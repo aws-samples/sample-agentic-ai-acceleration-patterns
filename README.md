@@ -1,7 +1,7 @@
 # Agentic AI Acceleration Patterns
 
-A collection of samples, best practices, and reference architectures for
-building Agentic AI applications on AWS.
+A collection of samples, best practices, and reference architectures to
+accelerate the building of Agentic AI applications on AWS.
 
 Each sample is self-contained and deployable on its own. Alongside the code,
 every sample ships its design trail: an `architecture.md` describing the
