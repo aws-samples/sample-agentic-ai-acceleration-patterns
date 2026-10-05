@@ -1,7 +1,7 @@
-# Multi-Tenant Agentic SaaS Patterns
+# Agentic AI Acceleration Patterns
 
 A collection of samples, best practices, and reference architectures for
-building multi-tenant agentic SaaS applications on AWS.
+building Agentic AI applications on AWS.
 
 Each sample is self-contained and deployable on its own. Alongside the code,
 every sample ships its design trail: an `architecture.md` describing the
@@ -23,11 +23,11 @@ just *what* it does.
 
 | Sample | Description |
 |---|---|
-| [The Simple Cell-Based Control Plane](./samples/control-plane/) | A minimal multi-tenant SaaS control plane for cell-based deployments — one service, one API, one DynamoDB table, one Step Functions workflow, script-driven provisioning via AWS CodeBuild. `maxTenants: 1` degenerates the model to a silo. |
+| [The Simple Cell-Based Control Plane](./samples/control-plane/) | A minimal multi-tenant control plane for cell-based deployments — one service, one API, one DynamoDB table, one Step Functions workflow, script-driven provisioning via AWS CodeBuild. `maxTenants: 1` degenerates the model to a silo. |
 
 ## The Simple Cell-Based Control Plane
 
-A minimal multi-tenant SaaS control plane for cell-based deployments. A cell
+A minimal multi-tenant control plane for cell-based deployments. A cell
 is a deployment unit: one shared application deployment plus up to
 `maxTenants` tenants, each with its own per-tenant deployment inside the
 cell. Set `maxTenants: 1` and the model degenerates to a silo — one tenant
@@ -46,7 +46,7 @@ Authorizer.
 
 ## Further Reading
 
-Blogs and articles on multi-tenant agentic SaaS, written by AWS authors.
+Blogs and articles on multi-tenant agentic, written by AWS authors.
 
 ### AWS Blogs
 
