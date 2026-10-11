@@ -13,7 +13,7 @@
  *
  * Control plane callers are vendor operators acting across tenants, so the
  * context carries operator identity rather than a caller tenant scope
- * (see control-plane.adr.md, ADR-006).
+ * (see adr/0006-control-plane-data-not-tenant-scoped.md, ADR-006).
  */
 
 /** Static service configuration — initialised once per Lambda cold start. */

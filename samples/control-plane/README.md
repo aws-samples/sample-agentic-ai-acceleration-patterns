@@ -8,7 +8,7 @@ per cell. One service, one API (11 operations), one DynamoDB table, one Step
 Functions workflow, two shared AWS CodeBuild projects.
 
 - Design: [`architecture.md`](./architecture.md)
-- Decisions and their reasoning trail: [`control-plane.adr.md`](./control-plane.adr.md)
+- Decisions and their reasoning trail: [`adr/`](./adr/) (one file per ADR, indexed in [`adr/README.md`](./adr/README.md))
 - Working specification the sample was built from: [`design/control-plane.spec.md`](./design/control-plane.spec.md)
 
 ## Architecture
@@ -250,7 +250,7 @@ The sample authenticates every operation but deliberately has no
 per-operation authorization: any valid token from the configured issuer is
 full admin (see the identity model in
 [`architecture.md`](./architecture.md) and ADR-015 in
-[`control-plane.adr.md`](./control-plane.adr.md)). That makes the issuer
+[`adr/0015-authentication-only-gating.md`](./adr/0015-authentication-only-gating.md)). That makes the issuer
 configuration and the API edge the two controls a deployer must get right.
 These items are operational — IdP-side, repository-side, and edge — and map
 to threats T1 (stolen

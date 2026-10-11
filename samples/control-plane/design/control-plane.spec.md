@@ -791,6 +791,6 @@ Per P-1, deferred generality is recorded as seams, not code:
 5. §6 + §9 — the script contract and the role asymmetry.
 6. §10 — build the acceptance test alongside, not after.
 
-The reference implementation's `architecture.md` and `control-plane.adr.md`
+The reference implementation's `architecture.md` and `adr/`
 carry the detailed rationale behind each requirement — consult them when a
 requirement here seems arbitrary; it almost certainly isn't.
