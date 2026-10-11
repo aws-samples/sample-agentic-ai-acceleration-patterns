@@ -10,10 +10,14 @@ and a `design/` folder holding the working specification the sample was built
 from — read those to understand *why* the sample looks the way it does, not
 just *what* it does.
 
+What every sample ships, and the bar it meets before it is merged, is
+described in [the Sample Standard](./docs/sample-standard.md).
+
 ## Contents
 
 - [Samples](#samples)
   - [The Simple Cell-Based Control Plane](#the-simple-cell-based-control-plane)
+- [Contributing a sample](#contributing-a-sample)
 - [Further Reading](#further-reading)
 - [Costs](#costs)
 - [Security](#security)
@@ -43,6 +47,15 @@ operation requires a JWT from your vendor IdP, validated by a Lambda
 Authorizer.
 
 [The Simple Cell-Based Control Plane](./samples/control-plane/)
+
+## Contributing a sample
+
+New samples follow [the Sample Standard](./docs/sample-standard.md): the
+directory layout, the design trail (specification, ADRs, threat model,
+architecture), the diagram conventions, the code and test requirements, the
+security review, and the README structure. Section 9 of the standard is the
+definition of done a pull request is reviewed against. General contribution
+guidelines are in [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Further Reading
 
