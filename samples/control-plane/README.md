@@ -9,6 +9,7 @@ Functions workflow, two shared AWS CodeBuild projects.
 
 - Design: [`architecture.md`](./architecture.md)
 - Decisions and their reasoning trail: [`adr/`](./adr/) (one file per ADR, indexed in [`adr/README.md`](./adr/README.md))
+- Threats and mitigations: [`threat-model.md`](./threat-model.md)
 - Working specification the sample was built from: [`design/control-plane.spec.md`](./design/control-plane.spec.md)
 
 ## Architecture
@@ -257,7 +258,7 @@ to threats T1 (stolen
 operator token), T2 (issuer misconfiguration), T5 (poisoned provisioning
 source), and T20 (over-broad issuer
 population) and mitigations M9, M10, and M11 in
-[`.threatmodel/threat_model.md`](../../.threatmodel/threat_model.md).
+[`threat-model.md`](./threat-model.md).
 
 ### Identity (M9)
 
