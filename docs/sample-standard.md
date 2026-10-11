@@ -32,7 +32,9 @@ names the pattern, not the technology (`control-plane`, not `dynamodb-sfn`).
 samples/<name>/
 ├── README.md                 # sections in §7 order
 ├── architecture.md           # the implemented state (§2.3)
-├── <name>.adr.md             # architecture decision records (§2.2)
+├── adr/
+│   ├── README.md             # index: number, title, status, date
+│   └── NNNN-short-title.md   # one file per decision (§2.2)
 ├── threat-model.md           # threats and mitigations (§2.4)
 ├── design/
 │   └── <name>.spec.md        # the specification the sample was built from (§2.1)
@@ -81,22 +83,52 @@ The specification is not rewritten to match the implementation. When the
 implementation diverges, record an ADR and, if the divergence changes a
 promise, amend the specification with a dated note that points at the ADR.
 
-### 2.2 Architecture decision records (`<name>.adr.md`)
+### 2.2 Architecture decision records (`adr/`)
 
-One file, numbered `ADR-nnn`, append-only. Each record has exactly four
-fields:
+One file per decision, `adr/NNNN-short-kebab-title.md`, numbered with four
+digits from `0001`, never reused; the next number is the current maximum plus
+one. `adr/README.md` is the index, a table of number, title, status, and date,
+updated in the same commit as the record it lists.
 
-- **Status**: Proposed, Accepted, Superseded by ADR-nnn, or Accepted with a
-  revision note.
-- **Context**: the forces, including the options considered and rejected.
-- **Decision**: what was chosen, in one paragraph.
-- **Consequences**: what becomes easier, what becomes harder, what would
-  trigger revisiting.
+Each record uses this template:
 
-Write ADRs for choices a newcomer would ask "why?" about: services, data model,
-identity, the asynchronous model, what was deliberately left out, and every
-cdk-nag suppression that is not self-evident. Decisions made during
-implementation get their own ADRs; do not fold them into earlier ones.
+```markdown
+# ADR-NNNN: <Title in imperative form, e.g. "Use one shared CodeBuild project">
+
+- Status: Proposed | Accepted | Deprecated | Superseded by ADR-NNNN
+- Date: YYYY-MM-DD
+- Deciders: FirstName LastName (Role), ...
+
+## Context
+The situation and the constraints that force a decision.
+
+## Options considered
+### Option 1: <name>
+Pros / cons.
+### Option 2: <name>
+Pros / cons.
+
+## Decision
+Which option and the reasons that decided it. One paragraph.
+
+## Consequences
+What becomes easier, what becomes harder, follow-up work, and what would
+trigger revisiting this decision.
+```
+
+Records are immutable once accepted. To change a decision, write a new record
+that supersedes it and set the old one's status to `Superseded by ADR-NNNN`;
+do not edit the old decision text. Write a record for choices a newcomer would
+ask "why?" about: services, data model, identity, the asynchronous model, what
+was deliberately left out, and every cdk-nag suppression that is not
+self-evident. Decisions made during implementation get their own records, in
+the same commit as the code that implements them. Cite records inline as
+`(ADR-0013)` in the specification, `architecture.md`, the threat model, code
+comments, and commit messages.
+
+`samples/control-plane` predates this rule and keeps its records in a single
+`control-plane.adr.md`; splitting it is a follow-up, not a reason to add to
+the single file.
 
 ### 2.3 Architecture (`architecture.md`)
 
@@ -104,7 +136,7 @@ Describes the implemented state, not the plan. It opens with a status block:
 implemented and verified or not, the date and Region of the last successful
 integration test run, and what that run covered. Sections follow the
 specification's shape (purpose, actors and identity, components, data model,
-API, workflows) and cite ADRs inline (`(ADR-013)`) wherever a choice is
+API, workflows) and cite records inline (`(ADR-0013)`) wherever a choice is
 explained.
 
 ### 2.4 Threat model (`threat-model.md`)
@@ -231,7 +263,7 @@ Before the pull request, on the synthesised tree:
 2. Run the static scanners the team uses (currently ProtoShield and the
    Automated Security Helper) against the sample directory with `cdk.out/`
    present.
-3. Disposition every finding in `threat-model.md` or an ADR: fixed, accepted
+3. Disposition every finding in `threat-model.md` or a new ADR: fixed, accepted
    with reason, or false positive with the evidence. Fix findings that are
    cheap and legitimate rather than documenting around them.
 4. Scanner outputs stay out of the repository; the pull request description
@@ -264,7 +296,7 @@ Sections, in this order, omitting only those that do not apply:
    to `threat-model.md`.
 9. **Production hardening checklist**: what a reader must add before using
    the pattern in production, each item tied to a threat-model mitigation.
-10. **Design trail**: links to `design/<name>.spec.md`, `<name>.adr.md`, and
+10. **Design trail**: links to `design/<name>.spec.md`, `adr/`, and
     `architecture.md`.
 
 ## 8. Root README
@@ -284,7 +316,7 @@ A sample is ready to merge when every line is true:
 - [ ] Layout matches §1; nothing generated or machine-produced is committed.
 - [ ] Specification written before the code, with numbered principles and an
       explicit scope boundary; divergences recorded as ADRs.
-- [ ] ADR file complete: four fields per record, options rejected named,
+- [ ] One file per ADR in `adr/` with the index current; options considered named,
       implementation-time decisions included.
 - [ ] `architecture.md` describes the implemented state and carries a dated
       verification status.
