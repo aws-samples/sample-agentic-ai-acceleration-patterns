@@ -126,9 +126,10 @@ the same commit as the code that implements them. Cite records inline as
 `(ADR-0013)` in the specification, `architecture.md`, the threat model, code
 comments, and commit messages.
 
-`samples/control-plane` predates this rule and keeps its records in a single
-`control-plane.adr.md`; splitting it is a follow-up, not a reason to add to
-the single file.
+`samples/control-plane` predates this rule: its records were written in a
+single file and later split, so its files use the original field layout
+(bold `Status/Context/Decision/Consequences`) and are cited as `ADR-012`
+rather than `ADR-0012`. New samples use the template above.
 
 ### 2.3 Architecture (`architecture.md`)
 

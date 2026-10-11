@@ -5,7 +5,7 @@
 > infrastructure on 2026-09-07 (eu-central-1): full cell lifecycle including
 > implicit cell creation, cell reuse, fill-to-capacity, second-cell
 > placement, in-flight and occupied-cell guards, and complete teardown.
-> ADRs: see `control-plane.adr.md` (ADR-001..014; ADR-012..014 introduce the
+> ADRs: see [`adr/`](./adr/README.md) (ADR-001..014; ADR-012..014 introduce the
 > cell model).
 
 ## 1. Purpose
