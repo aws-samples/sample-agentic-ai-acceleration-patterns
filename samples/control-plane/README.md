@@ -14,35 +14,17 @@ Functions workflow, two shared AWS CodeBuild projects.
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    OP([Vendor operator]) -- "vendor IdP JWT" --> APIGW
-    subgraph CP["Control plane"]
-        APIGW["API Gateway (REST, Smithy-generated)<br/>+ Lambda Authorizer (vendor IdP, JWKS)"]
-        SVC["Tenant Service (Lambda)"]
-        DDB[("DynamoDB single table<br/>cells + tenants")]
-        SFN["Provisioning workflow<br/>(Step Functions)"]
-        CB1["CodeBuild: cell scripts<br/>(shared cell deployment)"]
-        CB2["CodeBuild: tenant scripts<br/>(per-tenant deployment)"]
-        APIGW --> SVC
-        SVC --> DDB
-        SVC -- "async ops (202)" --> SFN
-        SFN -- "terminal status" --> DDB
-        SFN -- "new cell only" --> CB1
-        SFN --> CB2
-    end
-    subgraph AP["Application plane (SSM parameter namespaces)"]
-        CELLNS["/application-plane/cells/&lt;cellId&gt;/*"]
-        TENNS["/application-plane/tenants/&lt;tenantId&gt;"]
-    end
-    CB1 -- "writes" --> CELLNS
-    CB2 -- "reads" --> CELLNS
-    CB2 -- "writes" --> TENNS
-```
+![Architecture: a vendor operator calls API Gateway (Lambda Authorizer validates the vendor IdP JWT), which invokes the Tenant Service Lambda; the service writes DynamoDB and starts a Step Functions provisioning workflow that runs the cell-scripts CodeBuild project (new cell only) and the tenant-scripts CodeBuild project; the projects write and read SSM Parameter Store namespaces in the application plane](./diagrams/control-plane.drawio.svg)
+
+Operator JWT -> API Gateway (Lambda Authorizer) -> Tenant Service -> DynamoDB
+and, for async operations, Step Functions -> CodeBuild cell scripts (new cell
+only) then tenant scripts -> SSM Parameter Store namespaces in the application
+plane; the workflow writes the terminal status back to DynamoDB.
 
 One service, one API, one DynamoDB table, one state machine — and two shared
 CodeBuild projects whose separate service roles enforce the
-cell-script/tenant-script permission boundary.
+cell-script/tenant-script permission boundary. Diagram source:
+[`diagrams/control-plane.drawio`](./diagrams/control-plane.drawio).
 
 ## How it works
 
