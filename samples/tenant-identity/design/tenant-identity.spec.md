@@ -17,10 +17,29 @@ RFC 2119.
 
 Every multi-tenant application has to answer one question on every
 request: **which tenant is this caller acting for, and is the caller allowed
-to act for it?** With Amazon Cognito as the identity provider there are three
-common ways to lay the tenant boundary over user pools, and the choice shapes
-onboarding, token verification, offboarding, per-tenant customisation, and
-what happens when one person works for several tenants.
+to act for it?** Cognito answers the first half of that question for *users*
+out of the box: a signed token proves who authenticated. It has no notion of a
+tenant, but it offers three places where tenant information can be overlaid
+onto a user pool: the pool itself, a user attribute, or a group. Whichever is
+chosen, the overlay ends up inside the token the user presents, and that is
+why the choice matters.
+
+Once tenant identity rides in the token, **Cognito becomes the trusted source
+of tenant identity**, not only of user identity. The application reads the
+tenant from a claim that Cognito signed, so the claim carries the same
+guarantee as the user's identity: it cannot be forged by the client, it can be
+checked offline against the pool's public keys, and it is the same on every
+request without a lookup. The alternative, keeping a user-to-tenant mapping in
+an application table and consulting it per request, puts a second source of
+truth on the request path that can drift from the directory and that every
+service must be trusted to query correctly. Overlaying on Cognito instead
+means tenant assignment is made once, at onboarding, by the party that
+controls the user pool (the operator, P-8), and every service downstream
+inherits it from the token (P-3, P-5).
+
+The three overlays differ in how the tenant boundary is drawn, and the choice
+shapes onboarding, token verification, offboarding, per-tenant customisation,
+and what happens when one person works for several tenants.
 
 This sample builds the three topologies **side by side** behind one
 application-facing contract, so that the trade-offs can be seen by running the
