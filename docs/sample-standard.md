@@ -11,6 +11,13 @@ should be able to deploy it, run its integration test, read its reasoning, and
 take the pattern into their own system without reading anything outside the
 sample directory.
 
+**Terminology.** The repository is about multi-tenant *agentic applications*.
+Write "multi-tenant application", "application provider" (or "operator"), and
+"tenant"; do not write "SaaS" anywhere in a sample: not in prose, code
+comments, API model documentation, package descriptions, or diagrams. The
+patterns apply to any multi-tenant system, and the label narrows how readers
+place them.
+
 ## Contents
 
 1. [Layout](#1-layout)
@@ -333,6 +340,8 @@ A sample is ready to merge when every line is true:
       deployment.
 - [ ] `DESTROY` removal policies; teardown verified to leave nothing behind.
 - [ ] Synthetic data only; no deployment account ID in the tree.
+- [ ] Terminology per the introduction: `git grep -i saas samples/<name>` returns
+      nothing.
 - [ ] Unit tests green; `npx projen build` clean.
 - [ ] Integration test green in one Region with `--force`; date, Region, and
       coverage recorded in `architecture.md`.

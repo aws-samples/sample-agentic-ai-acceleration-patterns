@@ -11,7 +11,7 @@ use aws.apigateway#authorizer
 // Tenant resource
 // ---------------------------------------------------------------------------
 
-/// A tenant of the SaaS application. In the cell deployment model the tenant
+/// A tenant of the application. In the cell deployment model the tenant
 /// is placed into a cell at onboarding and provisioned with its own
 /// per-tenant application deployment inside that cell, using the cell's
 /// stamped definition. The tenant carries no source and no scripts of its

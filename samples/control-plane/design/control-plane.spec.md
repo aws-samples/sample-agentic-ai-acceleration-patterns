@@ -15,7 +15,7 @@ RFC 2119.
 
 ## 1. Problem Statement
 
-Multi-tenant SaaS providers need a **control plane**: the management layer
+Multi-tenant application providers need a **control plane**: the management layer
 that onboards tenants, provisions their infrastructure, tracks lifecycle
 state, and offboards them. Most published control plane examples are either
 toy CRUD APIs (no real provisioning) or sprawling platforms (dozens of
