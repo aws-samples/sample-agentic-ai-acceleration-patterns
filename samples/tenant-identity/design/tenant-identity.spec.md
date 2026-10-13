@@ -15,7 +15,7 @@ RFC 2119.
 
 ## 1. Problem Statement
 
-Every multi-tenant SaaS application has to answer one question on every
+Every multi-tenant application has to answer one question on every
 request: **which tenant is this caller acting for, and is the caller allowed
 to act for it?** With Amazon Cognito as the identity provider there are three
 common ways to lay the tenant boundary over user pools, and the choice shapes
@@ -40,7 +40,7 @@ differ (P-1).
 ### 1.1 The deployment model
 
 This is an **application-plane** sample: it is the identity layer a deployed
-SaaS application uses to authenticate end users and scope their requests to a
+multi-tenant application uses to authenticate end users and scope their requests to a
 tenant. It assumes a **pooled application plane** (one deployment serves many
 tenants) and shows how the identity boundary can still be silo
 (`pool-per-tenant`) or pool (`shared-pool*`) independently of the compute
@@ -49,7 +49,7 @@ customer identity as an application-plane concern (control-plane ADR-004).
 
 Two actor classes exist:
 
-- **Operators** (the SaaS vendor) onboard tenants and manage users and
+- **Operators** (the application provider) onboard tenants and manage users and
   memberships through the **platform API**.
 - **End users** (tenant staff) authenticate against Cognito and call the
   **application API**, which resolves their tenant context.
