@@ -15,7 +15,7 @@ RFC 2119.
 
 ## 1. Problem Statement
 
-Multi-tenant SaaS providers need a **control plane**: the management layer
+Vendors of multi-tenant applications need a **control plane**: the management layer
 that onboards tenants, provisions their infrastructure, tracks lifecycle
 state, and offboards them. Most published control plane examples are either
 toy CRUD APIs (no real provisioning) or sprawling platforms (dozens of
@@ -65,7 +65,7 @@ becomes part of it. Out of scope, deliberately:
 - Cell rebalancing, tenant migration between cells
 - Pre-provisioning capacity ahead of demand (auto-scaling the fleet)
 - **All application plane concerns — including customer identity.** Which
-  IdP a tenant's end users authenticate against is a property of the
+  IdP a tenant's users authenticate against is a property of the
   deployed application, owned by the provisioning scripts.
 
 ---

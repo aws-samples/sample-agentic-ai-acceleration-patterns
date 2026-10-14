@@ -12,7 +12,7 @@
 
 **Goal: a simple cell-based control plane for a single deployment model.**
 
-A minimal multi-tenant SaaS control plane sample for **cell-based
+A minimal multi-tenant control plane sample for **cell-based
 deployments**.
 
 A *cell* is a deployment unit containing one **shared

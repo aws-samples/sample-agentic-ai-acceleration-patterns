@@ -11,6 +11,20 @@ should be able to deploy it, run its integration test, read its reasoning, and
 take the pattern into their own system without reading anything outside the
 sample directory.
 
+**Terminology.** The repository is about multi-tenant *agentic applications*.
+Two actor classes exist, and every sample uses these two words for them:
+
+- **Vendor** (the operator): the party that builds and runs the application.
+- **Tenant** (the customer): an organisation the application serves. Its
+  people are **tenant users**.
+
+"Operator" is acceptable as the *name of a vendor-side role* (a role claim, an
+`ALLOWED_ROLES` value), not as the actor class. Do not write "application
+provider", "end user", or "customer" for the classes themselves. Do not write
+"SaaS" anywhere in a sample: not in prose, code comments, API model
+documentation, package descriptions, or diagrams. The patterns apply to any
+multi-tenant system, and the label narrows how readers place them.
+
 ## Contents
 
 1. [Layout](#1-layout)
@@ -333,6 +347,9 @@ A sample is ready to merge when every line is true:
       deployment.
 - [ ] `DESTROY` removal policies; teardown verified to leave nothing behind.
 - [ ] Synthetic data only; no deployment account ID in the tree.
+- [ ] Terminology per the introduction: actors are vendor and tenant;
+      `git grep -i -E 'saas|application provider|end[- ]user' samples/<name>`
+      returns nothing.
 - [ ] Unit tests green; `npx projen build` clean.
 - [ ] Integration test green in one Region with `--force`; date, Region, and
       coverage recorded in `architecture.md`.

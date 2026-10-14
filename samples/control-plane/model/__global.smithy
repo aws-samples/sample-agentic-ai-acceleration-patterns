@@ -12,7 +12,7 @@ use aws.protocols#restJson1
 use smithy.framework#ValidationException
 
 /// The cell-based control plane. Manages tenant and cell lifecycle for a
-/// multi-tenant SaaS application using the cell deployment model: a cell is
+/// multi-tenant application using the cell deployment model: a cell is
 /// a deployment unit containing one shared application deployment plus up to
 /// maxTenants tenants, each with its own per-tenant application deployment.
 /// Cells are created implicitly by tenant placement; deployments are

@@ -8,7 +8,7 @@ const project = new awscdk.AwsCdkTypeScriptApp({
   defaultReleaseBranch: 'main',
   github: false,
   name: 'control-plane',
-  description: 'The simple cell-based control plane - multi-tenant SaaS sample',
+  description: 'The simple cell-based control plane - multi-tenant sample',
   packageManager: javascript.NodePackageManager.NPM,
   license: 'MIT-0',
   copyrightOwner: 'Amazon.com, Inc. or its affiliates. All Rights Reserved.',
