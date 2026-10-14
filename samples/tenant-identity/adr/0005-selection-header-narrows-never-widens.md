@@ -1,6 +1,6 @@
 # ADR-0005: Let the client select a tenant with a header that can only narrow the token's memberships
 
-- Status: Accepted
+- Status: Superseded by ADR-0009
 - Date: 2026-10-13
 - Deciders: Dave Roberts (SA)
 

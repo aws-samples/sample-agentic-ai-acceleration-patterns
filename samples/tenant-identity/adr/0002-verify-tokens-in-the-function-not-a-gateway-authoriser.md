@@ -1,6 +1,6 @@
 # ADR-0002: Verify bearer tokens inside the application function, not with an API Gateway JWT authoriser
 
-- Status: Accepted
+- Status: Superseded by ADR-0009
 - Date: 2026-10-13
 - Deciders: Dave Roberts (SA)
 
