@@ -1,4 +1,4 @@
-# ADR-0006: Make platform mutations synchronous
+# ADR-0004: Make platform mutations synchronous
 
 - Status: Accepted
 - Date: 2026-10-13

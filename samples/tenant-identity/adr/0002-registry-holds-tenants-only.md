@@ -1,4 +1,4 @@
-# ADR-0003: Keep a tenant registry in DynamoDB, and make Cognito the only user store
+# ADR-0002: Keep a tenant registry in DynamoDB, and make Cognito the only user store
 
 - Status: Accepted
 - Date: 2026-10-13

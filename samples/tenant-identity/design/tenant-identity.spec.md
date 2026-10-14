@@ -59,7 +59,7 @@ provisions tenant identity in Cognito differs (P-1).
 **The sample stops at the token.** Its product is a Cognito access token that
 carries tenant identity, issued and withdrawn by the identity provider. How a
 service or gateway verifies that token and scopes a request to the tenant it
-names is the consumer's design, not this sample's (§1.2, ADR-0009). The
+names is the consumer's design, not this sample's (§1.2, ADR-0007). The
 integration test verifies the tokens with a standard library for one reason
 only: to prove that the claim is present, correct, and the same shape in
 every topology.
@@ -93,7 +93,7 @@ Out of scope, deliberately:
   it names belongs to the service or gateway that receives it: an API Gateway
   Cognito authoriser, a JWT authoriser, or an in-function verifier are all
   valid consumers, and the registry gives a `pool-per-tenant` consumer its
-  issuer allowlist (§4.1). None of them is built here (ADR-0009, seam in §11).
+  issuer allowlist (§4.1). None of them is built here (ADR-0007, seam in §11).
 - **A login UI.** Managed login / hosted UI, federation to tenant IdPs (SAML,
   OIDC, social), passwordless, MFA. Tokens are obtained with a server-side
   password flow for demonstration; the claims do not depend on how the token
@@ -148,7 +148,7 @@ the integration scenario (§10) runs unchanged against all three stacks.
 Nothing in the sample consumes the tokens it issues, so there is no request
 path on which to check a tenant's status, and the sample MUST NOT invent one.
 Offboarding is enforced where identity is issued, by the identity provider
-and the trigger that shapes its tokens (ADR-0010):
+and the trigger that shapes its tokens (ADR-0008):
 
 1. `DeleteTenant` flips the tenant to `DELETING` in the registry before
    touching Cognito (R-9).
@@ -233,7 +233,7 @@ The platform function creates and deletes user pools, groups, and users; the
 trigger function reads the registry and nothing else. They MUST be separate
 functions with separate roles: the trigger role MUST NOT hold any
 `cognito-idp:*` action (R-11), and the platform API MUST NOT be reachable
-with a tenant-user token (IAM only, ADR-0007). In `pool-per-tenant` the
+with a tenant-user token (IAM only, ADR-0005). In `pool-per-tenant` the
 platform role necessarily holds `cognito-idp:CreateUserPool` and
 `DeleteUserPool`, which are account-wide actions; this is the documented
 hardening point of that topology (N-4).
@@ -253,9 +253,9 @@ because the quotas are the first thing a real deployment hits.
 
 | # | Component | Requirement |
 |---|---|---|
-| R-1 | **HTTP API** | One API Gateway HTTP API, generated from the interface model (Smithy), one route family: `/platform/*` with IAM authorisation (ADR-0007). No application routes (ADR-0009). |
+| R-1 | **HTTP API** | One API Gateway HTTP API, generated from the interface model (Smithy), one route family: `/platform/*` with IAM authorisation (ADR-0005). No application routes (ADR-0007). |
 | R-2 | **Platform function** | Implements the platform API through the topology's provisioner. Role per P-8. |
-| R-3 | *Retired* | Was the application function. Removed with token consumption (ADR-0009). |
+| R-3 | *Retired* | Was the application function. Removed with token consumption (ADR-0007). |
 | R-4 | **Tenant registry** | One DynamoDB table (§4). Point-in-time recovery on; `DESTROY` removal for the sample. |
 | R-5 | **Pre-token-generation function** | Cognito Lambda trigger, version 2 event (`V2_0`), adds the claim(s) of P-6 to the access token and enforces tenant status (P-2, §8). Attached to every pool the sample creates. Pools MUST use the **Essentials** feature plan (the default for new pools); access-token customisation is not available on Lite without advanced security features. |
 | R-6 | **User pool(s)** | `shared-pool*`: exactly one pool created by the stack. `pool-per-tenant`: zero pools at deploy time; one pool, one app client, and the trigger attachment per tenant at onboarding. Every pool: self sign-up off, admin-create only, e-mail as username, access token lifetime 5 minutes (N-1), no hosted UI domain. |
@@ -274,7 +274,7 @@ because the quotas are the first thing a real deployment hits.
   `AdminInitiateAuth` from the platform function (`POST
   /platform/tenants/{tenantId}/users/{username}/token`) **for the
   demonstration only**, so the integration test can obtain real Cognito
-  tokens without a browser (ADR-0008). This route MUST be documented as a
+  tokens without a browser (ADR-0006). This route MUST be documented as a
   test aid and the README's hardening checklist MUST say to remove it in
   production.
 - **Verification in the test:** the integration test verifies every token it
@@ -295,7 +295,7 @@ message. The stack name MUST embed the topology
 (`TenantIdentity-<topology>`) so all three can coexist in one account and
 Region, which the integration test relies on. No other input exists: the
 former header-name and cache-TTL inputs went with token consumption
-(ADR-0009).
+(ADR-0007).
 
 ---
 
@@ -369,7 +369,7 @@ a capability (contrast control-plane P-8, where builds take minutes).
 ### 5.2 Application operations
 
 None. The former `/app/whoami` route and the resolution algorithm that backed
-it were removed with token consumption (ADR-0009); §5.3 is retired and its
+it were removed with token consumption (ADR-0007); §5.3 is retired and its
 number is not reused.
 
 ### 5.4 Error model
@@ -474,7 +474,7 @@ pools are per tenant; a consumer resolves them through `GetTenant` or
 
 ## 8. Pre-Token-Generation Contract
 
-The trigger is the sample (ADR-0004). It runs on every token issuance, sign-in and
+The trigger is the sample (ADR-0003). It runs on every token issuance, sign-in and
 refresh alike (Cognito invokes the pre-token-generation trigger for
 `TokenGeneration_RefreshTokens` as well as the authentication sources), and
 it is the only code that decides what tenant identity a token carries.
@@ -500,10 +500,10 @@ MUST NOT hold any `cognito-idp` permission.
 | # | Requirement | Rationale |
 |---|---|---|
 | N-1 | Access token lifetime MUST be the Cognito minimum (5 minutes) in every pool the sample creates; refresh tokens 1 day. | Issued tokens cannot be withdrawn, so the lifetime is the offboarding bound (P-2); keep it short. Refresh re-runs the trigger, so a long refresh lifetime costs nothing in offboarding latency. Documented trade: more refresh traffic. |
-| N-2 | *Retired.* | Was the resolver's registry cache TTL (ADR-0009). |
+| N-2 | *Retired.* | Was the resolver's registry cache TTL (ADR-0007). |
 | N-3 | The registry table MUST have point-in-time recovery; sample uses `DESTROY` removal. | Vendor-facing registry; in `pool-per-tenant` losing it orphans pools. |
 | N-4 | Platform role scoped to `cognito-idp` actions on pools the sample created (resource tag `sample=tenant-identity` as the condition where the action supports resource ARNs; `CreateUserPool` has no resource, so it is the accepted account-wide action, documented in the threat model). | P-8: this is the hardening point of `pool-per-tenant`. |
-| N-5 | *Retired.* | Was the application function's JWKS cache bound (ADR-0009). |
+| N-5 | *Retired.* | Was the application function's JWKS cache bound (ADR-0007). |
 | N-6 | Structured logs; the platform function and the trigger log `tenantId`, `userId`, and the rule that refused an issuance, and never a token or a temporary password. | Synthetic data still deserves hygiene the reader will copy. |
 | N-7 | The `/platform/*` stage MUST be throttled (reference: 10 rps / 20 burst). | `CreateTenant` in topology 1 creates account-wide resources; cap the rate of a leaked vendor credential. |
 | N-8 | Pools MUST be created with deletion protection **inactive** and tagged `sample=tenant-identity`. | Teardown must be total (P-4); a real deployment flips protection on and is told so in the hardening checklist. |
@@ -575,7 +575,7 @@ the registry never receives a user item (R-8).
 
 | Extension | Seam |
 |---|---|
-| Token consumption | An API Gateway Cognito authoriser (REST API; `pool-per-tenant` lists every tenant pool ARN, onboarding appends to it), an HTTP API JWT authoriser (`shared-pool*` only, one issuer), or an in-function verifier that reads the registry as its issuer allowlist. Each reads the claims of P-6 unchanged. Deliberately not built (ADR-0009). |
+| Token consumption | An API Gateway Cognito authoriser (REST API; `pool-per-tenant` lists every tenant pool ARN, onboarding appends to it), an HTTP API JWT authoriser (`shared-pool*` only, one issuer), or an in-function verifier that reads the registry as its issuer allowlist. Each reads the claims of P-6 unchanged. Deliberately not built (ADR-0007). |
 | Roles within a tenant | Groups not matching `^t-` in topology 3 (`role-admin`, `role-member`); a second custom attribute in topology 2; per-pool groups in topology 1. Add a `roles` claim in the trigger. |
 | Federation to a tenant's own IdP | Topology 1: an IdP per pool, the natural fit. Topologies 2 and 3: an IdP per tenant in the shared pool with attribute/group mapping, bounded by the 300-IdP quota. |
 | Tenant-scoped tokens at sign-in (alternative to the multi-valued claim) | Pass the chosen tenant as `clientMetadata` to `InitiateAuth`; the trigger intersects it with the user's groups and emits a single `tenant_id`. Trades a per-request choice by the consumer for a per-session one, and relaxes P-3's "no `clientMetadata`" rule to "intersect, never trust". |

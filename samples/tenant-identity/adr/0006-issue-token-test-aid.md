@@ -1,4 +1,4 @@
-# ADR-0008: Provide a server-side `IssueToken` route as a test aid, and label it as such
+# ADR-0006: Provide a server-side `IssueToken` route as a test aid, and label it as such
 
 - Status: Accepted
 - Date: 2026-10-13

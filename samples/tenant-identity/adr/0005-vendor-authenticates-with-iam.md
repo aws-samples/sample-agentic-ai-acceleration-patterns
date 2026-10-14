@@ -1,4 +1,4 @@
-# ADR-0007: Authenticate the vendor to the platform API with IAM, not a vendor IdP
+# ADR-0005: Authenticate the vendor to the platform API with IAM, not a vendor IdP
 
 - Status: Accepted
 - Date: 2026-10-13
@@ -29,7 +29,7 @@ vendor portal; stated as an explicit limitation.
 
 ## Decision
 Option 3. `/platform/*` uses `AWS_IAM` authorisation; it is the only API the
-sample exposes (ADR-0009). The README says that a vendor
+sample exposes (ADR-0007). The README says that a vendor
 portal would front the platform API with its own identity (the
 `control-plane` pattern) and that nothing in this sample depends on which.
 

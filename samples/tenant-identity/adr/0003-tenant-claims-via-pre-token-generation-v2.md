@@ -1,4 +1,4 @@
-# ADR-0004: Put the tenant claim into the access token with a V2 pre-token-generation trigger
+# ADR-0003: Put the tenant claim into the access token with a V2 pre-token-generation trigger
 
 - Status: Accepted
 - Date: 2026-10-13

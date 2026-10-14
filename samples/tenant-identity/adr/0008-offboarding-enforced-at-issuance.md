@@ -1,11 +1,11 @@
-# ADR-0010: Enforce tenant offboarding at issuance, in the pre-token-generation trigger
+# ADR-0008: Enforce tenant offboarding at issuance, in the pre-token-generation trigger
 
 - Status: Accepted
 - Date: 2026-10-14
 - Deciders: Dave Roberts (SA)
 
 ## Context
-With no consumer in the sample (ADR-0009) there is no request path on which
+With no consumer in the sample (ADR-0007) there is no request path on which
 to check whether a tenant still exists. Cognito's token model cannot express
 "this tenant is gone": `RevokeToken` and `AdminUserGlobalSignOut` act on
 refresh tokens and sessions, not on outstanding access tokens, and nothing

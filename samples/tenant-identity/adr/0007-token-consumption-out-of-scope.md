@@ -1,4 +1,4 @@
-# ADR-0009: Keep token consumption out of the sample; the integration test verifies tokens
+# ADR-0007: Keep token consumption out of the sample; the integration test verifies tokens
 
 - Status: Accepted
 - Date: 2026-10-14
@@ -10,8 +10,10 @@ overlay a tenant onto a user pool, the provisioning that creates each, and
 the trigger that puts the result into the access token. The first draft of
 the spec also built a consumer: an `/app/whoami` route, a seven-step
 resolution algorithm with a per-request registry status check and cache
-(former P-2, §5.3, N-2, N-5), a tenant-selection header (ADR-0005), and a
-decision on where verification runs (ADR-0002). That consumer grew to about a
+(former P-2, §5.3, N-2, N-5), a tenant-selection header that could narrow
+but never widen the token's memberships, and a decision to verify tokens
+inside the function rather than in a gateway authoriser. That consumer grew to
+about a
 third of the design and contradicted the spec's own argument that, once the
 tenant rides in a signed token, no second lookup is needed on the request
 path. A reviewer asked why the consumption side was in the sample at all.
@@ -31,7 +33,7 @@ is a consumer policy dressed as a principle.
 ### Option 3: No consumer; the integration test verifies the tokens
 Pros: the sample stops exactly at its subject, the token; every topology is
 proven by the same assertion on the same claims; offboarding is answered
-where identity lives (ADR-0010); the API shrinks to the platform routes.
+where identity lives (ADR-0008); the API shrinks to the platform routes.
 Cons: nothing in the deployed stack demonstrates a request being scoped to a
 tenant; the README must point readers at the consumer options instead.
 
@@ -43,8 +45,8 @@ verifies them with `aws-jwt-verify` against the issuer the registry or the
 published parameters name; that is test code and the README says so. The
 consumer options (Cognito authoriser, JWT authoriser, in-function verifier
 with the registry as issuer allowlist) are recorded as an extension seam.
-This record supersedes ADR-0002 and ADR-0005; their context sections still
-describe the consumer that was removed.
+The two records that had designed the removed consumer were dropped from the
+trail before the sample's first release rather than kept as superseded.
 
 ## Consequences
 Easier: the spec's scope matches its title; the only topology-specific code
