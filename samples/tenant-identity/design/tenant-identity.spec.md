@@ -34,7 +34,7 @@ an application table and consulting it per request, puts a second source of
 truth on the request path that can drift from the directory and that every
 service must be trusted to query correctly. Overlaying on Cognito instead
 means tenant assignment is made once, at onboarding, by the party that
-controls the user pool (the operator, P-8), and every service downstream
+controls the user pool (the vendor, P-8), and every service downstream
 inherits it from the token (P-3, P-5).
 
 The three overlays differ in how the tenant boundary is drawn, and the choice
@@ -67,21 +67,23 @@ every topology.
 ### 1.1 The deployment model
 
 This is an **application-plane** sample: it is the identity layer a deployed
-multi-tenant application uses to authenticate end users and to tell every
+multi-tenant application uses to authenticate tenant users and to tell every
 downstream service which tenant they act for. It assumes a **pooled
 application plane** (one deployment serves many tenants) and shows how the
 identity boundary can still be silo (`pool-per-tenant`) or pool
 (`shared-pool*`) independently of the compute boundary. It complements the
-`control-plane` sample, which deliberately treats customer identity as an
+`control-plane` sample, which deliberately treats tenant identity as an
 application-plane concern (control-plane ADR-004).
 
-Two actor classes exist:
+Two actor classes exist, and the spec uses these two words for them
+throughout:
 
-- **Operators** (the application provider) onboard tenants and manage users and
-  memberships through the **platform API**.
-- **End users** (tenant staff) authenticate against Cognito and receive tokens
-  that carry their tenant. What they call with those tokens is outside the
-  sample.
+- **Vendor** (the operator): the party that runs the application. It onboards
+  tenants and manages users and memberships through the **platform API**.
+- **Tenant** (the customer): an organisation served by the application. Its
+  people are **tenant users**; they authenticate against Cognito and receive
+  tokens that carry their tenant. What they call with those tokens is outside
+  the sample.
 
 ### 1.2 What this sample is NOT
 
@@ -98,7 +100,7 @@ Out of scope, deliberately:
   was issued.
 - **Authorisation within a tenant.** Roles and permissions (`admin`,
   `member`) are an extension seam (§11), not built.
-- **The vendor's own identity.** Operators authenticate to the platform API
+- **The vendor's own identity.** The vendor authenticates to the platform API
   with IAM (SigV4); the vendor IdP question is answered by the
   `control-plane` sample.
 - **A user directory of its own.** Cognito is the only user store (P-5).
@@ -132,7 +134,7 @@ spec's extension mechanism and the facts the ADRs appeal to.
 
 ### P-1. One contract, three strategies
 
-The operator sees one platform API and every consumer sees one token
+The vendor sees one platform API and every consumer sees one token
 contract (P-6), regardless of topology. Everything topology-specific lives
 behind one strategy interface, the **provisioner**: what onboarding a tenant,
 creating a user, changing a membership, and offboarding a tenant mean in this
@@ -164,9 +166,9 @@ own, which is a consumer decision outside this sample.
 
 ### P-3. Tenant identity is a claim the caller cannot choose
 
-The tenant a token names MUST be set by the operator through the platform API
+The tenant a token names MUST be set by the vendor through the platform API
 and MUST reach the token only through Cognito: the issuing pool, an
-attribute, or a group. Nothing the end user controls MAY influence it. In
+attribute, or a group. Nothing the tenant user controls MAY influence it. In
 `shared-pool` the attribute is created **immutable** and excluded from the app
 client's writable attributes, so the user can neither change it nor set it at
 sign-up (self sign-up is off in every pool, R-6). In `shared-pool-multi-tenant`
@@ -196,7 +198,7 @@ table. Users live in Cognito; memberships are Cognito groups or attributes;
 the registry holds **tenants only** (and, for `pool-per-tenant`, the
 pool/issuer the tenant owns). Duplicating the user directory creates a second
 source of truth that drifts; the trade is that listing "users of tenant X" is
-a Cognito call, which is acceptable for a platform API that operators call
+a Cognito call, which is acceptable for a platform API that the vendor calls
 rarely.
 
 ### P-6. Minimal claims, stable shape
@@ -231,7 +233,7 @@ The platform function creates and deletes user pools, groups, and users; the
 trigger function reads the registry and nothing else. They MUST be separate
 functions with separate roles: the trigger role MUST NOT hold any
 `cognito-idp:*` action (R-11), and the platform API MUST NOT be reachable
-with an end-user token (IAM only, ADR-0007). In `pool-per-tenant` the
+with a tenant-user token (IAM only, ADR-0007). In `pool-per-tenant` the
 platform role necessarily holds `cognito-idp:CreateUserPool` and
 `DeleteUserPool`, which are account-wide actions; this is the documented
 hardening point of that topology (N-4).
@@ -261,11 +263,11 @@ because the quotas are the first thing a real deployment hits.
 
 ### 3.2 Caller and identity model
 
-- **Operator → platform API:** SigV4 with any principal the deployer grants
+- **Vendor → platform API:** SigV4 with any principal the deployer grants
   `execute-api:Invoke` on `/platform/*`. The sample grants the deploying
   principal nothing implicitly; the integration test signs with its own
   credentials and the stack's resource policy allows the account.
-- **End user → Cognito:** sign-in against the topology's pool yields access,
+- **Tenant user → Cognito:** sign-in against the topology's pool yields access,
   ID, and refresh tokens; the access token carries the tenant (P-6). The
   sample defines no endpoint that accepts it.
 - **Sign-in in the sample:** `ADMIN_USER_PASSWORD_AUTH` through
@@ -335,7 +337,7 @@ throw, so no token leaves such a pool with a tenant claim.
 ### 4.3 Listing
 
 `ListTenants` scans the single table with pagination (the registry is
-operator-scale, not user-scale). An implementation MAY add a status GSI; it
+vendor-scale, not user-scale). An implementation MAY add a status GSI; it
 MUST NOT add a user item type to make listing users cheaper (P-5).
 
 ---
@@ -499,11 +501,11 @@ MUST NOT hold any `cognito-idp` permission.
 |---|---|---|
 | N-1 | Access token lifetime MUST be the Cognito minimum (5 minutes) in every pool the sample creates; refresh tokens 1 day. | Issued tokens cannot be withdrawn, so the lifetime is the offboarding bound (P-2); keep it short. Refresh re-runs the trigger, so a long refresh lifetime costs nothing in offboarding latency. Documented trade: more refresh traffic. |
 | N-2 | *Retired.* | Was the resolver's registry cache TTL (ADR-0009). |
-| N-3 | The registry table MUST have point-in-time recovery; sample uses `DESTROY` removal. | Operator-facing registry; in `pool-per-tenant` losing it orphans pools. |
+| N-3 | The registry table MUST have point-in-time recovery; sample uses `DESTROY` removal. | Vendor-facing registry; in `pool-per-tenant` losing it orphans pools. |
 | N-4 | Platform role scoped to `cognito-idp` actions on pools the sample created (resource tag `sample=tenant-identity` as the condition where the action supports resource ARNs; `CreateUserPool` has no resource, so it is the accepted account-wide action, documented in the threat model). | P-8: this is the hardening point of `pool-per-tenant`. |
 | N-5 | *Retired.* | Was the application function's JWKS cache bound (ADR-0009). |
 | N-6 | Structured logs; the platform function and the trigger log `tenantId`, `userId`, and the rule that refused an issuance, and never a token or a temporary password. | Synthetic data still deserves hygiene the reader will copy. |
-| N-7 | The `/platform/*` stage MUST be throttled (reference: 10 rps / 20 burst). | `CreateTenant` in topology 1 creates account-wide resources; cap the rate of a leaked operator credential. |
+| N-7 | The `/platform/*` stage MUST be throttled (reference: 10 rps / 20 burst). | `CreateTenant` in topology 1 creates account-wide resources; cap the rate of a leaked vendor credential. |
 | N-8 | Pools MUST be created with deletion protection **inactive** and tagged `sample=tenant-identity`. | Teardown must be total (P-4); a real deployment flips protection on and is told so in the hardening checklist. |
 | N-9 | The trigger reads the registry on every invocation, with no cache. | Issuance happens at sign-in and at most once per access-token lifetime per session, so the read rate is low and a cache would only add a window in which a `DELETING` tenant still receives tokens. |
 
@@ -533,7 +535,7 @@ verification of §3.2.
    carry no `tenant_id` or `tenants` claim.
 5. **Claim integrity (P-3):** topology 2: u1 calls `UpdateUserAttributes`
    on `custom:tenantId` with its own access token → rejected by Cognito, and
-   a fresh token still says `A`. Topology 3: the operator creates a group
+   a fresh token still says `A`. Topology 3: the vendor creates a group
    `role-admin`, adds u1, re-issues → `tenants` unchanged. Topology 1: a
    user created directly in pool B (bypassing the platform API) still
    receives `tenant_id = B`, because the claim comes from the pool, not the

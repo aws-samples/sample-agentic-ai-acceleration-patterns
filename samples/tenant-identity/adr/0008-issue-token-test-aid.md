@@ -25,7 +25,7 @@ Pros: the platform function already knows the topology's pool for a tenant;
 `AdminSetUserPassword` (permanent) then `AdminInitiateAuth` with
 `ADMIN_USER_PASSWORD_AUTH` returns tokens with no client secret; the test and
 the README demo use one call. Cons: a route that mints tokens for any user
-exists in the deployed API, protected only by the operator's IAM permission.
+exists in the deployed API, protected only by the vendor's IAM permission.
 
 ## Decision
 Option 3, with three constraints: the route is named a test aid in the

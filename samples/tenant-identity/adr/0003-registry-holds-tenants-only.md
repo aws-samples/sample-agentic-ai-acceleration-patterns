@@ -35,7 +35,7 @@ No user, membership, credential, or token material is ever written (R-8).
 ## Consequences
 Easier: offboarding has a clear two-phase shape (flip status, clean Cognito,
 remove item) and a retry path; the resolver's status check is a cheap cached
-read. Harder: operator-facing user listing is Cognito-paced; acceptable for a
+read. Harder: vendor-facing user listing is Cognito-paced; acceptable for a
 platform API. Revisit if a consumer needs per-user metadata Cognito cannot
 hold (attribute count or size limits); that is a new entity with its own
 ADR, still not a mirror of the directory.
