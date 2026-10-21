@@ -56,6 +56,11 @@ const project = new awscdk.AwsCdkTypeScriptApp({
   ],
   jestOptions: {
     jestConfig: {
+      // Jest defaults to one worker per CPU and ts-jest holds a TypeScript
+      // compiler in each (~1 GB). On a 16-core box that is 15 GB+ and gets
+      // the build OOM-killed, so cap the workers and recycle leaky ones.
+      maxWorkers: 4,
+      workerIdleMemoryLimit: '1GB',
       // e2e suites run against deployed stacks through their own task
       testPathIgnorePatterns: ['/node_modules/', '/test/e2e/'],
       coveragePathIgnorePatterns: ['/node_modules/', '/test/', '/src/smithy/'],
