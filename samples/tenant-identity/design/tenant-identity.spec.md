@@ -15,6 +15,12 @@
 > ADR-0008), ADR-0011, ADR-0012 (supersedes ADR-0006: the test aid returns
 > the refresh token).
 
+> **Amended 2026-10-21:** from the threat model. The exchange endpoint
+> checks that Cognito narrowed the token, so narrowing fails closed (§5.5,
+> §10 unit list; ADR-0013, T-17). Per-user platform operations check that
+> the user belongs to the path's tenant (R-13, §5.4, §10 step 3; ADR-0014,
+> T-16).
+
 The keywords MUST, MUST NOT, SHOULD, and MAY are to be interpreted as in
 RFC 2119.
 
@@ -413,6 +419,14 @@ generated from the model.
 | `IssueToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token` `{password}` → 200 `{accessToken, idToken, refreshToken, expiresIn}` | `AdminSetUserPassword` (permanent) then `AdminInitiateAuth` with `ADMIN_USER_PASSWORD_AUTH` against the topology's pool. §3.2. |
 | `RefreshToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token/refresh` `{refreshToken}` → 200 `{accessToken, idToken, expiresIn}` | `AdminInitiateAuth` with `REFRESH_TOKEN_AUTH`, so the test can show that refresh re-runs the trigger (P-2, §10 steps 6 and 7). Same labelling as `IssueToken`. |
 
+**R-13:** `DeleteUser`, `RemoveMembership`, `IssueToken`, and
+`RefreshToken` MUST first check, through the provisioner, that the user
+belongs to `{tenantId}`: 1: the user exists in the tenant's pool. 2:
+`custom:tenantId` equals `{tenantId}`. 3: the user is in `t-<tenantId>`.
+If not, the call fails with `ResourceNotFoundError` (404) and changes
+nothing. `CreateUser` and `AddMembership` are exempt: adding a user to a
+tenant is the vendor's intent (ADR-0014).
+
 Platform mutations are **synchronous**. The slowest, creating a user pool, is
 seconds, not minutes; a 202/polling model would add machinery without adding
 a capability (contrast control-plane P-8, where builds take minutes).
@@ -428,7 +442,7 @@ number is not reused.
 | Error | HTTP | Triggers |
 |---|---|---|
 | `ValidationError` | 400 | malformed input; `UnsupportedInTopology` |
-| `ResourceNotFoundError` | 404 | unknown tenant or user |
+| `ResourceNotFoundError` | 404 | unknown tenant or user; a user who does not belong to the path's tenant (R-13) |
 | `ConflictError` | 409 | tenant `DELETING` on mutation; removing a user's last membership; e-mail already exists in a shared pool for a different tenant (topology 2) |
 | `InternalServerError` | 500 | everything else |
 
@@ -454,15 +468,21 @@ RFC 8693 §2, with Cognito as the signer (ADR-0009). Request body
 | `audience`, `actor_token`, `actor_token_type` | not supported → `invalid_request` |
 
 Behaviour: validate the form, then call `GetTokensFromRefreshToken` with
-`ClientMetadata` = the §8.2 keys. The trigger decides; the function only
-maps the outcome.
+`ClientMetadata` = the §8.2 keys. The trigger decides. The function then
+checks that the trigger was asked (ADR-0013): it decodes the returned
+access token's payload, without verifying it, because it came from Cognito
+in this call. It refuses unless `token_use` is `access`, `tenant_id` equals
+the requested tenant (when one was requested), there is no `tenants` claim,
+and the `scope` set equals the requested set. A narrowed token never holds
+`aws.cognito.signin.user.admin`, so an un-narrowed one always fails the
+scope check. On a mismatch the token is discarded.
 
 Success, 200, `Cache-Control: no-store`:
 `{access_token, issued_token_type:
 "urn:ietf:params:oauth:token-type:access_token", token_type: "Bearer",
 expires_in, scope}`. No `refresh_token`.
 
-Errors, 400, `{error, error_description}`:
+Errors, `{error, error_description}`, 400 unless marked:
 
 | `error` | When |
 |---|---|
@@ -471,6 +491,7 @@ Errors, 400, `{error, error_description}`:
 | `invalid_target` | the trigger refused the tenant: not held, not `ACTIVE`, or absent (message prefix `invalid_target`) |
 | `invalid_scope` | the trigger refused the scopes (prefix `invalid_scope`) |
 | `invalid_grant` | anything else Cognito rejects: an expired, revoked, or foreign refresh token, or an unknown client |
+| `server_error` (500) | Cognito returned a token that does not match the request (ADR-0013); logged by rule name, never with the token |
 
 `error_description` is fixed text per code and never echoes Cognito's
 message or the token.
@@ -654,6 +675,8 @@ verification of §3.2.
 3. **Users:** `CreateUser` u1 in A, u2 in B. Topology 2: `CreateUser` with
    u1's e-mail in B → 409. Topology 3: `AddMembership` u1 → B succeeds;
    topologies 1 and 2: `AddMembership` → 400 `UnsupportedInTopology`.
+   Every topology (R-13): `DeleteUser` and `IssueToken` for tenant A with
+   u2's username → 404, and u2 still exists and still signs in.
 4. **Token contract (P-6):** `IssueToken` for u1 and u2; verify both access
    tokens. u1: `tenant_id = A` (1, 2; topology 1 also `iss` = tenant A's
    `issuer` from `GetTenant`) or `tenants = [A, B]` (3). u2: `tenant_id = B`
@@ -715,7 +738,10 @@ the registry never receives a user item (R-8); narrowing never widens: for
 any `clientMetadata`, the output tenants are a subset of the user's `ACTIVE`
 tenants and the output scopes a subset of §8.1 (property test, ADR-0010); the
 trigger's error prefixes match §5.5; the token-exchange role holds no
-`cognito-idp` or `dynamodb` action (R-12); the form parser rejects every
+`cognito-idp` or `dynamodb` action (R-12); the exchange function returns `server_error` and no token when Cognito's
+token is un-narrowed, names another tenant, or carries other scopes
+(ADR-0013); the provisioner refuses per-user operations for a user outside
+the path's tenant in every topology (R-13); the form parser rejects every
 RFC 8693 parameter not listed in §5.5.
 
 ---

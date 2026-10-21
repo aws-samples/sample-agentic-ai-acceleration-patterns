@@ -21,3 +21,5 @@ Template: [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md#2-d
 | [ADR-0010](0010-trigger-narrows-by-intersection.md) | Narrow in the pre-token-generation trigger by intersecting the request with what the user holds | Accepted | 2026-10-20 |
 | [ADR-0011](0011-token-endpoint-in-smithy-with-form-payload.md) | Model the token-exchange endpoint in Smithy with a form-encoded blob payload | Accepted | 2026-10-20 |
 | [ADR-0012](0012-test-aid-returns-refresh-token.md) | Provide `IssueToken` and `RefreshToken` test-aid routes, and return the refresh token | Accepted | 2026-10-21 |
+| [ADR-0013](0013-exchange-checks-the-narrowed-token.md) | Make the exchange endpoint check that Cognito actually narrowed the token | Accepted | 2026-10-21 |
+| [ADR-0014](0014-per-user-operations-check-tenant-membership.md) | Check that a user belongs to the path's tenant before any per-user platform operation | Accepted | 2026-10-21 |
