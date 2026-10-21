@@ -108,7 +108,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
 
     return this.mapErrors('CreateTenant', tenantId, async () => {
       // Provision Cognito first. A failure here is before the registry write,
-      // so the provisioner cleans up and we simply rethrow (spec §5.1).
+      // so the provisioner cleans up its own half-built state (spec §5.1).
       const provisioned = await this.provisioner.provisionTenant(tenantId, name);
       const timestamp = this.now().toISOString();
       const record: TenantRecord = {
@@ -121,7 +121,19 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
         updatedAt: timestamp,
       };
       // R-10: only tenant fields reach the registry — never user data.
-      await this.registry.create(record);
+      try {
+        await this.registry.create(record);
+      } catch (error) {
+        // Cognito is provisioned but the registry write failed: undo the
+        // provisioning so no untracked pool or group is left (spec §5.1).
+        // A clean-up failure is logged and the original error still surfaces.
+        try {
+          await this.provisioner.deprovisionTenant(record);
+        } catch (cleanup) {
+          log.error('CreateTenant clean-up failed', { operation: 'CreateTenant', tenantId, error: errorName(cleanup) });
+        }
+        throw error;
+      }
 
       // The tenant is now ACTIVE. If the admin step fails the tenant stays
       // ACTIVE with no admin and the error surfaces; the vendor retries with
@@ -224,7 +236,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     const tenantId = requireField(input.tenantId, 'tenantId');
     const username = requireField(input.username, 'username');
     const admin = requireField(input.admin, 'admin');
-    log.info('UpdateUser', { operation: 'UpdateUser', tenantId, username });
+    log.info('UpdateUser', { operation: 'UpdateUser', tenantId });
     return this.mapErrors('UpdateUser', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
       const user = await this.provisioner.setAdmin(tenant, username, admin);
@@ -238,7 +250,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
   ): Promise<DeleteUserServerOutput> => {
     const tenantId = requireField(input.tenantId, 'tenantId');
     const username = requireField(input.username, 'username');
-    log.info('DeleteUser', { operation: 'DeleteUser', tenantId, username });
+    log.info('DeleteUser', { operation: 'DeleteUser', tenantId });
     return this.mapErrors('DeleteUser', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
       await this.provisioner.deleteUser(tenant, username);
@@ -256,7 +268,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
   ): Promise<CreateMembershipServerOutput> => {
     const tenantId = requireField(input.tenantId, 'tenantId');
     const username = requireField(input.username, 'username');
-    log.info('CreateMembership', { operation: 'CreateMembership', tenantId, username });
+    log.info('CreateMembership', { operation: 'CreateMembership', tenantId });
     return this.mapErrors('CreateMembership', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
       await this.provisioner.createMembership(tenant, username);
@@ -270,7 +282,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
   ): Promise<DeleteMembershipServerOutput> => {
     const tenantId = requireField(input.tenantId, 'tenantId');
     const username = requireField(input.username, 'username');
-    log.info('DeleteMembership', { operation: 'DeleteMembership', tenantId, username });
+    log.info('DeleteMembership', { operation: 'DeleteMembership', tenantId });
     return this.mapErrors('DeleteMembership', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
       await this.provisioner.deleteMembership(tenant, username);
@@ -290,7 +302,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     const username = requireField(input.username, 'username');
     const password = requireField(input.password, 'password');
     // Never log the password.
-    log.info('IssueToken', { operation: 'IssueToken', tenantId, username });
+    log.info('IssueToken', { operation: 'IssueToken', tenantId });
     return this.mapErrors('IssueToken', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
       const tokens = await this.provisioner.issueToken(tenant, username, password);
@@ -311,7 +323,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     const username = requireField(input.username, 'username');
     const refreshToken = requireField(input.refreshToken, 'refreshToken');
     // Never log the token.
-    log.info('RefreshToken', { operation: 'RefreshToken', tenantId, username });
+    log.info('RefreshToken', { operation: 'RefreshToken', tenantId });
     return this.mapErrors('RefreshToken', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
       const tokens = await this.provisioner.refreshToken(tenant, username, refreshToken);

@@ -84,7 +84,7 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
   });
 
   describe('R-12 (custom:tenantId mismatch)', () => {
-    beforeEach(() => cognito.on(AdminGetUserCommand).resolves({ UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.b }], UserStatus: 'CONFIRMED' }));
+    beforeEach(() => cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.b }], UserStatus: 'CONFIRMED' }));
 
     it('assertMember throws NotFoundError on a different tenant', async () => {
       await expect(provisioner().assertMember(tenantA(), 'u2')).rejects.toBeInstanceOf(NotFoundError);
@@ -145,10 +145,23 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
 
   describe('getUser / listUsers / setAdmin', () => {
     it('getUser returns admin from group membership for a matching tenant', async () => {
-      cognito.on(AdminGetUserCommand).resolves({ UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }, { Name: 'email', Value: 'u1@x.com' }], UserStatus: 'CONFIRMED', UserCreateDate: new Date() });
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }, { Name: 'email', Value: 'u1@x.com' }], UserStatus: 'CONFIRMED', UserCreateDate: new Date() });
       cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [{ GroupName: `admin-${IDS.a}` }] });
       const view = await provisioner().getUser(tenantA(), 'u1');
       expect(view.admin).toBe(true);
+    });
+
+    it('getUser returns Cognito\'s canonical username, not an e-mail from the path (R-13)', async () => {
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'sub-u1', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }], UserStatus: 'CONFIRMED' });
+      cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [] });
+      const view = await provisioner().getUser(tenantA(), 'u1@x.com');
+      expect(view.username).toBe('sub-u1');
+    });
+
+    it('getUser fails closed when Cognito returns no Username (R-13)', async () => {
+      cognito.on(AdminGetUserCommand).resolves({ UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }], UserStatus: 'CONFIRMED' });
+      cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [] });
+      await expect(provisioner().getUser(tenantA(), 'u1@x.com')).rejects.toThrow('AdminGetUser returned no Username');
     });
 
     it('listUsers lists t- group members with admin flag', async () => {
@@ -174,7 +187,7 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
   });
 
   describe('token issuance', () => {
-    beforeEach(() => cognito.on(AdminGetUserCommand).resolves({ UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }], UserStatus: 'CONFIRMED' }));
+    beforeEach(() => cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }], UserStatus: 'CONFIRMED' }));
     it('issueToken signs in against the shared pool/client', async () => {
       cognito.on(AdminSetUserPasswordCommand).resolves({});
       cognito.on(AdminInitiateAuthCommand).resolves({ AuthenticationResult: { AccessToken: 'a', IdToken: 'i', RefreshToken: 'r', ExpiresIn: 300 } });

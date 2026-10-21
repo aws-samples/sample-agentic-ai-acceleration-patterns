@@ -6,7 +6,7 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import type { APIGatewayAuthorizerResult, APIGatewayTokenAuthorizerEvent } from 'aws-lambda';
 import { authorize, stripBearer, type AuthorizeDeps, type Caller, type TokenVerifier } from './tenant-authorizer';
-import { ENV, POOL_INDEX_NAME } from '../shared/constants';
+import { ENV, POOL_INDEX_NAME, requireEnv } from '../shared/constants';
 import { log } from '../shared/logger';
 import { DynamoDBRegistry } from '../shared/registry';
 
@@ -56,7 +56,7 @@ function readSharedPool(): { userPoolId: string; appClientId: string } | undefin
   return undefined;
 }
 
-const tableName = process.env[ENV.tableName] ?? '';
+const tableName = requireEnv(ENV.tableName);
 const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
   marshallOptions: { removeUndefinedValues: true },
 });

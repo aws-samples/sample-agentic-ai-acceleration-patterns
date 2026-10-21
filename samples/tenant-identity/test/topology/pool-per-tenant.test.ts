@@ -55,13 +55,18 @@ describe('PoolPerTenantProvisioner (spec §7.1)', () => {
       const poolInput = cognito.commandCalls(CreateUserPoolCommand)[0].args[0].input;
       expect(poolInput.UserPoolTier).toBe('ESSENTIALS');
       expect(poolInput.DeletionProtection).toBe('INACTIVE');
+      // R-13 relies on this: with e-mail as the username attribute, the
+      // Cognito username is the sub UUID the self-check compares against.
       expect(poolInput.UsernameAttributes).toEqual(['email']);
+      expect(poolInput.AliasAttributes).toBeUndefined();
       expect(poolInput.UserPoolTags).toEqual({ sample: 'tenant-identity' });
       expect(poolInput.LambdaConfig.PreTokenGenerationConfig).toEqual({ LambdaVersion: 'V2_0', LambdaArn: TRIGGER_ARN });
       const clientInput = cognito.commandCalls(CreateUserPoolClientCommand)[0].args[0].input;
       expect(clientInput.ExplicitAuthFlows).toEqual(['ALLOW_ADMIN_USER_PASSWORD_AUTH', 'ALLOW_REFRESH_TOKEN_AUTH']);
       expect(clientInput.AccessTokenValidity).toBe(5);
       expect(clientInput.PreventUserExistenceErrors).toBe('ENABLED');
+      // R-5, ADR-0009: refresh token rotation stays off.
+      expect(clientInput.RefreshTokenRotation?.Feature ?? 'DISABLED').toBe('DISABLED');
       expect(cognito.commandCalls(CreateGroupCommand)[0].args[0].input.GroupName).toBe(`admin-${IDS.a}`);
     });
 
@@ -143,10 +148,17 @@ describe('PoolPerTenantProvisioner (spec §7.1)', () => {
 
   describe('getUser / listUsers', () => {
     it('getUser computes admin from group membership', async () => {
-      cognito.on(AdminGetUserCommand).resolves({ UserAttributes: [{ Name: 'email', Value: 'u1@example.com' }], UserStatus: 'CONFIRMED', UserCreateDate: new Date() });
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: 'email', Value: 'u1@example.com' }], UserStatus: 'CONFIRMED', UserCreateDate: new Date() });
       cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [{ GroupName: `admin-${IDS.a}` }] });
       const view = await provisioner().getUser(tenantA(), 'u1');
       expect(view.admin).toBe(true);
+    });
+
+    it('getUser returns Cognito\'s canonical username, not an e-mail from the path (R-13)', async () => {
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'sub-u1', UserAttributes: [{ Name: 'email', Value: 'u1@example.com' }], UserStatus: 'CONFIRMED' });
+      cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [] });
+      const view = await provisioner().getUser(tenantA(), 'u1@example.com');
+      expect(view.username).toBe('sub-u1');
     });
 
     it('listUsers maps users with admin flag from the admin group page', async () => {
@@ -161,7 +173,7 @@ describe('PoolPerTenantProvisioner (spec §7.1)', () => {
   });
 
   describe('token issuance', () => {
-    beforeEach(() => cognito.on(AdminGetUserCommand).resolves({ UserAttributes: [], UserStatus: 'CONFIRMED' }));
+    beforeEach(() => cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [], UserStatus: 'CONFIRMED' }));
 
     it('issueToken sets a permanent password then ADMIN_USER_PASSWORD_AUTH', async () => {
       cognito.on(AdminSetUserPasswordCommand).resolves({});

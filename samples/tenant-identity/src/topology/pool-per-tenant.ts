@@ -186,7 +186,7 @@ export class PoolPerTenantProvisioner implements Provisioner {
     const userPoolId = this.poolId(tenant);
     const user = await adminGetUser(this.cognito, userPoolId, username);
     const groups = await listGroupsForUser(this.cognito, userPoolId, username);
-    return adminGetUserToView(username, user.attributes, user.status, user.createdAt, groups.includes(adminGroupName(tenant.tenantId)));
+    return adminGetUserToView(user.username, user.attributes, user.status, user.createdAt, groups.includes(adminGroupName(tenant.tenantId)));
   }
 
   async listUsers(tenant: TenantRecord, nextToken?: string): Promise<Page<UserView>> {

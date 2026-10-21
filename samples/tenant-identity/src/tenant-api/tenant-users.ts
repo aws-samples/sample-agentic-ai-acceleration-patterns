@@ -112,9 +112,13 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
    * self-mutation guard. Throws NotFoundError (404) when the user is not in
    * the tenant.
    */
-  private async resolveIsSelf(tenant: TenantRecord, username: string, sub: string): Promise<boolean> {
+  private async resolveTarget(
+    tenant: TenantRecord,
+    username: string,
+    sub: string,
+  ): Promise<{ username: string; isSelf: boolean }> {
     const user = await this.provisioner.getUser(tenant, username);
-    return user.username === sub;
+    return { username: user.username, isSelf: user.username === sub };
   }
 
   async CreateTenantUser(
@@ -184,11 +188,13 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
       const tenant = await this.loadTenant(context, true);
       // R-12 (membership) then R-13 (self-demote): resolve the path username
       // to the real username and refuse a self-demotion before any write.
-      const isSelf = await this.resolveIsSelf(tenant, input.username!, context.sub);
-      if (isSelf && input.admin === false) {
+      const target = await this.resolveTarget(tenant, input.username!, context.sub);
+      if (target.isSelf && input.admin === false) {
         throw new ConflictError('A tenant admin cannot demote themselves');
       }
-      const user = await this.provisioner.setAdmin(tenant, input.username!, input.admin!);
+      // The provisioner re-checks membership (R-12) inside setAdmin. That is
+      // one extra Cognito read, kept so the provisioner never trusts its caller.
+      const user = await this.provisioner.setAdmin(tenant, target.username, input.admin!);
       return { user: toUser(user) };
     } catch (error) {
       log.warn('tenant user operation failed', {
@@ -209,11 +215,11 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
       const tenant = await this.loadTenant(context, true);
       // R-12 (membership) then R-13 (self-delete): resolve the path username
       // to the real username and refuse a self-deletion before any write.
-      const isSelf = await this.resolveIsSelf(tenant, input.username!, context.sub);
-      if (isSelf) {
+      const target = await this.resolveTarget(tenant, input.username!, context.sub);
+      if (target.isSelf) {
         throw new ConflictError('A tenant admin cannot delete themselves');
       }
-      await this.provisioner.deleteUser(tenant, input.username!);
+      await this.provisioner.deleteUser(tenant, target.username);
       return {};
     } catch (error) {
       log.warn('tenant user operation failed', {

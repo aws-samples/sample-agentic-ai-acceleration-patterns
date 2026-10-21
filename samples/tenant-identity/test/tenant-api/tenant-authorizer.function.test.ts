@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: MIT-0
 
 import type { APIGatewayTokenAuthorizerEvent } from 'aws-lambda';
-import { buildPolicy, handler } from '../../src/tenant-api/tenant-authorizer.function';
+
+// Cold start reads TABLE_NAME via requireEnv at module load. `require` (not a
+// static import) runs after this assignment; a static import is hoisted above it.
+process.env.TABLE_NAME = 'registry-table';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { buildPolicy, handler } = require('../../src/tenant-api/tenant-authorizer.function') as typeof import('../../src/tenant-api/tenant-authorizer.function');
 
 /**
  * Unit tests for the authoriser handler's policy shape (ADR-0007, spec §5.3):

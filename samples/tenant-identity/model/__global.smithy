@@ -129,6 +129,8 @@ structure Tenant {
     updatedAt: IsoTimestamp
 }
 
+/// One page of tenants. ListTenants returns at most 50.
+@length(max: 100)
 list TenantList {
     member: Tenant
 }
@@ -154,6 +156,8 @@ structure User {
     createdAt: IsoTimestamp
 }
 
+/// One page of users. Cognito returns at most 60 per page.
+@length(max: 100)
 list UserList {
     member: User
 }

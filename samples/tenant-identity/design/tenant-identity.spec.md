@@ -338,7 +338,7 @@ recover a tenant that has locked itself out.
 
 | # | Component | Requirement |
 |---|---|---|
-| R-1 | **HTTP API** | One API Gateway HTTP API, generated from the interface model (Smithy), three route families: `/platform/*` with IAM authorisation (ADR-0005); `POST /oauth2/token`, the token-exchange endpoint, with no gateway authoriser because the refresh token is the credential (§5.4, ADR-0011); and `/tenant/*` with the tenant authoriser (R-9, ADR-0007). No other routes. |
+| R-1 | **REST API** | One API Gateway REST API (ADR-0016), generated from the interface model (Smithy), three route families: `/platform/*` with IAM authorisation (ADR-0005); `POST /oauth2/token`, the token-exchange endpoint, with no gateway authoriser because the refresh token is the credential (§5.4, ADR-0011); and `/tenant/*` with the tenant authoriser (R-9, ADR-0007). No other routes. |
 | R-2 | **Platform function** | Implements the platform API through the topology's provisioner. Role per P-8. |
 | R-3 | **Tenant registry** | One DynamoDB table (§4). Point-in-time recovery on; `DESTROY` removal for the sample. |
 | R-4 | **Pre-token-generation function** | Cognito Lambda trigger, version 2 event (`V2_0`), adds the claim(s) and scopes of P-6 to the access token, enforces tenant status (P-2), and applies narrowing requests (P-10, §8; ADR-0003). Attached to every pool the sample creates. Pools MUST use the **Essentials** feature plan (the default for new pools); access-token customisation is not available on Lite without advanced security features. |
@@ -346,7 +346,7 @@ recover a tenant that has locked itself out.
 | R-6 | **Parameter publication** | The stack publishes `/application-plane/shared/identity/{apiUrl,topology}` and, for `shared-pool*`, `/application-plane/shared/identity/userPoolId` and `appClientId`, so the sample mounts into the `control-plane` sample's shared namespace. |
 | R-7 | **Token-exchange function** | Implements `POST /oauth2/token` (§5.4). It parses the form and calls `GetTokensFromRefreshToken` with the narrowing request in `ClientMetadata`. It returns the access token only and discards the ID token. Its role holds logging permissions only, no `cognito-idp` or DynamoDB action, because `GetTokensFromRefreshToken` is authorised by the refresh token, not by IAM (P-10). |
 | R-8 | **Tenant-user function** | Implements `/tenant/users` (§5.2) through the topology's provisioner, with the tenant taken only from the authoriser context. Its role holds `AdminCreateUser`, `AdminGetUser`, `AdminDeleteUser`, `AdminAddUserToGroup`, `AdminRemoveUserFromGroup`, `AdminListGroupsForUser`, `ListUsers`, and `ListUsersInGroup`, scoped as N-3, plus registry reads. It holds no `CreateUserPool`, `DeleteUserPool`, `CreateGroup`, or `DeleteGroup` (P-8). |
-| R-9 | **Tenant authoriser** | HTTP API Lambda authoriser on `/tenant/*`, with result caching off. Verifies the access token as ADR-0007 states, refuses a tenant that is not `ACTIVE`, and passes `tenantId` and `sub` as context. Its role reads the registry and nothing else. |
+| R-9 | **Tenant authoriser** | REST API Lambda (request) authoriser on `/tenant/*`, with result caching off. Verifies the access token as ADR-0007 states, refuses a tenant that is not `ACTIVE`, and passes `tenantId` and `sub` as context. Its role reads the registry and nothing else. |
 
 ### 3.2 Caller and identity model
 
@@ -813,11 +813,12 @@ verification of §3.2.
    - `GetTenantUser` and `DeleteTenantUser` for u2 (tenant B): 404, and u2
      still exists (R-12).
    - `DeleteTenantUser` a1, and `UpdateTenantUser` a1 `admin=false`: 409
-     (R-13).
+     (R-13). The same two calls with a1's e-mail in the path, not the sub:
+     409 too (R-13 holds for any username form).
    - Topology 3: b1's `GetTenantUser` for u1 (in A and B) returns a User
      that does not mention A.
 9. **Offboard (P-2):** `DeleteTenant` A. a1's narrowed admin token from step
-   6b, not yet expired, → 403 on `ListTenantUsers` at once (R-9). `RefreshToken` for u1: fails in
+   8, not yet expired, → 403 on `ListTenantUsers` at once (R-9). `RefreshToken` for u1: fails in
    topology 1 (pool gone) and 2 (user gone); succeeds in topology 3 with
    `tenants = [B]`, because u1 still belongs to B. u1's pre-deletion access
    token still verifies against keys cached before the deletion (the test

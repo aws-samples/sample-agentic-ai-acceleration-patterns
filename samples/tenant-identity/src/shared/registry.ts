@@ -172,6 +172,11 @@ export class DynamoDBRegistry implements Registry {
 
   async list(nextToken?: string, limit = 50): Promise<Page<TenantRecord>> {
     const result = await this.client.send(
+      // A Scan with a filter: Limit counts items read before the filter, so a
+      // page can be short (or empty) and still carry a nextToken. The table
+      // holds one item type today, so pages are full; keep the filter so a
+      // second item type could never leak into ListTenants. A larger registry
+      // would list from a GSI instead.
       new ScanCommand({
         TableName: this.tableName,
         Limit: limit,

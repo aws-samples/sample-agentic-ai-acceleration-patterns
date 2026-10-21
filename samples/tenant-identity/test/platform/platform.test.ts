@@ -170,6 +170,19 @@ describe('PlatformService (spec §5.1)', () => {
       expect(provisioner.createUser).not.toHaveBeenCalled();
     });
 
+    it('deprovisions and rethrows when the registry write fails after provisioning (spec §5.1)', async () => {
+      const registry = new FakeRegistry();
+      jest.spyOn(registry, 'create').mockRejectedValue(new Error('throttled'));
+      const provisioner = mockProvisioner();
+      provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
+
+      await expect(
+        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
+      ).rejects.toBeInstanceOf(InternalServerError);
+      expect(provisioner.deprovisionTenant).toHaveBeenCalledWith(expect.objectContaining({ tenantId: TENANT_A }));
+      expect(provisioner.createUser).not.toHaveBeenCalled();
+    });
+
     it('leaves the tenant ACTIVE and surfaces the error when the admin step fails (spec §5.1)', async () => {
       const registry = new FakeRegistry();
       const provisioner = mockProvisioner();

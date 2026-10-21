@@ -149,10 +149,22 @@ export async function adminGetUser(
   cognito: CognitoIdentityProviderClient,
   userPoolId: string,
   username: string,
-): Promise<{ attributes: AttributeType[] | undefined; status: string | undefined; createdAt: Date | undefined }> {
+): Promise<{ username: string; attributes: AttributeType[] | undefined; status: string | undefined; createdAt: Date | undefined }> {
   try {
     const result = await cognito.send(new AdminGetUserCommand({ UserPoolId: userPoolId, Username: username }));
-    return { attributes: result.UserAttributes, status: result.UserStatus, createdAt: result.UserCreateDate };
+    // Return Cognito's canonical Username, never the caller's input: the input
+    // may be an e-mail alias, and R-13 compares the canonical name to `sub`.
+    // Fail closed when Cognito omits it: falling back to the input would let
+    // an e-mail slip past the R-13 self-check.
+    if (result.Username === undefined || result.Username === '') {
+      throw new Error('AdminGetUser returned no Username');
+    }
+    return {
+      username: result.Username,
+      attributes: result.UserAttributes,
+      status: result.UserStatus,
+      createdAt: result.UserCreateDate,
+    };
   } catch (error) {
     if (isCognitoError(error, COGNITO.userNotFound)) {
       throw new NotFoundError('User not found in tenant');

@@ -224,6 +224,17 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     }
   });
 
+  test.each(TOPOLOGIES)('tenant-user role holds no test-aid sign-in action (P-8, M-17) [%s]', (topology) => {
+    const template = synth(topology);
+    const actions = policyStatementsForRole(template, 'TenantUsersFunctionServiceRole').flatMap(actionsOf);
+    expect(actions).not.toContain('cognito-idp:AdminSetUserPassword');
+    expect(actions).not.toContain('cognito-idp:AdminInitiateAuth');
+    // The platform role keeps them for IssueToken/RefreshToken (ADR-0006).
+    const platform = policyStatementsForRole(template, 'PlatformFunctionServiceRole').flatMap(actionsOf);
+    expect(platform).toContain('cognito-idp:AdminSetUserPassword');
+    expect(platform).toContain('cognito-idp:AdminInitiateAuth');
+  });
+
   test('platform pool-per-tenant: CreateUserPool with the RequestTag condition and tagged per-pool actions (N-3)', () => {
     const template = synth('pool-per-tenant');
     const statements = policyStatementsForRole(template, 'PlatformFunctionServiceRole');
@@ -302,6 +313,28 @@ describe('TenantIdentityStack - shared user pool (R-4, R-5, N-1, N-8, §7.2)', (
     // Writable attributes are email only.
     expect(client.Properties.WriteAttributes).toEqual(['email']);
   });
+
+  test.each(['shared-pool', 'shared-pool-multi-tenant'] as Topology[])(
+    'pool signs in by e-mail, so the Cognito username is the sub (R-13) [%s]',
+    (topology) => {
+      // R-13 compares the canonical username to the token's `sub`. That only
+      // holds while e-mail is a username attribute (Username = sub UUID).
+      const template = synth(topology);
+      const pool = Object.values(template.findResources('AWS::Cognito::UserPool'))[0] as any;
+      expect(pool.Properties.UsernameAttributes).toEqual(['email']);
+      expect(pool.Properties.AliasAttributes).toBeUndefined();
+    },
+  );
+
+  test.each(['shared-pool', 'shared-pool-multi-tenant'] as Topology[])(
+    'app client leaves refresh token rotation off (R-5, ADR-0009) [%s]',
+    (topology) => {
+      const template = synth(topology);
+      const client = Object.values(template.findResources('AWS::Cognito::UserPoolClient'))[0] as any;
+      const feature = client.Properties.RefreshTokenRotation?.Feature;
+      expect(feature === undefined || feature === 'DISABLED').toBe(true);
+    },
+  );
 
   test.each(['shared-pool', 'shared-pool-multi-tenant'] as Topology[])(
     'pool: V2_0 trigger, Essentials plan, deletion protection INACTIVE, self sign-up off, sample tag [%s]',

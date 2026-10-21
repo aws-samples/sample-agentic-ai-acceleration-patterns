@@ -913,6 +913,14 @@ export function defineScenario(topology: Topology): void {
       coverage.record('UpdateTenantUser');
       expectStatus(selfDemote, 409, 'self-demote a1 (R-13)');
 
+      // Same two calls with a1's e-mail in the path → still 409. The service
+      // resolves the e-mail to Cognito's canonical username before the check.
+      const a1Email = encodeURIComponent(emailFor(runId, 'a1'));
+      const selfDeleteByEmail = await tenant.call('DELETE', `tenant/users/${a1Email}`, narrowedAdminTokenA);
+      expectStatus(selfDeleteByEmail, 409, 'self-delete a1 by e-mail (R-13)');
+      const selfDemoteByEmail = await tenant.call('PATCH', `tenant/users/${a1Email}`, narrowedAdminTokenA, { admin: false });
+      expectStatus(selfDemoteByEmail, 409, 'self-demote a1 by e-mail (R-13)');
+
       // Topology 3: b1's GetTenantUser for u1 (in A and B) returns a User
       // that does not mention A.
       if (topology === 'shared-pool-multi-tenant') {

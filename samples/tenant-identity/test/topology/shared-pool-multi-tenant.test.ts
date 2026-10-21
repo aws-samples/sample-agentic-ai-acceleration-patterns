@@ -102,7 +102,7 @@ describe('SharedPoolMultiTenantProvisioner (spec §7.3)', () => {
 
   describe('membership ops', () => {
     it('createMembership requires the user to exist, then adds idempotently', async () => {
-      cognito.on(AdminGetUserCommand).resolves({ UserAttributes: [], UserStatus: 'CONFIRMED' });
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [], UserStatus: 'CONFIRMED' });
       cognito.on(AdminAddUserToGroupCommand).resolves({});
       await provisioner().createMembership(tenantA(), 'u1');
       expect(cognito.commandCalls(AdminAddUserToGroupCommand)[0].args[0].input.GroupName).toBe(`t-${IDS.a}`);
@@ -199,9 +199,16 @@ describe('SharedPoolMultiTenantProvisioner (spec §7.3)', () => {
 
     it('getUser computes admin from admin-<tenant> membership', async () => {
       userGroups(`t-${IDS.a}`, `admin-${IDS.a}`);
-      cognito.on(AdminGetUserCommand).resolves({ UserAttributes: [{ Name: 'email', Value: 'u1@x.com' }], UserStatus: 'CONFIRMED', UserCreateDate: new Date() });
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: 'email', Value: 'u1@x.com' }], UserStatus: 'CONFIRMED', UserCreateDate: new Date() });
       const view = await provisioner().getUser(tenantA(), 'u1');
       expect(view.admin).toBe(true);
+    });
+
+    it('getUser returns Cognito\'s canonical username, not an e-mail from the path (R-13)', async () => {
+      userGroups(`t-${IDS.a}`);
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'sub-u1', UserAttributes: [{ Name: 'email', Value: 'u1@x.com' }], UserStatus: 'CONFIRMED' });
+      const view = await provisioner().getUser(tenantA(), 'u1@x.com');
+      expect(view.username).toBe('sub-u1');
     });
   });
 });

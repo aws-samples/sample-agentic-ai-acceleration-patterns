@@ -138,7 +138,7 @@ export class SharedPoolProvisioner implements Provisioner {
     await this.assertMember(tenant, username);
     const user = await adminGetUser(this.cognito, this.userPoolId, username);
     const groups = await listGroupsForUser(this.cognito, this.userPoolId, username);
-    return adminGetUserToView(username, user.attributes, user.status, user.createdAt, groups.includes(adminGroupName(tenant.tenantId)));
+    return adminGetUserToView(user.username, user.attributes, user.status, user.createdAt, groups.includes(adminGroupName(tenant.tenantId)));
   }
 
   async listUsers(tenant: TenantRecord, nextToken?: string): Promise<Page<UserView>> {

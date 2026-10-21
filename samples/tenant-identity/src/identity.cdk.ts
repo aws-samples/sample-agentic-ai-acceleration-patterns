@@ -48,11 +48,11 @@ const STAGE_NAME = 'prod';
 /** The registry GSI that maps a pool to its tenant (spec §4.2). */
 const GSI_BY_USER_POOL_ID = POOL_INDEX_NAME;
 
-/** The three cognito-idp actions the trigger reads the registry with (R-14). */
+/** The three DynamoDB actions the trigger reads the registry with (R-14). */
 const REGISTRY_READ_ACTIONS = ['dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:Query'];
 
-/** Per-pool cognito-idp actions used by both the platform and tenant-user roles. */
-const PER_POOL_USER_ACTIONS = [
+/** Per-pool cognito-idp user actions held by both the platform and tenant-user roles. */
+export const TENANT_USER_ACTIONS = [
   'cognito-idp:AdminCreateUser',
   'cognito-idp:AdminGetUser',
   'cognito-idp:AdminDeleteUser',
@@ -61,9 +61,18 @@ const PER_POOL_USER_ACTIONS = [
   'cognito-idp:AdminListGroupsForUser',
   'cognito-idp:ListUsers',
   'cognito-idp:ListUsersInGroup',
-  'cognito-idp:AdminSetUserPassword',
-  'cognito-idp:AdminInitiateAuth',
 ];
+
+/**
+ * Sign-in actions for the IssueToken/RefreshToken test aids (ADR-0006). The
+ * PLATFORM role only: the tenant-user function never signs anyone in, and in
+ * a shared pool these would let it set any user's password and mint their
+ * tokens (P-8, M-17).
+ */
+export const TEST_AID_SIGN_IN_ACTIONS = ['cognito-idp:AdminSetUserPassword', 'cognito-idp:AdminInitiateAuth'];
+
+/** Every per-pool user action the platform role holds. */
+const PER_POOL_USER_ACTIONS = [...TENANT_USER_ACTIONS, ...TEST_AID_SIGN_IN_ACTIONS];
 
 /** Group-lifecycle actions the PLATFORM role holds and the tenant-user role never does (R-8). */
 const GROUP_LIFECYCLE_ACTIONS = ['cognito-idp:CreateGroup', 'cognito-idp:DeleteGroup'];
@@ -327,8 +336,9 @@ export class TenantIdentityStack extends Stack {
       );
       tenantUsersFn.addToRolePolicy(
         new iam.PolicyStatement({
-          // R-8: NO CreateUserPool/DeleteUserPool/CreateGroup/DeleteGroup.
-          actions: PER_POOL_USER_ACTIONS,
+          // R-8: NO CreateUserPool/DeleteUserPool/CreateGroup/DeleteGroup, and
+          // no test-aid sign-in actions (P-8).
+          actions: TENANT_USER_ACTIONS,
           resources: [userPool.userPoolArn],
         }),
       );
@@ -378,7 +388,7 @@ export class TenantIdentityStack extends Stack {
       // tenant's own pool; no pool/group lifecycle action (R-8).
       tenantUsersFn.addToRolePolicy(
         new iam.PolicyStatement({
-          actions: PER_POOL_USER_ACTIONS,
+          actions: TENANT_USER_ACTIONS,
           resources: [`arn:${this.partition}:cognito-idp:${this.region}:${this.account}:userpool/*`],
           conditions: {
             StringEquals: { [`aws:ResourceTag/${SAMPLE_TAG_KEY}`]: SAMPLE_TAG_VALUE },

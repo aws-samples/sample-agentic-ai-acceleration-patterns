@@ -137,7 +137,7 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
       throw new NotFoundError('User not found in tenant');
     }
     const user = await adminGetUser(this.cognito, this.userPoolId, username);
-    return adminGetUserToView(username, user.attributes, user.status, user.createdAt, groups.includes(adminGroupName(tenant.tenantId)));
+    return adminGetUserToView(user.username, user.attributes, user.status, user.createdAt, groups.includes(adminGroupName(tenant.tenantId)));
   }
 
   async listUsers(tenant: TenantRecord, nextToken?: string): Promise<Page<UserView>> {
