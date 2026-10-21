@@ -27,3 +27,4 @@ Template: [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md#2-d
 | [ADR-0016](0016-one-rest-api-from-three-smithy-services.md) | Serve the three route families from one REST API built from three Smithy services | Accepted | 2026-10-21 |
 | [ADR-0017](0017-one-stack-per-account-publishes-shared-parameters.md) | Let only one stack per account and Region publish the shared identity parameters | Accepted | 2026-10-21 |
 | [ADR-0018](0018-registry-allowlist-not-jwks-stops-trust.md) | Rely on the registry allowlist, not a vanished JWKS, to stop trust in a deleted pool | Accepted | 2026-10-21 |
+| [ADR-0019](0019-teardown-leaves-no-log-group.md) | Delete log groups only after their writers have stopped, and leave the account's API Gateway role alone | Accepted | 2026-10-21 |

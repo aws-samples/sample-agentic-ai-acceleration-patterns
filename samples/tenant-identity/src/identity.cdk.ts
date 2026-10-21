@@ -25,6 +25,7 @@ import {
   TENANT_ATTRIBUTE_NAME,
   Topology,
 } from './shared/constants';
+import { LogDrain } from './shared/log-drain';
 import { acknowledgeGranularFinding, nagFindingResource, suppressTemplateScanners } from './shared/nag';
 import { IntegrationMapping, mergeOpenApi, patchIntegrations } from './shared/openapi';
 
@@ -40,6 +41,9 @@ export interface TenantIdentityStackProps extends StackProps {
    */
   readonly publishSharedParameters?: boolean;
 }
+
+/** The one API stage. Also part of the execution log group's name. */
+const STAGE_NAME = 'prod';
 
 /** The registry GSI that maps a pool to its tenant (spec §4.2). */
 const GSI_BY_USER_POOL_ID = POOL_INDEX_NAME;
@@ -447,6 +451,11 @@ export class TenantIdentityStack extends Stack {
     const api = new apigateway.SpecRestApi(this, 'Api', {
       restApiName: `${this.stackName}-api`,
       apiDefinition: apigateway.ApiDefinition.fromInline(definition),
+      // Do not create the account-wide API Gateway CloudWatch role. It is one
+      // setting per account and Region: CDK retains the role on destroy, and
+      // the setting keeps pointing at it. The account must already have one
+      // (README prerequisites, ADR-0019).
+      cloudWatchRole: false,
       // Resource policy (spec §3.2): the account root may invoke /platform/*
       // (IAM-authorised, so the actual caller is a granted principal); the
       // token and tenant routes allow any principal because they
@@ -468,7 +477,7 @@ export class TenantIdentityStack extends Stack {
         ],
       }),
       deployOptions: {
-        stageName: 'prod',
+        stageName: STAGE_NAME,
         // Who called and how (AwsSolutions-APIG1). The custom format adds the
         // caller identity: the SigV4 user ARN on /platform and the
         // authoriser principalId (the verified sub) on /tenant — every
@@ -516,12 +525,6 @@ export class TenantIdentityStack extends Stack {
         'More than 50 4XX responses in 5 minutes - possible token probing, leaked credential, or exchange-route abuse (threat T-9/T-20).',
     });
 
-    // API Gateway account CloudWatch logging role managed policy.
-    acknowledgeGranularFinding(
-      api,
-      'AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs]',
-      'The canonical AWS policy for API Gateway account-level CloudWatch logging - required for stage execution logging (APIG6).',
-    );
     // Request validation IS enabled (Smithy @requestValidator in the OpenAPI);
     // the rule only detects standalone CfnRequestValidator resources.
     Validations.of(api).acknowledge({
@@ -600,6 +603,34 @@ export class TenantIdentityStack extends Stack {
         });
       }
     }
+
+    // --- Teardown leaves no log group behind (ADR-0019) --------------------
+    // API Gateway creates the execution log group itself on first write, so
+    // it would live outside the stack. Own it here, before the stage writes.
+    const executionLogs = new logs.LogGroup(this, 'ApiExecutionLogs', {
+      // A literal stage name: a token would make the group depend on the stage.
+      logGroupName: `API-Gateway-Execution-Logs_${api.restApiId}/${STAGE_NAME}`,
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.DESTROY, // sample only
+    });
+    suppressTemplateScanners(executionLogs, {
+      cfnNag: [{ id: 'W84', reason: 'Execution logs carry request metadata only; default CloudWatch Logs SSE at rest is sufficient for this sample.' }],
+      checkov: [{ id: 'CKV_AWS_158', comment: 'Execution logs carry request metadata only; default CloudWatch Logs SSE at rest is sufficient for this sample.' }],
+    });
+    // Late log delivery recreates a deleted log group. Delete every writer
+    // first, wait, then delete its log groups. Two drains, because the
+    // execution log group's name depends on the API, and the API on the
+    // functions: one drain would be a dependency cycle.
+    const functions = [triggerFn, tokenFn, authorizerFn, platformFn, tenantUsersFn];
+    const functionDrain = new LogDrain(this, 'FunctionLogDrain');
+    for (const fn of functions) {
+      functionDrain.protect(fn.logGroup);
+      functionDrain.writer(fn);
+    }
+    const apiDrain = new LogDrain(this, 'ApiLogDrain');
+    apiDrain.protect(apiAccessLogs);
+    apiDrain.protect(executionLogs);
+    apiDrain.writer(api.deploymentStage);
 
     new CfnOutput(this, 'ApiUrl', { value: api.url });
     new CfnOutput(this, 'Topology', { value: topology });

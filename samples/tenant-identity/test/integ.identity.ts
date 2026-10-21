@@ -24,8 +24,8 @@
  */
 
 import * as path from 'path';
-import { ExpectedResult, IntegTest } from '@aws-cdk/integ-tests-alpha';
-import { App } from 'aws-cdk-lib';
+import { IntegTest } from '@aws-cdk/integ-tests-alpha';
+import { App, CfnWaitConditionHandle, Stack } from 'aws-cdk-lib';
 import { TenantIdentityStack } from '../src/identity.cdk';
 import { TOPOLOGIES, Topology } from '../src/shared/constants';
 
@@ -43,8 +43,8 @@ const app = new App();
 // One stack per topology, named exactly as the e2e scenario discovers them
 // (`${E2E_STACK_PREFIX}-${topology}`, default prefix TenantIdentity).
 // The R-6 parameter names are fixed per account and Region, so exactly one
-// of the three stacks publishes them (ADR-0017). The assertion stack below
-// checks that it did.
+// of the three stacks publishes them (ADR-0017). The e2e scenario checks
+// that the publisher's parameters name its own stack.
 const PUBLISHER: Topology = 'shared-pool-multi-tenant';
 
 const stacks = TOPOLOGIES.map(
@@ -70,15 +70,8 @@ const integ = new IntegTest(app, 'TenantIdentityInteg', {
   },
 });
 
-// R-6, §6.3: the publishing stack wrote the shared discovery parameters.
-// This also gives the assertion stack a resource, which CloudFormation
-// requires.
-integ.assertions
-  .awsApiCall('SSM', 'getParameter', { Name: '/application-plane/shared/identity/topology' })
-  .expect(ExpectedResult.objectLike({ Parameter: { Value: PUBLISHER } }));
-for (const name of ['apiUrl', 'userPoolId', 'appClientId']) {
-  integ.assertions
-    .awsApiCall('SSM', 'getParameter', { Name: `/application-plane/shared/identity/${name}` })
-    .assertAtPath('Parameter.Type', ExpectedResult.stringLikeRegexp('^String$'));
-}
-
+// CloudFormation refuses an empty stack, and integ-tests-alpha always adds an
+// assertion stack. Its awsApiCall assertions run in a Lambda whose log group
+// no stack owns (ADR-0019), so the R-6 parameter checks run in the e2e
+// scenario instead, and the assertion stack holds one inert resource.
+new CfnWaitConditionHandle((integ.assertions as unknown as { scope: Stack }).scope, 'Placeholder');

@@ -34,6 +34,7 @@ import {
   ListUsersInGroupCommand,
   UpdateUserAttributesCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
+import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { ulid } from 'ulid';
 import {
   AccessTokenVerifier,
@@ -260,6 +261,26 @@ export function defineScenario(topology: Topology): void {
         } catch {
           // best effort
         }
+      }
+    });
+
+    // -- R-6, §6.3: discovery parameters ------------------------------------
+    // One stack per account and Region publishes them (ADR-0017). When this
+    // stack is the publisher, every parameter must name this stack.
+    test('R-6: the shared discovery parameters name the publishing stack', async () => {
+      const ssm = new SSMClient({ region: process.env.AWS_REGION });
+      const read = async (name: string) =>
+        (await ssm.send(new GetParameterCommand({ Name: `/application-plane/shared/identity/${name}` })))
+          .Parameter?.Value;
+      const published = await read('topology');
+      expect(published).toBeDefined();
+      if (published !== topology) {
+        return; // another stack in this account publishes
+      }
+      expect(await read('apiUrl')).toBe(stack.apiUrl);
+      if (topology !== 'pool-per-tenant') {
+        expect(await read('userPoolId')).toBe(stack.userPoolId);
+        expect(await read('appClientId')).toBe(stack.appClientId);
       }
     });
 

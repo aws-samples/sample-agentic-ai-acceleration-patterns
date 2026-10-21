@@ -45,6 +45,7 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     // End-to-end scenario (test/e2e): SigV4 calls to the platform API and
     // stack discovery through CloudFormation outputs
     '@aws-sdk/client-cloudformation@3.1154.0',
+    '@aws-sdk/client-ssm@3.1154.0', // e2e: R-6 parameter check
     '@aws-sdk/credential-providers@3.1154.0',
     '@aws-crypto/sha256-js@5.2.0',
     '@smithy/signature-v4@5.7.4',

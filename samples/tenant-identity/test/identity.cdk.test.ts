@@ -515,3 +515,82 @@ describe('TenantIdentityStack - cdk-nag (sample-standard §4.3)', () => {
     expect({ topology, errors: detail }).toEqual({ topology, errors: '' });
   });
 });
+
+describe('TenantIdentityStack - teardown leaves no log group (ADR-0019)', () => {
+  test.each(TOPOLOGIES)('creates no account-wide API Gateway CloudWatch role [%s]', (topology) => {
+    const template = synth(topology);
+    template.resourceCountIs('AWS::ApiGateway::Account', 0);
+    const roles = Object.values(template.findResources('AWS::IAM::Role')) as any[];
+    const managed = roles.flatMap((r) => JSON.stringify(r.Properties.ManagedPolicyArns ?? []));
+    expect(managed.join()).not.toContain('AmazonAPIGatewayPushToCloudWatchLogs');
+  });
+
+  test.each(TOPOLOGIES)('owns the execution log group, with retention and Delete [%s]', (topology) => {
+    const template = synth(topology);
+    const groups = template.findResources('AWS::Logs::LogGroup', {
+      Properties: { LogGroupName: { 'Fn::Join': ['', ['API-Gateway-Execution-Logs_', { Ref: Match.anyValue() }, '/prod']] } },
+    });
+    expect(Object.keys(groups)).toHaveLength(1);
+    const [group] = Object.values(groups) as any[];
+    expect(group.DeletionPolicy).toBe('Delete');
+    expect(group.Properties.RetentionInDays).toBe(30);
+  });
+
+  test.each(TOPOLOGIES)('every log group is deleted after a drain, and every writer before it [%s]', (topology) => {
+    const template = synth(topology);
+    const resources = template.toJSON().Resources as Record<string, any>;
+    const drains = Object.entries(resources)
+      .filter(([, r]) => r.Type === 'AWS::CloudFormation::CustomResource' && r.Properties.DelaySeconds !== undefined)
+      .map(([id]) => id);
+    expect(drains).toHaveLength(2);
+    const dependsOn = (id: string): string[] => [resources[id].DependsOn ?? []].flat();
+
+    // Log groups: each is a dependency of some drain (deleted after it).
+    for (const [id, r] of Object.entries(resources)) {
+      if (r.Type === 'AWS::Logs::LogGroup') {
+        expect(drains.some((d) => dependsOn(d).includes(id))).toBe(true);
+      }
+    }
+    // Writers: every function except the drains' own waiters, and the stage,
+    // depend on a drain (deleted before it).
+    const waiters = new Set(drains.map((d) => resources[d].Properties.ServiceToken['Fn::GetAtt'][0]));
+    for (const [id, r] of Object.entries(resources)) {
+      const writer = (r.Type === 'AWS::Lambda::Function' && !waiters.has(id)) || r.Type === 'AWS::ApiGateway::Stage';
+      if (writer) {
+        expect(dependsOn(id).some((d) => drains.includes(d))).toBe(true);
+      }
+    }
+  });
+
+  test.each(TOPOLOGIES)('the drain waiter has no permissions, so it cannot create a log group [%s]', (topology) => {
+    const template = synth(topology);
+    const resources = template.toJSON().Resources as Record<string, any>;
+    const waiterRoles = Object.entries(resources)
+      .filter(([id, r]) => r.Type === 'AWS::IAM::Role' && id.includes('LogDrain'))
+      .map(([id]) => id);
+    expect(waiterRoles).toHaveLength(2);
+    for (const roleId of waiterRoles) {
+      expect(resources[roleId].Properties.ManagedPolicyArns ?? []).toEqual([]);
+      const attached = Object.values(resources).filter(
+        (r: any) => r.Type === 'AWS::IAM::Policy' && JSON.stringify(r.Properties.Roles).includes(roleId),
+      );
+      expect(attached).toEqual([]);
+    }
+  });
+
+  test.each(TOPOLOGIES)('the drain waiters write no logs: system WARN, application ERROR [%s]', (topology) => {
+    const template = synth(topology);
+    const resources = template.toJSON().Resources as Record<string, any>;
+    const waiters = Object.entries(resources).filter(
+      ([id, r]) => r.Type === 'AWS::Lambda::Function' && id.includes('LogDrain'),
+    );
+    expect(waiters).toHaveLength(2);
+    for (const [, fn] of waiters) {
+      expect(fn.Properties.LoggingConfig).toEqual({
+        LogFormat: 'JSON',
+        SystemLogLevel: 'WARN',
+        ApplicationLogLevel: 'ERROR',
+      });
+    }
+  });
+});

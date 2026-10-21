@@ -316,6 +316,7 @@
             "@aws-cdk/integ-tests-alpha",
             "@aws-crypto/sha256-js",
             "@aws-sdk/client-cloudformation",
+            "@aws-sdk/client-ssm",
             "@aws-sdk/credential-providers",
             "@smithy/protocol-http",
             "@smithy/signature-v4",
