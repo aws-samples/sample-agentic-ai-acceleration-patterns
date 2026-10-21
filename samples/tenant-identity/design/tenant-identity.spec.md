@@ -426,10 +426,10 @@ MUST NOT add a user item type to make listing users cheaper (P-5).
 ## 5. API Surface
 
 Defined first in Smithy; OpenAPI, server SDK, and gateway wiring are
-generated from the model. Operations bound to a resource lifecycle are named
-by it: `Create`, `Read`, `Update`, `Delete`, `List` (and `Put` for
-create-or-replace), so `ReadTenant`, not `GetTenant`. Operations outside the
-lifecycle (`IssueToken`, `RefreshToken`, the token exchange) keep a verb
+generated from the model. Operations bound to a resource lifecycle use the AWS
+verbs: `Create`, `Get`, `Update`, `Delete`, `List` (and `Put` for
+create-or-replace), so `CreateMembership`, not `AddMembership`. Operations
+outside the lifecycle (`IssueToken`, `RefreshToken`, the token exchange) keep a verb
 that says what they do.
 
 ### 5.1 Platform operations (`/platform`, IAM)
@@ -437,12 +437,12 @@ that says what they do.
 | Operation | Method / path | Effect by topology |
 |---|---|---|
 | `CreateTenant` | `POST /platform/tenants` `{name, adminEmail}` → 201 `{tenant, admin}` | 1: create pool + client + trigger + group `admin-<id>`, write registry. 2, 3: create groups `t-<id>` and `admin-<id>`, write registry. All: then `CreateUser` for `adminEmail` with `admin: true`; `admin` is that User with its temporary password. If this step fails, the tenant is `ACTIVE` with no admin, and the vendor retries with `CreateUser`. |
-| `ReadTenant` | `GET /platform/tenants/{tenantId}` | registry read |
+| `GetTenant` | `GET /platform/tenants/{tenantId}` | registry read |
 | `ListTenants` | `GET /platform/tenants?nextToken=` | registry scan |
 | `DeleteTenant` | `DELETE /platform/tenants/{tenantId}` → 204 | R-11, then: 1: delete pool. 2: delete users with `custom:tenantId=<id>`. 3: delete users whose only group is `t-<id>`, remove the group from the rest, delete the group. |
 | `CreateUser` | `POST /platform/tenants/{tenantId}/users` `{email, admin?}` → 201 User | 1: `AdminCreateUser` in the tenant's pool. 2: `AdminCreateUser` with `custom:tenantId`, then `AdminAddUserToGroup` `t-<id>`. 3: `AdminCreateUser` (if absent) + `AdminAddUserToGroup` `t-<id>`. All: `admin: true` also adds the user to `admin-<id>`. Returns a temporary password only in the response, only for a new Cognito user, and never logs it. |
 | `DeleteUser` | `DELETE /platform/tenants/{tenantId}/users/{username}` → 204 | 1, 2: `AdminDeleteUser`. 3: remove from `t-<id>` and `admin-<id>`; delete the user if no `t-*` group remains. |
-| `ReadUser` | `GET /platform/tenants/{tenantId}/users/{username}` → 200 User | `AdminGetUser`, plus `AdminListGroupsForUser` for the admin flag. |
+| `GetUser` | `GET /platform/tenants/{tenantId}/users/{username}` → 200 User | `AdminGetUser`, plus `AdminListGroupsForUser` for the admin flag. |
 | `ListUsers` | `GET /platform/tenants/{tenantId}/users?nextToken=` → 200 `{users, nextToken}` | 1: `ListUsers` on the tenant's pool. 2, 3: `ListUsersInGroup` `t-<id>`. |
 | `UpdateUser` | `PATCH /platform/tenants/{tenantId}/users/{username}` `{admin}` → 200 User | add the user to, or remove them from, `admin-<id>`. |
 | `CreateMembership` | `PUT /platform/tenants/{tenantId}/users/{username}/membership` → 204 | 3: `AdminAddUserToGroup`. 1, 2: 400 `UnsupportedInTopology`. |
@@ -454,7 +454,7 @@ A User is `{username, email, admin, status, createdAt}`: `status` is
 Cognito's user status, and `admin` is membership of `admin-<id>`. A User
 never says which other tenants the user belongs to.
 
-**R-12:** `ReadUser`, `UpdateUser`, `DeleteUser`, `DeleteMembership`,
+**R-12:** `GetUser`, `UpdateUser`, `DeleteUser`, `DeleteMembership`,
 `IssueToken`, `RefreshToken`, and every `/tenant/users/{username}`
 operation MUST first check, through the provisioner, that the user
 belongs to `{tenantId}`: 1: the user exists in the tenant's pool. 2:
@@ -477,7 +477,7 @@ operation as its platform twin, with the same per-topology effects.
 | Operation | Method / path | Platform twin |
 |---|---|---|
 | `CreateTenantUser` | `POST /tenant/users` `{email, admin?}` → 201 User | `CreateUser` |
-| `ReadTenantUser` | `GET /tenant/users/{username}` → 200 User | `ReadUser` |
+| `GetTenantUser` | `GET /tenant/users/{username}` → 200 User | `GetUser` |
 | `ListTenantUsers` | `GET /tenant/users?nextToken=` → 200 `{users, nextToken}` | `ListUsers` |
 | `UpdateTenantUser` | `PATCH /tenant/users/{username}` `{admin}` → 200 User | `UpdateUser` |
 | `DeleteTenantUser` | `DELETE /tenant/users/{username}` → 204 | `DeleteUser` |
@@ -516,7 +516,7 @@ RFC 8693 §2, with Cognito as the signer (ADR-0009). Request body
 | Parameter | Requirement |
 |---|---|
 | `grant_type` | `urn:ietf:params:oauth:grant-type:token-exchange` |
-| `client_id` | the app client that issued the refresh token: the shared client (2, 3) or the tenant's client from `ReadTenant` (1) |
+| `client_id` | the app client that issued the refresh token: the shared client (2, 3) or the tenant's client from `GetTenant` (1) |
 | `subject_token` | the user's refresh token |
 | `subject_token_type` | `urn:ietf:params:oauth:token-type:refresh_token`; any other value → `invalid_request` |
 | `requested_token_type` | optional; if present MUST be `urn:ietf:params:oauth:token-type:access_token` |
@@ -592,7 +592,7 @@ message or the token.
 | `/application-plane/shared/identity/appClientId` | 2, 3 | stack |
 
 `pool-per-tenant` publishes no pool identifiers at the shared level because
-pools are per tenant; a consumer resolves them through `ReadTenant` or
+pools are per tenant; a consumer resolves them through `GetTenant` or
 `ListTenants`.
 
 ---
@@ -738,7 +738,7 @@ verification of §3.2.
    synth with a misspelling fails the same way.
 2. **Onboard:** `CreateTenant` A (`adminEmail` a1) and B (`adminEmail` b1)
    → both `ACTIVE`, each response carrying its admin and a temporary
-   password; `ReadTenant` returns
+   password; `GetTenant` returns
    the topology-specific fields (pool ids and issuer for 1, `groupName` for
    3, neither for 2). Topology 1: two pools exist, each with the trigger
    attached.
@@ -749,7 +749,7 @@ verification of §3.2.
    u2's username → 404, and u2 still exists and still signs in.
 4. **Token contract (P-6):** `IssueToken` for u1 and u2; verify both access
    tokens. u1: `tenant_id = A` (1, 2; topology 1 also `iss` = tenant A's
-   `issuer` from `ReadTenant`) or `tenants = [A, B]` (3). u2: `tenant_id = B`
+   `issuer` from `GetTenant`) or `tenants = [A, B]` (3). u2: `tenant_id = B`
    or `tenants = [B]`. `sub` equals the Cognito user's `sub`. The ID tokens
    carry no `tenant_id` or `tenants` claim.
 5. **Claim integrity (P-3):** topology 2: u1 calls `UpdateUserAttributes`
@@ -782,21 +782,21 @@ verification of §3.2.
    exchange did not change the session.
 8. **Tenant admin (P-11), all topologies.** `IssueToken` for a1, then
    exchange with `resource=A` and `scope=tenant-admin/users`. With that
-   token: `CreateTenantUser` u3 → 201; `ReadTenantUser` u3 → `admin=false`;
+   token: `CreateTenantUser` u3 → 201; `GetTenantUser` u3 → `admin=false`;
    `ListTenantUsers` → a1, u1, u3, and neither u2 nor b1; `UpdateTenantUser`
    u3 `admin=true`, then `admin=false`; `DeleteTenantUser` u3 → 204, then
-   platform `ReadUser` u3 → 404. Then check the refusals:
+   platform `GetUser` u3 → 404. Then check the refusals:
    - a1's un-narrowed access token, and a narrowed one with only
      `tenant-api/read`: 403 from the authoriser.
    - u1 asks the exchange for `tenant-admin/users` on A: `invalid_scope`.
    - Topology 3: after `CreateMembership` a1 → B, a1 asks for
      `tenant-admin/users` on B: `invalid_scope`, because a1 is a member of B
      but not its admin.
-   - `ReadTenantUser` and `DeleteTenantUser` for u2 (tenant B): 404, and u2
+   - `GetTenantUser` and `DeleteTenantUser` for u2 (tenant B): 404, and u2
      still exists (R-12).
    - `DeleteTenantUser` a1, and `UpdateTenantUser` a1 `admin=false`: 409
      (R-13).
-   - Topology 3: b1's `ReadTenantUser` for u1 (in A and B) returns a User
+   - Topology 3: b1's `GetTenantUser` for u1 (in A and B) returns a User
      that does not mention A.
 9. **Offboard (P-2):** `DeleteTenant` A. a1's narrowed admin token from step
    6b, not yet expired, → 403 on `ListTenantUsers` at once (R-9). `RefreshToken` for u1: fails in
@@ -808,7 +808,7 @@ verification of §3.2.
    `ResourceNotFound`. Topology 3: exchanging u1's refresh token for
    `resource=A` → `invalid_target`, and for `resource=B` → success. Topology
    2: u1 is deleted. Topology 3: group `t-A` is
-   gone, u1 and u2 still exist. `ReadTenant` A → 404.
+   gone, u1 and u2 still exist. `GetTenant` A → 404.
 10. **`DELETING` window (P-2, unit level):** with a registry item in
    `DELETING`, the trigger throws for topologies 1 and 2 and omits the
    tenant for topology 3; with no item it does the same; with an unknown
