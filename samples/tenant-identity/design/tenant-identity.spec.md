@@ -432,6 +432,12 @@ create-or-replace), so `CreateMembership`, not `AddMembership`. Operations
 outside the lifecycle (`IssueToken`, `RefreshToken`, the token exchange) keep a verb
 that says what they do.
 
+**R-15:** `model/__global.smithy` MUST declare Smithy's `StandardOperationVerb`
+validator at `DANGER` severity, as `docs/sample-standard.md` §4.2 shows, with
+`verbs` = `Create`, `Get`, `Update`, `Delete`, `List`, `Issue`, `Refresh`,
+`Exchange`. `smithy build` fails on any other verb. This is part of project
+setup, before the first operation is modelled.
+
 ### 5.1 Platform operations (`/platform`, IAM)
 
 | Operation | Method / path | Effect by topology |

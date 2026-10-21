@@ -201,6 +201,36 @@ server SDK as the `preCompile` task, and keep the generated output out of the
 repository and out of lint. The model is the contract; the README API section
 is derived from it.
 
+Name resource lifecycle operations with the AWS verbs: `Create<Resource>`,
+`Get<Resource>` (bound to the resource's `read` slot), `Update<Resource>`,
+`Delete<Resource>`, `List<Resources>`, and `Put<Resource>` for
+create-or-replace. Never `Read`, `Add`, `Remove`, `Fetch`, or `Describe`
+(`GetTenant`, not `ReadTenant`; `CreateMembership`, not `AddMembership`).
+Operations outside a lifecycle use a verb that says what they do
+(`IssueToken`). Enforce this in `model/__global.smithy` with Smithy's
+`StandardOperationVerb` validator at `DANGER` severity, so a bad name fails
+`smithy build`. List the lifecycle verbs plus any non-lifecycle verbs the
+sample uses:
+
+```smithy
+metadata validators = [{
+    name: "StandardOperationVerb"
+    severity: "DANGER"
+    configuration: {
+        verbs: ["Create", "Get", "Update", "Delete", "List", "Put"]
+        suggestAlternatives: {
+            Read: ["Get"]
+            Fetch: ["Get"]
+            Describe: ["Get"]
+            Add: ["Create"]
+            Remove: ["Delete"]
+        }
+    }
+}]
+```
+
+`samples/control-plane` predates this rule and does not carry the validator.
+
 ### 4.3 CDK
 
 - Apply the cdk-nag `AwsSolutionsChecks` aspect in `src/main.ts`. Every
