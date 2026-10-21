@@ -11,7 +11,7 @@ tenant picks the pool, so a user of another tenant is simply not found. In
 the shared pools every user lives in one pool, and a username is enough for
 Cognito. As specified, `DeleteUser` for tenant A with a username from tenant
 B would delete B's user in `shared-pool`; in `shared-pool-multi-tenant`,
-`RemoveMembership` and `DeleteUser` would act on a user who is not in A, and
+`DeleteMembership` and `DeleteUser` would act on a user who is not in A, and
 the test aids would issue tokens for B's user through A's path (threat model
 T-16). The path names a tenant; the operation must stay inside it.
 
@@ -31,12 +31,12 @@ whether the user exists in another tenant. Cons: one extra Cognito read per
 call (`AdminGetUser` or `AdminListGroupsForUser`).
 
 ## Decision
-Option 3. Every per-user operation except `CreateUser` and `AddMembership`
-(`DeleteUser`, `RemoveMembership`, `IssueToken`, `RefreshToken`) first asks
+Option 3. Every per-user operation except `CreateUser` and `CreateMembership`
+(`DeleteUser`, `DeleteMembership`, `IssueToken`, `RefreshToken`) first asks
 the provisioner whether the user belongs to the tenant. Topology 1: the user
 exists in the tenant's pool. Topology 2: `custom:tenantId` equals the path's
 tenant. Topology 3: the user is in group `t-<tenantId>`. If not, the call
-fails with `ResourceNotFoundError` (404) and changes nothing. `AddMembership`
+fails with `ResourceNotFoundError` (404) and changes nothing. `CreateMembership`
 is the one operation that crosses tenants by design; it is vendor intent and
 topology 3 only.
 

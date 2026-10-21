@@ -36,7 +36,7 @@ tenant's first admin with it. `/tenant/users` offers create, get, update
 (the admin flag only), delete, and list, scoped to the token's `tenant_id`;
 a tenant admin cannot delete or demote themselves, so a tenant always keeps
 at least one admin through this door. The vendor keeps every operation on
-`/platform/*` and gains `GetUser`, `ListUsers`, and `UpdateUser` so its
+`/platform/*` and gains `ReadUser`, `ListUsers`, and `UpdateUser` so its
 rights stay a superset of the tenant admin's. A separate tenant-user
 function serves `/tenant/users`; its role holds the Cognito user actions
 and none of the pool or group lifecycle actions (P-8).
