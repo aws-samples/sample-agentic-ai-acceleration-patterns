@@ -55,18 +55,24 @@ export class PoolPerTenantProvisioner implements Provisioner {
 
   private readonly cognito: CognitoIdentityProviderClient;
   private readonly region: string;
-  private readonly triggerFunctionArn: string;
+  /**
+   * Only onboarding needs it, so it is checked there. The tenant-user
+   * function never onboards and is not given it (P-8).
+   */
+  private readonly triggerFunctionArn: string | undefined;
 
   constructor(deps: ProvisionerDeps) {
     this.cognito = deps.cognito;
     this.region = deps.region;
-    if (deps.triggerFunctionArn === undefined) {
-      throw new Error('pool-per-tenant requires triggerFunctionArn');
-    }
     this.triggerFunctionArn = deps.triggerFunctionArn;
   }
 
   async provisionTenant(tenantId: string, _name: string): Promise<ProvisionedTenant> {
+    if (this.triggerFunctionArn === undefined) {
+      // Deployment wiring bug: only the platform function onboards tenants.
+      throw new Error('pool-per-tenant onboarding requires triggerFunctionArn');
+    }
+    const triggerArn = this.triggerFunctionArn;
     const pool = await this.cognito.send(
       new CreateUserPoolCommand({
         PoolName: `${TENANT_POOL_NAME_PREFIX}${tenantId}`,
@@ -78,7 +84,7 @@ export class PoolPerTenantProvisioner implements Provisioner {
         AccountRecoverySetting: { RecoveryMechanisms: [{ Name: 'admin_only', Priority: 1 }] },
         UserPoolTags: { [SAMPLE_TAG_KEY]: SAMPLE_TAG_VALUE },
         LambdaConfig: {
-          PreTokenGenerationConfig: { LambdaVersion: 'V2_0', LambdaArn: this.triggerFunctionArn },
+          PreTokenGenerationConfig: { LambdaVersion: 'V2_0', LambdaArn: triggerArn },
         },
       }),
     );

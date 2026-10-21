@@ -32,6 +32,13 @@ import { IntegrationMapping, mergeOpenApi, patchIntegrations } from './shared/op
 export interface TenantIdentityStackProps extends StackProps {
   /** The deploy-time topology (spec P-7, ADR-0001). */
   readonly topology: Topology;
+  /**
+   * Publish the `/application-plane/shared/identity/*` parameters (R-6).
+   * Default true. The names are fixed, so only one stack per account and
+   * Region may publish them; the integration test turns it off on all but
+   * one of its three stacks (ADR-0017).
+   */
+  readonly publishSharedParameters?: boolean;
 }
 
 /** The registry GSI that maps a pool to its tenant (spec §4.2). */
@@ -572,24 +579,26 @@ export class TenantIdentityStack extends Stack {
       sourceArn: this.formatArn({ service: 'execute-api', resource: api.restApiId, resourceName: 'authorizers/*' }),
     });
 
-    // --- Discovery parameters (R-6, §6.3) + outputs -----------------------
-    new ssm.StringParameter(this, 'TopologyParameter', {
-      parameterName: '/application-plane/shared/identity/topology',
-      stringValue: topology,
-    });
-    new ssm.StringParameter(this, 'ApiUrlParameter', {
-      parameterName: '/application-plane/shared/identity/apiUrl',
-      stringValue: api.url,
-    });
-    if (isShared && userPool !== undefined && appClient !== undefined) {
-      new ssm.StringParameter(this, 'UserPoolIdParameter', {
-        parameterName: '/application-plane/shared/identity/userPoolId',
-        stringValue: userPool.userPoolId,
+    // --- Discovery parameters (R-6, §6.3, ADR-0017) + outputs ------------
+    if (props.publishSharedParameters ?? true) {
+      new ssm.StringParameter(this, 'TopologyParameter', {
+        parameterName: '/application-plane/shared/identity/topology',
+        stringValue: topology,
       });
-      new ssm.StringParameter(this, 'AppClientIdParameter', {
-        parameterName: '/application-plane/shared/identity/appClientId',
-        stringValue: appClient.userPoolClientId,
+      new ssm.StringParameter(this, 'ApiUrlParameter', {
+        parameterName: '/application-plane/shared/identity/apiUrl',
+        stringValue: api.url,
       });
+      if (isShared && userPool !== undefined && appClient !== undefined) {
+        new ssm.StringParameter(this, 'UserPoolIdParameter', {
+          parameterName: '/application-plane/shared/identity/userPoolId',
+          stringValue: userPool.userPoolId,
+        });
+        new ssm.StringParameter(this, 'AppClientIdParameter', {
+          parameterName: '/application-plane/shared/identity/appClientId',
+          stringValue: appClient.userPoolClientId,
+        });
+      }
     }
 
     new CfnOutput(this, 'ApiUrl', { value: api.url });
@@ -624,6 +633,16 @@ function functionProps(
       // keeps the Smithy server packages (not in the runtime SDK) in the
       // artifact.
       externalModules: [],
+      // The Smithy SSDKs validate with re2-wasm, which reads its wasm binary
+      // from disk at cold start; esbuild does not bundle it. Without it every
+      // SSDK function fails to initialise (502).
+      commandHooks: {
+        beforeBundling: () => [],
+        beforeInstall: () => [],
+        afterBundling: (inputDir: string, outputDir: string) => [
+          `cp ${inputDir}/node_modules/re2-wasm/build/wasm/re2.wasm ${outputDir}/`,
+        ],
+      },
     },
   };
 }

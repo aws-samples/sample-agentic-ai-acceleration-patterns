@@ -11,10 +11,11 @@ import { mergeOpenApi, patchIntegrations } from '../src/shared/openapi';
 // Skip NodejsFunction esbuild bundling in unit tests - assertions target
 // infrastructure shape, not bundle contents. (Other workers' entry files may
 // not exist yet; bundling is irrelevant to these template assertions.)
-function synth(topology: Topology): Template {
+function synth(topology: Topology, publishSharedParameters?: boolean): Template {
   const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
   const stack = new TenantIdentityStack(app, `TenantIdentity-${topology}`, {
     topology,
+    publishSharedParameters,
     env: { account: '123456789012', region: 'eu-central-1' },
   });
   return Template.fromStack(stack);
@@ -469,6 +470,12 @@ describe('TenantIdentityStack - discovery parameters + outputs (R-6, §6.3)', ()
     expect(names).not.toContain('/application-plane/shared/identity/userPoolId');
     expect(names).not.toContain('/application-plane/shared/identity/appClientId');
     expect(() => template.hasOutput('UserPoolId', {})).toThrow();
+  });
+});
+
+describe('TenantIdentityStack - parameter publishing switch (ADR-0017)', () => {
+  test.each(TOPOLOGIES)('publishSharedParameters=false creates no SSM parameter [%s]', (topology) => {
+    synth(topology, false).resourceCountIs('AWS::SSM::Parameter', 0);
   });
 });
 

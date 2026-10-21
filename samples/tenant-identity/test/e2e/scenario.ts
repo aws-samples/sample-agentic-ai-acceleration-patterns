@@ -25,6 +25,7 @@ import {
   AdminSetUserPasswordCommand,
   CognitoIdentityProviderClient,
   CreateGroupCommand,
+  DeleteGroupCommand,
   AdminAddUserToGroupCommand,
   DescribeUserPoolCommand,
   GetTokensFromRefreshTokenCommand,
@@ -374,6 +375,13 @@ export function defineScenario(topology: Topology): void {
         coverage.record('CreateMembership');
         expectStatus(add, 400, 'CreateMembership unsupported');
         expect(add.body.reason).toBe('UnsupportedInTopology');
+        const remove = await platform.call<{ reason?: string }>(
+          'DELETE',
+          `platform/tenants/${tenantIds.A}/users/${usernames.u1}/membership`,
+        );
+        coverage.record('DeleteMembership');
+        expectStatus(remove, 400, 'DeleteMembership unsupported');
+        expect(remove.body.reason).toBe('UnsupportedInTopology');
       }
 
       // R-12 (every topology): DeleteUser and IssueToken for A with u2's
@@ -400,6 +408,35 @@ export function defineScenario(topology: Topology): void {
       coverage.record('GetUser');
       expectStatus(u2Still, 200, 'GetUser B/u2 after R-12');
       tokens.u2 = await issueToken('B', 'u2'); // still signs in
+
+      // Vendor user management (§5.1): ListUsers shows A's users only, and
+      // UpdateUser flips the admin flag through the platform door.
+      const listA = await platform.call<{ users: { username: string }[] }>(
+        'GET',
+        `platform/tenants/${tenantIds.A}/users`,
+      );
+      coverage.record('ListUsers');
+      expectStatus(listA, 200, 'ListUsers A');
+      const listed = listA.body.users.map((u) => u.username);
+      expect(listed).toContain(usernames.u1);
+      expect(listed).not.toContain(usernames.u2);
+
+      for (const admin of [true, false]) {
+        const upd = await platform.call<{ user: { admin: boolean } }>(
+          'PATCH',
+          `platform/tenants/${tenantIds.A}/users/${usernames.u1}`,
+          { admin },
+        );
+        coverage.record('UpdateUser');
+        expectStatus(upd, 200, `UpdateUser A/u1 admin=${admin}`);
+        expect(upd.body.user.admin).toBe(admin);
+      }
+      const updCross = await platform.call(
+        'PATCH',
+        `platform/tenants/${tenantIds.A}/users/${usernames.u2}`,
+        { admin: true },
+      );
+      expectStatus(updCross, 404, 'UpdateUser A/u2 (R-12)');
     });
 
     // -- step 4: token contract (P-6) --------------------------------------
@@ -449,22 +486,31 @@ export function defineScenario(topology: Topology): void {
       } else if (topology === 'shared-pool-multi-tenant') {
         // The vendor creates a non-t-/non-admin- group, adds u1, re-issues:
         // `tenants` is unchanged (only `t-` groups contribute, §7.3).
+        // Per-run name, deleted afterwards, so runs never collide and the
+        // pool is left as it was (§10 step 11).
+        const roleGroup = `role-admin-${runId}`;
         await cognito.send(
-          new CreateGroupCommand({ UserPoolId: stack.userPoolId!, GroupName: 'role-admin' }),
+          new CreateGroupCommand({ UserPoolId: stack.userPoolId!, GroupName: roleGroup }),
         );
-        await cognito.send(
-          new AdminAddUserToGroupCommand({
-            UserPoolId: stack.userPoolId!,
-            Username: usernames.u1,
-            GroupName: 'role-admin',
-          }),
-        );
-        const fresh = await issueToken('A', 'u1');
-        const claims = await verifierFor('A').verify(fresh.accessToken);
-        expect(claims.tenants).toEqual(
-          expect.arrayContaining([tenantIds.A, tenantIds.B]),
-        );
-        expect((claims.tenants as string[]).length).toBe(2);
+        try {
+          await cognito.send(
+            new AdminAddUserToGroupCommand({
+              UserPoolId: stack.userPoolId!,
+              Username: usernames.u1,
+              GroupName: roleGroup,
+            }),
+          );
+          const fresh = await issueToken('A', 'u1');
+          const claims = await verifierFor('A').verify(fresh.accessToken);
+          expect(claims.tenants).toEqual(
+            expect.arrayContaining([tenantIds.A, tenantIds.B]),
+          );
+          expect((claims.tenants as string[]).length).toBe(2);
+        } finally {
+          await cognito.send(
+            new DeleteGroupCommand({ UserPoolId: stack.userPoolId!, GroupName: roleGroup }),
+          );
+        }
       } else {
         // pool-per-tenant: a user created directly in pool B (bypassing the
         // platform API) still receives tenant_id = B — the claim comes from
@@ -925,9 +971,15 @@ export function defineScenario(topology: Topology): void {
       expect(typeof cachedClaims.sub).toBe('string');
 
       if (topology === 'pool-per-tenant') {
-        // The pool's JWKS URL now returns 404 …
-        const jwksRes = await fetch(u1Verifier.jwksUrl());
-        expect(jwksRes.status).toBe(404);
+        // Cognito keeps serving a deleted pool's JWKS (ADR-0018), so the
+        // signature alone still checks out. The issuer allowlist is what
+        // stops trust: A's issuer is no longer in the registry …
+        const after = await platform.call<{ tenants: { issuer?: string }[] }>(
+          'GET',
+          'platform/tenants',
+        );
+        expectStatus(after, 200, 'ListTenants after DeleteTenant A');
+        expect(after.body.tenants.map((t) => t.issuer)).not.toContain(tenantIssuers.A);
         // … and DescribeUserPool → ResourceNotFoundException.
         const poolA = tenantIssuers.A.split('/').pop()!;
         await expect(

@@ -24,10 +24,10 @@
  */
 
 import * as path from 'path';
-import { IntegTest } from '@aws-cdk/integ-tests-alpha';
+import { ExpectedResult, IntegTest } from '@aws-cdk/integ-tests-alpha';
 import { App } from 'aws-cdk-lib';
 import { TenantIdentityStack } from '../src/identity.cdk';
-import { TOPOLOGIES } from '../src/shared/constants';
+import { TOPOLOGIES, Topology } from '../src/shared/constants';
 
 const STACK_PREFIX = 'TenantIdentity';
 
@@ -42,13 +42,22 @@ const app = new App();
 
 // One stack per topology, named exactly as the e2e scenario discovers them
 // (`${E2E_STACK_PREFIX}-${topology}`, default prefix TenantIdentity).
+// The R-6 parameter names are fixed per account and Region, so exactly one
+// of the three stacks publishes them (ADR-0017). The assertion stack below
+// checks that it did.
+const PUBLISHER: Topology = 'shared-pool-multi-tenant';
+
 const stacks = TOPOLOGIES.map(
-  (topology) => new TenantIdentityStack(app, `${STACK_PREFIX}-${topology}`, { topology }),
+  (topology) =>
+    new TenantIdentityStack(app, `${STACK_PREFIX}-${topology}`, {
+      topology,
+      publishSharedParameters: topology === PUBLISHER,
+    }),
 );
 
 const region = process.env.AWS_REGION;
 
-new IntegTest(app, 'TenantIdentityInteg', {
+const integ = new IntegTest(app, 'TenantIdentityInteg', {
   testCases: stacks,
   // Deploy to one Region only (the task enforces AWS_REGION is set).
   regions: region === undefined || region === '' ? undefined : [region],
@@ -60,3 +69,16 @@ new IntegTest(app, 'TenantIdentityInteg', {
     preDestroy: [`${tsNodeBin} ${cleanupScript}`],
   },
 });
+
+// R-6, §6.3: the publishing stack wrote the shared discovery parameters.
+// This also gives the assertion stack a resource, which CloudFormation
+// requires.
+integ.assertions
+  .awsApiCall('SSM', 'getParameter', { Name: '/application-plane/shared/identity/topology' })
+  .expect(ExpectedResult.objectLike({ Parameter: { Value: PUBLISHER } }));
+for (const name of ['apiUrl', 'userPoolId', 'appClientId']) {
+  integ.assertions
+    .awsApiCall('SSM', 'getParameter', { Name: `/application-plane/shared/identity/${name}` })
+    .assertAtPath('Parameter.Type', ExpectedResult.stringLikeRegexp('^String$'));
+}
+

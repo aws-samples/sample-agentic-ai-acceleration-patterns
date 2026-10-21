@@ -25,3 +25,5 @@ Template: [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md#2-d
 | [ADR-0014](0014-tenant-admin-user-management.md) | Let a tenant admin manage their own tenant's users, through a second front door to the provisioner | Accepted | 2026-10-21 |
 | [ADR-0015](0015-tenant-admin-role-as-group-and-scope.md) | Make tenant admin a per-tenant group, and grant its scope only on narrowed tokens | Accepted | 2026-10-21 |
 | [ADR-0016](0016-one-rest-api-from-three-smithy-services.md) | Serve the three route families from one REST API built from three Smithy services | Accepted | 2026-10-21 |
+| [ADR-0017](0017-one-stack-per-account-publishes-shared-parameters.md) | Let only one stack per account and Region publish the shared identity parameters | Accepted | 2026-10-21 |
+| [ADR-0018](0018-registry-allowlist-not-jwks-stops-trust.md) | Rely on the registry allowlist, not a vanished JWKS, to stop trust in a deleted pool | Accepted | 2026-10-21 |

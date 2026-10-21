@@ -78,7 +78,7 @@ hardening checklist.
 | M-8 | Role asymmetry: the trigger role holds only registry reads and logging, no `cognito-idp`; the exchange role holds logging only. Unit tests assert both policies | P-8, R-14, R-7 | T-8 |
 | M-9 | The exchange route is throttled separately at 20 rps / 40 burst. AWS WAF on the API is operational | N-6 | T-9 |
 | M-10 | No secrets in logs or caches: the trigger, platform, and exchange functions never log tokens, temporary passwords, or Cognito error text; `error_description` is fixed per code; responses carry `Cache-Control: no-store` | N-4, N-6, §5.4 | T-9, T-10 |
-| M-11 | One claim shape across topologies, with consumer guidance: a single-tenant consumer requires `tenant_id` and its scope; in topology 1, `ListTenants` is the issuer allowlist | P-6, §1.2, §4.1, [ADR-0007](./adr/0007-verify-tokens-only-on-the-tenant-api.md) | T-1, T-14 |
+| M-11 | One claim shape across topologies, with consumer guidance: a single-tenant consumer requires `tenant_id` and its scope; in topology 1, `ListTenants` is the issuer allowlist, and the only thing that stops trust in a deleted pool, because Cognito keeps serving its JWKS | P-6, §1.2, §4.1, [ADR-0007](./adr/0007-verify-tokens-only-on-the-tenant-api.md), [ADR-0018](./adr/0018-registry-allowlist-not-jwks-stops-trust.md) | T-1, T-14 |
 | M-12 | No refresh token is issued with a narrowed token; the endpoint accepts only refresh tokens as subject, so an access token cannot be exchanged | P-10, §5.4 (`subject_token_type`) | T-12 |
 | M-13 | Narrowed tokens suppress `aws.cognito.signin.user.admin`; §10 step 7 asserts `GetUser` is rejected | P-6, §8 (output) | T-13 |
 | M-14 | Registry has point-in-time recovery; only the platform function writes it | R-3, N-2, R-14 | T-15 |

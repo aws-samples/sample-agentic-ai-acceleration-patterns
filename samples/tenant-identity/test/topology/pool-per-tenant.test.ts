@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 import {
+  CognitoIdentityProviderClient,
   AdminAddUserToGroupCommand,
   AdminCreateUserCommand,
   AdminDeleteUserCommand,
@@ -191,5 +192,11 @@ describe('PoolPerTenantProvisioner (spec §7.1)', () => {
     it('deleteMembership throws UnsupportedInTopologyError', async () => {
       await expect(provisioner().deleteMembership(tenantA(), 'u1')).rejects.toBeInstanceOf(UnsupportedInTopologyError);
     });
+  });
+
+  test('builds without triggerFunctionArn, and refuses only onboarding (tenant-user function)', async () => {
+    const client = new CognitoIdentityProviderClient({});
+    const p = new PoolPerTenantProvisioner({ cognito: client, region: 'eu-central-1' });
+    await expect(p.provisionTenant('01ARZ3NDEKTSV4RRFFQ69G5FAV', 'x')).rejects.toThrow(/triggerFunctionArn/);
   });
 });

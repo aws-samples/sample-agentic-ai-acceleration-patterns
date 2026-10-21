@@ -14,6 +14,14 @@ RFC 2119.
 > **Amended 2026-10-21 (ADR-0016):** R-1 is built as an API Gateway
 > **REST** API, not an HTTP API, from three Smithy services merged into one
 > OpenAPI document. Everything else R-1 states holds.
+>
+> **Amended 2026-10-21 (ADR-0018):** §7.1 and §10 step 9 said a deleted
+> pool's JWKS URL stops answering. It does not; the registry allowlist is
+> what stops trust.
+>
+> **Amended 2026-10-21 (ADR-0017):** R-6's parameter names are fixed per
+> account and Region, so a stack prop `publishSharedParameters` (default
+> true) lets the integration test publish them from one of its three stacks.
 
 ---
 
@@ -622,10 +630,10 @@ pools are per tenant; a consumer resolves them through `GetTenant` or
   claim name identical in topologies 1 and 2 so a consumer reads one claim
   in both; `iss` and `tenant_id` MUST agree, and the integration test asserts
   it.
-- `DeleteTenant` deletes the pool. The issuer's JWKS endpoint disappears and
-  the issuer leaves the registry, so a verifier that has not cached the
-  pool's keys can no longer verify its outstanding tokens, and one that
-  consults the registry as its allowlist stops trusting them at once. This is the topology's strongest property and MUST be demonstrated (§10 step 9).
+- `DeleteTenant` deletes the pool and the issuer leaves the registry, so a
+  verifier that consults the registry as its allowlist stops trusting the
+  pool's outstanding tokens at once. Cognito keeps serving a deleted pool's
+  JWKS, so a verifier that checks signatures only does not stop (ADR-0018). This is the topology's strongest property and MUST be demonstrated (§10 step 9).
 - `CreateTenant` also creates group `admin-<tenantId>` in the tenant's pool,
   so the admin rule is the same in every topology (ADR-0015).
 
@@ -813,9 +821,9 @@ verification of §3.2.
    topology 1 (pool gone) and 2 (user gone); succeeds in topology 3 with
    `tenants = [B]`, because u1 still belongs to B. u1's pre-deletion access
    token still verifies against keys cached before the deletion (the test
-   asserts this and the README names the 5-minute bound); topology 1: the
-   pool's JWKS URL now returns 404 and `DescribeUserPool` →
-   `ResourceNotFound`. Topology 3: exchanging u1's refresh token for
+   asserts this and the README names the 5-minute bound); topology 1: A's
+   issuer is gone from `ListTenants` and `DescribeUserPool` →
+   `ResourceNotFound` (ADR-0018). Topology 3: exchanging u1's refresh token for
    `resource=A` → `invalid_target`, and for `resource=B` → success. Topology
    2: u1 is deleted. Topology 3: group `t-A` is
    gone, u1 and u2 still exist. `GetTenant` A → 404.
