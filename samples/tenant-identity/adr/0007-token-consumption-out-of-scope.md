@@ -1,6 +1,6 @@
 # ADR-0007: Keep token consumption out of the sample; the integration test verifies tokens
 
-- Status: Accepted
+- Status: Superseded by ADR-0016
 - Date: 2026-10-14
 - Deciders: Dave Roberts (SA)
 

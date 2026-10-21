@@ -2,15 +2,16 @@
 
 > Status: **Design stage, 2026-10-21.** Written from
 > [`design/tenant-identity.spec.md`](./design/tenant-identity.spec.md) and
-> ADR-0001 to ADR-0014 before any code exists. Every mitigation points at the
+> ADR-0001 to ADR-0017 before any code exists. Every mitigation points at the
 > spec requirement or ADR that will implement it; code locations, tests, and
 > cdk-nag suppressions are added as the sample is built. Findings from the
 > security review (standard §6) are dispositioned here.
 
 Scope: the platform API (`/platform/*`), the token-exchange endpoint
-(`POST /oauth2/token`), the pre-token-generation trigger, the tenant
-registry, and the user pools the sample creates, in all three topologies.
-Out of scope: whatever consumes the tokens (ADR-0007), sign-in UI and
+(`POST /oauth2/token`), the tenant API (`/tenant/*`) and its authoriser,
+the pre-token-generation trigger, the tenant registry, and the user pools
+the sample creates, in all three topologies. Out of scope: the services
+tenant users call with their tokens (ADR-0016), sign-in UI and
 federation (spec §1.2), and the vendor's own identity (ADR-0005).
 
 ## Assets and trust boundaries
@@ -22,12 +23,14 @@ federation (spec §1.2), and the vendor's own identity (ADR-0005).
 | Tenant registry | Source of tenant status; in `pool-per-tenant`, the issuer allowlist |
 | User pools and groups | Hold the tenant assignment itself |
 | Vendor IAM credential | Creates and deletes tenants, users, and (topology 1) pools |
+| Tenant admin's narrowed token | Creates, changes, and deletes users of one tenant for up to 5 minutes |
 
 | Boundary | Crossed by | Authenticated by |
 |---|---|---|
 | Vendor → platform API | SigV4 requests | IAM (ADR-0005) |
 | Any caller → token exchange | Form POST | The refresh token, validated by Cognito (ADR-0009) |
 | Any refresh-token holder → Cognito directly | `GetTokensFromRefreshToken` with `ClientMetadata` | The refresh token |
+| Tenant admin → tenant API | Bearer token | The tenant authoriser (ADR-0016) |
 | Cognito → trigger | V2 event | Lambda resource policy scoped to `cognito-idp.amazonaws.com` and the account |
 | Token holder → consumer service | Bearer token | The consumer (out of scope) |
 
@@ -38,7 +41,7 @@ federation (spec §1.2), and the vendor's own identity (ADR-0005).
 | T-1 | A multi-tenant token reaches a service that acts for one tenant | A leak from that service exposes every tenant the user belongs to; the service must be trusted to pick the right one | Mitigated by design; consumer must require `tenant_id` | M-1, M-11 |
 | T-2 | A refresh-token holder asks to narrow to a tenant or scope it does not hold, through the endpoint or straight to Cognito | Cross-tenant token signed by the trusted issuer. **Highest-consequence item.** | Mitigated by design | M-2 |
 | T-3 | A tenant user changes their own tenant assignment (attribute update, self sign-up, group spoofing) | User acts for a tenant the vendor never assigned | Mitigated by design | M-3 |
-| T-4 | An offboarded tenant keeps receiving tokens | Access continues after `DeleteTenant` | Mitigated for new tokens; residual: tokens already issued stay valid up to 5 minutes (accepted, README) | M-4 |
+| T-4 | An offboarded tenant keeps receiving tokens | Access continues after `DeleteTenant` | Mitigated for new tokens, and at once on `/tenant/*`; residual: tokens already issued stay valid up to 5 minutes elsewhere (accepted, README) | M-4, M-19 |
 | T-5 | A token leaves a pool without a tenant claim, or from a pool the sample does not know | A consumer reads a missing or wrong tenant | Mitigated by design | M-5 |
 | T-6 | The `IssueToken` and `RefreshToken` test aids mint tokens, including 1-day refresh tokens, for any user | A holder of the vendor's IAM permission can act as any tenant user | **Accepted for the sample**; removal is on the hardening checklist | M-6 |
 | T-7 | Leaked vendor IAM credential | Tenants and users created or deleted; in topology 1, user pools created account-wide | Partially mitigated; `CreateUserPool` has no resource ARN and stays account-wide (accepted, N-4) | M-6, M-7 |
@@ -48,10 +51,15 @@ federation (spec §1.2), and the vendor's own identity (ADR-0005).
 | T-11 | A stolen refresh token | Up to 1 day of tokens for every tenant the user holds; refresh token rotation is off (ADR-0009) | Residual accepted; narrowing grants nothing the token did not already grant. Revocation is operational | M-2, M-4 |
 | T-12 | A service that received a narrowed token extends or widens it | Narrowing undone downstream | Mitigated by design | M-12 |
 | T-13 | A narrowed token carries `aws.cognito.signin.user.admin` | The service can call Cognito user APIs as the user (`GetUser`, `UpdateUserAttributes`) | Mitigated for narrowed tokens; un-narrowed tokens keep the scope (accepted: they go only to the client) | M-13 |
-| T-14 | A consumer trusts the wrong issuer, e.g. any Cognito pool in topology 1 | Tokens from a pool the vendor does not control are accepted | Out of scope (ADR-0007); the sample publishes what a consumer needs | M-11 |
+| T-14 | A consumer trusts the wrong issuer, e.g. any Cognito pool in topology 1 | Tokens from a pool the vendor does not control are accepted | Mitigated for `/tenant/*` (M-19); other consumers are out of scope, and the sample publishes what they need | M-11, M-19 |
 | T-15 | Registry lost or corrupted | Topology 1 pools orphaned; trigger refuses every tenant | Mitigated by design | M-14 |
 | T-16 | A platform operation on tenant A touches a user of tenant B (shared pools: `DeleteUser`, `RemoveMembership` with a username from another tenant) | Vendor-side cross-tenant deletion | Mitigated by design | M-15 |
 | T-17 | `GetTokensFromRefreshToken` does not pass `ClientMetadata` to the trigger | The trigger issues an un-narrowed token and the endpoint returns it as narrowed: narrowing fails open | Mitigated by design; the integration test still proves the trigger path | M-2, M-16 |
+| T-18 | A tenant admin reads or changes users of another tenant | Cross-tenant identity change by a tenant. In `shared-pool*` the tenant-user role can reach every user in the pool, so IAM does not stop it | Mitigated in code; the IAM gap is accepted and documented (P-8) | M-15, M-17 |
+| T-19 | A user gains admin rights they were not given: a non-admin asks for `tenant-admin/users`, or an admin of A uses it on B | Privilege escalation inside or across tenants | Mitigated by design | M-2, M-18 |
+| T-20 | A forged or foreign token reaches `/tenant/*`: an ID token, a token from another pool or app client, an un-narrowed token, a deleted tenant | Admin actions without a valid admin token | Mitigated by design | M-19 |
+| T-21 | A tenant admin probes e-mail addresses with `CreateTenantUser` | Learns that an address already has an account with the vendor (409 in topology 2; no temporary password in topology 3) | **Accepted for the sample**; a real deployment sends invitations instead of returning passwords | — |
+| T-22 | A tenant admin locks the tenant out by deleting or demoting the last admin | The tenant cannot manage its users | Mitigated by design; the vendor can restore an admin | M-20 |
 
 ## Mitigations
 
@@ -76,6 +84,10 @@ hardening checklist.
 | M-14 | Registry has point-in-time recovery; only the platform function writes it | R-4, N-3, R-11 | T-15 |
 | M-15 | Per-user platform operations check, through the provisioner, that the user belongs to the path's tenant, and answer 404 otherwise | R-13, [ADR-0014](./adr/0014-per-user-operations-check-tenant-membership.md); spec §10 step 3 | T-16 |
 | M-16 | Narrowing fails closed: the exchange function decodes the token Cognito returned and answers `server_error` with no token unless `tenant_id`, `tenants`, and `scope` match the request | §5.5, [ADR-0013](./adr/0013-exchange-checks-the-narrowed-token.md); spec §10 unit list | T-17 |
+| M-17 | Two front doors, one check: the tenant-user function takes the tenant only from the authoriser context, runs the R-13 membership check, and returns a User that never names other tenants | P-11, R-13, R-14, §5.1 (User shape), [ADR-0015](./adr/0015-tenant-admin-user-management.md); spec §10 step 6b | T-18 |
+| M-18 | Admin is a per-tenant group, `admin-<tenantId>`; its scope is added only to narrowed tokens, and only for a member of that tenant's group | §8.1, §8.2, [ADR-0017](./adr/0017-tenant-admin-role-as-group-and-scope.md); spec §10 step 6b | T-19 |
+| M-19 | Tenant authoriser: verifies signature, issuer, app client, `token_use`, `tenant_id`, no `tenants`, and `tenant-admin/users`; refuses a tenant that is not `ACTIVE`; no result cache; `/tenant/*` throttled | R-15, N-11, [ADR-0016](./adr/0016-tenant-api-lambda-authoriser.md); spec §10 steps 6b and 7 | T-4, T-14, T-20 |
+| M-20 | A tenant admin cannot demote or delete themselves, so the tenant API always leaves an admin; the vendor's `UpdateUser` can restore one | R-16, `UpdateUser` in §5.1 | T-22 |
 
 ## Open items
 
@@ -86,6 +98,10 @@ hardening checklist.
 - **T-16 residual.** The membership check and the action are two Cognito
   calls; a concurrent membership change can race them. Accepted at vendor
   scale (ADR-0014).
+- **T-18 residual.** In `shared-pool*` the tenant-user function's role can
+  act on every user in the pool, so a bug in the R-13 check is a
+  cross-tenant bug. Unit tests cover the check per topology, and §10 step 6b
+  tries it end to end. `pool-per-tenant` does not have this gap.
 - **T-6 (test aids).** The largest accepted risk. A deployment that keeps
   the platform API must delete both routes.
 - **Refresh token rotation off.** Kept off so the exchange does not consume
