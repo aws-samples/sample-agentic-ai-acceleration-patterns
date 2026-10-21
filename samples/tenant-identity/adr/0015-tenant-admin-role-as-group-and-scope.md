@@ -1,15 +1,15 @@
-# ADR-0017: Make tenant admin a per-tenant group, and grant its scope only on narrowed tokens
+# ADR-0015: Make tenant admin a per-tenant group, and grant its scope only on narrowed tokens
 
 - Status: Accepted
 - Date: 2026-10-21
 - Deciders: Dave Roberts (SA)
 
 ## Context
-Tenant-admin user management (ADR-0015) needs a role: who is an admin of
+Tenant-admin user management (ADR-0014) needs a role: who is an admin of
 which tenant. In `shared-pool-multi-tenant` one person can be an admin of
 tenant A and a plain member of tenant B, so the role must be per tenant.
 The role must be set only by an admin path (P-3), and it must reach the
-token through the trigger, the only code that shapes tokens (ADR-0010).
+token through the trigger, the only code that shapes tokens (ADR-0003).
 
 ## Options considered
 ### Option 1: A `roles` claim on every token
@@ -25,7 +25,7 @@ second place to get P-3 wrong.
 Pros: one naming rule in all three topologies; groups are admin-only by
 construction; no new claim, only a scope; an admin token always names one
 tenant, so admin rights for two tenants never ride in one token. Cons: two
-groups per tenant (see ADR-0015 for the quota cost); an admin must exchange
+groups per tenant (see ADR-0014 for the quota cost); an admin must exchange
 before every admin call.
 
 ## Decision
@@ -38,7 +38,7 @@ matching neither `^t-` nor `^admin-` stay reserved for further roles (§11).
 ## Consequences
 Easier: least privilege is structural: no token can carry admin rights
 without naming exactly one tenant; the authoriser's check is one claim and
-one scope (ADR-0016). Harder: the trigger reads two group prefixes; the
+one scope (ADR-0007). Harder: the trigger reads two group prefixes; the
 integration test must show that a non-admin's request for the scope is
 refused (`invalid_scope`) and that an un-narrowed admin token is refused
 by `/tenant/*`.

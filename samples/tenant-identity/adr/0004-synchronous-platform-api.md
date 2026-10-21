@@ -20,8 +20,8 @@ machinery that its own problem does not need (P-1 in `control-plane`'s
 terms: a boundary that adds machinery without capability).
 ### Option 2: Synchronous request/response, with `DeleteTenant` idempotent and re-runnable
 Pros: simplest correct shape; `DeleteTenant` flips the registry status first
-(R-9), so a partial failure leaves a `DELETING` tenant that a retry
-completes, and the resolver already rejects it. Cons: a tenant with
+(R-11), so a partial failure leaves a `DELETING` tenant that a retry
+completes, and the trigger already refuses its tokens. Cons: a tenant with
 thousands of users would exceed the function timeout on delete; the sample
 documents that bound.
 

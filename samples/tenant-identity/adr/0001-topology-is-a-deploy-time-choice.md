@@ -20,8 +20,8 @@ redeploy, and migrating tenants between topologies is not supported.
 Pros: switch without redeploying. Cons: the stack must provision resources for
 every topology (a shared pool that `pool-per-tenant` never uses); handlers
 read configuration on every cold start; a mis-set parameter silently changes
-which strategy resolves tokens, which is exactly the failure P-3 guards
-against.
+which strategy provisions tenants and shapes tokens, which is exactly the
+failure P-3 guards against.
 ### Option 3: Three separate samples
 Pros: each is smaller. Cons: the point of the sample is the side-by-side
 comparison under one contract; three samples would drift and triple the
@@ -39,4 +39,4 @@ same scenario against each; a reader sees the topology in the stack name.
 Harder: a deployer who picks wrong must delete tenants and redeploy. Revisit
 if a real consumer needs mixed topologies in one deployment (some tenants
 with their own pool, the rest shared); that would be a fourth topology with
-its own resolver, not a runtime switch.
+its own provisioner, not a runtime switch.

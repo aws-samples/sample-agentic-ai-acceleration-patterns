@@ -28,8 +28,10 @@ staff are AWS principals, which suits an internal platform team but not a
 vendor portal; stated as an explicit limitation.
 
 ## Decision
-Option 3. `/platform/*` uses `AWS_IAM` authorisation; it is the only API the
-sample exposes (ADR-0007). The README says that a vendor
+Option 3. `/platform/*` uses `AWS_IAM` authorisation. The other two route
+families authenticate tenant users with tokens: `/oauth2/token` with the
+refresh token (ADR-0009), `/tenant/*` with a narrowed access token
+(ADR-0007). The README says that a vendor
 portal would front the platform API with its own identity (the
 `control-plane` pattern) and that nothing in this sample depends on which.
 

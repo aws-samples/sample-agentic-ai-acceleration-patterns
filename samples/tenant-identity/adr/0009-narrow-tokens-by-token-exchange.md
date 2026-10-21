@@ -27,8 +27,8 @@ which is the exposure this decision exists to remove.
 Pros: the subject token can be an access token, so a service could narrow a
 token it received; the full RFC 8693 surface, including the `act` claim for
 delegation. Cons: a second issuer and JWKS that every consumer must trust;
-key management and rotation; the endpoint becomes a token consumer
-(ADR-0007) and the most privileged part of the sample; it undercuts the
+key management and rotation; the endpoint becomes a token verifier
+and the most privileged part of the sample; it undercuts the
 spec's argument that Cognito is the trusted source of tenant identity (§1).
 ### Option 3: An RFC 8693 endpoint over Cognito, with the refresh token as subject token
 The endpoint accepts `subject_token_type =
@@ -45,7 +45,7 @@ depends on `ClientMetadata` reaching the trigger through
 token rotation must stay off, or each exchange would invalidate the client's
 refresh token. Every exchange is a Cognito call and a trigger invocation.
 ### Option 4: Narrow at sign-in by passing `ClientMetadata` to `InitiateAuth`
-Pros: no endpoint (the former §11 seam). Cons: one tenant per session;
+Pros: no endpoint (kept as a seam, spec §11). Cons: one tenant per session;
 switching tenant needs a new sign-in with the password; a client that calls
 services for different tenants cannot use it.
 
@@ -65,7 +65,7 @@ Easier: a single-tenant service can require `tenant_id` and its scope and
 reject every multi-tenant token, in every topology. No new trust anchor.
 Harder: clients exchange before calling a tenant service and may reuse the
 narrowed token for its five-minute lifetime. A service cannot narrow a token
-on its own. App clients are pinned to refresh-token rotation off (R-6).
+on its own. App clients are pinned to refresh-token rotation off (R-5).
 Exchange traffic counts against Cognito's request-rate quotas. Revisit if
 Cognito adds a native token-exchange grant, or if a delegation use case needs
 the `act` claim. Either one leads back to Option 2 or to a managed exchange

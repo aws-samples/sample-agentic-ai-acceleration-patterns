@@ -1,4 +1,4 @@
-# ADR-0014: Check that a user belongs to the path's tenant before any per-user platform operation
+# ADR-0013: Check that a user belongs to the path's tenant before any per-user platform operation
 
 - Status: Accepted
 - Date: 2026-10-21
@@ -45,6 +45,6 @@ Easier: a wrong tenant id in a vendor call cannot reach another tenant's
 users; the rule is testable once in the shared scenario. Harder: one more
 Cognito read per call, inside Cognito's admin API quotas at vendor scale;
 the platform role needs `AdminGetUser` and `AdminListGroupsForUser`, scoped
-like its other actions (N-4). The check and the action are two calls, so a
+like its other actions (N-3). The check and the action are two calls, so a
 concurrent membership change can race them; at vendor scale that is
 accepted.
