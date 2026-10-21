@@ -11,6 +11,10 @@
 The keywords MUST, MUST NOT, SHOULD, and MAY are to be interpreted as in
 RFC 2119.
 
+> **Amended 2026-10-21 (ADR-0016):** R-1 is built as an API Gateway
+> **REST** API, not an HTTP API, from three Smithy services merged into one
+> OpenAPI document. Everything else R-1 states holds.
+
 ---
 
 ## 1. Problem Statement

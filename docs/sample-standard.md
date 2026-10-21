@@ -209,7 +209,9 @@ create-or-replace. Never `Read`, `Add`, `Remove`, `Fetch`, or `Describe`
 Operations outside a lifecycle use a verb that says what they do
 (`IssueToken`). Enforce this in `model/__global.smithy` with Smithy's
 `StandardOperationVerb` validator at `DANGER` severity, so a bad name fails
-`smithy build`. List the lifecycle verbs plus any non-lifecycle verbs the
+`smithy build`. The validator ships in `software.amazon.smithy:smithy-linters`;
+add it to the `maven.dependencies` in `smithy-build.json`, or Smithy only
+warns that it cannot find the validator. List the lifecycle verbs plus any non-lifecycle verbs the
 sample uses:
 
 ```smithy

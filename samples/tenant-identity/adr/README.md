@@ -24,3 +24,4 @@ Template: [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md#2-d
 | [ADR-0013](0013-per-user-operations-check-tenant-membership.md) | Check that a user belongs to the path's tenant before any per-user platform operation | Accepted | 2026-10-21 |
 | [ADR-0014](0014-tenant-admin-user-management.md) | Let a tenant admin manage their own tenant's users, through a second front door to the provisioner | Accepted | 2026-10-21 |
 | [ADR-0015](0015-tenant-admin-role-as-group-and-scope.md) | Make tenant admin a per-tenant group, and grant its scope only on narrowed tokens | Accepted | 2026-10-21 |
+| [ADR-0016](0016-one-rest-api-from-three-smithy-services.md) | Serve the three route families from one REST API built from three Smithy services | Accepted | 2026-10-21 |
