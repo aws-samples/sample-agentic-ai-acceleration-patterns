@@ -8,6 +8,13 @@
 > an obvious necessity, the reasoning is given inline; the spec is also a
 > teaching document.
 
+> **Amended 2026-10-20:** token exchange (RFC 8693) added so a client can
+> narrow a token to one tenant and a subset of scopes before calling a
+> service: §1, P-3, P-6, P-10, R-1, R-5, R-6, R-12, §5.5, §8.1, §8.2, N-10,
+> §10 step 6a. Decisions: ADR-0009, ADR-0010 (supersedes ADR-0003 and
+> ADR-0008), ADR-0011, ADR-0012 (supersedes ADR-0006: the test aid returns
+> the refresh token).
+
 The keywords MUST, MUST NOT, SHOULD, and MAY are to be interpreted as in
 RFC 2119.
 
@@ -64,6 +71,18 @@ integration test verifies the tokens with a standard library for one reason
 only: to prove that the claim is present, correct, and the same shape in
 every topology.
 
+**A token for every tenant is too much token for one.** In
+`shared-pool-multi-tenant` a user's access token names every tenant the user
+belongs to. A service that acts for one tenant needs a token that names that
+tenant and nothing more. If the service receives the multi-tenant token, a
+leak from that service exposes every tenant the user belongs to, and the
+service has to be trusted to pick the right one. The sample therefore issues
+**narrowed tokens** through an OAuth 2.0 Token Exchange (RFC 8693) endpoint.
+The client that holds the user's refresh token exchanges it for an access
+token that names one tenant and a subset of scopes, before it calls the
+service. Cognito signs the narrowed token, so it has the same issuer and
+verifies the same way (P-10, ADR-0009).
+
 ### 1.1 The deployment model
 
 This is an **application-plane** sample: it is the identity layer a deployed
@@ -94,12 +113,18 @@ Out of scope, deliberately:
   Cognito authoriser, a JWT authoriser, or an in-function verifier are all
   valid consumers, and the registry gives a `pool-per-tenant` consumer its
   issuer allowlist (§4.1). None of them is built here (ADR-0007, seam in §11).
+  The token-exchange endpoint (§5.5) is not a consumer: its subject token is
+  a refresh token, which Cognito itself validates.
 - **A login UI.** Managed login / hosted UI, federation to tenant IdPs (SAML,
   OIDC, social), passwordless, MFA. Tokens are obtained with a server-side
   password flow for demonstration; the claims do not depend on how the token
   was issued.
 - **Authorisation within a tenant.** Roles and permissions (`admin`,
-  `member`) are an extension seam (§11), not built.
+  `member`) are an extension seam (§11), not built. Every user holds the
+  same two sample scopes (§8.1); deciding who holds which is that seam.
+- **Delegation and audience narrowing.** RFC 8693's `act` claim and
+  `audience` parameter are seams (§11). The exchange narrows tenant and
+  scopes only.
 - **The vendor's own identity.** The vendor authenticates to the platform API
   with IAM (SigV4); the vendor IdP question is answered by the
   `control-plane` sample.
@@ -118,6 +143,7 @@ Out of scope, deliberately:
 | Onboarding cost | create pool + client + trigger (seconds, more moving parts) | create nothing in Cognito | create one group |
 | Offboarding | delete pool: no new tokens, and the issuer disappears | stop issuance, then delete users, keep pool | stop issuance for the tenant, delete group; delete users whose only tenant it was |
 | Issuers a consumer must trust | one per tenant; the registry is the allowlist | one | one |
+| What token exchange narrows (§5.5) | scopes (the tenant is already single) | scopes (the tenant is already single) | tenant and scopes |
 | Hard ceilings (defaults, per Region) | 1,000 user pools (adjustable to 10,000) | 40,000,000 users per pool; 50 custom attributes | 10,000 groups per pool; 100 groups per user; 5,000 total changes in pre-token-generation output |
 | Where the tenant lives in the token | `iss` (and `tenant_id`, which MUST agree) | `tenant_id` claim from `custom:tenantId` | `tenants` claim from `cognito:groups` |
 
@@ -148,7 +174,7 @@ the integration scenario (§10) runs unchanged against all three stacks.
 Nothing in the sample consumes the tokens it issues, so there is no request
 path on which to check a tenant's status, and the sample MUST NOT invent one.
 Offboarding is enforced where identity is issued, by the identity provider
-and the trigger that shapes its tokens (ADR-0008):
+and the trigger that shapes its tokens (ADR-0010):
 
 1. `DeleteTenant` flips the tenant to `DELETING` in the registry before
    touching Cognito (R-9).
@@ -172,11 +198,12 @@ attribute, or a group. Nothing the tenant user controls MAY influence it. In
 `shared-pool` the attribute is created **immutable** and excluded from the app
 client's writable attributes, so the user can neither change it nor set it at
 sign-up (self sign-up is off in every pool, R-6). In `shared-pool-multi-tenant`
-groups are admin-only by construction. The trigger MUST NOT read
-`clientMetadata` or any other caller-supplied input when deriving the claim.
-When a token names several tenants, which one a given request acts for is the
-consumer's decision (§1.2); the token carries every membership and nothing
-else.
+groups are admin-only by construction. The trigger MUST NOT derive a tenant
+or a scope from `clientMetadata` or any other caller-supplied input. It MAY
+read a narrowing request from `clientMetadata`, and only to remove tenants
+and scopes the user already holds, never to add one (P-10, ADR-0010).
+Without an exchange, a token carries every membership. Narrowing to one
+tenant is the client's request, made through the exchange (§5.5).
 
 ### P-4. Onboarding and offboarding are symmetric and total
 
@@ -203,10 +230,11 @@ rarely.
 
 ### P-6. Minimal claims, stable shape
 
-The access token carries at most two tenant claims added by the pre-token-
-generation trigger: `tenant_id` (string, topologies 1 and 2) or `tenants`
-(array of strings, topology 3). Nothing else is added: no names, no roles,
-no e-mail. The claims go into the **access** token, not the ID token, because
+The access token carries exactly one tenant claim added by the pre-token-
+generation trigger: `tenant_id` (string; topologies 1 and 2, and every
+narrowed token) or `tenants` (array of strings; topology 3 without
+narrowing). The trigger also sets the sample scopes in `scope` (§8.1).
+Nothing else is added: no names, no roles, no e-mail. The claims go into the **access** token, not the ID token, because
 the access token is what a client presents to an API; the ID token is for the
 client itself. This is the **token contract**, the one thing a consumer may
 rely on across topologies:
@@ -216,9 +244,12 @@ rely on across topologies:
 | `pool-per-tenant` | `tenant_id` | the tenant's ULID | `iss` is the tenant's pool; the registry maps one to the other and the two MUST agree |
 | `shared-pool` | `tenant_id` | the tenant's ULID | |
 | `shared-pool-multi-tenant` | `tenants` | sorted array of ULIDs, length ≥ 1 | only groups named `t-<ULID>` contribute |
+| narrowed, any topology (§5.5) | `tenant_id` | the requested tenant's ULID | no `tenants` claim; `scope` is exactly the requested scopes; `aws.cognito.signin.user.admin` removed |
 
 `sub`, `username`, `iss`, `client_id`, `token_use`, and `exp` are Cognito's
-own and are not altered.
+own and are not altered. A single-tenant consumer SHOULD require
+`tenant_id` and the scope it serves, which rejects every un-narrowed
+topology-3 token.
 
 ### P-7. Explicit deploy-time choice, fail fast
 
@@ -245,6 +276,21 @@ place. The README MUST carry the comparison in §1.3 of this spec, kept true
 after implementation, including the service quotas that bound each design,
 because the quotas are the first thing a real deployment hits.
 
+### P-10. Narrow before you call, and narrowing never widens
+
+A client that acts for one tenant MUST be able to obtain a token that names
+only that tenant and only the scopes the call needs. Cognito issues the
+narrowed token through the pre-token-generation trigger, so it has the same
+issuer and signature as every other token, and no second signer is trusted
+(ADR-0009). The request to narrow is caller input and therefore untrusted.
+The trigger intersects it with what the user already holds, and refuses
+unless the result is exactly what was asked for (ADR-0010). So the exchange
+endpoint holds no privilege: anyone holding a refresh token can send the same
+request to Cognito directly, and gets nothing the refresh token did not
+already grant. The narrowed token is an access token only. No refresh token
+carrying the narrowing is issued, so a service that receives it cannot extend
+it past its lifetime (N-1).
+
 ---
 
 ## 3. System Shape
@@ -253,13 +299,14 @@ because the quotas are the first thing a real deployment hits.
 
 | # | Component | Requirement |
 |---|---|---|
-| R-1 | **HTTP API** | One API Gateway HTTP API, generated from the interface model (Smithy), one route family: `/platform/*` with IAM authorisation (ADR-0005). No application routes (ADR-0007). |
+| R-1 | **HTTP API** | One API Gateway HTTP API, generated from the interface model (Smithy), two route families: `/platform/*` with IAM authorisation (ADR-0005), and `POST /oauth2/token`, the token-exchange endpoint, with no gateway authoriser because the refresh token is the credential (§5.5, ADR-0011). No application routes (ADR-0007). |
 | R-2 | **Platform function** | Implements the platform API through the topology's provisioner. Role per P-8. |
 | R-3 | *Retired* | Was the application function. Removed with token consumption (ADR-0007). |
 | R-4 | **Tenant registry** | One DynamoDB table (§4). Point-in-time recovery on; `DESTROY` removal for the sample. |
-| R-5 | **Pre-token-generation function** | Cognito Lambda trigger, version 2 event (`V2_0`), adds the claim(s) of P-6 to the access token and enforces tenant status (P-2, §8). Attached to every pool the sample creates. Pools MUST use the **Essentials** feature plan (the default for new pools); access-token customisation is not available on Lite without advanced security features. |
-| R-6 | **User pool(s)** | `shared-pool*`: exactly one pool created by the stack. `pool-per-tenant`: zero pools at deploy time; one pool, one app client, and the trigger attachment per tenant at onboarding. Every pool: self sign-up off, admin-create only, e-mail as username, access token lifetime 5 minutes (N-1), no hosted UI domain. |
+| R-5 | **Pre-token-generation function** | Cognito Lambda trigger, version 2 event (`V2_0`), adds the claim(s) and scopes of P-6 to the access token, enforces tenant status (P-2), and applies narrowing requests (P-10, §8). Attached to every pool the sample creates. Pools MUST use the **Essentials** feature plan (the default for new pools); access-token customisation is not available on Lite without advanced security features. |
+| R-6 | **User pool(s)** | `shared-pool*`: exactly one pool created by the stack. `pool-per-tenant`: zero pools at deploy time; one pool, one app client, and the trigger attachment per tenant at onboarding. Every pool: self sign-up off, admin-create only, e-mail as username, access token lifetime 5 minutes (N-1), refresh token rotation off (ADR-0009), no hosted UI domain. |
 | R-7 | **Parameter publication** | The stack publishes `/application-plane/shared/identity/{apiUrl,topology}` and, for `shared-pool*`, `/application-plane/shared/identity/userPoolId` and `appClientId`, so the sample mounts into the `control-plane` sample's shared namespace. |
+| R-12 | **Token-exchange function** | Implements `POST /oauth2/token` (§5.5). It parses the form and calls `GetTokensFromRefreshToken` with the narrowing request in `ClientMetadata`. It returns the access token only and discards the ID token. Its role holds logging permissions only, no `cognito-idp` or DynamoDB action, because `GetTokensFromRefreshToken` is authorised by the refresh token, not by IAM (P-10). |
 
 ### 3.2 Caller and identity model
 
@@ -270,11 +317,15 @@ because the quotas are the first thing a real deployment hits.
 - **Tenant user → Cognito:** sign-in against the topology's pool yields access,
   ID, and refresh tokens; the access token carries the tenant (P-6). The
   sample defines no endpoint that accepts it.
+- **Client → token exchange:** the client that holds a tenant user's
+  refresh token posts it to `POST /oauth2/token` with the tenant and the
+  scopes it needs, and receives a narrowed access token (§5.5). In the
+  sample, the client is the integration test.
 - **Sign-in in the sample:** `ADMIN_USER_PASSWORD_AUTH` through
   `AdminInitiateAuth` from the platform function (`POST
   /platform/tenants/{tenantId}/users/{username}/token`) **for the
   demonstration only**, so the integration test can obtain real Cognito
-  tokens without a browser (ADR-0006). This route MUST be documented as a
+  tokens without a browser (ADR-0012). This route MUST be documented as a
   test aid and the README's hardening checklist MUST say to remove it in
   production.
 - **Verification in the test:** the integration test verifies every token it
@@ -382,8 +433,47 @@ number is not reused.
 | `InternalServerError` | 500 | everything else |
 
 401 and 403 on `/platform/*` are API Gateway's own (IAM); the sample emits
-neither. **R-10** (opaque 401/403 bodies) is retired with the application
+neither. `POST /oauth2/token` does not use this model; it returns RFC 6749
+§5.2 errors (§5.5). **R-10** (opaque 401/403 bodies) is retired with the application
 routes.
+
+### 5.5 Token exchange (`POST /oauth2/token`, no authoriser)
+
+RFC 8693 §2, with Cognito as the signer (ADR-0009). Request body
+`application/x-www-form-urlencoded` (ADR-0011):
+
+| Parameter | Requirement |
+|---|---|
+| `grant_type` | `urn:ietf:params:oauth:grant-type:token-exchange` |
+| `client_id` | the app client that issued the refresh token: the shared client (2, 3) or the tenant's client from `GetTenant` (1) |
+| `subject_token` | the user's refresh token |
+| `subject_token_type` | `urn:ietf:params:oauth:token-type:refresh_token`; any other value → `invalid_request` |
+| `requested_token_type` | optional; if present MUST be `urn:ietf:params:oauth:token-type:access_token` |
+| `resource` | `urn:tenant-identity:tenant:<ULID>`, at most one. Required in topology 3. In 1 and 2, if omitted, it defaults to the user's only tenant. |
+| `scope` | required; space-separated, non-empty subset of §8.1 |
+| `audience`, `actor_token`, `actor_token_type` | not supported → `invalid_request` |
+
+Behaviour: validate the form, then call `GetTokensFromRefreshToken` with
+`ClientMetadata` = the §8.2 keys. The trigger decides; the function only
+maps the outcome.
+
+Success, 200, `Cache-Control: no-store`:
+`{access_token, issued_token_type:
+"urn:ietf:params:oauth:token-type:access_token", token_type: "Bearer",
+expires_in, scope}`. No `refresh_token`.
+
+Errors, 400, `{error, error_description}`:
+
+| `error` | When |
+|---|---|
+| `invalid_request` | malformed form, a missing or unsupported parameter |
+| `unsupported_grant_type` | any other `grant_type` |
+| `invalid_target` | the trigger refused the tenant: not held, not `ACTIVE`, or absent (message prefix `invalid_target`) |
+| `invalid_scope` | the trigger refused the scopes (prefix `invalid_scope`) |
+| `invalid_grant` | anything else Cognito rejects: an expired, revoked, or foreign refresh token, or an unknown client |
+
+`error_description` is fixed text per code and never echoes Cognito's
+message or the token.
 
 ---
 
@@ -404,6 +494,10 @@ routes.
   including explicit `UnsupportedInTopology` failures (P-4).
 - No new token names a tenant once `DeleteTenant` has been accepted (P-2,
   R-9); tokens already issued expire within the access token lifetime (N-1).
+- A narrowed token names exactly the requested tenant and scopes, and only
+  when the user holds them. Otherwise no token is issued (P-10). This holds
+  whether the request comes through `POST /oauth2/token` or straight to
+  Cognito.
 - Clean teardown: `cdk destroy` after deleting all tenants leaves no pools,
   groups, users, parameters, or log groups with the sample's prefix.
 - Parameters under `/application-plane/shared/identity/*` (R-7).
@@ -466,6 +560,8 @@ pools are per tenant; a consumer resolves them through `GetTenant` or
   tenant that is not `ACTIVE` in the registry (§8), sorts, and writes the
   result as the `tenants` array claim. Groups not matching the convention
   are ignored (reserved for the roles seam, §11).
+- Narrowing (§8.2) picks one entry of that set and emits it as `tenant_id`
+  instead of `tenants`.
 - `AdminAddUserToGroup` is idempotent, so `AddMembership` is safe to retry.
 - A user's groups are capped at 100 (service quota, not adjustable); the
   sample does not pre-check the cap and surfaces Cognito's error as 400.
@@ -474,7 +570,7 @@ pools are per tenant; a consumer resolves them through `GetTenant` or
 
 ## 8. Pre-Token-Generation Contract
 
-The trigger is the sample (ADR-0003). It runs on every token issuance, sign-in and
+The trigger is the sample (ADR-0010). It runs on every token issuance, sign-in and
 refresh alike (Cognito invokes the pre-token-generation trigger for
 `TokenGeneration_RefreshTokens` as well as the authentication sources), and
 it is the only code that decides what tenant identity a token carries.
@@ -482,12 +578,41 @@ it is the only code that decides what tenant identity a token carries.
 | Field | Requirement |
 |---|---|
 | Trigger version | `V2_0` (access-token customisation). |
-| Input used | `userPoolId`, `request.userAttributes["custom:tenantId"]`, `request.groupConfiguration.groupsToOverride`. Nothing from `request.clientMetadata` (P-3). |
+| Input used | `userPoolId`, `request.userAttributes["custom:tenantId"]`, `request.groupConfiguration.groupsToOverride`, and from `request.clientMetadata` only the §8.2 keys, only to narrow (P-3, P-10). |
 | Tenant lookup | 1: registry item for the event's `userPoolId` (§4.2). 2: registry item for `custom:tenantId`. 3: registry items for every `t-*` group (one batch read). The read is per invocation, uncached (N-9). |
 | Status rule | 1, 2: tenant absent or not `ACTIVE` → throw. 3: drop every tenant that is absent or not `ACTIVE`; if nothing remains → throw. Cognito turns the throw into a failed sign-in or refresh (P-2). |
-| Output | `response.claimsAndScopeOverrideDetails.accessTokenGeneration.claimsToAddOrOverride` = `{tenant_id}` (1, 2) or `{tenants: [...]}` (3). ID token untouched. No `claimsToSuppress`, no scope changes, no group overrides. |
+| Output | `accessTokenGeneration.claimsToAddOrOverride` = `{tenant_id}` (1, 2, and every narrowed token) or `{tenants: [...]}` (3, un-narrowed). `accessTokenGeneration.scopesToAdd` = every §8.1 scope, or exactly the requested ones when narrowed. A narrowed token also gets `scopesToSuppress = ["aws.cognito.signin.user.admin"]`. ID token untouched. No `claimsToSuppress`, no group overrides. |
 | Failure mode | Any exception → Cognito fails the token request. The function MUST NOT swallow errors and return a token without the claim; a token without a tenant claim is a token the contract (P-6) does not allow. |
 | Idempotency | Pure function of the event and the registry's current state; no writes. |
+
+### 8.1 Sample scopes
+
+A fixed, deploy-time set: `tenant-api/read` and `tenant-api/write`. They
+name a fictional downstream API. Every user holds both; un-narrowed tokens
+carry both. The set is a constant in the trigger, not an input (P-7). Roles
+that decide who holds which scope are the §11 seam.
+
+### 8.2 Narrowing request
+
+Two `clientMetadata` keys, set by the token-exchange function or by any
+direct caller of `GetTokensFromRefreshToken`:
+
+| Key | Value |
+|---|---|
+| `tenant_identity_narrow_tenant` | a ULID |
+| `tenant_identity_narrow_scope` | space-separated scopes |
+
+If either key is present, the token is narrowed and both rules apply:
+
+1. The tenant set is computed as in the table above, with status rules
+   applied. The requested tenant MUST be in it. Otherwise the trigger throws
+   `invalid_target: ...`. In topologies 1 and 2, a missing tenant key means
+   the user's only tenant. In topology 3 it is an `invalid_target`.
+2. The requested scopes MUST be a non-empty subset of §8.1. Otherwise the
+   trigger throws `invalid_scope: ...`.
+
+The result is exactly the request, or nothing. The trigger never widens, and
+no other `clientMetadata` key is read (ADR-0010).
 
 **R-11:** The trigger function's role MUST hold only `dynamodb:GetItem`,
 `BatchGetItem`, and `Query` (for the GSI) on the registry, plus logging; it
@@ -506,6 +631,7 @@ MUST NOT hold any `cognito-idp` permission.
 | N-5 | *Retired.* | Was the application function's JWKS cache bound (ADR-0007). |
 | N-6 | Structured logs; the platform function and the trigger log `tenantId`, `userId`, and the rule that refused an issuance, and never a token or a temporary password. | Synthetic data still deserves hygiene the reader will copy. |
 | N-7 | The `/platform/*` stage MUST be throttled (reference: 10 rps / 20 burst). | `CreateTenant` in topology 1 creates account-wide resources; cap the rate of a leaked vendor credential. |
+| N-10 | `POST /oauth2/token` MUST be throttled separately from `/platform/*` (reference: 20 rps / 40 burst). Its function MUST NOT log the refresh token, the issued token, or Cognito's error message. | The route is unauthenticated at the gateway; cap the cost of abuse against Cognito's request-rate quotas. |
 | N-8 | Pools MUST be created with deletion protection **inactive** and tagged `sample=tenant-identity`. | Teardown must be total (P-4); a real deployment flips protection on and is told so in the hardening checklist. |
 | N-9 | The trigger reads the registry on every invocation, with no cache. | Issuance happens at sign-in and at most once per access-token lifetime per session, so the read rate is low and a cache would only add a window in which a `DELETING` tenant still receives tokens. |
 
@@ -545,13 +671,31 @@ verification of §3.2.
    `RemoveMembership` u1 from A → 409 (last tenant). `AddMembership` u1 → B
    again, refresh → `tenants = [A, B]`, so u1 enters step 7 as a
    multi-tenant user.
+6a. **Narrowing (P-10), all topologies.** Exchange u1's refresh token with
+   `scope=tenant-api/read`, plus `resource=A` (required in 3), and verify.
+   The result has `tenant_id = A`, no `tenants` claim,
+   `scope = "tenant-api/read"`, and no `aws.cognito.signin.user.admin`.
+   It has the same `iss` as u1's other tokens. Topology 2: that token's
+   `GetUser` call is rejected by Cognito. Then check the refusals:
+   - `resource=A` with u2's refresh token (u2 holds only B):
+     `invalid_target`, in every topology.
+   - `scope=tenant-api/admin`: `invalid_scope`.
+   - no `resource` in topology 3: `invalid_target`.
+   - `subject_token_type` = access token: `invalid_request`.
+   Bypass the endpoint: call `GetTokensFromRefreshToken` directly with u2's
+   refresh token and the §8.2 keys naming A. Cognito fails the request, which
+   proves the trigger enforces the rule, not the endpoint. A plain
+   `RefreshToken` afterwards returns u1's un-narrowed token again, so the
+   exchange did not change the session.
 7. **Offboard (P-2):** `DeleteTenant` A. `RefreshToken` for u1: fails in
    topology 1 (pool gone) and 2 (user gone); succeeds in topology 3 with
    `tenants = [B]`, because u1 still belongs to B. u1's pre-deletion access
    token still verifies against keys cached before the deletion (the test
    asserts this and the README names the 5-minute bound); topology 1: the
    pool's JWKS URL now returns 404 and `DescribeUserPool` →
-   `ResourceNotFound`. Topology 2: u1 is deleted. Topology 3: group `t-A` is
+   `ResourceNotFound`. Topology 3: exchanging u1's refresh token for
+   `resource=A` → `invalid_target`, and for `resource=B` → success. Topology
+   2: u1 is deleted. Topology 3: group `t-A` is
    gone, u1 and u2 still exist. `GetTenant` A → 404.
 8. **`DELETING` window (P-2, unit level):** with a registry item in
    `DELETING`, the trigger throws for topologies 1 and 2 and omits the
@@ -560,14 +704,19 @@ verification of §3.2.
 9. **Teardown:** `DeleteTenant` B; no pools (1) or groups and users (2, 3)
    tagged or prefixed by the test remain; `cdk destroy` leaves no stack, no
    parameters under `/application-plane/shared/identity/`, no log groups
-   with the sample's prefix. Every platform operation has run at least once
-   in every topology.
+   with the sample's prefix. Every platform operation and the token-exchange
+   endpoint have run at least once in every topology.
 
 Plus unit-level assertions that: the provisioner is the only
 topology-specific module (P-1); the trigger role's policy contains no
-`cognito-idp:*` action and the trigger never reads `clientMetadata` (P-3,
+`cognito-idp:*` action and the trigger reads no `clientMetadata` key outside §8.2 (P-3,
 P-8); the trigger returns the claim shape of §8 for each topology's event;
-the registry never receives a user item (R-8).
+the registry never receives a user item (R-8); narrowing never widens: for
+any `clientMetadata`, the output tenants are a subset of the user's `ACTIVE`
+tenants and the output scopes a subset of §8.1 (property test, ADR-0010); the
+trigger's error prefixes match §5.5; the token-exchange role holds no
+`cognito-idp` or `dynamodb` action (R-12); the form parser rejects every
+RFC 8693 parameter not listed in §5.5.
 
 ---
 
@@ -578,7 +727,8 @@ the registry never receives a user item (R-8).
 | Token consumption | An API Gateway Cognito authoriser (REST API; `pool-per-tenant` lists every tenant pool ARN, onboarding appends to it), an HTTP API JWT authoriser (`shared-pool*` only, one issuer), or an in-function verifier that reads the registry as its issuer allowlist. Each reads the claims of P-6 unchanged. Deliberately not built (ADR-0007). |
 | Roles within a tenant | Groups not matching `^t-` in topology 3 (`role-admin`, `role-member`); a second custom attribute in topology 2; per-pool groups in topology 1. Add a `roles` claim in the trigger. |
 | Federation to a tenant's own IdP | Topology 1: an IdP per pool, the natural fit. Topologies 2 and 3: an IdP per tenant in the shared pool with attribute/group mapping, bounded by the 300-IdP quota. |
-| Tenant-scoped tokens at sign-in (alternative to the multi-valued claim) | Pass the chosen tenant as `clientMetadata` to `InitiateAuth`; the trigger intersects it with the user's groups and emits a single `tenant_id`. Trades a per-request choice by the consumer for a per-session one, and relaxes P-3's "no `clientMetadata`" rule to "intersect, never trust". |
+| Narrowing at sign-in | Pass the §8.2 keys to `InitiateAuth` to narrow the session's first token. Not built: exchange (§5.5) narrows per call with no new sign-in (ADR-0009, Option 4). |
+| Delegation (`act`, RFC 8693 §4.1) and audience narrowing | A service exchanging a token it received, to act for the user downstream, needs an access-token subject and a signer of its own. Out of scope by ADR-0009; a managed exchange (for example AgentCore Identity on-behalf-of) is the natural fit. |
 | Hosted UI / managed login | Add a domain and OAuth flows to the app client; nothing in the trigger changes. |
 | Async onboarding | Wrap `CreateTenant` in the control-plane sample's workflow when onboarding grows beyond Cognito calls (e.g. also provisioning tenant storage). |
 | Control-plane mounting | A `scripts/control-plane/` lifecycle set that calls `CreateTenant`/`DeleteTenant` so this sample runs as a cell's identity component. |
@@ -589,7 +739,8 @@ the registry never receives a user item (R-8).
 ## 12. Reading Order for Implementers
 
 1. §1.3 and §2 (what the three topologies trade and the principles).
-2. §8, the pre-token-generation contract; it is the sample.
+2. §8, the pre-token-generation contract; it is the sample. §8.2 and §5.5
+   for narrowing.
 3. §7, the per-topology mechanics behind it.
 4. §4 and §5.1, registry and platform API.
 5. §10, then build the integration test first.

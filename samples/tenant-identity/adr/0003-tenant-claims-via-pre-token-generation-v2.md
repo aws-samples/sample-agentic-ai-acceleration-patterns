@@ -1,6 +1,6 @@
 # ADR-0003: Put the tenant claim into the access token with a V2 pre-token-generation trigger
 
-- Status: Accepted
+- Status: Superseded by ADR-0010
 - Date: 2026-10-13
 - Deciders: Dave Roberts (SA)
 

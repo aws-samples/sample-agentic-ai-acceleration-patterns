@@ -1,6 +1,6 @@
 # ADR-0006: Provide a server-side `IssueToken` route as a test aid, and label it as such
 
-- Status: Accepted
+- Status: Superseded by ADR-0012
 - Date: 2026-10-13
 - Deciders: Dave Roberts (SA)
 

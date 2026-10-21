@@ -1,6 +1,6 @@
 # ADR-0008: Enforce tenant offboarding at issuance, in the pre-token-generation trigger
 
-- Status: Accepted
+- Status: Superseded by ADR-0010
 - Date: 2026-10-14
 - Deciders: Dave Roberts (SA)
 
