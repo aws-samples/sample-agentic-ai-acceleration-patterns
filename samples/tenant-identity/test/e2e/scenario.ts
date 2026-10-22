@@ -151,11 +151,14 @@ function emailFor(runId: string, who: string): string {
 
 interface AssertNumber {
   status: number;
+  body?: unknown;
 }
 
 function expectStatus(result: AssertNumber, want: number, ctx: string): void {
   if (result.status !== want) {
-    throw new Error(`${ctx}: expected HTTP ${want}, got ${result.status}`);
+    // Print only error bodies: a 2xx body may hold tokens.
+    const body = result.status >= 400 && result.body !== undefined ? ` ${JSON.stringify(result.body).slice(0, 300)}` : '';
+    throw new Error(`${ctx}: expected HTTP ${want}, got ${result.status}${body}`);
   }
 }
 
@@ -465,7 +468,9 @@ export function defineScenario(topology: Topology): void {
       tokens.u1 = await issueToken('A', 'u1');
 
       const u1Claims = await verifierFor('A').verify(tokens.u1.accessToken);
+      expect(u1Claims['cognito:groups']).toBeUndefined(); // P-6, ADR-0020
       const u2Claims = await verifierFor('B').verify(tokens.u2.accessToken);
+      expect(u2Claims['cognito:groups']).toBeUndefined(); // P-6, ADR-0020
 
       if (topology === 'shared-pool-multi-tenant') {
         expect(u1Claims.tenants).toEqual(expect.arrayContaining([tenantIds.A, tenantIds.B]));
@@ -503,6 +508,7 @@ export function defineScenario(topology: Topology): void {
         // A fresh token still says A.
         const fresh = await issueToken('A', 'u1');
         const claims = await verifierFor('A').verify(fresh.accessToken);
+        expect(claims['cognito:groups']).toBeUndefined(); // P-6, ADR-0020
         expect(claims.tenant_id).toBe(tenantIds.A);
       } else if (topology === 'shared-pool-multi-tenant') {
         // The vendor creates a non-t-/non-admin- group, adds u1, re-issues:
@@ -523,6 +529,7 @@ export function defineScenario(topology: Topology): void {
           );
           const fresh = await issueToken('A', 'u1');
           const claims = await verifierFor('A').verify(fresh.accessToken);
+          expect(claims['cognito:groups']).toBeUndefined(); // P-6, ADR-0020
           expect(claims.tenants).toEqual(
             expect.arrayContaining([tenantIds.A, tenantIds.B]),
           );
@@ -565,6 +572,7 @@ export function defineScenario(topology: Topology): void {
         const access = auth.AuthenticationResult?.AccessToken;
         expect(access).toBeDefined();
         const claims = await verifierFor('B').verify(access!);
+        expect(claims['cognito:groups']).toBeUndefined(); // P-6, ADR-0020
         expect(claims.tenant_id).toBe(tenantIds.B);
       }
     });
@@ -599,6 +607,7 @@ export function defineScenario(topology: Topology): void {
       coverage.record('RefreshToken');
       expectStatus(r1, 200, 'RefreshToken u1 after remove B');
       const c1 = await verifierFor('A').verify(r1.body.accessToken);
+      expect(c1['cognito:groups']).toBeUndefined(); // P-6, ADR-0020
       expect(c1.tenants).toEqual([tenantIds.A]);
 
       // DeleteMembership u1 from A → 409 (last tenant).
@@ -625,6 +634,7 @@ export function defineScenario(topology: Topology): void {
       coverage.record('RefreshToken');
       expectStatus(r2, 200, 'RefreshToken u1 after re-add B');
       const c2 = await verifierFor('A').verify(r2.body.accessToken);
+      expect(c2['cognito:groups']).toBeUndefined(); // P-6, ADR-0020
       expect(c2.tenants).toEqual(expect.arrayContaining([tenantIds.A, tenantIds.B]));
       expect((c2.tenants as string[]).length).toBe(2);
     });
@@ -644,6 +654,7 @@ export function defineScenario(topology: Topology): void {
       expectStatus(ok, 200, 'exchange u1 read@A');
       const narrowed = (ok.body as { access_token: string; scope: string }).access_token;
       const nClaims = await verifierFor('A').verify(narrowed);
+      expect(nClaims['cognito:groups']).toBeUndefined(); // P-6, ADR-0020
       expect(nClaims.tenant_id).toBe(tenantIds.A);
       expect(nClaims.tenants).toBeUndefined();
       expect(String(nClaims.scope).split(' ').sort()).toEqual([SCOPE_API_READ]);
@@ -721,6 +732,7 @@ export function defineScenario(topology: Topology): void {
       coverage.record('RefreshToken');
       expectStatus(plain, 200, 'plain refresh after exchange');
       const pClaims = await verifierFor('A').verify(plain.body.accessToken);
+      expect(pClaims['cognito:groups']).toBeUndefined(); // P-6, ADR-0020
       if (topology === 'shared-pool-multi-tenant') {
         expect((pClaims.tenants as string[]).length).toBe(2);
       } else {
@@ -743,6 +755,7 @@ export function defineScenario(topology: Topology): void {
       expectStatus(adminExchange, 200, 'exchange a1 admin@A');
       narrowedAdminTokenA = (adminExchange.body as { access_token: string }).access_token;
       const adminClaims = await verifierFor('A').verify(narrowedAdminTokenA);
+      expect(adminClaims['cognito:groups']).toBeUndefined(); // P-6, ADR-0020
       expect(adminClaims.tenant_id).toBe(tenantIds.A);
       expect(String(adminClaims.scope).split(' ')).toContain(SCOPE_TENANT_ADMIN);
 
@@ -977,6 +990,7 @@ export function defineScenario(topology: Topology): void {
         coverage.record('RefreshToken');
         expectStatus(r, 200, 'RefreshToken u1 after A deleted (topo 3)');
         const claims = await verifierFor('B').verify(r.body.accessToken);
+        expect(claims['cognito:groups']).toBeUndefined(); // P-6, ADR-0020
         expect(claims.tenants).toEqual([tenantIds.B]);
       } else {
         // Topologies 1 and 2: u1's only tenant is gone, so a refresh fails.

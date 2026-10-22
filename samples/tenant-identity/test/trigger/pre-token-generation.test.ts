@@ -142,13 +142,23 @@ describe('§8 un-narrowed output shape', () => {
     expect(result.response.claimsAndScopeOverrideDetails.idTokenGeneration).toBeUndefined();
   });
 
-  it('un-narrowed sets no scopesToSuppress, no group overrides, no claimsToSuppress (spec §8)', async () => {
+  it('un-narrowed sets no scopesToSuppress and no claimsToSuppress (spec §8)', async () => {
     const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A) });
     const result = await handlePreTokenGeneration(event(), { source, registry: unusedRegistry });
     const gen = accessGen(result);
     expect(gen?.scopesToSuppress).toBeUndefined();
     expect(gen?.claimsToSuppress).toBeUndefined();
-    expect(result.response.claimsAndScopeOverrideDetails.groupOverrideDetails).toBeUndefined();
+  });
+
+  it.each([
+    ['single, un-narrowed', { kind: 'single', tenantId: TENANT_A, record: record(TENANT_A) }, undefined],
+    ['multi, un-narrowed', { kind: 'multi', records: [record(TENANT_A), record(TENANT_B)] }, undefined],
+    ['multi, narrowed', { kind: 'multi', records: [record(TENANT_A), record(TENANT_B)] }, { [NARROW_TENANT_KEY]: TENANT_A, [NARROW_SCOPE_KEY]: SCOPE_API_READ }],
+  ])('%s: overrides cognito:groups with none (P-6, ADR-0020)', async (_label, resolved, meta) => {
+    const source = fixedSource(resolved as never);
+    const ev = event(meta !== undefined ? { clientMetadata: meta as Record<string, string> } : {});
+    const result = await handlePreTokenGeneration(ev, { source, registry: unusedRegistry });
+    expect(result.response.claimsAndScopeOverrideDetails.groupOverrideDetails).toEqual({ groupsToOverride: [] });
   });
 });
 
@@ -159,12 +169,12 @@ describe('§8 un-narrowed output shape', () => {
 describe('§8 status rules (P-2, ADR-0008)', () => {
   it('single: absent record -> throw (§10 step 10)', async () => {
     const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: undefined });
-    await expect(handlePreTokenGeneration(event(), { source, registry: unusedRegistry })).rejects.toThrow();
+    await expect(handlePreTokenGeneration(event(), { source, registry: unusedRegistry })).rejects.toThrow(/^invalid_target: /);
   });
 
   it('single: DELETING record -> throw (§10 step 10)', async () => {
     const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A, 'DELETING') });
-    await expect(handlePreTokenGeneration(event(), { source, registry: unusedRegistry })).rejects.toThrow();
+    await expect(handlePreTokenGeneration(event(), { source, registry: unusedRegistry })).rejects.toThrow(/^invalid_target: /);
   });
 
   it('multi: drops DELETING tenants, keeps ACTIVE (spec §8, §10 step 10)', async () => {
@@ -178,12 +188,12 @@ describe('§8 status rules (P-2, ADR-0008)', () => {
 
   it('multi: all non-ACTIVE -> throw (spec §8)', async () => {
     const source = fixedSource({ kind: 'multi', records: [record(TENANT_A, 'DELETING')] });
-    await expect(handlePreTokenGeneration(event(), { source, registry: unusedRegistry })).rejects.toThrow();
+    await expect(handlePreTokenGeneration(event(), { source, registry: unusedRegistry })).rejects.toThrow(/^invalid_target: /);
   });
 
   it('multi: empty records -> throw (spec §8)', async () => {
     const source = fixedSource({ kind: 'multi', records: [] });
-    await expect(handlePreTokenGeneration(event(), { source, registry: unusedRegistry })).rejects.toThrow();
+    await expect(handlePreTokenGeneration(event(), { source, registry: unusedRegistry })).rejects.toThrow(/^invalid_target: /);
   });
 });
 

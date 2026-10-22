@@ -68,9 +68,10 @@ Four doors cross four boundaries:
 
 One stack per topology ([`src/identity.cdk.ts`](./src/identity.cdk.ts),
 `TenantIdentity-<topology>`). One REST API (`SpecRestApi`) built from three
-merged Smithy OpenAPI documents (ADR-0016), five Lambda functions whose roles
-are asymmetric by design (P-8), the tenant registry, and — for the shared
-topologies only — one user pool with the trigger attached.
+merged Smithy OpenAPI documents (ADR-0016), seven Lambda functions, the tenant
+registry, and — for the shared topologies only — one user pool with the
+trigger attached. Five functions handle requests; their roles are asymmetric
+by design (P-8). The other two wait during teardown (ADR-0019).
 
 ### 3.1 REST API (ADR-0016)
 
@@ -100,8 +101,8 @@ need it at cold start.
 | **Trigger** (`trigger/pre-token-generation.function.ts`) | reads the registry, nothing else (R-14, M-8) | `dynamodb:GetItem`, `BatchGetItem`, `Query` on the table and its `byUserPoolId` index; logging. **No** `cognito-idp` action. `grantReadData` is deliberately not used (it would add `Scan`/`DescribeTable`). |
 | **Token exchange** (`token-exchange/token-exchange.function.ts`) | logging only (R-7, M-8) | the managed basic-execution policy plus X-Ray; **no** `cognito-idp`, **no** `dynamodb`. `GetTokensFromRefreshToken` is authorised by the refresh token, not IAM. |
 | **Tenant authoriser** (`tenant-api/tenant-authorizer.function.ts`) | reads the registry, nothing else (R-9) | `dynamodb:GetItem`, `Query` via the same registry-read statement; logging. |
-| **Tenant-user** (`tenant-api/tenant-users.function.ts`) | registry reads + per-pool user actions, **no** pool/group lifecycle (R-8) | `dynamodb:GetItem`, `Query`; the ten per-pool `cognito-idp` user actions (`AdminCreateUser`, `AdminGetUser`, `AdminDeleteUser`, `AdminAddUserToGroup`, `AdminRemoveUserFromGroup`, `AdminListGroupsForUser`, `ListUsers`, `ListUsersInGroup`, `AdminSetUserPassword`, `AdminInitiateAuth`) scoped to the shared pool ARN, or to `userpool/*` with a `sample=tenant-identity` resource-tag condition in `pool-per-tenant`. **No** `CreateGroup`/`DeleteGroup`/`CreateUserPool`/`DeleteUserPool`. |
-| **Platform** (`platform/platform.function.ts`) | registry read+write + user, group, and (topology 1) pool lifecycle | `dynamodb` `GetItem`/`PutItem`/`UpdateItem`/`DeleteItem`/`Query`/`Scan`/`BatchGetItem` (the only writer of the registry, M-14); the ten per-pool user actions plus `CreateGroup`/`DeleteGroup`. In `shared-pool*` these are scoped to the stack pool ARN. In `pool-per-tenant` it additionally holds `CreateUserPool` on `*` (no resource ARN exists) constrained by a `RequestTag` condition that allows only the sample tag, `TagResource` on `userpool/*` under the same tag condition, and the per-pool + `CreateUserPoolClient`/`DeleteUserPool`/`DescribeUserPool` actions on `userpool/*` under a `ResourceTag` condition (N-3; the account-wide `CreateUserPool` is the accepted T-7 item). |
+| **Tenant-user** (`tenant-api/tenant-users.function.ts`) | registry reads + per-pool user actions, **no** pool/group lifecycle (R-8) | `dynamodb:GetItem`, `Query`; the eight per-pool `cognito-idp` user actions in `TENANT_USER_ACTIONS` (`AdminCreateUser`, `AdminGetUser`, `AdminDeleteUser`, `AdminAddUserToGroup`, `AdminRemoveUserFromGroup`, `AdminListGroupsForUser`, `ListUsers`, `ListUsersInGroup`) scoped to the shared pool ARN, or to `userpool/*` with resource-tag conditions on the sample tag and the stack tag in `pool-per-tenant`. **No** sign-in actions: `AdminSetUserPassword` and `AdminInitiateAuth` belong to the platform role only, for the test aids (M-21). **No** `CreateGroup`/`DeleteGroup`/`CreateUserPool`/`DeleteUserPool`. |
+| **Platform** (`platform/platform.function.ts`) | registry read+write + user, group, and (topology 1) pool lifecycle | `dynamodb` `GetItem`/`PutItem`/`UpdateItem`/`DeleteItem`/`Query`/`Scan`/`BatchGetItem` (the only writer of the registry, M-14); the ten per-pool user actions plus `CreateGroup`/`DeleteGroup`. In `shared-pool*` these are scoped to the stack pool ARN. In `pool-per-tenant` it additionally holds `CreateUserPool` on `*` (no resource ARN exists) constrained by a `RequestTag` condition that allows only the sample tag, `TagResource` on `userpool/*` under the same tag conditions (Cognito authorises the tags on `CreateUserPool` as `TagResource`), and the per-pool + `CreateUserPoolClient`/`DeleteUserPool`/`DescribeUserPool` actions on `userpool/*` under a `ResourceTag` condition (N-3; the account-wide `CreateUserPool` is the accepted T-7 item). |
 
 The platform and tenant-user roles' `cognito-idp` wildcards in
 `pool-per-tenant` are acknowledged cdk-nag IAM5 findings citing N-3/M-7/M-17;
@@ -121,7 +122,7 @@ on-demand billing, AWS-owned encryption at rest, point-in-time recovery on
 `shared-pool*`: one `cognito.UserPool` created by the stack, Essentials
 feature plan (required for access-token customisation, ADR-0003 / R-4), e-mail
 as the sign-in alias, self sign-up off, deletion protection off (N-8, so
-teardown is total), tagged `sample=tenant-identity`, `RemovalPolicy.DESTROY`,
+teardown is total), tagged `sample=tenant-identity` and `tenant-identity:stack=<stack name>`, `RemovalPolicy.DESTROY`,
 a strong password policy set explicitly (COG1 answered by configuration, not
 suppression). `shared-pool` adds an immutable `custom:tenantId` attribute that
 the app client cannot write (P-3). The V2 pre-token-generation trigger is
@@ -193,7 +194,7 @@ sequenceDiagram
     participant R as Registry
     V->>P: POST /platform/tenants {name, adminEmail}
     alt pool-per-tenant
-        P->>C: CreateUserPool (tag sample=tenant-identity)
+        P->>C: CreateUserPool (tags sample, tenant-identity:stack)
         P->>C: CreateUserPoolClient, attach trigger, CreateGroup admin-<id>
     else shared-pool / shared-pool-multi-tenant
         P->>C: CreateGroup t-<id> (+ admin-<id>), shared-pool also sets custom:tenantId on users

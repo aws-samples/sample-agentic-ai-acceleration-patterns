@@ -162,7 +162,7 @@ describe('ADR-0010: narrowing never widens (property)', () => {
           // A refusal is always acceptable. If it refused, prefixes must be the
           // fixed ones (never leaking input).
           const message = (error as Error).message;
-          expect(message === 'user has no active tenant' || /^invalid_(target|scope): /.test(message)).toBe(true);
+          expect(/^invalid_(target|scope): /.test(message)).toBe(true);
           return;
         }
 

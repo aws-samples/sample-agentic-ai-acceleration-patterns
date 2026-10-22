@@ -28,7 +28,7 @@ const CLIENT = 'client1';
 
 let cognito: AnyMock;
 function provisioner(): PoolPerTenantProvisioner {
-  return new PoolPerTenantProvisioner(depsFor(cognito, { triggerFunctionArn: TRIGGER_ARN }));
+  return new PoolPerTenantProvisioner(depsFor(cognito, { triggerFunctionArn: TRIGGER_ARN, stackName: 'TenantIdentity-pool-per-tenant' }));
 }
 function tenantA() {
   return tenant({ tenantId: IDS.a, topology: 'pool-per-tenant', userPoolId: POOL, appClientId: CLIENT });
@@ -59,7 +59,8 @@ describe('PoolPerTenantProvisioner (spec §7.1)', () => {
       // Cognito username is the sub UUID the self-check compares against.
       expect(poolInput.UsernameAttributes).toEqual(['email']);
       expect(poolInput.AliasAttributes).toBeUndefined();
-      expect(poolInput.UserPoolTags).toEqual({ sample: 'tenant-identity' });
+      expect(poolInput.UserPoolTags).toEqual({ 'sample': 'tenant-identity', 'tenant-identity:stack': 'TenantIdentity-pool-per-tenant' });
+      expect(poolInput.Policies?.PasswordPolicy).toMatchObject({ MinimumLength: 12, RequireSymbols: true, TemporaryPasswordValidityDays: 1 });
       expect(poolInput.LambdaConfig.PreTokenGenerationConfig).toEqual({ LambdaVersion: 'V2_0', LambdaArn: TRIGGER_ARN });
       const clientInput = cognito.commandCalls(CreateUserPoolClientCommand)[0].args[0].input;
       expect(clientInput.ExplicitAuthFlows).toEqual(['ALLOW_ADMIN_USER_PASSWORD_AUTH', 'ALLOW_REFRESH_TOKEN_AUTH']);
@@ -210,5 +211,11 @@ describe('PoolPerTenantProvisioner (spec §7.1)', () => {
     const client = new CognitoIdentityProviderClient({});
     const p = new PoolPerTenantProvisioner({ cognito: client, region: 'eu-central-1' });
     await expect(p.provisionTenant('01ARZ3NDEKTSV4RRFFQ69G5FAV', 'x')).rejects.toThrow(/triggerFunctionArn/);
+  });
+
+  test('refuses onboarding without stackName, before creating a pool (N-3)', async () => {
+    const client = new CognitoIdentityProviderClient({});
+    const p = new PoolPerTenantProvisioner({ cognito: client, region: 'eu-central-1', triggerFunctionArn: 'arn:aws:lambda:eu-central-1:123456789012:function:t' });
+    await expect(p.provisionTenant('01ARZ3NDEKTSV4RRFFQ69G5FAV', 'x')).rejects.toThrow(/stackName/);
   });
 });

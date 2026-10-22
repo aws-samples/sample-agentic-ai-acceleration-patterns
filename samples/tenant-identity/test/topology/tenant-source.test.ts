@@ -44,7 +44,7 @@ describe('tenantSourceFor (spec §8 tenant lookup, §4.2)', () => {
 
     it('throws on an unknown pool (§4.2)', async () => {
       const reg = reader({ getByUserPoolId: jest.fn(async () => undefined) });
-      await expect(source.resolve(event({ userPoolId: 'eu-central-1_ghost' }), reg)).rejects.toThrow('unknown user pool');
+      await expect(source.resolve(event({ userPoolId: 'eu-central-1_ghost' }), reg)).rejects.toThrow(/^invalid_target: unknown user pool$/);
     });
   });
 
@@ -71,6 +71,10 @@ describe('tenantSourceFor (spec §8 tenant lookup, §4.2)', () => {
 
     it('throws when the attribute is absent', async () => {
       await expect(source.resolve(event({ attributes: {} }), reader())).rejects.toBeInstanceOf(InvalidInputError);
+    });
+
+    it('refuses with the invalid_target prefix, so the exchange returns invalid_target (§5.4)', async () => {
+      await expect(source.resolve(event({ attributes: {} }), reader())).rejects.toThrow(/^invalid_target: /);
     });
   });
 

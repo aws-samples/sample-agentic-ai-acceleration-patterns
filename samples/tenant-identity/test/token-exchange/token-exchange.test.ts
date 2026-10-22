@@ -163,6 +163,13 @@ describe('ExchangeToken Cognito error mapping (§5.4)', () => {
     });
   });
 
+  it('an inactive tenant (trigger status refusal) -> invalid_target, not invalid_grant (§5.4)', async () => {
+    cognitoMock.on(GetTokens).rejects(
+      new UserLambdaValidationException({ message: 'PreTokenGeneration failed with error invalid_target: tenant is not active', $metadata: {} }),
+    );
+    await expect(exchange(form())).rejects.toMatchObject({ name: 'OAuthError', code: 'invalid_target' });
+  });
+
   it('invalid_scope in the lambda message -> invalid_scope (400)', async () => {
     cognitoMock.on(GetTokens).rejects(
       new UserLambdaValidationException({ message: 'PreTokenGeneration failed with error invalid_scope: not held', $metadata: {} }),
@@ -189,6 +196,8 @@ describe('ExchangeToken Cognito error mapping (§5.4)', () => {
     const caught = await exchange(form()).catch((e) => e);
     expect(caught).toBeInstanceOf(OAuthServerError);
     expect(caught.code).toBe('server_error');
+    // Retryable text, not the token-mismatch text.
+    expect(caught.description).toMatch(/retry later/);
   });
 
   it('a generic 5xx fault -> server_error (500)', async () => {
@@ -208,8 +217,9 @@ describe('ExchangeToken ADR-0012: reject tokens Cognito did not narrow', () => {
     const caught = await exchange(form({ resource: `${TENANT_RESOURCE_PREFIX}${TENANT_A}`, ...overrides })).catch((e) => e);
     expect(caught).toBeInstanceOf(OAuthServerError);
     expect(caught.code).toBe('server_error');
-    // No token is returned on a mismatch.
+    // No token is returned on a mismatch, and the text is the mismatch text.
     expect(caught.accessToken).toBeUndefined();
+    expect(caught.description).toMatch(/does not match the request/);
   }
 
   it('un-narrowed token with a tenants claim -> server_error', async () => {

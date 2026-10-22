@@ -1,9 +1,10 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { CustomResource, Duration } from 'aws-cdk-lib';
+import { CustomResource, Duration, RemovalPolicy } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct, IConstruct } from 'constructs';
 import { suppressTemplateScanners } from './nag';
 
@@ -36,7 +37,20 @@ export class LogDrain extends Construct {
       description: 'Log drain waiter: no permissions, so it cannot create a log group (ADR-0019)',
     });
 
+    // An explicit, deletable log group. The waiter never writes to it, but
+    // without one the useCdkManagedLogGroup feature flag (on in the integ
+    // app) adds a retained /aws/lambda group that outlives the stack.
+    const logGroup = new logs.LogGroup(this, 'Logs', {
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    suppressTemplateScanners(logGroup, {
+      cfnNag: [{ id: 'W84', reason: 'The waiter writes nothing to this group (ADR-0019).' }],
+      checkov: [{ id: 'CKV_AWS_158', comment: 'The waiter writes nothing to this group (ADR-0019).' }],
+    });
+
     const fn = new lambda.Function(this, 'Function', {
+      logGroup,
       runtime: lambda.Runtime.NODEJS_24_X,
       architecture: lambda.Architecture.ARM_64,
       handler: 'index.handler',
@@ -54,14 +68,14 @@ export class LogDrain extends Construct {
     suppressTemplateScanners(fn, {
       cfnNag: [
         { id: 'W58', reason: 'The waiter deliberately has no CloudWatch Logs permission: logging would recreate a log group after teardown (ADR-0019).' },
-        { id: 'W89', reason: 'Runs only on stack create and delete; no VPC resources are reached.' },
-        { id: 'W92', reason: 'Runs once per stack operation; reserved concurrency adds nothing.' },
+        { id: 'W89', reason: 'Runs only on stack create and delete; no VPC resources are reached. Accepted risk T-24 (threat model).' },
+        { id: 'W92', reason: 'Runs once per stack operation; reserved concurrency adds nothing. Accepted risk T-24 (threat model).' },
       ],
       checkov: [
-        { id: 'CKV_AWS_115', comment: 'Runs once per stack operation; reserved concurrency adds nothing.' },
-        { id: 'CKV_AWS_116', comment: 'CloudFormation retries the custom resource; a DLQ adds nothing.' },
-        { id: 'CKV_AWS_117', comment: 'Runs only on stack create and delete; no VPC resources are reached.' },
-        { id: 'CKV_AWS_173', comment: 'The function has no environment variables.' },
+        { id: 'CKV_AWS_115', comment: 'Runs once per stack operation; reserved concurrency adds nothing. Accepted risk T-24 (threat model).' },
+        { id: 'CKV_AWS_116', comment: 'CloudFormation retries the custom resource; a DLQ adds nothing. Accepted risk T-24 (threat model).' },
+        { id: 'CKV_AWS_117', comment: 'Runs only on stack create and delete; no VPC resources are reached. Accepted risk T-24 (threat model).' },
+        { id: 'CKV_AWS_173', comment: 'The function has no environment variables. Accepted risk T-24 (threat model).' },
       ],
     });
 

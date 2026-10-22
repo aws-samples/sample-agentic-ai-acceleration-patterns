@@ -19,6 +19,8 @@ export interface ProvisionerDeps {
   readonly sharedPool?: { readonly userPoolId: string; readonly appClientId: string };
   /** pool-per-tenant: the pre-token-generation function attached to every new pool. */
   readonly triggerFunctionArn?: string;
+  /** pool-per-tenant: the owning stack, written as the STACK_TAG_KEY tag on new pools. */
+  readonly stackName?: string;
 }
 
 /** The one place a topology value selects behaviour (spec P-1). */

@@ -45,6 +45,12 @@ export const OAUTH_ERROR_DESCRIPTIONS: Record<OAuthErrorCodeValue, string> = {
 };
 
 /**
+ * `server_error` text when Cognito throttled or failed, not when it returned
+ * the wrong token: the caller may retry (spec §5.4).
+ */
+export const SERVER_UNAVAILABLE_DESCRIPTION = 'The authorization server is temporarily unable to handle the request; retry later.';
+
+/**
  * A form-validation or exchange failure. Carries a code and the fixed
  * description for that code; the message is the description, so nothing a
  * caller supplied ever appears in it.

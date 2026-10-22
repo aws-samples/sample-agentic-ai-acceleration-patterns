@@ -43,6 +43,7 @@ import {
   REFRESH_TOKEN_DAYS,
   SAMPLE_TAG_KEY,
   SAMPLE_TAG_VALUE,
+  STACK_TAG_KEY,
   TENANT_POOL_NAME_PREFIX,
   type Topology,
 } from '../shared/constants';
@@ -60,17 +61,24 @@ export class PoolPerTenantProvisioner implements Provisioner {
    * function never onboards and is not given it (P-8).
    */
   private readonly triggerFunctionArn: string | undefined;
+  private readonly stackName: string | undefined;
 
   constructor(deps: ProvisionerDeps) {
     this.cognito = deps.cognito;
     this.region = deps.region;
     this.triggerFunctionArn = deps.triggerFunctionArn;
+    this.stackName = deps.stackName;
   }
 
   async provisionTenant(tenantId: string, _name: string): Promise<ProvisionedTenant> {
     if (this.triggerFunctionArn === undefined) {
       // Deployment wiring bug: only the platform function onboards tenants.
       throw new Error('pool-per-tenant onboarding requires triggerFunctionArn');
+    }
+    if (this.stackName === undefined) {
+      // The IAM conditions require the stack tag; a pool without it would be
+      // created and then unreachable by this stack's roles.
+      throw new Error('pool-per-tenant onboarding requires stackName');
     }
     const triggerArn = this.triggerFunctionArn;
     const pool = await this.cognito.send(
@@ -82,7 +90,18 @@ export class PoolPerTenantProvisioner implements Provisioner {
         AdminCreateUserConfig: { AllowAdminCreateUserOnly: true },
         DeletionProtection: 'INACTIVE',
         AccountRecoverySetting: { RecoveryMechanisms: [{ Name: 'admin_only', Priority: 1 }] },
-        UserPoolTags: { [SAMPLE_TAG_KEY]: SAMPLE_TAG_VALUE },
+        // Same rules as the stack-owned shared pool (identity.cdk.ts).
+        Policies: {
+          PasswordPolicy: {
+            MinimumLength: 12,
+            RequireLowercase: true,
+            RequireUppercase: true,
+            RequireNumbers: true,
+            RequireSymbols: true,
+            TemporaryPasswordValidityDays: 1,
+          },
+        },
+        UserPoolTags: { [SAMPLE_TAG_KEY]: SAMPLE_TAG_VALUE, [STACK_TAG_KEY]: this.stackName },
         LambdaConfig: {
           PreTokenGenerationConfig: { LambdaVersion: 'V2_0', LambdaArn: triggerArn },
         },

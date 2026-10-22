@@ -60,6 +60,12 @@ export const TENANT_POOL_NAME_PREFIX = 'tenant-identity-';
 /** Tag on every pool the sample creates (N-3, N-8). */
 export const SAMPLE_TAG_KEY = 'sample';
 export const SAMPLE_TAG_VALUE = 'tenant-identity';
+/**
+ * Second tag on every pool: the owning stack's name. The pool-per-tenant IAM
+ * conditions require it, so one stack's roles cannot reach another stack's
+ * pools in the same account (N-3).
+ */
+export const STACK_TAG_KEY = 'tenant-identity:stack';
 
 /** Token lifetimes (N-1). */
 export const ACCESS_TOKEN_MINUTES = 5;
@@ -127,6 +133,8 @@ export const ENV = {
   appClientId: 'APP_CLIENT_ID',
   /** pool-per-tenant: the trigger the platform function attaches to new pools. */
   triggerFunctionArn: 'TRIGGER_FUNCTION_ARN',
+  /** pool-per-tenant: value of the STACK_TAG_KEY tag set on new pools. */
+  stackName: 'STACK_NAME',
 } as const;
 
 /** The registry GSI that maps a pool to its tenant (spec §4.2). */

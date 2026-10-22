@@ -44,6 +44,7 @@ const cognito = new CognitoIdentityProviderClient({});
 const userPoolId = process.env[ENV.userPoolId];
 const appClientId = process.env[ENV.appClientId];
 const triggerFunctionArn = process.env[ENV.triggerFunctionArn];
+const stackName = process.env[ENV.stackName];
 
 const provisioner = createProvisioner(topology, {
   cognito,
@@ -51,6 +52,7 @@ const provisioner = createProvisioner(topology, {
   sharedPool:
     userPoolId !== undefined && appClientId !== undefined ? { userPoolId, appClientId } : undefined,
   triggerFunctionArn,
+  stackName,
 });
 
 const service = new PlatformService({ registry, provisioner, topology });

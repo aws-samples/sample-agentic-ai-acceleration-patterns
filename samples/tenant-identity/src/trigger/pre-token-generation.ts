@@ -53,6 +53,17 @@ const STATUS_ACTIVE = 'ACTIVE';
 const TARGET_NOT_HELD = `${INVALID_TARGET}: requested tenant is not an active tenant of the user`;
 const TARGET_MISSING_MULTI = `${INVALID_TARGET}: a tenant must be named when the user holds more than one`;
 const TARGET_MALFORMED = `${INVALID_TARGET}: requested tenant is not a valid identifier`;
+// Status refusals carry the same prefix, so the exchange maps an inactive or
+// absent tenant to invalid_target (§5.4), not invalid_grant.
+/**
+ * Cognito writes `cognito:groups` into the access token as well as the ID
+ * token. The groups name every tenant (`t-<id>`) and admin role
+ * (`admin-<id>`) the user holds, so leaving them would undo narrowing and
+ * break the P-6 contract. Every token overrides them with none (ADR-0020).
+ */
+const NO_GROUPS = { groupsToOverride: [] as string[] };
+const TARGET_NOT_ACTIVE = `${INVALID_TARGET}: tenant is not active`;
+const TARGET_NONE_ACTIVE = `${INVALID_TARGET}: user has no active tenant`;
 const SCOPE_EMPTY = `${INVALID_SCOPE}: at least one scope must be requested`;
 const SCOPE_DUPLICATE = `${INVALID_SCOPE}: a scope was requested more than once`;
 const SCOPE_NOT_HELD = `${INVALID_SCOPE}: a requested scope is not held for the requested tenant`;
@@ -116,7 +127,7 @@ function activeTenants(
         rule: 'status-single',
         tenantId: resolved.tenantId,
       });
-      throw new Error(`tenant ${resolved.tenantId} is not active`);
+      throw new Error(TARGET_NOT_ACTIVE);
     }
     return [record];
   }
@@ -127,7 +138,7 @@ function activeTenants(
       ...logBase,
       rule: 'status-multi',
     });
-    throw new Error('user has no active tenant');
+    throw new Error(TARGET_NONE_ACTIVE);
   }
   return active;
 }
@@ -191,6 +202,7 @@ function applyNarrowing(
       scopesToAdd: [...requested],
       scopesToSuppress: [COGNITO_USER_ADMIN_SCOPE],
     },
+    groupOverrideDetails: NO_GROUPS,
   };
   return event;
 }
@@ -259,6 +271,7 @@ function applyUnNarrowed(
         claimsToAddOrOverride: { tenant_id: tenantId },
         scopesToAdd: [...API_SCOPES],
       },
+      groupOverrideDetails: NO_GROUPS,
     };
     return event;
   }
@@ -272,6 +285,7 @@ function applyUnNarrowed(
       claimsToAddOrOverride: { tenants } as unknown as Record<string, string>,
       scopesToAdd: [...API_SCOPES],
     },
+    groupOverrideDetails: NO_GROUPS,
   };
   return event;
 }

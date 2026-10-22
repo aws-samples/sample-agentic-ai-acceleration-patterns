@@ -22,6 +22,7 @@ import {
   REFRESH_TOKEN_DAYS,
   SAMPLE_TAG_KEY,
   SAMPLE_TAG_VALUE,
+  STACK_TAG_KEY,
   TENANT_ATTRIBUTE_NAME,
   Topology,
 } from './shared/constants';
@@ -173,9 +174,6 @@ export class TenantIdentityStack extends Stack {
     const tokenFn = new NodejsFunction(this, 'TokenFunction', {
       entry: path.join(__dirname, 'token-exchange/token-exchange.function.ts'),
       ...functionProps(this, 'TokenFunctionLogs'),
-      environment: {
-        [ENV.topology]: topology,
-      },
     });
     acknowledgeLambdaBasicExecutionRole(tokenFn);
 
@@ -185,7 +183,6 @@ export class TenantIdentityStack extends Stack {
       entry: path.join(__dirname, 'tenant-api/tenant-authorizer.function.ts'),
       ...functionProps(this, 'AuthorizerFunctionLogs'),
       environment: {
-        [ENV.topology]: topology,
         [ENV.tableName]: table.tableName,
         [ENV.poolIndexName]: GSI_BY_USER_POOL_ID,
       },
@@ -278,6 +275,7 @@ export class TenantIdentityStack extends Stack {
       });
       // N-8 (M-3): tag every pool the sample creates.
       Tags.of(userPool).add(SAMPLE_TAG_KEY, SAMPLE_TAG_VALUE);
+      Tags.of(userPool).add(STACK_TAG_KEY, this.stackName);
 
       // R-4: attach the trigger with the V2 event (access-token
       // customisation). Grants cognito-idp.amazonaws.com invoke on the
@@ -348,28 +346,44 @@ export class TenantIdentityStack extends Stack {
       // pool-per-tenant: the platform function creates pools at onboarding.
       // It must know the trigger to attach to each new pool (ENV, §7.1).
       platformFn.addEnvironment(ENV.triggerFunctionArn, triggerFn.functionArn);
+      platformFn.addEnvironment(ENV.stackName, this.stackName);
+
+      // Both tags, so a role reaches only pools this stack created (N-3):
+      // another stack in the account tags its pools with its own name.
+      const requestTags = {
+        [`aws:RequestTag/${SAMPLE_TAG_KEY}`]: SAMPLE_TAG_VALUE,
+        [`aws:RequestTag/${STACK_TAG_KEY}`]: this.stackName,
+      };
+      const resourceTags = {
+        [`aws:ResourceTag/${SAMPLE_TAG_KEY}`]: SAMPLE_TAG_VALUE,
+        [`aws:ResourceTag/${STACK_TAG_KEY}`]: this.stackName,
+      };
 
       // N-3 (M-7): CreateUserPool has no resource ARN, so it is granted on
-      // '*' but constrained by a tag condition — only the sample's own tag
-      // may be set at create (and only that tag key). Documented accepted
+      // '*' but constrained by a tag condition — only the sample tag and this
+      // stack's tag may be set at create (and only those two keys). Documented accepted
       // account-wide action in the threat model (T-7).
       platformFn.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ['cognito-idp:CreateUserPool'],
           resources: ['*'],
           conditions: {
-            'StringEquals': { [`aws:RequestTag/${SAMPLE_TAG_KEY}`]: SAMPLE_TAG_VALUE },
-            'ForAllValues:StringEquals': { 'aws:TagKeys': [SAMPLE_TAG_KEY] },
+            'StringEquals': requestTags,
+            'ForAllValues:StringEquals': { 'aws:TagKeys': [SAMPLE_TAG_KEY, STACK_TAG_KEY] },
           },
         }),
       );
-      // TagResource for the pool at/after create, same tag condition.
+      // CreateUserPool with UserPoolTags is also authorised as TagResource on
+      // userpool/* (integ-verified: AccessDenied without it). Same tag
+      // condition as CreateUserPool. Residual: the role could tag a foreign
+      // pool into its ResourceTag rights; accepted with T-7 (threat model).
       platformFn.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ['cognito-idp:TagResource'],
           resources: [`arn:${this.partition}:cognito-idp:${this.region}:${this.account}:userpool/*`],
           conditions: {
-            StringEquals: { [`aws:RequestTag/${SAMPLE_TAG_KEY}`]: SAMPLE_TAG_VALUE },
+            'StringEquals': requestTags,
+            'ForAllValues:StringEquals': { 'aws:TagKeys': [SAMPLE_TAG_KEY, STACK_TAG_KEY] },
           },
         }),
       );
@@ -380,7 +394,7 @@ export class TenantIdentityStack extends Stack {
           actions: [...PER_POOL_USER_ACTIONS, ...GROUP_LIFECYCLE_ACTIONS, ...POOL_LIFECYCLE_ACTIONS],
           resources: [`arn:${this.partition}:cognito-idp:${this.region}:${this.account}:userpool/*`],
           conditions: {
-            StringEquals: { [`aws:ResourceTag/${SAMPLE_TAG_KEY}`]: SAMPLE_TAG_VALUE },
+            StringEquals: resourceTags,
           },
         }),
       );
@@ -391,7 +405,7 @@ export class TenantIdentityStack extends Stack {
           actions: TENANT_USER_ACTIONS,
           resources: [`arn:${this.partition}:cognito-idp:${this.region}:${this.account}:userpool/*`],
           conditions: {
-            StringEquals: { [`aws:ResourceTag/${SAMPLE_TAG_KEY}`]: SAMPLE_TAG_VALUE },
+            StringEquals: resourceTags,
           },
         }),
       );
@@ -416,17 +430,17 @@ export class TenantIdentityStack extends Stack {
       acknowledgeGranularFinding(
         platformFn,
         'AwsSolutions-IAM5[Resource::*]',
-        'N-3 / threat-model M-7 (T-7): cognito-idp:CreateUserPool has no resource ARN, so it is granted on * and constrained by a RequestTag condition (only the sample tag, only that tag key). Per-pool actions are scoped to userpool/* with a ResourceTag=sample condition because pools are created at runtime in pool-per-tenant.',
+        'N-3 / threat-model M-7 (T-7): cognito-idp:CreateUserPool has no resource ARN, so it is granted on * and constrained by a RequestTag condition (only the sample tag and the stack tag, only those keys). Per-pool actions are scoped to userpool/* with ResourceTag conditions on the sample tag and the stack tag because pools are created at runtime in pool-per-tenant.',
       );
       acknowledgeGranularFinding(
         tenantUsersFn,
         `AwsSolutions-IAM5[Resource::${userpoolWildcardArn}]`,
-        'N-3 / threat-model M-17: per-tenant pools are created at runtime, so the tenant-user actions are scoped to userpool/* with a ResourceTag=sample condition. No pool or group lifecycle action is present (R-8).',
+        'N-3 / threat-model M-17: per-tenant pools are created at runtime, so the tenant-user actions are scoped to userpool/* with ResourceTag conditions on the sample tag and the stack tag. No pool or group lifecycle action is present (R-8).',
       );
       acknowledgeGranularFinding(
         platformFn,
         `AwsSolutions-IAM5[Resource::${userpoolWildcardArn}]`,
-        'N-3 / threat-model M-7: per-pool and pool-lifecycle actions are scoped to userpool/* with a ResourceTag=sample condition because pools are created at runtime in pool-per-tenant.',
+        'N-3 / threat-model M-7: per-pool and pool-lifecycle actions are scoped to userpool/* with ResourceTag conditions on the sample tag and the stack tag because pools are created at runtime in pool-per-tenant.',
       );
     }
 
@@ -436,7 +450,7 @@ export class TenantIdentityStack extends Stack {
       acknowledgeGranularFinding(
         fn,
         `AwsSolutions-IAM5[Resource::${nagFindingResource(this, `${table.tableArn}/index/${GSI_BY_USER_POOL_ID}`)}]`,
-        'Registry read scoped to this table and its byUserPoolId index only; the index ARN is this table\'s own namespace, not a cross-resource wildcard.',
+        'Registry read scoped to this table and its byUserPoolId index only; the index ARN is this table\'s own namespace, not a cross-resource wildcard (R-14, threat-model M-8).',
       );
     }
 
@@ -540,7 +554,7 @@ export class TenantIdentityStack extends Stack {
     Validations.of(api).acknowledge({
       id: 'AwsSolutions-APIG2',
       reason:
-        'Request validation IS enabled: the merged Smithy OpenAPI applies x-amazon-apigateway-request-validator per operation. The rule only detects standalone CfnRequestValidator resources, which SpecRestApi does not create.',
+        'Request validation IS enabled: the merged Smithy OpenAPI applies x-amazon-apigateway-request-validator per operation. The rule only detects standalone CfnRequestValidator resources, which SpecRestApi does not create (ADR-0016).',
     });
     Validations.of(api).acknowledge({
       id: 'AwsSolutions-APIG3',
@@ -558,21 +572,21 @@ export class TenantIdentityStack extends Stack {
         'POST /oauth2/token uses no Cognito user-pool authoriser by design (ADR-0011); /tenant uses a custom Lambda authoriser (ADR-0007) and /platform uses AWS_IAM (ADR-0005).',
     });
     suppressTemplateScanners(apiAccessLogs, {
-      cfnNag: [{ id: 'W84', reason: 'Access logs carry request metadata only; default CloudWatch Logs SSE at rest is sufficient for this sample.' }],
-      checkov: [{ id: 'CKV_AWS_158', comment: 'Access logs carry request metadata only; default CloudWatch Logs SSE at rest is sufficient for this sample.' }],
+      cfnNag: [{ id: 'W84', reason: 'Access logs carry request metadata only; default CloudWatch Logs SSE at rest is sufficient for this sample. Accepted risk T-24 (threat model).' }],
+      checkov: [{ id: 'CKV_AWS_158', comment: 'Access logs carry request metadata only; default CloudWatch Logs SSE at rest is sufficient for this sample. Accepted risk T-24 (threat model).' }],
     });
     suppressTemplateScanners(api.deploymentStage, {
-      cfnNag: [{ id: 'W64', reason: 'Not usage-plan/API-key based: callers authenticate with IAM (/platform), tokens (/tenant, /oauth2); explicit per-route throttling bounds request rates (N-5/N-6/N-7).' }],
-      checkov: [{ id: 'CKV_AWS_120', comment: 'Identity responses are per-caller and mutation-heavy; stage caching risks stale reads for marginal benefit.' }],
+      cfnNag: [{ id: 'W64', reason: 'Not usage-plan/API-key based: callers authenticate with IAM (/platform), tokens (/tenant, /oauth2); explicit per-route throttling bounds request rates (N-5/N-6/N-7). Accepted risk T-24 (threat model).' }],
+      checkov: [{ id: 'CKV_AWS_120', comment: 'Identity responses are per-caller and mutation-heavy; stage caching risks stale reads for marginal benefit. Accepted risk T-24 (threat model).' }],
     });
     if (api.latestDeployment !== undefined) {
       suppressTemplateScanners(api.latestDeployment, {
-        cfnNag: [{ id: 'W68', reason: 'Not usage-plan/API-key based: callers authenticate with IAM or tokens; explicit per-route throttling bounds request rates.' }],
+        cfnNag: [{ id: 'W68', reason: 'Not usage-plan/API-key based: callers authenticate with IAM or tokens; explicit per-route throttling bounds request rates. Accepted risk T-24 (threat model).' }],
       });
     }
     for (const fn of [platformFn, tenantUsersFn]) {
       suppressTemplateScanners(fn.role!.node.findChild('DefaultPolicy'), {
-        cfnNag: [{ id: 'W76', reason: 'Least-privilege policy with granular per-resource statements (registry table + index, tag-conditioned cognito-idp); the statement-point count reflects explicit scoping, not over-breadth (P-8, N-3).' }],
+        cfnNag: [{ id: 'W76', reason: 'Least-privilege policy with granular per-resource statements (registry table + index, tag-conditioned cognito-idp); the statement-point count reflects explicit scoping, not over-breadth (P-8, N-3). Accepted risk T-24 (threat model).' }],
       });
     }
 
@@ -624,8 +638,8 @@ export class TenantIdentityStack extends Stack {
       removalPolicy: RemovalPolicy.DESTROY, // sample only
     });
     suppressTemplateScanners(executionLogs, {
-      cfnNag: [{ id: 'W84', reason: 'Execution logs carry request metadata only; default CloudWatch Logs SSE at rest is sufficient for this sample.' }],
-      checkov: [{ id: 'CKV_AWS_158', comment: 'Execution logs carry request metadata only; default CloudWatch Logs SSE at rest is sufficient for this sample.' }],
+      cfnNag: [{ id: 'W84', reason: 'Execution logs carry request metadata only; default CloudWatch Logs SSE at rest is sufficient for this sample. Accepted risk T-24 (threat model).' }],
+      checkov: [{ id: 'CKV_AWS_158', comment: 'Execution logs carry request metadata only; default CloudWatch Logs SSE at rest is sufficient for this sample. Accepted risk T-24 (threat model).' }],
     });
     // Late log delivery recreates a deleted log group. Delete every writer
     // first, wait, then delete its log groups. Two drains, because the
@@ -699,8 +713,8 @@ function functionLogGroup(scope: Construct, id: string): logs.LogGroup {
     removalPolicy: RemovalPolicy.DESTROY, // sample only
   });
   suppressTemplateScanners(logGroup, {
-    cfnNag: [{ id: 'W84', reason: 'Function logs carry non-sensitive request metadata; default CloudWatch Logs SSE at rest is sufficient for this sample.' }],
-    checkov: [{ id: 'CKV_AWS_158', comment: 'Function logs carry non-sensitive request metadata; default CloudWatch Logs SSE at rest is sufficient for this sample.' }],
+    cfnNag: [{ id: 'W84', reason: 'Function logs carry non-sensitive request metadata; default CloudWatch Logs SSE at rest is sufficient for this sample. Accepted risk T-24 (threat model).' }],
+    checkov: [{ id: 'CKV_AWS_158', comment: 'Function logs carry non-sensitive request metadata; default CloudWatch Logs SSE at rest is sufficient for this sample. Accepted risk T-24 (threat model).' }],
   });
   return logGroup;
 }
@@ -710,7 +724,7 @@ function acknowledgeLambdaBasicExecutionRole(fn: NodejsFunction): void {
   acknowledgeGranularFinding(
     fn,
     'AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]',
-    'Logs-only managed policy attached by NodejsFunction; a scoped replacement adds boilerplate with marginal benefit.',
+    'Logs-only managed policy attached by NodejsFunction; a scoped replacement adds boilerplate with marginal benefit. Accepted risk T-24 (threat model).',
   );
   // Active X-Ray tracing adds xray:PutTraceSegments / PutTelemetryRecords on
   // '*': the X-Ray API takes no resource ARN, so the wildcard is inherent to
@@ -718,26 +732,26 @@ function acknowledgeLambdaBasicExecutionRole(fn: NodejsFunction): void {
   acknowledgeGranularFinding(
     fn,
     'AwsSolutions-IAM5[Resource::*]',
-    'Active X-Ray tracing grants xray:PutTraceSegments/PutTelemetryRecords, which the X-Ray API only accepts on \'*\' (no resource ARN). Not over-breadth.',
+    'Active X-Ray tracing grants xray:PutTraceSegments/PutTelemetryRecords, which the X-Ray API only accepts on \'*\' (no resource ARN). Not over-breadth. Accepted risk T-24 (threat model).',
   );
   suppressTemplateScanners(fn, {
     cfnNag: [
-      { id: 'W58', reason: 'Log permissions come from the AWSLambdaBasicExecutionRole managed policy; cfn_nag does not resolve managed policies.' },
-      { id: 'W89', reason: 'The function calls only AWS APIs over public endpoints; no VPC-internal resource to reach.' },
-      { id: 'W92', reason: 'The sample does not partition account concurrency; API Gateway stage throttling bounds the invoke rate.' },
+      { id: 'W58', reason: 'Log permissions come from the AWSLambdaBasicExecutionRole managed policy; cfn_nag does not resolve managed policies. Accepted risk T-24 (threat model).' },
+      { id: 'W89', reason: 'The function calls only AWS APIs over public endpoints; no VPC-internal resource to reach. Accepted risk T-24 (threat model).' },
+      { id: 'W92', reason: 'The sample does not partition account concurrency; API Gateway stage throttling bounds the invoke rate. Accepted risk T-24 (threat model).' },
     ],
     checkov: [
-      { id: 'CKV_AWS_115', comment: 'The sample does not partition account concurrency; API Gateway stage throttling bounds the invoke rate.' },
-      { id: 'CKV_AWS_116', comment: 'Synchronous API/authorizer/trigger function - failures surface as errors; no async event source to dead-letter.' },
-      { id: 'CKV_AWS_117', comment: 'The function calls only AWS APIs over public endpoints; no VPC-internal resource to reach.' },
-      { id: 'CKV_AWS_173', comment: 'Environment variables carry non-secret configuration (table/pool/client identifiers); default encryption at rest applies.' },
+      { id: 'CKV_AWS_115', comment: 'The sample does not partition account concurrency; API Gateway stage throttling bounds the invoke rate. Accepted risk T-24 (threat model).' },
+      { id: 'CKV_AWS_116', comment: 'Synchronous API/authorizer/trigger function - failures surface as errors; no async event source to dead-letter. Accepted risk T-24 (threat model).' },
+      { id: 'CKV_AWS_117', comment: 'The function calls only AWS APIs over public endpoints; no VPC-internal resource to reach. Accepted risk T-24 (threat model).' },
+      { id: 'CKV_AWS_173', comment: 'Environment variables carry non-secret configuration (table/pool/client identifiers); default encryption at rest applies. Accepted risk T-24 (threat model).' },
     ],
   });
   const ownedLogGroup = fn.node.tryFindChild('LogGroup');
   if (ownedLogGroup !== undefined) {
     suppressTemplateScanners(ownedLogGroup, {
-      cfnNag: [{ id: 'W84', reason: 'Function logs carry non-sensitive request metadata; default CloudWatch Logs SSE at rest is sufficient for this sample.' }],
-      checkov: [{ id: 'CKV_AWS_158', comment: 'Function logs carry non-sensitive request metadata; default CloudWatch Logs SSE at rest is sufficient for this sample.' }],
+      cfnNag: [{ id: 'W84', reason: 'Function logs carry non-sensitive request metadata; default CloudWatch Logs SSE at rest is sufficient for this sample. Accepted risk T-24 (threat model).' }],
+      checkov: [{ id: 'CKV_AWS_158', comment: 'Function logs carry non-sensitive request metadata; default CloudWatch Logs SSE at rest is sufficient for this sample. Accepted risk T-24 (threat model).' }],
     });
   }
 }
@@ -765,20 +779,20 @@ function suppressUserPoolFindings(userPool: cognito.UserPool): void {
   Validations.of(userPool).acknowledge({
     id: 'AwsSolutions-COG2',
     reason:
-      'MFA is out of scope: users are admin-created and sign in only for the demonstration (ADR-0006, §3.2). A real deployment enables MFA - on the hardening checklist. The sample subject is tenant identity in the token, not sign-in hardening (§1.2).',
+      'MFA is out of scope: users are admin-created and sign in only for the demonstration (ADR-0006, §3.2). A real deployment enables MFA - on the hardening checklist. The sample subject is tenant identity in the token, not sign-in hardening (§1.2). Accepted risk T-23 (threat model).',
   });
   Validations.of(userPool).acknowledge({
     id: 'AwsSolutions-COG3',
     reason:
-      'Advanced Security (threat protection) is a production hardening concern on the README checklist. Out of scope for the identity-topology subject (§1.2).',
+      'Advanced Security (threat protection) is a production hardening concern on the README checklist. Out of scope for the identity-topology subject (§1.2). Accepted risk T-23 (threat model).',
   });
   Validations.of(userPool).acknowledge({
     id: 'AwsSolutions-COG8',
     reason:
-      'The Essentials feature plan is required (R-4): access-token customisation by the pre-token-generation trigger is unavailable on Lite, and the Plus tier\'s advanced threat protection is a production hardening concern (README checklist), out of scope for the identity-topology subject (§1.2).',
+      'The Essentials feature plan is required (R-4): access-token customisation by the pre-token-generation trigger is unavailable on Lite, and the Plus tier\'s advanced threat protection is a production hardening concern (README checklist), out of scope for the identity-topology subject (§1.2). Accepted risk T-23 (threat model).',
   });
   suppressTemplateScanners(userPool, {
-    cfnNag: [{ id: 'F78', reason: 'MFA out of scope: admin-created users, sign-in for the demonstration only (ADR-0006); real deployment enables MFA (README checklist).' }],
+    cfnNag: [{ id: 'F78', reason: 'MFA out of scope: admin-created users, sign-in for the demonstration only (ADR-0006); real deployment enables MFA (README checklist). Accepted risk T-23 (threat model).' }],
   });
 }
 

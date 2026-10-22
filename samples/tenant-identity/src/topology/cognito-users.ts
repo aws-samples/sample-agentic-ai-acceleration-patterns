@@ -72,9 +72,12 @@ export function generateTemporaryPassword(): string {
   return chars.join('');
 }
 
-/** A Cognito attribute filter escapes embedded double quotes (ListUsers). */
+/**
+ * A Cognito attribute filter (ListUsers). Backslashes are escaped first, then
+ * double quotes, so neither can end the quoted value early.
+ */
 export function emailFilter(email: string): string {
-  return `email = "${email.replace(/"/g, '\\"')}"`;
+  return `email = "${email.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
 /** The value of a user attribute, or undefined. */

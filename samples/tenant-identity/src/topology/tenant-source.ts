@@ -14,7 +14,7 @@
 
 import type { PreTokenGenerationV2TriggerEvent } from 'aws-lambda';
 import type { ResolvedTenants, TenantSource } from './provisioner';
-import { isTenantId, TENANT_ATTRIBUTE, TENANT_GROUP_PATTERN, type Topology } from '../shared/constants';
+import { INVALID_TARGET, isTenantId, TENANT_ATTRIBUTE, TENANT_GROUP_PATTERN, type Topology } from '../shared/constants';
 import { InvalidInputError } from '../shared/errors';
 import type { RegistryReader } from '../shared/registry';
 
@@ -41,7 +41,9 @@ class PoolPerTenantTenantSource implements TenantSource {
   async resolve(event: PreTokenGenerationV2TriggerEvent, registry: RegistryReader): Promise<ResolvedTenants> {
     const record = await registry.getByUserPoolId(event.userPoolId);
     if (record === undefined) {
-      throw new Error('unknown user pool');
+      // invalid_target prefix: the exchange maps an absent tenant to
+      // invalid_target, not invalid_grant (spec §5.4). Fixed text only.
+      throw new Error(`${INVALID_TARGET}: unknown user pool`);
     }
     return { kind: 'single', tenantId: record.tenantId, record };
   }
@@ -58,7 +60,7 @@ class SharedPoolTenantSource implements TenantSource {
   async resolve(event: PreTokenGenerationV2TriggerEvent, registry: RegistryReader): Promise<ResolvedTenants> {
     const tenantId = event.request.userAttributes[TENANT_ATTRIBUTE];
     if (!isTenantId(tenantId)) {
-      throw new InvalidInputError('User has no valid tenant attribute');
+      throw new InvalidInputError(`${INVALID_TARGET}: user has no valid tenant attribute`);
     }
     const record = await registry.get(tenantId);
     return { kind: 'single', tenantId, record };

@@ -21,7 +21,7 @@ import {
   CognitoIdentityProviderClient,
   GetTokensFromRefreshTokenCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
-import { ExchangeRequest, OAuthFailure, OAUTH_ERROR_DESCRIPTIONS, parseExchangeForm } from './form';
+import { ExchangeRequest, OAuthFailure, OAUTH_ERROR_DESCRIPTIONS, parseExchangeForm, SERVER_UNAVAILABLE_DESCRIPTION } from './form';
 import {
   COGNITO_USER_ADMIN_SCOPE,
   INVALID_SCOPE,
@@ -75,8 +75,8 @@ function clientError(failure: OAuthFailure): OAuthError {
 }
 
 /** A server (5xx) failure -> the generated OAuthServerError (HTTP 500). */
-function serverError(): OAuthServerError {
-  const description = OAUTH_ERROR_DESCRIPTIONS.server_error;
+function serverError(cause: 'mismatch' | 'unavailable' = 'mismatch'): OAuthServerError {
+  const description = cause === 'unavailable' ? SERVER_UNAVAILABLE_DESCRIPTION : OAUTH_ERROR_DESCRIPTIONS.server_error;
   return new OAuthServerError({
     message: description,
     code: 'server_error',
@@ -118,14 +118,14 @@ function mapCognitoError(error: unknown): OAuthError | OAuthServerError {
     case 'LimitExceededException':
     case 'InternalErrorException':
       log.error('exchange cognito fault', { errorName: name });
-      return serverError();
+      return serverError('unavailable');
     default:
       // An unmodelled client error from Cognito is still the caller's grant
       // problem; an unknown fault we treat conservatively as invalid_grant
       // unless the SDK marks it a server fault.
       if (isServerFault(error)) {
         log.error('exchange cognito fault', { errorName: name });
-        return serverError();
+        return serverError('unavailable');
       }
       return clientError(new OAuthFailure('invalid_grant'));
   }

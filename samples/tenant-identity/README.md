@@ -383,7 +383,7 @@ Each item maps to a threat-model mitigation (M-n) or threat (T-n).
       WAF).
 - [ ] **Enable MFA and Cognito threat protection** on the pools (the **Plus**
       feature tier) — the sample uses Essentials, which is the minimum for
-      access-token customisation (T-23, cdk-nag COG2/COG3; out of scope
+      access-token customisation (T-23, cdk-nag COG2/COG3/COG8; out of scope
       for the identity-topology subject).
 - [ ] **Turn deletion protection on** for the pools and set a non-`DESTROY`
       removal policy on the registry — the sample keeps both off so teardown

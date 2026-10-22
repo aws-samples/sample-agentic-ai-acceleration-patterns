@@ -186,6 +186,17 @@ describe('TenantUsersService — R-13 self-mutation (spec §5.2)', () => {
     );
     expect(provisioner.deleteUser).not.toHaveBeenCalled();
   });
+
+  it('refuses self-demotion even when the path uses the e-mail, not the username', async () => {
+    const provisioner = mockProvisioner({
+      getUser: jest.fn().mockResolvedValue(userView({ username: CALLER_SUB, email: 'me@example.com' })),
+    });
+    const service = new TenantUsersService(fakeRegistry(), provisioner);
+    await expect(
+      service.UpdateTenantUser({ username: 'me@example.com', admin: false }, context),
+    ).rejects.toBeInstanceOf(ModeledConflictError);
+    expect(provisioner.setAdmin).not.toHaveBeenCalled();
+  });
 });
 
 describe('TenantUsersService — tenant status (P-2 defence in depth)', () => {

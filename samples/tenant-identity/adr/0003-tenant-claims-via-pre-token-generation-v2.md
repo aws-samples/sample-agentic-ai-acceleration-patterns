@@ -1,6 +1,6 @@
 # ADR-0003: Put tenant identity into the access token with a V2 pre-token-generation trigger
 
-- Status: Accepted
+- Status: Superseded by ADR-0020
 - Date: 2026-10-21
 - Deciders: Dave Roberts (SA)
 

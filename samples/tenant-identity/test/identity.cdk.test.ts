@@ -243,7 +243,8 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     expect(createPool).toBeDefined();
     expect(createPool.Resource).toBe('*');
     expect(createPool.Condition.StringEquals['aws:RequestTag/sample']).toBe('tenant-identity');
-    expect(createPool.Condition['ForAllValues:StringEquals']['aws:TagKeys']).toEqual(['sample']);
+    expect(createPool.Condition['ForAllValues:StringEquals']['aws:TagKeys']).toEqual(['sample', 'tenant-identity:stack']);
+    expect(createPool.Condition.StringEquals['aws:RequestTag/tenant-identity:stack']).toBe('TenantIdentity-pool-per-tenant');
 
     // Per-pool + pool-lifecycle actions scoped to userpool/* with ResourceTag.
     const perPool = statements.find(
@@ -253,6 +254,44 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     );
     expect(perPool).toBeDefined();
     expect(JSON.stringify(perPool.Resource)).toContain('userpool/*');
+    // The stack tag keeps this stack's roles off other stacks' pools.
+    expect(perPool.Condition.StringEquals['aws:ResourceTag/tenant-identity:stack']).toBe('TenantIdentity-pool-per-tenant');
+  });
+
+  test('pool-per-tenant: every ResourceTag-scoped cognito statement names the stack (N-3)', () => {
+    const template = synth('pool-per-tenant');
+    for (const role of ['PlatformFunctionServiceRole', 'TenantUsersFunctionServiceRole']) {
+      const scoped = policyStatementsForRole(template, role).filter((s) => s.Condition?.StringEquals?.['aws:ResourceTag/sample']);
+      expect(scoped.length).toBeGreaterThan(0);
+      for (const s of scoped) {
+        expect(s.Condition.StringEquals['aws:ResourceTag/tenant-identity:stack']).toBe('TenantIdentity-pool-per-tenant');
+      }
+    }
+  });
+
+  test('platform pool-per-tenant: STACK_NAME is set for the pool tag', () => {
+    const template = synth('pool-per-tenant');
+    const fns = template.findResources('AWS::Lambda::Function');
+    const [, platform] = Object.entries(fns).find(([id]) => id.startsWith('PlatformFunction'))!;
+    expect((platform as any).Properties.Environment.Variables.STACK_NAME).toBe('TenantIdentity-pool-per-tenant');
+  });
+
+  test('platform pool-per-tenant: TagResource only for the sample tag key and value (N-3)', () => {
+    const template = synth('pool-per-tenant');
+    const statements = policyStatementsForRole(template, 'PlatformFunctionServiceRole');
+    const tag = statements.find((s) => actionsOf(s).includes('cognito-idp:TagResource'));
+    expect(tag).toBeDefined();
+    expect(tag.Condition.StringEquals['aws:RequestTag/sample']).toBe('tenant-identity');
+    expect(tag.Condition['ForAllValues:StringEquals']['aws:TagKeys']).toEqual(['sample', 'tenant-identity:stack']);
+  });
+
+  test.each(['TokenFunction', 'AuthorizerFunction'])('%s gets no TOPOLOGY setting it never reads', (fn) => {
+    const template = synth('pool-per-tenant');
+    const fns = template.findResources('AWS::Lambda::Function');
+    const match = Object.entries(fns).find(([id]) => id.startsWith(fn) && !id.includes('ServiceRole'));
+    expect(match).toBeDefined();
+    const vars = (match![1] as any).Properties.Environment?.Variables ?? {};
+    expect(vars).not.toHaveProperty('TOPOLOGY');
   });
 
   test('shared-pool platform role is scoped to the single stack pool ARN (N-3)', () => {
@@ -580,7 +619,8 @@ describe('TenantIdentityStack - teardown leaves no log group (ADR-0019)', () => 
 
     // Log groups: each is a dependency of some drain (deleted after it).
     for (const [id, r] of Object.entries(resources)) {
-      if (r.Type === 'AWS::Logs::LogGroup') {
+      // The waiters' own groups are exempt: nothing ever writes to them.
+      if (r.Type === 'AWS::Logs::LogGroup' && !id.includes('LogDrainLogs')) {
         expect(drains.some((d) => dependsOn(d).includes(id))).toBe(true);
       }
     }
@@ -592,6 +632,21 @@ describe('TenantIdentityStack - teardown leaves no log group (ADR-0019)', () => 
       if (writer) {
         expect(dependsOn(id).some((d) => drains.includes(d))).toBe(true);
       }
+    }
+  });
+
+  test.each(TOPOLOGIES)('no log group is retained, even with useCdkManagedLogGroup on [%s]', (topology) => {
+    // integ-runner synthesises with the recommended feature flags, which give
+    // any function without an explicit log group a retained one.
+    const app = new App({ context: { 'aws:cdk:bundling-stacks': [], '@aws-cdk/aws-lambda:useCdkManagedLogGroup': true } });
+    const stack = new TenantIdentityStack(app, `TenantIdentity-${topology}`, {
+      topology,
+      env: { account: '123456789012', region: 'eu-central-1' },
+    });
+    const groups = Object.values(Template.fromStack(stack).findResources('AWS::Logs::LogGroup')) as any[];
+    expect(groups.length).toBeGreaterThan(0);
+    for (const g of groups) {
+      expect(g.DeletionPolicy).toBe('Delete');
     }
   });
 
@@ -619,7 +674,7 @@ describe('TenantIdentityStack - teardown leaves no log group (ADR-0019)', () => 
     );
     expect(waiters).toHaveLength(2);
     for (const [, fn] of waiters) {
-      expect(fn.Properties.LoggingConfig).toEqual({
+      expect(fn.Properties.LoggingConfig).toMatchObject({
         LogFormat: 'JSON',
         SystemLogLevel: 'WARN',
         ApplicationLogLevel: 'ERROR',

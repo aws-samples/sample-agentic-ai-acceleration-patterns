@@ -251,7 +251,7 @@ The access token carries exactly one tenant claim added by the pre-token-
 generation trigger: `tenant_id` (string; topologies 1 and 2, and every
 narrowed token) or `tenants` (array of strings; topology 3 without
 narrowing). The trigger also sets the sample scopes in `scope` (§8.1).
-Nothing else is added: no names, no roles, no e-mail. The claims go into the **access** token, not the ID token, because
+Nothing else is added: no names, no roles, no e-mail. Cognito's own `cognito:groups` claim is removed from every token, because it names every tenant and admin group the user holds (ADR-0020). The claims go into the **access** token, not the ID token, because
 the access token is what a client presents to an API; the ID token is for the
 client itself. This is the **token contract**, the one thing a consumer may
 rely on across topologies:
@@ -505,7 +505,7 @@ API always leaves at least one admin; only the vendor can remove the last.
 view, `CreateTenantUser` and `DeleteTenantUser` are the only membership
 changes, and only for its own tenant. In topology 3, `CreateTenantUser` for
 an e-mail that already has a Cognito user adds that user to the tenant, as
-`CreateUser` does, and returns no temporary password (threat model T-21).
+`CreateUser` does, and returns no temporary password (threat model T-21, T-25).
 
 ### 5.3 Error model
 
@@ -563,6 +563,7 @@ Errors, `{error, error_description}`, 400 unless marked:
 | `invalid_scope` | the trigger refused the scopes (prefix `invalid_scope`) |
 | `invalid_grant` | anything else Cognito rejects: an expired, revoked, or foreign refresh token, or an unknown client |
 | `server_error` (500) | Cognito returned a token that does not match the request (ADR-0012); logged by rule name, never with the token |
+| `server_error` (500) | Cognito throttled the call or failed (`TooManyRequestsException`, `LimitExceededException`, `InternalErrorException`, any 5xx); the caller may retry. Logged by error name only |
 
 `error_description` is fixed text per code and never echoes Cognito's
 message or the token.
@@ -680,7 +681,7 @@ it is the only code that decides what tenant identity a token carries.
 | Input used | `userPoolId`, `request.userAttributes["custom:tenantId"]`, `request.groupConfiguration.groupsToOverride`, and from `request.clientMetadata` only the §8.2 keys, only to narrow (P-3, P-10). |
 | Tenant lookup | 1: registry item for the event's `userPoolId` (§4.2). 2: registry item for `custom:tenantId`. 3: registry items for every `t-*` group (one batch read). The read is per invocation, uncached (N-9). |
 | Status rule | 1, 2: tenant absent or not `ACTIVE` → throw. 3: drop every tenant that is absent or not `ACTIVE`; if nothing remains → throw. Cognito turns the throw into a failed sign-in or refresh (P-2). |
-| Output | `accessTokenGeneration.claimsToAddOrOverride` = `{tenant_id}` (1, 2, and every narrowed token) or `{tenants: [...]}` (3, un-narrowed). `accessTokenGeneration.scopesToAdd` = the §8.1 API scopes, or exactly the requested ones when narrowed; `tenant-admin/users` only ever when narrowed (§8.1). A narrowed token also gets `scopesToSuppress = ["aws.cognito.signin.user.admin"]`. ID token untouched. No `claimsToSuppress`, no group overrides. |
+| Output | `accessTokenGeneration.claimsToAddOrOverride` = `{tenant_id}` (1, 2, and every narrowed token) or `{tenants: [...]}` (3, un-narrowed). `accessTokenGeneration.scopesToAdd` = the §8.1 API scopes, or exactly the requested ones when narrowed; `tenant-admin/users` only ever when narrowed (§8.1). A narrowed token also gets `scopesToSuppress = ["aws.cognito.signin.user.admin"]`. Every token also gets `groupOverrideDetails.groupsToOverride = []`, so neither token carries `cognito:groups` (ADR-0020). No other ID-token change. No `claimsToSuppress`. |
 | Failure mode | Any exception → Cognito fails the token request. The function MUST NOT swallow errors and return a token without the claim; a token without a tenant claim is a token the contract (P-6) does not allow. |
 | Idempotency | Pure function of the event and the registry's current state; no writes. |
 
@@ -731,7 +732,7 @@ MUST NOT hold any `cognito-idp` permission.
 | N-1 | Access token lifetime MUST be the Cognito minimum (5 minutes) in every pool the sample creates; refresh tokens 1 day. | Issued tokens cannot be withdrawn, so the lifetime is the offboarding bound (P-2); keep it short. Refresh re-runs the trigger, so a long refresh lifetime costs nothing in offboarding latency. Documented trade: more refresh traffic. |
 | N-2 | The registry table MUST have point-in-time recovery; sample uses `DESTROY` removal. | Vendor-facing registry; in `pool-per-tenant` losing it orphans pools. |
 | N-3 | Platform role scoped to `cognito-idp` actions on pools the sample created (resource tag `sample=tenant-identity` as the condition where the action supports resource ARNs; `CreateUserPool` has no resource, so it is the accepted account-wide action, documented in the threat model). | P-8: this is the hardening point of `pool-per-tenant`. |
-| N-4 | Structured logs; the platform function and the trigger log `tenantId`, `userId`, and the rule that refused an issuance, and never a token or a temporary password. | Synthetic data still deserves hygiene the reader will copy. |
+| N-4 | Structured logs; the platform function logs `tenantId`, the operation, and the rule that refused an action, never a username or e-mail address (M-22); the trigger logs `tenantId`, the user's `sub` and Cognito `userName` (the `sub`, since pools sign in by e-mail), the trigger source, and the refusing rule. Neither logs a token or a temporary password. | Synthetic data still deserves hygiene the reader will copy. |
 | N-5 | The `/platform/*` stage MUST be throttled (reference: 10 rps / 20 burst). | `CreateTenant` in topology 1 creates account-wide resources; cap the rate of a leaked vendor credential. |
 | N-6 | `POST /oauth2/token` MUST be throttled separately from `/platform/*` (reference: 20 rps / 40 burst). Its function MUST NOT log the refresh token, the issued token, or Cognito's error message. | The route is unauthenticated at the gateway; cap the cost of abuse against Cognito's request-rate quotas. |
 | N-7 | `/tenant/*` MUST be throttled separately (reference: 10 rps / 20 burst). Its authoriser MUST NOT cache results. The tenant-user function logs `tenantId`, the caller's `sub`, and the operation, never a token or a temporary password. | Each call changes identity: cap the damage of a leaked admin token, and keep offboarding immediate on this route (P-2). |
