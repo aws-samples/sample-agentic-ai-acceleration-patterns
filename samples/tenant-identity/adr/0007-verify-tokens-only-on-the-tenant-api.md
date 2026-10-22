@@ -25,14 +25,15 @@ selection header), and puts a per-request lookup on the hot path, which the
 spec's argument for Cognito as the trusted source rejects (§1). The sample
 would be judged on a part that is not its subject.
 ### Option 2: HTTP API JWT authoriser on `/tenant/*`
-Pros: no code. Cons: one issuer per authoriser. Works for `shared-pool*`,
+Pros: no code. Cons: needs an HTTP API, which the sample does not use
+(ADR-0016); one issuer per authoriser. Works for `shared-pool*`,
 not for `pool-per-tenant`, so topology-specific wiring leaks into the API
 (P-1). Cannot check tenant status.
 ### Option 3: REST API with a Cognito user-pool authoriser
 Pros: no code; takes a list of pools. Cons: the list is fixed at deploy
-time, so onboarding a tenant in `pool-per-tenant` means redeploying the API;
-the sample's API is an HTTP API (R-1). Cannot check tenant status.
-### Option 4: One HTTP API Lambda authoriser on `/tenant/*` that reads the registry
+time, so onboarding a tenant in `pool-per-tenant` means redeploying the API.
+Cannot check tenant status.
+### Option 4: One Lambda authoriser on `/tenant/*` that reads the registry
 Pros: one code path for all topologies; the registry is already the issuer
 allowlist for `pool-per-tenant` (§4.1); it can refuse a tenant that is not
 `ACTIVE`, so offboarding takes effect on this route at once. Cons:

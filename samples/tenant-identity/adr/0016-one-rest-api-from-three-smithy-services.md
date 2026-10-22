@@ -5,11 +5,12 @@
 - Deciders: Dave Roberts (SA)
 
 ## Context
-Spec R-1 asks for one API Gateway HTTP API with three route families:
+Spec R-1 asks for one API Gateway API with three route families:
 `/platform/*` (IAM), `POST /oauth2/token` (no authoriser), and `/tenant/*`
-(Lambda authoriser). Building it showed three needs an HTTP API does not
-meet well. §3.2 grants the platform API to the account through a resource
-policy, and HTTP APIs have none. N-5, N-6 and N-7 set a separate throttle
+(Lambda authoriser). API Gateway offers two API types, REST and HTTP, and
+the spec's other requirements decide between them. §3.2 grants the
+platform API to the account through a resource policy, and HTTP APIs have
+none. N-5, N-6 and N-7 set a separate throttle
 per route family; both API types can do that, but only REST lets the
 generated OpenAPI drive it per method. The reference sample
 (`control-plane`) builds a REST `SpecRestApi` from Smithy's OpenAPI output,
@@ -21,7 +22,7 @@ must implement every operation of its service.
 
 ## Options considered
 ### Option 1: HTTP API from one Smithy service
-Pros: cheaper per request, matches R-1 as written. Cons: no resource
+Pros: cheaper per request, lower latency. Cons: no resource
 policy; one generated handler would force all three functions to carry
 every operation, or a hand-written router per function.
 ### Option 2: REST API from one Smithy service
@@ -47,6 +48,5 @@ Easier: least privilege per function falls out of the model split; the
 REST features (resource policy, WAF association, method throttling) are
 available to a deployer. Harder: a REST API costs more per request than an
 HTTP API, and the merge rejects duplicate paths or conflicting schema
-names, so the three services must not reuse a path. Spec R-1 says "HTTP
-API"; it carries a dated note that points here. Revisit if HTTP APIs gain
-resource policies.
+names, so the three services must not reuse a path. Revisit if HTTP APIs
+gain resource policies.

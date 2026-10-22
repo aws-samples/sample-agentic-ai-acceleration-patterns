@@ -332,16 +332,9 @@ no stack, pool, table, parameter, role, or log group with the sample's prefix.
 ## 8. Differences from the specification
 
 The code and the ADRs are authoritative; the specification carries dated
-amendment notes pointing at the first three below. These are the divergences
+amendment notes pointing at the first two below. These are the divergences
 found in the implementation:
 
-- **ADR-0016 — one REST API, not an HTTP API.** Spec R-1 asks for an API
-  Gateway **HTTP** API. The sample builds a REST `SpecRestApi` from three
-  Smithy services merged into one OpenAPI document, because an HTTP API has no
-  resource policy (needed for the §3.2 account grant), and REST lets the
-  generated OpenAPI drive per-method throttling and request validation, as the
-  `control-plane` sample does. The three services keep each function to one
-  generated handler.
 - **ADR-0017 — one stack per account and Region publishes the shared
   parameters.** R-6's four `/application-plane/shared/identity/*` parameter
   names are fixed, so two stacks cannot both own them. A stack prop

@@ -11,10 +11,6 @@
 The keywords MUST, MUST NOT, SHOULD, and MAY are to be interpreted as in
 RFC 2119.
 
-> **Amended 2026-10-21 (ADR-0016):** R-1 is built as an API Gateway
-> **REST** API, not an HTTP API, from three Smithy services merged into one
-> OpenAPI document. Everything else R-1 states holds.
->
 > **Amended 2026-10-21 (ADR-0018):** §7.1 and §10 step 9 said a deleted
 > pool's JWKS URL stops answering. It does not; the registry allowlist is
 > what stops trust.
