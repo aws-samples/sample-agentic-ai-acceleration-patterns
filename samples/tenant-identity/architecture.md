@@ -196,7 +196,7 @@ sequenceDiagram
         P->>C: CreateUserPool (tag sample=tenant-identity)
         P->>C: CreateUserPoolClient, attach trigger, CreateGroup admin-<id>
     else shared-pool / shared-pool-multi-tenant
-        P->>C: CreateGroup t-<id> (+ admin-<id>); shared-pool also sets custom:tenantId on users
+        P->>C: CreateGroup t-<id> (+ admin-<id>), shared-pool also sets custom:tenantId on users
     end
     P->>R: create tenant item (ACTIVE) — Cognito provisioned first
     P->>C: AdminCreateUser adminEmail, add to admin-<id>
@@ -219,7 +219,7 @@ sequenceDiagram
     U->>C: sign in / refresh (ADMIN_USER_PASSWORD_AUTH / REFRESH_TOKEN_AUTH)
     C->>T: V2 pre-token-generation event
     T->>R: resolve tenant(s): by userPoolId (1), custom:tenantId (2), or t-* groups (3)
-    T->>T: drop tenants not ACTIVE; none left -> throw (fail closed)
+    T->>T: drop tenants not ACTIVE, none left -> throw (fail closed)
     T-->>C: claimsToAddOrOverride {tenant_id} or {tenants:[...]}, scopesToAdd API scopes
     C-->>U: access token carrying the tenant claim
 ```
@@ -240,10 +240,10 @@ sequenceDiagram
     participant C as Cognito
     participant T as Trigger
     X->>E: POST /oauth2/token (form: refresh token, resource, scope)
-    E->>E: parse form; reject audience/actor_token (invalid_request)
+    E->>E: parse form, reject audience/actor_token (invalid_request)
     E->>C: GetTokensFromRefreshToken, ClientMetadata = narrow keys
     C->>T: pre-token-generation (refresh source)
-    T->>T: intersect request with held tenants/scopes; subset or throw invalid_target/invalid_scope
+    T->>T: intersect request with held tenants/scopes, subset or throw invalid_target/invalid_scope
     T-->>C: narrowed access token {tenant_id, requested scopes, suppress cognito admin scope}
     C-->>E: AuthenticationResult
     E->>E: ADR-0012: decode payload, refuse unless token_use=access, tenant_id matches, no tenants claim, scope set == request
