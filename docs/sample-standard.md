@@ -321,8 +321,10 @@ Sections, in this order, omitting only those that do not apply:
    teardown.
 5. **Deployment integration test**: how to run `npx projen integ`, what it
    stands up, runtime, cost, and the single-Region rule.
-6. **End-to-end demo**: a numbered, copy-pasteable walk through the flow
-   against a deployed stack.
+6. **End-to-end demo**: a runnable `scripts/demo.sh` that walks the flow
+   against a deployed stack, checks each response, and cleans up what it
+   created on exit (also on failure). The README section gives the command
+   and a step table (call and expected result), not the commands themselves.
 7. **API** (when there is one): operations and status machine, derived from
    the Smithy model.
 8. **Security notes**: the identity model, the trust boundaries, and a link

@@ -198,7 +198,7 @@ Teardown: **delete all tenants first** (so `pool-per-tenant` leaves no pools
 and the shared topologies leave no groups or users), then destroy the stack.
 
 ```bash
-# delete each tenant through the platform API (see the demo below), then:
+# delete each tenant through the platform API (`scripts/demo.sh` deletes its own tenant), then:
 npx cdk destroy --context topology=<the topology you deployed>
 ```
 
@@ -237,69 +237,34 @@ on a committed snapshot.
 
 ## End-to-end demo
 
-A copy-pasteable walk against a deployed **`shared-pool-multi-tenant`** stack.
-Prerequisites: [`awscurl`](https://github.com/okigan/awscurl) (signs
-`/platform/*` calls with SigV4), `curl`, and `jq`. Your credentials must hold
-`execute-api:Invoke` on the deployed API. Use synthetic e-mails on
-`simulator.amazonses.com`. Placeholders like `<api-url>` and `<tenant-id>`
-stand in for real values; never paste a real account id.
+[`scripts/demo.sh`](./scripts/demo.sh) walks the primary flow against one
+deployed stack and checks each answer as it goes:
 
 ```bash
-# 1. Read the stack outputs.
-API_URL=$(aws cloudformation describe-stacks \
-  --stack-name TenantIdentity-shared-pool-multi-tenant \
-  --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
-# e.g. https://<api-id>.execute-api.<region>.amazonaws.com/prod/
-
-# 2. Onboard a tenant and its first admin (SigV4). Returns the tenant and the
-#    admin's temporary password (shown once).
-awscurl --service execute-api -X POST "${API_URL}platform/tenants" \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"acme","adminEmail":"success+acme-admin@simulator.amazonses.com"}'
-# note the tenant.tenantId and admin.temporaryPassword from the response
-TENANT_ID=<tenant-id>
-ADMIN=success+acme-admin@simulator.amazonses.com
-TEMP_PW=<temporary-password-from-response>
-
-# 3. Sign the admin in with the IssueToken test aid (ADR-0006 — remove before
-#    production). It returns an access, id, and refresh token.
-awscurl --service execute-api -X POST \
-  "${API_URL}platform/tenants/${TENANT_ID}/users/${ADMIN}/token" \
-  -H 'Content-Type: application/json' \
-  -d "{\"password\":\"${TEMP_PW}\"}"
-REFRESH_TOKEN=<refreshToken-from-response>
-CLIENT_ID=$(aws cloudformation describe-stacks \
-  --stack-name TenantIdentity-shared-pool-multi-tenant \
-  --query "Stacks[0].Outputs[?OutputKey=='AppClientId'].OutputValue" --output text)
-
-# 4. Narrow the admin's refresh token to this tenant and the admin scope.
-#    The endpoint takes RFC 8693 form fields; no IAM signature.
-NARROWED=$(curl -s -X POST "${API_URL}oauth2/token" \
-  -H 'Content-Type: application/x-www-form-urlencoded' \
-  --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
-  --data-urlencode "client_id=${CLIENT_ID}" \
-  --data-urlencode "subject_token=${REFRESH_TOKEN}" \
-  --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:refresh_token' \
-  --data-urlencode "resource=urn:tenant-identity:tenant:${TENANT_ID}" \
-  --data-urlencode 'scope=tenant-admin/users' | jq -r .access_token)
-
-# 5. Decode the narrowed token's claims (no signature check — just look).
-echo "$NARROWED" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq '{tenant_id, tenants, scope, token_use}'
-# tenant_id is this tenant, there is no tenants claim, scope is "tenant-admin/users"
-
-# 6. Call the tenant admin door with the narrowed token as a bearer token.
-curl -s "${API_URL}tenant/users" -H "Authorization: Bearer ${NARROWED}" | jq .
-
-# 7. Create a user in this tenant through the admin door, then list again.
-curl -s -X POST "${API_URL}tenant/users" -H "Authorization: Bearer ${NARROWED}" \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"success+acme-user@simulator.amazonses.com"}' | jq .
-curl -s "${API_URL}tenant/users" -H "Authorization: Bearer ${NARROWED}" | jq '.users[].email'
-
-# 8. Offboard the tenant (SigV4). After this, a fresh narrow for this tenant
-#    is refused and /tenant/* stops at once.
-awscurl --service execute-api -X DELETE "${API_URL}platform/tenants/${TENANT_ID}"
+export AWS_REGION=eu-central-1
+./scripts/demo.sh                     # shared-pool-multi-tenant (default)
+./scripts/demo.sh pool-per-tenant     # or shared-pool
 ```
+
+| Step | Call | Expect |
+|---|---|---|
+| 1 | read stack outputs | `ApiUrl`, `AppClientId` |
+| 2 | `CreateTenant` (SigV4) | 201, `ACTIVE` |
+| 3 | `IssueToken` test aid (ADR-0006) | 200, broad token |
+| 3b | `ListTenantUsers`, broad token | 403 |
+| 4 | `POST /oauth2/token`, narrow (RFC 8693) | 200, `tenant_id` + `tenant-admin/users` |
+| 4b | narrow to a foreign tenant | 400 `invalid_target` |
+| 5 | `CreateTenantUser`, `ListTenantUsers` | 201, 200 |
+| 6 | `DeleteTenant` (SigV4) | 204 |
+| 6b | fresh narrow; old narrowed token | 400; 403 |
+
+Prerequisites: `aws` CLI v2, `curl` 7.75 or later (it signs `/platform/*`
+with `--aws-sigv4`), and `jq`. Your credentials must hold
+`execute-api:Invoke` on the deployed API. `STACK_PREFIX` overrides the
+`TenantIdentity` stack-name prefix. The script prints status codes, tenant ids
+and claims, never a token or password. It uses SES simulator e-mails and
+deletes its tenant on exit, also when a step fails. One run takes about
+15 seconds.
 
 ## API
 
