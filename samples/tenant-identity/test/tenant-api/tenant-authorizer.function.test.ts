@@ -7,7 +7,7 @@ import type { APIGatewayTokenAuthorizerEvent } from 'aws-lambda';
 // static import) runs after this assignment; a static import is hoisted above it.
 process.env.TABLE_NAME = 'registry-table';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { buildPolicy, handler } = require('../../src/tenant-api/tenant-authorizer.function') as typeof import('../../src/tenant-api/tenant-authorizer.function');
+const { buildPolicy, handler, verifierFor } = require('../../src/tenant-api/tenant-authorizer.function') as typeof import('../../src/tenant-api/tenant-authorizer.function');
 
 /**
  * Unit tests for the authoriser handler's policy shape (ADR-0007, spec §5.3):
@@ -54,5 +54,24 @@ describe('handler (ADR-0007)', () => {
     const result = await handler(event('Basic nope'));
     expect(firstStatement(result).Effect).toBe('Deny');
     expect(result.context).toBeUndefined();
+  });
+});
+
+describe('verifierFor cache key (M-25)', () => {
+  const POOL = 'eu-central-1_pool1';
+
+  it('reuses one verifier for the same pool and client', () => {
+    const first = verifierFor(POOL, 'client-a');
+    const second = verifierFor(POOL, 'client-a');
+    expect(second).toBe(first);
+  });
+
+  it('builds a distinct verifier for a different client id on the same pool', () => {
+    // M-25: the cache is keyed by pool AND client, so a verifier built for
+    // one app client is never handed back for another — a different client
+    // id gets its own verifier bound to that client.
+    const forA = verifierFor(POOL, 'client-a');
+    const forB = verifierFor(POOL, 'client-b');
+    expect(forB).not.toBe(forA);
   });
 });

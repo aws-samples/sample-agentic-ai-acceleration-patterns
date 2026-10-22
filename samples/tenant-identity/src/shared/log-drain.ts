@@ -99,9 +99,10 @@ export class LogDrain extends Construct {
 /**
  * The waiter. Answers Create and Update at once; on Delete it sleeps for
  * DelaySeconds, then answers. It reports through the pre-signed ResponseURL
- * only, never through logs.
+ * only, never through logs. Exported so a unit test can assert the ADR-0019
+ * try/finally without synthesising a stack.
  */
-const WAITER_SOURCE = `
+export const WAITER_SOURCE = `
 const https = require('https');
 const { URL } = require('url');
 function respond(event, context, status) {
@@ -125,10 +126,16 @@ function respond(event, context, status) {
   });
 }
 exports.handler = async (event, context) => {
-  if (event.RequestType === 'Delete') {
-    const seconds = Number(event.ResourceProperties.DelaySeconds) || 90;
-    await new Promise((r) => setTimeout(r, seconds * 1000));
+  // ADR-0019: respond() must always run, even if the Delete sleep path throws:
+  // a throw before respond would leave CloudFormation waiting the full
+  // custom-resource timeout (an hour) on every stack operation.
+  try {
+    if (event.RequestType === 'Delete') {
+      const seconds = Number(event.ResourceProperties.DelaySeconds) || 90;
+      await new Promise((r) => setTimeout(r, seconds * 1000));
+    }
+  } finally {
+    await respond(event, context, 'SUCCESS');
   }
-  await respond(event, context, 'SUCCESS');
 };
 `;

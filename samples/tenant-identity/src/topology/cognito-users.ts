@@ -113,7 +113,13 @@ export function adminGetUserToView(
   };
 }
 
-/** Finds a user in the pool by e-mail (ListUsers filter), or undefined. */
+/**
+ * Finds a user in the pool by e-mail (ListUsers filter), or undefined. R-17 (T-27):
+ * only a user whose `email_verified` attribute is 'true' is returned. An
+ * unverified e-mail is one the user wrote themselves and Cognito has not
+ * confirmed, so it must never match an invitation (threat model T-27,
+ * e-mail squatting); an unverified match is treated as no match.
+ */
 export async function findUserByEmail(
   cognito: CognitoIdentityProviderClient,
   userPoolId: string,
@@ -122,7 +128,11 @@ export async function findUserByEmail(
   const result = await cognito.send(
     new ListUsersCommand({ UserPoolId: userPoolId, Filter: emailFilter(email), Limit: 1 }),
   );
-  return result.Users?.[0];
+  const user = result.Users?.[0];
+  if (user === undefined || attr(user.Attributes, 'email_verified') !== 'true') {
+    return undefined;
+  }
+  return user;
 }
 
 /** All group names a user belongs to (paginated). */

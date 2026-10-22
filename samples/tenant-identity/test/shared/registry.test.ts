@@ -123,6 +123,55 @@ describe('DynamoDBRegistry (spec §4, ADR-0002)', () => {
     await expect(registry().create(record('01ARZ3NDEKTSV4RRFFQ69G5FA5'))).rejects.toBeInstanceOf(ConflictError);
   });
 
+  it('activate flips PROVISIONING to ACTIVE and writes the provisioned fields (ADR-0021, §5.1)', async () => {
+    const r = record('01ARZ3NDEKTSV4RRFFQ69G5FP1', {
+      status: 'ACTIVE',
+      userPoolId: 'pool_1',
+      appClientId: 'client_1',
+      issuer: 'https://cognito-idp.eu-central-1.amazonaws.com/pool_1',
+    });
+    ddb.on(UpdateCommand).resolves({ Attributes: item(r) });
+    const got = await registry().activate(r.tenantId, {
+      userPoolId: 'pool_1',
+      appClientId: 'client_1',
+      issuer: 'https://cognito-idp.eu-central-1.amazonaws.com/pool_1',
+    });
+    expect(got.status).toBe('ACTIVE');
+    expect(got.userPoolId).toBe('pool_1');
+    const call = ddb.commandCalls(UpdateCommand)[0];
+    const input = call.args[0].input;
+    expect(input.ConditionExpression).toBe('attribute_exists(PK) AND #s = :provisioning');
+    expect(input.UpdateExpression).toContain('#s = :active');
+    expect(input.UpdateExpression).toContain('#userPoolId = :userPoolId');
+    expect(input.UpdateExpression).toContain('#appClientId = :appClientId');
+    expect(input.UpdateExpression).toContain('#issuer = :issuer');
+    expect(input.ReturnValues).toBe('ALL_NEW');
+  });
+
+  it('activate omits undefined provisioned fields from the update (ADR-0021)', async () => {
+    const r = record('01ARZ3NDEKTSV4RRFFQ69G5FP2', { status: 'ACTIVE', groupName: 't-01ARZ3NDEKTSV4RRFFQ69G5FP2' });
+    ddb.on(UpdateCommand).resolves({ Attributes: item(r) });
+    // Only groupName is defined (shared-pool-multi-tenant); pool fields are undefined.
+    await registry().activate(r.tenantId, { groupName: `t-${r.tenantId}`, userPoolId: undefined });
+    const input = ddb.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toContain('#groupName = :groupName');
+    expect(input.UpdateExpression).not.toContain('userPoolId');
+    expect(input.ExpressionAttributeValues).not.toHaveProperty(':userPoolId');
+    expect(input.ExpressionAttributeNames).not.toHaveProperty('#userPoolId');
+  });
+
+  it('activate throws ConflictError when the row is not PROVISIONING (ADR-0021)', async () => {
+    const err = new Error('not provisioning');
+    err.name = 'ConditionalCheckFailedException';
+    ddb.on(UpdateCommand).rejects(err);
+    await expect(
+      registry().activate('01ARZ3NDEKTSV4RRFFQ69G5FP3', { groupName: 't-x' }),
+    ).rejects.toBeInstanceOf(ConflictError);
+    await expect(
+      registry().activate('01ARZ3NDEKTSV4RRFFQ69G5FP3', { groupName: 't-x' }),
+    ).rejects.toThrow('is not PROVISIONING');
+  });
+
   it('markDeleting throws NotFoundError when the tenant does not exist (R-11)', async () => {
     const err = new Error('nope');
     err.name = 'ConditionalCheckFailedException';

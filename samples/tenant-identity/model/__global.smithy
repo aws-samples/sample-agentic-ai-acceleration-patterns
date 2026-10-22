@@ -88,6 +88,10 @@ enum Topology {
 
 /// Tenant status in the registry (spec §4.1).
 enum TenantStatus {
+    /// The registry row exists; Cognito provisioning is in progress. No token
+    /// names the tenant and no mutation accepts it (spec §5.1).
+    PROVISIONING
+
     /// Tokens may name the tenant.
     ACTIVE
 

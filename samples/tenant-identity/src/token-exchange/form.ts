@@ -20,13 +20,14 @@ import {
   ULID_PATTERN,
 } from '../shared/constants';
 
-/** RFC 6749 §5.2 error codes the parser can raise. */
+/** RFC 6749 §5.2 error codes the parser (or the exchange) can raise. */
 export type OAuthErrorCodeValue =
   | 'invalid_request'
   | 'unsupported_grant_type'
   | 'invalid_target'
   | 'invalid_scope'
   | 'invalid_grant'
+  | 'invalid_client'
   | 'server_error';
 
 /**
@@ -41,6 +42,7 @@ export const OAUTH_ERROR_DESCRIPTIONS: Record<OAuthErrorCodeValue, string> = {
   invalid_target: 'The requested tenant is not available to this subject token.',
   invalid_scope: 'The requested scope is invalid or exceeds the subject token.',
   invalid_grant: 'The provided refresh token is invalid, expired, or revoked.',
+  invalid_client: 'The client_id is not the app client this endpoint serves.',
   server_error: 'The authorization server returned a token that does not match the request.',
 };
 
@@ -80,7 +82,14 @@ export interface ExchangeRequest {
 }
 
 /**
- * The only RFC 8693 parameters §5.4 recognises. `audience`, `actor_token`,
+ * Maximum accepted form body, in bytes (M-9). The endpoint is
+ * unauthenticated, so an oversize body is rejected before it is decoded or
+ * parsed — a URL-encoded refresh-token exchange is far under this. Measured
+ * as UTF-8 bytes (`Buffer.byteLength` for a string), not code points.
+ */
+export const MAX_FORM_BYTES = 16384;
+
+/** The only RFC 8693 parameters §5.4 recognises. `audience`, `actor_token`,
  * and `actor_token_type` are RFC 8693 parameters we deliberately refuse, so
  * they are listed here but rejected in the body (a clearer failure than
  * "unknown parameter"). Any name not in this set is an unknown parameter.
@@ -111,6 +120,13 @@ function invalidRequest(): never {
  * tests. Throws `OAuthFailure` on any violation.
  */
 export function parseExchangeForm(body: Uint8Array | string): ExchangeRequest {
+  // M-9: reject an oversize body before decoding or parsing. Measure UTF-8
+  // bytes for a string; a Uint8Array's length is already its byte count.
+  const byteLength = typeof body === 'string' ? Buffer.byteLength(body) : body.length;
+  if (byteLength > MAX_FORM_BYTES) {
+    invalidRequest();
+  }
+
   const text = typeof body === 'string' ? body : new TextDecoder().decode(body);
 
   const params = new URLSearchParams(text);

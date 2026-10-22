@@ -3,14 +3,16 @@
 
 /**
  * The RFC 8693 token-exchange operation (spec §5.4, R-7, ADR-0009,
- * ADR-0012). It parses the form, calls `GetTokensFromRefreshToken` with the
- * narrowing request in `ClientMetadata` (the trigger does the narrowing,
- * ADR-0010), maps Cognito's outcome to the RFC 6749 §5.2 error codes, and
- * then — because narrowing depends on `ClientMetadata` reaching the trigger
- * on refresh — decodes the returned access token and refuses it unless it
- * matches the request (ADR-0012). The endpoint holds no privilege: the
- * refresh token authorises the Cognito call (P-10), so the function's role
- * carries no `cognito-idp` or DynamoDB permission (R-7).
+ * ADR-0012). It parses the form, rejects a form naming a client other than
+ * the shared pool's app client (T-28, `invalid_client`), calls
+ * `GetTokensFromRefreshToken` with the narrowing request in `ClientMetadata`
+ * (the trigger does the narrowing, ADR-0010), maps Cognito's outcome to the
+ * RFC 6749 §5.2 error codes, and then — because narrowing depends on
+ * `ClientMetadata` reaching the trigger on refresh — decodes the returned
+ * access token and refuses it unless it matches the request (ADR-0012). The
+ * endpoint holds no privilege: the refresh token authorises the Cognito call
+ * (P-10), so the function's role carries no `cognito-idp` or DynamoDB
+ * permission (R-7).
  *
  * It never logs the refresh token, the issued token, the form, or Cognito's
  * error message (N-4, N-6): only error class names and the ADR-0012 rule
@@ -39,6 +41,13 @@ import type {
 
 export interface TokenExchangeDeps {
   readonly cognito: CognitoIdentityProviderClient;
+  /**
+   * T-28: the shared pool's app client. When set, a form whose `client_id`
+   * does not equal it is refused with `invalid_client` before Cognito is
+   * called. Undefined in pool-per-tenant, where each tenant has its own
+   * client and there is no single app client to compare against.
+   */
+  readonly appClientId?: string;
 }
 
 /** The minimal access-token payload shape ADR-0012 inspects. */
@@ -110,8 +119,15 @@ function mapCognitoError(error: unknown): OAuthError | OAuthServerError {
     case 'UserNotFoundException':
     case 'RefreshTokenReuseException':
     case 'ForbiddenException':
-    case 'UserLambdaValidationException':
       return clientError(new OAuthFailure('invalid_grant'));
+    // spec §5.4: a UserLambdaValidationException that carried neither the
+    // invalid_target nor the invalid_scope prefix (checked above) is the
+    // trigger failing for a non-caller reason — a registry outage, not a bad
+    // grant. Map it to server_error so the client retries rather than
+    // discarding a still-valid refresh token. Log the class name only (N-6).
+    case 'UserLambdaValidationException':
+      log.error('exchange trigger fault', { errorName: name });
+      return serverError('unavailable');
     // Throttling and server faults: the request may succeed on retry, so this
     // is a 500, not a client error (documented choice, spec §5.4 N-6).
     case 'TooManyRequestsException':
@@ -183,9 +199,11 @@ function assertNarrowed(claims: AccessTokenClaims, request: ExchangeRequest): vo
 
 export class TokenExchangeService<Context> {
   private readonly cognito: CognitoIdentityProviderClient;
+  private readonly appClientId: string | undefined;
 
   constructor(deps: TokenExchangeDeps) {
     this.cognito = deps.cognito;
+    this.appClientId = deps.appClientId;
   }
 
   public ExchangeToken = async (
@@ -204,6 +222,14 @@ export class TokenExchangeService<Context> {
       // A parser bug, not caller input.
       log.error('exchange form parse failed', { errorName: errorName(error) });
       throw serverError();
+    }
+
+    // T-28: in the shared pool, this endpoint serves exactly one app client.
+    // Refuse a form naming a different client with invalid_client, before
+    // Cognito is called. Skipped in pool-per-tenant (appClientId undefined),
+    // where each tenant has its own client.
+    if (this.appClientId !== undefined && request.clientId !== this.appClientId) {
+      throw clientError(new OAuthFailure('invalid_client'));
     }
 
     // 2. Ask Cognito, passing the narrowing request in ClientMetadata. Always

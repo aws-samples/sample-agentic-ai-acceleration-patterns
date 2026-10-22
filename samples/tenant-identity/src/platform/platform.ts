@@ -75,8 +75,10 @@ export interface PlatformServiceDeps {
  * `PlatformServiceService` interface; every operation returns its final state
  * (synchronous, ADR-0004). It owns the registry writes for tenants and
  * delegates everything Cognito-side to the topology's provisioner (P-1).
- * Tenant status gates every mutation: a `DELETING` tenant answers 409 to
- * writes and the token test-aids, and reads still return it (P-2, R-11).
+ * Tenant status gates every mutation: only an `ACTIVE` tenant accepts writes
+ * and the token test-aids. A `PROVISIONING` tenant (built registry-first,
+ * ADR-0021) and a `DELETING` tenant both answer 409, and reads still return them
+ * (P-2, R-11, ADR-0021).
  */
 export class PlatformService implements PlatformServiceService<PlatformContext> {
   private readonly registry: Registry;
@@ -107,30 +109,68 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     log.info('CreateTenant', { operation: 'CreateTenant', tenantId });
 
     return this.mapErrors('CreateTenant', tenantId, async () => {
-      // Provision Cognito first. A failure here is before the registry write,
-      // so the provisioner cleans up its own half-built state (spec §5.1).
-      const provisioned = await this.provisioner.provisionTenant(tenantId, name);
+      // ADR-0021: write the registry row FIRST, as PROVISIONING, then provision
+      // Cognito, then flip to ACTIVE (spec §5.1, ADR-0021 'registry row before
+      // provisioning'). A Lambda timeout at any point leaves a tracked row the
+      // registry lists, never an orphan pool or group that nothing references.
       const timestamp = this.now().toISOString();
       const record: TenantRecord = {
         tenantId,
         name,
-        status: 'ACTIVE',
+        status: 'PROVISIONING',
         topology: this.topology,
-        ...provisioned,
         createdAt: timestamp,
         updatedAt: timestamp,
       };
-      // R-10: only tenant fields reach the registry — never user data.
+      // R-10: only tenant fields reach the registry — never user data. No
+      // pool/group fields yet; they are written by activate() once Cognito is
+      // built.
+      await this.registry.create(record);
+
+      // Provision Cognito. On failure the provisioner undoes its own half-built
+      // state; we also delete the PROVISIONING row so a retry starts clean. A
+      // delete failure is logged and swallowed; the provisioning error surfaces.
+      let provisioned;
       try {
-        await this.registry.create(record);
+        provisioned = await this.provisioner.provisionTenant(tenantId, name);
       } catch (error) {
-        // Cognito is provisioned but the registry write failed: undo the
-        // provisioning so no untracked pool or group is left (spec §5.1).
-        // A clean-up failure is logged and the original error still surfaces.
         try {
-          await this.provisioner.deprovisionTenant(record);
+          await this.registry.delete(tenantId);
         } catch (cleanup) {
-          log.error('CreateTenant clean-up failed', { operation: 'CreateTenant', tenantId, error: errorName(cleanup) });
+          log.error('CreateTenant row clean-up failed', {
+            operation: 'CreateTenant',
+            tenantId,
+            error: errorName(cleanup),
+          });
+        }
+        throw error;
+      }
+
+      // Flip PROVISIONING -> ACTIVE, writing the provisioned Cognito fields in
+      // the same conditional update (spec §5.1). On failure, deprovision the
+      // Cognito half we just built and delete the row (both best-effort,
+      // logged) so no untracked pool or group is left behind.
+      let active: TenantRecord;
+      try {
+        active = await this.registry.activate(tenantId, provisioned);
+      } catch (error) {
+        try {
+          await this.provisioner.deprovisionTenant({ ...record, ...provisioned });
+        } catch (cleanup) {
+          log.error('CreateTenant deprovision clean-up failed', {
+            operation: 'CreateTenant',
+            tenantId,
+            error: errorName(cleanup),
+          });
+        }
+        try {
+          await this.registry.delete(tenantId);
+        } catch (cleanup) {
+          log.error('CreateTenant row clean-up failed', {
+            operation: 'CreateTenant',
+            tenantId,
+            error: errorName(cleanup),
+          });
         }
         throw error;
       }
@@ -138,9 +178,9 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       // The tenant is now ACTIVE. If the admin step fails the tenant stays
       // ACTIVE with no admin and the error surfaces; the vendor retries with
       // CreateUser (spec §5.1).
-      const admin = await this.provisioner.createUser(record, adminEmail, true);
+      const admin = await this.provisioner.createUser(active, adminEmail, true);
       return {
-        tenant: toTenant(record),
+        tenant: toTenant(active),
         admin: { user: toUser(admin.user), temporaryPassword: admin.temporaryPassword },
       };
     });
@@ -349,14 +389,15 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
   }
 
   /**
-   * Reads a tenant for a mutation (and the token test aids). A `DELETING`
-   * tenant answers 409: no write or token-issuance may name a tenant whose
-   * offboarding has started (P-2, spec §5.3). Unknown tenant -> 404.
+   * Reads a tenant for a mutation (and the token test aids). Only an `ACTIVE`
+   * tenant may be written to or named in token issuance: a `PROVISIONING`
+   * tenant is not yet built and a `DELETING` tenant is being torn down, so
+   * both answer 409 (P-2, ADR-0021, spec §5.3). Unknown tenant -> 404.
    */
   private async loadActiveTenant(tenantId: string): Promise<TenantRecord> {
     const record = await this.loadTenant(tenantId);
-    if (record.status === 'DELETING') {
-      throw new ConflictError({ message: `Tenant ${tenantId} is DELETING` });
+    if (record.status !== 'ACTIVE') {
+      throw new ConflictError({ message: `Tenant ${tenantId} is ${record.status}` });
     }
     return record;
   }

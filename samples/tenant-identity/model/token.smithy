@@ -84,6 +84,7 @@ enum OAuthErrorCode {
     INVALID_TARGET = "invalid_target"
     INVALID_SCOPE = "invalid_scope"
     INVALID_GRANT = "invalid_grant"
+    INVALID_CLIENT = "invalid_client"
     SERVER_ERROR = "server_error"
 }
 

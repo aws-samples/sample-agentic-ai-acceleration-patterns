@@ -12,15 +12,17 @@
  * Hook robustness: integ-runner runs hook commands with the working directory
  * set to the snapshot's parent (not this sample), and splits each command on
  * whitespace with no shell — so `&&`, env-var prefixes and quoting are not
- * available. Both hooks are therefore a single binary invocation by absolute
- * path, computed from `__dirname` at synth time:
- *   - postDeploy runs the sample's local jest against the e2e config, which
- *     discovers each `TenantIdentity-<topology>` stack by its CloudFormation
- *     outputs and runs the scenario (E2E_STACK_PREFIX defaults to
- *     TenantIdentity, AWS_REGION is inherited from the task).
- *   - preDestroy runs test/e2e/cleanup.ts through the local ts-node, deleting
- *     any tenant still in each stack's registry so `cdk destroy` can remove
- *     the stacks and `pool-per-tenant` leaves no pools (spec P-4, §6.2).
+ * available. The hook is therefore a single binary invocation by absolute
+ * path, computed from `__dirname` at synth time: postDeploy runs the sample's
+ * local jest against the e2e config, which discovers each
+ * `TenantIdentity-<topology>` stack by its CloudFormation outputs and runs the
+ * scenario (E2E_STACK_PREFIX defaults to TenantIdentity, AWS_REGION is
+ * inherited from the task).
+ *
+ * There is no preDestroy hook on purpose. The scenario leaves one tenant in
+ * every stack, and the stack's own TenantDrain must offboard it during
+ * `cdk destroy` (ADR-0022); a pool, group, or user left after the destroy is
+ * the failure signal.
  */
 
 import * as path from 'path';
@@ -34,9 +36,7 @@ const STACK_PREFIX = 'TenantIdentity';
 // Absolute paths resolved at synth time, so the hooks work from any cwd.
 const sampleDir = path.resolve(__dirname, '..');
 const jestBin = path.join(sampleDir, 'node_modules', '.bin', 'jest');
-const tsNodeBin = path.join(sampleDir, 'node_modules', '.bin', 'ts-node');
 const e2eConfig = path.join(sampleDir, 'test', 'e2e', 'jest.config.json');
-const cleanupScript = path.join(sampleDir, 'test', 'e2e', 'cleanup.ts');
 
 const app = new App();
 
@@ -65,8 +65,6 @@ const integ = new IntegTest(app, 'TenantIdentityInteg', {
   hooks: {
     // Run the spec §10 scenario against the three deployed stacks.
     postDeploy: [`${jestBin} --config ${e2eConfig}`],
-    // Drain every tenant so cdk destroy can remove the stacks cleanly.
-    preDestroy: [`${tsNodeBin} ${cleanupScript}`],
   },
 });
 

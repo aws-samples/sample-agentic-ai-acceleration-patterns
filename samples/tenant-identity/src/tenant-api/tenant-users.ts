@@ -32,6 +32,20 @@ import type { Provisioner, UserView } from '../topology/provisioner';
  * The caller cannot demote or delete themselves (R-13), so a tenant always
  * keeps at least one admin through this door; only the vendor can remove the
  * last (P-11).
+ *
+ * A narrowed tenant token lives for up to 5 minutes (ADR-0014), so a caller
+ * whose admin group was removed — or who was deleted from the tenant — can
+ * still present a valid token until it expires. R-16 (T-26): every mutation
+ * (Create/Update/Delete) re-checks the caller's admin group against Cognito
+ * via `requireCallerAdmin` after `loadTenant` and before any write, so a
+ * stale token cannot mutate. Reads (Get/List) deliberately keep only the
+ * R-12 membership check and do NOT re-verify admin — the accepted residual
+ * is that a just-demoted caller may still read for the token's lifetime.
+ *
+ * Extending R-13: UpdateTenantUser refuses ANY self-update (not only
+ * self-demotion), so a caller cannot self-promote or otherwise rewrite their
+ * own admin flag; the admin flag of the caller is changed by another admin
+ * only.
  */
 
 /** What the authoriser puts in the context (the only tenant source, P-11). */
@@ -105,6 +119,30 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
   }
 
   /**
+   * R-16 (T-26): re-checks the caller's admin group against Cognito before a
+   * mutation, so a narrowed token (ADR-0014, up to 5 min) cannot mutate after
+   * the caller was demoted or removed. `getUser(tenant, sub)` resolves the
+   * caller's own record: a NotFoundError means the caller is no longer a user
+   * of the tenant, `admin === false` means no longer an admin. Both are 409s
+   * (the token is valid but the caller's standing changed, so a retry with a
+   * fresh token is the fix). Call after loadTenant and before any write.
+   */
+  private async requireCallerAdmin(tenant: TenantRecord, sub: string): Promise<void> {
+    let caller: UserView;
+    try {
+      caller = await this.provisioner.getUser(tenant, sub);
+    } catch (error) {
+      if (error instanceof NotFoundError) {
+        throw new ConflictError('Caller is no longer a user of the tenant');
+      }
+      throw error;
+    }
+    if (caller.admin === false) {
+      throw new ConflictError('Caller is no longer an admin of the tenant');
+    }
+  }
+
+  /**
    * Resolves the path's `{username}` (which may be an e-mail, per the model)
    * to the user's Cognito username and compares it to the caller's `sub`.
    * This runs the R-12 membership check first (via `getUser`), then enforces
@@ -128,6 +166,8 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
     log.info('tenant user operation', { tenantId: context.tenantId, sub: context.sub, operation: 'CreateTenantUser' });
     try {
       const tenant = await this.loadTenant(context, true);
+      // R-16 (T-26): re-check the caller's admin group before any write.
+      await this.requireCallerAdmin(tenant, context.sub);
       const result = await this.provisioner.createUser(tenant, input.email!, input.admin ?? false);
       return { user: toUser(result.user), temporaryPassword: result.temporaryPassword };
     } catch (error) {
@@ -186,11 +226,16 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
     log.info('tenant user operation', { tenantId: context.tenantId, sub: context.sub, operation: 'UpdateTenantUser' });
     try {
       const tenant = await this.loadTenant(context, true);
-      // R-12 (membership) then R-13 (self-demote): resolve the path username
-      // to the real username and refuse a self-demotion before any write.
+      // R-16 (T-26): re-check the caller's admin group before any write.
+      await this.requireCallerAdmin(tenant, context.sub);
+      // R-12 (membership) then R-13 (self-mutation): resolve the path username
+      // to the real username and refuse a self-update before any write.
       const target = await this.resolveTarget(tenant, input.username!, context.sub);
-      if (target.isSelf && input.admin === false) {
-        throw new ConflictError('A tenant admin cannot demote themselves');
+      // Extends R-13: refuse ANY self-update of the admin flag, not only
+      // self-demotion — a caller cannot self-promote or otherwise rewrite
+      // their own admin flag; only another admin can change it.
+      if (target.isSelf) {
+        throw new ConflictError('A tenant admin cannot change their own admin flag');
       }
       // The provisioner re-checks membership (R-12) inside setAdmin. That is
       // one extra Cognito read, kept so the provisioner never trusts its caller.
@@ -213,6 +258,8 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
     log.info('tenant user operation', { tenantId: context.tenantId, sub: context.sub, operation: 'DeleteTenantUser' });
     try {
       const tenant = await this.loadTenant(context, true);
+      // R-16 (T-26): re-check the caller's admin group before any write.
+      await this.requireCallerAdmin(tenant, context.sub);
       // R-12 (membership) then R-13 (self-delete): resolve the path username
       // to the real username and refuse a self-deletion before any write.
       const target = await this.resolveTarget(tenant, input.username!, context.sub);

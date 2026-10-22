@@ -55,6 +55,21 @@ class FakeRegistry implements Registry {
     }
     this.items.set(record.tenantId, record);
   }
+  async activate(
+    tenantId: string,
+    provisioned: { userPoolId?: string; appClientId?: string; issuer?: string; groupName?: string },
+  ): Promise<TenantRecord> {
+    this.calls.push(`activate:${tenantId}`);
+    const existing = this.items.get(tenantId);
+    if (existing === undefined || existing.status !== 'PROVISIONING') {
+      throw new DomainConflictError(`Tenant ${tenantId} is not PROVISIONING`);
+    }
+    // Mirror the DynamoDB impl: only DEFINED provisioned fields are written.
+    const defined = Object.fromEntries(Object.entries(provisioned).filter(([, v]) => v !== undefined));
+    const updated: TenantRecord = { ...existing, ...defined, status: 'ACTIVE' };
+    this.items.set(tenantId, updated);
+    return updated;
+  }
   async markDeleting(tenantId: string): Promise<TenantRecord> {
     this.calls.push(`markDeleting:${tenantId}`);
     const existing = this.items.get(tenantId);
@@ -129,10 +144,15 @@ const TOKENS: TokenSet = { accessToken: 'a', idToken: 'i', refreshToken: 'r', ex
 
 describe('PlatformService (spec §5.1)', () => {
   describe('CreateTenant', () => {
-    it('writes an ACTIVE record with the provisioned fields and returns the admin with the temporary password (spec §5.1)', async () => {
+    it('writes the row as PROVISIONING before provisionTenant is called, then returns ACTIVE with the provisioned fields (ADR-0021, spec §5.1)', async () => {
       const registry = new FakeRegistry();
       const provisioner = mockProvisioner();
-      provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
+      // Capture the stored status at the moment provisionTenant is invoked.
+      let statusWhenProvisioned: TenantStatus | undefined;
+      provisioner.provisionTenant.mockImplementation(async () => {
+        statusWhenProvisioned = registry.items.get(TENANT_A)?.status;
+        return { groupName: `t-${TENANT_A}` };
+      });
       const newUser: NewUserResult = { user: userView('admin', true), temporaryPassword: 'Temp#1234' };
       provisioner.createUser.mockResolvedValue(newUser);
 
@@ -141,24 +161,34 @@ describe('PlatformService (spec §5.1)', () => {
         CONTEXT,
       );
 
+      // The row existed as PROVISIONING before Cognito was touched (ADR-0021).
+      expect(statusWhenProvisioned).toBe('PROVISIONING');
+      // Call order: create, then provisionTenant, then activate.
+      expect(registry.calls.indexOf(`create:${TENANT_A}`)).toBeLessThan(
+        provisioner.provisionTenant.mock.invocationCallOrder[0],
+      );
+      expect(registry.calls.indexOf(`create:${TENANT_A}`)).toBeLessThan(
+        registry.calls.indexOf(`activate:${TENANT_A}`),
+      );
+
       expect(out.tenant?.status).toBe('ACTIVE');
       expect(out.tenant?.tenantId).toBe(TENANT_A);
       expect(out.tenant?.groupName).toBe(`t-${TENANT_A}`);
       expect(out.tenant?.createdAt).toEqual(FIXED_NOW);
       expect(out.admin?.user?.admin).toBe(true);
       expect(out.admin?.temporaryPassword).toBe('Temp#1234');
-      // R-10: registry received only tenant fields, no user payload.
+      // The stored record is ACTIVE with the provisioned field after activate.
       const stored = registry.items.get(TENANT_A)!;
-      expect(Object.keys(stored)).toEqual(
-        expect.arrayContaining(['tenantId', 'name', 'status', 'topology', 'createdAt', 'updatedAt']),
-      );
+      expect(stored.status).toBe('ACTIVE');
+      expect(stored.groupName).toBe(`t-${TENANT_A}`);
+      // R-10: registry received only tenant fields, no user payload.
       expect(stored).not.toHaveProperty('email');
       expect(stored).not.toHaveProperty('temporaryPassword');
-      // The admin step runs after the registry write.
+      // The admin step runs after activation, against the ACTIVE record.
       expect(provisioner.createUser).toHaveBeenCalledWith(stored, 'admin@example.com', true);
     });
 
-    it('rethrows and never writes the registry when provisioning fails before the write (spec §5.1)', async () => {
+    it('deletes the PROVISIONING row and rethrows when provisioning fails (ADR-0021, spec §5.1)', async () => {
       const registry = new FakeRegistry();
       const provisioner = mockProvisioner();
       provisioner.provisionTenant.mockRejectedValue(new Error('boom'));
@@ -166,20 +196,29 @@ describe('PlatformService (spec §5.1)', () => {
       await expect(
         makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
       ).rejects.toBeInstanceOf(InternalServerError);
+      // The row was written then removed; nothing is left behind.
+      expect(registry.calls).toContain(`create:${TENANT_A}`);
+      expect(registry.calls).toContain(`delete:${TENANT_A}`);
       expect(registry.items.size).toBe(0);
+      expect(provisioner.deprovisionTenant).not.toHaveBeenCalled();
       expect(provisioner.createUser).not.toHaveBeenCalled();
     });
 
-    it('deprovisions and rethrows when the registry write fails after provisioning (spec §5.1)', async () => {
+    it('deprovisions Cognito and deletes the row when activate fails (ADR-0021, spec §5.1)', async () => {
       const registry = new FakeRegistry();
-      jest.spyOn(registry, 'create').mockRejectedValue(new Error('throttled'));
+      jest.spyOn(registry, 'activate').mockRejectedValue(new Error('throttled'));
       const provisioner = mockProvisioner();
       provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
 
       await expect(
         makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
       ).rejects.toBeInstanceOf(InternalServerError);
-      expect(provisioner.deprovisionTenant).toHaveBeenCalledWith(expect.objectContaining({ tenantId: TENANT_A }));
+      // Both the Cognito half and the registry row are cleaned up.
+      expect(provisioner.deprovisionTenant).toHaveBeenCalledWith(
+        expect.objectContaining({ tenantId: TENANT_A, groupName: `t-${TENANT_A}` }),
+      );
+      expect(registry.calls).toContain(`delete:${TENANT_A}`);
+      expect(registry.items.size).toBe(0);
       expect(provisioner.createUser).not.toHaveBeenCalled();
     });
 
@@ -438,6 +477,28 @@ describe('PlatformService (spec §5.1)', () => {
       const service = makeService(registry, provisioner);
       await expect(service.GetUser({ tenantId: TENANT_A, username: 'u1' }, CONTEXT)).resolves.toBeDefined();
       await expect(service.ListUsers({ tenantId: TENANT_A }, CONTEXT)).resolves.toBeDefined();
+    });
+  });
+
+  describe('409 on PROVISIONING for mutations and token aids (ADR-0021, P-2, spec §5.3)', () => {
+    function withProvisioning(): { service: PlatformService; provisioner: jest.Mocked<Provisioner> } {
+      const registry = new FakeRegistry();
+      registry.items.set(TENANT_A, tenantRecord('PROVISIONING'));
+      const provisioner = mockProvisioner();
+      return { service: makeService(registry, provisioner), provisioner };
+    }
+    const cases: Array<[string, (s: PlatformService) => Promise<unknown>]> = [
+      ['CreateUser', (s) => s.CreateUser({ tenantId: TENANT_A, email: 'u1@example.com' }, CONTEXT)],
+      ['IssueToken', (s) => s.IssueToken({ tenantId: TENANT_A, username: 'u1', password: 'Secret#123' }, CONTEXT)],
+    ];
+    it.each(cases)('%s -> 409 with the status message and does not touch the provisioner', async (_name, call) => {
+      const { service, provisioner } = withProvisioning();
+      await expect(call(service)).rejects.toMatchObject({
+        name: 'ConflictError',
+        message: `Tenant ${TENANT_A} is PROVISIONING`,
+      });
+      expect(provisioner.createUser).not.toHaveBeenCalled();
+      expect(provisioner.issueToken).not.toHaveBeenCalled();
     });
   });
 

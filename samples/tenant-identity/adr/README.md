@@ -29,3 +29,5 @@ Template: [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md#2-d
 | [ADR-0018](0018-registry-allowlist-not-jwks-stops-trust.md) | Rely on the registry allowlist, not a vanished JWKS, to stop trust in a deleted pool | Accepted | 2026-10-21 |
 | [ADR-0019](0019-teardown-leaves-no-log-group.md) | Delete log groups only after their writers have stopped, and leave the account's API Gateway role alone | Accepted | 2026-10-21 |
 | [ADR-0020](0020-tokens-carry-no-cognito-groups.md) | Remove `cognito:groups` from every token the trigger issues | Accepted | 2026-10-22 |
+| [ADR-0021](0021-registry-row-before-provisioning.md) | Write the registry row before provisioning Cognito | Accepted | 2026-10-22 |
+| [ADR-0022](0022-drain-registry-on-stack-delete.md) | Drain the registry on stack delete | Accepted | 2026-10-22 |

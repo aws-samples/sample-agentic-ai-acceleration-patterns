@@ -61,7 +61,13 @@ function mockProvisioner(over: Partial<Provisioner> = {}): jest.Mocked<Provision
     deprovisionTenant: jest.fn(),
     createUser: jest.fn().mockResolvedValue({ user: userView(), temporaryPassword: 'Temp#12345' }),
     assertMember: jest.fn().mockResolvedValue(undefined),
-    getUser: jest.fn().mockResolvedValue(userView()),
+    // R-16 (T-26): getUser now answers two callers — requireCallerAdmin asks
+    // for the caller's own sub (must be an admin), resolveTarget asks for the
+    // path username (the target). Default: the caller is an admin, everyone
+    // else is the non-admin target view.
+    getUser: jest.fn().mockImplementation((_tenant: TenantRecord, username: string) =>
+      Promise.resolve(username === CALLER_SUB ? userView({ username: CALLER_SUB, admin: true }) : userView()),
+    ),
     listUsers: jest.fn().mockResolvedValue({ items: [userView()], nextToken: undefined }),
     setAdmin: jest.fn().mockResolvedValue(userView({ admin: true })),
     deleteUser: jest.fn().mockResolvedValue(undefined),
@@ -144,9 +150,10 @@ describe('TenantUsersService — R-12 membership (ADR-0013)', () => {
 
 describe('TenantUsersService — R-13 self-mutation (spec §5.2)', () => {
   it('refuses self-demotion with 409 and never calls setAdmin', async () => {
-    // getUser resolves the path username to the caller's own sub.
+    // getUser resolves both the caller check and the path username to the
+    // caller's own (admin) record; the self-update guard then fires.
     const provisioner = mockProvisioner({
-      getUser: jest.fn().mockResolvedValue(userView({ username: CALLER_SUB })),
+      getUser: jest.fn().mockResolvedValue(userView({ username: CALLER_SUB, admin: true })),
     });
     const service = new TenantUsersService(fakeRegistry(), provisioner);
     await expect(
@@ -155,20 +162,20 @@ describe('TenantUsersService — R-13 self-mutation (spec §5.2)', () => {
     expect(provisioner.setAdmin).not.toHaveBeenCalled();
   });
 
-  it('allows self-promotion (admin: true) — only demotion is refused', async () => {
+  it('refuses self-promotion (admin: true) with 409 — extends R-13 (finding R-16 (T-26))', async () => {
     const provisioner = mockProvisioner({
-      getUser: jest.fn().mockResolvedValue(userView({ username: CALLER_SUB })),
-      setAdmin: jest.fn().mockResolvedValue(userView({ username: CALLER_SUB, admin: true })),
+      getUser: jest.fn().mockResolvedValue(userView({ username: CALLER_SUB, admin: true })),
     });
     const service = new TenantUsersService(fakeRegistry(), provisioner);
-    const out = await service.UpdateTenantUser({ username: CALLER_SUB, admin: true }, context);
-    expect(provisioner.setAdmin).toHaveBeenCalled();
-    expect(out.user?.admin).toBe(true);
+    await expect(
+      service.UpdateTenantUser({ username: CALLER_SUB, admin: true }, context),
+    ).rejects.toBeInstanceOf(ModeledConflictError);
+    expect(provisioner.setAdmin).not.toHaveBeenCalled();
   });
 
   it('refuses self-deletion with 409 and never calls deleteUser', async () => {
     const provisioner = mockProvisioner({
-      getUser: jest.fn().mockResolvedValue(userView({ username: CALLER_SUB })),
+      getUser: jest.fn().mockResolvedValue(userView({ username: CALLER_SUB, admin: true })),
     });
     const service = new TenantUsersService(fakeRegistry(), provisioner);
     await expect(service.DeleteTenantUser({ username: CALLER_SUB }, context)).rejects.toBeInstanceOf(ModeledConflictError);
@@ -178,7 +185,7 @@ describe('TenantUsersService — R-13 self-mutation (spec §5.2)', () => {
   it('refuses self-deletion even when the path uses the e-mail, not the username', async () => {
     // The caller passes their e-mail; getUser resolves it to their own sub.
     const provisioner = mockProvisioner({
-      getUser: jest.fn().mockResolvedValue(userView({ username: CALLER_SUB, email: 'me@example.com' })),
+      getUser: jest.fn().mockResolvedValue(userView({ username: CALLER_SUB, email: 'me@example.com', admin: true })),
     });
     const service = new TenantUsersService(fakeRegistry(), provisioner);
     await expect(service.DeleteTenantUser({ username: 'me@example.com' }, context)).rejects.toBeInstanceOf(
@@ -189,13 +196,60 @@ describe('TenantUsersService — R-13 self-mutation (spec §5.2)', () => {
 
   it('refuses self-demotion even when the path uses the e-mail, not the username', async () => {
     const provisioner = mockProvisioner({
-      getUser: jest.fn().mockResolvedValue(userView({ username: CALLER_SUB, email: 'me@example.com' })),
+      getUser: jest.fn().mockResolvedValue(userView({ username: CALLER_SUB, email: 'me@example.com', admin: true })),
     });
     const service = new TenantUsersService(fakeRegistry(), provisioner);
     await expect(
       service.UpdateTenantUser({ username: 'me@example.com', admin: false }, context),
     ).rejects.toBeInstanceOf(ModeledConflictError);
     expect(provisioner.setAdmin).not.toHaveBeenCalled();
+  });
+});
+
+describe('TenantUsersService — R-16 (T-26) caller admin re-check (finding R-16 (T-26))', () => {
+  it('CreateTenantUser 409s when the caller is no longer an admin (admin:false)', async () => {
+    // getUser answers the caller's own sub with admin:false.
+    const provisioner = mockProvisioner({
+      getUser: jest.fn().mockResolvedValue(userView({ username: CALLER_SUB, admin: false })),
+    });
+    const service = new TenantUsersService(fakeRegistry(), provisioner);
+    await expect(service.CreateTenantUser({ email: 'new@example.com' }, context)).rejects.toBeInstanceOf(
+      ModeledConflictError,
+    );
+    expect(provisioner.createUser).not.toHaveBeenCalled();
+  });
+
+  it('UpdateTenantUser 409s when the caller is no longer an admin (admin:false)', async () => {
+    const provisioner = mockProvisioner({
+      getUser: jest.fn().mockResolvedValue(userView({ username: CALLER_SUB, admin: false })),
+    });
+    const service = new TenantUsersService(fakeRegistry(), provisioner);
+    await expect(
+      service.UpdateTenantUser({ username: 'target-sub-9999', admin: true }, context),
+    ).rejects.toBeInstanceOf(ModeledConflictError);
+    expect(provisioner.setAdmin).not.toHaveBeenCalled();
+  });
+
+  it('DeleteTenantUser 409s when the caller is no longer an admin (admin:false)', async () => {
+    const provisioner = mockProvisioner({
+      getUser: jest.fn().mockResolvedValue(userView({ username: CALLER_SUB, admin: false })),
+    });
+    const service = new TenantUsersService(fakeRegistry(), provisioner);
+    await expect(service.DeleteTenantUser({ username: 'target-sub-9999' }, context)).rejects.toBeInstanceOf(
+      ModeledConflictError,
+    );
+    expect(provisioner.deleteUser).not.toHaveBeenCalled();
+  });
+
+  it('CreateTenantUser 409s when the caller is no longer a user of the tenant (getUser 404s)', async () => {
+    const provisioner = mockProvisioner({
+      getUser: jest.fn().mockRejectedValue(new NotFoundError('caller not in tenant')),
+    });
+    const service = new TenantUsersService(fakeRegistry(), provisioner);
+    await expect(service.CreateTenantUser({ email: 'new@example.com' }, context)).rejects.toBeInstanceOf(
+      ModeledConflictError,
+    );
+    expect(provisioner.createUser).not.toHaveBeenCalled();
   });
 });
 

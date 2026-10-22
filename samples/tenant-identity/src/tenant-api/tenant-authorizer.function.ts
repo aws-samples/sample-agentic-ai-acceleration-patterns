@@ -28,12 +28,16 @@ import { DynamoDBRegistry } from '../shared/registry';
  * here (R-9): the role holds registry reads and no Cognito action.
  */
 
-// One verifier per pool id. aws-jwt-verify caches each pool's JWKS inside the
-// verifier, so reusing it across invocations avoids refetching the keys.
+// One verifier per (pool id, client id). aws-jwt-verify caches each pool's
+// JWKS inside the verifier, so reusing it across invocations avoids
+// refetching the keys. M-25: the cache key includes the client id so a
+// verifier built for one app client is never reused for another — a verifier
+// is bound to the client id it was created with.
 const verifiers = new Map<string, TokenVerifier>();
 
-function verifierFor(userPoolId: string, clientId: string): TokenVerifier {
-  const existing = verifiers.get(userPoolId);
+export function verifierFor(userPoolId: string, clientId: string): TokenVerifier {
+  const key = `${userPoolId}|${clientId}`;
+  const existing = verifiers.get(key);
   if (existing !== undefined) {
     return existing;
   }
@@ -42,7 +46,7 @@ function verifierFor(userPoolId: string, clientId: string): TokenVerifier {
     tokenUse: 'access',
     clientId,
   }) as unknown as TokenVerifier;
-  verifiers.set(userPoolId, verifier);
+  verifiers.set(key, verifier);
   return verifier;
 }
 

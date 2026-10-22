@@ -66,6 +66,11 @@ describe('PoolPerTenantProvisioner (spec §7.1)', () => {
       expect(clientInput.ExplicitAuthFlows).toEqual(['ALLOW_ADMIN_USER_PASSWORD_AUTH', 'ALLOW_REFRESH_TOKEN_AUTH']);
       expect(clientInput.AccessTokenValidity).toBe(5);
       expect(clientInput.PreventUserExistenceErrors).toBe('ENABLED');
+      // R-17 (T-27): e-mail is immutable at the pool (an empty client
+      // WriteAttributes would mean "all", so the pool schema is the guard).
+      expect(poolInput.Schema).toEqual([{ Name: 'email', AttributeDataType: 'String', Required: true, Mutable: false }]);
+      expect(clientInput.WriteAttributes).toBeUndefined();
+      expect(clientInput.ReadAttributes).toEqual(['email']);
       // R-5, ADR-0009: refresh token rotation stays off.
       expect(clientInput.RefreshTokenRotation?.Feature ?? 'DISABLED').toBe('DISABLED');
       expect(cognito.commandCalls(CreateGroupCommand)[0].args[0].input.GroupName).toBe(`admin-${IDS.a}`);

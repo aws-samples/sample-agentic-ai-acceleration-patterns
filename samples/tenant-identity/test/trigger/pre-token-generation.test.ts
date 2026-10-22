@@ -77,6 +77,8 @@ interface EventOptions {
   readonly triggerSource?: string;
   readonly sub?: string;
   readonly userName?: string;
+  /** Scopes already on the incoming token (V2 `request.scopes`). */
+  readonly scopes?: string[];
 }
 
 function event(opts: EventOptions = {}): PreTokenGenerationV2TriggerEvent {
@@ -90,6 +92,7 @@ function event(opts: EventOptions = {}): PreTokenGenerationV2TriggerEvent {
     request: {
       userAttributes: { sub: opts.sub ?? 'sub-1' },
       groupConfiguration: { groupsToOverride: opts.groups ?? [] },
+      ...(opts.scopes !== undefined ? { scopes: opts.scopes } : {}),
       ...(opts.clientMetadata !== undefined ? { clientMetadata: opts.clientMetadata } : {}),
     },
     response: { claimsAndScopeOverrideDetails: {} },
@@ -268,6 +271,24 @@ describe('§8.2 narrowing success (ADR-0010)', () => {
       { source, registry: unusedRegistry },
     );
     expect(accessGen(result)?.scopesToSuppress).toEqual([COGNITO_USER_ADMIN_SCOPE]);
+  });
+
+  it('M-13: suppresses every incoming base scope not in the request, plus the cognito admin scope', async () => {
+    const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A) });
+    const result = await handlePreTokenGeneration(
+      event({
+        scopes: ['openid', 'email', COGNITO_USER_ADMIN_SCOPE, SCOPE_API_READ],
+        clientMetadata: { [NARROW_TENANT_KEY]: TENANT_A, [NARROW_SCOPE_KEY]: SCOPE_API_READ },
+      }),
+      { source, registry: unusedRegistry },
+    );
+    const suppress = accessGen(result)?.scopesToSuppress ?? [];
+    // openid, email and the cognito admin scope are suppressed; the requested
+    // scope survives, and nothing is duplicated.
+    expect(suppress).toEqual(expect.arrayContaining(['openid', 'email', COGNITO_USER_ADMIN_SCOPE]));
+    expect(suppress).not.toContain(SCOPE_API_READ);
+    expect(new Set(suppress).size).toBe(suppress.length);
+    expect(accessGen(result)?.scopesToAdd).toEqual([SCOPE_API_READ]);
   });
 });
 

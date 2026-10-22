@@ -17,7 +17,6 @@ verifies every token it asserts on with `aws-jwt-verify`, and it uses the
 | `clients.ts` | stack discovery (CloudFormation outputs), SigV4 platform client, form-POST exchange client, bearer tenant client, and the `aws-jwt-verify` helper |
 | `scenario.ts` | `defineScenario(topology)` — spec §10 steps 2–9 and 11 (steps 1 and 10 are unit-level, in `test/main.test.ts` and the trigger tests) |
 | `<topology>.e2e.test.ts` | one entry per topology; `describe.skip` when `E2E_TOPOLOGIES` excludes it |
-| `cleanup.ts` | preDestroy drain: deletes any tenant left in each stack's registry so `cdk destroy` leaves nothing behind |
 
 ## Run against deployed stacks
 
@@ -47,9 +46,13 @@ step and the narrowing-bypass step).
 ## As part of the deployment integration test
 
 `npx projen integ` (see the sample README) deploys the three stacks, runs this
-scenario as integ-runner's `postDeploy` hook, drains tenants with `cleanup.ts`
-as the `preDestroy` hook, then destroys the stacks. Running the scenario on its
-own with `npx projen e2e` is the faster loop when the stacks are already up.
+scenario as integ-runner's `postDeploy` hook, then destroys the stacks. Step 11
+leaves one tenant in every stack on purpose: the stack's own `TenantDrain`
+custom resource offboards it during `cdk destroy` (ADR-0022), so a pool, group,
+or user left after the destroy is a failure. Running the scenario on its own
+with `npx projen e2e` is the faster loop when the stacks are already up; delete
+the leftover tenant through the platform API (or redeploy and destroy) when you
+are done.
 
 ## Hygiene
 

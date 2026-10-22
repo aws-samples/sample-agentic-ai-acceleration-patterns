@@ -97,18 +97,28 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
       username = existing.Username ?? email;
     } else {
       temporaryPassword = generateTemporaryPassword();
-      const result = await this.cognito.send(
-        new AdminCreateUserCommand({
-          UserPoolId: this.userPoolId,
-          Username: email,
-          TemporaryPassword: temporaryPassword,
-          MessageAction: 'SUPPRESS',
-          UserAttributes: [
-            { Name: 'email', Value: email },
-            { Name: 'email_verified', Value: 'true' },
-          ],
-        }),
-      );
+      let result;
+      try {
+        result = await this.cognito.send(
+          new AdminCreateUserCommand({
+            UserPoolId: this.userPoolId,
+            Username: email,
+            TemporaryPassword: temporaryPassword,
+            MessageAction: 'SUPPRESS',
+            UserAttributes: [
+              { Name: 'email', Value: email },
+              { Name: 'email_verified', Value: 'true' },
+            ],
+          }),
+        );
+      } catch (error) {
+        // An unverified user holds the address (findUserByEmail ignores them,
+        // R-17): a conflict, never a membership for the squatter.
+        if (isCognitoError(error, COGNITO.usernameExists)) {
+          throw new ConflictError('E-mail already exists');
+        }
+        throw error;
+      }
       created = result.User;
       username = created?.Username ?? email;
     }

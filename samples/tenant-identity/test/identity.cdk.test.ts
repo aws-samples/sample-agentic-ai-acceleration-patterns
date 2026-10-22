@@ -4,7 +4,7 @@
 import { App, Validations } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
-import { TenantIdentityStack } from '../src/identity.cdk';
+import { DRAIN_SHARED_POOL_ACTIONS, TenantIdentityStack } from '../src/identity.cdk';
 import { Topology } from '../src/shared/constants';
 import { mergeOpenApi, patchIntegrations } from '../src/shared/openapi';
 
@@ -235,6 +235,60 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     expect(platform).toContain('cognito-idp:AdminInitiateAuth');
   });
 
+  // Every statement on Resource '*' is pinned per role. The cdk-nag IAM5
+  // acknowledgement for '*' is per role, not per action, so a future '*'
+  // action would otherwise pass review silently.
+  const XRAY = ['xray:PutTelemetryRecords', 'xray:PutTraceSegments'];
+  test.each(TOPOLOGIES)('the only Resource "*" actions are X-Ray, plus CreateUserPool on the pool-per-tenant platform role [%s]', (topology) => {
+    const template = synth(topology);
+    const roles: Record<string, string[]> = {
+      TriggerFunctionServiceRole: XRAY,
+      TokenFunctionServiceRole: XRAY,
+      AuthorizerFunctionServiceRole: XRAY,
+      TenantUsersFunctionServiceRole: XRAY,
+      TenantDrainFunctionServiceRole: XRAY,
+      PlatformFunctionServiceRole:
+        topology === 'pool-per-tenant' ? [...XRAY, 'cognito-idp:CreateUserPool'].sort() : XRAY,
+    };
+    for (const [role, expected] of Object.entries(roles)) {
+      const star = policyStatementsForRole(template, role)
+        .filter((s) => s.Resource === '*' || (Array.isArray(s.Resource) && s.Resource.includes('*')))
+        .flatMap(actionsOf)
+        .sort();
+      expect({ role, star }).toEqual({ role, star: expected });
+    }
+  });
+
+  test.each(TOPOLOGIES)('drain role: registry writes and delete-side Cognito only, no create or sign-in action (ADR-0022) [%s]', (topology) => {
+    const template = synth(topology);
+    const actions = policyStatementsForRole(template, 'TenantDrainFunctionServiceRole').flatMap(actionsOf);
+    for (const forbidden of [
+      'cognito-idp:CreateUserPool',
+      'cognito-idp:CreateUserPoolClient',
+      'cognito-idp:CreateGroup',
+      'cognito-idp:AdminCreateUser',
+      'cognito-idp:AdminAddUserToGroup',
+      'cognito-idp:AdminSetUserPassword',
+      'cognito-idp:AdminInitiateAuth',
+      'cognito-idp:TagResource',
+      'dynamodb:PutItem',
+    ]) {
+      expect(actions).not.toContain(forbidden);
+    }
+    expect(actions).toContain('dynamodb:Scan');
+    expect(actions).toContain('dynamodb:DeleteItem');
+    const cognito = actions.filter((a) => a.startsWith('cognito-idp:')).sort();
+    if (topology === 'pool-per-tenant') {
+      expect(cognito).toEqual(['cognito-idp:DeleteUserPool']);
+      const stmt = policyStatementsForRole(template, 'TenantDrainFunctionServiceRole').find((s) =>
+        actionsOf(s).includes('cognito-idp:DeleteUserPool'),
+      );
+      expect(JSON.stringify(stmt.Condition)).toContain('tenant-identity:stack');
+    } else {
+      expect(cognito).toEqual([...DRAIN_SHARED_POOL_ACTIONS].sort());
+    }
+  });
+
   test('platform pool-per-tenant: CreateUserPool with the RequestTag condition and tagged per-pool actions (N-3)', () => {
     const template = synth('pool-per-tenant');
     const statements = policyStatementsForRole(template, 'PlatformFunctionServiceRole');
@@ -349,9 +403,26 @@ describe('TenantIdentityStack - shared user pool (R-4, R-5, N-1, N-8, §7.2)', (
     const clients = template.findResources('AWS::Cognito::UserPoolClient');
     const client = Object.values(clients)[0] as any;
     expect(client.Properties.WriteAttributes ?? []).not.toContain('custom:tenantId');
-    // Writable attributes are email only.
-    expect(client.Properties.WriteAttributes).toEqual(['email']);
   });
+
+  test.each(['shared-pool', 'shared-pool-multi-tenant'] as Topology[])(
+    'e-mail is immutable at the pool; no self-service recovery (R-17, T-27) [%s]',
+    (topology) => {
+      const template = synth(topology);
+      const pool = Object.values(template.findResources('AWS::Cognito::UserPool'))[0] as any;
+      // The guard lives in the pool schema. An empty client WriteAttributes
+      // would mean "all standard attributes" (integration-verified), so the
+      // client list is not the control and is left unset.
+      const email = (pool.Properties.Schema as any[]).find((a) => a.Name === 'email');
+      expect(email).toMatchObject({ Required: true, Mutable: false });
+      const client = Object.values(template.findResources('AWS::Cognito::UserPoolClient'))[0] as any;
+      expect(client.Properties.WriteAttributes).toBeUndefined();
+      expect(client.Properties.ReadAttributes).toEqual(['email']);
+      expect(pool.Properties.AccountRecoverySetting).toEqual({
+        RecoveryMechanisms: [{ Name: 'admin_only', Priority: 1 }],
+      });
+    },
+  );
 
   test.each(['shared-pool', 'shared-pool-multi-tenant'] as Topology[])(
     'pool signs in by e-mail, so the Cognito username is the sub (R-13) [%s]',
@@ -555,8 +626,8 @@ describe('TenantIdentityStack - log groups bounded (teardown, §6.2)', () => {
   test.each(TOPOLOGIES)('every log group has 30-day retention and Delete removal [%s]', (topology) => {
     const template = synth(topology);
     const logGroups = Object.values(template.findResources('AWS::Logs::LogGroup'));
-    // Five function log groups + API access logs.
-    expect(logGroups.length).toBeGreaterThanOrEqual(6);
+    // Six function log groups + API access logs.
+    expect(logGroups.length).toBeGreaterThanOrEqual(7);
     for (const lg of logGroups as any[]) {
       expect(lg.Properties.RetentionInDays).toBe(30);
       expect(lg.DeletionPolicy).toBe('Delete');
@@ -585,6 +656,45 @@ describe('TenantIdentityStack - cdk-nag (sample-standard §4.3)', () => {
     );
     const detail = errors.map((e: any) => e.entry.data).join('\n');
     expect({ topology, errors: detail }).toEqual({ topology, errors: '' });
+  });
+});
+
+describe('TenantIdentityStack - teardown drains tenants (ADR-0022)', () => {
+  test.each(TOPOLOGIES)('one Custom::TenantDrain, served by the drain function, deleted before the registry table [%s]', (topology) => {
+    const template = synth(topology);
+    const resources = template.toJSON().Resources as Record<string, any>;
+    const drains = Object.entries(resources).filter(([, r]) => r.Type === 'Custom::TenantDrain');
+    expect(drains).toHaveLength(1);
+    const [, drain] = drains[0];
+    expect(drain.Properties.ServiceToken['Fn::GetAtt'][0]).toMatch(/^TenantDrainFunction/);
+    const dependsOn: string[] = [drain.DependsOn ?? []].flat();
+    const tables = Object.keys(resources).filter((id) => resources[id].Type === 'AWS::DynamoDB::GlobalTable');
+    expect(tables).toHaveLength(1);
+    expect(dependsOn).toContain(tables[0]);
+    // Shared pools: the drain also runs before the pool and its client go.
+    for (const id of Object.keys(resources).filter((k) =>
+      ['AWS::Cognito::UserPool', 'AWS::Cognito::UserPoolClient'].includes(resources[k].Type),
+    )) {
+      expect(dependsOn).toContain(id);
+    }
+  });
+
+  test.each(TOPOLOGIES)('the drain function has the platform environment and a 14-minute timeout [%s]', (topology) => {
+    const template = synth(topology);
+    const [fn] = Object.entries(template.findResources('AWS::Lambda::Function'))
+      .filter(([id]) => id.startsWith('TenantDrainFunction'))
+      .map(([, r]) => r as any);
+    expect(fn).toBeDefined();
+    expect(fn.Properties.Timeout).toBe(840);
+    const vars = fn.Properties.Environment.Variables;
+    expect(vars.TOPOLOGY).toBe(topology);
+    expect(vars.TABLE_NAME).toBeDefined();
+    if (topology === 'pool-per-tenant') {
+      expect(vars.USER_POOL_ID).toBeUndefined();
+    } else {
+      expect(vars.USER_POOL_ID).toBeDefined();
+      expect(vars.APP_CLIENT_ID).toBeDefined();
+    }
   });
 });
 

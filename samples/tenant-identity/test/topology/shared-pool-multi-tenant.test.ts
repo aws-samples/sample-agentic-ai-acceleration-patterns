@@ -60,8 +60,16 @@ describe('SharedPoolMultiTenantProvisioner (spec §7.3)', () => {
       expect(groups).toEqual([`t-${IDS.a}`, `admin-${IDS.a}`]);
     });
 
+    it('an unverified holder of the e-mail is a 409: no membership for a squatter (R-17)', async () => {
+      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'squatter', Attributes: [{ Name: 'email', Value: 'u1@x.com' }, { Name: 'email_verified', Value: 'false' }] }] });
+      cognito.on(AdminCreateUserCommand).rejects(cognitoError('UsernameExistsException'));
+      await expect(provisioner().createUser(tenantA(), 'u1@x.com', true)).rejects.toBeInstanceOf(ConflictError);
+      expect(cognito).toHaveReceivedCommandTimes(AdminAddUserToGroupCommand as AnyMock, 0);
+    });
+
     it('reuses an existing e-mail user and returns no password (T-21)', async () => {
-      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'existing', Attributes: [{ Name: 'email', Value: 'u1@x.com' }] }] });
+      // R-17 (T-27), T-27: only a verified existing e-mail is reused.
+      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'existing', Attributes: [{ Name: 'email', Value: 'u1@x.com' }, { Name: 'email_verified', Value: 'true' }] }] });
       cognito.on(AdminAddUserToGroupCommand).resolves({});
       const result = await provisioner().createUser(tenantA(), 'u1@x.com', false);
       expect(result.temporaryPassword).toBeUndefined();

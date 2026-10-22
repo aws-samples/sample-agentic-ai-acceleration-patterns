@@ -177,6 +177,19 @@ describe('ExchangeToken Cognito error mapping (§5.4)', () => {
     await expect(exchange(form())).rejects.toMatchObject({ name: 'OAuthError', code: 'invalid_scope' });
   });
 
+  it('spec §5.4: an unprefixed UserLambdaValidationException (trigger fault) -> server_error, not invalid_grant', async () => {
+    // Neither the invalid_target nor the invalid_scope prefix: the trigger
+    // failed for a non-caller reason (e.g. a registry outage). The client
+    // must retry, not discard its refresh token.
+    cognitoMock.on(GetTokens).rejects(
+      new UserLambdaValidationException({ message: 'PreTokenGeneration failed with error AccessDeniedException', $metadata: {} }),
+    );
+    const caught = await exchange(form()).catch((e) => e);
+    expect(caught).toBeInstanceOf(OAuthServerError);
+    expect(caught.code).toBe('server_error');
+    expect(caught.description).toMatch(/retry later/);
+  });
+
   it.each([
     ['NotAuthorizedException', new NotAuthorizedException({ message: 'x', ...meta })],
     ['InvalidParameterException', new InvalidParameterException({ message: 'x', ...meta })],
@@ -254,5 +267,46 @@ describe('ExchangeToken ADR-0012: reject tokens Cognito did not narrow', () => {
     const caught = await exchange(form()).catch((e) => e);
     expect(caught).toBeInstanceOf(OAuthServerError);
     expect(caught.code).toBe('server_error');
+  });
+});
+
+describe('ExchangeToken T-28: shared-pool client_id check', () => {
+  /** A service bound to a shared-pool app client id. */
+  function serviceWith(appClientId: string): TokenExchangeService<Record<string, unknown>> {
+    return new TokenExchangeService<Record<string, unknown>>({
+      cognito: cognitoMock as unknown as CognitoIdentityProviderClient,
+      appClientId,
+    });
+  }
+
+  it('a client_id other than the shared app client -> invalid_client, no Cognito call', async () => {
+    const caught = await serviceWith('the-only-client')
+      .ExchangeToken({ form: new TextEncoder().encode(form({ client_id: 'some-other-client' })) }, {})
+      .catch((e) => e);
+    expect(caught).toBeInstanceOf(OAuthError);
+    expect(caught.code).toBe('invalid_client');
+    // Refused before the refresh token ever reaches Cognito.
+    expect(cognitoMock.commandCalls(GetTokens)).toHaveLength(0);
+  });
+
+  it('the matching client_id passes the check and calls Cognito', async () => {
+    cognitoMock.on(GetTokens).resolves({
+      AuthenticationResult: { AccessToken: narrowedToken(TENANT_A, [SCOPE_API_READ]), ExpiresIn: 300 },
+    });
+    const output = await serviceWith(CLIENT).ExchangeToken(
+      { form: new TextEncoder().encode(form()) },
+      {},
+    );
+    expect(output.accessToken).toBe(narrowedToken(TENANT_A, [SCOPE_API_READ]));
+    expect(cognitoMock.commandCalls(GetTokens)).toHaveLength(1);
+  });
+
+  it('appClientId undefined (pool-per-tenant) performs no check', async () => {
+    cognitoMock.on(GetTokens).resolves({
+      AuthenticationResult: { AccessToken: narrowedToken(TENANT_A, [SCOPE_API_READ]), ExpiresIn: 300 },
+    });
+    // The default `service()` passes no appClientId; any client_id is allowed.
+    await exchange(form({ client_id: 'any-tenant-client' }));
+    expect(cognitoMock.commandCalls(GetTokens)).toHaveLength(1);
   });
 });

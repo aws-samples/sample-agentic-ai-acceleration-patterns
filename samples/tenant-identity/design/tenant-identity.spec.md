@@ -338,7 +338,7 @@ recover a tenant that has locked itself out.
 | R-2 | **Platform function** | Implements the platform API through the topology's provisioner. Role per P-8. |
 | R-3 | **Tenant registry** | One DynamoDB table (§4). Point-in-time recovery on; `DESTROY` removal for the sample. |
 | R-4 | **Pre-token-generation function** | Cognito Lambda trigger, version 2 event (`V2_0`), adds the claim(s) and scopes of P-6 to the access token, enforces tenant status (P-2), and applies narrowing requests (P-10, §8; ADR-0003). Attached to every pool the sample creates. Pools MUST use the **Essentials** feature plan (the default for new pools); access-token customisation is not available on Lite without advanced security features. |
-| R-5 | **User pool(s)** | `shared-pool*`: exactly one pool created by the stack. `pool-per-tenant`: zero pools at deploy time; one pool, one app client, and the trigger attachment per tenant at onboarding. Every pool: self sign-up off, admin-create only, e-mail as username, access token lifetime 5 minutes (N-1), refresh token rotation off (ADR-0009), no hosted UI domain. |
+| R-5 | **User pool(s)** | `shared-pool*`: exactly one pool created by the stack. `pool-per-tenant`: zero pools at deploy time; one pool, one app client, and the trigger attachment per tenant at onboarding. Every pool: self sign-up off, admin-create only, e-mail as username, admin-only account recovery, access token lifetime 5 minutes (N-1), refresh token rotation off (ADR-0009), no hosted UI domain. Every pool: `email` immutable (R-17). |
 | R-6 | **Parameter publication** | The stack publishes `/application-plane/shared/identity/{apiUrl,topology}` and, for `shared-pool*`, `/application-plane/shared/identity/userPoolId` and `appClientId`, so the sample mounts into the `control-plane` sample's shared namespace. |
 | R-7 | **Token-exchange function** | Implements `POST /oauth2/token` (§5.4). It parses the form and calls `GetTokensFromRefreshToken` with the narrowing request in `ClientMetadata`. It returns the access token only and discards the ID token. Its role holds logging permissions only, no `cognito-idp` or DynamoDB action, because `GetTokensFromRefreshToken` is authorised by the refresh token, not by IAM (P-10). |
 | R-8 | **Tenant-user function** | Implements `/tenant/users` (§5.2) through the topology's provisioner, with the tenant taken only from the authoriser context. Its role holds `AdminCreateUser`, `AdminGetUser`, `AdminDeleteUser`, `AdminAddUserToGroup`, `AdminRemoveUserFromGroup`, `AdminListGroupsForUser`, `ListUsers`, and `ListUsersInGroup`, scoped as N-3, plus registry reads. It holds no `CreateUserPool`, `DeleteUserPool`, `CreateGroup`, or `DeleteGroup` (P-8). |
@@ -398,7 +398,7 @@ One table, `TenantRegistry`. Single-table, one item type.
 |---|---|
 | `tenantId` | generated ULID |
 | `name` | required; not unique |
-| `status` | `ACTIVE` \| `DELETING` |
+| `status` | `PROVISIONING` \| `ACTIVE` \| `DELETING`. A tenant is `PROVISIONING` from the registry write until its Cognito resources exist (ADR-0021); only `ACTIVE` receives tokens or mutations. |
 | `topology` | the stack's topology, stamped for diagnostics |
 | `userPoolId`, `appClientId`, `issuer` | `pool-per-tenant` only: the tenant's own pool. `issuer` is stored for consumers: `ListTenants` is the issuer allowlist a `pool-per-tenant` verifier needs (§1.2). |
 | `groupName` | `shared-pool-multi-tenant` only: `t-<tenantId>` |
@@ -450,7 +450,7 @@ setup, before the first operation is modelled.
 
 | Operation | Method / path | Effect by topology |
 |---|---|---|
-| `CreateTenant` | `POST /platform/tenants` `{name, adminEmail}` → 201 `{tenant, admin}` | 1: create pool + client + trigger + group `admin-<id>`, write registry. 2, 3: create groups `t-<id>` and `admin-<id>`, write registry. All: then `CreateUser` for `adminEmail` with `admin: true`; `admin` is that User with its temporary password. If this step fails, the tenant is `ACTIVE` with no admin, and the vendor retries with `CreateUser`. |
+| `CreateTenant` | `POST /platform/tenants` `{name, adminEmail}` → 201 `{tenant, admin}` | All: write the registry row first, as `PROVISIONING` (ADR-0021). 1: create pool + client + trigger + group `admin-<id>`. 2, 3: create groups `t-<id>` and `admin-<id>`. All: flip the row to `ACTIVE` with the pool or group fields in one conditional write; a provisioning failure deletes the row, an activation failure deprovisions and deletes it. Then `CreateUser` for `adminEmail` with `admin: true`; `admin` is that User with its temporary password. If this last step fails, the tenant is `ACTIVE` with no admin, and the vendor retries with `CreateUser`. |
 | `GetTenant` | `GET /platform/tenants/{tenantId}` | registry read |
 | `ListTenants` | `GET /platform/tenants?nextToken=` | registry scan |
 | `DeleteTenant` | `DELETE /platform/tenants/{tenantId}` → 204 | R-11, then: 1: delete pool. 2: delete users with `custom:tenantId=<id>`. 3: delete users whose only group is `t-<id>`, remove the group from the rest, delete the group. |
@@ -496,10 +496,28 @@ operation as its platform twin, with the same per-topology effects.
 | `UpdateTenantUser` | `PATCH /tenant/users/{username}` `{admin}` → 200 User | `UpdateUser` |
 | `DeleteTenantUser` | `DELETE /tenant/users/{username}` → 204 | `DeleteUser` |
 
-**R-13:** A tenant admin MUST NOT demote or delete themselves.
-`UpdateTenantUser` with `admin: false`, or `DeleteTenantUser`, where
+**R-13:** A tenant admin MUST NOT change or delete themselves.
+`UpdateTenantUser` (either value of `admin`), or `DeleteTenantUser`, where
 `{username}` is the caller (`sub` from the authoriser) → 409. So the tenant
 API always leaves at least one admin; only the vendor can remove the last.
+
+**R-16:** Every `/tenant/*` mutation (`CreateTenantUser`, `UpdateTenantUser`,
+`DeleteTenantUser`) MUST re-read the caller's admin group through the
+provisioner before it writes, and answer 409 when the caller is no longer an
+admin, or no longer a member, of the tenant. The narrowed admin token lives
+five minutes; without this check a demoted or deleted admin keeps writing
+until it expires (threat model T-26). Reads are not re-checked: a demoted
+admin can list and read users until the token expires (accepted residual).
+
+**R-17:** Every pool the sample creates MUST declare `email` immutable
+(`Mutable: false`), and `findUserByEmail` (topology 3) MUST match only a
+user whose `email_verified` is `true`. Otherwise a user holding an
+un-narrowed token (which carries `aws.cognito.signin.user.admin`) could set
+their own `email` to an address a tenant admin later invites and be added as
+that invitee (threat model T-27). The guard is the pool schema, not the app
+client's `WriteAttributes`: Cognito reads an empty write list as "every
+standard attribute", so the client list cannot express "none". `CreateUser`
+sets `email_verified = true`.
 
 `CreateMembership` and `DeleteMembership` stay vendor-only. From a tenant's
 view, `CreateTenantUser` and `DeleteTenantUser` are the only membership
@@ -513,7 +531,7 @@ an e-mail that already has a Cognito user adds that user to the tenant, as
 |---|---|---|
 | `ValidationError` | 400 | malformed input; `UnsupportedInTopology` |
 | `ResourceNotFoundError` | 404 | unknown tenant or user; a user who does not belong to the path's tenant (R-12) |
-| `ConflictError` | 409 | tenant `DELETING` on mutation; removing a user's last membership; e-mail already exists in a shared pool for a different tenant (topology 2); a tenant admin demoting or deleting themselves (R-13) |
+| `ConflictError` | 409 | tenant `PROVISIONING` or `DELETING` on mutation; removing a user's last membership; e-mail already exists in a shared pool for a different tenant (topology 2); a tenant admin changing or deleting themselves (R-13); a caller whose admin group or membership is gone (R-16) |
 | `InternalServerError` | 500 | everything else |
 
 401 and 403 on `/platform/*` are API Gateway's own (IAM). On `/tenant/*`, API
@@ -561,9 +579,10 @@ Errors, `{error, error_description}`, 400 unless marked:
 | `unsupported_grant_type` | any other `grant_type` |
 | `invalid_target` | the trigger refused the tenant: not held, not `ACTIVE`, or absent (message prefix `invalid_target`) |
 | `invalid_scope` | the trigger refused the scopes (prefix `invalid_scope`) |
+| `invalid_client` | topologies 2 and 3: `client_id` is not the stack's app client. The endpoint serves one client and is not a relay for other pools in the Region (threat model T-28) |
 | `invalid_grant` | anything else Cognito rejects: an expired, revoked, or foreign refresh token, or an unknown client |
 | `server_error` (500) | Cognito returned a token that does not match the request (ADR-0012); logged by rule name, never with the token |
-| `server_error` (500) | Cognito throttled the call or failed (`TooManyRequestsException`, `LimitExceededException`, `InternalErrorException`, any 5xx); the caller may retry. Logged by error name only |
+| `server_error` (500) | Cognito throttled the call or failed (`TooManyRequestsException`, `LimitExceededException`, `InternalErrorException`, any 5xx), or the trigger failed for a reason that is not a refusal (`UserLambdaValidationException` with neither prefix, for example a registry outage); the caller may retry and MUST NOT discard its refresh token. Logged by error name only |
 
 `error_description` is fixed text per code and never echoes Cognito's
 message or the token.
@@ -593,8 +612,9 @@ message or the token.
   Cognito.
 - A tenant admin reaches exactly the users of their own tenant; the vendor
   reaches every user (P-11, R-12).
-- Clean teardown: `cdk destroy` after deleting all tenants leaves no pools,
-  groups, users, parameters, or log groups with the sample's prefix.
+- Clean teardown: `cdk destroy` leaves no pools, groups, users, parameters,
+  or log groups with the sample's prefix, whether or not tenants were deleted
+  first: the stack drains its registry on delete (ADR-0022).
 - Parameters under `/application-plane/shared/identity/*` (R-6).
 
 ### 6.3 Parameter namespace
@@ -767,9 +787,10 @@ verification of §3.2.
    `issuer` from `GetTenant`) or `tenants = [A, B]` (3). u2: `tenant_id = B`
    or `tenants = [B]`. `sub` equals the Cognito user's `sub`. The ID tokens
    carry no `tenant_id` or `tenants` claim.
-5. **Claim integrity (P-3):** topology 2: u1 calls `UpdateUserAttributes`
-   on `custom:tenantId` with its own access token → rejected by Cognito, and
-   a fresh token still says `A`. Topology 3: the vendor creates a group
+5. **Claim integrity (P-3):** every topology: u1 calls `UpdateUserAttributes`
+   on `email` with its own access token → rejected by Cognito, and the
+   vendor's `GetUser` still shows u1's e-mail (R-17). Topology 2: the same
+   call on `custom:tenantId` → rejected, and a fresh token still says `A`. Topology 3: the vendor creates a group
    `role-admin`, adds u1, re-issues → `tenants` unchanged. Topology 1: a
    user created directly in pool B (bypassing the platform API) still
    receives `tenant_id = B`, because the claim comes from the pool, not the
@@ -809,9 +830,16 @@ verification of §3.2.
      but not its admin.
    - `GetTenantUser` and `DeleteTenantUser` for u2 (tenant B): 404, and u2
      still exists (R-12).
-   - `DeleteTenantUser` a1, and `UpdateTenantUser` a1 `admin=false`: 409
-     (R-13). The same two calls with a1's e-mail in the path, not the sub:
-     409 too (R-13 holds for any username form).
+   - `DeleteTenantUser` a1, and `UpdateTenantUser` a1 with either `admin`
+     value: 409 (R-13). The same calls with a1's e-mail in the path, not the
+     sub: 409 too (R-13 holds for any username form).
+   - The vendor demotes a1 (`UpdateUser` `admin=false`) while a1's narrowed
+     admin token is still valid: `CreateTenantUser`, `UpdateTenantUser`, and
+     `DeleteTenantUser` → 409 (R-16); `ListTenantUsers` still 200 (accepted
+     residual). The vendor restores a1.
+   - Header shape: no `Authorization` header, or a bearer value that is not
+     a three-segment JWT → 401 from API Gateway without invoking the
+     authoriser; a well-formed JWT with a bad signature → 403.
    - Topology 3: b1's `GetTenantUser` for u1 (in A and B) returns a User
      that does not mention A.
 9. **Offboard (P-2):** `DeleteTenant` A. a1's narrowed admin token from step
@@ -830,9 +858,10 @@ verification of §3.2.
    tenant for topology 3; with no item it does the same; with an unknown
    `userPoolId` (topology 1) it throws.
 11. **Teardown:** `DeleteTenant` B; no pools (1) or groups and users (2, 3)
-   tagged or prefixed by the test remain; `cdk destroy` leaves no stack, no
-   parameters under `/application-plane/shared/identity/`, no log groups
-   with the sample's prefix. Every platform operation, every tenant operation, and the token-exchange endpoint have run at least once in every topology.
+   tagged or prefixed by the test remain. Then create one more tenant and
+   leave it: `cdk destroy` MUST offboard it (ADR-0022) and leave no stack,
+   pool, group, user, no parameters under `/application-plane/shared/identity/`,
+   and no log groups with the sample's prefix. Every platform operation, every tenant operation, and the token-exchange endpoint have run at least once in every topology.
 
 Plus unit-level assertions that: the provisioner is the only
 topology-specific module (P-1); the trigger role's policy contains no

@@ -29,6 +29,7 @@ import {
 import { LogDrain } from './shared/log-drain';
 import { acknowledgeGranularFinding, nagFindingResource, suppressTemplateScanners } from './shared/nag';
 import { IntegrationMapping, mergeOpenApi, patchIntegrations } from './shared/openapi';
+import { TenantDrain } from './teardown/tenant-drain-resource';
 
 /** Stack props: the deploy-time topology (ADR-0001) plus the usual StackProps. */
 export interface TenantIdentityStackProps extends StackProps {
@@ -78,6 +79,20 @@ const PER_POOL_USER_ACTIONS = [...TENANT_USER_ACTIONS, ...TEST_AID_SIGN_IN_ACTIO
 /** Group-lifecycle actions the PLATFORM role holds and the tenant-user role never does (R-8). */
 const GROUP_LIFECYCLE_ACTIONS = ['cognito-idp:CreateGroup', 'cognito-idp:DeleteGroup'];
 
+/**
+ * What offboarding a tenant in a shared pool needs (ADR-0022): list the
+ * tenant's users, remove or delete them, delete the two groups. The teardown
+ * drain holds these and nothing else.
+ */
+export const DRAIN_SHARED_POOL_ACTIONS = [
+  'cognito-idp:ListUsers',
+  'cognito-idp:ListUsersInGroup',
+  'cognito-idp:AdminListGroupsForUser',
+  'cognito-idp:AdminRemoveUserFromGroup',
+  'cognito-idp:AdminDeleteUser',
+  'cognito-idp:DeleteGroup',
+];
+
 /** Pool-lifecycle actions (pool-per-tenant platform role only). */
 const POOL_LIFECYCLE_ACTIONS = [
   'cognito-idp:CreateUserPoolClient',
@@ -95,7 +110,8 @@ const THROTTLE = {
 /**
  * Tenant Identity, one stack per topology (ADR-0001). One REST API
  * (SpecRestApi) built from the three merged Smithy OpenAPI documents, five
- * Lambda functions whose roles are asymmetric by design (P-8), the tenant
+ * Lambda functions whose roles are asymmetric by design (P-8), a sixth that
+ * drains the registry on stack delete (ADR-0022), the tenant
  * registry, and — for the shared-pool topologies — one user pool with the
  * pre-token-generation trigger attached. `pool-per-tenant` creates no pool
  * at deploy time; the platform function creates one per tenant at
@@ -241,6 +257,30 @@ export class TenantIdentityStack extends Stack {
     );
     acknowledgeLambdaBasicExecutionRole(tenantUsersFn);
 
+    // --- Teardown drain (ADR-0022) ----------------------------------------
+    // On stack delete, offboards every tenant still in the registry before
+    // the table (and the shared pool) go, so `cdk destroy` leaves no
+    // runtime-created pool, group, or user behind. Same env as the platform
+    // function; a subset of its permissions (delete-side only).
+    const drainFn = new NodejsFunction(this, 'TenantDrainFunction', {
+      entry: path.join(__dirname, 'teardown/tenant-drain.function.ts'),
+      ...functionProps(this, 'TenantDrainFunctionLogs', Duration.minutes(14)),
+      environment: {
+        [ENV.topology]: topology,
+        [ENV.tableName]: table.tableName,
+        [ENV.poolIndexName]: GSI_BY_USER_POOL_ID,
+      },
+    });
+    drainFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:Scan'],
+        resources: [table.tableArn, `${table.tableArn}/index/${GSI_BY_USER_POOL_ID}`],
+      }),
+    );
+    acknowledgeLambdaBasicExecutionRole(drainFn);
+    const tenantDrain = new TenantDrain(this, 'TenantDrain', { handler: drainFn });
+    tenantDrain.dependsOn(table);
+
     if (isShared) {
       // shared-pool*: exactly one pool, created by the stack (R-5). Its
       // custom attribute names the tenant only in `shared-pool` (§7.2);
@@ -264,11 +304,17 @@ export class TenantIdentityStack extends Stack {
         // R-5: admin-create only, no self sign-up.
         selfSignUpEnabled: false,
         autoVerify: { email: true },
-        standardAttributes: { email: { required: true, mutable: true } },
+        // E-mail is the identity the sample manages, so it is immutable: no
+        // user (and no admin) can rewrite it after creation (T-27, R-17).
+        // This is the pool-level guard; the app client's write list cannot
+        // do it, because Cognito reads an empty WriteAttributes as "every
+        // standard attribute" (integration-verified 2026-10-22).
+        standardAttributes: { email: { required: true, mutable: false } },
         customAttributes,
-        // Account recovery is e-mail; the sample never sends mail (admin
-        // create + AdminSetUserPassword), so this is inert, documented here.
-        accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
+        // Account recovery is admin-only: the sample never sends mail (admin
+        // create + AdminSetUserPassword), and EMAIL_ONLY would let anyone
+        // trigger a ForgotPassword e-mail to a user (T-27).
+        accountRecovery: cognito.AccountRecovery.NONE,
         // N-8 (P-4): deletion protection OFF so teardown is total.
         deletionProtection: false,
         removalPolicy: RemovalPolicy.DESTROY,
@@ -288,19 +334,15 @@ export class TenantIdentityStack extends Stack {
 
       // App client (R-5, N-1, §7.2). No secret, admin-password + refresh
       // auth only, 5-minute access/id tokens, 1-day refresh, no OAuth/hosted
-      // UI. custom:tenantId is NOT writable (P-3) — writeAttributes is email
-      // only; readAttributes email only.
-      const clientReadWrite =
-        topology === 'shared-pool'
-          ? {
-            readAttributes: new cognito.ClientAttributes().withStandardAttributes({ email: true }),
-            // P-3: custom:tenantId deliberately absent from writeAttributes.
-            writeAttributes: new cognito.ClientAttributes().withStandardAttributes({ email: true }),
-          }
-          : {
-            readAttributes: new cognito.ClientAttributes().withStandardAttributes({ email: true }),
-            writeAttributes: new cognito.ClientAttributes().withStandardAttributes({ email: true }),
-          };
+      // UI. readAttributes email only; custom:tenantId is neither readable
+      // nor writable (P-3). No writeAttributes: Cognito treats an empty list
+      // as "all standard attributes", so the guard against a user rewriting
+      // their e-mail (T-27, R-17) is the pool's immutable `email` above, not
+      // this list. The other standard attributes stay writable; the sample
+      // reads none of them.
+      const clientReadWrite = {
+        readAttributes: new cognito.ClientAttributes().withStandardAttributes({ email: true }),
+      };
 
       appClient = userPool.addClient('AppClient', {
         userPoolClientName: `${this.stackName}-client`,
@@ -319,10 +361,13 @@ export class TenantIdentityStack extends Stack {
       // trigger is excluded: it reads the tenant from the event/registry, not
       // from env, and wiring the pool id into it would create a circular
       // dependency (the pool references the trigger as its V2 trigger).
-      for (const fn of [platformFn, tenantUsersFn, tokenFn, authorizerFn]) {
+      for (const fn of [platformFn, tenantUsersFn, tokenFn, authorizerFn, drainFn]) {
         fn.addEnvironment(ENV.userPoolId, userPool.userPoolId);
         fn.addEnvironment(ENV.appClientId, appClient.userPoolClientId);
       }
+      // The drain runs before the pool is deleted (ADR-0022).
+      tenantDrain.dependsOn(userPool);
+      tenantDrain.dependsOn(appClient);
 
       // Platform + tenant-user roles: per-pool cognito actions scoped to the
       // stack pool ARN (N-3). Shared pools: the pool is known at synth time.
@@ -337,6 +382,13 @@ export class TenantIdentityStack extends Stack {
           // R-8: NO CreateUserPool/DeleteUserPool/CreateGroup/DeleteGroup, and
           // no test-aid sign-in actions (P-8).
           actions: TENANT_USER_ACTIONS,
+          resources: [userPool.userPoolArn],
+        }),
+      );
+      // The drain offboards tenants: delete-side user and group actions only.
+      drainFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: DRAIN_SHARED_POOL_ACTIONS,
           resources: [userPool.userPoolArn],
         }),
       );
@@ -409,6 +461,17 @@ export class TenantIdentityStack extends Stack {
           },
         }),
       );
+      // The drain deletes each tenant's pool: DeleteUserPool on this stack's
+      // pools only (ADR-0022).
+      drainFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ['cognito-idp:DeleteUserPool'],
+          resources: [`arn:${this.partition}:cognito-idp:${this.region}:${this.account}:userpool/*`],
+          conditions: {
+            StringEquals: resourceTags,
+          },
+        }),
+      );
 
       // §7.1: the shared trigger must be invokable by any pool the platform
       // function creates in this account. Cognito is the principal; scope to
@@ -442,11 +505,16 @@ export class TenantIdentityStack extends Stack {
         `AwsSolutions-IAM5[Resource::${userpoolWildcardArn}]`,
         'N-3 / threat-model M-7: per-pool and pool-lifecycle actions are scoped to userpool/* with ResourceTag conditions on the sample tag and the stack tag because pools are created at runtime in pool-per-tenant.',
       );
+      acknowledgeGranularFinding(
+        drainFn,
+        `AwsSolutions-IAM5[Resource::${userpoolWildcardArn}]`,
+        'N-3 / ADR-0022: the teardown drain deletes this stack\'s runtime-created pools, so DeleteUserPool is scoped to userpool/* with ResourceTag conditions on the sample tag and the stack tag.',
+      );
     }
 
     // IAM5 on the registry index wildcard (table/index/<name>) is this
     // table's own index namespace — explicit scoping, not over-breadth.
-    for (const fn of [triggerFn, authorizerFn, platformFn, tenantUsersFn]) {
+    for (const fn of [triggerFn, authorizerFn, platformFn, tenantUsersFn, drainFn]) {
       acknowledgeGranularFinding(
         fn,
         `AwsSolutions-IAM5[Resource::${nagFindingResource(this, `${table.tableArn}/index/${GSI_BY_USER_POOL_ID}`)}]`,
@@ -645,7 +713,7 @@ export class TenantIdentityStack extends Stack {
     // first, wait, then delete its log groups. Two drains, because the
     // execution log group's name depends on the API, and the API on the
     // functions: one drain would be a dependency cycle.
-    const functions = [triggerFn, tokenFn, authorizerFn, platformFn, tenantUsersFn];
+    const functions = [triggerFn, tokenFn, authorizerFn, platformFn, tenantUsersFn, drainFn];
     const functionDrain = new LogDrain(this, 'FunctionLogDrain');
     for (const fn of functions) {
       functionDrain.protect(fn.logGroup);

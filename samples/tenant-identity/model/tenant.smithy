@@ -25,6 +25,9 @@ use smithy.framework#ValidationException
         type: "token"
         uri: "PLACEHOLDER"
         identitySource: "method.request.header.Authorization"
+        // Only a well-formed `Bearer <jwt>` header reaches the authoriser;
+        // API Gateway answers 401 to anything else without an invocation.
+        identityValidationExpression: "^Bearer [A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$"
         // Caching off: the authoriser re-reads the tenant's status on every
         // request, so offboarding stops this route at once (spec P-2, N-7).
         resultTtlInSeconds: 0

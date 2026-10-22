@@ -65,9 +65,19 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
     });
 
     it('rejects an e-mail already in the pool with ConflictError (§5.3, §7.2)', async () => {
-      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'existing' }] });
+      // R-17 (T-27), T-27: only a verified existing e-mail is treated as present.
+      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'existing', Attributes: [{ Name: 'email', Value: 'u1@x.com' }, { Name: 'email_verified', Value: 'true' }] }] });
       await expect(provisioner().createUser(tenantA(), 'u1@x.com', false)).rejects.toBeInstanceOf(ConflictError);
       expect(cognito).toHaveReceivedCommandTimes(AdminCreateUserCommand as AnyMock, 0);
+    });
+
+    it('an unverified holder of the e-mail is a 409, never a reuse or a 500 (R-17)', async () => {
+      // findUserByEmail ignores the unverified user, so AdminCreateUser runs
+      // and Cognito refuses the alias: a conflict, not an internal error.
+      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'squatter', Attributes: [{ Name: 'email', Value: 'u1@x.com' }, { Name: 'email_verified', Value: 'false' }] }] });
+      cognito.on(AdminCreateUserCommand).rejects(cognitoError('UsernameExistsException'));
+      await expect(provisioner().createUser(tenantA(), 'u1@x.com', false)).rejects.toBeInstanceOf(ConflictError);
+      expect(cognito).toHaveReceivedCommandTimes(AdminAddUserToGroupCommand as AnyMock, 0);
     });
 
     it('never logs the temporary password', async () => {

@@ -194,13 +194,26 @@ function applyNarrowing(
 
   log.info('pre-token-generation narrowed', { ...logBase, tenantId: target.tenantId });
 
-  // Output: tenant_id = requested, scopes = exactly the requested set,
-  // suppress Cognito's own user-admin scope. No `tenants` claim (P-6, §8).
+  // Output: tenant_id = requested, scopes = exactly the requested set. M-13:
+  // a narrowed token must be *exactly* the request (ADR-0010, ADR-0012), so
+  // suppress every scope the incoming token already carries that is not in
+  // the requested set, plus Cognito's own user-admin scope (deduplicated).
+  // OAuth scopes are off in this sample today, but if a deployment turned
+  // them on the base scopes on the refresh token must not survive narrowing.
+  const requestedSet = new Set(requested);
+  const incomingScopes = event.request.scopes ?? [];
+  const scopesToSuppress = [
+    ...new Set([
+      ...incomingScopes.filter((s) => !requestedSet.has(s)),
+      COGNITO_USER_ADMIN_SCOPE,
+    ]),
+  ];
+  // No `tenants` claim (P-6, §8).
   event.response.claimsAndScopeOverrideDetails = {
     accessTokenGeneration: {
       claimsToAddOrOverride: { tenant_id: target.tenantId },
       scopesToAdd: [...requested],
-      scopesToSuppress: [COGNITO_USER_ADMIN_SCOPE],
+      scopesToSuppress,
     },
     groupOverrideDetails: NO_GROUPS,
   };

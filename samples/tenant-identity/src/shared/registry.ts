@@ -19,7 +19,10 @@ import { ConflictError, InvalidInputError, NotFoundError } from './errors';
  * membership, credential, or token is ever written here (R-10, ADR-0002).
  */
 
-export type TenantStatus = 'ACTIVE' | 'DELETING';
+// ADR-0021: a tenant is PROVISIONING from the registry-first write until its
+// Cognito half is built and the row is flipped to ACTIVE (spec §5.1,
+// ADR-0021 'registry row before provisioning'). DELETING is offboarding.
+export type TenantStatus = 'PROVISIONING' | 'ACTIVE' | 'DELETING';
 
 export interface TenantRecord {
   readonly tenantId: string;
@@ -54,6 +57,16 @@ export interface Registry extends RegistryReader {
   list(nextToken?: string, limit?: number): Promise<Page<TenantRecord>>;
   /** Fails with ConflictError if the id exists. */
   create(record: TenantRecord): Promise<void>;
+  /**
+   * ADR-0021: flip a PROVISIONING row to ACTIVE, writing the provisioned Cognito
+   * fields in the same conditional update (spec §5.1, ADR-0021). Only the
+   * DEFINED provisioned fields are written — undefined ones are never set.
+   * Returns the ACTIVE record. ConflictError if the row is not PROVISIONING.
+   */
+  activate(
+    tenantId: string,
+    provisioned: { userPoolId?: string; appClientId?: string; issuer?: string; groupName?: string },
+  ): Promise<TenantRecord>;
   /**
    * R-11: conditional flip to DELETING. Returns the record as it is after
    * the write. Idempotent: an already DELETING tenant is returned as is.
@@ -203,6 +216,50 @@ export class DynamoDBRegistry implements Registry {
     } catch (error) {
       if (isConditionFailure(error)) {
         throw new ConflictError(`Tenant ${record.tenantId} already exists`);
+      }
+      throw error;
+    }
+  }
+
+  async activate(
+    tenantId: string,
+    provisioned: { userPoolId?: string; appClientId?: string; issuer?: string; groupName?: string },
+  ): Promise<TenantRecord> {
+    // ADR-0021: a single conditional update flips PROVISIONING -> ACTIVE and writes
+    // the provisioned Cognito fields atomically (spec §5.1, ADR-0021). The
+    // condition guards against activating a row that is not PROVISIONING (a
+    // concurrent DeleteTenant, or a double activate). Only DEFINED provisioned
+    // fields join the SET clause — an undefined attribute is never written.
+    const names: Record<string, string> = { '#s': 'status' };
+    const values: Record<string, unknown> = {
+      ':provisioning': 'PROVISIONING',
+      ':active': 'ACTIVE',
+      ':now': this.now().toISOString(),
+    };
+    const sets = ['#s = :active', 'updatedAt = :now'];
+    for (const [field, value] of Object.entries(provisioned)) {
+      if (value !== undefined) {
+        names[`#${field}`] = field;
+        values[`:${field}`] = value;
+        sets.push(`#${field} = :${field}`);
+      }
+    }
+    try {
+      const result = await this.client.send(
+        new UpdateCommand({
+          TableName: this.tableName,
+          Key: key(tenantId),
+          UpdateExpression: `SET ${sets.join(', ')}`,
+          ConditionExpression: 'attribute_exists(PK) AND #s = :provisioning',
+          ExpressionAttributeNames: names,
+          ExpressionAttributeValues: values,
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      return fromItem(result.Attributes ?? {});
+    } catch (error) {
+      if (isConditionFailure(error)) {
+        throw new ConflictError(`Tenant ${tenantId} is not PROVISIONING`);
       }
       throw error;
     }

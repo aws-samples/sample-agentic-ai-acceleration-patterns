@@ -20,6 +20,7 @@ import {
 } from '../../src/shared/constants';
 import {
   ExchangeRequest,
+  MAX_FORM_BYTES,
   OAUTH_ERROR_DESCRIPTIONS,
   OAuthFailure,
   parseExchangeForm,
@@ -213,5 +214,41 @@ describe('OAuthFailure descriptions (§5.4: fixed text, never echo input)', () =
     for (const code of Object.keys(OAUTH_ERROR_DESCRIPTIONS)) {
       expect(OAUTH_ERROR_DESCRIPTIONS[code as keyof typeof OAUTH_ERROR_DESCRIPTIONS]).toBeTruthy();
     }
+  });
+});
+
+describe('parseExchangeForm M-9 body size limit', () => {
+  /**
+   * A valid form whose UTF-8 byte length is exactly `bytes`. The padding
+   * lengthens `subject_token`, an opaque value, so the form still parses when
+   * it is within the limit. Padding chars are single-byte and need no
+   * URL-encoding, so the byte count stays exact.
+   */
+  function formOfExactBytes(bytes: number): string {
+    const probe = form({ subject_token: REFRESH });
+    const deficit = bytes - Buffer.byteLength(probe);
+    if (deficit < 0) {
+      throw new Error('base form already exceeds target');
+    }
+    return form({ subject_token: REFRESH + 'A'.repeat(deficit) });
+  }
+
+  it('a body of exactly MAX_FORM_BYTES is accepted and parsed', () => {
+    const body = formOfExactBytes(MAX_FORM_BYTES);
+    expect(Buffer.byteLength(body)).toBe(MAX_FORM_BYTES);
+    const result = parseExchangeForm(body);
+    expect(result.clientId).toBe(CLIENT);
+  });
+
+  it('a body one byte over MAX_FORM_BYTES -> invalid_request (string)', () => {
+    const body = formOfExactBytes(MAX_FORM_BYTES + 1);
+    expect(Buffer.byteLength(body)).toBe(MAX_FORM_BYTES + 1);
+    expectCode(body, 'invalid_request');
+  });
+
+  it('an oversize Uint8Array body -> invalid_request', () => {
+    const bytes = new TextEncoder().encode(formOfExactBytes(MAX_FORM_BYTES + 100));
+    expect(bytes.length).toBe(MAX_FORM_BYTES + 100);
+    expectCode(bytes, 'invalid_request');
   });
 });

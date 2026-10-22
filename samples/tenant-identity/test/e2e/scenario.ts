@@ -495,6 +495,25 @@ export function defineScenario(topology: Topology): void {
 
     // -- step 5: claim integrity (P-3) -------------------------------------
     test('step 5: claim integrity — the tenant claim cannot be chosen by the caller', async () => {
+      // Every topology: a user cannot change their own e-mail with their
+      // un-narrowed access token (T-27, R-17). E-mail is immutable at the
+      // pool, so an invitation address can never be squatted.
+      await expect(
+        cognito.send(
+          new UpdateUserAttributesCommand({
+            AccessToken: tokens.u1.accessToken,
+            UserAttributes: [{ Name: 'email', Value: emailFor(runId, 'squat') }],
+          }),
+        ),
+      ).rejects.toBeDefined();
+      const unchanged = await platform.call<{ user: { email: string } }>(
+        'GET',
+        `platform/tenants/${tenantIds.A}/users/${usernames.u1}`,
+      );
+      coverage.record('GetUser');
+      expectStatus(unchanged, 200, 'GetUser u1 after refused e-mail write');
+      expect(unchanged.body.user.email).toBe(emailFor(runId, 'u1'));
+
       if (topology === 'shared-pool') {
         // u1 cannot change custom:tenantId with its own access token.
         await expect(
@@ -934,6 +953,41 @@ export function defineScenario(topology: Topology): void {
       const selfDemoteByEmail = await tenant.call('PATCH', `tenant/users/${a1Email}`, narrowedAdminTokenA, { admin: false });
       expectStatus(selfDemoteByEmail, 409, 'self-demote a1 by e-mail (R-13)');
 
+      // Self-promote is refused too: no self-update at all (R-13, T-26).
+      const selfPromote = await tenant.call('PATCH', `tenant/users/${usernames.a1}`, narrowedAdminTokenA, { admin: true });
+      expectStatus(selfPromote, 409, 'self-promote a1 (R-13)');
+
+      // T-26: the vendor demotes a1 while its narrowed admin token is still
+      // valid. Every mutation re-checks the admin group and answers 409; a
+      // read still works (the accepted residual). Then the vendor restores a1.
+      const demoteA1 = await platform.call('PATCH', `platform/tenants/${tenantIds.A}/users/${usernames.a1}`, { admin: false });
+      coverage.record('UpdateUser');
+      expectStatus(demoteA1, 200, 'platform demotes a1');
+      const staleCreate = await tenant.call('POST', 'tenant/users', narrowedAdminTokenA, { email: emailFor(runId, 'u4') });
+      expectStatus(staleCreate, 409, 'stale admin token: CreateTenantUser → 409 (T-26)');
+      const stalePromote = await tenant.call('PATCH', `tenant/users/${usernames.u1}`, narrowedAdminTokenA, { admin: true });
+      expectStatus(stalePromote, 409, 'stale admin token: UpdateTenantUser → 409 (T-26)');
+      const staleDelete = await tenant.call('DELETE', `tenant/users/${usernames.u1}`, narrowedAdminTokenA);
+      expectStatus(staleDelete, 409, 'stale admin token: DeleteTenantUser → 409 (T-26)');
+      const staleRead = await tenant.call('GET', 'tenant/users', narrowedAdminTokenA);
+      expectStatus(staleRead, 200, 'stale admin token: ListTenantUsers still reads (T-26 residual)');
+      const u1Alive = await platform.call<{ user: { admin: boolean } }>('GET', `platform/tenants/${tenantIds.A}/users/${usernames.u1}`);
+      expectStatus(u1Alive, 200, 'u1 untouched by the stale admin');
+      expect(u1Alive.body.user.admin).toBe(false);
+      const restoreA1 = await platform.call('PATCH', `platform/tenants/${tenantIds.A}/users/${usernames.a1}`, { admin: true });
+      expectStatus(restoreA1, 200, 'platform restores a1');
+
+      // Header shape: no header or a non-JWT bearer never reaches the
+      // authoriser (API Gateway 401); a well-formed but invalid JWT does (403).
+      const noHeader = await tenant.callAnonymous('GET', 'tenant/users');
+      expectStatus(noHeader, 401, 'no Authorization header → 401');
+      const notAJwt = await tenant.call('GET', 'tenant/users', 'not-a-jwt');
+      expectStatus(notAJwt, 401, 'non-JWT bearer → 401');
+      const [fHeader, fPayload, fSig] = narrowedAdminTokenA.split('.');
+      const forged = `${fHeader}.${fPayload}.${fSig[0] === 'A' ? 'B' : 'A'}${fSig.slice(1)}`;
+      const forgedCall = await tenant.call('GET', 'tenant/users', forged);
+      expectStatus(forgedCall, 403, 'bad-signature JWT → 403');
+
       // Topology 3: b1's GetTenantUser for u1 (in A and B) returns a User
       // that does not mention A.
       if (topology === 'shared-pool-multi-tenant') {
@@ -1119,6 +1173,16 @@ export function defineScenario(topology: Topology): void {
 
       // Every platform op, every tenant op, and the exchange ran (§10 step 11).
       expect(coverage.missing(topology)).toEqual([]);
+
+      // Leave one tenant behind on purpose. The stack's TenantDrain must
+      // offboard it on `cdk destroy` (ADR-0022): a leftover pool, group, or
+      // user after the destroy is the failure signal.
+      const leftover = await platform.call<{ tenant: { status: string } }>('POST', 'platform/tenants', {
+        name: `${runId}-left-for-drain`,
+        adminEmail: emailFor(runId, 'drain'),
+      });
+      expectStatus(leftover, 201, 'CreateTenant left for the stack drain');
+      expect(leftover.body.tenant.status).toBe('ACTIVE');
     });
   });
 }

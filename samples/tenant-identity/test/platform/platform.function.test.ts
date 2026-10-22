@@ -56,6 +56,21 @@ jest.mock('../../src/shared/registry', () => {
     async create(record: TenantRecord): Promise<void> {
       store.set(record.tenantId, record);
     }
+    async activate(
+      tenantId: string,
+      provisioned: { userPoolId?: string; appClientId?: string; issuer?: string; groupName?: string },
+    ): Promise<TenantRecord> {
+      // ADR-0021: flip PROVISIONING -> ACTIVE, writing only the DEFINED provisioned
+      // fields (mirrors DynamoDBRegistry.activate).
+      const existing = store.get(tenantId);
+      if (existing === undefined || existing.status !== 'PROVISIONING') {
+        throw new DomainConflictError(`Tenant ${tenantId} is not PROVISIONING`);
+      }
+      const defined = Object.fromEntries(Object.entries(provisioned).filter(([, v]) => v !== undefined));
+      const updated: TenantRecord = { ...existing, ...defined, status: 'ACTIVE' };
+      store.set(tenantId, updated);
+      return updated;
+    }
     async markDeleting(tenantId: string): Promise<TenantRecord> {
       const existing = store.get(tenantId);
       if (existing === undefined) {

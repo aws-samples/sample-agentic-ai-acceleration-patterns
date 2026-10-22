@@ -194,19 +194,23 @@ Region. The deployed stack publishes
 `shared-pool*`, `userPoolId` and `appClientId`) so the sample mounts into the
 `control-plane` sample's shared namespace.
 
-Teardown: **delete all tenants first** (so `pool-per-tenant` leaves no pools
-and the shared topologies leave no groups or users), then destroy the stack.
+Teardown:
 
 ```bash
-# delete each tenant through the platform API (`scripts/demo.sh` deletes its own tenant), then:
 npx cdk destroy --context topology=<the topology you deployed>
 ```
 
-`cdk destroy` takes about 90 seconds longer than a bare stack would: a
-`LogDrain` custom resource holds back log-group deletion until the functions
-and the API stage have stopped writing, so late log delivery cannot recreate a
-group outside the stack (ADR-0019). The teardown is total — no stack, pool,
-table, parameter, role, or log group with the sample's prefix remains.
+The stack offboards every tenant still in its registry on the way out: a
+`TenantDrain` custom resource runs the `DeleteTenant` sequence per tenant
+before the registry table and the shared pool are deleted, so `pool-per-tenant`
+leaves no pools and the shared topologies leave no groups or users, whether or
+not you deleted the tenants first (ADR-0022). It also takes about 90 seconds
+longer than a bare stack would: a `LogDrain` custom resource holds back
+log-group deletion until the functions and the API stage have stopped writing,
+so late log delivery cannot recreate a group outside the stack (ADR-0019). The
+teardown is total — no stack, pool, table, parameter, role, or log group with
+the sample's prefix remains. If the drain fails (for example a Cognito throttle
+on a large registry), the stack stays `DELETE_FAILED`; run `cdk destroy` again.
 
 ## Deployment integration test
 
@@ -224,8 +228,9 @@ npx projen integ
 
 It stands up **all three topology stacks in parallel**, runs the spec §10
 scenario (steps 2–9 and 11, plus the R-6 parameter check) against each as
-integ-runner's `postDeploy` hook, then drains every tenant with a `preDestroy`
-hook so `cdk destroy` leaves nothing behind. One run takes **about 10–20
+integ-runner's `postDeploy` hook, then destroys the stacks. Step 11 leaves one
+tenant in every stack on purpose, so the destroy also proves the stack's own
+`TenantDrain` (ADR-0022). One run takes **about 10–20
 minutes** (the last green run was 1,204 s) and costs well under 1 USD. Only
 the `shared-pool-multi-tenant` stack publishes the shared
 `/application-plane/shared/identity/*` parameters during the test, because
@@ -385,9 +390,11 @@ Each item maps to a threat-model mitigation (M-n) or threat (T-n).
       feature tier) — the sample uses Essentials, which is the minimum for
       access-token customisation (T-23, cdk-nag COG2/COG3/COG8; out of scope
       for the identity-topology subject).
-- [ ] **Turn deletion protection on** for the pools and set a non-`DESTROY`
-      removal policy on the registry — the sample keeps both off so teardown
-      is total (N-8; M-14 for the registry).
+- [ ] **Turn deletion protection on** for the pools, set a non-`DESTROY`
+      removal policy on the registry, and **remove the `TenantDrain`
+      resource** — the sample keeps protection off and offboards every tenant
+      on `cdk destroy` so teardown is total (N-8; M-14 for the registry;
+      ADR-0022, M-27).
 - [ ] **Add a custom domain and managed login / hosted UI** if tenant users
       sign in through a browser — the sample has no domain and uses a
       server-side password flow for the demo only (spec §1.2 seam).

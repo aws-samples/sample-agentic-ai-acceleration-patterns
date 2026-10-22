@@ -98,19 +98,29 @@ export class SharedPoolProvisioner implements Provisioner {
       throw new ConflictError('E-mail already exists');
     }
     const temporaryPassword = generateTemporaryPassword();
-    const created = await this.cognito.send(
-      new AdminCreateUserCommand({
-        UserPoolId: this.userPoolId,
-        Username: email,
-        TemporaryPassword: temporaryPassword,
-        MessageAction: 'SUPPRESS',
-        UserAttributes: [
-          { Name: 'email', Value: email },
-          { Name: 'email_verified', Value: 'true' },
-          { Name: TENANT_ATTRIBUTE, Value: tenant.tenantId },
-        ],
-      }),
-    );
+    let created;
+    try {
+      created = await this.cognito.send(
+        new AdminCreateUserCommand({
+          UserPoolId: this.userPoolId,
+          Username: email,
+          TemporaryPassword: temporaryPassword,
+          MessageAction: 'SUPPRESS',
+          UserAttributes: [
+            { Name: 'email', Value: email },
+            { Name: 'email_verified', Value: 'true' },
+            { Name: TENANT_ATTRIBUTE, Value: tenant.tenantId },
+          ],
+        }),
+      );
+    } catch (error) {
+      // An unverified user holds the address (findUserByEmail ignores them,
+      // R-17): still a conflict, never a 500.
+      if (isCognitoError(error, COGNITO.usernameExists)) {
+        throw new ConflictError('E-mail already exists');
+      }
+      throw error;
+    }
     const username = created.User?.Username ?? email;
     await this.cognito.send(
       new AdminAddUserToGroupCommand({ UserPoolId: this.userPoolId, Username: username, GroupName: tenantGroupName(tenant.tenantId) }),

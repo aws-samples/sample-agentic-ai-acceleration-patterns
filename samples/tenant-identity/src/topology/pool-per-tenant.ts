@@ -87,6 +87,9 @@ export class PoolPerTenantProvisioner implements Provisioner {
         UserPoolTier: 'ESSENTIALS',
         UsernameAttributes: ['email'],
         AutoVerifiedAttributes: ['email'],
+        // E-mail is immutable (R-17, T-27): the same schema as the stack's
+        // shared pool. Required so AdminCreateUser always sets it.
+        Schema: [{ Name: 'email', AttributeDataType: 'String', Required: true, Mutable: false }],
         AdminCreateUserConfig: { AllowAdminCreateUserOnly: true },
         DeletionProtection: 'INACTIVE',
         AccountRecoverySetting: { RecoveryMechanisms: [{ Name: 'admin_only', Priority: 1 }] },
@@ -126,7 +129,9 @@ export class PoolPerTenantProvisioner implements Provisioner {
           EnableTokenRevocation: true,
           PreventUserExistenceErrors: 'ENABLED',
           ReadAttributes: ['email'],
-          WriteAttributes: ['email'],
+          // No WriteAttributes: Cognito reads an empty list as "all standard
+          // attributes". The guard against a user rewriting their e-mail
+          // (R-17, T-27) is the pool's immutable `email` schema above.
         }),
       );
       const appClientId = client.UserPoolClient?.ClientId;
