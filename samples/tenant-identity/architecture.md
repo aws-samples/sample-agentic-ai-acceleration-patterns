@@ -1,10 +1,11 @@
 # Tenant Identity with Amazon Cognito — Architecture
 
 > Status: **Implemented and verified.** Last green deployment integration
-> test: 2026-10-21, eu-central-1, all three topologies, spec §10 steps 2–9 and
-> 11 plus the R-6 parameter check; teardown verified to leave no stack, pool,
-> table, parameter, role or log group 5 minutes after destroy. ADRs: see
-> [`adr/`](./adr/README.md) (ADR-0001..0019).
+> test: 2026-10-22, eu-central-1, all three topologies, spec §10 steps 2–9 and
+> 11 plus the R-6 parameter check, 408 s end to end (deploy 114 s, e2e 43 s,
+> destroy 237 s); teardown verified to leave no stack, pool, table, parameter,
+> role or log group 5 minutes after destroy. ADRs: see
+> [`adr/`](./adr/README.md) (ADR-0001..0024).
 
 This document describes what the sample deploys and runs, not the plan. Where
 the code and the specification diverge, the code and its ADRs win; the
@@ -71,8 +72,8 @@ One stack per topology ([`src/identity.cdk.ts`](./src/identity.cdk.ts),
 merged Smithy OpenAPI documents (ADR-0016), eight Lambda functions, the tenant
 registry, and — for the shared topologies only — one user pool with the
 trigger attached. Five functions handle requests; their roles are asymmetric
-by design (P-8). One drains the registry on stack delete (ADR-0022), and two
-wait during teardown (ADR-0019).
+by design (P-8). One drains the registry on stack delete (ADR-0022), and one
+waits during teardown (ADR-0024).
 
 ### 3.1 REST API (ADR-0016)
 
@@ -147,17 +148,21 @@ stack's tagged pools in `pool-per-tenant`; list, remove, delete user, and
 `DeleteGroup` on the shared pool otherwise. On Create and Update it answers at
 once.
 
-### 3.6 Log drain (ADR-0019)
+### 3.6 Log drain (ADR-0019, ADR-0024)
 
-Two `LogDrain` custom resources ([`src/shared/log-drain.ts`](./src/shared/log-drain.ts))
-sit between the log writers and their log groups on delete: writers depend on
+One `LogDrain` custom resource ([`src/shared/log-drain.ts`](./src/shared/log-drain.ts))
+sits between the log writers and their log groups on delete: writers depend on
 the drain, the drain depends on the log groups, so CloudFormation deletes the
 writers, the drain waits 90 seconds for buffered logs to land, then the groups
-go. Two drains — one for the six functions, one for the API stage — because
-the execution log group's name contains the API id and the API depends on the
-functions, so one drain would be a dependency cycle. The waiter function has a
-role with no permissions and log levels above anything it emits, so it writes
-no logs and cannot recreate a group.
+go. It protects all eight log groups (six functions, API access, API
+execution). Its writers are what invokes the functions, not the functions
+themselves: the API stage and `TenantDrain` (which, in `pool-per-tenant`,
+deletes the runtime pools that invoke the trigger). Neither the functions nor
+the shared pool can be writers: the execution log group's name contains the
+API id, the API references the functions, and the functions reference the
+pool, so either would be a dependency cycle (ADR-0024). The waiter function
+has a role with no permissions and log levels above anything it emits, so it
+writes no logs and cannot recreate a group.
 
 ## 4. Data model
 
@@ -323,10 +328,10 @@ registry allowlist is what stops trust (ADR-0018).
 
 `cdk destroy` removes every resource. The `TenantDrain` custom resource runs
 first and offboards every tenant still in the registry, so no runtime-created
-pool, group, or user outlives the stack (ADR-0022). The two `LogDrain` custom resources delay
-log-group deletion by 90 seconds after their writers are gone, so late log
-delivery from a function or the API stage cannot recreate a group outside the
-stack (ADR-0019). The stack owns the API execution log group explicitly (named
+pool, group, or user outlives the stack (ADR-0022). The `LogDrain` custom resource delays
+log-group deletion by 90 seconds after the API stage and `TenantDrain` are
+gone, so late log delivery from a function or the API stage cannot recreate a
+group outside the stack (ADR-0019, ADR-0024). The stack owns the API execution log group explicitly (named
 `API-Gateway-Execution-Logs_<api-id>/prod`) so it, too, is deleted. Because
 `cloudWatchRole: false`, destroy touches no account-wide setting. The result is
 no stack, pool, table, parameter, role, or log group with the sample's prefix.
@@ -375,10 +380,18 @@ found in the implementation:
   group itself, and sets `cloudWatchRole: false` so it never creates or retains
   the account-wide API Gateway CloudWatch role. The consequence is a deploy
   prerequisite (an account API Gateway CloudWatch role must already be set) and
-  a destroy that takes about 90 seconds longer. The integ-tests-alpha assertion
-  stack holds one inert `WaitConditionHandle` instead of `awsApiCall`
-  assertions (whose Lambda log group no stack would own), so the R-6 parameter
-  check runs in the e2e scenario.
+  a destroy that takes about 90 seconds longer. The R-6 parameter check runs
+  in the e2e scenario rather than as an integ-tests-alpha `awsApiCall`
+  assertion, whose Lambda log group no stack would own.
+- **ADR-0023 — the integration test runs on the CDK CLI.** integ-runner
+  deploys and destroys a test's stacks one at a time, so `scripts/integ.sh`
+  deploys and destroys the three topology stacks at once with
+  `cdk deploy/destroy --all --concurrency 3` and runs the e2e in between. No
+  integ-runner, no assertion stack.
+- **ADR-0024 — one log drain.** ADR-0019's two drains waited one after the
+  other. One drain now guards every log group; its writers are the API stage
+  and `TenantDrain`, not the functions, which removes the cycle that forced
+  two.
 
 - **ADR-0021 — registry row before provisioning.** `CreateTenant` writes a
   `PROVISIONING` row before it touches Cognito and flips it to `ACTIVE`

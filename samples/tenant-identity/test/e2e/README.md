@@ -45,8 +45,8 @@ step and the narrowing-bypass step).
 
 ## As part of the deployment integration test
 
-`npx projen integ` (see the sample README) deploys the three stacks, runs this
-scenario as integ-runner's `postDeploy` hook, then destroys the stacks. Step 11
+`npx projen integ` (see the sample README) deploys the three stacks at once,
+runs this scenario, then destroys them at once (ADR-0023). Step 11
 leaves one tenant in every stack on purpose: the stack's own `TenantDrain`
 custom resource offboards it during `cdk destroy` (ADR-0022), so a pool, group,
 or user left after the destroy is a failure. Running the scenario on its own

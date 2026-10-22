@@ -206,10 +206,7 @@
       "description": "Run the deployment integration test in $AWS_REGION (deploys three stacks to the current AWS account)",
       "steps": [
         {
-          "exec": "sh -c '[ -n \"$AWS_REGION\" ] || { echo \"Set AWS_REGION to the single Region to test in (e.g. export AWS_REGION=eu-central-1)\"; exit 1; }'"
-        },
-        {
-          "exec": "sh -c 'AWS_DEFAULT_REGION=\"$AWS_REGION\" exec integ-runner --language typescript --parallel-regions \"$AWS_REGION\" --update-on-failed --force integ.identity.ts'"
+          "exec": "scripts/integ.sh"
         }
       ]
     },
@@ -312,8 +309,6 @@
           "execArgs": [
             "npm",
             "update",
-            "@aws-cdk/integ-runner",
-            "@aws-cdk/integ-tests-alpha",
             "@aws-crypto/sha256-js",
             "@aws-sdk/client-cloudformation",
             "@aws-sdk/client-ssm",

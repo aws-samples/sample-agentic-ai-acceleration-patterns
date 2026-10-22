@@ -696,7 +696,7 @@ export class TenantIdentityStack extends Stack {
       }
     }
 
-    // --- Teardown leaves no log group behind (ADR-0019) --------------------
+    // --- Teardown leaves no log group behind (ADR-0024) --------------------
     // API Gateway creates the execution log group itself on first write, so
     // it would live outside the stack. Own it here, before the stage writes.
     const executionLogs = new logs.LogGroup(this, 'ApiExecutionLogs', {
@@ -709,20 +709,27 @@ export class TenantIdentityStack extends Stack {
       cfnNag: [{ id: 'W84', reason: 'Execution logs carry request metadata only; default CloudWatch Logs SSE at rest is sufficient for this sample. Accepted risk T-24 (threat model).' }],
       checkov: [{ id: 'CKV_AWS_158', comment: 'Execution logs carry request metadata only; default CloudWatch Logs SSE at rest is sufficient for this sample. Accepted risk T-24 (threat model).' }],
     });
-    // Late log delivery recreates a deleted log group. Delete every writer
-    // first, wait, then delete its log groups. Two drains, because the
-    // execution log group's name depends on the API, and the API on the
-    // functions: one drain would be a dependency cycle.
-    const functions = [triggerFn, tokenFn, authorizerFn, platformFn, tenantUsersFn, drainFn];
-    const functionDrain = new LogDrain(this, 'FunctionLogDrain');
-    for (const fn of functions) {
-      functionDrain.protect(fn.logGroup);
-      functionDrain.writer(fn);
+    // Late log delivery recreates a deleted log group. Delete what makes the
+    // functions and the API write logs, wait, then delete the log groups
+    // (ADR-0024). The writers are what invokes the functions, not the
+    // functions: the stage (API Gateway invokes four functions and writes
+    // both API log groups) and TenantDrain (CloudFormation invokes drainFn,
+    // and in pool-per-tenant it deletes the runtime pools that invoke the
+    // trigger). One drain guards every log group, so there is one wait.
+    //
+    // Neither the functions nor the shared pool can be writers: the
+    // execution log group's name holds the API id, the API references the
+    // functions, and the functions reference the pool, so either would be a
+    // dependency cycle. The pool is deleted after the drain has waited; only
+    // a direct Cognito sign-in in the seconds before that can still log late.
+    const logDrain = new LogDrain(this, 'LogDrain');
+    for (const fn of [triggerFn, tokenFn, authorizerFn, platformFn, tenantUsersFn, drainFn]) {
+      logDrain.protect(fn.logGroup);
     }
-    const apiDrain = new LogDrain(this, 'ApiLogDrain');
-    apiDrain.protect(apiAccessLogs);
-    apiDrain.protect(executionLogs);
-    apiDrain.writer(api.deploymentStage);
+    logDrain.protect(apiAccessLogs);
+    logDrain.protect(executionLogs);
+    logDrain.writer(api.deploymentStage);
+    logDrain.writer(tenantDrain);
 
     new CfnOutput(this, 'ApiUrl', { value: api.url });
     new CfnOutput(this, 'Topology', { value: topology });

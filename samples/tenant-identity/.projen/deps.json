@@ -1,16 +1,6 @@
 {
   "dependencies": [
     {
-      "name": "@aws-cdk/integ-runner",
-      "version": "2.205.7",
-      "type": "build"
-    },
-    {
-      "name": "@aws-cdk/integ-tests-alpha",
-      "version": "2.274.0-alpha.0",
-      "type": "build"
-    },
-    {
       "name": "@aws-crypto/sha256-js",
       "version": "5.2.0",
       "type": "build"

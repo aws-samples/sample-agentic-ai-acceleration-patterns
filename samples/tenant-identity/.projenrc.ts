@@ -50,9 +50,6 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     '@aws-crypto/sha256-js@5.2.0',
     '@smithy/signature-v4@5.7.4',
     '@smithy/protocol-http@5.6.2',
-    // Integ test framework - alpha pinned to the aws-cdk-lib version
-    `@aws-cdk/integ-tests-alpha@${cdkVersion}-alpha.0`,
-    '@aws-cdk/integ-runner@2.205.7',
   ],
   jestOptions: {
     jestConfig: {
@@ -78,9 +75,8 @@ project.gitignore.exclude('src/smithy/');
 project.gitignore.exclude('TODO.md');
 project.gitignore.exclude('.kiro/');
 
-// The integ-runner snapshot is machine output and is not shipped; the integ
-// task always runs --force, so no workflow depends on a committed snapshot.
-project.gitignore.exclude('test/*.snapshot/');
+// The integ task's cloud assembly is machine output (scripts/integ.sh).
+project.gitignore.exclude('cdk.integ.out/');
 
 // Regenerate the SSDKs + OpenAPI documents from the model before every compile
 project.preCompileTask.exec('smithy build');
@@ -111,20 +107,16 @@ e2e.exec(
 e2e.exec('jest --config test/e2e/jest.config.json --runInBand=false');
 
 // ---------------------------------------------------------------------------
-// Deployment integration test (test/integ.identity.ts). Deploys the three
-// topology stacks in parallel, runs the e2e task as integ-runner's
-// postDeploy hook, then destroys everything. Must run in EXACTLY ONE
-// explicitly selected Region (README "Deployment integration test").
+// Deployment integration test (test/integ.identity.ts, scripts/integ.sh).
+// Deploys the three topology stacks at once with the CDK CLI, runs the e2e
+// scenario, then always destroys them at once (ADR-0023). Must run in
+// EXACTLY ONE explicitly selected Region (README "Deployment integration
+// test"); the script fails fast when AWS_REGION is unset.
 // ---------------------------------------------------------------------------
 const integ = project.addTask('integ', {
   description:
     'Run the deployment integration test in $AWS_REGION (deploys three stacks to the current AWS account)',
 });
-integ.exec(
-  'sh -c \'[ -n "$AWS_REGION" ] || { echo "Set AWS_REGION to the single Region to test in (e.g. export AWS_REGION=eu-central-1)"; exit 1; }\'',
-);
-integ.exec(
-  'sh -c \'AWS_DEFAULT_REGION="$AWS_REGION" exec integ-runner --language typescript --parallel-regions "$AWS_REGION" --update-on-failed --force integ.identity.ts\'',
-);
+integ.exec('scripts/integ.sh');
 
 project.synth();

@@ -698,7 +698,7 @@ describe('TenantIdentityStack - teardown drains tenants (ADR-0022)', () => {
   });
 });
 
-describe('TenantIdentityStack - teardown leaves no log group (ADR-0019)', () => {
+describe('TenantIdentityStack - teardown leaves no log group (ADR-0024)', () => {
   test.each(TOPOLOGIES)('creates no account-wide API Gateway CloudWatch role [%s]', (topology) => {
     const template = synth(topology);
     template.resourceCountIs('AWS::ApiGateway::Account', 0);
@@ -718,36 +718,45 @@ describe('TenantIdentityStack - teardown leaves no log group (ADR-0019)', () => 
     expect(group.Properties.RetentionInDays).toBe(30);
   });
 
-  test.each(TOPOLOGIES)('every log group is deleted after a drain, and every writer before it [%s]', (topology) => {
+  test.each(TOPOLOGIES)('one drain: every log group is deleted after it, every writer before it [%s]', (topology) => {
     const template = synth(topology);
     const resources = template.toJSON().Resources as Record<string, any>;
     const drains = Object.entries(resources)
       .filter(([, r]) => r.Type === 'AWS::CloudFormation::CustomResource' && r.Properties.DelaySeconds !== undefined)
       .map(([id]) => id);
-    expect(drains).toHaveLength(2);
+    expect(drains).toHaveLength(1);
+    const [drain] = drains;
     const dependsOn = (id: string): string[] => [resources[id].DependsOn ?? []].flat();
 
-    // Log groups: each is a dependency of some drain (deleted after it).
+    // Log groups: each is a dependency of the drain (deleted after it).
     for (const [id, r] of Object.entries(resources)) {
-      // The waiters' own groups are exempt: nothing ever writes to them.
+      // The waiter's own group is exempt: nothing ever writes to it.
       if (r.Type === 'AWS::Logs::LogGroup' && !id.includes('LogDrainLogs')) {
-        expect(drains.some((d) => dependsOn(d).includes(id))).toBe(true);
+        expect(dependsOn(drain)).toContain(id);
       }
     }
-    // Writers: every function except the drains' own waiters, and the stage,
-    // depend on a drain (deleted before it).
-    const waiters = new Set(drains.map((d) => resources[d].Properties.ServiceToken['Fn::GetAtt'][0]));
+    // Writers: what invokes a function or writes the API logs depends on the
+    // drain (deleted before it): the stage and TenantDrain.
+    const writerTypes = new Set(['AWS::ApiGateway::Stage', 'Custom::TenantDrain']);
+    const writers = Object.entries(resources).filter(([, r]) => writerTypes.has(r.Type));
+    expect(writers).toHaveLength(2);
+    for (const [id] of writers) {
+      expect(dependsOn(id)).toContain(drain);
+    }
+    // The functions and the shared pool are not writers: either depending on
+    // the drain would make a cycle through the execution log group, and the
+    // functions would wait for the drain on create.
     for (const [id, r] of Object.entries(resources)) {
-      const writer = (r.Type === 'AWS::Lambda::Function' && !waiters.has(id)) || r.Type === 'AWS::ApiGateway::Stage';
-      if (writer) {
-        expect(dependsOn(id).some((d) => drains.includes(d))).toBe(true);
+      if (r.Type === 'AWS::Lambda::Function' || r.Type === 'AWS::Cognito::UserPool') {
+        expect(dependsOn(id)).not.toContain(drain);
       }
     }
   });
 
   test.each(TOPOLOGIES)('no log group is retained, even with useCdkManagedLogGroup on [%s]', (topology) => {
-    // integ-runner synthesises with the recommended feature flags, which give
-    // any function without an explicit log group a retained one.
+    // With this feature flag on (as in a reader's app that enables the
+    // recommended flags), any function without an explicit log group gets a
+    // retained one.
     const app = new App({ context: { 'aws:cdk:bundling-stacks': [], '@aws-cdk/aws-lambda:useCdkManagedLogGroup': true } });
     const stack = new TenantIdentityStack(app, `TenantIdentity-${topology}`, {
       topology,
@@ -766,7 +775,7 @@ describe('TenantIdentityStack - teardown leaves no log group (ADR-0019)', () => 
     const waiterRoles = Object.entries(resources)
       .filter(([id, r]) => r.Type === 'AWS::IAM::Role' && id.includes('LogDrain'))
       .map(([id]) => id);
-    expect(waiterRoles).toHaveLength(2);
+    expect(waiterRoles).toHaveLength(1);
     for (const roleId of waiterRoles) {
       expect(resources[roleId].Properties.ManagedPolicyArns ?? []).toEqual([]);
       const attached = Object.values(resources).filter(
@@ -782,7 +791,7 @@ describe('TenantIdentityStack - teardown leaves no log group (ADR-0019)', () => 
     const waiters = Object.entries(resources).filter(
       ([id, r]) => r.Type === 'AWS::Lambda::Function' && id.includes('LogDrain'),
     );
-    expect(waiters).toHaveLength(2);
+    expect(waiters).toHaveLength(1);
     for (const [, fn] of waiters) {
       expect(fn.Properties.LoggingConfig).toMatchObject({
         LogFormat: 'JSON',

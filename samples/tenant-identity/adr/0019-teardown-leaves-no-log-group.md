@@ -1,6 +1,6 @@
 # ADR-0019: Delete log groups only after their writers have stopped, and leave the account's API Gateway role alone
 
-- Status: Accepted
+- Status: Superseded in part by [ADR-0023](0023-integ-with-cdk-cli.md) (assertion stack) and [ADR-0024](0024-one-log-drain.md) (two drains)
 - Date: 2026-10-21
 - Deciders: Dave Roberts (SA)
 

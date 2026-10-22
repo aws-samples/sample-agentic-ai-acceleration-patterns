@@ -27,8 +27,6 @@
     "projen": "projen"
   },
   "devDependencies": {
-    "@aws-cdk/integ-runner": "2.205.7",
-    "@aws-cdk/integ-tests-alpha": "2.274.0-alpha.0",
     "@aws-crypto/sha256-js": "5.2.0",
     "@aws-sdk/client-cloudformation": "3.1154.0",
     "@aws-sdk/client-ssm": "3.1154.0",

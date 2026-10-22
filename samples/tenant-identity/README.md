@@ -206,39 +206,39 @@ before the registry table and the shared pool are deleted, so `pool-per-tenant`
 leaves no pools and the shared topologies leave no groups or users, whether or
 not you deleted the tenants first (ADR-0022). It also takes about 90 seconds
 longer than a bare stack would: a `LogDrain` custom resource holds back
-log-group deletion until the functions and the API stage have stopped writing,
-so late log delivery cannot recreate a group outside the stack (ADR-0019). The
+log-group deletion until the API stage and `TenantDrain` are gone and nothing
+invokes the functions, so late log delivery cannot recreate a group outside
+the stack (ADR-0019, ADR-0024). The
 teardown is total — no stack, pool, table, parameter, role, or log group with
 the sample's prefix remains. If the drain fails (for example a Cognito throttle
 on a large registry), the stack stays `DELETE_FAILED`; run `cdk destroy` again.
 
 ## Deployment integration test
 
-The [AWS CDK integration test](https://docs.aws.amazon.com/cdk/api/v2/docs/integ-tests-alpha-readme.html)
-([`test/integ.identity.ts`](./test/integ.identity.ts)) deploys temporary
+The deployment integration test ([`test/integ.identity.ts`](./test/integ.identity.ts),
+driven by [`scripts/integ.sh`](./scripts/integ.sh)) deploys temporary
 infrastructure into a real account and drives the full lifecycle. Use a
 non-production, CDK-bootstrapped account. Run it in exactly one Region: the
-`integ` task pins integ-runner to `$AWS_REGION` and fails fast when the
-variable is unset.
+script fails fast when `AWS_REGION` is unset.
 
 ```bash
 export AWS_REGION=eu-central-1
 npx projen integ
 ```
 
-It stands up **all three topology stacks in parallel**, runs the spec §10
-scenario (steps 2–9 and 11, plus the R-6 parameter check) against each as
-integ-runner's `postDeploy` hook, then destroys the stacks. Step 11 leaves one
-tenant in every stack on purpose, so the destroy also proves the stack's own
-`TenantDrain` (ADR-0022). One run takes **about 10–20
-minutes** (the last green run was 1,204 s) and costs well under 1 USD. Only
-the `shared-pool-multi-tenant` stack publishes the shared
-`/application-plane/shared/identity/*` parameters during the test, because
-those names are fixed per account and Region and two stacks cannot own the
-same name (ADR-0017); the scenario checks that the publisher's parameters name
-its own stack. The integ-runner snapshot (`test/integ.identity.ts.snapshot/`)
-is gitignored and the task always runs with `--force`, so no workflow depends
-on a committed snapshot.
+It deploys **all three topology stacks at once** with
+`cdk deploy --all --concurrency 3`, runs the spec §10 scenario (steps 2–9 and
+11, plus the R-6 parameter check) against each, then destroys them at once.
+The destroy always runs, also when the deploy or the scenario fails. Step 11
+leaves one tenant in every stack on purpose, so the destroy also proves the
+stack's own `TenantDrain` (ADR-0022). The CDK CLI drives the run rather than
+integ-runner, which deploys a test's stacks one at a time (ADR-0023). One run
+takes **about 7 minutes** (the last green run was 408 s) and costs well under
+1 USD. Only the `shared-pool-multi-tenant` stack publishes
+the shared `/application-plane/shared/identity/*` parameters during the test,
+because those names are fixed per account and Region and two stacks cannot own
+the same name (ADR-0017); the scenario checks that the publisher's parameters
+name its own stack.
 
 ## End-to-end demo
 

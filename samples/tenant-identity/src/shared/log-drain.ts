@@ -10,7 +10,7 @@ import { suppressTemplateScanners } from './nag';
 
 /**
  * Holds back the deletion of log groups until their writers have stopped
- * and their buffered logs have landed (ADR-0019).
+ * and their buffered logs have landed (ADR-0024).
  *
  * API Gateway and Lambda deliver logs a few seconds after the request. If
  * CloudFormation deletes a log group first, the late delivery recreates it,
@@ -34,7 +34,7 @@ export class LogDrain extends Construct {
 
     const role = new iam.Role(this, 'Role', {
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
-      description: 'Log drain waiter: no permissions, so it cannot create a log group (ADR-0019)',
+      description: 'Log drain waiter: no permissions, so it cannot create a log group (ADR-0024)',
     });
 
     // An explicit, deletable log group. The waiter never writes to it, but
@@ -45,8 +45,8 @@ export class LogDrain extends Construct {
       removalPolicy: RemovalPolicy.DESTROY,
     });
     suppressTemplateScanners(logGroup, {
-      cfnNag: [{ id: 'W84', reason: 'The waiter writes nothing to this group (ADR-0019).' }],
-      checkov: [{ id: 'CKV_AWS_158', comment: 'The waiter writes nothing to this group (ADR-0019).' }],
+      cfnNag: [{ id: 'W84', reason: 'The waiter writes nothing to this group (ADR-0024).' }],
+      checkov: [{ id: 'CKV_AWS_158', comment: 'The waiter writes nothing to this group (ADR-0024).' }],
     });
 
     const fn = new lambda.Function(this, 'Function', {
@@ -57,7 +57,7 @@ export class LogDrain extends Construct {
       role,
       timeout: delay.plus(Duration.seconds(30)),
       memorySize: 128,
-      description: 'Waits on stack delete so buffered logs land before their log groups go (ADR-0019)',
+      description: 'Waits on stack delete so buffered logs land before their log groups go (ADR-0024)',
       code: lambda.Code.fromInline(WAITER_SOURCE),
       // Write nothing at all: Lambda's own START/END/REPORT lines are INFO
       // system logs, and any write would create a log group no stack owns.
@@ -67,7 +67,7 @@ export class LogDrain extends Construct {
     });
     suppressTemplateScanners(fn, {
       cfnNag: [
-        { id: 'W58', reason: 'The waiter deliberately has no CloudWatch Logs permission: logging would recreate a log group after teardown (ADR-0019).' },
+        { id: 'W58', reason: 'The waiter deliberately has no CloudWatch Logs permission: logging would recreate a log group after teardown (ADR-0024).' },
         { id: 'W89', reason: 'Runs only on stack create and delete; no VPC resources are reached. Accepted risk T-24 (threat model).' },
         { id: 'W92', reason: 'Runs once per stack operation; reserved concurrency adds nothing. Accepted risk T-24 (threat model).' },
       ],
@@ -99,7 +99,7 @@ export class LogDrain extends Construct {
 /**
  * The waiter. Answers Create and Update at once; on Delete it sleeps for
  * DelaySeconds, then answers. It reports through the pre-signed ResponseURL
- * only, never through logs. Exported so a unit test can assert the ADR-0019
+ * only, never through logs. Exported so a unit test can assert the ADR-0024
  * try/finally without synthesising a stack.
  */
 export const WAITER_SOURCE = `
@@ -108,7 +108,7 @@ const { URL } = require('url');
 function respond(event, context, status) {
   const body = JSON.stringify({
     Status: status,
-    Reason: 'See ADR-0019',
+    Reason: 'See ADR-0024',
     PhysicalResourceId: event.PhysicalResourceId || 'log-drain',
     StackId: event.StackId,
     RequestId: event.RequestId,
@@ -126,7 +126,7 @@ function respond(event, context, status) {
   });
 }
 exports.handler = async (event, context) => {
-  // ADR-0019: respond() must always run, even if the Delete sleep path throws:
+  // ADR-0024: respond() must always run, even if the Delete sleep path throws:
   // a throw before respond would leave CloudFormation waiting the full
   // custom-resource timeout (an hour) on every stack operation.
   try {

@@ -48,5 +48,5 @@ junit.xml
 src/smithy/
 TODO.md
 .kiro/
-test/*.snapshot/
+cdk.integ.out/
 !/.projenrc.ts
