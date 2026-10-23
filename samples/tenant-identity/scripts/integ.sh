@@ -6,8 +6,9 @@
 #
 #   AWS_REGION=eu-central-1 scripts/integ.sh      # or: npx projen integ
 #
-# Synthesises test/integ.identity.ts (one stack per topology), deploys the
-# three stacks at once, runs the spec §10 scenario against them, then destroys
+# Synthesises test/integ.identity.ts (one stack per deployment: the three
+# topologies plus `tiered`, ADR-0027), deploys the four stacks at once, runs the
+# spec §10 scenario and the ADR-0027 tiered scenario against them, then destroys
 # them at once. The destroy always runs, also when the deploy or the scenario
 # fails, and the script exits non-zero if any step failed. The CDK CLI drives
 # the run, not integ-runner, because integ-runner deploys and destroys a
@@ -48,7 +49,7 @@ SAMPLE_TAG_KEY="$(read_constant SAMPLE_TAG_KEY)"
 SAMPLE_TAG_VALUE="$(read_constant SAMPLE_TAG_VALUE)"
 STACK_TAG_KEY="$(read_constant STACK_TAG_KEY)"
 
-# The three stack names (test/integ.identity.ts), read from the assembly
+# The four stack names (test/integ.identity.ts), read from the assembly
 # once it exists. Filled in after the synth.
 STACKS=()
 
@@ -114,8 +115,8 @@ destroy() {
   done
 
   echo "=== destroy ($(date -u +%H:%M:%S) UTC)"
-  if ! "${CDK[@]}" destroy --all --force --concurrency 3; then
-    echo "Destroy failed: run 'AWS_REGION=$AWS_REGION ${CDK[*]} destroy --all --force --concurrency 3' again" >&2
+  if ! "${CDK[@]}" destroy --all --force --concurrency 4; then
+    echo "Destroy failed: run 'AWS_REGION=$AWS_REGION ${CDK[*]} destroy --all --force --concurrency 4' again" >&2
     status=1
   else
     # The destroy succeeded; now prove it left nothing behind (ADR-0022,
@@ -158,7 +159,7 @@ fi
 trap destroy EXIT
 
 echo "=== deploy ($(date -u +%H:%M:%S) UTC)"
-"${CDK[@]}" deploy --all --concurrency 3 --require-approval never --progress events
+"${CDK[@]}" deploy --all --concurrency 4 --require-approval never --progress events
 
 echo "=== e2e ($(date -u +%H:%M:%S) UTC)"
 npx jest --config test/e2e/jest.config.json --runInBand=false

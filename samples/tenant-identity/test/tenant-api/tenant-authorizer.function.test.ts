@@ -7,6 +7,8 @@ import { DynamoDBRegistry } from '../../src/shared/registry';
 // Cold start reads TABLE_NAME via requireEnv at module load. `require` (not a
 // static import) runs after this assignment; a static import is hoisted above it.
 process.env.TABLE_NAME = 'registry-table';
+// No shared pool and a pool-per-tenant deployment: the handler maps the issuer through the registry.
+process.env.TOPOLOGY = 'pool-per-tenant';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { buildPolicy, handler, verifierFor } = require('../../src/tenant-api/tenant-authorizer.function') as typeof import('../../src/tenant-api/tenant-authorizer.function');
 

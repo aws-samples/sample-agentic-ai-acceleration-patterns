@@ -58,6 +58,7 @@ import {
 import {
   apiKeyName,
   COGNITO_USER_ADMIN_SCOPE,
+  Deployment,
   NARROW_SCOPE_KEY,
   NARROW_TENANT_KEY,
   SCOPE_API_READ,
@@ -72,10 +73,10 @@ import {
 } from '../../src/shared/constants';
 
 // ---------------------------------------------------------------------------
-// Which topologies to run (spec: E2E_TOPOLOGIES default all three)
+// Which stacks to run (spec: E2E_TOPOLOGIES default all; `tiered` included)
 // ---------------------------------------------------------------------------
 
-export function topologyEnabled(topology: Topology): boolean {
+export function topologyEnabled(deployment: Deployment): boolean {
   const raw = process.env.E2E_TOPOLOGIES;
   if (raw === undefined || raw.trim() === '') {
     return true;
@@ -83,7 +84,7 @@ export function topologyEnabled(topology: Topology): boolean {
   return raw
     .split(',')
     .map((t) => t.trim())
-    .includes(topology);
+    .includes(deployment);
 }
 
 // ---------------------------------------------------------------------------
@@ -140,21 +141,21 @@ class Coverage {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Helpers (shared with tiered.e2e.test.ts, ADR-0027)
 // ---------------------------------------------------------------------------
 
-interface Tokens {
+export interface Tokens {
   accessToken: string;
   idToken: string;
   refreshToken: string;
 }
 
 /** A fresh run id so names and e-mails never collide across runs. */
-function newRunId(): string {
+export function newRunId(): string {
   return ulid().slice(-10).toLowerCase();
 }
 
-function emailFor(runId: string, who: string): string {
+export function emailFor(runId: string, who: string): string {
   // SES simulator addresses: no mail is sent, and the provisioners suppress
   // messages anyway (steering SES_SIMULATOR_EMAILS, spec §10).
   return `success+${runId}-${who}@simulator.amazonses.com`;
@@ -165,7 +166,7 @@ interface AssertNumber {
   body?: unknown;
 }
 
-function expectStatus(result: AssertNumber, want: number, ctx: string): void {
+export function expectStatus(result: AssertNumber, want: number, ctx: string): void {
   if (result.status !== want) {
     // Print only error bodies: a 2xx body may hold tokens.
     const body = result.status >= 400 && result.body !== undefined ? ` ${JSON.stringify(result.body).slice(0, 300)}` : '';

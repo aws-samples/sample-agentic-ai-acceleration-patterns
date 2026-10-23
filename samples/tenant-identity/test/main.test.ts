@@ -3,45 +3,45 @@
 
 import { App } from 'aws-cdk-lib';
 import { TenantIdentityStack } from '../src/identity.cdk';
-import { parseTopology, TOPOLOGIES } from '../src/shared/constants';
+import { DEPLOYMENTS, parseDeployment } from '../src/shared/constants';
 
-// src/main.ts resolves the topology with parseTopology(context) and fails
-// synth if it is missing or misspelled (spec §10 step 1, P-7, ADR-0001). We
-// exercise the same code path the app uses - context resolution plus
-// parseTopology - without spawning a child process.
+// src/main.ts resolves the deployment with parseDeployment(context) and fails
+// synth if it is missing or misspelled (spec §10 step 1, P-7, ADR-0001,
+// ADR-0027). We exercise the same code path the app uses - context
+// resolution plus parseDeployment - without spawning a child process.
 function resolveTopologyFromContext(context: Record<string, unknown>): string {
   const app = new App({ context });
-  return parseTopology(app.node.tryGetContext('topology'));
+  return parseDeployment(app.node.tryGetContext('topology'));
 }
 
 describe('deploy inputs (spec §10 step 1)', () => {
-  test('synth without topology fails naming all three accepted values', () => {
+  test('synth without topology fails naming all four accepted values', () => {
     try {
       resolveTopologyFromContext({});
-      throw new Error('expected parseTopology to throw');
+      throw new Error('expected parseDeployment to throw');
     } catch (error) {
       const message = (error as Error).message;
       expect(message).toMatch(/missing/i);
-      for (const value of TOPOLOGIES) {
+      for (const value of DEPLOYMENTS) {
         expect(message).toContain(value);
       }
     }
   });
 
-  test('a misspelled topology fails the same way, naming all three values', () => {
+  test('a misspelled topology fails the same way, naming all four values', () => {
     try {
       resolveTopologyFromContext({ topology: 'shared_pool' }); // underscore, not hyphen
-      throw new Error('expected parseTopology to throw');
+      throw new Error('expected parseDeployment to throw');
     } catch (error) {
       const message = (error as Error).message;
       expect(message).toContain("'shared_pool'");
-      for (const value of TOPOLOGIES) {
+      for (const value of DEPLOYMENTS) {
         expect(message).toContain(value);
       }
     }
   });
 
-  test.each(TOPOLOGIES)('each accepted value resolves and names a stack TenantIdentity-%s', (topology) => {
+  test.each(DEPLOYMENTS)('each accepted value resolves and names a stack TenantIdentity-%s', (topology) => {
     expect(resolveTopologyFromContext({ topology })).toBe(topology);
     // And the app composes a stack with the topology-embedded name.
     const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });

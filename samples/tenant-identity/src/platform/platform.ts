@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 import { ulid } from 'ulid';
-import type { Topology } from '../shared/constants';
+import { type Deployment, TIER_TOPOLOGY, TIERED, tierOf, type Topology } from '../shared/constants';
 import {
   ConflictError as DomainConflictError,
   InvalidInputError,
@@ -47,7 +47,8 @@ import {
   User,
   ValidationError,
 } from '../smithy/platform/typescript-ssdk-codegen/src';
-import type { Provisioner, UserView } from '../topology/provisioner';
+import type { ProvisionersFor } from '../topology';
+import type { UserView } from '../topology/provisioner';
 
 /**
  * The per-request context the platform function builds from the API Gateway
@@ -63,10 +64,16 @@ export interface PlatformContext {
 /** Dependencies injected at cold start (and in tests). */
 export interface PlatformServiceDeps {
   readonly registry: Registry;
-  readonly provisioner: Provisioner;
+  /**
+   * The strategy for a tenant's topology (ADR-0027). Resolved per request
+   * from the registry row, never once from the deployment: in `tiered` the
+   * two tiers run different strategies in one runtime.
+   */
+  readonly provisioners: ProvisionersFor;
   /** The per-tenant API Gateway keys for `/tenant/*` throttling (ADR-0025). */
   readonly apiKeys: TenantApiKeys;
-  readonly topology: Topology;
+  /** What the stack deploys (P-7): one topology, or `tiered` (ADR-0027). */
+  readonly deployment: Deployment;
   /** Overridable so tests get deterministic ids. */
   readonly newTenantId?: () => string;
   /** Overridable so tests get deterministic timestamps. */
@@ -77,7 +84,8 @@ export interface PlatformServiceDeps {
  * The vendor's door (spec §5.1). Implements the Smithy-generated
  * `PlatformServiceService` interface; every operation returns its final state
  * (synchronous, ADR-0004). It owns the registry writes for tenants and
- * delegates everything Cognito-side to the topology's provisioner (P-1).
+ * delegates everything Cognito-side to the tenant's provisioner (P-1), picked
+ * by the topology on the tenant's registry row (ADR-0027).
  * Tenant status gates every mutation: only an `ACTIVE` tenant accepts writes
  * and the token test-aids. A `PROVISIONING` tenant (built registry-first,
  * ADR-0021) and a `DELETING` tenant both answer 409, and reads still return them
@@ -85,17 +93,17 @@ export interface PlatformServiceDeps {
  */
 export class PlatformService implements PlatformServiceService<PlatformContext> {
   private readonly registry: Registry;
-  private readonly provisioner: Provisioner;
+  private readonly provisioners: ProvisionersFor;
   private readonly apiKeys: TenantApiKeys;
-  private readonly topology: Topology;
+  private readonly deployment: Deployment;
   private readonly newTenantId: () => string;
   private readonly now: () => Date;
 
   constructor(deps: PlatformServiceDeps) {
     this.registry = deps.registry;
-    this.provisioner = deps.provisioner;
+    this.provisioners = deps.provisioners;
     this.apiKeys = deps.apiKeys;
-    this.topology = deps.topology;
+    this.deployment = deps.deployment;
     this.newTenantId = deps.newTenantId ?? ulid;
     this.now = deps.now ?? (() => new Date());
   }
@@ -114,11 +122,18 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     log.info('CreateTenant', { operation: 'CreateTenant', tenantId });
 
     return this.mapErrors('CreateTenant', tenantId, async () => {
+      // ADR-0027: the tenant's topology. In `tiered` it is the chosen tier's;
+      // the tier is explicit, never inferred or defaulted (P-7 as amended).
+      // Anywhere else it is the deployment's one topology and `tier` has no
+      // meaning (P-4). Both refusals are 400s before anything is written.
+      const topology = this.topologyFor(input.tier);
+      const provisioner = this.provisioners(topology);
+
       // spec §5.1: refuse an admin e-mail the topology would reject (shared
       // pool: already in the pool) BEFORE anything is written. Otherwise the
       // admin step 409s after the tenant is ACTIVE, leaving an adminless
       // tenant whose id the vendor never sees. Nothing exists yet to clean up.
-      await this.provisioner.assertEmailAvailable(adminEmail);
+      await provisioner.assertEmailAvailable(adminEmail);
 
       // ADR-0021: write the registry row FIRST, as PROVISIONING, then provision
       // Cognito, then flip to ACTIVE (spec §5.1, ADR-0021 'registry row before
@@ -129,7 +144,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
         tenantId,
         name,
         status: 'PROVISIONING',
-        topology: this.topology,
+        topology,
         createdAt: timestamp,
         updatedAt: timestamp,
       };
@@ -143,7 +158,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       // delete failure is logged and swallowed; the provisioning error surfaces.
       let provisioned;
       try {
-        provisioned = await this.provisioner.provisionTenant(tenantId, name);
+        provisioned = await provisioner.provisionTenant(tenantId, name);
       } catch (error) {
         try {
           await this.registry.delete(tenantId);
@@ -157,15 +172,16 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
         throw error;
       }
 
-      // ADR-0025: the tenant's API key, part of the provision step. The key
+      // ADR-0025: the tenant's API key, part of the provision step, in its
+      // tier's usage plan (ADR-0027; no tier outside `tiered`). The key
       // module deletes its own half-built key; here we undo the Cognito half
       // and the row (best effort, logged), as for a provisioning failure.
       let apiKey: TenantApiKey;
       try {
-        apiKey = await this.apiKeys.create(tenantId);
+        apiKey = await this.apiKeys.create(tenantId, tierOf(topology, this.deployment));
       } catch (error) {
         try {
-          await this.provisioner.deprovisionTenant({ ...record, ...provisioned });
+          await provisioner.deprovisionTenant({ ...record, ...provisioned });
         } catch (cleanup) {
           log.error('CreateTenant deprovision clean-up failed', {
             operation: 'CreateTenant',
@@ -203,7 +219,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
           });
         }
         try {
-          await this.provisioner.deprovisionTenant({ ...record, ...provisioned });
+          await provisioner.deprovisionTenant({ ...record, ...provisioned });
         } catch (cleanup) {
           log.error('CreateTenant deprovision clean-up failed', {
             operation: 'CreateTenant',
@@ -226,9 +242,9 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       // The tenant is now ACTIVE. If the admin step fails the tenant stays
       // ACTIVE with no admin and the error surfaces; the vendor retries with
       // CreateUser (spec §5.1).
-      const admin = await this.provisioner.createUser(active, adminEmail, true);
+      const admin = await provisioner.createUser(active, adminEmail, true);
       return {
-        tenant: toTenant(active),
+        tenant: this.toTenant(active),
         admin: { user: toUser(admin.user), temporaryPassword: admin.temporaryPassword },
       };
     });
@@ -241,7 +257,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     const tenantId = requireField(input.tenantId, 'tenantId');
     // Reads are allowed on a DELETING tenant and return it (P-2).
     const record = await this.loadTenant(tenantId);
-    return { tenant: toTenant(record) };
+    return { tenant: this.toTenant(record) };
   };
 
   ListTenants = async (
@@ -250,7 +266,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
   ): Promise<ListTenantsServerOutput> => {
     return this.mapErrors('ListTenants', undefined, async () => {
       const page = await this.registry.list(input.nextToken);
-      return { tenants: page.items.map(toTenant), nextToken: page.nextToken };
+      return { tenants: page.items.map((record) => this.toTenant(record)), nextToken: page.nextToken };
     });
   };
 
@@ -265,7 +281,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       // the tenant at once, before any Cognito clean-up. NotFound -> 404.
       // Idempotent and re-runnable against an already DELETING tenant.
       const deleting = await this.registry.markDeleting(tenantId);
-      await this.provisioner.deprovisionTenant(deleting);
+      await this.provisioners(deleting.topology).deprovisionTenant(deleting);
       // ADR-0025: the tenant's API key, idempotent. The authoriser already
       // refuses the DELETING tenant, so the key is unused from here on.
       await this.apiKeys.delete(deleting.apiKeyId);
@@ -288,7 +304,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     log.info('CreateUser', { operation: 'CreateUser', tenantId });
     return this.mapErrors('CreateUser', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
-      const result = await this.provisioner.createUser(tenant, email, input.admin ?? false);
+      const result = await this.provisioners(tenant.topology).createUser(tenant, email, input.admin ?? false);
       return { user: toUser(result.user), temporaryPassword: result.temporaryPassword };
     });
   };
@@ -303,7 +319,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       // Read: allowed on DELETING, refused on PROVISIONING (P-2, ADR-0021).
       // The provisioner runs the R-12 check.
       const tenant = await this.loadReadableTenant(tenantId);
-      const user = await this.provisioner.getUser(tenant, username);
+      const user = await this.provisioners(tenant.topology).getUser(tenant, username);
       return { user: toUser(user) };
     });
   };
@@ -316,7 +332,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     return this.mapErrors('ListUsers', tenantId, async () => {
       // Read: allowed on DELETING, refused on PROVISIONING (P-2, ADR-0021).
       const tenant = await this.loadReadableTenant(tenantId);
-      const page = await this.provisioner.listUsers(tenant, input.nextToken);
+      const page = await this.provisioners(tenant.topology).listUsers(tenant, input.nextToken);
       return { users: page.items.map(toUser), nextToken: page.nextToken };
     });
   };
@@ -331,7 +347,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     log.info('UpdateUser', { operation: 'UpdateUser', tenantId });
     return this.mapErrors('UpdateUser', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
-      const user = await this.provisioner.setAdmin(tenant, username, admin);
+      const user = await this.provisioners(tenant.topology).setAdmin(tenant, username, admin);
       return { user: toUser(user) };
     });
   };
@@ -345,7 +361,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     log.info('DeleteUser', { operation: 'DeleteUser', tenantId });
     return this.mapErrors('DeleteUser', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
-      await this.provisioner.deleteUser(tenant, username);
+      await this.provisioners(tenant.topology).deleteUser(tenant, username);
       return {};
     });
   };
@@ -363,7 +379,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     log.info('CreateMembership', { operation: 'CreateMembership', tenantId });
     return this.mapErrors('CreateMembership', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
-      await this.provisioner.createMembership(tenant, username);
+      await this.provisioners(tenant.topology).createMembership(tenant, username);
       return {};
     });
   };
@@ -377,7 +393,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     log.info('DeleteMembership', { operation: 'DeleteMembership', tenantId });
     return this.mapErrors('DeleteMembership', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
-      await this.provisioner.deleteMembership(tenant, username);
+      await this.provisioners(tenant.topology).deleteMembership(tenant, username);
       return {};
     });
   };
@@ -397,7 +413,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     log.info('IssueToken', { operation: 'IssueToken', tenantId });
     return this.mapErrors('IssueToken', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
-      const tokens = await this.provisioner.issueToken(tenant, username, password);
+      const tokens = await this.provisioners(tenant.topology).issueToken(tenant, username, password);
       return {
         accessToken: tokens.accessToken,
         idToken: tokens.idToken,
@@ -418,7 +434,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     log.info('RefreshToken', { operation: 'RefreshToken', tenantId });
     return this.mapErrors('RefreshToken', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
-      const tokens = await this.provisioner.refreshToken(tenant, username, refreshToken);
+      const tokens = await this.provisioners(tenant.topology).refreshToken(tenant, username, refreshToken);
       return {
         accessToken: tokens.accessToken,
         idToken: tokens.idToken,
@@ -430,6 +446,52 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
   // -------------------------------------------------------------------
   // Shared internals
   // -------------------------------------------------------------------
+
+  /**
+   * The topology a new tenant runs on (ADR-0027). `tiered`: the tier is
+   * required and names it; the error is a 400 with a fixed message, so the
+   * vendor learns the field, not a 500. Any single topology: `tier` has no
+   * meaning and is refused as UnsupportedInTopology (P-4), so a vendor who
+   * sends it against the wrong stack finds out rather than being silently
+   * given the only tier there is.
+   */
+  private topologyFor(tier: CreateTenantServerInput['tier']): Topology {
+    if (this.deployment === TIERED) {
+      if (tier === undefined) {
+        throw new InvalidInputError('tier is required in a tiered deployment');
+      }
+      return TIER_TOPOLOGY[tier];
+    }
+    if (tier !== undefined) {
+      throw new ValidationError({
+        message: 'tier is only accepted in a tiered deployment',
+        reason: 'UnsupportedInTopology',
+      });
+    }
+    return this.deployment;
+  }
+
+  /** Projects a registry record to the Smithy Tenant shape (dates as Date). */
+  private toTenant(record: TenantRecord): Tenant {
+    // ADR-0027: `tier` only in a `tiered` deployment, derived from the row's
+    // topology (the tier is never stored twice). Omitted elsewhere.
+    const tier = tierOf(record.topology, this.deployment);
+    return {
+      tenantId: record.tenantId,
+      name: record.name,
+      status: record.status,
+      topology: record.topology,
+      ...(tier === undefined ? {} : { tier }),
+      userPoolId: record.userPoolId,
+      appClientId: record.appClientId,
+      issuer: record.issuer,
+      groupName: record.groupName,
+      // The generated IsoTimestamp member is typed as a Date; the protocol
+      // serialiser formats it as ISO 8601 on the wire (spec §4.1).
+      createdAt: new Date(record.createdAt),
+      updatedAt: new Date(record.updatedAt),
+    };
+  }
 
   /** Reads a tenant or throws the modelled 404. Reads see DELETING tenants. */
   private async loadTenant(tenantId: string): Promise<TenantRecord> {
@@ -507,24 +569,6 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       throw new InternalServerError({ message: 'Internal server error' });
     }
   }
-}
-
-/** Projects a registry record to the Smithy Tenant shape (dates as Date). */
-function toTenant(record: TenantRecord): Tenant {
-  return {
-    tenantId: record.tenantId,
-    name: record.name,
-    status: record.status,
-    topology: record.topology,
-    userPoolId: record.userPoolId,
-    appClientId: record.appClientId,
-    issuer: record.issuer,
-    groupName: record.groupName,
-    // The generated IsoTimestamp member is typed as a Date; the protocol
-    // serialiser formats it as ISO 8601 on the wire (spec §4.1).
-    createdAt: new Date(record.createdAt),
-    updatedAt: new Date(record.updatedAt),
-  };
 }
 
 /** Projects a provisioner UserView to the Smithy User shape. */

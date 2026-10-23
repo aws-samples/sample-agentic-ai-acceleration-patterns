@@ -17,6 +17,7 @@ so the trade-offs can be seen by running the same scenario against each:
 | `pool-per-tenant` | one user pool per tenant; the token's issuer *is* the tenant | one tenant per account |
 | `shared-pool` | one pool; the tenant is an immutable user attribute | exactly one tenant |
 | `shared-pool-multi-tenant` | one pool; tenants are groups (`t-<tenantId>`); a user may hold several | one or more tenants |
+| `tiered` | both of the first two in one stack: each tenant is created as `standard` (`shared-pool`) or `premium` (`pool-per-tenant`), see [Tiered deployment](#tiered-deployment) | exactly one tenant |
 
 ### Choosing a topology
 
@@ -29,6 +30,7 @@ between the other two by how much each tenant needs its own pool settings.
 | `pool-per-tenant` | Tenants need their own pool settings (password policy, MFA, their own identity provider, custom domain), or a contract asks for a separate identity store per tenant | One issuer per tenant, so token checks must look the issuer up in the registry; a pool, app client and trigger wiring per tenant to onboard; the per-account user pool quota (1,000 by default, adjustable) caps the tenant count; a person in two tenants needs two accounts |
 | `shared-pool` | Every user belongs to exactly one tenant and all tenants share the same sign-in rules | Per-tenant pool settings; moving a user to another tenant (the attribute is immutable, so it means a new user) |
 | `shared-pool-multi-tenant` | One person works across tenants (consultants, agencies, support staff, a parent company over subsidiaries) | Un-narrowed tokens name every tenant the user holds, so services must only accept narrowed tokens; groups cap a pool at 5,000 tenants (two groups each) and a user at 100 groups |
+| `tiered` | Most tenants fit `shared-pool` and a few pay for their own pool (settings, issuer, IAM wall), and one API and registry must serve both | Two strategies in one runtime, bound to each tenant's row (the ADR-0027 binding rule); the stack carries `pool-per-tenant`'s account-wide `CreateUserPool` even with no premium tenant; clients must look a tenant's pool up before sign-in; no `shared-pool-multi-tenant` tier |
 
 Two rules hold in every topology:
 
@@ -38,6 +40,9 @@ Two rules hold in every topology:
   to what the call needs.
 - **The topology is fixed at deploy time.** This sample does not move tenants
   between topologies, so pick for the tenant mix you expect, not only today's.
+  `tiered` fixes the pair at deploy time and the tier per tenant at
+  `CreateTenant`; moving a tenant between tiers is specified in ADR-0027 but
+  not built.
 
 **Cognito request-rate quotas sit on the token path.** Every sign-in, refresh
 and exchange is one call in Cognito's `UserAuthentication` category
@@ -70,7 +75,7 @@ API Gateway key for per-tenant throttling (ADR-0025), and API keys are capped
 at **10,000 per account per Region, not adjustable**, shared with every other
 workload in the account; that caps tenants per account and Region in every
 topology. Usage plans are 300 per account and Region (adjustable); the sample
-uses one per stack. Onboarding and offboarding call `CreateApiKey` and
+uses one per stack, two in `tiered` (one per tier). Onboarding and offboarding call `CreateApiKey` and
 `DeleteApiKey`, **5 requests per second per account** each, inside an
 account-wide limit of 10 control-plane requests per second (burst 40), none of
 them adjustable, so bulk onboarding is paced by them
@@ -133,13 +138,53 @@ a pool per Region with every Region's issuer in the allowlist.
 - Threats and mitigations: [`threat-model.md`](./threat-model.md)
 - Working specification the sample was built from: [`design/tenant-identity.spec.md`](./design/tenant-identity.spec.md)
 
+### Tiered deployment
+
+`--context topology=tiered` deploys `shared-pool` and `pool-per-tenant` side
+by side in one stack: one API, one registry, one trigger, one authoriser
+([ADR-0027](./adr/0027-mixed-tier-deployment.md)). The tier is a tenant
+attribute, chosen once:
+
+- `CreateTenant` takes a required `tier`, `standard` or `premium`. `standard`
+  tenants live in the stack's shared pool (`shared-pool` mechanics);
+  `premium` tenants get a pool, app client and issuer of their own
+  (`pool-per-tenant` mechanics). The registry row's `topology` records the
+  tier's topology, and `GetTenant`/`ListTenants` return `tier`. Sending
+  `tier` to any other stack is a 400 `UnsupportedInTopology`; omitting it in
+  `tiered` is a 400.
+- **Consumers check tokens one way.** Both tiers issue the same claims
+  (`tenant_id`, the sample scopes), so a verifier does not know or care which
+  tier a token came from. The issuer allowlist is the shared pool plus the
+  registry's premium issuers (`ListTenants`).
+- **Sign-in needs the pool first.** A client must know which pool to
+  authenticate against, so the vendor maps its login hint (tenant URL,
+  e-mail domain, an "organisation" step) to a tenant and calls `GetTenant`
+  from its own backend for `userPoolId` and `appClientId`. Standard tenants
+  return nothing there; the client uses the shared pool's ids from the
+  published parameters. The sample builds no public discovery route, because
+  one would reveal which tenants exist.
+- **What premium buys.** Its own pool settings and issuer, the IAM wall of
+  ADR-0026 (the tenant-user function reaches a premium pool only on a session
+  tagged with that tenant), and a higher per-tenant throttle on `/tenant/*`:
+  25 rps / 50 burst against the standard tier's 10 / 20, through a second
+  usage plan on the same stage (both under the shared 50 / 100 limit).
+- **The binding rule.** A premium tenant is reachable only through its own
+  pool, every other tenant only through the shared pool. The trigger and the
+  authoriser read the tenant's row and refuse a mismatch (`pool_mismatch`),
+  so a premium tenant's id written into the shared pool's `custom:tenantId`
+  by a vendor bug yields no token, and a token from a premium pool cannot
+  reach a standard tenant (threat T-32, mitigation M-30).
+- **Tier change is specified, not built.** Cognito cannot export passwords,
+  so moving a tenant between tiers is a user migration; ADR-0027 gives the
+  steps.
+
 ## Architecture
 
 ![Architecture: a vendor signs /platform/* calls with IAM; a client posts a refresh token to /oauth2/token; the token-exchange function calls Cognito GetTokensFromRefreshToken with a narrowing request in ClientMetadata; the pre-token-generation trigger reads the tenant registry and narrows the access token to one tenant; the narrowed token is then presented to the tenant API through its Lambda authoriser](./diagrams/tenant-identity.drawio.svg)
 
 The vendor manages tenants through `/platform/*` with IAM. A client trades its refresh token at `/oauth2/token`. Cognito runs the trigger, which narrows the token to one tenant. The client sends only that narrowed token to the service.
 
-Components (one stack per topology, [`src/identity.cdk.ts`](./src/identity.cdk.ts)):
+Components (one stack per deployment, [`src/identity.cdk.ts`](./src/identity.cdk.ts)):
 
 - **One REST API** (`SpecRestApi`) built from three merged Smithy OpenAPI
   documents (ADR-0016): `/platform/*` (IAM), `POST /oauth2/token` (no gateway
@@ -150,22 +195,26 @@ Components (one stack per topology, [`src/identity.cdk.ts`](./src/identity.cdk.t
   scopes, and applies narrowing. Its role holds registry reads and logging
   only — no `cognito-idp` action (ADR-0003, ADR-0008, ADR-0010).
 - **Platform function** — the vendor's door: tenant and user lifecycle
-  through the topology's provisioner.
+  through the tenant's provisioner, picked per request from the registry
+  row's `topology` (one strategy per stack, two in `tiered`).
 - **Token-exchange function** — `POST /oauth2/token`: parses the form, calls
   `GetTokensFromRefreshToken`, and checks Cognito actually narrowed the token
   (ADR-0012). Its role holds logging only.
 - **Tenant authoriser** and **tenant-user function** — the tenant admin's
   door, with the tenant taken only from the verified, narrowed token
   (ADR-0007, ADR-0014). The authoriser also names the tenant's API key, so
-  `/tenant/*` is throttled per tenant through a usage plan (ADR-0025). In
-  `pool-per-tenant` the tenant-user function calls Cognito on a session
-  tagged with the tenant, which IAM lets reach only that tenant's pool
-  (ADR-0026).
+  `/tenant/*` is throttled per tenant through a usage plan (ADR-0025; two
+  plans in `tiered`, one per tier). In
+  `pool-per-tenant`, and for premium tenants in `tiered`, the tenant-user
+  function calls Cognito on a session tagged with the tenant, which IAM lets
+  reach only that tenant's pool (ADR-0026). Both functions apply the ADR-0027
+  binding rule: a tenant is reached only through its own pool.
 - **Tenant registry** — one DynamoDB table holding tenants only (ADR-0002);
   Cognito is the only user store.
 - **User pool(s)** — one for the shared topologies, created by the stack;
   none at deploy time for `pool-per-tenant`, where the platform function
-  creates one per tenant at onboarding.
+  creates one per tenant at onboarding. `tiered` has both: the stack's shared
+  pool for standard tenants and one pool per premium tenant.
 
 ## How it works
 
@@ -173,8 +222,8 @@ The primary flow is: the vendor onboards a tenant, a tenant user signs in, a
 client narrows the token, and the service (or the sample's own tenant API)
 receives a token that names exactly one tenant.
 
-1. **Onboard.** `POST /platform/tenants {name, adminEmail}` runs the
-   topology's provisioner. `pool-per-tenant` creates a pool, an app client,
+1. **Onboard.** `POST /platform/tenants {name, adminEmail}` (plus `tier` in
+   `tiered`) runs the tenant's provisioner. `pool-per-tenant` creates a pool, an app client,
    attaches the shared trigger, and creates `admin-<tenantId>`;
    `shared-pool*` create groups in the stack's one pool. The registry gets one
    tenant item; the tenant's first admin is created with a temporary password
@@ -259,10 +308,16 @@ costs:
 | Worked example | ≈ $1.9 | ≈ $1.9 | ≈ $1.9; a consultant in 5 tenants costs $0.015, not $0.075 |
 | Ceiling before cost matters | 1,000 pools per account and Region (adjustable to 10,000) | 5,000 tenants per pool (groups) | 5,000 tenants per pool (groups) |
 
+In `tiered` each tenant costs what its tier's column says: a standard tenant
+the `shared-pool` figures, a premium tenant the `pool-per-tenant` ones. The
+ceilings apply per tier (standard tenants share the shared pool's group
+ceiling, premium tenants the pool quota).
+
 On tiering: `pool-per-tenant` is the natural premium or silo tier (own pool
-settings, own issuer, blast radius of one), and a shared topology the default
-tier; the sample fixes one topology per stack, so mixing tiers means one stack
-per topology.
+settings, own issuer, blast radius of one), and `shared-pool` the default
+tier. `tiered` runs both from one stack, chosen per tenant at `CreateTenant`
+(ADR-0027, [Tiered deployment](#tiered-deployment)); a deployment that needs
+`shared-pool-multi-tenant` as a tier still runs it as its own stack.
 
 ## Deploy
 
@@ -309,16 +364,23 @@ Build, then deploy one topology:
 ```bash
 npm ci
 npx projen build    # smithy build + compile + unit tests + synth (synths shared-pool-multi-tenant)
-npx cdk deploy --context topology=<pool-per-tenant | shared-pool | shared-pool-multi-tenant>
+npx cdk deploy --context topology=<pool-per-tenant | shared-pool | shared-pool-multi-tenant | tiered>
+```
+
+For example, the tiered deployment:
+
+```bash
+npx cdk deploy --context topology=tiered
 ```
 
 `topology` is the one deployment input and is required: synthesis fails fast,
-naming the three accepted values, if it is missing or misspelled (P-7,
-ADR-0001). It selects the provisioner and is stamped into the stack name
-(`TenantIdentity-<topology>`), so all three can coexist in one account and
+naming the four accepted values, if it is missing or misspelled (P-7,
+ADR-0001, ADR-0027). It selects the provisioner(s) and is stamped into the stack name
+(`TenantIdentity-<topology>`), so all four can coexist in one account and
 Region. The deployed stack publishes
 `/application-plane/shared/identity/{apiUrl,topology}` (and, for
-`shared-pool*`, `userPoolId` and `appClientId`) so the sample mounts into the
+`shared-pool*` and `tiered`, `userPoolId` and `appClientId`; in `tiered`
+those are the shared pool's, which serves the standard tier) so the sample mounts into the
 `control-plane` sample's shared namespace.
 
 Teardown:
@@ -330,7 +392,8 @@ npx cdk destroy --context topology=<the topology you deployed>
 The stack offboards every tenant still in its registry on the way out: a
 `TenantDrain` custom resource runs the `DeleteTenant` sequence per tenant
 before the registry table and the shared pool are deleted, so `pool-per-tenant`
-leaves no pools and the shared topologies leave no groups or users, whether or
+leaves no pools, the shared topologies leave no groups or users, and `tiered`
+leaves neither, whether or
 not you deleted the tenants first (ADR-0022). It also takes about 90 seconds
 longer than a bare stack would: a `LogDrain` custom resource holds back
 log-group deletion until the API stage and `TenantDrain` are gone and nothing
@@ -353,15 +416,17 @@ export AWS_REGION=eu-central-1
 npx projen integ
 ```
 
-It deploys **all three topology stacks at once** with
-`cdk deploy --all --concurrency 3`, runs the spec §10 scenario (steps 2–9 and
+It deploys **all four stacks at once** (the three topologies and `tiered`) with
+`cdk deploy --all`, runs the spec §10 scenario (steps 2–9 and
 11, plus the R-6 parameter check) against each, then destroys them at once.
-The destroy always runs, also when the deploy or the scenario fails. Step 11
+In the `tiered` stack the scenario creates one tenant per tier and adds the
+binding-rule refusals (§10 step 12). The destroy
+always runs, also when the deploy or the scenario fails. Step 11
 leaves one tenant in every stack on purpose, so the destroy also proves the
 stack's own `TenantDrain` (ADR-0022). The CDK CLI drives the run rather than
 integ-runner, which deploys a test's stacks one at a time (ADR-0023). One run
-takes **about 7 minutes** (the last green run was 408 s) and costs well under
-1 USD. Only the `shared-pool-multi-tenant` stack publishes
+with three stacks took **about 7 minutes** (the last green run was 408 s) and
+cost well under 1 USD; the fourth stack adds to both. Only the `shared-pool-multi-tenant` stack publishes
 the shared `/application-plane/shared/identity/*` parameters during the test,
 because those names are fixed per account and Region and two stacks cannot own
 the same name (ADR-0017); the scenario checks that the publisher's parameters
@@ -408,9 +473,9 @@ Three Smithy services ([`model/`](./model/)) merged into one REST API
 
 | Operation | HTTP | Returns |
 |---|---|---|
-| `CreateTenant` | `POST /platform/tenants` | 201 — onboards a tenant and its first admin |
-| `GetTenant` | `GET /platform/tenants/{tenantId}` | 200 — registry read (topology fields vary) |
-| `ListTenants` | `GET /platform/tenants` | 200 — paginated registry scan; the issuer allowlist for topology 1 |
+| `CreateTenant` | `POST /platform/tenants` | 201 — onboards a tenant and its first admin; `tier` required in `tiered`, 400 `UnsupportedInTopology` elsewhere |
+| `GetTenant` | `GET /platform/tenants/{tenantId}` | 200 — registry read (topology fields vary; `tier` in `tiered`) |
+| `ListTenants` | `GET /platform/tenants` | 200 — paginated registry scan; the issuer allowlist for topology 1 and for premium tenants in `tiered` |
 | `DeleteTenant` | `DELETE /platform/tenants/{tenantId}` | 204 — `DELETING` first, then Cognito clean-up; idempotent |
 | `CreateUser` | `POST /platform/tenants/{tenantId}/users` | 201 — creates/attaches the user; temporary password once |
 | `GetUser` | `GET /platform/tenants/{tenantId}/users/{username}` | 200 |
@@ -435,8 +500,9 @@ Three Smithy services ([`model/`](./model/)) merged into one REST API
 The tenant is taken from the verified token, never from the request. Each
 operation runs the same provisioner method as its platform twin, with the
 same per-topology effects. Each tenant is throttled on its own at 10 rps / 20
-burst through the stack's usage plan, under the route's shared limit of
-50 rps / 100 burst for all tenants together (ADR-0025). Clients send no API key: the authoriser supplies the tenant's,
+burst through the stack's usage plan (in `tiered`, premium tenants at
+25 rps / 50 burst through a second plan), under the route's shared limit of
+50 rps / 100 burst for all tenants together (ADR-0025, ADR-0027). Clients send no API key: the authoriser supplies the tenant's,
 and an `x-api-key` header is ignored. `/platform/*` and `POST /oauth2/token`
 need no key; the token route has no authoriser, so the gateway knows no
 tenant there. A new tenant's key goes live after a short delay: until it
@@ -505,7 +571,17 @@ text per code and never echoes Cognito's message or a token.
   with the authoriser's tenant; the role reaches only the pool whose tag
   matches, so a code bug cannot reach another tenant's pool (ADR-0026, M-28).
   In `shared-pool*` IAM cannot scope users inside one pool, so the tenant
-  boundary there is the R-12 membership check in code only (T-18, P-8).
+  boundary there is the R-12 membership check in code only (T-18, P-8). In
+  `tiered` premium tenants get the IAM wall and standard tenants the code-only
+  one, chosen per request from the tenant's row.
+- **A tenant is reachable only through its own pool (`tiered`).** A premium
+  tenant's row names its pool; a standard row names none. The trigger and the
+  authoriser refuse a premium tenant reached through the shared pool and a
+  standard tenant reached through a premium pool (`pool_mismatch`), so a
+  vendor bug that writes a premium id into `custom:tenantId` yields no token
+  (ADR-0027, T-32, M-30). The exchange endpoint applies no `client_id` check
+  in `tiered`; a foreign client's pool is not in the registry, so the trigger
+  refuses it (M-5).
 - **Per-tenant throttling is not a security control.** The usage plan stops
   one tenant from spending every tenant's `/tenant/*` budget (T-31). The API
   key is not a credential (the authoriser picks it after verifying the token),
@@ -556,13 +632,14 @@ Each item maps to a threat-model mitigation (M-n) or threat (T-n).
       account root on `/platform/*`; narrow it to the specific vendor-operator
       principals and, optionally, source IP ranges (T-7, M-7).
 - [ ] **Narrow the vendor IAM grant** to `/platform/*` and review CloudTrail;
-      in `pool-per-tenant` the platform role holds account-wide
+      in `pool-per-tenant` and `tiered` the platform role holds account-wide
       `cognito-idp:CreateUserPool` (N-3, M-7, the documented hardening point of
-      that topology).
+      those deployments; `tiered` carries it even with no premium tenant, T-7).
 - [ ] **Size the stage's shared `/tenant/*` limit to your tenant count.** The
       sample sets it to 50 rps / 100 burst, five times the per-tenant 10 / 20,
-      so five busy tenants together reach it (T-31, ADR-0025). Add tiers (one
-      usage plan per tier) and quotas if the business needs them.
+      so five busy tenants together reach it (T-31, ADR-0025); in `tiered`
+      the premium plan is 25 / 50, so two premium tenants reach it. Adjust
+      the per-tier limits and add quotas if the business needs them.
 
 ## Design trail
 

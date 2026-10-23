@@ -346,8 +346,8 @@ describe('TenantUsersService — per-tenant provisioner (ADR-0026)', () => {
 
     await service.UpdateTenantUser({ username: 'target-sub-9999', admin: true }, context);
 
-    expect(factory).toHaveBeenCalledWith(TENANT_A);
-    expect(factory).not.toHaveBeenCalledWith(expect.not.stringMatching(TENANT_A));
+    expect(factory).toHaveBeenCalledWith(TENANT_A, 'shared-pool');
+    expect(factory).not.toHaveBeenCalledWith(expect.not.stringMatching(TENANT_A), expect.anything());
     // R-16, R-12 and the write all ran on the tenant's provisioner.
     expect(provisioner.getUser).toHaveBeenCalledWith(expect.objectContaining({ tenantId: TENANT_A }), CALLER_SUB);
     expect(provisioner.setAdmin).toHaveBeenCalledWith(expect.objectContaining({ tenantId: TENANT_A }), 'target-sub-9999', true);
@@ -371,6 +371,20 @@ describe('TenantUsersService — per-tenant provisioner (ADR-0026)', () => {
     });
     const service = new TenantUsersService(fakeRegistry(), factory);
     await expect(service.ListTenantUsers({}, context)).rejects.toMatchObject({ message: 'Internal server error' });
+  });
+
+  it('resolves the strategy from the row it read, never from the deployment (ADR-0027)', async () => {
+    // A tiered deployment: the same service serves a standard and a premium
+    // tenant, and the row's topology picks the provisioner for each request.
+    const provisioner = mockProvisioner();
+    const factory = jest.fn().mockReturnValue(provisioner);
+    const registry = fakeRegistry(activeTenant({ topology: 'pool-per-tenant', userPoolId: 'eu-central-1_premium' }));
+    const service = new TenantUsersService(registry, factory);
+
+    await service.ListTenantUsers({}, context);
+
+    expect(registry.get).toHaveBeenCalledWith(TENANT_A);
+    expect(factory).toHaveBeenCalledWith(TENANT_A, 'pool-per-tenant');
   });
 
   it('the R-13 self-mutation check still runs on scoped credentials (defence in depth)', async () => {

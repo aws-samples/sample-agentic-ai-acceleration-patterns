@@ -18,13 +18,16 @@ process.env.TABLE_NAME = 'registry-table';
 process.env.USER_POOL_ID = 'eu-central-1_pool';
 process.env.APP_CLIENT_ID = 'client';
 
-// Mock the topology barrel: createProvisioner must not build real Cognito
+// Mock the topology barrel: createProvisioners must not build real Cognito
 // strategies (and its sibling files may not exist yet in a parallel build).
+// Each call records the deployment and deps it was given (ADR-0027).
 const provisionerCalls: unknown[] = [];
 jest.mock('../../src/topology', () => ({
-  createProvisioner: (topology: string, deps: unknown) => {
-    provisionerCalls.push({ topology, deps });
-    return { topology };
+  // The real predicate: which topology runs on tenant-scoped credentials.
+  usesTenantScopedCredentials: jest.requireActual('../../src/topology').usesTenantScopedCredentials,
+  createProvisioners: (deployment: string, deps: unknown) => {
+    provisionerCalls.push({ deployment, deps });
+    return (topology: string) => ({ topology, deps });
   },
 }));
 
@@ -97,10 +100,11 @@ describe('tenant-users handler (P-11)', () => {
 });
 
 describe('tenant-users handler without a tenant-scoped role (shared pools, ADR-0026)', () => {
-  it('builds one provisioner on the function\'s own credentials', async () => {
+  it('builds one provisioner set on the function\'s own credentials, for the deployment', async () => {
     await handler(proxyEvent({ tenantId: TENANT_A, sub: 'admin-1' }));
     expect(provisionerCalls).toHaveLength(1);
-    const deps = (provisionerCalls[0] as { deps: { cognito: { config: { credentials: unknown } } } }).deps;
-    expect(deps.cognito).toBeDefined();
+    const call = provisionerCalls[0] as { deployment: string; deps: { cognito: { config: { credentials: unknown } } } };
+    expect(call.deployment).toBe('shared-pool');
+    expect(call.deps.cognito).toBeDefined();
   });
 });

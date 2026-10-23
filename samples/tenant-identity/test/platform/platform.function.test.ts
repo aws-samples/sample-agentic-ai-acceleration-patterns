@@ -42,8 +42,10 @@ const provisionerMock: jest.Mocked<Provisioner> = {
   refreshToken: jest.fn(),
 } as unknown as jest.Mocked<Provisioner>;
 
+// ADR-0027: the handler now asks the dispatcher for a strategy per row; one
+// mock answers for every topology here (a single-topology stack).
 jest.mock('../../src/topology', () => ({
-  createProvisioner: () => provisionerMock,
+  createProvisioners: () => () => provisionerMock,
 }));
 
 // ADR-0025: no API Gateway call leaves the test; CreateTenant gets a key.
@@ -51,10 +53,15 @@ const apiKeysMock = {
   create: jest.fn(async (tenantId: string) => ({ apiKeyId: `key-${tenantId}`, apiKeyValue: `value-${tenantId}` })),
   delete: jest.fn(async () => undefined),
 };
+/** The constructor arguments the handler wires at cold start (ADR-0025, ADR-0027). */
+const apiKeysCtorArgs: unknown[][] = [];
 jest.mock('../../src/shared/tenant-api-keys', () => ({
   ApiGatewayTenantApiKeys: class {
     create = apiKeysMock.create;
     delete = apiKeysMock.delete;
+    constructor(...args: unknown[]) {
+      apiKeysCtorArgs.push(args);
+    }
   },
 }));
 
@@ -253,5 +260,79 @@ describe('platform.function handler (spec §5.1 routing and status codes)', () =
       }),
     );
     expect(res.statusCode).toBe(409);
+  });
+
+  describe('tier (ADR-0027)', () => {
+    it('CreateTenant with a tier on a single-topology stack -> 400 UnsupportedInTopology', async () => {
+      const res = await handler(
+        event('POST', '/platform/tenants', { name: 'Acme', adminEmail: 'admin@example.com', tier: 'premium' }),
+      );
+      expect(res.statusCode).toBe(400);
+      const parsed = JSON.parse(res.body);
+      expect(parsed.reason).toBe('UnsupportedInTopology');
+      expect(parsed.message).toBe('tier is only accepted in a tiered deployment');
+      expect(store.size).toBe(0);
+    });
+
+    it('CreateTenant with an unknown tier -> 400 from the generated enum validator', async () => {
+      const res = await handler(
+        event('POST', '/platform/tenants', { name: 'Acme', adminEmail: 'admin@example.com', tier: 'gold' }),
+      );
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).fieldList?.[0]?.path).toBe('/tier');
+    });
+
+    it('GetTenant carries no tier on a single-topology stack', async () => {
+      store.set(TENANT_A, activeTenant());
+      const res = await handler(event('GET', `/platform/tenants/${TENANT_A}`, undefined, { tenantId: TENANT_A }));
+      expect(JSON.parse(res.body).tenant).not.toHaveProperty('tier');
+    });
+
+    it('cold start passes the premium plan name through as the fourth key-module argument (unset here)', () => {
+      // Read unconditionally (P-1); only a `tiered` stack sets it.
+      expect(apiKeysCtorArgs[0]).toEqual([
+        expect.anything(),
+        'TenantIdentity-test-tenant',
+        'TenantIdentity-test',
+        undefined,
+      ]);
+    });
+
+    it('a tiered stack: CreateTenant without a tier -> 400 InvalidInput, with one it provisions and returns the tier', async () => {
+      // A second cold start with TOPOLOGY=tiered and the premium plan set.
+      // Everything else (mocks, store) is shared with the main handler.
+      process.env[ENV.topology] = 'tiered';
+      process.env[ENV.premiumUsagePlanName] = 'TenantIdentity-test-tenant-premium';
+      let tiered: typeof handler;
+      jest.isolateModules(() => {
+        // A fresh module registry so the cold-start wiring re-runs with the
+        // tiered env; the jest.mock factories above still apply to it.
+        tiered = (jest.requireActual('../../src/platform/platform.function') as { handler: typeof handler }).handler;
+      });
+      process.env[ENV.topology] = 'shared-pool-multi-tenant';
+      delete process.env[ENV.premiumUsagePlanName];
+
+      expect(apiKeysCtorArgs[apiKeysCtorArgs.length - 1][3]).toBe('TenantIdentity-test-tenant-premium');
+
+      const missing = await tiered!(event('POST', '/platform/tenants', { name: 'Acme', adminEmail: 'a@e.com' }));
+      expect(missing.statusCode).toBe(400);
+      expect(JSON.parse(missing.body)).toMatchObject({
+        reason: 'InvalidInput',
+        message: 'tier is required in a tiered deployment',
+      });
+      expect(store.size).toBe(0);
+
+      provisionerMock.provisionTenant.mockResolvedValue({ userPoolId: 'eu-central-1_P', appClientId: 'c', issuer: 'i' });
+      provisionerMock.createUser.mockResolvedValue({ user: userView('admin', true), temporaryPassword: 'T#1' });
+      const created = await tiered!(
+        event('POST', '/platform/tenants', { name: 'Acme', adminEmail: 'a@e.com', tier: 'premium' }),
+      );
+      expect(created.statusCode).toBe(201);
+      const parsed = JSON.parse(created.body);
+      expect(parsed.tenant.topology).toBe('pool-per-tenant');
+      expect(parsed.tenant.tier).toBe('premium');
+      // The key went to the premium tier's plan.
+      expect(apiKeysMock.create).toHaveBeenLastCalledWith(parsed.tenant.tenantId, 'premium');
+    });
   });
 });

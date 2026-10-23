@@ -4,7 +4,8 @@
 /**
  * The RFC 8693 token-exchange operation (spec §5.4, R-7, ADR-0009,
  * ADR-0012). It parses the form, rejects a form naming a client other than
- * the shared pool's app client (T-28, `invalid_client`), calls
+ * the shared pool's app client where that is the only client (T-28,
+ * `invalid_client`; widened for premium clients in `tiered`, ADR-0027), calls
  * `GetTokensFromRefreshToken` with the narrowing request in `ClientMetadata`
  * (the trigger does the narrowing, ADR-0010), maps Cognito's outcome to the
  * RFC 6749 §5.2 error codes, and then — because narrowing depends on
@@ -44,10 +45,19 @@ export interface TokenExchangeDeps {
   /**
    * T-28: the shared pool's app client. When set, a form whose `client_id`
    * does not equal it is refused with `invalid_client` before Cognito is
-   * called. Undefined in pool-per-tenant, where each tenant has its own
-   * client and there is no single app client to compare against.
+   * called, unless `acceptOtherClients` is set. Undefined in pool-per-tenant,
+   * where each tenant has its own client and there is no single app client to
+   * compare against.
    */
   readonly appClientId?: string;
+  /**
+   * ADR-0027: true when the deployment creates per-tenant pools (tiered, and
+   * pool-per-tenant for symmetry), so a premium tenant's own client is a valid
+   * `client_id` next to the shared pool's. The check is then left to Cognito
+   * and the trigger: a client of a pool the registry does not know fails the
+   * trigger's pool lookup (M-5), so the refresh token buys no tenant claim.
+   */
+  readonly acceptOtherClients: boolean;
 }
 
 /** The minimal access-token payload shape ADR-0012 inspects. */
@@ -205,10 +215,12 @@ function assertNarrowed(claims: AccessTokenClaims, request: ExchangeRequest): vo
 export class TokenExchangeService<Context> {
   private readonly cognito: CognitoIdentityProviderClient;
   private readonly appClientId: string | undefined;
+  private readonly acceptOtherClients: boolean;
 
   constructor(deps: TokenExchangeDeps) {
     this.cognito = deps.cognito;
     this.appClientId = deps.appClientId;
+    this.acceptOtherClients = deps.acceptOtherClients;
   }
 
   public ExchangeToken = async (
@@ -229,11 +241,14 @@ export class TokenExchangeService<Context> {
       throw serverError();
     }
 
-    // T-28: in the shared pool, this endpoint serves exactly one app client.
+    // T-28: in a shared pool, this endpoint serves exactly one app client.
     // Refuse a form naming a different client with invalid_client, before
     // Cognito is called. Skipped in pool-per-tenant (appClientId undefined),
-    // where each tenant has its own client.
-    if (this.appClientId !== undefined && request.clientId !== this.appClientId) {
+    // where each tenant has its own client, and in tiered (acceptOtherClients),
+    // where a premium tenant's client is as valid as the shared pool's. A
+    // foreign client is then refused by the trigger instead: its pool is not
+    // in the registry, so no token with a tenant claim is issued (M-5).
+    if (this.appClientId !== undefined && request.clientId !== this.appClientId && !this.acceptOtherClients) {
       throw clientError(new OAuthFailure('invalid_client'));
     }
 

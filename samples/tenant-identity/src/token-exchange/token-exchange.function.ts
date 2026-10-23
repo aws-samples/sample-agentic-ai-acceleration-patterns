@@ -9,9 +9,11 @@
  * marks `application/x-www-form-urlencoded` a binary media type;
  * `convertEvent` decodes `isBase64Encoded` for us.
  *
- * In the shared pool the service is given the stack's app client id (T-28),
+ * In a shared pool the service is given the stack's app client id (T-28),
  * read from the `APP_CLIENT_ID` env var; an empty value means pool-per-tenant
- * (no single client to compare against), so the check is skipped.
+ * (no single client to compare against), so the check is skipped. In `tiered`
+ * (ADR-0027) the shared client is set but a premium tenant's own client must
+ * pass too, so the deployment's `hasPerTenantPools` widens the check.
  *
  * The token SSDK was generated with `disableDefaultValidation`, so the
  * handler factory requires a `ValidationCustomizer`. The only modelled
@@ -27,7 +29,7 @@ import type { ValidationContext, ValidationFailure } from '@smithy/server-common
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { OAUTH_ERROR_DESCRIPTIONS } from './form';
 import { TokenExchangeService } from './token-exchange';
-import { ENV } from '../shared/constants';
+import { ENV, hasPerTenantPools, parseDeployment } from '../shared/constants';
 import { getTokenServiceServiceHandler, OAuthError } from '../smithy/token/typescript-ssdk-codegen/src';
 
 /**
@@ -48,10 +50,14 @@ export function validationCustomizer(
 // refused with invalid_client. Unset in pool-per-tenant; '' is treated as
 // undefined (no check).
 const appClientId = process.env[ENV.appClientId] || undefined;
+// ADR-0027: per-tenant pools mean per-tenant clients, which the T-28 check
+// must let through; the trigger refuses a client of an unknown pool (M-5).
+const deployment = parseDeployment(process.env[ENV.topology]);
 
 const service = new TokenExchangeService<Record<string, unknown>>({
   cognito: new CognitoIdentityProviderClient({}),
   appClientId,
+  acceptOtherClients: hasPerTenantPools(deployment),
 });
 
 const serviceHandler = getTokenServiceServiceHandler(service, validationCustomizer);

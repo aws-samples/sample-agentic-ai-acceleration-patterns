@@ -9,7 +9,8 @@
  *
  * Built once at cold start, exactly like platform.function.ts (P-1): the
  * optional pool/trigger env vars are read unconditionally and handed to
- * `createProvisioner`, which validates what its topology needs. No topology
+ * `createProvisioners`, which builds the strategy for each topology the
+ * deployment offers (ADR-0027) and validates what each needs. No topology
  * branch lives here.
  *
  * It reports through the pre-signed ResponseURL with a node https PUT, the
@@ -28,15 +29,15 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { CloudFormationCustomResourceEvent } from 'aws-lambda';
 import { drainTenants, type DrainDeps } from './tenant-drain';
-import { ENV, parseTopology, requireEnv } from '../shared/constants';
+import { ENV, parseDeployment, requireEnv } from '../shared/constants';
 import { errorName } from '../shared/logger';
 import { DynamoDBRegistry } from '../shared/registry';
 import { ApiGatewayTenantApiKeys } from '../shared/tenant-api-keys';
-import { createProvisioner } from '../topology';
+import { createProvisioners } from '../topology';
 
 // --- Cold-start wiring (mirrors platform.function.ts) ----------------------
 
-const topology = parseTopology(process.env[ENV.topology]);
+const deployment = parseDeployment(process.env[ENV.topology]);
 const region = requireEnv('AWS_REGION');
 
 const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
@@ -56,7 +57,7 @@ const appClientId = process.env[ENV.appClientId];
 const triggerFunctionArn = process.env[ENV.triggerFunctionArn];
 const stackName = process.env[ENV.stackName];
 
-const provisioner = createProvisioner(topology, {
+const provisioners = createProvisioners(deployment, {
   cognito,
   region,
   sharedPool:
@@ -147,7 +148,7 @@ export async function handle(
   event: CloudFormationCustomResourceEvent,
   overrides: HandlerOverrides = {},
 ): Promise<void> {
-  const deps = overrides.deps ?? { registry, provisioner, apiKeys };
+  const deps = overrides.deps ?? { registry, provisioners, apiKeys };
   const send = overrides.send;
   let status: CfnStatus = 'SUCCESS';
   let reason = 'See ADR-0022';

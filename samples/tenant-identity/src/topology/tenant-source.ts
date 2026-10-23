@@ -13,13 +13,34 @@
  */
 
 import type { PreTokenGenerationV2TriggerEvent } from 'aws-lambda';
+import { bindingHolds } from './binding';
 import type { ResolvedTenants, TenantSource } from './provisioner';
-import { INVALID_TARGET, isTenantId, TENANT_ATTRIBUTE, TENANT_GROUP_PATTERN, type Topology } from '../shared/constants';
+import {
+  type Deployment,
+  INVALID_TARGET,
+  isTenantId,
+  POOL_MISMATCH,
+  TENANT_ATTRIBUTE,
+  TENANT_GROUP_PATTERN,
+  TIERED,
+  type Topology,
+} from '../shared/constants';
 import { InvalidInputError } from '../shared/errors';
 import type { RegistryReader } from '../shared/registry';
 
-/** Selects the tenant source for the deploy-time topology (spec P-1, P-7). */
-export function tenantSourceFor(topology: Topology): TenantSource {
+/**
+ * Selects the tenant source for the deployment (spec P-1, P-7). Every source
+ * applies the ADR-0027 binding rule to the rows it reads, so a tenant is
+ * only ever named through its own pool.
+ */
+export function tenantSourceFor(deployment: Deployment): TenantSource {
+  if (deployment === TIERED) {
+    return new TieredTenantSource();
+  }
+  return singleTenantSourceFor(deployment);
+}
+
+function singleTenantSourceFor(topology: Topology): TenantSource {
   switch (topology) {
     case 'pool-per-tenant':
       return new PoolPerTenantTenantSource();
@@ -45,6 +66,12 @@ class PoolPerTenantTenantSource implements TenantSource {
       // invalid_target, not invalid_grant (spec §5.4). Fixed text only.
       throw new Error(`${INVALID_TARGET}: unknown user pool`);
     }
+    // ADR-0027: the index row must be a pool-per-tenant tenant naming this
+    // pool. Always true for rows the platform wrote; checked so a stray
+    // index entry can never name a shared-pool tenant.
+    if (!bindingHolds(record, { kind: 'pool', userPoolId: event.userPoolId })) {
+      throw new Error(`${INVALID_TARGET}: ${POOL_MISMATCH}`);
+    }
     return { kind: 'single', tenantId: record.tenantId, record };
   }
 }
@@ -63,6 +90,12 @@ class SharedPoolTenantSource implements TenantSource {
       throw new InvalidInputError(`${INVALID_TARGET}: user has no valid tenant attribute`);
     }
     const record = await registry.get(tenantId);
+    // ADR-0027: a premium (pool-per-tenant) tenant's id in the attribute is
+    // a vendor bug, never a way in: the tenant is reachable only through its
+    // own pool.
+    if (record !== undefined && !bindingHolds(record, { kind: 'shared' })) {
+      throw new Error(`${INVALID_TARGET}: ${POOL_MISMATCH}`);
+    }
     return { kind: 'single', tenantId, record };
   }
 }
@@ -86,6 +119,27 @@ class SharedPoolMultiTenantTenantSource implements TenantSource {
       }
     }
     const records = await registry.batchGet(tenantIds);
-    return { kind: 'multi', records };
+    // ADR-0027: drop any tenant not bound to the shared pool.
+    return { kind: 'multi', records: records.filter((r) => bindingHolds(r, { kind: 'shared' })) };
+  }
+}
+
+/**
+ * `tiered` (ADR-0027): one trigger on the shared pool and every premium pool.
+ * The event's shape says which pool it came from: only the shared pool's
+ * schema has `custom:tenantId` (§7.2), and premium pools have no such
+ * attribute (§7.1). So an event with the attribute takes the shared-pool
+ * path, and any other takes the pool lookup. Each path then applies the
+ * binding rule, so a premium tenant cannot be named from the shared pool and
+ * a standard tenant cannot be named from a premium pool.
+ */
+class TieredTenantSource implements TenantSource {
+  readonly topology: Topology = 'shared-pool';
+  private readonly shared = new SharedPoolTenantSource();
+  private readonly perTenant = new PoolPerTenantTenantSource();
+
+  resolve(event: PreTokenGenerationV2TriggerEvent, registry: RegistryReader): Promise<ResolvedTenants> {
+    const fromSharedPool = event.request.userAttributes[TENANT_ATTRIBUTE] !== undefined;
+    return (fromSharedPool ? this.shared : this.perTenant).resolve(event, registry);
   }
 }

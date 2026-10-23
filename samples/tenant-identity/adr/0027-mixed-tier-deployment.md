@@ -1,6 +1,6 @@
 # ADR-0027: Serve a standard and a premium tier from one deployment, chosen per tenant
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-23
 - Deciders: Dave Roberts (SA)
 
@@ -64,32 +64,47 @@ offers both tiers; a tenant's tier is chosen once, explicitly, at
 `CreateTenant`, and is never inferred or defaulted.
 
 ### The binding rule
-Every row records the pool its tenant lives in (`userPoolId`), standard rows
-included (they name the shared pool). Every path that reaches a tenant from
-Cognito MUST find that the row's tier and pool match where it came from:
+A premium row records its own pool (`userPoolId`, as in `pool-per-tenant`);
+a standard row records no pool. A `pool-per-tenant` tenant is reachable only
+through the pool its row names; every other tenant is reachable only through
+the shared pool. Every path that maps a Cognito pool to a tenant MUST apply
+this after reading the row:
 
 | Arrived via | Row must say | Else |
 |---|---|---|
-| The shared pool (trigger `userPoolId`, authoriser `iss`, exchange `client_id`) | `shared-pool` | refuse (`pool_mismatch`) |
+| The shared pool (trigger: the event carries `custom:tenantId`; authoriser: `iss` is the shared pool's) | not `pool-per-tenant` | refuse (`pool_mismatch`) |
 | Any other pool | `pool-per-tenant`, and that pool is the row's `userPoolId` | refuse (`pool_mismatch`) |
 
 This stops a premium tenant's id being claimed through the shared pool (for
 example by a vendor bug that writes a premium id into `custom:tenantId`),
-and a standard tenant being reached with a token from a premium pool.
+and a standard tenant being reached with a token from a premium pool. The
+rule holds trivially in a single-topology stack and is applied in every
+stack, so nothing branches on the deployment to skip it
+(`src/topology/binding.ts`).
 
 ### Component changes
 | Component | Change |
 |---|---|
-| CDK stack | `tiered` deploys the shared pool, its app client and groups (as `shared-pool`) plus the pool-per-tenant grants, tags and tenant-scoped role (ADR-0026). Publishes the shared pool's `userPoolId`/`appClientId` parameters for the standard tier only. |
-| Smithy (`platform`) | `CreateTenantInput.tier`: enum `standard \| premium`, required when the stack is `tiered`, refused (`UnsupportedInTopology`) otherwise. `Tenant` output gains `tier`. |
-| Registry | `userPoolId`, `appClientId` and `issuer` on every row; standard rows name the shared pool. `topology` is the tenant's tier. |
-| Provisioner | A dispatcher in `src/topology/` returns the strategy for a row's `topology`. Platform and tenant-user handlers resolve it per request instead of once per cold start. Still the only place that branches (P-1). |
-| Pre-token trigger | One function, attached to the shared pool and every premium pool. The shared pool's id → `custom:tenantId`; any other pool → the `byUserPoolId` lookup. Then the binding rule. |
+| CDK stack | `tiered` deploys the shared pool, its app client and groups (as `shared-pool`) plus the pool-per-tenant grants, tags and tenant-scoped role (ADR-0026). Every function reads `TOPOLOGY=tiered`. Publishes the shared pool's `userPoolId`/`appClientId` parameters, which serve the standard tier only. |
+| Smithy (`platform`) | `CreateTenantInput.tier`: enum `standard \| premium`, required when the stack is `tiered`, refused (`UnsupportedInTopology`) otherwise. `Tenant` output gains `tier`, derived from the row's `topology`. |
+| Registry | `topology` is the tenant's tier. Premium rows carry `userPoolId`, `appClientId` and `issuer` as in `pool-per-tenant`; standard rows carry none, because the `byUserPoolId` index maps a pool to exactly one tenant and the shared pool's id cannot sit on every standard row. |
+| Provisioner | `createProvisioners` in `src/topology/` returns the strategy for a row's `topology`, built once per topology the deployment offers; a topology the deployment does not offer throws. Platform and tenant-user handlers resolve it per request instead of once per cold start. Still the only place that branches (P-1). |
+| Pre-token trigger | One function, attached to the shared pool and every premium pool. The event's shape says which pool it came from: only the shared pool's schema has `custom:tenantId`, so an event with the attribute takes the shared-pool path and any other takes the `byUserPoolId` lookup. Then the binding rule. (Wiring the shared pool's id into the trigger's environment would be a CDK cycle: the pool depends on the trigger.) |
 | Tenant authoriser | Decodes `iss` (unverified, as today). The shared pool's issuer → verify against the shared app client; another pool → the registry path of ADR-0007. Then the binding rule, as a new refusal `pool_mismatch` next to `issuer_tenant_mismatch`. |
-| Token exchange | Accepts the shared app client or a premium tenant's registered client; any other `client_id` → `invalid_client` (today's T-28 check, widened by one registry lookup). |
-| Tenant-user function | Standard tenants: its own role, scoped to the shared pool ARN (code-only wall, T-18). Premium tenants: the tenant-tagged STS role (ADR-0026, IAM wall). |
-| Throttling | One usage plan per tier (ADR-0025 "revisit if tiers"); `CreateTenant` adds the key to its tier's plan. Premium can get higher per-tenant limits; the shared stage limit sits above both. |
+| Token exchange | No `client_id` comparison in `tiered` (nor in `pool-per-tenant`): the form's client is passed to Cognito, and a client of a pool the registry does not know is refused by the trigger's pool lookup (M-5), so no token with a tenant claim is issued. The shared topologies keep the `invalid_client` check (T-28, M-25). |
+| Tenant-user function | Standard tenants: its own role, scoped to the shared pool ARN (code-only wall, T-18). Premium tenants: the tenant-tagged STS role (ADR-0026, IAM wall). Chosen per request from the row's `topology`. |
+| Throttling | One usage plan per tier (ADR-0025 "revisit if tiers"); `CreateTenant` adds the key to its tier's plan. Standard: 10 rps / 20 burst per tenant; premium: 25 rps / 50 burst per tenant; the shared `/tenant/*` stage limit (50 / 100) sits above both. |
 | Teardown drain | Unchanged in shape: it deletes each row through the dispatcher. |
+
+Amended 2026-10-23 during implementation:
+- Standard rows do not store the shared pool's `userPoolId`; the binding rule
+  is "pool-per-tenant rows only through their own pool, every other row only
+  through the shared pool".
+- The trigger tells the pools apart by event shape (`custom:tenantId`
+  present), not by a configured shared pool id.
+- The token exchange compares no `client_id` in `tiered`; a foreign client is
+  refused by the trigger because its pool is not in the registry.
+- The premium usage plan is 25 rps / 50 burst per tenant.
 
 ### What consumers see
 - **Token checks: no change.** Every access token carries `tenant_id` and
@@ -102,9 +117,10 @@ and a standard tenant being reached with a token from a premium pool.
 - **Sign-in: one change.** The client must pick the pool before login. The
   vendor maps a login hint (tenant URL, e-mail domain, or an "organisation"
   step) to a tenant, then calls `GetTenant` from its own backend to get
-  `userPoolId` and `appClientId`. Every standard tenant returns the shared
-  pool. The sample builds no public discovery route, because one would
-  reveal which tenants exist (extension seam).
+  `userPoolId` and `appClientId`. A premium tenant returns its own pool; a
+  standard tenant returns no pool fields, and the client uses the shared
+  pool's ids from the published parameters (§6.3). The sample builds no public discovery route, because
+  one would reveal which tenants exist (extension seam).
 
 ### Tier change: specified, not built
 Moving a tenant between tiers is a user migration, because Cognito cannot
@@ -138,9 +154,11 @@ one way; tier is visible per tenant in `ListTenants`.
 
 Harder:
 - Two strategies in one runtime. The binding rule is the new security
-  property, and it must hold in the trigger, the authoriser and the exchange
-  alike. Each mismatch needs a unit test, and the e2e needs a step that
-  presents each tier's token for the other tier's tenant.
+  property, and it must hold in the trigger and the authoriser alike (the
+  exchange relies on the trigger). Each mismatch needs a unit test, and the
+  e2e needs a step that puts a premium tenant's id on a shared-pool user and
+  expects no token (spec §10 step 12); a forged cross-tier token for the
+  authoriser is unit-level, since Cognito will not mint one.
 - The stack holds both topologies' IAM: the account-wide `CreateUserPool`
   (T-7) is present even for a deployment with only standard tenants.
 - The tenant-user and platform functions resolve the strategy per request,

@@ -28,7 +28,7 @@ import { HttpRequest } from '@smithy/protocol-http';
 import { SignatureV4 } from '@smithy/signature-v4';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { fetchJwks } from 'aws-jwt-verify/jwk';
-import type { Topology } from '../../src/shared/constants';
+import type { Deployment, Tier } from '../../src/shared/constants';
 import { issuerFor } from '../../src/shared/constants';
 
 // ---------------------------------------------------------------------------
@@ -45,21 +45,24 @@ export function region(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Stack discovery (spec §3.3): outputs of `${E2E_STACK_PREFIX}-${topology}`
+// Stack discovery (spec §3.3): outputs of `${E2E_STACK_PREFIX}-${deployment}`
 // ---------------------------------------------------------------------------
 
 /** The stack outputs the CDK worker publishes (TODO.md cross-worker contract). */
 export interface StackOutputs {
   /** API Gateway stage URL, trailing slash (output key `ApiUrl`). */
   readonly apiUrl: string;
-  readonly topology: Topology;
+  /** What the stack deploys: a topology, or `tiered` (ADR-0027). */
+  readonly topology: Deployment;
   readonly registryTableName: string;
-  /** shared-pool* only. */
+  /** shared-pool* and tiered (the standard tier's pool) only. */
   readonly userPoolId?: string;
   readonly appClientId?: string;
-  /** The `/tenant/*` usage plan (ADR-0025). */
+  /** The `/tenant/*` usage plan (ADR-0025); the standard tier's in tiered. */
   readonly tenantUsagePlanId?: string;
-  /** pool-per-tenant only: the role the tenant-user function assumes (ADR-0026). */
+  /** tiered only: the premium tier's `/tenant/*` usage plan (ADR-0027). */
+  readonly premiumUsagePlanId?: string;
+  /** pool-per-tenant and tiered: the role the tenant-user function assumes (ADR-0026). */
   readonly tenantScopedRoleArn?: string;
 }
 
@@ -70,6 +73,7 @@ const OUTPUT_KEYS = {
   userPoolId: 'UserPoolId',
   appClientId: 'AppClientId',
   tenantUsagePlanId: 'TenantUsagePlanId',
+  premiumUsagePlanId: 'PremiumUsagePlanId',
   tenantScopedRoleArn: 'TenantScopedRoleArn',
 } as const;
 
@@ -79,14 +83,14 @@ export function stackPrefix(): string {
   return value === undefined || value === '' ? 'TenantIdentity' : value;
 }
 
-export function stackName(topology: Topology): string {
-  return `${stackPrefix()}-${topology}`;
+export function stackName(deployment: Deployment): string {
+  return `${stackPrefix()}-${deployment}`;
 }
 
-/** Reads the stack's CloudFormation outputs once per topology. */
-export async function discoverStack(topology: Topology): Promise<StackOutputs> {
+/** Reads the stack's CloudFormation outputs once per deployment. */
+export async function discoverStack(deployment: Deployment): Promise<StackOutputs> {
   const cfn = new CloudFormationClient({ region: region() });
-  const name = stackName(topology);
+  const name = stackName(deployment);
   const result = await cfn.send(new DescribeStacksCommand({ StackName: name }));
   const stack = result.Stacks?.[0];
   if (stack === undefined) {
@@ -105,11 +109,12 @@ export async function discoverStack(topology: Topology): Promise<StackOutputs> {
   }
   return {
     apiUrl: apiUrl.endsWith('/') ? apiUrl : `${apiUrl}/`,
-    topology,
+    topology: deployment,
     registryTableName,
     userPoolId: outputs.get(OUTPUT_KEYS.userPoolId),
     appClientId: outputs.get(OUTPUT_KEYS.appClientId),
     tenantUsagePlanId: outputs.get(OUTPUT_KEYS.tenantUsagePlanId),
+    premiumUsagePlanId: outputs.get(OUTPUT_KEYS.premiumUsagePlanId),
     tenantScopedRoleArn: outputs.get(OUTPUT_KEYS.tenantScopedRoleArn),
   };
 }
@@ -147,6 +152,34 @@ async function readJson(res: Response): Promise<unknown> {
 // Platform API client: SigV4 over execute-api (spec §3.2, ADR-0005)
 // ---------------------------------------------------------------------------
 
+/** The `tenant` member of CreateTenant/GetTenant (model/__global.smithy). */
+export interface TenantOutput {
+  readonly tenantId: string;
+  readonly name: string;
+  readonly status: string;
+  /** The strategy the tenant runs on (spec §4.1). */
+  readonly topology?: string;
+  /** tiered only (ADR-0027). */
+  readonly tier?: Tier;
+  readonly userPoolId?: string;
+  readonly appClientId?: string;
+  readonly issuer?: string;
+  readonly groupName?: string;
+}
+
+/** CreateTenant's 201 body (model/platform.smithy). */
+export interface CreateTenantOutput {
+  readonly tenant: TenantOutput;
+  readonly admin: { readonly user: { readonly username: string }; readonly temporaryPassword?: string };
+}
+
+export interface CreateTenantInput {
+  readonly name: string;
+  readonly adminEmail: string;
+  /** Required in a `tiered` deployment, refused anywhere else (ADR-0027). */
+  readonly tier?: Tier;
+}
+
 export class PlatformClient {
   private readonly signer: SignatureV4;
 
@@ -157,6 +190,18 @@ export class PlatformClient {
       credentials: fromNodeProviderChain(),
       sha256: Sha256,
     });
+  }
+
+  /**
+   * `POST platform/tenants`. `tier` is sent only when given, so a call
+   * without it is byte-for-byte what a single-topology client sends.
+   */
+  async createTenant(input: CreateTenantInput): Promise<HttpResult<CreateTenantOutput>> {
+    const body: Record<string, unknown> = { name: input.name, adminEmail: input.adminEmail };
+    if (input.tier !== undefined) {
+      body.tier = input.tier;
+    }
+    return this.call<CreateTenantOutput>('POST', 'platform/tenants', body);
   }
 
   /**

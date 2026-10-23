@@ -9,10 +9,10 @@ import { convertEvent, convertVersion1Response } from '@smithy/server-apigateway
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { perTenant, TenantCredentialCache } from './tenant-credentials';
 import { TenantUsersService, type ProvisionerFor, type TenantCallerContext } from './tenant-users';
-import { ENV, parseTopology, POOL_INDEX_NAME, requireEnv } from '../shared/constants';
+import { ENV, parseDeployment, POOL_INDEX_NAME, requireEnv } from '../shared/constants';
 import { DynamoDBRegistry } from '../shared/registry';
 import { getTenantServiceServiceHandler } from '../smithy/tenant/typescript-ssdk-codegen/src';
-import { createProvisioner, type ProvisionerDeps } from '../topology';
+import { createProvisioners, type ProvisionerDeps, usesTenantScopedCredentials } from '../topology';
 
 /**
  * The `/tenant/users` handler (ADR-0014) — a pass-through, like every function
@@ -22,21 +22,25 @@ import { createProvisioner, type ProvisionerDeps } from '../topology';
  * (R-8, P-8).
  *
  * Cold-start wiring reads optional env vars without branching on the topology:
- * `createProvisioner` is the one place a topology value selects behaviour
- * (spec P-1). `sharedPool` and `triggerFunctionArn` are set only in the
- * topologies that use them, so reading them unconditionally is correct.
+ * `createProvisioners` is the one place a topology value selects behaviour
+ * (spec P-1), and the service asks it for the strategy on each tenant's
+ * registry row (ADR-0027). `sharedPool` and `triggerFunctionArn` are set only
+ * in the deployments that use them, so reading them unconditionally is
+ * correct.
  *
- * ADR-0026: when the stack sets a tenant-scoped role (pool-per-tenant), this
- * function's own role holds no Cognito action. Every Cognito call signs with
- * that role's credentials, assumed per tenant with the authoriser's tenant id
- * as the session tag, so IAM keeps the call inside that tenant's pool. The
- * R-12 and R-13 checks in the service still run (defence in depth). Without
- * the role (shared pools), the function calls Cognito with its own role:
- * IAM cannot scope users inside one pool.
+ * ADR-0026: when the stack sets a tenant-scoped role (pool-per-tenant,
+ * tiered), this function's own role holds no Cognito action on per-tenant
+ * pools. Every Cognito call for a pool-per-tenant tenant signs with that
+ * role's credentials, assumed per tenant with the authoriser's tenant id as
+ * the session tag, so IAM keeps the call inside that tenant's pool. The R-12
+ * and R-13 checks in the service still run (defence in depth). Shared-pool
+ * tenants (every tenant in shared-pool*, the standard tier in tiered) are
+ * served on the function's own role: IAM cannot scope users inside one pool,
+ * so the code-only wall (T-18) applies there.
  */
 
 const region = requireEnv('AWS_REGION');
-const topology = parseTopology(requireEnv(ENV.topology));
+const deployment = parseDeployment(requireEnv(ENV.topology));
 const tableName = requireEnv(ENV.tableName);
 
 const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
@@ -59,20 +63,27 @@ const baseDeps: Omit<ProvisionerDeps, 'cognito'> = {
   triggerFunctionArn: process.env[ENV.triggerFunctionArn],
 };
 
-/** One provisioner for every tenant, or one per tenant on scoped credentials (ADR-0026). */
+/**
+ * The strategy for a tenant's row, on the credentials its topology needs.
+ * Shared-pool tenants always run on the function's own client. Pool-per-tenant
+ * tenants run on scoped credentials when the stack set the role (ADR-0026);
+ * without it (a shared-pool* deployment) a pool-per-tenant row is a registry
+ * bug, and `createProvisioners` throws (a 500) rather than fall back.
+ */
 function buildProvisionerFor(): ProvisionerFor {
+  const own = createProvisioners(deployment, { ...baseDeps, cognito: new CognitoIdentityProviderClient({}) });
   const scopedRoleArn = process.env[ENV.tenantScopedRoleArn];
   if (scopedRoleArn === undefined || scopedRoleArn === '') {
-    const shared = createProvisioner(topology, { ...baseDeps, cognito: new CognitoIdentityProviderClient({}) });
-    return () => shared;
+    return (_tenantId, topology) => own(topology);
   }
   const credentials = new TenantCredentialCache({ sts: new STSClient({}), roleArn: scopedRoleArn });
-  return perTenant((tenantId) =>
-    createProvisioner(topology, {
+  const scoped = perTenant((tenantId) =>
+    createProvisioners(deployment, {
       ...baseDeps,
       cognito: new CognitoIdentityProviderClient({ credentials: () => credentials.credentialsFor(tenantId) }),
     }),
   );
+  return (tenantId, topology) => (usesTenantScopedCredentials(topology) ? scoped(tenantId)(topology) : own(topology));
 }
 
 const service = new TenantUsersService(registry, buildProvisionerFor());

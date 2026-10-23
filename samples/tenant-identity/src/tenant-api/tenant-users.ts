@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import type { Topology } from '../shared/constants';
 import { ConflictError, InvalidInputError, NotFoundError, UnsupportedInTopologyError } from '../shared/errors';
 import { errorName, log } from '../shared/logger';
 import type { RegistryReader, TenantRecord } from '../shared/registry';
@@ -97,12 +98,15 @@ function toModeledError(error: unknown): never {
 }
 
 /**
- * The provisioner for one tenant. A single provisioner serves every tenant
- * when the function calls Cognito with its own role (shared pools); in
- * pool-per-tenant the function passes a factory whose provisioner signs with
- * that tenant's scoped credentials (ADR-0026).
+ * The provisioner for one tenant, resolved per request from the registry row
+ * the service has already read (ADR-0027: the row's `topology` picks the
+ * strategy, so a `tiered` deployment serves standard and premium tenants
+ * from one function). The function passes a factory that also chooses the
+ * credentials: a single Cognito client on the function's own role for shared
+ * pools, or one signing with that tenant's scoped credentials for
+ * pool-per-tenant (ADR-0026).
  */
-export type ProvisionerFor = (tenantId: string) => Provisioner;
+export type ProvisionerFor = (tenantId: string, topology: Topology) => Provisioner;
 
 export class TenantUsersService implements TenantServiceService<TenantCallerContext> {
   private readonly provisionerFor: ProvisionerFor;
@@ -181,7 +185,7 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
     log.info('tenant user operation', { tenantId: context.tenantId, sub: context.sub, operation: 'CreateTenantUser' });
     try {
       const tenant = await this.loadTenant(context, true);
-      const provisioner = this.provisionerFor(context.tenantId);
+      const provisioner = this.provisionerFor(tenant.tenantId, tenant.topology);
       // R-16 (T-26): re-check the caller's admin group before any write.
       await this.requireCallerAdmin(provisioner, tenant, context.sub);
       const result = await provisioner.createUser(tenant, input.email!, input.admin ?? false);
@@ -203,7 +207,7 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
     log.info('tenant user operation', { tenantId: context.tenantId, sub: context.sub, operation: 'GetTenantUser' });
     try {
       const tenant = await this.loadTenant(context, false);
-      const provisioner = this.provisionerFor(context.tenantId);
+      const provisioner = this.provisionerFor(tenant.tenantId, tenant.topology);
       // getUser runs the R-12 membership check and 404s a non-member.
       const user = await provisioner.getUser(tenant, input.username!);
       return { user: toUser(user) };
@@ -224,7 +228,7 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
     log.info('tenant user operation', { tenantId: context.tenantId, sub: context.sub, operation: 'ListTenantUsers' });
     try {
       const tenant = await this.loadTenant(context, false);
-      const provisioner = this.provisionerFor(context.tenantId);
+      const provisioner = this.provisionerFor(tenant.tenantId, tenant.topology);
       const page = await provisioner.listUsers(tenant, input.nextToken);
       return { users: page.items.map(toUser), nextToken: page.nextToken };
     } catch (error) {
@@ -244,7 +248,7 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
     log.info('tenant user operation', { tenantId: context.tenantId, sub: context.sub, operation: 'UpdateTenantUser' });
     try {
       const tenant = await this.loadTenant(context, true);
-      const provisioner = this.provisionerFor(context.tenantId);
+      const provisioner = this.provisionerFor(tenant.tenantId, tenant.topology);
       // R-16 (T-26): re-check the caller's admin group before any write.
       await this.requireCallerAdmin(provisioner, tenant, context.sub);
       // R-12 (membership) then R-13 (self-mutation): resolve the path username
@@ -277,7 +281,7 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
     log.info('tenant user operation', { tenantId: context.tenantId, sub: context.sub, operation: 'DeleteTenantUser' });
     try {
       const tenant = await this.loadTenant(context, true);
-      const provisioner = this.provisionerFor(context.tenantId);
+      const provisioner = this.provisionerFor(tenant.tenantId, tenant.topology);
       // R-16 (T-26): re-check the caller's admin group before any write.
       await this.requireCallerAdmin(provisioner, tenant, context.sub);
       // R-12 (membership) then R-13 (self-delete): resolve the path username

@@ -25,7 +25,13 @@ import {
   TOKEN_TYPE_ACCESS,
   TOKEN_TYPE_REFRESH,
 } from '../../src/shared/constants';
-import { handler } from '../../src/token-exchange/token-exchange.function';
+
+// Cold start parses TOPOLOGY at module load. `require` (not a static import)
+// runs after this assignment; a static import is hoisted above it. No
+// APP_CLIENT_ID: pool-per-tenant has no single client to check (T-28).
+process.env.TOPOLOGY = 'pool-per-tenant';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { handler } = require('../../src/token-exchange/token-exchange.function') as typeof import('../../src/token-exchange/token-exchange.function');
 
 // See token-exchange.test.ts: the SDK's duplicated @smithy/types makes the
 // command constructor types diverge from the client's. Cast keeps the mock

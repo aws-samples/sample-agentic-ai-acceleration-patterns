@@ -2,17 +2,21 @@
 // SPDX-License-Identifier: MIT-0
 
 import { decomposeUnverifiedJwt } from 'aws-jwt-verify/jwt';
-import { isTenantId, SCOPE_TENANT_ADMIN, userPoolIdFromIssuer } from '../shared/constants';
+import { isTenantId, POOL_MISMATCH, SCOPE_TENANT_ADMIN, userPoolIdFromIssuer } from '../shared/constants';
 import { log } from '../shared/logger';
 import type { RegistryReader } from '../shared/registry';
+// The binding module only, not the topology barrel: the barrel pulls in the
+// provisioners and the Cognito SDK, which this function never calls (R-9).
+import { bindingHolds, type ArrivedVia } from '../topology/binding';
 
 /**
  * The core of the tenant authoriser (ADR-0007). It verifies a narrowed admin
  * access token and returns the one thing the tenant-user function may trust:
  * the tenant the token names and the caller's `sub`. Nothing here branches on
- * a topology name: the only distinction is whether the stack configured a
- * shared pool (shared-pool*) or not (pool-per-tenant). The decision rules are
- * spec P-2, P-3, P-6, P-11, R-9 and the token contract of §6 (P-6).
+ * a topology name: the only distinctions are whether the stack configured a
+ * shared pool (shared-pool*, tiered) and whether it creates per-tenant pools
+ * (pool-per-tenant, tiered). The decision rules are spec P-2, P-3, P-6, P-11,
+ * R-9, the token contract of §6 (P-6) and the ADR-0027 binding rule.
  *
  * Every refusal returns `undefined` and logs the rule name only, never the
  * token or its claims (N-7).
@@ -35,8 +39,14 @@ export interface TokenVerifier {
 export interface AuthorizeDeps {
   /** Reads tenant status on every request, uncached (ADR-0007). */
   readonly registry: RegistryReader;
-  /** shared-pool*: the stack's own pool and app client. Absent in pool-per-tenant. */
+  /** shared-pool*, tiered: the stack's own pool and app client. Absent in pool-per-tenant. */
   readonly sharedPool?: { readonly userPoolId: string; readonly appClientId: string };
+  /**
+   * ADR-0027: true when the deployment creates a pool per tenant
+   * (pool-per-tenant, tiered). Then the token's issuer picks the pool, and an
+   * issuer other than the shared pool's is mapped through the registry.
+   */
+  readonly perTenantPools: boolean;
   /**
    * Returns a verifier for one pool/client, created once and reused: the
    * verifier caches the pool's JWKS for its own lifetime. Caching the
@@ -76,28 +86,40 @@ function scopeSet(scope: unknown): Set<string> {
 /**
  * Verifies the token and returns the caller, or `undefined` to refuse.
  *
- * Shared pool: verify against the stack's pool and client.
- * Pool-per-tenant: read `iss` from the unverified payload only to pick the
- * pool, map it through the registry, then verify with that tenant's pool and
- * app client. The registry is the issuer allowlist for this topology (§4.1).
+ * Shared pool only (shared-pool*): verify against the stack's pool and client.
+ * Per-tenant pools (pool-per-tenant, tiered): read `iss` from the unverified
+ * payload only to pick the pool. The shared pool's issuer (tiered) verifies
+ * against the shared client; any other issuer is mapped through the
+ * registry, then verified with that tenant's pool and app client. The
+ * registry is the issuer allowlist for per-tenant pools (§4.1).
  *
  * After a valid signature, the claims must satisfy the token contract (P-6):
  * `token_use` access, a ULID `tenant_id`, no `tenants` claim, `scope`
- * includes `tenant-admin/users`, the tenant exists and is ACTIVE, and in
+ * includes `tenant-admin/users`, the tenant exists and is ACTIVE, in
  * pool-per-tenant the registry's tenant for the issuing pool equals
- * `tenant_id`.
+ * `tenant_id`, and the tenant's row is bound to the pool the token came from
+ * (ADR-0027 binding rule, refused as `pool_mismatch`).
  */
 export async function authorize(token: string, deps: AuthorizeDeps): Promise<Caller | undefined> {
   let userPoolId: string;
   let appClientId: string;
   let expectedTenantId: string | undefined;
+  let arrived: ArrivedVia;
 
-  if (deps.sharedPool !== undefined) {
+  if (!deps.perTenantPools) {
+    // shared-pool*: the stack's pool is the only issuer, so nothing is read
+    // from the token before verification; the verifier checks `iss` itself.
+    if (deps.sharedPool === undefined) {
+      // Neither a shared pool nor per-tenant pools: a wiring bug, never an allow.
+      log.warn('authorizer refused', { rule: 'no_pool_configured' });
+      return undefined;
+    }
     userPoolId = deps.sharedPool.userPoolId;
     appClientId = deps.sharedPool.appClientId;
+    arrived = { kind: 'shared' };
   } else {
-    // pool-per-tenant: the issuer picks the pool. Decode is unverified and
-    // used only to choose which pool's JWKS to verify against.
+    // pool-per-tenant, tiered: the issuer picks the pool. Decode is unverified
+    // and used only to choose which pool's JWKS to verify against.
     let issuer: string | undefined;
     try {
       issuer = decomposeUnverifiedJwt(token).payload.iss;
@@ -110,15 +132,23 @@ export async function authorize(token: string, deps: AuthorizeDeps): Promise<Cal
       log.warn('authorizer refused', { rule: 'issuer_not_a_pool' });
       return undefined;
     }
-    const owner = await deps.registry.getByUserPoolId(poolId);
-    if (owner === undefined || owner.appClientId === undefined) {
-      log.warn('authorizer refused', { rule: 'pool_not_in_registry' });
-      return undefined;
+    if (deps.sharedPool !== undefined && poolId === deps.sharedPool.userPoolId) {
+      // tiered: the shared pool's own issuer, the standard tier's door.
+      userPoolId = deps.sharedPool.userPoolId;
+      appClientId = deps.sharedPool.appClientId;
+      arrived = { kind: 'shared' };
+    } else {
+      const owner = await deps.registry.getByUserPoolId(poolId);
+      if (owner === undefined || owner.appClientId === undefined) {
+        log.warn('authorizer refused', { rule: 'pool_not_in_registry' });
+        return undefined;
+      }
+      userPoolId = poolId;
+      appClientId = owner.appClientId;
+      // The registry's tenant for this pool must equal the token's tenant_id.
+      expectedTenantId = owner.tenantId;
+      arrived = { kind: 'pool', userPoolId: poolId };
     }
-    userPoolId = poolId;
-    appClientId = owner.appClientId;
-    // The registry's tenant for this pool must equal the token's tenant_id.
-    expectedTenantId = owner.tenantId;
   }
 
   // Verify the signature, token_use=access, and client_id against the pool.
@@ -178,6 +208,14 @@ export async function authorize(token: string, deps: AuthorizeDeps): Promise<Cal
   }
   if (tenant.status !== 'ACTIVE') {
     log.warn('authorizer refused', { rule: 'tenant_not_active' });
+    return undefined;
+  }
+  // ADR-0027 binding rule: the tenant's row must name the pool the token came
+  // from. A premium (pool-per-tenant) tenant is never reached through the
+  // shared pool, and a standard tenant never through a premium pool. Trivially
+  // true in a single-topology deployment, checked in every one.
+  if (!bindingHolds(tenant, arrived)) {
+    log.warn('authorizer refused', { rule: POOL_MISMATCH });
     return undefined;
   }
   // ADR-0025: /tenant/* requires an API key. Without one API Gateway would

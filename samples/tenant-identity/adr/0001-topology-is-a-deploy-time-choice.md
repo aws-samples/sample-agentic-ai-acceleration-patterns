@@ -1,6 +1,6 @@
 # ADR-0001: Select the user-pool topology once, at deploy time, by CDK context
 
-- Status: Accepted
+- Status: Superseded in part by ADR-0027
 - Date: 2026-10-13
 - Deciders: Dave Roberts (SA)
 

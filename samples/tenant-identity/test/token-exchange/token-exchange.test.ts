@@ -81,6 +81,7 @@ function form(overrides: Record<string, string> = {}): string {
 function service(): TokenExchangeService<Record<string, unknown>> {
   return new TokenExchangeService<Record<string, unknown>>({
     cognito: cognitoMock as unknown as CognitoIdentityProviderClient,
+    acceptOtherClients: false,
   });
 }
 
@@ -284,11 +285,12 @@ describe('ExchangeToken ADR-0012: reject tokens Cognito did not narrow', () => {
 });
 
 describe('ExchangeToken T-28: shared-pool client_id check', () => {
-  /** A service bound to a shared-pool app client id. */
-  function serviceWith(appClientId: string): TokenExchangeService<Record<string, unknown>> {
+  /** A service bound to a shared-pool app client id, in a single shared topology. */
+  function serviceWith(appClientId: string, acceptOtherClients = false): TokenExchangeService<Record<string, unknown>> {
     return new TokenExchangeService<Record<string, unknown>>({
       cognito: cognitoMock as unknown as CognitoIdentityProviderClient,
       appClientId,
+      acceptOtherClients,
     });
   }
 
@@ -321,5 +323,55 @@ describe('ExchangeToken T-28: shared-pool client_id check', () => {
     // The default `service()` passes no appClientId; any client_id is allowed.
     await exchange(form({ client_id: 'any-tenant-client' }));
     expect(cognitoMock.commandCalls(GetTokens)).toHaveLength(1);
+  });
+
+  describe('tiered: acceptOtherClients (ADR-0027)', () => {
+    it('a premium tenant\'s client passes next to the shared client and reaches Cognito', async () => {
+      cognitoMock.on(GetTokens).resolves({
+        AuthenticationResult: { AccessToken: narrowedToken(TENANT_B, [SCOPE_API_READ]), ExpiresIn: 300 },
+      });
+      const output = await serviceWith('the-shared-client', true).ExchangeToken(
+        { form: new TextEncoder().encode(form({ client_id: 'premium-tenant-client', resource: `${TENANT_RESOURCE_PREFIX}${TENANT_B}` })) },
+        {},
+      );
+      expect(output.accessToken).toBe(narrowedToken(TENANT_B, [SCOPE_API_READ]));
+      const input = cognitoMock.commandCalls(GetTokens)[0].args[0].input;
+      expect(input.ClientId).toBe('premium-tenant-client');
+    });
+
+    it('the shared client still passes', async () => {
+      cognitoMock.on(GetTokens).resolves({
+        AuthenticationResult: { AccessToken: narrowedToken(TENANT_A, [SCOPE_API_READ]), ExpiresIn: 300 },
+      });
+      await serviceWith(CLIENT, true).ExchangeToken({ form: new TextEncoder().encode(form()) }, {});
+      expect(cognitoMock.commandCalls(GetTokens)).toHaveLength(1);
+    });
+
+    it('a foreign client is refused by the trigger, not here: invalid_target surfaces as the OAuth error', async () => {
+      // The client belongs to a pool the registry does not know (M-5): the
+      // trigger throws invalid_target, which Cognito wraps and this maps.
+      cognitoMock
+        .on(GetTokens)
+        .rejects(
+          new UserLambdaValidationException({
+            message: 'PreTokenGeneration failed with error invalid_target: unknown user pool.',
+            $metadata: {},
+          }),
+        );
+      const caught = await serviceWith(CLIENT, true)
+        .ExchangeToken({ form: new TextEncoder().encode(form({ client_id: 'foreign-client' })) }, {})
+        .catch((e) => e);
+      expect(caught).toBeInstanceOf(OAuthError);
+      expect(caught.code).toBe('invalid_target');
+      expect(cognitoMock.commandCalls(GetTokens)).toHaveLength(1);
+    });
+
+    it('without acceptOtherClients the same form is still invalid_client (shared-pool unchanged)', async () => {
+      const caught = await serviceWith(CLIENT, false)
+        .ExchangeToken({ form: new TextEncoder().encode(form({ client_id: 'premium-tenant-client' })) }, {})
+        .catch((e) => e);
+      expect(caught.code).toBe('invalid_client');
+      expect(cognitoMock.commandCalls(GetTokens)).toHaveLength(0);
+    });
   });
 });

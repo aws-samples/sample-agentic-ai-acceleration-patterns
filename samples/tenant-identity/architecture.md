@@ -76,13 +76,17 @@ Four doors cross four boundaries:
 
 ## 3. Components
 
-One stack per topology ([`src/identity.cdk.ts`](./src/identity.cdk.ts),
-`TenantIdentity-<topology>`). One REST API (`SpecRestApi`) built from three
+One stack per deployment ([`src/identity.cdk.ts`](./src/identity.cdk.ts),
+`TenantIdentity-<topology>`): one of the three topologies, or `tiered`, which
+deploys `shared-pool` and `pool-per-tenant` side by side (ADR-0027). One REST API (`SpecRestApi`) built from three
 merged Smithy OpenAPI documents (ADR-0016), eight Lambda functions, one usage
-plan for `/tenant/*` (ADR-0025), the tenant registry, and — for the shared topologies only — one user pool with the
+plan for `/tenant/*` (ADR-0025; two in `tiered`, one per tier), the tenant registry, and — for the shared topologies and `tiered` — one user pool with the
 trigger attached. Five functions handle requests; their roles are asymmetric
 by design (P-8). One drains the registry on stack delete (ADR-0022), and one
-waits during teardown (ADR-0024).
+waits during teardown (ADR-0024). Every function reads the deployment from
+its `TOPOLOGY` environment variable; nothing outside `src/topology/` branches
+on it (P-1), and `tiered` is expressed in the stack as two flags, "has a
+shared pool" and "creates per-tenant pools", both true.
 
 ### 3.1 REST API (ADR-0016)
 
@@ -100,11 +104,14 @@ on `/platform` and the authoriser `principalId` (the verified `sub`) on
 (N-5 `/platform` 10/20, N-6 `/oauth2/token` 20/40, N-7 `/tenant` 50/100 shared); an
 action-less CloudWatch alarm fires on more than 50 4XX responses in 5 minutes.
 
-`/tenant/*` is also throttled **per tenant** (ADR-0025). The stack's one usage
+`/tenant/*` is also throttled **per tenant** (ADR-0025). The stack's usage
 plan (`<stack>-tenant`, 10 rps / 20 burst per tenant, no quota) is on the stage, under
 the shared 50 rps / 100 burst `/tenant/*` stage limit, and the
 merged OpenAPI sets the API key source to `AUTHORIZER` and requires a key on
-the five `/tenant/*` methods only (`requireApiKey`). The authoriser returns the
+the five `/tenant/*` methods only (`requireApiKey`). In `tiered` a second plan
+(`<stack>-tenant-premium`, 25 rps / 50 burst per tenant) sits on the same
+stage for the premium tier, and `CreateTenant` puts each tenant's key in its
+tier's plan (ADR-0027); both plans sit under the same stage limit. The authoriser returns the
 verified tenant's key value as `usageIdentifierKey`, so API Gateway counts
 each tenant against its own key; a client never sends one and an `x-api-key`
 header is ignored. `/platform/*` (IAM) and `POST /oauth2/token` (no
@@ -123,11 +130,11 @@ need it at cold start.
 | **Trigger** (`trigger/pre-token-generation.function.ts`) | reads the registry, nothing else (R-14, M-8) | `dynamodb:GetItem`, `BatchGetItem`, `Query` on the table and its `byUserPoolId` index; logging. **No** `cognito-idp` action. `grantReadData` is deliberately not used (it would add `Scan`/`DescribeTable`). |
 | **Token exchange** (`token-exchange/token-exchange.function.ts`) | logging only (R-7, M-8) | the managed basic-execution policy plus X-Ray; **no** `cognito-idp`, **no** `dynamodb`. `GetTokensFromRefreshToken` is authorised by the refresh token, not IAM. |
 | **Tenant authoriser** (`tenant-api/tenant-authorizer.function.ts`) | reads the registry, nothing else (R-9) | `dynamodb:GetItem`, `Query` via the same registry-read statement; logging. |
-| **Tenant-user** (`tenant-api/tenant-users.function.ts`) | registry reads + per-pool user actions, **no** pool/group lifecycle (R-8) | `dynamodb:GetItem`, `Query`. `shared-pool*`: the eight per-pool `cognito-idp` user actions in `TENANT_USER_ACTIONS` (`AdminCreateUser`, `AdminGetUser`, `AdminDeleteUser`, `AdminAddUserToGroup`, `AdminRemoveUserFromGroup`, `AdminListGroupsForUser`, `ListUsers`, `ListUsersInGroup`) on the shared pool ARN. `pool-per-tenant`: **no** `cognito-idp` action; `sts:AssumeRole` + `sts:TagSession` on `TenantScopedRole` only (ADR-0026, below). **No** sign-in actions: `AdminSetUserPassword` and `AdminInitiateAuth` belong to the platform role only, for the test aids (M-21). **No** `CreateGroup`/`DeleteGroup`/`CreateUserPool`/`DeleteUserPool`. |
-| **Platform** (`platform/platform.function.ts`) | registry read+write + user, group, and (topology 1) pool lifecycle + tenant API keys | `dynamodb` `GetItem`/`PutItem`/`UpdateItem`/`DeleteItem`/`Query`/`Scan`/`BatchGetItem` (the only writer of the registry, M-14); the ten per-pool user actions plus `CreateGroup`/`DeleteGroup`. In `shared-pool*` these are scoped to the stack pool ARN. In `pool-per-tenant` it additionally holds `CreateUserPool` on `*` (no resource ARN exists) constrained by a `RequestTag` condition that allows only the sample, stack and tenant tags (the tenant tag ULID-shaped), `TagResource` on `userpool/*` under the same tag conditions plus `StringEqualsIfExists` on the sample and stack resource tags, so an already-tagged pool must be this stack's (a `Null` guard fails Cognito's own create-time check, integ 2026-10-22) (Cognito authorises the tags on `CreateUserPool` as `TagResource`), and the per-pool + `CreateUserPoolClient`/`DeleteUserPool` actions on `userpool/*` under a `ResourceTag` condition (N-3; the account-wide `CreateUserPool` is the accepted T-7 item). Every topology (ADR-0025): `apigateway:POST` on `/apikeys` only with the `tenant-identity:stack=<stack>` request tag and no other tag key, `apigateway:PUT` on the `/tags` ARN of `/apikeys/*` under the same tag conditions (how API Gateway authorises tag-on-create), `apigateway:DELETE` on `/apikeys/*` only where that resource tag matches, `apigateway:GET` on `/usageplans` (to find its plan by name), and, in a separate policy, `apigateway:POST` on `/usageplans/<plan id>/keys`. |
+| **Tenant-user** (`tenant-api/tenant-users.function.ts`) | registry reads + per-pool user actions, **no** pool/group lifecycle (R-8) | `dynamodb:GetItem`, `Query`. `shared-pool*`: the eight per-pool `cognito-idp` user actions in `TENANT_USER_ACTIONS` (`AdminCreateUser`, `AdminGetUser`, `AdminDeleteUser`, `AdminAddUserToGroup`, `AdminRemoveUserFromGroup`, `AdminListGroupsForUser`, `ListUsers`, `ListUsersInGroup`) on the shared pool ARN. `pool-per-tenant`: **no** `cognito-idp` action; `sts:AssumeRole` + `sts:TagSession` on `TenantScopedRole` only (ADR-0026, below). `tiered`: both grants; the function picks per request, from the tenant's row, its own role (standard) or the tenant-scoped session (premium), through `usesTenantScopedCredentials` in `src/topology/` (ADR-0027). **No** sign-in actions: `AdminSetUserPassword` and `AdminInitiateAuth` belong to the platform role only, for the test aids (M-21). **No** `CreateGroup`/`DeleteGroup`/`CreateUserPool`/`DeleteUserPool`. |
+| **Platform** (`platform/platform.function.ts`) | registry read+write + user, group, and (topology 1, `tiered`) pool lifecycle + tenant API keys | `dynamodb` `GetItem`/`PutItem`/`UpdateItem`/`DeleteItem`/`Query`/`Scan`/`BatchGetItem` (the only writer of the registry, M-14); the ten per-pool user actions plus `CreateGroup`/`DeleteGroup`. In `shared-pool*` these are scoped to the stack pool ARN. In `pool-per-tenant` it additionally holds `CreateUserPool` on `*` (no resource ARN exists) constrained by a `RequestTag` condition that allows only the sample, stack and tenant tags (the tenant tag ULID-shaped), `TagResource` on `userpool/*` under the same tag conditions plus `StringEqualsIfExists` on the sample and stack resource tags, so an already-tagged pool must be this stack's (a `Null` guard fails Cognito's own create-time check, integ 2026-10-22) (Cognito authorises the tags on `CreateUserPool` as `TagResource`), and the per-pool + `CreateUserPoolClient`/`DeleteUserPool` actions on `userpool/*` under a `ResourceTag` condition (N-3; the account-wide `CreateUserPool` is the accepted T-7 item). `tiered` holds both the shared-pool-ARN grant and the tagged `userpool/*` grants, so the account-wide `CreateUserPool` is present even while every tenant is standard (T-7). Every topology (ADR-0025): `apigateway:POST` on `/apikeys` only with the `tenant-identity:stack=<stack>` request tag and no other tag key, `apigateway:PUT` on the `/tags` ARN of `/apikeys/*` under the same tag conditions (how API Gateway authorises tag-on-create), `apigateway:DELETE` on `/apikeys/*` only where that resource tag matches, `apigateway:GET` on `/usageplans` (to find its plan by name), and, in a separate policy, `apigateway:POST` on `/usageplans/<plan id>/keys` (both plans' ids in `tiered`). |
 | **Tenant drain** (`teardown/tenant-drain.function.ts`) | registry writes + the delete side of Cognito + key deletion (ADR-0022) | see §3.5; plus `apigateway:DELETE` on `/apikeys/*` where `tenant-identity:stack` matches (ADR-0025). |
 
-**`TenantScopedRole`** (`pool-per-tenant` only, ADR-0026) is not a function
+**`TenantScopedRole`** (`pool-per-tenant` and `tiered`, ADR-0026) is not a function
 role. It trusts only the tenant-user function's role, for `sts:AssumeRole` and
 `sts:TagSession`, with exactly one session tag (`aws:RequestTag/TenantId`
 26 characters, `aws:TagKeys` = `TenantId`). Its one statement grants
@@ -170,7 +177,11 @@ platform function creates one pool, one app client, and the trigger attachment
 per tenant at onboarding (§7.1), each pool tagged `sample`,
 `tenant-identity:stack` and `tenant-identity:tenant=<tenantId>` (ADR-0026),
 and the stack grants the shared trigger
-`cognito-idp.amazonaws.com` invoke scoped to the account.
+`cognito-idp.amazonaws.com` invoke scoped to the account. `tiered` has both:
+the stack's shared pool, configured as `shared-pool` (so with
+`custom:tenantId`), holds every standard tenant, and the platform function
+creates one tagged pool per premium tenant (ADR-0027). The one trigger is
+attached to the shared pool and to every premium pool.
 
 ### 3.5 Tenant drain (ADR-0022)
 
@@ -211,8 +222,8 @@ One table, tenants only (R-10, ADR-0002). `PK=TENANT#<tenantId>`, `SK=META`.
 | `tenantId` | generated ULID |
 | `name` | required, not unique |
 | `status` | `PROVISIONING` \| `ACTIVE` \| `DELETING` (ADR-0021) |
-| `topology` | the stack's topology, stamped for diagnostics |
-| `userPoolId`, `appClientId`, `issuer` | `pool-per-tenant` only; `issuer` is the allowlist entry a consumer needs (ADR-0018) |
+| `topology` | the topology this tenant runs on: the stack's, or in `tiered` the tier's (`standard` → `shared-pool`, `premium` → `pool-per-tenant`, ADR-0027). The API derives `tier` from it; the tier is never stored twice |
+| `userPoolId`, `appClientId`, `issuer` | `pool-per-tenant` rows only (premium tenants in `tiered`); `issuer` is the allowlist entry a consumer needs (ADR-0018). Standard rows in `tiered` carry none: the `byUserPoolId` index maps a pool to exactly one tenant, so the shared pool's id cannot sit on every standard row |
 | `groupName` | `shared-pool-multi-tenant` only: `t-<tenantId>` |
 | `apiKeyId`, `apiKeyValue` | every topology: the tenant's API Gateway key (ADR-0025), written by `activate`; the value is what the authoriser returns as `usageIdentifierKey`. Not a credential (key source `AUTHORIZER`); never in an API response |
 | `createdAt`, `updatedAt` | ISO 8601 |
@@ -223,6 +234,15 @@ conditional `PutItem` (`attribute_not_exists(PK)`). `getByUserPoolId` queries
 the GSI (limit 2, throwing on a two-tenant collision) then reads the base item
 for current status. `list` is a paginated `Scan` filtered to `SK=META`. No
 user, membership, credential, or token is ever written (R-10).
+
+**The binding rule (ADR-0027).** A row's pool fields decide where its tenant
+may be reached from: a `pool-per-tenant` row only through the pool its
+`userPoolId` names, every other row only through the stack's shared pool
+([`src/topology/binding.ts`](./src/topology/binding.ts), `bindingHolds`). The
+trigger's tenant sources and the authoriser apply it after reading the row
+and refuse on a mismatch (`pool_mismatch`). It holds trivially in a
+single-topology stack and is checked in every stack, so no code branches on
+the deployment to skip it.
 
 ## 5. API
 
@@ -254,15 +274,16 @@ sequenceDiagram
     participant C as Cognito
     participant R as Registry
     participant G as API Gateway (control plane)
-    V->>P: POST /platform/tenants {name, adminEmail}
-    P->>R: create tenant item (PROVISIONING)
-    alt pool-per-tenant
+    V->>P: POST /platform/tenants {name, adminEmail[, tier]}
+    P->>P: topology = stack's, or the tier's in tiered (400 if tier missing there or present elsewhere)
+    P->>R: create tenant item (PROVISIONING, topology)
+    alt pool-per-tenant (premium in tiered)
         P->>C: CreateUserPool (tags sample, tenant-identity:stack, tenant-identity:tenant)
         P->>C: CreateUserPoolClient, attach trigger, CreateGroup admin-<id>
-    else shared-pool / shared-pool-multi-tenant
+    else shared-pool (standard in tiered) / shared-pool-multi-tenant
         P->>C: CreateGroup t-<id> (+ admin-<id>), shared-pool also sets custom:tenantId on users
     end
-    P->>G: CreateApiKey tenant-<id>, CreateUsagePlanKey (ADR-0025)
+    P->>G: CreateApiKey tenant-<id>, CreateUsagePlanKey in the tier's plan (ADR-0025, ADR-0027)
     P->>R: activate: PROVISIONING -> ACTIVE + Cognito fields + apiKeyId/apiKeyValue
     P->>C: AdminCreateUser adminEmail, add to admin-<id>
     P-->>V: 201 {tenant, admin:{user, temporaryPassword}}
@@ -273,7 +294,12 @@ failure deletes the row; a key failure deprovisions Cognito and deletes the
 row (the key module removes its own half-built key); an activation failure
 deletes the key, deprovisions and deletes the row. If the admin step fails
 after activation, the tenant stays `ACTIVE` with no admin and the vendor
-retries with `CreateUser` (the code does not roll the tenant back).
+retries with `CreateUser` (the code does not roll the tenant back). The
+provisioner is chosen from the row's `topology` on every operation
+(`createProvisioners` in [`src/topology/index.ts`](./src/topology/index.ts)),
+so in `tiered` a premium tenant's calls run the `pool-per-tenant` strategy and
+a standard tenant's the `shared-pool` one; a topology the deployment does not
+offer throws rather than falling back.
 
 ### 6.2 Token issuance and the trigger
 
@@ -285,7 +311,8 @@ sequenceDiagram
     participant R as Registry
     U->>C: sign in / refresh (ADMIN_USER_PASSWORD_AUTH / REFRESH_TOKEN_AUTH)
     C->>T: V2 pre-token-generation event
-    T->>R: resolve tenant(s): by userPoolId (1), custom:tenantId (2), or t-* groups (3)
+    T->>R: resolve tenant(s): by userPoolId (1), custom:tenantId (2), or t-* groups (3); tiered: (2) if the event carries custom:tenantId, else (1)
+    T->>T: binding rule: the row's pool matches where the event came from, else throw pool_mismatch (ADR-0027)
     T->>T: drop tenants not ACTIVE, none left -> throw (fail closed)
     T-->>C: claimsToAddOrOverride {tenant_id} or {tenants:[...]}, scopesToAdd API scopes
     C-->>U: access token carrying the tenant claim
@@ -296,7 +323,17 @@ writes). Any exception fails the token request, so a token without a tenant
 claim is never issued (P-6 fail-closed). In the shared topologies the trigger
 is one function attached to the one pool; in `pool-per-tenant` it is one
 function invoked by every pool the platform function creates, and it maps the
-event's `userPoolId` to a tenant through the GSI — an unknown pool throws.
+event's `userPoolId` to a tenant through the GSI — an unknown pool throws. In
+`tiered` the same function is attached to the shared pool and every premium
+pool, and tells them apart by the event's shape: only the shared pool's schema
+has `custom:tenantId`, so an event carrying it takes the `shared-pool` path
+and any other the GSI lookup (`TieredTenantSource` in
+[`src/topology/tenant-source.ts`](./src/topology/tenant-source.ts)). The
+shared pool's id is not in the trigger's environment, because the pool depends
+on the trigger and that would be a CDK cycle. Every source then applies the
+binding rule: a premium id found in `custom:tenantId` throws
+`invalid_target: pool_mismatch`, as does a GSI row that is not a
+`pool-per-tenant` tenant naming that pool.
 
 ### 6.3 Narrowing / exchange (incl. the ADR-0012 check)
 
@@ -327,7 +364,13 @@ because the token came from Cognito over TLS in this call) and returns
 `server_error` with no token unless it matches the request — so narrowing fails
 closed even if Cognito dropped `ClientMetadata` (ADR-0012). A narrowed token
 never carries `aws.cognito.signin.user.admin`, so an un-narrowed token always
-fails the scope-set comparison, in every topology.
+fails the scope-set comparison, in every topology. In the shared topologies
+the function first refuses a form whose `client_id` is not the stack's app
+client (`invalid_client`, T-28). In `pool-per-tenant` and `tiered` there is
+no such comparison: each premium tenant has its own client, so the form's
+client goes to Cognito as is, and a client of a pool the registry does not
+know fails the trigger's GSI lookup (M-5), so no token with a tenant claim is
+issued (ADR-0027).
 
 ### 6.4 Tenant admin calls through the authoriser
 
@@ -339,11 +382,11 @@ sequenceDiagram
     participant F as Tenant-user function
     participant C as Cognito
     A->>Z: /tenant/users, Authorization: Bearer <narrowed admin token>
-    Z->>Z: verify signature/app client (shared pool, or pool chosen from iss in pool-per-tenant)
+    Z->>Z: verify signature/app client (shared pool; or pool chosen from iss in pool-per-tenant and tiered, the shared pool's iss -> shared client)
     Z->>R: read tenant status (uncached)
-    Z->>Z: require token_use=access, ULID tenant_id, no tenants claim, scope has tenant-admin/users, status ACTIVE, an API key
+    Z->>Z: require token_use=access, ULID tenant_id, no tenants claim, scope has tenant-admin/users, status ACTIVE, binding rule holds (pool_mismatch otherwise, ADR-0027), an API key
     Z-->>F: context {tenantId, sub} (the only tenant source); usageIdentifierKey = tenant's key (API Gateway throttles per tenant, ADR-0025)
-    opt pool-per-tenant (ADR-0026)
+    opt pool-per-tenant, premium tenant in tiered (ADR-0026)
         F->>F: cached or sts:AssumeRole TenantScopedRole, session tag TenantId = context.tenantId
     end
     F->>C: provisioner op (R-12 membership check first), R-13 self-mutation guard
@@ -357,10 +400,16 @@ write, resolving an e-mail path parameter to the real username so passing an
 e-mail cannot evade the self-guard. In `pool-per-tenant` the authoriser reads
 `iss` from the unverified payload only to pick which pool's JWKS to verify
 against, then confirms the registry maps that pool to the token's `tenant_id`.
-There the function's Cognito calls also run on a session of
+In `tiered` it does the same, except that the shared pool's own issuer verifies
+against the shared app client; after the status check it applies the binding
+rule, refusing `pool_mismatch` when the tenant's row does not name the pool
+the token came from (a premium tenant through the shared pool, or a standard
+tenant through a premium pool). There the function's Cognito calls also run on a session of
 `TenantScopedRole` tagged with the authoriser's tenant, so IAM refuses a call
-on another tenant's pool even if the code picked it (ADR-0026). In the shared
-topologies the R-12 check is the only tenant boundary inside the pool.
+on another tenant's pool even if the code picked it (ADR-0026); in `tiered`
+the function picks that session for a premium tenant and its own role for a
+standard one, from the row's `topology`. In the shared
+topologies, and for standard tenants in `tiered`, the R-12 check is the only tenant boundary inside the pool.
 
 ### 6.5 Offboarding
 
@@ -415,6 +464,16 @@ no stack, pool, table, parameter, role, or log group with the sample's prefix.
   `groupsToOverride` entries matching `^t-<ULID>$`, strips the prefix, drops
   non-`ACTIVE` tenants, sorts, and writes the `tenants` array. Narrowing picks
   one entry and emits `tenant_id` instead.
+- **`tiered`** (ADR-0027): not a fourth set of mechanics but the first two in
+  one stack. `CreateTenant` takes a required `tier`; `premium` runs the
+  `pool-per-tenant` steps above and writes the pool fields, `standard` runs
+  the `shared-pool` steps and writes none. The row's `topology` records the
+  tier's topology and the API derives `tier` from it. The shared pool's
+  `userPoolId`/`appClientId` are published as the stack's parameters and
+  serve the standard tier only; a premium tenant's pool is read from
+  `GetTenant`. A tenant is reachable only through its own pool (the binding
+  rule, §4), checked in the trigger (§6.2) and the authoriser (§6.4). Moving a
+  tenant between tiers is specified in ADR-0027 and not built.
 
 ## 8. Differences from the specification
 
@@ -427,7 +486,7 @@ found in the implementation:
   names are fixed, so two stacks cannot both own them. A stack prop
   `publishSharedParameters` (default true) lets a normal single-topology
   deployment publish while the integration test publishes from only the
-  `shared-pool-multi-tenant` stack of its three.
+  `shared-pool-multi-tenant` stack of its four.
 - **ADR-0018 — the registry allowlist, not a vanished JWKS, stops trust.** Spec
   §7.1 and §10 step 9 said deleting a `pool-per-tenant` pool makes its JWKS
   disappear. A probe showed Cognito keeps serving a deleted pool's keys. The
@@ -447,8 +506,9 @@ found in the implementation:
   assertion, whose Lambda log group no stack would own.
 - **ADR-0023 — the integration test runs on the CDK CLI.** integ-runner
   deploys and destroys a test's stacks one at a time, so `scripts/integ.sh`
-  deploys and destroys the three topology stacks at once with
-  `cdk deploy/destroy --all --concurrency 3` and runs the e2e in between. No
+  deploys and destroys the test's stacks (the three topologies and, since
+  ADR-0027, `tiered`) at once with
+  `cdk deploy/destroy --all` and runs the e2e in between. No
   integ-runner, no assertion stack.
 - **ADR-0024 — one log drain.** ADR-0019's two drains waited one after the
   other. One drain now guards every log group; its writers are the API stage
@@ -469,6 +529,14 @@ found in the implementation:
 - **ADR-0026 — IAM tenant boundary in `pool-per-tenant`.** Pools carry a tenant
   tag and the tenant-user function calls Cognito on a tenant-tagged session of
   `TenantScopedRole` (R-18 in the spec).
+- **ADR-0027 — a `tiered` deployment.** A fourth `topology` value deploys
+  `shared-pool` and `pool-per-tenant` side by side; `CreateTenant` takes a
+  required `tier` and the row's `topology` records the tier's topology. P-7,
+  §3.3, §6.3, R-19, N-7 and §10 in the spec are amended. The ADR as first
+  written differs from the code in four points, listed in its amendment note:
+  standard rows store no pool id, the trigger tells the pools apart by event
+  shape, the exchange compares no `client_id`, and the premium plan is
+  25 rps / 50 burst. The integration test deploys four stacks, not three.
 
 Other, smaller implementation choices recorded as ADRs rather than spec
 changes: the trigger **refuses duplicate scopes** with `invalid_scope` rather

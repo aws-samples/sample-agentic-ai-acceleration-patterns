@@ -5,7 +5,7 @@
   "roots": ["<rootDir>/test/e2e"],
   "testMatch": ["<rootDir>/test/e2e/**/*.e2e.test.ts"],
   "testTimeout": 900000,
-  "maxWorkers": 3,
+  "maxWorkers": 4,
   "collectCoverage": false,
   "globals": {
     "ts-jest": {

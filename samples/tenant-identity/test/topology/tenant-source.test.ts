@@ -31,7 +31,7 @@ function event(partial: {
   } as unknown as PreTokenGenerationV2TriggerEvent;
 }
 
-describe('tenantSourceFor (spec §8 tenant lookup, §4.2)', () => {
+describe('tenantSourceFor (spec §8 tenant lookup, §4.2, ADR-0027 binding rule)', () => {
   describe('pool-per-tenant', () => {
     const source = tenantSourceFor('pool-per-tenant');
 
@@ -45,6 +45,19 @@ describe('tenantSourceFor (spec §8 tenant lookup, §4.2)', () => {
     it('throws on an unknown pool (§4.2)', async () => {
       const reg = reader({ getByUserPoolId: jest.fn(async () => undefined) });
       await expect(source.resolve(event({ userPoolId: 'eu-central-1_ghost' }), reg)).rejects.toThrow(/^invalid_target: unknown user pool$/);
+    });
+
+    it('refuses an index row whose topology is shared-pool (ADR-0027 binding rule)', async () => {
+      // A stray index entry maps the pool to a standard tenant: never a way in.
+      const record = tenant({ tenantId: IDS.a, topology: 'shared-pool', userPoolId: 'eu-central-1_p1' });
+      const reg = reader({ getByUserPoolId: jest.fn(async () => record) });
+      await expect(source.resolve(event({ userPoolId: 'eu-central-1_p1' }), reg)).rejects.toThrow(/^invalid_target: pool_mismatch$/);
+    });
+
+    it('refuses an index row that names a different pool than the event (ADR-0027 binding rule)', async () => {
+      const record = tenant({ tenantId: IDS.a, topology: 'pool-per-tenant', userPoolId: 'eu-central-1_other' });
+      const reg = reader({ getByUserPoolId: jest.fn(async () => record) });
+      await expect(source.resolve(event({ userPoolId: 'eu-central-1_p1' }), reg)).rejects.toThrow(/^invalid_target: pool_mismatch$/);
     });
   });
 
@@ -76,6 +89,14 @@ describe('tenantSourceFor (spec §8 tenant lookup, §4.2)', () => {
     it('refuses with the invalid_target prefix, so the exchange returns invalid_target (§5.4)', async () => {
       await expect(source.resolve(event({ attributes: {} }), reader())).rejects.toThrow(/^invalid_target: /);
     });
+
+    it('refuses an attribute naming a pool-per-tenant tenant (ADR-0027 binding rule)', async () => {
+      // A premium tenant's id written into custom:tenantId is a vendor bug,
+      // never a way to claim that tenant through the shared pool.
+      const record = tenant({ tenantId: IDS.a, topology: 'pool-per-tenant', userPoolId: 'eu-central-1_premium' });
+      const reg = reader({ get: jest.fn(async () => record) });
+      await expect(source.resolve(event({ attributes: { 'custom:tenantId': IDS.a } }), reg)).rejects.toThrow(/^invalid_target: pool_mismatch$/);
+    });
   });
 
   describe('shared-pool-multi-tenant', () => {
@@ -99,6 +120,66 @@ describe('tenantSourceFor (spec §8 tenant lookup, §4.2)', () => {
       const result = await source.resolve(event({ groups: ['role-admin'] }), reg);
       expect(result).toEqual({ kind: 'multi', records: [] });
       expect(batchGet).toHaveBeenCalledWith([]);
+    });
+
+    it('drops a t- group naming a pool-per-tenant tenant (ADR-0027 binding rule)', async () => {
+      const standard = tenant({ tenantId: IDS.a, topology: 'shared-pool-multi-tenant' });
+      const premium = tenant({ tenantId: IDS.b, topology: 'pool-per-tenant', userPoolId: 'eu-central-1_premium' });
+      const reg = reader({ batchGet: jest.fn(async () => [standard, premium]) });
+      const result = await source.resolve(event({ groups: [`t-${IDS.a}`, `t-${IDS.b}`] }), reg);
+      expect(result).toEqual({ kind: 'multi', records: [standard] });
+    });
+  });
+
+  describe('tiered (ADR-0027)', () => {
+    const source = tenantSourceFor('tiered');
+    const SHARED_POOL = 'eu-central-1_shared';
+    const PREMIUM_POOL = 'eu-central-1_premium';
+
+    it('an event with custom:tenantId takes the shared-pool path (standard tier)', async () => {
+      const record = tenant({ tenantId: IDS.a, topology: 'shared-pool', userPoolId: SHARED_POOL });
+      const get = jest.fn(async () => record);
+      const getByUserPoolId = jest.fn(async () => undefined);
+      const reg = reader({ get, getByUserPoolId });
+      const result = await source.resolve(event({ userPoolId: SHARED_POOL, attributes: { 'custom:tenantId': IDS.a } }), reg);
+      expect(result).toEqual({ kind: 'single', tenantId: IDS.a, record });
+      expect(get).toHaveBeenCalledWith(IDS.a);
+      expect(getByUserPoolId).not.toHaveBeenCalled();
+    });
+
+    it('an event without the attribute takes the pool lookup (premium tier)', async () => {
+      const record = tenant({ tenantId: IDS.b, topology: 'pool-per-tenant', userPoolId: PREMIUM_POOL });
+      const get = jest.fn(async () => undefined);
+      const getByUserPoolId = jest.fn(async () => record);
+      const reg = reader({ get, getByUserPoolId });
+      const result = await source.resolve(event({ userPoolId: PREMIUM_POOL }), reg);
+      expect(result).toEqual({ kind: 'single', tenantId: IDS.b, record });
+      expect(getByUserPoolId).toHaveBeenCalledWith(PREMIUM_POOL);
+      expect(get).not.toHaveBeenCalled();
+    });
+
+    it('refuses a premium tenant\'s id in custom:tenantId (pool_mismatch)', async () => {
+      const record = tenant({ tenantId: IDS.b, topology: 'pool-per-tenant', userPoolId: PREMIUM_POOL });
+      const reg = reader({ get: jest.fn(async () => record) });
+      await expect(
+        source.resolve(event({ userPoolId: SHARED_POOL, attributes: { 'custom:tenantId': IDS.b } }), reg),
+      ).rejects.toThrow(/^invalid_target: pool_mismatch$/);
+    });
+
+    it('refuses a standard tenant reached from a premium pool (pool_mismatch)', async () => {
+      const record = tenant({ tenantId: IDS.a, topology: 'shared-pool', userPoolId: SHARED_POOL });
+      const reg = reader({ getByUserPoolId: jest.fn(async () => record) });
+      await expect(source.resolve(event({ userPoolId: PREMIUM_POOL }), reg)).rejects.toThrow(/^invalid_target: pool_mismatch$/);
+    });
+
+    it('an event from a pool the registry does not know is refused (M-5)', async () => {
+      await expect(source.resolve(event({ userPoolId: 'eu-central-1_foreign' }), reader())).rejects.toThrow(/^invalid_target: unknown user pool$/);
+    });
+
+    it('a shared-pool event with a non-ULID attribute is refused as in shared-pool (P-3)', async () => {
+      await expect(
+        source.resolve(event({ userPoolId: SHARED_POOL, attributes: { 'custom:tenantId': 'not-a-ulid' } }), reader()),
+      ).rejects.toBeInstanceOf(InvalidInputError);
     });
   });
 });

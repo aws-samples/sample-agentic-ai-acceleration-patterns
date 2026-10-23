@@ -5,13 +5,13 @@ import { App, Validations } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { DRAIN_SHARED_POOL_ACTIONS, TENANT_USER_ACTIONS, TenantIdentityStack } from '../src/identity.cdk';
-import { Topology } from '../src/shared/constants';
+import { Deployment, Topology } from '../src/shared/constants';
 import { mergeOpenApi, patchIntegrations, requireApiKey } from '../src/shared/openapi';
 
 // Skip NodejsFunction esbuild bundling in unit tests - assertions target
 // infrastructure shape, not bundle contents. (Other workers' entry files may
 // not exist yet; bundling is irrelevant to these template assertions.)
-function synth(topology: Topology, publishSharedParameters?: boolean): Template {
+function synth(topology: Deployment, publishSharedParameters?: boolean): Template {
   const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
   const stack = new TenantIdentityStack(app, `TenantIdentity-${topology}`, {
     topology,
@@ -21,7 +21,14 @@ function synth(topology: Topology, publishSharedParameters?: boolean): Template 
   return Template.fromStack(stack);
 }
 
+/** The three single topologies (ADR-0001). */
 const TOPOLOGIES: Topology[] = ['pool-per-tenant', 'shared-pool', 'shared-pool-multi-tenant'];
+/** Every deployment: the three topologies plus `tiered` (ADR-0027). */
+const DEPLOYMENTS: Deployment[] = [...TOPOLOGIES, 'tiered'];
+/** The deployments with a stack-created shared pool (tiered: the standard tier's). */
+const SHARED_POOL_DEPLOYMENTS: Deployment[] = ['shared-pool', 'shared-pool-multi-tenant', 'tiered'];
+/** The deployments that create pools at run time (tiered: the premium tier's). */
+const PER_TENANT_POOL_DEPLOYMENTS: Deployment[] = ['pool-per-tenant', 'tiered'];
 
 // ---------------------------------------------------------------------------
 // Helpers to inspect IAM policies by the actions they grant.
@@ -233,7 +240,7 @@ describe('requireApiKey (ADR-0025)', () => {
 // ===========================================================================
 
 describe('TenantIdentityStack - role asymmetry (P-8)', () => {
-  test.each(TOPOLOGIES)('trigger role has only the three registry reads, no cognito-idp (R-14) [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('trigger role has only the three registry reads, no cognito-idp (R-14) [%s]', (topology) => {
     const template = synth(topology);
     const statements = policyStatementsForRole(template, 'TriggerFunctionServiceRole');
     const actions = statements.flatMap(actionsOf);
@@ -244,7 +251,7 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     expect(dynamo).toEqual(['dynamodb:BatchGetItem', 'dynamodb:GetItem', 'dynamodb:Query']);
   });
 
-  test.each(TOPOLOGIES)('token role holds no cognito-idp or dynamodb action (R-7) [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('token role holds no cognito-idp or dynamodb action (R-7) [%s]', (topology) => {
     const template = synth(topology);
     const statements = policyStatementsForRole(template, 'TokenFunctionServiceRole');
     const actions = statements.flatMap(actionsOf);
@@ -252,7 +259,7 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     expect(actions.some((a) => a.startsWith('dynamodb:'))).toBe(false);
   });
 
-  test.each(TOPOLOGIES)('authoriser role reads the registry with GetItem + Query only, no BatchGetItem, no cognito-idp (R-9) [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('authoriser role reads the registry with GetItem + Query only, no BatchGetItem, no cognito-idp (R-9) [%s]', (topology) => {
     const template = synth(topology);
     const statements = policyStatementsForRole(template, 'AuthorizerFunctionServiceRole');
     const actions = statements.flatMap(actionsOf);
@@ -262,7 +269,7 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     expect(dynamo).toEqual(['dynamodb:GetItem', 'dynamodb:Query']);
   });
 
-  test.each(TOPOLOGIES)('tenant-user role holds no pool or group lifecycle action (R-8) [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('tenant-user role holds no pool or group lifecycle action (R-8) [%s]', (topology) => {
     const template = synth(topology);
     const statements = policyStatementsForRole(template, 'TenantUsersFunctionServiceRole');
     const actions = statements.flatMap(actionsOf);
@@ -276,7 +283,7 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     }
   });
 
-  test.each(TOPOLOGIES)('tenant-user role holds no test-aid sign-in action (P-8, M-17) [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('tenant-user role holds no test-aid sign-in action (P-8, M-17) [%s]', (topology) => {
     const template = synth(topology);
     const actions = policyStatementsForRole(template, 'TenantUsersFunctionServiceRole').flatMap(actionsOf);
     expect(actions).not.toContain('cognito-idp:AdminSetUserPassword');
@@ -291,7 +298,7 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
   // acknowledgement for '*' is per role, not per action, so a future '*'
   // action would otherwise pass review silently.
   const XRAY = ['xray:PutTelemetryRecords', 'xray:PutTraceSegments'];
-  test.each(TOPOLOGIES)('the only Resource "*" actions are X-Ray, plus CreateUserPool on the pool-per-tenant platform role [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('the only Resource "*" actions are X-Ray, plus CreateUserPool on a platform role that creates pools [%s]', (topology) => {
     const template = synth(topology);
     const roles: Record<string, string[]> = {
       TriggerFunctionServiceRole: XRAY,
@@ -300,7 +307,7 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
       TenantUsersFunctionServiceRole: XRAY,
       TenantDrainFunctionServiceRole: XRAY,
       PlatformFunctionServiceRole:
-        topology === 'pool-per-tenant' ? [...XRAY, 'cognito-idp:CreateUserPool'].sort() : XRAY,
+        PER_TENANT_POOL_DEPLOYMENTS.includes(topology) ? [...XRAY, 'cognito-idp:CreateUserPool'].sort() : XRAY,
     };
     for (const [role, expected] of Object.entries(roles)) {
       const star = policyStatementsForRole(template, role)
@@ -311,7 +318,7 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     }
   });
 
-  test.each(TOPOLOGIES)('drain role: registry writes and delete-side Cognito only, no create or sign-in action (ADR-0022) [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('drain role: registry writes and delete-side Cognito only, no create or sign-in action (ADR-0022) [%s]', (topology) => {
     const template = synth(topology);
     const actions = policyStatementsForRole(template, 'TenantDrainFunctionServiceRole').flatMap(actionsOf);
     for (const forbidden of [
@@ -330,15 +337,22 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     expect(actions).toContain('dynamodb:Scan');
     expect(actions).toContain('dynamodb:DeleteItem');
     const cognito = actions.filter((a) => a.startsWith('cognito-idp:')).sort();
-    if (topology === 'pool-per-tenant') {
-      expect(cognito).toEqual(['cognito-idp:DeleteUserPool']);
+    const perTenantPools = PER_TENANT_POOL_DEPLOYMENTS.includes(topology);
+    const sharedPool = SHARED_POOL_DEPLOYMENTS.includes(topology);
+    // DeleteUserPool on this stack's runtime pools, where there are any.
+    expect(cognito.includes('cognito-idp:DeleteUserPool')).toBe(perTenantPools);
+    if (perTenantPools) {
       const stmt = policyStatementsForRole(template, 'TenantDrainFunctionServiceRole').find((s) =>
         actionsOf(s).includes('cognito-idp:DeleteUserPool'),
       );
       expect(JSON.stringify(stmt.Condition)).toContain('tenant-identity:stack');
-    } else {
-      expect(cognito).toEqual([...DRAIN_SHARED_POOL_ACTIONS].sort());
     }
+    // The shared pool's offboarding actions, where there is a shared pool.
+    const expected = [
+      ...(perTenantPools ? ['cognito-idp:DeleteUserPool'] : []),
+      ...(sharedPool ? DRAIN_SHARED_POOL_ACTIONS : []),
+    ].sort();
+    expect(cognito).toEqual(expected);
   });
 
   test('platform pool-per-tenant: CreateUserPool with the RequestTag condition and tagged per-pool actions (N-3)', () => {
@@ -418,7 +432,7 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     expect(tag.Condition.StringEquals['aws:RequestTag/tenant-identity:stack']).toBe('TenantIdentity-pool-per-tenant');
   });
 
-  test.each(TOPOLOGIES)('no role holds cognito-idp:DescribeUserPool - nothing in src/ calls it [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('no role holds cognito-idp:DescribeUserPool - nothing in src/ calls it [%s]', (topology) => {
     const template = synth(topology);
     expect(allPolicyStatements(template).flatMap(actionsOf)).not.toContain('cognito-idp:DescribeUserPool');
   });
@@ -444,7 +458,7 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     expect(star[0].reason).toContain('cognito-idp:CreateUserPool');
   });
 
-  test.each(TOPOLOGIES)('timeouts: platform 28 s (under API Gateway\'s 29 s), trigger 5 s (Cognito\'s trigger limit) [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('timeouts: platform 28 s (under API Gateway\'s 29 s), trigger 5 s (Cognito\'s trigger limit) [%s]', (topology) => {
     const template = synth(topology);
     const fns = Object.entries(template.findResources('AWS::Lambda::Function'));
     const timeoutOf = (prefix: string) =>
@@ -453,7 +467,7 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     expect(timeoutOf('TriggerFunction')).toBe(5);
   });
 
-  test.each(TOPOLOGIES)('the drain function has its own CKV_AWS_116 reason (async CloudFormation invoke) [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('the drain function has its own CKV_AWS_116 reason (async CloudFormation invoke) [%s]', (topology) => {
     const template = synth(topology);
     const [drain] = Object.entries(template.findResources('AWS::Lambda::Function'))
       .filter(([id]) => id.startsWith('TenantDrainFunction') && !id.includes('ServiceRole'))
@@ -463,13 +477,14 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     expect(skip?.comment).toMatch(/idempotent/);
   });
 
-  test.each(['TokenFunction', 'AuthorizerFunction'])('%s gets no TOPOLOGY setting it never reads', (fn) => {
+  // ADR-0027: both parse the deployment at cold start and would fail without it.
+  test.each(['TokenFunction', 'AuthorizerFunction'])('%s gets the deployment as TOPOLOGY', (fn) => {
     const template = synth('pool-per-tenant');
     const fns = template.findResources('AWS::Lambda::Function');
     const match = Object.entries(fns).find(([id]) => id.startsWith(fn) && !id.includes('ServiceRole'));
     expect(match).toBeDefined();
     const vars = (match![1] as any).Properties.Environment?.Variables ?? {};
-    expect(vars).not.toHaveProperty('TOPOLOGY');
+    expect(vars.TOPOLOGY).toBe('pool-per-tenant');
   });
 
   test('shared-pool platform role is scoped to the single stack pool ARN (N-3)', () => {
@@ -494,7 +509,7 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
 });
 
 describe('TenantIdentityStack - registry table (R-3, N-2, §4.2)', () => {
-  test.each(TOPOLOGIES)('PITR on, GSI byUserPoolId incl. tenantId, DeletionPolicy Delete [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('PITR on, GSI byUserPoolId incl. tenantId, DeletionPolicy Delete [%s]', (topology) => {
     const template = synth(topology);
     template.hasResource('AWS::DynamoDB::GlobalTable', {
       DeletionPolicy: 'Delete',
@@ -511,7 +526,7 @@ describe('TenantIdentityStack - registry table (R-3, N-2, §4.2)', () => {
       }),
     });
   });
-  test.each(TOPOLOGIES)('DynamoDB-owned key, with the checkov CKV_AWS_119 skip citing T-24 [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('DynamoDB-owned key, with the checkov CKV_AWS_119 skip citing T-24 [%s]', (topology) => {
     const template = synth(topology);
     const [table] = Object.values(template.findResources('AWS::DynamoDB::GlobalTable')) as any[];
     expect(table.Properties.SSESpecification?.SSEEnabled ?? false).toBe(false);
@@ -536,7 +551,7 @@ describe('TenantIdentityStack - shared user pool (R-4, R-5, N-1, N-8, §7.2)', (
     expect(client.Properties.WriteAttributes ?? []).not.toContain('custom:tenantId');
   });
 
-  test.each(['shared-pool', 'shared-pool-multi-tenant'] as Topology[])(
+  test.each(SHARED_POOL_DEPLOYMENTS)(
     'e-mail is immutable at the pool; no self-service recovery (R-17, T-27) [%s]',
     (topology) => {
       const template = synth(topology);
@@ -555,7 +570,7 @@ describe('TenantIdentityStack - shared user pool (R-4, R-5, N-1, N-8, §7.2)', (
     },
   );
 
-  test.each(['shared-pool', 'shared-pool-multi-tenant'] as Topology[])(
+  test.each(SHARED_POOL_DEPLOYMENTS)(
     'pool signs in by e-mail, so the Cognito username is the sub (R-13) [%s]',
     (topology) => {
       // R-13 compares the canonical username to the token's `sub`. That only
@@ -567,7 +582,7 @@ describe('TenantIdentityStack - shared user pool (R-4, R-5, N-1, N-8, §7.2)', (
     },
   );
 
-  test.each(['shared-pool', 'shared-pool-multi-tenant'] as Topology[])(
+  test.each(SHARED_POOL_DEPLOYMENTS)(
     'app client leaves refresh token rotation off (R-5, ADR-0009) [%s]',
     (topology) => {
       const template = synth(topology);
@@ -577,7 +592,7 @@ describe('TenantIdentityStack - shared user pool (R-4, R-5, N-1, N-8, §7.2)', (
     },
   );
 
-  test.each(['shared-pool', 'shared-pool-multi-tenant'] as Topology[])(
+  test.each(SHARED_POOL_DEPLOYMENTS)(
     'pool: V2_0 trigger, Essentials plan, deletion protection INACTIVE, self sign-up off, sample tag [%s]',
     (topology) => {
       const template = synth(topology);
@@ -592,7 +607,7 @@ describe('TenantIdentityStack - shared user pool (R-4, R-5, N-1, N-8, §7.2)', (
     },
   );
 
-  test.each(['shared-pool', 'shared-pool-multi-tenant'] as Topology[])(
+  test.each(SHARED_POOL_DEPLOYMENTS)(
     'app client: 5-min access/id tokens, 1-day refresh, no secret, no OAuth [%s]',
     (topology) => {
       const template = synth(topology);
@@ -622,7 +637,7 @@ describe('TenantIdentityStack - shared user pool (R-4, R-5, N-1, N-8, §7.2)', (
 });
 
 describe('TenantIdentityStack - API Gateway (R-1, §3.2, N-5..N-7)', () => {
-  test.each(TOPOLOGIES)('REST API built from merged OpenAPI, no PLACEHOLDER, five paths [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('REST API built from merged OpenAPI, no PLACEHOLDER, five paths [%s]', (topology) => {
     const template = synth(topology);
     const apis = template.findResources('AWS::ApiGateway::RestApi');
     const api = Object.values(apis)[0] as any;
@@ -642,7 +657,7 @@ describe('TenantIdentityStack - API Gateway (R-1, §3.2, N-5..N-7)', () => {
     ]);
   });
 
-  test.each(TOPOLOGIES)('token route has no authoriser; platform uses AWS_IAM; tenant uses the custom authoriser TTL 0 [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('token route has no authoriser; platform uses AWS_IAM; tenant uses the custom authoriser TTL 0 [%s]', (topology) => {
     const template = synth(topology);
     const api = Object.values(template.findResources('AWS::ApiGateway::RestApi'))[0] as any;
     const body = api.Properties.Body;
@@ -659,7 +674,7 @@ describe('TenantIdentityStack - API Gateway (R-1, §3.2, N-5..N-7)', () => {
     expect(authorizer.authorizerResultTtlInSeconds).toBe(0);
   });
 
-  test.each(TOPOLOGIES)('per-route throttling settings are present (N-5/N-6/N-7) [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('per-route throttling settings are present (N-5/N-6/N-7) [%s]', (topology) => {
     const template = synth(topology);
     const stage = Object.values(template.findResources('AWS::ApiGateway::Stage'))[0] as any;
     const methodSettings: any[] = stage.Properties.MethodSettings;
@@ -678,17 +693,20 @@ describe('TenantIdentityStack - API Gateway (R-1, §3.2, N-5..N-7)', () => {
     const token = find('/oauth2/token', 'POST');
     expect(token.ThrottlingRateLimit).toBe(20);
     expect(token.ThrottlingBurstLimit).toBe(40);
-    // N-7: /tenant shared 50/100, above the per-tenant 10/20 (T-31).
+    // N-7: /tenant shared 50/100, above every per-tenant plan (T-31).
     const tenant = find('/tenant/users', 'GET');
     expect(tenant.ThrottlingRateLimit).toBe(50);
     expect(tenant.ThrottlingBurstLimit).toBe(100);
-    const [plan] = Object.values(template.findResources('AWS::ApiGateway::UsagePlan')) as any[];
-    expect(plan.Properties.Throttle).toEqual({ RateLimit: 10, BurstLimit: 20 });
-    expect(tenant.ThrottlingRateLimit).toBeGreaterThan(plan.Properties.Throttle.RateLimit);
-    expect(tenant.ThrottlingBurstLimit).toBeGreaterThan(plan.Properties.Throttle.BurstLimit);
+    const plans = Object.values(template.findResources('AWS::ApiGateway::UsagePlan')) as any[];
+    const standard = plans.find((p) => p.Properties.UsagePlanName === `TenantIdentity-${topology}-tenant`);
+    expect(standard.Properties.Throttle).toEqual({ RateLimit: 10, BurstLimit: 20 });
+    for (const plan of plans) {
+      expect(tenant.ThrottlingRateLimit).toBeGreaterThan(plan.Properties.Throttle.RateLimit);
+      expect(tenant.ThrottlingBurstLimit).toBeGreaterThan(plan.Properties.Throttle.BurstLimit);
+    }
   });
 
-  test.each(TOPOLOGIES)('access log format carries caller identity + authoriser principal (N-4) [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('access log format carries caller identity + authoriser principal (N-4) [%s]', (topology) => {
     const template = synth(topology);
     const stage = Object.values(template.findResources('AWS::ApiGateway::Stage'))[0] as any;
     const format = JSON.parse(stage.Properties.AccessLogSetting.Format);
@@ -700,7 +718,7 @@ describe('TenantIdentityStack - API Gateway (R-1, §3.2, N-5..N-7)', () => {
     expect(stage.Properties.MethodSettings.some((m: any) => m.LoggingLevel === 'INFO')).toBe(true);
   });
 
-  test.each(TOPOLOGIES)('resource policy paths use the deployed stage name [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('resource policy paths use the deployed stage name [%s]', (topology) => {
     const template = synth(topology);
     const api = Object.values(template.findResources('AWS::ApiGateway::RestApi'))[0] as any;
     const stage = Object.values(template.findResources('AWS::ApiGateway::Stage'))[0] as any;
@@ -711,7 +729,7 @@ describe('TenantIdentityStack - API Gateway (R-1, §3.2, N-5..N-7)', () => {
     }
   });
 
-  test.each(TOPOLOGIES)('resource policy allows the account on /platform and any principal on token/tenant routes [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('resource policy allows the account on /platform and any principal on token/tenant routes [%s]', (topology) => {
     const template = synth(topology);
     const api = Object.values(template.findResources('AWS::ApiGateway::RestApi'))[0] as any;
     const policyJson = JSON.stringify(api.Properties.Policy);
@@ -720,7 +738,7 @@ describe('TenantIdentityStack - API Gateway (R-1, §3.2, N-5..N-7)', () => {
     expect(policyJson).toContain('execute-api:/prod/POST/oauth2/token');
   });
 
-  test.each(TOPOLOGIES)('a 4XX alarm with no actions exists [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('a 4XX alarm with no actions exists [%s]', (topology) => {
     const template = synth(topology);
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
       Namespace: 'AWS/ApiGateway',
@@ -758,7 +776,7 @@ describe('TenantIdentityStack - per-tenant Contributor Insights (N-4)', () => {
     return match![1];
   };
 
-  test.each(TOPOLOGIES)('four enabled CloudWatchLogRule v1 JSON rules, names prefixed with the stack name [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('four enabled CloudWatchLogRule v1 JSON rules, names prefixed with the stack name [%s]', (topology) => {
     const template = synth(topology);
     const all = Object.values(rules(template));
     expect(all).toHaveLength(4);
@@ -778,7 +796,7 @@ describe('TenantIdentityStack - per-tenant Contributor Insights (N-4)', () => {
     }
   });
 
-  test.each(TOPOLOGIES)('the two API rules read the access log group and key on tenantId, excluding "-" [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('the two API rules read the access log group and key on tenantId, excluding "-" [%s]', (topology) => {
     const template = synth(topology);
     const accessLogs = Object.keys(template.findResources('AWS::Logs::LogGroup')).find((id) => id.startsWith('ApiAccessLogs'))!;
     for (const prefix of ['TenantRequestsRule', 'TenantErrorsRule']) {
@@ -798,7 +816,7 @@ describe('TenantIdentityStack - per-tenant Contributor Insights (N-4)', () => {
     expect(errors.body.Contribution.Filters).toContainEqual({ Match: '$.status', StartsWith: ['4', '5'] });
   });
 
-  test.each(TOPOLOGIES)('the two trigger rules read the trigger log group: tokens by tenantId, refusals by rule [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('the two trigger rules read the trigger log group: tokens by tenantId, refusals by rule [%s]', (topology) => {
     const template = synth(topology);
     const triggerLogs = Object.keys(template.findResources('AWS::Logs::LogGroup')).find((id) => id.startsWith('TriggerFunctionLogs'))!;
     const tokens = byId(template, 'TenantTokensRule');
@@ -811,7 +829,7 @@ describe('TenantIdentityStack - per-tenant Contributor Insights (N-4)', () => {
     expect(refusals.body.Contribution.Filters).toEqual([{ Match: '$.message', StartsWith: ['pre-token-generation refused'] }]);
   });
 
-  test.each(TOPOLOGIES)('functions log in Lambda JSON format, so each line is the logger\'s JSON object [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('functions log in Lambda JSON format, so each line is the logger\'s JSON object [%s]', (topology) => {
     const template = synth(topology);
     const fns = Object.entries(template.findResources('AWS::Lambda::Function')).filter(([id]) => !id.includes('LogDrain'));
     expect(fns).toHaveLength(6);
@@ -822,7 +840,7 @@ describe('TenantIdentityStack - per-tenant Contributor Insights (N-4)', () => {
 });
 
 describe('TenantIdentityStack - discovery parameters + outputs (R-6, §6.3)', () => {
-  test.each(TOPOLOGIES)('publishes topology and apiUrl for every topology [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('publishes topology and apiUrl for every topology [%s]', (topology) => {
     const template = synth(topology);
     template.hasResourceProperties('AWS::SSM::Parameter', { Name: '/application-plane/shared/identity/topology' });
     template.hasResourceProperties('AWS::SSM::Parameter', { Name: '/application-plane/shared/identity/apiUrl' });
@@ -831,8 +849,8 @@ describe('TenantIdentityStack - discovery parameters + outputs (R-6, §6.3)', ()
     template.hasOutput('RegistryTableName', {});
   });
 
-  test('shared-pool* publishes userPoolId + appClientId and the UserPoolId/AppClientId outputs', () => {
-    for (const topology of ['shared-pool', 'shared-pool-multi-tenant'] as Topology[]) {
+  test('every deployment with a shared pool publishes userPoolId + appClientId and the UserPoolId/AppClientId outputs', () => {
+    for (const topology of SHARED_POOL_DEPLOYMENTS) {
       const template = synth(topology);
       template.hasResourceProperties('AWS::SSM::Parameter', { Name: '/application-plane/shared/identity/userPoolId' });
       template.hasResourceProperties('AWS::SSM::Parameter', { Name: '/application-plane/shared/identity/appClientId' });
@@ -852,13 +870,13 @@ describe('TenantIdentityStack - discovery parameters + outputs (R-6, §6.3)', ()
 });
 
 describe('TenantIdentityStack - parameter publishing switch (ADR-0017)', () => {
-  test.each(TOPOLOGIES)('publishSharedParameters=false creates no SSM parameter [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('publishSharedParameters=false creates no SSM parameter [%s]', (topology) => {
     synth(topology, false).resourceCountIs('AWS::SSM::Parameter', 0);
   });
 });
 
 describe('TenantIdentityStack - log groups bounded (teardown, §6.2)', () => {
-  test.each(TOPOLOGIES)('every log group has 30-day retention and Delete removal [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('every log group has 30-day retention and Delete removal [%s]', (topology) => {
     const template = synth(topology);
     const logGroups = Object.values(template.findResources('AWS::Logs::LogGroup'));
     // Six function log groups + API access logs.
@@ -875,7 +893,7 @@ describe('TenantIdentityStack - cdk-nag (sample-standard §4.3)', () => {
   // src/main.ts) proves there are no UNACKNOWLEDGED errors. Here we assert
   // the stack produces no nag ERROR annotations for any topology; the plugin
   // itself runs in main.test.ts via the real app.
-  test.each(TOPOLOGIES)('synthesises with no unsuppressed cdk-nag findings [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('synthesises with no unsuppressed cdk-nag findings [%s]', (topology) => {
     // Re-synth with the AwsSolutionsChecks aspect, as main.ts does, and read
     // annotations off the assembly.
     const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
@@ -895,7 +913,7 @@ describe('TenantIdentityStack - cdk-nag (sample-standard §4.3)', () => {
 });
 
 describe('TenantIdentityStack - teardown drains tenants (ADR-0022)', () => {
-  test.each(TOPOLOGIES)('one Custom::TenantDrain, served by the drain function, deleted before the registry table [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('one Custom::TenantDrain, served by the drain function, deleted before the registry table [%s]', (topology) => {
     const template = synth(topology);
     const resources = template.toJSON().Resources as Record<string, any>;
     const drains = Object.entries(resources).filter(([, r]) => r.Type === 'Custom::TenantDrain');
@@ -914,7 +932,7 @@ describe('TenantIdentityStack - teardown drains tenants (ADR-0022)', () => {
     }
   });
 
-  test.each(TOPOLOGIES)('the drain function has the platform environment and a 14-minute timeout [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('the drain function has the platform environment and a 14-minute timeout [%s]', (topology) => {
     const template = synth(topology);
     const [fn] = Object.entries(template.findResources('AWS::Lambda::Function'))
       .filter(([id]) => id.startsWith('TenantDrainFunction'))
@@ -934,7 +952,7 @@ describe('TenantIdentityStack - teardown drains tenants (ADR-0022)', () => {
 });
 
 describe('TenantIdentityStack - teardown leaves no log group (ADR-0024)', () => {
-  test.each(TOPOLOGIES)('creates no account-wide API Gateway CloudWatch role [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('creates no account-wide API Gateway CloudWatch role [%s]', (topology) => {
     const template = synth(topology);
     template.resourceCountIs('AWS::ApiGateway::Account', 0);
     const roles = Object.values(template.findResources('AWS::IAM::Role')) as any[];
@@ -942,7 +960,7 @@ describe('TenantIdentityStack - teardown leaves no log group (ADR-0024)', () => 
     expect(managed.join()).not.toContain('AmazonAPIGatewayPushToCloudWatchLogs');
   });
 
-  test.each(TOPOLOGIES)('owns the execution log group, with retention and Delete [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('owns the execution log group, with retention and Delete [%s]', (topology) => {
     const template = synth(topology);
     const groups = template.findResources('AWS::Logs::LogGroup', {
       Properties: { LogGroupName: { 'Fn::Join': ['', ['API-Gateway-Execution-Logs_', { Ref: Match.anyValue() }, '/prod']] } },
@@ -953,7 +971,7 @@ describe('TenantIdentityStack - teardown leaves no log group (ADR-0024)', () => 
     expect(group.Properties.RetentionInDays).toBe(30);
   });
 
-  test.each(TOPOLOGIES)('one drain: every log group is deleted after it, every writer before it [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('one drain: every log group is deleted after it, every writer before it [%s]', (topology) => {
     const template = synth(topology);
     const resources = template.toJSON().Resources as Record<string, any>;
     const drains = Object.entries(resources)
@@ -988,7 +1006,7 @@ describe('TenantIdentityStack - teardown leaves no log group (ADR-0024)', () => 
     }
   });
 
-  test.each(TOPOLOGIES)('no log group is retained, even with useCdkManagedLogGroup on [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('no log group is retained, even with useCdkManagedLogGroup on [%s]', (topology) => {
     // With this feature flag on (as in a reader's app that enables the
     // recommended flags), any function without an explicit log group gets a
     // retained one.
@@ -1004,7 +1022,7 @@ describe('TenantIdentityStack - teardown leaves no log group (ADR-0024)', () => 
     }
   });
 
-  test.each(TOPOLOGIES)('the drain waiter has no permissions, so it cannot create a log group [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('the drain waiter has no permissions, so it cannot create a log group [%s]', (topology) => {
     const template = synth(topology);
     const resources = template.toJSON().Resources as Record<string, any>;
     const waiterRoles = Object.entries(resources)
@@ -1020,7 +1038,7 @@ describe('TenantIdentityStack - teardown leaves no log group (ADR-0024)', () => 
     }
   });
 
-  test.each(TOPOLOGIES)('the drain waiters write no logs: system WARN, application ERROR [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('the drain waiters write no logs: system WARN, application ERROR [%s]', (topology) => {
     const template = synth(topology);
     const resources = template.toJSON().Resources as Record<string, any>;
     const waiters = Object.entries(resources).filter(
@@ -1047,7 +1065,7 @@ function apigatewayActions(template: Template, rolePrefix: string): any[] {
 }
 
 describe('TenantIdentityStack - per-tenant usage plan (ADR-0025)', () => {
-  test.each(TOPOLOGIES)('API key source AUTHORIZER; a key is required on every /tenant method and on no other [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('API key source AUTHORIZER; a key is required on every /tenant method and on no other [%s]', (topology) => {
     const template = synth(topology);
     const body = (Object.values(template.findResources('AWS::ApiGateway::RestApi'))[0] as any).Properties.Body;
     expect(body['x-amazon-apigateway-api-key-source']).toBe('AUTHORIZER');
@@ -1070,7 +1088,7 @@ describe('TenantIdentityStack - per-tenant usage plan (ADR-0025)', () => {
     expect(tenantOps).toBe(5);
   });
 
-  test.each(TOPOLOGIES)('one usage plan on the stage, throttled at the /tenant values (N-7) [%s]', (topology) => {
+  test.each(TOPOLOGIES)('a single topology: one usage plan on the stage, throttled at the /tenant values (N-7) [%s]', (topology) => {
     const template = synth(topology);
     template.resourceCountIs('AWS::ApiGateway::UsagePlan', 1);
     const plan = Object.values(template.findResources('AWS::ApiGateway::UsagePlan'))[0] as any;
@@ -1088,7 +1106,7 @@ describe('TenantIdentityStack - per-tenant usage plan (ADR-0025)', () => {
     template.resourceCountIs('AWS::ApiGateway::UsagePlanKey', 0);
   });
 
-  test.each(TOPOLOGIES)('platform role: create/delete keys, find the plan, add keys to THIS plan only [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('platform role: create/delete keys, find the plan, add keys to THIS plan only [%s]', (topology) => {
     const template = synth(topology);
     const statements = apigatewayActions(template, 'PlatformFunctionServiceRole');
     const render = (s: any) => JSON.stringify(s.Resource);
@@ -1125,7 +1143,7 @@ describe('TenantIdentityStack - per-tenant usage plan (ADR-0025)', () => {
     expect((fn as any).Properties.Environment.Variables.STACK_NAME).toBe(stackName);
   });
 
-  test.each(TOPOLOGIES)('drain role: DeleteApiKey only; no other role holds an apigateway action [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('drain role: DeleteApiKey only; no other role holds an apigateway action [%s]', (topology) => {
     const template = synth(topology);
     const drain = apigatewayActions(template, 'TenantDrainFunctionServiceRole');
     expect(drain.flatMap(actionsOf)).toEqual(['apigateway:DELETE']);
@@ -1136,15 +1154,18 @@ describe('TenantIdentityStack - per-tenant usage plan (ADR-0025)', () => {
     }
   });
 
-  test.each(TOPOLOGIES)('the tenant drain runs before the usage plan is deleted (ADR-0022) [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('the tenant drain runs before every usage plan is deleted (ADR-0022) [%s]', (topology) => {
     const template = synth(topology);
     const resources = template.toJSON().Resources as Record<string, any>;
     const [, drain] = Object.entries(resources).find(([, r]) => r.Type === 'Custom::TenantDrain')!;
-    const [planId] = Object.keys(template.findResources('AWS::ApiGateway::UsagePlan'));
-    expect([drain.DependsOn ?? []].flat()).toContain(planId);
+    const planIds = Object.keys(template.findResources('AWS::ApiGateway::UsagePlan'));
+    expect(planIds.length).toBeGreaterThan(0);
+    for (const planId of planIds) {
+      expect([drain.DependsOn ?? []].flat()).toContain(planId);
+    }
   });
 
-  test.each(TOPOLOGIES)('publishes the usage plan id for the e2e scenario [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('publishes the usage plan id for the e2e scenario [%s]', (topology) => {
     const template = synth(topology);
     expect(Object.keys(template.findOutputs('TenantUsagePlanId'))).toEqual(['TenantUsagePlanId']);
   });
@@ -1218,7 +1239,7 @@ describe('TenantIdentityStack - tenant-scoped role (ADR-0026)', () => {
     expect(tag.Condition.StringLike['aws:RequestTag/tenant-identity:tenant']).toBe('?'.repeat(26));
   });
 
-  test.each(['shared-pool', 'shared-pool-multi-tenant'] as Topology[])('shared pools: no scoped role; IAM cannot scope users inside one pool [%s]', (topology) => {
+  test.each(['shared-pool', 'shared-pool-multi-tenant'] as Deployment[])('shared pools: no scoped role; IAM cannot scope users inside one pool [%s]', (topology) => {
     const template = synth(topology);
     expect(Object.keys(template.findResources('AWS::IAM::Role')).filter((id) => id.startsWith('TenantScopedRole'))).toEqual([]);
     const statements = policyStatementsForRole(template, 'TenantUsersFunctionServiceRole');
@@ -1228,5 +1249,150 @@ describe('TenantIdentityStack - tenant-scoped role (ADR-0026)', () => {
     const [, fn] = Object.entries(template.findResources('AWS::Lambda::Function')).find(([id]) => id.startsWith('TenantUsersFunction'))!;
     expect((fn as any).Properties.Environment.Variables.TENANT_SCOPED_ROLE_ARN).toBeUndefined();
     expect(Object.keys(template.findOutputs('TenantScopedRoleArn'))).toEqual([]);
+  });
+});
+
+// ===========================================================================
+// ADR-0027: tiered deployment - both halves in one stack
+// ===========================================================================
+
+describe('TenantIdentityStack - tiered (ADR-0027)', () => {
+  const template = synth('tiered');
+  const fnById = (prefix: string) =>
+    Object.entries(template.findResources('AWS::Lambda::Function')).find(
+      ([id]) => id.startsWith(prefix) && !id.includes('ServiceRole'),
+    )![1] as any;
+
+  test('exactly one stack pool, with the shared-pool tenantId custom attribute (standard tier = shared-pool)', () => {
+    template.resourceCountIs('AWS::Cognito::UserPool', 1);
+    template.resourceCountIs('AWS::Cognito::UserPoolClient', 1);
+    const pool = Object.values(template.findResources('AWS::Cognito::UserPool'))[0] as any;
+    const tenantAttr = (pool.Properties.Schema as any[]).find((a) => a.Name === 'tenantId');
+    expect(tenantAttr).toMatchObject({ Mutable: false, StringAttributeConstraints: { MaxLength: '26', MinLength: '26' } });
+    expect(pool.Properties.LambdaConfig.PreTokenGenerationConfig.LambdaVersion).toBe('V2_0');
+  });
+
+  test('platform role: CreateUserPool with the tag conditions AND the shared pool ARN grants', () => {
+    const statements = policyStatementsForRole(template, 'PlatformFunctionServiceRole');
+    // Premium half: pool creation, tag-conditioned (N-3, ADR-0026).
+    const createPool = statements.find((s) => actionsOf(s).includes('cognito-idp:CreateUserPool'));
+    expect(createPool.Resource).toBe('*');
+    expect(createPool.Condition.StringEquals['aws:RequestTag/tenant-identity:stack']).toBe('TenantIdentity-tiered');
+    expect(createPool.Condition.StringLike['aws:RequestTag/tenant-identity:tenant']).toBe('?'.repeat(26));
+    const perPool = statements.find((s) => actionsOf(s).includes('cognito-idp:DeleteUserPool'));
+    expect(JSON.stringify(perPool.Resource)).toContain('userpool/*');
+    expect(perPool.Condition.StringEquals['aws:ResourceTag/tenant-identity:stack']).toBe('TenantIdentity-tiered');
+    // Standard half: per-pool user + group actions on the one stack pool.
+    const [poolId] = Object.keys(template.findResources('AWS::Cognito::UserPool'));
+    const shared = statements.find(
+      (s) => actionsOf(s).includes('cognito-idp:AdminCreateUser') && JSON.stringify(s.Resource).includes(poolId),
+    );
+    expect(shared).toBeDefined();
+    expect(shared.Condition).toBeUndefined();
+    expect(actionsOf(shared)).toContain('cognito-idp:CreateGroup');
+    // The trigger is attached by the stack to the shared pool and by the
+    // platform function to every premium pool (§7.1).
+    template.hasResourceProperties('AWS::Lambda::Permission', {
+      Action: 'lambda:InvokeFunction',
+      Principal: 'cognito-idp.amazonaws.com',
+      SourceAccount: '123456789012',
+    });
+    expect(fnById('PlatformFunction').Properties.Environment.Variables.TRIGGER_FUNCTION_ARN).toBeDefined();
+  });
+
+  test('two usage plans on the same stage: standard 10/20, premium 25/50, both under the /tenant ceiling (T-31)', () => {
+    template.resourceCountIs('AWS::ApiGateway::UsagePlan', 2);
+    const plans = Object.values(template.findResources('AWS::ApiGateway::UsagePlan')) as any[];
+    const byName = Object.fromEntries(plans.map((p) => [p.Properties.UsagePlanName, p.Properties]));
+    expect(byName['TenantIdentity-tiered-tenant'].Throttle).toEqual({ RateLimit: 10, BurstLimit: 20 });
+    expect(byName['TenantIdentity-tiered-tenant-premium'].Throttle).toEqual({ RateLimit: 25, BurstLimit: 50 });
+    const [stageId] = Object.keys(template.findResources('AWS::ApiGateway::Stage'));
+    for (const plan of plans) {
+      expect(plan.Properties.ApiStages).toHaveLength(1);
+      expect(plan.Properties.ApiStages[0]).toMatchObject({ ApiId: { Ref: expect.any(String) }, Stage: { Ref: stageId } });
+      expect(plan.Properties.Throttle.RateLimit).toBeLessThan(50);
+      expect(plan.Properties.Throttle.BurstLimit).toBeLessThan(100);
+    }
+    expect(Object.keys(template.findOutputs('PremiumUsagePlanId'))).toEqual(['PremiumUsagePlanId']);
+  });
+
+  test('platform function knows both plan names and may add keys to both plans, outside its default policy', () => {
+    const vars = fnById('PlatformFunction').Properties.Environment.Variables;
+    expect(vars.TENANT_USAGE_PLAN_NAME).toBe('TenantIdentity-tiered-tenant');
+    expect(vars.PREMIUM_USAGE_PLAN_NAME).toBe('TenantIdentity-tiered-tenant-premium');
+    const planIds = Object.keys(template.findResources('AWS::ApiGateway::UsagePlan'));
+    expect(planIds).toHaveLength(2);
+    const policies = Object.entries(template.findResources('AWS::IAM::Policy'));
+    const keyPolicies = policies.filter(([id]) => id.startsWith('PlatformFunctionUsagePlanKeyPolicy'));
+    expect(keyPolicies).toHaveLength(1);
+    const [[, keyPolicy]] = keyPolicies;
+    const rendered = JSON.stringify(keyPolicy);
+    for (const planId of planIds) {
+      expect(rendered).toContain(`"Ref":"${planId}"`);
+      // Nowhere else: the default policy must not reference a plan (cycle).
+      const others = policies.filter(
+        ([id, p]) => !id.startsWith('PlatformFunctionUsagePlanKeyPolicy') && JSON.stringify(p).includes(`"Ref":"${planId}"`),
+      );
+      expect(others).toEqual([]);
+    }
+    const statements = (keyPolicy as any).Properties.PolicyDocument.Statement;
+    expect(statements).toHaveLength(1);
+    expect(actionsOf(statements[0])).toEqual(['apigateway:POST']);
+    expect(JSON.stringify(statements[0].Resource)).toContain('/keys');
+  });
+
+  test('tenant-user role: the shared pool grant (standard, T-18 code wall) AND the scoped role (premium, ADR-0026)', () => {
+    const statements = policyStatementsForRole(template, 'TenantUsersFunctionServiceRole');
+    const [poolId] = Object.keys(template.findResources('AWS::Cognito::UserPool'));
+    const cognito = statements.filter((s) => actionsOf(s).some((a) => a.startsWith('cognito-idp:')));
+    expect(cognito).toHaveLength(1);
+    expect(actionsOf(cognito[0]).sort()).toEqual([...TENANT_USER_ACTIONS].sort());
+    expect(JSON.stringify(cognito[0].Resource)).toContain(poolId);
+    // Never userpool/*: premium pools are reached only through the scoped role.
+    expect(JSON.stringify(cognito[0].Resource)).not.toContain('userpool/*');
+    const [roleId] = Object.keys(template.findResources('AWS::IAM::Role')).filter((id) => id.startsWith('TenantScopedRole'));
+    expect(roleId).toBeDefined();
+    const sts = statements.filter((s) => actionsOf(s).some((a) => a.startsWith('sts:')));
+    expect(sts).toHaveLength(1);
+    expect(actionsOf(sts[0]).sort()).toEqual(['sts:AssumeRole', 'sts:TagSession']);
+    expect(sts[0].Resource).toEqual({ 'Fn::GetAtt': [roleId, 'Arn'] });
+    const vars = fnById('TenantUsersFunction').Properties.Environment.Variables;
+    expect(vars.TENANT_SCOPED_ROLE_ARN).toEqual({ 'Fn::GetAtt': [roleId, 'Arn'] });
+    expect(vars.USER_POOL_ID).toBeDefined();
+    expect(vars.APP_CLIENT_ID).toBeDefined();
+    expect(vars.TOPOLOGY).toBe('tiered');
+    expect(Object.keys(template.findOutputs('TenantScopedRoleArn'))).toEqual(['TenantScopedRoleArn']);
+    // The scoped role's permissions name this stack (N-3).
+    const [allow] = policyStatementsForRole(template, 'TenantScopedRole');
+    expect(allow.Condition.StringEquals['aws:ResourceTag/tenant-identity:stack']).toBe('TenantIdentity-tiered');
+  });
+
+  test('every function that reads TOPOLOGY gets the deployment value, tiered', () => {
+    for (const prefix of ['TriggerFunction', 'PlatformFunction', 'TenantUsersFunction', 'TenantDrainFunction', 'TokenFunction', 'AuthorizerFunction']) {
+      expect(fnById(prefix).Properties.Environment.Variables.TOPOLOGY).toBe('tiered');
+    }
+  });
+
+  test('shared parameters: topology=tiered plus the standard tier\'s pool and client', () => {
+    const params = Object.values(template.findResources('AWS::SSM::Parameter')) as any[];
+    const byName = Object.fromEntries(params.map((p) => [p.Properties.Name, p.Properties.Value]));
+    expect(byName['/application-plane/shared/identity/topology']).toBe('tiered');
+    const [poolId] = Object.keys(template.findResources('AWS::Cognito::UserPool'));
+    const [clientId] = Object.keys(template.findResources('AWS::Cognito::UserPoolClient'));
+    expect(byName['/application-plane/shared/identity/userPoolId']).toEqual({ Ref: poolId });
+    expect(byName['/application-plane/shared/identity/appClientId']).toEqual({ Ref: clientId });
+    template.hasOutput('UserPoolId', {});
+    template.hasOutput('AppClientId', {});
+  });
+
+  test('the drain runs before the shared pool, its client, and both plans go (ADR-0022)', () => {
+    const resources = template.toJSON().Resources as Record<string, any>;
+    const [, drain] = Object.entries(resources).find(([, r]) => r.Type === 'Custom::TenantDrain')!;
+    const dependsOn: string[] = [drain.DependsOn ?? []].flat();
+    for (const type of ['AWS::Cognito::UserPool', 'AWS::Cognito::UserPoolClient', 'AWS::ApiGateway::UsagePlan', 'AWS::DynamoDB::GlobalTable']) {
+      for (const id of Object.keys(template.findResources(type))) {
+        expect(dependsOn).toContain(id);
+      }
+    }
   });
 });

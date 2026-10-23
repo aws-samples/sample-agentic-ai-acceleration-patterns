@@ -17,9 +17,10 @@ import { ENV } from '../../src/shared/constants';
 import type { DrainDeps } from '../../src/teardown/tenant-drain';
 
 // Mock the topology barrel so cold start does not build real Cognito clients
-// (and the sibling files may be mid-build in a parallel run).
+// (and the sibling files may be mid-build in a parallel run). ADR-0027: the
+// handler asks the dispatcher for a strategy per row.
 jest.mock('../../src/topology', () => ({
-  createProvisioner: () => ({ topology: 'pool-per-tenant' }),
+  createProvisioners: () => () => ({ topology: 'pool-per-tenant' }),
 }));
 
 // Avoid constructing a real DynamoDB registry at cold start.
@@ -69,7 +70,7 @@ function capturingSend(): { send: jest.Mock; last: () => CfnResponseBody } {
 
 function depsMock(overrides: Partial<{ deprovisionThrows: boolean; items: string[] }> = {}): {
   deps: DrainDeps;
-  calls: { markDeleting: string[]; deprovision: number; delete: string[] };
+  calls: { markDeleting: string[]; deprovision: number; delete: string[]; asked: string[] };
 } {
   const items = (overrides.items ?? ['A']).map((tenantId) => ({
     tenantId,
@@ -80,7 +81,16 @@ function depsMock(overrides: Partial<{ deprovisionThrows: boolean; items: string
     createdAt: '2026-10-22T00:00:00.000Z',
     updatedAt: '2026-10-22T00:00:00.000Z',
   }));
-  const calls = { markDeleting: [] as string[], deprovision: 0, delete: [] as string[] };
+  const calls = { markDeleting: [] as string[], deprovision: 0, delete: [] as string[], asked: [] as string[] };
+  const provisioner = {
+    topology: 'pool-per-tenant',
+    deprovisionTenant: jest.fn(async () => {
+      calls.deprovision++;
+      if (overrides.deprovisionThrows) {
+        throw new TypeError('secret cognito detail');
+      }
+    }),
+  };
   const deps = {
     registry: {
       list: jest.fn().mockResolvedValue({ items, nextToken: undefined }),
@@ -96,14 +106,10 @@ function depsMock(overrides: Partial<{ deprovisionThrows: boolean; items: string
       getByUserPoolId: jest.fn(),
       create: jest.fn(),
     },
-    provisioner: {
-      topology: 'pool-per-tenant',
-      deprovisionTenant: jest.fn(async () => {
-        calls.deprovision++;
-        if (overrides.deprovisionThrows) {
-          throw new TypeError('secret cognito detail');
-        }
-      }),
+    // ADR-0027: the dispatcher; records the topology each row asked for.
+    provisioners: (topology: string) => {
+      calls.asked.push(topology);
+      return provisioner;
     },
     apiKeys: { create: jest.fn(), delete: jest.fn(async () => undefined) },
   } as unknown as DrainDeps;
@@ -131,6 +137,8 @@ describe('tenant-drain.function handler (ADR-0022)', () => {
     expect(calls.markDeleting).toEqual(['A', 'B']);
     expect(calls.deprovision).toBe(2);
     expect(calls.delete).toEqual(['A', 'B']);
+    // ADR-0027: one dispatch per row, by the row's topology.
+    expect(calls.asked).toEqual(['pool-per-tenant', 'pool-per-tenant']);
     expect(last().Status).toBe('SUCCESS');
   });
 

@@ -79,11 +79,20 @@ string Password
 @length(min: 1, max: 16384)
 string TokenValue
 
-/// The deploy-time topology (spec P-7).
+/// The topology a tenant runs on: the deploy-time topology, or in a
+/// `tiered` deployment the topology of the tenant's tier (spec P-7, ADR-0027).
 enum Topology {
     POOL_PER_TENANT = "pool-per-tenant"
     SHARED_POOL = "shared-pool"
     SHARED_POOL_MULTI_TENANT = "shared-pool-multi-tenant"
+}
+
+/// A tenant's tier in a `tiered` deployment (ADR-0027). `standard` runs on
+/// the stack's shared pool (`shared-pool`), `premium` on a pool of its own
+/// (`pool-per-tenant`).
+enum Tier {
+    STANDARD = "standard"
+    PREMIUM = "premium"
 }
 
 /// Tenant status in the registry (spec §4.1).
@@ -112,6 +121,9 @@ structure Tenant {
 
     @required
     topology: Topology
+
+    /// `tiered` deployments only: the tenant's tier (ADR-0027).
+    tier: Tier
 
     /// pool-per-tenant only: the tenant's own user pool.
     userPoolId: String

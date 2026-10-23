@@ -15,7 +15,8 @@ import { ApiGatewayTenantApiKeys } from '../../src/shared/tenant-api-keys';
  * Unit tests for the per-tenant API keys (ADR-0025): create a generated,
  * enabled key named tenant-<id>, add it to the stack's usage plan (found by
  * name, once), roll the key back when the plan step fails, and delete
- * idempotently.
+ * idempotently. ADR-0027: a premium key goes in the premium tier's plan,
+ * looked up and cached separately.
  */
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -116,6 +117,71 @@ describe('ApiGatewayTenantApiKeys.create (ADR-0025)', () => {
     apigw.on(CreateApiKeyCommand).resolves({ id: 'key-1' });
     await expect(keys().create(TENANT_A)).rejects.toThrow(/id and value/);
     expect(apigw.commandCalls(CreateUsagePlanKeyCommand)).toHaveLength(0);
+  });
+});
+
+describe('ApiGatewayTenantApiKeys.create per tier (ADR-0027)', () => {
+  const PREMIUM_PLAN = 'TenantIdentity-tiered-tenant-premium';
+
+  function tieredKeys(premium: string | undefined): ApiGatewayTenantApiKeys {
+    return new ApiGatewayTenantApiKeys(new APIGatewayClient({ region: 'eu-central-1' }), PLAN_NAME, STACK, premium);
+  }
+
+  beforeEach(() => {
+    apigw.on(GetUsagePlansCommand).resolves({
+      items: [
+        { id: 'plan-1', name: PLAN_NAME },
+        { id: 'plan-premium', name: PREMIUM_PLAN },
+      ],
+    });
+  });
+
+  it('premium puts the key in the premium plan', async () => {
+    await tieredKeys(PREMIUM_PLAN).create(TENANT_A, 'premium');
+    expect(apigw.commandCalls(CreateUsagePlanKeyCommand)[0].args[0].input.usagePlanId).toBe('plan-premium');
+  });
+
+  it.each([['standard', 'standard'], ['no tier (single-topology stack)', undefined]] as const)(
+    '%s puts the key in the stack\'s plan',
+    async (_label, tier) => {
+      await tieredKeys(PREMIUM_PLAN).create(TENANT_A, tier);
+      expect(apigw.commandCalls(CreateUsagePlanKeyCommand)[0].args[0].input.usagePlanId).toBe('plan-1');
+    },
+  );
+
+  it.each([undefined, ''])('premium without a premium plan name (%p) is refused before any call', async (premium) => {
+    await expect(tieredKeys(premium).create(TENANT_A, 'premium')).rejects.toThrow('requires the premium usage plan name');
+    expect(apigw.calls()).toHaveLength(0);
+  });
+
+  it('caches the lookup per plan name: one GetUsagePlans per tier, not per key', async () => {
+    const k = tieredKeys(PREMIUM_PLAN);
+    await k.create(TENANT_A, 'standard');
+    await k.create(TENANT_A, 'premium');
+    await k.create(TENANT_A, 'standard');
+    await k.create(TENANT_A, 'premium');
+    expect(apigw.commandCalls(GetUsagePlansCommand)).toHaveLength(2);
+    expect(apigw.commandCalls(CreateUsagePlanKeyCommand).map((c: any) => c.args[0].input.usagePlanId)).toEqual([
+      'plan-1',
+      'plan-premium',
+      'plan-1',
+      'plan-premium',
+    ]);
+  });
+
+  it('a failed premium lookup does not poison the standard plan, and is retried', async () => {
+    apigw
+      .on(GetUsagePlansCommand)
+      .rejectsOnce(new Error('throttled'))
+      .resolves({ items: [{ id: 'plan-1', name: PLAN_NAME }, { id: 'plan-premium', name: PREMIUM_PLAN }] });
+    const k = tieredKeys(PREMIUM_PLAN);
+    await expect(k.create(TENANT_A, 'premium')).rejects.toThrow('throttled');
+    await expect(k.create(TENANT_A, 'standard')).resolves.toMatchObject({ apiKeyId: 'key-1' });
+    await expect(k.create(TENANT_A, 'premium')).resolves.toMatchObject({ apiKeyId: 'key-1' });
+    expect(apigw.commandCalls(CreateUsagePlanKeyCommand).map((c: any) => c.args[0].input.usagePlanId)).toEqual([
+      'plan-1',
+      'plan-premium',
+    ]);
   });
 });
 

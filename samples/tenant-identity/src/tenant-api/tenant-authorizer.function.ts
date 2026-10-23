@@ -6,7 +6,7 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import type { APIGatewayAuthorizerResult, APIGatewayTokenAuthorizerEvent } from 'aws-lambda';
 import { authorize, stripBearer, type AuthorizeDeps, type Caller, type TokenVerifier } from './tenant-authorizer';
-import { ENV, POOL_INDEX_NAME, requireEnv } from '../shared/constants';
+import { ENV, hasPerTenantPools, parseDeployment, POOL_INDEX_NAME, requireEnv } from '../shared/constants';
 import { log } from '../shared/logger';
 import { DynamoDBRegistry } from '../shared/registry';
 
@@ -54,13 +54,14 @@ export function verifierFor(userPoolId: string, clientId: string): TokenVerifier
 function readSharedPool(): { userPoolId: string; appClientId: string } | undefined {
   const userPoolId = process.env[ENV.userPoolId];
   const appClientId = process.env[ENV.appClientId];
-  // Both or neither: a half-set pair is a wiring bug, treated as pool-per-tenant.
+  // Both or neither: a half-set pair is a wiring bug, treated as no shared pool.
   if (typeof userPoolId === 'string' && userPoolId !== '' && typeof appClientId === 'string' && appClientId !== '') {
     return { userPoolId, appClientId };
   }
   return undefined;
 }
 
+const deployment = parseDeployment(process.env[ENV.topology]);
 const tableName = requireEnv(ENV.tableName);
 const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
   marshallOptions: { removeUndefinedValues: true },
@@ -69,6 +70,8 @@ const deps: AuthorizeDeps = {
   registry: new DynamoDBRegistry(tableName, documentClient, process.env[ENV.poolIndexName] ?? POOL_INDEX_NAME),
   verifierFor,
   sharedPool: readSharedPool(),
+  // ADR-0027: pool-per-tenant and tiered map the issuer through the registry.
+  perTenantPools: hasPerTenantPools(deployment),
 };
 
 /** Builds an Allow/Deny policy for the one method that triggered the request. */

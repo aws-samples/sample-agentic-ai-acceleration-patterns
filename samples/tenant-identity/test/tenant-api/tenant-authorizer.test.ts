@@ -12,7 +12,9 @@ import { authorize, stripBearer, type AuthorizeDeps, type TokenVerifier } from '
  * unit-assertion paragraph): refuses an ID token, a token from another pool
  * or app client, a token with `tenants`, a token without `tenant-admin/users`,
  * a tenant that is not ACTIVE, and the pool-per-tenant mismatch cases;
- * accepts a correct one.
+ * accepts a correct one. ADR-0027: in `tiered` the issuer picks the door, and
+ * the binding rule refuses a tenant reached through a pool that is not its
+ * own (`pool_mismatch`).
  */
 
 const TENANT_A = '01HZX9ABCDEFGHJKMNPQRSTVWX';
@@ -87,6 +89,7 @@ describe('authorize — shared pool (P-6, ADR-0007)', () => {
       registry: fakeRegistry(),
       verifierFor: verifierReturning(goodClaims),
       sharedPool,
+      perTenantPools: false,
     };
     await expect(authorize('t.t.t', deps)).resolves.toEqual({ tenantId: TENANT_A, sub: SUB, usageIdentifierKey: API_KEY_VALUE });
   });
@@ -99,6 +102,7 @@ describe('authorize — shared pool (P-6, ADR-0007)', () => {
       registry: fakeRegistry({ get: jest.fn().mockResolvedValue(activeTenant(over)) }),
       verifierFor: verifierReturning(goodClaims),
       sharedPool,
+      perTenantPools: false,
     };
     await expect(authorize('t.t.t', deps)).resolves.toBeUndefined();
   });
@@ -108,6 +112,7 @@ describe('authorize — shared pool (P-6, ADR-0007)', () => {
       registry: fakeRegistry({ get: jest.fn().mockResolvedValue(activeTenant({ apiKeyValue: 'other-tenant-value-0000' })) }),
       verifierFor: verifierReturning({ ...goodClaims, usageIdentifierKey: 'from-the-token', api_key: 'x' }),
       sharedPool,
+      perTenantPools: false,
     };
     await expect(authorize('t.t.t', deps)).resolves.toMatchObject({ usageIdentifierKey: 'other-tenant-value-0000' });
   });
@@ -117,6 +122,7 @@ describe('authorize — shared pool (P-6, ADR-0007)', () => {
       registry: fakeRegistry(),
       verifierFor: verifierReturning({ ...goodClaims, token_use: 'id' }),
       sharedPool,
+      perTenantPools: false,
     };
     await expect(authorize('t.t.t', deps)).resolves.toBeUndefined();
   });
@@ -126,6 +132,7 @@ describe('authorize — shared pool (P-6, ADR-0007)', () => {
       registry: fakeRegistry(),
       verifierFor: verifierThrowing(),
       sharedPool,
+      perTenantPools: false,
     };
     await expect(authorize('t.t.t', deps)).resolves.toBeUndefined();
   });
@@ -135,6 +142,7 @@ describe('authorize — shared pool (P-6, ADR-0007)', () => {
       registry: fakeRegistry(),
       verifierFor: verifierReturning({ ...goodClaims, tenants: [TENANT_A] }),
       sharedPool,
+      perTenantPools: false,
     };
     await expect(authorize('t.t.t', deps)).resolves.toBeUndefined();
   });
@@ -144,6 +152,7 @@ describe('authorize — shared pool (P-6, ADR-0007)', () => {
       registry: fakeRegistry(),
       verifierFor: verifierReturning({ ...goodClaims, scope: SCOPE_API_READ }),
       sharedPool,
+      perTenantPools: false,
     };
     await expect(authorize('t.t.t', deps)).resolves.toBeUndefined();
   });
@@ -153,6 +162,7 @@ describe('authorize — shared pool (P-6, ADR-0007)', () => {
       registry: fakeRegistry(),
       verifierFor: verifierReturning({ ...goodClaims, tenant_id: 'not-a-ulid' }),
       sharedPool,
+      perTenantPools: false,
     };
     await expect(authorize('t.t.t', deps)).resolves.toBeUndefined();
   });
@@ -162,6 +172,7 @@ describe('authorize — shared pool (P-6, ADR-0007)', () => {
       registry: fakeRegistry({ get: jest.fn().mockResolvedValue(activeTenant({ status: 'DELETING' })) }),
       verifierFor: verifierReturning(goodClaims),
       sharedPool,
+      perTenantPools: false,
     };
     await expect(authorize('t.t.t', deps)).resolves.toBeUndefined();
   });
@@ -171,6 +182,7 @@ describe('authorize — shared pool (P-6, ADR-0007)', () => {
       registry: fakeRegistry({ get: jest.fn().mockResolvedValue(undefined) }),
       verifierFor: verifierReturning(goodClaims),
       sharedPool,
+      perTenantPools: false,
     };
     await expect(authorize('t.t.t', deps)).resolves.toBeUndefined();
   });
@@ -180,21 +192,27 @@ describe('authorize — shared pool (P-6, ADR-0007)', () => {
       registry: fakeRegistry(),
       verifierFor: verifierReturning({ ...goodClaims, sub: undefined }),
       sharedPool,
+      perTenantPools: false,
     };
     await expect(authorize('t.t.t', deps)).resolves.toBeUndefined();
   });
 });
 
+/**
+ * A token whose unverified `iss` names the pool: a real three-segment string
+ * so decomposeUnverifiedJwt can read it. The signature is never checked here
+ * (the verifier is a stub); the real-verifier suite below covers that.
+ */
+function tokenWithIssuer(poolId: string): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'RS256', kid: 'k' })).toString('base64url');
+  const payload = Buffer.from(
+    JSON.stringify({ iss: `https://cognito-idp.eu-central-1.amazonaws.com/${poolId}` }),
+  ).toString('base64url');
+  return `${header}.${payload}.sig`;
+}
+
 describe('authorize — pool-per-tenant (ADR-0007)', () => {
-  // No sharedPool: the issuer picks the pool via the registry. The token is a
-  // real unsigned-structure string so decomposeUnverifiedJwt can read `iss`.
-  function tokenWithIssuer(poolId: string): string {
-    const header = Buffer.from(JSON.stringify({ alg: 'RS256', kid: 'k' })).toString('base64url');
-    const payload = Buffer.from(
-      JSON.stringify({ iss: `https://cognito-idp.eu-central-1.amazonaws.com/${poolId}` }),
-    ).toString('base64url');
-    return `${header}.${payload}.sig`;
-  }
+  // No sharedPool: the issuer picks the pool via the registry.
 
   it('accepts when the registry maps the issuing pool to the token tenant', async () => {
     const deps: AuthorizeDeps = {
@@ -207,6 +225,7 @@ describe('authorize — pool-per-tenant (ADR-0007)', () => {
         ),
       }),
       verifierFor: verifierReturning(goodClaims),
+      perTenantPools: true,
     };
     await expect(authorize(tokenWithIssuer(POOL_A), deps)).resolves.toEqual({ tenantId: TENANT_A, sub: SUB, usageIdentifierKey: API_KEY_VALUE });
   });
@@ -215,6 +234,7 @@ describe('authorize — pool-per-tenant (ADR-0007)', () => {
     const deps: AuthorizeDeps = {
       registry: fakeRegistry({ getByUserPoolId: jest.fn().mockResolvedValue(undefined) }),
       verifierFor: verifierReturning(goodClaims),
+      perTenantPools: true,
     };
     await expect(authorize(tokenWithIssuer(POOL_A), deps)).resolves.toBeUndefined();
   });
@@ -228,6 +248,7 @@ describe('authorize — pool-per-tenant (ADR-0007)', () => {
       }),
       // token claims tenant_id = A, but the pool belongs to B.
       verifierFor: verifierReturning(goodClaims),
+      perTenantPools: true,
     };
     await expect(authorize(tokenWithIssuer(POOL_B), deps)).resolves.toBeUndefined();
   });
@@ -236,8 +257,131 @@ describe('authorize — pool-per-tenant (ADR-0007)', () => {
     const deps: AuthorizeDeps = {
       registry: fakeRegistry(),
       verifierFor: verifierReturning(goodClaims),
+      perTenantPools: true,
     };
     await expect(authorize('not-a-jwt', deps)).resolves.toBeUndefined();
+  });
+});
+
+describe('authorize — ADR-0027 binding rule (pool_mismatch)', () => {
+  const sharedPool = { userPoolId: POOL_A, appClientId: CLIENT };
+
+  it('shared pool: refuses a token naming a pool-per-tenant tenant (premium id in the shared pool)', async () => {
+    const deps: AuthorizeDeps = {
+      registry: fakeRegistry({
+        get: jest.fn().mockResolvedValue(activeTenant({ topology: 'pool-per-tenant', userPoolId: POOL_B, appClientId: CLIENT })),
+      }),
+      verifierFor: verifierReturning(goodClaims),
+      sharedPool,
+      perTenantPools: false,
+    };
+    await expect(authorize('t.t.t', deps)).resolves.toBeUndefined();
+  });
+
+  it('per-tenant pool: refuses when the row says shared-pool (standard tenant via a premium pool)', async () => {
+    // The index maps POOL_B to tenant A (so issuer_tenant_mismatch passes), but
+    // A's own row says shared-pool: the binding rule refuses.
+    const deps: AuthorizeDeps = {
+      registry: fakeRegistry({
+        getByUserPoolId: jest.fn().mockResolvedValue(
+          activeTenant({ tenantId: TENANT_A, topology: 'pool-per-tenant', userPoolId: POOL_B, appClientId: CLIENT }),
+        ),
+        get: jest.fn().mockResolvedValue(activeTenant({ tenantId: TENANT_A, topology: 'shared-pool' })),
+      }),
+      verifierFor: verifierReturning(goodClaims),
+      perTenantPools: true,
+    };
+    await expect(authorize(tokenWithIssuer(POOL_B), deps)).resolves.toBeUndefined();
+  });
+
+  it('per-tenant pool: refuses when the row names a different pool than the issuer', async () => {
+    const deps: AuthorizeDeps = {
+      registry: fakeRegistry({
+        getByUserPoolId: jest.fn().mockResolvedValue(
+          activeTenant({ tenantId: TENANT_A, topology: 'pool-per-tenant', userPoolId: POOL_B, appClientId: CLIENT }),
+        ),
+        get: jest.fn().mockResolvedValue(
+          activeTenant({ tenantId: TENANT_A, topology: 'pool-per-tenant', userPoolId: POOL_A, appClientId: CLIENT }),
+        ),
+      }),
+      verifierFor: verifierReturning(goodClaims),
+      perTenantPools: true,
+    };
+    await expect(authorize(tokenWithIssuer(POOL_B), deps)).resolves.toBeUndefined();
+  });
+});
+
+describe('authorize — tiered (ADR-0027)', () => {
+  // Both a shared pool and per-tenant pools: the issuer decides which door.
+  const sharedPool = { userPoolId: POOL_A, appClientId: CLIENT };
+  const standardRow = activeTenant({ tenantId: TENANT_A, topology: 'shared-pool', userPoolId: POOL_A, appClientId: CLIENT });
+  const premiumRow = activeTenant({ tenantId: TENANT_B, topology: 'pool-per-tenant', userPoolId: POOL_B, appClientId: 'premium-client' });
+
+  it('the shared pool issuer verifies with the shared client, no registry index read', async () => {
+    const verify = jest.fn().mockResolvedValue(goodClaims);
+    const verifierFor = jest.fn().mockReturnValue({ verify });
+    const registry = fakeRegistry({ get: jest.fn().mockResolvedValue(standardRow) });
+    const deps: AuthorizeDeps = { registry, verifierFor, sharedPool, perTenantPools: true };
+
+    await expect(authorize(tokenWithIssuer(POOL_A), deps)).resolves.toEqual({ tenantId: TENANT_A, sub: SUB, usageIdentifierKey: API_KEY_VALUE });
+    expect(verifierFor).toHaveBeenCalledWith(POOL_A, CLIENT);
+    expect(registry.getByUserPoolId).not.toHaveBeenCalled();
+  });
+
+  it('another issuer takes the registry path and verifies with that tenant\'s client', async () => {
+    const verifierFor = jest.fn().mockReturnValue({ verify: jest.fn().mockResolvedValue({ ...goodClaims, tenant_id: TENANT_B }) });
+    const registry = fakeRegistry({
+      getByUserPoolId: jest.fn().mockResolvedValue(premiumRow),
+      get: jest.fn().mockResolvedValue(premiumRow),
+    });
+    const deps: AuthorizeDeps = { registry, verifierFor, sharedPool, perTenantPools: true };
+
+    await expect(authorize(tokenWithIssuer(POOL_B), deps)).resolves.toEqual({ tenantId: TENANT_B, sub: SUB, usageIdentifierKey: API_KEY_VALUE });
+    expect(registry.getByUserPoolId).toHaveBeenCalledWith(POOL_B);
+    expect(verifierFor).toHaveBeenCalledWith(POOL_B, 'premium-client');
+  });
+
+  it('refuses a premium tenant\'s id presented through the shared pool (pool_mismatch)', async () => {
+    const deps: AuthorizeDeps = {
+      registry: fakeRegistry({ get: jest.fn().mockResolvedValue(premiumRow) }),
+      verifierFor: verifierReturning({ ...goodClaims, tenant_id: TENANT_B }),
+      sharedPool,
+      perTenantPools: true,
+    };
+    await expect(authorize(tokenWithIssuer(POOL_A), deps)).resolves.toBeUndefined();
+  });
+
+  it('refuses a standard tenant reached through a premium pool (pool_mismatch)', async () => {
+    const deps: AuthorizeDeps = {
+      registry: fakeRegistry({
+        // A stray index entry maps POOL_B to the standard tenant A.
+        getByUserPoolId: jest.fn().mockResolvedValue({ ...standardRow, appClientId: 'premium-client' }),
+        get: jest.fn().mockResolvedValue(standardRow),
+      }),
+      verifierFor: verifierReturning(goodClaims),
+      sharedPool,
+      perTenantPools: true,
+    };
+    await expect(authorize(tokenWithIssuer(POOL_B), deps)).resolves.toBeUndefined();
+  });
+
+  it('refuses an issuer that is neither the shared pool nor in the registry', async () => {
+    const deps: AuthorizeDeps = {
+      registry: fakeRegistry({ getByUserPoolId: jest.fn().mockResolvedValue(undefined) }),
+      verifierFor: verifierReturning(goodClaims),
+      sharedPool,
+      perTenantPools: true,
+    };
+    await expect(authorize(tokenWithIssuer(POOL_B), deps)).resolves.toBeUndefined();
+  });
+
+  it('refuses when neither a shared pool nor per-tenant pools are configured (wiring bug)', async () => {
+    const deps: AuthorizeDeps = {
+      registry: fakeRegistry(),
+      verifierFor: verifierReturning(goodClaims),
+      perTenantPools: false,
+    };
+    await expect(authorize(tokenWithIssuer(POOL_A), deps)).resolves.toBeUndefined();
   });
 });
 
@@ -294,6 +438,7 @@ describe('authorize — real CognitoJwtVerifier end to end (ADR-0007)', () => {
       registry: fakeRegistry(),
       verifierFor: () => verifier as unknown as TokenVerifier,
       sharedPool: { userPoolId: POOL_A, appClientId: CLIENT },
+      perTenantPools: false,
     };
     return authorize(token, deps);
   }

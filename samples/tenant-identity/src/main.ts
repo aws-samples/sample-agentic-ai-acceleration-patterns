@@ -4,7 +4,7 @@
 import { App, Validations } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { TenantIdentityStack } from './identity.cdk';
-import { parseTopology } from './shared/constants';
+import { parseDeployment } from './shared/constants';
 
 const app = new App();
 
@@ -18,11 +18,11 @@ Validations.of(app).addPlugins(
   new AwsSolutionsChecks(app, { verbose: true, writeSuppressionsToCloudFormation: true }),
 );
 
-// The one deployment input (spec §3.3, P-7, ADR-0001): the topology. Synth
-// fails fast, naming the three accepted values, if it is missing or
-// misspelled. The stack name embeds the topology so all three coexist in one
-// account and Region (the integration test relies on it).
-const topology = parseTopology(app.node.tryGetContext('topology'));
+// The one deployment input (spec §3.3, P-7, ADR-0001, ADR-0027): a topology,
+// or `tiered`. Synth fails fast, naming the four accepted values, if it is
+// missing or misspelled. The stack name embeds the value so every deployment
+// coexists in one account and Region (the integration test relies on it).
+const topology = parseDeployment(app.node.tryGetContext('topology'));
 
 // Optional: `--context publishSharedParameters=false` keeps this stack from
 // publishing the fixed-name /application-plane/shared/identity/* parameters

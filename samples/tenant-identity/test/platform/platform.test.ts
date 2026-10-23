@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 import { PlatformContext, PlatformService } from '../../src/platform/platform';
-import type { Topology } from '../../src/shared/constants';
+import type { Deployment, Topology } from '../../src/shared/constants';
 import {
   ConflictError as DomainConflictError,
   InvalidInputError,
@@ -17,13 +17,16 @@ import {
   ResourceNotFoundError,
   ValidationError,
 } from '../../src/smithy/platform/typescript-ssdk-codegen/src';
+import type { ProvisionersFor } from '../../src/topology';
 import type { NewUserResult, Provisioner, TokenSet, UserView } from '../../src/topology/provisioner';
 
 /**
- * Unit tests for the platform service (spec §5.1, §5.3, R-11, R-12, P-2, P-4).
- * A fake in-memory registry stands in for DynamoDB; the provisioner is a
- * jest mock so the tests assert the orchestration the service owns, not
- * Cognito behaviour.
+ * Unit tests for the platform service (spec §5.1, §5.3, R-11, R-12, P-2, P-4,
+ * ADR-0027). A fake in-memory registry stands in for DynamoDB; the
+ * provisioner is a jest mock so the tests assert the orchestration the
+ * service owns, not Cognito behaviour. The single-topology tests hand the
+ * service one mock for every topology; the `tiered` tests hand it one per
+ * tier and assert which one each row reaches.
  */
 
 const TENANT_A = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
@@ -135,16 +138,21 @@ beforeEach(() => {
   apiKeys = { create: jest.fn().mockResolvedValue(KEY), delete: jest.fn().mockResolvedValue(undefined) };
 });
 
+/** One mock for every topology: the single-topology service never asks for another. */
+function provisionersFor(provisioner: jest.Mocked<Provisioner>): ProvisionersFor {
+  return () => provisioner;
+}
+
 function makeService(
   registry: Registry,
   provisioner: jest.Mocked<Provisioner>,
-  topology: Topology = 'shared-pool-multi-tenant',
+  deployment: Deployment = 'shared-pool-multi-tenant',
 ): PlatformService {
   return new PlatformService({
     registry,
-    provisioner,
+    provisioners: provisionersFor(provisioner),
     apiKeys,
-    topology,
+    deployment,
     newTenantId: () => TENANT_A,
     now: () => FIXED_NOW,
   });
@@ -255,7 +263,8 @@ describe('PlatformService (spec §5.1)', () => {
 
       const out = await makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT);
 
-      expect(apiKeys.create).toHaveBeenCalledWith(TENANT_A);
+      // No tier outside `tiered` (ADR-0027): the key goes in the stack's plan.
+      expect(apiKeys.create).toHaveBeenCalledWith(TENANT_A, undefined);
       expect(provisioner.provisionTenant.mock.invocationCallOrder[0]).toBeLessThan(apiKeys.create.mock.invocationCallOrder[0]);
       const stored = registry.items.get(TENANT_A)!;
       expect(stored.status).toBe('ACTIVE');
@@ -370,6 +379,226 @@ describe('PlatformService (spec §5.1)', () => {
       expect(provisioner.assertEmailAvailable.mock.invocationCallOrder[0]).toBeLessThan(
         provisioner.provisionTenant.mock.invocationCallOrder[0],
       );
+    });
+  });
+
+  describe('tiered deployment (ADR-0027)', () => {
+    /** One mock per tier; the service must reach the right one by the row's topology. */
+    function tieredMocks(): {
+      shared: jest.Mocked<Provisioner>;
+      perTenant: jest.Mocked<Provisioner>;
+      provisioners: ProvisionersFor;
+    } {
+      const shared = mockProvisioner('shared-pool');
+      const perTenant = mockProvisioner('pool-per-tenant');
+      const byTopology: Partial<Record<Topology, jest.Mocked<Provisioner>>> = {
+        'shared-pool': shared,
+        'pool-per-tenant': perTenant,
+      };
+      const provisioners: ProvisionersFor = (topology) => {
+        const p = byTopology[topology];
+        if (p === undefined) {
+          throw new Error(`Topology ${topology} is not offered by deployment tiered`);
+        }
+        return p;
+      };
+      return { shared, perTenant, provisioners };
+    }
+
+    function tieredService(registry: Registry, provisioners: ProvisionersFor): PlatformService {
+      return new PlatformService({
+        registry,
+        provisioners,
+        apiKeys,
+        deployment: 'tiered',
+        newTenantId: () => TENANT_A,
+        now: () => FIXED_NOW,
+      });
+    }
+
+    it('CreateTenant standard -> row topology shared-pool, the shared-pool provisioner, the standard plan', async () => {
+      const registry = new FakeRegistry();
+      const { shared, perTenant, provisioners } = tieredMocks();
+      shared.provisionTenant.mockResolvedValue({});
+      shared.createUser.mockResolvedValue({ user: userView('admin', true), temporaryPassword: 'T#1' });
+
+      const out = await tieredService(registry, provisioners).CreateTenant(
+        { name: 'Acme', adminEmail: 'a@e.com', tier: 'standard' },
+        CONTEXT,
+      );
+
+      expect(registry.items.get(TENANT_A)?.topology).toBe('shared-pool');
+      expect(out.tenant?.topology).toBe('shared-pool');
+      expect(out.tenant?.tier).toBe('standard');
+      expect(shared.assertEmailAvailable).toHaveBeenCalledWith('a@e.com');
+      expect(shared.provisionTenant).toHaveBeenCalledWith(TENANT_A, 'Acme');
+      expect(shared.createUser).toHaveBeenCalled();
+      expect(perTenant.assertEmailAvailable).not.toHaveBeenCalled();
+      expect(perTenant.provisionTenant).not.toHaveBeenCalled();
+      // The key lands in the standard tier's plan.
+      expect(apiKeys.create).toHaveBeenCalledWith(TENANT_A, 'standard');
+    });
+
+    it('CreateTenant premium -> row topology pool-per-tenant, the pool-per-tenant provisioner, the premium plan', async () => {
+      const registry = new FakeRegistry();
+      const { shared, perTenant, provisioners } = tieredMocks();
+      perTenant.provisionTenant.mockResolvedValue({
+        userPoolId: 'eu-central-1_P',
+        appClientId: 'client-p',
+        issuer: 'https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_P',
+      });
+      perTenant.createUser.mockResolvedValue({ user: userView('admin', true), temporaryPassword: 'T#1' });
+
+      const out = await tieredService(registry, provisioners).CreateTenant(
+        { name: 'Acme', adminEmail: 'a@e.com', tier: 'premium' },
+        CONTEXT,
+      );
+
+      expect(registry.items.get(TENANT_A)?.topology).toBe('pool-per-tenant');
+      expect(out.tenant?.topology).toBe('pool-per-tenant');
+      expect(out.tenant?.tier).toBe('premium');
+      expect(out.tenant?.userPoolId).toBe('eu-central-1_P');
+      expect(perTenant.provisionTenant).toHaveBeenCalledWith(TENANT_A, 'Acme');
+      expect(perTenant.createUser).toHaveBeenCalled();
+      expect(shared.provisionTenant).not.toHaveBeenCalled();
+      expect(apiKeys.create).toHaveBeenCalledWith(TENANT_A, 'premium');
+    });
+
+    it('CreateTenant without a tier -> 400 InvalidInput with a fixed message, before anything is written', async () => {
+      const registry = new FakeRegistry();
+      const { shared, perTenant, provisioners } = tieredMocks();
+
+      await expect(
+        tieredService(registry, provisioners).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
+      ).rejects.toMatchObject({
+        name: 'ValidationError',
+        reason: 'InvalidInput',
+        message: 'tier is required in a tiered deployment',
+      });
+      expect(registry.items.size).toBe(0);
+      expect(registry.calls).toEqual([]);
+      expect(shared.assertEmailAvailable).not.toHaveBeenCalled();
+      expect(perTenant.assertEmailAvailable).not.toHaveBeenCalled();
+      expect(apiKeys.create).not.toHaveBeenCalled();
+    });
+
+    it('a premium-tier clean-up after a key failure deprovisions through the pool-per-tenant provisioner', async () => {
+      const registry = new FakeRegistry();
+      const { shared, perTenant, provisioners } = tieredMocks();
+      perTenant.provisionTenant.mockResolvedValue({ userPoolId: 'eu-central-1_P' });
+      apiKeys.create.mockRejectedValue(new Error('apigw down'));
+
+      await expect(
+        tieredService(registry, provisioners).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com', tier: 'premium' }, CONTEXT),
+      ).rejects.toBeInstanceOf(InternalServerError);
+      expect(perTenant.deprovisionTenant).toHaveBeenCalledWith(
+        expect.objectContaining({ tenantId: TENANT_A, topology: 'pool-per-tenant', userPoolId: 'eu-central-1_P' }),
+      );
+      expect(shared.deprovisionTenant).not.toHaveBeenCalled();
+      expect(registry.items.size).toBe(0);
+    });
+
+    it('GetTenant and ListTenants return the tier derived from each row\'s topology', async () => {
+      const registry = new FakeRegistry();
+      const TENANT_B = '01ARZ3NDEKTSV4RRFFQ69G5FAW';
+      registry.items.set(TENANT_A, tenantRecord('ACTIVE', 'shared-pool'));
+      registry.items.set(TENANT_B, { ...tenantRecord('ACTIVE', 'pool-per-tenant'), tenantId: TENANT_B });
+      const service = tieredService(registry, tieredMocks().provisioners);
+
+      const got = await service.GetTenant({ tenantId: TENANT_B }, CONTEXT);
+      expect(got.tenant?.tier).toBe('premium');
+
+      const listed = await service.ListTenants({}, CONTEXT);
+      expect(listed.tenants?.map((t) => [t.tenantId, t.tier])).toEqual([
+        [TENANT_A, 'standard'],
+        [TENANT_B, 'premium'],
+      ]);
+    });
+
+    it('per-user operations dispatch on the row\'s topology, not the deployment', async () => {
+      const registry = new FakeRegistry();
+      registry.items.set(TENANT_A, tenantRecord('ACTIVE', 'pool-per-tenant'));
+      const { shared, perTenant, provisioners } = tieredMocks();
+      perTenant.createUser.mockResolvedValue({ user: userView('u1'), temporaryPassword: 'T#1' });
+      perTenant.getUser.mockResolvedValue(userView('u1'));
+      perTenant.listUsers.mockResolvedValue({ items: [], nextToken: undefined });
+      perTenant.setAdmin.mockResolvedValue(userView('u1', true));
+      perTenant.deleteUser.mockResolvedValue(undefined);
+      perTenant.issueToken.mockResolvedValue(TOKENS);
+      perTenant.refreshToken.mockResolvedValue(TOKENS);
+      const service = tieredService(registry, provisioners);
+
+      await service.CreateUser({ tenantId: TENANT_A, email: 'u1@e.com' }, CONTEXT);
+      await service.GetUser({ tenantId: TENANT_A, username: 'u1' }, CONTEXT);
+      await service.ListUsers({ tenantId: TENANT_A }, CONTEXT);
+      await service.UpdateUser({ tenantId: TENANT_A, username: 'u1', admin: true }, CONTEXT);
+      await service.DeleteUser({ tenantId: TENANT_A, username: 'u1' }, CONTEXT);
+      await service.IssueToken({ tenantId: TENANT_A, username: 'u1', password: 'Secret#123' }, CONTEXT);
+      await service.RefreshToken({ tenantId: TENANT_A, username: 'u1', refreshToken: 'r' }, CONTEXT);
+
+      for (const method of ['createUser', 'getUser', 'listUsers', 'setAdmin', 'deleteUser', 'issueToken', 'refreshToken'] as const) {
+        expect(perTenant[method]).toHaveBeenCalledTimes(1);
+        expect(shared[method]).not.toHaveBeenCalled();
+      }
+    });
+
+    it('DeleteTenant deprovisions a standard tenant through the shared-pool provisioner', async () => {
+      const registry = new FakeRegistry();
+      registry.items.set(TENANT_A, tenantRecord('ACTIVE', 'shared-pool'));
+      const { shared, perTenant, provisioners } = tieredMocks();
+      shared.deprovisionTenant.mockResolvedValue(undefined);
+
+      await tieredService(registry, provisioners).DeleteTenant({ tenantId: TENANT_A }, CONTEXT);
+
+      expect(shared.deprovisionTenant).toHaveBeenCalledWith(expect.objectContaining({ tenantId: TENANT_A, status: 'DELETING' }));
+      expect(perTenant.deprovisionTenant).not.toHaveBeenCalled();
+      expect(registry.items.has(TENANT_A)).toBe(false);
+    });
+
+    it('a row whose topology the deployment does not offer is a 500, never a fallback', async () => {
+      const registry = new FakeRegistry();
+      registry.items.set(TENANT_A, tenantRecord('ACTIVE', 'shared-pool-multi-tenant'));
+      const { shared, perTenant, provisioners } = tieredMocks();
+
+      await expect(
+        tieredService(registry, provisioners).GetUser({ tenantId: TENANT_A, username: 'u1' }, CONTEXT),
+      ).rejects.toBeInstanceOf(InternalServerError);
+      expect(shared.getUser).not.toHaveBeenCalled();
+      expect(perTenant.getUser).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('tier outside a tiered deployment (ADR-0027, P-4)', () => {
+    it.each<Deployment>(['shared-pool', 'pool-per-tenant', 'shared-pool-multi-tenant'])(
+      'CreateTenant with a tier in %s -> 400 UnsupportedInTopology, nothing written',
+      async (deployment) => {
+        const registry = new FakeRegistry();
+        const provisioner = mockProvisioner(deployment as Topology);
+
+        await expect(
+          makeService(registry, provisioner, deployment).CreateTenant(
+            { name: 'Acme', adminEmail: 'a@e.com', tier: 'standard' },
+            CONTEXT,
+          ),
+        ).rejects.toMatchObject({
+          name: 'ValidationError',
+          reason: 'UnsupportedInTopology',
+          message: 'tier is only accepted in a tiered deployment',
+        });
+        expect(registry.items.size).toBe(0);
+        expect(provisioner.assertEmailAvailable).not.toHaveBeenCalled();
+        expect(provisioner.provisionTenant).not.toHaveBeenCalled();
+      },
+    );
+
+    it('GetTenant carries no tier field in a single-topology deployment', async () => {
+      const registry = new FakeRegistry();
+      registry.items.set(TENANT_A, tenantRecord('ACTIVE', 'shared-pool'));
+      const out = await makeService(registry, mockProvisioner('shared-pool'), 'shared-pool').GetTenant(
+        { tenantId: TENANT_A },
+        CONTEXT,
+      );
+      expect(out.tenant).not.toHaveProperty('tier');
     });
   });
 

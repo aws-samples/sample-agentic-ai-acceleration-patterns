@@ -8,11 +8,11 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { convertEvent, convertVersion1Response } from '@smithy/server-apigateway';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { PlatformContext, PlatformService } from './platform';
-import { ENV, parseTopology, requireEnv } from '../shared/constants';
+import { ENV, parseDeployment, requireEnv } from '../shared/constants';
 import { DynamoDBRegistry } from '../shared/registry';
 import { ApiGatewayTenantApiKeys } from '../shared/tenant-api-keys';
 import { getPlatformServiceServiceHandler } from '../smithy/platform/typescript-ssdk-codegen/src';
-import { createProvisioner } from '../topology';
+import { createProvisioners } from '../topology';
 
 /**
  * The platform API handler — a pass-through (ADR-0005, context separation):
@@ -21,12 +21,14 @@ import { createProvisioner } from '../topology';
  * 3. dispatches to the Smithy-generated service handler
  *
  * No topology branch lives here (P-1): the optional pool/trigger env vars are
- * read unconditionally and passed to `createProvisioner`, which validates
- * what its topology actually needs. Everything below is built once at cold
- * start.
+ * read unconditionally and passed to `createProvisioners`, which builds the
+ * strategy for each topology the deployment offers (one, or both tiers' in
+ * `tiered`, ADR-0027) and validates what each actually needs. Everything
+ * below is built once at cold start; the service picks a strategy per
+ * request from the tenant's registry row.
  */
 
-const topology = parseTopology(process.env[ENV.topology]);
+const deployment = parseDeployment(process.env[ENV.topology]);
 const region = requireEnv('AWS_REGION');
 
 const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
@@ -48,7 +50,7 @@ const appClientId = process.env[ENV.appClientId];
 const triggerFunctionArn = process.env[ENV.triggerFunctionArn];
 const stackName = process.env[ENV.stackName];
 
-const provisioner = createProvisioner(topology, {
+const provisioners = createProvisioners(deployment, {
   cognito,
   region,
   sharedPool:
@@ -59,13 +61,16 @@ const provisioner = createProvisioner(topology, {
 
 // ADR-0025: per-tenant API keys in the stack's /tenant/* usage plan. The
 // plan is found by name at first use (ENV.tenantUsagePlanName explains why).
+// The premium plan (ADR-0027) is set by the stack in `tiered` only; read
+// unconditionally, the key module refuses a premium key without it.
 const apiKeys = new ApiGatewayTenantApiKeys(
   new APIGatewayClient({}),
   requireEnv(ENV.tenantUsagePlanName),
   requireEnv(ENV.stackName),
+  process.env[ENV.premiumUsagePlanName],
 );
 
-const service = new PlatformService({ registry, provisioner, apiKeys, topology });
+const service = new PlatformService({ registry, provisioners, apiKeys, deployment });
 const serviceHandler = getPlatformServiceServiceHandler<PlatformContext>(service);
 
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {

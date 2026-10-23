@@ -5,7 +5,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { PreTokenGenerationV2TriggerEvent, PreTokenGenerationV2TriggerHandler } from 'aws-lambda';
 import { handlePreTokenGeneration } from './pre-token-generation';
-import { ENV, parseTopology, requireEnv } from '../shared/constants';
+import { ENV, parseDeployment, requireEnv } from '../shared/constants';
 import { DynamoDBRegistry } from '../shared/registry';
 import { createTenantSource } from '../topology';
 
@@ -18,13 +18,13 @@ import { createTenantSource } from '../topology';
  * constructs a DynamoDB document client and nothing Cognito-side.
  */
 
-const topology = parseTopology(process.env[ENV.topology]);
+const deployment = parseDeployment(process.env[ENV.topology]);
 const tableName = requireEnv(ENV.tableName);
 const poolIndexName = requireEnv(ENV.poolIndexName);
 
 const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const registry = new DynamoDBRegistry(tableName, documentClient, poolIndexName);
-const source = createTenantSource(topology);
+const source = createTenantSource(deployment);
 
 export const handler: PreTokenGenerationV2TriggerHandler = async (
   event: PreTokenGenerationV2TriggerEvent,

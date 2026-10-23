@@ -14,6 +14,62 @@
 export const TOPOLOGIES = ['pool-per-tenant', 'shared-pool', 'shared-pool-multi-tenant'] as const;
 export type Topology = (typeof TOPOLOGIES)[number];
 
+/**
+ * What a stack deploys (spec P-7, ADR-0027): one topology, or `tiered`, which
+ * offers a `standard` tier (`shared-pool`) and a `premium` tier
+ * (`pool-per-tenant`) side by side. `ENV.topology` and the `topology` CDK
+ * context carry a Deployment; a registry row's `topology` is always a
+ * Topology (the strategy that tenant runs on).
+ */
+export const TIERED = 'tiered';
+export const DEPLOYMENTS = [...TOPOLOGIES, TIERED] as const;
+export type Deployment = (typeof DEPLOYMENTS)[number];
+
+/** Returns the deployment, or throws with the accepted values listed. */
+export function parseDeployment(value: unknown): Deployment {
+  if (typeof value === 'string' && (DEPLOYMENTS as readonly string[]).includes(value)) {
+    return value as Deployment;
+  }
+  const shown = value === undefined || value === '' ? '(missing)' : `'${String(value)}'`;
+  throw new Error(
+    `Invalid topology ${shown}. Pass exactly one of: ${DEPLOYMENTS.join(', ')} ` +
+      '(for example --context topology=shared-pool).',
+  );
+}
+
+/** A tenant's tier in a `tiered` deployment (ADR-0027). */
+export const TIERS = ['standard', 'premium'] as const;
+export type Tier = (typeof TIERS)[number];
+
+/** The topology each tier runs on (ADR-0027). */
+export const TIER_TOPOLOGY: Readonly<Record<Tier, Topology>> = {
+  standard: 'shared-pool',
+  premium: 'pool-per-tenant',
+};
+
+/** The topologies a deployment offers: one, or both tiers' in `tiered`. */
+export function topologiesOf(deployment: Deployment): readonly Topology[] {
+  return deployment === TIERED ? [TIER_TOPOLOGY.standard, TIER_TOPOLOGY.premium] : [deployment];
+}
+
+/** True when the deployment has the stack-created shared pool. */
+export function hasSharedPool(deployment: Deployment): boolean {
+  return topologiesOf(deployment).some((t) => t !== 'pool-per-tenant');
+}
+
+/** True when the deployment creates pools at run time, one per tenant. */
+export function hasPerTenantPools(deployment: Deployment): boolean {
+  return topologiesOf(deployment).includes('pool-per-tenant');
+}
+
+/** The tier of a tenant's topology, in a `tiered` deployment only. */
+export function tierOf(topology: Topology, deployment: Deployment): Tier | undefined {
+  if (deployment !== TIERED) {
+    return undefined;
+  }
+  return (Object.keys(TIER_TOPOLOGY) as Tier[]).find((tier) => TIER_TOPOLOGY[tier] === topology);
+}
+
 /** Returns the topology, or throws with the accepted values listed. */
 export function parseTopology(value: unknown): Topology {
   if (typeof value === 'string' && (TOPOLOGIES as readonly string[]).includes(value)) {
@@ -85,9 +141,14 @@ export function apiKeyName(tenantId: string): string {
   return `tenant-${tenantId}`;
 }
 
-/** The stack's one usage plan for `/tenant/*` (ADR-0025). */
+/** The stack's usage plan for `/tenant/*` (ADR-0025); the standard tier's in `tiered`. */
 export function tenantUsagePlanName(stackName: string): string {
   return `${stackName}-tenant`;
+}
+
+/** `tiered` only: the premium tier's usage plan for `/tenant/*` (ADR-0025, ADR-0027). */
+export function premiumUsagePlanName(stackName: string): string {
+  return `${stackName}-tenant-premium`;
 }
 
 /** Token lifetimes (N-1). */
@@ -130,6 +191,13 @@ export const NARROW_SCOPE_KEY = 'tenant_identity_narrow_scope';
 export const INVALID_TARGET = 'invalid_target';
 export const INVALID_SCOPE = 'invalid_scope';
 
+/**
+ * ADR-0027 binding rule: the refusal rule name the authoriser logs, and the
+ * reason the trigger refuses, when a tenant is reached through a pool that is
+ * not its own.
+ */
+export const POOL_MISMATCH = 'pool_mismatch';
+
 // ---------------------------------------------------------------------------
 // RFC 8693 (spec §5.4)
 // ---------------------------------------------------------------------------
@@ -148,6 +216,7 @@ export function tenantResource(tenantId: string): string {
 // ---------------------------------------------------------------------------
 
 export const ENV = {
+  /** The stack's Deployment (a topology, or `tiered`); parse with parseDeployment. */
   topology: 'TOPOLOGY',
   tableName: 'TABLE_NAME',
   poolIndexName: 'POOL_INDEX_NAME',
@@ -165,6 +234,8 @@ export const ENV = {
    * the function.
    */
   tenantUsagePlanName: 'TENANT_USAGE_PLAN_NAME',
+  /** Platform function, `tiered` only: the premium tier's usage plan name (ADR-0027). */
+  premiumUsagePlanName: 'PREMIUM_USAGE_PLAN_NAME',
   /** Tenant-user function, pool-per-tenant only: the role it assumes per tenant (ADR-0026). */
   tenantScopedRoleArn: 'TENANT_SCOPED_ROLE_ARN',
 } as const;

@@ -16,9 +16,13 @@ import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import {
   ACCESS_TOKEN_MINUTES,
+  Deployment,
   ENV,
+  hasPerTenantPools,
+  hasSharedPool,
   ID_TOKEN_MINUTES,
   POOL_INDEX_NAME,
+  premiumUsagePlanName,
   REFRESH_TOKEN_DAYS,
   SAMPLE_TAG_KEY,
   SAMPLE_TAG_VALUE,
@@ -27,22 +31,27 @@ import {
   TENANT_SESSION_TAG_KEY,
   TENANT_TAG_KEY,
   tenantUsagePlanName,
-  Topology,
+  TIERED,
+  topologiesOf,
 } from './shared/constants';
 import { LogDrain } from './shared/log-drain';
 import { acknowledgeGranularFinding, nagFindingResource, suppressTemplateScanners } from './shared/nag';
 import { IntegrationMapping, mergeOpenApi, patchIntegrations, requireApiKey } from './shared/openapi';
 import { TenantDrain } from './teardown/tenant-drain-resource';
 
-/** Stack props: the deploy-time topology (ADR-0001) plus the usual StackProps. */
+/** Stack props: the deploy-time choice (ADR-0001, ADR-0027) plus the usual StackProps. */
 export interface TenantIdentityStackProps extends StackProps {
-  /** The deploy-time topology (spec P-7, ADR-0001). */
-  readonly topology: Topology;
+  /**
+   * What the stack deploys (spec P-7, ADR-0001): one topology, or `tiered`
+   * (ADR-0027), which deploys the shared pool for the standard tier and the
+   * pool-per-tenant machinery for the premium tier side by side.
+   */
+  readonly topology: Deployment;
   /**
    * Publish the `/application-plane/shared/identity/*` parameters (R-6).
    * Default true. The names are fixed, so only one stack per account and
    * Region may publish them; the integration test turns it off on all but
-   * one of its three stacks (ADR-0017).
+   * one of its stacks (ADR-0017).
    */
   readonly publishSharedParameters?: boolean;
 }
@@ -120,23 +129,28 @@ const TENANT_ID_PATTERN = '?'.repeat(26);
  * shared `/tenant/*` ceiling for all tenants together; `tenantPerKey` is each
  * tenant's own usage-plan limit (R-19, ADR-0025). The shared ceiling is five
  * times the per-tenant one, so no single tenant can fill it (T-31).
+ * `tenantPremiumKey` is the premium tier's per-tenant limit in a `tiered`
+ * deployment (ADR-0027): higher than standard, still under the shared ceiling.
  */
 const THROTTLE = {
   platform: { rateLimit: 10, burstLimit: 20 }, // N-5
   token: { rateLimit: 20, burstLimit: 40 }, // N-6
   tenant: { rateLimit: 50, burstLimit: 100 }, // N-7, shared
-  tenantPerKey: { rateLimit: 10, burstLimit: 20 }, // N-7 / R-19, per tenant
+  tenantPerKey: { rateLimit: 10, burstLimit: 20 }, // N-7 / R-19, per tenant (standard tier in tiered)
+  tenantPremiumKey: { rateLimit: 25, burstLimit: 50 }, // ADR-0027, per premium tenant (tiered only)
 } as const;
 
 /**
- * Tenant Identity, one stack per topology (ADR-0001). One REST API
- * (SpecRestApi) built from the three merged Smithy OpenAPI documents, five
- * Lambda functions whose roles are asymmetric by design (P-8), a sixth that
- * drains the registry on stack delete (ADR-0022), the tenant
- * registry, and — for the shared-pool topologies — one user pool with the
+ * Tenant Identity, one stack per deployment (ADR-0001, ADR-0027). One REST
+ * API (SpecRestApi) built from the three merged Smithy OpenAPI documents,
+ * five Lambda functions whose roles are asymmetric by design (P-8), a sixth
+ * that drains the registry on stack delete (ADR-0022), the tenant registry,
+ * and — for the shared-pool topologies — one user pool with the
  * pre-token-generation trigger attached. `pool-per-tenant` creates no pool
  * at deploy time; the platform function creates one per tenant at
- * onboarding (spec §7.1).
+ * onboarding (spec §7.1). `tiered` deploys both: the shared pool for the
+ * standard tier and the pool-per-tenant grants, tags and tenant-scoped role
+ * for the premium tier (ADR-0027).
  */
 export class TenantIdentityStack extends Stack {
   /** The deployed API base URL (with trailing slash). */
@@ -146,8 +160,13 @@ export class TenantIdentityStack extends Stack {
     super(scope, id, props);
 
     const { topology } = props;
-    const isPoolPerTenant = topology === 'pool-per-tenant';
-    const isShared = !isPoolPerTenant;
+    // The two halves a deployment may have (ADR-0027): a stack-created
+    // shared pool, and pools created at run time, one per tenant. A single
+    // topology has one of them; `tiered` has both, so every block below is
+    // guarded by one flag or the other, never by an if/else on the topology.
+    const sharedPool = hasSharedPool(topology);
+    const perTenantPools = hasPerTenantPools(topology);
+    const tiered = topology === TIERED;
 
     // --- Tenant registry (spec §4, R-3, N-2) ------------------------------
     // Single table, one item type (TENANT#<id> / META). GSI byUserPoolId
@@ -218,6 +237,9 @@ export class TenantIdentityStack extends Stack {
     const tokenFn = new NodejsFunction(this, 'TokenFunction', {
       entry: path.join(__dirname, 'token-exchange/token-exchange.function.ts'),
       ...functionProps(this, 'TokenFunctionLogs'),
+      // ADR-0027: the function reads the deployment to decide whether a
+      // client other than the shared pool's is acceptable (T-28).
+      environment: { [ENV.topology]: topology },
     });
     acknowledgeLambdaBasicExecutionRole(tokenFn);
 
@@ -227,6 +249,8 @@ export class TenantIdentityStack extends Stack {
       entry: path.join(__dirname, 'tenant-api/tenant-authorizer.function.ts'),
       ...functionProps(this, 'AuthorizerFunctionLogs'),
       environment: {
+        // ADR-0027: shared pool, per-tenant pools, or both.
+        [ENV.topology]: topology,
         [ENV.tableName]: table.tableName,
         [ENV.poolIndexName]: GSI_BY_USER_POOL_ID,
       },
@@ -255,6 +279,8 @@ export class TenantIdentityStack extends Stack {
         [ENV.poolIndexName]: GSI_BY_USER_POOL_ID,
         // ADR-0025: looked up by name; the plan's id would be a cycle.
         [ENV.tenantUsagePlanName]: tenantUsagePlanName(this.stackName),
+        // ADR-0027: the premium tier's plan, same reason. tiered only.
+        ...(tiered ? { [ENV.premiumUsagePlanName]: premiumUsagePlanName(this.stackName) } : {}),
       },
     });
     // Registry read/write (M-14: only the platform function writes it).
@@ -273,11 +299,12 @@ export class TenantIdentityStack extends Stack {
       }),
     );
     // cdk-nag keeps ONE reason per finding id per construct (the first
-    // acknowledgment wins when it writes the template metadata), so the
-    // pool-per-tenant platform role, which has two '*' resources (X-Ray and
-    // CreateUserPool), documents both in a single reason here.
+    // acknowledgment wins when it writes the template metadata), so a
+    // platform role that creates pools at run time (pool-per-tenant, tiered),
+    // which has two '*' resources (X-Ray and CreateUserPool), documents both
+    // in a single reason here.
     acknowledgeLambdaBasicExecutionRole(platformFn, {
-      wildcardResourceReason: isPoolPerTenant
+      wildcardResourceReason: perTenantPools
         ? 'Two actions take no resource ARN. (1) Active X-Ray tracing grants xray:PutTraceSegments/PutTelemetryRecords, which the X-Ray API only accepts on \'*\'. (2) N-3 / threat-model M-7 (T-7): cognito-idp:CreateUserPool has no resource ARN, so it is granted on * and constrained by a RequestTag condition (only the sample, stack and tenant tags, only those keys). Per-pool actions are scoped to userpool/* with ResourceTag conditions on the sample tag and the stack tag because pools are created at runtime in pool-per-tenant.'
         : undefined,
     });
@@ -328,18 +355,19 @@ export class TenantIdentityStack extends Stack {
     const tenantDrain = new TenantDrain(this, 'TenantDrain', { handler: drainFn });
     tenantDrain.dependsOn(table);
 
-    if (isShared) {
-      // shared-pool*: exactly one pool, created by the stack (R-5). Its
-      // custom attribute names the tenant only in `shared-pool` (§7.2);
-      // `shared-pool-multi-tenant` uses groups, no custom attribute (§7.3).
-      const customAttributes =
-        topology === 'shared-pool'
-          ? {
-            // §7.2, P-3: immutable, not writable by the app client. A ULID
-            // is 26 chars.
-            [TENANT_ATTRIBUTE_NAME]: new cognito.StringAttribute({ minLen: 26, maxLen: 26, mutable: false }),
-          }
-          : undefined;
+    if (sharedPool) {
+      // shared-pool*, and the standard tier of tiered: exactly one pool,
+      // created by the stack (R-5). Its custom attribute names the tenant
+      // only where the `shared-pool` strategy runs (§7.2; in tiered that is
+      // the standard tier, ADR-0027); `shared-pool-multi-tenant` uses groups,
+      // no custom attribute (§7.3).
+      const customAttributes = topologiesOf(topology).includes('shared-pool')
+        ? {
+          // §7.2, P-3: immutable, not writable by the app client. A ULID
+          // is 26 chars.
+          [TENANT_ATTRIBUTE_NAME]: new cognito.StringAttribute({ minLen: 26, maxLen: 26, mutable: false }),
+        }
+        : undefined;
 
       userPool = new cognito.UserPool(this, 'UserPool', {
         userPoolName: `${this.stackName}-pool`,
@@ -427,7 +455,9 @@ export class TenantIdentityStack extends Stack {
       tenantUsersFn.addToRolePolicy(
         new iam.PolicyStatement({
           // R-8: NO CreateUserPool/DeleteUserPool/CreateGroup/DeleteGroup, and
-          // no test-aid sign-in actions (P-8).
+          // no test-aid sign-in actions (P-8). In tiered this is the standard
+          // tier's code-only wall (T-18); premium tenants go through the
+          // tenant-scoped role below (ADR-0026, ADR-0027).
           actions: TENANT_USER_ACTIONS,
           resources: [userPool.userPoolArn],
         }),
@@ -441,11 +471,14 @@ export class TenantIdentityStack extends Stack {
       );
 
       suppressUserPoolFindings(userPool);
-    } else {
-      // pool-per-tenant: the platform function creates pools at onboarding.
-      // It must know the trigger to attach to each new pool (ENV, §7.1).
+    }
+
+    if (perTenantPools) {
+      // pool-per-tenant, and the premium tier of tiered: the platform
+      // function creates pools at onboarding. It must know the trigger to
+      // attach to each new pool (ENV, §7.1).
       platformFn.addEnvironment(ENV.triggerFunctionArn, triggerFn.functionArn);
-      // ENV.stackName is set for every topology below (API key tag, ADR-0025).
+      // ENV.stackName is set for every deployment below (API key tag, ADR-0025).
 
       // Both tags, so a role reaches only pools this stack created (N-3):
       // another stack in the account tags its pools with its own name.
@@ -513,11 +546,13 @@ export class TenantIdentityStack extends Stack {
           },
         }),
       );
-      // ADR-0026: the tenant-user function holds no Cognito action itself. It
-      // assumes TenantScopedRole once per tenant, tagging the session with
-      // the authoriser's tenant id; that role reaches only the pool whose
-      // tenant tag equals the session tag. IAM then enforces the T-18 tenant
-      // boundary; the R-12 code check stays as defence in depth.
+      // ADR-0026: for per-tenant pools the tenant-user function holds no
+      // Cognito action itself (in tiered its own role reaches only the shared
+      // pool, above). It assumes TenantScopedRole once per tenant, tagging
+      // the session with the authoriser's tenant id; that role reaches only
+      // the pool whose tenant tag equals the session tag. IAM then enforces
+      // the T-18 tenant boundary; the R-12 code check stays as defence in
+      // depth.
       const tenantScopedRole = new iam.Role(this, 'TenantScopedRole', {
         description: 'Tenant-user Cognito actions on the one pool whose tenant tag matches the session tag (ADR-0026)',
         assumedBy: new iam.ArnPrincipal(tenantUsersFn.role!.roleArn)
@@ -711,6 +746,23 @@ export class TenantIdentityStack extends Stack {
     // The drain deletes every tenant's key before the plan goes (ADR-0022).
     tenantDrain.dependsOn(tenantUsagePlan);
 
+    // ADR-0027: in tiered, a second plan on the same stage for the premium
+    // tier, with a higher per-tenant limit. CreateTenant adds each tenant's
+    // key to its tier's plan. Both sit under the stage's shared /tenant
+    // ceiling (THROTTLE.tenant), so the T-31 argument holds for both tiers.
+    const usagePlans = [tenantUsagePlan];
+    if (tiered) {
+      const premiumUsagePlan = new apigateway.UsagePlan(this, 'PremiumUsagePlan', {
+        name: premiumUsagePlanName(this.stackName),
+        description: 'Per-tenant throttle for /tenant/*, premium tier (ADR-0025, ADR-0027); one API key per tenant',
+        throttle: { rateLimit: THROTTLE.tenantPremiumKey.rateLimit, burstLimit: THROTTLE.tenantPremiumKey.burstLimit },
+        apiStages: [{ api, stage: api.deploymentStage }],
+      });
+      tenantDrain.dependsOn(premiumUsagePlan);
+      usagePlans.push(premiumUsagePlan);
+      new CfnOutput(this, 'PremiumUsagePlanId', { value: premiumUsagePlan.usagePlanId });
+    }
+
     // API Gateway control-plane ARNs for the keys (ADR-0025). CreateApiKey is
     // POST on /apikeys; DeleteApiKey is DELETE on /apikeys/<id>, and key ids
     // are generated, so it is /apikeys/*. Every key is created carrying the
@@ -753,24 +805,25 @@ export class TenantIdentityStack extends Stack {
         conditions: { StringEquals: { [`aws:ResourceTag/${STACK_TAG_KEY}`]: this.stackName } },
       });
     platformFn.addToRolePolicy(deleteOwnKeys());
-    // GetUsagePlans, to find this stack's plan by name at first use.
+    // GetUsagePlans, to find this stack's plan(s) by name at first use.
     platformFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['apigateway:GET'],
         resources: [`arn:${this.partition}:apigateway:${this.region}::/usageplans`],
       }),
     );
-    // CreateUsagePlanKey on this plan only. A separate policy, not the role's
-    // default one: the function depends on its default policy, and naming the
-    // plan there would close the cycle function -> plan -> API -> function.
+    // CreateUsagePlanKey on this stack's plan(s) only. A separate policy, not
+    // the role's default one: the function depends on its default policy, and
+    // naming a plan there would close the cycle function -> plan -> API ->
+    // function. In tiered the premium plan is a second resource (ADR-0027).
     new iam.Policy(platformFn, 'UsagePlanKeyPolicy', {
       roles: [platformFn.role!],
       statements: [
         new iam.PolicyStatement({
           actions: ['apigateway:POST'],
-          resources: [
-            `arn:${this.partition}:apigateway:${this.region}::/usageplans/${tenantUsagePlan.usagePlanId}/keys`,
-          ],
+          resources: usagePlans.map(
+            (plan) => `arn:${this.partition}:apigateway:${this.region}::/usageplans/${plan.usagePlanId}/keys`,
+          ),
         }),
       ],
     });
@@ -911,6 +964,7 @@ export class TenantIdentityStack extends Stack {
 
     // --- Discovery parameters (R-6, §6.3, ADR-0017) + outputs ------------
     if (props.publishSharedParameters ?? true) {
+      // The deployment value: a topology, or `tiered` (ADR-0027).
       new ssm.StringParameter(this, 'TopologyParameter', {
         parameterName: '/application-plane/shared/identity/topology',
         stringValue: topology,
@@ -919,7 +973,10 @@ export class TenantIdentityStack extends Stack {
         parameterName: '/application-plane/shared/identity/apiUrl',
         stringValue: api.url,
       });
-      if (isShared && userPool !== undefined && appClient !== undefined) {
+      // The shared pool's ids. In tiered they are the standard tier's; a
+      // premium tenant's pool is read from GetTenant, never from here
+      // (ADR-0027).
+      if (sharedPool && userPool !== undefined && appClient !== undefined) {
         new ssm.StringParameter(this, 'UserPoolIdParameter', {
           parameterName: '/application-plane/shared/identity/userPoolId',
           stringValue: userPool.userPoolId,
@@ -970,7 +1027,7 @@ export class TenantIdentityStack extends Stack {
     new CfnOutput(this, 'Topology', { value: topology });
     new CfnOutput(this, 'RegistryTableName', { value: table.tableName });
     new CfnOutput(this, 'TenantUsagePlanId', { value: tenantUsagePlan.usagePlanId });
-    if (isShared && userPool !== undefined && appClient !== undefined) {
+    if (sharedPool && userPool !== undefined && appClient !== undefined) {
       new CfnOutput(this, 'UserPoolId', { value: userPool.userPoolId });
       new CfnOutput(this, 'AppClientId', { value: appClient.userPoolClientId });
     }

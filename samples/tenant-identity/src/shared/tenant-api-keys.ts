@@ -12,6 +12,10 @@
  * Topology-independent: the platform service creates the key during
  * CreateTenant's provision step (ADR-0021) and deletes it on DeleteTenant;
  * the teardown drain deletes it too (ADR-0022).
+ *
+ * `tiered` (ADR-0027): one usage plan per tier. A premium tenant's key goes
+ * in the premium plan, every other key in the stack's (standard) plan. The
+ * tier is the caller's choice per key; this module never reads a topology.
  */
 
 import {
@@ -21,7 +25,7 @@ import {
   DeleteApiKeyCommand,
   GetUsagePlansCommand,
 } from '@aws-sdk/client-api-gateway';
-import { apiKeyName, STACK_TAG_KEY } from './constants';
+import { apiKeyName, STACK_TAG_KEY, type Tier } from './constants';
 import { errorName, log } from './logger';
 
 /** What CreateTenant stores on the registry row (ADR-0025). */
@@ -35,8 +39,11 @@ export interface TenantApiKeys {
    * Creates the tenant's key and adds it to the usage plan. On a usage-plan
    * failure the key just created is deleted (best effort) and the error is
    * rethrown, so a failed call leaves no key behind.
+   *
+   * `tier` (ADR-0027): `premium` puts the key in the premium tier's plan;
+   * `standard` or absent (a single-topology deployment) in the stack's plan.
    */
-  create(tenantId: string): Promise<TenantApiKey>;
+  create(tenantId: string, tier?: Tier): Promise<TenantApiKey>;
   /** Deletes the key. Idempotent: an absent id or an already-deleted key is not an error. */
   delete(apiKeyId: string | undefined): Promise<void>;
 }
@@ -49,7 +56,8 @@ function isNotFound(error: unknown): boolean {
 }
 
 export class ApiGatewayTenantApiKeys implements TenantApiKeys {
-  private usagePlanId: Promise<string> | undefined;
+  /** Resolved plan ids by plan name; one in-flight or settled lookup per name. */
+  private readonly usagePlanIds = new Map<string, Promise<string>>();
 
   /**
    * `usagePlanName` is resolved to an id on first use and cached for the
@@ -59,20 +67,23 @@ export class ApiGatewayTenantApiKeys implements TenantApiKeys {
    * `stackName` is the value of the STACK_TAG_KEY tag every key is created
    * with: the roles may create only keys with that tag and delete only keys
    * that carry it (T-7). Also needed only by `create`.
+   * `premiumUsagePlanName` (ADR-0027) is the premium tier's plan, set only in
+   * a `tiered` deployment; `create(_, 'premium')` throws without it.
    */
   constructor(
     private readonly client: APIGatewayClient,
     private readonly usagePlanName: string | undefined,
     private readonly stackName?: string,
+    private readonly premiumUsagePlanName?: string,
   ) {}
 
-  async create(tenantId: string): Promise<TenantApiKey> {
+  async create(tenantId: string, tier?: Tier): Promise<TenantApiKey> {
     const stackName = this.stackName;
     if (stackName === undefined || stackName === '') {
       // Deployment wiring bug: IAM refuses an untagged key, so fail first.
       throw new Error('Creating a tenant API key requires the stack name');
     }
-    const usagePlanId = await this.resolveUsagePlanId();
+    const usagePlanId = await this.resolveUsagePlanId(this.planNameFor(tier));
     // A generated value: API Gateway picks it, so it is never derived from
     // the tenant id or anything a caller knows.
     const key = await this.client.send(
@@ -116,24 +127,40 @@ export class ApiGatewayTenantApiKeys implements TenantApiKeys {
     }
   }
 
-  private resolveUsagePlanId(): Promise<string> {
-    if (this.usagePlanId === undefined) {
-      const lookup = this.lookUpUsagePlanId();
-      // A failed lookup is not cached: the next call retries.
-      lookup.catch(() => {
-        this.usagePlanId = undefined;
-      });
-      this.usagePlanId = lookup;
+  /**
+   * The plan a key of this tier belongs in (ADR-0027). Absence is a
+   * deployment wiring bug: only the platform function creates keys, and only
+   * a `tiered` deployment sets the premium plan.
+   */
+  private planNameFor(tier: Tier | undefined): string {
+    if (tier === 'premium') {
+      const name = this.premiumUsagePlanName;
+      if (name === undefined || name === '') {
+        throw new Error('Creating a premium tenant API key requires the premium usage plan name');
+      }
+      return name;
     }
-    return this.usagePlanId;
-  }
-
-  private async lookUpUsagePlanId(): Promise<string> {
     const name = this.usagePlanName;
     if (name === undefined || name === '') {
-      // Deployment wiring bug: only the platform function creates keys.
       throw new Error('Creating a tenant API key requires the usage plan name');
     }
+    return name;
+  }
+
+  private resolveUsagePlanId(name: string): Promise<string> {
+    let lookup = this.usagePlanIds.get(name);
+    if (lookup === undefined) {
+      lookup = this.lookUpUsagePlanId(name);
+      // A failed lookup is not cached: the next call retries.
+      lookup.catch(() => {
+        this.usagePlanIds.delete(name);
+      });
+      this.usagePlanIds.set(name, lookup);
+    }
+    return lookup;
+  }
+
+  private async lookUpUsagePlanId(name: string): Promise<string> {
     const ids: string[] = [];
     let position: string | undefined;
     do {

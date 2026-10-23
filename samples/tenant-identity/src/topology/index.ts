@@ -7,9 +7,22 @@ import type { Provisioner, TenantSource } from './provisioner';
 import { SharedPoolProvisioner } from './shared-pool';
 import { SharedPoolMultiTenantProvisioner } from './shared-pool-multi-tenant';
 import { tenantSourceFor } from './tenant-source';
-import type { Topology } from '../shared/constants';
+import { type Deployment, type Topology, topologiesOf } from '../shared/constants';
 
 export type { Provisioner, TenantSource } from './provisioner';
+export { bindingHolds, type ArrivedVia } from './binding';
+
+/**
+ * ADR-0026: true for the topology whose tenant-user calls run on credentials
+ * scoped to the tenant (its own pool, tagged with its id). Kept here so no
+ * module outside `src/topology/` names a topology (P-1).
+ */
+export function usesTenantScopedCredentials(topology: Topology): boolean {
+  return topology === 'pool-per-tenant';
+}
+
+/** A tenant's strategy, by the topology on its registry row (ADR-0027). */
+export type ProvisionersFor = (topology: Topology) => Provisioner;
 
 /** What a provisioner needs, resolved once at cold start from the function environment. */
 export interface ProvisionerDeps {
@@ -35,6 +48,28 @@ export function createProvisioner(topology: Topology, deps: ProvisionerDeps): Pr
   }
 }
 
-export function createTenantSource(topology: Topology): TenantSource {
-  return tenantSourceFor(topology);
+/**
+ * ADR-0027: the provisioner for each topology the deployment offers, built
+ * lazily and once each. Callers pass the topology on the tenant's registry
+ * row, never the deployment. A topology the deployment does not offer is a
+ * registry/wiring bug and throws (a 500), never falls back.
+ */
+export function createProvisioners(deployment: Deployment, deps: ProvisionerDeps): ProvisionersFor {
+  const offered = topologiesOf(deployment);
+  const built = new Map<Topology, Provisioner>();
+  return (topology: Topology) => {
+    if (!offered.includes(topology)) {
+      throw new Error(`Topology ${topology} is not offered by deployment ${deployment}`);
+    }
+    let provisioner = built.get(topology);
+    if (provisioner === undefined) {
+      provisioner = createProvisioner(topology, deps);
+      built.set(topology, provisioner);
+    }
+    return provisioner;
+  };
+}
+
+export function createTenantSource(deployment: Deployment): TenantSource {
+  return tenantSourceFor(deployment);
 }

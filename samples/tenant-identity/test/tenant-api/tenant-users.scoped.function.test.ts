@@ -28,21 +28,28 @@ sts.on(AssumeRoleCommand).callsFake((input: { Tags: { Value: string }[] }) => ({
   },
 }));
 
+// Every createProvisioners call is one credential set: the function's own
+// (built at cold start, never used here) and one per tenant on scoped
+// credentials. The returned dispatcher hands back one object per set.
 const built: { tenantDeps: any }[] = [];
 jest.mock('../../src/topology', () => ({
-  createProvisioner: (_topology: string, deps: unknown) => {
+  // The real predicate: which topology runs on tenant-scoped credentials.
+  usesTenantScopedCredentials: jest.requireActual('../../src/topology').usesTenantScopedCredentials,
+  createProvisioners: (_deployment: string, deps: unknown) => {
     built.push({ tenantDeps: deps });
-    return { built: built.length };
+    const provisioner = { built: built.length };
+    return () => provisioner;
   },
 }));
 
-// Capture which provisioner the service would use for the request.
+// Capture which provisioner the service would use for the request. Every
+// tenant here is pool-per-tenant, as the deployment is.
 let usedProvisioner: unknown;
 jest.mock('../../src/tenant-api/tenant-users', () => ({
   TenantUsersService: class {
-    constructor(_registry: unknown, private readonly provisionerFor: (t: string) => unknown) {}
+    constructor(_registry: unknown, private readonly provisionerFor: (t: string, topology: string) => unknown) {}
     async ListTenantUsers(_input: unknown, context: { tenantId: string }) {
-      usedProvisioner = this.provisionerFor(context.tenantId);
+      usedProvisioner = this.provisionerFor(context.tenantId, 'pool-per-tenant');
       return { users: [] };
     }
   },
@@ -88,12 +95,13 @@ describe('tenant-users handler with a tenant-scoped role (ADR-0026)', () => {
     expect(usedProvisioner).toBe(forA); // reused, not rebuilt
     await handler(proxyEvent(TENANT_B));
     expect(usedProvisioner).not.toBe(forA);
-    expect(built).toHaveLength(2);
+    // built[0] is the function's own set (cold start); then one per tenant.
+    expect(built).toHaveLength(3);
 
     // Resolve each Cognito client's credentials: one AssumeRole per tenant,
     // with that tenant as the session tag.
-    const credsA = await built[0].tenantDeps.cognito.config.credentials();
-    const credsB = await built[1].tenantDeps.cognito.config.credentials();
+    const credsA = await built[1].tenantDeps.cognito.config.credentials();
+    const credsB = await built[2].tenantDeps.cognito.config.credentials();
     expect(credsA.accessKeyId).toBe(`ASIA-${TENANT_A}`);
     expect(credsB.accessKeyId).toBe(`ASIA-${TENANT_B}`);
     const calls = sts.commandCalls(AssumeRoleCommand).map((c: any) => c.args[0].input);

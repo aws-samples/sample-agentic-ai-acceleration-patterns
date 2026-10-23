@@ -58,6 +58,10 @@ operation CreateTenant {
         /// The tenant's first admin.
         @required
         adminEmail: EmailAddress
+
+        /// Required in a `tiered` deployment, refused (UnsupportedInTopology)
+        /// in any other (ADR-0027). Chosen once; never inferred or defaulted.
+        tier: Tier
     }
 
     output := {
