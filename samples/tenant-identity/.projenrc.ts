@@ -84,6 +84,9 @@ project.gitignore.exclude('cdk.integ.out/');
 // Holmes MCP keeps its local project link here.
 project.gitignore.exclude('.holmes/');
 
+// ASH writes its reports here (.ash/.ash.yaml is committed).
+project.gitignore.exclude('.ash/ash_output/');
+
 // Regenerate the SSDKs + OpenAPI documents from the model before every compile
 project.preCompileTask.exec('smithy build');
 

@@ -50,4 +50,5 @@ TODO.md
 .kiro/
 cdk.integ.out/
 .holmes/
+.ash/ash_output/
 !/.projenrc.ts
