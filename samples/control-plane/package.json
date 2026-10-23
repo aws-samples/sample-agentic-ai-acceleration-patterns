@@ -1,6 +1,6 @@
 {
   "name": "control-plane",
-  "description": "The simple cell-based control plane - multi-tenant SaaS sample",
+  "description": "The simple cell-based control plane - multi-tenant sample",
   "scripts": {
     "build": "projen build",
     "bundle": "projen bundle",
@@ -26,8 +26,8 @@
     "projen": "projen"
   },
   "devDependencies": {
-    "@aws-cdk/integ-runner": "2.205.0",
-    "@aws-cdk/integ-tests-alpha": "2.268.0-alpha.0",
+    "@aws-cdk/integ-runner": "2.205.8",
+    "@aws-cdk/integ-tests-alpha": "2.274.0-alpha.0",
     "@stylistic/eslint-plugin": "^2",
     "@types/aws-lambda": "8.10.163",
     "@types/jest": "^30.0.0",
@@ -58,7 +58,7 @@
     "@smithy/server-apigateway": "0.3.3",
     "@smithy/server-common": "0.4.2",
     "@smithy/types": "4.17.2",
-    "aws-cdk-lib": "^2.268.0",
+    "aws-cdk-lib": "^2.274.0",
     "cdk-nag": "3.0.2",
     "constructs": "^10.5.1",
     "jose": "6.2.10",

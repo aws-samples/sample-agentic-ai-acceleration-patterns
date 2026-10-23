@@ -4,11 +4,11 @@
 import { awscdk, javascript } from 'projen';
 
 const project = new awscdk.AwsCdkTypeScriptApp({
-  cdkVersion: '2.268.0',
+  cdkVersion: '2.274.0',
   defaultReleaseBranch: 'main',
   github: false,
   name: 'control-plane',
-  description: 'The simple cell-based control plane - multi-tenant SaaS sample',
+  description: 'The simple cell-based control plane - multi-tenant sample',
   packageManager: javascript.NodePackageManager.NPM,
   license: 'MIT-0',
   copyrightOwner: 'Amazon.com, Inc. or its affiliates. All Rights Reserved.',
@@ -38,8 +38,8 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     '@types/aws-lambda@8.10.163',
     'aws-sdk-client-mock@4.1.0',
     // Integ test framework - alpha pinned to the aws-cdk-lib version
-    '@aws-cdk/integ-tests-alpha@2.268.0-alpha.0',
-    '@aws-cdk/integ-runner@2.205.0',
+    '@aws-cdk/integ-tests-alpha@2.274.0-alpha.0',
+    '@aws-cdk/integ-runner@2.205.8',
   ],
 });
 
