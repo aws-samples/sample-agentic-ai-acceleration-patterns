@@ -4,7 +4,7 @@
 import { awscdk, javascript } from 'projen';
 
 const project = new awscdk.AwsCdkTypeScriptApp({
-  cdkVersion: '2.268.0',
+  cdkVersion: '2.274.0',
   defaultReleaseBranch: 'main',
   github: false,
   name: 'control-plane',
@@ -38,8 +38,8 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     '@types/aws-lambda@8.10.163',
     'aws-sdk-client-mock@4.1.0',
     // Integ test framework - alpha pinned to the aws-cdk-lib version
-    '@aws-cdk/integ-tests-alpha@2.268.0-alpha.0',
-    '@aws-cdk/integ-runner@2.205.0',
+    '@aws-cdk/integ-tests-alpha@2.274.0-alpha.0',
+    '@aws-cdk/integ-runner@2.205.8',
   ],
 });
 
