@@ -101,8 +101,10 @@ tokens, not IAM). Access and execution logging write to one-month-retention
 log groups with a custom access-log format that records the SigV4 caller ARN
 on `/platform` and the authoriser `principalId` (the verified `sub`) on
 `/tenant`. Each route family is throttled separately via per-method settings
-(N-5 `/platform` 10/20, N-6 `/oauth2/token` 20/40, N-7 `/tenant` 50/100 shared); an
-action-less CloudWatch alarm fires on more than 50 4XX responses in 5 minutes.
+(N-5 `/platform` 10/20, N-6 `/oauth2/token` 20/40, N-7 `/tenant` 50/100 shared).
+Two CloudWatch alarms, more than 50 4XX or at least 5 5XX responses in 5
+minutes, notify an SNS topic encrypted with a customer-managed KMS key (M-31).
+The stack creates no subscription; subscribe the `AlarmTopicArn` output.
 
 `/tenant/*` is also throttled **per tenant** (ADR-0025). The stack's usage
 plan (`<stack>-tenant`, 10 rps / 20 burst per tenant, no quota) is on the stage, under

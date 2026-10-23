@@ -212,7 +212,7 @@ describe('PlatformService (spec §5.1)', () => {
       provisioner.provisionTenant.mockRejectedValue(new Error('boom'));
 
       await expect(
-        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
+        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT),
       ).rejects.toBeInstanceOf(InternalServerError);
       // The row was written then removed; nothing is left behind.
       expect(registry.calls).toContain(`create:${TENANT_A}`);
@@ -229,7 +229,7 @@ describe('PlatformService (spec §5.1)', () => {
       provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
 
       await expect(
-        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
+        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT),
       ).rejects.toBeInstanceOf(InternalServerError);
       // Both the Cognito half and the registry row are cleaned up.
       expect(provisioner.deprovisionTenant).toHaveBeenCalledWith(
@@ -247,7 +247,7 @@ describe('PlatformService (spec §5.1)', () => {
       provisioner.createUser.mockRejectedValue(new DomainConflictError('email exists'));
 
       await expect(
-        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
+        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT),
       ).rejects.toBeInstanceOf(ConflictError);
       // Tenant remains ACTIVE; vendor retries CreateUser.
       expect(registry.items.get(TENANT_A)?.status).toBe('ACTIVE');
@@ -261,7 +261,7 @@ describe('PlatformService (spec §5.1)', () => {
       provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
       provisioner.createUser.mockResolvedValue({ user: userView('admin', true), temporaryPassword: 'T#1' });
 
-      const out = await makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT);
+      const out = await makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT);
 
       // No tier outside `tiered` (ADR-0027): the key goes in the stack's plan.
       expect(apiKeys.create).toHaveBeenCalledWith(TENANT_A, undefined);
@@ -282,7 +282,7 @@ describe('PlatformService (spec §5.1)', () => {
       apiKeys.create.mockRejectedValue(Object.assign(new Error('limit'), { name: 'LimitExceededException' }));
 
       await expect(
-        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
+        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT),
       ).rejects.toBeInstanceOf(InternalServerError);
       expect(provisioner.deprovisionTenant).toHaveBeenCalledWith(
         expect.objectContaining({ tenantId: TENANT_A, groupName: `t-${TENANT_A}` }),
@@ -303,7 +303,7 @@ describe('PlatformService (spec §5.1)', () => {
       apiKeys.create.mockRejectedValue(new Error('apigw down'));
 
       await expect(
-        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
+        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT),
       ).rejects.toBeInstanceOf(InternalServerError);
       expect(provisioner.deprovisionTenant).toHaveBeenCalled();
       expect(registry.delete).toHaveBeenCalledWith(TENANT_A);
@@ -316,7 +316,7 @@ describe('PlatformService (spec §5.1)', () => {
       provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
 
       await expect(
-        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
+        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT),
       ).rejects.toBeInstanceOf(InternalServerError);
       expect(apiKeys.delete).toHaveBeenCalledWith(KEY.apiKeyId);
       expect(provisioner.deprovisionTenant).toHaveBeenCalled();
@@ -331,7 +331,7 @@ describe('PlatformService (spec §5.1)', () => {
       apiKeys.delete.mockRejectedValue(new Error('apigw down'));
 
       await expect(
-        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
+        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT),
       ).rejects.toBeInstanceOf(InternalServerError);
       expect(provisioner.deprovisionTenant).toHaveBeenCalled();
       expect(registry.items.size).toBe(0);
@@ -342,7 +342,7 @@ describe('PlatformService (spec §5.1)', () => {
       const provisioner = mockProvisioner();
       provisioner.provisionTenant.mockRejectedValue(new Error('boom'));
       await expect(
-        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
+        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT),
       ).rejects.toBeInstanceOf(InternalServerError);
       expect(apiKeys.create).not.toHaveBeenCalled();
     });
@@ -355,9 +355,9 @@ describe('PlatformService (spec §5.1)', () => {
       provisioner.assertEmailAvailable.mockRejectedValue(new DomainConflictError('E-mail already exists'));
 
       await expect(
-        makeService(registry, provisioner, 'shared-pool').CreateTenant({ name: 'Acme', adminEmail: 'taken@e.com' }, CONTEXT),
+        makeService(registry, provisioner, 'shared-pool').CreateTenant({ name: 'Acme', adminEmail: 'taken@example.com' }, CONTEXT),
       ).rejects.toBeInstanceOf(ConflictError);
-      expect(provisioner.assertEmailAvailable).toHaveBeenCalledWith('taken@e.com');
+      expect(provisioner.assertEmailAvailable).toHaveBeenCalledWith('taken@example.com');
       expect(registry.calls).not.toContain(`create:${TENANT_A}`);
       expect(registry.items.size).toBe(0);
       expect(provisioner.provisionTenant).not.toHaveBeenCalled();
@@ -374,7 +374,7 @@ describe('PlatformService (spec §5.1)', () => {
       provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
       provisioner.createUser.mockResolvedValue({ user: userView('admin', true), temporaryPassword: 'T#1' });
 
-      await makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT);
+      await makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT);
       expect(rowsWhenChecked).toBe(0);
       expect(provisioner.assertEmailAvailable.mock.invocationCallOrder[0]).toBeLessThan(
         provisioner.provisionTenant.mock.invocationCallOrder[0],
@@ -423,14 +423,14 @@ describe('PlatformService (spec §5.1)', () => {
       shared.createUser.mockResolvedValue({ user: userView('admin', true), temporaryPassword: 'T#1' });
 
       const out = await tieredService(registry, provisioners).CreateTenant(
-        { name: 'Acme', adminEmail: 'a@e.com', tier: 'standard' },
+        { name: 'Acme', adminEmail: 'a@example.com', tier: 'standard' },
         CONTEXT,
       );
 
       expect(registry.items.get(TENANT_A)?.topology).toBe('shared-pool');
       expect(out.tenant?.topology).toBe('shared-pool');
       expect(out.tenant?.tier).toBe('standard');
-      expect(shared.assertEmailAvailable).toHaveBeenCalledWith('a@e.com');
+      expect(shared.assertEmailAvailable).toHaveBeenCalledWith('a@example.com');
       expect(shared.provisionTenant).toHaveBeenCalledWith(TENANT_A, 'Acme');
       expect(shared.createUser).toHaveBeenCalled();
       expect(perTenant.assertEmailAvailable).not.toHaveBeenCalled();
@@ -450,7 +450,7 @@ describe('PlatformService (spec §5.1)', () => {
       perTenant.createUser.mockResolvedValue({ user: userView('admin', true), temporaryPassword: 'T#1' });
 
       const out = await tieredService(registry, provisioners).CreateTenant(
-        { name: 'Acme', adminEmail: 'a@e.com', tier: 'premium' },
+        { name: 'Acme', adminEmail: 'a@example.com', tier: 'premium' },
         CONTEXT,
       );
 
@@ -469,7 +469,7 @@ describe('PlatformService (spec §5.1)', () => {
       const { shared, perTenant, provisioners } = tieredMocks();
 
       await expect(
-        tieredService(registry, provisioners).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
+        tieredService(registry, provisioners).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT),
       ).rejects.toMatchObject({
         name: 'ValidationError',
         reason: 'InvalidInput',
@@ -489,7 +489,7 @@ describe('PlatformService (spec §5.1)', () => {
       apiKeys.create.mockRejectedValue(new Error('apigw down'));
 
       await expect(
-        tieredService(registry, provisioners).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com', tier: 'premium' }, CONTEXT),
+        tieredService(registry, provisioners).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com', tier: 'premium' }, CONTEXT),
       ).rejects.toBeInstanceOf(InternalServerError);
       expect(perTenant.deprovisionTenant).toHaveBeenCalledWith(
         expect.objectContaining({ tenantId: TENANT_A, topology: 'pool-per-tenant', userPoolId: 'eu-central-1_P' }),
@@ -528,7 +528,7 @@ describe('PlatformService (spec §5.1)', () => {
       perTenant.refreshToken.mockResolvedValue(TOKENS);
       const service = tieredService(registry, provisioners);
 
-      await service.CreateUser({ tenantId: TENANT_A, email: 'u1@e.com' }, CONTEXT);
+      await service.CreateUser({ tenantId: TENANT_A, email: 'u1@example.com' }, CONTEXT);
       await service.GetUser({ tenantId: TENANT_A, username: 'u1' }, CONTEXT);
       await service.ListUsers({ tenantId: TENANT_A }, CONTEXT);
       await service.UpdateUser({ tenantId: TENANT_A, username: 'u1', admin: true }, CONTEXT);
@@ -577,7 +577,7 @@ describe('PlatformService (spec §5.1)', () => {
 
         await expect(
           makeService(registry, provisioner, deployment).CreateTenant(
-            { name: 'Acme', adminEmail: 'a@e.com', tier: 'standard' },
+            { name: 'Acme', adminEmail: 'a@example.com', tier: 'standard' },
             CONTEXT,
           ),
         ).rejects.toMatchObject({

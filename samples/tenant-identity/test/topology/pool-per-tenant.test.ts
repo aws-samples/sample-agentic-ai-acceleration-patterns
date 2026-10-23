@@ -175,7 +175,7 @@ describe('PoolPerTenantProvisioner (spec §7.1)', () => {
 
     it('listUsers maps users with admin flag from the admin group page', async () => {
       cognito.on(ListUsersInGroupCommand).resolves({ Users: [{ Username: 'u1' }] });
-      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'u1', Attributes: [{ Name: 'email', Value: 'u1@x.com' }] }, { Username: 'u2' }], PaginationToken: 'next' });
+      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'u1', Attributes: [{ Name: 'email', Value: 'u1@example.com' }] }, { Username: 'u2' }], PaginationToken: 'next' });
       const page = await provisioner().listUsers(tenantA());
       expect(page.items).toHaveLength(2);
       expect(page.items.find((u) => u.username === 'u1')?.admin).toBe(true);
@@ -252,7 +252,7 @@ describe('PoolPerTenantProvisioner (spec §7.1)', () => {
 
   describe('assertEmailAvailable', () => {
     it('is a no-op: a new tenant has an empty pool', async () => {
-      await expect(provisioner().assertEmailAvailable('u1@x.com')).resolves.toBeUndefined();
+      await expect(provisioner().assertEmailAvailable('u1@example.com')).resolves.toBeUndefined();
       expect(cognito.calls()).toHaveLength(0);
     });
   });

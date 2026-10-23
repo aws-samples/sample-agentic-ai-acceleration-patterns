@@ -6,12 +6,15 @@ import * as path from 'path';
 import { CfnOutput, Duration, RemovalPolicy, Stack, StackProps, Tags, Validations } from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction, NodejsFunctionProps } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import {
@@ -893,8 +896,33 @@ export class TenantIdentityStack extends Stack {
     });
 
     // M-4/M-9/N-5..N-7 signal: sustained 4XX is the probing / leaked-token /
-    // amplification signature at the edge. Alarm only (sample scope).
-    new cloudwatch.Alarm(this, 'ApiClientErrorAlarm', {
+    // amplification signature at the edge; 5XX means the service itself is
+    // failing. Both notify one encrypted SNS topic (M-31). The sample creates
+    // no subscription: subscribe the AlarmTopicArn output to your on-call path.
+    // A customer-managed key is required: CloudWatch alarms cannot publish to
+    // a topic encrypted with the AWS-managed alias/aws/sns key.
+    const alarmKey = new kms.Key(this, 'AlarmTopicKey', {
+      description: `${this.stackName} alarm topic encryption`,
+      enableKeyRotation: true,
+      removalPolicy: RemovalPolicy.DESTROY, // sample only
+      pendingWindow: Duration.days(7),
+    });
+    alarmKey.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: 'AllowCloudWatchAlarmsToPublish',
+        principals: [new iam.ServicePrincipal('cloudwatch.amazonaws.com')],
+        actions: ['kms:Decrypt', 'kms:GenerateDataKey*'],
+        resources: ['*'],
+        conditions: { StringEquals: { 'aws:SourceAccount': this.account } },
+      }),
+    );
+    const alarmTopic = new sns.Topic(this, 'AlarmTopic', {
+      displayName: `${this.stackName} alarms`,
+      masterKey: alarmKey,
+      enforceSSL: true,
+    });
+    const alarmAction = new cloudwatchActions.SnsAction(alarmTopic);
+    const clientErrorAlarm = new cloudwatch.Alarm(this, 'ApiClientErrorAlarm', {
       metric: api.metricClientError({ period: Duration.minutes(5), statistic: 'Sum' }),
       threshold: 50,
       evaluationPeriods: 1,
@@ -903,6 +931,20 @@ export class TenantIdentityStack extends Stack {
       alarmDescription:
         'More than 50 4XX responses in 5 minutes - possible token probing, leaked credential, or exchange-route abuse (threat T-9/T-20).',
     });
+    const serverErrorAlarm = new cloudwatch.Alarm(this, 'ApiServerErrorAlarm', {
+      metric: api.metricServerError({ period: Duration.minutes(5), statistic: 'Sum' }),
+      threshold: 5,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription:
+        'At least 5 5XX responses in 5 minutes - a function, the authoriser, or a downstream Cognito/DynamoDB call is failing (M-31).',
+    });
+    for (const alarm of [clientErrorAlarm, serverErrorAlarm]) {
+      alarm.addAlarmAction(alarmAction);
+      alarm.addOkAction(alarmAction);
+    }
+    new CfnOutput(this, 'AlarmTopicArn', { value: alarmTopic.topicArn });
 
     // Request validation IS enabled (Smithy @requestValidator in the OpenAPI);
     // the rule only detects standalone CfnRequestValidator resources.

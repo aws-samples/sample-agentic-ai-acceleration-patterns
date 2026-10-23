@@ -49,4 +49,5 @@ src/smithy/
 TODO.md
 .kiro/
 cdk.integ.out/
+.holmes/
 !/.projenrc.ts

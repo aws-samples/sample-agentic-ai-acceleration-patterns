@@ -622,9 +622,11 @@ Each item maps to a threat-model mitigation (M-n) or threat (T-n).
 - [ ] **Decide on refresh token rotation.** The sample keeps it off so the
       exchange does not consume the client's refresh token (ADR-0009); a
       deployment that needs rotation revisits that trade (T-11).
-- [ ] **Wire alarm actions.** The sample ships an action-less 4XX alarm as the
-      probing / leaked-token / amplification signal (M-4/M-9); point it at a
-      notification or response action.
+- [ ] **Subscribe to the alarm topic.** The 4XX alarm (probing, leaked token,
+      amplification) and the 5XX alarm (the service failing) notify the
+      stack's `AlarmTopicArn` SNS topic (M-31), which has no subscriber.
+      Point it at your on-call path, and add per-function `Errors` alarms if
+      you need to know which function failed.
 - [ ] **Use a KMS customer-managed key for the log groups** if your compliance
       regime requires it — the sample relies on default CloudWatch Logs
       encryption at rest (the W84/CKV_AWS_158 suppressions).

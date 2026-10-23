@@ -81,6 +81,9 @@ project.gitignore.exclude('.kiro/');
 // The integ task's cloud assembly is machine output (scripts/integ.sh).
 project.gitignore.exclude('cdk.integ.out/');
 
+// Holmes MCP keeps its local project link here.
+project.gitignore.exclude('.holmes/');
+
 // Regenerate the SSDKs + OpenAPI documents from the model before every compile
 project.preCompileTask.exec('smithy build');
 

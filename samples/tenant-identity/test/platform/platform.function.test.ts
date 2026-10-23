@@ -314,7 +314,7 @@ describe('platform.function handler (spec §5.1 routing and status codes)', () =
 
       expect(apiKeysCtorArgs[apiKeysCtorArgs.length - 1][3]).toBe('TenantIdentity-test-tenant-premium');
 
-      const missing = await tiered!(event('POST', '/platform/tenants', { name: 'Acme', adminEmail: 'a@e.com' }));
+      const missing = await tiered!(event('POST', '/platform/tenants', { name: 'Acme', adminEmail: 'a@example.com' }));
       expect(missing.statusCode).toBe(400);
       expect(JSON.parse(missing.body)).toMatchObject({
         reason: 'InvalidInput',
@@ -325,7 +325,7 @@ describe('platform.function handler (spec §5.1 routing and status codes)', () =
       provisionerMock.provisionTenant.mockResolvedValue({ userPoolId: 'eu-central-1_P', appClientId: 'c', issuer: 'i' });
       provisionerMock.createUser.mockResolvedValue({ user: userView('admin', true), temporaryPassword: 'T#1' });
       const created = await tiered!(
-        event('POST', '/platform/tenants', { name: 'Acme', adminEmail: 'a@e.com', tier: 'premium' }),
+        event('POST', '/platform/tenants', { name: 'Acme', adminEmail: 'a@example.com', tier: 'premium' }),
       );
       expect(created.statusCode).toBe(201);
       const parsed = JSON.parse(created.body);

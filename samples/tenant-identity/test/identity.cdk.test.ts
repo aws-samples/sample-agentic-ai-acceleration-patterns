@@ -738,17 +738,47 @@ describe('TenantIdentityStack - API Gateway (R-1, §3.2, N-5..N-7)', () => {
     expect(policyJson).toContain('execute-api:/prod/POST/oauth2/token');
   });
 
-  test.each(DEPLOYMENTS)('a 4XX alarm with no actions exists [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('4XX and 5XX alarms notify the encrypted alarm topic [%s]', (topology) => {
     const template = synth(topology);
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
       Namespace: 'AWS/ApiGateway',
       MetricName: '4XXError',
       Threshold: 50,
     });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      Namespace: 'AWS/ApiGateway',
+      MetricName: '5XXError',
+      Threshold: 5,
+    });
+    const topics = template.findResources('AWS::SNS::Topic');
+    expect(Object.keys(topics)).toHaveLength(1);
+    const [topicId, topic] = Object.entries(topics)[0] as [string, any];
+    expect(topic.Properties.KmsMasterKeyId).toBeDefined();
+    const topicRef = { Ref: topicId };
     const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm'));
+    expect(alarms).toHaveLength(2);
     for (const alarm of alarms as any[]) {
-      expect(alarm.Properties.AlarmActions ?? []).toEqual([]);
+      expect(alarm.Properties.AlarmActions).toEqual([topicRef]);
+      expect(alarm.Properties.OKActions).toEqual([topicRef]);
     }
+    template.hasResourceProperties('AWS::KMS::Key', {
+      EnableKeyRotation: true,
+      KeyPolicy: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Sid: 'AllowCloudWatchAlarmsToPublish',
+            Principal: { Service: 'cloudwatch.amazonaws.com' },
+          }),
+        ]),
+      }),
+    });
+    template.hasResourceProperties('AWS::SNS::TopicPolicy', {
+      PolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({ Effect: 'Deny', Condition: { Bool: { 'aws:SecureTransport': 'false' } } }),
+        ]),
+      }),
+    });
   });
 });
 

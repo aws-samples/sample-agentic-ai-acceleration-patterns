@@ -55,9 +55,9 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
   describe('createUser', () => {
     it('creates the user with custom:tenantId and adds to t- (+admin)', async () => {
       cognito.on(ListUsersCommand).resolves({ Users: [] }); // no existing e-mail
-      cognito.on(AdminCreateUserCommand).resolves({ User: { Username: 'u1', Attributes: [{ Name: 'email', Value: 'u1@x.com' }, { Name: TENANT_ATTR, Value: IDS.a }] } });
+      cognito.on(AdminCreateUserCommand).resolves({ User: { Username: 'u1', Attributes: [{ Name: 'email', Value: 'u1@example.com' }, { Name: TENANT_ATTR, Value: IDS.a }] } });
       cognito.on(AdminAddUserToGroupCommand).resolves({});
-      const result = await provisioner().createUser(tenantA(), 'u1@x.com', true);
+      const result = await provisioner().createUser(tenantA(), 'u1@example.com', true);
       expect(result.temporaryPassword).toBeDefined();
       const attrs = cognito.commandCalls(AdminCreateUserCommand)[0].args[0].input.UserAttributes;
       expect(attrs).toEqual(expect.arrayContaining([{ Name: TENANT_ATTR, Value: IDS.a }]));
@@ -67,17 +67,17 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
 
     it('rejects an e-mail already in the pool with ConflictError (§5.3, §7.2)', async () => {
       // R-17 (T-27), T-27: only a verified existing e-mail is treated as present.
-      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'existing', Attributes: [{ Name: 'email', Value: 'u1@x.com' }, { Name: 'email_verified', Value: 'true' }] }] });
-      await expect(provisioner().createUser(tenantA(), 'u1@x.com', false)).rejects.toBeInstanceOf(ConflictError);
+      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'existing', Attributes: [{ Name: 'email', Value: 'u1@example.com' }, { Name: 'email_verified', Value: 'true' }] }] });
+      await expect(provisioner().createUser(tenantA(), 'u1@example.com', false)).rejects.toBeInstanceOf(ConflictError);
       expect(cognito).toHaveReceivedCommandTimes(AdminCreateUserCommand as AnyMock, 0);
     });
 
     it('an unverified holder of the e-mail is a 409, never a reuse or a 500 (R-17)', async () => {
       // findUserByEmail ignores the unverified user, so AdminCreateUser runs
       // and Cognito refuses the alias: a conflict, not an internal error.
-      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'squatter', Attributes: [{ Name: 'email', Value: 'u1@x.com' }, { Name: 'email_verified', Value: 'false' }] }] });
+      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'squatter', Attributes: [{ Name: 'email', Value: 'u1@example.com' }, { Name: 'email_verified', Value: 'false' }] }] });
       cognito.on(AdminCreateUserCommand).rejects(cognitoError('UsernameExistsException'));
-      await expect(provisioner().createUser(tenantA(), 'u1@x.com', false)).rejects.toBeInstanceOf(ConflictError);
+      await expect(provisioner().createUser(tenantA(), 'u1@example.com', false)).rejects.toBeInstanceOf(ConflictError);
       expect(cognito).toHaveReceivedCommandTimes(AdminAddUserToGroupCommand as AnyMock, 0);
     });
 
@@ -86,7 +86,7 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
       cognito.on(AdminCreateUserCommand).resolves({ User: { Username: 'u1' } });
       cognito.on(AdminAddUserToGroupCommand).resolves({});
       const spy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
-      const result = await provisioner().createUser(tenantA(), 'u1@x.com', false);
+      const result = await provisioner().createUser(tenantA(), 'u1@example.com', false);
       for (const line of spy.mock.calls.flat()) {
         expect(String(line)).not.toContain(result.temporaryPassword);
       }
@@ -156,7 +156,7 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
 
   describe('getUser / listUsers / setAdmin', () => {
     it('getUser returns admin from group membership for a matching tenant', async () => {
-      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }, { Name: 'email', Value: 'u1@x.com' }], UserStatus: 'CONFIRMED', UserCreateDate: new Date() });
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }, { Name: 'email', Value: 'u1@example.com' }], UserStatus: 'CONFIRMED', UserCreateDate: new Date() });
       cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [{ GroupName: `admin-${IDS.a}` }] });
       const view = await provisioner().getUser(tenantA(), 'u1');
       expect(view.admin).toBe(true);
@@ -165,14 +165,14 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
     it('getUser returns Cognito\'s canonical username, not an e-mail from the path (R-13)', async () => {
       cognito.on(AdminGetUserCommand).resolves({ Username: 'sub-u1', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }], UserStatus: 'CONFIRMED' });
       cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [] });
-      const view = await provisioner().getUser(tenantA(), 'u1@x.com');
+      const view = await provisioner().getUser(tenantA(), 'u1@example.com');
       expect(view.username).toBe('sub-u1');
     });
 
     it('getUser fails closed when Cognito returns no Username (R-13)', async () => {
       cognito.on(AdminGetUserCommand).resolves({ UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }], UserStatus: 'CONFIRMED' });
       cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [] });
-      await expect(provisioner().getUser(tenantA(), 'u1@x.com')).rejects.toThrow('AdminGetUser returned no Username');
+      await expect(provisioner().getUser(tenantA(), 'u1@example.com')).rejects.toThrow('AdminGetUser returned no Username');
     });
 
     it('listUsers lists t- group members with admin flag', async () => {
@@ -180,7 +180,7 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
         if (input.GroupName === `admin-${IDS.a}`) {
           return { Users: [{ Username: 'u1' }] };
         }
-        return { Users: [{ Username: 'u1', Attributes: [{ Name: 'email', Value: 'u1@x.com' }] }, { Username: 'u2' }] };
+        return { Users: [{ Username: 'u1', Attributes: [{ Name: 'email', Value: 'u1@example.com' }] }, { Username: 'u2' }] };
       });
       const page = await provisioner().listUsers(tenantA());
       expect(page.items.find((u) => u.username === 'u1')?.admin).toBe(true);
@@ -210,14 +210,14 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
 
   describe('assertEmailAvailable (spec §5.1 CreateTenant pre-flight)', () => {
     it('throws ConflictError when a verified user already holds the e-mail', async () => {
-      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'existing', Attributes: [{ Name: 'email', Value: 'u1@x.com' }, { Name: 'email_verified', Value: 'true' }] }] });
-      await expect(provisioner().assertEmailAvailable('u1@x.com')).rejects.toBeInstanceOf(ConflictError);
+      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'existing', Attributes: [{ Name: 'email', Value: 'u1@example.com' }, { Name: 'email_verified', Value: 'true' }] }] });
+      await expect(provisioner().assertEmailAvailable('u1@example.com')).rejects.toBeInstanceOf(ConflictError);
       expect(cognito).toHaveReceivedCommandTimes(AdminCreateUserCommand as AnyMock, 0);
     });
 
     it('resolves when the e-mail is free', async () => {
       cognito.on(ListUsersCommand).resolves({ Users: [] });
-      await expect(provisioner().assertEmailAvailable('free@x.com')).resolves.toBeUndefined();
+      await expect(provisioner().assertEmailAvailable('free@example.com')).resolves.toBeUndefined();
     });
   });
 

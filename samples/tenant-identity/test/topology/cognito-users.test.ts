@@ -41,29 +41,29 @@ describe('findUserByEmail verified-only (R-17 (T-27), T-27)', () => {
 
   it('returns a user whose email_verified is "true"', async () => {
     cognitoMock.on(ListUsersCommand).resolves({
-      Users: [{ Username: 'u1', Attributes: [{ Name: 'email', Value: 'u1@x.com' }, { Name: 'email_verified', Value: 'true' }] }],
+      Users: [{ Username: 'u1', Attributes: [{ Name: 'email', Value: 'u1@example.com' }, { Name: 'email_verified', Value: 'true' }] }],
     });
-    const user = await findUserByEmail(client, 'pool', 'u1@x.com');
+    const user = await findUserByEmail(client, 'pool', 'u1@example.com');
     expect(user?.Username).toBe('u1');
   });
 
   it('ignores a user whose email_verified is "false" (self-written, unconfirmed)', async () => {
     cognitoMock.on(ListUsersCommand).resolves({
-      Users: [{ Username: 'u1', Attributes: [{ Name: 'email', Value: 'u1@x.com' }, { Name: 'email_verified', Value: 'false' }] }],
+      Users: [{ Username: 'u1', Attributes: [{ Name: 'email', Value: 'u1@example.com' }, { Name: 'email_verified', Value: 'false' }] }],
     });
-    expect(await findUserByEmail(client, 'pool', 'u1@x.com')).toBeUndefined();
+    expect(await findUserByEmail(client, 'pool', 'u1@example.com')).toBeUndefined();
   });
 
   it('ignores a user with no email_verified attribute', async () => {
     cognitoMock.on(ListUsersCommand).resolves({
-      Users: [{ Username: 'u1', Attributes: [{ Name: 'email', Value: 'u1@x.com' }] }],
+      Users: [{ Username: 'u1', Attributes: [{ Name: 'email', Value: 'u1@example.com' }] }],
     });
-    expect(await findUserByEmail(client, 'pool', 'u1@x.com')).toBeUndefined();
+    expect(await findUserByEmail(client, 'pool', 'u1@example.com')).toBeUndefined();
   });
 
   it('returns undefined when no user matches', async () => {
     cognitoMock.on(ListUsersCommand).resolves({ Users: [] });
-    expect(await findUserByEmail(client, 'pool', 'nobody@x.com')).toBeUndefined();
+    expect(await findUserByEmail(client, 'pool', 'nobody@example.com')).toBeUndefined();
   });
 });
 
