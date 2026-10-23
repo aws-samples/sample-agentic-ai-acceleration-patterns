@@ -776,6 +776,12 @@ describe('TenantIdentityStack - API Gateway (R-1, §3.2, N-5..N-7)', () => {
       PolicyDocument: Match.objectLike({
         Statement: Match.arrayWith([
           Match.objectLike({ Effect: 'Deny', Condition: { Bool: { 'aws:SecureTransport': 'false' } } }),
+          Match.objectLike({
+            Sid: 'AllowCloudWatchAlarmsToPublish',
+            Effect: 'Allow',
+            Principal: { Service: 'cloudwatch.amazonaws.com' },
+            Action: 'sns:Publish',
+          }),
         ]),
       }),
     });

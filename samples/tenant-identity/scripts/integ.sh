@@ -101,6 +101,44 @@ leftover_log_groups() {
   done
 }
 
+# Proves every alarm in a stack can deliver to its action (M-31): forces the
+# alarm into ALARM, then waits for the alarm history to record the SNS publish.
+# The history says "Failed to execute action" when CloudWatch cannot publish,
+# e.g. when the topic's KMS key policy does not let it in. No subscription is
+# needed. The alarm is set back to OK afterwards; its next evaluation would
+# reset it anyway.
+check_alarm_actions() {
+  local stack="$1" alarm since summary failed=0 i
+  for alarm in $(aws cloudformation describe-stack-resources --stack-name "$stack" \
+      --query "StackResources[?ResourceType=='AWS::CloudWatch::Alarm'].PhysicalResourceId" --output text); do
+    # A transition is what fires an action, so start from OK.
+    aws cloudwatch set-alarm-state --alarm-name "$alarm" --state-value OK \
+      --state-reason "integ: alarm action check (reset)"
+    sleep 2
+    since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    aws cloudwatch set-alarm-state --alarm-name "$alarm" --state-value ALARM \
+      --state-reason "integ: alarm action check (M-31)"
+    summary=""
+    for i in $(seq 1 30); do
+      summary="$(aws cloudwatch describe-alarm-history --alarm-name "$alarm" \
+        --history-item-type Action --start-date "$since" \
+        --query 'AlarmHistoryItems[0].HistorySummary' --output text)"
+      if [ -n "$summary" ] && [ "$summary" != "None" ]; then
+        break
+      fi
+      sleep 2
+    done
+    aws cloudwatch set-alarm-state --alarm-name "$alarm" --state-value OK \
+      --state-reason "integ: alarm action check (done)"
+    case "$summary" in
+      "Successfully executed action"*) echo "$alarm: $summary" ;;
+      "") echo "$alarm: no action recorded within 60 s" >&2; failed=1 ;;
+      *) echo "$alarm: $summary" >&2; failed=1 ;;
+    esac
+  done
+  return "$failed"
+}
+
 destroy() {
   local status=$?
   trap - EXIT
@@ -163,3 +201,13 @@ echo "=== deploy ($(date -u +%H:%M:%S) UTC)"
 
 echo "=== e2e ($(date -u +%H:%M:%S) UTC)"
 npx jest --config test/e2e/jest.config.json --runInBand=false
+
+echo "=== alarm actions ($(date -u +%H:%M:%S) UTC)"
+alarm_status=0
+for stack in "${STACKS[@]}"; do
+  check_alarm_actions "$stack" || alarm_status=1
+done
+if [ "$alarm_status" -ne 0 ]; then
+  echo "An alarm could not deliver to its SNS topic (M-31)" >&2
+  exit 1
+fi

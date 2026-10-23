@@ -420,7 +420,9 @@ It deploys **all four stacks at once** (the three topologies and `tiered`) with
 `cdk deploy --all`, runs the spec §10 scenario (steps 2–9 and
 11, plus the R-6 parameter check) against each, then destroys them at once.
 In the `tiered` stack the scenario creates one tenant per tier and adds the
-binding-rule refusals (§10 step 12). The destroy
+binding-rule refusals (§10 step 12). After the scenario it forces each
+stack's alarms into `ALARM` and fails unless the alarm history shows a
+successful publish to the alarm topic (M-31). The destroy
 always runs, also when the deploy or the scenario fails. Step 11
 leaves one tenant in every stack on purpose, so the destroy also proves the
 stack's own `TenantDrain` (ADR-0022). The CDK CLI drives the run rather than

@@ -921,6 +921,21 @@ export class TenantIdentityStack extends Stack {
       masterKey: alarmKey,
       enforceSSL: true,
     });
+    // enforceSSL gives the topic a policy holding only the TLS deny, which
+    // replaces SNS's default owner policy, so CloudWatch needs an explicit
+    // allow. Scoped to this account's alarms.
+    alarmTopic.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: 'AllowCloudWatchAlarmsToPublish',
+        principals: [new iam.ServicePrincipal('cloudwatch.amazonaws.com')],
+        actions: ['sns:Publish'],
+        resources: [alarmTopic.topicArn],
+        conditions: {
+          StringEquals: { 'aws:SourceAccount': this.account },
+          ArnLike: { 'aws:SourceArn': `arn:${this.partition}:cloudwatch:${this.region}:${this.account}:alarm:*` },
+        },
+      }),
+    );
     const alarmAction = new cloudwatchActions.SnsAction(alarmTopic);
     const clientErrorAlarm = new cloudwatch.Alarm(this, 'ApiClientErrorAlarm', {
       metric: api.metricClientError({ period: Duration.minutes(5), statistic: 'Sum' }),
