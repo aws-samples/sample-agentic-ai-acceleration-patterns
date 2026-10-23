@@ -1196,12 +1196,15 @@ function acknowledgeLambdaBasicExecutionRole(fn: NodejsFunction, overrides: Exec
   // Active X-Ray tracing adds xray:PutTraceSegments / PutTelemetryRecords on
   // '*': the X-Ray API takes no resource ARN, so the wildcard is inherent to
   // the service, not over-breadth.
-  acknowledgeGranularFinding(
-    fn,
-    'AwsSolutions-IAM5[Resource::*]',
-    overrides.wildcardResourceReason ??
-      'Active X-Ray tracing grants xray:PutTraceSegments/PutTelemetryRecords, which the X-Ray API only accepts on \'*\' (no resource ARN). Not over-breadth. Accepted risk T-24 (threat model).',
-  );
+  const wildcardResourceReason = overrides.wildcardResourceReason ??
+    'Active X-Ray tracing grants xray:PutTraceSegments/PutTelemetryRecords, which the X-Ray API only accepts on \'*\' (no resource ARN). Not over-breadth. Accepted risk T-24 (threat model).';
+  acknowledgeGranularFinding(fn, 'AwsSolutions-IAM5[Resource::*]', wildcardResourceReason);
+  // cfn_nag reports the same '*' resources as W12 on the role's default
+  // policy, so the template carries the same reason for external scans.
+  const defaultPolicy = fn.role?.node.tryFindChild('DefaultPolicy');
+  if (defaultPolicy !== undefined) {
+    suppressTemplateScanners(defaultPolicy, { cfnNag: [{ id: 'W12', reason: wildcardResourceReason }] });
+  }
   suppressTemplateScanners(fn, {
     cfnNag: [
       { id: 'W58', reason: 'Log permissions come from the AWSLambdaBasicExecutionRole managed policy; cfn_nag does not resolve managed policies. Accepted risk T-24 (threat model).' },

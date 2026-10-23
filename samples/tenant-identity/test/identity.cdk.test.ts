@@ -458,6 +458,21 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     expect(star[0].reason).toContain('cognito-idp:CreateUserPool');
   });
 
+  test.each(DEPLOYMENTS)('every IAM policy with a \'*\' resource carries a cfn_nag W12 reason [%s]', (topology) => {
+    const template = synth(topology);
+    const wildcard = Object.entries(template.findResources('AWS::IAM::Policy')).filter(([, r]) =>
+      (r as any).Properties.PolicyDocument.Statement.some((s: any) =>
+        (Array.isArray(s.Resource) ? s.Resource : [s.Resource]).includes('*')),
+    );
+    expect(wildcard.length).toBeGreaterThan(0);
+    for (const [id, r] of wildcard) {
+      const rules: { id: string; reason: string }[] = (r as any).Metadata?.cfn_nag?.rules_to_suppress ?? [];
+      const w12 = rules.filter((x) => x.id === 'W12');
+      expect({ id, count: w12.length }).toEqual({ id, count: 1 });
+      expect(w12[0].reason).toContain('xray:PutTraceSegments');
+    }
+  });
+
   test.each(DEPLOYMENTS)('timeouts: platform 28 s (under API Gateway\'s 29 s), trigger 5 s (Cognito\'s trigger limit) [%s]', (topology) => {
     const template = synth(topology);
     const fns = Object.entries(template.findResources('AWS::Lambda::Function'));
