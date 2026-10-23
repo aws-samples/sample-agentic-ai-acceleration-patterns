@@ -202,6 +202,48 @@ export function patchIntegrations(doc: object, mapping: IntegrationMapping): obj
   return copy;
 }
 
+/** The API-level extension that names where API Gateway reads the API key. */
+export const API_KEY_SOURCE_KEY = 'x-amazon-apigateway-api-key-source';
+/** The security scheme API Gateway maps to "API key required" on a method. */
+export const API_KEY_SCHEME = 'api_key';
+
+/**
+ * Requires an API key on every operation under `pathPrefix` and sets the
+ * API's key source to AUTHORIZER (ADR-0025): the Lambda authoriser returns
+ * the key as `usageIdentifierKey`, so API Gateway never reads a client's
+ * `x-api-key` header. The scheme is added to each of the operation's
+ * existing security requirement objects (AND, not OR), so the authoriser
+ * still runs; an operation with no requirement gets one with the key only.
+ * Returns a deep copy. Throws when no operation matches the prefix, so a
+ * renamed route fails synth instead of silently losing its throttle.
+ */
+export function requireApiKey(doc: object, pathPrefix: string): object {
+  const copy: Json = deepCopy(doc as Json);
+  let matched = 0;
+  for (const [pathKey, pathItem] of Object.entries(copy.paths ?? {})) {
+    if (!pathKey.startsWith(pathPrefix)) {
+      continue;
+    }
+    for (const [method, operation] of Object.entries(pathItem as Json)) {
+      if (!isHttpMethod(method)) {
+        continue;
+      }
+      const op = operation as Json;
+      const requirements: Json[] = Array.isArray(op[SECURITY_KEY]) && op[SECURITY_KEY].length > 0 ? op[SECURITY_KEY] : [{}];
+      op[SECURITY_KEY] = requirements.map((requirement) => ({ ...requirement, [API_KEY_SCHEME]: [] }));
+      matched++;
+    }
+  }
+  if (matched === 0) {
+    throw new Error(`requireApiKey: no operation under '${pathPrefix}'`);
+  }
+  copy.components ??= {};
+  copy.components.securitySchemes ??= {};
+  copy.components.securitySchemes[API_KEY_SCHEME] = { type: 'apiKey', name: 'x-api-key', in: 'header' };
+  copy[API_KEY_SOURCE_KEY] = 'AUTHORIZER';
+  return copy;
+}
+
 function isHttpMethod(key: string): boolean {
   return (HTTP_METHODS as readonly string[]).includes(key);
 }

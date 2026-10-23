@@ -25,7 +25,7 @@ import {
   UserType,
 } from '@aws-sdk/client-cognito-identity-provider';
 import type { UserView } from './provisioner';
-import { ConflictError, NotFoundError } from '../shared/errors';
+import { ConflictError, InvalidInputError, NotFoundError } from '../shared/errors';
 
 /** Cognito exception names the provisioners branch on. */
 export const COGNITO = {
@@ -36,6 +36,8 @@ export const COGNITO = {
   notAuthorized: 'NotAuthorizedException',
   userNotConfirmed: 'UserNotConfirmedException',
   userLambdaValidation: 'UserLambdaValidationException',
+  invalidPassword: 'InvalidPasswordException',
+  invalidParameter: 'InvalidParameterException',
 } as const;
 
 /** True when a thrown value is the named Cognito exception. */
@@ -157,12 +159,20 @@ export async function listGroupsForUser(
   return names;
 }
 
+/** The normalised AdminGetUser result. */
+export interface AdminUser {
+  readonly username: string;
+  readonly attributes: AttributeType[] | undefined;
+  readonly status: string | undefined;
+  readonly createdAt: Date | undefined;
+}
+
 /** AdminGetUser, mapping UserNotFoundException to NotFoundError (R-12). */
 export async function adminGetUser(
   cognito: CognitoIdentityProviderClient,
   userPoolId: string,
   username: string,
-): Promise<{ username: string; attributes: AttributeType[] | undefined; status: string | undefined; createdAt: Date | undefined }> {
+): Promise<AdminUser> {
   try {
     const result = await cognito.send(new AdminGetUserCommand({ UserPoolId: userPoolId, Username: username }));
     // Return Cognito's canonical Username, never the caller's input: the input
@@ -196,7 +206,8 @@ interface AuthResultShape {
 /**
  * The test-aid sign-in flow (ADR-0006): set a permanent password, then
  * ADMIN_USER_PASSWORD_AUTH. Auth failures and trigger refusals map to
- * ConflictError with fixed text, never Cognito's message (N-4).
+ * ConflictError, a password the pool rejects to InvalidInputError, both with
+ * fixed text, never Cognito's message (N-4).
  */
 export async function adminPasswordSignIn(
   cognito: CognitoIdentityProviderClient,
@@ -205,9 +216,20 @@ export async function adminPasswordSignIn(
   username: string,
   password: string,
 ): Promise<{ accessToken: string; idToken: string; refreshToken?: string; expiresIn: number }> {
-  await cognito.send(
-    new AdminSetUserPasswordCommand({ UserPoolId: userPoolId, Username: username, Password: password, Permanent: true }),
-  );
+  try {
+    // Inside a try: a password the pool policy rejects
+    // (InvalidPasswordException / InvalidParameterException) is the caller's
+    // input, a 400 with fixed text, never a 500 or Cognito's message (N-4).
+    // Scoped to this step only, so the refresh flow's mapping is unchanged.
+    await cognito.send(
+      new AdminSetUserPasswordCommand({ UserPoolId: userPoolId, Username: username, Password: password, Permanent: true }),
+    );
+  } catch (error) {
+    if (isCognitoError(error, COGNITO.invalidPassword) || isCognitoError(error, COGNITO.invalidParameter)) {
+      throw new InvalidInputError('Password does not meet the pool policy');
+    }
+    throw mapAuthError(error);
+  }
   try {
     const result = await cognito.send(
       new AdminInitiateAuthCommand({

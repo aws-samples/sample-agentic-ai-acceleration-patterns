@@ -22,6 +22,7 @@
 
 import * as https from 'https';
 import { URL } from 'url';
+import { APIGatewayClient } from '@aws-sdk/client-api-gateway';
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
@@ -30,6 +31,7 @@ import { drainTenants, type DrainDeps } from './tenant-drain';
 import { ENV, parseTopology, requireEnv } from '../shared/constants';
 import { errorName } from '../shared/logger';
 import { DynamoDBRegistry } from '../shared/registry';
+import { ApiGatewayTenantApiKeys } from '../shared/tenant-api-keys';
 import { createProvisioner } from '../topology';
 
 // --- Cold-start wiring (mirrors platform.function.ts) ----------------------
@@ -62,6 +64,9 @@ const provisioner = createProvisioner(topology, {
   triggerFunctionArn,
   stackName,
 });
+
+// The drain only deletes keys, so it needs no usage plan (ADR-0025).
+const apiKeys = new ApiGatewayTenantApiKeys(new APIGatewayClient({}), undefined);
 
 // --- CloudFormation custom-resource response -------------------------------
 
@@ -142,7 +147,7 @@ export async function handle(
   event: CloudFormationCustomResourceEvent,
   overrides: HandlerOverrides = {},
 ): Promise<void> {
-  const deps = overrides.deps ?? { registry, provisioner };
+  const deps = overrides.deps ?? { registry, provisioner, apiKeys };
   const send = overrides.send;
   let status: CfnStatus = 'SUCCESS';
   let reason = 'See ADR-0022';

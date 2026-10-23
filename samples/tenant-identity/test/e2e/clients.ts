@@ -57,6 +57,10 @@ export interface StackOutputs {
   /** shared-pool* only. */
   readonly userPoolId?: string;
   readonly appClientId?: string;
+  /** The `/tenant/*` usage plan (ADR-0025). */
+  readonly tenantUsagePlanId?: string;
+  /** pool-per-tenant only: the role the tenant-user function assumes (ADR-0026). */
+  readonly tenantScopedRoleArn?: string;
 }
 
 const OUTPUT_KEYS = {
@@ -65,6 +69,8 @@ const OUTPUT_KEYS = {
   registryTableName: 'RegistryTableName',
   userPoolId: 'UserPoolId',
   appClientId: 'AppClientId',
+  tenantUsagePlanId: 'TenantUsagePlanId',
+  tenantScopedRoleArn: 'TenantScopedRoleArn',
 } as const;
 
 /** `TenantIdentity` unless overridden (matches the `integ`/`e2e` task env). */
@@ -103,6 +109,8 @@ export async function discoverStack(topology: Topology): Promise<StackOutputs> {
     registryTableName,
     userPoolId: outputs.get(OUTPUT_KEYS.userPoolId),
     appClientId: outputs.get(OUTPUT_KEYS.appClientId),
+    tenantUsagePlanId: outputs.get(OUTPUT_KEYS.tenantUsagePlanId),
+    tenantScopedRoleArn: outputs.get(OUTPUT_KEYS.tenantScopedRoleArn),
   };
 }
 
@@ -262,13 +270,31 @@ export class ExchangeClient {
 export class TenantClient {
   constructor(private readonly apiUrl: string) {}
 
-  /** Calls a `/tenant/*` route with the bearer token (no body for GET/DELETE). */
+  /**
+   * Calls a `/tenant/*` route with the bearer token (no body for GET/DELETE).
+   * A brand-new tenant's usage-plan key propagates eventually (ADR-0025), so
+   * the gateway's own `403 {"message":"Forbidden"}` (missing/unknown key, not
+   * the authoriser's Deny) is retried with backoff, bounded at 5 minutes.
+   */
   async call<T = unknown>(
     method: string,
     path: string,
     token: string,
     body?: unknown,
   ): Promise<HttpResult<T>> {
+    const deadline = Date.now() + 5 * 60_000;
+    for (let delay = 2_000; ; delay = Math.min(delay * 2, 30_000)) {
+      const result = await this.callOnce<T>(method, path, token, body);
+      const keyNotLive =
+        result.status === 403 && (result.body as { message?: unknown } | undefined)?.message === 'Forbidden';
+      if (!keyNotLive || Date.now() + delay > deadline) {
+        return result;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+
+  private async callOnce<T>(method: string, path: string, token: string, body?: unknown): Promise<HttpResult<T>> {
     const headers: Record<string, string> = { authorization: `Bearer ${token}` };
     const payload = body === undefined ? undefined : JSON.stringify(body);
     if (payload !== undefined) {

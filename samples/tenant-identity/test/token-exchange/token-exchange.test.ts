@@ -177,6 +177,19 @@ describe('ExchangeToken Cognito error mapping (§5.4)', () => {
     await expect(exchange(form())).rejects.toMatchObject({ name: 'OAuthError', code: 'invalid_scope' });
   });
 
+  it('the invalid_target/invalid_scope prefix routes only on UserLambdaValidationException (§5.4)', async () => {
+    // Another exception whose text happens to carry the prefix is not a
+    // trigger verdict: NotAuthorizedException stays invalid_grant.
+    cognitoMock.on(GetTokens).rejects(
+      new NotAuthorizedException({ message: 'Refresh token invalid_target: echoed text', $metadata: {} }),
+    );
+    await expect(exchange(form())).rejects.toMatchObject({ name: 'OAuthError', code: 'invalid_grant' });
+    cognitoMock.on(GetTokens).rejects(
+      new TooManyRequestsException({ message: 'invalid_scope in a throttling message', $metadata: {} }),
+    );
+    await expect(exchange(form())).rejects.toMatchObject({ name: 'OAuthServerError', code: 'server_error' });
+  });
+
   it('spec §5.4: an unprefixed UserLambdaValidationException (trigger fault) -> server_error, not invalid_grant', async () => {
     // Neither the invalid_target nor the invalid_scope prefix: the trigger
     // failed for a non-caller reason (e.g. a registry outage). The client

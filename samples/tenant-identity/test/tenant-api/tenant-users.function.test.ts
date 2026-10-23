@@ -95,3 +95,12 @@ describe('tenant-users handler (P-11)', () => {
     expect(handleMock).not.toHaveBeenCalled();
   });
 });
+
+describe('tenant-users handler without a tenant-scoped role (shared pools, ADR-0026)', () => {
+  it('builds one provisioner on the function\'s own credentials', async () => {
+    await handler(proxyEvent({ tenantId: TENANT_A, sub: 'admin-1' }));
+    expect(provisionerCalls).toHaveLength(1);
+    const deps = (provisionerCalls[0] as { deps: { cognito: { config: { credentials: unknown } } } }).deps;
+    expect(deps.cognito).toBeDefined();
+  });
+});

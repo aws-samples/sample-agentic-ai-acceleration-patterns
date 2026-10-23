@@ -20,6 +20,12 @@
  */
 
 import {
+  APIGatewayClient,
+  GetApiKeyCommand,
+  GetApiKeysCommand,
+  GetUsagePlanKeyCommand,
+} from '@aws-sdk/client-api-gateway';
+import {
   AdminCreateUserCommand,
   AdminInitiateAuthCommand,
   AdminSetUserPasswordCommand,
@@ -30,10 +36,12 @@ import {
   DescribeUserPoolCommand,
   GetTokensFromRefreshTokenCommand,
   GetUserCommand,
+  ListTagsForResourceCommand,
   ListUsersCommand,
   ListUsersInGroupCommand,
   UpdateUserAttributesCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
+import { IAMClient, SimulatePrincipalPolicyCommand } from '@aws-sdk/client-iam';
 import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { ulid } from 'ulid';
 import {
@@ -48,6 +56,7 @@ import {
   TenantClient,
 } from './clients';
 import {
+  apiKeyName,
   COGNITO_USER_ADMIN_SCOPE,
   NARROW_SCOPE_KEY,
   NARROW_TENANT_KEY,
@@ -56,6 +65,8 @@ import {
   TENANT_ATTRIBUTE,
   tenantResource,
   TENANT_POOL_NAME_PREFIX,
+  TENANT_SESSION_TAG_KEY,
+  TENANT_TAG_KEY,
   TOKEN_TYPE_ACCESS,
   Topology,
 } from '../../src/shared/constants';
@@ -195,6 +206,22 @@ export function defineScenario(topology: Topology): void {
     let u1Verifier: AccessTokenVerifier | undefined; // topology 1: u1's pool (A)
     let narrowedAdminTokenA: string; // step 8, re-checked at step 9
     let formerAId: string; // tenant A's ULID, kept after it is deleted
+    const apiKeyIds: Record<string, string> = {}; // A, B (ADR-0025)
+    let apigw: APIGatewayClient;
+
+    /** ADR-0025: the keys named tenant-<id>; GetApiKeys' nameQuery is a prefix match. */
+    async function keysNamedFor(tenantId: string): Promise<{ id?: string; enabled?: boolean }[]> {
+      const res = await apigw.send(new GetApiKeysCommand({ nameQuery: apiKeyName(tenantId), includeValues: false }));
+      return (res.items ?? []).filter((k) => k.name === apiKeyName(tenantId));
+    }
+
+    /** ADR-0025: after DeleteTenant the tenant's key is gone, by id and by name. */
+    async function expectKeyGone(tenantKey: string, tenantId: string): Promise<void> {
+      await expect(apigw.send(new GetApiKeyCommand({ apiKey: apiKeyIds[tenantKey] }))).rejects.toMatchObject({
+        name: 'NotFoundException',
+      });
+      expect(await keysNamedFor(tenantId)).toEqual([]);
+    }
 
     /** Exchange client_id for a tenant: shared (2,3) or the tenant's own (1). */
     function exchangeClientId(tenantKey: string): string {
@@ -250,6 +277,7 @@ export function defineScenario(topology: Topology): void {
       exchange = new ExchangeClient(stack.apiUrl);
       tenant = new TenantClient(stack.apiUrl);
       cognito = new CognitoIdentityProviderClient({ region: region() });
+      apigw = new APIGatewayClient({ region: region() });
       if (topology !== 'pool-per-tenant') {
         sharedVerifier = AccessTokenVerifier.forPool(stack.userPoolId!, stack.appClientId!);
       }
@@ -366,6 +394,68 @@ export function defineScenario(topology: Topology): void {
           ).toBeDefined();
         }
       }
+    });
+
+    // -- ADR-0025: one API key per tenant, in the stack's usage plan --------
+    test('ADR-0025: CreateTenant gave A and B one enabled key each, in the /tenant usage plan', async () => {
+      expect(stack.tenantUsagePlanId).toBeDefined();
+      for (const key of ['A', 'B']) {
+        const named = await keysNamedFor(tenantIds[key]);
+        expect(named).toHaveLength(1);
+        expect(named[0].enabled).toBe(true);
+        apiKeyIds[key] = named[0].id!;
+        const inPlan = await apigw.send(
+          new GetUsagePlanKeyCommand({ usagePlanId: stack.tenantUsagePlanId!, keyId: apiKeyIds[key] }),
+        );
+        expect(inPlan.id).toBe(apiKeyIds[key]);
+      }
+      expect(apiKeyIds.A).not.toBe(apiKeyIds.B);
+    });
+
+    // -- ADR-0026: IAM keeps tenant A's session out of pool B ----------------
+    // The tenant-scoped role trusts only the tenant-user function's role, so
+    // the test cannot assume it with its own credentials. Instead it (1)
+    // reads the tenant tag on both pools, and (2) asks the IAM policy
+    // simulator to evaluate the role's real policy for a session tagged A
+    // against each pool. The R-12 code check is exercised end to end in
+    // step 8; this proves the IAM layer underneath it.
+    test('ADR-0026: pools carry their tenant tag; a session tagged A is denied pool B (pool-per-tenant)', async () => {
+      if (topology !== 'pool-per-tenant') {
+        expect(stack.tenantScopedRoleArn).toBeUndefined();
+        return;
+      }
+      const roleArn = stack.tenantScopedRoleArn!;
+      const [, partition, , , account] = roleArn.split(':');
+      const poolArn = (tenantKey: string) =>
+        `arn:${partition}:cognito-idp:${region()}:${account}:userpool/${tenantIssuers[tenantKey].split('/').pop()}`;
+      const tagsOf = async (tenantKey: string) =>
+        (await cognito.send(new ListTagsForResourceCommand({ ResourceArn: poolArn(tenantKey) }))).Tags ?? {};
+      const tagsA = await tagsOf('A');
+      const tagsB = await tagsOf('B');
+      expect(tagsA[TENANT_TAG_KEY]).toBe(tenantIds.A);
+      expect(tagsB[TENANT_TAG_KEY]).toBe(tenantIds.B);
+
+      const iam = new IAMClient({ region: region() });
+      const decide = async (sessionTenant: string, tenantKey: string, tags: Record<string, string>) => {
+        const res = await iam.send(
+          new SimulatePrincipalPolicyCommand({
+            PolicySourceArn: roleArn,
+            ActionNames: ['cognito-idp:AdminGetUser', 'cognito-idp:AdminDeleteUser'],
+            ResourceArns: [poolArn(tenantKey)],
+            ContextEntries: [
+              { ContextKeyName: `aws:PrincipalTag/${TENANT_SESSION_TAG_KEY}`, ContextKeyType: 'string', ContextKeyValues: [sessionTenant] },
+              ...Object.entries(tags).map(([k, v]) => ({
+                ContextKeyName: `aws:ResourceTag/${k}`,
+                ContextKeyType: 'string' as const,
+                ContextKeyValues: [v],
+              })),
+            ],
+          }),
+        );
+        return (res.EvaluationResults ?? []).map((r) => r.EvalDecision);
+      };
+      expect(await decide(tenantIds.A, 'A', tagsA)).toEqual(['allowed', 'allowed']);
+      expect(await decide(tenantIds.A, 'B', tagsB)).toEqual(['implicitDeny', 'implicitDeny']);
     });
 
     // -- step 3: users, topology-specific 409/400, R-12 404s ----------------
@@ -1032,6 +1122,8 @@ export function defineScenario(topology: Topology): void {
       // once (R-9 reads the registry: A is no longer ACTIVE).
       const adminNow = await tenant.call('GET', 'tenant/users', narrowedAdminTokenA);
       expectStatus(adminNow, 403, 'narrowed admin token after DeleteTenant → 403');
+      // ADR-0025: DeleteTenant deleted A's API key.
+      await expectKeyGone('A', formerAId);
 
       // Per-topology refresh outcomes for u1.
       if (topology === 'shared-pool-multi-tenant') {
@@ -1143,7 +1235,10 @@ export function defineScenario(topology: Topology): void {
       const delB = await platform.call('DELETE', `platform/tenants/${tenantIds.B}`);
       coverage.record('DeleteTenant');
       expectStatus(delB, 204, 'DeleteTenant B');
+      const formerBId = tenantIds.B;
       delete tenantIds.B;
+      // ADR-0025: DeleteTenant deleted B's API key.
+      await expectKeyGone('B', formerBId);
 
       // After both tenants are gone, nothing attributable to the run should
       // remain. Shared pools: no users with the run's e-mails, and no groups
@@ -1160,7 +1255,7 @@ export function defineScenario(topology: Topology): void {
         expect(users.Users ?? []).toHaveLength(0);
 
         // No group t-/admin- for either tenant remains.
-        for (const id of [formerAId, tenantIds.B].filter((v): v is string => v !== undefined)) {
+        for (const id of [formerAId, formerBId].filter((v): v is string => v !== undefined)) {
           for (const group of [`t-${id}`, `admin-${id}`]) {
             await expect(
               cognito.send(

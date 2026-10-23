@@ -29,6 +29,7 @@ const provisionerMock: jest.Mocked<Provisioner> = {
   topology: 'shared-pool-multi-tenant',
   provisionTenant: jest.fn(),
   deprovisionTenant: jest.fn(),
+  assertEmailAvailable: jest.fn(),
   createUser: jest.fn(),
   assertMember: jest.fn(),
   getUser: jest.fn(),
@@ -43,6 +44,18 @@ const provisionerMock: jest.Mocked<Provisioner> = {
 
 jest.mock('../../src/topology', () => ({
   createProvisioner: () => provisionerMock,
+}));
+
+// ADR-0025: no API Gateway call leaves the test; CreateTenant gets a key.
+const apiKeysMock = {
+  create: jest.fn(async (tenantId: string) => ({ apiKeyId: `key-${tenantId}`, apiKeyValue: `value-${tenantId}` })),
+  delete: jest.fn(async () => undefined),
+};
+jest.mock('../../src/shared/tenant-api-keys', () => ({
+  ApiGatewayTenantApiKeys: class {
+    create = apiKeysMock.create;
+    delete = apiKeysMock.delete;
+  },
 }));
 
 jest.mock('../../src/shared/registry', () => {
@@ -96,6 +109,8 @@ jest.mock('../../src/shared/registry', () => {
 process.env[ENV.topology] = 'shared-pool-multi-tenant';
 process.env[ENV.tableName] = 'TestTable';
 process.env[ENV.poolIndexName] = 'byUserPoolId';
+process.env[ENV.tenantUsagePlanName] = 'TenantIdentity-test-tenant';
+process.env[ENV.stackName] = 'TenantIdentity-test';
 process.env.AWS_REGION = 'eu-central-1';
 
 // Import after the mocks and env are set so cold-start wiring uses them.

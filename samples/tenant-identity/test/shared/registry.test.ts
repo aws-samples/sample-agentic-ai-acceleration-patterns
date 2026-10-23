@@ -15,7 +15,7 @@ import {
 import { mockClient } from 'aws-sdk-client-mock';
 import 'aws-sdk-client-mock-jest';
 import { ConflictError, InvalidInputError, NotFoundError } from '../../src/shared/errors';
-import { DynamoDBRegistry, type TenantRecord } from '../../src/shared/registry';
+import { backoffDelay, DynamoDBRegistry, type TenantRecord } from '../../src/shared/registry';
 
 const TABLE = 'TenantRegistry';
 // The mock is typed loosely: a nested @smithy/types (pulled by @aws-sdk/core)
@@ -148,6 +148,16 @@ describe('DynamoDBRegistry (spec §4, ADR-0002)', () => {
     expect(input.ReturnValues).toBe('ALL_NEW');
   });
 
+  it('activate writes the API key id and value with the Cognito fields (ADR-0025)', async () => {
+    ddb.on(UpdateCommand).resolves({ Attributes: { PK: 'TENANT#x', SK: 'META', status: 'ACTIVE' } });
+    await registry().activate('01ARZ3NDEKTSV4RRFFQ69G5FP3', { groupName: 't-x', apiKeyId: 'key-1', apiKeyValue: 'value-1' });
+    const input = ddb.commandCalls(UpdateCommand).at(-1).args[0].input;
+    expect(input.UpdateExpression).toContain('#apiKeyId = :apiKeyId');
+    expect(input.UpdateExpression).toContain('#apiKeyValue = :apiKeyValue');
+    expect(input.ExpressionAttributeValues[':apiKeyId']).toBe('key-1');
+    expect(input.ExpressionAttributeValues[':apiKeyValue']).toBe('value-1');
+  });
+
   it('activate omits undefined provisioned fields from the update (ADR-0021)', async () => {
     const r = record('01ARZ3NDEKTSV4RRFFQ69G5FP2', { status: 'ACTIVE', groupName: 't-01ARZ3NDEKTSV4RRFFQ69G5FP2' });
     ddb.on(UpdateCommand).resolves({ Attributes: item(r) });
@@ -202,5 +212,43 @@ describe('DynamoDBRegistry (spec §4, ADR-0002)', () => {
     for (const forbidden of ['username', 'email', 'password', 'membership', 'accessToken', 'refreshToken', 'sub', 'groups']) {
       expect(written).not.toHaveProperty(forbidden);
     }
+  });
+});
+
+describe('DynamoDBRegistry batchGet backoff (UnprocessedKeys)', () => {
+  const unprocessed = (id: string) => ({ UnprocessedKeys: { [TABLE]: { Keys: [{ PK: `TENANT#${id}`, SK: 'META' }] } } });
+
+  it('sleeps with exponential, jittered, capped backoff between retries, never before the first read', async () => {
+    const a = record('01ARZ3NDEKTSV4RRFFQ69G5FA1');
+    ddb
+      .on(BatchGetCommand)
+      .resolvesOnce(unprocessed(a.tenantId))
+      .resolvesOnce(unprocessed(a.tenantId))
+      .resolvesOnce({ Responses: { [TABLE]: [item(a)] } });
+    const sleep = jest.fn().mockResolvedValue(undefined);
+    const registry = new DynamoDBRegistry(TABLE, client, undefined, undefined, sleep);
+    expect(await registry.batchGet([a.tenantId])).toEqual([a]);
+    // Three reads, two waits: before retry 1 and retry 2 only.
+    expect(ddb).toHaveReceivedCommandTimes(AnyBatchGet, 3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(sleep.mock.calls[0][0]).toBeGreaterThanOrEqual(0);
+    expect(sleep.mock.calls[0][0]).toBeLessThan(50); // 25 * 2^1
+    expect(sleep.mock.calls[1][0]).toBeLessThan(100); // 25 * 2^2
+  });
+
+  it('gives up after six reads, sleeping between each', async () => {
+    ddb.on(BatchGetCommand).resolves(unprocessed('01ARZ3NDEKTSV4RRFFQ69G5FA1'));
+    const sleep = jest.fn().mockResolvedValue(undefined);
+    const registry = new DynamoDBRegistry(TABLE, client, undefined, undefined, sleep);
+    await expect(registry.batchGet(['01ARZ3NDEKTSV4RRFFQ69G5FA1'])).rejects.toThrow('Registry batch read did not complete');
+    expect(ddb).toHaveReceivedCommandTimes(AnyBatchGet, 6);
+    expect(sleep).toHaveBeenCalledTimes(5);
+  });
+
+  it('backoffDelay is full jitter under min(400, 25 * 2^attempt)', () => {
+    expect(backoffDelay(1, () => 0.999)).toBe(49);
+    expect(backoffDelay(3, () => 0.5)).toBe(100);
+    expect(backoffDelay(10, () => 0.999)).toBe(399);
+    expect(backoffDelay(10, () => 0)).toBe(0);
   });
 });

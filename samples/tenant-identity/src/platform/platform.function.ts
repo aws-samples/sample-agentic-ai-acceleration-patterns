@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { APIGatewayClient } from '@aws-sdk/client-api-gateway';
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
@@ -9,6 +10,7 @@ import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { PlatformContext, PlatformService } from './platform';
 import { ENV, parseTopology, requireEnv } from '../shared/constants';
 import { DynamoDBRegistry } from '../shared/registry';
+import { ApiGatewayTenantApiKeys } from '../shared/tenant-api-keys';
 import { getPlatformServiceServiceHandler } from '../smithy/platform/typescript-ssdk-codegen/src';
 import { createProvisioner } from '../topology';
 
@@ -55,7 +57,15 @@ const provisioner = createProvisioner(topology, {
   stackName,
 });
 
-const service = new PlatformService({ registry, provisioner, topology });
+// ADR-0025: per-tenant API keys in the stack's /tenant/* usage plan. The
+// plan is found by name at first use (ENV.tenantUsagePlanName explains why).
+const apiKeys = new ApiGatewayTenantApiKeys(
+  new APIGatewayClient({}),
+  requireEnv(ENV.tenantUsagePlanName),
+  requireEnv(ENV.stackName),
+);
+
+const service = new PlatformService({ registry, provisioner, apiKeys, topology });
 const serviceHandler = getPlatformServiceServiceHandler<PlatformContext>(service);
 
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {

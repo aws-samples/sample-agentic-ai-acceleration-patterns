@@ -24,11 +24,14 @@ import {
   SAMPLE_TAG_VALUE,
   STACK_TAG_KEY,
   TENANT_ATTRIBUTE_NAME,
+  TENANT_SESSION_TAG_KEY,
+  TENANT_TAG_KEY,
+  tenantUsagePlanName,
   Topology,
 } from './shared/constants';
 import { LogDrain } from './shared/log-drain';
 import { acknowledgeGranularFinding, nagFindingResource, suppressTemplateScanners } from './shared/nag';
-import { IntegrationMapping, mergeOpenApi, patchIntegrations } from './shared/openapi';
+import { IntegrationMapping, mergeOpenApi, patchIntegrations, requireApiKey } from './shared/openapi';
 import { TenantDrain } from './teardown/tenant-drain-resource';
 
 /** Stack props: the deploy-time topology (ADR-0001) plus the usual StackProps. */
@@ -50,7 +53,12 @@ const STAGE_NAME = 'prod';
 /** The registry GSI that maps a pool to its tenant (spec §4.2). */
 const GSI_BY_USER_POOL_ID = POOL_INDEX_NAME;
 
-/** The three DynamoDB actions the trigger reads the registry with (R-14). */
+/**
+ * The three DynamoDB actions the trigger reads the registry with (R-14):
+ * get, batchGet (shared-pool-multi-tenant resolves every group's tenant in
+ * one call) and the byUserPoolId query. The authoriser never batch-reads, so
+ * it holds only GetItem + Query (see below), not this list.
+ */
 const REGISTRY_READ_ACTIONS = ['dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:Query'];
 
 /** Per-pool cognito-idp user actions held by both the platform and tenant-user roles. */
@@ -93,18 +101,31 @@ export const DRAIN_SHARED_POOL_ACTIONS = [
   'cognito-idp:DeleteGroup',
 ];
 
-/** Pool-lifecycle actions (pool-per-tenant platform role only). */
-const POOL_LIFECYCLE_ACTIONS = [
-  'cognito-idp:CreateUserPoolClient',
-  'cognito-idp:DeleteUserPool',
-  'cognito-idp:DescribeUserPool',
-];
+/**
+ * Pool-lifecycle actions (pool-per-tenant platform role only). Create and
+ * delete are what onboarding and offboarding call; the platform code never
+ * describes a pool, so DescribeUserPool is not granted.
+ */
+const POOL_LIFECYCLE_ACTIONS = ['cognito-idp:CreateUserPoolClient', 'cognito-idp:DeleteUserPool'];
 
-/** Throttle limits by route family (N-5, N-6, N-7). */
+/**
+ * A tenant id as an IAM string pattern: exactly 26 characters, the length of
+ * a ULID. IAM has no regex condition, so `StringLike` with 26 `?` is the
+ * tightest shape check available (ADR-0026).
+ */
+const TENANT_ID_PATTERN = '?'.repeat(26);
+
+/**
+ * Throttle limits by route family (N-5, N-6, N-7). `tenant` is the stage's
+ * shared `/tenant/*` ceiling for all tenants together; `tenantPerKey` is each
+ * tenant's own usage-plan limit (R-19, ADR-0025). The shared ceiling is five
+ * times the per-tenant one, so no single tenant can fill it (T-31).
+ */
 const THROTTLE = {
   platform: { rateLimit: 10, burstLimit: 20 }, // N-5
   token: { rateLimit: 20, burstLimit: 40 }, // N-6
-  tenant: { rateLimit: 10, burstLimit: 20 }, // N-7
+  tenant: { rateLimit: 50, burstLimit: 100 }, // N-7, shared
+  tenantPerKey: { rateLimit: 10, burstLimit: 20 }, // N-7 / R-19, per tenant
 } as const;
 
 /**
@@ -150,10 +171,14 @@ export class TenantIdentityStack extends Stack {
       // N-2 (M-14): point-in-time recovery; losing the registry orphans
       // pool-per-tenant pools.
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      // AWS-managed encryption at rest (the TableV2 default).
+      // Encrypted at rest with a DynamoDB-owned key (the TableV2 default):
+      // the registry holds identifiers and status only, no secret.
       encryption: dynamodb.TableEncryptionV2.dynamoOwnedKey(),
       // Sample only — a real registry is retained.
       removalPolicy: RemovalPolicy.DESTROY,
+    });
+    suppressTemplateScanners(table, {
+      checkov: [{ id: 'CKV_AWS_119', comment: 'The registry holds tenant identifiers and status only; a DynamoDB-owned key is sufficient for this sample and a customer-managed KMS key is on the hardening checklist. Accepted risk T-24 (threat model).' }],
     });
 
     // --- Shared pool (shared-pool, shared-pool-multi-tenant) --------------
@@ -166,7 +191,10 @@ export class TenantIdentityStack extends Stack {
     // never a cognito-idp action (R-14, M-8).
     const triggerFn = new NodejsFunction(this, 'TriggerFunction', {
       entry: path.join(__dirname, 'trigger/pre-token-generation.function.ts'),
-      ...functionProps(this, 'TriggerFunctionLogs'),
+      // Cognito waits at most 5 s for a trigger and then fails the sign-in;
+      // a longer timeout would only let the function keep running (and keep
+      // reading the registry) after the caller has already been refused.
+      ...functionProps(this, 'TriggerFunctionLogs', Duration.seconds(5)),
       environment: {
         [ENV.topology]: topology,
         [ENV.tableName]: table.tableName,
@@ -203,9 +231,11 @@ export class TenantIdentityStack extends Stack {
         [ENV.poolIndexName]: GSI_BY_USER_POOL_ID,
       },
     });
+    // R-9: registry.get (GetItem) and registry.getByUserPoolId (Query on the
+    // index) are the authoriser's only reads; it never batch-reads.
     authorizerFn.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: REGISTRY_READ_ACTIONS,
+        actions: ['dynamodb:GetItem', 'dynamodb:Query'],
         resources: [table.tableArn, `${table.tableArn}/index/${GSI_BY_USER_POOL_ID}`],
       }),
     );
@@ -214,11 +244,17 @@ export class TenantIdentityStack extends Stack {
     // --- Platform function (R-2) ------------------------------------------
     const platformFn = new NodejsFunction(this, 'PlatformFunction', {
       entry: path.join(__dirname, 'platform/platform.function.ts'),
-      ...functionProps(this, 'PlatformFunctionLogs', Duration.seconds(30)),
+      // Below API Gateway's fixed 29 s integration timeout: a slow
+      // onboarding (CreateUserPool + client + groups) must fail in the
+      // function, where it is logged and the caller sees the error, not as a
+      // gateway 504 with the function still running behind it.
+      ...functionProps(this, 'PlatformFunctionLogs', Duration.seconds(28)),
       environment: {
         [ENV.topology]: topology,
         [ENV.tableName]: table.tableName,
         [ENV.poolIndexName]: GSI_BY_USER_POOL_ID,
+        // ADR-0025: looked up by name; the plan's id would be a cycle.
+        [ENV.tenantUsagePlanName]: tenantUsagePlanName(this.stackName),
       },
     });
     // Registry read/write (M-14: only the platform function writes it).
@@ -236,7 +272,15 @@ export class TenantIdentityStack extends Stack {
         resources: [table.tableArn, `${table.tableArn}/index/${GSI_BY_USER_POOL_ID}`],
       }),
     );
-    acknowledgeLambdaBasicExecutionRole(platformFn);
+    // cdk-nag keeps ONE reason per finding id per construct (the first
+    // acknowledgment wins when it writes the template metadata), so the
+    // pool-per-tenant platform role, which has two '*' resources (X-Ray and
+    // CreateUserPool), documents both in a single reason here.
+    acknowledgeLambdaBasicExecutionRole(platformFn, {
+      wildcardResourceReason: isPoolPerTenant
+        ? 'Two actions take no resource ARN. (1) Active X-Ray tracing grants xray:PutTraceSegments/PutTelemetryRecords, which the X-Ray API only accepts on \'*\'. (2) N-3 / threat-model M-7 (T-7): cognito-idp:CreateUserPool has no resource ARN, so it is granted on * and constrained by a RequestTag condition (only the sample, stack and tenant tags, only those keys). Per-pool actions are scoped to userpool/* with ResourceTag conditions on the sample tag and the stack tag because pools are created at runtime in pool-per-tenant.'
+        : undefined,
+    });
 
     // --- Tenant-user function (R-8) ---------------------------------------
     const tenantUsersFn = new NodejsFunction(this, 'TenantUsersFunction', {
@@ -277,7 +321,10 @@ export class TenantIdentityStack extends Stack {
         resources: [table.tableArn, `${table.tableArn}/index/${GSI_BY_USER_POOL_ID}`],
       }),
     );
-    acknowledgeLambdaBasicExecutionRole(drainFn);
+    acknowledgeLambdaBasicExecutionRole(drainFn, {
+      noDeadLetterQueueReason:
+        'Invoked asynchronously by CloudFormation as a custom resource. The drain is idempotent (it re-reads the registry and skips what is already gone), so Lambda\'s built-in async retry is the recovery path; a dead-letter queue would hold an event nobody replays. Accepted risk T-24 (threat model).',
+    });
     const tenantDrain = new TenantDrain(this, 'TenantDrain', { handler: drainFn });
     tenantDrain.dependsOn(table);
 
@@ -398,7 +445,7 @@ export class TenantIdentityStack extends Stack {
       // pool-per-tenant: the platform function creates pools at onboarding.
       // It must know the trigger to attach to each new pool (ENV, §7.1).
       platformFn.addEnvironment(ENV.triggerFunctionArn, triggerFn.functionArn);
-      platformFn.addEnvironment(ENV.stackName, this.stackName);
+      // ENV.stackName is set for every topology below (API key tag, ADR-0025).
 
       // Both tags, so a role reaches only pools this stack created (N-3):
       // another stack in the account tags its pools with its own name.
@@ -411,31 +458,47 @@ export class TenantIdentityStack extends Stack {
         [`aws:ResourceTag/${STACK_TAG_KEY}`]: this.stackName,
       };
 
+      // ADR-0026: every new pool also carries its tenant's id. Required (a
+      // StringLike on a missing key fails) and shaped like a ULID.
+      const tenantRequestTag = { [`aws:RequestTag/${TENANT_TAG_KEY}`]: TENANT_ID_PATTERN };
+      const poolTagKeys = [SAMPLE_TAG_KEY, STACK_TAG_KEY, TENANT_TAG_KEY];
+
       // N-3 (M-7): CreateUserPool has no resource ARN, so it is granted on
-      // '*' but constrained by a tag condition — only the sample tag and this
-      // stack's tag may be set at create (and only those two keys). Documented accepted
-      // account-wide action in the threat model (T-7).
+      // '*' but constrained by a tag condition — only the sample tag, this
+      // stack's tag and a tenant tag may be set at create (and only those
+      // three keys). Documented accepted account-wide action in the threat
+      // model (T-7).
       platformFn.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ['cognito-idp:CreateUserPool'],
           resources: ['*'],
           conditions: {
             'StringEquals': requestTags,
-            'ForAllValues:StringEquals': { 'aws:TagKeys': [SAMPLE_TAG_KEY, STACK_TAG_KEY] },
+            'StringLike': tenantRequestTag,
+            'ForAllValues:StringEquals': { 'aws:TagKeys': poolTagKeys },
           },
         }),
       );
       // CreateUserPool with UserPoolTags is also authorised as TagResource on
       // userpool/* (integ-verified: AccessDenied without it). Same tag
-      // condition as CreateUserPool. Residual: the role could tag a foreign
-      // pool into its ResourceTag rights; accepted with T-7 (threat model).
+      // condition as CreateUserPool, plus StringEqualsIfExists on the sample
+      // and stack resource tags: a pool that already carries them must carry
+      // THIS stack's values, so the role cannot tag another stack's pool into
+      // its own ResourceTag rights. A Null ('no tag yet') condition is NOT
+      // usable here: integ 2026-10-22 showed CreateUserPool's implicit
+      // TagResource fails it (AccessDenied), so IfExists is what works for the
+      // pool being created. Residual: a pool in this account that carries
+      // neither tag could still be tagged in; accepted with T-7 (threat model).
       platformFn.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ['cognito-idp:TagResource'],
           resources: [`arn:${this.partition}:cognito-idp:${this.region}:${this.account}:userpool/*`],
           conditions: {
             'StringEquals': requestTags,
-            'ForAllValues:StringEquals': { 'aws:TagKeys': [SAMPLE_TAG_KEY, STACK_TAG_KEY] },
+            'StringLike': tenantRequestTag,
+            'ForAllValues:StringEquals': { 'aws:TagKeys': poolTagKeys },
+            // A pool that is already tagged must be this stack's own.
+            'StringEqualsIfExists': resourceTags,
           },
         }),
       );
@@ -450,17 +513,43 @@ export class TenantIdentityStack extends Stack {
           },
         }),
       );
-      // The tenant-user function manages users of the caller's tenant in the
-      // tenant's own pool; no pool/group lifecycle action (R-8).
-      tenantUsersFn.addToRolePolicy(
+      // ADR-0026: the tenant-user function holds no Cognito action itself. It
+      // assumes TenantScopedRole once per tenant, tagging the session with
+      // the authoriser's tenant id; that role reaches only the pool whose
+      // tenant tag equals the session tag. IAM then enforces the T-18 tenant
+      // boundary; the R-12 code check stays as defence in depth.
+      const tenantScopedRole = new iam.Role(this, 'TenantScopedRole', {
+        description: 'Tenant-user Cognito actions on the one pool whose tenant tag matches the session tag (ADR-0026)',
+        assumedBy: new iam.ArnPrincipal(tenantUsersFn.role!.roleArn)
+          .withConditions({
+            // A session must carry exactly one tag, TenantId, shaped like a
+            // ULID; nothing else may be tagged and nothing is transitive.
+            'StringLike': { [`aws:RequestTag/${TENANT_SESSION_TAG_KEY}`]: TENANT_ID_PATTERN },
+            'ForAllValues:StringEquals': { 'aws:TagKeys': [TENANT_SESSION_TAG_KEY] },
+          })
+          .withSessionTags(),
+      });
+      tenantScopedRole.addToPolicy(
         new iam.PolicyStatement({
+          // R-8: user actions only, no pool/group lifecycle, no sign-in (P-8).
           actions: TENANT_USER_ACTIONS,
           resources: [`arn:${this.partition}:cognito-idp:${this.region}:${this.account}:userpool/*`],
           conditions: {
-            StringEquals: resourceTags,
+            StringEquals: {
+              ...resourceTags,
+              [`aws:ResourceTag/${TENANT_TAG_KEY}`]: `\${aws:PrincipalTag/${TENANT_SESSION_TAG_KEY}}`,
+            },
           },
         }),
       );
+      tenantUsersFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ['sts:AssumeRole', 'sts:TagSession'],
+          resources: [tenantScopedRole.roleArn],
+        }),
+      );
+      tenantUsersFn.addEnvironment(ENV.tenantScopedRoleArn, tenantScopedRole.roleArn);
+      new CfnOutput(this, 'TenantScopedRoleArn', { value: tenantScopedRole.roleArn });
       // The drain deletes each tenant's pool: DeleteUserPool on this stack's
       // pools only (ADR-0022).
       drainFn.addToRolePolicy(
@@ -486,19 +575,16 @@ export class TenantIdentityStack extends Stack {
       // each as an acknowledged cdk-nag IAM5 finding with the threat-model
       // reference. The userpool/* ARN carries the ${AWS::Partition} token, so
       // the finding id is built with nagFindingResource (resolve + flatten).
+      // The platform role's Resource::* finding (X-Ray + CreateUserPool) is
+      // acknowledged once, above, in acknowledgeLambdaBasicExecutionRole.
       const userpoolWildcardArn = nagFindingResource(
         this,
         `arn:${this.partition}:cognito-idp:${this.region}:${this.account}:userpool/*`,
       );
       acknowledgeGranularFinding(
-        platformFn,
-        'AwsSolutions-IAM5[Resource::*]',
-        'N-3 / threat-model M-7 (T-7): cognito-idp:CreateUserPool has no resource ARN, so it is granted on * and constrained by a RequestTag condition (only the sample tag and the stack tag, only those keys). Per-pool actions are scoped to userpool/* with ResourceTag conditions on the sample tag and the stack tag because pools are created at runtime in pool-per-tenant.',
-      );
-      acknowledgeGranularFinding(
-        tenantUsersFn,
+        tenantScopedRole,
         `AwsSolutions-IAM5[Resource::${userpoolWildcardArn}]`,
-        'N-3 / threat-model M-17: per-tenant pools are created at runtime, so the tenant-user actions are scoped to userpool/* with ResourceTag conditions on the sample tag and the stack tag. No pool or group lifecycle action is present (R-8).',
+        'N-3 / ADR-0026 / threat-model M-17, M-28: per-tenant pools are created at runtime, so the tenant-user actions are scoped to userpool/* with ResourceTag conditions on the sample tag, the stack tag, and the tenant tag equal to the session\'s TenantId tag: a session reaches exactly one tenant\'s pool. No pool or group lifecycle action is present (R-8).',
       );
       acknowledgeGranularFinding(
         platformFn,
@@ -558,13 +644,13 @@ export class TenantIdentityStack extends Stack {
             effect: iam.Effect.ALLOW,
             principals: [new iam.AccountRootPrincipal()],
             actions: ['execute-api:Invoke'],
-            resources: ['execute-api:/prod/*/platform/*'],
+            resources: [`execute-api:/${STAGE_NAME}/*/platform/*`],
           }),
           new iam.PolicyStatement({
             effect: iam.Effect.ALLOW,
             principals: [new iam.AnyPrincipal()],
             actions: ['execute-api:Invoke'],
-            resources: ['execute-api:/prod/POST/oauth2/token', 'execute-api:/prod/*/tenant/*'],
+            resources: [`execute-api:/${STAGE_NAME}/POST/oauth2/token`, `execute-api:/${STAGE_NAME}/*/tenant/*`],
           }),
         ],
       }),
@@ -589,6 +675,10 @@ export class TenantIdentityStack extends Stack {
             callerArn: apigateway.AccessLogField.contextIdentityUserArn(),
             // The verified tenant admin sub on /tenant/* (present on Deny too).
             principalId: apigateway.AccessLogField.contextAuthorizerPrincipalId(),
+            // The caller's tenant on /tenant/* (the authoriser returns
+            // context.tenantId on Allow). The per-tenant dimension every
+            // Contributor Insights rule below keys on.
+            tenantId: apigateway.AccessLogField.contextAuthorizer('tenantId'),
           }),
         ),
         loggingLevel: apigateway.MethodLoggingLevel.INFO, // APIG6
@@ -604,6 +694,150 @@ export class TenantIdentityStack extends Stack {
       },
     });
     this.apiUrl = api.url;
+
+    // --- Per-tenant throttling on /tenant/* (ADR-0025) ---------------------
+    // One usage plan per stack, on the stage; one API key per tenant, created
+    // by CreateTenant. Usage-plan limits apply per key, so each tenant gets
+    // THROTTLE.tenantPerKey on its own. Only /tenant/* methods require a key,
+    // so the plan changes nothing on /platform/* or /oauth2/token. The
+    // stage's per-method /tenant limits (THROTTLE.tenant, N-7) still apply on
+    // top, to all tenants together, and sit above the per-key limit (T-31).
+    const tenantUsagePlan = new apigateway.UsagePlan(this, 'TenantUsagePlan', {
+      name: tenantUsagePlanName(this.stackName),
+      description: 'Per-tenant throttle for /tenant/* (ADR-0025); one API key per tenant',
+      throttle: { rateLimit: THROTTLE.tenantPerKey.rateLimit, burstLimit: THROTTLE.tenantPerKey.burstLimit },
+      apiStages: [{ api, stage: api.deploymentStage }],
+    });
+    // The drain deletes every tenant's key before the plan goes (ADR-0022).
+    tenantDrain.dependsOn(tenantUsagePlan);
+
+    // API Gateway control-plane ARNs for the keys (ADR-0025). CreateApiKey is
+    // POST on /apikeys; DeleteApiKey is DELETE on /apikeys/<id>, and key ids
+    // are generated, so it is /apikeys/*. Every key is created carrying the
+    // stack tag, and the delete is allowed only on keys with this stack's
+    // tag, so neither role can delete another workload's key (T-7).
+    const apiKeysArn = `arn:${this.partition}:apigateway:${this.region}::/apikeys`;
+    const apiKeyArn = `${apiKeysArn}/*`;
+    platformFn.addEnvironment(ENV.stackName, this.stackName);
+    platformFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['apigateway:POST'],
+        resources: [apiKeysArn],
+        conditions: {
+          'StringEquals': { [`aws:RequestTag/${STACK_TAG_KEY}`]: this.stackName },
+          'ForAllValues:StringEquals': { 'aws:TagKeys': [STACK_TAG_KEY] },
+        },
+      }),
+    );
+    // API Gateway authorises the tags on CreateApiKey as TagResource:
+    // apigateway:PUT on /tags/<url-encoded /apikeys/* ARN> (integ 2026-10-23).
+    // Same tag conditions as the create. A role holding this can also tag an
+    // existing untagged key in the Region with this stack's tag, and then
+    // delete it: the accepted T-7 residual, as with Cognito's TagResource.
+    const apiKeyTagsArn = `arn:${this.partition}:apigateway:${this.region}::/tags/arn%3A${this.partition}%3Aapigateway%3A${this.region}%3A%3A%2Fapikeys%2F*`;
+    platformFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['apigateway:PUT'],
+        resources: [apiKeyTagsArn],
+        conditions: {
+          'StringEquals': { [`aws:RequestTag/${STACK_TAG_KEY}`]: this.stackName },
+          'ForAllValues:StringEquals': { 'aws:TagKeys': [STACK_TAG_KEY] },
+          'StringEqualsIfExists': { [`aws:ResourceTag/${STACK_TAG_KEY}`]: this.stackName },
+        },
+      }),
+    );
+    const deleteOwnKeys = () =>
+      new iam.PolicyStatement({
+        actions: ['apigateway:DELETE'],
+        resources: [apiKeyArn],
+        conditions: { StringEquals: { [`aws:ResourceTag/${STACK_TAG_KEY}`]: this.stackName } },
+      });
+    platformFn.addToRolePolicy(deleteOwnKeys());
+    // GetUsagePlans, to find this stack's plan by name at first use.
+    platformFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['apigateway:GET'],
+        resources: [`arn:${this.partition}:apigateway:${this.region}::/usageplans`],
+      }),
+    );
+    // CreateUsagePlanKey on this plan only. A separate policy, not the role's
+    // default one: the function depends on its default policy, and naming the
+    // plan there would close the cycle function -> plan -> API -> function.
+    new iam.Policy(platformFn, 'UsagePlanKeyPolicy', {
+      roles: [platformFn.role!],
+      statements: [
+        new iam.PolicyStatement({
+          actions: ['apigateway:POST'],
+          resources: [
+            `arn:${this.partition}:apigateway:${this.region}::/usageplans/${tenantUsagePlan.usagePlanId}/keys`,
+          ],
+        }),
+      ],
+    });
+    // The drain deletes this stack's keys only.
+    drainFn.addToRolePolicy(deleteOwnKeys());
+    acknowledgeGranularFinding(
+      platformFn,
+      `AwsSolutions-IAM5[Resource::${nagFindingResource(this, apiKeyTagsArn)}]`,
+      'ADR-0025: API Gateway authorises the tag on CreateApiKey as apigateway:PUT on the /tags ARN of /apikeys/*; the key id is not known before creation. Conditioned on the request tag tenant-identity:stack = this stack, no other tag key, and no other stack tag already on the key (threat-model T-7).',
+    );
+    for (const fn of [platformFn, drainFn]) {
+      acknowledgeGranularFinding(
+        fn,
+        `AwsSolutions-IAM5[Resource::${nagFindingResource(this, apiKeyArn)}]`,
+        'ADR-0025: API key ids are generated at CreateTenant, so DeleteApiKey is granted on /apikeys/* in this Region, conditioned on aws:ResourceTag/tenant-identity:stack = this stack. Keys are created with that tag (aws:RequestTag condition on CreateApiKey), so the role deletes only keys this stack created (threat-model T-7).',
+      );
+    }
+
+    // --- Per-tenant observability: Contributor Insights (N-4) --------------
+    // Who is driving traffic, errors and token issuance, by tenant, without a
+    // metric per tenant. Four rules over the two log groups that already
+    // carry tenantId. Rule names are account-wide, so each is prefixed with
+    // the stack name. Cost: a fixed charge per rule-month plus a charge per
+    // million matched log events (CloudWatch pricing).
+    //
+    // Access logs: $context.authorizer.tenantId renders as '-' when the
+    // request had no authoriser context (/platform, /oauth2/token, and a
+    // Deny), so the per-tenant rules exclude '-' as well as a missing field.
+    const tenantPresent = [
+      { Match: '$.tenantId', IsPresent: true },
+      { Match: '$.tenantId', NotIn: ['-'] },
+    ];
+    // (a) Requests per tenant on /tenant/*.
+    insightRule(this, 'TenantRequestsRule', `${this.stackName}-tenant-requests`, {
+      LogGroupNames: [apiAccessLogs.logGroupName],
+      Contribution: { Keys: ['$.tenantId'], Filters: tenantPresent },
+    });
+    // (b) Error responses per tenant and status. The access log writes
+    // status as a string, so "4xx or 5xx" is a prefix match, not GreaterThan
+    // (which Contributor Insights defines for numeric fields only).
+    insightRule(this, 'TenantErrorsRule', `${this.stackName}-tenant-errors`, {
+      LogGroupNames: [apiAccessLogs.logGroupName],
+      Contribution: {
+        Keys: ['$.tenantId', '$.status'],
+        Filters: [...tenantPresent, { Match: '$.status', StartsWith: ['4', '5'] }],
+      },
+    });
+    // (c) Tokens issued per tenant: the trigger's 'pre-token-generation
+    // issued' line (src/trigger/pre-token-generation.ts). In
+    // shared-pool-multi-tenant an un-narrowed token lists every tenant,
+    // comma-joined, and counts as one contributor.
+    insightRule(this, 'TenantTokensRule', `${this.stackName}-tenant-tokens`, {
+      LogGroupNames: [triggerFn.logGroup.logGroupName],
+      Contribution: {
+        Keys: ['$.tenantId'],
+        Filters: [{ Match: '$.message', In: ['pre-token-generation issued'] }],
+      },
+    });
+    // (d) Refusals by rule: every 'pre-token-generation refused*' line
+    // carries the §8 rule that fired (never the caller's input).
+    insightRule(this, 'TokenRefusalsRule', `${this.stackName}-token-refusals`, {
+      LogGroupNames: [triggerFn.logGroup.logGroupName],
+      Contribution: {
+        Keys: ['$.rule'],
+        Filters: [{ Match: '$.message', StartsWith: ['pre-token-generation refused'] }],
+      },
+    });
 
     // M-4/M-9/N-5..N-7 signal: sustained 4XX is the probing / leaked-token /
     // amplification signature at the edge. Alarm only (sample scope).
@@ -643,13 +877,14 @@ export class TenantIdentityStack extends Stack {
       cfnNag: [{ id: 'W84', reason: 'Access logs carry request metadata only; default CloudWatch Logs SSE at rest is sufficient for this sample. Accepted risk T-24 (threat model).' }],
       checkov: [{ id: 'CKV_AWS_158', comment: 'Access logs carry request metadata only; default CloudWatch Logs SSE at rest is sufficient for this sample. Accepted risk T-24 (threat model).' }],
     });
+    // The stage is in TenantUsagePlan (ADR-0025), so cfn_nag W64 no longer
+    // applies to it.
     suppressTemplateScanners(api.deploymentStage, {
-      cfnNag: [{ id: 'W64', reason: 'Not usage-plan/API-key based: callers authenticate with IAM (/platform), tokens (/tenant, /oauth2); explicit per-route throttling bounds request rates (N-5/N-6/N-7). Accepted risk T-24 (threat model).' }],
       checkov: [{ id: 'CKV_AWS_120', comment: 'Identity responses are per-caller and mutation-heavy; stage caching risks stale reads for marginal benefit. Accepted risk T-24 (threat model).' }],
     });
     if (api.latestDeployment !== undefined) {
       suppressTemplateScanners(api.latestDeployment, {
-        cfnNag: [{ id: 'W68', reason: 'Not usage-plan/API-key based: callers authenticate with IAM or tokens; explicit per-route throttling bounds request rates. Accepted risk T-24 (threat model).' }],
+        cfnNag: [{ id: 'W68', reason: 'The stage this deployment backs is in the per-tenant usage plan (ADR-0025); cfn_nag matches a usage plan to a Deployment\'s StageName, which CDK leaves unset because the stage is a separate resource. Only /tenant/* requires a key: /platform/* is IAM-authorised and /oauth2/token has no authoriser to return one.' }],
       });
     }
     for (const fn of [platformFn, tenantUsersFn]) {
@@ -734,6 +969,7 @@ export class TenantIdentityStack extends Stack {
     new CfnOutput(this, 'ApiUrl', { value: api.url });
     new CfnOutput(this, 'Topology', { value: topology });
     new CfnOutput(this, 'RegistryTableName', { value: table.tableName });
+    new CfnOutput(this, 'TenantUsagePlanId', { value: tenantUsagePlan.usagePlanId });
     if (isShared && userPool !== undefined && appClient !== undefined) {
       new CfnOutput(this, 'UserPoolId', { value: userPool.userPoolId });
       new CfnOutput(this, 'AppClientId', { value: appClient.userPoolClientId });
@@ -755,6 +991,11 @@ function functionProps(
     timeout,
     tracing: lambda.Tracing.ACTIVE,
     logGroup: functionLogGroup(scope, logGroupId),
+    // The logger (src/shared/logger.ts) writes one JSON object per line.
+    // Lambda's JSON log format passes an already-JSON line through as is;
+    // the plain-text format prefixes it with a timestamp, request id and
+    // level, which the Contributor Insights JSON rules cannot parse.
+    loggingFormat: lambda.LoggingFormat.JSON,
     bundling: {
       minify: true,
       sourceMap: true,
@@ -794,8 +1035,45 @@ function functionLogGroup(scope: Construct, id: string): logs.LogGroup {
   return logGroup;
 }
 
+/**
+ * A CloudWatch Contributor Insights rule over CloudWatch Logs (schema
+ * CloudWatchLogRule v1, JSON log format), enabled. `body` carries the
+ * log groups and the Contribution; the schema, format and Count aggregation
+ * are fixed here so every rule in the stack reads the same way.
+ */
+function insightRule(
+  scope: Construct,
+  id: string,
+  ruleName: string,
+  body: { LogGroupNames: string[]; Contribution: Record<string, unknown> },
+): cloudwatch.CfnInsightRule {
+  return new cloudwatch.CfnInsightRule(scope, id, {
+    ruleName,
+    ruleState: 'ENABLED',
+    ruleBody: JSON.stringify({
+      Schema: { Name: 'CloudWatchLogRule', Version: 1 },
+      LogGroupNames: body.LogGroupNames,
+      LogFormat: 'JSON',
+      Contribution: body.Contribution,
+      AggregateOn: 'Count',
+    }),
+  });
+}
+
+/** Per-function overrides for the reasons acknowledgeLambdaBasicExecutionRole records. */
+interface ExecutionRoleAcknowledgements {
+  /**
+   * Replaces the X-Ray-only reason for `AwsSolutions-IAM5[Resource::*]`
+   * when the role has a second '*' resource (cdk-nag records one reason per
+   * finding id per construct, so both must be stated in one).
+   */
+  readonly wildcardResourceReason?: string;
+  /** Replaces the synchronous-invocation reason for checkov CKV_AWS_116 (no dead-letter queue). */
+  readonly noDeadLetterQueueReason?: string;
+}
+
 /** Acknowledges the IAM4 finding for the managed basic-execution role + template-scanner counterparts. */
-function acknowledgeLambdaBasicExecutionRole(fn: NodejsFunction): void {
+function acknowledgeLambdaBasicExecutionRole(fn: NodejsFunction, overrides: ExecutionRoleAcknowledgements = {}): void {
   acknowledgeGranularFinding(
     fn,
     'AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]',
@@ -807,7 +1085,8 @@ function acknowledgeLambdaBasicExecutionRole(fn: NodejsFunction): void {
   acknowledgeGranularFinding(
     fn,
     'AwsSolutions-IAM5[Resource::*]',
-    'Active X-Ray tracing grants xray:PutTraceSegments/PutTelemetryRecords, which the X-Ray API only accepts on \'*\' (no resource ARN). Not over-breadth. Accepted risk T-24 (threat model).',
+    overrides.wildcardResourceReason ??
+      'Active X-Ray tracing grants xray:PutTraceSegments/PutTelemetryRecords, which the X-Ray API only accepts on \'*\' (no resource ARN). Not over-breadth. Accepted risk T-24 (threat model).',
   );
   suppressTemplateScanners(fn, {
     cfnNag: [
@@ -817,7 +1096,7 @@ function acknowledgeLambdaBasicExecutionRole(fn: NodejsFunction): void {
     ],
     checkov: [
       { id: 'CKV_AWS_115', comment: 'The sample does not partition account concurrency; API Gateway stage throttling bounds the invoke rate. Accepted risk T-24 (threat model).' },
-      { id: 'CKV_AWS_116', comment: 'Synchronous API/authorizer/trigger function - failures surface as errors; no async event source to dead-letter. Accepted risk T-24 (threat model).' },
+      { id: 'CKV_AWS_116', comment: overrides.noDeadLetterQueueReason ?? 'Synchronous API/authorizer/trigger function - failures surface as errors; no async event source to dead-letter. Accepted risk T-24 (threat model).' },
       { id: 'CKV_AWS_117', comment: 'The function calls only AWS APIs over public endpoints; no VPC-internal resource to reach. Accepted risk T-24 (threat model).' },
       { id: 'CKV_AWS_173', comment: 'Environment variables carry non-secret configuration (table/pool/client identifiers); default encryption at rest applies. Accepted risk T-24 (threat model).' },
     ],
@@ -886,7 +1165,10 @@ function buildApiDefinition(stack: Stack, mapping: IntegrationMapping): object {
     read('tenant', 'TenantService'),
     read('token', 'TokenService'),
   ];
-  return patchIntegrations(mergeOpenApi(docs), mapping);
+  // ADR-0025: /tenant/* methods require an API key, read from the
+  // authoriser's usageIdentifierKey. /platform/* and /oauth2/token do not:
+  // the token route has no authoriser, so nothing could name a tenant key.
+  return requireApiKey(patchIntegrations(mergeOpenApi(docs), mapping), '/tenant');
 }
 
 /**

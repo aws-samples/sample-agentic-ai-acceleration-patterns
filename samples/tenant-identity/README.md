@@ -39,6 +39,68 @@ Two rules hold in every topology:
 - **The topology is fixed at deploy time.** This sample does not move tenants
   between topologies, so pick for the tenant mix you expect, not only today's.
 
+**Cognito request-rate quotas sit on the token path.** Every sign-in, refresh
+and exchange is one call in Cognito's `UserAuthentication` category
+(`InitiateAuth`, `AdminInitiateAuth`, `GetTokensFromRefreshToken`, refresh at
+the token endpoint; 120 RPS by default, adjustable), plus one trigger
+invocation and one registry read. Cognito measures these quotas per account
+per Region, summed over every user pool and every workload in the account, so
+the stage throttles (N-5..N-7) bound only this API: another application in the
+same account can use up the quota this one needs, and the reverse. With
+5-minute access tokens (N-1) an active session makes about 12 calls an hour,
+so the default 120 RPS carries roughly 36,000 concurrently active sessions per
+account and Region before sign-ins are counted. User management sits in other
+categories: `AdminCreateUser` in `UserCreation` (50, adjustable);
+`AdminDeleteUser`, `AdminAddUserToGroup` and `AdminRemoveUserFromGroup` in
+`UserUpdate` (25, not adjustable); `AdminListGroupsForUser` in
+`UserResourceRead` (50); `ListUsers` and `ListUsersInGroup` in `UserList` (30,
+not adjustable). `pool-per-tenant` onboarding and offboarding also spend
+`UserPoolUpdate` (`CreateUserPool`, `DeleteUserPool`), `UserPoolClientUpdate`
+(`CreateUserPoolClient`) and `UserPoolResourceUpdate` (`CreateGroup`,
+`DeleteGroup`), 15 RPS each and not adjustable, so bulk onboarding is paced by
+them. To raise an adjustable category, request a higher account-level maximum
+in Service Quotas, then set the rate with `UpdateProvisionedLimit` or the
+console's **Provisioned limits** tab; capacity above the default is billed per
+RPS-month. Watch the per-category `CallCount` and `ThrottleCount` metrics.
+Figures from [Quotas in Amazon Cognito](https://docs.aws.amazon.com/cognito/latest/developerguide/quotas.html),
+read 2026-10-22.
+
+**API Gateway and STS quotas sit on the tenant door.** Every tenant gets one
+API Gateway key for per-tenant throttling (ADR-0025), and API keys are capped
+at **10,000 per account per Region, not adjustable**, shared with every other
+workload in the account; that caps tenants per account and Region in every
+topology. Usage plans are 300 per account and Region (adjustable); the sample
+uses one per stack. Onboarding and offboarding call `CreateApiKey` and
+`DeleteApiKey`, **5 requests per second per account** each, inside an
+account-wide limit of 10 control-plane requests per second (burst 40), none of
+them adjustable, so bulk onboarding is paced by them
+([REST API quotas](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-execution-service-limits-table.html),
+[API Gateway quotas](https://docs.aws.amazon.com/apigateway/latest/developerguide/limits.html),
+read 2026-10-22). In `pool-per-tenant` the tenant-user function assumes a
+tenant-scoped role per tenant and execution environment, about every 13
+minutes per warm environment (ADR-0026); `AssumeRole` shares STS's default
+**600 requests per second per account and Region** with `GetCallerIdentity`,
+`GetSessionToken` and every other caller in the account
+([IAM and AWS STS quotas](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_iam-quotas.html),
+read 2026-10-22).
+
+**Shared-pool offboarding is O(pool), not O(tenant).** In `shared-pool`,
+`DeleteTenant` also scans the whole pool with `ListUsers` (60 users a page,
+`UserList` quota) to catch users missing from the tenant's group
+(`deprovisionTenant` in [`src/topology/shared-pool.ts`](./src/topology/shared-pool.ts)).
+The call must finish inside API Gateway's 29-second integration timeout (the
+platform function's own is 30 seconds). At 100–200 ms a page that is roughly
+8,000–17,000 pool users, and the 30 RPS quota caps it near 50,000 even at no
+latency, less the time spent deleting the tenant's own users (`UserUpdate`,
+25 RPS). Beyond that, `DeleteTenant` times out and leaves the tenant
+`DELETING`: the trigger already refuses it, and re-running `DeleteTenant`
+resumes the clean-up, but each run rescans from the start, so a large enough
+pool never completes. Move deletion behind an asynchronous workflow before
+that point (the seam in [ADR-0004](./adr/0004-synchronous-platform-api.md)).
+`shared-pool-multi-tenant` lists only the tenant's group, and
+`pool-per-tenant` deletes one pool, so their offboarding grows with the tenant,
+not the pool.
+
 The vendor manages tenants and users through a `/platform/*` API authorised
 with IAM. A tenant admin manages the users of its own tenant through a
 `/tenant/*` API. Because a token in `shared-pool-multi-tenant` names every
@@ -58,7 +120,13 @@ only, not RFC 8693 delegation (`act`) or audience. It does not answer the
 vendor's own identity (that is the [`control-plane`](../control-plane/)
 sample), route a request to the right tenant deployment (a front-door sample),
 persist users of its own (Cognito is the only user store), or migrate tenants
-between topologies.
+between topologies. It runs in one Region with no disaster recovery: the
+pools do not use Cognito multi-Region replication (an Essentials/Plus add-on
+that needs a multi-Region KMS customer-managed key, a multi-Region issuer and a
+trigger configured per replica), and the registry table, which every token
+issuance reads, has no replicas. Going multi-Region is a redesign of the
+token path, not a setting: replicated pools plus a global registry table, or
+a pool per Region with every Region's issuer in the allowlist.
 
 - Design: [`architecture.md`](./architecture.md)
 - Decisions and their reasoning: [`adr/`](./adr/) (one file per ADR, indexed in [`adr/README.md`](./adr/README.md))
@@ -88,7 +156,11 @@ Components (one stack per topology, [`src/identity.cdk.ts`](./src/identity.cdk.t
   (ADR-0012). Its role holds logging only.
 - **Tenant authoriser** and **tenant-user function** — the tenant admin's
   door, with the tenant taken only from the verified, narrowed token
-  (ADR-0007, ADR-0014).
+  (ADR-0007, ADR-0014). The authoriser also names the tenant's API key, so
+  `/tenant/*` is throttled per tenant through a usage plan (ADR-0025). In
+  `pool-per-tenant` the tenant-user function calls Cognito on a session
+  tagged with the tenant, which IAM lets reach only that tenant's pool
+  (ADR-0026).
 - **Tenant registry** — one DynamoDB table holding tenants only (ADR-0002);
   Cognito is the only user store.
 - **User pool(s)** — one for the shared topologies, created by the stack;
@@ -136,6 +208,61 @@ sample does not build: `DeleteTenant` flips the tenant to `DELETING` before
 touching Cognito, and the trigger then refuses it on every new token. Full
 detail, including the per-topology mechanics and the narrowing intersection,
 is in [`architecture.md`](./architecture.md).
+
+## Cost per tenant
+
+Approximate, eu-central-1 on-demand prices read on 2026-10-22 from the AWS
+Price List (publication dates 2026-09-11 to 2026-10-20); excludes the
+account-level free tiers except where stated. Build your own estimate with the
+[AWS Pricing Calculator](https://calculator.aws/).
+
+**Worked assumption.** A tenant with 100 monthly active users (MAU); each user
+has 20 one-hour sessions a month (2,000 sessions). A session is one direct
+Cognito sign-in, then a narrowed token from `POST /oauth2/token` every
+5 minutes (N-1), so 12 exchanges. Each sign-in is one Cognito call, one
+trigger invocation and one registry read; each exchange adds one API request
+and one exchange-function invocation. Per tenant per month: 2,000 sign-ins,
+24,000 exchanges, 26,000 trigger invocations and registry reads. Functions run
+on ARM at 256 MB; assumed durations are 50 ms (trigger) and 150 ms (exchange,
+which waits on Cognito).
+
+| Item | Price (eu-central-1) | Arithmetic | $/tenant/month |
+|---|---|---|---|
+| Cognito Essentials MAU | $0.015/MAU after 10,000 free MAU per account or organisation | 100 × $0.015 | 1.50 |
+| API Gateway REST requests | $3.70 per million | 24,000 × $3.70/M | 0.09 |
+| Lambda requests + compute | $0.20 per million; $0.0000133334/GB-s (ARM) | 50,000 × $0.20/M + (26,000 × 0.05 s + 24,000 × 0.15 s) × 0.25 GB × $0.0000133334 | 0.03 |
+| DynamoDB on-demand reads | $0.1525 per million RRU | 26,000 strongly consistent reads × $0.1525/M | <0.01 |
+| CloudWatch Logs ingestion | $0.63/GB | ~3.5 KB per exchange (access log, INFO execution log, two functions) + ~1 KB per sign-in ≈ 0.086 GB | 0.05 |
+| X-Ray traces recorded | $5.00 per million | ~2 traces per exchange (stage, Cognito-invoked trigger) + 1 per sign-in = 50,000 (low rates are fully sampled) | 0.25 |
+| Contributor Insights matched events | $0.025 per million | 4 rules × ~26,000 events | <0.01 |
+| **Variable total** | | | **≈ 1.9** |
+| Contributor Insights rules (per stack, not per tenant) | $0.50 per rule-month | 4 × $0.50 = $2 per stack, divided by the tenant count | 2 / tenants |
+
+Cognito is about 80% of the bill, so the MAU count drives cost; the log and
+trace sizes are estimates to replace with measured values from a deployed
+stack. The 10,000 free Essentials MAU cover the first ~100 such tenants per
+account. Moving the pools to **Plus** for MFA and threat protection (T-23) changes
+the MAU rate to $0.020 with no free tier: $2 for Cognito, ≈ $2.4 in total.
+
+The per-tenant API key and usage plan (ADR-0025) and the tenant-scoped STS
+sessions (ADR-0026) carry no charge of their own. API keys cap tenants at
+10,000 per account and Region in every topology (see the quotas above).
+
+MAU are billed per user-pool user, so the topology changes what one person
+costs:
+
+| | `pool-per-tenant` | `shared-pool` | `shared-pool-multi-tenant` |
+|---|---|---|---|
+| A person in k tenants | k users in k pools: k MAU | k users (one e-mail each): k MAU | one user: 1 MAU |
+| Registry reads per token | GSI query + item read (~1.5 RRU) | 1 RRU | 1 RRU per tenant the user holds |
+| Fixed cost per tenant | none (no per-pool fee) | none | none |
+| Worked example | ≈ $1.9 | ≈ $1.9 | ≈ $1.9; a consultant in 5 tenants costs $0.015, not $0.075 |
+| Ceiling before cost matters | 1,000 pools per account and Region (adjustable to 10,000) | 5,000 tenants per pool (groups) | 5,000 tenants per pool (groups) |
+
+On tiering: `pool-per-tenant` is the natural premium or silo tier (own pool
+settings, own issuer, blast radius of one), and a shared topology the default
+tier; the sample fixes one topology per stack, so mixing tiers means one stack
+per topology.
 
 ## Deploy
 
@@ -307,7 +434,14 @@ Three Smithy services ([`model/`](./model/)) merged into one REST API
 
 The tenant is taken from the verified token, never from the request. Each
 operation runs the same provisioner method as its platform twin, with the
-same per-topology effects.
+same per-topology effects. Each tenant is throttled on its own at 10 rps / 20
+burst through the stack's usage plan, under the route's shared limit of
+50 rps / 100 burst for all tenants together (ADR-0025). Clients send no API key: the authoriser supplies the tenant's,
+and an `x-api-key` header is ignored. `/platform/*` and `POST /oauth2/token`
+need no key; the token route has no authoriser, so the gateway knows no
+tenant there. A new tenant's key goes live after a short delay: until it
+does, `/tenant/*` answers `403 {"message":"Forbidden"}`, so retry that with
+backoff (ADR-0025).
 
 ### Token exchange (`POST /oauth2/token`, no gateway authoriser)
 
@@ -365,6 +499,17 @@ text per code and never echoes Cognito's message or a token.
   elsewhere. New tokens stop immediately (the trigger refuses a `DELETING`
   tenant), and `/tenant/*` stops immediately (the authoriser re-reads status).
   A consumer that needs a tighter bound adds a status check of its own.
+- **Where IAM draws the tenant boundary on the tenant door.** In
+  `pool-per-tenant` every pool carries a `tenant-identity:tenant` tag, and the
+  tenant-user function calls Cognito on a session of `TenantScopedRole` tagged
+  with the authoriser's tenant; the role reaches only the pool whose tag
+  matches, so a code bug cannot reach another tenant's pool (ADR-0026, M-28).
+  In `shared-pool*` IAM cannot scope users inside one pool, so the tenant
+  boundary there is the R-12 membership check in code only (T-18, P-8).
+- **Per-tenant throttling is not a security control.** The usage plan stops
+  one tenant from spending every tenant's `/tenant/*` budget (T-31). The API
+  key is not a credential (the authoriser picks it after verifying the token),
+  and API Gateway applies usage-plan limits on a best-effort basis.
 - **Deleting a `pool-per-tenant` pool does not stop its JWKS (ADR-0018).**
   Cognito keeps serving a deleted pool's keys, so a verifier that checks
   signatures only keeps trusting outstanding tokens until they expire. Use the
@@ -414,6 +559,10 @@ Each item maps to a threat-model mitigation (M-n) or threat (T-n).
       in `pool-per-tenant` the platform role holds account-wide
       `cognito-idp:CreateUserPool` (N-3, M-7, the documented hardening point of
       that topology).
+- [ ] **Size the stage's shared `/tenant/*` limit to your tenant count.** The
+      sample sets it to 50 rps / 100 burst, five times the per-tenant 10 / 20,
+      so five busy tenants together reach it (T-31, ADR-0025). Add tiers (one
+      usage plan per tier) and quotas if the business needs them.
 
 ## Design trail
 

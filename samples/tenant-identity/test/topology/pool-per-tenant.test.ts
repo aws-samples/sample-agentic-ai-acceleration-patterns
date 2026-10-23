@@ -9,6 +9,7 @@ import {
   AdminGetUserCommand,
   AdminInitiateAuthCommand,
   AdminListGroupsForUserCommand,
+  AdminRemoveUserFromGroupCommand,
   AdminSetUserPasswordCommand,
   CreateGroupCommand,
   CreateUserPoolClientCommand,
@@ -59,7 +60,12 @@ describe('PoolPerTenantProvisioner (spec §7.1)', () => {
       // Cognito username is the sub UUID the self-check compares against.
       expect(poolInput.UsernameAttributes).toEqual(['email']);
       expect(poolInput.AliasAttributes).toBeUndefined();
-      expect(poolInput.UserPoolTags).toEqual({ 'sample': 'tenant-identity', 'tenant-identity:stack': 'TenantIdentity-pool-per-tenant' });
+      // ADR-0026: the tenant tag the tenant-scoped role matches its session tag against.
+      expect(poolInput.UserPoolTags).toEqual({
+        'sample': 'tenant-identity',
+        'tenant-identity:stack': 'TenantIdentity-pool-per-tenant',
+        'tenant-identity:tenant': IDS.a,
+      });
       expect(poolInput.Policies?.PasswordPolicy).toMatchObject({ MinimumLength: 12, RequireSymbols: true, TemporaryPasswordValidityDays: 1 });
       expect(poolInput.LambdaConfig.PreTokenGenerationConfig).toEqual({ LambdaVersion: 'V2_0', LambdaArn: TRIGGER_ARN });
       const clientInput = cognito.commandCalls(CreateUserPoolClientCommand)[0].args[0].input;
@@ -222,5 +228,52 @@ describe('PoolPerTenantProvisioner (spec §7.1)', () => {
     const client = new CognitoIdentityProviderClient({});
     const p = new PoolPerTenantProvisioner({ cognito: client, region: 'eu-central-1', triggerFunctionArn: 'arn:aws:lambda:eu-central-1:123456789012:function:t' });
     await expect(p.provisionTenant('01ARZ3NDEKTSV4RRFFQ69G5FAV', 'x')).rejects.toThrow(/stackName/);
+  });
+
+  describe('PROVISIONING tenant without pool fields (ADR-0021)', () => {
+    const provisioning = () => tenant({ tenantId: IDS.a, topology: 'pool-per-tenant', status: 'PROVISIONING' });
+
+    it('getUser throws ConflictError (409), not a plain Error (500)', async () => {
+      await expect(provisioner().getUser(provisioning(), 'u1')).rejects.toBeInstanceOf(ConflictError);
+      expect(cognito.calls()).toHaveLength(0);
+    });
+
+    it('listUsers throws ConflictError', async () => {
+      await expect(provisioner().listUsers(provisioning())).rejects.toBeInstanceOf(ConflictError);
+    });
+
+    it('issueToken throws ConflictError when the app client is missing', async () => {
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1' });
+      const noClient = tenant({ tenantId: IDS.a, topology: 'pool-per-tenant', userPoolId: POOL });
+      await expect(provisioner().issueToken(noClient, 'u1', 'pw')).rejects.toBeInstanceOf(ConflictError);
+      expect(cognito).toHaveReceivedCommandTimes(AdminSetUserPasswordCommand as AnyMock, 0);
+    });
+  });
+
+  describe('assertEmailAvailable', () => {
+    it('is a no-op: a new tenant has an empty pool', async () => {
+      await expect(provisioner().assertEmailAvailable('u1@x.com')).resolves.toBeUndefined();
+      expect(cognito.calls()).toHaveLength(0);
+    });
+  });
+
+  describe('setAdmin happy path', () => {
+    it('promote adds to admin-<tenant> in the tenant pool and returns admin=true', async () => {
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [], UserStatus: 'CONFIRMED' });
+      cognito.on(AdminAddUserToGroupCommand).resolves({});
+      cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [{ GroupName: `admin-${IDS.a}` }] });
+      const view = await provisioner().setAdmin(tenantA(), 'u1', true);
+      expect(cognito.commandCalls(AdminAddUserToGroupCommand)[0].args[0].input).toMatchObject({ UserPoolId: POOL, Username: 'u1', GroupName: `admin-${IDS.a}` });
+      expect(view.admin).toBe(true);
+    });
+
+    it('demote removes from admin-<tenant> and returns admin=false', async () => {
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [], UserStatus: 'CONFIRMED' });
+      cognito.on(AdminRemoveUserFromGroupCommand).resolves({});
+      cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [] });
+      const view = await provisioner().setAdmin(tenantA(), 'u1', false);
+      expect(cognito.commandCalls(AdminRemoveUserFromGroupCommand)[0].args[0].input).toMatchObject({ UserPoolId: POOL, GroupName: `admin-${IDS.a}` });
+      expect(view.admin).toBe(false);
+    });
   });
 });

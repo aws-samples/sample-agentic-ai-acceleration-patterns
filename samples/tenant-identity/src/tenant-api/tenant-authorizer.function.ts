@@ -17,7 +17,8 @@ import { DynamoDBRegistry } from '../shared/registry';
  * takes effect at once and offboarding stops `/tenant/*` immediately (P-2).
  *
  * Allow → an IAM policy that lets the caller invoke the method, with
- * `{ tenantId, sub }` in the authoriser context. Refuse → an explicit Deny
+ * `{ tenantId, sub }` in the authoriser context and the tenant's API key as
+ * `usageIdentifierKey` (ADR-0025). Refuse → an explicit Deny
  * policy; API Gateway answers the client 403 with no reason in the body
  * (spec §5.3). A missing header is a non-bearer header to this handler, so it
  * also refuses: API Gateway then returns 403, which is acceptable for the
@@ -86,6 +87,10 @@ export function buildPolicy(methodArn: string, effect: 'Allow' | 'Deny', caller?
     },
     // The only two values the function may trust (R-9, P-11). Absent on Deny.
     context: caller === undefined ? undefined : { tenantId: caller.tenantId, sub: caller.sub },
+    // ADR-0025: the tenant's key, so the usage plan throttles per tenant. The
+    // API's key source is AUTHORIZER, so this is the only key API Gateway
+    // reads; a client's x-api-key header is ignored. Absent on Deny.
+    ...(caller === undefined ? {} : { usageIdentifierKey: caller.usageIdentifierKey }),
   };
 }
 

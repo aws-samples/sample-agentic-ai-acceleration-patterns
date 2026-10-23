@@ -105,11 +105,16 @@ function mapCognitoError(error: unknown): OAuthError | OAuthServerError {
   const name = errorName(error);
   const message = error instanceof Error ? error.message : '';
 
-  if (message.includes(INVALID_TARGET)) {
-    return clientError(new OAuthFailure('invalid_target'));
-  }
-  if (message.includes(INVALID_SCOPE)) {
-    return clientError(new OAuthFailure('invalid_scope'));
+  // Only the trigger's own refusal may route on its message: another
+  // exception whose text happens to contain the prefix is not a trigger
+  // verdict (spec §5.4).
+  if (name === 'UserLambdaValidationException') {
+    if (message.includes(INVALID_TARGET)) {
+      return clientError(new OAuthFailure('invalid_target'));
+    }
+    if (message.includes(INVALID_SCOPE)) {
+      return clientError(new OAuthFailure('invalid_scope'));
+    }
   }
 
   switch (name) {

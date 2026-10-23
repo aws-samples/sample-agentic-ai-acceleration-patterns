@@ -24,6 +24,7 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import {
   adminGetUser,
+  type AdminUser,
   adminGetUserToView,
   adminPasswordSignIn,
   adminRefresh,
@@ -89,14 +90,22 @@ export class SharedPoolProvisioner implements Provisioner {
     await this.deleteGroupIdempotent(adminGroupName(tenant.tenantId));
   }
 
-  async createUser(tenant: TenantRecord, email: string, admin: boolean): Promise<NewUserResult> {
-    // Any e-mail already present in the shared pool is a conflict: one person
-    // is one tenant here, and moving tenants is delete + create (spec §7.2,
-    // §5.3). Same-tenant re-create is also 409 (documented choice).
+  async assertEmailAvailable(email: string): Promise<void> {
+    // spec §5.1, §7.2: the e-mail is pool-unique, so a taken one would make
+    // CreateTenant's admin step 409 after the tenant is ACTIVE. Checked
+    // before the registry write; createUser still re-checks (and catches
+    // UsernameExists for unverified holders, R-17), so a race stays a 409.
     const existing = await findUserByEmail(this.cognito, this.userPoolId, email);
     if (existing !== undefined) {
       throw new ConflictError('E-mail already exists');
     }
+  }
+
+  async createUser(tenant: TenantRecord, email: string, admin: boolean): Promise<NewUserResult> {
+    // Any e-mail already present in the shared pool is a conflict: one person
+    // is one tenant here, and moving tenants is delete + create (spec §7.2,
+    // §5.3). Same-tenant re-create is also 409 (documented choice).
+    await this.assertEmailAvailable(email);
     const temporaryPassword = generateTemporaryPassword();
     let created;
     try {
@@ -137,16 +146,12 @@ export class SharedPoolProvisioner implements Provisioner {
   }
 
   async assertMember(tenant: TenantRecord, username: string): Promise<void> {
-    // R-12: custom:tenantId must equal the path's tenant.
-    const user = await adminGetUser(this.cognito, this.userPoolId, username);
-    if (attr(user.attributes, TENANT_ATTRIBUTE) !== tenant.tenantId) {
-      throw new NotFoundError('User not found in tenant');
-    }
+    await this.member(tenant, username);
   }
 
   async getUser(tenant: TenantRecord, username: string): Promise<UserView> {
-    await this.assertMember(tenant, username);
-    const user = await adminGetUser(this.cognito, this.userPoolId, username);
+    // One AdminGetUser serves both the R-12 check and the view.
+    const user = await this.member(tenant, username);
     const groups = await listGroupsForUser(this.cognito, this.userPoolId, username);
     return adminGetUserToView(user.username, user.attributes, user.status, user.createdAt, groups.includes(adminGroupName(tenant.tenantId)));
   }
@@ -187,6 +192,18 @@ export class SharedPoolProvisioner implements Provisioner {
   async refreshToken(tenant: TenantRecord, username: string, refreshToken: string): Promise<TokenSet> {
     await this.assertMember(tenant, username);
     return adminRefresh(this.cognito, this.userPoolId, this.appClientId, refreshToken);
+  }
+
+  /**
+   * R-12: custom:tenantId must equal the path's tenant. Returns the
+   * AdminGetUser result so callers need not read the user again.
+   */
+  private async member(tenant: TenantRecord, username: string): Promise<AdminUser> {
+    const user = await adminGetUser(this.cognito, this.userPoolId, username);
+    if (attr(user.attributes, TENANT_ATTRIBUTE) !== tenant.tenantId) {
+      throw new NotFoundError('User not found in tenant');
+    }
+    return user;
   }
 
   private async createGroupIdempotent(groupName: string): Promise<void> {

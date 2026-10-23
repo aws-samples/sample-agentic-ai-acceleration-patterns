@@ -66,6 +66,29 @@ export const SAMPLE_TAG_VALUE = 'tenant-identity';
  * pools in the same account (N-3).
  */
 export const STACK_TAG_KEY = 'tenant-identity:stack';
+/**
+ * Third tag on every pool-per-tenant pool: the tenant that owns it
+ * (ADR-0026). The tenant-scoped role matches it against its session tag.
+ */
+export const TENANT_TAG_KEY = 'tenant-identity:tenant';
+/**
+ * The session tag the tenant-user function sets when it assumes the
+ * tenant-scoped role (ADR-0026). A plain key, no ':' or '-', so it reads
+ * cleanly inside the `${aws:PrincipalTag/...}` policy variable.
+ */
+export const TENANT_SESSION_TAG_KEY = 'TenantId';
+/** Session length for the tenant-scoped role: the STS minimum (ADR-0026). */
+export const TENANT_SESSION_SECONDS = 900;
+
+/** The per-tenant API Gateway key's name (ADR-0025). */
+export function apiKeyName(tenantId: string): string {
+  return `tenant-${tenantId}`;
+}
+
+/** The stack's one usage plan for `/tenant/*` (ADR-0025). */
+export function tenantUsagePlanName(stackName: string): string {
+  return `${stackName}-tenant`;
+}
 
 /** Token lifetimes (N-1). */
 export const ACCESS_TOKEN_MINUTES = 5;
@@ -133,8 +156,17 @@ export const ENV = {
   appClientId: 'APP_CLIENT_ID',
   /** pool-per-tenant: the trigger the platform function attaches to new pools. */
   triggerFunctionArn: 'TRIGGER_FUNCTION_ARN',
-  /** pool-per-tenant: value of the STACK_TAG_KEY tag set on new pools. */
+  /** Value of the STACK_TAG_KEY tag set on new pools (pool-per-tenant) and on every tenant API key (ADR-0025). */
   stackName: 'STACK_NAME',
+  /**
+   * Platform function: the name of the stack's `/tenant/*` usage plan, looked
+   * up at run time (ADR-0025). A name, not the id: the id would make the
+   * function depend on the plan, which depends on the API, which depends on
+   * the function.
+   */
+  tenantUsagePlanName: 'TENANT_USAGE_PLAN_NAME',
+  /** Tenant-user function, pool-per-tenant only: the role it assumes per tenant (ADR-0026). */
+  tenantScopedRoleArn: 'TENANT_SCOPED_ROLE_ARN',
 } as const;
 
 /** The registry GSI that maps a pool to its tenant (spec §4.2). */

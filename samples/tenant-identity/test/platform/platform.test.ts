@@ -10,6 +10,7 @@ import {
   UnsupportedInTopologyError,
 } from '../../src/shared/errors';
 import type { Page, Registry, TenantRecord, TenantStatus } from '../../src/shared/registry';
+import type { TenantApiKey, TenantApiKeys } from '../../src/shared/tenant-api-keys';
 import {
   ConflictError,
   InternalServerError,
@@ -113,6 +114,7 @@ function mockProvisioner(topology: Topology = 'shared-pool-multi-tenant'): jest.
     topology,
     provisionTenant: jest.fn(),
     deprovisionTenant: jest.fn(),
+    assertEmailAvailable: jest.fn().mockResolvedValue(undefined),
     createUser: jest.fn(),
     assertMember: jest.fn(),
     getUser: jest.fn(),
@@ -126,6 +128,13 @@ function mockProvisioner(topology: Topology = 'shared-pool-multi-tenant'): jest.
   } as unknown as jest.Mocked<Provisioner>;
 }
 
+// ADR-0025: the API key module, reset per test.
+let apiKeys: jest.Mocked<TenantApiKeys>;
+const KEY: TenantApiKey = { apiKeyId: 'key-id-a', apiKeyValue: 'key-value-a-00000000000' };
+beforeEach(() => {
+  apiKeys = { create: jest.fn().mockResolvedValue(KEY), delete: jest.fn().mockResolvedValue(undefined) };
+});
+
 function makeService(
   registry: Registry,
   provisioner: jest.Mocked<Provisioner>,
@@ -134,6 +143,7 @@ function makeService(
   return new PlatformService({
     registry,
     provisioner,
+    apiKeys,
     topology,
     newTenantId: () => TENANT_A,
     now: () => FIXED_NOW,
@@ -236,6 +246,133 @@ describe('PlatformService (spec §5.1)', () => {
     });
   });
 
+  describe('CreateTenant API key (ADR-0025)', () => {
+    it('creates the key after Cognito and before activation, and stores id and value on the row', async () => {
+      const registry = new FakeRegistry();
+      const provisioner = mockProvisioner();
+      provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
+      provisioner.createUser.mockResolvedValue({ user: userView('admin', true), temporaryPassword: 'T#1' });
+
+      const out = await makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT);
+
+      expect(apiKeys.create).toHaveBeenCalledWith(TENANT_A);
+      expect(provisioner.provisionTenant.mock.invocationCallOrder[0]).toBeLessThan(apiKeys.create.mock.invocationCallOrder[0]);
+      const stored = registry.items.get(TENANT_A)!;
+      expect(stored.status).toBe('ACTIVE');
+      expect(stored.apiKeyId).toBe(KEY.apiKeyId);
+      expect(stored.apiKeyValue).toBe(KEY.apiKeyValue);
+      // The key never leaves through the API (it is not in the Tenant shape).
+      expect(JSON.stringify(out)).not.toContain(KEY.apiKeyValue);
+      expect(JSON.stringify(out)).not.toContain(KEY.apiKeyId);
+    });
+
+    it('a key failure deprovisions Cognito, deletes the row, and rethrows; no key to delete', async () => {
+      const registry = new FakeRegistry();
+      const provisioner = mockProvisioner();
+      provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
+      apiKeys.create.mockRejectedValue(Object.assign(new Error('limit'), { name: 'LimitExceededException' }));
+
+      await expect(
+        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
+      ).rejects.toBeInstanceOf(InternalServerError);
+      expect(provisioner.deprovisionTenant).toHaveBeenCalledWith(
+        expect.objectContaining({ tenantId: TENANT_A, groupName: `t-${TENANT_A}` }),
+      );
+      expect(registry.items.size).toBe(0);
+      expect(registry.calls).not.toContain(`activate:${TENANT_A}`);
+      // ApiGatewayTenantApiKeys.create undoes its own half-built key.
+      expect(apiKeys.delete).not.toHaveBeenCalled();
+      expect(provisioner.createUser).not.toHaveBeenCalled();
+    });
+
+    it('a key failure still surfaces when the clean-up fails too', async () => {
+      const registry = new FakeRegistry();
+      jest.spyOn(registry, 'delete').mockRejectedValue(new Error('ddb down'));
+      const provisioner = mockProvisioner();
+      provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
+      provisioner.deprovisionTenant.mockRejectedValue(new Error('cognito down'));
+      apiKeys.create.mockRejectedValue(new Error('apigw down'));
+
+      await expect(
+        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
+      ).rejects.toBeInstanceOf(InternalServerError);
+      expect(provisioner.deprovisionTenant).toHaveBeenCalled();
+      expect(registry.delete).toHaveBeenCalledWith(TENANT_A);
+    });
+
+    it('an activation failure deletes the key as well as the Cognito half and the row', async () => {
+      const registry = new FakeRegistry();
+      jest.spyOn(registry, 'activate').mockRejectedValue(new Error('throttled'));
+      const provisioner = mockProvisioner();
+      provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
+
+      await expect(
+        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
+      ).rejects.toBeInstanceOf(InternalServerError);
+      expect(apiKeys.delete).toHaveBeenCalledWith(KEY.apiKeyId);
+      expect(provisioner.deprovisionTenant).toHaveBeenCalled();
+      expect(registry.items.size).toBe(0);
+    });
+
+    it('an activation failure still deprovisions when the key delete fails', async () => {
+      const registry = new FakeRegistry();
+      jest.spyOn(registry, 'activate').mockRejectedValue(new Error('throttled'));
+      const provisioner = mockProvisioner();
+      provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
+      apiKeys.delete.mockRejectedValue(new Error('apigw down'));
+
+      await expect(
+        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
+      ).rejects.toBeInstanceOf(InternalServerError);
+      expect(provisioner.deprovisionTenant).toHaveBeenCalled();
+      expect(registry.items.size).toBe(0);
+    });
+
+    it('a provisioning failure creates no key', async () => {
+      const registry = new FakeRegistry();
+      const provisioner = mockProvisioner();
+      provisioner.provisionTenant.mockRejectedValue(new Error('boom'));
+      await expect(
+        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT),
+      ).rejects.toBeInstanceOf(InternalServerError);
+      expect(apiKeys.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('CreateTenant admin e-mail pre-flight (spec §5.1)', () => {
+    it('a taken admin e-mail is a 409 before anything is written: no row, no Cognito, no adminless tenant', async () => {
+      const registry = new FakeRegistry();
+      const provisioner = mockProvisioner('shared-pool');
+      provisioner.assertEmailAvailable.mockRejectedValue(new DomainConflictError('E-mail already exists'));
+
+      await expect(
+        makeService(registry, provisioner, 'shared-pool').CreateTenant({ name: 'Acme', adminEmail: 'taken@e.com' }, CONTEXT),
+      ).rejects.toBeInstanceOf(ConflictError);
+      expect(provisioner.assertEmailAvailable).toHaveBeenCalledWith('taken@e.com');
+      expect(registry.calls).not.toContain(`create:${TENANT_A}`);
+      expect(registry.items.size).toBe(0);
+      expect(provisioner.provisionTenant).not.toHaveBeenCalled();
+      expect(provisioner.createUser).not.toHaveBeenCalled();
+    });
+
+    it('checks the e-mail before the registry write (ADR-0021 ordering otherwise unchanged)', async () => {
+      const registry = new FakeRegistry();
+      const provisioner = mockProvisioner();
+      let rowsWhenChecked = -1;
+      provisioner.assertEmailAvailable.mockImplementation(async () => {
+        rowsWhenChecked = registry.items.size;
+      });
+      provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
+      provisioner.createUser.mockResolvedValue({ user: userView('admin', true), temporaryPassword: 'T#1' });
+
+      await makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@e.com' }, CONTEXT);
+      expect(rowsWhenChecked).toBe(0);
+      expect(provisioner.assertEmailAvailable.mock.invocationCallOrder[0]).toBeLessThan(
+        provisioner.provisionTenant.mock.invocationCallOrder[0],
+      );
+    });
+  });
+
   describe('GetTenant', () => {
     it('returns the tenant', async () => {
       const registry = new FakeRegistry();
@@ -311,6 +448,35 @@ describe('PlatformService (spec §5.1)', () => {
       await expect(
         makeService(new FakeRegistry(), mockProvisioner()).DeleteTenant({ tenantId: TENANT_A }, CONTEXT),
       ).rejects.toBeInstanceOf(ResourceNotFoundError);
+      expect(apiKeys.delete).not.toHaveBeenCalled();
+    });
+
+    it('deletes the tenant\'s API key after Cognito and before the row (ADR-0025)', async () => {
+      const registry = new FakeRegistry();
+      registry.items.set(TENANT_A, { ...tenantRecord(), apiKeyId: KEY.apiKeyId, apiKeyValue: KEY.apiKeyValue });
+      const provisioner = mockProvisioner();
+      provisioner.deprovisionTenant.mockResolvedValue(undefined);
+
+      await makeService(registry, provisioner).DeleteTenant({ tenantId: TENANT_A }, CONTEXT);
+
+      expect(apiKeys.delete).toHaveBeenCalledWith(KEY.apiKeyId);
+      expect(provisioner.deprovisionTenant.mock.invocationCallOrder[0]).toBeLessThan(apiKeys.delete.mock.invocationCallOrder[0]);
+      expect(registry.items.has(TENANT_A)).toBe(false);
+    });
+
+    it('a key delete failure leaves the tenant DELETING for a re-run (ADR-0025, R-11)', async () => {
+      const registry = new FakeRegistry();
+      registry.items.set(TENANT_A, { ...tenantRecord(), apiKeyId: KEY.apiKeyId });
+      const provisioner = mockProvisioner();
+      provisioner.deprovisionTenant.mockResolvedValue(undefined);
+      apiKeys.delete.mockRejectedValueOnce(new Error('TooManyRequestsException'));
+      const service = makeService(registry, provisioner);
+
+      await expect(service.DeleteTenant({ tenantId: TENANT_A }, CONTEXT)).rejects.toBeInstanceOf(InternalServerError);
+      expect(registry.items.get(TENANT_A)?.status).toBe('DELETING');
+
+      await service.DeleteTenant({ tenantId: TENANT_A }, CONTEXT);
+      expect(registry.items.has(TENANT_A)).toBe(false);
     });
   });
 
@@ -499,6 +665,24 @@ describe('PlatformService (spec §5.1)', () => {
       });
       expect(provisioner.createUser).not.toHaveBeenCalled();
       expect(provisioner.issueToken).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('409 on PROVISIONING for Cognito-side reads (ADR-0021, P-2, spec §5.3)', () => {
+    const cases: Array<[string, (s: PlatformService) => Promise<unknown>]> = [
+      ['GetUser', (s) => s.GetUser({ tenantId: TENANT_A, username: 'u1' }, CONTEXT)],
+      ['ListUsers', (s) => s.ListUsers({ tenantId: TENANT_A }, CONTEXT)],
+    ];
+    it.each(cases)('%s -> 409 and does not touch the provisioner', async (_name, call) => {
+      const registry = new FakeRegistry();
+      registry.items.set(TENANT_A, tenantRecord('PROVISIONING', 'pool-per-tenant'));
+      const provisioner = mockProvisioner('pool-per-tenant');
+      await expect(call(makeService(registry, provisioner, 'pool-per-tenant'))).rejects.toMatchObject({
+        name: 'ConflictError',
+        message: `Tenant ${TENANT_A} is PROVISIONING`,
+      });
+      expect(provisioner.getUser).not.toHaveBeenCalled();
+      expect(provisioner.listUsers).not.toHaveBeenCalled();
     });
   });
 

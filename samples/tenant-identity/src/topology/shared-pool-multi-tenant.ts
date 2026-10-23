@@ -87,6 +87,10 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
     await this.deleteGroupIdempotent(adminGroupName(tenant.tenantId));
   }
 
+  async assertEmailAvailable(_email: string): Promise<void> {
+    // No-op: an existing e-mail user is reused for a new tenant (spec §7.3).
+  }
+
   async createUser(tenant: TenantRecord, email: string, admin: boolean): Promise<NewUserResult> {
     // Reuse an existing e-mail user (no temporary password), else create one.
     const existing = await findUserByEmail(this.cognito, this.userPoolId, email);
@@ -126,9 +130,16 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
     if (admin) {
       await this.addToGroup(username, adminGroupName(tenant.tenantId));
     }
+    // A reused user may already be an admin of this tenant (admin=false does
+    // not remove them), so report the actual `admin-<id>` membership, not the
+    // input flag. A new user holds only the groups just added.
+    const isAdmin =
+      existing !== undefined
+        ? (await listGroupsForUser(this.cognito, this.userPoolId, username)).includes(adminGroupName(tenant.tenantId))
+        : admin;
     const source = created ?? existing;
     return {
-      user: adminGetUserToView(username, source?.Attributes, source?.UserStatus, source?.UserCreateDate, admin),
+      user: adminGetUserToView(username, source?.Attributes, source?.UserStatus, source?.UserCreateDate, isAdmin),
       temporaryPassword,
     };
   }
@@ -169,12 +180,7 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
     await this.assertMember(tenant, username);
     await this.removeFromGroup(username, tenantGroupName(tenant.tenantId));
     await this.removeFromGroup(username, adminGroupName(tenant.tenantId));
-    const remaining = (await listGroupsForUser(this.cognito, this.userPoolId, username)).filter((g) =>
-      TENANT_GROUP_PATTERN.test(g),
-    );
-    if (remaining.length === 0) {
-      await this.deleteUserRaw(username);
-    }
+    await this.deleteIfNoTenantGroups(username);
   }
 
   async createMembership(tenant: TenantRecord, username: string): Promise<void> {
@@ -194,6 +200,11 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
     }
     await this.removeFromGroup(username, tenantGroupName(tenant.tenantId));
     await this.removeFromGroup(username, adminGroupName(tenant.tenantId));
+    // Race: a concurrent DeleteMembership/deleteUser on the user's other
+    // tenant may have passed its own "not the last tenant" check at the same
+    // time, leaving the user in no `t-*` group. Re-list after the removal and
+    // delete the orphan, exactly as deleteUser does (P-4, spec §7.3).
+    await this.deleteIfNoTenantGroups(username);
   }
 
   async issueToken(tenant: TenantRecord, username: string, password: string): Promise<TokenSet> {
@@ -204,6 +215,14 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
   async refreshToken(tenant: TenantRecord, username: string, refreshToken: string): Promise<TokenSet> {
     await this.assertMember(tenant, username);
     return adminRefresh(this.cognito, this.userPoolId, this.appClientId, refreshToken);
+  }
+
+  /** Deletes the Cognito user when no `t-*` group remains (P-4). */
+  private async deleteIfNoTenantGroups(username: string): Promise<void> {
+    const remaining = (await this.safeListGroups(username)).filter((g) => TENANT_GROUP_PATTERN.test(g));
+    if (remaining.length === 0) {
+      await this.deleteUserRaw(username);
+    }
   }
 
   private async safeListGroups(username: string): Promise<string[]> {

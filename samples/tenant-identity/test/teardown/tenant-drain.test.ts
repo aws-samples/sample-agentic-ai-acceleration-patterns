@@ -11,6 +11,7 @@
 
 import { NotFoundError } from '../../src/shared/errors';
 import type { Page, Registry, TenantRecord } from '../../src/shared/registry';
+import type { TenantApiKeys } from '../../src/shared/tenant-api-keys';
 import { drainTenants } from '../../src/teardown/tenant-drain';
 import type { Provisioner } from '../../src/topology';
 
@@ -21,6 +22,7 @@ function tenant(tenantId: string): TenantRecord {
     status: 'ACTIVE',
     topology: 'pool-per-tenant',
     userPoolId: `eu-central-1_${tenantId}`,
+    apiKeyId: `key-${tenantId}`,
     createdAt: '2026-10-22T00:00:00.000Z',
     updatedAt: '2026-10-22T00:00:00.000Z',
   };
@@ -61,6 +63,11 @@ function provisionerMock(): jest.Mocked<Provisioner> {
   } as unknown as jest.Mocked<Provisioner>;
 }
 
+let apiKeys: jest.Mocked<TenantApiKeys>;
+beforeEach(() => {
+  apiKeys = { create: jest.fn(), delete: jest.fn().mockResolvedValue(undefined) };
+});
+
 describe('drainTenants (ADR-0022)', () => {
   it('drains two pages and counts the deletes', async () => {
     const registry = registryMock([
@@ -69,7 +76,7 @@ describe('drainTenants (ADR-0022)', () => {
     ]);
     const provisioner = provisionerMock();
 
-    const result = await drainTenants({ registry, provisioner });
+    const result = await drainTenants({ registry, provisioner, apiKeys });
 
     expect(result).toEqual({ deleted: 3 });
     // Two pages were read, the second with the first page's nextToken.
@@ -85,7 +92,7 @@ describe('drainTenants (ADR-0022)', () => {
     const registry = registryMock([{ items: [tenant('A')], nextToken: undefined }]);
     const provisioner = provisionerMock();
 
-    await drainTenants({ registry, provisioner });
+    await drainTenants({ registry, provisioner, apiKeys });
 
     expect(provisioner.deprovisionTenant).toHaveBeenCalledWith(
       expect.objectContaining({ tenantId: 'A', status: 'DELETING' }),
@@ -99,7 +106,7 @@ describe('drainTenants (ADR-0022)', () => {
       .mockRejectedValueOnce(new NotFoundError('Tenant A not found'))
       .mockResolvedValueOnce({ ...tenant('B'), status: 'DELETING' });
 
-    const result = await drainTenants({ registry, provisioner });
+    const result = await drainTenants({ registry, provisioner, apiKeys });
 
     expect(result).toEqual({ deleted: 1 });
     // A was skipped: no deprovision, no delete for it.
@@ -114,7 +121,7 @@ describe('drainTenants (ADR-0022)', () => {
     const provisioner = provisionerMock();
     provisioner.deprovisionTenant.mockRejectedValueOnce(new Error('cognito boom'));
 
-    await expect(drainTenants({ registry, provisioner })).rejects.toThrow('cognito boom');
+    await expect(drainTenants({ registry, provisioner, apiKeys })).rejects.toThrow('cognito boom');
     // The registry item is left for a retried drain to pick up.
     expect(registry.delete).not.toHaveBeenCalled();
   });
@@ -124,7 +131,28 @@ describe('drainTenants (ADR-0022)', () => {
     const provisioner = provisionerMock();
     registry.markDeleting.mockReset().mockRejectedValueOnce(new Error('ddb throttled'));
 
-    await expect(drainTenants({ registry, provisioner })).rejects.toThrow('ddb throttled');
+    await expect(drainTenants({ registry, provisioner, apiKeys })).rejects.toThrow('ddb throttled');
     expect(provisioner.deprovisionTenant).not.toHaveBeenCalled();
+  });
+
+  it('deletes each tenant\'s API key after Cognito and before the registry row (ADR-0025)', async () => {
+    const registry = registryMock([{ items: [tenant('A'), tenant('B')], nextToken: undefined }]);
+    const provisioner = provisionerMock();
+
+    await drainTenants({ registry, provisioner, apiKeys });
+
+    expect(apiKeys.delete.mock.calls.map((c) => c[0])).toEqual(['key-A', 'key-B']);
+    expect(provisioner.deprovisionTenant.mock.invocationCallOrder[0]).toBeLessThan(apiKeys.delete.mock.invocationCallOrder[0]);
+    expect(apiKeys.delete.mock.invocationCallOrder[0]).toBeLessThan(registry.delete.mock.invocationCallOrder[0]);
+    expect(apiKeys.create).not.toHaveBeenCalled();
+  });
+
+  it('a key delete failure leaves the row for a retried drain (ADR-0025, ADR-0022)', async () => {
+    const registry = registryMock([{ items: [tenant('A')], nextToken: undefined }]);
+    const provisioner = provisionerMock();
+    apiKeys.delete.mockRejectedValueOnce(new Error('TooManyRequestsException'));
+
+    await expect(drainTenants({ registry, provisioner, apiKeys })).rejects.toThrow('TooManyRequestsException');
+    expect(registry.delete).not.toHaveBeenCalled();
   });
 });

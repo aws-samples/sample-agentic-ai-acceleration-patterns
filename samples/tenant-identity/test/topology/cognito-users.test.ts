@@ -1,10 +1,17 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { CognitoIdentityProviderClient, ListUsersCommand } from '@aws-sdk/client-cognito-identity-provider';
+import {
+  AdminInitiateAuthCommand,
+  AdminSetUserPasswordCommand,
+  CognitoIdentityProviderClient,
+  ListUsersCommand,
+} from '@aws-sdk/client-cognito-identity-provider';
 import { mockClient } from 'aws-sdk-client-mock';
 import 'aws-sdk-client-mock-jest';
-import { emailFilter, findUserByEmail } from '../../src/topology/cognito-users';
+import { cognitoError } from './helpers';
+import { InvalidInputError, NotFoundError } from '../../src/shared/errors';
+import { adminPasswordSignIn, emailFilter, findUserByEmail } from '../../src/topology/cognito-users';
 
 describe('emailFilter (ListUsers attribute filter)', () => {
   it('quotes a plain address', () => {
@@ -57,5 +64,27 @@ describe('findUserByEmail verified-only (R-17 (T-27), T-27)', () => {
   it('returns undefined when no user matches', async () => {
     cognitoMock.on(ListUsersCommand).resolves({ Users: [] });
     expect(await findUserByEmail(client, 'pool', 'nobody@x.com')).toBeUndefined();
+  });
+});
+
+describe('adminPasswordSignIn password rejection (ADR-0006, N-4)', () => {
+  beforeEach(() => cognitoMock.reset());
+
+  const client = cognitoMock as unknown as CognitoIdentityProviderClient;
+
+  it.each(['InvalidPasswordException', 'InvalidParameterException'])(
+    '%s from AdminSetUserPassword -> InvalidInputError with fixed text, never Cognito\'s message',
+    async (name) => {
+      cognitoMock.on(AdminSetUserPasswordCommand).rejects(cognitoError(name, 'Password did not conform with policy: secret detail'));
+      const call = adminPasswordSignIn(client, 'pool', 'client', 'u1', 'weak');
+      await expect(call).rejects.toBeInstanceOf(InvalidInputError);
+      await expect(adminPasswordSignIn(client, 'pool', 'client', 'u1', 'weak')).rejects.toThrow('Password does not meet the pool policy');
+      expect(cognitoMock.commandCalls(AdminInitiateAuthCommand)).toHaveLength(0);
+    },
+  );
+
+  it('UserNotFoundException from AdminSetUserPassword -> NotFoundError', async () => {
+    cognitoMock.on(AdminSetUserPasswordCommand).rejects(cognitoError('UserNotFoundException'));
+    await expect(adminPasswordSignIn(client, 'pool', 'client', 'u1', 'pw')).rejects.toBeInstanceOf(NotFoundError);
   });
 });

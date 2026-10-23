@@ -35,8 +35,28 @@ export interface TenantRecord {
   readonly issuer?: string;
   /** shared-pool-multi-tenant only: `t-<tenantId>`. */
   readonly groupName?: string;
+  /**
+   * Every topology: the tenant's API Gateway key (ADR-0025), set by
+   * activate(). The value is what the authoriser returns as
+   * `usageIdentifierKey`. It is a throttling identifier, not a credential:
+   * the API's key source is AUTHORIZER, so API Gateway ignores any
+   * `x-api-key` header a caller sends, and the key admits nothing on its own
+   * (R-10 allows it: a tenant field, not user data).
+   */
+  readonly apiKeyId?: string;
+  readonly apiKeyValue?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+/** The fields `activate` writes: the Cognito half and the API key (ADR-0021, ADR-0025). */
+export interface ActivatedFields {
+  readonly userPoolId?: string;
+  readonly appClientId?: string;
+  readonly issuer?: string;
+  readonly groupName?: string;
+  readonly apiKeyId?: string;
+  readonly apiKeyValue?: string;
 }
 
 export interface Page<T> {
@@ -65,7 +85,7 @@ export interface Registry extends RegistryReader {
    */
   activate(
     tenantId: string,
-    provisioned: { userPoolId?: string; appClientId?: string; issuer?: string; groupName?: string },
+    provisioned: ActivatedFields,
   ): Promise<TenantRecord>;
   /**
    * R-11: conditional flip to DELETING. Returns the record as it is after
@@ -122,12 +142,27 @@ function isConditionFailure(error: unknown): boolean {
   return error instanceof Error && error.name === 'ConditionalCheckFailedException';
 }
 
+/** batchGet retry backoff: ~25 ms * 2^attempt, capped, with full jitter. */
+const BACKOFF_BASE_MS = 25;
+const BACKOFF_CAP_MS = 400;
+const MAX_BATCH_ATTEMPTS = 6;
+
+/** The real sleep; tests inject an instant one. */
+const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Full-jitter delay before retry `attempt` (1-based). */
+export function backoffDelay(attempt: number, random: () => number = Math.random): number {
+  const ceiling = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** attempt);
+  return Math.floor(random() * ceiling);
+}
+
 export class DynamoDBRegistry implements Registry {
   constructor(
     private readonly tableName: string,
     private readonly client: DynamoDBDocumentClient,
     private readonly poolIndexName: string = POOL_INDEX_NAME,
     private readonly now: () => Date = () => new Date(),
+    private readonly sleep: (ms: number) => Promise<void> = defaultSleep,
   ) {}
 
   async get(tenantId: string): Promise<TenantRecord | undefined> {
@@ -142,10 +177,15 @@ export class DynamoDBRegistry implements Registry {
     const records: TenantRecord[] = [];
     for (let i = 0; i < unique.length; i += MAX_BATCH) {
       let keys: Record<string, unknown>[] | undefined = unique.slice(i, i + MAX_BATCH).map(key);
-      // Retry unprocessed keys; DynamoDB returns them under throttling.
+      // Retry unprocessed keys; DynamoDB returns them under throttling, so
+      // back off exponentially with jitter between rounds (AWS guidance for
+      // UnprocessedKeys) rather than re-sending at once.
       for (let attempt = 0; keys !== undefined && keys.length > 0; attempt++) {
-        if (attempt > 5) {
+        if (attempt >= MAX_BATCH_ATTEMPTS) {
           throw new Error('Registry batch read did not complete');
+        }
+        if (attempt > 0) {
+          await this.sleep(backoffDelay(attempt));
         }
         const result = await this.client.send(
           new BatchGetCommand({
@@ -179,7 +219,7 @@ export class DynamoDBRegistry implements Registry {
     if (items.length === 0) {
       return undefined;
     }
-    // The GSI projects keys only; read the item for its current status.
+    // The GSI carries tenantId but not status; read the item for its current status.
     return this.get(String(items[0].tenantId));
   }
 
@@ -223,7 +263,7 @@ export class DynamoDBRegistry implements Registry {
 
   async activate(
     tenantId: string,
-    provisioned: { userPoolId?: string; appClientId?: string; issuer?: string; groupName?: string },
+    provisioned: ActivatedFields,
   ): Promise<TenantRecord> {
     // ADR-0021: a single conditional update flips PROVISIONING -> ACTIVE and writes
     // the provisioned Cognito fields atomically (spec §5.1, ADR-0021). The

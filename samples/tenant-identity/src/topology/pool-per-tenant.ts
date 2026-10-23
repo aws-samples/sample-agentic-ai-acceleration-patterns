@@ -45,6 +45,7 @@ import {
   SAMPLE_TAG_VALUE,
   STACK_TAG_KEY,
   TENANT_POOL_NAME_PREFIX,
+  TENANT_TAG_KEY,
   type Topology,
 } from '../shared/constants';
 import { ConflictError, UnsupportedInTopologyError } from '../shared/errors';
@@ -104,7 +105,13 @@ export class PoolPerTenantProvisioner implements Provisioner {
             TemporaryPasswordValidityDays: 1,
           },
         },
-        UserPoolTags: { [SAMPLE_TAG_KEY]: SAMPLE_TAG_VALUE, [STACK_TAG_KEY]: this.stackName },
+        // The tenant tag is what the tenant-scoped role matches its session
+        // tag against (ADR-0026); the tenant id is known before the pool.
+        UserPoolTags: {
+          [SAMPLE_TAG_KEY]: SAMPLE_TAG_VALUE,
+          [STACK_TAG_KEY]: this.stackName,
+          [TENANT_TAG_KEY]: tenantId,
+        },
         LambdaConfig: {
           PreTokenGenerationConfig: { LambdaVersion: 'V2_0', LambdaArn: triggerArn },
         },
@@ -164,6 +171,10 @@ export class PoolPerTenantProvisioner implements Provisioner {
       }
       throw error;
     }
+  }
+
+  async assertEmailAvailable(_email: string): Promise<void> {
+    // No-op: a new tenant gets a new, empty pool, so every e-mail is free.
   }
 
   async createUser(tenant: TenantRecord, email: string, admin: boolean): Promise<NewUserResult> {
@@ -253,16 +264,21 @@ export class PoolPerTenantProvisioner implements Provisioner {
     return adminRefresh(this.cognito, this.poolId(tenant), this.clientId(tenant), refreshToken);
   }
 
+  /**
+   * A record without pool fields is a PROVISIONING tenant (ADR-0021): its
+   * pool is not built or not yet recorded. That is a state conflict (409),
+   * not a server fault.
+   */
   private poolId(tenant: TenantRecord): string {
     if (tenant.userPoolId === undefined) {
-      throw new Error('Tenant record has no userPoolId');
+      throw new ConflictError(`Tenant ${tenant.tenantId} has no user pool yet`);
     }
     return tenant.userPoolId;
   }
 
   private clientId(tenant: TenantRecord): string {
     if (tenant.appClientId === undefined) {
-      throw new Error('Tenant record has no appClientId');
+      throw new ConflictError(`Tenant ${tenant.tenantId} has no app client yet`);
     }
     return tenant.appClientId;
   }

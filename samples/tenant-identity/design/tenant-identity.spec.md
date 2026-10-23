@@ -287,7 +287,10 @@ platform role necessarily holds `cognito-idp:CreateUserPool` and
 `DeleteUserPool`, which are account-wide actions; this is the documented hardening point of that topology (N-3). The
 tenant-user function (R-8) holds Cognito user actions only, with no pool
 or group lifecycle action, and the tenant authoriser (R-9) reads the
-registry only. In `shared-pool*` the tenant-user role can still reach every
+registry only. In `pool-per-tenant` the tenant-user function holds no
+Cognito action itself: it calls Cognito on a tenant-scoped session whose
+role reaches only the pool tagged with that tenant (R-18, ADR-0026). In
+`shared-pool*` the tenant-user role can still reach every
 user in the pool, because Cognito has no IAM boundary per tenant inside a
 pool. That function's tenant isolation is therefore enforced in code by
 R-12, and the threat model records it.
@@ -342,7 +345,9 @@ recover a tenant that has locked itself out.
 | R-6 | **Parameter publication** | The stack publishes `/application-plane/shared/identity/{apiUrl,topology}` and, for `shared-pool*`, `/application-plane/shared/identity/userPoolId` and `appClientId`, so the sample mounts into the `control-plane` sample's shared namespace. |
 | R-7 | **Token-exchange function** | Implements `POST /oauth2/token` (§5.4). It parses the form and calls `GetTokensFromRefreshToken` with the narrowing request in `ClientMetadata`. It returns the access token only and discards the ID token. Its role holds logging permissions only, no `cognito-idp` or DynamoDB action, because `GetTokensFromRefreshToken` is authorised by the refresh token, not by IAM (P-10). |
 | R-8 | **Tenant-user function** | Implements `/tenant/users` (§5.2) through the topology's provisioner, with the tenant taken only from the authoriser context. Its role holds `AdminCreateUser`, `AdminGetUser`, `AdminDeleteUser`, `AdminAddUserToGroup`, `AdminRemoveUserFromGroup`, `AdminListGroupsForUser`, `ListUsers`, and `ListUsersInGroup`, scoped as N-3, plus registry reads. It holds no `CreateUserPool`, `DeleteUserPool`, `CreateGroup`, or `DeleteGroup` (P-8). |
-| R-9 | **Tenant authoriser** | REST API Lambda (request) authoriser on `/tenant/*`, with result caching off. Verifies the access token as ADR-0007 states, refuses a tenant that is not `ACTIVE`, and passes `tenantId` and `sub` as context. Its role reads the registry and nothing else. |
+| R-9 | **Tenant authoriser** | REST API Lambda (request) authoriser on `/tenant/*`, with result caching off. Verifies the access token as ADR-0007 states, refuses a tenant that is not `ACTIVE`, and passes `tenantId` and `sub` as context. On Allow it returns the tenant's API key value as `usageIdentifierKey` (R-19); it refuses a tenant with no key. Its role reads the registry and nothing else. |
+| R-18 | **Tenant-scoped role** (`pool-per-tenant` only) | Every pool the platform function creates is tagged `tenant-identity:tenant=<tenantId>`. One role grants the R-8 user actions on `userpool/*` only where that tag equals the session tag `TenantId`; it trusts only the tenant-user function's role, for `sts:AssumeRole` and `sts:TagSession`, with exactly one ULID-shaped `TenantId` tag. The tenant-user function's own role then holds no `cognito-idp` action: it assumes this role per tenant with the authoriser's `tenantId` (900-second sessions, cached per tenant, refreshed before expiry) and keeps the R-12 and R-13 checks. Shared pools: no such role; IAM cannot scope users inside a pool (ADR-0026). |
+| R-19 | **Per-tenant throttle** | One usage plan per stack on the stage, at the N-7 per-tenant limits; one API key per tenant, tagged with the stack name, created by `CreateTenant` and deleted by `DeleteTenant` and the teardown drain. The API's key source is `AUTHORIZER` and only `/tenant/*` methods require a key: `/platform/*` is IAM, and `POST /oauth2/token` has no authoriser, so no tenant is known at the gateway there (ADR-0025). |
 
 ### 3.2 Caller and identity model
 
@@ -402,6 +407,7 @@ One table, `TenantRegistry`. Single-table, one item type.
 | `topology` | the stack's topology, stamped for diagnostics |
 | `userPoolId`, `appClientId`, `issuer` | `pool-per-tenant` only: the tenant's own pool. `issuer` is stored for consumers: `ListTenants` is the issuer allowlist a `pool-per-tenant` verifier needs (§1.2). |
 | `groupName` | `shared-pool-multi-tenant` only: `t-<tenantId>` |
+| `apiKeyId`, `apiKeyValue` | every topology: the tenant's API Gateway key (R-19, ADR-0025). The value is a throttling identifier the authoriser returns, not a credential: with the `AUTHORIZER` key source a client's `x-api-key` header is ignored. Never returned by the API. |
 | `createdAt`, `updatedAt` | ISO-8601 |
 
 Key: `PK=TENANT#<tenantId>`, `SK=META`.
@@ -450,10 +456,10 @@ setup, before the first operation is modelled.
 
 | Operation | Method / path | Effect by topology |
 |---|---|---|
-| `CreateTenant` | `POST /platform/tenants` `{name, adminEmail}` → 201 `{tenant, admin}` | All: write the registry row first, as `PROVISIONING` (ADR-0021). 1: create pool + client + trigger + group `admin-<id>`. 2, 3: create groups `t-<id>` and `admin-<id>`. All: flip the row to `ACTIVE` with the pool or group fields in one conditional write; a provisioning failure deletes the row, an activation failure deprovisions and deletes it. Then `CreateUser` for `adminEmail` with `admin: true`; `admin` is that User with its temporary password. If this last step fails, the tenant is `ACTIVE` with no admin, and the vendor retries with `CreateUser`. |
+| `CreateTenant` | `POST /platform/tenants` `{name, adminEmail}` → 201 `{tenant, admin}` | All: write the registry row first, as `PROVISIONING` (ADR-0021). 1: create pool (tagged with the tenant, R-18) + client + trigger + group `admin-<id>`. 2, 3: create groups `t-<id>` and `admin-<id>`. All: create the tenant's API key and add it to the usage plan (R-19); a key failure deprovisions and deletes the row. All: flip the row to `ACTIVE` with the pool or group fields in one conditional write; a provisioning failure deletes the row, an activation failure deprovisions and deletes it. Then `CreateUser` for `adminEmail` with `admin: true`; `admin` is that User with its temporary password. If this last step fails, the tenant is `ACTIVE` with no admin, and the vendor retries with `CreateUser`. |
 | `GetTenant` | `GET /platform/tenants/{tenantId}` | registry read |
 | `ListTenants` | `GET /platform/tenants?nextToken=` | registry scan |
-| `DeleteTenant` | `DELETE /platform/tenants/{tenantId}` → 204 | R-11, then: 1: delete pool. 2: delete users with `custom:tenantId=<id>`. 3: delete users whose only group is `t-<id>`, remove the group from the rest, delete the group. |
+| `DeleteTenant` | `DELETE /platform/tenants/{tenantId}` → 204 | R-11, then: 1: delete pool. 2: delete users with `custom:tenantId=<id>`. 3: delete users whose only group is `t-<id>`, remove the group from the rest, delete the group. All: delete the tenant's API key (R-19, idempotent). |
 | `CreateUser` | `POST /platform/tenants/{tenantId}/users` `{email, admin?}` → 201 User | 1: `AdminCreateUser` in the tenant's pool. 2: `AdminCreateUser` with `custom:tenantId`, then `AdminAddUserToGroup` `t-<id>`. 3: `AdminCreateUser` (if absent) + `AdminAddUserToGroup` `t-<id>`. All: `admin: true` also adds the user to `admin-<id>`. Returns a temporary password only in the response, only for a new Cognito user, and never logs it. |
 | `DeleteUser` | `DELETE /platform/tenants/{tenantId}/users/{username}` → 204 | 1, 2: `AdminDeleteUser`. 3: remove from `t-<id>` and `admin-<id>`; delete the user if no `t-*` group remains. |
 | `GetUser` | `GET /platform/tenants/{tenantId}/users/{username}` → 200 User | `AdminGetUser`, plus `AdminListGroupsForUser` for the admin flag. |
@@ -755,7 +761,7 @@ MUST NOT hold any `cognito-idp` permission.
 | N-4 | Structured logs; the platform function logs `tenantId`, the operation, and the rule that refused an action, never a username or e-mail address (M-22); the trigger logs `tenantId`, the user's `sub` and Cognito `userName` (the `sub`, since pools sign in by e-mail), the trigger source, and the refusing rule. Neither logs a token or a temporary password. | Synthetic data still deserves hygiene the reader will copy. |
 | N-5 | The `/platform/*` stage MUST be throttled (reference: 10 rps / 20 burst). | `CreateTenant` in topology 1 creates account-wide resources; cap the rate of a leaked vendor credential. |
 | N-6 | `POST /oauth2/token` MUST be throttled separately from `/platform/*` (reference: 20 rps / 40 burst). Its function MUST NOT log the refresh token, the issued token, or Cognito's error message. | The route is unauthenticated at the gateway; cap the cost of abuse against Cognito's request-rate quotas. |
-| N-7 | `/tenant/*` MUST be throttled separately (reference: 10 rps / 20 burst). Its authoriser MUST NOT cache results. The tenant-user function logs `tenantId`, the caller's `sub`, and the operation, never a token or a temporary password. | Each call changes identity: cap the damage of a leaked admin token, and keep offboarding immediate on this route (P-2). |
+| N-7 | `/tenant/*` MUST be throttled per tenant (reference: 10 rps / 20 burst, R-19) and, for all tenants together, at a shared stage limit above the per-tenant one (reference: 50 rps / 100 burst). Its authoriser MUST NOT cache results. The tenant-user function logs `tenantId`, the caller's `sub`, and the operation, never a token or a temporary password. | Each call changes identity: cap the damage of a leaked admin token, keep one tenant from spending every tenant's budget, and keep offboarding immediate on this route (P-2). |
 | N-8 | Pools MUST be created with deletion protection **inactive** and tagged `sample=tenant-identity`. | Teardown must be total (P-4); a real deployment flips protection on and is told so in the hardening checklist. |
 | N-9 | The trigger reads the registry on every invocation, with no cache. | Issuance happens at sign-in and at most once per access-token lifetime per session, so the read rate is low and a cache would only add a window in which a `DELETING` tenant still receives tokens. |
 
@@ -776,7 +782,10 @@ verification of §3.2.
    password; `GetTenant` returns
    the topology-specific fields (pool ids and issuer for 1, `groupName` for
    3, neither for 2). Topology 1: two pools exist, each with the trigger
-   attached.
+   attached and its tenant tag. Every topology: each tenant has exactly one
+   enabled API key `tenant-<id>` in the stack's usage plan (R-19). Topology 1:
+   the IAM policy simulator denies the tenant-scoped role, on a session
+   tagged A, every user action on pool B and allows it on pool A (R-18).
 3. **Users:** `CreateUser` u1 in A, u2 in B. Topology 2: `CreateUser` with
    u1's e-mail in B → 409. Topology 3: `CreateMembership` u1 → B succeeds;
    topologies 1 and 2: `CreateMembership` → 400 `UnsupportedInTopology`.
@@ -852,7 +861,8 @@ verification of §3.2.
    `ResourceNotFound` (ADR-0018). Topology 3: exchanging u1's refresh token for
    `resource=A` → `invalid_target`, and for `resource=B` → success. Topology
    2: u1 is deleted. Topology 3: group `t-A` is
-   gone, u1 and u2 still exist. `GetTenant` A → 404.
+   gone, u1 and u2 still exist. `GetTenant` A → 404. Every topology: A's API
+   key is gone (R-19).
 10. **`DELETING` window (P-2, unit level):** with a registry item in
    `DELETING`, the trigger throws for topologies 1 and 2 and omits the
    tenant for topology 3; with no item it does the same; with an unknown
@@ -878,7 +888,11 @@ the path's tenant in every topology (R-12); the tenant-user function reads the t
 never from the path, body, or query (P-11); the authoriser refuses an ID
 token, a token from another pool or app client, a token with `tenants`, a
 token without `tenant-admin/users`, and a tenant that is not `ACTIVE`
-(ADR-0007); the trigger never puts `tenant-admin/users` on an un-narrowed
+(ADR-0007), and returns the tenant's API key as `usageIdentifierKey` only on
+Allow (R-19); only `/tenant/*` methods require an API key, with key source
+`AUTHORIZER` (R-19); in `pool-per-tenant` the tenant-user role holds no
+`cognito-idp` action and the tenant-scoped role's trust and permissions are
+those of R-18; the trigger never puts `tenant-admin/users` on an un-narrowed
 token, and puts it on a narrowed one only for a member of `admin-<T>`
 (ADR-0015); the tenant-user role holds no pool or group lifecycle action
 (R-8); the form parser rejects every

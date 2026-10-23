@@ -96,24 +96,38 @@ function toModeledError(error: unknown): never {
   throw new InternalServerError({ message: 'Internal server error' });
 }
 
+/**
+ * The provisioner for one tenant. A single provisioner serves every tenant
+ * when the function calls Cognito with its own role (shared pools); in
+ * pool-per-tenant the function passes a factory whose provisioner signs with
+ * that tenant's scoped credentials (ADR-0026).
+ */
+export type ProvisionerFor = (tenantId: string) => Provisioner;
+
 export class TenantUsersService implements TenantServiceService<TenantCallerContext> {
+  private readonly provisionerFor: ProvisionerFor;
+
   constructor(
     private readonly registry: RegistryReader,
-    private readonly provisioner: Provisioner,
-  ) {}
+    provisioner: Provisioner | ProvisionerFor,
+  ) {
+    this.provisionerFor = typeof provisioner === 'function' ? provisioner : () => provisioner;
+  }
 
   /**
    * Loads the tenant from the context's id and refuses a missing tenant (404)
-   * or, for a mutation, a DELETING one (409). The authoriser already refuses a
-   * non-ACTIVE tenant; this is defence in depth, inside the function (P-2).
+   * or, for a mutation, any tenant that is not ACTIVE (409): DELETING is
+   * being torn down and PROVISIONING is not built yet (P-2, ADR-0021). The
+   * authoriser already refuses a non-ACTIVE tenant; this is defence in
+   * depth, inside the function.
    */
   private async loadTenant(context: TenantCallerContext, mutating: boolean): Promise<TenantRecord> {
     const tenant = await this.registry.get(context.tenantId);
     if (tenant === undefined) {
       throw new NotFoundError(`Tenant ${context.tenantId} not found`);
     }
-    if (mutating && tenant.status === 'DELETING') {
-      throw new ConflictError(`Tenant ${context.tenantId} is being deleted`);
+    if (mutating && tenant.status !== 'ACTIVE') {
+      throw new ConflictError(`Tenant ${context.tenantId} is ${tenant.status}`);
     }
     return tenant;
   }
@@ -127,10 +141,10 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
    * (the token is valid but the caller's standing changed, so a retry with a
    * fresh token is the fix). Call after loadTenant and before any write.
    */
-  private async requireCallerAdmin(tenant: TenantRecord, sub: string): Promise<void> {
+  private async requireCallerAdmin(provisioner: Provisioner, tenant: TenantRecord, sub: string): Promise<void> {
     let caller: UserView;
     try {
-      caller = await this.provisioner.getUser(tenant, sub);
+      caller = await provisioner.getUser(tenant, sub);
     } catch (error) {
       if (error instanceof NotFoundError) {
         throw new ConflictError('Caller is no longer a user of the tenant');
@@ -151,11 +165,12 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
    * the tenant.
    */
   private async resolveTarget(
+    provisioner: Provisioner,
     tenant: TenantRecord,
     username: string,
     sub: string,
   ): Promise<{ username: string; isSelf: boolean }> {
-    const user = await this.provisioner.getUser(tenant, username);
+    const user = await provisioner.getUser(tenant, username);
     return { username: user.username, isSelf: user.username === sub };
   }
 
@@ -166,9 +181,10 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
     log.info('tenant user operation', { tenantId: context.tenantId, sub: context.sub, operation: 'CreateTenantUser' });
     try {
       const tenant = await this.loadTenant(context, true);
+      const provisioner = this.provisionerFor(context.tenantId);
       // R-16 (T-26): re-check the caller's admin group before any write.
-      await this.requireCallerAdmin(tenant, context.sub);
-      const result = await this.provisioner.createUser(tenant, input.email!, input.admin ?? false);
+      await this.requireCallerAdmin(provisioner, tenant, context.sub);
+      const result = await provisioner.createUser(tenant, input.email!, input.admin ?? false);
       return { user: toUser(result.user), temporaryPassword: result.temporaryPassword };
     } catch (error) {
       log.warn('tenant user operation failed', {
@@ -187,8 +203,9 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
     log.info('tenant user operation', { tenantId: context.tenantId, sub: context.sub, operation: 'GetTenantUser' });
     try {
       const tenant = await this.loadTenant(context, false);
+      const provisioner = this.provisionerFor(context.tenantId);
       // getUser runs the R-12 membership check and 404s a non-member.
-      const user = await this.provisioner.getUser(tenant, input.username!);
+      const user = await provisioner.getUser(tenant, input.username!);
       return { user: toUser(user) };
     } catch (error) {
       log.warn('tenant user operation failed', {
@@ -207,7 +224,8 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
     log.info('tenant user operation', { tenantId: context.tenantId, sub: context.sub, operation: 'ListTenantUsers' });
     try {
       const tenant = await this.loadTenant(context, false);
-      const page = await this.provisioner.listUsers(tenant, input.nextToken);
+      const provisioner = this.provisionerFor(context.tenantId);
+      const page = await provisioner.listUsers(tenant, input.nextToken);
       return { users: page.items.map(toUser), nextToken: page.nextToken };
     } catch (error) {
       log.warn('tenant user operation failed', {
@@ -226,11 +244,12 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
     log.info('tenant user operation', { tenantId: context.tenantId, sub: context.sub, operation: 'UpdateTenantUser' });
     try {
       const tenant = await this.loadTenant(context, true);
+      const provisioner = this.provisionerFor(context.tenantId);
       // R-16 (T-26): re-check the caller's admin group before any write.
-      await this.requireCallerAdmin(tenant, context.sub);
+      await this.requireCallerAdmin(provisioner, tenant, context.sub);
       // R-12 (membership) then R-13 (self-mutation): resolve the path username
       // to the real username and refuse a self-update before any write.
-      const target = await this.resolveTarget(tenant, input.username!, context.sub);
+      const target = await this.resolveTarget(provisioner, tenant, input.username!, context.sub);
       // Extends R-13: refuse ANY self-update of the admin flag, not only
       // self-demotion — a caller cannot self-promote or otherwise rewrite
       // their own admin flag; only another admin can change it.
@@ -239,7 +258,7 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
       }
       // The provisioner re-checks membership (R-12) inside setAdmin. That is
       // one extra Cognito read, kept so the provisioner never trusts its caller.
-      const user = await this.provisioner.setAdmin(tenant, target.username, input.admin!);
+      const user = await provisioner.setAdmin(tenant, target.username, input.admin!);
       return { user: toUser(user) };
     } catch (error) {
       log.warn('tenant user operation failed', {
@@ -258,15 +277,16 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
     log.info('tenant user operation', { tenantId: context.tenantId, sub: context.sub, operation: 'DeleteTenantUser' });
     try {
       const tenant = await this.loadTenant(context, true);
+      const provisioner = this.provisionerFor(context.tenantId);
       // R-16 (T-26): re-check the caller's admin group before any write.
-      await this.requireCallerAdmin(tenant, context.sub);
+      await this.requireCallerAdmin(provisioner, tenant, context.sub);
       // R-12 (membership) then R-13 (self-delete): resolve the path username
       // to the real username and refuse a self-deletion before any write.
-      const target = await this.resolveTarget(tenant, input.username!, context.sub);
+      const target = await this.resolveTarget(provisioner, tenant, input.username!, context.sub);
       if (target.isSelf) {
         throw new ConflictError('A tenant admin cannot delete themselves');
       }
-      await this.provisioner.deleteUser(tenant, target.username);
+      await provisioner.deleteUser(tenant, target.username);
       return {};
     } catch (error) {
       log.warn('tenant user operation failed', {

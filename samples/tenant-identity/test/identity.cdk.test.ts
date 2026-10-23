@@ -4,9 +4,9 @@
 import { App, Validations } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
-import { DRAIN_SHARED_POOL_ACTIONS, TenantIdentityStack } from '../src/identity.cdk';
+import { DRAIN_SHARED_POOL_ACTIONS, TENANT_USER_ACTIONS, TenantIdentityStack } from '../src/identity.cdk';
 import { Topology } from '../src/shared/constants';
-import { mergeOpenApi, patchIntegrations } from '../src/shared/openapi';
+import { mergeOpenApi, patchIntegrations, requireApiKey } from '../src/shared/openapi';
 
 // Skip NodejsFunction esbuild bundling in unit tests - assertions target
 // infrastructure shape, not bundle contents. (Other workers' entry files may
@@ -177,6 +177,57 @@ describe('patchIntegrations (R-1)', () => {
   });
 });
 
+describe('requireApiKey (ADR-0025)', () => {
+  const doc = {
+    paths: {
+      '/platform/tenants': { get: { security: [{ 'aws.auth.sigv4': [] }] } },
+      '/oauth2/token': { post: { security: [] } },
+      '/tenant/users': {
+        get: { security: [{ 'tenant-authorizer': [] }] },
+        post: { security: [{ 'tenant-authorizer': [] }] },
+        parameters: [],
+      },
+      '/tenant/users/{username}': { delete: {} },
+    },
+    components: { securitySchemes: { 'tenant-authorizer': { type: 'apiKey' } } },
+  };
+
+  test('adds the key to every /tenant operation, AND-ed with the authoriser', () => {
+    const out = requireApiKey(doc, '/tenant') as any;
+    expect(out.paths['/tenant/users'].get.security).toEqual([{ 'tenant-authorizer': [], 'api_key': [] }]);
+    expect(out.paths['/tenant/users'].post.security).toEqual([{ 'tenant-authorizer': [], 'api_key': [] }]);
+    // An operation with no requirement gets one with the key only.
+    expect(out.paths['/tenant/users/{username}'].delete.security).toEqual([{ api_key: [] }]);
+    // Non-method keys are left alone.
+    expect(out.paths['/tenant/users'].parameters).toEqual([]);
+  });
+
+  test('leaves /platform and the token route alone', () => {
+    const out = requireApiKey(doc, '/tenant') as any;
+    expect(out.paths['/platform/tenants'].get.security).toEqual([{ 'aws.auth.sigv4': [] }]);
+    expect(out.paths['/oauth2/token'].post.security).toEqual([]);
+  });
+
+  test('sets the key source to AUTHORIZER and defines the api_key scheme', () => {
+    const out = requireApiKey(doc, '/tenant') as any;
+    expect(out['x-amazon-apigateway-api-key-source']).toBe('AUTHORIZER');
+    expect(out.components.securitySchemes.api_key).toEqual({ type: 'apiKey', name: 'x-api-key', in: 'header' });
+    expect(out.components.securitySchemes['tenant-authorizer']).toBeDefined();
+  });
+
+  test('creates components when the document has none', () => {
+    const out = requireApiKey({ paths: { '/tenant/x': { get: {} } } }, '/tenant') as any;
+    expect(out.components.securitySchemes.api_key).toBeDefined();
+  });
+
+  test('does not mutate the input, and throws when no operation matches', () => {
+    const copy = JSON.parse(JSON.stringify(doc));
+    requireApiKey(doc, '/tenant');
+    expect(doc).toEqual(copy);
+    expect(() => requireApiKey(doc, '/nope')).toThrow(/no operation under '\/nope'/);
+  });
+});
+
 // ===========================================================================
 // TenantIdentityStack - synthesised for all three topologies
 // ===========================================================================
@@ -201,13 +252,14 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     expect(actions.some((a) => a.startsWith('dynamodb:'))).toBe(false);
   });
 
-  test.each(TOPOLOGIES)('authoriser role reads the registry only, no cognito-idp (R-9) [%s]', (topology) => {
+  test.each(TOPOLOGIES)('authoriser role reads the registry with GetItem + Query only, no BatchGetItem, no cognito-idp (R-9) [%s]', (topology) => {
     const template = synth(topology);
     const statements = policyStatementsForRole(template, 'AuthorizerFunctionServiceRole');
     const actions = statements.flatMap(actionsOf);
     expect(actions.some((a) => a.startsWith('cognito-idp:'))).toBe(false);
+    // registry.get + registry.getByUserPoolId; the authoriser never batch-reads.
     const dynamo = actions.filter((a) => a.startsWith('dynamodb:')).sort();
-    expect(dynamo).toEqual(['dynamodb:BatchGetItem', 'dynamodb:GetItem', 'dynamodb:Query']);
+    expect(dynamo).toEqual(['dynamodb:GetItem', 'dynamodb:Query']);
   });
 
   test.each(TOPOLOGIES)('tenant-user role holds no pool or group lifecycle action (R-8) [%s]', (topology) => {
@@ -297,8 +349,14 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     expect(createPool).toBeDefined();
     expect(createPool.Resource).toBe('*');
     expect(createPool.Condition.StringEquals['aws:RequestTag/sample']).toBe('tenant-identity');
-    expect(createPool.Condition['ForAllValues:StringEquals']['aws:TagKeys']).toEqual(['sample', 'tenant-identity:stack']);
+    expect(createPool.Condition['ForAllValues:StringEquals']['aws:TagKeys']).toEqual([
+      'sample',
+      'tenant-identity:stack',
+      'tenant-identity:tenant',
+    ]);
     expect(createPool.Condition.StringEquals['aws:RequestTag/tenant-identity:stack']).toBe('TenantIdentity-pool-per-tenant');
+    // ADR-0026: a tenant tag is required, shaped like a 26-character ULID.
+    expect(createPool.Condition.StringLike['aws:RequestTag/tenant-identity:tenant']).toBe('?'.repeat(26));
 
     // Per-pool + pool-lifecycle actions scoped to userpool/* with ResourceTag.
     const perPool = statements.find(
@@ -314,7 +372,7 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
 
   test('pool-per-tenant: every ResourceTag-scoped cognito statement names the stack (N-3)', () => {
     const template = synth('pool-per-tenant');
-    for (const role of ['PlatformFunctionServiceRole', 'TenantUsersFunctionServiceRole']) {
+    for (const role of ['PlatformFunctionServiceRole', 'TenantScopedRole']) {
       const scoped = policyStatementsForRole(template, role).filter((s) => s.Condition?.StringEquals?.['aws:ResourceTag/sample']);
       expect(scoped.length).toBeGreaterThan(0);
       for (const s of scoped) {
@@ -336,7 +394,73 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     const tag = statements.find((s) => actionsOf(s).includes('cognito-idp:TagResource'));
     expect(tag).toBeDefined();
     expect(tag.Condition.StringEquals['aws:RequestTag/sample']).toBe('tenant-identity');
-    expect(tag.Condition['ForAllValues:StringEquals']['aws:TagKeys']).toEqual(['sample', 'tenant-identity:stack']);
+    expect(tag.Condition['ForAllValues:StringEquals']['aws:TagKeys']).toEqual([
+      'sample',
+      'tenant-identity:stack',
+      'tenant-identity:tenant',
+    ]);
+    expect(tag.Condition.StringLike['aws:RequestTag/tenant-identity:tenant']).toBe('?'.repeat(26));
+  });
+
+  test('platform pool-per-tenant: TagResource only on an untagged pool or one of this stack (N-3, T-7)', () => {
+    // StringEqualsIfExists: a pool that already carries the sample/stack tags
+    // must carry this stack's values, so another stack's pool cannot be tagged
+    // into this role's ResourceTag rights. Not Null: CreateUserPool's implicit
+    // TagResource fails a Null guard (integ 2026-10-22).
+    const template = synth('pool-per-tenant');
+    const statements = policyStatementsForRole(template, 'PlatformFunctionServiceRole');
+    const tag = statements.find((s) => actionsOf(s).includes('cognito-idp:TagResource'));
+    expect(tag.Condition.Null).toBeUndefined();
+    expect(tag.Condition.StringEqualsIfExists).toEqual({
+      'aws:ResourceTag/sample': 'tenant-identity',
+      'aws:ResourceTag/tenant-identity:stack': 'TenantIdentity-pool-per-tenant',
+    });
+    expect(tag.Condition.StringEquals['aws:RequestTag/tenant-identity:stack']).toBe('TenantIdentity-pool-per-tenant');
+  });
+
+  test.each(TOPOLOGIES)('no role holds cognito-idp:DescribeUserPool - nothing in src/ calls it [%s]', (topology) => {
+    const template = synth(topology);
+    expect(allPolicyStatements(template).flatMap(actionsOf)).not.toContain('cognito-idp:DescribeUserPool');
+  });
+
+  test('pool-per-tenant platform role acknowledges IAM5[Resource::*] once, with both wildcard actions in one reason', () => {
+    // cdk-nag keeps the first reason per finding id when it writes template
+    // metadata, so two acknowledgments would silently drop one. The merged
+    // reason must name both '*' actions.
+    const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+    Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true, writeSuppressionsToCloudFormation: true }));
+    const stack = new TenantIdentityStack(app, 'TenantIdentity-pool-per-tenant', {
+      topology: 'pool-per-tenant',
+      env: { account: '123456789012', region: 'eu-central-1' },
+    });
+    const template = Template.fromStack(stack);
+    const [policy] = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.startsWith('PlatformFunctionServiceRoleDefaultPolicy'))
+      .map(([, r]) => r as any);
+    const rules: { id: string; reason: string }[] = policy.Metadata.cdk_nag.rules_to_suppress;
+    const star = rules.filter((r) => r.id === 'AwsSolutions-IAM5[Resource::*]');
+    expect(star).toHaveLength(1);
+    expect(star[0].reason).toContain('xray:PutTraceSegments');
+    expect(star[0].reason).toContain('cognito-idp:CreateUserPool');
+  });
+
+  test.each(TOPOLOGIES)('timeouts: platform 28 s (under API Gateway\'s 29 s), trigger 5 s (Cognito\'s trigger limit) [%s]', (topology) => {
+    const template = synth(topology);
+    const fns = Object.entries(template.findResources('AWS::Lambda::Function'));
+    const timeoutOf = (prefix: string) =>
+      (fns.find(([id]) => id.startsWith(prefix) && !id.includes('ServiceRole'))![1] as any).Properties.Timeout;
+    expect(timeoutOf('PlatformFunction')).toBe(28);
+    expect(timeoutOf('TriggerFunction')).toBe(5);
+  });
+
+  test.each(TOPOLOGIES)('the drain function has its own CKV_AWS_116 reason (async CloudFormation invoke) [%s]', (topology) => {
+    const template = synth(topology);
+    const [drain] = Object.entries(template.findResources('AWS::Lambda::Function'))
+      .filter(([id]) => id.startsWith('TenantDrainFunction') && !id.includes('ServiceRole'))
+      .map(([, r]) => r as any);
+    const skip = (drain.Metadata.checkov.skip as { id: string; comment: string }[]).find((s) => s.id === 'CKV_AWS_116');
+    expect(skip?.comment).toMatch(/CloudFormation/);
+    expect(skip?.comment).toMatch(/idempotent/);
   });
 
   test.each(['TokenFunction', 'AuthorizerFunction'])('%s gets no TOPOLOGY setting it never reads', (fn) => {
@@ -386,6 +510,13 @@ describe('TenantIdentityStack - registry table (R-3, N-2, §4.2)', () => {
         ]),
       }),
     });
+  });
+  test.each(TOPOLOGIES)('DynamoDB-owned key, with the checkov CKV_AWS_119 skip citing T-24 [%s]', (topology) => {
+    const template = synth(topology);
+    const [table] = Object.values(template.findResources('AWS::DynamoDB::GlobalTable')) as any[];
+    expect(table.Properties.SSESpecification?.SSEEnabled ?? false).toBe(false);
+    const skip = (table.Metadata.checkov.skip as { id: string; comment: string }[]).find((s) => s.id === 'CKV_AWS_119');
+    expect(skip?.comment).toMatch(/T-24/);
   });
 });
 
@@ -520,8 +651,8 @@ describe('TenantIdentityStack - API Gateway (R-1, §3.2, N-5..N-7)', () => {
     expect(body.paths['/oauth2/token'].post.security).toEqual([]);
     // Platform op: SigV4 scheme.
     expect(body.paths['/platform/tenants'].get.security).toEqual([{ 'aws.auth.sigv4': [] }]);
-    // Tenant op: the custom authoriser.
-    expect(body.paths['/tenant/users'].get.security).toEqual([{ 'tenant-authorizer': [] }]);
+    // Tenant op: the custom authoriser AND an API key (ADR-0025).
+    expect(body.paths['/tenant/users'].get.security).toEqual([{ 'tenant-authorizer': [], 'api_key': [] }]);
     // Authoriser caching off.
     const authorizer = body.components.securitySchemes['tenant-authorizer']['x-amazon-apigateway-authorizer'];
     expect(authorizer.type).toBe('token');
@@ -547,10 +678,14 @@ describe('TenantIdentityStack - API Gateway (R-1, §3.2, N-5..N-7)', () => {
     const token = find('/oauth2/token', 'POST');
     expect(token.ThrottlingRateLimit).toBe(20);
     expect(token.ThrottlingBurstLimit).toBe(40);
-    // N-7: /tenant 10/20.
+    // N-7: /tenant shared 50/100, above the per-tenant 10/20 (T-31).
     const tenant = find('/tenant/users', 'GET');
-    expect(tenant.ThrottlingRateLimit).toBe(10);
-    expect(tenant.ThrottlingBurstLimit).toBe(20);
+    expect(tenant.ThrottlingRateLimit).toBe(50);
+    expect(tenant.ThrottlingBurstLimit).toBe(100);
+    const [plan] = Object.values(template.findResources('AWS::ApiGateway::UsagePlan')) as any[];
+    expect(plan.Properties.Throttle).toEqual({ RateLimit: 10, BurstLimit: 20 });
+    expect(tenant.ThrottlingRateLimit).toBeGreaterThan(plan.Properties.Throttle.RateLimit);
+    expect(tenant.ThrottlingBurstLimit).toBeGreaterThan(plan.Properties.Throttle.BurstLimit);
   });
 
   test.each(TOPOLOGIES)('access log format carries caller identity + authoriser principal (N-4) [%s]', (topology) => {
@@ -559,8 +694,21 @@ describe('TenantIdentityStack - API Gateway (R-1, §3.2, N-5..N-7)', () => {
     const format = JSON.parse(stage.Properties.AccessLogSetting.Format);
     expect(format.callerArn).toBe('$context.identity.userArn');
     expect(format.principalId).toBe('$context.authorizer.principalId');
+    // The per-tenant dimension (the authoriser returns context.tenantId on Allow).
+    expect(format.tenantId).toBe('$context.authorizer.tenantId');
     expect(stage.Properties.TracingEnabled).toBe(true);
     expect(stage.Properties.MethodSettings.some((m: any) => m.LoggingLevel === 'INFO')).toBe(true);
+  });
+
+  test.each(TOPOLOGIES)('resource policy paths use the deployed stage name [%s]', (topology) => {
+    const template = synth(topology);
+    const api = Object.values(template.findResources('AWS::ApiGateway::RestApi'))[0] as any;
+    const stage = Object.values(template.findResources('AWS::ApiGateway::Stage'))[0] as any;
+    const resources: string[] = api.Properties.Policy.Statement.flatMap((s: any) => [s.Resource].flat());
+    expect(resources.length).toBeGreaterThan(0);
+    for (const r of resources) {
+      expect(r.startsWith(`execute-api:/${stage.Properties.StageName}/`)).toBe(true);
+    }
   });
 
   test.each(TOPOLOGIES)('resource policy allows the account on /platform and any principal on token/tenant routes [%s]', (topology) => {
@@ -582,6 +730,93 @@ describe('TenantIdentityStack - API Gateway (R-1, §3.2, N-5..N-7)', () => {
     const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm'));
     for (const alarm of alarms as any[]) {
       expect(alarm.Properties.AlarmActions ?? []).toEqual([]);
+    }
+  });
+});
+
+describe('TenantIdentityStack - per-tenant Contributor Insights (N-4)', () => {
+  // RuleBody carries the log group name as a Ref, so CloudFormation renders
+  // it as an Fn::Join. Re-join it with each Ref replaced by its logical id,
+  // which makes the body parsable and LogGroupNames assertable.
+  function renderBody(ruleBody: any): string {
+    if (typeof ruleBody === 'string') {
+      return ruleBody;
+    }
+    const [delimiter, parts] = ruleBody['Fn::Join'] as [string, any[]];
+    return parts.map((p) => (typeof p === 'string' ? p : String(p.Ref))).join(delimiter);
+  }
+  function rules(template: Template): Record<string, any> {
+    const out: Record<string, any> = {};
+    for (const [id, r] of Object.entries(template.findResources('AWS::CloudWatch::InsightRule'))) {
+      out[id] = { ...(r as any).Properties, body: JSON.parse(renderBody((r as any).Properties.RuleBody)) };
+    }
+    return out;
+  }
+  const byId = (template: Template, prefix: string) => {
+    const match = Object.entries(rules(template)).find(([id]) => id.startsWith(prefix));
+    expect(match).toBeDefined();
+    return match![1];
+  };
+
+  test.each(TOPOLOGIES)('four enabled CloudWatchLogRule v1 JSON rules, names prefixed with the stack name [%s]', (topology) => {
+    const template = synth(topology);
+    const all = Object.values(rules(template));
+    expect(all).toHaveLength(4);
+    const names = all.map((r) => r.RuleName).sort();
+    expect(names).toEqual([
+      `TenantIdentity-${topology}-tenant-errors`,
+      `TenantIdentity-${topology}-tenant-requests`,
+      `TenantIdentity-${topology}-tenant-tokens`,
+      `TenantIdentity-${topology}-token-refusals`,
+    ]);
+    for (const r of all) {
+      expect(r.RuleState).toBe('ENABLED');
+      expect(r.body.Schema).toEqual({ Name: 'CloudWatchLogRule', Version: 1 });
+      expect(r.body.LogFormat).toBe('JSON');
+      expect(r.body.AggregateOn).toBe('Count');
+      expect(r.body.LogGroupNames).toHaveLength(1);
+    }
+  });
+
+  test.each(TOPOLOGIES)('the two API rules read the access log group and key on tenantId, excluding "-" [%s]', (topology) => {
+    const template = synth(topology);
+    const accessLogs = Object.keys(template.findResources('AWS::Logs::LogGroup')).find((id) => id.startsWith('ApiAccessLogs'))!;
+    for (const prefix of ['TenantRequestsRule', 'TenantErrorsRule']) {
+      const rule = byId(template, prefix);
+      expect(rule.body.LogGroupNames).toEqual([accessLogs]);
+      expect(rule.body.Contribution.Keys[0]).toBe('$.tenantId');
+      expect(rule.body.Contribution.Filters).toEqual(
+        expect.arrayContaining([
+          { Match: '$.tenantId', IsPresent: true },
+          { Match: '$.tenantId', NotIn: ['-'] },
+        ]),
+      );
+    }
+    const errors = byId(template, 'TenantErrorsRule');
+    expect(errors.body.Contribution.Keys).toEqual(['$.tenantId', '$.status']);
+    // status is a string in the access log, so >= 400 is a prefix match.
+    expect(errors.body.Contribution.Filters).toContainEqual({ Match: '$.status', StartsWith: ['4', '5'] });
+  });
+
+  test.each(TOPOLOGIES)('the two trigger rules read the trigger log group: tokens by tenantId, refusals by rule [%s]', (topology) => {
+    const template = synth(topology);
+    const triggerLogs = Object.keys(template.findResources('AWS::Logs::LogGroup')).find((id) => id.startsWith('TriggerFunctionLogs'))!;
+    const tokens = byId(template, 'TenantTokensRule');
+    expect(tokens.body.LogGroupNames).toEqual([triggerLogs]);
+    expect(tokens.body.Contribution.Keys).toEqual(['$.tenantId']);
+    expect(tokens.body.Contribution.Filters).toEqual([{ Match: '$.message', In: ['pre-token-generation issued'] }]);
+    const refusals = byId(template, 'TokenRefusalsRule');
+    expect(refusals.body.LogGroupNames).toEqual([triggerLogs]);
+    expect(refusals.body.Contribution.Keys).toEqual(['$.rule']);
+    expect(refusals.body.Contribution.Filters).toEqual([{ Match: '$.message', StartsWith: ['pre-token-generation refused'] }]);
+  });
+
+  test.each(TOPOLOGIES)('functions log in Lambda JSON format, so each line is the logger\'s JSON object [%s]', (topology) => {
+    const template = synth(topology);
+    const fns = Object.entries(template.findResources('AWS::Lambda::Function')).filter(([id]) => !id.includes('LogDrain'));
+    expect(fns).toHaveLength(6);
+    for (const [, fn] of fns) {
+      expect((fn as any).Properties.LoggingConfig.LogFormat).toBe('JSON');
     }
   });
 });
@@ -799,5 +1034,199 @@ describe('TenantIdentityStack - teardown leaves no log group (ADR-0024)', () => 
         ApplicationLogLevel: 'ERROR',
       });
     }
+  });
+});
+
+// ===========================================================================
+// ADR-0025: per-tenant throttling on /tenant/*
+// ===========================================================================
+
+/** Every statement of every role whose logical id starts with `prefix`, apigateway actions only. */
+function apigatewayActions(template: Template, rolePrefix: string): any[] {
+  return policyStatementsForRole(template, rolePrefix).filter((s) => actionsOf(s).some((a) => a.startsWith('apigateway:')));
+}
+
+describe('TenantIdentityStack - per-tenant usage plan (ADR-0025)', () => {
+  test.each(TOPOLOGIES)('API key source AUTHORIZER; a key is required on every /tenant method and on no other [%s]', (topology) => {
+    const template = synth(topology);
+    const body = (Object.values(template.findResources('AWS::ApiGateway::RestApi'))[0] as any).Properties.Body;
+    expect(body['x-amazon-apigateway-api-key-source']).toBe('AUTHORIZER');
+    expect(body.components.securitySchemes.api_key).toEqual({ type: 'apiKey', name: 'x-api-key', in: 'header' });
+    let tenantOps = 0;
+    for (const [pathKey, item] of Object.entries(body.paths as Record<string, any>)) {
+      for (const [method, op] of Object.entries(item as Record<string, any>)) {
+        if (!['get', 'put', 'post', 'delete', 'patch'].includes(method)) {
+          continue;
+        }
+        const keyed = ((op.security ?? []) as any[]).some((r) => r.api_key !== undefined);
+        expect({ op: `${method} ${pathKey}`, keyed }).toEqual({ op: `${method} ${pathKey}`, keyed: pathKey.startsWith('/tenant') });
+        if (pathKey.startsWith('/tenant')) {
+          tenantOps++;
+          // The authoriser still runs: the key is AND-ed, not an alternative.
+          expect(op.security).toEqual([{ 'tenant-authorizer': [], 'api_key': [] }]);
+        }
+      }
+    }
+    expect(tenantOps).toBe(5);
+  });
+
+  test.each(TOPOLOGIES)('one usage plan on the stage, throttled at the /tenant values (N-7) [%s]', (topology) => {
+    const template = synth(topology);
+    template.resourceCountIs('AWS::ApiGateway::UsagePlan', 1);
+    const plan = Object.values(template.findResources('AWS::ApiGateway::UsagePlan'))[0] as any;
+    expect(plan.Properties.UsagePlanName).toBe(`TenantIdentity-${topology}-tenant`);
+    expect(plan.Properties.Throttle).toEqual({ RateLimit: 10, BurstLimit: 20 });
+    expect(plan.Properties.Quota).toBeUndefined();
+    expect(plan.Properties.ApiStages).toHaveLength(1);
+    const [apiStage] = plan.Properties.ApiStages;
+    const [apiId] = Object.keys(template.findResources('AWS::ApiGateway::RestApi'));
+    const [stageId] = Object.keys(template.findResources('AWS::ApiGateway::Stage'));
+    expect(apiStage.ApiId).toEqual({ Ref: apiId });
+    expect(apiStage.Stage).toEqual({ Ref: stageId });
+    // No key is created at deploy time: CreateTenant creates one per tenant.
+    template.resourceCountIs('AWS::ApiGateway::ApiKey', 0);
+    template.resourceCountIs('AWS::ApiGateway::UsagePlanKey', 0);
+  });
+
+  test.each(TOPOLOGIES)('platform role: create/delete keys, find the plan, add keys to THIS plan only [%s]', (topology) => {
+    const template = synth(topology);
+    const statements = apigatewayActions(template, 'PlatformFunctionServiceRole');
+    const render = (s: any) => JSON.stringify(s.Resource);
+    const byAction = (action: string) => statements.filter((s) => actionsOf(s).includes(action)).map(render);
+    expect(statements.flatMap(actionsOf).sort()).toEqual(['apigateway:DELETE', 'apigateway:GET', 'apigateway:POST', 'apigateway:POST', 'apigateway:PUT']);
+    // Tag-on-create is authorised as PUT on the key's /tags ARN, same conditions.
+    const tagPut = statements.find((st) => actionsOf(st).includes('apigateway:PUT'));
+    expect(render(tagPut)).toContain('/tags/arn%3A');
+    expect(render(tagPut)).toContain('%2Fapikeys%2F*');
+    expect(tagPut.Condition['ForAllValues:StringEquals']).toEqual({ 'aws:TagKeys': ['tenant-identity:stack'] });
+    expect(tagPut.Condition.StringEqualsIfExists).toEqual({ 'aws:ResourceTag/tenant-identity:stack': `TenantIdentity-${topology}` });
+    expect(byAction('apigateway:DELETE')).toEqual([expect.stringContaining('::/apikeys/*')]);
+    const stackName = `TenantIdentity-${topology}`;
+    // T-7: delete only keys this stack tagged; create only keys with that tag and no other tag key.
+    const del = statements.find((st) => actionsOf(st).includes('apigateway:DELETE'));
+    expect(del.Condition).toEqual({ StringEquals: { 'aws:ResourceTag/tenant-identity:stack': stackName } });
+    const createKey = statements.find((st) => actionsOf(st).includes('apigateway:POST') && render(st).includes('::/apikeys"'));
+    expect(createKey.Condition).toEqual({
+      'StringEquals': { 'aws:RequestTag/tenant-identity:stack': stackName },
+      'ForAllValues:StringEquals': { 'aws:TagKeys': ['tenant-identity:stack'] },
+    });
+    expect(byAction('apigateway:GET')).toEqual([expect.stringContaining('::/usageplans"')]);
+    const posts = byAction('apigateway:POST');
+    expect(posts.some((r) => r.includes('::/apikeys"'))).toBe(true);
+    const [planId] = Object.keys(template.findResources('AWS::ApiGateway::UsagePlan'));
+    expect(posts.some((r) => r.includes(`"Ref":"${planId}"`) && r.includes('/keys'))).toBe(true);
+    // The plan-specific statement lives outside the default policy (no cycle).
+    const policies = template.findResources('AWS::IAM::Policy');
+    const [owner] = Object.entries(policies).filter(([, p]) => JSON.stringify(p).includes(`"Ref":"${planId}"`));
+    expect(owner[0]).toMatch(/^PlatformFunctionUsagePlanKeyPolicy/);
+    // The function finds the plan by name.
+    const [, fn] = Object.entries(template.findResources('AWS::Lambda::Function')).find(([id]) => id.startsWith('PlatformFunction'))!;
+    expect((fn as any).Properties.Environment.Variables.TENANT_USAGE_PLAN_NAME).toBe(`TenantIdentity-${topology}-tenant`);
+    expect((fn as any).Properties.Environment.Variables.STACK_NAME).toBe(stackName);
+  });
+
+  test.each(TOPOLOGIES)('drain role: DeleteApiKey only; no other role holds an apigateway action [%s]', (topology) => {
+    const template = synth(topology);
+    const drain = apigatewayActions(template, 'TenantDrainFunctionServiceRole');
+    expect(drain.flatMap(actionsOf)).toEqual(['apigateway:DELETE']);
+    expect(JSON.stringify(drain[0].Resource)).toContain('::/apikeys/*');
+    expect(drain[0].Condition).toEqual({ StringEquals: { 'aws:ResourceTag/tenant-identity:stack': `TenantIdentity-${topology}` } });
+    for (const role of ['TriggerFunctionServiceRole', 'TokenFunctionServiceRole', 'AuthorizerFunctionServiceRole', 'TenantUsersFunctionServiceRole']) {
+      expect({ role, actions: apigatewayActions(template, role).flatMap(actionsOf) }).toEqual({ role, actions: [] });
+    }
+  });
+
+  test.each(TOPOLOGIES)('the tenant drain runs before the usage plan is deleted (ADR-0022) [%s]', (topology) => {
+    const template = synth(topology);
+    const resources = template.toJSON().Resources as Record<string, any>;
+    const [, drain] = Object.entries(resources).find(([, r]) => r.Type === 'Custom::TenantDrain')!;
+    const [planId] = Object.keys(template.findResources('AWS::ApiGateway::UsagePlan'));
+    expect([drain.DependsOn ?? []].flat()).toContain(planId);
+  });
+
+  test.each(TOPOLOGIES)('publishes the usage plan id for the e2e scenario [%s]', (topology) => {
+    const template = synth(topology);
+    expect(Object.keys(template.findOutputs('TenantUsagePlanId'))).toEqual(['TenantUsagePlanId']);
+  });
+});
+
+// ===========================================================================
+// ADR-0026: IAM-enforced tenant boundary (pool-per-tenant)
+// ===========================================================================
+
+describe('TenantIdentityStack - tenant-scoped role (ADR-0026)', () => {
+  function scopedRole(template: Template): [string, any] {
+    const roles = Object.entries(template.findResources('AWS::IAM::Role')).filter(([id]) => id.startsWith('TenantScopedRole'));
+    expect(roles).toHaveLength(1);
+    return roles[0];
+  }
+
+  test('trust: only the tenant-user function role, AssumeRole + TagSession, exactly one ULID-shaped TenantId tag', () => {
+    const template = synth('pool-per-tenant');
+    const [, role] = scopedRole(template);
+    const statements = role.Properties.AssumeRolePolicyDocument.Statement;
+    expect(statements).toHaveLength(1);
+    const [trust] = statements;
+    expect(trust.Effect).toBe('Allow');
+    expect([trust.Action].flat().sort()).toEqual(['sts:AssumeRole', 'sts:TagSession']);
+    // The principal is the tenant-user function's role, nothing else.
+    expect(Object.keys(trust.Principal)).toEqual(['AWS']);
+    expect(JSON.stringify(trust.Principal.AWS)).toMatch(/TenantUsersFunctionServiceRole[0-9A-F]+","Arn"/);
+    expect(trust.Condition).toEqual({
+      'StringLike': { 'aws:RequestTag/TenantId': '?'.repeat(26) },
+      'ForAllValues:StringEquals': { 'aws:TagKeys': ['TenantId'] },
+    });
+  });
+
+  test('permissions: the tenant-user actions on userpool/*, only where the pool\'s tenant tag equals the session tag', () => {
+    const template = synth('pool-per-tenant');
+    const statements = policyStatementsForRole(template, 'TenantScopedRole');
+    expect(statements).toHaveLength(1);
+    const [allow] = statements;
+    expect(actionsOf(allow).sort()).toEqual([...TENANT_USER_ACTIONS].sort());
+    expect(JSON.stringify(allow.Resource)).toContain(':userpool/*');
+    expect(allow.Condition).toEqual({
+      StringEquals: {
+        'aws:ResourceTag/sample': 'tenant-identity',
+        'aws:ResourceTag/tenant-identity:stack': 'TenantIdentity-pool-per-tenant',
+        'aws:ResourceTag/tenant-identity:tenant': '${aws:PrincipalTag/TenantId}',
+      },
+    });
+    // No sign-in and no lifecycle action (R-8, P-8).
+    for (const forbidden of ['cognito-idp:AdminSetUserPassword', 'cognito-idp:AdminInitiateAuth', 'cognito-idp:DeleteUserPool', 'cognito-idp:CreateGroup']) {
+      expect(actionsOf(allow)).not.toContain(forbidden);
+    }
+  });
+
+  test('the tenant-user base role holds no cognito-idp action, only AssumeRole + TagSession on the scoped role', () => {
+    const template = synth('pool-per-tenant');
+    const [roleId] = scopedRole(template);
+    const statements = policyStatementsForRole(template, 'TenantUsersFunctionServiceRole');
+    const actions = statements.flatMap(actionsOf);
+    expect(actions.some((a) => a.startsWith('cognito-idp:'))).toBe(false);
+    const sts = statements.filter((s) => actionsOf(s).some((a) => a.startsWith('sts:')));
+    expect(sts).toHaveLength(1);
+    expect(actionsOf(sts[0]).sort()).toEqual(['sts:AssumeRole', 'sts:TagSession']);
+    expect(sts[0].Resource).toEqual({ 'Fn::GetAtt': [roleId, 'Arn'] });
+    const [, fn] = Object.entries(template.findResources('AWS::Lambda::Function')).find(([id]) => id.startsWith('TenantUsersFunction'))!;
+    expect((fn as any).Properties.Environment.Variables.TENANT_SCOPED_ROLE_ARN).toEqual({ 'Fn::GetAtt': [roleId, 'Arn'] });
+  });
+
+  test('the platform role may tag a new pool with its tenant (ADR-0026)', () => {
+    const template = synth('pool-per-tenant');
+    const tag = policyStatementsForRole(template, 'PlatformFunctionServiceRole').find((s) => actionsOf(s).includes('cognito-idp:TagResource'));
+    expect(tag.Condition.StringLike['aws:RequestTag/tenant-identity:tenant']).toBe('?'.repeat(26));
+  });
+
+  test.each(['shared-pool', 'shared-pool-multi-tenant'] as Topology[])('shared pools: no scoped role; IAM cannot scope users inside one pool [%s]', (topology) => {
+    const template = synth(topology);
+    expect(Object.keys(template.findResources('AWS::IAM::Role')).filter((id) => id.startsWith('TenantScopedRole'))).toEqual([]);
+    const statements = policyStatementsForRole(template, 'TenantUsersFunctionServiceRole');
+    const actions = statements.flatMap(actionsOf);
+    expect(actions.some((a) => a.startsWith('sts:'))).toBe(false);
+    expect(actions.filter((a) => a.startsWith('cognito-idp:')).sort()).toEqual([...TENANT_USER_ACTIONS].sort());
+    const [, fn] = Object.entries(template.findResources('AWS::Lambda::Function')).find(([id]) => id.startsWith('TenantUsersFunction'))!;
+    expect((fn as any).Properties.Environment.Variables.TENANT_SCOPED_ROLE_ARN).toBeUndefined();
+    expect(Object.keys(template.findOutputs('TenantScopedRoleArn'))).toEqual([]);
   });
 });

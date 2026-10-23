@@ -105,6 +105,7 @@ function depsMock(overrides: Partial<{ deprovisionThrows: boolean; items: string
         }
       }),
     },
+    apiKeys: { create: jest.fn(), delete: jest.fn(async () => undefined) },
   } as unknown as DrainDeps;
   return { deps, calls };
 }

@@ -11,6 +11,7 @@ import {
 } from '../shared/errors';
 import { errorName, log } from '../shared/logger';
 import type { Registry, TenantRecord } from '../shared/registry';
+import type { TenantApiKey, TenantApiKeys } from '../shared/tenant-api-keys';
 import {
   ConflictError,
   CreateMembershipServerInput,
@@ -63,6 +64,8 @@ export interface PlatformContext {
 export interface PlatformServiceDeps {
   readonly registry: Registry;
   readonly provisioner: Provisioner;
+  /** The per-tenant API Gateway keys for `/tenant/*` throttling (ADR-0025). */
+  readonly apiKeys: TenantApiKeys;
   readonly topology: Topology;
   /** Overridable so tests get deterministic ids. */
   readonly newTenantId?: () => string;
@@ -83,6 +86,7 @@ export interface PlatformServiceDeps {
 export class PlatformService implements PlatformServiceService<PlatformContext> {
   private readonly registry: Registry;
   private readonly provisioner: Provisioner;
+  private readonly apiKeys: TenantApiKeys;
   private readonly topology: Topology;
   private readonly newTenantId: () => string;
   private readonly now: () => Date;
@@ -90,6 +94,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
   constructor(deps: PlatformServiceDeps) {
     this.registry = deps.registry;
     this.provisioner = deps.provisioner;
+    this.apiKeys = deps.apiKeys;
     this.topology = deps.topology;
     this.newTenantId = deps.newTenantId ?? ulid;
     this.now = deps.now ?? (() => new Date());
@@ -109,6 +114,12 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     log.info('CreateTenant', { operation: 'CreateTenant', tenantId });
 
     return this.mapErrors('CreateTenant', tenantId, async () => {
+      // spec §5.1: refuse an admin e-mail the topology would reject (shared
+      // pool: already in the pool) BEFORE anything is written. Otherwise the
+      // admin step 409s after the tenant is ACTIVE, leaving an adminless
+      // tenant whose id the vendor never sees. Nothing exists yet to clean up.
+      await this.provisioner.assertEmailAvailable(adminEmail);
+
       // ADR-0021: write the registry row FIRST, as PROVISIONING, then provision
       // Cognito, then flip to ACTIVE (spec §5.1, ADR-0021 'registry row before
       // provisioning'). A Lambda timeout at any point leaves a tracked row the
@@ -146,14 +157,51 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
         throw error;
       }
 
-      // Flip PROVISIONING -> ACTIVE, writing the provisioned Cognito fields in
-      // the same conditional update (spec §5.1). On failure, deprovision the
-      // Cognito half we just built and delete the row (both best-effort,
-      // logged) so no untracked pool or group is left behind.
+      // ADR-0025: the tenant's API key, part of the provision step. The key
+      // module deletes its own half-built key; here we undo the Cognito half
+      // and the row (best effort, logged), as for a provisioning failure.
+      let apiKey: TenantApiKey;
+      try {
+        apiKey = await this.apiKeys.create(tenantId);
+      } catch (error) {
+        try {
+          await this.provisioner.deprovisionTenant({ ...record, ...provisioned });
+        } catch (cleanup) {
+          log.error('CreateTenant deprovision clean-up failed', {
+            operation: 'CreateTenant',
+            tenantId,
+            error: errorName(cleanup),
+          });
+        }
+        try {
+          await this.registry.delete(tenantId);
+        } catch (cleanup) {
+          log.error('CreateTenant row clean-up failed', {
+            operation: 'CreateTenant',
+            tenantId,
+            error: errorName(cleanup),
+          });
+        }
+        throw error;
+      }
+
+      // Flip PROVISIONING -> ACTIVE, writing the provisioned Cognito fields and
+      // the API key in the same conditional update (spec §5.1). On failure,
+      // delete the key, deprovision the Cognito half we just built and delete
+      // the row (all best-effort, logged) so nothing untracked is left behind.
       let active: TenantRecord;
       try {
-        active = await this.registry.activate(tenantId, provisioned);
+        active = await this.registry.activate(tenantId, { ...provisioned, ...apiKey });
       } catch (error) {
+        try {
+          await this.apiKeys.delete(apiKey.apiKeyId);
+        } catch (cleanup) {
+          log.error('CreateTenant API key clean-up failed', {
+            operation: 'CreateTenant',
+            tenantId,
+            error: errorName(cleanup),
+          });
+        }
         try {
           await this.provisioner.deprovisionTenant({ ...record, ...provisioned });
         } catch (cleanup) {
@@ -218,6 +266,9 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       // Idempotent and re-runnable against an already DELETING tenant.
       const deleting = await this.registry.markDeleting(tenantId);
       await this.provisioner.deprovisionTenant(deleting);
+      // ADR-0025: the tenant's API key, idempotent. The authoriser already
+      // refuses the DELETING tenant, so the key is unused from here on.
+      await this.apiKeys.delete(deleting.apiKeyId);
       // Remove the registry item only after clean-up succeeds (R-11).
       await this.registry.delete(tenantId);
       return {};
@@ -249,8 +300,9 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     const tenantId = requireField(input.tenantId, 'tenantId');
     const username = requireField(input.username, 'username');
     return this.mapErrors('GetUser', tenantId, async () => {
-      // Read: allowed on DELETING. The provisioner runs the R-12 check.
-      const tenant = await this.loadTenant(tenantId);
+      // Read: allowed on DELETING, refused on PROVISIONING (P-2, ADR-0021).
+      // The provisioner runs the R-12 check.
+      const tenant = await this.loadReadableTenant(tenantId);
       const user = await this.provisioner.getUser(tenant, username);
       return { user: toUser(user) };
     });
@@ -262,8 +314,8 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
   ): Promise<ListUsersServerOutput> => {
     const tenantId = requireField(input.tenantId, 'tenantId');
     return this.mapErrors('ListUsers', tenantId, async () => {
-      // Read: allowed on DELETING.
-      const tenant = await this.loadTenant(tenantId);
+      // Read: allowed on DELETING, refused on PROVISIONING (P-2, ADR-0021).
+      const tenant = await this.loadReadableTenant(tenantId);
       const page = await this.provisioner.listUsers(tenant, input.nextToken);
       return { users: page.items.map(toUser), nextToken: page.nextToken };
     });
@@ -384,6 +436,20 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     const record = await this.registry.get(tenantId);
     if (record === undefined) {
       throw new ResourceNotFoundError({ message: `Tenant ${tenantId} not found` });
+    }
+    return record;
+  }
+
+  /**
+   * Reads a tenant for a Cognito-side read (GetUser, ListUsers). DELETING is
+   * readable (P-2); a PROVISIONING tenant has no Cognito half recorded yet,
+   * so there is nothing to read: 409, not a 500 from the provisioner
+   * (ADR-0021, spec §5.3). Unknown tenant -> 404.
+   */
+  private async loadReadableTenant(tenantId: string): Promise<TenantRecord> {
+    const record = await this.loadTenant(tenantId);
+    if (record.status === 'PROVISIONING') {
+      throw new ConflictError({ message: `Tenant ${tenantId} is ${record.status}` });
     }
     return record;
   }

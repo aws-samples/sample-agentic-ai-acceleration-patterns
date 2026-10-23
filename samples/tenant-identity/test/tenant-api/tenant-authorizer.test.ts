@@ -21,6 +21,7 @@ const POOL_A = 'eu-central-1_AAAApoolA';
 const POOL_B = 'eu-central-1_BBBBpoolB';
 const CLIENT = 'appclient0000000000000';
 const SUB = 'user-sub-0001';
+const API_KEY_VALUE = 'tenant-a-key-value-0000000000';
 
 function activeTenant(over: Partial<TenantRecord> = {}): TenantRecord {
   return {
@@ -28,6 +29,8 @@ function activeTenant(over: Partial<TenantRecord> = {}): TenantRecord {
     name: 'Tenant A',
     status: 'ACTIVE',
     topology: 'shared-pool',
+    apiKeyId: 'key-id-a',
+    apiKeyValue: API_KEY_VALUE,
     createdAt: '2026-10-21T00:00:00.000Z',
     updatedAt: '2026-10-21T00:00:00.000Z',
     ...over,
@@ -85,7 +88,28 @@ describe('authorize — shared pool (P-6, ADR-0007)', () => {
       verifierFor: verifierReturning(goodClaims),
       sharedPool,
     };
-    await expect(authorize('t.t.t', deps)).resolves.toEqual({ tenantId: TENANT_A, sub: SUB });
+    await expect(authorize('t.t.t', deps)).resolves.toEqual({ tenantId: TENANT_A, sub: SUB, usageIdentifierKey: API_KEY_VALUE });
+  });
+
+  it.each([
+    ['no key fields (a tenant from before ADR-0025)', { apiKeyId: undefined, apiKeyValue: undefined }],
+    ['an empty key value', { apiKeyValue: '' }],
+  ])('refuses an ACTIVE tenant with %s (ADR-0025)', async (_label, over) => {
+    const deps: AuthorizeDeps = {
+      registry: fakeRegistry({ get: jest.fn().mockResolvedValue(activeTenant(over)) }),
+      verifierFor: verifierReturning(goodClaims),
+      sharedPool,
+    };
+    await expect(authorize('t.t.t', deps)).resolves.toBeUndefined();
+  });
+
+  it('returns the key of the tenant it read, never one from the token (ADR-0025)', async () => {
+    const deps: AuthorizeDeps = {
+      registry: fakeRegistry({ get: jest.fn().mockResolvedValue(activeTenant({ apiKeyValue: 'other-tenant-value-0000' })) }),
+      verifierFor: verifierReturning({ ...goodClaims, usageIdentifierKey: 'from-the-token', api_key: 'x' }),
+      sharedPool,
+    };
+    await expect(authorize('t.t.t', deps)).resolves.toMatchObject({ usageIdentifierKey: 'other-tenant-value-0000' });
   });
 
   it('refuses an ID token (token_use id)', async () => {
@@ -184,7 +208,7 @@ describe('authorize — pool-per-tenant (ADR-0007)', () => {
       }),
       verifierFor: verifierReturning(goodClaims),
     };
-    await expect(authorize(tokenWithIssuer(POOL_A), deps)).resolves.toEqual({ tenantId: TENANT_A, sub: SUB });
+    await expect(authorize(tokenWithIssuer(POOL_A), deps)).resolves.toEqual({ tenantId: TENANT_A, sub: SUB, usageIdentifierKey: API_KEY_VALUE });
   });
 
   it('refuses when the issuing pool is not in the registry', async () => {
@@ -275,7 +299,7 @@ describe('authorize — real CognitoJwtVerifier end to end (ADR-0007)', () => {
   }
 
   it('accepts a correctly signed token', async () => {
-    await expect(mintAndVerify({})).resolves.toEqual({ tenantId: TENANT_A, sub: SUB });
+    await expect(mintAndVerify({})).resolves.toEqual({ tenantId: TENANT_A, sub: SUB, usageIdentifierKey: API_KEY_VALUE });
   });
 
   it('refuses a token whose signature was tampered with', async () => {

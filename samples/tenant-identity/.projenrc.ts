@@ -31,6 +31,8 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     '@aws-sdk/client-cognito-identity-provider@3.1154.0',
     '@aws-sdk/client-dynamodb@3.1154.0',
     '@aws-sdk/lib-dynamodb@3.1154.0',
+    '@aws-sdk/client-api-gateway@3.1154.0', // per-tenant API keys (ADR-0025)
+    '@aws-sdk/client-sts@3.1154.0', // tenant-scoped role session (ADR-0026)
     'aws-jwt-verify@5.2.1', // tenant authoriser (ADR-0007)
     'ulid@3.0.2', // tenant id generation
     // Security linting - AwsSolutionsChecks aspect applied in src/main.ts
@@ -46,6 +48,7 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     // stack discovery through CloudFormation outputs
     '@aws-sdk/client-cloudformation@3.1154.0',
     '@aws-sdk/client-ssm@3.1154.0', // e2e: R-6 parameter check
+    '@aws-sdk/client-iam@3.1154.0', // e2e: ADR-0026 policy simulation
     '@aws-sdk/credential-providers@3.1154.0',
     '@aws-crypto/sha256-js@5.2.0',
     '@smithy/signature-v4@5.7.4',

@@ -266,6 +266,20 @@ describe('TenantUsersService — tenant status (P-2 defence in depth)', () => {
     );
   });
 
+  it.each([
+    ['CreateTenantUser', (s: TenantUsersService) => s.CreateTenantUser({ email: 'a@example.com' }, context)],
+    ['UpdateTenantUser', (s: TenantUsersService) => s.UpdateTenantUser({ username: 'target-sub-9999', admin: true }, context)],
+    ['DeleteTenantUser', (s: TenantUsersService) => s.DeleteTenantUser({ username: 'target-sub-9999' }, context)],
+  ])('409s %s when the tenant is PROVISIONING and touches no provisioner (ADR-0021, P-2)', async (_name, call) => {
+    const provisioner = mockProvisioner();
+    const service = new TenantUsersService(fakeRegistry(activeTenant({ status: 'PROVISIONING' })), provisioner);
+    await expect(call(service)).rejects.toBeInstanceOf(ModeledConflictError);
+    expect(provisioner.getUser).not.toHaveBeenCalled();
+    expect(provisioner.createUser).not.toHaveBeenCalled();
+    expect(provisioner.setAdmin).not.toHaveBeenCalled();
+    expect(provisioner.deleteUser).not.toHaveBeenCalled();
+  });
+
   it('allows a read when the tenant is DELETING (read is not a mutation)', async () => {
     const service = new TenantUsersService(fakeRegistry(activeTenant({ status: 'DELETING' })), mockProvisioner());
     await expect(service.GetTenantUser({ username: 'target-sub-9999' }, context)).resolves.toBeDefined();
@@ -323,3 +337,48 @@ describe('TenantUsersService — error mapping (§5.3)', () => {
 
 // Keep InternalServerError referenced for clarity of the mapping under test.
 void InternalServerError;
+
+describe('TenantUsersService — per-tenant provisioner (ADR-0026)', () => {
+  it('asks the factory for the context tenant\'s provisioner and uses it for every Cognito call', async () => {
+    const provisioner = mockProvisioner();
+    const factory = jest.fn().mockReturnValue(provisioner);
+    const service = new TenantUsersService(fakeRegistry(), factory);
+
+    await service.UpdateTenantUser({ username: 'target-sub-9999', admin: true }, context);
+
+    expect(factory).toHaveBeenCalledWith(TENANT_A);
+    expect(factory).not.toHaveBeenCalledWith(expect.not.stringMatching(TENANT_A));
+    // R-16, R-12 and the write all ran on the tenant's provisioner.
+    expect(provisioner.getUser).toHaveBeenCalledWith(expect.objectContaining({ tenantId: TENANT_A }), CALLER_SUB);
+    expect(provisioner.setAdmin).toHaveBeenCalledWith(expect.objectContaining({ tenantId: TENANT_A }), 'target-sub-9999', true);
+  });
+
+  it('reads use the factory too (Get, List)', async () => {
+    const provisioner = mockProvisioner();
+    const factory = jest.fn().mockReturnValue(provisioner);
+    const service = new TenantUsersService(fakeRegistry(), factory);
+
+    await service.GetTenantUser({ username: 'target-sub-9999' }, context);
+    await service.ListTenantUsers({}, context);
+
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(provisioner.listUsers).toHaveBeenCalled();
+  });
+
+  it('a credential failure in the factory is a 500 with no detail', async () => {
+    const factory = jest.fn().mockImplementation(() => {
+      throw Object.assign(new Error('not authorized to perform sts:AssumeRole'), { name: 'AccessDenied' });
+    });
+    const service = new TenantUsersService(fakeRegistry(), factory);
+    await expect(service.ListTenantUsers({}, context)).rejects.toMatchObject({ message: 'Internal server error' });
+  });
+
+  it('the R-13 self-mutation check still runs on scoped credentials (defence in depth)', async () => {
+    const provisioner = mockProvisioner({
+      getUser: jest.fn().mockResolvedValue(userView({ username: CALLER_SUB, admin: true })),
+    });
+    const service = new TenantUsersService(fakeRegistry(), () => provisioner);
+    await expect(service.DeleteTenantUser({ username: CALLER_SUB }, context)).rejects.toBeInstanceOf(ModeledConflictError);
+    expect(provisioner.deleteUser).not.toHaveBeenCalled();
+  });
+});

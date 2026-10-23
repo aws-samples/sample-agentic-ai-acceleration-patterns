@@ -67,6 +67,16 @@ export interface Provisioner {
   /** Removes everything provisionTenant and the tenant's users created. Idempotent. */
   deprovisionTenant(tenant: TenantRecord): Promise<void>;
 
+  /**
+   * Pre-flight for CreateTenant's admin step (spec §5.1): throws ConflictError
+   * when `createUser` would certainly refuse this e-mail for a brand-new
+   * tenant. CreateTenant calls it BEFORE the registry write, so a taken
+   * e-mail never leaves an ACTIVE tenant with no admin. shared-pool: the
+   * e-mail is pool-unique (one person, one tenant). The other topologies
+   * accept any e-mail for a new tenant, so this is a no-op there.
+   */
+  assertEmailAvailable(email: string): Promise<void>;
+
   /** Creates the user (or, in topology 3, reuses an existing one) and adds them to the tenant. */
   createUser(tenant: TenantRecord, email: string, admin: boolean): Promise<NewUserResult>;
 

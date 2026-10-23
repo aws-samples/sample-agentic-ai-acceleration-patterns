@@ -48,6 +48,12 @@ export interface AuthorizeDeps {
 export interface Caller {
   readonly tenantId: string;
   readonly sub: string;
+  /**
+   * The tenant's API key value, returned to API Gateway as
+   * `usageIdentifierKey` so the stage throttles this tenant on its own
+   * (ADR-0025). Never put into the function's context.
+   */
+  readonly usageIdentifierKey: string;
 }
 
 /**
@@ -174,6 +180,12 @@ export async function authorize(token: string, deps: AuthorizeDeps): Promise<Cal
     log.warn('authorizer refused', { rule: 'tenant_not_active' });
     return undefined;
   }
+  // ADR-0025: /tenant/* requires an API key. Without one API Gateway would
+  // refuse the call anyway (403); refusing here logs why.
+  if (typeof tenant.apiKeyValue !== 'string' || tenant.apiKeyValue === '') {
+    log.warn('authorizer refused', { rule: 'tenant_has_no_api_key' });
+    return undefined;
+  }
 
-  return { tenantId, sub };
+  return { tenantId, sub, usageIdentifierKey: tenant.apiKeyValue };
 }

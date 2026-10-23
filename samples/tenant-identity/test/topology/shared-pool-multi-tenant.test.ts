@@ -71,6 +71,7 @@ describe('SharedPoolMultiTenantProvisioner (spec §7.3)', () => {
       // R-17 (T-27), T-27: only a verified existing e-mail is reused.
       cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'existing', Attributes: [{ Name: 'email', Value: 'u1@x.com' }, { Name: 'email_verified', Value: 'true' }] }] });
       cognito.on(AdminAddUserToGroupCommand).resolves({});
+      userGroups(`t-${IDS.a}`);
       const result = await provisioner().createUser(tenantA(), 'u1@x.com', false);
       expect(result.temporaryPassword).toBeUndefined();
       expect(cognito).toHaveReceivedCommandTimes(AdminCreateUserCommand as AnyMock, 0);
@@ -217,6 +218,84 @@ describe('SharedPoolMultiTenantProvisioner (spec §7.3)', () => {
       cognito.on(AdminGetUserCommand).resolves({ Username: 'sub-u1', UserAttributes: [{ Name: 'email', Value: 'u1@x.com' }], UserStatus: 'CONFIRMED' });
       const view = await provisioner().getUser(tenantA(), 'u1@x.com');
       expect(view.username).toBe('sub-u1');
+    });
+  });
+
+  describe('createUser reuse reports actual admin membership', () => {
+    it('admin=false on a user already in admin-<tenant> returns admin=true', async () => {
+      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'existing', Attributes: [{ Name: 'email', Value: 'u1@x.com' }, { Name: 'email_verified', Value: 'true' }] }] });
+      cognito.on(AdminAddUserToGroupCommand).resolves({});
+      userGroups(`t-${IDS.a}`, `admin-${IDS.a}`, `t-${IDS.b}`);
+      const result = await provisioner().createUser(tenantA(), 'u1@x.com', false);
+      expect(result.user.admin).toBe(true);
+    });
+
+    it('admin=false on a user who is admin elsewhere only returns admin=false', async () => {
+      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'existing', Attributes: [{ Name: 'email', Value: 'u1@x.com' }, { Name: 'email_verified', Value: 'true' }] }] });
+      cognito.on(AdminAddUserToGroupCommand).resolves({});
+      userGroups(`t-${IDS.a}`, `t-${IDS.b}`, `admin-${IDS.b}`);
+      const result = await provisioner().createUser(tenantA(), 'u1@x.com', false);
+      expect(result.user.admin).toBe(false);
+    });
+  });
+
+  describe('deleteMembership race (P-4)', () => {
+    it('deletes the Cognito user when a concurrent removal left no t- group', async () => {
+      // assertMember and the last-tenant check both see A and B; by the time
+      // A is removed, a concurrent call has already removed B.
+      cognito
+        .on(AdminListGroupsForUserCommand)
+        .resolvesOnce({ Groups: [{ GroupName: `t-${IDS.a}` }, { GroupName: `t-${IDS.b}` }] }) // assertMember
+        .resolvesOnce({ Groups: [{ GroupName: `t-${IDS.a}` }, { GroupName: `t-${IDS.b}` }] }) // last-tenant check
+        .resolves({ Groups: [] }); // after removal
+      cognito.on(AdminRemoveUserFromGroupCommand).resolves({});
+      cognito.on(AdminDeleteUserCommand).resolves({});
+      await provisioner().deleteMembership(tenantA(), 'u1');
+      expect(cognito).toHaveReceivedCommandTimes(AdminDeleteUserCommand as AnyMock, 1);
+    });
+
+    it('keeps the user when another t- group still remains after removal', async () => {
+      cognito
+        .on(AdminListGroupsForUserCommand)
+        .resolvesOnce({ Groups: [{ GroupName: `t-${IDS.a}` }, { GroupName: `t-${IDS.b}` }] })
+        .resolvesOnce({ Groups: [{ GroupName: `t-${IDS.a}` }, { GroupName: `t-${IDS.b}` }] })
+        .resolves({ Groups: [{ GroupName: `t-${IDS.b}` }] });
+      cognito.on(AdminRemoveUserFromGroupCommand).resolves({});
+      await provisioner().deleteMembership(tenantA(), 'u1');
+      expect(cognito).toHaveReceivedCommandTimes(AdminDeleteUserCommand as AnyMock, 0);
+    });
+  });
+
+  describe('assertEmailAvailable', () => {
+    it('is a no-op: an existing e-mail is reused (spec §7.3)', async () => {
+      await expect(provisioner().assertEmailAvailable('u1@x.com')).resolves.toBeUndefined();
+      expect(cognito.calls()).toHaveLength(0);
+    });
+  });
+
+  describe('setAdmin happy path', () => {
+    it('promote adds to admin-<tenant> and returns admin=true', async () => {
+      cognito.on(AdminAddUserToGroupCommand).resolves({});
+      cognito
+        .on(AdminListGroupsForUserCommand)
+        .resolvesOnce({ Groups: [{ GroupName: `t-${IDS.a}` }] }) // assertMember
+        .resolves({ Groups: [{ GroupName: `t-${IDS.a}` }, { GroupName: `admin-${IDS.a}` }] });
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [], UserStatus: 'CONFIRMED' });
+      const view = await provisioner().setAdmin(tenantA(), 'u1', true);
+      expect(cognito.commandCalls(AdminAddUserToGroupCommand)[0].args[0].input).toMatchObject({ UserPoolId: POOL, Username: 'u1', GroupName: `admin-${IDS.a}` });
+      expect(view.admin).toBe(true);
+    });
+
+    it('demote removes from admin-<tenant> and returns admin=false', async () => {
+      cognito.on(AdminRemoveUserFromGroupCommand).resolves({});
+      cognito
+        .on(AdminListGroupsForUserCommand)
+        .resolvesOnce({ Groups: [{ GroupName: `t-${IDS.a}` }, { GroupName: `admin-${IDS.a}` }] })
+        .resolves({ Groups: [{ GroupName: `t-${IDS.a}` }] });
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [], UserStatus: 'CONFIRMED' });
+      const view = await provisioner().setAdmin(tenantA(), 'u1', false);
+      expect(cognito.commandCalls(AdminRemoveUserFromGroupCommand)[0].args[0].input).toMatchObject({ GroupName: `admin-${IDS.a}` });
+      expect(view.admin).toBe(false);
     });
   });
 });

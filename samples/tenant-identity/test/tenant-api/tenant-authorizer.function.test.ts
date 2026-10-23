@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 import type { APIGatewayTokenAuthorizerEvent } from 'aws-lambda';
+import { DynamoDBRegistry } from '../../src/shared/registry';
 
 // Cold start reads TABLE_NAME via requireEnv at module load. `require` (not a
 // static import) runs after this assignment; a static import is hoisted above it.
@@ -24,7 +25,11 @@ function firstStatement(result: { policyDocument: { Statement: unknown[] } }): R
 
 describe('buildPolicy (ADR-0007)', () => {
   it('Allow carries an Allow statement and {tenantId, sub} context', () => {
-    const result = buildPolicy(METHOD_ARN, 'Allow', { tenantId: '01HZX9ABCDEFGHJKMNPQRSTVWX', sub: 'user-1' });
+    const result = buildPolicy(METHOD_ARN, 'Allow', {
+      tenantId: '01HZX9ABCDEFGHJKMNPQRSTVWX',
+      sub: 'user-1',
+      usageIdentifierKey: 'tenant-key-value-000000',
+    });
     expect(result.principalId).toBe('user-1');
     expect(firstStatement(result)).toEqual({
       Action: 'execute-api:Invoke',
@@ -32,6 +37,8 @@ describe('buildPolicy (ADR-0007)', () => {
       Resource: METHOD_ARN,
     });
     expect(result.context).toEqual({ tenantId: '01HZX9ABCDEFGHJKMNPQRSTVWX', sub: 'user-1' });
+    // ADR-0025: the tenant's key goes to API Gateway, never into the context.
+    expect(result.usageIdentifierKey).toBe('tenant-key-value-000000');
   });
 
   it('Deny is an explicit Deny with no context (API Gateway → 403)', () => {
@@ -40,6 +47,8 @@ describe('buildPolicy (ADR-0007)', () => {
     expect(firstStatement(result).Effect).toBe('Deny');
     expect(firstStatement(result).Resource).toBe(METHOD_ARN);
     expect(result.context).toBeUndefined();
+    // No key on Deny: nothing is throttled against a tenant.
+    expect(result.usageIdentifierKey).toBeUndefined();
   });
 });
 
@@ -54,6 +63,25 @@ describe('handler (ADR-0007)', () => {
     const result = await handler(event('Basic nope'));
     expect(firstStatement(result).Effect).toBe('Deny');
     expect(result.context).toBeUndefined();
+  });
+
+  it('a registry failure is an explicit Deny with no context, never an Allow (P-2)', async () => {
+    // No shared pool is configured, so the handler takes the pool-per-tenant
+    // path: the unverified issuer is mapped through the registry, which fails.
+    const spy = jest
+      .spyOn(DynamoDBRegistry.prototype, 'getByUserPoolId')
+      .mockRejectedValue(Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' }));
+    const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const jwt = `${b64({ alg: 'RS256', kid: 'k' })}.${b64({ iss: 'https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_pool1' })}.sig`;
+    try {
+      const result = await handler(event(`Bearer ${jwt}`));
+      expect(spy).toHaveBeenCalledWith('eu-central-1_pool1');
+      expect(result.principalId).toBe('unauthorized');
+      expect(firstStatement(result).Effect).toBe('Deny');
+      expect(result.context).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

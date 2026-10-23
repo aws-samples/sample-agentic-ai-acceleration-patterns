@@ -29,6 +29,7 @@
   "devDependencies": {
     "@aws-crypto/sha256-js": "5.2.0",
     "@aws-sdk/client-cloudformation": "3.1154.0",
+    "@aws-sdk/client-iam": "3.1154.0",
     "@aws-sdk/client-ssm": "3.1154.0",
     "@aws-sdk/credential-providers": "3.1154.0",
     "@smithy/protocol-http": "5.6.2",
@@ -55,8 +56,10 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
+    "@aws-sdk/client-api-gateway": "3.1154.0",
     "@aws-sdk/client-cognito-identity-provider": "3.1154.0",
     "@aws-sdk/client-dynamodb": "3.1154.0",
+    "@aws-sdk/client-sts": "3.1154.0",
     "@aws-sdk/core": "3.977.9",
     "@aws-sdk/lib-dynamodb": "3.1154.0",
     "@smithy/core": "3.33.3",

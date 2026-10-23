@@ -3,10 +3,12 @@
 
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { STSClient } from '@aws-sdk/client-sts';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { convertEvent, convertVersion1Response } from '@smithy/server-apigateway';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
-import { TenantUsersService, type TenantCallerContext } from './tenant-users';
+import { perTenant, TenantCredentialCache } from './tenant-credentials';
+import { TenantUsersService, type ProvisionerFor, type TenantCallerContext } from './tenant-users';
 import { ENV, parseTopology, POOL_INDEX_NAME, requireEnv } from '../shared/constants';
 import { DynamoDBRegistry } from '../shared/registry';
 import { getTenantServiceServiceHandler } from '../smithy/tenant/typescript-ssdk-codegen/src';
@@ -23,6 +25,14 @@ import { createProvisioner, type ProvisionerDeps } from '../topology';
  * `createProvisioner` is the one place a topology value selects behaviour
  * (spec P-1). `sharedPool` and `triggerFunctionArn` are set only in the
  * topologies that use them, so reading them unconditionally is correct.
+ *
+ * ADR-0026: when the stack sets a tenant-scoped role (pool-per-tenant), this
+ * function's own role holds no Cognito action. Every Cognito call signs with
+ * that role's credentials, assumed per tenant with the authoriser's tenant id
+ * as the session tag, so IAM keeps the call inside that tenant's pool. The
+ * R-12 and R-13 checks in the service still run (defence in depth). Without
+ * the role (shared pools), the function calls Cognito with its own role:
+ * IAM cannot scope users inside one pool.
  */
 
 const region = requireEnv('AWS_REGION');
@@ -43,14 +53,29 @@ function readSharedPool(): ProvisionerDeps['sharedPool'] {
   return undefined;
 }
 
-const provisioner = createProvisioner(topology, {
-  cognito: new CognitoIdentityProviderClient({}),
+const baseDeps: Omit<ProvisionerDeps, 'cognito'> = {
   region,
   sharedPool: readSharedPool(),
   triggerFunctionArn: process.env[ENV.triggerFunctionArn],
-});
+};
 
-const service = new TenantUsersService(registry, provisioner);
+/** One provisioner for every tenant, or one per tenant on scoped credentials (ADR-0026). */
+function buildProvisionerFor(): ProvisionerFor {
+  const scopedRoleArn = process.env[ENV.tenantScopedRoleArn];
+  if (scopedRoleArn === undefined || scopedRoleArn === '') {
+    const shared = createProvisioner(topology, { ...baseDeps, cognito: new CognitoIdentityProviderClient({}) });
+    return () => shared;
+  }
+  const credentials = new TenantCredentialCache({ sts: new STSClient({}), roleArn: scopedRoleArn });
+  return perTenant((tenantId) =>
+    createProvisioner(topology, {
+      ...baseDeps,
+      cognito: new CognitoIdentityProviderClient({ credentials: () => credentials.credentialsFor(tenantId) }),
+    }),
+  );
+}
+
+const service = new TenantUsersService(registry, buildProvisionerFor());
 const serviceHandler = getTenantServiceServiceHandler<TenantCallerContext>(service);
 
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {

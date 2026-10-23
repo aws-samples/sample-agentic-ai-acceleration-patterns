@@ -11,6 +11,11 @@
       "type": "build"
     },
     {
+      "name": "@aws-sdk/client-iam",
+      "version": "3.1154.0",
+      "type": "build"
+    },
+    {
       "name": "@aws-sdk/client-ssm",
       "version": "3.1154.0",
       "type": "build"
@@ -121,12 +126,22 @@
       "type": "build"
     },
     {
+      "name": "@aws-sdk/client-api-gateway",
+      "version": "3.1154.0",
+      "type": "runtime"
+    },
+    {
       "name": "@aws-sdk/client-cognito-identity-provider",
       "version": "3.1154.0",
       "type": "runtime"
     },
     {
       "name": "@aws-sdk/client-dynamodb",
+      "version": "3.1154.0",
+      "type": "runtime"
+    },
+    {
+      "name": "@aws-sdk/client-sts",
       "version": "3.1154.0",
       "type": "runtime"
     },

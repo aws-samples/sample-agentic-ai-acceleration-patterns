@@ -24,8 +24,16 @@ Validations.of(app).addPlugins(
 // account and Region (the integration test relies on it).
 const topology = parseTopology(app.node.tryGetContext('topology'));
 
+// Optional: `--context publishSharedParameters=false` keeps this stack from
+// publishing the fixed-name /application-plane/shared/identity/* parameters
+// (R-6). One stack per account and Region may own those names (ADR-0017),
+// so a second topology deployed beside an existing one turns them off here.
+// Anything but the string 'false' (or a cdk.json boolean false) publishes.
+const publishSharedParameters = String(app.node.tryGetContext('publishSharedParameters') ?? 'true') !== 'false';
+
 new TenantIdentityStack(app, `TenantIdentity-${topology}`, {
   topology,
+  publishSharedParameters,
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
     region: process.env.CDK_DEFAULT_REGION,

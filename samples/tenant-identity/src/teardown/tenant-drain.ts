@@ -10,7 +10,8 @@
  * before the table goes.
  *
  * It replays the platform DeleteTenant sequence for each tenant
- * (markDeleting -> provisioner.deprovisionTenant -> registry.delete, R-11),
+ * (markDeleting -> provisioner.deprovisionTenant -> apiKeys.delete ->
+ * registry.delete, R-11, ADR-0025),
  * so there is one offboarding path, not two. It is idempotent: a tenant that
  * is already gone from the registry (NotFoundError on markDeleting) is
  * skipped, so a retried or partially-completed drain still converges.
@@ -19,6 +20,7 @@
 import { NotFoundError } from '../shared/errors';
 import { log } from '../shared/logger';
 import type { Registry } from '../shared/registry';
+import type { TenantApiKeys } from '../shared/tenant-api-keys';
 import type { Provisioner } from '../topology';
 
 /** Guards against a mispaginating registry: a hard ceiling on Scan pages. */
@@ -27,6 +29,8 @@ const MAX_PAGES = 1000;
 export interface DrainDeps {
   readonly registry: Registry;
   readonly provisioner: Provisioner;
+  /** Deletes each tenant's API Gateway key (ADR-0025). */
+  readonly apiKeys: TenantApiKeys;
 }
 
 export interface DrainResult {
@@ -42,7 +46,7 @@ export interface DrainResult {
  * does not tear down the table over orphaned pools.
  */
 export async function drainTenants(deps: DrainDeps): Promise<DrainResult> {
-  const { registry, provisioner } = deps;
+  const { registry, provisioner, apiKeys } = deps;
   let deleted = 0;
   let nextToken: string | undefined;
   let pages = 0;
@@ -69,6 +73,9 @@ export async function drainTenants(deps: DrainDeps): Promise<DrainResult> {
       }
       log.info('Drain deprovision', { operation: 'drainTenants', tenantId });
       await provisioner.deprovisionTenant(deleting);
+      // ADR-0025: API keys are created at run time, so the stack would leave
+      // them behind (and they count against the account's key quota).
+      await apiKeys.delete(deleting.apiKeyId);
       await registry.delete(tenantId);
       deleted++;
     }

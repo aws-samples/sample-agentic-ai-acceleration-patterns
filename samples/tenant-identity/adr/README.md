@@ -33,3 +33,5 @@ Template: [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md#2-d
 | [ADR-0022](0022-drain-registry-on-stack-delete.md) | Drain the registry on stack delete | Accepted | 2026-10-22 |
 | [ADR-0023](0023-integ-with-cdk-cli.md) | Drive the integration test with the CDK CLI, not integ-runner | Accepted | 2026-10-22 |
 | [ADR-0024](0024-one-log-drain.md) | Use one log drain whose writers are what invokes the functions | Accepted | 2026-10-22 |
+| [ADR-0025](0025-per-tenant-throttling-with-usage-plan-keys.md) | Throttle `/tenant/*` per tenant with one usage plan and an API key per tenant | Accepted | 2026-10-22 |
+| [ADR-0026](0026-iam-tenant-boundary-for-pool-per-tenant.md) | Enforce the tenant boundary of tenant-user calls with IAM in `pool-per-tenant` | Accepted | 2026-10-22 |
