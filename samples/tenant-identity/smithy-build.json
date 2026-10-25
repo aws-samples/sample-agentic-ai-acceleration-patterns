@@ -1,0 +1,69 @@
+{
+  "version": "1.0",
+  "sources": [
+    "model"
+  ],
+  "outputDirectory": "src/smithy",
+  "maven": {
+    "dependencies": [
+      "software.amazon.smithy:smithy-aws-traits:1.73.0",
+      "software.amazon.smithy:smithy-linters:1.73.0",
+      "software.amazon.smithy:smithy-validation-model:1.73.0",
+      "software.amazon.smithy:smithy-openapi:1.73.0",
+      "software.amazon.smithy:smithy-aws-apigateway-openapi:1.73.0",
+      "software.amazon.smithy:smithy-aws-apigateway-traits:1.73.0",
+      "software.amazon.smithy.typescript:smithy-aws-typescript-codegen:0.53.0"
+    ]
+  },
+  "projections": {
+    "platform": {
+      "plugins": {
+        "typescript-ssdk-codegen": {
+          "service": "tenantidentity#PlatformService",
+          "package": "@tenant-identity/platform-service-ssdk",
+          "packageVersion": "0.0.1",
+          "packageDescription": "Server SDK for the tenant-identity platform API"
+        },
+        "openapi": {
+          "service": "tenantidentity#PlatformService",
+          "protocol": "aws.protocols#restJson1",
+          "apiGatewayType": "REST",
+          "apiGatewayDefaults": "2023-08-11"
+        }
+      }
+    },
+    "tenant": {
+      "plugins": {
+        "typescript-ssdk-codegen": {
+          "service": "tenantidentity#TenantService",
+          "package": "@tenant-identity/tenant-service-ssdk",
+          "packageVersion": "0.0.1",
+          "packageDescription": "Server SDK for the tenant-identity tenant API"
+        },
+        "openapi": {
+          "service": "tenantidentity#TenantService",
+          "protocol": "aws.protocols#restJson1",
+          "apiGatewayType": "REST",
+          "apiGatewayDefaults": "2023-08-11"
+        }
+      }
+    },
+    "token": {
+      "plugins": {
+        "typescript-ssdk-codegen": {
+          "service": "tenantidentity#TokenService",
+          "package": "@tenant-identity/token-service-ssdk",
+          "packageVersion": "0.0.1",
+          "packageDescription": "Server SDK for the tenant-identity token exchange",
+          "disableDefaultValidation": true
+        },
+        "openapi": {
+          "service": "tenantidentity#TokenService",
+          "protocol": "aws.protocols#restJson1",
+          "apiGatewayType": "REST",
+          "apiGatewayDefaults": "2023-08-11"
+        }
+      }
+    }
+  }
+}

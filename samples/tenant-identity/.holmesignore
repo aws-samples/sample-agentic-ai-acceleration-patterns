@@ -1,0 +1,12 @@
+# Holmes scans source only. Everything below is generated or local state.
+node_modules/
+cdk.out/
+cdk.integ.out/
+coverage/
+test-reports/
+smithy/
+ash_output/
+.holmes/
+.kiro/
+.cache/
+TODO.md

@@ -17,6 +17,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 
 - [Samples](#samples)
   - [The Simple Cell-Based Control Plane](#the-simple-cell-based-control-plane)
+  - [Tenant Identity with Amazon Cognito](#tenant-identity-with-amazon-cognito)
 - [Contributing a sample](#contributing-a-sample)
 - [Further Reading](#further-reading)
 - [Costs](#costs)
@@ -28,6 +29,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 | Sample | Description |
 |---|---|
 | [The Simple Cell-Based Control Plane](./samples/control-plane/) | A minimal multi-tenant control plane for cell-based deployments — one service, one API, one DynamoDB table, one Step Functions workflow, script-driven provisioning via AWS CodeBuild. `maxTenants: 1` degenerates the model to a silo. |
+| [Tenant Identity with Amazon Cognito](./samples/tenant-identity/) | An identity layer that makes Amazon Cognito the trusted source of tenant identity, in three user-pool topologies chosen at deploy time — plus a `tiered` mode that runs two of them side by side — with RFC 8693 token narrowing to one tenant. |
 
 ## The Simple Cell-Based Control Plane
 
@@ -47,6 +49,32 @@ operation requires a JWT from your vendor IdP, validated by a Lambda
 Authorizer.
 
 [The Simple Cell-Based Control Plane](./samples/control-plane/)
+
+## Tenant Identity with Amazon Cognito
+
+Every multi-tenant application has to answer one question on every request:
+which tenant is this caller acting for? Amazon Cognito proves who a user is,
+but it has no notion of a tenant. The alternative — keeping a user-to-tenant
+mapping in an application table and consulting it on every request — puts a
+second source of truth on the request path that can drift from the directory.
+
+This sample overlays tenant identity onto Cognito so the tenant rides in every
+access token as a claim Cognito signs, and a service reads it from a verifiable
+claim instead of a lookup. It builds the three overlays Cognito allows — one
+pool per tenant, an immutable user attribute, or a group — side by side behind
+one platform API and one token contract, chosen once at deploy time, and adds a
+fourth `tiered` deployment mode that runs the pool-per-tenant and shared-pool
+overlays together in one stack, with each tenant placed in a `standard` or
+`premium` tier at onboarding. The vendor
+manages tenants and users with IAM through `/platform/*`; a tenant admin manages
+its own tenant's users through `/tenant/*`. Because a token can name every
+tenant a user belongs to, a client trades a refresh token at an RFC 8693
+exchange endpoint for an access token narrowed to one tenant, which Cognito
+re-signs so it verifies the same way.
+
+The sample stops at the token: verifying it and scoping a request belongs to
+the consuming service, which is an extension seam rather than built here. See
+[Tenant Identity with Amazon Cognito](./samples/tenant-identity/).
 
 ## Contributing a sample
 
