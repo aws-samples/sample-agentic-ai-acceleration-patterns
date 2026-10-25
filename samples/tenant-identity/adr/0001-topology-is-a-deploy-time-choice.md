@@ -1,6 +1,6 @@
 # ADR-0001: Select the user-pool topology once, at deploy time, by CDK context
 
-- Status: Superseded in part by ADR-0027
+- Status: Accepted
 - Date: 2026-10-13
 - Deciders: Dave Roberts (SA)
 
@@ -40,3 +40,10 @@ Harder: a deployer who picks wrong must delete tenants and redeploy. Revisit
 if a real consumer needs mixed topologies in one deployment (some tenants
 with their own pool, the rest shared); that would be a fourth topology with
 its own provisioner, not a runtime switch.
+
+Note: ADR-0027 amends this record only in part. It adds that fourth
+`tiered` topology — `shared-pool` and `pool-per-tenant` in one stack, the tier
+chosen per tenant at `CreateTenant` — so a deployment can mix the two without a
+runtime switch. The decision here stands for the rest: the topology (now one of
+four values) is still a required CDK context value, validated at synth, immutable
+for the life of a deployment, and stamped into the stack name.

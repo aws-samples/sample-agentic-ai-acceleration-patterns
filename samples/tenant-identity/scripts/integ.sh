@@ -101,6 +101,40 @@ leftover_log_groups() {
   done
 }
 
+# Prints REST APIs left by a failed CloudFormation create. SpecRestApi first
+# creates the shell API, then imports its OpenAPI document with PutRestApi. If
+# that second call is denied, CloudFormation has no physical id to delete and
+# the shell API can survive rollback. Names are stack-scoped.
+leftover_rest_apis() {
+  local stack
+  for stack in "${STACKS[@]}"; do
+    aws apigateway get-rest-apis \
+      --query "items[?name=='${stack}-api'].[id,name]" --output text
+  done
+}
+
+# API Gateway limits DeleteRestApi to about one request per 30 seconds. Retry
+# throttles and pace multiple orphan deletes. The caller still fails the integ
+# run: cleanup prevents account litter; it does not turn a failed deploy green.
+delete_leftover_rest_apis() {
+  local apis="$1" id name attempt
+  while read -r id name; do
+    [ -n "$id" ] || continue
+    echo "Deleting orphan REST API ${name} (${id})" >&2
+    for attempt in 1 2 3 4 5; do
+      if aws apigateway delete-rest-api --rest-api-id "$id"; then
+        break
+      fi
+      if [ "$attempt" -eq 5 ]; then
+        echo "Could not delete orphan REST API ${name} (${id})" >&2
+        return 1
+      fi
+      sleep $((attempt * 10))
+    done
+    sleep 35
+  done <<<"$apis"
+}
+
 # Proves every alarm in a stack can deliver to its action (M-31): forces the
 # alarm into ALARM, then waits for the alarm history to record the SNS publish.
 # The history says "Failed to execute action" when CloudWatch cannot publish,
@@ -160,12 +194,19 @@ destroy() {
     # The destroy succeeded; now prove it left nothing behind (ADR-0022,
     # ADR-0024). A leftover fails the run even when the scenario passed.
     echo "=== leftovers ($(date -u +%H:%M:%S) UTC)"
-    local pools leftovers
+    local pools leftovers apis
     pools="$(leftover_pools || true)"
     if [ -n "$pools" ]; then
       echo "Leftover user pool(s) tagged ${SAMPLE_TAG_KEY}=${SAMPLE_TAG_VALUE} (ADR-0022):" >&2
       echo "$pools" >&2
       status=1
+    fi
+    apis="$(leftover_rest_apis || true)"
+    if [ -n "$apis" ]; then
+      echo "Leftover REST API(s) from the integ stacks:" >&2
+      echo "$apis" >&2
+      status=1
+      delete_leftover_rest_apis "$apis" || status=1
     fi
     if [ "${#log_groups[@]}" -gt 0 ]; then
       leftovers="$(leftover_log_groups "${log_groups[@]}" || true)"
@@ -176,7 +217,7 @@ destroy() {
       fi
     fi
     if [ "$status" -eq 0 ]; then
-      echo "No leftover pool or log group."
+      echo "No leftover pool, REST API or log group."
     fi
   fi
   echo "=== done ($(date -u +%H:%M:%S) UTC), exit $status"

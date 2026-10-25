@@ -1,11 +1,14 @@
 # Tenant Identity with Amazon Cognito — Architecture
 
 > Status: **Implemented and verified.** Last green deployment integration
-> test: 2026-10-22, eu-central-1, all three topologies, spec §10 steps 2–9 and
-> 11 plus the R-6 parameter check, 408 s end to end (deploy 114 s, e2e 43 s,
-> destroy 237 s); teardown verified to leave no stack, pool, table, parameter,
-> role or log group 5 minutes after destroy. ADRs: see
-> [`adr/`](./adr/README.md) (ADR-0001..0024).
+> test: 2026-10-23, eu-central-1, all four stacks (the three topologies and
+> `tiered`, ADR-0027), spec §10 steps 2–9 and 11 plus the ADR-0027 tiered
+> scenario (step 12) and the R-6 parameter check: 45/45 e2e assertions passed
+> and all 8 alarm actions published to the SNS topic (M-31). Teardown verified
+> to leave no stack, pool, table, parameter, role or log group: the destroy's
+> leftover check reported no tagged pool and no owned log group 90 s after
+> `TenantDrain` and the API stage were gone. ADRs: see
+> [`adr/`](./adr/README.md) (ADR-0001..0027).
 
 This document describes what the sample deploys and runs, not the plan. Where
 the code and the specification diverge, the code and its ADRs win; the
@@ -510,7 +513,9 @@ found in the implementation:
   deploys and destroys a test's stacks one at a time, so `scripts/integ.sh`
   deploys and destroys the test's stacks (the three topologies and, since
   ADR-0027, `tiered`) at once with
-  `cdk deploy/destroy --all` and runs the e2e in between. No
+  `cdk deploy/destroy --all` and runs the e2e in between. After destroy it
+  also removes a stack-named REST API shell that CloudFormation can leave when
+  `PutRestApi` fails before recording the resource id (T-33/M-32). No
   integ-runner, no assertion stack.
 - **ADR-0024 — one log drain.** ADR-0019's two drains waited one after the
   other. One drain now guards every log group; its writers are the API stage

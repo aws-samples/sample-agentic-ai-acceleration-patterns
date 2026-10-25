@@ -648,8 +648,10 @@ message or the token.
 - A tenant admin reaches exactly the users of their own tenant; the vendor
   reaches every user (P-11, R-12).
 - Clean teardown: `cdk destroy` leaves no pools, groups, users, parameters,
-  or log groups with the sample's prefix, whether or not tenants were deleted
-  first: the stack drains its registry on delete (ADR-0022).
+  API keys, REST APIs, or log groups with the sample's prefix, whether or not tenants were deleted
+  first: the stack drains its registry on delete (ADR-0022), and the integration
+  driver removes a REST API shell if CloudFormation failed before recording its
+  physical id (T-33/M-32).
 - Parameters under `/application-plane/shared/identity/*` (R-6).
 
 ### 6.3 Parameter namespace

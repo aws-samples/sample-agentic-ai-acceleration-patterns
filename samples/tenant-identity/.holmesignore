@@ -5,6 +5,7 @@ cdk.integ.out/
 coverage/
 test-reports/
 smithy/
+ash_output/
 .holmes/
 .kiro/
 .cache/

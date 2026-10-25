@@ -10,12 +10,35 @@ const project = new awscdk.AwsCdkTypeScriptApp({
   defaultReleaseBranch: 'main',
   github: false,
   name: 'tenant-identity',
-  description: 'Tenant identity with Amazon Cognito in three user-pool topologies, with token narrowing (RFC 8693)',
+  description: 'Tenant identity with Amazon Cognito in three user-pool topologies plus a mixed tiered mode, with token narrowing (RFC 8693)',
   packageManager: javascript.NodePackageManager.NPM,
   license: 'MIT-0',
   copyrightOwner: 'Amazon.com, Inc. or its affiliates. All Rights Reserved.',
   copyrightPeriod: '',
   projenrcTs: true,
+  // Node 24 is the baseline this sample is built and tested on. projen writes
+  // it to package.json `engines.node` (>=24) so npm install warns on an older
+  // runtime, and pins the devContainer/CI node version off the same value.
+  minNodeVersion: '24.0.0',
+  // The test compile (`tsc --noEmit -p test/tsconfig.json`, and ts-jest, which
+  // uses the same tsconfig) needs two compiler options on top of the inherited
+  // src config:
+  //   - skipLibCheck: the standalone test tsc otherwise fails inside
+  //     @types/sinon, which references a @sinonjs/fake-timers type the installed
+  //     version no longer exports (FakeTimerInstallOpts). The mismatch is in an
+  //     external .d.ts we do not control; skipping library type-checking for the
+  //     test compile only leaves the src compile (tsconfig.json) unaffected.
+  //   - isolatedModules: ts-jest emits TS151002 on every run because the project
+  //     uses the hybrid NodeNext module kind, which ts-jest only supports with
+  //     isolatedModules. Setting it in the tsconfig (not the deprecated ts-jest
+  //     transform option) silences the warning the way current ts-jest asks for.
+  //     Per-file transpilation is exactly ts-jest's model, so nothing is lost.
+  tsconfigDev: {
+    compilerOptions: {
+      skipLibCheck: true,
+      isolatedModules: true,
+    },
+  },
   deps: [
     // Smithy SSDK runtime (generated code in src/smithy imports these -
     // mirror the dependency set of the generated SSDK package.json)
@@ -39,6 +62,7 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     'cdk-nag@3.0.2',
   ],
   devDeps: [
+    '@types/node@24.19.2',
     '@types/aws-lambda@8.10.164',
     'aws-sdk-client-mock@4.1.0',
     'aws-sdk-client-mock-jest@4.1.0',
@@ -124,7 +148,7 @@ e2e.exec('jest --config test/e2e/jest.config.json --runInBand=false');
 // ---------------------------------------------------------------------------
 const integ = project.addTask('integ', {
   description:
-    'Run the deployment integration test in $AWS_REGION (deploys three stacks to the current AWS account)',
+    'Run the deployment integration test in $AWS_REGION (deploys four stacks to the current AWS account)',
 });
 integ.exec('scripts/integ.sh');
 

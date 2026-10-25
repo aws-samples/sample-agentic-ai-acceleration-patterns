@@ -1282,4 +1282,3 @@ export function defineScenario(topology: Topology): void {
     });
   });
 }
-

@@ -258,67 +258,6 @@ touching Cognito, and the trigger then refuses it on every new token. Full
 detail, including the per-topology mechanics and the narrowing intersection,
 is in [`architecture.md`](./architecture.md).
 
-## Cost per tenant
-
-Approximate, eu-central-1 on-demand prices read on 2026-10-22 from the AWS
-Price List (publication dates 2026-09-11 to 2026-10-20); excludes the
-account-level free tiers except where stated. Build your own estimate with the
-[AWS Pricing Calculator](https://calculator.aws/).
-
-**Worked assumption.** A tenant with 100 monthly active users (MAU); each user
-has 20 one-hour sessions a month (2,000 sessions). A session is one direct
-Cognito sign-in, then a narrowed token from `POST /oauth2/token` every
-5 minutes (N-1), so 12 exchanges. Each sign-in is one Cognito call, one
-trigger invocation and one registry read; each exchange adds one API request
-and one exchange-function invocation. Per tenant per month: 2,000 sign-ins,
-24,000 exchanges, 26,000 trigger invocations and registry reads. Functions run
-on ARM at 256 MB; assumed durations are 50 ms (trigger) and 150 ms (exchange,
-which waits on Cognito).
-
-| Item | Price (eu-central-1) | Arithmetic | $/tenant/month |
-|---|---|---|---|
-| Cognito Essentials MAU | $0.015/MAU after 10,000 free MAU per account or organisation | 100 × $0.015 | 1.50 |
-| API Gateway REST requests | $3.70 per million | 24,000 × $3.70/M | 0.09 |
-| Lambda requests + compute | $0.20 per million; $0.0000133334/GB-s (ARM) | 50,000 × $0.20/M + (26,000 × 0.05 s + 24,000 × 0.15 s) × 0.25 GB × $0.0000133334 | 0.03 |
-| DynamoDB on-demand reads | $0.1525 per million RRU | 26,000 strongly consistent reads × $0.1525/M | <0.01 |
-| CloudWatch Logs ingestion | $0.63/GB | ~3.5 KB per exchange (access log, INFO execution log, two functions) + ~1 KB per sign-in ≈ 0.086 GB | 0.05 |
-| X-Ray traces recorded | $5.00 per million | ~2 traces per exchange (stage, Cognito-invoked trigger) + 1 per sign-in = 50,000 (low rates are fully sampled) | 0.25 |
-| Contributor Insights matched events | $0.025 per million | 4 rules × ~26,000 events | <0.01 |
-| **Variable total** | | | **≈ 1.9** |
-| Contributor Insights rules (per stack, not per tenant) | $0.50 per rule-month | 4 × $0.50 = $2 per stack, divided by the tenant count | 2 / tenants |
-
-Cognito is about 80% of the bill, so the MAU count drives cost; the log and
-trace sizes are estimates to replace with measured values from a deployed
-stack. The 10,000 free Essentials MAU cover the first ~100 such tenants per
-account. Moving the pools to **Plus** for MFA and threat protection (T-23) changes
-the MAU rate to $0.020 with no free tier: $2 for Cognito, ≈ $2.4 in total.
-
-The per-tenant API key and usage plan (ADR-0025) and the tenant-scoped STS
-sessions (ADR-0026) carry no charge of their own. API keys cap tenants at
-10,000 per account and Region in every topology (see the quotas above).
-
-MAU are billed per user-pool user, so the topology changes what one person
-costs:
-
-| | `pool-per-tenant` | `shared-pool` | `shared-pool-multi-tenant` |
-|---|---|---|---|
-| A person in k tenants | k users in k pools: k MAU | k users (one e-mail each): k MAU | one user: 1 MAU |
-| Registry reads per token | GSI query + item read (~1.5 RRU) | 1 RRU | 1 RRU per tenant the user holds |
-| Fixed cost per tenant | none (no per-pool fee) | none | none |
-| Worked example | ≈ $1.9 | ≈ $1.9 | ≈ $1.9; a consultant in 5 tenants costs $0.015, not $0.075 |
-| Ceiling before cost matters | 1,000 pools per account and Region (adjustable to 10,000) | 5,000 tenants per pool (groups) | 5,000 tenants per pool (groups) |
-
-In `tiered` each tenant costs what its tier's column says: a standard tenant
-the `shared-pool` figures, a premium tenant the `pool-per-tenant` ones. The
-ceilings apply per tier (standard tenants share the shared pool's group
-ceiling, premium tenants the pool quota).
-
-On tiering: `pool-per-tenant` is the natural premium or silo tier (own pool
-settings, own issuer, blast radius of one), and `shared-pool` the default
-tier. `tiered` runs both from one stack, chosen per tenant at `CreateTenant`
-(ADR-0027, [Tiered deployment](#tiered-deployment)); a deployment that needs
-`shared-pool-multi-tenant` as a tier still runs it as its own stack.
-
 ## Deploy
 
 Prerequisites:
@@ -399,8 +338,10 @@ longer than a bare stack would: a `LogDrain` custom resource holds back
 log-group deletion until the API stage and `TenantDrain` are gone and nothing
 invokes the functions, so late log delivery cannot recreate a group outside
 the stack (ADR-0019, ADR-0024). The
-teardown is total — no stack, pool, table, parameter, role, or log group with
-the sample's prefix remains. If the drain fails (for example a Cognito throttle
+teardown is total — no stack, pool, table, parameter, role, REST API, or log group with
+the sample's prefix remains. The integration driver also finds and deletes an
+empty REST API shell if CloudFormation created it but failed before recording
+its physical id (T-33/M-32). If the drain fails (for example a Cognito throttle
 on a large registry), the stack stays `DELETE_FAILED`; run `cdk destroy` again.
 
 ## Deployment integration test
@@ -425,10 +366,12 @@ stack's alarms into `ALARM` and fails unless the alarm history shows a
 successful publish to the alarm topic (M-31). The destroy
 always runs, also when the deploy or the scenario fails. Step 11
 leaves one tenant in every stack on purpose, so the destroy also proves the
-stack's own `TenantDrain` (ADR-0022). The CDK CLI drives the run rather than
+stack's own `TenantDrain` (ADR-0022). It also checks for a stack-named REST
+API after destroy; if a failed `PutRestApi` left an untracked API shell, the
+run fails and deletes it at API Gateway's allowed rate (T-33/M-32). The CDK CLI drives the run rather than
 integ-runner, which deploys a test's stacks one at a time (ADR-0023). One run
-with three stacks took **about 7 minutes** (the last green run was 408 s) and
-cost well under 1 USD; the fourth stack adds to both. Only the `shared-pool-multi-tenant` stack publishes
+with all four stacks took **about 8.5 minutes** (the last green run was 505 s)
+and cost well under 1 USD. Only the `shared-pool-multi-tenant` stack publishes
 the shared `/application-plane/shared/identity/*` parameters during the test,
 because those names are fixed per account and Region and two stacks cannot own
 the same name (ADR-0017); the scenario checks that the publisher's parameters
@@ -657,3 +600,64 @@ pre-token-generation output limit, IdPs per pool) bound each topology
 differently; they are the first thing a real deployment hits. See the
 [Amazon Cognito quotas page](https://docs.aws.amazon.com/cognito/latest/developerguide/limits.html)
 for current figures rather than treating any number here as permanent.
+
+## Appendix: Cost per tenant
+
+Approximate, eu-central-1 on-demand prices read on 2026-10-22 from the AWS
+Price List (publication dates 2026-09-11 to 2026-10-20); excludes the
+account-level free tiers except where stated. Build your own estimate with the
+[AWS Pricing Calculator](https://calculator.aws/).
+
+**Worked assumption.** A tenant with 100 monthly active users (MAU); each user
+has 20 one-hour sessions a month (2,000 sessions). A session is one direct
+Cognito sign-in, then a narrowed token from `POST /oauth2/token` every
+5 minutes (N-1), so 12 exchanges. Each sign-in is one Cognito call, one
+trigger invocation and one registry read; each exchange adds one API request
+and one exchange-function invocation. Per tenant per month: 2,000 sign-ins,
+24,000 exchanges, 26,000 trigger invocations and registry reads. Functions run
+on ARM at 256 MB; assumed durations are 50 ms (trigger) and 150 ms (exchange,
+which waits on Cognito).
+
+| Item | Price (eu-central-1) | Arithmetic | $/tenant/month |
+|---|---|---|---|
+| Cognito Essentials MAU | $0.015/MAU after 10,000 free MAU per account or organisation | 100 × $0.015 | 1.50 |
+| API Gateway REST requests | $3.70 per million | 24,000 × $3.70/M | 0.09 |
+| Lambda requests + compute | $0.20 per million; $0.0000133334/GB-s (ARM) | 50,000 × $0.20/M + (26,000 × 0.05 s + 24,000 × 0.15 s) × 0.25 GB × $0.0000133334 | 0.03 |
+| DynamoDB on-demand reads | $0.1525 per million RRU | 26,000 strongly consistent reads × $0.1525/M | <0.01 |
+| CloudWatch Logs ingestion | $0.63/GB | ~3.5 KB per exchange (access log, INFO execution log, two functions) + ~1 KB per sign-in ≈ 0.086 GB | 0.05 |
+| X-Ray traces recorded | $5.00 per million | ~2 traces per exchange (stage, Cognito-invoked trigger) + 1 per sign-in = 50,000 (low rates are fully sampled) | 0.25 |
+| Contributor Insights matched events | $0.025 per million | 4 rules × ~26,000 events | <0.01 |
+| **Variable total** | | | **≈ 1.9** |
+| Contributor Insights rules (per stack, not per tenant) | $0.50 per rule-month | 4 × $0.50 = $2 per stack, divided by the tenant count | 2 / tenants |
+
+Cognito is about 80% of the bill, so the MAU count drives cost; the log and
+trace sizes are estimates to replace with measured values from a deployed
+stack. The 10,000 free Essentials MAU cover the first ~100 such tenants per
+account. Moving the pools to **Plus** for MFA and threat protection (T-23) changes
+the MAU rate to $0.020 with no free tier: $2 for Cognito, ≈ $2.4 in total.
+
+The per-tenant API key and usage plan (ADR-0025) and the tenant-scoped STS
+sessions (ADR-0026) carry no charge of their own. API keys cap tenants at
+10,000 per account and Region in every topology (see the quotas above).
+
+MAU are billed per user-pool user, so the topology changes what one person
+costs:
+
+| | `pool-per-tenant` | `shared-pool` | `shared-pool-multi-tenant` |
+|---|---|---|---|
+| A person in k tenants | k users in k pools: k MAU | k users (one e-mail each): k MAU | one user: 1 MAU |
+| Registry reads per token | GSI query + item read (~1.5 RRU) | 1 RRU | 1 RRU per tenant the user holds |
+| Fixed cost per tenant | none (no per-pool fee) | none | none |
+| Worked example | ≈ $1.9 | ≈ $1.9 | ≈ $1.9; a consultant in 5 tenants costs $0.015, not $0.075 |
+| Ceiling before cost matters | 1,000 pools per account and Region (adjustable to 10,000) | 5,000 tenants per pool (groups) | 5,000 tenants per pool (groups) |
+
+In `tiered` each tenant costs what its tier's column says: a standard tenant
+the `shared-pool` figures, a premium tenant the `pool-per-tenant` ones. The
+ceilings apply per tier (standard tenants share the shared pool's group
+ceiling, premium tenants the pool quota).
+
+On tiering: `pool-per-tenant` is the natural premium or silo tier (own pool
+settings, own issuer, blast radius of one), and `shared-pool` the default
+tier. `tiered` runs both from one stack, chosen per tenant at `CreateTenant`
+(ADR-0027, [Tiered deployment](#tiered-deployment)); a deployment that needs
+`shared-pool-multi-tenant` as a tier still runs it as its own stack.

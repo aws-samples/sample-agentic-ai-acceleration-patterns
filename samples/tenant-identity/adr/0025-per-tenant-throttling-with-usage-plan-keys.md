@@ -8,8 +8,9 @@
 N-7 throttles `/tenant/*` with per-method stage settings (first 10 rps / 20
 burst). Those limits are shared by every tenant: one tenant admin, or one
 leaked admin token, can use the whole budget and every other tenant's admin
-gets 429s. The SaaS Lens calls this the noisy-neighbour problem and expects a
-per-tenant limit at the edge. API Gateway REST APIs throttle per client only
+gets 429s. AWS Well-Architected multi-tenant guidance calls this the
+noisy-neighbour problem and expects a per-tenant limit at the edge. API
+Gateway REST APIs throttle per client only
 through usage plans: "Throttling and quota limits apply to requests for
 individual API keys that are aggregated across all API stages within a usage
 plan" ([Usage plans and API keys](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-api-usage-plans.html),

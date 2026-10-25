@@ -11,9 +11,9 @@ the authoriser verified. Its role could reach every pool this stack created
 kept tenant A's admin out of tenant B's pool was code: the provisioner picks
 the pool from the registry row for the authoriser's tenant, and the R-12
 membership check runs first (ADR-0013, ADR-0014). A bug in either is a
-cross-tenant bug (threat model T-18). The SaaS Lens recommends tenant
-isolation that does not rest on application code alone: scope the
-credentials a request runs with to its tenant.
+cross-tenant bug (threat model T-18). AWS Well-Architected multi-tenant
+guidance recommends tenant isolation that does not rest on application code
+alone: scope the credentials a request runs with to its tenant.
 
 In `pool-per-tenant` each tenant owns a pool, and a pool is an IAM resource
 with tags, so IAM can draw the boundary. In `shared-pool*` the tenants share

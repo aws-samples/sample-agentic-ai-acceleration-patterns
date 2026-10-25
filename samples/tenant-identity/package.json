@@ -1,6 +1,6 @@
 {
   "name": "tenant-identity",
-  "description": "Tenant identity with Amazon Cognito in three user-pool topologies, with token narrowing (RFC 8693)",
+  "description": "Tenant identity with Amazon Cognito in three user-pool topologies plus a mixed tiered mode, with token narrowing (RFC 8693)",
   "scripts": {
     "build": "projen build",
     "bundle": "projen bundle",
@@ -37,7 +37,7 @@
     "@stylistic/eslint-plugin": "^2",
     "@types/aws-lambda": "8.10.164",
     "@types/jest": "^30.0.0",
-    "@types/node": "^26.6.5",
+    "@types/node": "24.19.2",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",
     "aws-cdk": "^2",
@@ -74,6 +74,9 @@
     "constructs": "^10.5.1",
     "tslib": "2.8.1",
     "ulid": "3.0.2"
+  },
+  "engines": {
+    "node": ">= 24.0.0"
   },
   "devEngines": {
     "packageManager": {

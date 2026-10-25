@@ -1,6 +1,6 @@
 # ADR-0019: Delete log groups only after their writers have stopped, and leave the account's API Gateway role alone
 
-- Status: Superseded in part by [ADR-0023](0023-integ-with-cdk-cli.md) (assertion stack) and [ADR-0024](0024-one-log-drain.md) (two drains)
+- Status: Accepted
 - Date: 2026-10-21
 - Deciders: Dave Roberts (SA)
 
@@ -54,3 +54,13 @@ longer. A deploy needs an API Gateway CloudWatch role already set on the
 account and Region, which the README lists as a prerequisite; without it
 the stage fails to create. Revisit if API Gateway stops recreating
 deleted log groups.
+
+Note: later records amend this one only in part. ADR-0024 replaces the two
+drains above with a single `LogDrain` whose writers are the API stage and
+`TenantDrain` rather than the functions, removing the dependency cycle that
+forced two. ADR-0023 drops the integ-tests-alpha assertion stack (the
+`WaitConditionHandle` and the `awsApiCall`s) in favour of driving the run with
+the CDK CLI, so the R-6 parameter check lives in the e2e scenario. The core
+decision here stands: delete log groups only after their writers have stopped,
+own the API execution log group in the stack, and set `cloudWatchRole: false`
+so the account-wide API Gateway role is left alone.

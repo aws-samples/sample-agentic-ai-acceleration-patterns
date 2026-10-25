@@ -203,7 +203,7 @@
     },
     "integ": {
       "name": "integ",
-      "description": "Run the deployment integration test in $AWS_REGION (deploys three stacks to the current AWS account)",
+      "description": "Run the deployment integration test in $AWS_REGION (deploys four stacks to the current AWS account)",
       "steps": [
         {
           "exec": "scripts/integ.sh"
@@ -299,7 +299,7 @@
             "--peer",
             "--no-deprecated",
             "--dep=dev,prod,peer,optional",
-            "--filter=@types/jest,@types/node,esbuild,eslint-import-resolver-typescript,eslint-plugin-import,jest,projen,ts-jest,ts-node,typescript"
+            "--filter=@types/jest,esbuild,eslint-import-resolver-typescript,eslint-plugin-import,jest,projen,ts-jest,ts-node,typescript"
           ]
         },
         {

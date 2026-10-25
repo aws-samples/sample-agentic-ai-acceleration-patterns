@@ -3,7 +3,9 @@
   "extends": "../tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
-    "rootDir": ".."
+    "rootDir": "..",
+    "skipLibCheck": true,
+    "isolatedModules": true
   },
   "include": [
     "**/*.ts"

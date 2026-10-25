@@ -62,6 +62,8 @@ ST="$(jq -r '.SessionToken // empty' <<<"$CREDS")"
 unset CREDS
 
 BODY_FILE="$(mktemp)"
+REQUEST_FILE="$(mktemp)"
+chmod 600 "$BODY_FILE" "$REQUEST_FILE"
 TENANT_ID=""
 
 cleanup() {
@@ -70,40 +72,53 @@ cleanup() {
     platform DELETE "platform/tenants/${TENANT_ID}" >/dev/null 2>&1 || true
     echo "Cleanup: deleted tenant ${TENANT_ID}"
   fi
-  rm -f "$BODY_FILE"
+  rm -f "$BODY_FILE" "$REQUEST_FILE"
   exit "$code"
 }
 trap cleanup EXIT
 
 # platform METHOD PATH [JSON] -> prints the HTTP status; body in $BODY_FILE.
+# Sensitive credentials and request bodies reach curl through a stdin config
+# and a mode-0600 temp file, never through process arguments. Other local users
+# can read /proc/<pid>/cmdline while a request runs.
 platform() {
-  local method="$1" path="$2" data="${3:-}"
+  local method="$1" path="$2" data="${3:-}" config
   local args=(-s -o "$BODY_FILE" -w '%{http_code}' -X "$method"
-    --aws-sigv4 "aws:amz:${REGION}:execute-api" --user "${AK}:${SK}")
-  [[ -n "$ST" ]] && args+=(-H "x-amz-security-token: ${ST}")
-  [[ -n "$data" ]] && args+=(-H 'Content-Type: application/json' --data "$data")
-  curl "${args[@]}" "${API_URL}${path}"
+    --aws-sigv4 "aws:amz:${REGION}:execute-api" --config -)
+  config="user = \"${AK}:${SK}\""
+  [[ -n "$ST" ]] && config+=$'\n'"header = \"x-amz-security-token: ${ST}\""
+  if [[ -n "$data" ]]; then
+    printf '%s' "$data" >"$REQUEST_FILE"
+    args+=(-H 'Content-Type: application/json' --data-binary "@$REQUEST_FILE")
+  fi
+  curl "${args[@]}" "${API_URL}${path}" <<<"$config"
 }
 
 # tenant METHOD PATH TOKEN [JSON] -> prints the HTTP status; body in $BODY_FILE.
 tenant() {
   local method="$1" path="$2" token="$3" data="${4:-}"
-  local args=(-s -o "$BODY_FILE" -w '%{http_code}' -X "$method"
-    -H "Authorization: Bearer ${token}")
-  [[ -n "$data" ]] && args+=(-H 'Content-Type: application/json' --data "$data")
-  curl "${args[@]}" "${API_URL}${path}"
+  local args=(-s -o "$BODY_FILE" -w '%{http_code}' -X "$method" --config -)
+  if [[ -n "$data" ]]; then
+    printf '%s' "$data" >"$REQUEST_FILE"
+    args+=(-H 'Content-Type: application/json' --data-binary "@$REQUEST_FILE")
+  fi
+  curl "${args[@]}" "${API_URL}${path}" <<<"header = \"Authorization: Bearer ${token}\""
 }
+
+urlencode() { jq -sRr @uri; }
 
 # narrow REFRESH_TOKEN TENANT_ID -> prints the HTTP status; body in $BODY_FILE.
 narrow() {
+  printf 'grant_type=%s&client_id=%s&subject_token=%s&subject_token_type=%s&resource=%s&scope=%s' \
+    "$(printf '%s' "$GRANT_TYPE" | urlencode)" \
+    "$(printf '%s' "$CLIENT_ID" | urlencode)" \
+    "$(printf '%s' "$1" | urlencode)" \
+    "$(printf '%s' "$REFRESH_TYPE" | urlencode)" \
+    "$(printf '%s' "urn:tenant-identity:tenant:$2" | urlencode)" \
+    "$(printf '%s' "$ADMIN_SCOPE" | urlencode)" >"$REQUEST_FILE"
   curl -s -o "$BODY_FILE" -w '%{http_code}' -X POST "${API_URL}oauth2/token" \
     -H 'Content-Type: application/x-www-form-urlencoded' \
-    --data-urlencode "grant_type=${GRANT_TYPE}" \
-    --data-urlencode "client_id=${CLIENT_ID}" \
-    --data-urlencode "subject_token=$1" \
-    --data-urlencode "subject_token_type=${REFRESH_TYPE}" \
-    --data-urlencode "resource=urn:tenant-identity:tenant:$2" \
-    --data-urlencode "scope=${ADMIN_SCOPE}"
+    --data-binary "@$REQUEST_FILE"
 }
 
 # claims JWT -> the payload as JSON (decoded only, not verified).
@@ -151,7 +166,7 @@ fi
 # -- 3. Sign the admin in --------------------------------------------------
 step "3. Sign the admin in (IssueToken test aid, ADR-0006: remove before production)"
 status="$(platform POST "platform/tenants/${TENANT_ID}/users/${ADMIN_USERNAME}/token" \
-  "$(jq -nc --arg p "$DEMO_PASSWORD" '{password: $p}')")"
+  "$(printf '%s' "$DEMO_PASSWORD" | jq -Rs '{password: .}')")"
 expect 200 "$status" IssueToken
 REFRESH_TOKEN="$(jq -r .refreshToken "$BODY_FILE")"
 BROAD="$(jq -r .accessToken "$BODY_FILE")"

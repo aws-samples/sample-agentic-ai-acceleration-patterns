@@ -1133,7 +1133,7 @@ function functionProps(
 }
 
 /**
- * Explicit Lambda log group with bounded retention (M-15-style): the
+ * Explicit Lambda log group with bounded retention (T-24; ADR-0019): the
  * Lambda-service-created default group never expires and lives outside the
  * stack. One month matches the API access logs.
  */
