@@ -1,6 +1,6 @@
 # ADR-0033: Encrypt the parked admin password with a key the build role cannot decrypt
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-26
 - Deciders: Dave Roberts (SA)
 

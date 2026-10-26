@@ -36,9 +36,9 @@ Template: [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md#2-d
 | [ADR-0025](0025-per-tenant-throttling-with-usage-plan-keys.md) | Throttle `/tenant/*` per tenant with one usage plan and an API key per tenant | Accepted | 2026-10-22 |
 | [ADR-0026](0026-iam-tenant-boundary-for-pool-per-tenant.md) | Enforce the tenant boundary of tenant-user calls with IAM in `pool-per-tenant` | Accepted | 2026-10-22 |
 | [ADR-0027](0027-mixed-tier-deployment.md) | Serve a standard and a premium tier from one deployment, chosen per tenant | Accepted | 2026-10-23 |
-| [ADR-0028](0028-ship-the-control-plane-mount-in-this-sample.md) | Ship the control-plane mount as `scripts/control-plane/` in this sample | Proposed | 2026-10-26 |
-| [ADR-0029](0029-accept-a-caller-supplied-tenant-id.md) | Accept an optional caller-supplied `tenantId` on `CreateTenant` | Proposed | 2026-10-26 |
-| [ADR-0030](0030-publish-a-least-privilege-platform-invoke-policy.md) | Publish a least-privilege managed policy for the platform calls of the mount | Proposed | 2026-10-26 |
-| [ADR-0031](0031-park-the-first-admin-password-in-a-securestring.md) | Park the temporary password of the first admin in an SSM SecureString | Proposed | 2026-10-26 |
-| [ADR-0032](0032-make-the-first-admin-a-conditional-write.md) | Make the first admin a conditional write on the registry row | Proposed | 2026-10-26 |
-| [ADR-0033](0033-encrypt-the-parked-password-with-a-customer-key.md) | Encrypt the parked admin password with a key the build role cannot decrypt | Proposed | 2026-10-26 |
+| [ADR-0028](0028-ship-the-control-plane-mount-in-this-sample.md) | Ship the control-plane mount as `scripts/control-plane/` in this sample | Accepted | 2026-10-26 |
+| [ADR-0029](0029-accept-a-caller-supplied-tenant-id.md) | Accept an optional caller-supplied `tenantId` on `CreateTenant` | Accepted | 2026-10-26 |
+| [ADR-0030](0030-publish-a-least-privilege-platform-invoke-policy.md) | Publish a least-privilege managed policy for the platform calls of the mount | Accepted | 2026-10-26 |
+| [ADR-0031](0031-park-the-first-admin-password-in-a-securestring.md) | Park the temporary password of the first admin in an SSM SecureString | Accepted | 2026-10-26 |
+| [ADR-0032](0032-make-the-first-admin-a-conditional-write.md) | Make the first admin a conditional write on the registry row | Accepted | 2026-10-26 |
+| [ADR-0033](0033-encrypt-the-parked-password-with-a-customer-key.md) | Encrypt the parked admin password with a key the build role cannot decrypt | Accepted | 2026-10-26 |

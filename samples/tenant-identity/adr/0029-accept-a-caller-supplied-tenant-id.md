@@ -1,6 +1,6 @@
 # ADR-0029: Accept an optional caller-supplied `tenantId` on `CreateTenant`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-26
 - Deciders: Dave Roberts (SA)
 

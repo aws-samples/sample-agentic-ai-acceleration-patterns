@@ -1,6 +1,6 @@
 # ADR-0022: Attach deployer-supplied managed policies to the tenant build role
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-26
 - Deciders: Dave Roberts (SA)
 

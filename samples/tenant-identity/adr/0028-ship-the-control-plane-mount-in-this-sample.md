@@ -1,6 +1,6 @@
 # ADR-0028: Ship the control-plane mount as `scripts/control-plane/` in this sample
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-26
 - Deciders: Dave Roberts (SA)
 

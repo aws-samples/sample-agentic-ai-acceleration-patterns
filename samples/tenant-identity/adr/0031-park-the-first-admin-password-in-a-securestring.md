@@ -1,6 +1,6 @@
 # ADR-0031: Park the temporary password of the first admin in an SSM SecureString
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-26
 - Deciders: Dave Roberts (SA)
 

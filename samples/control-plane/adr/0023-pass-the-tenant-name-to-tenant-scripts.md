@@ -1,6 +1,6 @@
 # ADR-0023: Pass the tenant name to tenant scripts as `TENANT_NAME`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-26
 - Deciders: Dave Roberts (SA)
 

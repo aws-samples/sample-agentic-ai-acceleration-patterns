@@ -1,6 +1,6 @@
 # ADR-0030: Publish a least-privilege managed policy for the platform calls of the mount
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-26
 - Deciders: Dave Roberts (SA)
 

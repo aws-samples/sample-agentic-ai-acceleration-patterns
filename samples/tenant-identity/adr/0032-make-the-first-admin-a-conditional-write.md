@@ -1,6 +1,6 @@
 # ADR-0032: Make the first admin a conditional write on the registry row
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-26
 - Deciders: Dave Roberts (SA)
 
