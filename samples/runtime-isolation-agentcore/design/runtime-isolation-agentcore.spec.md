@@ -256,6 +256,31 @@ that adds tenant-scoped memory) can consume this one:
 | V-5 | API Gateway REST `responseTransferMode: STREAM` with a Lambda proxy relays the Runtime's SSE stream past 29 s | Buffered response with a 29 s cap, documented |
 | V-6 | Runtime `requestHeaderAllowlist` passes `X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Token` from both ingresses | Forward the token in the payload under a reserved key the agent strips; ADR records it |
 
+### 7.1 Spike results (2026-10-26, pg sandbox, eu-central-1)
+
+Throwaway stack `RiacSpike` (Cognito, SigV4 Runtime with an echo agent, API
+Gateway REST + streaming Lambda proxy, AgentCore Gateway + REQUEST
+interceptor). Deployed, probed, destroyed; no fallback is needed.
+
+| ID | Result | Evidence |
+|---|---|---|
+| V-1 | PASS | Admin role and a same-account role whose identity policy allows `InvokeAgentRuntime` both get `AccessDeniedException ... explicit deny in a resource-based policy`. A deny on the runtime ARN alone is enough; the endpoint needs no policy of its own. |
+| V-2 | PASS | `addPropertyDeletionOverride('TargetConfiguration.Http.Connector')` plus `addPropertyOverride('TargetConfiguration.Http.AgentcoreRuntime', {Arn, Qualifier})` deploys; target `READY`. A placeholder `connector` must be deleted, or the merge keeps both keys. |
+| V-3 | PASS | Interceptor sees the session header (and `Authorization`) with `passRequestHeaders: true`. A2 or B1 sending A1's session id: 403; no header: 403. Returning the header in `transformedGatewayRequest.headers` **overwrites** it: the Runtime received the interceptor's value, not the client's. |
+| V-4 | PASS | With the REQUEST interceptor on, a 36 s SSE response streamed: TTFB 0.33 s, total 36.3 s, all 20 events. |
+| V-5 | PASS, with a setting | With the integration timeout at 29 s the stream is cut at 29.1 s (15 of 20 events). With `timeout: Duration.minutes(2)` it streams the full 36 s, TTFB 0.25 s. STREAM mode allows up to 15 min; the construct must set it. |
+| V-6 | PASS | The allowlisted header reaches the agent from both ingresses (Lambda via an SDK `build` middleware; Gateway via the interceptor's `transformedGatewayRequest.headers`). The Gateway does not pass the client's `Authorization` to a SigV4 Runtime. |
+
+Also seen: the same session id from both ingresses lands in the same microVM
+(same per-VM nonce), and A2 using A1's `conversationId` gets a different
+session and microVM. Single-call latencies were 0.2-0.3 s warm on both
+ingresses; this is not the §8 step 9 measurement.
+
+Follow-up for the design: because V-3 overwrite works, the `agentcore-gateway`
+ingress could build the session id itself (as API Gateway does) instead of
+trusting a client-built header. That would give both ingresses the same
+contract. Decide in ADR-0002 before implementation.
+
 ---
 
 ## 8. Integration test outline
