@@ -56,7 +56,7 @@ samples/<name>/
 │   ├── <name>.drawio         # diagram source (§3)
 │   └── <name>.drawio.svg     # exported, embedded in README
 ├── .projenrc.ts              # the only hand-edited project file (§4.1)
-├── src/                      # CDK app (main.ts) and runtime code
+├── src/                      # CDK app (main.ts), the exported construct (§4.5), runtime code
 ├── test/                     # unit tests and integ.<flow>.ts (§5)
 ├── model/                    # Smithy model, only when the sample exposes an API
 ├── scripts/                  # provisioning or demo scripts, with CONVENTIONS.md
@@ -273,6 +273,34 @@ metadata validators = [{
 - Idempotency and retry safety where retries actually happen; document the
   benign races you tolerate and the corruption you prevent.
 
+### 4.5 Deliverable: a CDK construct
+
+The pattern ships as a reusable CDK construct, not only as a stack. A reader
+takes the pattern into their own system by instantiating the construct in
+their own app, so the construct is the unit of reuse and the stack in
+`src/main.ts` is a thin demo that wires it to the sample's dependencies.
+
+- Export the construct (and its props interface) from `src/index.ts`. One
+  construct per pattern; name it after the pattern
+  (`SessionIsolatedAgentRuntime`, not `AgentCoreStack`).
+- The construct takes its dependencies as props (an issuer, a table, a key)
+  and creates none of them. What the deployer must supply is the
+  specification's Contracts section (§2.1), expressed as the props type.
+- Options the pattern offers are typed props with secure defaults; an
+  optional behaviour is off unless set. Validate props in the constructor and
+  fail at synth with a message that names the prop.
+- The construct applies no cdk-nag aspect and no `App`-level settings; it
+  carries its own `NagSuppressions` with reasons, so a consumer who applies
+  cdk-nag sees the same result as the sample.
+- Expose what a consumer needs to wire the next component (endpoint URL, role,
+  ARNs) as read-only properties, not as stack outputs or SSM parameters the
+  construct writes for itself.
+- Unit tests synthesise the construct inside a bare test stack, once per
+  option combination the specification promises.
+
+`samples/control-plane` and `samples/tenant-identity` predate this rule and
+ship stacks.
+
 ## 5. Tests
 
 ### 5.1 Unit tests
@@ -346,8 +374,9 @@ Sections, in this order, omitting only those that do not apply:
 3. **How it works**: the primary flow, step by step, with pointers into
    `architecture.md` for depth.
 4. **Deploy**: prerequisites, the exact `npx projen build` and
-   `npx cdk deploy` commands with every `--context` input explained, and
-   teardown.
+   `npx cdk deploy` commands with every `--context` input explained,
+   teardown, and a short snippet that instantiates the construct in a
+   consumer's own app (§4.5).
 5. **Deployment integration test**: how to run `npx projen integ`, what it
    stands up, runtime, cost, and the single-Region rule.
 6. **End-to-end demo**: a runnable `scripts/demo.sh` that walks the flow
@@ -391,6 +420,8 @@ A sample is ready to merge when every line is true:
       overlaps.
 - [ ] projen project per §4.1; dependencies pinned; MIT-0 header on every
       authored file and on no generated file.
+- [ ] The pattern is a construct exported from `src/index.ts` with typed,
+      validated props and secure defaults (§4.5); the stack is a thin demo.
 - [ ] cdk-nag aspect applied; every suppression cites an ADR or mitigation.
 - [ ] Fail-fast context validation; build placeholders cannot reach a real
       deployment.

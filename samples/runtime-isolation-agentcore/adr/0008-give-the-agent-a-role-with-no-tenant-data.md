@@ -1,0 +1,24 @@
+<!--
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+SPDX-License-Identifier: MIT-0
+-->
+# ADR-0008: Give the agent an execution role with no tenant-scoped permission
+
+- Status: Proposed
+- Date: 2026-10-26
+- Deciders: Dave Roberts (PSA)
+
+## Context
+Any code in the microVM can read the execution role credential from MMDS. If that role could read tenant data, session isolation would not be the only boundary that matters.
+
+## Options considered
+### Option 1: Grant data access and filter in code
+Cons: filtered isolation inside the session.
+### Option 2: Model invocation on one named model, logs, and X-Ray only
+Pros: nothing tenant-scoped to leak; keeps the sample about the Runtime boundary.
+
+## Decision
+Option 2, plus `requireMMDSV2: true`.
+
+## Consequences
+Easier: a small threat surface. Harder: a real agent needs data; pairing with a TVM or the memory sample is the README's next step.
