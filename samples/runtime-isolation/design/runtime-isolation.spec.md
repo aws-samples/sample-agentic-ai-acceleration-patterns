@@ -102,8 +102,8 @@ request alone.** `runtimeSessionId = "s-" + base32(sha256(tenant_id "|" sub))[0:
 for `sessionScope: 'user'`, and `sha256(tenant_id)` for `'tenant'`.
 `conversationId` is client-chosen (16 to 64 of `[A-Za-z0-9]`), so a user can
 hold several conversations, but the prefix comes only from the verified
-token. Where the ingress cannot set the id itself, it MUST reject a request
-whose id lacks the caller's prefix (ADR-0002).
+token. The ingress always builds the id; a session id sent by the client is
+ignored and overwritten (ADR-0002).
 
 **P-3. Tenant context comes only from the validated JWT.** `tenant_id` and
 `sub` are read from a token whose signature, issuer, client, expiry, and
@@ -144,7 +144,7 @@ which to prefer and why (ADR-0009).
 | C-1 | **Backend: AgentCore Runtime** (the first backend, ADR-0011) | TypeScript agent, direct code deployment; IAM inbound auth; resource policy per P-1; `requireMMDSV2: true`; `requestHeaderAllowlist` holds the user-token header only when P-5 forwarding is on |
 | C-2 | **Agent** | Echoes the derived session prefix and calls one Bedrock model; validates `prompt` is a string (Runtime best practices, input validation) |
 | C-3a | **Ingress A: API Gateway** | Regional REST API, one `POST /invocations` route, Lambda request authoriser (JWT verify, P-3) and a Lambda proxy integration with `responseTransferMode: STREAM`. The integration Lambda builds the session id (P-2) and calls `InvokeAgentRuntime` with SigV4, streaming the response back |
-| C-3b | **Ingress B: AgentCore Gateway** | No protocol type; `CUSTOM_JWT` inbound authoriser on the tenant-identity pool; one Runtime target (`http.agentcoreRuntime`) with `GATEWAY_IAM_ROLE` outbound; a REQUEST interceptor Lambda that enforces P-2, P-5 |
+| C-3b | **Ingress B: AgentCore Gateway** | No protocol type; `CUSTOM_JWT` inbound authoriser on the tenant-identity pool; one Runtime target (`http.agentcoreRuntime`) with `GATEWAY_IAM_ROLE` outbound; a REQUEST interceptor Lambda that builds the session id and overwrites the session header (P-2), and enforces P-5 |
 | C-4 | **Demo app** | `src/main.ts`: reads tenant-identity's SSM parameters and instantiates the construct with one ingress |
 | C-5 | **Integration driver** | `scripts/integ.sh`: deploys tenant-identity (`shared-pool`), then this sample once per ingress, runs the e2e suite and the latency probe, destroys everything |
 
@@ -185,7 +185,7 @@ No stored entities. The only derived value is the session id (P-2):
 | Field | Source | Shape |
 |---|---|---|
 | prefix | `sha256(tenant_id "|" sub)` or `sha256(tenant_id)`, base32, first 26 chars | `[a-z2-7]{26}` |
-| `conversationId` | client, in the request body (`api-gateway`) or embedded in the session header (`agentcore-gateway`) | `[A-Za-z0-9]{16,64}` |
+| `conversationId` | client, in the request body, on both ingresses | `[A-Za-z0-9]{16,64}` |
 | `runtimeSessionId` | `s-<prefix>-<conversationId>` | 45 to 93 chars (Runtime minimum is 33) |
 
 ---
@@ -198,12 +198,12 @@ One operation, the same contract on both ingresses: `InvokeAgent`.
 |---|---|---|
 | URL | `POST https://<api>/prod/invocations` | `POST https://<gw>.gateway.bedrock-agentcore.<region>.amazonaws.com/<target>/invocations` |
 | Auth | `Authorization: Bearer <access token>` | same |
-| Body | `{conversationId, prompt}` | `{prompt}` |
-| Session | built by the ingress | client sends `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: s-<prefix>-<conversationId>`; the interceptor rejects a wrong prefix **[verify V-3]**, or overwrites it if the Gateway allows |
+| Body | `{conversationId, prompt}` | same |
+| Session | built by the integration Lambda | built by the interceptor, written to `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id`; a client value is overwritten (V-3) |
 | Response | `text/event-stream`, streamed | same |
 
 Errors (both): 401 missing/invalid token; 403 `tenant_id` absent, required
-scope missing, narrowed-token rule failed, or session prefix mismatch; 400
+scope missing, or narrowed-token rule failed; 400
 malformed `conversationId` or `prompt`. Error bodies are fixed text and never
 echo the token or the session id.
 
@@ -289,9 +289,8 @@ session and microVM. Single-call latencies were 0.2-0.3 s warm on both
 ingresses; this is not the §8 step 9 measurement.
 
 Follow-up for the design: because V-3 overwrite works, the `agentcore-gateway`
-ingress could build the session id itself (as API Gateway does) instead of
-trusting a client-built header. That would give both ingresses the same
-contract. Decide in ADR-0002 before implementation.
+ingress builds the session id itself, as API Gateway does (ADR-0002, decided
+2026-10-26). Both ingresses share one request contract.
 
 ---
 
@@ -302,9 +301,10 @@ contract. Decide in ADR-0002 before implementation.
 2. Deploy the sample with the chosen ingress.
 3. Call `InvokeAgentRuntime` directly with the test runner's own Admin
    credentials and with a role that is not the ingress: both denied (P-1).
-4. A1 opens conversation `c1`; A2 sends A1's full session id: refused (P-2).
-5. B1 sends A1's session id: refused. A1 resumes `c1`: same microVM (the agent
-   returns a per-VM nonce it generated at start).
+4. A1 opens conversation `c1`. A2 and B1 send `c1`, and also set the session
+   header to A1's session id: each lands in its own session and microVM, never
+   A1's (the agent returns its derived prefix and a per-VM nonce) (P-2).
+5. A1 resumes `c1`: same microVM (same nonce).
 6. Token with no `tenant_id`, an expired token, a token from another client:
    401/403.
 7. `requiredScopes` on: a token narrowed to `tenant-api/write` only is refused
