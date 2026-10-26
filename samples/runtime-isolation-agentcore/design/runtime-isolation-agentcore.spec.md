@@ -63,8 +63,9 @@ invocation boundary.
   `shared-pool` topology; any OIDC provider that issues the §6.2 token
   contract works.
 - Not a data-isolation sample. The agent holds no tenant data and no TVM
-  credential. Isolating memory, RAG stores, or tools is the subject of other
-  samples (`multi-tenant-agentcore-runtime-and-memory`).
+  credential. Isolating memory, RAG stores, or tools is the data layer
+  (`ARCHITECTURE.md` §3.3) and belongs to a later sample that can consume
+  this construct.
 - Not multi-tenant-per-user. A user belongs to exactly one tenant
   (tenant-identity `shared-pool`). The `shared-pool-multi-tenant` topology is
   out of scope.
@@ -223,6 +224,24 @@ only, §1.2).
   total latency (p50, p95) and the per-request cost of each.
 - `cdk destroy` leaves no stacks, log groups, or parameters with the sample's
   prefix.
+
+### 6.4 Composition (standard §1.1)
+
+**Consumes:** `tenant-identity`, topology `shared-pool`, through
+`/application-plane/shared/identity/{userPoolId,appClientId}` (ADR-0004). Only
+the demo app and the integration driver read them; the construct takes the
+issuer as props.
+
+**Published interface**, so a later sample (for example a data-layer sample
+that adds tenant-scoped memory) can consume this one:
+
+- Construct `SessionIsolatedAgentRuntime`, exported from `src/index.ts`, with
+  read-only `endpointUrl`, `runtimeArn`, `ingressRole`, and
+  `executionRole`.
+- Parameters, written by the demo stack under
+  `/application-plane/shared/agent-runtime/`: `endpointUrl` (the ingress
+  invocation URL), `runtimeArn`, and `ingress` (`api-gateway` or
+  `agentcore-gateway`).
 
 ---
 

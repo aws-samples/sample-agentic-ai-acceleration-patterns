@@ -3,7 +3,12 @@
 A collection of samples, best practices, and reference architectures to
 accelerate the building of Agentic AI applications on AWS.
 
-Each sample is self-contained and deployable on its own. Alongside the code,
+Each sample demonstrates one pattern and is built as a building block: a
+sample can consume other samples through their published interface (an
+exported CDK construct and published SSM parameters), and later samples can
+consume it. How the samples fit together (tenant identity, tenant isolation,
+the control plane) is in [the Architecture Overview](./ARCHITECTURE.md).
+Alongside the code,
 every sample ships its design trail: an `architecture.md` describing the
 implemented state, an ADR file recording the decisions and their reasoning,
 and a `design/` folder holding the working specification the sample was built
@@ -15,6 +20,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 
 ## Contents
 
+- [Architecture Overview](./ARCHITECTURE.md)
 - [Samples](#samples)
   - [The Simple Cell-Based Control Plane](#the-simple-cell-based-control-plane)
   - [Tenant Identity with Amazon Cognito](#tenant-identity-with-amazon-cognito)

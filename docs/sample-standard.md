@@ -5,11 +5,13 @@ merged. The standard is derived from [`samples/control-plane`](../samples/contro
 the reference sample; where the two disagree, fix whichever one is wrong and
 say so in the pull request.
 
-A sample is a self-contained, deployable demonstration of one pattern, shipped
-with the design trail that explains why it looks the way it does. Readers
-should be able to deploy it, run its integration test, read its reasoning, and
-take the pattern into their own system without reading anything outside the
-sample directory.
+A sample is a deployable demonstration of one pattern, shipped with the design
+trail that explains why it looks the way it does. Samples are modular: a sample
+may consume other samples, and every sample is built so that others can consume
+it (§1.1). Readers should be able to deploy it, run its integration test, read
+its reasoning, and take the pattern into their own system by reading the sample
+directory plus the published interfaces of the samples it depends on. How the
+samples fit together is in [`ARCHITECTURE.md`](../ARCHITECTURE.md).
 
 **Terminology.** The repository is about multi-tenant *agentic applications*.
 Two actor classes exist, and every sample uses these two words for them:
@@ -28,6 +30,7 @@ multi-tenant system, and the label narrows how readers place them.
 ## Contents
 
 1. [Layout](#1-layout)
+   1. [Composition](#11-composition)
 2. [Design trail](#2-design-trail)
 3. [Architecture diagram](#3-architecture-diagram)
 4. [Code](#4-code)
@@ -70,6 +73,49 @@ machine output (the integ-runner snapshot `test/*.snapshot/`, or the CDK CLI
 driver's own cloud assembly) are gitignored; working notes (`TODO.md`) and agent
 configuration (`.kiro/`) are gitignored.
 
+### 1.1 Composition
+
+Samples are building blocks. A sample consumes another sample instead of
+re-implementing it, and publishes what it builds so a later sample can do the
+same. The repository's shared concepts and the parameter namespace are in
+[`ARCHITECTURE.md`](../ARCHITECTURE.md).
+
+A sample's **published interface** is two things, both listed in its
+specification's Contracts section (§2.1) and its README:
+
+- **The construct** (§4.5): the build-time interface. Its props are the
+  contract a consumer meets; its read-only properties are what it hands on.
+- **Published parameters**: the deploy-time interface. The demo stack (never
+  the construct, §4.5) writes the identifiers a consumer needs to SSM
+  Parameter Store under the sample's namespace in `ARCHITECTURE.md` §5, and
+  each parameter's name, value shape, and meaning are documented.
+
+Consuming another sample follows these rules:
+
+- **Depend on the interface, not the implementation.** A consumer reads the
+  producer's published parameters or instantiates its exported construct.
+  It never imports from another sample's `src/` by relative path, reads its
+  stack outputs, or relies on resource names it does not publish.
+- **The consumer's construct stays producer-agnostic.** It takes what it needs
+  as props shaped by a contract (an issuer URL, a role ARN), so a reader can
+  swap the producer for their own system. Only the demo app and the
+  integration test name the producer.
+- **Build-time reuse goes through the producer's package entry.** To
+  instantiate another sample's construct, declare the producer as a local
+  dependency (`file:../<producer>`) in `.projenrc.ts` and import from its
+  `src/index.ts` exports. Record the first such dependency in an ADR.
+- **Dependencies are declared and acyclic.** The consumer's README lists each
+  producer, the topology or options it needs, and how to deploy it (§7). No
+  sample depends, directly or transitively, on itself.
+- **A published interface is a promise.** Renaming or reshaping a published
+  parameter or a construct prop is a breaking change: record an ADR in the
+  producer and update every consumer in the same pull request.
+- **Integration tests compose; producers stay independent.** A consumer's
+  integration test deploys its producers through their own documented deploy
+  path, or reuses an existing deployment it detects, and tears down only what
+  it deployed (§5.2). A producer's own integration test never needs a
+  consumer.
+
 ## 2. Design trail
 
 The design trail is written before the code and kept true after it. A reader
@@ -91,8 +137,8 @@ The working specification the sample was built from. Sections, in order:
 4. **Data model**: every entity, its keys, its status values.
 5. **API surface** (when there is an API): operations, status state machine,
    error shapes.
-6. **Contracts**: what a deployer must supply and what the sample promises in
-   return.
+6. **Contracts**: what a deployer must supply, what the sample promises in
+   return, the samples it consumes, and its published interface (§1.1).
 
 The specification is not rewritten to match the implementation. When the
 implementation diverges, record an ADR and, if the divergence changes a
@@ -294,7 +340,8 @@ their own app, so the construct is the unit of reuse and the stack in
   cdk-nag sees the same result as the sample.
 - Expose what a consumer needs to wire the next component (endpoint URL, role,
   ARNs) as read-only properties, not as stack outputs or SSM parameters the
-  construct writes for itself.
+  construct writes for itself. The demo stack publishes those properties as
+  the sample's published parameters (§1.1).
 - Unit tests synthesise the construct inside a bare test stack, once per
   option combination the specification promises.
 
@@ -333,8 +380,11 @@ Either way, the test:
 
 - Runs in **exactly one Region**, selected by `AWS_REGION`; the task fails
   fast when it is unset so no multi-Region default ever applies.
-- Stands up its own dependencies (a throwaway identity provider, a bucket of
-  sample scripts) rather than assuming anything exists in the account.
+- Stands up its own dependencies (a bucket of sample scripts, the samples it
+  consumes) rather than assuming anything exists in the account. A consumed
+  sample is deployed through its own documented deploy path, or an existing
+  deployment is detected and reused; the test tears down only what it
+  deployed (§1.1).
 - Drives the **full lifecycle**: every API operation or every step of the
   demonstrated flow, including the failure paths the specification models,
   and teardown. The test passing means the sample can be created, used, and
@@ -373,7 +423,8 @@ Sections, in this order, omitting only those that do not apply:
    and a short component list.
 3. **How it works**: the primary flow, step by step, with pointers into
    `architecture.md` for depth.
-4. **Deploy**: prerequisites, the exact `npx projen build` and
+4. **Deploy**: prerequisites, including each consumed sample with the
+   topology or options it needs and how to deploy it (§1.1), the exact `npx projen build` and
    `npx cdk deploy` commands with every `--context` input explained,
    teardown, and a short snippet that instantiates the construct in a
    consumer's own app (§4.5).
@@ -402,11 +453,19 @@ Adding a sample changes three places in the repository `README.md`:
    shape of the solution, and a link to the sample directory.
 3. The matching entry under **Contents**.
 
+It also changes [`ARCHITECTURE.md`](../ARCHITECTURE.md): the sample's place in
+the concept map (§6 there), its parameter namespace (§5 there), and the
+samples it consumes.
+
 ## 9. Definition of done
 
 A sample is ready to merge when every line is true:
 
 - [ ] Layout matches §1; nothing generated or machine-produced is committed.
+- [ ] Composition per §1.1: consumed samples are used only through their
+      published interface and listed in the README; this sample's published
+      interface (construct and parameters) is documented in the specification
+      and README, and its parameters sit in its `ARCHITECTURE.md` namespace.
 - [ ] Specification written before the code, with numbered principles and an
       explicit scope boundary; divergences recorded as ADRs.
 - [ ] One file per ADR in `adr/` with the index current; options considered named,
@@ -437,4 +496,5 @@ A sample is ready to merge when every line is true:
 - [ ] Security review run on the synthesised tree; results summarised in the
       pull request.
 - [ ] Sample README has every applicable §7 section in order.
-- [ ] Root README table row, section, and Contents entry added.
+- [ ] Root README table row, section, and Contents entry added;
+      `ARCHITECTURE.md` concept map and parameter namespace updated.
