@@ -30,3 +30,5 @@ Template for new records: [`docs/sample-standard.md` §2.2](../../../docs/sample
 | [ADR-0019](0019-operator-identity-end-to-end.md) | Operator identity flows end-to-end — access logs to build environment (threat model M12) | Accepted | 2026-09-15 |
 | [ADR-0020](0020-supply-chain-pinning-warn-and-allow.md) | Supply-chain pinning is warn-and-allow — a full commit SHA is the only immutable ref (threat model M10) | Accepted | 2026-09-15 |
 | [ADR-0021](0021-bounded-blast-radius.md) | Bounded blast radius for amplification and log exposure (threat model M15/M17) | Accepted | 2026-09-15 |
+| [ADR-0022](0022-attach-deployer-supplied-managed-policies-to-the-tenant-build-role.md) | Attach deployer-supplied managed policies to the tenant build role | Proposed | 2026-10-26 |
+| [ADR-0023](0023-pass-the-tenant-name-to-tenant-scripts.md) | Pass the tenant name to tenant scripts as `TENANT_NAME` | Proposed | 2026-10-26 |
