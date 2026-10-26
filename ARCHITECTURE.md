@@ -133,7 +133,7 @@ Each layer is enforced on its own; a request passes all of them.
 | Data | which tenant's data may this code reach? | tenant-scoped credentials: ABAC with a `TenantId` session tag, issued per request |
 | Delegation | what may the agent do on the user's behalf? | the narrowest token that works, forwarded only on opt-in |
 
-Three rules hold at every layer:
+Four rules hold at every layer:
 
 1. **Tenant context comes only from the validated token.** No component trusts
    a tenant id it did not derive from a verified claim.
@@ -145,6 +145,11 @@ Three rules hold at every layer:
    latency, cost drivers), and traces name the tenant where the service
    allows (Sample Standard §4.4). Isolation that cannot be observed per
    tenant cannot be shown to hold, throttled fairly, or billed.
+4. **Every tenant's cost can be attributed.** Dedicated resources carry a
+   `TenantId` cost allocation tag; shared resources are metered per tenant
+   on the consumption that drives their bill (requests, compute seconds,
+   model tokens, bytes), with the formula documented (Sample Standard
+   §4.4). Tiering, fair-use limits, and pricing all depend on it.
 
 ## 4. The control plane
 

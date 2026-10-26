@@ -178,6 +178,19 @@ prefix is derived from the tenant, so a session can be joined back to a
 tenant through the ingress log. What the Runtime cannot carry per tenant is
 listed in `architecture.md` (standard §4.4).
 
+**P-10. Every request's cost is attributable to its tenant.** The pattern
+pools one backend across tenants, so nothing in the bill carries a tenant
+tag; the ingress meters, per tenant, the consumption each billed service
+charges for: ingress requests, ingress compute milliseconds, backend
+invocation seconds (wall time of the invoke, the AgentCore Runtime billing
+unit together with memory), model input and output tokens (reported by the
+agent in a final usage event and read, never stored, by the ingress), and
+streamed bytes. The demo publishes per-tenant cost metrics and top-tenant
+Contributor Insights rules, and the README gives the attribution formula
+and the unattributable remainder (idle, fixed, and per-request service fees
+below the metered unit). Only usage figures leave the agent, never content
+(ADR-0017).
+
 ---
 
 ## 3. System shape

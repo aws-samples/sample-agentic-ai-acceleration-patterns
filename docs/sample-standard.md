@@ -332,6 +332,20 @@ metadata validators = [{
   `samples/tenant-identity` is the worked example: `tenantId` in the access
   log and Lambda logs, four Contributor Insights top-tenant rules, and one
   API key per tenant for throttling.
+- **Per-tenant cost attribution.** Every sample states what its tenants cost
+  and makes that cost attributable to a tenant. Dedicated (silo, bridge,
+  cell) resources carry a `TenantId` tag that is activated as a cost
+  allocation tag, so Cost Explorer and CUR split them by tenant. Shared
+  (pool) resources cannot be tagged per tenant, so the sample meters the
+  consumption that drives their bill per tenant (requests, compute seconds,
+  model input and output tokens, bytes, read and write units) as per-tenant
+  metrics from the component that knows the tenant, and documents the
+  attribution formula (metric times the service's unit price) in
+  `architecture.md` and the README's Costs section. Where a cost cannot be
+  attributed (a fixed component, a service that reports no per-call usage),
+  say so and name the apportioning rule the vendor would use (equal split,
+  by requests). Metering reads only usage figures from the token or
+  response, never content.
 
 ### 4.5 Deliverable: a CDK construct
 
@@ -503,6 +517,9 @@ A sample is ready to merge when every line is true:
 - [ ] Per-tenant observability (§4.4): `tenantId` in structured and access
       logs, per-tenant metrics for requests, errors, latency, and cost
       drivers; gaps named in `architecture.md`.
+- [ ] Per-tenant cost attribution (§4.4): dedicated resources tagged
+      `TenantId`; shared resources metered per tenant; the attribution
+      formula and the unattributable remainder documented.
 - [ ] Terminology per the introduction: actors are vendor and tenant;
       `git grep -i -E 'saas|application provider|end[- ]user' samples/<name>`
       returns nothing.
