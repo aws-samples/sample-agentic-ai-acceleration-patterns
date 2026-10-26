@@ -1,0 +1,219 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: MIT-0
+
+import { AssumeRoleCommand, STSClient } from '@aws-sdk/client-sts';
+import { mockClient } from 'aws-sdk-client-mock';
+import 'aws-sdk-client-mock-jest';
+import type { IngressConfig } from '../../src/shared/config';
+import { ERROR_TEXT, IngressPipeline, parseBody, pipelineFor, RequestError } from '../../src/shared/request';
+import { PREFIX_PATTERN, RANDOM_UNIT_ID_PATTERN, sessionPrefix } from '../../src/shared/session';
+import { TokenVendingMachine } from '../../src/shared/tvm';
+import { TokenVerifier } from '../../src/shared/verifier';
+import { baseConfig, CLIENT_ID, DISCOVERY_URL, testIssuer, type TestIssuer } from '../helpers';
+
+/** The one request contract both ingresses enforce (spec §5, ADR-0002, ADR-0013). */
+
+describe('parseBody', () => {
+  const refuse = (fn: () => unknown, reason: string) => {
+    try {
+      fn();
+    } catch (error) {
+      expect(error).toBeInstanceOf(RequestError);
+      expect((error as RequestError).status).toBe(400);
+      expect((error as RequestError).reason).toBe(reason);
+      return;
+    }
+    throw new Error('expected a 400');
+  };
+
+  it('session off: {prompt} only', () => {
+    expect(parseBody('{"prompt":"hello"}', false)).toEqual({ prompt: 'hello' });
+    refuse(() => parseBody('{"prompt":"hello","conversationId":"conversationA1x0001"}', false), 'conversation_id_without_session');
+  });
+
+  it('session on: {conversationId, prompt}, conversationId validated', () => {
+    expect(parseBody('{"prompt":"hello","conversationId":"conversationA1x0001"}', true)).toEqual({
+      prompt: 'hello',
+      conversationId: 'conversationA1x0001',
+    });
+    refuse(() => parseBody('{"prompt":"hello"}', true), 'malformed_conversation_id');
+    refuse(() => parseBody('{"prompt":"hello","conversationId":"too short"}', true), 'malformed_conversation_id');
+    refuse(() => parseBody('{"prompt":"hello","conversationId":42}', true), 'malformed_conversation_id');
+  });
+
+  it('prompt must be a string (Runtime input validation)', () => {
+    refuse(() => parseBody('{}', false), 'malformed_prompt');
+    refuse(() => parseBody('{"prompt":42}', false), 'malformed_prompt');
+    refuse(() => parseBody('{"prompt":{"nested":true}}', false), 'malformed_prompt');
+    refuse(() => parseBody(null, false), 'malformed_prompt');
+  });
+
+  it('malformed JSON and non-object bodies are 400', () => {
+    refuse(() => parseBody('not json', false), 'malformed_json');
+    refuse(() => parseBody('[1]', false), 'malformed_body');
+    refuse(() => parseBody('null', false), 'malformed_body');
+  });
+
+  it('error texts are fixed and echo nothing', () => {
+    expect(ERROR_TEXT).toEqual({ 400: 'bad request', 401: 'unauthorized', 403: 'forbidden', 502: 'upstream error' });
+  });
+});
+
+describe('IngressPipeline', () => {
+  let issuer: TestIssuer;
+  const sts = mockClient(STSClient);
+  beforeAll(async () => {
+    issuer = await testIssuer();
+  });
+  beforeEach(() => {
+    sts.reset();
+    sts.on(AssumeRoleCommand).resolves({
+      Credentials: { AccessKeyId: 'ASIA-SYNTHETIC', SecretAccessKey: 's', SessionToken: 't', Expiration: new Date(Date.now() + 900_000) },
+    });
+  });
+
+  const pipeline = (config: IngressConfig) => {
+    const verifier = new TokenVerifier(
+      {
+        discoveryUrl: config.discoveryUrl,
+        allowedClientIds: config.allowedClientIds,
+        requiredScopes: config.requiredScopes,
+        requireNarrowedToken: config.delegation.requireNarrowedToken,
+        allowedScopes: config.delegation.allowedScopes,
+      },
+      { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
+    );
+    const tvm = config.tvm === undefined ? undefined : new TokenVendingMachine(config.tvm, { sts: new STSClient({}) });
+    return new IngressPipeline(config, verifier, tvm);
+  };
+
+  const refusal = async (promise: Promise<unknown>) => {
+    try {
+      await promise;
+    } catch (error) {
+      if (error instanceof RequestError) {
+        return { status: error.status, reason: error.reason };
+      }
+      throw error;
+    }
+    throw new Error('expected a refusal');
+  };
+
+  it('session off: a fresh random unit per request, no token, no credentials (P-2, P-4)', async () => {
+    const p = pipeline(baseConfig());
+    const token = await issuer.mint();
+    const a = await p.validate({ authorization: `Bearer ${token}`, body: '{"prompt":"hi"}' });
+    const b = await p.validate({ authorization: `Bearer ${token}`, body: '{"prompt":"hi"}' });
+    expect(a.unitId).toMatch(RANDOM_UNIT_ID_PATTERN);
+    expect(a.unitId).not.toBe(b.unitId);
+    expect(a).toEqual({ tenantId: 'tenant-a', sub: 'user-a1', unitId: a.unitId, prompt: 'hi' });
+    expect(a.userToken).toBeUndefined();
+    expect(a.credentials).toBeUndefined();
+  });
+
+  it("session 'user': the unit is derived from the verified tenant_id|sub and the body's conversationId", async () => {
+    const p = pipeline(baseConfig({ sessionScope: 'user' }));
+    const body = '{"prompt":"hi","conversationId":"conversationA1x0001"}';
+    const a1 = await p.validate({ authorization: `Bearer ${await issuer.mint()}`, body });
+    const a2 = await p.validate({ authorization: `Bearer ${await issuer.mint({ sub: 'user-a2' })}`, body });
+    const b1 = await p.validate({ authorization: `Bearer ${await issuer.mint({ sub: 'user-b1', tenant_id: 'tenant-b' })}`, body });
+    expect(a1.unitId).toBe(`s-${sessionPrefix('tenant-a', 'user-a1', 'user')}-conversationA1x0001`);
+    expect(a1.unitId.split('-')[1]).toMatch(PREFIX_PATTERN);
+    // Same conversationId, different user or tenant: a different unit (spec §6.3).
+    expect(a2.unitId).not.toBe(a1.unitId);
+    expect(b1.unitId).not.toBe(a1.unitId);
+    // Same user resumes the same unit (integ step 5).
+    expect((await p.validate({ authorization: `Bearer ${await issuer.mint()}`, body })).unitId).toBe(a1.unitId);
+  });
+
+  it("session 'tenant': two users of one tenant share the unit for one conversationId", async () => {
+    const p = pipeline(baseConfig({ sessionScope: 'tenant' }));
+    const body = '{"prompt":"hi","conversationId":"conversationA1x0001"}';
+    const a1 = await p.validate({ authorization: `Bearer ${await issuer.mint()}`, body });
+    const a2 = await p.validate({ authorization: `Bearer ${await issuer.mint({ sub: 'user-a2' })}`, body });
+    expect(a2.unitId).toBe(a1.unitId);
+  });
+
+  it('token refusals keep the verifier status (401/403) and the body is not read first', async () => {
+    const p = pipeline(baseConfig());
+    expect(await refusal(p.validate({ body: '{"prompt":"hi"}' }))).toEqual({ status: 401, reason: 'missing_token' });
+    expect(await refusal(p.validate({ authorization: 'Basic x', body: '{"prompt":"hi"}' }))).toEqual({ status: 401, reason: 'missing_token' });
+    expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint({ tenant_id: undefined })}`, body: 'garbage' }))).toEqual({
+      status: 403,
+      reason: 'no_tenant',
+    });
+  });
+
+  it('a conversationId without session is 400 (ADR-0013); a bad one with session is 400', async () => {
+    const token = `Bearer ${await issuer.mint()}`;
+    expect(await refusal(pipeline(baseConfig()).validate({ authorization: token, body: '{"prompt":"hi","conversationId":"conversationA1x0001"}' }))).toEqual({
+      status: 400,
+      reason: 'conversation_id_without_session',
+    });
+    expect(await refusal(pipeline(baseConfig({ sessionScope: 'user' })).validate({ authorization: token, body: '{"prompt":"hi"}' }))).toEqual({
+      status: 400,
+      reason: 'malformed_conversation_id',
+    });
+  });
+
+  it('requiredScopes are enforced (ADR-0005)', async () => {
+    const p = pipeline(baseConfig({ requiredScopes: ['tenant-api/read'] }));
+    expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint({ scope: 'tenant-api/write' })}`, body: '{"prompt":"hi"}' }))).toEqual({
+      status: 403,
+      reason: 'scope_missing',
+    });
+    await expect(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body: '{"prompt":"hi"}' })).resolves.toBeDefined();
+  });
+
+  it('forwardUserToken attaches the raw token; requireNarrowedToken refuses an un-narrowed one (P-5)', async () => {
+    const forward = pipeline(baseConfig({ delegation: { forwardUserToken: true, requireNarrowedToken: false } }));
+    const token = await issuer.mint();
+    expect((await forward.validate({ authorization: `Bearer ${token}`, body: '{"prompt":"hi"}' })).userToken).toBe(token);
+
+    const narrowed = pipeline(
+      baseConfig({ delegation: { forwardUserToken: true, requireNarrowedToken: true, allowedScopes: ['tenant-api/read'] } }),
+    );
+    expect(await refusal(narrowed.validate({ authorization: `Bearer ${token}`, body: '{"prompt":"hi"}' }))).toEqual({ status: 403, reason: 'not_narrowed' });
+    const small = await issuer.mint({ scope: 'tenant-api/read' });
+    expect((await narrowed.validate({ authorization: `Bearer ${small}`, body: '{"prompt":"hi"}' })).userToken).toBe(small);
+  });
+
+  describe('tvm (P-8)', () => {
+    const tvmConfig = baseConfig({ tvm: { roleArn: 'arn:aws:iam::111122223333:role/tenant', includeUserIdTag: false, claimTags: {}, durationSeconds: 900 } });
+
+    it('attaches credentials vended with the verified tenant as the TenantId tag', async () => {
+      const p = pipeline(tvmConfig);
+      const r = await p.validate({ authorization: `Bearer ${await issuer.mint()}`, body: '{"prompt":"hi"}' });
+      expect(r.credentials?.accessKeyId).toBe('ASIA-SYNTHETIC');
+      expect(sts).toHaveReceivedCommandWith(AssumeRoleCommand, { Tags: [{ Key: 'TenantId', Value: 'tenant-a' }] });
+    });
+
+    it('a missing claimTags claim is 403; an STS failure is 502', async () => {
+      const missing = pipeline(baseConfig({ tvm: { ...tvmConfig.tvm!, claimTags: { Tier: 'custom:tier' } } }));
+      expect(await refusal(missing.validate({ authorization: `Bearer ${await issuer.mint()}`, body: '{"prompt":"hi"}' }))).toEqual({
+        status: 403,
+        reason: 'claim_missing',
+      });
+      sts.on(AssumeRoleCommand).rejects(new Error('AccessDenied'));
+      expect(await refusal(pipeline(tvmConfig).validate({ authorization: `Bearer ${await issuer.mint()}`, body: '{"prompt":"hi"}' }))).toEqual({
+        status: 502,
+        reason: 'tvm_failed',
+      });
+    });
+
+    it('refuses to be built without a TVM when the config has one', () => {
+      const verifier = new TokenVerifier(
+        { discoveryUrl: DISCOVERY_URL, allowedClientIds: [CLIENT_ID] },
+        { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
+      );
+      expect(() => new IngressPipeline(tvmConfig, verifier)).toThrow(/TokenVendingMachine/);
+    });
+  });
+
+  it('pipelineFor builds a verifier and, with tvm, a TVM from the config', () => {
+    expect(pipelineFor(baseConfig())).toBeInstanceOf(IngressPipeline);
+    expect(pipelineFor(baseConfig({ tvm: { roleArn: 'arn:aws:iam::111122223333:role/t', includeUserIdTag: false, claimTags: {}, durationSeconds: 900 } }))).toBeInstanceOf(
+      IngressPipeline,
+    );
+  });
+});
