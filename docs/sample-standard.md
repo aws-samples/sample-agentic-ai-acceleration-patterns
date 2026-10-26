@@ -318,6 +318,20 @@ metadata validators = [{
   account ID before every commit.
 - Idempotency and retry safety where retries actually happen; document the
   benign races you tolerate and the corruption you prevent.
+- **Per-tenant observability where practical.** A shared component should be
+  able to answer "which tenant?" from its own telemetry: put the verified
+  `tenantId` in structured logs and access logs (a field, never free text),
+  emit per-tenant metrics (CloudWatch EMF or Contributor Insights on the
+  `tenantId` field) for request count, errors, latency, and the cost drivers
+  the component has, and name the tenant in traces where the service allows.
+  The tenant comes from the validated claim or session tag, never from the
+  request, and only the id is recorded, never user data or token content
+  (§4.4 first bullet). Where a service cannot carry the tenant (a managed
+  log the sample does not format), say so in `architecture.md` and point to
+  the nearest place it can be joined (a request id, a session id prefix).
+  `samples/tenant-identity` is the worked example: `tenantId` in the access
+  log and Lambda logs, four Contributor Insights top-tenant rules, and one
+  API key per tenant for throttling.
 
 ### 4.5 Deliverable: a CDK construct
 
@@ -486,6 +500,9 @@ A sample is ready to merge when every line is true:
       deployment.
 - [ ] `DESTROY` removal policies; teardown verified to leave nothing behind.
 - [ ] Synthetic data only; no deployment account ID in the tree.
+- [ ] Per-tenant observability (§4.4): `tenantId` in structured and access
+      logs, per-tenant metrics for requests, errors, latency, and cost
+      drivers; gaps named in `architecture.md`.
 - [ ] Terminology per the introduction: actors are vendor and tenant;
       `git grep -i -E 'saas|application provider|end[- ]user' samples/<name>`
       returns nothing.

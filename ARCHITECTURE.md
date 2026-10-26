@@ -133,13 +133,18 @@ Each layer is enforced on its own; a request passes all of them.
 | Data | which tenant's data may this code reach? | tenant-scoped credentials: ABAC with a `TenantId` session tag, issued per request |
 | Delegation | what may the agent do on the user's behalf? | the narrowest token that works, forwarded only on opt-in |
 
-Two rules hold at every layer:
+Three rules hold at every layer:
 
 1. **Tenant context comes only from the validated token.** No component trusts
    a tenant id it did not derive from a verified claim.
 2. **The tenant cannot set its own scope.** Session tags, session ids, and
    key prefixes are set by vendor code from verified claims, never by the
    caller.
+3. **Every layer can say which tenant it served.** Logs carry the verified
+   `tenantId` as a field, metrics are emitted per tenant (requests, errors,
+   latency, cost drivers), and traces name the tenant where the service
+   allows (Sample Standard §4.4). Isolation that cannot be observed per
+   tenant cannot be shown to hold, throttled fairly, or billed.
 
 ## 4. The control plane
 

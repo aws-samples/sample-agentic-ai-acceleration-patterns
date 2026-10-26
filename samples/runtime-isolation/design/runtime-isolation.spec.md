@@ -168,6 +168,16 @@ policy scopes data by `${aws:PrincipalTag/TenantId}`, so a cross-tenant call
 fails in IAM whatever the agent does (enforced, not filtered). The agent holds
 no `sts:AssumeRole` (ADR-0012).
 
+**P-9. Every request is attributable to a tenant in telemetry.** The ingress
+writes the verified `tenant_id` (and the session prefix, never the token) as
+a field in its structured logs and, on API Gateway, in the access log; it
+emits per-tenant metrics for requests, 4xx/5xx, TTFB, and streamed bytes
+(CloudWatch EMF), and the demo adds Contributor Insights top-tenant rules on
+the access log. The Runtime's own log streams are named by session id, whose
+prefix is derived from the tenant, so a session can be joined back to a
+tenant through the ingress log. What the Runtime cannot carry per tenant is
+listed in `architecture.md` (standard §4.4).
+
 ---
 
 ## 3. System shape
