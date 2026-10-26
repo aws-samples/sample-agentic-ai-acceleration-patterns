@@ -2,10 +2,10 @@
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 -->
-# Specification: Runtime Isolation with Session Mapping on AgentCore Runtime
+# Specification: Runtime Isolation with Session Mapping
 
 > **Status:** Draft, 2026-10-26. Requirements and principles for the
-> `runtime-isolation-agentcore` sample. Items marked **[verify]** are service
+> `runtime-isolation` sample. Items marked **[verify]** are service
 > behaviours the design depends on; the first spike (§7) proves them, and if
 > one fails the named fallback applies and an ADR records the change.
 
@@ -38,6 +38,13 @@ This is the "Runtime isolation with session mapping" pattern of
 [Agentic AI delegation patterns](https://builder.aws.com/content/3HBLL1UuIpyzPENldeTfjYjvGQj/agentic-ai-delegation-patterns),
 Figure 3.
 
+The pattern is not tied to AgentCore. It needs any compute service that runs
+each session in its own isolated environment and lets one IAM principal be
+the only caller. The construct models that as a **backend**, a typed prop
+(ADR-0011). AgentCore Runtime is the first and, for now, only backend; AWS
+Lambda's microVMs are a candidate for a later one. The principles (§2) are
+written against the backend, and §3 maps them onto AgentCore Runtime.
+
 The sample ships as a CDK construct, `SessionIsolatedAgentRuntime`
 (standard §4.5), with the ingress a deploy-time choice: an Amazon API Gateway
 REST API with response streaming, or an AgentCore Gateway with a Runtime
@@ -58,6 +65,10 @@ invocation boundary.
 | What a delegated token can do | Optional; forwarded only on opt-in, optionally narrowed (P-5) |
 
 ### 1.2 What this sample is NOT
+
+- Not a backend catalogue. Only the AgentCore Runtime backend is built. A new
+  backend is added only when it meets P-1 and P-2, proved by the same e2e
+  suite (ADR-0011).
 
 - Not an identity provider. It consumes tokens from tenant-identity's
   `shared-pool` topology; any OIDC provider that issues the §6.2 token
@@ -130,7 +141,7 @@ which to prefer and why (ADR-0009).
 
 | ID | Component | Notes |
 |---|---|---|
-| C-1 | **AgentCore Runtime** | TypeScript agent, direct code deployment; IAM inbound auth; resource policy per P-1; `requireMMDSV2: true`; `requestHeaderAllowlist` holds the user-token header only when P-5 forwarding is on |
+| C-1 | **Backend: AgentCore Runtime** (the first backend, ADR-0011) | TypeScript agent, direct code deployment; IAM inbound auth; resource policy per P-1; `requireMMDSV2: true`; `requestHeaderAllowlist` holds the user-token header only when P-5 forwarding is on |
 | C-2 | **Agent** | Echoes the derived session prefix and calls one Bedrock model; validates `prompt` is a string (Runtime best practices, input validation) |
 | C-3a | **Ingress A: API Gateway** | Regional REST API, one `POST /invocations` route, Lambda request authoriser (JWT verify, P-3) and a Lambda proxy integration with `responseTransferMode: STREAM`. The integration Lambda builds the session id (P-2) and calls `InvokeAgentRuntime` with SigV4, streaming the response back |
 | C-3b | **Ingress B: AgentCore Gateway** | No protocol type; `CUSTOM_JWT` inbound authoriser on the tenant-identity pool; one Runtime target (`http.agentcoreRuntime`) with `GATEWAY_IAM_ROLE` outbound; a REQUEST interceptor Lambda that enforces P-2, P-5 |
@@ -155,7 +166,8 @@ which to prefer and why (ADR-0009).
 | `identity.discoveryUrl` | string | required | OIDC discovery URL of the issuer |
 | `identity.allowedClientIds` | string[] | required, non-empty | `client_id` values accepted |
 | `agent` | `{ codePath, modelId }` | required | agent code and the one model it may invoke |
-| `ingress` | `'api-gateway' \| 'agentcore-gateway'` | required | C-3a or C-3b |
+| `backend` | `'agentcore-runtime'` | `'agentcore-runtime'` | the session-isolating compute service (ADR-0011) |
+| `ingress` | `'api-gateway' \| 'agentcore-gateway'` | required | C-3a or C-3b; `agentcore-gateway` is valid only with the `agentcore-runtime` backend |
 | `sessionScope` | `'user' \| 'tenant'` | `'user'` | isolation dimension (P-2) |
 | `requiredScopes` | string[] | none | if set, the token's `scope` MUST contain all of them (ADR-0005) |
 | `delegation.forwardUserToken` | boolean | `false` | P-5 |

@@ -16,3 +16,4 @@ SPDX-License-Identifier: MIT-0
 | [0008](./0008-give-the-agent-a-role-with-no-tenant-data.md) | Give the agent an execution role with no tenant-scoped permission | Proposed | 2026-10-26 |
 | [0009](./0009-choose-the-default-ingress-by-measurement.md) | Choose the recommended ingress by measurement, after security parity | Proposed | 2026-10-26 |
 | [0010](./0010-declare-the-runtime-gateway-target-with-a-raw-override.md) | Declare the Gateway's Runtime target with a typed raw override | Proposed | 2026-10-26 |
+| [0011](./0011-model-the-compute-service-as-a-backend-agentcore-first.md) | Model the compute service as a backend, with AgentCore Runtime first | Proposed | 2026-10-26 |

@@ -175,7 +175,7 @@ Every published parameter sits under one of these paths, owned by one writer:
 | `/control-plane/*` | `control-plane` stack | the control-plane API URL |
 | `/application-plane/shared/*` | shared application-plane stacks, one owner per sub-path | resources every cell and tenant uses |
 | `/application-plane/shared/identity/*` | `tenant-identity` stack | `apiUrl`, `topology`, and for shared pools `userPoolId`, `appClientId` |
-| `/application-plane/shared/agent-runtime/*` | `runtime-isolation-agentcore` demo stack (planned) | `endpointUrl`, `runtimeArn`, `ingress` |
+| `/application-plane/shared/agent-runtime/*` | `runtime-isolation` demo stack (planned) | `endpointUrl`, `runtimeArn`, `ingress` |
 | `/application-plane/cells/<cellId>/*` | the cell create script | a cell's shared deployment |
 | `/application-plane/tenants/<tenantId>` | the tenant create script | a tenant's own deployment state |
 
@@ -228,7 +228,7 @@ does so with tenant-scoped credentials derived from the same claims.
 |---|---|---|---|
 | [`control-plane`](./samples/control-plane/) | control plane: tenant and cell lifecycle | a vendor IdP | `/control-plane/tenant-api-url`; scripts write `/application-plane/cells/*` and `/application-plane/tenants/*` |
 | [`tenant-identity`](./samples/tenant-identity/) | tenant identity: the token contract on Cognito | nothing | `/application-plane/shared/identity/*` |
-| [`runtime-isolation-agentcore`](./samples/runtime-isolation-agentcore/) (in design) | isolation: invocation, session, and delegation layers on AgentCore Runtime | `tenant-identity` `shared-pool` | construct `SessionIsolatedAgentRuntime`; `/application-plane/shared/agent-runtime/*` |
+| [`runtime-isolation`](./samples/runtime-isolation/) (in design) | isolation: invocation, session, and delegation layers on any session-isolating compute; AgentCore Runtime first | `tenant-identity` `shared-pool` | construct `SessionIsolatedAgentRuntime`; `/application-plane/shared/agent-runtime/*` |
 
 The data layer (tenant-scoped credentials for memory, retrieval, and tools)
 has no sample yet.
