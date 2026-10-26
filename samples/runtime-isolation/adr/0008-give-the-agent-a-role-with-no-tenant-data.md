@@ -21,4 +21,4 @@ Pros: nothing tenant-scoped to leak; keeps the sample about the Runtime boundary
 Option 2, plus `requireMMDSV2: true`.
 
 ## Consequences
-Easier: a small threat surface. Harder: a real agent needs data; pairing with a TVM or the memory sample is the README's next step.
+Easier: a small threat surface. Harder: a real agent needs data; the optional TVM (ADR-0012) supplies it with credentials vended from the validated token, so this role stays data-free.

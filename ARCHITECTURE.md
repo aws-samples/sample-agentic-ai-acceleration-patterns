@@ -228,7 +228,8 @@ does so with tenant-scoped credentials derived from the same claims.
 |---|---|---|---|
 | [`control-plane`](./samples/control-plane/) | control plane: tenant and cell lifecycle | a vendor IdP | `/control-plane/tenant-api-url`; scripts write `/application-plane/cells/*` and `/application-plane/tenants/*` |
 | [`tenant-identity`](./samples/tenant-identity/) | tenant identity: the token contract on Cognito | nothing | `/application-plane/shared/identity/*` |
-| [`runtime-isolation`](./samples/runtime-isolation/) (in design) | isolation: invocation, session, and delegation layers on any session-isolating compute; AgentCore Runtime first | `tenant-identity` `shared-pool` | construct `SessionIsolatedAgentRuntime`; `/application-plane/shared/agent-runtime/*` |
+| [`runtime-isolation`](./samples/runtime-isolation/) (in design) | isolation: invocation, session, and delegation layers on any session-isolating compute, plus an optional TVM for the data layer; AgentCore Runtime first | `tenant-identity` `shared-pool` | construct `SessionIsolatedAgentRuntime`; `/application-plane/shared/agent-runtime/*` |
 
-The data layer (tenant-scoped credentials for memory, retrieval, and tools)
-has no sample yet.
+`runtime-isolation` can vend the data layer's tenant-scoped credentials (its
+optional TVM); what those credentials unlock (memory, retrieval, tools) has no
+sample yet.

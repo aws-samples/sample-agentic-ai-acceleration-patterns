@@ -62,6 +62,7 @@ invocation boundary.
 | Who may invoke the Runtime | Runtime resource policy: only the ingress principal (P-1) |
 | Which session a request lands in | Ingress derives or checks the session id from validated claims (P-2) |
 | What the agent can reach | Runtime execution role: model invocation only; no tenant data (P-6) |
+| What tenant data the agent may reach | Optional TVM: tenant-scoped credentials vended at ingress from the same claims, IAM-enforced (P-8) |
 | What a delegated token can do | Optional; forwarded only on opt-in, optionally narrowed (P-5) |
 
 ### 1.2 What this sample is NOT
@@ -73,10 +74,11 @@ invocation boundary.
 - Not an identity provider. It consumes tokens from tenant-identity's
   `shared-pool` topology; any OIDC provider that issues the §6.2 token
   contract works.
-- Not a data-isolation sample. The agent holds no tenant data and no TVM
-  credential. Isolating memory, RAG stores, or tools is the data layer
-  (`ARCHITECTURE.md` §3.3) and belongs to a later sample that can consume
-  this construct.
+- Not a data-layer sample. The optional TVM (P-8) vends tenant-scoped
+  credentials; what they unlock (memory, RAG stores, tools) is the data layer
+  (`ARCHITECTURE.md` §3.3) and belongs to later samples that consume this
+  construct. The demo ships one tenant-partitioned table only to prove the
+  credentials work.
 - Not multi-tenant-per-user. A user belongs to exactly one tenant
   (tenant-identity `shared-pool`). The `shared-pool-multi-tenant` topology is
   out of scope.
@@ -133,6 +135,16 @@ meet P-1 to P-6 identically. They are compared on measured latency
 (time to first byte, total) and per-request cost, and the README states
 which to prefer and why (ADR-0009).
 
+**P-8. Tenant data is reached only with credentials vended from the validated
+token, never from the agent's own role.** With `tvm` set, the ingress assumes
+`tvm.role` with session tags built from the claims it has just verified
+(`TenantId` always; `UserId` and allowlisted claims on opt-in) and forwards the
+credentials to the backend in
+`X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Credentials`. The tenant role's
+policy scopes data by `${aws:PrincipalTag/TenantId}`, so a cross-tenant call
+fails in IAM whatever the agent does (enforced, not filtered). The agent holds
+no `sts:AssumeRole` (ADR-0012).
+
 ---
 
 ## 3. System shape
@@ -146,6 +158,7 @@ which to prefer and why (ADR-0009).
 | C-3a | **Ingress A: API Gateway** | Regional REST API, one `POST /invocations` route, Lambda request authoriser (JWT verify, P-3) and a Lambda proxy integration with `responseTransferMode: STREAM`. The integration Lambda builds the session id (P-2) and calls `InvokeAgentRuntime` with SigV4, streaming the response back |
 | C-3b | **Ingress B: AgentCore Gateway** | No protocol type; `CUSTOM_JWT` inbound authoriser on the tenant-identity pool; one Runtime target (`http.agentcoreRuntime`) with `GATEWAY_IAM_ROLE` outbound; a REQUEST interceptor Lambda that builds the session id and overwrites the session header (P-2), and enforces P-5 |
 | C-4 | **Demo app** | `src/main.ts`: reads tenant-identity's SSM parameters and instantiates the construct with one ingress |
+| C-6 | **TVM module** | Shared by both ingress Lambdas, optional: validated claims to session tags, `AssumeRole` + `TagSession` on `tvm.role`, per-tag-set cache, credential header (P-8) |
 | C-5 | **Integration driver** | `scripts/integ.sh`: deploys tenant-identity (`shared-pool`), then this sample once per ingress, runs the e2e suite and the latency probe, destroys everything |
 
 ### 3.2 Caller and identity model
@@ -173,6 +186,10 @@ which to prefer and why (ADR-0009).
 | `delegation.forwardUserToken` | boolean | `false` | P-5 |
 | `delegation.requireNarrowedToken` | boolean | `false` | only valid with `forwardUserToken` |
 | `delegation.allowedScopes` | string[] | required when `requireNarrowedToken` | P-5 |
+| `tvm.role` | `iam.IRole` | none (TVM off) | the tenant role the ingress assumes; the deployer owns its trust and ABAC policies (P-8, ADR-0012) |
+| `tvm.includeUserIdTag` | boolean | `false` | add `UserId = sub` as a session tag |
+| `tvm.claimTags` | `Record<string, string>` | none | extra session tags, tag key to claim name; a claim missing from the token fails the request with 403; `TenantId` and `UserId` are reserved keys |
+| `tvm.durationSeconds` | number | `900` | 900 to 3600; credential lifetime |
 
 Props are validated at synth; an invalid combination fails with the prop name.
 
@@ -217,6 +234,10 @@ echo the token or the session id.
   tenant-identity `shared-pool`; its `userPoolId` and `appClientId` SSM
   parameters give the discovery URL and client id).
 - An agent code bundle and a Bedrock model id enabled in the Region.
+- With `tvm`: a tenant role whose trust policy allows `sts:AssumeRole` and
+  `sts:TagSession` to `tvmCallerRole` only, requires the `TenantId` request
+  tag, pins `aws:TagKeys` to the tags it expects, and whose permissions scope
+  every data resource by `${aws:PrincipalTag/TenantId}` (ADR-0012).
 
 ### 6.2 Token contract
 
@@ -232,6 +253,10 @@ only, §1.2).
   user A2's under `sessionScope: 'user'` (integ steps 4, 5).
 - The user token reaches the agent only when forwarding is on, and only
   narrowed when `requireNarrowedToken` is on (integ steps 7, 8).
+- With `tvm` on, the agent's credentials carry `TenantId` equal to the
+  caller's `tenant_id`; a read of the caller's own tenant data succeeds and a
+  read of another tenant's fails in IAM; the role cannot be assumed by the
+  test runner's own credentials (integ step 8a).
 - Both ingresses pass the same e2e suite; the README reports measured TTFB and
   total latency (p50, p95) and the per-request cost of each.
 - `cdk destroy` leaves no stacks, log groups, or parameters with the sample's
@@ -248,8 +273,9 @@ issuer as props.
 that adds tenant-scoped memory) can consume this one:
 
 - Construct `SessionIsolatedAgentRuntime`, exported from `src/index.ts`, with
-  read-only `endpointUrl`, `runtimeArn`, `ingressRole`, and
-  `executionRole`.
+  read-only `endpointUrl`, `runtimeArn`, `ingressRole`, `executionRole`, and
+  `tvmCallerRole` (the role that validates the token and, with `tvm`, assumes
+  the tenant role: the integration Lambda or the interceptor Lambda).
 - Parameters, written by the demo stack under
   `/application-plane/shared/agent-runtime/`: `endpointUrl` (the ingress
   invocation URL), `runtimeArn`, and `ingress` (`api-gateway` or
@@ -267,6 +293,7 @@ that adds tenant-scoped memory) can consume this one:
 | V-4 | A REQUEST interceptor runs on a streaming Runtime invocation and the response still streams (docs say buffered only; field reports say request interceptors work) | Accept buffered responses on `agentcore-gateway` and report it in the latency table |
 | V-5 | API Gateway REST `responseTransferMode: STREAM` with a Lambda proxy relays the Runtime's SSE stream past 29 s | Buffered response with a 29 s cap, documented |
 | V-6 | Runtime `requestHeaderAllowlist` passes `X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Token` from both ingresses | Forward the token in the payload under a reserved key the agent strips; ADR records it |
+| V-7 | A second allowlisted header of about 2 KB (base64 STS credentials) reaches the agent from both ingresses, and neither API Gateway access logs nor Gateway/interceptor logs record request header values | Split the credential across headers, or forward only a reference the agent redeems; if a log records headers and cannot be configured not to, the TVM is dropped on that ingress (ADR-0012) |
 
 ### 7.1 Spike results (2026-10-26, pg sandbox, eu-central-1)
 
@@ -312,6 +339,13 @@ ingress builds the session id itself, as API Gateway does (ADR-0002, decided
 8. Forwarding on: the agent reports the forwarded token's `scope`; with
    `requireNarrowedToken`, an un-narrowed token is refused and a narrowed one
    accepted.
+8a. TVM on: the demo table holds one item per tenant under `TENANT#<id>`. A1
+   asks the agent to read tenant A's item: success (positive control). A1 asks
+   it to read tenant B's item: `AccessDeniedException` from IAM. The runner
+   calls `sts:AssumeRole` on the tenant role with its own credentials: denied.
+   The agent reports the `TenantId` tag of its credentials via
+   `sts:GetCallerIdentity` plus the session name; CloudTrail shows one
+   `AssumeRole` per tenant per credential lifetime, not per request.
 9. Latency probe: 20 invocations per ingress, TTFB and total, p50 and p95.
 10. Destroy; assert nothing left.
 
