@@ -28,14 +28,21 @@ Validations.of(app).addPlugins(
 //   Authorizer. Customer identity is an application plane decision (ADR-004).
 // - the CellDefinition - one source + two script sets + maxTenants, stamped
 //   onto each cell record at creation (ADR-012). Validated at synth time.
+// A fourth input, tenantBuildManagedPolicyArns, is optional (ADR-022).
 const vendorIdpIssuerUrl = requireContext('vendorIdpIssuerUrl');
 const vendorIdpAudience = requireContext('vendorIdpAudience');
 const cellDefinition = parseCellDefinitionContext(requireContext('cellDefinition'));
+// Optional (ADR-022): customer-managed policy ARNs attached to the tenant
+// build role, e.g. a least-privilege policy an application-plane sample
+// publishes for its API. Validated in the stack (fails synth on an ARN
+// outside this partition/account). Default: none.
+const tenantBuildManagedPolicyArns = parseJsonContext<string[]>('tenantBuildManagedPolicyArns');
 
 const stack = new TenantStack(app, 'control-plane-dev', {
   vendorIdpIssuerUrl: String(vendorIdpIssuerUrl),
   vendorIdpAudience: String(vendorIdpAudience),
   cellDefinition,
+  tenantBuildManagedPolicyArns,
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
     region: process.env.CDK_DEFAULT_REGION,
@@ -88,4 +95,24 @@ function parseCellDefinitionContext(context: unknown): CellDefinition {
     }
   }
   return context as CellDefinition;
+}
+
+/**
+ * Reads an OPTIONAL context value given as a structured value (cdk.json) or
+ * a JSON string (`--context key='[...]'`). Absent or empty means undefined;
+ * structural validation happens in the stack.
+ */
+function parseJsonContext<T>(key: string): T | undefined {
+  const value = app.node.tryGetContext(key);
+  if (value === undefined || value === '') {
+    return undefined;
+  }
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value) as T;
+    } catch (error) {
+      throw new Error(`The ${key} context value is not valid JSON: ${(error as Error).message}`);
+    }
+  }
+  return value as T;
 }

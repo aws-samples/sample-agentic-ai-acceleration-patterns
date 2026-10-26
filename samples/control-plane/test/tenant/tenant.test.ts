@@ -164,6 +164,7 @@ describe('CreateTenant placement (§6)', () => {
         operation: 'create',
         scriptPath: 'stamped/tenant/create.sh',
         failedStatus: 'CREATE_FAILED',
+        tenantName: 'acme', // every operation (ADR-023)
         adminEmail: 'success@simulator.amazonses.com',
       },
     });
@@ -277,6 +278,7 @@ describe('CreateTenant placement (§6)', () => {
         operation: 'create',
         scriptPath: 'scripts/sample-tenant/create.sh',
         failedStatus: 'CREATE_FAILED',
+        tenantName: 'acme', // every operation (ADR-023)
         adminEmail: 'success@simulator.amazonses.com',
       },
     });
@@ -458,6 +460,7 @@ describe('DeleteTenant', () => {
           operation: 'delete',
           scriptPath: 'stamped/tenant/delete.sh',
           failedStatus: 'DELETE_FAILED',
+          tenantName: 'acme', // from the stored record (ADR-023)
           adminEmail: '',
         },
       });
@@ -642,6 +645,7 @@ describe('UpdateResource', () => {
           operation: 'update',
           scriptPath: 'stamped/tenant/update.sh',
           failedStatus: 'UPDATE_FAILED',
+          tenantName: 'acme', // from the stored record (ADR-023)
           adminEmail: '',
         },
       });

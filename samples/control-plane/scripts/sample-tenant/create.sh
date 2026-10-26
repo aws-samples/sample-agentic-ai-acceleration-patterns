@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: MIT-0
 # Sample tenant CREATE script.
 #
-# Runs in AWS CodeBuild with: TENANT_ID, CELL_ID, OPERATION, ADMIN_EMAIL
-# (create only). Demonstrates the application-plane patterns from the design:
+# Runs in AWS CodeBuild with: TENANT_ID, TENANT_NAME, CELL_ID, OPERATION,
+# OPERATOR_ID, ADMIN_EMAIL (create only). Demonstrates the application-plane
+# patterns from the design:
 #   - the cell's shared resource identifiers are read from
 #     /application-plane/cells/<cellId>/* at deploy time - the cell -> tenant
 #     contract (architecture.md section 7, extending ADR-010)

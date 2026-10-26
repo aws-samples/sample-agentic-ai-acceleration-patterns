@@ -3,10 +3,11 @@
 # SPDX-License-Identifier: MIT-0
 # Sample tenant DELETE script.
 #
-# Runs in AWS CodeBuild with: TENANT_ID, CELL_ID, OPERATION. Deprovisions the
-# per-tenant deployment. Must tolerate partial provisioning - it is also the
-# cleanup path for CREATE_FAILED tenants (including tenants whose cell itself
-# failed to create), so a missing resource is success, not an error.
+# Runs in AWS CodeBuild with: TENANT_ID, TENANT_NAME, CELL_ID, OPERATION,
+# OPERATOR_ID. Deprovisions the per-tenant deployment. Must tolerate partial
+# provisioning - it is also the cleanup path for CREATE_FAILED tenants
+# (including tenants whose cell itself failed to create), so a missing
+# resource is success, not an error.
 set -euo pipefail
 
 : "${TENANT_ID:?TENANT_ID env var is required}"

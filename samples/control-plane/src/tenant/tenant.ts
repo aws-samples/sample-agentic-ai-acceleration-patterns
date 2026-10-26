@@ -81,8 +81,13 @@ interface BuildPhaseInput {
   readonly failedStatus: FailedLifecycleStatus;
 }
 
-/** The tenant build phase — `adminEmail` is always present (empty string for non-create). */
+/**
+ * The tenant build phase. `tenantName` is the name stored on the tenant
+ * record, present on every operation and forwarded as `TENANT_NAME`
+ * (ADR-023); `adminEmail` is always present (empty string for non-create).
+ */
 interface TenantBuildPhaseInput extends BuildPhaseInput {
+  readonly tenantName: string;
   readonly adminEmail: string;
 }
 
@@ -294,6 +299,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           operation: 'create',
           scriptPath: requireField(placed.cell.tenantScripts.create, 'cell.tenantScripts.create'),
           failedStatus: 'CREATE_FAILED',
+          tenantName: tenant.name,
           adminEmail,
         },
       };
@@ -346,6 +352,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           operation: 'create',
           scriptPath: requireField(cell.tenantScripts.create, 'cellDefinition.tenantScripts.create'),
           failedStatus: 'CREATE_FAILED',
+          tenantName: tenant.name,
           adminEmail,
         },
       };
@@ -445,6 +452,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           operation: 'delete',
           scriptPath: requireField(cell.tenantScripts.delete, 'cell.tenantScripts.delete'),
           failedStatus: 'DELETE_FAILED',
+          tenantName: existing.name,
           adminEmail: '',
         },
       },
@@ -530,6 +538,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           operation: 'update',
           scriptPath: requireField(cell.tenantScripts.update, 'cell.tenantScripts.update'),
           failedStatus: 'UPDATE_FAILED',
+          tenantName: existing.name,
           adminEmail: '',
         },
       },

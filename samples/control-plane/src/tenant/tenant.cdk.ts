@@ -3,7 +3,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { CfnOutput, Duration, RemovalPolicy, Stack, StackProps, Validations } from 'aws-cdk-lib';
+import { CfnOutput, Duration, RemovalPolicy, Stack, StackProps, Token, Validations } from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -12,6 +12,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
+import { RegionInfo } from 'aws-cdk-lib/region-info';
 import { Construct } from 'constructs';
 import { ProvisioningWorkflow } from './tenant.sfn';
 import { nagFindingResource, acknowledgeGranularFinding, suppressTemplateScanners } from '../shared/nag';
@@ -27,6 +28,16 @@ export interface TenantStackProps extends StackProps {
    * context and validated at synth time.
    */
   readonly cellDefinition: CellDefinition;
+  /**
+   * Optional deployment input (ADR-022): customer-managed IAM policy ARNs
+   * attached to the tenant build role in addition to its SSM namespace
+   * grants (spec §6.2). Lets a tenant script call an application-plane API
+   * with a policy the application plane publishes (producer-owned least
+   * privilege) while the control plane learns only an ARN list - never what
+   * the policy is for (P-3). Every entry must be a managed-policy ARN in
+   * this stack's partition and account; synth fails otherwise. Default: none.
+   */
+  readonly tenantBuildManagedPolicyArns?: string[];
 }
 
 /** Where provisioning code lives - a CodeBuild ProjectSource reference. */
@@ -106,6 +117,82 @@ export function validateCellDefinition(definition: CellDefinition): void {
 }
 
 /**
+ * A customer-managed IAM policy ARN: `arn:<partition>:iam::<account>:policy/<path><name>`.
+ * The account segment is twelve digits, which also rejects AWS managed
+ * policies (`iam::aws:policy/...`) - the input is for policies the deployer
+ * owns in this account (ADR-022).
+ */
+const MANAGED_POLICY_ARN = /^arn:([a-z][a-z0-9-]*):iam::(\d{12}):policy\/[\w+=,.@/-]+$/;
+
+/** The partition and account a managed-policy ARN must belong to. */
+export interface StackIdentity {
+  readonly partition: string;
+  readonly account: string;
+}
+
+/**
+ * The stack's partition and account for ARN validation. `Stack.partition`
+ * is the `AWS::Partition` pseudo-parameter unless the
+ * `@aws-cdk/core:enablePartitionLiterals` flag is on, so the partition is
+ * derived here from the Region when that is resolved (the same RegionInfo
+ * lookup CDK itself uses); the account is `Stack.account` as given.
+ */
+export function stackIdentity(stack: Stack): StackIdentity {
+  const partition = Token.isUnresolved(stack.region)
+    ? stack.partition
+    : RegionInfo.get(stack.region).partition ?? stack.partition;
+  return { partition, account: stack.account };
+}
+
+/**
+ * Synth-time validation of the `tenantBuildManagedPolicyArns` deployment
+ * input (ADR-022): every entry must be a literal customer-managed IAM policy
+ * ARN in the stack's own partition and account. Throws with every problem
+ * listed otherwise.
+ *
+ * Limitation: when the stack is environment-agnostic the partition (derived
+ * from the Region, see `stackIdentity`) or the account is a CDK token at
+ * synth time and cannot be compared, so only the ARN shape (including a
+ * twelve-digit account) and whichever of the two is resolved are checked.
+ * `src/main.ts` passes `CDK_DEFAULT_ACCOUNT` / `CDK_DEFAULT_REGION`, so a
+ * real `cdk deploy` resolves both.
+ */
+export function validateTenantBuildManagedPolicyArns(
+  arns: unknown,
+  stack: StackIdentity,
+): void {
+  if (arns === undefined) {
+    return;
+  }
+  const problems: string[] = [];
+  if (!Array.isArray(arns)) {
+    problems.push(`must be an array of strings (got: ${JSON.stringify(arns)})`);
+  } else {
+    arns.forEach((arn, index) => {
+      const match = typeof arn === 'string' ? MANAGED_POLICY_ARN.exec(arn) : null;
+      if (match === null) {
+        problems.push(`[${index}] ${JSON.stringify(arn)} is not a customer-managed IAM policy ARN (arn:<partition>:iam::<account>:policy/<name>)`);
+        return;
+      }
+      const [, partition, account] = match;
+      if (!Token.isUnresolved(stack.partition) && partition !== stack.partition) {
+        problems.push(`[${index}] ${arn} is in partition '${partition}'; this stack deploys to '${stack.partition}'`);
+      }
+      if (!Token.isUnresolved(stack.account) && account !== stack.account) {
+        problems.push(`[${index}] ${arn} is in account ${account}; this stack deploys to ${stack.account}`);
+      }
+    });
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      'Invalid tenantBuildManagedPolicyArns deployment input (ADR-022):\n'
+      + problems.map((p) => `  - ${p}`).join('\n')
+      + '\nEach entry must be a managed-policy ARN in this stack\'s partition and account, e.g. --context tenantBuildManagedPolicyArns=\'["arn:aws:iam::123456789012:policy/MyPolicy"]\'',
+    );
+  }
+}
+
+/**
  * The cell-based control plane - one stack: API Gateway (generated from the
  * Smithy OpenAPI output), Lambda Authorizer (vendor IdP), API handler, the
  * cells + tenants table (GSI-1/GSI-2), and the provisioning workflow
@@ -122,6 +209,8 @@ export class TenantStack extends Stack {
 
     // Fail synth on an invalid cellDefinition (§10).
     validateCellDefinition(props.cellDefinition);
+    // Fail synth on a policy ARN outside this partition/account (ADR-022).
+    validateTenantBuildManagedPolicyArns(props.tenantBuildManagedPolicyArns, stackIdentity(this));
 
     // --- Control plane table (cells + tenants, single table) --------------
     // PK=CELL#<id>|TENANT#<id>, SK=META. GSI-1/GSI-2 serve the three listing
@@ -159,7 +248,10 @@ export class TenantStack extends Stack {
     // --- Provisioning workflow (Step Functions + two shared CodeBuild
     //     projects with distinct service roles, §3/§7) ---------------------
     // The workflow grants itself least-privilege table access internally.
-    const workflow = new ProvisioningWorkflow(this, 'Provisioning', { table });
+    const workflow = new ProvisioningWorkflow(this, 'Provisioning', {
+      table,
+      tenantBuildManagedPolicyArns: props.tenantBuildManagedPolicyArns,
+    });
     this.provisioning = workflow;
 
     // --- Lambda Authorizer (the ingress layer) ----------------------------

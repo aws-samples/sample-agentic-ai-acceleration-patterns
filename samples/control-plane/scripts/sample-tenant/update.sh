@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: MIT-0
 # Sample tenant UPDATE script.
 #
-# Runs in AWS CodeBuild with: TENANT_ID, CELL_ID, OPERATION. Re-applies the
-# per-tenant deployment - a real script would re-run its IaC deployment here.
-# Idempotent by design.
+# Runs in AWS CodeBuild with: TENANT_ID, TENANT_NAME, CELL_ID, OPERATION,
+# OPERATOR_ID. Re-applies the per-tenant deployment - a real script would
+# re-run its IaC deployment here. Idempotent by design.
 set -euo pipefail
 
 : "${TENANT_ID:?TENANT_ID env var is required}"
