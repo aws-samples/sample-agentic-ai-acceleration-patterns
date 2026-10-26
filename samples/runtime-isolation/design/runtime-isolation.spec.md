@@ -139,8 +139,8 @@ which to prefer and why (ADR-0009).
 token, never from the agent's own role.** With `tvm` set, the ingress assumes
 `tvm.role` with session tags built from the claims it has just verified
 (`TenantId` always; `UserId` and allowlisted claims on opt-in) and forwards the
-credentials to the backend in
-`X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Credentials`. The tenant role's
+credentials to the backend over the transport the backend defines (§3.4;
+ADR-0011). The tenant role's
 policy scopes data by `${aws:PrincipalTag/TenantId}`, so a cross-tenant call
 fails in IAM whatever the agent does (enforced, not filtered). The agent holds
 no `sts:AssumeRole` (ADR-0012).
@@ -192,6 +192,23 @@ no `sts:AssumeRole` (ADR-0012).
 | `tvm.durationSeconds` | number | `900` | 900 to 3600; credential lifetime |
 
 Props are validated at synth; an invalid combination fails with the prop name.
+
+### 3.4 Backend interface
+
+A backend (ADR-0011) defines four things. Everything else in the construct is
+backend-neutral.
+
+| Concern | `agentcore-runtime` | A later backend supplies |
+|---|---|---|
+| Invoke call | `InvokeAgentRuntime`, SigV4 | its own call |
+| Who may invoke (P-1) | Runtime resource policy, ingress principal only | its own resource policy |
+| Session id transport (P-2) | `runtimeSessionId` | its own session field |
+| Credential and user-token transport (P-5, P-8) | allowlisted headers `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Credentials` and `...-Custom-User-Token`, base64 JSON | its own payload or context field, with V-7 repeated |
+
+The ingress hands the backend a validated request (`tenant_id`, `sub`,
+`conversationId`, `prompt`, optional user token, optional credentials); the
+backend maps it onto these four and never sees the bearer token's raw
+`Authorization` value.
 
 ---
 
