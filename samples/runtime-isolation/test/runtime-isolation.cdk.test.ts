@@ -91,7 +91,7 @@ describe('resolveOptions', () => {
     ingress: 'api-gateway',
   };
 
-  it('applies secure defaults: every module off, backend agentcore-runtime', () => {
+  it('applies secure defaults: every optional module off, TVM always on with the default role, backend agentcore-runtime', () => {
     expect(resolveOptions(valid)).toEqual({
       backend: 'agentcore-runtime',
       ingress: 'api-gateway',
@@ -100,7 +100,7 @@ describe('resolveOptions', () => {
       forwardUserToken: false,
       requireNarrowedToken: false,
       allowedScopes: undefined,
-      tvm: undefined,
+      tvm: { role: undefined, includeUserIdTag: false, claimTags: {}, durationSeconds: 900 },
     });
   });
 
@@ -163,8 +163,10 @@ describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
     });
   });
 
-  it('the Runtime admits no custom header when neither forwarding nor the TVM is on (ADR-0006)', () => {
-    template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', { RequestHeaderConfiguration: Match.absent() });
+  it('the Runtime always admits the credential header (the TVM is always on, ADR-0018) and no user-token header without forwarding', () => {
+    template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
+      RequestHeaderConfiguration: { RequestHeaderAllowlist: [RUNTIME_HEADERS.TENANT_CREDENTIALS] },
+    });
   });
 
   it('the resource policy allows InvokeAgentRuntime for the ingress principal only and denies everything to everyone else (P-1, ADR-0001)', () => {
@@ -195,17 +197,16 @@ describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
     expect(JSON.stringify(execStatements)).not.toContain('bedrock-agentcore:');
   });
 
-  it('the execution role holds model invocation on the one model, its code object, its log prefix and traces, and no data permission (P-6, ADR-0008)', () => {
+  it('the execution role holds its code object, its log prefix and traces, and NO model and no data permission (P-6, ADR-0008 amended by ADR-0018)', () => {
     const statements = statementsForRole(template, 'IsolatedRuntimeBackendExecutionRole');
     const actions = statements.flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action])) as string[];
     expect(actions).toEqual(
-      expect.arrayContaining(['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream', 's3:GetObject', 'logs:PutLogEvents', 'xray:PutTraceSegments', 'cloudwatch:PutMetricData']),
+      expect.arrayContaining(['s3:GetObject', 'logs:PutLogEvents', 'xray:PutTraceSegments', 'cloudwatch:PutMetricData']),
     );
-    for (const forbidden of ['dynamodb:', 'sts:AssumeRole', 'sts:TagSession', 's3:PutObject', 's3:ListBucket', 'secretsmanager:', 'bedrock-agentcore:']) {
+    for (const forbidden of ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream', 'dynamodb:', 'sts:AssumeRole', 'sts:TagSession', 's3:PutObject', 's3:ListBucket', 'secretsmanager:', 'bedrock-agentcore:']) {
       expect(actions.some((a) => a.startsWith(forbidden) || a === forbidden)).toBe(false);
     }
-    const model = statements.find((s) => s.Sid === 'OneModel');
-    expect(JSON.stringify(model.Resource)).toContain('foundation-model/amazon.nova-lite-v1:0');
+    expect(statements.find((s) => s.Sid === 'OneModel')).toBeUndefined();
     // The trust is the Runtime service for this account only.
     template.hasResourceProperties('AWS::IAM::Role', {
       Description: Match.stringLikeRegexp('execution role'),
@@ -220,10 +221,30 @@ describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
     });
   });
 
-  it('no identity policy grants sts:AssumeRole or sts:TagSession when the TVM is off (P-4)', () => {
-    const policies = JSON.stringify(template.findResources('AWS::IAM::Policy'));
-    expect(policies).not.toContain('sts:AssumeRole');
-    expect(policies).not.toContain('sts:TagSession');
+  it('the default TenantModelRole carries the one-model statement and nothing else, trusted by tvmCallerRole only (ADR-0018)', () => {
+    const callerId = Stack.of(construct).resolve(construct.tvmCallerRole.roleArn)['Fn::GetAtt'][0] as string;
+    const statements = statementsForRole(template, 'IsolatedRuntimeTenantModelRole');
+    const model = statements.find((s) => s.Sid === 'OneModel');
+    expect(model).toBeDefined();
+    expect(model.Action).toEqual(['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream']);
+    expect(JSON.stringify(model.Resource)).toContain('foundation-model/amazon.nova-lite-v1:0');
+    // No data permission on the default role.
+    for (const s of statements) {
+      expect(JSON.stringify(s.Action)).not.toContain('dynamodb:');
+    }
+    // Trust: tvmCallerRole only, TenantId request tag, TagKeys pinned, TagSession.
+    const role = Object.values(template.findResources('AWS::IAM::Role', { Properties: { Description: Match.stringLikeRegexp('Default tenant role') } }))[0] as any;
+    const [trust] = role.Properties.AssumeRolePolicyDocument.Statement;
+    expect(trust.Action).toEqual(['sts:AssumeRole', 'sts:TagSession']);
+    expect(trust.Principal).toEqual({ AWS: Stack.of(construct).resolve(construct.tvmCallerRole.roleArn) });
+    expect(trust.Condition).toEqual({
+      'StringLike': { 'aws:RequestTag/TenantId': '?*' },
+      'ForAllValues:StringEquals': { 'aws:TagKeys': ['TenantId'] },
+    });
+    expect(role.Properties.MaxSessionDuration).toBe(3600);
+    // tvmCallerRole may assume it.
+    const grant = statementsForRole(template, callerId).find((s) => s.Sid === 'AssumeTenantRole');
+    expect(grant.Action).toEqual(['sts:AssumeRole', 'sts:TagSession']);
   });
 
   it('every log group has a retention and a DESTROY (Delete) removal policy (standard §4.3)', () => {
@@ -242,7 +263,7 @@ describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
     }
   });
 
-  it('the ingress Lambdas carry every option as environment, with the modules off', () => {
+  it('the ingress Lambdas carry every option as environment, with the optional modules off and the TVM on', () => {
     const env = lambdaEnv(template, ingress === 'api-gateway' ? 'chooses the unit' : 'interceptor');
     expect(env).toMatchObject({
       [ENV.INGRESS]: ingress,
@@ -250,8 +271,13 @@ describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
       [ENV.ALLOWED_CLIENT_IDS]: 'client-one',
       [ENV.FORWARD_USER_TOKEN]: 'false',
       [ENV.REQUIRE_NARROWED_TOKEN]: 'false',
+      // The TVM is always on (ADR-0018): the default role's ARN and its defaults.
+      [ENV.TVM_INCLUDE_USER_ID_TAG]: 'false',
+      [ENV.TVM_CLAIM_TAGS]: '{}',
+      [ENV.TVM_DURATION_SECONDS]: '900',
     });
-    for (const absent of [ENV.SESSION_SCOPE, ENV.REQUIRED_SCOPES, ENV.ALLOWED_SCOPES, ENV.TVM_ROLE_ARN]) {
+    expect(env[ENV.TVM_ROLE_ARN]).toBeDefined();
+    for (const absent of [ENV.SESSION_SCOPE, ENV.REQUIRED_SCOPES, ENV.ALLOWED_SCOPES]) {
       expect(env).not.toHaveProperty(absent);
     }
   });
@@ -271,6 +297,7 @@ describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
     expect(construct.ingressRole).toBeDefined();
     expect(construct.executionRole).toBeDefined();
     expect(construct.tvmCallerRole).toBeDefined();
+    expect(construct.tenantRole).toBeDefined();
     expect(construct.options.ingress).toBe(ingress);
   });
 
@@ -445,10 +472,10 @@ describe.each(INGRESSES)('options, ingress=%s', (ingress) => {
     expect(lambdaEnv(synth({ ingress, requiredScopes: ['a', 'b'] }).template, fnDescription)[ENV.REQUIRED_SCOPES]).toBe('a,b');
   });
 
-  it('delegation.forwardUserToken puts only the user-token header on the Runtime allowlist (ADR-0006)', () => {
+  it('delegation.forwardUserToken adds the user-token header alongside the always-on credential header (ADR-0006, ADR-0018)', () => {
     const { template } = synth({ ingress, delegation: { forwardUserToken: true } });
     template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
-      RequestHeaderConfiguration: { RequestHeaderAllowlist: [RUNTIME_HEADERS.USER_TOKEN] },
+      RequestHeaderConfiguration: { RequestHeaderAllowlist: [RUNTIME_HEADERS.USER_TOKEN, RUNTIME_HEADERS.TENANT_CREDENTIALS] },
     });
     expect(lambdaEnv(template, fnDescription)[ENV.FORWARD_USER_TOKEN]).toBe('true');
   });
@@ -474,8 +501,15 @@ describe.each(INGRESSES)('options, ingress=%s', (ingress) => {
     // Only one role holds the grant.
     const all = JSON.stringify(template.toJSON());
     expect(all.split('AssumeTenantRole').length - 1).toBe(1);
-    // The execution role still has nothing tenant-scoped.
+    // The execution role still has nothing tenant-scoped, and no model.
     expect(JSON.stringify(statementsForRole(template, 'IsolatedRuntimeBackendExecutionRole'))).not.toContain('sts:');
+    expect(JSON.stringify(statementsForRole(template, 'IsolatedRuntimeBackendExecutionRole'))).not.toContain('bedrock:Invoke');
+    // The construct adds the one-model statement to the DEPLOYER's role (ADR-0018), and creates no default role.
+    const deployerId = Stack.of(construct).resolve(tenantRole.roleArn)['Fn::GetAtt'][0] as string;
+    const model = statementsForRole(template, deployerId).find((s) => s.Sid === 'OneModel');
+    expect(model.Action).toEqual(['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream']);
+    expect(construct.tenantRole).toBe(tenantRole);
+    expect(JSON.stringify(template.toJSON())).not.toContain('TenantModelRole');
     const env = lambdaEnv(template, fnDescription);
     expect(env[ENV.TVM_ROLE_ARN]).toEqual(Stack.of(construct).resolve(tenantRole.roleArn));
     expect(env[ENV.TVM_INCLUDE_USER_ID_TAG]).toBe('true');
@@ -522,11 +556,11 @@ describe.each(INGRESSES)('options, ingress=%s', (ingress) => {
   });
 });
 
-describe('the execution role model grant (P-6, ADR-0008, ADR-0017)', () => {
-  const oneModel = (t: Template) => statementsForRole(t, 'IsolatedRuntimeBackendExecutionRole').find((s) => s.Sid === 'OneModel');
+describe('the tenant role model grant (ADR-0018, was the execution role under ADR-0008)', () => {
+  const oneModel = (t: Template) => statementsForRole(t, 'IsolatedRuntimeTenantModelRole').find((s) => s.Sid === 'OneModel');
   const resolved = (s: unknown) => JSON.stringify(s);
 
-  it('a plain model id: both invoke actions on the foundation-model ARN in this Region, and nothing else', () => {
+  it('a plain model id: both invoke actions on the foundation-model ARN in this Region, and nothing else; the execution role has no model', () => {
     const { template } = synth({ ingress: 'api-gateway' });
     const statement = oneModel(template);
     expect(statement.Action).toEqual(['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream']);
@@ -536,14 +570,10 @@ describe('the execution role model grant (P-6, ADR-0008, ADR-0017)', () => {
     expect(resolved(resources[0])).toContain('::foundation-model/amazon.nova-lite-v1:0');
     expect(resolved(resources[0])).not.toContain('inference-profile');
     expect(resolved(resources[0])).not.toContain('*');
-    // No other statement of the execution role touches Bedrock, and nothing grants bedrock:* or a bedrock wildcard resource.
-    const others = statementsForRole(template, 'IsolatedRuntimeBackendExecutionRole').filter((s) => s.Sid !== 'OneModel');
-    expect(others.length).toBeGreaterThan(0);
-    for (const s of others) {
-      expect(resolved(s.Action)).not.toMatch(/"bedrock:/);
-      expect(resolved(s.Resource)).not.toContain(':bedrock:');
-    }
-    expect(resolved(statement)).not.toContain('bedrock:*');
+    // The execution role touches no Bedrock at all (ADR-0008 amended).
+    const exec = statementsForRole(template, 'IsolatedRuntimeBackendExecutionRole');
+    expect(resolved(exec)).not.toContain('bedrock:Invoke');
+    expect(exec.find((s: any) => s.Sid === 'OneModel')).toBeUndefined();
   });
 
   it('a cross-Region inference profile id: the account-scoped profile ARN plus the base model in any Region, no wildcard on the model', () => {

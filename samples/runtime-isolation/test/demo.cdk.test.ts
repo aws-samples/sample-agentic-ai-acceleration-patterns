@@ -223,12 +223,24 @@ describe('RuntimeIsolationDemoStack', () => {
     });
   });
 
-  it('without tvm: no table, no tenant role', () => {
+  it('without tvm (no demo tenant data): no table, no demo TenantRole, but the construct\'s default model-only role and a TenantRoleArn output', () => {
     const { template, stack } = synth(context());
     template.resourceCountIs('AWS::DynamoDB::GlobalTable', 0);
     expect(stack.table).toBeUndefined();
     expect(stack.tenantRole).toBeUndefined();
-    expect(JSON.stringify(template.toJSON())).not.toContain('TenantRole');
+    // The demo stack creates no data-bearing TenantRole of its own (only the construct's default model role exists).
+    const roleDescriptions = (Object.values(template.findResources('AWS::IAM::Role')) as any[]).map((r) => String(r.Properties.Description ?? ''));
+    expect(roleDescriptions.some((d) => d.includes('ABAC on the demo table'))).toBe(false);
+    // The construct's default role is present and model-only (ADR-0018).
+    const role = Object.values(template.findResources('AWS::IAM::Role', { Properties: { Description: Match.stringLikeRegexp('Default tenant role') } }))[0] as any;
+    expect(role).toBeDefined();
+    const policies = Object.values(template.findResources('AWS::IAM::Policy')) as any[];
+    const model = policies.flatMap((p) => p.Properties.PolicyDocument.Statement).find((s: any) => s.Sid === 'OneModel');
+    expect(model.Action).toEqual(['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream']);
+    // TenantRoleArn is always output; DemoTableName is not, with no demo table.
+    const outputs = Object.keys(template.toJSON().Outputs);
+    expect(outputs).toContain('TenantRoleArn');
+    expect(outputs).not.toContain('DemoTableName');
   });
 
   describe.each(['api-gateway', 'agentcore-gateway'] as const)('tvm on, ingress=%s', (ingress) => {

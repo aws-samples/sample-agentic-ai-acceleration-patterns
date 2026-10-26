@@ -54,6 +54,9 @@ const clients = (items: Record<string, Record<string, unknown>>, deny = false): 
   };
 };
 
+/** The vended credentials in the agent's SDK shape (expiration as a Date), for the model/data clients. */
+const sdkCreds = { accessKeyId: 'ASIA-SYNTHETIC', secretAccessKey: 'synthetic-secret', sessionToken: 'synthetic-token', expiration: new Date('2026-01-01T00:15:00.000Z') };
+
 /** A ConverseStream reply: text deltas then the metadata event with usage. */
 async function* converseStream(deltas: string[], usage?: { inputTokens: number; outputTokens: number }): AsyncGenerator<ConverseStreamOutput> {
   yield { messageStart: { role: 'assistant' } };
@@ -212,7 +215,7 @@ describe('converse', () => {
   it('streams each text delta as a data event and returns the usage from the metadata event', async () => {
     bedrockMock.on(ConverseStreamCommand).resolves({ stream: converseStream(['Hel', 'lo'], { inputTokens: 17, outputTokens: 42 }) } as any);
     const written: string[] = [];
-    const usage = await converse('what is runtime isolation?', MODEL_ID, (t) => written.push(t), clients({}));
+    const usage = await converse('what is runtime isolation?', MODEL_ID, sdkCreds, (t) => written.push(t), clients({}));
     expect(usage).toEqual({ inputTokens: 17, outputTokens: 42, modelId: MODEL_ID });
     expect(written).toEqual(['data: {"text":"Hel"}\n\n', 'data: {"text":"lo"}\n\n']);
     expect(bedrockMock).toHaveReceivedCommandTimes(ConverseStreamCommand, 1);
@@ -224,17 +227,19 @@ describe('converse', () => {
 
   it('fails by name when the stream ends without metadata (no usage to report)', async () => {
     bedrockMock.on(ConverseStreamCommand).resolves({ stream: converseStream(['x']) } as any);
-    await expect(converse('hi', MODEL_ID, () => {}, clients({}))).rejects.toMatchObject({ name: 'NoUsageMetadata' });
+    await expect(converse('hi', MODEL_ID, sdkCreds, () => {}, clients({}))).rejects.toMatchObject({ name: 'NoUsageMetadata' });
   });
 });
 
 describe('respond', () => {
   const headers = { [RUNTIME_HEADERS.SESSION_ID.toLowerCase()]: 's-abcdefghijklmnopqrstuvwxyz-conversationA1x0001' };
+  // A model prompt requires the vended credential header (ADR-0018): the model client is built from it.
+  const modelHeaders = { ...headers, [RUNTIME_HEADERS.TENANT_CREDENTIALS.toLowerCase()]: encodeCredentials(credentials) };
 
   it('a model prompt: SSE text deltas, then the usage event LAST with the tokens and the model id (ADR-0017)', async () => {
     bedrockMock.on(ConverseStreamCommand).resolves({ stream: converseStream(['Hel', 'lo'], { inputTokens: 17, outputTokens: 42 }) } as any);
     const { c, s } = sink();
-    await respond(headers, 'what is runtime isolation?', { modelId: MODEL_ID }, s, clients({}));
+    await respond(modelHeaders, 'what is runtime isolation?', { modelId: MODEL_ID }, s, clients({}));
     expect(c.status).toBe(200);
     expect(c.headers).toEqual({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
     expect(c.ended).toBe(true);
@@ -283,11 +288,28 @@ describe('respond', () => {
     error.name = 'ThrottlingException';
     bedrockMock.on(ConverseStreamCommand).rejects(error);
     const { c, s } = sink();
-    await respond(headers, 'hello', { modelId: MODEL_ID }, s, clients({}));
+    await respond(modelHeaders, 'hello', { modelId: MODEL_ID }, s, clients({}));
     expect(c.status).toBe(200);
     expect(events(c.body)).toEqual([{ event: 'error', data: '{"error":"ThrottlingException"}' }]);
     expect(c.body).not.toContain('<content>');
     expect(parseUsageEvent(c.body)).toBeUndefined();
+    expect(c.ended).toBe(true);
+  });
+
+  it('a model prompt without the credential header is a NoCredentials error, no model call, no fallback (ADR-0018)', async () => {
+    const { c, s } = sink();
+    await respond(headers, 'hello', { modelId: MODEL_ID }, s, clients({}));
+    expect(bedrockMock).not.toHaveReceivedCommand(ConverseStreamCommand);
+    expect(events(c.body)).toEqual([{ event: 'error', data: '{"error":"NoCredentials"}' }]);
+    expect(parseUsageEvent(c.body)).toBeUndefined();
+    expect(c.ended).toBe(true);
+  });
+
+  it('a model prompt with a malformed credential header is a MalformedCredentials error, no model call (ADR-0018)', async () => {
+    const { c, s } = sink();
+    await respond({ ...headers, [RUNTIME_HEADERS.TENANT_CREDENTIALS.toLowerCase()]: 'not-base64-json' }, 'hello', { modelId: MODEL_ID }, s, clients({}));
+    expect(bedrockMock).not.toHaveReceivedCommand(ConverseStreamCommand);
+    expect(events(c.body)).toEqual([{ event: 'error', data: '{"error":"MalformedCredentials"}' }]);
     expect(c.ended).toBe(true);
   });
 
@@ -312,14 +334,14 @@ describe('respond', () => {
     try {
       bedrockMock.on(ConverseStreamCommand).resolvesOnce({ stream: converseStream([REPLY], { inputTokens: 3, outputTokens: 4 }) } as any);
       const ok = sink();
-      await respond(headers, PROMPT, { modelId: MODEL_ID }, ok.s, clients({}));
+      await respond(modelHeaders, PROMPT, { modelId: MODEL_ID }, ok.s, clients({}));
       expect(ok.c.body).toContain(REPLY);
 
       const error = new Error(`validation failed for: ${PROMPT}`);
       error.name = 'ValidationException';
       bedrockMock.on(ConverseStreamCommand).rejects(error);
       const failed = sink();
-      await respond(headers, PROMPT, { modelId: MODEL_ID }, failed.s, clients({}));
+      await respond(modelHeaders, PROMPT, { modelId: MODEL_ID }, failed.s, clients({}));
       expect(events(failed.c.body)).toEqual([{ event: 'error', data: '{"error":"ValidationException"}' }]);
 
       const logged = spies.flatMap((spy) => spy.mock.calls.map((call) => call.map(String).join(' '))).join('\n');
