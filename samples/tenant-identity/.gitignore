@@ -49,6 +49,7 @@ src/smithy/
 TODO.md
 .kiro/
 cdk.integ.out/
+cdk.integ-cp.out/
 .holmes/
 .ash/ash_output/
 !/.projenrc.ts

@@ -104,6 +104,7 @@ project.gitignore.exclude('.kiro/');
 
 // The integ task's cloud assembly is machine output (scripts/integ.sh).
 project.gitignore.exclude('cdk.integ.out/');
+project.gitignore.exclude('cdk.integ-cp.out/');
 
 // Holmes MCP keeps its local project link here.
 project.gitignore.exclude('.holmes/');
@@ -151,5 +152,15 @@ const integ = project.addTask('integ', {
     'Run the deployment integration test in $AWS_REGION (deploys four stacks to the current AWS account)',
 });
 integ.exec('scripts/integ.sh');
+
+// Control-plane mounting integration test (mounting spec §10,
+// test/integ.control-plane.ts, scripts/integ-control-plane.sh). Deploys
+// tenant-identity (shared-pool) and a setup stack, then control-plane through
+// its own deploy path, runs the scenario, and always destroys all three.
+const integCp = project.addTask('integ:control-plane', {
+  description:
+    'Run the control-plane mounting integration test in $AWS_REGION (deploys tenant-identity, a setup stack and ../control-plane)',
+});
+integCp.exec('scripts/integ-control-plane.sh');
 
 project.synth();

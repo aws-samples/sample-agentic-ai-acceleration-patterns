@@ -1,0 +1,16 @@
+{
+  "//": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. SPDX-License-Identifier: MIT-0",
+  "preset": "ts-jest",
+  "rootDir": "../../..",
+  "roots": ["<rootDir>/test/e2e/control-plane"],
+  "testMatch": ["<rootDir>/test/e2e/control-plane/**/*.cp-e2e.test.ts"],
+  "testTimeout": 3600000,
+  "maxWorkers": 1,
+  "collectCoverage": false,
+  "globals": {
+    "ts-jest": {
+      "tsconfig": "<rootDir>/test/tsconfig.json",
+      "isolatedModules": true
+    }
+  }
+}

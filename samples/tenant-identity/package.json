@@ -14,6 +14,7 @@
     "eject": "projen eject",
     "eslint": "projen eslint",
     "integ": "projen integ",
+    "integ:control-plane": "projen integ:control-plane",
     "package": "projen package",
     "post-compile": "projen post-compile",
     "post-upgrade": "projen post-upgrade",
