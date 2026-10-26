@@ -313,6 +313,24 @@ Either way, the test:
   destroyed without leaving resources behind.
 - The README states the runtime and approximate cost of one run.
 
+**The integration test is a reference implementation**, not only a check. It
+is the one place where the sample is deployed, wired to what it depends on,
+driven through its flow, and torn down, in code a reader can run. Readers
+copy from it, so write it to be read:
+
+- It does only what a consumer of the sample could do: the published
+  construct, the published parameters, the public API. No imports from
+  another sample's `src/`, no stack outputs, no resource names the sample
+  does not publish. A shortcut that only a test could take teaches the
+  wrong wiring.
+- When the sample consumes another sample, the test is the reference for
+  that composition: it deploys the producer through the producer's own
+  deploy path and names it explicitly, so the wiring between the two is
+  shown once, end to end, and nowhere else has to describe it in prose.
+- Steps are named and ordered as the README's step table is, so the table
+  and the code can be read side by side.
+- The README's integration-test section says so, and points at the file.
+
 Record the date, Region, and coverage of the last green run in the
 `architecture.md` status block.
 
@@ -349,7 +367,9 @@ Sections, in this order, omitting only those that do not apply:
    `npx cdk deploy` commands with every `--context` input explained, and
    teardown.
 5. **Deployment integration test**: how to run `npx projen integ`, what it
-   stands up, runtime, cost, and the single-Region rule.
+   stands up, runtime, cost, and the single-Region rule. State that the test
+   is the reference implementation of the sample's wiring (§5.2) and link
+   the file.
 6. **End-to-end demo**: a runnable `scripts/demo.sh` that walks the flow
    against a deployed stack, checks each response, and cleans up what it
    created on exit (also on failure). The README section gives the command
