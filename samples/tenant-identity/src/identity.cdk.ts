@@ -19,6 +19,7 @@ import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import {
   ACCESS_TOKEN_MINUTES,
+  ADMIN_PASSWORD_KEY_ALIAS,
   Deployment,
   ENV,
   hasPerTenantPools,
@@ -29,6 +30,7 @@ import {
   REFRESH_TOKEN_DAYS,
   SAMPLE_TAG_KEY,
   SAMPLE_TAG_VALUE,
+  SHARED_PARAMETER,
   STACK_TAG_KEY,
   TENANT_ATTRIBUTE_NAME,
   TENANT_SESSION_TAG_KEY,
@@ -54,13 +56,32 @@ export interface TenantIdentityStackProps extends StackProps {
    * Publish the `/application-plane/shared/identity/*` parameters (R-6).
    * Default true. The names are fixed, so only one stack per account and
    * Region may publish them; the integration test turns it off on all but
-   * one of its stacks (ADR-0017).
+   * one of its stacks (ADR-0017). The publishing stack also owns the two
+   * fixed-name resources of the control-plane mount, `AdminPasswordKey`
+   * (ADR-0033) and `PlatformInvokePolicy` (ADR-0030), and their parameters.
    */
   readonly publishSharedParameters?: boolean;
 }
 
 /** The one API stage. Also part of the execution log group's name. */
 const STAGE_NAME = 'prod';
+
+/**
+ * The platform routes the control-plane mount scripts call (mounting spec
+ * §6.3, ADR-0030): CreateTenant, GetTenant, DeleteTenant and CreateUser (the
+ * first-admin slot on replay, M-R-6). Nothing else: not ListTenants
+ * (`GET /platform/tenants`), not the test aids, not user updates or
+ * memberships (M-R-4). execute-api ARNs cannot tell a tenant path from a
+ * user path under it, so the two `/platform/tenants/*` entries also match
+ * ListUsers, GetUser and DeleteUser; the scripts never call those, and the
+ * over-grant is recorded in threat-model.md (T-34).
+ */
+const PLATFORM_INVOKE_ROUTES: readonly { method: string; path: string }[] = [
+  { method: 'POST', path: '/platform/tenants' },
+  { method: 'GET', path: '/platform/tenants/*' },
+  { method: 'DELETE', path: '/platform/tenants/*' },
+  { method: 'POST', path: '/platform/tenants/*/users' },
+];
 
 /** The registry GSI that maps a pool to its tenant (spec §4.2). */
 const GSI_BY_USER_POOL_ID = POOL_INDEX_NAME;
@@ -1023,11 +1044,11 @@ export class TenantIdentityStack extends Stack {
     if (props.publishSharedParameters ?? true) {
       // The deployment value: a topology, or `tiered` (ADR-0027).
       new ssm.StringParameter(this, 'TopologyParameter', {
-        parameterName: '/application-plane/shared/identity/topology',
+        parameterName: SHARED_PARAMETER.topology,
         stringValue: topology,
       });
       new ssm.StringParameter(this, 'ApiUrlParameter', {
-        parameterName: '/application-plane/shared/identity/apiUrl',
+        parameterName: SHARED_PARAMETER.apiUrl,
         stringValue: api.url,
       });
       // The shared pool's ids. In tiered they are the standard tier's; a
@@ -1035,14 +1056,75 @@ export class TenantIdentityStack extends Stack {
       // (ADR-0027).
       if (sharedPool && userPool !== undefined && appClient !== undefined) {
         new ssm.StringParameter(this, 'UserPoolIdParameter', {
-          parameterName: '/application-plane/shared/identity/userPoolId',
+          parameterName: SHARED_PARAMETER.userPoolId,
           stringValue: userPool.userPoolId,
         });
         new ssm.StringParameter(this, 'AppClientIdParameter', {
-          parameterName: '/application-plane/shared/identity/appClientId',
+          parameterName: SHARED_PARAMETER.appClientId,
           stringValue: appClient.userPoolClientId,
         });
       }
+
+      // --- Control-plane mount (mounting spec §6.3, §6.5) -----------------
+      // Both resources below carry fixed, account-wide names (the key alias
+      // and the parameter names), so, like the parameters, they belong to
+      // the one stack per account and Region that publishes (ADR-0017).
+      //
+      // AdminPasswordKey (ADR-0033): the key the mount's tenant/create.sh
+      // encrypts the first admin's parked temporary password with. Default
+      // key policy only (the account root, so IAM identity policies decide
+      // who encrypts and who decrypts); nothing in this stack holds
+      // kms:Decrypt on it. Rotation on. Sample only: a KMS key cannot be
+      // deleted outright, so DESTROY schedules it with the minimum 7-day
+      // pending window (ADR-0019 teardown stance).
+      const adminPasswordKey = new kms.Key(this, 'AdminPasswordKey', {
+        description: `${this.stackName} first-admin parked temporary password (ADR-0033)`,
+        alias: ADMIN_PASSWORD_KEY_ALIAS,
+        enableKeyRotation: true,
+        removalPolicy: RemovalPolicy.DESTROY, // sample only
+        pendingWindow: Duration.days(7),
+      });
+
+      // PlatformInvokePolicy (ADR-0030, M-P-4): the least privilege for the
+      // mount, published by the producer so the consumer attaches one ARN
+      // and never writes an execute-api grant itself. Exactly two
+      // statements: the four routes the scripts call, and encrypt-through-
+      // SSM on the key above (kms:ViaService), so the build role can park a
+      // password but never read one back (no kms:Decrypt, M-R-4).
+      const platformInvokePolicy = new iam.ManagedPolicy(this, 'PlatformInvokePolicy', {
+        description: `Invoke the ${this.stackName} platform routes the control-plane mount calls, and encrypt the parked admin password through SSM (ADR-0030, ADR-0033)`,
+        statements: [
+          new iam.PolicyStatement({
+            actions: ['execute-api:Invoke'],
+            resources: PLATFORM_INVOKE_ROUTES.map((route) => api.arnForExecuteApi(route.method, route.path, STAGE_NAME)),
+          }),
+          new iam.PolicyStatement({
+            actions: ['kms:Encrypt', 'kms:GenerateDataKey'],
+            resources: [adminPasswordKey.keyArn],
+            conditions: { StringEquals: { 'kms:ViaService': `ssm.${this.region}.amazonaws.com` } },
+          }),
+        ],
+      });
+      // The `*` in the route ARNs is a path label ({tenantId}), not a
+      // wildcard grant: each ARN names one method on one API stage. cdk-nag
+      // reports each as IAM5; acknowledge each with the threat-model row
+      // that records what the label also matches.
+      for (const route of PLATFORM_INVOKE_ROUTES.filter((r) => r.path.includes('*'))) {
+        acknowledgeGranularFinding(
+          platformInvokePolicy,
+          `AwsSolutions-IAM5[Resource::${nagFindingResource(this, api.arnForExecuteApi(route.method, route.path, STAGE_NAME))}]`,
+          `ADR-0030 / threat-model M-33 (T-34): ${route.method} ${route.path} is one method on this API's ${STAGE_NAME} stage; the * stands for the {tenantId} path label, which execute-api ARNs cannot express otherwise. The same ARN also matches the user routes under the tenant path, which the mount scripts never call; the over-grant is recorded in threat-model.md.`,
+        );
+      }
+
+      new ssm.StringParameter(this, 'AdminPasswordKeyArnParameter', {
+        parameterName: SHARED_PARAMETER.adminPasswordKeyArn,
+        stringValue: adminPasswordKey.keyArn,
+      });
+      new ssm.StringParameter(this, 'PlatformInvokePolicyArnParameter', {
+        parameterName: SHARED_PARAMETER.platformInvokePolicyArn,
+        stringValue: platformInvokePolicy.managedPolicyArn,
+      });
     }
 
     // --- Teardown leaves no log group behind (ADR-0024) --------------------

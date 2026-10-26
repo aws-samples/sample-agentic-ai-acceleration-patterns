@@ -251,3 +251,37 @@ export function requireEnv(name: string): string {
   }
   return value;
 }
+
+// ---------------------------------------------------------------------------
+// Shared discovery parameters (R-6, §6.3, ADR-0017) and the control-plane
+// mount (mounting spec §6.2, ADR-0030, ADR-0033)
+// ---------------------------------------------------------------------------
+
+/**
+ * The namespace one stack per account and Region publishes (ADR-0017). The
+ * control-plane mount scripts read it; the names are fixed so a consumer
+ * needs no knowledge of the topology to find them.
+ */
+export const SHARED_PARAMETER_PREFIX = '/application-plane/shared/identity';
+
+/** The fixed parameter names under SHARED_PARAMETER_PREFIX. */
+export const SHARED_PARAMETER = {
+  /** The deployment: a topology, or `tiered` (ADR-0027). */
+  topology: `${SHARED_PARAMETER_PREFIX}/topology`,
+  /** The API base URL, with trailing slash. */
+  apiUrl: `${SHARED_PARAMETER_PREFIX}/apiUrl`,
+  /** shared-pool*: the stack pool (the standard tier's in `tiered`). */
+  userPoolId: `${SHARED_PARAMETER_PREFIX}/userPoolId`,
+  appClientId: `${SHARED_PARAMETER_PREFIX}/appClientId`,
+  /** The managed policy a control-plane tenant build role attaches (ADR-0030). */
+  platformInvokePolicyArn: `${SHARED_PARAMETER_PREFIX}/platformInvokePolicyArn`,
+  /** The key that encrypts a parked first-admin password (ADR-0033). */
+  adminPasswordKeyArn: `${SHARED_PARAMETER_PREFIX}/adminPasswordKeyArn`,
+} as const;
+
+/**
+ * The alias of the customer-managed key that encrypts the first admin's
+ * parked temporary password (ADR-0033, mounting spec §6.5). One per account
+ * and Region, owned by the stack that publishes the shared parameters.
+ */
+export const ADMIN_PASSWORD_KEY_ALIAS = 'alias/application-plane/identity/admin-password';
