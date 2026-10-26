@@ -355,6 +355,39 @@ interceptor). Deployed, probed, destroyed; no fallback is needed.
 | V-5 | PASS, with a setting | With the integration timeout at 29 s the stream is cut at 29.1 s (15 of 20 events). With `timeout: Duration.minutes(2)` it streams the full 36 s, TTFB 0.25 s. STREAM mode allows up to 15 min; the construct must set it. |
 | V-6 | PASS | The allowlisted header reaches the agent from both ingresses (Lambda via an SDK `build` middleware; Gateway via the interceptor's `transformedGatewayRequest.headers`). The Gateway does not pass the client's `Authorization` to a SigV4 Runtime. |
 
+**V-7 (run separately, same day, same account):** PASS. Rebuilt the spike with
+a `riacspike-tenant` role (trusts only the two token-validating Lambda roles,
+requires `aws:RequestTag/TenantId`, `aws:TagKeys` pinned to `TenantId`,
+`UserId`; `dynamodb:GetItem` with `dynamodb:LeadingKeys =
+TENANT#${aws:PrincipalTag/TenantId}`), a table with one item per tenant, and
+the credential header on the Runtime allowlist.
+
+| Check | API Gateway | AgentCore Gateway |
+|---|---|---|
+| Credential header reaches the agent | yes, 1,240 bytes | yes, 1,240 bytes |
+| Agent's caller identity | `assumed-role/riacspike-tenant/tenant-tenanta` | same |
+| A1 reads tenant A (positive control) | item returned | item returned |
+| A1 reads tenant B | `AccessDeniedException` from DynamoDB | same |
+| B1 reads tenant A | not run | `AccessDeniedException` |
+| Second call, same tenant | served from the Lambda's cache | same |
+| Runner assumes the tenant role directly | `AccessDenied` | |
+
+CloudTrail shows one `AssumeRole` on the tenant role per ingress Lambda per
+tenant, not per request, plus the runner's denied attempt. After the run,
+every log group on the path was pulled and searched for the access key prefix
+`ASIA`, `secretAccessKey`, the base64 of `{"accessKeyId":`, the header name,
+and a JWT prefix: API Gateway execution logs (INFO, data trace off) and the
+JSON access log hold request ids, status, and timings only; the ingress and
+interceptor Lambda logs hold header *names* only (by construction); the
+Runtime log group's per-session, `otel-rt-logs`, and `spans` streams were
+empty for this agent; AgentCore Gateway vends no log group. Zero hits.
+
+Two things the construct must carry from this: `dataTraceEnabled` MUST stay
+off on the API Gateway stage (data trace logs request headers), and the agent
+and any OTEL instrumentation MUST not record request headers. Cold-start TTFB
+with a fresh `AssumeRole` was 1.5 to 3.7 s; a cached credential added about
+0.1 s.
+
 Also seen: the same session id from both ingresses lands in the same microVM
 (same per-VM nonce), and A2 using A1's `conversationId` gets a different
 session and microVM. Single-call latencies were 0.2-0.3 s warm on both
