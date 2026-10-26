@@ -276,8 +276,12 @@ user get created; if that fails, the claim is released with a conditional
 delete (`firstAdminUsername = :email`) and the original error is returned.
 
 **M-R-9:** `CreateTenant` creates its first admin through the same path, so
-the admin it makes also holds the slot. `DeleteUser` on the slot holder MUST
-release the slot in the same way, so the vendor can replace a lost admin.
+the admin it makes also holds the slot. Platform `DeleteUser` on the slot
+holder MUST release the slot in the same way, so the vendor can replace a
+lost admin. If the holder's Cognito user is already gone, a platform
+`DeleteUser` naming the holder's email returns 404 and still releases the
+slot. The tenant-admin `DeleteTenantUser` does not touch the slot: its role
+holds registry reads only (tenant-identity R-8), and that control is kept.
 
 The guard is a conditional write on the authoritative record, not a
 read-then-write (control-plane P-5). Two racing `firstAdmin` creates get one
@@ -415,7 +419,9 @@ status and body to the caller in variables.
 5. **M-R-6** (replay after a create that left no admin, tenant-identity §5.1
    last sentence, or a build killed before the park): `POST
    /platform/tenants/{T}/users {email: ADMIN_EMAIL, firstAdmin: true}`:
-   - 201 → park the returned password (step 6), done.
+   - 201 → park the returned password (step 6), done. A 201 with no
+     `temporaryPassword` (an existing pool user was added as a member, so no
+     new Cognito user was made) parks nothing and is success.
    - 409 → the slot is held; an admin exists. Do nothing; never re-park.
    - other → exit 1.
 
