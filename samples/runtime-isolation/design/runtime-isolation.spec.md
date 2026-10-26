@@ -186,7 +186,7 @@ listed in `architecture.md` (standard §4.4).
 
 | ID | Component | Notes |
 |---|---|---|
-| C-1 | **Backend: AgentCore Runtime** (the first backend, ADR-0011) | TypeScript agent, direct code deployment; IAM inbound auth; resource policy per P-1; `requireMMDSV2: true`; `requestHeaderAllowlist` holds the user-token header only when P-5 forwarding is on |
+| C-1 | **Backend: AgentCore Runtime** (the first backend, ADR-0011) | TypeScript agent, direct code deployment; IAM inbound auth; resource policy per P-1; `requireMMDSV2: true` (amended 2026-10-26: not exposed by `AWS::BedrockAgentCore::Runtime` in aws-cdk-lib 2.274.0, so left out until CloudFormation supports it; threat-model T-13); `requestHeaderAllowlist` holds the user-token header only when P-5 forwarding is on |
 | C-2 | **Agent** | Echoes its unit id and a per-VM nonce and calls one Bedrock model; validates `prompt` is a string (Runtime best practices, input validation) |
 | C-3a | **Ingress A: API Gateway** | Regional REST API, one `POST /invocations` route, Lambda request authoriser (JWT verify, P-3) and a Lambda proxy integration with `responseTransferMode: STREAM`. The integration Lambda chooses the unit (P-2) and calls `InvokeAgentRuntime` with SigV4, streaming the response back |
 | C-3b | **Ingress B: AgentCore Gateway** | No protocol type; `CUSTOM_JWT` inbound authoriser on the tenant-identity pool; one Runtime target (`http.agentcoreRuntime`) with `GATEWAY_IAM_ROLE` outbound; a REQUEST interceptor Lambda that chooses the unit and overwrites the session header (P-2), and enforces P-5 |
@@ -212,7 +212,7 @@ listed in `architecture.md` (standard §4.4).
 |---|---|---|---|
 | `identity.discoveryUrl` | string | required | OIDC discovery URL of the issuer |
 | `identity.allowedClientIds` | string[] | required, non-empty | `client_id` values accepted |
-| `agent` | `{ codePath, modelId }` | required | agent code and the one model it may invoke |
+| `agent` | `{ codePath, modelId, environment? }` | required | agent code and the one model it may invoke; `environment` (added 2026-10-26 at implementation: the demo agent needs its table name, and a construct cannot know a consumer's agent configuration) |
 | `backend` | `'agentcore-runtime'` | `'agentcore-runtime'` | the session-isolating compute service (ADR-0011) |
 | `ingress` | `'api-gateway' \| 'agentcore-gateway'` | required | C-3a or C-3b; `agentcore-gateway` is valid only with the `agentcore-runtime` backend |
 | `session.scope` | `'user' \| 'tenant'` | none (session mapping off: fresh unit per request) | with `session` set, conversations persist in a unit derived from the claims; `'user'` if `scope` is omitted (P-2, ADR-0013) |
