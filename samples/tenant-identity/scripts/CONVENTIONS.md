@@ -60,9 +60,41 @@ credentials, so the overriding rule is that none of those ever reach output.
   parameter that failed (name, not value) so the log is diagnosable without a
   re-run. Never swallow an error into a success exit.
 
+## Scripts that run in CodeBuild (`control-plane/`)
+
+`control-plane/{tenant,cell}/*.sh` and `control-plane/lib.sh` are the mount
+the `control-plane` sample runs in its tenant and cell CodeBuild projects
+(ADR-0028, [control-plane mounting spec](../design/control-plane-mounting.spec.md)
+§7). They follow everything above plus the control-plane sample's own
+`scripts/CONVENTIONS.md`, because their output lands in a CloudWatch log group
+readable by anyone with log-group access:
+
+- **Inputs are environment variables, guarded.** `TENANT_ID`, `TENANT_NAME`,
+  `CELL_ID`, `OPERATION`, `ADMIN_EMAIL` (create only), `OPERATOR_ID` and
+  `AWS_REGION` (spec §6.1), each behind a `: "${VAR:?...}"` guard, before
+  `lib.sh` is sourced.
+- **Log the operator beside the tenant id** (`OPERATOR_ID`, spec §3.3), so a
+  platform-API access-log line, which shows only the build role, can be joined
+  to the operator through the build log.
+- **One door to the platform API.** Every call goes through
+  `platform_call METHOD TEMPLATE [BODY]`, which prints exactly
+  `"<METHOD> <path-template> -> HTTP <code>"` (the template, with
+  `{tenantId}` unexpanded) and returns the status and body in
+  `PLATFORM_STATUS` / `PLATFORM_BODY`. Nothing else prints a URL or a body.
+- **Secrets never touch a command line.** SigV4 credentials go to `curl`
+  through `--config -` on stdin, request bodies through a mode-0600 `mktemp`
+  file (`--data-binary @file`), and the parked password only as `--value` to
+  `aws ssm put-parameter ... > /dev/null`, followed by `unset PW`.
+- **Replay is the recovery path** (spec M-P-3). Read state first, write only
+  what is missing, treat "already there" and "already gone" as success, and
+  exit non-zero for anything else, naming the operation and HTTP status.
+- **Unit-tested with stubs.** `test/scripts/` runs every script with `aws` and
+  `curl` replaced on `PATH`, covering each branch of spec §7 and asserting
+  that no stub ever sees a password, e-mail or credential in its argv.
+
 ## Scope
 
 These conventions apply to every script in this directory (`demo.sh`,
-`integ.sh`) and any script added later. They are the local-script counterpart
-of `docs/sample-standard.md` §4.4 (no secrets, tokens, or caller payloads in
-logs).
+`integ.sh`, `control-plane/`) and any script added later. They are the
+local-script counterpart of `docs/sample-standard.md` §4.4 (no secrets,
+tokens, or caller payloads in logs).
