@@ -45,6 +45,15 @@ export interface TenantRecord {
    */
   readonly apiKeyId?: string;
   readonly apiKeyValue?: string;
+  /**
+   * ADR-0032: the tenant's single first-admin slot, claimed by a conditional
+   * write before the admin's Cognito user is created and released when that
+   * user is deleted. The value is the admin's e-mail, which is the sign-in
+   * name in every pool the sample creates. This is a tenant fact (which
+   * user holds the slot), the one place a user's address reaches the
+   * registry; it never leaves through the API (`GetTenant` omits it).
+   */
+  readonly firstAdminUsername?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -93,6 +102,18 @@ export interface Registry extends RegistryReader {
    * Throws NotFoundError if the tenant does not exist.
    */
   markDeleting(tenantId: string): Promise<TenantRecord>;
+  /**
+   * ADR-0032 (mounting spec M-R-8): claims the tenant's first-admin slot
+   * with one conditional write (`attribute_not_exists(firstAdminUsername)`).
+   * ConflictError when the slot is held or the row is gone; nothing changes.
+   */
+  claimFirstAdmin(tenantId: string, username: string): Promise<void>;
+  /**
+   * ADR-0032 (M-R-8, M-R-9): releases the slot only if `username` holds it
+   * (`firstAdminUsername = :username`). A slot held by someone else, or
+   * already empty, is left alone and is not an error.
+   */
+  releaseFirstAdmin(tenantId: string, username: string): Promise<void>;
   /** Removes the item. A missing item is not an error. */
   delete(tenantId: string): Promise<void>;
 }
@@ -322,6 +343,55 @@ export class DynamoDBRegistry implements Registry {
     } catch (error) {
       if (isConditionFailure(error)) {
         throw new NotFoundError(`Tenant ${tenantId} not found`);
+      }
+      throw error;
+    }
+  }
+
+  async claimFirstAdmin(tenantId: string, username: string): Promise<void> {
+    // ADR-0032: the slot is decided by this conditional write, never by a
+    // read (control-plane P-5): two racing claims get one success and one
+    // ConflictError whatever order Cognito later sees them in. The
+    // attribute_exists(PK) guard keeps an UpdateItem on a vanished row from
+    // creating a stub item; that case is also a conflict (the tenant is
+    // being deleted), not a new row.
+    try {
+      await this.client.send(
+        new UpdateCommand({
+          TableName: this.tableName,
+          Key: key(tenantId),
+          UpdateExpression: 'SET firstAdminUsername = :u, updatedAt = :now',
+          ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(firstAdminUsername)',
+          ExpressionAttributeValues: { ':u': username, ':now': this.now().toISOString() },
+        }),
+      );
+    } catch (error) {
+      if (isConditionFailure(error)) {
+        throw new ConflictError(`Tenant ${tenantId} already has a first admin`);
+      }
+      throw error;
+    }
+  }
+
+  async releaseFirstAdmin(tenantId: string, username: string): Promise<void> {
+    // ADR-0032: the conditional delete of the attribute (M-R-8). Only the
+    // holder's name releases the slot, so a release that runs after a new
+    // claim (a lost race, or a stale retry) cannot free the newer holder.
+    // A failed condition means there is nothing to release: already gone is
+    // success (mounting spec M-P-3).
+    try {
+      await this.client.send(
+        new UpdateCommand({
+          TableName: this.tableName,
+          Key: key(tenantId),
+          UpdateExpression: 'REMOVE firstAdminUsername SET updatedAt = :now',
+          ConditionExpression: 'attribute_exists(PK) AND firstAdminUsername = :u',
+          ExpressionAttributeValues: { ':u': username, ':now': this.now().toISOString() },
+        }),
+      );
+    } catch (error) {
+      if (isConditionFailure(error)) {
+        return;
       }
       throw error;
     }

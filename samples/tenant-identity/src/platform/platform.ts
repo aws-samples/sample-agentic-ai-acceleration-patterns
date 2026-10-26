@@ -48,7 +48,7 @@ import {
   ValidationError,
 } from '../smithy/platform/typescript-ssdk-codegen/src';
 import type { ProvisionersFor } from '../topology';
-import type { UserView } from '../topology/provisioner';
+import type { NewUserResult, Provisioner, UserView } from '../topology/provisioner';
 
 /**
  * The per-request context the platform function builds from the API Gateway
@@ -118,8 +118,13 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
   ): Promise<CreateTenantServerOutput> => {
     const name = requireField(input.name, 'name');
     const adminEmail = requireField(input.adminEmail, 'adminEmail');
-    const tenantId = this.newTenantId();
-    log.info('CreateTenant', { operation: 'CreateTenant', tenantId });
+    // ADR-0029: an upstream control plane may supply the id so one tenant has
+    // one id across planes (mounting spec M-P-1). The model types it TenantId,
+    // so a bad id was already a 400 (M-R-3); an existing one fails the
+    // conditional registry write below with 409 and changes nothing (M-R-2).
+    const callerSuppliedId = input.tenantId !== undefined;
+    const tenantId = input.tenantId ?? this.newTenantId();
+    log.info('CreateTenant', { operation: 'CreateTenant', tenantId, callerSuppliedId });
 
     return this.mapErrors('CreateTenant', tenantId, async () => {
       // ADR-0027: the tenant's topology. In `tiered` it is the chosen tier's;
@@ -150,7 +155,9 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       };
       // R-10: only tenant fields reach the registry — never user data. No
       // pool/group fields yet; they are written by activate() once Cognito is
-      // built.
+      // built. The write's attribute_not_exists(PK) condition holds for a
+      // caller-supplied id too: a replay against an existing tenant is a 409
+      // here, before Cognito is touched (ADR-0029, M-R-2).
       await this.registry.create(record);
 
       // Provision Cognito. On failure the provisioner undoes its own half-built
@@ -239,10 +246,12 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
         throw error;
       }
 
-      // The tenant is now ACTIVE. If the admin step fails the tenant stays
-      // ACTIVE with no admin and the error surfaces; the vendor retries with
-      // CreateUser (spec §5.1).
-      const admin = await provisioner.createUser(active, adminEmail, true);
+      // The tenant is now ACTIVE. The admin is created through the first-admin
+      // path, so it holds the tenant's slot (ADR-0032, M-R-9). If the step
+      // fails the slot is released, the tenant stays ACTIVE with no admin and
+      // the error surfaces; the vendor retries with CreateUser {firstAdmin:
+      // true} (spec §5.1, mounting spec M-R-6).
+      const admin = await this.createFirstAdmin(provisioner, active, adminEmail);
       return {
         tenant: this.toTenant(active),
         admin: { user: toUser(admin.user), temporaryPassword: admin.temporaryPassword },
@@ -301,10 +310,17 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
   ): Promise<CreateUserServerOutput> => {
     const tenantId = requireField(input.tenantId, 'tenantId');
     const email = requireField(input.email, 'email');
-    log.info('CreateUser', { operation: 'CreateUser', tenantId });
+    const firstAdmin = input.firstAdmin === true;
+    log.info('CreateUser', { operation: 'CreateUser', tenantId, firstAdmin });
     return this.mapErrors('CreateUser', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
-      const result = await this.provisioners(tenant.topology).createUser(tenant, email, input.admin ?? false);
+      const provisioner = this.provisioners(tenant.topology);
+      // ADR-0032: `firstAdmin` claims the tenant's single slot first (409 if
+      // held) and implies admin. A plain `admin: true` is unchanged: a tenant
+      // may have many admins; it has one first admin.
+      const result = firstAdmin
+        ? await this.createFirstAdmin(provisioner, tenant, email)
+        : await provisioner.createUser(tenant, email, input.admin ?? false);
       return { user: toUser(result.user), temporaryPassword: result.temporaryPassword };
     });
   };
@@ -361,7 +377,19 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     log.info('DeleteUser', { operation: 'DeleteUser', tenantId });
     return this.mapErrors('DeleteUser', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
-      await this.provisioners(tenant.topology).deleteUser(tenant, username);
+      const provisioner = this.provisioners(tenant.topology);
+      // ADR-0032 (M-R-9): find out BEFORE the delete whether the user holds
+      // the first-admin slot; afterwards there is no user left to ask.
+      const slot = await this.firstAdminSlotHeldBy(provisioner, tenant, username);
+      await provisioner.deleteUser(tenant, username);
+      if (slot !== undefined) {
+        // Released only after Cognito confirms the delete, so a failed delete
+        // never frees a slot whose holder still exists. If this write fails
+        // the user is gone and the slot stale; the next DeleteUser of the
+        // holder's e-mail takes the stale-slot path in firstAdminSlotHeldBy.
+        await this.registry.releaseFirstAdmin(tenantId, slot);
+        log.info('first-admin slot released', { operation: 'DeleteUser', tenantId });
+      }
       return {};
     });
   };
@@ -448,6 +476,71 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
   // -------------------------------------------------------------------
 
   /**
+   * The first-admin path (ADR-0032, mounting spec M-R-8). Claim the tenant's
+   * slot with one conditional write, THEN create the Cognito user as an
+   * admin. The slot, not a read, decides: two racing calls get one 201 and
+   * one 409 whatever order Cognito sees them in (control-plane P-5). A
+   * failed claim changes nothing. If Cognito refuses after the claim, the
+   * slot is released with a conditional write on the same name and the
+   * original error surfaces; a release failure is logged and the original
+   * error still surfaces (the next claim of this e-mail is a 409 the vendor
+   * clears with DeleteUser, M-R-9).
+   */
+  private async createFirstAdmin(provisioner: Provisioner, tenant: TenantRecord, email: string): Promise<NewUserResult> {
+    await this.registry.claimFirstAdmin(tenant.tenantId, email);
+    try {
+      return await provisioner.createUser(tenant, email, true);
+    } catch (error) {
+      try {
+        await this.registry.releaseFirstAdmin(tenant.tenantId, email);
+      } catch (cleanup) {
+        log.error('first-admin slot release failed', {
+          operation: 'CreateUser',
+          tenantId: tenant.tenantId,
+          error: errorName(cleanup),
+        });
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Whether `username` (a Cognito username or an e-mail, per the model) is
+   * the tenant's first admin; returns the slot value to release, or
+   * undefined. Nothing is read when no slot is held, so DeleteUser on a
+   * tenant without one is unchanged. The slot holds the admin's e-mail, so
+   * the user is resolved through the provisioner (R-12 check included) and
+   * compared on e-mail.
+   *
+   * Stale slot: if the holder is already gone from Cognito (deleted through
+   * the tenant admin's door, which cannot write the registry, M-14, or by a
+   * membership removal) a DeleteUser naming the holder's e-mail releases
+   * the slot and still answers 404, so the vendor can replace a lost first
+   * admin (M-R-9) without the registry ever being edited by hand.
+   */
+  private async firstAdminSlotHeldBy(
+    provisioner: Provisioner,
+    tenant: TenantRecord,
+    username: string,
+  ): Promise<string | undefined> {
+    const holder = tenant.firstAdminUsername;
+    if (holder === undefined) {
+      return undefined;
+    }
+    let user: UserView;
+    try {
+      user = await provisioner.getUser(tenant, username);
+    } catch (error) {
+      if (error instanceof NotFoundError && username === holder) {
+        await this.registry.releaseFirstAdmin(tenant.tenantId, holder);
+        log.info('stale first-admin slot released', { operation: 'DeleteUser', tenantId: tenant.tenantId });
+      }
+      throw error;
+    }
+    return user.email === holder ? holder : undefined;
+  }
+
+  /**
    * The topology a new tenant runs on (ADR-0027). `tiered`: the tier is
    * required and names it; the error is a 400 with a fixed message, so the
    * vendor learns the field, not a 500. Any single topology: `tier` has no
@@ -471,7 +564,12 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     return this.deployment;
   }
 
-  /** Projects a registry record to the Smithy Tenant shape (dates as Date). */
+  /**
+   * Projects a registry record to the Smithy Tenant shape (dates as Date).
+   * Field by field on purpose: the row's API key (ADR-0025) and first-admin
+   * slot (ADR-0032) are tenant facts the registry holds and the API never
+   * returns (mounting spec §10 step 4).
+   */
   private toTenant(record: TenantRecord): Tenant {
     // ADR-0027: `tier` only in a `tiered` deployment, derived from the row's
     // topology (the tier is never stored twice). Omitted elsewhere.

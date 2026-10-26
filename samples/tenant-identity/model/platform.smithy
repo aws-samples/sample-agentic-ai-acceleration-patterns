@@ -49,9 +49,17 @@ resource PlatformTenant {
 }
 
 /// Onboards a tenant and its first admin (ADR-0014). Synchronous (ADR-0004).
+/// The admin holds the tenant's first-admin slot (ADR-0032).
 @http(method: "POST", uri: "/platform/tenants", code: 201)
 operation CreateTenant {
     input := {
+        /// Optional. When present, the registry row is written with this id
+        /// instead of a generated one, so an upstream control plane keeps
+        /// one id across planes (ADR-0029). An existing id is a 409
+        /// ConflictError and changes nothing. Typed `TenantId` so the ULID
+        /// pattern rejects a bad id with 400 before any write.
+        tenantId: TenantId
+
         @required
         name: TenantName
 
@@ -167,6 +175,13 @@ operation CreateUser {
 
         /// Also add the user to `admin-<tenantId>`.
         admin: Boolean
+
+        /// Optional. When true, the call claims the tenant's single
+        /// first-admin slot with one conditional write before the Cognito
+        /// user is created (ADR-0032); 409 ConflictError if the slot is
+        /// taken, and nothing changes. Implies `admin: true`. A tenant may
+        /// have many admins; it has one first admin.
+        firstAdmin: Boolean
     }
 
     output := {

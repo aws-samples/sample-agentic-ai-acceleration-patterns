@@ -202,6 +202,69 @@ describe('DynamoDBRegistry (spec §4, ADR-0002)', () => {
     expect(ddb).toHaveReceivedCommandWith(AnyDelete, { TableName: TABLE, Key: { PK: 'TENANT#01ARZ3NDEKTSV4RRFFQ69G5FA7', SK: 'META' } });
   });
 
+  describe('first-admin slot (ADR-0032, mounting spec M-R-8, M-R-9)', () => {
+    const TENANT = '01ARZ3NDEKTSV4RRFFQ69G5FS1';
+    const EMAIL = 'success+admin@simulator.amazonses.com';
+    const conditionFailure = () => {
+      const err = new Error('condition');
+      err.name = 'ConditionalCheckFailedException';
+      return err;
+    };
+
+    it('claimFirstAdmin is ONE conditional write guarded by attribute_not_exists(firstAdminUsername)', async () => {
+      ddb.on(UpdateCommand).resolves({});
+      await registry().claimFirstAdmin(TENANT, EMAIL);
+      const calls = ddb.commandCalls(UpdateCommand);
+      expect(calls).toHaveLength(1);
+      const input = calls[0].args[0].input;
+      expect(input.Key).toEqual({ PK: `TENANT#${TENANT}`, SK: 'META' });
+      expect(input.ConditionExpression).toBe('attribute_exists(PK) AND attribute_not_exists(firstAdminUsername)');
+      expect(input.UpdateExpression).toBe('SET firstAdminUsername = :u, updatedAt = :now');
+      expect(input.ExpressionAttributeValues[':u']).toBe(EMAIL);
+      // No read before the write: the condition decides (control-plane P-5).
+      expect(ddb.commandCalls(GetCommand)).toHaveLength(0);
+    });
+
+    it('claimFirstAdmin throws ConflictError when the slot is held, changing nothing else', async () => {
+      ddb.on(UpdateCommand).rejects(conditionFailure());
+      await expect(registry().claimFirstAdmin(TENANT, EMAIL)).rejects.toBeInstanceOf(ConflictError);
+      await expect(registry().claimFirstAdmin(TENANT, EMAIL)).rejects.toThrow('already has a first admin');
+      expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
+      expect(ddb.commandCalls(DeleteCommand)).toHaveLength(0);
+    });
+
+    it('claimFirstAdmin rethrows any other DynamoDB error', async () => {
+      ddb.on(UpdateCommand).rejects(Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' }));
+      await expect(registry().claimFirstAdmin(TENANT, EMAIL)).rejects.toThrow('throttled');
+    });
+
+    it('releaseFirstAdmin removes the attribute only when the given name holds it', async () => {
+      ddb.on(UpdateCommand).resolves({});
+      await registry().releaseFirstAdmin(TENANT, EMAIL);
+      const input = ddb.commandCalls(UpdateCommand)[0].args[0].input;
+      expect(input.Key).toEqual({ PK: `TENANT#${TENANT}`, SK: 'META' });
+      expect(input.ConditionExpression).toBe('attribute_exists(PK) AND firstAdminUsername = :u');
+      expect(input.UpdateExpression).toBe('REMOVE firstAdminUsername SET updatedAt = :now');
+      expect(input.ExpressionAttributeValues[':u']).toBe(EMAIL);
+    });
+
+    it('releaseFirstAdmin treats a failed condition (held by another, or already empty) as done', async () => {
+      ddb.on(UpdateCommand).rejects(conditionFailure());
+      await expect(registry().releaseFirstAdmin(TENANT, EMAIL)).resolves.toBeUndefined();
+    });
+
+    it('releaseFirstAdmin rethrows any other DynamoDB error', async () => {
+      ddb.on(UpdateCommand).rejects(Object.assign(new Error('down'), { name: 'InternalServerError' }));
+      await expect(registry().releaseFirstAdmin(TENANT, EMAIL)).rejects.toThrow('down');
+    });
+
+    it('get returns firstAdminUsername from the row (the service decides what leaves through the API)', async () => {
+      const r = record(TENANT, { firstAdminUsername: EMAIL });
+      ddb.on(GetCommand).resolves({ Item: item(r) });
+      expect((await registry().get(TENANT))?.firstAdminUsername).toBe(EMAIL);
+    });
+  });
+
   it('never writes an item with user or membership fields (R-10)', async () => {
     const r = record('01ARZ3NDEKTSV4RRFFQ69G5FA8');
     ddb.on(PutCommand).resolves({});

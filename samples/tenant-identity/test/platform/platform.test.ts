@@ -13,6 +13,7 @@ import type { Page, Registry, TenantRecord, TenantStatus } from '../../src/share
 import type { TenantApiKey, TenantApiKeys } from '../../src/shared/tenant-api-keys';
 import {
   ConflictError,
+  CreateTenantInput,
   InternalServerError,
   ResourceNotFoundError,
   ValidationError,
@@ -83,6 +84,25 @@ class FakeRegistry implements Registry {
     const updated: TenantRecord = { ...existing, status: 'DELETING' };
     this.items.set(tenantId, updated);
     return updated;
+  }
+  async claimFirstAdmin(tenantId: string, username: string): Promise<void> {
+    this.calls.push(`claimFirstAdmin:${tenantId}`);
+    // Mirror the DynamoDB impl: one conditional write, 409 if held or gone.
+    const existing = this.items.get(tenantId);
+    if (existing === undefined || existing.firstAdminUsername !== undefined) {
+      throw new DomainConflictError(`Tenant ${tenantId} already has a first admin`);
+    }
+    this.items.set(tenantId, { ...existing, firstAdminUsername: username });
+  }
+  async releaseFirstAdmin(tenantId: string, username: string): Promise<void> {
+    this.calls.push(`releaseFirstAdmin:${tenantId}`);
+    // Mirror the DynamoDB impl: only the holder's name releases; else no-op.
+    const existing = this.items.get(tenantId);
+    if (existing === undefined || existing.firstAdminUsername !== username) {
+      return;
+    }
+    const { firstAdminUsername: _released, ...rest } = existing;
+    this.items.set(tenantId, rest);
   }
   async delete(tenantId: string): Promise<void> {
     this.calls.push(`delete:${tenantId}`);
@@ -202,8 +222,14 @@ describe('PlatformService (spec §5.1)', () => {
       // R-10: registry received only tenant fields, no user payload.
       expect(stored).not.toHaveProperty('email');
       expect(stored).not.toHaveProperty('temporaryPassword');
-      // The admin step runs after activation, against the ACTIVE record.
-      expect(provisioner.createUser).toHaveBeenCalledWith(stored, 'admin@example.com', true);
+      // The admin step runs after activation, against the ACTIVE record, and
+      // holds the first-admin slot (ADR-0032, M-R-9).
+      expect(provisioner.createUser).toHaveBeenCalledWith(
+        expect.objectContaining({ tenantId: TENANT_A, status: 'ACTIVE', groupName: `t-${TENANT_A}` }),
+        'admin@example.com',
+        true,
+      );
+      expect(stored.firstAdminUsername).toBe('admin@example.com');
     });
 
     it('deletes the PROVISIONING row and rethrows when provisioning fails (ADR-0021, spec §5.1)', async () => {
@@ -249,8 +275,329 @@ describe('PlatformService (spec §5.1)', () => {
       await expect(
         makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT),
       ).rejects.toBeInstanceOf(ConflictError);
-      // Tenant remains ACTIVE; vendor retries CreateUser.
+      // Tenant remains ACTIVE; vendor retries CreateUser {firstAdmin: true},
+      // so the slot the failed admin step claimed is released (M-R-8).
       expect(registry.items.get(TENANT_A)?.status).toBe('ACTIVE');
+      expect(registry.items.get(TENANT_A)).not.toHaveProperty('firstAdminUsername');
+      expect(registry.calls).toContain(`releaseFirstAdmin:${TENANT_A}`);
+    });
+  });
+
+  describe('CreateTenant with a caller-supplied tenantId (ADR-0029, mounting spec M-R-2, M-R-3)', () => {
+    const SUPPLIED = '01HZXK5V3P9Q7R2T4W6Y8A0BCD';
+
+    function ready(): { registry: FakeRegistry; provisioner: jest.Mocked<Provisioner> } {
+      const registry = new FakeRegistry();
+      const provisioner = mockProvisioner();
+      provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${SUPPLIED}` });
+      provisioner.createUser.mockResolvedValue({ user: userView('admin', true), temporaryPassword: 'T#1' });
+      return { registry, provisioner };
+    }
+
+    it('uses the supplied id for the row, the provisioner, the key and the response; the generator is not called', async () => {
+      const { registry, provisioner } = ready();
+      const newTenantId = jest.fn(() => TENANT_A);
+      const service = new PlatformService({
+        registry,
+        provisioners: provisionersFor(provisioner),
+        apiKeys,
+        deployment: 'shared-pool-multi-tenant',
+        newTenantId,
+        now: () => FIXED_NOW,
+      });
+
+      const out = await service.CreateTenant({ tenantId: SUPPLIED, name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT);
+
+      expect(out.tenant?.tenantId).toBe(SUPPLIED);
+      expect(registry.items.has(SUPPLIED)).toBe(true);
+      expect(registry.items.has(TENANT_A)).toBe(false);
+      expect(newTenantId).not.toHaveBeenCalled();
+      expect(provisioner.provisionTenant).toHaveBeenCalledWith(SUPPLIED, 'Acme');
+      expect(apiKeys.create).toHaveBeenCalledWith(SUPPLIED, undefined);
+    });
+
+    it('an existing id is a 409 from the conditional registry write and changes nothing (M-R-2)', async () => {
+      const { registry, provisioner } = ready();
+      const before = { ...tenantRecord(), tenantId: SUPPLIED, firstAdminUsername: 'first@example.com' };
+      registry.items.set(SUPPLIED, before);
+
+      await expect(
+        makeService(registry, provisioner).CreateTenant({ tenantId: SUPPLIED, name: 'Replay', adminEmail: 'b@example.com' }, CONTEXT),
+      ).rejects.toBeInstanceOf(ConflictError);
+
+      // The write was attempted (the condition decides, not a read) and refused.
+      expect(registry.calls).toContain(`create:${SUPPLIED}`);
+      expect(registry.items.get(SUPPLIED)).toEqual(before);
+      expect(registry.items.size).toBe(1);
+      // Nothing was built or torn down in Cognito or API Gateway.
+      expect(provisioner.provisionTenant).not.toHaveBeenCalled();
+      expect(provisioner.deprovisionTenant).not.toHaveBeenCalled();
+      expect(provisioner.createUser).not.toHaveBeenCalled();
+      expect(apiKeys.create).not.toHaveBeenCalled();
+      expect(registry.calls).not.toContain(`delete:${SUPPLIED}`);
+    });
+
+    it('without tenantId the generated id is used as before', async () => {
+      const { registry, provisioner } = ready();
+      provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
+      const out = await makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT);
+      expect(out.tenant?.tenantId).toBe(TENANT_A);
+      expect(registry.items.has(TENANT_A)).toBe(true);
+    });
+
+    it('the generated model validator rejects a bad id with the TenantId pattern before the service runs (M-R-3)', () => {
+      // The pattern lives on the TenantId shape the member reuses, so the
+      // same ULID rule applies to the optional input as to every path label.
+      const failures = CreateTenantInput.validate({ tenantId: 'not-a-ulid', name: 'Acme', adminEmail: 'a@example.com' });
+      expect(failures).toEqual([
+        expect.objectContaining({ path: '/tenantId', constraintType: 'pattern', constraintValues: '^[0-9A-HJKMNP-TV-Z]{26}$' }),
+      ]);
+      expect(CreateTenantInput.validate({ tenantId: SUPPLIED, name: 'Acme', adminEmail: 'a@example.com' })).toEqual([]);
+      // Lower-case and the excluded letters (I, L, O, U) are refused too.
+      expect(CreateTenantInput.validate({ tenantId: SUPPLIED.toLowerCase(), name: 'Acme', adminEmail: 'a@example.com' })).toHaveLength(1);
+      expect(CreateTenantInput.validate({ tenantId: '01HZXK5V3P9Q7R2T4W6Y8A0BIL', name: 'Acme', adminEmail: 'a@example.com' })).toHaveLength(1);
+    });
+  });
+
+  describe('first-admin slot (ADR-0032, mounting spec M-R-8, M-R-9)', () => {
+    const FIRST = 'success+admin@simulator.amazonses.com';
+    const OTHER = 'other@example.com';
+
+    function withActiveTenant(firstAdminUsername?: string): {
+      registry: FakeRegistry;
+      provisioner: jest.Mocked<Provisioner>;
+      service: PlatformService;
+    } {
+      const registry = new FakeRegistry();
+      registry.items.set(TENANT_A, { ...tenantRecord(), ...(firstAdminUsername === undefined ? {} : { firstAdminUsername }) });
+      const provisioner = mockProvisioner();
+      return { registry, provisioner, service: makeService(registry, provisioner) };
+    }
+
+    it('CreateUser {firstAdmin: true} claims the slot, then creates an admin -> 201 with the slot held', async () => {
+      const { registry, provisioner, service } = withActiveTenant();
+      let slotWhenCreated: string | undefined;
+      provisioner.createUser.mockImplementation(async () => {
+        slotWhenCreated = registry.items.get(TENANT_A)?.firstAdminUsername;
+        return { user: { ...userView('sub-1', true), email: FIRST }, temporaryPassword: 'T#1' };
+      });
+
+      const out = await service.CreateUser({ tenantId: TENANT_A, email: FIRST, firstAdmin: true }, CONTEXT);
+
+      // The claim precedes the Cognito call (M-R-8), and implies admin.
+      expect(slotWhenCreated).toBe(FIRST);
+      expect(provisioner.createUser).toHaveBeenCalledWith(expect.objectContaining({ tenantId: TENANT_A }), FIRST, true);
+      expect(out.user?.admin).toBe(true);
+      expect(out.temporaryPassword).toBe('T#1');
+      expect(registry.items.get(TENANT_A)?.firstAdminUsername).toBe(FIRST);
+    });
+
+    it('firstAdmin: true with admin: false still creates an admin (firstAdmin implies admin)', async () => {
+      const { provisioner, service } = withActiveTenant();
+      provisioner.createUser.mockResolvedValue({ user: userView('sub-1', true), temporaryPassword: 'T#1' });
+      await service.CreateUser({ tenantId: TENANT_A, email: FIRST, admin: false, firstAdmin: true }, CONTEXT);
+      expect(provisioner.createUser).toHaveBeenCalledWith(expect.anything(), FIRST, true);
+    });
+
+    it('a taken slot is a 409 before any Cognito call, and the holder is unchanged', async () => {
+      const { registry, provisioner, service } = withActiveTenant(FIRST);
+
+      await expect(
+        service.CreateUser({ tenantId: TENANT_A, email: OTHER, firstAdmin: true }, CONTEXT),
+      ).rejects.toMatchObject({ name: 'ConflictError', message: `Tenant ${TENANT_A} already has a first admin` });
+
+      expect(provisioner.createUser).not.toHaveBeenCalled();
+      expect(registry.items.get(TENANT_A)?.firstAdminUsername).toBe(FIRST);
+      // Nothing was released either: the failed claim touched nothing.
+      expect(registry.calls).not.toContain(`releaseFirstAdmin:${TENANT_A}`);
+    });
+
+    it('a replay with the same e-mail is also a 409 (the slot, not Cognito uniqueness, decides)', async () => {
+      const { provisioner, service } = withActiveTenant(FIRST);
+      await expect(
+        service.CreateUser({ tenantId: TENANT_A, email: FIRST, firstAdmin: true }, CONTEXT),
+      ).rejects.toBeInstanceOf(ConflictError);
+      expect(provisioner.createUser).not.toHaveBeenCalled();
+    });
+
+    it('a Cognito failure after the claim releases the slot and surfaces the ORIGINAL error', async () => {
+      const { registry, provisioner, service } = withActiveTenant();
+      provisioner.createUser.mockRejectedValue(new DomainConflictError('E-mail already exists'));
+
+      await expect(
+        service.CreateUser({ tenantId: TENANT_A, email: FIRST, firstAdmin: true }, CONTEXT),
+      ).rejects.toMatchObject({ name: 'ConflictError', message: 'E-mail already exists' });
+
+      expect(registry.calls).toEqual(expect.arrayContaining([`claimFirstAdmin:${TENANT_A}`, `releaseFirstAdmin:${TENANT_A}`]));
+      expect(registry.items.get(TENANT_A)).not.toHaveProperty('firstAdminUsername');
+      // The slot is free again: a retry succeeds.
+      provisioner.createUser.mockResolvedValue({ user: userView('sub-1', true), temporaryPassword: 'T#1' });
+      await expect(service.CreateUser({ tenantId: TENANT_A, email: FIRST, firstAdmin: true }, CONTEXT)).resolves.toBeDefined();
+      expect(registry.items.get(TENANT_A)?.firstAdminUsername).toBe(FIRST);
+    });
+
+    it('an unknown Cognito failure after the claim releases the slot and is a 500 without the message (N-6)', async () => {
+      const { registry, provisioner, service } = withActiveTenant();
+      provisioner.createUser.mockRejectedValue(new Error('secret cognito detail'));
+      await expect(
+        service.CreateUser({ tenantId: TENANT_A, email: FIRST, firstAdmin: true }, CONTEXT),
+      ).rejects.toMatchObject({ name: 'InternalServerError', message: 'Internal server error' });
+      expect(registry.items.get(TENANT_A)).not.toHaveProperty('firstAdminUsername');
+    });
+
+    it('the original error still surfaces when the release itself fails', async () => {
+      const { registry, provisioner, service } = withActiveTenant();
+      provisioner.createUser.mockRejectedValue(new DomainConflictError('E-mail already exists'));
+      jest.spyOn(registry, 'releaseFirstAdmin').mockRejectedValue(new Error('ddb down'));
+      await expect(
+        service.CreateUser({ tenantId: TENANT_A, email: FIRST, firstAdmin: true }, CONTEXT),
+      ).rejects.toMatchObject({ name: 'ConflictError', message: 'E-mail already exists' });
+      expect(registry.releaseFirstAdmin).toHaveBeenCalledWith(TENANT_A, FIRST);
+    });
+
+    it('a second plain admin is allowed while the slot is held (many admins, one first admin)', async () => {
+      const { registry, provisioner, service } = withActiveTenant(FIRST);
+      provisioner.createUser.mockResolvedValue({ user: { ...userView('sub-2', true), email: OTHER }, temporaryPassword: 'T#2' });
+
+      const out = await service.CreateUser({ tenantId: TENANT_A, email: OTHER, admin: true }, CONTEXT);
+
+      expect(out.user?.admin).toBe(true);
+      expect(provisioner.createUser).toHaveBeenCalledWith(expect.anything(), OTHER, true);
+      expect(registry.calls).not.toContain(`claimFirstAdmin:${TENANT_A}`);
+      expect(registry.items.get(TENANT_A)?.firstAdminUsername).toBe(FIRST);
+    });
+
+    it('CreateUser without firstAdmin never touches the slot (unchanged behaviour)', async () => {
+      const { registry, provisioner, service } = withActiveTenant();
+      provisioner.createUser.mockResolvedValue({ user: userView('u1'), temporaryPassword: 'T#1' });
+      await service.CreateUser({ tenantId: TENANT_A, email: 'u1@example.com', admin: false }, CONTEXT);
+      await service.CreateUser({ tenantId: TENANT_A, email: 'u2@example.com', firstAdmin: false }, CONTEXT);
+      expect(registry.calls.filter((c) => c.startsWith('claimFirstAdmin') || c.startsWith('releaseFirstAdmin'))).toEqual([]);
+      expect(registry.items.get(TENANT_A)).not.toHaveProperty('firstAdminUsername');
+    });
+
+    it('CreateTenant\'s admin holds the slot, claimed before the Cognito user is created (M-R-9)', async () => {
+      const registry = new FakeRegistry();
+      const provisioner = mockProvisioner();
+      provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
+      let slotWhenCreated: string | undefined;
+      provisioner.createUser.mockImplementation(async () => {
+        slotWhenCreated = registry.items.get(TENANT_A)?.firstAdminUsername;
+        return { user: { ...userView('sub-1', true), email: FIRST }, temporaryPassword: 'T#1' };
+      });
+
+      const out = await makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: FIRST }, CONTEXT);
+
+      expect(slotWhenCreated).toBe(FIRST);
+      expect(registry.items.get(TENANT_A)?.firstAdminUsername).toBe(FIRST);
+      // Claimed after activation (the row must be ACTIVE for the write to matter).
+      expect(registry.calls.indexOf(`activate:${TENANT_A}`)).toBeLessThan(registry.calls.indexOf(`claimFirstAdmin:${TENANT_A}`));
+      // A replay of the first-admin step is now a 409, with no second admin.
+      await expect(
+        makeService(registry, provisioner).CreateUser({ tenantId: TENANT_A, email: FIRST, firstAdmin: true }, CONTEXT),
+      ).rejects.toBeInstanceOf(ConflictError);
+      expect(provisioner.createUser).toHaveBeenCalledTimes(1);
+      // The slot never leaves through the API.
+      expect(JSON.stringify(out)).not.toContain('firstAdminUsername');
+    });
+
+    describe('DeleteUser (M-R-9)', () => {
+      it('deleting the holder (by Cognito username) releases the slot after the Cognito delete', async () => {
+        const { registry, provisioner, service } = withActiveTenant(FIRST);
+        provisioner.getUser.mockResolvedValue({ ...userView('sub-1', true), email: FIRST });
+        let slotWhenDeleted: string | undefined;
+        provisioner.deleteUser.mockImplementation(async () => {
+          slotWhenDeleted = registry.items.get(TENANT_A)?.firstAdminUsername;
+        });
+
+        await service.DeleteUser({ tenantId: TENANT_A, username: 'sub-1' }, CONTEXT);
+
+        expect(provisioner.deleteUser).toHaveBeenCalledWith(expect.objectContaining({ tenantId: TENANT_A }), 'sub-1');
+        // Still held while Cognito ran; released only after it succeeded.
+        expect(slotWhenDeleted).toBe(FIRST);
+        expect(registry.items.get(TENANT_A)).not.toHaveProperty('firstAdminUsername');
+        // The vendor can now replace the lost admin.
+        provisioner.createUser.mockResolvedValue({ user: userView('sub-9', true), temporaryPassword: 'T#9' });
+        await expect(service.CreateUser({ tenantId: TENANT_A, email: OTHER, firstAdmin: true }, CONTEXT)).resolves.toBeDefined();
+        expect(registry.items.get(TENANT_A)?.firstAdminUsername).toBe(OTHER);
+      });
+
+      it('deleting the holder by e-mail releases the slot too', async () => {
+        const { registry, provisioner, service } = withActiveTenant(FIRST);
+        provisioner.getUser.mockResolvedValue({ ...userView('sub-1', true), email: FIRST });
+        provisioner.deleteUser.mockResolvedValue(undefined);
+        await service.DeleteUser({ tenantId: TENANT_A, username: FIRST }, CONTEXT);
+        expect(registry.items.get(TENANT_A)).not.toHaveProperty('firstAdminUsername');
+      });
+
+      it('deleting another user leaves the slot held', async () => {
+        const { registry, provisioner, service } = withActiveTenant(FIRST);
+        provisioner.getUser.mockResolvedValue({ ...userView('sub-2', true), email: OTHER });
+        provisioner.deleteUser.mockResolvedValue(undefined);
+
+        await service.DeleteUser({ tenantId: TENANT_A, username: 'sub-2' }, CONTEXT);
+
+        expect(provisioner.deleteUser).toHaveBeenCalledWith(expect.anything(), 'sub-2');
+        expect(registry.items.get(TENANT_A)?.firstAdminUsername).toBe(FIRST);
+        expect(registry.calls).not.toContain(`releaseFirstAdmin:${TENANT_A}`);
+      });
+
+      it('a failed Cognito delete keeps the slot (the holder still exists)', async () => {
+        const { registry, provisioner, service } = withActiveTenant(FIRST);
+        provisioner.getUser.mockResolvedValue({ ...userView('sub-1', true), email: FIRST });
+        provisioner.deleteUser.mockRejectedValue(new Error('cognito down'));
+        await expect(service.DeleteUser({ tenantId: TENANT_A, username: 'sub-1' }, CONTEXT)).rejects.toBeInstanceOf(InternalServerError);
+        expect(registry.items.get(TENANT_A)?.firstAdminUsername).toBe(FIRST);
+      });
+
+      it('with no slot held, DeleteUser does not read the user first (unchanged behaviour)', async () => {
+        const { registry, provisioner, service } = withActiveTenant();
+        provisioner.deleteUser.mockResolvedValue(undefined);
+        await service.DeleteUser({ tenantId: TENANT_A, username: 'sub-2' }, CONTEXT);
+        expect(provisioner.getUser).not.toHaveBeenCalled();
+        expect(registry.calls).not.toContain(`releaseFirstAdmin:${TENANT_A}`);
+      });
+
+      it('a stale slot (holder already gone from Cognito) is released by DeleteUser of the holder\'s e-mail, which still 404s', async () => {
+        // The tenant admin\'s door deleted the first admin; it cannot write
+        // the registry (M-14), so the slot outlived the user.
+        const { registry, provisioner, service } = withActiveTenant(FIRST);
+        provisioner.getUser.mockRejectedValue(new NotFoundError('User not found in tenant'));
+
+        await expect(service.DeleteUser({ tenantId: TENANT_A, username: FIRST }, CONTEXT)).rejects.toBeInstanceOf(ResourceNotFoundError);
+
+        expect(provisioner.deleteUser).not.toHaveBeenCalled();
+        expect(registry.items.get(TENANT_A)).not.toHaveProperty('firstAdminUsername');
+        // Recovery: a new first admin can now be created.
+        provisioner.createUser.mockResolvedValue({ user: userView('sub-9', true), temporaryPassword: 'T#9' });
+        await expect(service.CreateUser({ tenantId: TENANT_A, email: OTHER, firstAdmin: true }, CONTEXT)).resolves.toBeDefined();
+      });
+
+      it('a 404 for a name that is not the holder leaves the slot alone', async () => {
+        const { registry, provisioner, service } = withActiveTenant(FIRST);
+        provisioner.getUser.mockRejectedValue(new NotFoundError('User not found in tenant'));
+        await expect(service.DeleteUser({ tenantId: TENANT_A, username: OTHER }, CONTEXT)).rejects.toBeInstanceOf(ResourceNotFoundError);
+        expect(registry.items.get(TENANT_A)?.firstAdminUsername).toBe(FIRST);
+        expect(registry.calls).not.toContain(`releaseFirstAdmin:${TENANT_A}`);
+      });
+    });
+
+    it('GetTenant and ListTenants never expose firstAdminUsername (mounting spec §10 step 4)', async () => {
+      const { service } = withActiveTenant(FIRST);
+      const got = await service.GetTenant({ tenantId: TENANT_A }, CONTEXT);
+      expect(got.tenant).not.toHaveProperty('firstAdminUsername');
+      expect(JSON.stringify(got)).not.toContain(FIRST);
+      const listed = await service.ListTenants({}, CONTEXT);
+      expect(JSON.stringify(listed)).not.toContain('firstAdminUsername');
+      expect(JSON.stringify(listed)).not.toContain(FIRST);
+    });
+
+    it('DeleteTenant removes the row, slot included, with no separate release', async () => {
+      const { registry, provisioner, service } = withActiveTenant(FIRST);
+      provisioner.deprovisionTenant.mockResolvedValue(undefined);
+      await service.DeleteTenant({ tenantId: TENANT_A }, CONTEXT);
+      expect(registry.items.has(TENANT_A)).toBe(false);
+      expect(registry.calls).not.toContain(`releaseFirstAdmin:${TENANT_A}`);
     });
   });
 
