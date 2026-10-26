@@ -12,14 +12,14 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Aws, Names, Stack } from 'aws-cdk-lib';
+import { Aws, Names, Stack, Token } from 'aws-cdk-lib';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3assets from 'aws-cdk-lib/aws-s3-assets';
 import { Construct } from 'constructs';
 import { RUNTIME_HEADERS } from './agentcore-runtime.transport';
 import type { BackendTransportOptions, IBackend } from './backend.cdk';
-import { ENV } from '../shared/config';
+import { AGENT_ENV, ENV } from '../shared/config';
 import { acknowledgeGranularFinding, nagFindingResource } from '../shared/nag';
 
 /** The entry file the Runtime starts inside `codePath`. */
@@ -27,6 +27,40 @@ export const AGENT_ENTRY_POINT = 'app.js';
 
 /** The Runtime actions the policy denies to everyone (ADR-0001): everything but the one invoke call. */
 export const INVOKE_ACTION = 'bedrock-agentcore:InvokeAgentRuntime';
+
+/**
+ * Cross-Region inference profile ids carry a geo prefix (`eu.`, `us.`,
+ * `apac.`, `global.`, ...) before the foundation model id. Such a call is
+ * authorised on the profile ARN (account-scoped) AND on the foundation-model
+ * ARN in the Regions the profile routes to; a plain model id needs the
+ * foundation-model ARN in this Region only. An unresolved token is treated as
+ * a plain id (the demo passes a literal).
+ */
+const INFERENCE_PROFILE_PREFIX = /^(us|eu|apac|global|us-gov|jp|au|ca)\./;
+
+export function isInferenceProfileId(modelId: string): boolean {
+  return !Token.isUnresolved(modelId) && INFERENCE_PROFILE_PREFIX.test(modelId);
+}
+
+/** The foundation model id behind an inference profile id (`eu.amazon.nova-lite-v1:0` -> `amazon.nova-lite-v1:0`). */
+export function baseModelId(modelId: string): string {
+  return modelId.replace(INFERENCE_PROFILE_PREFIX, '');
+}
+
+function foundationModelArn(region: string, modelId: string): string {
+  return `arn:${Aws.PARTITION}:bedrock:${region}::foundation-model/${modelId}`;
+}
+
+/** The resources the `OneModel` statement names: exactly the ARN forms this one model id needs, no wildcard on the model. */
+export function modelResourceArns(modelId: string): string[] {
+  if (!isInferenceProfileId(modelId)) {
+    return [foundationModelArn(Aws.REGION, modelId)];
+  }
+  return [
+    `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:inference-profile/${modelId}`,
+    foundationModelArn('*', baseModelId(modelId)),
+  ];
+}
 
 export interface AgentCoreRuntimeBackendProps {
   /** Directory with `app.js` (a Node HTTP server on port 8080). Uploaded as the Runtime's code. */
@@ -88,10 +122,21 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
     this.executionRole.addToPolicy(
       new iam.PolicyStatement({
         sid: 'OneModel',
+        // Both invoke forms: the agent streams (ConverseStream is authorised
+        // as InvokeModelWithResponseStream); Converse is InvokeModel.
         actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
-        resources: [`arn:${Aws.PARTITION}:bedrock:${Aws.REGION}::foundation-model/${props.modelId}`],
+        resources: modelResourceArns(props.modelId),
       }),
     );
+    if (isInferenceProfileId(props.modelId)) {
+      // The foundation-model ARN carries no account and, for a cross-Region
+      // profile, no fixed Region: `*` here is the Region, not the model.
+      acknowledgeGranularFinding(
+        this.executionRole,
+        `AwsSolutions-IAM5[Resource::${nagFindingResource(this, foundationModelArn('*', baseModelId(props.modelId)))}]`,
+        'A cross-Region inference profile routes the call to the model in any Region of its set, so the foundation-model ARN names one model with a Region wildcard; the profile ARN itself is exact (ADR-0008).',
+      );
+    }
     this.executionRole.addToPolicy(
       new iam.PolicyStatement({
         sid: 'Traces',
@@ -145,7 +190,7 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
       networkConfiguration: { networkMode: 'PUBLIC' },
       protocolConfiguration: 'HTTP',
       requestHeaderConfiguration: allowlist.length > 0 ? { requestHeaderAllowlist: allowlist } : undefined,
-      environmentVariables: props.environment,
+      environmentVariables: { [AGENT_ENV.MODEL_ID]: props.modelId, ...props.environment },
     });
     this.runtime.node.addDependency(this.executionRole);
     this.resourceArn = this.runtime.attrAgentRuntimeArn;

@@ -8,7 +8,11 @@
  * Lambda response streaming (spike V-5: the integration timeout is two
  * minutes, set by the construct). Logs carry the verified tenantId and the
  * session prefix as fields, never a header value (P-9); one EMF record per
- * request carries requests, 4xx/5xx, TTFB and streamed bytes.
+ * request carries requests, 4xx/5xx, TTFB and streamed bytes (P-9) and the
+ * cost meters (P-10, ADR-0017): ingress milliseconds, backend invoke
+ * seconds (from the invoke call to the end of the stream), and the model
+ * tokens read from the agent's final `event: usage` SSE event. The stream is
+ * forwarded unchanged; the scanner only looks at it.
  */
 
 import type { Writable } from 'node:stream';
@@ -17,7 +21,7 @@ import { AgentCoreRuntimeBackend } from '../backend/agentcore-runtime.transport'
 import type { InvokeBackend } from '../backend/backend';
 import { ENV, readIngressConfig, requireEnv } from '../shared/config';
 import { errorName, log } from '../shared/logger';
-import { emitRequestMetrics } from '../shared/metrics';
+import { emitRequestMetrics, type RequestMetrics, UsageEventScanner } from '../shared/metrics';
 import { ERROR_TEXT, IngressPipeline, pipelineFor, RequestError } from '../shared/request';
 import { prefixOf } from '../shared/session';
 
@@ -58,9 +62,18 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
   // The tenant the authoriser verified: present on every request that reached
   // us, so even a refusal below is attributed to a tenant in the metrics.
   const authorizedTenant = (event.requestContext?.authorizer as Record<string, unknown> | undefined)?.tenantId;
-  const tenantForMetrics = (status: number, tenantId?: string, extra: { ttfbMs?: number; streamedBytes?: number } = {}) =>
+  type Extra = Omit<RequestMetrics, 'tenantId' | 'ingress' | 'status' | 'ingressDurationMs'>;
+  // One EMF record per request, emitted once, at the end, so IngressDurationMs
+  // covers the whole handler (P-10).
+  const tenantForMetrics = (status: number, tenantId?: string, extra: Extra = {}) =>
     emitRequestMetrics(
-      { tenantId: tenantId ?? (typeof authorizedTenant === 'string' ? authorizedTenant : 'unknown'), ingress: 'api-gateway', status, ...extra },
+      {
+        tenantId: tenantId ?? (typeof authorizedTenant === 'string' ? authorizedTenant : 'unknown'),
+        ingress: 'api-gateway',
+        status,
+        ingressDurationMs: now() - started,
+        ...extra,
+      },
       deps.metricsOut,
     );
 
@@ -84,6 +97,10 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
   }
 
   const fields = { ingress: 'api-gateway', tenantId: request.tenantId, sessionPrefix: prefixOf(request.unitId) };
+  // Backend invoke wall time runs from the invoke call to the end of the
+  // stream: the AgentCore Runtime bills the session's active CPU and memory
+  // over that window (P-10).
+  const invokeStarted = now();
   let response;
   try {
     response = await deps.backend.invoke(request);
@@ -94,6 +111,9 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
 
   let ttfbMs: number | undefined;
   let streamedBytes = 0;
+  // Reads the usage event off the stream as it passes; the chunks the caller
+  // receives are the chunks the backend sent (ADR-0017).
+  const usage = new UsageEventScanner();
   out.start(200, { 'Content-Type': response.contentType, 'Cache-Control': 'no-store' });
   try {
     for await (const chunk of response.body) {
@@ -101,6 +121,7 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
         ttfbMs = now() - started;
       }
       streamedBytes += chunk.byteLength;
+      usage.feed(chunk);
       out.write(chunk);
     }
   } catch (error) {
@@ -109,8 +130,30 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
   } finally {
     out.end();
   }
-  log.info('request served', { ...fields, status: 200, ttfbMs, streamedBytes, totalMs: now() - started });
-  tenantForMetrics(200, request.tenantId, { ttfbMs, streamedBytes });
+  const backendInvokeSeconds = (now() - invokeStarted) / 1000;
+  const reported = usage.result();
+  // Figures only: the token counts and the model id, never stream content.
+  // (The logger drops any field whose name contains "token", a guard for
+  // bearer tokens, so the counts are logged as usageInput/usageOutput.)
+  log.info('request served', {
+    ...fields,
+    status: 200,
+    ttfbMs,
+    streamedBytes,
+    backendInvokeSeconds,
+    usageInput: reported?.inputTokens,
+    usageOutput: reported?.outputTokens,
+    modelId: reported?.modelId,
+    usageReported: reported !== undefined,
+    totalMs: now() - started,
+  });
+  tenantForMetrics(200, request.tenantId, {
+    ttfbMs,
+    streamedBytes,
+    backendInvokeSeconds,
+    modelInputTokens: reported?.inputTokens,
+    modelOutputTokens: reported?.outputTokens,
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -121,7 +121,8 @@ for INGRESS in api-gateway agentcore-gateway; do
   # TODO: aws bedrock-agentcore invoke-agent-runtime ... must fail with AccessDeniedException (resource policy); read exit status only.
 
   step 4b "A2 and B1 send A1's conversationId (and A1's unit id in the session header): own units, never A1's (P-2)"
-  # TODO: POST {conversationId: c1, prompt: "hello"} as A1, A2, B1; compare sessionPrefix and nonce from the agent report.
+  # TODO: POST {conversationId: c1, prompt: "report"} as A1, A2, B1; compare sessionPrefix and nonce from the agent report
+  #       (the first `data:` event of the SSE response; "hello" would go to the model, ADR-0017).
 
   step 5 "A1 resumes c1: same nonce"
   # TODO
@@ -137,6 +138,10 @@ for INGRESS in api-gateway agentcore-gateway; do
 
   step 8a "TVM: A1 reads tenant A (ok), tenant B (AccessDeniedException); the runner cannot assume the tenant role"
   # TODO: prompt "read tenant-a" then "read tenant-b"; aws sts assume-role on TenantRoleArn with the runner's credentials must fail (exit status only).
+
+  step 8b "cost attribution: a model prompt's stream ends with event: usage; RuntimeIsolation ModelOutputTokens has a datapoint for TenantId=tenant-a (api-gateway only, P-10)"
+  # TODO: POST a non-probe prompt; assert the last SSE event is `event: usage` with inputTokens/outputTokens > 0;
+  #       on api-gateway, poll get-metric-statistics for ModelOutputTokens and BackendInvokeSeconds with Name=TenantId,Value=tenant-a.
 
   step 9 "latency probe: 20 invocations, TTFB and total, p50/p95"
   # TODO: curl -w '%{time_starttransfer} %{time_total}' x20; compute percentiles with sort/awk; print the table.

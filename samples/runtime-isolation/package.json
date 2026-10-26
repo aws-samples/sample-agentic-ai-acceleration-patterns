@@ -48,6 +48,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-agentcore": "3.1154.0",
+    "@aws-sdk/client-bedrock-runtime": "3.1154.0",
     "@aws-sdk/client-dynamodb": "3.1154.0",
     "@aws-sdk/client-sts": "3.1154.0",
     "aws-cdk-lib": "^2.274.0",

@@ -32,6 +32,7 @@ const project = new awscdk.AwsCdkTypeScriptApp({
   deps: [
     // Runtime: the ingress Lambdas and the echo agent
     '@aws-sdk/client-bedrock-agentcore@3.1154.0', // InvokeAgentRuntime (backend, ADR-0011)
+    '@aws-sdk/client-bedrock-runtime@3.1154.0', // agent's ConverseStream call; token usage for the usage event (P-10, ADR-0017)
     '@aws-sdk/client-sts@3.1154.0', // TVM AssumeRole + TagSession (ADR-0012); agent GetCallerIdentity
     '@aws-sdk/client-dynamodb@3.1154.0', // echo agent's demo-table read with vended credentials
     'jose@5.10.0', // JWT verification against the issuer's JWKS (P-3); 5.x ships CJS, which ts-jest needs (6.x is ESM-only)

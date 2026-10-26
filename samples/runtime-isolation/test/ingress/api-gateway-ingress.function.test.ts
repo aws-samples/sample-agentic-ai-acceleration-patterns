@@ -124,7 +124,8 @@ describe('handleRequest', () => {
     expect(served.sessionPrefix).toBe(backend.requests[0].unitId.split('-')[1]);
     expect(served.ingress).toBe('api-gateway');
     expect(served.status).toBe(200);
-    expect(served.ttfbMs).toBe(100);
+    // The clock ticks 100 ms per read: start, invoke start, first chunk.
+    expect(served.ttfbMs).toBe(200);
     expect(served.streamedBytes).toBe(18);
     expect(logs.join('\n')).not.toContain(token);
     expect(logs.join('\n')).not.toContain('conversationA1x0001');
@@ -137,8 +138,81 @@ describe('handleRequest', () => {
     expect(record.TenantId).toBe('tenant-a');
     expect(record.Ingress).toBe('api-gateway');
     expect(record.Requests).toBe(1);
-    expect(record.TtfbMs).toBe(100);
+    expect(record.TtfbMs).toBe(200);
     expect(record.StreamedBytes).toBe(18);
+  });
+
+  describe('cost metering (P-10, ADR-0017)', () => {
+    const USAGE = 'event: usage\ndata: {"inputTokens":17,"outputTokens":42,"modelId":"amazon.nova-lite-v1:0"}\n\n';
+    const body = '{"prompt":"what is runtime isolation?","conversationId":"conversationA1x0001"}';
+
+    it('reads the usage event off the stream and emits tokens, backend seconds, ingress ms and bytes once per request', async () => {
+      // now() ticks 100 ms per read, so every duration is a positive, ordered number.
+      const chunks = ['data: {"text":"Hel"}\n\n', 'data: {"text":"lo"}\n\n', USAGE];
+      const { w, out } = writer();
+      await handleRequest(event(`Bearer ${await issuer.mint()}`, body), out, deps(new FakeBackend(chunks)));
+      expect(metrics).toHaveLength(1);
+      const record = JSON.parse(metrics[0]);
+      expect(record).toMatchObject({
+        TenantId: 'tenant-a',
+        Ingress: 'api-gateway',
+        Requests: 1,
+        ModelInputTokens: 17,
+        ModelOutputTokens: 42,
+        StreamedBytes: Buffer.byteLength(chunks.join('')),
+      });
+      expect(record.BackendInvokeSeconds).toBeGreaterThan(0);
+      expect(record.IngressDurationMs).toBeGreaterThan(record.BackendInvokeSeconds * 1000);
+      expect(record.TtfbMs).toBeGreaterThan(0);
+      const names = record._aws.CloudWatchMetrics[0].Metrics.map((m: any) => m.Name);
+      expect(names).toEqual(expect.arrayContaining(['Requests', 'IngressDurationMs', 'BackendInvokeSeconds', 'ModelInputTokens', 'ModelOutputTokens', 'StreamedBytes']));
+      // The stream reached the caller byte for byte, usage event included.
+      expect(w.body).toBe(chunks.join(''));
+      // The log carries figures, never the streamed text.
+      const served = logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request served');
+      expect(served).toMatchObject({ usageInput: 17, usageOutput: 42, modelId: 'amazon.nova-lite-v1:0', usageReported: true });
+      expect(logs.join('\n')).not.toContain('Hel');
+      expect(metrics[0]).not.toContain('Hel');
+      // Nor the prompt.
+      expect(logs.join('\n')).not.toContain('what is runtime isolation');
+      expect(metrics[0]).not.toContain('what is runtime isolation');
+    });
+
+    it('finds the usage event when it is split across chunks', async () => {
+      const chunks = ['data: {"text":"x"}\n\neven', 't: usage\ndata: {"inputTokens":1,"out', 'putTokens":2,"modelId":"m"}\n\n'];
+      await handleRequest(event(`Bearer ${await issuer.mint()}`, body), writer().out, deps(new FakeBackend(chunks)));
+      expect(JSON.parse(metrics[0])).toMatchObject({ ModelInputTokens: 1, ModelOutputTokens: 2 });
+    });
+
+    it('a stream without a usage event leaves the token metrics absent (a visible gap, not a guess)', async () => {
+      await handleRequest(event(`Bearer ${await issuer.mint()}`, body), writer().out, deps(new FakeBackend()));
+      const record = JSON.parse(metrics[0]);
+      expect(record).not.toHaveProperty('ModelInputTokens');
+      expect(record).not.toHaveProperty('ModelOutputTokens');
+      expect(record.BackendInvokeSeconds).toBeGreaterThan(0);
+      expect(record.IngressDurationMs).toBeGreaterThan(0);
+      expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request served').usageReported).toBe(false);
+    });
+
+    it('a refusal carries IngressDurationMs but no backend or model figures', async () => {
+      await handleRequest(event(undefined, body), writer().out, deps(new FakeBackend()));
+      const record = JSON.parse(metrics[0]);
+      expect(record.Errors4xx).toBe(1);
+      expect(record.IngressDurationMs).toBeGreaterThan(0);
+      for (const absent of ['BackendInvokeSeconds', 'ModelInputTokens', 'ModelOutputTokens', 'StreamedBytes', 'TtfbMs']) {
+        expect(record).not.toHaveProperty(absent);
+      }
+    });
+
+    it('a backend failure (502) carries IngressDurationMs and no BackendInvokeSeconds', async () => {
+      const error = new Error('x');
+      error.name = 'AccessDeniedException';
+      await handleRequest(event(`Bearer ${await issuer.mint()}`, body), writer().out, deps(new FakeBackend([], error)));
+      const record = JSON.parse(metrics[0]);
+      expect(record.Errors5xx).toBe(1);
+      expect(record.IngressDurationMs).toBeGreaterThan(0);
+      expect(record).not.toHaveProperty('BackendInvokeSeconds');
+    });
   });
 
   it.each([

@@ -7,13 +7,17 @@ import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import {
   AGENT_RUNTIME_PARAMETERS,
+  dashboardName,
   DEFAULT_MODEL_ID,
   DemoContext,
   IDENTITY_PARAMETERS,
+  meteredCostMetrics,
   parseDemoContext,
   PLACEHOLDER,
   RuntimeIsolationDemoStack,
+  tenantSearchExpression,
 } from '../src/demo.cdk';
+import { COST_METRIC_NAMES } from '../src/shared/metrics';
 
 /** The thin demo stack (spec C-4, §6.4): consumes tenant-identity's parameters, publishes its own, wires the TVM demo. */
 const FIXTURE_AGENT = path.join(__dirname, 'fixtures', 'agent');
@@ -41,6 +45,18 @@ function synth(ctx: DemoContext, publishParameters?: boolean, withNag = false): 
     env: { account: '111122223333', region: 'eu-central-1' },
   });
   return { template: Template.fromStack(stack), stack };
+}
+
+/** A template string that may be an Fn::Join of literals and refs, as one string (refs become their logical id). */
+function flatten(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+  const join = (value as { 'Fn::Join'?: [string, unknown[]] })['Fn::Join'];
+  if (join !== undefined) {
+    return join[1].map((part) => (typeof part === 'string' ? part : JSON.stringify(part).replace(/"/g, ''))).join(join[0]);
+  }
+  return JSON.stringify(value);
 }
 
 describe('parseDemoContext (fail-fast, standard §4.3)', () => {
@@ -132,14 +148,79 @@ describe('RuntimeIsolationDemoStack', () => {
     synth(context(), false).template.resourceCountIs('AWS::SSM::Parameter', 0);
   });
 
-  it('api-gateway: two Contributor Insights rules on the access log keyed by tenantId (P-9)', () => {
+  it('api-gateway: Contributor Insights rules on the access log keyed by tenantId (P-9) and on the ingress EMF log by TenantId (P-10)', () => {
     const { template } = synth(context());
-    template.resourceCountIs('AWS::CloudWatch::InsightRule', 2);
+    template.resourceCountIs('AWS::CloudWatch::InsightRule', 4);
     const rules = Object.values(template.findResources('AWS::CloudWatch::InsightRule')) as any[];
-    for (const rule of rules) {
-      expect(JSON.stringify(rule.Properties.RuleBody)).toContain('$.tenantId');
+    const bodies = rules.map((r) => ({ name: r.Properties.RuleName as string, body: JSON.parse(flatten(r.Properties.RuleBody)) }));
+    const access = bodies.filter((b) => b.body.Contribution.Keys[0] === '$.tenantId');
+    expect(access).toHaveLength(2);
+    for (const rule of access) {
+      expect(rule.body.AggregateOn).toBe('Count');
+      expect(rule.body.LogGroupNames[0]).toContain('ApiAccessLogs');
     }
+    // The cost rules read the ingress Lambda's log group (where the EMF records are) and SUM the metric field.
+    const cost = bodies.filter((b) => b.body.Contribution.Keys[0] === '$.TenantId');
+    expect(cost.map((c) => c.body.Contribution.ValueOf).sort()).toEqual(['$.BackendInvokeSeconds', '$.ModelOutputTokens']);
+    for (const rule of cost) {
+      expect(rule.body.AggregateOn).toBe('Sum');
+      expect(rule.body.LogGroupNames[0]).toContain('IngressLogs');
+      expect(rule.body.Contribution.Filters).toEqual([{ Match: rule.body.Contribution.ValueOf, IsPresent: true }]);
+    }
+    expect(cost.map((c) => c.name).sort()).toEqual([
+      'RuntimeIsolation-api-gateway-top-tenants-backend-seconds',
+      'RuntimeIsolation-api-gateway-top-tenants-output-tokens',
+    ]);
     synth(context({ ingress: 'agentcore-gateway' })).template.resourceCountIs('AWS::CloudWatch::InsightRule', 0);
+  });
+
+  describe('cost dashboard (P-10, ADR-0017)', () => {
+    const dashboardOf = (template: Template) => {
+      const [resource] = Object.values(template.findResources('AWS::CloudWatch::Dashboard')) as any[];
+      const body = JSON.parse(flatten(resource.Properties.DashboardBody));
+      const graphs = (body.widgets as any[]).filter((w) => w.type === 'metric');
+      const texts = (body.widgets as any[]).filter((w) => w.type === 'text').map((w) => w.properties.markdown as string);
+      return { resource, graphs, texts };
+    };
+
+    it('api-gateway: RuntimeIsolation-api-gateway with one SEARCH widget per cost metric over the TenantId dimension', () => {
+      const { template } = synth(context());
+      template.resourceCountIs('AWS::CloudWatch::Dashboard', 1);
+      template.hasResourceProperties('AWS::CloudWatch::Dashboard', { DashboardName: dashboardName('api-gateway') });
+      const { graphs, texts } = dashboardOf(template);
+      expect(COST_METRIC_NAMES).toEqual(['Requests', 'IngressDurationMs', 'BackendInvokeSeconds', 'ModelInputTokens', 'ModelOutputTokens', 'StreamedBytes']);
+      expect(graphs.map((g) => g.properties.title)).toEqual(COST_METRIC_NAMES.map((n) => `${n} by tenant`));
+      for (const [i, name] of COST_METRIC_NAMES.entries()) {
+        const [[metric]] = graphs[i].properties.metrics;
+        expect(metric.expression).toBe(tenantSearchExpression(name, 'api-gateway'));
+        expect(metric.expression).toContain('{RuntimeIsolation,TenantId,Ingress}');
+        expect(metric.expression).toContain(`MetricName="${name}"`);
+        expect(metric.expression).toContain('Ingress="api-gateway"');
+        expect(graphs[i].properties.stat).toBe('Sum');
+      }
+      expect(texts.join('\n')).toContain('Cost per tenant');
+      expect(texts.join('\n')).not.toContain('Not metered on this ingress');
+    });
+
+    it('agentcore-gateway: the two request-side widgets and a note on the four the interceptor cannot meter', () => {
+      const { template } = synth(context({ ingress: 'agentcore-gateway' }));
+      template.hasResourceProperties('AWS::CloudWatch::Dashboard', { DashboardName: dashboardName('agentcore-gateway') });
+      const { graphs, texts } = dashboardOf(template);
+      expect(meteredCostMetrics('agentcore-gateway')).toEqual(['Requests', 'IngressDurationMs']);
+      expect(graphs.map((g) => g.properties.title)).toEqual(['Requests by tenant', 'IngressDurationMs by tenant']);
+      expect(graphs[0].properties.metrics[0][0].expression).toContain('Ingress="agentcore-gateway"');
+      const note = texts.find((t) => t.includes('Not metered on this ingress'))!;
+      expect(note).toBeDefined();
+      for (const absent of ['BackendInvokeSeconds', 'ModelInputTokens', 'ModelOutputTokens', 'StreamedBytes']) {
+        expect(note).toContain(absent);
+      }
+      expect(note).toContain('ADR-0009');
+    });
+
+    it('the dashboard is not retained on delete', () => {
+      const { resource } = dashboardOf(synth(context()).template);
+      expect(resource.DeletionPolicy).not.toBe('Retain');
+    });
   });
 
   it('without tvm: no table, no tenant role', () => {
@@ -184,8 +265,10 @@ describe('RuntimeIsolationDemoStack', () => {
       expect(abac.Resource).toEqual(stack.resolve(stack.table!.tableArn));
     });
 
-    it('the agent learns the table name through its environment; the execution role still has no table access', () => {
-      template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', { EnvironmentVariables: { TABLE_NAME: stack.resolve(stack.table!.tableName) } });
+    it('the agent learns the table name and the model id through its environment; the execution role still has no table access', () => {
+      template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
+        EnvironmentVariables: { TABLE_NAME: stack.resolve(stack.table!.tableName), MODEL_ID: DEFAULT_MODEL_ID },
+      });
       const policies = Object.values(template.findResources('AWS::IAM::Policy')) as any[];
       const exec = policies.filter((p) => JSON.stringify(p.Properties.Roles).includes('ExecutionRole'));
       expect(JSON.stringify(exec)).not.toContain('dynamodb');

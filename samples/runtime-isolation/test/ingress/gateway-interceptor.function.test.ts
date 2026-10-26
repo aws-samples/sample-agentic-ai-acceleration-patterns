@@ -134,6 +134,22 @@ describe('intercept', () => {
     expect(JSON.parse(metrics[0])).toMatchObject({ TenantId: 'tenant-a', Ingress: 'agentcore-gateway', Requests: 1 });
   });
 
+  it('meters the request side only: Requests and IngressDurationMs, no backend or model figures (P-10 gap, ADR-0009 input)', async () => {
+    let t = 1000;
+    const d = { ...deps(), now: () => (t += 50) };
+    await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body), d);
+    expect(metrics).toHaveLength(1);
+    const record = JSON.parse(metrics[0]);
+    expect(record).toMatchObject({ TenantId: 'tenant-a', Ingress: 'agentcore-gateway', Requests: 1, IngressDurationMs: 50 });
+    expect(record._aws.CloudWatchMetrics[0].Metrics.map((m: any) => m.Name)).toEqual(['Requests', 'Errors4xx', 'Errors5xx', 'IngressDurationMs']);
+    for (const absent of ['BackendInvokeSeconds', 'ModelInputTokens', 'ModelOutputTokens', 'StreamedBytes', 'TtfbMs']) {
+      expect(record).not.toHaveProperty(absent);
+    }
+    // A refusal is metered the same way.
+    await intercept(event({}, body), d);
+    expect(JSON.parse(metrics[1])).toMatchObject({ Errors4xx: 1, IngressDurationMs: 50 });
+  });
+
   it('handles a missing http section as a refusal, not a crash', async () => {
     const out = await intercept({}, deps());
     expect((out.http as any).transformedGatewayResponse.statusCode).toBe(401);

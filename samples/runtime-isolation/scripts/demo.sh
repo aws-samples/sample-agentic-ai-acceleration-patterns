@@ -54,7 +54,9 @@ invoke() {
   echo "HTTP ${status}"
 }
 
-report() { jq -r "{sessionPrefix, nonce, forwardedScope, credentials, read: .read.result} | tostring" "$BODY"; }
+# The agent answers as SSE (ADR-0017): the report is the first `data:` event; the last event is `event: usage`.
+report() { grep -m1 '^data: ' "$BODY" | sed 's/^data: //' | jq -r "{sessionPrefix, nonce, forwardedScope, credentials, read: .read.result} | tostring"; }
+usage() { awk '/^event: usage/{u=1;next} u&&/^data: /{sub(/^data: /,""); print; exit}' "$BODY"; }
 
 echo "== 1. two tenants, three users (tenant-identity shared-pool)"
 # TODO: create tenant-a and tenant-b via tenant-identity's platform API (SigV4), users a1, a2, b1 with
@@ -62,7 +64,7 @@ echo "== 1. two tenants, three users (tenant-identity shared-pool)"
 # TOKEN_A2, TOKEN_B1 (cognito-idp admin-initiate-auth ... --query AuthenticationResult.AccessToken).
 
 echo "== 2. A1 opens conversation c1; the agent reports its session prefix and nonce"
-# TODO: invoke TOKEN_A1 '{"conversationId":"demoConversation0001","prompt":"hello"}'; report
+# TODO: invoke TOKEN_A1 '{"conversationId":"demoConversation0001","prompt":"report"}'; report
 
 echo "== 3. A2 and B1 send the same conversationId: different prefix, different nonce (P-2)"
 # TODO
@@ -79,5 +81,9 @@ echo "== 6. TVM: A1 reads tenant-a (ok) and tenant-b (AccessDeniedException from
 
 echo "== 7. streaming: 'stream 10' arrives as text/event-stream over ten seconds"
 # TODO: curl -N with -w ttfb/total; count 'data:' lines.
+
+echo "== 8. cost attribution: a model prompt ends with the usage event; the ingress metrics carry it per tenant (P-10)"
+# TODO: invoke TOKEN_A1 '{"conversationId":"demoConversation0001","prompt":"In one sentence, what is tenant isolation?"}'; usage
+# TODO: cloudwatch get-metric-statistics --namespace RuntimeIsolation --metric-name ModelOutputTokens --dimensions Name=TenantId,Value=tenant-a Name=Ingress,Value=$INGRESS --statistics Sum
 
 echo "demo complete"

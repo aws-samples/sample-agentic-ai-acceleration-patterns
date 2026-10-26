@@ -6,6 +6,7 @@ import { App, Stack, Validations } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { AwsSolutionsChecks } from 'cdk-nag';
+import { baseModelId, isInferenceProfileId } from '../src/backend/agentcore-runtime.cdk';
 import { RUNTIME_HEADERS } from '../src/backend/agentcore-runtime.transport';
 import { GATEWAY_TARGET_NAME, IsolatedRuntime, IsolatedRuntimeProps, resolveOptions, ROUTE, STAGE_NAME } from '../src/index';
 import { ENV } from '../src/shared/config';
@@ -510,10 +511,64 @@ describe.each(INGRESSES)('options, ingress=%s', (ingress) => {
     ).not.toThrow();
   });
 
-  it('agent.environment reaches the Runtime', () => {
+  it('agent.environment reaches the Runtime, alongside MODEL_ID (the one model the agent calls, P-6)', () => {
     synth({ ingress, agent: { codePath: FIXTURE_AGENT, modelId: 'm', environment: { TABLE_NAME: 'demo' } } }).template.hasResourceProperties(
       'AWS::BedrockAgentCore::Runtime',
-      { EnvironmentVariables: { TABLE_NAME: 'demo' } },
+      { EnvironmentVariables: { TABLE_NAME: 'demo', MODEL_ID: 'm' } },
     );
+    synth({ ingress }).template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
+      EnvironmentVariables: { MODEL_ID: 'amazon.nova-lite-v1:0' },
+    });
+  });
+});
+
+describe('the execution role model grant (P-6, ADR-0008, ADR-0017)', () => {
+  const oneModel = (t: Template) => statementsForRole(t, 'IsolatedRuntimeBackendExecutionRole').find((s) => s.Sid === 'OneModel');
+  const resolved = (s: unknown) => JSON.stringify(s);
+
+  it('a plain model id: both invoke actions on the foundation-model ARN in this Region, and nothing else', () => {
+    const { template } = synth({ ingress: 'api-gateway' });
+    const statement = oneModel(template);
+    expect(statement.Action).toEqual(['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream']);
+    const resources = Array.isArray(statement.Resource) ? statement.Resource : [statement.Resource];
+    expect(resources).toHaveLength(1);
+    expect(resolved(resources[0])).toContain(':bedrock:');
+    expect(resolved(resources[0])).toContain('::foundation-model/amazon.nova-lite-v1:0');
+    expect(resolved(resources[0])).not.toContain('inference-profile');
+    expect(resolved(resources[0])).not.toContain('*');
+    // No other statement of the execution role touches Bedrock, and nothing grants bedrock:* or a bedrock wildcard resource.
+    const others = statementsForRole(template, 'IsolatedRuntimeBackendExecutionRole').filter((s) => s.Sid !== 'OneModel');
+    expect(others.length).toBeGreaterThan(0);
+    for (const s of others) {
+      expect(resolved(s.Action)).not.toMatch(/"bedrock:/);
+      expect(resolved(s.Resource)).not.toContain(':bedrock:');
+    }
+    expect(resolved(statement)).not.toContain('bedrock:*');
+  });
+
+  it('a cross-Region inference profile id: the account-scoped profile ARN plus the base model in any Region, no wildcard on the model', () => {
+    const { template } = synth({ ingress: 'api-gateway', agent: { codePath: FIXTURE_AGENT, modelId: 'eu.amazon.nova-lite-v1:0' } }, true);
+    const statement = oneModel(template);
+    expect(statement.Action).toEqual(['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream']);
+    expect(statement.Resource).toHaveLength(2);
+    const [profile, model] = statement.Resource.map(resolved);
+    expect(profile).toContain(':inference-profile/eu.amazon.nova-lite-v1:0');
+    expect(profile).toContain('AWS::AccountId');
+    expect(model).toContain(':bedrock:*::foundation-model/amazon.nova-lite-v1:0');
+    expect(model).not.toContain('foundation-model/*');
+    // The agent is told the profile id as given.
+    template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', { EnvironmentVariables: { MODEL_ID: 'eu.amazon.nova-lite-v1:0' } });
+    // cdk-nag passes with the Region-wildcard acknowledgment.
+    expect(() => template.toJSON()).not.toThrow();
+  });
+
+  it('isInferenceProfileId and baseModelId recognise the geo prefixes only', () => {
+    expect(isInferenceProfileId('amazon.nova-lite-v1:0')).toBe(false);
+    expect(isInferenceProfileId('anthropic.claude-3-5-haiku-20241022-v1:0')).toBe(false);
+    for (const prefix of ['us', 'eu', 'apac', 'global', 'us-gov', 'jp', 'au', 'ca']) {
+      expect(isInferenceProfileId(`${prefix}.amazon.nova-lite-v1:0`)).toBe(true);
+      expect(baseModelId(`${prefix}.amazon.nova-lite-v1:0`)).toBe('amazon.nova-lite-v1:0');
+    }
+    expect(baseModelId('amazon.nova-lite-v1:0')).toBe('amazon.nova-lite-v1:0');
   });
 });

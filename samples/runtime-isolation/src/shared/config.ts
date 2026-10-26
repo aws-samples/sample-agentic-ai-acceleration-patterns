@@ -29,6 +29,14 @@ export const ENV = {
   RUNTIME_ARN: 'RI_RUNTIME_ARN',
 } as const;
 
+/** Environment variables the construct sets for the agent process (src/agent/app.ts reads them). */
+export const AGENT_ENV = {
+  /** The one model the execution role allows; the agent calls exactly this id (P-6, ADR-0017). */
+  MODEL_ID: 'MODEL_ID',
+  /** The demo's tenant-partitioned table for the `read <tenant>` probe (set by the demo stack, ADR-0012). */
+  TABLE_NAME: 'TABLE_NAME',
+} as const;
+
 export interface DelegationConfig {
   readonly forwardUserToken: boolean;
   readonly requireNarrowedToken: boolean;

@@ -12,6 +12,15 @@
  *
  * Logs carry header NAMES never, and values never: only the verified
  * tenantId, the session prefix, a status and a reason (P-9, spike V-7).
+ *
+ * Cost metering (P-10, ADR-0017) on this ingress is request-side only. A
+ * REQUEST interceptor returns before the Gateway invokes the Runtime and
+ * never sees the response, so it can emit `Requests`, the errors and
+ * `IngressDurationMs` (its own wall time) but NOT `BackendInvokeSeconds`,
+ * `ModelInputTokens`, `ModelOutputTokens`, `TtfbMs` or `StreamedBytes`.
+ * Those stay absent from this ingress's records rather than being guessed;
+ * a RESPONSE interceptor would see the body but not the invoke wall time.
+ * This is an input to the ingress comparison (ADR-0009).
  */
 
 import { AgentCoreRuntimeBackend } from '../backend/agentcore-runtime.transport';
@@ -45,6 +54,7 @@ export interface InterceptorDependencies {
   readonly pipeline: IngressPipeline;
   readonly backend: HeaderTransportBackend;
   readonly metricsOut?: (line: string) => void;
+  readonly now?: () => number;
 }
 
 /** Case-insensitive header lookup. */
@@ -103,8 +113,15 @@ function deny(statusCode: 400 | 401 | 403 | 502): InterceptorOutput {
 /** The interceptor's logic (unit-tested directly). */
 export async function intercept(event: InterceptorEvent, deps: InterceptorDependencies): Promise<InterceptorOutput> {
   const gatewayRequest = event.http?.gatewayRequest;
+  const now = deps.now ?? Date.now;
+  const started = now();
+  // Request side only (see the file comment): Requests, errors and this
+  // function's own milliseconds. No backend or model figures exist here.
   const metrics = (status: number, tenantId?: string) =>
-    emitRequestMetrics({ tenantId: tenantId ?? 'unknown', ingress: 'agentcore-gateway', status }, deps.metricsOut);
+    emitRequestMetrics(
+      { tenantId: tenantId ?? 'unknown', ingress: 'agentcore-gateway', status, ingressDurationMs: now() - started },
+      deps.metricsOut,
+    );
 
   let request;
   try {

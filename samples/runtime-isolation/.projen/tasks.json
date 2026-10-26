@@ -312,6 +312,7 @@
             "ts-node",
             "typescript",
             "@aws-sdk/client-bedrock-agentcore",
+            "@aws-sdk/client-bedrock-runtime",
             "@aws-sdk/client-dynamodb",
             "@aws-sdk/client-sts",
             "aws-cdk-lib",

@@ -18,5 +18,7 @@ export type {
   ResolvedOptions,
 } from './runtime-isolation.cdk';
 export type { BackendKind } from './backend/backend';
-export type { IngressKind } from './shared/metrics';
+export type { IngressKind, UsageEvent } from './shared/metrics';
+// The agent-to-ingress usage event (ADR-0017): a consumer's own agent ends its SSE stream with `event: usage`.
+export { USAGE_EVENT, METRIC_NAMES } from './shared/metrics';
 export type { SessionScope } from './shared/session';

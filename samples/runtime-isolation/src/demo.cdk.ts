@@ -20,7 +20,8 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { IsolatedRuntime, IsolatedRuntimeProps } from './runtime-isolation.cdk';
-import type { IngressKind } from './shared/metrics';
+import { AGENT_ENV } from './shared/config';
+import { COST_METRIC_NAMES, type IngressKind, METRIC_NAMES, METRICS_NAMESPACE } from './shared/metrics';
 import type { SessionScope } from './shared/session';
 import { TENANT_TAG_KEY, USER_TAG_KEY } from './shared/tvm';
 
@@ -43,7 +44,7 @@ export const PLACEHOLDER = {
   appClientId: 'PLACEHOLDER-NOT-A-CLIENT-ID',
 } as const;
 
-/** Default model id for the demo; the echo agent does not call it, but the execution role is scoped to it (P-6). */
+/** Default model id for the demo: the one model the agent calls and the execution role allows (P-6). */
 export const DEFAULT_MODEL_ID = 'amazon.nova-lite-v1:0';
 
 /** The demo table's partition key and the per-tenant key prefix the tenant role's ABAC condition pins. */
@@ -135,6 +136,8 @@ export class RuntimeIsolationDemoStack extends Stack {
   readonly runtime: IsolatedRuntime;
   readonly table?: dynamodb.TableV2;
   readonly tenantRole?: iam.Role;
+  /** The per-tenant cost dashboard, `RuntimeIsolation-<ingress>` (P-10). */
+  readonly dashboard: cloudwatch.Dashboard;
 
   constructor(scope: Construct, id: string, props: RuntimeIsolationDemoStackProps) {
     super(scope, id, props);
@@ -208,7 +211,7 @@ export class RuntimeIsolationDemoStack extends Stack {
         }),
       );
       tvm = { role: this.tenantRole, includeUserIdTag: ctx.includeUserIdTag };
-      agentEnvironment = { TABLE_NAME: this.table.tableName };
+      agentEnvironment = { [AGENT_ENV.TABLE_NAME]: this.table.tableName };
     }
 
     this.runtime = new IsolatedRuntime(this, 'IsolatedRuntime', {
@@ -227,7 +230,12 @@ export class RuntimeIsolationDemoStack extends Stack {
     callerRoleArn = this.runtime.tvmCallerRole.roleArn;
 
     // P-9 on the api-gateway ingress: top tenants by request and by error,
-    // from the access log's tenantId field.
+    // from the access log's tenantId field. P-10 (ADR-0017): top tenants by
+    // backend seconds and by output tokens, from the ingress Lambda's EMF
+    // records (the same log group the metrics come from). The
+    // agentcore-gateway ingress has no access log of its own and its
+    // interceptor sees only the request side (no backend or model figures),
+    // so it gets none of these.
     if (ctx.ingress === 'api-gateway') {
       const accessLogs = this.runtime.node.findChild('ApiAccessLogs') as logs.LogGroup;
       insightRule(this, 'TopTenantsByRequest', `${this.stackName}-top-tenants-requests`, {
@@ -244,7 +252,31 @@ export class RuntimeIsolationDemoStack extends Stack {
           ],
         },
       });
+      const ingressLogs = this.runtime.node.findChild('IngressLogs') as logs.LogGroup;
+      insightRule(this, 'TopTenantsByBackendSeconds', `${this.stackName}-top-tenants-backend-seconds`, {
+        LogGroupNames: [ingressLogs.logGroupName],
+        Contribution: {
+          Keys: ['$.TenantId'],
+          ValueOf: `$.${METRIC_NAMES.BackendInvokeSeconds}`,
+          Filters: [{ Match: `$.${METRIC_NAMES.BackendInvokeSeconds}`, IsPresent: true }],
+        },
+        AggregateOn: 'Sum',
+      });
+      insightRule(this, 'TopTenantsByOutputTokens', `${this.stackName}-top-tenants-output-tokens`, {
+        LogGroupNames: [ingressLogs.logGroupName],
+        Contribution: {
+          Keys: ['$.TenantId'],
+          ValueOf: `$.${METRIC_NAMES.ModelOutputTokens}`,
+          Filters: [{ Match: `$.${METRIC_NAMES.ModelOutputTokens}`, IsPresent: true }],
+        },
+        AggregateOn: 'Sum',
+      });
     }
+
+    // The per-tenant cost dashboard (P-10, ADR-0017): one widget per cost
+    // metric, one line per tenant, found by a SEARCH over the TenantId
+    // dimension so a new tenant appears without a template change.
+    this.dashboard = costDashboard(this, ctx.ingress);
 
     // The published interface (spec §6.4, standard §1.1).
     if (props.publishParameters ?? true) {
@@ -277,12 +309,12 @@ export class RuntimeIsolationDemoStack extends Stack {
   }
 }
 
-/** A Contributor Insights rule over a JSON CloudWatch Logs group, enabled, counting. */
+/** A Contributor Insights rule over a JSON CloudWatch Logs group, enabled; counts by default, sums `ValueOf` with `AggregateOn: 'Sum'`. */
 function insightRule(
   scope: Construct,
   id: string,
   ruleName: string,
-  body: { LogGroupNames: string[]; Contribution: Record<string, unknown> },
+  body: { LogGroupNames: string[]; Contribution: Record<string, unknown>; AggregateOn?: 'Count' | 'Sum' },
 ): cloudwatch.CfnInsightRule {
   return new cloudwatch.CfnInsightRule(scope, id, {
     ruleName,
@@ -292,7 +324,70 @@ function insightRule(
       LogGroupNames: body.LogGroupNames,
       LogFormat: 'JSON',
       Contribution: body.Contribution,
-      AggregateOn: 'Count',
+      AggregateOn: body.AggregateOn ?? 'Count',
     }),
   });
+}
+
+/** The dashboard name for an ingress; one dashboard per deployed ingress. */
+export function dashboardName(ingress: IngressKind): string {
+  return `RuntimeIsolation-${ingress}`;
+}
+
+/** The SEARCH expression that finds one cost metric for every tenant on one ingress (Sum over the period). */
+export function tenantSearchExpression(metricName: string, ingress: IngressKind): string {
+  return `SEARCH('{${METRICS_NAMESPACE},TenantId,Ingress} MetricName="${metricName}" Ingress="${ingress}"', 'Sum', 300)`;
+}
+
+/** Which of the six cost metrics an ingress can meter (the interceptor sees only the request side). */
+export function meteredCostMetrics(ingress: IngressKind): readonly string[] {
+  return ingress === 'api-gateway' ? COST_METRIC_NAMES : [METRIC_NAMES.Requests, METRIC_NAMES.IngressDurationMs];
+}
+
+/**
+ * The per-tenant cost dashboard (P-10, ADR-0017). Each widget is one cost
+ * metric with one line per tenant. On the agentcore-gateway ingress the
+ * backend and model widgets are replaced by a note, since that ingress
+ * cannot meter them (gateway-interceptor.function.ts).
+ */
+function costDashboard(scope: Construct, ingress: IngressKind): cloudwatch.Dashboard {
+  const dashboard = new cloudwatch.Dashboard(scope, 'CostDashboard', {
+    dashboardName: dashboardName(ingress),
+    defaultInterval: Duration.hours(3),
+  });
+  dashboard.addWidgets(
+    new cloudwatch.TextWidget({
+      width: 24,
+      height: 2,
+      markdown: [
+        `## Per-tenant cost drivers, ingress \`${ingress}\` (P-10, ADR-0017)`,
+        'Each line is one tenant (the `TenantId` dimension of the `RuntimeIsolation` EMF records). Cost per tenant = sum over metrics of (metric x unit price) plus an equal share of the unattributable remainder; see the README.',
+      ].join('\n'),
+    }),
+  );
+  const widgets = meteredCostMetrics(ingress).map(
+    (name) =>
+      new cloudwatch.GraphWidget({
+        title: `${name} by tenant`,
+        width: 8,
+        height: 6,
+        left: [new cloudwatch.MathExpression({ expression: tenantSearchExpression(name, ingress), label: name, period: Duration.minutes(5) })],
+        leftYAxis: { min: 0 },
+        statistic: 'Sum',
+      }),
+  );
+  dashboard.addWidgets(...widgets);
+  if (ingress === 'agentcore-gateway') {
+    dashboard.addWidgets(
+      new cloudwatch.TextWidget({
+        width: 24,
+        height: 3,
+        markdown: [
+          '### Not metered on this ingress',
+          `\`${METRIC_NAMES.BackendInvokeSeconds}\`, \`${METRIC_NAMES.ModelInputTokens}\`, \`${METRIC_NAMES.ModelOutputTokens}\` and \`${METRIC_NAMES.StreamedBytes}\`: a REQUEST interceptor returns before the Runtime is invoked and never sees the response, so backend seconds and tokens cannot be attributed at this ingress (ADR-0009 comparison input).`,
+        ].join('\n'),
+      }),
+    );
+  }
+  return dashboard;
 }
