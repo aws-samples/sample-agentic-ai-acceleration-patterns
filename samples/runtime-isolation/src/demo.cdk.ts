@@ -5,11 +5,14 @@
  * The demo stack (spec C-4, §6.4; standard §4.5): a thin wiring of
  * `IsolatedRuntime` to the sample's dependencies. It reads tenant-identity's
  * published parameters for the issuer (ADR-0004), chooses the ingress and the
- * optional modules from CDK context, publishes the construct's read-only
- * properties as this sample's parameters, and, with `tvm`, adds the one
- * tenant-partitioned table and tenant role that prove the credentials work
- * (ADR-0012). Only this file and the integration test name tenant-identity;
- * the construct does not.
+ * optional modules from CDK context, and publishes the construct's read-only
+ * properties as this sample's parameters. The TVM is always on (ADR-0018):
+ * the `tvm` context flag now means "demo tenant data". When true, the demo
+ * adds a tenant-partitioned table and its own data-bearing TenantRole and
+ * passes it (ADR-0016 lazy trust ARN); when false, the demo passes no role
+ * and the construct's default model-only TenantModelRole is used, so model
+ * cost is still attributed per tenant. Only this file and the integration
+ * test name tenant-identity; the construct does not.
  */
 
 import { CfnOutput, CfnRule, Duration, Fn, Lazy, RemovalPolicy, Stack, StackProps } from 'aws-cdk-lib';
@@ -167,11 +170,12 @@ export class RuntimeIsolationDemoStack extends Stack {
     }
     const discoveryUrl = `https://cognito-idp.${this.region}.amazonaws.com/${userPoolId}/.well-known/openid-configuration`;
 
-    // The TVM option (ADR-0012): one tenant-partitioned table and the tenant
-    // role the construct's tvmCallerRole may assume. The role's trust names
-    // tvmCallerRole lazily, since the construct that creates that role takes
-    // this role as a prop.
-    let tvm: IsolatedRuntimeProps['tvm'];
+    // The TVM is always on (ADR-0018). `ctx.tvm` means "demo tenant data":
+    // true adds a tenant-partitioned table and the construct's tvmCallerRole
+    // may assume a data-bearing role the demo owns (ADR-0016 lazy trust ARN);
+    // false passes no role, so the construct creates its default model-only
+    // role and model cost is still attributed per tenant.
+    let tvm: IsolatedRuntimeProps['tvm'] = { includeUserIdTag: ctx.includeUserIdTag };
     let agentEnvironment: Record<string, string> | undefined;
     let callerRoleArn: string | undefined;
     if (ctx.tvm) {
@@ -184,7 +188,7 @@ export class RuntimeIsolationDemoStack extends Stack {
       // Resolved at synth so the trust policy names exactly the construct's caller role (ADR-0016).
       const caller = new iam.ArnPrincipal(Lazy.string({ produce: () => callerRoleArn! }));
       this.tenantRole = new iam.Role(this, 'TenantRole', {
-        description: 'Tenant role (spec §6.1): assumable only by tvmCallerRole with a TenantId session tag; ABAC on the demo table',
+        description: 'Tenant role (spec §6.1): assumable only by tvmCallerRole with a TenantId session tag; ABAC on the demo table (the construct adds the model statement, ADR-0018)',
         // Trust (spec §6.1): tvmCallerRole only, a non-empty TenantId request
         // tag, and exactly the tag keys the deployment expects. TagSession
         // comes from withSessionTags().
@@ -197,7 +201,8 @@ export class RuntimeIsolationDemoStack extends Stack {
         maxSessionDuration: Duration.hours(1),
       });
       // ABAC (P-8): the tenant's own partition only, decided by IAM from the
-      // session tag, whatever the agent asks for.
+      // session tag, whatever the agent asks for. The one-model statement is
+      // added by the construct (ADR-0018), not here.
       this.tenantRole.addToPolicy(
         new iam.PolicyStatement({
           sid: 'OwnTenantPartitionOnly',
@@ -302,8 +307,10 @@ export class RuntimeIsolationDemoStack extends Stack {
     new CfnOutput(this, 'Ingress', { value: ctx.ingress });
     new CfnOutput(this, 'IngressRoleArn', { value: this.runtime.ingressRole.roleArn });
     new CfnOutput(this, 'TvmCallerRoleArn', { value: this.runtime.tvmCallerRole.roleArn });
-    if (this.tenantRole !== undefined && this.table !== undefined) {
-      new CfnOutput(this, 'TenantRoleArn', { value: this.tenantRole.roleArn });
+    // The TVM is always on (ADR-0018): the tenant role every model call is
+    // signed by is always present, the deployer's role or the default one.
+    new CfnOutput(this, 'TenantRoleArn', { value: this.runtime.tenantRole.roleArn });
+    if (this.table !== undefined) {
       new CfnOutput(this, 'DemoTableName', { value: this.table.tableName });
     }
   }

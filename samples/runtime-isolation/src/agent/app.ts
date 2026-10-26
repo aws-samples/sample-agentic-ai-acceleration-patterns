@@ -20,8 +20,14 @@
  *                      every two seconds, for the streaming checks (V-4, V-5).
  *
  * Any other prompt goes to the model (`MODEL_ID`) through Bedrock
- * ConverseStream; text deltas stream as `data:` events and the usage event
- * carries the input and output tokens from the ConverseStream metadata.
+ * ConverseStream, using a Bedrock client built from the vended tenant
+ * credentials (ADR-0018): the call is signed by the tenant role, so AWS
+ * attributes the model cost to that tenant. A model prompt with no credential
+ * header, or a malformed one, is an `event: error` (`NoCredentials` /
+ * `MalformedCredentials`) with no usage event; the agent never falls back to
+ * the execution role, which holds no model permission at all (ADR-0008
+ * amended). Text deltas stream as `data:` events and the usage event carries
+ * the input and output tokens from the ConverseStream metadata.
  *
  * It never logs or echoes a header value: not the token, not the credentials
  * (ADR-0006, ADR-0012, spike V-7). It validates that `prompt` is a string of
@@ -95,16 +101,14 @@ export type SdkCredentials = Omit<VendedCredentials, 'expiration'> & { expiratio
 export interface AgentClients {
   readonly dynamo: (credentials: SdkCredentials) => Pick<DynamoDBClient, 'send'>;
   readonly sts: (credentials: SdkCredentials) => Pick<STSClient, 'send'>;
-  /** The model client runs as the execution role (P-6): no tenant credentials. */
-  readonly bedrock: () => Pick<BedrockRuntimeClient, 'send'>;
+  /** The model client runs as the vended tenant credentials (ADR-0018): cost is attributed per tenant and the agent has no shared model permission. */
+  readonly bedrock: (credentials: SdkCredentials) => Pick<BedrockRuntimeClient, 'send'>;
 }
-
-let bedrockClient: BedrockRuntimeClient | undefined;
 
 const defaultClients: AgentClients = {
   dynamo: (credentials) => new DynamoDBClient({ credentials }),
   sts: (credentials) => new STSClient({ credentials }),
-  bedrock: () => (bedrockClient ??= new BedrockRuntimeClient({})),
+  bedrock: (credentials) => new BedrockRuntimeClient({ credentials }),
 };
 
 function sdkCredentials(header: string): SdkCredentials {
@@ -217,18 +221,20 @@ export function isProbe(prompt: string): boolean {
 }
 
 /**
- * Calls the model with the prompt, writes each text delta as a `data:`
- * event, and returns the usage from the metadata event. Only figures are
- * returned; the content goes to the caller and nowhere else.
+ * Calls the model with the prompt as the vended tenant credentials
+ * (ADR-0018), writes each text delta as a `data:` event, and returns the
+ * usage from the metadata event. Only figures are returned; the content goes
+ * to the caller and nowhere else.
  */
 export async function converse(
   prompt: string,
   modelId: string,
+  credentials: SdkCredentials,
   write: (text: string) => void,
   clients: AgentClients = defaultClients,
   abortSignal?: AbortSignal,
 ): Promise<UsageEvent> {
-  const output = await clients.bedrock().send(
+  const output = await clients.bedrock(credentials).send(
     new ConverseStreamCommand({
       modelId,
       messages: [{ role: 'user', content: [{ text: prompt }] }],
@@ -313,10 +319,27 @@ export async function respond(
     sink.end();
     return;
   }
+  // The model call is signed by the vended tenant credentials (ADR-0018):
+  // without them the agent errors rather than falling back to the execution
+  // role, which holds no model permission at all.
+  const credentialHeader = headerValue(headers, RUNTIME_HEADERS.TENANT_CREDENTIALS);
+  if (credentialHeader === undefined) {
+    sink.write(sseEvent({ error: 'NoCredentials' }, 'error'));
+    sink.end();
+    return;
+  }
+  let credentials: SdkCredentials;
+  try {
+    credentials = sdkCredentials(credentialHeader);
+  } catch {
+    sink.write(sseEvent({ error: 'MalformedCredentials' }, 'error'));
+    sink.end();
+    return;
+  }
   const abort = new AbortController();
   sink.onClose?.(() => abort.abort());
   try {
-    const usage = await converse(prompt, options.modelId, (text) => sink.write(text), clients, abort.signal);
+    const usage = await converse(prompt, options.modelId, credentials, (text) => sink.write(text), clients, abort.signal);
     sink.write(usageEvent(usage));
   } catch (error) {
     // The name only (AccessDeniedException, ThrottlingException, ...): no message, which could carry content.

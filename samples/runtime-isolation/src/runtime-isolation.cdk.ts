@@ -6,16 +6,25 @@
  * one ingress, which maps the validated caller to an isolated compute unit.
  * The ingress is a deploy-time choice (ADR-0003): an API Gateway REST API
  * with response streaming, or an AgentCore Gateway with a Runtime target.
- * Session mapping, scope checks, delegation and the token vending machine are
- * optional modules, off by default (P-4).
+ * Session mapping, scope checks and delegation are optional modules, off by
+ * default (P-4).
  *
- * The construct creates none of its dependencies: the issuer, the agent code
- * and, with `tvm`, the tenant role are props. It applies no cdk-nag aspect
- * and no App settings; it carries its own acknowledgments with reasons.
+ * The token vending machine is always on (ADR-0018): every model call is
+ * signed by a tenant role carrying the verified `TenantId`, so AWS attributes
+ * model cost to the IAM principal per tenant (CUR 2.0). `tvm` stays an
+ * optional prop, but only to let the deployer supply a role that also reaches
+ * tenant data; unset, the construct creates `TenantModelRole`, which may
+ * invoke only the one model. The agent holds no shared model permission: the
+ * execution role has no `bedrock:Invoke*` (ADR-0008 amended by ADR-0018).
+ *
+ * The construct creates none of its data dependencies: the issuer, the agent
+ * code and, with `tvm`, a data-bearing tenant role are props. It applies no
+ * cdk-nag aspect and no App settings; it carries its own acknowledgments with
+ * reasons.
  */
 
 import * as path from 'node:path';
-import { Duration, Names, RemovalPolicy, Stack, Token, Validations } from 'aws-cdk-lib';
+import { Duration, Lazy, Names, RemovalPolicy, Stack, Token, Validations } from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -23,12 +32,12 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction, NodejsFunctionProps } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
-import { AgentCoreRuntimeBackend } from './backend/agentcore-runtime.cdk';
+import { AgentCoreRuntimeBackend, baseModelId, foundationModelArn, isInferenceProfileId, modelResourceArns } from './backend/agentcore-runtime.cdk';
 import type { BackendKind } from './backend/backend';
 import type { IBackend } from './backend/backend.cdk';
 import { ENV } from './shared/config';
 import type { IngressKind } from './shared/metrics';
-import { acknowledgeGranularFinding } from './shared/nag';
+import { acknowledgeGranularFinding, nagFindingResource } from './shared/nag';
 import { CONVERSATION_ID_PATTERN, type SessionScope } from './shared/session';
 import { TENANT_TAG_KEY, USER_TAG_KEY } from './shared/tvm';
 
@@ -73,10 +82,15 @@ export interface DelegationProps {
   readonly allowedScopes?: string[];
 }
 
-/** The `tvm` module (P-8, ADR-0012). */
+/** The `tvm` module (P-8, ADR-0012, ADR-0018). The TVM is always on; this prop only customises it. */
 export interface TvmProps {
-  /** The tenant role the ingress assumes. The deployer owns its trust and ABAC policies (spec §6.1). */
-  readonly role: iam.IRole;
+  /**
+   * A tenant role the ingress assumes that ALSO reaches tenant data. The
+   * deployer owns its trust and ABAC policies (spec §6.1), and the construct
+   * adds the one-model statement to it (ADR-0018). Unset: the construct
+   * creates `TenantModelRole`, which may invoke only the one model.
+   */
+  readonly role?: iam.IRole;
   /** Add `UserId = sub` as a session tag. Default false. */
   readonly includeUserIdTag?: boolean;
   /** Extra session tags: tag key to claim name. A claim missing from the token fails the request with 403. `TenantId` and `UserId` are reserved. */
@@ -97,7 +111,11 @@ export interface IsolatedRuntimeProps {
   /** Scopes the token must all carry (ADR-0005). Unset: no scope check. */
   readonly requiredScopes?: string[];
   readonly delegation?: DelegationProps;
-  /** Unset: the TVM is off. */
+  /**
+   * The TVM is always on (ADR-0018). Unset: the construct creates a
+   * model-only `TenantModelRole`. Set: customise the TVM, and optionally
+   * supply a role that also reaches tenant data.
+   */
   readonly tvm?: TvmProps;
 }
 
@@ -110,8 +128,9 @@ export interface ResolvedOptions {
   readonly forwardUserToken: boolean;
   readonly requireNarrowedToken: boolean;
   readonly allowedScopes?: string[];
-  readonly tvm?: {
-    readonly role: iam.IRole;
+  /** The TVM is always on (ADR-0018); `role` undefined means the construct's default model-only role. */
+  readonly tvm: {
+    readonly role?: iam.IRole;
     readonly includeUserIdTag: boolean;
     readonly claimTags: Record<string, string>;
     readonly durationSeconds: number;
@@ -183,26 +202,31 @@ export function resolveOptions(props: IsolatedRuntimeProps): ResolvedOptions {
     fail('delegation.allowedScopes', 'must contain scope strings without whitespace');
   }
 
-  let tvm: ResolvedOptions['tvm'];
-  if (props.tvm !== undefined) {
-    const durationSeconds = props.tvm.durationSeconds ?? 900;
-    if (!Number.isInteger(durationSeconds) || durationSeconds < 900 || durationSeconds > 3600) {
-      fail('tvm.durationSeconds', `must be an integer from 900 to 3600 (got ${String(durationSeconds)})`);
-    }
-    const claimTags = props.tvm.claimTags ?? {};
-    for (const [key, claim] of Object.entries(claimTags)) {
-      if (key === TENANT_TAG_KEY || key === USER_TAG_KEY) {
-        fail('tvm.claimTags', `${key} is a reserved tag key`);
-      }
-      if (!TAG_KEY_PATTERN.test(key)) {
-        fail('tvm.claimTags', `tag key '${key}' is not a valid tag key`);
-      }
-      if (typeof claim !== 'string' || claim.length === 0) {
-        fail('tvm.claimTags', `tag key '${key}' must map to a claim name`);
-      }
-    }
-    tvm = { role: props.tvm.role, includeUserIdTag: props.tvm.includeUserIdTag ?? false, claimTags, durationSeconds };
+  // The TVM is always on (ADR-0018). `props.tvm` only customises it; its
+  // absence is the default model-only role, not an off switch.
+  const tvmProps = props.tvm ?? {};
+  const durationSeconds = tvmProps.durationSeconds ?? 900;
+  if (!Number.isInteger(durationSeconds) || durationSeconds < 900 || durationSeconds > 3600) {
+    fail('tvm.durationSeconds', `must be an integer from 900 to 3600 (got ${String(durationSeconds)})`);
   }
+  const claimTags = tvmProps.claimTags ?? {};
+  for (const [key, claim] of Object.entries(claimTags)) {
+    if (key === TENANT_TAG_KEY || key === USER_TAG_KEY) {
+      fail('tvm.claimTags', `${key} is a reserved tag key`);
+    }
+    if (!TAG_KEY_PATTERN.test(key)) {
+      fail('tvm.claimTags', `tag key '${key}' is not a valid tag key`);
+    }
+    if (typeof claim !== 'string' || claim.length === 0) {
+      fail('tvm.claimTags', `tag key '${key}' must map to a claim name`);
+    }
+  }
+  const tvm: ResolvedOptions['tvm'] = {
+    role: tvmProps.role,
+    includeUserIdTag: tvmProps.includeUserIdTag ?? false,
+    claimTags,
+    durationSeconds,
+  };
 
   return {
     backend,
@@ -240,6 +264,8 @@ export class IsolatedRuntime extends Construct {
   readonly executionRole: iam.IRole;
   /** The role that validates the token and, with `tvm`, assumes the tenant role: the integration Lambda or the interceptor. */
   readonly tvmCallerRole: iam.IRole;
+  /** The tenant role every model call is signed by (ADR-0018): the deployer's role, or the construct's default `TenantModelRole`. */
+  readonly tenantRole: iam.IRole;
   /** The resolved options, for consumers and tests. */
   readonly options: ResolvedOptions;
 
@@ -252,12 +278,15 @@ export class IsolatedRuntime extends Construct {
       codePath: props.agent.codePath,
       modelId: props.agent.modelId,
       environment: props.agent.environment,
-      transports: { forwardUserToken: options.forwardUserToken, tenantCredentials: options.tvm !== undefined },
+      transports: { forwardUserToken: options.forwardUserToken, tenantCredentials: true },
     });
     this.runtimeArn = backend.resourceArn;
     this.executionRole = backend.executionRole;
 
-    const environment = ingressEnvironment(props, options);
+    // The tenant-role ARN the ingress assumes. The default role is created
+    // after the ingress (it trusts tvmCallerRole), so resolve its ARN lazily.
+    const tenantRoleArn = options.tvm.role?.roleArn ?? Lazy.string({ produce: () => this.tenantRole.roleArn });
+    const environment = ingressEnvironment(props, options, tenantRoleArn);
 
     if (options.ingress === 'api-gateway') {
       const api = this.apiGatewayIngress(props, options, environment, backend);
@@ -273,16 +302,78 @@ export class IsolatedRuntime extends Construct {
 
     backend.bindIngress(this.ingressRole);
 
+    // The TVM is always on (ADR-0018). When the deployer supplies a role it
+    // owns (and may use for tenant data), use it; otherwise create a
+    // model-only `TenantModelRole` trusted by tvmCallerRole alone, built
+    // AFTER tvmCallerRole exists so its trust names exactly that principal.
+    this.tenantRole = options.tvm.role ?? this.defaultTenantRole(options);
+
+    // Always add the one-model statement to the tenant role (default or the
+    // deployer's): every model call is signed by a principal carrying the
+    // verified TenantId, so AWS attributes model cost per tenant (ADR-0018).
+    // Same ARNs and inference-profile acknowledgment as the old execution-role
+    // OneModel statement (ADR-0008 amended).
+    this.grantModel(this.tenantRole, props.agent.modelId);
+
     // P-8 (ADR-0012): only the token-validating role may assume the tenant
-    // role, and only when the TVM is on. The deployer's trust policy must
-    // name tvmCallerRole and require the TenantId request tag (spec §6.1).
-    if (options.tvm !== undefined) {
-      this.tvmCallerRole.addToPrincipalPolicy(
-        new iam.PolicyStatement({
-          sid: 'AssumeTenantRole',
-          actions: ['sts:AssumeRole', 'sts:TagSession'],
-          resources: [options.tvm.role.roleArn],
-        }),
+    // role. For a deployer-supplied role the trust policy must name
+    // tvmCallerRole and require the TenantId request tag (spec §6.1); the
+    // default role's trust does that by construction.
+    this.tvmCallerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'AssumeTenantRole',
+        actions: ['sts:AssumeRole', 'sts:TagSession'],
+        resources: [this.tenantRole.roleArn],
+      }),
+    );
+  }
+
+  /**
+   * The default tenant role (ADR-0018): trusted by `tvmCallerRole` only,
+   * requiring a non-empty `TenantId` request tag and `aws:TagKeys` pinned to
+   * the configured tag set, with `sts:TagSession` and a one-hour maximum
+   * session (role chaining caps there). It carries only the model statement
+   * (added by the caller via `grantModel`), no data permission.
+   */
+  private defaultTenantRole(options: ResolvedOptions): iam.Role {
+    const tagKeys = [TENANT_TAG_KEY];
+    if (options.tvm.includeUserIdTag) {
+      tagKeys.push(USER_TAG_KEY);
+    }
+    tagKeys.push(...Object.keys(options.tvm.claimTags));
+    return new iam.Role(this, 'TenantModelRole', {
+      description: 'Default tenant role (ADR-0018): assumable only by tvmCallerRole with a TenantId session tag; may invoke only the one model',
+      assumedBy: new iam.ArnPrincipal(this.tvmCallerRole.roleArn)
+        .withConditions({
+          'StringLike': { [`aws:RequestTag/${TENANT_TAG_KEY}`]: '?*' },
+          'ForAllValues:StringEquals': { 'aws:TagKeys': tagKeys },
+        })
+        .withSessionTags(),
+      maxSessionDuration: Duration.hours(1),
+    });
+  }
+
+  /**
+   * Adds the one-model statement (`bedrock:InvokeModel`,
+   * `bedrock:InvokeModelWithResponseStream` on `modelResourceArns(modelId)`)
+   * to a tenant role, with the inference-profile Region-wildcard
+   * acknowledgment where the id is a cross-Region profile (ADR-0018, was the
+   * execution role's `OneModel` under ADR-0008). An imported role (no
+   * `addToPrincipalPolicy` effect) must already carry it; the README says so.
+   */
+  private grantModel(role: iam.IRole, modelId: string): void {
+    role.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'OneModel',
+        actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
+        resources: modelResourceArns(modelId),
+      }),
+    );
+    if (isInferenceProfileId(modelId)) {
+      acknowledgeGranularFinding(
+        role,
+        `AwsSolutions-IAM5[Resource::${nagFindingResource(this, foundationModelArn('*', baseModelId(modelId)))}]`,
+        'A cross-Region inference profile routes the call to the model in any Region of its set, so the foundation-model ARN names one model with a Region wildcard; the profile ARN itself is exact (ADR-0018).',
       );
     }
   }
@@ -505,7 +596,7 @@ export class IsolatedRuntime extends Construct {
 // ---------------------------------------------------------------------------
 
 /** The ingress Lambdas' environment (src/shared/config.ts): every option, backend-neutral. */
-function ingressEnvironment(props: IsolatedRuntimeProps, options: ResolvedOptions): Record<string, string> {
+function ingressEnvironment(props: IsolatedRuntimeProps, options: ResolvedOptions, tenantRoleArn: string): Record<string, string> {
   const env: Record<string, string> = {
     [ENV.INGRESS]: options.ingress,
     [ENV.DISCOVERY_URL]: props.identity.discoveryUrl,
@@ -522,12 +613,11 @@ function ingressEnvironment(props: IsolatedRuntimeProps, options: ResolvedOption
   if (options.allowedScopes !== undefined) {
     env[ENV.ALLOWED_SCOPES] = options.allowedScopes.join(',');
   }
-  if (options.tvm !== undefined) {
-    env[ENV.TVM_ROLE_ARN] = options.tvm.role.roleArn;
-    env[ENV.TVM_INCLUDE_USER_ID_TAG] = String(options.tvm.includeUserIdTag);
-    env[ENV.TVM_CLAIM_TAGS] = JSON.stringify(options.tvm.claimTags);
-    env[ENV.TVM_DURATION_SECONDS] = String(options.tvm.durationSeconds);
-  }
+  // The TVM is always on (ADR-0018), so these are always set.
+  env[ENV.TVM_ROLE_ARN] = tenantRoleArn;
+  env[ENV.TVM_INCLUDE_USER_ID_TAG] = String(options.tvm.includeUserIdTag);
+  env[ENV.TVM_CLAIM_TAGS] = JSON.stringify(options.tvm.claimTags);
+  env[ENV.TVM_DURATION_SECONDS] = String(options.tvm.durationSeconds);
   return env;
 }
 

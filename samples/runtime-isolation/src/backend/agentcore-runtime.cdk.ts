@@ -3,11 +3,13 @@
 
 /**
  * The `agentcore-runtime` backend, CDK side (spec C-1, §3.4; ADR-0001,
- * ADR-0008, ADR-0010, ADR-0011). One AgentCore Runtime with IAM (SigV4)
- * inbound authorisation, an execution role that can invoke one model and
- * write logs and nothing tenant-scoped, a resource policy that names one
- * ingress principal, and a request-header allowlist that carries the
- * user-token and credential headers only when the matching option is on.
+ * ADR-0008, ADR-0010, ADR-0011, ADR-0018). One AgentCore Runtime with IAM
+ * (SigV4) inbound authorisation, an execution role that can write logs and
+ * traces and read its own code and nothing else (no model, no tenant data:
+ * the agent uses the vended tenant credentials for both, ADR-0018), a
+ * resource policy that names one ingress principal, and a request-header
+ * allowlist that always carries the credential header and carries the
+ * user-token header only when forwarding is on.
  */
 
 import * as fs from 'node:fs';
@@ -47,7 +49,8 @@ export function baseModelId(modelId: string): string {
   return modelId.replace(INFERENCE_PROFILE_PREFIX, '');
 }
 
-function foundationModelArn(region: string, modelId: string): string {
+/** The foundation-model ARN form (`eu.amazon.nova-lite-v1:0` -> `arn:...:bedrock:<region>::foundation-model/amazon.nova-lite-v1:0`). */
+export function foundationModelArn(region: string, modelId: string): string {
   return `arn:${Aws.PARTITION}:bedrock:${region}::foundation-model/${modelId}`;
 }
 
@@ -88,10 +91,12 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
     }
     const code = new s3assets.Asset(this, 'AgentCode', { path: props.codePath });
 
-    // The execution role (ADR-0008): the Runtime service assumes it for this
-    // account only. It may read its own code, write its own log group,
-    // trace, and invoke the one model. No data permission: the TVM supplies
-    // tenant data access with credentials vended from the token (ADR-0012).
+    // The execution role (ADR-0008, amended by ADR-0018): the Runtime service
+    // assumes it for this account only. It may read its own code, write its
+    // own log group and trace. No model access and no data permission: the
+    // agent invokes the model AND reaches tenant data with the credentials
+    // vended from the token (ADR-0012, ADR-0018), so a compromised agent holds
+    // no shared permission of any kind.
     this.executionRole = new iam.Role(this, 'ExecutionRole', {
       assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com', {
         conditions: {
@@ -99,7 +104,7 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
           ArnLike: { 'aws:SourceArn': `arn:${Aws.PARTITION}:bedrock-agentcore:${Aws.REGION}:${Aws.ACCOUNT_ID}:*` },
         },
       }),
-      description: 'AgentCore Runtime execution role: model invocation, logs and traces only (ADR-0008)',
+      description: 'AgentCore Runtime execution role: logs and traces only; no model and no data (ADR-0008, ADR-0018)',
     });
     // The one code object, by exact key: no bucket-wide read.
     this.executionRole.addToPolicy(
@@ -119,24 +124,12 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
         ],
       }),
     );
-    this.executionRole.addToPolicy(
-      new iam.PolicyStatement({
-        sid: 'OneModel',
-        // Both invoke forms: the agent streams (ConverseStream is authorised
-        // as InvokeModelWithResponseStream); Converse is InvokeModel.
-        actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
-        resources: modelResourceArns(props.modelId),
-      }),
-    );
-    if (isInferenceProfileId(props.modelId)) {
-      // The foundation-model ARN carries no account and, for a cross-Region
-      // profile, no fixed Region: `*` here is the Region, not the model.
-      acknowledgeGranularFinding(
-        this.executionRole,
-        `AwsSolutions-IAM5[Resource::${nagFindingResource(this, foundationModelArn('*', baseModelId(props.modelId)))}]`,
-        'A cross-Region inference profile routes the call to the model in any Region of its set, so the foundation-model ARN names one model with a Region wildcard; the profile ARN itself is exact (ADR-0008).',
-      );
-    }
+    // Model invocation is NOT granted here (ADR-0008 amended by ADR-0018):
+    // the agent signs every model call with the vended tenant credentials, so
+    // AWS attributes model cost per tenant and a compromised agent holds no
+    // shared model permission. The one-model statement lives on the tenant
+    // role (src/runtime-isolation.cdk.ts). The execution role keeps code,
+    // logs, traces and metrics only.
     this.executionRole.addToPolicy(
       new iam.PolicyStatement({
         sid: 'Traces',
