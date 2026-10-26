@@ -18,7 +18,7 @@ No API change. Con: a second record of one fact, with a window after `CreateTena
 Safe retries without exposing the id. Con: still two ids, plus an idempotency record to store and expire.
 
 ## Decision
-Option 1. It removes the mapping and the duplicate-on-retry window with no new storage. The id pattern is validated by the Smithy model before any write.
+Option 1. It removes the mapping and the duplicate-on-retry window with no new storage. The new member is typed `TenantId` (the shape in `__global.smithy`), not a fresh string, so its ULID pattern rejects a bad id with 400 before any write (spec M-R-3).
 
 ## Consequences
 Callers without an id are unchanged. The README API section and spec §5.1 gain the field (amend with a dated note when accepted). Revisit if `/platform/*` ever admits a non-vendor caller.

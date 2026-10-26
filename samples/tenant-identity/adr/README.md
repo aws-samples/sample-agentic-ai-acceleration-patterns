@@ -40,3 +40,5 @@ Template: [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md#2-d
 | [ADR-0029](0029-accept-a-caller-supplied-tenant-id.md) | Accept an optional caller-supplied `tenantId` on `CreateTenant` | Proposed | 2026-10-26 |
 | [ADR-0030](0030-publish-a-least-privilege-platform-invoke-policy.md) | Publish a least-privilege managed policy for the platform calls of the mount | Proposed | 2026-10-26 |
 | [ADR-0031](0031-park-the-first-admin-password-in-a-securestring.md) | Park the temporary password of the first admin in an SSM SecureString | Proposed | 2026-10-26 |
+| [ADR-0032](0032-make-the-first-admin-a-conditional-write.md) | Make the first admin a conditional write on the registry row | Proposed | 2026-10-26 |
+| [ADR-0033](0033-encrypt-the-parked-password-with-a-customer-key.md) | Encrypt the parked admin password with a key the build role cannot decrypt | Proposed | 2026-10-26 |

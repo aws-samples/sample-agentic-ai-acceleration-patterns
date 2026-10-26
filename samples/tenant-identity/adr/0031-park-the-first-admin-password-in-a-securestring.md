@@ -9,7 +9,7 @@ Every topology creates users with `MessageAction: SUPPRESS` and returns the temp
 
 ## Options considered
 ### Option 1: SecureString at `/application-plane/tenants/<T>/identity/admin-temporary-password`
-Inside the namespace the tenant build role already owns; encrypted; deleted by `tenant/delete.sh`. Con: readable by any principal with that path and the default key, including the shared build role (spec §9 gap 3).
+Inside the namespace the tenant build role already owns; encrypted with `AdminPasswordKey` (ADR-0033), which the build role can encrypt with but not decrypt; deleted by `tenant/delete.sh`. Con: the deployer must grant `kms:Decrypt` to whoever collects the password.
 
 ### Option 2: Let Cognito email the invitation
 The real-world path; the script holds nothing. Con: a change to every topology, the daily quota of the Cognito default sender, and an SES-backed sender for the simulator addresses the tests use.
@@ -21,4 +21,4 @@ Nothing secret stored. Con: the admin is locked out until the vendor runs `Delet
 Option 1 for the sample, with option 2 as a hardening item. It keeps one-call onboarding, and the integration test can sign the admin in (spec §10 step 6).
 
 ## Consequences
-A build killed between the 201 and the park loses the password (spec §9 gap 1). Hardening: a customer KMS key the build role may encrypt with but not decrypt, or option 2. The value never appears in a log: `put-parameter` output goes to `/dev/null`.
+A build killed between the 201 and the park loses the password (spec §9 gap 1); the park is therefore the very next call after the 201 (spec M-R-10), and the replay path claims the first-admin slot instead of re-parking (ADR-0032). Hardening left: option 2. The value never appears in a log: `put-parameter` output goes to `/dev/null`.

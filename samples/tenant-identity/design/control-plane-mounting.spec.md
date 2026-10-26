@@ -6,7 +6,13 @@
 > provisioning scripts, filling the "Control-plane mounting" seam of
 > tenant-identity §11. It changes both samples; each change is recorded as a
 > Proposed ADR in the sample it touches (tenant-identity ADR-0028 to
-> ADR-0031, control-plane ADR-0022 and ADR-0023).
+> ADR-0033, control-plane ADR-0022 and ADR-0023).
+>
+> Revised 2026-10-26 after a blind review: `tenantId` is typed `TenantId`
+> (§5.1), the first admin is a conditional write (§5.3, ADR-0032), the parked
+> password is encrypted with a key the build role cannot decrypt (§6.5,
+> ADR-0033), the park happens before any other work (M-R-10), and §10 names
+> the test-aid dependency.
 >
 > Written against `main` at `c4023d8`. The composition rule and repository
 > `ARCHITECTURE.md` on the unmerged `sample/runtime-isolation` branch
@@ -66,8 +72,8 @@ mirrors it.
 - Not per-cell identity (one identity stack per cell). That is a different
   deployment model, recorded as a seam in §11.
 - Not delivery of the admin invitation to a real mailbox. The script parks
-  the temporary password for the vendor (ADR-0031); real delivery is a
-  hardening item.
+  the temporary password for the vendor, encrypted with a key the build role
+  cannot decrypt (ADR-0031, ADR-0033); real delivery is a hardening item.
 
 ---
 
@@ -122,7 +128,9 @@ bodies.
 | `scripts/control-plane/cell/{create,update,delete}.sh` | tenant-identity | new |
 | `scripts/control-plane/lib.sh` (sign and call the platform API) | tenant-identity | new |
 | `CreateTenant` optional `tenantId` input | tenant-identity | changed (ADR-0029) |
-| `PlatformInvokePolicy` managed policy + its SSM parameter | tenant-identity | new (ADR-0030) |
+| `CreateUser` optional `firstAdmin` input; registry `firstAdminUsername` | tenant-identity | changed (ADR-0032) |
+| `PlatformInvokePolicy` managed policy (API routes + encrypt) + its SSM parameter | tenant-identity | new (ADR-0030) |
+| `AdminPasswordKey` KMS key + its SSM parameter | tenant-identity | new (ADR-0033) |
 | `tenantBuildManagedPolicyArns` deployment input | control-plane | new (ADR-0022) |
 | `TENANT_NAME` in the tenant script environment | control-plane | new (ADR-0023) |
 | `test/integ.control-plane.ts` + `scripts/integ-control-plane.sh` | tenant-identity | new (§10) |
@@ -133,9 +141,10 @@ bodies.
 vendor ──JWT──▶ control-plane CreateTenant (202, tenantId=T)
                  └─▶ Step Functions ─▶ CodeBuild tenant project
                        └─▶ tenant/create.sh
-                             ├─ read /application-plane/shared/identity/{apiUrl,topology}
+                             ├─ read /application-plane/shared/identity/{apiUrl,topology,adminPasswordKeyArn}
                              ├─ SigV4 POST {apiUrl}/platform/tenants {tenantId:T, name, adminEmail}
-                             └─ put /application-plane/tenants/T/identity/admin-temporary-password (SecureString)
+                             └─ put /application-plane/tenants/T/identity/admin-temporary-password
+                                (SecureString, key = AdminPasswordKey)
                  ◀── build SUCCEEDED ── tenant ACTIVE in control-plane
 ```
 
@@ -185,7 +194,8 @@ No new tables. State lives in existing stores:
 |---|---|---|
 | tenant lifecycle (control) | control-plane `Tenant` record | control-plane |
 | tenant identity (registry row, pool or groups) | tenant-identity `TenantRegistry`, key `TENANT#<T>` | tenant-identity |
-| first admin's temporary password, until collected | SSM SecureString `/application-plane/tenants/<T>/identity/admin-temporary-password` | the tenant scripts (ADR-0031) |
+| first admin's temporary password, until collected | SSM SecureString `/application-plane/tenants/<T>/identity/admin-temporary-password`, encrypted with `AdminPasswordKey` | the tenant scripts (ADR-0031, ADR-0033) |
+| which user is the first admin | tenant-identity registry row, `firstAdminUsername` | tenant-identity (ADR-0032) |
 
 **M-R-1:** The script MUST NOT write any other identity fact to SSM. Pool
 ids, client ids and issuers are read from `GetTenant` by whoever needs them
@@ -203,6 +213,7 @@ operation CreateTenant {
         /// Optional. When present, the registry row is written with this id
         /// instead of a generated one. Lets an upstream control plane keep
         /// one id across planes (control-plane mounting spec M-P-1).
+        /// Typed `TenantId` (not a fresh string) so the ULID pattern applies.
         tenantId: TenantId
         @required
         name: TenantName
@@ -219,8 +230,9 @@ operation CreateTenant {
 409 `ConflictError` and changes nothing. Without `tenantId`, behaviour is
 unchanged (a generated ULID).
 
-**M-R-3:** The id MUST be validated by the Smithy pattern (400 on mismatch)
-before any write.
+**M-R-3:** The `tenantId` member MUST reuse the `TenantId` shape from
+`__global.smithy`, so its pattern (`^[0-9A-HJKMNP-TV-Z]{26}$`) rejects a bad
+id with 400 before any write. A new string shape would not carry the pattern.
 
 Neither the tenant API nor the token contract changes.
 
@@ -233,6 +245,45 @@ Neither the tenant API nor the token contract changes.
 Same boundary test as `ADMIN_EMAIL` (control-plane ADR-004): onboarding
 input, not application-plane configuration. Unlike `ADMIN_EMAIL` it is
 already persisted on the record, so it is passed on every operation.
+
+### 5.3 tenant-identity `CreateUser` takes an optional `firstAdmin` (ADR-0032)
+
+```smithy
+operation CreateUser {
+    input := {
+        @required
+        @httpLabel
+        tenantId: TenantId
+        @required
+        email: EmailAddress
+        /// Also add the user to `admin-<tenantId>`.
+        admin: Boolean
+        /// Optional. When true, the call claims the tenant's single
+        /// first-admin slot. 409 ConflictError if the slot is taken.
+        /// Implies admin: true.
+        firstAdmin: Boolean
+    }
+    // output and errors unchanged; ConflictError already modelled
+}
+```
+
+**M-R-8:** The registry row gains `firstAdminUsername`. A `firstAdmin`
+create MUST first claim it with one conditional write
+(`attribute_not_exists(firstAdminUsername)`, value = the email, which is the
+Cognito username in every topology). A failed condition is 409
+`ConflictError` and changes nothing. Only after the claim does the Cognito
+user get created; if that fails, the claim is released with a conditional
+delete (`firstAdminUsername = :email`) and the original error is returned.
+
+**M-R-9:** `CreateTenant` creates its first admin through the same path, so
+the admin it makes also holds the slot. `DeleteUser` on the slot holder MUST
+release the slot in the same way, so the vendor can replace a lost admin.
+
+The guard is a conditional write on the authoritative record, not a
+read-then-write (control-plane P-5). Two racing `firstAdmin` creates get one
+201 and one 409, whatever order Cognito sees them in. Ordinary
+`CreateUser {admin: true}` is unchanged: a tenant may have more admins; it has
+one *first* admin.
 
 ---
 
@@ -250,6 +301,7 @@ already persisted on the record, so it is passed on every operation.
 | `/application-plane/shared/identity/apiUrl` | tenant-identity stack (existing) | all mount scripts |
 | `/application-plane/shared/identity/topology` | tenant-identity stack (existing) | `tenant/create.sh`, `cell/create.sh` |
 | `/application-plane/shared/identity/platformInvokePolicyArn` | tenant-identity stack (new, ADR-0030) | the deployer, once, as control-plane context |
+| `/application-plane/shared/identity/adminPasswordKeyArn` | tenant-identity stack (new, ADR-0033) | `tenant/create.sh` |
 | `/application-plane/tenants/<T>/identity/admin-temporary-password` | `tenant/create.sh` | the vendor, out of band; deleted by `tenant/delete.sh` |
 
 All reads and writes stay inside the namespaces control-plane already grants
@@ -260,34 +312,49 @@ its tenant build role (control-plane spec §6.2). No grant changes there.
 ```json
 {
   "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": "execute-api:Invoke",
-    "Resource": [
-      "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/POST/platform/tenants",
-      "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/GET/platform/tenants/*",
-      "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/DELETE/platform/tenants/*",
-      "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/POST/platform/tenants/*/users"
-    ]
-  }]
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "execute-api:Invoke",
+      "Resource": [
+        "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/POST/platform/tenants",
+        "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/GET/platform/tenants/*",
+        "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/DELETE/platform/tenants/*",
+        "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/POST/platform/tenants/*/users"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["kms:Encrypt", "kms:GenerateDataKey"],
+      "Resource": "<AdminPasswordKey ARN>",
+      "Condition": { "StringEquals": { "kms:ViaService": "ssm.<region>.amazonaws.com" } }
+    }
+  ]
 }
 ```
 
-`GET /platform/tenants/*` also matches `GET .../users`, which
-`tenant/create.sh` needs to check for the admin, and `POST .../users`
-re-creates a missing one (M-R-6).
+`POST .../users` is for M-R-6 (claim the first-admin slot on replay).
+`GET /platform/tenants/*` is for `GetTenant`; it also matches `GET .../users`
+and `GetUser`, which the scripts never call. The second statement lets SSM
+encrypt the parked password with `AdminPasswordKey` (ADR-0033) and nothing
+else: no `kms:Decrypt`, and only through SSM.
 
 **M-R-4:** The policy MUST NOT grant `ListTenants`, `IssueToken`,
-`RefreshToken`, user updates, or memberships. `DELETE /platform/tenants/*`
-also matches `DeleteUser`; the scripts never call it, and the threat model
-records the over-grant (execute-api ARNs cannot tell a tenant path from a
-user path under it).
+`RefreshToken`, user updates, memberships, or `kms:Decrypt`.
+`DELETE /platform/tenants/*` also matches `DeleteUser`; the scripts never
+call it, and `threat-model.md` records the over-grant in the same PR that
+adds the policy (execute-api ARNs cannot tell a tenant path from a user path
+under it).
 
 ### 6.4 What the mount promises
 
 - After control-plane `CreateTenant` reaches `ACTIVE`, tenant-identity
   `GetTenant(T)` returns `ACTIVE`, with the same `name`, and the tenant has
-  exactly one admin, `ADMIN_EMAIL`.
+  exactly one first admin, `ADMIN_EMAIL`, held by the conditional slot of
+  M-R-8. No replay, race or retry can make a second one.
+- The parked password can be read only by a principal holding
+  `kms:Decrypt` on `AdminPasswordKey`. The control-plane tenant build role
+  holds none (§6.5).
 - After control-plane `DeleteTenant` completes, tenant-identity `GetTenant(T)`
   returns 404 and no `/application-plane/tenants/<T>/identity/*` parameter
   remains.
@@ -295,6 +362,26 @@ user path under it).
   `CREATE_FAILED`/`DELETE_FAILED` with the operation and HTTP status in the
   build log (never the body), and re-running the control-plane operation
   finishes the job (M-P-3).
+
+### 6.5 `AdminPasswordKey` (ADR-0033)
+
+A symmetric customer-managed KMS key owned by the tenant-identity stack that
+publishes the shared parameters (ADR-0017), alias
+`alias/application-plane/identity/admin-password`, rotation on, ARN at
+`/application-plane/shared/identity/adminPasswordKeyArn`.
+
+Key policy: the default (account root, so IAM policies decide) plus nothing
+else. Who may do what then follows from identity policies:
+
+| Principal | Can | Because |
+|---|---|---|
+| control-plane tenant build role | encrypt, through SSM only | `PlatformInvokePolicy` second statement |
+| the vendor's reader (whoever collects the password) | decrypt | its own `kms:Decrypt` on the key ARN; the deployer grants it |
+| anything else with `ssm:GetParameter` on `/application-plane/tenants/*` | nothing useful | `--with-decryption` fails without `kms:Decrypt` |
+
+**M-R-11:** `tenant/create.sh` MUST pass `--key-id` with this ARN on every
+`put-parameter`; a park with the default SSM key is a failure (exit 1 before
+the write). Deleting the parameter needs no KMS permission.
 
 ---
 
@@ -307,7 +394,8 @@ status and body to the caller in variables.
 
 ### 7.1 `tenant/create.sh`
 
-1. Read `apiUrl` and `topology`. Missing → exit 1 naming the parameter.
+1. Read `apiUrl`, `topology` and `adminPasswordKeyArn`. Missing → exit 1
+   naming the parameter.
 2. **M-R-7:** `topology == tiered` → exit 1 with
    `"tiered identity needs a per-tenant tier; not supported when mounted"`.
 3. `GET /platform/tenants/{T}`:
@@ -318,18 +406,26 @@ status and body to the caller in variables.
    - 200 `DELETING` → exit 1 (`"tenant is being offboarded"`).
    - 404 → step 4.
 4. `POST /platform/tenants {tenantId: T, name: TENANT_NAME, adminEmail}`:
-   - 201 → park `admin.temporaryPassword` (step 6), done.
+   - 201 → **M-R-10:** park `admin.temporaryPassword` (step 6) as the very
+     next call, before any log line, read or other work, so the window of
+     §9 gap 1 is one call wide. Then done.
    - 409 → a racing create won; go to 3 once more, then fail if still not
      `ACTIVE`.
    - other → exit 1.
 5. **M-R-6** (replay after a create that left no admin, tenant-identity §5.1
-   last sentence): `GET /platform/tenants/{T}/users`; if no user has
-   `admin: true`, `POST /platform/tenants/{T}/users {email: ADMIN_EMAIL,
-   admin: true}` and park the returned password. If an admin exists, do
-   nothing; never re-park.
-6. Park: `aws ssm put-parameter --type SecureString --overwrite --name
+   last sentence, or a build killed before the park): `POST
+   /platform/tenants/{T}/users {email: ADMIN_EMAIL, firstAdmin: true}`:
+   - 201 → park the returned password (step 6), done.
+   - 409 → the slot is held; an admin exists. Do nothing; never re-park.
+   - other → exit 1.
+
+   No `GET .../users` first: the slot (M-R-8) decides, not a read.
+6. Park: `aws ssm put-parameter --type SecureString --key-id "$KEY_ARN"
+   --overwrite --name
    /application-plane/tenants/{T}/identity/admin-temporary-password
-   --value "$PW" > /dev/null`, then `unset PW`. Log the parameter name only.
+   --value "$PW" > /dev/null`, then `unset PW`. `KEY_ARN` is
+   `adminPasswordKeyArn`, read in step 1 (missing → exit 1, M-R-11). Log
+   the parameter name only.
 
 ### 7.2 `tenant/update.sh`
 
@@ -363,7 +459,7 @@ no-op (control-plane P-9).
 | identity stack not deployed | cell `CREATE_FAILED` | deploy tenant-identity, `UpdateCell` |
 | `tiered` topology | cell or tenant `CREATE_FAILED` | redeploy identity with a single topology |
 | policy not attached | tenant `CREATE_FAILED`, `HTTP 403` in log | redeploy control-plane with the context, then `DeleteTenant` and `CreateTenant` again |
-| build killed after 201, before park | `CREATE_FAILED` | re-run: step 3 sees `ACTIVE`, step 5 sees an admin and does not re-park. The password is lost; the vendor recovers with `DeleteUser` + `CreateUser` (residual gap, §9) |
+| build killed after 201, before park | `CREATE_FAILED` | re-run: step 3 sees `ACTIVE`, step 5 gets 409 and does not re-park. The password is lost; the vendor recovers with `DeleteUser` (releases the slot, M-R-9) then `CreateUser {firstAdmin: true}` by hand, or control-plane `DeleteTenant` + `CreateTenant` (residual gap, §9) |
 | identity row stuck `PROVISIONING` | `CREATE_FAILED` | vendor `DeleteTenant` on tenant-identity, then control-plane `DeleteTenant` |
 | identity `DeleteTenant` fails | `DELETE_FAILED` | control-plane `DeleteTenant` retry re-runs the script |
 
@@ -378,11 +474,15 @@ no-op (control-plane P-9).
   password again or to let Cognito deliver it (ADR-0031 Consequences).
 - **Residual gap 2:** a tenant-identity row stuck in `PROVISIONING` blocks
   replay. tenant-identity has no sweep; its §11 is the place to add one.
-- **Residual gap 3:** the parked password is readable by anything that can
-  read `/application-plane/tenants/*` and decrypt with the default SSM key.
-  In control-plane that is the tenant build role, which runs every tenant's
-  script (control-plane ADR-021 bounds that blast radius). Hardening: a
-  customer KMS key the build role can encrypt with but not decrypt.
+- **Closed gap (was 3):** the parked password was readable by the shared
+  tenant build role, which runs every tenant's script. `AdminPasswordKey`
+  (§6.5, ADR-0033) closes it: the build role can encrypt through SSM and
+  cannot decrypt. What remains is the deployer's choice of who holds
+  `kms:Decrypt`; §10 step 5b checks the build role does not.
+- **Closed gap (was the §6.4 single-admin promise):** the first admin is a
+  conditional write (M-R-8), not a read-then-write.
+- **Cost:** one customer-managed KMS key per account and Region (about
+  $1/month) plus a few encrypt calls per tenant.
 
 ---
 
@@ -411,12 +511,14 @@ cdk deploy` with the §3.4 context), never by importing its `src/`.
 | 1 | control-plane `CreateTenant` for the first tenant creates its cell (implicit, control-plane ADR-013) | cell `ACTIVE`; `cell/create.sh` found the identity parameters |
 | 2 | control-plane `CreateTenant {name, adminEmail=success+admin@simulator.amazonses.com}` | 202, polls to `ACTIVE` |
 | 3 | tenant-identity `GetTenant(T)` with the test's own SigV4 | 200 `ACTIVE`, same `name` |
-| 4 | tenant-identity `ListUsers(T)` | exactly one user, `admin: true` |
-| 5 | parked parameter exists, type `SecureString` | true; value never printed |
-| 6 | `IssueToken` for the admin with the parked password (test aid) | access token whose `tenant_id` claim is `T` |
+| 4 | tenant-identity `ListUsers(T)` | exactly one user, `admin: true`; `GetTenant(T)` is unchanged (no registry field leaks into the API) |
+| 5 | parked parameter exists, type `SecureString`, `KeyId` = `adminPasswordKeyArn` | true; value never printed |
+| 5b | `iam simulate-principal-policy` for the control-plane tenant build role, action `kms:Decrypt`, resource `adminPasswordKeyArn` | `implicitDeny` |
+| 6 | `IssueToken` for the admin with the parked password | access token whose `tenant_id` claim is `T`. **Needs the test-aid routes deployed** (`IssueToken` is a test aid, tenant-identity ADR-0006, removed by README hardening item 1); the test asserts they exist and fails with a clear message if not |
 | 7 | control-plane `UpdateTenant(T)` | `ACTIVE`; still one admin; parameter not re-written (version unchanged) |
 | 8 | run `tenant/create.sh` locally a second time with the build's env | exit 0; still one registry row, one admin |
 | 9 | tenant-identity `CreateTenant` with an existing `tenantId` | 409, nothing changed |
+| 9b | tenant-identity `CreateUser(T) {email: other@example.com, firstAdmin: true}` | 409, no user created; then `CreateUser {admin: true}` for the same email → 201 (a second admin is allowed, a second *first* admin is not); delete it |
 | 10 | control-plane `DeleteTenant(T)` | completes |
 | 11 | tenant-identity `GetTenant(T)` | 404; parked parameter gone |
 | 12 | teardown from an exit trap: control-plane, setup, identity | no stacks, pools, parameters, or log groups with either prefix |
@@ -446,7 +548,9 @@ Estimated run: 25-35 minutes, under $1.
 | Work item | Ready | Depends on |
 |---|---|---|
 | tenant-identity: optional `tenantId` (ADR-0029) + unit tests | yes | — |
-| tenant-identity: `PlatformInvokePolicy` + parameter (ADR-0030) | yes | — |
+| tenant-identity: `firstAdmin` slot (ADR-0032) + unit tests | yes | — |
+| tenant-identity: `AdminPasswordKey` + parameter (ADR-0033) | yes | — |
+| tenant-identity: `PlatformInvokePolicy` + parameter + `threat-model.md` entry, one PR (ADR-0030) | yes | ADR-0033 (key ARN) |
 | control-plane: `tenantBuildManagedPolicyArns` (ADR-0022) | yes | — |
 | control-plane: `TENANT_NAME` env (ADR-0023) | yes | — |
 | tenant-identity: mount scripts + stub unit tests | yes | contracts in §5-§7 only |
