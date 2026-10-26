@@ -38,16 +38,17 @@ invokes the service with SigV4. A leaked or forged JWT, or a guessed unit id,
 cannot reach a unit the ingress would not have chosen for that caller. Every
 check sits in front of the compute, never inside it.
 
-The pattern is a core plus optional modules. The core is the trusted ingress
-and the one-principal resource policy (P-1, P-3). The modules each add a
-check and are off by default (P-4):
+The pattern is a core plus optional modules. The core is the trusted ingress,
+the one-principal resource policy (P-1, P-3), and an always-on token vending
+machine that signs model calls and data access per tenant (P-8, P-10,
+ADR-0018). The other modules each add a check and are off by default (P-4):
 
 | Module | Adds | Prop |
 |---|---|---|
 | Session mapping | conversations that persist across requests, in a unit derived from the caller's claims, so a user resumes only their own session (P-2, ADR-0002, ADR-0013) | `session` |
 | Scope checks | required OAuth scopes on the token (ADR-0005) | `requiredScopes` |
 | Delegation | the user's token forwarded to the agent, optionally narrowed (P-5) | `delegation` |
-| TVM | tenant-scoped AWS credentials for the agent's data access (P-8) | `tvm` |
+| TVM | always on (ADR-0018): tenant-scoped AWS credentials for the model call and the agent's data access (P-8); `tvm` customises it, e.g. a role that also reaches tenant data | `tvm` |
 
 Without session mapping every request runs in a fresh unit and nothing
 carries over between requests: the strictest setting. With it, the sample
@@ -77,8 +78,8 @@ with `session` set. Enforced isolation at the invocation boundary.
 |---|---|
 | Who may invoke the backend | Backend resource policy: only the ingress principal (P-1) |
 | Which unit a request lands in | Ingress chooses the unit: fresh per request, or derived from validated claims with `session` (P-2) |
-| What the agent can reach | Execution role: model invocation only; no tenant data (P-6) |
-| What tenant data the agent may reach | Optional TVM: tenant-scoped credentials vended at ingress from the same claims, IAM-enforced (P-8) |
+| What the agent can reach | Execution role: logs and traces only; no model and no tenant data (P-6) |
+| What model and tenant data the agent may reach | Always-on TVM: tenant-scoped credentials vended at ingress from the same claims, used to sign the model call (cost attributed per tenant, P-10) and any data access, IAM-enforced (P-8) |
 | What a delegated token can do | Optional; forwarded only on opt-in, optionally narrowed (P-5) |
 
 ### 1.2 What this sample is NOT
@@ -149,24 +150,32 @@ agent asked for.** The user's JWT reaches the agent only when
 ADR-0007).
 
 **P-6. The agent's own role cannot cross tenants because it holds nothing
-tenant-scoped.** The execution role grants `bedrock:InvokeModel` on named
-models and logs; it has no data permission. The microVM's MMDS credential is
-therefore not a tenant boundary concern in this sample.
+tenant-scoped, and holds no model permission either.** The execution role
+grants logs and traces only; it has no data permission and, since ADR-0018,
+no `bedrock:Invoke*`. The agent invokes the model with the vended tenant
+credentials (P-8), so model access too is scoped to the verified tenant. The
+microVM's MMDS credential is therefore not a tenant boundary concern in this
+sample.
 
 **P-7. Security first, then latency, then cost.** Both ingress options MUST
 meet P-1 to P-6 identically. They are compared on measured latency
 (time to first byte, total) and per-request cost, and the README states
 which to prefer and why (ADR-0009).
 
-**P-8. Tenant data is reached only with credentials vended from the validated
-token, never from the agent's own role.** With `tvm` set, the ingress assumes
-`tvm.role` with session tags built from the claims it has just verified
-(`TenantId` always; `UserId` and allowlisted claims on opt-in) and forwards the
-credentials to the backend over the transport the backend defines (§3.4;
-ADR-0011). The tenant role's
-policy scopes data by `${aws:PrincipalTag/TenantId}`, so a cross-tenant call
-fails in IAM whatever the agent does (enforced, not filtered). The agent holds
-no `sts:AssumeRole` (ADR-0012).
+**P-8. Tenant data and the model are reached only with credentials vended
+from the validated token, never from the agent's own role.** The TVM is
+always on (ADR-0018). The ingress assumes a tenant role with session tags
+built from the claims it has just verified (`TenantId` always; `UserId` and
+allowlisted claims on opt-in) and forwards the credentials to the backend
+over the transport the backend defines (§3.4; ADR-0011). The agent signs
+every model call with those credentials, so AWS attributes model cost to the
+IAM principal per tenant (CUR 2.0, ADR-0018); a data-bearing role's policy
+scopes data by `${aws:PrincipalTag/TenantId}`, so a cross-tenant call fails
+in IAM whatever the agent does (enforced, not filtered). The agent holds no
+`sts:AssumeRole` and, since ADR-0018, no model permission of its own
+(ADR-0012). `tvm.role` is optional: unset, the construct creates a default
+role that may invoke only the one model; set, the deployer supplies a role
+that also reaches tenant data and the construct adds the model grant to it.
 
 **P-9. Every request is attributable to a tenant in telemetry.** The ingress
 writes the verified `tenant_id` (and the session prefix, never the token) as
@@ -183,13 +192,18 @@ pools one backend across tenants, so nothing in the bill carries a tenant
 tag; the ingress meters, per tenant, the consumption each billed service
 charges for: ingress requests, ingress compute milliseconds, backend
 invocation seconds (wall time of the invoke, the AgentCore Runtime billing
-unit together with memory), model input and output tokens (reported by the
-agent in a final usage event and read, never stored, by the ingress), and
-streamed bytes. The demo publishes per-tenant cost metrics and top-tenant
-Contributor Insights rules, and the README gives the attribution formula
-and the unattributable remainder (idle, fixed, and per-request service fees
-below the metered unit). Only usage figures leave the agent, never content
-(ADR-0017).
+unit together with memory), and streamed bytes. Model tokens are the
+exception (ADR-0018): because the agent signs every model call with
+credentials tagged `TenantId`, AWS itself attributes model cost to the IAM
+principal per tenant (CUR 2.0 `line_item_iam_principal`,
+`iamPrincipal/TenantId`), so the bill is the source of truth for model cost;
+the agent's final usage event (input and output tokens) and the token
+metrics stay as a near-real-time cross-check. The demo publishes per-tenant
+cost metrics and top-tenant Contributor Insights rules, and the README gives
+the attribution formula, the two account-level billing options the deployer
+must turn on for model cost, and the unattributable remainder (idle, fixed,
+and per-request service fees below the metered unit). Only usage figures
+leave the agent, never content (ADR-0017).
 
 ---
 
@@ -199,7 +213,7 @@ below the metered unit). Only usage figures leave the agent, never content
 
 | ID | Component | Notes |
 |---|---|---|
-| C-1 | **Backend: AgentCore Runtime** (the first backend, ADR-0011) | TypeScript agent, direct code deployment; IAM inbound auth; resource policy per P-1; `requireMMDSV2: true` (amended 2026-10-26: not exposed by `AWS::BedrockAgentCore::Runtime` in aws-cdk-lib 2.274.0, so left out until CloudFormation supports it; threat-model T-13); `requestHeaderAllowlist` holds the user-token header only when P-5 forwarding is on |
+| C-1 | **Backend: AgentCore Runtime** (the first backend, ADR-0011) | TypeScript agent, direct code deployment; IAM inbound auth; resource policy per P-1; `requireMMDSV2: true` (amended 2026-10-26: not exposed by `AWS::BedrockAgentCore::Runtime` in aws-cdk-lib 2.274.0, so left out until CloudFormation supports it; threat-model T-13); execution role grants logs and traces only, no model (ADR-0018); `requestHeaderAllowlist` always holds the credential header (ADR-0018) and holds the user-token header only when P-5 forwarding is on |
 | C-2 | **Agent** | Echoes its unit id and a per-VM nonce and calls one Bedrock model; validates `prompt` is a string (Runtime best practices, input validation) |
 | C-3a | **Ingress A: API Gateway** | Regional REST API, one `POST /invocations` route, Lambda request authoriser (JWT verify, P-3) and a Lambda proxy integration with `responseTransferMode: STREAM`. The integration Lambda chooses the unit (P-2) and calls `InvokeAgentRuntime` with SigV4, streaming the response back |
 | C-3b | **Ingress B: AgentCore Gateway** | No protocol type; `CUSTOM_JWT` inbound authoriser on the tenant-identity pool; one Runtime target (`http.agentcoreRuntime`) with `GATEWAY_IAM_ROLE` outbound; a REQUEST interceptor Lambda that chooses the unit and overwrites the session header (P-2), and enforces P-5 |
@@ -233,7 +247,7 @@ below the metered unit). Only usage figures leave the agent, never content
 | `delegation.forwardUserToken` | boolean | `false` | P-5 |
 | `delegation.requireNarrowedToken` | boolean | `false` | only valid with `forwardUserToken` |
 | `delegation.allowedScopes` | string[] | required when `requireNarrowedToken` | P-5 |
-| `tvm.role` | `iam.IRole` | none (TVM off) | the tenant role the ingress assumes; the deployer owns its trust and ABAC policies (P-8, ADR-0012) |
+| `tvm.role` | `iam.IRole` | none (construct creates a model-only role) | the TVM is always on (ADR-0018); unset, the construct creates `TenantModelRole` that may invoke only the one model; set, a role that also reaches tenant data, whose trust and ABAC the deployer owns and to which the construct adds the model grant (P-8, ADR-0012, ADR-0018) |
 | `tvm.includeUserIdTag` | boolean | `false` | add `UserId = sub` as a session tag |
 | `tvm.claimTags` | `Record<string, string>` | none | extra session tags, tag key to claim name; a claim missing from the token fails the request with 403; `TenantId` and `UserId` are reserved keys |
 | `tvm.durationSeconds` | number | `900` | 900 to 3600; credential lifetime |
@@ -251,10 +265,10 @@ backend-neutral.
 | Invoke call | `InvokeAgentRuntime`, SigV4 | its own call |
 | Who may invoke (P-1) | Runtime resource policy, ingress principal only | its own resource policy |
 | Unit id transport (P-2) | `runtimeSessionId` | its own field |
-| Credential and user-token transport (P-5, P-8) | allowlisted headers `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Credentials` and `...-Custom-User-Token`, base64 JSON | its own payload or context field, with V-7 repeated |
+| Credential and user-token transport (P-5, P-8) | allowlisted headers `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Credentials` (always, ADR-0018) and `...-Custom-User-Token` (on opt-in), base64 JSON | its own payload or context field, with V-7 repeated |
 
 The ingress hands the backend a validated request (`tenant_id`, `sub`, the
-chosen unit id, `prompt`, optional user token, optional credentials); the
+chosen unit id, `prompt`, optional user token, the vended credentials); the
 backend maps it onto these and never sees the bearer token's raw
 `Authorization` value.
 
@@ -270,6 +284,13 @@ No stored entities. The only derived value is the unit id (P-2):
 | prefix (`session`) | `sha256(tenant_id "|" sub)` or `sha256(tenant_id)`, base32, first 26 chars | `[a-z2-7]{26}` |
 | `conversationId` (`session`) | client, in the request body, on both ingresses | `[A-Za-z0-9]{16,64}` |
 | `runtimeSessionId` | the random id, or `s-<prefix>-<conversationId>` | 45 to 93 chars (Runtime minimum is 33) |
+
+Model cost per tenant is not stored by the sample: it is read from the bill
+(ADR-0018). Because the agent signs the model call with a role session tagged
+`TenantId`, AWS records the cost against `iamPrincipal/TenantId` in CUR 2.0;
+the deployer activates that cost allocation tag and the CUR caller-identity
+option (both account-level, README). The usage event's token figures are a
+cross-check, read by the ingress and never stored.
 
 ---
 
@@ -300,10 +321,13 @@ bodies are fixed text and never echo the token or the unit id.
   tenant-identity `shared-pool`; its `userPoolId` and `appClientId` SSM
   parameters give the discovery URL and client id).
 - An agent code bundle and a Bedrock model id enabled in the Region.
-- With `tvm`: a tenant role whose trust policy allows `sts:AssumeRole` and
+- With `tvm` (optional, the TVM is always on): a tenant role that also
+  reaches tenant data, whose trust policy allows `sts:AssumeRole` and
   `sts:TagSession` to `tvmCallerRole` only, requires the `TenantId` request
   tag, pins `aws:TagKeys` to the tags it expects, and whose permissions scope
-  every data resource by `${aws:PrincipalTag/TenantId}` (ADR-0012).
+  every data resource by `${aws:PrincipalTag/TenantId}` (ADR-0012). Without
+  it the construct creates a role that may invoke only the one model
+  (ADR-0018).
 
 ### 6.2 Token contract
 
@@ -341,9 +365,11 @@ issuer as props.
 that adds tenant-scoped memory) can consume this one:
 
 - Construct `IsolatedRuntime`, exported from `src/index.ts`, with
-  read-only `endpointUrl`, `runtimeArn`, `ingressRole`, `executionRole`, and
-  `tvmCallerRole` (the role that validates the token and, with `tvm`, assumes
-  the tenant role: the integration Lambda or the interceptor Lambda).
+  read-only `endpointUrl`, `runtimeArn`, `ingressRole`, `executionRole`,
+  `tvmCallerRole` (the role that validates the token and assumes the tenant
+  role: the integration Lambda or the interceptor Lambda) and `tenantRole`
+  (the role every model call is signed by, the deployer's or the default
+  model-only one, ADR-0018).
 - Parameters, written by the demo stack under
   `/application-plane/shared/agent-runtime/`: `endpointUrl` (the ingress
   invocation URL), `runtimeArn`, and `ingress` (`api-gateway` or

@@ -24,3 +24,5 @@ Option 3. The ingress emits, per request, with `TenantId` and `Ingress` dimensio
 
 ## Consequences
 Easier: a tenant's cost is one CloudWatch query; tiers and fair-use limits can key on the same metrics. Harder: the usage event is a contract the README must document for consumers' own agents; CloudWatch custom metrics cost money per metric-dimension pair, so the construct keeps the set small and the README says so. Revisit if AgentCore Runtime exposes per-invocation CPU and memory seconds, which would replace wall time.
+
+Amended by ADR-0018: model token cost is read from CUR 2.0 by IAM principal (`iamPrincipal/TenantId`) rather than from the usage event; the usage event and the `ModelInputTokens`/`ModelOutputTokens` metrics stay as a near-real-time cross-check, not the billing source.

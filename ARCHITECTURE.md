@@ -149,7 +149,10 @@ Four rules hold at every layer:
    `TenantId` cost allocation tag; shared resources are metered per tenant
    on the consumption that drives their bill (requests, compute seconds,
    model tokens, bytes), with the formula documented (Sample Standard
-   §4.4). Tiering, fair-use limits, and pricing all depend on it.
+   §4.4). For Amazon Bedrock in a pool, sign the model call with credentials
+   carrying a `TenantId` session tag so CUR 2.0 attributes model cost to the
+   IAM principal per tenant, instead of relying on the agent's self-reported
+   usage. Tiering, fair-use limits, and pricing all depend on it.
 
 ## 4. The control plane
 

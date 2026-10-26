@@ -24,3 +24,5 @@ Option 2. When `tvm` is set, the token-validating ingress Lambda (the API Gatewa
 
 ## Consequences
 Easier: enforced data isolation with the same claims that isolate the session; one place to audit. Harder: every hop on the backend's transport must not log the credential (for `agentcore-runtime`: API Gateway access logs, the Gateway, the interceptor; threat model); the agent must build its clients from the header per request and never log it; a `tvm.role` whose trust policy allows another caller silently widens the boundary, so the integration test asserts the role refuses the runner's own credentials. Revisit if the Runtime gains a way to receive per-invocation credentials natively.
+
+Amended by ADR-0018: the TVM is no longer optional (always on), `tvm.role` is optional (the construct creates a default model-only role), and the vended credentials also sign the model call, so the credential transport is always present.

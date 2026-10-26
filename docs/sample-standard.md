@@ -346,6 +346,15 @@ metadata validators = [{
   say so and name the apportioning rule the vendor would use (equal split,
   by requests). Metering reads only usage figures from the token or
   response, never content.
+- **Model cost in a pool: attribute by IAM principal.** When a pooled Amazon
+  Bedrock call is made on behalf of a tenant, sign it with credentials
+  carrying a `TenantId` session tag so CUR 2.0 and Cost Explorer attribute
+  the model cost to the IAM principal per tenant
+  (`iamPrincipal/TenantId`) — the bill, not the agent's self-reported usage,
+  is then the source of truth for model cost. Activate the
+  `iamPrincipal/TenantId` cost allocation tag and the CUR caller-identity
+  option (both account-level); keep any agent-reported token figures as a
+  cross-check. `samples/runtime-isolation` is the worked example.
 
 ### 4.5 Deliverable: a CDK construct
 

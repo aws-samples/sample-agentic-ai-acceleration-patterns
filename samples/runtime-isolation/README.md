@@ -5,8 +5,9 @@ SPDX-License-Identifier: MIT-0
 # Runtime Isolation
 
 A backend that trusts exactly one ingress, which maps the validated caller to
-an isolated compute unit (Amazon Bedrock AgentCore Runtime first), with
-optional session mapping, scope checks, delegation and a token vending machine.
+an isolated compute unit (Amazon Bedrock AgentCore Runtime first), with an
+always-on token vending machine (every model call signed per tenant) and
+optional session mapping, scope checks and delegation.
 
 This README is a placeholder written by the implementation stage; the
 documentation stage replaces it with the sections of
@@ -21,15 +22,59 @@ Build: `npx projen build`. The construct is `IsolatedRuntime`, exported from
 [`src/index.ts`](./src/index.ts); the demo stack is
 [`src/main.ts`](./src/main.ts) (`--context ingress=api-gateway|agentcore-gateway`).
 
+### Props and deploy notes (ADR-0018)
+
+- The TVM is always on. `tvm` is an optional prop: unset, the construct
+  creates `TenantModelRole`, a role that may invoke only the one model;
+  set, you supply a role that also reaches tenant data (the construct adds
+  the model grant and the deployer owns its trust and ABAC, spec §6.1). An
+  **imported** `tvm.role` must already carry
+  `bedrock:InvokeModel`/`...WithResponseStream` on the model, because the
+  construct cannot add a policy to a role it did not create.
+- The construct exposes `tenantRole` (the role every model call is signed by)
+  alongside `ingressRole`, `executionRole` and `tvmCallerRole`.
+- Demo (`src/main.ts`): the `--context tvm=true` flag means "demo tenant
+  data" — it adds a DynamoDB table and a data-bearing tenant role. With
+  `tvm` unset the demo still runs; model cost is attributed per tenant
+  through the construct's default role.
+- After deploy, turn on the two account-level billing options below so model
+  cost splits by tenant.
+
 ## Costs
 
 The backend, the model, the gateway and the ingress Lambda are pooled across
-tenants, so nothing in the bill carries a tenant tag. The ingress meters, per
-request and per verified tenant, the consumption each pooled service bills
-for, and publishes it as CloudWatch metrics (namespace `RuntimeIsolation`,
-dimensions `TenantId` and `Ingress`). The agent reports its model usage in
-the last event of its response stream; the ingress reads the figures and
-never stores the content (P-10, ADR-0017).
+tenants, so nothing in the bill carries a tenant tag. Two mechanisms make
+cost attributable per tenant:
+
+- **Model tokens come from the bill, by IAM principal (ADR-0018).** The agent
+  signs every model call with credentials vended from the verified token and
+  tagged `TenantId`, so AWS attributes the model cost to
+  `iamPrincipal/TenantId` in CUR 2.0 and Cost Explorer — the bill is the
+  source of truth for model cost, independent of what the agent reports.
+- **Everything else the ingress meters per tenant.** For the consumption each
+  other pooled service bills for (requests, ingress compute, backend seconds,
+  bytes), the ingress emits CloudWatch metrics (namespace `RuntimeIsolation`,
+  dimensions `TenantId` and `Ingress`).
+
+The agent still reports its model token usage in the last event of its
+response stream; the ingress reads the figures and never stores the content
+(P-10, ADR-0017). Those figures and the `ModelInputTokens` / `ModelOutputTokens`
+metrics are a near-real-time **cross-check** against the bill, not the billing
+source.
+
+### Turn on model-cost attribution (one-time, account level)
+
+CUR 2.0 does not split cost by IAM principal until the deployer turns it on.
+Both settings are account-level, so the construct cannot set them; do them
+once per account:
+
+1. In **Billing → Cost allocation tags**, activate the `iamPrincipal/TenantId`
+   cost allocation tag.
+2. In the CUR 2.0 data export, enable **"Include caller identity (IAM
+   principal) allocation data"**.
+
+Model cost per tenant is then one query over CUR 2.0's `line_item_iam_principal`
+and `iamPrincipal/TenantId` columns.
 
 ### The usage event (agent-to-ingress contract)
 
@@ -77,10 +122,13 @@ Plug in the current prices for the deployment Region:
 | Metric | Price to apply |
 |---|---|
 | `BackendInvokeSeconds` | AgentCore Runtime vCPU-hour and GB-hour. The Runtime bills active CPU and memory per second, so wall time is an upper bound; treat it as the share key for the Runtime's billed total rather than an exact figure |
-| `ModelInputTokens`, `ModelOutputTokens` | Bedrock input and output token prices for the configured model |
+| `ModelInputTokens`, `ModelOutputTokens` | Cross-check only (ADR-0018). The billed model cost per tenant is read from CUR 2.0 by `iamPrincipal/TenantId`, not computed from these metrics; use them to spot drift, not to bill |
 | `IngressDurationMs` | Lambda GB-second (milliseconds × the ingress function's memory) |
 | `Requests` | Lambda request price, plus the API Gateway REST request price or the AgentCore Gateway per-call price |
 | `StreamedBytes` | Data transfer out, where billed |
+
+Model cost itself is the CUR 2.0 figure keyed on `iamPrincipal/TenantId`
+(above), added to the metered total per tenant.
 
 **Unattributable remainder**: log storage and ingestion, the dashboard and
 Contributor Insights rules, the custom metrics themselves, X-Ray traces, and

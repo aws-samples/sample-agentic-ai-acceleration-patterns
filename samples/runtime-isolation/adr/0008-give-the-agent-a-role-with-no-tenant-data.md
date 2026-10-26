@@ -22,3 +22,5 @@ Option 2, plus `requireMMDSV2: true`.
 
 ## Consequences
 Easier: a small threat surface. Harder: a real agent needs data; the optional TVM (ADR-0012) supplies it with credentials vended from the validated token, so this role stays data-free.
+
+Amended by ADR-0018: the execution role also loses model invocation, which moves to the always-on tenant role, so this role grants logs and traces only.
