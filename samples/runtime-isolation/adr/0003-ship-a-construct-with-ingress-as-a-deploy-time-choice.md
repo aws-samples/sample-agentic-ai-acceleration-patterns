@@ -20,7 +20,7 @@ Pros: identical Runtime and policy, one e2e suite run twice, a direct latency an
 Cons: the Runtime would trust two principals, which weakens P-1 for the demo's sake.
 
 ## Decision
-Option 2. `SessionIsolatedAgentRuntime` creates the Runtime and exactly one ingress; its resource policy names only that ingress's principal.
+Option 2. `IsolatedRuntime` creates the backend and exactly one ingress; its resource policy names only that ingress's principal.
 
 ## Consequences
 Easier: like-for-like measurement. Harder: two code paths to keep equivalent; the shared session module and one e2e suite are the guard.

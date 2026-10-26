@@ -2,7 +2,7 @@
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 -->
-# Specification: Runtime Isolation with Session Mapping
+# Specification: Runtime Isolation
 
 > **Status:** Draft, 2026-10-26. Requirements and principles for the
 > `runtime-isolation` sample. Items marked **[verify]** are service
@@ -16,52 +16,68 @@ RFC 2119.
 
 ## 1. Problem statement
 
-Amazon Bedrock AgentCore Runtime runs each `runtimeSessionId` in its own
-microVM. A vendor can use that as a tenant boundary: build the session id from
-the caller's tenant and user, and one tenant's conversation never shares a
-process with another's. AgentCore does not map sessions to callers; that is
-left to the vendor
+A multi-tenant agent needs compute that keeps one tenant's work out of
+another's process. Several AWS services offer that unit of isolation: Amazon
+Bedrock AgentCore Runtime runs each `runtimeSessionId` in its own microVM;
+AWS Lambda runs each function instance in its own microVM. None of them
+decides *which* unit a given caller may use. That mapping, from an
+authenticated caller to an isolated unit, is left to the vendor
 ([Runtime security best practices](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-security-best-practices.html)).
 
-The obvious build is a Runtime with inbound JWT authorisation and a check in
-the agent that the session id matches the token. That is **filtered**
-isolation: any valid token can call the Runtime with any session id, and the
-only thing between a tenant and another tenant's microVM is a line of agent
-code that runs *inside* the session it is meant to guard.
+The obvious build puts a JWT authoriser on the compute service and a check in
+the agent that the caller matches the unit. That is **filtered** isolation:
+any valid token can call the service and name any unit, and the only thing
+between a tenant and another tenant's process is a line of agent code that
+runs *inside* the unit it is meant to guard.
 
-This sample makes session mapping **enforced**. The Runtime trusts exactly one
-IAM principal, an ingress the vendor controls. The ingress validates the user's
-JWT, derives the session id from the validated `tenant_id` and `sub`, and
-invokes the Runtime with SigV4. A leaked or forged JWT, or a guessed session
-id, cannot reach a session the ingress would not have built for that caller.
-This is the "Runtime isolation with session mapping" pattern of
+**Runtime isolation**, as this sample defines it, makes the mapping
+**enforced**. The compute service trusts exactly one IAM principal, an
+ingress the vendor controls. The ingress validates the user's JWT, reads the
+tenant and user from the validated claims, chooses the isolation unit, and
+invokes the service with SigV4. A leaked or forged JWT, or a guessed unit id,
+cannot reach a unit the ingress would not have chosen for that caller. Every
+check sits in front of the compute, never inside it.
+
+The pattern is a core plus optional modules. The core is the trusted ingress
+and the one-principal resource policy (P-1, P-3). The modules each add a
+check and are off by default (P-4):
+
+| Module | Adds | Prop |
+|---|---|---|
+| Session mapping | conversations that persist across requests, in a unit derived from the caller's claims, so a user resumes only their own session (P-2, ADR-0002, ADR-0013) | `session` |
+| Scope checks | required OAuth scopes on the token (ADR-0005) | `requiredScopes` |
+| Delegation | the user's token forwarded to the agent, optionally narrowed (P-5) | `delegation` |
+| TVM | tenant-scoped AWS credentials for the agent's data access (P-8) | `tvm` |
+
+Without session mapping every request runs in a fresh unit and nothing
+carries over between requests: the strictest setting. With it, the sample
+realises the "Runtime isolation with session mapping" pattern of
 [Agentic AI delegation patterns](https://builder.aws.com/content/3HBLL1UuIpyzPENldeTfjYjvGQj/agentic-ai-delegation-patterns),
 Figure 3.
 
-The pattern is not tied to AgentCore. It needs any compute service that runs
-each session in its own isolated environment and lets one IAM principal be
-the only caller. The construct models that as a **backend**, a typed prop
-(ADR-0011). AgentCore Runtime is the first and, for now, only backend; AWS
-Lambda's microVMs are a candidate for a later one. The principles (§2) are
-written against the backend, and §3 maps them onto AgentCore Runtime.
+The pattern is not tied to one service. It needs any compute service that
+runs work in isolated units and lets one IAM principal be the only caller.
+The construct models that as a **backend**, a typed prop (ADR-0011).
+AgentCore Runtime is the first and, for now, only backend; AWS Lambda's
+microVMs are a candidate for a later one. The principles (§2) are written
+against the backend, and §3 maps them onto AgentCore Runtime.
 
-The sample ships as a CDK construct, `SessionIsolatedAgentRuntime`
-(standard §4.5), with the ingress a deploy-time choice: an Amazon API Gateway
-REST API with response streaming, or an AgentCore Gateway with a Runtime
-target. The tenant-identity sample, topology `shared-pool`, is the identity
-provider.
+The sample ships as a CDK construct, `IsolatedRuntime` (standard §4.5), with
+the ingress a deploy-time choice: an Amazon API Gateway REST API with response
+streaming, or an AgentCore Gateway with a Runtime target. The tenant-identity
+sample, topology `shared-pool`, is the identity provider.
 
 ### 1.1 Deployment model
 
-**Pool**: one Runtime per agent, shared by every tenant; isolation per session
-(per user by default, per tenant optionally). Enforced isolation at the
-invocation boundary.
+**Pool**: one backend per agent, shared by every tenant; isolation per unit.
+A unit is one request by default, or one conversation per user or per tenant
+with `session` set. Enforced isolation at the invocation boundary.
 
 | Layer | What isolates tenants |
 |---|---|
-| Who may invoke the Runtime | Runtime resource policy: only the ingress principal (P-1) |
-| Which session a request lands in | Ingress derives or checks the session id from validated claims (P-2) |
-| What the agent can reach | Runtime execution role: model invocation only; no tenant data (P-6) |
+| Who may invoke the backend | Backend resource policy: only the ingress principal (P-1) |
+| Which unit a request lands in | Ingress chooses the unit: fresh per request, or derived from validated claims with `session` (P-2) |
+| What the agent can reach | Execution role: model invocation only; no tenant data (P-6) |
 | What tenant data the agent may reach | Optional TVM: tenant-scoped credentials vended at ingress from the same claims, IAM-enforced (P-8) |
 | What a delegated token can do | Optional; forwarded only on opt-in, optionally narrowed (P-5) |
 
@@ -70,6 +86,8 @@ invocation boundary.
 - Not a backend catalogue. Only the AgentCore Runtime backend is built. A new
   backend is added only when it meets P-1 and P-2, proved by the same e2e
   suite (ADR-0011).
+- Not a session-mapping sample only. Session mapping is one module; the
+  construct is complete without it.
 
 - Not an identity provider. It consumes tokens from tenant-identity's
   `shared-pool` topology; any OIDC provider that issues the §6.2 token
@@ -92,28 +110,33 @@ invocation boundary.
 
 ## 2. Guiding principles
 
-**P-1. The Runtime trusts one IAM principal, and it is the ingress.**
-The Runtime uses IAM (SigV4) inbound authorisation. Its resource policy
-allows `bedrock-agentcore:InvokeAgentRuntime` only for the ingress principal
-and denies `InvokeAgentRuntimeForUser` and the WebSocket and command
-variants to everyone. No user token can invoke the Runtime directly. Rules
-out: a JWT authoriser on the Runtime as the only gate.
+**P-1. The backend trusts one IAM principal, and it is the ingress.**
+The backend uses IAM (SigV4) inbound authorisation. Its resource policy
+allows the invoke call only for the ingress principal and denies every other
+entry point to everyone. For AgentCore Runtime that is
+`bedrock-agentcore:InvokeAgentRuntime` for the ingress, and a deny on
+`InvokeAgentRuntimeForUser` and the WebSocket and command variants. No user
+token can invoke the backend directly. Rules out: a JWT authoriser on the
+backend as the only gate.
 
-**P-2. The session id is a function of validated claims, never of the
-request alone.** `runtimeSessionId = "s-" + base32(sha256(tenant_id "|" sub))[0:26] + "-" + conversationId`
-for `sessionScope: 'user'`, and `sha256(tenant_id)` for `'tenant'`.
+**P-2. The ingress alone chooses the isolation unit, from validated claims,
+never from the request alone.** Without `session`, every request runs in a
+fresh unit: the ingress generates a random unit id and nothing is shared
+between requests. With `session`,
+`runtimeSessionId = "s-" + base32(sha256(tenant_id "|" sub))[0:26] + "-" + conversationId`
+for `session.scope: 'user'`, and `sha256(tenant_id)` for `'tenant'`.
 `conversationId` is client-chosen (16 to 64 of `[A-Za-z0-9]`), so a user can
 hold several conversations, but the prefix comes only from the verified
-token. The ingress always builds the id; a session id sent by the client is
-ignored and overwritten (ADR-0002).
+token. In both cases a unit id sent by the client is ignored and overwritten
+(ADR-0002, ADR-0013).
 
 **P-3. Tenant context comes only from the validated JWT.** `tenant_id` and
 `sub` are read from a token whose signature, issuer, client, expiry, and
 `token_use: access` were checked at ingress. Nothing in the body, query, or a
 client header names a tenant.
 
-**P-4. Every optional behaviour is off by default and typed.** Scope checks,
-token forwarding, downscoping, and the per-tenant session scope are props
+**P-4. Every optional behaviour is off by default and typed.** Session
+mapping, scope checks, token forwarding, downscoping, and the TVM are props
 with secure defaults. Turning one on adds a check; none removes one.
 
 **P-5. A delegated token is the narrowest token that works, in a header the
@@ -154,11 +177,12 @@ no `sts:AssumeRole` (ADR-0012).
 | ID | Component | Notes |
 |---|---|---|
 | C-1 | **Backend: AgentCore Runtime** (the first backend, ADR-0011) | TypeScript agent, direct code deployment; IAM inbound auth; resource policy per P-1; `requireMMDSV2: true`; `requestHeaderAllowlist` holds the user-token header only when P-5 forwarding is on |
-| C-2 | **Agent** | Echoes the derived session prefix and calls one Bedrock model; validates `prompt` is a string (Runtime best practices, input validation) |
-| C-3a | **Ingress A: API Gateway** | Regional REST API, one `POST /invocations` route, Lambda request authoriser (JWT verify, P-3) and a Lambda proxy integration with `responseTransferMode: STREAM`. The integration Lambda builds the session id (P-2) and calls `InvokeAgentRuntime` with SigV4, streaming the response back |
-| C-3b | **Ingress B: AgentCore Gateway** | No protocol type; `CUSTOM_JWT` inbound authoriser on the tenant-identity pool; one Runtime target (`http.agentcoreRuntime`) with `GATEWAY_IAM_ROLE` outbound; a REQUEST interceptor Lambda that builds the session id and overwrites the session header (P-2), and enforces P-5 |
+| C-2 | **Agent** | Echoes its unit id and a per-VM nonce and calls one Bedrock model; validates `prompt` is a string (Runtime best practices, input validation) |
+| C-3a | **Ingress A: API Gateway** | Regional REST API, one `POST /invocations` route, Lambda request authoriser (JWT verify, P-3) and a Lambda proxy integration with `responseTransferMode: STREAM`. The integration Lambda chooses the unit (P-2) and calls `InvokeAgentRuntime` with SigV4, streaming the response back |
+| C-3b | **Ingress B: AgentCore Gateway** | No protocol type; `CUSTOM_JWT` inbound authoriser on the tenant-identity pool; one Runtime target (`http.agentcoreRuntime`) with `GATEWAY_IAM_ROLE` outbound; a REQUEST interceptor Lambda that chooses the unit and overwrites the session header (P-2), and enforces P-5 |
 | C-4 | **Demo app** | `src/main.ts`: reads tenant-identity's SSM parameters and instantiates the construct with one ingress |
-| C-6 | **TVM module** | Shared by both ingress Lambdas, optional: validated claims to session tags, `AssumeRole` + `TagSession` on `tvm.role`, per-tag-set cache, credential header (P-8) |
+| C-6 | **Unit module** | Shared by both ingress Lambdas: random unit id, or with `session` the claim-derived id (P-2) |
+| C-7 | **TVM module** | Shared by both ingress Lambdas, optional: validated claims to session tags, `AssumeRole` + `TagSession` on `tvm.role`, per-tag-set cache, credential header (P-8) |
 | C-5 | **Integration driver** | `scripts/integ.sh`: deploys tenant-identity (`shared-pool`), then this sample once per ingress, runs the e2e suite and the latency probe, destroys everything |
 
 ### 3.2 Caller and identity model
@@ -181,7 +205,7 @@ no `sts:AssumeRole` (ADR-0012).
 | `agent` | `{ codePath, modelId }` | required | agent code and the one model it may invoke |
 | `backend` | `'agentcore-runtime'` | `'agentcore-runtime'` | the session-isolating compute service (ADR-0011) |
 | `ingress` | `'api-gateway' \| 'agentcore-gateway'` | required | C-3a or C-3b; `agentcore-gateway` is valid only with the `agentcore-runtime` backend |
-| `sessionScope` | `'user' \| 'tenant'` | `'user'` | isolation dimension (P-2) |
+| `session.scope` | `'user' \| 'tenant'` | none (session mapping off: fresh unit per request) | with `session` set, conversations persist in a unit derived from the claims; `'user'` if `scope` is omitted (P-2, ADR-0013) |
 | `requiredScopes` | string[] | none | if set, the token's `scope` MUST contain all of them (ADR-0005) |
 | `delegation.forwardUserToken` | boolean | `false` | P-5 |
 | `delegation.requireNarrowedToken` | boolean | `false` | only valid with `forwardUserToken` |
@@ -195,32 +219,34 @@ Props are validated at synth; an invalid combination fails with the prop name.
 
 ### 3.4 Backend interface
 
-A backend (ADR-0011) defines four things. Everything else in the construct is
+A backend (ADR-0011) defines five things. Everything else in the construct is
 backend-neutral.
 
 | Concern | `agentcore-runtime` | A later backend supplies |
 |---|---|---|
+| Isolation unit (P-2) | one `runtimeSessionId`, one microVM | its own unit (function instance, container, session) |
 | Invoke call | `InvokeAgentRuntime`, SigV4 | its own call |
 | Who may invoke (P-1) | Runtime resource policy, ingress principal only | its own resource policy |
-| Session id transport (P-2) | `runtimeSessionId` | its own session field |
+| Unit id transport (P-2) | `runtimeSessionId` | its own field |
 | Credential and user-token transport (P-5, P-8) | allowlisted headers `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Credentials` and `...-Custom-User-Token`, base64 JSON | its own payload or context field, with V-7 repeated |
 
-The ingress hands the backend a validated request (`tenant_id`, `sub`,
-`conversationId`, `prompt`, optional user token, optional credentials); the
-backend maps it onto these four and never sees the bearer token's raw
+The ingress hands the backend a validated request (`tenant_id`, `sub`, the
+chosen unit id, `prompt`, optional user token, optional credentials); the
+backend maps it onto these and never sees the bearer token's raw
 `Authorization` value.
 
 ---
 
 ## 4. Data model
 
-No stored entities. The only derived value is the session id (P-2):
+No stored entities. The only derived value is the unit id (P-2):
 
 | Field | Source | Shape |
 |---|---|---|
-| prefix | `sha256(tenant_id "|" sub)` or `sha256(tenant_id)`, base32, first 26 chars | `[a-z2-7]{26}` |
-| `conversationId` | client, in the request body, on both ingresses | `[A-Za-z0-9]{16,64}` |
-| `runtimeSessionId` | `s-<prefix>-<conversationId>` | 45 to 93 chars (Runtime minimum is 33) |
+| random id (no `session`) | `s-` + base32 of 32 random bytes, generated per request at ingress | `s-[a-z2-7]{52}` |
+| prefix (`session`) | `sha256(tenant_id "|" sub)` or `sha256(tenant_id)`, base32, first 26 chars | `[a-z2-7]{26}` |
+| `conversationId` (`session`) | client, in the request body, on both ingresses | `[A-Za-z0-9]{16,64}` |
+| `runtimeSessionId` | the random id, or `s-<prefix>-<conversationId>` | 45 to 93 chars (Runtime minimum is 33) |
 
 ---
 
@@ -232,14 +258,14 @@ One operation, the same contract on both ingresses: `InvokeAgent`.
 |---|---|---|
 | URL | `POST https://<api>/prod/invocations` | `POST https://<gw>.gateway.bedrock-agentcore.<region>.amazonaws.com/<target>/invocations` |
 | Auth | `Authorization: Bearer <access token>` | same |
-| Body | `{conversationId, prompt}` | same |
-| Session | built by the integration Lambda | built by the interceptor, written to `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id`; a client value is overwritten (V-3) |
+| Body | `{prompt}`; with `session`, `{conversationId, prompt}` | same |
+| Unit | chosen by the integration Lambda | chosen by the interceptor, written to `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id`; a client value is overwritten (V-3) |
 | Response | `text/event-stream`, streamed | same |
 
 Errors (both): 401 missing/invalid token; 403 `tenant_id` absent, required
-scope missing, or narrowed-token rule failed; 400
-malformed `conversationId` or `prompt`. Error bodies are fixed text and never
-echo the token or the session id.
+scope missing, or narrowed-token rule failed; 400 malformed `prompt`,
+malformed `conversationId`, or `conversationId` sent without `session`. Error
+bodies are fixed text and never echo the token or the unit id.
 
 ---
 
@@ -265,9 +291,11 @@ only, §1.2).
 
 ### 6.3 What the sample promises
 
-- No principal other than the ingress can invoke the Runtime (integ step 3).
-- Tenant A's valid token cannot land in tenant B's session, nor user A1's in
-  user A2's under `sessionScope: 'user'` (integ steps 4, 5).
+- No principal other than the ingress can invoke the backend (integ step 3).
+- Without `session`, no two requests share a unit, even from the same user
+  (integ step 4a).
+- With `session`, tenant A's valid token cannot land in tenant B's unit, nor
+  user A1's in user A2's under `scope: 'user'` (integ steps 4b, 5).
 - The user token reaches the agent only when forwarding is on, and only
   narrowed when `requireNarrowedToken` is on (integ steps 7, 8).
 - With `tvm` on, the agent's credentials carry `TenantId` equal to the
@@ -289,7 +317,7 @@ issuer as props.
 **Published interface**, so a later sample (for example a data-layer sample
 that adds tenant-scoped memory) can consume this one:
 
-- Construct `SessionIsolatedAgentRuntime`, exported from `src/index.ts`, with
+- Construct `IsolatedRuntime`, exported from `src/index.ts`, with
   read-only `endpointUrl`, `runtimeArn`, `ingressRole`, `executionRole`, and
   `tvmCallerRole` (the role that validates the token and, with `tvm`, assumes
   the tenant role: the integration Lambda or the interceptor Lambda).
@@ -333,8 +361,9 @@ session and microVM. Single-call latencies were 0.2-0.3 s warm on both
 ingresses; this is not the §8 step 9 measurement.
 
 Follow-up for the design: because V-3 overwrite works, the `agentcore-gateway`
-ingress builds the session id itself, as API Gateway does (ADR-0002, decided
-2026-10-26). Both ingresses share one request contract.
+ingress chooses the unit itself, as API Gateway does (ADR-0002, decided
+2026-10-26). Both ingresses share one request contract. The same overwrite
+carries the random per-request id when `session` is off (ADR-0013).
 
 ---
 
@@ -345,10 +374,14 @@ ingress builds the session id itself, as API Gateway does (ADR-0002, decided
 2. Deploy the sample with the chosen ingress.
 3. Call `InvokeAgentRuntime` directly with the test runner's own Admin
    credentials and with a role that is not the ingress: both denied (P-1).
-4. A1 opens conversation `c1`. A2 and B1 send `c1`, and also set the session
-   header to A1's session id: each lands in its own session and microVM, never
-   A1's (the agent returns its derived prefix and a per-VM nonce) (P-2).
-5. A1 resumes `c1`: same microVM (same nonce).
+4a. `session` off: A1 sends two requests, the second with the first's unit id
+   in the session header and a `conversationId` in the body: 400 for the
+   body field; with the body fixed, two different units and nonces (P-2).
+4b. `session` on: A1 opens conversation `c1`. A2 and B1 send `c1`, and also
+   set the session header to A1's unit id: each lands in its own unit and
+   microVM, never A1's (the agent returns its unit id and a per-VM nonce)
+   (P-2).
+5. `session` on: A1 resumes `c1`: same microVM (same nonce).
 6. Token with no `tenant_id`, an expired token, a token from another client:
    401/403.
 7. `requiredScopes` on: a token narrowed to `tenant-api/write` only is refused

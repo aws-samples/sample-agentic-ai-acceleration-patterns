@@ -328,7 +328,7 @@ their own app, so the construct is the unit of reuse and the stack in
 
 - Export the construct (and its props interface) from `src/index.ts`. One
   construct per pattern; name it after the pattern
-  (`SessionIsolatedAgentRuntime`, not `AgentCoreStack`).
+  (`IsolatedRuntime`, not `AgentCoreStack`).
 - The construct takes its dependencies as props (an issuer, a table, a key)
   and creates none of them. What the deployer must supply is the
   specification's Contracts section (§2.1), expressed as the props type.
