@@ -8,6 +8,8 @@
 # provisioning - it is also the cleanup path for CREATE_FAILED tenants
 # (including tenants whose cell itself failed to create), so a missing
 # resource is success, not an error.
+# TENANT_NAME is operator-supplied free text: expand it quoted only, never
+# eval or use as an identifier (see scripts/CONVENTIONS.md).
 set -euo pipefail
 
 : "${TENANT_ID:?TENANT_ID env var is required}"

@@ -14,6 +14,8 @@
 # The per-tenant deployment it provisions is deliberately tiny: one SSM
 # parameter per tenant standing in for real infrastructure (a real script
 # would run CDK/Terraform/CloudFormation here).
+# TENANT_NAME and ADMIN_EMAIL are operator-supplied free text: expand them
+# quoted only, never eval or use as an identifier (see scripts/CONVENTIONS.md).
 set -euo pipefail
 
 : "${TENANT_ID:?TENANT_ID env var is required}"
