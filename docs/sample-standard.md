@@ -5,11 +5,13 @@ merged. The standard is derived from [`samples/control-plane`](../samples/contro
 the reference sample; where the two disagree, fix whichever one is wrong and
 say so in the pull request.
 
-A sample is a self-contained, deployable demonstration of one pattern, shipped
-with the design trail that explains why it looks the way it does. Readers
-should be able to deploy it, run its integration test, read its reasoning, and
-take the pattern into their own system without reading anything outside the
-sample directory.
+A sample is a deployable demonstration of one pattern, shipped with the design
+trail that explains why it looks the way it does. Samples are modular: a sample
+may consume other samples, and every sample is built so that others can consume
+it (§1.1). Readers should be able to deploy it, run its integration test, read
+its reasoning, and take the pattern into their own system by reading the sample
+directory plus the published interfaces of the samples it depends on. How the
+samples fit together is in [`ARCHITECTURE.md`](../ARCHITECTURE.md).
 
 **Terminology.** The repository is about multi-tenant *agentic applications*.
 Two actor classes exist, and every sample uses these two words for them:
@@ -28,6 +30,7 @@ multi-tenant system, and the label narrows how readers place them.
 ## Contents
 
 1. [Layout](#1-layout)
+   1. [Composition](#11-composition)
 2. [Design trail](#2-design-trail)
 3. [Architecture diagram](#3-architecture-diagram)
 4. [Code](#4-code)
@@ -56,7 +59,7 @@ samples/<name>/
 │   ├── <name>.drawio         # diagram source (§3)
 │   └── <name>.drawio.svg     # exported, embedded in README
 ├── .projenrc.ts              # the only hand-edited project file (§4.1)
-├── src/                      # CDK app (main.ts) and runtime code
+├── src/                      # CDK app (main.ts), the exported construct (§4.5), runtime code
 ├── test/                     # unit tests and integ.<flow>.ts (§5)
 ├── model/                    # Smithy model, only when the sample exposes an API
 ├── scripts/                  # provisioning or demo scripts, with CONVENTIONS.md
@@ -69,6 +72,49 @@ Smithy output (`src/smithy/`), `cdk.out/`, and the integration test's
 machine output (the integ-runner snapshot `test/*.snapshot/`, or the CDK CLI
 driver's own cloud assembly) are gitignored; working notes (`TODO.md`) and agent
 configuration (`.kiro/`) are gitignored.
+
+### 1.1 Composition
+
+Samples are building blocks. A sample consumes another sample instead of
+re-implementing it, and publishes what it builds so a later sample can do the
+same. The repository's shared concepts and the parameter namespace are in
+[`ARCHITECTURE.md`](../ARCHITECTURE.md).
+
+A sample's **published interface** is two things, both listed in its
+specification's Contracts section (§2.1) and its README:
+
+- **The construct** (§4.5): the build-time interface. Its props are the
+  contract a consumer meets; its read-only properties are what it hands on.
+- **Published parameters**: the deploy-time interface. The demo stack (never
+  the construct, §4.5) writes the identifiers a consumer needs to SSM
+  Parameter Store under the sample's namespace in `ARCHITECTURE.md` §5, and
+  each parameter's name, value shape, and meaning are documented.
+
+Consuming another sample follows these rules:
+
+- **Depend on the interface, not the implementation.** A consumer reads the
+  producer's published parameters or instantiates its exported construct.
+  It never imports from another sample's `src/` by relative path, reads its
+  stack outputs, or relies on resource names it does not publish.
+- **The consumer's construct stays producer-agnostic.** It takes what it needs
+  as props shaped by a contract (an issuer URL, a role ARN), so a reader can
+  swap the producer for their own system. Only the demo app and the
+  integration test name the producer.
+- **Build-time reuse goes through the producer's package entry.** To
+  instantiate another sample's construct, declare the producer as a local
+  dependency (`file:../<producer>`) in `.projenrc.ts` and import from its
+  `src/index.ts` exports. Record the first such dependency in an ADR.
+- **Dependencies are declared and acyclic.** The consumer's README lists each
+  producer, the topology or options it needs, and how to deploy it (§7). No
+  sample depends, directly or transitively, on itself.
+- **A published interface is a promise.** Renaming or reshaping a published
+  parameter or a construct prop is a breaking change: record an ADR in the
+  producer and update every consumer in the same pull request.
+- **Integration tests compose; producers stay independent.** A consumer's
+  integration test deploys its producers through their own documented deploy
+  path, or reuses an existing deployment it detects, and tears down only what
+  it deployed (§5.2). A producer's own integration test never needs a
+  consumer.
 
 ## 2. Design trail
 
@@ -91,8 +137,8 @@ The working specification the sample was built from. Sections, in order:
 4. **Data model**: every entity, its keys, its status values.
 5. **API surface** (when there is an API): operations, status state machine,
    error shapes.
-6. **Contracts**: what a deployer must supply and what the sample promises in
-   return.
+6. **Contracts**: what a deployer must supply, what the sample promises in
+   return, the samples it consumes, and its published interface (§1.1).
 
 The specification is not rewritten to match the implementation. When the
 implementation diverges, record an ADR and, if the divergence changes a
@@ -272,6 +318,72 @@ metadata validators = [{
   account ID before every commit.
 - Idempotency and retry safety where retries actually happen; document the
   benign races you tolerate and the corruption you prevent.
+- **Per-tenant observability where practical.** A shared component should be
+  able to answer "which tenant?" from its own telemetry: put the verified
+  `tenantId` in structured logs and access logs (a field, never free text),
+  emit per-tenant metrics (CloudWatch EMF or Contributor Insights on the
+  `tenantId` field) for request count, errors, latency, and the cost drivers
+  the component has, and name the tenant in traces where the service allows.
+  The tenant comes from the validated claim or session tag, never from the
+  request, and only the id is recorded, never user data or token content
+  (§4.4 first bullet). Where a service cannot carry the tenant (a managed
+  log the sample does not format), say so in `architecture.md` and point to
+  the nearest place it can be joined (a request id, a session id prefix).
+  `samples/tenant-identity` is the worked example: `tenantId` in the access
+  log and Lambda logs, four Contributor Insights top-tenant rules, and one
+  API key per tenant for throttling.
+- **Per-tenant cost attribution.** Every sample states what its tenants cost
+  and makes that cost attributable to a tenant. Dedicated (silo, bridge,
+  cell) resources carry a `TenantId` tag that is activated as a cost
+  allocation tag, so Cost Explorer and CUR split them by tenant. Shared
+  (pool) resources cannot be tagged per tenant, so the sample meters the
+  consumption that drives their bill per tenant (requests, compute seconds,
+  model input and output tokens, bytes, read and write units) as per-tenant
+  metrics from the component that knows the tenant, and documents the
+  attribution formula (metric times the service's unit price) in
+  `architecture.md` and the README's Costs section. Where a cost cannot be
+  attributed (a fixed component, a service that reports no per-call usage),
+  say so and name the apportioning rule the vendor would use (equal split,
+  by requests). Metering reads only usage figures from the token or
+  response, never content.
+- **Model cost in a pool: attribute by IAM principal.** When a pooled Amazon
+  Bedrock call is made on behalf of a tenant, sign it with credentials
+  carrying a `TenantId` session tag so CUR 2.0 and Cost Explorer attribute
+  the model cost to the IAM principal per tenant
+  (`iamPrincipal/TenantId`) — the bill, not the agent's self-reported usage,
+  is then the source of truth for model cost. Activate the
+  `iamPrincipal/TenantId` cost allocation tag and the CUR caller-identity
+  option (both account-level); keep any agent-reported token figures as a
+  cross-check. `samples/runtime-isolation` is the worked example.
+
+### 4.5 Deliverable: a CDK construct
+
+The pattern ships as a reusable CDK construct, not only as a stack. A reader
+takes the pattern into their own system by instantiating the construct in
+their own app, so the construct is the unit of reuse and the stack in
+`src/main.ts` is a thin demo that wires it to the sample's dependencies.
+
+- Export the construct (and its props interface) from `src/index.ts`. One
+  construct per pattern; name it after the pattern
+  (`IsolatedRuntime`, not `AgentCoreStack`).
+- The construct takes its dependencies as props (an issuer, a table, a key)
+  and creates none of them. What the deployer must supply is the
+  specification's Contracts section (§2.1), expressed as the props type.
+- Options the pattern offers are typed props with secure defaults; an
+  optional behaviour is off unless set. Validate props in the constructor and
+  fail at synth with a message that names the prop.
+- The construct applies no cdk-nag aspect and no `App`-level settings; it
+  carries its own `NagSuppressions` with reasons, so a consumer who applies
+  cdk-nag sees the same result as the sample.
+- Expose what a consumer needs to wire the next component (endpoint URL, role,
+  ARNs) as read-only properties, not as stack outputs or SSM parameters the
+  construct writes for itself. The demo stack publishes those properties as
+  the sample's published parameters (§1.1).
+- Unit tests synthesise the construct inside a bare test stack, once per
+  option combination the specification promises.
+
+`samples/control-plane` and `samples/tenant-identity` predate this rule and
+ship stacks.
 
 ## 5. Tests
 
@@ -305,8 +417,11 @@ Either way, the test:
 
 - Runs in **exactly one Region**, selected by `AWS_REGION`; the task fails
   fast when it is unset so no multi-Region default ever applies.
-- Stands up its own dependencies (a throwaway identity provider, a bucket of
-  sample scripts) rather than assuming anything exists in the account.
+- Stands up its own dependencies (a bucket of sample scripts, the samples it
+  consumes) rather than assuming anything exists in the account. A consumed
+  sample is deployed through its own documented deploy path, or an existing
+  deployment is detected and reused; the test tears down only what it
+  deployed (§1.1).
 - Drives the **full lifecycle**: every API operation or every step of the
   demonstrated flow, including the failure paths the specification models,
   and teardown. The test passing means the sample can be created, used, and
@@ -363,9 +478,11 @@ Sections, in this order, omitting only those that do not apply:
    and a short component list.
 3. **How it works**: the primary flow, step by step, with pointers into
    `architecture.md` for depth.
-4. **Deploy**: prerequisites, the exact `npx projen build` and
-   `npx cdk deploy` commands with every `--context` input explained, and
-   teardown.
+4. **Deploy**: prerequisites, including each consumed sample with the
+   topology or options it needs and how to deploy it (§1.1), the exact `npx projen build` and
+   `npx cdk deploy` commands with every `--context` input explained,
+   teardown, and a short snippet that instantiates the construct in a
+   consumer's own app (§4.5).
 5. **Deployment integration test**: how to run `npx projen integ`, what it
    stands up, runtime, cost, and the single-Region rule. State that the test
    is the reference implementation of the sample's wiring (§5.2) and link
@@ -393,11 +510,19 @@ Adding a sample changes three places in the repository `README.md`:
    shape of the solution, and a link to the sample directory.
 3. The matching entry under **Contents**.
 
+It also changes [`ARCHITECTURE.md`](../ARCHITECTURE.md): the sample's place in
+the concept map (§6 there), its parameter namespace (§5 there), and the
+samples it consumes.
+
 ## 9. Definition of done
 
 A sample is ready to merge when every line is true:
 
 - [ ] Layout matches §1; nothing generated or machine-produced is committed.
+- [ ] Composition per §1.1: consumed samples are used only through their
+      published interface and listed in the README; this sample's published
+      interface (construct and parameters) is documented in the specification
+      and README, and its parameters sit in its `ARCHITECTURE.md` namespace.
 - [ ] Specification written before the code, with numbered principles and an
       explicit scope boundary; divergences recorded as ADRs.
 - [ ] One file per ADR in `adr/` with the index current; options considered named,
@@ -411,11 +536,19 @@ A sample is ready to merge when every line is true:
       overlaps.
 - [ ] projen project per §4.1; dependencies pinned; MIT-0 header on every
       authored file and on no generated file.
+- [ ] The pattern is a construct exported from `src/index.ts` with typed,
+      validated props and secure defaults (§4.5); the stack is a thin demo.
 - [ ] cdk-nag aspect applied; every suppression cites an ADR or mitigation.
 - [ ] Fail-fast context validation; build placeholders cannot reach a real
       deployment.
 - [ ] `DESTROY` removal policies; teardown verified to leave nothing behind.
 - [ ] Synthetic data only; no deployment account ID in the tree.
+- [ ] Per-tenant observability (§4.4): `tenantId` in structured and access
+      logs, per-tenant metrics for requests, errors, latency, and cost
+      drivers; gaps named in `architecture.md`.
+- [ ] Per-tenant cost attribution (§4.4): dedicated resources tagged
+      `TenantId`; shared resources metered per tenant; the attribution
+      formula and the unattributable remainder documented.
 - [ ] Terminology per the introduction: actors are vendor and tenant;
       `git grep -i -E 'saas|application provider|end[- ]user' samples/<name>`
       returns nothing.
@@ -426,4 +559,5 @@ A sample is ready to merge when every line is true:
 - [ ] Security review run on the synthesised tree; results summarised in the
       pull request.
 - [ ] Sample README has every applicable §7 section in order.
-- [ ] Root README table row, section, and Contents entry added.
+- [ ] Root README table row, section, and Contents entry added;
+      `ARCHITECTURE.md` concept map and parameter namespace updated.
