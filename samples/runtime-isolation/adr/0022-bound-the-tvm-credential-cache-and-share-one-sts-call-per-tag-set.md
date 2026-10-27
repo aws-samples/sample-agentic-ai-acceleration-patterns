@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0022: Bound the TVM credential cache and share one STS call per tag set
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-27
 - Deciders: Dave Roberts (PSA)
 

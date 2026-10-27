@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0021: Make per-tenant CloudWatch metrics opt-in, off by default
 
-- Status: Proposed. Amends ADR-0017.
+- Status: Accepted. Amends ADR-0017.
 - Date: 2026-10-27
 - Deciders: Dave Roberts (PSA)
 
@@ -26,7 +26,7 @@ With metrics off, the ingress log line still carries `tenantId`, `status`, `ttfb
 
 The logger now writes raw JSON lines to stdout, as EMF does, instead of calling `console.log`. Under the Lambda JSON log format a `console.log` string lands as `{"message":"<string>"}`, so the fields would not be top level and Contributor Insights could not key on them.
 
-The demo's Contributor Insights rules (top tenants by backend seconds and by output tokens) now read the log line: `$.tenantId`, `$.backendInvokeSeconds`, `$.usageOutput`, filtered on `$.message In ['request served']`. They work with metrics off. Contributor Insights bills per rule and per matched log event, not per tenant. The demo dashboard is added only with `--context perTenantMetrics=true`.
+The demo has four Contributor Insights rules, on `api-gateway` only. Two read the API Gateway access log: top tenants by requests and by errors. Two read the ingress log line: top tenants by backend seconds and by output tokens, keyed on `$.tenantId`, `$.backendInvokeSeconds` and `$.usageOutput`, filtered on `$.message In ['request served']`. All four work with metrics off. Contributor Insights bills per rule and per matched log event, not per tenant. The demo dashboard is added only with `--context perTenantMetrics=true`.
 
 ## Consequences
 Easier: the default deployment's metric cost no longer grows with tenants; cost attribution keeps working from the log.

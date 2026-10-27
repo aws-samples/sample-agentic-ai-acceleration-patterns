@@ -10,12 +10,12 @@ SPDX-License-Identifier: MIT-0
 > 8b plus the per-tenant limit probe (ADR-0020). See the
 > [README integration test](./README.md#integration-test) for the step table.
 > Security scans: 2026-10-27, ASH 0 actionable findings; Holmes CSR v3 0 high,
-> 0 medium.
+> 0 medium; dispositions in the [threat model](./threat-model.md#security-review).
 > Also checked by hand on 2026-10-27 (`api-gateway`, `outputTokensPerMinute=200`,
 > per-tenant metrics off): tenant A was refused with 429 after 233 output tokens
 > while tenant B was served; the ingress log has `tenantId` and the cost figures
-> as top-level fields, with no EMF records; the three Contributor Insights
-> rules reported both tenants (requests, backend seconds, output tokens).
+> as top-level fields, with no EMF records; the four Contributor Insights
+> rules reported both tenants (requests, errors, backend seconds, output tokens).
 
 This file describes what is deployed. The design trail is
 [`design/runtime-isolation.spec.md`](./design/runtime-isolation.spec.md), the
@@ -41,7 +41,7 @@ per tenant (ADR-0001, ADR-0012, ADR-0017, ADR-0020).
 | Tenant limits | A DynamoDB fixed-window counter per tenant per minute, shared by every ingress instance; 429 before the TVM and the backend (ADR-0020) | `src/shared/limits.ts` |
 | Logs and metrics | A structured JSON log line per request with `tenantId` and the cost figures; per-tenant EMF metrics only with `perTenantMetrics` (ADR-0017, ADR-0021) | `src/shared/logger.ts`, `src/shared/metrics.ts` |
 | Teardown | An owned execution log group and one log drain per ingress (ADR-0019) | `src/shared/log-drain.ts` |
-| Demo stack | The construct wired to tenant-identity `shared-pool`, a demo tenant table and role, Contributor Insights rules, and the published SSM parameters (ADR-0004, ADR-0016) | `src/main.ts`, `src/demo.cdk.ts` |
+| Demo stack | The construct wired to tenant-identity `shared-pool`, a demo tenant table and role, four Contributor Insights rules on `api-gateway`, and the published SSM parameters (ADR-0004, ADR-0016) | `src/main.ts`, `src/demo.cdk.ts` |
 
 ## Request flow
 
@@ -69,10 +69,10 @@ for your account and Region before sizing.
 | AgentCore Runtime active sessions | 2,500 per account outside us-east-1 and us-west-2; 5,000 in those two; adjustable ([source](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/bedrock-agentcore-limits.html)) | Concurrent conversations across all tenants. With `session` off every request is its own session | Per-tenant request limit bounds one tenant's share | Request a quota increase; turn session mapping on so resumed conversations reuse a session |
 | AgentCore Runtime data plane | 1,000 TPS; adjustable ([source](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/bedrock-agentcore-limits.html)) | `InvokeAgentRuntime` across all tenants | As above | Keep the stage throttle below it |
 | STS `AssumeRole` | 600 rps per account per Region, shared with other STS calls; raised by Support case | TVM cache misses: instances × tag sets ÷ credential lifetime | Bounded LRU cache, single flight, limits before STS (ADR-0022) | Keep `includeUserIdTag` off unless needed; watch STS throttling |
-| Lambda concurrency | 1,000 per account per Region by default (unverified; check your account) | On `api-gateway` the integration Lambda is held for the whole stream, up to the 2-minute integration timeout: 50 rps × 120 s = 6,000 concurrent | Nothing beyond the stage throttle | Reserved concurrency on the ingress function, or prefer `agentcore-gateway` for long streams |
+| Lambda concurrency | Per account per Region; see [Lambda quotas](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html) | On `api-gateway` the integration Lambda is held for the whole stream, up to the 2-minute integration timeout: 50 rps × 120 s = 6,000 concurrent | Nothing beyond the stage throttle | Reserved concurrency on the ingress function, or prefer `agentcore-gateway` for long streams |
 | Amazon Bedrock model quota | Per account per model, shared by all tenants | Model tokens across all tenants | Optional `tenantLimits.outputTokensPerMinute` on `api-gateway` (ADR-0020) | Request quota per model; set the token limit per tier |
-| CloudWatch custom metrics | About 9 per tenant per ingress when on | `perTenantMetrics: true` at many tenants | Off by default, synth warning when on (ADR-0021) | Use Logs Insights and Contributor Insights at scale |
-| Contributor Insights | Top 500 contributors per rule | Rules over the ingress log line | Two demo rules on the log line (ADR-0021) | Use Logs Insights for the long tail |
+| CloudWatch custom metrics | Up to 9 per tenant per ingress when on (`TenantId` and `Ingress` dimensions); see [CloudWatch pricing](https://aws.amazon.com/cloudwatch/pricing/) | `perTenantMetrics: true` at many tenants | Off by default, synth warning when on (ADR-0021) | Use Logs Insights and Contributor Insights at scale |
+| Contributor Insights | Top 500 contributors per rule | Rules over the access log and the ingress log line | Four demo rules on `api-gateway`: requests and errors on the access log, backend seconds and output tokens on the `request served` line (ADR-0021) | Use Logs Insights for the long tail |
 | TVM cache | 1000 entries per instance (default), about 1.5 MB | More active tag sets per instance than the bound | LRU eviction, expired entries dropped first (ADR-0022) | Size `tvm.cacheMaxEntries` to active tenants per instance |
 
 ## Cross-tenant data safety

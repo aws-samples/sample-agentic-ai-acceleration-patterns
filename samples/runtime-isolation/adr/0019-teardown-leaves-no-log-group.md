@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0019: Teardown leaves no log group: own the execution log group and drain late logs
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-27
 - Deciders: Dave Roberts (PSA)
 

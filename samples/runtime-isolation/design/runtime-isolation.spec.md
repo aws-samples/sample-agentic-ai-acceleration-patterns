@@ -41,7 +41,8 @@ check sits in front of the compute, never inside it.
 The pattern is a core plus optional modules. The core is the trusted ingress,
 the one-principal resource policy (P-1, P-3), and an always-on token vending
 machine that signs model calls and data access per tenant (P-8, P-10,
-ADR-0018). The other modules each add a check and are off by default (P-4):
+ADR-0018). The modules below each add a check; the TVM is always on,
+per-tenant limits are on by default, and the rest are off by default (P-4):
 
 | Module | Adds | Prop |
 |---|---|---|
@@ -49,6 +50,8 @@ ADR-0018). The other modules each add a check and are off by default (P-4):
 | Scope checks | required OAuth scopes on the token (ADR-0005) | `requiredScopes` |
 | Delegation | the user's token forwarded to the agent, optionally narrowed (P-5) | `delegation` |
 | TVM | always on (ADR-0018): tenant-scoped AWS credentials for the model call and the agent's data access (P-8); `tvm` customises it, e.g. a role that also reaches tenant data | `tvm` |
+| Per-tenant limits | on by default (ADR-0020): requests per tenant per minute, and on `api-gateway` optionally output tokens, counted fleet-wide; over the limit is 429 | `tenantLimits` |
+| Per-tenant metrics | off by default (ADR-0021): per-tenant CloudWatch metrics (EMF); the ingress log line carries the same figures without them | `perTenantMetrics` |
 
 Without session mapping every request runs in a fresh unit and nothing
 carries over between requests: the strictest setting. With it, the sample
@@ -93,7 +96,7 @@ with `session` set. Enforced isolation at the invocation boundary.
 - Not an identity provider. It consumes tokens from tenant-identity's
   `shared-pool` topology; any OIDC provider that issues the §6.2 token
   contract works.
-- Not a data-layer sample. The optional TVM (P-8) vends tenant-scoped
+- Not a data-layer sample. The always-on TVM (P-8, ADR-0018) vends tenant-scoped
   credentials; what they unlock (memory, RAG stores, tools) is the data layer
   (`ARCHITECTURE.md` §3.3) and belongs to later samples that consume this
   construct. The demo ships one tenant-partitioned table only to prove the
@@ -136,9 +139,12 @@ token. In both cases a unit id sent by the client is ignored and overwritten
 `token_use: access` were checked at ingress. Nothing in the body, query, or a
 client header names a tenant.
 
-**P-4. Every optional behaviour is off by default and typed.** Session
-mapping, scope checks, token forwarding, downscoping, and the TVM are props
-with secure defaults. Turning one on adds a check; none removes one.
+**P-4. Every module is typed, with a secure default.** Session mapping,
+scope checks, token forwarding, downscoping and per-tenant metrics are off by
+default. The TVM is always on (ADR-0018). Per-tenant limits are on by
+default, at 60 requests per tenant per minute (`tenantLimits`, ADR-0020).
+Turning a module on adds a check; none removes one (amended 2026-10-27,
+ADR-0018, ADR-0020, ADR-0021).
 
 **P-5. A delegated token is the narrowest token that works, in a header the
 agent asked for.** The user's JWT reaches the agent only when
@@ -179,10 +185,16 @@ that also reaches tenant data and the construct adds the model grant to it.
 
 **P-9. Every request is attributable to a tenant in telemetry.** The ingress
 writes the verified `tenant_id` (and the session prefix, never the token) as
-a field in its structured logs and, on API Gateway, in the access log; it
-emits per-tenant metrics for requests, 4xx/5xx, TTFB, and streamed bytes
-(CloudWatch EMF), and the demo adds Contributor Insights top-tenant rules on
-the access log. The Runtime's own log streams are named by session id, whose
+a top-level field of one structured log line per request and, on API Gateway,
+in the access log. That log line is the default path (ADR-0021). On
+`api-gateway` it is `request served` and carries status, TTFB, streamed
+bytes, backend invoke seconds and the usage tokens. On `agentcore-gateway`
+the interceptor writes `request admitted` with request-side fields only,
+because it never sees the response. Per-tenant CloudWatch metrics (EMF) are
+opt-in through `perTenantMetrics`, default `false`. The demo adds four
+Contributor Insights top-tenant rules, on `api-gateway` only: two on the
+access log (requests, errors) and two on the ingress log line (backend
+seconds, output tokens) (amended 2026-10-27, ADR-0021). The Runtime's own log streams are named by session id, whose
 prefix is derived from the tenant, so a session can be joined back to a
 tenant through the ingress log. What the Runtime cannot carry per tenant is
 listed in `architecture.md` (standard §4.4).
@@ -192,14 +204,18 @@ pools one backend across tenants, so nothing in the bill carries a tenant
 tag; the ingress meters, per tenant, the consumption each billed service
 charges for: ingress requests, ingress compute milliseconds, backend
 invocation seconds (wall time of the invoke, the AgentCore Runtime billing
-unit together with memory), and streamed bytes. Model tokens are the
+unit together with memory), and streamed bytes. Backend seconds, bytes and
+tokens are metered on `api-gateway` only; the `agentcore-gateway`
+interceptor sees the request, not the response, so it meters requests only
+(amended 2026-10-27, ADR-0021). Model tokens are the
 exception (ADR-0018): because the agent signs every model call with
 credentials tagged `TenantId`, AWS itself attributes model cost to the IAM
 principal per tenant (CUR 2.0 `line_item_iam_principal`,
 `iamPrincipal/TenantId`), so the bill is the source of truth for model cost;
-the agent's final usage event (input and output tokens) and the token
-metrics stay as a near-real-time cross-check. The demo publishes per-tenant
-cost metrics and top-tenant Contributor Insights rules, and the README gives
+the agent's final usage event (input and output tokens) stays as a
+near-real-time cross-check in the ingress log line (and in the token metrics
+when `perTenantMetrics` is on). The demo reads these figures with the
+Contributor Insights rules of P-9, not with metrics (ADR-0021), and the README gives
 the attribution formula, the two account-level billing options the deployer
 must turn on for model cost, and the unattributable remainder (idle, fixed,
 and per-request service fees below the metered unit). Only usage figures
@@ -219,7 +235,7 @@ leave the agent, never content (ADR-0017).
 | C-3b | **Ingress B: AgentCore Gateway** | No protocol type; `CUSTOM_JWT` inbound authoriser on the tenant-identity pool; one Runtime target (`http.agentcoreRuntime`) with `GATEWAY_IAM_ROLE` outbound; a REQUEST interceptor Lambda that chooses the unit and overwrites the session header (P-2), and enforces P-5 |
 | C-4 | **Demo app** | `src/main.ts`: reads tenant-identity's SSM parameters and instantiates the construct with one ingress |
 | C-6 | **Unit module** | Shared by both ingress Lambdas: random unit id, or with `session` the claim-derived id (P-2) |
-| C-7 | **TVM module** | Shared by both ingress Lambdas, optional: validated claims to session tags, `AssumeRole` + `TagSession` on `tvm.role`, per-tag-set cache, credential header (P-8) |
+| C-7 | **TVM module** | Shared by both ingress Lambdas, always on (ADR-0018): validated claims to session tags, `AssumeRole` + `TagSession` on `tvm.role` or the default `TenantModelRole`, per-tag-set cache bounded by `tvm.cacheMaxEntries` with one STS call per tag set (ADR-0022), credential header (P-8) |
 | C-5 | **Integration driver** | `scripts/integ.sh`: deploys tenant-identity (`shared-pool`), then this sample once per ingress, runs the e2e suite and the latency probe, destroys everything |
 
 ### 3.2 Caller and identity model
@@ -251,6 +267,11 @@ leave the agent, never content (ADR-0017).
 | `tvm.includeUserIdTag` | boolean | `false` | add `UserId = sub` as a session tag |
 | `tvm.claimTags` | `Record<string, string>` | none | extra session tags, tag key to claim name; a claim missing from the token fails the request with 403; `TenantId` and `UserId` are reserved keys |
 | `tvm.durationSeconds` | number | `900` | 900 to 3600; credential lifetime |
+| `tvm.cacheMaxEntries` | number | `1000` | cached credential sets per ingress instance, one per tag set; least recently used evicted first (ADR-0022) |
+| `tenantLimits` | `{ requestsPerMinute?, outputTokensPerMinute? } \| false` | on, `requestsPerMinute: 60` | per-tenant fixed-window limits shared by every ingress instance; over the limit is 429 before the TVM and the backend; `requestsPerMinute: 0` turns the request limit off; `false` creates no counter table (ADR-0020) |
+| `tenantLimits.outputTokensPerMinute` | number | none (no token limit) | model output tokens per tenant per minute, counted after the stream ends; `api-gateway` only (ADR-0020) |
+| `stageThrottle` | `{ rateLimit?, burstLimit? }` | `50` rps, burst `25` | the API Gateway stage throttle, shared by all tenants; `api-gateway` only; was hard-coded before ADR-0020 |
+| `perTenantMetrics` | boolean | `false` | per-tenant CloudWatch metrics (EMF); on adds the synth warning `runtime-isolation:per-tenant-metrics-cost` (ADR-0021) |
 
 Props are validated at synth; an invalid combination fails with the prop name.
 
@@ -265,7 +286,7 @@ backend-neutral.
 | Invoke call | `InvokeAgentRuntime`, SigV4 | its own call |
 | Who may invoke (P-1) | Runtime resource policy, ingress principal only | its own resource policy |
 | Unit id transport (P-2) | `runtimeSessionId` | its own field |
-| Credential and user-token transport (P-5, P-8) | allowlisted headers `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Credentials` (always, ADR-0018) and `...-Custom-User-Token` (on opt-in), base64 JSON | its own payload or context field, with V-7 repeated |
+| Credential and user-token transport (P-5, P-8) | allowlisted headers `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Credentials` (always, ADR-0018) and `...-Custom-User-Token` (on opt-in); the credentials header is base64 JSON, the user token is the raw JWT (amended 2026-10-27, ADR-0006, ADR-0012) | its own payload or context field, with V-7 repeated |
 
 The ingress hands the backend a validated request (`tenant_id`, `sub`, the
 chosen unit id, `prompt`, optional user token, the vended credentials); the
@@ -306,10 +327,22 @@ One operation, the same contract on both ingresses: `InvokeAgent`.
 | Unit | chosen by the integration Lambda | chosen by the interceptor, written to `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id`; a client value is overwritten (V-3) |
 | Response | `text/event-stream`, streamed | same |
 
-Errors (both): 401 missing/invalid token; 403 `tenant_id` absent, required
-scope missing, or narrowed-token rule failed; 400 malformed `prompt`,
-malformed `conversationId`, or `conversationId` sent without `session`. Error
-bodies are fixed text and never echo the token or the unit id.
+Errors written by the ingress code, with fixed bodies (`src/shared/request.ts`):
+
+| Status | Body | When |
+|---|---|---|
+| 400 | `bad request` | malformed `prompt`, malformed `conversationId`, or `conversationId` sent without `session` |
+| 401 | `unauthorized` | missing or invalid token |
+| 403 | `forbidden` | `tenant_id` absent, `tenants` claim present, required scope missing, narrowed-token rule failed, or a `tvm.claimTags` claim missing |
+| 429 | `too many requests` | the tenant is over its `tenantLimits`; checked before the TVM and the backend (ADR-0020) |
+| 502 | `upstream error` | the backend invoke failed |
+
+These bodies never echo the token, the unit id or the input. Refusals made by
+the gateway itself use the gateway's own status and body. On `api-gateway`
+the Lambda authoriser's Deny surfaces as 403, so a missing or invalid token
+is 403 there, not 401; API Gateway's request validator (400) and stage
+throttle (429) return API Gateway's JSON body (amended 2026-10-27, ADR-0015,
+ADR-0020).
 
 ---
 
@@ -321,7 +354,7 @@ bodies are fixed text and never echo the token or the unit id.
   tenant-identity `shared-pool`; its `userPoolId` and `appClientId` SSM
   parameters give the discovery URL and client id).
 - An agent code bundle and a Bedrock model id enabled in the Region.
-- With `tvm` (optional, the TVM is always on): a tenant role that also
+- Optionally `tvm.role` (the TVM itself is always on, ADR-0018): a tenant role that also
   reaches tenant data, whose trust policy allows `sts:AssumeRole` and
   `sts:TagSession` to `tvmCallerRole` only, requires the `TenantId` request
   tag, pins `aws:TagKeys` to the tags it expects, and whose permissions scope
@@ -345,14 +378,18 @@ only, §1.2).
   user A1's in user A2's under `scope: 'user'` (integ steps 4b, 5).
 - The user token reaches the agent only when forwarding is on, and only
   narrowed when `requireNarrowedToken` is on (integ steps 7, 8).
-- With `tvm` on, the agent's credentials carry `TenantId` equal to the
-  caller's `tenant_id`; a read of the caller's own tenant data succeeds and a
+- The TVM is always on (ADR-0018): the agent's credentials are vended for
+  the caller's `tenant_id`; a read of the caller's own tenant data succeeds and a
   read of another tenant's fails in IAM; the role cannot be assumed by the
   test runner's own credentials (integ step 8a).
 - Both ingresses pass the same e2e suite; the README reports measured TTFB and
   total latency (p50, p95) and the per-request cost of each.
-- `cdk destroy` leaves no stacks, log groups, or parameters with the sample's
-  prefix.
+- With `tenantLimits`, a tenant over its limit gets 429 while another
+  tenant is served (integ limits step, ADR-0020).
+- `cdk destroy` plus the integration script's teardown leaves no stacks, log
+  groups, or parameters with the sample's prefix. The Runtime creates its own
+  log groups outside CloudFormation; the script deletes them after destroy
+  and checks that none is recreated (amended 2026-10-27, ADR-0019).
 
 ### 6.4 Composition (standard §1.1)
 
@@ -454,32 +491,55 @@ carries the random per-request id when `session` is off (ADR-0013).
 1. Deploy tenant-identity (`shared-pool`); create tenants A and B, users A1,
    A2, B1; issue tokens.
 2. Deploy the sample with the chosen ingress.
-3. Call `InvokeAgentRuntime` directly with the test runner's own Admin
-   credentials and with a role that is not the ingress: both denied (P-1).
-4a. `session` off: A1 sends two requests, the second with the first's unit id
-   in the session header and a `conversationId` in the body: 400 for the
-   body field; with the body fixed, two different units and nonces (P-2).
+3. Call `InvokeAgentRuntime` directly with the test runner's own
+   credentials: denied (P-1). A second, non-ingress role is not exercised
+   here; spike V-1 showed that such a role, with an identity policy that
+   allows the call, is denied too (amended 2026-10-27, ADR-0001).
+4a. `session` off: A1 sends a `conversationId` in the body: 400. A1 then
+   sends two requests, the second with the first's unit id in the session
+   header: two different units and two different nonces (P-2, ADR-0013). The
+   same stack sends a model prompt signed by the default `TenantModelRole`
+   (ADR-0018).
 4b. `session` on: A1 opens conversation `c1`. A2 and B1 send `c1`, and also
    set the session header to A1's unit id: each lands in its own unit and
    microVM, never A1's (the agent returns its unit id and a per-VM nonce)
    (P-2).
 5. `session` on: A1 resumes `c1`: same microVM (same nonce).
-6. Token with no `tenant_id`, an expired token, a token from another client:
-   401/403.
+6. No token, a tampered token, an ID token: 401 or 403, by ingress (§5). A
+   malformed `conversationId`: 400 or 403. Tokens with no `tenant_id`,
+   expired, or from another client are covered by the verifier unit tests
+   (`test/shared/verifier.test.ts`), not by the script (amended 2026-10-27,
+   ADR-0015).
 7. `requiredScopes` on: a token narrowed to `tenant-api/write` only is refused
    when `tenant-api/read` is required.
 8. Forwarding on: the agent reports the forwarded token's `scope`; with
    `requireNarrowedToken`, an un-narrowed token is refused and a narrowed one
    accepted.
-8a. TVM on: the demo table holds one item per tenant under `TENANT#<id>`. A1
-   asks the agent to read tenant A's item: success (positive control). A1 asks
-   it to read tenant B's item: `AccessDeniedException` from IAM. The runner
-   calls `sts:AssumeRole` on the tenant role with its own credentials: denied.
-   The agent reports the `TenantId` tag of its credentials via
-   `sts:GetCallerIdentity` plus the session name; CloudTrail shows one
-   `AssumeRole` per tenant per credential lifetime, not per request.
+8a. TVM (always on): the demo table holds one item per tenant under
+   `TENANT#<id>`. A1 asks the agent to read tenant A's item: success
+   (positive control). A1 asks it to read tenant B's item, and B1 tenant A's:
+   `AccessDeniedException` from IAM. The runner calls `sts:AssumeRole` on the
+   tenant role with its own credentials: denied. The agent reports its
+   caller ARN; the script prints a note, and does not fail, when the session
+   name does not carry the tenant id. One `AssumeRole` per tenant per
+   credential lifetime was shown in CloudTrail by spike V-7, not by this
+   script (amended 2026-10-27, ADR-0012, ADR-0018).
+8b. A model prompt ends with `event: usage` (P-10, ADR-0018). The
+   `api-gateway` stack, with `perTenantMetrics` on, publishes tenant A's
+   `ModelOutputTokens` and `BackendInvokeSeconds`; the `agentcore-gateway`
+   stack, with it off, publishes no per-tenant metrics (ADR-0021).
+Limits. On a stack with `requestsPerMinute: 5`, tenant A gets 429
+   `too many requests` within the minute while tenant B is served (ADR-0020).
+   The output-token limit is not in the script. It was checked by hand on
+   2026-10-27 at 200 tokens per minute: tenant A was refused after 233
+   tokens, tenant B was served, the log fields were top level, and the four
+   Contributor Insights rules reported both tenants (ADR-0020, ADR-0021).
 9. Latency probe: 20 invocations per ingress, TTFB and total, p50 and p95.
-10. Destroy; assert nothing left.
+   Then `scripts/demo.sh` runs against the `api-gateway` stack.
+10. Destroy; delete the Runtime's service-created log groups; assert no
+   stacks, parameters or log groups are left (ADR-0019).
 
-Steps 3 to 8 run on both ingresses; option toggles are separate deployments
-of the demo app with different context.
+Steps 3 to 9 run on both all-on stacks (`api-gateway`, `agentcore-gateway`).
+Step 4a, the narrowed-token case of step 8 and the limits step run on their
+own stacks. All four stacks come from `test/integ.runtime.ts` and deploy
+together.

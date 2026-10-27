@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0020: Limit each tenant at the ingress with a shared fixed-window counter
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-27
 - Deciders: Dave Roberts (PSA)
 
@@ -43,7 +43,7 @@ The stage throttle becomes the prop `stageThrottle?: { rateLimit?: number; burst
 Code: `src/shared/limits.ts`, `src/shared/request.ts`, `src/runtime-isolation.cdk.ts`.
 
 ## Consequences
-Easier: one tenant can no longer use the shared stage, Runtime or model quota for every tenant. A limited request costs one DynamoDB write and nothing else. The integration test shows tenant A limited while tenant B is served.
+Easier: one tenant can no longer use the shared stage, Runtime or model quota for every tenant. A limited request costs one DynamoDB write and nothing else. The integration test shows the request limit: tenant A is limited while tenant B is served. The output-token limit was checked by hand on 2026-10-27: at 200 tokens per minute tenant A was refused after 233 tokens and tenant B was served.
 
 Harder:
 - Every request costs one on-demand DynamoDB write (check current pricing).

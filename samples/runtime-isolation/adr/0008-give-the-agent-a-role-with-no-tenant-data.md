@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0008: Give the agent an execution role with no tenant-scoped permission
 
-- Status: Proposed
+- Status: Accepted. Amended by ADR-0018.
 - Date: 2026-10-26
 - Deciders: Dave Roberts (PSA)
 

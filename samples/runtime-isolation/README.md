@@ -4,68 +4,253 @@ SPDX-License-Identifier: MIT-0
 -->
 # Runtime Isolation
 
-A backend that trusts exactly one ingress, which maps the validated caller to
-an isolated compute unit (Amazon Bedrock AgentCore Runtime first), with an
-always-on token vending machine (every model call signed per tenant) and
-optional session mapping, scope checks and delegation.
+A pooled agent backend where each tenant user's conversation runs in its own
+compute unit, and the backend trusts exactly one ingress. The ingress verifies
+the caller's access token, chooses the unit from the verified claims, vends
+tenant-scoped credentials for every model call, limits each tenant's share,
+and attributes cost per tenant. The backend is Amazon Bedrock AgentCore
+Runtime (one microVM per session); the ingress is a deploy-time choice between
+an API Gateway REST API and an AgentCore Gateway. Session mapping, scope checks
+and delegation are optional modules, off by default. The token vending
+machine (TVM) is always on (ADR-0018). It ships as one CDK construct,
+`IsolatedRuntime`, plus a thin demo stack.
 
-This README is a placeholder written by the implementation stage; the
-documentation stage replaces it with the sections of
-[`docs/sample-standard.md`](../../docs/sample-standard.md) §7. Until then, the
-design trail is the reference:
+**What this sample is NOT** (spec §1.2):
 
-- [`design/runtime-isolation.spec.md`](./design/runtime-isolation.spec.md)
-- [`adr/`](./adr/README.md)
-- [`threat-model.md`](./threat-model.md)
+- Not a backend catalogue. Only the AgentCore Runtime backend is built
+  (ADR-0011).
+- Not an identity provider. It consumes tenant-identity `shared-pool`; any
+  OIDC issuer that meets the token contract (spec §6.2) works.
+- Not a data-layer sample. The TVM vends tenant-scoped credentials; what they
+  unlock (memory, retrieval, tools) belongs to later samples. The demo table
+  exists only to prove the credentials work.
+- Not multi-tenant-per-user. A user belongs to exactly one tenant; a token
+  with a `tenants` claim is refused.
+- Not a tool gateway. AgentCore Gateway is used only as an ingress to the
+  Runtime, never as an MCP aggregator.
+- Not an RFC 8693 token service. Downscoping reuses tenant-identity's
+  `/oauth2/token` (ADR-0007).
+- Not a session store. No table lists or revokes sessions.
 
-Build: `npx projen build`. The construct is `IsolatedRuntime`, exported from
-[`src/index.ts`](./src/index.ts); the demo stack is
-[`src/main.ts`](./src/main.ts) (`--context ingress=api-gateway|agentcore-gateway`).
+## Architecture
 
-### Props and deploy notes (ADR-0018)
+![Architecture: a tenant user signs in to the tenant-identity Cognito shared pool and calls the ingress with a bearer JWT. The ingress, either API Gateway REST with a Lambda authoriser and a streaming Lambda, or AgentCore Gateway with a CUSTOM_JWT authoriser and a REQUEST interceptor, verifies the JWT, derives the session id from tenant_id and sub, assumes the tenant role with a TenantId session tag, and invokes the AgentCore Runtime with SigV4 as the one principal its resource policy allows. The agent in the microVM calls the Bedrock model and the tenant's data with the tenant-scoped credentials, and IAM enforces ABAC on TenantId](./diagrams/runtime-isolation.drawio.svg)
 
-- The TVM is always on. `tvm` is an optional prop: unset, the construct
-  creates `TenantModelRole`, a role that may invoke only the one model;
-  set, you supply a role that also reaches tenant data (the construct adds
-  the model grant and the deployer owns its trust and ABAC, spec §6.1). An
-  **imported** `tvm.role` must already carry
-  `bedrock:InvokeModel`/`...WithResponseStream` on the model, because the
-  construct cannot add a policy to a role it did not create.
-- The construct exposes `tenantRole` (the role every model call is signed by)
-  alongside `ingressRole`, `executionRole` and `tvmCallerRole`.
-- Demo (`src/main.ts`): the `--context tvm=true` flag means "demo tenant
-  data" — it adds a DynamoDB table and a data-bearing tenant role. With
-  `tvm` unset the demo still runs; model cost is attributed per tenant
-  through the construct's default role.
-- After deploy, turn on the two account-level billing options below so model
-  cost splits by tenant.
+A request carries a bearer token to the ingress, which verifies it, picks the
+microVM from `tenant_id` and `sub`, vends `TenantId`-tagged credentials, and
+invokes the Runtime as the only principal it trusts; the agent then reaches
+the model and tenant data only with those credentials.
 
-## Demo
+Since ADR-0018 the execution role holds no model permission and the TVM is
+always on. Every model call is signed by the tenant role, not the execution
+role.
 
-[`scripts/demo.sh`](./scripts/demo.sh) walks the primary flow against a
-deployed stack. It needs tenant-identity `shared-pool` deployed in the same
-account and Region, and reads both samples' published parameters.
+Components ([`architecture.md`](./architecture.md#components) has the code
+locations):
+
+- **Ingress, `api-gateway`**: a REST API with a REQUEST Lambda authoriser and
+  a streaming integration Lambda that calls `InvokeAgentRuntime` and forwards
+  the stream (ADR-0003, ADR-0009, ADR-0015).
+- **Ingress, `agentcore-gateway`**: an AgentCore Gateway with a `CUSTOM_JWT`
+  authoriser and a REQUEST interceptor Lambda that re-verifies the token and
+  sets the session id and credential headers (ADR-0010, ADR-0015).
+- **Backend**: one AgentCore Runtime whose resource policy allows
+  `InvokeAgentRuntime` to the ingress role only (ADR-0001, ADR-0011).
+- **Agent**: the code in the microVM. It builds its AWS clients per request
+  from the vended credentials and ends each stream with a `usage` event
+  (ADR-0008, ADR-0017, ADR-0018).
+- **TVM**: `AssumeRole` plus `TagSession` on the tenant role with `TenantId`
+  from the verified claim, cached per instance in a bounded LRU cache with
+  single flight (ADR-0012, ADR-0022).
+- **Tenant limits**: a DynamoDB fixed-window counter per tenant per minute,
+  shared by every ingress instance (ADR-0020).
+- **Logs and metrics**: one structured log line per request with `tenantId`
+  and the cost figures; per-tenant EMF metrics only with `perTenantMetrics`
+  (ADR-0017, ADR-0021).
+
+## How it works
+
+Both ingresses run the same checks in the same order, from one shared
+pipeline ([`src/shared/request.ts`](./src/shared/request.ts)):
+
+1. **Verify the token**: signature, `iss`, `client_id`, `exp`,
+   `token_use: access`, and a single `tenant_id` (ADR-0004, ADR-0015). On
+   `api-gateway` the authoriser checks it and the integration Lambda checks it
+   again; on `agentcore-gateway` the `CUSTOM_JWT` authoriser checks it and the
+   interceptor checks it again.
+2. **Check scopes** when `requiredScopes` is set, and the narrowed-token rule
+   when `delegation.requireNarrowedToken` is on (ADR-0005, ADR-0007).
+3. **Parse the body**: `prompt` must be a string; `conversationId` must match
+   `[A-Za-z0-9]{16,64}` with `session` on and must be absent with it off
+   (ADR-0013).
+4. **Check the tenant limit**: one conditional `UpdateItem`. A limited tenant
+   gets 429 before any STS, Runtime or model call (ADR-0020).
+5. **Vend credentials**: the TVM assumes the tenant role tagged
+   `TenantId = tenant_id`, from the cache when it can (ADR-0012, ADR-0022).
+6. **Choose the unit**: with `session` off, a fresh random session id per
+   request; with it on, a session id derived from `tenant_id` and `sub` (or
+   `tenant_id` alone with `scope: 'tenant'`) plus `conversationId`. Any
+   session header the client sends is ignored or overwritten (ADR-0002).
+7. **Invoke the Runtime** with the session id and the credential header. On
+   `api-gateway` the integration Lambda forwards the stream.
+8. **Meter**: on `api-gateway` the Lambda reads the closing `usage` event,
+   adds the output tokens to the tenant's counter and logs `request served`.
+   The interceptor logs `request admitted` before the Gateway calls the
+   Runtime, because it never sees the response.
+
+The forwarded user token (`delegation.forwardUserToken`) travels raw in
+`X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Token`; the vended credentials
+travel as base64 JSON in
+`X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Credentials`. Each header is
+on the Runtime's allowlist only when its module needs it (ADR-0006,
+ADR-0012). Depth: [`architecture.md`](./architecture.md#request-flow) and
+spec §3.
+
+## Deploy
+
+Prerequisites:
+
+- An AWS account, non-production, bootstrapped for AWS CDK, and a Region
+  where AgentCore Runtime and AgentCore Gateway are available. The
+  integration test runs in `eu-central-1`.
+- **Node.js 24**. Docker is not needed: the functions bundle locally with
+  esbuild.
+- **tenant-identity, topology `shared-pool`, deployed first** in the same
+  account and Region. This sample reads its published
+  `/application-plane/shared/identity/{userPoolId,appClientId}` parameters at
+  deploy time (ADR-0004). Deploy it from
+  [`../tenant-identity`](../tenant-identity/README.md#deploy):
+
+  ```bash
+  cd ../tenant-identity
+  npm ci
+  npx projen build
+  npx cdk deploy --context topology=shared-pool
+  cd ../runtime-isolation
+  ```
+
+- **An API Gateway CloudWatch Logs role already set on the account and
+  Region** (`api-gateway` ingress). The construct enables execution logging
+  but does not create the account-wide `AWS::ApiGateway::Account` role
+  (`cloudWatchRole: false`), because that setting is one per account and
+  Region and CDK retains it on destroy. Check with `aws apigateway
+  get-account`; if `cloudwatchRoleArn` is null, set one as described in
+  [tenant-identity's Deploy section](../tenant-identity/README.md#deploy).
+- **Amazon Bedrock model access** to Amazon Nova Lite. The demo's default
+  model is the Region's cross-Region inference profile, for example
+  `eu.amazon.nova-lite-v1:0` in `eu-*` Regions (`us.` and `apac.` elsewhere;
+  any other Region gets the base id `amazon.nova-lite-v1:0`). Override with
+  `--context modelId=<id>`.
+
+Build, then deploy one ingress:
 
 ```bash
-export AWS_REGION=eu-central-1
-npx cdk deploy --context ingress=api-gateway --context session=user --context requiredScopes=tenant-api/read --context forwardUserToken=true --context tvm=true
-scripts/demo.sh
+npm ci
+npx projen build
+npx cdk deploy --context ingress=api-gateway
 ```
 
-| Step | Shows |
-|---|---|
-| 1 | two tenants, three users (tenant-identity platform API) |
-| 2 to 4 | the session follows the token: A2 and B1 reuse A1's `conversationId` and fake A1's session header, and land in their own units; A1 resumes on the same microVM |
-| 5 | no token, a tampered token, an ID token: 401/403 |
-| 6 | the forwarded token's scope (forwarding on) |
-| 7 | A1 reads tenant A's item; tenant B's is `AccessDeniedException` from IAM |
-| 8 | `stream 10` arrives as `text/event-stream` |
-| 9 | a model prompt ends with the `usage` event; the per-tenant metric command |
+`npx projen build` compiles, runs the unit tests and cdk-nag, and synthesises
+with `--context ingress=api-gateway --context identityParameterPlaceholders=true`
+so it needs no AWS account. A template synthesised with placeholders carries a
+CloudFormation rule that refuses to deploy.
 
-Steps whose module is off are skipped. The script creates two tenants and
-deletes them on exit, also on failure. It prints status codes, tenant ids
-and report fields, never a token, password or header value
-([`scripts/CONVENTIONS.md`](./scripts/CONVENTIONS.md)).
+The demo stack's inputs are CDK context keys, parsed by `parseDemoContext` in
+[`src/demo.cdk.ts`](./src/demo.cdk.ts). Synthesis fails fast and names the
+key when a value is missing or malformed.
+
+| Context key | Values | Default | What it does |
+|---|---|---|---|
+| `ingress` | `api-gateway`, `agentcore-gateway` | required | The ingress (ADR-0003). It is in the stack name, `RuntimeIsolation-<ingress>`, so both can be deployed side by side |
+| `session` | `user`, `tenant`, `off` | `off` | Session mapping (ADR-0013). `user` keys the unit on `tenant_id` and `sub`; `tenant` on `tenant_id` only |
+| `requiredScopes` | comma-separated scopes, e.g. `tenant-api/read` | unset (no check) | Scopes every token must carry (ADR-0005) |
+| `forwardUserToken` | `true`, `false` | `false` | Forward the user's token to the agent (ADR-0006) |
+| `requireNarrowedToken` | `true`, `false` | `false` | Refuse a token whose scopes are not a subset of `allowedScopes`; needs `forwardUserToken=true` (ADR-0007) |
+| `allowedScopes` | comma-separated scopes | unset | The scopes a forwarded token may carry; required with `requireNarrowedToken` |
+| `tvm` | `true`, `false` | `false` | "Demo tenant data": adds a tenant-partitioned DynamoDB table and a data-bearing tenant role with ABAC. With `false` the TVM still runs, using the construct's model-only `TenantModelRole` (ADR-0016, ADR-0018) |
+| `includeUserIdTag` | `true`, `false` | `false` | Add `UserId = sub` as a session tag (multiplies the TVM cache keys, ADR-0022) |
+| `modelId` | a Bedrock model id or inference profile id | the Region's Nova Lite profile (above) | The one model the tenant role may invoke |
+| `perTenantMetrics` | `true`, `false` | `false` | Per-tenant CloudWatch metrics and the cost dashboard; synth prints a cost warning (ADR-0021) |
+| `requestsPerMinute` | non-negative integer | construct default, 60 | Requests per tenant per minute; `0` turns the limit off (ADR-0020) |
+| `outputTokensPerMinute` | non-negative integer | unset (off) | Output tokens per tenant per minute; `api-gateway` only (ADR-0020) |
+| `identityParameterPlaceholders` | `true`, `false` | `false` | Build only: synthesise with placeholder pool and client ids instead of reading tenant-identity's parameters |
+
+The demo deploy that turns every module on (used by
+[`scripts/demo.sh`](./scripts/demo.sh)):
+
+```bash
+npx cdk deploy --context ingress=api-gateway --context session=user --context requiredScopes=tenant-api/read --context forwardUserToken=true --context tvm=true
+```
+
+After deploy, turn on the two account-level billing options in
+[Costs](#turn-on-model-cost-attribution-one-time-account-level) so model cost
+splits by tenant.
+
+Teardown, with the same `ingress` you deployed:
+
+```bash
+npx cdk destroy --context ingress=api-gateway
+```
+
+Every resource has `RemovalPolicy.DESTROY`. The destroy waits about 90 s for
+the log drain, so late log delivery cannot recreate a log group outside the
+stack (ADR-0019). Destroy tenant-identity afterwards from its own directory if
+nothing else uses it.
+
+### Use the construct in your own app
+
+Declare this sample as a local dependency (`file:../runtime-isolation`) in
+your `.projenrc.ts` and import from its package entry,
+[`src/index.ts`](./src/index.ts) (standard §1.1). The construct reads no SSM
+parameter; it takes the issuer, the agent and an optional tenant role as
+props:
+
+```ts
+import * as ssm from 'aws-cdk-lib/aws-ssm';
+import { IsolatedRuntime } from 'runtime-isolation/src';
+
+const userPoolId = ssm.StringParameter.valueForStringParameter(this, '/application-plane/shared/identity/userPoolId');
+const appClientId = ssm.StringParameter.valueForStringParameter(this, '/application-plane/shared/identity/appClientId');
+
+const runtime = new IsolatedRuntime(this, 'IsolatedRuntime', {
+  identity: {
+    discoveryUrl: `https://cognito-idp.${this.region}.amazonaws.com/${userPoolId}/.well-known/openid-configuration`,
+    allowedClientIds: [appClientId],
+  },
+  agent: { codePath: 'path/to/agent-bundle', modelId: 'eu.amazon.nova-lite-v1:0' },
+  ingress: 'api-gateway',
+  session: { scope: 'user' },
+  tvm: { role: myTenantDataRole },
+});
+```
+
+- **Consumes**: an OIDC issuer meeting spec §6.2 (here tenant-identity
+  `shared-pool` through `/application-plane/shared/identity/{userPoolId,appClientId}`);
+  an agent bundle (a directory with `app.js`, a Node HTTP server on port
+  8080) that ends each stream with the `usage` event; and, optionally,
+  `tvm.role`, a tenant role that also reaches your tenant data. Its trust and
+  ABAC policies are yours (spec §6.1, M-10). An imported `tvm.role` must
+  already carry `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream`
+  on the model, because the construct cannot add a policy to a role it did
+  not create. Without `tvm.role` the construct creates `TenantModelRole`,
+  which may invoke only the one model.
+- **Hands on** (read-only properties): `endpointUrl`, `runtimeArn`,
+  `ingressRole`, `executionRole`, `tvmCallerRole` (the role that validates the
+  token and assumes the tenant role; trust it from your tenant role),
+  `tenantRole` (the role every model call is signed by), `limitsTable` (unset
+  when `tenantLimits` is `false`) and `options`.
+- **Published parameters**, written by the demo stack only, under
+  `/application-plane/shared/agent-runtime/`:
+
+  | Parameter | Value |
+  |---|---|
+  | `endpointUrl` | The ingress invocation URL (`POST`, bearer token) |
+  | `runtimeArn` | The AgentCore Runtime ARN. Check its account before you send tokens to `endpointUrl` (M-20) |
+  | `ingress` | `api-gateway` or `agentcore-gateway` |
+
+Every prop, its default and its validation are in the TSDoc of
+[`src/runtime-isolation.cdk.ts`](./src/runtime-isolation.cdk.ts) and in
+[Scale and limits](#scale-and-limits).
 
 ## Integration test
 
@@ -110,6 +295,135 @@ lifetime; the CUR 2.0 `iamPrincipal/TenantId` line items (they arrive a day late
 Both ingresses stream: the first event of `stream 10` arrives after about
 0.2 s and the last after about 10 s. This is one run from one client; it is
 an input to ADR-0009, not a benchmark.
+
+## Demo
+
+[`scripts/demo.sh`](./scripts/demo.sh) walks the primary flow against a
+deployed stack. It needs tenant-identity `shared-pool` deployed in the same
+account and Region, and reads both samples' published parameters.
+
+```bash
+export AWS_REGION=eu-central-1
+npx cdk deploy --context ingress=api-gateway --context session=user --context requiredScopes=tenant-api/read --context forwardUserToken=true --context tvm=true
+scripts/demo.sh
+```
+
+| Step | Shows |
+|---|---|
+| 1 | two tenants, three users (tenant-identity platform API) |
+| 2 to 4 | the session follows the token: A2 and B1 reuse A1's `conversationId` and fake A1's session header, and land in their own units; A1 resumes on the same microVM |
+| 5 | no token, a tampered token, an ID token: 401/403 |
+| 6 | the forwarded token's scope (forwarding on) |
+| 7 | A1 reads tenant A's item; tenant B's is `AccessDeniedException` from IAM |
+| 8 | `stream 10` arrives as `text/event-stream` |
+| 9 | a model prompt ends with the `usage` event; the per-tenant metric command |
+
+Steps whose module is off are skipped. The script creates two tenants and
+deletes them on exit, also on failure. It prints status codes, tenant ids
+and report fields, never a token, password or header value
+([`scripts/CONVENTIONS.md`](./scripts/CONVENTIONS.md)).
+
+## API
+
+One operation, the same contract on both ingresses (spec §5). The route is
+`invocations` (`ROUTE` in [`src/index.ts`](./src/index.ts)).
+
+| | `api-gateway` | `agentcore-gateway` |
+|---|---|---|
+| URL (`endpointUrl`) | `POST https://<api>/prod/invocations` | `POST https://<gw>.gateway.bedrock-agentcore.<region>.amazonaws.com/agent/invocations` |
+| Auth | `Authorization: Bearer <access token>` | same |
+| Body | `{"prompt": "..."}`; with `session` on, `{"conversationId": "...", "prompt": "..."}` | same |
+| Response | `200`, `text/event-stream`, streamed; the last event is `event: usage` ([the usage event](#the-usage-event-agent-to-ingress-contract)) | same |
+
+Errors. The ingress returns fixed bodies from
+[`src/shared/request.ts`](./src/shared/request.ts) that never echo the token,
+the unit id or the input:
+
+| Status | Body | When |
+|---|---|---|
+| 400 | `bad request` | `prompt` not a string; malformed JSON; malformed `conversationId`; `conversationId` sent with `session` off |
+| 401 | `unauthorized` | No token; a bad signature, issuer, client or expiry; not an access token |
+| 403 | `forbidden` | No `tenant_id`, a `tenants` claim, a required scope missing, the narrowed-token rule failed, or a `claimTags` claim missing |
+| 429 | `too many requests` | The tenant's request or output-token limit for the current minute is reached (ADR-0020) |
+| 502 | `upstream error` | The TVM's STS call, the Runtime or the ingress itself failed |
+
+On `api-gateway` the authoriser runs first, and its Deny surfaces as API
+Gateway's own 403: a tampered token or an ID token is 403 there (integ step
+6), while a missing token is 401. API Gateway's request validation and stage throttle return API Gateway's JSON
+body, not the fixed text. On `agentcore-gateway` the `CUSTOM_JWT` authoriser
+refuses before the interceptor runs, with the Gateway's own body.
+
+## Security notes
+
+- **Identity model.** The access token is the only source of tenant context
+  (P-3). The ingress reads `tenant_id` and `sub` from the verified token only,
+  never from a header or the body. A user belongs to one tenant.
+- **One trusted principal.** The Runtime's resource policy allows
+  `InvokeAgentRuntime` to the ingress role only, so a leaked JWT cannot reach a
+  unit directly and a caller cannot name another tenant's session (ADR-0001,
+  ADR-0002).
+- **Credentials, not code, isolate data and model.** The execution role holds
+  logs and traces only: no `bedrock:Invoke*`, no data, no STS (ADR-0008,
+  ADR-0018). The agent reaches the model and tenant data only with the
+  vended `TenantId`-tagged credentials, and IAM refuses a cross-tenant read
+  (`AccessDeniedException`, integ step 8a).
+- **Trust boundaries** (threat model): B1 client to ingress (bearer token,
+  verified twice); B2 ingress to Runtime (SigV4, resource policy); B3 Runtime
+  to microVM (session id, allowlisted headers); B4 ingress to tenant role and
+  agent to tenant data (trust policy and ABAC on `TenantId`); B5 telemetry and
+  parameters (IAM, field-allowlisted loggers that never log a token,
+  credential or header value).
+- **Larger residual on `agentcore-gateway`.** What the Gateway does when the
+  interceptor Lambda times out or is throttled is not documented and was not
+  probed (T-11). In-code failures short-circuit to 403.
+- cdk-nag `AwsSolutionsChecks` runs on every synth; each suppression carries
+  a reason citing an ADR or a mitigation (ADR-0014).
+
+Threats, mitigations and accepted risks: [`threat-model.md`](./threat-model.md).
+
+## Production hardening checklist
+
+Each item is a "Deployer action" in [`threat-model.md`](./threat-model.md#mitigations)
+(M-n) or an accepted risk (T-n).
+
+- [ ] **Own the tenant role's trust and ABAC** when you pass `tvm.role`: trust
+      `tvmCallerRole` only, require `aws:RequestTag/TenantId`, pin
+      `aws:TagKeys` to the tags you use, and scope every data statement by
+      `${aws:PrincipalTag/TenantId}`. The demo's `TenantRole` in
+      [`src/demo.cdk.ts`](./src/demo.cdk.ts) is the worked example (M-10,
+      T-16).
+- [ ] **Map only vendor-set claims to session tags** in `tvm.claimTags`,
+      never a user-writable attribute (M-11, T-17, T-20).
+- [ ] **Plan offboarding against the credential lifetime.** Keep
+      `tvm.durationSeconds` at 900 where offboarding latency matters, and
+      attach a `TenantId` deny to the tenant role to cut a tenant off before
+      its vended credentials expire (M-14, T-19).
+- [ ] **Add edge protection and size the shared limits**: AWS WAF on the
+      `api-gateway` stage, per-tenant usage plans keyed from the authoriser,
+      Lambda reserved concurrency on the ingress function sized to the
+      Runtime quota, Bedrock quota per model, and `tenantLimits` per tier.
+      `agentcore-gateway` has no stage throttle in the sample (M-19, M-25,
+      T-26, T-35).
+- [ ] **Alarm on the interceptor's errors and throttles** on
+      `agentcore-gateway`, until a probe shows the Gateway fails closed (M-5,
+      T-11).
+- [ ] **Alarm on any other principal** calling `InvokeAgentRuntime` on the
+      Runtime or assuming the tenant role, from CloudTrail (M-22, T-32).
+- [ ] **Restrict `ssm:PutParameter` on `/application-plane/shared/*`** to the
+      deploying roles, so nobody can repoint the issuer or the endpoint
+      (M-20, T-29, T-30).
+- [ ] **Leave `perTenantMetrics` off at scale**, or accept about 9 custom
+      metrics per tenant per ingress (M-28, T-38).
+- [ ] **Change the removal policies.** The sample sets `DESTROY` on every
+      resource so teardown is total (M-23).
+
+## Design trail
+
+- Specification: [`design/runtime-isolation.spec.md`](./design/runtime-isolation.spec.md)
+- Decisions: [`adr/`](./adr/) (indexed in [`adr/README.md`](./adr/README.md))
+- Implemented state: [`architecture.md`](./architecture.md)
+- Threats and mitigations: [`threat-model.md`](./threat-model.md)
+- Diagram source: [`diagrams/runtime-isolation.drawio`](./diagrams/runtime-isolation.drawio)
 
 ## Scale and limits
 
@@ -212,10 +526,11 @@ row below can be summed per tenant with Logs Insights.
 `Errors4xx`, `Errors5xx` and `TtfbMs` are emitted alongside (P-9). On the
 agentcore-gateway ingress the REQUEST interceptor returns before the Runtime
 is invoked and never sees the response, so backend seconds, tokens and bytes
-are not attributed there; the dashboard says so. The demo adds Contributor
-Insights rules for the top tenants by backend seconds and output tokens,
-which read the log line (`$.backendInvokeSeconds`, `$.usageOutput`) and so
-work with metrics off. The dashboard `RuntimeIsolation-<ingress>`, with one
+are not attributed there; the dashboard says so. On `api-gateway` the demo
+adds four Contributor Insights rules: top tenants by requests and by errors
+(from the access log), and by backend seconds and by output tokens (from the
+ingress log line, `$.backendInvokeSeconds` and `$.usageOutput`). All four
+work with metrics off. The `agentcore-gateway` demo has none. The dashboard `RuntimeIsolation-<ingress>`, with one
 per-tenant line per metric, is added only with
 `--context perTenantMetrics=true`.
 

@@ -24,6 +24,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 - [Samples](#samples)
   - [The Simple Cell-Based Control Plane](#the-simple-cell-based-control-plane)
   - [Tenant Identity with Amazon Cognito](#tenant-identity-with-amazon-cognito)
+  - [Runtime Isolation](#runtime-isolation)
 - [Contributing a sample](#contributing-a-sample)
 - [Further Reading](#further-reading)
 - [Costs](#costs)
@@ -36,6 +37,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 |---|---|
 | [The Simple Cell-Based Control Plane](./samples/control-plane/) | A minimal multi-tenant control plane for cell-based deployments — one service, one API, one DynamoDB table, one Step Functions workflow, script-driven provisioning via AWS CodeBuild. `maxTenants: 1` degenerates the model to a silo. |
 | [Tenant Identity with Amazon Cognito](./samples/tenant-identity/) | An identity layer that makes Amazon Cognito the trusted source of tenant identity, in three user-pool topologies chosen at deploy time — plus a `tiered` mode that runs two of them side by side — with RFC 8693 token narrowing to one tenant. |
+| [Runtime Isolation](./samples/runtime-isolation/) | A pooled agent backend on Amazon Bedrock AgentCore Runtime that trusts one ingress, which verifies the tenant token, maps each caller to their own microVM, signs every model call with tenant-scoped credentials, limits each tenant and attributes cost per tenant. |
 
 ## The Simple Cell-Based Control Plane
 
@@ -81,6 +83,29 @@ re-signs so it verifies the same way.
 The sample stops at the token: verifying it and scoping a request belongs to
 the consuming service, which is an extension seam rather than built here. See
 [Tenant Identity with Amazon Cognito](./samples/tenant-identity/).
+
+## Runtime Isolation
+
+A pooled agent backend serves every tenant from shared compute, so two
+questions follow on every request: which compute unit may this caller reach,
+and whose permissions does the agent use? If the client picks the session, or
+the agent holds one role for all tenants, a stolen token or a prompt-injected
+agent can reach another tenant's conversation or data.
+
+This sample puts one ingress in front of an Amazon Bedrock AgentCore Runtime
+and makes it the only principal the Runtime trusts. The ingress, an API
+Gateway REST API or an AgentCore Gateway chosen at deploy time, verifies the
+tenant-identity access token, derives the microVM session from the verified
+`tenant_id` and `sub`, and vends `TenantId`-tagged credentials with a token
+vending machine that is always on. The agent's own role holds no model or data
+permission, so IAM, not agent code, keeps each tenant to its own model calls
+and data. The ingress also limits each tenant's requests per minute and logs
+per-tenant cost figures; model cost splits by tenant in the bill through the
+IAM principal. Session mapping, scope checks and token forwarding are optional
+modules.
+
+It ships as one CDK construct, `IsolatedRuntime`, that later samples can
+consume. See [Runtime Isolation](./samples/runtime-isolation/).
 
 ## Contributing a sample
 
