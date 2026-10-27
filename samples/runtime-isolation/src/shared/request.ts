@@ -92,6 +92,11 @@ export class IngressPipeline {
     }
   }
 
+  /** Pre-fetches what the first request would otherwise wait for (the issuer's discovery document and JWKS). */
+  warm(): void {
+    this.verifier.warm();
+  }
+
   /** Runs every check; throws RequestError with the status to return. */
   async validate(inputs: RequestInputs): Promise<ValidatedRequest> {
     const token = bearerToken(inputs.authorization);

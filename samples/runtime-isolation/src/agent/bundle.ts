@@ -34,7 +34,7 @@ export function bundleAgent(options: BundleAgentOptions = {}): string {
     platform: 'node',
     format: 'cjs',
     target: 'node22',
-    minify: false,
+    minify: true, // smaller artifact for every new microVM to fetch and parse; the agent logs error names, not stacks
     sourcemap: false,
     outfile: path.join(outDir, AGENT_ENTRY_FILE),
     logLevel: 'warning',

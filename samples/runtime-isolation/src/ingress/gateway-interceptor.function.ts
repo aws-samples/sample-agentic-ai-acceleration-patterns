@@ -164,14 +164,21 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
   };
 }
 
-let deps: InterceptorDependencies | undefined;
+function defaultDependencies(): InterceptorDependencies {
+  const config = readIngressConfig();
+  const pipeline = pipelineFor(config);
+  pipeline.warm();
+  // The interceptor never invokes the Runtime itself; the backend object
+  // supplies only the header transport. The ARN is not needed for that.
+  return { pipeline, backend: new AgentCoreRuntimeBackend(''), perTenantMetrics: config.perTenantMetrics };
+}
+
+// Built during init on the Lambda runtime (the config is present there), so
+// client construction and the discovery and JWKS fetch run before the first
+// event. Under jest the handler is not used; tests call intercept() directly.
+let deps: InterceptorDependencies | undefined = process.env.AWS_LAMBDA_FUNCTION_NAME !== undefined ? defaultDependencies() : undefined;
 
 export async function handler(event: InterceptorEvent): Promise<InterceptorOutput> {
-  if (deps === undefined) {
-    const config = readIngressConfig();
-    // The interceptor never invokes the Runtime itself; the backend object
-    // supplies only the header transport. The ARN is not needed for that.
-    deps = { pipeline: pipelineFor(config), backend: new AgentCoreRuntimeBackend(''), perTenantMetrics: config.perTenantMetrics };
-  }
+  deps ??= defaultDependencies();
   return intercept(event, deps);
 }

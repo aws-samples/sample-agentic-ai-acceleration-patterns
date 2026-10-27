@@ -113,6 +113,16 @@ export class TokenVerifier {
     return this.resolved;
   }
 
+  /**
+   * Starts the discovery and JWKS fetch now, so a container that calls this
+   * at init has them in hand for its first request. A failure is swallowed
+   * here (resolve() resets, so the next verify retries) and never surfaces
+   * from init.
+   */
+  warm(): void {
+    this.resolve().catch(() => undefined);
+  }
+
   /** Verifies a raw token (no `Bearer` prefix). Throws TokenError. */
   async verify(token: string | undefined): Promise<VerifiedClaims> {
     if (token === undefined || token.length === 0) {

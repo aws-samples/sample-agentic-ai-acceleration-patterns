@@ -173,8 +173,10 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
 
 function defaultDependencies(): HandlerDependencies {
   const config = readIngressConfig();
+  const pipeline = pipelineFor(config);
+  pipeline.warm();
   return {
-    pipeline: pipelineFor(config),
+    pipeline,
     backend: new AgentCoreRuntimeBackend(requireEnv(ENV.RUNTIME_ARN)),
     perTenantMetrics: config.perTenantMetrics,
   };
@@ -185,12 +187,14 @@ type StreamHandler = StreamifyHandler<APIGatewayProxyEvent, void>;
 // `awslambda` is a global of the Lambda Node.js runtime (typed by
 // @types/aws-lambda); under jest it is absent, so the handler is exported
 // unwrapped and the tests call handleRequest directly.
-const streamify: (fn: StreamHandler) => StreamHandler =
-  typeof awslambda !== 'undefined' && typeof awslambda.streamifyResponse === 'function'
-    ? (fn) => awslambda.streamifyResponse(fn)
-    : (fn) => fn;
+const onLambda = typeof awslambda !== 'undefined' && typeof awslambda.streamifyResponse === 'function';
+const streamify: (fn: StreamHandler) => StreamHandler = onLambda ? (fn) => awslambda.streamifyResponse(fn) : (fn) => fn;
 
-let deps: HandlerDependencies | undefined;
+// Built during init on the Lambda runtime: the config read, the SDK clients
+// and the TVM cache are constructed at boosted CPU, and the verifier's
+// discovery and JWKS fetch run before the first event arrives. Under jest
+// there is no config, so the handler builds them on first call.
+let deps: HandlerDependencies | undefined = onLambda ? defaultDependencies() : undefined;
 
 export const handler: StreamHandler = streamify(async (event, responseStream) => {
   deps ??= defaultDependencies();

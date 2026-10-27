@@ -799,7 +799,10 @@ function functionProps(scope: Construct, logGroupId: string, timeout: Duration):
     loggingFormat: lambda.LoggingFormat.JSON,
     bundling: {
       minify: true,
-      sourceMap: true,
+      // No source maps: the logger writes error names only, never stacks, and
+      // NODE_OPTIONS=--enable-source-maps is not set, so a map is only
+      // artifact weight on every cold start.
+      sourceMap: false,
       // Bundle the SDK clients so the artifact pins the versions the sample
       // was tested against.
       externalModules: [],

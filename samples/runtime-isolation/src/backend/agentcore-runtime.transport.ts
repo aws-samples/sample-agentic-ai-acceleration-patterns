@@ -65,10 +65,10 @@ export class AgentCoreRuntimeBackend implements InvokeBackend, HeaderTransportBa
 
   /**
    * @param runtimeArn the Runtime to invoke; may be empty when only the header transport is used
-   * @param client an injected client (tests); created on first invoke otherwise
+   * @param client an injected client (tests); created here when an ARN is given, so construction happens at init, not on the first invoke
    */
   constructor(private readonly runtimeArn: string, client?: BedrockAgentCoreClient) {
-    this.client = client;
+    this.client = client ?? (runtimeArn.length > 0 ? new BedrockAgentCoreClient({}) : undefined);
   }
 
   /** Headers for the Gateway path: unit id plus the custom headers (ADR-0002). */

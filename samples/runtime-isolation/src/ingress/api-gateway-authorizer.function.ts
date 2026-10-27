@@ -26,6 +26,9 @@ const verifier = new TokenVerifier({
   requireNarrowedToken: config.delegation.requireNarrowedToken,
   allowedScopes: config.delegation.allowedScopes,
 });
+// Fetch the discovery document and JWKS during init, at boosted CPU and off
+// the first request's path, instead of inside the first verify.
+verifier.warm();
 
 /** The policy for one method ARN. Allow carries the tenant context; Deny carries none. */
 export function buildPolicy(
