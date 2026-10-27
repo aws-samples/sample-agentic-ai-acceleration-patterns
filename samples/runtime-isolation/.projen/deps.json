@@ -116,6 +116,11 @@
       "type": "runtime"
     },
     {
+      "name": "@smithy/node-http-handler",
+      "version": "4.12.1",
+      "type": "runtime"
+    },
+    {
       "name": "aws-cdk-lib",
       "version": "2.274.0",
       "type": "runtime"

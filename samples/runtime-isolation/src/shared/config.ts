@@ -93,6 +93,16 @@ function positiveInteger(name: string, value: string | undefined, allowZero = fa
   return n;
 }
 
+/**
+ * True on the Lambda runtime (the runtime sets `AWS_LAMBDA_FUNCTION_NAME`),
+ * false under jest. The handlers build their dependencies at module load
+ * only on Lambda, so a missing or malformed variable fails the init phase
+ * by design, naming the variable, instead of the first request (ADR-0023).
+ */
+export function isLambdaRuntime(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.AWS_LAMBDA_FUNCTION_NAME !== undefined && env.AWS_LAMBDA_FUNCTION_NAME.length > 0;
+}
+
 /** Reads one required variable; a missing value fails at cold start, naming it. */
 export function requireEnv(name: string, env: NodeJS.ProcessEnv = process.env): string {
   const value = env[name];

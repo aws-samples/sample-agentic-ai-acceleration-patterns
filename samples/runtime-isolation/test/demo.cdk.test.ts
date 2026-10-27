@@ -31,6 +31,7 @@ const context = (overrides: Partial<DemoContext> = {}): DemoContext => ({
   includeUserIdTag: false,
   modelId: DEFAULT_MODEL_ID,
   identityParameterPlaceholders: false,
+  publishParameters: true,
   perTenantMetrics: false,
   ...overrides,
 });
@@ -95,6 +96,7 @@ describe('parseDemoContext (fail-fast, standard §4.3)', () => {
           perTenantMetrics: 'true',
           requestsPerMinute: '30',
           outputTokensPerMinute: 2000,
+          publishParameters: 'false',
         }),
       ),
     ).toEqual({
@@ -111,7 +113,14 @@ describe('parseDemoContext (fail-fast, standard §4.3)', () => {
       perTenantMetrics: true,
       requestsPerMinute: 30,
       outputTokensPerMinute: 2000,
+      publishParameters: false,
     });
+  });
+
+  it('publishParameters defaults to true and must be true or false (the parameter names are account-wide)', () => {
+    expect(parseDemoContext(read({ ingress: 'api-gateway' })).publishParameters).toBe(true);
+    expect(parseDemoContext(read({ ingress: 'agentcore-gateway', publishParameters: 'false' })).publishParameters).toBe(false);
+    expect(() => parseDemoContext(read({ ingress: 'api-gateway', publishParameters: 'no' }))).toThrow(/'publishParameters'/);
   });
 
   it('session accepts user, tenant, off; refuses anything else by name', () => {
@@ -173,8 +182,9 @@ describe('RuntimeIsolationDemoStack', () => {
     template.hasResourceProperties('AWS::SSM::Parameter', { Name: AGENT_RUNTIME_PARAMETERS.ingress, Value: 'agentcore-gateway' });
   });
 
-  it('publishParameters=false writes none', () => {
+  it('publishParameters=false writes none, as a prop or as context (a second ingress beside the first)', () => {
     synth(context(), false).template.resourceCountIs('AWS::SSM::Parameter', 0);
+    synth(context({ ingress: 'agentcore-gateway', publishParameters: false })).template.resourceCountIs('AWS::SSM::Parameter', 0);
   });
 
   it("api-gateway: Contributor Insights rules keyed by $.tenantId on the access log (P-9) and on the ingress 'request served' log line (P-10, ADR-0021)", () => {

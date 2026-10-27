@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0015: Verify the token at every ingress stage, not only at the gateway
 
-- Status: Accepted
+- Status: Accepted. Amended by ADR-0023.
 - Date: 2026-10-26
 - Deciders: Dave Roberts (PSA)
 

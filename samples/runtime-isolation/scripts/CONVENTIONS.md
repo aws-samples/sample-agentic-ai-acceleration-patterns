@@ -6,7 +6,8 @@ SPDX-License-Identifier: MIT-0
 
 Conventions for the shell scripts in this directory. They run locally against
 a deployed `RuntimeIsolation-<ingress>` stack (`demo.sh` walks the primary
-flow; `integ.sh` drives the deployment integration test, spec §8). What they
+flow; `integ.sh` drives the deployment integration test, spec §8; `perf.sh`
+measures client-seen latency, ADR-0009 and ADR-0023). What they
 print lands in the operator's terminal and, in CI, the job log; both are an
 audience, not a scratchpad. A script on this path handles access tokens,
 refresh tokens, temporary passwords, SigV4 credentials and, with the TVM on,
@@ -55,7 +56,8 @@ that none of those ever reach output.
   `npx`), so a missing input fails fast with a message that names it.
 - Register an `EXIT` trap that cleans up whatever the script created.
   `demo.sh` deletes the demo table items and users it wrote and removes its
-  temp files on every exit; `integ.sh` destroys every stack it deployed from
+  temp files on every exit; `perf.sh` deletes its tenant and, unless
+  `PERF_OUT` asked to keep the raw samples, its output directory; `integ.sh` destroys every stack it deployed from
   the trap, so the destroy runs even when the deploy or a step fails, and
   then checks that nothing it created was left behind: stacks with the
   sample's prefix, plus the log groups and SSM parameters its own stacks
@@ -67,6 +69,6 @@ that none of those ever reach output.
 ## Scope
 
 These conventions apply to every script in this directory (`demo.sh`,
-`integ.sh`) and any script added later. They are the local-script counterpart
+`integ.sh`, `perf.sh`) and any script added later. They are the local-script counterpart
 of `docs/sample-standard.md` §4.4 (no secrets, tokens or caller payloads in
 logs) and of spike V-7 (no header value on any log on the path).

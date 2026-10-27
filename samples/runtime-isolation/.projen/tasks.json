@@ -303,6 +303,7 @@
             "@aws-sdk/client-bedrock-runtime",
             "@aws-sdk/client-dynamodb",
             "@aws-sdk/client-sts",
+            "@smithy/node-http-handler",
             "aws-cdk-lib",
             "cdk-nag",
             "constructs",

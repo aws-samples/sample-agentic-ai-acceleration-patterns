@@ -25,7 +25,7 @@
 
 import { AgentCoreRuntimeBackend } from '../backend/agentcore-runtime.transport';
 import type { HeaderTransportBackend } from '../backend/backend';
-import { readIngressConfig } from '../shared/config';
+import { isLambdaRuntime, readIngressConfig } from '../shared/config';
 import { errorName, log } from '../shared/logger';
 import { emitRequestMetrics } from '../shared/metrics';
 import { ERROR_TEXT, type ErrorStatus, IngressPipeline, pipelineFor, RequestError } from '../shared/request';
@@ -57,6 +57,8 @@ export interface InterceptorDependencies {
   /** Emit per-tenant EMF metrics (ADR-0021). Default false. */
   readonly perTenantMetrics?: boolean;
   readonly now?: () => number;
+  /** Resolves once init's pre-connects are done (ADR-0023); the first request awaits it. */
+  readonly ready?: Promise<void>;
 }
 
 /** Case-insensitive header lookup. */
@@ -117,6 +119,9 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
   const gatewayRequest = event.http?.gatewayRequest;
   const now = deps.now ?? Date.now;
   const started = now();
+  // The first request of an environment waits for init's pre-connects and
+  // fetches (ADR-0023); `ready` never rejects by construction.
+  await deps.ready;
   // Request side only (see the file comment): Requests, errors and this
   // function's own milliseconds. No backend or model figures exist here.
   const metrics = (status: number, tenantId?: string) =>
@@ -164,14 +169,23 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
   };
 }
 
-let deps: InterceptorDependencies | undefined;
+function defaultDependencies(): InterceptorDependencies {
+  const config = readIngressConfig();
+  const pipeline = pipelineFor(config);
+  // STS and DynamoDB connections open during init (ADR-0023). The interceptor
+  // never invokes the Runtime itself; the backend object supplies only the
+  // header transport, so no Runtime connection is opened here.
+  const ready = pipeline.warm();
+  return { pipeline, backend: new AgentCoreRuntimeBackend(''), perTenantMetrics: config.perTenantMetrics, ready };
+}
+
+// Built during init on the Lambda runtime (the config is present there), so
+// client construction and the discovery and JWKS fetch run before the first
+// event; a missing or malformed variable fails init, naming it (intended).
+// Under jest the handler is not used; tests call intercept() directly.
+let deps: InterceptorDependencies | undefined = isLambdaRuntime() ? defaultDependencies() : undefined;
 
 export async function handler(event: InterceptorEvent): Promise<InterceptorOutput> {
-  if (deps === undefined) {
-    const config = readIngressConfig();
-    // The interceptor never invokes the Runtime itself; the backend object
-    // supplies only the header transport. The ARN is not needed for that.
-    deps = { pipeline: pipelineFor(config), backend: new AgentCoreRuntimeBackend(''), perTenantMetrics: config.perTenantMetrics };
-  }
+  deps ??= defaultDependencies();
   return intercept(event, deps);
 }

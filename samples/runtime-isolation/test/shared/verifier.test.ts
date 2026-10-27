@@ -93,6 +93,29 @@ describe('TokenVerifier', () => {
     });
   });
 
+  describe('warm (ADR-0023)', () => {
+    it('fetches the discovery document and reloads the JWKS, then resolves', async () => {
+      const reload = jest.fn().mockResolvedValue(undefined);
+      const fetchDiscovery = jest.fn(issuer.fetchDiscovery);
+      const getKey = Object.assign(issuer.getKey, { reload });
+      const v = new TokenVerifier({ discoveryUrl: DISCOVERY_URL, allowedClientIds: [CLIENT_ID] }, { getKey, fetchDiscovery });
+      await expect(v.warm()).resolves.toBeUndefined();
+      expect(fetchDiscovery).toHaveBeenCalledTimes(1);
+      expect(reload).toHaveBeenCalledTimes(1);
+      // The first verify reuses the fetched discovery document.
+      await v.verify(await issuer.mint());
+      expect(fetchDiscovery).toHaveBeenCalledTimes(1);
+    });
+
+    it('resolves on a failed discovery and leaves verify to retry', async () => {
+      const fetchDiscovery = jest.fn().mockRejectedValueOnce(new Error('down')).mockImplementation(issuer.fetchDiscovery);
+      const v = new TokenVerifier({ discoveryUrl: DISCOVERY_URL, allowedClientIds: [CLIENT_ID] }, { getKey: issuer.getKey, fetchDiscovery });
+      await expect(v.warm()).resolves.toBeUndefined();
+      await expect(v.verify(await issuer.mint())).resolves.toMatchObject({ clientId: CLIENT_ID });
+      expect(fetchDiscovery).toHaveBeenCalledTimes(2);
+    });
+  });
+
   describe('requiredScopes (ADR-0005)', () => {
     it('requires every listed scope (AND)', async () => {
       const v = verifier({ requiredScopes: ['tenant-api/read', 'tenant-api/write'] });

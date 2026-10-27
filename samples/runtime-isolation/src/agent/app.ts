@@ -36,9 +36,11 @@
 
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { Agent as HttpsAgent } from 'node:https';
 import { BedrockRuntimeClient, ConverseStreamCommand } from '@aws-sdk/client-bedrock-runtime';
 import { DynamoDBClient, GetItemCommand } from '@aws-sdk/client-dynamodb';
 import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { decodeCredentials, RUNTIME_HEADERS } from '../backend/agentcore-runtime.transport';
 import { AGENT_ENV } from '../shared/config';
 import { USAGE_EVENT, type UsageEvent } from '../shared/metrics';
@@ -105,10 +107,19 @@ export interface AgentClients {
   readonly bedrock: (credentials: SdkCredentials) => Pick<BedrockRuntimeClient, 'send'>;
 }
 
+/**
+ * One socket pool for the whole process. The clients stay per request, built
+ * from that request's vended credentials (ADR-0018: every call is signed by
+ * the tenant role), but they share this handler so a conversation's second
+ * and later turns reuse the TLS connection to Bedrock instead of opening a
+ * new one. Credentials are per client, never on the handler.
+ */
+const requestHandler = new NodeHttpHandler({ httpsAgent: new HttpsAgent({ keepAlive: true, maxSockets: 50 }) });
+
 const defaultClients: AgentClients = {
-  dynamo: (credentials) => new DynamoDBClient({ credentials }),
-  sts: (credentials) => new STSClient({ credentials }),
-  bedrock: (credentials) => new BedrockRuntimeClient({ credentials }),
+  dynamo: (credentials) => new DynamoDBClient({ credentials, requestHandler }),
+  sts: (credentials) => new STSClient({ credentials, requestHandler }),
+  bedrock: (credentials) => new BedrockRuntimeClient({ credentials, requestHandler }),
 };
 
 function sdkCredentials(header: string): SdkCredentials {

@@ -36,6 +36,7 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     '@aws-sdk/client-bedrock-runtime@3.1154.0', // agent's ConverseStream call; token usage for the usage event (P-10, ADR-0017)
     '@aws-sdk/client-sts@3.1154.0', // TVM AssumeRole + TagSession (ADR-0012); agent GetCallerIdentity
     '@aws-sdk/client-dynamodb@3.1154.0', // echo agent's demo-table read with vended credentials
+    '@smithy/node-http-handler@4.12.1', // the agent's shared keep-alive handler across its per-request clients
     'jose@5.10.0', // JWT verification against the issuer's JWKS (P-3); 5.x ships CJS, which ts-jest needs (6.x is ESM-only)
     // Security linting - AwsSolutionsChecks aspect applied in src/main.ts
     'cdk-nag@3.0.2',

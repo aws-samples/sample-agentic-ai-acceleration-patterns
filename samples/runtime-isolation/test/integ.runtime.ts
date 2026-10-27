@@ -45,6 +45,7 @@ const allOn = (ingress: DemoContext['ingress']): DemoContext => ({
   includeUserIdTag: false,
   modelId,
   identityParameterPlaceholders: false,
+  publishParameters: true,
 });
 
 export const INTEG_STACKS: Record<string, DemoContext> = {
@@ -58,6 +59,7 @@ export const INTEG_STACKS: Record<string, DemoContext> = {
     includeUserIdTag: false,
     modelId,
     identityParameterPlaceholders: false,
+    publishParameters: true,
   },
   'narrowed': {
     ingress: 'api-gateway',
@@ -71,6 +73,7 @@ export const INTEG_STACKS: Record<string, DemoContext> = {
     includeUserIdTag: false,
     modelId,
     identityParameterPlaceholders: false,
+    publishParameters: true,
   },
 };
 const PUBLISHER = 'api-gateway';

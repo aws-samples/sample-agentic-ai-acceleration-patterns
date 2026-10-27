@@ -8,6 +8,7 @@ import type { TvmConfig } from '../../src/shared/config';
 import {
   ClaimMissingError,
   DEFAULT_CACHE_MAX_ENTRIES,
+  REFRESH_AHEAD_MS,
   REFRESH_JITTER_MS,
   REFRESH_MARGIN_MS,
   roleSessionName,
@@ -138,13 +139,71 @@ describe('TokenVendingMachine', () => {
     let now = T0;
     const machine = tvm({}, () => now, () => 0);
     await machine.vend(claims());
-    // 900 s lifetime; at 900 s - 121 s remaining the entry is still fresh.
-    now = T0 + 900_000 - REFRESH_MARGIN_MS - 1000;
+    // 900 s lifetime; well before the margin and the refresh-ahead window the entry is simply fresh.
+    now = T0 + 900_000 - REFRESH_MARGIN_MS - REFRESH_AHEAD_MS - 1000;
     expect((await machine.vend(claims())).cached).toBe(true);
-    // At exactly the margin it is refreshed.
+    expect(sts).toHaveReceivedCommandTimes(AssumeRoleCommand, 1);
+    // At exactly the margin, with no request in the ahead window, it is refreshed on the request path.
     now = T0 + 900_000 - REFRESH_MARGIN_MS;
     expect((await machine.vend(claims())).cached).toBe(false);
     expect(sts).toHaveReceivedCommandTimes(AssumeRoleCommand, 2);
+  });
+
+  describe('refresh-ahead (ADR-0023)', () => {
+    const flush = () => new Promise((resolve) => setImmediate(resolve));
+    let clock: number;
+    beforeEach(() => {
+      clock = T0;
+      // Credentials expire 900 s after the call that vended them.
+      sts.on(AssumeRoleCommand).callsFake(async () => ({
+        Credentials: { AccessKeyId: `ASIA-SYNTHETIC-${clock}`, SecretAccessKey: 's', SessionToken: 't', Expiration: new Date(clock + 900_000) },
+      }));
+    });
+
+    it('within REFRESH_AHEAD_MS of the margin a hit is served and one AssumeRole runs in the background', async () => {
+      const machine = tvm({}, () => clock, () => 0);
+      const first = await machine.vend(claims());
+      clock = T0 + 900_000 - REFRESH_MARGIN_MS - REFRESH_AHEAD_MS + 1000;
+      const served = await machine.vend(claims());
+      expect(served.cached).toBe(true);
+      expect(served.credentials).toEqual(first.credentials);
+      await flush();
+      expect(sts).toHaveReceivedCommandTimes(AssumeRoleCommand, 2);
+      // Past the old margin the refreshed entry is a plain hit: no wait, no third call.
+      clock = T0 + 900_000 - REFRESH_MARGIN_MS + 1000;
+      const later = await machine.vend(claims());
+      expect(later.cached).toBe(true);
+      expect(later.credentials).not.toEqual(first.credentials);
+      expect(sts).toHaveReceivedCommandTimes(AssumeRoleCommand, 2);
+    });
+
+    it('many hits in the ahead window start one refresh, not one each', async () => {
+      const machine = tvm({}, () => clock, () => 0);
+      await machine.vend(claims());
+      clock = T0 + 900_000 - REFRESH_MARGIN_MS - 1000;
+      await Promise.all([machine.vend(claims()), machine.vend(claims()), machine.vend(claims())]);
+      await flush();
+      expect(sts).toHaveReceivedCommandTimes(AssumeRoleCommand, 2);
+    });
+
+    it('a failed background refresh keeps the entry; the request path retries at the margin', async () => {
+      const ok = async () => ({
+        Credentials: { AccessKeyId: `ASIA-SYNTHETIC-${clock}`, SecretAccessKey: 's', SessionToken: 't', Expiration: new Date(clock + 900_000) },
+      });
+      // First call vends, the second (the background refresh) is throttled, the third succeeds.
+      sts.on(AssumeRoleCommand).callsFakeOnce(ok).rejectsOnce(new Error('Throttling')).callsFake(ok);
+      const machine = tvm({}, () => clock, () => 0);
+      const first = await machine.vend(claims());
+      clock = T0 + 900_000 - REFRESH_MARGIN_MS - 1000;
+      expect((await machine.vend(claims())).credentials).toEqual(first.credentials);
+      await flush();
+      expect(machine.size).toBe(1);
+      clock = T0 + 900_000 - REFRESH_MARGIN_MS;
+      const retried = await machine.vend(claims());
+      expect(retried.cached).toBe(false);
+      expect(retried.credentials).not.toEqual(first.credentials);
+      expect(sts).toHaveReceivedCommandTimes(AssumeRoleCommand, 3);
+    });
   });
 
   it('jitter widens the margin by up to REFRESH_JITTER_MS, fixed per entry', async () => {
@@ -226,10 +285,12 @@ describe('TokenVendingMachine', () => {
     it('evicts expired entries before fresh ones, even when the expired one was used more recently', async () => {
       const machine = bounded(2);
       await machine.vend(tenant('tenant-a'));
-      clock = T0 + 700_000;
+      clock = T0 + 600_000;
       await machine.vend(tenant('tenant-b'));
-      clock = T0 + 750_000;
+      // tenant-a has 250 s left: a plain hit, outside the refresh-ahead window (ADR-0023).
+      clock = T0 + 650_000;
       expect((await machine.vend(tenant('tenant-a'))).cached).toBe(true);
+      // Now tenant-a has 100 s left (inside the margin): it is the one evicted, though used after tenant-b.
       clock = T0 + 800_000;
       await machine.vend(tenant('tenant-c'));
       expect(machine.size).toBe(2);

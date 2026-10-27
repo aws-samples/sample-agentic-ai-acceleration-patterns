@@ -111,6 +111,23 @@ describe('handleRequest', () => {
     perTenantMetrics: true,
   });
 
+  it('awaits deps.ready before any work, so init-time pre-connects are reused (ADR-0023)', async () => {
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const backend = new FakeBackend();
+    const { w, out } = writer();
+    const run = handleRequest(event(`Bearer ${await issuer.mint()}`, '{"prompt":"hi","conversationId":"conversationA1x0001"}'), out, { ...deps(backend), ready });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(backend.requests).toHaveLength(0);
+    expect(w.status).toBeUndefined();
+    release();
+    await run;
+    expect(backend.requests).toHaveLength(1);
+    expect(w.status).toBe(200);
+  });
+
   it('relays the backend stream with its content type and 200', async () => {
     const backend = new FakeBackend();
     const { w, out } = writer();

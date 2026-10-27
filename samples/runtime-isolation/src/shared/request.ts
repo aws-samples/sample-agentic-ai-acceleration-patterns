@@ -11,6 +11,7 @@
  */
 
 import type { IngressConfig } from './config';
+import { endpointHost, preconnect } from './http';
 import { TenantLimiter } from './limits';
 import { isValidConversationId, randomUnitId, sessionUnitId } from './session';
 import { ClaimMissingError, TokenVendingMachine } from './tvm';
@@ -90,6 +91,22 @@ export class IngressPipeline {
     if (config.tvm !== undefined && tvm === undefined) {
       throw new Error('IngressPipeline: tvm module is configured but no TokenVendingMachine was given');
     }
+  }
+
+  /**
+   * Pre-fetches what the first request would otherwise wait for (ADR-0023):
+   * the issuer's discovery document and JWKS, and a TLS connection to each
+   * service the pipeline calls (STS for the TVM, DynamoDB for the limiter),
+   * all in parallel. Resolves when every attempt has ended, success or not.
+   */
+  warm(): Promise<void> {
+    return Promise.all([
+      this.verifier.warm(),
+      preconnect([
+        this.tvm === undefined ? undefined : endpointHost('sts'),
+        this.limiter === undefined ? undefined : endpointHost('dynamodb'),
+      ]),
+    ]).then(() => undefined);
   }
 
   /** Runs every check; throws RequestError with the status to return. */

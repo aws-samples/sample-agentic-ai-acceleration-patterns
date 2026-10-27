@@ -20,7 +20,7 @@ SPDX-License-Identifier: MIT-0
 | [0012](./0012-vend-tenant-scoped-credentials-at-ingress-and-forward-them.md) | Vend tenant-scoped credentials at the ingress and forward them to the backend | Accepted, amended by ADR-0018 | 2026-10-26 |
 | [0013](./0013-make-session-mapping-an-optional-module.md) | Make session mapping an optional module; a fresh unit per request by default | Accepted | 2026-10-26 |
 | [0014](./0014-accept-the-production-hardening-cdk-nag-findings.md) | Accept the production-hardening cdk-nag findings in the sample | Accepted | 2026-10-26 |
-| [0015](./0015-verify-the-token-at-every-ingress-stage.md) | Verify the token at every ingress stage, not only at the gateway | Accepted | 2026-10-26 |
+| [0015](./0015-verify-the-token-at-every-ingress-stage.md) | Verify the token at every ingress stage, not only at the gateway | Accepted, amended by ADR-0023 | 2026-10-26 |
 | [0016](./0016-break-the-tenant-role-trust-cycle-with-a-lazy-caller-arn.md) | Break the tenant-role trust cycle in the demo with a lazy caller ARN | Accepted | 2026-10-26 |
 | [0017](./0017-meter-pooled-cost-per-tenant-at-the-ingress.md) | Meter pooled cost per tenant at the ingress, with the agent reporting usage | Accepted, amended by ADR-0018 and ADR-0021 | 2026-10-26 |
 | [0018](./0018-always-vend-tenant-credentials-and-attribute-model-cost-by-iam-principal.md) | Always vend tenant credentials, and attribute model cost by IAM principal | Accepted | 2026-10-26 |
@@ -28,3 +28,4 @@ SPDX-License-Identifier: MIT-0
 | [0020](./0020-limit-each-tenant-at-the-ingress-with-a-shared-fixed-window-counter.md) | Limit each tenant at the ingress with a shared fixed-window counter | Accepted | 2026-10-27 |
 | [0021](./0021-make-per-tenant-cloudwatch-metrics-opt-in.md) | Make per-tenant CloudWatch metrics opt-in, off by default (amends ADR-0017) | Accepted | 2026-10-27 |
 | [0022](./0022-bound-the-tvm-credential-cache-and-share-one-sts-call-per-tag-set.md) | Bound the TVM credential cache and share one STS call per tag set | Accepted | 2026-10-27 |
+| [0023](./0023-tune-the-ingress-cold-and-hot-paths-by-measurement.md) | Tune the ingress cold and hot paths by measurement (amends ADR-0015) | Accepted | 2026-10-27 |

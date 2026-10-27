@@ -336,6 +336,9 @@ export const STAGE_NAME = 'prod';
 export const ROUTE = 'invocations';
 /** Spike V-5: the integration timeout caps the stream; two minutes, not the 29 s default. */
 export const INTEGRATION_TIMEOUT = Duration.minutes(2);
+/** How long API Gateway caches an authoriser result per `Authorization` header (ADR-0015, ADR-0023). */
+export const AUTHORIZER_CACHE_TTL = Duration.minutes(5);
+
 /** The Gateway target name; part of `endpointUrl` on the `agentcore-gateway` ingress. */
 export const GATEWAY_TARGET_NAME = 'agent';
 
@@ -573,12 +576,12 @@ export class IsolatedRuntime extends Construct {
     const authorizer = new apigateway.RequestAuthorizer(this, 'Authorizer', {
       handler: authorizerFn,
       identitySources: [apigateway.IdentitySource.header('Authorization')],
-      // Cached per Authorization header value: the same token re-verifies at
-      // most once a minute, and a token is refused at most a minute after
-      // it expires.
-      // 60 s cache keyed on the Authorization header; the integration Lambda
-      // re-verifies the token before any invoke (ADR-0015).
-      resultsCacheTtl: Duration.minutes(1),
+      // Cached per Authorization header value for five minutes (ADR-0015,
+      // amended by ADR-0023): the same token re-verifies here at most once
+      // in five minutes. The cache never extends a token's life: the
+      // integration Lambda re-verifies it, including `exp`, before any
+      // invoke, so a token is refused there the moment it expires.
+      resultsCacheTtl: AUTHORIZER_CACHE_TTL,
     });
 
     // Request validation (AwsSolutions-APIG2): the body shape is enforced at
@@ -799,7 +802,10 @@ function functionProps(scope: Construct, logGroupId: string, timeout: Duration):
     loggingFormat: lambda.LoggingFormat.JSON,
     bundling: {
       minify: true,
-      sourceMap: true,
+      // No source maps: the logger writes error names only, never stacks, and
+      // NODE_OPTIONS=--enable-source-maps is not set, so a map is only
+      // artifact weight on every cold start.
+      sourceMap: false,
       // Bundle the SDK clients so the artifact pins the versions the sample
       // was tested against.
       externalModules: [],

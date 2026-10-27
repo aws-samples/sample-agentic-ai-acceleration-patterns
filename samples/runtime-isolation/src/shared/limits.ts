@@ -23,10 +23,14 @@
  *
  * Failure mode: if DynamoDB itself errors (not a limit hit), the request is
  * admitted and the error is logged. The limit protects availability; turning
- * a DynamoDB fault into a total outage would defeat it (ADR-0020).
+ * a DynamoDB fault into a total outage would defeat it (ADR-0020). The
+ * client is tuned for that (ADR-0023): two attempts, 500 ms to connect,
+ * 1,000 ms per attempt, so an impaired table adds at most about three
+ * seconds to a request before it is admitted, not the SDK's default minute.
  */
 
 import { ConditionalCheckFailedException, DynamoDBClient, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
+import { sharedHandler } from './http';
 import { errorName, log } from './logger';
 
 export interface TenantLimitsConfig {
@@ -48,6 +52,8 @@ export interface TenantLimiterDependencies {
 const WINDOW_MS = 60_000;
 /** Items live two windows past their own, then TTL removes them. */
 const TTL_SECONDS = 180;
+/** The limiter's DynamoDB client settings (ADR-0023): bounded wait under impairment, since a fault admits the request anyway. */
+export const LIMITER_CLIENT = { maxAttempts: 2, connectionTimeout: 500, requestTimeout: 1000 } as const;
 
 /** The item key for a tenant's window: `TENANT#<id>#<epoch minute>`. */
 export function windowKey(tenantId: string, nowMs: number): string {
@@ -59,7 +65,12 @@ export class TenantLimiter {
   private readonly now: () => number;
 
   constructor(private readonly config: TenantLimitsConfig, deps: TenantLimiterDependencies = {}) {
-    this.dynamo = deps.dynamo ?? new DynamoDBClient({});
+    this.dynamo =
+      deps.dynamo ??
+      new DynamoDBClient({
+        maxAttempts: LIMITER_CLIENT.maxAttempts,
+        requestHandler: sharedHandler({ connectionTimeout: LIMITER_CLIENT.connectionTimeout, requestTimeout: LIMITER_CLIENT.requestTimeout }),
+      });
     this.now = deps.now ?? Date.now;
   }
 

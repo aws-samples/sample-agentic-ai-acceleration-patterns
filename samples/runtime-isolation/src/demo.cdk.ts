@@ -85,6 +85,13 @@ export interface DemoContext {
   readonly requestsPerMinute?: number;
   /** Output tokens per tenant per minute (ADR-0020, api-gateway only). */
   readonly outputTokensPerMinute?: number;
+  /**
+   * Write the `/application-plane/shared/agent-runtime/*` parameters (spec §6.4). Default true.
+   * The parameter names are account-wide, so only one stack per account and Region may publish:
+   * a second ingress deployed beside the first must set `publishParameters=false` or its deploy
+   * fails on `IngressParameter already exists`.
+   */
+  readonly publishParameters: boolean;
 }
 
 type ContextReader = (key: string) => unknown;
@@ -157,6 +164,7 @@ export function parseDemoContext(read: ContextReader, region?: string): DemoCont
     perTenantMetrics: flag(read, 'perTenantMetrics'),
     requestsPerMinute: integer(read, 'requestsPerMinute'),
     outputTokensPerMinute: integer(read, 'outputTokensPerMinute'),
+    publishParameters: read('publishParameters') === undefined ? true : flag(read, 'publishParameters'),
   };
 }
 
@@ -164,7 +172,7 @@ export interface RuntimeIsolationDemoStackProps extends StackProps {
   readonly context: DemoContext;
   /** Directory with the bundled agent (`app.js`); see src/agent/bundle.ts. */
   readonly agentCodePath: string;
-  /** Publish the `/application-plane/shared/agent-runtime/*` parameters. Default true; the integration test turns it off on all but one stack. */
+  /** Publish the `/application-plane/shared/agent-runtime/*` parameters. Overrides `context.publishParameters`; the integration test turns it off on all but one stack. */
   readonly publishParameters?: boolean;
   /** The cost dashboard's name (account-wide). Default `RuntimeIsolation-<ingress>`; the integration test passes its stack name so several stacks of one ingress coexist. */
   readonly dashboardName?: string;
@@ -335,8 +343,9 @@ export class RuntimeIsolationDemoStack extends Stack {
       this.dashboard = costDashboard(this, ctx.ingress, props.dashboardName ?? dashboardName(ctx.ingress));
     }
 
-    // The published interface (spec §6.4, standard §1.1).
-    if (props.publishParameters ?? true) {
+    // The published interface (spec §6.4, standard §1.1). The names are
+    // account-wide, so one stack per account and Region publishes them.
+    if (props.publishParameters ?? ctx.publishParameters) {
       new ssm.StringParameter(this, 'EndpointUrlParameter', {
         parameterName: AGENT_RUNTIME_PARAMETERS.endpointUrl,
         stringValue: this.runtime.endpointUrl,

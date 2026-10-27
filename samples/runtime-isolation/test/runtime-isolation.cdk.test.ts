@@ -364,7 +364,7 @@ describe('api-gateway ingress', () => {
     template.hasResourceProperties('AWS::ApiGateway::Authorizer', {
       Type: 'REQUEST',
       IdentitySource: 'method.request.header.Authorization',
-      AuthorizerResultTtlInSeconds: 60,
+      AuthorizerResultTtlInSeconds: 300,
     });
     template.hasResourceProperties('AWS::ApiGateway::RequestValidator', { ValidateRequestBody: true });
   });

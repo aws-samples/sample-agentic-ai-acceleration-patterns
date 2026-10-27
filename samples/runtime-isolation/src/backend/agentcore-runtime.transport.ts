@@ -12,6 +12,7 @@
 
 import { BedrockAgentCoreClient, InvokeAgentRuntimeCommand } from '@aws-sdk/client-bedrock-agentcore';
 import type { BackendResponse, HeaderTransportBackend, InvokeBackend, ValidatedRequest } from './backend';
+import { endpointHost, preconnect, sharedHandler } from '../shared/http';
 import type { VendedCredentials } from '../shared/tvm';
 
 /** Request headers on the ingress-to-Runtime hop (ADR-0006, ADR-0012). */
@@ -65,10 +66,15 @@ export class AgentCoreRuntimeBackend implements InvokeBackend, HeaderTransportBa
 
   /**
    * @param runtimeArn the Runtime to invoke; may be empty when only the header transport is used
-   * @param client an injected client (tests); created on first invoke otherwise
+   * @param client an injected client (tests); created here when an ARN is given, so construction happens at init, not on the first invoke
    */
   constructor(private readonly runtimeArn: string, client?: BedrockAgentCoreClient) {
-    this.client = client;
+    this.client = client ?? (runtimeArn.length > 0 ? new BedrockAgentCoreClient({ requestHandler: sharedHandler() }) : undefined);
+  }
+
+  /** Opens the connection to the Runtime endpoint ahead of the first invoke (ADR-0023); call it at init. */
+  warm(): Promise<void> {
+    return this.runtimeArn.length > 0 ? preconnect([endpointHost('bedrock-agentcore')]) : Promise.resolve();
   }
 
   /** Headers for the Gateway path: unit id plus the custom headers (ADR-0002). */
@@ -101,7 +107,7 @@ export class AgentCoreRuntimeBackend implements InvokeBackend, HeaderTransportBa
     if (this.runtimeArn.length === 0) {
       throw new Error('AgentCoreRuntimeBackend: no runtime ARN to invoke');
     }
-    this.client ??= new BedrockAgentCoreClient({});
+    this.client ??= new BedrockAgentCoreClient({ requestHandler: sharedHandler() });
     const output = await this.client.send(command);
     const body = output.response;
     if (body === undefined) {
