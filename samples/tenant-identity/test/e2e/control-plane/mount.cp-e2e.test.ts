@@ -177,7 +177,7 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
     adminUsername = res.body.users[0].username;
 
     const t = await platform.call<any>('GET', `platform/tenants/${tenantId}`);
-    expect(t.body.tenant).not.toHaveProperty('firstAdminUsername');
+    expect(t.body.tenant).not.toHaveProperty('firstAdminEmail');
   });
 
   test('step 5: the password is parked as a SecureString under AdminPasswordKey', async () => {
