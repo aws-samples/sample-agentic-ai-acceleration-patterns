@@ -48,17 +48,23 @@ export interface TenantRecord {
   /**
    * ADR-0032: the tenant's single first-admin slot, claimed by a conditional
    * write before the admin's Cognito user is created and released when that
-   * user is deleted. The value is the admin's e-mail, which is the sign-in
-   * name in every pool the sample creates. This is a tenant fact (which
-   * user holds the slot), the one place a user's address reaches the
-   * registry; it never leaves through the API (`GetTenant` omits it).
+   * user leaves the tenant. The value is the admin's E-MAIL, not the Cognito
+   * username: in pool-per-tenant the pool uses the e-mail as an alias and
+   * Cognito generates a UUID username, so the two differ there. The service
+   * compares on `UserView.email`, never on the username. This is a tenant
+   * fact (which user holds the slot), the one place a user's address
+   * reaches the registry; it never leaves through the API (`GetTenant`
+   * omits it).
    */
-  readonly firstAdminUsername?: string;
+  readonly firstAdminEmail?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
 
-/** The fields `activate` writes: the Cognito half and the API key (ADR-0021, ADR-0025). */
+/**
+ * The fields `activate` writes: the Cognito half, the API key (ADR-0021,
+ * ADR-0025) and, for CreateTenant, the first-admin slot (ADR-0032).
+ */
 export interface ActivatedFields {
   readonly userPoolId?: string;
   readonly appClientId?: string;
@@ -66,6 +72,16 @@ export interface ActivatedFields {
   readonly groupName?: string;
   readonly apiKeyId?: string;
   readonly apiKeyValue?: string;
+  /**
+   * CreateTenant only: the admin's e-mail, written in the same conditional
+   * update that flips the row to ACTIVE, so the slot is never empty on an
+   * ACTIVE row that CreateTenant is still building. A `CreateUser
+   * {firstAdmin: true}` racing the tail of CreateTenant therefore gets a
+   * 409 from the claim, never CreateTenant from its own admin step. No
+   * guard is needed on the write: a PROVISIONING row refuses CreateUser
+   * (P-2), so nothing else can hold the slot before activation.
+   */
+  readonly firstAdminEmail?: string;
 }
 
 export interface Page<T> {
@@ -88,8 +104,10 @@ export interface Registry extends RegistryReader {
   create(record: TenantRecord): Promise<void>;
   /**
    * ADR-0021: flip a PROVISIONING row to ACTIVE, writing the provisioned Cognito
-   * fields in the same conditional update (spec §5.1, ADR-0021). Only the
-   * DEFINED provisioned fields are written — undefined ones are never set.
+   * fields in the same conditional update (spec §5.1, ADR-0021), and for
+   * CreateTenant the first-admin slot too (ADR-0032): the row is never ACTIVE
+   * with an empty slot while its admin is still being created. Only the
+   * DEFINED fields are written — undefined ones are never set.
    * Returns the ACTIVE record. ConflictError if the row is not PROVISIONING.
    */
   activate(
@@ -104,16 +122,26 @@ export interface Registry extends RegistryReader {
   markDeleting(tenantId: string): Promise<TenantRecord>;
   /**
    * ADR-0032 (mounting spec M-R-8): claims the tenant's first-admin slot
-   * with one conditional write (`attribute_not_exists(firstAdminUsername)`).
-   * ConflictError when the slot is held or the row is gone; nothing changes.
+   * with one conditional write (`attribute_not_exists(firstAdminEmail)`).
+   * ConflictError when the slot is held; NotFoundError when the row is gone
+   * (the tenant was deleted under the caller). Either way nothing changes.
    */
-  claimFirstAdmin(tenantId: string, username: string): Promise<void>;
+  claimFirstAdmin(tenantId: string, email: string): Promise<void>;
   /**
-   * ADR-0032 (M-R-8, M-R-9): releases the slot only if `username` holds it
-   * (`firstAdminUsername = :username`). A slot held by someone else, or
+   * ADR-0032: re-asserts a claim after the Cognito user exists. One
+   * conditional write, `attribute_not_exists(firstAdminEmail) OR
+   * firstAdminEmail = :email`: a slot that is still ours, or that a stale
+   * release emptied while Cognito ran, is (re)written to `email`; a slot
+   * another e-mail took in between is a ConflictError, a vanished row a
+   * NotFoundError. Nothing changes on either error.
+   */
+  confirmFirstAdmin(tenantId: string, email: string): Promise<void>;
+  /**
+   * ADR-0032 (M-R-8, M-R-9): releases the slot only if `email` holds it
+   * (`firstAdminEmail = :email`). A slot held by someone else, or
    * already empty, is left alone and is not an error.
    */
-  releaseFirstAdmin(tenantId: string, username: string): Promise<void>;
+  releaseFirstAdmin(tenantId: string, email: string): Promise<void>;
   /** Removes the item. A missing item is not an error. */
   delete(tenantId: string): Promise<void>;
 }
@@ -161,6 +189,18 @@ function decodeToken(token: string | undefined): Record<string, unknown> | undef
 
 function isConditionFailure(error: unknown): boolean {
   return error instanceof Error && error.name === 'ConditionalCheckFailedException';
+}
+
+/**
+ * Whether a failed condition found a row at all. With
+ * `ReturnValuesOnConditionCheckFailure: ALL_OLD` DynamoDB attaches the
+ * existing item to the exception; a missing `Item` means the key does not
+ * exist (DynamoDB has no old item to return), so the `attribute_exists(PK)`
+ * half of the condition is what failed. Presence is all that is read here:
+ * the item's shape (marshalled or not) does not matter.
+ */
+function conditionFailedOnMissingRow(error: unknown): boolean {
+  return (error as { Item?: unknown }).Item === undefined;
 }
 
 /** batchGet retry backoff: ~25 ms * 2^attempt, capped, with full jitter. */
@@ -348,34 +388,71 @@ export class DynamoDBRegistry implements Registry {
     }
   }
 
-  async claimFirstAdmin(tenantId: string, username: string): Promise<void> {
+  async claimFirstAdmin(tenantId: string, email: string): Promise<void> {
     // ADR-0032: the slot is decided by this conditional write, never by a
     // read (control-plane P-5): two racing claims get one success and one
     // ConflictError whatever order Cognito later sees them in. The
     // attribute_exists(PK) guard keeps an UpdateItem on a vanished row from
-    // creating a stub item; that case is also a conflict (the tenant is
-    // being deleted), not a new row.
+    // creating a stub item. ALL_OLD on failure tells the two apart: a row
+    // came back, so the slot is held (409); no row, so the tenant is gone
+    // (404), which is what the caller would have read had it looked.
     try {
       await this.client.send(
         new UpdateCommand({
           TableName: this.tableName,
           Key: key(tenantId),
-          UpdateExpression: 'SET firstAdminUsername = :u, updatedAt = :now',
-          ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(firstAdminUsername)',
-          ExpressionAttributeValues: { ':u': username, ':now': this.now().toISOString() },
+          UpdateExpression: 'SET firstAdminEmail = :u, updatedAt = :now',
+          ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(firstAdminEmail)',
+          ExpressionAttributeValues: { ':u': email, ':now': this.now().toISOString() },
+          ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
         }),
       );
     } catch (error) {
       if (isConditionFailure(error)) {
-        throw new ConflictError(`Tenant ${tenantId} already has a first admin`);
+        throw this.slotConditionError(tenantId, error);
       }
       throw error;
     }
   }
 
-  async releaseFirstAdmin(tenantId: string, username: string): Promise<void> {
+  async confirmFirstAdmin(tenantId: string, email: string): Promise<void> {
+    // ADR-0032: the re-assertion after the Cognito user exists. The claim
+    // that preceded createUser can have been released under it by a stale-
+    // slot DeleteUser of the same e-mail (the holder was not in Cognito yet,
+    // so it looked stale). Writing `email` again when the slot is empty OR
+    // still ours closes that window; a slot now held by another e-mail is
+    // the one case the caller must undo (the user it just made). Same
+    // ALL_OLD split as claimFirstAdmin for a vanished row.
+    try {
+      await this.client.send(
+        new UpdateCommand({
+          TableName: this.tableName,
+          Key: key(tenantId),
+          UpdateExpression: 'SET firstAdminEmail = :u, updatedAt = :now',
+          ConditionExpression: 'attribute_exists(PK) AND (attribute_not_exists(firstAdminEmail) OR firstAdminEmail = :u)',
+          ExpressionAttributeValues: { ':u': email, ':now': this.now().toISOString() },
+          ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
+        }),
+      );
+    } catch (error) {
+      if (isConditionFailure(error)) {
+        throw this.slotConditionError(tenantId, error);
+      }
+      throw error;
+    }
+  }
+
+  /** The modelled error for a failed slot condition: 404 for a missing row, else 409. */
+  private slotConditionError(tenantId: string, error: unknown): Error {
+    if (conditionFailedOnMissingRow(error)) {
+      return new NotFoundError(`Tenant ${tenantId} not found`);
+    }
+    return new ConflictError(`Tenant ${tenantId} already has a first admin`);
+  }
+
+  async releaseFirstAdmin(tenantId: string, email: string): Promise<void> {
     // ADR-0032: the conditional delete of the attribute (M-R-8). Only the
-    // holder's name releases the slot, so a release that runs after a new
+    // holder's e-mail releases the slot, so a release that runs after a new
     // claim (a lost race, or a stale retry) cannot free the newer holder.
     // A failed condition means there is nothing to release: already gone is
     // success (mounting spec M-P-3).
@@ -384,9 +461,9 @@ export class DynamoDBRegistry implements Registry {
         new UpdateCommand({
           TableName: this.tableName,
           Key: key(tenantId),
-          UpdateExpression: 'REMOVE firstAdminUsername SET updatedAt = :now',
-          ConditionExpression: 'attribute_exists(PK) AND firstAdminUsername = :u',
-          ExpressionAttributeValues: { ':u': username, ':now': this.now().toISOString() },
+          UpdateExpression: 'REMOVE firstAdminEmail SET updatedAt = :now',
+          ConditionExpression: 'attribute_exists(PK) AND firstAdminEmail = :u',
+          ExpressionAttributeValues: { ':u': email, ':now': this.now().toISOString() },
         }),
       );
     } catch (error) {

@@ -208,13 +208,18 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
         throw error;
       }
 
-      // Flip PROVISIONING -> ACTIVE, writing the provisioned Cognito fields and
-      // the API key in the same conditional update (spec §5.1). On failure,
-      // delete the key, deprovision the Cognito half we just built and delete
-      // the row (all best-effort, logged) so nothing untracked is left behind.
+      // Flip PROVISIONING -> ACTIVE, writing the provisioned Cognito fields,
+      // the API key AND the first-admin slot in the same conditional update
+      // (spec §5.1, ADR-0032). Claiming the slot here, not in a second write
+      // after activation, means there is no instant at which the row is
+      // ACTIVE with an empty slot: a concurrent `CreateUser {firstAdmin:
+      // true}` on this id is a 409 from its claim, and CreateTenant can
+      // never lose its own tenant's slot to it. On failure, delete the key,
+      // deprovision the Cognito half we just built and delete the row (all
+      // best-effort, logged) so nothing untracked is left behind.
       let active: TenantRecord;
       try {
-        active = await this.registry.activate(tenantId, { ...provisioned, ...apiKey });
+        active = await this.registry.activate(tenantId, { ...provisioned, ...apiKey, firstAdminEmail: adminEmail });
       } catch (error) {
         try {
           await this.apiKeys.delete(apiKey.apiKeyId);
@@ -246,12 +251,13 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
         throw error;
       }
 
-      // The tenant is now ACTIVE. The admin is created through the first-admin
-      // path, so it holds the tenant's slot (ADR-0032, M-R-9). If the step
+      // The tenant is now ACTIVE and its first-admin slot already holds the
+      // admin's e-mail (claimed by activate above, ADR-0032, M-R-9), so only
+      // the Cognito half of the first-admin path runs here. If the step
       // fails the slot is released, the tenant stays ACTIVE with no admin and
       // the error surfaces; the vendor retries with CreateUser {firstAdmin:
       // true} (spec §5.1, mounting spec M-R-6).
-      const admin = await this.createFirstAdmin(provisioner, active, adminEmail);
+      const admin = await this.createUserForHeldSlot(provisioner, active, adminEmail, 'CreateTenant');
       return {
         tenant: this.toTenant(active),
         admin: { user: toUser(admin.user), temporaryPassword: admin.temporaryPassword },
@@ -380,7 +386,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       const provisioner = this.provisioners(tenant.topology);
       // ADR-0032 (M-R-9): find out BEFORE the delete whether the user holds
       // the first-admin slot; afterwards there is no user left to ask.
-      const slot = await this.firstAdminSlotHeldBy(provisioner, tenant, username);
+      const slot = await this.firstAdminSlotHeldBy(provisioner, tenant, username, 'DeleteUser');
       await provisioner.deleteUser(tenant, username);
       if (slot !== undefined) {
         // Released only after Cognito confirms the delete, so a failed delete
@@ -421,7 +427,20 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     log.info('DeleteMembership', { operation: 'DeleteMembership', tenantId });
     return this.mapErrors('DeleteMembership', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
-      await this.provisioners(tenant.topology).deleteMembership(tenant, username);
+      const provisioner = this.provisioners(tenant.topology);
+      // ADR-0032 (M-R-9): leaving the tenant through a membership removal
+      // ends the first admin's tenure exactly as DeleteUser does, so the
+      // slot is handled the same way: read before, release after. (An
+      // `UpdateUser {admin: false}` of the holder does NOT release it: the
+      // user is still in the tenant, and a free slot while they exist would
+      // allow the second first admin §6.4 forbids. The slot follows the
+      // user's presence in the tenant, not their admin flag.)
+      const slot = await this.firstAdminSlotHeldBy(provisioner, tenant, username, 'DeleteMembership');
+      await provisioner.deleteMembership(tenant, username);
+      if (slot !== undefined) {
+        await this.registry.releaseFirstAdmin(tenantId, slot);
+        log.info('first-admin slot released', { operation: 'DeleteMembership', tenantId });
+      }
       return {};
     });
   };
@@ -476,54 +495,104 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
   // -------------------------------------------------------------------
 
   /**
-   * The first-admin path (ADR-0032, mounting spec M-R-8). Claim the tenant's
-   * slot with one conditional write, THEN create the Cognito user as an
-   * admin. The slot, not a read, decides: two racing calls get one 201 and
-   * one 409 whatever order Cognito sees them in (control-plane P-5). A
-   * failed claim changes nothing. If Cognito refuses after the claim, the
-   * slot is released with a conditional write on the same name and the
-   * original error surfaces; a release failure is logged and the original
-   * error still surfaces (the next claim of this e-mail is a 409 the vendor
-   * clears with DeleteUser, M-R-9).
+   * The first-admin path for CreateUser (ADR-0032, mounting spec M-R-8).
+   * Claim the tenant's slot with one conditional write, THEN create the
+   * Cognito user as an admin. The slot, not a read, decides: two racing
+   * calls get one 201 and one 409 whatever order Cognito sees them in
+   * (control-plane P-5). A failed claim changes nothing. CreateTenant
+   * skips the claim: its slot is written by `activate` in the same update
+   * that makes the row ACTIVE, and it joins at `createUserForHeldSlot`.
    */
   private async createFirstAdmin(provisioner: Provisioner, tenant: TenantRecord, email: string): Promise<NewUserResult> {
     await this.registry.claimFirstAdmin(tenant.tenantId, email);
+    return this.createUserForHeldSlot(provisioner, tenant, email, 'CreateUser');
+  }
+
+  /**
+   * The Cognito half of the first-admin path, entered with the slot already
+   * held by `email`. If Cognito refuses, the slot is released with a
+   * conditional write on the same e-mail and the original error surfaces; a
+   * release failure is logged and the original error still surfaces (the
+   * next claim of this e-mail is a 409 the vendor clears with DeleteUser,
+   * M-R-9).
+   *
+   * After Cognito succeeds the claim is re-asserted (`confirmFirstAdmin`).
+   * While Cognito ran, a DeleteUser naming this very e-mail found no such
+   * user yet, took it for a stale slot and released it (firstAdminSlotHeldBy);
+   * a second `firstAdmin` call could then claim the empty slot, and the
+   * tenant would end up with two first admins. The confirm write puts the
+   * slot back when it is empty or still ours, and when another e-mail holds
+   * it the user just created is undone (`deleteUser`: in topology 3 this
+   * leaves the tenant and deletes the user only if no tenant remains) and a
+   * 409 surfaces. Any other confirm failure (DynamoDB unavailable) is
+   * rethrown as it is: the user exists and the slot is, barring that race,
+   * still ours, so deleting the user would strand the slot.
+   */
+  private async createUserForHeldSlot(
+    provisioner: Provisioner,
+    tenant: TenantRecord,
+    email: string,
+    operation: 'CreateUser' | 'CreateTenant',
+  ): Promise<NewUserResult> {
+    let created: NewUserResult;
     try {
-      return await provisioner.createUser(tenant, email, true);
+      created = await provisioner.createUser(tenant, email, true);
     } catch (error) {
       try {
         await this.registry.releaseFirstAdmin(tenant.tenantId, email);
       } catch (cleanup) {
         log.error('first-admin slot release failed', {
-          operation: 'CreateUser',
+          operation,
           tenantId: tenant.tenantId,
           error: errorName(cleanup),
         });
       }
       throw error;
     }
+    try {
+      await this.registry.confirmFirstAdmin(tenant.tenantId, email);
+    } catch (error) {
+      if (error instanceof DomainConflictError || error instanceof NotFoundError) {
+        log.info('first-admin slot lost while Cognito ran; undoing the user', { operation, tenantId: tenant.tenantId });
+        try {
+          await provisioner.deleteUser(tenant, created.user.username);
+        } catch (cleanup) {
+          log.error('first-admin user undo failed', {
+            operation,
+            tenantId: tenant.tenantId,
+            error: errorName(cleanup),
+          });
+        }
+      }
+      throw error;
+    }
+    return created;
   }
 
   /**
    * Whether `username` (a Cognito username or an e-mail, per the model) is
    * the tenant's first admin; returns the slot value to release, or
    * undefined. Nothing is read when no slot is held, so DeleteUser on a
-   * tenant without one is unchanged. The slot holds the admin's e-mail, so
-   * the user is resolved through the provisioner (R-12 check included) and
-   * compared on e-mail.
+   * tenant without one is unchanged. The slot holds the admin's E-MAIL (in
+   * pool-per-tenant the Cognito username is a UUID), so the user is
+   * resolved through the provisioner (R-12 check included) and compared on
+   * `UserView.email`, never on the name the caller passed.
    *
    * Stale slot: if the holder is already gone from Cognito (deleted through
-   * the tenant admin's door, which cannot write the registry, M-14, or by a
-   * membership removal) a DeleteUser naming the holder's e-mail releases
-   * the slot and still answers 404, so the vendor can replace a lost first
-   * admin (M-R-9) without the registry ever being edited by hand.
+   * the tenant admin's door, which cannot write the registry, M-14) a
+   * DeleteUser or DeleteMembership naming the holder's E-MAIL releases the
+   * slot and still answers 404, so the vendor can replace a lost first
+   * admin (M-R-9) without the registry ever being edited by hand. Naming
+   * the gone holder's UUID username is a plain 404 and keeps the slot: with
+   * no user left there is nothing to map the UUID back to the e-mail.
    */
   private async firstAdminSlotHeldBy(
     provisioner: Provisioner,
     tenant: TenantRecord,
     username: string,
+    operation: 'DeleteUser' | 'DeleteMembership',
   ): Promise<string | undefined> {
-    const holder = tenant.firstAdminUsername;
+    const holder = tenant.firstAdminEmail;
     if (holder === undefined) {
       return undefined;
     }
@@ -533,7 +602,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
     } catch (error) {
       if (error instanceof NotFoundError && username === holder) {
         await this.registry.releaseFirstAdmin(tenant.tenantId, holder);
-        log.info('stale first-admin slot released', { operation: 'DeleteUser', tenantId: tenant.tenantId });
+        log.info('stale first-admin slot released', { operation, tenantId: tenant.tenantId });
       }
       throw error;
     }
