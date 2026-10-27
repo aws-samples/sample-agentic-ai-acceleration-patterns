@@ -73,7 +73,7 @@ federation (spec §1.2), and the vendor's own identity (ADR-0005).
 | T-31 | One tenant (a busy admin, a script, or a leaked admin token) uses up the `/tenant/*` budget | Every other tenant's admin gets 429s: a noisy neighbour on the tenant door | Mitigated: each tenant has its own usage-plan throttle, keyed by an API key only the authoriser can name; the stage's shared N-7 limit (50 rps) is five times the per-tenant one (10 rps), so one tenant cannot reach it alone; residual: five or more busy tenants together can, and usage-plan throttling is best effort (ADR-0025). In `tiered` a premium tenant's plan allows 25 rps, so two busy premium tenants reach the shared limit (ADR-0027) | M-29 |
 | T-32 | In `tiered`, a tenant is reached through the other tier's pool: a vendor bug (or a leaked vendor credential, T-7) writes a premium tenant's id into a shared-pool user's `custom:tenantId`, so a shared-pool sign-in yields a token naming the premium tenant; or a premium pool's token, whose `tenant_id` the registry maps to that pool, is presented against a standard tenant | A premium tenant's isolation (own pool, own issuer, the IAM wall of ADR-0026) is bypassed from the shared pool, where every standard user and the tenant-user function's own role can reach; or a standard tenant is administered from a pool it does not live in. The tiers share one trigger, one authoriser and one registry, so a confusion between them is a cross-tenant path that no single-topology stack has | Mitigated by design (the binding rule) | M-5, M-30 |
 | T-33 | CloudFormation creates a REST API shell, then `PutRestApi` fails before the resource gets a physical id | Rollback cannot delete the untracked shell API, so a failed integration run leaves up to four empty APIs in the account | Mitigated in the integration driver | M-32 |
-| T-34 | The published `PlatformInvokePolicy` grants more routes than the control-plane mount calls: `GET /platform/tenants/*` also matches `ListUsers` and `GetUser`, and `DELETE /platform/tenants/*` also matches `DeleteUser`, because an execute-api ARN cannot tell the tenant path from the user paths under it. A holder of the policy (the control-plane tenant build role, which runs every tenant's script) that is compromised or runs a bad script can list, read or delete any tenant's users through the platform API | Cross-tenant read and deletion of users by the build role, beyond the create, get, delete-tenant and create-user calls the mount needs. It cannot sign anyone in (no `IssueToken`/`RefreshToken` route), cannot see every tenant at once (no `ListTenants`), cannot change a user or a membership, and cannot read a parked password (no `kms:Decrypt`) | **Accepted for the sample** as an over-grant, with the routes the mount does need held exact (M-R-4). The mount scripts never call the three extra operations; the API access log attributes every `/platform/*` call to the build role (N-4), and control-plane's `OPERATOR_ID` in the build log joins it to the operator | M-33 |
+| T-34 | The published `PlatformInvokePolicy` grants more routes than the control-plane mount calls: `GET /platform/tenants/*` also matches `ListUsers` and `GetUser`, and `DELETE /platform/tenants/*` also matches `DeleteUser`, because an execute-api ARN cannot tell the tenant path from the user paths under it. A holder of the policy (the control-plane tenant build role, which runs every tenant's script) that is compromised or runs a bad script can list, read or delete any tenant's users through the platform API | Cross-tenant read and deletion of users by the build role, beyond the create, get, delete-tenant and create-user calls the mount needs. It cannot sign anyone in (no `IssueToken`/`RefreshToken` route), cannot see every tenant at once (no `ListTenants`), cannot change a user or a membership, and cannot read a parked password (no `kms:Decrypt`) | **Accepted for the sample** as an over-grant, with the routes the mount does need held exact (M-R-4). Of the three extra operations the mount calls only `ListUsers`, and only on the replay path after a 409, to check that the tenant has an admin (mounting spec §7.1 step 5); `GetUser` and `DeleteUser` it never calls. The API access log attributes every `/platform/*` call to the build role (N-4), and control-plane's `OPERATOR_ID` in the build log joins it to the operator | M-33 |
 
 ## Mitigations
 
@@ -174,13 +174,15 @@ hardening checklist.
   execute-api authorises on `<method>/<path>` ARNs, and the `*` that stands
   for `{tenantId}` also matches `{tenantId}/users` and
   `{tenantId}/users/{username}`. Two explicit `Deny` statements
-  (`GET .../tenants/*/users*`, `DELETE .../tenants/*/users/*`) would close it
-  without touching the `POST .../users` the replay path needs (M-R-6); the
-  published policy does not carry them because the mounting spec §6.3 fixes
-  it to the two Allow statements, and a `Deny` in a shared managed policy
-  binds every principal that attaches it. Accepted for the sample; a
-  deployer who mounts under control-plane can attach that `Deny` pair as a
-  second policy on the build role. The key side has no residual: without
+  (`GET .../tenants/*/users/*`, `DELETE .../tenants/*/users/*`) would close
+  `GetUser` and `DeleteUser` without touching the `POST .../users` the replay
+  path needs (M-R-6) or the `GET .../users` it reads after a 409 (mounting
+  spec §7.1 step 5), which is why `ListUsers` cannot be denied; the published
+  policy does not carry them because the mounting spec §6.3 fixes it to the
+  two Allow statements, and a `Deny` in a shared managed policy binds every
+  principal that attaches it. Accepted for the sample; a deployer who mounts
+  under control-plane can attach that `Deny` pair as a second policy on the
+  build role. The key side has no residual: without
   `kms:Decrypt` on `AdminPasswordKey`, `ssm:GetParameter --with-decryption`
   on the parked password fails (mounting spec §6.5).
 
