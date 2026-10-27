@@ -36,6 +36,7 @@ import { AgentCoreRuntimeBackend, baseModelId, foundationModelArn, isInferencePr
 import type { BackendKind } from './backend/backend';
 import type { IBackend } from './backend/backend.cdk';
 import { ENV } from './shared/config';
+import { LogDrain } from './shared/log-drain';
 import type { IngressKind } from './shared/metrics';
 import { acknowledgeGranularFinding, nagFindingResource } from './shared/nag';
 import { CONVERSATION_ID_PATTERN, type SessionScope } from './shared/session';
@@ -496,6 +497,23 @@ export class IsolatedRuntime extends Construct {
       },
     );
 
+    // ADR-0019: teardown leaves no log group. API Gateway creates the
+    // execution log group itself (outside the stack) and delivers access and
+    // execution logs a few seconds late, so a deleted group comes back with
+    // no retention. The construct owns the execution group by its fixed name,
+    // and one drain waits between the stage (the writer, which also invokes
+    // both functions) and every log group on this path.
+    const executionLogs = new logs.LogGroup(this, 'ApiExecutionLogs', {
+      logGroupName: `API-Gateway-Execution-Logs_${api.restApiId}/${STAGE_NAME}`,
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.DESTROY, // sample only
+    });
+    const drain = new LogDrain(this, 'LogDrain');
+    for (const group of [accessLogs, executionLogs, authorizerFn.logGroup, ingressFn.logGroup]) {
+      drain.protect(group);
+    }
+    drain.writer(api.deploymentStage);
+
     Validations.of(api).acknowledge({
       id: 'AwsSolutions-APIG3',
       reason:
@@ -536,8 +554,11 @@ export class IsolatedRuntime extends Construct {
     acknowledgeLambdaFindings(interceptorFn);
 
     const stack = Stack.of(this);
-    // Gateway names match ^([0-9a-zA-Z][-]?){1,48}$.
-    const gatewayName = `${Names.uniqueResourceName(this, { maxLength: 40, separator: '-' })}-gw`;
+    // Gateway names match ^([0-9a-zA-Z][-]?){1,48}$. The service lowercases
+    // the name in the gateway id, and so in the ARN the role's aws:SourceArn
+    // condition compares case-sensitively: a mixed-case name makes the Gateway
+    // unable to assume its role (first integ run, 2026-10-27). Lowercase here.
+    const gatewayName = `${Names.uniqueResourceName(this, { maxLength: 40, separator: '-' })}-gw`.toLowerCase();
     const gatewayRole = new iam.Role(this, 'GatewayRole', {
       assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com', {
         conditions: {
@@ -582,6 +603,12 @@ export class IsolatedRuntime extends Construct {
     gateway.node.addDependency(gatewayRole);
 
     backend.addGatewayTarget(gateway, GATEWAY_TARGET_NAME);
+
+    // ADR-0019: the Gateway invokes the interceptor; its late logs must land
+    // before the interceptor's log group is deleted.
+    const drain = new LogDrain(this, 'LogDrain');
+    drain.protect(interceptorFn.logGroup);
+    drain.writer(gateway);
 
     return {
       endpointUrl: `${gateway.attrGatewayUrl}/${GATEWAY_TARGET_NAME}/${ROUTE}`,

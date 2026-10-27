@@ -283,7 +283,12 @@ describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
   });
 
   it('Lambdas use Node 24 on arm64 with JSON logs, tracing and explicit log groups', () => {
-    for (const fn of Object.values(template.findResources('AWS::Lambda::Function')) as any[]) {
+    // The log-drain waiter is excluded: it is traced by nothing and writes nothing (ADR-0019).
+    const fns = (Object.values(template.findResources('AWS::Lambda::Function')) as any[]).filter(
+      (f) => !String(f.Properties.Description ?? '').startsWith('Waits on stack delete'),
+    );
+    expect(fns.length).toBeGreaterThan(0);
+    for (const fn of fns) {
       expect(fn.Properties.Runtime).toBe('nodejs24.x');
       expect(fn.Properties.Architectures).toEqual(['arm64']);
       expect(fn.Properties.LoggingConfig).toMatchObject({ LogFormat: 'JSON', LogGroup: { Ref: expect.any(String) } });
@@ -388,6 +393,15 @@ describe('api-gateway ingress', () => {
 // ---------------------------------------------------------------------------
 describe('agentcore-gateway ingress', () => {
   const { template, construct } = synth({ ingress: 'agentcore-gateway' });
+
+  it('the Gateway name is lowercase and the role trust names it exactly, since the service lowercases the gateway id in its ARN', () => {
+    const gateway = Object.values(template.findResources('AWS::BedrockAgentCore::Gateway'))[0] as any;
+    const name: string = gateway.Properties.Name;
+    expect(name).toBe(name.toLowerCase());
+    const [, role] = Object.entries(template.findResources('AWS::IAM::Role')).find(([id]) => id.includes('GatewayRole')) as [string, any];
+    const sourceArn = JSON.stringify(role.Properties.AssumeRolePolicyDocument.Statement[0].Condition.ArnLike['aws:SourceArn']);
+    expect(sourceArn).toContain(`:gateway/${name}-*`);
+  });
 
   it('the Gateway uses CUSTOM_JWT on the issuer with the allowed clients and a REQUEST interceptor that sees headers (spike V-3)', () => {
     template.hasResourceProperties('AWS::BedrockAgentCore::Gateway', {
