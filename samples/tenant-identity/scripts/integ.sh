@@ -33,107 +33,14 @@ cd "$SAMPLE_DIR"
 OUT="cdk.integ.out"
 CDK=(npx cdk --app "$OUT")
 
-# The tags every pool the sample creates carries (src/shared/constants.ts:
-# SAMPLE_TAG_KEY / SAMPLE_TAG_VALUE / STACK_TAG_KEY). Read from the source so
-# the leftover check cannot drift from what the stacks tag.
-read_constant() {
-  local value
-  value="$(sed -n "s/^export const $1 = '\(.*\)';\$/\1/p" src/shared/constants.ts)"
-  if [ -z "$value" ]; then
-    echo "Cannot read $1 from src/shared/constants.ts" >&2
-    exit 1
-  fi
-  printf '%s' "$value"
-}
-SAMPLE_TAG_KEY="$(read_constant SAMPLE_TAG_KEY)"
-SAMPLE_TAG_VALUE="$(read_constant SAMPLE_TAG_VALUE)"
-STACK_TAG_KEY="$(read_constant STACK_TAG_KEY)"
-
 # The four stack names (test/integ.identity.ts), read from the assembly
-# once it exists. Filled in after the synth.
+# once it exists. Filled in after the synth. The leftover checks
+# (scripts/integ-lib.sh) read them.
 STACKS=()
 
-# Prints every user pool in the Region that carries the sample tag and one
-# of the integ stacks' tags - what the TenantDrain must have deleted
-# (ADR-0022). One line per pool: "<pool id> <stack tag>".
-leftover_pools() {
-  local account partition pool arn sample stack
-  account="$(aws sts get-caller-identity --query Account --output text)"
-  partition="$(aws sts get-caller-identity --query Arn --output text | cut -d: -f2)"
-  # The CLI follows NextToken; --max-results is the page size.
-  for pool in $(aws cognito-idp list-user-pools --max-results 60 --query 'UserPools[].Id' --output text); do
-    arn="arn:${partition}:cognito-idp:${AWS_REGION}:${account}:userpool/${pool}"
-    sample="$(aws cognito-idp list-tags-for-resource --resource-arn "$arn" \
-      --query "Tags.\"${SAMPLE_TAG_KEY}\"" --output text 2>/dev/null || true)"
-    if [ "$sample" != "$SAMPLE_TAG_VALUE" ]; then
-      continue
-    fi
-    stack="$(aws cognito-idp list-tags-for-resource --resource-arn "$arn" \
-      --query "Tags.\"${STACK_TAG_KEY}\"" --output text 2>/dev/null || true)"
-    local s
-    for s in "${STACKS[@]}"; do
-      if [ "$stack" = "$s" ]; then
-        echo "$pool $stack"
-      fi
-    done
-  done
-}
-
-# Prints the log group names a stack owns right now (its functions', the API
-# access logs and the API execution logs, ADR-0024). Empty when the stack is
-# gone or never deployed. Captured BEFORE the destroy: the names are the
-# only way to find the groups afterwards.
-stack_log_groups() {
-  aws cloudformation describe-stack-resources --stack-name "$1" \
-    --query "StackResources[?ResourceType=='AWS::Logs::LogGroup'].PhysicalResourceId" \
-    --output text 2>/dev/null | tr '\t' '\n' | sed '/^$/d' || true
-}
-
-# Prints the names in "$@" that still exist as log groups.
-leftover_log_groups() {
-  local name found
-  for name in "$@"; do
-    found="$(aws logs describe-log-groups --log-group-name-prefix "$name" \
-      --query "logGroups[?logGroupName=='${name}'].logGroupName" --output text 2>/dev/null || true)"
-    if [ -n "$found" ] && [ "$found" != "None" ]; then
-      echo "$name"
-    fi
-  done
-}
-
-# Prints REST APIs left by a failed CloudFormation create. SpecRestApi first
-# creates the shell API, then imports its OpenAPI document with PutRestApi. If
-# that second call is denied, CloudFormation has no physical id to delete and
-# the shell API can survive rollback. Names are stack-scoped.
-leftover_rest_apis() {
-  local stack
-  for stack in "${STACKS[@]}"; do
-    aws apigateway get-rest-apis \
-      --query "items[?name=='${stack}-api'].[id,name]" --output text
-  done
-}
-
-# API Gateway limits DeleteRestApi to about one request per 30 seconds. Retry
-# throttles and pace multiple orphan deletes. The caller still fails the integ
-# run: cleanup prevents account litter; it does not turn a failed deploy green.
-delete_leftover_rest_apis() {
-  local apis="$1" id name attempt
-  while read -r id name; do
-    [ -n "$id" ] || continue
-    echo "Deleting orphan REST API ${name} (${id})" >&2
-    for attempt in 1 2 3 4 5; do
-      if aws apigateway delete-rest-api --rest-api-id "$id"; then
-        break
-      fi
-      if [ "$attempt" -eq 5 ]; then
-        echo "Could not delete orphan REST API ${name} (${id})" >&2
-        return 1
-      fi
-      sleep $((attempt * 10))
-    done
-    sleep 35
-  done <<<"$apis"
-}
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=integ-lib.sh
+source "$SAMPLE_DIR/scripts/integ-lib.sh"
 
 # Proves every alarm in a stack can deliver to its action (M-31): forces the
 # alarm into ALARM, then waits for the alarm history to record the SNS publish.
@@ -142,7 +49,7 @@ delete_leftover_rest_apis() {
 # needed. The alarm is set back to OK afterwards; its next evaluation would
 # reset it anyway.
 check_alarm_actions() {
-  local stack="$1" alarm since summary failed=0 i
+  local stack="$1" alarm since summary failed=0
   for alarm in $(aws cloudformation describe-stack-resources --stack-name "$stack" \
       --query "StackResources[?ResourceType=='AWS::CloudWatch::Alarm'].PhysicalResourceId" --output text); do
     # A transition is what fires an action, so start from OK.
@@ -153,7 +60,7 @@ check_alarm_actions() {
     aws cloudwatch set-alarm-state --alarm-name "$alarm" --state-value ALARM \
       --state-reason "integ: alarm action check (M-31)"
     summary=""
-    for i in $(seq 1 30); do
+    for _ in $(seq 1 30); do
       summary="$(aws cloudwatch describe-alarm-history --alarm-name "$alarm" \
         --history-item-type Action --start-date "$since" \
         --query 'AlarmHistoryItems[0].HistorySummary' --output text)"
