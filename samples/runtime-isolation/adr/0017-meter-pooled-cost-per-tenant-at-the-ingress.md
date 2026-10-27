@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0017: Meter pooled cost per tenant at the ingress, with the agent reporting usage
 
-- Status: Proposed
+- Status: Proposed. Amended by ADR-0021.
 - Date: 2026-10-26
 - Deciders: Dave Roberts (PSA)
 
@@ -26,3 +26,5 @@ Option 3. The ingress emits, per request, with `TenantId` and `Ingress` dimensio
 Easier: a tenant's cost is one CloudWatch query; tiers and fair-use limits can key on the same metrics. Harder: the usage event is a contract the README must document for consumers' own agents; CloudWatch custom metrics cost money per metric-dimension pair, so the construct keeps the set small and the README says so. Revisit if AgentCore Runtime exposes per-invocation CPU and memory seconds, which would replace wall time.
 
 Amended by ADR-0018: model token cost is read from CUR 2.0 by IAM principal (`iamPrincipal/TenantId`) rather than from the usage event; the usage event and the `ModelInputTokens`/`ModelOutputTokens` metrics stay as a near-real-time cross-check, not the billing source.
+
+Amended by ADR-0021: the per-tenant metrics are opt-in (`perTenantMetrics`, off by default) because their cost grows with tenants; the ingress log line carries the same figures, and the demo Contributor Insights rules read the log line instead of the metrics.

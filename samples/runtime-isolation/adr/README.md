@@ -25,3 +25,6 @@ SPDX-License-Identifier: MIT-0
 | [0017](./0017-meter-pooled-cost-per-tenant-at-the-ingress.md) | Meter pooled cost per tenant at the ingress, with the agent reporting usage | Proposed | 2026-10-26 |
 | [0018](./0018-always-vend-tenant-credentials-and-attribute-model-cost-by-iam-principal.md) | Always vend tenant credentials, and attribute model cost by IAM principal | Proposed | 2026-10-26 |
 | [0019](./0019-teardown-leaves-no-log-group.md) | Teardown leaves no log group: own the execution log group and drain late logs | Proposed | 2026-10-27 |
+| [0020](./0020-limit-each-tenant-at-the-ingress-with-a-shared-fixed-window-counter.md) | Limit each tenant at the ingress with a shared fixed-window counter | Proposed | 2026-10-27 |
+| [0021](./0021-make-per-tenant-cloudwatch-metrics-opt-in.md) | Make per-tenant CloudWatch metrics opt-in, off by default (amends ADR-0017) | Proposed | 2026-10-27 |
+| [0022](./0022-bound-the-tvm-credential-cache-and-share-one-sts-call-per-tag-set.md) | Bound the TVM credential cache and share one STS call per tag set | Proposed | 2026-10-27 |

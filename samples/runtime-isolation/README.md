@@ -111,6 +111,32 @@ Both ingresses stream: the first event of `stream 10` arrives after about
 0.2 s and the last after about 10 s. This is one run from one client; it is
 an input to ADR-0009, not a benchmark.
 
+## Scale and limits
+
+The pool is shared, so the construct limits each tenant's share and keeps its
+own cost flat as tenants grow. Every value, the AWS quota it protects and the
+deployer action are in [`architecture.md`](./architecture.md#scale-limits).
+
+| Prop | Default | What it does |
+|---|---|---|
+| `tenantLimits.requestsPerMinute` | 60 | Requests per tenant per minute, counted fleet-wide in a DynamoDB table; a hit is 429 before STS, the Runtime or the model (ADR-0020). `0` turns it off |
+| `tenantLimits.outputTokensPerMinute` | unset (off) | Model output tokens per tenant per minute; `api-gateway` only, synth fails otherwise (ADR-0020) |
+| `tenantLimits: false` | | No table and no per-tenant limit |
+| `stageThrottle` | `{ rateLimit: 50, burstLimit: 25 }` | The API Gateway stage throttle; `api-gateway` only; shared by all tenants (ADR-0020) |
+| `perTenantMetrics` | `false` | Per-tenant CloudWatch metrics (ADR-0017, ADR-0021) |
+| `tvm.cacheMaxEntries` | 1000 | Credential cache entries per Lambda instance, LRU, about 1.5 KB each (ADR-0022) |
+
+**Cost warning: `perTenantMetrics: true` adds about 9 CloudWatch custom
+metrics per tenant per ingress, billed monthly. At 10,000 tenants that is
+about 90,000 metrics.** The synth prints a warning when it is on. The ingress
+log line carries the same figures, so use Logs Insights or Contributor
+Insights at scale.
+
+The limit is a fixed one-minute window: a tenant can reach up to twice the
+limit across a window boundary. If DynamoDB errors, requests are admitted and
+an error is logged. Demo: `--context requestsPerMinute=<n>`,
+`--context outputTokensPerMinute=<n>`, `--context perTenantMetrics=true`.
+
 ## Costs
 
 The backend, the model, the gateway and the ingress Lambda are pooled across
@@ -124,8 +150,11 @@ cost attributable per tenant:
   source of truth for model cost, independent of what the agent reports.
 - **Everything else the ingress meters per tenant.** For the consumption each
   other pooled service bills for (requests, ingress compute, backend seconds,
-  bytes), the ingress emits CloudWatch metrics (namespace `RuntimeIsolation`,
-  dimensions `TenantId` and `Ingress`).
+  bytes), the ingress writes the figures with `tenantId` on its structured
+  log line (`request served` on `api-gateway`, `request admitted` on the
+  interceptor). Per-tenant CloudWatch metrics (namespace `RuntimeIsolation`,
+  dimensions `TenantId` and `Ingress`) are opt-in with `perTenantMetrics`
+  (ADR-0021).
 
 The agent still reports its model token usage in the last event of its
 response stream; the ingress reads the figures and never stores the content
@@ -166,6 +195,11 @@ Every agent response is a `text/event-stream`. Its last event is:
 
 ### The metrics
 
+Emitted only with `perTenantMetrics: true` (ADR-0021). With it off, the log
+line carries the same figures as `ttfbMs`, `streamedBytes`,
+`backendInvokeSeconds`, `usageInput`, `usageOutput` and `modelId`, so every
+row below can be summed per tenant with Logs Insights.
+
 | Metric | Unit | Source | api-gateway | agentcore-gateway |
 |---|---|---|---|---|
 | `Requests` | Count | ingress, one per request, refusals included | yes | yes |
@@ -179,9 +213,11 @@ Every agent response is a `text/event-stream`. Its last event is:
 agentcore-gateway ingress the REQUEST interceptor returns before the Runtime
 is invoked and never sees the response, so backend seconds, tokens and bytes
 are not attributed there; the dashboard says so. The demo adds Contributor
-Insights rules for the top tenants by `BackendInvokeSeconds` and
-`ModelOutputTokens`, and a dashboard `RuntimeIsolation-<ingress>` with one
-per-tenant line per metric.
+Insights rules for the top tenants by backend seconds and output tokens,
+which read the log line (`$.backendInvokeSeconds`, `$.usageOutput`) and so
+work with metrics off. The dashboard `RuntimeIsolation-<ingress>`, with one
+per-tenant line per metric, is added only with
+`--context perTenantMetrics=true`.
 
 ### Attribution formula
 
@@ -205,5 +241,7 @@ Model cost itself is the CUR 2.0 figure keyed on `iamPrincipal/TenantId`
 Contributor Insights rules, the custom metrics themselves, X-Ray traces, and
 the backend time of requests whose stream broke before the usage event.
 Apportion it equally across active tenants or by `Requests`, and say which.
-CloudWatch bills each custom metric-dimension pair, so the metric set stays
-small: the monthly metric count grows with tenants × ingresses × 9.
+CloudWatch bills each custom metric-dimension pair: with `perTenantMetrics`
+on, the monthly metric count grows with tenants × ingresses × 9, which is why
+it is off by default (ADR-0021). Contributor Insights bills per rule and per
+matched log event, not per tenant.
