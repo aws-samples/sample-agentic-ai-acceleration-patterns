@@ -1,0 +1,19 @@
+flowchart TB
+    IDP["Trusted identity provider<br/>Membership and scoped JWT claims"]
+    A["Tenant A<br/>Shopping and support agents"]
+    B["Tenant B<br/>Shopping agent"]
+    IDP -->|"Signed tokens"| A
+    IDP -->|"Signed token"| B
+    subgraph AWS["Vendor AWS account and Region"]
+        GW["AgentCore Gateway<br/>CUSTOM_JWT"]
+        POL["AgentCore Policy<br/>Cedar · ENFORCE"]
+        ROLE["Gateway execution role<br/>Six Memory operations"]
+        MEM["AgentCore Memory<br/>Native connector target"]
+        NS["Tenant A shared facts<br/>Tenant B shared facts<br/>Separate actor/session histories"]
+        GW -. "Evaluate each request" .-> POL
+        GW -->|"Allowed request"| ROLE
+        ROLE -->|"Memory fence pins execution role"| MEM
+        MEM --> NS
+    end
+    A -->|"Native Memory HTTP"| GW
+    B -->|"Native Memory HTTP"| GW

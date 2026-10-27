@@ -1,0 +1,13 @@
+{
+  "dependencies": {
+    "@cedar-policy/cedar-wasm": "4.14.0"
+  },
+  "name": "tenant-memory-isolation-validation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Draft tenant memory isolation validation kit",
+  "license": "MIT-0",
+  "scripts": {
+    "test": "node --test test/policy.test.cjs"
+  }
+}

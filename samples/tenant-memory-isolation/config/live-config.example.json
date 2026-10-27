@@ -1,0 +1,25 @@
+{
+  "region": "us-west-2",
+  "memoryId": "ExampleMemory-1234567890",
+  "memoryArn": "arn:aws:bedrock-agentcore:us-west-2:000000000000:memory/ExampleMemory-1234567890",
+  "gatewayId": "example",
+  "gatewayArn": "arn:aws:bedrock-agentcore:us-west-2:000000000000:gateway/example",
+  "gatewayRoleArn": "arn:aws:iam::000000000000:role/ExampleGatewayRole",
+  "gatewayUrl": "https://example.gateway.bedrock-agentcore.us-west-2.amazonaws.com/mcp",
+  "targetName": "tenant-memory",
+  "targetId": "target-example",
+  "identities": {
+    "a-shopping": {
+      "actorId": "tenant-a", "sessionId": "shopping-001",
+      "namespacePath": "/tenants/tenant-a/shared/", "tokenEnv": "TENANT_A_SHOPPING_TOKEN"
+    },
+    "a-support": {
+      "actorId": "tenant-a", "sessionId": "support-001",
+      "namespacePath": "/tenants/tenant-a/shared/", "tokenEnv": "TENANT_A_SUPPORT_TOKEN"
+    },
+    "b-shopping": {
+      "actorId": "tenant-b", "sessionId": "shopping-001",
+      "namespacePath": "/tenants/tenant-b/shared/", "tokenEnv": "TENANT_B_SHOPPING_TOKEN"
+    }
+  }
+}

@@ -1,0 +1,102 @@
+<mxfile host="app.diagrams.net" version="26.0.0">
+  <diagram id="tenant-memory-isolation" name="Tenant memory isolation">
+    <mxGraphModel dx="960" dy="720" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="960" pageHeight="720" math="0" shadow="0" background="#ffffff">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="aws-account" value="Vendor AWS account" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_aws_cloud_alt;strokeColor=#232F3E;fillColor=none;verticalAlign=top;align=left;spacingLeft=35;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="310" y="70" width="600" height="590" as="geometry" />
+        </mxCell>
+        <mxCell id="aws-region" value="AWS Region" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_region;strokeColor=#00A4A6;fillColor=none;dashed=1;verticalAlign=top;align=left;spacingLeft=35;fontStyle=1;" vertex="1" parent="aws-account">
+          <mxGeometry x="20" y="45" width="560" height="525" as="geometry" />
+        </mxCell>
+        <mxCell id="trusted-issuer" value="&lt;b&gt;Trusted identity provider&lt;/b&gt;&lt;br&gt;&lt;i&gt;Verified membership&lt;br&gt;and memory entitlements&lt;/i&gt;" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;rounded=0;strokeColor=#545B64;fillColor=#F2F3F3;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="57.5" y="70" width="200" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="tenant-applications" value="Tenant applications" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;rounded=0;strokeColor=#879596;fillColor=#ffffff;verticalAlign=top;align=left;spacingLeft=12;spacingTop=10;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="45" y="280" width="225" height="360" as="geometry" />
+        </mxCell>
+        <mxCell id="tenant-a" value="&lt;b&gt;Tenant A&lt;/b&gt;&lt;br&gt;&lt;i&gt;Shopping agent&lt;br&gt;Support agent&lt;/i&gt;" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;rounded=0;strokeColor=#545B64;fillColor=#F2F3F3;spacing=10;" vertex="1" parent="tenant-applications">
+          <mxGeometry x="18" y="60" width="190" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="tenant-b" value="&lt;b&gt;Tenant B&lt;/b&gt;&lt;br&gt;&lt;i&gt;Shopping agent&lt;/i&gt;" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;rounded=0;strokeColor=#545B64;fillColor=#F2F3F3;spacing=10;" vertex="1" parent="tenant-applications">
+          <mxGeometry x="18" y="225" width="190" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="policy" value="" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.bedrock_agentcore;fillColor=#01A88D;strokeColor=#ffffff;aspect=fixed;verticalLabelPosition=bottom;verticalAlign=top;align=center;" vertex="1" parent="aws-region">
+          <mxGeometry x="85" y="40" width="72" height="72" as="geometry" />
+        </mxCell>
+        <mxCell id="policy-label" value="&lt;b&gt;AgentCore Policy&lt;/b&gt;&lt;br&gt;&lt;i&gt;Cedar · ENFORCE&lt;/i&gt;" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;text;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;" vertex="1" parent="aws-region">
+          <mxGeometry x="168" y="40" width="165" height="72" as="geometry" />
+        </mxCell>
+        <mxCell id="gateway" value="" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.bedrock_agentcore;fillColor=#01A88D;strokeColor=#ffffff;aspect=fixed;verticalLabelPosition=bottom;verticalAlign=top;align=center;" vertex="1" parent="aws-region">
+          <mxGeometry x="85" y="239" width="72" height="72" as="geometry" />
+        </mxCell>
+        <mxCell id="gateway-label" value="&lt;b&gt;AgentCore Gateway&lt;/b&gt;&lt;br&gt;&lt;i&gt;CUSTOM_JWT&lt;/i&gt;" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;text;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;" vertex="1" parent="aws-region">
+          <mxGeometry x="45" y="317" width="153" height="47" as="geometry" />
+        </mxCell>
+        <mxCell id="gateway-role" value="" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;shape=mxgraph.aws4.role;fillColor=#DD344C;strokeColor=none;aspect=fixed;" vertex="1" parent="aws-region">
+          <mxGeometry x="220" y="330" width="54" height="54" as="geometry" />
+        </mxCell>
+        <mxCell id="role-label" value="&lt;b&gt;IAM execution role&lt;/b&gt;&lt;br&gt;&lt;i&gt;Gateway-bound trust&lt;/i&gt;" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;text;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;" vertex="1" parent="aws-region">
+          <mxGeometry x="185" y="393" width="150" height="57" as="geometry" />
+        </mxCell>
+        <mxCell id="memory-resource" value="One shared Memory resource" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;rounded=0;strokeColor=#01A88D;strokeWidth=2;fillColor=#ffffff;verticalAlign=top;align=center;spacingTop=12;fontStyle=1;" vertex="1" parent="aws-region">
+          <mxGeometry x="365" y="40" width="175" height="470" as="geometry" />
+        </mxCell>
+        <mxCell id="memory-icon" value="" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.bedrock_agentcore;fillColor=#01A88D;strokeColor=#ffffff;aspect=fixed;verticalLabelPosition=bottom;verticalAlign=top;align=center;" vertex="1" parent="memory-resource">
+          <mxGeometry x="51.5" y="65" width="72" height="72" as="geometry" />
+        </mxCell>
+        <mxCell id="memory-label" value="&lt;b&gt;AgentCore Memory&lt;/b&gt;&lt;br&gt;&lt;i&gt;Native connector target&lt;/i&gt;" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;text;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;" vertex="1" parent="memory-resource">
+          <mxGeometry x="8" y="145" width="159" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="session-histories" value="&lt;b&gt;Short-term events&lt;/b&gt;&lt;br&gt;&lt;i&gt;Separate actor/session&lt;br&gt;histories for each&lt;br&gt;agent conversation&lt;/i&gt;" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;rounded=0;strokeColor=#879596;fillColor=#F2F3F3;fontSize=13;spacing=6;" vertex="1" parent="memory-resource">
+          <mxGeometry x="10" y="220" width="155" height="85" as="geometry" />
+        </mxCell>
+        <mxCell id="tenant-namespaces" value="&lt;b&gt;Long-term records&lt;/b&gt;&lt;br&gt;&lt;i&gt;Tenant A shared facts&lt;br&gt;Tenant B shared facts&lt;br&gt;Separate namespaces&lt;/i&gt;" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;rounded=0;strokeColor=#879596;fillColor=#F2F3F3;fontSize=13;spacing=6;" vertex="1" parent="memory-resource">
+          <mxGeometry x="10" y="322" width="155" height="85" as="geometry" />
+        </mxCell>
+        <mxCell id="memory-fence" value="&lt;b&gt;Resource policy&lt;/b&gt;&lt;br&gt;&lt;i&gt;Gateway role required&lt;/i&gt;" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=wrap;text;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="memory-resource">
+          <mxGeometry x="6" y="419" width="163" height="43" as="geometry" />
+        </mxCell>
+        <mxCell id="issue-tokens" value="Issue signed scoped JWTs" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=nowrap;edgeStyle=none;endArrow=open;endFill=0;strokeColor=#545B64;strokeWidth=2;labelBackgroundColor=#ffffff;align=center;verticalAlign=middle;fontSize=13;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="trusted-issuer" target="tenant-applications">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="0" y="0" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tenant-a-http" value="Memory HTTP + JWT" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=nowrap;edgeStyle=orthogonalEdgeStyle;endArrow=open;endFill=0;strokeColor=#545B64;strokeWidth=2;labelBackgroundColor=#ffffff;align=center;verticalAlign=middle;fontSize=13;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="tenant-a" target="gateway">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="0" y="-17" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tenant-b-http" value="" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=nowrap;edgeStyle=none;endArrow=open;endFill=0;strokeColor=#545B64;strokeWidth=2;labelBackgroundColor=#ffffff;align=center;verticalAlign=middle;fontSize=13;exitX=1;exitY=0.5;entryX=0;entryY=0.8;" edge="1" parent="1" source="tenant-b" target="gateway">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="292" y="555" />
+              <mxPoint x="292" y="411.6" />
+            </Array>
+            <mxPoint x="-65" y="50" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="evaluate-policy" value="Evaluate each request" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=nowrap;edgeStyle=none;endArrow=open;endFill=0;strokeColor=#545B64;strokeWidth=2;labelBackgroundColor=#ffffff;align=center;verticalAlign=middle;fontSize=13;exitX=0.5;exitY=0;entryX=0.5;entryY=1;dashed=1;" edge="1" parent="1" source="gateway" target="policy">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="70" y="0" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="allowed-memory-request" value="Allowed Memory HTTP" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=nowrap;edgeStyle=none;endArrow=open;endFill=0;strokeColor=#545B64;strokeWidth=2;labelBackgroundColor=#ffffff;align=center;verticalAlign=middle;fontSize=13;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="gateway" target="memory-resource">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="0" y="-18" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="outbound-credentials" value="Use IAM credentials" style="html=1;fontFamily=Amazon Ember;fontColor=#232F3E;fontSize=14;whiteSpace=nowrap;edgeStyle=none;endArrow=open;endFill=0;strokeColor=#545B64;strokeWidth=2;labelBackgroundColor=#ffffff;align=center;verticalAlign=middle;fontSize=13;exitX=1;exitY=0.8;entryX=0;entryY=0.5;dashed=1;" edge="1" parent="1" source="gateway" target="gateway-role">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="525" y="411.6" />
+              <mxPoint x="525" y="472" />
+            </Array>
+            <mxPoint x="60" y="8" as="offset" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

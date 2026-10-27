@@ -1,0 +1,11 @@
+.venv/
+node_modules/
+generated/
+__pycache__/
+*.pyc
+live-report*.json
+live-config.json
+tokens/
+live-state*.json
+live-diagnostics*.json
+.live-history/

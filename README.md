@@ -26,6 +26,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
   - [Tenant Identity with Amazon Cognito](#tenant-identity-with-amazon-cognito)
   - [Agentic runtime isolation: the agent platform at scale](#agentic-runtime-isolation-the-agent-platform-at-scale)
   - [Per-Tenant Encrypted Ingestion for Agentic Applications](#per-tenant-encrypted-ingestion-for-agentic-applications)
+  - [Tenant Memory Isolation through Gateway](#tenant-memory-isolation-through-gateway)
 - [Contributing a sample](#contributing-a-sample)
 - [Further Reading](#further-reading)
 - [Costs](#costs)
@@ -40,6 +41,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 | [Tenant Identity with Amazon Cognito](./samples/tenant-identity/) | An identity layer that makes Amazon Cognito the trusted source of tenant identity, in three user-pool topologies chosen at deploy time — plus a `tiered` mode that runs two of them side by side — with RFC 8693 token narrowing to one tenant. |
 | [Agentic runtime isolation: the agent platform at scale](./samples/agentic-runtime-isolation/) | A pooled agent platform on Amazon Bedrock AgentCore: one ingress verifies the tenant token, resolves the agent and tool grant from an entitlement store, mints a 5-minute transaction token and invokes the agent's Runtime (a fresh microVM session per request by default, one per tenant or per user with session mapping) with tenant-scoped credentials, while a tools gateway (one by default, more optional) checks each call with a per-tool interceptor and then AgentCore Policy. With `agentDelegation` on the `api-gateway` ingress, an agent hands the transaction to another agent through that ingress, which re-issues the token for the next hop. |
 | [Per-Tenant Encrypted Ingestion for Agentic Applications](./samples/tenant-encrypted-ingestion/) | One drop zone and pipeline for every tenant's documents, each tenant's encrypted with its own AWS KMS key, kept apart by key policy and identity-policy ABAC rather than code, validated by a deployer-extensible chain before it lands, in a vendor-owned or tenant-owned key tier, with cryptographic offboarding. |
+| [Tenant Memory Isolation through Gateway](./samples/tenant-memory-isolation/) | A reference solution for tenant-scoped agent memory, combining shared tenant facts, separate conversation histories, the native AgentCore Memory connector, signed JWT claims, Cedar policies, and IAM controls. |
 
 ## The Simple Cell-Based Control Plane
 
@@ -142,6 +144,20 @@ It ships as one CDK construct, `TenantEncryptedIngestion`. Its demo stack,
 integration test and demo use tenant-identity's `shared-pool`; the construct
 accepts any OIDC issuer that meets the token contract. See
 [Per-Tenant Encrypted Ingestion for Agentic Applications](./samples/tenant-encrypted-ingestion/).
+
+## Tenant Memory Isolation through Gateway
+
+A reference solution for SaaS builders designing memory access for multiple
+agents and tenants. It uses a shared AgentCore Memory resource with tenant
+namespaces for selected long-term facts and separate sessions for agent
+conversation histories.
+
+The architecture combines issuer-controlled JWT claims, AgentCore Gateway,
+Cedar access policies, and a Memory resource policy. The sample includes the
+native Memory client, configuration renderer, access policies, and design
+guidance for adapting the pattern to your application.
+
+[Tenant Memory Isolation through Gateway](./samples/tenant-memory-isolation/)
 
 ## Contributing a sample
 
