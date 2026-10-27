@@ -11,6 +11,11 @@ SPDX-License-Identifier: MIT-0
 > [README integration test](./README.md#integration-test) for the step table.
 > Security scans: 2026-10-27, ASH 0 actionable findings; Holmes CSR v3 0 high,
 > 0 medium.
+> Also checked by hand on 2026-10-27 (`api-gateway`, `outputTokensPerMinute=200`,
+> per-tenant metrics off): tenant A was refused with 429 after 233 output tokens
+> while tenant B was served; the ingress log has `tenantId` and the cost figures
+> as top-level fields, with no EMF records; the three Contributor Insights
+> rules reported both tenants (requests, backend seconds, output tokens).
 
 This file describes what is deployed. The design trail is
 [`design/runtime-isolation.spec.md`](./design/runtime-isolation.spec.md), the
