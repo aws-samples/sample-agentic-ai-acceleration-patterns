@@ -15,6 +15,8 @@ export type {
   SessionProps,
   DelegationProps,
   TvmProps,
+  TenantLimitsProps,
+  StageThrottleProps,
   ResolvedOptions,
 } from './runtime-isolation.cdk';
 export type { BackendKind } from './backend/backend';

@@ -1,3 +1,7 @@
+<!--
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+SPDX-License-Identifier: MIT-0
+-->
 # Script Conventions
 
 Conventions for the shell scripts in this directory. They run locally against
