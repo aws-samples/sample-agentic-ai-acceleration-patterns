@@ -16,6 +16,20 @@
 > ADR-0033), the park happens before any other work (M-R-10), and §10 names
 > the test-aid dependency.
 >
+> **Amended 2026-10-27** after the implementation review (ADR-0032 amendment
+> note; `src/platform/platform.ts`, `src/shared/registry.ts`,
+> `scripts/control-plane/`): the slot attribute is `firstAdminEmail` and holds
+> the e-mail, not the Cognito username (§3.1, §4, M-R-8); the claim is
+> re-asserted after the Cognito create, `CreateTenant` claims inside its
+> activation write, `DeleteMembership` releases as `DeleteUser` does, a stale
+> slot is released by the holder's e-mail only, and a vanished row is 404
+> (M-R-8, M-R-9, §8); `tenant/create.sh` verifies both 409s, parks through
+> `file://` with three attempts, and warns when the parked password is
+> missing (§6.3, §7.1, §8, §9); the teardown check deletes recreated
+> control-plane log groups with a warning and also looks for pools and REST
+> APIs (§10 step 12); control-plane's re-apply is `UpdateResource` (§7.2,
+> §10 step 7). M-R-5 was never assigned: the numbering runs M-R-4, M-R-6.
+>
 > Written against `main` at `c4023d8`. The composition rule and repository
 > `ARCHITECTURE.md` on the unmerged `sample/runtime-isolation` branch
 > (`1537688`, standard §1.1) say samples consume each other only through an
@@ -115,7 +129,7 @@ without reading it. No `execute-api:*` wildcard is written in control-plane.
 ### M-P-5. Nothing secret reaches a build log
 
 Scripts follow both samples' `scripts/CONVENTIONS.md`: no `set -x`; log
-names, ids and HTTP status, never passwords, credentials, emails or response
+names, ids and HTTP status, never passwords, credentials, e-mails or response
 bodies.
 
 ---
@@ -130,7 +144,7 @@ bodies.
 | `scripts/control-plane/cell/{create,update,delete}.sh` | tenant-identity | new |
 | `scripts/control-plane/lib.sh` (sign and call the platform API) | tenant-identity | new |
 | `CreateTenant` optional `tenantId` input | tenant-identity | changed (ADR-0029) |
-| `CreateUser` optional `firstAdmin` input; registry `firstAdminUsername` | tenant-identity | changed (ADR-0032) |
+| `CreateUser` optional `firstAdmin` input; registry `firstAdminEmail` | tenant-identity | changed (ADR-0032) |
 | `PlatformInvokePolicy` managed policy (API routes + encrypt) + its SSM parameter | tenant-identity | new (ADR-0030) |
 | `AdminPasswordKey` KMS key + its SSM parameter | tenant-identity | new (ADR-0033) |
 | `tenantBuildManagedPolicyArns` deployment input | control-plane | new (ADR-0022) |
@@ -197,7 +211,7 @@ No new tables. State lives in existing stores:
 | tenant lifecycle (control) | control-plane `Tenant` record | control-plane |
 | tenant identity (registry row, pool or groups) | tenant-identity `TenantRegistry`, key `TENANT#<T>` | tenant-identity |
 | first admin's temporary password, until collected | SSM SecureString `/application-plane/tenants/<T>/identity/admin-temporary-password`, encrypted with `AdminPasswordKey` | the tenant scripts (ADR-0031, ADR-0033) |
-| which user is the first admin | tenant-identity registry row, `firstAdminUsername` | tenant-identity (ADR-0032) |
+| which user is the first admin | tenant-identity registry row, `firstAdminEmail` | tenant-identity (ADR-0032) |
 
 **M-R-1:** The script MUST NOT write any other identity fact to SSM. Pool
 ids, client ids and issuers are read from `GetTenant` by whoever needs them
@@ -261,29 +275,54 @@ operation CreateUser {
         /// Also add the user to `admin-<tenantId>`.
         admin: Boolean
         /// Optional. When true, the call claims the tenant's single
-        /// first-admin slot. 409 ConflictError if the slot is taken.
-        /// Implies admin: true.
+        /// first-admin slot with one conditional write before the Cognito
+        /// user is created (ADR-0032); 409 ConflictError if the slot is
+        /// taken, and nothing changes. Implies `admin: true`. A tenant may
+        /// have many admins; it has one first admin.
         firstAdmin: Boolean
     }
     // output and errors unchanged; ConflictError already modelled
 }
 ```
 
-**M-R-8:** The registry row gains `firstAdminUsername`. A `firstAdmin`
-create MUST first claim it with one conditional write
-(`attribute_not_exists(firstAdminUsername)`, value = the email, which is the
-Cognito username in every topology). A failed condition is 409
-`ConflictError` and changes nothing. Only after the claim does the Cognito
-user get created; if that fails, the claim is released with a conditional
-delete (`firstAdminUsername = :email`) and the original error is returned.
+**M-R-8:** The registry row gains `firstAdminEmail`. A `firstAdmin` create
+MUST first claim it with one conditional write
+(`attribute_not_exists(firstAdminEmail)`, value = the e-mail). The slot
+stores the e-mail, not the Cognito username: the two are equal in the shared
+pools, but in `pool-per-tenant` Cognito generates a UUID username and the
+e-mail is an alias, so the service compares a user with the slot on the
+user's e-mail, never on the name a caller passed. A failed condition is 409
+`ConflictError` and changes nothing; a condition that fails because the row
+is gone is 404 `ResourceNotFoundError`. Only after the claim does the
+Cognito user get created; if that fails, the claim is released with a
+conditional write (`REMOVE firstAdminEmail`, condition
+`firstAdminEmail = :email`) and the original error is returned. After the
+Cognito create succeeds the claim MUST be re-asserted with a second
+conditional write (`attribute_not_exists(firstAdminEmail) OR firstAdminEmail
+= :email`): while Cognito ran, a `DeleteUser` naming this e-mail found no
+user yet and released the slot as stale (M-R-9), and without this write a
+second `firstAdmin` call could claim the empty slot. If the re-assertion
+finds another e-mail in the slot (409) or no row (404), the user just
+created is deleted again and that error is returned.
 
-**M-R-9:** `CreateTenant` creates its first admin through the same path, so
-the admin it makes also holds the slot. Platform `DeleteUser` on the slot
-holder MUST release the slot in the same way, so the vendor can replace a
-lost admin. If the holder's Cognito user is already gone, a platform
-`DeleteUser` naming the holder's email returns 404 and still releases the
-slot. The tenant-admin `DeleteTenantUser` does not touch the slot: its role
-holds registry reads only (tenant-identity R-8), and that control is kept.
+**M-R-9:** `CreateTenant` claims the slot inside the conditional update that
+flips its row to `ACTIVE` (the write that also stores the pool or group
+fields and the API key), so there is no instant at which a row is `ACTIVE`
+with an empty slot; it then runs only the Cognito half of M-R-8 (create,
+re-assert, release on failure). Platform `DeleteUser` on the slot holder
+MUST release the slot after Cognito confirms the delete, so the vendor can
+replace a lost admin; `DeleteMembership` on the holder (topology 3) MUST do
+the same, because leaving the tenant ends the first admin's tenure as a
+delete does. `UpdateUser {admin: false}` on the holder does NOT release it:
+the user is still in the tenant, and a free slot while they exist would allow
+the second first admin §6.4 forbids. If the holder's Cognito user is already
+gone, a platform `DeleteUser` or `DeleteMembership` naming the holder's
+**e-mail** as `{username}` returns 404 and still releases the slot; naming
+the gone holder's UUID username (`pool-per-tenant`) is a plain 404 and keeps
+the slot, because with no user left nothing maps the UUID back to the
+e-mail. The tenant-admin `DeleteTenantUser` does not touch the slot: its
+role holds registry reads only (tenant-identity R-8), and that control is
+kept.
 
 The guard is a conditional write on the authoritative record, not a
 read-then-write (control-plane P-5). Two racing `firstAdmin` creates get one
@@ -340,8 +379,9 @@ its tenant build role (control-plane spec §6.2). No grant changes there.
 ```
 
 `POST .../users` is for M-R-6 (claim the first-admin slot on replay).
-`GET /platform/tenants/*` is for `GetTenant`; it also matches `GET .../users`
-and `GetUser`, which the scripts never call. The second statement lets SSM
+`GET /platform/tenants/*` is for `GetTenant` and, on the replay path only,
+for `ListUsers` (the check after a 409, §7.1 step 5); it also matches
+`GetUser`, which the scripts never call. The second statement lets SSM
 encrypt the parked password with `AdminPasswordKey` (ADR-0033) and nothing
 else: no `kms:Decrypt`, and only through SSM.
 
@@ -415,8 +455,11 @@ status and body to the caller in variables.
    - 201 → **M-R-10:** park `admin.temporaryPassword` (step 6) as the very
      next call, before any log line, read or other work, so the window of
      §9 gap 1 is one call wide. Then done.
-   - 409 → a racing create won; go to 3 once more, then fail if still not
-     `ACTIVE`.
+   - 409 → either a racing create won, or (shared pool) `adminEmail` is
+     already taken and nothing was written. Go to 3 once more: `ACTIVE` →
+     step 5; still 404 → exit 1 naming the e-mail as the probable cause
+     (`ADMIN_EMAIL is probably already in use in the shared pool`);
+     `PROVISIONING` → exit 1 (re-run later).
    - other → exit 1.
 5. **M-R-6** (replay after a create that left no admin, tenant-identity §5.1
    last sentence, or a build killed before the park): `POST
@@ -424,14 +467,27 @@ status and body to the caller in variables.
    - 201 → park the returned password (step 6), done. A 201 with no
      `temporaryPassword` (an existing pool user was added as a member, so no
      new Cognito user was made) parks nothing and is success.
-   - 409 → the slot is held; an admin exists. Do nothing; never re-park.
+   - 409 → the slot is held, or (shared pool) the e-mail is taken and
+     tenant-identity released the slot before answering the same 409. `GET
+     /platform/tenants/{T}/users` (following `nextToken`) MUST show at least
+     one `admin: true` user, else exit 1 naming the e-mail as the probable
+     cause. Then check that the parked parameter exists (`get-parameter`
+     without decryption, the version only) and print a WARNING pointing at
+     §8 when it is absent. Never re-park.
    - other → exit 1.
 
-   No `GET .../users` first: the slot (M-R-8) decides, not a read.
-6. Park: `aws ssm put-parameter --type SecureString --key-id "$KEY_ARN"
-   --overwrite --name
+   No `GET .../users` before the slot: the conditional write (M-R-8)
+   decides, not a read. The read after a 409 only verifies the outcome.
+6. Park: write the password to the mode-0600 scratch file `lib.sh` creates
+   and `unset` the variable, then `aws ssm put-parameter --type SecureString
+   --key-id "$KEY_ARN" --overwrite --name
    /application-plane/tenants/{T}/identity/admin-temporary-password
-   --value "$PW" > /dev/null`, then `unset PW`. `KEY_ARN` is
+   --value "file://$PLATFORM_REQUEST_FILE" > /dev/null`. The password never
+   goes on argv (M-P-5: another local user can read `/proc/<pid>/cmdline`).
+   A failing CLI call gets three attempts with a 1 s then 2 s backoff, each
+   failure logged by error class; after the third, exit 1 naming the
+   parameter and pointing at §8, because the password is then lost.
+   Truncate the file after the park. `KEY_ARN` is
    `adminPasswordKeyArn`, read in step 1 (missing → exit 1, M-R-11). Log
    the parameter name only.
 
@@ -439,7 +495,7 @@ status and body to the caller in variables.
 
 Reconcile only. `GET /platform/tenants/{T}`: `ACTIVE` → success; anything
 else → exit 1 naming the status. It never creates (control-plane
-`UpdateTenant` on a tenant whose identity was lost should fail loudly, not
+`UpdateResource` on a tenant whose identity was lost should fail loudly, not
 silently re-onboard with no `ADMIN_EMAIL`).
 
 ### 7.3 `tenant/delete.sh`
@@ -467,7 +523,8 @@ no-op (control-plane P-9).
 | identity stack not deployed | cell `CREATE_FAILED` | deploy tenant-identity, `UpdateCell` |
 | `tiered` topology | cell or tenant `CREATE_FAILED` | redeploy identity with a single topology |
 | policy not attached | tenant `CREATE_FAILED`, `HTTP 403` in log | redeploy control-plane with the context, then `DeleteTenant` and `CreateTenant` again |
-| build killed after 201, before park | `CREATE_FAILED` | re-run: step 3 sees `ACTIVE`, step 5 gets 409 and does not re-park. The password is lost; the vendor recovers with `DeleteUser` (releases the slot, M-R-9) then `CreateUser {firstAdmin: true}` by hand, or control-plane `DeleteTenant` + `CreateTenant` (residual gap, §9) |
+| build killed after 201, before park; or the park failed three times | `CREATE_FAILED` | re-run: step 3 sees `ACTIVE`, step 5 gets 409, finds the admin and does not re-park; it prints `WARNING ... no parked password` pointing here. The password is lost; the vendor recovers with `DeleteUser` naming the holder's e-mail (releases the slot, M-R-9) then `CreateUser {firstAdmin: true}` by hand, or control-plane `DeleteTenant` + `CreateTenant` (residual gap, §9) |
+| `adminEmail` already in use in the shared pool | `CREATE_FAILED`, `ADMIN_EMAIL is probably already in use in the shared pool` in the log | onboard with another e-mail, or free the address (`DeleteUser` in the tenant that holds it) and re-run |
 | identity row stuck `PROVISIONING` | `CREATE_FAILED` | vendor `DeleteTenant` on tenant-identity, then control-plane `DeleteTenant` |
 | identity `DeleteTenant` fails | `DELETE_FAILED` | control-plane `DeleteTenant` retry re-runs the script |
 
@@ -478,8 +535,11 @@ no-op (control-plane P-9).
 - **Runtime:** a pool-per-tenant create is seconds inside a build of about
   one minute; well inside control-plane's build budget (control-plane R-23).
 - **Residual gap 1:** a build killed between the 201 and the park loses the
-  temporary password. Closing it needs tenant-identity to return the
-  password again or to let Cognito deliver it (ADR-0031 Consequences).
+  temporary password. The park's three attempts (§7.1 step 6) keep a
+  transient SSM or KMS error from losing it, and a replay says so with a
+  WARNING (§7.1 step 5); the one-call window remains. Closing it needs
+  tenant-identity to return the password again or to let Cognito deliver it
+  (ADR-0031 Consequences).
 - **Residual gap 2:** a tenant-identity row stuck in `PROVISIONING` blocks
   replay. tenant-identity has no sweep; its §11 is the place to add one.
 - **Closed gap (was 3):** the parked password was readable by the shared
@@ -523,18 +583,18 @@ cdk deploy` with the §3.4 context), never by importing its `src/`.
 | 5 | parked parameter exists, type `SecureString`, `KeyId` = `adminPasswordKeyArn` | true; value never printed |
 | 5b | `iam simulate-principal-policy` for the control-plane tenant build role, action `kms:Decrypt`, resource `adminPasswordKeyArn` | `implicitDeny` |
 | 6 | `IssueToken` for the admin with the parked password | access token whose `tenant_id` claim is `T`. **Needs the test-aid routes deployed** (`IssueToken` is a test aid, tenant-identity ADR-0006, removed by README hardening item 1); the test asserts they exist and fails with a clear message if not |
-| 7 | control-plane `UpdateTenant(T)` | `ACTIVE`; still one admin; parameter not re-written (version unchanged) |
+| 7 | control-plane `UpdateResource(T)` (the re-apply that re-runs `tenant/update.sh`; `UpdateTenant` edits metadata and runs no script) | `ACTIVE`; still one admin; parameter not re-written (version unchanged) |
 | 8 | run `tenant/create.sh` locally a second time with the build's env | exit 0; still one registry row, one admin |
 | 9 | tenant-identity `CreateTenant` with an existing `tenantId` | 409, nothing changed |
 | 9b | tenant-identity `CreateUser(T) {email: other@example.com, firstAdmin: true}` | 409, no user created; then `CreateUser {admin: true}` for the same email → 201 (a second admin is allowed, a second *first* admin is not); delete it |
 | 10 | control-plane `DeleteTenant(T)` | completes |
 | 11 | tenant-identity `GetTenant(T)` | 404; parked parameter gone |
-| 12 | teardown from an exit trap: control-plane, setup, identity | no stacks, pools, parameters, or log groups with either prefix |
+| 12 | teardown from an exit trap: control-plane, setup, identity | no stack, parameter, user pool, REST API or log group of the run remains. A leftover parked parameter or orphan REST API is deleted and still fails the run. A tenant-identity log group recreated during teardown fails the run (ADR-0024); a control-plane log group recreated during teardown is deleted with a warning and does not (control-plane has no log drain; its known issue, not the mount's) |
 
 Unit tests (jest, no AWS): each mount script run with `aws` and `curl`
 replaced by stubs on `PATH`, covering every branch of §7 including `tiered`
 refusal, `PROVISIONING`, 409 race, and 404-on-delete; plus a check that no
-stub ever receives the password or email on its command line.
+stub ever receives the password or e-mail on its command line.
 
 Estimated run: 25-35 minutes, under $1.
 
