@@ -57,8 +57,10 @@ that none of those ever reach output.
   `demo.sh` deletes the demo table items and users it wrote and removes its
   temp files on every exit; `integ.sh` destroys every stack it deployed from
   the trap, so the destroy runs even when the deploy or a step fails, and
-  then checks that nothing with the sample's prefix was left behind
-  (stacks, log groups, `/application-plane/shared/agent-runtime/*`).
+  then checks that nothing it created was left behind: stacks with the
+  sample's prefix, plus the log groups and SSM parameters its own stacks
+  owned. It ignores parameters under `/application-plane/shared/agent-runtime/*`
+  that another deployment wrote.
 - Exit non-zero on any failure, naming the step, resource or parameter that
   failed (name, not value). Never swallow an error into a success exit.
 

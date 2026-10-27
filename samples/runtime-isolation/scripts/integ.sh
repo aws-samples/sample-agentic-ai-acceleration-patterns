@@ -54,16 +54,22 @@ log_groups_of() { # STACK -> the stack's AWS::Logs::LogGroup physical ids
     --query "StackResources[?ResourceType=='AWS::Logs::LogGroup'].PhysicalResourceId" --output text 2>/dev/null | tr '\t' '\n'
 }
 
+params_of() { # STACK -> the stack's AWS::SSM::Parameter names
+  aws cloudformation describe-stack-resources --stack-name "$1" \
+    --query "StackResources[?ResourceType=='AWS::SSM::Parameter'].PhysicalResourceId" --output text 2>/dev/null | tr '\t' '\n'
+}
+
 cleanup() {
   local status=$?
   set +e
   echo "== step 10: teardown"
   delete_tenants
-  local groups="${LIB_TMP}/log-groups" runtimes="${LIB_TMP}/runtimes" s
-  : >"$groups"; : >"$runtimes"
+  local groups="${LIB_TMP}/log-groups" runtimes="${LIB_TMP}/runtimes" params="${LIB_TMP}/params" s
+  : >"$groups"; : >"$runtimes"; : >"$params"
   if [[ "$DEPLOYED_SAMPLE" == 1 ]]; then
     for s in "${SUFFIXES[@]}"; do
       log_groups_of "${STACK_PREFIX}-${s}" >>"$groups"
+      params_of "${STACK_PREFIX}-${s}" >>"$params"
       aws cloudformation describe-stacks --stack-name "${STACK_PREFIX}-${s}" \
         --query "Stacks[0].Outputs[?OutputKey=='RuntimeArn'].OutputValue" --output text 2>/dev/null | sed 's#.*/##' >>"$runtimes"
     done
@@ -87,8 +93,14 @@ cleanup() {
     --query "StackSummaries[?starts_with(StackName, '${STACK_PREFIX}')].StackName" --output text)"
   if [[ -n "$left" ]]; then echo "leftover stacks: $left" >&2; FAILED=1; fi
   if [[ "$DEPLOYED_SAMPLE" == 1 ]]; then
-    left="$(aws ssm get-parameters-by-path --path "$PARAM_PREFIX" --query 'Parameters[].Name' --output text)"
-    if [[ -n "$left" ]]; then echo "leftover parameters under $PARAM_PREFIX" >&2; FAILED=1; fi
+    # Only the parameters this run's stacks wrote. Another deployment (a demo
+    # or a parallel run) may own parameters under the same prefix.
+    while read -r p; do
+      [[ -n "$p" && "$p" != None ]] || continue
+      if aws ssm get-parameter --name "$p" --query Parameter.Name --output text >/dev/null 2>&1; then
+        echo "leftover parameter: $p" >&2; FAILED=1
+      fi
+    done <"$params"
     while read -r g; do
       [[ -n "$g" ]] || continue
       if aws logs describe-log-groups --log-group-name-prefix "$g" --query "logGroups[?logGroupName=='$g'].logGroupName" --output text | grep -q .; then
