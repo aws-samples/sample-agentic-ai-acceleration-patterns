@@ -2,7 +2,7 @@
 
 > Status: **Implemented and verified** — the current architecture. The
 > integration test (`test/integ.tenant.ts`) passed against deployed
-> infrastructure on 2026-09-07 (eu-central-1): full cell lifecycle including
+> infrastructure on 2026-10-27 (eu-west-1): full cell lifecycle including
 > implicit cell creation, cell reuse, fill-to-capacity, second-cell
 > placement, in-flight and occupied-cell guards, and complete teardown. The
 > joint control-plane mount test owned by the `tenant-identity` sample
@@ -10,8 +10,8 @@
 > 2026-10-27 with this control plane deployed through its own
 > deploy path, covering the optional `tenantBuildManagedPolicyArns`
 > deployment input (§10, ADR-022) and `TENANT_NAME` on every tenant build
-> (ADR-023); the API access log group that can reappear after teardown is
-> the open item (README, Known issues).
+> (ADR-023). The API access log group can reappear after teardown; the
+> joint test deletes it with a warning (README, Known issues).
 > ADRs: see [`adr/`](./adr/README.md) (ADR-001..023; ADR-012..014 introduce the
 > cell model, ADR-022..023 the application-plane mount inputs).
 
