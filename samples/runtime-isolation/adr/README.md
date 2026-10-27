@@ -29,3 +29,4 @@ SPDX-License-Identifier: MIT-0
 | [0021](./0021-make-per-tenant-cloudwatch-metrics-opt-in.md) | Make per-tenant CloudWatch metrics opt-in, off by default (amends ADR-0017) | Accepted | 2026-10-27 |
 | [0022](./0022-bound-the-tvm-credential-cache-and-share-one-sts-call-per-tag-set.md) | Bound the TVM credential cache and share one STS call per tag set | Accepted | 2026-10-27 |
 | [0023](./0023-tune-the-ingress-cold-and-hot-paths-by-measurement.md) | Tune the ingress cold and hot paths by measurement (amends ADR-0015) | Accepted | 2026-10-27 |
+| [0024](./0024-share-one-ingress-across-runtimes-with-a-route-per-runtime.md) | Share one ingress across several Runtimes, one route per Runtime | Proposed | 2026-10-27 |
