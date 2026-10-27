@@ -25,6 +25,16 @@ RFC 2119.
 > tenant is reachable only through its own pool (the binding rule, §4.2).
 > P-7, §1.2, §3.3, §4, §5.1, §5.4, §6, N-7, R-19, §10 and §11 are amended;
 > the integration test runs four stacks.
+>
+> **Amended 2026-10-27 (ADR-0029, ADR-0032; the
+> [control-plane mounting spec](control-plane-mounting.spec.md) §5):**
+> `CreateTenant` takes an optional caller-supplied `tenantId` (409 if the row
+> exists); `CreateUser` takes an optional `firstAdmin` that claims the
+> tenant's single first-admin slot, `firstAdminEmail` on the registry row,
+> with conditional writes; `CreateTenant` claims it in its activation write;
+> `DeleteUser` and `DeleteMembership` release it when they remove the holder.
+> §4.1, §5.1 and §5.3 are amended. The §11 "Control-plane mounting" seam is
+> filled by that addendum.
 
 ---
 
@@ -426,6 +436,7 @@ One table, `TenantRegistry`. Single-table, one item type.
 | `userPoolId`, `appClientId`, `issuer` | `pool-per-tenant` rows only (premium tenants in `tiered`): the tenant's own pool. `issuer` is stored for consumers: `ListTenants` is the issuer allowlist a `pool-per-tenant` verifier needs (§1.2). A standard row in `tiered` stores none of them (§4.2). |
 | `groupName` | `shared-pool-multi-tenant` only: `t-<tenantId>` |
 | `apiKeyId`, `apiKeyValue` | every topology: the tenant's API Gateway key (R-19, ADR-0025). The value is a throttling identifier the authoriser returns, not a credential: with the `AUTHORIZER` key source a client's `x-api-key` header is ignored. Never returned by the API. |
+| `firstAdminEmail` | every topology, optional: the tenant's single first-admin slot (ADR-0032, mounting spec M-R-8, M-R-9). Set by `CreateTenant` in its activation write and by `CreateUser {firstAdmin: true}` through a claim (`attribute_not_exists(firstAdminEmail)`) that is re-asserted after the Cognito create; released by `DeleteUser` or `DeleteMembership` when they remove the holder, found by comparing the user's e-mail with the slot (the Cognito username is a UUID in `pool-per-tenant`). A tenant fact, which user was onboarded first, not user data in the R-10 sense: the one place an address reaches the table. Never returned by the API. |
 | `createdAt`, `updatedAt` | ISO-8601 |
 
 Key: `PK=TENANT#<tenantId>`, `SK=META`.
@@ -484,17 +495,17 @@ setup, before the first operation is modelled.
 
 | Operation | Method / path | Effect by topology |
 |---|---|---|
-| `CreateTenant` | `POST /platform/tenants` `{name, adminEmail[, tier]}` → 201 `{tenant, admin}` | `tier` (`standard` \| `premium`) is required in `tiered` and selects the tenant's topology; in any other stack it is refused with 400 `UnsupportedInTopology`, and in `tiered` its absence is a 400 (ADR-0027). All: write the registry row first, as `PROVISIONING` (ADR-0021). 1: create pool (tagged with the tenant, R-18) + client + trigger + group `admin-<id>`. 2, 3: create groups `t-<id>` and `admin-<id>`. All: create the tenant's API key and add it to the usage plan (R-19); a key failure deprovisions and deletes the row. All: flip the row to `ACTIVE` with the pool or group fields in one conditional write; a provisioning failure deletes the row, an activation failure deprovisions and deletes it. Then `CreateUser` for `adminEmail` with `admin: true`; `admin` is that User with its temporary password. If this last step fails, the tenant is `ACTIVE` with no admin, and the vendor retries with `CreateUser`. |
+| `CreateTenant` | `POST /platform/tenants` `{name, adminEmail[, tier][, tenantId]}` → 201 `{tenant, admin}` | `tier` (`standard` \| `premium`) is required in `tiered` and selects the tenant's topology; in any other stack it is refused with 400 `UnsupportedInTopology`, and in `tiered` its absence is a 400 (ADR-0027). `tenantId` (optional, the `TenantId` shape, so a bad id is a 400) is used as the row's id instead of a generated ULID, for a caller that already holds one; the `attribute_not_exists(PK)` write makes an existing row a 409 that changes nothing (ADR-0029). All: write the registry row first, as `PROVISIONING` (ADR-0021). 1: create pool (tagged with the tenant, R-18) + client + trigger + group `admin-<id>`. 2, 3: create groups `t-<id>` and `admin-<id>`. All: create the tenant's API key and add it to the usage plan (R-19); a key failure deprovisions and deletes the row. All: flip the row to `ACTIVE` with the pool or group fields and `firstAdminEmail = adminEmail` in one conditional write (ADR-0032); a provisioning failure deletes the row, an activation failure deprovisions and deletes it. Then the Cognito half of the first-admin path for `adminEmail` (`admin: true`, slot re-asserted after the create); `admin` is that User with its temporary password. If this last step fails, the slot is released, the tenant is `ACTIVE` with no admin, and the vendor retries with `CreateUser {firstAdmin: true}`. |
 | `GetTenant` | `GET /platform/tenants/{tenantId}` | registry read; in `tiered` the `Tenant` carries `tier`, and a premium tenant's `userPoolId`/`appClientId` are what a client needs before sign-in (§6.3) |
 | `ListTenants` | `GET /platform/tenants?nextToken=` | registry scan |
 | `DeleteTenant` | `DELETE /platform/tenants/{tenantId}` → 204 | R-11, then: 1: delete pool. 2: delete users with `custom:tenantId=<id>`. 3: delete users whose only group is `t-<id>`, remove the group from the rest, delete the group. All: delete the tenant's API key (R-19, idempotent). |
-| `CreateUser` | `POST /platform/tenants/{tenantId}/users` `{email, admin?}` → 201 User | 1: `AdminCreateUser` in the tenant's pool. 2: `AdminCreateUser` with `custom:tenantId`, then `AdminAddUserToGroup` `t-<id>`. 3: `AdminCreateUser` (if absent) + `AdminAddUserToGroup` `t-<id>`. All: `admin: true` also adds the user to `admin-<id>`. Returns a temporary password only in the response, only for a new Cognito user, and never logs it. |
-| `DeleteUser` | `DELETE /platform/tenants/{tenantId}/users/{username}` → 204 | 1, 2: `AdminDeleteUser`. 3: remove from `t-<id>` and `admin-<id>`; delete the user if no `t-*` group remains. |
+| `CreateUser` | `POST /platform/tenants/{tenantId}/users` `{email, admin?, firstAdmin?}` → 201 User | 1: `AdminCreateUser` in the tenant's pool. 2: `AdminCreateUser` with `custom:tenantId`, then `AdminAddUserToGroup` `t-<id>`. 3: `AdminCreateUser` (if absent) + `AdminAddUserToGroup` `t-<id>`. All: `admin: true` also adds the user to `admin-<id>`. `firstAdmin: true` implies `admin` and claims the tenant's single first-admin slot with a conditional write before the Cognito call, re-asserts it after, releases it if Cognito fails, and answers 409 `ConflictError` when the slot is held (404 when the row is gone), changing nothing (ADR-0032, mounting spec M-R-8). Returns a temporary password only in the response, only for a new Cognito user, and never logs it. |
+| `DeleteUser` | `DELETE /platform/tenants/{tenantId}/users/{username}` → 204 | 1, 2: `AdminDeleteUser`. 3: remove from `t-<id>` and `admin-<id>`; delete the user if no `t-*` group remains. All: if the user holds the first-admin slot, release it after the delete; a `{username}` that is the slot's e-mail with no user behind it answers 404 and still releases the slot (ADR-0032, mounting spec M-R-9). |
 | `GetUser` | `GET /platform/tenants/{tenantId}/users/{username}` → 200 User | `AdminGetUser`, plus `AdminListGroupsForUser` for the admin flag. |
 | `ListUsers` | `GET /platform/tenants/{tenantId}/users?nextToken=` → 200 `{users, nextToken}` | 1: `ListUsers` on the tenant's pool. 2, 3: `ListUsersInGroup` `t-<id>`. |
 | `UpdateUser` | `PATCH /platform/tenants/{tenantId}/users/{username}` `{admin}` → 200 User | add the user to, or remove them from, `admin-<id>`. |
 | `CreateMembership` | `PUT /platform/tenants/{tenantId}/users/{username}/membership` → 204 | 3: `AdminAddUserToGroup`. 1, 2: 400 `UnsupportedInTopology`. |
-| `DeleteMembership` | `DELETE /platform/tenants/{tenantId}/users/{username}/membership` → 204 | 3: `AdminRemoveUserFromGroup`; 409 if it is the user's last tenant (use `DeleteUser`). 1, 2: 400 `UnsupportedInTopology`. |
+| `DeleteMembership` | `DELETE /platform/tenants/{tenantId}/users/{username}/membership` → 204 | 3: `AdminRemoveUserFromGroup`; 409 if it is the user's last tenant (use `DeleteUser`); if the user holds the first-admin slot, release it after the removal, as `DeleteUser` does (ADR-0032). 1, 2: 400 `UnsupportedInTopology`. |
 | `IssueToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token` `{password}` → 200 `{accessToken, idToken, refreshToken, expiresIn}` | `AdminSetUserPassword` (permanent) then `AdminInitiateAuth` with `ADMIN_USER_PASSWORD_AUTH` against the topology's pool. §3.2. |
 | `RefreshToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token/refresh` `{refreshToken}` → 200 `{accessToken, idToken, expiresIn}` | `AdminInitiateAuth` with `REFRESH_TOKEN_AUTH`, so the test can show that refresh re-runs the trigger (P-2, §10 steps 6 and 9). Same labelling as `IssueToken`. |
 
@@ -564,8 +575,8 @@ an e-mail that already has a Cognito user adds that user to the tenant, as
 | Error | HTTP | Triggers |
 |---|---|---|
 | `ValidationError` | 400 | malformed input; `UnsupportedInTopology` |
-| `ResourceNotFoundError` | 404 | unknown tenant or user; a user who does not belong to the path's tenant (R-12) |
-| `ConflictError` | 409 | tenant `PROVISIONING` or `DELETING` on mutation; removing a user's last membership; e-mail already exists in a shared pool for a different tenant (topology 2); a tenant admin changing or deleting themselves (R-13); a caller whose admin group or membership is gone (R-16) |
+| `ResourceNotFoundError` | 404 | unknown tenant or user; a user who does not belong to the path's tenant (R-12); a first-admin claim whose row has vanished (ADR-0032) |
+| `ConflictError` | 409 | tenant `PROVISIONING` or `DELETING` on mutation; `CreateTenant` with a `tenantId` that exists (ADR-0029); a `firstAdmin` create when the slot is held (ADR-0032); removing a user's last membership; e-mail already exists in a shared pool for a different tenant (topology 2); a tenant admin changing or deleting themselves (R-13); a caller whose admin group or membership is gone (R-16) |
 | `InternalServerError` | 500 | everything else |
 
 401 and 403 on `/platform/*` are API Gateway's own (IAM). On `/tenant/*`, API
