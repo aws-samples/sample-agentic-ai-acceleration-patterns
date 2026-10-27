@@ -10,7 +10,10 @@
  * Everything here is what a consumer could do: control-plane's public API
  * with a vendor-IdP JWT, tenant-identity's platform API with SigV4, the
  * published SSM parameters, and stack outputs of the two stacks this test
- * owns. No `src/` of either sample is imported (sample-standard §5.2).
+ * owns. No control-plane `src/` is imported (sample-standard §5.2 forbids
+ * another sample's `src/`); the only tenant-identity import is the shared
+ * e2e client in `../clients`, which reads constants from this sample's own
+ * `src/shared/constants`.
  *
  * Hygiene: no token, password or parameter value is ever printed.
  */
