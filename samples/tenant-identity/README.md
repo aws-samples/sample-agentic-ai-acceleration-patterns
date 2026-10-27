@@ -344,6 +344,116 @@ empty REST API shell if CloudFormation created it but failed before recording
 its physical id (T-33/M-32). If the drain fails (for example a Cognito throttle
 on a large registry), the stack stays `DELETE_FAILED`; run `cdk destroy` again.
 
+## Mounting under the control plane
+
+This sample mounts under the [`control-plane`](../control-plane/) sample so
+one vendor onboarding call provisions a tenant's identity too. Control-plane
+`CreateTenant` runs `scripts/control-plane/tenant/create.sh`, shipped here,
+which calls this sample's `CreateTenant` with the **same** tenant id
+(ADR-0029); `DeleteTenant` mirrors it through `tenant/delete.sh`. The control
+plane learns nothing about identity: it only attaches a managed policy and
+passes a tenant's name (mounting spec M-P-2, M-P-3). This sample is
+account-level shared infrastructure (ADR-0017), so every control-plane cell
+reaches the same identity deployment and the cell scripts only check that one
+exists.
+
+**Deploy order.** tenant-identity first (it publishes the policy ARN), then
+control-plane. Deploy this sample in a single, non-`tiered` topology, then
+deploy control-plane with its cell definition pointing at `scripts/control-plane/`
+and its tenant build role granted the published
+`platformInvokePolicyArn`:
+
+```bash
+export AWS_REGION=eu-central-1
+npx cdk deploy --context topology=shared-pool
+
+POLICY_ARN=$(aws ssm get-parameter --region "$AWS_REGION" \
+  --name /application-plane/shared/identity/platformInvokePolicyArn \
+  --query Parameter.Value --output text)
+
+cd ../control-plane
+npx cdk deploy control-plane-dev \
+  --context vendorIdpIssuerUrl=https://YOUR_ISSUER \
+  --context vendorIdpAudience=YOUR_AUDIENCE \
+  --context tenantBuildManagedPolicyArns="[\"$POLICY_ARN\"]" \
+  --context cellDefinition='{
+    "source": { "type": "S3", "location": "YOUR_BUCKET/scripts/" },
+    "cellScripts": {
+      "create": "control-plane/cell/create.sh",
+      "update": "control-plane/cell/update.sh",
+      "delete": "control-plane/cell/delete.sh"
+    },
+    "tenantScripts": {
+      "create": "control-plane/tenant/create.sh",
+      "update": "control-plane/tenant/update.sh",
+      "delete": "control-plane/tenant/delete.sh"
+    },
+    "maxTenants": 10
+  }'
+```
+
+The exact context is what
+[`scripts/integ-control-plane.sh`](./scripts/integ-control-plane.sh)
+`control_plane_context()` assembles: `tenantBuildManagedPolicyArns` is the
+JSON array `["<platformInvokePolicyArn>"]`, and `cellDefinition` names a
+`source` holding this sample's `scripts/` folder (so `control-plane/...`
+resolves), the vendor IdP issuer and audience, the three
+`cellScripts`, and the three `tenantScripts`. control-plane fails at synth if
+an entry of `tenantBuildManagedPolicyArns` is not a managed-policy ARN in its
+own partition and account (ADR-0022).
+
+**Parameters.** The identity stack publishes four parameters under
+`/application-plane/shared/identity/`: `apiUrl` and `topology` (existing), and
+the two the mount adds — `platformInvokePolicyArn` (ADR-0030) and
+`adminPasswordKeyArn` (ADR-0033). For each tenant, `tenant/create.sh` parks
+the first admin's temporary password at
+`/application-plane/tenants/<T>/identity/admin-temporary-password`, a
+`SecureString` encrypted with `AdminPasswordKey` (ADR-0031).
+
+**Collecting the admin password.** The vendor reads the parked password out of
+band:
+
+```bash
+aws ssm get-parameter --with-decryption \
+  --name /application-plane/tenants/<T>/identity/admin-temporary-password \
+  --query Parameter.Value --output text
+```
+
+`--with-decryption` needs `kms:Decrypt` on `AdminPasswordKey`, which the
+deployer grants to whoever collects the password. The control-plane tenant
+build role holds `kms:Encrypt` through SSM only and **cannot** decrypt
+(ADR-0033), so a parked password is never readable from the build log or by
+the role that wrote it.
+
+**Not supported.** `tiered` is refused: a tiered stack needs a `tier` per
+tenant and control-plane has no per-tenant input to carry one, so the create
+and cell scripts exit with `tiered identity needs a per-tenant tier; not
+supported when mounted` (M-R-7). Per-cell identity (one identity stack per
+cell) is a documented seam, not built (mounting spec §11).
+
+**Failure and recovery** (mounting spec §8):
+
+| Failure | Control-plane result | Recovery |
+|---|---|---|
+| identity stack not deployed | cell `CREATE_FAILED` | deploy tenant-identity, `UpdateCell` |
+| `tiered` topology | cell or tenant `CREATE_FAILED` | redeploy identity with a single topology |
+| policy not attached | tenant `CREATE_FAILED`, `HTTP 403` in the build log | redeploy control-plane with the context, then `DeleteTenant` + `CreateTenant` |
+| build killed after the 201, before the park | `CREATE_FAILED` | re-run: the replay sees `ACTIVE` and the slot held (409), so it re-parks nothing; the password is lost, recover with `DeleteUser` then `CreateUser {firstAdmin: true}`, or control-plane `DeleteTenant` + `CreateTenant` |
+| identity row stuck `PROVISIONING` | `CREATE_FAILED` | `DeleteTenant` on tenant-identity, then control-plane `DeleteTenant` |
+| identity `DeleteTenant` fails | `DELETE_FAILED` | control-plane `DeleteTenant` retry re-runs the script |
+
+**Cost.** One customer-managed KMS key per account and Region (about
+$1/month), plus a few encrypt calls per tenant.
+
+Design trail for the mount: the
+[mounting specification](./design/control-plane-mounting.spec.md) and
+ADRs [0028](./adr/0028-ship-the-control-plane-mount-in-this-sample.md),
+[0029](./adr/0029-accept-a-caller-supplied-tenant-id.md),
+[0030](./adr/0030-publish-a-least-privilege-platform-invoke-policy.md),
+[0031](./adr/0031-park-the-first-admin-password-in-a-securestring.md),
+[0032](./adr/0032-make-the-first-admin-a-conditional-write.md),
+[0033](./adr/0033-encrypt-the-parked-password-with-a-customer-key.md).
+
 ## Deployment integration test
 
 The deployment integration test ([`test/integ.identity.ts`](./test/integ.identity.ts),
@@ -376,6 +486,52 @@ the shared `/application-plane/shared/identity/*` parameters during the test,
 because those names are fixed per account and Region and two stacks cannot own
 the same name (ADR-0017); the scenario checks that the publisher's parameters
 name its own stack.
+
+### Joint control-plane mount test
+
+A second deployment integration test
+([`test/integ.control-plane.ts`](./test/integ.control-plane.ts), driven by
+[`scripts/integ-control-plane.sh`](./scripts/integ-control-plane.sh)) proves
+the mount end to end and, per [sample standard §5.2](../../docs/sample-standard.md#5-tests),
+is the **reference implementation of the control-plane wiring**: it deploys
+control-plane through control-plane's own deploy path, never by importing its
+`src/`, and drives the whole flow with only the published parameters and the
+public APIs.
+
+```bash
+export AWS_REGION=eu-central-1
+npx projen integ:control-plane
+```
+
+It stands up `TenantIdentity-shared-pool`, a `TenantIdentityCpSetup` stack (a
+throwaway vendor IdP minting `role: operator` and an S3 bucket holding
+`scripts/control-plane/`), and control-plane itself, then runs the scenario in
+[`test/e2e/control-plane/mount.cp-e2e.test.ts`](./test/e2e/control-plane/mount.cp-e2e.test.ts):
+
+| # | Step | Expected |
+|---|---|---|
+| 1–2 | control-plane `CreateTenant {name, adminEmail=success+…@simulator.amazonses.com}` | 202, cell and tenant poll to `ACTIVE`; `cell/create.sh` found the identity parameters |
+| 3 | tenant-identity `GetTenant(T)` via the test's own SigV4 | 200 `ACTIVE`, same `name` |
+| 4 | tenant-identity `ListUsers(T)` | exactly one user, `admin: true`; `GetTenant` leaks no `firstAdminUsername` |
+| 5 | the parked parameter | `SecureString`, `KeyId` = `adminPasswordKeyArn`; value never printed |
+| 5b | IAM policy simulator, build role, `kms:Decrypt` on the key | `implicitDeny` |
+| 6 | `IssueToken` for the admin with the parked password | 200; access token's `tenant_id` is `T` |
+| 7 | control-plane `UpdateResource(T)` | `ACTIVE`; still one admin; parked parameter version unchanged |
+| 8 | run `tenant/create.sh` a second time with the build's env | exit 0, `already has its first admin`; still one user and one parameter version |
+| 9 | tenant-identity `CreateTenant` with the existing `tenantId` | 409, nothing changed |
+| 9b | `CreateUser {firstAdmin: true}` (taken slot) then `CreateUser {admin: true}` | 409, then 201 — a second *first* admin is refused, a second admin is allowed |
+| 10–11 | control-plane `DeleteTenant(T)` | completes; `GetTenant(T)` 404; parked parameter gone |
+| 12 | teardown from an exit trap: control-plane, setup, identity | no stacks, pools, parameters or log groups with either prefix |
+
+Step 6 **needs the test-aid routes** (`IssueToken`, ADR-0006, the first
+hardening item below): the test asserts they exist and fails with a clear
+message if they were removed. The run takes **about 11 minutes** observed (the
+spec estimated 25–35) and costs under 1 USD. One honest caveat at this head:
+the teardown's leftover-log-group check currently fails because control-plane's
+API access log group is recreated during teardown — control-plane has no log
+drain like this sample's (ADR-0024) — a known open bug in control-plane, not in
+the mount. The `AdminPasswordKey` stays `PendingDeletion` for 7 days after
+teardown (ADR-0033).
 
 ## End-to-end demo
 
@@ -418,15 +574,15 @@ Three Smithy services ([`model/`](./model/)) merged into one REST API
 
 | Operation | HTTP | Returns |
 |---|---|---|
-| `CreateTenant` | `POST /platform/tenants` | 201 — onboards a tenant and its first admin; `tier` required in `tiered`, 400 `UnsupportedInTopology` elsewhere |
+| `CreateTenant` | `POST /platform/tenants` | 201 — onboards a tenant and its first admin; optional `tenantId` (`TenantId` pattern) keeps one id across planes, 409 `ConflictError` if it exists (ADR-0029); `tier` required in `tiered`, 400 `UnsupportedInTopology` elsewhere |
 | `GetTenant` | `GET /platform/tenants/{tenantId}` | 200 — registry read (topology fields vary; `tier` in `tiered`) |
 | `ListTenants` | `GET /platform/tenants` | 200 — paginated registry scan; the issuer allowlist for topology 1 and for premium tenants in `tiered` |
 | `DeleteTenant` | `DELETE /platform/tenants/{tenantId}` | 204 — `DELETING` first, then Cognito clean-up; idempotent |
-| `CreateUser` | `POST /platform/tenants/{tenantId}/users` | 201 — creates/attaches the user; temporary password once |
+| `CreateUser` | `POST /platform/tenants/{tenantId}/users` | 201 — creates/attaches the user; temporary password once; optional `firstAdmin` claims the tenant's single first-admin slot (implies `admin`), 409 `ConflictError` if taken (ADR-0032) |
 | `GetUser` | `GET /platform/tenants/{tenantId}/users/{username}` | 200 |
 | `ListUsers` | `GET /platform/tenants/{tenantId}/users` | 200 — paginated |
 | `UpdateUser` | `PATCH /platform/tenants/{tenantId}/users/{username}` | 200 — sets the admin flag |
-| `DeleteUser` | `DELETE /platform/tenants/{tenantId}/users/{username}` | 204 |
+| `DeleteUser` | `DELETE /platform/tenants/{tenantId}/users/{username}` | 204 — releases the first-admin slot when it deletes the holder, so a lost admin can be replaced (ADR-0032) |
 | `CreateMembership` | `PUT /platform/tenants/{tenantId}/users/{username}/membership` | 204 — topology 3 only; 400 `UnsupportedInTopology` otherwise |
 | `DeleteMembership` | `DELETE /platform/tenants/{tenantId}/users/{username}/membership` | 204 — topology 3 only; 409 on last tenant |
 | `IssueToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token` | 200 — sets a password, signs in; remove before production (ADR-0006) |
@@ -537,6 +693,19 @@ text per code and never echoes Cognito's message or a token.
   **registry as the issuer allowlist**: `ListTenants` carries each tenant's
   issuer, and `DeleteTenant` removes it, so a consumer that checks the issuer
   against the registry stops trusting the pool at once.
+- **The control-plane mount parks a first-admin password, encrypted.** When
+  mounted (see [Mounting under the control plane](#mounting-under-the-control-plane)),
+  `tenant/create.sh` parks the first admin's temporary password in an SSM
+  `SecureString` encrypted with `AdminPasswordKey` (ADR-0031, ADR-0033). The
+  control-plane tenant build role that writes it holds `kms:Encrypt` through
+  SSM only; only a principal the deployer grants `kms:Decrypt` can read it
+  back, so the password is never exposed in a build log or to the role that
+  parked it. Parking is a sample stand-in for real invite delivery (a
+  hardening item). The published `PlatformInvokePolicy` is held exact to the
+  four routes the mount calls, but execute-api ARNs cannot separate a tenant
+  path from the user paths under it, so `GET`/`DELETE /platform/tenants/*`
+  also match `ListUsers`, `GetUser` and `DeleteUser`; that over-grant is
+  accepted and recorded as T-34 in [`threat-model.md`](./threat-model.md).
 
 The full threat model, with every mitigation pointing at an ADR, a code
 location, or a cdk-nag suppression, is in [`threat-model.md`](./threat-model.md).
@@ -587,6 +756,19 @@ Each item maps to a threat-model mitigation (M-n) or threat (T-n).
       so five busy tenants together reach it (T-31, ADR-0025); in `tiered`
       the premium plan is 25 / 50, so two premium tenants reach it. Adjust
       the per-tier limits and add quotas if the business needs them.
+- [ ] **Decide who collects the parked admin password** when mounted under the
+      control plane. Only a principal the deployer grants `kms:Decrypt` on
+      `AdminPasswordKey` can read the parked `SecureString`; grant it to the
+      vendor's reader and to no one wider (ADR-0033, mounting spec §6.5).
+- [ ] **Deliver the first-admin invitation for real** instead of parking it.
+      The mount parks the temporary password as a sample stand-in; a
+      production deployment lets Cognito (or an SES-backed sender) deliver the
+      invitation and parks nothing (ADR-0031 hardening item, mounting spec §11).
+- [ ] **Review the mount's accepted over-grant.** `PlatformInvokePolicy` grants
+      `GET`/`DELETE /platform/tenants/*`, which also reach `ListUsers`,
+      `GetUser` and `DeleteUser` the mount never calls, because execute-api
+      ARNs cannot exclude them (T-34, M-33). Watch the build role in CloudTrail
+      and the API access log, which attributes every `/platform/*` call to it.
 
 ## Design trail
 

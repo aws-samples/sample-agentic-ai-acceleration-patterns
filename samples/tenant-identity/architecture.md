@@ -218,6 +218,45 @@ pool, so either would be a dependency cycle (ADR-0024). The waiter function
 has a role with no permissions and log levels above anything it emits, so it
 writes no logs and cannot recreate a group.
 
+### 3.7 Control-plane mount (ADR-0028..0033)
+
+The stack that publishes the shared parameters (`publishSharedParameters`,
+ADR-0017) also owns the two fixed-name resources the `control-plane` mount
+needs ([`src/identity.cdk.ts`](./src/identity.cdk.ts), `PlatformInvokePolicy` and `AdminPasswordKey`):
+
+- **`PlatformInvokePolicy`** — an `iam.ManagedPolicy` the control-plane tenant
+  build role attaches to call `/platform/*` with SigV4 (ADR-0030). Exactly two
+  statements: `execute-api:Invoke` on the four route ARNs of `PLATFORM_INVOKE_ROUTES`
+  (`POST /platform/tenants`, `GET`/`DELETE /platform/tenants/*`,
+  `POST /platform/tenants/*/users` — the create, get, delete-tenant and
+  first-admin-slot routes the scripts call), and `kms:Encrypt` +
+  `kms:GenerateDataKey` on `AdminPasswordKey`, scoped to
+  `kms:ViaService = ssm.<region>.amazonaws.com`. No `ListTenants`, no test-aid
+  route, no `kms:Decrypt` (M-R-4). The `*` in each route ARN stands for the
+  `{tenantId}` label, but execute-api matching also lets it reach the user
+  routes below it; that over-grant is T-34, and the three ARNs are
+  acknowledged for cdk-nag IAM5 with that row. Its ARN is published at
+  `/application-plane/shared/identity/platformInvokePolicyArn`.
+- **`AdminPasswordKey`** — a symmetric customer-managed `kms.Key`, alias
+  `alias/application-plane/identity/admin-password`, rotation on,
+  `RemovalPolicy.DESTROY` with the minimum 7-day pending window (a KMS key
+  cannot be deleted outright, so teardown is not total for it; ADR-0033,
+  ADR-0019). It keeps the default key policy (account root only), so IAM
+  identity policies decide who encrypts (the build role, through SSM) and who
+  decrypts (whoever the deployer grants `kms:Decrypt`; nothing in this stack
+  holds it). Its ARN is published at
+  `/application-plane/shared/identity/adminPasswordKeyArn`.
+
+The mount's calling code is not in the stack: `scripts/control-plane/{lib.sh,tenant/*.sh,cell/*.sh}`
+run in control-plane's CodeBuild projects, read these parameters, call the
+platform API, and park each first admin's temporary password at
+`/application-plane/tenants/<T>/identity/admin-temporary-password` as a
+`SecureString` under `AdminPasswordKey` (ADR-0031). The create path is the
+reference implementation in [`test/integ.control-plane.ts`](./test/integ.control-plane.ts)
+and [`scripts/integ-control-plane.sh`](./scripts/integ-control-plane.sh); the
+mount as a whole is specified in
+[`design/control-plane-mounting.spec.md`](./design/control-plane-mounting.spec.md).
+
 ## 4. Data model
 
 One table, tenants only (R-10, ADR-0002). `PK=TENANT#<tenantId>`, `SK=META`.
@@ -231,6 +270,7 @@ One table, tenants only (R-10, ADR-0002). `PK=TENANT#<tenantId>`, `SK=META`.
 | `userPoolId`, `appClientId`, `issuer` | `pool-per-tenant` rows only (premium tenants in `tiered`); `issuer` is the allowlist entry a consumer needs (ADR-0018). Standard rows in `tiered` carry none: the `byUserPoolId` index maps a pool to exactly one tenant, so the shared pool's id cannot sit on every standard row |
 | `groupName` | `shared-pool-multi-tenant` only: `t-<tenantId>` |
 | `apiKeyId`, `apiKeyValue` | every topology: the tenant's API Gateway key (ADR-0025), written by `activate`; the value is what the authoriser returns as `usageIdentifierKey`. Not a credential (key source `AUTHORIZER`); never in an API response |
+| `firstAdminUsername` | the tenant's single first-admin slot (ADR-0032): claimed by a conditional write (`attribute_not_exists(firstAdminUsername)`), holds the admin's e-mail (the Cognito username in every topology), released by `DeleteUser` on the holder. Set by `CreateTenant` and by `CreateUser {firstAdmin: true}`; never returned by `GetTenant` |
 | `createdAt`, `updatedAt` | ISO 8601 |
 
 `GetItem`/`BatchGetItem` use consistent reads. `markDeleting` is a conditional
@@ -451,6 +491,44 @@ group outside the stack (ADR-0019, ADR-0024). The stack owns the API execution l
 `API-Gateway-Execution-Logs_<api-id>/prod`) so it, too, is deleted. Because
 `cloudWatchRole: false`, destroy touches no account-wide setting. The result is
 no stack, pool, table, parameter, role, or log group with the sample's prefix.
+
+### 6.7 Control-plane mount: the create path (ADR-0028..0033)
+
+When mounted under the `control-plane` sample, one vendor `CreateTenant` call
+drives both planes. control-plane runs `scripts/control-plane/tenant/create.sh`
+in its tenant CodeBuild project; the script calls this sample's platform API
+with SigV4 under the **same** tenant id (ADR-0029) and parks the first admin's
+temporary password. Only the paths the script actually takes are shown.
+
+```mermaid
+sequenceDiagram
+    participant V as Vendor (JWT)
+    participant CP as control-plane (Step Functions + CodeBuild)
+    participant S as tenant/create.sh
+    participant SSM as SSM Parameter Store
+    participant P as Platform API (SigV4)
+    V->>CP: CreateTenant {name, adminEmail} (202, tenantId=T)
+    CP->>S: run with TENANT_ID=T, TENANT_NAME, ADMIN_EMAIL, OPERATOR_ID
+    S->>SSM: read /application-plane/shared/identity/{apiUrl,topology,adminPasswordKeyArn}
+    S->>S: refuse if topology == tiered (M-R-7)
+    S->>P: GET /platform/tenants/{T}
+    alt 404 (absent)
+        S->>P: POST /platform/tenants {tenantId:T, name, adminEmail}
+        P-->>S: 201 {admin.temporaryPassword}
+        S->>SSM: put SecureString /application-plane/tenants/T/identity/admin-temporary-password (key=AdminPasswordKey)
+    else 200 ACTIVE (replay)
+        S->>P: POST /platform/tenants/{T}/users {email, firstAdmin:true}
+        P-->>S: 201 (park password) or 409 (slot held, nothing to do)
+    end
+    S-->>CP: exit 0 -> build SUCCEEDED -> tenant ACTIVE
+```
+
+The park is the next call after the 201 (M-R-10), so a build killed between
+them loses only one call's worth of state (residual gap, spec §9). The replay
+branch claims the first-admin slot with a conditional write rather than reading
+the user list (ADR-0032), so re-runs are safe. `tenant/delete.sh` is the same
+shape: `DELETE /platform/tenants/{T}` (204 or 404 both success) then
+`delete-parameter` on the parked password.
 
 ## 7. Topology mechanics
 

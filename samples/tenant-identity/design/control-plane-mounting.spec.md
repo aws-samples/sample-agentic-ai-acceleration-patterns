@@ -1,12 +1,14 @@
 # Specification: Mounting Tenant Identity under the Control Plane
 
-> **Status:** Accepted, 2026-10-26. In implementation. This is an addendum to
+> **Status:** Accepted, 2026-10-26. Implemented 2026-10-27. This is an addendum to
 > [`tenant-identity.spec.md`](tenant-identity.spec.md): it specifies how the
 > `control-plane` sample onboards and offboards tenant identity through its
 > provisioning scripts, filling the "Control-plane mounting" seam of
 > tenant-identity §11. It changes both samples; each change is recorded as an
 > Accepted ADR in the sample it touches (tenant-identity ADR-0028 to
-> ADR-0033, control-plane ADR-0022 and ADR-0023).
+> ADR-0033, control-plane ADR-0022 and ADR-0023). The implemented state is
+> documented in the README "Mounting under the control plane" section and
+> `architecture.md` §3.7 and §6.7.
 >
 > Revised 2026-10-26 after a blind review: `tenantId` is typed `TenantId`
 > (§5.1), the first admin is a conditional write (§5.3, ADR-0032), the parked

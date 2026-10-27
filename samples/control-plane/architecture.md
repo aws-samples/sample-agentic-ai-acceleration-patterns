@@ -473,8 +473,9 @@ operation shape:
          to cellBuild.failedStatus + statusReason; end
 2. Choice: tenantBuild present?
      StartBuild (.sync) — tenant CodeBuild project, with a task-level timeout:
-       env: SCRIPT_PATH=tenantBuild.scriptPath, TENANT_ID, CELL_ID,
-            OPERATION=tenantBuild.operation, OPERATOR_ID (ADR-019),
+       env: SCRIPT_PATH=tenantBuild.scriptPath, TENANT_ID,
+            TENANT_NAME (the tenant's stored name, every operation; ADR-023),
+            CELL_ID, OPERATION=tenantBuild.operation, OPERATOR_ID (ADR-019),
             ADMIN_EMAIL (create only; empty string otherwise)
      success (choice on tenantBuild.operation):
        delete → TransactWriteItems with a stable ClientRequestToken:
@@ -558,6 +559,15 @@ Design points:
   parameters. Both are shared fleet roles, so provisioning source remains
   trusted vendor code and the role policies remain documented hardening
   points.
+- The optional `tenantBuildManagedPolicyArns` deployment input (§10, ADR-022)
+  attaches deployer-supplied customer-managed policies to the **tenant project
+  role**, in addition to the grants above, so a tenant script can call an
+  application-plane API with a policy the application plane publishes
+  (producer-owned least privilege). Synthesis validates each entry is a
+  managed-policy ARN in this stack's own partition and account. The policies
+  are attached by reference, never read: the control plane learns an ARN list,
+  not what a policy is for (P-3). The role runs every tenant's script, so what
+  is attached widens the blast radius of all of them.
 
 ## 8. Smithy Model Sketch
 
@@ -667,11 +677,14 @@ to SSM (`/control-plane/tenant-api-url`) for tooling/demo convenience.
 | `cellDefinition.cellScripts` (`{create, update, delete}`) | shared cell deployment lifecycle |
 | `cellDefinition.tenantScripts` (`{create, update, delete}`) | per-tenant deployment lifecycle |
 | `cellDefinition.maxTenants` | cell capacity, stamped at cell creation (ADR-012) |
+| `tenantBuildManagedPolicyArns` (optional) | customer-managed IAM policy ARNs attached to the tenant build role, in addition to its §7 SSM grants (ADR-022) |
 
 Supplied via CDK context. Synthesis validates `maxTenants` as an integer of
 at least one and requires non-empty source and script values; it warns (does
 not fail) when `source.sourceVersion` is absent or not a full commit SHA
-(ADR-020). Changing `cellDefinition` affects only cells created after the
+(ADR-020). When `tenantBuildManagedPolicyArns` is given, synthesis fails if any
+entry is not a managed-policy ARN in the stack's own partition and account
+(ADR-022). Changing `cellDefinition` affects only cells created after the
 change; existing cells keep their stamped definition.
 
 ## 11. Deployment Lessons (carried forward)
