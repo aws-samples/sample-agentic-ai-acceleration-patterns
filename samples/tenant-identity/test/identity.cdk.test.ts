@@ -46,6 +46,30 @@ function allPolicyStatements(template: Template): any[] {
   return statements;
 }
 
+/**
+ * Every IAM identity-policy statement in the template, wherever it lives:
+ * AWS::IAM::Policy, AWS::IAM::ManagedPolicy, and the inline `Policies` of
+ * AWS::IAM::Role. A grant in any of the three is a grant.
+ */
+function allIamStatements(template: Template): any[] {
+  const statements: any[] = [...allPolicyStatements(template)];
+  for (const policy of Object.values(template.findResources('AWS::IAM::ManagedPolicy')) as any[]) {
+    statements.push(...policy.Properties.PolicyDocument.Statement);
+  }
+  for (const role of Object.values(template.findResources('AWS::IAM::Role')) as any[]) {
+    for (const inline of role.Properties.Policies ?? []) {
+      statements.push(...inline.PolicyDocument.Statement);
+    }
+  }
+  return statements;
+}
+
+/** The resources a statement names, as strings (intrinsics rendered via JSON). */
+function resourcesOf(statement: any): string[] {
+  const r = statement.Resource ?? [];
+  return (Array.isArray(r) ? r : [r]).map((x: unknown) => (typeof x === 'string' ? x : JSON.stringify(x)));
+}
+
 /** The DefaultPolicy statements for a function whose logical id starts with `prefix`. */
 function policyStatementsForRole(template: Template, rolePrefix: string): any[] {
   const policies = template.findResources('AWS::IAM::Policy');
@@ -1041,9 +1065,28 @@ describe('TenantIdentityStack - control-plane mount (ADR-0030, ADR-0033)', () =>
   test.each(DEPLOYMENTS)('nothing in the stack holds kms:Decrypt on the admin-password key (§6.4) [%s]', (topology) => {
     const template = synth(topology);
     const { keyId } = mount(template);
-    const statements = allPolicyStatements(template);
-    const touching = statements.filter((s) => JSON.stringify(s.Resource).includes(keyId));
-    expect(touching).toEqual([]);
+    // Inline policies, managed policies and role-inline policies alike.
+    const statements = allIamStatements(template);
+    expect(statements.length).toBeGreaterThan(0);
+    // Nothing is granted on the key itself. The only statement allowed to
+    // name it is the §6.3 Encrypt+GenerateDataKey grant in the published
+    // policy, and that one must not carry Decrypt or a wildcard.
+    const touching = statements.filter((s) => resourcesOf(s).some((r) => r.includes(keyId)));
+    for (const s of touching) {
+      expect(s.Effect).toBe('Allow');
+      expect(actionsOf(s).sort()).toEqual(['kms:Encrypt', 'kms:GenerateDataKey']);
+    }
+    expect(touching.length).toBeLessThanOrEqual(1);
+    // No role in the stack (function DefaultPolicies) names the key at all.
+    expect(allPolicyStatements(template).filter((s) => resourcesOf(s).some((r) => r.includes(keyId)))).toEqual([]);
+    // And no statement reaches the key by a wildcard instead: kms:Decrypt,
+    // kms:* or * on Resource '*' (or any resource pattern that is not the
+    // alarm topic's own key) would decrypt the parked password just as well.
+    const decrypting = (a: string): boolean => a === 'kms:Decrypt' || a === 'kms:*' || a === '*';
+    const wildcardDecrypt = statements.filter(
+      (s) => s.Effect === 'Allow' && actionsOf(s).some(decrypting) && resourcesOf(s).some((r) => r === '*' || r.includes('kms:*')),
+    );
+    expect(wildcardDecrypt).toEqual([]);
   });
 
   test.each(DEPLOYMENTS)('publishes both ARNs at the fixed parameter names [%s]', (topology) => {
