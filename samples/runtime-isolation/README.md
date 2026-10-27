@@ -161,7 +161,7 @@ key when a value is missing or malformed.
 
 | Context key | Values | Default | What it does |
 |---|---|---|---|
-| `ingress` | `api-gateway`, `agentcore-gateway` | required | The ingress (ADR-0003). It is in the stack name, `RuntimeIsolation-<ingress>`, so both can be deployed side by side |
+| `ingress` | `api-gateway`, `agentcore-gateway` | required | The ingress (ADR-0003). It is in the stack name, `RuntimeIsolation-<ingress>`, so both can be deployed side by side (see [Two ingresses in one account](#two-ingresses-in-one-account)) |
 | `session` | `user`, `tenant`, `off` | `off` | Session mapping (ADR-0013). `user` keys the unit on `tenant_id` and `sub`; `tenant` on `tenant_id` only |
 | `requiredScopes` | comma-separated scopes, e.g. `tenant-api/read` | unset (no check) | Scopes every token must carry (ADR-0005) |
 | `forwardUserToken` | `true`, `false` | `false` | Forward the user's token to the agent (ADR-0006) |
@@ -174,6 +174,7 @@ key when a value is missing or malformed.
 | `requestsPerMinute` | non-negative integer | construct default, 60 | Requests per tenant per minute; `0` turns the limit off (ADR-0020) |
 | `outputTokensPerMinute` | non-negative integer | unset (off) | Output tokens per tenant per minute; `api-gateway` only (ADR-0020) |
 | `identityParameterPlaceholders` | `true`, `false` | `false` | Build only: synthesise with placeholder pool and client ids instead of reading tenant-identity's parameters |
+| `publishParameters` | `true`, `false` | `true` | Write the `/application-plane/shared/agent-runtime/*` parameters. Set `false` on a second ingress deployed beside the first |
 
 The demo deploy that turns every module on (used by
 [`scripts/demo.sh`](./scripts/demo.sh)):
@@ -181,6 +182,22 @@ The demo deploy that turns every module on (used by
 ```bash
 npx cdk deploy --context ingress=api-gateway --context session=user --context requiredScopes=tenant-api/read --context forwardUserToken=true --context tvm=true
 ```
+
+### Two ingresses in one account
+
+The published parameter names are account-wide, so only one stack per account
+and Region may write them. The first deploy publishes; the second sets
+`publishParameters=false`, or CloudFormation refuses it with
+`IngressParameter already exists`:
+
+```bash
+npx cdk deploy --context ingress=api-gateway
+npx cdk deploy --context ingress=agentcore-gateway --context publishParameters=false
+```
+
+The parameters then describe the first stack (`ingress` says which); a
+consumer that wants the other reads that stack's `EndpointUrl` output.
+The integration test deploys several stacks this way (`test/integ.runtime.ts`).
 
 After deploy, turn on the two account-level billing options in
 [Costs](#turn-on-model-cost-attribution-one-time-account-level) so model cost
