@@ -402,10 +402,12 @@ resolves), the vendor IdP issuer and audience, the three
 an entry of `tenantBuildManagedPolicyArns` is not a managed-policy ARN in its
 own partition and account (ADR-0022).
 
-**Parameters.** The identity stack publishes four parameters under
-`/application-plane/shared/identity/`: `apiUrl` and `topology` (existing), and
-the two the mount adds — `platformInvokePolicyArn` (ADR-0030) and
-`adminPasswordKeyArn` (ADR-0033). For each tenant, `tenant/create.sh` parks
+**Parameters.** The mount reads four of the parameters the identity stack
+publishes under `/application-plane/shared/identity/`: `apiUrl` and
+`topology` (existing), and the two the mount adds — `platformInvokePolicyArn`
+(ADR-0030) and `adminPasswordKeyArn` (ADR-0033). The stack publishes others
+too (`userPoolId` and `appClientId` in `shared-pool`); the mount does not use
+them. For each tenant, `tenant/create.sh` parks
 the first admin's temporary password at
 `/application-plane/tenants/<T>/identity/admin-temporary-password`, a
 `SecureString` encrypted with `AdminPasswordKey` (ADR-0031).

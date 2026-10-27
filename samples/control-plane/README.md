@@ -99,13 +99,10 @@ One optional context input, `tenantBuildManagedPolicyArns`, attaches
 deployer-supplied customer-managed IAM policies to the tenant build role in
 addition to its SSM grants, so a tenant script can call an application-plane
 API with a policy that plane publishes (ADR-022). Each entry must be a
-managed-policy ARN in the stack's own partition and account, or synth fails:
+managed-policy ARN in the stack's own partition and account, or synth fails.
+Add this line to the deploy command above:
 
 ```bash
-npx cdk deploy \
-  --context vendorIdpIssuerUrl=https://YOUR_ISSUER \
-  --context vendorIdpAudience=YOUR_AUDIENCE \
-  --context cellDefinition='{ ... }' \
   --context tenantBuildManagedPolicyArns='["arn:aws:iam::123456789012:policy/PlatformInvokePolicy"]'
 ```
 
