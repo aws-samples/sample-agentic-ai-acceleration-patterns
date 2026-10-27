@@ -7,7 +7,11 @@
 > and all 8 alarm actions published to the SNS topic (M-31). Teardown verified
 > to leave no stack, pool, table, parameter, role or log group: the destroy's
 > leftover check reported no tagged pool and no owned log group 90 s after
-> `TenantDrain` and the API stage were gone. ADRs: see
+> `TenantDrain` and the API stage were gone. Last green control-plane mount
+> integration test (`npx projen integ:control-plane`): 2026-10-27, eu-west-1,
+> mounting spec §10 steps 1–12 including 5b and 9b: 11/11 e2e assertions
+> passed in about 11 minutes, and teardown left no stack, parameter, pool,
+> REST API or log group. ADRs: see
 > [`adr/`](./adr/README.md) (ADR-0001..0033).
 
 This document describes what the sample deploys and runs, not the plan. Where
