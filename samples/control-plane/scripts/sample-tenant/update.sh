@@ -27,11 +27,19 @@ EXISTING=$(aws ssm get-parameter \
   --query Parameter.Value --output text)
 ADMIN_USER=$(echo "${EXISTING}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["adminUser"])')
 
+# Build the JSON with a real encoder (an e-mail may hold a quote) and hand it
+# to the CLI through a 0600 file, so the e-mail never reaches argv.
+VALUE_FILE=$(mktemp)
+chmod 600 "$VALUE_FILE"
+trap 'rm -f "$VALUE_FILE"' EXIT
+ENDPOINT="${TENANT_ID}.${CELL_SHARED_ENDPOINT}" ADMIN_USER_VALUE="${ADMIN_USER}" \
+  python3 -c 'import json,os; print(json.dumps({"endpoint": os.environ["ENDPOINT"], "cellId": os.environ["CELL_ID"], "adminUser": os.environ["ADMIN_USER_VALUE"], "provisionedBy": "update.sh"}, separators=(",", ":")))' \
+  > "$VALUE_FILE"
 aws ssm put-parameter \
   --name "/application-plane/tenants/${TENANT_ID}" \
   --type String \
   --overwrite \
-  --value "{\"endpoint\":\"${TENANT_ID}.${CELL_SHARED_ENDPOINT}\",\"cellId\":\"${CELL_ID}\",\"adminUser\":\"${ADMIN_USER}\",\"provisionedBy\":\"update.sh\"}"
+  --value "file://$VALUE_FILE"
 # Log the parameter NAME, never its VALUE - build logs are readable by
 # anyone with log-group access (see scripts/CONVENTIONS.md).
 echo "Wrote /application-plane/tenants/${TENANT_ID}"
