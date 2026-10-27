@@ -9,13 +9,18 @@
  * jitter, so a fleet of containers does not refresh in lock step). The
  * cache is bounded (ADR-0022): at most `cacheMaxEntries` tag sets, least
  * recently used evicted first, expired entries dropped on the way, and
- * concurrent misses for one tag set share one STS call. It never
- * logs a value: not a tag, not a key, not a token. How the credentials reach
- * the backend is the backend's concern (src/backend).
+ * concurrent misses for one tag set share one STS call. A hot tag set is
+ * refreshed ahead of time (ADR-0023): in the two minutes before the margin
+ * a request is served from the cache and one STS call runs in the
+ * background, so a busy tenant never waits for STS after its first request.
+ * It never logs a value: not a tag, not a key, not a token. How the
+ * credentials reach the backend is the backend's concern (src/backend).
  */
 
 import { AssumeRoleCommand, STSClient, type Tag } from '@aws-sdk/client-sts';
 import type { TvmConfig } from './config';
+import { sharedHandler } from './http';
+import { errorName, log } from './logger';
 import type { VerifiedClaims } from './verifier';
 
 /** Reserved tag keys the ingress always sets or owns (spec §3.3). */
@@ -26,6 +31,8 @@ export const USER_TAG_KEY = 'UserId';
 export const REFRESH_MARGIN_MS = 120_000;
 /** Up to this much extra margin, chosen once per cache entry. */
 export const REFRESH_JITTER_MS = 30_000;
+/** Within this much of the margin, a hit is served and a refresh starts in the background (ADR-0023). */
+export const REFRESH_AHEAD_MS = 120_000;
 
 /** Default bound on cached tag sets per ingress instance (ADR-0022). */
 export const DEFAULT_CACHE_MAX_ENTRIES = 1000;
@@ -105,7 +112,7 @@ export class TokenVendingMachine {
   private readonly maxEntries: number;
 
   constructor(private readonly config: TvmConfig, deps: TokenVendingMachineDependencies = {}) {
-    this.sts = deps.sts ?? new STSClient({});
+    this.sts = deps.sts ?? new STSClient({ requestHandler: sharedHandler() });
     this.now = deps.now ?? Date.now;
     this.random = deps.random ?? Math.random;
     this.maxEntries = config.cacheMaxEntries ?? DEFAULT_CACHE_MAX_ENTRIES;
@@ -121,8 +128,12 @@ export class TokenVendingMachine {
     const hit = this.cache.get(key);
     if (hit !== undefined) {
       this.cache.delete(key);
-      if (hit.expiresAt - this.now() > hit.margin) {
+      const remaining = hit.expiresAt - this.now();
+      if (remaining > hit.margin) {
         this.cache.set(key, hit);
+        if (remaining <= hit.margin + REFRESH_AHEAD_MS) {
+          this.refreshAhead(claims, tags, key);
+        }
         return { credentials: hit.credentials, cached: true };
       }
     }
@@ -130,13 +141,28 @@ export class TokenVendingMachine {
     if (pending !== undefined) {
       return { credentials: await pending, cached: true };
     }
-    const call = this.assume(claims, tags, key);
+    return { credentials: await this.singleFlight(claims, tags, key), cached: false };
+  }
+
+  /** One AssumeRole per tag set at a time; a concurrent miss awaits the same call. */
+  private singleFlight(claims: VerifiedClaims, tags: Tag[], key: string): Promise<VendedCredentials> {
+    const call = this.assume(claims, tags, key).finally(() => this.inFlight.delete(key));
     this.inFlight.set(key, call);
-    try {
-      return { credentials: await call, cached: false };
-    } finally {
-      this.inFlight.delete(key);
+    return call;
+  }
+
+  /**
+   * Starts a refresh for a still-fresh entry without waiting for it. A
+   * failure is logged by name only; the entry stays and the next request
+   * past the margin retries on the request path as before.
+   */
+  private refreshAhead(claims: VerifiedClaims, tags: Tag[], key: string): void {
+    if (this.inFlight.has(key)) {
+      return;
     }
+    this.singleFlight(claims, tags, key).catch((error) => {
+      log.warn('tvm refresh-ahead failed; the entry stays until its margin', { error: errorName(error) });
+    });
   }
 
   private async assume(claims: VerifiedClaims, tags: Tag[], key: string): Promise<VendedCredentials> {

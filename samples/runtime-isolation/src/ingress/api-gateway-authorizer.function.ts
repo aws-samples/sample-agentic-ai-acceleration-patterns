@@ -27,8 +27,9 @@ const verifier = new TokenVerifier({
   allowedScopes: config.delegation.allowedScopes,
 });
 // Fetch the discovery document and JWKS during init, at boosted CPU and off
-// the first request's path, instead of inside the first verify.
-verifier.warm();
+// the first request's path, instead of inside the first verify (ADR-0023).
+// The first request awaits it; a failure resolves too and verify() retries.
+const ready = verifier.warm();
 
 /** The policy for one method ARN. Allow carries the tenant context; Deny carries none. */
 export function buildPolicy(
@@ -57,6 +58,7 @@ function authorizationHeader(event: APIGatewayRequestAuthorizerEvent): string | 
 }
 
 export async function handler(event: APIGatewayRequestAuthorizerEvent): Promise<APIGatewayAuthorizerResult> {
+  await ready;
   try {
     const claims = await verifier.verify(bearerToken(authorizationHeader(event)));
     return buildPolicy(event.methodArn, 'Allow', { tenantId: claims.tenantId, sub: claims.sub });

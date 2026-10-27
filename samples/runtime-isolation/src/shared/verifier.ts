@@ -114,13 +114,21 @@ export class TokenVerifier {
   }
 
   /**
-   * Starts the discovery and JWKS fetch now, so a container that calls this
-   * at init has them in hand for its first request. A failure is swallowed
-   * here (resolve() resets, so the next verify retries) and never surfaces
-   * from init.
+   * Fetches the discovery document and then the JWKS now, so a container
+   * that calls this at init has both in hand for its first request
+   * (ADR-0023; jose fetches the JWKS lazily on the first verify otherwise).
+   * Resolves when both are fetched or when either failed: a failure is
+   * swallowed here (resolve() resets, so the next verify retries) and never
+   * surfaces from init.
    */
-  warm(): void {
-    this.resolve().catch(() => undefined);
+  async warm(): Promise<void> {
+    try {
+      const { getKey } = await this.resolve();
+      const remote = getKey as JWTVerifyGetKey & { reload?: () => Promise<void> };
+      await remote.reload?.();
+    } catch {
+      return undefined;
+    }
   }
 
   /** Verifies a raw token (no `Bearer` prefix). Throws TokenError. */

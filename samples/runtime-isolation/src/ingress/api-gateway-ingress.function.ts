@@ -39,6 +39,8 @@ export interface HandlerDependencies {
   readonly metricsOut?: (line: string) => void;
   /** Emit per-tenant EMF metrics (ADR-0021). Default false. */
   readonly perTenantMetrics?: boolean;
+  /** Resolves once init's pre-connects are done (ADR-0023); the first request awaits it. */
+  readonly ready?: Promise<void>;
 }
 
 function authorizationHeader(event: APIGatewayProxyEvent): string | undefined {
@@ -174,12 +176,11 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
 function defaultDependencies(): HandlerDependencies {
   const config = readIngressConfig();
   const pipeline = pipelineFor(config);
-  pipeline.warm();
-  return {
-    pipeline,
-    backend: new AgentCoreRuntimeBackend(requireEnv(ENV.RUNTIME_ARN)),
-    perTenantMetrics: config.perTenantMetrics,
-  };
+  const backend = new AgentCoreRuntimeBackend(requireEnv(ENV.RUNTIME_ARN));
+  // The connections to STS, DynamoDB and the Runtime endpoint open during
+  // init, in parallel with the verifier's fetches (ADR-0023).
+  const ready = Promise.all([pipeline.warm(), backend.warm()]).then(() => undefined);
+  return { pipeline, backend, perTenantMetrics: config.perTenantMetrics, ready };
 }
 
 type StreamHandler = StreamifyHandler<APIGatewayProxyEvent, void>;
@@ -198,6 +199,7 @@ let deps: HandlerDependencies | undefined = onLambda ? defaultDependencies() : u
 
 export const handler: StreamHandler = streamify(async (event, responseStream) => {
   deps ??= defaultDependencies();
+  await deps.ready;
   let stream: Writable | undefined;
   const writer: ResponseWriter = {
     start: (statusCode, headers) => {

@@ -57,6 +57,8 @@ export interface InterceptorDependencies {
   /** Emit per-tenant EMF metrics (ADR-0021). Default false. */
   readonly perTenantMetrics?: boolean;
   readonly now?: () => number;
+  /** Resolves once init's pre-connects are done (ADR-0023); the first request awaits it. */
+  readonly ready?: Promise<void>;
 }
 
 /** Case-insensitive header lookup. */
@@ -167,10 +169,11 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
 function defaultDependencies(): InterceptorDependencies {
   const config = readIngressConfig();
   const pipeline = pipelineFor(config);
-  pipeline.warm();
-  // The interceptor never invokes the Runtime itself; the backend object
-  // supplies only the header transport. The ARN is not needed for that.
-  return { pipeline, backend: new AgentCoreRuntimeBackend(''), perTenantMetrics: config.perTenantMetrics };
+  // STS and DynamoDB connections open during init (ADR-0023). The interceptor
+  // never invokes the Runtime itself; the backend object supplies only the
+  // header transport, so no Runtime connection is opened here.
+  const ready = pipeline.warm();
+  return { pipeline, backend: new AgentCoreRuntimeBackend(''), perTenantMetrics: config.perTenantMetrics, ready };
 }
 
 // Built during init on the Lambda runtime (the config is present there), so
@@ -180,5 +183,6 @@ let deps: InterceptorDependencies | undefined = process.env.AWS_LAMBDA_FUNCTION_
 
 export async function handler(event: InterceptorEvent): Promise<InterceptorOutput> {
   deps ??= defaultDependencies();
+  await deps.ready;
   return intercept(event, deps);
 }

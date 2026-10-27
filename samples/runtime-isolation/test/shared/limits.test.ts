@@ -4,7 +4,7 @@
 import { ConditionalCheckFailedException, DynamoDBClient, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
 import { mockClient } from 'aws-sdk-client-mock';
 import 'aws-sdk-client-mock-jest';
-import { TenantLimiter, type TenantLimitsConfig, windowKey } from '../../src/shared/limits';
+import { LIMITER_CLIENT, TenantLimiter, type TenantLimitsConfig, windowKey } from '../../src/shared/limits';
 
 /** ADR-0020: one conditional UpdateItem per request, 429 on a limit hit, fail-open on a DynamoDB fault. */
 describe('TenantLimiter', () => {
@@ -27,6 +27,13 @@ describe('TenantLimiter', () => {
 
   const limiter = (overrides: Partial<TenantLimitsConfig> = {}) =>
     new TenantLimiter({ tableName: 'TenantLimits', requestsPerMinute: 60, ...overrides }, { dynamo: new DynamoDBClient({}), now: () => NOW });
+
+  it('the default client waits a bounded time under impairment (ADR-0023): two attempts, short timeouts', async () => {
+    const client = (new TenantLimiter({ tableName: 'TenantLimits', requestsPerMinute: 60 }) as any).dynamo as DynamoDBClient;
+    expect(await client.config.maxAttempts()).toBe(2);
+    const handler = await (client.config.requestHandler as any).configProvider;
+    expect(handler).toMatchObject({ connectionTimeout: LIMITER_CLIENT.connectionTimeout, requestTimeout: LIMITER_CLIENT.requestTimeout });
+  });
 
   it('the window key is TENANT#<id>#<epoch minute>', () => {
     expect(windowKey('tenant-a', NOW)).toBe(`TENANT#tenant-a#${MINUTE}`);
