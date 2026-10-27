@@ -313,6 +313,33 @@ Both ingresses stream: the first event of `stream 10` arrives after about
 0.2 s and the last after about 10 s. This is one run from one client; it is
 an input to ADR-0009, not a benchmark.
 
+[`scripts/perf.sh`](./scripts/perf.sh) measures the shapes a caller sees
+against a deployed stack: the first request of a run (cold ingress Lambda
+and a new microVM), a new conversation per request, a warm conversation,
+the same with a one-word model prompt, and N parallel requests. It creates
+one tenant and deletes it on exit. The server-side split (Lambda init, the
+ingress's own work, the Runtime's microVM boot) is in the ingress log group,
+as the script's last line says (ADR-0023).
+
+```bash
+AWS_REGION=eu-central-1 scripts/perf.sh
+ENDPOINT=<EndpointUrl output> AWS_REGION=eu-central-1 scripts/perf.sh
+```
+
+The second form measures a stack deployed with `publishParameters=false`.
+Measured 2026-10-27 in `eu-central-1`, client p50 of one run per ingress, same build:
+
+| Step | api-gateway | agentcore-gateway |
+|---|---|---|
+| New conversation, `report` probe (microVM start) | 1.4 s | 1.5 s |
+| Warm conversation, `report` probe | 0.20 s | 0.29 s |
+| Warm conversation, one-word model prompt (Nova Lite) | 0.5 s | 0.6 s |
+| Ingress Lambda, cold environment, its own work on the first request | ~0.2 s | not measured |
+
+The microVM start is the Runtime's and is the same on both ingresses. On
+`agentcore-gateway` the first byte and the last byte arrive together on
+every call: the Gateway buffers the Runtime's stream (spike V-4).
+
 ## Demo
 
 [`scripts/demo.sh`](./scripts/demo.sh) walks the primary flow against a
