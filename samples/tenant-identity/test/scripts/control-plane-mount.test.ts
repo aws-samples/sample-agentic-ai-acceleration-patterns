@@ -13,6 +13,7 @@ import {
   curlRequests,
   FIXTURE,
   IDENTITY_NS,
+  NEXT_TOKEN,
   notFound,
   PARKED_PARAM,
   runScript,
@@ -22,6 +23,7 @@ import {
   tenantEnv,
   TIERED_REFUSAL,
   userCreated,
+  usersPage,
 } from './mount-harness';
 
 /**
@@ -35,6 +37,9 @@ const API = FIXTURE.apiUrl; // ends with '/'
 const GET_TENANT = `GET ${API}platform/tenants/${FIXTURE.tenantId}`;
 const POST_TENANTS = `POST ${API}platform/tenants`;
 const POST_USERS = `POST ${API}platform/tenants/${FIXTURE.tenantId}/users`;
+const GET_USERS = `GET ${API}platform/tenants/${FIXTURE.tenantId}/users`;
+const GET_USERS_NEXT = `${GET_USERS}?nextToken=${encodeURIComponent(NEXT_TOKEN)}`;
+const EMAIL_IN_USE = 'ADMIN_EMAIL is probably already in use in the shared pool';
 const DELETE_TENANT = `DELETE ${API}platform/tenants/${FIXTURE.tenantId}`;
 /** A real `set -x` / `set -ex` command at the start of a line (comments mentioning it are fine). */
 const SET_X = /^\s*set\s+-[a-zA-Z]*x/m;
@@ -50,6 +55,27 @@ function run(...args: Parameters<typeof runScript>): RunResult {
 function putParameterCalls(result: RunResult) {
   return result.calls.filter((c) => c.tool === 'aws' && c.argv[0] === 'ssm' && c.argv[1] === 'put-parameter');
 }
+
+/** The password a put-parameter call parked: read from its `--value file://` file, never from argv. */
+function parkedValue(call: RunResult['calls'][number]): string | undefined {
+  expect(argAfter(call.argv, '--value')).toMatch(/^file:\/\/\//);
+  return call.value;
+}
+
+/** `aws ssm get-parameter` calls on the parked password (the m2 existence check, without decryption). */
+function parkedChecks(result: RunResult) {
+  return result.calls.filter(
+    (c) => c.tool === 'aws' && c.argv[1] === 'get-parameter' && argAfter(c.argv, '--name') === PARKED_PARAM,
+  );
+}
+
+/** Replay after the slot is held: ACTIVE, 409 on the slot, one admin in the list, password parked. */
+const slotHeld = {
+  env: tenantEnv(),
+  params: allParams(),
+  curl: [tenantActive(), conflict, usersPage([true])],
+  parkedParameter: true,
+};
 
 describe('scripts/control-plane layout', () => {
   const scripts = ['tenant/create.sh', 'tenant/update.sh', 'tenant/delete.sh', 'cell/create.sh', 'cell/update.sh', 'cell/delete.sh'];
@@ -91,7 +117,32 @@ describe('tenant/create.sh', () => {
     const r = run('tenant/create.sh', { env: tenantEnv(), params: allParams({ topology: undefined }) });
     expect(r.status).toBe(1);
     expect(r.stderr).toContain(`${IDENTITY_NS}/topology`);
+    expect(r.stderr).toContain('deploy tenant-identity');
     expect(curlRequests(r)).toEqual([]);
+  });
+
+  it('step 1: a denied read names the parameter and the error class, not a missing deployment', () => {
+    const r = run('tenant/create.sh', {
+      env: tenantEnv(),
+      params: allParams(),
+      getParameterDenied: [`${IDENTITY_NS}/apiUrl`],
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`${IDENTITY_NS}/apiUrl`);
+    expect(r.stderr).toContain('AccessDeniedException');
+    expect(r.stderr).not.toContain('deploy tenant-identity');
+    expect(r.stderr).not.toContain('not authorized'); // the class, never the CLI's full text
+    expect(curlRequests(r)).toEqual([]);
+  });
+
+  it('M-P-1: a TENANT_ID that is not a ULID exits 1 before any call', () => {
+    for (const bad of ['not-a-ulid', '01ARZ3NDEKTSV4RRFFQ69G5FA', '01ARZ3NDEKTSV4RRFFQ69G5FAV/x', 'ILOU3NDEKTSV4RRFFQ69G5FAV1']) {
+      const r = run('tenant/create.sh', { env: tenantEnv({ TENANT_ID: bad }), params: allParams() });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('TENANT_ID is not a ULID');
+      expect(r.stderr).not.toContain(bad);
+      expect(r.calls).toHaveLength(0);
+    }
   });
 
   it('M-R-11: a missing adminPasswordKeyArn exits 1 before any write or platform call', () => {
@@ -166,8 +217,15 @@ describe('tenant/create.sh', () => {
       expect(argAfter(put.argv, '--type')).toBe('SecureString');
       expect(argAfter(put.argv, '--key-id')).toBe(FIXTURE.keyArn);
       expect(argAfter(put.argv, '--name')).toBe(PARKED_PARAM);
-      expect(argAfter(put.argv, '--value')).toBe(FIXTURE.password);
+      expect(parkedValue(put)).toBe(FIXTURE.password);
       expect(put.argv).toContain('--overwrite');
+    });
+
+    it('passes the password through the 0600 request file, never on argv', () => {
+      const [put] = putParameterCalls(r);
+      expect(put.argv.join(' ')).not.toContain(FIXTURE.password);
+      expect(put.value).toBe(FIXTURE.password);
+      expect(r.scratchLeftovers).toEqual([]); // the scratch directory is gone with the process
     });
 
     it('logs the parameter name, the operator and the tenant id, never the value', () => {
@@ -185,15 +243,32 @@ describe('tenant/create.sh', () => {
     expect(putParameterCalls(r)).toHaveLength(0);
   });
 
-  it('step 4: a failed park fails the build (never a silent success)', () => {
+  it('step 4: a park that keeps failing is retried three times, then fails the build naming the parameter', () => {
     const r = run('tenant/create.sh', {
       env: tenantEnv(),
       params: allParams(),
       curl: [notFound, created()],
       putParameterFails: true,
     });
-    expect(r.status).not.toBe(0);
-    expect(putParameterCalls(r)).toHaveLength(1);
+    expect(r.status).toBe(1);
+    expect(putParameterCalls(r)).toHaveLength(3);
+    expect(r.stderr).toContain('ThrottlingException');
+    expect(r.stderr).toContain(`put-parameter ${PARKED_PARAM} failed after 3 attempts`);
+    expect(r.stderr).toContain('spec §8');
+  });
+
+  it('step 4: a transient park failure is retried and the second attempt parks the same password', () => {
+    const r = run('tenant/create.sh', {
+      env: tenantEnv(),
+      params: allParams(),
+      curl: [notFound, created()],
+      putParameterFails: 1,
+    });
+    expect(r.status).toBe(0);
+    const puts = putParameterCalls(r);
+    expect(puts).toHaveLength(2);
+    expect(parkedValue(puts[1])).toBe(FIXTURE.password);
+    expect(r.stdout).toContain(`Parked the first admin's temporary password at ${PARKED_PARAM}`);
   });
 
   it('step 4: 409 (a racing create won) re-reads once, then claims the first-admin slot', () => {
@@ -205,16 +280,31 @@ describe('tenant/create.sh', () => {
     expect(r.status).toBe(0);
     expect(curlRequests(r)).toEqual([GET_TENANT, POST_TENANTS, GET_TENANT, POST_USERS]);
     const [put] = putParameterCalls(r);
-    expect(argAfter(put.argv, '--value')).toBe(FIXTURE.replayPassword);
+    expect(parkedValue(put)).toBe(FIXTURE.replayPassword);
   });
 
-  it('step 4: 409 then still not ACTIVE exits 1 without a third read', () => {
+  it('step 4: 409 then PROVISIONING exits 1 with "re-run later" and no third read', () => {
     const r = run('tenant/create.sh', {
       env: tenantEnv(),
       params: allParams(),
       curl: [notFound, conflict, tenantActive('PROVISIONING')],
     });
     expect(r.status).toBe(1);
+    expect(r.stderr).toContain('re-run later');
+    expect(curlRequests(r)).toEqual([GET_TENANT, POST_TENANTS, GET_TENANT]);
+    expect(putParameterCalls(r)).toHaveLength(0);
+  });
+
+  it('step 4: 409 then still ABSENT (shared pool: the e-mail is taken) exits 1 naming the cause, not "re-run later"', () => {
+    const r = run('tenant/create.sh', {
+      env: tenantEnv(),
+      params: allParams(),
+      curl: [notFound, conflict, notFound],
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('HTTP 409');
+    expect(r.stderr).toContain(EMAIL_IN_USE);
+    expect(r.stderr).not.toContain('re-run later');
     expect(curlRequests(r)).toEqual([GET_TENANT, POST_TENANTS, GET_TENANT]);
     expect(putParameterCalls(r)).toHaveLength(0);
   });
@@ -235,17 +325,75 @@ describe('tenant/create.sh', () => {
       const post = r.calls.filter((c) => c.tool === 'curl')[1];
       expect(JSON.parse(post.body ?? '')).toEqual({ email: FIXTURE.adminEmail, firstAdmin: true });
       const [put] = putParameterCalls(r);
-      expect(argAfter(put.argv, '--value')).toBe(FIXTURE.replayPassword);
+      expect(parkedValue(put)).toBe(FIXTURE.replayPassword);
       expect(argAfter(put.argv, '--key-id')).toBe(FIXTURE.keyArn);
       expect(r.stdout).toContain('POST platform/tenants/{tenantId}/users -> HTTP 201');
     });
 
-    it('409 (slot held) does nothing and never re-parks', () => {
-      const r = run('tenant/create.sh', { env: tenantEnv(), params: allParams(), curl: [tenantActive(), conflict] });
+    it('409 (slot held, an admin exists, password parked) does nothing and never re-parks', () => {
+      const r = run('tenant/create.sh', slotHeld);
       expect(r.status).toBe(0);
-      expect(curlRequests(r)).toEqual([GET_TENANT, POST_USERS]);
+      expect(curlRequests(r)).toEqual([GET_TENANT, POST_USERS, GET_USERS]);
       expect(putParameterCalls(r)).toHaveLength(0);
       expect(r.stdout).toContain('already has its first admin');
+      expect(r.stdout).toContain(`Parked password present at ${PARKED_PARAM}`);
+      expect(r.stderr).not.toContain('WARNING');
+    });
+
+    it('409 with no admin in the user list exits 1: the e-mail is taken in the shared pool', () => {
+      for (const page of [usersPage([]), usersPage([false, false])]) {
+        const r = run('tenant/create.sh', { ...slotHeld, curl: [tenantActive(), conflict, page] });
+        expect(r.status).toBe(1);
+        expect(r.stderr).toContain('HTTP 409');
+        expect(r.stderr).toContain(EMAIL_IN_USE);
+        expect(r.stdout).not.toContain('already has its first admin');
+        expect(curlRequests(r)).toEqual([GET_TENANT, POST_USERS, GET_USERS]);
+        expect(putParameterCalls(r)).toHaveLength(0);
+      }
+    });
+
+    it('409: the admin check follows nextToken and stops at the page that holds an admin', () => {
+      const r = run('tenant/create.sh', {
+        ...slotHeld,
+        curl: [tenantActive(), conflict, usersPage([false], NEXT_TOKEN), usersPage([false, true], NEXT_TOKEN)],
+      });
+      expect(r.status).toBe(0);
+      expect(curlRequests(r)).toEqual([GET_TENANT, POST_USERS, GET_USERS, GET_USERS_NEXT]);
+      expect(r.stdout).not.toContain(NEXT_TOKEN); // the token is never logged
+    });
+
+    it('409: a ListUsers that is not 200 exits 1 naming the status', () => {
+      const r = run('tenant/create.sh', { ...slotHeld, curl: [tenantActive(), conflict, { status: 403 }] });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('ListUsers');
+      expect(r.stderr).toContain('HTTP 403');
+    });
+
+    it('409 with an admin but no parked password exits 0 with a loud WARNING and the spec §8 pointer', () => {
+      const r = run('tenant/create.sh', { ...slotHeld, parkedParameter: false });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('already has its first admin');
+      expect(r.stderr).toContain('WARNING');
+      expect(r.stderr).toContain(PARKED_PARAM);
+      expect(r.stderr).toContain('spec §8');
+      expect(putParameterCalls(r)).toHaveLength(0);
+    });
+
+    it('409: the parked-password check reads the version only, never the decrypted value', () => {
+      const r = run('tenant/create.sh', slotHeld);
+      const [check] = parkedChecks(r);
+      expect(check).toBeDefined();
+      expect(check.argv).not.toContain('--with-decryption');
+      expect(argAfter(check.argv, '--query')).toBe('Parameter.Version');
+      expect(r.log).not.toContain('AQICAHh'); // the ciphertext the stub returns
+    });
+
+    it('409: a parked-password check that is denied warns naming the class and still exits 0', () => {
+      const r = run('tenant/create.sh', { ...slotHeld, getParameterDenied: [PARKED_PARAM] });
+      expect(r.status).toBe(0);
+      expect(r.stderr).toContain('WARNING');
+      expect(r.stderr).toContain('AccessDeniedException');
+      expect(r.stderr).not.toContain('spec §8');
     });
 
     it('201 without a temporary password (user already in the shared pool) parks nothing and succeeds', () => {
@@ -265,14 +413,26 @@ describe('tenant/create.sh', () => {
       expect(putParameterCalls(r)).toHaveLength(0);
     });
 
-    it('never reads the user list first: the slot decides (ADR-0032)', () => {
-      const r = run('tenant/create.sh', { env: tenantEnv(), params: allParams(), curl: [tenantActive(), conflict] });
-      expect(curlRequests(r).some((q) => q.startsWith('GET') && q.endsWith('/users'))).toBe(false);
+    it('never reads the user list before the slot: the conditional write decides (ADR-0032)', () => {
+      const r = run('tenant/create.sh', slotHeld);
+      const requests = curlRequests(r);
+      expect(requests.indexOf(POST_USERS)).toBeGreaterThan(-1);
+      expect(requests.indexOf(GET_USERS)).toBeGreaterThan(requests.indexOf(POST_USERS));
+      const r2 = run('tenant/create.sh', { env: tenantEnv(), params: allParams(), curl: [tenantActive(), userCreated()] });
+      expect(curlRequests(r2)).not.toContain(GET_USERS);
     });
   });
 
+  it('a transport failure exits 1 with curl\'s exit code and the path template', () => {
+    const r = run('tenant/create.sh', { env: tenantEnv(), params: allParams(), curlExit: 7 });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('GET platform/tenants/{tenantId}: curl exit 7');
+    expect(r.stderr).not.toContain(FIXTURE.apiUrl);
+    expect(putParameterCalls(r)).toHaveLength(0);
+  });
+
   describe('SigV4 signing (§3.3)', () => {
-    const r = run('tenant/create.sh', { env: tenantEnv(), params: allParams(), curl: [tenantActive(), conflict] });
+    const r = run('tenant/create.sh', slotHeld);
     const curls = r.calls.filter((c) => c.tool === 'curl');
 
     it('signs every call as the current role for execute-api in AWS_REGION', () => {
@@ -297,13 +457,9 @@ describe('tenant/create.sh', () => {
   });
 
   it('tolerates an apiUrl without a trailing slash', () => {
-    const r = run('tenant/create.sh', {
-      env: tenantEnv(),
-      params: allParams({ apiUrl: API.replace(/\/$/, '') }),
-      curl: [tenantActive(), conflict],
-    });
+    const r = run('tenant/create.sh', { ...slotHeld, params: allParams({ apiUrl: API.replace(/\/$/, '') }) });
     expect(r.status).toBe(0);
-    expect(curlRequests(r)).toEqual([GET_TENANT, POST_USERS]);
+    expect(curlRequests(r)).toEqual([GET_TENANT, POST_USERS, GET_USERS]);
   });
 });
 
@@ -380,10 +536,18 @@ describe('tenant/delete.sh (§7.3)', () => {
     expect(deleteParameterCalls(r)).toHaveLength(0);
   });
 
-  it('any other delete-parameter error exits 1 naming the parameter', () => {
+  it('any other delete-parameter error exits 1 naming the parameter and the error class', () => {
     const r = run('tenant/delete.sh', { env, params: allParams(), curl: [{ status: 204 }], deleteParameter: 'error' });
     expect(r.status).toBe(1);
     expect(r.stderr).toContain(PARKED_PARAM);
+    expect(r.stderr).toContain('AccessDeniedException');
+  });
+
+  it.each(['tenant/delete.sh', 'tenant/update.sh'])('%s refuses a TENANT_ID that is not a ULID before any call', (script) => {
+    const r = run(script, { env: tenantEnv({ OPERATION: 'x', ADMIN_EMAIL: undefined, TENANT_ID: 'not-a-ulid' }), params: allParams() });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('TENANT_ID is not a ULID');
+    expect(r.calls).toHaveLength(0);
   });
 
   it('needs apiUrl', () => {
@@ -441,7 +605,7 @@ describe('cell scripts (§7.4)', () => {
 });
 
 describe('hygiene across every run (M-P-5, scripts/CONVENTIONS.md)', () => {
-  it('no stub ever received the password or the admin email on its command line, except --value to put-parameter', () => {
+  it('no stub ever received the password, the admin email or a credential on its command line', () => {
     expect(runs.length).toBeGreaterThan(20);
     for (const r of runs) {
       for (const c of r.calls) {
@@ -449,18 +613,23 @@ describe('hygiene across every run (M-P-5, scripts/CONVENTIONS.md)', () => {
         expect(argv).not.toContain(FIXTURE.adminEmail);
         expect(argv).not.toContain(FIXTURE.secretAccessKey);
         expect(argv).not.toContain(FIXTURE.sessionToken);
-        const isPark = c.tool === 'aws' && c.argv[1] === 'put-parameter';
-        if (isPark) {
-          // The password travels only here, to SSM, as --value.
-          const withoutValue = c.argv.filter((a, i) => a !== '--value' && c.argv[i - 1] !== '--value').join(' ');
-          expect(withoutValue).not.toContain(FIXTURE.password);
-          expect(withoutValue).not.toContain(FIXTURE.replayPassword);
-        } else {
-          expect(argv).not.toContain(FIXTURE.password);
-          expect(argv).not.toContain(FIXTURE.replayPassword);
-        }
+        expect(argv).not.toContain(FIXTURE.password);
+        expect(argv).not.toContain(FIXTURE.replayPassword);
       }
     }
+  });
+
+  it('the password reaches put-parameter only through a file:// value, and every park used one', () => {
+    const parks = runs.flatMap((r) => r.calls.filter((c) => c.tool === 'aws' && c.argv[1] === 'put-parameter'));
+    expect(parks.length).toBeGreaterThan(0);
+    for (const c of parks) {
+      expect(argAfter(c.argv, '--value')).toMatch(/^file:\/\/\//);
+      expect([FIXTURE.password, FIXTURE.replayPassword]).toContain(c.value);
+    }
+  });
+
+  it('no run leaves a scratch file behind', () => {
+    for (const r of runs) expect(r.scratchLeftovers).toEqual([]);
   });
 
   it('the admin email reaches curl only in the request body file, and credentials only on stdin', () => {

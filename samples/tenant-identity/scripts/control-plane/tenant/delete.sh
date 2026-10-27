@@ -37,14 +37,18 @@ case "$PLATFORM_STATUS" in
   *) fail "DeleteTenant for ${TENANT_ID} returned HTTP ${PLATFORM_STATUS}" ;;
 esac
 
-# Step 2: the parked password; ParameterNotFound is success. The CLI error
-# text names the parameter and carries no value, so it may be inspected.
-if err="$(aws ssm delete-parameter --name "$PARKED_PARAM" 2>&1 >/dev/null)"; then
+# Step 2: the parked password; ParameterNotFound is success. Any other error
+# fails naming the parameter and the error class (never the CLI's full text).
+if aws ssm delete-parameter --name "$PARKED_PARAM" >/dev/null 2>"$PLATFORM_ERR_FILE"; then
   echo "Deleted ${PARKED_PARAM}"
-elif [[ "$err" == *ParameterNotFound* ]]; then
-  echo "No parked password at ${PARKED_PARAM}; nothing to delete"
 else
-  fail "delete-parameter ${PARKED_PARAM} failed"
+  class="$(aws_error_class "$PLATFORM_ERR_FILE")"
+  : >"$PLATFORM_ERR_FILE"
+  if [[ "$class" == ParameterNotFound ]]; then
+    echo "No parked password at ${PARKED_PARAM}; nothing to delete"
+  else
+    fail "delete-parameter ${PARKED_PARAM} failed (${class})"
+  fi
 fi
 
 echo "Tenant ${TENANT_ID} identity offboarded"
