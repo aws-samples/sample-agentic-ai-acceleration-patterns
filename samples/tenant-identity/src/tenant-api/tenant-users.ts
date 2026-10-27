@@ -290,6 +290,10 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
       if (target.isSelf) {
         throw new ConflictError('A tenant admin cannot delete themselves');
       }
+      // ADR-0032: this door does not release the tenant's first-admin slot.
+      // Its role reads the registry and never writes it (R-8, threat-model
+      // M-14), so deleting the first admin here leaves the slot held; the
+      // vendor's platform DeleteUser of the holder's e-mail releases it.
       await provisioner.deleteUser(tenant, target.username);
       return {};
     } catch (error) {

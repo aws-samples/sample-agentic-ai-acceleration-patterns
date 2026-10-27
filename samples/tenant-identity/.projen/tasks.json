@@ -210,6 +210,15 @@
         }
       ]
     },
+    "integ:control-plane": {
+      "name": "integ:control-plane",
+      "description": "Run the control-plane mounting integration test in $AWS_REGION (deploys tenant-identity, a setup stack and ../control-plane)",
+      "steps": [
+        {
+          "exec": "scripts/integ-control-plane.sh"
+        }
+      ]
+    },
     "package": {
       "name": "package",
       "description": "Creates the distribution package"

@@ -15,6 +15,13 @@ import { nagFindingResource, acknowledgeGranularFinding, suppressTemplateScanner
 export interface ProvisioningWorkflowProps {
   /** The control plane table (cells + tenants; terminal state is written directly to it). */
   readonly table: dynamodb.ITable;
+  /**
+   * Customer-managed policy ARNs attached to the tenant build role in
+   * addition to its SSM namespace grants (ADR-022). Validated by the stack
+   * before construction; the workflow attaches them without interpreting
+   * them (P-3). Cell builds get none.
+   */
+  readonly tenantBuildManagedPolicyArns?: string[];
 }
 
 /**
@@ -66,7 +73,7 @@ const INLINE_BUILDSPEC = [
  *   "tenantId": "...",                                               // when tenantBuild present
  *   "tenantBuild": { "operation": "create|update|delete",
  *                    "scriptPath": "...", "failedStatus": "...",
- *                    "adminEmail": "..." }                           // optional
+ *                    "tenantName": "...", "adminEmail": "..." }        // optional
  * }
  * ```
  *
@@ -76,9 +83,12 @@ const INLINE_BUILDSPEC = [
  * UpdateResource (tenant update), DeleteTenant (tenant delete),
  * UpdateCell (cell update), DeleteCell (cell delete).
  *
- * Input contract: `tenantBuild.adminEmail`, `sourceVersion`, and
- * `operatorId` are always present — the service supplies an empty string
- * for non-create operations / an unpinned source. A non-empty
+ * Input contract: `tenantBuild.tenantName`, `tenantBuild.adminEmail`,
+ * `sourceVersion`, and `operatorId` are always present — the service
+ * supplies an empty `adminEmail` for non-create operations and an empty
+ * `sourceVersion` for an unpinned source; `tenantName` is the name stored on
+ * the tenant record and reaches every tenant build as `TENANT_NAME`
+ * (ADR-023). A non-empty
  * `sourceVersion` (the stamped supply-chain pin, T5/M10) becomes the
  * CodeBuild `SourceVersion` override; `operatorId` (the verified JWT sub)
  * is forwarded to every build as `OPERATOR_ID` so application-plane changes
@@ -185,6 +195,15 @@ export class ProvisioningWorkflow extends Construct {
     acknowledgeSsmNamespaceGrant(this.tenantProject, '/application-plane/shared/*');
     acknowledgeSsmNamespaceGrant(this.tenantProject, '/application-plane/cells/*');
     acknowledgeSsmNamespaceGrant(this.tenantProject, '/application-plane/tenants/*');
+    // ADR-022: deployer-supplied managed policies widen the tenant build
+    // role by exactly what the deployer attaches - the ADR-021 blast-radius
+    // bound now includes them. Attached by reference, never read: the
+    // control plane learns an ARN list, not what the policy is for (P-3).
+    (props.tenantBuildManagedPolicyArns ?? []).forEach((arn, index) => {
+      this.tenantProject.role!.addManagedPolicy(
+        iam.ManagedPolicy.fromManagedPolicyArn(this, `TenantBuildManagedPolicy${index}`, arn),
+      );
+    });
 
     // ------------------------------------------------------------------
     // States — defined leaf-first so transitions can reference them.
@@ -323,6 +342,9 @@ export class ProvisioningWorkflow extends Construct {
     const runTenantBuild = this.buildTask('RunTenantBuild', this.tenantProject, '$.tenantBuildResult', [
       envVar('SCRIPT_PATH', '$.tenantBuild.scriptPath'),
       envVar('TENANT_ID', '$.tenantId'),
+      // ADR-023: the tenant's name as stored on the control-plane record, on
+      // every operation - onboarding input, not configuration (ADR-004).
+      envVar('TENANT_NAME', '$.tenantBuild.tenantName'),
       envVar('CELL_ID', '$.cellId'),
       envVar('OPERATION', '$.tenantBuild.operation'),
       // Create only; the service supplies an empty string otherwise (§7).

@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: MIT-0
 # Sample tenant CREATE script.
 #
-# Runs in AWS CodeBuild with: TENANT_ID, CELL_ID, OPERATION, ADMIN_EMAIL
-# (create only). Demonstrates the application-plane patterns from the design:
+# Runs in AWS CodeBuild with: TENANT_ID, TENANT_NAME, CELL_ID, OPERATION,
+# OPERATOR_ID, ADMIN_EMAIL (create only). Demonstrates the application-plane
+# patterns from the design:
 #   - the cell's shared resource identifiers are read from
 #     /application-plane/cells/<cellId>/* at deploy time - the cell -> tenant
 #     contract (architecture.md section 7, extending ADR-010)
@@ -13,6 +14,8 @@
 # The per-tenant deployment it provisions is deliberately tiny: one SSM
 # parameter per tenant standing in for real infrastructure (a real script
 # would run CDK/Terraform/CloudFormation here).
+# TENANT_NAME and ADMIN_EMAIL are operator-supplied free text: expand them
+# quoted only, never eval or use as an identifier (see scripts/CONVENTIONS.md).
 set -euo pipefail
 
 : "${TENANT_ID:?TENANT_ID env var is required}"
@@ -39,11 +42,19 @@ echo "Read /application-plane/cells/${CELL_ID}/shared-endpoint"
 # with log-group access; see scripts/CONVENTIONS.md).
 echo "Bootstrapping first admin user"
 
+# Build the JSON with a real encoder (an e-mail may hold a quote) and hand it
+# to the CLI through a 0600 file, so the e-mail never reaches argv.
+VALUE_FILE=$(mktemp)
+chmod 600 "$VALUE_FILE"
+trap 'rm -f "$VALUE_FILE"' EXIT
+ENDPOINT="${TENANT_ID}.${CELL_SHARED_ENDPOINT}" ADMIN_USER_VALUE="${ADMIN_EMAIL}" \
+  python3 -c 'import json,os; print(json.dumps({"endpoint": os.environ["ENDPOINT"], "cellId": os.environ["CELL_ID"], "adminUser": os.environ["ADMIN_USER_VALUE"], "provisionedBy": "create.sh"}, separators=(",", ":")))' \
+  > "$VALUE_FILE"
 aws ssm put-parameter \
   --name "/application-plane/tenants/${TENANT_ID}" \
   --type String \
   --overwrite \
-  --value "{\"endpoint\":\"${TENANT_ID}.${CELL_SHARED_ENDPOINT}\",\"cellId\":\"${CELL_ID}\",\"adminUser\":\"${ADMIN_EMAIL}\",\"provisionedBy\":\"create.sh\"}"
+  --value "file://$VALUE_FILE"
 echo "Wrote /application-plane/tenants/${TENANT_ID}"
 
 echo "Tenant ${TENANT_ID} provisioned in cell ${CELL_ID}"

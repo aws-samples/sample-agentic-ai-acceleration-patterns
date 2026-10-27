@@ -46,6 +46,30 @@ function allPolicyStatements(template: Template): any[] {
   return statements;
 }
 
+/**
+ * Every IAM identity-policy statement in the template, wherever it lives:
+ * AWS::IAM::Policy, AWS::IAM::ManagedPolicy, and the inline `Policies` of
+ * AWS::IAM::Role. A grant in any of the three is a grant.
+ */
+function allIamStatements(template: Template): any[] {
+  const statements: any[] = [...allPolicyStatements(template)];
+  for (const policy of Object.values(template.findResources('AWS::IAM::ManagedPolicy')) as any[]) {
+    statements.push(...policy.Properties.PolicyDocument.Statement);
+  }
+  for (const role of Object.values(template.findResources('AWS::IAM::Role')) as any[]) {
+    for (const inline of role.Properties.Policies ?? []) {
+      statements.push(...inline.PolicyDocument.Statement);
+    }
+  }
+  return statements;
+}
+
+/** The resources a statement names, as strings (intrinsics rendered via JSON). */
+function resourcesOf(statement: any): string[] {
+  const r = statement.Resource ?? [];
+  return (Array.isArray(r) ? r : [r]).map((x: unknown) => (typeof x === 'string' ? x : JSON.stringify(x)));
+}
+
 /** The DefaultPolicy statements for a function whose logical id starts with `prefix`. */
 function policyStatementsForRole(template: Template, rolePrefix: string): any[] {
   const policies = template.findResources('AWS::IAM::Policy');
@@ -923,6 +947,193 @@ describe('TenantIdentityStack - discovery parameters + outputs (R-6, §6.3)', ()
 describe('TenantIdentityStack - parameter publishing switch (ADR-0017)', () => {
   test.each(DEPLOYMENTS)('publishSharedParameters=false creates no SSM parameter [%s]', (topology) => {
     synth(topology, false).resourceCountIs('AWS::SSM::Parameter', 0);
+  });
+});
+
+// ===========================================================================
+// Control-plane mount: AdminPasswordKey (ADR-0033) + PlatformInvokePolicy (ADR-0030)
+// ===========================================================================
+
+/** Renders an Fn::Join / Ref / Fn::GetAtt resource the way the finding ids do: `<LogicalId>` placeholders. */
+function renderArn(value: any): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (value['Fn::Join'] !== undefined) {
+    const [delimiter, parts] = value['Fn::Join'] as [string, any[]];
+    return parts.map(renderArn).join(delimiter);
+  }
+  if (value['Fn::GetAtt'] !== undefined) {
+    return `<${value['Fn::GetAtt'][0]}.${value['Fn::GetAtt'][1]}>`;
+  }
+  return `<${value.Ref}>`;
+}
+
+describe('TenantIdentityStack - control-plane mount (ADR-0030, ADR-0033)', () => {
+  const PARAM_KEY = '/application-plane/shared/identity/adminPasswordKeyArn';
+  const PARAM_POLICY = '/application-plane/shared/identity/platformInvokePolicyArn';
+
+  /** The one managed policy, the one admin-password key and its alias. */
+  function mount(template: Template) {
+    const policies = Object.entries(template.findResources('AWS::IAM::ManagedPolicy'));
+    expect(policies).toHaveLength(1);
+    const [policyId, policy] = policies[0] as [string, any];
+    const keys = Object.entries(template.findResources('AWS::KMS::Key')).filter(([id]) => id.startsWith('AdminPasswordKey'));
+    expect(keys).toHaveLength(1);
+    const [keyId, key] = keys[0] as [string, any];
+    const aliases = Object.values(template.findResources('AWS::KMS::Alias')) as any[];
+    expect(aliases).toHaveLength(1);
+    return { policyId, policy, keyId, key, alias: aliases[0] };
+  }
+
+  test.each(DEPLOYMENTS)('the key: symmetric, rotation on, the fixed alias, the default key policy only, scheduled for deletion in 7 days [%s]', (topology) => {
+    const template = synth(topology);
+    const { keyId, key, alias } = mount(template);
+    expect(key.Properties.EnableKeyRotation).toBe(true);
+    // Symmetric encryption is the KMS default: no KeySpec / KeyUsage override.
+    expect(key.Properties.KeySpec).toBeUndefined();
+    expect(key.Properties.KeyUsage).toBeUndefined();
+    // §6.5: the account root and nothing else, so IAM identity policies decide.
+    const statements: any[] = key.Properties.KeyPolicy.Statement;
+    expect(statements).toHaveLength(1);
+    expect(statements[0].Action).toBe('kms:*');
+    expect(statements[0].Effect).toBe('Allow');
+    expect(renderArn(statements[0].Principal.AWS)).toBe('arn:<AWS::Partition>:iam::123456789012:root');
+    // ADR-0019 teardown stance: a key is only ever scheduled for deletion.
+    expect(key.DeletionPolicy).toBe('Delete');
+    expect(key.Properties.PendingWindowInDays).toBe(7);
+    expect(alias.Properties.AliasName).toBe('alias/application-plane/identity/admin-password');
+    expect(alias.Properties.TargetKeyId).toEqual({ 'Fn::GetAtt': [keyId, 'Arn'] });
+  });
+
+  test.each(DEPLOYMENTS)('the policy: exactly the two §6.3 statements, built from the deployed API id and stage [%s]', (topology) => {
+    const template = synth(topology);
+    const { policy, keyId } = mount(template);
+    const [apiId] = Object.keys(template.findResources('AWS::ApiGateway::RestApi'));
+    const stage = Object.values(template.findResources('AWS::ApiGateway::Stage'))[0] as any;
+    const statements: any[] = policy.Properties.PolicyDocument.Statement;
+    expect(statements).toHaveLength(2);
+
+    const [invoke, encrypt] = statements;
+    expect(invoke.Effect).toBe('Allow');
+    expect(invoke.Action).toBe('execute-api:Invoke');
+    expect(invoke.Condition).toBeUndefined();
+    const prefix = `arn:<AWS::Partition>:execute-api:eu-central-1:123456789012:<${apiId}>/${stage.Properties.StageName}`;
+    expect(invoke.Resource.map(renderArn)).toEqual([
+      `${prefix}/POST/platform/tenants`,
+      `${prefix}/GET/platform/tenants/*`,
+      `${prefix}/DELETE/platform/tenants/*`,
+      `${prefix}/POST/platform/tenants/*/users`,
+    ]);
+
+    expect(encrypt.Effect).toBe('Allow');
+    expect(actionsOf(encrypt).sort()).toEqual(['kms:Encrypt', 'kms:GenerateDataKey']);
+    expect(encrypt.Resource).toEqual({ 'Fn::GetAtt': [keyId, 'Arn'] });
+    expect(encrypt.Condition).toEqual({ StringEquals: { 'kms:ViaService': 'ssm.eu-central-1.amazonaws.com' } });
+  });
+
+  test.each(DEPLOYMENTS)('M-R-4: no Decrypt, and no ListTenants, IssueToken, RefreshToken, user-update or membership route [%s]', (topology) => {
+    const template = synth(topology);
+    const { policy } = mount(template);
+    const statements: any[] = policy.Properties.PolicyDocument.Statement;
+    const actions = statements.flatMap(actionsOf);
+    expect(actions).not.toContain('kms:Decrypt');
+    expect(actions.some((a) => a.includes('*'))).toBe(false);
+    const routes: string[] = statements
+      .filter((s) => actionsOf(s).includes('execute-api:Invoke'))
+      .flatMap((s) => [s.Resource].flat().map(renderArn))
+      .map((arn) => arn.slice(arn.indexOf('/prod/') + '/prod'.length));
+    expect(routes).toHaveLength(4);
+    // ListTenants is GET on the collection; the GET grant is on /platform/tenants/*.
+    expect(routes).not.toContain('/GET/platform/tenants');
+    for (const route of routes) {
+      // IssueToken, RefreshToken, memberships, UpdateUser (PUT/PATCH), and
+      // nothing below .../users (the per-user routes).
+      expect(route).not.toMatch(/\/token/);
+      expect(route).not.toMatch(/\/membership/);
+      expect(route).not.toMatch(/^\/(PUT|PATCH|\*)\//);
+      expect(route).not.toMatch(/\/users\//);
+    }
+    // The stage name is never a wildcard: the grant names the one deployed stage.
+    for (const s of statements.filter((st) => actionsOf(st).includes('execute-api:Invoke'))) {
+      for (const arn of [s.Resource].flat().map(renderArn)) {
+        expect(arn).toMatch(/>\/prod\//);
+      }
+    }
+  });
+
+  test.each(DEPLOYMENTS)('nothing in the stack holds kms:Decrypt on the admin-password key (§6.4) [%s]', (topology) => {
+    const template = synth(topology);
+    const { keyId } = mount(template);
+    // Inline policies, managed policies and role-inline policies alike.
+    const statements = allIamStatements(template);
+    expect(statements.length).toBeGreaterThan(0);
+    // Nothing is granted on the key itself. The only statement allowed to
+    // name it is the §6.3 Encrypt+GenerateDataKey grant in the published
+    // policy, and that one must not carry Decrypt or a wildcard.
+    const touching = statements.filter((s) => resourcesOf(s).some((r) => r.includes(keyId)));
+    for (const s of touching) {
+      expect(s.Effect).toBe('Allow');
+      expect(actionsOf(s).sort()).toEqual(['kms:Encrypt', 'kms:GenerateDataKey']);
+    }
+    expect(touching.length).toBeLessThanOrEqual(1);
+    // No role in the stack (function DefaultPolicies) names the key at all.
+    expect(allPolicyStatements(template).filter((s) => resourcesOf(s).some((r) => r.includes(keyId)))).toEqual([]);
+    // And no statement reaches the key by a wildcard instead: kms:Decrypt,
+    // kms:* or * on Resource '*' (or any resource pattern that is not the
+    // alarm topic's own key) would decrypt the parked password just as well.
+    const decrypting = (a: string): boolean => a === 'kms:Decrypt' || a === 'kms:*' || a === '*';
+    const wildcardDecrypt = statements.filter(
+      (s) => s.Effect === 'Allow' && actionsOf(s).some(decrypting) && resourcesOf(s).some((r) => r === '*' || r.includes('kms:*')),
+    );
+    expect(wildcardDecrypt).toEqual([]);
+  });
+
+  test.each(DEPLOYMENTS)('publishes both ARNs at the fixed parameter names [%s]', (topology) => {
+    const template = synth(topology);
+    const { policyId, keyId } = mount(template);
+    const params = Object.values(template.findResources('AWS::SSM::Parameter')) as any[];
+    const byName = Object.fromEntries(params.map((p) => [p.Properties.Name, p.Properties]));
+    expect(byName[PARAM_KEY].Type).toBe('String');
+    expect(byName[PARAM_KEY].Value).toEqual({ 'Fn::GetAtt': [keyId, 'Arn'] });
+    expect(byName[PARAM_POLICY].Type).toBe('String');
+    expect(byName[PARAM_POLICY].Value).toEqual({ Ref: policyId });
+  });
+
+  test.each(DEPLOYMENTS)('publishSharedParameters=false: no key, no alias, no policy, no parameter (ADR-0017: one owner per account) [%s]', (topology) => {
+    const template = synth(topology, false);
+    template.resourceCountIs('AWS::IAM::ManagedPolicy', 0);
+    template.resourceCountIs('AWS::KMS::Alias', 0);
+    // The alarm topic key (M-31) stays; it carries no fixed name.
+    const keys = Object.keys(template.findResources('AWS::KMS::Key'));
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).toMatch(/^AlarmTopicKey/);
+    template.resourceCountIs('AWS::SSM::Parameter', 0);
+  });
+
+  test('every wildcard route ARN is acknowledged for cdk-nag IAM5 with the threat-model row, once each', () => {
+    const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+    Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true, writeSuppressionsToCloudFormation: true }));
+    const stack = new TenantIdentityStack(app, 'TenantIdentity-shared-pool', {
+      topology: 'shared-pool',
+      env: { account: '123456789012', region: 'eu-central-1' },
+    });
+    const template = Template.fromStack(stack);
+    const { policy } = mount(template);
+    const rules: { id: string; reason: string }[] = policy.Metadata.cdk_nag.rules_to_suppress;
+    const iam5 = rules.filter((r) => r.id.startsWith('AwsSolutions-IAM5['));
+    expect(iam5.map((r) => r.id.replace(/^.*\/prod\//, '').replace(/\]$/, '')).sort()).toEqual([
+      'DELETE/platform/tenants/*',
+      'GET/platform/tenants/*',
+      'POST/platform/tenants/*/users',
+    ]);
+    for (const r of iam5) {
+      expect(r.reason).toContain('T-34');
+      expect(r.reason).toContain('threat-model.md');
+    }
+    // No blanket acknowledgment: the exact-route one above is the only kind.
+    expect(rules.some((r) => r.id === 'AwsSolutions-IAM5')).toBe(false);
+    expect(rules.some((r) => r.id === 'AwsSolutions-IAM5[Resource::*]')).toBe(false);
   });
 });
 

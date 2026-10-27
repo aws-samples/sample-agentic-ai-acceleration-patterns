@@ -6,9 +6,14 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-/** Failed CloudFormation creates can leave the REST API shell behind. */
+/**
+ * Failed CloudFormation creates can leave the REST API shell behind. The
+ * helpers live in scripts/integ-lib.sh, shared with integ-control-plane.sh;
+ * integ.sh is what calls them after its destroy.
+ */
 describe('integ.sh failed-create cleanup', () => {
   const INTEG = join(__dirname, '..', '..', 'scripts', 'integ.sh');
+  const INTEG_LIB = join(__dirname, '..', '..', 'scripts', 'integ-lib.sh');
   let work: string;
 
   beforeEach(() => {
@@ -47,8 +52,8 @@ describe('integ.sh failed-create cleanup', () => {
         '#!/usr/bin/env bash',
         'set -euo pipefail',
         `PATH=${JSON.stringify(work)}:$PATH`,
-        `INTEG=${JSON.stringify(INTEG)}`,
-        'extract() { awk -v n="$1" \'$0 == n "() {" { p=1 } p { print } p && /^}/ { exit }\' "$INTEG"; }',
+        `INTEG_LIB=${JSON.stringify(INTEG_LIB)}`,
+        'extract() { awk -v n="$1" \'$0 == n "() {" { p=1 } p { print } p && /^}/ { exit }\' "$INTEG_LIB"; }',
         'eval "$(extract leftover_rest_apis)"',
         'eval "$(extract delete_leftover_rest_apis)"',
         'STACKS=(TenantIdentity-a TenantIdentity-b)',

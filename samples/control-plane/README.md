@@ -49,7 +49,8 @@ implicitly when onboarding finds no free capacity.
 
 Scripts run in shared CodeBuild projects via per-execution `StartBuild`
 overrides. Cell scripts receive `CELL_ID` and `OPERATION`; tenant scripts
-receive `TENANT_ID`, `CELL_ID`, `OPERATION`, and (on create) `ADMIN_EMAIL`
+receive `TENANT_ID`, `TENANT_NAME` (the tenant's stored name, on every
+operation — ADR-023), `CELL_ID`, `OPERATION`, and (on create) `ADMIN_EMAIL`
 for application-plane user bootstrap. The cell create script publishes shared
 resource identifiers to `/application-plane/cells/<cellId>/*`; tenant scripts
 read that namespace (plus the global `/application-plane/shared/*`) and write
@@ -69,9 +70,12 @@ Prerequisites: an AWS account, Node.js 22+, the [Smithy CLI](https://smithy.io/2
 and an OIDC vendor IdP (any issuer with OIDC discovery works — a Cognito user
 pool is the quickest to stand up).
 
+Build first (Smithy build, compile, tests and synth), then deploy with the
+three required context inputs:
+
 ```bash
 npm ci
-npx projen build   # smithy build + compile + test + synth
+npx projen build
 npx cdk deploy \
   --context vendorIdpIssuerUrl=https://YOUR_ISSUER \
   --context vendorIdpAudience=YOUR_AUDIENCE \
@@ -94,12 +98,63 @@ npx cdk deploy \
 The `cellDefinition` is validated at synth time and stamped onto every cell
 created afterwards; changing it never affects existing cells.
 
+One optional context input, `tenantBuildManagedPolicyArns`, attaches
+deployer-supplied customer-managed IAM policies to the tenant build role in
+addition to its SSM grants, so a tenant script can call an application-plane
+API with a policy that plane publishes (ADR-022). Each entry must be a
+managed-policy ARN in the stack's own partition and account, or synth fails;
+the check needs the target account and Region, which `cdk deploy` supplies
+through `CDK_DEFAULT_ACCOUNT` / `CDK_DEFAULT_REGION`, so a non-empty list on
+an environment-agnostic synth (for example `cdk synth` with no credentials)
+also fails rather than deferring the account check to deploy time. The same
+deploy command with the optional input added:
+
+```bash
+npx cdk deploy \
+  --context vendorIdpIssuerUrl=https://YOUR_ISSUER \
+  --context vendorIdpAudience=YOUR_AUDIENCE \
+  --context cellDefinition='{
+    "source": { "type": "GITHUB", "location": "https://github.com/YOUR_ORG/YOUR_REPO.git" },
+    "cellScripts": {
+      "create": "samples/control-plane/scripts/sample-cell/create.sh",
+      "update": "samples/control-plane/scripts/sample-cell/update.sh",
+      "delete": "samples/control-plane/scripts/sample-cell/delete.sh"
+    },
+    "tenantScripts": {
+      "create": "samples/control-plane/scripts/sample-tenant/create.sh",
+      "update": "samples/control-plane/scripts/sample-tenant/update.sh",
+      "delete": "samples/control-plane/scripts/sample-tenant/delete.sh"
+    },
+    "maxTenants": 10
+  }' \
+  --context tenantBuildManagedPolicyArns='["arn:aws:iam::123456789012:policy/PlatformInvokePolicy"]'
+```
+
+### Example: mounting tenant-identity
+
+The [`tenant-identity`](../tenant-identity/) sample is the worked consumer of
+both inputs: its control-plane mount runs as the tenant scripts, reads
+`TENANT_NAME` to name the tenant it onboards, and is granted the platform API
+through a `PlatformInvokePolicy` it publishes and that the deployer passes here
+as `tenantBuildManagedPolicyArns`. Deploy steps are in its README,
+[Mounting under the control plane](../tenant-identity/README.md#mounting-under-the-control-plane).
+The joint integration test
+([`scripts/integ-control-plane.sh`](../tenant-identity/scripts/integ-control-plane.sh),
+specified in [`design/control-plane-mounting.spec.md`](../tenant-identity/design/control-plane-mounting.spec.md))
+deploys this control plane with that wiring and is the reference implementation
+for it — read it rather than copying the wiring from prose.
+
 ## Deployment integration test
 
 The [AWS CDK integration test](https://docs.aws.amazon.com/cdk/api/v2/docs/integ-tests-alpha-readme.html)
 deploys temporary infrastructure into a real AWS account and exercises the
 complete cell and tenant lifecycle. Use a non-production account that is
-bootstrapped for AWS CDK deployments.
+bootstrapped for AWS CDK deployments. Per
+[sample standard §5.2](../../docs/sample-standard.md#5-tests) the test,
+[`test/integ.tenant.ts`](./test/integ.tenant.ts), is the reference
+implementation of this sample's wiring: how the vendor IdP, the stamped
+script source and the `cellDefinition` fit together is read from that file,
+not from prose.
 
 Run it in one explicitly selected Region — the `integ` task pins
 integ-runner to `$AWS_REGION` (overriding its multi-Region defaults) and
@@ -292,6 +347,22 @@ open item).
       so tighter per-method limits on the build-starting operations
       (`POST /tenants`, the `PUT`/`DELETE` operations) further cap the
       cost amplification a leaked token can cause.
+- [ ] **Review every policy in `tenantBuildManagedPolicyArns`.** The tenant
+      build role runs every tenant's script, so an attached policy widens
+      all of them. Attach only a least-privilege policy the producing plane
+      publishes, never a hand-written wildcard (T21, M18, ADR-022).
 - [ ] Optionally, add an **API Gateway resource policy** restricting source
       IPs to vendor operator networks, so a stolen token alone is not
       sufficient to reach the API.
+
+## Known issues
+
+- **The API access log group can reappear after teardown.** API Gateway
+  writes the stage's access logs asynchronously, so a write can land just
+  after CloudFormation has deleted the log group during `cdk destroy`, and
+  that late write recreates the group — left behind with no retention. The
+  `tenant-identity` sample hit the same race and solved it with a log drain
+  whose writers are what invoke the functions (its ADR-0024); this sample has
+  not yet adopted that. After a teardown, look for a log group named
+  `control-plane-dev-ApiAccessLogs...` (the CDK-generated name of
+  `ApiAccessLogs` in `src/tenant/tenant.cdk.ts`) and delete it.

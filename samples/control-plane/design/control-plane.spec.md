@@ -328,9 +328,15 @@ Supplied at deployment time, validated at synthesis/deploy:
 | `cellDefinition.cellScripts` | `{create, update, delete}` — all three paths required, non-empty |
 | `cellDefinition.tenantScripts` | `{create, update, delete}` — all three paths required, non-empty |
 | `cellDefinition.maxTenants` | integer ≥ 1 |
+| `tenantBuildManagedPolicyArns` (optional, [ADR-022](../adr/0022-attach-deployer-supplied-managed-policies-to-the-tenant-build-role.md)) | array of customer-managed IAM policy ARNs (`arn:<partition>:iam::<account>:policy/...`), each in the stack's own partition and account; synth MUST fail otherwise. Default: none |
 
 Changing `cellDefinition` after deployment MUST affect only cells created
 afterwards (P-4).
+
+`tenantBuildManagedPolicyArns` attaches each policy to the tenant build role
+in addition to the §6.2 grants. The control plane learns an ARN list, never
+what the policies are for (P-3); the application plane that needs the
+permission publishes the policy. Amendment 2026-10-26 (ADR-022).
 
 ---
 
@@ -513,10 +519,14 @@ control plane's entire contract with them:
 |---|---|---|
 | `CELL_ID` | ✓ | ✓ |
 | `TENANT_ID` | — | ✓ |
+| `TENANT_NAME` | — | ✓ every operation; the tenant's `name` as stored on the Tenant record ([ADR-023](../adr/0023-pass-the-tenant-name-to-tenant-scripts.md), amendment 2026-10-26) |
 | `OPERATION` | `create\|update\|delete` | `create\|update\|delete` |
 | `ADMIN_EMAIL` | — | create only (empty string otherwise) |
+| `OPERATOR_ID` | ✓ | ✓ (the verified operator identity, [ADR-019](../adr/0019-operator-identity-end-to-end.md)) |
 
-That's it. No application plane configuration is injected (P-3). If a
+That's it. No application plane configuration is injected (P-3). `TENANT_NAME`
+passes the same boundary test as `ADMIN_EMAIL` (ADR-004): onboarding input the
+control plane already holds, not application-plane configuration. If a
 future variant wants opaque per-tenant configuration, the extension point
 is a generic `parameters: map<string,string>` passed through as environment
 variables — deliberately generic, never shaped like any specific concern.
@@ -543,7 +553,9 @@ completion — the workflow's retry paths (`UpdateCell` after
 them. Empty deployments are explicit no-op scripts (P-9).
 
 The scripts are trusted vendor code; the build role policies (§6.2, P-12)
-are the documented hardening point that bounds what they can do.
+are the documented hardening point that bounds what they can do. Any
+`tenantBuildManagedPolicyArns` (§3.3, ADR-022) widen the tenant build role by
+exactly what the deployer attaches, so they are part of that bound.
 
 ---
 

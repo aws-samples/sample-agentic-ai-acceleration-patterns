@@ -49,9 +49,17 @@ resource PlatformTenant {
 }
 
 /// Onboards a tenant and its first admin (ADR-0014). Synchronous (ADR-0004).
+/// The admin holds the tenant's first-admin slot (ADR-0032).
 @http(method: "POST", uri: "/platform/tenants", code: 201)
 operation CreateTenant {
     input := {
+        /// Optional. When present, the registry row is written with this id
+        /// instead of a generated one, so an upstream control plane keeps
+        /// one id across planes (ADR-0029). An existing id is a 409
+        /// ConflictError and changes nothing. Typed `TenantId` so the ULID
+        /// pattern rejects a bad id with 400 before any write.
+        tenantId: TenantId
+
         @required
         name: TenantName
 
@@ -167,6 +175,13 @@ operation CreateUser {
 
         /// Also add the user to `admin-<tenantId>`.
         admin: Boolean
+
+        /// Optional. When true, the call claims the tenant's single
+        /// first-admin slot with one conditional write before the Cognito
+        /// user is created (ADR-0032); 409 ConflictError if the slot is
+        /// taken, and nothing changes. Implies `admin: true`. A tenant may
+        /// have many admins; it has one first admin.
+        firstAdmin: Boolean
     }
 
     output := {
@@ -257,6 +272,18 @@ operation UpdateUser {
     ]
 }
 
+/// Deletes the user (topologies 1, 2) or removes them from this tenant,
+/// deleting the Cognito user only when no tenant remains (3). If the user
+/// holds the tenant's first-admin slot (ADR-0032) the slot is released after
+/// the delete, so a replacement `CreateUser {firstAdmin: true}` succeeds.
+/// `{username}` may be the Cognito username or the e-mail.
+///
+/// Stale slot (the first admin was already removed through the tenant
+/// admin's door, which cannot write the registry): a DeleteUser naming the
+/// holder's E-MAIL as `{username}` answers 404 and releases the slot. The
+/// slot stores the e-mail, not the Cognito username: in pool-per-tenant the
+/// username is a UUID the e-mail only aliases, so naming the gone holder by
+/// UUID is a plain 404 and the slot stays held.
 @idempotent
 @http(method: "DELETE", uri: "/platform/tenants/{tenantId}/users/{username}", code: 204)
 operation DeleteUser {
@@ -388,7 +415,10 @@ operation CreateMembership {
 }
 
 /// Removes the user from `t-<tenantId>` and `admin-<tenantId>`. Refused
-/// with 409 when it is the user's last tenant (use DeleteUser).
+/// with 409 when it is the user's last tenant (use DeleteUser). If the user
+/// holds the tenant's first-admin slot (ADR-0032) it is released after the
+/// removal, exactly as DeleteUser does; a stale slot is released by naming
+/// the gone holder's e-mail (404, slot released), as for DeleteUser.
 @idempotent
 @http(method: "DELETE", uri: "/platform/tenants/{tenantId}/users/{username}/membership", code: 204)
 operation DeleteMembership {

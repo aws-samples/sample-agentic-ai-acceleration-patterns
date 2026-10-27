@@ -7,8 +7,12 @@
 > and all 8 alarm actions published to the SNS topic (M-31). Teardown verified
 > to leave no stack, pool, table, parameter, role or log group: the destroy's
 > leftover check reported no tagged pool and no owned log group 90 s after
-> `TenantDrain` and the API stage were gone. ADRs: see
-> [`adr/`](./adr/README.md) (ADR-0001..0027).
+> `TenantDrain` and the API stage were gone. Last green control-plane mount
+> integration test (`npx projen integ:control-plane`): 2026-10-27, eu-west-1,
+> mounting spec §10 steps 1–12 including 5b and 9b: 11/11 e2e assertions
+> passed in about 11 minutes, and teardown left no stack, parameter, pool,
+> REST API or log group. ADRs: see
+> [`adr/`](./adr/README.md) (ADR-0001..0033).
 
 This document describes what the sample deploys and runs, not the plan. Where
 the code and the specification diverge, the code and its ADRs win; the
@@ -218,6 +222,46 @@ pool, so either would be a dependency cycle (ADR-0024). The waiter function
 has a role with no permissions and log levels above anything it emits, so it
 writes no logs and cannot recreate a group.
 
+### 3.7 Control-plane mount (ADR-0028..0033)
+
+The stack that publishes the shared parameters (`publishSharedParameters`,
+ADR-0017) also owns the two fixed-name resources the `control-plane` mount
+needs ([`src/identity.cdk.ts`](./src/identity.cdk.ts), `PlatformInvokePolicy` and `AdminPasswordKey`):
+
+- **`PlatformInvokePolicy`** — an `iam.ManagedPolicy` the control-plane tenant
+  build role attaches to call `/platform/*` with SigV4 (ADR-0030). Exactly two
+  statements: `execute-api:Invoke` on the four route ARNs of `PLATFORM_INVOKE_ROUTES`
+  (`POST /platform/tenants`, `GET`/`DELETE /platform/tenants/*`,
+  `POST /platform/tenants/*/users` — the create, get, delete-tenant and
+  first-admin-slot routes the scripts call; the `GET` ARN also serves the
+  `ListUsers` check `tenant/create.sh` makes after a 409), and `kms:Encrypt` +
+  `kms:GenerateDataKey` on `AdminPasswordKey`, scoped to
+  `kms:ViaService = ssm.<region>.amazonaws.com`. No `ListTenants`, no test-aid
+  route, no `kms:Decrypt` (M-R-4). The `*` in each route ARN stands for the
+  `{tenantId}` label, but execute-api matching also lets it reach the user
+  routes below it; that over-grant is T-34, and the three ARNs are
+  acknowledged for cdk-nag IAM5 with that row. Its ARN is published at
+  `/application-plane/shared/identity/platformInvokePolicyArn`.
+- **`AdminPasswordKey`** — a symmetric customer-managed `kms.Key`, alias
+  `alias/application-plane/identity/admin-password`, rotation on,
+  `RemovalPolicy.DESTROY` with the minimum 7-day pending window (a KMS key
+  cannot be deleted outright, so teardown is not total for it; ADR-0033,
+  ADR-0019). It keeps the default key policy (account root only), so IAM
+  identity policies decide who encrypts (the build role, through SSM) and who
+  decrypts (whoever the deployer grants `kms:Decrypt`; nothing in this stack
+  holds it). Its ARN is published at
+  `/application-plane/shared/identity/adminPasswordKeyArn`.
+
+The mount's calling code is not in the stack: `scripts/control-plane/{lib.sh,tenant/*.sh,cell/*.sh}`
+run in control-plane's CodeBuild projects, read these parameters, call the
+platform API, and park each first admin's temporary password at
+`/application-plane/tenants/<T>/identity/admin-temporary-password` as a
+`SecureString` under `AdminPasswordKey` (ADR-0031). The create path is the
+reference implementation in [`test/integ.control-plane.ts`](./test/integ.control-plane.ts)
+and [`scripts/integ-control-plane.sh`](./scripts/integ-control-plane.sh); the
+mount as a whole is specified in
+[`design/control-plane-mounting.spec.md`](./design/control-plane-mounting.spec.md).
+
 ## 4. Data model
 
 One table, tenants only (R-10, ADR-0002). `PK=TENANT#<tenantId>`, `SK=META`.
@@ -231,6 +275,7 @@ One table, tenants only (R-10, ADR-0002). `PK=TENANT#<tenantId>`, `SK=META`.
 | `userPoolId`, `appClientId`, `issuer` | `pool-per-tenant` rows only (premium tenants in `tiered`); `issuer` is the allowlist entry a consumer needs (ADR-0018). Standard rows in `tiered` carry none: the `byUserPoolId` index maps a pool to exactly one tenant, so the shared pool's id cannot sit on every standard row |
 | `groupName` | `shared-pool-multi-tenant` only: `t-<tenantId>` |
 | `apiKeyId`, `apiKeyValue` | every topology: the tenant's API Gateway key (ADR-0025), written by `activate`; the value is what the authoriser returns as `usageIdentifierKey`. Not a credential (key source `AUTHORIZER`); never in an API response |
+| `firstAdminEmail` | the tenant's single first-admin slot (ADR-0032 and its amendment note): holds the admin's e-mail, not the Cognito username (a UUID in `pool-per-tenant`, where the e-mail is an alias), so the service compares on `UserView.email`. `CreateTenant` writes it in the same conditional update that flips the row to `ACTIVE`; `CreateUser {firstAdmin: true}` claims it with `attribute_not_exists(firstAdminEmail)`, re-asserts it after the Cognito create (`attribute_not_exists OR = :email`, undoing the user on 409/404) and releases it if Cognito fails. Released by `DeleteUser` or `DeleteMembership` on the holder after Cognito confirms; a `{username}` equal to the slot's e-mail with no user behind it is a 404 that still releases (the gone holder's UUID is a plain 404). `UpdateUser {admin: false}` does not release it. Never returned by `GetTenant` |
 | `createdAt`, `updatedAt` | ISO 8601 |
 
 `GetItem`/`BatchGetItem` use consistent reads. `markDeleting` is a conditional
@@ -452,6 +497,57 @@ group outside the stack (ADR-0019, ADR-0024). The stack owns the API execution l
 `cloudWatchRole: false`, destroy touches no account-wide setting. The result is
 no stack, pool, table, parameter, role, or log group with the sample's prefix.
 
+### 6.7 Control-plane mount: the create path (ADR-0028..0033)
+
+When mounted under the `control-plane` sample, one vendor `CreateTenant` call
+drives both planes. control-plane runs `scripts/control-plane/tenant/create.sh`
+in its tenant CodeBuild project; the script calls this sample's platform API
+with SigV4 under the **same** tenant id (ADR-0029) and parks the first admin's
+temporary password. Only the paths the script actually takes are shown.
+
+```mermaid
+sequenceDiagram
+    participant V as Vendor (JWT)
+    participant CP as control-plane (Step Functions + CodeBuild)
+    participant S as tenant/create.sh
+    participant SSM as SSM Parameter Store
+    participant P as Platform API (SigV4)
+    V->>CP: CreateTenant {name, adminEmail} (202, tenantId=T)
+    CP->>S: run with TENANT_ID=T, TENANT_NAME, ADMIN_EMAIL, OPERATOR_ID
+    S->>SSM: read /application-plane/shared/identity/{apiUrl,topology,adminPasswordKeyArn}
+    S->>S: refuse if topology == tiered (M-R-7)
+    S->>P: GET /platform/tenants/{T}
+    alt 404 (absent)
+        S->>P: POST /platform/tenants {tenantId:T, name, adminEmail}
+        P-->>S: 201 {admin.temporaryPassword}
+        S->>SSM: put SecureString /application-plane/tenants/T/identity/admin-temporary-password (key=AdminPasswordKey)
+    else 200 ACTIVE (replay)
+        S->>P: POST /platform/tenants/{T}/users {email, firstAdmin:true}
+        alt 201
+            S->>SSM: put SecureString (park the returned password, if any)
+        else 409 (slot held, or e-mail taken in the shared pool)
+            S->>P: GET /platform/tenants/{T}/users (must show an admin, else exit 1)
+            S->>SSM: get-parameter version, no decryption (WARNING if the parked password is gone)
+        end
+    end
+    S-->>CP: exit 0 -> build SUCCEEDED -> tenant ACTIVE
+```
+
+The park is the next call after the 201 (M-R-10) and gets three attempts, so
+a build killed between them loses only one call's worth of state (residual
+gap, spec §9) and a transient SSM or KMS error loses nothing. The password
+reaches `put-parameter` through `--value file://` from `lib.sh`'s mode-0600
+scratch file, never on argv (M-P-5). The replay branch claims the first-admin
+slot with a conditional write rather than reading the user list (ADR-0032);
+its read of the user list comes *after* the 409 and only verifies the outcome,
+because tenant-identity answers the same 409 when, in a shared pool, the
+e-mail is already taken (the slot is released before the answer). On the
+platform side the slot is re-asserted after the Cognito create and
+`CreateTenant` claims it inside its activation write (ADR-0032 amendment
+note), so re-runs and racing creates are safe. `tenant/delete.sh` is the same
+shape: `DELETE /platform/tenants/{T}` (204 or 404 both success) then
+`delete-parameter` on the parked password.
+
 ## 7. Topology mechanics
 
 - **`pool-per-tenant`** (ADR cites §7.1): `CreateTenant` creates a pool
@@ -483,8 +579,8 @@ no stack, pool, table, parameter, role, or log group with the sample's prefix.
 ## 8. Differences from the specification
 
 The code and the ADRs are authoritative; the specification carries dated
-amendment notes pointing at the first two below. These are the divergences
-found in the implementation:
+amendment notes pointing at the first two below and at ADR-0029 and
+ADR-0032. These are the divergences found in the implementation:
 
 - **ADR-0017 — one stack per account and Region publishes the shared
   parameters.** R-6's four `/application-plane/shared/identity/*` parameter
@@ -544,6 +640,25 @@ found in the implementation:
   standard rows store no pool id, the trigger tells the pools apart by event
   shape, the exchange compares no `client_id`, and the premium plan is
   25 rps / 50 burst. The integration test deploys four stacks, not three.
+- **ADR-0029 — `CreateTenant` accepts a caller-supplied `tenantId`.** The
+  spec's §5.1 said the id is generated. It still is by default; an optional
+  `tenantId` (the `TenantId` shape) is written instead when the caller
+  already holds one, and the existing `attribute_not_exists(PK)` write turns
+  a repeat into a 409. §5.1 and §5.3 are amended.
+- **ADR-0032 — one first admin per tenant, held by a conditional write.**
+  The spec had no such notion: `CreateTenant` made an admin and the vendor
+  could add more. The row gains `firstAdminEmail`; `CreateUser` gains
+  `firstAdmin`; `CreateTenant` claims the slot in its activation write;
+  `DeleteUser` and `DeleteMembership` release it with the holder. The ADR as
+  first written differs from the code in the points its amendment note
+  lists: the attribute holds the e-mail (the username is a UUID in
+  `pool-per-tenant`), the claim is re-asserted after the Cognito create, and
+  a vanished row is 404. §4.1, §5.1 and §5.3 are amended.
+- **ADR-0028, ADR-0030, ADR-0031, ADR-0033 — the control-plane mount.** Not
+  divergences but an addition that fills the spec's §11 "Control-plane
+  mounting" seam, specified in
+  [`design/control-plane-mounting.spec.md`](./design/control-plane-mounting.spec.md)
+  and described in §3.7 and §6.7 above.
 
 Other, smaller implementation choices recorded as ADRs rather than spec
 changes: the trigger **refuses duplicate scopes** with `invalid_scope` rather

@@ -8,7 +8,7 @@ import {
   NotFoundError,
   UnsupportedInTopologyError,
 } from '../../src/shared/errors';
-import type { TenantRecord } from '../../src/shared/registry';
+import type { ActivatedFields, TenantRecord } from '../../src/shared/registry';
 import type { NewUserResult, Provisioner, UserView } from '../../src/topology/provisioner';
 
 /**
@@ -74,14 +74,15 @@ jest.mock('../../src/shared/registry', () => {
       return { items: [...store.values()] };
     }
     async create(record: TenantRecord): Promise<void> {
+      // Mirrors DynamoDBRegistry.create's attribute_not_exists(PK) condition.
+      if (store.has(record.tenantId)) {
+        throw new DomainConflictError(`Tenant ${record.tenantId} already exists`);
+      }
       store.set(record.tenantId, record);
     }
-    async activate(
-      tenantId: string,
-      provisioned: { userPoolId?: string; appClientId?: string; issuer?: string; groupName?: string },
-    ): Promise<TenantRecord> {
+    async activate(tenantId: string, provisioned: ActivatedFields): Promise<TenantRecord> {
       // ADR-0021: flip PROVISIONING -> ACTIVE, writing only the DEFINED provisioned
-      // fields (mirrors DynamoDBRegistry.activate).
+      // fields (mirrors DynamoDBRegistry.activate), the first-admin slot included.
       const existing = store.get(tenantId);
       if (existing === undefined || existing.status !== 'PROVISIONING') {
         throw new DomainConflictError(`Tenant ${tenantId} is not PROVISIONING`);
@@ -99,6 +100,36 @@ jest.mock('../../src/shared/registry', () => {
       const updated: TenantRecord = { ...existing, status: 'DELETING' };
       store.set(tenantId, updated);
       return updated;
+    }
+    async claimFirstAdmin(tenantId: string, email: string): Promise<void> {
+      // ADR-0032: mirrors DynamoDBRegistry.claimFirstAdmin (one conditional write).
+      const existing = store.get(tenantId);
+      if (existing === undefined) {
+        throw new NotFoundError(`Tenant ${tenantId} not found`);
+      }
+      if (existing.firstAdminEmail !== undefined) {
+        throw new DomainConflictError(`Tenant ${tenantId} already has a first admin`);
+      }
+      store.set(tenantId, { ...existing, firstAdminEmail: email });
+    }
+    async confirmFirstAdmin(tenantId: string, email: string): Promise<void> {
+      // ADR-0032: mirrors DynamoDBRegistry.confirmFirstAdmin (empty or ours -> written).
+      const existing = store.get(tenantId);
+      if (existing === undefined) {
+        throw new NotFoundError(`Tenant ${tenantId} not found`);
+      }
+      if (existing.firstAdminEmail !== undefined && existing.firstAdminEmail !== email) {
+        throw new DomainConflictError(`Tenant ${tenantId} already has a first admin`);
+      }
+      store.set(tenantId, { ...existing, firstAdminEmail: email });
+    }
+    async releaseFirstAdmin(tenantId: string, email: string): Promise<void> {
+      const existing = store.get(tenantId);
+      if (existing === undefined || existing.firstAdminEmail !== email) {
+        return;
+      }
+      const { firstAdminEmail: _released, ...rest } = existing;
+      store.set(tenantId, rest);
     }
     async delete(tenantId: string): Promise<void> {
       store.delete(tenantId);
@@ -238,6 +269,110 @@ describe('platform.function handler (spec §5.1 routing and status codes)', () =
     const parsed = JSON.parse(res.body);
     expect(parsed.fieldList?.[0]?.path).toBe('/tenantId');
     expect(parsed.message).toContain('tenantId');
+  });
+
+  describe('caller-supplied tenantId on CreateTenant (ADR-0029)', () => {
+    const SUPPLIED = '01HZXK5V3P9Q7R2T4W6Y8A0BCD';
+
+    beforeEach(() => {
+      provisionerMock.provisionTenant.mockResolvedValue({ groupName: `t-${SUPPLIED}` });
+      provisionerMock.createUser.mockResolvedValue({ user: userView('admin', true), temporaryPassword: 'Temp#1234' });
+      provisionerMock.provisionTenant.mockClear();
+      provisionerMock.createUser.mockClear();
+    });
+
+    it('a valid ULID is used as the tenant id -> 201', async () => {
+      const res = await handler(
+        event('POST', '/platform/tenants', { tenantId: SUPPLIED, name: 'Acme', adminEmail: 'admin@example.com' }),
+      );
+      expect(res.statusCode).toBe(201);
+      expect(JSON.parse(res.body).tenant.tenantId).toBe(SUPPLIED);
+      expect(store.has(SUPPLIED)).toBe(true);
+    });
+
+    it('a bad pattern -> 400 from the generated validator, before any write (M-R-3)', async () => {
+      const res = await handler(
+        event('POST', '/platform/tenants', { tenantId: 'not-a-ulid', name: 'Acme', adminEmail: 'admin@example.com' }),
+      );
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).fieldList?.[0]?.path).toBe('/tenantId');
+      expect(store.size).toBe(0);
+      expect(provisionerMock.provisionTenant).not.toHaveBeenCalled();
+    });
+
+    it('an existing id -> 409 ConflictError, nothing changed (M-R-2)', async () => {
+      const before = { ...activeTenant(), tenantId: SUPPLIED };
+      store.set(SUPPLIED, before);
+      const res = await handler(
+        event('POST', '/platform/tenants', { tenantId: SUPPLIED, name: 'Replay', adminEmail: 'other@example.com' }),
+      );
+      expect(res.statusCode).toBe(409);
+      expect(store.get(SUPPLIED)).toEqual(before);
+      expect(provisionerMock.provisionTenant).not.toHaveBeenCalled();
+      expect(provisionerMock.createUser).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('firstAdmin on CreateUser (ADR-0032)', () => {
+    const FIRST = 'success+admin@simulator.amazonses.com';
+
+    beforeEach(() => {
+      provisionerMock.createUser.mockReset();
+    });
+
+    it('claims the slot and creates the admin -> 201; a second firstAdmin -> 409 with no Cognito call', async () => {
+      store.set(TENANT_A, activeTenant());
+      provisionerMock.createUser.mockResolvedValue({ user: { ...userView('sub-1', true), email: FIRST }, temporaryPassword: 'Temp#1234' });
+
+      const first = await handler(
+        event('POST', `/platform/tenants/${TENANT_A}/users`, { email: FIRST, firstAdmin: true }, { tenantId: TENANT_A }),
+      );
+      expect(first.statusCode).toBe(201);
+      expect(JSON.parse(first.body).user.admin).toBe(true);
+      expect(store.get(TENANT_A)?.firstAdminEmail).toBe(FIRST);
+
+      const second = await handler(
+        event('POST', `/platform/tenants/${TENANT_A}/users`, { email: 'other@example.com', firstAdmin: true }, { tenantId: TENANT_A }),
+      );
+      expect(second.statusCode).toBe(409);
+      expect(provisionerMock.createUser).toHaveBeenCalledTimes(1);
+
+      // A plain admin is still allowed.
+      const plain = await handler(
+        event('POST', `/platform/tenants/${TENANT_A}/users`, { email: 'other@example.com', admin: true }, { tenantId: TENANT_A }),
+      );
+      expect(plain.statusCode).toBe(201);
+    });
+
+    it('a Cognito refusal after the claim releases the slot and returns that error (409 here)', async () => {
+      store.set(TENANT_A, activeTenant());
+      provisionerMock.createUser.mockRejectedValue(new DomainConflictError('E-mail already exists'));
+      const res = await handler(
+        event('POST', `/platform/tenants/${TENANT_A}/users`, { email: FIRST, firstAdmin: true }, { tenantId: TENANT_A }),
+      );
+      expect(res.statusCode).toBe(409);
+      expect(JSON.parse(res.body).message).toBe('E-mail already exists');
+      expect(store.get(TENANT_A)).not.toHaveProperty('firstAdminEmail');
+    });
+
+    it('GetTenant never carries firstAdminEmail (mounting spec §10 step 4)', async () => {
+      store.set(TENANT_A, { ...activeTenant(), firstAdminEmail: FIRST });
+      const res = await handler(event('GET', `/platform/tenants/${TENANT_A}`, undefined, { tenantId: TENANT_A }));
+      expect(res.statusCode).toBe(200);
+      expect(res.body).not.toContain('firstAdminEmail');
+      expect(res.body).not.toContain(FIRST);
+    });
+
+    it('DeleteUser of the holder -> 204 and the slot is released', async () => {
+      store.set(TENANT_A, { ...activeTenant(), firstAdminEmail: FIRST });
+      provisionerMock.getUser.mockResolvedValue({ ...userView('sub-1', true), email: FIRST });
+      provisionerMock.deleteUser.mockResolvedValue(undefined);
+      const res = await handler(
+        event('DELETE', `/platform/tenants/${TENANT_A}/users/sub-1`, undefined, { tenantId: TENANT_A, username: 'sub-1' }),
+      );
+      expect(res.statusCode).toBe(204);
+      expect(store.get(TENANT_A)).not.toHaveProperty('firstAdminEmail');
+    });
   });
 
   it('unknown provisioner failure -> 500 without leaking the message (N-6)', async () => {
