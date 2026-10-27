@@ -28,7 +28,13 @@ export function sharedHandler(options: Pick<NodeHttpHandlerOptions, 'connectionT
   return new NodeHttpHandler({ httpsAgent, ...options });
 }
 
-/** The regional endpoint host of a service in this Region, or undefined when the Region is unknown. */
+/**
+ * The regional endpoint host of a service in this Region, or undefined when
+ * the Region is unknown. Assumes the `aws` partition and the public
+ * endpoint: in `aws-cn` or `aws-us-gov`, or with a PrivateLink endpoint, the
+ * host differs, the pre-connect warms the wrong host, and the first request
+ * opens its own connection as it did before (no error, no gain).
+ */
 export function endpointHost(service: 'sts' | 'dynamodb' | 'bedrock-agentcore', region = process.env.AWS_REGION): string | undefined {
   return region === undefined || region.length === 0 ? undefined : `${service}.${region}.amazonaws.com`;
 }
@@ -43,8 +49,8 @@ export function preconnect(hosts: ReadonlyArray<string | undefined>, timeoutMs =
           const req = request({ agent: httpsAgent, host, method: 'POST', path: '/', headers: { 'Content-Length': '0' }, timeout: timeoutMs }, (res) => {
             res.resume();
             res.on('end', resolve);
-            res.on('error', () => resolve());
           });
+          // A connect failure or timeout surfaces on the request, never on a response.
           req.on('timeout', () => req.destroy());
           req.on('error', () => resolve());
           req.end();

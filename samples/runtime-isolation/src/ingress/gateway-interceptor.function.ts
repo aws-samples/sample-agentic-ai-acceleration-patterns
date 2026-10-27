@@ -25,7 +25,7 @@
 
 import { AgentCoreRuntimeBackend } from '../backend/agentcore-runtime.transport';
 import type { HeaderTransportBackend } from '../backend/backend';
-import { readIngressConfig } from '../shared/config';
+import { isLambdaRuntime, readIngressConfig } from '../shared/config';
 import { errorName, log } from '../shared/logger';
 import { emitRequestMetrics } from '../shared/metrics';
 import { ERROR_TEXT, type ErrorStatus, IngressPipeline, pipelineFor, RequestError } from '../shared/request';
@@ -119,6 +119,9 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
   const gatewayRequest = event.http?.gatewayRequest;
   const now = deps.now ?? Date.now;
   const started = now();
+  // The first request of an environment waits for init's pre-connects and
+  // fetches (ADR-0023); `ready` never rejects by construction.
+  await deps.ready;
   // Request side only (see the file comment): Requests, errors and this
   // function's own milliseconds. No backend or model figures exist here.
   const metrics = (status: number, tenantId?: string) =>
@@ -178,11 +181,11 @@ function defaultDependencies(): InterceptorDependencies {
 
 // Built during init on the Lambda runtime (the config is present there), so
 // client construction and the discovery and JWKS fetch run before the first
-// event. Under jest the handler is not used; tests call intercept() directly.
-let deps: InterceptorDependencies | undefined = process.env.AWS_LAMBDA_FUNCTION_NAME !== undefined ? defaultDependencies() : undefined;
+// event; a missing or malformed variable fails init, naming it (intended).
+// Under jest the handler is not used; tests call intercept() directly.
+let deps: InterceptorDependencies | undefined = isLambdaRuntime() ? defaultDependencies() : undefined;
 
 export async function handler(event: InterceptorEvent): Promise<InterceptorOutput> {
   deps ??= defaultDependencies();
-  await deps.ready;
   return intercept(event, deps);
 }

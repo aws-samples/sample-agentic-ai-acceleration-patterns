@@ -75,6 +75,24 @@ describe('intercept', () => {
     expect(http.transformedGatewayRequest.body).toBe(body);
   });
 
+  it('awaits deps.ready before any work (ADR-0023)', async () => {
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let settled = false;
+    const run = intercept(event({ Authorization: `Bearer ${await issuer.mint()}` }, body), { ...deps(), ready }).then((out) => {
+      settled = true;
+      return out;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+    release();
+    const out = await run;
+    expect(settled).toBe(true);
+    expect('transformedGatewayRequest' in out.http).toBe(true);
+  });
+
   it('a request with no session header gets one too: the client never needs to send it (ADR-0002)', async () => {
     const out = await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body), deps());
     const http = out.http as { transformedGatewayRequest: { headers: Record<string, string> } };

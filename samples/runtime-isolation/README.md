@@ -334,7 +334,7 @@ Measured 2026-10-27 in `eu-central-1`, client p50 of one run per ingress, same b
 | New conversation, `report` probe (microVM start) | 1.4 s | 1.5 s |
 | Warm conversation, `report` probe | 0.20 s | 0.29 s |
 | Warm conversation, one-word model prompt (Nova Lite) | 0.5 s | 0.6 s |
-| Ingress Lambda, cold environment, its own work on the first request | ~0.2 s | not measured |
+| Ingress Lambda's own work on the first request of a cold environment, server-side, after the ~0.33 s init and excluding the microVM start (ADR-0023; was 0.55 s) | ~0.2 s | not measured |
 
 The microVM start is the Runtime's and is the same on both ingresses. On
 `agentcore-gateway` the first byte and the last byte arrive together on

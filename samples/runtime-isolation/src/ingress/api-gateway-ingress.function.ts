@@ -19,7 +19,7 @@ import type { Writable } from 'node:stream';
 import type { APIGatewayProxyEvent, StreamifyHandler } from 'aws-lambda';
 import { AgentCoreRuntimeBackend } from '../backend/agentcore-runtime.transport';
 import type { InvokeBackend } from '../backend/backend';
-import { ENV, readIngressConfig, requireEnv } from '../shared/config';
+import { ENV, isLambdaRuntime, readIngressConfig, requireEnv } from '../shared/config';
 import { errorName, log } from '../shared/logger';
 import { emitRequestMetrics, type RequestMetrics, UsageEventScanner } from '../shared/metrics';
 import { ERROR_TEXT, type ErrorStatus, IngressPipeline, pipelineFor, RequestError } from '../shared/request';
@@ -63,6 +63,10 @@ function decodeBody(event: APIGatewayProxyEvent): string | null {
 export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWriter, deps: HandlerDependencies): Promise<void> {
   const now = deps.now ?? Date.now;
   const started = now();
+  // The first request of an environment waits for init's pre-connects and
+  // fetches (ADR-0023); afterwards this is a settled promise. `ready` never
+  // rejects by construction (warm() swallows failures), so no catch here.
+  await deps.ready;
   // The tenant the authoriser verified: present on every request that reached
   // us, so even a refusal below is attributed to a tenant in the metrics.
   const authorizedTenant = (event.requestContext?.authorizer as Record<string, unknown> | undefined)?.tenantId;
@@ -193,13 +197,14 @@ const streamify: (fn: StreamHandler) => StreamHandler = onLambda ? (fn) => awsla
 
 // Built during init on the Lambda runtime: the config read, the SDK clients
 // and the TVM cache are constructed at boosted CPU, and the verifier's
-// discovery and JWKS fetch run before the first event arrives. Under jest
-// there is no config, so the handler builds them on first call.
-let deps: HandlerDependencies | undefined = onLambda ? defaultDependencies() : undefined;
+// discovery and JWKS fetch run before the first event arrives. A missing or
+// malformed environment variable therefore fails init, naming it, rather
+// than the first request (intended: the construct sets every variable).
+// Under jest there is no config, so the handler builds them on first call.
+let deps: HandlerDependencies | undefined = isLambdaRuntime() ? defaultDependencies() : undefined;
 
 export const handler: StreamHandler = streamify(async (event, responseStream) => {
   deps ??= defaultDependencies();
-  await deps.ready;
   let stream: Writable | undefined;
   const writer: ResponseWriter = {
     start: (statusCode, headers) => {
