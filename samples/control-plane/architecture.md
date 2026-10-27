@@ -4,9 +4,16 @@
 > integration test (`test/integ.tenant.ts`) passed against deployed
 > infrastructure on 2026-09-07 (eu-central-1): full cell lifecycle including
 > implicit cell creation, cell reuse, fill-to-capacity, second-cell
-> placement, in-flight and occupied-cell guards, and complete teardown.
-> ADRs: see [`adr/`](./adr/README.md) (ADR-001..014; ADR-012..014 introduce the
-> cell model).
+> placement, in-flight and occupied-cell guards, and complete teardown. The
+> joint control-plane mount test owned by the `tenant-identity` sample
+> (`samples/tenant-identity/test/integ.control-plane.ts`) passed on
+> 2026-10-27 with this control plane deployed through its own
+> deploy path, covering the optional `tenantBuildManagedPolicyArns`
+> deployment input (§10, ADR-022) and `TENANT_NAME` on every tenant build
+> (ADR-023); the API access log group that can reappear after teardown is
+> the open item (README, Known issues).
+> ADRs: see [`adr/`](./adr/README.md) (ADR-001..023; ADR-012..014 introduce the
+> cell model, ADR-022..023 the application-plane mount inputs).
 
 ## 1. Purpose
 
@@ -682,8 +689,9 @@ to SSM (`/control-plane/tenant-api-url`) for tooling/demo convenience.
 Supplied via CDK context. Synthesis validates `maxTenants` as an integer of
 at least one and requires non-empty source and script values; it warns (does
 not fail) when `source.sourceVersion` is absent or not a full commit SHA
-(ADR-020). When `tenantBuildManagedPolicyArns` is given, synthesis fails if any
-entry is not a managed-policy ARN in the stack's own partition and account
+(ADR-020). When `tenantBuildManagedPolicyArns` is non-empty, synthesis fails if
+any entry is not a managed-policy ARN in the stack's own partition and account,
+or if the stack's account or Region is unresolved so that check cannot run
 (ADR-022). Changing `cellDefinition` affects only cells created after the
 change; existing cells keep their stamped definition.
 

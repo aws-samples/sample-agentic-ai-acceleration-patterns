@@ -6,6 +6,8 @@
 # Runs in AWS CodeBuild with: TENANT_ID, TENANT_NAME, CELL_ID, OPERATION,
 # OPERATOR_ID. Re-applies the per-tenant deployment - a real script would
 # re-run its IaC deployment here. Idempotent by design.
+# TENANT_NAME is operator-supplied free text: expand it quoted only, never
+# eval or use as an identifier (see scripts/CONVENTIONS.md).
 set -euo pipefail
 
 : "${TENANT_ID:?TENANT_ID env var is required}"

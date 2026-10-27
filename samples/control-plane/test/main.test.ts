@@ -372,6 +372,10 @@ describe('tenantBuildManagedPolicyArns (ADR-022)', () => {
       // AWS managed policies live in the pseudo-account 'aws' - never this account.
       ['arn:aws:iam::aws:policy/AdministratorAccess', /not a customer-managed IAM policy ARN/],
       [`arn:aws:kms:eu-central-1:${account}:key/abc`, /not a customer-managed IAM policy ARN/],
+      // Malformed policy paths: empty segments or a trailing slash with no name.
+      [`arn:aws:iam::${account}:policy//`, /not a customer-managed IAM policy ARN/],
+      [`arn:aws:iam::${account}:policy/foo/`, /not a customer-managed IAM policy ARN/],
+      [`arn:aws:iam::${account}:policy/a//b`, /not a customer-managed IAM policy ARN/],
     ];
     for (const [arn, message] of cases) {
       expect(() => synth({ tenantBuildManagedPolicyArns: [arn] }, env)).toThrow(message);
@@ -388,17 +392,24 @@ describe('tenantBuildManagedPolicyArns (ADR-022)', () => {
       .toThrow(/\[0\] 42 is not a customer-managed IAM policy ARN/);
   });
 
-  test('an environment-agnostic stack checks the shape and whatever is resolved (documented limitation)', () => {
-    // No env: partition and account are tokens; only the shape is checked.
-    const { tenant } = buildProjects(synth({ tenantBuildManagedPolicyArns: [policyA] }));
-    expect(tenant).toBeDefined();
-    expect(() => synth({ tenantBuildManagedPolicyArns: ['arn:aws:iam::aws:policy/AdministratorAccess'] }))
-      .toThrow(/not a customer-managed IAM policy ARN/);
+  test('an environment-agnostic stack rejects a non-empty list (the account check needs a resolved env)', () => {
+    // No env: partition and account are tokens, so the cross-account check
+    // cannot run; synth fails rather than deferring that check to IAM at deploy.
+    expect(() => synth({ tenantBuildManagedPolicyArns: [policyA] }))
+      .toThrow(/region \(partition\) and account must be resolved at synth time/);
+    expect(() => synth({ tenantBuildManagedPolicyArns: [policyA] }))
+      .toThrow(/CDK_DEFAULT_ACCOUNT/);
     // Region only: the partition resolves (aws) while the account stays a token.
-    expect(() => synth({ tenantBuildManagedPolicyArns: [`arn:aws-us-gov:iam::${account}:policy/P`] }, { region: 'eu-central-1' }))
-      .toThrow(/partition 'aws-us-gov'/);
-    expect(() => synth({ tenantBuildManagedPolicyArns: ['arn:aws:iam::210987654321:policy/P'] }, { region: 'eu-central-1' }))
-      .not.toThrow();
+    expect(() => synth({ tenantBuildManagedPolicyArns: [policyA] }, { region: 'eu-central-1' }))
+      .toThrow(/the stack's account must be resolved at synth time/);
+    // An omitted or empty list never needs the env.
+    for (const template of [synth({}), synth({ tenantBuildManagedPolicyArns: [] })]) {
+      const { tenant } = buildProjects(template);
+      expect(serviceRole(template, tenant).Properties.ManagedPolicyArns).toBeUndefined();
+    }
+    // The pure function reports the same problem for a token identity.
+    expect(() => validateTenantBuildManagedPolicyArns([policyA], { partition: 'aws', account: '${Token[AWS.AccountId.0]}' }))
+      .toThrow(/account must be resolved at synth time/);
   });
 });
 

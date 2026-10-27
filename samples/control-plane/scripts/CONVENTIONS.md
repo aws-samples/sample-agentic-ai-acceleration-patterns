@@ -40,6 +40,23 @@ log group into an unintended secrets store.
 - Never pass secrets as plaintext environment variables or command-line
   arguments defined in the CellDefinition.
 
+## Untrusted inputs
+
+- **`TENANT_NAME` and `ADMIN_EMAIL` are operator-supplied free text.** The
+  control plane passes them through unchanged (ADR-004, ADR-023); the name
+  has only a length limit and may contain quotes, `$(`, backticks or
+  newlines. Always expand them quoted (`"${TENANT_NAME}"`), never `eval`
+  them or interpolate them into a command line, a URL, a file path or a
+  resource name, and sanitise (or reject) them before using either as an
+  identifier. The control plane delivers them as structured CodeBuild
+  environment variables, so the first script that expands one unquoted is
+  the first place an injection becomes possible.
+- `TENANT_ID` and `CELL_ID` are control-plane-generated ULIDs and
+  `OPERATION` is a fixed verb, so the samples use them in parameter names
+  and paths as-is. `OPERATOR_ID` is the verified `sub` claim of the
+  operator's vendor-IdP token (ADR-019): fine to log or tag with, but quote
+  it and treat it like free text anywhere else.
+
 ## Failure behaviour
 
 - Exit non-zero on any failure — `set -euo pipefail` plus

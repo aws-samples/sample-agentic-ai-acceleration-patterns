@@ -57,8 +57,14 @@ export interface RunOptions {
   readonly curl?: CurlResponse[];
   /** `aws ssm delete-parameter` outcome. */
   readonly deleteParameter?: 'ok' | 'notfound' | 'error';
-  /** Make `aws ssm put-parameter` fail. */
-  readonly putParameterFails?: boolean;
+  /** Make `aws ssm put-parameter` fail: `true` for every attempt, a number for the first N attempts. */
+  readonly putParameterFails?: boolean | number;
+  /** Full parameter names whose `aws ssm get-parameter` is denied (AccessDeniedException) instead of answered. */
+  readonly getParameterDenied?: string[];
+  /** Make the parked password (PARKED_PARAM) exist in "SSM". */
+  readonly parkedParameter?: boolean;
+  /** Make the first curl call fail with this exit code (no HTTP response). */
+  readonly curlExit?: number;
 }
 
 /** One recorded stub invocation. */
@@ -69,6 +75,8 @@ export interface Call {
   readonly stdin?: string;
   /** curl only: the contents of the `--data-binary @file` body, if any. */
   readonly body?: string;
+  /** aws put-parameter only: the contents of the `--value file://...` file. */
+  readonly value?: string;
 }
 
 export interface RunResult {
@@ -78,6 +86,12 @@ export interface RunResult {
   readonly calls: Call[];
   /** stdout + stderr, for hygiene assertions. */
   readonly log: string;
+  /**
+   * Files the script left under its TMPDIR after exit (the harness's own
+   * bin/, calls/, params/, responses/ and control files excluded). A clean
+   * run leaves none: lib.sh removes its scratch directory from the EXIT trap.
+   */
+  readonly scratchLeftovers: string[];
 }
 
 const US = '\u001f'; // unit separator between argv items in the call log
@@ -143,6 +157,25 @@ export const userCreated = (password: string | null = FIXTURE.replayPassword): C
     ...(password ? { temporaryPassword: password } : {}),
   },
 });
+/** A pagination token as tenant-identity issues it (opaque, URL-unsafe characters included). */
+export const NEXT_TOKEN = 'eyJrIjoidjEifQ==/next+page';
+/**
+ * A ListUsers page (200). One user per entry, `admin` as given; the admin
+ * carries the fixture e-mail so a body leak is caught by the hygiene suite.
+ * `nextToken` makes it a non-final page.
+ */
+export const usersPage = (admins: boolean[], nextToken?: string): CurlResponse => ({
+  status: 200,
+  body: {
+    users: admins.map((admin, i) => ({
+      username: admin ? FIXTURE.adminEmail : `success+member${i}@simulator.amazonses.com`,
+      email: admin ? FIXTURE.adminEmail : `success+member${i}@simulator.amazonses.com`,
+      admin,
+      status: 'CONFIRMED',
+    })),
+    ...(nextToken ? { nextToken } : {}),
+  },
+});
 
 const AWS_STUB = `#!/usr/bin/env bash
 # aws stub: records argv, answers from the fixture directory.
@@ -158,11 +191,19 @@ case "$1 $2" in
   "ssm get-parameter")
     name=""; while [ $# -gt 0 ]; do [ "$1" = --name ] && name="$2"; shift; done
     f="$W/params/$(printf '%s' "$name" | tr '/' '_')"
+    if [ -f "$W/denied/$(printf '%s' "$name" | tr '/' '_')" ]; then
+      echo "An error occurred (AccessDeniedException) when calling the GetParameter operation: User is not authorized" >&2; exit 254; fi
     if [ -f "$f" ]; then cat "$f"; else
       echo "An error occurred (ParameterNotFound) when calling the GetParameter operation: " >&2; exit 254; fi
     ;;
   "ssm put-parameter")
-    if [ -f "$W/put-fails" ]; then echo "An error occurred (AccessDeniedException) when calling the PutParameter operation" >&2; exit 254; fi
+    value=""; while [ $# -gt 0 ]; do [ "$1" = --value ] && value="$2"; shift; done
+    case "$value" in file://*) cp "\${value#file://}" "$W/calls/$(printf '%04d' "$n").value" ;; esac
+    left="$(cat "$W/put-fails" 2>/dev/null || echo 0)"
+    if [ "$left" -gt 0 ]; then
+      echo $((left - 1)) >"$W/put-fails"
+      echo "An error occurred (ThrottlingException) when calling the PutParameter operation: Rate exceeded" >&2; exit 254
+    fi
     echo '{"Version": 1, "Tier": "Standard"}'
     ;;
   "ssm delete-parameter")
@@ -185,6 +226,7 @@ n="$(cat "$W/counter" 2>/dev/null || echo 0)"; echo $((n + 1)) >"$W/counter"
 id="$(printf '%04d' "$n")"
 { printf 'curl'; for a in "$@"; do printf '${US}%s' "$a"; done; printf '\\n'; } >"$W/calls/$id.curl"
 cat >"$W/calls/$id.stdin"
+if [ -f "$W/curl-exit" ]; then code="$(cat "$W/curl-exit")"; rm "$W/curl-exit"; exit "$code"; fi
 fmt=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -207,7 +249,7 @@ printf '%s' "\${fmt//%\\{http_code\\}/$status}"
  */
 export function runScript(script: string, options: RunOptions = {}): RunResult {
   const work = mkdtempSync(join(tmpdir(), 'mount-scripts-'));
-  for (const d of ['bin', 'calls', 'params', 'responses']) mkdirSync(join(work, d));
+  for (const d of ['bin', 'calls', 'params', 'responses', 'denied']) mkdirSync(join(work, d));
 
   writeFileSync(join(work, 'bin', 'aws'), AWS_STUB);
   writeFileSync(join(work, 'bin', 'curl'), CURL_STUB);
@@ -217,12 +259,17 @@ export function runScript(script: string, options: RunOptions = {}): RunResult {
   for (const [name, value] of Object.entries(options.params ?? {})) {
     writeFileSync(join(work, 'params', `${IDENTITY_NS}/${name}`.replace(/\//g, '_')), value);
   }
+  if (options.parkedParameter) writeFileSync(join(work, 'params', PARKED_PARAM.replace(/\//g, '_')), 'AQICAHh-ciphertext');
+  for (const name of options.getParameterDenied ?? []) writeFileSync(join(work, 'denied', name.replace(/\//g, '_')), '');
+  if (options.curlExit !== undefined) writeFileSync(join(work, 'curl-exit'), String(options.curlExit));
   (options.curl ?? []).forEach((r, i) => {
     const body = r.body === undefined ? '' : JSON.stringify(r.body);
     writeFileSync(join(work, 'responses', String(i).padStart(4, '0')), `${r.status}\n${body}`);
   });
   if (options.deleteParameter) writeFileSync(join(work, 'delete-result'), options.deleteParameter);
-  if (options.putParameterFails) writeFileSync(join(work, 'put-fails'), '');
+  if (options.putParameterFails) {
+    writeFileSync(join(work, 'put-fails'), String(options.putParameterFails === true ? 99 : options.putParameterFails));
+  }
 
   // Only the §6.1 variables plus what bash and the stubs need: no ambient AWS
   // configuration can leak in, and nothing but the stubs answers as aws/curl.
@@ -252,8 +299,12 @@ export function runScript(script: string, options: RunOptions = {}): RunResult {
           body: existsSync(bodyPath) ? readFileSync(bodyPath, 'utf8') : undefined,
         };
       }
-      return call;
+      const valuePath = join(work, 'calls', `${id}.value`);
+      return existsSync(valuePath) ? { ...call, value: readFileSync(valuePath, 'utf8') } : call;
     });
+
+  const harnessEntries = new Set(['bin', 'calls', 'params', 'responses', 'denied', 'counter', 'delete-result', 'put-fails', 'curl-exit']);
+  const scratchLeftovers = readdirSync(work).filter((f) => !harnessEntries.has(f));
 
   return {
     status: proc.status ?? -1,
@@ -261,6 +312,7 @@ export function runScript(script: string, options: RunOptions = {}): RunResult {
     stderr: proc.stderr ?? '',
     calls,
     log: `${proc.stdout ?? ''}${proc.stderr ?? ''}`,
+    scratchLeftovers,
   };
 }
 

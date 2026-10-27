@@ -120,9 +120,12 @@ export function validateCellDefinition(definition: CellDefinition): void {
  * A customer-managed IAM policy ARN: `arn:<partition>:iam::<account>:policy/<path><name>`.
  * The account segment is twelve digits, which also rejects AWS managed
  * policies (`iam::aws:policy/...`) - the input is for policies the deployer
- * owns in this account (ADR-022).
+ * owns in this account (ADR-022). The path is zero or more non-empty
+ * segments, each followed by `/`, then a non-empty name, so `policy//`,
+ * `policy/foo/` and `policy/a//b` are rejected at synth rather than by IAM
+ * at deploy.
  */
-const MANAGED_POLICY_ARN = /^arn:([a-z][a-z0-9-]*):iam::(\d{12}):policy\/[\w+=,.@/-]+$/;
+const MANAGED_POLICY_ARN = /^arn:([a-z][a-z0-9-]*):iam::(\d{12}):policy\/(?:[\w+=,.@-]+\/)*[\w+=,.@-]+$/;
 
 /** The partition and account a managed-policy ARN must belong to. */
 export interface StackIdentity {
@@ -150,12 +153,12 @@ export function stackIdentity(stack: Stack): StackIdentity {
  * ARN in the stack's own partition and account. Throws with every problem
  * listed otherwise.
  *
- * Limitation: when the stack is environment-agnostic the partition (derived
- * from the Region, see `stackIdentity`) or the account is a CDK token at
- * synth time and cannot be compared, so only the ARN shape (including a
- * twelve-digit account) and whichever of the two is resolved are checked.
+ * The partition (derived from the Region, see `stackIdentity`) and the
+ * account must be resolved at synth time for that comparison, so a non-empty
+ * list on an environment-agnostic stack (either one still a CDK token) fails
+ * synth rather than deferring the cross-account check to IAM at deploy.
  * `src/main.ts` passes `CDK_DEFAULT_ACCOUNT` / `CDK_DEFAULT_REGION`, so a
- * real `cdk deploy` resolves both.
+ * real `cdk deploy` resolves both; an omitted or empty list never needs them.
  */
 export function validateTenantBuildManagedPolicyArns(
   arns: unknown,
@@ -167,6 +170,16 @@ export function validateTenantBuildManagedPolicyArns(
   const problems: string[] = [];
   if (!Array.isArray(arns)) {
     problems.push(`must be an array of strings (got: ${JSON.stringify(arns)})`);
+  } else if (arns.length > 0 && (Token.isUnresolved(stack.partition) || Token.isUnresolved(stack.account))) {
+    const unresolved = [
+      ...(Token.isUnresolved(stack.partition) ? ['region (partition)'] : []),
+      ...(Token.isUnresolved(stack.account) ? ['account'] : []),
+    ].join(' and ');
+    problems.push(
+      `the stack's ${unresolved} must be resolved at synth time to check that each ARN belongs to this stack; `
+      + 'this stack is environment-agnostic. Deploy with `cdk deploy` (src/main.ts passes CDK_DEFAULT_ACCOUNT / '
+      + 'CDK_DEFAULT_REGION) or set `env: { account, region }` on the stack',
+    );
   } else {
     arns.forEach((arn, index) => {
       const match = typeof arn === 'string' ? MANAGED_POLICY_ARN.exec(arn) : null;
@@ -175,10 +188,10 @@ export function validateTenantBuildManagedPolicyArns(
         return;
       }
       const [, partition, account] = match;
-      if (!Token.isUnresolved(stack.partition) && partition !== stack.partition) {
+      if (partition !== stack.partition) {
         problems.push(`[${index}] ${arn} is in partition '${partition}'; this stack deploys to '${stack.partition}'`);
       }
-      if (!Token.isUnresolved(stack.account) && account !== stack.account) {
+      if (account !== stack.account) {
         problems.push(`[${index}] ${arn} is in account ${account}; this stack deploys to ${stack.account}`);
       }
     });

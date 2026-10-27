@@ -70,9 +70,12 @@ Prerequisites: an AWS account, Node.js 22+, the [Smithy CLI](https://smithy.io/2
 and an OIDC vendor IdP (any issuer with OIDC discovery works — a Cognito user
 pool is the quickest to stand up).
 
+Build first (Smithy build, compile, tests and synth), then deploy with the
+three required context inputs:
+
 ```bash
 npm ci
-npx projen build   # smithy build + compile + test + synth
+npx projen build
 npx cdk deploy \
   --context vendorIdpIssuerUrl=https://YOUR_ISSUER \
   --context vendorIdpAudience=YOUR_AUDIENCE \
@@ -99,10 +102,31 @@ One optional context input, `tenantBuildManagedPolicyArns`, attaches
 deployer-supplied customer-managed IAM policies to the tenant build role in
 addition to its SSM grants, so a tenant script can call an application-plane
 API with a policy that plane publishes (ADR-022). Each entry must be a
-managed-policy ARN in the stack's own partition and account, or synth fails.
-Add this line to the deploy command above:
+managed-policy ARN in the stack's own partition and account, or synth fails;
+the check needs the target account and Region, which `cdk deploy` supplies
+through `CDK_DEFAULT_ACCOUNT` / `CDK_DEFAULT_REGION`, so a non-empty list on
+an environment-agnostic synth (for example `cdk synth` with no credentials)
+also fails rather than deferring the account check to deploy time. The same
+deploy command with the optional input added:
 
 ```bash
+npx cdk deploy \
+  --context vendorIdpIssuerUrl=https://YOUR_ISSUER \
+  --context vendorIdpAudience=YOUR_AUDIENCE \
+  --context cellDefinition='{
+    "source": { "type": "GITHUB", "location": "https://github.com/YOUR_ORG/YOUR_REPO.git" },
+    "cellScripts": {
+      "create": "samples/control-plane/scripts/sample-cell/create.sh",
+      "update": "samples/control-plane/scripts/sample-cell/update.sh",
+      "delete": "samples/control-plane/scripts/sample-cell/delete.sh"
+    },
+    "tenantScripts": {
+      "create": "samples/control-plane/scripts/sample-tenant/create.sh",
+      "update": "samples/control-plane/scripts/sample-tenant/update.sh",
+      "delete": "samples/control-plane/scripts/sample-tenant/delete.sh"
+    },
+    "maxTenants": 10
+  }' \
   --context tenantBuildManagedPolicyArns='["arn:aws:iam::123456789012:policy/PlatformInvokePolicy"]'
 ```
 
@@ -125,7 +149,12 @@ for it — read it rather than copying the wiring from prose.
 The [AWS CDK integration test](https://docs.aws.amazon.com/cdk/api/v2/docs/integ-tests-alpha-readme.html)
 deploys temporary infrastructure into a real AWS account and exercises the
 complete cell and tenant lifecycle. Use a non-production account that is
-bootstrapped for AWS CDK deployments.
+bootstrapped for AWS CDK deployments. Per
+[sample standard §5.2](../../docs/sample-standard.md#5-tests) the test,
+[`test/integ.tenant.ts`](./test/integ.tenant.ts), is the reference
+implementation of this sample's wiring: how the vendor IdP, the stamped
+script source and the `cellDefinition` fit together is read from that file,
+not from prose.
 
 Run it in one explicitly selected Region — the `integ` task pins
 integ-runner to `$AWS_REGION` (overriding its multi-Region defaults) and
