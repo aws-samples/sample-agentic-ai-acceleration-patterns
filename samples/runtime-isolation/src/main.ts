@@ -20,7 +20,7 @@ Validations.of(app).addPlugins(
 // Deployment inputs (spec §3.3) from --context; synth fails fast naming any
 // missing or malformed key. The stack name embeds the ingress so both can be
 // deployed side by side (the integration test relies on it).
-const context = parseDemoContext((key) => app.node.tryGetContext(key));
+const context = parseDemoContext((key) => app.node.tryGetContext(key), process.env.CDK_DEFAULT_REGION);
 
 new RuntimeIsolationDemoStack(app, `RuntimeIsolation-${context.ingress}`, {
   context,

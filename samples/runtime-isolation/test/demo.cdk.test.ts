@@ -9,6 +9,7 @@ import {
   AGENT_RUNTIME_PARAMETERS,
   dashboardName,
   DEFAULT_MODEL_ID,
+  defaultModelId,
   DemoContext,
   IDENTITY_PARAMETERS,
   meteredCostMetrics,
@@ -110,6 +111,15 @@ describe('parseDemoContext (fail-fast, standard §4.3)', () => {
   it('flags must be true or false', () => {
     expect(() => parseDemoContext(read({ ingress: 'api-gateway', tvm: 'yes' }))).toThrow(/'tvm'/);
     expect(() => parseDemoContext(read({ ingress: 'api-gateway', modelId: '' }))).toThrow(/'modelId'/);
+  });
+
+  it('defaults the model to the Region geography inference profile (Nova Lite is profile-only on demand)', () => {
+    expect(defaultModelId('eu-central-1')).toBe('eu.amazon.nova-lite-v1:0');
+    expect(defaultModelId('us-east-1')).toBe('us.amazon.nova-lite-v1:0');
+    expect(defaultModelId('ap-southeast-2')).toBe('apac.amazon.nova-lite-v1:0');
+    expect(defaultModelId('ca-central-1')).toBe(DEFAULT_MODEL_ID);
+    expect(defaultModelId(undefined)).toBe(DEFAULT_MODEL_ID);
+    expect(parseDemoContext(read({ ingress: 'api-gateway' }), 'eu-west-1').modelId).toBe('eu.amazon.nova-lite-v1:0');
   });
 });
 

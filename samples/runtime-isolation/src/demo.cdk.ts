@@ -47,8 +47,20 @@ export const PLACEHOLDER = {
   appClientId: 'PLACEHOLDER-NOT-A-CLIENT-ID',
 } as const;
 
-/** Default model id for the demo: the one model the agent calls and the execution role allows (P-6). */
+/** Base model id for the demo: the one model the agent calls and the tenant role allows (P-6, ADR-0018). */
 export const DEFAULT_MODEL_ID = 'amazon.nova-lite-v1:0';
+
+/**
+ * The demo's default model for a Region. Amazon Nova Lite is served on demand
+ * only through a cross-Region inference profile in most Regions (the base id
+ * is a ValidationException there, first integ run 2026-10-27), so the default
+ * is the geography's profile; an unknown or unresolved Region gets the base id.
+ */
+export function defaultModelId(region: string | undefined): string {
+  const geo: Record<string, string> = { eu: 'eu', us: 'us', ap: 'apac' };
+  const prefix = region === undefined ? undefined : geo[region.split('-')[0]];
+  return prefix === undefined ? DEFAULT_MODEL_ID : `${prefix}.${DEFAULT_MODEL_ID}`;
+}
 
 /** The demo table's partition key and the per-tenant key prefix the tenant role's ABAC condition pins. */
 export const TABLE_PARTITION_KEY = 'PK';
@@ -93,8 +105,8 @@ function list(read: ContextReader, key: string): string[] | undefined {
   return value.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
 }
 
-/** Parses and validates the demo's context; fails fast naming the key (standard §4.3). */
-export function parseDemoContext(read: ContextReader): DemoContext {
+/** Parses and validates the demo's context; fails fast naming the key (standard §4.3). `region` picks the default model. */
+export function parseDemoContext(read: ContextReader, region?: string): DemoContext {
   const ingress = read('ingress');
   if (ingress !== 'api-gateway' && ingress !== 'agentcore-gateway') {
     throw new Error(
@@ -109,7 +121,7 @@ export function parseDemoContext(read: ContextReader): DemoContext {
     }
     sessionScope = session;
   }
-  const modelId = read('modelId') ?? DEFAULT_MODEL_ID;
+  const modelId = read('modelId') ?? defaultModelId(region);
   if (typeof modelId !== 'string' || modelId.length === 0) {
     throw new Error("Context 'modelId' must be a Bedrock model id");
   }
@@ -133,6 +145,8 @@ export interface RuntimeIsolationDemoStackProps extends StackProps {
   readonly agentCodePath: string;
   /** Publish the `/application-plane/shared/agent-runtime/*` parameters. Default true; the integration test turns it off on all but one stack. */
   readonly publishParameters?: boolean;
+  /** The cost dashboard's name (account-wide). Default `RuntimeIsolation-<ingress>`; the integration test passes its stack name so several stacks of one ingress coexist. */
+  readonly dashboardName?: string;
 }
 
 export class RuntimeIsolationDemoStack extends Stack {
@@ -281,7 +295,7 @@ export class RuntimeIsolationDemoStack extends Stack {
     // The per-tenant cost dashboard (P-10, ADR-0017): one widget per cost
     // metric, one line per tenant, found by a SEARCH over the TenantId
     // dimension so a new tenant appears without a template change.
-    this.dashboard = costDashboard(this, ctx.ingress);
+    this.dashboard = costDashboard(this, ctx.ingress, props.dashboardName ?? dashboardName(ctx.ingress));
 
     // The published interface (spec §6.4, standard §1.1).
     if (props.publishParameters ?? true) {
@@ -357,9 +371,9 @@ export function meteredCostMetrics(ingress: IngressKind): readonly string[] {
  * backend and model widgets are replaced by a note, since that ingress
  * cannot meter them (gateway-interceptor.function.ts).
  */
-function costDashboard(scope: Construct, ingress: IngressKind): cloudwatch.Dashboard {
+function costDashboard(scope: Construct, ingress: IngressKind, title: string): cloudwatch.Dashboard {
   const dashboard = new cloudwatch.Dashboard(scope, 'CostDashboard', {
-    dashboardName: dashboardName(ingress),
+    dashboardName: title,
     defaultInterval: Duration.hours(3),
   });
   dashboard.addWidgets(

@@ -40,6 +40,77 @@ Build: `npx projen build`. The construct is `IsolatedRuntime`, exported from
 - After deploy, turn on the two account-level billing options below so model
   cost splits by tenant.
 
+## Demo
+
+[`scripts/demo.sh`](./scripts/demo.sh) walks the primary flow against a
+deployed stack. It needs tenant-identity `shared-pool` deployed in the same
+account and Region, and reads both samples' published parameters.
+
+```bash
+export AWS_REGION=eu-central-1
+npx cdk deploy --context ingress=api-gateway --context session=user --context requiredScopes=tenant-api/read --context forwardUserToken=true --context tvm=true
+scripts/demo.sh
+```
+
+| Step | Shows |
+|---|---|
+| 1 | two tenants, three users (tenant-identity platform API) |
+| 2 to 4 | the session follows the token: A2 and B1 reuse A1's `conversationId` and fake A1's session header, and land in their own units; A1 resumes on the same microVM |
+| 5 | no token, a tampered token, an ID token: 401/403 |
+| 6 | the forwarded token's scope (forwarding on) |
+| 7 | A1 reads tenant A's item; tenant B's is `AccessDeniedException` from IAM |
+| 8 | `stream 10` arrives as `text/event-stream` |
+| 9 | a model prompt ends with the `usage` event; the per-tenant metric command |
+
+Steps whose module is off are skipped. The script creates two tenants and
+deletes them on exit, also on failure. It prints status codes, tenant ids
+and report fields, never a token, password or header value
+([`scripts/CONVENTIONS.md`](./scripts/CONVENTIONS.md)).
+
+## Integration test
+
+```bash
+export AWS_REGION=eu-central-1
+npx projen integ
+```
+
+[`scripts/integ.sh`](./scripts/integ.sh) reuses a published tenant-identity
+`shared-pool`, or deploys and later destroys it. It deploys the four stacks of
+[`test/integ.runtime.ts`](./test/integ.runtime.ts) at once, runs spec §8,
+runs `scripts/demo.sh`, destroys everything from an exit trap, and fails if a
+stack, parameter or log group is left behind.
+
+Last green run: 2026-10-27, a sandbox account, eu-central-1: deploy 107 s,
+steps 223 s, then the destroy (which waits about 90 s for the ADR-0019 log drain).
+
+| Spec §8 step | api-gateway | agentcore-gateway |
+|---|---|---|
+| 3 direct `InvokeAgentRuntime` with the runner's credentials denied | pass | pass |
+| 4a session off: `conversationId` is 400; two requests, two units | pass | not run |
+| 4b A2/B1 with A1's `conversationId` and session header: own units | pass | pass |
+| 5 A1 resumes on the same microVM | pass | pass |
+| 6 no token 401; tampered token, ID token 403; malformed id 400 | pass | pass |
+| 7 token narrowed to `tenant-api/write` refused | pass | pass |
+| 8 forwarded scope reported; `requireNarrowedToken` refuses un-narrowed | pass | forwarded scope only |
+| 8a A reads A; A reads B and B reads A denied by IAM; runner cannot assume the tenant role | pass | pass |
+| 8b usage event on the stream; `ModelOutputTokens` per tenant in CloudWatch | pass | usage event only |
+| ADR-0018 default `TenantModelRole` signs a model call | pass | not run |
+
+Not covered yet: step 3 with a second, non-ingress role (the spike's V-1
+covered it); the CloudTrail check of one `AssumeRole` per tenant per credential
+lifetime; the CUR 2.0 `iamPrincipal/TenantId` line items (they arrive a day later).
+
+### Latency (20 `report` calls, no model, warm)
+
+| Ingress | TTFB p50 | TTFB p95 | `stream 10` TTFB | `stream 10` total |
+|---|---|---|---|---|
+| api-gateway | 0.193 s | 0.206 s | 0.204 s | 10.19 s |
+| agentcore-gateway | 0.295 s | 0.334 s | 0.262 s | 10.23 s |
+
+Both ingresses stream: the first event of `stream 10` arrives after about
+0.2 s and the last after about 10 s. This is one run from one client; it is
+an input to ADR-0009, not a benchmark.
+
 ## Costs
 
 The backend, the model, the gateway and the ingress Lambda are pooled across

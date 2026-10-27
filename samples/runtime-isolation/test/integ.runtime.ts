@@ -4,48 +4,82 @@
 /**
  * Deployment integration test app (spec §8, standard §5.2).
  *
- * One demo stack per ingress, with every module on, so the spec §8 steps 3
- * to 8a run against both ingresses from one deployment each. `scripts/integ.sh`
- * (the `integ` projen task) deploys tenant-identity (`shared-pool`) unless its
- * parameters are already published (ADR-0004, tenant-identity ADR-0017),
- * synthesises this app, deploys both stacks at once with the CDK CLI, runs
- * the steps, and always destroys what it deployed. The CDK CLI drives the run
- * because integ-runner deploys and destroys one stack at a time.
+ * Four demo stacks, deployed at once by `scripts/integ.sh` (the `integ`
+ * projen task) with the CDK CLI, because integ-runner deploys and destroys
+ * one stack at a time:
  *
- * Option toggles the steps need in the OFF state (4a: `session` off; 7, 8:
- * scopes and narrowing off) are separate deployments of src/main.ts with
- * different context; the script runs those after the ON pass.
+ * | Stack suffix         | Ingress           | Modules                                                   | Spec §8 steps |
+ * |----------------------|-------------------|-----------------------------------------------------------|---------------|
+ * | `api-gateway`        | api-gateway       | every module on, demo tenant data                         | 3 to 9        |
+ * | `agentcore-gateway`  | agentcore-gateway | every module on, demo tenant data                         | 3 to 9        |
+ * | `session-off`        | api-gateway       | session off, no scope check, no forwarding, default role  | 4a, ADR-0018  |
+ * | `narrowed`           | api-gateway       | forwarding with requireNarrowedToken                      | 8 (narrowed)  |
  *
- * The published parameters have fixed names, so only the api-gateway stack
- * writes them here.
+ * `session-off` runs on the construct's default model-only TenantModelRole
+ * (no `tvm.role`), so the run also proves a model call is signed by a
+ * tenant-tagged role when the deployer brings none (ADR-0018).
+ *
+ * The published parameters have fixed names, so only the `api-gateway`
+ * stack writes them. Dashboards are account-wide names, so each stack names
+ * its own after the stack.
  */
 
 import { App } from 'aws-cdk-lib';
 import { bundleAgent } from '../src/agent/bundle';
-import { DEFAULT_MODEL_ID, DemoContext, RuntimeIsolationDemoStack } from '../src/demo.cdk';
+import { DemoContext, defaultModelId, RuntimeIsolationDemoStack } from '../src/demo.cdk';
 
 export const STACK_PREFIX = 'RuntimeIsolationInteg';
-export const INGRESSES: DemoContext['ingress'][] = ['api-gateway', 'agentcore-gateway'];
-const PUBLISHER: DemoContext['ingress'] = 'api-gateway';
+
+const modelId = process.env.INTEG_MODEL_ID ?? defaultModelId(process.env.AWS_REGION ?? process.env.CDK_DEFAULT_REGION);
+
+const allOn = (ingress: DemoContext['ingress']): DemoContext => ({
+  ingress,
+  sessionScope: 'user',
+  requiredScopes: ['tenant-api/read'],
+  forwardUserToken: true,
+  requireNarrowedToken: false,
+  tvm: true,
+  includeUserIdTag: false,
+  modelId,
+  identityParameterPlaceholders: false,
+});
+
+export const INTEG_STACKS: Record<string, DemoContext> = {
+  'api-gateway': allOn('api-gateway'),
+  'agentcore-gateway': allOn('agentcore-gateway'),
+  'session-off': {
+    ingress: 'api-gateway',
+    forwardUserToken: false,
+    requireNarrowedToken: false,
+    tvm: false,
+    includeUserIdTag: false,
+    modelId,
+    identityParameterPlaceholders: false,
+  },
+  'narrowed': {
+    ingress: 'api-gateway',
+    sessionScope: 'user',
+    forwardUserToken: true,
+    requireNarrowedToken: true,
+    allowedScopes: ['tenant-api/read'],
+    tvm: false,
+    includeUserIdTag: false,
+    modelId,
+    identityParameterPlaceholders: false,
+  },
+};
+const PUBLISHER = 'api-gateway';
 
 const app = new App();
 const agentCodePath = bundleAgent();
 
-for (const ingress of INGRESSES) {
-  new RuntimeIsolationDemoStack(app, `${STACK_PREFIX}-${ingress}`, {
+for (const [suffix, context] of Object.entries(INTEG_STACKS)) {
+  const stackName = `${STACK_PREFIX}-${suffix}`;
+  new RuntimeIsolationDemoStack(app, stackName, {
     agentCodePath,
-    publishParameters: ingress === PUBLISHER,
-    context: {
-      ingress,
-      sessionScope: 'user',
-      requiredScopes: ['tenant-api/read'],
-      forwardUserToken: true,
-      requireNarrowedToken: false,
-      tvm: true,
-      includeUserIdTag: false,
-      modelId: process.env.INTEG_MODEL_ID ?? DEFAULT_MODEL_ID,
-      identityParameterPlaceholders: false,
-    },
+    publishParameters: suffix === PUBLISHER,
+    dashboardName: stackName,
+    context,
   });
 }
 
