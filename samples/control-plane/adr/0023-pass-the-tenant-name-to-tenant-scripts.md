@@ -18,7 +18,7 @@ No change. Con: downstream registries show ids where people expect names.
 General. Con: a larger change for one field the record already has.
 
 ## Decision
-Option 1.
+Option 1. The name passes the same boundary test ADR-004 applied to `ADMIN_EMAIL`: it is an input the operator supplies at onboarding and the application plane needs to act on, not control-plane configuration, so forwarding it keeps the control plane ignorant of what the application plane does with it. The record already holds the value, so no new data is collected and no schema changes; delivering it on every operation (not only create) lets update and delete scripts address the same downstream object by the same name. Option 2 would make the consumer's registry show opaque ids, and Option 3 would hold a one-field change behind a general mechanism that has no second consumer yet.
 
 ## Consequences
-Spec §6.1 gains a row (dated amendment when accepted). The name is not a secret and may be logged.
+Spec §6.1 gains a row (dated amendment when accepted). The name is not a secret and may be logged, but it is operator-supplied free text (length-limited only), so scripts must quote it and never use it unsanitised as an identifier (`scripts/CONVENTIONS.md`, Untrusted inputs). `UpdateTenant` changes the stored name without starting a build, so a rename reaches the tenant scripts, and anything they maintain downstream, only on the next `UpdateResource` or `DeleteTenant` for that tenant; until then the application plane holds the name it last received.
