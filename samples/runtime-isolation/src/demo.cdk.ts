@@ -79,6 +79,12 @@ export interface DemoContext {
   readonly modelId: string;
   /** Build-only: synthesise with placeholders instead of tenant-identity's parameters. */
   readonly identityParameterPlaceholders: boolean;
+  /** Per-tenant EMF metrics and the cost dashboard (ADR-0021). Default false: they cost per tenant. */
+  readonly perTenantMetrics?: boolean;
+  /** Requests per tenant per minute (ADR-0020); unset uses the construct default (60), 0 turns it off. */
+  readonly requestsPerMinute?: number;
+  /** Output tokens per tenant per minute (ADR-0020, api-gateway only). */
+  readonly outputTokensPerMinute?: number;
 }
 
 type ContextReader = (key: string) => unknown;
@@ -92,6 +98,18 @@ function flag(read: ContextReader, key: string): boolean {
     return true;
   }
   throw new Error(`Context '${key}' must be true or false (got ${String(value)})`);
+}
+
+function integer(read: ContextReader, key: string): number | undefined {
+  const value = read(key);
+  if (value === undefined || value === '') {
+    return undefined;
+  }
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`Context '${key}' must be a non-negative integer (got ${String(value)})`);
+  }
+  return n;
 }
 
 function list(read: ContextReader, key: string): string[] | undefined {
@@ -136,6 +154,9 @@ export function parseDemoContext(read: ContextReader, region?: string): DemoCont
     includeUserIdTag: flag(read, 'includeUserIdTag'),
     modelId,
     identityParameterPlaceholders: flag(read, 'identityParameterPlaceholders'),
+    perTenantMetrics: flag(read, 'perTenantMetrics'),
+    requestsPerMinute: integer(read, 'requestsPerMinute'),
+    outputTokensPerMinute: integer(read, 'outputTokensPerMinute'),
   };
 }
 
@@ -153,8 +174,8 @@ export class RuntimeIsolationDemoStack extends Stack {
   readonly runtime: IsolatedRuntime;
   readonly table?: dynamodb.TableV2;
   readonly tenantRole?: iam.Role;
-  /** The per-tenant cost dashboard, `RuntimeIsolation-<ingress>` (P-10). */
-  readonly dashboard: cloudwatch.Dashboard;
+  /** The per-tenant cost dashboard, `RuntimeIsolation-<ingress>` (P-10); only with `perTenantMetrics` (ADR-0021). */
+  readonly dashboard?: cloudwatch.Dashboard;
 
   constructor(scope: Construct, id: string, props: RuntimeIsolationDemoStackProps) {
     super(scope, id, props);
@@ -245,13 +266,20 @@ export class RuntimeIsolationDemoStack extends Stack {
         allowedScopes: ctx.allowedScopes,
       },
       tvm,
+      perTenantMetrics: ctx.perTenantMetrics ?? false,
+      tenantLimits:
+        ctx.requestsPerMinute === undefined && ctx.outputTokensPerMinute === undefined
+          ? undefined
+          : { requestsPerMinute: ctx.requestsPerMinute, outputTokensPerMinute: ctx.outputTokensPerMinute },
     });
     callerRoleArn = this.runtime.tvmCallerRole.roleArn;
 
     // P-9 on the api-gateway ingress: top tenants by request and by error,
     // from the access log's tenantId field. P-10 (ADR-0017): top tenants by
-    // backend seconds and by output tokens, from the ingress Lambda's EMF
-    // records (the same log group the metrics come from). The
+    // backend seconds and by output tokens, from the ingress Lambda's
+    // 'request served' log line, which carries the figures whether or not
+    // per-tenant metrics are on (ADR-0021). Contributor Insights is billed
+    // per rule and per log event matched, not per tenant. The
     // agentcore-gateway ingress has no access log of its own and its
     // interceptor sees only the request side (no backend or model figures),
     // so it gets none of these.
@@ -275,18 +303,24 @@ export class RuntimeIsolationDemoStack extends Stack {
       insightRule(this, 'TopTenantsByBackendSeconds', `${this.stackName}-top-tenants-backend-seconds`, {
         LogGroupNames: [ingressLogs.logGroupName],
         Contribution: {
-          Keys: ['$.TenantId'],
-          ValueOf: `$.${METRIC_NAMES.BackendInvokeSeconds}`,
-          Filters: [{ Match: `$.${METRIC_NAMES.BackendInvokeSeconds}`, IsPresent: true }],
+          Keys: ['$.tenantId'],
+          ValueOf: '$.backendInvokeSeconds',
+          Filters: [
+            { Match: '$.message', In: ['request served'] },
+            { Match: '$.backendInvokeSeconds', IsPresent: true },
+          ],
         },
         AggregateOn: 'Sum',
       });
       insightRule(this, 'TopTenantsByOutputTokens', `${this.stackName}-top-tenants-output-tokens`, {
         LogGroupNames: [ingressLogs.logGroupName],
         Contribution: {
-          Keys: ['$.TenantId'],
-          ValueOf: `$.${METRIC_NAMES.ModelOutputTokens}`,
-          Filters: [{ Match: `$.${METRIC_NAMES.ModelOutputTokens}`, IsPresent: true }],
+          Keys: ['$.tenantId'],
+          ValueOf: '$.usageOutput',
+          Filters: [
+            { Match: '$.message', In: ['request served'] },
+            { Match: '$.usageOutput', IsPresent: true },
+          ],
         },
         AggregateOn: 'Sum',
       });
@@ -294,8 +328,12 @@ export class RuntimeIsolationDemoStack extends Stack {
 
     // The per-tenant cost dashboard (P-10, ADR-0017): one widget per cost
     // metric, one line per tenant, found by a SEARCH over the TenantId
-    // dimension so a new tenant appears without a template change.
-    this.dashboard = costDashboard(this, ctx.ingress, props.dashboardName ?? dashboardName(ctx.ingress));
+    // dimension so a new tenant appears without a template change. Only
+    // with per-tenant metrics on (ADR-0021): without them there is nothing
+    // to chart, and the insight rules above cover top tenants.
+    if (ctx.perTenantMetrics === true) {
+      this.dashboard = costDashboard(this, ctx.ingress, props.dashboardName ?? dashboardName(ctx.ingress));
+    }
 
     // The published interface (spec §6.4, standard §1.1).
     if (props.publishParameters ?? true) {

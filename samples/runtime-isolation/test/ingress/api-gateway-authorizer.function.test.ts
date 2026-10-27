@@ -42,7 +42,7 @@ describe('handler', () => {
   it('denies with no network: the real verifier cannot reach the synthetic issuer', async () => {
     // The module-level verifier fetches the discovery URL; with no reachable
     // issuer every token is refused with an explicit Deny, never an Allow.
-    const spy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    const spy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
     const fetchSpy = jest.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline'));
     try {
       const result = await authorizer.handler(event({ Authorization: `Bearer ${await issuer.mint()}` }));
@@ -55,7 +55,7 @@ describe('handler', () => {
   });
 
   it('denies a missing or non-bearer header without consulting the issuer', async () => {
-    const spy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    const spy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
     const fetchSpy = jest.spyOn(globalThis, 'fetch');
     try {
       for (const headers of [{}, { Authorization: 'Basic x' }] as Record<string, string>[]) {

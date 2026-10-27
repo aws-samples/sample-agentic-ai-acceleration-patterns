@@ -28,7 +28,7 @@ import type { HeaderTransportBackend } from '../backend/backend';
 import { readIngressConfig } from '../shared/config';
 import { errorName, log } from '../shared/logger';
 import { emitRequestMetrics } from '../shared/metrics';
-import { ERROR_TEXT, IngressPipeline, pipelineFor, RequestError } from '../shared/request';
+import { ERROR_TEXT, type ErrorStatus, IngressPipeline, pipelineFor, RequestError } from '../shared/request';
 import { prefixOf } from '../shared/session';
 
 /** The REQUEST interceptor event for an HTTP (Runtime) target, as the spike observed it. */
@@ -54,6 +54,8 @@ export interface InterceptorDependencies {
   readonly pipeline: IngressPipeline;
   readonly backend: HeaderTransportBackend;
   readonly metricsOut?: (line: string) => void;
+  /** Emit per-tenant EMF metrics (ADR-0021). Default false. */
+  readonly perTenantMetrics?: boolean;
   readonly now?: () => number;
 }
 
@@ -97,7 +99,7 @@ export function bodyText(body: unknown): string | null {
   }
 }
 
-function deny(statusCode: 400 | 401 | 403 | 502): InterceptorOutput {
+function deny(statusCode: ErrorStatus): InterceptorOutput {
   return {
     interceptorOutputVersion: '1.0',
     http: {
@@ -118,6 +120,7 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
   // Request side only (see the file comment): Requests, errors and this
   // function's own milliseconds. No backend or model figures exist here.
   const metrics = (status: number, tenantId?: string) =>
+    (deps.perTenantMetrics ?? false) &&
     emitRequestMetrics(
       { tenantId: tenantId ?? 'unknown', ingress: 'agentcore-gateway', status, ingressDurationMs: now() - started },
       deps.metricsOut,
@@ -131,8 +134,8 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
     });
   } catch (error) {
     if (error instanceof RequestError) {
-      log.warn('request refused', { ingress: 'agentcore-gateway', status: error.status, reason: error.reason });
-      metrics(error.status);
+      log.warn('request refused', { ingress: 'agentcore-gateway', status: error.status, reason: error.reason, tenantId: error.tenantId });
+      metrics(error.status, error.tenantId);
       return deny(error.status);
     }
     log.error('pipeline failed', { ingress: 'agentcore-gateway', error: errorName(error) });
@@ -168,7 +171,7 @@ export async function handler(event: InterceptorEvent): Promise<InterceptorOutpu
     const config = readIngressConfig();
     // The interceptor never invokes the Runtime itself; the backend object
     // supplies only the header transport. The ARN is not needed for that.
-    deps = { pipeline: pipelineFor(config), backend: new AgentCoreRuntimeBackend('') };
+    deps = { pipeline: pipelineFor(config), backend: new AgentCoreRuntimeBackend(''), perTenantMetrics: config.perTenantMetrics };
   }
   return intercept(event, deps);
 }

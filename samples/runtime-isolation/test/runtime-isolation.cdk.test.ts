@@ -3,7 +3,7 @@
 
 import * as path from 'node:path';
 import { App, Stack, Validations } from 'aws-cdk-lib';
-import { Match, Template } from 'aws-cdk-lib/assertions';
+import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { baseModelId, isInferenceProfileId } from '../src/backend/agentcore-runtime.cdk';
@@ -100,7 +100,19 @@ describe('resolveOptions', () => {
       forwardUserToken: false,
       requireNarrowedToken: false,
       allowedScopes: undefined,
-      tvm: { role: undefined, includeUserIdTag: false, claimTags: {}, durationSeconds: 900 },
+      tvm: { role: undefined, includeUserIdTag: false, claimTags: {}, durationSeconds: 900, cacheMaxEntries: 1000 },
+      tenantLimits: { requestsPerMinute: 60, outputTokensPerMinute: undefined },
+      stageThrottle: { rateLimit: 50, burstLimit: 25 },
+      perTenantMetrics: false,
+    });
+  });
+
+  it('tenantLimits: false and requestsPerMinute 0 without a token limit both turn the limits off', () => {
+    expect(resolveOptions({ ...valid, tenantLimits: false }).tenantLimits).toBeUndefined();
+    expect(resolveOptions({ ...valid, tenantLimits: { requestsPerMinute: 0 } }).tenantLimits).toBeUndefined();
+    expect(resolveOptions({ ...valid, tenantLimits: { requestsPerMinute: 0, outputTokensPerMinute: 100 } }).tenantLimits).toEqual({
+      requestsPerMinute: 0,
+      outputTokensPerMinute: 100,
     });
   });
 
@@ -124,6 +136,13 @@ describe('resolveOptions', () => {
     ['delegation.requireNarrowedToken without forward', { delegation: { requireNarrowedToken: true, allowedScopes: ['x'] } }, /delegation\.requireNarrowedToken/],
     ['delegation.allowedScopes missing', { delegation: { forwardUserToken: true, requireNarrowedToken: true } }, /delegation\.allowedScopes/],
     ['delegation.allowedScopes without narrowing', { delegation: { forwardUserToken: true, allowedScopes: ['x'] } }, /delegation\.allowedScopes/],
+    ['tenantLimits.requestsPerMinute negative', { tenantLimits: { requestsPerMinute: -1 } }, /tenantLimits\.requestsPerMinute/],
+    ['tenantLimits.outputTokensPerMinute zero', { tenantLimits: { outputTokensPerMinute: 0 } }, /tenantLimits\.outputTokensPerMinute/],
+    ['tenantLimits.outputTokensPerMinute on agentcore-gateway', { ingress: 'agentcore-gateway', tenantLimits: { outputTokensPerMinute: 100 } }, /tenantLimits\.outputTokensPerMinute/],
+    ['stageThrottle on agentcore-gateway', { ingress: 'agentcore-gateway', stageThrottle: { rateLimit: 10 } }, /stageThrottle/],
+    ['stageThrottle zero rate', { stageThrottle: { rateLimit: 0 } }, /stageThrottle/],
+    ['stageThrottle fractional burst', { stageThrottle: { burstLimit: 1.5 } }, /stageThrottle/],
+    ['tvm.cacheMaxEntries zero', { tvm: { role: {} as iam.IRole, cacheMaxEntries: 0 } }, /tvm\.cacheMaxEntries/],
     ['tvm.durationSeconds low', { tvm: { role: {} as iam.IRole, durationSeconds: 899 } }, /tvm\.durationSeconds/],
     ['tvm.durationSeconds high', { tvm: { role: {} as iam.IRole, durationSeconds: 3601 } }, /tvm\.durationSeconds/],
     ['tvm.durationSeconds fraction', { tvm: { role: {} as iam.IRole, durationSeconds: 900.5 } }, /tvm\.durationSeconds/],
@@ -614,5 +633,96 @@ describe('the tenant role model grant (ADR-0018, was the execution role under AD
       expect(baseModelId(`${prefix}.amazon.nova-lite-v1:0`)).toBe('amazon.nova-lite-v1:0');
     }
     expect(baseModelId('amazon.nova-lite-v1:0')).toBe('amazon.nova-lite-v1:0');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-tenant limits, stage throttle and the per-tenant metrics opt-in
+// (ADR-0020, ADR-0021, ADR-0022)
+// ---------------------------------------------------------------------------
+describe.each(INGRESSES)('per-tenant limits, ingress=%s (ADR-0020)', (ingress) => {
+  const fnDescription = ingress === 'api-gateway' ? 'chooses the unit' : 'interceptor';
+  const { template, construct } = synth({ ingress });
+
+  it('by default creates one TenantLimits table with a TTL on expiresAt, PITR and DeletionPolicy Delete', () => {
+    const tables = template.findResources('AWS::DynamoDB::GlobalTable');
+    expect(Object.keys(tables)).toHaveLength(1);
+    const [id, table] = Object.entries(tables)[0] as [string, any];
+    expect(id).toContain('TenantLimits');
+    expect(table.DeletionPolicy).toBe('Delete');
+    expect(table.UpdateReplacePolicy).toBe('Delete');
+    expect(table.Properties.KeySchema).toEqual([{ AttributeName: 'PK', KeyType: 'HASH' }]);
+    expect(table.Properties.TimeToLiveSpecification).toEqual({ AttributeName: 'expiresAt', Enabled: true });
+    expect(table.Properties.Replicas[0].PointInTimeRecoverySpecification).toEqual({ PointInTimeRecoveryEnabled: true });
+    expect(construct.limitsTable).toBeDefined();
+  });
+
+  it('writes the table name and the limits to the ingress environment, metrics off and the cache bound', () => {
+    const env = lambdaEnv(template, fnDescription);
+    expect(env[ENV.LIMITS_TABLE]).toEqual(Stack.of(construct).resolve(construct.limitsTable!.tableName));
+    expect(env[ENV.LIMIT_REQUESTS_PER_MINUTE]).toBe('60');
+    expect(env).not.toHaveProperty(ENV.LIMIT_OUTPUT_TOKENS_PER_MINUTE);
+    expect(env[ENV.PER_TENANT_METRICS]).toBe('false');
+    expect(env[ENV.TVM_CACHE_MAX_ENTRIES]).toBe('1000');
+  });
+
+  it('tvmCallerRole has dynamodb:UpdateItem on exactly that table, and no other DynamoDB action', () => {
+    const callerId = Stack.of(construct).resolve(construct.tvmCallerRole.roleArn)['Fn::GetAtt'][0] as string;
+    const statements = statementsForRole(template, callerId);
+    const count = statements.filter((s) => JSON.stringify(s.Action).includes('dynamodb:'));
+    expect(count).toHaveLength(1);
+    expect(count[0].Sid).toBe('CountTenantUsage');
+    expect(count[0].Action).toBe('dynamodb:UpdateItem');
+    expect(count[0].Resource).toEqual(Stack.of(construct).resolve(construct.limitsTable!.tableArn));
+  });
+
+  it('tenantLimits: false creates no table and sets no limits environment', () => {
+    const off = synth({ ingress, tenantLimits: false });
+    off.template.resourceCountIs('AWS::DynamoDB::GlobalTable', 0);
+    expect(off.construct.limitsTable).toBeUndefined();
+    const env = lambdaEnv(off.template, fnDescription);
+    for (const name of [ENV.LIMITS_TABLE, ENV.LIMIT_REQUESTS_PER_MINUTE, ENV.LIMIT_OUTPUT_TOKENS_PER_MINUTE]) {
+      expect(env).not.toHaveProperty(name);
+    }
+    expect(JSON.stringify(off.template.toJSON())).not.toContain('dynamodb:UpdateItem');
+  });
+
+  it('tvm.cacheMaxEntries reaches the environment', () => {
+    expect(lambdaEnv(synth({ ingress, tvm: { cacheMaxEntries: 50 } }).template, fnDescription)[ENV.TVM_CACHE_MAX_ENTRIES]).toBe('50');
+  });
+
+  it('perTenantMetrics: true adds the cost warning and sets the flag; false (default) adds no warning', () => {
+    const on = synth({ ingress, perTenantMetrics: true });
+    Annotations.fromStack(on.stack).hasWarning('*', Match.stringLikeRegexp('perTenantMetrics is on.*custom metrics per ingress'));
+    Annotations.fromStack(on.stack).hasWarning('*', Match.stringLikeRegexp('runtime-isolation:per-tenant-metrics-cost'));
+    expect(lambdaEnv(on.template, fnDescription)[ENV.PER_TENANT_METRICS]).toBe('true');
+    Annotations.fromStack(synth({ ingress, perTenantMetrics: false }).stack).hasNoWarning('*', Match.stringLikeRegexp('perTenantMetrics'));
+    Annotations.fromStack(synth({ ingress }).stack).hasNoWarning('*', Match.stringLikeRegexp('perTenantMetrics'));
+  });
+});
+
+describe('per-tenant limits and stage throttle, api-gateway only', () => {
+  it('outputTokensPerMinute reaches the integration Lambda environment', () => {
+    const { template } = synth({ ingress: 'api-gateway', tenantLimits: { requestsPerMinute: 30, outputTokensPerMinute: 5000 } });
+    const env = lambdaEnv(template, 'chooses the unit');
+    expect(env[ENV.LIMIT_REQUESTS_PER_MINUTE]).toBe('30');
+    expect(env[ENV.LIMIT_OUTPUT_TOKENS_PER_MINUTE]).toBe('5000');
+  });
+
+  it('outputTokensPerMinute with agentcore-gateway throws naming tenantLimits.outputTokensPerMinute', () => {
+    expect(() => synth({ ingress: 'agentcore-gateway', tenantLimits: { outputTokensPerMinute: 5000 } })).toThrow(/tenantLimits\.outputTokensPerMinute/);
+  });
+
+  it('the stage throttle defaults to 50/25 and stageThrottle overrides it', () => {
+    synth({ ingress: 'api-gateway' }).template.hasResourceProperties('AWS::ApiGateway::Stage', {
+      MethodSettings: [Match.objectLike({ ThrottlingRateLimit: 50, ThrottlingBurstLimit: 25 })],
+    });
+    synth({ ingress: 'api-gateway', stageThrottle: { rateLimit: 200, burstLimit: 100 } }).template.hasResourceProperties('AWS::ApiGateway::Stage', {
+      MethodSettings: [Match.objectLike({ ThrottlingRateLimit: 200, ThrottlingBurstLimit: 100 })],
+    });
+  });
+
+  it('stageThrottle with agentcore-gateway throws naming stageThrottle', () => {
+    expect(() => synth({ ingress: 'agentcore-gateway', stageThrottle: { rateLimit: 10, burstLimit: 5 } })).toThrow(/stageThrottle/);
   });
 });

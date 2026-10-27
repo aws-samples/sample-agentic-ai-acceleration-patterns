@@ -3,6 +3,7 @@
 
 import { AgentCoreRuntimeBackend, RUNTIME_HEADERS } from '../../src/backend/agentcore-runtime.transport';
 import { ENV } from '../../src/shared/config';
+import type { TenantLimiter } from '../../src/shared/limits';
 import { pipelineFor } from '../../src/shared/request';
 import { sessionPrefix } from '../../src/shared/session';
 import { TokenVerifier } from '../../src/shared/verifier';
@@ -28,8 +29,9 @@ describe('intercept', () => {
   beforeEach(() => {
     metrics = [];
     logs = [];
-    logSpy = jest.spyOn(console, 'log').mockImplementation((l: string) => {
-      logs.push(l);
+    logSpy = jest.spyOn(process.stdout, 'write').mockImplementation((l: any) => {
+      logs.push(String(l).trimEnd());
+      return true;
     });
   });
   afterEach(() => logSpy.mockRestore());
@@ -49,6 +51,7 @@ describe('intercept', () => {
     }),
     backend,
     metricsOut: (l: string) => metrics.push(l),
+    perTenantMetrics: true,
   });
 
   const event = (headers: Record<string, string>, body: unknown) => ({
@@ -102,7 +105,7 @@ describe('intercept', () => {
   it.each<[string, boolean, number, string]>([
     ['no Authorization', false, 401, 'unauthorized'],
     ['bad prompt', true, 400, 'bad request'],
-  ])('%s -> fixed-text response %i', async (_n, withToken, status, text) => {
+  ])('%s (token: %s) -> fixed-text response %i', async (_n, withToken, status, text) => {
     const h: Record<string, string> = withToken ? { authorization: `Bearer ${await issuer.mint()}` } : {};
     const b = withToken ? '{"prompt":42,"conversationId":"conversationA1x0001"}' : body;
     const out = await intercept(event(h, b), deps());
@@ -148,6 +151,34 @@ describe('intercept', () => {
     // A refusal is metered the same way.
     await intercept(event({}, body), d);
     expect(JSON.parse(metrics[1])).toMatchObject({ Errors4xx: 1, IngressDurationMs: 50 });
+  });
+
+  it('a limited tenant gets a 429 "too many requests" response (ADR-0020)', async () => {
+    const config = baseConfig({ ingress: 'agentcore-gateway', sessionScope: 'user', limits: { tableName: 'TenantLimits', requestsPerMinute: 1 } });
+    const limiter = { admit: async () => 'limited', recordOutputTokens: async () => undefined } as unknown as TenantLimiter;
+    const d = {
+      ...deps(config),
+      pipeline: pipelineFor(config, {
+        verifier: new TokenVerifier(
+          { discoveryUrl: DISCOVERY_URL, allowedClientIds: [CLIENT_ID] },
+          { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
+        ),
+        limiter,
+      }),
+    };
+    const out = await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body), d);
+    const response = (out.http as any).transformedGatewayResponse;
+    expect(response.statusCode).toBe(429);
+    expect(Buffer.from(response.body, 'base64').toString()).toBe('too many requests');
+    expect(JSON.parse(metrics[0])).toMatchObject({ TenantId: 'tenant-a', Errors4xx: 1 });
+  });
+
+  it('per-tenant metrics are off by default (ADR-0021): nothing on metricsOut', async () => {
+    const { perTenantMetrics: _on, ...off } = deps();
+    await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body), off);
+    await intercept(event({}, body), off);
+    expect(metrics).toEqual([]);
+    expect(logs.some((l) => l.includes('_aws'))).toBe(false);
   });
 
   it('handles a missing http section as a refusal, not a crash', async () => {

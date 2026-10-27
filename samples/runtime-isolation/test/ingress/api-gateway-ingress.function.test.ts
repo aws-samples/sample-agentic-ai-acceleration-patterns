@@ -4,6 +4,7 @@
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 import type { BackendResponse, InvokeBackend, ValidatedRequest } from '../../src/backend/backend';
 import { ENV } from '../../src/shared/config';
+import type { Admission, TenantLimiter } from '../../src/shared/limits';
 import { IngressPipeline, pipelineFor } from '../../src/shared/request';
 import { TokenVerifier } from '../../src/shared/verifier';
 import { baseConfig, CLIENT_ID, DISCOVERY_URL, testIssuer, type TestIssuer } from '../helpers';
@@ -91,8 +92,9 @@ describe('handleRequest', () => {
   beforeEach(() => {
     metrics = [];
     logs = [];
-    logSpy = jest.spyOn(console, 'log').mockImplementation((l: string) => {
-      logs.push(l);
+    logSpy = jest.spyOn(process.stdout, 'write').mockImplementation((l: any) => {
+      logs.push(String(l).trimEnd());
+      return true;
     });
   });
   afterEach(() => logSpy.mockRestore());
@@ -101,7 +103,13 @@ describe('handleRequest', () => {
     let t = 1000;
     return () => (t += 100);
   };
-  const deps = (backend: InvokeBackend) => ({ pipeline, backend, metricsOut: (l: string) => metrics.push(l), now: ticking() });
+  const deps = (backend: InvokeBackend, p: IngressPipeline = pipeline) => ({
+    pipeline: p,
+    backend,
+    metricsOut: (l: string) => metrics.push(l),
+    now: ticking(),
+    perTenantMetrics: true,
+  });
 
   it('relays the backend stream with its content type and 200', async () => {
     const backend = new FakeBackend();
@@ -269,5 +277,61 @@ describe('handleRequest', () => {
 
   it('exports a handler even without the Lambda streaming global', () => {
     expect(typeof handler).toBe('function');
+  });
+  describe('per-tenant limits and metrics opt-in (ADR-0020, ADR-0021)', () => {
+    const body = '{"prompt":"hi","conversationId":"conversationA1x0001"}';
+    const USAGE = 'event: usage\ndata: {"inputTokens":17,"outputTokens":42,"modelId":"m"}\n\n';
+    const limited = (verdict: Admission) => {
+      const recorded: Array<[string, number]> = [];
+      const limiter = {
+        admit: async () => verdict,
+        recordOutputTokens: async (tenantId: string, n: number) => {
+          recorded.push([tenantId, n]);
+        },
+      } as unknown as TenantLimiter;
+      const p = pipelineFor(baseConfig({ sessionScope: 'user', limits: { tableName: 'TenantLimits', requestsPerMinute: 1, outputTokensPerMinute: 100 } }), {
+        verifier: new TokenVerifier(
+          { discoveryUrl: DISCOVERY_URL, allowedClientIds: [CLIENT_ID] },
+          { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
+        ),
+        limiter,
+      });
+      return { p, recorded };
+    };
+
+    it('a limited tenant gets 429 "too many requests" and no backend call', async () => {
+      const { p } = limited('limited');
+      const backend = new FakeBackend();
+      const { w, out } = writer();
+      await handleRequest(event(`Bearer ${await issuer.mint()}`, body), out, deps(backend, p));
+      expect(w.status).toBe(429);
+      expect(w.body).toBe('too many requests');
+      expect(backend.requests).toHaveLength(0);
+      const refused = logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request refused');
+      expect(refused).toMatchObject({ status: 429, reason: 'tenant_rate_limited', tenantId: 'tenant-a' });
+      expect(JSON.parse(metrics[0])).toMatchObject({ TenantId: 'tenant-a', Errors4xx: 1 });
+    });
+
+    it("records the usage event's outputTokens against the tenant after the stream", async () => {
+      const { p, recorded } = limited('admitted');
+      await handleRequest(event(`Bearer ${await issuer.mint()}`, body), writer().out, deps(new FakeBackend(['data: x\n\n', USAGE]), p));
+      expect(recorded).toEqual([['tenant-a', 42]]);
+    });
+
+    it('records nothing when the stream carries no usage event', async () => {
+      const { p, recorded } = limited('admitted');
+      await handleRequest(event(`Bearer ${await issuer.mint()}`, body), writer().out, deps(new FakeBackend(), p));
+      expect(recorded).toEqual([]);
+    });
+
+    it('per-tenant metrics are off by default: nothing on metricsOut, the log line still carries the figures', async () => {
+      const { perTenantMetrics: _on, ...off } = deps(new FakeBackend(['data: x\n\n', USAGE]));
+      await handleRequest(event(`Bearer ${await issuer.mint()}`, body), writer().out, off);
+      await handleRequest(event(undefined, body), writer().out, off);
+      expect(metrics).toEqual([]);
+      const served = logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request served');
+      expect(served).toMatchObject({ tenantId: 'tenant-a', usageOutput: 42 });
+      expect(logs.some((l) => l.includes('_aws'))).toBe(false);
+    });
   });
 });

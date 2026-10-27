@@ -13,7 +13,7 @@
 #   2. Synthesise test/integ.runtime.ts and deploy its four stacks at once.
 #   3..9 on both all-on stacks (api-gateway, agentcore-gateway).
 #   4a on the session-off stack (also a model call on the default role).
-#   8 (narrowed) on the narrowed stack.
+#   8 (narrowed) and the per-tenant limit (ADR-0020) on the narrowed stack.
 #   8b per-tenant metrics; then scripts/demo.sh against the published stack.
 #  10. Destroy from the EXIT trap (also on failure); assert nothing is left.
 #
@@ -276,6 +276,20 @@ status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "integConversation${RUN}" report)
 status="$(invoke "$ENDPOINT" A1_READ "$(body "integConversation${RUN}" report)")"; expect_status 200 "$status" "narrowed token"
 [[ "$(report_field .forwardedScope)" == tenant-api/read ]] || fail "narrowed: forwarded scope $(report_field .forwardedScope)"
 
+step limits "per-tenant limit, 5 requests/min (ADR-0020): tenant A is limited, tenant B is not"
+narrow B1_REFRESH "$TENANT_B" tenant-api/read B1_READ; status="$NARROW_STATUS"; expect_status 200 "$status" "narrow B1 to tenant-api/read"
+limited=0
+for i in $(seq 1 12); do
+  status="$(invoke "$ENDPOINT" A1_READ "$(body "integConversation${RUN}" report)")"
+  if [[ "$status" == 429 ]]; then limited=$i; break; fi
+  [[ "$status" == 200 ]] || fail "limit probe call $i: HTTP $status"
+done
+[[ "$limited" -gt 0 ]] || fail "tenant A was never limited in 12 calls"
+[[ "$(cat "$BODY")" == "too many requests" ]] || fail "429 body is not the fixed text"
+echo "  tenant A: 429 on call ${limited}"
+status="$(invoke "$ENDPOINT" B1_READ "$(body "integConversation${RUN}" report)")"; expect_status 200 "$status" "tenant B while A is limited"
+echo "limits narrowed stack: tenant A 429 on call ${limited}, tenant B 200" >>"$RESULTS"
+
 # --------------------------------------------------------------------------
 # 8b (metrics). The EMF records reach CloudWatch metrics within minutes.
 # --------------------------------------------------------------------------
@@ -294,6 +308,10 @@ secs="$(aws cloudwatch get-metric-statistics --namespace RuntimeIsolation --metr
   --start-time "$STARTED" --end-time "$(date -u -d '+5 min' +%FT%TZ)" --query 'sum(Datapoints[].Sum)' --output text)"
 echo "  tenant A on api-gateway: ModelOutputTokens=${sum} BackendInvokeSeconds=${secs}"
 echo "metrics tenant A api-gateway: ModelOutputTokens=${sum} BackendInvokeSeconds=${secs}" >>"$RESULTS"
+left="$(aws cloudwatch list-metrics --namespace RuntimeIsolation --metric-name Requests \
+  --dimensions Name=TenantId,Value="$TENANT_A" Name=Ingress,Value=agentcore-gateway --query 'length(Metrics)' --output text)"
+[[ "$left" == 0 ]] || fail "agentcore-gateway stack emitted per-tenant metrics with perTenantMetrics off (ADR-0021)"
+echo "  agentcore-gateway (perTenantMetrics off): no per-tenant metrics"
 
 # --------------------------------------------------------------------------
 # The demo, against the stack that published the parameters

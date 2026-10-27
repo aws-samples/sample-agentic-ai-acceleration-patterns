@@ -25,6 +25,13 @@ export const ENV = {
   TVM_INCLUDE_USER_ID_TAG: 'RI_TVM_INCLUDE_USER_ID_TAG',
   TVM_CLAIM_TAGS: 'RI_TVM_CLAIM_TAGS',
   TVM_DURATION_SECONDS: 'RI_TVM_DURATION_SECONDS',
+  TVM_CACHE_MAX_ENTRIES: 'RI_TVM_CACHE_MAX_ENTRIES',
+  /** Per-tenant limits (ADR-0020): the shared counter table and the two limits. */
+  LIMITS_TABLE: 'RI_LIMITS_TABLE',
+  LIMIT_REQUESTS_PER_MINUTE: 'RI_LIMIT_REQUESTS_PER_MINUTE',
+  LIMIT_OUTPUT_TOKENS_PER_MINUTE: 'RI_LIMIT_OUTPUT_TOKENS_PER_MINUTE',
+  /** Per-tenant EMF metrics on (ADR-0021); off unless 'true'. */
+  PER_TENANT_METRICS: 'RI_PER_TENANT_METRICS',
   /** Backend-specific: the AgentCore Runtime ARN the ingress invokes. */
   RUNTIME_ARN: 'RI_RUNTIME_ARN',
 } as const;
@@ -49,6 +56,14 @@ export interface TvmConfig {
   /** Tag key to claim name. */
   readonly claimTags: Record<string, string>;
   readonly durationSeconds: number;
+  /** Bound on cached tag sets per ingress instance (ADR-0022); default 1000. */
+  readonly cacheMaxEntries?: number;
+}
+
+export interface LimitsConfig {
+  readonly tableName: string;
+  readonly requestsPerMinute: number;
+  readonly outputTokensPerMinute?: number;
 }
 
 export interface IngressConfig {
@@ -61,6 +76,21 @@ export interface IngressConfig {
   readonly delegation: DelegationConfig;
   /** Set when the `tvm` module is on (ADR-0012). */
   readonly tvm?: TvmConfig;
+  /** Set when per-tenant limits are on (ADR-0020). */
+  readonly limits?: LimitsConfig;
+  /** Emit per-tenant EMF metrics (ADR-0021). */
+  readonly perTenantMetrics: boolean;
+}
+
+function positiveInteger(name: string, value: string | undefined, allowZero = false): number | undefined {
+  if (value === undefined || value === '') {
+    return undefined;
+  }
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < (allowZero ? 0 : 1)) {
+    throw new Error(`${name} must be a${allowZero ? ' non-negative' : ' positive'} integer`);
+  }
+  return n;
 }
 
 /** Reads one required variable; a missing value fails at cold start, naming it. */
@@ -107,6 +137,16 @@ export function readIngressConfig(env: NodeJS.ProcessEnv = process.env): Ingress
       includeUserIdTag: flag(env[ENV.TVM_INCLUDE_USER_ID_TAG]),
       claimTags,
       durationSeconds: duration,
+      cacheMaxEntries: positiveInteger(ENV.TVM_CACHE_MAX_ENTRIES, env[ENV.TVM_CACHE_MAX_ENTRIES]),
+    };
+  }
+  const limitsTable = env[ENV.LIMITS_TABLE];
+  let limits: LimitsConfig | undefined;
+  if (limitsTable !== undefined && limitsTable.length > 0) {
+    limits = {
+      tableName: limitsTable,
+      requestsPerMinute: positiveInteger(ENV.LIMIT_REQUESTS_PER_MINUTE, env[ENV.LIMIT_REQUESTS_PER_MINUTE], true) ?? 0,
+      outputTokensPerMinute: positiveInteger(ENV.LIMIT_OUTPUT_TOKENS_PER_MINUTE, env[ENV.LIMIT_OUTPUT_TOKENS_PER_MINUTE]),
     };
   }
   return {
@@ -121,5 +161,7 @@ export function readIngressConfig(env: NodeJS.ProcessEnv = process.env): Ingress
       allowedScopes: list(env[ENV.ALLOWED_SCOPES]),
     },
     tvm,
+    limits,
+    perTenantMetrics: flag(env[ENV.PER_TENANT_METRICS]),
   };
 }

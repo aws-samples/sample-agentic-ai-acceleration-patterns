@@ -9,8 +9,9 @@ describe('log', () => {
   let spy: jest.SpyInstance;
   beforeEach(() => {
     lines = [];
-    spy = jest.spyOn(console, 'log').mockImplementation((line: string) => {
-      lines.push(line);
+    spy = jest.spyOn(process.stdout, 'write').mockImplementation((line: any) => {
+      lines.push(String(line).trimEnd());
+      return true;
     });
   });
   afterEach(() => spy.mockRestore());

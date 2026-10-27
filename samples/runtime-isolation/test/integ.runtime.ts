@@ -13,7 +13,7 @@
  * | `api-gateway`        | api-gateway       | every module on, demo tenant data                         | 3 to 9        |
  * | `agentcore-gateway`  | agentcore-gateway | every module on, demo tenant data                         | 3 to 9        |
  * | `session-off`        | api-gateway       | session off, no scope check, no forwarding, default role  | 4a, ADR-0018  |
- * | `narrowed`           | api-gateway       | forwarding with requireNarrowedToken                      | 8 (narrowed)  |
+ * | `narrowed`           | api-gateway       | forwarding with requireNarrowedToken, 5 requests/min      | 8 (narrowed), limits |
  *
  * `session-off` runs on the construct's default model-only TenantModelRole
  * (no `tvm.role`), so the run also proves a model call is signed by a
@@ -34,6 +34,9 @@ const modelId = process.env.INTEG_MODEL_ID ?? defaultModelId(process.env.AWS_REG
 
 const allOn = (ingress: DemoContext['ingress']): DemoContext => ({
   ingress,
+  // api-gateway checks the opt-in per-tenant metrics (ADR-0021); the
+  // agentcore-gateway stack runs with them off, the default.
+  perTenantMetrics: ingress === 'api-gateway',
   sessionScope: 'user',
   requiredScopes: ['tenant-api/read'],
   forwardUserToken: true,
@@ -58,6 +61,8 @@ export const INTEG_STACKS: Record<string, DemoContext> = {
   },
   'narrowed': {
     ingress: 'api-gateway',
+    // Low per-tenant limit (ADR-0020): the integ shows tenant A limited while tenant B is not.
+    requestsPerMinute: 5,
     sessionScope: 'user',
     forwardUserToken: true,
     requireNarrowedToken: true,

@@ -7,6 +7,7 @@ import 'aws-sdk-client-mock-jest';
 import type { TvmConfig } from '../../src/shared/config';
 import {
   ClaimMissingError,
+  DEFAULT_CACHE_MAX_ENTRIES,
   REFRESH_JITTER_MS,
   REFRESH_MARGIN_MS,
   roleSessionName,
@@ -177,5 +178,88 @@ describe('TokenVendingMachine', () => {
       spy.mockRestore();
       out.mockRestore();
     }
+  });
+  describe('bounded cache and single flight (ADR-0022)', () => {
+    let clock: number;
+    const tenant = (id: string) => claims({ tenantId: id });
+    beforeEach(() => {
+      clock = T0;
+      sts.on(AssumeRoleCommand).callsFake(async (input) => ({
+        Credentials: {
+          AccessKeyId: `ASIA-SYNTHETIC-${input.Tags?.find((t: any) => t.Key === 'TenantId')?.Value}`,
+          SecretAccessKey: 'synthetic-secret',
+          SessionToken: 'synthetic-session-token',
+          Expiration: new Date(clock + 900_000),
+        },
+      }));
+    });
+    const bounded = (cacheMaxEntries?: number) => tvm({ cacheMaxEntries }, () => clock);
+
+    it('defaults to DEFAULT_CACHE_MAX_ENTRIES and refuses a non-positive bound', () => {
+      expect(DEFAULT_CACHE_MAX_ENTRIES).toBe(1000);
+      expect(() => bounded(0)).toThrow(/cacheMaxEntries/);
+      expect(() => bounded(1.5)).toThrow(/cacheMaxEntries/);
+    });
+
+    it('never holds more than cacheMaxEntries tag sets', async () => {
+      const machine = bounded(3);
+      for (let i = 0; i < 10; i++) {
+        await machine.vend(tenant(`tenant-${i}`));
+        expect(machine.size).toBeLessThanOrEqual(3);
+      }
+      expect(machine.size).toBe(3);
+    });
+
+    it('evicts the least recently used; a hit refreshes recency', async () => {
+      const machine = bounded(2);
+      await machine.vend(tenant('tenant-a'));
+      await machine.vend(tenant('tenant-b'));
+      expect((await machine.vend(tenant('tenant-a'))).cached).toBe(true);
+      await machine.vend(tenant('tenant-c'));
+      expect(machine.size).toBe(2);
+      expect(sts).toHaveReceivedCommandTimes(AssumeRoleCommand, 3);
+      expect((await machine.vend(tenant('tenant-a'))).cached).toBe(true);
+      expect(sts).toHaveReceivedCommandTimes(AssumeRoleCommand, 3);
+      expect((await machine.vend(tenant('tenant-b'))).cached).toBe(false);
+    });
+
+    it('evicts expired entries before fresh ones, even when the expired one was used more recently', async () => {
+      const machine = bounded(2);
+      await machine.vend(tenant('tenant-a'));
+      clock = T0 + 700_000;
+      await machine.vend(tenant('tenant-b'));
+      clock = T0 + 750_000;
+      expect((await machine.vend(tenant('tenant-a'))).cached).toBe(true);
+      clock = T0 + 800_000;
+      await machine.vend(tenant('tenant-c'));
+      expect(machine.size).toBe(2);
+      expect((await machine.vend(tenant('tenant-b'))).cached).toBe(true);
+      expect((await machine.vend(tenant('tenant-c'))).cached).toBe(true);
+      expect(sts).toHaveReceivedCommandTimes(AssumeRoleCommand, 3);
+    });
+
+    it('two concurrent vend() calls for one tag set make exactly one AssumeRole', async () => {
+      const machine = bounded();
+      const [a, b] = await Promise.all([machine.vend(tenant('tenant-a')), machine.vend(tenant('tenant-a'))]);
+      expect(sts).toHaveReceivedCommandTimes(AssumeRoleCommand, 1);
+      expect(a.credentials).toEqual(b.credentials);
+      expect([a.cached, b.cached].sort()).toEqual([false, true]);
+      expect(machine.size).toBe(1);
+    });
+
+    it('a failed in-flight call is shared, not cached, and the next call retries', async () => {
+      sts.on(AssumeRoleCommand).rejectsOnce(new Error('Throttling')).callsFake(async () => ({
+        Credentials: { AccessKeyId: 'ASIA-SYNTHETIC-retry', SecretAccessKey: 's', SessionToken: 't', Expiration: new Date(clock + 900_000) },
+      }));
+      const machine = bounded();
+      const results = await Promise.allSettled([machine.vend(tenant('tenant-a')), machine.vend(tenant('tenant-a'))]);
+      expect(results.map((r) => r.status)).toEqual(['rejected', 'rejected']);
+      expect(sts).toHaveReceivedCommandTimes(AssumeRoleCommand, 1);
+      expect(machine.size).toBe(0);
+      const retry = await machine.vend(tenant('tenant-a'));
+      expect(retry.cached).toBe(false);
+      expect(retry.credentials.accessKeyId).toBe('ASIA-SYNTHETIC-retry');
+      expect(sts).toHaveReceivedCommandTimes(AssumeRoleCommand, 2);
+    });
   });
 });

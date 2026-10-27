@@ -274,18 +274,6 @@
       },
       "steps": [
         {
-          "execArgs": [
-            "npx",
-            "npm-check-updates@20",
-            "--upgrade",
-            "--target=minor",
-            "--peer",
-            "--no-deprecated",
-            "--dep=dev,prod,peer,optional",
-            "--filter=@types/jest,esbuild,eslint-import-resolver-typescript,eslint-plugin-import,jest,projen,ts-jest,ts-node,typescript"
-          ]
-        },
-        {
           "exec": "npm install"
         },
         {
@@ -305,8 +293,8 @@
             "eslint-import-resolver-typescript",
             "eslint-plugin-import",
             "eslint",
-            "jest",
             "jest-junit",
+            "jest",
             "projen",
             "ts-jest",
             "ts-node",

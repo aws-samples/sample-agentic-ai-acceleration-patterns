@@ -7,6 +7,13 @@
  * the rule that refused a request. Fields whose names look like secrets are
  * dropped before writing, so a mistake in a caller cannot put a token, a
  * credential or a header value in the logs.
+ *
+ * Each record is one JSON line written straight to stdout, like the EMF
+ * records (src/shared/metrics.ts). Under the Lambda JSON log format a
+ * `console.log` of a string lands as `{"message": "<the string>"}`, so the
+ * fields would not be queryable; a raw stdout line keeps them at the top
+ * level (`$.tenantId`), which the demo's Contributor Insights rules and Logs
+ * Insights queries rely on (ADR-0021).
  */
 
 export type LogFields = Record<string, string | number | boolean | undefined>;
@@ -20,8 +27,7 @@ function write(level: 'INFO' | 'WARN' | 'ERROR', message: string, fields: LogFie
       safe[key] = value;
     }
   }
-  // eslint-disable-next-line no-console
-  console.log(JSON.stringify({ level, message, ...safe }));
+  process.stdout.write(JSON.stringify({ level, message, ...safe }) + '\n');
 }
 
 export const log = {

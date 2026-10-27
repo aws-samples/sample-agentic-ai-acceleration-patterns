@@ -22,7 +22,7 @@ import type { InvokeBackend } from '../backend/backend';
 import { ENV, readIngressConfig, requireEnv } from '../shared/config';
 import { errorName, log } from '../shared/logger';
 import { emitRequestMetrics, type RequestMetrics, UsageEventScanner } from '../shared/metrics';
-import { ERROR_TEXT, IngressPipeline, pipelineFor, RequestError } from '../shared/request';
+import { ERROR_TEXT, type ErrorStatus, IngressPipeline, pipelineFor, RequestError } from '../shared/request';
 import { prefixOf } from '../shared/session';
 
 /** What the handler needs from the response stream; the Lambda global supplies it. */
@@ -37,6 +37,8 @@ export interface HandlerDependencies {
   readonly backend: InvokeBackend;
   readonly now?: () => number;
   readonly metricsOut?: (line: string) => void;
+  /** Emit per-tenant EMF metrics (ADR-0021). Default false. */
+  readonly perTenantMetrics?: boolean;
 }
 
 function authorizationHeader(event: APIGatewayProxyEvent): string | undefined {
@@ -65,7 +67,11 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
   type Extra = Omit<RequestMetrics, 'tenantId' | 'ingress' | 'status' | 'ingressDurationMs'>;
   // One EMF record per request, emitted once, at the end, so IngressDurationMs
   // covers the whole handler (P-10).
+  // Per-tenant EMF metrics are opt-in (ADR-0021): the log line below carries
+  // the same figures with the tenantId at no per-tenant metric cost.
+  const metricsOn = deps.perTenantMetrics ?? false;
   const tenantForMetrics = (status: number, tenantId?: string, extra: Extra = {}) =>
+    metricsOn &&
     emitRequestMetrics(
       {
         tenantId: tenantId ?? (typeof authorizedTenant === 'string' ? authorizedTenant : 'unknown'),
@@ -77,7 +83,7 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
       deps.metricsOut,
     );
 
-  const fail = (status: 400 | 401 | 403 | 502, reason: string, tenantId?: string) => {
+  const fail = (status: ErrorStatus, reason: string, tenantId?: string) => {
     log.warn('request refused', { ingress: 'api-gateway', status, reason, tenantId });
     tenantForMetrics(status, tenantId);
     out.start(status, { 'Content-Type': 'text/plain' });
@@ -90,7 +96,7 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
     request = await deps.pipeline.validate({ authorization: authorizationHeader(event), body: decodeBody(event) });
   } catch (error) {
     if (error instanceof RequestError) {
-      return fail(error.status, error.reason);
+      return fail(error.status, error.reason, error.tenantId);
     }
     log.error('pipeline failed', { ingress: 'api-gateway', error: errorName(error) });
     return fail(502, 'pipeline_failed');
@@ -147,6 +153,10 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
     usageReported: reported !== undefined,
     totalMs: now() - started,
   });
+  // ADR-0020: the tokens this request used count against the tenant's next requests.
+  if (reported !== undefined) {
+    await deps.pipeline.limiter?.recordOutputTokens(request.tenantId, reported.outputTokens);
+  }
   tenantForMetrics(200, request.tenantId, {
     ttfbMs,
     streamedBytes,
@@ -166,6 +176,7 @@ function defaultDependencies(): HandlerDependencies {
   return {
     pipeline: pipelineFor(config),
     backend: new AgentCoreRuntimeBackend(requireEnv(ENV.RUNTIME_ARN)),
+    perTenantMetrics: config.perTenantMetrics,
   };
 }
 

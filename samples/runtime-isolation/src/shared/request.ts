@@ -11,21 +11,26 @@
  */
 
 import type { IngressConfig } from './config';
+import { TenantLimiter } from './limits';
 import { isValidConversationId, randomUnitId, sessionUnitId } from './session';
 import { ClaimMissingError, TokenVendingMachine } from './tvm';
 import { bearerToken, TokenError, TokenVerifier, type VerifiedClaims } from './verifier';
 import type { ValidatedRequest } from '../backend/backend';
 
 /** Fixed response bodies (spec §5): never echo the token, the unit id or the input. */
-export const ERROR_TEXT: Record<400 | 401 | 403 | 502, string> = {
+export type ErrorStatus = 400 | 401 | 403 | 429 | 502;
+
+export const ERROR_TEXT: Record<ErrorStatus, string> = {
   400: 'bad request',
   401: 'unauthorized',
   403: 'forbidden',
+  429: 'too many requests',
   502: 'upstream error',
 };
 
 export class RequestError extends Error {
-  constructor(readonly status: 400 | 401 | 403 | 502, readonly reason: string) {
+  /** `tenantId` is set only once the token is verified, so a refusal after that point is attributed (P-9). */
+  constructor(readonly status: ErrorStatus, readonly reason: string, readonly tenantId?: string) {
     super(reason);
     this.name = 'RequestError';
   }
@@ -79,6 +84,8 @@ export class IngressPipeline {
     private readonly config: IngressConfig,
     private readonly verifier: TokenVerifier,
     private readonly tvm?: TokenVendingMachine,
+    /** Per-tenant limits (ADR-0020); undefined when off. */
+    readonly limiter?: TenantLimiter,
   ) {
     if (config.tvm !== undefined && tvm === undefined) {
       throw new Error('IngressPipeline: tvm module is configured but no TokenVendingMachine was given');
@@ -98,6 +105,11 @@ export class IngressPipeline {
       throw error;
     }
     const body = parseBody(inputs.body, this.config.sessionScope !== undefined);
+    // Per-tenant limit (ADR-0020) before any cost is incurred: no STS call,
+    // no Runtime session and no model call for a limited tenant.
+    if (this.limiter !== undefined && (await this.limiter.admit(claims.tenantId)) === 'limited') {
+      throw new RequestError(429, 'tenant_rate_limited', claims.tenantId);
+    }
     const unitId =
       this.config.sessionScope !== undefined
         ? sessionUnitId(claims.tenantId, claims.sub, this.config.sessionScope, body.conversationId!)
@@ -123,7 +135,10 @@ export class IngressPipeline {
 }
 
 /** Builds the verifier and, when configured, the TVM from the ingress configuration. */
-export function pipelineFor(config: IngressConfig, deps: { tvm?: TokenVendingMachine; verifier?: TokenVerifier } = {}): IngressPipeline {
+export function pipelineFor(
+  config: IngressConfig,
+  deps: { tvm?: TokenVendingMachine; verifier?: TokenVerifier; limiter?: TenantLimiter } = {},
+): IngressPipeline {
   const verifier =
     deps.verifier ??
     new TokenVerifier({
@@ -134,5 +149,6 @@ export function pipelineFor(config: IngressConfig, deps: { tvm?: TokenVendingMac
       allowedScopes: config.delegation.allowedScopes,
     });
   const tvm = config.tvm === undefined ? undefined : deps.tvm ?? new TokenVendingMachine(config.tvm);
-  return new IngressPipeline(config, verifier, tvm);
+  const limiter = config.limits === undefined ? undefined : deps.limiter ?? new TenantLimiter(config.limits);
+  return new IngressPipeline(config, verifier, tvm, limiter);
 }

@@ -31,6 +31,7 @@ const context = (overrides: Partial<DemoContext> = {}): DemoContext => ({
   includeUserIdTag: false,
   modelId: DEFAULT_MODEL_ID,
   identityParameterPlaceholders: false,
+  perTenantMetrics: false,
   ...overrides,
 });
 
@@ -60,6 +61,11 @@ function flatten(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/** DynamoDB tables other than the construct's TenantLimits counters (the only one with a TTL). */
+function demoTables(template: Template): any[] {
+  return (Object.values(template.findResources('AWS::DynamoDB::GlobalTable')) as any[]).filter((t) => t.Properties.TimeToLiveSpecification === undefined);
+}
+
 describe('parseDemoContext (fail-fast, standard §4.3)', () => {
   const read = (values: Record<string, unknown>) => (key: string) => values[key];
 
@@ -86,6 +92,9 @@ describe('parseDemoContext (fail-fast, standard §4.3)', () => {
           includeUserIdTag: 'true',
           modelId: 'amazon.nova-micro-v1:0',
           identityParameterPlaceholders: 'true',
+          perTenantMetrics: 'true',
+          requestsPerMinute: '30',
+          outputTokensPerMinute: 2000,
         }),
       ),
     ).toEqual({
@@ -99,6 +108,9 @@ describe('parseDemoContext (fail-fast, standard §4.3)', () => {
       includeUserIdTag: true,
       modelId: 'amazon.nova-micro-v1:0',
       identityParameterPlaceholders: true,
+      perTenantMetrics: true,
+      requestsPerMinute: 30,
+      outputTokensPerMinute: 2000,
     });
   });
 
@@ -111,6 +123,13 @@ describe('parseDemoContext (fail-fast, standard §4.3)', () => {
   it('flags must be true or false', () => {
     expect(() => parseDemoContext(read({ ingress: 'api-gateway', tvm: 'yes' }))).toThrow(/'tvm'/);
     expect(() => parseDemoContext(read({ ingress: 'api-gateway', modelId: '' }))).toThrow(/'modelId'/);
+    expect(() => parseDemoContext(read({ ingress: 'api-gateway', perTenantMetrics: 'yes' }))).toThrow(/'perTenantMetrics'/);
+  });
+
+  it('limits must be non-negative integers, named on failure', () => {
+    expect(() => parseDemoContext(read({ ingress: 'api-gateway', requestsPerMinute: '-1' }))).toThrow(/'requestsPerMinute'/);
+    expect(() => parseDemoContext(read({ ingress: 'api-gateway', outputTokensPerMinute: 'lots' }))).toThrow(/'outputTokensPerMinute'/);
+    expect(parseDemoContext(read({ ingress: 'api-gateway', requestsPerMinute: '0' })).requestsPerMinute).toBe(0);
   });
 
   it('defaults the model to the Region geography inference profile (Nova Lite is profile-only on demand)', () => {
@@ -158,30 +177,45 @@ describe('RuntimeIsolationDemoStack', () => {
     synth(context(), false).template.resourceCountIs('AWS::SSM::Parameter', 0);
   });
 
-  it('api-gateway: Contributor Insights rules on the access log keyed by tenantId (P-9) and on the ingress EMF log by TenantId (P-10)', () => {
+  it("api-gateway: Contributor Insights rules keyed by $.tenantId on the access log (P-9) and on the ingress 'request served' log line (P-10, ADR-0021)", () => {
     const { template } = synth(context());
     template.resourceCountIs('AWS::CloudWatch::InsightRule', 4);
     const rules = Object.values(template.findResources('AWS::CloudWatch::InsightRule')) as any[];
     const bodies = rules.map((r) => ({ name: r.Properties.RuleName as string, body: JSON.parse(flatten(r.Properties.RuleBody)) }));
-    const access = bodies.filter((b) => b.body.Contribution.Keys[0] === '$.tenantId');
+    for (const rule of bodies) {
+      expect(rule.body.Contribution.Keys).toEqual(['$.tenantId']);
+    }
+    expect(JSON.stringify(bodies)).not.toContain('$.TenantId');
+    const access = bodies.filter((b) => b.body.LogGroupNames[0].includes('ApiAccessLogs'));
     expect(access).toHaveLength(2);
     for (const rule of access) {
       expect(rule.body.AggregateOn).toBe('Count');
-      expect(rule.body.LogGroupNames[0]).toContain('ApiAccessLogs');
     }
-    // The cost rules read the ingress Lambda's log group (where the EMF records are) and SUM the metric field.
-    const cost = bodies.filter((b) => b.body.Contribution.Keys[0] === '$.TenantId');
-    expect(cost.map((c) => c.body.Contribution.ValueOf).sort()).toEqual(['$.BackendInvokeSeconds', '$.ModelOutputTokens']);
+    // The cost rules read the ingress Lambda's log line, which carries the figures whether or not EMF is on.
+    const cost = bodies.filter((b) => b.body.LogGroupNames[0].includes('IngressLogs'));
+    expect(cost.map((c) => c.body.Contribution.ValueOf).sort()).toEqual(['$.backendInvokeSeconds', '$.usageOutput']);
     for (const rule of cost) {
       expect(rule.body.AggregateOn).toBe('Sum');
-      expect(rule.body.LogGroupNames[0]).toContain('IngressLogs');
-      expect(rule.body.Contribution.Filters).toEqual([{ Match: rule.body.Contribution.ValueOf, IsPresent: true }]);
+      expect(rule.body.Contribution.Filters).toEqual([
+        { Match: '$.message', In: ['request served'] },
+        { Match: rule.body.Contribution.ValueOf, IsPresent: true },
+      ]);
     }
     expect(cost.map((c) => c.name).sort()).toEqual([
       'RuntimeIsolation-api-gateway-top-tenants-backend-seconds',
       'RuntimeIsolation-api-gateway-top-tenants-output-tokens',
     ]);
     synth(context({ ingress: 'agentcore-gateway' })).template.resourceCountIs('AWS::CloudWatch::InsightRule', 0);
+  });
+
+  it('per-tenant metrics off by default: no dashboard, the construct gets perTenantMetrics false and the demo limits pass through', () => {
+    const { template, stack } = synth(context());
+    template.resourceCountIs('AWS::CloudWatch::Dashboard', 0);
+    expect(stack.dashboard).toBeUndefined();
+    expect(stack.runtime.options.perTenantMetrics).toBe(false);
+    expect(stack.runtime.options.tenantLimits).toEqual({ requestsPerMinute: 60, outputTokensPerMinute: undefined });
+    const limited = synth(context({ requestsPerMinute: 10, outputTokensPerMinute: 500 })).stack;
+    expect(limited.runtime.options.tenantLimits).toEqual({ requestsPerMinute: 10, outputTokensPerMinute: 500 });
   });
 
   describe('cost dashboard (P-10, ADR-0017)', () => {
@@ -194,7 +228,7 @@ describe('RuntimeIsolationDemoStack', () => {
     };
 
     it('api-gateway: RuntimeIsolation-api-gateway with one SEARCH widget per cost metric over the TenantId dimension', () => {
-      const { template } = synth(context());
+      const { template } = synth(context({ perTenantMetrics: true }));
       template.resourceCountIs('AWS::CloudWatch::Dashboard', 1);
       template.hasResourceProperties('AWS::CloudWatch::Dashboard', { DashboardName: dashboardName('api-gateway') });
       const { graphs, texts } = dashboardOf(template);
@@ -213,7 +247,7 @@ describe('RuntimeIsolationDemoStack', () => {
     });
 
     it('agentcore-gateway: the two request-side widgets and a note on the four the interceptor cannot meter', () => {
-      const { template } = synth(context({ ingress: 'agentcore-gateway' }));
+      const { template } = synth(context({ ingress: 'agentcore-gateway', perTenantMetrics: true }));
       template.hasResourceProperties('AWS::CloudWatch::Dashboard', { DashboardName: dashboardName('agentcore-gateway') });
       const { graphs, texts } = dashboardOf(template);
       expect(meteredCostMetrics('agentcore-gateway')).toEqual(['Requests', 'IngressDurationMs']);
@@ -228,14 +262,16 @@ describe('RuntimeIsolationDemoStack', () => {
     });
 
     it('the dashboard is not retained on delete', () => {
-      const { resource } = dashboardOf(synth(context()).template);
+      const { resource } = dashboardOf(synth(context({ perTenantMetrics: true })).template);
       expect(resource.DeletionPolicy).not.toBe('Retain');
     });
   });
 
   it('without tvm (no demo tenant data): no table, no demo TenantRole, but the construct\'s default model-only role and a TenantRoleArn output', () => {
     const { template, stack } = synth(context());
-    template.resourceCountIs('AWS::DynamoDB::GlobalTable', 0);
+    // Only the construct's TenantLimits counter table (ADR-0020), no demo data table.
+    template.resourceCountIs('AWS::DynamoDB::GlobalTable', 1);
+    expect(demoTables(template)).toHaveLength(0);
     expect(stack.table).toBeUndefined();
     expect(stack.tenantRole).toBeUndefined();
     // The demo stack creates no data-bearing TenantRole of its own (only the construct's default model role exists).
@@ -256,13 +292,14 @@ describe('RuntimeIsolationDemoStack', () => {
   describe.each(['api-gateway', 'agentcore-gateway'] as const)('tvm on, ingress=%s', (ingress) => {
     const { template, stack } = synth(context({ ingress, tvm: true }));
 
-    it('creates the demo table with DESTROY and PITR', () => {
-      template.resourceCountIs('AWS::DynamoDB::GlobalTable', 1);
-      template.hasResource('AWS::DynamoDB::GlobalTable', { DeletionPolicy: 'Delete', UpdateReplacePolicy: 'Delete' });
-      template.hasResourceProperties('AWS::DynamoDB::GlobalTable', {
-        KeySchema: [{ AttributeName: 'PK', KeyType: 'HASH' }],
-        Replicas: [Match.objectLike({ PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true } })],
-      });
+    it('creates the demo table with DESTROY and PITR (beside the construct\'s TenantLimits table)', () => {
+      template.resourceCountIs('AWS::DynamoDB::GlobalTable', 2);
+      const [demo] = demoTables(template);
+      expect(demoTables(template)).toHaveLength(1);
+      expect(demo.DeletionPolicy).toBe('Delete');
+      expect(demo.UpdateReplacePolicy).toBe('Delete');
+      expect(demo.Properties.KeySchema).toEqual([{ AttributeName: 'PK', KeyType: 'HASH' }]);
+      expect(demo.Properties.Replicas[0].PointInTimeRecoverySpecification).toEqual({ PointInTimeRecoveryEnabled: true });
     });
 
     it('the tenant role trusts only tvmCallerRole, requires the TenantId request tag and pins the tag keys (spec §6.1)', () => {

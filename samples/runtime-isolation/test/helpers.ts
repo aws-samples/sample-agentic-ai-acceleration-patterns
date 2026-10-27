@@ -64,5 +64,6 @@ export const baseConfig = (overrides: Partial<IngressConfig> = {}): IngressConfi
   discoveryUrl: DISCOVERY_URL,
   allowedClientIds: [CLIENT_ID],
   delegation: { forwardUserToken: false, requireNarrowedToken: false },
+  perTenantMetrics: false,
   ...overrides,
 });

@@ -2,7 +2,7 @@
   "dependencies": [
     {
       "name": "@stylistic/eslint-plugin",
-      "version": "^2",
+      "version": "2.13.0",
       "type": "build"
     },
     {
@@ -12,6 +12,7 @@
     },
     {
       "name": "@types/jest",
+      "version": "30.0.0",
       "type": "build"
     },
     {
@@ -21,17 +22,17 @@
     },
     {
       "name": "@typescript-eslint/eslint-plugin",
-      "version": "^8",
+      "version": "8.72.0",
       "type": "build"
     },
     {
       "name": "@typescript-eslint/parser",
-      "version": "^8",
+      "version": "8.72.0",
       "type": "build"
     },
     {
       "name": "aws-cdk",
-      "version": "^2",
+      "version": "2.1146.1",
       "type": "build"
     },
     {
@@ -46,44 +47,52 @@
     },
     {
       "name": "esbuild",
+      "version": "0.28.2",
       "type": "build"
     },
     {
       "name": "eslint-import-resolver-typescript",
+      "version": "4.4.5",
       "type": "build"
     },
     {
       "name": "eslint-plugin-import",
+      "version": "2.32.0",
       "type": "build"
     },
     {
       "name": "eslint",
-      "version": "^9",
-      "type": "build"
-    },
-    {
-      "name": "jest",
+      "version": "9.39.5",
       "type": "build"
     },
     {
       "name": "jest-junit",
-      "version": "^17",
+      "version": "17.0.0",
+      "type": "build"
+    },
+    {
+      "name": "jest",
+      "version": "30.5.2",
       "type": "build"
     },
     {
       "name": "projen",
+      "version": "0.104.10",
       "type": "build"
     },
     {
       "name": "ts-jest",
+      "version": "29.4.15",
       "type": "build"
     },
     {
       "name": "ts-node",
+      "version": "10.9.2",
       "type": "build"
     },
     {
       "name": "typescript",
+      "version": "5.9.3",
       "type": "build"
     },
     {
@@ -108,7 +117,7 @@
     },
     {
       "name": "aws-cdk-lib",
-      "version": "^2.274.0",
+      "version": "2.274.0",
       "type": "runtime"
     },
     {
@@ -118,7 +127,7 @@
     },
     {
       "name": "constructs",
-      "version": "^10.5.1",
+      "version": "10.8.1",
       "type": "runtime"
     },
     {

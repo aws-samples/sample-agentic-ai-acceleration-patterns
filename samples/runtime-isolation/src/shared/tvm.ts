@@ -6,7 +6,10 @@
  * ingress Lambdas. It turns the claims the verifier has just validated into
  * session tags, assumes the tenant role with `sts:AssumeRole` + `TagSession`,
  * and caches the result per tag set until two minutes before expiry (with
- * jitter, so a fleet of containers does not refresh in lock step). It never
+ * jitter, so a fleet of containers does not refresh in lock step). The
+ * cache is bounded (ADR-0022): at most `cacheMaxEntries` tag sets, least
+ * recently used evicted first, expired entries dropped on the way, and
+ * concurrent misses for one tag set share one STS call. It never
  * logs a value: not a tag, not a key, not a token. How the credentials reach
  * the backend is the backend's concern (src/backend).
  */
@@ -23,6 +26,9 @@ export const USER_TAG_KEY = 'UserId';
 export const REFRESH_MARGIN_MS = 120_000;
 /** Up to this much extra margin, chosen once per cache entry. */
 export const REFRESH_JITTER_MS = 30_000;
+
+/** Default bound on cached tag sets per ingress instance (ADR-0022). */
+export const DEFAULT_CACHE_MAX_ENTRIES = 1000;
 
 /** A `tvm.claimTags` claim that the token does not carry: the request fails with 403. */
 export class ClaimMissingError extends Error {
@@ -89,15 +95,23 @@ export interface TokenVendingMachineDependencies {
 }
 
 export class TokenVendingMachine {
+  /** Insertion order is recency order: a hit is re-inserted, the first key is the least recently used. */
   private readonly cache = new Map<string, CacheEntry>();
+  /** One in-flight AssumeRole per tag set (single flight): concurrent misses await the same call. */
+  private readonly inFlight = new Map<string, Promise<VendedCredentials>>();
   private readonly sts: STSClient;
   private readonly now: () => number;
   private readonly random: () => number;
+  private readonly maxEntries: number;
 
   constructor(private readonly config: TvmConfig, deps: TokenVendingMachineDependencies = {}) {
     this.sts = deps.sts ?? new STSClient({});
     this.now = deps.now ?? Date.now;
     this.random = deps.random ?? Math.random;
+    this.maxEntries = config.cacheMaxEntries ?? DEFAULT_CACHE_MAX_ENTRIES;
+    if (!Number.isInteger(this.maxEntries) || this.maxEntries < 1) {
+      throw new Error('TokenVendingMachine: cacheMaxEntries must be a positive integer');
+    }
   }
 
   /** Tenant-scoped credentials for these claims, from the cache when still fresh. */
@@ -105,9 +119,27 @@ export class TokenVendingMachine {
     const tags = sessionTags(claims, this.config);
     const key = JSON.stringify(tags);
     const hit = this.cache.get(key);
-    if (hit !== undefined && hit.expiresAt - this.now() > hit.margin) {
-      return { credentials: hit.credentials, cached: true };
+    if (hit !== undefined) {
+      this.cache.delete(key);
+      if (hit.expiresAt - this.now() > hit.margin) {
+        this.cache.set(key, hit);
+        return { credentials: hit.credentials, cached: true };
+      }
     }
+    const pending = this.inFlight.get(key);
+    if (pending !== undefined) {
+      return { credentials: await pending, cached: true };
+    }
+    const call = this.assume(claims, tags, key);
+    this.inFlight.set(key, call);
+    try {
+      return { credentials: await call, cached: false };
+    } finally {
+      this.inFlight.delete(key);
+    }
+  }
+
+  private async assume(claims: VerifiedClaims, tags: Tag[], key: string): Promise<VendedCredentials> {
     const response = await this.sts.send(
       new AssumeRoleCommand({
         RoleArn: this.config.roleArn,
@@ -126,12 +158,33 @@ export class TokenVendingMachine {
       sessionToken: c.SessionToken,
       expiration: new Date(c.Expiration).toISOString(),
     };
-    this.cache.set(key, {
+    this.store(key, {
       credentials,
       expiresAt: new Date(c.Expiration).getTime(),
       margin: REFRESH_MARGIN_MS + Math.floor(this.random() * REFRESH_JITTER_MS),
     });
-    return { credentials, cached: false };
+    return credentials;
+  }
+
+  /** Adds an entry, then evicts expired entries and the least recently used until within the bound. */
+  private store(key: string, entry: CacheEntry): void {
+    this.cache.delete(key);
+    this.cache.set(key, entry);
+    if (this.cache.size <= this.maxEntries) {
+      return;
+    }
+    const now = this.now();
+    for (const [k, e] of this.cache) {
+      if (e.expiresAt - now <= e.margin) {
+        this.cache.delete(k);
+      }
+    }
+    for (const k of this.cache.keys()) {
+      if (this.cache.size <= this.maxEntries) {
+        break;
+      }
+      this.cache.delete(k);
+    }
   }
 
   /** Number of cached tag sets (for tests). */

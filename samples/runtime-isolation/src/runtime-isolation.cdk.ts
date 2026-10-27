@@ -24,9 +24,10 @@
  */
 
 import * as path from 'node:path';
-import { Duration, Lazy, Names, RemovalPolicy, Stack, Token, Validations } from 'aws-cdk-lib';
+import { Annotations, Duration, Lazy, Names, RemovalPolicy, Stack, Token, Validations } from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction, NodejsFunctionProps } from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -40,7 +41,7 @@ import { LogDrain } from './shared/log-drain';
 import type { IngressKind } from './shared/metrics';
 import { acknowledgeGranularFinding, nagFindingResource } from './shared/nag';
 import { CONVERSATION_ID_PATTERN, type SessionScope } from './shared/session';
-import { TENANT_TAG_KEY, USER_TAG_KEY } from './shared/tvm';
+import { DEFAULT_CACHE_MAX_ENTRIES, TENANT_TAG_KEY, USER_TAG_KEY } from './shared/tvm';
 
 // ---------------------------------------------------------------------------
 // Props (spec §3.3)
@@ -98,6 +99,32 @@ export interface TvmProps {
   readonly claimTags?: Record<string, string>;
   /** Credential lifetime, 900 to 3600. Default 900. */
   readonly durationSeconds?: number;
+  /**
+   * Bound on cached credential sets per ingress instance (ADR-0022): least
+   * recently used evicted first. One entry is one tag set: one per tenant,
+   * or one per user with `includeUserIdTag`. Default 1000.
+   */
+  readonly cacheMaxEntries?: number;
+}
+
+/** Per-tenant limits, enforced fleet-wide at the ingress (ADR-0020). */
+export interface TenantLimitsProps {
+  /** Requests one tenant may make per minute. Default 60. `0` turns the request limit off. */
+  readonly requestsPerMinute?: number;
+  /**
+   * Model output tokens one tenant may use per minute. Unset: no token limit.
+   * `api-gateway` ingress only: the AgentCore Gateway interceptor never sees
+   * the response, so it cannot count tokens.
+   */
+  readonly outputTokensPerMinute?: number;
+}
+
+/** The API Gateway stage throttle, shared by all tenants (`api-gateway` ingress only). */
+export interface StageThrottleProps {
+  /** Steady-state requests per second for the whole stage. Default 50. */
+  readonly rateLimit?: number;
+  /** Burst for the whole stage. Default 25. */
+  readonly burstLimit?: number;
 }
 
 export interface IsolatedRuntimeProps {
@@ -118,6 +145,22 @@ export interface IsolatedRuntimeProps {
    * supply a role that also reaches tenant data.
    */
   readonly tvm?: TvmProps;
+  /**
+   * Per-tenant limits (ADR-0020), on by default at 60 requests per tenant per
+   * minute, so one tenant cannot use the shared stage, Runtime and model
+   * quota for all. Pass `false` to turn them off.
+   */
+  readonly tenantLimits?: TenantLimitsProps | false;
+  /** The shared stage throttle on the `api-gateway` ingress. Default 50 rps, burst 25. */
+  readonly stageThrottle?: StageThrottleProps;
+  /**
+   * Emit per-tenant CloudWatch metrics (EMF, ADR-0021). Default false.
+   * COST: about 9 custom metrics per tenant per ingress (10,000 tenants is
+   * about 90,000 metrics, billed monthly per metric). Without it the ingress
+   * log carries the same figures per request with the tenantId, for Logs
+   * Insights and Contributor Insights.
+   */
+  readonly perTenantMetrics?: boolean;
 }
 
 /** The props after defaults and validation; what the construct and its tests reason about. */
@@ -135,7 +178,12 @@ export interface ResolvedOptions {
     readonly includeUserIdTag: boolean;
     readonly claimTags: Record<string, string>;
     readonly durationSeconds: number;
+    readonly cacheMaxEntries: number;
   };
+  /** Undefined when per-tenant limits are off. */
+  readonly tenantLimits?: { readonly requestsPerMinute: number; readonly outputTokensPerMinute?: number };
+  readonly stageThrottle: { readonly rateLimit: number; readonly burstLimit: number };
+  readonly perTenantMetrics: boolean;
 }
 
 /** IAM tag key shape (`[\p{L}\p{Z}\p{N}_.:/=+\-@]{1,128}`), restricted here to the plain subset. */
@@ -222,12 +270,46 @@ export function resolveOptions(props: IsolatedRuntimeProps): ResolvedOptions {
       fail('tvm.claimTags', `tag key '${key}' must map to a claim name`);
     }
   }
+  const cacheMaxEntries = tvmProps.cacheMaxEntries ?? DEFAULT_CACHE_MAX_ENTRIES;
+  if (!Number.isInteger(cacheMaxEntries) || cacheMaxEntries < 1) {
+    fail('tvm.cacheMaxEntries', `must be a positive integer (got ${String(cacheMaxEntries)})`);
+  }
   const tvm: ResolvedOptions['tvm'] = {
     role: tvmProps.role,
     includeUserIdTag: tvmProps.includeUserIdTag ?? false,
     claimTags,
     durationSeconds,
+    cacheMaxEntries,
   };
+
+  let tenantLimits: ResolvedOptions['tenantLimits'];
+  if (props.tenantLimits !== false) {
+    const requestsPerMinute = props.tenantLimits?.requestsPerMinute ?? 60;
+    const outputTokensPerMinute = props.tenantLimits?.outputTokensPerMinute;
+    if (!Number.isInteger(requestsPerMinute) || requestsPerMinute < 0) {
+      fail('tenantLimits.requestsPerMinute', `must be a non-negative integer (got ${String(requestsPerMinute)})`);
+    }
+    if (outputTokensPerMinute !== undefined) {
+      if (!Number.isInteger(outputTokensPerMinute) || outputTokensPerMinute < 1) {
+        fail('tenantLimits.outputTokensPerMinute', `must be a positive integer (got ${String(outputTokensPerMinute)})`);
+      }
+      if (props.ingress !== 'api-gateway') {
+        fail('tenantLimits.outputTokensPerMinute', "is valid only with the 'api-gateway' ingress (the interceptor never sees the response)");
+      }
+    }
+    if (requestsPerMinute > 0 || outputTokensPerMinute !== undefined) {
+      tenantLimits = { requestsPerMinute, outputTokensPerMinute };
+    }
+  }
+
+  const rateLimit = props.stageThrottle?.rateLimit ?? 50;
+  const burstLimit = props.stageThrottle?.burstLimit ?? 25;
+  if (props.stageThrottle !== undefined && props.ingress !== 'api-gateway') {
+    fail('stageThrottle', "is valid only with the 'api-gateway' ingress");
+  }
+  if (!(rateLimit > 0) || !Number.isInteger(burstLimit) || burstLimit < 1) {
+    fail('stageThrottle', 'rateLimit must be > 0 and burstLimit a positive integer');
+  }
 
   return {
     backend,
@@ -238,6 +320,9 @@ export function resolveOptions(props: IsolatedRuntimeProps): ResolvedOptions {
     requireNarrowedToken,
     allowedScopes,
     tvm,
+    tenantLimits,
+    stageThrottle: { rateLimit, burstLimit },
+    perTenantMetrics: props.perTenantMetrics ?? false,
   };
 }
 
@@ -269,6 +354,8 @@ export class IsolatedRuntime extends Construct {
   readonly tenantRole: iam.IRole;
   /** The resolved options, for consumers and tests. */
   readonly options: ResolvedOptions;
+  /** The per-tenant usage counters (ADR-0020); undefined when `tenantLimits` is `false`. */
+  readonly limitsTable?: dynamodb.TableV2;
 
   constructor(scope: Construct, id: string, props: IsolatedRuntimeProps) {
     super(scope, id);
@@ -287,7 +374,25 @@ export class IsolatedRuntime extends Construct {
     // The tenant-role ARN the ingress assumes. The default role is created
     // after the ingress (it trusts tvmCallerRole), so resolve its ARN lazily.
     const tenantRoleArn = options.tvm.role?.roleArn ?? Lazy.string({ produce: () => this.tenantRole.roleArn });
-    const environment = ingressEnvironment(props, options, tenantRoleArn);
+
+    // Per-tenant limits (ADR-0020): one fixed-window counter per tenant per
+    // minute, shared by every ingress instance.
+    if (options.tenantLimits !== undefined) {
+      this.limitsTable = new dynamodb.TableV2(this, 'TenantLimits', {
+        partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING },
+        timeToLiveAttribute: 'expiresAt',
+        removalPolicy: RemovalPolicy.DESTROY, // counters only, gone within minutes anyway
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      });
+    }
+    const environment = ingressEnvironment(props, options, tenantRoleArn, this.limitsTable?.tableName);
+
+    if (options.perTenantMetrics) {
+      Annotations.of(this).addWarningV2(
+        'runtime-isolation:per-tenant-metrics-cost',
+        'perTenantMetrics is on: each tenant adds about 9 CloudWatch custom metrics per ingress, billed monthly (10,000 tenants is about 90,000 metrics). The ingress log carries the same figures with the tenantId; prefer Logs Insights or Contributor Insights at scale (ADR-0021).',
+      );
+    }
 
     if (options.ingress === 'api-gateway') {
       const api = this.apiGatewayIngress(props, options, environment, backend);
@@ -302,6 +407,18 @@ export class IsolatedRuntime extends Construct {
     }
 
     backend.bindIngress(this.ingressRole);
+
+    // ADR-0020: the token-validating role counts requests and tokens, and
+    // may do nothing else with the table.
+    if (this.limitsTable !== undefined) {
+      this.tvmCallerRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          sid: 'CountTenantUsage',
+          actions: ['dynamodb:UpdateItem'],
+          resources: [this.limitsTable.tableArn],
+        }),
+      );
+    }
 
     // The TVM is always on (ADR-0018). When the deployer supplies a role it
     // owns (and may use for tenant data), use it; otherwise create a
@@ -446,8 +563,10 @@ export class IsolatedRuntime extends Construct {
         dataTraceEnabled: false,
         tracingEnabled: true,
         metricsEnabled: true,
-        throttlingRateLimit: 50,
-        throttlingBurstLimit: 25,
+        // Shared by every tenant (ADR-0020): the per-tenant limit sits in
+        // front of it, so one tenant cannot use the whole stage.
+        throttlingRateLimit: options.stageThrottle.rateLimit,
+        throttlingBurstLimit: options.stageThrottle.burstLimit,
       },
     });
 
@@ -623,7 +742,12 @@ export class IsolatedRuntime extends Construct {
 // ---------------------------------------------------------------------------
 
 /** The ingress Lambdas' environment (src/shared/config.ts): every option, backend-neutral. */
-function ingressEnvironment(props: IsolatedRuntimeProps, options: ResolvedOptions, tenantRoleArn: string): Record<string, string> {
+function ingressEnvironment(
+  props: IsolatedRuntimeProps,
+  options: ResolvedOptions,
+  tenantRoleArn: string,
+  limitsTableName: string | undefined,
+): Record<string, string> {
   const env: Record<string, string> = {
     [ENV.INGRESS]: options.ingress,
     [ENV.DISCOVERY_URL]: props.identity.discoveryUrl,
@@ -645,6 +769,15 @@ function ingressEnvironment(props: IsolatedRuntimeProps, options: ResolvedOption
   env[ENV.TVM_INCLUDE_USER_ID_TAG] = String(options.tvm.includeUserIdTag);
   env[ENV.TVM_CLAIM_TAGS] = JSON.stringify(options.tvm.claimTags);
   env[ENV.TVM_DURATION_SECONDS] = String(options.tvm.durationSeconds);
+  env[ENV.TVM_CACHE_MAX_ENTRIES] = String(options.tvm.cacheMaxEntries);
+  if (options.tenantLimits !== undefined && limitsTableName !== undefined) {
+    env[ENV.LIMITS_TABLE] = limitsTableName;
+    env[ENV.LIMIT_REQUESTS_PER_MINUTE] = String(options.tenantLimits.requestsPerMinute);
+    if (options.tenantLimits.outputTokensPerMinute !== undefined) {
+      env[ENV.LIMIT_OUTPUT_TOKENS_PER_MINUTE] = String(options.tenantLimits.outputTokensPerMinute);
+    }
+  }
+  env[ENV.PER_TENANT_METRICS] = String(options.perTenantMetrics);
   return env;
 }
 

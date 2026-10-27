@@ -5,6 +5,7 @@ import { AssumeRoleCommand, STSClient } from '@aws-sdk/client-sts';
 import { mockClient } from 'aws-sdk-client-mock';
 import 'aws-sdk-client-mock-jest';
 import type { IngressConfig } from '../../src/shared/config';
+import { type Admission, TenantLimiter } from '../../src/shared/limits';
 import { ERROR_TEXT, IngressPipeline, parseBody, pipelineFor, RequestError } from '../../src/shared/request';
 import { PREFIX_PATTERN, RANDOM_UNIT_ID_PATTERN, sessionPrefix } from '../../src/shared/session';
 import { TokenVendingMachine } from '../../src/shared/tvm';
@@ -55,7 +56,7 @@ describe('parseBody', () => {
   });
 
   it('error texts are fixed and echo nothing', () => {
-    expect(ERROR_TEXT).toEqual({ 400: 'bad request', 401: 'unauthorized', 403: 'forbidden', 502: 'upstream error' });
+    expect(ERROR_TEXT).toEqual({ 400: 'bad request', 401: 'unauthorized', 403: 'forbidden', 429: 'too many requests', 502: 'upstream error' });
   });
 });
 
@@ -72,7 +73,7 @@ describe('IngressPipeline', () => {
     });
   });
 
-  const pipeline = (config: IngressConfig) => {
+  const pipeline = (config: IngressConfig, limiter?: TenantLimiter) => {
     const verifier = new TokenVerifier(
       {
         discoveryUrl: config.discoveryUrl,
@@ -84,7 +85,7 @@ describe('IngressPipeline', () => {
       { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
     );
     const tvm = config.tvm === undefined ? undefined : new TokenVendingMachine(config.tvm, { sts: new STSClient({}) });
-    return new IngressPipeline(config, verifier, tvm);
+    return new IngressPipeline(config, verifier, tvm, limiter);
   };
 
   const refusal = async (promise: Promise<unknown>) => {
@@ -215,5 +216,55 @@ describe('IngressPipeline', () => {
     expect(pipelineFor(baseConfig({ tvm: { roleArn: 'arn:aws:iam::111122223333:role/t', includeUserIdTag: false, claimTags: {}, durationSeconds: 900 } }))).toBeInstanceOf(
       IngressPipeline,
     );
+  });
+  describe('per-tenant limits (ADR-0020)', () => {
+    const tvmConfig = baseConfig({ tvm: { roleArn: 'arn:aws:iam::111122223333:role/tenant', includeUserIdTag: false, claimTags: {}, durationSeconds: 900 } });
+    const fakeLimiter = (verdict: Admission) => {
+      const admitted: string[] = [];
+      const limiter = {
+        admit: async (tenantId: string) => {
+          admitted.push(tenantId);
+          return verdict;
+        },
+        recordOutputTokens: async () => undefined,
+      } as unknown as TenantLimiter;
+      return { limiter, admitted };
+    };
+
+    it('a limited tenant is a 429 tenant_rate_limited carrying the tenantId, and no AssumeRole is made', async () => {
+      const { limiter, admitted } = fakeLimiter('limited');
+      const p = pipeline(tvmConfig, limiter);
+      let caught: unknown;
+      try {
+        await p.validate({ authorization: `Bearer ${await issuer.mint()}`, body: '{"prompt":"hi"}' });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(RequestError);
+      expect(caught).toMatchObject({ status: 429, reason: 'tenant_rate_limited', tenantId: 'tenant-a' });
+      expect(admitted).toEqual(['tenant-a']);
+      expect(sts).toHaveReceivedCommandTimes(AssumeRoleCommand, 0);
+    });
+
+    it('an admitted tenant proceeds to the TVM', async () => {
+      const { limiter, admitted } = fakeLimiter('admitted');
+      const r = await pipeline(tvmConfig, limiter).validate({ authorization: `Bearer ${await issuer.mint()}`, body: '{"prompt":"hi"}' });
+      expect(r.credentials?.accessKeyId).toBe('ASIA-SYNTHETIC');
+      expect(admitted).toEqual(['tenant-a']);
+      expect(sts).toHaveReceivedCommandTimes(AssumeRoleCommand, 1);
+    });
+
+    it('the limit is not checked for a request refused earlier (bad token, bad body)', async () => {
+      const { limiter, admitted } = fakeLimiter('limited');
+      const p = pipeline(baseConfig(), limiter);
+      expect(await refusal(p.validate({ body: '{"prompt":"hi"}' }))).toEqual({ status: 401, reason: 'missing_token' });
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body: 'nope' }))).toEqual({ status: 400, reason: 'malformed_json' });
+      expect(admitted).toEqual([]);
+    });
+
+    it('pipelineFor builds a limiter only when limits are configured', () => {
+      expect(pipelineFor(baseConfig()).limiter).toBeUndefined();
+      expect(pipelineFor(baseConfig({ limits: { tableName: 'TenantLimits', requestsPerMinute: 60 } })).limiter).toBeInstanceOf(TenantLimiter);
+    });
   });
 });
