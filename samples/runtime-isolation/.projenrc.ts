@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import * as fs from 'node:fs';
 import { awscdk, javascript } from 'projen';
 
 const cdkVersion = '2.274.0';
@@ -98,5 +99,26 @@ const integ = project.addTask('integ', {
     'Run the deployment integration test in $AWS_REGION (deploys stacks to the current AWS account)',
 });
 integ.exec('scripts/integ.sh');
+
+// ---------------------------------------------------------------------------
+// Exact version pins (supply chain, Holmes CSR finding 2026-10-27). projen
+// writes caret ranges for the toolchain it adds itself (eslint, jest,
+// typescript, projen, constructs, ...). Pin every dependency that is not
+// already exact to the version package-lock.json resolved, so package.json
+// and the lock file agree and a fresh install cannot float. `npx projen
+// upgrade` refreshes the lock file; the next `npx projen` re-pins.
+// ---------------------------------------------------------------------------
+if (fs.existsSync('package-lock.json')) {
+  const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8')) as {
+    packages?: Record<string, { version?: string }>;
+  };
+  for (const dep of project.deps.all) {
+    const resolved = lock.packages?.[`node_modules/${dep.name}`]?.version;
+    const exact = dep.version !== undefined && /^\d+\.\d+\.\d+/.test(dep.version);
+    if (!exact && resolved !== undefined && dep.type !== 'peer') {
+      project.deps.addDependency(`${dep.name}@${resolved}`, dep.type);
+    }
+  }
+}
 
 project.synth();

@@ -134,7 +134,7 @@ narrow A1_REFRESH "$TENANT_A" tenant-api/write A1_WRITE; status="$NARROW_STATUS"
 # --------------------------------------------------------------------------
 # 2. Deploy the four stacks
 # --------------------------------------------------------------------------
-step 2 "synth and deploy ${STACK_PREFIX}-{$(IFS=,; echo "${SUFFIXES[*]}")}"
+step 2 "synth and deploy ${STACK_PREFIX}-{$(printf '%s,' "${SUFFIXES[@]}" | sed 's/,$//')}"
 rm -rf "$OUT"
 npx cdk synth -q --app "npx ts-node -P tsconfig.json --prefer-ts-exts test/integ.runtime.ts" --output "$OUT" >"${LIB_TMP}/synth.log" 2>&1 \
   || { tail -30 "${LIB_TMP}/synth.log" >&2; fail "synth"; }
