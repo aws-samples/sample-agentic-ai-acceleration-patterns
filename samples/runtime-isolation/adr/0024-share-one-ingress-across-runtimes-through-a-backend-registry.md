@@ -126,9 +126,13 @@ given at `CreateAgentRuntime` (the `CfnRuntime.tags` property) are copied to
 the `DEFAULT` endpoint; a later `TagResource` on the Runtime is not, and the
 endpoint ARN can be tagged on its own. So `AgentBackend` sets `ri:ingress`
 in `CfnRuntime.tags` at synth and the grant holds for both resource forms.
-A tag changed after creation must be put on both ARNs. Not yet tested
-end-to-end: an `InvokeAgentRuntime` call through a role carrying the
-condition; integ step 9 covers it.
+A tag changed after creation must be put on both ARNs. Tested end-to-end
+the same day: a role allowed `InvokeAgentRuntime` on `runtime/*` and
+`runtime/*/runtime-endpoint/*` with `StringEquals aws:ResourceTag/ri:ingress`
+reached a Runtime created with that tag (HTTP 200; the agent then refused for
+want of the credential header, as expected) and was refused on an untagged
+Runtime with `AccessDeniedException ... no identity-based policy allows`.
+Integ step 9 repeats this against the deployed construct.
 
 **CRUDL.** Create: Runtime, policy, target, then the registry entry; live
 within one TTL. Read and list: `GetParameter`, `GetParametersByPath`.
