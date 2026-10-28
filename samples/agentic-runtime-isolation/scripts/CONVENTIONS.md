@@ -22,13 +22,16 @@ that none of those ever reach output.
 - **Never print a token, credential, password, session id or header value.**
   Log the HTTP status, the tenant id, the step name, and the agent's
   non-secret report fields (`sessionPrefix`, `nonce`, `forwardedScope`,
-  `read.result`) instead:
+  `read.result`) instead. Good, the status, the tenant and the prefix the
+  agent derived:
 
   ```bash
-  # Good — status, tenant and the prefix the agent derived
   echo "step 5 ${TENANT}: HTTP ${status} prefix=$(jq -r .sessionPrefix "$BODY")"
+  ```
 
-  # Bad — the token is now in the terminal and any CI log
+  Bad, the token is now in the terminal and in any CI log:
+
+  ```bash
   echo "token: ${ACCESS_TOKEN}"
   ```
 

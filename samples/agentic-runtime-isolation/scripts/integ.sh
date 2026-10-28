@@ -71,6 +71,16 @@ params_of() { # STACK -> the stack's AWS::SSM::Parameter names
     --query "StackResources[?ResourceType=='AWS::SSM::Parameter'].PhysicalResourceId" --output text 2>/dev/null | tr '\t' '\n'
 }
 
+# runtimes_of STACK -> the Runtime ids of every *RuntimeArn output (RuntimeArn,
+# BillingRuntimeArn, ... one per AgentBackend, ADR-0024). Each Runtime writes
+# its own log groups under /aws/bedrock-agentcore/runtimes/<id> outside
+# CloudFormation, so the destroy leaves them and cleanup must know every id.
+runtimes_of() {
+  aws cloudformation describe-stacks --stack-name "$1" \
+    --query "Stacks[0].Outputs[?ends_with(OutputKey, 'RuntimeArn')].OutputValue" --output text 2>/dev/null | tr '\t' '\n' | sed 's#.*/##'
+}
+RUNTIME_LOG_PREFIX="/aws/bedrock-agentcore/runtimes/"
+
 cleanup() {
   local status=$?
   set +e
@@ -88,15 +98,14 @@ cleanup() {
     for s in "${SUFFIXES[@]}"; do
       log_groups_of "${STACK_PREFIX}-${s}" >>"$groups"
       params_of "${STACK_PREFIX}-${s}" >>"$params"
-      aws cloudformation describe-stacks --stack-name "${STACK_PREFIX}-${s}" \
-        --query "Stacks[0].Outputs[?OutputKey=='RuntimeArn'].OutputValue" --output text 2>/dev/null | sed 's#.*/##' >>"$runtimes"
+      runtimes_of "${STACK_PREFIX}-${s}" >>"$runtimes"
     done
     "${CDK[@]}" destroy --all --force --concurrency 4 >"${LIB_TMP}/destroy.log" 2>&1 \
       || { echo "destroy failed: ${STACK_PREFIX} stacks (see cdk output above)" >&2; tail -20 "${LIB_TMP}/destroy.log" >&2; FAILED=1; }
-    # The Runtime writes its own log groups outside CloudFormation.
+    # Every Runtime (default and billing) writes its own log groups outside CloudFormation.
     while read -r rt; do
       [[ -n "$rt" && "$rt" != None ]] || continue
-      for g in $(aws logs describe-log-groups --log-group-name-prefix "/aws/bedrock-agentcore/runtimes/${rt}" \
+      for g in $(aws logs describe-log-groups --log-group-name-prefix "${RUNTIME_LOG_PREFIX}${rt}" \
         --query 'logGroups[].logGroupName' --output text); do
         aws logs delete-log-group --log-group-name "$g" >/dev/null 2>&1
       done
@@ -125,6 +134,14 @@ cleanup() {
         echo "leftover log group (recreated by a writer after delete): $g" >&2; FAILED=1
       fi
     done <"$groups"
+    # The Runtimes' own log-group prefixes, for every Runtime id collected above.
+    while read -r rt; do
+      [[ -n "$rt" && "$rt" != None ]] || continue
+      left="$(aws logs describe-log-groups --log-group-name-prefix "${RUNTIME_LOG_PREFIX}${rt}" --query 'logGroups[].logGroupName' --output text)"
+      if [[ -n "$left" && "$left" != None ]]; then
+        echo "leftover runtime log groups under ${RUNTIME_LOG_PREFIX}${rt}: $left" >&2; FAILED=1
+      fi
+    done <"$runtimes"
   fi
   [[ -s "$RESULTS" ]] && { echo "== results"; cat "$RESULTS"; }
   rm -rf "$LIB_TMP"

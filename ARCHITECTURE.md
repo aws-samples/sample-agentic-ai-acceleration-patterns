@@ -188,7 +188,7 @@ Every published parameter sits under one of these paths, owned by one writer:
 | `/control-plane/*` | `control-plane` stack | the control-plane API URL |
 | `/application-plane/shared/*` | shared application-plane stacks, one owner per sub-path | resources every cell and tenant uses |
 | `/application-plane/shared/identity/*` | `tenant-identity` stack | `apiUrl`, `topology`, and for shared pools `userPoolId`, `appClientId` |
-| `/application-plane/shared/agent-runtime/*` | `runtime-isolation` demo stack | `endpointUrl`, `runtimeArn`, `ingress` |
+| `/application-plane/shared/agent-runtime/*` | `agentic-runtime-isolation`: the `SharedIngress` (its `registryPrefix`), each `AgentBackend` under `backends/<name>`, and the demo stack | `endpointUrl`, `baseUrl`, `ingress`, `ingressRoleArn`, `ingressId`, `tenantRoleArn`, `gatewayIdentifier` (Gateway only), `backends/<name>` registry entries, `runtimeArn` (demo stack) |
 | `/application-plane/cells/<cellId>/*` | the cell create script | a cell's shared deployment |
 | `/application-plane/tenants/<tenantId>` | the tenant create script | a tenant's own deployment state |
 

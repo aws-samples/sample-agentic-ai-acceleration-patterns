@@ -51,7 +51,7 @@ Plus a thin demo stack.
 
 ## Architecture
 
-![Architecture: a tenant user signs in to the tenant-identity Cognito shared pool and calls the ingress with a bearer JWT. The ingress, either API Gateway REST with a Lambda authoriser and a streaming Lambda, or AgentCore Gateway with a CUSTOM_JWT authoriser and a REQUEST interceptor, verifies the JWT, derives the session id from tenant_id and sub, assumes the tenant role with a TenantId session tag, and invokes the AgentCore Runtime with SigV4 as the one principal its resource policy allows. The agent in the microVM calls the Bedrock model and the tenant's data with the tenant-scoped credentials, and IAM enforces ABAC on TenantId](./diagrams/runtime-isolation.drawio.svg)
+![Architecture: a tenant user signs in to the tenant-identity Cognito shared pool and calls the ingress with a bearer JWT. The ingress, either API Gateway REST with a Lambda authoriser and a streaming Lambda, or AgentCore Gateway with a CUSTOM_JWT authoriser and a REQUEST interceptor, verifies the JWT, resolves the backend named in POST /{backend}/invocations from the SSM Parameter Store backend registry (backends/<name>: runtimeArn, requiredScopes, status), derives the session id from tenant_id and sub, assumes the tenant role with a TenantId session tag, and invokes that backend's AgentCore Runtime with SigV4 as the one principal its resource policy allows. Each AgentBackend is one Runtime, shown here as default and billing. The agent in the microVM calls the Bedrock model and the tenant's data with the tenant-scoped credentials, and IAM enforces ABAC on TenantId](./diagrams/runtime-isolation.drawio.svg)
 
 A request carries a bearer token to the ingress on a `/{backend}/invocations`
 route. The ingress verifies the token, resolves the backend the route names
@@ -300,11 +300,15 @@ Add more agents by adding more `AgentBackend`s to the same ingress (see
   on the model, because the construct cannot add a policy to a role it did
   not create. Without `tvm.role` the construct creates `TenantModelRole`,
   which may invoke only the one model.
-- **Hands on** (read-only properties): `endpointUrl`, `runtimeArn`,
-  `ingressRole`, `executionRole`, `tvmCallerRole` (the role that validates the
-  token and assumes the tenant role; trust it from your tenant role),
-  `tenantRole` (the role every model call is signed by), `limitsTable` (unset
-  when `tenantLimits` is `false`) and `options`.
+- **Hands on** (read-only properties). On the `SharedIngress`: `endpointUrl`
+  (the base URL; `urlFor(name)` gives a backend's route), `ingressRole`,
+  `tvmCallerRole` (the role that validates the token and assumes the tenant
+  role; trust it from your tenant role), `tenantRole` (the role every model
+  call is signed by), `limitsTable` (unset when `tenantLimits` is `false`),
+  `registryPrefix`, `ingressId`, `gatewayIdentifier` (`agentcore-gateway`
+  only) and `options`. On each `AgentBackend`: `name`, `runtimeArn`,
+  `executionRole`, `endpointUrl` (`<base>/<name>/invocations`),
+  `registryParameterName` and `backend` (the Runtime L1 wrapper).
 - **Published parameters**, written under
   `/application-plane/shared/agent-runtime/` (the ingress's `registryPrefix`):
 
@@ -321,7 +325,8 @@ Add more agents by adding more `AgentBackend`s to the same ingress (see
   | `runtimeArn` | the one-backend demo stack | The AgentCore Runtime ARN. Check its account before you send tokens to `endpointUrl` (M-20) |
 
 Every prop, its default and its validation are in the TSDoc of
-[`src/runtime-isolation.cdk.ts`](./src/runtime-isolation.cdk.ts) and in
+[`src/shared-ingress.cdk.ts`](./src/shared-ingress.cdk.ts) and
+[`src/agent-backend.cdk.ts`](./src/agent-backend.cdk.ts), and in
 [Scale and limits](#scale-and-limits).
 
 ### Several backends behind one ingress
@@ -376,12 +381,16 @@ new AgentBackend(this, 'Billing', {
 
 A backend in its own stack, deployed after the ingress and on its own release
 train. It finds the ingress through the published parameters, so
-CloudFormation sees no dependency between the two stacks:
+CloudFormation sees no dependency between the two stacks. An `AgentBackend`
+in another stack must take the ingress this way: passing a `SharedIngress`
+instance across stacks fails at synth. The fourth argument names the ingress
+kind, because which parameters exist and whether a Gateway target is created
+is decided at synth, before a parameter can be read:
 
 ```ts
 import { AgentBackend, SharedIngress } from 'agentic-runtime-isolation/src';
 
-const ingress = SharedIngress.fromParameters(this, 'Ingress', '/application-plane/shared/agent-runtime/');
+const ingress = SharedIngress.fromParameters(this, 'Ingress', '/application-plane/shared/agent-runtime/', 'api-gateway');
 
 new AgentBackend(this, 'Billing', {
   name: 'billing',
@@ -395,11 +404,16 @@ new AgentBackend(this, 'Billing', {
 resource and one Gateway. A name is `[a-z0-9-]{1,32}`;
 `ingress.urlFor('billing')` returns the backend's URL,
 `${endpointUrl}/billing/invocations`, where a `SharedIngress`'s `endpointUrl`
-is the base URL without a route. The authoriser looks
-the name up and refuses an unknown or `draining` name with 404 before the
-body is read; a token missing one of the backend's `requiredScopes` gets 403;
-a registry entry the ingress cannot read or parse gets 502. On `api-gateway`
-the authoriser's Deny surfaces as API Gateway's own 403, as in
+is the base URL without a route. The backend is read from the path exactly,
+`/{backend}/invocations` (on `api-gateway` the bare `/invocations` resolves to
+`defaultBackend`); a stage-prefixed path is not accepted. On
+`agentcore-gateway` the name is always in the path: the Gateway routes by
+target, so `defaultBackend` has no effect there. The authoriser looks the
+name up and refuses an unknown or `draining` name with 404 before the body is
+read; a token missing one of the backend's `requiredScopes` gets 403; a
+registry entry the ingress cannot read or parse, or whose `runtimeArn` is
+outside the ingress's own partition, Region and account, gets 502. On
+`api-gateway` the authoriser's Deny surfaces as API Gateway's own 403, as in
 [API](#api).
 
 **Registry.** SSM Parameter Store, one parameter per backend at
@@ -410,29 +424,31 @@ the authoriser's Deny surfaces as API Gateway's own 403, as in
 ```
 
 `status` is `active` or `draining`. The ingress caches an entry per process
-for `registryTtl` (60 s default) and serves the stale entry while it
-refreshes, so a change is live within one TTL and a cold instance pays one
-`GetParameter` per backend. The ingress-wide `requiredScopes` is the floor
-every token must meet (and the Gateway authoriser's `allowedScopes`); the
-backend's `requiredScopes` are required on top, per route (ADR-0005,
-ADR-0024).
+for `registryTtl` (60 s default, 750 s at most) and serves the stale entry
+while it refreshes, so a change is live within one TTL and a cold instance
+pays one `GetParameter` per backend. A refresh that fails backs off before
+the next attempt; an entry that could not be refreshed for ten times the TTL
+is no longer served and the route answers 502 `registry_unavailable`. The
+ingress-wide `requiredScopes` is the floor every token must meet (and the
+Gateway authoriser's `allowedScopes`); the backend's `requiredScopes` are
+required on top, per route (ADR-0005, ADR-0024).
 
 **Backend lifecycle.** No row redeploys the ingress (ADR-0024):
 
 | Operation | Effect | Live after | Ingress deploy |
 |---|---|---|---|
-| Create | Runtime, resource policy, Gateway target, then the registry entry | one `registryTtl` | no |
+| Create | Runtime, resource policy, Gateway target, then the registry entry. An entry of that name that already exists is refused (the write is not an overwrite), so two stacks cannot claim one route; an entry that already names this Runtime is reclaimed, so a retried Create is not a duplicate | one `registryTtl` | no |
 | Read, list | `GetParameter` on the name; `GetParametersByPath` on `<registryPrefix>backends/` | immediate | no |
 | Update | overwrite `runtimeArn` (or `requiredScopes`); streams already running finish on the old Runtime, new requests move | one `registryTtl` | no |
-| Delete | set `draining`, wait one `registryTtl` plus the longest stream (2 min on `api-gateway`), delete the Runtime and target, remove the entry | one `registryTtl` to refuse new requests | no |
+| Delete | set `draining`, wait one `registryTtl` plus the longest stream (2 min on `api-gateway`), delete the Runtime and target, remove the entry. Only an entry whose `runtimeArn` is this backend's own is drained; an entry another writer replaced is left alone | one `registryTtl` to refuse new requests | no |
 
 **Props.**
 
 | Prop | Default | What it does |
 |---|---|---|
 | `registryPrefix` | `/application-plane/shared/agent-runtime/` | The SSM prefix the ingress publishes under and reads `backends/<name>` from. One per account and Region; set it when one account runs several ingresses |
-| `registryTtl` | `Duration.seconds(60)` | How long an entry is served from the per-process cache before a refresh; bounds both propagation delay and SSM read rate |
-| `defaultBackend` | unset | The backend the bare `/invocations` route resolves to; unset, that route is 404. The demo sets `agent` |
+| `registryTtl` | `Duration.seconds(60)` | How long an entry is served from the per-process cache before a refresh; bounds both propagation delay and SSM read rate. At least 1 s, at most 750 s; synth fails outside that range |
+| `defaultBackend` | unset | The backend the bare `/invocations` route resolves to on `api-gateway`; unset, that route is 404. No effect on `agentcore-gateway`, where the name is always in the path. The demo sets `agent` |
 
 **What the shared form costs** (ADR-0024 consequences):
 
@@ -572,13 +588,14 @@ and report fields, never a token, password or header value
 
 One operation, the same contract on both ingresses (spec §5). The route is
 `invocations` (`ROUTE` in [`src/index.ts`](./src/index.ts)), under a backend
-name: `POST /{backend}/invocations`. A `defaultBackend` is also served at the
-bare URL below (ADR-0024).
+name: `POST /{backend}/invocations`. On `api-gateway` a `defaultBackend` is
+also served at the bare URL below; on `agentcore-gateway` the name is always
+in the path (ADR-0024).
 
 | | `api-gateway` | `agentcore-gateway` |
 |---|---|---|
 | URL of a named backend (`urlFor(name)`) | `POST https://<api>/prod/<backend>/invocations` | `POST https://<gw>.gateway.bedrock-agentcore.<region>.amazonaws.com/<backend>/invocations` |
-| URL (`endpointUrl`), one-backend wrapper | `POST https://<api>/prod/invocations` | `POST https://<gw>.gateway.bedrock-agentcore.<region>.amazonaws.com/agent/invocations` |
+| URL (`endpointUrl`), a `SharedIngress` with `defaultBackend` | `POST https://<api>/prod/invocations` | `POST https://<gw>.gateway.bedrock-agentcore.<region>.amazonaws.com/agent/invocations` (the name is always in the path) |
 | Auth | `Authorization: Bearer <access token>` | same |
 | Body | `{"prompt": "..."}`; with `session` on, `{"conversationId": "...", "prompt": "..."}` | same |
 | Response | `200`, `text/event-stream`, streamed; the last event is `event: usage` ([the usage event](#the-usage-event-agent-to-ingress-contract)) | same |
@@ -594,7 +611,7 @@ the unit id or the input:
 | 403 | `forbidden` | No `tenant_id`, a `tenants` claim, a required scope missing (ingress-wide or the backend's, ADR-0024), the narrowed-token rule failed, or a `claimTags` claim missing |
 | 404 | `not found` | The backend name has no registry entry, or its entry is `draining` (ADR-0024) |
 | 429 | `too many requests` | The tenant's request or output-token limit for the current minute is reached (ADR-0020) |
-| 502 | `upstream error` | The TVM's STS call, the Runtime or the ingress itself failed; the registry could not be read or its entry is malformed (ADR-0024) |
+| 502 | `upstream error` | The TVM's STS call, the Runtime or the ingress itself failed; the registry could not be read for ten times `registryTtl`, its entry is malformed, or its `runtimeArn` is outside the ingress's own partition, Region and account (ADR-0024) |
 
 On `api-gateway` the authoriser runs first, and its Deny surfaces as API
 Gateway's own 403: a tampered token or an ID token is 403 there (integ step
@@ -700,9 +717,9 @@ deployer action are in [`architecture.md`](./architecture.md#scale-limits).
 | `stageThrottle` | `{ rateLimit: 50, burstLimit: 25 }` | The API Gateway stage throttle; `api-gateway` only; shared by all tenants and backends (ADR-0020) |
 | `perTenantMetrics` | `false` | Per-tenant CloudWatch metrics (ADR-0017, ADR-0021) |
 | `tvm.cacheMaxEntries` | 1000 | Credential cache entries per Lambda instance, LRU, about 1.5 KB each (ADR-0022) |
-| `registryTtl` | `Duration.seconds(60)` | How long a backend registry entry is served from the per-process cache before a refresh; a miss serves the stale entry while refreshing. SSM standard throughput is 40 TPS per account and Region, so misses (instances × backends ÷ `registryTtl`) must stay well under it (ADR-0024) |
+| `registryTtl` | `Duration.seconds(60)` | How long a backend registry entry is served from the per-process cache before a refresh (1 s to 750 s); a miss serves the stale entry while refreshing, a failed refresh backs off, and an entry older than ten TTLs is refused with 502. SSM standard throughput is 40 TPS per account and Region, so misses (instances × backends ÷ `registryTtl`) must stay well under it (ADR-0024) |
 | `registryPrefix` | `/application-plane/shared/agent-runtime/` | The SSM prefix of the published parameters and the `backends/<name>` entries; one per account and Region (ADR-0024) |
-| `defaultBackend` | unset | The backend the bare `/invocations` route resolves to; the demo sets `agent` (ADR-0024) |
+| `defaultBackend` | unset | The backend the bare `/invocations` route resolves to on `api-gateway`; no effect on `agentcore-gateway`. The demo sets `agent` (ADR-0024) |
 
 | Shared resource | Shared by | Deployer action |
 |---|---|---|

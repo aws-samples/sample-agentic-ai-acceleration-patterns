@@ -4,8 +4,8 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0024: Share one ingress across several Runtimes through a backend registry
 
-- Status: Proposed
-- Date: 2026-10-28 (revised; first proposed 2026-10-27)
+- Status: Accepted
+- Date: 2026-10-28 (accepted on the first green integration run; first proposed 2026-10-27)
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -85,7 +85,8 @@ Runtimes that do not exist at its deploy, so it becomes a pattern plus a
 condition rather than a list; the registry is a new trust boundary.
 
 ## Decision
-Option 5, as a proposal to be verified by implementation.
+Option 5, verified by implementation (integration run 2026-10-28, eu-central-1,
+both ingresses, step 9-registry green).
 
 **Shape.** `SharedIngress` is the ingress alone: API or Gateway, authoriser,
 TVM, limits, log drain, and the registry prefix it reads. `AgentBackend`
@@ -199,27 +200,62 @@ pattern and the registry is small and slow-changing):
   drain shape, ADR-0019).
 - *Fixed prefix.* `/application-plane/shared/agent-runtime/` is one per
   account and Region, so two ingresses in one account collide. `SharedIngress`
-  takes a `registryPrefix` prop; the one-backend wrapper keeps the default.
+  takes a `registryPrefix` prop; a `SharedIngress` with `defaultBackend` keeps
+  the default.
 - *Counts and listing.* 10,000 standard parameters per account and Region,
   shared with everything else; `GetParametersByPath` returns 10 per call.
   Fine for hundreds of backends, not thousands.
 - *No push.* The ingress learns of a change through the cache TTL, not an
   event.
 
+What implementation changed in the text above (verified on the 2026-10-28
+integration run):
+
+- *Create refuses an existing name.* The registry custom resource writes
+  with `Overwrite: false`, so a second stack claiming a name fails its
+  deploy instead of silently taking the route; two writers to one name are
+  no longer last-write-wins on Create (Update still overwrites). An existing
+  entry whose `runtimeArn` is already this Runtime's is reclaimed, so a
+  retried Create (a lost CloudFormation answer, a rolled-back stack) is not
+  mistaken for a duplicate.
+- *Delete drains only its own entry.* The custom resource sets `draining`
+  and removes the parameter only when the entry's `runtimeArn` is the one
+  it wrote; an entry another writer replaced is left alone.
+- *`registryTtl` is bounded* to 1 s to 750 s at synth.
+- *Cross-stack by `fromParameters` only.* An `AgentBackend` in another
+  stack takes `SharedIngress.fromParameters(scope, id, prefix, ingress)`;
+  passing a `SharedIngress` instance from another stack fails synth, so the
+  "hidden dependency" above is the only cross-stack shape.
+- *No default backend on `agentcore-gateway`.* The Gateway routes by
+  target, so the name is always in the path there; `defaultBackend` applies
+  to the bare `/invocations` route on `api-gateway` only. A stage-prefixed
+  path is not accepted on either ingress.
+- *Account and Region check.* The ingress accepts an entry only when its
+  `runtimeArn` is in the ingress's own partition, Region and account
+  (`RI_REGISTRY_ACCOUNT`); a foreign ARN is 502. This bounds the "wrong
+  `runtimeArn`" consequence to Runtimes the ingress could invoke anyway.
+- *Bounded staleness.* The cache backs off after a failed refresh and
+  serves a stale entry for at most ten times `registryTtl`, after which the
+  route answers 502 `registry_unavailable`; "warm instances serve the stale
+  cache" above holds for that window only.
+- *Resource policy covers both ARN forms.* The Runtime policy's Allow and
+  Deny name the Runtime ARN and `<arn>/*` (the endpoint form), matching the
+  grant.
+
 Revisit the store when writes need conditions or transactions, when
 backends live in other accounts, or past a few hundred backends: DynamoDB
 (conditional writes, transactions, a resource policy for other accounts)
 is the alternative, behind the same registry interface.
 
-Follow-up: `SharedIngress` and `AgentBackend` constructs (the one-backend
+Shipped: `SharedIngress` and `AgentBackend` constructs (the one-backend
 form is a `SharedIngress` with `defaultBackend` plus one `AgentBackend`, no
 separate wrapper); `ingressRoleArn` and `registryPrefix` among the
 ingress's published parameters; spec §3.3, §4 (the registry is a stored
-entity the construct now has), §5 and §6.4 get dated notes when this ships;
-integ step 9 (two backends behind one ingress; a token scoped to one gets
+entity the construct now has), §5 and §6.4 carry dated notes; integ step
+9-registry (two backends behind one ingress; a token scoped to one gets
 403 on the other; a backend added after the ingress deploy serves within
-one TTL; a drained backend returns 404 within one TTL). Confirmed on the
-first integ (2026-10-28): the interceptor event names the Gateway target,
+one TTL; a drained backend is refused within one TTL), green on both
+ingresses on 2026-10-28. Confirmed on that run: the interceptor event names the Gateway target,
 so the `request admitted` line carries `backend` and `/billing` routed to
 its own Runtime. Revisit if a deployer needs per-backend tenant roles or
 per-backend concurrency.

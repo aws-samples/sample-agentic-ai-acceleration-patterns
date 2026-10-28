@@ -282,7 +282,7 @@ construct:
 
 | Construct | Props | Meaning |
 |---|---|---|
-| `SharedIngress` | every ingress prop except `agent`, plus `registryPrefix` (default `/application-plane/shared/agent-runtime/`), `registryTtl` (`Duration`, default 60 s), `defaultBackend` (default none) | the ingress alone: API or Gateway, authoriser, TVM, limits, log drain, and the registry prefix it publishes under and reads `backends/<name>` from. `registryPrefix` is one per account and Region; set it when one account runs several ingresses. `defaultBackend` is the backend the bare `/invocations` route resolves to. `SharedIngress.fromParameters(scope, id, prefix)` imports an ingress deployed in another stack through its published parameters (§6.4) |
+| `SharedIngress` | every ingress prop except `agent`, plus `registryPrefix` (default `/application-plane/shared/agent-runtime/`), `registryTtl` (`Duration`, default 60 s), `defaultBackend` (default none) | the ingress alone: API or Gateway, authoriser, TVM, limits, log drain, and the registry prefix it publishes under and reads `backends/<name>` from. `registryPrefix` is one per account and Region; set it when one account runs several ingresses. `defaultBackend` is the backend the bare `/invocations` route resolves to. `SharedIngress.fromParameters(scope, id, prefix, ingress)` imports an ingress deployed in another stack through its published parameters (§6.4); an `AgentBackend` in another stack must take the ingress this way, a `SharedIngress` instance from another stack fails synth. `registryTtl` is 1 s to 750 s |
 | `AgentBackend` | `name` (`[a-z0-9-]{1,32}`), `ingress` (a `SharedIngress` or `fromParameters`), `agent` (`{ codePath, modelId, environment? }`), `requiredScopes?` | one backend: the Runtime tagged `ri:ingress = <ingressId>`, its resource policy naming the ingress role, on `agentcore-gateway` a Gateway target named `name`, and the registry entry `{ runtimeArn, requiredScopes, status }`. `requiredScopes` are required on top of the ingress-wide list, per route. On delete the entry is set to `draining`, held for `registryTtl` plus 120 s, then removed |
 
 The ingress-wide `requiredScopes` stays the floor every token must meet.
@@ -305,7 +305,7 @@ chosen unit id, `prompt`, optional user token, the vended credentials); the
 backend maps it onto these and never sees the bearer token's raw
 `Authorization` value.
 
-**Amended 2026-10-28 (ADR-0024, proposed).** "Who may invoke" splits into
+**Amended 2026-10-28 (ADR-0024).** "Who may invoke" splits into
 two halves. The backend's `bindIngress` takes the ingress role ARN (from the
 `SharedIngress` or its published `ingressRoleArn`) and writes only the
 Runtime's resource policy, naming that one role (P-1 per Runtime). The
@@ -339,7 +339,7 @@ the deployer activates that cost allocation tag and the CUR caller-identity
 option (both account-level, README). The usage event's token figures are a
 cross-check, read by the ingress and never stored.
 
-**Amended 2026-10-28 (ADR-0024, proposed).** The backend registry is a
+**Amended 2026-10-28 (ADR-0024).** The backend registry is a
 stored entity the construct now has: one SSM `String` parameter per backend
 at `<registryPrefix>backends/<name>`, written by that backend's stack and
 read by the ingress.
@@ -475,9 +475,10 @@ every Runtime behind it trusts), `ingressId` (the `ri:ingress` tag value),
 `AgentBackend` publishes its registry entry at `backends/<name>`.
 `runtimeArn` stays, written by the one-backend demo stack, so today's
 consumer contract does not break. `SharedIngress.fromParameters(scope, id,
-prefix)` imports an ingress from those parameters, so a backend stack in the
-same account and Region needs only the prefix and no CloudFormation
-dependency on the ingress stack; the deploy order (ingress first) is
+prefix, ingress)` imports an ingress from those parameters (`ingress` names
+the kind, decided at synth before a parameter can be read), so a backend
+stack in the same account and Region needs only the prefix and no
+CloudFormation dependency on the ingress stack; the deploy order (ingress first) is
 documented and scripted. `SharedIngress` exposes `urlFor(name)`, the URL of
 one backend's route.
 
@@ -605,7 +606,7 @@ Limits. On a stack with `requestsPerMinute: 5`, tenant A gets 429
    Contributor Insights rules reported both tenants (ADR-0020, ADR-0021).
 9. Latency probe: 20 invocations per ingress, TTFB and total, p50 and p95.
    Then `scripts/demo.sh` runs against the `api-gateway` stack.
-9-registry. (added 2026-10-28, ADR-0024, proposed) Each all-on stack carries a
+9-registry. (added 2026-10-28, ADR-0024; green on both ingresses 2026-10-28) Each all-on stack carries a
    second backend, `billing`, with its own required scope. A tenant-A token
    narrowed to the ingress floor is 200 on the default backend and 403 on
    `/billing/invocations`; a token narrowed to the floor plus the billing

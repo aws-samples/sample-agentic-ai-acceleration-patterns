@@ -92,8 +92,8 @@ and whose permissions does the agent use? If the client picks the session, or
 the agent holds one role for all tenants, a stolen token or a prompt-injected
 agent can reach another tenant's conversation or data.
 
-This sample puts one ingress in front of an Amazon Bedrock AgentCore Runtime
-and makes it the only principal the Runtime trusts. The ingress, an API
+This sample puts one shared ingress in front of one or more Amazon Bedrock
+AgentCore Runtimes and makes it the only principal each Runtime trusts. The ingress, an API
 Gateway REST API or an AgentCore Gateway chosen at deploy time, verifies the
 tenant-identity access token, derives the microVM session from the verified
 `tenant_id` and `sub`, and vends `TenantId`-tagged credentials with a token
@@ -104,8 +104,13 @@ per-tenant cost figures; model cost splits by tenant in the bill through the
 IAM principal. Session mapping, scope checks and token forwarding are optional
 modules.
 
-It ships as one CDK construct, `IsolatedRuntime`, that later samples can
-consume. See [Agentic Runtime Isolation](./samples/agentic-runtime-isolation/).
+It ships as two CDK constructs that later samples can consume:
+`SharedIngress`, the ingress with its authoriser, TVM, limits and backend
+registry, and `AgentBackend`, one agent's Runtime registered behind it. A
+backend is added, changed or drained through the registry without
+redeploying the ingress; one agent is a `SharedIngress` with a
+`defaultBackend` plus one `AgentBackend` of that name. See
+[Agentic Runtime Isolation](./samples/agentic-runtime-isolation/).
 
 ## Contributing a sample
 
