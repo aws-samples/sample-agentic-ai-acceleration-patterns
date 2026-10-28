@@ -32,8 +32,11 @@ export const ENV = {
   LIMIT_OUTPUT_TOKENS_PER_MINUTE: 'RI_LIMIT_OUTPUT_TOKENS_PER_MINUTE',
   /** Per-tenant EMF metrics on (ADR-0021); off unless 'true'. */
   PER_TENANT_METRICS: 'RI_PER_TENANT_METRICS',
-  /** Backend-specific: the AgentCore Runtime ARN the ingress invokes. */
-  RUNTIME_ARN: 'RI_RUNTIME_ARN',
+  /** Backend registry (ADR-0024): the SSM parameter prefix the ingress resolves `/{backend}/invocations` through, and the cache TTL. */
+  REGISTRY_PREFIX: 'RI_REGISTRY_PREFIX',
+  REGISTRY_TTL_SECONDS: 'RI_REGISTRY_TTL_SECONDS',
+  /** The backend served at the bare `/invocations` route (the one-backend wrapper); unset when there is none. */
+  DEFAULT_BACKEND: 'RI_DEFAULT_BACKEND',
 } as const;
 
 /** Environment variables the construct sets for the agent process (src/agent/app.ts reads them). */
@@ -66,6 +69,16 @@ export interface LimitsConfig {
   readonly outputTokensPerMinute?: number;
 }
 
+/** The backend registry the ingress resolves routes through (ADR-0024). */
+export interface RegistryConfig {
+  /** SSM parameter prefix, with a trailing slash; entries live at `${prefix}backends/<name>`. */
+  readonly prefix: string;
+  /** Seconds an entry is served from the per-process cache before a refresh; default 60. */
+  readonly ttlSeconds: number;
+  /** The backend the bare `/invocations` route resolves to (one-backend wrapper); undefined when there is none. */
+  readonly defaultBackend?: string;
+}
+
 export interface IngressConfig {
   readonly ingress: IngressKind;
   readonly discoveryUrl: string;
@@ -80,6 +93,8 @@ export interface IngressConfig {
   readonly limits?: LimitsConfig;
   /** Emit per-tenant EMF metrics (ADR-0021). */
   readonly perTenantMetrics: boolean;
+  /** The backend registry (ADR-0024). */
+  readonly registry: RegistryConfig;
 }
 
 function positiveInteger(name: string, value: string | undefined, allowZero = false): number | undefined {
@@ -173,5 +188,20 @@ export function readIngressConfig(env: NodeJS.ProcessEnv = process.env): Ingress
     tvm,
     limits,
     perTenantMetrics: flag(env[ENV.PER_TENANT_METRICS]),
+    registry: readRegistryConfig(env),
+  };
+}
+
+/** The registry prefix must be an absolute SSM path ending in `/`. */
+export function readRegistryConfig(env: NodeJS.ProcessEnv = process.env): RegistryConfig {
+  const prefix = requireEnv(ENV.REGISTRY_PREFIX, env);
+  if (!prefix.startsWith('/') || !prefix.endsWith('/')) {
+    throw new Error(`${ENV.REGISTRY_PREFIX} must start and end with /`);
+  }
+  const defaultBackend = env[ENV.DEFAULT_BACKEND];
+  return {
+    prefix,
+    ttlSeconds: positiveInteger(ENV.REGISTRY_TTL_SECONDS, env[ENV.REGISTRY_TTL_SECONDS]) ?? 60,
+    defaultBackend: defaultBackend === undefined || defaultBackend === '' ? undefined : defaultBackend,
   };
 }

@@ -302,6 +302,7 @@
             "@aws-sdk/client-bedrock-agentcore",
             "@aws-sdk/client-bedrock-runtime",
             "@aws-sdk/client-dynamodb",
+            "@aws-sdk/client-ssm",
             "@aws-sdk/client-sts",
             "@smithy/node-http-handler",
             "aws-cdk-lib",
