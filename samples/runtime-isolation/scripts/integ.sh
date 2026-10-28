@@ -167,9 +167,9 @@ else
     || { tail -30 "${LIB_TMP}/identity-deploy.log" "${LIB_TMP}/identity-build.log" >&2 2>/dev/null; fail "deploy ${IDENTITY_STACK}"; }
 fi
 identity_init
-create_tenant "rtiso-integ-a-${RUN}"; TENANT_A="$TENANT_ID"; issue_token "$TENANT_A" "$ADMIN_USERNAME" A1
-create_user "$TENANT_A" "rtiso-integ-a2-${RUN}"; issue_token "$TENANT_A" "$USERNAME" A2
-create_tenant "rtiso-integ-b-${RUN}"; TENANT_B="$TENANT_ID"; issue_token "$TENANT_B" "$ADMIN_USERNAME" B1
+create_tenant "rtiso-integ-a-${RUN}"; TENANT_A="$TENANT_ID"; A1_USER="$ADMIN_USERNAME"; issue_token "$TENANT_A" "$A1_USER" A1
+create_user "$TENANT_A" "rtiso-integ-a2-${RUN}"; A2_USER="$USERNAME"; issue_token "$TENANT_A" "$A2_USER" A2
+create_tenant "rtiso-integ-b-${RUN}"; TENANT_B="$TENANT_ID"; B1_USER="$ADMIN_USERNAME"; issue_token "$TENANT_B" "$B1_USER" B1
 echo "  tenant A=${TENANT_A} (A1, A2), tenant B=${TENANT_B} (B1)"
 narrow A1_REFRESH "$TENANT_A" tenant-api/read A1_READ; status="$NARROW_STATUS"; expect_status 200 "$status" "narrow A1 to tenant-api/read"
 narrow A1_REFRESH "$TENANT_A" tenant-api/write A1_WRITE; status="$NARROW_STATUS"; expect_status 200 "$status" "narrow A1 to tenant-api/write"
@@ -198,6 +198,19 @@ done
 # --------------------------------------------------------------------------
 for INGRESS in api-gateway agentcore-gateway; do
   echo "---- ingress: $INGRESS"
+  # Access tokens live 300s (tenant-identity). The api-gateway authoriser
+  # caches its Allow per token for 300s (ADR-0015), so a token that expires
+  # mid-run keeps being served there; the AgentCore Gateway re-validates the
+  # token on every request and refuses an expired one. A full run outlives
+  # 300s, so mint this iteration's tokens fresh here rather than reuse step
+  # 1's (first integ 2026-10-28: the gateway 403'd a step-1 token by the time
+  # its loop ran). Refresh tokens are long-lived, so A1_READ/A1_WRITE narrow
+  # from A1_REFRESH.
+  issue_token "$TENANT_A" "$A1_USER" A1
+  issue_token "$TENANT_A" "$A2_USER" A2
+  issue_token "$TENANT_B" "$B1_USER" B1
+  narrow A1_REFRESH "$TENANT_A" tenant-api/read A1_READ; [[ "$NARROW_STATUS" == 200 ]] || fail "re-narrow A1 to tenant-api/read: HTTP ${NARROW_STATUS}"
+  narrow A1_REFRESH "$TENANT_A" tenant-api/write A1_WRITE; [[ "$NARROW_STATUS" == 200 ]] || fail "re-narrow A1 to tenant-api/write: HTTP ${NARROW_STATUS}"
   ENDPOINT="$(output "$INGRESS" EndpointUrl)"
   RUNTIME_ARN="$(output "$INGRESS" RuntimeArn)"
   TENANT_ROLE="$(output "$INGRESS" TenantRoleArn)"
@@ -311,6 +324,7 @@ for INGRESS in api-gateway agentcore-gateway; do
   echo "  registry prefix ${REGISTRY_PREFIX}: billing is active, its own Runtime, requires ${BILLING_SCOPE}"
 
   # (ii) the floor-scope token reaches the default backend only; the billing scope opens billing
+  narrow A1_REFRESH "$TENANT_A" tenant-api/read A1_READ; [[ "$NARROW_STATUS" == 200 ]] || fail "re-narrow A1 to the floor before step 9: HTTP ${NARROW_STATUS}"
   status="$(invoke "$ENDPOINT" A1_READ "$(body "$C1" report)")"; expect_status 200 "$status" "floor-scope token on the default backend"
   status="$(invoke "$BILLING_URL" A1_READ "$(body "$C1" report)")"; expect_status 403 "$status" "floor-scope token on billing"
   narrow A1_REFRESH "$TENANT_A" "tenant-api/read ${BILLING_SCOPE}" A1_BILLING; status="$NARROW_STATUS"; expect_status 200 "$status" "narrow A1 to the floor plus ${BILLING_SCOPE}"
