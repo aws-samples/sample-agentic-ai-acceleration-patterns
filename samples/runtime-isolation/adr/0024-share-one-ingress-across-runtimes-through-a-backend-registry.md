@@ -215,7 +215,8 @@ ingress's published parameters; spec §3.3, §4 (the registry is a stored
 entity the construct now has), §5 and §6.4 get dated notes when this ships;
 integ step 9 (two backends behind one ingress; a token scoped to one gets
 403 on the other; a backend added after the ingress deploy serves within
-one TTL; a drained backend returns 404 within one TTL); verify on first
-deploy that the interceptor event names the Gateway target, or the
-`request admitted` line cannot carry `backend`. Revisit if a deployer needs
-per-backend tenant roles or per-backend concurrency.
+one TTL; a drained backend returns 404 within one TTL). Confirmed on the
+first integ (2026-10-28): the interceptor event names the Gateway target,
+so the `request admitted` line carries `backend` and `/billing` routed to
+its own Runtime. Revisit if a deployer needs per-backend tenant roles or
+per-backend concurrency.

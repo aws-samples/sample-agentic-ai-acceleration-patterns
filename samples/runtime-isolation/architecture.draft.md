@@ -81,7 +81,7 @@ Both ingresses run the same checks in the same order:
 6. Vend credentials through the TVM, from the cache when possible (ADR-0012, ADR-0022). One `tvm.role` and one cache serve every backend **(draft)**.
 7. Derive the session id from the verified claims (ADR-0002, ADR-0013). Session ids are scoped per Runtime, so the same `conversationId` on two backends is two sessions **(draft)**.
 8. Invoke the resolved Runtime with the session id and the credential header; on `api-gateway`, forward the stream.
-9. On `api-gateway`, read the `usage` event, add output tokens to the tenant's counter, and log `request served` with `backend`. On the interceptor, log `request admitted` before the Gateway calls the Runtime; `backend` is present only if the interceptor event names the target (to verify on first deploy, ADR-0024) **(draft)**.
+9. On `api-gateway`, read the `usage` event, add output tokens to the tenant's counter, and log `request served` with `backend`. On the interceptor, log `request admitted` before the Gateway calls the Runtime; the interceptor event names the target, so `backend` is present (confirmed on the first integ, ADR-0024) **(draft)**.
 
 ## Scale limits
 
