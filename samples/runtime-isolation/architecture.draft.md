@@ -36,8 +36,10 @@ ADR-0012, ADR-0017, ADR-0020, ADR-0024).
 
 A backend name is `[a-z0-9-]{1,32}`. The registry entry is a JSON string
 `{ "runtimeArn", "requiredScopes": [], "status": "active" | "draining" }`
-in SSM Parameter Store; the ingress caches it per process for `registryTtl`
-(60 s default). The backend role may write and delete its own name only; the
+in SSM Parameter Store under `registryPrefix` (default
+`/application-plane/shared/agent-runtime/`; set it when one account runs
+several ingresses); the ingress caches it per process for `registryTtl`
+(60 s default) and serves a stale entry while it refreshes. The backend role may write and delete its own name only; the
 ingress role reads the prefix only. Creating, updating or deleting a backend
 never redeploys the ingress: a change is live within one TTL, and a delete
 sets `draining` first so running streams finish (ADR-0024).

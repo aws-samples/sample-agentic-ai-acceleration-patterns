@@ -151,6 +151,51 @@ remains the answer when backends must not share concurrency. One `tvm.role`
 serves every backend, so a backend cannot be given a narrower tenant role
 than its siblings.
 
+Harder, from the choice of SSM Parameter Store as the registry (reviewed
+2026-10-28; SSM is kept because it is the sample's published-interface
+pattern and the registry is small and slow-changing):
+
+- *Quota.* 40 TPS standard per account and Region, shared by every SSM
+  caller in the account; the higher tier is paid. The cache is the control:
+  misses are instances × backends ÷ `registryTtl`, and a stale entry is
+  served while a refresh runs.
+- *Eventual consistency, no conditional write.* Two instances may disagree
+  for one TTL, and two writers to one name are last-write-wins. One writer
+  per name by IAM; the ingress logs the parameter version it resolved.
+- *No transactions.* Runtime, resource policy, Gateway target and registry
+  entry are four writes; a failed create leaves a half backend. The entry is
+  written last and `status` gates traffic.
+- *Untyped value.* A JSON string, schema by convention, 4 KB on the standard
+  tier; a bad entry fails at request time. `AgentBackend` validates at
+  synth; the ingress answers 502 and logs the fault.
+- *Availability dependency.* With SSM unavailable, warm instances serve the
+  stale cache and cold instances resolve nothing, so the ingress fails
+  closed for new instances.
+- *Cross-account.* A standard parameter cannot be shared; an advanced
+  parameter shares through RAM read-only. A backend in another account
+  needs a registrar role in the ingress account, or a different store.
+- *Hidden dependency.* `AgentBackend` reads `ingressRoleArn` by parameter
+  name, so CloudFormation sees no dependency between the stacks. Deploy
+  order is documented and scripted; deleting the ingress leaves entries,
+  and its stack removes the prefix on delete.
+- *Drain on delete.* An `AWS::SSM::Parameter` disappears at once on stack
+  delete, so `draining` needs a custom resource that writes the status,
+  waits one TTL plus the longest stream, then removes the entry (the log
+  drain shape, ADR-0019).
+- *Fixed prefix.* `/application-plane/shared/agent-runtime/` is one per
+  account and Region, so two ingresses in one account collide. `SharedIngress`
+  takes a `registryPrefix` prop; the one-backend wrapper keeps the default.
+- *Counts and listing.* 10,000 standard parameters per account and Region,
+  shared with everything else; `GetParametersByPath` returns 10 per call.
+  Fine for hundreds of backends, not thousands.
+- *No push.* The ingress learns of a change through the cache TTL, not an
+  event.
+
+Revisit the store when writes need conditions or transactions, when
+backends live in other accounts, or past a few hundred backends: DynamoDB
+(conditional writes, transactions, a resource policy for other accounts)
+is the alternative, behind the same registry interface.
+
 Follow-up: `SharedIngress` and `AgentBackend` constructs and the
 `IsolatedRuntime` wrapper; `ingressRoleArn` and `registryPrefix` among the
 ingress's published parameters; spec §3.3, §4 (the registry is a stored
