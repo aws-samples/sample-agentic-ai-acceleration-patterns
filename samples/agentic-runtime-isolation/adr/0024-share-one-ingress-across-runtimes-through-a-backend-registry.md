@@ -238,9 +238,11 @@ integration run):
   serves a stale entry for at most ten times `registryTtl`, after which the
   route answers 502 `registry_unavailable`; "warm instances serve the stale
   cache" above holds for that window only.
-- *Resource policy covers both ARN forms.* The Runtime policy's Allow and
-  Deny name the Runtime ARN and `<arn>/*` (the endpoint form), matching the
-  grant.
+- *Resource policy names the Runtime ARN alone.* `PutResourcePolicy` accepts
+  exactly one `Resource` per statement, equal to the attached ARN; `<arn>/*`
+  is refused (ValidationException, 2026-10-28). The ingress invokes by Runtime
+  ARN, so the policy on that ARN is the gate; the endpoint form lives in the
+  grant only.
 
 Revisit the store when writes need conditions or transactions, when
 backends live in other accounts, or past a few hundred backends: DynamoDB

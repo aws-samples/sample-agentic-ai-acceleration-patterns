@@ -256,7 +256,7 @@ describe.each(INGRESSES)('one-backend defaults, ingress=%s', (ingress) => {
     });
   });
 
-  it('the resource policy allows InvokeAgentRuntime for the ingress principal only and denies everything to everyone else, on the Runtime ARN and its endpoint form (P-1, ADR-0001, ADR-0024)', () => {
+  it('the resource policy allows InvokeAgentRuntime for the ingress principal only and denies everything to everyone else, on the Runtime ARN (P-1, ADR-0001, ADR-0024)', () => {
     template.resourceCountIs('AWS::BedrockAgentCore::ResourcePolicy', 1);
     const policy = resourcePolicy(template);
     expect(policy.Statement).toHaveLength(2);
@@ -268,11 +268,11 @@ describe.each(INGRESSES)('one-backend defaults, ingress=%s', (ingress) => {
     expect(deny.Effect).toBe('Deny');
     expect(deny.Principal).toEqual({ AWS: '*' });
     expect(deny.Action).toBe('bedrock-agentcore:*');
-    // Both statements name the Runtime ARN and `<arn>/*`, since InvokeAgentRuntime is also
-    // authorised on the runtime-endpoint ARN; a Deny on the Runtime alone would not gate it.
+    // Both statements name the Runtime ARN alone: PutResourcePolicy requires exactly one
+    // Resource per statement, equal to the attached ARN (`<arn>/*` is refused).
     const runtimeArnRef = JSON.stringify(Stack.of(construct.ingress).resolve(construct.runtimeArn));
     for (const statement of [allow, deny]) {
-      expect(statement.Resource).toEqual([runtimeArnRef, `${runtimeArnRef}/*`]);
+      expect(statement.Resource).toBe(runtimeArnRef);
     }
     // The same principal appears in the Allow and in the ArnNotEquals condition, and it is the ingress role.
     const ingressRef = JSON.stringify(Stack.of(construct.ingress).resolve(construct.ingressRole.roleArn));

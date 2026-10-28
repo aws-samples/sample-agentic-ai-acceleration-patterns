@@ -208,18 +208,18 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
    * over the Runtime ARN pattern (`SharedIngress`, ADR-0024), so the ingress
    * role is passed by ARN and may belong to another stack. Called once.
    *
-   * Both statements name the Runtime ARN and `<arn>/*`: the Service
-   * Authorization Reference lists `InvokeAgentRuntime` on `runtime` and on
-   * `runtime-endpoint` (`<runtime arn>/runtime-endpoint/<name>`), and the
-   * ingress grant covers both forms (ADR-0024). A Deny on the Runtime ARN
-   * alone would leave an invoke addressed to an endpoint ARN ungated.
+   * Both statements name the Runtime ARN alone. `PutResourcePolicy` requires
+   * every statement to carry exactly one `Resource`, equal to the ARN the
+   * policy is attached to (`<arn>/*` is refused with a ValidationException,
+   * seen 2026-10-28). The ingress invokes by Runtime ARN, so this one
+   * resource is the one the gate must cover; the endpoint form in the
+   * ingress grant (ADR-0024) is the identity half only.
    */
   bindIngress(ingressRoleArn: string): agentcore.CfnResourcePolicy {
     if (this.resourcePolicy !== undefined) {
       throw new Error('AgentCoreRuntimeBackend.bindIngress: the backend trusts exactly one ingress (ADR-0003)');
     }
     const stack = Stack.of(this);
-    const resources = [this.resourceArn, `${this.resourceArn}/*`];
     this.resourcePolicy = new agentcore.CfnResourcePolicy(this, 'ResourcePolicy', {
       resourceArn: this.resourceArn,
       policy: stack.toJsonString({
@@ -230,14 +230,14 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
             Effect: 'Allow',
             Principal: { AWS: ingressRoleArn },
             Action: INVOKE_ACTION,
-            Resource: resources,
+            Resource: this.resourceArn,
           },
           {
             Sid: 'DenyOthers',
             Effect: 'Deny',
             Principal: { AWS: '*' },
             Action: 'bedrock-agentcore:*',
-            Resource: resources,
+            Resource: this.resourceArn,
             Condition: { ArnNotEquals: { 'aws:PrincipalArn': ingressRoleArn } },
           },
         ],
