@@ -116,10 +116,16 @@ the same check per Gateway target. Refusal: 403 (ADR-0005 order holds).
 **Grant.** The ingress role's `InvokeAgentRuntime` grant is the Runtime
 ARN pattern of the account and Region with a condition that the Runtime
 carries the tag `ri:ingress = <ingress id>`, which `AgentBackend` sets. The
-Runtime's resource policy remains the hard gate (ADR-0001). To verify on
-first deploy: that `InvokeAgentRuntime` honours `aws:ResourceTag`; if not,
-the fallback is the bare pattern with the resource policy as the only gate,
-recorded as a threat-model change.
+Runtime's resource policy remains the hard gate (ADR-0001). The Service
+Authorization Reference (read 2026-10-28) lists `aws:ResourceTag/${TagKey}`
+for `InvokeAgentRuntime` on both `runtime` and `runtime-endpoint`, so the
+condition is honoured. The grant names two resources, `<arn>` and `<arn>/*`
+(the endpoint), and the endpoint carries its own tags; the docs do not say
+the `DEFAULT` endpoint inherits the Runtime's. To verify on first deploy:
+that the tag is present on the `DEFAULT` endpoint; if not, `AgentBackend`
+tags the endpoint too (`CfnRuntimeEndpoint`), or the fallback is the bare
+pattern with the resource policy as the only gate, recorded as a
+threat-model change.
 
 **CRUDL.** Create: Runtime, policy, target, then the registry entry; live
 within one TTL. Read and list: `GetParameter`, `GetParametersByPath`.
