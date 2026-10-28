@@ -136,7 +136,7 @@ delete_tenants() {
   CREATED_TENANTS=()
 }
 
-# -- The runtime-isolation endpoint -----------------------------------------
+# -- The agentic-runtime-isolation endpoint ---------------------------------
 
 LAST_TTFB=""
 LAST_TOTAL=""

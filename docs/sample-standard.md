@@ -354,7 +354,7 @@ metadata validators = [{
   is then the source of truth for model cost. Activate the
   `iamPrincipal/TenantId` cost allocation tag and the CUR caller-identity
   option (both account-level); keep any agent-reported token figures as a
-  cross-check. `samples/runtime-isolation` is the worked example.
+  cross-check. `samples/agentic-runtime-isolation` is the worked example.
 
 ### 4.5 Deliverable: a CDK construct
 

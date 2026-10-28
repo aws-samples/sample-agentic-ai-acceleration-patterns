@@ -2,7 +2,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 #
-# Latency harness against a deployed runtime-isolation stack and a deployed
+# Latency harness against a deployed agentic-runtime-isolation stack and a deployed
 # tenant-identity shared-pool (ADR-0009, ADR-0023). It measures the five
 # shapes a caller sees, client-side with curl, and prints one summary line
 # per scenario (p50/p90/max of TTFB and total, in seconds):

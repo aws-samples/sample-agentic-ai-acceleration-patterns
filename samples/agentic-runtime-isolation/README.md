@@ -2,20 +2,32 @@
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 -->
-# Runtime Isolation
+# Agentic Runtime Isolation
 
-A pooled agent backend where each tenant user's conversation runs in its own
-compute unit, and the backend trusts exactly one ingress. The ingress verifies
-the caller's access token, chooses the unit from the verified claims, vends
-tenant-scoped credentials for every model call, limits each tenant's share,
-and attributes cost per tenant. The backend is Amazon Bedrock AgentCore
-Runtime (one microVM per session); the ingress is a deploy-time choice between
-an API Gateway REST API and an AgentCore Gateway. Session mapping, scope checks
-and delegation are optional modules, off by default. The token vending
-machine (TVM) is always on (ADR-0018). It ships as CDK constructs:
-`IsolatedRuntime` for one backend behind one ingress, and `SharedIngress`
-plus `AgentBackend` for several backends behind one ingress (ADR-0024,
-proposed), plus a thin demo stack.
+A pooled agent platform where each tenant user's conversation runs in its own
+compute unit, and every backend trusts exactly one ingress. One shared ingress
+fronts one or more agent backends. For each request it verifies the caller's
+access token, resolves which backend the route names from a registry, chooses
+the compute unit from the verified claims, vends tenant-scoped credentials for
+every model call, limits each tenant's share, and attributes cost per tenant. A
+backend is an Amazon Bedrock AgentCore Runtime (one microVM per session); the
+ingress is a deploy-time choice between an API Gateway REST API and an
+AgentCore Gateway. Session mapping, scope checks and delegation are optional
+modules, off by default. The token vending machine (TVM) is always on
+(ADR-0018).
+
+It ships as CDK constructs:
+
+- **`SharedIngress`** plus **`AgentBackend`** are the core design: one ingress
+  in front of many backends, each backend registered in SSM so it can be
+  added, changed or drained without redeploying the ingress (ADR-0024). Each
+  backend carries its own required scopes, and every backend's Runtime trusts
+  the one ingress role.
+- **`IsolatedRuntime`** is the one-backend convenience wrapper over both: a
+  single ingress and a single backend served at the bare `/invocations` URL,
+  for the common case of one agent.
+
+Plus a thin demo stack.
 
 **What this sample is NOT** (spec §1.2):
 
@@ -33,15 +45,19 @@ proposed), plus a thin demo stack.
 - Not an RFC 8693 token service. Downscoping reuses tenant-identity's
   `/oauth2/token` (ADR-0007).
 - Not a session store. No table lists or revokes sessions.
+- Not a backend control plane. The registry is a published interface and a
+  worked `AgentBackend` construct, not a CRUD API with its own auth.
 
 ## Architecture
 
 ![Architecture: a tenant user signs in to the tenant-identity Cognito shared pool and calls the ingress with a bearer JWT. The ingress, either API Gateway REST with a Lambda authoriser and a streaming Lambda, or AgentCore Gateway with a CUSTOM_JWT authoriser and a REQUEST interceptor, verifies the JWT, derives the session id from tenant_id and sub, assumes the tenant role with a TenantId session tag, and invokes the AgentCore Runtime with SigV4 as the one principal its resource policy allows. The agent in the microVM calls the Bedrock model and the tenant's data with the tenant-scoped credentials, and IAM enforces ABAC on TenantId](./diagrams/runtime-isolation.drawio.svg)
 
-A request carries a bearer token to the ingress, which verifies it, picks the
-microVM from `tenant_id` and `sub`, vends `TenantId`-tagged credentials, and
-invokes the Runtime as the only principal it trusts; the agent then reaches
-the model and tenant data only with those credentials.
+A request carries a bearer token to the ingress on a `/{backend}/invocations`
+route. The ingress verifies the token, resolves the backend the route names
+from the registry, picks the microVM from `tenant_id` and `sub`, vends
+`TenantId`-tagged credentials, and invokes that backend's Runtime as the only
+principal it trusts; the agent then reaches the model and tenant data only
+with those credentials.
 
 Since ADR-0018 the execution role holds no model permission and the TVM is
 always on. Every model call is signed by the tenant role, not the execution
@@ -56,11 +72,15 @@ locations):
 - **Ingress, `agentcore-gateway`**: an AgentCore Gateway with a `CUSTOM_JWT`
   authoriser and a REQUEST interceptor Lambda that re-verifies the token and
   sets the session id and credential headers (ADR-0010, ADR-0015).
+- **Backend registry**: one SSM parameter per backend at
+  `<registryPrefix>backends/<name>` = `{runtimeArn, requiredScopes, status}`.
+  The ingress resolves the route's backend from it (cached per instance,
+  `registryTtl`), so adding, changing or draining a backend is a registry
+  write, never an ingress deploy (ADR-0024).
 - **Backend**: an AgentCore Runtime whose resource policy allows
   `InvokeAgentRuntime` to the ingress role only (ADR-0001, ADR-0011). One
-  ingress fronts one Runtime with `IsolatedRuntime`, or one Runtime per
-  registered backend with `SharedIngress` and `AgentBackend` (ADR-0024; see
-  [Several backends behind one ingress](#several-backends-behind-one-ingress)).
+  ingress fronts many Runtimes, one per registered `AgentBackend`; the
+  `IsolatedRuntime` wrapper is the one-backend case.
 - **Agent**: the code in the microVM. It builds its AWS clients per request
   from the vended credentials and ends each stream with a `usage` event
   (ADR-0008, ADR-0017, ADR-0018).
@@ -68,10 +88,10 @@ locations):
   from the verified claim, cached per instance in a bounded LRU cache with
   single flight (ADR-0012, ADR-0022).
 - **Tenant limits**: a DynamoDB fixed-window counter per tenant per minute,
-  shared by every ingress instance (ADR-0020).
+  shared by every ingress instance and every backend behind it (ADR-0020).
 - **Logs and metrics**: one structured log line per request with `tenantId`
-  and the cost figures; per-tenant EMF metrics only with `perTenantMetrics`
-  (ADR-0017, ADR-0021).
+  and `backend` and the cost figures; per-tenant EMF metrics only with
+  `perTenantMetrics` (ADR-0017, ADR-0021).
 
 ## How it works
 
@@ -83,25 +103,33 @@ pipeline ([`src/shared/request.ts`](./src/shared/request.ts)):
    `api-gateway` the authoriser checks it and the integration Lambda checks it
    again; on `agentcore-gateway` the `CUSTOM_JWT` authoriser checks it and the
    interceptor checks it again.
-2. **Check scopes** when `requiredScopes` is set, and the narrowed-token rule
-   when `delegation.requireNarrowedToken` is on (ADR-0005, ADR-0007).
-3. **Parse the body**: `prompt` must be a string; `conversationId` must match
+2. **Resolve the backend**: the route is `/{backend}/invocations`. The ingress
+   reads the backend's registry entry (from the per-instance cache), and
+   refuses an unknown or `draining` name with 404 before the body is read
+   (ADR-0024).
+3. **Check scopes**: every scope in the ingress-wide `requiredScopes` floor and
+   in the resolved backend's own `requiredScopes` must be in the token (AND),
+   plus the narrowed-token rule when `delegation.requireNarrowedToken` is on
+   (ADR-0005, ADR-0007, ADR-0024). On `agentcore-gateway` the floor is also the
+   `CUSTOM_JWT` authoriser's `allowedScopes`, checked before the interceptor
+   runs.
+4. **Parse the body**: `prompt` must be a string; `conversationId` must match
    `[A-Za-z0-9]{16,64}` with `session` on and must be absent with it off
    (ADR-0013).
-4. **Check the tenant limit**: one conditional `UpdateItem`. A limited tenant
+5. **Check the tenant limit**: one conditional `UpdateItem`. A limited tenant
    gets 429 before any STS, Runtime or model call (ADR-0020).
-5. **Vend credentials**: the TVM assumes the tenant role tagged
+6. **Vend credentials**: the TVM assumes the tenant role tagged
    `TenantId = tenant_id`, from the cache when it can (ADR-0012, ADR-0022).
-6. **Choose the unit**: with `session` off, a fresh random session id per
+7. **Choose the unit**: with `session` off, a fresh random session id per
    request; with it on, a session id derived from `tenant_id` and `sub` (or
    `tenant_id` alone with `scope: 'tenant'`) plus `conversationId`. Any
    session header the client sends is ignored or overwritten (ADR-0002).
-7. **Invoke the Runtime** with the session id and the credential header. On
-   `api-gateway` the integration Lambda forwards the stream.
-8. **Meter**: on `api-gateway` the Lambda reads the closing `usage` event,
-   adds the output tokens to the tenant's counter and logs `request served`.
-   The interceptor logs `request admitted` before the Gateway calls the
-   Runtime, because it never sees the response.
+8. **Invoke the backend's Runtime** with the session id and the credential
+   header. On `api-gateway` the integration Lambda forwards the stream.
+9. **Meter**: on `api-gateway` the Lambda reads the closing `usage` event,
+   adds the output tokens to the tenant's counter and logs `request served`
+   with `backend`. The interceptor logs `request admitted` with `backend`
+   before the Gateway calls the Runtime, because it never sees the response.
 
 The forwarded user token (`delegation.forwardUserToken`) travels raw in
 `X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Token`; the vended credentials
@@ -131,7 +159,7 @@ Prerequisites:
   npm ci
   npx projen build
   npx cdk deploy --context topology=shared-pool
-  cd ../runtime-isolation
+  cd ../agentic-runtime-isolation
   ```
 
 - **An API Gateway CloudWatch Logs role already set on the account and
@@ -168,7 +196,7 @@ key when a value is missing or malformed.
 |---|---|---|---|
 | `ingress` | `api-gateway`, `agentcore-gateway` | required | The ingress (ADR-0003). It is in the stack name, `RuntimeIsolation-<ingress>`, so both can be deployed side by side (see [Two ingresses in one account](#two-ingresses-in-one-account)) |
 | `session` | `user`, `tenant`, `off` | `off` | Session mapping (ADR-0013). `user` keys the unit on `tenant_id` and `sub`; `tenant` on `tenant_id` only |
-| `requiredScopes` | comma-separated scopes, e.g. `tenant-api/read` | unset (no check) | Scopes every token must carry (ADR-0005) |
+| `requiredScopes` | comma-separated scopes, e.g. `tenant-api/read` | unset (no check) | The ingress-wide scope floor every token must carry (ADR-0005); a backend adds its own on top (ADR-0024) |
 | `forwardUserToken` | `true`, `false` | `false` | Forward the user's token to the agent (ADR-0006) |
 | `requireNarrowedToken` | `true`, `false` | `false` | Refuse a token whose scopes are not a subset of `allowedScopes`; needs `forwardUserToken=true` (ADR-0007) |
 | `allowedScopes` | comma-separated scopes | unset | The scopes a forwarded token may carry; required with `requireNarrowedToken` |
@@ -181,8 +209,8 @@ key when a value is missing or malformed.
 | `identityParameterPlaceholders` | `true`, `false` | `false` | Build only: synthesise with placeholder pool and client ids instead of reading tenant-identity's parameters |
 | `publishParameters` | `true`, `false` | `true` | Write the `/application-plane/shared/agent-runtime/*` parameters. Set `false` on a second ingress deployed beside the first |
 
-The demo deploy that turns every module on (used by
-[`scripts/demo.sh`](./scripts/demo.sh)):
+The demo deploy turns every module on and adds a second backend, `billing`,
+with its own required scope (used by [`scripts/demo.sh`](./scripts/demo.sh)):
 
 ```bash
 npx cdk deploy --context ingress=api-gateway --context session=user --context requiredScopes=tenant-api/read --context forwardUserToken=true --context tvm=true
@@ -223,15 +251,17 @@ nothing else uses it.
 
 ### Use the construct in your own app
 
-Declare this sample as a local dependency (`file:../runtime-isolation`) in
-your `.projenrc.ts` and import from its package entry,
+Declare this sample as a local dependency (`file:../agentic-runtime-isolation`)
+in your `.projenrc.ts` and import from its package entry,
 [`src/index.ts`](./src/index.ts) (standard §1.1). The construct reads no SSM
 parameter; it takes the issuer, the agent and an optional tenant role as
-props:
+props.
+
+For one agent, use the `IsolatedRuntime` wrapper:
 
 ```ts
 import * as ssm from 'aws-cdk-lib/aws-ssm';
-import { IsolatedRuntime } from 'runtime-isolation/src';
+import { IsolatedRuntime } from 'agentic-runtime-isolation/src';
 
 const userPoolId = ssm.StringParameter.valueForStringParameter(this, '/application-plane/shared/identity/userPoolId');
 const appClientId = ssm.StringParameter.valueForStringParameter(this, '/application-plane/shared/identity/appClientId');
@@ -247,6 +277,9 @@ const runtime = new IsolatedRuntime(this, 'IsolatedRuntime', {
   tvm: { role: myTenantDataRole },
 });
 ```
+
+For several agents behind one ingress, use `SharedIngress` and `AgentBackend`
+(see [Several backends behind one ingress](#several-backends-behind-one-ingress)).
 
 - **Consumes**: an OIDC issuer meeting spec §6.2 (here tenant-identity
   `shared-pool` through `/application-plane/shared/identity/{userPoolId,appClientId}`);
@@ -284,12 +317,11 @@ Every prop, its default and its validation are in the TSDoc of
 
 ### Several backends behind one ingress
 
-`IsolatedRuntime` is one ingress and one backend. A vendor with several
-agents (a support agent, a billing agent) can deploy it once per agent, and
-then has one API, one authoriser, one stage throttle, one counter table and
-one hostname per agent, while the token check, the TVM, the tenant limit and
-the metering are the same in every copy. ADR-0024 (proposed) splits the
-construct in two so one ingress serves several Runtimes:
+One shared ingress in front of many backends is the core design. A vendor with
+several agents (a support agent, a billing agent) gives them one API, one
+authoriser, one stage throttle, one counter table and one hostname, and the
+token check, the TVM, the tenant limit and the metering are the same for every
+backend. The construct is in two parts (ADR-0024):
 
 - **`SharedIngress`** is the ingress alone: API or Gateway, authoriser, TVM,
   limits, log drain, and the registry prefix it reads. It takes the
@@ -302,14 +334,13 @@ construct in two so one ingress serves several Runtimes:
   same name on `agentcore-gateway`, and writes its registry entry. On delete
   it sets the entry to `draining`, waits `registryTtl` plus 120 s so running
   streams finish, and removes the entry.
-- **`IsolatedRuntime`** stays as the one-backend wrapper over both: default
-  backend `agent`, the bare `/invocations` URL and today's published values
-  unchanged.
+- **`IsolatedRuntime`** is the one-backend wrapper over both: default backend
+  `agent`, the bare `/invocations` URL and the single-backend published values.
 
 Two backends in one stack:
 
 ```ts
-import { AgentBackend, SharedIngress } from 'runtime-isolation/src';
+import { AgentBackend, SharedIngress } from 'agentic-runtime-isolation/src';
 
 const ingress = new SharedIngress(this, 'Ingress', {
   identity: { discoveryUrl, allowedClientIds: [appClientId] },
@@ -338,7 +369,7 @@ train. It finds the ingress through the published parameters, so
 CloudFormation sees no dependency between the two stacks:
 
 ```ts
-import { AgentBackend, SharedIngress } from 'runtime-isolation/src';
+import { AgentBackend, SharedIngress } from 'agentic-runtime-isolation/src';
 
 const ingress = SharedIngress.fromParameters(this, 'Ingress', '/application-plane/shared/agent-runtime/');
 
@@ -412,8 +443,8 @@ ADR-0024).
 - On `api-gateway` the stage throttle and the one integration Lambda's
   concurrency are shared by every backend: 50 rps × 120 s is 6,000
   concurrent executions for all backends together, so one slow backend can
-  starve the rest. Use one `IsolatedRuntime` per backend, or ADR-0024
-  Option 4, when backends must not share concurrency.
+  starve the rest. Use one `IsolatedRuntime` per backend when backends must
+  not share concurrency.
 - One `tvm.role` serves every backend; a backend cannot be given a narrower
   tenant role than its siblings. One tenant limit counts the tenant's
   requests across all backends (ADR-0020).
@@ -437,8 +468,12 @@ npx projen integ
 runs `scripts/demo.sh`, destroys everything from an exit trap, and fails if a
 stack, parameter or log group is left behind.
 
-Last green run: 2026-10-27, a sandbox account, eu-central-1: deploy 107 s,
-steps 223 s, then the destroy (which waits about 90 s for the ADR-0019 log drain).
+Last green run: 2026-10-28, a sandbox account, eu-central-1: deploy 107 s,
+steps 208 s, then the destroy (which waits about 90 s for the ADR-0019 log
+drain). Every step passed on both ingresses, including the ADR-0024 registry
+step. (Tokens are short-lived; the harness mints them fresh per ingress
+iteration so an expired token never masks a check — see
+[`scripts/CONVENTIONS.md`](./scripts/CONVENTIONS.md).)
 
 | Spec §8 step | api-gateway | agentcore-gateway |
 |---|---|---|
@@ -452,19 +487,18 @@ steps 223 s, then the destroy (which waits about 90 s for the ADR-0019 log drain
 | 8a A reads A; A reads B and B reads A denied by IAM; runner cannot assume the tenant role | pass | pass |
 | 8b usage event on the stream; `ModelOutputTokens` per tenant in CloudWatch | pass | usage event only |
 | ADR-0018 default `TenantModelRole` signs a model call | pass | not run |
-| 9-registry (ADR-0024): floor-scope token 200 on the default backend, 403 on `billing`; token with the billing scope 200; `/nosuch/invocations` refused; a backend added by a registry write serves within one TTL and is refused once `draining` | not yet run | not yet run (add and drain on `api-gateway` only) |
+| 9-registry (ADR-0024): floor-scope token 200 on the default backend, 403 on `billing`; token with the billing scope 200; `/nosuch/invocations` refused (403 api-gateway, 404 Gateway); a backend added by a registry write serves within one TTL and is refused once `draining` (add and drain on `api-gateway`) | pass | pass |
 
 Not covered yet: step 3 with a second, non-ingress role (the spike's V-1
 covered it); the CloudTrail check of one `AssumeRole` per tenant per credential
-lifetime; the CUR 2.0 `iamPrincipal/TenantId` line items (they arrive a day later);
-the ADR-0024 step on a green run.
+lifetime; the CUR 2.0 `iamPrincipal/TenantId` line items (they arrive a day later).
 
 ### Latency (20 `report` calls, no model, warm)
 
 | Ingress | TTFB p50 | TTFB p95 | `stream 10` TTFB | `stream 10` total |
 |---|---|---|---|---|
-| api-gateway | 0.193 s | 0.206 s | 0.204 s | 10.19 s |
-| agentcore-gateway | 0.295 s | 0.334 s | 0.262 s | 10.23 s |
+| api-gateway | 0.198 s | 0.219 s | 0.161 s | 10.15 s |
+| agentcore-gateway | 0.290 s | 0.325 s | 0.199 s | 10.18 s |
 
 Both ingresses stream: the first event of `stream 10` arrives after about
 0.2 s and the last after about 10 s. This is one run from one client; it is
@@ -533,8 +567,8 @@ backend at the bare URL below (ADR-0024).
 
 | | `api-gateway` | `agentcore-gateway` |
 |---|---|---|
-| URL (`endpointUrl`) | `POST https://<api>/prod/invocations` | `POST https://<gw>.gateway.bedrock-agentcore.<region>.amazonaws.com/agent/invocations` |
 | URL of a named backend (`urlFor(name)`) | `POST https://<api>/prod/<backend>/invocations` | `POST https://<gw>.gateway.bedrock-agentcore.<region>.amazonaws.com/<backend>/invocations` |
+| URL (`endpointUrl`), one-backend wrapper | `POST https://<api>/prod/invocations` | `POST https://<gw>.gateway.bedrock-agentcore.<region>.amazonaws.com/agent/invocations` |
 | Auth | `Authorization: Bearer <access token>` | same |
 | Body | `{"prompt": "..."}`; with `session` on, `{"conversationId": "...", "prompt": "..."}` | same |
 | Response | `200`, `text/event-stream`, streamed; the last event is `event: usage` ([the usage event](#the-usage-event-agent-to-ingress-contract)) | same |
@@ -568,10 +602,10 @@ Gateway itself refuses a target name it has no target for.
 - **One trusted principal.** Each Runtime's resource policy allows
   `InvokeAgentRuntime` to the ingress role only, so a leaked JWT cannot reach a
   unit directly and a caller cannot name another tenant's session (ADR-0001,
-  ADR-0002). Behind a `SharedIngress` the route picks the Runtime through the
-  registry; a wrong entry can send a tenant to the wrong backend, never to
-  another tenant's data, because credentials and session prefix come from
-  the verified claims alone (ADR-0024, T-39).
+  ADR-0002). The route picks the backend's Runtime through the registry; a
+  wrong entry can send a tenant to the wrong backend, never to another
+  tenant's data, because credentials and session prefix come from the verified
+  claims alone (ADR-0024, T-39).
 - **Credentials, not code, isolate data and model.** The execution role holds
   logs and traces only: no `bedrock:Invoke*`, no data, no STS (ADR-0008,
   ADR-0018). The agent reaches the model and tenant data only with the
@@ -582,7 +616,8 @@ Gateway itself refuses a target name it has no target for.
   to microVM (session id, allowlisted headers); B4 ingress to tenant role and
   agent to tenant data (trust policy and ABAC on `TenantId`); B5 telemetry and
   parameters (IAM, field-allowlisted loggers that never log a token,
-  credential or header value).
+  credential or header value); B6 the backend registry (one writer per name,
+  the ingress reads the prefix only, ADR-0024).
 - **Larger residual on `agentcore-gateway`.** What the Gateway does when the
   interceptor Lambda times out or is throttled is not documented and was not
   probed (T-11). In-code failures short-circuit to 403.
@@ -652,7 +687,7 @@ deployer action are in [`architecture.md`](./architecture.md#scale-limits).
 | `tenantLimits.requestsPerMinute` | 60 | Requests per tenant per minute, counted fleet-wide in a DynamoDB table; a hit is 429 before STS, the Runtime or the model (ADR-0020). `0` turns it off |
 | `tenantLimits.outputTokensPerMinute` | unset (off) | Model output tokens per tenant per minute; `api-gateway` only, synth fails otherwise (ADR-0020) |
 | `tenantLimits: false` | | No table and no per-tenant limit |
-| `stageThrottle` | `{ rateLimit: 50, burstLimit: 25 }` | The API Gateway stage throttle; `api-gateway` only; shared by all tenants (ADR-0020) |
+| `stageThrottle` | `{ rateLimit: 50, burstLimit: 25 }` | The API Gateway stage throttle; `api-gateway` only; shared by all tenants and backends (ADR-0020) |
 | `perTenantMetrics` | `false` | Per-tenant CloudWatch metrics (ADR-0017, ADR-0021) |
 | `tvm.cacheMaxEntries` | 1000 | Credential cache entries per Lambda instance, LRU, about 1.5 KB each (ADR-0022) |
 | `registryTtl` | `Duration.seconds(60)` | How long a backend registry entry is served from the per-process cache before a refresh; a miss serves the stale entry while refreshing. SSM standard throughput is 40 TPS per account and Region, so misses (instances × backends ÷ `registryTtl`) must stay well under it (ADR-0024) |
@@ -661,7 +696,7 @@ deployer action are in [`architecture.md`](./architecture.md#scale-limits).
 
 | Shared resource | Shared by | Deployer action |
 |---|---|---|
-| API Gateway stage throttle and the one integration Lambda's concurrency (50 rps × 120 s = 6,000 concurrent) | every tenant and, behind a `SharedIngress`, every backend (ADR-0024) | reserved concurrency on the ingress function; one `IsolatedRuntime` per backend when backends must not share |
+| API Gateway stage throttle and the one integration Lambda's concurrency (50 rps × 120 s = 6,000 concurrent) | every tenant and every backend behind the ingress (ADR-0024) | reserved concurrency on the ingress function; one `IsolatedRuntime` per backend when backends must not share |
 | SSM Parameter Store reads, 40 TPS standard per account and Region | every ingress instance's registry misses, plus every other SSM caller in the account | raise `registryTtl`; turn on higher throughput for very large fleets (ADR-0024) |
 
 **Cost warning: `perTenantMetrics: true` adds about 9 CloudWatch custom

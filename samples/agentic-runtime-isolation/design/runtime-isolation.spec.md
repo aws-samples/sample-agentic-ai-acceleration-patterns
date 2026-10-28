@@ -5,7 +5,7 @@ SPDX-License-Identifier: MIT-0
 # Specification: Runtime Isolation
 
 > **Status:** Draft, 2026-10-26. Requirements and principles for the
-> `runtime-isolation` sample. Items marked **[verify]** are service
+> `agentic-runtime-isolation` sample. Items marked **[verify]** are service
 > behaviours the design depends on; the first spike (§7) proves them, and if
 > one fails the named fallback applies and an ADR records the change.
 

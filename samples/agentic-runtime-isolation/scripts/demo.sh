@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT-0
 #
 # End-to-end demo (docs/sample-standard.md §7.6) against a deployed
-# runtime-isolation stack and a deployed tenant-identity shared-pool.
+# agentic-runtime-isolation stack and a deployed tenant-identity shared-pool.
 #
 #   AWS_REGION=eu-central-1 scripts/demo.sh
 #

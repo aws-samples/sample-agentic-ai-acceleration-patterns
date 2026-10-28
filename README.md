@@ -37,7 +37,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 |---|---|
 | [The Simple Cell-Based Control Plane](./samples/control-plane/) | A minimal multi-tenant control plane for cell-based deployments — one service, one API, one DynamoDB table, one Step Functions workflow, script-driven provisioning via AWS CodeBuild. `maxTenants: 1` degenerates the model to a silo. |
 | [Tenant Identity with Amazon Cognito](./samples/tenant-identity/) | An identity layer that makes Amazon Cognito the trusted source of tenant identity, in three user-pool topologies chosen at deploy time — plus a `tiered` mode that runs two of them side by side — with RFC 8693 token narrowing to one tenant. |
-| [Runtime Isolation](./samples/runtime-isolation/) | A pooled agent backend on Amazon Bedrock AgentCore Runtime that trusts one ingress, which verifies the tenant token, maps each caller to their own microVM, signs every model call with tenant-scoped credentials, limits each tenant and attributes cost per tenant. |
+| [Agentic Runtime Isolation](./samples/agentic-runtime-isolation/) | A pooled agent platform on Amazon Bedrock AgentCore Runtime: one shared ingress fronts one or more agent backends, verifies the tenant token, maps each caller to their own microVM, signs every model call with tenant-scoped credentials, limits each tenant and attributes cost per tenant. |
 
 ## The Simple Cell-Based Control Plane
 
@@ -105,7 +105,7 @@ IAM principal. Session mapping, scope checks and token forwarding are optional
 modules.
 
 It ships as one CDK construct, `IsolatedRuntime`, that later samples can
-consume. See [Runtime Isolation](./samples/runtime-isolation/).
+consume. See [Agentic Runtime Isolation](./samples/agentic-runtime-isolation/).
 
 ## Contributing a sample
 

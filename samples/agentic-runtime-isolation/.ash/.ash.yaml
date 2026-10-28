@@ -1,9 +1,9 @@
 # ASH (Automated Security Helper) v3 config for this sample.
-# Run from samples/runtime-isolation:
+# Run from samples/agentic-runtime-isolation:
 #   ash --mode local --source-dir . --output-dir .ash/ash_output
 #
 # ignore_paths: machine output that is not committed (ASH does not read .gitignore).
-project_name: runtime-isolation
+project_name: agentic-runtime-isolation
 fail_on_findings: true
 global_settings:
   severity_threshold: MEDIUM
