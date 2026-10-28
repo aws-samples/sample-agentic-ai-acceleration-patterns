@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { ENV, readIngressConfig, requireEnv } from '../../src/shared/config';
+import { ENV, readIngressConfig, readRegistryConfig, requireEnv } from '../../src/shared/config';
 
 /** The construct writes these variables; the handlers read them back (one encoding, one file). */
 describe('readIngressConfig', () => {
@@ -9,6 +9,7 @@ describe('readIngressConfig', () => {
     [ENV.INGRESS]: 'api-gateway',
     [ENV.DISCOVERY_URL]: 'https://issuer.example/.well-known/openid-configuration',
     [ENV.ALLOWED_CLIENT_IDS]: 'c1, c2',
+    [ENV.REGISTRY_PREFIX]: '/application-plane/shared/agent-runtime/',
   };
 
   it('reads the minimal configuration with every module off', () => {
@@ -22,6 +23,7 @@ describe('readIngressConfig', () => {
       tvm: undefined,
       limits: undefined,
       perTenantMetrics: false,
+      registry: { prefix: '/application-plane/shared/agent-runtime/', ttlSeconds: 60, defaultBackend: undefined },
     });
   });
 
@@ -43,6 +45,8 @@ describe('readIngressConfig', () => {
       [ENV.LIMIT_REQUESTS_PER_MINUTE]: '60',
       [ENV.LIMIT_OUTPUT_TOKENS_PER_MINUTE]: '5000',
       [ENV.PER_TENANT_METRICS]: 'true',
+      [ENV.REGISTRY_TTL_SECONDS]: '30',
+      [ENV.DEFAULT_BACKEND]: 'agent',
     });
     expect(config.ingress).toBe('agentcore-gateway');
     expect(config.requiredScopes).toEqual(['tenant-api/read']);
@@ -57,6 +61,16 @@ describe('readIngressConfig', () => {
     });
     expect(config.limits).toEqual({ tableName: 'TenantLimits', requestsPerMinute: 60, outputTokensPerMinute: 5000 });
     expect(config.perTenantMetrics).toBe(true);
+    expect(config.registry).toEqual({ prefix: '/application-plane/shared/agent-runtime/', ttlSeconds: 30, defaultBackend: 'agent' });
+  });
+
+  it('registry (ADR-0024): the prefix is required and must be an absolute path ending in /; TTL defaults to 60; an empty default is none', () => {
+    expect(readRegistryConfig({ [ENV.REGISTRY_PREFIX]: '/p/', [ENV.DEFAULT_BACKEND]: '' })).toEqual({ prefix: '/p/', ttlSeconds: 60, defaultBackend: undefined });
+    expect(() => readIngressConfig({ ...base, [ENV.REGISTRY_PREFIX]: undefined })).toThrow(ENV.REGISTRY_PREFIX);
+    expect(() => readIngressConfig({ ...base, [ENV.REGISTRY_PREFIX]: 'relative/' })).toThrow(ENV.REGISTRY_PREFIX);
+    expect(() => readIngressConfig({ ...base, [ENV.REGISTRY_PREFIX]: '/no-trailing-slash' })).toThrow(ENV.REGISTRY_PREFIX);
+    expect(() => readIngressConfig({ ...base, [ENV.REGISTRY_TTL_SECONDS]: '0' })).toThrow(ENV.REGISTRY_TTL_SECONDS);
+    expect(() => readIngressConfig({ ...base, [ENV.REGISTRY_TTL_SECONDS]: 'soon' })).toThrow(ENV.REGISTRY_TTL_SECONDS);
   });
 
   it('limits: a table with no request limit reads as 0 and no token limit', () => {

@@ -155,10 +155,10 @@ export class BackendRegistry {
     }
     const slot = this.cache.get(backend);
     const fresh = slot !== undefined && this.now() - slot.fetchedAt < this.config.ttlSeconds * 1000;
-    if (slot === undefined) {
-      await this.refresh(backend);
-    } else if (!fresh) {
-      // Stale: refresh, but serve what we have if the refresh fails.
+    if (slot === undefined || !fresh) {
+      // Cold or stale: refresh. A failed refresh leaves the slot holding
+      // either the stale entry (served below) or a `registry_unavailable`
+      // miss, so the SDK error never escapes as anything but a RegistryError.
       await this.refresh(backend).catch(() => undefined);
     }
     const current = this.cache.get(backend);

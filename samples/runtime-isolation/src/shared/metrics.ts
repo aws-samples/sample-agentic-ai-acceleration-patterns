@@ -48,6 +48,13 @@ export interface RequestMetrics {
   /** The verified `tenant_id`; a dimension, never free text. */
   readonly tenantId: string;
   readonly ingress: IngressKind;
+  /**
+   * The backend the route resolved to (ADR-0024); when set, the record also
+   * carries the `[TenantId, Ingress, Backend]` dimension set. Callers emit
+   * records only with `perTenantMetrics` on (ADR-0021), so the extra series
+   * cost only what that opt-in already pays for.
+   */
+  readonly backend?: string;
   /** HTTP status the ingress returned. */
   readonly status: number;
   /** Wall time of the ingress handler for this request, in milliseconds. */
@@ -90,19 +97,27 @@ export function emfRecord(m: RequestMetrics, timestamp: number = Date.now()): Re
       values[name] = value;
     }
   }
+  // The two-dimension set stays first so dashboards searching
+  // {RuntimeIsolation,TenantId,Ingress} keep working; the Backend set is
+  // added, not substituted (ADR-0024).
+  const dimensions: string[][] = [['TenantId', 'Ingress']];
+  if (m.backend !== undefined) {
+    dimensions.push(['TenantId', 'Ingress', 'Backend']);
+  }
   return {
     _aws: {
       Timestamp: timestamp,
       CloudWatchMetrics: [
         {
           Namespace: METRICS_NAMESPACE,
-          Dimensions: [['TenantId', 'Ingress']],
+          Dimensions: dimensions,
           Metrics: metrics,
         },
       ],
     },
     TenantId: m.tenantId,
     Ingress: m.ingress,
+    ...(m.backend === undefined ? {} : { Backend: m.backend }),
     Status: m.status,
     ...values,
   };

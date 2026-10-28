@@ -3,10 +3,12 @@
 
 /**
  * The demo stack (spec C-4, §6.4; standard §4.5): a thin wiring of
- * `IsolatedRuntime` to the sample's dependencies. It reads tenant-identity's
- * published parameters for the issuer (ADR-0004), chooses the ingress and the
- * optional modules from CDK context, and publishes the construct's read-only
- * properties as this sample's parameters. The TVM is always on (ADR-0018):
+ * `IsolatedRuntime` to the sample's dependencies, plus a second backend
+ * (`billing`, ADR-0024) behind the same ingress when the deployment checks
+ * scopes. It reads tenant-identity's published parameters for the issuer
+ * (ADR-0004), chooses the ingress and the optional modules from CDK context,
+ * and publishes the Runtime ARNs as this sample's parameters (the ingress
+ * publishes its own, src/shared-ingress.cdk.ts). The TVM is always on (ADR-0018):
  * the `tvm` context flag now means "demo tenant data". When true, the demo
  * adds a tenant-partitioned table and its own data-bearing TenantRole and
  * passes it (ADR-0016 lazy trust ARN); when false, the demo passes no role
@@ -15,18 +17,20 @@
  * test name tenant-identity; the construct does not.
  */
 
-import { CfnOutput, CfnRule, Duration, Fn, Lazy, RemovalPolicy, Stack, StackProps } from 'aws-cdk-lib';
+import { Aws, CfnOutput, CfnRule, Duration, Fn, Lazy, RemovalPolicy, Stack, StackProps } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
+import { AgentBackend } from './agent-backend.cdk';
 import { IsolatedRuntime, IsolatedRuntimeProps } from './runtime-isolation.cdk';
 import { AGENT_ENV } from './shared/config';
 import { COST_METRIC_NAMES, type IngressKind, METRIC_NAMES, METRICS_NAMESPACE } from './shared/metrics';
 import type { SessionScope } from './shared/session';
 import { TENANT_TAG_KEY, USER_TAG_KEY } from './shared/tvm';
+import { DEFAULT_REGISTRY_PREFIX } from './shared-ingress.cdk';
 
 /** tenant-identity's published parameters this sample consumes (ARCHITECTURE.md §5.1, ADR-0004). */
 export const IDENTITY_PARAMETERS = {
@@ -34,12 +38,27 @@ export const IDENTITY_PARAMETERS = {
   appClientId: '/application-plane/shared/identity/appClientId',
 } as const;
 
-/** This sample's published parameters (spec §6.4, ARCHITECTURE.md §5.1). */
+/**
+ * This sample's published parameters (spec §6.4, ARCHITECTURE.md §5.1).
+ * `SharedIngress` publishes `endpointUrl`, `ingress`, `ingressRoleArn`,
+ * `ingressId` and `tenantRoleArn` under the same prefix itself (ADR-0024);
+ * the demo keeps `runtimeArn` for the default backend (back-compat) and adds
+ * the billing backend's ARN.
+ */
 export const AGENT_RUNTIME_PARAMETERS = {
-  endpointUrl: '/application-plane/shared/agent-runtime/endpointUrl',
-  runtimeArn: '/application-plane/shared/agent-runtime/runtimeArn',
-  ingress: '/application-plane/shared/agent-runtime/ingress',
+  runtimeArn: `${DEFAULT_REGISTRY_PREFIX}runtimeArn`,
+  billingRuntimeArn: `${DEFAULT_REGISTRY_PREFIX}backends-info/billing/runtimeArn`,
 } as const;
+
+/** The second backend's name (ADR-0024): the integ's step 9 calls `/billing/invocations`. */
+export const BILLING_BACKEND = 'billing';
+/**
+ * The scope the billing backend requires on top of the ingress floor
+ * (`tenant-api/read` in the all-on stacks). tenant-identity issues it and
+ * the integ narrows a token to `tenant-api/read` only, which the billing
+ * route then refuses with 403 while the default backend still serves it.
+ */
+export const BILLING_SCOPE = 'tenant-api/write';
 
 /** The build-time placeholders (standard §4.3). A CloudFormation rule refuses to deploy a stack that carries them. */
 export const PLACEHOLDER = {
@@ -86,12 +105,19 @@ export interface DemoContext {
   /** Output tokens per tenant per minute (ADR-0020, api-gateway only). */
   readonly outputTokensPerMinute?: number;
   /**
-   * Write the `/application-plane/shared/agent-runtime/*` parameters (spec §6.4). Default true.
-   * The parameter names are account-wide, so only one stack per account and Region may publish:
-   * a second ingress deployed beside the first must set `publishParameters=false` or its deploy
-   * fails on `IngressParameter already exists`.
+   * Publish under `/application-plane/shared/agent-runtime/` (spec §6.4). Default true.
+   * The prefix is account-wide, so only one stack per account and Region may use it: a second
+   * ingress deployed beside the first must set `publishParameters=false`, which moves its
+   * registry and its published parameters under `/application-plane/shared/agent-runtime/<stackName>/`
+   * and skips the demo's own `runtimeArn` parameters (ADR-0024).
    */
   readonly publishParameters: boolean;
+  /**
+   * Add the `billing` backend behind the same ingress (ADR-0024), requiring `BILLING_SCOPE`.
+   * Default: on when `requiredScopes` is set (the scope-checking deployments, where a second
+   * backend with a scope of its own shows the per-backend check), off otherwise.
+   */
+  readonly billingBackend?: boolean;
 }
 
 type ContextReader = (key: string) => unknown;
@@ -165,14 +191,20 @@ export function parseDemoContext(read: ContextReader, region?: string): DemoCont
     requestsPerMinute: integer(read, 'requestsPerMinute'),
     outputTokensPerMinute: integer(read, 'outputTokensPerMinute'),
     publishParameters: read('publishParameters') === undefined ? true : flag(read, 'publishParameters'),
+    billingBackend: read('billingBackend') === undefined ? undefined : flag(read, 'billingBackend'),
   };
+}
+
+/** Whether the demo adds the billing backend: the explicit flag, else when the deployment checks scopes. */
+export function wantsBillingBackend(ctx: DemoContext): boolean {
+  return ctx.billingBackend ?? ctx.requiredScopes !== undefined;
 }
 
 export interface RuntimeIsolationDemoStackProps extends StackProps {
   readonly context: DemoContext;
   /** Directory with the bundled agent (`app.js`); see src/agent/bundle.ts. */
   readonly agentCodePath: string;
-  /** Publish the `/application-plane/shared/agent-runtime/*` parameters. Overrides `context.publishParameters`; the integration test turns it off on all but one stack. */
+  /** Publish under `/application-plane/shared/agent-runtime/`. Overrides `context.publishParameters`; the integration test turns it off on all but one stack, which then use a stack-scoped prefix. */
   readonly publishParameters?: boolean;
   /** The cost dashboard's name (account-wide). Default `RuntimeIsolation-<ingress>`; the integration test passes its stack name so several stacks of one ingress coexist. */
   readonly dashboardName?: string;
@@ -180,6 +212,10 @@ export interface RuntimeIsolationDemoStackProps extends StackProps {
 
 export class RuntimeIsolationDemoStack extends Stack {
   readonly runtime: IsolatedRuntime;
+  /** The second backend behind the same ingress (ADR-0024); undefined unless `wantsBillingBackend`. */
+  readonly billing?: AgentBackend;
+  /** The registry prefix this stack's ingress and backends use (ADR-0024). */
+  readonly registryPrefix: string;
   readonly table?: dynamodb.TableV2;
   readonly tenantRole?: iam.Role;
   /** The per-tenant cost dashboard, `RuntimeIsolation-<ingress>` (P-10); only with `perTenantMetrics` (ADR-0021). */
@@ -212,6 +248,13 @@ export class RuntimeIsolationDemoStack extends Stack {
       appClientId = ssm.StringParameter.valueForStringParameter(this, IDENTITY_PARAMETERS.appClientId);
     }
     const discoveryUrl = `https://cognito-idp.${this.region}.amazonaws.com/${userPoolId}/.well-known/openid-configuration`;
+
+    // The registry prefix (ADR-0024) is also where the ingress publishes, and
+    // it is one per account and Region; a stack that does not publish takes
+    // a prefix of its own under it, so its registry entries and parameters
+    // never collide with the publishing stack's.
+    const publish = props.publishParameters ?? ctx.publishParameters;
+    this.registryPrefix = publish ? DEFAULT_REGISTRY_PREFIX : `${DEFAULT_REGISTRY_PREFIX}${Aws.STACK_NAME}/`;
 
     // The TVM is always on (ADR-0018). `ctx.tvm` means "demo tenant data":
     // true adds a tenant-partitioned table and the construct's tvmCallerRole
@@ -262,10 +305,12 @@ export class RuntimeIsolationDemoStack extends Stack {
       agentEnvironment = { [AGENT_ENV.TABLE_NAME]: this.table.tableName };
     }
 
+    const agent: IsolatedRuntimeProps['agent'] = { codePath: props.agentCodePath, modelId: ctx.modelId, environment: agentEnvironment };
     this.runtime = new IsolatedRuntime(this, 'IsolatedRuntime', {
       identity: { discoveryUrl, allowedClientIds: [appClientId] },
-      agent: { codePath: props.agentCodePath, modelId: ctx.modelId, environment: agentEnvironment },
+      agent,
       ingress: ctx.ingress,
+      registryPrefix: this.registryPrefix,
       session: ctx.sessionScope === undefined ? undefined : { scope: ctx.sessionScope },
       requiredScopes: ctx.requiredScopes,
       delegation: {
@@ -282,6 +327,19 @@ export class RuntimeIsolationDemoStack extends Stack {
     });
     callerRoleArn = this.runtime.tvmCallerRole.roleArn;
 
+    // A second backend behind the same ingress (ADR-0024): the same agent
+    // code and model, its own Runtime and registry entry, and a scope of its
+    // own on top of the ingress floor. A token narrowed to the floor alone
+    // reaches `/agent/invocations` and gets 403 on `/billing/invocations`.
+    if (wantsBillingBackend(ctx)) {
+      this.billing = new AgentBackend(this, 'BillingBackend', {
+        name: BILLING_BACKEND,
+        ingress: this.runtime.ingress,
+        agent,
+        requiredScopes: [BILLING_SCOPE],
+      });
+    }
+
     // P-9 on the api-gateway ingress: top tenants by request and by error,
     // from the access log's tenantId field. P-10 (ADR-0017): top tenants by
     // backend seconds and by output tokens, from the ingress Lambda's
@@ -292,7 +350,7 @@ export class RuntimeIsolationDemoStack extends Stack {
     // interceptor sees only the request side (no backend or model figures),
     // so it gets none of these.
     if (ctx.ingress === 'api-gateway') {
-      const accessLogs = this.runtime.node.findChild('ApiAccessLogs') as logs.LogGroup;
+      const accessLogs = this.runtime.ingress.node.findChild('ApiAccessLogs') as logs.LogGroup;
       insightRule(this, 'TopTenantsByRequest', `${this.stackName}-top-tenants-requests`, {
         LogGroupNames: [accessLogs.logGroupName],
         Contribution: { Keys: ['$.tenantId'], Filters: [{ Match: '$.tenantId', IsPresent: true }] },
@@ -307,11 +365,14 @@ export class RuntimeIsolationDemoStack extends Stack {
           ],
         },
       });
-      const ingressLogs = this.runtime.node.findChild('IngressLogs') as logs.LogGroup;
+      // The 'request served' line names the backend (ADR-0024), so the cost
+      // rules key on tenant and backend: one tenant's seconds and tokens per
+      // agent, which the access log cannot give.
+      const ingressLogs = this.runtime.ingress.node.findChild('IngressLogs') as logs.LogGroup;
       insightRule(this, 'TopTenantsByBackendSeconds', `${this.stackName}-top-tenants-backend-seconds`, {
         LogGroupNames: [ingressLogs.logGroupName],
         Contribution: {
-          Keys: ['$.tenantId'],
+          Keys: ['$.tenantId', '$.backend'],
           ValueOf: '$.backendInvokeSeconds',
           Filters: [
             { Match: '$.message', In: ['request served'] },
@@ -323,7 +384,7 @@ export class RuntimeIsolationDemoStack extends Stack {
       insightRule(this, 'TopTenantsByOutputTokens', `${this.stackName}-top-tenants-output-tokens`, {
         LogGroupNames: [ingressLogs.logGroupName],
         Contribution: {
-          Keys: ['$.tenantId'],
+          Keys: ['$.tenantId', '$.backend'],
           ValueOf: '$.usageOutput',
           Filters: [
             { Match: '$.message', In: ['request served'] },
@@ -343,28 +404,33 @@ export class RuntimeIsolationDemoStack extends Stack {
       this.dashboard = costDashboard(this, ctx.ingress, props.dashboardName ?? dashboardName(ctx.ingress));
     }
 
-    // The published interface (spec §6.4, standard §1.1). The names are
-    // account-wide, so one stack per account and Region publishes them.
-    if (props.publishParameters ?? ctx.publishParameters) {
-      new ssm.StringParameter(this, 'EndpointUrlParameter', {
-        parameterName: AGENT_RUNTIME_PARAMETERS.endpointUrl,
-        stringValue: this.runtime.endpointUrl,
-        description: 'runtime-isolation: the ingress invocation URL (POST, bearer token)',
-      });
+    // The published interface (spec §6.4, standard §1.1). The ingress
+    // publishes endpointUrl, ingress, ingressRoleArn, ingressId and
+    // tenantRoleArn under its prefix (ADR-0024); the demo adds the Runtime
+    // ARNs. The default prefix is account-wide, so one stack per account and
+    // Region publishes there.
+    if (publish) {
       new ssm.StringParameter(this, 'RuntimeArnParameter', {
         parameterName: AGENT_RUNTIME_PARAMETERS.runtimeArn,
         stringValue: this.runtime.runtimeArn,
-        description: 'runtime-isolation: the AgentCore Runtime ARN',
+        description: 'runtime-isolation: the default backend\'s AgentCore Runtime ARN',
       });
-      new ssm.StringParameter(this, 'IngressParameter', {
-        parameterName: AGENT_RUNTIME_PARAMETERS.ingress,
-        stringValue: ctx.ingress,
-        description: 'runtime-isolation: the deployed ingress (api-gateway or agentcore-gateway)',
-      });
+      if (this.billing !== undefined) {
+        new ssm.StringParameter(this, 'BillingRuntimeArnParameter', {
+          parameterName: AGENT_RUNTIME_PARAMETERS.billingRuntimeArn,
+          stringValue: this.billing.runtimeArn,
+          description: 'runtime-isolation: the billing backend\'s AgentCore Runtime ARN (ADR-0024)',
+        });
+      }
     }
 
     new CfnOutput(this, 'EndpointUrl', { value: this.runtime.endpointUrl });
     new CfnOutput(this, 'RuntimeArn', { value: this.runtime.runtimeArn });
+    new CfnOutput(this, 'RegistryPrefix', { value: this.registryPrefix });
+    if (this.billing !== undefined) {
+      new CfnOutput(this, 'BillingEndpointUrl', { value: this.billing.endpointUrl! });
+      new CfnOutput(this, 'BillingRuntimeArn', { value: this.billing.runtimeArn });
+    }
     new CfnOutput(this, 'Ingress', { value: ctx.ingress });
     new CfnOutput(this, 'IngressRoleArn', { value: this.runtime.ingressRole.roleArn });
     new CfnOutput(this, 'TvmCallerRoleArn', { value: this.runtime.tvmCallerRole.roleArn });

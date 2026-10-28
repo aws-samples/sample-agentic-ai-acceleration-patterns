@@ -3,23 +3,26 @@
 
 /**
  * API Gateway streaming integration Lambda (spec C-3a). Runs the shared
- * pipeline (verify, parse, choose the unit, optional token and credentials),
- * invokes the backend with SigV4 and relays its stream to the caller through
- * Lambda response streaming (spike V-5: the integration timeout is two
- * minutes, set by the construct). Logs carry the verified tenantId and the
- * session prefix as fields, never a header value (P-9); one EMF record per
- * request carries requests, 4xx/5xx, TTFB and streamed bytes (P-9) and the
- * cost meters (P-10, ADR-0017): ingress milliseconds, backend invoke
- * seconds (from the invoke call to the end of the stream), and the model
- * tokens read from the agent's final `event: usage` SSE event. The stream is
- * forwarded unchanged; the scanner only looks at it.
+ * pipeline (verify, resolve the route's backend through the registry, parse,
+ * choose the unit, optional token and credentials), invokes the resolved
+ * Runtime with SigV4 and relays its stream to the caller through Lambda
+ * response streaming (spike V-5: the integration timeout is two minutes, set
+ * by the construct). One Lambda serves every backend behind the ingress
+ * (ADR-0024); no Runtime ARN is in its environment. Logs carry the verified
+ * tenantId, the backend and the session prefix as fields, never a header
+ * value (P-9); one EMF record per request carries requests, 4xx/5xx, TTFB
+ * and streamed bytes (P-9) and the cost meters (P-10, ADR-0017): ingress
+ * milliseconds, backend invoke seconds (from the invoke call to the end of
+ * the stream), and the model tokens read from the agent's final
+ * `event: usage` SSE event. The stream is forwarded unchanged; the scanner
+ * only looks at it.
  */
 
 import type { Writable } from 'node:stream';
 import type { APIGatewayProxyEvent, StreamifyHandler } from 'aws-lambda';
 import { AgentCoreRuntimeBackend } from '../backend/agentcore-runtime.transport';
 import type { InvokeBackend } from '../backend/backend';
-import { ENV, isLambdaRuntime, readIngressConfig, requireEnv } from '../shared/config';
+import { isLambdaRuntime, readIngressConfig } from '../shared/config';
 import { errorName, log } from '../shared/logger';
 import { emitRequestMetrics, type RequestMetrics, UsageEventScanner } from '../shared/metrics';
 import { ERROR_TEXT, type ErrorStatus, IngressPipeline, pipelineFor, RequestError } from '../shared/request';
@@ -67,9 +70,11 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
   // fetches (ADR-0023); afterwards this is a settled promise. `ready` never
   // rejects by construction (warm() swallows failures), so no catch here.
   await deps.ready;
-  // The tenant the authoriser verified: present on every request that reached
-  // us, so even a refusal below is attributed to a tenant in the metrics.
-  const authorizedTenant = (event.requestContext?.authorizer as Record<string, unknown> | undefined)?.tenantId;
+  // The tenant and backend the authoriser resolved: present on every request
+  // that reached us, so even a refusal below is attributed in the metrics.
+  const authorizer = (event.requestContext?.authorizer ?? {}) as Record<string, unknown>;
+  const authorizedTenant = typeof authorizer.tenantId === 'string' ? authorizer.tenantId : undefined;
+  const authorizedBackend = typeof authorizer.backend === 'string' ? authorizer.backend : undefined;
   type Extra = Omit<RequestMetrics, 'tenantId' | 'ingress' | 'status' | 'ingressDurationMs'>;
   // One EMF record per request, emitted once, at the end, so IngressDurationMs
   // covers the whole handler (P-10).
@@ -80,18 +85,19 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
     metricsOn &&
     emitRequestMetrics(
       {
-        tenantId: tenantId ?? (typeof authorizedTenant === 'string' ? authorizedTenant : 'unknown'),
+        tenantId: tenantId ?? authorizedTenant ?? 'unknown',
         ingress: 'api-gateway',
         status,
         ingressDurationMs: now() - started,
+        backend: authorizedBackend,
         ...extra,
       },
       deps.metricsOut,
     );
 
-  const fail = (status: ErrorStatus, reason: string, tenantId?: string) => {
-    log.warn('request refused', { ingress: 'api-gateway', status, reason, tenantId });
-    tenantForMetrics(status, tenantId);
+  const fail = (status: ErrorStatus, reason: string, tenantId?: string, backend: string | undefined = authorizedBackend) => {
+    log.warn('request refused', { ingress: 'api-gateway', status, reason, tenantId, backend });
+    tenantForMetrics(status, tenantId, { backend });
     out.start(status, { 'Content-Type': 'text/plain' });
     out.write(ERROR_TEXT[status]);
     out.end();
@@ -99,7 +105,12 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
 
   let request;
   try {
-    request = await deps.pipeline.validate({ authorization: authorizationHeader(event), body: decodeBody(event) });
+    // `event.path` is the request path as called, stage stripped
+    // (`/<backend>/invocations`): the real segment the client sent, where
+    // `requestContext.resourcePath` is the template (`/{backend}/invocations`)
+    // and `requestContext.path` carries the stage prefix. The registry
+    // resolves the name (ADR-0024).
+    request = await deps.pipeline.validate({ authorization: authorizationHeader(event), body: decodeBody(event), path: event.path });
   } catch (error) {
     if (error instanceof RequestError) {
       return fail(error.status, error.reason, error.tenantId);
@@ -108,7 +119,7 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
     return fail(502, 'pipeline_failed');
   }
 
-  const fields = { ingress: 'api-gateway', tenantId: request.tenantId, sessionPrefix: prefixOf(request.unitId) };
+  const fields = { ingress: 'api-gateway', tenantId: request.tenantId, backend: request.backend, sessionPrefix: prefixOf(request.unitId) };
   // Backend invoke wall time runs from the invoke call to the end of the
   // stream: the AgentCore Runtime bills the session's active CPU and memory
   // over that window (P-10).
@@ -118,7 +129,7 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
     response = await deps.backend.invoke(request);
   } catch (error) {
     log.error('backend invoke failed', { ...fields, error: errorName(error) });
-    return fail(502, 'backend_failed', request.tenantId);
+    return fail(502, 'backend_failed', request.tenantId, request.backend);
   }
 
   let ttfbMs: number | undefined;
@@ -164,6 +175,7 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
     await deps.pipeline.limiter?.recordOutputTokens(request.tenantId, reported.outputTokens);
   }
   tenantForMetrics(200, request.tenantId, {
+    backend: request.backend,
     ttfbMs,
     streamedBytes,
     backendInvokeSeconds,
@@ -180,9 +192,12 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
 function defaultDependencies(): HandlerDependencies {
   const config = readIngressConfig();
   const pipeline = pipelineFor(config);
-  const backend = new AgentCoreRuntimeBackend(requireEnv(ENV.RUNTIME_ARN));
+  // One transport for every backend: the Runtime ARN comes with each
+  // validated request from the registry (ADR-0024).
+  const backend = new AgentCoreRuntimeBackend();
   // The connections to STS, DynamoDB and the Runtime endpoint open during
-  // init, in parallel with the verifier's fetches (ADR-0023).
+  // init, in parallel with the verifier's fetches and the default backend's
+  // registry read (ADR-0023).
   const ready = Promise.all([pipeline.warm(), backend.warm()]).then(() => undefined);
   return { pipeline, backend, perTenantMetrics: config.perTenantMetrics, ready };
 }

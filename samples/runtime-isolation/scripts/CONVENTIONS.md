@@ -66,6 +66,24 @@ that none of those ever reach output.
 - Exit non-zero on any failure, naming the step, resource or parameter that
   failed (name, not value). Never swallow an error into a success exit.
 
+## Published parameters and who owns them
+
+The scripts read this sample's published parameters under the ingress's
+`registryPrefix` (default `/application-plane/shared/agent-runtime/`,
+`PARAM_PREFIX` in `lib.sh`) and never write the ones a stack owns
+(ADR-0024):
+
+| Parameter | Owner | Scripts |
+|---|---|---|
+| `endpointUrl`, `ingress`, `ingressRoleArn`, `ingressId`, `tenantRoleArn`, `gatewayIdentifier` (`agentcore-gateway` only) | the ingress stack (`SharedIngress`) | read only (`demo.sh`, `integ.sh`, `perf.sh`) |
+| `runtimeArn` | the one-backend demo stack | read only |
+| `backends/<name>` | the stack that deployed that `AgentBackend`; its custom resource writes `active`, `draining`, then removes the entry | read only, except `backends/late` |
+| `backends/late` | `integ.sh` step 9-registry, written with `aws ssm put-parameter` to show a backend added after the ingress deploy | the script deletes it at the end of the step and again from the `EXIT` trap, so a failed run leaves no route behind |
+
+A script that writes a registry entry owns its deletion. Never overwrite a
+`backends/<name>` entry a stack wrote: CloudFormation does not see the
+change, and the stack's delete would race the drain.
+
 ## Scope
 
 These conventions apply to every script in this directory (`demo.sh`,

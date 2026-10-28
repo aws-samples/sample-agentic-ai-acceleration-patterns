@@ -12,6 +12,9 @@
 #      tenant-identity ADR-0017). Create tenants A and B, users A1, A2, B1.
 #   2. Synthesise test/integ.runtime.ts and deploy its four stacks at once.
 #   3..9 on both all-on stacks (api-gateway, agentcore-gateway).
+#   9-registry (ADR-0024) on both: the second backend `billing` and its scope,
+#      an unknown backend name; on api-gateway also a backend added and
+#      drained through a registry write after the deploy.
 #   4a on the session-off stack (also a model call on the default role).
 #   8 (narrowed) and the per-tenant limit (ADR-0020) on the narrowed stack.
 #   8b per-tenant metrics; then scripts/demo.sh against the published stack.
@@ -49,6 +52,15 @@ STARTED="$(date -u +%FT%TZ)"
 RESULTS="${LIB_TMP}/results"
 : >"$RESULTS"
 
+# The scope the demo's second backend `billing` requires on top of the
+# ingress floor (ADR-0024). MUST match BILLING_SCOPE exported by
+# src/demo.cdk.ts. tenant-identity shared-pool issues only tenant-api/read
+# and tenant-api/write, and the floor is tenant-api/read, so write is the
+# only scope the identity provider can narrow a token to for this check.
+BILLING_SCOPE="tenant-api/write"
+# Registry entries this script wrote (step 9-registry); removed in cleanup.
+LATE_PARAMS=()
+
 log_groups_of() { # STACK -> the stack's AWS::Logs::LogGroup physical ids
   aws cloudformation describe-stack-resources --stack-name "$1" \
     --query "StackResources[?ResourceType=='AWS::Logs::LogGroup'].PhysicalResourceId" --output text 2>/dev/null | tr '\t' '\n'
@@ -64,6 +76,12 @@ cleanup() {
   set +e
   echo "== step 10: teardown"
   delete_tenants
+  # The registry entry step 9-registry wrote belongs to this script, not to a
+  # stack, so the stack destroy would leave it (CONVENTIONS.md).
+  local lp
+  for lp in "${LATE_PARAMS[@]:-}"; do
+    [[ -n "$lp" ]] && aws ssm delete-parameter --name "$lp" >/dev/null 2>&1
+  done
   local groups="${LIB_TMP}/log-groups" runtimes="${LIB_TMP}/runtimes" params="${LIB_TMP}/params" s
   : >"$groups"; : >"$runtimes"; : >"$params"
   if [[ "$DEPLOYED_SAMPLE" == 1 ]]; then
@@ -121,6 +139,19 @@ trap cleanup EXIT
 step() { echo "== step $1: $2"; }
 output() { jq -r --arg s "${STACK_PREFIX}-$1" --arg k "$2" '.[$s][$k] // empty' "${LIB_TMP}/outputs.json"; }
 body() { jq -nc --arg c "$1" --arg p "$2" '{conversationId: $c, prompt: $p}'; }
+
+# backend_url ENDPOINT_URL NAME -> the URL of one backend's route (ADR-0024).
+# Tolerates either shape of the published endpointUrl: the ingress base
+# (https://<api>/prod) or the default backend's full URL
+# (https://<api>/prod/invocations, https://<gw>/agent/invocations).
+backend_url() {
+  local base="${1%/}"
+  base="${base%/invocations}"; base="${base%/agent}"
+  echo "${base}/$2/invocations"
+}
+
+# registry_entry RUNTIME_ARN SCOPES_JSON STATUS -> the entry JSON (src/shared/registry.ts schema).
+registry_entry() { jq -nc --arg a "$1" --argjson s "$2" --arg st "$3" '{runtimeArn: $a, requiredScopes: $s, status: $st}'; }
 
 # --------------------------------------------------------------------------
 # 1. tenant-identity (shared-pool), reused or deployed
@@ -258,6 +289,100 @@ for INGRESS in api-gateway agentcore-gateway; do
   [[ "$(data_events)" -ge 6 && -n "$(usage_json)" ]] || fail "stream 10: $(data_events) data events"
   echo "  stream 10: $(data_events) data events, TTFB ${LAST_TTFB}s, total ${LAST_TOTAL}s"
   echo "${INGRESS} stream 10: TTFB ${LAST_TTFB}s total ${LAST_TOTAL}s" >>"$RESULTS"
+
+  # ------------------------------------------------------------------------
+  # 9-registry (ADR-0024): two backends behind one ingress
+  # ------------------------------------------------------------------------
+  step 9-registry "backend registry: billing scope, unknown name, a backend added and drained after the deploy"
+  # Each ingress publishes under its own registryPrefix (two ingresses in one
+  # account collide on the default). The stack says which; the default is the
+  # publisher's.
+  REGISTRY_PREFIX="$(output "$INGRESS" RegistryPrefix)"
+  [[ -n "$REGISTRY_PREFIX" ]] || REGISTRY_PREFIX="${PARAM_PREFIX}/"
+  [[ "$REGISTRY_PREFIX" == */ ]] || REGISTRY_PREFIX="${REGISTRY_PREFIX}/"
+  PUBLISHED_ENDPOINT="$(param "${REGISTRY_PREFIX}endpointUrl")" || fail "parameter ${REGISTRY_PREFIX}endpointUrl not found"
+  BILLING_URL="$(backend_url "$PUBLISHED_ENDPOINT" billing)"
+  BILLING_ENTRY="$(param "${REGISTRY_PREFIX}backends/billing")" || fail "registry entry ${REGISTRY_PREFIX}backends/billing not found"
+  BILLING_RUNTIME_ARN="$(jq -r .runtimeArn <<<"$BILLING_ENTRY")"
+  [[ "$BILLING_RUNTIME_ARN" == arn:*:bedrock-agentcore:*:runtime/* ]] || fail "backends/billing has no Runtime ARN"
+  [[ "$BILLING_RUNTIME_ARN" != "$RUNTIME_ARN" ]] || fail "billing's registry entry names the default backend's Runtime"
+  jq -e --arg s "$BILLING_SCOPE" '.status == "active" and (.requiredScopes | index($s) != null)' <<<"$BILLING_ENTRY" >/dev/null \
+    || fail "backends/billing is not active with requiredScopes containing ${BILLING_SCOPE} (BILLING_SCOPE must match src/demo.cdk.ts)"
+  echo "  registry prefix ${REGISTRY_PREFIX}: billing is active, its own Runtime, requires ${BILLING_SCOPE}"
+
+  # (ii) the floor-scope token reaches the default backend only; the billing scope opens billing
+  status="$(invoke "$ENDPOINT" A1_READ "$(body "$C1" report)")"; expect_status 200 "$status" "floor-scope token on the default backend"
+  status="$(invoke "$BILLING_URL" A1_READ "$(body "$C1" report)")"; expect_status 403 "$status" "floor-scope token on billing"
+  narrow A1_REFRESH "$TENANT_A" "tenant-api/read ${BILLING_SCOPE}" A1_BILLING; status="$NARROW_STATUS"; expect_status 200 "$status" "narrow A1 to the floor plus ${BILLING_SCOPE}"
+  status="$(invoke "$BILLING_URL" A1_BILLING "$(body "$C1" report)")"; expect_status 200 "$status" "billing-scope token on billing"
+  [[ "$(report_field .credentials)" == true ]] || fail "no vended credentials reached the billing backend"
+  BILLING_NONCE="$(report_field .nonce)"
+  status="$(invoke "$ENDPOINT" A1_BILLING "$(body "$C1" report)")"; expect_status 200 "$status" "billing-scope token on the default backend"
+  [[ "$(report_field .nonce)" != "$BILLING_NONCE" ]] || fail "the default backend and billing answered from the same microVM"
+  echo "  the same conversationId on two backends is two units"
+
+  # (iii) an unknown backend name. On api-gateway the authoriser resolves the
+  # name; its Deny surfaces as API Gateway's own 403, and a design that lets
+  # the integration Lambda answer gives 404 instead. Either is a refusal
+  # before the Runtime; which one is recorded, not asserted. The Gateway
+  # refuses a target it does not have by itself, with its own status.
+  status="$(invoke "$(backend_url "$PUBLISHED_ENDPOINT" nosuch)" A1_BILLING "$(body "$C1" report)")"
+  if [[ "$INGRESS" == api-gateway ]]; then
+    expect_status "403|404" "$status" "unknown backend /nosuch"
+  else
+    [[ "$status" != 200 ]] || fail "unknown backend /nosuch: the Gateway served it"
+    echo "  unknown backend /nosuch -> HTTP ${status} (the Gateway's own refusal)"
+  fi
+  echo "${INGRESS} registry: billing 403 floor/200 scoped, unknown backend HTTP ${status}" >>"$RESULTS"
+
+  # (iv) a backend added by a registry write after the ingress deploy, then
+  # drained. api-gateway only: on agentcore-gateway a backend is also a
+  # Gateway target, which the registry alone cannot create. The entry points
+  # `late` at billing's Runtime with no extra scopes, so the floor token must
+  # reach it through the tag-conditioned grant (ADR-0024) once the ingress's
+  # registry cache (registryTtl, 60 s) has turned over. Each poll mints a
+  # fresh token: the API Gateway authoriser caches its result per token (300
+  # s, ADR-0015), so a Deny cached on the first poll, or an Allow cached
+  # before the drain, would otherwise hide the change for longer than the
+  # registry TTL. Agent B decides whether the cache key also carries the
+  # path; a fresh token is correct under either choice.
+  if [[ "$INGRESS" == api-gateway ]]; then
+    LATE_PARAM="${REGISTRY_PREFIX}backends/late"
+    LATE_URL="$(backend_url "$PUBLISHED_ENDPOINT" late)"
+    LATE_PARAMS+=("$LATE_PARAM")
+    aws ssm put-parameter --name "$LATE_PARAM" --type String --overwrite \
+      --value "$(registry_entry "$BILLING_RUNTIME_ARN" '[]' active)" >/dev/null
+    deadline=$((SECONDS + 90)); served=""
+    while [[ $SECONDS -lt $deadline ]]; do
+      narrow A1_REFRESH "$TENANT_A" tenant-api/read A1_LATE; [[ "$NARROW_STATUS" == 200 ]] || fail "narrow A1 for the late probe: HTTP ${NARROW_STATUS}"
+      status="$(invoke "$LATE_URL" A1_LATE "$(body "$C1" report)")"
+      if [[ "$status" == 200 ]]; then served=$((SECONDS - deadline + 90)); break; fi
+      [[ "$status" =~ ^(403|404)$ ]] || fail "late backend probe: HTTP ${status}"
+      sleep 5
+    done
+    [[ -n "$served" ]] || fail "backends/late was not served within 90 s of the registry write"
+    # Same Runtime, same claims, same conversationId: the same microVM as the
+    # billing call above, which shows the entry's runtimeArn picked the Runtime.
+    [[ "$(report_field .nonce)" == "$BILLING_NONCE" ]] || fail "late backend did not answer from billing's Runtime (nonce differs)"
+    echo "  /late served ${served}s after the registry write, on billing's microVM, with no ingress deploy"
+    aws ssm put-parameter --name "$LATE_PARAM" --type String --overwrite \
+      --value "$(registry_entry "$BILLING_RUNTIME_ARN" '[]' draining)" >/dev/null
+    deadline=$((SECONDS + 90)); drained=""
+    while [[ $SECONDS -lt $deadline ]]; do
+      narrow A1_REFRESH "$TENANT_A" tenant-api/read A1_LATE; [[ "$NARROW_STATUS" == 200 ]] || fail "narrow A1 for the drain probe: HTTP ${NARROW_STATUS}"
+      status="$(invoke "$LATE_URL" A1_LATE "$(body "$C1" report)")"
+      if [[ "$status" =~ ^(403|404)$ ]]; then drained=$((SECONDS - deadline + 90)); break; fi
+      [[ "$status" == 200 ]] || fail "draining backend probe: HTTP ${status}"
+      sleep 5
+    done
+    [[ -n "$drained" ]] || fail "backends/late still served 90 s after status draining"
+    echo "  /late refused with HTTP ${status} ${drained}s after status draining"
+    aws ssm delete-parameter --name "$LATE_PARAM" >/dev/null
+    LATE_PARAMS=()
+    echo "${INGRESS} registry: late backend served after ${served}s, drained after ${drained}s (HTTP ${status})" >>"$RESULTS"
+  else
+    echo "  add-and-drain not run on ${INGRESS}: a backend there is also a Gateway target"
+  fi
 done
 
 # --------------------------------------------------------------------------

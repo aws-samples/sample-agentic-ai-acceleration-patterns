@@ -275,6 +275,18 @@ leave the agent, never content (ADR-0017).
 
 Props are validated at synth; an invalid combination fails with the prop name.
 
+**Amended 2026-10-28 (ADR-0024, proposed).** The construct splits in two
+behind `IsolatedRuntime`, which keeps every prop above and becomes the
+one-backend wrapper (default backend `agent`, the bare `/invocations` URL
+kept):
+
+| Construct | Props | Meaning |
+|---|---|---|
+| `SharedIngress` | every `IsolatedRuntime` prop except `agent`, plus `registryPrefix` (default `/application-plane/shared/agent-runtime/`), `registryTtl` (`Duration`, default 60 s), `defaultBackend` (default none) | the ingress alone: API or Gateway, authoriser, TVM, limits, log drain, and the registry prefix it publishes under and reads `backends/<name>` from. `registryPrefix` is one per account and Region; set it when one account runs several ingresses. `defaultBackend` is the backend the bare `/invocations` route resolves to. `SharedIngress.fromParameters(scope, id, prefix)` imports an ingress deployed in another stack through its published parameters (§6.4) |
+| `AgentBackend` | `name` (`[a-z0-9-]{1,32}`), `ingress` (a `SharedIngress` or `fromParameters`), `agent` (`{ codePath, modelId, environment? }`), `requiredScopes?` | one backend: the Runtime tagged `ri:ingress = <ingressId>`, its resource policy naming the ingress role, on `agentcore-gateway` a Gateway target named `name`, and the registry entry `{ runtimeArn, requiredScopes, status }`. `requiredScopes` are required on top of the ingress-wide list, per route. On delete the entry is set to `draining`, held for `registryTtl` plus 120 s, then removed |
+
+The ingress-wide `requiredScopes` stays the floor every token must meet.
+
 ### 3.4 Backend interface
 
 A backend (ADR-0011) defines five things. Everything else in the construct is
@@ -293,11 +305,25 @@ chosen unit id, `prompt`, optional user token, the vended credentials); the
 backend maps it onto these and never sees the bearer token's raw
 `Authorization` value.
 
+**Amended 2026-10-28 (ADR-0024, proposed).** "Who may invoke" splits into
+two halves. The backend's `bindIngress` takes the ingress role ARN (from the
+`SharedIngress` or its published `ingressRoleArn`) and writes only the
+Runtime's resource policy, naming that one role (P-1 per Runtime). The
+identity-side grant is the ingress's own: `InvokeAgentRuntime` on the
+account's Runtime ARN pattern (`runtime/*` and `runtime/*/runtime-endpoint/*`)
+conditioned on `aws:ResourceTag/ri:ingress = <ingressId>`, a tag the backend
+sets in `CfnRuntime.tags` at creation (copied to the `DEFAULT` endpoint,
+checked 2026-10-28). The resource policy remains the hard gate; the condition
+narrows the identity grant to Runtimes registered behind this ingress. A
+later backend supplies its own resource policy and its own tag-or-equivalent
+condition for the pattern grant.
+
 ---
 
 ## 4. Data model
 
-No stored entities. The only derived value is the unit id (P-2):
+No stored entities (amended 2026-10-28: except the backend registry, below).
+The only derived value is the unit id (P-2):
 
 | Field | Source | Shape |
 |---|---|---|
@@ -313,6 +339,25 @@ the deployer activates that cost allocation tag and the CUR caller-identity
 option (both account-level, README). The usage event's token figures are a
 cross-check, read by the ingress and never stored.
 
+**Amended 2026-10-28 (ADR-0024, proposed).** The backend registry is a
+stored entity the construct now has: one SSM `String` parameter per backend
+at `<registryPrefix>backends/<name>`, written by that backend's stack and
+read by the ingress.
+
+| Field | Shape | Meaning |
+|---|---|---|
+| `runtimeArn` | `arn:<partition>:bedrock-agentcore:<region>:<account>:runtime/<id>` | the Runtime the route invokes |
+| `requiredScopes` | string[], may be empty | scopes required on top of the ingress-wide list |
+| `status` | `active` or `draining` | `draining` refuses new requests (404) while running streams finish |
+
+The entry is a JSON string, 4 KB on the standard tier, schema by convention
+and validated at synth by `AgentBackend` and at read time by the ingress
+(`src/shared/registry.ts`). The ingress caches it per process for
+`registryTtl` and serves a stale entry while it refreshes; a name with no
+entry is cached as a miss for the same TTL. Writes are last-write-wins and
+eventually consistent; one writer per name is enforced by IAM, not by the
+store. Tenant state is still not stored.
+
 ---
 
 ## 5. API surface
@@ -321,7 +366,7 @@ One operation, the same contract on both ingresses: `InvokeAgent`.
 
 | | `api-gateway` | `agentcore-gateway` |
 |---|---|---|
-| URL | `POST https://<api>/prod/invocations` | `POST https://<gw>.gateway.bedrock-agentcore.<region>.amazonaws.com/<target>/invocations` |
+| URL | `POST https://<api>/prod/invocations` (`IsolatedRuntime`); `POST https://<api>/prod/<backend>/invocations` (amended 2026-10-28, ADR-0024) | `POST https://<gw>.gateway.bedrock-agentcore.<region>.amazonaws.com/<target>/invocations`, where the target is the backend name |
 | Auth | `Authorization: Bearer <access token>` | same |
 | Body | `{prompt}`; with `session`, `{conversationId, prompt}` | same |
 | Unit | chosen by the integration Lambda | chosen by the interceptor, written to `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id`; a client value is overwritten (V-3) |
@@ -333,16 +378,24 @@ Errors written by the ingress code, with fixed bodies (`src/shared/request.ts`):
 |---|---|---|
 | 400 | `bad request` | malformed `prompt`, malformed `conversationId`, or `conversationId` sent without `session` |
 | 401 | `unauthorized` | missing or invalid token |
-| 403 | `forbidden` | `tenant_id` absent, `tenants` claim present, required scope missing, narrowed-token rule failed, or a `tvm.claimTags` claim missing |
+| 403 | `forbidden` | `tenant_id` absent, `tenants` claim present, required scope missing (ingress-wide, or the backend's `requiredScopes` from the registry, amended 2026-10-28, ADR-0024), narrowed-token rule failed, or a `tvm.claimTags` claim missing |
+| 404 | `not found` | the backend name has no registry entry or its entry is `draining`; refused before the body is read (amended 2026-10-28, ADR-0024) |
 | 429 | `too many requests` | the tenant is over its `tenantLimits`; checked before the TVM and the backend (ADR-0020) |
-| 502 | `upstream error` | the backend invoke failed |
+| 502 | `upstream error` | the backend invoke failed; the registry could not be read or its entry is malformed (amended 2026-10-28, ADR-0024) |
 
 These bodies never echo the token, the unit id or the input. Refusals made by
 the gateway itself use the gateway's own status and body. On `api-gateway`
 the Lambda authoriser's Deny surfaces as 403, so a missing or invalid token
 is 403 there, not 401; API Gateway's request validator (400) and stage
 throttle (429) return API Gateway's JSON body (amended 2026-10-27, ADR-0015,
-ADR-0020).
+ADR-0020). Behind a `SharedIngress` the route is `POST /{backend}/invocations`
+on both ingresses, one API Gateway resource and one Gateway; the backend name
+is `[a-z0-9-]{1,32}`, resolved through the registry before the body is read.
+An unknown or `draining` name refused by the API Gateway authoriser surfaces
+as that 403; `agentcore-gateway` refuses a name it has no target for with the
+Gateway's own status. The 403 for a missing backend scope follows the
+ADR-0005 order: ingress-wide scopes first, then the backend's (amended
+2026-10-28, ADR-0024).
 
 ---
 
@@ -411,6 +464,22 @@ that adds tenant-scoped memory) can consume this one:
   `/application-plane/shared/agent-runtime/`: `endpointUrl` (the ingress
   invocation URL), `runtimeArn`, and `ingress` (`api-gateway` or
   `agentcore-gateway`).
+
+**Amended 2026-10-28 (ADR-0024, proposed).** `SharedIngress` and
+`AgentBackend` join the exported constructs. `SharedIngress` publishes, under
+its `registryPrefix`: `endpointUrl` (the ingress base URL without a route; a
+backend is at `<endpointUrl>/<backend>/invocations`, and `IsolatedRuntime`
+keeps publishing today's full invocation URL), `ingress`, `ingressRoleArn` (the role
+every Runtime behind it trusts), `ingressId` (the `ri:ingress` tag value),
+`tenantRoleArn`, and on `agentcore-gateway` `gatewayIdentifier`. Each
+`AgentBackend` publishes its registry entry at `backends/<name>`.
+`runtimeArn` stays, written by the one-backend demo stack, so today's
+consumer contract does not break. `SharedIngress.fromParameters(scope, id,
+prefix)` imports an ingress from those parameters, so a backend stack in the
+same account and Region needs only the prefix and no CloudFormation
+dependency on the ingress stack; the deploy order (ingress first) is
+documented and scripted. `SharedIngress` exposes `urlFor(name)`, the URL of
+one backend's route.
 
 ---
 
@@ -536,10 +605,24 @@ Limits. On a stack with `requestsPerMinute: 5`, tenant A gets 429
    Contributor Insights rules reported both tenants (ADR-0020, ADR-0021).
 9. Latency probe: 20 invocations per ingress, TTFB and total, p50 and p95.
    Then `scripts/demo.sh` runs against the `api-gateway` stack.
+9-registry. (added 2026-10-28, ADR-0024, proposed) Each all-on stack carries a
+   second backend, `billing`, with its own required scope. A tenant-A token
+   narrowed to the ingress floor is 200 on the default backend and 403 on
+   `/billing/invocations`; a token narrowed to the floor plus the billing
+   scope is 200 on `billing`. `/nosuch/invocations` is refused: on
+   `api-gateway` 403 (the authoriser's Deny) or 404, on `agentcore-gateway`
+   the Gateway's own refusal of an unknown target. On `api-gateway` only, the
+   script writes a registry entry `late` pointing at `billing`'s Runtime
+   with no extra scopes and polls `/late/invocations` until 200 within 90 s
+   (one `registryTtl` plus margin; the tag-conditioned grant reaches a
+   Runtime the ingress deploy never named), sets it to `draining` and polls
+   until refused within 90 s, then deletes the entry (also from the exit
+   trap). The add-and-drain half is not run on `agentcore-gateway`, where a
+   backend is also a Gateway target the registry alone cannot create.
 10. Destroy; delete the Runtime's service-created log groups; assert no
    stacks, parameters or log groups are left (ADR-0019).
 
-Steps 3 to 9 run on both all-on stacks (`api-gateway`, `agentcore-gateway`).
+Steps 3 to 9 and 9-registry run on both all-on stacks (`api-gateway`, `agentcore-gateway`).
 Step 4a, the narrowed-token case of step 8 and the limits step run on their
 own stacks. All four stacks come from `test/integ.runtime.ts` and deploy
 together.

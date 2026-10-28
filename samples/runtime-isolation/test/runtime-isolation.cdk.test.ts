@@ -2,13 +2,27 @@
 // SPDX-License-Identifier: MIT-0
 
 import * as path from 'node:path';
-import { App, Stack, Validations } from 'aws-cdk-lib';
+import { App, CfnOutput, Duration, Stack, Validations } from 'aws-cdk-lib';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { baseModelId, isInferenceProfileId } from '../src/backend/agentcore-runtime.cdk';
 import { RUNTIME_HEADERS } from '../src/backend/agentcore-runtime.transport';
-import { GATEWAY_TARGET_NAME, IsolatedRuntime, IsolatedRuntimeProps, resolveOptions, ROUTE, STAGE_NAME } from '../src/index';
+import {
+  AgentBackend,
+  DEFAULT_REGISTRY_PREFIX,
+  GATEWAY_TARGET_NAME,
+  INGRESS_TAG_KEY,
+  IsolatedRuntime,
+  IsolatedRuntimeProps,
+  PUBLISHED,
+  registryParameterName,
+  resolveOptions,
+  ROUTE,
+  SharedIngress,
+  SharedIngressRef,
+  STAGE_NAME,
+} from '../src/index';
 import { ENV } from '../src/shared/config';
 
 /**
@@ -16,7 +30,9 @@ import { ENV } from '../src/shared/config';
  * specification promises (standard §4.5, §5.1). Assertions cover what the
  * threat model relies on: the one-principal resource policy, the header
  * allowlist per option, the data-free execution role, DESTROY removal
- * policies, the stage's logging settings and the TVM grant.
+ * policies, the stage's logging settings, the TVM grant and, since ADR-0024,
+ * the tag-conditioned invoke grant, the registry read grant and the
+ * registry entry.
  */
 
 const FIXTURE_AGENT = path.join(__dirname, 'fixtures', 'agent');
@@ -91,7 +107,7 @@ describe('resolveOptions', () => {
     ingress: 'api-gateway',
   };
 
-  it('applies secure defaults: every optional module off, TVM always on with the default role, backend agentcore-runtime', () => {
+  it('applies secure defaults: every optional module off, TVM always on with the default role, backend agentcore-runtime, the default registry (ADR-0024)', () => {
     expect(resolveOptions(valid)).toEqual({
       backend: 'agentcore-runtime',
       ingress: 'api-gateway',
@@ -104,7 +120,18 @@ describe('resolveOptions', () => {
       tenantLimits: { requestsPerMinute: 60, outputTokensPerMinute: undefined },
       stageThrottle: { rateLimit: 50, burstLimit: 25 },
       perTenantMetrics: false,
+      registryPrefix: DEFAULT_REGISTRY_PREFIX,
+      registryTtlSeconds: 60,
+      defaultBackend: undefined,
     });
+  });
+
+  it('registryPrefix must start and end with /, registryTtl be whole seconds, defaultBackend a backend name', () => {
+    expect(() => resolveOptions({ ...valid, registryPrefix: 'application-plane/' })).toThrow(/registryPrefix/);
+    expect(() => resolveOptions({ ...valid, registryPrefix: '/application-plane' })).toThrow(/registryPrefix/);
+    expect(() => resolveOptions({ ...valid, registryTtl: Duration.seconds(0) })).toThrow(/registryTtl/);
+    expect(() => resolveOptions({ ...valid, defaultBackend: 'Billing' } as any)).toThrow(/defaultBackend/);
+    expect(resolveOptions({ ...valid, registryPrefix: '/custom/', registryTtl: Duration.seconds(5) })).toMatchObject({ registryPrefix: '/custom/', registryTtlSeconds: 5 });
   });
 
   it('tenantLimits: false and requestsPerMinute 0 without a token limit both turn the limits off', () => {
@@ -126,8 +153,6 @@ describe('resolveOptions', () => {
     ['identity.discoveryUrl shape', { identity: { discoveryUrl: 'https://issuer/', allowedClientIds: ['c'] } }, /identity\.discoveryUrl/],
     ['identity.allowedClientIds empty', { identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: [] } }, /identity\.allowedClientIds/],
     ['identity.allowedClientIds blank', { identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: [''] } }, /identity\.allowedClientIds/],
-    ['agent.codePath', { agent: { codePath: '', modelId: 'm' } }, /agent\.codePath/],
-    ['agent.modelId', { agent: { codePath: FIXTURE_AGENT, modelId: '' } }, /agent\.modelId/],
     ['backend', { backend: 'lambda' as any }, /backend/],
     ['ingress', { ingress: 'alb' as any }, /ingress/],
     ['session.scope', { session: { scope: 'global' as any } }, /session\.scope/],
@@ -163,6 +188,12 @@ describe('resolveOptions', () => {
 
   it('fails when the agent directory lacks app.js', () => {
     expect(() => synth({ ingress: 'api-gateway', agent: { codePath: __dirname, modelId: 'm' } })).toThrow(/agent\.codePath.*app\.js/);
+  });
+
+  it('the backend names agent.codePath, agent.modelId and backendName on a bad value', () => {
+    expect(() => synth({ ingress: 'api-gateway', agent: { codePath: '', modelId: 'm' } })).toThrow(/agent\.codePath/);
+    expect(() => synth({ ingress: 'api-gateway', agent: { codePath: FIXTURE_AGENT, modelId: '' } })).toThrow(/agent\.modelId/);
+    expect(() => synth({ ingress: 'api-gateway', backendName: 'Agent' })).toThrow(/backendName/);
   });
 });
 
@@ -208,16 +239,102 @@ describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
     expect(JSON.stringify(policy)).not.toContain('ExecutionRole');
   });
 
-  it('the ingress role holds the invoke grant and the execution role does not (P-1, P-6)', () => {
+  it('the ingress role may invoke only Runtimes tagged ri:ingress = ingressId, on the runtime/* and endpoint patterns; the execution role has no invoke (P-1, P-6, ADR-0024)', () => {
     const roleId = Stack.of(construct).resolve(construct.ingressRole.roleArn)['Fn::GetAtt'][0] as string;
-    const ingressStatements = statementsForRole(template, roleId);
-    expect(ingressStatements.some((s) => s.Sid === 'InvokeRuntime' && s.Action === 'bedrock-agentcore:InvokeAgentRuntime')).toBe(true);
-    const execStatements = statementsForRole(template, 'IsolatedRuntimeBackendExecutionRole');
+    const grant = statementsForRole(template, roleId).find((s) => s.Sid === 'InvokeTaggedRuntimes');
+    expect(grant.Action).toBe('bedrock-agentcore:InvokeAgentRuntime');
+    const resources = grant.Resource.map((r: unknown) => JSON.stringify(r));
+    expect(resources).toHaveLength(2);
+    expect(resources[0]).toContain(':bedrock-agentcore:');
+    expect(resources[0]).toContain(':runtime/*"');
+    expect(resources[1]).toContain(':runtime/*/runtime-endpoint/*"');
+    expect(grant.Condition).toEqual({ StringEquals: { [`aws:ResourceTag/${INGRESS_TAG_KEY}`]: construct.ingress.ingressId } });
+    // No per-Runtime grant remains (the old InvokeRuntime statement).
+    expect(JSON.stringify(template.toJSON())).not.toContain('"InvokeRuntime"');
+    const execStatements = statementsForRole(template, 'BackendRuntimeExecutionRole');
     expect(JSON.stringify(execStatements)).not.toContain('bedrock-agentcore:');
   });
 
+  it('the Runtime carries the ri:ingress tag at creation, equal to ingressId, which is lower case and at most 48 characters (ADR-0024)', () => {
+    const { ingressId } = construct.ingress;
+    expect(ingressId).toBe(ingressId.toLowerCase());
+    expect(ingressId.length).toBeLessThanOrEqual(48);
+    expect(ingressId.length).toBeGreaterThan(0);
+    template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', { Tags: { [INGRESS_TAG_KEY]: ingressId } });
+  });
+
+  it('the route resolvers may read registry entries under the prefix and nothing else in Parameter Store (ADR-0024)', () => {
+    const readers = ingress === 'api-gateway' ? ['AuthorizerFunctionServiceRole', 'IngressFunctionServiceRole'] : ['InterceptorFunctionServiceRole'];
+    for (const reader of readers) {
+      const statement = statementsForRole(template, reader).find((s) => s.Sid === 'ReadBackendRegistry');
+      expect(statement).toBeDefined();
+      expect(statement.Action).toBe('ssm:GetParameter');
+      const resource = JSON.stringify(statement.Resource);
+      expect(resource).toContain(':ssm:');
+      expect(resource).toContain(`:parameter${DEFAULT_REGISTRY_PREFIX}backends/*"`);
+    }
+    // No ingress role may write the registry: the only Put/Delete grant is the registry-entry writer's.
+    const writers = (Object.values(template.findResources('AWS::IAM::Policy')) as any[]).filter((p) =>
+      JSON.stringify(p.Properties.PolicyDocument).includes('ssm:PutParameter'),
+    );
+    expect(writers).toHaveLength(1);
+    expect(JSON.stringify(writers[0].Properties.Roles)).toContain('RegistryEntryFunctionServiceRole');
+  });
+
+  it('writes one registry entry for the default backend through a custom resource that drains before removal (ADR-0024)', () => {
+    const entries = Object.values(template.findResources('Custom::RuntimeIsolationRegistryEntry')) as any[];
+    expect(entries).toHaveLength(1);
+    const [entry] = entries;
+    expect(entry.Properties.ParameterName).toBe(registryParameterName(DEFAULT_REGISTRY_PREFIX, GATEWAY_TARGET_NAME));
+    expect(entry.Properties.RuntimeArn).toEqual({ 'Fn::GetAtt': [runtimeLogicalId(template), 'AgentRuntimeArn'] });
+    expect(entry.Properties.RequiredScopes).toEqual([]);
+    expect(entry.Properties.DrainSeconds).toBe(180);
+    // Written after the Runtime and its resource policy (and the target).
+    const deps: string[] = entry.DependsOn ?? [];
+    expect(deps).toContain(runtimeLogicalId(template));
+    expect(deps.some((d) => d.includes('ResourcePolicy'))).toBe(true);
+    if (ingress === 'agentcore-gateway') {
+      expect(deps.some((d) => d.includes('GatewayTarget'))).toBe(true);
+    }
+    expect(construct.backend.registryParameterName).toBe(`${DEFAULT_REGISTRY_PREFIX}backends/agent`);
+    // Its role may put, get and delete exactly that parameter.
+    const own = statementsForRole(template, 'RegistryEntryFunctionServiceRole').find((s) => s.Sid === 'OwnRegistryEntry');
+    expect(own.Action).toEqual(['ssm:PutParameter', 'ssm:GetParameter', 'ssm:DeleteParameter']);
+    expect(JSON.stringify(own.Resource)).toContain(`:parameter${DEFAULT_REGISTRY_PREFIX}backends/agent"`);
+    // The drain waits the whole delete.
+    const fns = Object.values(template.findResources('AWS::Lambda::Function')) as any[];
+    const writer = fns.find((f) => String(f.Properties.Description).includes('registry entry'));
+    expect(writer.Properties.Timeout).toBe(210);
+  });
+
+  it('publishes endpointUrl, baseUrl, ingressRoleArn, ingressId, ingress and tenantRoleArn under the prefix (ADR-0024)', () => {
+    const params = Object.values(template.findResources('AWS::SSM::Parameter')) as any[];
+    const names = params.map((p) => p.Properties.Name as string).sort();
+    const expected: string[] = [
+      PUBLISHED.endpointUrl,
+      PUBLISHED.baseUrl,
+      PUBLISHED.ingressRoleArn,
+      PUBLISHED.ingressId,
+      PUBLISHED.ingress,
+      PUBLISHED.tenantRoleArn,
+    ];
+    const expectedNames = expected
+      .concat(ingress === 'agentcore-gateway' ? [PUBLISHED.gatewayIdentifier] : [])
+      .map((n) => `${DEFAULT_REGISTRY_PREFIX}${n}`)
+      .sort();
+    expect(names).toEqual(expectedNames);
+    const byName = (n: string) => params.find((p) => p.Properties.Name === `${DEFAULT_REGISTRY_PREFIX}${n}`).Properties.Value;
+    expect(byName(PUBLISHED.ingress)).toBe(ingress);
+    // endpointUrl keeps the spec §6.4 meaning (the default backend's invocation URL, what the scripts POST to); baseUrl is the base.
+    expect(byName(PUBLISHED.endpointUrl)).toEqual(Stack.of(construct).resolve(construct.endpointUrl));
+    expect(byName(PUBLISHED.baseUrl)).toEqual(Stack.of(construct).resolve(construct.ingress.endpointUrl));
+    expect(byName(PUBLISHED.ingressId)).toBe(construct.ingress.ingressId);
+    expect(byName(PUBLISHED.ingressRoleArn)).toEqual(Stack.of(construct).resolve(construct.ingressRole.roleArn));
+    expect(byName(PUBLISHED.tenantRoleArn)).toEqual(Stack.of(construct).resolve(construct.tenantRole.roleArn));
+  });
+
   it('the execution role holds its code object, its log prefix and traces, and NO model and no data permission (P-6, ADR-0008 amended by ADR-0018)', () => {
-    const statements = statementsForRole(template, 'IsolatedRuntimeBackendExecutionRole');
+    const statements = statementsForRole(template, 'BackendRuntimeExecutionRole');
     const actions = statements.flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action])) as string[];
     expect(actions).toEqual(
       expect.arrayContaining(['s3:GetObject', 'logs:PutLogEvents', 'xray:PutTraceSegments', 'cloudwatch:PutMetricData']),
@@ -242,7 +359,7 @@ describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
 
   it('the default TenantModelRole carries the one-model statement and nothing else, trusted by tvmCallerRole only (ADR-0018)', () => {
     const callerId = Stack.of(construct).resolve(construct.tvmCallerRole.roleArn)['Fn::GetAtt'][0] as string;
-    const statements = statementsForRole(template, 'IsolatedRuntimeTenantModelRole');
+    const statements = statementsForRole(template, 'TenantModelRole');
     const model = statements.find((s) => s.Sid === 'OneModel');
     expect(model).toBeDefined();
     expect(model.Action).toEqual(['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream']);
@@ -299,23 +416,37 @@ describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
     for (const absent of [ENV.SESSION_SCOPE, ENV.REQUIRED_SCOPES, ENV.ALLOWED_SCOPES]) {
       expect(env).not.toHaveProperty(absent);
     }
+    // The registry (ADR-0024) replaces the Runtime ARN: no Lambda knows a backend.
+    expect(env[ENV.REGISTRY_PREFIX]).toBe(DEFAULT_REGISTRY_PREFIX);
+    expect(env[ENV.REGISTRY_TTL_SECONDS]).toBe('60');
+    expect(env[ENV.DEFAULT_BACKEND]).toBe(GATEWAY_TARGET_NAME);
+    expect(env).not.toHaveProperty('RI_RUNTIME_ARN');
+    for (const fn of Object.values(template.findResources('AWS::Lambda::Function')) as any[]) {
+      expect(JSON.stringify(fn.Properties.Environment ?? {})).not.toContain('AgentRuntimeArn');
+    }
   });
 
-  it('Lambdas use Node 24 on arm64 with JSON logs, tracing and explicit log groups', () => {
-    // The log-drain waiter is excluded: it is traced by nothing and writes nothing (ADR-0019).
-    const fns = (Object.values(template.findResources('AWS::Lambda::Function')) as any[]).filter(
-      (f) => !String(f.Properties.Description ?? '').startsWith('Waits on stack delete'),
-    );
+  it('Lambdas use Node 24 on arm64 with JSON logs and explicit log groups; the request-path ones trace', () => {
+    const fns = Object.values(template.findResources('AWS::Lambda::Function')) as any[];
     expect(fns.length).toBeGreaterThan(0);
     for (const fn of fns) {
       expect(fn.Properties.Runtime).toBe('nodejs24.x');
       expect(fn.Properties.Architectures).toEqual(['arm64']);
       expect(fn.Properties.LoggingConfig).toMatchObject({ LogFormat: 'JSON', LogGroup: { Ref: expect.any(String) } });
-      expect(fn.Properties.TracingConfig).toEqual({ Mode: 'Active' });
+    }
+    // The log-drain waiter and the registry-entry writer run on stack operations, not requests: no tracing, and quiet logs (ADR-0019).
+    const quiet = fns.filter((f) => /Waits on stack delete|registry entry/.test(String(f.Properties.Description ?? '')));
+    expect(quiet).toHaveLength(2);
+    for (const fn of fns) {
+      if (quiet.includes(fn)) {
+        expect(fn.Properties.LoggingConfig.SystemLogLevel).toBe('WARN');
+      } else {
+        expect(fn.Properties.TracingConfig).toEqual({ Mode: 'Active' });
+      }
     }
   });
 
-  it('exposes the read-only properties (spec §6.4)', () => {
+  it('exposes the read-only properties (spec §6.4), and the ingress and backend it wraps (ADR-0024)', () => {
     expect(construct.endpointUrl).toBeDefined();
     expect(construct.runtimeArn).toBeDefined();
     expect(construct.ingressRole).toBeDefined();
@@ -323,6 +454,14 @@ describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
     expect(construct.tvmCallerRole).toBeDefined();
     expect(construct.tenantRole).toBeDefined();
     expect(construct.options.ingress).toBe(ingress);
+    expect(construct.ingress).toBeInstanceOf(SharedIngress);
+    expect(construct.backend).toBeInstanceOf(AgentBackend);
+    expect(construct.ingressRole).toBe(construct.ingress.ingressRole);
+    expect(construct.tenantRole).toBe(construct.ingress.tenantRole);
+    expect(construct.runtimeArn).toBe(construct.backend.runtimeArn);
+    expect(construct.options).toBe(construct.ingress.options);
+    expect(construct.options.defaultBackend).toBe(GATEWAY_TARGET_NAME);
+    expect(construct.backend.endpointUrl).toBe(construct.ingress.urlFor(GATEWAY_TARGET_NAME));
   });
 
   it('passes cdk-nag AwsSolutionsChecks with the construct\'s own acknowledgments (standard §4.5)', () => {
@@ -352,21 +491,43 @@ describe('api-gateway ingress', () => {
     expect(stage.Properties.AccessLogSetting.Format).not.toContain('$input');
   });
 
-  it('the one route is POST /invocations behind the custom Lambda authoriser with request validation', () => {
-    template.resourceCountIs('AWS::ApiGateway::Method', 1);
-    template.hasResourceProperties('AWS::ApiGateway::Resource', { PathPart: ROUTE });
-    template.hasResourceProperties('AWS::ApiGateway::Method', {
-      HttpMethod: 'POST',
-      AuthorizationType: 'CUSTOM',
-      AuthorizerId: Match.anyValue(),
-      RequestValidatorId: Match.anyValue(),
-    });
+  it('the routes are POST /{backend}/invocations and, for the default backend, POST /invocations, both behind the custom Lambda authoriser with request validation (ADR-0024)', () => {
+    template.resourceCountIs('AWS::ApiGateway::Method', 2);
+    template.resourceCountIs('AWS::ApiGateway::RequestValidator', 1);
+    const resources = Object.values(template.findResources('AWS::ApiGateway::Resource')) as any[];
+    expect(resources.map((r) => r.Properties.PathPart).sort()).toEqual(['{backend}', ROUTE, ROUTE].sort());
+    const backendResource = resources.find((r) => r.Properties.PathPart === '{backend}');
+    expect(backendResource.Properties.ParentId['Fn::GetAtt'][1]).toBe('RootResourceId');
+    const methods = Object.values(template.findResources('AWS::ApiGateway::Method')) as any[];
+    for (const method of methods) {
+      expect(method.Properties).toMatchObject({ HttpMethod: 'POST', AuthorizationType: 'CUSTOM' });
+      expect(method.Properties.AuthorizerId).toBeDefined();
+      expect(method.Properties.RequestValidatorId).toBeDefined();
+      expect(method.Properties.RequestModels['application/json']).toEqual({ Ref: expect.stringContaining('InvokeModel') });
+    }
+    const parameterised = methods.find((m) => m.Properties.RequestParameters !== undefined);
+    expect(parameterised.Properties.RequestParameters).toEqual({ 'method.request.path.backend': true });
+    template.hasResourceProperties('AWS::ApiGateway::RequestValidator', { ValidateRequestBody: true, ValidateRequestParameters: true });
+  });
+
+  it('the authoriser result is cached per Authorization header AND request path, so a result for one backend is never reused for another (ADR-0024)', () => {
     template.hasResourceProperties('AWS::ApiGateway::Authorizer', {
       Type: 'REQUEST',
-      IdentitySource: 'method.request.header.Authorization',
+      IdentitySource: 'method.request.header.Authorization,context.path',
       AuthorizerResultTtlInSeconds: 300,
     });
-    template.hasResourceProperties('AWS::ApiGateway::RequestValidator', { ValidateRequestBody: true });
+  });
+
+  it('a SharedIngress without defaultBackend has only the /{backend}/invocations route', () => {
+    const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+    const stack = new Stack(app, 'Test', { env: { account: '111122223333', region: 'eu-central-1' } });
+    new SharedIngress(stack, 'Ingress', { identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: ['c'] }, ingress: 'api-gateway' });
+    const t = Template.fromStack(stack);
+    t.resourceCountIs('AWS::ApiGateway::Method', 1);
+    expect((Object.values(t.findResources('AWS::ApiGateway::Resource')) as any[]).map((r) => r.Properties.PathPart).sort()).toEqual(['{backend}', ROUTE].sort());
+    expect(lambdaEnv(t, 'chooses the unit')).not.toHaveProperty(ENV.DEFAULT_BACKEND);
+    t.resourceCountIs('AWS::BedrockAgentCore::Runtime', 0);
+    t.resourceCountIs('Custom::RuntimeIsolationRegistryEntry', 0);
   });
 
   it('the integration streams with a two-minute timeout (spike V-5) and the Lambda outlives it', () => {
@@ -384,10 +545,16 @@ describe('api-gateway ingress', () => {
     });
   });
 
-  it('endpointUrl is the stage URL plus the route; ingressRole and tvmCallerRole are the integration Lambda role', () => {
-    const url = Stack.of(construct).resolve(construct.endpointUrl);
-    expect(JSON.stringify(url)).toContain(`/${ROUTE}"`);
-    expect(JSON.stringify(url)).toContain(`Stage${STAGE_NAME}`);
+  it('endpointUrl is the stage URL plus the bare route; urlFor adds the backend; ingressRole and tvmCallerRole are the integration Lambda role', () => {
+    const url = JSON.stringify(Stack.of(construct).resolve(construct.endpointUrl));
+    expect(url).toContain(`/${ROUTE}"`);
+    expect(url).not.toContain(`/${GATEWAY_TARGET_NAME}/${ROUTE}`);
+    expect(url).toContain(`Stage${STAGE_NAME}`);
+    const base = JSON.stringify(Stack.of(construct).resolve(construct.ingress.endpointUrl));
+    expect(base).not.toContain(ROUTE);
+    expect(base).toContain('.execute-api.');
+    expect(JSON.stringify(Stack.of(construct).resolve(construct.ingress.urlFor('billing')))).toContain(`/billing/${ROUTE}"`);
+    expect(() => construct.ingress.urlFor('Billing')).toThrow(/backend/);
     expect(construct.ingressRole).toBe(construct.tvmCallerRole);
     expect(JSON.stringify(Stack.of(construct).resolve(construct.ingressRole.roleArn))).toContain('IngressFunctionServiceRole');
   });
@@ -433,10 +600,13 @@ describe('agentcore-gateway ingress', () => {
     });
   });
 
-  it('the Runtime target is declared through the raw override with the exact CloudFormation keys (ADR-0010, spike V-2)', () => {
+  it('the Runtime target is created by AgentBackend, named after the backend, through the raw override with the exact CloudFormation keys (ADR-0010, ADR-0024, spike V-2)', () => {
     template.resourceCountIs('AWS::BedrockAgentCore::GatewayTarget', 1);
-    const target = Object.values(template.findResources('AWS::BedrockAgentCore::GatewayTarget'))[0] as any;
+    const [id, target] = Object.entries(template.findResources('AWS::BedrockAgentCore::GatewayTarget'))[0] as [string, any];
+    expect(id).toContain('Backend');
     expect(target.Properties.Name).toBe(GATEWAY_TARGET_NAME);
+    expect(target.Properties.GatewayIdentifier).toEqual({ 'Fn::GetAtt': [Object.keys(template.findResources('AWS::BedrockAgentCore::Gateway'))[0], 'GatewayIdentifier'] });
+    expect(construct.ingress.gatewayIdentifier).toBeDefined();
     expect(target.Properties.TargetConfiguration).toEqual({
       Http: {
         AgentcoreRuntime: {
@@ -473,10 +643,19 @@ describe('agentcore-gateway ingress', () => {
     expect(JSON.stringify(Stack.of(construct).resolve(construct.tvmCallerRole.roleArn))).toContain('InterceptorFunctionServiceRole');
   });
 
-  it('endpointUrl is the Gateway URL plus /<target>/invocations', () => {
+  it('endpointUrl is the Gateway URL plus /<target>/invocations; the ingress base URL is the Gateway URL', () => {
     const url = Stack.of(construct).resolve(construct.endpointUrl);
     expect(JSON.stringify(url)).toContain(`/${GATEWAY_TARGET_NAME}/${ROUTE}`);
     expect(JSON.stringify(url)).toContain('GatewayUrl');
+    expect(construct.endpointUrl).toBe(construct.ingress.urlFor(GATEWAY_TARGET_NAME));
+    expect(JSON.stringify(Stack.of(construct).resolve(construct.ingress.endpointUrl))).not.toContain(ROUTE);
+  });
+
+  it('publishes the Gateway identifier so a backend stack can add its target (ADR-0024)', () => {
+    template.hasResourceProperties('AWS::SSM::Parameter', {
+      Name: `${DEFAULT_REGISTRY_PREFIX}${PUBLISHED.gatewayIdentifier}`,
+      Value: { 'Fn::GetAtt': [Object.keys(template.findResources('AWS::BedrockAgentCore::Gateway'))[0], 'GatewayIdentifier'] },
+    });
   });
 
   it('creates no API Gateway resources', () => {
@@ -535,8 +714,8 @@ describe.each(INGRESSES)('options, ingress=%s', (ingress) => {
     const all = JSON.stringify(template.toJSON());
     expect(all.split('AssumeTenantRole').length - 1).toBe(1);
     // The execution role still has nothing tenant-scoped, and no model.
-    expect(JSON.stringify(statementsForRole(template, 'IsolatedRuntimeBackendExecutionRole'))).not.toContain('sts:');
-    expect(JSON.stringify(statementsForRole(template, 'IsolatedRuntimeBackendExecutionRole'))).not.toContain('bedrock:Invoke');
+    expect(JSON.stringify(statementsForRole(template, 'BackendRuntimeExecutionRole'))).not.toContain('sts:');
+    expect(JSON.stringify(statementsForRole(template, 'BackendRuntimeExecutionRole'))).not.toContain('bedrock:Invoke');
     // The construct adds the one-model statement to the DEPLOYER's role (ADR-0018), and creates no default role.
     const deployerId = Stack.of(construct).resolve(tenantRole.roleArn)['Fn::GetAtt'][0] as string;
     const model = statementsForRole(template, deployerId).find((s) => s.Sid === 'OneModel');
@@ -590,7 +769,7 @@ describe.each(INGRESSES)('options, ingress=%s', (ingress) => {
 });
 
 describe('the tenant role model grant (ADR-0018, was the execution role under ADR-0008)', () => {
-  const oneModel = (t: Template) => statementsForRole(t, 'IsolatedRuntimeTenantModelRole').find((s) => s.Sid === 'OneModel');
+  const oneModel = (t: Template) => statementsForRole(t, 'TenantModelRole').find((s) => s.Sid === 'OneModel');
   const resolved = (s: unknown) => JSON.stringify(s);
 
   it('a plain model id: both invoke actions on the foundation-model ARN in this Region, and nothing else; the execution role has no model', () => {
@@ -604,7 +783,7 @@ describe('the tenant role model grant (ADR-0018, was the execution role under AD
     expect(resolved(resources[0])).not.toContain('inference-profile');
     expect(resolved(resources[0])).not.toContain('*');
     // The execution role touches no Bedrock at all (ADR-0008 amended).
-    const exec = statementsForRole(template, 'IsolatedRuntimeBackendExecutionRole');
+    const exec = statementsForRole(template, 'BackendRuntimeExecutionRole');
     expect(resolved(exec)).not.toContain('bedrock:Invoke');
     expect(exec.find((s: any) => s.Sid === 'OneModel')).toBeUndefined();
   });
@@ -724,5 +903,156 @@ describe('per-tenant limits and stage throttle, api-gateway only', () => {
 
   it('stageThrottle with agentcore-gateway throws naming stageThrottle', () => {
     expect(() => synth({ ingress: 'agentcore-gateway', stageThrottle: { rateLimit: 10, burstLimit: 5 } })).toThrow(/stageThrottle/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Several backends behind one ingress (ADR-0024)
+// ---------------------------------------------------------------------------
+describe.each(INGRESSES)('SharedIngress with several AgentBackends, ingress=%s (ADR-0024)', (ingress) => {
+  const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+  Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true }));
+  const stack = new Stack(app, 'Test', { env: { account: '111122223333', region: 'eu-central-1' } });
+  const shared = new SharedIngress(stack, 'Ingress', {
+    identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: ['client-one'] },
+    ingress,
+    requiredScopes: ['tenant-api/read'],
+    registryPrefix: '/acme/agents/',
+    registryTtl: Duration.seconds(30),
+  });
+  const support = new AgentBackend(stack, 'Support', { name: 'support', ingress: shared, agent: { codePath: FIXTURE_AGENT, modelId: 'eu.amazon.nova-lite-v1:0' } });
+  const billing = new AgentBackend(stack, 'Billing', {
+    name: 'billing',
+    ingress: shared,
+    agent: { codePath: FIXTURE_AGENT, modelId: 'eu.amazon.nova-lite-v1:0' },
+    requiredScopes: ['tenant-api/write'],
+  });
+  const template = Template.fromStack(stack);
+
+  it('creates two Runtimes, each tagged for the ingress, with a resource policy naming the one ingress role, and (Gateway) a target per backend', () => {
+    template.resourceCountIs('AWS::BedrockAgentCore::Runtime', 2);
+    template.resourceCountIs('AWS::BedrockAgentCore::ResourcePolicy', 2);
+    template.resourceCountIs('AWS::BedrockAgentCore::GatewayTarget', ingress === 'agentcore-gateway' ? 2 : 0);
+    for (const runtime of Object.values(template.findResources('AWS::BedrockAgentCore::Runtime')) as any[]) {
+      expect(runtime.Properties.Tags).toEqual({ [INGRESS_TAG_KEY]: shared.ingressId });
+    }
+    const ingressRef = JSON.stringify(stack.resolve(shared.ingressRole.roleArn));
+    for (const policy of Object.values(template.findResources('AWS::BedrockAgentCore::ResourcePolicy')) as any[]) {
+      expect(JSON.stringify(policy.Properties.Policy)).toContain(ingressRef.slice(1, -1));
+    }
+    if (ingress === 'agentcore-gateway') {
+      const names = (Object.values(template.findResources('AWS::BedrockAgentCore::GatewayTarget')) as any[]).map((t) => t.Properties.Name).sort();
+      expect(names).toEqual(['billing', 'support']);
+    }
+  });
+
+  it('writes one registry entry per backend under the custom prefix, with the backend\'s scopes and a drain of TTL + 120 s', () => {
+    const entries = Object.values(template.findResources('Custom::RuntimeIsolationRegistryEntry')) as any[];
+    expect(entries.map((e) => e.Properties.ParameterName).sort()).toEqual(['/acme/agents/backends/billing', '/acme/agents/backends/support']);
+    const billingEntry = entries.find((e) => e.Properties.ParameterName.endsWith('/billing'));
+    expect(billingEntry.Properties.RequiredScopes).toEqual(['tenant-api/write']);
+    expect(billingEntry.Properties.DrainSeconds).toBe(150);
+    expect(support.registryParameterName).toBe(registryParameterName('/acme/agents/', 'support'));
+    expect(billing.endpointUrl).toBe(shared.urlFor('billing'));
+    expect(lambdaEnv(template, ingress === 'api-gateway' ? 'chooses the unit' : 'interceptor')).toMatchObject({
+      [ENV.REGISTRY_PREFIX]: '/acme/agents/',
+      [ENV.REGISTRY_TTL_SECONDS]: '30',
+      [ENV.REQUIRED_SCOPES]: 'tenant-api/read',
+    });
+    // The read grant follows the prefix.
+    expect(JSON.stringify(template.toJSON())).toContain(':parameter/acme/agents/backends/*"');
+  });
+
+  it('grantModel is idempotent per model id: two backends on one model add one statement to the tenant role; a second model adds a second', () => {
+    const statements = statementsForRole(template, 'TenantModelRole').filter((s) => String(s.Sid).startsWith('OneModel'));
+    expect(statements).toHaveLength(1);
+    expect(statements[0].Sid).toBe('OneModel');
+    const other = new Stack(new App({ context: { 'aws:cdk:bundling-stacks': [] } }), 'Other', { env: { account: '111122223333', region: 'eu-central-1' } });
+    const two = new SharedIngress(other, 'Ingress', { identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: ['c'] }, ingress });
+    two.grantModel('amazon.nova-lite-v1:0');
+    two.grantModel('amazon.nova-micro-v1:0');
+    two.grantModel('amazon.nova-micro-v1:0');
+    const after = statementsForRole(Template.fromStack(other), 'TenantModelRole').filter((s) => String(s.Sid).startsWith('OneModel'));
+    expect(after.map((s) => s.Sid).sort()).toEqual(['OneModel', 'OneModel2']);
+    expect(JSON.stringify(after.find((s) => s.Sid === 'OneModel2').Resource)).toContain('amazon.nova-micro-v1:0');
+  });
+
+  it('refuses a bad backend name, a duplicate scope shape and a Gateway ref without an identifier, naming the prop', () => {
+    const other = new Stack(new App({ context: { 'aws:cdk:bundling-stacks': [] } }), 'Other');
+    const sharedOther = new SharedIngress(other, 'Ingress', { identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: ['c'] }, ingress: 'api-gateway' });
+    expect(() => new AgentBackend(other, 'Bad', { name: 'Billing', ingress: sharedOther, agent: { codePath: FIXTURE_AGENT, modelId: 'm' } })).toThrow(/AgentBackend: name/);
+    expect(() => new AgentBackend(other, 'Bad2', { name: 'ok', ingress: sharedOther, agent: { codePath: FIXTURE_AGENT, modelId: 'm' }, requiredScopes: ['a b'] })).toThrow(/requiredScopes/);
+    const ref: SharedIngressRef = { registryPrefix: '/p/', ingressRoleArn: 'arn:aws:iam::111122223333:role/x', ingressId: 'x', ingress: 'agentcore-gateway', tenantRoleArn: 'arn:aws:iam::111122223333:role/t' };
+    expect(() => new AgentBackend(other, 'Bad3', { name: 'ok', ingress: ref, agent: { codePath: FIXTURE_AGENT, modelId: 'm' } })).toThrow(/gatewayIdentifier/);
+  });
+
+  it('passes cdk-nag with every new finding acknowledged', () => {
+    expect(() => template.toJSON()).not.toThrow();
+  });
+});
+
+describe.each(INGRESSES)('AgentBackend in its own stack from SharedIngress.fromParameters, ingress=%s (ADR-0024)', (ingress) => {
+  const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+  Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true }));
+  const stack = new Stack(app, 'BackendStack', { env: { account: '111122223333', region: 'eu-central-1' } });
+  const ref = SharedIngress.fromParameters(stack, 'Ingress', DEFAULT_REGISTRY_PREFIX, ingress, { forwardUserToken: true });
+  const backend = new AgentBackend(stack, 'Billing', {
+    name: 'billing',
+    ingress: ref,
+    agent: { codePath: FIXTURE_AGENT, modelId: 'amazon.nova-lite-v1:0' },
+    requiredScopes: ['tenant-api/write'],
+  });
+  // What a backend stack does with the URL (and what keeps the endpointUrl parameter referenced).
+  new CfnOutput(stack, 'BillingEndpointUrl', { value: backend.endpointUrl! });
+  const template = Template.fromStack(stack);
+
+  it('reads the published parameters: baseUrl, ingressRoleArn, ingressId, tenantRoleArn and, on the Gateway, gatewayIdentifier', () => {
+    const params = Object.values(template.toJSON().Parameters as Record<string, any>).filter(
+      (p) => p.Type === 'AWS::SSM::Parameter::Value<String>' && String(p.Default).startsWith(DEFAULT_REGISTRY_PREFIX),
+    );
+    const expected: string[] = [PUBLISHED.baseUrl, PUBLISHED.ingressRoleArn, PUBLISHED.ingressId, PUBLISHED.tenantRoleArn];
+    const expectedNames = expected
+      .concat(ingress === 'agentcore-gateway' ? [PUBLISHED.gatewayIdentifier] : [])
+      .map((n) => `${DEFAULT_REGISTRY_PREFIX}${n}`)
+      .sort();
+    expect(params.map((p) => p.Default).sort()).toEqual(expectedNames);
+    expect(ref.ingress).toBe(ingress);
+  });
+
+  it('creates the Runtime tagged with the read ingressId, the resource policy on the read role ARN, the target on the read Gateway, and the entry under the prefix', () => {
+    template.resourceCountIs('AWS::BedrockAgentCore::Runtime', 1);
+    template.resourceCountIs('AWS::BedrockAgentCore::ResourcePolicy', 1);
+    template.resourceCountIs('AWS::BedrockAgentCore::GatewayTarget', ingress === 'agentcore-gateway' ? 1 : 0);
+    const runtime = Object.values(template.findResources('AWS::BedrockAgentCore::Runtime'))[0] as any;
+    expect(runtime.Properties.Tags).toEqual({ [INGRESS_TAG_KEY]: stack.resolve(ref.ingressId) });
+    // forwardUserToken from the ref decides the header allowlist.
+    expect(runtime.Properties.RequestHeaderConfiguration.RequestHeaderAllowlist).toEqual([
+      RUNTIME_HEADERS.USER_TOKEN,
+      RUNTIME_HEADERS.TENANT_CREDENTIALS,
+    ]);
+    expect(JSON.stringify(resourcePolicy(template))).toContain(JSON.stringify(JSON.stringify(stack.resolve(ref.ingressRoleArn))).slice(1, -1));
+    template.hasResourceProperties('Custom::RuntimeIsolationRegistryEntry', {
+      ParameterName: `${DEFAULT_REGISTRY_PREFIX}backends/billing`,
+      RequiredScopes: ['tenant-api/write'],
+      DrainSeconds: 180,
+    });
+    expect(backend.registryParameterName).toBe(`${DEFAULT_REGISTRY_PREFIX}backends/billing`);
+    expect(JSON.stringify(stack.resolve(backend.endpointUrl))).toContain(`/billing/${ROUTE}`);
+  });
+
+  it('adds the one-model statement to the imported tenant role through a policy of this stack (ADR-0018)', () => {
+    const policies = Object.values(template.findResources('AWS::IAM::Policy')) as any[];
+    const model = policies.find((p) => JSON.stringify(p.Properties.PolicyDocument).includes('"OneModel"'));
+    expect(model).toBeDefined();
+    const statement = model.Properties.PolicyDocument.Statement.find((s: any) => s.Sid === 'OneModel');
+    expect(statement.Action).toEqual(['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream']);
+    expect(JSON.stringify(statement.Resource)).toContain('foundation-model/amazon.nova-lite-v1:0');
+    // Attached by the role NAME parsed from the ARN parameter, not to a role of this stack.
+    expect(JSON.stringify(model.Properties.Roles)).toContain('Fn::Select');
+    expect(JSON.stringify(template.toJSON())).not.toContain('TenantModelRole');
+  });
+
+  it('passes cdk-nag', () => {
+    expect(() => template.toJSON()).not.toThrow();
   });
 });

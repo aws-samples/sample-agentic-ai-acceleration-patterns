@@ -89,6 +89,19 @@ describe('emfRecord', () => {
     expect(record.IngressDurationMs).toBe(12);
   });
 
+  it('with a backend (ADR-0024) the record adds a [TenantId, Ingress, Backend] dimension set and keeps the two-dimension one first', () => {
+    const record = emfRecord({ tenantId: 'tenant-a', ingress: 'api-gateway', status: 200, backend: 'billing' }) as any;
+    expect(record._aws.CloudWatchMetrics[0].Dimensions).toEqual([
+      ['TenantId', 'Ingress'],
+      ['TenantId', 'Ingress', 'Backend'],
+    ]);
+    expect(record.Backend).toBe('billing');
+    // Without a backend nothing changes: no Backend field, one dimension set.
+    const plain = emfRecord({ tenantId: 'tenant-a', ingress: 'api-gateway', status: 200 }) as any;
+    expect(plain._aws.CloudWatchMetrics[0].Dimensions).toEqual([['TenantId', 'Ingress']]);
+    expect(plain).not.toHaveProperty('Backend');
+  });
+
   it('emitRequestMetrics writes one newline-terminated JSON line to the sink', () => {
     const lines: string[] = [];
     emitRequestMetrics({ tenantId: 't', ingress: 'api-gateway', status: 200 }, (l) => lines.push(l));

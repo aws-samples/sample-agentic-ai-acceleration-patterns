@@ -9,6 +9,8 @@
 
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT, type JWTPayload, type JWTVerifyGetKey, type KeyLike } from 'jose';
 import type { IngressConfig } from '../src/shared/config';
+import { type RegistryEntry, RegistryError } from '../src/shared/registry';
+import type { RegistryResolver } from '../src/shared/request';
 import type { Discovery } from '../src/shared/verifier';
 
 export const ISSUER = 'https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TESTPOOL00';
@@ -58,6 +60,11 @@ export async function testIssuer(): Promise<TestIssuer> {
   };
 }
 
+/** The registry prefix and the one backend the fixtures resolve (ADR-0024). */
+export const REGISTRY_PREFIX = '/application-plane/shared/agent-runtime/';
+export const DEFAULT_BACKEND = 'agent';
+export const RUNTIME_ARN = 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_test-abc123';
+
 /** An ingress configuration with every module off; tests override what they need. */
 export const baseConfig = (overrides: Partial<IngressConfig> = {}): IngressConfig => ({
   ingress: 'api-gateway',
@@ -65,5 +72,34 @@ export const baseConfig = (overrides: Partial<IngressConfig> = {}): IngressConfi
   allowedClientIds: [CLIENT_ID],
   delegation: { forwardUserToken: false, requireNarrowedToken: false },
   perTenantMetrics: false,
+  registry: { prefix: REGISTRY_PREFIX, ttlSeconds: 60, defaultBackend: DEFAULT_BACKEND },
   ...overrides,
 });
+
+/**
+ * A registry stub with no SSM behind it: `agent` resolves to RUNTIME_ARN with
+ * no scopes, plus whatever entries a test adds; any other name is
+ * `unknown_backend`. `warmed` records the names `warm()` was asked for.
+ */
+export const stubRegistry = (entries: Record<string, RegistryEntry> = {}) => {
+  const table: Record<string, RegistryEntry> = { [DEFAULT_BACKEND]: { runtimeArn: RUNTIME_ARN, requiredScopes: [], status: 'active' }, ...entries };
+  const warmed: string[] = [];
+  const registry: RegistryResolver = {
+    resolve: async (backend: string) => {
+      const entry = table[backend];
+      if (entry === undefined) {
+        throw new RegistryError('unknown_backend');
+      }
+      if (entry.status === 'draining') {
+        throw new RegistryError('backend_draining');
+      }
+      return entry;
+    },
+    warm: async (backend: string | undefined) => {
+      if (backend !== undefined) {
+        warmed.push(backend);
+      }
+    },
+  };
+  return { registry, warmed };
+};

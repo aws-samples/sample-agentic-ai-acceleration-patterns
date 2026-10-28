@@ -13,14 +13,16 @@ import {
   runtimePayload,
 } from '../../src/backend/agentcore-runtime.transport';
 import type { ValidatedRequest } from '../../src/backend/backend';
+import { RUNTIME_ARN } from '../helpers';
 
-/** The `agentcore-runtime` backend's five concerns on the request path (spec §3.4, ADR-0011, ADR-0012). */
-const RUNTIME_ARN = 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_test-abc123';
+/** The `agentcore-runtime` backend's five concerns on the request path (spec §3.4, ADR-0011, ADR-0012, ADR-0024). */
 const credentials = { accessKeyId: 'ASIA-SYNTHETIC', secretAccessKey: 'synthetic-secret', sessionToken: 'synthetic-token', expiration: '2026-01-01T00:15:00.000Z' };
 const request = (overrides: Partial<ValidatedRequest> = {}): ValidatedRequest => ({
   tenantId: 'tenant-a',
   sub: 'user-a1',
   unitId: 's-abcdefghijklmnopqrstuvwxyz-conversationA1x0001',
+  backend: 'agent',
+  runtimeArn: RUNTIME_ARN,
   prompt: 'hello',
   ...overrides,
 });
@@ -61,7 +63,7 @@ describe('AgentCoreRuntimeBackend', () => {
   beforeEach(() => mock.reset());
 
   it('transportHeaders carries the unit id plus the custom headers (the Gateway path, ADR-0002)', () => {
-    const backend = new AgentCoreRuntimeBackend('');
+    const backend = new AgentCoreRuntimeBackend();
     expect(backend.transportHeaders(request({ userToken: 'jwt' }))).toEqual({
       [RUNTIME_HEADERS.SESSION_ID]: 's-abcdefghijklmnopqrstuvwxyz-conversationA1x0001',
       [RUNTIME_HEADERS.USER_TOKEN]: 'jwt',
@@ -72,13 +74,13 @@ describe('AgentCoreRuntimeBackend', () => {
     expect(JSON.parse(Buffer.from(runtimePayload(request({ userToken: 'jwt', credentials }))).toString())).toEqual({ prompt: 'hello' });
   });
 
-  it('invoke calls InvokeAgentRuntime with the unit id as runtimeSessionId and streams the response', async () => {
+  it("invoke calls InvokeAgentRuntime on the request's Runtime with the unit id as runtimeSessionId and streams the response", async () => {
     async function* body() {
       yield Buffer.from('data: one\n\n');
       yield Buffer.from('data: two\n\n');
     }
     mock.on(InvokeAgentRuntimeCommand).resolves({ contentType: 'text/event-stream', response: body() as any });
-    const backend = new AgentCoreRuntimeBackend(RUNTIME_ARN, new BedrockAgentCoreClient({}));
+    const backend = new AgentCoreRuntimeBackend(new BedrockAgentCoreClient({}));
     const response = await backend.invoke(request());
     expect(response.contentType).toBe('text/event-stream');
     const chunks: string[] = [];
@@ -96,12 +98,25 @@ describe('AgentCoreRuntimeBackend', () => {
     expect(JSON.parse(Buffer.from(sent).toString())).toEqual({ prompt: 'hello' });
   });
 
+  it('one instance serves every backend: the ARN is taken from each request (ADR-0024)', async () => {
+    async function* body() {
+      yield Buffer.from('{}');
+    }
+    mock.on(InvokeAgentRuntimeCommand).resolves({ contentType: 'application/json', response: body() as any });
+    const other = 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_billing-1';
+    const backend = new AgentCoreRuntimeBackend(new BedrockAgentCoreClient({}));
+    await backend.invoke(request());
+    await backend.invoke(request({ backend: 'billing', runtimeArn: other }));
+    const arns = mock.commandCalls(InvokeAgentRuntimeCommand).map((c) => c.args[0].input.agentRuntimeArn);
+    expect(arns).toEqual([RUNTIME_ARN, other]);
+  });
+
   it('invoke adds the custom headers at the build step so they are signed (spike V-6)', async () => {
     async function* body() {
       yield Buffer.from('{}');
     }
     mock.on(InvokeAgentRuntimeCommand).resolves({ contentType: 'application/json', response: body() as any });
-    const backend = new AgentCoreRuntimeBackend(RUNTIME_ARN, new BedrockAgentCoreClient({}));
+    const backend = new AgentCoreRuntimeBackend(new BedrockAgentCoreClient({}));
     await backend.invoke(request({ userToken: 'jwt', credentials }));
     const command = mock.commandCalls(InvokeAgentRuntimeCommand)[0].args[0];
     // The middleware is registered on the command's stack under its name.
@@ -110,8 +125,9 @@ describe('AgentCoreRuntimeBackend', () => {
   });
 
   it('invoke fails when there is no runtime ARN or no body', async () => {
-    await expect(new AgentCoreRuntimeBackend('').invoke(request())).rejects.toThrow(/runtime ARN/);
+    await expect(new AgentCoreRuntimeBackend(new BedrockAgentCoreClient({})).invoke(request({ runtimeArn: '' }))).rejects.toThrow(/runtime ARN/);
+    expect(mock).toHaveReceivedCommandTimes(InvokeAgentRuntimeCommand, 0);
     mock.on(InvokeAgentRuntimeCommand).resolves({ contentType: 'application/json' });
-    await expect(new AgentCoreRuntimeBackend(RUNTIME_ARN, new BedrockAgentCoreClient({})).invoke(request())).rejects.toThrow(/no response body/);
+    await expect(new AgentCoreRuntimeBackend(new BedrockAgentCoreClient({})).invoke(request())).rejects.toThrow(/no response body/);
   });
 });

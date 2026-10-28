@@ -19,8 +19,9 @@ Validations.of(app).addPlugins(
 
 // Deployment inputs (spec §3.3) from --context; synth fails fast naming any
 // missing or malformed key. The stack name embeds the ingress so both can be
-// deployed side by side; the second needs --context publishParameters=false
-// because the published parameter names are account-wide.
+// deployed side by side; the second needs --context publishParameters=false,
+// which moves its registry and published parameters under a stack-scoped
+// prefix, because the default prefix is account-wide (ADR-0024).
 const context = parseDemoContext((key) => app.node.tryGetContext(key), process.env.CDK_DEFAULT_REGION);
 
 new RuntimeIsolationDemoStack(app, `RuntimeIsolation-${context.ingress}`, {

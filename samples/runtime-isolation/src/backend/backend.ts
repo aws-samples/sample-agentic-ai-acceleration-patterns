@@ -23,6 +23,13 @@ export interface ValidatedRequest {
   readonly sub: string;
   /** The isolation unit the ingress chose (P-2). */
   readonly unitId: string;
+  /**
+   * The backend name from the route (`/{backend}/invocations`) and the
+   * Runtime ARN its registry entry names (ADR-0024). Chosen from the route
+   * and the registry alone, never from the body or a header.
+   */
+  readonly backend: string;
+  readonly runtimeArn: string;
   /** The caller's prompt, validated as a string. */
   readonly prompt: string;
   /** The user's token, only when `delegation.forwardUserToken` is on (P-5). */

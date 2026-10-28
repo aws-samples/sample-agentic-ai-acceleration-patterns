@@ -7,6 +7,8 @@ import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import {
   AGENT_RUNTIME_PARAMETERS,
+  BILLING_BACKEND,
+  BILLING_SCOPE,
   dashboardName,
   DEFAULT_MODEL_ID,
   defaultModelId,
@@ -17,8 +19,10 @@ import {
   PLACEHOLDER,
   RuntimeIsolationDemoStack,
   tenantSearchExpression,
+  wantsBillingBackend,
 } from '../src/demo.cdk';
 import { COST_METRIC_NAMES } from '../src/shared/metrics';
+import { DEFAULT_REGISTRY_PREFIX, PUBLISHED } from '../src/shared-ingress.cdk';
 
 /** The thin demo stack (spec C-4, §6.4): consumes tenant-identity's parameters, publishes its own, wires the TVM demo. */
 const FIXTURE_AGENT = path.join(__dirname, 'fixtures', 'agent');
@@ -117,6 +121,17 @@ describe('parseDemoContext (fail-fast, standard §4.3)', () => {
     });
   });
 
+  it('billingBackend: explicit true/false, else on exactly when requiredScopes is set (ADR-0024)', () => {
+    expect(parseDemoContext(read({ ingress: 'api-gateway' })).billingBackend).toBeUndefined();
+    expect(parseDemoContext(read({ ingress: 'api-gateway', billingBackend: 'true' })).billingBackend).toBe(true);
+    expect(() => parseDemoContext(read({ ingress: 'api-gateway', billingBackend: 'maybe' }))).toThrow(/'billingBackend'/);
+    expect(wantsBillingBackend(context())).toBe(false);
+    expect(wantsBillingBackend(context({ requiredScopes: ['tenant-api/read'] }))).toBe(true);
+    expect(wantsBillingBackend(context({ requiredScopes: ['tenant-api/read'], billingBackend: false }))).toBe(false);
+    expect(wantsBillingBackend(context({ billingBackend: true }))).toBe(true);
+    expect(BILLING_SCOPE).toBe('tenant-api/write');
+  });
+
   it('publishParameters defaults to true and must be true or false (the parameter names are account-wide)', () => {
     expect(parseDemoContext(read({ ingress: 'api-gateway' })).publishParameters).toBe(true);
     expect(parseDemoContext(read({ ingress: 'agentcore-gateway', publishParameters: 'false' })).publishParameters).toBe(false);
@@ -174,38 +189,110 @@ describe('RuntimeIsolationDemoStack', () => {
     expect(rule.Assertions[0].Assert).toEqual({ 'Fn::Equals': ['build-placeholder', 'deployable'] });
   });
 
-  it('publishes the three parameters under /application-plane/shared/agent-runtime/ (spec §6.4)', () => {
-    const { template } = synth(context({ ingress: 'agentcore-gateway' }));
-    template.resourceCountIs('AWS::SSM::Parameter', 3);
-    template.hasResourceProperties('AWS::SSM::Parameter', { Name: AGENT_RUNTIME_PARAMETERS.endpointUrl, Type: 'String' });
+  it('publishes under /application-plane/shared/agent-runtime/: the ingress its six (seven on the Gateway), the demo the default backend\'s runtimeArn (spec §6.4, ADR-0024)', () => {
+    const { template, stack } = synth(context({ ingress: 'agentcore-gateway' }));
+    template.resourceCountIs('AWS::SSM::Parameter', 8);
+    const names = (Object.values(template.findResources('AWS::SSM::Parameter')) as any[]).map((p) => p.Properties.Name).sort();
+    expect(names).toEqual(
+      [
+        AGENT_RUNTIME_PARAMETERS.runtimeArn,
+        ...Object.values(PUBLISHED).map((n) => `${DEFAULT_REGISTRY_PREFIX}${n}`),
+      ].sort(),
+    );
     template.hasResourceProperties('AWS::SSM::Parameter', { Name: AGENT_RUNTIME_PARAMETERS.runtimeArn, Type: 'String' });
-    template.hasResourceProperties('AWS::SSM::Parameter', { Name: AGENT_RUNTIME_PARAMETERS.ingress, Value: 'agentcore-gateway' });
+    template.hasResourceProperties('AWS::SSM::Parameter', { Name: `${DEFAULT_REGISTRY_PREFIX}${PUBLISHED.ingress}`, Value: 'agentcore-gateway' });
+    expect(stack.registryPrefix).toBe(DEFAULT_REGISTRY_PREFIX);
+    expect(AGENT_RUNTIME_PARAMETERS.runtimeArn).toBe('/application-plane/shared/agent-runtime/runtimeArn');
+    // The registry entry is a custom resource under the same prefix, not a plain parameter.
+    template.hasResourceProperties('Custom::RuntimeIsolationRegistryEntry', { ParameterName: `${DEFAULT_REGISTRY_PREFIX}backends/agent` });
   });
 
-  it('publishParameters=false writes none, as a prop or as context (a second ingress beside the first)', () => {
-    synth(context(), false).template.resourceCountIs('AWS::SSM::Parameter', 0);
-    synth(context({ ingress: 'agentcore-gateway', publishParameters: false })).template.resourceCountIs('AWS::SSM::Parameter', 0);
+  it('publishParameters=false (prop or context) moves the registry and the published parameters under a stack-scoped prefix and writes no demo parameter (a second ingress beside the first)', () => {
+    for (const { template, stack } of [synth(context(), false), synth(context({ ingress: 'agentcore-gateway', publishParameters: false }))]) {
+      const prefix = JSON.stringify(stack.resolve(stack.registryPrefix));
+      expect(prefix).toContain(DEFAULT_REGISTRY_PREFIX);
+      expect(prefix).toContain('AWS::StackName');
+      const text = JSON.stringify(template.toJSON());
+      for (const name of Object.values(AGENT_RUNTIME_PARAMETERS)) {
+        expect(text).not.toContain(`"${name}"`);
+      }
+      // Every published parameter and the registry entry carry the stack name.
+      for (const param of Object.values(template.findResources('AWS::SSM::Parameter')) as any[]) {
+        expect(JSON.stringify(param.Properties.Name)).toContain('AWS::StackName');
+      }
+      const [entry] = Object.values(template.findResources('Custom::RuntimeIsolationRegistryEntry')) as any[];
+      expect(JSON.stringify(entry.Properties.ParameterName)).toContain('AWS::StackName');
+      expect(JSON.stringify(entry.Properties.ParameterName)).toContain('/backends/agent');
+      expect(stack.runtime.options.registryPrefix).toBe(stack.registryPrefix);
+    }
   });
 
-  it("api-gateway: Contributor Insights rules keyed by $.tenantId on the access log (P-9) and on the ingress 'request served' log line (P-10, ADR-0021)", () => {
+  describe.each(['api-gateway', 'agentcore-gateway'] as const)('the billing backend behind the same ingress (ADR-0024), ingress=%s', (ingress) => {
+    const allOn = context({ ingress, sessionScope: 'user', requiredScopes: ['tenant-api/read'], forwardUserToken: true, tvm: true });
+    const { template, stack } = synth(allOn);
+
+    it('an all-on stack has two backends: two Runtimes, two resource policies, two registry entries, one ingress', () => {
+      template.resourceCountIs('AWS::BedrockAgentCore::Runtime', 2);
+      template.resourceCountIs('AWS::BedrockAgentCore::ResourcePolicy', 2);
+      template.resourceCountIs('Custom::RuntimeIsolationRegistryEntry', 2);
+      template.resourceCountIs(ingress === 'api-gateway' ? 'AWS::ApiGateway::RestApi' : 'AWS::BedrockAgentCore::Gateway', 1);
+      template.resourceCountIs('AWS::BedrockAgentCore::GatewayTarget', ingress === 'agentcore-gateway' ? 2 : 0);
+      expect(stack.billing).toBeDefined();
+      expect(stack.billing!.name).toBe(BILLING_BACKEND);
+      expect(stack.billing!.endpointUrl).toBe(stack.runtime.ingress.urlFor(BILLING_BACKEND));
+    });
+
+    it('the billing entry requires BILLING_SCOPE on top of the floor; the default entry requires nothing more', () => {
+      const entries = Object.values(template.findResources('Custom::RuntimeIsolationRegistryEntry')) as any[];
+      const billing = entries.find((e) => e.Properties.ParameterName === `${DEFAULT_REGISTRY_PREFIX}backends/${BILLING_BACKEND}`);
+      const agent = entries.find((e) => e.Properties.ParameterName === `${DEFAULT_REGISTRY_PREFIX}backends/agent`);
+      expect(billing.Properties.RequiredScopes).toEqual([BILLING_SCOPE]);
+      expect(agent.Properties.RequiredScopes).toEqual([]);
+      // Both Runtimes run the same code and model, with the demo table.
+      for (const runtime of Object.values(template.findResources('AWS::BedrockAgentCore::Runtime')) as any[]) {
+        expect(runtime.Properties.EnvironmentVariables).toEqual({ TABLE_NAME: stack.resolve(stack.table!.tableName), MODEL_ID: DEFAULT_MODEL_ID });
+        expect(runtime.Properties.Tags).toEqual({ 'ri:ingress': stack.runtime.ingress.ingressId });
+      }
+      // One model, one statement on the deployer's tenant role (grantModel is idempotent).
+      const policies = Object.values(template.findResources('AWS::IAM::Policy')) as any[];
+      const models = policies.flatMap((p) => p.Properties.PolicyDocument.Statement).filter((s: any) => String(s.Sid).startsWith('OneModel'));
+      expect(models).toHaveLength(1);
+    });
+
+    it('publishes the billing Runtime ARN beside the default one, and outputs both URLs', () => {
+      template.hasResourceProperties('AWS::SSM::Parameter', { Name: AGENT_RUNTIME_PARAMETERS.billingRuntimeArn, Type: 'String' });
+      expect(AGENT_RUNTIME_PARAMETERS.billingRuntimeArn).toBe('/application-plane/shared/agent-runtime/backends-info/billing/runtimeArn');
+      const outputs = Object.keys(template.toJSON().Outputs);
+      expect(outputs).toEqual(expect.arrayContaining(['EndpointUrl', 'BillingEndpointUrl', 'BillingRuntimeArn', 'RegistryPrefix']));
+    });
+
+    it('without a scope floor (or with billingBackend=false) there is one backend', () => {
+      synth(context({ ingress })).template.resourceCountIs('AWS::BedrockAgentCore::Runtime', 1);
+      synth(context({ ingress, requiredScopes: ['tenant-api/read'], billingBackend: false })).template.resourceCountIs('AWS::BedrockAgentCore::Runtime', 1);
+      const { template: explicit, stack: s } = synth(context({ ingress, billingBackend: true }));
+      explicit.resourceCountIs('AWS::BedrockAgentCore::Runtime', 2);
+      expect(s.billing).toBeDefined();
+    });
+  });
+
+  it("api-gateway: Contributor Insights rules keyed by $.tenantId on the access log (P-9) and by tenant and backend on the ingress 'request served' log line (P-10, ADR-0021, ADR-0024)", () => {
     const { template } = synth(context());
     template.resourceCountIs('AWS::CloudWatch::InsightRule', 4);
     const rules = Object.values(template.findResources('AWS::CloudWatch::InsightRule')) as any[];
     const bodies = rules.map((r) => ({ name: r.Properties.RuleName as string, body: JSON.parse(flatten(r.Properties.RuleBody)) }));
-    for (const rule of bodies) {
-      expect(rule.body.Contribution.Keys).toEqual(['$.tenantId']);
-    }
     expect(JSON.stringify(bodies)).not.toContain('$.TenantId');
     const access = bodies.filter((b) => b.body.LogGroupNames[0].includes('ApiAccessLogs'));
     expect(access).toHaveLength(2);
     for (const rule of access) {
       expect(rule.body.AggregateOn).toBe('Count');
+      expect(rule.body.Contribution.Keys).toEqual(['$.tenantId']);
     }
-    // The cost rules read the ingress Lambda's log line, which carries the figures whether or not EMF is on.
+    // The cost rules read the ingress Lambda's log line, which carries the figures whether or not EMF is on, and names the backend.
     const cost = bodies.filter((b) => b.body.LogGroupNames[0].includes('IngressLogs'));
     expect(cost.map((c) => c.body.Contribution.ValueOf).sort()).toEqual(['$.backendInvokeSeconds', '$.usageOutput']);
     for (const rule of cost) {
       expect(rule.body.AggregateOn).toBe('Sum');
+      expect(rule.body.Contribution.Keys).toEqual(['$.tenantId', '$.backend']);
       expect(rule.body.Contribution.Filters).toEqual([
         { Match: '$.message', In: ['request served'] },
         { Match: rule.body.Contribution.ValueOf, IsPresent: true },
@@ -349,9 +436,9 @@ describe('RuntimeIsolationDemoStack', () => {
       expect(role.Properties.AssumeRolePolicyDocument.Statement[0].Condition['ForAllValues:StringEquals']['aws:TagKeys']).toEqual(['TenantId', 'UserId']);
     });
 
-    it('outputs name the tenant role and the table', () => {
+    it('outputs name the tenant role, the table and the registry prefix', () => {
       const outputs = Object.keys(template.toJSON().Outputs);
-      expect(outputs).toEqual(expect.arrayContaining(['EndpointUrl', 'RuntimeArn', 'Ingress', 'IngressRoleArn', 'TvmCallerRoleArn', 'TenantRoleArn', 'DemoTableName']));
+      expect(outputs).toEqual(expect.arrayContaining(['EndpointUrl', 'RuntimeArn', 'Ingress', 'IngressRoleArn', 'TvmCallerRoleArn', 'TenantRoleArn', 'DemoTableName', 'RegistryPrefix']));
     });
   });
 

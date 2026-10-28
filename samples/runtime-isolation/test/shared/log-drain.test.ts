@@ -34,7 +34,7 @@ describe('teardown leaves no log group (ADR-0019)', () => {
 
     const [drain] = logicalIdOf(template, 'AWS::CloudFormation::CustomResource');
     const drainDeps: string[] = template.toJSON().Resources[drain].DependsOn ?? [];
-    const writerGroups = Object.keys(groups).filter((id) => !id.includes('LogDrain'));
+    const writerGroups = Object.keys(groups).filter((id) => !id.includes('LogDrain') && !id.includes('RegistryEntry'));
     expect(writerGroups.length).toBe(4);
     for (const id of writerGroups) {
       expect(drainDeps).toContain(id);

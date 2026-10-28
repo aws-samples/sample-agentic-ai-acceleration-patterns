@@ -7,9 +7,10 @@
  * (SigV4) inbound authorisation, an execution role that can write logs and
  * traces and read its own code and nothing else (no model, no tenant data:
  * the agent uses the vended tenant credentials for both, ADR-0018), a
- * resource policy that names one ingress principal, and a request-header
- * allowlist that always carries the credential header and carries the
- * user-token header only when forwarding is on.
+ * resource policy that names one ingress principal, the `ri:ingress` tag
+ * the ingress role's invoke grant is conditioned on (ADR-0024), and a
+ * request-header allowlist that always carries the credential header and
+ * carries the user-token header only when forwarding is on.
  */
 
 import * as fs from 'node:fs';
@@ -21,7 +22,7 @@ import * as s3assets from 'aws-cdk-lib/aws-s3-assets';
 import { Construct } from 'constructs';
 import { RUNTIME_HEADERS } from './agentcore-runtime.transport';
 import type { BackendTransportOptions, IBackend } from './backend.cdk';
-import { AGENT_ENV, ENV } from '../shared/config';
+import { AGENT_ENV } from '../shared/config';
 import { acknowledgeGranularFinding, nagFindingResource } from '../shared/nag';
 
 /** The entry file the Runtime starts inside `codePath`. */
@@ -73,15 +74,22 @@ export interface AgentCoreRuntimeBackendProps {
   /** Environment variables for the agent process. */
   readonly environment?: Record<string, string>;
   readonly transports: BackendTransportOptions;
+  /**
+   * Tags on the Runtime, given at creation so the service copies them to the
+   * DEFAULT endpoint (checked 2026-10-28). `AgentBackend` sets
+   * `ri:ingress = <ingressId>`, the condition on the ingress role's invoke
+   * grant (ADR-0024).
+   */
+  readonly tags?: Record<string, string>;
 }
 
 export class AgentCoreRuntimeBackend extends Construct implements IBackend {
   readonly resourceArn: string;
   readonly executionRole: iam.Role;
-  readonly ingressEnvironment: Record<string, string>;
   /** The L1, for the Gateway target helper and for tests. */
   readonly runtime: agentcore.CfnRuntime;
-  private bound = false;
+  /** The resource policy written by `bindIngress`; undefined until then. */
+  resourcePolicy?: agentcore.CfnResourcePolicy;
 
   constructor(scope: Construct, id: string, props: AgentCoreRuntimeBackendProps) {
     super(scope, id);
@@ -184,10 +192,10 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
       protocolConfiguration: 'HTTP',
       requestHeaderConfiguration: allowlist.length > 0 ? { requestHeaderAllowlist: allowlist } : undefined,
       environmentVariables: { [AGENT_ENV.MODEL_ID]: props.modelId, ...props.environment },
+      tags: props.tags,
     });
     this.runtime.node.addDependency(this.executionRole);
     this.resourceArn = this.runtime.attrAgentRuntimeArn;
-    this.ingressEnvironment = { [ENV.RUNTIME_ARN]: this.resourceArn };
   }
 
   /**
@@ -195,27 +203,16 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
    * for the ingress role and denies every `bedrock-agentcore:*` action on
    * the Runtime to any other principal, which covers `InvokeAgentRuntimeForUser`
    * and the WebSocket and command variants this sample does not use. The
-   * identity grant on the ingress role completes the pair.
+   * identity half of the pair lives on the ingress: a tag-conditioned grant
+   * over the Runtime ARN pattern (`SharedIngress`, ADR-0024), so the ingress
+   * role is passed by ARN and may belong to another stack. Called once.
    */
-  bindIngress(ingressRole: iam.IRole): void {
-    if (this.bound) {
+  bindIngress(ingressRoleArn: string): agentcore.CfnResourcePolicy {
+    if (this.resourcePolicy !== undefined) {
       throw new Error('AgentCoreRuntimeBackend.bindIngress: the backend trusts exactly one ingress (ADR-0003)');
     }
-    this.bound = true;
     const stack = Stack.of(this);
-    ingressRole.addToPrincipalPolicy(
-      new iam.PolicyStatement({
-        sid: 'InvokeRuntime',
-        actions: [INVOKE_ACTION],
-        resources: [this.resourceArn, `${this.resourceArn}/*`],
-      }),
-    );
-    acknowledgeGranularFinding(
-      ingressRole,
-      `AwsSolutions-IAM5[Resource::${nagFindingResource(this, `${this.resourceArn}/*`)}]`,
-      'InvokeAgentRuntime is authorised on the Runtime ARN and its endpoint qualifier (<arn>/*), the two resource forms the action accepts; both name this one Runtime (ADR-0001).',
-    );
-    new agentcore.CfnResourcePolicy(this, 'ResourcePolicy', {
+    this.resourcePolicy = new agentcore.CfnResourcePolicy(this, 'ResourcePolicy', {
       resourceArn: this.resourceArn,
       policy: stack.toJsonString({
         Version: '2012-10-17',
@@ -223,7 +220,7 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
           {
             Sid: 'IngressOnly',
             Effect: 'Allow',
-            Principal: { AWS: ingressRole.roleArn },
+            Principal: { AWS: ingressRoleArn },
             Action: INVOKE_ACTION,
             Resource: this.resourceArn,
           },
@@ -233,11 +230,12 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
             Principal: { AWS: '*' },
             Action: 'bedrock-agentcore:*',
             Resource: this.resourceArn,
-            Condition: { ArnNotEquals: { 'aws:PrincipalArn': ingressRole.roleArn } },
+            Condition: { ArnNotEquals: { 'aws:PrincipalArn': ingressRoleArn } },
           },
         ],
       }),
     });
+    return this.resourcePolicy;
   }
 
   /**
@@ -245,11 +243,13 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
    * CDK L1 lacks `TargetConfiguration.Http.AgentcoreRuntime` (aws-cdk#37999),
    * so the typed `connector` placeholder is deleted and the Runtime block is
    * written with raw overrides. A unit test asserts the emitted keys, so a
-   * casing error fails the build, not the deploy (spike V-2).
+   * casing error fails the build, not the deploy (spike V-2). The Gateway is
+   * named by identifier so a backend stack can add a target to an ingress
+   * stack's Gateway (ADR-0024); the target name is the backend name.
    */
-  addGatewayTarget(gateway: agentcore.CfnGateway, name: string): agentcore.CfnGatewayTarget {
+  addGatewayTarget(gatewayIdentifier: string, name: string): agentcore.CfnGatewayTarget {
     const target = new agentcore.CfnGatewayTarget(this, 'GatewayTarget', {
-      gatewayIdentifier: gateway.attrGatewayIdentifier,
+      gatewayIdentifier,
       name,
       description: 'AgentCore Runtime target (ADR-0010 raw override)',
       targetConfiguration: { http: { connector: { source: { connectorId: 'placeholder-removed-by-override' } } } },

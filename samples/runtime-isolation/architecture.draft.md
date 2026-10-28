@@ -31,7 +31,7 @@ ADR-0012, ADR-0017, ADR-0020, ADR-0024).
 | Construct | Creates | Route | Published parameters |
 |---|---|---|---|
 | `IsolatedRuntime` (one backend, today's shape) | a `SharedIngress` and one `AgentBackend` | `POST /invocations` (`api-gateway`); `POST /agent/invocations` (`agentcore-gateway`) | unchanged |
-| `SharedIngress` | the ingress alone: API or Gateway, authoriser, TVM, limits, log drain | `POST /{backend}/invocations` on both ingresses, one API resource | `/application-plane/shared/agent-runtime/{endpointUrl,ingressRoleArn,registryPrefix}` |
+| `SharedIngress` | the ingress alone: API or Gateway, authoriser, TVM, limits, log drain | `POST /{backend}/invocations` on both ingresses, one API resource | `/application-plane/shared/agent-runtime/{endpointUrl,baseUrl,ingressRoleArn,ingressId,ingress,tenantRoleArn}` (`gatewayIdentifier` on the Gateway) |
 | `AgentBackend(ingress)` | one Runtime, its resource policy naming the ingress role, its registry entry, its Gateway target | served under its name | `/application-plane/shared/agent-runtime/backends/<name>` |
 
 A backend name is `[a-z0-9-]{1,32}`. The registry entry is a JSON string

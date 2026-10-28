@@ -6,11 +6,12 @@ import { mockClient } from 'aws-sdk-client-mock';
 import 'aws-sdk-client-mock-jest';
 import type { IngressConfig } from '../../src/shared/config';
 import { type Admission, TenantLimiter } from '../../src/shared/limits';
-import { ERROR_TEXT, IngressPipeline, parseBody, pipelineFor, RequestError } from '../../src/shared/request';
+import { BackendRegistry, RegistryError } from '../../src/shared/registry';
+import { ERROR_TEXT, IngressPipeline, parseBody, pipelineFor, type RegistryResolver, RequestError } from '../../src/shared/request';
 import { PREFIX_PATTERN, RANDOM_UNIT_ID_PATTERN, sessionPrefix } from '../../src/shared/session';
 import { TokenVendingMachine } from '../../src/shared/tvm';
 import { TokenVerifier } from '../../src/shared/verifier';
-import { baseConfig, CLIENT_ID, DISCOVERY_URL, testIssuer, type TestIssuer } from '../helpers';
+import { baseConfig, CLIENT_ID, DISCOVERY_URL, RUNTIME_ARN, stubRegistry, testIssuer, type TestIssuer } from '../helpers';
 
 /** The one request contract both ingresses enforce (spec §5, ADR-0002, ADR-0013). */
 
@@ -56,7 +57,14 @@ describe('parseBody', () => {
   });
 
   it('error texts are fixed and echo nothing', () => {
-    expect(ERROR_TEXT).toEqual({ 400: 'bad request', 401: 'unauthorized', 403: 'forbidden', 429: 'too many requests', 502: 'upstream error' });
+    expect(ERROR_TEXT).toEqual({
+      400: 'bad request',
+      401: 'unauthorized',
+      403: 'forbidden',
+      404: 'not found',
+      429: 'too many requests',
+      502: 'upstream error',
+    });
   });
 });
 
@@ -73,7 +81,7 @@ describe('IngressPipeline', () => {
     });
   });
 
-  const pipeline = (config: IngressConfig, limiter?: TenantLimiter) => {
+  const pipeline = (config: IngressConfig, limiter?: TenantLimiter, registry: RegistryResolver = stubRegistry().registry) => {
     const verifier = new TokenVerifier(
       {
         discoveryUrl: config.discoveryUrl,
@@ -85,7 +93,7 @@ describe('IngressPipeline', () => {
       { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
     );
     const tvm = config.tvm === undefined ? undefined : new TokenVendingMachine(config.tvm, { sts: new STSClient({}) });
-    return new IngressPipeline(config, verifier, tvm, limiter);
+    return new IngressPipeline(config, verifier, registry, tvm, limiter);
   };
 
   const refusal = async (promise: Promise<unknown>) => {
@@ -107,7 +115,7 @@ describe('IngressPipeline', () => {
     const b = await p.validate({ authorization: `Bearer ${token}`, body: '{"prompt":"hi"}' });
     expect(a.unitId).toMatch(RANDOM_UNIT_ID_PATTERN);
     expect(a.unitId).not.toBe(b.unitId);
-    expect(a).toEqual({ tenantId: 'tenant-a', sub: 'user-a1', unitId: a.unitId, prompt: 'hi' });
+    expect(a).toEqual({ tenantId: 'tenant-a', sub: 'user-a1', unitId: a.unitId, backend: 'agent', runtimeArn: RUNTIME_ARN, prompt: 'hi' });
     expect(a.userToken).toBeUndefined();
     expect(a.credentials).toBeUndefined();
   });
@@ -207,15 +215,101 @@ describe('IngressPipeline', () => {
         { discoveryUrl: DISCOVERY_URL, allowedClientIds: [CLIENT_ID] },
         { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
       );
-      expect(() => new IngressPipeline(tvmConfig, verifier)).toThrow(/TokenVendingMachine/);
+      expect(() => new IngressPipeline(tvmConfig, verifier, stubRegistry().registry)).toThrow(/TokenVendingMachine/);
     });
   });
 
-  it('pipelineFor builds a verifier and, with tvm, a TVM from the config', () => {
-    expect(pipelineFor(baseConfig())).toBeInstanceOf(IngressPipeline);
+  it('pipelineFor builds a verifier, a registry and, with tvm, a TVM from the config', () => {
+    const p = pipelineFor(baseConfig());
+    expect(p).toBeInstanceOf(IngressPipeline);
+    expect(p.registry).toBeInstanceOf(BackendRegistry);
     expect(pipelineFor(baseConfig({ tvm: { roleArn: 'arn:aws:iam::111122223333:role/t', includeUserIdTag: false, claimTags: {}, durationSeconds: 900 } }))).toBeInstanceOf(
       IngressPipeline,
     );
+    const { registry } = stubRegistry();
+    expect(pipelineFor(baseConfig(), { registry }).registry).toBe(registry);
+  });
+
+  describe('backend resolution (ADR-0024)', () => {
+    const body = '{"prompt":"hi"}';
+    const entries = {
+      billing: { runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_billing-1', requiredScopes: ['tenant-api/write'], status: 'active' as const },
+      old: { runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_old-1', requiredScopes: [], status: 'draining' as const },
+    };
+
+    it('the route names the backend and the entry supplies the Runtime ARN', async () => {
+      const p = pipeline(baseConfig(), undefined, stubRegistry(entries).registry);
+      const token = `Bearer ${await issuer.mint()}`;
+      const r = await p.validate({ authorization: token, body, path: '/billing/invocations' });
+      expect(r.backend).toBe('billing');
+      expect(r.runtimeArn).toBe(entries.billing.runtimeArn);
+      // A stage prefix is tolerated; the bare route falls back to the default backend.
+      expect((await p.validate({ authorization: token, body, path: '/prod/billing/invocations' })).backend).toBe('billing');
+      expect(await p.validate({ authorization: token, body, path: '/invocations' })).toMatchObject({ backend: 'agent', runtimeArn: RUNTIME_ARN });
+    });
+
+    it('an unparseable path, an unknown name or a draining backend is 404 with the reason, attributed to the tenant', async () => {
+      const p = pipeline(baseConfig(), undefined, stubRegistry(entries).registry);
+      const token = `Bearer ${await issuer.mint()}`;
+      expect(await refusal(p.validate({ authorization: token, body, path: '/billing/other' }))).toEqual({ status: 404, reason: 'unknown_backend' });
+      expect(await refusal(p.validate({ authorization: token, body, path: '/Billing/invocations' }))).toEqual({ status: 404, reason: 'unknown_backend' });
+      expect(await refusal(p.validate({ authorization: token, body, path: '/nope/invocations' }))).toEqual({ status: 404, reason: 'unknown_backend' });
+      expect(await refusal(p.validate({ authorization: token, body, path: '/old/invocations' }))).toEqual({ status: 404, reason: 'backend_draining' });
+      let caught: unknown;
+      await p.validate({ authorization: token, body, path: '/nope/invocations' }).catch((e) => (caught = e));
+      expect(caught).toMatchObject({ status: 404, tenantId: 'tenant-a' });
+    });
+
+    it('no default backend: the bare route is 404', async () => {
+      const p = pipeline(baseConfig({ registry: { prefix: '/p/', ttlSeconds: 60 } }), undefined, stubRegistry(entries).registry);
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, path: '/invocations' }))).toEqual({ status: 404, reason: 'unknown_backend' });
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body }))).toEqual({ status: 404, reason: 'unknown_backend' });
+    });
+
+    it('a registry fault is 502 with its reason', async () => {
+      const faulty = (reason: 'registry_entry_invalid' | 'registry_unavailable'): RegistryResolver => ({
+        resolve: async () => {
+          throw new RegistryError(reason);
+        },
+        warm: async () => undefined,
+      });
+      for (const reason of ['registry_entry_invalid', 'registry_unavailable'] as const) {
+        const p = pipeline(baseConfig(), undefined, faulty(reason));
+        expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, path: '/agent/invocations' }))).toEqual({ status: 502, reason });
+      }
+    });
+
+    it("the backend's requiredScopes are required on top of the ingress-wide list: 403 backend_scope_missing", async () => {
+      const p = pipeline(baseConfig({ requiredScopes: ['tenant-api/read'] }), undefined, stubRegistry(entries).registry);
+      const readOnly = `Bearer ${await issuer.mint({ scope: 'tenant-api/read' })}`;
+      expect(await refusal(p.validate({ authorization: readOnly, body, path: '/billing/invocations' }))).toEqual({ status: 403, reason: 'backend_scope_missing' });
+      // The ingress-wide floor still refuses first (ADR-0005 order).
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint({ scope: 'tenant-api/write' })}`, body, path: '/billing/invocations' }))).toEqual({
+        status: 403,
+        reason: 'scope_missing',
+      });
+      await expect(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, path: '/billing/invocations' })).resolves.toMatchObject({ backend: 'billing' });
+      // The default backend has no scopes of its own: the read-only token passes.
+      await expect(p.validate({ authorization: readOnly, body, path: '/agent/invocations' })).resolves.toMatchObject({ backend: 'agent' });
+    });
+
+    it('the backend is resolved after the token and before the body: a bad token is 401, an unknown route costs no body parse', async () => {
+      const p = pipeline(baseConfig(), undefined, stubRegistry().registry);
+      expect(await refusal(p.validate({ body: 'garbage', path: '/nope/invocations' }))).toEqual({ status: 401, reason: 'missing_token' });
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body: 'garbage', path: '/nope/invocations' }))).toEqual({
+        status: 404,
+        reason: 'unknown_backend',
+      });
+    });
+
+    it('warm() pre-fetches the default backend only when one is configured', async () => {
+      const withDefault = stubRegistry();
+      await pipeline(baseConfig(), undefined, withDefault.registry).warm();
+      expect(withDefault.warmed).toEqual(['agent']);
+      const without = stubRegistry();
+      await pipeline(baseConfig({ registry: { prefix: '/p/', ttlSeconds: 60 } }), undefined, without.registry).warm();
+      expect(without.warmed).toEqual([]);
+    });
   });
   describe('per-tenant limits (ADR-0020)', () => {
     const tvmConfig = baseConfig({ tvm: { roleArn: 'arn:aws:iam::111122223333:role/tenant', includeUserIdTag: false, claimTags: {}, durationSeconds: 900 } });

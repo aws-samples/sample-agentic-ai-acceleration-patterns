@@ -7,13 +7,20 @@ import type { TenantLimiter } from '../../src/shared/limits';
 import { pipelineFor } from '../../src/shared/request';
 import { sessionPrefix } from '../../src/shared/session';
 import { TokenVerifier } from '../../src/shared/verifier';
-import { baseConfig, CLIENT_ID, DISCOVERY_URL, testIssuer, type TestIssuer } from '../helpers';
+import { baseConfig, CLIENT_ID, DISCOVERY_URL, REGISTRY_PREFIX, RUNTIME_ARN, stubRegistry, testIssuer, type TestIssuer } from '../helpers';
 
 process.env[ENV.INGRESS] = 'agentcore-gateway';
 process.env[ENV.DISCOVERY_URL] = DISCOVERY_URL;
 process.env[ENV.ALLOWED_CLIENT_IDS] = CLIENT_ID;
+process.env[ENV.REGISTRY_PREFIX] = REGISTRY_PREFIX;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { bodyText, intercept, handler } = require('../../src/ingress/gateway-interceptor.function') as typeof import('../../src/ingress/gateway-interceptor.function');
+const { bodyText, intercept, handler, resetPathWarning } = require('../../src/ingress/gateway-interceptor.function') as typeof import('../../src/ingress/gateway-interceptor.function');
+
+/** The registry the tests resolve through: `agent` (no scopes), `billing` (needs write), `old` (draining). */
+const ENTRIES = {
+  billing: { runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_billing-1', requiredScopes: ['tenant-api/write'], status: 'active' as const },
+  old: { runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_old-1', requiredScopes: [], status: 'draining' as const },
+};
 
 /** The REQUEST interceptor (spec C-3b, ADR-0002 as decided): builds the unit id, overwrites the header, denies with fixed text. */
 describe('intercept', () => {
@@ -21,7 +28,7 @@ describe('intercept', () => {
   let metrics: string[];
   let logs: string[];
   let logSpy: jest.SpyInstance;
-  const backend = new AgentCoreRuntimeBackend('');
+  const backend = new AgentCoreRuntimeBackend();
 
   beforeAll(async () => {
     issuer = await testIssuer();
@@ -48,15 +55,17 @@ describe('intercept', () => {
         },
         { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
       ),
+      registry: stubRegistry(ENTRIES).registry,
     }),
     backend,
     metricsOut: (l: string) => metrics.push(l),
     perTenantMetrics: true,
   });
 
-  const event = (headers: Record<string, string>, body: unknown) => ({
+  /** The Gateway target is named after the backend, so the event path is `/<backend>/invocations` (ADR-0024). */
+  const event = (headers: Record<string, string>, body: unknown, route: { path?: string } = { path: '/agent/invocations' }) => ({
     interceptorInputVersion: '1.0',
-    http: { gatewayRequest: { path: '/agent/invocations', headers, body } },
+    http: { gatewayRequest: { path: route.path, headers, body } },
   });
 
   const body = '{"prompt":"hi","conversationId":"conversationA1x0001"}';
@@ -147,12 +156,71 @@ describe('intercept', () => {
     await intercept(event({ authorization: `Bearer ${token}`, [RUNTIME_HEADERS.SESSION_ID]: 'client-sent-value' }, body), deps());
     const admitted = logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request admitted');
     expect(admitted.tenantId).toBe('tenant-a');
+    expect(admitted.backend).toBe('agent');
     expect(admitted.sessionPrefix).toBe(sessionPrefix('tenant-a', 'user-a1', 'user'));
     const all = logs.join('\n');
     expect(all).not.toContain(token);
     expect(all).not.toContain('client-sent-value');
     expect(all).not.toContain('conversationA1x0001');
-    expect(JSON.parse(metrics[0])).toMatchObject({ TenantId: 'tenant-a', Ingress: 'agentcore-gateway', Requests: 1 });
+    expect(JSON.parse(metrics[0])).toMatchObject({ TenantId: 'tenant-a', Ingress: 'agentcore-gateway', Backend: 'agent', Requests: 1 });
+  });
+
+  describe('backend routing (ADR-0024)', () => {
+    beforeEach(() => resetPathWarning());
+
+    it('the target path names the backend and the admitted line carries it', async () => {
+      const out = await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body, { path: '/billing/invocations' }), deps());
+      expect('transformedGatewayRequest' in out.http).toBe(true);
+      expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request admitted')).toMatchObject({ backend: 'billing' });
+      expect(JSON.parse(metrics[0])).toMatchObject({ Backend: 'billing' });
+    });
+
+    it.each([
+      ['unknown backend', '/nope/invocations', 'unknown_backend'],
+      ['draining backend', '/old/invocations', 'backend_draining'],
+    ])('%s -> 404 "not found"', async (_n, path, reason) => {
+      const out = await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body, { path }), deps());
+      const response = (out.http as any).transformedGatewayResponse;
+      expect(response.statusCode).toBe(404);
+      expect(Buffer.from(response.body, 'base64').toString()).toBe('not found');
+      expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request refused')).toMatchObject({ status: 404, reason, tenantId: 'tenant-a' });
+      expect(logs.some((l) => l.includes('interceptor path lacks backend'))).toBe(false);
+    });
+
+    it("a token without the backend's scopes -> 403 backend_scope_missing", async () => {
+      const out = await intercept(event({ authorization: `Bearer ${await issuer.mint({ scope: 'tenant-api/read' })}` }, body, { path: '/billing/invocations' }), deps());
+      expect((out.http as any).transformedGatewayResponse.statusCode).toBe(403);
+      expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request refused')).toMatchObject({ status: 403, reason: 'backend_scope_missing' });
+    });
+
+    it('a path without a name serves the default backend when one is configured', async () => {
+      for (const path of ['/invocations', undefined]) {
+        const out = await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body, { path }), deps());
+        expect('transformedGatewayRequest' in out.http).toBe(true);
+      }
+      expect(logs.filter((l) => l.includes('request admitted')).map((l) => JSON.parse(l).backend)).toEqual(['agent', 'agent']);
+    });
+
+    it("no name and no default backend: 404, and 'interceptor path lacks backend' is warned once per cold start", async () => {
+      const d = deps(baseConfig({ ingress: 'agentcore-gateway', sessionScope: 'user', registry: { prefix: REGISTRY_PREFIX, ttlSeconds: 60 } }));
+      for (const path of [undefined, '/invocations', undefined]) {
+        const out = await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body, { path }), d);
+        expect((out.http as any).transformedGatewayResponse.statusCode).toBe(404);
+      }
+      const warnings = logs.map((l) => JSON.parse(l)).filter((l) => l.message === 'interceptor path lacks backend');
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toMatchObject({ level: 'WARN', ingress: 'agentcore-gateway', pathPresent: false });
+      // A named but unknown backend is not that warning.
+      await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body, { path: '/nope/invocations' }), d);
+      expect(logs.filter((l) => l.includes('interceptor path lacks backend'))).toHaveLength(1);
+    });
+
+    it('the transport headers are the same for every backend: the Gateway, not the interceptor, picks the Runtime', async () => {
+      const out = await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body, { path: '/billing/invocations' }), deps());
+      const headers = (out.http as any).transformedGatewayRequest.headers as Record<string, string>;
+      expect(Object.keys(headers)).toEqual([RUNTIME_HEADERS.SESSION_ID]);
+      expect(JSON.stringify(out)).not.toContain(RUNTIME_ARN);
+    });
   });
 
   it('meters the request side only: Requests and IngressDurationMs, no backend or model figures (P-10 gap, ADR-0009 input)', async () => {
@@ -182,6 +250,7 @@ describe('intercept', () => {
           { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
         ),
         limiter,
+        registry: stubRegistry().registry,
       }),
     };
     const out = await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body), d);

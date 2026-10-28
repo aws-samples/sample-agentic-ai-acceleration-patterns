@@ -2,13 +2,22 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * AgentCore Gateway REQUEST interceptor (spec C-3b, ADR-0002, ADR-0013). The
- * Gateway has already checked the JWT with its CUSTOM_JWT authoriser; the
- * interceptor runs the same shared pipeline again (one contract on both
- * ingresses), BUILDS the unit id from the validated claims and the body's
+ * AgentCore Gateway REQUEST interceptor (spec C-3b, ADR-0002, ADR-0013,
+ * ADR-0024). The Gateway has already checked the JWT with its CUSTOM_JWT
+ * authoriser (`allowedScopes` is the product floor); the interceptor runs the
+ * same shared pipeline again (one contract on both ingresses), resolves the
+ * backend the Gateway target names through the registry and requires its
+ * scopes, BUILDS the unit id from the validated claims and the body's
  * `conversationId`, and writes it to the Runtime session header, overwriting
  * whatever the client sent (spike V-3). With the options on it also sets the
  * user-token and credential headers. A refusal is a fixed-text response.
+ *
+ * The Gateway target is created under the backend's name (`AgentBackend`), so
+ * the request path is `/<backend>/invocations` and the same `backendFromPath`
+ * reads it on both ingresses. Whether the interceptor event carries that path
+ * is verified on first deploy (ADR-0024 follow-up): with no name in the path
+ * and no default backend the pipeline refuses with 404, and this module warns
+ * once per cold start so the gap is visible in the logs.
  *
  * Logs carry header NAMES never, and values never: only the verified
  * tenantId, the session prefix, a status and a reason (P-9, spike V-7).
@@ -28,6 +37,7 @@ import type { HeaderTransportBackend } from '../backend/backend';
 import { isLambdaRuntime, readIngressConfig } from '../shared/config';
 import { errorName, log } from '../shared/logger';
 import { emitRequestMetrics } from '../shared/metrics';
+import { backendFromPath } from '../shared/registry';
 import { ERROR_TEXT, type ErrorStatus, IngressPipeline, pipelineFor, RequestError } from '../shared/request';
 import { prefixOf } from '../shared/session';
 
@@ -101,6 +111,14 @@ export function bodyText(body: unknown): string | null {
   }
 }
 
+/** Set once the 'interceptor path lacks backend' warning has been written in this process. */
+let warnedPathLacksBackend = false;
+
+/** Resets the once-per-cold-start warning (tests only). */
+export function resetPathWarning(): void {
+  warnedPathLacksBackend = false;
+}
+
 function deny(statusCode: ErrorStatus): InterceptorOutput {
   return {
     interceptorOutputVersion: '1.0',
@@ -124,21 +142,33 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
   await deps.ready;
   // Request side only (see the file comment): Requests, errors and this
   // function's own milliseconds. No backend or model figures exist here.
-  const metrics = (status: number, tenantId?: string) =>
+  const metrics = (status: number, tenantId?: string, backend?: string) =>
     (deps.perTenantMetrics ?? false) &&
     emitRequestMetrics(
-      { tenantId: tenantId ?? 'unknown', ingress: 'agentcore-gateway', status, ingressDurationMs: now() - started },
+      { tenantId: tenantId ?? 'unknown', ingress: 'agentcore-gateway', status, ingressDurationMs: now() - started, backend },
       deps.metricsOut,
     );
 
+  // The Gateway target is named after the backend, so the request path the
+  // event carries is `/<backend>/invocations`; the registry resolves it
+  // (ADR-0024). The name is read from the path only, never from a header.
+  const path = gatewayRequest?.path;
   let request;
   try {
     request = await deps.pipeline.validate({
       authorization: header(gatewayRequest?.headers, 'authorization'),
       body: bodyText(gatewayRequest?.body),
+      path,
     });
   } catch (error) {
     if (error instanceof RequestError) {
+      if (error.reason === 'unknown_backend' && backendFromPath(path) === undefined && !warnedPathLacksBackend) {
+        // The event named no backend and no default is configured: either
+        // the Gateway does not hand the target path to the interceptor (to
+        // verify on first deploy, ADR-0024) or the ingress needs a default.
+        warnedPathLacksBackend = true;
+        log.warn('interceptor path lacks backend', { ingress: 'agentcore-gateway', pathPresent: path !== undefined });
+      }
       log.warn('request refused', { ingress: 'agentcore-gateway', status: error.status, reason: error.reason, tenantId: error.tenantId });
       metrics(error.status, error.tenantId);
       return deny(error.status);
@@ -151,10 +181,11 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
   log.info('request admitted', {
     ingress: 'agentcore-gateway',
     tenantId: request.tenantId,
+    backend: request.backend,
     sessionPrefix: prefixOf(request.unitId),
     status: 200,
   });
-  metrics(200, request.tenantId);
+  metrics(200, request.tenantId, request.backend);
   // The body passes through unchanged; the agent reads `prompt` and ignores
   // the rest. Every header the backend needs is set here, so a client value
   // in the session header never reaches the Runtime (P-2).
@@ -172,11 +203,12 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
 function defaultDependencies(): InterceptorDependencies {
   const config = readIngressConfig();
   const pipeline = pipelineFor(config);
-  // STS and DynamoDB connections open during init (ADR-0023). The interceptor
-  // never invokes the Runtime itself; the backend object supplies only the
-  // header transport, so no Runtime connection is opened here.
+  // STS and DynamoDB connections and the default backend's registry read
+  // happen during init (ADR-0023). The interceptor never invokes the Runtime
+  // itself; the backend object supplies only the header transport, so no
+  // Runtime client or connection is built here.
   const ready = pipeline.warm();
-  return { pipeline, backend: new AgentCoreRuntimeBackend(''), perTenantMetrics: config.perTenantMetrics, ready };
+  return { pipeline, backend: new AgentCoreRuntimeBackend(), perTenantMetrics: config.perTenantMetrics, ready };
 }
 
 // Built during init on the Lambda runtime (the config is present there), so
