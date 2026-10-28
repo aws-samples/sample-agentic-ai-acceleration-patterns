@@ -14,14 +14,16 @@
  * on both ingresses, src/shared/request.ts); this authoriser is the gate
  * that keeps a bad token, an unknown route or a token without the backend's
  * scopes from ever starting the streaming Lambda. API Gateway caches the
- * result per `Authorization` header (ADR-0015); the policy names the one
- * method ARN, so a cached Allow for one route does not open another.
+ * result per `Authorization` header AND `context.path` (ADR-0015, amended by
+ * ADR-0024; src/shared-ingress.cdk.ts), so one token's Allow for one route is
+ * never served for another; the policy also names the one method ARN.
  */
 
 import type { APIGatewayAuthorizerResult, APIGatewayRequestAuthorizerEvent } from 'aws-lambda';
 import { readIngressConfig } from '../shared/config';
+import { headerValue, missingScopes } from '../shared/headers';
 import { errorName, log } from '../shared/logger';
-import { BackendRegistry, backendFromPath, RegistryError } from '../shared/registry';
+import { BackendRegistry, backendFromPath, isValidBackendName, RegistryError } from '../shared/registry';
 import type { RegistryResolver } from '../shared/request';
 import { bearerToken, TokenError, TokenVerifier } from '../shared/verifier';
 
@@ -55,26 +57,17 @@ export function buildPolicy(methodArn: string, effect: 'Allow' | 'Deny', context
   };
 }
 
-function authorizationHeader(event: APIGatewayRequestAuthorizerEvent): string | undefined {
-  const headers = event.headers ?? {};
-  for (const [name, value] of Object.entries(headers)) {
-    if (name.toLowerCase() === 'authorization' && value !== undefined) {
-      return value;
-    }
-  }
-  return undefined;
-}
-
 /**
  * The backend name of the request. API Gateway fills `pathParameters.backend`
  * for the `/{backend}/invocations` resource; the bare `/invocations` route of
- * the one-backend wrapper has no parameter, so the path is read and the
- * default backend applies (ADR-0024).
+ * the one-agent form (bare `/invocations`) has no parameter, so the path is read and the
+ * default backend applies (ADR-0024). A parameter that is not a valid name is
+ * undefined (404), so an arbitrary client segment is never logged or looked up.
  */
 function backendOf(event: APIGatewayRequestAuthorizerEvent, defaultBackend: string | undefined): string | undefined {
   const parameter = event.pathParameters?.backend;
   if (typeof parameter === 'string' && parameter.length > 0) {
-    return parameter;
+    return isValidBackendName(parameter) ? parameter : undefined;
   }
   return backendFromPath(event.path, defaultBackend);
 }
@@ -87,7 +80,7 @@ export async function authorize(event: APIGatewayRequestAuthorizerEvent, deps: A
   let sub: string;
   let scopes: string[];
   try {
-    ({ tenantId, sub, scopes } = await deps.verifier.verify(bearerToken(authorizationHeader(event))));
+    ({ tenantId, sub, scopes } = await deps.verifier.verify(bearerToken(headerValue(event.headers, 'authorization'))));
   } catch (error) {
     if (error instanceof TokenError) {
       log.warn('token refused', { ...fields, reason: error.reason, status: error.status });
@@ -106,7 +99,7 @@ export async function authorize(event: APIGatewayRequestAuthorizerEvent, deps: A
   let runtimeArn: string;
   try {
     const entry = await deps.registry.resolve(backend);
-    if (entry.requiredScopes.some((scope) => !scopes.includes(scope))) {
+    if (missingScopes(scopes, entry.requiredScopes).length > 0) {
       log.warn('request refused', { ...fields, tenantId, backend, reason: 'backend_scope_missing', status: 403 });
       return buildPolicy(event.methodArn, 'Deny');
     }

@@ -23,6 +23,7 @@ import type { APIGatewayProxyEvent, StreamifyHandler } from 'aws-lambda';
 import { AgentCoreRuntimeBackend } from '../backend/agentcore-runtime.transport';
 import type { InvokeBackend } from '../backend/backend';
 import { isLambdaRuntime, readIngressConfig } from '../shared/config';
+import { headerValue } from '../shared/headers';
 import { errorName, log } from '../shared/logger';
 import { emitRequestMetrics, type RequestMetrics, UsageEventScanner } from '../shared/metrics';
 import { ERROR_TEXT, type ErrorStatus, IngressPipeline, pipelineFor, RequestError } from '../shared/request';
@@ -44,15 +45,6 @@ export interface HandlerDependencies {
   readonly perTenantMetrics?: boolean;
   /** Resolves once init's pre-connects are done (ADR-0023); the first request awaits it. */
   readonly ready?: Promise<void>;
-}
-
-function authorizationHeader(event: APIGatewayProxyEvent): string | undefined {
-  for (const [name, value] of Object.entries(event.headers ?? {})) {
-    if (name.toLowerCase() === 'authorization' && value !== undefined) {
-      return value;
-    }
-  }
-  return undefined;
 }
 
 function decodeBody(event: APIGatewayProxyEvent): string | null {
@@ -110,7 +102,7 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
     // `requestContext.resourcePath` is the template (`/{backend}/invocations`)
     // and `requestContext.path` carries the stage prefix. The registry
     // resolves the name (ADR-0024).
-    request = await deps.pipeline.validate({ authorization: authorizationHeader(event), body: decodeBody(event), path: event.path });
+    request = await deps.pipeline.validate({ authorization: headerValue(event.headers, 'authorization'), body: decodeBody(event), path: event.path });
   } catch (error) {
     if (error instanceof RequestError) {
       return fail(error.status, error.reason, error.tenantId);

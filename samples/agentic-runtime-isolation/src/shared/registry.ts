@@ -14,11 +14,11 @@
  */
 
 import { GetParameterCommand, ParameterNotFound, SSMClient } from '@aws-sdk/client-ssm';
-import type { RegistryConfig } from './config';
+import { BACKEND_NAME_PATTERN, type RegistryConfig } from './config';
 import { sharedHandler } from './http';
 
-/** A backend name: lower-case letters, digits and hyphens, 1 to 32 characters. */
-export const BACKEND_NAME_PATTERN = /^[a-z0-9-]{1,32}$/;
+/** The name rule lives in config.ts (which validates `RI_DEFAULT_BACKEND` without loading the SSM client); re-exported for the CDK side. */
+export { BACKEND_NAME_PATTERN };
 
 /** The route suffix under every backend name (spec §5). */
 export const ROUTE = 'invocations';
@@ -48,13 +48,31 @@ export function registryParameterName(prefix: string, backend: string): string {
   return `${prefix}${REGISTRY_BACKENDS_SEGMENT}${backend}`;
 }
 
-const RUNTIME_ARN_PATTERN = /^arn:[a-z-]+:bedrock-agentcore:[a-z0-9-]+:\d{12}:runtime\/[A-Za-z0-9_-]+$/;
+const RUNTIME_ARN_PATTERN = /^arn:([a-z-]+):bedrock-agentcore:([a-z0-9-]+):(\d{12}):runtime\/[A-Za-z0-9_-]+$/;
+
+/** The partition a Region belongs to, so an entry's ARN can be checked against the Lambda's own. */
+export function partitionOf(region: string): string {
+  if (region.startsWith('cn-')) {
+    return 'aws-cn';
+  }
+  if (region.startsWith('us-gov-')) {
+    return 'aws-us-gov';
+  }
+  return 'aws';
+}
+
+/** Where the ingress runs; an entry whose Runtime ARN points elsewhere is refused. Either field absent skips its check. */
+export interface RegistryScope {
+  readonly region?: string;
+  readonly account?: string;
+}
 
 /**
  * Parses and validates an entry's JSON. Throws on anything the ingress must
- * not act on: a malformed ARN, a non-string scope, an unknown status.
+ * not act on: a malformed ARN, an ARN outside the ingress's own partition,
+ * Region or account, a non-string scope, an unknown status.
  */
-export function parseRegistryEntry(raw: string): RegistryEntry {
+export function parseRegistryEntry(raw: string, scope: RegistryScope = {}): RegistryEntry {
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -65,8 +83,16 @@ export function parseRegistryEntry(raw: string): RegistryEntry {
     throw new Error('registry entry is not an object');
   }
   const { runtimeArn, requiredScopes, status } = value as Record<string, unknown>;
-  if (typeof runtimeArn !== 'string' || !RUNTIME_ARN_PATTERN.test(runtimeArn)) {
+  const arn = typeof runtimeArn === 'string' ? RUNTIME_ARN_PATTERN.exec(runtimeArn) : null;
+  if (arn === null) {
     throw new Error('registry entry runtimeArn is not an AgentCore Runtime ARN');
+  }
+  const [, partition, region, account] = arn;
+  if (scope.region !== undefined && (region !== scope.region || partition !== partitionOf(scope.region))) {
+    throw new Error('registry entry runtimeArn is outside the ingress Region');
+  }
+  if (scope.account !== undefined && account !== scope.account) {
+    throw new Error('registry entry runtimeArn is outside the ingress account');
   }
   const scopes = requiredScopes === undefined ? [] : requiredScopes;
   if (!Array.isArray(scopes) || scopes.some((s) => typeof s !== 'string' || s.length === 0 || /\s/.test(s))) {
@@ -75,29 +101,31 @@ export function parseRegistryEntry(raw: string): RegistryEntry {
   if (status !== 'active' && status !== 'draining') {
     throw new Error('registry entry status must be active or draining');
   }
-  return { runtimeArn, requiredScopes: scopes as string[], status };
+  return { runtimeArn: runtimeArn as string, requiredScopes: scopes as string[], status };
 }
 
 /**
- * Reads the backend name from a request path. `/<name>/invocations` yields
- * the name; the bare `/invocations` yields `defaultBackend` when one is
- * configured. A stage prefix (`/prod/...`) is tolerated because API Gateway
- * and the Gateway differ in what they hand the Lambda. Returns undefined
- * for anything else, including an ill-formed name.
+ * Reads the backend name from a request path. Both ingresses hand the Lambda
+ * the path stage-stripped (API Gateway's `event.path`, the Gateway target's
+ * path), so exactly two shapes are accepted: `/<name>/invocations` yields the
+ * name; the bare `/invocations` yields `defaultBackend` when one is
+ * configured. A trailing slash and a query string are tolerated. Anything
+ * else is undefined: more segments, an ill-formed name, or a name equal to
+ * the route word itself.
  */
 export function backendFromPath(path: string | undefined, defaultBackend?: string): string | undefined {
   if (path === undefined) {
     return undefined;
   }
   const segments = path.split('?')[0].split('/').filter((s) => s.length > 0);
-  if (segments.length === 0 || segments[segments.length - 1] !== ROUTE) {
+  if (segments.length === 0 || segments.length > 2 || segments[segments.length - 1] !== ROUTE) {
     return undefined;
   }
   if (segments.length === 1) {
     return defaultBackend;
   }
-  const name = segments[segments.length - 2];
-  return isValidBackendName(name) ? name : undefined;
+  const name = segments[0];
+  return name !== ROUTE && isValidBackendName(name) ? name : undefined;
 }
 
 /** Why a lookup produced no backend. */
@@ -114,17 +142,37 @@ interface CacheSlot {
   entry?: RegistryEntry;
   /** The miss to report while the slot is stale and a refresh fails. */
   miss?: RegistryMiss;
+  /** When the entry or miss was last read from SSM; bounds how long a stale entry may be served. */
   fetchedAt: number;
+  /** When the next refresh may run: `fetchedAt` plus the TTL, or pushed out by a failed refresh. */
+  nextRefreshAt: number;
   inflight?: Promise<void>;
 }
+
+/**
+ * Seconds a failed refresh of a stale entry holds before the next attempt
+ * (bounded by the TTL), so a request storm during an SSM outage reads SSM
+ * once per interval per backend instead of once per request.
+ */
+export const REFRESH_RETRY_SECONDS = 5;
+
+/**
+ * The multiple of the TTL after which a stale entry is no longer served and
+ * the miss becomes `registry_unavailable`: the registry has been unreadable
+ * for that long, and the entry may describe a Runtime that no longer exists
+ * or whose scopes have changed. With the default 60 s TTL that is 10 minutes.
+ */
+export const MAX_STALE_TTL_MULTIPLE = 10;
 
 /**
  * Resolves backend names through SSM with a per-process cache. An entry is
  * served from the cache for `ttlSeconds`; after that the next request
  * refreshes it in flight, and a failed refresh serves the stale entry
- * (stale-while-refresh), so SSM's 40 TPS standard quota is paid once per
- * process per backend per TTL. A name that SSM does not know is cached as a
- * miss for the same TTL, so an unknown route cannot drive a read per request.
+ * (stale-while-refresh) for up to MAX_STALE_TTL_MULTIPLE TTLs, retrying
+ * every REFRESH_RETRY_SECONDS, so SSM's 40 TPS standard quota is paid once
+ * per process per backend per TTL. A name that SSM does not know is cached
+ * as a miss for the same TTL, so an unknown route cannot drive a read per
+ * request.
  */
 export class BackendRegistry {
   private readonly cache = new Map<string, CacheSlot>();
@@ -154,8 +202,7 @@ export class BackendRegistry {
       throw new RegistryError('unknown_backend');
     }
     const slot = this.cache.get(backend);
-    const fresh = slot !== undefined && this.now() - slot.fetchedAt < this.config.ttlSeconds * 1000;
-    if (slot === undefined || !fresh) {
+    if (slot === undefined || this.now() >= slot.nextRefreshAt) {
       // Cold or stale: refresh. A failed refresh leaves the slot holding
       // either the stale entry (served below) or a `registry_unavailable`
       // miss, so the SDK error never escapes as anything but a RegistryError.
@@ -181,10 +228,12 @@ export class BackendRegistry {
     if (existing?.inflight !== undefined) {
       return existing.inflight;
     }
-    const slot: CacheSlot = existing ?? { fetchedAt: 0 };
+    const ttlMs = this.config.ttlSeconds * 1000;
+    const slot: CacheSlot = existing ?? { fetchedAt: 0, nextRefreshAt: 0 };
     slot.inflight = this.fetch(backend)
       .then((result) => {
         slot.fetchedAt = this.now();
+        slot.nextRefreshAt = slot.fetchedAt + ttlMs;
         if ('entry' in result) {
           slot.entry = result.entry;
           slot.miss = undefined;
@@ -195,9 +244,17 @@ export class BackendRegistry {
         }
       })
       .catch((error: unknown) => {
+        const now = this.now();
+        if (slot.entry !== undefined && now - slot.fetchedAt > MAX_STALE_TTL_MULTIPLE * ttlMs) {
+          // Too stale to trust: drop it and report the registry as down.
+          slot.entry = undefined;
+        }
         if (slot.entry === undefined) {
           slot.miss = 'registry_unavailable';
-          slot.fetchedAt = this.now();
+          slot.fetchedAt = now;
+          slot.nextRefreshAt = now + ttlMs;
+        } else {
+          slot.nextRefreshAt = now + Math.min(ttlMs, REFRESH_RETRY_SECONDS * 1000);
         }
         throw error;
       })
@@ -223,7 +280,7 @@ export class BackendRegistry {
       return { miss: 'unknown_backend' };
     }
     try {
-      return { entry: parseRegistryEntry(value) };
+      return { entry: parseRegistryEntry(value, { region: this.config.region, account: this.config.account }) };
     } catch {
       return { miss: 'registry_entry_invalid' };
     }

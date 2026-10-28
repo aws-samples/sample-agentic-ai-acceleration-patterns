@@ -3,13 +3,19 @@
 
 /**
  * The ingress Lambdas' configuration: the construct writes it as environment
- * variables (src/runtime-isolation.cdk.ts) and the handlers read it back
+ * variables (src/shared-ingress.cdk.ts) and the handlers read it back
  * here, so the names and the encoding live in one file. Everything in it is
  * configuration a deployer chose; nothing is a secret.
  */
 
 import type { IngressKind } from './metrics';
 import type { SessionScope } from './session';
+
+/** A backend name: lower-case letters, digits and hyphens, 1 to 32 characters (ADR-0024). */
+export const BACKEND_NAME_PATTERN = /^[a-z0-9-]{1,32}$/;
+
+/** A 12-digit AWS account id. */
+const ACCOUNT_ID_PATTERN = /^\d{12}$/;
 
 /** Environment variable names. */
 export const ENV = {
@@ -35,7 +41,9 @@ export const ENV = {
   /** Backend registry (ADR-0024): the SSM parameter prefix the ingress resolves `/{backend}/invocations` through, and the cache TTL. */
   REGISTRY_PREFIX: 'RI_REGISTRY_PREFIX',
   REGISTRY_TTL_SECONDS: 'RI_REGISTRY_TTL_SECONDS',
-  /** The backend served at the bare `/invocations` route (the one-backend wrapper); unset when there is none. */
+  /** The account the ingress runs in; a registry entry whose Runtime ARN names another account is refused. Unset skips the check. */
+  REGISTRY_ACCOUNT: 'RI_REGISTRY_ACCOUNT',
+  /** The backend served at the bare `/invocations` route (the one-agent form); unset when there is none. */
   DEFAULT_BACKEND: 'RI_DEFAULT_BACKEND',
 } as const;
 
@@ -75,8 +83,12 @@ export interface RegistryConfig {
   readonly prefix: string;
   /** Seconds an entry is served from the per-process cache before a refresh; default 60. */
   readonly ttlSeconds: number;
-  /** The backend the bare `/invocations` route resolves to (one-backend wrapper); undefined when there is none. */
+  /** The backend the bare `/invocations` route resolves to (the one-agent form); undefined when there is none. */
   readonly defaultBackend?: string;
+  /** The Region the ingress runs in (`AWS_REGION`); an entry's Runtime ARN must match it and its partition. Undefined skips the check. */
+  readonly region?: string;
+  /** The account the ingress runs in (`RI_REGISTRY_ACCOUNT`); an entry's Runtime ARN must match it. Undefined skips the check. */
+  readonly account?: string;
 }
 
 export interface IngressConfig {
@@ -192,16 +204,30 @@ export function readIngressConfig(env: NodeJS.ProcessEnv = process.env): Ingress
   };
 }
 
-/** The registry prefix must be an absolute SSM path ending in `/`. */
+/**
+ * The registry prefix must be an absolute SSM path ending in `/`; the default
+ * backend, when set, must be a valid backend name; the account, when set,
+ * must be a 12-digit id. The Region is the Lambda's own (`AWS_REGION`).
+ */
 export function readRegistryConfig(env: NodeJS.ProcessEnv = process.env): RegistryConfig {
   const prefix = requireEnv(ENV.REGISTRY_PREFIX, env);
   if (!prefix.startsWith('/') || !prefix.endsWith('/')) {
     throw new Error(`${ENV.REGISTRY_PREFIX} must start and end with /`);
   }
   const defaultBackend = env[ENV.DEFAULT_BACKEND];
+  if (defaultBackend !== undefined && defaultBackend !== '' && !BACKEND_NAME_PATTERN.test(defaultBackend)) {
+    throw new Error(`${ENV.DEFAULT_BACKEND} must be 1 to 32 lower-case letters, digits and hyphens`);
+  }
+  const account = env[ENV.REGISTRY_ACCOUNT];
+  if (account !== undefined && account !== '' && !ACCOUNT_ID_PATTERN.test(account)) {
+    throw new Error(`${ENV.REGISTRY_ACCOUNT} must be a 12-digit AWS account id`);
+  }
+  const region = env.AWS_REGION;
   return {
     prefix,
     ttlSeconds: positiveInteger(ENV.REGISTRY_TTL_SECONDS, env[ENV.REGISTRY_TTL_SECONDS]) ?? 60,
     defaultBackend: defaultBackend === undefined || defaultBackend === '' ? undefined : defaultBackend,
+    region: region === undefined || region === '' ? undefined : region,
+    account: account === undefined || account === '' ? undefined : account,
   };
 }

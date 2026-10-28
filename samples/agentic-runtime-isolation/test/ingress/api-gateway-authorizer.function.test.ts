@@ -108,6 +108,21 @@ describe('authorize', () => {
     expect(refusal()).toMatchObject({ reason: 'backend_draining', backend: 'old' });
   });
 
+  it('an ill-formed pathParameters.backend is a 404 Deny: the segment is neither looked up nor logged', async () => {
+    const token = `Bearer ${await issuer.mint()}`;
+    const { registry } = stubRegistry(entries);
+    const resolve = jest.spyOn(registry, 'resolve');
+    for (const segment of ['Nope', 'a_b', 'a'.repeat(33), '<script>']) {
+      logs = [];
+      const result = await authorizer.authorize(event({ Authorization: token }, { path: `/${segment}/invocations`, backend: segment }), deps(registry));
+      expect(effectOf(result)).toBe('Deny');
+      expect(refusal()).toMatchObject({ reason: 'unknown_backend', status: 404, tenantId: 'tenant-a' });
+      expect(refusal().backend).toBeUndefined();
+      expect(logs.join('\n')).not.toContain(segment);
+    }
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
   it('a registry fault is a Deny with its reason; an unexpected error is a Deny with the error name', async () => {
     const token = `Bearer ${await issuer.mint()}`;
     const faulty: RegistryResolver = {

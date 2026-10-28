@@ -13,11 +13,14 @@
  * user-token and credential headers. A refusal is a fixed-text response.
  *
  * The Gateway target is created under the backend's name (`AgentBackend`), so
- * the request path is `/<backend>/invocations` and the same `backendFromPath`
- * reads it on both ingresses. Whether the interceptor event carries that path
- * is verified on first deploy (ADR-0024 follow-up): with no name in the path
- * and no default backend the pipeline refuses with 404, and this module warns
- * once per cold start so the gap is visible in the logs.
+ * the request path the interceptor event carries is `/<backend>/invocations`
+ * (verified: integ step 9-registry, 2026-10-28) and the same `backendFromPath`
+ * reads it on both ingresses. On this ingress the name MUST come from the
+ * path: the pipeline is called with `requireBackendInPath`, so a default
+ * backend never routes a Gateway request, and an event whose path names no
+ * backend is refused with 404 `unknown_backend`. That case is a deployment
+ * fault (a target not named after its backend), so this module warns once
+ * per cold start to make it visible in the logs.
  *
  * Logs carry header NAMES never, and values never: only the verified
  * tenantId, the session prefix, a status and a reason (P-9, spike V-7).
@@ -35,6 +38,7 @@
 import { AgentCoreRuntimeBackend } from '../backend/agentcore-runtime.transport';
 import type { HeaderTransportBackend } from '../backend/backend';
 import { isLambdaRuntime, readIngressConfig } from '../shared/config';
+import { headerValue } from '../shared/headers';
 import { errorName, log } from '../shared/logger';
 import { emitRequestMetrics } from '../shared/metrics';
 import { backendFromPath } from '../shared/registry';
@@ -69,20 +73,6 @@ export interface InterceptorDependencies {
   readonly now?: () => number;
   /** Resolves once init's pre-connects are done (ADR-0023); the first request awaits it. */
   readonly ready?: Promise<void>;
-}
-
-/** Case-insensitive header lookup. */
-function header(headers: Record<string, string> | undefined, name: string): string | undefined {
-  if (headers === undefined) {
-    return undefined;
-  }
-  const wanted = name.toLowerCase();
-  for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() === wanted) {
-      return value;
-    }
-  }
-  return undefined;
 }
 
 /**
@@ -151,26 +141,28 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
 
   // The Gateway target is named after the backend, so the request path the
   // event carries is `/<backend>/invocations`; the registry resolves it
-  // (ADR-0024). The name is read from the path only, never from a header.
+  // (ADR-0024). The name is read from the path only, never from a header,
+  // and never from the default backend (`requireBackendInPath`).
   const path = gatewayRequest?.path;
+  const backend = backendFromPath(path);
   let request;
   try {
     request = await deps.pipeline.validate({
-      authorization: header(gatewayRequest?.headers, 'authorization'),
+      authorization: headerValue(gatewayRequest?.headers, 'authorization'),
       body: bodyText(gatewayRequest?.body),
       path,
+      requireBackendInPath: true,
     });
   } catch (error) {
     if (error instanceof RequestError) {
-      if (error.reason === 'unknown_backend' && backendFromPath(path) === undefined && !warnedPathLacksBackend) {
-        // The event named no backend and no default is configured: either
-        // the Gateway does not hand the target path to the interceptor (to
-        // verify on first deploy, ADR-0024) or the ingress needs a default.
+      if (error.reason === 'unknown_backend' && backend === undefined && !warnedPathLacksBackend) {
+        // The event named no backend: the target is not named after its
+        // backend, or the Gateway handed a path this module does not read.
         warnedPathLacksBackend = true;
         log.warn('interceptor path lacks backend', { ingress: 'agentcore-gateway', pathPresent: path !== undefined });
       }
-      log.warn('request refused', { ingress: 'agentcore-gateway', status: error.status, reason: error.reason, tenantId: error.tenantId });
-      metrics(error.status, error.tenantId);
+      log.warn('request refused', { ingress: 'agentcore-gateway', status: error.status, reason: error.reason, tenantId: error.tenantId, backend });
+      metrics(error.status, error.tenantId, backend);
       return deny(error.status);
     }
     log.error('pipeline failed', { ingress: 'agentcore-gateway', error: errorName(error) });

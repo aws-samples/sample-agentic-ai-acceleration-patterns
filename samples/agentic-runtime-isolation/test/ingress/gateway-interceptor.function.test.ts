@@ -176,32 +176,42 @@ describe('intercept', () => {
     });
 
     it.each([
-      ['unknown backend', '/nope/invocations', 'unknown_backend'],
-      ['draining backend', '/old/invocations', 'backend_draining'],
-    ])('%s -> 404 "not found"', async (_n, path, reason) => {
+      ['unknown backend', '/nope/invocations', 'unknown_backend', 'nope'],
+      ['draining backend', '/old/invocations', 'backend_draining', 'old'],
+    ])('%s -> 404 "not found", the refused line names the backend', async (_n, path, reason, name) => {
       const out = await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body, { path }), deps());
       const response = (out.http as any).transformedGatewayResponse;
       expect(response.statusCode).toBe(404);
       expect(Buffer.from(response.body, 'base64').toString()).toBe('not found');
-      expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request refused')).toMatchObject({ status: 404, reason, tenantId: 'tenant-a' });
+      expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request refused')).toMatchObject({ status: 404, reason, tenantId: 'tenant-a', backend: name });
+      expect(JSON.parse(metrics[0])).toMatchObject({ Backend: name, Errors4xx: 1 });
       expect(logs.some((l) => l.includes('interceptor path lacks backend'))).toBe(false);
     });
 
     it("a token without the backend's scopes -> 403 backend_scope_missing", async () => {
       const out = await intercept(event({ authorization: `Bearer ${await issuer.mint({ scope: 'tenant-api/read' })}` }, body, { path: '/billing/invocations' }), deps());
       expect((out.http as any).transformedGatewayResponse.statusCode).toBe(403);
-      expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request refused')).toMatchObject({ status: 403, reason: 'backend_scope_missing' });
+      expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request refused')).toMatchObject({ status: 403, reason: 'backend_scope_missing', backend: 'billing' });
     });
 
-    it('a path without a name serves the default backend when one is configured', async () => {
+    it('the name MUST come from the path: a default backend never routes a Gateway request (404, no header forwarded)', async () => {
+      // deps() configures `agent` as the default backend; the API Gateway ingress would serve it here.
       for (const path of ['/invocations', undefined]) {
         const out = await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body, { path }), deps());
-        expect('transformedGatewayRequest' in out.http).toBe(true);
+        expect('transformedGatewayRequest' in out.http).toBe(false);
+        const response = (out.http as any).transformedGatewayResponse;
+        expect(response.statusCode).toBe(404);
+        expect(Buffer.from(response.body, 'base64').toString()).toBe('not found');
       }
-      expect(logs.filter((l) => l.includes('request admitted')).map((l) => JSON.parse(l).backend)).toEqual(['agent', 'agent']);
+      expect(logs.some((l) => l.includes('request admitted'))).toBe(false);
+      const refused = logs.map((l) => JSON.parse(l)).filter((l) => l.message === 'request refused');
+      expect(refused).toHaveLength(2);
+      expect(refused[0]).toMatchObject({ status: 404, reason: 'unknown_backend', tenantId: 'tenant-a' });
+      expect(refused[0].backend).toBeUndefined();
+      expect(logs.filter((l) => l.includes('interceptor path lacks backend'))).toHaveLength(1);
     });
 
-    it("no name and no default backend: 404, and 'interceptor path lacks backend' is warned once per cold start", async () => {
+    it("no name in the path: 404, and 'interceptor path lacks backend' is warned once per cold start", async () => {
       const d = deps(baseConfig({ ingress: 'agentcore-gateway', sessionScope: 'user', registry: { prefix: REGISTRY_PREFIX, ttlSeconds: 60 } }));
       for (const path of [undefined, '/invocations', undefined]) {
         const out = await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body, { path }), d);

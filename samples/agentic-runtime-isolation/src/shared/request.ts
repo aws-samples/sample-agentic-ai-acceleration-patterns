@@ -13,6 +13,7 @@
  */
 
 import type { IngressConfig } from './config';
+import { missingScopes } from './headers';
 import { endpointHost, preconnect } from './http';
 import { TenantLimiter } from './limits';
 import { BackendRegistry, backendFromPath, RegistryError, type RegistryMiss, ROUTE } from './registry';
@@ -97,6 +98,14 @@ export interface RequestInputs {
    * otherwise.
    */
   readonly path?: string;
+  /**
+   * Refuse a path that carries no backend name (404 `unknown_backend`) even
+   * when a default backend is configured. The Gateway ingress sets this: its
+   * target is named after the backend, so the path always names one, and a
+   * default must never route a Gateway request. The API Gateway ingress
+   * leaves it off so the one-agent form's bare `/invocations` works.
+   */
+  readonly requireBackendInPath?: boolean;
 }
 
 /** What the pipeline needs from the registry; `BackendRegistry` is the implementation, tests pass a stub. */
@@ -149,7 +158,7 @@ export class IngressPipeline {
     }
     // The backend comes from the route and the registry alone (ADR-0024).
     // Resolved before the body is read, so an unknown route costs no parse.
-    const { backend, runtimeArn } = await this.resolveBackend(inputs.path, claims);
+    const { backend, runtimeArn } = await this.resolveBackend(inputs, claims);
     const body = parseBody(inputs.body, this.config.sessionScope !== undefined);
     // Per-tenant limit (ADR-0020) before any cost is incurred: no STS call,
     // no Runtime session and no model call for a limited tenant.
@@ -184,9 +193,11 @@ export class IngressPipeline {
    * name or a draining backend is 404; a registry fault is 502; a token
    * without the backend's `requiredScopes` is 403 `backend_scope_missing`,
    * checked after the ingress-wide scopes the verifier enforced (ADR-0005).
+   * With `requireBackendInPath` the default backend is not consulted.
    */
-  private async resolveBackend(path: string | undefined, claims: VerifiedClaims): Promise<{ backend: string; runtimeArn: string }> {
-    const backend = backendFromPath(path ?? `/${ROUTE}`, this.config.registry.defaultBackend);
+  private async resolveBackend(inputs: RequestInputs, claims: VerifiedClaims): Promise<{ backend: string; runtimeArn: string }> {
+    const defaultBackend = inputs.requireBackendInPath === true ? undefined : this.config.registry.defaultBackend;
+    const backend = backendFromPath(inputs.path ?? `/${ROUTE}`, defaultBackend);
     if (backend === undefined) {
       throw new RequestError(404, 'unknown_backend', claims.tenantId);
     }
@@ -199,7 +210,7 @@ export class IngressPipeline {
       }
       throw error;
     }
-    if (entry.requiredScopes.some((scope) => !claims.scopes.includes(scope))) {
+    if (missingScopes(claims.scopes, entry.requiredScopes).length > 0) {
       throw new RequestError(403, 'backend_scope_missing', claims.tenantId);
     }
     return { backend, runtimeArn: entry.runtimeArn };

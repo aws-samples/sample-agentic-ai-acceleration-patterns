@@ -243,8 +243,7 @@ describe('IngressPipeline', () => {
       const r = await p.validate({ authorization: token, body, path: '/billing/invocations' });
       expect(r.backend).toBe('billing');
       expect(r.runtimeArn).toBe(entries.billing.runtimeArn);
-      // A stage prefix is tolerated; the bare route falls back to the default backend.
-      expect((await p.validate({ authorization: token, body, path: '/prod/billing/invocations' })).backend).toBe('billing');
+      // The bare route falls back to the default backend.
       expect(await p.validate({ authorization: token, body, path: '/invocations' })).toMatchObject({ backend: 'agent', runtimeArn: RUNTIME_ARN });
     });
 
@@ -252,6 +251,7 @@ describe('IngressPipeline', () => {
       const p = pipeline(baseConfig(), undefined, stubRegistry(entries).registry);
       const token = `Bearer ${await issuer.mint()}`;
       expect(await refusal(p.validate({ authorization: token, body, path: '/billing/other' }))).toEqual({ status: 404, reason: 'unknown_backend' });
+      expect(await refusal(p.validate({ authorization: token, body, path: '/prod/billing/invocations' }))).toEqual({ status: 404, reason: 'unknown_backend' });
       expect(await refusal(p.validate({ authorization: token, body, path: '/Billing/invocations' }))).toEqual({ status: 404, reason: 'unknown_backend' });
       expect(await refusal(p.validate({ authorization: token, body, path: '/nope/invocations' }))).toEqual({ status: 404, reason: 'unknown_backend' });
       expect(await refusal(p.validate({ authorization: token, body, path: '/old/invocations' }))).toEqual({ status: 404, reason: 'backend_draining' });
@@ -264,6 +264,15 @@ describe('IngressPipeline', () => {
       const p = pipeline(baseConfig({ registry: { prefix: '/p/', ttlSeconds: 60 } }), undefined, stubRegistry(entries).registry);
       expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, path: '/invocations' }))).toEqual({ status: 404, reason: 'unknown_backend' });
       expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body }))).toEqual({ status: 404, reason: 'unknown_backend' });
+    });
+
+    it('requireBackendInPath: the default backend is never consulted, a named backend still resolves', async () => {
+      const p = pipeline(baseConfig(), undefined, stubRegistry(entries).registry);
+      const token = `Bearer ${await issuer.mint()}`;
+      expect(await refusal(p.validate({ authorization: token, body, path: '/invocations', requireBackendInPath: true }))).toEqual({ status: 404, reason: 'unknown_backend' });
+      expect(await refusal(p.validate({ authorization: token, body, requireBackendInPath: true }))).toEqual({ status: 404, reason: 'unknown_backend' });
+      await expect(p.validate({ authorization: token, body, path: '/billing/invocations', requireBackendInPath: true })).resolves.toMatchObject({ backend: 'billing' });
+      await expect(p.validate({ authorization: token, body, path: '/agent/invocations', requireBackendInPath: true })).resolves.toMatchObject({ backend: 'agent' });
     });
 
     it('a registry fault is 502 with its reason', async () => {

@@ -89,7 +89,8 @@ export class AgentCoreRuntimeBackend implements InvokeBackend, HeaderTransportBa
 
   /** The direct path: `InvokeAgentRuntime` with SigV4 on the request's Runtime, the unit id as `runtimeSessionId`. */
   async invoke(request: ValidatedRequest): Promise<BackendResponse> {
-    if (request.runtimeArn === undefined || request.runtimeArn.length === 0) {
+    // `runtimeArn` is typed and registry-validated; an empty string would be a pipeline defect, not a request fault.
+    if (request.runtimeArn.length === 0) {
       throw new Error('AgentCoreRuntimeBackend: no runtime ARN to invoke');
     }
     const command = new InvokeAgentRuntimeCommand({

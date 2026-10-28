@@ -73,6 +73,26 @@ describe('readIngressConfig', () => {
     expect(() => readIngressConfig({ ...base, [ENV.REGISTRY_TTL_SECONDS]: 'soon' })).toThrow(ENV.REGISTRY_TTL_SECONDS);
   });
 
+  it('registry: the default backend must be a valid backend name', () => {
+    expect(readRegistryConfig({ ...base, [ENV.DEFAULT_BACKEND]: 'billing-2' }).defaultBackend).toBe('billing-2');
+    for (const bad of ['Agent', 'a_b', 'a'.repeat(33), 'agent/invocations']) {
+      expect(() => readRegistryConfig({ ...base, [ENV.DEFAULT_BACKEND]: bad })).toThrow(ENV.DEFAULT_BACKEND);
+    }
+  });
+
+  it('registry: the Region is the Lambda\'s AWS_REGION and the account is RI_REGISTRY_ACCOUNT; either absent skips its check', () => {
+    expect(readRegistryConfig({ ...base, AWS_REGION: 'eu-central-1', [ENV.REGISTRY_ACCOUNT]: '111122223333' })).toMatchObject({
+      region: 'eu-central-1',
+      account: '111122223333',
+    });
+    const none = readRegistryConfig({ ...base, AWS_REGION: '', [ENV.REGISTRY_ACCOUNT]: '' });
+    expect(none.region).toBeUndefined();
+    expect(none.account).toBeUndefined();
+    expect(readIngressConfig({ ...base, AWS_REGION: 'us-east-1' }).registry.region).toBe('us-east-1');
+    expect(() => readRegistryConfig({ ...base, [ENV.REGISTRY_ACCOUNT]: '12345' })).toThrow(ENV.REGISTRY_ACCOUNT);
+    expect(() => readRegistryConfig({ ...base, [ENV.REGISTRY_ACCOUNT]: 'arn:aws:iam::111122223333:root' })).toThrow(ENV.REGISTRY_ACCOUNT);
+  });
+
   it('limits: a table with no request limit reads as 0 and no token limit', () => {
     expect(readIngressConfig({ ...base, [ENV.LIMITS_TABLE]: 'TenantLimits' }).limits).toEqual({
       tableName: 'TenantLimits',

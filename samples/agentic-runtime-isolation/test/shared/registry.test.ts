@@ -9,7 +9,10 @@ import {
   BackendRegistry,
   backendFromPath,
   isValidBackendName,
+  MAX_STALE_TTL_MULTIPLE,
   parseRegistryEntry,
+  partitionOf,
+  REFRESH_RETRY_SECONDS,
   RegistryError,
   registryParameterName,
 } from '../../src/shared/registry';
@@ -48,6 +51,44 @@ describe('parseRegistryEntry', () => {
     expect(() => parseRegistryEntry('[1]')).toThrow(/not an object/);
     expect(() => parseRegistryEntry('null')).toThrow(/not an object/);
   });
+
+  describe('the Runtime ARN must be in the ingress partition, Region and account', () => {
+    const scope = { region: 'eu-central-1', account: '111122223333' };
+
+    it('accepts an ARN that matches', () => {
+      expect(parseRegistryEntry(ENTRY, scope).runtimeArn).toBe(RUNTIME_ARN);
+    });
+
+    it('refuses another Region, and another partition for the same Region name', () => {
+      const other = JSON.stringify({ runtimeArn: 'arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/ri_x-1', status: 'active' });
+      expect(() => parseRegistryEntry(other, scope)).toThrow(/Region/);
+      const partition = JSON.stringify({ runtimeArn: 'arn:aws-cn:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_x-1', status: 'active' });
+      expect(() => parseRegistryEntry(partition, scope)).toThrow(/Region/);
+      const cn = JSON.stringify({ runtimeArn: 'arn:aws-cn:bedrock-agentcore:cn-north-1:111122223333:runtime/ri_x-1', status: 'active' });
+      expect(parseRegistryEntry(cn, { region: 'cn-north-1' }).runtimeArn).toContain('cn-north-1');
+      expect(() => parseRegistryEntry(ENTRY, { region: 'cn-north-1' })).toThrow(/Region/);
+    });
+
+    it('refuses another account', () => {
+      const other = JSON.stringify({ runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:444455556666:runtime/ri_x-1', status: 'active' });
+      expect(() => parseRegistryEntry(other, scope)).toThrow(/account/);
+    });
+
+    it('an absent account or Region skips that check', () => {
+      const other = JSON.stringify({ runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:444455556666:runtime/ri_x-1', status: 'active' });
+      expect(parseRegistryEntry(other, { region: 'eu-central-1' }).runtimeArn).toContain('444455556666');
+      const elsewhere = JSON.stringify({ runtimeArn: 'arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/ri_x-1', status: 'active' });
+      expect(parseRegistryEntry(elsewhere, { account: '111122223333' }).runtimeArn).toContain('us-east-1');
+      expect(parseRegistryEntry(elsewhere).runtimeArn).toContain('us-east-1');
+    });
+  });
+
+  it('partitionOf derives the partition from the Region', () => {
+    expect(partitionOf('eu-central-1')).toBe('aws');
+    expect(partitionOf('cn-northwest-1')).toBe('aws-cn');
+    expect(partitionOf('us-gov-west-1')).toBe('aws-us-gov');
+    expect(partitionOf('us-east-1')).toBe('aws');
+  });
 });
 
 describe('backend names and parameter names', () => {
@@ -69,24 +110,32 @@ describe('backend names and parameter names', () => {
 });
 
 describe('backendFromPath', () => {
-  it('reads the name before /invocations, with or without a stage prefix or a query string', () => {
+  it('reads the name before /invocations, with or without a trailing slash or a query string', () => {
     expect(backendFromPath('/agent/invocations')).toBe('agent');
-    expect(backendFromPath('/prod/agent/invocations')).toBe('agent');
     expect(backendFromPath('agent/invocations/')).toBe('agent');
     expect(backendFromPath('/agent/invocations?x=1')).toBe('agent');
   });
 
   it('the bare route resolves to the default backend, or to nothing', () => {
     expect(backendFromPath('/invocations', 'agent')).toBe('agent');
-    expect(backendFromPath('/prod/invocations', 'agent')).toBe('prod');
+    expect(backendFromPath('/invocations/', 'agent')).toBe('agent');
     expect(backendFromPath('/invocations')).toBeUndefined();
     expect(backendFromPath(undefined, 'agent')).toBeUndefined();
   });
 
-  it('an ill-formed name is nothing, even with a default', () => {
+  it('a stage prefix is not tolerated: the ingresses hand the path stage-stripped', () => {
+    expect(backendFromPath('/prod/agent/invocations')).toBeUndefined();
+    // Two segments are always `<name>/invocations`: a stage name in that
+    // position is read as a backend called `prod`, which the registry then
+    // resolves or refuses; there is no stage to strip here.
+    expect(backendFromPath('/prod/invocations', 'agent')).toBe('prod');
+  });
+
+  it('an ill-formed name is nothing, even with a default; the route word is not a name', () => {
     expect(backendFromPath('/Agent/invocations', 'agent')).toBeUndefined();
     expect(backendFromPath('/a_b/invocations')).toBeUndefined();
     expect(backendFromPath(`/${'a'.repeat(33)}/invocations`)).toBeUndefined();
+    expect(backendFromPath('/invocations/invocations', 'agent')).toBeUndefined();
   });
 
   it('a path that does not end in /invocations is nothing', () => {
@@ -180,6 +229,72 @@ describe('BackendRegistry', () => {
     ssm.on(GetParameterCommand).rejects(new Error('ThrottlingException'));
     expect(await r.resolve('agent')).toEqual(first);
     expect(ssm).toHaveReceivedCommandTimes(GetParameterCommand, 2);
+  });
+
+  it('a failed refresh of a stale entry holds for REFRESH_RETRY_SECONDS: a request storm during an outage does not read SSM per request', async () => {
+    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: ENTRY } });
+    const r = registry();
+    const first = await r.resolve('agent');
+    clock += 61_000;
+    ssm.on(GetParameterCommand).rejects(new Error('ThrottlingException'));
+    for (let i = 0; i < 10; i += 1) {
+      expect(await r.resolve('agent')).toEqual(first);
+    }
+    expect(ssm).toHaveReceivedCommandTimes(GetParameterCommand, 2);
+    clock += REFRESH_RETRY_SECONDS * 1000 - 1;
+    expect(await r.resolve('agent')).toEqual(first);
+    expect(ssm).toHaveReceivedCommandTimes(GetParameterCommand, 2);
+    clock += 1;
+    expect(await r.resolve('agent')).toEqual(first);
+    expect(ssm).toHaveReceivedCommandTimes(GetParameterCommand, 3);
+    // Once SSM is back the next retry refreshes and the normal TTL resumes.
+    clock += REFRESH_RETRY_SECONDS * 1000;
+    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: JSON.stringify({ runtimeArn: RUNTIME_ARN, requiredScopes: [], status: 'active' }) } });
+    expect((await r.resolve('agent')).requiredScopes).toEqual([]);
+    clock += 59_000;
+    await r.resolve('agent');
+    expect(ssm).toHaveReceivedCommandTimes(GetParameterCommand, 4);
+  });
+
+  it('the retry hold never exceeds the TTL', async () => {
+    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: ENTRY } });
+    const r = registry(2);
+    await r.resolve('agent');
+    clock += 2_000;
+    ssm.on(GetParameterCommand).rejects(new Error('ThrottlingException'));
+    await r.resolve('agent');
+    clock += 2_000;
+    await r.resolve('agent');
+    expect(ssm).toHaveReceivedCommandTimes(GetParameterCommand, 3);
+  });
+
+  it(`a stale entry older than ${MAX_STALE_TTL_MULTIPLE} TTLs is dropped: the miss is registry_unavailable, held for one TTL`, async () => {
+    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: ENTRY } });
+    const r = registry();
+    const fetchedAt = clock;
+    const first = await r.resolve('agent');
+    ssm.on(GetParameterCommand).rejects(new Error('ThrottlingException'));
+    // Served stale right up to the ceiling.
+    clock = fetchedAt + MAX_STALE_TTL_MULTIPLE * 60_000;
+    expect(await r.resolve('agent')).toEqual(first);
+    clock += REFRESH_RETRY_SECONDS * 1000;
+    expect(await miss(r.resolve('agent'))).toBe('registry_unavailable');
+    const reads = ssm.commandCalls(GetParameterCommand).length;
+    expect(await miss(r.resolve('agent'))).toBe('registry_unavailable');
+    expect(ssm).toHaveReceivedCommandTimes(GetParameterCommand, reads);
+    clock += 60_000;
+    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: ENTRY } });
+    expect(await r.resolve('agent')).toEqual(first);
+  });
+
+  it('the Region and account the registry is configured with are applied to every entry', async () => {
+    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: ENTRY } });
+    const scoped = (region: string, account?: string) =>
+      new BackendRegistry({ prefix: REGISTRY_PREFIX, ttlSeconds: 60, region, account }, new SSMClient({}), now);
+    expect((await scoped('eu-central-1', '111122223333').resolve('agent')).runtimeArn).toBe(RUNTIME_ARN);
+    expect(await miss(scoped('us-east-1', '111122223333').resolve('agent'))).toBe('registry_entry_invalid');
+    expect(await miss(scoped('eu-central-1', '444455556666').resolve('agent'))).toBe('registry_entry_invalid');
+    expect((await scoped('eu-central-1').resolve('agent')).runtimeArn).toBe(RUNTIME_ARN);
   });
 
   it('refreshes after the TTL and picks up a changed entry; a definite miss replaces a stale entry', async () => {
