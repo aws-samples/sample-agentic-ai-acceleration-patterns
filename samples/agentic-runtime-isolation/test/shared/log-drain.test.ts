@@ -30,6 +30,16 @@ function logicalIdOf(template: Template, type: string): string[] {
   return Object.keys(template.findResources(type));
 }
 
+/** The registry entry (whose Delete invokes its handler) -> the same drain -> the handler's log group (ADR-0019, ADR-0024). */
+function expectRegistryEntryBehindDrain(template: Template, drain: string): void {
+  const resources = template.toJSON().Resources;
+  const [entryLogs] = logicalIdOf(template, 'AWS::Logs::LogGroup').filter((id) => id.includes('RegistryEntryLogs'));
+  expect(entryLogs).toBeDefined();
+  expect(resources[drain].DependsOn).toContain(entryLogs);
+  const [entry] = logicalIdOf(template, 'Custom::RuntimeIsolationRegistryEntry');
+  expect(resources[entry].DependsOn).toContain(drain);
+}
+
 describe('teardown leaves no log group (ADR-0019)', () => {
   it('api-gateway: owns the execution log group, and the stage -> drain -> every log group', () => {
     const template = synth('api-gateway');
@@ -47,6 +57,7 @@ describe('teardown leaves no log group (ADR-0019)', () => {
     }
     const [stage] = logicalIdOf(template, 'AWS::ApiGateway::Stage');
     expect(template.toJSON().Resources[stage].DependsOn).toContain(drain);
+    expectRegistryEntryBehindDrain(template, drain);
   });
 
   it('agentcore-gateway: the Gateway -> drain -> the interceptor log group', () => {
@@ -56,6 +67,7 @@ describe('teardown leaves no log group (ADR-0019)', () => {
     expect(template.toJSON().Resources[drain].DependsOn).toContain(interceptorLogs);
     const [gateway] = logicalIdOf(template, 'AWS::BedrockAgentCore::Gateway');
     expect(template.toJSON().Resources[gateway].DependsOn).toContain(drain);
+    expectRegistryEntryBehindDrain(template, drain);
   });
 
   it('the waiter always answers CloudFormation, also when the Delete wait throws', () => {

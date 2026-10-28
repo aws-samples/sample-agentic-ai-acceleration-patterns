@@ -5,12 +5,13 @@
  * One backend's registry entry as a custom resource (ADR-0024). A plain
  * `AWS::SSM::Parameter` disappears the moment its stack deletes it, so
  * running streams on the backend would be cut and the ingress would answer
- * 502 until its cache expired. This resource writes the entry on Create and
- * Update, and on Delete sets `status: draining`, waits one registry TTL plus
- * the longest stream, then removes the parameter (the log-drain shape,
- * ADR-0019). Its role may put, get and delete exactly this one parameter:
- * whoever writes `backends/<name>` chooses which Runtime answers the route,
- * so the write grant is per backend and per name.
+ * 502 until its cache expired. This resource writes the entry on Create
+ * (refusing a name another stack holds) and Update, and on Delete, if the
+ * entry is still this Runtime's, sets `status: draining`, waits one registry
+ * TTL plus the longest stream, then removes the parameter (the log-drain
+ * shape, ADR-0019). Its role may put, get and delete exactly this one
+ * parameter: whoever writes `backends/<name>` chooses which Runtime answers
+ * the route, so the write grant is per backend and per name.
  */
 
 import * as path from 'node:path';
@@ -20,11 +21,19 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
+import { LogDrain } from './log-drain';
 import { acknowledgeGranularFinding } from './nag';
 import { registryParameterName } from './registry';
 
 /** The longest stream the `api-gateway` ingress relays (its integration timeout, spike V-5). */
 export const LONGEST_STREAM = Duration.minutes(2);
+
+/** Lambda's longest timeout; the Delete path waits the whole drain inside one invocation. */
+const LAMBDA_MAX_TIMEOUT = Duration.minutes(15);
+/** Slack after the drain for the two SSM calls and the CloudFormation answer. */
+const DRAIN_SLACK = Duration.seconds(30);
+/** The longest `drain` the handler can wait: the Lambda maximum less the slack (870 s). */
+export const MAX_DRAIN = LAMBDA_MAX_TIMEOUT.minus(DRAIN_SLACK);
 
 export interface RegistryEntryResourceProps {
   /** The ingress's registry prefix, with its trailing slash. */
@@ -38,9 +47,18 @@ export interface RegistryEntryResourceProps {
   /**
    * How long Delete keeps the entry at `draining` before removing it: one
    * registry TTL (so every ingress instance has stopped routing here) plus
-   * the longest stream (so what was routed has finished). Default 180 s.
+   * the longest stream (so what was routed has finished). Default 180 s; at
+   * most `MAX_DRAIN` (870 s), since the handler waits it out in one Lambda
+   * invocation.
    */
   readonly drain?: Duration;
+  /**
+   * The log drain (ADR-0019) that holds back this function's log group until
+   * the custom resource is gone and its last lines have landed. Without one
+   * the group is deleted alongside the function and a late line recreates
+   * it outside the stack.
+   */
+  readonly logDrain?: LogDrain;
 }
 
 export class RegistryEntryResource extends Construct {
@@ -48,10 +66,18 @@ export class RegistryEntryResource extends Construct {
   readonly parameterName: string;
   /** The custom resource, for dependencies: it must be written after the Runtime, its policy and its target exist. */
   readonly resource: CustomResource;
+  /** The handler's log group, for a drain added after construction. */
+  readonly logGroup: logs.ILogGroup;
 
   constructor(scope: Construct, id: string, props: RegistryEntryResourceProps) {
     super(scope, id);
+    const fail = (prop: string, message: string): never => {
+      throw new Error(`RegistryEntryResource: ${prop} ${message}`);
+    };
     const drain = props.drain ?? Duration.seconds(60).plus(LONGEST_STREAM);
+    if (drain.toSeconds() < 1 || drain.toSeconds() > MAX_DRAIN.toSeconds()) {
+      fail('drain', `must be from 1 to ${MAX_DRAIN.toSeconds()} seconds (got ${drain.toSeconds()})`);
+    }
     this.parameterName = registryParameterName(props.registryPrefix, props.backend);
     const stack = Stack.of(this);
 
@@ -62,6 +88,7 @@ export class RegistryEntryResource extends Construct {
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: RemovalPolicy.DESTROY, // sample only
     });
+    this.logGroup = logGroup;
     const fn = new NodejsFunction(this, 'Function', {
       entry: path.join(__dirname, 'registry-entry.function.ts'),
       handler: 'handler',
@@ -69,7 +96,7 @@ export class RegistryEntryResource extends Construct {
       architecture: lambda.Architecture.ARM_64,
       memorySize: 256,
       // The Delete path waits the whole drain before answering.
-      timeout: drain.plus(Duration.seconds(30)),
+      timeout: drain.plus(DRAIN_SLACK),
       logGroup,
       loggingFormat: lambda.LoggingFormat.JSON,
       systemLogLevelV2: lambda.SystemLogLevel.WARN,
@@ -101,5 +128,12 @@ export class RegistryEntryResource extends Construct {
         DrainSeconds: drain.toSeconds(),
       },
     });
+
+    // ADR-0019: the custom resource (whose Delete invokes the function) goes
+    // before the drain waits, and the log group only after.
+    if (props.logDrain !== undefined) {
+      props.logDrain.writer(this.resource);
+      props.logDrain.protect(logGroup);
+    }
   }
 }

@@ -14,7 +14,9 @@ import {
   DEFAULT_REGISTRY_PREFIX,
   GATEWAY_TARGET_NAME,
   INGRESS_TAG_KEY,
+  MAX_REGISTRY_TTL,
   PUBLISHED,
+  RegistryEntryResource,
   registryParameterName,
   resolveOptions,
   ROUTE,
@@ -113,10 +115,11 @@ function runtimeLogicalId(template: Template): string {
 function resourcePolicy(template: Template): { Statement: any[] } {
   const policy = Object.values(template.findResources('AWS::BedrockAgentCore::ResourcePolicy'))[0] as any;
   // The policy is a Fn::Join of JSON fragments and references; stitch the
-  // fragments with placeholders so the document parses.
+  // fragments with placeholders so the document parses. A reference with a
+  // literal tail (`<arn>/*`) stays one string: the placeholder plus the tail.
   const parts = policy.Properties.Policy['Fn::Join'][1] as unknown[];
   const text = parts.map((p) => (typeof p === 'string' ? p : `<<${JSON.stringify(p)}>>`)).join('');
-  return JSON.parse(text.replace(/"<<(.*?)>>"/g, (_m, inner) => JSON.stringify(inner)));
+  return JSON.parse(text.replace(/"<<(.*?)>>([^"]*)"/g, (_m, inner, tail) => JSON.stringify(inner + tail)));
 }
 
 function lambdaEnv(template: Template, functionDescriptionContains: string): Record<string, unknown> {
@@ -155,10 +158,15 @@ describe('resolveOptions', () => {
     });
   });
 
-  it('registryPrefix must start and end with /, registryTtl be whole seconds, defaultBackend a backend name', () => {
+  it('registryPrefix must start and end with /, registryTtl be whole seconds from 1 to 750, defaultBackend a backend name', () => {
     expect(() => resolveOptions({ ...valid, registryPrefix: 'application-plane/' })).toThrow(/registryPrefix/);
     expect(() => resolveOptions({ ...valid, registryPrefix: '/application-plane' })).toThrow(/registryPrefix/);
     expect(() => resolveOptions({ ...valid, registryTtl: Duration.seconds(0) })).toThrow(/registryTtl/);
+    // The entry drains TTL + 120 s inside one Lambda invocation (+ 30 s slack), which must stay under 900 s.
+    expect(MAX_REGISTRY_TTL.toSeconds()).toBe(750);
+    expect(() => resolveOptions({ ...valid, registryTtl: Duration.seconds(751) })).toThrow(/SharedIngress: registryTtl must be .* 1 to 750 \(got 751\)/);
+    expect(() => resolveOptions({ ...valid, registryTtl: Duration.minutes(15) })).toThrow(/registryTtl/);
+    expect(resolveOptions({ ...valid, registryTtl: Duration.seconds(750) }).registryTtlSeconds).toBe(750);
     expect(() => resolveOptions({ ...valid, defaultBackend: 'Billing' } as any)).toThrow(/defaultBackend/);
     expect(resolveOptions({ ...valid, registryPrefix: '/custom/', registryTtl: Duration.seconds(5) })).toMatchObject({ registryPrefix: '/custom/', registryTtlSeconds: 5 });
   });
@@ -248,7 +256,7 @@ describe.each(INGRESSES)('one-backend defaults, ingress=%s', (ingress) => {
     });
   });
 
-  it('the resource policy allows InvokeAgentRuntime for the ingress principal only and denies everything to everyone else (P-1, ADR-0001)', () => {
+  it('the resource policy allows InvokeAgentRuntime for the ingress principal only and denies everything to everyone else, on the Runtime ARN and its endpoint form (P-1, ADR-0001, ADR-0024)', () => {
     template.resourceCountIs('AWS::BedrockAgentCore::ResourcePolicy', 1);
     const policy = resourcePolicy(template);
     expect(policy.Statement).toHaveLength(2);
@@ -260,6 +268,12 @@ describe.each(INGRESSES)('one-backend defaults, ingress=%s', (ingress) => {
     expect(deny.Effect).toBe('Deny');
     expect(deny.Principal).toEqual({ AWS: '*' });
     expect(deny.Action).toBe('bedrock-agentcore:*');
+    // Both statements name the Runtime ARN and `<arn>/*`, since InvokeAgentRuntime is also
+    // authorised on the runtime-endpoint ARN; a Deny on the Runtime alone would not gate it.
+    const runtimeArnRef = JSON.stringify(Stack.of(construct.ingress).resolve(construct.runtimeArn));
+    for (const statement of [allow, deny]) {
+      expect(statement.Resource).toEqual([runtimeArnRef, `${runtimeArnRef}/*`]);
+    }
     // The same principal appears in the Allow and in the ArnNotEquals condition, and it is the ingress role.
     const ingressRef = JSON.stringify(Stack.of(construct.ingress).resolve(construct.ingressRole.roleArn));
     expect(JSON.stringify(allow.Principal.AWS)).toBe(JSON.stringify(ingressRef));
@@ -449,6 +463,10 @@ describe.each(INGRESSES)('one-backend defaults, ingress=%s', (ingress) => {
     expect(env[ENV.REGISTRY_PREFIX]).toBe(DEFAULT_REGISTRY_PREFIX);
     expect(env[ENV.REGISTRY_TTL_SECONDS]).toBe('60');
     expect(env[ENV.DEFAULT_BACKEND]).toBe(GATEWAY_TARGET_NAME);
+    // The registry's account, so a resolver refuses an entry naming another account's Runtime; the Region is AWS_REGION.
+    expect(ENV.REGISTRY_ACCOUNT).toBe('RI_REGISTRY_ACCOUNT');
+    expect(env[ENV.REGISTRY_ACCOUNT]).toBe('111122223333');
+    expect(env).not.toHaveProperty('RI_REGISTRY_REGION');
     expect(env).not.toHaveProperty('RI_RUNTIME_ARN');
     for (const fn of Object.values(template.findResources('AWS::Lambda::Function')) as any[]) {
       expect(JSON.stringify(fn.Properties.Environment ?? {})).not.toContain('AgentRuntimeArn');
@@ -1015,6 +1033,43 @@ describe.each(INGRESSES)('SharedIngress with several AgentBackends, ingress=%s (
     expect(() => new AgentBackend(other, 'Bad3', { name: 'ok', ingress: ref, agent: { codePath: FIXTURE_AGENT, modelId: 'm' } })).toThrow(/gatewayIdentifier/);
   });
 
+  it('refuses a SharedIngress instance from another stack: it must be imported with fromParameters (ADR-0024)', () => {
+    const otherApp = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+    const backendStack = new Stack(otherApp, 'BackendStack', { env: { account: '111122223333', region: 'eu-central-1' } });
+    expect(() => new AgentBackend(backendStack, 'Foreign', { name: 'foreign', ingress: shared, agent: { codePath: FIXTURE_AGENT, modelId: 'm' } })).toThrow(
+      /AgentBackend: ingress a SharedIngress from another stack must be imported with SharedIngress\.fromParameters/,
+    );
+    // Nothing of the backend reached the ingress's stack either.
+    expect(JSON.stringify(template.toJSON())).not.toContain('Foreign');
+  });
+
+  it('a RegistryEntryResource drain above 870 s (TTL 750 s + 120 s) is refused at synth, so the handler timeout stays under Lambda\'s 15 minutes', () => {
+    const other = new Stack(new App({ context: { 'aws:cdk:bundling-stacks': [] } }), 'Other', { env: { account: '111122223333', region: 'eu-central-1' } });
+    const base = { registryPrefix: '/p/', backend: 'b', runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/x', requiredScopes: [] };
+    expect(() => new RegistryEntryResource(other, 'TooLong', { ...base, drain: Duration.seconds(871) })).toThrow(/RegistryEntryResource: drain must be from 1 to 870 seconds \(got 871\)/);
+    expect(() => new RegistryEntryResource(other, 'Zero', { ...base, drain: Duration.seconds(0) })).toThrow(/RegistryEntryResource: drain/);
+    new RegistryEntryResource(other, 'Max', { ...base, drain: Duration.seconds(870) });
+    const fns = Object.values(Template.fromStack(other).findResources('AWS::Lambda::Function')) as any[];
+    expect(fns.find((f) => String(f.Properties.Description).includes('registry entry')).Properties.Timeout).toBe(900);
+  });
+
+  it('every registry entry sits behind the ingress log drain: entry -> drain -> its log group (ADR-0019)', () => {
+    const resources = template.toJSON().Resources as Record<string, any>;
+    const [drain] = Object.keys(template.findResources('AWS::CloudFormation::CustomResource'));
+    const drainDeps: string[] = resources[drain].DependsOn ?? [];
+    const entryLogGroups = Object.keys(template.findResources('AWS::Logs::LogGroup')).filter((id) => id.includes('RegistryEntryLogs'));
+    expect(entryLogGroups).toHaveLength(2);
+    for (const group of entryLogGroups) {
+      expect(drainDeps).toContain(group);
+    }
+    for (const [id, entry] of Object.entries(template.findResources('Custom::RuntimeIsolationRegistryEntry'))) {
+      expect((entry as any).DependsOn ?? []).toContain(drain);
+      expect(resources[id]).toBeDefined();
+    }
+    // Only the ingress's drain exists: no backend adds a second one in the ingress's stack.
+    template.resourceCountIs('AWS::CloudFormation::CustomResource', 1);
+  });
+
   it('passes cdk-nag with every new finding acknowledged', () => {
     expect(() => template.toJSON()).not.toThrow();
   });
@@ -1067,6 +1122,21 @@ describe.each(INGRESSES)('AgentBackend in its own stack from SharedIngress.fromP
     });
     expect(backend.registryParameterName).toBe(`${DEFAULT_REGISTRY_PREFIX}backends/billing`);
     expect(JSON.stringify(stack.resolve(backend.endpointUrl))).toContain(`/billing/${ROUTE}`);
+  });
+
+  it('owns a log drain of its own, since the ingress\'s is in another stack: entry -> drain -> the handler log group (ADR-0019)', () => {
+    const resources = template.toJSON().Resources as Record<string, any>;
+    const drains = Object.keys(template.findResources('AWS::CloudFormation::CustomResource'));
+    expect(drains).toHaveLength(1);
+    const [drain] = drains;
+    expect(drain).toContain('BillingLogDrain');
+    const [entryLogGroup] = Object.keys(template.findResources('AWS::Logs::LogGroup')).filter((id) => id.includes('RegistryEntryLogs'));
+    expect(resources[drain].DependsOn).toContain(entryLogGroup);
+    const [entry] = Object.values(template.findResources('Custom::RuntimeIsolationRegistryEntry')) as any[];
+    expect(entry.DependsOn).toContain(drain);
+    for (const group of Object.values(template.findResources('AWS::Logs::LogGroup')) as any[]) {
+      expect(group.DeletionPolicy).toBe('Delete');
+    }
   });
 
   it('adds the one-model statement to the imported tenant role through a policy of this stack (ADR-0018)', () => {

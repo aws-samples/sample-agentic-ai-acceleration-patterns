@@ -42,6 +42,7 @@ import { LogDrain } from './shared/log-drain';
 import type { IngressKind } from './shared/metrics';
 import { acknowledgeGranularFinding, nagFindingResource } from './shared/nag';
 import { BACKEND_NAME_PATTERN, INGRESS_TAG_KEY, REGISTRY_BACKENDS_SEGMENT, ROUTE } from './shared/registry';
+import { LONGEST_STREAM, MAX_DRAIN } from './shared/registry-entry.cdk';
 import { CONVERSATION_ID_PATTERN, type SessionScope } from './shared/session';
 import { DEFAULT_CACHE_MAX_ENTRIES, TENANT_TAG_KEY, USER_TAG_KEY } from './shared/tvm';
 
@@ -120,6 +121,12 @@ export interface StageThrottleProps {
 export const DEFAULT_REGISTRY_PREFIX = '/application-plane/shared/agent-runtime/';
 /** How long an ingress process serves a registry entry before refreshing it (ADR-0024). */
 export const DEFAULT_REGISTRY_TTL = Duration.seconds(60);
+/**
+ * The longest `registryTtl`: a backend's entry drains for one TTL plus the
+ * longest stream inside one Lambda invocation of the registry-entry handler,
+ * which must stay under Lambda's 15-minute ceiling (750 s).
+ */
+export const MAX_REGISTRY_TTL = MAX_DRAIN.minus(LONGEST_STREAM);
 /** The conventional default backend name, and so the Gateway target name for the one-agent form (ADR-0024). */
 export const GATEWAY_TARGET_NAME = 'agent';
 
@@ -169,11 +176,15 @@ export interface SharedIngressProps {
    * its own.
    */
   readonly registryPrefix?: string;
-  /** How long an ingress process serves a registry entry before refreshing it. Default 60 seconds (ADR-0024). */
+  /**
+   * How long an ingress process serves a registry entry before refreshing it.
+   * Default 60 seconds; from 1 to `MAX_REGISTRY_TTL` (750) seconds (ADR-0024).
+   */
   readonly registryTtl?: Duration;
   /**
    * The backend served at the bare `/invocations` route, so a deployment of
-   * one backend keeps today's URL (`IsolatedRuntime` sets it). Must match
+   * one backend keeps today's URL (the one-agent form, a `SharedIngress`
+   * with `defaultBackend`, sets it). Must match
    * `[a-z0-9-]{1,32}`. Unset: only `/{backend}/invocations` exists.
    */
   readonly defaultBackend?: string;
@@ -332,8 +343,8 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
     fail('registryPrefix', `must start and end with / (got ${registryPrefix})`);
   }
   const registryTtlSeconds = (props.registryTtl ?? DEFAULT_REGISTRY_TTL).toSeconds();
-  if (!Number.isInteger(registryTtlSeconds) || registryTtlSeconds < 1) {
-    fail('registryTtl', 'must be a whole number of seconds, at least one');
+  if (!Number.isInteger(registryTtlSeconds) || registryTtlSeconds < 1 || registryTtlSeconds > MAX_REGISTRY_TTL.toSeconds()) {
+    fail('registryTtl', `must be a whole number of seconds from 1 to ${MAX_REGISTRY_TTL.toSeconds()} (got ${String(registryTtlSeconds)})`);
   }
   if (props.defaultBackend !== undefined && !BACKEND_NAME_PATTERN.test(props.defaultBackend)) {
     fail('defaultBackend', `must match ${BACKEND_NAME_PATTERN.source} (got ${props.defaultBackend})`);
@@ -396,6 +407,19 @@ export interface SharedIngressRef {
   readonly forwardUserToken?: boolean;
 }
 
+/** What each ingress variant hands back to the constructor. */
+interface IngressWiring {
+  endpointUrl: string;
+  /** The one principal every Runtime trusts (P-1). */
+  ingressRole: iam.IRole;
+  /** The role that validates the token and assumes the tenant role. */
+  tvmCallerRole: iam.IRole;
+  /** The roles that resolve routes through the registry. */
+  registryReaders: iam.IRole[];
+  /** The drain between this variant's writers and its log groups (ADR-0019). */
+  logDrain: LogDrain;
+}
+
 export class SharedIngress extends Construct {
   /**
    * Reads another stack's ingress from its published parameters (ADR-0024).
@@ -445,6 +469,8 @@ export class SharedIngress extends Construct {
   readonly ingressId: string;
   /** The Gateway identifier (`agentcore-gateway` only), for `AgentBackend` targets. */
   readonly gatewayIdentifier?: string;
+  /** The log drain (ADR-0019) between this ingress's writers and its log groups; a same-stack `AgentBackend` puts its registry entry behind it. */
+  readonly logDrain: LogDrain;
 
   private readonly grantedModels = new Set<string>();
 
@@ -469,7 +495,7 @@ export class SharedIngress extends Construct {
         pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       });
     }
-    const environment = ingressEnvironment(props, options, tenantRoleArn, this.limitsTable?.tableName);
+    const environment = ingressEnvironment(props, options, tenantRoleArn, this.limitsTable?.tableName, Stack.of(this).account);
 
     if (options.perTenantMetrics) {
       Annotations.of(this).addWarningV2(
@@ -484,6 +510,7 @@ export class SharedIngress extends Construct {
       this.endpointUrl = api.endpointUrl;
       this.ingressRole = api.ingressRole;
       this.tvmCallerRole = api.tvmCallerRole;
+      this.logDrain = api.logDrain;
       registryReaders = api.registryReaders;
     } else {
       const gw = this.agentCoreGatewayIngress(props, options, environment);
@@ -491,6 +518,7 @@ export class SharedIngress extends Construct {
       this.ingressRole = gw.ingressRole;
       this.tvmCallerRole = gw.tvmCallerRole;
       this.gatewayIdentifier = gw.gatewayIdentifier;
+      this.logDrain = gw.logDrain;
       registryReaders = gw.registryReaders;
     }
 
@@ -624,7 +652,7 @@ export class SharedIngress extends Construct {
         stringValue: value,
         description: `runtime-isolation: ${description}`,
       });
-    // `endpointUrl` keeps its spec §6.4 meaning for the one-backend wrapper and
+    // `endpointUrl` keeps its spec §6.4 meaning for the one-agent form and
     // the scripts that POST to it: with a default backend it is that backend's
     // invocation URL (the bare `/invocations` route on api-gateway, the target
     // route on the Gateway); without one, the base URL. `baseUrl` is always the base.
@@ -677,7 +705,7 @@ export class SharedIngress extends Construct {
     props: SharedIngressProps,
     options: ResolvedOptions,
     environment: Record<string, string>,
-  ): { endpointUrl: string; ingressRole: iam.IRole; tvmCallerRole: iam.IRole; registryReaders: iam.IRole[] } {
+  ): IngressWiring {
     const authorizerFn = new NodejsFunction(this, 'AuthorizerFunction', {
       ...functionProps(this, 'AuthorizerLogs', Duration.seconds(10)),
       entry: path.join(__dirname, 'ingress', 'api-gateway-authorizer.function.ts'),
@@ -853,6 +881,7 @@ export class SharedIngress extends Construct {
       tvmCallerRole: ingressFn.role!,
       // Both resolve the route: the authoriser decides, the integration Lambda re-reads the entry before the invoke.
       registryReaders: [authorizerFn.role!, ingressFn.role!],
+      logDrain: drain,
     };
   }
 
@@ -863,7 +892,7 @@ export class SharedIngress extends Construct {
     props: SharedIngressProps,
     options: ResolvedOptions,
     environment: Record<string, string>,
-  ): { endpointUrl: string; ingressRole: iam.IRole; tvmCallerRole: iam.IRole; gatewayIdentifier: string; registryReaders: iam.IRole[] } {
+  ): IngressWiring & { gatewayIdentifier: string } {
     const interceptorFn = new NodejsFunction(this, 'InterceptorFunction', {
       ...functionProps(this, 'InterceptorLogs', Duration.seconds(10)),
       entry: path.join(__dirname, 'ingress', 'gateway-interceptor.function.ts'),
@@ -935,6 +964,7 @@ export class SharedIngress extends Construct {
       tvmCallerRole: interceptorFn.role!,
       gatewayIdentifier: gateway.attrGatewayIdentifier,
       registryReaders: [interceptorFn.role!],
+      logDrain: drain,
     };
   }
 }
@@ -985,6 +1015,7 @@ function ingressEnvironment(
   options: ResolvedOptions,
   tenantRoleArn: string,
   limitsTableName: string | undefined,
+  registryAccount: string,
 ): Record<string, string> {
   const env: Record<string, string> = {
     [ENV.INGRESS]: options.ingress,
@@ -1019,6 +1050,9 @@ function ingressEnvironment(
   // The registry (ADR-0024): the ingress resolves `/{backend}/invocations` here.
   env[ENV.REGISTRY_PREFIX] = options.registryPrefix;
   env[ENV.REGISTRY_TTL_SECONDS] = String(options.registryTtlSeconds);
+  // The account the registry lives in, so a resolver refuses an entry whose
+  // Runtime ARN names another account; the Region is AWS_REGION.
+  env[ENV.REGISTRY_ACCOUNT] = registryAccount;
   if (options.defaultBackend !== undefined) {
     env[ENV.DEFAULT_BACKEND] = options.defaultBackend;
   }

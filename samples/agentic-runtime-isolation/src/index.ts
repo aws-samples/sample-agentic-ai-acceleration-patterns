@@ -24,11 +24,11 @@ export type {
 } from './shared-ingress.cdk';
 export { ROUTE } from './shared/registry';
 export type { AgentProps } from './agent-backend.cdk';
-export { SharedIngress, DEFAULT_REGISTRY_PREFIX, DEFAULT_REGISTRY_TTL, PUBLISHED } from './shared-ingress.cdk';
+export { SharedIngress, DEFAULT_REGISTRY_PREFIX, DEFAULT_REGISTRY_TTL, MAX_REGISTRY_TTL, PUBLISHED } from './shared-ingress.cdk';
 export type { SharedIngressProps, SharedIngressRef } from './shared-ingress.cdk';
 export { AgentBackend } from './agent-backend.cdk';
 export type { AgentBackendProps } from './agent-backend.cdk';
-export { RegistryEntryResource, LONGEST_STREAM } from './shared/registry-entry.cdk';
+export { RegistryEntryResource, LONGEST_STREAM, MAX_DRAIN } from './shared/registry-entry.cdk';
 export type { RegistryEntryResourceProps } from './shared/registry-entry.cdk';
 // The registry contract (ADR-0024): a consumer that reads or writes entries by hand uses the same names and schema.
 export { BACKEND_NAME_PATTERN, INGRESS_TAG_KEY, registryParameterName } from './shared/registry';

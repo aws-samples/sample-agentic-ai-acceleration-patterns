@@ -136,8 +136,9 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
     // the agent signs every model call with the vended tenant credentials, so
     // AWS attributes model cost per tenant and a compromised agent holds no
     // shared model permission. The one-model statement lives on the tenant
-    // role (src/runtime-isolation.cdk.ts). The execution role keeps code,
-    // logs, traces and metrics only.
+    // role (`SharedIngress.grantModel` in src/shared-ingress.cdk.ts, or the
+    // backend stack's own policy in src/agent-backend.cdk.ts). The execution
+    // role keeps code, logs, traces and metrics only.
     this.executionRole.addToPolicy(
       new iam.PolicyStatement({
         sid: 'Traces',
@@ -206,12 +207,19 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
    * identity half of the pair lives on the ingress: a tag-conditioned grant
    * over the Runtime ARN pattern (`SharedIngress`, ADR-0024), so the ingress
    * role is passed by ARN and may belong to another stack. Called once.
+   *
+   * Both statements name the Runtime ARN and `<arn>/*`: the Service
+   * Authorization Reference lists `InvokeAgentRuntime` on `runtime` and on
+   * `runtime-endpoint` (`<runtime arn>/runtime-endpoint/<name>`), and the
+   * ingress grant covers both forms (ADR-0024). A Deny on the Runtime ARN
+   * alone would leave an invoke addressed to an endpoint ARN ungated.
    */
   bindIngress(ingressRoleArn: string): agentcore.CfnResourcePolicy {
     if (this.resourcePolicy !== undefined) {
       throw new Error('AgentCoreRuntimeBackend.bindIngress: the backend trusts exactly one ingress (ADR-0003)');
     }
     const stack = Stack.of(this);
+    const resources = [this.resourceArn, `${this.resourceArn}/*`];
     this.resourcePolicy = new agentcore.CfnResourcePolicy(this, 'ResourcePolicy', {
       resourceArn: this.resourceArn,
       policy: stack.toJsonString({
@@ -222,14 +230,14 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
             Effect: 'Allow',
             Principal: { AWS: ingressRoleArn },
             Action: INVOKE_ACTION,
-            Resource: this.resourceArn,
+            Resource: resources,
           },
           {
             Sid: 'DenyOthers',
             Effect: 'Deny',
             Principal: { AWS: '*' },
             Action: 'bedrock-agentcore:*',
-            Resource: this.resourceArn,
+            Resource: resources,
             Condition: { ArnNotEquals: { 'aws:PrincipalArn': ingressRoleArn } },
           },
         ],

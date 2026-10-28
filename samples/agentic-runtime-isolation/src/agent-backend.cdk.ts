@@ -13,10 +13,11 @@
  * backend never redeploys the ingress.
  */
 
-import { Duration, Token } from 'aws-cdk-lib';
+import { Duration, Stack, Token } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { AgentCoreRuntimeBackend } from './backend/agentcore-runtime.cdk';
+import { LogDrain } from './shared/log-drain';
 import { INGRESS_TAG_KEY, BACKEND_NAME_PATTERN, ROUTE } from './shared/registry';
 import { LONGEST_STREAM, RegistryEntryResource } from './shared/registry-entry.cdk';
 import { addModelStatement, SharedIngress, type SharedIngressRef } from './shared-ingress.cdk';
@@ -37,7 +38,13 @@ export interface AgentProps {
 export interface AgentBackendProps {
   /** The backend name: the route is `/<name>/invocations` and the Gateway target is `<name>`. `[a-z0-9-]{1,32}`. */
   readonly name: string;
-  /** The ingress this backend sits behind: the construct in this stack, or another stack's published values. */
+  /**
+   * The ingress this backend sits behind: the `SharedIngress` of this stack,
+   * or another stack's published values from `SharedIngress.fromParameters`.
+   * A `SharedIngress` instance from another stack is refused: it would pull
+   * that stack's role, drain and Gateway in as cross-stack references, which
+   * is what the registry exists to avoid (ADR-0024).
+   */
   readonly ingress: SharedIngress | SharedIngressRef;
   readonly agent: AgentProps;
   /** Scopes a token must carry for this backend, on top of the ingress-wide floor (ADR-0005, ADR-0024). Unset: none. */
@@ -79,6 +86,9 @@ export class AgentBackend extends Construct {
     this.name = props.name;
 
     const ingress = props.ingress;
+    if (ingress instanceof SharedIngress && Stack.of(ingress) !== Stack.of(this)) {
+      fail('ingress', 'a SharedIngress from another stack must be imported with SharedIngress.fromParameters(...)');
+    }
     const ref: SharedIngressRef =
       ingress instanceof SharedIngress
         ? {
@@ -130,14 +140,18 @@ export class AgentBackend extends Construct {
     }
 
     // The entry is written last (ADR-0024): a half-created backend is never
-    // routable, and `status` gates traffic from the first write.
+    // routable, and `status` gates traffic from the first write. Its handler's
+    // log group sits behind a log drain (ADR-0019): the ingress's own in the
+    // same stack, this backend's own otherwise.
     const ttl = ingress instanceof SharedIngress ? Duration.seconds(ingress.options.registryTtlSeconds) : Duration.seconds(60);
+    const logDrain = ingress instanceof SharedIngress ? ingress.logDrain : new LogDrain(this, 'LogDrain');
     const entry = new RegistryEntryResource(this, 'RegistryEntry', {
       registryPrefix: ref.registryPrefix,
       backend: props.name,
       runtimeArn: this.runtimeArn,
       requiredScopes,
       drain: ttl.plus(LONGEST_STREAM),
+      logDrain,
     });
     entry.resource.node.addDependency(this.backend.runtime, policy);
     if (target !== undefined) {
