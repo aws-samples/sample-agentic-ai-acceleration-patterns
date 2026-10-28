@@ -9,9 +9,10 @@ SPDX-License-Identifier: MIT-0
 - Deciders: Dave Roberts (PSA)
 
 ## Context
-`IsolatedRuntime` creates one ingress and one backend (ADR-0003, ADR-0011):
-the integration Lambda or the interceptor reads one `RI_RUNTIME_ARN`, and the
-Runtime's resource policy names that ingress role alone (ADR-0001). A vendor
+Before this decision the construct created one ingress and one backend
+(ADR-0003, ADR-0011): the integration Lambda or the interceptor read one
+`RI_RUNTIME_ARN`, and the Runtime's resource policy named that ingress role
+alone (ADR-0001). A vendor
 with several agents (a support agent, a billing agent) deploys the construct
 once per agent and gets one API, one authoriser, one stage throttle, one
 counter table and one log drain per agent. The token check, the TVM, the
@@ -92,8 +93,9 @@ TVM, limits, log drain, and the registry prefix it reads. `AgentBackend`
 Runtime, sets the Runtime's resource policy to the ingress role it reads
 from the ingress's published parameters (P-1 per Runtime, ADR-0001), writes
 its registry entry, and on `agentcore-gateway` creates its Gateway target.
-`IsolatedRuntime` stays as the one-backend wrapper over both, so today's
-URLs and published values do not change.
+The one-backend form is a `SharedIngress` with a `defaultBackend` plus one
+`AgentBackend` of that name, so today's bare `/invocations` URL and published
+values do not change; no separate wrapper construct is kept.
 
 **Route.** `POST /{backend}/invocations` on both ingresses. The name is
 `[a-z0-9-]{1,32}`. The authoriser looks the name up; an unknown or
@@ -209,8 +211,9 @@ backends live in other accounts, or past a few hundred backends: DynamoDB
 (conditional writes, transactions, a resource policy for other accounts)
 is the alternative, behind the same registry interface.
 
-Follow-up: `SharedIngress` and `AgentBackend` constructs and the
-`IsolatedRuntime` wrapper; `ingressRoleArn` and `registryPrefix` among the
+Follow-up: `SharedIngress` and `AgentBackend` constructs (the one-backend
+form is a `SharedIngress` with `defaultBackend` plus one `AgentBackend`, no
+separate wrapper); `ingressRoleArn` and `registryPrefix` among the
 ingress's published parameters; spec §3.3, §4 (the registry is a stored
 entity the construct now has), §5 and §6.4 get dated notes when this ships;
 integ step 9 (two backends behind one ingress; a token scoped to one gets

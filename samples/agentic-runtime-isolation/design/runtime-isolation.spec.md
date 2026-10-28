@@ -66,8 +66,8 @@ AgentCore Runtime is the first and, for now, only backend; AWS Lambda's
 microVMs are a candidate for a later one. The principles (§2) are written
 against the backend, and §3 maps them onto AgentCore Runtime.
 
-The sample ships as a CDK construct, `IsolatedRuntime` (standard §4.5), with
-the ingress a deploy-time choice: an Amazon API Gateway REST API with response
+The sample ships as CDK constructs, `SharedIngress` and `AgentBackend`
+(standard §4.5), with the ingress a deploy-time choice: an Amazon API Gateway REST API with response
 streaming, or an AgentCore Gateway with a Runtime target. The tenant-identity
 sample, topology `shared-pool`, is the identity provider.
 
@@ -275,14 +275,14 @@ leave the agent, never content (ADR-0017).
 
 Props are validated at synth; an invalid combination fails with the prop name.
 
-**Amended 2026-10-28 (ADR-0024, proposed).** The construct splits in two
-behind `IsolatedRuntime`, which keeps every prop above and becomes the
-one-backend wrapper (default backend `agent`, the bare `/invocations` URL
-kept):
+**Amended 2026-10-28 (ADR-0024).** The construct is two parts; the one-backend
+form is a `SharedIngress` with a `defaultBackend` plus one `AgentBackend` of
+that name (the bare `/invocations` URL kept), with no separate wrapper
+construct:
 
 | Construct | Props | Meaning |
 |---|---|---|
-| `SharedIngress` | every `IsolatedRuntime` prop except `agent`, plus `registryPrefix` (default `/application-plane/shared/agent-runtime/`), `registryTtl` (`Duration`, default 60 s), `defaultBackend` (default none) | the ingress alone: API or Gateway, authoriser, TVM, limits, log drain, and the registry prefix it publishes under and reads `backends/<name>` from. `registryPrefix` is one per account and Region; set it when one account runs several ingresses. `defaultBackend` is the backend the bare `/invocations` route resolves to. `SharedIngress.fromParameters(scope, id, prefix)` imports an ingress deployed in another stack through its published parameters (§6.4) |
+| `SharedIngress` | every ingress prop except `agent`, plus `registryPrefix` (default `/application-plane/shared/agent-runtime/`), `registryTtl` (`Duration`, default 60 s), `defaultBackend` (default none) | the ingress alone: API or Gateway, authoriser, TVM, limits, log drain, and the registry prefix it publishes under and reads `backends/<name>` from. `registryPrefix` is one per account and Region; set it when one account runs several ingresses. `defaultBackend` is the backend the bare `/invocations` route resolves to. `SharedIngress.fromParameters(scope, id, prefix)` imports an ingress deployed in another stack through its published parameters (§6.4) |
 | `AgentBackend` | `name` (`[a-z0-9-]{1,32}`), `ingress` (a `SharedIngress` or `fromParameters`), `agent` (`{ codePath, modelId, environment? }`), `requiredScopes?` | one backend: the Runtime tagged `ri:ingress = <ingressId>`, its resource policy naming the ingress role, on `agentcore-gateway` a Gateway target named `name`, and the registry entry `{ runtimeArn, requiredScopes, status }`. `requiredScopes` are required on top of the ingress-wide list, per route. On delete the entry is set to `draining`, held for `registryTtl` plus 120 s, then removed |
 
 The ingress-wide `requiredScopes` stays the floor every token must meet.
@@ -366,7 +366,7 @@ One operation, the same contract on both ingresses: `InvokeAgent`.
 
 | | `api-gateway` | `agentcore-gateway` |
 |---|---|---|
-| URL | `POST https://<api>/prod/invocations` (`IsolatedRuntime`); `POST https://<api>/prod/<backend>/invocations` (amended 2026-10-28, ADR-0024) | `POST https://<gw>.gateway.bedrock-agentcore.<region>.amazonaws.com/<target>/invocations`, where the target is the backend name |
+| URL | `POST https://<api>/prod/invocations` (a `defaultBackend`); `POST https://<api>/prod/<backend>/invocations` (amended 2026-10-28, ADR-0024) | `POST https://<gw>.gateway.bedrock-agentcore.<region>.amazonaws.com/<target>/invocations`, where the target is the backend name |
 | Auth | `Authorization: Bearer <access token>` | same |
 | Body | `{prompt}`; with `session`, `{conversationId, prompt}` | same |
 | Unit | chosen by the integration Lambda | chosen by the interceptor, written to `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id`; a client value is overwritten (V-3) |
@@ -454,22 +454,22 @@ issuer as props.
 **Published interface**, so a later sample (for example a data-layer sample
 that adds tenant-scoped memory) can consume this one:
 
-- Construct `IsolatedRuntime`, exported from `src/index.ts`, with
-  read-only `endpointUrl`, `runtimeArn`, `ingressRole`, `executionRole`,
-  `tvmCallerRole` (the role that validates the token and assumes the tenant
-  role: the integration Lambda or the interceptor Lambda) and `tenantRole`
-  (the role every model call is signed by, the deployer's or the default
-  model-only one, ADR-0018).
+- Constructs `SharedIngress` and `AgentBackend`, exported from `src/index.ts`.
+  The ingress exposes read-only `endpointUrl`, `ingressRole`, `tvmCallerRole`
+  (the role that validates the token and assumes the tenant role: the
+  integration Lambda or the interceptor Lambda) and `tenantRole` (the role
+  every model call is signed by, the deployer's or the default model-only one,
+  ADR-0018); a backend exposes `runtimeArn` and `executionRole`.
 - Parameters, written by the demo stack under
   `/application-plane/shared/agent-runtime/`: `endpointUrl` (the ingress
   invocation URL), `runtimeArn`, and `ingress` (`api-gateway` or
   `agentcore-gateway`).
 
-**Amended 2026-10-28 (ADR-0024, proposed).** `SharedIngress` and
-`AgentBackend` join the exported constructs. `SharedIngress` publishes, under
-its `registryPrefix`: `endpointUrl` (the ingress base URL without a route; a
-backend is at `<endpointUrl>/<backend>/invocations`, and `IsolatedRuntime`
-keeps publishing today's full invocation URL), `ingress`, `ingressRoleArn` (the role
+**Amended 2026-10-28 (ADR-0024).** `SharedIngress` and `AgentBackend` are the
+exported constructs. `SharedIngress` publishes, under its `registryPrefix`:
+`endpointUrl` (the ingress base URL without a route; a backend is at
+`<endpointUrl>/<backend>/invocations`, and a `defaultBackend` makes the ingress
+publish today's full invocation URL), `ingress`, `ingressRoleArn` (the role
 every Runtime behind it trusts), `ingressId` (the `ri:ingress` tag value),
 `tenantRoleArn`, and on `agentcore-gateway` `gatewayIdentifier`. Each
 `AgentBackend` publishes its registry entry at `backends/<name>`.

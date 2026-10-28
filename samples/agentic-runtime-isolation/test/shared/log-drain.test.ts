@@ -4,18 +4,24 @@
 import * as path from 'node:path';
 import { App, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
-import { IsolatedRuntime } from '../../src/runtime-isolation.cdk';
+import { AgentBackend } from '../../src/agent-backend.cdk';
 import { WAITER_SOURCE } from '../../src/shared/log-drain';
+import { SharedIngress } from '../../src/shared-ingress.cdk';
 
 const FIXTURE_AGENT = path.join(__dirname, '..', 'fixtures', 'agent');
 
 function synth(ingress: 'api-gateway' | 'agentcore-gateway'): Template {
   const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
   const stack = new Stack(app, 'Test', { env: { account: '111122223333', region: 'eu-central-1' } });
-  new IsolatedRuntime(stack, 'IsolatedRuntime', {
+  const sharedIngress = new SharedIngress(stack, 'Ingress', {
     identity: { discoveryUrl: 'https://issuer.example.com/.well-known/openid-configuration', allowedClientIds: ['client-one'] },
-    agent: { codePath: FIXTURE_AGENT, modelId: 'amazon.nova-lite-v1:0' },
     ingress,
+    defaultBackend: 'agent',
+  });
+  new AgentBackend(stack, 'Backend', {
+    name: 'agent',
+    ingress: sharedIngress,
+    agent: { codePath: FIXTURE_AGENT, modelId: 'amazon.nova-lite-v1:0' },
   });
   return Template.fromStack(stack);
 }

@@ -23,9 +23,10 @@ It ships as CDK constructs:
   added, changed or drained without redeploying the ingress (ADR-0024). Each
   backend carries its own required scopes, and every backend's Runtime trusts
   the one ingress role.
-- **`IsolatedRuntime`** is the one-backend convenience wrapper over both: a
-  single ingress and a single backend served at the bare `/invocations` URL,
-  for the common case of one agent.
+For one agent, give the ingress a `defaultBackend` and add one `AgentBackend`
+of that name: it is served at the bare `/invocations` URL, the single-backend
+shape most deployments start from (see
+[Use the construct](#use-the-construct-in-your-own-app)).
 
 Plus a thin demo stack.
 
@@ -79,8 +80,8 @@ locations):
   write, never an ingress deploy (ADR-0024).
 - **Backend**: an AgentCore Runtime whose resource policy allows
   `InvokeAgentRuntime` to the ingress role only (ADR-0001, ADR-0011). One
-  ingress fronts many Runtimes, one per registered `AgentBackend`; the
-  `IsolatedRuntime` wrapper is the one-backend case.
+  ingress fronts many Runtimes, one per registered `AgentBackend`; a
+  `defaultBackend` plus one `AgentBackend` of that name is the one-backend case.
 - **Agent**: the code in the microVM. It builds its AWS clients per request
   from the vended credentials and ends each stream with a `usage` event
   (ADR-0008, ADR-0017, ADR-0018).
@@ -257,29 +258,37 @@ in your `.projenrc.ts` and import from its package entry,
 parameter; it takes the issuer, the agent and an optional tenant role as
 props.
 
-For one agent, use the `IsolatedRuntime` wrapper:
+For one agent, give the ingress a `defaultBackend` and add one `AgentBackend`
+of that name: the backend is then served at the bare `/invocations` URL as
+well as `/<name>/invocations`.
 
 ```ts
 import * as ssm from 'aws-cdk-lib/aws-ssm';
-import { IsolatedRuntime } from 'agentic-runtime-isolation/src';
+import { AgentBackend, SharedIngress } from 'agentic-runtime-isolation/src';
 
 const userPoolId = ssm.StringParameter.valueForStringParameter(this, '/application-plane/shared/identity/userPoolId');
 const appClientId = ssm.StringParameter.valueForStringParameter(this, '/application-plane/shared/identity/appClientId');
 
-const runtime = new IsolatedRuntime(this, 'IsolatedRuntime', {
+const ingress = new SharedIngress(this, 'Ingress', {
   identity: {
     discoveryUrl: `https://cognito-idp.${this.region}.amazonaws.com/${userPoolId}/.well-known/openid-configuration`,
     allowedClientIds: [appClientId],
   },
-  agent: { codePath: 'path/to/agent-bundle', modelId: 'eu.amazon.nova-lite-v1:0' },
   ingress: 'api-gateway',
   session: { scope: 'user' },
   tvm: { role: myTenantDataRole },
+  defaultBackend: 'agent',
+});
+
+new AgentBackend(this, 'Agent', {
+  name: 'agent',
+  ingress,
+  agent: { codePath: 'path/to/agent-bundle', modelId: 'eu.amazon.nova-lite-v1:0' },
 });
 ```
 
-For several agents behind one ingress, use `SharedIngress` and `AgentBackend`
-(see [Several backends behind one ingress](#several-backends-behind-one-ingress)).
+Add more agents by adding more `AgentBackend`s to the same ingress (see
+[Several backends behind one ingress](#several-backends-behind-one-ingress)).
 
 - **Consumes**: an OIDC issuer meeting spec §6.2 (here tenant-identity
   `shared-pool` through `/application-plane/shared/identity/{userPoolId,appClientId}`);
@@ -301,7 +310,7 @@ For several agents behind one ingress, use `SharedIngress` and `AgentBackend`
 
   | Parameter | Written by | Value |
   |---|---|---|
-  | `endpointUrl` | the ingress | The invocation URL (`POST`, bearer token): the default backend's when `defaultBackend` is set (`IsolatedRuntime`, as today), else the ingress base URL |
+  | `endpointUrl` | the ingress | The invocation URL (`POST`, bearer token): the default backend's when `defaultBackend` is set, else the ingress base URL |
   | `baseUrl` | the ingress | The ingress base URL (`https://<api>/prod`, or the Gateway URL); a backend is at `<baseUrl>/<backend>/invocations` (ADR-0024). `SharedIngress.fromParameters` reads this one |
   | `ingress` | the ingress | `api-gateway` or `agentcore-gateway` |
   | `ingressRoleArn` | the ingress | The one role every Runtime behind this ingress trusts; `AgentBackend` reads it to write the Runtime's resource policy (ADR-0024) |
@@ -324,18 +333,19 @@ token check, the TVM, the tenant limit and the metering are the same for every
 backend. The construct is in two parts (ADR-0024):
 
 - **`SharedIngress`** is the ingress alone: API or Gateway, authoriser, TVM,
-  limits, log drain, and the registry prefix it reads. It takes the
-  `IsolatedRuntime` props minus `agent`, plus `registryPrefix`,
-  `registryTtl` and `defaultBackend`. Its `endpointUrl` is the ingress base
-  URL; `urlFor(name)` gives a backend's route.
+  limits, log drain, and the registry prefix it reads. It takes the ingress
+  props (identity, ingress, session, scopes, delegation, TVM, limits) plus
+  `registryPrefix`, `registryTtl` and `defaultBackend`. Its `endpointUrl` is
+  the ingress base URL; `urlFor(name)` gives a backend's route.
 - **`AgentBackend`** is one backend: it creates the Runtime, tagged
   `ri:ingress = <ingressId>`, writes the Runtime's resource policy naming the
   ingress role (P-1 per Runtime, ADR-0001), creates the Gateway target of the
   same name on `agentcore-gateway`, and writes its registry entry. On delete
   it sets the entry to `draining`, waits `registryTtl` plus 120 s so running
   streams finish, and removes the entry.
-- **`IsolatedRuntime`** is the one-backend wrapper over both: default backend
-  `agent`, the bare `/invocations` URL and the single-backend published values.
+One agent is the same two constructs with a `defaultBackend` set (above); the
+bare `/invocations` URL and the single-backend published values follow from
+that.
 
 Two backends in one stack:
 
@@ -422,7 +432,7 @@ ADR-0024).
 |---|---|---|
 | `registryPrefix` | `/application-plane/shared/agent-runtime/` | The SSM prefix the ingress publishes under and reads `backends/<name>` from. One per account and Region; set it when one account runs several ingresses |
 | `registryTtl` | `Duration.seconds(60)` | How long an entry is served from the per-process cache before a refresh; bounds both propagation delay and SSM read rate |
-| `defaultBackend` | unset (`agent` in `IsolatedRuntime`) | The backend the bare `/invocations` route resolves to; unset, that route is 404 |
+| `defaultBackend` | unset | The backend the bare `/invocations` route resolves to; unset, that route is 404. The demo sets `agent` |
 
 **What the shared form costs** (ADR-0024 consequences):
 
@@ -443,8 +453,8 @@ ADR-0024).
 - On `api-gateway` the stage throttle and the one integration Lambda's
   concurrency are shared by every backend: 50 rps × 120 s is 6,000
   concurrent executions for all backends together, so one slow backend can
-  starve the rest. Use one `IsolatedRuntime` per backend when backends must
-  not share concurrency.
+  starve the rest. Deploy a separate `SharedIngress` per backend when they
+  must not share concurrency.
 - One `tvm.role` serves every backend; a backend cannot be given a narrower
   tenant role than its siblings. One tenant limit counts the tenant's
   requests across all backends (ADR-0020).
@@ -562,8 +572,8 @@ and report fields, never a token, password or header value
 
 One operation, the same contract on both ingresses (spec §5). The route is
 `invocations` (`ROUTE` in [`src/index.ts`](./src/index.ts)), under a backend
-name: `POST /{backend}/invocations`. `IsolatedRuntime` also serves its one
-backend at the bare URL below (ADR-0024).
+name: `POST /{backend}/invocations`. A `defaultBackend` is also served at the
+bare URL below (ADR-0024).
 
 | | `api-gateway` | `agentcore-gateway` |
 |---|---|---|
@@ -692,11 +702,11 @@ deployer action are in [`architecture.md`](./architecture.md#scale-limits).
 | `tvm.cacheMaxEntries` | 1000 | Credential cache entries per Lambda instance, LRU, about 1.5 KB each (ADR-0022) |
 | `registryTtl` | `Duration.seconds(60)` | How long a backend registry entry is served from the per-process cache before a refresh; a miss serves the stale entry while refreshing. SSM standard throughput is 40 TPS per account and Region, so misses (instances × backends ÷ `registryTtl`) must stay well under it (ADR-0024) |
 | `registryPrefix` | `/application-plane/shared/agent-runtime/` | The SSM prefix of the published parameters and the `backends/<name>` entries; one per account and Region (ADR-0024) |
-| `defaultBackend` | unset (`agent` in `IsolatedRuntime`) | The backend the bare `/invocations` route resolves to (ADR-0024) |
+| `defaultBackend` | unset | The backend the bare `/invocations` route resolves to; the demo sets `agent` (ADR-0024) |
 
 | Shared resource | Shared by | Deployer action |
 |---|---|---|
-| API Gateway stage throttle and the one integration Lambda's concurrency (50 rps × 120 s = 6,000 concurrent) | every tenant and every backend behind the ingress (ADR-0024) | reserved concurrency on the ingress function; one `IsolatedRuntime` per backend when backends must not share |
+| API Gateway stage throttle and the one integration Lambda's concurrency (50 rps × 120 s = 6,000 concurrent) | every tenant and every backend behind the ingress (ADR-0024) | reserved concurrency on the ingress function; a separate `SharedIngress` per backend when they must not share |
 | SSM Parameter Store reads, 40 TPS standard per account and Region | every ingress instance's registry misses, plus every other SSM caller in the account | raise `registryTtl`; turn on higher throughput for very large fleets (ADR-0024) |
 
 **Cost warning: `perTenantMetrics: true` adds about 9 CloudWatch custom

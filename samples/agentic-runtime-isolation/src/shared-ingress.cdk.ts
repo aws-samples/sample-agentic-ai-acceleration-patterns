@@ -120,6 +120,8 @@ export interface StageThrottleProps {
 export const DEFAULT_REGISTRY_PREFIX = '/application-plane/shared/agent-runtime/';
 /** How long an ingress process serves a registry entry before refreshing it (ADR-0024). */
 export const DEFAULT_REGISTRY_TTL = Duration.seconds(60);
+/** The conventional default backend name, and so the Gateway target name for the one-agent form (ADR-0024). */
+export const GATEWAY_TARGET_NAME = 'agent';
 
 export interface SharedIngressProps {
   readonly identity: IdentityProps;

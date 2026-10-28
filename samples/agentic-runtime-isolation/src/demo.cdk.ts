@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * The demo stack (spec C-4, §6.4; standard §4.5): a thin wiring of
- * `IsolatedRuntime` to the sample's dependencies, plus a second backend
- * (`billing`, ADR-0024) behind the same ingress when the deployment checks
+ * The demo stack (spec C-4, §6.4; standard §4.5): a thin wiring of a
+ * `SharedIngress` (with a default `agent` backend) and one `AgentBackend` to
+ * the sample's dependencies, plus a second backend (`billing`, ADR-0024)
+ * behind the same ingress when the deployment checks
  * scopes. It reads tenant-identity's published parameters for the issuer
  * (ADR-0004), chooses the ingress and the optional modules from CDK context,
  * and publishes the Runtime ARNs as this sample's parameters (the ingress
@@ -24,13 +25,13 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
-import { AgentBackend } from './agent-backend.cdk';
-import { IsolatedRuntime, IsolatedRuntimeProps } from './runtime-isolation.cdk';
+import { AgentBackend, type AgentProps } from './agent-backend.cdk';
 import { AGENT_ENV } from './shared/config';
 import { COST_METRIC_NAMES, type IngressKind, METRIC_NAMES, METRICS_NAMESPACE } from './shared/metrics';
+import { ROUTE } from './shared/registry';
 import type { SessionScope } from './shared/session';
 import { TENANT_TAG_KEY, USER_TAG_KEY } from './shared/tvm';
-import { DEFAULT_REGISTRY_PREFIX } from './shared-ingress.cdk';
+import { DEFAULT_REGISTRY_PREFIX, GATEWAY_TARGET_NAME, SharedIngress, type SharedIngressProps } from './shared-ingress.cdk';
 
 /** tenant-identity's published parameters this sample consumes (ARCHITECTURE.md §5.1, ADR-0004). */
 export const IDENTITY_PARAMETERS = {
@@ -211,7 +212,10 @@ export interface RuntimeIsolationDemoStackProps extends StackProps {
 }
 
 export class RuntimeIsolationDemoStack extends Stack {
-  readonly runtime: IsolatedRuntime;
+  /** The shared ingress (ADR-0024). */
+  readonly ingress: SharedIngress;
+  /** The default backend `agent`, served at the bare `/invocations` URL (ADR-0024). */
+  readonly agentBackend: AgentBackend;
   /** The second backend behind the same ingress (ADR-0024); undefined unless `wantsBillingBackend`. */
   readonly billing?: AgentBackend;
   /** The registry prefix this stack's ingress and backends use (ADR-0024). */
@@ -261,7 +265,7 @@ export class RuntimeIsolationDemoStack extends Stack {
     // may assume a data-bearing role the demo owns (ADR-0016 lazy trust ARN);
     // false passes no role, so the construct creates its default model-only
     // role and model cost is still attributed per tenant.
-    let tvm: IsolatedRuntimeProps['tvm'] = { includeUserIdTag: ctx.includeUserIdTag };
+    let tvm: SharedIngressProps['tvm'] = { includeUserIdTag: ctx.includeUserIdTag };
     let agentEnvironment: Record<string, string> | undefined;
     let callerRoleArn: string | undefined;
     if (ctx.tvm) {
@@ -305,10 +309,9 @@ export class RuntimeIsolationDemoStack extends Stack {
       agentEnvironment = { [AGENT_ENV.TABLE_NAME]: this.table.tableName };
     }
 
-    const agent: IsolatedRuntimeProps['agent'] = { codePath: props.agentCodePath, modelId: ctx.modelId, environment: agentEnvironment };
-    this.runtime = new IsolatedRuntime(this, 'IsolatedRuntime', {
+    const agent: AgentProps = { codePath: props.agentCodePath, modelId: ctx.modelId, environment: agentEnvironment };
+    this.ingress = new SharedIngress(this, 'SharedIngress', {
       identity: { discoveryUrl, allowedClientIds: [appClientId] },
-      agent,
       ingress: ctx.ingress,
       registryPrefix: this.registryPrefix,
       session: ctx.sessionScope === undefined ? undefined : { scope: ctx.sessionScope },
@@ -324,8 +327,10 @@ export class RuntimeIsolationDemoStack extends Stack {
         ctx.requestsPerMinute === undefined && ctx.outputTokensPerMinute === undefined
           ? undefined
           : { requestsPerMinute: ctx.requestsPerMinute, outputTokensPerMinute: ctx.outputTokensPerMinute },
+      defaultBackend: GATEWAY_TARGET_NAME,
     });
-    callerRoleArn = this.runtime.tvmCallerRole.roleArn;
+    this.agentBackend = new AgentBackend(this, 'AgentBackend', { name: GATEWAY_TARGET_NAME, ingress: this.ingress, agent });
+    callerRoleArn = this.ingress.tvmCallerRole.roleArn;
 
     // A second backend behind the same ingress (ADR-0024): the same agent
     // code and model, its own Runtime and registry entry, and a scope of its
@@ -334,7 +339,7 @@ export class RuntimeIsolationDemoStack extends Stack {
     if (wantsBillingBackend(ctx)) {
       this.billing = new AgentBackend(this, 'BillingBackend', {
         name: BILLING_BACKEND,
-        ingress: this.runtime.ingress,
+        ingress: this.ingress,
         agent,
         requiredScopes: [BILLING_SCOPE],
       });
@@ -350,7 +355,7 @@ export class RuntimeIsolationDemoStack extends Stack {
     // interceptor sees only the request side (no backend or model figures),
     // so it gets none of these.
     if (ctx.ingress === 'api-gateway') {
-      const accessLogs = this.runtime.ingress.node.findChild('ApiAccessLogs') as logs.LogGroup;
+      const accessLogs = this.ingress.node.findChild('ApiAccessLogs') as logs.LogGroup;
       insightRule(this, 'TopTenantsByRequest', `${this.stackName}-top-tenants-requests`, {
         LogGroupNames: [accessLogs.logGroupName],
         Contribution: { Keys: ['$.tenantId'], Filters: [{ Match: '$.tenantId', IsPresent: true }] },
@@ -368,7 +373,7 @@ export class RuntimeIsolationDemoStack extends Stack {
       // The 'request served' line names the backend (ADR-0024), so the cost
       // rules key on tenant and backend: one tenant's seconds and tokens per
       // agent, which the access log cannot give.
-      const ingressLogs = this.runtime.ingress.node.findChild('IngressLogs') as logs.LogGroup;
+      const ingressLogs = this.ingress.node.findChild('IngressLogs') as logs.LogGroup;
       insightRule(this, 'TopTenantsByBackendSeconds', `${this.stackName}-top-tenants-backend-seconds`, {
         LogGroupNames: [ingressLogs.logGroupName],
         Contribution: {
@@ -412,7 +417,7 @@ export class RuntimeIsolationDemoStack extends Stack {
     if (publish) {
       new ssm.StringParameter(this, 'RuntimeArnParameter', {
         parameterName: AGENT_RUNTIME_PARAMETERS.runtimeArn,
-        stringValue: this.runtime.runtimeArn,
+        stringValue: this.agentBackend.runtimeArn,
         description: 'runtime-isolation: the default backend\'s AgentCore Runtime ARN',
       });
       if (this.billing !== undefined) {
@@ -424,19 +429,20 @@ export class RuntimeIsolationDemoStack extends Stack {
       }
     }
 
-    new CfnOutput(this, 'EndpointUrl', { value: this.runtime.endpointUrl });
-    new CfnOutput(this, 'RuntimeArn', { value: this.runtime.runtimeArn });
+    const endpointUrl = ctx.ingress === 'api-gateway' ? `${this.ingress.endpointUrl}/${ROUTE}` : this.ingress.urlFor(GATEWAY_TARGET_NAME);
+    new CfnOutput(this, 'EndpointUrl', { value: endpointUrl });
+    new CfnOutput(this, 'RuntimeArn', { value: this.agentBackend.runtimeArn });
     new CfnOutput(this, 'RegistryPrefix', { value: this.registryPrefix });
     if (this.billing !== undefined) {
       new CfnOutput(this, 'BillingEndpointUrl', { value: this.billing.endpointUrl! });
       new CfnOutput(this, 'BillingRuntimeArn', { value: this.billing.runtimeArn });
     }
     new CfnOutput(this, 'Ingress', { value: ctx.ingress });
-    new CfnOutput(this, 'IngressRoleArn', { value: this.runtime.ingressRole.roleArn });
-    new CfnOutput(this, 'TvmCallerRoleArn', { value: this.runtime.tvmCallerRole.roleArn });
+    new CfnOutput(this, 'IngressRoleArn', { value: this.ingress.ingressRole.roleArn });
+    new CfnOutput(this, 'TvmCallerRoleArn', { value: this.ingress.tvmCallerRole.roleArn });
     // The TVM is always on (ADR-0018): the tenant role every model call is
     // signed by is always present, the deployer's role or the default one.
-    new CfnOutput(this, 'TenantRoleArn', { value: this.runtime.tenantRole.roleArn });
+    new CfnOutput(this, 'TenantRoleArn', { value: this.ingress.tenantRole.roleArn });
     if (this.table !== undefined) {
       new CfnOutput(this, 'DemoTableName', { value: this.table.tableName });
     }

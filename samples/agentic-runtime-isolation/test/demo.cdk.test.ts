@@ -223,7 +223,7 @@ describe('RuntimeIsolationDemoStack', () => {
       const [entry] = Object.values(template.findResources('Custom::RuntimeIsolationRegistryEntry')) as any[];
       expect(JSON.stringify(entry.Properties.ParameterName)).toContain('AWS::StackName');
       expect(JSON.stringify(entry.Properties.ParameterName)).toContain('/backends/agent');
-      expect(stack.runtime.options.registryPrefix).toBe(stack.registryPrefix);
+      expect(stack.ingress.options.registryPrefix).toBe(stack.registryPrefix);
     }
   });
 
@@ -239,7 +239,7 @@ describe('RuntimeIsolationDemoStack', () => {
       template.resourceCountIs('AWS::BedrockAgentCore::GatewayTarget', ingress === 'agentcore-gateway' ? 2 : 0);
       expect(stack.billing).toBeDefined();
       expect(stack.billing!.name).toBe(BILLING_BACKEND);
-      expect(stack.billing!.endpointUrl).toBe(stack.runtime.ingress.urlFor(BILLING_BACKEND));
+      expect(stack.billing!.endpointUrl).toBe(stack.ingress.urlFor(BILLING_BACKEND));
     });
 
     it('the billing entry requires BILLING_SCOPE on top of the floor; the default entry requires nothing more', () => {
@@ -251,7 +251,7 @@ describe('RuntimeIsolationDemoStack', () => {
       // Both Runtimes run the same code and model, with the demo table.
       for (const runtime of Object.values(template.findResources('AWS::BedrockAgentCore::Runtime')) as any[]) {
         expect(runtime.Properties.EnvironmentVariables).toEqual({ TABLE_NAME: stack.resolve(stack.table!.tableName), MODEL_ID: DEFAULT_MODEL_ID });
-        expect(runtime.Properties.Tags).toEqual({ 'ri:ingress': stack.runtime.ingress.ingressId });
+        expect(runtime.Properties.Tags).toEqual({ 'ri:ingress': stack.ingress.ingressId });
       }
       // One model, one statement on the deployer's tenant role (grantModel is idempotent).
       const policies = Object.values(template.findResources('AWS::IAM::Policy')) as any[];
@@ -309,10 +309,10 @@ describe('RuntimeIsolationDemoStack', () => {
     const { template, stack } = synth(context());
     template.resourceCountIs('AWS::CloudWatch::Dashboard', 0);
     expect(stack.dashboard).toBeUndefined();
-    expect(stack.runtime.options.perTenantMetrics).toBe(false);
-    expect(stack.runtime.options.tenantLimits).toEqual({ requestsPerMinute: 60, outputTokensPerMinute: undefined });
+    expect(stack.ingress.options.perTenantMetrics).toBe(false);
+    expect(stack.ingress.options.tenantLimits).toEqual({ requestsPerMinute: 60, outputTokensPerMinute: undefined });
     const limited = synth(context({ requestsPerMinute: 10, outputTokensPerMinute: 500 })).stack;
-    expect(limited.runtime.options.tenantLimits).toEqual({ requestsPerMinute: 10, outputTokensPerMinute: 500 });
+    expect(limited.ingress.options.tenantLimits).toEqual({ requestsPerMinute: 10, outputTokensPerMinute: 500 });
   });
 
   describe('cost dashboard (P-10, ADR-0017)', () => {
@@ -405,7 +405,7 @@ describe('RuntimeIsolationDemoStack', () => {
       expect(statements).toHaveLength(1);
       const [trust] = statements;
       expect(trust.Action).toEqual(['sts:AssumeRole', 'sts:TagSession']);
-      expect(trust.Principal).toEqual({ AWS: stack.resolve(stack.runtime.tvmCallerRole.roleArn) });
+      expect(trust.Principal).toEqual({ AWS: stack.resolve(stack.ingress.tvmCallerRole.roleArn) });
       expect(trust.Condition).toEqual({
         'StringLike': { 'aws:RequestTag/TenantId': '?*' },
         'ForAllValues:StringEquals': { 'aws:TagKeys': ['TenantId'] },

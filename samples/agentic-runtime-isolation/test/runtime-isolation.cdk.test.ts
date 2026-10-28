@@ -10,16 +10,16 @@ import { baseModelId, isInferenceProfileId } from '../src/backend/agentcore-runt
 import { RUNTIME_HEADERS } from '../src/backend/agentcore-runtime.transport';
 import {
   AgentBackend,
+  type AgentProps,
   DEFAULT_REGISTRY_PREFIX,
   GATEWAY_TARGET_NAME,
   INGRESS_TAG_KEY,
-  IsolatedRuntime,
-  IsolatedRuntimeProps,
   PUBLISHED,
   registryParameterName,
   resolveOptions,
   ROUTE,
   SharedIngress,
+  type SharedIngressProps,
   SharedIngressRef,
   STAGE_NAME,
 } from '../src/index';
@@ -38,30 +38,59 @@ import { ENV } from '../src/shared/config';
 const FIXTURE_AGENT = path.join(__dirname, 'fixtures', 'agent');
 const DISCOVERY_URL = 'https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TESTPOOL00/.well-known/openid-configuration';
 
-type Ingress = IsolatedRuntimeProps['ingress'];
+type DemoProps = Omit<SharedIngressProps, 'defaultBackend'> & { agent: AgentProps; backendName?: string };
+type Ingress = DemoProps['ingress'];
 const INGRESSES: Ingress[] = ['api-gateway', 'agentcore-gateway'];
 
 interface Synth {
   template: Template;
   stack: Stack;
-  construct: IsolatedRuntime;
+  construct: {
+    endpointUrl: string;
+    runtimeArn: string;
+    executionRole: iam.IRole;
+    ingress: SharedIngress;
+    backend: AgentBackend;
+    options: SharedIngress['options'];
+    ingressRole: iam.IRole;
+    tvmCallerRole: iam.IRole;
+    tenantRole: iam.IRole;
+    limitsTable: SharedIngress['limitsTable'];
+  };
   tenantRole: iam.Role;
 }
 
 /** Synthesises the construct in a bare stack; NodejsFunction bundling is skipped (template shape, not bundle contents). */
-function synth(props: Partial<IsolatedRuntimeProps> & { ingress: Ingress }, withNag = false): Synth {
+function synth(props: Partial<DemoProps> & { ingress: Ingress }, withNag = false): Synth {
   const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
   if (withNag) {
     Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true }));
   }
   const stack = new Stack(app, 'Test', { env: { account: '111122223333', region: 'eu-central-1' } });
   const tenantRole = new iam.Role(stack, 'TenantRole', { assumedBy: new iam.AccountRootPrincipal() });
-  const construct = new IsolatedRuntime(stack, 'IsolatedRuntime', {
+  const merged = {
     identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: ['client-one'] },
     agent: { codePath: FIXTURE_AGENT, modelId: 'amazon.nova-lite-v1:0' },
     ...props,
     tvm: props.tvm === undefined ? undefined : { ...props.tvm, role: tenantRole },
-  });
+  } as DemoProps;
+  const { agent, backendName, ...rest } = merged;
+  const bn = backendName ?? GATEWAY_TARGET_NAME;
+  const ingress = new SharedIngress(stack, 'Ingress', { ...rest, defaultBackend: bn });
+  const backend = new AgentBackend(stack, 'Backend', { name: bn, ingress, agent });
+  const endpointUrl = rest.ingress === 'api-gateway' ? `${ingress.endpointUrl}/${ROUTE}` : ingress.urlFor(bn);
+  const construct = {
+    endpointUrl,
+    runtimeArn: backend.runtimeArn,
+    executionRole: backend.executionRole,
+    ingress,
+    backend,
+    options: ingress.options,
+    ingressRole: ingress.ingressRole,
+    tvmCallerRole: ingress.tvmCallerRole,
+    tenantRole: ingress.tenantRole,
+    limitsTable: ingress.limitsTable,
+  };
   return { template: Template.fromStack(stack), stack, construct, tenantRole };
 }
 
@@ -101,7 +130,7 @@ function lambdaEnv(template: Template, functionDescriptionContains: string): Rec
 // Props validation (standard §4.5: fail at synth, name the prop)
 // ---------------------------------------------------------------------------
 describe('resolveOptions', () => {
-  const valid: IsolatedRuntimeProps = {
+  const valid: DemoProps = {
     identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: ['c'] },
     agent: { codePath: FIXTURE_AGENT, modelId: 'm' },
     ingress: 'api-gateway',
@@ -148,7 +177,7 @@ describe('resolveOptions', () => {
     expect(resolveOptions({ ...valid, session: { scope: 'tenant' } }).sessionScope).toBe('tenant');
   });
 
-  it.each<[string, Partial<IsolatedRuntimeProps>, RegExp]>([
+  it.each<[string, Partial<DemoProps>, RegExp]>([
     ['identity.discoveryUrl', { identity: { discoveryUrl: 'http://issuer/.well-known/openid-configuration', allowedClientIds: ['c'] } }, /identity\.discoveryUrl/],
     ['identity.discoveryUrl shape', { identity: { discoveryUrl: 'https://issuer/', allowedClientIds: ['c'] } }, /identity\.discoveryUrl/],
     ['identity.allowedClientIds empty', { identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: [] } }, /identity\.allowedClientIds/],
@@ -193,14 +222,14 @@ describe('resolveOptions', () => {
   it('the backend names agent.codePath, agent.modelId and backendName on a bad value', () => {
     expect(() => synth({ ingress: 'api-gateway', agent: { codePath: '', modelId: 'm' } })).toThrow(/agent\.codePath/);
     expect(() => synth({ ingress: 'api-gateway', agent: { codePath: FIXTURE_AGENT, modelId: '' } })).toThrow(/agent\.modelId/);
-    expect(() => synth({ ingress: 'api-gateway', backendName: 'Agent' })).toThrow(/backendName/);
+    expect(() => synth({ ingress: 'api-gateway', backendName: 'Agent' })).toThrow(/must match/);
   });
 });
 
 // ---------------------------------------------------------------------------
 // Both ingresses, defaults (every module off)
 // ---------------------------------------------------------------------------
-describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
+describe.each(INGRESSES)('one-backend defaults, ingress=%s', (ingress) => {
   const { template, construct } = synth({ ingress });
 
   it('creates one Runtime with IAM inbound auth (no authorizer), PUBLIC network, HTTP protocol, NODE_22 code from the asset', () => {
@@ -232,7 +261,7 @@ describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
     expect(deny.Principal).toEqual({ AWS: '*' });
     expect(deny.Action).toBe('bedrock-agentcore:*');
     // The same principal appears in the Allow and in the ArnNotEquals condition, and it is the ingress role.
-    const ingressRef = JSON.stringify(Stack.of(construct).resolve(construct.ingressRole.roleArn));
+    const ingressRef = JSON.stringify(Stack.of(construct.ingress).resolve(construct.ingressRole.roleArn));
     expect(JSON.stringify(allow.Principal.AWS)).toBe(JSON.stringify(ingressRef));
     expect(JSON.stringify(deny.Condition.ArnNotEquals['aws:PrincipalArn'])).toBe(JSON.stringify(ingressRef));
     // Neither statement names another principal.
@@ -240,7 +269,7 @@ describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
   });
 
   it('the ingress role may invoke only Runtimes tagged ri:ingress = ingressId, on the runtime/* and endpoint patterns; the execution role has no invoke (P-1, P-6, ADR-0024)', () => {
-    const roleId = Stack.of(construct).resolve(construct.ingressRole.roleArn)['Fn::GetAtt'][0] as string;
+    const roleId = Stack.of(construct.ingress).resolve(construct.ingressRole.roleArn)['Fn::GetAtt'][0] as string;
     const grant = statementsForRole(template, roleId).find((s) => s.Sid === 'InvokeTaggedRuntimes');
     expect(grant.Action).toBe('bedrock-agentcore:InvokeAgentRuntime');
     const resources = grant.Resource.map((r: unknown) => JSON.stringify(r));
@@ -326,11 +355,11 @@ describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
     const byName = (n: string) => params.find((p) => p.Properties.Name === `${DEFAULT_REGISTRY_PREFIX}${n}`).Properties.Value;
     expect(byName(PUBLISHED.ingress)).toBe(ingress);
     // endpointUrl keeps the spec §6.4 meaning (the default backend's invocation URL, what the scripts POST to); baseUrl is the base.
-    expect(byName(PUBLISHED.endpointUrl)).toEqual(Stack.of(construct).resolve(construct.endpointUrl));
-    expect(byName(PUBLISHED.baseUrl)).toEqual(Stack.of(construct).resolve(construct.ingress.endpointUrl));
+    expect(byName(PUBLISHED.endpointUrl)).toEqual(Stack.of(construct.ingress).resolve(construct.endpointUrl));
+    expect(byName(PUBLISHED.baseUrl)).toEqual(Stack.of(construct.ingress).resolve(construct.ingress.endpointUrl));
     expect(byName(PUBLISHED.ingressId)).toBe(construct.ingress.ingressId);
-    expect(byName(PUBLISHED.ingressRoleArn)).toEqual(Stack.of(construct).resolve(construct.ingressRole.roleArn));
-    expect(byName(PUBLISHED.tenantRoleArn)).toEqual(Stack.of(construct).resolve(construct.tenantRole.roleArn));
+    expect(byName(PUBLISHED.ingressRoleArn)).toEqual(Stack.of(construct.ingress).resolve(construct.ingressRole.roleArn));
+    expect(byName(PUBLISHED.tenantRoleArn)).toEqual(Stack.of(construct.ingress).resolve(construct.tenantRole.roleArn));
   });
 
   it('the execution role holds its code object, its log prefix and traces, and NO model and no data permission (P-6, ADR-0008 amended by ADR-0018)', () => {
@@ -358,7 +387,7 @@ describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
   });
 
   it('the default TenantModelRole carries the one-model statement and nothing else, trusted by tvmCallerRole only (ADR-0018)', () => {
-    const callerId = Stack.of(construct).resolve(construct.tvmCallerRole.roleArn)['Fn::GetAtt'][0] as string;
+    const callerId = Stack.of(construct.ingress).resolve(construct.tvmCallerRole.roleArn)['Fn::GetAtt'][0] as string;
     const statements = statementsForRole(template, 'TenantModelRole');
     const model = statements.find((s) => s.Sid === 'OneModel');
     expect(model).toBeDefined();
@@ -372,7 +401,7 @@ describe.each(INGRESSES)('IsolatedRuntime defaults, ingress=%s', (ingress) => {
     const role = Object.values(template.findResources('AWS::IAM::Role', { Properties: { Description: Match.stringLikeRegexp('Default tenant role') } }))[0] as any;
     const [trust] = role.Properties.AssumeRolePolicyDocument.Statement;
     expect(trust.Action).toEqual(['sts:AssumeRole', 'sts:TagSession']);
-    expect(trust.Principal).toEqual({ AWS: Stack.of(construct).resolve(construct.tvmCallerRole.roleArn) });
+    expect(trust.Principal).toEqual({ AWS: Stack.of(construct.ingress).resolve(construct.tvmCallerRole.roleArn) });
     expect(trust.Condition).toEqual({
       'StringLike': { 'aws:RequestTag/TenantId': '?*' },
       'ForAllValues:StringEquals': { 'aws:TagKeys': ['TenantId'] },
@@ -546,17 +575,17 @@ describe('api-gateway ingress', () => {
   });
 
   it('endpointUrl is the stage URL plus the bare route; urlFor adds the backend; ingressRole and tvmCallerRole are the integration Lambda role', () => {
-    const url = JSON.stringify(Stack.of(construct).resolve(construct.endpointUrl));
+    const url = JSON.stringify(Stack.of(construct.ingress).resolve(construct.endpointUrl));
     expect(url).toContain(`/${ROUTE}"`);
     expect(url).not.toContain(`/${GATEWAY_TARGET_NAME}/${ROUTE}`);
     expect(url).toContain(`Stage${STAGE_NAME}`);
-    const base = JSON.stringify(Stack.of(construct).resolve(construct.ingress.endpointUrl));
+    const base = JSON.stringify(Stack.of(construct.ingress).resolve(construct.ingress.endpointUrl));
     expect(base).not.toContain(ROUTE);
     expect(base).toContain('.execute-api.');
-    expect(JSON.stringify(Stack.of(construct).resolve(construct.ingress.urlFor('billing')))).toContain(`/billing/${ROUTE}"`);
+    expect(JSON.stringify(Stack.of(construct.ingress).resolve(construct.ingress.urlFor('billing')))).toContain(`/billing/${ROUTE}"`);
     expect(() => construct.ingress.urlFor('Billing')).toThrow(/backend/);
     expect(construct.ingressRole).toBe(construct.tvmCallerRole);
-    expect(JSON.stringify(Stack.of(construct).resolve(construct.ingressRole.roleArn))).toContain('IngressFunctionServiceRole');
+    expect(JSON.stringify(Stack.of(construct.ingress).resolve(construct.ingressRole.roleArn))).toContain('IngressFunctionServiceRole');
   });
 
   it('creates no Gateway resources', () => {
@@ -620,7 +649,7 @@ describe('agentcore-gateway ingress', () => {
   });
 
   it('the Gateway role is the ingress principal, trusted by the service for this account and this gateway only, and may invoke the interceptor by exact ARN', () => {
-    expect(JSON.stringify(Stack.of(construct).resolve(construct.ingressRole.roleArn))).toContain('GatewayRole');
+    expect(JSON.stringify(Stack.of(construct.ingress).resolve(construct.ingressRole.roleArn))).toContain('GatewayRole');
     template.hasResourceProperties('AWS::IAM::Role', {
       Description: Match.stringLikeRegexp('Gateway role'),
       AssumeRolePolicyDocument: {
@@ -640,15 +669,15 @@ describe('agentcore-gateway ingress', () => {
 
   it('tvmCallerRole is the interceptor role, distinct from the ingress role', () => {
     expect(construct.tvmCallerRole).not.toBe(construct.ingressRole);
-    expect(JSON.stringify(Stack.of(construct).resolve(construct.tvmCallerRole.roleArn))).toContain('InterceptorFunctionServiceRole');
+    expect(JSON.stringify(Stack.of(construct.ingress).resolve(construct.tvmCallerRole.roleArn))).toContain('InterceptorFunctionServiceRole');
   });
 
   it('endpointUrl is the Gateway URL plus /<target>/invocations; the ingress base URL is the Gateway URL', () => {
-    const url = Stack.of(construct).resolve(construct.endpointUrl);
+    const url = Stack.of(construct.ingress).resolve(construct.endpointUrl);
     expect(JSON.stringify(url)).toContain(`/${GATEWAY_TARGET_NAME}/${ROUTE}`);
     expect(JSON.stringify(url)).toContain('GatewayUrl');
     expect(construct.endpointUrl).toBe(construct.ingress.urlFor(GATEWAY_TARGET_NAME));
-    expect(JSON.stringify(Stack.of(construct).resolve(construct.ingress.endpointUrl))).not.toContain(ROUTE);
+    expect(JSON.stringify(Stack.of(construct.ingress).resolve(construct.ingress.endpointUrl))).not.toContain(ROUTE);
   });
 
   it('publishes the Gateway identifier so a backend stack can add its target (ADR-0024)', () => {
@@ -706,10 +735,10 @@ describe.each(INGRESSES)('options, ingress=%s', (ingress) => {
     template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
       RequestHeaderConfiguration: { RequestHeaderAllowlist: [RUNTIME_HEADERS.TENANT_CREDENTIALS] },
     });
-    const callerId = Stack.of(construct).resolve(construct.tvmCallerRole.roleArn)['Fn::GetAtt'][0] as string;
+    const callerId = Stack.of(construct.ingress).resolve(construct.tvmCallerRole.roleArn)['Fn::GetAtt'][0] as string;
     const grant = statementsForRole(template, callerId).find((s) => s.Sid === 'AssumeTenantRole');
     expect(grant.Action).toEqual(['sts:AssumeRole', 'sts:TagSession']);
-    expect(grant.Resource).toEqual(Stack.of(construct).resolve(tenantRole.roleArn));
+    expect(grant.Resource).toEqual(Stack.of(construct.ingress).resolve(tenantRole.roleArn));
     // Only one role holds the grant.
     const all = JSON.stringify(template.toJSON());
     expect(all.split('AssumeTenantRole').length - 1).toBe(1);
@@ -717,13 +746,13 @@ describe.each(INGRESSES)('options, ingress=%s', (ingress) => {
     expect(JSON.stringify(statementsForRole(template, 'BackendRuntimeExecutionRole'))).not.toContain('sts:');
     expect(JSON.stringify(statementsForRole(template, 'BackendRuntimeExecutionRole'))).not.toContain('bedrock:Invoke');
     // The construct adds the one-model statement to the DEPLOYER's role (ADR-0018), and creates no default role.
-    const deployerId = Stack.of(construct).resolve(tenantRole.roleArn)['Fn::GetAtt'][0] as string;
+    const deployerId = Stack.of(construct.ingress).resolve(tenantRole.roleArn)['Fn::GetAtt'][0] as string;
     const model = statementsForRole(template, deployerId).find((s) => s.Sid === 'OneModel');
     expect(model.Action).toEqual(['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream']);
     expect(construct.tenantRole).toBe(tenantRole);
     expect(JSON.stringify(template.toJSON())).not.toContain('TenantModelRole');
     const env = lambdaEnv(template, fnDescription);
-    expect(env[ENV.TVM_ROLE_ARN]).toEqual(Stack.of(construct).resolve(tenantRole.roleArn));
+    expect(env[ENV.TVM_ROLE_ARN]).toEqual(Stack.of(construct.ingress).resolve(tenantRole.roleArn));
     expect(env[ENV.TVM_INCLUDE_USER_ID_TAG]).toBe('true');
     expect(env[ENV.TVM_CLAIM_TAGS]).toBe('{"Tier":"custom:tier"}');
     expect(env[ENV.TVM_DURATION_SECONDS]).toBe('1800');
@@ -838,7 +867,7 @@ describe.each(INGRESSES)('per-tenant limits, ingress=%s (ADR-0020)', (ingress) =
 
   it('writes the table name and the limits to the ingress environment, metrics off and the cache bound', () => {
     const env = lambdaEnv(template, fnDescription);
-    expect(env[ENV.LIMITS_TABLE]).toEqual(Stack.of(construct).resolve(construct.limitsTable!.tableName));
+    expect(env[ENV.LIMITS_TABLE]).toEqual(Stack.of(construct.ingress).resolve(construct.limitsTable!.tableName));
     expect(env[ENV.LIMIT_REQUESTS_PER_MINUTE]).toBe('60');
     expect(env).not.toHaveProperty(ENV.LIMIT_OUTPUT_TOKENS_PER_MINUTE);
     expect(env[ENV.PER_TENANT_METRICS]).toBe('false');
@@ -846,13 +875,13 @@ describe.each(INGRESSES)('per-tenant limits, ingress=%s (ADR-0020)', (ingress) =
   });
 
   it('tvmCallerRole has dynamodb:UpdateItem on exactly that table, and no other DynamoDB action', () => {
-    const callerId = Stack.of(construct).resolve(construct.tvmCallerRole.roleArn)['Fn::GetAtt'][0] as string;
+    const callerId = Stack.of(construct.ingress).resolve(construct.tvmCallerRole.roleArn)['Fn::GetAtt'][0] as string;
     const statements = statementsForRole(template, callerId);
     const count = statements.filter((s) => JSON.stringify(s.Action).includes('dynamodb:'));
     expect(count).toHaveLength(1);
     expect(count[0].Sid).toBe('CountTenantUsage');
     expect(count[0].Action).toBe('dynamodb:UpdateItem');
-    expect(count[0].Resource).toEqual(Stack.of(construct).resolve(construct.limitsTable!.tableArn));
+    expect(count[0].Resource).toEqual(Stack.of(construct.ingress).resolve(construct.limitsTable!.tableArn));
   });
 
   it('tenantLimits: false creates no table and sets no limits environment', () => {
