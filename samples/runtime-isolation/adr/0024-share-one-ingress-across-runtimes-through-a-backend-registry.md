@@ -120,12 +120,15 @@ Runtime's resource policy remains the hard gate (ADR-0001). The Service
 Authorization Reference (read 2026-10-28) lists `aws:ResourceTag/${TagKey}`
 for `InvokeAgentRuntime` on both `runtime` and `runtime-endpoint`, so the
 condition is honoured. The grant names two resources, `<arn>` and `<arn>/*`
-(the endpoint), and the endpoint carries its own tags; the docs do not say
-the `DEFAULT` endpoint inherits the Runtime's. To verify on first deploy:
-that the tag is present on the `DEFAULT` endpoint; if not, `AgentBackend`
-tags the endpoint too (`CfnRuntimeEndpoint`), or the fallback is the bare
-pattern with the resource policy as the only gate, recorded as a
-threat-model change.
+(the endpoint), and the endpoint carries its own tags. Checked on
+2026-10-28 in the sandbox (eu-central-1) against a deployed Runtime: tags
+given at `CreateAgentRuntime` (the `CfnRuntime.tags` property) are copied to
+the `DEFAULT` endpoint; a later `TagResource` on the Runtime is not, and the
+endpoint ARN can be tagged on its own. So `AgentBackend` sets `ri:ingress`
+in `CfnRuntime.tags` at synth and the grant holds for both resource forms.
+A tag changed after creation must be put on both ARNs. Not yet tested
+end-to-end: an `InvokeAgentRuntime` call through a role carrying the
+condition; integ step 9 covers it.
 
 **CRUDL.** Create: Runtime, policy, target, then the registry entry; live
 within one TTL. Read and list: `GetParameter`, `GetParametersByPath`.
