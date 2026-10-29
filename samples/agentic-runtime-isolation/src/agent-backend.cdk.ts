@@ -8,9 +8,10 @@
  * applies; writes the Runtime's resource policy naming the ingress role
  * alone (P-1, ADR-0001); on the `agentcore-gateway` ingress adds the Gateway
  * target named after the backend (ADR-0010); adds its one-model statement to
- * the ingress's tenant role (ADR-0018); and last writes its registry entry,
- * which is what makes the route live. Creating, changing or removing a
- * backend never redeploys the ingress.
+ * the ingress's tenant role (ADR-0018); registers its own scopes with the
+ * identity provider (ADR-0025); and last writes its registry entry, which is
+ * what makes the route live. Creating, changing or removing a backend never
+ * redeploys the ingress, and never redeploys the identity provider.
  */
 
 import { Duration, Stack, Token } from 'aws-cdk-lib';
@@ -18,8 +19,9 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { AgentCoreRuntimeBackend } from './backend/agentcore-runtime.cdk';
 import { LogDrain } from './shared/log-drain';
-import { INGRESS_TAG_KEY, BACKEND_NAME_PATTERN, ROUTE } from './shared/registry';
+import { INGRESS_TAG_KEY, BACKEND_NAME_PATTERN, backendScopesProblem, ROUTE } from './shared/registry';
 import { LONGEST_STREAM, RegistryEntryResource } from './shared/registry-entry.cdk';
+import { type IdentityApiProps, ScopeRegistration } from './shared/scope-registration.cdk';
 import { addModelStatement, SharedIngress, type SharedIngressRef } from './shared-ingress.cdk';
 
 /** The agent the backend runs. */
@@ -47,8 +49,23 @@ export interface AgentBackendProps {
    */
   readonly ingress: SharedIngress | SharedIngressRef;
   readonly agent: AgentProps;
-  /** Scopes a token must carry for this backend, on top of the ingress-wide floor (ADR-0005, ADR-0024). Unset: none. */
-  readonly requiredScopes?: string[];
+  /**
+   * The scopes this backend owns (ADR-0025): at least one, no duplicates,
+   * each `<name>/<action>` where `<name>` is this backend's name (so two
+   * backends cannot share a scope), 3 to 128 characters of `[a-z0-9-]` and
+   * one slash. Registered with tenant-identity at deploy, removed at delete.
+   * A token reaches this backend when it carries ANY ONE of them (OR), after
+   * the ingress-wide `requiredScopes` floor (AND, ADR-0005). The agent sees
+   * the token's scopes itself (ADR-0007) and separates, say, `billing/read`
+   * from `billing/invoke`.
+   */
+  readonly scopes: string[];
+  /**
+   * Where tenant-identity's platform API is, for the scope registration.
+   * Unset: read from its published parameters at deploy time. Set only by a
+   * build that must synthesise without an account (placeholders).
+   */
+  readonly identityApi?: IdentityApiProps;
 }
 
 export class AgentBackend extends Construct {
@@ -64,6 +81,10 @@ export class AgentBackend extends Construct {
   readonly name: string;
   /** The compute, for tests and for a consumer that needs the L1. */
   readonly backend: AgentCoreRuntimeBackend;
+  /** The scopes this backend owns, as given (ADR-0025). */
+  readonly scopes: readonly string[];
+  /** The scope registration with the identity provider (ADR-0025). */
+  readonly scopeRegistration: ScopeRegistration;
 
   constructor(scope: Construct, id: string, props: AgentBackendProps) {
     super(scope, id);
@@ -79,11 +100,13 @@ export class AgentBackend extends Construct {
     if (props.agent.modelId.length === 0) {
       fail('agent.modelId', 'must be a Bedrock model id');
     }
-    const requiredScopes = props.requiredScopes ?? [];
-    if (requiredScopes.some((s) => s.trim().length === 0 || /\s/.test(s))) {
-      fail('requiredScopes', 'must be a list of scope strings without whitespace');
+    // `?? []` covers a JavaScript caller that omits the required prop: the message names it.
+    const scopesProblem = backendScopesProblem(props.name, props.scopes ?? []);
+    if (scopesProblem !== undefined) {
+      fail('scopes', scopesProblem);
     }
     this.name = props.name;
+    this.scopes = [...props.scopes];
 
     const ingress = props.ingress;
     if (ingress instanceof SharedIngress && Stack.of(ingress) !== Stack.of(this)) {
@@ -139,21 +162,31 @@ export class AgentBackend extends Construct {
       addModelStatement(this, tenantRole, props.agent.modelId, 'OneModel');
     }
 
-    // The entry is written last (ADR-0024): a half-created backend is never
-    // routable, and `status` gates traffic from the first write. Its handler's
-    // log group sits behind a log drain (ADR-0019): the ingress's own in the
-    // same stack, this backend's own otherwise.
+    // The scopes go to the identity provider before the route exists
+    // (ADR-0025), so a token is never checked against a scope the issuer
+    // does not know. The handlers' log groups sit behind a log drain
+    // (ADR-0019): the ingress's own in the same stack, this backend's own
+    // otherwise.
     const ttl = ingress instanceof SharedIngress ? Duration.seconds(ingress.options.registryTtlSeconds) : Duration.seconds(60);
     const logDrain = ingress instanceof SharedIngress ? ingress.logDrain : new LogDrain(this, 'LogDrain');
+    this.scopeRegistration = new ScopeRegistration(this, 'Scopes', {
+      backend: props.name,
+      scopes: this.scopes as string[],
+      identityApi: props.identityApi,
+      logDrain,
+    });
+
+    // The entry is written last (ADR-0024): a half-created backend is never
+    // routable, and `status` gates traffic from the first write.
     const entry = new RegistryEntryResource(this, 'RegistryEntry', {
       registryPrefix: ref.registryPrefix,
       backend: props.name,
       runtimeArn: this.runtimeArn,
-      requiredScopes,
+      scopes: this.scopes as string[],
       drain: ttl.plus(LONGEST_STREAM),
       logDrain,
     });
-    entry.resource.node.addDependency(this.backend.runtime, policy);
+    entry.resource.node.addDependency(this.backend.runtime, policy, this.scopeRegistration.resource);
     if (target !== undefined) {
       entry.resource.node.addDependency(target);
     }

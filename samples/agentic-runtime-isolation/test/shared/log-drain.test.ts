@@ -16,12 +16,14 @@ function synth(ingress: 'api-gateway' | 'agentcore-gateway'): Template {
   const sharedIngress = new SharedIngress(stack, 'Ingress', {
     identity: { discoveryUrl: 'https://issuer.example.com/.well-known/openid-configuration', allowedClientIds: ['client-one'] },
     ingress,
-    defaultBackend: 'agent',
+    defaultBackend: 'default',
   });
   new AgentBackend(stack, 'Backend', {
-    name: 'agent',
+    name: 'default',
     ingress: sharedIngress,
     agent: { codePath: FIXTURE_AGENT, modelId: 'amazon.nova-lite-v1:0' },
+    scopes: ['default/chat'],
+    identityApi: { apiUrl: 'https://identity.example.com/prod/', platformInvokePolicyArn: 'arn:aws:iam::111122223333:policy/PlatformInvoke' },
   });
   return Template.fromStack(stack);
 }
@@ -30,14 +32,20 @@ function logicalIdOf(template: Template, type: string): string[] {
   return Object.keys(template.findResources(type));
 }
 
-/** The registry entry (whose Delete invokes its handler) -> the same drain -> the handler's log group (ADR-0019, ADR-0024). */
+/**
+ * The registry entry and the scope registration (whose Deletes invoke their
+ * handlers) -> the same drain -> each handler's log group (ADR-0019,
+ * ADR-0024, ADR-0025).
+ */
 function expectRegistryEntryBehindDrain(template: Template, drain: string): void {
   const resources = template.toJSON().Resources;
-  const [entryLogs] = logicalIdOf(template, 'AWS::Logs::LogGroup').filter((id) => id.includes('RegistryEntryLogs'));
-  expect(entryLogs).toBeDefined();
-  expect(resources[drain].DependsOn).toContain(entryLogs);
-  const [entry] = logicalIdOf(template, 'Custom::RuntimeIsolationRegistryEntry');
-  expect(resources[entry].DependsOn).toContain(drain);
+  for (const [logsId, type] of [['RegistryEntryLogs', 'Custom::RuntimeIsolationRegistryEntry'], ['ScopesLogs', 'Custom::RuntimeIsolationScopeRegistration']]) {
+    const [handlerLogs] = logicalIdOf(template, 'AWS::Logs::LogGroup').filter((id) => id.includes(logsId));
+    expect(handlerLogs).toBeDefined();
+    expect(resources[drain].DependsOn).toContain(handlerLogs);
+    const [resource] = logicalIdOf(template, type);
+    expect(resources[resource].DependsOn).toContain(drain);
+  }
 }
 
 describe('teardown leaves no log group (ADR-0019)', () => {
@@ -50,7 +58,7 @@ describe('teardown leaves no log group (ADR-0019)', () => {
 
     const [drain] = logicalIdOf(template, 'AWS::CloudFormation::CustomResource');
     const drainDeps: string[] = template.toJSON().Resources[drain].DependsOn ?? [];
-    const writerGroups = Object.keys(groups).filter((id) => !id.includes('LogDrain') && !id.includes('RegistryEntry'));
+    const writerGroups = Object.keys(groups).filter((id) => !id.includes('LogDrain') && !id.includes('RegistryEntry') && !id.includes('ScopesLogs'));
     expect(writerGroups.length).toBe(4);
     for (const id of writerGroups) {
       expect(drainDeps).toContain(id);

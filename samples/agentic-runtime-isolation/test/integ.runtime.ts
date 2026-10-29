@@ -10,10 +10,15 @@
  *
  * | Stack suffix         | Ingress           | Modules                                                   | Spec §8 steps |
  * |----------------------|-------------------|-----------------------------------------------------------|---------------|
- * | `api-gateway`        | api-gateway       | every module on, demo tenant data                         | 3 to 9        |
- * | `agentcore-gateway`  | agentcore-gateway | every module on, demo tenant data                         | 3 to 9        |
- * | `session-off`        | api-gateway       | session off, no scope check, no forwarding, default role  | 4a, ADR-0018  |
- * | `narrowed`           | api-gateway       | forwarding with requireNarrowedToken, 5 requests/min      | 8 (narrowed), limits |
+ * | `api-gateway`        | api-gateway       | every module on, two backends with their own scopes, no floor, demo tenant data | 3 to 9, 9-registry |
+ * | `agentcore-gateway`  | agentcore-gateway | every module on, two backends with their own scopes, no floor, demo tenant data | 3 to 9, 9-registry |
+ * | `session-off`        | api-gateway       | session off, no floor, no forwarding, default role        | 4a, ADR-0018  |
+ * | `narrowed`           | api-gateway       | floor `default/chat`, forwarding with requireNarrowedToken, 5 requests/min | 8 (narrowed), limits |
+ *
+ * The all-on stacks carry no ingress-wide floor (ADR-0025): the integration
+ * test narrows tokens to one backend scope at a time (`billing/read` alone
+ * must reach billing), which a floor would refuse. The `narrowed` stack keeps
+ * the floor and the Gateway-style `allowedScopes` on `default/chat`.
  *
  * `session-off` runs on the construct's default model-only TenantModelRole
  * (no `tvm.role`), so the run also proves a model call is signed by a
@@ -38,7 +43,6 @@ const allOn = (ingress: DemoContext['ingress']): DemoContext => ({
   // agentcore-gateway stack runs with them off, the default.
   perTenantMetrics: ingress === 'api-gateway',
   sessionScope: 'user',
-  requiredScopes: ['tenant-api/read'],
   forwardUserToken: true,
   requireNarrowedToken: false,
   tvm: true,
@@ -46,6 +50,7 @@ const allOn = (ingress: DemoContext['ingress']): DemoContext => ({
   modelId,
   identityParameterPlaceholders: false,
   publishParameters: true,
+  billingBackend: true,
 });
 
 export const INTEG_STACKS: Record<string, DemoContext> = {
@@ -66,9 +71,12 @@ export const INTEG_STACKS: Record<string, DemoContext> = {
     // Low per-tenant limit (ADR-0020): the integ shows tenant A limited while tenant B is not.
     requestsPerMinute: 5,
     sessionScope: 'user',
+    // The ingress-wide floor (ADR-0005) and the narrowed-token rule
+    // (ADR-0007) on the default backend's one scope.
+    requiredScopes: ['default/chat'],
     forwardUserToken: true,
     requireNarrowedToken: true,
-    allowedScopes: ['tenant-api/read'],
+    allowedScopes: ['default/chat'],
     tvm: false,
     includeUserIdTag: false,
     modelId,
