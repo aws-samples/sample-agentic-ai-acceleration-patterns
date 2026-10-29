@@ -10,6 +10,7 @@ import {
   AdminListGroupsForUserCommand,
   AdminRemoveUserFromGroupCommand,
   AdminSetUserPasswordCommand,
+  AdminUpdateUserAttributesCommand,
   CreateGroupCommand,
   DeleteGroupCommand,
   ListUsersCommand,
@@ -17,7 +18,7 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import 'aws-sdk-client-mock-jest';
 import { AnyMock, cognitoError, cognitoMock, depsFor, IDS, tenant } from './helpers';
-import { ConflictError, NotFoundError, UnsupportedInTopologyError } from '../../src/shared/errors';
+import { ConflictError, InvalidInputError, NotFoundError, UnsupportedInTopologyError } from '../../src/shared/errors';
 import { SharedPoolProvisioner } from '../../src/topology/shared-pool';
 
 const POOL = 'eu-central-1_shared';
@@ -247,6 +248,52 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
       const view = await provisioner().setAdmin(tenantA(), 'u1', false);
       expect(cognito.commandCalls(AdminRemoveUserFromGroupCommand)[0].args[0].input).toMatchObject({ GroupName: `admin-${IDS.a}` });
       expect(view.admin).toBe(false);
+    });
+  });
+
+  describe('setScopes / grantedScopes (ADR-0036)', () => {
+    it('writes custom:scopes as a space-separated list after the R-12 check, and the view reads it back', async () => {
+      cognito
+        .on(AdminGetUserCommand)
+        .resolvesOnce({ Username: 'u1', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }], UserStatus: 'CONFIRMED' })
+        .resolves({ Username: 'u1', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }, { Name: 'custom:scopes', Value: 'sample/read' }], UserStatus: 'CONFIRMED' });
+      cognito.on(AdminUpdateUserAttributesCommand).resolves({});
+      cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [] });
+      const view = await provisioner().setScopes(tenantA(), 'u1', ['sample/read']);
+      expect(cognito.commandCalls(AdminUpdateUserAttributesCommand)[0].args[0].input).toEqual({
+        UserPoolId: POOL,
+        Username: 'u1',
+        UserAttributes: [{ Name: 'custom:scopes', Value: 'sample/read' }],
+      });
+      expect(view.grantedScopes).toEqual(['sample/read']);
+    });
+
+    it('an empty list writes the empty string (a present attribute: the user holds nothing)', async () => {
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }, { Name: 'custom:scopes', Value: '' }], UserStatus: 'CONFIRMED' });
+      cognito.on(AdminUpdateUserAttributesCommand).resolves({});
+      cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [] });
+      const view = await provisioner().setScopes(tenantA(), 'u1', []);
+      expect(cognito.commandCalls(AdminUpdateUserAttributesCommand)[0].args[0].input.UserAttributes).toEqual([{ Name: 'custom:scopes', Value: '' }]);
+      expect(view.grantedScopes).toEqual([]);
+    });
+
+    it('a user of another tenant is a 404 and nothing is written (R-12)', async () => {
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u2', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.b }], UserStatus: 'CONFIRMED' });
+      await expect(provisioner().setScopes(tenantA(), 'u2', ['sample/read'])).rejects.toBeInstanceOf(NotFoundError);
+      expect(cognito.commandCalls(AdminUpdateUserAttributesCommand)).toHaveLength(0);
+    });
+
+    it('a list that does not fit the 2048-character attribute is a 400, not a Cognito error', async () => {
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }], UserStatus: 'CONFIRMED' });
+      const many = Array.from({ length: 200 }, (_, i) => `backend-${i}/action-${i}`);
+      await expect(provisioner().setScopes(tenantA(), 'u1', many)).rejects.toBeInstanceOf(InvalidInputError);
+      expect(cognito.commandCalls(AdminUpdateUserAttributesCommand)).toHaveLength(0);
+    });
+
+    it('getUser reports an absent attribute as undefined (all of the tenant\'s scopes)', async () => {
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }], UserStatus: 'CONFIRMED' });
+      cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [] });
+      expect((await provisioner().getUser(tenantA(), 'u1')).grantedScopes).toBeUndefined();
     });
   });
 });

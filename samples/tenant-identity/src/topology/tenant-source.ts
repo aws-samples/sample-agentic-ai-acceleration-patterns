@@ -4,9 +4,10 @@
 /**
  * Tenant sources for the pre-token-generation trigger (spec §8 "Tenant
  * lookup"). One per topology; each reads the event and the registry only,
- * and returns the tenant(s) the token should name. The trigger (W1) applies
- * the status rule and narrowing on top of this; the source only maps an
- * event to tenant ids.
+ * and returns the tenant(s) the token should name, plus the user's granted
+ * scopes per tenant in the topology's `custom:scopes` encoding (ADR-0036).
+ * The trigger (W1) applies the status rule, the scope rule and narrowing on
+ * top of this; the source only maps an event to tenant ids and grants.
  *
  * This module MUST NOT import the Cognito SDK: the trigger's role holds no
  * `cognito-idp` action (R-14), and nothing here needs one.
@@ -20,6 +21,7 @@ import {
   INVALID_TARGET,
   isTenantId,
   POOL_MISMATCH,
+  SCOPES_ATTRIBUTE,
   TENANT_ATTRIBUTE,
   TENANT_GROUP_PATTERN,
   TIERED,
@@ -27,6 +29,22 @@ import {
 } from '../shared/constants';
 import { InvalidInputError } from '../shared/errors';
 import type { RegistryReader } from '../shared/registry';
+import { decodeScopeList, decodeScopeMapEntry } from '../shared/scopes';
+
+/**
+ * ADR-0036: the single-tenant reading of `custom:scopes` (a space-separated
+ * list). The attribute is for the user's one tenant, so the id is ignored.
+ */
+function listGrants(event: PreTokenGenerationV2TriggerEvent): (tenantId: string) => readonly string[] | undefined {
+  const granted = decodeScopeList(event.request.userAttributes?.[SCOPES_ATTRIBUTE]);
+  return () => granted;
+}
+
+/** ADR-0036: the multi-tenant reading of `custom:scopes` (a JSON object keyed by tenant id). */
+function mapGrants(event: PreTokenGenerationV2TriggerEvent): (tenantId: string) => readonly string[] | undefined {
+  const value = event.request.userAttributes?.[SCOPES_ATTRIBUTE];
+  return (tenantId) => decodeScopeMapEntry(value, tenantId);
+}
 
 /**
  * Selects the tenant source for the deployment (spec P-1, P-7). Every source
@@ -72,7 +90,7 @@ class PoolPerTenantTenantSource implements TenantSource {
     if (!bindingHolds(record, { kind: 'pool', userPoolId: event.userPoolId })) {
       throw new Error(`${INVALID_TARGET}: ${POOL_MISMATCH}`);
     }
-    return { kind: 'single', tenantId: record.tenantId, record };
+    return { kind: 'single', tenantId: record.tenantId, record, grantedScopes: listGrants(event) };
   }
 }
 
@@ -96,7 +114,7 @@ class SharedPoolTenantSource implements TenantSource {
     if (record !== undefined && !bindingHolds(record, { kind: 'shared' })) {
       throw new Error(`${INVALID_TARGET}: ${POOL_MISMATCH}`);
     }
-    return { kind: 'single', tenantId, record };
+    return { kind: 'single', tenantId, record, grantedScopes: listGrants(event) };
   }
 }
 
@@ -120,7 +138,11 @@ class SharedPoolMultiTenantTenantSource implements TenantSource {
     }
     const records = await registry.batchGet(tenantIds);
     // ADR-0027: drop any tenant not bound to the shared pool.
-    return { kind: 'multi', records: records.filter((r) => bindingHolds(r, { kind: 'shared' })) };
+    return {
+      kind: 'multi',
+      records: records.filter((r) => bindingHolds(r, { kind: 'shared' })),
+      grantedScopes: mapGrants(event),
+    };
   }
 }
 

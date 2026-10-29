@@ -30,6 +30,14 @@ export interface UserView {
   readonly admin: boolean;
   /** Cognito's UserStatus. */
   readonly status: string;
+  /**
+   * ADR-0036: the scopes an admin granted the user for THIS tenant, read
+   * from `custom:scopes` in the topology's encoding. `undefined` when the
+   * attribute (or, in topology 3, the tenant's key) is absent, which means
+   * all of the tenant's scopes. The service layer intersects it with the
+   * tenant's entitlement and the catalogue (`effectiveScopes`).
+   */
+  readonly grantedScopes?: readonly string[];
   readonly createdAt: Date;
 }
 
@@ -90,6 +98,14 @@ export interface Provisioner {
   /** Adds the user to, or removes them from, `admin-<tenantId>`. */
   setAdmin(tenant: TenantRecord, username: string, admin: boolean): Promise<UserView>;
 
+  /**
+   * ADR-0036: writes the user's granted scopes for this tenant into
+   * `custom:scopes` in the topology's encoding (a list, or one key of the
+   * JSON object in topology 3). The caller has validated the list against
+   * the tenant's entitlement; this only encodes and writes. R-12 check first.
+   */
+  setScopes(tenant: TenantRecord, username: string, scopes: readonly string[]): Promise<UserView>;
+
   /** 1, 2: delete the Cognito user. 3: leave the tenant; delete the user if no `t-*` group remains. */
   deleteUser(tenant: TenantRecord, username: string): Promise<void>;
 
@@ -123,6 +139,19 @@ export interface TenantSource {
   resolve(event: PreTokenGenerationV2TriggerEvent, registry: RegistryReader): Promise<ResolvedTenants>;
 }
 
+/**
+ * ADR-0036: the user's granted scopes for a tenant, read from the event's
+ * `custom:scopes` in the topology's encoding. `undefined` means the
+ * attribute (or the tenant's key) is absent: the user holds all of the
+ * tenant's scopes.
+ */
+export type GrantedScopes = (tenantId: string) => readonly string[] | undefined;
+
 export type ResolvedTenants =
-  | { readonly kind: 'single'; readonly tenantId: string; readonly record: TenantRecord | undefined }
-  | { readonly kind: 'multi'; readonly records: readonly TenantRecord[] };
+  | {
+    readonly kind: 'single';
+    readonly tenantId: string;
+    readonly record: TenantRecord | undefined;
+    readonly grantedScopes: GrantedScopes;
+  }
+  | { readonly kind: 'multi'; readonly records: readonly TenantRecord[]; readonly grantedScopes: GrantedScopes };

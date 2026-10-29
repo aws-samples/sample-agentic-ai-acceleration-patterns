@@ -34,6 +34,7 @@ import {
   generateTemporaryPassword,
   isCognitoError,
   listGroupsForUser,
+  writeScopesAttribute,
 } from './cognito-users';
 import type { ProvisionerDeps } from './index';
 import { listUsersInGroup } from './listing';
@@ -47,6 +48,7 @@ import {
 import { ConflictError, NotFoundError, UnsupportedInTopologyError } from '../shared/errors';
 import { Page } from '../shared/registry';
 import type { TenantRecord } from '../shared/registry';
+import { decodeScopeList, encodeScopeList } from '../shared/scopes';
 
 const PAGE_LIMIT = 60;
 
@@ -140,7 +142,14 @@ export class SharedPoolProvisioner implements Provisioner {
       );
     }
     return {
-      user: adminGetUserToView(username, created.User?.Attributes, created.User?.UserStatus, created.User?.UserCreateDate, admin),
+      user: adminGetUserToView(
+        username,
+        created.User?.Attributes,
+        created.User?.UserStatus,
+        created.User?.UserCreateDate,
+        admin,
+        decodeScopeList,
+      ),
       temporaryPassword,
     };
   }
@@ -153,11 +162,33 @@ export class SharedPoolProvisioner implements Provisioner {
     // One AdminGetUser serves both the R-12 check and the view.
     const user = await this.member(tenant, username);
     const groups = await listGroupsForUser(this.cognito, this.userPoolId, username);
-    return adminGetUserToView(user.username, user.attributes, user.status, user.createdAt, groups.includes(adminGroupName(tenant.tenantId)));
+    return adminGetUserToView(
+      user.username,
+      user.attributes,
+      user.status,
+      user.createdAt,
+      groups.includes(adminGroupName(tenant.tenantId)),
+      decodeScopeList,
+    );
   }
 
   async listUsers(tenant: TenantRecord, nextToken?: string): Promise<Page<UserView>> {
-    return listUsersInGroup(this.cognito, this.userPoolId, tenantGroupName(tenant.tenantId), adminGroupName(tenant.tenantId), nextToken);
+    return listUsersInGroup(
+      this.cognito,
+      this.userPoolId,
+      tenantGroupName(tenant.tenantId),
+      adminGroupName(tenant.tenantId),
+      decodeScopeList,
+      nextToken,
+    );
+  }
+
+  async setScopes(tenant: TenantRecord, username: string, scopes: readonly string[]): Promise<UserView> {
+    // ADR-0036: one person is one tenant here, so the attribute is the plain
+    // list for this tenant. R-12 first, as every per-user method does.
+    await this.assertMember(tenant, username);
+    await writeScopesAttribute(this.cognito, this.userPoolId, username, encodeScopeList(scopes));
+    return this.getUser(tenant, username);
   }
 
   async setAdmin(tenant: TenantRecord, username: string, admin: boolean): Promise<UserView> {

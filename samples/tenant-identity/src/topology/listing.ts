@@ -18,7 +18,7 @@ import {
   ListUsersInGroupCommand,
   UserType,
 } from '@aws-sdk/client-cognito-identity-provider';
-import { COGNITO, isCognitoError, toUserView } from './cognito-users';
+import { COGNITO, type GrantReader, isCognitoError, toUserView } from './cognito-users';
 import type { UserView } from './provisioner';
 import { InvalidInputError } from '../shared/errors';
 import type { Page } from '../shared/registry';
@@ -69,13 +69,14 @@ export async function listUsersInPool(
   cognito: CognitoIdentityProviderClient,
   userPoolId: string,
   adminGroup: string,
+  grants: GrantReader,
   nextToken?: string,
 ): Promise<Page<UserView>> {
   const admins = await adminUsernames(cognito, userPoolId, adminGroup);
   const result = await withCallerToken(nextToken, () =>
     cognito.send(new ListUsersCommand({ UserPoolId: userPoolId, Limit: PAGE_LIMIT, PaginationToken: nextToken })),
   );
-  const items = ((result.Users ?? []) as UserType[]).map((u) => toUserView(u, admins.has(u.Username ?? '')));
+  const items = ((result.Users ?? []) as UserType[]).map((u) => toUserView(u, admins.has(u.Username ?? ''), grants));
   return { items, nextToken: result.PaginationToken };
 }
 
@@ -85,6 +86,7 @@ export async function listUsersInGroup(
   userPoolId: string,
   tenantGroup: string,
   adminGroup: string,
+  grants: GrantReader,
   nextToken?: string,
 ): Promise<Page<UserView>> {
   const admins = await adminUsernames(cognito, userPoolId, adminGroup);
@@ -93,6 +95,6 @@ export async function listUsersInGroup(
       new ListUsersInGroupCommand({ UserPoolId: userPoolId, GroupName: tenantGroup, Limit: PAGE_LIMIT, NextToken: nextToken }),
     ),
   );
-  const items = ((result.Users ?? []) as UserType[]).map((u) => toUserView(u, admins.has(u.Username ?? '')));
+  const items = ((result.Users ?? []) as UserType[]).map((u) => toUserView(u, admins.has(u.Username ?? ''), grants));
   return { items, nextToken: result.NextToken };
 }

@@ -26,17 +26,20 @@ import {
   adminGetUserToView,
   adminPasswordSignIn,
   adminRefresh,
+  attr,
   COGNITO,
   findUserByEmail,
   generateTemporaryPassword,
   isCognitoError,
   listGroupsForUser,
+  writeScopesAttribute,
 } from './cognito-users';
 import type { ProvisionerDeps } from './index';
 import { listUsersInGroup } from './listing';
 import type { NewUserResult, Provisioner, ProvisionedTenant, TokenSet, UserView } from './provisioner';
 import {
   adminGroupName,
+  SCOPES_ATTRIBUTE,
   TENANT_GROUP_PATTERN,
   tenantGroupName,
   type Topology,
@@ -44,6 +47,15 @@ import {
 import { ConflictError, NotFoundError } from '../shared/errors';
 import { Page } from '../shared/registry';
 import type { TenantRecord } from '../shared/registry';
+import { decodeScopeMapEntry, encodeScopeMap } from '../shared/scopes';
+
+/**
+ * ADR-0036: one person belongs to several tenants here, so `custom:scopes`
+ * is a JSON object keyed by tenant id; this reads the one key a view is for.
+ */
+function grantsFor(tenantId: string): (value: string | undefined) => readonly string[] | undefined {
+  return (value) => decodeScopeMapEntry(value, tenantId);
+}
 
 const PAGE_LIMIT = 60;
 
@@ -139,7 +151,14 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
         : admin;
     const source = created ?? existing;
     return {
-      user: adminGetUserToView(username, source?.Attributes, source?.UserStatus, source?.UserCreateDate, isAdmin),
+      user: adminGetUserToView(
+        username,
+        source?.Attributes,
+        source?.UserStatus,
+        source?.UserCreateDate,
+        isAdmin,
+        grantsFor(tenant.tenantId),
+      ),
       temporaryPassword,
     };
   }
@@ -158,11 +177,38 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
       throw new NotFoundError('User not found in tenant');
     }
     const user = await adminGetUser(this.cognito, this.userPoolId, username);
-    return adminGetUserToView(user.username, user.attributes, user.status, user.createdAt, groups.includes(adminGroupName(tenant.tenantId)));
+    return adminGetUserToView(
+      user.username,
+      user.attributes,
+      user.status,
+      user.createdAt,
+      groups.includes(adminGroupName(tenant.tenantId)),
+      grantsFor(tenant.tenantId),
+    );
   }
 
   async listUsers(tenant: TenantRecord, nextToken?: string): Promise<Page<UserView>> {
-    return listUsersInGroup(this.cognito, this.userPoolId, tenantGroupName(tenant.tenantId), adminGroupName(tenant.tenantId), nextToken);
+    return listUsersInGroup(
+      this.cognito,
+      this.userPoolId,
+      tenantGroupName(tenant.tenantId),
+      adminGroupName(tenant.tenantId),
+      grantsFor(tenant.tenantId),
+      nextToken,
+    );
+  }
+
+  async setScopes(tenant: TenantRecord, username: string, scopes: readonly string[]): Promise<UserView> {
+    // ADR-0036: replace this tenant's key in the JSON object and leave the
+    // user's other tenants' grants as they are. Read-modify-write on one
+    // attribute: two admins of different tenants cutting the same person at
+    // the same instant can lose one write; the loser's cut is re-applied by
+    // repeating it (the attribute shows what is held). R-12 first.
+    await this.assertMember(tenant, username);
+    const current = await adminGetUser(this.cognito, this.userPoolId, username);
+    const encoded = encodeScopeMap(attr(current.attributes, SCOPES_ATTRIBUTE), tenant.tenantId, scopes);
+    await writeScopesAttribute(this.cognito, this.userPoolId, username, encoded);
+    return this.getUser(tenant, username);
   }
 
   async setAdmin(tenant: TenantRecord, username: string, admin: boolean): Promise<UserView> {

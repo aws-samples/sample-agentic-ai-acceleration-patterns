@@ -8,6 +8,7 @@ import {
   AdminGetUserCommand,
   AdminListGroupsForUserCommand,
   AdminRemoveUserFromGroupCommand,
+  AdminUpdateUserAttributesCommand,
   CreateGroupCommand,
   DeleteGroupCommand,
   ListUsersCommand,
@@ -296,6 +297,53 @@ describe('SharedPoolMultiTenantProvisioner (spec §7.3)', () => {
       const view = await provisioner().setAdmin(tenantA(), 'u1', false);
       expect(cognito.commandCalls(AdminRemoveUserFromGroupCommand)[0].args[0].input).toMatchObject({ GroupName: `admin-${IDS.a}` });
       expect(view.admin).toBe(false);
+    });
+  });
+
+  describe('setScopes / grantedScopes (ADR-0036, JSON object keyed by tenant)', () => {
+    const otherTenant = '01C0ABCDEFGHJKMNPQRSTVWXYZ';
+
+    it('replaces this tenant\'s key and keeps the other tenants\' grants', async () => {
+      cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [{ GroupName: `t-${IDS.a}` }, { GroupName: `t-${otherTenant}` }] });
+      const before = JSON.stringify({ [otherTenant]: 'billing/read', [IDS.a]: 'sample/read sample/write' });
+      const after = JSON.stringify({ [otherTenant]: 'billing/read', [IDS.a]: 'sample/read' });
+      cognito
+        .on(AdminGetUserCommand)
+        .resolvesOnce({ Username: 'u1', UserAttributes: [{ Name: 'custom:scopes', Value: before }], UserStatus: 'CONFIRMED' })
+        .resolves({ Username: 'u1', UserAttributes: [{ Name: 'custom:scopes', Value: after }], UserStatus: 'CONFIRMED' });
+      cognito.on(AdminUpdateUserAttributesCommand).resolves({});
+      const view = await provisioner().setScopes(tenantA(), 'u1', ['sample/read']);
+      const written = cognito.commandCalls(AdminUpdateUserAttributesCommand)[0].args[0].input.UserAttributes[0];
+      expect(written.Name).toBe('custom:scopes');
+      expect(JSON.parse(written.Value)).toEqual({ [otherTenant]: 'billing/read', [IDS.a]: 'sample/read' });
+      expect(view.grantedScopes).toEqual(['sample/read']);
+    });
+
+    it('starts a new object when the attribute is absent', async () => {
+      cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [{ GroupName: `t-${IDS.a}` }] });
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [], UserStatus: 'CONFIRMED' });
+      cognito.on(AdminUpdateUserAttributesCommand).resolves({});
+      await provisioner().setScopes(tenantA(), 'u1', []);
+      const written = cognito.commandCalls(AdminUpdateUserAttributesCommand)[0].args[0].input.UserAttributes[0];
+      expect(JSON.parse(written.Value)).toEqual({ [IDS.a]: '' });
+    });
+
+    it('getUser reads only this tenant\'s key; another tenant\'s grant is never shown (spec §5.1)', async () => {
+      cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [{ GroupName: `t-${IDS.a}` }, { GroupName: `t-${otherTenant}` }] });
+      cognito.on(AdminGetUserCommand).resolves({
+        Username: 'u1',
+        UserAttributes: [{ Name: 'custom:scopes', Value: JSON.stringify({ [otherTenant]: 'billing/read' }) }],
+        UserStatus: 'CONFIRMED',
+      });
+      const view = await provisioner().getUser(tenantA(), 'u1');
+      expect(view.grantedScopes).toBeUndefined();
+      expect(JSON.stringify(view)).not.toContain(otherTenant);
+    });
+
+    it('a non-member is a 404 and nothing is written (R-12)', async () => {
+      cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [{ GroupName: `t-${otherTenant}` }] });
+      await expect(provisioner().setScopes(tenantA(), 'u1', ['sample/read'])).rejects.toBeInstanceOf(NotFoundError);
+      expect(cognito.commandCalls(AdminUpdateUserAttributesCommand)).toHaveLength(0);
     });
   });
 });
