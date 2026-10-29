@@ -16,13 +16,15 @@ the status rule (ADR-0008).
 ## Options considered
 ### Option 1: A `scopes` field on the tenant registry row
 `CreateTenant` takes an optional `scopes` list; when absent, the row is written
-with every scope in the catalogue at that moment. A new `UpdateTenant`
+with an empty list, so a new tenant holds nothing until the platform says
+otherwise (fail closed). A new `UpdateTenant`
 (`PATCH /platform/tenants/{tenantId}`) replaces the list; `GetTenant` and
 `ListTenants` return it. Each entry must exist in the catalogue, else 400
 `invalid_scope`. Pros: the trigger already has the row, so no extra read; one
 place to look; a change takes effect at the next issuance (5 min at most, the
-same bound as offboarding). Cons: a tenant created before a backend is added
-does not gain the new scope by itself; the platform calls `UpdateTenant`.
+same bound as offboarding); no tenant ever holds a scope by accident. Cons:
+every caller of `CreateTenant` that wants a usable tenant must name scopes or
+follow with `UpdateTenant`.
 
 ### Option 2: A Cognito group per tenant and scope
 `scope-<tenantId>-<scope>` groups, users added to each. Pros: the trigger sees
@@ -52,12 +54,16 @@ granted only when every requested scope is in `held` for the target tenant;
 otherwise `invalid_scope`, with the same fixed text as today.
 
 ## Consequences
-`CreateTenant`'s default is a snapshot: a tenant created when the catalogue
-held `default/chat` does not hold `billing/read` registered a day later until
-`UpdateTenant` says so. That is the intended meaning of entitlement, and the
+`CreateTenant` without `scopes` yields a tenant whose tokens carry no scope
+but `tenant-admin/users` for its admins; such a token is refused by every
+consumer that requires a scope, and the token exchange refuses to narrow it
+(`invalid_scope`). The platform entitles the tenant explicitly, at creation or
+through `UpdateTenant`; a backend registered later is held by no tenant until
+`UpdateTenant` names it. That is the intended meaning of entitlement, and the
 README says so. A scope deleted from the catalogue (ADR-0034) drops out of
 `held` by the first intersection without touching tenant rows; a later
 `UpdateTenant` that still names it gets `invalid_scope`. The control-plane
-mount (ADR-0028) passes no `scopes`, so mounted tenants get the snapshot
-default. `PlatformInvokePolicy` (ADR-0030) gains `PATCH /platform/tenants/*`,
+mount (ADR-0028) gains a `scopes` input on tenant creation and passes it to
+`CreateTenant`; a mount that omits it creates a tenant with no scopes. The
+sample's own integration test passes the two scopes it registers. `PlatformInvokePolicy` (ADR-0030) gains `PATCH /platform/tenants/*`,
 which by ARN shape also reaches `UpdateUser`; recorded in `threat-model.md`.
