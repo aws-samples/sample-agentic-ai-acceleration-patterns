@@ -1182,7 +1182,7 @@ export function defineScenario(topology: Topology): void {
       );
       expectStatus(unNarrowed, 403, 'un-narrowed admin token → 403');
 
-      // a narrowed token with only tenant-api/read → 403.
+      // a narrowed token with only sample/read → 403.
       const readOnlyExchange = await exchange.exchange({
         clientId: exchangeClientId('A'),
         subjectToken: tokens.a1.refreshToken,

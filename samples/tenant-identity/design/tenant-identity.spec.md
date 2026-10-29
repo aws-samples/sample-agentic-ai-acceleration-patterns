@@ -259,8 +259,9 @@ or users attributable to the test.
 
 The sample MUST NOT persist users, memberships, or credentials in its own
 table. Users live in Cognito; memberships are Cognito groups or attributes;
-the registry holds **tenants only** (and, for `pool-per-tenant`, the
-pool/issuer the tenant owns). Duplicating the user directory creates a second
+the registry holds **tenants** (with, for `pool-per-tenant`, the pool/issuer
+the tenant owns, and for every tenant its scope entitlement, §8.1) **and the
+scope catalogue** (ADR-0034), nothing about users. Duplicating the user directory creates a second
 source of truth that drifts; the trade is that listing "users of tenant X" is
 a Cognito call, which is acceptable for a platform API that the vendor calls
 rarely.
@@ -270,7 +271,7 @@ rarely.
 The access token carries exactly one tenant claim added by the pre-token-
 generation trigger: `tenant_id` (string; topologies 1 and 2, and every
 narrowed token) or `tenants` (array of strings; topology 3 without
-narrowing). The trigger also sets the sample scopes in `scope` (§8.1).
+narrowing). The trigger also sets the scopes the user holds in `scope` (§8.1).
 Nothing else is added: no names, no roles, no e-mail. Cognito's own `cognito:groups` claim is removed from every token, because it names every tenant and admin group the user holds (ADR-0020). The claims go into the **access** token, not the ID token, because
 the access token is what a client presents to an API; the ID token is for the
 client itself. This is the **token contract**, the one thing a consumer may
@@ -364,12 +365,12 @@ recover a tenant that has locked itself out.
 |---|---|---|
 | R-1 | **REST API** | One API Gateway REST API (ADR-0016), generated from the interface model (Smithy), three route families: `/platform/*` with IAM authorisation (ADR-0005); `POST /oauth2/token`, the token-exchange endpoint, with no gateway authoriser because the refresh token is the credential (§5.4, ADR-0011); and `/tenant/*` with the tenant authoriser (R-9, ADR-0007). No other routes. |
 | R-2 | **Platform function** | Implements the platform API through the topology's provisioner. Role per P-8. |
-| R-3 | **Tenant registry** | One DynamoDB table (§4). Point-in-time recovery on; `DESTROY` removal for the sample. |
+| R-3 | **Tenant registry** | One DynamoDB table (§4): the tenant rows and the scope catalogue rows. Point-in-time recovery on; `DESTROY` removal for the sample. |
 | R-4 | **Pre-token-generation function** | Cognito Lambda trigger, version 2 event (`V2_0`), adds the claim(s) and scopes of P-6 to the access token, enforces tenant status (P-2), and applies narrowing requests (P-10, §8; ADR-0003). Attached to every pool the sample creates. Pools MUST use the **Essentials** feature plan (the default for new pools); access-token customisation is not available on Lite without advanced security features. |
 | R-5 | **User pool(s)** | `shared-pool*`: exactly one pool created by the stack. `pool-per-tenant`: zero pools at deploy time; one pool, one app client, and the trigger attachment per tenant at onboarding. Every pool: self sign-up off, admin-create only, e-mail as username, admin-only account recovery, access token lifetime 5 minutes (N-1), refresh token rotation off (ADR-0009), no hosted UI domain. Every pool: `email` immutable (R-17). |
 | R-6 | **Parameter publication** | The stack publishes `/application-plane/shared/identity/{apiUrl,topology}` and, for `shared-pool*`, `/application-plane/shared/identity/userPoolId` and `appClientId`, so the sample mounts into the `control-plane` sample's shared namespace. |
-| R-7 | **Token-exchange function** | Implements `POST /oauth2/token` (§5.4). It parses the form and calls `GetTokensFromRefreshToken` with the narrowing request in `ClientMetadata`. It returns the access token only and discards the ID token. Its role holds logging permissions only, no `cognito-idp` or DynamoDB action, because `GetTokensFromRefreshToken` is authorised by the refresh token, not by IAM (P-10). |
-| R-8 | **Tenant-user function** | Implements `/tenant/users` (§5.2) through the topology's provisioner, with the tenant taken only from the authoriser context. Its role holds `AdminCreateUser`, `AdminGetUser`, `AdminDeleteUser`, `AdminAddUserToGroup`, `AdminRemoveUserFromGroup`, `AdminListGroupsForUser`, `ListUsers`, and `ListUsersInGroup`, scoped as N-3, plus registry reads. It holds no `CreateUserPool`, `DeleteUserPool`, `CreateGroup`, or `DeleteGroup` (P-8). |
+| R-7 | **Token-exchange function** | Implements `POST /oauth2/token` (§5.4). It parses the form and calls `GetTokensFromRefreshToken` with the narrowing request in `ClientMetadata`. It returns the access token only and discards the ID token. Its role holds logging permissions and one `dynamodb:Query` on the registry table bound to the catalogue's partition key (`dynamodb:LeadingKeys = SCOPE`, §8.1), no `cognito-idp` action and no other registry read, because `GetTokensFromRefreshToken` is authorised by the refresh token, not by IAM (P-10). |
+| R-8 | **Tenant-user function** | Implements `/tenant/users` (§5.2) through the topology's provisioner, with the tenant taken only from the authoriser context. Its role holds `AdminCreateUser`, `AdminGetUser`, `AdminUpdateUserAttributes` (for `custom:scopes` only, §8.1), `AdminDeleteUser`, `AdminAddUserToGroup`, `AdminRemoveUserFromGroup`, `AdminListGroupsForUser`, `ListUsers`, and `ListUsersInGroup`, scoped as N-3, plus registry reads. It holds no `CreateUserPool`, `DeleteUserPool`, `CreateGroup`, or `DeleteGroup` (P-8). |
 | R-9 | **Tenant authoriser** | REST API Lambda (request) authoriser on `/tenant/*`, with result caching off. Verifies the access token as ADR-0007 states, refuses a tenant that is not `ACTIVE`, and passes `tenantId` and `sub` as context. On Allow it returns the tenant's API key value as `usageIdentifierKey` (R-19); it refuses a tenant with no key. Its role reads the registry and nothing else. |
 | R-18 | **Tenant-scoped role** (`pool-per-tenant` only) | Every pool the platform function creates is tagged `tenant-identity:tenant=<tenantId>`. One role grants the R-8 user actions on `userpool/*` only where that tag equals the session tag `TenantId`; it trusts only the tenant-user function's role, for `sts:AssumeRole` and `sts:TagSession`, with exactly one ULID-shaped `TenantId` tag. The tenant-user function's own role then holds no `cognito-idp` action: it assumes this role per tenant with the authoriser's `tenantId` (900-second sessions, cached per tenant, refreshed before expiry) and keeps the R-12 and R-13 checks. Shared pools: no such role; IAM cannot scope users inside a pool (ADR-0026). |
 | R-19 | **Per-tenant throttle** | One usage plan per stack on the stage, at the N-7 per-tenant limits; in `tiered`, one plan per tier (standard at the N-7 reference, premium at 25 rps / 50 burst), and `CreateTenant` adds the key to its tier's plan (ADR-0027). One API key per tenant, tagged with the stack name, created by `CreateTenant` and deleted by `DeleteTenant` and the teardown drain. The API's key source is `AUTHORIZER` and only `/tenant/*` methods require a key: `/platform/*` is IAM, and `POST /oauth2/token` has no authoriser, so no tenant is known at the gateway there (ADR-0025). |
@@ -423,7 +424,8 @@ function receives the deployment value in its environment (`TOPOLOGY`); in
 
 ## 4. Data Model
 
-One table, `TenantRegistry`. Single-table, one item type.
+One table, `TenantRegistry`. Single-table, two item types: tenants (§4.1)
+and the scope catalogue (§4.4).
 
 ### 4.1 Tenant
 
@@ -436,6 +438,7 @@ One table, `TenantRegistry`. Single-table, one item type.
 | `userPoolId`, `appClientId`, `issuer` | `pool-per-tenant` rows only (premium tenants in `tiered`): the tenant's own pool. `issuer` is stored for consumers: `ListTenants` is the issuer allowlist a `pool-per-tenant` verifier needs (§1.2). A standard row in `tiered` stores none of them (§4.2). |
 | `groupName` | `shared-pool-multi-tenant` only: `t-<tenantId>` |
 | `apiKeyId`, `apiKeyValue` | every topology: the tenant's API Gateway key (R-19, ADR-0025). The value is a throttling identifier the authoriser returns, not a credential: with the `AUTHORIZER` key source a client's `x-api-key` header is ignored. Never returned by the API. |
+| `scopes` | every topology: the scopes the tenant is entitled to (ADR-0035), a list of §4.4 names; may be empty. Set by `CreateTenant` (absent in the request means `[]`, fail closed) and replaced by `UpdateTenant`; each entry MUST be in the catalogue when written (400 `invalid_scope` otherwise). A row written before the field existed reads as `[]`. Returned by `GetTenant` and `ListTenants`. |
 | `firstAdminEmail` | every topology, optional: the tenant's single first-admin slot (ADR-0032, mounting spec M-R-8, M-R-9). Set by `CreateTenant` in its activation write and by `CreateUser {firstAdmin: true}` through a claim (`attribute_not_exists(firstAdminEmail)`) that is re-asserted after the Cognito create; released by `DeleteUser` or `DeleteMembership` when they remove the holder, found by comparing the user's e-mail with the slot (the Cognito username is a UUID in `pool-per-tenant`). A tenant fact, which user was onboarded first, not user data in the R-10 sense: the one place an address reaches the table. Never returned by the API. |
 | `createdAt`, `updatedAt` | ISO-8601 |
 
@@ -471,8 +474,23 @@ no code branches on the deployment to skip it.
 ### 4.3 Listing
 
 `ListTenants` scans the single table with pagination (the registry is
-vendor-scale, not user-scale). An implementation MAY add a status GSI; it
-MUST NOT add a user item type to make listing users cheaper (P-5).
+vendor-scale, not user-scale), filtered to `SK = META` so the catalogue rows
+(§4.4) never appear in it. An implementation MAY add a status GSI; it MUST
+NOT add a user item type to make listing users cheaper (P-5).
+
+### 4.4 Scope catalogue (ADR-0034)
+
+| Field | Requirement |
+|---|---|
+| `name` | `^[a-z0-9-]+/[a-z0-9-]+$`, 3 to 128 characters; `<owner>/<action>`, the owner being the registering backend's name. The owner `tenant-admin` is reserved for the built-in `tenant-admin/users` and MUST be refused with 400 `invalid_scope` |
+| `owner` | the text before the `/`, derived, never supplied |
+| `description` | optional, at most 256 characters |
+| `createdAt` | ISO-8601; kept across re-registrations (`PutScope` is create-or-replace) |
+
+Key: `PK=SCOPE`, `SK=<name>`. The catalogue read is one paginated `Query` on
+`PK = SCOPE`. `DeleteScope` removes the row and nothing else: tenant rows
+that still name the scope are left alone, and the trigger's intersection
+(§8.1) drops the scope from tokens within the cache period.
 
 ---
 
@@ -495,23 +513,31 @@ setup, before the first operation is modelled.
 
 | Operation | Method / path | Effect by topology |
 |---|---|---|
-| `CreateTenant` | `POST /platform/tenants` `{name, adminEmail[, tier][, tenantId]}` → 201 `{tenant, admin}` | `tier` (`standard` \| `premium`) is required in `tiered` and selects the tenant's topology; in any other stack it is refused with 400 `UnsupportedInTopology`, and in `tiered` its absence is a 400 (ADR-0027). `tenantId` (optional, the `TenantId` shape, so a bad id is a 400) is used as the row's id instead of a generated ULID, for a caller that already holds one; the `attribute_not_exists(PK)` write makes an existing row a 409 that changes nothing (ADR-0029). All: write the registry row first, as `PROVISIONING` (ADR-0021). 1: create pool (tagged with the tenant, R-18) + client + trigger + group `admin-<id>`. 2, 3: create groups `t-<id>` and `admin-<id>`. All: create the tenant's API key and add it to the usage plan (R-19); a key failure deprovisions and deletes the row. All: flip the row to `ACTIVE` with the pool or group fields and `firstAdminEmail = adminEmail` in one conditional write (ADR-0032); a provisioning failure deletes the row, an activation failure deprovisions and deletes it. Then the Cognito half of the first-admin path for `adminEmail` (`admin: true`, slot re-asserted after the create); `admin` is that User with its temporary password. If this last step fails, the slot is released, the tenant is `ACTIVE` with no admin, and the vendor retries with `CreateUser {firstAdmin: true}`. |
-| `GetTenant` | `GET /platform/tenants/{tenantId}` | registry read; in `tiered` the `Tenant` carries `tier`, and a premium tenant's `userPoolId`/`appClientId` are what a client needs before sign-in (§6.3) |
-| `ListTenants` | `GET /platform/tenants?nextToken=` | registry scan |
+| `CreateTenant` | `POST /platform/tenants` `{name, adminEmail[, tier][, tenantId][, scopes]}` → 201 `{tenant, admin}` | `scopes` (optional, default `[]`) is the tenant's entitlement (§4.1, ADR-0035): no duplicates, every entry in the catalogue, never `tenant-admin/users`, else 400 `invalid_scope` before any write. `tier` (`standard` \| `premium`) is required in `tiered` and selects the tenant's topology; in any other stack it is refused with 400 `UnsupportedInTopology`, and in `tiered` its absence is a 400 (ADR-0027). `tenantId` (optional, the `TenantId` shape, so a bad id is a 400) is used as the row's id instead of a generated ULID, for a caller that already holds one; the `attribute_not_exists(PK)` write makes an existing row a 409 that changes nothing (ADR-0029). All: write the registry row first, as `PROVISIONING` (ADR-0021). 1: create pool (tagged with the tenant, R-18) + client + trigger + group `admin-<id>`. 2, 3: create groups `t-<id>` and `admin-<id>`. All: create the tenant's API key and add it to the usage plan (R-19); a key failure deprovisions and deletes the row. All: flip the row to `ACTIVE` with the pool or group fields and `firstAdminEmail = adminEmail` in one conditional write (ADR-0032); a provisioning failure deletes the row, an activation failure deprovisions and deletes it. Then the Cognito half of the first-admin path for `adminEmail` (`admin: true`, slot re-asserted after the create); `admin` is that User with its temporary password. If this last step fails, the slot is released, the tenant is `ACTIVE` with no admin, and the vendor retries with `CreateUser {firstAdmin: true}`. |
+| `GetTenant` | `GET /platform/tenants/{tenantId}` | registry read, `scopes` included; in `tiered` the `Tenant` carries `tier`, and a premium tenant's `userPoolId`/`appClientId` are what a client needs before sign-in (§6.3) |
+| `UpdateTenant` | `PATCH /platform/tenants/{tenantId}` `{scopes}` → 200 `{tenant}` | replaces the entitlement with the same rule as `CreateTenant.scopes`; only an `ACTIVE` tenant (409 otherwise); one conditional registry write, no Cognito call. Takes effect at the next token issuance (ADR-0035). |
+| `ListTenants` | `GET /platform/tenants?nextToken=` | registry scan, `scopes` on every row |
 | `DeleteTenant` | `DELETE /platform/tenants/{tenantId}` → 204 | R-11, then: 1: delete pool. 2: delete users with `custom:tenantId=<id>`. 3: delete users whose only group is `t-<id>`, remove the group from the rest, delete the group. All: delete the tenant's API key (R-19, idempotent). |
 | `CreateUser` | `POST /platform/tenants/{tenantId}/users` `{email, admin?, firstAdmin?}` → 201 User | 1: `AdminCreateUser` in the tenant's pool. 2: `AdminCreateUser` with `custom:tenantId`, then `AdminAddUserToGroup` `t-<id>`. 3: `AdminCreateUser` (if absent) + `AdminAddUserToGroup` `t-<id>`. All: `admin: true` also adds the user to `admin-<id>`. `firstAdmin: true` implies `admin` and claims the tenant's single first-admin slot with a conditional write before the Cognito call, re-asserts it after, releases it if Cognito fails, and answers 409 `ConflictError` when the slot is held (404 when the row is gone), changing nothing (ADR-0032, mounting spec M-R-8). Returns a temporary password only in the response, only for a new Cognito user, and never logs it. |
 | `DeleteUser` | `DELETE /platform/tenants/{tenantId}/users/{username}` → 204 | 1, 2: `AdminDeleteUser`. 3: remove from `t-<id>` and `admin-<id>`; delete the user if no `t-*` group remains. All: if the user holds the first-admin slot, release it after the delete; a `{username}` that is the slot's e-mail with no user behind it answers 404 and still releases the slot (ADR-0032, mounting spec M-R-9). |
-| `GetUser` | `GET /platform/tenants/{tenantId}/users/{username}` → 200 User | `AdminGetUser`, plus `AdminListGroupsForUser` for the admin flag. |
-| `ListUsers` | `GET /platform/tenants/{tenantId}/users?nextToken=` → 200 `{users, nextToken}` | 1: `ListUsers` on the tenant's pool. 2, 3: `ListUsersInGroup` `t-<id>`. |
-| `UpdateUser` | `PATCH /platform/tenants/{tenantId}/users/{username}` `{admin}` → 200 User | add the user to, or remove them from, `admin-<id>`. |
+| `GetUser` | `GET /platform/tenants/{tenantId}/users/{username}` → 200 User | `AdminGetUser`, plus `AdminListGroupsForUser` for the admin flag; `scopes` is computed as §8.1 `held` without the admin scope. |
+| `ListUsers` | `GET /platform/tenants/{tenantId}/users?nextToken=` → 200 `{users, nextToken}` | 1: `ListUsers` on the tenant's pool. 2, 3: `ListUsersInGroup` `t-<id>`. Each User's `scopes` as for `GetUser`. |
+| `UpdateUser` | `PATCH /platform/tenants/{tenantId}/users/{username}` `{admin?, scopes?}` → 200 User | at least one field. `admin`: add the user to, or remove them from, `admin-<id>`. `scopes`: the user's grant (ADR-0036): no duplicates, a subset of the tenant's `scopes`, never `tenant-admin/users`, else 400 `invalid_scope` and neither field is written; `[]` is valid and means the user holds nothing. Written to `custom:scopes` with `AdminUpdateUserAttributes` in the topology's encoding (§8.1). |
+| `PutScope` | `PUT /platform/scopes/{scope}` `{description?}` → 200 `{scope}` | registers a catalogue row (§4.4) or replaces its description; idempotent, `createdAt` kept. Reserved owner → 400 `invalid_scope`. |
+| `GetScope` | `GET /platform/scopes/{scope}` → 200 `{scope}` | 404 when absent. |
+| `ListScopes` | `GET /platform/scopes?nextToken=` → 200 `{scopes, nextToken}` | the catalogue, paginated. |
+| `DeleteScope` | `DELETE /platform/scopes/{scope}` → 204 | idempotent: 204 also when absent. Tenant rows are not touched (§4.4). |
 | `CreateMembership` | `PUT /platform/tenants/{tenantId}/users/{username}/membership` → 204 | 3: `AdminAddUserToGroup`. 1, 2: 400 `UnsupportedInTopology`. |
 | `DeleteMembership` | `DELETE /platform/tenants/{tenantId}/users/{username}/membership` → 204 | 3: `AdminRemoveUserFromGroup`; 409 if it is the user's last tenant (use `DeleteUser`); if the user holds the first-admin slot, release it after the removal, as `DeleteUser` does (ADR-0032). 1, 2: 400 `UnsupportedInTopology`. |
 | `IssueToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token` `{password}` → 200 `{accessToken, idToken, refreshToken, expiresIn}` | `AdminSetUserPassword` (permanent) then `AdminInitiateAuth` with `ADMIN_USER_PASSWORD_AUTH` against the topology's pool. §3.2. |
 | `RefreshToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token/refresh` `{refreshToken}` → 200 `{accessToken, idToken, expiresIn}` | `AdminInitiateAuth` with `REFRESH_TOKEN_AUTH`, so the test can show that refresh re-runs the trigger (P-2, §10 steps 6 and 9). Same labelling as `IssueToken`. |
 
-A User is `{username, email, admin, status, createdAt}`: `status` is
-Cognito's user status, and `admin` is membership of `admin-<id>`. A User
-never says which other tenants the user belongs to.
+A User is `{username, email, admin, status, scopes, createdAt}`: `status` is
+Cognito's user status, `admin` is membership of `admin-<id>`, and `scopes` is
+the effective set the user holds for the path's tenant (§8.1 `held` without
+`tenant-admin/users`). A User never says which other tenants the user
+belongs to, and in topology 3 `scopes` is read from the tenant's own key of
+`custom:scopes` only.
 
 **R-12:** `GetUser`, `UpdateUser`, `DeleteUser`, `DeleteMembership`,
 `IssueToken`, `RefreshToken`, and every `/tenant/users/{username}`
@@ -538,12 +564,13 @@ operation as its platform twin, with the same per-topology effects.
 | `CreateTenantUser` | `POST /tenant/users` `{email, admin?}` → 201 User | `CreateUser` |
 | `GetTenantUser` | `GET /tenant/users/{username}` → 200 User | `GetUser` |
 | `ListTenantUsers` | `GET /tenant/users?nextToken=` → 200 `{users, nextToken}` | `ListUsers` |
-| `UpdateTenantUser` | `PATCH /tenant/users/{username}` `{admin}` → 200 User | `UpdateUser` |
+| `UpdateTenantUser` | `PATCH /tenant/users/{username}` `{admin?, scopes?}` → 200 User | `UpdateUser` (same `scopes` rule, against the caller's tenant's entitlement) |
 | `DeleteTenantUser` | `DELETE /tenant/users/{username}` → 204 | `DeleteUser` |
 
 **R-13:** A tenant admin MUST NOT change or delete themselves.
-`UpdateTenantUser` (either value of `admin`), or `DeleteTenantUser`, where
-`{username}` is the caller (`sub` from the authoriser) → 409. So the tenant
+`UpdateTenantUser` (either value of `admin`, or any `scopes`), or
+`DeleteTenantUser`, where `{username}` is the caller (`sub` from the
+authoriser) → 409. So the tenant
 API always leaves at least one admin; only the vendor can remove the last.
 
 **R-16:** Every `/tenant/*` mutation (`CreateTenantUser`, `UpdateTenantUser`,
@@ -574,8 +601,8 @@ an e-mail that already has a Cognito user adds that user to the tenant, as
 
 | Error | HTTP | Triggers |
 |---|---|---|
-| `ValidationError` | 400 | malformed input; `UnsupportedInTopology` |
-| `ResourceNotFoundError` | 404 | unknown tenant or user; a user who does not belong to the path's tenant (R-12); a first-admin claim whose row has vanished (ADR-0032) |
+| `ValidationError` | 400 | malformed input; a scope rule broken (`CreateTenant.scopes`, `UpdateTenant`, `UpdateUser.scopes`, `UpdateTenantUser.scopes`, `PutScope` of a reserved owner), with a message starting `invalid_scope` that never echoes the offending name; `UnsupportedInTopology` |
+| `ResourceNotFoundError` | 404 | unknown tenant, scope or user; a user who does not belong to the path's tenant (R-12); a first-admin claim whose row has vanished (ADR-0032) |
 | `ConflictError` | 409 | tenant `PROVISIONING` or `DELETING` on mutation; `CreateTenant` with a `tenantId` that exists (ADR-0029); a `firstAdmin` create when the slot is held (ADR-0032); removing a user's last membership; e-mail already exists in a shared pool for a different tenant (topology 2); a tenant admin changing or deleting themselves (R-13); a caller whose admin group or membership is gone (R-16) |
 | `InternalServerError` | 500 | everything else |
 
@@ -598,7 +625,7 @@ RFC 8693 §2, with Cognito as the signer (ADR-0009). Request body
 | `subject_token_type` | `urn:ietf:params:oauth:token-type:refresh_token`; any other value → `invalid_request` |
 | `requested_token_type` | optional; if present MUST be `urn:ietf:params:oauth:token-type:access_token` |
 | `resource` | `urn:tenant-identity:tenant:<ULID>`, at most one. Required in topology 3. In 1 and 2, if omitted, it defaults to the user's only tenant. |
-| `scope` | required; space-separated, non-empty subset of §8.1 |
+| `scope` | required; space-separated, non-empty, no duplicates; each entry a well-formed §4.4 name that is in the catalogue, or `tenant-admin/users`, else `invalid_scope` (the function reads the catalogue through the §8.1 cache). Whether the user holds it is the trigger's decision. |
 | `audience`, `actor_token`, `actor_token_type` | not supported → `invalid_request` |
 
 Behaviour: validate the form, then call `GetTokensFromRefreshToken` with
@@ -623,7 +650,7 @@ Errors, `{error, error_description}`, 400 unless marked:
 | `invalid_request` | malformed form, a missing or unsupported parameter |
 | `unsupported_grant_type` | any other `grant_type` |
 | `invalid_target` | the trigger refused the tenant: not held, not `ACTIVE`, or absent (message prefix `invalid_target`) |
-| `invalid_scope` | the trigger refused the scopes (prefix `invalid_scope`) |
+| `invalid_scope` | a requested scope is not in the catalogue (refused by the function), or the trigger refused the scopes (prefix `invalid_scope`): not held by the user for the target tenant |
 | `invalid_client` | topologies 2 and 3: `client_id` is not the stack's app client. The endpoint serves one client and is not a relay for other pools in the Region (threat model T-28) |
 | `invalid_grant` | anything else Cognito rejects: an expired, revoked, or foreign refresh token, or an unknown client |
 | `server_error` (500) | Cognito returned a token that does not match the request (ADR-0012); logged by rule name, never with the token |
@@ -750,23 +777,58 @@ it is the only code that decides what tenant identity a token carries.
 | Field | Requirement |
 |---|---|
 | Trigger version | `V2_0` (access-token customisation). |
-| Input used | `userPoolId`, `request.userAttributes["custom:tenantId"]`, `request.groupConfiguration.groupsToOverride`, and from `request.clientMetadata` only the §8.2 keys, only to narrow (P-3, P-10). |
-| Tenant lookup | 1: registry item for the event's `userPoolId` (§4.2). 2: registry item for `custom:tenantId`. 3: registry items for every `t-*` group (one batch read). The read is per invocation, uncached (N-9). |
+| Input used | `userPoolId`, `request.userAttributes["custom:tenantId"]`, `request.userAttributes["custom:scopes"]` (§8.1), `request.groupConfiguration.groupsToOverride`, and from `request.clientMetadata` only the §8.2 keys, only to narrow (P-3, P-10). |
+| Tenant lookup | 1: registry item for the event's `userPoolId` (§4.2). 2: registry item for `custom:tenantId`. 3: registry items for every `t-*` group (one batch read). The read is per invocation, uncached (N-9). The scope catalogue (§4.4) is the one cached read: at most once per 60 s per container. |
 | Status rule | 1, 2: tenant absent or not `ACTIVE` → throw. 3: drop every tenant that is absent or not `ACTIVE`; if nothing remains → throw. Cognito turns the throw into a failed sign-in or refresh (P-2). |
-| Output | `accessTokenGeneration.claimsToAddOrOverride` = `{tenant_id}` (1, 2, and every narrowed token) or `{tenants: [...]}` (3, un-narrowed). `accessTokenGeneration.scopesToAdd` = the §8.1 API scopes, or exactly the requested ones when narrowed; `tenant-admin/users` only ever when narrowed (§8.1). A narrowed token also gets `scopesToSuppress = ["aws.cognito.signin.user.admin"]`. Every token also gets `groupOverrideDetails.groupsToOverride = []`, so neither token carries `cognito:groups` (ADR-0020). No other ID-token change. No `claimsToSuppress`. |
+| Output | `accessTokenGeneration.claimsToAddOrOverride` = `{tenant_id}` (1, 2, and every narrowed token) or `{tenants: [...]}` (3, un-narrowed). `accessTokenGeneration.scopesToAdd` = §8.1 `held` without the admin scope (3, un-narrowed: the intersection of `held` over the active tenants), or exactly the requested ones when narrowed; `tenant-admin/users` only ever when narrowed (§8.1). A narrowed token also gets `scopesToSuppress = ["aws.cognito.signin.user.admin"]`. Every token also gets `groupOverrideDetails.groupsToOverride = []`, so neither token carries `cognito:groups` (ADR-0020). No other ID-token change. No `claimsToSuppress`. |
 | Failure mode | Any exception → Cognito fails the token request. The function MUST NOT swallow errors and return a token without the claim; a token without a tenant claim is a token the contract (P-6) does not allow. |
 | Idempotency | Pure function of the event and the registry's current state; no writes. |
 
-### 8.1 Sample scopes
+### 8.1 Scopes
 
-A fixed, deploy-time set, a constant in the trigger, not an input (P-7):
+The sample names one scope of its own, `tenant-admin/users`, held by the
+members of group `admin-<T>` and carried only when narrowed to (ADR-0015).
+Every other scope is a catalogue row (§4.4) a backend registered through
+`PutScope` (ADR-0034); which tenant may hold it is the tenant's entitlement
+`scopes` (§4.1, ADR-0035), and which user of that tenant does is the user's
+grant (ADR-0036):
 
-| Scope | Held for tenant T by | Un-narrowed tokens |
-|---|---|---|
-| `tenant-api/read`, `tenant-api/write` | every user of T; they name a fictional downstream API | carry both |
-| `tenant-admin/users` | members of group `admin-<T>` (ADR-0015) | never carry it |
+```
+catalogue        = the names of every §4.4 row (cached 60 s per container; a
+                   failed read keeps the last catalogue; a container that has
+                   never read one has an empty catalogue)
+tenant.scopes    = the registry row's field (absent = [])
+granted(u, t)    = custom:scopes of user u for tenant t (below); absent = tenant.scopes
+held(u, t)       = catalogue ∩ tenant.scopes ∩ granted(u, t)
+                   ∪ { tenant-admin/users  if u is in admin-<t> }
+```
 
-Further roles that decide who holds which API scope are the §11 seam.
+| Token | `scope` |
+|---|---|
+| un-narrowed, 1 and 2 | `held(u, t)` without `tenant-admin/users` |
+| un-narrowed, 3 | the intersection of `held(u, t)` without the admin scope over the active tenants the token names: a scope on a token that names several tenants MUST be true for every one of them |
+| narrowed (§8.2) | exactly the request, granted only when every requested scope is in `held(u, target)` |
+
+An empty catalogue (a container that has never read it) therefore issues
+tokens with no scope and refuses every narrowing with `invalid_scope`, never a
+guessed scope. The ordering of `scopesToAdd` follows `tenant.scopes`.
+
+**`custom:scopes`.** Every pool the sample creates (the stack's shared pool
+and each `pool-per-tenant` pool) declares the mutable string attribute
+`scopes` (max 2048), which the app client can neither read nor write: only
+`UpdateUser` and `UpdateTenantUser` write it, with `AdminUpdateUserAttributes`,
+and only the trigger and the two user doors read it. Encoding: topologies 1
+and 2 store a space-separated list (`""` is a present, empty grant);
+topology 3 stores a JSON object keyed by tenant id whose values are
+space-separated lists, so one attribute carries one grant per membership, and
+a missing key means "all of that tenant's scopes". A value in topology 3 that
+is not a JSON object of strings is read as an empty grant for every tenant
+(fail closed) and is replaced whole by the next write. The attribute is not
+user data in the R-10 sense (it lives in Cognito, P-5) and is not sensitive:
+the token shows the same set.
+
+Further roles that decide who holds which scope through groups are the §11
+seam; today the grant is per user.
 
 ### 8.2 Narrowing request
 
@@ -784,8 +846,8 @@ If either key is present, the token is narrowed and both rules apply:
    applied. The requested tenant MUST be in it. Otherwise the trigger throws
    `invalid_target: ...`. In topologies 1 and 2, a missing tenant key means
    the user's only tenant. In topology 3 it is an `invalid_target`.
-2. The requested scopes MUST be a non-empty subset of the scopes the user
-   holds for the requested tenant (§8.1). Otherwise the trigger throws
+2. The requested scopes MUST be a non-empty subset, without duplicates, of
+   `held(u, target)` (§8.1). Otherwise the trigger throws
    `invalid_scope: ...`.
 
 The result is exactly the request, or nothing. The trigger never widens, and
@@ -826,11 +888,19 @@ step 12.
 
 1. **Deploy inputs:** synth without `topology` fails naming the four values;
    synth with a misspelling fails the same way.
-2. **Onboard:** `CreateTenant` A (`adminEmail` a1) and B (`adminEmail` b1)
-   → both `ACTIVE`, each response carrying its admin and a temporary
-   password; `GetTenant` returns
-   the topology-specific fields (pool ids and issuer for 1, `groupName` for
-   3, neither for 2). Topology 1: two pools exist, each with the trigger
+   1b. **Catalogue (ADR-0034):** `PutScope` `sample/read` and `sample/write`
+   → 200 with `owner = sample`; a second `PutScope` keeps `createdAt` and
+   replaces the description; `GetScope` and `ListScopes` show both;
+   `PutScope` `tenant-admin/billing` → 400 `invalid_scope`; a name the
+   pattern rejects → 400; `GetScope` of an unknown name → 404.
+2. **Onboard:** `CreateTenant` A (`adminEmail` a1, `scopes` both) and B
+   (`adminEmail` b1, `scopes` read only) → both `ACTIVE`, each response
+   carrying its admin and a temporary password; `GetTenant` and
+   `ListTenants` return each tenant's `scopes` and the topology-specific
+   fields (pool ids and issuer for 1, `groupName` for 3, neither for 2).
+   `CreateTenant` with an unregistered scope → 400 `invalid_scope` and
+   nothing written; `CreateTenant` without `scopes` → 201 with `scopes = []`
+   and an admin whose `scopes` are `[]` (then deleted). Topology 1: two pools exist, each with the trigger
    attached and its tenant tag. Every topology: each tenant has exactly one
    enabled API key `tenant-<id>` in the stack's usage plan (R-19). Topology 1:
    the IAM policy simulator denies the tenant-scoped role, on a session
@@ -849,10 +919,15 @@ step 12.
    tokens. u1: `tenant_id = A` (1, 2; topology 1 also `iss` = tenant A's
    `issuer` from `GetTenant`) or `tenants = [A, B]` (3). u2: `tenant_id = B`
    or `tenants = [B]`. `sub` equals the Cognito user's `sub`. The ID tokens
-   carry no `tenant_id` or `tenants` claim.
+   carry no `tenant_id` or `tenants` claim. `scope`: u1 carries both of A's
+   scopes (1, 2) or `sample/read` only (3: the intersection with B); u2
+   carries `sample/read`; neither carries `tenant-admin/users`, both carry
+   `aws.cognito.signin.user.admin` (§8.1).
 5. **Claim integrity (P-3):** every topology: u1 calls `UpdateUserAttributes`
    on `email` with its own access token → rejected by Cognito, and the
-   vendor's `GetUser` still shows u1's e-mail (R-17). Topology 2: the same
+   vendor's `GetUser` still shows u1's e-mail (R-17); the same call on
+   `custom:scopes` → rejected, and `GetUser` with that token returns no
+   `custom:scopes` (ADR-0036). Topology 2: the same
    call on `custom:tenantId` → rejected, and a fresh token still says `A`. Topology 3: the vendor creates a group
    `role-admin`, adds u1, re-issues → `tenants` unchanged. Topology 1: a
    user created directly in pool B (bypassing the platform API) still
@@ -864,14 +939,17 @@ step 12.
    again, refresh → `tenants = [A, B]`, so u1 enters step 9 as a
    multi-tenant user.
 7. **Narrowing (P-10), all topologies.** Exchange u1's refresh token with
-   `scope=tenant-api/read`, plus `resource=A` (required in 3), and verify.
+   `scope=sample/read`, plus `resource=A` (required in 3), and verify.
    The result has `tenant_id = A`, no `tenants` claim,
-   `scope = "tenant-api/read"`, and no `aws.cognito.signin.user.admin`.
+   `scope = "sample/read"`, and no `aws.cognito.signin.user.admin`.
    It has the same `iss` as u1's other tokens. Topology 2: that token's
-   `GetUser` call is rejected by Cognito. Then check the refusals:
+   `GetUser` call is rejected by Cognito. Exchanging for both of A's scopes
+   succeeds with exactly both. Then check the refusals:
    - `resource=A` with u2's refresh token (u2 holds only B):
      `invalid_target`, in every topology.
-   - `scope=tenant-api/admin`: `invalid_scope`.
+   - `scope=tenant-api/admin` (not in the catalogue): `invalid_scope`.
+   - u2 asks for `sample/write` on B (registered, but B is not entitled):
+     `invalid_scope` (ADR-0035).
    - no `resource` in topology 3: `invalid_target`.
    - `subject_token_type` = access token: `invalid_request`.
    Bypass the endpoint: call `GetTokensFromRefreshToken` directly with u2's
@@ -883,10 +961,19 @@ step 12.
    exchange with `resource=A` and `scope=tenant-admin/users`. With that
    token: `CreateTenantUser` u3 → 201; `GetTenantUser` u3 → `admin=false`;
    `ListTenantUsers` → a1, u1, u3, and neither u2 nor b1; `UpdateTenantUser`
-   u3 `admin=true`, then `admin=false`; `DeleteTenantUser` u3 → 204, then
+   u3 `admin=true`, then `admin=false`. **Grant (ADR-0036):**
+   `UpdateTenantUser` u1 `scopes=[sample/read]` → 200 with that `scopes` and
+   `admin` untouched; `ListTenantUsers` shows it; a refresh of u1's token
+   carries `sample/read` only, and an exchange for `sample/write` on A is
+   `invalid_scope`; topology 3: platform `GetUser` B/u1 still shows B's
+   entitlement (the cut is per tenant). `scopes` naming an unregistered
+   scope, the admin scope, or a duplicate → 400 `invalid_scope`.
+   `scopes=[]` → 200, and (1, 2) the next token carries no scope. Platform
+   `UpdateUser` u1 `scopes` = both restores it; platform `UpdateUser` with
+   an unregistered scope → 400. Then `DeleteTenantUser` u3 → 204, then
    platform `GetUser` u3 → 404. Then check the refusals:
    - a1's un-narrowed access token, and a narrowed one with only
-     `tenant-api/read`: 403 from the authoriser.
+     `sample/read`: 403 from the authoriser.
    - u1 asks the exchange for `tenant-admin/users` on A: `invalid_scope`.
    - Topology 3: after `CreateMembership` a1 → B, a1 asks for
      `tenant-admin/users` on B: `invalid_scope`, because a1 is a member of B
@@ -894,8 +981,18 @@ step 12.
    - `GetTenantUser` and `DeleteTenantUser` for u2 (tenant B): 404, and u2
      still exists (R-12).
    - `DeleteTenantUser` a1, and `UpdateTenantUser` a1 with either `admin`
-     value: 409 (R-13). The same calls with a1's e-mail in the path, not the
-     sub: 409 too (R-13 holds for any username form).
+     value or with `scopes`: 409 (R-13). The same calls with a1's e-mail in
+     the path, not the sub: 409 too (R-13 holds for any username form).
+   8b. **Entitlement and catalogue changes reach tokens (ADR-0034, ADR-0035).**
+   `UpdateTenant` B `scopes` = both → 200; a refresh of u2's token carries
+   both and u2's exchange for `sample/write` on B succeeds (topology 3: u1's
+   un-narrowed token now carries both too, the intersection grew).
+   `UpdateTenant` with an unregistered scope → 400; of an unknown tenant →
+   404. `DeleteScope` `sample/write` → 204, again → 204, `GetScope` → 404;
+   `GetTenant` A still names it, platform `GetUser` A/u1 no longer shows it;
+   within 120 s a refresh of u1's token stops carrying it and the exchange
+   refuses it; `UpdateTenant` A naming it → 400. `PutScope` it again: within
+   120 s u1's token carries it again.
    - The vendor demotes a1 (`UpdateUser` `admin=false`) while a1's narrowed
      admin token is still valid: `CreateTenantUser`, `UpdateTenantUser`, and
      `DeleteTenantUser` → 409 (R-16); `ListTenantUsers` still 200 (accepted
@@ -943,9 +1040,13 @@ topology-specific module (P-1); the trigger role's policy contains no
 P-8); the trigger returns the claim shape of §8 for each topology's event;
 the registry never receives a user item (R-10); narrowing never widens: for
 any `clientMetadata`, the output tenants are a subset of the user's `ACTIVE`
-tenants and the output scopes a subset of §8.1 (property test, ADR-0010); the
+tenants and the output scopes a subset of §8.1 `held` for that tenant, for
+any catalogue, entitlement and grant (property test, ADR-0010, ADR-0035); the
 trigger's error prefixes match §5.4; the token-exchange role holds no
-`cognito-idp` or `dynamodb` action (R-7); the exchange function returns `server_error` and no token when Cognito's
+`cognito-idp` action and one `dynamodb:Query` bound to the `SCOPE` partition
+key (R-7); every shared pool declares `custom:scopes` mutable and neither
+readable nor writable through the app client, and the trigger role holds no
+`AdminUpdateUserAttributes` (ADR-0036); the exchange function returns `server_error` and no token when Cognito's
 token is un-narrowed, names another tenant, or carries other scopes
 (ADR-0012); the provisioner refuses per-user operations for a user outside
 the path's tenant in every topology (R-12); the tenant-user function reads the tenant only from the authoriser context,

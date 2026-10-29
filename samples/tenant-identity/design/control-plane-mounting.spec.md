@@ -337,7 +337,11 @@ one *first* admin.
 ### 6.1 Script environment the mount relies on
 
 `TENANT_ID`, `TENANT_NAME`, `CELL_ID`, `OPERATION`, `ADMIN_EMAIL` (create),
-`OPERATOR_ID`, `AWS_REGION` (CodeBuild default).
+`OPERATOR_ID`, `AWS_REGION` (CodeBuild default), and the optional `SCOPES`
+(create and update): a space-separated list of the scopes the tenant is
+entitled to (tenant-identity ADR-0035). The control plane passes it as an
+opaque onboarding input, as it does `TENANT_NAME`; it knows nothing about
+what a scope is.
 
 ### 6.2 Parameters
 
@@ -364,8 +368,13 @@ its tenant build role (control-plane spec §6.2). No grant changes there.
       "Resource": [
         "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/POST/platform/tenants",
         "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/GET/platform/tenants/*",
+        "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/PATCH/platform/tenants/*",
         "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/DELETE/platform/tenants/*",
-        "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/POST/platform/tenants/*/users"
+        "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/POST/platform/tenants/*/users",
+        "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/PUT/platform/scopes/*",
+        "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/GET/platform/scopes",
+        "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/GET/platform/scopes/*",
+        "arn:<partition>:execute-api:<region>:<account>:<apiId>/<stage>/DELETE/platform/scopes/*"
       ]
     },
     {
@@ -381,16 +390,21 @@ its tenant build role (control-plane spec §6.2). No grant changes there.
 `POST .../users` is for M-R-6 (claim the first-admin slot on replay).
 `GET /platform/tenants/*` is for `GetTenant` and, on the replay path only,
 for `ListUsers` (the check after a 409, §7.1 step 5); it also matches
-`GetUser`, which the scripts never call. The second statement lets SSM
-encrypt the parked password with `AdminPasswordKey` (ADR-0033) and nothing
-else: no `kms:Decrypt`, and only through SSM.
+`GetUser`, which the scripts never call. `PATCH /platform/tenants/*` is for
+`UpdateTenant` (`tenant/update.sh` with `SCOPES`, tenant-identity ADR-0035);
+it also matches `UpdateUser`, which the scripts never call. The four
+`/platform/scopes` routes are not for the mount at all: they are for a
+backend that registers its scopes with the same policy (tenant-identity
+ADR-0034), so one published ARN serves both consumers. The second statement
+lets SSM encrypt the parked password with `AdminPasswordKey` (ADR-0033) and
+nothing else: no `kms:Decrypt`, and only through SSM.
 
 **M-R-4:** The policy MUST NOT grant `ListTenants`, `IssueToken`,
-`RefreshToken`, user updates, memberships, or `kms:Decrypt`.
-`DELETE /platform/tenants/*` also matches `DeleteUser`; the scripts never
-call it, and `threat-model.md` records the over-grant in the same PR that
-adds the policy (execute-api ARNs cannot tell a tenant path from a user path
-under it).
+`RefreshToken`, user updates by their own route, memberships, or
+`kms:Decrypt`. `DELETE /platform/tenants/*` also matches `DeleteUser` and
+`PATCH /platform/tenants/*` also matches `UpdateUser`; the scripts never
+call either, and `threat-model.md` records the over-grant (T-34): execute-api
+ARNs cannot tell a tenant path from a user path under it.
 
 ### 6.4 What the mount promises
 
@@ -451,7 +465,10 @@ status and body to the caller in variables.
      documented residual gap (§9).
    - 200 `DELETING` → exit 1 (`"tenant is being offboarded"`).
    - 404 → step 4.
-4. `POST /platform/tenants {tenantId: T, name: TENANT_NAME, adminEmail}`:
+4. `POST /platform/tenants {tenantId: T, name: TENANT_NAME, adminEmail,
+   scopes}` (`scopes` = the words of `SCOPES`, `[]` when unset or empty):
+   - 400 → exit 1 with the API's message (an unregistered or malformed
+     scope; nothing was written, a corrected `SCOPES` and a re-run fix it).
    - 201 → **M-R-10:** park `admin.temporaryPassword` (step 6) as the very
      next call, before any log line, read or other work, so the window of
      §9 gap 1 is one call wide. Then done.
@@ -493,10 +510,15 @@ status and body to the caller in variables.
 
 ### 7.2 `tenant/update.sh`
 
-Reconcile only. `GET /platform/tenants/{T}`: `ACTIVE` → success; anything
+Reconcile only. `GET /platform/tenants/{T}`: `ACTIVE` → continue; anything
 else → exit 1 naming the status. It never creates (control-plane
 `UpdateResource` on a tenant whose identity was lost should fail loudly, not
-silently re-onboard with no `ADMIN_EMAIL`).
+silently re-onboard with no `ADMIN_EMAIL`). Then, only when `SCOPES` is set
+(an empty value counts and means "no scope"),
+`PATCH /platform/tenants/{T} {scopes}` replaces the entitlement
+(tenant-identity ADR-0035): 200 → success, printing the list; 400 → exit 1
+with the API's message; anything else → exit 1 naming the status. With
+`SCOPES` unset the entitlement is left as it is.
 
 ### 7.3 `tenant/delete.sh`
 
@@ -525,6 +547,7 @@ no-op (control-plane P-9).
 | policy not attached | tenant `CREATE_FAILED`, `HTTP 403` in log | redeploy control-plane with the context, then `DeleteTenant` and `CreateTenant` again |
 | build killed after 201, before park; or the park failed three times | `CREATE_FAILED` | re-run: step 3 sees `ACTIVE`, step 5 gets 409, finds the admin and does not re-park; it prints `WARNING ... no parked password` pointing here. The password is lost; the vendor recovers with `DeleteUser` naming the holder's e-mail (releases the slot, M-R-9) then `CreateUser {firstAdmin: true}` by hand, or control-plane `DeleteTenant` + `CreateTenant` (residual gap, §9) |
 | `adminEmail` already in use in the shared pool | `CREATE_FAILED`, `ADMIN_EMAIL is probably already in use in the shared pool` in the log | onboard with another e-mail, or free the address (`DeleteUser` in the tenant that holds it) and re-run |
+| a `SCOPES` entry is not in the catalogue | `CREATE_FAILED` or `UPDATE_FAILED`, the API's `invalid_scope` message in the log | register the scope (the owning backend's deploy does) or drop it from `SCOPES`, re-run |
 | identity row stuck `PROVISIONING` | `CREATE_FAILED` | vendor `DeleteTenant` on tenant-identity, then control-plane `DeleteTenant` |
 | identity `DeleteTenant` fails | `DELETE_FAILED` | control-plane `DeleteTenant` retry re-runs the script |
 
@@ -604,7 +627,7 @@ Estimated run: 25-35 minutes, under $1.
 
 | Extension | Seam |
 |---|---|
-| `tiered` | control-plane opaque `parameters` map → `TENANT_TIER` env → `tier` on `CreateTenant` |
+| `tiered` | control-plane opaque `parameters` map → `TENANT_TIER` env → `tier` on `CreateTenant` (the same seam `SCOPES` uses today) |
 | Per-cell identity | `cell/create.sh` deploys a `TenantIdentity-<topology>` stack per cell with `publishSharedParameters: false` and writes its `apiUrl` to `/application-plane/cells/<cellId>/identity/apiUrl`; tenant scripts read the cell value first |
 | Real invite delivery | tenant-identity `CreateTenant` option to let Cognito send the invitation (no `SUPPRESS`), with an SES-backed sender; the script then parks nothing |
 | Async onboarding | tenant-identity §11 "Async onboarding" is now this mount |
