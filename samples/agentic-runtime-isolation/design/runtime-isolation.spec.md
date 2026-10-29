@@ -672,8 +672,9 @@ Floor. (added 2026-10-29, ADR-0025) On the narrowed stack, which keeps the
    (the floor, checked first), the floor plus `billing/read` is 200 on both.
 Stale identity. (added 2026-10-29, ADR-0025) Step 1 calls
    `GET /platform/scopes` with SigV4 on a published tenant-identity: 200
-   reuses it; API Gateway's "Missing Authentication Token" (403 or 404, no
-   such route) is a deployment from before the catalogue, which is destroyed
+   reuses it; API Gateway's own no-such-route answer (404 "No method found
+   matching route" for a signed request, 403 "Missing Authentication Token"
+   otherwise) is a deployment from before the catalogue, which is destroyed
    and redeployed from `../tenant-identity` and left published.
 10. Destroy; delete the Runtime's service-created log groups; assert no
    stacks, parameters or log groups are left (ADR-0019).

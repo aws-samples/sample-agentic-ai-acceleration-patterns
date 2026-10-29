@@ -89,15 +89,17 @@ tenant_api() {
 }
 
 # scope_catalogue_status -> the HTTP status of GET /platform/scopes (SigV4);
-# body in $BODY. 200 is a tenant-identity with the scope catalogue (ADR-0025);
-# a 403 or 404 whose body says "Missing Authentication Token" is API
-# Gateway's answer for a route the deployed API does not have, i.e. a stale
-# tenant-identity from before its ADR-0034.
+# body in $BODY. 200 is a tenant-identity with the scope catalogue (ADR-0025).
+# A route the deployed API does not have is API Gateway's own answer, not
+# the service's: with a signed request it is 404 "No method found matching
+# route ..."; unsigned (or when the signature cannot be matched to a method)
+# it is 403 "Missing Authentication Token". Either is a stale tenant-identity
+# from before its ADR-0034.
 scope_catalogue_status() { platform GET platform/scopes; }
 
 # stale_identity STATUS -> 0 when STATUS and $BODY say the deployment lacks /platform/scopes.
 stale_identity() {
-  [[ "$1" =~ ^(403|404)$ ]] && grep -q 'Missing Authentication Token' "$BODY"
+  [[ "$1" =~ ^(403|404)$ ]] && grep -Eq 'Missing Authentication Token|No method found matching route' "$BODY"
 }
 
 CREATED_TENANTS=()
@@ -126,7 +128,7 @@ set_user_scopes() {
   narrow "$1" "$2" "$TENANT_ADMIN_SCOPE" ADMIN_NARROWED
   [[ "$NARROW_STATUS" == 200 ]] || fail "narrow the tenant admin to ${TENANT_ADMIN_SCOPE}: HTTP ${NARROW_STATUS}"
   SET_SCOPES_STATUS="$(tenant_api PATCH "tenant/users/$3" ADMIN_NARROWED \
-    "$(jq -nc --argjson s "$(scopes_json "$4")" '{admin: false, scopes: $s}')")"
+    "$(jq -nc --argjson s "$(scopes_json "$4")" '{scopes: $s}')")"
   ADMIN_NARROWED=""
 }
 
