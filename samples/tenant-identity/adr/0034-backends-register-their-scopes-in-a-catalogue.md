@@ -1,6 +1,6 @@
 # ADR-0034: Let backends register their own scopes in a catalogue through the platform API
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-29
 - Deciders: Dave Roberts (SA)
 

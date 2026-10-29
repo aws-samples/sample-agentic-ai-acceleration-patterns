@@ -594,8 +594,9 @@ stack's own `TenantDrain` (ADR-0022). It also checks for a stack-named REST
 API after destroy; if a failed `PutRestApi` left an untracked API shell, the
 run fails and deletes it at API Gateway's allowed rate (T-33/M-32). The CDK CLI drives the run rather than
 integ-runner, which deploys a test's stacks one at a time (ADR-0023). One run
-with all four stacks took **about 8.5 minutes** (the last green run was 505 s)
-and cost well under 1 USD. Only the `shared-pool-multi-tenant` stack publishes
+with all four stacks took **about 10.5 minutes** (the last green run was 630 s,
+of which two 60 s waits per stack let a `DeleteScope` and a re-registration
+reach the catalogue cache) and cost well under 1 USD. Only the `shared-pool-multi-tenant` stack publishes
 the shared `/application-plane/shared/identity/*` parameters during the test,
 because those names are fixed per account and Region and two stacks cannot own
 the same name (ADR-0017); the scenario checks that the publisher's parameters

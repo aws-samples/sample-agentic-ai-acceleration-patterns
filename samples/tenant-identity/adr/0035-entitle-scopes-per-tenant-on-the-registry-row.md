@@ -1,6 +1,6 @@
 # ADR-0035: Entitle scopes per tenant on the registry row
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-29
 - Deciders: Dave Roberts (SA)
 

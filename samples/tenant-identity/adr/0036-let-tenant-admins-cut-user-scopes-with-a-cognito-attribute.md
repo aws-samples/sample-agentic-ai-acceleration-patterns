@@ -1,6 +1,6 @@
 # ADR-0036: Let tenant admins cut a user's scopes with a Cognito attribute
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-29
 - Deciders: Dave Roberts (SA)
 
