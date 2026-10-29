@@ -12,8 +12,8 @@
  * `ClientMetadata` reaching the trigger on refresh — decodes the returned
  * access token and refuses it unless it matches the request (ADR-0012). The
  * endpoint holds no privilege: the refresh token authorises the Cognito call
- * (P-10), so the function's role carries no `cognito-idp` or DynamoDB
- * permission (R-7).
+ * (P-10), so the function's role carries no `cognito-idp` permission and
+ * only the one registry read the scope catalogue needs (R-7, ADR-0034).
  *
  * It never logs the refresh token, the issued token, the form, or Cognito's
  * error message (N-4, N-6): only error class names and the ADR-0012 rule
@@ -34,6 +34,7 @@ import {
   TOKEN_TYPE_ACCESS,
 } from '../shared/constants';
 import { errorName, log } from '../shared/logger';
+import type { ScopeCatalogue } from '../shared/scope-catalogue';
 import { OAuthError, OAuthServerError } from '../smithy/token/typescript-ssdk-codegen/src';
 import type {
   ExchangeTokenServerInput,
@@ -58,6 +59,12 @@ export interface TokenExchangeDeps {
    * trigger's pool lookup (M-5), so the refresh token buys no tenant claim.
    */
   readonly acceptOtherClients: boolean;
+  /**
+   * ADR-0034: the registered scope names, read through a 60 s cache. A
+   * requested scope that is not registered (and is not the built-in admin
+   * scope) is `invalid_scope` before Cognito is called.
+   */
+  readonly catalogue: ScopeCatalogue;
 }
 
 /** The minimal access-token payload shape ADR-0012 inspects. */
@@ -216,22 +223,26 @@ export class TokenExchangeService<Context> {
   private readonly cognito: CognitoIdentityProviderClient;
   private readonly appClientId: string | undefined;
   private readonly acceptOtherClients: boolean;
+  private readonly catalogue: ScopeCatalogue;
 
   constructor(deps: TokenExchangeDeps) {
     this.cognito = deps.cognito;
     this.appClientId = deps.appClientId;
     this.acceptOtherClients = deps.acceptOtherClients;
+    this.catalogue = deps.catalogue;
   }
 
   public ExchangeToken = async (
     input: ExchangeTokenServerInput,
     _context: Context,
   ): Promise<ExchangeTokenServerOutput> => {
-    // 1. Parse the form. OAuthFailure -> the generated OAuthError (400).
+    // 1. Parse the form. OAuthFailure -> the generated OAuthError (400). The
+    // catalogue read never throws (a failed read keeps the last one).
+    const catalogue = await this.catalogue.names();
     let request: ExchangeRequest;
     try {
       // `form` is @required; the generated validator guarantees it is set.
-      request = parseExchangeForm(input.form ?? new Uint8Array());
+      request = parseExchangeForm(input.form ?? new Uint8Array(), catalogue);
     } catch (error) {
       if (error instanceof OAuthFailure) {
         throw clientError(error);

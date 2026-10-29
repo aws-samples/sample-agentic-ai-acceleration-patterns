@@ -25,13 +25,17 @@ import {
   COGNITO_USER_ADMIN_SCOPE,
   NARROW_SCOPE_KEY,
   NARROW_TENANT_KEY,
-  SCOPE_API_READ,
-  SCOPE_API_WRITE,
   TENANT_RESOURCE_PREFIX,
   TOKEN_TYPE_ACCESS,
   TOKEN_TYPE_REFRESH,
   GRANT_TYPE_TOKEN_EXCHANGE,
 } from '../../src/shared/constants';
+import { StaticScopeCatalogue } from '../../src/shared/scope-catalogue';
+
+// The catalogue the exchange runs against (ADR-0034): two registered scopes.
+const SCOPE_API_READ = 'sample/read';
+const SCOPE_API_WRITE = 'sample/write';
+const CATALOGUE = new StaticScopeCatalogue([SCOPE_API_READ, SCOPE_API_WRITE]);
 import { OAuthError, OAuthServerError } from '../../src/smithy/token/typescript-ssdk-codegen/src';
 import { TokenExchangeService } from '../../src/token-exchange/token-exchange';
 
@@ -82,6 +86,7 @@ function service(): TokenExchangeService<Record<string, unknown>> {
   return new TokenExchangeService<Record<string, unknown>>({
     cognito: cognitoMock as unknown as CognitoIdentityProviderClient,
     acceptOtherClients: false,
+    catalogue: CATALOGUE,
   });
 }
 
@@ -291,6 +296,7 @@ describe('ExchangeToken T-28: shared-pool client_id check', () => {
       cognito: cognitoMock as unknown as CognitoIdentityProviderClient,
       appClientId,
       acceptOtherClients,
+      catalogue: CATALOGUE,
     });
   }
 

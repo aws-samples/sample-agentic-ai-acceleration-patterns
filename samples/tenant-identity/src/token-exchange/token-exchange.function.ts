@@ -24,12 +24,16 @@
  */
 
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { convertEvent, convertVersion1Response } from '@smithy/server-apigateway';
 import type { ValidationContext, ValidationFailure } from '@smithy/server-common';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { OAUTH_ERROR_DESCRIPTIONS } from './form';
 import { TokenExchangeService } from './token-exchange';
-import { ENV, hasPerTenantPools, parseDeployment } from '../shared/constants';
+import { ENV, hasPerTenantPools, parseDeployment, requireEnv } from '../shared/constants';
+import { DynamoDBRegistry } from '../shared/registry';
+import { CachedScopeCatalogue } from '../shared/scope-catalogue';
 import { getTokenServiceServiceHandler, OAuthError } from '../smithy/token/typescript-ssdk-codegen/src';
 
 /**
@@ -54,10 +58,19 @@ const appClientId = process.env[ENV.appClientId] || undefined;
 // must let through; the trigger refuses a client of an unknown pool (M-5).
 const deployment = parseDeployment(process.env[ENV.topology]);
 
+// ADR-0034: the scope catalogue, the function's one registry read (a Query
+// on `PK = SCOPE`, which is all its role allows), cached 60 s per container.
+const registry = new DynamoDBRegistry(
+  requireEnv(ENV.tableName),
+  DynamoDBDocumentClient.from(new DynamoDBClient({})),
+  requireEnv(ENV.poolIndexName),
+);
+
 const service = new TokenExchangeService<Record<string, unknown>>({
   cognito: new CognitoIdentityProviderClient({}),
   appClientId,
   acceptOtherClients: hasPerTenantPools(deployment),
+  catalogue: new CachedScopeCatalogue(registry),
 });
 
 const serviceHandler = getTokenServiceServiceHandler(service, validationCustomizer);
