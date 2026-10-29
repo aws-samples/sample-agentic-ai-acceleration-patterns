@@ -77,15 +77,29 @@ identity_init() {
 # tenant_api METHOD PATH TOKEN_VAR [JSON] -> HTTP status; body in $BODY.
 # The tenant API (`/tenant/*`) takes a bearer token narrowed to
 # tenant-admin/users; TOKEN_VAR is a variable NAME, never printed.
+# `/tenant/*` is throttled per tenant through a usage plan and an API key the
+# authoriser supplies (tenant-identity ADR-0025). A brand-new tenant's key
+# propagates to the stage eventually, and until it has API Gateway itself
+# answers 403 {"message":"Forbidden"} (its usage-plan check, not the
+# authoriser's Deny, whose body differs). That answer is retried with backoff,
+# bounded by TENANT_API_KEY_WAIT seconds (default 300), as tenant-identity's
+# own e2e client does; any other status returns at once.
+TENANT_API_KEY_WAIT="${TENANT_API_KEY_WAIT:-300}"
 tenant_api() {
-  local method="$1" path="$2" token_var="$3" data="${4:-}" config
+  local method="$1" path="$2" token_var="$3" data="${4:-}" config status delay=2 waited=0
   local args=(-s -o "$BODY" -w '%{http_code}' -X "$method" --config -)
   config="header = \"Authorization: Bearer ${!token_var}\""
   if [[ -n "$data" ]]; then
     printf '%s' "$data" >"$REQ"
     args+=(-H 'Content-Type: application/json' --data-binary "@$REQ")
   fi
-  curl "${args[@]}" "${IDENTITY_API}${path}" <<<"$config"
+  while :; do
+    status="$(curl "${args[@]}" "${IDENTITY_API}${path}" <<<"$config")"
+    [[ "$status" == 403 ]] && jq -e '.message == "Forbidden" and (keys | length == 1)' "$BODY" >/dev/null 2>&1 || break
+    (( waited + delay <= TENANT_API_KEY_WAIT )) || break
+    sleep "$delay"; waited=$(( waited + delay )); delay=$(( delay * 2 > 30 ? 30 : delay * 2 ))
+  done
+  printf '%s' "$status"
 }
 
 # scope_catalogue_status -> the HTTP status of GET /platform/scopes (SigV4);
