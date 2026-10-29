@@ -37,7 +37,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 |---|---|
 | [The Simple Cell-Based Control Plane](./samples/control-plane/) | A minimal multi-tenant control plane for cell-based deployments — one service, one API, one DynamoDB table, one Step Functions workflow, script-driven provisioning via AWS CodeBuild. `maxTenants: 1` degenerates the model to a silo. |
 | [Tenant Identity with Amazon Cognito](./samples/tenant-identity/) | An identity layer that makes Amazon Cognito the trusted source of tenant identity, in three user-pool topologies chosen at deploy time — plus a `tiered` mode that runs two of them side by side — with RFC 8693 token narrowing to one tenant. |
-| [Runtime Isolation](./samples/runtime-isolation/) | A pooled agent backend on Amazon Bedrock AgentCore Runtime that trusts one ingress, which verifies the tenant token, maps each caller to their own microVM, signs every model call with tenant-scoped credentials, limits each tenant and attributes cost per tenant. |
+| [Agentic Runtime Isolation](./samples/agentic-runtime-isolation/) | A pooled agent platform on Amazon Bedrock AgentCore Runtime: one shared ingress fronts one or more agent backends, verifies the tenant token, maps each caller to their own microVM, signs every model call with tenant-scoped credentials, limits each tenant and attributes cost per tenant. |
 
 ## The Simple Cell-Based Control Plane
 
@@ -92,8 +92,8 @@ and whose permissions does the agent use? If the client picks the session, or
 the agent holds one role for all tenants, a stolen token or a prompt-injected
 agent can reach another tenant's conversation or data.
 
-This sample puts one ingress in front of an Amazon Bedrock AgentCore Runtime
-and makes it the only principal the Runtime trusts. The ingress, an API
+This sample puts one shared ingress in front of one or more Amazon Bedrock
+AgentCore Runtimes and makes it the only principal each Runtime trusts. The ingress, an API
 Gateway REST API or an AgentCore Gateway chosen at deploy time, verifies the
 tenant-identity access token, derives the microVM session from the verified
 `tenant_id` and `sub`, and vends `TenantId`-tagged credentials with a token
@@ -104,8 +104,13 @@ per-tenant cost figures; model cost splits by tenant in the bill through the
 IAM principal. Session mapping, scope checks and token forwarding are optional
 modules.
 
-It ships as one CDK construct, `IsolatedRuntime`, that later samples can
-consume. See [Runtime Isolation](./samples/runtime-isolation/).
+It ships as two CDK constructs that later samples can consume:
+`SharedIngress`, the ingress with its authoriser, TVM, limits and backend
+registry, and `AgentBackend`, one agent's Runtime registered behind it. A
+backend is added, changed or drained through the registry without
+redeploying the ingress; one agent is a `SharedIngress` with a
+`defaultBackend` plus one `AgentBackend` of that name. See
+[Agentic Runtime Isolation](./samples/agentic-runtime-isolation/).
 
 ## Contributing a sample
 

@@ -354,7 +354,7 @@ metadata validators = [{
   is then the source of truth for model cost. Activate the
   `iamPrincipal/TenantId` cost allocation tag and the CUR caller-identity
   option (both account-level); keep any agent-reported token figures as a
-  cross-check. `samples/runtime-isolation` is the worked example.
+  cross-check. `samples/agentic-runtime-isolation` is the worked example.
 
 ### 4.5 Deliverable: a CDK construct
 
@@ -365,7 +365,7 @@ their own app, so the construct is the unit of reuse and the stack in
 
 - Export the construct (and its props interface) from `src/index.ts`. One
   construct per pattern; name it after the pattern
-  (`IsolatedRuntime`, not `AgentCoreStack`).
+  (`SharedIngress`, not `AgentCoreStack`).
 - The construct takes its dependencies as props (an issuer, a table, a key)
   and creates none of them. What the deployer must supply is the
   specification's Contracts section (§2.1), expressed as the props type.
