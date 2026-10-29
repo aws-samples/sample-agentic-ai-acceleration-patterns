@@ -29,7 +29,7 @@ which undoes the consumer's hot-plug story and couples two release trains.
 ### Option 2: A scope catalogue in the registry table, written through the platform API
 A `Scope` resource on the platform service: `PUT /platform/scopes/{scope}`
 (idempotent create), `DELETE /platform/scopes/{scope}`, `GET /platform/scopes`.
-Rows `SCOPE#<name>` in the registry table beside the tenant rows. The owner of
+Rows `PK=SCOPE`, `SK=<name>` in the registry table beside the tenant rows. The owner of
 a backend registers its scopes at deploy with a custom resource that calls the
 API with SigV4, the way the control-plane mount does (ADR-0005, ADR-0030).
 The trigger and the token exchange read the catalogue and cache it for 60 s.
@@ -63,10 +63,17 @@ the only user store.
 
 ## Consequences
 The token path gains one DynamoDB read every 60 s per Lambda container
-(`Query` on `PK = SCOPE`); a read failure keeps the previous catalogue and
-retries after 5 s, and an empty catalogue at cold start refuses narrowing with
-`invalid_scope` rather than issuing an un-narrowed token with no scopes.
-`PlatformInvokePolicy` (ADR-0030) gains `PUT`/`DELETE /platform/scopes/*`;
-`GET /platform/scopes` is reachable through it because execute-api ARNs cannot
-exclude it, recorded in `threat-model.md`. A registered scope is not yet held
-by anyone: entitlement is per tenant (ADR-0035) and per user (ADR-0036).
+(`Query` on `PK = SCOPE`, eventually consistent). The cache is
+stale-while-revalidate: a container serves its last catalogue without
+waiting while a refresh runs, keeps it on a failed read and waits 5 s before
+the next attempt, and has a max-age of ten TTLs (600 s): past that without a
+successful read it returns an empty set, so an empty catalogue, at cold start
+or after a long outage, refuses narrowing with `invalid_scope` and issues
+tokens with no scope rather than a stale or guessed set.
+`PlatformInvokePolicy` (ADR-0030) gains the four `/platform/scopes` routes
+explicitly: `PUT /platform/scopes/*`, `GET /platform/scopes`,
+`GET /platform/scopes/*` and `DELETE /platform/scopes/*`, so a backend's
+registration role and the control-plane mount's build role each hold the
+other's routes; the over-grant is recorded in `threat-model.md` (T-34).
+A registered scope is not yet held by anyone: entitlement is per tenant
+(ADR-0035) and per user (ADR-0036).

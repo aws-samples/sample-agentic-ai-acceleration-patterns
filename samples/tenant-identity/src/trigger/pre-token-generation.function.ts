@@ -3,6 +3,7 @@
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import type { PreTokenGenerationV2TriggerEvent, PreTokenGenerationV2TriggerHandler } from 'aws-lambda';
 import { handlePreTokenGeneration } from './pre-token-generation';
 import { ENV, parseDeployment, requireEnv } from '../shared/constants';
@@ -24,7 +25,12 @@ const deployment = parseDeployment(process.env[ENV.topology]);
 const tableName = requireEnv(ENV.tableName);
 const poolIndexName = requireEnv(ENV.poolIndexName);
 
-const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+// Cognito gives the trigger 5 s in all; a registry call that hangs for the
+// SDK's default 6 s connect timeout would spend the whole budget on one
+// socket. Bound each attempt so a retry still fits inside the window.
+const documentClient = DynamoDBDocumentClient.from(
+  new DynamoDBClient({ requestHandler: new NodeHttpHandler({ connectionTimeout: 1000, requestTimeout: 2000 }) }),
+);
 const registry = new DynamoDBRegistry(tableName, documentClient, poolIndexName);
 const source = createTenantSource(deployment);
 // ADR-0034: the catalogue, re-read at most once a minute per container.

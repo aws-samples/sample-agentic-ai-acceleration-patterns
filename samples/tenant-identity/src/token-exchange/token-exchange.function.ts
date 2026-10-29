@@ -26,6 +26,7 @@
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { convertEvent, convertVersion1Response } from '@smithy/server-apigateway';
 import type { ValidationContext, ValidationFailure } from '@smithy/server-common';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
@@ -60,9 +61,14 @@ const deployment = parseDeployment(process.env[ENV.topology]);
 
 // ADR-0034: the scope catalogue, the function's one registry read (a Query
 // on `PK = SCOPE`, which is all its role allows), cached 60 s per container.
+// The catalogue read sits on the token request's path only at cold start
+// (stale-while-revalidate afterwards); bound the socket so a hung registry
+// call cannot hold the request for the SDK's default 6 s connect timeout.
 const registry = new DynamoDBRegistry(
   requireEnv(ENV.tableName),
-  DynamoDBDocumentClient.from(new DynamoDBClient({})),
+  DynamoDBDocumentClient.from(
+    new DynamoDBClient({ requestHandler: new NodeHttpHandler({ connectionTimeout: 1000, requestTimeout: 2000 }) }),
+  ),
   requireEnv(ENV.poolIndexName),
 );
 

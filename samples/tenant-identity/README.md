@@ -839,13 +839,17 @@ text per code and never echoes Cognito's message or a token.
   SSM only; only a principal the deployer grants `kms:Decrypt` can read it
   back, so the password is never exposed in a build log or to the role that
   parked it. Parking is a sample stand-in for real invite delivery (a
-  hardening item). The published `PlatformInvokePolicy` is held exact to the
-  four routes the mount calls, but execute-api ARNs cannot separate a tenant
-  path from the user paths under it, so `GET`/`DELETE /platform/tenants/*`
-  also match `GetUser` and `DeleteUser`, which the mount never calls
-  (`ListUsers`, under the same `GET` ARN, it does call, after a 409, to
-  check that an admin exists); that over-grant is accepted and recorded
-  as T-34 in [`threat-model.md`](./threat-model.md).
+  hardening item). The published `PlatformInvokePolicy` holds nine routes:
+  the five the mount calls (`POST /platform/tenants`,
+  `GET`/`PATCH`/`DELETE /platform/tenants/*`, `POST /platform/tenants/*/users`)
+  and the four `/platform/scopes` routes a backend's scope registration
+  calls (ADR-0034), so each consumer also holds the other's set. Execute-api
+  ARNs cannot separate a tenant path from the user paths under it, so
+  `GET /platform/tenants/*` also matches `GetUser`, `PATCH` matches
+  `UpdateUser` and `DELETE` matches `DeleteUser` and `DeleteMembership`, none
+  of which the mount calls (`ListUsers`, under the same `GET` ARN, it does
+  call, after a 409, to check that an admin exists); that over-grant is
+  accepted and recorded as T-34 in [`threat-model.md`](./threat-model.md).
 
 The full threat model, with every mitigation pointing at an ADR, a code
 location, or a cdk-nag suppression, is in [`threat-model.md`](./threat-model.md).
@@ -904,12 +908,16 @@ Each item maps to a threat-model mitigation (M-n) or threat (T-n).
       The mount parks the temporary password as a sample stand-in; a
       production deployment lets Cognito (or an SES-backed sender) deliver the
       invitation and parks nothing (ADR-0031 hardening item, mounting spec §11).
-- [ ] **Review the mount's accepted over-grant.** `PlatformInvokePolicy` grants
-      `GET`/`DELETE /platform/tenants/*`, which also reach `GetUser` and
-      `DeleteUser`, which the mount never calls, because execute-api ARNs
-      cannot exclude them (T-34, M-33); `ListUsers` it calls only to verify a
-      409. Watch the build role in CloudTrail and the API access log, which
-      attributes every `/platform/*` call to it.
+- [ ] **Review the published policy's accepted over-grant.** The nine-route
+      `PlatformInvokePolicy` grants `GET`/`PATCH`/`DELETE /platform/tenants/*`,
+      which also reach `GetUser`, `UpdateUser`, `DeleteUser` and
+      `DeleteMembership`, which the mount never calls, because execute-api
+      ARNs cannot exclude them (T-34, M-33); `ListUsers` it calls only to
+      verify a 409. It also gives the mount's build role the four
+      `/platform/scopes` routes and a backend's registration role the tenant
+      routes (ADR-0034). Watch both holders in CloudTrail and the API access
+      log, which attributes every `/platform/*` call to its role; a deployer
+      can attach a `Deny` on the route family a holder does not need.
 
 ## Design trail
 

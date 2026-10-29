@@ -48,11 +48,23 @@ provisioner add `custom:scopes` (mutable, string) to the pool schema; the
 trigger reads it, never writes it.
 
 ## Consequences
-A user attribute is readable by the user through `GetUser` with the
-`aws.cognito.signin.user.admin` scope, which a narrowed token never carries
-(P-6); the attribute is not sensitive in any case, since the token shows the
-same set. Cutting a user takes effect at the next issuance, 5 min at most. A
-tenant's own cut (`UpdateTenant`) wins by intersection: a user attribute that
-still names a scope the tenant lost is harmless and is shown as not held. The
-pool schema change is additive and deploys to an existing shared pool without
-replacement.
+The user cannot read or write the attribute: every app client reads and
+writes `email` only, so `GetUser` does not return `custom:scopes` and
+`UpdateUserAttributes` on it is refused (the e2e scenario asserts both); the
+attribute is not sensitive in any case, since the token shows the same set.
+Cutting a user takes effect at the next issuance, 5 min at most. A tenant's
+own cut (`UpdateTenant`) wins by intersection: a user attribute that still
+names a scope the tenant lost is harmless and is shown as not held. An absent
+attribute (or, in topology 3, an absent tenant key) means the whole
+entitlement and so tracks the tenant's future growth; an explicit grant is
+frozen at the names it lists and does not pick up scopes the tenant gains
+later until it is rewritten. `DeleteMembership` removes the tenant's key from
+the topology-3 object, so a stale grant does not survive a re-membership. A
+value that cannot be decoded is read as an empty grant and a write that would
+merge into it is refused with 409 rather than overwriting it. Residual: in
+topology 3 the object is one attribute shared by every membership, so a
+read-modify-write by two tenants' admins at the same moment can lose one
+write (Cognito has no conditional attribute update, and R-10 forbids a
+per-user serialisation point in the registry); the loser's next read shows
+the loss and a repeat write fixes it. The pool schema change is additive and
+deploys to an existing shared pool without replacement.

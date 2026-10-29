@@ -35,6 +35,19 @@ RFC 2119.
 > `DeleteUser` and `DeleteMembership` release it when they remove the holder.
 > §4.1, §5.1 and §5.3 are amended. The §11 "Control-plane mounting" seam is
 > filled by that addendum.
+>
+> **Amended 2026-10-29 (ADR-0034, ADR-0035, ADR-0036):** the spec as first
+> written had two built-in API scopes, `tenant-api/read` and
+> `tenant-api/write`, held by every tenant user, and the exchange narrowed
+> within them. Now nothing is built in except `tenant-admin/users`: scopes are
+> catalogue rows a backend registers through `PutScope` (§4.4, new), a
+> tenant's entitlement is the registry row's `scopes` set by `CreateTenant`
+> and replaced by `UpdateTenant` (§4.1, §5.1), a user's grant is the
+> `custom:scopes` attribute cut through `UpdateUser` and `UpdateTenantUser`,
+> and the trigger writes `catalogue ∩ entitlement ∩ grant` (§8.1, rewritten).
+> §1.2, §4.1, §4.4, §5.1, §5.2, §5.3, §8.1 and §10 steps 1b and 8b are
+> rewritten; R-15 gains `Put`. The mounting spec's §6.1, §6.3, §7.1 and §7.2
+> carry the matching note.
 
 ---
 
@@ -148,8 +161,9 @@ Out of scope, deliberately:
   was issued.
 - **Roles beyond tenant admin.** One role is built: tenant admin, which
   grants user management in one tenant (ADR-0015). Further roles and
-  permissions are an extension seam (§11). Every user holds the two sample
-  API scopes (§8.1).
+  permissions are an extension seam (§11). No API scope is built in except
+  `tenant-admin/users`: a user holds the §8.1 intersection of the catalogue,
+  the tenant's entitlement and the user's grant.
 - **Delegation and audience narrowing.** RFC 8693's `act` claim and
   `audience` parameter are seams (§11). The exchange narrows tenant and
   scopes only.
@@ -438,7 +452,7 @@ and the scope catalogue (§4.4).
 | `userPoolId`, `appClientId`, `issuer` | `pool-per-tenant` rows only (premium tenants in `tiered`): the tenant's own pool. `issuer` is stored for consumers: `ListTenants` is the issuer allowlist a `pool-per-tenant` verifier needs (§1.2). A standard row in `tiered` stores none of them (§4.2). |
 | `groupName` | `shared-pool-multi-tenant` only: `t-<tenantId>` |
 | `apiKeyId`, `apiKeyValue` | every topology: the tenant's API Gateway key (R-19, ADR-0025). The value is a throttling identifier the authoriser returns, not a credential: with the `AUTHORIZER` key source a client's `x-api-key` header is ignored. Never returned by the API. |
-| `scopes` | every topology: the scopes the tenant is entitled to (ADR-0035), a list of §4.4 names; may be empty. Set by `CreateTenant` (absent in the request means `[]`, fail closed) and replaced by `UpdateTenant`; each entry MUST be in the catalogue when written (400 `invalid_scope` otherwise). A row written before the field existed reads as `[]`. Returned by `GetTenant` and `ListTenants`. |
+| `scopes` | every topology: the scopes the tenant is entitled to (ADR-0035), a list of §4.4 names (`ScopeNameList`, at most 100 entries); may be empty. Set by `CreateTenant` (absent in the request means `[]`, fail closed) and replaced by `UpdateTenant`; each entry MUST be in the catalogue when written (400 `invalid_scope` otherwise). A row written before the field existed reads as `[]`. Returned by `GetTenant` and `ListTenants`. |
 | `firstAdminEmail` | every topology, optional: the tenant's single first-admin slot (ADR-0032, mounting spec M-R-8, M-R-9). Set by `CreateTenant` in its activation write and by `CreateUser {firstAdmin: true}` through a claim (`attribute_not_exists(firstAdminEmail)`) that is re-asserted after the Cognito create; released by `DeleteUser` or `DeleteMembership` when they remove the holder, found by comparing the user's e-mail with the slot (the Cognito username is a UUID in `pool-per-tenant`). A tenant fact, which user was onboarded first, not user data in the R-10 sense: the one place an address reaches the table. Never returned by the API. |
 | `createdAt`, `updatedAt` | ISO-8601 |
 
@@ -487,8 +501,9 @@ NOT add a user item type to make listing users cheaper (P-5).
 | `description` | optional, at most 256 characters |
 | `createdAt` | ISO-8601; kept across re-registrations (`PutScope` is create-or-replace) |
 
-Key: `PK=SCOPE`, `SK=<name>`. The catalogue read is one paginated `Query` on
-`PK = SCOPE`. `DeleteScope` removes the row and nothing else: tenant rows
+Key: `PK=SCOPE`, `SK=<name>`. The catalogue read is one paginated,
+eventually consistent `Query` on `PK = SCOPE` (a scope reaches the token
+path within the cache period, §8.1, so read consistency buys nothing). `DeleteScope` removes the row and nothing else: tenant rows
 that still name the scope are left alone, and the trigger's intersection
 (§8.1) drops the scope from tokens within the cache period.
 
@@ -505,8 +520,9 @@ that says what they do.
 
 **R-15:** `model/__global.smithy` MUST declare Smithy's `StandardOperationVerb`
 validator at `DANGER` severity, as `docs/sample-standard.md` §4.2 shows, with
-`verbs` = `Create`, `Get`, `Update`, `Delete`, `List`, `Issue`, `Refresh`,
-`Exchange`. `smithy build` fails on any other verb. This is part of project
+`verbs` = `Create`, `Get`, `Update`, `Delete`, `List`, `Put`, `Issue`,
+`Refresh`, `Exchange` (`Put` for the create-or-replace `PutScope`,
+ADR-0034). `smithy build` fails on any other verb. This is part of project
 setup, before the first operation is modelled.
 
 ### 5.1 Platform operations (`/platform`, IAM)
@@ -798,10 +814,11 @@ Every other scope is a catalogue row (§4.4) a backend registered through
 grant (ADR-0036):
 
 ```
-catalogue        = the names of every §4.4 row (cached 60 s per container; a
-                   failed read keeps the last catalogue and is retried after
-                   5 s; a container that has never read one has an empty
-                   catalogue)
+catalogue        = the names of every §4.4 row (cached 60 s per container and
+                   served stale while a refresh runs; a failed read keeps the
+                   last catalogue and is retried after 5 s; after 600 s
+                   without a successful read, or in a container that has
+                   never read one, the catalogue is empty: fail closed)
 tenant.scopes    = the registry row's field (absent = [])
 granted(u, t)    = custom:scopes of user u for tenant t (below); absent = tenant.scopes
 held(u, t)       = catalogue ∩ tenant.scopes ∩ granted(u, t)
@@ -814,9 +831,10 @@ held(u, t)       = catalogue ∩ tenant.scopes ∩ granted(u, t)
 | un-narrowed, 3 | the intersection of `held(u, t)` without the admin scope over the active tenants the token names: a scope on a token that names several tenants MUST be true for every one of them |
 | narrowed (§8.2) | exactly the request, granted only when every requested scope is in `held(u, target)` |
 
-An empty catalogue (a container that has never read it) therefore issues
-tokens with no scope and refuses every narrowing with `invalid_scope`, never a
-guessed scope. The ordering of `scopesToAdd` follows `tenant.scopes`.
+An empty catalogue (a container that has never read it, or one cut off from
+the registry for 600 s) therefore issues tokens with no scope and refuses
+every narrowing with `invalid_scope`, never a guessed or stale scope. The
+exchange validates the whole form before it reads the catalogue. The ordering of `scopesToAdd` follows `tenant.scopes`.
 
 **`custom:scopes`.** Every pool the sample creates (the stack's shared pool
 and each `pool-per-tenant` pool) declares the mutable string attribute
@@ -830,9 +848,12 @@ and 2 store a space-separated list, or the marker `-` for an empty grant
 "all"; `-` can be no scope name); topology 3 stores a JSON object keyed by
 tenant id whose values are those single-tenant encodings, so one attribute
 carries one grant per membership, and a missing key means "all of that
-tenant's scopes". A value in topology 3 that
+tenant's scopes". `DeleteMembership` removes the tenant's key from the
+object. A value in topology 3 that
 is not a JSON object of strings is read as an empty grant for every tenant
-(fail closed) and is replaced whole by the next write. The attribute is not
+(fail closed); a write that would have to merge into such a value, or into
+an undecodable single-tenant value, is refused with 409 rather than
+overwriting it. The attribute is not
 user data in the R-10 sense (it lives in Cognito, P-5) and is not sensitive:
 the token shows the same set.
 

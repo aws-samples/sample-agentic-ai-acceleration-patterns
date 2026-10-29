@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 import { INVALID_SCOPE, SCOPE_TENANT_ADMIN } from '../../src/shared/constants';
-import { InvalidInputError } from '../../src/shared/errors';
+import { ConflictError, InvalidInputError } from '../../src/shared/errors';
 import {
   assertAttributeFits,
   assertGrantableScopes,
@@ -17,7 +17,9 @@ import {
   encodeScopeMap,
   isReservedScope,
   isScopeName,
+  removeScopeMapEntry,
   SCOPE_REFUSALS,
+  SCOPES_ATTRIBUTE_CORRUPT,
   scopeOwner,
 } from '../../src/shared/scopes';
 
@@ -165,13 +167,29 @@ describe('custom:scopes encodings (ADR-0036)', () => {
   });
 
   it.each(['a/b c/d', '[]', '42', 'null', '{"x": 1}', '{bad json'])(
-    'multi-tenant decoding of %j (not a JSON object of strings) is "nothing" for every tenant, and encoding replaces it',
+    'multi-tenant decoding of %j (not a JSON object of strings) is "nothing" for every tenant, and encoding refuses it (409)',
     (bad) => {
       expect(decodeScopeMap(bad)).toBeUndefined();
       expect(decodeScopeMapEntry(bad, T1)).toEqual([]);
-      expect(JSON.parse(encodeScopeMap(bad, T1, ['a/b']))).toEqual({ [T1]: 'a/b' });
+      // Never replaced: that would also discard the other tenants' grants.
+      expect(() => encodeScopeMap(bad, T1, ['a/b'])).toThrow(ConflictError);
+      expect(() => encodeScopeMap(bad, T1, ['a/b'])).toThrow(SCOPES_ATTRIBUTE_CORRUPT);
+      // A removal leaves it alone too: nothing to write.
+      expect(removeScopeMapEntry(bad, T1)).toBeUndefined();
     },
   );
+
+  it('multi-tenant removal: drops one key, keeps the rest, and writes nothing when there is nothing to drop', () => {
+    const value = JSON.stringify({ [T1]: 'a/b c/d', [T2]: '-' });
+    expect(JSON.parse(removeScopeMapEntry(value, T1)!)).toEqual({ [T2]: '-' });
+    // The last key leaves an empty object, which Cognito stores (it is not '').
+    expect(removeScopeMapEntry(JSON.stringify({ [T1]: '-' }), T1)).toBe('{}');
+    expect(removeScopeMapEntry(value, '01C0ABCDEFGHJKMNPQRSTVWXYZ')).toBeUndefined();
+    expect(removeScopeMapEntry(undefined, T1)).toBeUndefined();
+    // The written value reads back as "all of the tenant's scopes" for the removed key.
+    expect(decodeScopeMapEntry(removeScopeMapEntry(value, T1), T1)).toBeUndefined();
+    expect(decodeScopeMapEntry(removeScopeMapEntry(value, T1), T2)).toEqual([]);
+  });
 
   it('an encoded value longer than the Cognito limit is refused before the write', () => {
     expect(() => assertAttributeFits('x'.repeat(2048))).not.toThrow();

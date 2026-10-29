@@ -547,23 +547,34 @@ export class DynamoDBRegistry implements Registry {
   }
 
   async updateTenantScopes(tenantId: string, scopes: readonly string[]): Promise<TenantRecord> {
-    // ADR-0035: one conditional update; attribute_exists(PK) keeps it from
-    // creating a stub row for a tenant that was deleted under the caller.
+    // ADR-0035: one conditional update. attribute_exists(PK) keeps it from
+    // creating a stub row for a tenant that was deleted under the caller;
+    // `#s = :active` (as in activate) keeps it from writing a tenant that
+    // left ACTIVE between the caller's status check and this write (a
+    // concurrent DeleteTenant), so a DELETING tenant's entitlement never
+    // changes under its drain. The ALL_OLD split tells the two apart: no
+    // old item means the row is gone (404), an old item means its status
+    // is not ACTIVE (409).
     try {
       const result = await this.client.send(
         new UpdateCommand({
           TableName: this.tableName,
           Key: key(tenantId),
           UpdateExpression: 'SET scopes = :scopes, updatedAt = :now',
-          ConditionExpression: 'attribute_exists(PK)',
-          ExpressionAttributeValues: { ':scopes': [...scopes], ':now': this.now().toISOString() },
+          ConditionExpression: 'attribute_exists(PK) AND #s = :active',
+          ExpressionAttributeNames: { '#s': 'status' },
+          ExpressionAttributeValues: { ':scopes': [...scopes], ':active': 'ACTIVE', ':now': this.now().toISOString() },
           ReturnValues: 'ALL_NEW',
+          ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
         }),
       );
       return fromItem(result.Attributes ?? {});
     } catch (error) {
       if (isConditionFailure(error)) {
-        throw new NotFoundError(`Tenant ${tenantId} not found`);
+        if (conditionFailedOnMissingRow(error)) {
+          throw new NotFoundError(`Tenant ${tenantId} not found`);
+        }
+        throw new ConflictError(`Tenant ${tenantId} is not ACTIVE`);
       }
       throw error;
     }
@@ -619,7 +630,10 @@ export class DynamoDBRegistry implements Registry {
         ExpressionAttributeValues: { ':scope': SCOPE_PARTITION },
         Limit: limit,
         ExclusiveStartKey: decodeToken(nextToken, isScopeKey),
-        ConsistentRead: true,
+        // Eventually consistent: the catalogue is a slowly changing list the
+        // token path caches for a minute anyway (ADR-0034), and a strongly
+        // consistent Query costs twice the read capacity.
+        ConsistentRead: false,
       }),
     );
     return {
@@ -641,7 +655,7 @@ export class DynamoDBRegistry implements Registry {
           ExpressionAttributeValues: { ':scope': SCOPE_PARTITION },
           ProjectionExpression: 'SK',
           ExclusiveStartKey: startKey,
-          ConsistentRead: true,
+          ConsistentRead: false, // see listScopes
         }),
       );
       for (const item of result.Items ?? []) {

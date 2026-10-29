@@ -323,9 +323,24 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     const actions = statements.flatMap(actionsOf);
     // No cognito-idp action anywhere on the trigger role (M-8).
     expect(actions.some((a) => a.startsWith('cognito-idp:'))).toBe(false);
-    // Exactly the three read actions on DynamoDB.
-    const dynamo = actions.filter((a) => a.startsWith('dynamodb:')).sort();
-    expect(dynamo).toEqual(['dynamodb:BatchGetItem', 'dynamodb:GetItem', 'dynamodb:Query']);
+    // Exactly the three read actions on DynamoDB, in two statements: the
+    // table (bound to the tenant and catalogue partitions) and the index.
+    const dynamo = statements.filter((s) => actionsOf(s).some((a) => a.startsWith('dynamodb:')));
+    expect(dynamo).toHaveLength(2);
+    for (const s of dynamo) {
+      expect(actionsOf(s).sort()).toEqual(['dynamodb:BatchGetItem', 'dynamodb:GetItem', 'dynamodb:Query']);
+      expect([s.Resource].flat()).toHaveLength(1);
+    }
+    const [tableStatement] = dynamo.filter((s) => !renderArn(s.Resource).includes('/index/'));
+    const [indexStatement] = dynamo.filter((s) => renderArn(s.Resource).includes('/index/'));
+    expect(tableStatement).toBeDefined();
+    expect(indexStatement).toBeDefined();
+    // The table reads reach only TENANT#<id> rows and the SCOPE partition:
+    // StringLike for the prefix, ForAllValues so a BatchGetItem is all-or-nothing.
+    expect(tableStatement.Condition).toEqual({ 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['TENANT#*', 'SCOPE'] } });
+    // The index's partition key is the pool id, not a registry key: no condition.
+    expect(indexStatement.Condition).toBeUndefined();
+    expect(renderArn(indexStatement.Resource)).toMatch(/\/index\/byUserPoolId$/);
   });
 
   test.each(DEPLOYMENTS)('token role holds no cognito-idp action and one registry Query bound to the SCOPE partition (R-7, ADR-0034) [%s]', (topology) => {
@@ -1139,21 +1154,27 @@ describe('TenantIdentityStack - control-plane mount (ADR-0030, ADR-0033)', () =>
       .filter((s) => actionsOf(s).includes('execute-api:Invoke'))
       .flatMap((s) => [s.Resource].flat().map(renderArn))
       .map((arn) => arn.slice(arn.indexOf('/prod/') + '/prod'.length));
-    expect(routes).toHaveLength(9);
-    // ListTenants is GET on the collection; the GET grant is on /platform/tenants/*.
-    expect(routes).not.toContain('/GET/platform/tenants');
-    for (const route of routes) {
-      // IssueToken, RefreshToken, memberships, no method wildcard, and
-      // nothing below .../users (the per-user routes). PATCH is UpdateTenant
-      // (ADR-0035) and PUT is PutScope (ADR-0034); the PATCH ARN also matches
-      // UpdateUser, recorded in threat-model.md (T-34).
-      expect(route).not.toMatch(/\/token/);
-      expect(route).not.toMatch(/\/membership/);
-      expect(route).not.toMatch(/^\/\*\//);
-      expect(route).not.toMatch(/\/users\//);
-      expect(route).not.toMatch(/^\/PUT\/platform\/tenants/);
-      expect(route).not.toMatch(/^\/PATCH\/platform\/scopes/);
-    }
+    // Exactly the nine routes, nothing else: no ListTenants (GET on the
+    // collection), no IssueToken / RefreshToken (.../token), no per-user
+    // route (.../users/*), no method wildcard. PATCH is UpdateTenant
+    // (ADR-0035) and PUT is PutScope (ADR-0034). Two of these ARNs match more
+    // than the operation they are granted for, because the `*` is a path
+    // label and execute-api ARNs cannot say otherwise: PATCH
+    // /platform/tenants/* also matches UpdateUser, and DELETE
+    // /platform/tenants/* also matches DeleteMembership (DELETE
+    // /platform/tenants/{tenantId}/users/{username}/membership). Both are
+    // recorded in threat-model.md (T-34); the consumers never call either.
+    expect(routes).toEqual([
+      '/POST/platform/tenants',
+      '/GET/platform/tenants/*',
+      '/PATCH/platform/tenants/*',
+      '/DELETE/platform/tenants/*',
+      '/POST/platform/tenants/*/users',
+      '/PUT/platform/scopes/*',
+      '/GET/platform/scopes',
+      '/GET/platform/scopes/*',
+      '/DELETE/platform/scopes/*',
+    ]);
     // The stage name is never a wildcard: the grant names the one deployed stage.
     for (const s of statements.filter((st) => actionsOf(st).includes('execute-api:Invoke'))) {
       for (const arn of [s.Resource].flat().map(renderArn)) {

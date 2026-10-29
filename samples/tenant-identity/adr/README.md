@@ -42,6 +42,6 @@ Template: [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md#2-d
 | [ADR-0031](0031-park-the-first-admin-password-in-a-securestring.md) | Park the temporary password of the first admin in an SSM SecureString | Accepted | 2026-10-26 |
 | [ADR-0032](0032-make-the-first-admin-a-conditional-write.md) | Make the first admin a conditional write on the registry row | Accepted | 2026-10-26 |
 | [ADR-0033](0033-encrypt-the-parked-password-with-a-customer-key.md) | Encrypt the parked admin password with a key the build role cannot decrypt | Accepted | 2026-10-26 |
-| [ADR-0034](0034-backends-register-their-scopes-in-a-catalogue.md) | Let backends register their own scopes in a catalogue through the platform API (amends ADR-0002) | Accepted | 2026-10-29 |
+| [ADR-0034](0034-backends-register-their-scopes-in-a-catalogue.md) | Let backends register their own scopes in a catalogue through the platform API | Accepted | 2026-10-29 |
 | [ADR-0035](0035-entitle-scopes-per-tenant-on-the-registry-row.md) | Entitle scopes per tenant on the registry row | Accepted | 2026-10-29 |
 | [ADR-0036](0036-let-tenant-admins-cut-user-scopes-with-a-cognito-attribute.md) | Let tenant admins cut a user's scopes with a Cognito attribute | Accepted | 2026-10-29 |

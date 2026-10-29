@@ -19,7 +19,7 @@
  */
 
 import { INVALID_SCOPE, RESERVED_SCOPE_OWNER, SCOPE_NAME_PATTERN, SCOPE_TENANT_ADMIN, SCOPES_ATTRIBUTE_MAX_LENGTH } from './constants';
-import { InvalidInputError } from './errors';
+import { ConflictError, InvalidInputError } from './errors';
 
 /** True when `value` is a well-formed `<owner>/<action>` scope name. */
 export function isScopeName(value: unknown): value is string {
@@ -161,17 +161,42 @@ export function decodeScopeList(value: string | undefined): string[] | undefined
   return value.split(' ').filter((s) => s.length > 0 && s !== EMPTY_GRANT);
 }
 
+/** The 409 for a `custom:scopes` value the sample never wrote (ADR-0036). */
+export const SCOPES_ATTRIBUTE_CORRUPT = 'The user scopes attribute is not in the expected format; reset it before granting scopes';
+
 /**
  * Multi-tenant encoding (topology 3): a JSON object keyed by tenant id whose
  * values are single-tenant encodings (a list, or `-` for nothing), so one
  * attribute serves every membership and the object is never an empty
- * string. Starts from the attribute's current value and replaces one key; a
- * current value that is not a JSON object of strings is replaced whole,
- * never merged with.
+ * string. Starts from the attribute's current value and replaces one key. A
+ * current value that is not a JSON object of strings is a write the sample
+ * never makes: it is refused (ConflictError, 409), never merged with and
+ * never silently replaced, because replacing it would also discard whatever
+ * the other tenants' admins believe they granted.
  */
 export function encodeScopeMap(current: string | undefined, tenantId: string, scopes: readonly string[]): string {
-  const map = decodeScopeMap(current) ?? {};
+  const map = current === undefined ? {} : decodeScopeMap(current);
+  if (map === undefined) {
+    throw new ConflictError(SCOPES_ATTRIBUTE_CORRUPT);
+  }
   return JSON.stringify({ ...map, [tenantId]: encodeScopeList(scopes) });
+}
+
+/**
+ * Multi-tenant encoding without one tenant's key (topology 3): what a
+ * membership removal writes, so a user who later rejoins the tenant starts
+ * from "all of the tenant's scopes", not from a grant an earlier admin cut.
+ * Returns `undefined` when there is nothing to write: the attribute is
+ * absent, the key is not in it, or the value is not one the sample wrote
+ * (left alone; `decodeScopeMapEntry` already reads it as nothing).
+ */
+export function removeScopeMapEntry(current: string | undefined, tenantId: string): string | undefined {
+  const map = decodeScopeMap(current);
+  if (map === undefined || !(tenantId in map)) {
+    return undefined;
+  }
+  const { [tenantId]: _removed, ...rest } = map;
+  return JSON.stringify(rest);
 }
 
 /**
