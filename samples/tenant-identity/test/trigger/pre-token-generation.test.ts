@@ -24,18 +24,19 @@ import { handlePreTokenGeneration, type PreTokenGenerationDeps } from '../../src
  */
 
 // The two catalogue scopes these tests register (ADR-0034) and, unless a
-// test says otherwise, entitle every tenant to (ADR-0035).
-const SCOPE_API_READ = 'sample/read';
-const SCOPE_API_WRITE = 'sample/write';
-const API_SCOPES: readonly string[] = [SCOPE_API_READ, SCOPE_API_WRITE];
-const CATALOGUE: ScopeCatalogue = new StaticScopeCatalogue(API_SCOPES);
+// test says otherwise, entitle every tenant to (ADR-0035): the fixture's
+// entitlement, nothing more.
+const SAMPLE_READ = 'sample/read';
+const SAMPLE_WRITE = 'sample/write';
+const ENTITLEMENT: readonly string[] = [SAMPLE_READ, SAMPLE_WRITE];
+const CATALOGUE: ScopeCatalogue = new StaticScopeCatalogue(ENTITLEMENT);
 
 // Two valid ULIDs (Crockford base32, 26 chars) for the fictional tenants A, B.
 const TENANT_A = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
 const TENANT_B = '01BX5ZZKBKACTAV9WEVGEMMVRZ';
 const NOT_A_ULID = 'not-a-ulid';
 
-function record(tenantId: string, status: TenantStatus = 'ACTIVE', scopes: readonly string[] = API_SCOPES): TenantRecord {
+function record(tenantId: string, status: TenantStatus = 'ACTIVE', scopes: readonly string[] = ENTITLEMENT): TenantRecord {
   return {
     tenantId,
     name: `tenant ${tenantId}`,
@@ -131,12 +132,12 @@ function accessGen(result: PreTokenGenerationV2TriggerEvent) {
 // ---------------------------------------------------------------------------
 
 describe('§8 un-narrowed output shape', () => {
-  it('single topology emits tenant_id and both API scopes (spec §8, P-6)', async () => {
+  it('single topology emits tenant_id and the whole tenant entitlement (spec §8, P-6)', async () => {
     const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A) });
     const result = await handlePreTokenGeneration(event(), deps(source));
     const gen = accessGen(result);
     expect(gen?.claimsToAddOrOverride).toEqual({ tenant_id: TENANT_A });
-    expect(gen?.scopesToAdd).toEqual([...API_SCOPES]);
+    expect(gen?.scopesToAdd).toEqual([...ENTITLEMENT]);
   });
 
   it('single topology never carries tenant-admin/users un-narrowed (ADR-0015)', async () => {
@@ -150,7 +151,7 @@ describe('§8 un-narrowed output shape', () => {
     const result = await handlePreTokenGeneration(event(), deps(source));
     const gen = accessGen(result);
     expect(gen?.claimsToAddOrOverride).toEqual({ tenants: [TENANT_A, TENANT_B] });
-    expect(gen?.scopesToAdd).toEqual([...API_SCOPES]);
+    expect(gen?.scopesToAdd).toEqual([...ENTITLEMENT]);
   });
 
   it('multi topology un-narrowed carries no tenant_id claim (spec §8)', async () => {
@@ -176,7 +177,7 @@ describe('§8 un-narrowed output shape', () => {
   it.each([
     ['single, un-narrowed', { kind: 'single', tenantId: TENANT_A, record: record(TENANT_A) }, undefined],
     ['multi, un-narrowed', { kind: 'multi', records: [record(TENANT_A), record(TENANT_B)] }, undefined],
-    ['multi, narrowed', { kind: 'multi', records: [record(TENANT_A), record(TENANT_B)] }, { [NARROW_TENANT_KEY]: TENANT_A, [NARROW_SCOPE_KEY]: SCOPE_API_READ }],
+    ['multi, narrowed', { kind: 'multi', records: [record(TENANT_A), record(TENANT_B)] }, { [NARROW_TENANT_KEY]: TENANT_A, [NARROW_SCOPE_KEY]: SAMPLE_READ }],
   ])('%s: overrides cognito:groups with none (P-6, ADR-0020)', async (_label, resolved, meta) => {
     const source = fixedSource(resolved as never);
     const ev = event(meta !== undefined ? { clientMetadata: meta as Record<string, string> } : {});
@@ -228,12 +229,12 @@ describe('§8.2 narrowing success (ADR-0010)', () => {
   it('single topology, missing tenant key narrows to the only tenant', async () => {
     const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A) });
     const result = await handlePreTokenGeneration(
-      event({ clientMetadata: { [NARROW_SCOPE_KEY]: SCOPE_API_READ } }),
+      event({ clientMetadata: { [NARROW_SCOPE_KEY]: SAMPLE_READ } }),
       deps(source),
     );
     const gen = accessGen(result);
     expect(gen?.claimsToAddOrOverride).toEqual({ tenant_id: TENANT_A });
-    expect(gen?.scopesToAdd).toEqual([SCOPE_API_READ]);
+    expect(gen?.scopesToAdd).toEqual([SAMPLE_READ]);
     expect(gen?.scopesToSuppress).toEqual([COGNITO_USER_ADMIN_SCOPE]);
     expect(gen?.claimsToAddOrOverride).not.toHaveProperty('tenants');
   });
@@ -243,20 +244,20 @@ describe('§8.2 narrowing success (ADR-0010)', () => {
     const result = await handlePreTokenGeneration(
       event({
         groups: [tenantGroupName(TENANT_A), tenantGroupName(TENANT_B)],
-        clientMetadata: { [NARROW_TENANT_KEY]: TENANT_A, [NARROW_SCOPE_KEY]: `${SCOPE_API_READ} ${SCOPE_API_WRITE}` },
+        clientMetadata: { [NARROW_TENANT_KEY]: TENANT_A, [NARROW_SCOPE_KEY]: `${SAMPLE_READ} ${SAMPLE_WRITE}` },
       }),
       deps(source),
     );
     const gen = accessGen(result);
     expect(gen?.claimsToAddOrOverride).toEqual({ tenant_id: TENANT_A });
-    expect(gen?.scopesToAdd).toEqual([SCOPE_API_READ, SCOPE_API_WRITE]);
+    expect(gen?.scopesToAdd).toEqual([SAMPLE_READ, SAMPLE_WRITE]);
     expect(gen?.scopesToSuppress).toEqual([COGNITO_USER_ADMIN_SCOPE]);
   });
 
   it('narrowed multi token carries no tenants claim (spec §8 note)', async () => {
     const source = fixedSource({ kind: 'multi', records: [record(TENANT_A), record(TENANT_B)] });
     const result = await handlePreTokenGeneration(
-      event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_A, [NARROW_SCOPE_KEY]: SCOPE_API_READ } }),
+      event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_A, [NARROW_SCOPE_KEY]: SAMPLE_READ } }),
       deps(source),
     );
     expect(accessGen(result)?.claimsToAddOrOverride).not.toHaveProperty('tenants');
@@ -277,7 +278,7 @@ describe('§8.2 narrowing success (ADR-0010)', () => {
   it('narrowing a token sets the ID token untouched and suppresses the cognito admin scope', async () => {
     const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A) });
     const result = await handlePreTokenGeneration(
-      event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_A, [NARROW_SCOPE_KEY]: SCOPE_API_READ } }),
+      event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_A, [NARROW_SCOPE_KEY]: SAMPLE_READ } }),
       deps(source),
     );
     expect(result.response.claimsAndScopeOverrideDetails.idTokenGeneration).toBeUndefined();
@@ -287,7 +288,7 @@ describe('§8.2 narrowing success (ADR-0010)', () => {
   it('presence of only the scope key (no tenant key) narrows in single topology', async () => {
     const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A) });
     const result = await handlePreTokenGeneration(
-      event({ clientMetadata: { [NARROW_SCOPE_KEY]: SCOPE_API_WRITE } }),
+      event({ clientMetadata: { [NARROW_SCOPE_KEY]: SAMPLE_WRITE } }),
       deps(source),
     );
     expect(accessGen(result)?.scopesToSuppress).toEqual([COGNITO_USER_ADMIN_SCOPE]);
@@ -297,8 +298,8 @@ describe('§8.2 narrowing success (ADR-0010)', () => {
     const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A) });
     const result = await handlePreTokenGeneration(
       event({
-        scopes: ['openid', 'email', COGNITO_USER_ADMIN_SCOPE, SCOPE_API_READ],
-        clientMetadata: { [NARROW_TENANT_KEY]: TENANT_A, [NARROW_SCOPE_KEY]: SCOPE_API_READ },
+        scopes: ['openid', 'email', COGNITO_USER_ADMIN_SCOPE, SAMPLE_READ],
+        clientMetadata: { [NARROW_TENANT_KEY]: TENANT_A, [NARROW_SCOPE_KEY]: SAMPLE_READ },
       }),
       deps(source),
     );
@@ -306,9 +307,9 @@ describe('§8.2 narrowing success (ADR-0010)', () => {
     // openid, email and the cognito admin scope are suppressed; the requested
     // scope survives, and nothing is duplicated.
     expect(suppress).toEqual(expect.arrayContaining(['openid', 'email', COGNITO_USER_ADMIN_SCOPE]));
-    expect(suppress).not.toContain(SCOPE_API_READ);
+    expect(suppress).not.toContain(SAMPLE_READ);
     expect(new Set(suppress).size).toBe(suppress.length);
-    expect(accessGen(result)?.scopesToAdd).toEqual([SCOPE_API_READ]);
+    expect(accessGen(result)?.scopesToAdd).toEqual([SAMPLE_READ]);
   });
 });
 
@@ -321,7 +322,7 @@ describe('§8.2 narrowing refusals (ADR-0010, §5.4)', () => {
     const source = fixedSource({ kind: 'multi', records: [record(TENANT_A)] });
     await expect(
       handlePreTokenGeneration(
-        event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_B, [NARROW_SCOPE_KEY]: SCOPE_API_READ } }),
+        event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_B, [NARROW_SCOPE_KEY]: SAMPLE_READ } }),
         deps(source),
       ),
     ).rejects.toThrow(/^invalid_target: /);
@@ -331,7 +332,7 @@ describe('§8.2 narrowing refusals (ADR-0010, §5.4)', () => {
     const source = fixedSource({ kind: 'multi', records: [record(TENANT_A)] });
     await expect(
       handlePreTokenGeneration(
-        event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_B, [NARROW_SCOPE_KEY]: SCOPE_API_READ } }),
+        event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_B, [NARROW_SCOPE_KEY]: SAMPLE_READ } }),
         deps(source),
       ),
     ).rejects.toThrow(expect.not.stringContaining(TENANT_B));
@@ -344,7 +345,7 @@ describe('§8.2 narrowing refusals (ADR-0010, §5.4)', () => {
     });
     await expect(
       handlePreTokenGeneration(
-        event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_B, [NARROW_SCOPE_KEY]: SCOPE_API_READ } }),
+        event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_B, [NARROW_SCOPE_KEY]: SAMPLE_READ } }),
         deps(source),
       ),
     ).rejects.toThrow(/^invalid_target: /);
@@ -353,7 +354,7 @@ describe('§8.2 narrowing refusals (ADR-0010, §5.4)', () => {
   it('multi topology without a tenant key -> invalid_target', async () => {
     const source = fixedSource({ kind: 'multi', records: [record(TENANT_A), record(TENANT_B)] });
     await expect(
-      handlePreTokenGeneration(event({ clientMetadata: { [NARROW_SCOPE_KEY]: SCOPE_API_READ } }), deps(source)),
+      handlePreTokenGeneration(event({ clientMetadata: { [NARROW_SCOPE_KEY]: SAMPLE_READ } }), deps(source)),
     ).rejects.toThrow(/^invalid_target: /);
   });
 
@@ -361,7 +362,7 @@ describe('§8.2 narrowing refusals (ADR-0010, §5.4)', () => {
     const source = fixedSource({ kind: 'multi', records: [record(TENANT_A)] });
     await expect(
       handlePreTokenGeneration(
-        event({ clientMetadata: { [NARROW_TENANT_KEY]: NOT_A_ULID, [NARROW_SCOPE_KEY]: SCOPE_API_READ } }),
+        event({ clientMetadata: { [NARROW_TENANT_KEY]: NOT_A_ULID, [NARROW_SCOPE_KEY]: SAMPLE_READ } }),
         deps(source),
       ),
     ).rejects.toThrow(expect.not.stringContaining(NOT_A_ULID));
@@ -371,7 +372,7 @@ describe('§8.2 narrowing refusals (ADR-0010, §5.4)', () => {
     const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A) });
     await expect(
       handlePreTokenGeneration(
-        event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_B, [NARROW_SCOPE_KEY]: SCOPE_API_READ } }),
+        event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_B, [NARROW_SCOPE_KEY]: SAMPLE_READ } }),
         deps(source),
       ),
     ).rejects.toThrow(/^invalid_target: /);
@@ -411,7 +412,7 @@ describe('§8.2 narrowing refusals (ADR-0010, §5.4)', () => {
     const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A) });
     await expect(
       handlePreTokenGeneration(
-        event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_A, [NARROW_SCOPE_KEY]: `${SCOPE_API_READ} ${SCOPE_API_READ}` } }),
+        event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_A, [NARROW_SCOPE_KEY]: `${SAMPLE_READ} ${SAMPLE_READ}` } }),
         deps(source),
       ),
     ).rejects.toThrow(/^invalid_scope: /);
@@ -471,7 +472,7 @@ describe('P-3 clientMetadata isolation', () => {
     const result = await handlePreTokenGeneration(
       event({
         clientMetadata: {
-          [NARROW_SCOPE_KEY]: SCOPE_API_READ,
+          [NARROW_SCOPE_KEY]: SAMPLE_READ,
           scope: SCOPE_TENANT_ADMIN,
           tenant_id: TENANT_B,
           anything: 'ignored',
@@ -479,7 +480,7 @@ describe('P-3 clientMetadata isolation', () => {
       }),
       deps(source),
     );
-    expect(accessGen(result)?.scopesToAdd).toEqual([SCOPE_API_READ]);
+    expect(accessGen(result)?.scopesToAdd).toEqual([SAMPLE_READ]);
     expect(accessGen(result)?.claimsToAddOrOverride).toEqual({ tenant_id: TENANT_A });
   });
 
@@ -530,18 +531,18 @@ describe('§8 failure mode: errors propagate, never swallowed', () => {
 
 describe('§8.1 held(user, tenant) (ADR-0034, ADR-0035, ADR-0036)', () => {
   const BILLING = 'billing/read';
-  const WIDE = new StaticScopeCatalogue([...API_SCOPES, BILLING]);
+  const WIDE = new StaticScopeCatalogue([...ENTITLEMENT, BILLING]);
 
   it('un-narrowed single token carries the tenant entitlement, not the whole catalogue', async () => {
-    const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A, 'ACTIVE', [SCOPE_API_READ]) });
+    const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A, 'ACTIVE', [SAMPLE_READ]) });
     const result = await handlePreTokenGeneration(event(), deps(source, WIDE));
-    expect(accessGen(result)?.scopesToAdd).toEqual([SCOPE_API_READ]);
+    expect(accessGen(result)?.scopesToAdd).toEqual([SAMPLE_READ]);
   });
 
   it('a tenant entitlement that left the catalogue is not issued (DeleteScope, ADR-0034)', async () => {
-    const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A, 'ACTIVE', [SCOPE_API_READ, BILLING]) });
+    const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A, 'ACTIVE', [SAMPLE_READ, BILLING]) });
     const result = await handlePreTokenGeneration(event(), deps(source, CATALOGUE));
-    expect(accessGen(result)?.scopesToAdd).toEqual([SCOPE_API_READ]);
+    expect(accessGen(result)?.scopesToAdd).toEqual([SAMPLE_READ]);
   });
 
   it('a tenant with no scopes gets a token with no scopes (fail closed, ADR-0035)', async () => {
@@ -563,34 +564,34 @@ describe('§8.1 held(user, tenant) (ADR-0034, ADR-0035, ADR-0036)', () => {
       kind: 'single',
       tenantId: TENANT_A,
       record: record(TENANT_A),
-      grantedScopes: () => [SCOPE_API_WRITE],
+      grantedScopes: () => [SAMPLE_WRITE],
     });
     const result = await handlePreTokenGeneration(event(), deps(source));
-    expect(accessGen(result)?.scopesToAdd).toEqual([SCOPE_API_WRITE]);
+    expect(accessGen(result)?.scopesToAdd).toEqual([SAMPLE_WRITE]);
   });
 
   it('an empty grant means the user holds nothing; an absent grant means all (ADR-0036)', async () => {
     const cut = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A), grantedScopes: () => [] });
     expect(accessGen(await handlePreTokenGeneration(event(), deps(cut)))?.scopesToAdd).toEqual([]);
     const all = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A), grantedScopes: () => undefined });
-    expect(accessGen(await handlePreTokenGeneration(event(), deps(all)))?.scopesToAdd).toEqual([...API_SCOPES]);
+    expect(accessGen(await handlePreTokenGeneration(event(), deps(all)))?.scopesToAdd).toEqual([...ENTITLEMENT]);
   });
 
   it('a grant cannot add a scope the tenant does not hold (ADR-0035 wins by intersection)', async () => {
     const source = fixedSource({
       kind: 'single',
       tenantId: TENANT_A,
-      record: record(TENANT_A, 'ACTIVE', [SCOPE_API_READ]),
-      grantedScopes: () => [SCOPE_API_READ, SCOPE_API_WRITE, BILLING],
+      record: record(TENANT_A, 'ACTIVE', [SAMPLE_READ]),
+      grantedScopes: () => [SAMPLE_READ, SAMPLE_WRITE, BILLING],
     });
     const result = await handlePreTokenGeneration(event(), deps(source, WIDE));
-    expect(accessGen(result)?.scopesToAdd).toEqual([SCOPE_API_READ]);
+    expect(accessGen(result)?.scopesToAdd).toEqual([SAMPLE_READ]);
   });
 
   it('narrowing to a scope the tenant is not entitled to -> invalid_scope', async () => {
-    const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A, 'ACTIVE', [SCOPE_API_READ]) });
+    const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A, 'ACTIVE', [SAMPLE_READ]) });
     await expect(
-      handlePreTokenGeneration(event({ clientMetadata: { [NARROW_SCOPE_KEY]: SCOPE_API_WRITE } }), deps(source, WIDE)),
+      handlePreTokenGeneration(event({ clientMetadata: { [NARROW_SCOPE_KEY]: SAMPLE_WRITE } }), deps(source, WIDE)),
     ).rejects.toThrow(/^invalid_scope: /);
   });
 
@@ -599,10 +600,10 @@ describe('§8.1 held(user, tenant) (ADR-0034, ADR-0035, ADR-0036)', () => {
       kind: 'single',
       tenantId: TENANT_A,
       record: record(TENANT_A),
-      grantedScopes: () => [SCOPE_API_READ],
+      grantedScopes: () => [SAMPLE_READ],
     });
     await expect(
-      handlePreTokenGeneration(event({ clientMetadata: { [NARROW_SCOPE_KEY]: SCOPE_API_WRITE } }), deps(source)),
+      handlePreTokenGeneration(event({ clientMetadata: { [NARROW_SCOPE_KEY]: SAMPLE_WRITE } }), deps(source)),
     ).rejects.toThrow(/^invalid_scope: /);
   });
 
@@ -610,7 +611,7 @@ describe('§8.1 held(user, tenant) (ADR-0034, ADR-0035, ADR-0036)', () => {
     const empty = new StaticScopeCatalogue([]);
     const source = fixedSource({ kind: 'single', tenantId: TENANT_A, record: record(TENANT_A) });
     await expect(
-      handlePreTokenGeneration(event({ clientMetadata: { [NARROW_SCOPE_KEY]: SCOPE_API_READ } }), deps(source, empty)),
+      handlePreTokenGeneration(event({ clientMetadata: { [NARROW_SCOPE_KEY]: SAMPLE_READ } }), deps(source, empty)),
     ).rejects.toThrow(/^invalid_scope: /);
     expect(accessGen(await handlePreTokenGeneration(event(), deps(source, empty)))?.scopesToAdd).toEqual([]);
   });
@@ -629,37 +630,37 @@ describe('§8.1 held(user, tenant) (ADR-0034, ADR-0035, ADR-0036)', () => {
     const source = fixedSource({
       kind: 'multi',
       records: [
-        record(TENANT_A, 'ACTIVE', [SCOPE_API_READ, SCOPE_API_WRITE, BILLING]),
-        record(TENANT_B, 'ACTIVE', [SCOPE_API_READ, BILLING]),
+        record(TENANT_A, 'ACTIVE', [SAMPLE_READ, SAMPLE_WRITE, BILLING]),
+        record(TENANT_B, 'ACTIVE', [SAMPLE_READ, BILLING]),
       ],
-      grantedScopes: (tenantId) => (tenantId === TENANT_B ? [SCOPE_API_READ] : undefined),
+      grantedScopes: (tenantId) => (tenantId === TENANT_B ? [SAMPLE_READ] : undefined),
     });
     const result = await handlePreTokenGeneration(event(), deps(source, WIDE));
-    expect(accessGen(result)?.scopesToAdd).toEqual([SCOPE_API_READ]);
+    expect(accessGen(result)?.scopesToAdd).toEqual([SAMPLE_READ]);
   });
 
   it('multi: a DELETING tenant does not take part in the intersection', async () => {
     const source = fixedSource({
       kind: 'multi',
-      records: [record(TENANT_A, 'ACTIVE', API_SCOPES), record(TENANT_B, 'DELETING', [])],
+      records: [record(TENANT_A, 'ACTIVE', ENTITLEMENT), record(TENANT_B, 'DELETING', [])],
     });
     const result = await handlePreTokenGeneration(event(), deps(source));
-    expect(accessGen(result)?.scopesToAdd).toEqual([...API_SCOPES]);
+    expect(accessGen(result)?.scopesToAdd).toEqual([...ENTITLEMENT]);
   });
 
   it('multi: narrowing is checked against held for the TARGET tenant only', async () => {
     const source = fixedSource({
       kind: 'multi',
-      records: [record(TENANT_A, 'ACTIVE', [SCOPE_API_READ]), record(TENANT_B, 'ACTIVE', API_SCOPES)],
+      records: [record(TENANT_A, 'ACTIVE', [SAMPLE_READ]), record(TENANT_B, 'ACTIVE', ENTITLEMENT)],
     });
     const ok = await handlePreTokenGeneration(
-      event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_B, [NARROW_SCOPE_KEY]: SCOPE_API_WRITE } }),
+      event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_B, [NARROW_SCOPE_KEY]: SAMPLE_WRITE } }),
       deps(source),
     );
-    expect(accessGen(ok)?.scopesToAdd).toEqual([SCOPE_API_WRITE]);
+    expect(accessGen(ok)?.scopesToAdd).toEqual([SAMPLE_WRITE]);
     await expect(
       handlePreTokenGeneration(
-        event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_A, [NARROW_SCOPE_KEY]: SCOPE_API_WRITE } }),
+        event({ clientMetadata: { [NARROW_TENANT_KEY]: TENANT_A, [NARROW_SCOPE_KEY]: SAMPLE_WRITE } }),
         deps(source),
       ),
     ).rejects.toThrow(/^invalid_scope: /);
