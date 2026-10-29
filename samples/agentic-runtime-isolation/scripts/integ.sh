@@ -163,14 +163,27 @@ body() { jq -nc --arg c "$1" --arg p "$2" '{conversationId: $c, prompt: $p}'; }
 # registry_entry RUNTIME_ARN SCOPES_JSON STATUS -> the entry JSON (src/shared/registry.ts schema).
 registry_entry() { jq -nc --arg a "$1" --argjson s "$2" --arg st "$3" '{runtimeArn: $a, scopes: $s, status: $st}'; }
 
+# identity_prepare -> npm ci (when node_modules is missing) and projen build
+# in ../tenant-identity, once per run. Every cdk command there, destroy
+# included, synthesises the app, which reads the Smithy-generated OpenAPI
+# under its gitignored src/smithy/ that only the build produces.
+IDENTITY_PREPARED=0
+identity_prepare() {
+  [[ "$IDENTITY_PREPARED" == 1 ]] && return 0
+  (cd "$IDENTITY_DIR" && { [[ -d node_modules ]] || npm ci --no-audit --no-fund >"${LIB_TMP}/identity-install.log" 2>&1; }) \
+    || { tail -30 "${LIB_TMP}/identity-install.log" >&2; fail "npm ci in ${IDENTITY_DIR}"; }
+  (cd "$IDENTITY_DIR" && npx projen build >"${LIB_TMP}/identity-build.log" 2>&1) \
+    || { tail -30 "${LIB_TMP}/identity-build.log" >&2; fail "projen build in ${IDENTITY_DIR}"; }
+  IDENTITY_PREPARED=1
+}
+
 # deploy_identity -> builds and deploys TenantIdentity-shared-pool from ../tenant-identity (its own path).
 deploy_identity() {
   echo "  deploying ${IDENTITY_STACK} through its own path (npm ci if needed, projen build, cdk deploy)"
+  identity_prepare
   (cd "$IDENTITY_DIR" \
-    && { [[ -d node_modules ]] || npm ci --no-audit --no-fund >"${LIB_TMP}/identity-install.log" 2>&1; } \
-    && npx projen build >"${LIB_TMP}/identity-build.log" 2>&1 \
     && npx cdk deploy "$IDENTITY_STACK" --context topology=shared-pool --require-approval never >"${LIB_TMP}/identity-deploy.log" 2>&1) \
-    || { tail -30 "${LIB_TMP}/identity-deploy.log" "${LIB_TMP}/identity-build.log" "${LIB_TMP}/identity-install.log" >&2 2>/dev/null; fail "deploy ${IDENTITY_STACK}"; }
+    || { tail -30 "${LIB_TMP}/identity-deploy.log" >&2; fail "deploy ${IDENTITY_STACK}"; }
 }
 
 # --------------------------------------------------------------------------
@@ -188,6 +201,7 @@ if aws ssm get-parameter --name "${IDENTITY_PREFIX}/apiUrl" --query Parameter.Na
     echo "  reusing the published tenant-identity deployment (GET /platform/scopes -> HTTP 200)"
   elif stale_identity "$status"; then
     echo "  the published tenant-identity is stale (GET /platform/scopes -> HTTP ${status}, no such route): destroying and redeploying it from ${IDENTITY_DIR}"
+    identity_prepare
     (cd "$IDENTITY_DIR" && npx cdk destroy "$IDENTITY_STACK" --context topology=shared-pool --force >"${LIB_TMP}/identity-stale-destroy.log" 2>&1) \
       || { tail -30 "${LIB_TMP}/identity-stale-destroy.log" >&2; fail "destroy the stale ${IDENTITY_STACK}"; }
     deploy_identity
