@@ -1,14 +1,14 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { SCOPE_CATALOGUE_TTL_MS } from '../../src/shared/constants';
+import { SCOPE_CATALOGUE_RETRY_MS, SCOPE_CATALOGUE_TTL_MS } from '../../src/shared/constants';
 import type { ScopeCatalogueReader } from '../../src/shared/registry';
 import { CachedScopeCatalogue, StaticScopeCatalogue } from '../../src/shared/scope-catalogue';
 
 /**
  * The 60 s catalogue cache of ADR-0034: one read per TTL per container, a
- * failed read keeps the last catalogue, and a container that never read
- * successfully has an empty one.
+ * failed read keeps the last catalogue and backs off 5 s before the next
+ * read (M-36), and a container that never read successfully has an empty one.
  */
 
 function reader(results: Array<string[] | Error>): ScopeCatalogueReader & { calls: number } {
@@ -51,23 +51,51 @@ describe('CachedScopeCatalogue (ADR-0034)', () => {
     expect(r.calls).toBe(2);
   });
 
-  it('is empty before the first successful read, and a failed cold read stays empty', async () => {
+  it('is empty before the first successful read, and a failed cold read stays empty until the backoff passes', async () => {
     const r = reader([new Error('throttled'), ['a/b']]);
     const catalogue = new CachedScopeCatalogue(r, SCOPE_CATALOGUE_TTL_MS, clock);
     expect((await catalogue.names()).size).toBe(0);
-    // Retried at the next call, not after the TTL: nothing was cached.
+    // Within the backoff every call serves the empty catalogue with no read
+    // (M-36): an outage costs one table call per 5 s, not one per token.
+    now += SCOPE_CATALOGUE_RETRY_MS - 1;
+    expect((await catalogue.names()).size).toBe(0);
+    expect(r.calls).toBe(1);
+    // Retried once the backoff has passed, not after the TTL: nothing was cached.
+    now += 1;
     expect([...(await catalogue.names())]).toEqual(['a/b']);
     expect(r.calls).toBe(2);
   });
 
-  it('a failed refresh keeps the previous catalogue and retries at the next call', async () => {
+  it('a failed refresh keeps the previous catalogue and retries after the backoff', async () => {
     const r = reader([['a/b'], new Error('throttled'), ['c/d']]);
     const catalogue = new CachedScopeCatalogue(r, SCOPE_CATALOGUE_TTL_MS, clock);
     await catalogue.names();
     now += SCOPE_CATALOGUE_TTL_MS;
     expect([...(await catalogue.names())]).toEqual(['a/b']); // failed read, kept
-    expect([...(await catalogue.names())]).toEqual(['c/d']); // retried at once
+    expect([...(await catalogue.names())]).toEqual(['a/b']); // in backoff, no read
+    expect(r.calls).toBe(2);
+    now += SCOPE_CATALOGUE_RETRY_MS;
+    expect([...(await catalogue.names())]).toEqual(['c/d']); // retried after 5 s
     expect(r.calls).toBe(3);
+  });
+
+  it('a successful read clears the backoff, so the next refresh waits the TTL, not the backoff', async () => {
+    const r = reader([new Error('throttled'), ['a/b'], ['c/d']]);
+    const catalogue = new CachedScopeCatalogue(r, SCOPE_CATALOGUE_TTL_MS, clock);
+    await catalogue.names();
+    now += SCOPE_CATALOGUE_RETRY_MS;
+    expect([...(await catalogue.names())]).toEqual(['a/b']);
+    now += SCOPE_CATALOGUE_TTL_MS - 1;
+    expect([...(await catalogue.names())]).toEqual(['a/b']);
+    expect(r.calls).toBe(2);
+    now += 1;
+    expect([...(await catalogue.names())]).toEqual(['c/d']);
+    expect(r.calls).toBe(3);
+  });
+
+  it('the backoff is shorter than the TTL, so a stale catalogue is never kept for an extra period', () => {
+    expect(SCOPE_CATALOGUE_RETRY_MS).toBe(5_000);
+    expect(SCOPE_CATALOGUE_RETRY_MS).toBeLessThan(SCOPE_CATALOGUE_TTL_MS);
   });
 
   it('concurrent callers on a stale cache share one read', async () => {

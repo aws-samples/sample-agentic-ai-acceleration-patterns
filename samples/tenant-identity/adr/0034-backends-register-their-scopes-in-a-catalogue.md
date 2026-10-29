@@ -64,7 +64,7 @@ the only user store.
 ## Consequences
 The token path gains one DynamoDB read every 60 s per Lambda container
 (`Query` on `PK = SCOPE`); a read failure keeps the previous catalogue and
-retries, and an empty catalogue at cold start refuses narrowing with
+retries after 5 s, and an empty catalogue at cold start refuses narrowing with
 `invalid_scope` rather than issuing an un-narrowed token with no scopes.
 `PlatformInvokePolicy` (ADR-0030) gains `PUT`/`DELETE /platform/scopes/*`;
 `GET /platform/scopes` is reachable through it because execute-api ARNs cannot

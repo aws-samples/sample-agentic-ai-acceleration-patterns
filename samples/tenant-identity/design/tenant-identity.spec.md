@@ -799,8 +799,9 @@ grant (ADR-0036):
 
 ```
 catalogue        = the names of every §4.4 row (cached 60 s per container; a
-                   failed read keeps the last catalogue; a container that has
-                   never read one has an empty catalogue)
+                   failed read keeps the last catalogue and is retried after
+                   5 s; a container that has never read one has an empty
+                   catalogue)
 tenant.scopes    = the registry row's field (absent = [])
 granted(u, t)    = custom:scopes of user u for tenant t (below); absent = tenant.scopes
 held(u, t)       = catalogue ∩ tenant.scopes ∩ granted(u, t)

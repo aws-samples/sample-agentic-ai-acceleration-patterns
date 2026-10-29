@@ -188,6 +188,13 @@ export const RESERVED_SCOPE_OWNER = 'tenant-admin';
 /** How long a Lambda container keeps the scope catalogue before re-reading it (ADR-0034). */
 export const SCOPE_CATALOGUE_TTL_MS = 60_000;
 /**
+ * How long a container waits after a FAILED catalogue read before trying
+ * again (M-36). Without it a registry outage would cost one extra DynamoDB
+ * call per token issuance on top of the registry read; with it the stale (or
+ * empty cold-start) catalogue is served for 5 s, then one retry.
+ */
+export const SCOPE_CATALOGUE_RETRY_MS = 5_000;
+/**
  * The registry partition key every catalogue row shares (ADR-0034); the sort
  * key is the scope name. Named here because the token function's IAM policy
  * binds its one Query to this key (`dynamodb:LeadingKeys`).
