@@ -4,11 +4,15 @@
 #
 # control-plane tenant UPDATE script for tenant-identity (ADR-0028, mounting
 # spec §7.2). Runs in the control-plane tenant CodeBuild project with
-# TENANT_ID, TENANT_NAME, CELL_ID, OPERATION, OPERATOR_ID, AWS_REGION.
+# TENANT_ID, TENANT_NAME, CELL_ID, OPERATION, OPERATOR_ID, AWS_REGION and the
+# optional SCOPES, a space-separated list of the scopes the tenant is
+# entitled to (ADR-0035).
 #
 # Reconcile only: the tenant's identity must be ACTIVE. It never creates, so a
 # tenant whose identity was lost fails loudly instead of being silently
-# re-onboarded with no ADMIN_EMAIL.
+# re-onboarded with no ADMIN_EMAIL. When SCOPES is set (an empty value
+# counts: it means "no scope"), the entitlement is replaced with UpdateTenant;
+# when it is unset, the entitlement is left as it is.
 set -euo pipefail
 
 : "${TENANT_ID:?TENANT_ID env var is required}"
@@ -37,3 +41,15 @@ esac
   || fail "tenant ${TENANT_ID} identity is '${TENANT_STATUS}', expected ACTIVE"
 
 echo "Tenant ${TENANT_ID} identity is ACTIVE"
+
+if [[ -n "${SCOPES+set}" ]]; then
+  # ADR-0035: replace the entitlement. Same encoding as create.sh; a 400
+  # names an unregistered or malformed scope and changes nothing.
+  platform_call PATCH 'platform/tenants/{tenantId}' \
+    "$(jq -nc --arg s "$SCOPES" '{scopes: ($s | split(" ") | map(select(length > 0)))}')"
+  case "$PLATFORM_STATUS" in
+    200) echo "Tenant ${TENANT_ID} scopes set to: $(jq -r '.tenant.scopes | join(" ")' <<<"$PLATFORM_BODY")" ;;
+    400) fail "UpdateTenant for ${TENANT_ID} refused (HTTP 400): $(jq -r '.message // "invalid input"' <<<"$PLATFORM_BODY")" ;;
+    *) fail "UpdateTenant for ${TENANT_ID} returned HTTP ${PLATFORM_STATUS}" ;;
+  esac
+fi

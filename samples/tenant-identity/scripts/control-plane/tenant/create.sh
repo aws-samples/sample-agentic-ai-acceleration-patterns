@@ -5,8 +5,10 @@
 # control-plane tenant CREATE script for tenant-identity (ADR-0028, mounting
 # spec §7.1). Runs in the control-plane tenant CodeBuild project with
 # TENANT_ID, TENANT_NAME, CELL_ID, OPERATION, ADMIN_EMAIL, OPERATOR_ID,
-# AWS_REGION (spec §6.1). Onboards the tenant's identity under the SAME tenant
-# id (M-P-1) and parks the first admin's temporary password in an SSM
+# AWS_REGION (spec §6.1) and the optional SCOPES, a space-separated list of
+# the scopes the tenant is entitled to (ADR-0035); unset or empty creates a
+# tenant that holds no scope. Onboards the tenant's identity under the SAME
+# tenant id (M-P-1) and parks the first admin's temporary password in an SSM
 # SecureString encrypted with AdminPasswordKey (ADR-0031, ADR-0033).
 #
 # Safe to re-run (M-P-3): every step reads state first and only writes what
@@ -131,10 +133,12 @@ get_tenant_status
 check_tenant_status
 
 if [[ "$TENANT_STATUS" == ABSENT ]]; then
-  # Step 4: create it under the control plane's id (ADR-0029).
+  # Step 4: create it under the control plane's id (ADR-0029), entitled to
+  # SCOPES (ADR-0035): the words of the variable as a JSON array, an unset or
+  # empty SCOPES as an empty array (a tenant that holds nothing).
   platform_call POST platform/tenants \
-    "$(jq -nc --arg t "$TENANT_ID" --arg n "$TENANT_NAME" --arg e "$ADMIN_EMAIL" \
-      '{tenantId: $t, name: $n, adminEmail: $e}')"
+    "$(jq -nc --arg t "$TENANT_ID" --arg n "$TENANT_NAME" --arg e "$ADMIN_EMAIL" --arg s "${SCOPES:-}" \
+      '{tenantId: $t, name: $n, adminEmail: $e, scopes: ($s | split(" ") | map(select(length > 0)))}')"
   case "$PLATFORM_STATUS" in
     201)
       # M-R-10: the park is the very next call after the 201.
@@ -155,6 +159,11 @@ if [[ "$TENANT_STATUS" == ABSENT ]]; then
         PROVISIONING) fail "tenant ${TENANT_ID} is PROVISIONING after a concurrent create; re-run later" ;;
         *) fail "tenant ${TENANT_ID} is '${TENANT_STATUS}' after a concurrent create" ;;
       esac
+      ;;
+    400)
+      # A scope in SCOPES is not registered (or malformed): the input is
+      # wrong, nothing was written, and a re-run with the right list fixes it.
+      fail "CreateTenant for ${TENANT_ID} refused (HTTP 400): $(jq -r '.message // "invalid input"' <<<"$PLATFORM_BODY")"
       ;;
     *) fail "CreateTenant for ${TENANT_ID} returned HTTP ${PLATFORM_STATUS}" ;;
   esac
