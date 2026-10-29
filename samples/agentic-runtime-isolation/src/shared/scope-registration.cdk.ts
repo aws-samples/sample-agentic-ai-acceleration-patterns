@@ -15,16 +15,19 @@
  * registry entry of the backend depends on this resource, so a route is
  * never live for a scope the issuer does not know.
  *
- * The policy grants `PUT|DELETE /platform/scopes/*`, `GET /platform/scopes`
- * and `PATCH /platform/tenants/*`, which is wider than this one backend's
- * names: whoever can run code as this function's role can register or
- * remove any scope and change any tenant's entitlement (threat model T-41).
- * The function runs the handler in this file's sibling and nothing else, and
- * its role holds this policy and logs only.
+ * The policy grants `PUT|GET|DELETE /platform/scopes*` and the tenant routes
+ * (`POST /platform/tenants`, `GET|PATCH|DELETE /platform/tenants/{id}`,
+ * `POST /platform/tenants/{id}/users`). The role carries an inline Deny on
+ * `execute-api:Invoke` for every `/platform/tenants*` route, so what it can
+ * reach is the catalogue alone; that is still wider than this one backend's names:
+ * whoever can run code as this function's role can register or remove any
+ * scope (threat model T-41). The function runs the handler in this file's
+ * sibling and nothing else, and its role holds this policy, the Deny and
+ * logs only.
  */
 
 import * as path from 'node:path';
-import { CustomResource, Duration, RemovalPolicy } from 'aws-cdk-lib';
+import { CustomResource, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -40,6 +43,16 @@ export const IDENTITY_API_PARAMETERS = {
   apiUrl: '/application-plane/shared/identity/apiUrl',
   platformInvokePolicyArn: '/application-plane/shared/identity/platformInvokePolicyArn',
 } as const;
+
+/**
+ * The execute-api ARN pattern of every `/platform/tenants*` route on any API
+ * in this account and Region (`<api>/<stage>/<method>/platform/tenants` and
+ * everything under it): the part of `PlatformInvokePolicy` the registration
+ * role is denied (T-41).
+ */
+export function platformTenantRoutesArn(scope: Construct): string {
+  return Stack.of(scope).formatArn({ service: 'execute-api', resource: '*', resourceName: '*/*/platform/tenants*' });
+}
 
 /**
  * Where the identity API is. Unset, both values are read from the published
@@ -71,7 +84,7 @@ export class ScopeRegistration extends Construct {
   readonly resource: CustomResource;
   /** The handler's log group, for a drain added after construction. */
   readonly logGroup: logs.ILogGroup;
-  /** The function's role: the published `PlatformInvokePolicy` plus logs. */
+  /** The function's role: the published `PlatformInvokePolicy`, an inline Deny on every `/platform/tenants*` route, and logs. */
   readonly role: iam.IRole;
   /** The scopes registered. */
   readonly scopes: readonly string[];
@@ -118,6 +131,20 @@ export class ScopeRegistration extends Construct {
     // The published PlatformInvokePolicy (tenant-identity ADR-0030): the
     // only way into `/platform/*`. Wider than one backend's names; T-41.
     fn.role!.addManagedPolicy(iam.ManagedPolicy.fromManagedPolicyArn(this, 'PlatformInvokePolicy', policyArn));
+    // The policy also grants the tenant routes (`POST /platform/tenants`,
+    // `GET|PATCH|DELETE /platform/tenants/*`, `POST /platform/tenants/*/users`),
+    // which this function never calls and which reach tenant data (CreateUser
+    // returns a temporary password). An explicit Deny on that route family
+    // wins over the managed Allow, so the role keeps `/platform/scopes*`
+    // alone (T-41; tenant-identity's T-34 expects each holder to do this).
+    fn.role!.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'DenyPlatformTenantRoutes',
+        effect: iam.Effect.DENY,
+        actions: ['execute-api:Invoke'],
+        resources: [platformTenantRoutesArn(this)],
+      }),
+    );
     acknowledgeGranularFinding(
       fn,
       'AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]',

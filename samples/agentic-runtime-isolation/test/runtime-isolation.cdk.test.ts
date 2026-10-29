@@ -1036,7 +1036,19 @@ describe.each(INGRESSES)('SharedIngress with several AgentBackends, ingress=%s (
     expect(fn).toBeDefined();
     const roleId = fn.Properties.Role['Fn::GetAtt'][0];
     expect(JSON.stringify(resources[roleId].Properties.ManagedPolicyArns)).toContain(IDENTITY_API.platformInvokePolicyArn);
-    expect(statementsForRole(template, roleId).some((s) => JSON.stringify(s).includes('ssm:'))).toBe(false);
+    const roleStatements = statementsForRole(template, roleId);
+    expect(roleStatements.some((s) => JSON.stringify(s).includes('ssm:'))).toBe(false);
+    // The role grants no execute-api route of its own: the only Allow into /platform/* is the managed policy...
+    expect(roleStatements.some((s) => s.Effect === 'Allow' && JSON.stringify(s.Action).includes('execute-api'))).toBe(false);
+    expect(JSON.stringify(roleStatements).includes('/platform/tenants')).toBe(true);
+    // ...and an explicit Deny takes the tenant routes back out of it (T-41), leaving `/platform/scopes*` alone.
+    const deny = roleStatements.find((s) => s.Sid === 'DenyPlatformTenantRoutes');
+    expect(deny).toMatchObject({ Effect: 'Deny', Action: 'execute-api:Invoke' });
+    const denied = JSON.stringify(deny.Resource);
+    expect(denied).toContain(':execute-api:');
+    expect(denied).toContain(':*/*/*/platform/tenants*');
+    expect(roleStatements.filter((s) => s.Effect === 'Allow' && JSON.stringify(s).includes('/platform/tenants'))).toHaveLength(0);
+    expect(resources[roleId].Properties.ManagedPolicyArns).toHaveLength(2); // AWSLambdaBasicExecutionRole and PlatformInvokePolicy, nothing else
     expect(billing.scopeRegistration.scopes).toEqual(['billing/read', 'billing/invoke']);
     // Its log group is behind the ingress drain too.
     const [drain] = Object.keys(template.findResources('AWS::CloudFormation::CustomResource'));
