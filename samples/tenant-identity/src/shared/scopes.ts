@@ -134,27 +134,40 @@ export function effectiveScopes(
 // ---------------------------------------------------------------------------
 
 /**
- * Single-tenant encoding: a space-separated list. An empty list is the empty
- * string, which is a present attribute and so means "nothing", not "all".
+ * The single-tenant encoding of an empty grant. Cognito stores no empty
+ * string: `AdminUpdateUserAttributes` with `""` deletes the attribute
+ * (integration-verified 2026-10-29), which would read back as "all of the
+ * tenant's scopes". A lone `-`, which no scope name can be (there is no
+ * `/`), stands for "nothing" instead.
+ */
+export const EMPTY_GRANT = '-';
+
+/**
+ * Single-tenant encoding: a space-separated list, or `-` for an empty grant
+ * (a present attribute that means "nothing", not "all").
  */
 export function encodeScopeList(scopes: readonly string[]): string {
-  return scopes.join(' ');
+  return scopes.length === 0 ? EMPTY_GRANT : scopes.join(' ');
 }
 
-/** Single-tenant decoding. `undefined` (attribute absent) stays undefined. */
+/**
+ * Single-tenant decoding. `undefined` (attribute absent) stays undefined; the
+ * `-` marker, and any stray `-` token, reads as no scope.
+ */
 export function decodeScopeList(value: string | undefined): string[] | undefined {
   if (value === undefined) {
     return undefined;
   }
-  return value.split(' ').filter((s) => s.length > 0);
+  return value.split(' ').filter((s) => s.length > 0 && s !== EMPTY_GRANT);
 }
 
 /**
  * Multi-tenant encoding (topology 3): a JSON object keyed by tenant id whose
- * values are space-separated lists, so one attribute serves every
- * membership. Starts from the attribute's current value and replaces one
- * key; a current value that is not a JSON object of strings is replaced
- * whole, never merged with.
+ * values are single-tenant encodings (a list, or `-` for nothing), so one
+ * attribute serves every membership and the object is never an empty
+ * string. Starts from the attribute's current value and replaces one key; a
+ * current value that is not a JSON object of strings is replaced whole,
+ * never merged with.
  */
 export function encodeScopeMap(current: string | undefined, tenantId: string, scopes: readonly string[]): string {
   const map = decodeScopeMap(current) ?? {};

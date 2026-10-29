@@ -325,7 +325,7 @@ describe('SharedPoolMultiTenantProvisioner (spec §7.3)', () => {
       cognito.on(AdminUpdateUserAttributesCommand).resolves({});
       await provisioner().setScopes(tenantA(), 'u1', []);
       const written = cognito.commandCalls(AdminUpdateUserAttributesCommand)[0].args[0].input.UserAttributes[0];
-      expect(JSON.parse(written.Value)).toEqual({ [IDS.a]: '' });
+      expect(JSON.parse(written.Value)).toEqual({ [IDS.a]: '-' });
     });
 
     it('getUser reads only this tenant\'s key; another tenant\'s grant is never shown (spec §5.1)', async () => {

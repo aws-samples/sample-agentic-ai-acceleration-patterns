@@ -824,10 +824,12 @@ is `email` only) nor write (`WriteAttributes` names only the immutable `email`, 
 only `UpdateUser` and `UpdateTenantUser` write it, with
 `AdminUpdateUserAttributes`, and only the trigger and the two user doors
 read it. Encoding: topologies 1
-and 2 store a space-separated list (`""` is a present, empty grant);
-topology 3 stores a JSON object keyed by tenant id whose values are
-space-separated lists, so one attribute carries one grant per membership, and
-a missing key means "all of that tenant's scopes". A value in topology 3 that
+and 2 store a space-separated list, or the marker `-` for an empty grant
+(Cognito deletes an attribute written as `""`, which would read back as
+"all"; `-` can be no scope name); topology 3 stores a JSON object keyed by
+tenant id whose values are those single-tenant encodings, so one attribute
+carries one grant per membership, and a missing key means "all of that
+tenant's scopes". A value in topology 3 that
 is not a JSON object of strings is read as an empty grant for every tenant
 (fail closed) and is replaced whole by the next write. The attribute is not
 user data in the R-10 sense (it lives in Cognito, P-5) and is not sensitive:

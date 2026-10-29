@@ -268,12 +268,12 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
       expect(view.grantedScopes).toEqual(['sample/read']);
     });
 
-    it('an empty list writes the empty string (a present attribute: the user holds nothing)', async () => {
-      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }, { Name: 'custom:scopes', Value: '' }], UserStatus: 'CONFIRMED' });
+    it('an empty list writes the `-` marker (Cognito would drop an empty string; the user holds nothing)', async () => {
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }, { Name: 'custom:scopes', Value: '-' }], UserStatus: 'CONFIRMED' });
       cognito.on(AdminUpdateUserAttributesCommand).resolves({});
       cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [] });
       const view = await provisioner().setScopes(tenantA(), 'u1', []);
-      expect(cognito.commandCalls(AdminUpdateUserAttributesCommand)[0].args[0].input.UserAttributes).toEqual([{ Name: 'custom:scopes', Value: '' }]);
+      expect(cognito.commandCalls(AdminUpdateUserAttributesCommand)[0].args[0].input.UserAttributes).toEqual([{ Name: 'custom:scopes', Value: '-' }]);
       expect(view.grantedScopes).toEqual([]);
     });
 

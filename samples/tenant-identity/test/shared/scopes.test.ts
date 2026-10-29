@@ -12,6 +12,7 @@ import {
   decodeScopeMap,
   decodeScopeMapEntry,
   effectiveScopes,
+  EMPTY_GRANT,
   encodeScopeList,
   encodeScopeMap,
   isReservedScope,
@@ -134,25 +135,29 @@ describe('effectiveScopes = catalogue ∩ entitlement ∩ grant (spec §8.1)', (
 });
 
 describe('custom:scopes encodings (ADR-0036)', () => {
-  it('single-tenant: space-separated list; empty list is the empty string, absent is undefined', () => {
+  it('single-tenant: space-separated list; an empty list is the `-` marker (Cognito drops an empty string); absent is undefined', () => {
     expect(encodeScopeList(['a/b', 'c/d'])).toBe('a/b c/d');
-    expect(encodeScopeList([])).toBe('');
+    expect(encodeScopeList([])).toBe(EMPTY_GRANT);
+    expect(EMPTY_GRANT).toBe('-');
     expect(decodeScopeList('a/b  c/d')).toEqual(['a/b', 'c/d']);
+    expect(decodeScopeList('-')).toEqual([]);
     expect(decodeScopeList('')).toEqual([]);
+    expect(decodeScopeList('a/b -')).toEqual(['a/b']);
     expect(decodeScopeList(undefined)).toBeUndefined();
+    expect(decodeScopeList(encodeScopeList([]))).toEqual([]);
   });
 
   it('multi-tenant: a JSON object keyed by tenant id, one key replaced at a time', () => {
     const first = encodeScopeMap(undefined, T1, ['a/b']);
     expect(JSON.parse(first)).toEqual({ [T1]: 'a/b' });
     const second = encodeScopeMap(first, T2, []);
-    expect(JSON.parse(second)).toEqual({ [T1]: 'a/b', [T2]: '' });
+    expect(JSON.parse(second)).toEqual({ [T1]: 'a/b', [T2]: '-' });
     const replaced = encodeScopeMap(second, T1, ['c/d', 'a/b']);
-    expect(JSON.parse(replaced)).toEqual({ [T1]: 'c/d a/b', [T2]: '' });
+    expect(JSON.parse(replaced)).toEqual({ [T1]: 'c/d a/b', [T2]: '-' });
   });
 
   it('multi-tenant decoding: missing key or absent attribute is undefined; a present key is its list', () => {
-    const value = JSON.stringify({ [T1]: 'a/b c/d', [T2]: '' });
+    const value = JSON.stringify({ [T1]: 'a/b c/d', [T2]: '-' });
     expect(decodeScopeMapEntry(value, T1)).toEqual(['a/b', 'c/d']);
     expect(decodeScopeMapEntry(value, T2)).toEqual([]);
     expect(decodeScopeMapEntry(value, '01C0ABCDEFGHJKMNPQRSTVWXYZ')).toBeUndefined();

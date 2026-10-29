@@ -401,7 +401,7 @@ sequenceDiagram
 
 The scopes a token carries are decided here and nowhere else (spec §8.1): the
 tenant source reads the user's grant out of `custom:scopes` in its topology's
-encoding (a list in 1 and 2, the tenant's key of a JSON object in 3; absent
+encoding (a list, or `-` for nothing, in 1 and 2, the tenant's key of a JSON object in 3; absent
 means the whole entitlement), the registry row carries the tenant's
 entitlement, and the cached catalogue bounds both. An empty catalogue (a
 container that has never read it) issues tokens with no scope and refuses

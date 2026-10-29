@@ -195,7 +195,7 @@ describe('tenantSourceFor reads the custom:scopes grant per topology (ADR-0036)'
       reg,
     );
     expect(cut.grantedScopes(IDS.a)).toEqual(['sample/read', 'sample/write']);
-    const none = await source.resolve(event({ attributes: { 'custom:tenantId': IDS.a, 'custom:scopes': '' } }), reg);
+    const none = await source.resolve(event({ attributes: { 'custom:tenantId': IDS.a, 'custom:scopes': '-' } }), reg);
     expect(none.grantedScopes(IDS.a)).toEqual([]);
     const all = await source.resolve(event({ attributes: { 'custom:tenantId': IDS.a } }), reg);
     expect(all.grantedScopes(IDS.a)).toBeUndefined();
@@ -208,7 +208,7 @@ describe('tenantSourceFor reads the custom:scopes grant per topology (ADR-0036)'
     const result = await source.resolve(
       event({
         groups: [`t-${IDS.a}`, `t-${IDS.b}`],
-        attributes: { 'custom:scopes': JSON.stringify({ [IDS.a]: 'sample/read', [IDS.b]: '' }) },
+        attributes: { 'custom:scopes': JSON.stringify({ [IDS.a]: 'sample/read', [IDS.b]: '-' }) },
       }),
       reg,
     );

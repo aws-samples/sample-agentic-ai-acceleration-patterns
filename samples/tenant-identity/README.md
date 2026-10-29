@@ -298,10 +298,11 @@ ADR-0036):
    write list names only the required, immutable `email`: Cognito reads an
    unset list as "every attribute"), so a user cannot widen their own grant
    with their token. In the single-tenant
-   topologies the value is a space-separated list; in
-   `shared-pool-multi-tenant` it is a JSON object keyed by tenant id, so one
-   person is cut per tenant. An absent attribute (or key) means the whole
-   entitlement. `GetUser`, `ListUsers` and their tenant twins return the
+   topologies the value is a space-separated list, or `-` for an empty grant
+   (Cognito drops an attribute written as an empty string); in
+   `shared-pool-multi-tenant` it is a JSON object keyed by tenant id with the
+   same values, so one person is cut per tenant. An absent attribute (or
+   key) means the whole entitlement. `GetUser`, `ListUsers` and their tenant twins return the
    effective set.
 
 What a token carries is the intersection:
