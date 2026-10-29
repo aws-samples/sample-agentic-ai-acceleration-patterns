@@ -275,12 +275,17 @@ describe('TenantIdentityStack - role asymmetry (P-8)', () => {
     expect(dynamo).toEqual(['dynamodb:BatchGetItem', 'dynamodb:GetItem', 'dynamodb:Query']);
   });
 
-  test.each(DEPLOYMENTS)('token role holds no cognito-idp or dynamodb action (R-7) [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('token role holds no cognito-idp action and one registry Query bound to the SCOPE partition (R-7, ADR-0034) [%s]', (topology) => {
     const template = synth(topology);
     const statements = policyStatementsForRole(template, 'TokenFunctionServiceRole');
     const actions = statements.flatMap(actionsOf);
     expect(actions.some((a) => a.startsWith('cognito-idp:'))).toBe(false);
-    expect(actions.some((a) => a.startsWith('dynamodb:'))).toBe(false);
+    const dynamo = statements.filter((s) => actionsOf(s).some((a) => a.startsWith('dynamodb:')));
+    expect(dynamo).toHaveLength(1);
+    expect(actionsOf(dynamo[0])).toEqual(['dynamodb:Query']);
+    // The table only, not its index, and only the catalogue's partition key.
+    expect([dynamo[0].Resource].flat()).toHaveLength(1);
+    expect(dynamo[0].Condition).toEqual({ 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['SCOPE'] } });
   });
 
   test.each(DEPLOYMENTS)('authoriser role reads the registry with GetItem + Query only, no BatchGetItem, no cognito-idp (R-9) [%s]', (topology) => {
@@ -591,6 +596,33 @@ describe('TenantIdentityStack - shared user pool (R-4, R-5, N-1, N-8, §7.2)', (
   });
 
   test.each(SHARED_POOL_DEPLOYMENTS)(
+    'every shared pool has the mutable custom:scopes attribute, neither readable nor writable by the client (ADR-0036) [%s]',
+    (topology) => {
+      const template = synth(topology);
+      const pool = Object.values(template.findResources('AWS::Cognito::UserPool'))[0] as any;
+      const scopes = (pool.Properties.Schema as any[]).find((a) => a.Name === 'scopes');
+      expect(scopes).toBeDefined();
+      expect(scopes.Mutable).toBe(true);
+      expect(scopes.AttributeDataType).toBe('String');
+      expect(scopes.StringAttributeConstraints).toEqual({ MaxLength: '2048' });
+      const client = Object.values(template.findResources('AWS::Cognito::UserPoolClient'))[0] as any;
+      expect(client.Properties.ReadAttributes ?? []).not.toContain('custom:scopes');
+      expect(client.Properties.WriteAttributes ?? []).not.toContain('custom:scopes');
+    },
+  );
+
+  test.each(DEPLOYMENTS)('the platform role and the tenant-user door may write user attributes (custom:scopes), the trigger may not (ADR-0036) [%s]', (topology) => {
+    const template = synth(topology);
+    // pool-per-tenant runs its tenant-user calls on the tenant-scoped role
+    // (ADR-0026); the function's own role holds only sts there.
+    const tenantUserRole = topology === 'pool-per-tenant' ? 'TenantScopedRole' : 'TenantUsersFunctionServiceRole';
+    for (const role of ['PlatformFunctionServiceRole', tenantUserRole]) {
+      expect(policyStatementsForRole(template, role).flatMap(actionsOf)).toContain('cognito-idp:AdminUpdateUserAttributes');
+    }
+    expect(policyStatementsForRole(template, 'TriggerFunctionServiceRole').flatMap(actionsOf)).not.toContain('cognito-idp:AdminUpdateUserAttributes');
+  });
+
+  test.each(SHARED_POOL_DEPLOYMENTS)(
     'e-mail is immutable at the pool; no self-service recovery (R-17, T-27) [%s]',
     (topology) => {
       const template = synth(topology);
@@ -676,7 +708,7 @@ describe('TenantIdentityStack - shared user pool (R-4, R-5, N-1, N-8, §7.2)', (
 });
 
 describe('TenantIdentityStack - API Gateway (R-1, §3.2, N-5..N-7)', () => {
-  test.each(DEPLOYMENTS)('REST API built from merged OpenAPI, no PLACEHOLDER, five paths [%s]', (topology) => {
+  test.each(DEPLOYMENTS)('REST API built from merged OpenAPI, no PLACEHOLDER, every path [%s]', (topology) => {
     const template = synth(topology);
     const apis = template.findResources('AWS::ApiGateway::RestApi');
     const api = Object.values(apis)[0] as any;
@@ -684,6 +716,8 @@ describe('TenantIdentityStack - API Gateway (R-1, §3.2, N-5..N-7)', () => {
     expect(JSON.stringify(body)).not.toContain('PLACEHOLDER');
     expect(Object.keys(body.paths).sort()).toEqual([
       '/oauth2/token',
+      '/platform/scopes',
+      '/platform/scopes/{scope}',
       '/platform/tenants',
       '/platform/tenants/{tenantId}',
       '/platform/tenants/{tenantId}/users',
@@ -1019,11 +1053,18 @@ describe('TenantIdentityStack - control-plane mount (ADR-0030, ADR-0033)', () =>
     expect(invoke.Action).toBe('execute-api:Invoke');
     expect(invoke.Condition).toBeUndefined();
     const prefix = `arn:<AWS::Partition>:execute-api:eu-central-1:123456789012:<${apiId}>/${stage.Properties.StageName}`;
+    // The mount's four routes, UpdateTenant (ADR-0035) and the four scope
+    // catalogue routes a backend's registration calls (ADR-0034).
     expect(invoke.Resource.map(renderArn)).toEqual([
       `${prefix}/POST/platform/tenants`,
       `${prefix}/GET/platform/tenants/*`,
+      `${prefix}/PATCH/platform/tenants/*`,
       `${prefix}/DELETE/platform/tenants/*`,
       `${prefix}/POST/platform/tenants/*/users`,
+      `${prefix}/PUT/platform/scopes/*`,
+      `${prefix}/GET/platform/scopes`,
+      `${prefix}/GET/platform/scopes/*`,
+      `${prefix}/DELETE/platform/scopes/*`,
     ]);
 
     expect(encrypt.Effect).toBe('Allow');
@@ -1043,16 +1084,20 @@ describe('TenantIdentityStack - control-plane mount (ADR-0030, ADR-0033)', () =>
       .filter((s) => actionsOf(s).includes('execute-api:Invoke'))
       .flatMap((s) => [s.Resource].flat().map(renderArn))
       .map((arn) => arn.slice(arn.indexOf('/prod/') + '/prod'.length));
-    expect(routes).toHaveLength(4);
+    expect(routes).toHaveLength(9);
     // ListTenants is GET on the collection; the GET grant is on /platform/tenants/*.
     expect(routes).not.toContain('/GET/platform/tenants');
     for (const route of routes) {
-      // IssueToken, RefreshToken, memberships, UpdateUser (PUT/PATCH), and
-      // nothing below .../users (the per-user routes).
+      // IssueToken, RefreshToken, memberships, no method wildcard, and
+      // nothing below .../users (the per-user routes). PATCH is UpdateTenant
+      // (ADR-0035) and PUT is PutScope (ADR-0034); the PATCH ARN also matches
+      // UpdateUser, recorded in threat-model.md (T-34).
       expect(route).not.toMatch(/\/token/);
       expect(route).not.toMatch(/\/membership/);
-      expect(route).not.toMatch(/^\/(PUT|PATCH|\*)\//);
+      expect(route).not.toMatch(/^\/\*\//);
       expect(route).not.toMatch(/\/users\//);
+      expect(route).not.toMatch(/^\/PUT\/platform\/tenants/);
+      expect(route).not.toMatch(/^\/PATCH\/platform\/scopes/);
     }
     // The stage name is never a wildcard: the grant names the one deployed stage.
     for (const s of statements.filter((st) => actionsOf(st).includes('execute-api:Invoke'))) {
@@ -1123,9 +1168,13 @@ describe('TenantIdentityStack - control-plane mount (ADR-0030, ADR-0033)', () =>
     const rules: { id: string; reason: string }[] = policy.Metadata.cdk_nag.rules_to_suppress;
     const iam5 = rules.filter((r) => r.id.startsWith('AwsSolutions-IAM5['));
     expect(iam5.map((r) => r.id.replace(/^.*\/prod\//, '').replace(/\]$/, '')).sort()).toEqual([
+      'DELETE/platform/scopes/*',
       'DELETE/platform/tenants/*',
+      'GET/platform/scopes/*',
       'GET/platform/tenants/*',
+      'PATCH/platform/tenants/*',
       'POST/platform/tenants/*/users',
+      'PUT/platform/scopes/*',
     ]);
     for (const r of iam5) {
       expect(r.reason).toContain('T-34');
