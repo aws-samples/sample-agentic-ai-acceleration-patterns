@@ -12,10 +12,13 @@
 #      one without it is stale and is destroyed and redeployed from
 #      ../tenant-identity (and left in place, republished); none at all is
 #      deployed and destroyed at the end (ADR-0004, tenant-identity
-#      ADR-0017). Create tenant A entitled to every demo scope and tenant B
-#      to default/chat; users A1 (admin), A2, B1; A1 cuts A2 to default/chat
-#      and billing/read through the tenant API; check what each can narrow to.
-#   2. Synthesise test/integ.runtime.ts and deploy its four stacks at once.
+#      ADR-0017).
+#   2. Synthesise test/integ.runtime.ts and deploy its four stacks at once;
+#      their backends register the demo scopes in the catalogue (ADR-0025).
+#      Then create tenant A entitled to every demo scope and tenant B to
+#      default/chat (a tenant can only be entitled to a registered scope);
+#      users A1 (admin), A2, B1; A1 cuts A2 to default/chat and billing/read
+#      through the tenant API; check what each can narrow to.
 #   3..9 on both all-on stacks (api-gateway, agentcore-gateway).
 #   9-registry (ADR-0024, ADR-0025) on both: the second backend `billing`
 #      and its scopes (any one admits), an unknown backend name; on
@@ -216,9 +219,26 @@ else
   identity_init
 fi
 
-# Tenant A is entitled to every demo scope, tenant B to default/chat only
-# (CreateTenant.scopes, tenant-identity ADR-0035). The admin of A then cuts
-# A2 to default/chat and billing/read through the tenant API (ADR-0036).
+# --------------------------------------------------------------------------
+# 2. Deploy the four stacks
+# --------------------------------------------------------------------------
+step 2 "synth and deploy ${STACK_PREFIX}-{$(printf '%s,' "${SUFFIXES[@]}" | sed 's/,$//')}"
+rm -rf "$OUT"
+npx cdk synth -q --app "npx ts-node -P tsconfig.json --prefer-ts-exts test/integ.runtime.ts" --output "$OUT" >"${LIB_TMP}/synth.log" 2>&1 \
+  || { tail -30 "${LIB_TMP}/synth.log" >&2; fail "synth"; }
+DEPLOYED_SAMPLE=1
+DEPLOY_START=$SECONDS
+"${CDK[@]}" deploy --all --require-approval never --concurrency 4 --outputs-file "${LIB_TMP}/outputs.json" >"${LIB_TMP}/deploy.log" 2>&1 \
+  || { grep -E "FAILED|Error|error" "${LIB_TMP}/deploy.log" | grep -v "^\s*$" | tail -30 >&2; fail "deploy"; }
+echo "  deployed in $((SECONDS - DEPLOY_START))s"
+
+# 2b. Tenants, after the deploy: CreateTenant.scopes must name scopes the
+# catalogue holds (tenant-identity ADR-0035), and the catalogue is filled by
+# the backends' ScopeRegistration when the stacks deploy (ADR-0025), so a
+# tenant entitled to default/chat cannot exist before the default backend
+# does. Tenant A is entitled to every demo scope, tenant B to default/chat
+# only. The admin of A then cuts A2 to default/chat and billing/read through
+# the tenant API (ADR-0036).
 create_tenant "rtiso-integ-a-${RUN}" "$ALL_DEMO_SCOPES"; TENANT_A="$TENANT_ID"; A1_USER="$ADMIN_USERNAME"; issue_token "$TENANT_A" "$A1_USER" A1
 create_user "$TENANT_A" "rtiso-integ-a2-${RUN}"; A2_USER="$USERNAME"; issue_token "$TENANT_A" "$A2_USER" A2
 create_tenant "rtiso-integ-b-${RUN}" "$DEFAULT_SCOPE"; TENANT_B="$TENANT_ID"; B1_USER="$ADMIN_USERNAME"; issue_token "$TENANT_B" "$B1_USER" B1
@@ -238,18 +258,7 @@ narrow B1_REFRESH "$TENANT_B" "$BILLING_READ_SCOPE" B1_READ; expect_invalid_scop
 narrow B1_REFRESH "$TENANT_B" "$DEFAULT_SCOPE" B1_CHAT; expect_status 200 "$NARROW_STATUS" "narrow B1 to ${DEFAULT_SCOPE}"
 echo "scopes: A1 ${DEFAULT_SCOPE}/${BILLING_INVOKE_SCOPE} 200; A2 ${BILLING_READ_SCOPE} 200, ${BILLING_INVOKE_SCOPE} invalid_scope; B1 ${BILLING_READ_SCOPE} invalid_scope" >>"$RESULTS"
 
-# --------------------------------------------------------------------------
-# 2. Deploy the four stacks
-# --------------------------------------------------------------------------
-step 2 "synth and deploy ${STACK_PREFIX}-{$(printf '%s,' "${SUFFIXES[@]}" | sed 's/,$//')}"
-rm -rf "$OUT"
-npx cdk synth -q --app "npx ts-node -P tsconfig.json --prefer-ts-exts test/integ.runtime.ts" --output "$OUT" >"${LIB_TMP}/synth.log" 2>&1 \
-  || { tail -30 "${LIB_TMP}/synth.log" >&2; fail "synth"; }
-DEPLOYED_SAMPLE=1
-DEPLOY_START=$SECONDS
-"${CDK[@]}" deploy --all --require-approval never --concurrency 4 --outputs-file "${LIB_TMP}/outputs.json" >"${LIB_TMP}/deploy.log" 2>&1 \
-  || { grep -E "FAILED|Error|error" "${LIB_TMP}/deploy.log" | grep -v "^\s*$" | tail -30 >&2; fail "deploy"; }
-echo "  deployed in $((SECONDS - DEPLOY_START))s"
+# Seed one item per tenant in each all-on stack's demo table (step 8a reads them).
 for s in api-gateway agentcore-gateway; do
   table="$(output "$s" DemoTableName)"
   for t in "$TENANT_A" "$TENANT_B"; do
