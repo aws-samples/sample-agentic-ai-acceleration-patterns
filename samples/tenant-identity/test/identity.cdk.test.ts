@@ -6,7 +6,7 @@ import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { DRAIN_SHARED_POOL_ACTIONS, TENANT_USER_ACTIONS, TenantIdentityStack } from '../src/identity.cdk';
 import { Deployment, Topology } from '../src/shared/constants';
-import { mergeOpenApi, patchIntegrations, requireApiKey } from '../src/shared/openapi';
+import { allowEmptyBody, mergeOpenApi, patchIntegrations, requireApiKey } from '../src/shared/openapi';
 
 // Skip NodejsFunction esbuild bundling in unit tests - assertions target
 // infrastructure shape, not bundle contents. (Other workers' entry files may
@@ -160,6 +160,59 @@ describe('mergeOpenApi (R-1)', () => {
       components: { schemas: { Tenant: { type: 'string' } } },
     };
     expect(() => mergeOpenApi([platform, conflicting])).toThrow(/schema 'Tenant' defined differently/);
+  });
+});
+
+describe('allowEmptyBody (ADR-0034)', () => {
+  const doc = {
+    'openapi': '3.0.2',
+    'info': { title: 'p' },
+    'paths': {
+      '/platform/scopes/{scope}': {
+        put: {
+          'operationId': 'PutScope',
+          'requestBody': { content: { 'application/json': { schema: { $ref: '#/components/schemas/PutScopeRequestContent' } } } },
+          'x-amazon-apigateway-request-validator': 'full',
+        },
+        get: { 'operationId': 'GetScope', 'x-amazon-apigateway-request-validator': 'full' },
+      },
+      '/platform/tenants': {
+        post: {
+          'operationId': 'CreateTenant',
+          'requestBody': { content: { 'application/json': { schema: { $ref: '#/components/schemas/CreateTenantRequestContent' } } } },
+          'x-amazon-apigateway-request-validator': 'full',
+        },
+      },
+    },
+    'components': {
+      schemas: {
+        PutScopeRequestContent: { type: 'object', properties: { description: { type: 'string' } } },
+        CreateTenantRequestContent: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+      },
+    },
+    'x-amazon-apigateway-request-validators': { full: { validateRequestBody: true, validateRequestParameters: true } },
+  };
+
+  test('an operation whose body has no required member validates parameters only; others keep full', () => {
+    const out = allowEmptyBody(doc) as any;
+    expect(out.paths['/platform/scopes/{scope}'].put['x-amazon-apigateway-request-validator']).toBe('params-only');
+    expect(out.paths['/platform/scopes/{scope}'].get['x-amazon-apigateway-request-validator']).toBe('full');
+    expect(out.paths['/platform/tenants'].post['x-amazon-apigateway-request-validator']).toBe('full');
+    expect(out['x-amazon-apigateway-request-validators']['params-only']).toEqual({ validateRequestParameters: true });
+    // The input is untouched.
+    expect((doc.paths['/platform/scopes/{scope}'].put as any)['x-amazon-apigateway-request-validator']).toBe('full');
+  });
+
+  test.each(DEPLOYMENTS)('in the deployed API, PutScope and the two user PATCHes validate parameters only; CreateTenant stays full [%s]', (topology) => {
+    const template = synth(topology);
+    const body = (Object.values(template.findResources('AWS::ApiGateway::RestApi'))[0] as any).Properties.Body;
+    const validatorOf = (p: string, m: string) => body.paths[p][m]['x-amazon-apigateway-request-validator'];
+    expect(validatorOf('/platform/scopes/{scope}', 'put')).toBe('params-only');
+    expect(validatorOf('/platform/tenants/{tenantId}/users/{username}', 'patch')).toBe('params-only');
+    expect(validatorOf('/tenant/users/{username}', 'patch')).toBe('params-only');
+    expect(validatorOf('/platform/tenants', 'post')).toBe('full');
+    expect(validatorOf('/platform/tenants/{tenantId}', 'patch')).toBe('full');
+    expect(validatorOf('/oauth2/token', 'post')).toBe('params-only');
   });
 });
 
@@ -628,12 +681,13 @@ describe('TenantIdentityStack - shared user pool (R-4, R-5, N-1, N-8, §7.2)', (
       const template = synth(topology);
       const pool = Object.values(template.findResources('AWS::Cognito::UserPool'))[0] as any;
       // The guard lives in the pool schema. An empty client WriteAttributes
-      // would mean "all standard attributes" (integration-verified), so the
-      // client list is not the control and is left unset.
+      // would mean "every attribute" (integration-verified, custom ones
+      // included), so the client names exactly one harmless standard
+      // attribute as writable and e-mail is not among them either way.
       const email = (pool.Properties.Schema as any[]).find((a) => a.Name === 'email');
       expect(email).toMatchObject({ Required: true, Mutable: false });
       const client = Object.values(template.findResources('AWS::Cognito::UserPoolClient'))[0] as any;
-      expect(client.Properties.WriteAttributes).toBeUndefined();
+      expect(client.Properties.WriteAttributes).toEqual(['locale']);
       expect(client.Properties.ReadAttributes).toEqual(['email']);
       expect(pool.Properties.AccountRecoverySetting).toEqual({
         RecoveryMechanisms: [{ Name: 'admin_only', Priority: 1 }],

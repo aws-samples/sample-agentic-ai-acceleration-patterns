@@ -203,6 +203,16 @@ export const SCOPES_ATTRIBUTE_NAME = 'scopes';
 export const SCOPES_ATTRIBUTE = `custom:${SCOPES_ATTRIBUTE_NAME}`;
 /** Cognito's limit on a custom string attribute value (ADR-0036). */
 export const SCOPES_ATTRIBUTE_MAX_LENGTH = 2048;
+/**
+ * The one attribute every app client the sample creates may write. Cognito
+ * reads an empty `WriteAttributes` as "every attribute", custom ones
+ * included (integration-verified 2026-10-29: a user wrote `custom:scopes`
+ * with their own token), so the list must name something; `locale` is a
+ * standard, mutable attribute the sample never reads. Everything else, the
+ * custom attributes above all, is then not writable through the client
+ * (P-3, ADR-0036).
+ */
+export const CLIENT_WRITABLE_ATTRIBUTE = 'locale';
 /** Cognito's own scope; a narrowed token never carries it (spec P-6). */
 export const COGNITO_USER_ADMIN_SCOPE = 'aws.cognito.signin.user.admin';
 

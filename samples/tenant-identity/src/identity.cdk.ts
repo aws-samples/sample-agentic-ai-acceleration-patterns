@@ -20,6 +20,7 @@ import { Construct } from 'constructs';
 import {
   ACCESS_TOKEN_MINUTES,
   ADMIN_PASSWORD_KEY_ALIAS,
+  CLIENT_WRITABLE_ATTRIBUTE,
   Deployment,
   ENV,
   hasPerTenantPools,
@@ -44,7 +45,7 @@ import {
 } from './shared/constants';
 import { LogDrain } from './shared/log-drain';
 import { acknowledgeGranularFinding, nagFindingResource, suppressTemplateScanners } from './shared/nag';
-import { IntegrationMapping, mergeOpenApi, patchIntegrations, requireApiKey } from './shared/openapi';
+import { allowEmptyBody, IntegrationMapping, mergeOpenApi, patchIntegrations, requireApiKey } from './shared/openapi';
 import { TenantDrain } from './teardown/tenant-drain-resource';
 
 /** Stack props: the deploy-time choice (ADR-0001, ADR-0027) plus the usual StackProps. */
@@ -466,16 +467,16 @@ export class TenantIdentityStack extends Stack {
       // App client (R-5, N-1, §7.2). No secret, admin-password + refresh
       // auth only, 5-minute access/id tokens, 1-day refresh, no OAuth/hosted
       // UI. readAttributes email only; custom:tenantId and custom:scopes are
-      // neither readable nor writable (P-3, ADR-0036): a custom attribute
-      // is writable through the client only when listed, so a user cannot
-      // rewrite their own grant with their token (integration-verified by
-      // the e2e scenario). No writeAttributes: Cognito treats an empty list
-      // as "all standard attributes", so the guard against a user rewriting
-      // their e-mail (T-27, R-17) is the pool's immutable `email` above, not
-      // this list. The other standard attributes stay writable; the sample
-      // reads none of them.
+      // neither readable nor writable (P-3, ADR-0036). Cognito treats an
+      // unset or empty WriteAttributes as "every attribute", custom ones
+      // included (integration-verified 2026-10-29: a user rewrote their own
+      // custom:scopes), so the list names exactly one harmless standard
+      // attribute (`locale`) and thereby closes every other, custom:scopes
+      // above all. The guard against a user rewriting their e-mail (T-27,
+      // R-17) stays the pool's immutable `email` above.
       const clientReadWrite = {
         readAttributes: new cognito.ClientAttributes().withStandardAttributes({ email: true }),
+        writeAttributes: new cognito.ClientAttributes().withStandardAttributes({ [CLIENT_WRITABLE_ATTRIBUTE]: true }),
       };
 
       appClient = userPool.addClient('AppClient', {
@@ -1405,7 +1406,8 @@ function buildApiDefinition(stack: Stack, mapping: IntegrationMapping): object {
   // ADR-0025: /tenant/* methods require an API key, read from the
   // authoriser's usageIdentifierKey. /platform/* and /oauth2/token do not:
   // the token route has no authoriser, so nothing could name a tenant key.
-  return requireApiKey(patchIntegrations(mergeOpenApi(docs), mapping), '/tenant');
+  // ADR-0034: a bodiless PutScope (no description) must reach the function.
+  return requireApiKey(patchIntegrations(allowEmptyBody(mergeOpenApi(docs)), mapping), '/tenant');
 }
 
 /**

@@ -39,6 +39,7 @@ import type { NewUserResult, Provisioner, ProvisionedTenant, TokenSet, UserView 
 import {
   ACCESS_TOKEN_MINUTES,
   adminGroupName,
+  CLIENT_WRITABLE_ATTRIBUTE,
   ID_TOKEN_MINUTES,
   issuerFor,
   REFRESH_TOKEN_DAYS,
@@ -150,9 +151,11 @@ export class PoolPerTenantProvisioner implements Provisioner {
           EnableTokenRevocation: true,
           PreventUserExistenceErrors: 'ENABLED',
           ReadAttributes: ['email'],
-          // No WriteAttributes: Cognito reads an empty list as "all standard
-          // attributes". The guard against a user rewriting their e-mail
+          // One writable standard attribute and nothing else: Cognito reads
+          // an empty list as "every attribute", custom:scopes included
+          // (ADR-0036). The guard against a user rewriting their e-mail
           // (R-17, T-27) is the pool's immutable `email` schema above.
+          WriteAttributes: [CLIENT_WRITABLE_ATTRIBUTE],
         }),
       );
       const appClientId = client.UserPoolClient?.ClientId;

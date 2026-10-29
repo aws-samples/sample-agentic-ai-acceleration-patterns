@@ -97,9 +97,14 @@ export async function eventually(probe: () => Promise<boolean>, what: string, ti
   }
 }
 
-/** The scope claim as a sorted array; absent is empty. */
+/**
+ * The sample's scopes on a token, sorted: the `scope` claim without
+ * Cognito's own `aws.cognito.signin.user.admin` (asserted on separately).
+ */
 function scopesOf(claims: Claims): string[] {
-  return typeof claims.scope === 'string' ? claims.scope.split(' ').filter((s) => s !== '').sort() : [];
+  return typeof claims.scope === 'string'
+    ? claims.scope.split(' ').filter((s) => s !== '' && s !== COGNITO_USER_ADMIN_SCOPE).sort()
+    : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +357,7 @@ export function defineScenario(topology: Topology): void {
       const again = await platform.call<{ scope: { createdAt: string; description?: string } }>(
         'PUT',
         `platform/scopes/${encodeURIComponent(SCOPE_API_READ)}`,
+        {},
       );
       expectStatus(again, 200, 'PutScope sample/read again');
       expect(again.body.scope.createdAt).toBe(first.body.scope.createdAt);
@@ -365,11 +371,17 @@ export function defineScenario(topology: Topology): void {
 
       // Refusals: the reserved owner (400 invalid_scope), a name the model
       // rejects (400 from the request validator), an unknown scope (404).
-      const reserved = await platform.call<{ message?: string }>('PUT', 'platform/scopes/tenant-admin%2Fbilling');
+      const reserved = await platform.call<{ message?: string }>('PUT', 'platform/scopes/tenant-admin%2Fbilling', {});
       expectStatus(reserved, 400, 'PutScope tenant-admin/billing');
       expect(reserved.body.message).toMatch(/^invalid_scope/);
-      const malformed = await platform.call('PUT', 'platform/scopes/Sample%2FRead');
+      const malformed = await platform.call('PUT', 'platform/scopes/Sample%2FRead', {});
       expectStatus(malformed, 400, 'PutScope Sample/Read');
+      // A bodiless PUT (no description) is accepted: the gateway validates
+      // parameters only on this route (allowEmptyBody), the SSDK reads an
+      // empty body as `{}`.
+      const bodiless = await platform.call<{ scope: { name: string } }>('PUT', `platform/scopes/${encodeURIComponent(SCOPE_API_READ)}`);
+      expectStatus(bodiless, 200, 'PutScope without a body');
+      expect(bodiless.body.scope.name).toBe(SCOPE_API_READ);
       const unknown = await platform.call('GET', 'platform/scopes/nosuch%2Fscope');
       coverage.record('GetScope');
       expectStatus(unknown, 404, 'GetScope nosuch/scope');
@@ -1422,7 +1434,7 @@ export function defineScenario(topology: Topology): void {
       expectStatus(stale, 400, 'UpdateTenant A with the deleted scope');
       expect(stale.body.message).toMatch(/^invalid_scope/);
       // Re-register it: the scope is held again at the next issuance.
-      const back = await platform.call('PUT', `platform/scopes/${encodeURIComponent(SCOPE_API_WRITE)}`);
+      const back = await platform.call('PUT', `platform/scopes/${encodeURIComponent(SCOPE_API_WRITE)}`, {});
       expectStatus(back, 200, 'PutScope sample/write again');
       await eventually(async () => {
         const r = await platform.call<{ accessToken: string }>(

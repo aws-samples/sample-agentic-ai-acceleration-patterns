@@ -180,10 +180,13 @@ teardown is total), tagged `sample=tenant-identity` and `tenant-identity:stack=<
 a strong password policy set explicitly (COG1 answered by configuration, not
 suppression). Every shared pool declares the mutable `custom:scopes`
 attribute (max 2048) that holds a user's scope grant (ADR-0036); `shared-pool`
-adds an immutable `custom:tenantId`. The app client lists neither in
-`ReadAttributes` or `WriteAttributes`, so a user can see or rewrite neither
-with their own token (P-3; the e2e scenario proves the `custom:scopes` write
-is refused). The V2 pre-token-generation trigger is attached. The app client
+adds an immutable `custom:tenantId`. The app client reads `email` only and
+writes `locale` only: Cognito reads an unset or empty `WriteAttributes` as
+"every attribute", custom ones included (the first integration run let a
+user rewrite their own `custom:scopes`), so one harmless standard attribute
+is listed to close all the others. A user can therefore neither see nor
+rewrite either custom attribute with their own token (P-3; the e2e scenario
+proves the `custom:scopes` write is refused). The V2 pre-token-generation trigger is attached. The app client
 has no secret, admin-password + refresh auth only, 5-minute access/id tokens,
 1-day refresh, OAuth/hosted UI disabled, token revocation enabled. `pool-per-tenant` creates **no** pool at deploy time; the
 platform function creates one pool, one app client, and the trigger attachment
