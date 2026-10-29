@@ -14,18 +14,27 @@
  * The scenario leaves one tenant in every stack on purpose: the stack's own
  * TenantDrain must offboard it during the destroy (ADR-0022), and a pool,
  * group, or user left afterwards is the failure signal.
+ *
+ * Two environment variables let the run share an account with other work:
+ * `E2E_STACK_PREFIX` renames the four stacks (default `TenantIdentity`), and
+ * `E2E_PUBLISHER` names the deployment that publishes the shared parameters
+ * (default `shared-pool-multi-tenant`; `none` publishes from no stack, for an
+ * account where another deployment already owns them, ADR-0017).
  */
 
 import { App } from 'aws-cdk-lib';
 import { TenantIdentityStack } from '../src/identity.cdk';
-import { Deployment, DEPLOYMENTS } from '../src/shared/constants';
+import { DEPLOYMENTS } from '../src/shared/constants';
 
-const STACK_PREFIX = 'TenantIdentity';
+const STACK_PREFIX = process.env.E2E_STACK_PREFIX || 'TenantIdentity';
 
-// The R-6 parameter names are fixed per account and Region, so exactly one
+// The R-6 parameter names are fixed per account and Region, so at most one
 // of the stacks publishes them (ADR-0017). The e2e scenario checks that the
 // publisher's parameters name its own stack.
-const PUBLISHER: Deployment = 'shared-pool-multi-tenant';
+const PUBLISHER = process.env.E2E_PUBLISHER || 'shared-pool-multi-tenant';
+if (PUBLISHER !== 'none' && !(DEPLOYMENTS as readonly string[]).includes(PUBLISHER)) {
+  throw new Error(`E2E_PUBLISHER must be one of ${DEPLOYMENTS.join(', ')} or none, not '${PUBLISHER}'`);
+}
 
 const app = new App();
 

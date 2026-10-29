@@ -14,8 +14,24 @@
 # the run, not integ-runner, because integ-runner deploys and destroys a
 # test's stacks one at a time (ADR-0023).
 #
+# The scenario registers two scopes (sample/read, sample/write) through the
+# platform API, creates its tenants with them, and proves the entitlement and
+# grant rules on real tokens: a tenant that lacks a scope cannot narrow to it,
+# a tenant admin's cut shows in the user's next token, UpdateTenant widens a
+# tenant, and DeleteScope drops the scope from every token within the 60 s
+# catalogue cache (ADR-0034, ADR-0035, ADR-0036).
+#
 # Runs in exactly one Region: AWS_REGION must be set. Deploys into the account
 # of the ambient AWS credentials, which must be CDK-bootstrapped there.
+#
+# Sharing an account with other deployments of this sample: set
+# E2E_STACK_PREFIX to rename the four stacks (default TenantIdentity) and
+# E2E_PUBLISHER=none so no integ stack publishes the shared
+# /application-plane/shared/identity/* parameters another deployment owns
+# (ADR-0017). Both are read by test/integ.identity.ts and the e2e scenario.
+#
+#   E2E_STACK_PREFIX=TenantIdentityScopes E2E_PUBLISHER=none \
+#     AWS_REGION=eu-central-1 scripts/integ.sh
 
 set -euo pipefail
 
