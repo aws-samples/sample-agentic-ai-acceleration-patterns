@@ -438,9 +438,12 @@ export class TenantIdentityStack extends Stack {
         autoVerify: { email: true },
         // E-mail is the identity the sample manages, so it is immutable: no
         // user (and no admin) can rewrite it after creation (T-27, R-17).
-        // This is the pool-level guard; the app client's write list cannot
-        // do it, because Cognito reads an empty WriteAttributes as "every
-        // standard attribute" (integration-verified 2026-10-22).
+        // This is the pool-level guard, and the only one for e-mail: the
+        // app client's write list (below) must contain the required
+        // `email` (Cognito refuses a list that omits a required attribute,
+        // and reads an empty list as "every attribute", integration-verified
+        // 2026-10-22 and 2026-10-29), so the list closes the custom
+        // attributes and the pool's immutability closes e-mail.
         standardAttributes: { email: { required: true, mutable: false } },
         customAttributes,
         // Account recovery is admin-only: the sample never sends mail (admin
