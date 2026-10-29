@@ -418,12 +418,16 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       if (input.scopes !== undefined) {
         assertGrantableScopes(input.scopes, tenantScopes(tenant));
       }
+      // Two Cognito writes with no transaction (spec §5.1): the grant goes
+      // first, so a failure between them leaves the user narrowed but with
+      // the old admin flag, never the other way round. Each write returns
+      // the full user view, so the last one read is the one answered.
       let user: UserView | undefined;
-      if (input.admin !== undefined) {
-        user = await provisioner.setAdmin(tenant, username, input.admin);
-      }
       if (input.scopes !== undefined) {
         user = await provisioner.setScopes(tenant, username, input.scopes);
+      }
+      if (input.admin !== undefined) {
+        user = await provisioner.setAdmin(tenant, username, input.admin);
       }
       return { user: toUser(requireField(user, 'user'), tenant, await this.catalogue()) };
     });

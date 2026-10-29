@@ -426,13 +426,29 @@ describe('TenantUsersService — user scopes (ADR-0036)', () => {
     expect(out.user?.scopes).toEqual(['c/d']);
   });
 
-  it('UpdateTenantUser with admin and scopes does both', async () => {
-    const provisioner = mockProvisioner({ setScopes: jest.fn().mockResolvedValue(userView({ admin: true, grantedScopes: [] })) });
+  it('UpdateTenantUser with admin and scopes does both, scopes first (spec §5.1)', async () => {
+    const provisioner = mockProvisioner({
+      setScopes: jest.fn().mockResolvedValue(userView({ admin: false, grantedScopes: [] })),
+      setAdmin: jest.fn().mockResolvedValue(userView({ admin: true, grantedScopes: [] })),
+    });
     const service = new TenantUsersService(entitled(), provisioner);
     const out = await service.UpdateTenantUser({ username: 'target-sub-9999', admin: true, scopes: [] }, context);
-    expect(provisioner.setAdmin).toHaveBeenCalled();
     expect(provisioner.setScopes).toHaveBeenCalledWith(expect.anything(), 'target-sub-9999', []);
+    expect(provisioner.setScopes.mock.invocationCallOrder[0]).toBeLessThan(provisioner.setAdmin.mock.invocationCallOrder[0]);
     expect(out.user).toMatchObject({ admin: true, scopes: [] });
+  });
+
+  it('UpdateTenantUser whose admin write fails after the grant leaves the grant written and answers 500 (spec §5.1)', async () => {
+    const provisioner = mockProvisioner({
+      setScopes: jest.fn().mockResolvedValue(userView({ admin: false, grantedScopes: [] })),
+      setAdmin: jest.fn().mockRejectedValue(new Error('InternalErrorException')),
+    });
+    const service = new TenantUsersService(entitled(), provisioner);
+    await expect(service.UpdateTenantUser({ username: 'target-sub-9999', admin: true, scopes: [] }, context)).rejects.toBeInstanceOf(
+      InternalServerError,
+    );
+    expect(provisioner.setScopes).toHaveBeenCalledWith(expect.anything(), 'target-sub-9999', []);
+    expect(provisioner.setAdmin).toHaveBeenCalledTimes(1);
   });
 
   it.each([

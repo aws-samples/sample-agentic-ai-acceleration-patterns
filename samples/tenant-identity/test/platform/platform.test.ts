@@ -1464,14 +1464,26 @@ describe('PlatformService (spec §5.1)', () => {
       expect(out.user?.scopes).toEqual(['c/d']);
     });
 
-    it('UpdateUser with admin and scopes does both, admin first', async () => {
+    it('UpdateUser with admin and scopes does both, scopes first (spec §5.1)', async () => {
       const registry = entitled('a/b');
       const provisioner = mockProvisioner();
-      provisioner.setAdmin.mockResolvedValue(userView('u1', true));
-      provisioner.setScopes.mockResolvedValue({ ...userView('u1', true), grantedScopes: [] });
+      provisioner.setScopes.mockResolvedValue({ ...userView('u1', false), grantedScopes: [] });
+      provisioner.setAdmin.mockResolvedValue({ ...userView('u1', true), grantedScopes: [] });
       const out = await makeService(registry, provisioner).UpdateUser({ tenantId: TENANT_A, username: 'u1', admin: true, scopes: [] }, CONTEXT);
-      expect(provisioner.setAdmin.mock.invocationCallOrder[0]).toBeLessThan(provisioner.setScopes.mock.invocationCallOrder[0]);
+      expect(provisioner.setScopes.mock.invocationCallOrder[0]).toBeLessThan(provisioner.setAdmin.mock.invocationCallOrder[0]);
       expect(out.user).toMatchObject({ admin: true, scopes: [] });
+    });
+
+    it('UpdateUser whose admin write fails after the grant leaves the grant written and answers 500 (spec §5.1)', async () => {
+      const registry = entitled('a/b');
+      const provisioner = mockProvisioner();
+      provisioner.setScopes.mockResolvedValue({ ...userView('u1', false), grantedScopes: [] });
+      provisioner.setAdmin.mockRejectedValue(new Error('InternalErrorException'));
+      await expect(
+        makeService(registry, provisioner).UpdateUser({ tenantId: TENANT_A, username: 'u1', admin: true, scopes: [] }, CONTEXT),
+      ).rejects.toBeInstanceOf(InternalServerError);
+      expect(provisioner.setScopes).toHaveBeenCalledWith(expect.objectContaining({ tenantId: TENANT_A }), 'u1', []);
+      expect(provisioner.setAdmin).toHaveBeenCalledTimes(1);
     });
 
     it.each([

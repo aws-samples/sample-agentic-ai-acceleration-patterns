@@ -289,13 +289,15 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
       }
       // The provisioner re-checks membership (R-12) inside setAdmin and
       // setScopes. That is one extra Cognito read, kept so the provisioner
-      // never trusts its caller.
+      // never trusts its caller. Two writes, no transaction (spec §5.1): the
+      // grant first, so a failure between them leaves the user narrowed
+      // with the old admin flag, never widened.
       let user: UserView | undefined;
-      if (input.admin !== undefined) {
-        user = await provisioner.setAdmin(tenant, target.username, input.admin);
-      }
       if (input.scopes !== undefined) {
         user = await provisioner.setScopes(tenant, target.username, input.scopes);
+      }
+      if (input.admin !== undefined) {
+        user = await provisioner.setAdmin(tenant, target.username, input.admin);
       }
       return { user: toUser(user!, tenant, await this.catalogue()) };
     } catch (error) {
