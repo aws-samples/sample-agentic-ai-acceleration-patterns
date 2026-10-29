@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0025: Give each backend its own scopes, registered with the identity provider at deploy
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-29
 - Deciders: Dave Roberts (PSA)
 

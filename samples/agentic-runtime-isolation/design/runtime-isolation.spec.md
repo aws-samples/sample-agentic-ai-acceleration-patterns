@@ -593,9 +593,12 @@ carries the random per-request id when `session` is off (ADR-0013).
 
 ## 8. Integration test outline
 
-1. Deploy tenant-identity (`shared-pool`); create tenants A and B, users A1,
-   A2, B1; issue tokens.
-2. Deploy the sample with the chosen ingress.
+1. Deploy tenant-identity (`shared-pool`), or reuse a published one (see
+   "Stale identity" below).
+2. Deploy the sample with the chosen ingress; its backends register their
+   scopes in the catalogue (ADR-0025). Then create tenants A and B, users
+   A1, A2, B1; issue tokens. The tenants follow the deploy because a tenant
+   can only be entitled to a registered scope (tenant-identity ADR-0035).
 3. Call `InvokeAgentRuntime` directly with the test runner's own
    credentials: denied (P-1). A second, non-ingress role is not exercised
    here; spike V-1 showed that such a role, with an identity policy that
@@ -642,11 +645,11 @@ Limits. On a stack with `requestsPerMinute: 5`, tenant A gets 429
    Contributor Insights rules reported both tenants (ADR-0020, ADR-0021).
 9. Latency probe: 20 invocations per ingress, TTFB and total, p50 and p95.
    Then `scripts/demo.sh` runs against the `api-gateway` stack.
-9-registry. (added 2026-10-28, ADR-0024; green on both ingresses 2026-10-28;
-   amended 2026-10-29, ADR-0025, not yet run in that shape) Each all-on stack
+9-registry. (added 2026-10-28, ADR-0024; amended 2026-10-29, ADR-0025;
+   green on both ingresses in that shape 2026-10-29) Each all-on stack
    carries a second backend, `billing`, owning `billing/read` and
    `billing/invoke`; the default backend owns `default/chat`; the stacks
-   carry no ingress-wide floor. Step 1 creates tenant A entitled to all three
+   carry no ingress-wide floor. Step 2 creates tenant A entitled to all three
    scopes and tenant B to `default/chat`, and A's admin cuts user A2 to
    `default/chat billing/read` through `PATCH /tenant/users/{A2}`. Checks:
    `GET /platform/scopes` lists the three scopes with owners `default` and

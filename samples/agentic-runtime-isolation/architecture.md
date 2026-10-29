@@ -4,18 +4,18 @@ SPDX-License-Identifier: MIT-0
 -->
 # Agentic Runtime Isolation: Architecture
 
-> **Status: implemented; the backend-owned scopes (ADR-0025) await their
-> first green integration run.**
-> Last green integration run: 2026-10-28, a sandbox account, eu-central-1,
+> **Status: implemented and verified by the integration run of 2026-10-29.**
+> Last green integration run: 2026-10-29, a sandbox account, eu-central-1,
 > both ingresses (`api-gateway` and `agentcore-gateway`), spec §8 steps 3 to
-> 8b, the per-tenant limit probe (ADR-0020) and step 9-registry (ADR-0024:
-> two backends behind one ingress, the scope split, an unknown name, a
-> backend added and drained after the ingress deploy). ADR-0025 (each
-> backend owns its scopes, registered with tenant-identity at deploy, any
-> one of them admits) is implemented and unit-tested; its integration
-> checks need tenant-identity's scope catalogue (its ADR-0034 to ADR-0036)
-> deployed. See the [README integration test](./README.md#integration-test)
-> for the step table.
+> 8b, the per-tenant limit probe (ADR-0020), step 9-registry (ADR-0024:
+> two backends behind one ingress, an unknown name, a backend added and
+> drained after the ingress deploy) and the ADR-0025 checks (each backend
+> owns its scopes, registered with tenant-identity's catalogue at deploy,
+> any one of them admits; tenant and user entitlement refused at the
+> exchange; the ingress-wide floor on the narrowed stack). Step 1 found the
+> published tenant-identity stale (no `/platform/scopes` route) and
+> republished it from `../tenant-identity`. See the
+> [README integration test](./README.md#integration-test) for the step table.
 > Security scans: 2026-10-27, ASH 0 actionable findings; Holmes CSR v3 0 high,
 > 0 medium; dispositions in the [threat model](./threat-model.md#security-review).
 > Also checked by hand on 2026-10-27 (`api-gateway`, `outputTokensPerMinute=200`,

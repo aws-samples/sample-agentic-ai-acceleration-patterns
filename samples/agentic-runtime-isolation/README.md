@@ -564,20 +564,23 @@ npx projen integ
 `shared-pool` when it has the scope catalogue (`GET /platform/scopes` is 200),
 destroys and redeploys a stale one from `../tenant-identity` (leaving the new
 one published), or deploys and later destroys one when none is published. It
-creates tenant A entitled to all three demo scopes and tenant B to
-`default/chat`, has A's admin cut user A2 to `default/chat billing/read`,
 deploys the four stacks of [`test/integ.runtime.ts`](./test/integ.runtime.ts)
-at once, runs spec §8, runs `scripts/demo.sh`, destroys everything from an
-exit trap, and fails if a stack, parameter or log group is left behind.
+at once (their backends fill the scope catalogue), then creates tenant A
+entitled to all three demo scopes and tenant B to `default/chat` (a tenant
+can only be entitled to a registered scope, so the tenants follow the
+deploy), has A's admin cut user A2 to `default/chat billing/read`, runs spec
+§8, runs `scripts/demo.sh`, destroys everything from an exit trap, and fails
+if a stack, parameter or log group is left behind.
 
-Last green run: 2026-10-28, a sandbox account, eu-central-1: deploy 107 s,
-steps 208 s, then the destroy (which waits about 90 s for the ADR-0019 log
+Last green run: 2026-10-29, a sandbox account, eu-central-1: deploy 137 s,
+steps 406 s, then the destroy (which waits about 90 s for the ADR-0019 log
 drain). Every step passed on both ingresses, including the ADR-0024 registry
-step. The ADR-0025 rows below (step 7's new shape, 9-registry's scope checks
-and the floor step) describe the current script and are **not yet green**:
-they need tenant-identity's scope catalogue deployed, which the integration
-test does itself in step 1. (Tokens are short-lived; the harness mints them
-fresh per ingress iteration so an expired token never masks a check, see
+step and the ADR-0025 rows (step 7's new shape, 9-registry's scope checks
+and the floor step). Step 1 found the published tenant-identity stale (no
+`/platform/scopes` route, API Gateway's 404 "No method found matching
+route") and republished it from `../tenant-identity` before the run.
+(Tokens are short-lived; the harness mints them fresh per ingress iteration
+so an expired token never masks a check, see
 [`scripts/CONVENTIONS.md`](./scripts/CONVENTIONS.md).)
 
 | Spec §8 step | api-gateway | agentcore-gateway |
@@ -587,13 +590,13 @@ fresh per ingress iteration so an expired token never masks a check, see
 | 4b A2/B1 with A1's `conversationId` and session header: own units | pass | pass |
 | 5 A1 resumes on the same microVM | pass | pass |
 | 6 no token 401; tampered token, ID token 403; malformed id 400 | pass | pass |
-| 7 token narrowed to `billing/read` only refused on the default backend (ADR-0025) | not yet run | not yet run |
+| 7 token narrowed to `billing/read` only refused on the default backend (ADR-0025) | pass | pass |
 | 8 forwarded scope reported; `requireNarrowedToken` refuses un-narrowed | pass | forwarded scope only |
 | 8a A reads A; A reads B and B reads A denied by IAM; runner cannot assume the tenant role | pass | pass |
 | 8b usage event on the stream; `ModelOutputTokens` per tenant in CloudWatch | pass | usage event only |
 | ADR-0018 default `TenantModelRole` signs a model call | pass | not run |
-| 9-registry (ADR-0024, ADR-0025): the catalogue lists the three scopes with their owners; `default/chat` token 200 on the default backend, 403 on `billing`; A1 narrowed to `billing/invoke` 200 on billing, A2 (cut to `billing/read` by the tenant admin) 200 on billing; `billing/invoke` token 403 on the default backend; B narrowed to `billing/read` and A2 to `billing/invoke` refused at the exchange with `invalid_scope`; `/nosuch/invocations` refused (403 api-gateway, 404 Gateway); a backend added by a registry write serves within one TTL and is refused once `draining` (add and drain on `api-gateway`) | not yet run | not yet run |
-| floor (narrowed stack): floor-only token 403 on billing; `billing/read` without the floor 403; floor plus `billing/read` 200 on both backends | not yet run | not run |
+| 9-registry (ADR-0024, ADR-0025): the catalogue lists the three scopes with their owners; `default/chat` token 200 on the default backend, 403 on `billing`; A1 narrowed to `billing/invoke` 200 on billing, A2 (cut to `billing/read` by the tenant admin) 200 on billing; `billing/invoke` token 403 on the default backend; B narrowed to `billing/read` and A2 to `billing/invoke` refused at the exchange with `invalid_scope`; `/nosuch/invocations` refused (403 api-gateway, 404 Gateway); a backend added by a registry write serves within one TTL and is refused once `draining` (add and drain on `api-gateway`) | pass | pass (unknown name 404; add-and-drain not run, a backend there is also a Gateway target) |
+| floor (narrowed stack): floor-only token 403 on billing; `billing/read` without the floor 403; floor plus `billing/read` 200 on both backends | pass | not run |
 
 Not covered yet: step 3 with a second, non-ingress role (the spike's V-1
 covered it); the CloudTrail check of one `AssumeRole` per tenant per credential
@@ -603,8 +606,8 @@ lifetime; the CUR 2.0 `iamPrincipal/TenantId` line items (they arrive a day late
 
 | Ingress | TTFB p50 | TTFB p95 | `stream 10` TTFB | `stream 10` total |
 |---|---|---|---|---|
-| api-gateway | 0.198 s | 0.219 s | 0.161 s | 10.15 s |
-| agentcore-gateway | 0.290 s | 0.325 s | 0.199 s | 10.18 s |
+| api-gateway | 0.203 s | 0.220 s | 0.196 s | 10.18 s |
+| agentcore-gateway | 0.290 s | 0.327 s | 0.242 s | 10.22 s |
 
 Both ingresses stream: the first event of `stream 10` arrives after about
 0.2 s and the last after about 10 s. This is one run from one client; it is
