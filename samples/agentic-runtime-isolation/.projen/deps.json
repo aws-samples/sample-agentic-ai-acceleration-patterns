@@ -96,6 +96,11 @@
       "type": "build"
     },
     {
+      "name": "@aws-crypto/sha256-js",
+      "version": "5.2.0",
+      "type": "runtime"
+    },
+    {
       "name": "@aws-sdk/client-bedrock-agentcore",
       "version": "3.1154.0",
       "type": "runtime"
@@ -121,8 +126,28 @@
       "type": "runtime"
     },
     {
+      "name": "@aws-sdk/credential-providers",
+      "version": "3.1154.0",
+      "type": "runtime"
+    },
+    {
       "name": "@smithy/node-http-handler",
       "version": "4.12.1",
+      "type": "runtime"
+    },
+    {
+      "name": "@smithy/protocol-http",
+      "version": "5.6.2",
+      "type": "runtime"
+    },
+    {
+      "name": "@smithy/signature-v4",
+      "version": "5.7.4",
+      "type": "runtime"
+    },
+    {
+      "name": "@smithy/types",
+      "version": "4.19.0",
       "type": "runtime"
     },
     {
