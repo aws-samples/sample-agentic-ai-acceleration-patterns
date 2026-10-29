@@ -12,8 +12,9 @@ SPDX-License-Identifier: MIT-0
 > drained after the ingress deploy) and the ADR-0025 checks (each backend
 > owns its scopes, registered with tenant-identity's catalogue at deploy,
 > any one of them admits; tenant and user entitlement refused at the
-> exchange; the ingress-wide floor on the narrowed stack). Step 1 found the
-> published tenant-identity stale (no `/platform/scopes` route) and
+> exchange; the ingress-wide floor on the narrowed stack). Step 1 reused the
+> published tenant-identity (`GET /platform/scopes` 200); the run before it
+> had found that deployment stale (no `/platform/scopes` route) and
 > republished it from `../tenant-identity`. See the
 > [README integration test](./README.md#integration-test) for the step table.
 > Security scans: 2026-10-27, ASH 0 actionable findings; Holmes CSR v3 0 high,
@@ -96,9 +97,9 @@ AgentBackend stack ──PUT /platform/scopes/<name>/<action>──▶ tenant-id
 |---|---|---|
 | `SharedIngress` | The construct that creates one ingress (either kind), the TVM and limits wiring, the log drain, the ingress role with its tag-conditioned invoke grant, the registry read grant, and the published parameters. `fromParameters(scope, id, prefix, ingress)` imports an ingress from another stack, and is the only way an `AgentBackend` in another stack may name it | `src/shared-ingress.cdk.ts` |
 | `AgentBackend` | The construct that creates one Runtime tagged `ri:ingress = <ingressId>`, writes its resource policy naming the ingress role, adds the one-model statement to the tenant role, on `agentcore-gateway` adds the Gateway target, registers its scopes, and writes the registry entry last. Refuses at synth a scope list that is empty, repeats a name, or names a scope not owned by the backend | `src/agent-backend.cdk.ts` |
-| Scope registration | The custom resource behind each backend's scopes (ADR-0025): Create and Update `PUT /platform/scopes/{scope}` for each (Update also `DELETE`s the dropped ones) and fail the deploy on a refused or unreachable API; Delete `DELETE`s each, best effort. SigV4 over `execute-api` with the function's own role, which carries tenant-identity's published `PlatformInvokePolicy`; the API URL and policy ARN are read from `/application-plane/shared/identity/{apiUrl,platformInvokePolicyArn}` at deploy time. Fixed physical id per backend, no log on success | `src/shared/scope-registration.cdk.ts`, `src/shared/scope-registration.function.ts` |
+| Scope registration | The custom resource behind each backend's scopes (ADR-0025): Create and Update `PUT /platform/scopes/{scope}` for each (Update also `DELETE`s the dropped ones) and fail the deploy on a refused or unreachable API; Delete `DELETE`s each, best effort. Every `PUT` writes the description `<StackId>#<LogicalResourceId>` as an ownership marker; Create `GET`s each scope first and fails with `scope <name> already registered by another stack` when the marker names another stack, taking the physical id `scope-registration:<backend>:unclaimed` so the rollback's Delete is a no-op; Delete skips a scope whose marker names another stack. Each call has a 10 s abort timeout and one retry on 429, 5xx or a transport error, and the handler answers CloudFormation before its own Lambda timeout. `ApiUrl` must be an `https` URL whose hostname ends `.execute-api.<region>.amazonaws.com`. SigV4 over `execute-api` with the function's own role, which carries tenant-identity's published `PlatformInvokePolicy` less an inline Deny on every `/platform/tenants*` route; the API URL and policy ARN are read from `/application-plane/shared/identity/{apiUrl,platformInvokePolicyArn}` at deploy time. Renaming the backend replaces the resource, so the old name's scopes are deleted. Fixed physical id per backend, no log on success | `src/shared/scope-registration.cdk.ts`, `src/shared/scope-registration.function.ts` |
 | Registry entry | The custom resource behind each entry: Create writes `active` and refuses an existing name; Update overwrites; Delete sets `draining`, waits one TTL plus the longest stream, then removes the entry, and only when the entry's `runtimeArn` is its own. Depends on the scope registration | `src/shared/registry-entry.cdk.ts`, `src/shared/registry-entry.function.ts` |
-| Registry cache | Per-process cache of entries keyed by name: stale-while-refresh, back-off on a failed refresh, a maximum stale age of ten times `registryTtl`, and the partition, Region and account check against the ingress's own (`RI_REGISTRY_ACCOUNT`). The parser requires `scopes`, so an entry written before ADR-0025 is 502 rather than "no scopes" | `src/shared/registry.ts` |
+| Registry cache | Per-process cache of entries keyed by name: stale-while-refresh, back-off on a failed refresh, a maximum stale age of ten times `registryTtl`, and the partition, Region and account check against the ingress's own (`RI_REGISTRY_ACCOUNT`). The parser requires `scopes`; an entry without it is refused with 502, never read as "no scopes" | `src/shared/registry.ts` |
 | Scope checks | `missingScopes` (AND) for the ingress-wide floor and `hasAnyScope` (OR) for the backend's own scopes, one copy for the authoriser and the pipeline; an empty backend list admits no token | `src/shared/headers.ts` |
 | Ingress, `api-gateway` | REST API with a REQUEST Lambda authoriser and a streaming integration Lambda (`responseTransferMode: STREAM`, 2-minute timeout). One `/{backend}/invocations` resource on the same authoriser and Lambda; the authoriser resolves the name through the registry cache and requires one of the backend's scopes, the Lambda reads the resolved Runtime ARN from the authoriser context, calls `InvokeAgentRuntime` and forwards the stream (ADR-0003, ADR-0005, ADR-0009, ADR-0015, ADR-0024, ADR-0025) | `src/ingress/api-gateway-authorizer.function.ts`, `src/ingress/api-gateway-ingress.function.ts` |
 | Ingress, `agentcore-gateway` | AgentCore Gateway with a `CUSTOM_JWT` authoriser (`allowedScopes` is the product floor only, so a backend added later needs no Gateway redeploy), one Runtime target per backend created by the backend's own stack, and one REQUEST interceptor Lambda that re-verifies the token, requires one of the target's `scopes` from the registry and sets the session id and credential headers. The Gateway routes to the target named in the URL and calls that Runtime; the name is always in the path, there is no default backend on this ingress (ADR-0005, ADR-0010, ADR-0015, ADR-0024, ADR-0025) | `src/ingress/gateway-interceptor.function.ts` |
@@ -161,8 +162,34 @@ Reviewed on 2026-10-28 for the shared ingress. Each item was checked in code:
 - The Runtime is chosen from the route, never from the body or a header, and only through the registry entry for that name. A wrong entry sends a tenant to the wrong backend, not to another tenant's data: the vended credentials and the session id prefix are built from the verified claims alone (ADR-0002, ADR-0012, ADR-0024).
 - The registry is a trust boundary (threat model B6, T-39): only the backend's own role may write its name (`ssm:PutParameter` and `DeleteParameter` on that one parameter), the ingress role may only read the prefix, and the ingress refuses an entry whose `runtimeArn` is outside its own partition, Region and account.
 - A token reaches only the backends one of whose `scopes` it carries; the ingress-wide list stays as the floor (ADR-0005, ADR-0025). Which scopes a token can carry is decided at the identity provider per tenant and per user, so a tenant not entitled to `billing/*` cannot obtain a token for billing at all.
-- The scope registration's role holds tenant-identity's `PlatformInvokePolicy`, wider than one backend's names (threat model B7, T-41): a compromised backend stack could register foreign scope names or change a tenant's entitlement, but not route a request (the registry entry is pinned to the backend's own name at synth) and not reach another tenant's data.
+- The scope registration's role holds tenant-identity's `PlatformInvokePolicy`, every `/platform/*` route, less an inline Deny on every `/platform/tenants*` route (threat model B7, T-41), so of the policy's routes it reaches the catalogue alone. What remains is wider than one backend's names: a compromised backend stack could delete another backend's scopes from the catalogue, but not register a scope another stack owns (the ownership marker in the scope's description is checked before each Create), not change a tenant's entitlement, users or data, not route a request (the registry entry is pinned to the backend's own name at synth) and not reach another tenant's data. A direct invoker of the registration function can pick any `Backend` in the event; the handler re-validates the shape and the owner rule, and the control on who may invoke the function or assume its role is IAM (residual, T-41).
 - Each Runtime's resource policy names the one ingress role on the Runtime ARN and denies every other principal (ADR-0001). The ingress role's grant is a Runtime ARN pattern with a `ri:ingress` tag condition instead of a list, so the resource policy carries P-1 alone if the condition is not honoured (threat model T-40).
+
+## Differences from the specification
+
+Where the implemented state differs from
+[`design/runtime-isolation.spec.md`](./design/runtime-isolation.spec.md), the
+specification carries a dated amendment that points here.
+
+- **ADR-0025 (amended 2026-10-29).** The scope registration claims ownership
+  of each scope: every `PUT /platform/scopes/{scope}` writes the description
+  `<StackId>#<LogicalResourceId>`, Create `GET`s each scope first and fails
+  the deploy with `scope <name> already registered by another stack` when
+  the marker names another stack (the resource then holds the physical id
+  `scope-registration:<backend>:unclaimed`, whose Delete is a no-op), and
+  Delete skips a scope another stack owns. The specification's registration
+  was an unconditional `PUT`. Each platform call has a 10 s abort timeout
+  and one retry on 429, 5xx or a transport error; the handler answers
+  CloudFormation before its Lambda timeout. `ApiUrl` must be `https` with a
+  hostname ending `.execute-api.<region>.amazonaws.com`. Renaming a backend
+  replaces the registration, so the old name's scopes are deleted from the
+  catalogue. The function's role carries the `PlatformInvokePolicy` less an
+  inline Deny on every `/platform/tenants*` route; the policy also grants
+  `kms:Encrypt` and `kms:GenerateDataKey` on tenant-identity's admin-password
+  key under `kms:ViaService = ssm`, which the function never uses (inert). The integration driver
+  replaces a stale published tenant-identity only with
+  `INTEG_REPLACE_STALE_IDENTITY=1`, otherwise failing with instructions, and
+  its cleanup verifies that the demo scopes are gone from a reused catalogue.
 
 ## What the service cannot carry per tenant
 

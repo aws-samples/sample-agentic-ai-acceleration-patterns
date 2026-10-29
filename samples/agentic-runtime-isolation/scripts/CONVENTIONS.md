@@ -66,6 +66,12 @@ that none of those ever reach output.
   sample's prefix, plus the log groups and SSM parameters its own stacks
   owned. It ignores parameters under `/application-plane/shared/agent-runtime/*`
   that another deployment wrote.
+- `integ.sh` never replaces a published tenant-identity on its own. A
+  published deployment without the scope catalogue is stale; the script
+  fails and names the fix unless `INTEG_REPLACE_STALE_IDENTITY=1` is set,
+  because the replacement deletes the shared user pool and every other
+  consumer's tenants and tokens with it. On a reused deployment the cleanup
+  also checks that the demo scopes are gone from the catalogue.
 - Exit non-zero on any failure, naming the step, resource or parameter that
   failed (name, not value). Never swallow an error into a success exit.
 

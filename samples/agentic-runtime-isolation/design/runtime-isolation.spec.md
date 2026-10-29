@@ -53,6 +53,11 @@ per-tenant limits are on by default, and the rest are off by default (P-4):
 | Per-tenant limits | on by default (ADR-0020): requests per tenant per minute, and on `api-gateway` optionally output tokens, counted fleet-wide; over the limit is 429 | `tenantLimits` |
 | Per-tenant metrics | off by default (ADR-0021): per-tenant CloudWatch metrics (EMF); the ingress log line carries the same figures without them | `perTenantMetrics` |
 
+**Amended 2026-10-29 (ADR-0025).** A backend's `scopes` are registered with
+the identity provider's catalogue by the backend's own stack at deploy, with
+an ownership marker, so a scope belongs to exactly one stack and the issuer
+knows every scope the ingress will check before the route is live.
+
 Without session mapping every request runs in a fresh unit and nothing
 carries over between requests: the strictest setting. With it, the sample
 realises the "Runtime isolation with session mapping" pattern of
@@ -236,7 +241,7 @@ leave the agent, never content (ADR-0017).
 | C-4 | **Demo app** | `src/main.ts`: reads tenant-identity's SSM parameters and instantiates the construct with one ingress |
 | C-6 | **Unit module** | Shared by both ingress Lambdas: random unit id, or with `session` the claim-derived id (P-2) |
 | C-7 | **TVM module** | Shared by both ingress Lambdas, always on (ADR-0018): validated claims to session tags, `AssumeRole` + `TagSession` on `tvm.role` or the default `TenantModelRole`, per-tag-set cache bounded by `tvm.cacheMaxEntries` with one STS call per tag set (ADR-0022), credential header (P-8) |
-| C-5 | **Integration driver** | `scripts/integ.sh`: deploys tenant-identity (`shared-pool`), then this sample once per ingress, runs the e2e suite and the latency probe, destroys everything |
+| C-5 | **Integration driver** | `scripts/integ.sh`: deploys tenant-identity (`shared-pool`), then this sample once per ingress, runs the e2e suite and the latency probe, destroys everything. **Amended 2026-10-29 (ADR-0025).** It reuses a published tenant-identity that has the scope catalogue, deploys one when none is published, and replaces a stale one (no `/platform/scopes` route) only with `INTEG_REPLACE_STALE_IDENTITY=1`, otherwise failing with instructions; replacement deletes the shared pool and every other consumer's tenants and tokens. Its cleanup verifies the demo scopes are gone from a reused catalogue |
 
 ### 3.2 Caller and identity model
 
@@ -249,6 +254,14 @@ leave the agent, never content (ADR-0017).
   `POST /oauth2/token` for a token holding only the scopes it needs
   (tenant-identity ADR-0009), and calls the ingress with that token. A scope
   the user does not hold is refused there with `invalid_scope`.
+- **Amended 2026-10-29 (ADR-0025).** The backend's stack is itself a caller
+  of tenant-identity's platform API: its `ScopeRegistration` function signs
+  `PUT|GET|DELETE /platform/scopes/{scope}` with SigV4 under a role that
+  carries the published `PlatformInvokePolicy` less an inline Deny on every
+  `/platform/tenants*` route. Each scope it puts carries the description
+  `<StackId>#<LogicalResourceId>` as an ownership marker, and a scope whose
+  marker names another stack is neither claimed nor deleted. Which scopes a
+  token may carry is still decided by tenant-identity alone.
 - The **vendor** deploys the construct; no vendor call path into a session
   exists.
 
@@ -286,7 +299,7 @@ construct:
 | Construct | Props | Meaning |
 |---|---|---|
 | `SharedIngress` | every ingress prop except `agent`, plus `registryPrefix` (default `/application-plane/shared/agent-runtime/`), `registryTtl` (`Duration`, default 60 s), `defaultBackend` (default none) | the ingress alone: API or Gateway, authoriser, TVM, limits, log drain, and the registry prefix it publishes under and reads `backends/<name>` from. `registryPrefix` is one per account and Region; set it when one account runs several ingresses. `defaultBackend` is the backend the bare `/invocations` route resolves to. `SharedIngress.fromParameters(scope, id, prefix, ingress)` imports an ingress deployed in another stack through its published parameters (§6.4); an `AgentBackend` in another stack must take the ingress this way, a `SharedIngress` instance from another stack fails synth. `registryTtl` is 1 s to 750 s |
-| `AgentBackend` | `name` (`[a-z0-9-]{1,32}`), `ingress` (a `SharedIngress` or `fromParameters`), `agent` (`{ codePath, modelId, environment? }`), `scopes` (required), `identityApi?` | one backend: the Runtime tagged `ri:ingress = <ingressId>`, its resource policy naming the ingress role, on `agentcore-gateway` a Gateway target named `name`, its scope registration with tenant-identity, and the registry entry `{ runtimeArn, scopes, status }`. On delete the entry is set to `draining`, held for `registryTtl` plus 120 s, then removed, and the scopes are removed from the catalogue |
+| `AgentBackend` | `name` (`[a-z0-9-]{1,32}`), `ingress` (a `SharedIngress` or `fromParameters`), `agent` (`{ codePath, modelId, environment? }`), `scopes` (required), `identityApi?` | one backend: the Runtime tagged `ri:ingress = <ingressId>`, its resource policy naming the ingress role, on `agentcore-gateway` a Gateway target named `name`, its scope registration with tenant-identity, and the registry entry `{ runtimeArn, scopes, status }`. On delete the entry is set to `draining`, held for `registryTtl` plus 120 s, then removed, and the scopes are removed from the catalogue. **Amended 2026-10-29 (ADR-0025).** Changing `name` replaces the Runtime, the registration and the entry: the new name is created first, then the old name's scopes are deleted from the catalogue and its entry drained; `identityApi.apiUrl`, by value or from the parameter, must be an `https` URL whose hostname ends `.execute-api.<region>.amazonaws.com` |
 
 The ingress-wide `requiredScopes` is the floor every token must meet.
 
@@ -314,6 +327,24 @@ inline `Deny` on `execute-api:Invoke` for `*/*/*/platform/tenants*`, so of
 the policy's routes it reaches the catalogue alone (threat model T-41); the
 handler applies the same owner rule as the construct, so a direct invoke
 cannot register a name under another owner.
+
+**Amended 2026-10-29 (ADR-0025).** The registration claims each scope rather
+than overwriting it. Every `PUT` writes the description
+`<StackId>#<LogicalResourceId>` as an ownership marker. Create `GET`s each
+scope first and fails the deploy with `scope <name> already registered by
+another stack` when the marker names another stack; the resource then takes
+the physical id `scope-registration:<backend>:unclaimed`, whose Delete is a
+no-op, so the rollback removes nothing it did not claim. Delete skips a scope
+whose marker names another stack. Each platform call has a 10 s abort
+timeout and one retry on 429, 5xx or a transport error; the handler always
+answers CloudFormation before its Lambda timeout, so a slow or unreachable
+API fails the stack rather than hanging it. The handler re-validates the
+event's shape, but a principal allowed to invoke the function directly can
+pass any `Backend` name; the control is IAM on `lambda:InvokeFunction` and
+on assuming the function's role (residual, threat model T-41). The published
+`PlatformInvokePolicy` also carries `kms:Encrypt` and `kms:GenerateDataKey`
+on tenant-identity's admin-password key under `kms:ViaService = ssm`; the
+function never uses them (inert).
 
 **Limitation.** `delegation.allowedScopes` is a static list fixed at synth
 (ADR-0007). With `delegation.requireNarrowedToken` on, it must name every
@@ -394,6 +425,15 @@ and validated at synth by `AgentBackend` and at read time by the ingress
 entry is cached as a miss for the same TTL. Writes are last-write-wins and
 eventually consistent; one writer per name is enforced by IAM, not by the
 store. Tenant state is still not stored.
+
+**Amended 2026-10-29 (ADR-0025).** The scope catalogue entry in
+tenant-identity (`GET /platform/scopes/{scope}`) is a second stored entity the
+backend stack writes: its `description` is the ownership marker
+`<StackId>#<LogicalResourceId>` of the `ScopeRegistration` that put it. The
+registration reads the marker before Create and before each Delete; a marker
+naming another stack fails the Create and is skipped on Delete. The store
+enforces nothing; the handler does, and two stacks claiming one scope at the
+same instant is a benign race the second deploy loses on its next `GET`.
 
 ---
 
@@ -605,11 +645,24 @@ carries the random per-request id when `session` is off (ADR-0013).
 ## 8. Integration test outline
 
 1. Deploy tenant-identity (`shared-pool`), or reuse a published one (see
-   "Stale identity" below).
+   "Stale identity" below). **Amended 2026-10-29 (ADR-0025).** A stale
+   published deployment is replaced only with `INTEG_REPLACE_STALE_IDENTITY=1`;
+   without it the step fails and prints what to do, because replacement
+   deletes the shared pool and invalidates every other consumer's tenants
+   and tokens. On a reused deployment each backend's registration `GET`s its
+   scopes before the `PUT`: a demo scope left in the catalogue by another
+   stack (its ownership marker `<StackId>#<LogicalResourceId>` names that
+   stack) fails the deploy in step 2 with `scope <name> already registered
+   by another stack`, and the leftover stack or scope must be removed first.
 2. Deploy the sample with the chosen ingress; its backends register their
    scopes in the catalogue (ADR-0025). Then create tenants A and B, users
    A1, A2, B1; issue tokens. The tenants follow the deploy because a tenant
    can only be entitled to a registered scope (tenant-identity ADR-0035).
+   **Amended 2026-10-29 (ADR-0025).** The tenant and user part is step 2b in
+   `scripts/integ.sh`: tenant A entitled to all three demo scopes, tenant B
+   to `default/chat`, A's admin cuts A2 to `default/chat billing/read`, and
+   the exchange refuses B1 narrowed to `billing/read` and A2 to
+   `billing/invoke` with `invalid_scope`.
 3. Call `InvokeAgentRuntime` directly with the test runner's own
    credentials: denied (P-1). A second, non-ingress role is not exercised
    here; spike V-1 showed that such a role, with an identity policy that
@@ -631,6 +684,10 @@ carries the random per-request id when `session` is off (ADR-0013).
    ADR-0015).
 7. Backend scopes (ADR-0025): a token narrowed to `billing/read` only is
    refused with 403 on the default backend, which owns `default/chat` alone.
+   **Amended 2026-10-29 (ADR-0025).** The refusal is the backend's any-of
+   check (`backend_scope_missing`) after the ingress-wide floor; green on
+   both ingresses 2026-10-29, the default backend's scopes read from its
+   registry entry, never from the catalogue.
 8. Forwarding on: the agent reports the forwarded token's `scope`; with
    `requireNarrowedToken`, an un-narrowed token is refused and a narrowed one
    accepted.
@@ -687,10 +744,16 @@ Stale identity. (added 2026-10-29, ADR-0025) Step 1 calls
    `GET /platform/scopes` with SigV4 on a published tenant-identity: 200
    reuses it; API Gateway's own no-such-route answer (404 "No method found
    matching route" for a signed request, 403 "Missing Authentication Token"
-   otherwise) is a deployment from before the catalogue, which is destroyed
-   and redeployed from `../tenant-identity` and left published.
+   otherwise) is a deployment from before the catalogue. **Amended
+   2026-10-29 (ADR-0025).** Such a deployment is destroyed and redeployed
+   from `../tenant-identity` (and left published) only when
+   `INTEG_REPLACE_STALE_IDENTITY=1`; otherwise the step fails with
+   instructions, since the redeploy deletes the shared pool that other
+   consumers may depend on.
 10. Destroy; delete the Runtime's service-created log groups; assert no
-   stacks, parameters or log groups are left (ADR-0019).
+   stacks, parameters or log groups are left (ADR-0019). **Amended
+   2026-10-29 (ADR-0025).** On a reused tenant-identity, also assert the
+   demo scopes are gone from the catalogue (`GET /platform/scopes`).
 
 Steps 3 to 9 and 9-registry run on both all-on stacks (`api-gateway`, `agentcore-gateway`).
 Step 4a, the narrowed-token case of step 8 and the limits step run on their

@@ -207,7 +207,7 @@ key when a value is missing or malformed.
 |---|---|---|---|
 | `ingress` | `api-gateway`, `agentcore-gateway` | required | The ingress (ADR-0003). It is in the stack name, `RuntimeIsolation-<ingress>`, so both can be deployed side by side (see [Two ingresses in one account](#two-ingresses-in-one-account)) |
 | `session` | `user`, `tenant`, `off` | `off` | Session mapping (ADR-0013). `user` keys the unit on `tenant_id` and `sub`; `tenant` on `tenant_id` only |
-| `requiredScopes` | comma-separated scopes, e.g. `platform/active` | unset (no check) | The ingress-wide scope floor every token must carry (AND, ADR-0005). Rarely needed since ADR-0025: each backend owns its scopes, checked any-of on top of the floor |
+| `requiredScopes` | comma-separated scopes, e.g. `platform/active` | unset (no check) | The ingress-wide scope floor every token must carry (AND, ADR-0005). Each backend owns its scopes, checked any-of on top of the floor (ADR-0025), so most deployments leave the floor unset |
 | `forwardUserToken` | `true`, `false` | `false` | Forward the user's token to the agent (ADR-0006) |
 | `requireNarrowedToken` | `true`, `false` | `false` | Refuse a token whose scopes are not a subset of `allowedScopes`; needs `forwardUserToken=true` (ADR-0007) |
 | `allowedScopes` | comma-separated scopes | unset | The scopes a forwarded token may carry; required with `requireNarrowedToken`. A static list fixed at synth: with `requireNarrowedToken` on it must name every backend's scopes, so a backend added later needs an ingress redeploy (see [Scopes](#several-backends-behind-one-ingress)) |
@@ -432,8 +432,8 @@ new AgentBackend(this, 'Billing', {
 cannot share one; `[a-z0-9-]` on both sides of the slash, 3 to 128
 characters, no duplicates, or synth fails naming `scopes`. A token reaches
 the backend when it carries **any one** of them (OR). The agent receives the
-token's scopes as before (ADR-0007) and separates `billing/read` from
-`billing/invoke` itself. The ingress-wide `requiredScopes` floor (AND) stays
+token's scopes in the forwarded token (ADR-0007) and separates `billing/read`
+from `billing/invoke` itself. The ingress-wide `requiredScopes` floor (AND) stays
 for a scope every backend shares, say `platform/active`; most deployments
 leave it unset. On `agentcore-gateway` the floor is also the Gateway's
 `allowedScopes`, so with a floor set a token must carry the floor and a
@@ -494,18 +494,17 @@ the next attempt; an entry that could not be refreshed for ten times the TTL
 is no longer served and the route answers 502 `registry_unavailable`. The
 ingress-wide `requiredScopes` is the floor every token must meet (and the
 Gateway authoriser's `allowedScopes`); the backend's `scopes` are checked
-any-of on top, per route (ADR-0005, ADR-0025). `scopes` is required: an
-entry written before ADR-0025 (`requiredScopes`) is refused with 502, not
-read as "no scopes".
+any-of on top, per route (ADR-0005, ADR-0025). `scopes` is required; an
+entry without it is refused with 502, never read as "no scopes".
 
 **Backend lifecycle.** No row redeploys the ingress (ADR-0024):
 
 | Operation | Effect | Live after | Ingress deploy |
 |---|---|---|---|
-| Create | Runtime, resource policy, Gateway target, the scope registration with tenant-identity, then the registry entry. An entry of that name that already exists is refused (the write is not an overwrite), so two stacks cannot claim one route; an entry that already names this Runtime is reclaimed, so a retried Create is not a duplicate | one `registryTtl` | no (and no identity deploy), unless `delegation.requireNarrowedToken` is on: then `allowedScopes` must be extended first (see the limitation above) |
+| Create | Runtime, resource policy, Gateway target, the scope registration with tenant-identity, then the registry entry. Each scope is `GET` before it is `PUT`; a scope already in the catalogue under another stack's ownership marker (`<StackId>#<LogicalResourceId>` in its description) fails the deploy with `scope <name> already registered by another stack`, and the registration then takes the physical id `scope-registration:<backend>:unclaimed` so the rollback's Delete is a no-op. An entry of that name that already exists is refused (the write is not an overwrite), so two stacks cannot claim one route; an entry that already names this Runtime is reclaimed, so a retried Create is not a duplicate | one `registryTtl` | no (and no identity deploy), unless `delegation.requireNarrowedToken` is on: then `allowedScopes` must be extended first (see the limitation above) |
 | Read, list | `GetParameter` on the name; `GetParametersByPath` on `<registryPrefix>backends/` | immediate | no |
-| Update | overwrite `runtimeArn` (or `scopes`: new names are put in the catalogue, dropped names removed from it, then the entry is rewritten); streams already running finish on the old Runtime, new requests move | one `registryTtl` | no |
-| Delete | set `draining`, wait one `registryTtl` plus the longest stream (2 min on `api-gateway`), delete the Runtime and target, remove the entry, remove the scopes from the catalogue (best effort). Only an entry whose `runtimeArn` is this backend's own is drained; an entry another writer replaced is left alone | one `registryTtl` to refuse new requests | no |
+| Update | overwrite `runtimeArn` (or `scopes`: new names are put in the catalogue, dropped names removed from it, then the entry is rewritten); streams already running finish on the old Runtime, new requests move. Renaming a backend (`name`) is a replacement: the new name's Runtime, scopes and entry are created, then the old scopes are deleted from the catalogue and the old entry drained | one `registryTtl` | no |
+| Delete | set `draining`, wait one `registryTtl` plus the longest stream (2 min on `api-gateway`), delete the Runtime and target, remove the entry, remove the scopes from the catalogue (best effort; a scope whose ownership marker names another stack is skipped). Only an entry whose `runtimeArn` is this backend's own is drained; an entry another writer replaced is left alone | one `registryTtl` to refuse new requests | no |
 
 **Props.**
 
@@ -537,15 +536,24 @@ read as "no scopes".
   prefix only. A wrong `runtimeArn` sends a tenant to the wrong backend, not
   to another tenant's data: the vended credentials and the session prefix
   come from the verified claims alone (ADR-0002, ADR-0012; threat model T-39).
-- The scope registration holds tenant-identity's `PlatformInvokePolicy`,
-  which is wider than one backend's names (`PUT|DELETE /platform/scopes/*`,
-  `PATCH /platform/tenants/*`). A compromised backend stack could register a
-  scope under another backend's name or change a tenant's entitlement; the
-  ingress still routes by the registry entry, and the entry's scopes are
-  pinned to the backend name at synth (threat model T-41).
-- A backend deploy now depends on tenant-identity's API being reachable:
-  the scope registration fails the deploy when `PUT /platform/scopes` is
-  refused or the published API is stale (no such route).
+- The scope registration's role holds tenant-identity's
+  `PlatformInvokePolicy`, every `/platform/*` route, less an inline Deny on
+  every `/platform/tenants*` route, so of the policy's routes it reaches the
+  catalogue alone and cannot touch a tenant, a user or an entitlement. What
+  remains is wider than one backend's names: a compromised backend stack
+  could delete another backend's scopes from the catalogue. It cannot
+  register a scope another stack owns (each scope's catalogue description
+  names its owning stack and resource, and a `PUT` for a scope another stack
+  owns fails the deploy with `scope <name> already registered by another
+  stack`), and it cannot route a request: the ingress routes by the registry
+  entry, whose scopes are pinned to the backend name at synth (threat model
+  T-41).
+- A backend deploy depends on tenant-identity's API being reachable: the
+  scope registration fails the deploy when `PUT /platform/scopes` is
+  refused or the published API has no such route. Each call has a 10 s
+  timeout and one retry on 429, 5xx or a transport error, and the handler
+  always answers CloudFormation before its own Lambda timeout, so a failed
+  registration fails the stack rather than hanging it.
 - The ingress role's `InvokeAgentRuntime` grant is a Runtime ARN pattern
   with an `aws:ResourceTag/ri:ingress` condition instead of a list, because
   the Runtimes do not exist at the ingress deploy. The Runtime's resource
@@ -574,8 +582,26 @@ npx projen integ
 
 [`scripts/integ.sh`](./scripts/integ.sh) reuses a published tenant-identity
 `shared-pool` when it has the scope catalogue (`GET /platform/scopes` is 200),
-destroys and redeploys a stale one from `../tenant-identity` (leaving the new
-one published), or deploys and later destroys one when none is published. It
+or deploys and later destroys one when none is published. A published
+deployment without the catalogue (API Gateway's no-such-route answer) is
+stale: the script fails and prints what to do, unless
+`INTEG_REPLACE_STALE_IDENTITY=1` is set, in which case it destroys the stale
+stack and redeploys it from `../tenant-identity`, leaving the new one
+published. Replacement deletes the shared user pool, so every tenant, user
+and token of any other consumer of that deployment is gone; set the variable
+only in an account where that is acceptable.
+
+```bash
+export AWS_REGION=eu-central-1
+INTEG_REPLACE_STALE_IDENTITY=1 npx projen integ
+```
+
+On a reused deployment the demo scopes may already be in the catalogue from
+an earlier run that did not clean up. A scope registered by another stack
+fails the deploy with `scope <name> already registered by another stack`;
+delete the leftover stack or the scope (`DELETE /platform/scopes/{scope}`)
+and rerun. The cleanup verifies that the demo scopes are gone from a reused
+catalogue after the destroy. It
 deploys the four stacks of [`test/integ.runtime.ts`](./test/integ.runtime.ts)
 at once (their backends fill the scope catalogue), then creates tenant A
 entitled to all three demo scopes and tenant B to `default/chat` (a tenant
@@ -792,12 +818,15 @@ Each item is a "Deployer action" in [`threat-model.md`](./threat-model.md#mitiga
       to the backend-deploying roles, because the ingress role's grant is
       conditioned on the `ri:ingress` tag (M-29, M-30, T-39, T-40).
 - [ ] **Watch the scope catalogue.** The scope registration's role holds
-      tenant-identity's `PlatformInvokePolicy`, which reaches every scope and
-      every tenant's entitlement, not this backend's names alone. Alarm on
-      `PUT|DELETE /platform/scopes/*` and `PATCH /platform/tenants/*` in the
-      identity API's access log by any principal other than a backend's
-      registration role, and keep the backend-deploying roles few (M-31,
-      T-41).
+      tenant-identity's `PlatformInvokePolicy` (every `/platform/*` route)
+      less an inline Deny on every `/platform/tenants*` route, so it reaches
+      every scope name in the catalogue, not this backend's names alone.
+      Alarm on `PUT|DELETE /platform/scopes/*` in the identity API's access
+      log by any principal other than a backend's registration role, and on
+      any `/platform/tenants*` call by a registration role (the Deny makes it
+      a 403 that should never appear); keep the backend-deploying roles few
+      and restrict who may invoke the registration function or assume its
+      role (M-31, T-41).
 - [ ] **Leave `perTenantMetrics` off at scale**, or accept about 9 custom
       metrics per tenant per ingress (M-28, T-38).
 - [ ] **Change the removal policies.** The sample sets `DESTROY` on every
@@ -827,7 +856,7 @@ deployer action are in [`architecture.md`](./architecture.md#scale-limits).
 | `tvm.cacheMaxEntries` | 1000 | Credential cache entries per Lambda instance, LRU, about 1.5 KB each (ADR-0022) |
 | `registryTtl` | `Duration.seconds(60)` | How long a backend registry entry is served from the per-process cache before a refresh (1 s to 750 s); a miss serves the stale entry while refreshing, a failed refresh backs off, and an entry older than ten TTLs is refused with 502. SSM standard throughput is 40 TPS per account and Region, so misses (instances × backends ÷ `registryTtl`) must stay well under it (ADR-0024) |
 | `registryPrefix` | `/application-plane/shared/agent-runtime/` | The SSM prefix of the published parameters and the `backends/<name>` entries; one per account and Region (ADR-0024) |
-| `defaultBackend` | unset | The backend the bare `/invocations` route resolves to on `api-gateway`; no effect on `agentcore-gateway`. The demo sets `agent` (ADR-0024) |
+| `defaultBackend` | unset | The backend the bare `/invocations` route resolves to on `api-gateway`; no effect on `agentcore-gateway`. The demo sets `default` (ADR-0024) |
 
 | Shared resource | Shared by | Deployer action |
 |---|---|---|
