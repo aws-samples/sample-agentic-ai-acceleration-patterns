@@ -128,12 +128,30 @@ describe('scope-registration custom resource handler', () => {
   it('refuses malformed properties on Create and Update, naming the property; Delete with malformed properties succeeds without a call', async () => {
     expect(await handleEvent(event('Create', { ApiUrl: 'http://plain.example.com/' }), deps())).toMatchObject({ status: 'FAILED', reason: 'ApiUrl must be an https URL' });
     expect(await handleEvent(event('Create', { Backend: '' }), deps())).toMatchObject({ status: 'FAILED', reason: 'Backend must be the backend name' });
-    expect(await handleEvent(event('Create', { Scopes: [] }), deps())).toMatchObject({ status: 'FAILED', reason: 'Scopes must be a non-empty list of scope names' });
-    expect(await handleEvent(event('Create', { Scopes: ['billing/Read'] }), deps())).toMatchObject({ status: 'FAILED', reason: 'Scopes must be a non-empty list of scope names' });
-    expect(await handleEvent(event('Update', { Scopes: 'billing/read' as any }), deps())).toMatchObject({ status: 'FAILED' });
+    expect(await handleEvent(event('Create', { Scopes: [] }), deps())).toMatchObject({ status: 'FAILED', reason: 'Scopes must name at least one scope (ADR-0025)' });
+    expect(await handleEvent(event('Create', { Scopes: ['billing/Read'] }), deps())).toMatchObject({ status: 'FAILED', reason: expect.stringMatching(/^Scopes 'billing\/Read' must match/) });
+    expect(await handleEvent(event('Create', { Scopes: ['billing/read', 'billing/read'] }), deps())).toMatchObject({ status: 'FAILED', reason: 'Scopes must not repeat a scope' });
+    expect(await handleEvent(event('Update', { Scopes: 'billing/read' as any }), deps())).toMatchObject({ status: 'FAILED', reason: 'Scopes must be a list of scope names' });
     expect(calls).toHaveLength(0);
     expect(await handleEvent(event('Delete', { Scopes: [] }, { PhysicalResourceId: 'scope-registration:billing' }), deps())).toEqual({ status: 'SUCCESS', physicalResourceId: 'scope-registration:billing' });
     expect(calls).toHaveLength(0);
+  });
+
+  it('refuses a Scopes list that names another owner on Create and Update, so a direct invoke cannot register a foreign name; nothing is called', async () => {
+    const foreign = ['billing/read', 'default/chat'];
+    const reason = "Scopes 'default/chat' must be owned by this backend: billing/<action> (ADR-0025)";
+    expect(await handleEvent(event('Create', { Scopes: foreign }), deps())).toEqual({ status: 'FAILED', physicalResourceId: 'scope-registration:billing', reason });
+    expect(await handleEvent(event('Update', { Scopes: foreign }, { PhysicalResourceId: 'scope-registration:billing', OldResourceProperties: event('Update').ResourceProperties }), deps())).toEqual({
+      status: 'FAILED',
+      physicalResourceId: 'scope-registration:billing',
+      reason,
+    });
+    expect(await handleEvent(event('Create', { Scopes: ['tenant-admin/users'] }), deps())).toMatchObject({ status: 'FAILED', reason: expect.stringMatching(/must be owned by this backend: billing/) });
+    expect(calls).toHaveLength(0);
+    // An old list that carried a foreign name (it cannot, through the construct) is not deleted on the owner's behalf either.
+    const previous = { ...event('Update').ResourceProperties, Scopes: ['billing/read', 'default/chat'] };
+    expect(await handleEvent(event('Update', { Scopes: ['billing/invoke'] }, { PhysicalResourceId: 'scope-registration:billing', OldResourceProperties: previous }), deps())).toMatchObject({ status: 'SUCCESS' });
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([`PUT ${API}platform/scopes/billing%2Finvoke`, `DELETE ${API}platform/scopes/billing%2Fread`]);
   });
 
   it('signedPlatformCall signs with SigV4 for execute-api and sends the signed headers; only the status comes back', async () => {

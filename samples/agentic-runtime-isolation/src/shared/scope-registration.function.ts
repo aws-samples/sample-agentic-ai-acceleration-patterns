@@ -26,6 +26,10 @@
  * it. The PhysicalResourceId is fixed per backend, so a change of scopes is
  * an Update, never a replacement that would delete the scopes just put.
  *
+ * The handler applies the construct's scope rule again (`backendScopesProblem`:
+ * at least one, no duplicates, each `<Backend>/<action>`), so a direct invoke
+ * of the function cannot register a name under another backend's owner.
+ *
  * The handler writes no log on success (its log group would otherwise be
  * recreated by a late line after the stack deleted it, ADR-0019), one error
  * line per failed call, and always answers CloudFormation.
@@ -38,7 +42,7 @@ import { HttpRequest } from '@smithy/protocol-http';
 import { SignatureV4 } from '@smithy/signature-v4';
 import type { AwsCredentialIdentity, AwsCredentialIdentityProvider } from '@smithy/types';
 import { errorName, log } from './logger';
-import { isValidScopeName } from './registry';
+import { backendScopesProblem, isValidScopeName, scopeOwner } from './registry';
 
 /** The resource properties the construct writes. */
 export interface ScopeRegistrationProperties {
@@ -102,8 +106,15 @@ function scopesOf(properties: ScopeRegistrationProperties): string[] | string {
     return 'Backend must be the backend name';
   }
   const scopes = properties.Scopes;
-  if (!Array.isArray(scopes) || scopes.length === 0 || !scopes.every(isValidScopeName)) {
-    return 'Scopes must be a non-empty list of scope names';
+  if (!Array.isArray(scopes)) {
+    return 'Scopes must be a list of scope names';
+  }
+  // The construct's own rule (at least one, no duplicates, each a valid name
+  // owned by Backend), applied again here: a direct invoke of the function
+  // bypasses the construct, and must not register a name under another owner.
+  const problem = backendScopesProblem(properties.Backend, scopes);
+  if (problem !== undefined) {
+    return `Scopes ${problem}`;
   }
   return scopes;
 }
@@ -174,7 +185,7 @@ export async function handleEvent(event: ScopeRegistrationEvent, deps: ScopeRegi
   if (event.RequestType === 'Update') {
     const previous = event.OldResourceProperties?.Scopes;
     if (Array.isArray(previous)) {
-      const dropped = previous.filter((s): s is string => isValidScopeName(s) && !scopes.includes(s));
+      const dropped = previous.filter((s): s is string => isValidScopeName(s) && scopeOwner(s) === properties.Backend && !scopes.includes(s));
       await deleteScopes(deps, properties, dropped);
     }
   }
