@@ -16,6 +16,7 @@ import {
   TOKEN_TYPE_REFRESH,
 } from '../../src/shared/constants';
 import {
+  assertRegisteredScopes,
   ExchangeRequest,
   MAX_FORM_BYTES,
   OAUTH_ERROR_DESCRIPTIONS,
@@ -192,6 +193,23 @@ describe('parseExchangeForm §5.4 scope', () => {
     const empty = new Set<string>();
     expect(() => parseExchangeForm(form({ scope: SCOPE_API_READ }), empty)).toThrow(OAuthFailure);
     expect(parseExchangeForm(form({ scope: SCOPE_TENANT_ADMIN }), empty).scopes).toEqual([SCOPE_TENANT_ADMIN]);
+  });
+
+  it('without a catalogue the parser checks the form only; assertRegisteredScopes is the catalogue step', () => {
+    // The service runs the two apart, so a malformed form never reads the catalogue.
+    const request = parseWithCatalogue(form({ scope: `billing/read ${SCOPE_TENANT_ADMIN}` }));
+    expect(request.scopes).toEqual(['billing/read', SCOPE_TENANT_ADMIN]);
+    expect(() => assertRegisteredScopes(request.scopes, CATALOGUE)).toThrow(OAuthFailure);
+    expect(() => assertRegisteredScopes(request.scopes, new Set(['billing/read']))).not.toThrow();
+    expect(() => assertRegisteredScopes([SCOPE_TENANT_ADMIN], new Set())).not.toThrow();
+    try {
+      assertRegisteredScopes(['billing/read'], CATALOGUE);
+    } catch (error) {
+      expect((error as OAuthFailure).code).toBe('invalid_scope');
+    }
+    // Form-level refusals still apply without a catalogue.
+    expect(() => parseWithCatalogue(form({ scope: 'Sample/Read' }))).toThrow(OAuthFailure);
+    expect(() => parseWithCatalogue(form({ grant_type: 'authorization_code' }))).toThrow(OAuthFailure);
   });
 
   it.each(['Sample/Read', 'sample', 'sample/read/x', 'sample/', '/read', 'sample read'])(

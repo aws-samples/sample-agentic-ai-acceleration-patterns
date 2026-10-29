@@ -261,11 +261,22 @@ export class TenantIdentityStack extends Stack {
     });
     // R-14 (M-8): the three read actions, on the table AND its index, and
     // nothing else. grantReadData would add Scan + DescribeTable, widening
-    // the hottest role past what §8 needs.
+    // the hottest role past what §8 needs. On the table the reads are
+    // further bound to the two partitions the trigger needs, tenant rows and
+    // the scope catalogue (dynamodb:LeadingKeys; StringLike for the TENANT#
+    // prefix). The index statement carries no key condition: its partition
+    // key is the pool id, which is what the byUserPoolId Query looks up.
     triggerFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: REGISTRY_READ_ACTIONS,
-        resources: [table.tableArn, `${table.tableArn}/index/${GSI_BY_USER_POOL_ID}`],
+        resources: [table.tableArn],
+        conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['TENANT#*', SCOPE_PARTITION_KEY] } },
+      }),
+    );
+    triggerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: REGISTRY_READ_ACTIONS,
+        resources: [`${table.tableArn}/index/${GSI_BY_USER_POOL_ID}`],
       }),
     );
     acknowledgeLambdaBasicExecutionRole(triggerFn);
@@ -1128,8 +1139,10 @@ export class TenantIdentityStack extends Stack {
       // PlatformInvokePolicy (ADR-0030, M-P-4): the least privilege for the
       // mount, published by the producer so the consumer attaches one ARN
       // and never writes an execute-api grant itself. Exactly two
-      // statements: the four routes the scripts call, and encrypt-through-
-      // SSM on the key above (kms:ViaService), so the build role can park a
+      // statements: the nine routes in PLATFORM_INVOKE_ROUTES (the four the
+      // mount scripts call, UpdateTenant, and the four scope catalogue
+      // routes a backend's registration calls), and encrypt-through-SSM on
+      // the key above (kms:ViaService), so the build role can park a
       // password but never read one back (no kms:Decrypt, M-R-4).
       const platformInvokePolicy = new iam.ManagedPolicy(this, 'PlatformInvokePolicy', {
         description: `Invoke the ${this.stackName} platform routes the control-plane mount calls, and encrypt the parked admin password through SSM (ADR-0030, ADR-0033)`,

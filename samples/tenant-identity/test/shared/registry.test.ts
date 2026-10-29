@@ -420,6 +420,7 @@ describe('DynamoDBRegistry scope catalogue (ADR-0034)', () => {
       KeyConditionExpression: 'PK = :scope',
       ExpressionAttributeValues: { ':scope': 'SCOPE' },
       Limit: 50,
+      ConsistentRead: false, // the catalogue is cached a minute anyway (ADR-0034)
     });
     expect(page.items.map((s) => s.name)).toEqual(['a/b']);
     expect(page.nextToken).toBeDefined();
@@ -442,7 +443,7 @@ describe('DynamoDBRegistry scope catalogue (ADR-0034)', () => {
       .resolvesOnce({ Items: [{ SK: 'a/b' }, { SK: 'c/d' }], LastEvaluatedKey: { PK: 'SCOPE', SK: 'c/d' } })
       .resolvesOnce({ Items: [{ SK: 'e/f' }] });
     expect(await registry().listScopeNames()).toEqual(['a/b', 'c/d', 'e/f']);
-    expect(ddb.commandCalls(QueryCommand)[0].args[0].input).toMatchObject({ ProjectionExpression: 'SK', ConsistentRead: true });
+    expect(ddb.commandCalls(QueryCommand)[0].args[0].input).toMatchObject({ ProjectionExpression: 'SK', ConsistentRead: false });
     expect(ddb.commandCalls(QueryCommand)[1].args[0].input.ExclusiveStartKey).toEqual({ PK: 'SCOPE', SK: 'c/d' });
   });
 
@@ -470,16 +471,29 @@ describe('DynamoDBRegistry tenant entitlement (ADR-0035)', () => {
     const input = ddb.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.Key).toEqual({ PK: `TENANT#${id}`, SK: 'META' });
     expect(input.UpdateExpression).toBe('SET scopes = :scopes, updatedAt = :now');
-    expect(input.ConditionExpression).toBe('attribute_exists(PK)');
-    expect(input.ExpressionAttributeValues).toEqual({ ':scopes': ['a/b'], ':now': now.toISOString() });
+    // The same ACTIVE guard as activate(): a tenant that left ACTIVE under
+    // the caller (a concurrent DeleteTenant) is never written.
+    expect(input.ConditionExpression).toBe('attribute_exists(PK) AND #s = :active');
+    expect(input.ExpressionAttributeNames).toEqual({ '#s': 'status' });
+    expect(input.ExpressionAttributeValues).toEqual({ ':scopes': ['a/b'], ':active': 'ACTIVE', ':now': now.toISOString() });
+    expect(input.ReturnValuesOnConditionCheckFailure).toBe('ALL_OLD');
     expect(updated.scopes).toEqual(['a/b']);
   });
 
   it('updateTenantScopes on a vanished row is a NotFoundError and creates no stub', async () => {
+    // No old item on the failure: the row does not exist.
     const failure = new Error('cond');
     failure.name = 'ConditionalCheckFailedException';
     ddb.on(UpdateCommand).rejects(failure);
     await expect(registry().updateTenantScopes(id, [])).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('updateTenantScopes on a row that is not ACTIVE is a ConflictError', async () => {
+    const failure = new Error('cond') as Error & { Item?: unknown };
+    failure.name = 'ConditionalCheckFailedException';
+    failure.Item = item(record(id, { status: 'DELETING' }));
+    ddb.on(UpdateCommand).rejects(failure);
+    await expect(registry().updateTenantScopes(id, ['a/b'])).rejects.toBeInstanceOf(ConflictError);
   });
 
   it('create writes the scopes on the row and get returns them', async () => {

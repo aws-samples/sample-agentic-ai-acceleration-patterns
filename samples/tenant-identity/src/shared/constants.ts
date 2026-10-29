@@ -195,6 +195,15 @@ export const SCOPE_CATALOGUE_TTL_MS = 60_000;
  */
 export const SCOPE_CATALOGUE_RETRY_MS = 5_000;
 /**
+ * How old a cached catalogue may get before the token path stops trusting
+ * it. A stale cache (older than the TTL) is served while a refresh runs in
+ * the background, so a slow registry never adds its latency to a token
+ * request; a cache this old is a registry that has been down for ten TTLs,
+ * and the token path then fails closed (an empty catalogue: narrowing is
+ * refused, an un-narrowed token carries no scope) until a read succeeds.
+ */
+export const SCOPE_CATALOGUE_MAX_AGE_MS = 10 * SCOPE_CATALOGUE_TTL_MS;
+/**
  * The registry partition key every catalogue row shares (ADR-0034); the sort
  * key is the scope name. Named here because the token function's IAM policy
  * binds its one Query to this key (`dynamodb:LeadingKeys`).

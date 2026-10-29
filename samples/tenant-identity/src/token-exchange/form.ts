@@ -118,11 +118,14 @@ function invalidRequest(): never {
 /**
  * Parse and validate the form body. `body` is the raw request payload: a
  * Uint8Array as delivered by the generated deserializer, or a string in
- * tests. `catalogue` is the registered scope names (ADR-0034); a requested
- * scope must be one of them, or the built-in `tenant-admin/users`, else
- * `invalid_scope`. Throws `OAuthFailure` on any violation.
+ * tests. Every check here is on the form alone: shape, grant type, token
+ * type, resource, and well-formed, de-duplicated scope names. Whether the
+ * names exist is a separate step (`assertRegisteredScopes`), so the service
+ * reads the catalogue only for a form that has already passed, never for a
+ * malformed one. When `catalogue` is given the two steps run together (the
+ * form-level tests). Throws `OAuthFailure` on any violation.
  */
-export function parseExchangeForm(body: Uint8Array | string, catalogue: ReadonlySet<string>): ExchangeRequest {
+export function parseExchangeForm(body: Uint8Array | string, catalogue?: ReadonlySet<string>): ExchangeRequest {
   // M-9: reject an oversize body before decoding or parsing. Measure UTF-8
   // bytes for a string; a Uint8Array's length is already its byte count.
   const byteLength = typeof body === 'string' ? Buffer.byteLength(body) : body.length;
@@ -203,10 +206,9 @@ export function parseExchangeForm(body: Uint8Array | string, catalogue: Readonly
     tenantId = candidate;
   }
 
-  // scope: required, space-separated, non-empty, each a well-formed name
-  // that is in the catalogue or is the built-in admin scope, no duplicates
-  // (spec §5.4, ADR-0034). Whether the user HOLDS the scope is the
-  // trigger's decision; this only refuses names that do not exist.
+  // scope: required, space-separated, non-empty, each a well-formed name,
+  // no duplicates (spec §5.4, ADR-0034). Whether the name is registered is
+  // `assertRegisteredScopes`; whether the user HOLDS it is the trigger's.
   const scope = params.get('scope');
   if (scope === null) {
     invalidRequest();
@@ -217,14 +219,17 @@ export function parseExchangeForm(body: Uint8Array | string, catalogue: Readonly
   }
   const scopeSet = new Set<string>();
   for (const s of scopes) {
-    if (!isScopeName(s) || (s !== SCOPE_TENANT_ADMIN && !catalogue.has(s))) {
-      // An out-of-vocabulary scope is a scope problem, not a malformed form.
+    if (!isScopeName(s)) {
+      // A malformed scope is a scope problem, not a malformed form.
       throw new OAuthFailure('invalid_scope');
     }
     if (scopeSet.has(s)) {
       invalidRequest();
     }
     scopeSet.add(s);
+  }
+  if (catalogue !== undefined) {
+    assertRegisteredScopes(scopes, catalogue);
   }
 
   return {
@@ -233,4 +238,18 @@ export function parseExchangeForm(body: Uint8Array | string, catalogue: Readonly
     ...(tenantId !== undefined ? { tenantId } : {}),
     scopes,
   };
+}
+
+/**
+ * The catalogue check (ADR-0034): every requested scope is a registered
+ * name or the built-in `tenant-admin/users`, else `invalid_scope`. Run after
+ * `parseExchangeForm` has accepted the form, so the one registry-backed
+ * value the exchange consults is read for well-formed requests only.
+ */
+export function assertRegisteredScopes(scopes: readonly string[], catalogue: ReadonlySet<string>): void {
+  for (const s of scopes) {
+    if (s !== SCOPE_TENANT_ADMIN && !catalogue.has(s)) {
+      throw new OAuthFailure('invalid_scope');
+    }
+  }
 }

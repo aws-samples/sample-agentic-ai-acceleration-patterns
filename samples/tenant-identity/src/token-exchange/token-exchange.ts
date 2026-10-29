@@ -24,7 +24,7 @@ import {
   CognitoIdentityProviderClient,
   GetTokensFromRefreshTokenCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
-import { ExchangeRequest, OAuthFailure, OAUTH_ERROR_DESCRIPTIONS, parseExchangeForm, SERVER_UNAVAILABLE_DESCRIPTION } from './form';
+import { assertRegisteredScopes, ExchangeRequest, OAuthFailure, OAUTH_ERROR_DESCRIPTIONS, parseExchangeForm, SERVER_UNAVAILABLE_DESCRIPTION } from './form';
 import {
   COGNITO_USER_ADMIN_SCOPE,
   INVALID_SCOPE,
@@ -236,13 +236,13 @@ export class TokenExchangeService<Context> {
     input: ExchangeTokenServerInput,
     _context: Context,
   ): Promise<ExchangeTokenServerOutput> => {
-    // 1. Parse the form. OAuthFailure -> the generated OAuthError (400). The
-    // catalogue read never throws (a failed read keeps the last one).
-    const catalogue = await this.catalogue.names();
+    // 1. Parse the form. OAuthFailure -> the generated OAuthError (400).
+    // The form is validated in full before anything is read: a malformed
+    // request on this unauthenticated endpoint costs no catalogue lookup.
     let request: ExchangeRequest;
     try {
       // `form` is @required; the generated validator guarantees it is set.
-      request = parseExchangeForm(input.form ?? new Uint8Array(), catalogue);
+      request = parseExchangeForm(input.form ?? new Uint8Array());
     } catch (error) {
       if (error instanceof OAuthFailure) {
         throw clientError(error);
@@ -250,6 +250,19 @@ export class TokenExchangeService<Context> {
       // A parser bug, not caller input.
       log.error('exchange form parse failed', { errorName: errorName(error) });
       throw serverError();
+    }
+
+    // 1b. The one registry-backed check (ADR-0034): every requested scope is
+    // registered, or the built-in admin scope. The catalogue read never
+    // throws (a failed read keeps the last one) and is served from the
+    // container cache after cold start.
+    try {
+      assertRegisteredScopes(request.scopes, await this.catalogue.names());
+    } catch (error) {
+      if (error instanceof OAuthFailure) {
+        throw clientError(error);
+      }
+      throw error;
     }
 
     // T-28: in a shared pool, this endpoint serves exactly one app client.

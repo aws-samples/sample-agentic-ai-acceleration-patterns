@@ -77,7 +77,11 @@ string PaginationToken
 string ScopeName
 
 /// A list of scope names. No duplicates: a repeated name is a 400
-/// ValidationError whose message starts `invalid_scope`.
+/// ValidationError whose message starts `invalid_scope`. Capped at 100: a
+/// tenant entitlement or a user grant beyond that is a modelling error, not
+/// a request, and the cap bounds the per-request validation work on the
+/// unauthenticated-adjacent platform routes.
+@length(max: 100)
 list ScopeNameList {
     member: ScopeName
 }

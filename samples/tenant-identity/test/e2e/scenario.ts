@@ -326,7 +326,9 @@ export function defineScenario(topology: Topology): void {
 
     // Best-effort cleanup: delete any tenant this run created so a failed
     // run leaves nothing behind (spec P-4, §10 step 11). The scopes stay:
-    // the catalogue is the stack's, and step 11 deletes them on purpose.
+    // the catalogue is the stack's, and step 11 leaves them in place on
+    // purpose (the leftover tenant it creates is entitled to one; the scope
+    // rows go with the table on `cdk destroy`).
     afterAll(async () => {
       for (const key of Object.keys(tenantIds)) {
         try {
