@@ -10,7 +10,9 @@ import {
   UnsupportedInTopologyError,
 } from '../shared/errors';
 import { errorName, log } from '../shared/logger';
-import type { Registry, TenantRecord } from '../shared/registry';
+import type { Registry, ScopeRecord, TenantRecord } from '../shared/registry';
+import { tenantScopes } from '../shared/registry';
+import { assertGrantableScopes, assertRegistrableScope, assertTenantScopes, effectiveScopes, scopeOwner } from '../shared/scopes';
 import type { TenantApiKey, TenantApiKeys } from '../shared/tenant-api-keys';
 import {
   ConflictError,
@@ -22,10 +24,14 @@ import {
   CreateUserServerOutput,
   DeleteMembershipServerInput,
   DeleteMembershipServerOutput,
+  DeleteScopeServerInput,
+  DeleteScopeServerOutput,
   DeleteTenantServerInput,
   DeleteTenantServerOutput,
   DeleteUserServerInput,
   DeleteUserServerOutput,
+  GetScopeServerInput,
+  GetScopeServerOutput,
   GetTenantServerInput,
   GetTenantServerOutput,
   GetUserServerInput,
@@ -33,15 +39,22 @@ import {
   InternalServerError,
   IssueTokenServerInput,
   IssueTokenServerOutput,
+  ListScopesServerInput,
+  ListScopesServerOutput,
   ListTenantsServerInput,
   ListTenantsServerOutput,
   ListUsersServerInput,
   ListUsersServerOutput,
   PlatformServiceService,
+  PutScopeServerInput,
+  PutScopeServerOutput,
   RefreshTokenServerInput,
   RefreshTokenServerOutput,
   ResourceNotFoundError,
+  Scope,
   Tenant,
+  UpdateTenantServerInput,
+  UpdateTenantServerOutput,
   UpdateUserServerInput,
   UpdateUserServerOutput,
   User,
@@ -134,6 +147,11 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       const topology = this.topologyFor(input.tier);
       const provisioner = this.provisioners(topology);
 
+      // ADR-0035: the entitlement. Absent means none (fail closed); every
+      // name must be in the catalogue. A 400 here, before any write.
+      const scopes = input.scopes ?? [];
+      assertTenantScopes(scopes, await this.catalogue());
+
       // spec §5.1: refuse an admin e-mail the topology would reject (shared
       // pool: already in the pool) BEFORE anything is written. Otherwise the
       // admin step 409s after the tenant is ACTIVE, leaving an adminless
@@ -150,6 +168,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
         name,
         status: 'PROVISIONING',
         topology,
+        scopes,
         createdAt: timestamp,
         updatedAt: timestamp,
       };
@@ -260,8 +279,28 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       const admin = await this.createUserForHeldSlot(provisioner, active, adminEmail, 'CreateTenant');
       return {
         tenant: this.toTenant(active),
-        admin: { user: toUser(admin.user), temporaryPassword: admin.temporaryPassword },
+        // The admin's scopes are the tenant's: the catalogue was just read
+        // and every entitlement passed it, and a new user has no grant.
+        admin: { user: toUser(admin.user, active, new Set(scopes)), temporaryPassword: admin.temporaryPassword },
       };
+    });
+  };
+
+  UpdateTenant = async (
+    input: UpdateTenantServerInput,
+    _context: PlatformContext,
+  ): Promise<UpdateTenantServerOutput> => {
+    const tenantId = requireField(input.tenantId, 'tenantId');
+    const scopes = requireField(input.scopes, 'scopes');
+    log.info('UpdateTenant', { operation: 'UpdateTenant', tenantId });
+    return this.mapErrors('UpdateTenant', tenantId, async () => {
+      // ADR-0035: the same rule as CreateTenant, on an ACTIVE tenant (409
+      // otherwise, like every other mutation). The list replaces the old one;
+      // it takes effect at the next issuance.
+      await this.loadActiveTenant(tenantId);
+      assertTenantScopes(scopes, await this.catalogue());
+      const updated = await this.registry.updateTenantScopes(tenantId, scopes);
+      return { tenant: this.toTenant(updated) };
     });
   };
 
@@ -327,7 +366,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       const result = firstAdmin
         ? await this.createFirstAdmin(provisioner, tenant, email)
         : await provisioner.createUser(tenant, email, input.admin ?? false);
-      return { user: toUser(result.user), temporaryPassword: result.temporaryPassword };
+      return { user: toUser(result.user, tenant, await this.catalogue()), temporaryPassword: result.temporaryPassword };
     });
   };
 
@@ -342,7 +381,7 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       // The provisioner runs the R-12 check.
       const tenant = await this.loadReadableTenant(tenantId);
       const user = await this.provisioners(tenant.topology).getUser(tenant, username);
-      return { user: toUser(user) };
+      return { user: toUser(user, tenant, await this.catalogue()) };
     });
   };
 
@@ -355,7 +394,8 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       // Read: allowed on DELETING, refused on PROVISIONING (P-2, ADR-0021).
       const tenant = await this.loadReadableTenant(tenantId);
       const page = await this.provisioners(tenant.topology).listUsers(tenant, input.nextToken);
-      return { users: page.items.map(toUser), nextToken: page.nextToken };
+      const catalogue = await this.catalogue();
+      return { users: page.items.map((view) => toUser(view, tenant, catalogue)), nextToken: page.nextToken };
     });
   };
 
@@ -365,12 +405,27 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
   ): Promise<UpdateUserServerOutput> => {
     const tenantId = requireField(input.tenantId, 'tenantId');
     const username = requireField(input.username, 'username');
-    const admin = requireField(input.admin, 'admin');
     log.info('UpdateUser', { operation: 'UpdateUser', tenantId });
     return this.mapErrors('UpdateUser', tenantId, async () => {
       const tenant = await this.loadActiveTenant(tenantId);
-      const user = await this.provisioners(tenant.topology).setAdmin(tenant, username, admin);
-      return { user: toUser(user) };
+      const provisioner = this.provisioners(tenant.topology);
+      // ADR-0036: the admin flag, the scope grant, or both; nothing is a
+      // 400. The grant is validated against the tenant's entitlement before
+      // either write, so a refused list changes nothing, not even the flag.
+      if (input.admin === undefined && input.scopes === undefined) {
+        throw new InvalidInputError('UpdateUser needs admin, scopes, or both');
+      }
+      if (input.scopes !== undefined) {
+        assertGrantableScopes(input.scopes, tenantScopes(tenant));
+      }
+      let user: UserView | undefined;
+      if (input.admin !== undefined) {
+        user = await provisioner.setAdmin(tenant, username, input.admin);
+      }
+      if (input.scopes !== undefined) {
+        user = await provisioner.setScopes(tenant, username, input.scopes);
+      }
+      return { user: toUser(requireField(user, 'user'), tenant, await this.catalogue()) };
     });
   };
 
@@ -396,6 +451,63 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
         await this.registry.releaseFirstAdmin(tenantId, slot);
         log.info('first-admin slot released', { operation: 'DeleteUser', tenantId });
       }
+      return {};
+    });
+  };
+
+  // -------------------------------------------------------------------
+  // Scope catalogue (ADR-0034)
+  // -------------------------------------------------------------------
+
+  PutScope = async (
+    input: PutScopeServerInput,
+    _context: PlatformContext,
+  ): Promise<PutScopeServerOutput> => {
+    const name = requireField(input.scope, 'scope');
+    log.info('PutScope', { operation: 'PutScope', scope: name });
+    return this.mapErrors('PutScope', undefined, async () => {
+      // The model checked the pattern; the reserved owner is checked here
+      // (400 `invalid_scope`). Create-or-replace, owner derived from the name.
+      assertRegistrableScope(name);
+      const record = await this.registry.putScope({ name, owner: scopeOwner(name), description: input.description });
+      return { scope: toScope(record) };
+    });
+  };
+
+  GetScope = async (
+    input: GetScopeServerInput,
+    _context: PlatformContext,
+  ): Promise<GetScopeServerOutput> => {
+    const name = requireField(input.scope, 'scope');
+    return this.mapErrors('GetScope', undefined, async () => {
+      const record = await this.registry.getScope(name);
+      if (record === undefined) {
+        throw new NotFoundError(`Scope ${name} not found`);
+      }
+      return { scope: toScope(record) };
+    });
+  };
+
+  ListScopes = async (
+    input: ListScopesServerInput,
+    _context: PlatformContext,
+  ): Promise<ListScopesServerOutput> => {
+    return this.mapErrors('ListScopes', undefined, async () => {
+      const page = await this.registry.listScopes(input.nextToken);
+      return { scopes: page.items.map(toScope), nextToken: page.nextToken };
+    });
+  };
+
+  DeleteScope = async (
+    input: DeleteScopeServerInput,
+    _context: PlatformContext,
+  ): Promise<DeleteScopeServerOutput> => {
+    const name = requireField(input.scope, 'scope');
+    log.info('DeleteScope', { operation: 'DeleteScope', scope: name });
+    return this.mapErrors('DeleteScope', undefined, async () => {
+      // Idempotent; tenant rows that still name the scope are left alone:
+      // the trigger intersects it away (ADR-0035).
+      await this.registry.deleteScope(name);
       return {};
     });
   };
@@ -610,6 +722,15 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
   }
 
   /**
+   * The catalogue as a set (ADR-0034). Read from the registry on every call
+   * that needs it: the platform function has no reason to serve a stale
+   * catalogue, and the read is one Query on a handful of rows.
+   */
+  private async catalogue(): Promise<ReadonlySet<string>> {
+    return new Set(await this.registry.listScopeNames());
+  }
+
+  /**
    * The topology a new tenant runs on (ADR-0027). `tiered`: the tier is
    * required and names it; the error is a 400 with a fixed message, so the
    * vendor learns the field, not a 500. Any single topology: `tier` has no
@@ -653,6 +774,8 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       appClientId: record.appClientId,
       issuer: record.issuer,
       groupName: record.groupName,
+      // ADR-0035: a row from before the field holds nothing.
+      scopes: [...tenantScopes(record)],
       // The generated IsoTimestamp member is typed as a Date; the protocol
       // serialiser formats it as ISO 8601 on the wire (spec §4.1).
       createdAt: new Date(record.createdAt),
@@ -738,14 +861,29 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
   }
 }
 
-/** Projects a provisioner UserView to the Smithy User shape. */
-function toUser(view: UserView): User {
+/**
+ * Projects a provisioner UserView to the Smithy User shape. `scopes` is what
+ * the user holds for the tenant (ADR-0036): catalogue, entitlement and
+ * grant intersected, never the admin scope.
+ */
+function toUser(view: UserView, tenant: TenantRecord, catalogue: ReadonlySet<string>): User {
   return {
     username: view.username,
     email: view.email,
     admin: view.admin,
     status: view.status,
+    scopes: effectiveScopes(catalogue, tenantScopes(tenant), view.grantedScopes),
     createdAt: view.createdAt,
+  };
+}
+
+/** Projects a catalogue row to the Smithy Scope shape. */
+function toScope(record: ScopeRecord): Scope {
+  return {
+    name: record.name,
+    owner: record.owner,
+    ...(record.description === undefined ? {} : { description: record.description }),
+    createdAt: new Date(record.createdAt),
   };
 }
 

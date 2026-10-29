@@ -9,7 +9,7 @@ import {
   NotFoundError,
   UnsupportedInTopologyError,
 } from '../../src/shared/errors';
-import type { ActivatedFields, Page, Registry, TenantRecord, TenantStatus } from '../../src/shared/registry';
+import type { ActivatedFields, Page, Registry, ScopeRecord, TenantRecord, TenantStatus } from '../../src/shared/registry';
 import type { TenantApiKey, TenantApiKeys } from '../../src/shared/tenant-api-keys';
 import {
   ConflictError,
@@ -37,7 +37,17 @@ const FIXED_NOW = new Date('2026-10-21T11:00:00.000Z');
 /** Minimal in-memory Registry recording call order for the DeleteTenant test. */
 class FakeRegistry implements Registry {
   readonly items = new Map<string, TenantRecord>();
+  /** The scope catalogue rows (ADR-0034), by name. */
+  readonly scopes = new Map<string, ScopeRecord>();
   readonly calls: string[] = [];
+
+  /** Registers catalogue scopes directly, as a backend's PutScope would. */
+  withScopes(...names: string[]): this {
+    for (const name of names) {
+      this.scopes.set(name, { name, owner: name.split('/')[0], createdAt: FIXED_NOW.toISOString() });
+    }
+    return this;
+  }
 
   async get(tenantId: string): Promise<TenantRecord | undefined> {
     this.calls.push(`get:${tenantId}`);
@@ -121,6 +131,37 @@ class FakeRegistry implements Registry {
     this.calls.push(`delete:${tenantId}`);
     this.items.delete(tenantId);
   }
+  async updateTenantScopes(tenantId: string, scopes: readonly string[]): Promise<TenantRecord> {
+    this.calls.push(`updateTenantScopes:${tenantId}`);
+    const existing = this.items.get(tenantId);
+    if (existing === undefined) {
+      throw new NotFoundError(`Tenant ${tenantId} not found`);
+    }
+    const updated: TenantRecord = { ...existing, scopes: [...scopes] };
+    this.items.set(tenantId, updated);
+    return updated;
+  }
+  async putScope(scope: Omit<ScopeRecord, 'createdAt'>): Promise<ScopeRecord> {
+    this.calls.push(`putScope:${scope.name}`);
+    const existing = this.scopes.get(scope.name);
+    const written: ScopeRecord = { ...scope, createdAt: existing?.createdAt ?? FIXED_NOW.toISOString() };
+    this.scopes.set(scope.name, written);
+    return written;
+  }
+  async getScope(name: string): Promise<ScopeRecord | undefined> {
+    return this.scopes.get(name);
+  }
+  async listScopes(): Promise<Page<ScopeRecord>> {
+    return { items: [...this.scopes.values()] };
+  }
+  async listScopeNames(): Promise<string[]> {
+    this.calls.push('listScopeNames');
+    return [...this.scopes.keys()];
+  }
+  async deleteScope(name: string): Promise<void> {
+    this.calls.push(`deleteScope:${name}`);
+    this.scopes.delete(name);
+  }
 }
 
 function tenantRecord(status: TenantStatus = 'ACTIVE', topology: Topology = 'shared-pool-multi-tenant'): TenantRecord {
@@ -156,6 +197,7 @@ function mockProvisioner(topology: Topology = 'shared-pool-multi-tenant'): jest.
     getUser: jest.fn(),
     listUsers: jest.fn(),
     setAdmin: jest.fn(),
+    setScopes: jest.fn(),
     deleteUser: jest.fn(),
     createMembership: jest.fn(),
     deleteMembership: jest.fn(),
@@ -1260,6 +1302,205 @@ describe('PlatformService (spec §5.1)', () => {
         CONTEXT,
       );
       expect(out.tenant).not.toHaveProperty('tier');
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // Scope catalogue (ADR-0034) and tenant entitlement (ADR-0035)
+  // -------------------------------------------------------------------
+
+  describe('scope catalogue (ADR-0034)', () => {
+    it('PutScope registers a scope, derives the owner from the name and is idempotent', async () => {
+      const registry = new FakeRegistry();
+      const service = makeService(registry, mockProvisioner());
+      const first = await service.PutScope({ scope: 'billing/read', description: 'Read invoices' }, CONTEXT);
+      expect(first.scope).toEqual({ name: 'billing/read', owner: 'billing', description: 'Read invoices', createdAt: FIXED_NOW });
+      const again = await service.PutScope({ scope: 'billing/read' }, CONTEXT);
+      expect(again.scope?.createdAt).toEqual(FIXED_NOW);
+      expect(again.scope).not.toHaveProperty('description');
+      expect(registry.scopes.size).toBe(1);
+    });
+
+    it('PutScope refuses the reserved owner tenant-admin with 400 invalid_scope and writes nothing', async () => {
+      const registry = new FakeRegistry();
+      await expect(
+        makeService(registry, mockProvisioner()).PutScope({ scope: 'tenant-admin/billing' }, CONTEXT),
+      ).rejects.toMatchObject({ name: 'ValidationError', reason: 'InvalidInput', message: expect.stringMatching(/^invalid_scope/) });
+      expect(registry.scopes.size).toBe(0);
+    });
+
+    it('GetScope returns the row, 404 when absent', async () => {
+      const registry = new FakeRegistry().withScopes('billing/read');
+      const service = makeService(registry, mockProvisioner());
+      expect((await service.GetScope({ scope: 'billing/read' }, CONTEXT)).scope?.owner).toBe('billing');
+      await expect(service.GetScope({ scope: 'billing/none' }, CONTEXT)).rejects.toBeInstanceOf(ResourceNotFoundError);
+    });
+
+    it('ListScopes lists the catalogue', async () => {
+      const registry = new FakeRegistry().withScopes('a/b', 'c/d');
+      const out = await makeService(registry, mockProvisioner()).ListScopes({}, CONTEXT);
+      expect(out.scopes?.map((s) => s.name)).toEqual(['a/b', 'c/d']);
+    });
+
+    it('DeleteScope removes the row, is idempotent, and leaves tenant rows that name it alone (ADR-0035)', async () => {
+      const registry = new FakeRegistry().withScopes('a/b');
+      registry.items.set(TENANT_A, { ...tenantRecord(), scopes: ['a/b'] });
+      const service = makeService(registry, mockProvisioner());
+      await service.DeleteScope({ scope: 'a/b' }, CONTEXT);
+      await service.DeleteScope({ scope: 'a/b' }, CONTEXT);
+      expect(registry.scopes.size).toBe(0);
+      expect(registry.items.get(TENANT_A)?.scopes).toEqual(['a/b']);
+      // The tenant still lists it; the trigger intersects it away (§8.1).
+      expect((await service.GetTenant({ tenantId: TENANT_A }, CONTEXT)).tenant?.scopes).toEqual(['a/b']);
+    });
+  });
+
+  describe('tenant entitlement (ADR-0035)', () => {
+    function readyProvisioner(): jest.Mocked<Provisioner> {
+      const provisioner = mockProvisioner();
+      provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
+      provisioner.createUser.mockResolvedValue({ user: userView('admin', true), temporaryPassword: 'Temp#1234' });
+      return provisioner;
+    }
+
+    it('CreateTenant without scopes writes an empty entitlement (fail closed)', async () => {
+      const registry = new FakeRegistry().withScopes('a/b');
+      const out = await makeService(registry, readyProvisioner()).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT);
+      expect(out.tenant?.scopes).toEqual([]);
+      expect(registry.items.get(TENANT_A)?.scopes).toEqual([]);
+      expect(out.admin?.user?.scopes).toEqual([]);
+    });
+
+    it('CreateTenant with scopes stores them and the admin holds them', async () => {
+      const registry = new FakeRegistry().withScopes('a/b', 'c/d');
+      const out = await makeService(registry, readyProvisioner()).CreateTenant(
+        { name: 'Acme', adminEmail: 'a@example.com', scopes: ['c/d', 'a/b'] },
+        CONTEXT,
+      );
+      expect(out.tenant?.scopes).toEqual(['c/d', 'a/b']);
+      expect(out.admin?.user?.scopes).toEqual(['c/d', 'a/b']);
+    });
+
+    it.each([
+      ['an unregistered scope', ['a/b', 'x/y']],
+      ['a duplicate', ['a/b', 'a/b']],
+      ['the admin scope', ['tenant-admin/users']],
+    ])('CreateTenant with %s is 400 invalid_scope before anything is written', async (_label, scopes) => {
+      const registry = new FakeRegistry().withScopes('a/b');
+      const provisioner = readyProvisioner();
+      await expect(
+        makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com', scopes }, CONTEXT),
+      ).rejects.toMatchObject({ name: 'ValidationError', message: expect.stringMatching(/^invalid_scope/) });
+      expect(registry.items.size).toBe(0);
+      expect(provisioner.provisionTenant).not.toHaveBeenCalled();
+    });
+
+    it('UpdateTenant replaces the entitlement on an ACTIVE tenant', async () => {
+      const registry = new FakeRegistry().withScopes('a/b', 'c/d');
+      registry.items.set(TENANT_A, { ...tenantRecord(), scopes: ['a/b'] });
+      const out = await makeService(registry, mockProvisioner()).UpdateTenant({ tenantId: TENANT_A, scopes: ['c/d'] }, CONTEXT);
+      expect(out.tenant?.scopes).toEqual(['c/d']);
+      expect(registry.items.get(TENANT_A)?.scopes).toEqual(['c/d']);
+      expect((await makeService(registry, mockProvisioner()).ListTenants({}, CONTEXT)).tenants?.[0].scopes).toEqual(['c/d']);
+    });
+
+    it('UpdateTenant to an empty list is allowed (the tenant then holds nothing)', async () => {
+      const registry = new FakeRegistry().withScopes('a/b');
+      registry.items.set(TENANT_A, { ...tenantRecord(), scopes: ['a/b'] });
+      const out = await makeService(registry, mockProvisioner()).UpdateTenant({ tenantId: TENANT_A, scopes: [] }, CONTEXT);
+      expect(out.tenant?.scopes).toEqual([]);
+    });
+
+    it('UpdateTenant refuses a scope that left the catalogue with 400 invalid_scope and changes nothing', async () => {
+      const registry = new FakeRegistry().withScopes('a/b');
+      registry.items.set(TENANT_A, { ...tenantRecord(), scopes: ['a/b'] });
+      await expect(
+        makeService(registry, mockProvisioner()).UpdateTenant({ tenantId: TENANT_A, scopes: ['a/b', 'gone/x'] }, CONTEXT),
+      ).rejects.toMatchObject({ name: 'ValidationError', message: expect.stringMatching(/^invalid_scope/) });
+      expect(registry.items.get(TENANT_A)?.scopes).toEqual(['a/b']);
+    });
+
+    it('UpdateTenant is 404 for an unknown tenant and 409 for a non-ACTIVE one', async () => {
+      const registry = new FakeRegistry().withScopes('a/b');
+      const service = makeService(registry, mockProvisioner());
+      await expect(service.UpdateTenant({ tenantId: TENANT_A, scopes: [] }, CONTEXT)).rejects.toBeInstanceOf(ResourceNotFoundError);
+      registry.items.set(TENANT_A, tenantRecord('DELETING'));
+      await expect(service.UpdateTenant({ tenantId: TENANT_A, scopes: [] }, CONTEXT)).rejects.toBeInstanceOf(ConflictError);
+    });
+
+    it('GetTenant on a row written before ADR-0035 reports no scopes', async () => {
+      const registry = new FakeRegistry();
+      registry.items.set(TENANT_A, tenantRecord());
+      expect((await makeService(registry, mockProvisioner()).GetTenant({ tenantId: TENANT_A }, CONTEXT)).tenant?.scopes).toEqual([]);
+    });
+  });
+
+  describe('user scopes (ADR-0036)', () => {
+    function entitled(...scopes: string[]): FakeRegistry {
+      const registry = new FakeRegistry().withScopes('a/b', 'c/d', 'e/f');
+      registry.items.set(TENANT_A, { ...tenantRecord(), scopes });
+      return registry;
+    }
+
+    it('GetUser and ListUsers report the effective scopes: catalogue ∩ entitlement ∩ grant', async () => {
+      const registry = entitled('a/b', 'c/d', 'gone/x');
+      const provisioner = mockProvisioner();
+      provisioner.getUser.mockResolvedValue({ ...userView('u1'), grantedScopes: ['c/d', 'e/f'] });
+      provisioner.listUsers.mockResolvedValue({ items: [userView('all'), { ...userView('none'), grantedScopes: [] }] });
+      const service = makeService(registry, provisioner);
+      expect((await service.GetUser({ tenantId: TENANT_A, username: 'u1' }, CONTEXT)).user?.scopes).toEqual(['c/d']);
+      const listed = (await service.ListUsers({ tenantId: TENANT_A }, CONTEXT)).users!;
+      expect(listed[0].scopes).toEqual(['a/b', 'c/d']);
+      expect(listed[1].scopes).toEqual([]);
+    });
+
+    it('UpdateUser with scopes validates against the entitlement, then writes through the provisioner', async () => {
+      const registry = entitled('a/b', 'c/d');
+      const provisioner = mockProvisioner();
+      provisioner.setScopes.mockResolvedValue({ ...userView('u1'), grantedScopes: ['c/d'] });
+      const out = await makeService(registry, provisioner).UpdateUser({ tenantId: TENANT_A, username: 'u1', scopes: ['c/d'] }, CONTEXT);
+      expect(provisioner.setScopes).toHaveBeenCalledWith(expect.objectContaining({ tenantId: TENANT_A }), 'u1', ['c/d']);
+      expect(provisioner.setAdmin).not.toHaveBeenCalled();
+      expect(out.user?.scopes).toEqual(['c/d']);
+    });
+
+    it('UpdateUser with admin and scopes does both, admin first', async () => {
+      const registry = entitled('a/b');
+      const provisioner = mockProvisioner();
+      provisioner.setAdmin.mockResolvedValue(userView('u1', true));
+      provisioner.setScopes.mockResolvedValue({ ...userView('u1', true), grantedScopes: [] });
+      const out = await makeService(registry, provisioner).UpdateUser({ tenantId: TENANT_A, username: 'u1', admin: true, scopes: [] }, CONTEXT);
+      expect(provisioner.setAdmin.mock.invocationCallOrder[0]).toBeLessThan(provisioner.setScopes.mock.invocationCallOrder[0]);
+      expect(out.user).toMatchObject({ admin: true, scopes: [] });
+    });
+
+    it.each([
+      ['a scope the tenant does not hold', ['e/f']],
+      ['a duplicate', ['a/b', 'a/b']],
+      ['the admin scope', ['tenant-admin/users']],
+    ])('UpdateUser with %s is 400 invalid_scope and writes neither the flag nor the grant', async (_label, scopes) => {
+      const registry = entitled('a/b', 'c/d');
+      const provisioner = mockProvisioner();
+      await expect(
+        makeService(registry, provisioner).UpdateUser({ tenantId: TENANT_A, username: 'u1', admin: true, scopes }, CONTEXT),
+      ).rejects.toMatchObject({ name: 'ValidationError', message: expect.stringMatching(/^invalid_scope/) });
+      expect(provisioner.setAdmin).not.toHaveBeenCalled();
+      expect(provisioner.setScopes).not.toHaveBeenCalled();
+    });
+
+    it('UpdateUser with neither admin nor scopes is 400', async () => {
+      const registry = entitled('a/b');
+      await expect(
+        makeService(registry, mockProvisioner()).UpdateUser({ tenantId: TENANT_A, username: 'u1' }, CONTEXT),
+      ).rejects.toMatchObject({ name: 'ValidationError', reason: 'InvalidInput' });
+    });
+
+    it('UpdateUser scopes on a DELETING tenant is 409 (P-2)', async () => {
+      const registry = new FakeRegistry();
+      registry.items.set(TENANT_A, tenantRecord('DELETING'));
+      await expect(
+        makeService(registry, mockProvisioner()).UpdateUser({ tenantId: TENANT_A, username: 'u1', scopes: [] }, CONTEXT),
+      ).rejects.toBeInstanceOf(ConflictError);
     });
   });
 
