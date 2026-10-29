@@ -584,13 +584,16 @@ deploy), has A's admin cut user A2 to `default/chat billing/read`, runs spec
 §8, runs `scripts/demo.sh`, destroys everything from an exit trap, and fails
 if a stack, parameter or log group is left behind.
 
-Last green run: 2026-10-29, a sandbox account, eu-central-1: deploy 137 s,
-steps 406 s, then the destroy (which waits about 90 s for the ADR-0019 log
+Last green run: 2026-10-29, a sandbox account, eu-central-1: deploy 117 s,
+steps 395 s, then the destroy (which waits about 90 s for the ADR-0019 log
 drain). Every step passed on both ingresses, including the ADR-0024 registry
-step and the ADR-0025 rows (step 7's new shape, 9-registry's scope checks
-and the floor step). Step 1 found the published tenant-identity stale (no
-`/platform/scopes` route, API Gateway's 404 "No method found matching
-route") and republished it from `../tenant-identity` before the run.
+step and the ADR-0025 rows (step 7's shape, 9-registry's scope checks and
+the floor step), with the scope registration running under the role that
+denies the `/platform/tenants*` routes (threat model T-41). Step 1 reused
+the published tenant-identity (`GET /platform/scopes` 200); the run before
+it had found that deployment stale (no `/platform/scopes` route, API
+Gateway's 404 "No method found matching route") and republished it from
+`../tenant-identity`.
 (Tokens are short-lived; the harness mints them fresh per ingress iteration
 so an expired token never masks a check, see
 [`scripts/CONVENTIONS.md`](./scripts/CONVENTIONS.md).)
@@ -618,8 +621,8 @@ lifetime; the CUR 2.0 `iamPrincipal/TenantId` line items (they arrive a day late
 
 | Ingress | TTFB p50 | TTFB p95 | `stream 10` TTFB | `stream 10` total |
 |---|---|---|---|---|
-| api-gateway | 0.203 s | 0.220 s | 0.196 s | 10.18 s |
-| agentcore-gateway | 0.290 s | 0.327 s | 0.242 s | 10.22 s |
+| api-gateway | 0.198 s | 0.223 s | 0.168 s | 10.16 s |
+| agentcore-gateway | 0.274 s | 0.340 s | 0.217 s | 10.20 s |
 
 Both ingresses stream: the first event of `stream 10` arrives after about
 0.2 s and the last after about 10 s. This is one run from one client; it is
