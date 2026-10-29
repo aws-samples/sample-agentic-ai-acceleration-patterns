@@ -22,6 +22,7 @@ service PlatformService {
     version: "2026-10-21"
     resources: [
         PlatformTenant
+        PlatformScope
     ]
     errors: [
         ValidationException
@@ -41,6 +42,7 @@ resource PlatformTenant {
     }
     create: CreateTenant
     read: GetTenant
+    update: UpdateTenant
     delete: DeleteTenant
     list: ListTenants
     resources: [
@@ -70,6 +72,11 @@ operation CreateTenant {
         /// Required in a `tiered` deployment, refused (UnsupportedInTopology)
         /// in any other (ADR-0027). Chosen once; never inferred or defaulted.
         tier: Tier
+
+        /// The scopes the tenant is entitled to (ADR-0035). Absent means
+        /// none (fail closed). Each must be in the catalogue, else 400
+        /// `invalid_scope`.
+        scopes: ScopeNameList
     }
 
     output := {
@@ -119,6 +126,31 @@ operation ListTenants {
 
         nextToken: PaginationToken
     }
+}
+
+/// Replaces the tenant's entitlement (ADR-0035). Each scope must be in the
+/// catalogue, else 400 `invalid_scope`. Takes effect at the next token
+/// issuance (5 min at most). Only an ACTIVE tenant accepts it (409 otherwise).
+@http(method: "PATCH", uri: "/platform/tenants/{tenantId}", code: 200)
+operation UpdateTenant {
+    input := {
+        @required
+        @httpLabel
+        tenantId: TenantId
+
+        @required
+        scopes: ScopeNameList
+    }
+
+    output := {
+        @required
+        tenant: Tenant
+    }
+
+    errors: [
+        ResourceNotFoundError
+        ConflictError
+    ]
 }
 
 /// Offboards a tenant: status DELETING first, then the Cognito clean-up
@@ -245,7 +277,8 @@ operation ListUsers {
     ]
 }
 
-/// Changes the admin flag: membership of `admin-<tenantId>`.
+/// Changes the admin flag (membership of `admin-<tenantId>`) and/or the
+/// user's granted scopes (ADR-0036). At least one of the two must be given.
 @http(method: "PATCH", uri: "/platform/tenants/{tenantId}/users/{username}")
 operation UpdateUser {
     input := {
@@ -257,8 +290,13 @@ operation UpdateUser {
         @httpLabel
         username: Username
 
-        @required
         admin: Boolean
+
+        /// The scopes the user may hold for this tenant: a subset of the
+        /// tenant's `scopes`, no duplicates, never `tenant-admin/users`,
+        /// else 400 `invalid_scope`. Empty means the user holds nothing.
+        /// Stored in the Cognito attribute `custom:scopes`.
+        scopes: ScopeNameList
     }
 
     output := {
@@ -374,6 +412,95 @@ operation RefreshToken {
         ResourceNotFoundError
         ConflictError
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Scope catalogue (ADR-0034)
+// ---------------------------------------------------------------------------
+
+/// A scope a backend owns. Registered at the backend's deploy, deleted at
+/// its teardown; a tenant holds it only once UpdateTenant (or CreateTenant)
+/// names it (ADR-0035).
+resource PlatformScope {
+    identifiers: {
+        scope: ScopeName
+    }
+    put: PutScope
+    read: GetScope
+    delete: DeleteScope
+    list: ListScopes
+}
+
+/// Registers a scope, or replaces its description (idempotent). The owner
+/// is the text before the `/`. A name under the reserved owner
+/// `tenant-admin` is a 400 `invalid_scope`.
+@idempotent
+@http(method: "PUT", uri: "/platform/scopes/{scope}", code: 200)
+operation PutScope {
+    input := {
+        @required
+        @httpLabel
+        scope: ScopeName
+
+        @length(max: 256)
+        description: String
+    }
+
+    output := {
+        @required
+        scope: Scope
+    }
+}
+
+@readonly
+@http(method: "GET", uri: "/platform/scopes/{scope}")
+operation GetScope {
+    input := {
+        @required
+        @httpLabel
+        scope: ScopeName
+    }
+
+    output := {
+        @required
+        scope: Scope
+    }
+
+    errors: [
+        ResourceNotFoundError
+    ]
+}
+
+@readonly
+@paginated(inputToken: "nextToken", outputToken: "nextToken", items: "scopes")
+@http(method: "GET", uri: "/platform/scopes")
+operation ListScopes {
+    input := {
+        @httpQuery("nextToken")
+        nextToken: PaginationToken
+    }
+
+    output := {
+        @required
+        scopes: ScopeList
+
+        nextToken: PaginationToken
+    }
+}
+
+/// Removes the scope from the catalogue. Tokens stop carrying it within one
+/// catalogue cache period plus the access-token lifetime. Idempotent: 204
+/// also when the scope is absent.
+@idempotent
+@http(method: "DELETE", uri: "/platform/scopes/{scope}", code: 204)
+operation DeleteScope {
+    input := {
+        @required
+        @httpLabel
+        scope: ScopeName
+    }
+
+    output := {}
 }
 
 // ---------------------------------------------------------------------------

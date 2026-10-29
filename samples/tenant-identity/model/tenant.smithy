@@ -118,7 +118,8 @@ operation ListTenantUsers {
     }
 }
 
-/// Changes the admin flag. A caller cannot demote themselves (spec R-13).
+/// Changes the admin flag and/or the user's granted scopes (ADR-0036); at
+/// least one must be given. A caller cannot update themselves (spec R-13).
 @http(method: "PATCH", uri: "/tenant/users/{username}")
 operation UpdateTenantUser {
     input := {
@@ -126,8 +127,12 @@ operation UpdateTenantUser {
         @httpLabel
         username: Username
 
-        @required
         admin: Boolean
+
+        /// Twin of platform UpdateUser.scopes: a subset of the tenant's
+        /// `scopes`, no duplicates, never `tenant-admin/users`, else 400
+        /// `invalid_scope`. Empty means the user holds nothing.
+        scopes: ScopeNameList
     }
 
     output := {
