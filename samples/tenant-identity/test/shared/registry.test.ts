@@ -369,3 +369,125 @@ describe('DynamoDBRegistry batchGet backoff (UnprocessedKeys)', () => {
     expect(backoffDelay(10, () => 0)).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Scope catalogue rows and the tenant entitlement (ADR-0034, ADR-0035)
+// ---------------------------------------------------------------------------
+
+describe('DynamoDBRegistry scope catalogue (ADR-0034)', () => {
+  const now = new Date('2026-10-29T10:00:00.000Z');
+  const registry = () => new DynamoDBRegistry(TABLE, client, undefined, () => now);
+  const scopeItem = (name: string, extra: Record<string, unknown> = {}) => ({
+    PK: 'SCOPE',
+    SK: name,
+    name,
+    owner: name.split('/')[0],
+    createdAt: '2026-10-29T09:00:00.000Z',
+    ...extra,
+  });
+
+  it('putScope is one UpdateItem on PK=SCOPE / SK=<name> that keeps an existing createdAt', async () => {
+    ddb.on(UpdateCommand).resolves({ Attributes: scopeItem('billing/read', { description: 'Read invoices' }) });
+    const written = await registry().putScope({ name: 'billing/read', owner: 'billing', description: 'Read invoices' });
+    const input = ddb.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.Key).toEqual({ PK: 'SCOPE', SK: 'billing/read' });
+    expect(input.UpdateExpression).toContain('createdAt = if_not_exists(createdAt, :now)');
+    expect(input.UpdateExpression).toContain('#desc = :desc');
+    expect(input.ExpressionAttributeValues).toMatchObject({ ':name': 'billing/read', ':owner': 'billing', ':desc': 'Read invoices', ':now': now.toISOString() });
+    expect(input.ReturnValues).toBe('ALL_NEW');
+    expect(written).toEqual({ name: 'billing/read', owner: 'billing', description: 'Read invoices', createdAt: '2026-10-29T09:00:00.000Z' });
+  });
+
+  it('putScope without a description removes a stale one', async () => {
+    ddb.on(UpdateCommand).resolves({ Attributes: scopeItem('billing/read') });
+    await registry().putScope({ name: 'billing/read', owner: 'billing' });
+    const input = ddb.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toContain('REMOVE #desc');
+    expect(input.ExpressionAttributeValues).not.toHaveProperty(':desc');
+  });
+
+  it('getScope reads the row consistently and strips the keys; absent is undefined', async () => {
+    ddb.on(GetCommand).resolvesOnce({ Item: scopeItem('billing/read') }).resolvesOnce({});
+    expect(await registry().getScope('billing/read')).toEqual({ name: 'billing/read', owner: 'billing', createdAt: '2026-10-29T09:00:00.000Z' });
+    expect(ddb.commandCalls(GetCommand)[0].args[0].input).toMatchObject({ Key: { PK: 'SCOPE', SK: 'billing/read' }, ConsistentRead: true });
+    expect(await registry().getScope('billing/none')).toBeUndefined();
+  });
+
+  it('listScopes queries PK=SCOPE with an opaque nextToken that names a scope key', async () => {
+    ddb.on(QueryCommand).resolvesOnce({ Items: [scopeItem('a/b')], LastEvaluatedKey: { PK: 'SCOPE', SK: 'a/b' } }).resolvesOnce({ Items: [scopeItem('c/d')] });
+    const page = await registry().listScopes();
+    expect(ddb.commandCalls(QueryCommand)[0].args[0].input).toMatchObject({
+      KeyConditionExpression: 'PK = :scope',
+      ExpressionAttributeValues: { ':scope': 'SCOPE' },
+      Limit: 50,
+    });
+    expect(page.items.map((s) => s.name)).toEqual(['a/b']);
+    expect(page.nextToken).toBeDefined();
+    const next = await registry().listScopes(page.nextToken);
+    expect(ddb.commandCalls(QueryCommand)[1].args[0].input.ExclusiveStartKey).toEqual({ PK: 'SCOPE', SK: 'a/b' });
+    expect(next.items.map((s) => s.name)).toEqual(['c/d']);
+    expect(next.nextToken).toBeUndefined();
+  });
+
+  it('listScopes rejects a tenant-list nextToken, and list rejects a scope-list one (400)', async () => {
+    const tenantToken = Buffer.from(JSON.stringify({ PK: 'TENANT#01ARZ3NDEKTSV4RRFFQ69G5FAV', SK: 'META' })).toString('base64url');
+    const scopeToken = Buffer.from(JSON.stringify({ PK: 'SCOPE', SK: 'a/b' })).toString('base64url');
+    await expect(registry().listScopes(tenantToken)).rejects.toBeInstanceOf(InvalidInputError);
+    await expect(registry().list(scopeToken)).rejects.toBeInstanceOf(InvalidInputError);
+  });
+
+  it('listScopeNames follows every page and returns the sort keys only', async () => {
+    ddb
+      .on(QueryCommand)
+      .resolvesOnce({ Items: [{ SK: 'a/b' }, { SK: 'c/d' }], LastEvaluatedKey: { PK: 'SCOPE', SK: 'c/d' } })
+      .resolvesOnce({ Items: [{ SK: 'e/f' }] });
+    expect(await registry().listScopeNames()).toEqual(['a/b', 'c/d', 'e/f']);
+    expect(ddb.commandCalls(QueryCommand)[0].args[0].input).toMatchObject({ ProjectionExpression: 'SK', ConsistentRead: true });
+    expect(ddb.commandCalls(QueryCommand)[1].args[0].input.ExclusiveStartKey).toEqual({ PK: 'SCOPE', SK: 'c/d' });
+  });
+
+  it('deleteScope is one DeleteItem and a missing row is not an error', async () => {
+    ddb.on(DeleteCommand).resolves({});
+    await expect(registry().deleteScope('billing/read')).resolves.toBeUndefined();
+    expect(ddb.commandCalls(DeleteCommand)[0].args[0].input).toEqual({ TableName: TABLE, Key: { PK: 'SCOPE', SK: 'billing/read' } });
+  });
+
+  it('list (tenants) keeps the SK = META filter that excludes scope rows (§4.3, ADR-0034)', async () => {
+    ddb.on(ScanCommand).resolves({ Items: [] });
+    await registry().list();
+    expect(ddb.commandCalls(ScanCommand)[0].args[0].input).toMatchObject({ FilterExpression: 'SK = :meta', ExpressionAttributeValues: { ':meta': 'META' } });
+  });
+});
+
+describe('DynamoDBRegistry tenant entitlement (ADR-0035)', () => {
+  const now = new Date('2026-10-29T10:00:00.000Z');
+  const registry = () => new DynamoDBRegistry(TABLE, client, undefined, () => now);
+  const id = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
+
+  it('updateTenantScopes replaces the list on an existing row and returns the row', async () => {
+    ddb.on(UpdateCommand).resolves({ Attributes: item(record(id, { scopes: ['a/b'] })) });
+    const updated = await registry().updateTenantScopes(id, ['a/b']);
+    const input = ddb.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.Key).toEqual({ PK: `TENANT#${id}`, SK: 'META' });
+    expect(input.UpdateExpression).toBe('SET scopes = :scopes, updatedAt = :now');
+    expect(input.ConditionExpression).toBe('attribute_exists(PK)');
+    expect(input.ExpressionAttributeValues).toEqual({ ':scopes': ['a/b'], ':now': now.toISOString() });
+    expect(updated.scopes).toEqual(['a/b']);
+  });
+
+  it('updateTenantScopes on a vanished row is a NotFoundError and creates no stub', async () => {
+    const failure = new Error('cond');
+    failure.name = 'ConditionalCheckFailedException';
+    ddb.on(UpdateCommand).rejects(failure);
+    await expect(registry().updateTenantScopes(id, [])).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('create writes the scopes on the row and get returns them', async () => {
+    const r = record(id, { scopes: ['a/b', 'c/d'] });
+    ddb.on(PutCommand).resolves({});
+    await registry().create(r);
+    expect(ddb.commandCalls(PutCommand)[0].args[0].input.Item).toMatchObject({ scopes: ['a/b', 'c/d'] });
+    ddb.on(GetCommand).resolves({ Item: item(r) });
+    expect((await registry().get(id))?.scopes).toEqual(['a/b', 'c/d']);
+  });
+});

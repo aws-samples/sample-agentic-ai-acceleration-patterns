@@ -3,7 +3,8 @@
 
 /**
  * The fixed vocabulary every module shares: topology names, group names,
- * scopes, the narrowing keys, and the RFC 8693 URNs. These are deploy-time
+ * the built-in scope and the scope-name rules, the narrowing keys, and the
+ * RFC 8693 URNs. These are deploy-time
  * constants, never inputs (spec P-7, §8.1).
  */
 
@@ -167,16 +168,41 @@ export function userPoolIdFromIssuer(issuer: string): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Scopes (spec §8.1)
+// Scopes (spec §8.1, ADR-0034, ADR-0035, ADR-0036)
 // ---------------------------------------------------------------------------
 
-export const SCOPE_API_READ = 'tenant-api/read';
-export const SCOPE_API_WRITE = 'tenant-api/write';
+/**
+ * The one built-in scope: the tenant admin's door (ADR-0015). Every other
+ * scope is a catalogue row a backend registered through `PutScope`
+ * (ADR-0034); the sample itself names none.
+ */
 export const SCOPE_TENANT_ADMIN = 'tenant-admin/users';
-/** Every user of a tenant holds these. Un-narrowed tokens carry both. */
-export const API_SCOPES: readonly string[] = [SCOPE_API_READ, SCOPE_API_WRITE];
-/** Every scope the sample knows. */
-export const ALL_SCOPES: readonly string[] = [SCOPE_API_READ, SCOPE_API_WRITE, SCOPE_TENANT_ADMIN];
+/**
+ * `<owner>/<action>`: the owner is the registering backend's name (ADR-0034).
+ * Mirrors the `ScopeName` pattern in model/__global.smithy; the trigger and
+ * the exchange apply it to values the model never saw.
+ */
+export const SCOPE_NAME_PATTERN = /^[a-z0-9-]+\/[a-z0-9-]+$/;
+/** The owner prefix of the built-in scope; `PutScope` refuses it (ADR-0034). */
+export const RESERVED_SCOPE_OWNER = 'tenant-admin';
+/** How long a Lambda container keeps the scope catalogue before re-reading it (ADR-0034). */
+export const SCOPE_CATALOGUE_TTL_MS = 60_000;
+/**
+ * The registry partition key every catalogue row shares (ADR-0034); the sort
+ * key is the scope name. Named here because the token function's IAM policy
+ * binds its one Query to this key (`dynamodb:LeadingKeys`).
+ */
+export const SCOPE_PARTITION_KEY = 'SCOPE';
+/**
+ * The mutable custom attribute that holds a user's granted scopes
+ * (ADR-0036). Written by the two user APIs, read by the trigger only.
+ * Single-tenant topologies store a space-separated list; topology 3 a JSON
+ * object keyed by tenant id. Absent means "all of the tenant's scopes".
+ */
+export const SCOPES_ATTRIBUTE_NAME = 'scopes';
+export const SCOPES_ATTRIBUTE = `custom:${SCOPES_ATTRIBUTE_NAME}`;
+/** Cognito's limit on a custom string attribute value (ADR-0036). */
+export const SCOPES_ATTRIBUTE_MAX_LENGTH = 2048;
 /** Cognito's own scope; a narrowed token never carries it (spec P-6). */
 export const COGNITO_USER_ADMIN_SCOPE = 'aws.cognito.signin.user.admin';
 

@@ -11,12 +11,13 @@ import {
   ScanCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { POOL_INDEX_NAME, Topology } from './constants';
+import { POOL_INDEX_NAME, SCOPE_PARTITION_KEY, Topology } from './constants';
 import { ConflictError, InvalidInputError, NotFoundError } from './errors';
 
 /**
- * The tenant registry (spec §4). It holds tenants only: no user,
- * membership, credential, or token is ever written here (R-10, ADR-0002).
+ * The tenant registry (spec §4). It holds tenants and, since ADR-0034, the
+ * scope catalogue: no user, membership, credential, or token is ever written
+ * here (R-10, ADR-0002 as amended by ADR-0034).
  */
 
 // ADR-0021: a tenant is PROVISIONING from the registry-first write until its
@@ -57,8 +58,31 @@ export interface TenantRecord {
    * omits it).
    */
   readonly firstAdminEmail?: string;
+  /**
+   * ADR-0035: the scopes the tenant is entitled to, a subset of the
+   * catalogue at the time it was written. Absent on rows written before
+   * ADR-0035; read it through `tenantScopes()`, which treats absent as `[]`
+   * (fail closed).
+   */
+  readonly scopes?: readonly string[];
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+/** The tenant's entitlement (ADR-0035); a row without the field holds nothing. */
+export function tenantScopes(record: Pick<TenantRecord, 'scopes'>): readonly string[] {
+  return record.scopes ?? [];
+}
+
+/**
+ * One row of the scope catalogue (ADR-0034): a scope a backend registered
+ * through `PutScope`. `owner` is the text before the `/` in the name.
+ */
+export interface ScopeRecord {
+  readonly name: string;
+  readonly owner: string;
+  readonly description?: string;
+  readonly createdAt: string;
 }
 
 /**
@@ -89,8 +113,17 @@ export interface Page<T> {
   readonly nextToken?: string;
 }
 
+/**
+ * The catalogue read (ADR-0034): the names of every scope row, read with one
+ * paginated Query on `PK = SCOPE`. The trigger, the token exchange and the
+ * two user APIs hold this and nothing else of the catalogue.
+ */
+export interface ScopeCatalogueReader {
+  listScopeNames(): Promise<string[]>;
+}
+
 /** Read side: everything the trigger and the authoriser may call (R-14). */
-export interface RegistryReader {
+export interface RegistryReader extends ScopeCatalogueReader {
   get(tenantId: string): Promise<TenantRecord | undefined>;
   /** Missing ids are omitted from the result. */
   batchGet(tenantIds: readonly string[]): Promise<TenantRecord[]>;
@@ -100,6 +133,22 @@ export interface RegistryReader {
 
 export interface Registry extends RegistryReader {
   list(nextToken?: string, limit?: number): Promise<Page<TenantRecord>>;
+  /**
+   * ADR-0035: replaces the tenant's entitlement. One conditional update on an
+   * existing row; NotFoundError when the row is gone. Callers validate the
+   * list against the catalogue first. Returns the row as written.
+   */
+  updateTenantScopes(tenantId: string, scopes: readonly string[]): Promise<TenantRecord>;
+  /**
+   * ADR-0034: create-or-replace a catalogue row. `createdAt` is kept from an
+   * existing row, so a re-registration at every deploy does not move it.
+   * Returns the row as written.
+   */
+  putScope(scope: Omit<ScopeRecord, 'createdAt'>): Promise<ScopeRecord>;
+  getScope(name: string): Promise<ScopeRecord | undefined>;
+  listScopes(nextToken?: string, limit?: number): Promise<Page<ScopeRecord>>;
+  /** Removes the row. A missing row is not an error (idempotent). */
+  deleteScope(name: string): Promise<void>;
   /** Fails with ConflictError if the id exists. */
   create(record: TenantRecord): Promise<void>;
   /**
@@ -148,6 +197,8 @@ export interface Registry extends RegistryReader {
 
 const KEY_PREFIX = 'TENANT#';
 const SORT_KEY = 'META';
+/** ADR-0034: every catalogue row shares this partition key; the sort key is the scope name. */
+const SCOPE_PARTITION = SCOPE_PARTITION_KEY;
 const MAX_BATCH = 100;
 
 interface TenantItem extends TenantRecord {
@@ -168,17 +219,31 @@ function fromItem(item: Record<string, unknown>): TenantRecord {
   return rest as unknown as TenantRecord;
 }
 
+function scopeKey(name: string): { PK: string; SK: string } {
+  return { PK: SCOPE_PARTITION, SK: name };
+}
+
+function scopeFromItem(item: Record<string, unknown>): ScopeRecord {
+  const { PK: _pk, SK: _sk, ...rest } = item;
+  return rest as unknown as ScopeRecord;
+}
+
 function encodeToken(lastKey: Record<string, unknown> | undefined): string | undefined {
   return lastKey === undefined ? undefined : Buffer.from(JSON.stringify(lastKey), 'utf8').toString('base64url');
 }
 
-function decodeToken(token: string | undefined): Record<string, unknown> | undefined {
+/**
+ * Decodes a pagination token into the key it names, accepting only a key of
+ * the item type being listed: a tenant token on the scope listing (or the
+ * reverse) is the caller's input, a 400.
+ */
+function decodeToken(token: string | undefined, accepts: (pk: string) => boolean): Record<string, unknown> | undefined {
   if (token === undefined) {
     return undefined;
   }
   try {
     const parsed = JSON.parse(Buffer.from(token, 'base64url').toString('utf8'));
-    if (typeof parsed?.PK === 'string' && typeof parsed?.SK === 'string' && parsed.PK.startsWith(KEY_PREFIX)) {
+    if (typeof parsed?.PK === 'string' && typeof parsed?.SK === 'string' && accepts(parsed.PK)) {
       return { PK: parsed.PK, SK: parsed.SK };
     }
   } catch {
@@ -186,6 +251,9 @@ function decodeToken(token: string | undefined): Record<string, unknown> | undef
   }
   throw new InvalidInputError('Invalid nextToken');
 }
+
+const isTenantKey = (pk: string): boolean => pk.startsWith(KEY_PREFIX);
+const isScopeKey = (pk: string): boolean => pk === SCOPE_PARTITION;
 
 function isConditionFailure(error: unknown): boolean {
   return error instanceof Error && error.name === 'ConditionalCheckFailedException';
@@ -287,14 +355,14 @@ export class DynamoDBRegistry implements Registry {
   async list(nextToken?: string, limit = 50): Promise<Page<TenantRecord>> {
     const result = await this.client.send(
       // A Scan with a filter: Limit counts items read before the filter, so a
-      // page can be short (or empty) and still carry a nextToken. The table
-      // holds one item type today, so pages are full; keep the filter so a
-      // second item type could never leak into ListTenants. A larger registry
-      // would list from a GSI instead.
+      // page can be short (or empty) and still carry a nextToken. The filter
+      // is what keeps the catalogue rows (`PK = SCOPE`, ADR-0034) out of
+      // ListTenants: their sort key is the scope name, never META. A larger
+      // registry would list from a GSI instead.
       new ScanCommand({
         TableName: this.tableName,
         Limit: limit,
-        ExclusiveStartKey: decodeToken(nextToken),
+        ExclusiveStartKey: decodeToken(nextToken, isTenantKey),
         FilterExpression: 'SK = :meta',
         ExpressionAttributeValues: { ':meta': SORT_KEY },
       }),
@@ -476,5 +544,115 @@ export class DynamoDBRegistry implements Registry {
 
   async delete(tenantId: string): Promise<void> {
     await this.client.send(new DeleteCommand({ TableName: this.tableName, Key: key(tenantId) }));
+  }
+
+  async updateTenantScopes(tenantId: string, scopes: readonly string[]): Promise<TenantRecord> {
+    // ADR-0035: one conditional update; attribute_exists(PK) keeps it from
+    // creating a stub row for a tenant that was deleted under the caller.
+    try {
+      const result = await this.client.send(
+        new UpdateCommand({
+          TableName: this.tableName,
+          Key: key(tenantId),
+          UpdateExpression: 'SET scopes = :scopes, updatedAt = :now',
+          ConditionExpression: 'attribute_exists(PK)',
+          ExpressionAttributeValues: { ':scopes': [...scopes], ':now': this.now().toISOString() },
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      return fromItem(result.Attributes ?? {});
+    } catch (error) {
+      if (isConditionFailure(error)) {
+        throw new NotFoundError(`Tenant ${tenantId} not found`);
+      }
+      throw error;
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // Scope catalogue (ADR-0034)
+  // -------------------------------------------------------------------
+
+  async putScope(scope: Omit<ScopeRecord, 'createdAt'>): Promise<ScopeRecord> {
+    // Create-or-replace in one write: if_not_exists keeps the first
+    // createdAt, so a backend that re-registers at every deploy does not
+    // move it; owner and description follow the request, and an omitted
+    // description removes a stale one rather than keeping it.
+    const names: Record<string, string> = { '#name': 'name', '#owner': 'owner', '#desc': 'description' };
+    const values: Record<string, unknown> = {
+      ':name': scope.name,
+      ':owner': scope.owner,
+      ':now': this.now().toISOString(),
+    };
+    let expression = 'SET #name = :name, #owner = :owner, createdAt = if_not_exists(createdAt, :now)';
+    if (scope.description !== undefined) {
+      values[':desc'] = scope.description;
+      expression += ', #desc = :desc';
+    } else {
+      expression += ' REMOVE #desc';
+    }
+    const result = await this.client.send(
+      new UpdateCommand({
+        TableName: this.tableName,
+        Key: scopeKey(scope.name),
+        UpdateExpression: expression,
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return scopeFromItem(result.Attributes ?? {});
+  }
+
+  async getScope(name: string): Promise<ScopeRecord | undefined> {
+    const result = await this.client.send(
+      new GetCommand({ TableName: this.tableName, Key: scopeKey(name), ConsistentRead: true }),
+    );
+    return result.Item === undefined ? undefined : scopeFromItem(result.Item);
+  }
+
+  async listScopes(nextToken?: string, limit = 50): Promise<Page<ScopeRecord>> {
+    const result = await this.client.send(
+      new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'PK = :scope',
+        ExpressionAttributeValues: { ':scope': SCOPE_PARTITION },
+        Limit: limit,
+        ExclusiveStartKey: decodeToken(nextToken, isScopeKey),
+        ConsistentRead: true,
+      }),
+    );
+    return {
+      items: (result.Items ?? []).map(scopeFromItem),
+      nextToken: encodeToken(result.LastEvaluatedKey),
+    };
+  }
+
+  async listScopeNames(): Promise<string[]> {
+    // The whole catalogue, following every page: it is what the trigger
+    // caches for 60 s (ADR-0034) and what the user APIs intersect with.
+    const names: string[] = [];
+    let startKey: Record<string, unknown> | undefined;
+    do {
+      const result = await this.client.send(
+        new QueryCommand({
+          TableName: this.tableName,
+          KeyConditionExpression: 'PK = :scope',
+          ExpressionAttributeValues: { ':scope': SCOPE_PARTITION },
+          ProjectionExpression: 'SK',
+          ExclusiveStartKey: startKey,
+          ConsistentRead: true,
+        }),
+      );
+      for (const item of result.Items ?? []) {
+        names.push(String(item.SK));
+      }
+      startKey = result.LastEvaluatedKey;
+    } while (startKey !== undefined);
+    return names;
+  }
+
+  async deleteScope(name: string): Promise<void> {
+    await this.client.send(new DeleteCommand({ TableName: this.tableName, Key: scopeKey(name) }));
   }
 }
