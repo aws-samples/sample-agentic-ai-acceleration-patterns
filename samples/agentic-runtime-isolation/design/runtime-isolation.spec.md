@@ -243,9 +243,8 @@ leave the agent, never content (ADR-0017).
 - A **tenant user** signs in to tenant-identity's shared pool and receives an
   access token with `tenant_id`, `sub`, `client_id`, and `scope`: un-narrowed,
   every scope the user holds, which is the intersection of the catalogue,
-  the tenant's entitlement and the user's own list (amended 2026-10-29,
-  ADR-0025; tenant-identity ADR-0034 to ADR-0036). Before ADR-0025 that was
-  the fixed pair `tenant-api/read tenant-api/write`.
+  the tenant's entitlement and the user's own list (ADR-0025; tenant-identity
+  ADR-0034 to ADR-0036).
 - To downscope, the client exchanges its refresh token at tenant-identity
   `POST /oauth2/token` for a token holding only the scopes it needs
   (tenant-identity ADR-0009), and calls the ingress with that token. A scope
@@ -266,7 +265,7 @@ leave the agent, never content (ADR-0017).
 | `requiredScopes` | string[] | none | if set, the token's `scope` MUST contain all of them (ADR-0005): the ingress-wide floor, for a scope every backend shares. A backend's own scopes are `AgentBackend.scopes` (ADR-0025) |
 | `delegation.forwardUserToken` | boolean | `false` | P-5 |
 | `delegation.requireNarrowedToken` | boolean | `false` | only valid with `forwardUserToken` |
-| `delegation.allowedScopes` | string[] | required when `requireNarrowedToken` | P-5 |
+| `delegation.allowedScopes` | string[] | required when `requireNarrowedToken` | P-5; a static list: with `requireNarrowedToken` it must name every backend's scopes, so a backend added later needs an ingress redeploy (§3.3 limitation) |
 | `tvm.role` | `iam.IRole` | none (construct creates a model-only role) | the TVM is always on (ADR-0018); unset, the construct creates `TenantModelRole` that may invoke only the one model; set, a role that also reaches tenant data, whose trust and ABAC the deployer owns and to which the construct adds the model grant (P-8, ADR-0012, ADR-0018) |
 | `tvm.includeUserIdTag` | boolean | `false` | add `UserId = sub` as a session tag |
 | `tvm.claimTags` | `Record<string, string>` | none | extra session tags, tag key to claim name; a claim missing from the token fails the request with 403; `TenantId` and `UserId` are reserved keys |
@@ -289,11 +288,10 @@ construct:
 | `SharedIngress` | every ingress prop except `agent`, plus `registryPrefix` (default `/application-plane/shared/agent-runtime/`), `registryTtl` (`Duration`, default 60 s), `defaultBackend` (default none) | the ingress alone: API or Gateway, authoriser, TVM, limits, log drain, and the registry prefix it publishes under and reads `backends/<name>` from. `registryPrefix` is one per account and Region; set it when one account runs several ingresses. `defaultBackend` is the backend the bare `/invocations` route resolves to. `SharedIngress.fromParameters(scope, id, prefix, ingress)` imports an ingress deployed in another stack through its published parameters (§6.4); an `AgentBackend` in another stack must take the ingress this way, a `SharedIngress` instance from another stack fails synth. `registryTtl` is 1 s to 750 s |
 | `AgentBackend` | `name` (`[a-z0-9-]{1,32}`), `ingress` (a `SharedIngress` or `fromParameters`), `agent` (`{ codePath, modelId, environment? }`), `scopes` (required), `identityApi?` | one backend: the Runtime tagged `ri:ingress = <ingressId>`, its resource policy naming the ingress role, on `agentcore-gateway` a Gateway target named `name`, its scope registration with tenant-identity, and the registry entry `{ runtimeArn, scopes, status }`. On delete the entry is set to `draining`, held for `registryTtl` plus 120 s, then removed, and the scopes are removed from the catalogue |
 
-The ingress-wide `requiredScopes` stays the floor every token must meet.
+The ingress-wide `requiredScopes` is the floor every token must meet.
 
-**Amended 2026-10-29 (ADR-0025).** `AgentBackend.requiredScopes` (optional,
-AND on top of the floor) is replaced by `scopes` (required): the scopes the
-backend owns, at least one, no duplicates, each `<name>/<action>` where
+**Backend scopes (ADR-0025).** `AgentBackend.scopes` (required) names the
+scopes the backend owns: at least one, no duplicates, each `<name>/<action>` where
 `<name>` is the backend's own name and both sides are `[a-z0-9-]`, 3 to 128
 characters in all (tenant-identity's `ScopeName`); synth fails naming
 `scopes` otherwise. A token passes the backend when it carries **any one** of
@@ -311,7 +309,20 @@ Create and Update fail the deploy when a call is refused or the API is
 unreachable; Delete is best effort. The Gateway's `CUSTOM_JWT allowedScopes`
 stays equal to the floor only: the per-backend check lives in the interceptor
 and the authoriser, so a backend added after the ingress deploy needs no
-Gateway redeploy.
+Gateway redeploy. The function's role carries the managed policy plus an
+inline `Deny` on `execute-api:Invoke` for `*/*/*/platform/tenants*`, so of
+the policy's routes it reaches the catalogue alone (threat model T-41); the
+handler applies the same owner rule as the construct, so a direct invoke
+cannot register a name under another owner.
+
+**Limitation.** `delegation.allowedScopes` is a static list fixed at synth
+(ADR-0007). With `delegation.requireNarrowedToken` on, it must name every
+backend's scopes for their narrowed tokens to pass, so a backend added after
+the deploy needs an ingress redeploy that extends the list first: the one
+exception to the no-redeploy rule of ADR-0024 and ADR-0025. With
+`requireNarrowedToken` off, the list is unused and no ingress change is
+needed. Deriving the allowed set from the registry entries at request time
+is the known way to remove the exception; not implemented.
 
 ### 3.4 Backend interface
 
@@ -373,7 +384,7 @@ read by the ingress.
 | Field | Shape | Meaning |
 |---|---|---|
 | `runtimeArn` | `arn:<partition>:bedrock-agentcore:<region>:<account>:runtime/<id>` | the Runtime the route invokes |
-| `scopes` | string[], required (amended 2026-10-29, ADR-0025; was `requiredScopes`, optional) | the backend's own scopes; a token passes with any one of them. An entry without the field is refused (502), so a pre-ADR-0025 entry fails loudly rather than admitting every token; an empty list admits none |
+| `scopes` | string[], required (ADR-0025) | the backend's own scopes; a token passes with any one of them. An entry without the field is refused (502), so an entry written in an older shape fails loudly rather than admitting every token; an empty list admits none |
 | `status` | `active` or `draining` | `draining` refuses new requests (404) while running streams finish |
 
 The entry is a JSON string, 4 KB on the standard tier, schema by convention
@@ -618,9 +629,8 @@ carries the random per-request id when `session` is off (ADR-0013).
    expired, or from another client are covered by the verifier unit tests
    (`test/shared/verifier.test.ts`), not by the script (amended 2026-10-27,
    ADR-0015).
-7. Backend scopes (amended 2026-10-29, ADR-0025; was the ingress-wide floor
-   on `tenant-api/read`): a token narrowed to `billing/read` only is refused
-   with 403 on the default backend, which owns `default/chat` alone.
+7. Backend scopes (ADR-0025): a token narrowed to `billing/read` only is
+   refused with 403 on the default backend, which owns `default/chat` alone.
 8. Forwarding on: the agent reports the forwarded token's `scope`; with
    `requireNarrowedToken`, an un-narrowed token is refused and a narrowed one
    accepted.

@@ -210,7 +210,7 @@ key when a value is missing or malformed.
 | `requiredScopes` | comma-separated scopes, e.g. `platform/active` | unset (no check) | The ingress-wide scope floor every token must carry (AND, ADR-0005). Rarely needed since ADR-0025: each backend owns its scopes, checked any-of on top of the floor |
 | `forwardUserToken` | `true`, `false` | `false` | Forward the user's token to the agent (ADR-0006) |
 | `requireNarrowedToken` | `true`, `false` | `false` | Refuse a token whose scopes are not a subset of `allowedScopes`; needs `forwardUserToken=true` (ADR-0007) |
-| `allowedScopes` | comma-separated scopes | unset | The scopes a forwarded token may carry; required with `requireNarrowedToken` |
+| `allowedScopes` | comma-separated scopes | unset | The scopes a forwarded token may carry; required with `requireNarrowedToken`. A static list fixed at synth: with `requireNarrowedToken` on it must name every backend's scopes, so a backend added later needs an ingress redeploy (see [Scopes](#several-backends-behind-one-ingress)) |
 | `tvm` | `true`, `false` | `false` | "Demo tenant data": adds a tenant-partitioned DynamoDB table and a data-bearing tenant role with ABAC. With `false` the TVM still runs, using the construct's model-only `TenantModelRole` (ADR-0016, ADR-0018) |
 | `includeUserIdTag` | `true`, `false` | `false` | Add `UserId = sub` as a session tag (multiplies the TVM cache keys, ADR-0022) |
 | `modelId` | a Bedrock model id or inference profile id | the Region's Nova Lite profile (above) | The one model the tenant role may invoke |
@@ -300,13 +300,14 @@ const ingress = new SharedIngress(this, 'Ingress', {
   ingress: 'api-gateway',
   session: { scope: 'user' },
   tvm: { role: myTenantDataRole },
-  defaultBackend: 'agent',
+  defaultBackend: 'default',
 });
 
-new AgentBackend(this, 'Agent', {
-  name: 'agent',
+new AgentBackend(this, 'Default', {
+  name: 'default',
   ingress,
   agent: { codePath: 'path/to/agent-bundle', modelId: 'eu.amazon.nova-lite-v1:0' },
+  scopes: ['default/chat'],
 });
 ```
 
@@ -439,6 +440,17 @@ leave it unset. On `agentcore-gateway` the floor is also the Gateway's
 backend scope; the per-backend check is in the interceptor only, which is
 what lets a backend be added without a Gateway redeploy.
 
+**Limitation: `delegation.allowedScopes` is static.** With
+`delegation.requireNarrowedToken` on, the ingress refuses a token whose
+scopes are not a subset of `delegation.allowedScopes`, a list fixed at synth
+(ADR-0007). That list must then name every backend's scopes (the integ's
+narrowed stack lists all three), so a backend added after the deploy needs
+an ingress redeploy to extend it before its tokens pass, an exception to the
+no-redeploy rule in the lifecycle table below. Without `requireNarrowedToken`
+the list is unused and a backend is added with no ingress change. Deriving
+the allowed set from the registry entries at request time would remove the
+exception; it is not implemented.
+
 When the backend deploys, a `ScopeRegistration` custom resource puts each
 scope in tenant-identity's catalogue (`PUT /platform/scopes/{scope}`, SigV4
 with the published `PlatformInvokePolicy`), and the registry entry is written
@@ -490,7 +502,7 @@ read as "no scopes".
 
 | Operation | Effect | Live after | Ingress deploy |
 |---|---|---|---|
-| Create | Runtime, resource policy, Gateway target, the scope registration with tenant-identity, then the registry entry. An entry of that name that already exists is refused (the write is not an overwrite), so two stacks cannot claim one route; an entry that already names this Runtime is reclaimed, so a retried Create is not a duplicate | one `registryTtl` | no (and no identity deploy) |
+| Create | Runtime, resource policy, Gateway target, the scope registration with tenant-identity, then the registry entry. An entry of that name that already exists is refused (the write is not an overwrite), so two stacks cannot claim one route; an entry that already names this Runtime is reclaimed, so a retried Create is not a duplicate | one `registryTtl` | no (and no identity deploy), unless `delegation.requireNarrowedToken` is on: then `allowedScopes` must be extended first (see the limitation above) |
 | Read, list | `GetParameter` on the name; `GetParametersByPath` on `<registryPrefix>backends/` | immediate | no |
 | Update | overwrite `runtimeArn` (or `scopes`: new names are put in the catalogue, dropped names removed from it, then the entry is rewritten); streams already running finish on the old Runtime, new requests move | one `registryTtl` | no |
 | Delete | set `draining`, wait one `registryTtl` plus the longest stream (2 min on `api-gateway`), delete the Runtime and target, remove the entry, remove the scopes from the catalogue (best effort). Only an entry whose `runtimeArn` is this backend's own is drained; an entry another writer replaced is left alone | one `registryTtl` to refuse new requests | no |
