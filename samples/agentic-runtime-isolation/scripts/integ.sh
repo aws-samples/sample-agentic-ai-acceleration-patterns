@@ -229,7 +229,7 @@ npx cdk synth -q --app "npx ts-node -P tsconfig.json --prefer-ts-exts test/integ
 DEPLOYED_SAMPLE=1
 DEPLOY_START=$SECONDS
 "${CDK[@]}" deploy --all --require-approval never --concurrency 4 --outputs-file "${LIB_TMP}/outputs.json" >"${LIB_TMP}/deploy.log" 2>&1 \
-  || { grep -E "FAILED|Error|error" "${LIB_TMP}/deploy.log" | grep -v "^\s*$" | tail -30 >&2; fail "deploy"; }
+  || { grep -E "FAILED|Error|error" "${LIB_TMP}/deploy.log" | grep -v "^\s*$" | tail -30 >&2; echo "---- last lines of the deploy log:" >&2; tail -15 "${LIB_TMP}/deploy.log" >&2; fail "deploy"; }
 echo "  deployed in $((SECONDS - DEPLOY_START))s"
 
 # 2b. Tenants, after the deploy: CreateTenant.scopes must name scopes the
