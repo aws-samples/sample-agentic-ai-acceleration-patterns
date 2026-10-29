@@ -587,12 +587,13 @@ user whose `email_verified` is `true`. Otherwise a user holding an
 un-narrowed token (which carries `aws.cognito.signin.user.admin`) could set
 their own `email` to an address a tenant admin later invites and be added as
 that invitee (threat model T-27). The guard is the pool schema, not the app
-client's `WriteAttributes`: Cognito reads an empty or unset write list as
-"every attribute", custom ones included (integration-verified 2026-10-29), so
-the client list cannot express "none". Every app client the sample creates
-therefore names exactly one harmless standard attribute (`locale`) as
-writable, which closes every other attribute, `custom:scopes` above all
-(§8.1). `CreateUser` sets `email_verified = true`.
+client's `WriteAttributes`: Cognito reads an unset write list as "every
+attribute", custom ones included, and refuses a list that omits a required
+attribute (both integration-verified 2026-10-29), so the client list cannot
+express "none". Every app client the sample creates therefore names exactly
+the required `email` as writable, which grants its initial value only (the
+pool keeps it immutable) and closes every other attribute, `custom:scopes`
+above all (§8.1). `CreateUser` sets `email_verified = true`.
 
 `CreateMembership` and `DeleteMembership` stay vendor-only. From a tenant's
 view, `CreateTenantUser` and `DeleteTenantUser` are the only membership
@@ -819,7 +820,7 @@ guessed scope. The ordering of `scopesToAdd` follows `tenant.scopes`.
 **`custom:scopes`.** Every pool the sample creates (the stack's shared pool
 and each `pool-per-tenant` pool) declares the mutable string attribute
 `scopes` (max 2048), which the app client can neither read (`ReadAttributes`
-is `email` only) nor write (`WriteAttributes` names only `locale`, R-17):
+is `email` only) nor write (`WriteAttributes` names only the immutable `email`, R-17):
 only `UpdateUser` and `UpdateTenantUser` write it, with
 `AdminUpdateUserAttributes`, and only the trigger and the two user doors
 read it. Encoding: topologies 1

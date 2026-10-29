@@ -468,12 +468,13 @@ export class TenantIdentityStack extends Stack {
       // auth only, 5-minute access/id tokens, 1-day refresh, no OAuth/hosted
       // UI. readAttributes email only; custom:tenantId and custom:scopes are
       // neither readable nor writable (P-3, ADR-0036). Cognito treats an
-      // unset or empty WriteAttributes as "every attribute", custom ones
-      // included (integration-verified 2026-10-29: a user rewrote their own
-      // custom:scopes), so the list names exactly one harmless standard
-      // attribute (`locale`) and thereby closes every other, custom:scopes
-      // above all. The guard against a user rewriting their e-mail (T-27,
-      // R-17) stays the pool's immutable `email` above.
+      // unset WriteAttributes as "every attribute", custom ones included
+      // (integration-verified 2026-10-29: a user rewrote their own
+      // custom:scopes), and refuses a list that omits a required attribute,
+      // so the list names exactly the required `email` and thereby closes
+      // every other attribute, custom:scopes above all. The guard against a
+      // user rewriting their e-mail (T-27, R-17) stays the pool's immutable
+      // `email` above: write access covers the initial value only.
       const clientReadWrite = {
         readAttributes: new cognito.ClientAttributes().withStandardAttributes({ email: true }),
         writeAttributes: new cognito.ClientAttributes().withStandardAttributes({ [CLIENT_WRITABLE_ATTRIBUTE]: true }),

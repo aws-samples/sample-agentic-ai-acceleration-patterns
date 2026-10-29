@@ -151,10 +151,11 @@ export class PoolPerTenantProvisioner implements Provisioner {
           EnableTokenRevocation: true,
           PreventUserExistenceErrors: 'ENABLED',
           ReadAttributes: ['email'],
-          // One writable standard attribute and nothing else: Cognito reads
-          // an empty list as "every attribute", custom:scopes included
-          // (ADR-0036). The guard against a user rewriting their e-mail
-          // (R-17, T-27) is the pool's immutable `email` schema above.
+          // The required `email` and nothing else: Cognito reads an unset
+          // list as "every attribute", custom:scopes included, and refuses
+          // one that omits a required attribute (ADR-0036). The guard against
+          // a user rewriting their e-mail (R-17, T-27) is the pool's
+          // immutable `email` schema above.
           WriteAttributes: [CLIENT_WRITABLE_ATTRIBUTE],
         }),
       );

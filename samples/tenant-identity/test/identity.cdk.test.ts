@@ -682,12 +682,13 @@ describe('TenantIdentityStack - shared user pool (R-4, R-5, N-1, N-8, §7.2)', (
       const pool = Object.values(template.findResources('AWS::Cognito::UserPool'))[0] as any;
       // The guard lives in the pool schema. An empty client WriteAttributes
       // would mean "every attribute" (integration-verified, custom ones
-      // included), so the client names exactly one harmless standard
-      // attribute as writable and e-mail is not among them either way.
+      // included), and Cognito refuses a list without the required e-mail,
+      // so the client names exactly `email` as writable: the initial value
+      // only, since the pool keeps it immutable.
       const email = (pool.Properties.Schema as any[]).find((a) => a.Name === 'email');
       expect(email).toMatchObject({ Required: true, Mutable: false });
       const client = Object.values(template.findResources('AWS::Cognito::UserPoolClient'))[0] as any;
-      expect(client.Properties.WriteAttributes).toEqual(['locale']);
+      expect(client.Properties.WriteAttributes).toEqual(['email']);
       expect(client.Properties.ReadAttributes).toEqual(['email']);
       expect(pool.Properties.AccountRecoverySetting).toEqual({
         RecoveryMechanisms: [{ Name: 'admin_only', Priority: 1 }],

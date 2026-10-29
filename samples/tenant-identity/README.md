@@ -295,8 +295,9 @@ ADR-0036):
    duplicates and never `tenant-admin/users`; empty is valid and means the
    user holds nothing. The grant is stored in the Cognito attribute
    `custom:scopes`, which the app client can neither read nor write (its
-   write list names only `locale`: Cognito reads an empty list as "every
-   attribute"), so a user cannot widen their own grant with their token. In the single-tenant
+   write list names only the required, immutable `email`: Cognito reads an
+   unset list as "every attribute"), so a user cannot widen their own grant
+   with their token. In the single-tenant
    topologies the value is a space-separated list; in
    `shared-pool-multi-tenant` it is a JSON object keyed by tenant id, so one
    person is cut per tenant. An absent attribute (or key) means the whole

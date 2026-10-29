@@ -75,14 +75,14 @@ describe('PoolPerTenantProvisioner (spec §7.1)', () => {
       expect(clientInput.PreventUserExistenceErrors).toBe('ENABLED');
       // R-17 (T-27): e-mail is immutable at the pool (an empty client
       // WriteAttributes would mean "every attribute", so the pool schema is
-      // the guard for e-mail, and the one-entry write list keeps
-      // custom:scopes closed, ADR-0036).
+      // the guard for e-mail, and the write list of exactly the required
+      // `email` keeps custom:scopes closed, ADR-0036).
       expect(poolInput.Schema).toEqual([
         { Name: 'email', AttributeDataType: 'String', Required: true, Mutable: false },
         // ADR-0036: the mutable per-user scope grant, as on the shared pool.
         { Name: 'scopes', AttributeDataType: 'String', Mutable: true, StringAttributeConstraints: { MaxLength: '2048' } },
       ]);
-      expect(clientInput.WriteAttributes).toEqual(['locale']);
+      expect(clientInput.WriteAttributes).toEqual(['email']);
       expect(clientInput.ReadAttributes).toEqual(['email']);
       // R-5, ADR-0009: refresh token rotation stays off.
       expect(clientInput.RefreshTokenRotation?.Feature ?? 'DISABLED').toBe('DISABLED');
