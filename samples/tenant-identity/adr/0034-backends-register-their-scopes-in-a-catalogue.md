@@ -50,8 +50,9 @@ registering backend's name, so a scope is unique because the backend name is
 (the consumer refuses a second backend of the same name). The catalogue
 refuses a name that does not match `^[a-z0-9-]+/[a-z0-9-]+$`, a name whose
 owner is `tenant-admin` (reserved for `tenant-admin/users`, which stays the one
-built-in scope and keeps its group rule, ADR-0015), and a second registration
-of the same name by a caller who gives a different `owner`. `DELETE` removes
+built-in scope and keeps its group rule, ADR-0015). The owner is derived from
+the name, never given by the caller, so a re-registration of the same name
+cannot change it: `PUT` replaces the description only. `DELETE` removes
 the row; tokens stop carrying the scope within one cache period plus the access
 token lifetime (5 min). The `tenant-api/read` and `tenant-api/write` constants
 go: this stack's own integration test registers two scopes through the API and
