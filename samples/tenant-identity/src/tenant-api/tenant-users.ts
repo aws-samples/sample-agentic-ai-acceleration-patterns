@@ -5,6 +5,8 @@ import type { Topology } from '../shared/constants';
 import { ConflictError, InvalidInputError, NotFoundError, UnsupportedInTopologyError } from '../shared/errors';
 import { errorName, log } from '../shared/logger';
 import type { RegistryReader, TenantRecord } from '../shared/registry';
+import { tenantScopes } from '../shared/registry';
+import { assertGrantableScopes, effectiveScopes } from '../shared/scopes';
 import {
   ConflictError as ModeledConflictError,
   InternalServerError,
@@ -45,8 +47,12 @@ import type { Provisioner, UserView } from '../topology/provisioner';
  *
  * Extending R-13: UpdateTenantUser refuses ANY self-update (not only
  * self-demotion), so a caller cannot self-promote or otherwise rewrite their
- * own admin flag; the admin flag of the caller is changed by another admin
- * only.
+ * own admin flag or scope grant; both are changed by another admin only.
+ *
+ * ADR-0036: UpdateTenantUser also cuts a user's scopes, within the tenant's
+ * entitlement (ADR-0035); Get/List show the effective set. The catalogue is
+ * read from the registry per request (R-8: this role reads the registry,
+ * never writes it).
  */
 
 /** What the authoriser puts in the context (the only tenant source, P-11). */
@@ -57,12 +63,18 @@ export interface TenantCallerContext {
   readonly [key: string]: unknown;
 }
 
-function toUser(view: UserView): User {
+/**
+ * Projects a provisioner UserView to the Smithy User shape. `scopes` is what
+ * the user holds for the caller's tenant (ADR-0036): catalogue, entitlement
+ * and grant intersected, never the admin scope.
+ */
+function toUser(view: UserView, tenant: TenantRecord, catalogue: ReadonlySet<string>): User {
   return {
     username: view.username,
     email: view.email,
     admin: view.admin,
     status: view.status,
+    scopes: effectiveScopes(catalogue, tenantScopes(tenant), view.grantedScopes),
     createdAt: view.createdAt,
   };
 }
@@ -145,6 +157,11 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
    * (the token is valid but the caller's standing changed, so a retry with a
    * fresh token is the fix). Call after loadTenant and before any write.
    */
+  /** The scope catalogue as a set (ADR-0034), read once per request. */
+  private async catalogue(): Promise<ReadonlySet<string>> {
+    return new Set(await this.registry.listScopeNames());
+  }
+
   private async requireCallerAdmin(provisioner: Provisioner, tenant: TenantRecord, sub: string): Promise<void> {
     let caller: UserView;
     try {
@@ -189,7 +206,7 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
       // R-16 (T-26): re-check the caller's admin group before any write.
       await this.requireCallerAdmin(provisioner, tenant, context.sub);
       const result = await provisioner.createUser(tenant, input.email!, input.admin ?? false);
-      return { user: toUser(result.user), temporaryPassword: result.temporaryPassword };
+      return { user: toUser(result.user, tenant, await this.catalogue()), temporaryPassword: result.temporaryPassword };
     } catch (error) {
       log.warn('tenant user operation failed', {
         tenantId: context.tenantId,
@@ -210,7 +227,7 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
       const provisioner = this.provisionerFor(tenant.tenantId, tenant.topology);
       // getUser runs the R-12 membership check and 404s a non-member.
       const user = await provisioner.getUser(tenant, input.username!);
-      return { user: toUser(user) };
+      return { user: toUser(user, tenant, await this.catalogue()) };
     } catch (error) {
       log.warn('tenant user operation failed', {
         tenantId: context.tenantId,
@@ -230,7 +247,8 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
       const tenant = await this.loadTenant(context, false);
       const provisioner = this.provisionerFor(tenant.tenantId, tenant.topology);
       const page = await provisioner.listUsers(tenant, input.nextToken);
-      return { users: page.items.map(toUser), nextToken: page.nextToken };
+      const catalogue = await this.catalogue();
+      return { users: page.items.map((view) => toUser(view, tenant, catalogue)), nextToken: page.nextToken };
     } catch (error) {
       log.warn('tenant user operation failed', {
         tenantId: context.tenantId,
@@ -242,28 +260,44 @@ export class TenantUsersService implements TenantServiceService<TenantCallerCont
   }
 
   async UpdateTenantUser(
-    input: { username?: string; admin?: boolean },
+    input: { username?: string; admin?: boolean; scopes?: string[] },
     context: TenantCallerContext,
   ): Promise<UpdateTenantUserOutput> {
     log.info('tenant user operation', { tenantId: context.tenantId, sub: context.sub, operation: 'UpdateTenantUser' });
     try {
+      // ADR-0036: the admin flag, the scope grant, or both; nothing is a 400.
+      if (input.admin === undefined && input.scopes === undefined) {
+        throw new InvalidInputError('UpdateTenantUser needs admin, scopes, or both');
+      }
       const tenant = await this.loadTenant(context, true);
+      // The grant must lie within the tenant's entitlement (ADR-0035);
+      // checked before any read of the user, so a refused list costs nothing.
+      if (input.scopes !== undefined) {
+        assertGrantableScopes(input.scopes, tenantScopes(tenant));
+      }
       const provisioner = this.provisionerFor(tenant.tenantId, tenant.topology);
       // R-16 (T-26): re-check the caller's admin group before any write.
       await this.requireCallerAdmin(provisioner, tenant, context.sub);
       // R-12 (membership) then R-13 (self-mutation): resolve the path username
       // to the real username and refuse a self-update before any write.
       const target = await this.resolveTarget(provisioner, tenant, input.username!, context.sub);
-      // Extends R-13: refuse ANY self-update of the admin flag, not only
-      // self-demotion — a caller cannot self-promote or otherwise rewrite
-      // their own admin flag; only another admin can change it.
+      // Extends R-13: refuse ANY self-update, not only self-demotion — a
+      // caller cannot self-promote, rewrite their own admin flag, or change
+      // their own grant; only another admin can.
       if (target.isSelf) {
-        throw new ConflictError('A tenant admin cannot change their own admin flag');
+        throw new ConflictError('A tenant admin cannot change their own admin flag or scopes');
       }
-      // The provisioner re-checks membership (R-12) inside setAdmin. That is
-      // one extra Cognito read, kept so the provisioner never trusts its caller.
-      const user = await provisioner.setAdmin(tenant, target.username, input.admin!);
-      return { user: toUser(user) };
+      // The provisioner re-checks membership (R-12) inside setAdmin and
+      // setScopes. That is one extra Cognito read, kept so the provisioner
+      // never trusts its caller.
+      let user: UserView | undefined;
+      if (input.admin !== undefined) {
+        user = await provisioner.setAdmin(tenant, target.username, input.admin);
+      }
+      if (input.scopes !== undefined) {
+        user = await provisioner.setScopes(tenant, target.username, input.scopes);
+      }
+      return { user: toUser(user!, tenant, await this.catalogue()) };
     } catch (error) {
       log.warn('tenant user operation failed', {
         tenantId: context.tenantId,

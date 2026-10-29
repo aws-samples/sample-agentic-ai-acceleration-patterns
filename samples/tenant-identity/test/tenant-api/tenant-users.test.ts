@@ -51,6 +51,8 @@ function fakeRegistry(...args: [TenantRecord | undefined] | []): RegistryReader 
     get: jest.fn().mockResolvedValue(tenant),
     batchGet: jest.fn().mockResolvedValue([]),
     getByUserPoolId: jest.fn().mockResolvedValue(undefined),
+    // The catalogue (ADR-0034): what the tests entitle tenants to, plus one more.
+    listScopeNames: jest.fn().mockResolvedValue(['a/b', 'c/d', 'e/f']),
   };
 }
 
@@ -70,6 +72,7 @@ function mockProvisioner(over: Partial<Provisioner> = {}): jest.Mocked<Provision
     ),
     listUsers: jest.fn().mockResolvedValue({ items: [userView()], nextToken: undefined }),
     setAdmin: jest.fn().mockResolvedValue(userView({ admin: true })),
+    setScopes: jest.fn().mockResolvedValue(userView({ grantedScopes: [] })),
     deleteUser: jest.fn().mockResolvedValue(undefined),
     createMembership: jest.fn(),
     deleteMembership: jest.fn(),
@@ -394,5 +397,85 @@ describe('TenantUsersService — per-tenant provisioner (ADR-0026)', () => {
     const service = new TenantUsersService(fakeRegistry(), () => provisioner);
     await expect(service.DeleteTenantUser({ username: CALLER_SUB }, context)).rejects.toBeInstanceOf(ModeledConflictError);
     expect(provisioner.deleteUser).not.toHaveBeenCalled();
+  });
+});
+
+describe('TenantUsersService — user scopes (ADR-0036)', () => {
+  const entitled = () => fakeRegistry(activeTenant({ scopes: ['a/b', 'c/d', 'gone/x'] }));
+
+  it('GetTenantUser and ListTenantUsers report the effective scopes: catalogue ∩ entitlement ∩ grant', async () => {
+    const provisioner = mockProvisioner({
+      getUser: jest.fn().mockResolvedValue(userView({ grantedScopes: ['c/d', 'e/f'] })),
+      listUsers: jest.fn().mockResolvedValue({ items: [userView(), userView({ username: 'cut', grantedScopes: [] })] }),
+    });
+    const service = new TenantUsersService(entitled(), provisioner);
+    expect((await service.GetTenantUser({ username: 'target-sub-9999' }, context)).user?.scopes).toEqual(['c/d']);
+    const listed = (await service.ListTenantUsers({}, context)).users!;
+    expect(listed[0].scopes).toEqual(['a/b', 'c/d']);
+    expect(listed[1].scopes).toEqual([]);
+  });
+
+  it('UpdateTenantUser with scopes validates against the entitlement, re-checks the caller, then writes', async () => {
+    const provisioner = mockProvisioner({ setScopes: jest.fn().mockResolvedValue(userView({ grantedScopes: ['c/d'] })) });
+    const service = new TenantUsersService(entitled(), provisioner);
+    const out = await service.UpdateTenantUser({ username: 'target-sub-9999', scopes: ['c/d'] }, context);
+    expect(provisioner.setScopes).toHaveBeenCalledWith(expect.objectContaining({ tenantId: TENANT_A }), 'target-sub-9999', ['c/d']);
+    expect(provisioner.setAdmin).not.toHaveBeenCalled();
+    // requireCallerAdmin (caller) and resolveTarget (target) both read Cognito.
+    expect(provisioner.getUser).toHaveBeenCalledWith(expect.anything(), CALLER_SUB);
+    expect(out.user?.scopes).toEqual(['c/d']);
+  });
+
+  it('UpdateTenantUser with admin and scopes does both', async () => {
+    const provisioner = mockProvisioner({ setScopes: jest.fn().mockResolvedValue(userView({ admin: true, grantedScopes: [] })) });
+    const service = new TenantUsersService(entitled(), provisioner);
+    const out = await service.UpdateTenantUser({ username: 'target-sub-9999', admin: true, scopes: [] }, context);
+    expect(provisioner.setAdmin).toHaveBeenCalled();
+    expect(provisioner.setScopes).toHaveBeenCalledWith(expect.anything(), 'target-sub-9999', []);
+    expect(out.user).toMatchObject({ admin: true, scopes: [] });
+  });
+
+  it.each([
+    ['a scope the tenant does not hold', ['e/f']],
+    ['a duplicate', ['a/b', 'a/b']],
+    ['the admin scope', ['tenant-admin/users']],
+    ['a malformed name', ['Sample/Read']],
+  ])('UpdateTenantUser with %s is 400 invalid_scope before any Cognito call', async (_label, scopes) => {
+    const provisioner = mockProvisioner();
+    const service = new TenantUsersService(entitled(), provisioner);
+    await expect(service.UpdateTenantUser({ username: 'target-sub-9999', admin: true, scopes }, context)).rejects.toMatchObject({
+      name: 'ValidationError',
+      reason: 'InvalidInput',
+      message: expect.stringMatching(/^invalid_scope/),
+    });
+    expect(provisioner.getUser).not.toHaveBeenCalled();
+    expect(provisioner.setAdmin).not.toHaveBeenCalled();
+    expect(provisioner.setScopes).not.toHaveBeenCalled();
+  });
+
+  it('UpdateTenantUser with neither admin nor scopes is 400', async () => {
+    const service = new TenantUsersService(entitled(), mockProvisioner());
+    await expect(service.UpdateTenantUser({ username: 'target-sub-9999' }, context)).rejects.toMatchObject({
+      name: 'ValidationError',
+      reason: 'InvalidInput',
+    });
+  });
+
+  it('a caller cannot change their own scopes (R-13 extended)', async () => {
+    const provisioner = mockProvisioner();
+    const service = new TenantUsersService(entitled(), provisioner);
+    await expect(service.UpdateTenantUser({ username: CALLER_SUB, scopes: [] }, context)).rejects.toBeInstanceOf(ModeledConflictError);
+    expect(provisioner.setScopes).not.toHaveBeenCalled();
+  });
+
+  it('a demoted caller cannot cut anyone (R-16 / T-26)', async () => {
+    const provisioner = mockProvisioner({
+      getUser: jest.fn().mockImplementation((_t: TenantRecord, username: string) =>
+        Promise.resolve(username === CALLER_SUB ? userView({ username: CALLER_SUB, admin: false }) : userView()),
+      ),
+    });
+    const service = new TenantUsersService(entitled(), provisioner);
+    await expect(service.UpdateTenantUser({ username: 'target-sub-9999', scopes: ['a/b'] }, context)).rejects.toBeInstanceOf(ModeledConflictError);
+    expect(provisioner.setScopes).not.toHaveBeenCalled();
   });
 });
