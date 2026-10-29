@@ -8,11 +8,15 @@
 #
 # Flow:
 #   1. tenant-identity (shared-pool): reuse a published deployment when it
-#      has the scope catalogue (GET /platform/scopes, ADR-0025); a published
-#      one without it is stale and is destroyed and redeployed from
-#      ../tenant-identity (and left in place, republished); none at all is
-#      deployed and destroyed at the end (ADR-0004, tenant-identity
-#      ADR-0017).
+#      has the scope catalogue (GET /platform/scopes, ADR-0025); none at all
+#      is deployed and destroyed at the end (ADR-0004, tenant-identity
+#      ADR-0017). A published one WITHOUT the catalogue predates ADR-0034
+#      and is stale: the run fails and says so, unless
+#      INTEG_REPLACE_STALE_IDENTITY=1, which destroys it and redeploys from
+#      ../tenant-identity (left in place, republished). Replacing it deletes
+#      the shared Cognito user pool, so every other consumer of that
+#      deployment loses its tenants and users; opt in only in an account
+#      this run owns.
 #   2. Synthesise test/integ.runtime.ts and deploy its four stacks at once;
 #      their backends register the demo scopes in the catalogue (ADR-0025).
 #      Then create tenant A entitled to every demo scope and tenant B to
@@ -120,6 +124,18 @@ cleanup() {
   if [[ "$DEPLOYED_IDENTITY" == 1 ]]; then
     (cd "$IDENTITY_DIR" && npx cdk destroy "$IDENTITY_STACK" --context topology=shared-pool --force >"${LIB_TMP}/identity-destroy.log" 2>&1) \
       || { echo "destroy failed: ${IDENTITY_STACK}" >&2; FAILED=1; }
+  elif [[ "$DEPLOYED_SAMPLE" == 1 && -n "${IDENTITY_API:-}" ]]; then
+    # The tenant-identity stays: the stacks' ScopeRegistration Delete must
+    # have removed every demo scope from its catalogue (ADR-0025). A scope
+    # still there is a leftover (the Delete skipped it, or the handler never
+    # ran); 404 is the only acceptable answer.
+    local sc st
+    for sc in $ALL_DEMO_SCOPES; do
+      st="$(platform GET "platform/scopes/$(jq -rn --arg s "$sc" '$s | @uri')")"
+      if [[ "$st" != 404 ]]; then
+        echo "leftover scope in the tenant-identity catalogue: ${sc} (GET /platform/scopes/${sc} -> HTTP ${st})" >&2; FAILED=1
+      fi
+    done
   fi
   local left
   left="$(aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE DELETE_FAILED ROLLBACK_COMPLETE \
@@ -166,15 +182,21 @@ body() { jq -nc --arg c "$1" --arg p "$2" '{conversationId: $c, prompt: $p}'; }
 # registry_entry RUNTIME_ARN SCOPES_JSON STATUS -> the entry JSON (src/shared/registry.ts schema).
 registry_entry() { jq -nc --arg a "$1" --argjson s "$2" --arg st "$3" '{runtimeArn: $a, scopes: $s, status: $st}'; }
 
-# identity_prepare -> npm ci (when node_modules is missing) and projen build
-# in ../tenant-identity, once per run. Every cdk command there, destroy
+# identity_prepare -> npm ci (when node_modules is missing, or package-lock.json
+# is newer than it: the lock file changed since the last install) and projen
+# build in ../tenant-identity, once per run. Every cdk command there, destroy
 # included, synthesises the app, which reads the Smithy-generated OpenAPI
 # under its gitignored src/smithy/ that only the build produces.
 IDENTITY_PREPARED=0
+identity_needs_install() { # -> 0 when ../tenant-identity's node_modules is missing or older than its lock file
+  [[ ! -d "${IDENTITY_DIR}/node_modules" ]] || [[ "${IDENTITY_DIR}/package-lock.json" -nt "${IDENTITY_DIR}/node_modules" ]]
+}
 identity_prepare() {
   [[ "$IDENTITY_PREPARED" == 1 ]] && return 0
-  (cd "$IDENTITY_DIR" && { [[ -d node_modules ]] || npm ci --no-audit --no-fund >"${LIB_TMP}/identity-install.log" 2>&1; }) \
-    || { tail -30 "${LIB_TMP}/identity-install.log" >&2; fail "npm ci in ${IDENTITY_DIR}"; }
+  if identity_needs_install; then
+    (cd "$IDENTITY_DIR" && npm ci --no-audit --no-fund >"${LIB_TMP}/identity-install.log" 2>&1) \
+      || { tail -30 "${LIB_TMP}/identity-install.log" >&2; fail "npm ci in ${IDENTITY_DIR}"; }
+  fi
   (cd "$IDENTITY_DIR" && npx projen build >"${LIB_TMP}/identity-build.log" 2>&1) \
     || { tail -30 "${LIB_TMP}/identity-build.log" >&2; fail "projen build in ${IDENTITY_DIR}"; }
   IDENTITY_PREPARED=1
@@ -197,13 +219,30 @@ if aws ssm get-parameter --name "${IDENTITY_PREFIX}/apiUrl" --query Parameter.Na
   identity_init
   # A published deployment from before the scope catalogue has no
   # /platform/scopes route; API Gateway answers "Missing Authentication
-  # Token" for it. The backends' ScopeRegistration would fail against it, so
-  # it is replaced by the current ../tenant-identity, which stays published.
+  # Token" for it. The backends' ScopeRegistration would fail against it.
+  # Replacing it is destructive for everyone sharing the deployment (the
+  # shared Cognito pool goes with the stack), so it only happens on
+  # explicit opt-in (INTEG_REPLACE_STALE_IDENTITY=1); otherwise the run
+  # stops here and says what to do.
   status="$(scope_catalogue_status)"
   if [[ "$status" == 200 ]]; then
     echo "  reusing the published tenant-identity deployment (GET /platform/scopes -> HTTP 200)"
   elif stale_identity "$status"; then
-    echo "  the published tenant-identity is stale (GET /platform/scopes -> HTTP ${status}, no such route): destroying and redeploying it from ${IDENTITY_DIR}"
+    if [[ "${INTEG_REPLACE_STALE_IDENTITY:-0}" != 1 ]]; then
+      cat >&2 <<STALE
+the published tenant-identity (${IDENTITY_STACK}) is stale: GET /platform/scopes -> HTTP ${status} (no such route).
+It predates the scope catalogue (tenant-identity ADR-0034), and this sample's ScopeRegistration cannot register
+its scopes against it. To replace it with the current ${IDENTITY_DIR}, rerun with
+
+  INTEG_REPLACE_STALE_IDENTITY=1 AWS_REGION=${REGION} scripts/integ.sh
+
+Replacing it destroys and redeploys the stack, which DELETES the shared Cognito user pool: every tenant and user
+other consumers of this deployment created is gone, and their tokens and parameters stop resolving. Do this only
+in an account this run owns; otherwise update the published tenant-identity through its own path first.
+STALE
+      fail "stale tenant-identity (set INTEG_REPLACE_STALE_IDENTITY=1 to replace it)"
+    fi
+    echo "  the published tenant-identity is stale (GET /platform/scopes -> HTTP ${status}, no such route); INTEG_REPLACE_STALE_IDENTITY=1: destroying and redeploying it from ${IDENTITY_DIR}"
     identity_prepare
     (cd "$IDENTITY_DIR" && npx cdk destroy "$IDENTITY_STACK" --context topology=shared-pool --force >"${LIB_TMP}/identity-stale-destroy.log" 2>&1) \
       || { tail -30 "${LIB_TMP}/identity-stale-destroy.log" >&2; fail "destroy the stale ${IDENTITY_STACK}"; }

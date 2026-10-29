@@ -17,13 +17,20 @@
  *
  * The policy grants `PUT|GET|DELETE /platform/scopes*` and the tenant routes
  * (`POST /platform/tenants`, `GET|PATCH|DELETE /platform/tenants/{id}`,
- * `POST /platform/tenants/{id}/users`). The role carries an inline Deny on
- * `execute-api:Invoke` for every `/platform/tenants*` route, so what it can
- * reach is the catalogue alone; that is still wider than this one backend's names:
- * whoever can run code as this function's role can register or remove any
- * scope (threat model T-41). The function runs the handler in this file's
- * sibling and nothing else, and its role holds this policy, the Deny and
- * logs only.
+ * `POST /platform/tenants/{id}/users`), and, for tenant-identity's
+ * control-plane mount (its ADR-0033), `kms:Encrypt` and `kms:GenerateDataKey`
+ * on its admin-password key under `kms:ViaService = ssm.<region>.amazonaws.com`.
+ * That KMS grant is inert here: the function calls no SSM API, holds no
+ * `ssm:PutParameter`, and the condition only lets SSM use the key on the
+ * role's behalf. The role carries an inline Deny on `execute-api:Invoke` for
+ * every `/platform/tenants*` route, so what it can reach is the catalogue
+ * alone; that is still wider than this one backend's names: whoever can run
+ * code as this function's role can register or remove any scope (threat
+ * model T-41). The handler also refuses an `ApiUrl` whose host is not
+ * `<api>.execute-api.<AWS_REGION>.amazonaws.com`, so the role's signature is
+ * never sent to a host of a direct invoker's choosing. The function runs the
+ * handler in this file's sibling and nothing else, and its role holds this
+ * policy, the Deny and logs only.
  */
 
 import * as path from 'node:path';
@@ -118,7 +125,10 @@ export class ScopeRegistration extends Construct {
       runtime: lambda.Runtime.NODEJS_24_X,
       architecture: lambda.Architecture.ARM_64,
       memorySize: 256,
-      // One signed call per scope, each a few hundred milliseconds.
+      // Two signed calls per scope (GET, then PUT or DELETE), each a few
+      // hundred milliseconds, bounded at 10 s per attempt with one retry; the
+      // handler answers FAILED 2 s before this deadline rather than let
+      // Lambda kill it unanswered.
       timeout: Duration.seconds(60),
       logGroup,
       loggingFormat: lambda.LoggingFormat.JSON,

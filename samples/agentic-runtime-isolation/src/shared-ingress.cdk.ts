@@ -945,6 +945,10 @@ export class SharedIngress extends Construct {
           // ADR-0005: the service checks the product floor before the
           // interceptor runs; the interceptor enforces the floor again (AND)
           // and the target's own scopes from the registry (any one, ADR-0025).
+          // CUSTOM_JWT's allowedScopes is ANY-OF: a token holding any one of
+          // the listed scopes passes the service's check. With a floor of
+          // several scopes, only the interceptor enforces that the token
+          // holds ALL of them; the service alone would admit a token with one.
           // Only the floor goes here: a backend added after this deploy must
           // not need a Gateway redeploy.
           ...(options.requiredScopes !== undefined ? { allowedScopes: options.requiredScopes } : {}),
