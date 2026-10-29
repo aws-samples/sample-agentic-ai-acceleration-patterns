@@ -4,7 +4,6 @@
 import type { PreTokenGenerationV2TriggerEvent } from 'aws-lambda';
 import {
   adminGroupName,
-  API_SCOPES,
   COGNITO_USER_ADMIN_SCOPE,
   INVALID_SCOPE,
   INVALID_TARGET,
@@ -15,6 +14,9 @@ import {
 } from '../shared/constants';
 import { log } from '../shared/logger';
 import type { RegistryReader, TenantRecord } from '../shared/registry';
+import { tenantScopes } from '../shared/registry';
+import type { ScopeCatalogue } from '../shared/scope-catalogue';
+import { effectiveScopes } from '../shared/scopes';
 import type { ResolvedTenants, TenantSource } from '../topology/provisioner';
 
 /**
@@ -25,7 +27,22 @@ import type { ResolvedTenants, TenantSource } from '../topology/provisioner';
  *
  * The trigger role holds no `cognito-idp` permission (R-14): every Cognito
  * fact it needs is already in the event (`groupConfiguration.groupsToOverride`,
- * `userAttributes`) or in the registry (status).
+ * `userAttributes`, including the `custom:scopes` grant of ADR-0036) or in
+ * the registry (status, the tenant's `scopes` of ADR-0035, and the scope
+ * catalogue of ADR-0034, read through a 60 s cache).
+ *
+ * ## Scopes (spec §8.1, ADR-0035)
+ *
+ *   held(user, tenant) = catalogue ∩ tenant.scopes ∩ granted(user, tenant)
+ *                        ∪ { tenant-admin/users  if user in admin-<tenant> }
+ *
+ * An un-narrowed single-tenant token carries `held` minus the admin scope;
+ * an un-narrowed multi-tenant token the intersection of `held` over its
+ * active tenants (a scope on a token that names several tenants must be true
+ * for every one of them). Narrowing grants exactly the request when every
+ * requested scope is in `held` for the target. An empty catalogue (a
+ * container that has never read it) therefore issues tokens with no scope
+ * and refuses every narrowing with `invalid_scope`, never a guessed scope.
  *
  * Refusals throw an `Error` whose message begins exactly `invalid_target: `
  * or `invalid_scope: ` followed by fixed text. The text never echoes the
@@ -71,6 +88,8 @@ const SCOPE_NOT_HELD = `${INVALID_SCOPE}: a requested scope is not held for the 
 export interface PreTokenGenerationDeps {
   readonly source: TenantSource;
   readonly registry: RegistryReader;
+  /** The scope catalogue (ADR-0034), cached 60 s per container. */
+  readonly catalogue: ScopeCatalogue;
 }
 
 /** A narrowing request read from the two §8.2 keys only. */
@@ -98,15 +117,18 @@ export async function handlePreTokenGeneration(
   // 2. Apply the status rules (P-2, ADR-0008). Produces the ACTIVE set.
   const active = activeTenants(resolved, logBase);
 
-  // 3. Read ONLY the two §8.2 narrowing keys. No other clientMetadata key is
+  // 3. The scope catalogue (ADR-0034). Cached; never throws.
+  const catalogue = await deps.catalogue.names();
+
+  // 4. Read ONLY the two §8.2 narrowing keys. No other clientMetadata key is
   //    read: nothing the caller supplies can add a tenant or a scope (P-3).
   const narrow = readNarrowRequest(event.request.clientMetadata);
 
   if (narrow !== undefined) {
-    return applyNarrowing(event, resolved, active, narrow, logBase);
+    return applyNarrowing(event, resolved, active, catalogue, narrow, logBase);
   }
 
-  return applyUnNarrowed(event, resolved, active, logBase);
+  return applyUnNarrowed(event, resolved, active, catalogue, logBase);
 }
 
 /**
@@ -170,6 +192,7 @@ function applyNarrowing(
   event: PreTokenGenerationV2TriggerEvent,
   resolved: ResolvedTenants,
   active: TenantRecord[],
+  catalogue: ReadonlySet<string>,
   narrow: NarrowRequest,
   logBase: Record<string, string | undefined>,
 ): PreTokenGenerationV2TriggerEvent {
@@ -185,7 +208,7 @@ function applyNarrowing(
     refuse(SCOPE_DUPLICATE, 'narrow-scope-duplicate', { ...logBase, tenantId: target.tenantId });
   }
 
-  const held = scopesHeldFor(event, target.tenantId);
+  const held = scopesHeldFor(event, resolved, target, catalogue);
   for (const scope of requested) {
     if (!held.has(scope)) {
       refuse(SCOPE_NOT_HELD, 'narrow-scope-not-held', { ...logBase, tenantId: target.tenantId });
@@ -253,41 +276,56 @@ function resolveNarrowTenant(
 }
 
 /**
- * The scopes the user holds for a tenant (§8.1): the two API scopes for every
- * member, plus `tenant-admin/users` only if the user is in `admin-<tenant>`.
- * Membership comes from the event's groups, never from caller input.
+ * `held(user, tenant)` (§8.1, ADR-0035): the catalogue, the tenant's
+ * entitlement and the user's grant intersected, plus `tenant-admin/users`
+ * only if the user is in `admin-<tenant>`. Membership and the grant come
+ * from the event's groups and attributes, never from caller input; the
+ * entitlement and the catalogue come from the registry.
  */
-function scopesHeldFor(event: PreTokenGenerationV2TriggerEvent, tenantId: string): Set<string> {
-  const held = new Set<string>(API_SCOPES);
+function scopesHeldFor(
+  event: PreTokenGenerationV2TriggerEvent,
+  resolved: ResolvedTenants,
+  tenant: TenantRecord,
+  catalogue: ReadonlySet<string>,
+): Set<string> {
+  const held = new Set<string>(effectiveScopes(catalogue, tenantScopes(tenant), resolved.grantedScopes(tenant.tenantId)));
   const groups = event.request.groupConfiguration?.groupsToOverride ?? [];
-  if (groups.includes(adminGroupName(tenantId))) {
+  if (groups.includes(adminGroupName(tenant.tenantId))) {
     held.add(SCOPE_TENANT_ADMIN);
   }
   return held;
 }
 
 /**
- * The un-narrowed token (§8 "Output"): `tenant_id` for single topologies,
- * `tenants` (sorted) for multi; API scopes only, never `tenant-admin/users`.
+ * The un-narrowed token (§8 "Output"): `tenant_id` and `held` (ADR-0035) for
+ * single topologies; `tenants` (sorted) and the intersection of `held` over
+ * them for multi. Never `tenant-admin/users`: the admin scope is only ever
+ * narrowed to (ADR-0015).
  */
 function applyUnNarrowed(
   event: PreTokenGenerationV2TriggerEvent,
   resolved: ResolvedTenants,
   active: TenantRecord[],
+  catalogue: ReadonlySet<string>,
   logBase: Record<string, string | undefined>,
 ): PreTokenGenerationV2TriggerEvent {
   if (resolved.kind === 'single') {
-    const tenantId = active[0].tenantId;
-    log.info('pre-token-generation issued', { ...logBase, tenantId });
+    const tenant = active[0];
+    const scopes = effectiveScopes(catalogue, tenantScopes(tenant), resolved.grantedScopes(tenant.tenantId));
+    log.info('pre-token-generation issued', { ...logBase, tenantId: tenant.tenantId });
     event.response.claimsAndScopeOverrideDetails = {
       accessTokenGeneration: {
-        claimsToAddOrOverride: { tenant_id: tenantId },
-        scopesToAdd: [...API_SCOPES],
+        claimsToAddOrOverride: { tenant_id: tenant.tenantId },
+        scopesToAdd: scopes,
       },
       groupOverrideDetails: NO_GROUPS,
     };
     return event;
   }
+
+  // The intersection over the active tenants, in the first tenant's order.
+  const perTenant = active.map((t) => effectiveScopes(catalogue, tenantScopes(t), resolved.grantedScopes(t.tenantId)));
+  const scopes = perTenant[0].filter((scope) => perTenant.every((held) => held.includes(scope)));
 
   // Sorted array of ULIDs (P-6). V2 events accept arrays as claim values;
   // @types/aws-lambda types the map as strings only, hence the cast.
@@ -296,7 +334,7 @@ function applyUnNarrowed(
   event.response.claimsAndScopeOverrideDetails = {
     accessTokenGeneration: {
       claimsToAddOrOverride: { tenants } as unknown as Record<string, string>,
-      scopesToAdd: [...API_SCOPES],
+      scopesToAdd: scopes,
     },
     groupOverrideDetails: NO_GROUPS,
   };
