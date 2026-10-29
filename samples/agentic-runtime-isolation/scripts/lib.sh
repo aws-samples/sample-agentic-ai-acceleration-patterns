@@ -15,6 +15,19 @@ PARAM_PREFIX="/application-plane/shared/agent-runtime"
 SESSION_HEADER="X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"
 GRANT_TYPE='urn:ietf:params:oauth:grant-type:token-exchange'
 REFRESH_TYPE='urn:ietf:params:oauth:token-type:refresh_token'
+# The scope a tenant admin narrows to for the tenant API (tenant-identity ADR-0009).
+TENANT_ADMIN_SCOPE='tenant-admin/users'
+
+# The scopes the demo's backends own (ADR-0025). MUST match DEFAULT_SCOPES and
+# BILLING_SCOPES exported by src/demo.cdk.ts: the default backend owns one,
+# billing owns two, any one of a backend's scopes opens that backend. A
+# tenant holds a scope only when CreateTenant lists it (tenant-identity
+# ADR-0035); a user holds it only when the tenant does and the tenant admin
+# has not cut it (ADR-0036). The scripts create their tenants with these.
+DEFAULT_SCOPE='default/chat'
+BILLING_READ_SCOPE='billing/read'
+BILLING_INVOKE_SCOPE='billing/invoke'
+ALL_DEMO_SCOPES="${DEFAULT_SCOPE} ${BILLING_READ_SCOPE} ${BILLING_INVOKE_SCOPE}"
 
 BODY="${LIB_TMP}/body"
 REQ="${LIB_TMP}/request"
@@ -33,6 +46,9 @@ load_sigv4() {
   SIGV4_SK="$(jq -r .SecretAccessKey <<<"$creds")"
   SIGV4_ST="$(jq -r '.SessionToken // empty' <<<"$creds")"
 }
+
+# scopes_json "a b c" -> ["a","b","c"] (an empty string is []).
+scopes_json() { printf '%s' "$1" | jq -Rc 'split(" ") | map(select(length > 0))'; }
 
 # platform METHOD PATH [JSON] -> HTTP status; body in $BODY.
 platform() {
@@ -58,17 +74,60 @@ identity_init() {
   load_sigv4
 }
 
+# tenant_api METHOD PATH TOKEN_VAR [JSON] -> HTTP status; body in $BODY.
+# The tenant API (`/tenant/*`) takes a bearer token narrowed to
+# tenant-admin/users; TOKEN_VAR is a variable NAME, never printed.
+tenant_api() {
+  local method="$1" path="$2" token_var="$3" data="${4:-}" config
+  local args=(-s -o "$BODY" -w '%{http_code}' -X "$method" --config -)
+  config="header = \"Authorization: Bearer ${!token_var}\""
+  if [[ -n "$data" ]]; then
+    printf '%s' "$data" >"$REQ"
+    args+=(-H 'Content-Type: application/json' --data-binary "@$REQ")
+  fi
+  curl "${args[@]}" "${IDENTITY_API}${path}" <<<"$config"
+}
+
+# scope_catalogue_status -> the HTTP status of GET /platform/scopes (SigV4);
+# body in $BODY. 200 is a tenant-identity with the scope catalogue (ADR-0025);
+# a 403 or 404 whose body says "Missing Authentication Token" is API
+# Gateway's answer for a route the deployed API does not have, i.e. a stale
+# tenant-identity from before its ADR-0034.
+scope_catalogue_status() { platform GET platform/scopes; }
+
+# stale_identity STATUS -> 0 when STATUS and $BODY say the deployment lacks /platform/scopes.
+stale_identity() {
+  [[ "$1" =~ ^(403|404)$ ]] && grep -q 'Missing Authentication Token' "$BODY"
+}
+
 CREATED_TENANTS=()
 
-# create_tenant NAME -> sets TENANT_ID and ADMIN_USERNAME.
+# create_tenant NAME [SCOPES] -> sets TENANT_ID and ADMIN_USERNAME.
+# SCOPES is a space-separated list the tenant is entitled to (ADR-0025,
+# tenant-identity ADR-0035); default: every demo scope. An absent list would
+# leave the tenant with no scopes and every token refused at the ingress.
 create_tenant() {
   local status
   status="$(platform POST platform/tenants \
-    "$(jq -nc --arg n "$1" --arg e "success+${1}-admin@simulator.amazonses.com" '{name: $n, adminEmail: $e}')")"
+    "$(jq -nc --arg n "$1" --arg e "success+${1}-admin@simulator.amazonses.com" --argjson s "$(scopes_json "${2-$ALL_DEMO_SCOPES}")" \
+      '{name: $n, adminEmail: $e, scopes: $s}')")"
   [[ "$status" == 201 ]] || fail "CreateTenant $1: HTTP ${status}"
   TENANT_ID="$(jq -r .tenant.tenantId "$BODY")"
   ADMIN_USERNAME="$(jq -r .admin.user.username "$BODY")"
   CREATED_TENANTS+=("$TENANT_ID")
+}
+
+# set_user_scopes ADMIN_REFRESH_VAR TENANT_ID USERNAME SCOPES -> HTTP status of the PATCH; body in $BODY.
+# The tenant admin narrows to tenant-admin/users and cuts the user's scopes
+# to SCOPES (space-separated, a subset of the tenant's) through the tenant
+# API, PATCH /tenant/users/{username} (tenant-identity ADR-0036). Call it
+# directly, never in $(...).
+set_user_scopes() {
+  narrow "$1" "$2" "$TENANT_ADMIN_SCOPE" ADMIN_NARROWED
+  [[ "$NARROW_STATUS" == 200 ]] || fail "narrow the tenant admin to ${TENANT_ADMIN_SCOPE}: HTTP ${NARROW_STATUS}"
+  SET_SCOPES_STATUS="$(tenant_api PATCH "tenant/users/$3" ADMIN_NARROWED \
+    "$(jq -nc --argjson s "$(scopes_json "$4")" '{admin: false, scopes: $s}')")"
+  ADMIN_NARROWED=""
 }
 
 # create_user TENANT_ID LABEL -> sets USERNAME.
@@ -106,6 +165,9 @@ tamper() {
 }
 
 # narrow REFRESH_VAR TENANT_ID SCOPE OUT_VAR -> sets NARROW_STATUS, and OUT_VAR on 200 (RFC 8693, tenant-identity ADR-0009).
+# SCOPE may be several scopes separated by spaces. A scope the user does not
+# hold (not in the catalogue, not the tenant's, or cut by the tenant admin)
+# is 400 invalid_scope (ADR-0025); callers assert on NARROW_STATUS.
 # Call it directly, never in $(...): a subshell would lose OUT_VAR.
 narrow() {
   local refresh="${!1}" status
@@ -126,6 +188,15 @@ narrow() {
   NARROW_STATUS="$status"
 }
 
+# oauth_error -> the RFC 6749 `error` code of the last refused exchange (body in $BODY).
+oauth_error() { jq -r '.error // empty' "$BODY" 2>/dev/null; }
+
+# expect_invalid_scope WHAT -> fails unless the last narrow was 400 invalid_scope.
+expect_invalid_scope() {
+  [[ "$NARROW_STATUS" == 400 && "$(oauth_error)" == invalid_scope ]] || fail "$1: expected HTTP 400 invalid_scope, got HTTP ${NARROW_STATUS} $(oauth_error)"
+  echo "  $1 -> HTTP 400 invalid_scope"
+}
+
 # delete_tenants: offboards every tenant this run created (exit trap).
 delete_tenants() {
   local t
@@ -137,6 +208,16 @@ delete_tenants() {
 }
 
 # -- The agentic-runtime-isolation endpoint ---------------------------------
+
+# backend_url ENDPOINT_URL NAME -> the URL of one backend's route (ADR-0024).
+# Tolerates either shape of the published endpointUrl: the ingress base
+# (https://<api>/prod) or the default backend's full URL
+# (https://<api>/prod/invocations, https://<gw>/default/invocations).
+backend_url() {
+  local base="${1%/}"
+  base="${base%/invocations}"; base="${base%/default}"
+  echo "${base}/$2/invocations"
+}
 
 LAST_TTFB=""
 LAST_TOTAL=""

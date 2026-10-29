@@ -13,13 +13,15 @@
 # with every module on for the full walk:
 #
 #   npx cdk deploy --context ingress=api-gateway --context session=user \
-#     --context requiredScopes=tenant-api/read --context forwardUserToken=true --context tvm=true
+#     --context forwardUserToken=true --context tvm=true --context billingBackend=true
 #
 # Walks: two tenants and three users; the session follows the token, not the
-# request; resume; refusals; the forwarded scope; a cross-tenant read refused
-# by IAM; streaming; and per-tenant cost (the usage event and the metric).
-# Steps whose module is off are skipped with a note. Creates two tenants and
-# deletes them on exit, also on failure. Conventions: scripts/CONVENTIONS.md.
+# request; resume; refusals; the forwarded scope; the two backends and their
+# own scopes (ADR-0025); a cross-tenant read refused by IAM; streaming; and
+# per-tenant cost (the usage event and the metric). Steps whose module is off
+# are skipped with a note. Creates two tenants (A entitled to every demo
+# scope, B to default/chat) and deletes them on exit, also on failure.
+# Conventions: scripts/CONVENTIONS.md.
 #
 # Needs: bash, aws (v2), curl >= 7.75 (--aws-sigv4), jq. The AWS credentials
 # need execute-api:Invoke on tenant-identity's platform API, ssm:GetParameter,
@@ -73,11 +75,11 @@ trap cleanup EXIT
 step() { printf '\n== %s\n' "$*"; }
 C1="demoConversation${RUN}"
 
-step "1. Two tenants and three users (tenant-identity shared-pool, platform API)"
-create_tenant "rtiso-demo-a-${RUN}"; TENANT_A="$TENANT_ID"; issue_token "$TENANT_A" "$ADMIN_USERNAME" A1
-create_user "$TENANT_A" "rtiso-demo-a2-${RUN}"; issue_token "$TENANT_A" "$USERNAME" A2
-create_tenant "rtiso-demo-b-${RUN}"; TENANT_B="$TENANT_ID"; issue_token "$TENANT_B" "$ADMIN_USERNAME" B1
-echo "tenant A=${TENANT_A} (users A1, A2), tenant B=${TENANT_B} (user B1)"
+step "1. Two tenants and three users (tenant-identity shared-pool, platform API); tenant A holds every demo scope, tenant B default/chat"
+create_tenant "rtiso-demo-a-${RUN}" "$ALL_DEMO_SCOPES"; TENANT_A="$TENANT_ID"; A1_USER="$ADMIN_USERNAME"; issue_token "$TENANT_A" "$A1_USER" A1
+create_user "$TENANT_A" "rtiso-demo-a2-${RUN}"; A2_USER="$USERNAME"; issue_token "$TENANT_A" "$A2_USER" A2
+create_tenant "rtiso-demo-b-${RUN}" "$DEFAULT_SCOPE"; TENANT_B="$TENANT_ID"; B1_USER="$ADMIN_USERNAME"; issue_token "$TENANT_B" "$B1_USER" B1
+echo "tenant A=${TENANT_A} (users A1, A2) holds ${ALL_DEMO_SCOPES}; tenant B=${TENANT_B} (user B1) holds ${DEFAULT_SCOPE}"
 
 step "2. A1 opens conversation c1; the agent reports its session prefix and microVM nonce"
 status="$(invoke "$ENDPOINT" A1_ACCESS "$(jq -nc --arg c "$C1" '{conversationId: $c, prompt: "report"}')")"
@@ -125,13 +127,33 @@ expect_status "401|403" "$status" "ID token instead of an access token"
 
 step "6. Delegation: the scope the agent received"
 if [[ "$FORWARDED" == true ]]; then
-  narrow A1_REFRESH "$TENANT_A" tenant-api/read A1_READ; status="$NARROW_STATUS"
-  expect_status 200 "$status" "narrow A1 to tenant-api/read"
-  status="$(invoke "$ENDPOINT" A1_READ "$(with_c1 report)")"
+  narrow A1_REFRESH "$TENANT_A" "$DEFAULT_SCOPE" A1_CHAT; status="$NARROW_STATUS"
+  expect_status 200 "$status" "narrow A1 to ${DEFAULT_SCOPE}"
+  status="$(invoke "$ENDPOINT" A1_CHAT "$(with_c1 report)")"
   expect_status "200|403" "$status" "A1 with the narrowed token"
   [[ "$status" == 200 ]] && echo "  forwarded scope: $(report_field .forwardedScope)"
 else
   echo "  forwardUserToken is off on this deployment: skipped"
+fi
+
+step "6b. Backend scopes (ADR-0025): billing owns ${BILLING_READ_SCOPE} and ${BILLING_INVOKE_SCOPE}; a tenant and a user hold only what they were given"
+BILLING_URL="$(backend_url "$ENDPOINT" billing)"
+if [[ "$(param "${PARAM_PREFIX}/backends/billing" 2>/dev/null || true)" == *runtimeArn* ]]; then
+  narrow A1_REFRESH "$TENANT_A" "$DEFAULT_SCOPE" A1_CHAT; expect_status 200 "$NARROW_STATUS" "narrow A1 to ${DEFAULT_SCOPE}"
+  status="$(invoke "$BILLING_URL" A1_CHAT "$(with_c1 report)")"; expect_status 403 "$status" "A1 with ${DEFAULT_SCOPE} only on /billing/invocations"
+  narrow A1_REFRESH "$TENANT_A" "$BILLING_INVOKE_SCOPE" A1_INVOKE; expect_status 200 "$NARROW_STATUS" "narrow A1 to ${BILLING_INVOKE_SCOPE}"
+  status="$(invoke "$BILLING_URL" A1_INVOKE "$(with_c1 report)")"; expect_status 200 "$status" "A1 with ${BILLING_INVOKE_SCOPE} on /billing/invocations"
+  echo "  billing answered from its own microVM (nonce=$(report_field .nonce)); the default backend's was ${A1_NONCE}"
+  echo "  the admin of tenant A cuts A2 to ${DEFAULT_SCOPE} ${BILLING_READ_SCOPE} (PATCH /tenant/users/{A2} with a token narrowed to ${TENANT_ADMIN_SCOPE})"
+  set_user_scopes A1_REFRESH "$TENANT_A" "$A2_USER" "${DEFAULT_SCOPE} ${BILLING_READ_SCOPE}"
+  expect_status 200 "$SET_SCOPES_STATUS" "UpdateTenantUser A2"
+  narrow A2_REFRESH "$TENANT_A" "$BILLING_READ_SCOPE" A2_READ; expect_status 200 "$NARROW_STATUS" "narrow A2 to ${BILLING_READ_SCOPE}"
+  status="$(invoke "$BILLING_URL" A2_READ "$(with_c1 report)")"; expect_status 200 "$status" "A2 with ${BILLING_READ_SCOPE} on /billing/invocations"
+  narrow A2_REFRESH "$TENANT_A" "$BILLING_INVOKE_SCOPE" A2_INVOKE; expect_invalid_scope "narrow A2 to ${BILLING_INVOKE_SCOPE} (cut by the admin)"
+  narrow B1_REFRESH "$TENANT_B" "$BILLING_READ_SCOPE" B1_READ; expect_invalid_scope "narrow B1 to ${BILLING_READ_SCOPE} (tenant B is not entitled to billing)"
+  echo "  entitlement lives at the issuer: the ingress only asks whether the token carries one of the backend's scopes"
+else
+  echo "  no billing backend on this deployment (deploy with --context billingBackend=true): skipped"
 fi
 
 step "7. TVM: A1 reads tenant A's item, then tenant B's (IAM decides, P-8)"

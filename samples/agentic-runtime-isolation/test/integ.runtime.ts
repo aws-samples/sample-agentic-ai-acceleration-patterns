@@ -13,12 +13,15 @@
  * | `api-gateway`        | api-gateway       | every module on, two backends with their own scopes, no floor, demo tenant data | 3 to 9, 9-registry |
  * | `agentcore-gateway`  | agentcore-gateway | every module on, two backends with their own scopes, no floor, demo tenant data | 3 to 9, 9-registry |
  * | `session-off`        | api-gateway       | session off, no floor, no forwarding, default role        | 4a, ADR-0018  |
- * | `narrowed`           | api-gateway       | floor `default/chat`, forwarding with requireNarrowedToken, 5 requests/min | 8 (narrowed), limits |
+ * | `narrowed`           | api-gateway       | floor `default/chat`, two backends, forwarding with requireNarrowedToken, 5 requests/min | 8 (narrowed), floor, limits |
  *
  * The all-on stacks carry no ingress-wide floor (ADR-0025): the integration
  * test narrows tokens to one backend scope at a time (`billing/read` alone
  * must reach billing), which a floor would refuse. The `narrowed` stack keeps
- * the floor and the Gateway-style `allowedScopes` on `default/chat`.
+ * the floor (`default/chat`, AND) in front of the two backends' own scopes
+ * (OR), with `allowedScopes` naming all three, so the run shows both checks
+ * on one route: the floor alone is refused on billing, a billing scope alone
+ * is refused by the floor, and the two together pass.
  *
  * `session-off` runs on the construct's default model-only TenantModelRole
  * (no `tvm.role`), so the run also proves a model call is signed by a
@@ -76,7 +79,8 @@ export const INTEG_STACKS: Record<string, DemoContext> = {
     requiredScopes: ['default/chat'],
     forwardUserToken: true,
     requireNarrowedToken: true,
-    allowedScopes: ['default/chat'],
+    allowedScopes: ['default/chat', 'billing/read', 'billing/invoke'],
+    billingBackend: true,
     tvm: false,
     includeUserIdTag: false,
     modelId,

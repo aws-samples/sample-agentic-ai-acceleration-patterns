@@ -7,16 +7,23 @@
 #   AWS_REGION=eu-central-1 scripts/integ.sh      # or: npx projen integ
 #
 # Flow:
-#   1. tenant-identity (shared-pool): reuse a published deployment, else
-#      deploy it through its own path and destroy it at the end (ADR-0004,
-#      tenant-identity ADR-0017). Create tenants A and B, users A1, A2, B1.
+#   1. tenant-identity (shared-pool): reuse a published deployment when it
+#      has the scope catalogue (GET /platform/scopes, ADR-0025); a published
+#      one without it is stale and is destroyed and redeployed from
+#      ../tenant-identity (and left in place, republished); none at all is
+#      deployed and destroyed at the end (ADR-0004, tenant-identity
+#      ADR-0017). Create tenant A entitled to every demo scope and tenant B
+#      to default/chat; users A1 (admin), A2, B1; A1 cuts A2 to default/chat
+#      and billing/read through the tenant API; check what each can narrow to.
 #   2. Synthesise test/integ.runtime.ts and deploy its four stacks at once.
 #   3..9 on both all-on stacks (api-gateway, agentcore-gateway).
-#   9-registry (ADR-0024) on both: the second backend `billing` and its scope,
-#      an unknown backend name; on api-gateway also a backend added and
-#      drained through a registry write after the deploy.
+#   9-registry (ADR-0024, ADR-0025) on both: the second backend `billing`
+#      and its scopes (any one admits), an unknown backend name; on
+#      api-gateway also a backend added and drained through a registry write
+#      after the deploy.
 #   4a on the session-off stack (also a model call on the default role).
-#   8 (narrowed) and the per-tenant limit (ADR-0020) on the narrowed stack.
+#   8 (narrowed), the floor plus the backend scopes, and the per-tenant
+#      limit (ADR-0020) on the narrowed stack.
 #   8b per-tenant metrics; then scripts/demo.sh against the published stack.
 #  10. Destroy from the EXIT trap (also on failure); assert nothing is left.
 #
@@ -52,12 +59,8 @@ STARTED="$(date -u +%FT%TZ)"
 RESULTS="${LIB_TMP}/results"
 : >"$RESULTS"
 
-# The scope the demo's second backend `billing` requires on top of the
-# ingress floor (ADR-0024). MUST match BILLING_SCOPE exported by
-# src/demo.cdk.ts. tenant-identity shared-pool issues only tenant-api/read
-# and tenant-api/write, and the floor is tenant-api/read, so write is the
-# only scope the identity provider can narrow a token to for this check.
-BILLING_SCOPE="tenant-api/write"
+# The demo scopes (DEFAULT_SCOPE, BILLING_READ_SCOPE, BILLING_INVOKE_SCOPE)
+# come from lib.sh and MUST match src/demo.cdk.ts (ADR-0025).
 # Registry entries this script wrote (step 9-registry); removed in cleanup.
 LATE_PARAMS=()
 
@@ -157,39 +160,69 @@ step() { echo "== step $1: $2"; }
 output() { jq -r --arg s "${STACK_PREFIX}-$1" --arg k "$2" '.[$s][$k] // empty' "${LIB_TMP}/outputs.json"; }
 body() { jq -nc --arg c "$1" --arg p "$2" '{conversationId: $c, prompt: $p}'; }
 
-# backend_url ENDPOINT_URL NAME -> the URL of one backend's route (ADR-0024).
-# Tolerates either shape of the published endpointUrl: the ingress base
-# (https://<api>/prod) or the default backend's full URL
-# (https://<api>/prod/invocations, https://<gw>/agent/invocations).
-backend_url() {
-  local base="${1%/}"
-  base="${base%/invocations}"; base="${base%/agent}"
-  echo "${base}/$2/invocations"
+# registry_entry RUNTIME_ARN SCOPES_JSON STATUS -> the entry JSON (src/shared/registry.ts schema).
+registry_entry() { jq -nc --arg a "$1" --argjson s "$2" --arg st "$3" '{runtimeArn: $a, scopes: $s, status: $st}'; }
+
+# deploy_identity -> builds and deploys TenantIdentity-shared-pool from ../tenant-identity (its own path).
+deploy_identity() {
+  echo "  deploying ${IDENTITY_STACK} through its own path (npm ci if needed, projen build, cdk deploy)"
+  (cd "$IDENTITY_DIR" \
+    && { [[ -d node_modules ]] || npm ci --no-audit --no-fund >"${LIB_TMP}/identity-install.log" 2>&1; } \
+    && npx projen build >"${LIB_TMP}/identity-build.log" 2>&1 \
+    && npx cdk deploy "$IDENTITY_STACK" --context topology=shared-pool --require-approval never >"${LIB_TMP}/identity-deploy.log" 2>&1) \
+    || { tail -30 "${LIB_TMP}/identity-deploy.log" "${LIB_TMP}/identity-build.log" "${LIB_TMP}/identity-install.log" >&2 2>/dev/null; fail "deploy ${IDENTITY_STACK}"; }
 }
 
-# registry_entry RUNTIME_ARN SCOPES_JSON STATUS -> the entry JSON (src/shared/registry.ts schema).
-registry_entry() { jq -nc --arg a "$1" --argjson s "$2" --arg st "$3" '{runtimeArn: $a, requiredScopes: $s, status: $st}'; }
-
 # --------------------------------------------------------------------------
-# 1. tenant-identity (shared-pool), reused or deployed
+# 1. tenant-identity (shared-pool): reused, republished when stale, or deployed
 # --------------------------------------------------------------------------
 step 1 "tenant-identity shared-pool"
 if aws ssm get-parameter --name "${IDENTITY_PREFIX}/apiUrl" --query Parameter.Name --output text >/dev/null 2>&1; then
-  echo "  reusing the published tenant-identity deployment"
+  identity_init
+  # A published deployment from before the scope catalogue has no
+  # /platform/scopes route; API Gateway answers "Missing Authentication
+  # Token" for it. The backends' ScopeRegistration would fail against it, so
+  # it is replaced by the current ../tenant-identity, which stays published.
+  status="$(scope_catalogue_status)"
+  if [[ "$status" == 200 ]]; then
+    echo "  reusing the published tenant-identity deployment (GET /platform/scopes -> HTTP 200)"
+  elif stale_identity "$status"; then
+    echo "  the published tenant-identity is stale (GET /platform/scopes -> HTTP ${status}, no such route): destroying and redeploying it from ${IDENTITY_DIR}"
+    (cd "$IDENTITY_DIR" && npx cdk destroy "$IDENTITY_STACK" --context topology=shared-pool --force >"${LIB_TMP}/identity-stale-destroy.log" 2>&1) \
+      || { tail -30 "${LIB_TMP}/identity-stale-destroy.log" >&2; fail "destroy the stale ${IDENTITY_STACK}"; }
+    deploy_identity
+    identity_init
+    status="$(scope_catalogue_status)"; expect_status 200 "$status" "GET /platform/scopes on the redeployed tenant-identity"
+  else
+    fail "GET /platform/scopes on the published tenant-identity: HTTP ${status} (neither the catalogue nor a missing route)"
+  fi
 else
-  echo "  deploying ${IDENTITY_STACK} through its own path (projen build, cdk deploy)"
   DEPLOYED_IDENTITY=1
-  (cd "$IDENTITY_DIR" && npx projen build >"${LIB_TMP}/identity-build.log" 2>&1 \
-    && npx cdk deploy "$IDENTITY_STACK" --context topology=shared-pool --require-approval never >"${LIB_TMP}/identity-deploy.log" 2>&1) \
-    || { tail -30 "${LIB_TMP}/identity-deploy.log" "${LIB_TMP}/identity-build.log" >&2 2>/dev/null; fail "deploy ${IDENTITY_STACK}"; }
+  deploy_identity
+  identity_init
 fi
-identity_init
-create_tenant "rtiso-integ-a-${RUN}"; TENANT_A="$TENANT_ID"; A1_USER="$ADMIN_USERNAME"; issue_token "$TENANT_A" "$A1_USER" A1
+
+# Tenant A is entitled to every demo scope, tenant B to default/chat only
+# (CreateTenant.scopes, tenant-identity ADR-0035). The admin of A then cuts
+# A2 to default/chat and billing/read through the tenant API (ADR-0036).
+create_tenant "rtiso-integ-a-${RUN}" "$ALL_DEMO_SCOPES"; TENANT_A="$TENANT_ID"; A1_USER="$ADMIN_USERNAME"; issue_token "$TENANT_A" "$A1_USER" A1
 create_user "$TENANT_A" "rtiso-integ-a2-${RUN}"; A2_USER="$USERNAME"; issue_token "$TENANT_A" "$A2_USER" A2
-create_tenant "rtiso-integ-b-${RUN}"; TENANT_B="$TENANT_ID"; B1_USER="$ADMIN_USERNAME"; issue_token "$TENANT_B" "$B1_USER" B1
-echo "  tenant A=${TENANT_A} (A1, A2), tenant B=${TENANT_B} (B1)"
-narrow A1_REFRESH "$TENANT_A" tenant-api/read A1_READ; status="$NARROW_STATUS"; expect_status 200 "$status" "narrow A1 to tenant-api/read"
-narrow A1_REFRESH "$TENANT_A" tenant-api/write A1_WRITE; status="$NARROW_STATUS"; expect_status 200 "$status" "narrow A1 to tenant-api/write"
+create_tenant "rtiso-integ-b-${RUN}" "$DEFAULT_SCOPE"; TENANT_B="$TENANT_ID"; B1_USER="$ADMIN_USERNAME"; issue_token "$TENANT_B" "$B1_USER" B1
+echo "  tenant A=${TENANT_A} (A1, A2) holds ${ALL_DEMO_SCOPES}; tenant B=${TENANT_B} (B1) holds ${DEFAULT_SCOPE}"
+set_user_scopes A1_REFRESH "$TENANT_A" "$A2_USER" "${DEFAULT_SCOPE} ${BILLING_READ_SCOPE}"
+expect_status 200 "$SET_SCOPES_STATUS" "A1 (tenant admin) cuts A2 to ${DEFAULT_SCOPE} ${BILLING_READ_SCOPE} via PATCH /tenant/users/{A2}"
+# A2's next token reflects the cut (tokens are minted per ingress below too).
+issue_token "$TENANT_A" "$A2_USER" A2
+
+# What each user can narrow to (ADR-0025): the issuer refuses a scope the
+# tenant is not entitled to, or the admin cut, with 400 invalid_scope.
+narrow A1_REFRESH "$TENANT_A" "$DEFAULT_SCOPE" A1_CHAT; expect_status 200 "$NARROW_STATUS" "narrow A1 to ${DEFAULT_SCOPE}"
+narrow A1_REFRESH "$TENANT_A" "$BILLING_INVOKE_SCOPE" A1_INVOKE; expect_status 200 "$NARROW_STATUS" "narrow A1 to ${BILLING_INVOKE_SCOPE}"
+narrow A2_REFRESH "$TENANT_A" "$BILLING_READ_SCOPE" A2_READ; expect_status 200 "$NARROW_STATUS" "narrow A2 to ${BILLING_READ_SCOPE} (kept by the admin)"
+narrow A2_REFRESH "$TENANT_A" "$BILLING_INVOKE_SCOPE" A2_INVOKE; expect_invalid_scope "narrow A2 to ${BILLING_INVOKE_SCOPE} (cut by the admin)"
+narrow B1_REFRESH "$TENANT_B" "$BILLING_READ_SCOPE" B1_READ; expect_invalid_scope "narrow B1 to ${BILLING_READ_SCOPE} (tenant B is not entitled)"
+narrow B1_REFRESH "$TENANT_B" "$DEFAULT_SCOPE" B1_CHAT; expect_status 200 "$NARROW_STATUS" "narrow B1 to ${DEFAULT_SCOPE}"
+echo "scopes: A1 ${DEFAULT_SCOPE}/${BILLING_INVOKE_SCOPE} 200; A2 ${BILLING_READ_SCOPE} 200, ${BILLING_INVOKE_SCOPE} invalid_scope; B1 ${BILLING_READ_SCOPE} invalid_scope" >>"$RESULTS"
 
 # --------------------------------------------------------------------------
 # 2. Deploy the four stacks
@@ -221,13 +254,15 @@ for INGRESS in api-gateway agentcore-gateway; do
   # token on every request and refuses an expired one. A full run outlives
   # 300s, so mint this iteration's tokens fresh here rather than reuse step
   # 1's (first integ 2026-10-28: the gateway 403'd a step-1 token by the time
-  # its loop ran). Refresh tokens are long-lived, so A1_READ/A1_WRITE narrow
-  # from A1_REFRESH.
+  # its loop ran). Refresh tokens are long-lived, so the narrowed tokens come
+  # from the refresh tokens.
   issue_token "$TENANT_A" "$A1_USER" A1
   issue_token "$TENANT_A" "$A2_USER" A2
   issue_token "$TENANT_B" "$B1_USER" B1
-  narrow A1_REFRESH "$TENANT_A" tenant-api/read A1_READ; [[ "$NARROW_STATUS" == 200 ]] || fail "re-narrow A1 to tenant-api/read: HTTP ${NARROW_STATUS}"
-  narrow A1_REFRESH "$TENANT_A" tenant-api/write A1_WRITE; [[ "$NARROW_STATUS" == 200 ]] || fail "re-narrow A1 to tenant-api/write: HTTP ${NARROW_STATUS}"
+  narrow A1_REFRESH "$TENANT_A" "$DEFAULT_SCOPE" A1_CHAT; [[ "$NARROW_STATUS" == 200 ]] || fail "re-narrow A1 to ${DEFAULT_SCOPE}: HTTP ${NARROW_STATUS}"
+  narrow A1_REFRESH "$TENANT_A" "$BILLING_READ_SCOPE" A1_READ; [[ "$NARROW_STATUS" == 200 ]] || fail "re-narrow A1 to ${BILLING_READ_SCOPE}: HTTP ${NARROW_STATUS}"
+  narrow A1_REFRESH "$TENANT_A" "$BILLING_INVOKE_SCOPE" A1_INVOKE; [[ "$NARROW_STATUS" == 200 ]] || fail "re-narrow A1 to ${BILLING_INVOKE_SCOPE}: HTTP ${NARROW_STATUS}"
+  narrow A2_REFRESH "$TENANT_A" "$BILLING_READ_SCOPE" A2_READ; [[ "$NARROW_STATUS" == 200 ]] || fail "re-narrow A2 to ${BILLING_READ_SCOPE}: HTTP ${NARROW_STATUS}"
   ENDPOINT="$(output "$INGRESS" EndpointUrl)"
   RUNTIME_ARN="$(output "$INGRESS" RuntimeArn)"
   TENANT_ROLE="$(output "$INGRESS" TenantRoleArn)"
@@ -268,15 +303,15 @@ for INGRESS in api-gateway agentcore-gateway; do
   status="$(invoke "$ENDPOINT" A1_ID "$(body "$C1" report)")"; expect_status "401|403" "$status" "ID token"
   status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "bad!" report)")"; expect_status "400|403" "$status" "malformed conversationId"
 
-  step 7 "requiredScopes: a token narrowed to tenant-api/write only is refused"
-  status="$(invoke "$ENDPOINT" A1_WRITE "$(body "$C1" report)")"; expect_status 403 "$status" "tenant-api/write only"
+  step 7 "backend scopes (ADR-0025): a token narrowed to ${BILLING_READ_SCOPE} only is refused on the default backend"
+  status="$(invoke "$ENDPOINT" A1_READ "$(body "$C1" report)")"; expect_status 403 "$status" "${BILLING_READ_SCOPE} only on the default backend"
 
   step 8 "forwarding on: the agent reports the forwarded token's scope"
-  status="$(invoke "$ENDPOINT" A1_READ "$(body "$C1" report)")"; expect_status 200 "$status" "narrowed to tenant-api/read"
+  status="$(invoke "$ENDPOINT" A1_CHAT "$(body "$C1" report)")"; expect_status 200 "$status" "narrowed to ${DEFAULT_SCOPE}"
   [[ "$(report_field .forwardedToken)" == true ]] || fail "no user token reached the agent"
-  [[ "$(report_field .forwardedScope)" == tenant-api/read ]] || fail "forwarded scope is $(report_field .forwardedScope)"
+  [[ "$(report_field .forwardedScope)" == "$DEFAULT_SCOPE" ]] || fail "forwarded scope is $(report_field .forwardedScope)"
   [[ "$(report_field .forwardedTenant)" == "$TENANT_A" ]] || fail "forwarded tenant is not A"
-  echo "  forwarded scope=tenant-api/read tenant=A"
+  echo "  forwarded scope=${DEFAULT_SCOPE} tenant=A"
 
   step 8a "TVM: A1 reads tenant A (ok) and tenant B (denied); the runner cannot assume the tenant role"
   status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "$C1" "read ${TENANT_A}")")"; expect_status 200 "$status" "read A"
@@ -321,9 +356,10 @@ for INGRESS in api-gateway agentcore-gateway; do
   echo "${INGRESS} stream 10: TTFB ${LAST_TTFB}s total ${LAST_TOTAL}s" >>"$RESULTS"
 
   # ------------------------------------------------------------------------
-  # 9-registry (ADR-0024): two backends behind one ingress
+  # 9-registry (ADR-0024, ADR-0025): two backends behind one ingress, each
+  # owning its scopes
   # ------------------------------------------------------------------------
-  step 9-registry "backend registry: billing scope, unknown name, a backend added and drained after the deploy"
+  step 9-registry "backend registry: billing scopes (any one admits), entitlement, unknown name, a backend added and drained after the deploy"
   # Each ingress publishes under its own registryPrefix (two ingresses in one
   # account collide on the default). The stack says which; the default is the
   # publisher's.
@@ -336,42 +372,62 @@ for INGRESS in api-gateway agentcore-gateway; do
   BILLING_RUNTIME_ARN="$(jq -r .runtimeArn <<<"$BILLING_ENTRY")"
   [[ "$BILLING_RUNTIME_ARN" == arn:*:bedrock-agentcore:*:runtime/* ]] || fail "backends/billing has no Runtime ARN"
   [[ "$BILLING_RUNTIME_ARN" != "$RUNTIME_ARN" ]] || fail "billing's registry entry names the default backend's Runtime"
-  jq -e --arg s "$BILLING_SCOPE" '.status == "active" and (.requiredScopes | index($s) != null)' <<<"$BILLING_ENTRY" >/dev/null \
-    || fail "backends/billing is not active with requiredScopes containing ${BILLING_SCOPE} (BILLING_SCOPE must match src/demo.cdk.ts)"
-  echo "  registry prefix ${REGISTRY_PREFIX}: billing is active, its own Runtime, requires ${BILLING_SCOPE}"
+  jq -e --arg r "$BILLING_READ_SCOPE" --arg i "$BILLING_INVOKE_SCOPE" '.status == "active" and (.scopes | index($r) != null) and (.scopes | index($i) != null) and (.requiredScopes == null)' <<<"$BILLING_ENTRY" >/dev/null \
+    || fail "backends/billing is not active with scopes ${BILLING_READ_SCOPE} and ${BILLING_INVOKE_SCOPE} (the demo scopes must match src/demo.cdk.ts)"
+  DEFAULT_ENTRY="$(param "${REGISTRY_PREFIX}backends/default")" || fail "registry entry ${REGISTRY_PREFIX}backends/default not found"
+  jq -e --arg s "$DEFAULT_SCOPE" '.scopes == [$s]' <<<"$DEFAULT_ENTRY" >/dev/null || fail "backends/default does not own exactly ${DEFAULT_SCOPE}"
+  echo "  registry prefix ${REGISTRY_PREFIX}: billing is active, its own Runtime, owns ${BILLING_READ_SCOPE} and ${BILLING_INVOKE_SCOPE}; default owns ${DEFAULT_SCOPE}"
 
-  # (ii) the floor-scope token reaches the default backend only; the billing scope opens billing
-  narrow A1_REFRESH "$TENANT_A" tenant-api/read A1_READ; [[ "$NARROW_STATUS" == 200 ]] || fail "re-narrow A1 to the floor before step 9: HTTP ${NARROW_STATUS}"
-  status="$(invoke "$ENDPOINT" A1_READ "$(body "$C1" report)")"; expect_status 200 "$status" "floor-scope token on the default backend"
-  status="$(invoke "$BILLING_URL" A1_READ "$(body "$C1" report)")"; expect_status 403 "$status" "floor-scope token on billing"
-  narrow A1_REFRESH "$TENANT_A" "tenant-api/read ${BILLING_SCOPE}" A1_BILLING; status="$NARROW_STATUS"; expect_status 200 "$status" "narrow A1 to the floor plus ${BILLING_SCOPE}"
-  status="$(invoke "$BILLING_URL" A1_BILLING "$(body "$C1" report)")"; expect_status 200 "$status" "billing-scope token on billing"
+  # (i-b) the catalogue holds the three scopes the two backends registered (ADR-0025)
+  status="$(scope_catalogue_status)"; expect_status 200 "$status" "GET /platform/scopes"
+  for s in $ALL_DEMO_SCOPES; do
+    jq -e --arg s "$s" '.scopes | map(.name) | index($s) != null' "$BODY" >/dev/null || fail "scope ${s} is not in tenant-identity's catalogue (ScopeRegistration)"
+  done
+  jq -e '.scopes | map(select(.name | startswith("billing/"))) | all(.owner == "billing")' "$BODY" >/dev/null || fail "the billing scopes are not owned by billing in the catalogue"
+  echo "  the catalogue lists ${ALL_DEMO_SCOPES}, owners default and billing"
+
+  # (ii) any one of billing's scopes opens billing (OR); default/chat alone does not;
+  # the entitlement is the issuer's: B cannot narrow to billing at all, A2 only to billing/read
+  status="$(invoke "$ENDPOINT" A1_CHAT "$(body "$C1" report)")"; expect_status 200 "$status" "${DEFAULT_SCOPE} token on the default backend"
+  status="$(invoke "$BILLING_URL" A1_CHAT "$(body "$C1" report)")"; expect_status 403 "$status" "${DEFAULT_SCOPE} token on billing"
+  status="$(invoke "$BILLING_URL" A1_INVOKE "$(body "$C1" report)")"; expect_status 200 "$status" "A1 narrowed to ${BILLING_INVOKE_SCOPE} on billing"
   [[ "$(report_field .credentials)" == true ]] || fail "no vended credentials reached the billing backend"
+  [[ "$(report_field .forwardedScope)" == "$BILLING_INVOKE_SCOPE" ]] || fail "billing saw forwarded scope $(report_field .forwardedScope)"
   BILLING_NONCE="$(report_field .nonce)"
-  status="$(invoke "$ENDPOINT" A1_BILLING "$(body "$C1" report)")"; expect_status 200 "$status" "billing-scope token on the default backend"
+  status="$(invoke "$BILLING_URL" A2_READ "$(body "$C1" report)")"; expect_status 200 "$status" "A2 (cut to ${BILLING_READ_SCOPE} by the tenant admin) on billing"
+  [[ "$(report_field .forwardedScope)" == "$BILLING_READ_SCOPE" ]] || fail "billing saw forwarded scope $(report_field .forwardedScope) for A2"
+  status="$(invoke "$ENDPOINT" A1_INVOKE "$(body "$C1" report)")"; expect_status 403 "$status" "${BILLING_INVOKE_SCOPE} token on the default backend"
+  narrow B1_REFRESH "$TENANT_B" "$BILLING_READ_SCOPE" B1_READ; expect_invalid_scope "B1 narrowed to ${BILLING_READ_SCOPE} (tenant B holds ${DEFAULT_SCOPE} only)"
+  narrow A2_REFRESH "$TENANT_A" "$BILLING_INVOKE_SCOPE" A2_INVOKE; expect_invalid_scope "A2 narrowed to ${BILLING_INVOKE_SCOPE} (cut by the admin)"
+  # The same conversationId on two backends is two units: billing answered A1 from one microVM, the default backend from another.
+  status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "$C1" report)")"; expect_status 200 "$status" "A1's un-narrowed token on the default backend"
   [[ "$(report_field .nonce)" != "$BILLING_NONCE" ]] || fail "the default backend and billing answered from the same microVM"
-  echo "  the same conversationId on two backends is two units"
+  status="$(invoke "$BILLING_URL" A1_ACCESS "$(body "$C1" report)")"; expect_status 200 "$status" "A1's un-narrowed token (all three scopes) on billing"
+  [[ "$(report_field .nonce)" == "$BILLING_NONCE" ]] || fail "billing did not resume A1's conversation on the same microVM"
+  echo "  any one billing scope opens billing, default/chat does not; B and the cut A2 are refused by the issuer; two backends, two units"
 
   # (iii) an unknown backend name. On api-gateway the authoriser resolves the
   # name; its Deny surfaces as API Gateway's own 403, and a design that lets
   # the integration Lambda answer gives 404 instead. Either is a refusal
   # before the Runtime; which one is recorded, not asserted. The Gateway
   # refuses a target it does not have by itself, with its own status.
-  status="$(invoke "$(backend_url "$PUBLISHED_ENDPOINT" nosuch)" A1_BILLING "$(body "$C1" report)")"
+  status="$(invoke "$(backend_url "$PUBLISHED_ENDPOINT" nosuch)" A1_ACCESS "$(body "$C1" report)")"
   if [[ "$INGRESS" == api-gateway ]]; then
     expect_status "403|404" "$status" "unknown backend /nosuch"
   else
     [[ "$status" != 200 ]] || fail "unknown backend /nosuch: the Gateway served it"
     echo "  unknown backend /nosuch -> HTTP ${status} (the Gateway's own refusal)"
   fi
-  echo "${INGRESS} registry: billing 403 floor/200 scoped, unknown backend HTTP ${status}" >>"$RESULTS"
+  echo "${INGRESS} registry: billing 403 default/chat, 200 billing/invoke (A1), 200 billing/read (A2); unknown backend HTTP ${status}" >>"$RESULTS"
 
   # (iv) a backend added by a registry write after the ingress deploy, then
   # drained. api-gateway only: on agentcore-gateway a backend is also a
   # Gateway target, which the registry alone cannot create. The entry points
-  # `late` at billing's Runtime with no extra scopes, so the floor token must
-  # reach it through the tag-conditioned grant (ADR-0024) once the ingress's
-  # registry cache (registryTtl, 60 s) has turned over. Each poll mints a
+  # `late` at billing's Runtime and names billing's scopes (an entry must
+  # carry scopes, ADR-0025; `late/*` would be refused by the issuer), so the
+  # billing/invoke token must reach it through the tag-conditioned grant
+  # (ADR-0024) once the ingress's registry cache (registryTtl, 60 s) has
+  # turned over. Each poll mints a
   # fresh token: the API Gateway authoriser caches its result per token (300
   # s, ADR-0015), so a Deny cached on the first poll, or an Allow cached
   # before the drain, would otherwise hide the change for longer than the
@@ -381,11 +437,12 @@ for INGRESS in api-gateway agentcore-gateway; do
     LATE_PARAM="${REGISTRY_PREFIX}backends/late"
     LATE_URL="$(backend_url "$PUBLISHED_ENDPOINT" late)"
     LATE_PARAMS+=("$LATE_PARAM")
+    LATE_SCOPES="$(scopes_json "$BILLING_INVOKE_SCOPE")"
     aws ssm put-parameter --name "$LATE_PARAM" --type String --overwrite \
-      --value "$(registry_entry "$BILLING_RUNTIME_ARN" '[]' active)" >/dev/null
+      --value "$(registry_entry "$BILLING_RUNTIME_ARN" "$LATE_SCOPES" active)" >/dev/null
     deadline=$((SECONDS + 90)); served=""
     while [[ $SECONDS -lt $deadline ]]; do
-      narrow A1_REFRESH "$TENANT_A" tenant-api/read A1_LATE; [[ "$NARROW_STATUS" == 200 ]] || fail "narrow A1 for the late probe: HTTP ${NARROW_STATUS}"
+      narrow A1_REFRESH "$TENANT_A" "$BILLING_INVOKE_SCOPE" A1_LATE; [[ "$NARROW_STATUS" == 200 ]] || fail "narrow A1 for the late probe: HTTP ${NARROW_STATUS}"
       status="$(invoke "$LATE_URL" A1_LATE "$(body "$C1" report)")"
       if [[ "$status" == 200 ]]; then served=$((SECONDS - deadline + 90)); break; fi
       [[ "$status" =~ ^(403|404)$ ]] || fail "late backend probe: HTTP ${status}"
@@ -397,10 +454,10 @@ for INGRESS in api-gateway agentcore-gateway; do
     [[ "$(report_field .nonce)" == "$BILLING_NONCE" ]] || fail "late backend did not answer from billing's Runtime (nonce differs)"
     echo "  /late served ${served}s after the registry write, on billing's microVM, with no ingress deploy"
     aws ssm put-parameter --name "$LATE_PARAM" --type String --overwrite \
-      --value "$(registry_entry "$BILLING_RUNTIME_ARN" '[]' draining)" >/dev/null
+      --value "$(registry_entry "$BILLING_RUNTIME_ARN" "$LATE_SCOPES" draining)" >/dev/null
     deadline=$((SECONDS + 90)); drained=""
     while [[ $SECONDS -lt $deadline ]]; do
-      narrow A1_REFRESH "$TENANT_A" tenant-api/read A1_LATE; [[ "$NARROW_STATUS" == 200 ]] || fail "narrow A1 for the drain probe: HTTP ${NARROW_STATUS}"
+      narrow A1_REFRESH "$TENANT_A" "$BILLING_INVOKE_SCOPE" A1_LATE; [[ "$NARROW_STATUS" == 200 ]] || fail "narrow A1 for the drain probe: HTTP ${NARROW_STATUS}"
       status="$(invoke "$LATE_URL" A1_LATE "$(body "$C1" report)")"
       if [[ "$status" =~ ^(403|404)$ ]]; then drained=$((SECONDS - deadline + 90)); break; fi
       [[ "$status" == 200 ]] || fail "draining backend probe: HTTP ${status}"
@@ -441,22 +498,33 @@ echo "  usage: $(usage_json)"
 echo "---- stack: narrowed"
 ENDPOINT="$(output narrowed EndpointUrl)"
 step 8-narrowed "requireNarrowedToken: un-narrowed refused, narrowed accepted"
+narrow A1_REFRESH "$TENANT_A" "$DEFAULT_SCOPE" A1_CHAT; [[ "$NARROW_STATUS" == 200 ]] || fail "re-narrow A1 to ${DEFAULT_SCOPE}: HTTP ${NARROW_STATUS}"
 status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "integConversation${RUN}" report)")"; expect_status 403 "$status" "un-narrowed token"
-status="$(invoke "$ENDPOINT" A1_READ "$(body "integConversation${RUN}" report)")"; expect_status 200 "$status" "narrowed token"
-[[ "$(report_field .forwardedScope)" == tenant-api/read ]] || fail "narrowed: forwarded scope $(report_field .forwardedScope)"
+status="$(invoke "$ENDPOINT" A1_CHAT "$(body "integConversation${RUN}" report)")"; expect_status 200 "$status" "narrowed token"
+[[ "$(report_field .forwardedScope)" == "$DEFAULT_SCOPE" ]] || fail "narrowed: forwarded scope $(report_field .forwardedScope)"
+
+step floor "ingress-wide floor ${DEFAULT_SCOPE} (AND, ADR-0005) plus the backend's own scopes (OR, ADR-0025) on the narrowed stack"
+NARROWED_BILLING_URL="$(backend_url "$ENDPOINT" billing)"
+status="$(invoke "$NARROWED_BILLING_URL" A1_CHAT "$(body "integConversation${RUN}" report)")"; expect_status 403 "$status" "floor-only token on billing"
+narrow A1_REFRESH "$TENANT_A" "$BILLING_READ_SCOPE" A1_READ; [[ "$NARROW_STATUS" == 200 ]] || fail "re-narrow A1 to ${BILLING_READ_SCOPE}: HTTP ${NARROW_STATUS}"
+status="$(invoke "$NARROWED_BILLING_URL" A1_READ "$(body "integConversation${RUN}" report)")"; expect_status 403 "$status" "${BILLING_READ_SCOPE} without the floor on billing"
+narrow A1_REFRESH "$TENANT_A" "${DEFAULT_SCOPE} ${BILLING_READ_SCOPE}" A1_FLOOR_READ; [[ "$NARROW_STATUS" == 200 ]] || fail "narrow A1 to the floor plus ${BILLING_READ_SCOPE}: HTTP ${NARROW_STATUS}"
+status="$(invoke "$NARROWED_BILLING_URL" A1_FLOOR_READ "$(body "integConversation${RUN}" report)")"; expect_status 200 "$status" "floor plus ${BILLING_READ_SCOPE} on billing"
+status="$(invoke "$ENDPOINT" A1_FLOOR_READ "$(body "integConversation${RUN}" report)")"; expect_status 200 "$status" "floor plus ${BILLING_READ_SCOPE} on the default backend"
+echo "narrowed stack floor: 403 floor-only on billing, 403 billing/read without the floor, 200 with both" >>"$RESULTS"
 
 step limits "per-tenant limit, 5 requests/min (ADR-0020): tenant A is limited, tenant B is not"
-narrow B1_REFRESH "$TENANT_B" tenant-api/read B1_READ; status="$NARROW_STATUS"; expect_status 200 "$status" "narrow B1 to tenant-api/read"
+narrow B1_REFRESH "$TENANT_B" "$DEFAULT_SCOPE" B1_CHAT; status="$NARROW_STATUS"; expect_status 200 "$status" "narrow B1 to ${DEFAULT_SCOPE}"
 limited=0
 for i in $(seq 1 12); do
-  status="$(invoke "$ENDPOINT" A1_READ "$(body "integConversation${RUN}" report)")"
+  status="$(invoke "$ENDPOINT" A1_CHAT "$(body "integConversation${RUN}" report)")"
   if [[ "$status" == 429 ]]; then limited=$i; break; fi
   [[ "$status" == 200 ]] || fail "limit probe call $i: HTTP $status"
 done
 [[ "$limited" -gt 0 ]] || fail "tenant A was never limited in 12 calls"
 [[ "$(cat "$BODY")" == "too many requests" ]] || fail "429 body is not the fixed text"
 echo "  tenant A: 429 on call ${limited}"
-status="$(invoke "$ENDPOINT" B1_READ "$(body "integConversation${RUN}" report)")"; expect_status 200 "$status" "tenant B while A is limited"
+status="$(invoke "$ENDPOINT" B1_CHAT "$(body "integConversation${RUN}" report)")"; expect_status 200 "$status" "tenant B while A is limited"
 echo "limits narrowed stack: tenant A 429 on call ${limited}, tenant B 200" >>"$RESULTS"
 
 # --------------------------------------------------------------------------
