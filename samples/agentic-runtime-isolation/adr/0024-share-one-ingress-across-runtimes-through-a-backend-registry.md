@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0024: Share one ingress across several Runtimes through a backend registry
 
-- Status: Accepted
+- Status: Accepted. Amended by ADR-0025.
 - Date: 2026-10-28 (accepted on the first green integration run; first proposed 2026-10-27)
 - Deciders: Dave Roberts (PSA)
 
@@ -261,3 +261,5 @@ ingresses on 2026-10-28. Confirmed on that run: the interceptor event names the 
 so the `request admitted` line carries `backend` and `/billing` routed to
 its own Runtime. Revisit if a deployer needs per-backend tenant roles or
 per-backend concurrency.
+
+Amended by ADR-0025: the registry entry's `requiredScopes` (AND on top of the floor, free names from tenant-identity's fixed set) is renamed `scopes` and becomes the backend's own, `<name>/<action>`, checked any-of; `AgentBackend` registers them with tenant-identity before writing the entry, so adding a backend still needs no ingress deploy and now no identity deploy either.

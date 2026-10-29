@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0005: Make scope checks optional and enforce them at ingress
 
-- Status: Accepted
+- Status: Accepted. Amended by ADR-0025.
 - Date: 2026-10-26
 - Deciders: Dave Roberts (PSA)
 
@@ -22,3 +22,5 @@ Option 2. All listed scopes must be present (AND).
 
 ## Consequences
 Easier: consumers opt in. Harder: tenant-identity's scopes are a fixed set (its P-7); the demo uses `tenant-api/read`.
+
+Amended by ADR-0025: `requiredScopes` on the ingress stays the AND floor and stays optional, but each backend now owns scopes of its own, registered with tenant-identity at deploy and checked any-of (OR) on top of the floor. The fixed set is gone; the demo's floor is unset, and the narrowed integration stack uses `default/chat`.

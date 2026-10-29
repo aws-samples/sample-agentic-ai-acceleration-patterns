@@ -47,7 +47,7 @@ per-tenant limits are on by default, and the rest are off by default (P-4):
 | Module | Adds | Prop |
 |---|---|---|
 | Session mapping | conversations that persist across requests, in a unit derived from the caller's claims, so a user resumes only their own session (P-2, ADR-0002, ADR-0013) | `session` |
-| Scope checks | required OAuth scopes on the token (ADR-0005) | `requiredScopes` |
+| Scope checks | required OAuth scopes on the token: the ingress-wide floor (AND, ADR-0005) plus each backend's own scopes, any one of which admits (OR, ADR-0025) | `requiredScopes` on the ingress, `scopes` on each backend |
 | Delegation | the user's token forwarded to the agent, optionally narrowed (P-5) | `delegation` |
 | TVM | always on (ADR-0018): tenant-scoped AWS credentials for the model call and the agent's data access (P-8); `tvm` customises it, e.g. a role that also reaches tenant data | `tvm` |
 | Per-tenant limits | on by default (ADR-0020): requests per tenant per minute, and on `api-gateway` optionally output tokens, counted fleet-wide; over the limit is 429 | `tenantLimits` |
@@ -241,11 +241,15 @@ leave the agent, never content (ADR-0017).
 ### 3.2 Caller and identity model
 
 - A **tenant user** signs in to tenant-identity's shared pool and receives an
-  access token with `tenant_id`, `sub`, `client_id`, and `scope`
-  (`tenant-api/read tenant-api/write` un-narrowed).
+  access token with `tenant_id`, `sub`, `client_id`, and `scope`: un-narrowed,
+  every scope the user holds, which is the intersection of the catalogue,
+  the tenant's entitlement and the user's own list (amended 2026-10-29,
+  ADR-0025; tenant-identity ADR-0034 to ADR-0036). Before ADR-0025 that was
+  the fixed pair `tenant-api/read tenant-api/write`.
 - To downscope, the client exchanges its refresh token at tenant-identity
   `POST /oauth2/token` for a token holding only the scopes it needs
-  (tenant-identity ADR-0009), and calls the ingress with that token.
+  (tenant-identity ADR-0009), and calls the ingress with that token. A scope
+  the user does not hold is refused there with `invalid_scope`.
 - The **vendor** deploys the construct; no vendor call path into a session
   exists.
 
@@ -259,7 +263,7 @@ leave the agent, never content (ADR-0017).
 | `backend` | `'agentcore-runtime'` | `'agentcore-runtime'` | the session-isolating compute service (ADR-0011) |
 | `ingress` | `'api-gateway' \| 'agentcore-gateway'` | required | C-3a or C-3b; `agentcore-gateway` is valid only with the `agentcore-runtime` backend |
 | `session.scope` | `'user' \| 'tenant'` | none (session mapping off: fresh unit per request) | with `session` set, conversations persist in a unit derived from the claims; `'user'` if `scope` is omitted (P-2, ADR-0013) |
-| `requiredScopes` | string[] | none | if set, the token's `scope` MUST contain all of them (ADR-0005) |
+| `requiredScopes` | string[] | none | if set, the token's `scope` MUST contain all of them (ADR-0005): the ingress-wide floor, for a scope every backend shares. A backend's own scopes are `AgentBackend.scopes` (ADR-0025) |
 | `delegation.forwardUserToken` | boolean | `false` | P-5 |
 | `delegation.requireNarrowedToken` | boolean | `false` | only valid with `forwardUserToken` |
 | `delegation.allowedScopes` | string[] | required when `requireNarrowedToken` | P-5 |
@@ -283,9 +287,31 @@ construct:
 | Construct | Props | Meaning |
 |---|---|---|
 | `SharedIngress` | every ingress prop except `agent`, plus `registryPrefix` (default `/application-plane/shared/agent-runtime/`), `registryTtl` (`Duration`, default 60 s), `defaultBackend` (default none) | the ingress alone: API or Gateway, authoriser, TVM, limits, log drain, and the registry prefix it publishes under and reads `backends/<name>` from. `registryPrefix` is one per account and Region; set it when one account runs several ingresses. `defaultBackend` is the backend the bare `/invocations` route resolves to. `SharedIngress.fromParameters(scope, id, prefix, ingress)` imports an ingress deployed in another stack through its published parameters (§6.4); an `AgentBackend` in another stack must take the ingress this way, a `SharedIngress` instance from another stack fails synth. `registryTtl` is 1 s to 750 s |
-| `AgentBackend` | `name` (`[a-z0-9-]{1,32}`), `ingress` (a `SharedIngress` or `fromParameters`), `agent` (`{ codePath, modelId, environment? }`), `requiredScopes?` | one backend: the Runtime tagged `ri:ingress = <ingressId>`, its resource policy naming the ingress role, on `agentcore-gateway` a Gateway target named `name`, and the registry entry `{ runtimeArn, requiredScopes, status }`. `requiredScopes` are required on top of the ingress-wide list, per route. On delete the entry is set to `draining`, held for `registryTtl` plus 120 s, then removed |
+| `AgentBackend` | `name` (`[a-z0-9-]{1,32}`), `ingress` (a `SharedIngress` or `fromParameters`), `agent` (`{ codePath, modelId, environment? }`), `scopes` (required), `identityApi?` | one backend: the Runtime tagged `ri:ingress = <ingressId>`, its resource policy naming the ingress role, on `agentcore-gateway` a Gateway target named `name`, its scope registration with tenant-identity, and the registry entry `{ runtimeArn, scopes, status }`. On delete the entry is set to `draining`, held for `registryTtl` plus 120 s, then removed, and the scopes are removed from the catalogue |
 
 The ingress-wide `requiredScopes` stays the floor every token must meet.
+
+**Amended 2026-10-29 (ADR-0025).** `AgentBackend.requiredScopes` (optional,
+AND on top of the floor) is replaced by `scopes` (required): the scopes the
+backend owns, at least one, no duplicates, each `<name>/<action>` where
+`<name>` is the backend's own name and both sides are `[a-z0-9-]`, 3 to 128
+characters in all (tenant-identity's `ScopeName`); synth fails naming
+`scopes` otherwise. A token passes the backend when it carries **any one** of
+them (OR), after the ingress-wide floor (AND). When the backend deploys, a
+`ScopeRegistration` custom resource (a Node Lambda) calls tenant-identity's
+`PUT /platform/scopes/{scope}` for each scope with SigV4 (`execute-api`, the
+stack's Region), and `DELETE` on delete; an Update puts the new list and
+deletes the dropped names. It reads the API URL from
+`/application-plane/shared/identity/apiUrl` and attaches the managed policy
+at `/application-plane/shared/identity/platformInvokePolicyArn` to its role
+(read at deploy time, the ADR-0004 mechanism; `identityApi` passes both by
+value for a build without an account). The registry entry `dependsOn` the
+registration, so a route is never live for a scope the issuer does not know.
+Create and Update fail the deploy when a call is refused or the API is
+unreachable; Delete is best effort. The Gateway's `CUSTOM_JWT allowedScopes`
+stays equal to the floor only: the per-backend check lives in the interceptor
+and the authoriser, so a backend added after the ingress deploy needs no
+Gateway redeploy.
 
 ### 3.4 Backend interface
 
@@ -347,7 +373,7 @@ read by the ingress.
 | Field | Shape | Meaning |
 |---|---|---|
 | `runtimeArn` | `arn:<partition>:bedrock-agentcore:<region>:<account>:runtime/<id>` | the Runtime the route invokes |
-| `requiredScopes` | string[], may be empty | scopes required on top of the ingress-wide list |
+| `scopes` | string[], required (amended 2026-10-29, ADR-0025; was `requiredScopes`, optional) | the backend's own scopes; a token passes with any one of them. An entry without the field is refused (502), so a pre-ADR-0025 entry fails loudly rather than admitting every token; an empty list admits none |
 | `status` | `active` or `draining` | `draining` refuses new requests (404) while running streams finish |
 
 The entry is a JSON string, 4 KB on the standard tier, schema by convention
@@ -378,7 +404,7 @@ Errors written by the ingress code, with fixed bodies (`src/shared/request.ts`):
 |---|---|---|
 | 400 | `bad request` | malformed `prompt`, malformed `conversationId`, or `conversationId` sent without `session` |
 | 401 | `unauthorized` | missing or invalid token |
-| 403 | `forbidden` | `tenant_id` absent, `tenants` claim present, required scope missing (ingress-wide, or the backend's `requiredScopes` from the registry, amended 2026-10-28, ADR-0024), narrowed-token rule failed, or a `tvm.claimTags` claim missing |
+| 403 | `forbidden` | `tenant_id` absent, `tenants` claim present, an ingress-wide scope missing (ADR-0005), none of the backend's `scopes` from the registry carried (`backend_scope_missing`; amended 2026-10-28, ADR-0024, and 2026-10-29, ADR-0025: any one admits), narrowed-token rule failed, or a `tvm.claimTags` claim missing |
 | 404 | `not found` | the backend name has no registry entry or its entry is `draining`; refused before the body is read (amended 2026-10-28, ADR-0024) |
 | 429 | `too many requests` | the tenant is over its `tenantLimits`; checked before the TVM and the backend (ADR-0020) |
 | 502 | `upstream error` | the backend invoke failed; the registry could not be read or its entry is malformed (amended 2026-10-28, ADR-0024) |
@@ -394,8 +420,8 @@ is `[a-z0-9-]{1,32}`, resolved through the registry before the body is read.
 An unknown or `draining` name refused by the API Gateway authoriser surfaces
 as that 403; `agentcore-gateway` refuses a name it has no target for with the
 Gateway's own status. The 403 for a missing backend scope follows the
-ADR-0005 order: ingress-wide scopes first, then the backend's (amended
-2026-10-28, ADR-0024).
+ADR-0005 order: ingress-wide scopes first (AND), then the backend's (any one,
+amended 2026-10-28, ADR-0024, and 2026-10-29, ADR-0025).
 
 ---
 
@@ -449,7 +475,16 @@ only, §1.2).
 **Consumes:** `tenant-identity`, topology `shared-pool`, through
 `/application-plane/shared/identity/{userPoolId,appClientId}` (ADR-0004). Only
 the demo app and the integration driver read them; the construct takes the
-issuer as props.
+issuer as props. **Amended 2026-10-29 (ADR-0025):** `AgentBackend` also
+consumes `/application-plane/shared/identity/{apiUrl,platformInvokePolicyArn}`
+(tenant-identity ADR-0017, ADR-0030) for its scope registration, read at
+deploy time unless `identityApi` passes them by value, and calls
+tenant-identity's `PUT|DELETE /platform/scopes/{scope}` (its ADR-0034). The
+`PlatformInvokePolicy` also grants `GET /platform/scopes` and
+`PATCH /platform/tenants/*`, which the construct does not call; the
+integration driver uses `GET /platform/scopes` to tell a stale tenant-identity
+from one with the catalogue, and tenant-identity's own tenant API
+(`PATCH /tenant/users/{username}`) to cut a user's scopes.
 
 **Published interface**, so a later sample (for example a data-layer sample
 that adds tenant-scoped memory) can consume this one:
@@ -580,8 +615,9 @@ carries the random per-request id when `session` is off (ADR-0013).
    expired, or from another client are covered by the verifier unit tests
    (`test/shared/verifier.test.ts`), not by the script (amended 2026-10-27,
    ADR-0015).
-7. `requiredScopes` on: a token narrowed to `tenant-api/write` only is refused
-   when `tenant-api/read` is required.
+7. Backend scopes (amended 2026-10-29, ADR-0025; was the ingress-wide floor
+   on `tenant-api/read`): a token narrowed to `billing/read` only is refused
+   with 403 on the default backend, which owns `default/chat` alone.
 8. Forwarding on: the agent reports the forwarded token's `scope`; with
    `requireNarrowedToken`, an un-narrowed token is refused and a narrowed one
    accepted.
@@ -606,20 +642,39 @@ Limits. On a stack with `requestsPerMinute: 5`, tenant A gets 429
    Contributor Insights rules reported both tenants (ADR-0020, ADR-0021).
 9. Latency probe: 20 invocations per ingress, TTFB and total, p50 and p95.
    Then `scripts/demo.sh` runs against the `api-gateway` stack.
-9-registry. (added 2026-10-28, ADR-0024; green on both ingresses 2026-10-28) Each all-on stack carries a
-   second backend, `billing`, with its own required scope. A tenant-A token
-   narrowed to the ingress floor is 200 on the default backend and 403 on
-   `/billing/invocations`; a token narrowed to the floor plus the billing
-   scope is 200 on `billing`. `/nosuch/invocations` is refused: on
-   `api-gateway` 403 (the authoriser's Deny) or 404, on `agentcore-gateway`
-   the Gateway's own refusal of an unknown target. On `api-gateway` only, the
-   script writes a registry entry `late` pointing at `billing`'s Runtime
-   with no extra scopes and polls `/late/invocations` until 200 within 90 s
-   (one `registryTtl` plus margin; the tag-conditioned grant reaches a
-   Runtime the ingress deploy never named), sets it to `draining` and polls
-   until refused within 90 s, then deletes the entry (also from the exit
-   trap). The add-and-drain half is not run on `agentcore-gateway`, where a
-   backend is also a Gateway target the registry alone cannot create.
+9-registry. (added 2026-10-28, ADR-0024; green on both ingresses 2026-10-28;
+   amended 2026-10-29, ADR-0025, not yet run in that shape) Each all-on stack
+   carries a second backend, `billing`, owning `billing/read` and
+   `billing/invoke`; the default backend owns `default/chat`; the stacks
+   carry no ingress-wide floor. Step 1 creates tenant A entitled to all three
+   scopes and tenant B to `default/chat`, and A's admin cuts user A2 to
+   `default/chat billing/read` through `PATCH /tenant/users/{A2}`. Checks:
+   `GET /platform/scopes` lists the three scopes with owners `default` and
+   `billing`; a tenant-A token narrowed to `default/chat` is 200 on the
+   default backend and 403 on `/billing/invocations`; A1 narrowed to
+   `billing/invoke` is 200 on billing (any one scope admits), as is A2
+   narrowed to `billing/read`; `billing/invoke` is 403 on the default
+   backend; B1 narrowed to `billing/read`, and A2 to `billing/invoke`, are
+   refused at the exchange with 400 `invalid_scope`. `/nosuch/invocations`
+   is refused: on `api-gateway` 403 (the authoriser's Deny) or 404, on
+   `agentcore-gateway` the Gateway's own refusal of an unknown target. On
+   `api-gateway` only, the script writes a registry entry `late` pointing at
+   `billing`'s Runtime with `billing/invoke` and polls `/late/invocations`
+   until 200 within 90 s (one `registryTtl` plus margin; the tag-conditioned
+   grant reaches a Runtime the ingress deploy never named), sets it to
+   `draining` and polls until refused within 90 s, then deletes the entry
+   (also from the exit trap). The add-and-drain half is not run on
+   `agentcore-gateway`, where a backend is also a Gateway target the
+   registry alone cannot create.
+Floor. (added 2026-10-29, ADR-0025) On the narrowed stack, which keeps the
+   ingress-wide floor `default/chat` in front of both backends: a floor-only
+   token is 403 on billing, a `billing/read` token without the floor is 403
+   (the floor, checked first), the floor plus `billing/read` is 200 on both.
+Stale identity. (added 2026-10-29, ADR-0025) Step 1 calls
+   `GET /platform/scopes` with SigV4 on a published tenant-identity: 200
+   reuses it; API Gateway's "Missing Authentication Token" (403 or 404, no
+   such route) is a deployment from before the catalogue, which is destroyed
+   and redeployed from `../tenant-identity` and left published.
 10. Destroy; delete the Runtime's service-created log groups; assert no
    stacks, parameters or log groups are left (ADR-0019).
 
