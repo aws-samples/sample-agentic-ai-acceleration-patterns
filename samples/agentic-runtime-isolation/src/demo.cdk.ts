@@ -131,6 +131,14 @@ export interface DemoContext {
    * stacks turn it on.
    */
   readonly billingBackend?: boolean;
+  /**
+   * The owner marker both backends register their scopes under (`AgentBackend.scopeOwner`,
+   * ADR-0025). Unset: each stack owns its scopes alone, so a second demo stack in the
+   * same account fails its deploy on `default/chat`. Several stacks that share one
+   * tenant-identity catalogue (the integration test's four) pass one value and MUST be
+   * destroyed together: the first one destroyed removes the scopes.
+   */
+  readonly scopeOwner?: string;
 }
 
 type ContextReader = (key: string) => unknown;
@@ -156,6 +164,17 @@ function integer(read: ContextReader, key: string): number | undefined {
     throw new Error(`Context '${key}' must be a non-negative integer (got ${String(value)})`);
   }
   return n;
+}
+
+function text(read: ContextReader, key: string): string | undefined {
+  const value = read(key);
+  if (value === undefined || value === '') {
+    return undefined;
+  }
+  if (typeof value !== 'string') {
+    throw new Error(`Context '${key}' must be a string`);
+  }
+  return value;
 }
 
 function list(read: ContextReader, key: string): string[] | undefined {
@@ -205,6 +224,7 @@ export function parseDemoContext(read: ContextReader, region?: string): DemoCont
     outputTokensPerMinute: integer(read, 'outputTokensPerMinute'),
     publishParameters: read('publishParameters') === undefined ? true : flag(read, 'publishParameters'),
     billingBackend: read('billingBackend') === undefined ? undefined : flag(read, 'billingBackend'),
+    scopeOwner: text(read, 'scopeOwner'),
   };
 }
 
@@ -221,6 +241,8 @@ export interface RuntimeIsolationDemoStackProps extends StackProps {
   readonly publishParameters?: boolean;
   /** The cost dashboard's name (account-wide). Default `RuntimeIsolation-<ingress>`; the integration test passes its stack name so several stacks of one ingress coexist. */
   readonly dashboardName?: string;
+  /** The scope owner marker for both backends. Overrides `context.scopeOwner`; see `DemoContext.scopeOwner`. */
+  readonly scopeOwner?: string;
 }
 
 export class RuntimeIsolationDemoStack extends Stack {
@@ -325,6 +347,8 @@ export class RuntimeIsolationDemoStack extends Stack {
     }
 
     const agent: AgentProps = { codePath: props.agentCodePath, modelId: ctx.modelId, environment: agentEnvironment };
+    // One marker for both backends (ADR-0025): unset, each registration is its own owner.
+    const scopeOwner = props.scopeOwner ?? ctx.scopeOwner;
     this.ingress = new SharedIngress(this, 'SharedIngress', {
       identity: { discoveryUrl, allowedClientIds: [appClientId] },
       ingress: ctx.ingress,
@@ -350,6 +374,7 @@ export class RuntimeIsolationDemoStack extends Stack {
       agent,
       scopes: [...DEFAULT_SCOPES],
       identityApi,
+      scopeOwner,
     });
     callerRoleArn = this.ingress.tvmCallerRole.roleArn;
 
@@ -365,6 +390,7 @@ export class RuntimeIsolationDemoStack extends Stack {
         agent,
         scopes: [...BILLING_SCOPES],
         identityApi,
+        scopeOwner,
       });
     }
 

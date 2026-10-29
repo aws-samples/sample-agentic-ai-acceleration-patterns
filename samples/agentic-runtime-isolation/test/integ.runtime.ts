@@ -30,6 +30,13 @@
  * The published parameters have fixed names, so only the `api-gateway`
  * stack writes them. Dashboards are account-wide names, so each stack names
  * its own after the stack.
+ *
+ * All four stacks register the same scopes (`default/chat`, `billing/read`,
+ * `billing/invoke`) in the one tenant-identity catalogue, so they share one
+ * owner marker (`scopeOwner`, ADR-0025): with the per-stack default three of
+ * the four would fail their Create on a name the first one put. Sharing is
+ * safe here because `scripts/integ.sh` destroys them together; the first
+ * destroy removes the scopes for all of them.
  */
 
 import { App } from 'aws-cdk-lib';
@@ -37,6 +44,8 @@ import { bundleAgent } from '../src/agent/bundle';
 import { DemoContext, defaultModelId, RuntimeIsolationDemoStack } from '../src/demo.cdk';
 
 export const STACK_PREFIX = 'RuntimeIsolationInteg';
+/** The one owner marker every integ stack registers its scopes under (destroyed together by scripts/integ.sh). */
+export const SCOPE_OWNER = STACK_PREFIX;
 
 const modelId = process.env.INTEG_MODEL_ID ?? defaultModelId(process.env.AWS_REGION ?? process.env.CDK_DEFAULT_REGION);
 
@@ -54,6 +63,7 @@ const allOn = (ingress: DemoContext['ingress']): DemoContext => ({
   identityParameterPlaceholders: false,
   publishParameters: true,
   billingBackend: true,
+  scopeOwner: SCOPE_OWNER,
 });
 
 export const INTEG_STACKS: Record<string, DemoContext> = {
@@ -68,6 +78,7 @@ export const INTEG_STACKS: Record<string, DemoContext> = {
     modelId,
     identityParameterPlaceholders: false,
     publishParameters: true,
+    scopeOwner: SCOPE_OWNER,
   },
   'narrowed': {
     ingress: 'api-gateway',
@@ -86,6 +97,7 @@ export const INTEG_STACKS: Record<string, DemoContext> = {
     modelId,
     identityParameterPlaceholders: false,
     publishParameters: true,
+    scopeOwner: SCOPE_OWNER,
   },
 };
 const PUBLISHER = 'api-gateway';

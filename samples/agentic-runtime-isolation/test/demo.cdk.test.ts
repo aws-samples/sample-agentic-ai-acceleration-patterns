@@ -103,6 +103,7 @@ describe('parseDemoContext (fail-fast, standard §4.3)', () => {
           requestsPerMinute: '30',
           outputTokensPerMinute: 2000,
           publishParameters: 'false',
+          scopeOwner: 'shared-owner',
         }),
       ),
     ).toEqual({
@@ -120,7 +121,16 @@ describe('parseDemoContext (fail-fast, standard §4.3)', () => {
       requestsPerMinute: 30,
       outputTokensPerMinute: 2000,
       publishParameters: false,
+      scopeOwner: 'shared-owner',
     });
+  });
+
+  it('scopeOwner: unset or empty is undefined (each stack owns its scopes alone), otherwise the string as given; AgentBackend validates it at synth (ADR-0025)', () => {
+    expect(parseDemoContext(read({ ingress: 'api-gateway' })).scopeOwner).toBeUndefined();
+    expect(parseDemoContext(read({ ingress: 'api-gateway', scopeOwner: '' })).scopeOwner).toBeUndefined();
+    expect(parseDemoContext(read({ ingress: 'api-gateway', scopeOwner: 'RuntimeIsolationInteg' })).scopeOwner).toBe('RuntimeIsolationInteg');
+    expect(() => parseDemoContext(read({ ingress: 'api-gateway', scopeOwner: true }))).toThrow(/Context 'scopeOwner' must be a string/);
+    expect(() => synth(context({ scopeOwner: 'a#b' }))).toThrow(/AgentBackend: scopeOwner must not contain '#'/);
   });
 
   it('billingBackend: explicit true/false, else off (ADR-0024, ADR-0025); the demo scopes are named after their backends', () => {
@@ -280,6 +290,26 @@ describe('RuntimeIsolationDemoStack', () => {
       const policies = Object.values(template.findResources('AWS::IAM::Policy')) as any[];
       const models = policies.flatMap((p) => p.Properties.PolicyDocument.Statement).filter((s: any) => String(s.Sid).startsWith('OneModel'));
       expect(models).toHaveLength(1);
+    });
+
+    it('scopeOwner reaches both registrations as Owner (context, or the prop over it); unset, neither carries one (ADR-0025)', () => {
+      for (const reg of Object.values(template.findResources('Custom::RuntimeIsolationScopeRegistration')) as any[]) {
+        expect(reg.Properties.Owner).toBeUndefined();
+      }
+      const fromContext = synth(context({ ingress, billingBackend: true, scopeOwner: 'RuntimeIsolationInteg' })).template;
+      fromContext.resourceCountIs('Custom::RuntimeIsolationScopeRegistration', 2);
+      fromContext.hasResourceProperties('Custom::RuntimeIsolationScopeRegistration', { Backend: GATEWAY_TARGET_NAME, Owner: 'RuntimeIsolationInteg' });
+      fromContext.hasResourceProperties('Custom::RuntimeIsolationScopeRegistration', { Backend: BILLING_BACKEND, Owner: 'RuntimeIsolationInteg' });
+      const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+      const overridden = Template.fromStack(
+        new RuntimeIsolationDemoStack(app, 'Overridden', {
+          context: context({ ingress, billingBackend: true, scopeOwner: 'from-context' }),
+          agentCodePath: FIXTURE_AGENT,
+          scopeOwner: 'from-prop',
+          env: { account: '111122223333', region: 'eu-central-1' },
+        }),
+      );
+      expect((Object.values(overridden.findResources('Custom::RuntimeIsolationScopeRegistration')) as any[]).map((r) => r.Properties.Owner)).toEqual(['from-prop', 'from-prop']);
     });
 
     it('publishes the billing Runtime ARN beside the default one, and outputs both URLs', () => {

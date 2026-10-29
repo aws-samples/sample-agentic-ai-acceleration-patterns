@@ -9,7 +9,8 @@
  * alone (P-1, ADR-0001); on the `agentcore-gateway` ingress adds the Gateway
  * target named after the backend (ADR-0010); adds its one-model statement to
  * the ingress's tenant role (ADR-0018); registers its own scopes with the
- * identity provider (ADR-0025); and last writes its registry entry, which is
+ * identity provider (ADR-0025), under its own owner marker unless
+ * `scopeOwner` names a shared one; and last writes its registry entry, which is
  * what makes the route live. Creating, changing or removing a backend never
  * redeploys the ingress, and never redeploys the identity provider.
  */
@@ -66,6 +67,38 @@ export interface AgentBackendProps {
    * build that must synthesise without an account (placeholders).
    */
   readonly identityApi?: IdentityApiProps;
+  /**
+   * The owner marker the scope registration writes into the catalogue as
+   * each scope's description (ADR-0025). Default: this stack's id and the
+   * registration's logical id, so a second stack that registers the same
+   * names fails its deploy instead of taking them over. Stacks that pass the
+   * same value co-own the names: each one's Create and Update passes the
+   * owner check, and they MUST be destroyed together, because the first one
+   * destroyed removes the scopes from the catalogue and the others' tokens
+   * are refused from then on. Non-empty, at most 200 characters, no `#`
+   * (the separator of the default marker).
+   */
+  readonly scopeOwner?: string;
+}
+
+/** The longest `scopeOwner`; PutScope's description holds 256 and the default marker is longer than any sensible explicit one. */
+export const SCOPE_OWNER_MAX_LENGTH = 200;
+
+/** Why `scopeOwner` is refused, or undefined when it is acceptable (or unset). */
+export function scopeOwnerProblem(owner: string | undefined): string | undefined {
+  if (owner === undefined) {
+    return undefined;
+  }
+  if (typeof owner !== 'string' || owner.length === 0) {
+    return 'must be a non-empty string';
+  }
+  if (owner.length > SCOPE_OWNER_MAX_LENGTH) {
+    return `must be at most ${SCOPE_OWNER_MAX_LENGTH} characters (got ${owner.length})`;
+  }
+  if (owner.includes('#')) {
+    return "must not contain '#' (the separator of the default <StackId>#<LogicalResourceId> marker)";
+  }
+  return undefined;
 }
 
 export class AgentBackend extends Construct {
@@ -104,6 +137,10 @@ export class AgentBackend extends Construct {
     const scopesProblem = backendScopesProblem(props.name, props.scopes ?? []);
     if (scopesProblem !== undefined) {
       fail('scopes', scopesProblem);
+    }
+    const ownerProblem = scopeOwnerProblem(props.scopeOwner);
+    if (ownerProblem !== undefined) {
+      fail('scopeOwner', ownerProblem);
     }
     this.name = props.name;
     this.scopes = [...props.scopes];
@@ -173,6 +210,7 @@ export class AgentBackend extends Construct {
       backend: props.name,
       scopes: this.scopes as string[],
       identityApi: props.identityApi,
+      owner: props.scopeOwner,
       logDrain,
     });
 

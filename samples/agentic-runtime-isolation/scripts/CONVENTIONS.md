@@ -66,6 +66,12 @@ that none of those ever reach output.
   sample's prefix, plus the log groups and SSM parameters its own stacks
   owned. It ignores parameters under `/application-plane/shared/agent-runtime/*`
   that another deployment wrote.
+- `integ.sh` deploys the four stacks of `test/integ.runtime.ts` at once and
+  destroys them together from the trap: they all pass
+  `scopeOwner: 'RuntimeIsolationInteg'`, so they co-own the demo scope names
+  in the catalogue, and the first one destroyed removes those scopes. A
+  stack deployed with any other owner marker fails on the same names with
+  `scope <name> already registered by another stack`.
 - `integ.sh` never replaces a published tenant-identity on its own. A
   published deployment without the scope catalogue is stale; the script
   fails and names the fix unless `INTEG_REPLACE_STALE_IDENTITY=1` is set,

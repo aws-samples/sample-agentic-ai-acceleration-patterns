@@ -10,6 +10,8 @@ import { baseModelId, isInferenceProfileId } from '../src/backend/agentcore-runt
 import { RUNTIME_HEADERS } from '../src/backend/agentcore-runtime.transport';
 import {
   AgentBackend,
+  SCOPE_OWNER_MAX_LENGTH,
+  scopeOwnerProblem,
   type AgentProps,
   DEFAULT_REGISTRY_PREFIX,
   GATEWAY_TARGET_NAME,
@@ -1026,6 +1028,10 @@ describe.each(INGRESSES)('SharedIngress with several AgentBackends, ingress=%s (
     expect(registrations.map((r) => r.Properties.Backend).sort()).toEqual(['billing', 'support']);
     const billingReg = registrations.find((r) => r.Properties.Backend === 'billing');
     expect(billingReg.Properties).toMatchObject({ ApiUrl: IDENTITY_API.apiUrl, Scopes: ['billing/read', 'billing/invoke'] });
+    // No Owner by default: the handler marks the scopes with this stack's id and the resource's logical id.
+    for (const r of registrations) {
+      expect(r.Properties.Owner).toBeUndefined();
+    }
     // The entry waits for the registration, so the route never names a scope the issuer does not know.
     const resources = template.toJSON().Resources as Record<string, any>;
     const [regId] = Object.entries(resources).find(([, r]) => r.Type === 'Custom::RuntimeIsolationScopeRegistration' && r.Properties.Backend === 'billing')!;
@@ -1078,6 +1084,34 @@ describe.each(INGRESSES)('SharedIngress with several AgentBackends, ingress=%s (
     expect(() => new ScopeRegistration(other, 'Reg', { backend: 'ok', scopes: ['other/x'], identityApi: IDENTITY_API })).toThrow(/ScopeRegistration: scopes 'other\/x' must be owned/);
     // The longest accepted name: 128 characters.
     new AgentBackend(other, 'Max', { name: 'ok', ingress: sharedOther, agent: agentOf(), scopes: [`ok/${'a'.repeat(125)}`], identityApi: IDENTITY_API });
+  });
+
+  it('scopeOwner: passed to the registration as Owner, so stacks that share it co-own the names; refused when empty, over 200 characters or carrying # (ADR-0025)', () => {
+    const other = new Stack(new App({ context: { 'aws:cdk:bundling-stacks': [] } }), 'Other');
+    const sharedOther = new SharedIngress(other, 'Ingress', { identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: ['c'] }, ingress: 'api-gateway' });
+    const make = (id: string, scopeOwner: string | undefined) => () =>
+      new AgentBackend(other, id, { name: id.toLowerCase(), ingress: sharedOther, agent: agentOf(), scopes: [`${id.toLowerCase()}/chat`], identityApi: IDENTITY_API, scopeOwner });
+    expect(make('Empty', '')).toThrow(/AgentBackend: scopeOwner must be a non-empty string/);
+    expect(make('Long', 'x'.repeat(SCOPE_OWNER_MAX_LENGTH + 1))).toThrow(/AgentBackend: scopeOwner must be at most 200 characters \(got 201\)/);
+    expect(make('Hash', 'arn:aws:cloudformation:eu-central-1:111122223333:stack/A/1#Scopes')).toThrow(/AgentBackend: scopeOwner must not contain '#'/);
+    expect(() => new AgentBackend(other, 'NotString', { name: 'ns', ingress: sharedOther, agent: agentOf(), scopes: ['ns/chat'], identityApi: IDENTITY_API, scopeOwner: 7 as any })).toThrow(/scopeOwner must be a non-empty string/);
+    expect(scopeOwnerProblem(undefined)).toBeUndefined();
+    expect(scopeOwnerProblem('x'.repeat(SCOPE_OWNER_MAX_LENGTH))).toBeUndefined();
+    // Two backends in one stack and one in another, all under one marker: every registration carries it verbatim; one without stays default.
+    const owned = make('Owned', 'RuntimeIsolationInteg')();
+    make('Second', 'RuntimeIsolationInteg')();
+    make('Alone', undefined)();
+    // ScopeRegistration on its own writes the Owner property when given and omits it otherwise.
+    new ScopeRegistration(other, 'RegOwned', { backend: 'reg', scopes: ['reg/x'], identityApi: IDENTITY_API, owner: 'shared' });
+    new ScopeRegistration(other, 'RegPlain', { backend: 'plain', scopes: ['plain/x'], identityApi: IDENTITY_API });
+    const t = Template.fromStack(other);
+    const regs = Object.values(t.findResources('Custom::RuntimeIsolationScopeRegistration')) as any[];
+    expect(regs.find((r) => r.Properties.Backend === 'owned').Properties.Owner).toBe('RuntimeIsolationInteg');
+    expect(regs.find((r) => r.Properties.Backend === 'second').Properties.Owner).toBe('RuntimeIsolationInteg');
+    expect(regs.find((r) => r.Properties.Backend === 'alone').Properties.Owner).toBeUndefined();
+    expect(owned.scopeRegistration.resource).toBeDefined();
+    t.hasResourceProperties('Custom::RuntimeIsolationScopeRegistration', { Backend: 'reg', Owner: 'shared' });
+    t.hasResourceProperties('Custom::RuntimeIsolationScopeRegistration', { Backend: 'plain', Owner: Match.absent() });
   });
 
   it('without identityApi the registration reads apiUrl and platformInvokePolicyArn from the published parameters at deploy time (ADR-0025)', () => {

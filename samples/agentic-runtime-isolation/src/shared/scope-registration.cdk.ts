@@ -13,7 +13,9 @@
  * (tenant-identity ADR-0030), read at deploy time the way the demo stack
  * reads the pool id (`AWS::SSM::Parameter::Value` template parameters). The
  * registry entry of the backend depends on this resource, so a route is
- * never live for a scope the issuer does not know.
+ * never live for a scope the issuer does not know. Each scope's description
+ * is an owner marker (the handler's default, or the `owner` prop) that a
+ * second registration of the same name is checked against.
  *
  * The policy grants `PUT|GET|DELETE /platform/scopes*` and the tenant routes
  * (`POST /platform/tenants`, `GET|PATCH|DELETE /platform/tenants/{id}`,
@@ -79,6 +81,13 @@ export interface ScopeRegistrationProps {
   /** The scopes to register: at least one, no duplicates, each owned by `backend`. */
   readonly scopes: string[];
   readonly identityApi?: IdentityApiProps;
+  /**
+   * The owner marker written as each scope's description and compared on
+   * Create, Update and Delete. Unset: the handler uses
+   * `<StackId>#<LogicalResourceId>`, which is unique to this resource.
+   * Resources that pass the same value co-own the names (`AgentBackend.scopeOwner`).
+   */
+  readonly owner?: string;
   /**
    * The log drain (ADR-0019) that holds back this function's log group until
    * the custom resource is gone and its last lines have landed.
@@ -168,6 +177,8 @@ export class ScopeRegistration extends Construct {
         ApiUrl: apiUrl,
         Backend: props.backend,
         Scopes: this.scopes,
+        // Omitted when unset: the handler then derives the marker from the event.
+        ...(props.owner === undefined ? {} : { Owner: props.owner }),
       },
     });
     // The policy must be attached before the first call, and detached only after the last.

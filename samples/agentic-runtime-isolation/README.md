@@ -501,7 +501,7 @@ entry without it is refused with 502, never read as "no scopes".
 
 | Operation | Effect | Live after | Ingress deploy |
 |---|---|---|---|
-| Create | Runtime, resource policy, Gateway target, the scope registration with tenant-identity, then the registry entry. Each scope is `GET` before it is `PUT`; a scope already in the catalogue under another stack's ownership marker (`<StackId>#<LogicalResourceId>` in its description) fails the deploy with `scope <name> already registered by another stack`, and the registration then takes the physical id `scope-registration:<backend>:unclaimed` so the rollback's Delete is a no-op. An entry of that name that already exists is refused (the write is not an overwrite), so two stacks cannot claim one route; an entry that already names this Runtime is reclaimed, so a retried Create is not a duplicate | one `registryTtl` | no (and no identity deploy), unless `delegation.requireNarrowedToken` is on: then `allowedScopes` must be extended first (see the limitation above) |
+| Create | Runtime, resource policy, Gateway target, the scope registration with tenant-identity, then the registry entry. Each scope is `GET` before it is `PUT`; a scope already in the catalogue under another owner's marker (`scopeOwner`, default `<StackId>#<LogicalResourceId>`, in its description) fails the deploy with `scope <name> already registered by another stack; is another backend named <Backend> deployed?`, and the registration then takes the physical id `scope-registration:<backend>:unclaimed` so the rollback's Delete is a no-op. An entry of that name that already exists is refused (the write is not an overwrite), so two stacks cannot claim one route; an entry that already names this Runtime is reclaimed, so a retried Create is not a duplicate | one `registryTtl` | no (and no identity deploy), unless `delegation.requireNarrowedToken` is on: then `allowedScopes` must be extended first (see the limitation above) |
 | Read, list | `GetParameter` on the name; `GetParametersByPath` on `<registryPrefix>backends/` | immediate | no |
 | Update | overwrite `runtimeArn` (or `scopes`: new names are put in the catalogue, dropped names removed from it, then the entry is rewritten); streams already running finish on the old Runtime, new requests move. Renaming a backend (`name`) is a replacement: the new name's Runtime, scopes and entry are created, then the old scopes are deleted from the catalogue and the old entry drained | one `registryTtl` | no |
 | Delete | set `draining`, wait one `registryTtl` plus the longest stream (2 min on `api-gateway`), delete the Runtime and target, remove the entry, remove the scopes from the catalogue (best effort; a scope whose ownership marker names another stack is skipped). Only an entry whose `runtimeArn` is this backend's own is drained; an entry another writer replaced is left alone | one `registryTtl` to refuse new requests | no |
@@ -523,6 +523,7 @@ entry without it is refused with 502, never read as "no scopes".
 | `agent` | required | `{ codePath, modelId, environment? }`: the bundle, the one model the tenant role may invoke, configuration |
 | `scopes` | required | The scopes this backend owns, `<name>/<action>`, at least one, no duplicates; any one admits a token (ADR-0025) |
 | `identityApi` | unset | Where tenant-identity's API is (`apiUrl`, `platformInvokePolicyArn`); unset reads the published `/application-plane/shared/identity/{apiUrl,platformInvokePolicyArn}` at deploy time. Set only for a build that synthesises without an account |
+| `scopeOwner` | `<StackId>#<LogicalResourceId>` | The ownership marker written into each scope's catalogue `description`. Unset, each stack owns its scopes alone and a second stack registering the same names fails Create with `scope <name> already registered by another stack; is another backend named <Backend> deployed?`. Set the same value on several stacks (a non-empty string, at most 200 characters, no `#`; synth fails otherwise) when they must register the same backend names at once, as the integration test's four stacks do: they then co-own the names and must be destroyed together, because the first one destroyed removes the scopes from the catalogue |
 
 **What the shared form costs** (ADR-0024 consequences):
 
@@ -543,9 +544,10 @@ entry without it is refused with 502, never read as "no scopes".
   remains is wider than one backend's names: a compromised backend stack
   could delete another backend's scopes from the catalogue. It cannot
   register a scope another stack owns (each scope's catalogue description
-  names its owning stack and resource, and a `PUT` for a scope another stack
-  owns fails the deploy with `scope <name> already registered by another
-  stack`), and it cannot route a request: the ingress routes by the registry
+  carries its owner marker, `scopeOwner` or the owning stack and resource,
+  and a `PUT` for a scope under another marker fails the deploy with `scope
+  <name> already registered by another stack`; stacks that share a
+  `scopeOwner` co-own their scopes by choice), and it cannot route a request: the ingress routes by the registry
   entry, whose scopes are pinned to the backend name at synth (threat model
   T-41).
 - A backend deploy depends on tenant-identity's API being reachable: the
@@ -603,7 +605,9 @@ delete the leftover stack or the scope (`DELETE /platform/scopes/{scope}`)
 and rerun. The cleanup verifies that the demo scopes are gone from a reused
 catalogue after the destroy. It
 deploys the four stacks of [`test/integ.runtime.ts`](./test/integ.runtime.ts)
-at once (their backends fill the scope catalogue), then creates tenant A
+at once (their backends fill the scope catalogue; all four pass
+`scopeOwner: 'RuntimeIsolationInteg'`, so they co-own the demo scope names
+and the script destroys them together), then creates tenant A
 entitled to all three demo scopes and tenant B to `default/chat` (a tenant
 can only be entitled to a registered scope, so the tenants follow the
 deploy), has A's admin cut user A2 to `default/chat billing/read`, runs spec

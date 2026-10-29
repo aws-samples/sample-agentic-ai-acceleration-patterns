@@ -6,7 +6,9 @@ import {
   createHandler,
   handleEvent,
   isApiGatewayHost,
+  OWNER_MAX_LENGTH,
   ownerMarker,
+  ownerProblem,
   physicalId,
   type PlatformMethod,
   type PlatformResponse,
@@ -101,6 +103,92 @@ describe('scope-registration custom resource handler', () => {
     expect(physicalId('billing')).toBe('scope-registration:billing');
     expect(unclaimedId('billing')).toBe('scope-registration:billing:unclaimed');
     expect(ownerMarker({ StackId: STACK, LogicalResourceId: 'BillingScopes' })).toBe(MARKER);
+    // An explicit Owner replaces the default marker; an absent or unusable one falls back to it.
+    expect(ownerMarker({ StackId: STACK, LogicalResourceId: 'BillingScopes' }, { Owner: 'RuntimeIsolationInteg' })).toBe('RuntimeIsolationInteg');
+    expect(ownerMarker({ StackId: STACK, LogicalResourceId: 'BillingScopes' }, { Owner: undefined })).toBe(MARKER);
+    expect(ownerMarker({ StackId: STACK, LogicalResourceId: 'BillingScopes' }, { Owner: '' })).toBe(MARKER);
+    expect(ownerMarker({ StackId: STACK, LogicalResourceId: 'BillingScopes' }, { Owner: 'x'.repeat(OWNER_MAX_LENGTH + 1) })).toBe(MARKER);
+    expect(ownerProblem(undefined)).toBeUndefined();
+    expect(ownerProblem('shared')).toBeUndefined();
+    expect(ownerProblem('x'.repeat(OWNER_MAX_LENGTH))).toBeUndefined();
+    expect(ownerProblem('')).toBe('Owner must be a non-empty string when given');
+    expect(ownerProblem(42)).toBe('Owner must be a non-empty string when given');
+    expect(ownerProblem('x'.repeat(OWNER_MAX_LENGTH + 1))).toBe('Owner must be at most 256 characters');
+  });
+
+  describe('an explicit Owner property (co-ownership, AgentBackend.scopeOwner)', () => {
+    const OWNER = 'RuntimeIsolationInteg';
+
+    it('Create puts every scope with the Owner as its description instead of the stack marker', async () => {
+      const outcome = await handleEvent(event('Create', { Owner: OWNER }), deps());
+      expect(outcome).toEqual({ status: 'SUCCESS', physicalResourceId: 'scope-registration:billing' });
+      const puts = calls.filter((c) => c.method === 'PUT');
+      expect(puts).toHaveLength(2);
+      for (const c of puts) {
+        expect(JSON.parse(c.body!)).toEqual({ description: OWNER });
+      }
+    });
+
+    it("Create passes the owner check when the catalogue holds the same Owner (another stack's registration), so co-owning stacks deploy side by side", async () => {
+      const outcome = await handleEvent(event('Create', { Owner: OWNER }), deps({ catalogue: { 'billing/read': OWNER, 'billing/invoke': OWNER } }));
+      expect(outcome).toEqual({ status: 'SUCCESS', physicalResourceId: 'scope-registration:billing' });
+      expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(2);
+      expect(logs).toEqual([]);
+    });
+
+    it("Create with an Owner is still refused when the catalogue holds a different marker (a stack's default one included), and a default-marker Create is refused by an Owner", async () => {
+      expect(await handleEvent(event('Create', { Owner: OWNER }), deps({ catalogue: { 'billing/read': MARKER } }))).toEqual({
+        status: 'FAILED',
+        physicalResourceId: 'scope-registration:billing:unclaimed',
+        reason: 'scope billing/read already registered by another stack; is another backend named billing deployed?',
+      });
+      expect(await handleEvent(event('Create', { Owner: 'other-owner' }), deps({ catalogue: { 'billing/read': OWNER } }))).toMatchObject({ status: 'FAILED', physicalResourceId: 'scope-registration:billing:unclaimed' });
+      expect(await handleEvent(event('Create'), deps({ catalogue: { 'billing/read': OWNER } }))).toMatchObject({ status: 'FAILED', physicalResourceId: 'scope-registration:billing:unclaimed' });
+      expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(0);
+    });
+
+    it('Update owner-checks an added scope against the Owner and puts the list under it', async () => {
+      const previous = event('Update').ResourceProperties;
+      const outcome = await handleEvent(
+        event('Update', { Owner: OWNER, Scopes: ['billing/read', 'billing/invoke', 'billing/export'] }, { PhysicalResourceId: 'scope-registration:billing', OldResourceProperties: { ...previous, Owner: OWNER } }),
+        deps({ catalogue: { 'billing/export': OWNER } }),
+      );
+      expect(outcome).toEqual({ status: 'SUCCESS', physicalResourceId: 'scope-registration:billing' });
+      expect(trace()).toEqual([
+        'GET /prod/platform/scopes/billing/export',
+        'PUT /prod/platform/scopes/billing/read',
+        'PUT /prod/platform/scopes/billing/invoke',
+        'PUT /prod/platform/scopes/billing/export',
+      ]);
+      for (const c of calls.filter((x) => x.method === 'PUT')) {
+        expect(JSON.parse(c.body!)).toEqual({ description: OWNER });
+      }
+    });
+
+    it('Delete removes the scopes that carry the Owner (the first co-owner destroyed takes them for all), and skips ones under another marker', async () => {
+      const outcome = await handleEvent(
+        event('Delete', { Owner: OWNER }, { PhysicalResourceId: 'scope-registration:billing' }),
+        deps({ catalogue: { 'billing/read': OWNER, 'billing/invoke': MARKER } }),
+      );
+      expect(outcome).toEqual({ status: 'SUCCESS', physicalResourceId: 'scope-registration:billing' });
+      expect(trace()).toEqual(['GET /prod/platform/scopes/billing/read', 'DELETE /prod/platform/scopes/billing/read', 'GET /prod/platform/scopes/billing/invoke']);
+      expect(logs.map((l) => JSON.parse(l))).toEqual([{ level: 'ERROR', message: 'scope owned by another stack; left in the catalogue', backend: 'billing', scope: 'billing/invoke' }]);
+    });
+
+    it('refuses an Owner that is not a non-empty string of at most 256 characters on Create and Update, like any other property; Delete succeeds without a call', async () => {
+      expect(await handleEvent(event('Create', { Owner: '' }), deps())).toEqual({ status: 'FAILED', physicalResourceId: 'scope-registration:billing', reason: 'Owner must be a non-empty string when given' });
+      expect(await handleEvent(event('Create', { Owner: 42 as any }), deps())).toMatchObject({ status: 'FAILED', reason: 'Owner must be a non-empty string when given' });
+      expect(await handleEvent(event('Create', { Owner: ['a'] as any }), deps())).toMatchObject({ status: 'FAILED', reason: 'Owner must be a non-empty string when given' });
+      expect(await handleEvent(event('Create', { Owner: 'x'.repeat(257) }), deps())).toMatchObject({ status: 'FAILED', reason: 'Owner must be at most 256 characters' });
+      expect(await handleEvent(event('Update', { Owner: '' }, { PhysicalResourceId: 'scope-registration:billing' }), deps())).toMatchObject({ status: 'FAILED', reason: 'Owner must be a non-empty string when given' });
+      expect(calls).toHaveLength(0);
+      expect(await handleEvent(event('Delete', { Owner: '' }, { PhysicalResourceId: 'scope-registration:billing' }), deps())).toEqual({ status: 'SUCCESS', physicalResourceId: 'scope-registration:billing' });
+      expect(calls).toHaveLength(0);
+      // The longest accepted Owner is used as written.
+      const longest = 'y'.repeat(256);
+      expect(await handleEvent(event('Create', { Owner: longest }), deps())).toMatchObject({ status: 'SUCCESS' });
+      expect(JSON.parse(calls.find((c) => c.method === 'PUT')!.body!)).toEqual({ description: longest });
+    });
   });
 
   it('isApiGatewayHost accepts only <api>.execute-api.<region>.amazonaws.com in the given Region', () => {

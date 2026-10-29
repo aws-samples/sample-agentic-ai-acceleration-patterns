@@ -299,7 +299,7 @@ construct:
 | Construct | Props | Meaning |
 |---|---|---|
 | `SharedIngress` | every ingress prop except `agent`, plus `registryPrefix` (default `/application-plane/shared/agent-runtime/`), `registryTtl` (`Duration`, default 60 s), `defaultBackend` (default none) | the ingress alone: API or Gateway, authoriser, TVM, limits, log drain, and the registry prefix it publishes under and reads `backends/<name>` from. `registryPrefix` is one per account and Region; set it when one account runs several ingresses. `defaultBackend` is the backend the bare `/invocations` route resolves to. `SharedIngress.fromParameters(scope, id, prefix, ingress)` imports an ingress deployed in another stack through its published parameters (§6.4); an `AgentBackend` in another stack must take the ingress this way, a `SharedIngress` instance from another stack fails synth. `registryTtl` is 1 s to 750 s |
-| `AgentBackend` | `name` (`[a-z0-9-]{1,32}`), `ingress` (a `SharedIngress` or `fromParameters`), `agent` (`{ codePath, modelId, environment? }`), `scopes` (required), `identityApi?` | one backend: the Runtime tagged `ri:ingress = <ingressId>`, its resource policy naming the ingress role, on `agentcore-gateway` a Gateway target named `name`, its scope registration with tenant-identity, and the registry entry `{ runtimeArn, scopes, status }`. On delete the entry is set to `draining`, held for `registryTtl` plus 120 s, then removed, and the scopes are removed from the catalogue. **Amended 2026-10-29 (ADR-0025).** Changing `name` replaces the Runtime, the registration and the entry: the new name is created first, then the old name's scopes are deleted from the catalogue and its entry drained; `identityApi.apiUrl`, by value or from the parameter, must be an `https` URL whose hostname ends `.execute-api.<region>.amazonaws.com` |
+| `AgentBackend` | `name` (`[a-z0-9-]{1,32}`), `ingress` (a `SharedIngress` or `fromParameters`), `agent` (`{ codePath, modelId, environment? }`), `scopes` (required), `identityApi?`, `scopeOwner?` (default `<StackId>#<LogicalResourceId>`; non-empty, at most 200 characters, no `#`) | one backend: the Runtime tagged `ri:ingress = <ingressId>`, its resource policy naming the ingress role, on `agentcore-gateway` a Gateway target named `name`, its scope registration with tenant-identity, and the registry entry `{ runtimeArn, scopes, status }`. On delete the entry is set to `draining`, held for `registryTtl` plus 120 s, then removed, and the scopes are removed from the catalogue. **Amended 2026-10-29 (ADR-0025).** Changing `name` replaces the Runtime, the registration and the entry: the new name is created first, then the old name's scopes are deleted from the catalogue and its entry drained; `identityApi.apiUrl`, by value or from the parameter, must be an `https` URL whose hostname ends `.execute-api.<region>.amazonaws.com`; `scopeOwner` is the ownership marker written into each scope's catalogue description, shared by stacks that must register the same names and so be destroyed together |
 
 The ingress-wide `requiredScopes` is the floor every token must meet.
 
@@ -332,10 +332,16 @@ cannot register a name under another owner.
 than overwriting it. Every `PUT` writes the description
 `<StackId>#<LogicalResourceId>` as an ownership marker. Create `GET`s each
 scope first and fails the deploy with `scope <name> already registered by
-another stack` when the marker names another stack; the resource then takes
+another stack; is another backend named <Backend> deployed?` when the marker
+names another owner; the resource then takes
 the physical id `scope-registration:<backend>:unclaimed`, whose Delete is a
 no-op, so the rollback removes nothing it did not claim. Delete skips a scope
-whose marker names another stack. Each platform call has a 10 s abort
+whose marker names another owner. The marker is `AgentBackend.scopeOwner`
+(passed to the resource as `Owner`), default `<StackId>#<LogicalResourceId>`;
+synth requires a non-empty string of at most 200 characters without `#`.
+Stacks that pass the same `scopeOwner` co-own the names: each one's Create
+passes the `GET`, and the first one destroyed removes the scopes from the
+catalogue, so co-owners are destroyed together. Each platform call has a 10 s abort
 timeout and one retry on 429, 5xx or a transport error; the handler always
 answers CloudFormation before its Lambda timeout, so a slow or unreachable
 API fails the stack rather than hanging it. The handler re-validates the
@@ -655,7 +661,10 @@ carries the random per-request id when `session` is off (ADR-0013).
    stack) fails the deploy in step 2 with `scope <name> already registered
    by another stack`, and the leftover stack or scope must be removed first.
 2. Deploy the sample with the chosen ingress; its backends register their
-   scopes in the catalogue (ADR-0025). Then create tenants A and B, users
+   scopes in the catalogue (ADR-0025). The four stacks of
+   `test/integ.runtime.ts` deploy at once and all pass
+   `scopeOwner: 'RuntimeIsolationInteg'`, so they co-own the demo scope
+   names and `scripts/integ.sh` destroys them together. Then create tenants A and B, users
    A1, A2, B1; issue tokens. The tenants follow the deploy because a tenant
    can only be entitled to a registered scope (tenant-identity ADR-0035).
    **Amended 2026-10-29 (ADR-0025).** The tenant and user part is step 2b in

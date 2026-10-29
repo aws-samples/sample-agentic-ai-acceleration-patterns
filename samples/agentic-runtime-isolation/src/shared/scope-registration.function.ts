@@ -23,10 +23,13 @@
  *   when its description is this resource's own marker. A scope another
  *   resource owns, or whose owner cannot be read, is left in place.
  *
- * The owner marker is the scope's `description`: `<StackId>#<LogicalResourceId>`
- * of the resource that put it (`GetScope` returns it). Two resources that
- * would both put `billing/read` therefore see each other, which the
- * fixed-per-backend PhysicalResourceId alone cannot tell apart.
+ * The owner marker is the scope's `description` (`GetScope` returns it): the
+ * `Owner` property when the construct passes one, else
+ * `<StackId>#<LogicalResourceId>` of the resource that put it. Two resources
+ * that would both put `billing/read` therefore see each other, which the
+ * fixed-per-backend PhysicalResourceId alone cannot tell apart. Resources
+ * given the same `Owner` co-own the names: each passes the check, and the
+ * first one deleted removes the scopes for all of them (`AgentBackend.scopeOwner`).
  *
  * Create and Update fail the deployment when a call does not succeed: a
  * backend whose scopes the issuer does not know would refuse every token
@@ -42,7 +45,8 @@
  * fixed per backend, so a change of scopes is an Update, never a
  * replacement that would delete the scopes just put.
  *
- * The handler re-validates the properties' shape and that every scope is
+ * The handler re-validates the properties' shape (an `Owner`, when given, is
+ * a non-empty string of at most 256 characters) and that every scope is
  * `<Backend>/<action>` (`backendScopesProblem`): a direct invoke cannot pass
  * a list whose names belong to a different owner than the `Backend` it
  * names. It does not stop a direct invoker from choosing any `Backend`:
@@ -79,6 +83,8 @@ export interface ScopeRegistrationProperties {
   readonly Backend: string;
   /** The scopes to register, each `<Backend>/<action>`. */
   readonly Scopes: string[];
+  /** An explicit owner marker (1 to 256 characters); absent, the marker is `<StackId>#<LogicalResourceId>`. */
+  readonly Owner?: string;
   /** The custom-resource framework's own property; ignored. */
   readonly ServiceToken?: string;
 }
@@ -143,14 +149,36 @@ export function unclaimedId(backend: string): string {
   return `${physicalId(backend)}${UNCLAIMED_SUFFIX}`;
 }
 
+/** The longest `Owner` property: PutScope's description holds 256 characters. */
+export const OWNER_MAX_LENGTH = 256;
+
 /**
  * The owner marker this resource writes as each scope's description, and
- * reads back to recognise its own scopes: `<StackId>#<LogicalResourceId>`.
+ * reads back to recognise its own scopes: the `Owner` property when given
+ * (already validated by `ownerProblem`), else `<StackId>#<LogicalResourceId>`.
  * (PutScope's description is at most 256 characters; a stack ARN plus a
  * logical id stays well under that for any name CDK generates.)
  */
-export function ownerMarker(event: Pick<ScopeRegistrationEvent, 'StackId' | 'LogicalResourceId'>): string {
+export function ownerMarker(event: Pick<ScopeRegistrationEvent, 'StackId' | 'LogicalResourceId'>, properties?: Pick<ScopeRegistrationProperties, 'Owner'>): string {
+  const owner = properties?.Owner;
+  if (typeof owner === 'string' && owner.length > 0 && owner.length <= OWNER_MAX_LENGTH) {
+    return owner;
+  }
   return `${event.StackId}#${event.LogicalResourceId}`;
+}
+
+/** Why the `Owner` property is refused, or undefined when absent or acceptable. */
+export function ownerProblem(owner: unknown): string | undefined {
+  if (owner === undefined) {
+    return undefined;
+  }
+  if (typeof owner !== 'string' || owner.length === 0) {
+    return 'Owner must be a non-empty string when given';
+  }
+  if (owner.length > OWNER_MAX_LENGTH) {
+    return `Owner must be at most ${OWNER_MAX_LENGTH} characters`;
+  }
+  return undefined;
 }
 
 /** The description the handler wrote before the owner marker existed; a Delete still recognises it as its own. */
@@ -194,6 +222,10 @@ function scopesOf(properties: ScopeRegistrationProperties, region: string): stri
   const problem = backendScopesProblem(properties.Backend, scopes);
   if (problem !== undefined) {
     return `Scopes ${problem}`;
+  }
+  const owner = ownerProblem(properties.Owner);
+  if (owner !== undefined) {
+    return owner;
   }
   return scopes;
 }
@@ -320,7 +352,7 @@ export async function handleEvent(event: ScopeRegistrationEvent, deps: ScopeRegi
   const properties = event.ResourceProperties;
   const backend = typeof properties.Backend === 'string' ? properties.Backend : 'unknown';
   const id = event.PhysicalResourceId ?? physicalId(backend);
-  const marker = ownerMarker(event);
+  const marker = ownerMarker(event, properties);
 
   if (event.RequestType === 'Delete' && id.endsWith(UNCLAIMED_SUFFIX)) {
     // The rollback of a Create that found the scopes owned by another stack: nothing of ours to remove.
