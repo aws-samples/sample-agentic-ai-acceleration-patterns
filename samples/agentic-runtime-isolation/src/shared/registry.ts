@@ -33,8 +33,13 @@ export const REGISTRY_BACKENDS_SEGMENT = 'backends/';
 export interface RegistryEntry {
   /** The AgentCore Runtime ARN the route invokes. */
   readonly runtimeArn: string;
-  /** Scopes a token must carry for this backend, on top of the ingress-wide list (ADR-0005). Empty means none. */
-  readonly requiredScopes: string[];
+  /**
+   * The backend's own scopes (ADR-0025): a token passes when it carries any
+   * one of them (OR), after the ingress-wide floor (ADR-0005, AND). Named
+   * `<backend>/<action>` and registered with the identity provider by the
+   * backend's stack. Empty admits no token.
+   */
+  readonly scopes: string[];
   /** `draining` refuses new requests (404) while running streams finish; the entry is removed afterwards. */
   readonly status: 'active' | 'draining';
 }
@@ -49,6 +54,53 @@ export function registryParameterName(prefix: string, backend: string): string {
 }
 
 const RUNTIME_ARN_PATTERN = /^arn:([a-z-]+):bedrock-agentcore:([a-z0-9-]+):(\d{12}):runtime\/[A-Za-z0-9_-]+$/;
+
+/**
+ * tenant-identity's scope name shape (its `ScopeName`): `<owner>/<action>`,
+ * 3 to 128 characters. The owner is the text before the slash; for a backend
+ * it is the backend name (ADR-0025).
+ */
+export const SCOPE_NAME_PATTERN = /^[a-z0-9-]+\/[a-z0-9-]+$/;
+export const SCOPE_NAME_MIN_LENGTH = 3;
+export const SCOPE_NAME_MAX_LENGTH = 128;
+
+/** Whether `scope` is a scope name the identity provider accepts. */
+export function isValidScopeName(scope: unknown): scope is string {
+  return (
+    typeof scope === 'string' &&
+    scope.length >= SCOPE_NAME_MIN_LENGTH &&
+    scope.length <= SCOPE_NAME_MAX_LENGTH &&
+    SCOPE_NAME_PATTERN.test(scope)
+  );
+}
+
+/** The owner of a scope name: the text before the slash (ADR-0025). */
+export function scopeOwner(scope: string): string {
+  return scope.split('/')[0];
+}
+
+/**
+ * Checks a backend's scope list at synth (ADR-0025): at least one, no
+ * duplicates, each a valid scope name owned by `backend`. Returns the
+ * message to fail with, or undefined when the list is acceptable.
+ */
+export function backendScopesProblem(backend: string, scopes: readonly string[]): string | undefined {
+  if (scopes.length === 0) {
+    return 'must name at least one scope (ADR-0025)';
+  }
+  for (const scope of scopes) {
+    if (!isValidScopeName(scope)) {
+      return `'${scope}' must match ${SCOPE_NAME_PATTERN.source} and be ${SCOPE_NAME_MIN_LENGTH} to ${SCOPE_NAME_MAX_LENGTH} characters`;
+    }
+    if (scopeOwner(scope) !== backend) {
+      return `'${scope}' must be owned by this backend: ${backend}/<action> (ADR-0025)`;
+    }
+  }
+  if (new Set(scopes).size !== scopes.length) {
+    return 'must not repeat a scope';
+  }
+  return undefined;
+}
 
 /** The partition a Region belongs to, so an entry's ARN can be checked against the Lambda's own. */
 export function partitionOf(region: string): string {
@@ -70,7 +122,10 @@ export interface RegistryScope {
 /**
  * Parses and validates an entry's JSON. Throws on anything the ingress must
  * not act on: a malformed ARN, an ARN outside the ingress's own partition,
- * Region or account, a non-string scope, an unknown status.
+ * Region or account, a missing or malformed `scopes` list, an unknown status.
+ * `scopes` is required: an entry written before ADR-0025 (`requiredScopes`)
+ * is refused rather than read as "no scopes", so a stale entry fails loudly
+ * (502) instead of admitting every token.
  */
 export function parseRegistryEntry(raw: string, scope: RegistryScope = {}): RegistryEntry {
   let value: unknown;
@@ -82,7 +137,7 @@ export function parseRegistryEntry(raw: string, scope: RegistryScope = {}): Regi
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('registry entry is not an object');
   }
-  const { runtimeArn, requiredScopes, status } = value as Record<string, unknown>;
+  const { runtimeArn, scopes, status } = value as Record<string, unknown>;
   const arn = typeof runtimeArn === 'string' ? RUNTIME_ARN_PATTERN.exec(runtimeArn) : null;
   if (arn === null) {
     throw new Error('registry entry runtimeArn is not an AgentCore Runtime ARN');
@@ -94,14 +149,13 @@ export function parseRegistryEntry(raw: string, scope: RegistryScope = {}): Regi
   if (scope.account !== undefined && account !== scope.account) {
     throw new Error('registry entry runtimeArn is outside the ingress account');
   }
-  const scopes = requiredScopes === undefined ? [] : requiredScopes;
   if (!Array.isArray(scopes) || scopes.some((s) => typeof s !== 'string' || s.length === 0 || /\s/.test(s))) {
-    throw new Error('registry entry requiredScopes must be a list of scope strings');
+    throw new Error('registry entry scopes must be a list of scope strings');
   }
   if (status !== 'active' && status !== 'draining') {
     throw new Error('registry entry status must be active or draining');
   }
-  return { runtimeArn: runtimeArn as string, requiredScopes: scopes as string[], status };
+  return { runtimeArn: runtimeArn as string, scopes: scopes as string[], status };
 }
 
 /**

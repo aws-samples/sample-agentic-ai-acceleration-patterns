@@ -42,8 +42,8 @@ export interface RegistryEntryResourceProps {
   readonly backend: string;
   /** The Runtime ARN the route invokes. */
   readonly runtimeArn: string;
-  /** Scopes a token must carry for this backend, on top of the ingress floor. */
-  readonly requiredScopes: string[];
+  /** The backend's own scopes (ADR-0025); a token passes with any one of them, after the ingress floor. */
+  readonly scopes: string[];
   /**
    * How long Delete keeps the entry at `draining` before removing it: one
    * registry TTL (so every ingress instance has stopped routing here) plus
@@ -124,7 +124,7 @@ export class RegistryEntryResource extends Construct {
       properties: {
         ParameterName: this.parameterName,
         RuntimeArn: props.runtimeArn,
-        RequiredScopes: props.requiredScopes,
+        Scopes: props.scopes,
         DrainSeconds: drain.toSeconds(),
       },
     });

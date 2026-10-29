@@ -7,7 +7,7 @@ import type { TenantLimiter } from '../../src/shared/limits';
 import { pipelineFor } from '../../src/shared/request';
 import { sessionPrefix } from '../../src/shared/session';
 import { TokenVerifier } from '../../src/shared/verifier';
-import { baseConfig, CLIENT_ID, DISCOVERY_URL, REGISTRY_PREFIX, RUNTIME_ARN, stubRegistry, testIssuer, type TestIssuer } from '../helpers';
+import { baseConfig, CLIENT_ID, DISCOVERY_URL, FIXTURE_ENTRIES, REGISTRY_PREFIX, RUNTIME_ARN, stubRegistry, testIssuer, type TestIssuer } from '../helpers';
 
 process.env[ENV.INGRESS] = 'agentcore-gateway';
 process.env[ENV.DISCOVERY_URL] = DISCOVERY_URL;
@@ -16,10 +16,10 @@ process.env[ENV.REGISTRY_PREFIX] = REGISTRY_PREFIX;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { bodyText, intercept, handler, resetPathWarning } = require('../../src/ingress/gateway-interceptor.function') as typeof import('../../src/ingress/gateway-interceptor.function');
 
-/** The registry the tests resolve through: `agent` (no scopes), `billing` (needs write), `old` (draining). */
+/** The registry the tests resolve through: `default` (`default/chat`), `billing` (`billing/read` or `billing/invoke`), `old` (draining). */
 const ENTRIES = {
-  billing: { runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_billing-1', requiredScopes: ['tenant-api/write'], status: 'active' as const },
-  old: { runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_old-1', requiredScopes: [], status: 'draining' as const },
+  billing: FIXTURE_ENTRIES.billing,
+  old: FIXTURE_ENTRIES.old,
 };
 
 /** The REQUEST interceptor (spec C-3b, ADR-0002 as decided): builds the unit id, overwrites the header, denies with fixed text. */
@@ -63,7 +63,7 @@ describe('intercept', () => {
   });
 
   /** The Gateway target is named after the backend, so the event path is `/<backend>/invocations` (ADR-0024). */
-  const event = (headers: Record<string, string>, body: unknown, route: { path?: string } = { path: '/agent/invocations' }) => ({
+  const event = (headers: Record<string, string>, body: unknown, route: { path?: string } = { path: '/default/invocations' }) => ({
     interceptorInputVersion: '1.0',
     http: { gatewayRequest: { path: route.path, headers, body } },
   });
@@ -146,8 +146,8 @@ describe('intercept', () => {
   it('403 for a token without tenant_id, and for a missing required scope', async () => {
     const a = await intercept(event({ authorization: `Bearer ${await issuer.mint({ tenant_id: undefined })}` }, body), deps());
     expect((a.http as any).transformedGatewayResponse.statusCode).toBe(403);
-    const d = deps(baseConfig({ ingress: 'agentcore-gateway', sessionScope: 'user', requiredScopes: ['tenant-api/read'] }));
-    const b = await intercept(event({ authorization: `Bearer ${await issuer.mint({ scope: 'tenant-api/write' })}` }, body), d);
+    const d = deps(baseConfig({ ingress: 'agentcore-gateway', sessionScope: 'user', requiredScopes: ['default/chat'] }));
+    const b = await intercept(event({ authorization: `Bearer ${await issuer.mint({ scope: 'billing/read' })}` }, body), d);
     expect((b.http as any).transformedGatewayResponse.statusCode).toBe(403);
   });
 
@@ -156,13 +156,13 @@ describe('intercept', () => {
     await intercept(event({ authorization: `Bearer ${token}`, [RUNTIME_HEADERS.SESSION_ID]: 'client-sent-value' }, body), deps());
     const admitted = logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request admitted');
     expect(admitted.tenantId).toBe('tenant-a');
-    expect(admitted.backend).toBe('agent');
+    expect(admitted.backend).toBe('default');
     expect(admitted.sessionPrefix).toBe(sessionPrefix('tenant-a', 'user-a1', 'user'));
     const all = logs.join('\n');
     expect(all).not.toContain(token);
     expect(all).not.toContain('client-sent-value');
     expect(all).not.toContain('conversationA1x0001');
-    expect(JSON.parse(metrics[0])).toMatchObject({ TenantId: 'tenant-a', Ingress: 'agentcore-gateway', Backend: 'agent', Requests: 1 });
+    expect(JSON.parse(metrics[0])).toMatchObject({ TenantId: 'tenant-a', Ingress: 'agentcore-gateway', Backend: 'default', Requests: 1 });
   });
 
   describe('backend routing (ADR-0024)', () => {
@@ -188,10 +188,12 @@ describe('intercept', () => {
       expect(logs.some((l) => l.includes('interceptor path lacks backend'))).toBe(false);
     });
 
-    it("a token without the backend's scopes -> 403 backend_scope_missing", async () => {
-      const out = await intercept(event({ authorization: `Bearer ${await issuer.mint({ scope: 'tenant-api/read' })}` }, body, { path: '/billing/invocations' }), deps());
+    it("a token with none of the backend's scopes -> 403 backend_scope_missing; any one of them is admitted (ADR-0025)", async () => {
+      const out = await intercept(event({ authorization: `Bearer ${await issuer.mint({ scope: 'default/chat' })}` }, body, { path: '/billing/invocations' }), deps());
       expect((out.http as any).transformedGatewayResponse.statusCode).toBe(403);
       expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request refused')).toMatchObject({ status: 403, reason: 'backend_scope_missing', backend: 'billing' });
+      const invokeOnly = await intercept(event({ authorization: `Bearer ${await issuer.mint({ scope: 'billing/invoke' })}` }, body, { path: '/billing/invocations' }), deps());
+      expect('transformedGatewayRequest' in invokeOnly.http).toBe(true);
     });
 
     it('the name MUST come from the path: a default backend never routes a Gateway request (404, no header forwarded)', async () => {

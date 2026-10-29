@@ -5,7 +5,8 @@
  * The ingress pipeline (spec §3.4, §5), shared by the API Gateway integration
  * Lambda and the AgentCore Gateway REQUEST interceptor so both ingresses
  * enforce one contract: verify the token (P-3), resolve the backend named by
- * the route through the registry and require its scopes (ADR-0024), parse
+ * the route through the registry and require one of its scopes (ADR-0024,
+ * ADR-0025), parse
  * `{conversationId, prompt}`, choose the unit (P-2), attach the user token on
  * opt-in (P-5) and vend tenant credentials on opt-in (P-8). The output is a
  * ValidatedRequest naming the backend and its Runtime ARN; nothing here knows
@@ -13,7 +14,7 @@
  */
 
 import type { IngressConfig } from './config';
-import { missingScopes } from './headers';
+import { hasAnyScope } from './headers';
 import { endpointHost, preconnect } from './http';
 import { TenantLimiter } from './limits';
 import { BackendRegistry, backendFromPath, RegistryError, type RegistryMiss, ROUTE } from './registry';
@@ -191,8 +192,9 @@ export class IngressPipeline {
   /**
    * Resolves the route's backend (ADR-0024): an unparseable path, an unknown
    * name or a draining backend is 404; a registry fault is 502; a token
-   * without the backend's `requiredScopes` is 403 `backend_scope_missing`,
-   * checked after the ingress-wide scopes the verifier enforced (ADR-0005).
+   * carrying none of the backend's `scopes` is 403 `backend_scope_missing`
+   * (any one of them passes, ADR-0025), checked after the ingress-wide floor
+   * the verifier enforced (ADR-0005, every one required).
    * With `requireBackendInPath` the default backend is not consulted.
    */
   private async resolveBackend(inputs: RequestInputs, claims: VerifiedClaims): Promise<{ backend: string; runtimeArn: string }> {
@@ -210,7 +212,7 @@ export class IngressPipeline {
       }
       throw error;
     }
-    if (missingScopes(claims.scopes, entry.requiredScopes).length > 0) {
+    if (!hasAnyScope(claims.scopes, entry.scopes)) {
       throw new RequestError(403, 'backend_scope_missing', claims.tenantId);
     }
     return { backend, runtimeArn: entry.runtimeArn };

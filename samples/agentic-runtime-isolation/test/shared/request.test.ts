@@ -11,7 +11,7 @@ import { ERROR_TEXT, IngressPipeline, parseBody, pipelineFor, type RegistryResol
 import { PREFIX_PATTERN, RANDOM_UNIT_ID_PATTERN, sessionPrefix } from '../../src/shared/session';
 import { TokenVendingMachine } from '../../src/shared/tvm';
 import { TokenVerifier } from '../../src/shared/verifier';
-import { baseConfig, CLIENT_ID, DISCOVERY_URL, RUNTIME_ARN, stubRegistry, testIssuer, type TestIssuer } from '../helpers';
+import { baseConfig, CLIENT_ID, DISCOVERY_URL, FIXTURE_ENTRIES, RUNTIME_ARN, stubRegistry, testIssuer, type TestIssuer } from '../helpers';
 
 /** The one request contract both ingresses enforce (spec §5, ADR-0002, ADR-0013). */
 
@@ -115,7 +115,7 @@ describe('IngressPipeline', () => {
     const b = await p.validate({ authorization: `Bearer ${token}`, body: '{"prompt":"hi"}' });
     expect(a.unitId).toMatch(RANDOM_UNIT_ID_PATTERN);
     expect(a.unitId).not.toBe(b.unitId);
-    expect(a).toEqual({ tenantId: 'tenant-a', sub: 'user-a1', unitId: a.unitId, backend: 'agent', runtimeArn: RUNTIME_ARN, prompt: 'hi' });
+    expect(a).toEqual({ tenantId: 'tenant-a', sub: 'user-a1', unitId: a.unitId, backend: 'default', runtimeArn: RUNTIME_ARN, prompt: 'hi' });
     expect(a.userToken).toBeUndefined();
     expect(a.credentials).toBeUndefined();
   });
@@ -166,8 +166,8 @@ describe('IngressPipeline', () => {
   });
 
   it('requiredScopes are enforced (ADR-0005)', async () => {
-    const p = pipeline(baseConfig({ requiredScopes: ['tenant-api/read'] }));
-    expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint({ scope: 'tenant-api/write' })}`, body: '{"prompt":"hi"}' }))).toEqual({
+    const p = pipeline(baseConfig({ requiredScopes: ['default/chat'] }));
+    expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint({ scope: 'billing/read' })}`, body: '{"prompt":"hi"}' }))).toEqual({
       status: 403,
       reason: 'scope_missing',
     });
@@ -180,10 +180,10 @@ describe('IngressPipeline', () => {
     expect((await forward.validate({ authorization: `Bearer ${token}`, body: '{"prompt":"hi"}' })).userToken).toBe(token);
 
     const narrowed = pipeline(
-      baseConfig({ delegation: { forwardUserToken: true, requireNarrowedToken: true, allowedScopes: ['tenant-api/read'] } }),
+      baseConfig({ delegation: { forwardUserToken: true, requireNarrowedToken: true, allowedScopes: ['default/chat'] } }),
     );
     expect(await refusal(narrowed.validate({ authorization: `Bearer ${token}`, body: '{"prompt":"hi"}' }))).toEqual({ status: 403, reason: 'not_narrowed' });
-    const small = await issuer.mint({ scope: 'tenant-api/read' });
+    const small = await issuer.mint({ scope: 'default/chat' });
     expect((await narrowed.validate({ authorization: `Bearer ${small}`, body: '{"prompt":"hi"}' })).userToken).toBe(small);
   });
 
@@ -232,10 +232,7 @@ describe('IngressPipeline', () => {
 
   describe('backend resolution (ADR-0024)', () => {
     const body = '{"prompt":"hi"}';
-    const entries = {
-      billing: { runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_billing-1', requiredScopes: ['tenant-api/write'], status: 'active' as const },
-      old: { runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_old-1', requiredScopes: [], status: 'draining' as const },
-    };
+    const entries = FIXTURE_ENTRIES;
 
     it('the route names the backend and the entry supplies the Runtime ARN', async () => {
       const p = pipeline(baseConfig(), undefined, stubRegistry(entries).registry);
@@ -244,7 +241,7 @@ describe('IngressPipeline', () => {
       expect(r.backend).toBe('billing');
       expect(r.runtimeArn).toBe(entries.billing.runtimeArn);
       // The bare route falls back to the default backend.
-      expect(await p.validate({ authorization: token, body, path: '/invocations' })).toMatchObject({ backend: 'agent', runtimeArn: RUNTIME_ARN });
+      expect(await p.validate({ authorization: token, body, path: '/invocations' })).toMatchObject({ backend: 'default', runtimeArn: RUNTIME_ARN });
     });
 
     it('an unparseable path, an unknown name or a draining backend is 404 with the reason, attributed to the tenant', async () => {
@@ -272,7 +269,7 @@ describe('IngressPipeline', () => {
       expect(await refusal(p.validate({ authorization: token, body, path: '/invocations', requireBackendInPath: true }))).toEqual({ status: 404, reason: 'unknown_backend' });
       expect(await refusal(p.validate({ authorization: token, body, requireBackendInPath: true }))).toEqual({ status: 404, reason: 'unknown_backend' });
       await expect(p.validate({ authorization: token, body, path: '/billing/invocations', requireBackendInPath: true })).resolves.toMatchObject({ backend: 'billing' });
-      await expect(p.validate({ authorization: token, body, path: '/agent/invocations', requireBackendInPath: true })).resolves.toMatchObject({ backend: 'agent' });
+      await expect(p.validate({ authorization: token, body, path: '/default/invocations', requireBackendInPath: true })).resolves.toMatchObject({ backend: 'default' });
     });
 
     it('a registry fault is 502 with its reason', async () => {
@@ -284,22 +281,45 @@ describe('IngressPipeline', () => {
       });
       for (const reason of ['registry_entry_invalid', 'registry_unavailable'] as const) {
         const p = pipeline(baseConfig(), undefined, faulty(reason));
-        expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, path: '/agent/invocations' }))).toEqual({ status: 502, reason });
+        expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, path: '/default/invocations' }))).toEqual({ status: 502, reason });
       }
     });
 
-    it("the backend's requiredScopes are required on top of the ingress-wide list: 403 backend_scope_missing", async () => {
-      const p = pipeline(baseConfig({ requiredScopes: ['tenant-api/read'] }), undefined, stubRegistry(entries).registry);
-      const readOnly = `Bearer ${await issuer.mint({ scope: 'tenant-api/read' })}`;
-      expect(await refusal(p.validate({ authorization: readOnly, body, path: '/billing/invocations' }))).toEqual({ status: 403, reason: 'backend_scope_missing' });
-      // The ingress-wide floor still refuses first (ADR-0005 order).
-      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint({ scope: 'tenant-api/write' })}`, body, path: '/billing/invocations' }))).toEqual({
+    it("a token passes a backend with ANY ONE of the backend's scopes; none of them is 403 backend_scope_missing (ADR-0025)", async () => {
+      const p = pipeline(baseConfig(), undefined, stubRegistry(entries).registry);
+      const chatOnly = `Bearer ${await issuer.mint({ scope: 'default/chat' })}`;
+      expect(await refusal(p.validate({ authorization: chatOnly, body, path: '/billing/invocations' }))).toEqual({ status: 403, reason: 'backend_scope_missing' });
+      await expect(p.validate({ authorization: chatOnly, body, path: '/default/invocations' })).resolves.toMatchObject({ backend: 'default' });
+      // Either of billing's two scopes alone opens billing (OR), and neither opens the default backend.
+      for (const scope of ['billing/read', 'billing/invoke']) {
+        const one = `Bearer ${await issuer.mint({ scope })}`;
+        await expect(p.validate({ authorization: one, body, path: '/billing/invocations' })).resolves.toMatchObject({ backend: 'billing' });
+        expect(await refusal(p.validate({ authorization: one, body, path: '/default/invocations' }))).toEqual({ status: 403, reason: 'backend_scope_missing' });
+      }
+      // A token with no scope at all reaches nothing.
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint({ scope: undefined })}`, body, path: '/default/invocations' }))).toEqual({
+        status: 403,
+        reason: 'backend_scope_missing',
+      });
+    });
+
+    it('the ingress-wide floor (AND) is checked before the backend scopes (ADR-0005 order)', async () => {
+      const p = pipeline(baseConfig({ requiredScopes: ['default/chat'] }), undefined, stubRegistry(entries).registry);
+      // billing/read alone fails the floor at the verifier, not at the backend.
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint({ scope: 'billing/read' })}`, body, path: '/billing/invocations' }))).toEqual({
         status: 403,
         reason: 'scope_missing',
       });
-      await expect(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, path: '/billing/invocations' })).resolves.toMatchObject({ backend: 'billing' });
-      // The default backend has no scopes of its own: the read-only token passes.
-      await expect(p.validate({ authorization: readOnly, body, path: '/agent/invocations' })).resolves.toMatchObject({ backend: 'agent' });
+      // The floor plus one billing scope passes billing; the floor alone passes default only.
+      await expect(p.validate({ authorization: `Bearer ${await issuer.mint({ scope: 'default/chat billing/invoke' })}`, body, path: '/billing/invocations' })).resolves.toMatchObject({ backend: 'billing' });
+      const floorOnly = `Bearer ${await issuer.mint({ scope: 'default/chat' })}`;
+      expect(await refusal(p.validate({ authorization: floorOnly, body, path: '/billing/invocations' }))).toEqual({ status: 403, reason: 'backend_scope_missing' });
+      await expect(p.validate({ authorization: floorOnly, body, path: '/default/invocations' })).resolves.toMatchObject({ backend: 'default' });
+    });
+
+    it('an entry with an empty scope list admits no token (fail closed)', async () => {
+      const p = pipeline(baseConfig(), undefined, stubRegistry({ none: { runtimeArn: RUNTIME_ARN, scopes: [], status: 'active' } }).registry);
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, path: '/none/invocations' }))).toEqual({ status: 403, reason: 'backend_scope_missing' });
     });
 
     it('the backend is resolved after the token and before the body: a bad token is 401, an unknown route costs no body parse', async () => {
@@ -314,7 +334,7 @@ describe('IngressPipeline', () => {
     it('warm() pre-fetches the default backend only when one is configured', async () => {
       const withDefault = stubRegistry();
       await pipeline(baseConfig(), undefined, withDefault.registry).warm();
-      expect(withDefault.warmed).toEqual(['agent']);
+      expect(withDefault.warmed).toEqual(['default']);
       const without = stubRegistry();
       await pipeline(baseConfig({ registry: { prefix: '/p/', ttlSeconds: 60 } }), undefined, without.registry).warm();
       expect(without.warmed).toEqual([]);
