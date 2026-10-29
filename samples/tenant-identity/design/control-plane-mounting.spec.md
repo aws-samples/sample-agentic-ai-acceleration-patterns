@@ -30,6 +30,18 @@
 > APIs (§10 step 12); control-plane's re-apply is `UpdateResource` (§7.2,
 > §10 step 7). M-R-5 was never assigned: the numbering runs M-R-4, M-R-6.
 >
+> **Amended 2026-10-29 (ADR-0034, ADR-0035, ADR-0036):** the spec as first
+> written had a four-route `PlatformInvokePolicy` (`POST /platform/tenants`,
+> `GET`/`DELETE /platform/tenants/*`, `POST /platform/tenants/*/users`) and
+> no scope input. Now §6.1 adds the optional `SCOPES` environment variable,
+> §6.3 is the nine-route policy (`PATCH /platform/tenants/*` for
+> `UpdateTenant`, and the four `/platform/scopes` routes a backend's
+> registration uses, tenant-identity ADR-0034), §7.1 passes `SCOPES` as the
+> `scopes` of `CreateTenant` (ADR-0035) and §7.2 `tenant/update.sh` replaces
+> the entitlement with `PATCH /platform/tenants/{T}`. §6.1, §6.3, §7.1 and
+> §7.2 are rewritten; M-R-4 records the wider over-grant (tenant-identity
+> T-34).
+>
 > Written against `main` at `c4023d8`. The composition rule and repository
 > `ARCHITECTURE.md` on the unmerged `sample/runtime-isolation` branch
 > (`1537688`, standard §1.1) say samples consume each other only through an
