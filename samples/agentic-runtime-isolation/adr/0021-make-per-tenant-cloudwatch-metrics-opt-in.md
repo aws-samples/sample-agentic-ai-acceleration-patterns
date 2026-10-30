@@ -4,8 +4,9 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0021: Make per-tenant CloudWatch metrics opt-in, off by default
 
-- Status: Accepted. Amends ADR-0017.
+- Status: Accepted
 - Date: 2026-10-27
+- Amends: ADR-0017
 - Deciders: Dave Roberts (PSA)
 
 ## Context

@@ -4,8 +4,9 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0023: Tune the ingress cold and hot paths by measurement
 
-- Status: Accepted. Amends ADR-0015.
+- Status: Accepted
 - Date: 2026-10-27
+- Amends: ADR-0015
 - Deciders: Dave Roberts (PSA)
 
 ## Context

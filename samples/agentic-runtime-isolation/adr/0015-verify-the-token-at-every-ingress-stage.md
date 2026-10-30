@@ -4,8 +4,9 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0015: Verify the token at every ingress stage, not only at the gateway
 
-- Status: Accepted. Amended by ADR-0023.
+- Status: Accepted
 - Date: 2026-10-26
+- Amended by: ADR-0023
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -24,3 +25,5 @@ Option 2. The REQUEST authoriser caches results for 60 seconds keyed on the `Aut
 
 ## Consequences
 Easier: one verifier, one test suite, one error table for both ingresses. Harder: a change to the token contract (§6.2) touches the verifier and the authoriser's identity expression together. Revisit if AgentCore Gateway passes verified claims to interceptors.
+
+Amended by ADR-0023 (2026-10-27): the REQUEST authoriser's result cache is 5 minutes, not 60 seconds (ADR-0023 item 6); the integration Lambda still re-verifies the token, including `exp`, before any invoke, so a cached Allow never outlives the Lambda's own check.

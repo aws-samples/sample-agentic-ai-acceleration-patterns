@@ -4,8 +4,10 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0024: Share one ingress across several Runtimes through a backend registry
 
-- Status: Accepted. Amended by ADR-0025.
-- Date: 2026-10-28 (accepted on the first green integration run; first proposed 2026-10-27)
+- Status: Accepted
+- Date: 2026-10-28
+- Amends: ADR-0003, ADR-0011, ADR-0013
+- Amended by: ADR-0025
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -38,6 +40,9 @@ SSM parameters, standard §1.1) must not break for the single-agent deployer.
 The AgentCore Gateway already addresses a target by URL
 (`/<target>/invocations`, ADR-0010), so the shared shape must fit both
 ingresses with the same client contract (spec §5).
+
+Note (2026-10-28): this record was first proposed on 2026-10-27 and accepted
+on the first green integration run, 2026-10-28.
 
 ## Options considered
 ### Option 1: Keep one construct per Runtime (status quo)

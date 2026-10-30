@@ -158,6 +158,8 @@ Each record uses this template:
 
 - Status: Proposed | Accepted | Deprecated | Superseded by ADR-NNNN
 - Date: YYYY-MM-DD
+- Amends: ADR-NNNN, ...
+- Amended by: ADR-NNNN, ...
 - Deciders: FirstName LastName (Role), ...
 
 ## Context
@@ -179,7 +181,11 @@ trigger revisiting this decision.
 
 Records are immutable once accepted. To change a decision, write a new record
 that supersedes it and set the old one's status to `Superseded by ADR-NNNN`;
-do not edit the old decision text. Write a record for choices a newcomer would
+do not edit the old decision text. The `Amends` and `Amended by` lines are
+optional: an amendment adds to or narrows a decision without replacing it, so
+both records keep `Status: Accepted`; the amending record lists `Amends`, and
+the amended record gets an `Amended by` line and a dated trailing note saying
+what changed. Write a record for choices a newcomer would
 ask "why?" about: services, data model, identity, the asynchronous model, what
 was deliberately left out, and every cdk-nag suppression that is not
 self-evident. Decisions made during implementation get their own records, in
