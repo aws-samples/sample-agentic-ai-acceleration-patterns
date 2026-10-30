@@ -4,8 +4,10 @@ SPDX-License-Identifier: MIT-0
 -->
 # Agentic Runtime Isolation: Architecture
 
-> **Status: implemented and verified by the integration run of 2026-10-29.**
-> Last green integration run: 2026-10-29, a sandbox account, eu-central-1.
+> **Status: implemented and verified by the integration run of 2026-10-30.**
+> Last green integration run: 2026-10-30, a sandbox account, eu-central-1
+> (steps complete in 357 s; `api-gateway` TTFB p50 0.198 s, `agentcore-gateway`
+> 0.307 s; both streamed `stream 10` with a first byte under 0.3 s).
 > Both ingresses (`api-gateway` and `agentcore-gateway`) ran spec §8 steps 3
 > to 8b, step 9 (latency) and step 9-registry (ADR-0024, ADR-0025: two
 > backends behind one ingress, each owning its scopes, any one of them
@@ -21,7 +23,7 @@ SPDX-License-Identifier: MIT-0
 > Step 10 tears down and fails on any stack, parameter or log group the run's
 > own stacks left, and on a demo scope left in a reused catalogue. Step 1
 > reused the published tenant-identity (`GET /platform/scopes` 200). The
-> [README integration test](./README.md#integration-test) has the step
+> [README integration test](./README.md#deployment-integration-test) has the step
 > table. Ownership-marker collision (ADR-0025) is unit-tested only
 > (`test/shared/scope-registration.test.ts`).
 > Security scans: 2026-10-27, ASH 0 actionable findings; Holmes CSR v3 0 high,

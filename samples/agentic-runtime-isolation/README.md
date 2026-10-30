@@ -652,8 +652,8 @@ deploy), has A's admin cut user A2 to `default/chat billing/read`, runs spec
 §8, runs `scripts/demo.sh`, destroys everything from an exit trap, and fails
 if a stack, parameter or log group is left behind.
 
-Last green run: 2026-10-29, a sandbox account, eu-central-1: deploy 117 s,
-steps 395 s, then the destroy (which waits about 90 s for the ADR-0019 log
+Last green run: 2026-10-30, a sandbox account, eu-central-1: deploy 117 s,
+steps 357 s, then the destroy (which waits about 90 s for the ADR-0019 log
 drain). One run costs well under $1 at on-demand rates, dominated by
 AgentCore Runtime session time across the four stacks; API Gateway, Lambda,
 DynamoDB, SSM, CloudWatch and the handful of Nova Lite calls add cents.
