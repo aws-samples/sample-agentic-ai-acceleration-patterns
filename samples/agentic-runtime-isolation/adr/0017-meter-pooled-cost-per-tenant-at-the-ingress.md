@@ -4,8 +4,9 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0017: Meter pooled cost per tenant at the ingress, with the agent reporting usage
 
-- Status: Accepted. Amended by ADR-0018 and ADR-0021.
+- Status: Accepted
 - Date: 2026-10-26
+- Amended by: ADR-0018, ADR-0021
 - Deciders: Dave Roberts (PSA)
 
 ## Context

@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-10-26
+- Amended by: ADR-0024
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -24,3 +25,7 @@ Option 3. The sample is `runtime-isolation`; `IsolatedRuntime` takes `backend` (
 
 ## Consequences
 Easier: adding a backend is a new prop value plus those five things, run through the same e2e suite. Harder: keep AgentCore-specific details (headers, `InvokeAgentRuntime`) out of the shared ingress code; the backend interface is where they live. Revisit when a second backend is designed: it is accepted only once it passes P-1 and P-2 in the integration test.
+
+Amended by ADR-0024 (2026-10-28): `IsolatedRuntime` is replaced by `SharedIngress` (the ingress alone) plus one `AgentBackend` per Runtime; each `AgentBackend` creates its backend through the `IBackend` interface (`src/backend/backend.cdk.ts`; `BackendKind` still has the one value `'agentcore-runtime'`), which owns the five things listed above, and the shared ingress stays backend-neutral.
+
+Note (2026-10-30): the sample was renamed from `runtime-isolation` to `agentic-runtime-isolation` on 2026-10-28; the backend-neutral name chosen here is kept inside the new one.

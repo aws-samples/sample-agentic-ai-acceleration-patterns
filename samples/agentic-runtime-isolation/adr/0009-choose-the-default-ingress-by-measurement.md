@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-10-26
+- Amended by: ADR-0029
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -22,3 +23,5 @@ Option 2. This ADR stays Proposed until the integ run; a follow-up ADR records t
 
 ## Consequences
 Expected shape, to be confirmed: Gateway cheaper per long streamed answer (interceptor Lambda is short; API Gateway's Lambda bills for the whole stream); API Gateway richer at the edge (WAF, per-tenant throttling).
+
+Amended by ADR-0029 (2026-10-30): the measurement ran on 2026-10-27 in `eu-central-1`; with security at parity the recommendation is `api-gateway` (TTFB p50 0.198 s against 0.274 s), `agentcore-gateway` stays the alternative, and per-request cost was not measured.

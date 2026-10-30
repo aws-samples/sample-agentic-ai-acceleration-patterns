@@ -4,8 +4,9 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0012: Vend tenant-scoped credentials at the ingress and forward them to the backend
 
-- Status: Accepted. Amended by ADR-0018.
+- Status: Accepted
 - Date: 2026-10-26
+- Amended by: ADR-0018
 - Deciders: Dave Roberts (PSA)
 
 ## Context

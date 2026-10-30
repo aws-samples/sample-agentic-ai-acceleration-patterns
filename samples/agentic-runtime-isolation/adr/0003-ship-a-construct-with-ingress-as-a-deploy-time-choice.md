@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-10-26
+- Amended by: ADR-0024
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -24,3 +25,5 @@ Option 2. `IsolatedRuntime` creates the backend and exactly one ingress; its res
 
 ## Consequences
 Easier: like-for-like measurement. Harder: two code paths to keep equivalent; the shared session module and one e2e suite are the guard.
+
+Amended by ADR-0024 (2026-10-28): `IsolatedRuntime` is replaced by `SharedIngress` (the ingress alone) plus one `AgentBackend` per Runtime; the ingress is still chosen at deploy, once per `SharedIngress`, and each Runtime's resource policy still names only that ingress's principal.

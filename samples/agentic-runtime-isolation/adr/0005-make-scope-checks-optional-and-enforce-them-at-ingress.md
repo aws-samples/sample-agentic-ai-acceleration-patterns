@@ -4,8 +4,9 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0005: Make scope checks optional and enforce them at ingress
 
-- Status: Accepted. Amended by ADR-0025.
+- Status: Accepted
 - Date: 2026-10-26
+- Amended by: ADR-0025
 - Deciders: Dave Roberts (PSA)
 
 ## Context
