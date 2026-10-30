@@ -47,12 +47,17 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
+    "@aws-crypto/sha256-js": "5.2.0",
     "@aws-sdk/client-bedrock-agentcore": "3.1154.0",
     "@aws-sdk/client-bedrock-runtime": "3.1154.0",
     "@aws-sdk/client-dynamodb": "3.1154.0",
     "@aws-sdk/client-ssm": "3.1154.0",
     "@aws-sdk/client-sts": "3.1154.0",
+    "@aws-sdk/credential-providers": "3.1154.0",
     "@smithy/node-http-handler": "4.12.1",
+    "@smithy/protocol-http": "5.6.2",
+    "@smithy/signature-v4": "5.7.4",
+    "@smithy/types": "4.19.0",
     "aws-cdk-lib": "2.274.0",
     "cdk-nag": "3.0.2",
     "constructs": "10.8.1",

@@ -17,7 +17,7 @@ describe('registry-entry custom resource handler', () => {
   const NAME = '/application-plane/shared/agent-runtime/backends/billing';
   const RUNTIME_ARN = 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_billing-abc123';
   const OTHER_ARN = RUNTIME_ARN.replace('abc123', 'def456');
-  const stored = (runtimeArn: string, status = 'active') => ({ Parameter: { Name: NAME, Value: JSON.stringify({ runtimeArn, requiredScopes: ['tenant-api/write'], status }) } });
+  const stored = (runtimeArn: string, status = 'active') => ({ Parameter: { Name: NAME, Value: JSON.stringify({ runtimeArn, scopes: ['billing/read', 'billing/invoke'], status }) } });
   let slept: number[];
   let logs: string[];
   let outSpy: jest.SpyInstance;
@@ -30,7 +30,7 @@ describe('registry-entry custom resource handler', () => {
     RequestId: 'req-1',
     LogicalResourceId: 'BillingRegistryEntry',
     PhysicalResourceId: physicalId,
-    ResourceProperties: { ServiceToken: 'arn:aws:lambda:eu-central-1:111122223333:function:x', ParameterName: NAME, RuntimeArn: RUNTIME_ARN, RequiredScopes: ['tenant-api/write'], DrainSeconds: '180', ...overrides },
+    ResourceProperties: { ServiceToken: 'arn:aws:lambda:eu-central-1:111122223333:function:x', ParameterName: NAME, RuntimeArn: RUNTIME_ARN, Scopes: ['billing/read', 'billing/invoke'], DrainSeconds: '180', ...overrides },
   });
 
   beforeEach(() => {
@@ -54,7 +54,7 @@ describe('registry-entry custom resource handler', () => {
     expect(outcome).toEqual({ status: 'SUCCESS', physicalResourceId: NAME });
     expect(ssm).toHaveReceivedCommandTimes(PutParameterCommand, 1);
     expect(ssm).toHaveReceivedCommandWith(PutParameterCommand, { Name: NAME, Type: 'String', Overwrite: false });
-    expect(written()).toEqual({ runtimeArn: RUNTIME_ARN, requiredScopes: ['tenant-api/write'], status: 'active' });
+    expect(written()).toEqual({ runtimeArn: RUNTIME_ARN, scopes: ['billing/read', 'billing/invoke'], status: 'active' });
     expect(ssm).not.toHaveReceivedCommand(GetParameterCommand);
     expect(ssm).not.toHaveReceivedCommand(DeleteParameterCommand);
     expect(slept).toEqual([]);
@@ -82,7 +82,7 @@ describe('registry-entry custom resource handler', () => {
     expect(outcome).toEqual({ status: 'SUCCESS', physicalResourceId: NAME });
     expect(ssm).toHaveReceivedCommandTimes(PutParameterCommand, 2);
     expect(ssm.commandCalls(PutParameterCommand)[1].args[0].input).toMatchObject({ Name: NAME, Overwrite: true });
-    expect(written(1)).toEqual({ runtimeArn: RUNTIME_ARN, requiredScopes: ['tenant-api/write'], status: 'active' });
+    expect(written(1)).toEqual({ runtimeArn: RUNTIME_ARN, scopes: ['billing/read', 'billing/invoke'], status: 'active' });
     expect(logs).toEqual([]);
   });
 
@@ -95,11 +95,11 @@ describe('registry-entry custom resource handler', () => {
     expect(ssm).toHaveReceivedCommandTimes(PutParameterCommand, 1);
   });
 
-  it('Update overwrites the entry (a new Runtime ARN is live within one TTL); scopes default to none', async () => {
-    const outcome = await handleEvent(event('Update', { RuntimeArn: OTHER_ARN, RequiredScopes: undefined }, NAME), deps());
+  it('Update overwrites the entry (a new Runtime ARN is live within one TTL); a missing Scopes property writes an empty list', async () => {
+    const outcome = await handleEvent(event('Update', { RuntimeArn: OTHER_ARN, Scopes: undefined }, NAME), deps());
     expect(outcome.status).toBe('SUCCESS');
     expect(ssm).toHaveReceivedCommandWith(PutParameterCommand, { Name: NAME, Overwrite: true });
-    expect(written()).toEqual({ runtimeArn: OTHER_ARN, requiredScopes: [], status: 'active' });
+    expect(written()).toEqual({ runtimeArn: OTHER_ARN, scopes: [], status: 'active' });
   });
 
   it('Update with a changed ParameterName yields the new name as physical id, so CloudFormation follows with a Delete of the old entry', async () => {
@@ -116,7 +116,7 @@ describe('registry-entry custom resource handler', () => {
     const outcome = await handleEvent(event('Delete', {}, NAME), deps());
     expect(outcome).toEqual({ status: 'SUCCESS', physicalResourceId: NAME });
     expect(ssm).toHaveReceivedCommandWith(GetParameterCommand, { Name: NAME });
-    expect(written()).toEqual({ runtimeArn: RUNTIME_ARN, requiredScopes: ['tenant-api/write'], status: 'draining' });
+    expect(written()).toEqual({ runtimeArn: RUNTIME_ARN, scopes: ['billing/read', 'billing/invoke'], status: 'draining' });
     expect(slept).toEqual([180_000]);
     expect(ssm).toHaveReceivedCommandWith(DeleteParameterCommand, { Name: NAME });
     // Order: get, put, sleep, delete.

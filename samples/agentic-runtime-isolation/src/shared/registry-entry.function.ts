@@ -4,7 +4,7 @@
 /**
  * The registry-entry custom resource handler (ADR-0024). One backend's stack
  * owns one SSM parameter, `${prefix}backends/<name>`, holding
- * `{ runtimeArn, requiredScopes, status }`:
+ * `{ runtimeArn, scopes, status }`:
  *
  * - Create writes the entry with `status: active` and refuses to overwrite:
  *   two stacks claiming one backend name is a deploy-time failure naming
@@ -44,7 +44,7 @@ import { parseRegistryEntry, type RegistryEntry } from './registry';
 export interface RegistryEntryProperties {
   readonly ParameterName: string;
   readonly RuntimeArn: string;
-  readonly RequiredScopes?: string[];
+  readonly Scopes?: string[];
   readonly DrainSeconds: string | number;
   /** The custom-resource framework's own property; ignored. */
   readonly ServiceToken?: string;
@@ -76,7 +76,7 @@ export interface RegistryEntryDependencies {
 /** The entry one request writes; validated with the same parser the ingress uses, so a bad value fails here, not at request time. */
 function entryFrom(properties: RegistryEntryProperties, status: RegistryEntry['status']): RegistryEntry {
   return parseRegistryEntry(
-    JSON.stringify({ runtimeArn: properties.RuntimeArn, requiredScopes: properties.RequiredScopes ?? [], status }),
+    JSON.stringify({ runtimeArn: properties.RuntimeArn, scopes: properties.Scopes ?? [], status }),
   );
 }
 

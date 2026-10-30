@@ -4,7 +4,8 @@
 /**
  * API Gateway Lambda authoriser (spec C-3a, P-3, ADR-0024). Verifies the
  * bearer token with the shared verifier, resolves the backend the route names
- * through the registry and requires that backend's scopes, then returns Allow
+ * through the registry and requires one of that backend's scopes (ADR-0025),
+ * then returns Allow
  * with `{ tenantId, sub, backend, runtimeArn }` as context, so the stage's
  * JSON access log carries the tenant and the backend on every request (P-9).
  * Any refusal is an explicit Deny; the body API Gateway returns is its fixed
@@ -21,7 +22,7 @@
 
 import type { APIGatewayAuthorizerResult, APIGatewayRequestAuthorizerEvent } from 'aws-lambda';
 import { readIngressConfig } from '../shared/config';
-import { headerValue, missingScopes } from '../shared/headers';
+import { hasAnyScope, headerValue } from '../shared/headers';
 import { errorName, log } from '../shared/logger';
 import { BackendRegistry, backendFromPath, isValidBackendName, RegistryError } from '../shared/registry';
 import type { RegistryResolver } from '../shared/request';
@@ -99,7 +100,7 @@ export async function authorize(event: APIGatewayRequestAuthorizerEvent, deps: A
   let runtimeArn: string;
   try {
     const entry = await deps.registry.resolve(backend);
-    if (missingScopes(scopes, entry.requiredScopes).length > 0) {
+    if (!hasAnyScope(scopes, entry.scopes)) {
       log.warn('request refused', { ...fields, tenantId, backend, reason: 'backend_scope_missing', status: 403 });
       return buildPolicy(event.methodArn, 'Deny');
     }

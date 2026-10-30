@@ -10,7 +10,7 @@ SPDX-License-Identifier: MIT-0
 | [0002](./0002-derive-the-session-id-from-validated-claims.md) | Derive the session id from validated tenant and user claims | Accepted | 2026-10-26 |
 | [0003](./0003-ship-a-construct-with-ingress-as-a-deploy-time-choice.md) | Ship one construct with the ingress as a deploy-time choice | Accepted | 2026-10-26 |
 | [0004](./0004-use-tenant-identity-shared-pool-as-the-identity-provider.md) | Use tenant-identity `shared-pool` as the identity provider, read from its parameters | Accepted | 2026-10-26 |
-| [0005](./0005-make-scope-checks-optional-and-enforce-them-at-ingress.md) | Make scope checks optional and enforce them at ingress | Accepted | 2026-10-26 |
+| [0005](./0005-make-scope-checks-optional-and-enforce-them-at-ingress.md) | Make scope checks optional and enforce them at ingress | Accepted, amended by ADR-0025 | 2026-10-26 |
 | [0006](./0006-forward-the-user-token-only-on-opt-in-in-a-custom-header.md) | Forward the user token only on opt-in, in a Runtime custom header | Accepted | 2026-10-26 |
 | [0007](./0007-downscope-by-requiring-a-narrowed-bearer-token.md) | Downscope by requiring a narrowed bearer token, not by exchanging at ingress | Accepted | 2026-10-26 |
 | [0008](./0008-give-the-agent-a-role-with-no-tenant-data.md) | Give the agent an execution role with no tenant-scoped permission | Accepted, amended by ADR-0018 | 2026-10-26 |
@@ -29,4 +29,5 @@ SPDX-License-Identifier: MIT-0
 | [0021](./0021-make-per-tenant-cloudwatch-metrics-opt-in.md) | Make per-tenant CloudWatch metrics opt-in, off by default (amends ADR-0017) | Accepted | 2026-10-27 |
 | [0022](./0022-bound-the-tvm-credential-cache-and-share-one-sts-call-per-tag-set.md) | Bound the TVM credential cache and share one STS call per tag set | Accepted | 2026-10-27 |
 | [0023](./0023-tune-the-ingress-cold-and-hot-paths-by-measurement.md) | Tune the ingress cold and hot paths by measurement (amends ADR-0015) | Accepted | 2026-10-27 |
-| [0024](./0024-share-one-ingress-across-runtimes-through-a-backend-registry.md) | Share one ingress across several Runtimes through a backend registry | Accepted | 2026-10-28 |
+| [0024](./0024-share-one-ingress-across-runtimes-through-a-backend-registry.md) | Share one ingress across several Runtimes through a backend registry | Accepted, amended by ADR-0025 | 2026-10-28 |
+| [0025](./0025-give-each-backend-its-own-scopes-registered-at-deploy.md) | Give each backend its own scopes, registered with the identity provider at deploy (amends ADR-0005 and ADR-0024) | Accepted | 2026-10-29 |

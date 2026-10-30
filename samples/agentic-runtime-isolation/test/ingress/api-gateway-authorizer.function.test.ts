@@ -6,7 +6,7 @@ import { ENV } from '../../src/shared/config';
 import { RegistryError } from '../../src/shared/registry';
 import type { RegistryResolver } from '../../src/shared/request';
 import { TokenVerifier } from '../../src/shared/verifier';
-import { CLIENT_ID, DISCOVERY_URL, REGISTRY_PREFIX, RUNTIME_ARN, stubRegistry, testIssuer, type TestIssuer } from '../helpers';
+import { CLIENT_ID, DISCOVERY_URL, FIXTURE_ENTRIES, REGISTRY_PREFIX, RUNTIME_ARN, stubRegistry, testIssuer, type TestIssuer } from '../helpers';
 
 process.env[ENV.INGRESS] = 'api-gateway';
 process.env[ENV.DISCOVERY_URL] = DISCOVERY_URL;
@@ -18,8 +18,8 @@ delete process.env[ENV.DEFAULT_BACKEND];
 const authorizer = require('../../src/ingress/api-gateway-authorizer.function') as typeof import('../../src/ingress/api-gateway-authorizer.function');
 
 /** The Lambda authoriser (spec C-3a, ADR-0024): Allow with {tenantId, sub, backend, runtimeArn} context, explicit Deny otherwise. */
-const METHOD_ARN = 'arn:aws:execute-api:eu-central-1:111122223333:abc123/prod/POST/agent/invocations';
-const CONTEXT = { tenantId: 'tenant-a', sub: 'user-a1', backend: 'agent', runtimeArn: RUNTIME_ARN };
+const METHOD_ARN = 'arn:aws:execute-api:eu-central-1:111122223333:abc123/prod/POST/default/invocations';
+const CONTEXT = { tenantId: 'tenant-a', sub: 'user-a1', backend: 'default', runtimeArn: RUNTIME_ARN };
 
 const effectOf = (result: { policyDocument: { Statement: unknown[] } }) => (result.policyDocument.Statement[0] as { Effect: string }).Effect;
 
@@ -45,8 +45,8 @@ describe('authorize', () => {
   let logs: string[];
   let spy: jest.SpyInstance;
   const entries = {
-    billing: { runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_billing-1', requiredScopes: ['tenant-api/write'], status: 'active' as const },
-    old: { runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_old-1', requiredScopes: [], status: 'draining' as const },
+    billing: FIXTURE_ENTRIES.billing,
+    old: FIXTURE_ENTRIES.old,
   };
 
   beforeAll(async () => {
@@ -65,8 +65,8 @@ describe('authorize', () => {
   });
   afterEach(() => spy.mockRestore());
 
-  const deps = (registry: RegistryResolver = stubRegistry(entries).registry) => ({ verifier, registry, defaultBackend: 'agent' });
-  const event = (headers: Record<string, string>, route: { path?: string; backend?: string } = { path: '/agent/invocations', backend: 'agent' }): APIGatewayRequestAuthorizerEvent =>
+  const deps = (registry: RegistryResolver = stubRegistry(entries).registry) => ({ verifier, registry, defaultBackend: 'default' });
+  const event = (headers: Record<string, string>, route: { path?: string; backend?: string } = { path: '/default/invocations', backend: 'default' }): APIGatewayRequestAuthorizerEvent =>
     ({
       type: 'REQUEST',
       methodArn: METHOD_ARN,
@@ -90,7 +90,7 @@ describe('authorize', () => {
     const byPath = await authorizer.authorize(event({ Authorization: token }, { path: '/billing/invocations' }), deps());
     expect(byPath.context).toMatchObject({ backend: 'billing' });
     const bare = await authorizer.authorize(event({ Authorization: token }, { path: '/invocations' }), deps());
-    expect(bare.context).toMatchObject({ backend: 'agent', runtimeArn: RUNTIME_ARN });
+    expect(bare.context).toMatchObject({ backend: 'default', runtimeArn: RUNTIME_ARN });
     const noDefault = await authorizer.authorize(event({ Authorization: token }, { path: '/invocations' }), { ...deps(), defaultBackend: undefined });
     expect(effectOf(noDefault)).toBe('Deny');
     expect(refusal()).toMatchObject({ reason: 'unknown_backend', status: 404, tenantId: 'tenant-a' });
@@ -132,7 +132,7 @@ describe('authorize', () => {
       warm: async () => undefined,
     };
     expect(effectOf(await authorizer.authorize(event({ Authorization: token }), deps(faulty)))).toBe('Deny');
-    expect(refusal()).toMatchObject({ reason: 'registry_unavailable', backend: 'agent' });
+    expect(refusal()).toMatchObject({ reason: 'registry_unavailable', backend: 'default' });
     logs = [];
     const broken: RegistryResolver = {
       resolve: async () => {
@@ -144,22 +144,27 @@ describe('authorize', () => {
     expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'authorizer failed')).toMatchObject({ error: 'TypeError' });
   });
 
-  it("a token without the backend's requiredScopes is a Deny (403 backend_scope_missing); the ingress-wide floor still applies first", async () => {
-    const readOnly = `Bearer ${await issuer.mint({ scope: 'tenant-api/read' })}`;
-    const result = await authorizer.authorize(event({ Authorization: readOnly }, { path: '/billing/invocations', backend: 'billing' }), deps());
+  it("a token with none of the backend's scopes is a Deny (403 backend_scope_missing); any one of them is an Allow (ADR-0025); the ingress-wide floor still applies first", async () => {
+    const chatOnly = `Bearer ${await issuer.mint({ scope: 'default/chat' })}`;
+    const result = await authorizer.authorize(event({ Authorization: chatOnly }, { path: '/billing/invocations', backend: 'billing' }), deps());
     expect(effectOf(result)).toBe('Deny');
     expect(refusal()).toMatchObject({ reason: 'backend_scope_missing', status: 403, backend: 'billing', tenantId: 'tenant-a' });
-    // The same token reaches a backend with no scopes of its own.
-    expect(effectOf(await authorizer.authorize(event({ Authorization: readOnly }), deps()))).toBe('Allow');
+    // The same token reaches the backend whose one scope it carries.
+    expect(effectOf(await authorizer.authorize(event({ Authorization: chatOnly }), deps()))).toBe('Allow');
+    // Either of billing's scopes alone is enough (OR).
+    for (const scope of ['billing/read', 'billing/invoke']) {
+      const one = `Bearer ${await issuer.mint({ scope })}`;
+      expect(effectOf(await authorizer.authorize(event({ Authorization: one }, { path: '/billing/invocations', backend: 'billing' }), deps()))).toBe('Allow');
+    }
     // The ingress-wide list is the verifier's: a miss there is 'scope_missing', before the registry is consulted.
     const floor = new TokenVerifier(
-      { discoveryUrl: DISCOVERY_URL, allowedClientIds: [CLIENT_ID], requiredScopes: ['tenant-api/write'] },
+      { discoveryUrl: DISCOVERY_URL, allowedClientIds: [CLIENT_ID], requiredScopes: ['billing/read'] },
       { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
     );
     logs = [];
     const { registry } = stubRegistry(entries);
     const resolve = jest.spyOn(registry, 'resolve');
-    expect(effectOf(await authorizer.authorize(event({ Authorization: readOnly }), { ...deps(registry), verifier: floor }))).toBe('Deny');
+    expect(effectOf(await authorizer.authorize(event({ Authorization: chatOnly }), { ...deps(registry), verifier: floor }))).toBe('Deny');
     expect(refusal()).toMatchObject({ reason: 'scope_missing', status: 403 });
     expect(resolve).not.toHaveBeenCalled();
   });
@@ -214,8 +219,8 @@ describe('handler', () => {
         type: 'REQUEST',
         methodArn: METHOD_ARN,
         headers: { Authorization: `Bearer ${await issuer.mint()}` },
-        path: '/agent/invocations',
-        pathParameters: { backend: 'agent' },
+        path: '/default/invocations',
+        pathParameters: { backend: 'default' },
       } as unknown as APIGatewayRequestAuthorizerEvent);
       expect(effectOf(result)).toBe('Deny');
       expect(result.context).toBeUndefined();

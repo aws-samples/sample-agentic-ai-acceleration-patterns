@@ -34,7 +34,7 @@ describe('TokenVerifier', () => {
     expect(claims.tenantId).toBe('tenant-a');
     expect(claims.sub).toBe('user-a1');
     expect(claims.clientId).toBe(CLIENT_ID);
-    expect(claims.scopes).toEqual(['tenant-api/read', 'tenant-api/write', USER_ADMIN_SCOPE]);
+    expect(claims.scopes).toEqual(['default/chat', 'billing/read', USER_ADMIN_SCOPE]);
     expect(claims.claims.tenant_id).toBe('tenant-a');
   });
 
@@ -118,31 +118,31 @@ describe('TokenVerifier', () => {
 
   describe('requiredScopes (ADR-0005)', () => {
     it('requires every listed scope (AND)', async () => {
-      const v = verifier({ requiredScopes: ['tenant-api/read', 'tenant-api/write'] });
+      const v = verifier({ requiredScopes: ['default/chat', 'billing/read'] });
       await expect(v.verify(await issuer.mint())).resolves.toBeDefined();
-      expect(await refusal(v.verify(await issuer.mint({ scope: 'tenant-api/write' })))).toEqual({ status: 403, reason: 'scope_missing' });
+      expect(await refusal(v.verify(await issuer.mint({ scope: 'billing/read' })))).toEqual({ status: 403, reason: 'scope_missing' });
       expect(await refusal(v.verify(await issuer.mint({ scope: undefined })))).toEqual({ status: 403, reason: 'scope_missing' });
     });
   });
 
   describe('requireNarrowedToken (ADR-0007)', () => {
-    const v = () => verifier({ requireNarrowedToken: true, allowedScopes: ['tenant-api/read'] });
+    const v = () => verifier({ requireNarrowedToken: true, allowedScopes: ['default/chat'] });
 
     it('refuses an un-narrowed token (carries user.admin and a scope outside the allowlist)', async () => {
       expect(await refusal(v().verify(await issuer.mint()))).toEqual({ status: 403, reason: 'not_narrowed' });
     });
 
     it('refuses a token with a scope outside allowedScopes', async () => {
-      expect(await refusal(v().verify(await issuer.mint({ scope: 'tenant-api/read tenant-api/write' })))).toEqual({ status: 403, reason: 'not_narrowed' });
+      expect(await refusal(v().verify(await issuer.mint({ scope: 'default/chat billing/read' })))).toEqual({ status: 403, reason: 'not_narrowed' });
     });
 
     it('refuses the Cognito user.admin scope even when listed', async () => {
-      const w = verifier({ requireNarrowedToken: true, allowedScopes: ['tenant-api/read', USER_ADMIN_SCOPE] });
-      expect(await refusal(w.verify(await issuer.mint({ scope: `tenant-api/read ${USER_ADMIN_SCOPE}` })))).toEqual({ status: 403, reason: 'not_narrowed' });
+      const w = verifier({ requireNarrowedToken: true, allowedScopes: ['default/chat', USER_ADMIN_SCOPE] });
+      expect(await refusal(w.verify(await issuer.mint({ scope: `default/chat ${USER_ADMIN_SCOPE}` })))).toEqual({ status: 403, reason: 'not_narrowed' });
     });
 
     it('accepts a token whose scopes are a subset of allowedScopes', async () => {
-      await expect(v().verify(await issuer.mint({ scope: 'tenant-api/read' }))).resolves.toBeDefined();
+      await expect(v().verify(await issuer.mint({ scope: 'default/chat' }))).resolves.toBeDefined();
     });
 
     it('requires allowedScopes at construction', () => {

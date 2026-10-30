@@ -10,10 +10,18 @@
  *
  * | Stack suffix         | Ingress           | Modules                                                   | Spec §8 steps |
  * |----------------------|-------------------|-----------------------------------------------------------|---------------|
- * | `api-gateway`        | api-gateway       | every module on, demo tenant data                         | 3 to 9        |
- * | `agentcore-gateway`  | agentcore-gateway | every module on, demo tenant data                         | 3 to 9        |
- * | `session-off`        | api-gateway       | session off, no scope check, no forwarding, default role  | 4a, ADR-0018  |
- * | `narrowed`           | api-gateway       | forwarding with requireNarrowedToken, 5 requests/min      | 8 (narrowed), limits |
+ * | `api-gateway`        | api-gateway       | every module on, two backends with their own scopes, no floor, demo tenant data | 3 to 9, 9-registry |
+ * | `agentcore-gateway`  | agentcore-gateway | every module on, two backends with their own scopes, no floor, demo tenant data | 3 to 9, 9-registry |
+ * | `session-off`        | api-gateway       | session off, no floor, no forwarding, default role        | 4a, ADR-0018  |
+ * | `narrowed`           | api-gateway       | floor `default/chat`, two backends, forwarding with requireNarrowedToken, 5 requests/min | 8 (narrowed), floor, limits |
+ *
+ * The all-on stacks carry no ingress-wide floor (ADR-0025): the integration
+ * test narrows tokens to one backend scope at a time (`billing/read` alone
+ * must reach billing), which a floor would refuse. The `narrowed` stack keeps
+ * the floor (`default/chat`, AND) in front of the two backends' own scopes
+ * (OR), with `allowedScopes` naming all three, so the run shows both checks
+ * on one route: the floor alone is refused on billing, a billing scope alone
+ * is refused by the floor, and the two together pass.
  *
  * `session-off` runs on the construct's default model-only TenantModelRole
  * (no `tvm.role`), so the run also proves a model call is signed by a
@@ -22,6 +30,13 @@
  * The published parameters have fixed names, so only the `api-gateway`
  * stack writes them. Dashboards are account-wide names, so each stack names
  * its own after the stack.
+ *
+ * All four stacks register the same scopes (`default/chat`, `billing/read`,
+ * `billing/invoke`) in the one tenant-identity catalogue, so they share one
+ * owner marker (`scopeOwner`, ADR-0025): with the per-stack default three of
+ * the four would fail their Create on a name the first one put. Sharing is
+ * safe here because `scripts/integ.sh` destroys them together; the first
+ * destroy removes the scopes for all of them.
  */
 
 import { App } from 'aws-cdk-lib';
@@ -29,6 +44,8 @@ import { bundleAgent } from '../src/agent/bundle';
 import { DemoContext, defaultModelId, RuntimeIsolationDemoStack } from '../src/demo.cdk';
 
 export const STACK_PREFIX = 'RuntimeIsolationInteg';
+/** The one owner marker every integ stack registers its scopes under (destroyed together by scripts/integ.sh). */
+export const SCOPE_OWNER = STACK_PREFIX;
 
 const modelId = process.env.INTEG_MODEL_ID ?? defaultModelId(process.env.AWS_REGION ?? process.env.CDK_DEFAULT_REGION);
 
@@ -38,7 +55,6 @@ const allOn = (ingress: DemoContext['ingress']): DemoContext => ({
   // agentcore-gateway stack runs with them off, the default.
   perTenantMetrics: ingress === 'api-gateway',
   sessionScope: 'user',
-  requiredScopes: ['tenant-api/read'],
   forwardUserToken: true,
   requireNarrowedToken: false,
   tvm: true,
@@ -46,6 +62,8 @@ const allOn = (ingress: DemoContext['ingress']): DemoContext => ({
   modelId,
   identityParameterPlaceholders: false,
   publishParameters: true,
+  billingBackend: true,
+  scopeOwner: SCOPE_OWNER,
 });
 
 export const INTEG_STACKS: Record<string, DemoContext> = {
@@ -60,20 +78,26 @@ export const INTEG_STACKS: Record<string, DemoContext> = {
     modelId,
     identityParameterPlaceholders: false,
     publishParameters: true,
+    scopeOwner: SCOPE_OWNER,
   },
   'narrowed': {
     ingress: 'api-gateway',
     // Low per-tenant limit (ADR-0020): the integ shows tenant A limited while tenant B is not.
     requestsPerMinute: 5,
     sessionScope: 'user',
+    // The ingress-wide floor (ADR-0005) and the narrowed-token rule
+    // (ADR-0007) on the default backend's one scope.
+    requiredScopes: ['default/chat'],
     forwardUserToken: true,
     requireNarrowedToken: true,
-    allowedScopes: ['tenant-api/read'],
+    allowedScopes: ['default/chat', 'billing/read', 'billing/invoke'],
+    billingBackend: true,
     tvm: false,
     includeUserIdTag: false,
     modelId,
     identityParameterPlaceholders: false,
     publishParameters: true,
+    scopeOwner: SCOPE_OWNER,
   },
 };
 const PUBLISHER = 'api-gateway';

@@ -26,12 +26,15 @@ export { ROUTE } from './shared/registry';
 export type { AgentProps } from './agent-backend.cdk';
 export { SharedIngress, DEFAULT_REGISTRY_PREFIX, DEFAULT_REGISTRY_TTL, MAX_REGISTRY_TTL, PUBLISHED } from './shared-ingress.cdk';
 export type { SharedIngressProps, SharedIngressRef } from './shared-ingress.cdk';
-export { AgentBackend } from './agent-backend.cdk';
+export { AgentBackend, SCOPE_OWNER_MAX_LENGTH, scopeOwnerProblem } from './agent-backend.cdk';
 export type { AgentBackendProps } from './agent-backend.cdk';
 export { RegistryEntryResource, LONGEST_STREAM, MAX_DRAIN } from './shared/registry-entry.cdk';
 export type { RegistryEntryResourceProps } from './shared/registry-entry.cdk';
+// The scope registration (ADR-0025): what a backend puts in tenant-identity's catalogue, and where it finds the API.
+export { ScopeRegistration, IDENTITY_API_PARAMETERS } from './shared/scope-registration.cdk';
+export type { ScopeRegistrationProps, IdentityApiProps } from './shared/scope-registration.cdk';
 // The registry contract (ADR-0024): a consumer that reads or writes entries by hand uses the same names and schema.
-export { BACKEND_NAME_PATTERN, INGRESS_TAG_KEY, registryParameterName } from './shared/registry';
+export { BACKEND_NAME_PATTERN, INGRESS_TAG_KEY, SCOPE_NAME_PATTERN, registryParameterName, backendScopesProblem } from './shared/registry';
 export type { RegistryEntry } from './shared/registry';
 export type { BackendKind } from './backend/backend';
 export type { IngressKind, UsageEvent } from './shared/metrics';

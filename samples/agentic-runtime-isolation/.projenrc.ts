@@ -38,6 +38,13 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     '@aws-sdk/client-dynamodb@3.1154.0', // echo agent's demo-table read with vended credentials
     '@aws-sdk/client-ssm@3.1154.0', // backend registry reads at the ingress, writes from the backend's registry-entry custom resource (ADR-0024)
     '@smithy/node-http-handler@4.12.1', // the agent's shared keep-alive handler across its per-request clients
+    // The scope-registration custom resource signs GET/PUT/DELETE /platform/scopes/* on tenant-identity's API (ADR-0025); the same pins as tenant-identity's e2e client, except @smithy/types
+    '@aws-sdk/credential-providers@3.1154.0',
+    '@aws-crypto/sha256-js@5.2.0',
+    '@smithy/signature-v4@5.7.4',
+    '@smithy/protocol-http@5.6.2',
+    // The credential types the scope-registration signer accepts. tenant-identity pins 4.17.2; signature-v4@5.7.4 requires ^4.19.0, so this is the version its lock file resolves (a lower pin would install two copies).
+    '@smithy/types@4.19.0',
     'jose@5.10.0', // JWT verification against the issuer's JWKS (P-3); 5.x ships CJS, which ts-jest needs (6.x is ESM-only)
     // Security linting - AwsSolutionsChecks aspect applied in src/main.ts
     'cdk-nag@3.0.2',

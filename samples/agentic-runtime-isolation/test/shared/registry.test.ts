@@ -8,24 +8,64 @@ import {
   BACKEND_NAME_PATTERN,
   BackendRegistry,
   backendFromPath,
+  backendScopesProblem,
   isValidBackendName,
+  isValidScopeName,
   MAX_STALE_TTL_MULTIPLE,
   parseRegistryEntry,
   partitionOf,
   REFRESH_RETRY_SECONDS,
   RegistryError,
   registryParameterName,
+  SCOPE_NAME_PATTERN,
+  scopeOwner,
 } from '../../src/shared/registry';
 import { REGISTRY_PREFIX, RUNTIME_ARN } from '../helpers';
 
 /** The backend registry (ADR-0024): the entry schema, the route parser and the cached SSM client. */
 
-const ENTRY = JSON.stringify({ runtimeArn: RUNTIME_ARN, requiredScopes: ['tenant-api/write'], status: 'active' });
+const SCOPES = ['billing/read', 'billing/invoke'];
+const ENTRY = JSON.stringify({ runtimeArn: RUNTIME_ARN, scopes: SCOPES, status: 'active' });
+
+describe('scope names (ADR-0025, tenant-identity ScopeName)', () => {
+  it('isValidScopeName: <owner>/<action> of [a-z0-9-], 3 to 128 characters', () => {
+    expect(SCOPE_NAME_PATTERN.source).toBe('^[a-z0-9-]+\\/[a-z0-9-]+$');
+    for (const ok of ['a/b', 'default/chat', 'billing/invoke', 'tenant-admin/users', `x/${'y'.repeat(126)}`]) {
+      expect(isValidScopeName(ok)).toBe(true);
+    }
+    for (const bad of ['', 'ab', 'a/', '/b', 'noslash', 'a/b/c', 'A/b', 'a/B', 'a b/c', 'a/b ', `x/${'y'.repeat(127)}`, 42, undefined, null]) {
+      expect(isValidScopeName(bad)).toBe(false);
+    }
+  });
+
+  it('scopeOwner is the text before the slash', () => {
+    expect(scopeOwner('billing/read')).toBe('billing');
+    expect(scopeOwner('default/chat')).toBe('default');
+  });
+
+  it('backendScopesProblem: at least one, every one valid and owned by the backend, no repeats; undefined when acceptable', () => {
+    expect(backendScopesProblem('billing', ['billing/read', 'billing/invoke'])).toBeUndefined();
+    expect(backendScopesProblem('default', ['default/chat'])).toBeUndefined();
+    expect(backendScopesProblem('billing', [])).toMatch(/at least one scope/);
+    expect(backendScopesProblem('billing', ['billing/read', 'billing/read'])).toMatch(/must not repeat/);
+    expect(backendScopesProblem('billing', ['billing/Read'])).toMatch(/'billing\/Read' must match/);
+    expect(backendScopesProblem('billing', ['billing'])).toMatch(/'billing' must match/);
+    expect(backendScopesProblem('billing', ['billing/read', 'default/chat'])).toMatch(/'default\/chat' must be owned by this backend: billing\/<action>/);
+    expect(backendScopesProblem('billing', ['billing-2/read'])).toMatch(/must be owned by this backend/);
+    // The first problem in list order is the one reported.
+    expect(backendScopesProblem('billing', ['x/y', 'billing/read', 'billing/read'])).toMatch(/'x\/y' must be owned/);
+  });
+});
 
 describe('parseRegistryEntry', () => {
-  it('accepts a well-formed entry and defaults requiredScopes to none', () => {
-    expect(parseRegistryEntry(ENTRY)).toEqual({ runtimeArn: RUNTIME_ARN, requiredScopes: ['tenant-api/write'], status: 'active' });
-    expect(parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, status: 'draining' }))).toEqual({ runtimeArn: RUNTIME_ARN, requiredScopes: [], status: 'draining' });
+  it('accepts a well-formed entry; an empty scope list parses (and admits nothing at the ingress)', () => {
+    expect(parseRegistryEntry(ENTRY)).toEqual({ runtimeArn: RUNTIME_ARN, scopes: SCOPES, status: 'active' });
+    expect(parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, scopes: [], status: 'draining' }))).toEqual({ runtimeArn: RUNTIME_ARN, scopes: [], status: 'draining' });
+  });
+
+  it('refuses an entry without scopes, so a pre-ADR-0025 requiredScopes entry is 502, not "no scopes"', () => {
+    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, status: 'active' }))).toThrow(/scopes/);
+    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, requiredScopes: ['x/y'], status: 'active' }))).toThrow(/scopes/);
   });
 
   it('refuses a malformed Runtime ARN', () => {
@@ -35,15 +75,15 @@ describe('parseRegistryEntry', () => {
   });
 
   it('refuses scopes that are not a list of non-empty, space-free strings', () => {
-    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, requiredScopes: 'tenant-api/write', status: 'active' }))).toThrow(/requiredScopes/);
-    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, requiredScopes: [42], status: 'active' }))).toThrow(/requiredScopes/);
-    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, requiredScopes: ['a b'], status: 'active' }))).toThrow(/requiredScopes/);
-    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, requiredScopes: [''], status: 'active' }))).toThrow(/requiredScopes/);
+    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, scopes: 'billing/read', status: 'active' }))).toThrow(/scopes/);
+    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, scopes: [42], status: 'active' }))).toThrow(/scopes/);
+    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, scopes: ['a b'], status: 'active' }))).toThrow(/scopes/);
+    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, scopes: [''], status: 'active' }))).toThrow(/scopes/);
   });
 
   it('refuses an unknown status', () => {
-    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, status: 'retired' }))).toThrow(/status/);
-    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN }))).toThrow(/status/);
+    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, scopes: SCOPES, status: 'retired' }))).toThrow(/status/);
+    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, scopes: SCOPES }))).toThrow(/status/);
   });
 
   it('refuses anything that is not a JSON object', () => {
@@ -60,24 +100,24 @@ describe('parseRegistryEntry', () => {
     });
 
     it('refuses another Region, and another partition for the same Region name', () => {
-      const other = JSON.stringify({ runtimeArn: 'arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/ri_x-1', status: 'active' });
+      const other = JSON.stringify({ runtimeArn: 'arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/ri_x-1', scopes: SCOPES, status: 'active' });
       expect(() => parseRegistryEntry(other, scope)).toThrow(/Region/);
-      const partition = JSON.stringify({ runtimeArn: 'arn:aws-cn:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_x-1', status: 'active' });
+      const partition = JSON.stringify({ runtimeArn: 'arn:aws-cn:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_x-1', scopes: SCOPES, status: 'active' });
       expect(() => parseRegistryEntry(partition, scope)).toThrow(/Region/);
-      const cn = JSON.stringify({ runtimeArn: 'arn:aws-cn:bedrock-agentcore:cn-north-1:111122223333:runtime/ri_x-1', status: 'active' });
+      const cn = JSON.stringify({ runtimeArn: 'arn:aws-cn:bedrock-agentcore:cn-north-1:111122223333:runtime/ri_x-1', scopes: SCOPES, status: 'active' });
       expect(parseRegistryEntry(cn, { region: 'cn-north-1' }).runtimeArn).toContain('cn-north-1');
       expect(() => parseRegistryEntry(ENTRY, { region: 'cn-north-1' })).toThrow(/Region/);
     });
 
     it('refuses another account', () => {
-      const other = JSON.stringify({ runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:444455556666:runtime/ri_x-1', status: 'active' });
+      const other = JSON.stringify({ runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:444455556666:runtime/ri_x-1', scopes: SCOPES, status: 'active' });
       expect(() => parseRegistryEntry(other, scope)).toThrow(/account/);
     });
 
     it('an absent account or Region skips that check', () => {
-      const other = JSON.stringify({ runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:444455556666:runtime/ri_x-1', status: 'active' });
+      const other = JSON.stringify({ runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:444455556666:runtime/ri_x-1', scopes: SCOPES, status: 'active' });
       expect(parseRegistryEntry(other, { region: 'eu-central-1' }).runtimeArn).toContain('444455556666');
-      const elsewhere = JSON.stringify({ runtimeArn: 'arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/ri_x-1', status: 'active' });
+      const elsewhere = JSON.stringify({ runtimeArn: 'arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/ri_x-1', scopes: SCOPES, status: 'active' });
       expect(parseRegistryEntry(elsewhere, { account: '111122223333' }).runtimeArn).toContain('us-east-1');
       expect(parseRegistryEntry(elsewhere).runtimeArn).toContain('us-east-1');
     });
@@ -173,7 +213,7 @@ describe('BackendRegistry', () => {
     ssm.on(GetParameterCommand).resolves({ Parameter: { Value: ENTRY } });
     const r = registry();
     const entry = await r.resolve('agent');
-    expect(entry).toEqual({ runtimeArn: RUNTIME_ARN, requiredScopes: ['tenant-api/write'], status: 'active' });
+    expect(entry).toEqual({ runtimeArn: RUNTIME_ARN, scopes: SCOPES, status: 'active' });
     clock += 59_000;
     expect(await r.resolve('agent')).toBe(entry);
     expect(ssm).toHaveReceivedCommandTimes(GetParameterCommand, 1);
@@ -198,7 +238,7 @@ describe('BackendRegistry', () => {
   });
 
   it('a draining backend is backend_draining', async () => {
-    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: JSON.stringify({ runtimeArn: RUNTIME_ARN, status: 'draining' }) } });
+    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: JSON.stringify({ runtimeArn: RUNTIME_ARN, scopes: SCOPES, status: 'draining' }) } });
     expect(await miss(registry().resolve('old'))).toBe('backend_draining');
   });
 
@@ -249,8 +289,8 @@ describe('BackendRegistry', () => {
     expect(ssm).toHaveReceivedCommandTimes(GetParameterCommand, 3);
     // Once SSM is back the next retry refreshes and the normal TTL resumes.
     clock += REFRESH_RETRY_SECONDS * 1000;
-    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: JSON.stringify({ runtimeArn: RUNTIME_ARN, requiredScopes: [], status: 'active' }) } });
-    expect((await r.resolve('agent')).requiredScopes).toEqual([]);
+    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: JSON.stringify({ runtimeArn: RUNTIME_ARN, scopes: ['default/chat'], status: 'active' }) } });
+    expect((await r.resolve('agent')).scopes).toEqual(['default/chat']);
     clock += 59_000;
     await r.resolve('agent');
     expect(ssm).toHaveReceivedCommandTimes(GetParameterCommand, 4);
@@ -300,13 +340,13 @@ describe('BackendRegistry', () => {
   it('refreshes after the TTL and picks up a changed entry; a definite miss replaces a stale entry', async () => {
     ssm.on(GetParameterCommand).resolves({ Parameter: { Value: ENTRY } });
     const r = registry(30);
-    expect((await r.resolve('agent')).requiredScopes).toEqual(['tenant-api/write']);
+    expect((await r.resolve('agent')).scopes).toEqual(SCOPES);
     clock += 29_000;
     await r.resolve('agent');
     expect(ssm).toHaveReceivedCommandTimes(GetParameterCommand, 1);
     clock += 2_000;
-    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: JSON.stringify({ runtimeArn: RUNTIME_ARN, requiredScopes: [], status: 'active' }) } });
-    expect((await r.resolve('agent')).requiredScopes).toEqual([]);
+    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: JSON.stringify({ runtimeArn: RUNTIME_ARN, scopes: ['default/chat'], status: 'active' }) } });
+    expect((await r.resolve('agent')).scopes).toEqual(['default/chat']);
     expect(ssm).toHaveReceivedCommandTimes(GetParameterCommand, 2);
     clock += 31_000;
     ssm.on(GetParameterCommand).rejects(notFound());

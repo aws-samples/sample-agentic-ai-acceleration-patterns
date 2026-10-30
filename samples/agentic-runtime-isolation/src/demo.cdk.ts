@@ -3,11 +3,13 @@
 
 /**
  * The demo stack (spec C-4, §6.4; standard §4.5): a thin wiring of a
- * `SharedIngress` (with a default `agent` backend) and one `AgentBackend` to
- * the sample's dependencies, plus a second backend (`billing`, ADR-0024)
- * behind the same ingress when the deployment checks
- * scopes. It reads tenant-identity's published parameters for the issuer
- * (ADR-0004), chooses the ingress and the optional modules from CDK context,
+ * `SharedIngress` (with a `default` backend owning `default/chat`) and one
+ * `AgentBackend` to the sample's dependencies, plus a second backend
+ * (`billing`, owning `billing/read` and `billing/invoke`; ADR-0024,
+ * ADR-0025) behind the same ingress on request. It reads tenant-identity's
+ * published parameters for the issuer (ADR-0004) and for the scope
+ * registration's API (ADR-0025), chooses the ingress and the optional
+ * modules from CDK context,
  * and publishes the Runtime ARNs as this sample's parameters (the ingress
  * publishes its own, src/shared-ingress.cdk.ts). The TVM is always on (ADR-0018):
  * the `tvm` context flag now means "demo tenant data". When true, the demo
@@ -29,11 +31,16 @@ import { AgentBackend, type AgentProps } from './agent-backend.cdk';
 import { AGENT_ENV } from './shared/config';
 import { COST_METRIC_NAMES, type IngressKind, METRIC_NAMES, METRICS_NAMESPACE } from './shared/metrics';
 import { ROUTE } from './shared/registry';
+import type { IdentityApiProps } from './shared/scope-registration.cdk';
 import type { SessionScope } from './shared/session';
 import { TENANT_TAG_KEY, USER_TAG_KEY } from './shared/tvm';
 import { DEFAULT_REGISTRY_PREFIX, GATEWAY_TARGET_NAME, SharedIngress, type SharedIngressProps } from './shared-ingress.cdk';
 
-/** tenant-identity's published parameters this sample consumes (ARCHITECTURE.md §5.1, ADR-0004). */
+/**
+ * tenant-identity's published parameters this stack consumes for the issuer
+ * (ARCHITECTURE.md §5.1, ADR-0004). The scope registration reads two more,
+ * `apiUrl` and `platformInvokePolicyArn` (`IDENTITY_API_PARAMETERS`, ADR-0025).
+ */
 export const IDENTITY_PARAMETERS = {
   userPoolId: '/application-plane/shared/identity/userPoolId',
   appClientId: '/application-plane/shared/identity/appClientId',
@@ -54,17 +61,22 @@ export const AGENT_RUNTIME_PARAMETERS = {
 /** The second backend's name (ADR-0024): the integ's step 9 calls `/billing/invocations`. */
 export const BILLING_BACKEND = 'billing';
 /**
- * The scope the billing backend requires on top of the ingress floor
- * (`tenant-api/read` in the all-on stacks). tenant-identity issues it and
- * the integ narrows a token to `tenant-api/read` only, which the billing
- * route then refuses with 403 while the default backend still serves it.
+ * The scopes the demo's backends own (ADR-0025), named after the backend.
+ * The default backend owns one; billing owns two, so the agent behind it can
+ * tell a read-only token from one that may invoke. A tenant is entitled to a
+ * scope by `CreateTenant.scopes` (tenant-identity ADR-0035) and a user by the
+ * tenant admin (ADR-0036); the integration test gives tenant A all three and
+ * tenant B `default/chat` only.
  */
-export const BILLING_SCOPE = 'tenant-api/write';
+export const DEFAULT_SCOPES = [`${GATEWAY_TARGET_NAME}/chat`] as const;
+export const BILLING_SCOPES = [`${BILLING_BACKEND}/read`, `${BILLING_BACKEND}/invoke`] as const;
 
 /** The build-time placeholders (standard §4.3). A CloudFormation rule refuses to deploy a stack that carries them. */
 export const PLACEHOLDER = {
   userPoolId: 'PLACEHOLDER-NOT-A-USER-POOL',
   appClientId: 'PLACEHOLDER-NOT-A-CLIENT-ID',
+  apiUrl: 'https://placeholder-not-an-api.example.com/',
+  platformInvokePolicyArn: 'arn:aws:iam::111122223333:policy/PLACEHOLDER-NOT-A-POLICY',
 } as const;
 
 /** Base model id for the demo: the one model the agent calls and the tenant role allows (P-6, ADR-0018). */
@@ -114,11 +126,19 @@ export interface DemoContext {
    */
   readonly publishParameters: boolean;
   /**
-   * Add the `billing` backend behind the same ingress (ADR-0024), requiring `BILLING_SCOPE`.
-   * Default: on when `requiredScopes` is set (the scope-checking deployments, where a second
-   * backend with a scope of its own shows the per-backend check), off otherwise.
+   * Add the `billing` backend behind the same ingress (ADR-0024), owning `BILLING_SCOPES`
+   * (ADR-0025). Default off: the one-backend form. The demo deploy and the integration
+   * stacks turn it on.
    */
   readonly billingBackend?: boolean;
+  /**
+   * The owner marker both backends register their scopes under (`AgentBackend.scopeOwner`,
+   * ADR-0025). Unset: each stack owns its scopes alone, so a second demo stack in the
+   * same account fails its deploy on `default/chat`. Several stacks that share one
+   * tenant-identity catalogue (the integration test's four) pass one value and MUST be
+   * destroyed together: the first one destroyed removes the scopes.
+   */
+  readonly scopeOwner?: string;
 }
 
 type ContextReader = (key: string) => unknown;
@@ -144,6 +164,17 @@ function integer(read: ContextReader, key: string): number | undefined {
     throw new Error(`Context '${key}' must be a non-negative integer (got ${String(value)})`);
   }
   return n;
+}
+
+function text(read: ContextReader, key: string): string | undefined {
+  const value = read(key);
+  if (value === undefined || value === '') {
+    return undefined;
+  }
+  if (typeof value !== 'string') {
+    throw new Error(`Context '${key}' must be a string`);
+  }
+  return value;
 }
 
 function list(read: ContextReader, key: string): string[] | undefined {
@@ -193,12 +224,13 @@ export function parseDemoContext(read: ContextReader, region?: string): DemoCont
     outputTokensPerMinute: integer(read, 'outputTokensPerMinute'),
     publishParameters: read('publishParameters') === undefined ? true : flag(read, 'publishParameters'),
     billingBackend: read('billingBackend') === undefined ? undefined : flag(read, 'billingBackend'),
+    scopeOwner: text(read, 'scopeOwner'),
   };
 }
 
-/** Whether the demo adds the billing backend: the explicit flag, else when the deployment checks scopes. */
+/** Whether the demo adds the billing backend: the explicit flag, else off. */
 export function wantsBillingBackend(ctx: DemoContext): boolean {
-  return ctx.billingBackend ?? ctx.requiredScopes !== undefined;
+  return ctx.billingBackend ?? false;
 }
 
 export interface RuntimeIsolationDemoStackProps extends StackProps {
@@ -209,6 +241,8 @@ export interface RuntimeIsolationDemoStackProps extends StackProps {
   readonly publishParameters?: boolean;
   /** The cost dashboard's name (account-wide). Default `RuntimeIsolation-<ingress>`; the integration test passes its stack name so several stacks of one ingress coexist. */
   readonly dashboardName?: string;
+  /** The scope owner marker for both backends. Overrides `context.scopeOwner`; see `DemoContext.scopeOwner`. */
+  readonly scopeOwner?: string;
 }
 
 export class RuntimeIsolationDemoStack extends Stack {
@@ -230,14 +264,17 @@ export class RuntimeIsolationDemoStack extends Stack {
     const ctx = props.context;
 
     // The issuer (ADR-0004): tenant-identity's shared pool, read from its
-    // published parameters at deploy time. The build synthesises with
-    // placeholders no account can resolve, and the rule below makes sure a
-    // placeholder template is refused by CloudFormation.
+    // published parameters at deploy time; the scope registration reads the
+    // identity API's URL and invoke policy the same way (ADR-0025). The build
+    // synthesises with placeholders no account can resolve, and the rule
+    // below makes sure a placeholder template is refused by CloudFormation.
     let userPoolId: string;
     let appClientId: string;
+    let identityApi: IdentityApiProps | undefined;
     if (ctx.identityParameterPlaceholders) {
       userPoolId = PLACEHOLDER.userPoolId;
       appClientId = PLACEHOLDER.appClientId;
+      identityApi = { apiUrl: PLACEHOLDER.apiUrl, platformInvokePolicyArn: PLACEHOLDER.platformInvokePolicyArn };
       new CfnRule(this, 'RefusePlaceholderDeployment', {
         assertions: [
           {
@@ -310,6 +347,8 @@ export class RuntimeIsolationDemoStack extends Stack {
     }
 
     const agent: AgentProps = { codePath: props.agentCodePath, modelId: ctx.modelId, environment: agentEnvironment };
+    // One marker for both backends (ADR-0025): unset, each registration is its own owner.
+    const scopeOwner = props.scopeOwner ?? ctx.scopeOwner;
     this.ingress = new SharedIngress(this, 'SharedIngress', {
       identity: { discoveryUrl, allowedClientIds: [appClientId] },
       ingress: ctx.ingress,
@@ -329,19 +368,29 @@ export class RuntimeIsolationDemoStack extends Stack {
           : { requestsPerMinute: ctx.requestsPerMinute, outputTokensPerMinute: ctx.outputTokensPerMinute },
       defaultBackend: GATEWAY_TARGET_NAME,
     });
-    this.agentBackend = new AgentBackend(this, 'AgentBackend', { name: GATEWAY_TARGET_NAME, ingress: this.ingress, agent });
+    this.agentBackend = new AgentBackend(this, 'AgentBackend', {
+      name: GATEWAY_TARGET_NAME,
+      ingress: this.ingress,
+      agent,
+      scopes: [...DEFAULT_SCOPES],
+      identityApi,
+      scopeOwner,
+    });
     callerRoleArn = this.ingress.tvmCallerRole.roleArn;
 
     // A second backend behind the same ingress (ADR-0024): the same agent
-    // code and model, its own Runtime and registry entry, and a scope of its
-    // own on top of the ingress floor. A token narrowed to the floor alone
-    // reaches `/agent/invocations` and gets 403 on `/billing/invocations`.
+    // code and model, its own Runtime, registry entry and scopes (ADR-0025).
+    // A token carrying `default/chat` alone reaches `/default/invocations`
+    // and gets 403 on `/billing/invocations`; one carrying `billing/read` or
+    // `billing/invoke` reaches billing.
     if (wantsBillingBackend(ctx)) {
       this.billing = new AgentBackend(this, 'BillingBackend', {
         name: BILLING_BACKEND,
         ingress: this.ingress,
         agent,
-        requiredScopes: [BILLING_SCOPE],
+        scopes: [...BILLING_SCOPES],
+        identityApi,
+        scopeOwner,
       });
     }
 

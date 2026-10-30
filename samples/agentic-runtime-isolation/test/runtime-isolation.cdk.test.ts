@@ -10,9 +10,13 @@ import { baseModelId, isInferenceProfileId } from '../src/backend/agentcore-runt
 import { RUNTIME_HEADERS } from '../src/backend/agentcore-runtime.transport';
 import {
   AgentBackend,
+  SCOPE_OWNER_MAX_LENGTH,
+  scopeOwnerProblem,
   type AgentProps,
   DEFAULT_REGISTRY_PREFIX,
   GATEWAY_TARGET_NAME,
+  IDENTITY_API_PARAMETERS,
+  type IdentityApiProps,
   INGRESS_TAG_KEY,
   MAX_REGISTRY_TTL,
   PUBLISHED,
@@ -20,6 +24,7 @@ import {
   registryParameterName,
   resolveOptions,
   ROUTE,
+  ScopeRegistration,
   SharedIngress,
   type SharedIngressProps,
   SharedIngressRef,
@@ -39,6 +44,11 @@ import { ENV } from '../src/shared/config';
 
 const FIXTURE_AGENT = path.join(__dirname, 'fixtures', 'agent');
 const DISCOVERY_URL = 'https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TESTPOOL00/.well-known/openid-configuration';
+/** The identity API given by value, so a synth test needs no SSM lookup (the demo does the same with `identityParameterPlaceholders`). */
+const IDENTITY_API: IdentityApiProps = { apiUrl: 'https://identity.example.com/prod/', platformInvokePolicyArn: 'arn:aws:iam::111122223333:policy/PlatformInvoke' };
+/** The default backend's one scope (ADR-0025). */
+const DEFAULT_SCOPES = [`${GATEWAY_TARGET_NAME}/chat`];
+const agentOf = (modelId = 'm'): AgentProps => ({ codePath: FIXTURE_AGENT, modelId });
 
 type DemoProps = Omit<SharedIngressProps, 'defaultBackend'> & { agent: AgentProps; backendName?: string };
 type Ingress = DemoProps['ingress'];
@@ -79,7 +89,7 @@ function synth(props: Partial<DemoProps> & { ingress: Ingress }, withNag = false
   const { agent, backendName, ...rest } = merged;
   const bn = backendName ?? GATEWAY_TARGET_NAME;
   const ingress = new SharedIngress(stack, 'Ingress', { ...rest, defaultBackend: bn });
-  const backend = new AgentBackend(stack, 'Backend', { name: bn, ingress, agent });
+  const backend = new AgentBackend(stack, 'Backend', { name: bn, ingress, agent, scopes: [`${bn}/chat`], identityApi: IDENTITY_API });
   const endpointUrl = rest.ingress === 'api-gateway' ? `${ingress.endpointUrl}/${ROUTE}` : ingress.urlFor(bn);
   const construct = {
     endpointUrl,
@@ -330,20 +340,21 @@ describe.each(INGRESSES)('one-backend defaults, ingress=%s', (ingress) => {
     const [entry] = entries;
     expect(entry.Properties.ParameterName).toBe(registryParameterName(DEFAULT_REGISTRY_PREFIX, GATEWAY_TARGET_NAME));
     expect(entry.Properties.RuntimeArn).toEqual({ 'Fn::GetAtt': [runtimeLogicalId(template), 'AgentRuntimeArn'] });
-    expect(entry.Properties.RequiredScopes).toEqual([]);
+    expect(entry.Properties.Scopes).toEqual(DEFAULT_SCOPES);
     expect(entry.Properties.DrainSeconds).toBe(180);
-    // Written after the Runtime and its resource policy (and the target).
+    // Written after the Runtime, its resource policy (and the target), and the scope registration (ADR-0025).
     const deps: string[] = entry.DependsOn ?? [];
     expect(deps).toContain(runtimeLogicalId(template));
     expect(deps.some((d) => d.includes('ResourcePolicy'))).toBe(true);
+    expect(deps.some((d) => d.includes('BackendScopes'))).toBe(true);
     if (ingress === 'agentcore-gateway') {
       expect(deps.some((d) => d.includes('GatewayTarget'))).toBe(true);
     }
-    expect(construct.backend.registryParameterName).toBe(`${DEFAULT_REGISTRY_PREFIX}backends/agent`);
+    expect(construct.backend.registryParameterName).toBe(`${DEFAULT_REGISTRY_PREFIX}backends/${GATEWAY_TARGET_NAME}`);
     // Its role may put, get and delete exactly that parameter.
     const own = statementsForRole(template, 'RegistryEntryFunctionServiceRole').find((s) => s.Sid === 'OwnRegistryEntry');
     expect(own.Action).toEqual(['ssm:PutParameter', 'ssm:GetParameter', 'ssm:DeleteParameter']);
-    expect(JSON.stringify(own.Resource)).toContain(`:parameter${DEFAULT_REGISTRY_PREFIX}backends/agent"`);
+    expect(JSON.stringify(own.Resource)).toContain(`:parameter${DEFAULT_REGISTRY_PREFIX}backends/${GATEWAY_TARGET_NAME}"`);
     // The drain waits the whole delete.
     const fns = Object.values(template.findResources('AWS::Lambda::Function')) as any[];
     const writer = fns.find((f) => String(f.Properties.Description).includes('registry entry'));
@@ -481,9 +492,9 @@ describe.each(INGRESSES)('one-backend defaults, ingress=%s', (ingress) => {
       expect(fn.Properties.Architectures).toEqual(['arm64']);
       expect(fn.Properties.LoggingConfig).toMatchObject({ LogFormat: 'JSON', LogGroup: { Ref: expect.any(String) } });
     }
-    // The log-drain waiter and the registry-entry writer run on stack operations, not requests: no tracing, and quiet logs (ADR-0019).
-    const quiet = fns.filter((f) => /Waits on stack delete|registry entry/.test(String(f.Properties.Description ?? '')));
-    expect(quiet).toHaveLength(2);
+    // The log-drain waiter, the registry-entry writer and the scope registration run on stack operations, not requests: no tracing, and quiet logs (ADR-0019).
+    const quiet = fns.filter((f) => /Waits on stack delete|registry entry|registers backend/.test(String(f.Properties.Description ?? '')));
+    expect(quiet).toHaveLength(3);
     for (const fn of fns) {
       if (quiet.includes(fn)) {
         expect(fn.Properties.LoggingConfig.SystemLogLevel).toBe('WARN');
@@ -963,16 +974,17 @@ describe.each(INGRESSES)('SharedIngress with several AgentBackends, ingress=%s (
   const shared = new SharedIngress(stack, 'Ingress', {
     identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: ['client-one'] },
     ingress,
-    requiredScopes: ['tenant-api/read'],
+    requiredScopes: ['platform/active'],
     registryPrefix: '/acme/agents/',
     registryTtl: Duration.seconds(30),
   });
-  const support = new AgentBackend(stack, 'Support', { name: 'support', ingress: shared, agent: { codePath: FIXTURE_AGENT, modelId: 'eu.amazon.nova-lite-v1:0' } });
+  const support = new AgentBackend(stack, 'Support', { name: 'support', ingress: shared, agent: agentOf('eu.amazon.nova-lite-v1:0'), scopes: ['support/chat'], identityApi: IDENTITY_API });
   const billing = new AgentBackend(stack, 'Billing', {
     name: 'billing',
     ingress: shared,
-    agent: { codePath: FIXTURE_AGENT, modelId: 'eu.amazon.nova-lite-v1:0' },
-    requiredScopes: ['tenant-api/write'],
+    agent: agentOf('eu.amazon.nova-lite-v1:0'),
+    scopes: ['billing/read', 'billing/invoke'],
+    identityApi: IDENTITY_API,
   });
   const template = Template.fromStack(stack);
 
@@ -997,17 +1009,127 @@ describe.each(INGRESSES)('SharedIngress with several AgentBackends, ingress=%s (
     const entries = Object.values(template.findResources('Custom::RuntimeIsolationRegistryEntry')) as any[];
     expect(entries.map((e) => e.Properties.ParameterName).sort()).toEqual(['/acme/agents/backends/billing', '/acme/agents/backends/support']);
     const billingEntry = entries.find((e) => e.Properties.ParameterName.endsWith('/billing'));
-    expect(billingEntry.Properties.RequiredScopes).toEqual(['tenant-api/write']);
+    expect(billingEntry.Properties.Scopes).toEqual(['billing/read', 'billing/invoke']);
     expect(billingEntry.Properties.DrainSeconds).toBe(150);
+    expect(billing.scopes).toEqual(['billing/read', 'billing/invoke']);
     expect(support.registryParameterName).toBe(registryParameterName('/acme/agents/', 'support'));
     expect(billing.endpointUrl).toBe(shared.urlFor('billing'));
     expect(lambdaEnv(template, ingress === 'api-gateway' ? 'chooses the unit' : 'interceptor')).toMatchObject({
       [ENV.REGISTRY_PREFIX]: '/acme/agents/',
       [ENV.REGISTRY_TTL_SECONDS]: '30',
-      [ENV.REQUIRED_SCOPES]: 'tenant-api/read',
+      [ENV.REQUIRED_SCOPES]: 'platform/active',
     });
     // The read grant follows the prefix.
     expect(JSON.stringify(template.toJSON())).toContain(':parameter/acme/agents/backends/*"');
+  });
+
+  it('registers each backend\'s scopes with the identity API through a custom resource the entry depends on (ADR-0025)', () => {
+    const registrations = Object.values(template.findResources('Custom::RuntimeIsolationScopeRegistration')) as any[];
+    expect(registrations.map((r) => r.Properties.Backend).sort()).toEqual(['billing', 'support']);
+    const billingReg = registrations.find((r) => r.Properties.Backend === 'billing');
+    expect(billingReg.Properties).toMatchObject({ ApiUrl: IDENTITY_API.apiUrl, Scopes: ['billing/read', 'billing/invoke'] });
+    // No Owner by default: the handler marks the scopes with this stack's id and the resource's logical id.
+    for (const r of registrations) {
+      expect(r.Properties.Owner).toBeUndefined();
+    }
+    // The entry waits for the registration, so the route never names a scope the issuer does not know.
+    const resources = template.toJSON().Resources as Record<string, any>;
+    const [regId] = Object.entries(resources).find(([, r]) => r.Type === 'Custom::RuntimeIsolationScopeRegistration' && r.Properties.Backend === 'billing')!;
+    const [, billingEntry] = Object.entries(resources).find(([, r]) => r.Type === 'Custom::RuntimeIsolationRegistryEntry' && String(r.Properties.ParameterName).endsWith('/billing'))!;
+    expect(billingEntry.DependsOn).toContain(regId);
+    // The registration function's role carries the published PlatformInvokePolicy and nothing of the registry.
+    const fn = (Object.values(template.findResources('AWS::Lambda::Function')) as any[]).find((f) => String(f.Properties.Description).includes("registers backend billing's scopes"));
+    expect(fn).toBeDefined();
+    const roleId = fn.Properties.Role['Fn::GetAtt'][0];
+    expect(JSON.stringify(resources[roleId].Properties.ManagedPolicyArns)).toContain(IDENTITY_API.platformInvokePolicyArn);
+    const roleStatements = statementsForRole(template, roleId);
+    expect(roleStatements.some((s) => JSON.stringify(s).includes('ssm:'))).toBe(false);
+    // The role grants no execute-api route of its own: the only Allow into /platform/* is the managed policy...
+    expect(roleStatements.some((s) => s.Effect === 'Allow' && JSON.stringify(s.Action).includes('execute-api'))).toBe(false);
+    expect(JSON.stringify(roleStatements).includes('/platform/tenants')).toBe(true);
+    // ...and an explicit Deny takes the tenant routes back out of it (T-41), leaving `/platform/scopes*` alone.
+    const deny = roleStatements.find((s) => s.Sid === 'DenyPlatformTenantRoutes');
+    expect(deny).toMatchObject({ Effect: 'Deny', Action: 'execute-api:Invoke' });
+    const denied = JSON.stringify(deny.Resource);
+    expect(denied).toContain(':execute-api:');
+    expect(denied).toContain(':*/*/*/platform/tenants*');
+    expect(roleStatements.filter((s) => s.Effect === 'Allow' && JSON.stringify(s).includes('/platform/tenants'))).toHaveLength(0);
+    expect(resources[roleId].Properties.ManagedPolicyArns).toHaveLength(2); // AWSLambdaBasicExecutionRole and PlatformInvokePolicy, nothing else
+    expect(billing.scopeRegistration.scopes).toEqual(['billing/read', 'billing/invoke']);
+    // Its log group is behind the ingress drain too.
+    const [drain] = Object.keys(template.findResources('AWS::CloudFormation::CustomResource'));
+    const scopeLogGroups = Object.keys(template.findResources('AWS::Logs::LogGroup')).filter((id) => id.includes('ScopesLogs'));
+    expect(scopeLogGroups).toHaveLength(2);
+    for (const group of scopeLogGroups) {
+      expect(resources[drain].DependsOn).toContain(group);
+    }
+    expect(billingReg.DependsOn).toContain(drain);
+  });
+
+  it('refuses a scope list that is empty, repeats a name, is ill-formed or is owned by another name, naming the prop (ADR-0025)', () => {
+    const other = new Stack(new App({ context: { 'aws:cdk:bundling-stacks': [] } }), 'Other');
+    const sharedOther = new SharedIngress(other, 'Ingress', { identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: ['c'] }, ingress: 'api-gateway' });
+    const make = (id: string, scopes: string[]) => () => new AgentBackend(other, id, { name: 'ok', ingress: sharedOther, agent: agentOf(), scopes, identityApi: IDENTITY_API });
+    expect(make('Empty', [])).toThrow(/AgentBackend: scopes must name at least one scope/);
+    expect(make('Dup', ['ok/read', 'ok/read'])).toThrow(/AgentBackend: scopes must not repeat a scope/);
+    expect(make('Space', ['ok/re ad'])).toThrow(/AgentBackend: scopes 'ok\/re ad' must match/);
+    expect(make('Upper', ['ok/Read'])).toThrow(/AgentBackend: scopes 'ok\/Read' must match/);
+    expect(make('NoSlash', ['okread'])).toThrow(/AgentBackend: scopes 'okread' must match/);
+    expect(make('TwoSlashes', ['ok/read/all'])).toThrow(/AgentBackend: scopes 'ok\/read\/all' must match/);
+    expect(make('Foreign', ['ok/read', 'billing/read'])).toThrow(/AgentBackend: scopes 'billing\/read' must be owned by this backend: ok\/<action>/);
+    expect(make('Reserved', ['tenant-admin/users'])).toThrow(/must be owned by this backend/);
+    expect(make('Long', [`ok/${'a'.repeat(126)}`])).toThrow(/AgentBackend: scopes 'ok\/a+' must match/);
+    expect(() => new AgentBackend(other, 'Missing', { name: 'ok', ingress: sharedOther, agent: agentOf(), identityApi: IDENTITY_API } as any)).toThrow(/AgentBackend: scopes must name at least one scope/);
+    // ScopeRegistration on its own applies the same rule.
+    expect(() => new ScopeRegistration(other, 'Reg', { backend: 'ok', scopes: ['other/x'], identityApi: IDENTITY_API })).toThrow(/ScopeRegistration: scopes 'other\/x' must be owned/);
+    // The longest accepted name: 128 characters.
+    new AgentBackend(other, 'Max', { name: 'ok', ingress: sharedOther, agent: agentOf(), scopes: [`ok/${'a'.repeat(125)}`], identityApi: IDENTITY_API });
+  });
+
+  it('scopeOwner: passed to the registration as Owner, so stacks that share it co-own the names; refused when empty, over 200 characters or carrying # (ADR-0025)', () => {
+    const other = new Stack(new App({ context: { 'aws:cdk:bundling-stacks': [] } }), 'Other');
+    const sharedOther = new SharedIngress(other, 'Ingress', { identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: ['c'] }, ingress: 'api-gateway' });
+    const make = (id: string, scopeOwner: string | undefined) => () =>
+      new AgentBackend(other, id, { name: id.toLowerCase(), ingress: sharedOther, agent: agentOf(), scopes: [`${id.toLowerCase()}/chat`], identityApi: IDENTITY_API, scopeOwner });
+    expect(make('Empty', '')).toThrow(/AgentBackend: scopeOwner must be a non-empty string/);
+    expect(make('Long', 'x'.repeat(SCOPE_OWNER_MAX_LENGTH + 1))).toThrow(/AgentBackend: scopeOwner must be at most 200 characters \(got 201\)/);
+    expect(make('Hash', 'arn:aws:cloudformation:eu-central-1:111122223333:stack/A/1#Scopes')).toThrow(/AgentBackend: scopeOwner must not contain '#'/);
+    expect(() => new AgentBackend(other, 'NotString', { name: 'ns', ingress: sharedOther, agent: agentOf(), scopes: ['ns/chat'], identityApi: IDENTITY_API, scopeOwner: 7 as any })).toThrow(/scopeOwner must be a non-empty string/);
+    expect(scopeOwnerProblem(undefined)).toBeUndefined();
+    expect(scopeOwnerProblem('x'.repeat(SCOPE_OWNER_MAX_LENGTH))).toBeUndefined();
+    // Two backends in one stack and one in another, all under one marker: every registration carries it verbatim; one without stays default.
+    const owned = make('Owned', 'RuntimeIsolationInteg')();
+    make('Second', 'RuntimeIsolationInteg')();
+    make('Alone', undefined)();
+    // ScopeRegistration on its own writes the Owner property when given and omits it otherwise.
+    new ScopeRegistration(other, 'RegOwned', { backend: 'reg', scopes: ['reg/x'], identityApi: IDENTITY_API, owner: 'shared' });
+    new ScopeRegistration(other, 'RegPlain', { backend: 'plain', scopes: ['plain/x'], identityApi: IDENTITY_API });
+    const t = Template.fromStack(other);
+    const regs = Object.values(t.findResources('Custom::RuntimeIsolationScopeRegistration')) as any[];
+    expect(regs.find((r) => r.Properties.Backend === 'owned').Properties.Owner).toBe('RuntimeIsolationInteg');
+    expect(regs.find((r) => r.Properties.Backend === 'second').Properties.Owner).toBe('RuntimeIsolationInteg');
+    expect(regs.find((r) => r.Properties.Backend === 'alone').Properties.Owner).toBeUndefined();
+    expect(owned.scopeRegistration.resource).toBeDefined();
+    t.hasResourceProperties('Custom::RuntimeIsolationScopeRegistration', { Backend: 'reg', Owner: 'shared' });
+    t.hasResourceProperties('Custom::RuntimeIsolationScopeRegistration', { Backend: 'plain', Owner: Match.absent() });
+  });
+
+  it('without identityApi the registration reads apiUrl and platformInvokePolicyArn from the published parameters at deploy time (ADR-0025)', () => {
+    const other = new Stack(new App({ context: { 'aws:cdk:bundling-stacks': [] } }), 'Other', { env: { account: '111122223333', region: 'eu-central-1' } });
+    const sharedOther = new SharedIngress(other, 'Ingress', { identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: ['c'] }, ingress: 'api-gateway' });
+    new AgentBackend(other, 'One', { name: 'one', ingress: sharedOther, agent: agentOf(), scopes: ['one/chat'] });
+    new AgentBackend(other, 'Two', { name: 'two', ingress: sharedOther, agent: agentOf(), scopes: ['two/chat'] });
+    const t = Template.fromStack(other);
+    const params = Object.values(t.toJSON().Parameters as Record<string, any>).filter(
+      (p) => p.Type === 'AWS::SSM::Parameter::Value<String>' && String(p.Default).startsWith('/application-plane/'),
+    );
+    // One template parameter per name per stack, shared by both backends.
+    expect(params.map((p) => p.Default).sort()).toEqual([IDENTITY_API_PARAMETERS.apiUrl, IDENTITY_API_PARAMETERS.platformInvokePolicyArn].sort());
+    const regs = Object.values(t.findResources('Custom::RuntimeIsolationScopeRegistration')) as any[];
+    expect(regs).toHaveLength(2);
+    for (const reg of regs) {
+      expect(reg.Properties.ApiUrl).toEqual({ Ref: expect.stringMatching(/^SsmParameterValue/) });
+    }
   });
 
   it('grantModel is idempotent per model id: two backends on one model add one statement to the tenant role; a second model adds a second', () => {
@@ -1027,16 +1149,15 @@ describe.each(INGRESSES)('SharedIngress with several AgentBackends, ingress=%s (
   it('refuses a bad backend name, a duplicate scope shape and a Gateway ref without an identifier, naming the prop', () => {
     const other = new Stack(new App({ context: { 'aws:cdk:bundling-stacks': [] } }), 'Other');
     const sharedOther = new SharedIngress(other, 'Ingress', { identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: ['c'] }, ingress: 'api-gateway' });
-    expect(() => new AgentBackend(other, 'Bad', { name: 'Billing', ingress: sharedOther, agent: { codePath: FIXTURE_AGENT, modelId: 'm' } })).toThrow(/AgentBackend: name/);
-    expect(() => new AgentBackend(other, 'Bad2', { name: 'ok', ingress: sharedOther, agent: { codePath: FIXTURE_AGENT, modelId: 'm' }, requiredScopes: ['a b'] })).toThrow(/requiredScopes/);
+    expect(() => new AgentBackend(other, 'Bad', { name: 'Billing', ingress: sharedOther, agent: agentOf(), scopes: ['billing/read'], identityApi: IDENTITY_API })).toThrow(/AgentBackend: name/);
     const ref: SharedIngressRef = { registryPrefix: '/p/', ingressRoleArn: 'arn:aws:iam::111122223333:role/x', ingressId: 'x', ingress: 'agentcore-gateway', tenantRoleArn: 'arn:aws:iam::111122223333:role/t' };
-    expect(() => new AgentBackend(other, 'Bad3', { name: 'ok', ingress: ref, agent: { codePath: FIXTURE_AGENT, modelId: 'm' } })).toThrow(/gatewayIdentifier/);
+    expect(() => new AgentBackend(other, 'Bad3', { name: 'ok', ingress: ref, agent: agentOf(), scopes: ['ok/chat'], identityApi: IDENTITY_API })).toThrow(/gatewayIdentifier/);
   });
 
   it('refuses a SharedIngress instance from another stack: it must be imported with fromParameters (ADR-0024)', () => {
     const otherApp = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
     const backendStack = new Stack(otherApp, 'BackendStack', { env: { account: '111122223333', region: 'eu-central-1' } });
-    expect(() => new AgentBackend(backendStack, 'Foreign', { name: 'foreign', ingress: shared, agent: { codePath: FIXTURE_AGENT, modelId: 'm' } })).toThrow(
+    expect(() => new AgentBackend(backendStack, 'Foreign', { name: 'foreign', ingress: shared, agent: agentOf(), scopes: ['foreign/chat'], identityApi: IDENTITY_API })).toThrow(
       /AgentBackend: ingress a SharedIngress from another stack must be imported with SharedIngress\.fromParameters/,
     );
     // Nothing of the backend reached the ingress's stack either.
@@ -1045,7 +1166,7 @@ describe.each(INGRESSES)('SharedIngress with several AgentBackends, ingress=%s (
 
   it('a RegistryEntryResource drain above 870 s (TTL 750 s + 120 s) is refused at synth, so the handler timeout stays under Lambda\'s 15 minutes', () => {
     const other = new Stack(new App({ context: { 'aws:cdk:bundling-stacks': [] } }), 'Other', { env: { account: '111122223333', region: 'eu-central-1' } });
-    const base = { registryPrefix: '/p/', backend: 'b', runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/x', requiredScopes: [] };
+    const base = { registryPrefix: '/p/', backend: 'b', runtimeArn: 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/x', scopes: ['b/x'] };
     expect(() => new RegistryEntryResource(other, 'TooLong', { ...base, drain: Duration.seconds(871) })).toThrow(/RegistryEntryResource: drain must be from 1 to 870 seconds \(got 871\)/);
     expect(() => new RegistryEntryResource(other, 'Zero', { ...base, drain: Duration.seconds(0) })).toThrow(/RegistryEntryResource: drain/);
     new RegistryEntryResource(other, 'Max', { ...base, drain: Duration.seconds(870) });
@@ -1054,6 +1175,7 @@ describe.each(INGRESSES)('SharedIngress with several AgentBackends, ingress=%s (
   });
 
   it('every registry entry sits behind the ingress log drain: entry -> drain -> its log group (ADR-0019)', () => {
+    // (The scope registrations are checked the same way in the ADR-0025 test above.)
     const resources = template.toJSON().Resources as Record<string, any>;
     const [drain] = Object.keys(template.findResources('AWS::CloudFormation::CustomResource'));
     const drainDeps: string[] = resources[drain].DependsOn ?? [];
@@ -1084,22 +1206,23 @@ describe.each(INGRESSES)('AgentBackend in its own stack from SharedIngress.fromP
     name: 'billing',
     ingress: ref,
     agent: { codePath: FIXTURE_AGENT, modelId: 'amazon.nova-lite-v1:0' },
-    requiredScopes: ['tenant-api/write'],
+    scopes: ['billing/read', 'billing/invoke'],
   });
   // What a backend stack does with the URL (and what keeps the endpointUrl parameter referenced).
   new CfnOutput(stack, 'BillingEndpointUrl', { value: backend.endpointUrl! });
   const template = Template.fromStack(stack);
 
-  it('reads the published parameters: baseUrl, ingressRoleArn, ingressId, tenantRoleArn and, on the Gateway, gatewayIdentifier', () => {
-    const params = Object.values(template.toJSON().Parameters as Record<string, any>).filter(
-      (p) => p.Type === 'AWS::SSM::Parameter::Value<String>' && String(p.Default).startsWith(DEFAULT_REGISTRY_PREFIX),
-    );
+  it('reads the published parameters: baseUrl, ingressRoleArn, ingressId, tenantRoleArn and, on the Gateway, gatewayIdentifier; plus the identity API for the scopes (ADR-0025)', () => {
+    const all = Object.values(template.toJSON().Parameters as Record<string, any>).filter((p) => p.Type === 'AWS::SSM::Parameter::Value<String>');
+    const params = all.filter((p) => String(p.Default).startsWith(DEFAULT_REGISTRY_PREFIX));
     const expected: string[] = [PUBLISHED.baseUrl, PUBLISHED.ingressRoleArn, PUBLISHED.ingressId, PUBLISHED.tenantRoleArn];
     const expectedNames = expected
       .concat(ingress === 'agentcore-gateway' ? [PUBLISHED.gatewayIdentifier] : [])
       .map((n) => `${DEFAULT_REGISTRY_PREFIX}${n}`)
       .sort();
     expect(params.map((p) => p.Default).sort()).toEqual(expectedNames);
+    const identityApi = [IDENTITY_API_PARAMETERS.apiUrl, IDENTITY_API_PARAMETERS.platformInvokePolicyArn];
+    expect(all.map((p) => p.Default)).toEqual(expect.arrayContaining(identityApi));
     expect(ref.ingress).toBe(ingress);
   });
 
@@ -1117,9 +1240,10 @@ describe.each(INGRESSES)('AgentBackend in its own stack from SharedIngress.fromP
     expect(JSON.stringify(resourcePolicy(template))).toContain(JSON.stringify(JSON.stringify(stack.resolve(ref.ingressRoleArn))).slice(1, -1));
     template.hasResourceProperties('Custom::RuntimeIsolationRegistryEntry', {
       ParameterName: `${DEFAULT_REGISTRY_PREFIX}backends/billing`,
-      RequiredScopes: ['tenant-api/write'],
+      Scopes: ['billing/read', 'billing/invoke'],
       DrainSeconds: 180,
     });
+    template.hasResourceProperties('Custom::RuntimeIsolationScopeRegistration', { Backend: 'billing', Scopes: ['billing/read', 'billing/invoke'] });
     expect(backend.registryParameterName).toBe(`${DEFAULT_REGISTRY_PREFIX}backends/billing`);
     expect(JSON.stringify(stack.resolve(backend.endpointUrl))).toContain(`/billing/${ROUTE}`);
   });
@@ -1132,8 +1256,12 @@ describe.each(INGRESSES)('AgentBackend in its own stack from SharedIngress.fromP
     expect(drain).toContain('BillingLogDrain');
     const [entryLogGroup] = Object.keys(template.findResources('AWS::Logs::LogGroup')).filter((id) => id.includes('RegistryEntryLogs'));
     expect(resources[drain].DependsOn).toContain(entryLogGroup);
+    const [scopesLogGroup] = Object.keys(template.findResources('AWS::Logs::LogGroup')).filter((id) => id.includes('ScopesLogs'));
+    expect(resources[drain].DependsOn).toContain(scopesLogGroup);
     const [entry] = Object.values(template.findResources('Custom::RuntimeIsolationRegistryEntry')) as any[];
     expect(entry.DependsOn).toContain(drain);
+    const [registration] = Object.values(template.findResources('Custom::RuntimeIsolationScopeRegistration')) as any[];
+    expect(registration.DependsOn).toContain(drain);
     for (const group of Object.values(template.findResources('AWS::Logs::LogGroup')) as any[]) {
       expect(group.DeletionPolicy).toBe('Delete');
     }

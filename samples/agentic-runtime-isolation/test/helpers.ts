@@ -21,7 +21,7 @@ export const OTHER_CLIENT_ID = 'otherclient000000000000000';
 export interface TestIssuer {
   readonly getKey: JWTVerifyGetKey;
   readonly fetchDiscovery: (url: string) => Promise<Discovery>;
-  /** A valid access token for the given overrides (defaults: tenant-a, user-a1, both scopes). */
+  /** A valid access token for the given overrides (defaults: tenant-a, user-a1, the default backend's scope and billing/read). */
   mint(overrides?: JWTPayload & { exp?: number }, headerKid?: string): Promise<string>;
   /** A token signed by a key the JWKS does not know. */
   mintForeign(overrides?: JWTPayload): Promise<string>;
@@ -32,7 +32,7 @@ export const DEFAULT_CLAIMS: JWTPayload = {
   tenant_id: 'tenant-a',
   client_id: CLIENT_ID,
   token_use: 'access',
-  scope: 'tenant-api/read tenant-api/write aws.cognito.signin.user.admin',
+  scope: 'default/chat billing/read aws.cognito.signin.user.admin',
 };
 
 export async function testIssuer(): Promise<TestIssuer> {
@@ -60,10 +60,20 @@ export async function testIssuer(): Promise<TestIssuer> {
   };
 }
 
-/** The registry prefix and the one backend the fixtures resolve (ADR-0024). */
+/** The registry prefix and the one backend the fixtures resolve (ADR-0024), with its one scope (ADR-0025). */
 export const REGISTRY_PREFIX = '/application-plane/shared/agent-runtime/';
-export const DEFAULT_BACKEND = 'agent';
+export const DEFAULT_BACKEND = 'default';
+export const DEFAULT_SCOPE = 'default/chat';
 export const RUNTIME_ARN = 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_test-abc123';
+/** A second backend the fixtures add: two scopes of its own, any one admits (ADR-0025). */
+export const BILLING_RUNTIME_ARN = 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_billing-1';
+export const BILLING_SCOPES = ['billing/read', 'billing/invoke'];
+/** A draining backend. */
+export const OLD_RUNTIME_ARN = 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_old-1';
+export const FIXTURE_ENTRIES: Record<string, RegistryEntry> = {
+  billing: { runtimeArn: BILLING_RUNTIME_ARN, scopes: BILLING_SCOPES, status: 'active' },
+  old: { runtimeArn: OLD_RUNTIME_ARN, scopes: ['old/chat'], status: 'draining' },
+};
 
 /** An ingress configuration with every module off; tests override what they need. */
 export const baseConfig = (overrides: Partial<IngressConfig> = {}): IngressConfig => ({
@@ -77,12 +87,13 @@ export const baseConfig = (overrides: Partial<IngressConfig> = {}): IngressConfi
 });
 
 /**
- * A registry stub with no SSM behind it: `agent` resolves to RUNTIME_ARN with
- * no scopes, plus whatever entries a test adds; any other name is
- * `unknown_backend`. `warmed` records the names `warm()` was asked for.
+ * A registry stub with no SSM behind it: `default` resolves to RUNTIME_ARN
+ * with the one scope `default/chat`, plus whatever entries a test adds; any
+ * other name is `unknown_backend`. `warmed` records the names `warm()` was
+ * asked for.
  */
 export const stubRegistry = (entries: Record<string, RegistryEntry> = {}) => {
-  const table: Record<string, RegistryEntry> = { [DEFAULT_BACKEND]: { runtimeArn: RUNTIME_ARN, requiredScopes: [], status: 'active' }, ...entries };
+  const table: Record<string, RegistryEntry> = { [DEFAULT_BACKEND]: { runtimeArn: RUNTIME_ARN, scopes: [DEFAULT_SCOPE], status: 'active' }, ...entries };
   const warmed: string[] = [];
   const registry: RegistryResolver = {
     resolve: async (backend: string) => {

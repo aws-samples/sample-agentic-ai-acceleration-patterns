@@ -66,6 +66,18 @@ that none of those ever reach output.
   sample's prefix, plus the log groups and SSM parameters its own stacks
   owned. It ignores parameters under `/application-plane/shared/agent-runtime/*`
   that another deployment wrote.
+- `integ.sh` deploys the four stacks of `test/integ.runtime.ts` at once and
+  destroys them together from the trap: they all pass
+  `scopeOwner: 'RuntimeIsolationInteg'`, so they co-own the demo scope names
+  in the catalogue, and the first one destroyed removes those scopes. A
+  stack deployed with any other owner marker fails on the same names with
+  `scope <name> already registered by another stack`.
+- `integ.sh` never replaces a published tenant-identity on its own. A
+  published deployment without the scope catalogue is stale; the script
+  fails and names the fix unless `INTEG_REPLACE_STALE_IDENTITY=1` is set,
+  because the replacement deletes the shared user pool and every other
+  consumer's tenants and tokens with it. On a reused deployment the cleanup
+  also checks that the demo scopes are gone from the catalogue.
 - Exit non-zero on any failure, naming the step, resource or parameter that
   failed (name, not value). Never swallow an error into a success exit.
 
@@ -81,7 +93,18 @@ The scripts read this sample's published parameters under the ingress's
 | `endpointUrl`, `ingress`, `ingressRoleArn`, `ingressId`, `tenantRoleArn`, `gatewayIdentifier` (`agentcore-gateway` only) | the ingress stack (`SharedIngress`) | read only (`demo.sh`, `integ.sh`, `perf.sh`) |
 | `runtimeArn` | the one-backend demo stack | read only |
 | `backends/<name>` | the stack that deployed that `AgentBackend`; its custom resource writes `active`, `draining`, then removes the entry | read only, except `backends/late` |
-| `backends/late` | `integ.sh` step 9-registry, written with `aws ssm put-parameter` to show a backend added after the ingress deploy | the script deletes it at the end of the step and again from the `EXIT` trap, so a failed run leaves no route behind |
+| `backends/late` | `integ.sh` step 9-registry, written with `aws ssm put-parameter` to show a backend added after the ingress deploy; it names billing's Runtime and `billing/invoke` (an entry must carry `scopes`, ADR-0025) | the script deletes it at the end of the step and again from the `EXIT` trap, so a failed run leaves no route behind |
+
+The scripts also call tenant-identity's platform API with SigV4 (`platform`
+in `lib.sh`): `CreateTenant` with the tenant's `scopes`, `IssueToken`,
+`DeleteTenant`, and `GET /platform/scopes` to tell a stale deployment from
+one with the scope catalogue (ADR-0025). The tenant admin's cut of a user's
+scopes goes through the tenant API with a bearer token narrowed to
+`tenant-admin/users` (`set_user_scopes`). The scopes the scripts create
+tenants with (`DEFAULT_SCOPE`, `BILLING_READ_SCOPE`, `BILLING_INVOKE_SCOPE`
+in `lib.sh`) must match `DEFAULT_SCOPES` and `BILLING_SCOPES` in
+`src/demo.cdk.ts`: a tenant created without them holds no scope and every
+token is refused at the ingress.
 
 A script that writes a registry entry owns its deletion. Never overwrite a
 `backends/<name>` entry a stack wrote: CloudFormation does not see the

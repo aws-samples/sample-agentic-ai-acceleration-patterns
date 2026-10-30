@@ -127,8 +127,12 @@ export const DEFAULT_REGISTRY_TTL = Duration.seconds(60);
  * which must stay under Lambda's 15-minute ceiling (750 s).
  */
 export const MAX_REGISTRY_TTL = MAX_DRAIN.minus(LONGEST_STREAM);
-/** The conventional default backend name, and so the Gateway target name for the one-agent form (ADR-0024). */
-export const GATEWAY_TARGET_NAME = 'agent';
+/**
+ * The conventional default backend name, and so the Gateway target name for
+ * the one-agent form (ADR-0024). `default`, since ADR-0025 names a backend's
+ * scopes after it (`default/chat`); the registry entry and the route follow.
+ */
+export const GATEWAY_TARGET_NAME = 'default';
 
 export interface SharedIngressProps {
   readonly identity: IdentityProps;
@@ -139,9 +143,13 @@ export interface SharedIngressProps {
   /** Session mapping (ADR-0013). Unset: a fresh unit per request. */
   readonly session?: SessionProps;
   /**
-   * Scopes every token must carry, whatever the backend (ADR-0005): the
-   * product floor. Each backend may require more (`AgentBackend.requiredScopes`).
-   * Unset: no ingress-wide scope check.
+   * Scopes every token must carry, whatever the backend (ADR-0005, AND): the
+   * product floor, for a scope every backend shares (say `platform/active`).
+   * Each backend owns its own scopes on top (`AgentBackend.scopes`, any one
+   * of them, ADR-0025); on `agentcore-gateway` the floor is also the
+   * `CUSTOM_JWT` authoriser's `allowedScopes`, so a token narrowed to one
+   * backend's scope alone must still carry the floor. Unset: no ingress-wide
+   * scope check, which is the usual choice since ADR-0025.
    */
   readonly requiredScopes?: string[];
   readonly delegation?: DelegationProps;
@@ -184,7 +192,7 @@ export interface SharedIngressProps {
   /**
    * The backend served at the bare `/invocations` route, so a deployment of
    * one backend keeps today's URL (the one-agent form, a `SharedIngress`
-   * with `defaultBackend`, sets it). Must match
+   * with `defaultBackend`, sets it; the demo uses `default`). Must match
    * `[a-z0-9-]{1,32}`. Unset: only `/{backend}/invocations` exists.
    */
   readonly defaultBackend?: string;
@@ -935,8 +943,14 @@ export class SharedIngress extends Construct {
           discoveryUrl: props.identity.discoveryUrl,
           allowedClients: props.identity.allowedClientIds,
           // ADR-0005: the service checks the product floor before the
-          // interceptor runs; the interceptor enforces AND, plus the target's
-          // own scopes from the registry (ADR-0024).
+          // interceptor runs; the interceptor enforces the floor again (AND)
+          // and the target's own scopes from the registry (any one, ADR-0025).
+          // CUSTOM_JWT's allowedScopes is ANY-OF: a token holding any one of
+          // the listed scopes passes the service's check. With a floor of
+          // several scopes, only the interceptor enforces that the token
+          // holds ALL of them; the service alone would admit a token with one.
+          // Only the floor goes here: a backend added after this deploy must
+          // not need a Gateway redeploy.
           ...(options.requiredScopes !== undefined ? { allowedScopes: options.requiredScopes } : {}),
         },
       },
