@@ -1018,7 +1018,7 @@ export function addModelStatement(scope: Construct, role: iam.IRole, modelId: st
     acknowledgeGranularFinding(
       role,
       `AwsSolutions-IAM5[Resource::${nagFindingResource(scope, foundationModelArn('*', baseModelId(modelId)))}]`,
-      'A cross-Region inference profile routes the call to the model in any Region of its set, so the foundation-model ARN names one model with a Region wildcard; the profile ARN itself is exact (ADR-0018).',
+      'A cross-Region inference profile routes the call to the model in any Region of its set, so the foundation-model ARN names one model with a Region wildcard; the profile ARN itself is exact (ADR-0018, ADR-0028).',
     );
   }
 }

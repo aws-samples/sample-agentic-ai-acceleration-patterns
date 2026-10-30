@@ -129,7 +129,7 @@ Each layer is enforced on its own; a request passes all of them.
 |---|---|---|
 | Identity | which tenant is this caller? | a signed `tenant_id` claim (§2) |
 | Invocation | who may call the agent runtime? | a resource policy that trusts only the vendor's ingress |
-| Session | which agent session may this request use? | a session id derived from validated `tenant_id` and `sub` |
+| Session | which agent session may this request use? | a session id the ingress sets: fresh per request, or derived from validated `tenant_id` and `sub` when sessions map to users |
 | Data | which tenant's data may this code reach? | tenant-scoped credentials: ABAC with a `TenantId` session tag, issued per request |
 | Delegation | what may the agent do on the user's behalf? | the narrowest token that works, forwarded only on opt-in |
 
@@ -188,7 +188,7 @@ Every published parameter sits under one of these paths, owned by one writer:
 | `/control-plane/*` | `control-plane` stack | the control-plane API URL |
 | `/application-plane/shared/*` | shared application-plane stacks, one owner per sub-path | resources every cell and tenant uses |
 | `/application-plane/shared/identity/*` | `tenant-identity` stack | `apiUrl`, `topology`, `platformInvokePolicyArn` (the managed policy that may call `/platform/*`, consumed by `agentic-runtime-isolation`'s scope registration), and for shared pools `userPoolId`, `appClientId` |
-| `/application-plane/shared/agent-runtime/*` | `agentic-runtime-isolation`: the `SharedIngress` (its `registryPrefix`), each `AgentBackend` under `backends/<name>`, and the demo stack | `endpointUrl`, `baseUrl`, `ingress`, `ingressRoleArn`, `ingressId`, `tenantRoleArn`, `gatewayIdentifier` (Gateway only), `backends/<name>` registry entries, `runtimeArn` (demo stack) |
+| `/application-plane/shared/agent-runtime/*` | `agentic-runtime-isolation`: the `SharedIngress` (its `registryPrefix`), each `AgentBackend` under `backends/<name>`, and the demo stack | `endpointUrl`, `baseUrl`, `ingress`, `ingressRoleArn`, `ingressId`, `tenantRoleArn`, `gatewayIdentifier` (Gateway only), `backends/<name>` registry entries, `runtimeArn` and, with `billingBackend`, `backends-info/billing/runtimeArn` (demo stack) |
 | `/application-plane/cells/<cellId>/*` | the cell create script | a cell's shared deployment |
 | `/application-plane/tenants/<tenantId>` | the tenant create script | a tenant's own deployment state |
 
@@ -226,8 +226,9 @@ sequenceDiagram
   U->>ID: sign in
   ID-->>U: access token {sub, tenant_id, scope}
   U->>IN: request + bearer token
-  IN->>IN: verify token, derive session id from tenant_id + sub
-  IN->>RT: InvokeAgentRuntime (SigV4, derived session id)
+  IN->>IN: verify token, resolve /{backend}/invocations from the registry
+  IN->>IN: set session id (fresh, or from tenant_id + sub with session mapping)
+  IN->>RT: InvokeAgentRuntime (SigV4, ingress-set session id)
   RT-->>U: streamed response
 ```
 
@@ -241,8 +242,9 @@ does so with tenant-scoped credentials derived from the same claims.
 |---|---|---|---|
 | [`control-plane`](./samples/control-plane/) | control plane: tenant and cell lifecycle | a vendor IdP | `/control-plane/tenant-api-url`; scripts write `/application-plane/cells/*` and `/application-plane/tenants/*` |
 | [`tenant-identity`](./samples/tenant-identity/) | tenant identity: the token contract on Cognito | nothing | `/application-plane/shared/identity/*` |
-| [`agentic-runtime-isolation`](./samples/agentic-runtime-isolation/) | isolation: one shared ingress fronts one or more agent backends, each registered in SSM and owning scopes it registers with `tenant-identity` at deploy; the ingress maps the validated caller to an isolated compute unit, vends tenant-scoped credentials through an always-on TVM and enforces per-tenant limits, 60 requests per tenant per minute by default; optional modules for session mapping, a scope floor and delegation; AgentCore Runtime first | `tenant-identity` `shared-pool` (its parameters and its `PUT|DELETE /platform/scopes/{scope}`) | constructs `SharedIngress`, `AgentBackend`; `/application-plane/shared/agent-runtime/*` |
+| [`agentic-runtime-isolation`](./samples/agentic-runtime-isolation/) | isolation: one shared ingress fronts one or more agent backends, each registered in SSM and owning scopes it registers with `tenant-identity` at deploy; the ingress maps the validated caller to an isolated compute unit, vends tenant-scoped credentials through an always-on TVM and enforces per-tenant limits, 60 requests per tenant per minute by default; optional modules for session mapping, a scope floor and delegation; AgentCore Runtime first | `tenant-identity` `shared-pool` (its parameters and its `PUT|GET|DELETE /platform/scopes/{scope}`) | constructs `SharedIngress`, `AgentBackend`; `/application-plane/shared/agent-runtime/*` |
 
-`runtime-isolation` vends the data layer's tenant-scoped credentials: its TVM
-is always on and signs every model call (runtime-isolation ADR-0018). What
-those credentials unlock (memory, retrieval, tools) has no sample yet.
+`agentic-runtime-isolation` vends the data layer's tenant-scoped
+credentials: its TVM is always on and signs every model call
+(agentic-runtime-isolation ADR-0018). What those credentials unlock (memory,
+retrieval, tools) has no sample yet.

@@ -24,7 +24,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 - [Samples](#samples)
   - [The Simple Cell-Based Control Plane](#the-simple-cell-based-control-plane)
   - [Tenant Identity with Amazon Cognito](#tenant-identity-with-amazon-cognito)
-  - [Runtime Isolation](#runtime-isolation)
+  - [Agentic Runtime Isolation](#agentic-runtime-isolation)
 - [Contributing a sample](#contributing-a-sample)
 - [Further Reading](#further-reading)
 - [Costs](#costs)
@@ -84,7 +84,7 @@ The sample stops at the token: verifying it and scoping a request belongs to
 the consuming service, which is an extension seam rather than built here. See
 [Tenant Identity with Amazon Cognito](./samples/tenant-identity/).
 
-## Runtime Isolation
+## Agentic Runtime Isolation
 
 A pooled agent backend serves every tenant from shared compute, so two
 questions follow on every request: which compute unit may this caller reach,
@@ -95,14 +95,17 @@ agent can reach another tenant's conversation or data.
 This sample puts one shared ingress in front of one or more Amazon Bedrock
 AgentCore Runtimes and makes it the only principal each Runtime trusts. The ingress, an API
 Gateway REST API or an AgentCore Gateway chosen at deploy time, verifies the
-tenant-identity access token, derives the microVM session from the verified
-`tenant_id` and `sub`, and vends `TenantId`-tagged credentials with a token
-vending machine that is always on. The agent's own role holds no model or data
-permission, so IAM, not agent code, keeps each tenant to its own model calls
-and data. The ingress also limits each tenant's requests per minute and logs
-per-tenant cost figures; model cost splits by tenant in the bill through the
-IAM principal. Session mapping, scope checks and token forwarding are optional
-modules.
+tenant-identity access token, gives each request a fresh microVM session by
+default, or one per user derived from the verified `tenant_id` and `sub` with
+session mapping on (ADR-0013), and vends `TenantId`-tagged credentials with a
+token vending machine that is always on. The agent's own role holds no model
+or data permission, so IAM, not agent code, keeps each tenant to its own
+model calls and data. The ingress also limits each tenant's requests per
+minute and logs per-tenant cost figures; model cost splits by tenant in the
+bill through the IAM principal. Each backend owns the scopes it registers
+with tenant-identity at deploy, and the ingress admits a token carrying any
+one of them (ADR-0025); session mapping, an ingress-wide scope floor and
+token forwarding are optional modules.
 
 It ships as two CDK constructs that later samples can consume:
 `SharedIngress`, the ingress with its authoriser, TVM, limits and backend

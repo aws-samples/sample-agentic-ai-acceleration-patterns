@@ -69,7 +69,7 @@ export function modelResourceArns(modelId: string): string[] {
 export interface AgentCoreRuntimeBackendProps {
   /** Directory with `app.js` (a Node HTTP server on port 8080). Uploaded as the Runtime's code. */
   readonly codePath: string;
-  /** The one Bedrock model id the execution role may invoke (P-6). */
+  /** The one Bedrock model id the agent calls; the tenant role, not the execution role, may invoke it (P-6, ADR-0018). */
   readonly modelId: string;
   /** Environment variables for the agent process. */
   readonly environment?: Record<string, string>;

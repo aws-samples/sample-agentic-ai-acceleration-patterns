@@ -459,10 +459,10 @@ export class RuntimeIsolationDemoStack extends Stack {
     }
 
     // The published interface (spec §6.4, standard §1.1). The ingress
-    // publishes endpointUrl, ingress, ingressRoleArn, ingressId and
-    // tenantRoleArn under its prefix (ADR-0024); the demo adds the Runtime
-    // ARNs. The default prefix is account-wide, so one stack per account and
-    // Region publishes there.
+    // publishes endpointUrl, baseUrl, ingress, ingressRoleArn, ingressId,
+    // tenantRoleArn and, on agentcore-gateway, gatewayIdentifier under its
+    // prefix (ADR-0024); the demo adds the Runtime ARNs. The default prefix
+    // is account-wide, so one stack per account and Region publishes there.
     if (publish) {
       new ssm.StringParameter(this, 'RuntimeArnParameter', {
         parameterName: AGENT_RUNTIME_PARAMETERS.runtimeArn,
