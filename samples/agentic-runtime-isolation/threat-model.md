@@ -8,7 +8,7 @@ SPDX-License-Identifier: MIT-0
 > backend-owned scopes (ADR-0025), verified by the integration run of
 > 2026-10-29.** 41
 > threats (T-1 to T-41), 31 mitigations (M-1 to M-31). First written 2026-10-26 from
-> [`design/runtime-isolation.spec.md`](./design/runtime-isolation.spec.md)
+> [`design/agentic-runtime-isolation.spec.md`](./design/agentic-runtime-isolation.spec.md)
 > (P-1 to P-9, §3.4, §6, and the §7.1 spike results V-1 to V-7) and ADR-0001
 > to ADR-0013, enumerated STRIDE-per-boundary with the threat-modelling MCP
 > server (Threat Composer export kept out of the repository). Extended

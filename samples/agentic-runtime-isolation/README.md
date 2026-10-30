@@ -52,7 +52,7 @@ Plus a thin demo stack.
 
 ## Architecture
 
-![Architecture: a tenant user signs in to the tenant-identity Cognito shared pool and calls the ingress with a bearer JWT. The ingress, either API Gateway REST with a Lambda authoriser and a streaming Lambda, or AgentCore Gateway with a CUSTOM_JWT authoriser and a REQUEST interceptor, verifies the JWT, resolves the backend named in POST /{backend}/invocations from the SSM Parameter Store backend registry (backends/<name>: runtimeArn, scopes, status), checks the tenant's per-minute limit in a DynamoDB counter and returns 429 before any further call, derives the session id from tenant_id and sub, assumes the tenant role with a TenantId session tag, and invokes that backend's AgentCore Runtime with SigV4 as the one principal its resource policy allows; on the Gateway ingress the REQUEST interceptor only sets the headers and the Gateway calls the target named after the backend. Each AgentBackend is one Runtime plus its registry entry and Gateway target, shown here as default and billing, and it registers its own scopes with tenant-identity's scope catalogue through PUT /platform/scopes/<name>/<action> with SigV4 when it deploys (DELETE on destroy); the ingress admits a token that carries any one of the backend's scopes. The agent in the microVM calls the Bedrock model and the tenant's data with the tenant-scoped credentials, and IAM enforces ABAC on TenantId](./diagrams/runtime-isolation.drawio.svg)
+![Architecture: a tenant user signs in to the tenant-identity Cognito shared pool and calls the ingress with a bearer JWT. The ingress, either API Gateway REST with a Lambda authoriser and a streaming Lambda, or AgentCore Gateway with a CUSTOM_JWT authoriser and a REQUEST interceptor, verifies the JWT, resolves the backend named in POST /{backend}/invocations from the SSM Parameter Store backend registry (backends/<name>: runtimeArn, scopes, status), checks the tenant's per-minute limit in a DynamoDB counter and returns 429 before any further call, derives the session id from tenant_id and sub, assumes the tenant role with a TenantId session tag, and invokes that backend's AgentCore Runtime with SigV4 as the one principal its resource policy allows; on the Gateway ingress the REQUEST interceptor only sets the headers and the Gateway calls the target named after the backend. Each AgentBackend is one Runtime plus its registry entry and Gateway target, shown here as default and billing, and it registers its own scopes with tenant-identity's scope catalogue through PUT /platform/scopes/<name>/<action> with SigV4 when it deploys (DELETE on destroy); the ingress admits a token that carries any one of the backend's scopes. The agent in the microVM calls the Bedrock model and the tenant's data with the tenant-scoped credentials, and IAM enforces ABAC on TenantId](./diagrams/agentic-runtime-isolation.drawio.svg)
 
 A request carries a bearer token to the ingress on a `/{backend}/invocations`
 route. The ingress verifies the token, resolves the backend the route names
@@ -838,11 +838,11 @@ Each item is a "Deployer action" in [`threat-model.md`](./threat-model.md#mitiga
 
 ## Design trail
 
-- Specification: [`design/runtime-isolation.spec.md`](./design/runtime-isolation.spec.md)
+- Specification: [`design/agentic-runtime-isolation.spec.md`](./design/agentic-runtime-isolation.spec.md)
 - Decisions: [`adr/`](./adr/) (indexed in [`adr/README.md`](./adr/README.md))
 - Implemented state: [`architecture.md`](./architecture.md)
 - Threats and mitigations: [`threat-model.md`](./threat-model.md)
-- Diagram source: [`diagrams/runtime-isolation.drawio`](./diagrams/runtime-isolation.drawio)
+- Diagram source: [`diagrams/agentic-runtime-isolation.drawio`](./diagrams/agentic-runtime-isolation.drawio)
 
 ## Scale and limits
 

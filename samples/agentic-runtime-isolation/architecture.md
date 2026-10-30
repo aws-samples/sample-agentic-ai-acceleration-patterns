@@ -26,7 +26,7 @@ SPDX-License-Identifier: MIT-0
 > rules reported both tenants (requests, errors, backend seconds, output tokens).
 
 This file describes what is deployed. The design trail is
-[`design/runtime-isolation.spec.md`](./design/runtime-isolation.spec.md), the
+[`design/agentic-runtime-isolation.spec.md`](./design/agentic-runtime-isolation.spec.md), the
 [ADRs](./adr/README.md) and the [threat model](./threat-model.md).
 
 ## Purpose
@@ -168,7 +168,7 @@ Reviewed on 2026-10-28 for the shared ingress. Each item was checked in code:
 ## Differences from the specification
 
 Where the implemented state differs from
-[`design/runtime-isolation.spec.md`](./design/runtime-isolation.spec.md), the
+[`design/agentic-runtime-isolation.spec.md`](./design/agentic-runtime-isolation.spec.md), the
 specification carries a dated amendment that points here.
 
 - **ADR-0025 (amended 2026-10-29).** The scope registration claims ownership
