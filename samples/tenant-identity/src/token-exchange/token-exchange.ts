@@ -12,8 +12,8 @@
  * `ClientMetadata` reaching the trigger on refresh — decodes the returned
  * access token and refuses it unless it matches the request (ADR-0012). The
  * endpoint holds no privilege: the refresh token authorises the Cognito call
- * (P-10), so the function's role carries no `cognito-idp` or DynamoDB
- * permission (R-7).
+ * (P-10), so the function's role carries no `cognito-idp` permission and
+ * only the one registry read the scope catalogue needs (R-7, ADR-0034).
  *
  * It never logs the refresh token, the issued token, the form, or Cognito's
  * error message (N-4, N-6): only error class names and the ADR-0012 rule
@@ -24,7 +24,7 @@ import {
   CognitoIdentityProviderClient,
   GetTokensFromRefreshTokenCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
-import { ExchangeRequest, OAuthFailure, OAUTH_ERROR_DESCRIPTIONS, parseExchangeForm, SERVER_UNAVAILABLE_DESCRIPTION } from './form';
+import { assertRegisteredScopes, ExchangeRequest, OAuthFailure, OAUTH_ERROR_DESCRIPTIONS, parseExchangeForm, SERVER_UNAVAILABLE_DESCRIPTION } from './form';
 import {
   COGNITO_USER_ADMIN_SCOPE,
   INVALID_SCOPE,
@@ -34,6 +34,7 @@ import {
   TOKEN_TYPE_ACCESS,
 } from '../shared/constants';
 import { errorName, log } from '../shared/logger';
+import type { ScopeCatalogue } from '../shared/scope-catalogue';
 import { OAuthError, OAuthServerError } from '../smithy/token/typescript-ssdk-codegen/src';
 import type {
   ExchangeTokenServerInput,
@@ -58,6 +59,12 @@ export interface TokenExchangeDeps {
    * trigger's pool lookup (M-5), so the refresh token buys no tenant claim.
    */
   readonly acceptOtherClients: boolean;
+  /**
+   * ADR-0034: the registered scope names, read through a 60 s cache. A
+   * requested scope that is not registered (and is not the built-in admin
+   * scope) is `invalid_scope` before Cognito is called.
+   */
+  readonly catalogue: ScopeCatalogue;
 }
 
 /** The minimal access-token payload shape ADR-0012 inspects. */
@@ -216,11 +223,13 @@ export class TokenExchangeService<Context> {
   private readonly cognito: CognitoIdentityProviderClient;
   private readonly appClientId: string | undefined;
   private readonly acceptOtherClients: boolean;
+  private readonly catalogue: ScopeCatalogue;
 
   constructor(deps: TokenExchangeDeps) {
     this.cognito = deps.cognito;
     this.appClientId = deps.appClientId;
     this.acceptOtherClients = deps.acceptOtherClients;
+    this.catalogue = deps.catalogue;
   }
 
   public ExchangeToken = async (
@@ -228,6 +237,8 @@ export class TokenExchangeService<Context> {
     _context: Context,
   ): Promise<ExchangeTokenServerOutput> => {
     // 1. Parse the form. OAuthFailure -> the generated OAuthError (400).
+    // The form is validated in full before anything is read: a malformed
+    // request on this unauthenticated endpoint costs no catalogue lookup.
     let request: ExchangeRequest;
     try {
       // `form` is @required; the generated validator guarantees it is set.
@@ -239,6 +250,19 @@ export class TokenExchangeService<Context> {
       // A parser bug, not caller input.
       log.error('exchange form parse failed', { errorName: errorName(error) });
       throw serverError();
+    }
+
+    // 1b. The one registry-backed check (ADR-0034): every requested scope is
+    // registered, or the built-in admin scope. The catalogue read never
+    // throws (a failed read keeps the last one) and is served from the
+    // container cache after cold start.
+    try {
+      assertRegisteredScopes(request.scopes, await this.catalogue.names());
+    } catch (error) {
+      if (error instanceof OAuthFailure) {
+        throw clientError(error);
+      }
+      throw error;
     }
 
     // T-28: in a shared pool, this endpoint serves exactly one app client.

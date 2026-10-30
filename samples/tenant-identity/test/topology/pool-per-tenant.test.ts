@@ -10,6 +10,7 @@ import {
   AdminInitiateAuthCommand,
   AdminListGroupsForUserCommand,
   AdminRemoveUserFromGroupCommand,
+  AdminUpdateUserAttributesCommand,
   AdminSetUserPasswordCommand,
   CreateGroupCommand,
   CreateUserPoolClientCommand,
@@ -73,9 +74,15 @@ describe('PoolPerTenantProvisioner (spec §7.1)', () => {
       expect(clientInput.AccessTokenValidity).toBe(5);
       expect(clientInput.PreventUserExistenceErrors).toBe('ENABLED');
       // R-17 (T-27): e-mail is immutable at the pool (an empty client
-      // WriteAttributes would mean "all", so the pool schema is the guard).
-      expect(poolInput.Schema).toEqual([{ Name: 'email', AttributeDataType: 'String', Required: true, Mutable: false }]);
-      expect(clientInput.WriteAttributes).toBeUndefined();
+      // WriteAttributes would mean "every attribute", so the pool schema is
+      // the guard for e-mail, and the write list of exactly the required
+      // `email` keeps custom:scopes closed, ADR-0036).
+      expect(poolInput.Schema).toEqual([
+        { Name: 'email', AttributeDataType: 'String', Required: true, Mutable: false },
+        // ADR-0036: the mutable per-user scope grant, as on the shared pool.
+        { Name: 'scopes', AttributeDataType: 'String', Mutable: true, StringAttributeConstraints: { MaxLength: '2048' } },
+      ]);
+      expect(clientInput.WriteAttributes).toEqual(['email']);
       expect(clientInput.ReadAttributes).toEqual(['email']);
       // R-5, ADR-0009: refresh token rotation stays off.
       expect(clientInput.RefreshTokenRotation?.Feature ?? 'DISABLED').toBe('DISABLED');
@@ -274,6 +281,30 @@ describe('PoolPerTenantProvisioner (spec §7.1)', () => {
       const view = await provisioner().setAdmin(tenantA(), 'u1', false);
       expect(cognito.commandCalls(AdminRemoveUserFromGroupCommand)[0].args[0].input).toMatchObject({ UserPoolId: POOL, GroupName: `admin-${IDS.a}` });
       expect(view.admin).toBe(false);
+    });
+  });
+
+  describe('setScopes / grantedScopes (ADR-0036)', () => {
+    it('writes custom:scopes as a list in the tenant\'s own pool and the view reads it back', async () => {
+      cognito
+        .on(AdminGetUserCommand)
+        .resolvesOnce({ Username: 'u1', UserAttributes: [], UserStatus: 'CONFIRMED' })
+        .resolves({ Username: 'u1', UserAttributes: [{ Name: 'custom:scopes', Value: 'sample/write' }], UserStatus: 'CONFIRMED' });
+      cognito.on(AdminUpdateUserAttributesCommand).resolves({});
+      cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [] });
+      const view = await provisioner().setScopes(tenantA(), 'u1', ['sample/write']);
+      expect(cognito.commandCalls(AdminUpdateUserAttributesCommand)[0].args[0].input).toEqual({
+        UserPoolId: POOL,
+        Username: 'u1',
+        UserAttributes: [{ Name: 'custom:scopes', Value: 'sample/write' }],
+      });
+      expect(view.grantedScopes).toEqual(['sample/write']);
+    });
+
+    it('an unknown user is a 404 and nothing is written (R-12)', async () => {
+      cognito.on(AdminGetUserCommand).rejects(cognitoError('UserNotFoundException'));
+      await expect(provisioner().setScopes(tenantA(), 'ghost', [])).rejects.toBeInstanceOf(NotFoundError);
+      expect(cognito.commandCalls(AdminUpdateUserAttributesCommand)).toHaveLength(0);
     });
   });
 });

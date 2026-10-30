@@ -46,7 +46,7 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     '@aws-sdk/core@3.977.9',
     '@smithy/core@3.33.3',
     '@smithy/fetch-http-handler@5.7.2',
-    '@smithy/node-http-handler@4.11.3',
+    '@smithy/node-http-handler@4.11.3', // also imported directly: the token path's DynamoDB socket timeouts
     '@smithy/server-common@0.4.2',
     '@smithy/server-apigateway@0.3.3',
     '@smithy/types@4.17.2',

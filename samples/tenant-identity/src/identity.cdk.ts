@@ -20,6 +20,7 @@ import { Construct } from 'constructs';
 import {
   ACCESS_TOKEN_MINUTES,
   ADMIN_PASSWORD_KEY_ALIAS,
+  CLIENT_WRITABLE_ATTRIBUTE,
   Deployment,
   ENV,
   hasPerTenantPools,
@@ -30,6 +31,9 @@ import {
   REFRESH_TOKEN_DAYS,
   SAMPLE_TAG_KEY,
   SAMPLE_TAG_VALUE,
+  SCOPE_PARTITION_KEY,
+  SCOPES_ATTRIBUTE_MAX_LENGTH,
+  SCOPES_ATTRIBUTE_NAME,
   SHARED_PARAMETER,
   STACK_TAG_KEY,
   TENANT_ATTRIBUTE_NAME,
@@ -41,7 +45,7 @@ import {
 } from './shared/constants';
 import { LogDrain } from './shared/log-drain';
 import { acknowledgeGranularFinding, nagFindingResource, suppressTemplateScanners } from './shared/nag';
-import { IntegrationMapping, mergeOpenApi, patchIntegrations, requireApiKey } from './shared/openapi';
+import { allowEmptyBody, IntegrationMapping, mergeOpenApi, patchIntegrations, requireApiKey } from './shared/openapi';
 import { TenantDrain } from './teardown/tenant-drain-resource';
 
 /** Stack props: the deploy-time choice (ADR-0001, ADR-0027) plus the usual StackProps. */
@@ -67,20 +71,28 @@ export interface TenantIdentityStackProps extends StackProps {
 const STAGE_NAME = 'prod';
 
 /**
- * The platform routes the control-plane mount scripts call (mounting spec
- * §6.3, ADR-0030): CreateTenant, GetTenant, DeleteTenant and CreateUser (the
- * first-admin slot on replay, M-R-6). Nothing else: not ListTenants
+ * The platform routes a consumer of `PlatformInvokePolicy` calls (mounting
+ * spec §6.3, ADR-0030): the control-plane mount's CreateTenant, GetTenant,
+ * UpdateTenant (ADR-0035), DeleteTenant and CreateUser (the first-admin slot
+ * on replay, M-R-6), and a backend's scope registration (ADR-0034): PutScope,
+ * GetScope, ListScopes, DeleteScope. Nothing else: not ListTenants
  * (`GET /platform/tenants`), not the test aids, not user updates or
  * memberships (M-R-4). execute-api ARNs cannot tell a tenant path from a
- * user path under it, so the two `/platform/tenants/*` entries also match
- * ListUsers, GetUser and DeleteUser; the scripts never call those, and the
- * over-grant is recorded in threat-model.md (T-34).
+ * user path under it, so the `/platform/tenants/*` entries also match
+ * ListUsers, GetUser, DeleteUser and, through PATCH, UpdateUser; the
+ * consumers never call those, and the over-grant is recorded in
+ * threat-model.md (T-34).
  */
-const PLATFORM_INVOKE_ROUTES: readonly { method: string; path: string }[] = [
+export const PLATFORM_INVOKE_ROUTES: readonly { method: string; path: string }[] = [
   { method: 'POST', path: '/platform/tenants' },
   { method: 'GET', path: '/platform/tenants/*' },
+  { method: 'PATCH', path: '/platform/tenants/*' },
   { method: 'DELETE', path: '/platform/tenants/*' },
   { method: 'POST', path: '/platform/tenants/*/users' },
+  { method: 'PUT', path: '/platform/scopes/*' },
+  { method: 'GET', path: '/platform/scopes' },
+  { method: 'GET', path: '/platform/scopes/*' },
+  { method: 'DELETE', path: '/platform/scopes/*' },
 ];
 
 /** The registry GSI that maps a pool to its tenant (spec §4.2). */
@@ -98,6 +110,9 @@ const REGISTRY_READ_ACTIONS = ['dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dyn
 export const TENANT_USER_ACTIONS = [
   'cognito-idp:AdminCreateUser',
   'cognito-idp:AdminGetUser',
+  // ADR-0036: writes `custom:scopes` only (the sample's one mutable
+  // attribute; e-mail is immutable at the pool).
+  'cognito-idp:AdminUpdateUserAttributes',
   'cognito-idp:AdminDeleteUser',
   'cognito-idp:AdminAddUserToGroup',
   'cognito-idp:AdminRemoveUserFromGroup',
@@ -246,25 +261,49 @@ export class TenantIdentityStack extends Stack {
     });
     // R-14 (M-8): the three read actions, on the table AND its index, and
     // nothing else. grantReadData would add Scan + DescribeTable, widening
-    // the hottest role past what §8 needs.
+    // the hottest role past what §8 needs. On the table the reads are
+    // further bound to the two partitions the trigger needs, tenant rows and
+    // the scope catalogue (dynamodb:LeadingKeys; StringLike for the TENANT#
+    // prefix). The index statement carries no key condition: its partition
+    // key is the pool id, which is what the byUserPoolId Query looks up.
     triggerFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: REGISTRY_READ_ACTIONS,
-        resources: [table.tableArn, `${table.tableArn}/index/${GSI_BY_USER_POOL_ID}`],
+        resources: [table.tableArn],
+        conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['TENANT#*', SCOPE_PARTITION_KEY] } },
+      }),
+    );
+    triggerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: REGISTRY_READ_ACTIONS,
+        resources: [`${table.tableArn}/index/${GSI_BY_USER_POOL_ID}`],
       }),
     );
     acknowledgeLambdaBasicExecutionRole(triggerFn);
 
     // --- Token-exchange function (R-7, ADR-0009) --------------------------
-    // Logging only: GetTokensFromRefreshToken is authorised by the refresh
-    // token, not IAM. No cognito-idp, no dynamodb action (M-8).
+    // GetTokensFromRefreshToken is authorised by the refresh token, not IAM:
+    // no cognito-idp action (M-8). Its one registry read is the scope
+    // catalogue (ADR-0034): a Query bound to the SCOPE partition by a
+    // dynamodb:LeadingKeys condition, so the role cannot read a tenant row.
     const tokenFn = new NodejsFunction(this, 'TokenFunction', {
       entry: path.join(__dirname, 'token-exchange/token-exchange.function.ts'),
       ...functionProps(this, 'TokenFunctionLogs'),
-      // ADR-0027: the function reads the deployment to decide whether a
-      // client other than the shared pool's is acceptable (T-28).
-      environment: { [ENV.topology]: topology },
+      environment: {
+        // ADR-0027: the function reads the deployment to decide whether a
+        // client other than the shared pool's is acceptable (T-28).
+        [ENV.topology]: topology,
+        [ENV.tableName]: table.tableName,
+        [ENV.poolIndexName]: GSI_BY_USER_POOL_ID,
+      },
     });
+    tokenFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [table.tableArn],
+        conditions: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': [SCOPE_PARTITION_KEY] } },
+      }),
+    );
     acknowledgeLambdaBasicExecutionRole(tokenFn);
 
     // --- Tenant authoriser (R-9, ADR-0007) --------------------------------
@@ -385,13 +424,18 @@ export class TenantIdentityStack extends Stack {
       // only where the `shared-pool` strategy runs (§7.2; in tiered that is
       // the standard tier, ADR-0027); `shared-pool-multi-tenant` uses groups,
       // no custom attribute (§7.3).
-      const customAttributes = topologiesOf(topology).includes('shared-pool')
-        ? {
-          // §7.2, P-3: immutable, not writable by the app client. A ULID
-          // is 26 chars.
-          [TENANT_ATTRIBUTE_NAME]: new cognito.StringAttribute({ minLen: 26, maxLen: 26, mutable: false }),
-        }
-        : undefined;
+      const customAttributes: Record<string, cognito.ICustomAttribute> = {
+        // ADR-0036: the per-user scope grant every shared pool carries.
+        // Mutable, written by the two user APIs, read by the trigger. Not in
+        // the app client's read or write lists, so a user cannot see or
+        // rewrite it with their own token (see the client below).
+        [SCOPES_ATTRIBUTE_NAME]: new cognito.StringAttribute({ maxLen: SCOPES_ATTRIBUTE_MAX_LENGTH, mutable: true }),
+      };
+      if (topologiesOf(topology).includes('shared-pool')) {
+        // §7.2, P-3: immutable, not writable by the app client. A ULID
+        // is 26 chars.
+        customAttributes[TENANT_ATTRIBUTE_NAME] = new cognito.StringAttribute({ minLen: 26, maxLen: 26, mutable: false });
+      }
 
       userPool = new cognito.UserPool(this, 'UserPool', {
         userPoolName: `${this.stackName}-pool`,
@@ -405,9 +449,12 @@ export class TenantIdentityStack extends Stack {
         autoVerify: { email: true },
         // E-mail is the identity the sample manages, so it is immutable: no
         // user (and no admin) can rewrite it after creation (T-27, R-17).
-        // This is the pool-level guard; the app client's write list cannot
-        // do it, because Cognito reads an empty WriteAttributes as "every
-        // standard attribute" (integration-verified 2026-10-22).
+        // This is the pool-level guard, and the only one for e-mail: the
+        // app client's write list (below) must contain the required
+        // `email` (Cognito refuses a list that omits a required attribute,
+        // and reads an empty list as "every attribute", integration-verified
+        // 2026-10-22 and 2026-10-29), so the list closes the custom
+        // attributes and the pool's immutability closes e-mail.
         standardAttributes: { email: { required: true, mutable: false } },
         customAttributes,
         // Account recovery is admin-only: the sample never sends mail (admin
@@ -433,14 +480,18 @@ export class TenantIdentityStack extends Stack {
 
       // App client (R-5, N-1, §7.2). No secret, admin-password + refresh
       // auth only, 5-minute access/id tokens, 1-day refresh, no OAuth/hosted
-      // UI. readAttributes email only; custom:tenantId is neither readable
-      // nor writable (P-3). No writeAttributes: Cognito treats an empty list
-      // as "all standard attributes", so the guard against a user rewriting
-      // their e-mail (T-27, R-17) is the pool's immutable `email` above, not
-      // this list. The other standard attributes stay writable; the sample
-      // reads none of them.
+      // UI. readAttributes email only; custom:tenantId and custom:scopes are
+      // neither readable nor writable (P-3, ADR-0036). Cognito treats an
+      // unset WriteAttributes as "every attribute", custom ones included
+      // (integration-verified 2026-10-29: a user rewrote their own
+      // custom:scopes), and refuses a list that omits a required attribute,
+      // so the list names exactly the required `email` and thereby closes
+      // every other attribute, custom:scopes above all. The guard against a
+      // user rewriting their e-mail (T-27, R-17) stays the pool's immutable
+      // `email` above: write access covers the initial value only.
       const clientReadWrite = {
         readAttributes: new cognito.ClientAttributes().withStandardAttributes({ email: true }),
+        writeAttributes: new cognito.ClientAttributes().withStandardAttributes({ [CLIENT_WRITABLE_ATTRIBUTE]: true }),
       };
 
       appClient = userPool.addClient('AppClient', {
@@ -1088,8 +1139,10 @@ export class TenantIdentityStack extends Stack {
       // PlatformInvokePolicy (ADR-0030, M-P-4): the least privilege for the
       // mount, published by the producer so the consumer attaches one ARN
       // and never writes an execute-api grant itself. Exactly two
-      // statements: the four routes the scripts call, and encrypt-through-
-      // SSM on the key above (kms:ViaService), so the build role can park a
+      // statements: the nine routes in PLATFORM_INVOKE_ROUTES (the four the
+      // mount scripts call, UpdateTenant, and the four scope catalogue
+      // routes a backend's registration calls), and encrypt-through-SSM on
+      // the key above (kms:ViaService), so the build role can park a
       // password but never read one back (no kms:Decrypt, M-R-4).
       const platformInvokePolicy = new iam.ManagedPolicy(this, 'PlatformInvokePolicy', {
         description: `Invoke the ${this.stackName} platform routes the control-plane mount calls, and encrypt the parked admin password through SSM (ADR-0030, ADR-0033)`,
@@ -1105,15 +1158,18 @@ export class TenantIdentityStack extends Stack {
           }),
         ],
       });
-      // The `*` in the route ARNs is a path label ({tenantId}), not a
-      // wildcard grant: each ARN names one method on one API stage. cdk-nag
-      // reports each as IAM5; acknowledge each with the threat-model row
-      // that records what the label also matches.
+      // The `*` in the route ARNs is a path label ({tenantId} or {scope}),
+      // not a wildcard grant: each ARN names one method on one API stage.
+      // cdk-nag reports each as IAM5; acknowledge each with the threat-model
+      // row that records what the label also matches.
       for (const route of PLATFORM_INVOKE_ROUTES.filter((r) => r.path.includes('*'))) {
+        const alsoMatches = route.path.startsWith('/platform/tenants/')
+          ? 'The same ARN also matches the user routes under the tenant path (for PATCH, UpdateUser), which the consumers never call; the over-grant is recorded in threat-model.md.'
+          : 'The scope path has no route below it, so the ARN matches nothing but the one operation; recorded in threat-model.md for completeness.';
         acknowledgeGranularFinding(
           platformInvokePolicy,
           `AwsSolutions-IAM5[Resource::${nagFindingResource(this, api.arnForExecuteApi(route.method, route.path, STAGE_NAME))}]`,
-          `ADR-0030 / threat-model M-33 (T-34): ${route.method} ${route.path} is one method on this API's ${STAGE_NAME} stage; the * stands for the {tenantId} path label, which execute-api ARNs cannot express otherwise. The same ARN also matches the user routes under the tenant path, which the mount scripts never call; the over-grant is recorded in threat-model.md.`,
+          `ADR-0030 / threat-model M-33 (T-34): ${route.method} ${route.path} is one method on this API's ${STAGE_NAME} stage; the * stands for the ${route.path.startsWith('/platform/scopes') ? '{scope}' : '{tenantId}'} path label, which execute-api ARNs cannot express otherwise. ${alsoMatches}`,
         );
       }
 
@@ -1367,7 +1423,8 @@ function buildApiDefinition(stack: Stack, mapping: IntegrationMapping): object {
   // ADR-0025: /tenant/* methods require an API key, read from the
   // authoriser's usageIdentifierKey. /platform/* and /oauth2/token do not:
   // the token route has no authoriser, so nothing could name a tenant key.
-  return requireApiKey(patchIntegrations(mergeOpenApi(docs), mapping), '/tenant');
+  // ADR-0034: a bodiless PutScope (no description) must reach the function.
+  return requireApiKey(patchIntegrations(allowEmptyBody(mergeOpenApi(docs)), mapping), '/tenant');
 }
 
 /**

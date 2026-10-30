@@ -31,6 +31,7 @@ import {
   isCognitoError,
   listGroupsForUser,
   toUserView,
+  writeScopesAttribute,
 } from './cognito-users';
 import type { ProvisionerDeps } from './index';
 import { listUsersInPool } from './listing';
@@ -38,11 +39,14 @@ import type { NewUserResult, Provisioner, ProvisionedTenant, TokenSet, UserView 
 import {
   ACCESS_TOKEN_MINUTES,
   adminGroupName,
+  CLIENT_WRITABLE_ATTRIBUTE,
   ID_TOKEN_MINUTES,
   issuerFor,
   REFRESH_TOKEN_DAYS,
   SAMPLE_TAG_KEY,
   SAMPLE_TAG_VALUE,
+  SCOPES_ATTRIBUTE_MAX_LENGTH,
+  SCOPES_ATTRIBUTE_NAME,
   STACK_TAG_KEY,
   TENANT_POOL_NAME_PREFIX,
   TENANT_TAG_KEY,
@@ -51,6 +55,7 @@ import {
 import { ConflictError, UnsupportedInTopologyError } from '../shared/errors';
 import { Page } from '../shared/registry';
 import type { TenantRecord } from '../shared/registry';
+import { decodeScopeList, encodeScopeList } from '../shared/scopes';
 
 export class PoolPerTenantProvisioner implements Provisioner {
   readonly topology: Topology = 'pool-per-tenant';
@@ -90,7 +95,17 @@ export class PoolPerTenantProvisioner implements Provisioner {
         AutoVerifiedAttributes: ['email'],
         // E-mail is immutable (R-17, T-27): the same schema as the stack's
         // shared pool. Required so AdminCreateUser always sets it.
-        Schema: [{ Name: 'email', AttributeDataType: 'String', Required: true, Mutable: false }],
+        Schema: [
+          { Name: 'email', AttributeDataType: 'String', Required: true, Mutable: false },
+          // ADR-0036: the admins' per-user scope grant, the same attribute
+          // the stack's shared pool has. Mutable; the trigger only reads it.
+          {
+            Name: SCOPES_ATTRIBUTE_NAME,
+            AttributeDataType: 'String',
+            Mutable: true,
+            StringAttributeConstraints: { MaxLength: String(SCOPES_ATTRIBUTE_MAX_LENGTH) },
+          },
+        ],
         AdminCreateUserConfig: { AllowAdminCreateUserOnly: true },
         DeletionProtection: 'INACTIVE',
         AccountRecoverySetting: { RecoveryMechanisms: [{ Name: 'admin_only', Priority: 1 }] },
@@ -136,9 +151,12 @@ export class PoolPerTenantProvisioner implements Provisioner {
           EnableTokenRevocation: true,
           PreventUserExistenceErrors: 'ENABLED',
           ReadAttributes: ['email'],
-          // No WriteAttributes: Cognito reads an empty list as "all standard
-          // attributes". The guard against a user rewriting their e-mail
-          // (R-17, T-27) is the pool's immutable `email` schema above.
+          // The required `email` and nothing else: Cognito reads an unset
+          // list as "every attribute", custom:scopes included, and refuses
+          // one that omits a required attribute (ADR-0036). The guard against
+          // a user rewriting their e-mail (R-17, T-27) is the pool's
+          // immutable `email` schema above.
+          WriteAttributes: [CLIENT_WRITABLE_ATTRIBUTE],
         }),
       );
       const appClientId = client.UserPoolClient?.ClientId;
@@ -207,7 +225,7 @@ export class PoolPerTenantProvisioner implements Provisioner {
       );
     }
     return {
-      user: toUserView(created.User ?? { Username: username }, admin),
+      user: toUserView(created.User ?? { Username: username }, admin, decodeScopeList),
       temporaryPassword,
     };
   }
@@ -221,12 +239,27 @@ export class PoolPerTenantProvisioner implements Provisioner {
     const userPoolId = this.poolId(tenant);
     const user = await adminGetUser(this.cognito, userPoolId, username);
     const groups = await listGroupsForUser(this.cognito, userPoolId, username);
-    return adminGetUserToView(user.username, user.attributes, user.status, user.createdAt, groups.includes(adminGroupName(tenant.tenantId)));
+    return adminGetUserToView(
+      user.username,
+      user.attributes,
+      user.status,
+      user.createdAt,
+      groups.includes(adminGroupName(tenant.tenantId)),
+      decodeScopeList,
+    );
   }
 
   async listUsers(tenant: TenantRecord, nextToken?: string): Promise<Page<UserView>> {
     const userPoolId = this.poolId(tenant);
-    return listUsersInPool(this.cognito, userPoolId, adminGroupName(tenant.tenantId), nextToken);
+    return listUsersInPool(this.cognito, userPoolId, adminGroupName(tenant.tenantId), decodeScopeList, nextToken);
+  }
+
+  async setScopes(tenant: TenantRecord, username: string, scopes: readonly string[]): Promise<UserView> {
+    // ADR-0036: the pool is the tenant's own, so the attribute is the plain
+    // list. R-12 (existence in the pool) first.
+    await this.assertMember(tenant, username);
+    await writeScopesAttribute(this.cognito, this.poolId(tenant), username, encodeScopeList(scopes));
+    return this.getUser(tenant, username);
   }
 
   async setAdmin(tenant: TenantRecord, username: string, admin: boolean): Promise<UserView> {

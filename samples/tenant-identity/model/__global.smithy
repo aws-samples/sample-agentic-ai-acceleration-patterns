@@ -3,15 +3,15 @@
 
 $version: "2.0"
 
-// Operation names use the AWS lifecycle verbs, plus the three non-lifecycle
-// verbs this sample needs (spec R-15, docs/sample-standard.md §4.2). DANGER
-// makes a bad name fail `smithy build`.
+// Operation names use the AWS lifecycle verbs (Put for create-or-replace),
+// plus the three non-lifecycle verbs this sample needs (spec R-15,
+// docs/sample-standard.md §4.2). DANGER makes a bad name fail `smithy build`.
 metadata validators = [
     {
         name: "StandardOperationVerb"
         severity: "DANGER"
         configuration: {
-            verbs: ["Create", "Get", "Update", "Delete", "List", "Issue", "Refresh", "Exchange"]
+            verbs: ["Create", "Get", "Update", "Delete", "List", "Put", "Issue", "Refresh", "Exchange"]
             suggestAlternatives: {
                 Read: ["Get"]
                 Fetch: ["Get"]
@@ -68,6 +68,46 @@ timestamp IsoTimestamp
 /// Opaque pagination token.
 @length(min: 1, max: 4096)
 string PaginationToken
+
+/// A scope name, `<owner>/<action>` (spec §8.1, ADR-0034). The owner is the
+/// registering backend's name; `tenant-admin` is reserved for the built-in
+/// `tenant-admin/users`.
+@pattern("^[a-z0-9-]+/[a-z0-9-]+$")
+@length(min: 3, max: 128)
+string ScopeName
+
+/// A list of scope names. No duplicates: a repeated name is a 400
+/// ValidationError whose message starts `invalid_scope`. Capped at 100: a
+/// tenant entitlement or a user grant beyond that is a modelling error, not
+/// a request, and the cap bounds the per-request validation work on the
+/// unauthenticated-adjacent platform routes.
+@length(max: 100)
+list ScopeNameList {
+    member: ScopeName
+}
+
+/// A scope in the catalogue (ADR-0034): registered by a backend through
+/// PutScope, held by a tenant through its `scopes` (ADR-0035).
+structure Scope {
+    @required
+    name: ScopeName
+
+    /// The text before the `/` in the name.
+    @required
+    owner: String
+
+    @length(max: 256)
+    description: String
+
+    @required
+    createdAt: IsoTimestamp
+}
+
+/// One page of scopes. ListScopes returns at most 50.
+@length(max: 100)
+list ScopeList {
+    member: Scope
+}
 
 /// A password. Never logged.
 @sensitive
@@ -138,6 +178,12 @@ structure Tenant {
     /// shared-pool-multi-tenant only: the membership group, `t-<tenantId>`.
     groupName: String
 
+    /// The scopes the tenant is entitled to (ADR-0035). May be empty: a
+    /// tenant created without `scopes` holds none until UpdateTenant names
+    /// them. Every entry is in the catalogue when written.
+    @required
+    scopes: ScopeNameList
+
     @required
     createdAt: IsoTimestamp
 
@@ -167,6 +213,12 @@ structure User {
     /// Cognito's user status, for example FORCE_CHANGE_PASSWORD or CONFIRMED.
     @required
     status: String
+
+    /// The scopes the user holds for this tenant (ADR-0036): the catalogue,
+    /// the tenant's entitlement and the user's grant intersected. Never
+    /// `tenant-admin/users`, which `admin` reports.
+    @required
+    scopes: ScopeNameList
 
     @required
     createdAt: IsoTimestamp

@@ -61,8 +61,8 @@ import {
   Deployment,
   NARROW_SCOPE_KEY,
   NARROW_TENANT_KEY,
-  SCOPE_API_READ,
   SCOPE_TENANT_ADMIN,
+  SCOPES_ATTRIBUTE,
   TENANT_ATTRIBUTE,
   tenantResource,
   TENANT_POOL_NAME_PREFIX,
@@ -71,6 +71,41 @@ import {
   TOKEN_TYPE_ACCESS,
   Topology,
 } from '../../src/shared/constants';
+
+// The two scopes the scenario registers in the catalogue (ADR-0034) and
+// entitles its tenants to (ADR-0035): A holds both, B holds read only.
+export const SCOPE_API_READ = 'sample/read';
+export const SCOPE_API_WRITE = 'sample/write';
+const SCOPES_A = [SCOPE_API_READ, SCOPE_API_WRITE];
+const SCOPES_B = [SCOPE_API_READ];
+
+/**
+ * Polls `probe` until it returns true, for up to `timeoutMs`. The scope
+ * catalogue is cached for 60 s per Lambda container (ADR-0034), so a
+ * catalogue change shows in tokens within that period plus one issuance.
+ */
+export async function eventually(probe: () => Promise<boolean>, what: string, timeoutMs = 120_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await probe()) {
+      return;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`${what}: not observed within ${timeoutMs / 1000} s`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+  }
+}
+
+/**
+ * The sample's scopes on a token, sorted: the `scope` claim without
+ * Cognito's own `aws.cognito.signin.user.admin` (asserted on separately).
+ */
+function scopesOf(claims: Claims): string[] {
+  return typeof claims.scope === 'string'
+    ? claims.scope.split(' ').filter((s) => s !== '' && s !== COGNITO_USER_ADMIN_SCOPE).sort()
+    : [];
+}
 
 // ---------------------------------------------------------------------------
 // Which stacks to run (spec: E2E_TOPOLOGIES default all; `tiered` included)
@@ -95,8 +130,13 @@ export function topologyEnabled(deployment: Deployment): boolean {
 const PLATFORM_OPS = [
   'CreateTenant',
   'GetTenant',
+  'UpdateTenant',
   'ListTenants',
   'DeleteTenant',
+  'PutScope',
+  'GetScope',
+  'ListScopes',
+  'DeleteScope',
   'CreateUser',
   'GetUser',
   'ListUsers',
@@ -285,7 +325,10 @@ export function defineScenario(topology: Topology): void {
     });
 
     // Best-effort cleanup: delete any tenant this run created so a failed
-    // run leaves nothing behind (spec P-4, §10 step 11).
+    // run leaves nothing behind (spec P-4, §10 step 11). The scopes stay:
+    // the catalogue is the stack's, and step 11 leaves them in place on
+    // purpose (the leftover tenant it creates is entitled to one; the scope
+    // rows go with the table on `cdk destroy`).
     afterAll(async () => {
       for (const key of Object.keys(tenantIds)) {
         try {
@@ -296,10 +339,65 @@ export function defineScenario(topology: Topology): void {
       }
     });
 
+    // -- step 1b: the scope catalogue (ADR-0034) ----------------------------
+    test('step 1b: register the two scopes; the reserved owner and a malformed name are refused', async () => {
+      for (const scope of SCOPES_A) {
+        const put = await platform.call<{ scope: { name: string; owner: string; description?: string; createdAt: string } }>(
+          'PUT',
+          `platform/scopes/${encodeURIComponent(scope)}`,
+          { description: `${runId} ${scope}` },
+        );
+        coverage.record('PutScope');
+        expectStatus(put, 200, `PutScope ${scope}`);
+        expect(put.body.scope).toMatchObject({ name: scope, owner: 'sample', description: `${runId} ${scope}` });
+        expect(typeof put.body.scope.createdAt).toBe('string');
+      }
+      // Idempotent: a second PUT keeps createdAt and replaces the description.
+      const first = await platform.call<{ scope: { createdAt: string } }>('GET', `platform/scopes/${encodeURIComponent(SCOPE_API_READ)}`);
+      coverage.record('GetScope');
+      expectStatus(first, 200, 'GetScope sample/read');
+      const again = await platform.call<{ scope: { createdAt: string; description?: string } }>(
+        'PUT',
+        `platform/scopes/${encodeURIComponent(SCOPE_API_READ)}`,
+        {},
+      );
+      expectStatus(again, 200, 'PutScope sample/read again');
+      expect(again.body.scope.createdAt).toBe(first.body.scope.createdAt);
+      expect(again.body.scope.description).toBeUndefined();
+
+      // ListScopes shows both.
+      const list = await platform.call<{ scopes: { name: string }[] }>('GET', 'platform/scopes');
+      coverage.record('ListScopes');
+      expectStatus(list, 200, 'ListScopes');
+      expect(list.body.scopes.map((s) => s.name)).toEqual(expect.arrayContaining(SCOPES_A));
+
+      // Refusals: the reserved owner (400 invalid_scope), a name the model
+      // rejects (400 from the request validator), an unknown scope (404).
+      const reserved = await platform.call<{ message?: string }>('PUT', 'platform/scopes/tenant-admin%2Fbilling', {});
+      expectStatus(reserved, 400, 'PutScope tenant-admin/billing');
+      expect(reserved.body.message).toMatch(/^invalid_scope/);
+      const malformed = await platform.call('PUT', 'platform/scopes/Sample%2FRead', {});
+      expectStatus(malformed, 400, 'PutScope Sample/Read');
+      // A bodiless PUT (no description) is accepted: the gateway validates
+      // parameters only on this route (allowEmptyBody), the SSDK reads an
+      // empty body as `{}`.
+      const bodiless = await platform.call<{ scope: { name: string } }>('PUT', `platform/scopes/${encodeURIComponent(SCOPE_API_READ)}`);
+      expectStatus(bodiless, 200, 'PutScope without a body');
+      expect(bodiless.body.scope.name).toBe(SCOPE_API_READ);
+      const unknown = await platform.call('GET', 'platform/scopes/nosuch%2Fscope');
+      coverage.record('GetScope');
+      expectStatus(unknown, 404, 'GetScope nosuch/scope');
+    });
+
     // -- R-6, §6.3: discovery parameters ------------------------------------
     // One stack per account and Region publishes them (ADR-0017). When this
-    // stack is the publisher, every parameter must name this stack.
+    // stack is the publisher, every parameter must name this stack. A run
+    // with E2E_PUBLISHER=none (another deployment owns the parameters in
+    // this account) has nothing to check here.
     test('R-6: the shared discovery parameters name the publishing stack', async () => {
+      if (process.env.E2E_PUBLISHER === 'none') {
+        return;
+      }
       const ssm = new SSMClient({ region: process.env.AWS_REGION });
       const read = async (name: string) =>
         (await ssm.send(new GetParameterCommand({ Name: `/application-plane/shared/identity/${name}` })))
@@ -335,6 +433,8 @@ export function defineScenario(topology: Topology): void {
         }>('POST', 'platform/tenants', {
           name: `${runId}-${key}`,
           adminEmail: emailFor(runId, who),
+          // ADR-0035: A is entitled to both scopes, B to read only.
+          scopes: key === 'A' ? SCOPES_A : SCOPES_B,
         });
         coverage.record('CreateTenant');
         expectStatus(res, 201, `CreateTenant ${key}`);
@@ -344,17 +444,20 @@ export function defineScenario(topology: Topology): void {
         tenantIds[key] = res.body.tenant.tenantId;
         usernames[who] = res.body.admin.user.username;
 
-        // GetTenant returns the topology-specific fields (§10 step 2).
+        // GetTenant returns the topology-specific fields (§10 step 2) and
+        // the entitlement (ADR-0035).
         const got = await platform.call<{
           tenant: {
             userPoolId?: string;
             appClientId?: string;
             issuer?: string;
             groupName?: string;
+            scopes: string[];
           };
         }>('GET', `platform/tenants/${tenantIds[key]}`);
         coverage.record('GetTenant');
         expectStatus(got, 200, `GetTenant ${key}`);
+        expect(got.body.tenant.scopes).toEqual(key === 'A' ? SCOPES_A : SCOPES_B);
         if (topology === 'pool-per-tenant') {
           expect(got.body.tenant.userPoolId).toBeDefined();
           expect(got.body.tenant.appClientId).toBeDefined();
@@ -371,7 +474,7 @@ export function defineScenario(topology: Topology): void {
       }
 
       // ListTenants includes A and B (coverage + registry scan).
-      const list = await platform.call<{ tenants: { tenantId: string }[] }>(
+      const list = await platform.call<{ tenants: { tenantId: string; scopes: string[] }[] }>(
         'GET',
         'platform/tenants',
       );
@@ -380,6 +483,27 @@ export function defineScenario(topology: Topology): void {
       const ids = new Set(list.body.tenants.map((t) => t.tenantId));
       expect(ids.has(tenantIds.A)).toBe(true);
       expect(ids.has(tenantIds.B)).toBe(true);
+      expect(list.body.tenants.find((t) => t.tenantId === tenantIds.B)?.scopes).toEqual(SCOPES_B);
+
+      // ADR-0035: a scope outside the catalogue is refused before any write,
+      // and a tenant without scopes is created with none (fail closed).
+      const refused = await platform.call<{ message?: string }>('POST', 'platform/tenants', {
+        name: `${runId}-refused`,
+        adminEmail: emailFor(runId, 'refused'),
+        scopes: [SCOPE_API_READ, 'nosuch/scope'],
+      });
+      expectStatus(refused, 400, 'CreateTenant with an unregistered scope');
+      expect(refused.body.message).toMatch(/^invalid_scope/);
+      const none = await platform.call<{ tenant: { tenantId: string; scopes: string[] }; admin: { user: { scopes: string[] } } }>(
+        'POST',
+        'platform/tenants',
+        { name: `${runId}-none`, adminEmail: emailFor(runId, 'none') },
+      );
+      expectStatus(none, 201, 'CreateTenant without scopes');
+      expect(none.body.tenant.scopes).toEqual([]);
+      expect(none.body.admin.user.scopes).toEqual([]);
+      const delNone = await platform.call('DELETE', `platform/tenants/${none.body.tenant.tenantId}`);
+      expectStatus(delNone, 204, 'DeleteTenant none');
 
       // Topology 1: two pools exist, each with the trigger attached.
       if (topology === 'pool-per-tenant') {
@@ -568,6 +692,9 @@ export function defineScenario(topology: Topology): void {
         expect((u1Claims.tenants as string[]).length).toBe(2);
         expect(u2Claims.tenants).toEqual([tenantIds.B]);
         expect(u1Claims.tenant_id).toBeUndefined();
+        // ADR-0035: a token naming A and B carries the intersection of what
+        // the user holds for each: B holds read only.
+        expect(scopesOf(u1Claims)).toEqual([SCOPE_API_READ]);
       } else {
         expect(u1Claims.tenant_id).toBe(tenantIds.A);
         expect(u2Claims.tenant_id).toBe(tenantIds.B);
@@ -575,7 +702,13 @@ export function defineScenario(topology: Topology): void {
           // iss equals the tenant's issuer from GetTenant.
           expect(u1Claims.iss).toBe(tenantIssuers.A);
         }
+        // ADR-0035: the un-narrowed token carries the tenant's entitlement.
+        expect(scopesOf(u1Claims)).toEqual([...SCOPES_A].sort());
       }
+      expect(scopesOf(u2Claims)).toEqual(SCOPES_B);
+      // Never the admin scope un-narrowed (ADR-0015); the Cognito scope stays.
+      expect(scopesOf(u2Claims)).not.toContain(SCOPE_TENANT_ADMIN);
+      expect(String(u2Claims.scope)).toContain(COGNITO_USER_ADMIN_SCOPE);
       expect(typeof u1Claims.sub).toBe('string');
 
       // ID tokens carry no tenant claim.
@@ -604,6 +737,22 @@ export function defineScenario(topology: Topology): void {
       coverage.record('GetUser');
       expectStatus(unchanged, 200, 'GetUser u1 after refused e-mail write');
       expect(unchanged.body.user.email).toBe(emailFor(runId, 'u1'));
+
+      // ADR-0036: a user cannot grant themselves scopes by writing
+      // custom:scopes with their own token; the app client lists no custom
+      // attribute as writable (P-3).
+      await expect(
+        cognito.send(
+          new UpdateUserAttributesCommand({
+            AccessToken: tokens.u1.accessToken,
+            UserAttributes: [{ Name: SCOPES_ATTRIBUTE, Value: `${SCOPE_API_READ} ${SCOPE_API_WRITE}` }],
+          }),
+        ),
+      ).rejects.toBeDefined();
+      // ... and cannot read it either: GetUser with the un-narrowed token
+      // returns the readable attributes only.
+      const self = await cognito.send(new GetUserCommand({ AccessToken: tokens.u1.accessToken }));
+      expect(self.UserAttributes?.some((a) => a.Name === SCOPES_ATTRIBUTE)).toBe(false);
 
       if (topology === 'shared-pool') {
         // u1 cannot change custom:tenantId with its own access token.
@@ -798,6 +947,27 @@ export function defineScenario(topology: Topology): void {
       });
       expect(badScope.oauthError).toBe('invalid_scope');
 
+      // ADR-0035: B is entitled to read only, so u2 cannot narrow to write
+      // (the trigger refuses: the scope exists but B does not hold it).
+      const notEntitled = await exchange.exchange({
+        clientId: exchangeClientId('B'),
+        subjectToken: tokens.u2.refreshToken,
+        scope: SCOPE_API_WRITE,
+        resource: topology === 'shared-pool-multi-tenant' ? tenantResource(tenantIds.B) : undefined,
+      });
+      coverage.record('ExchangeToken');
+      expectStatus(notEntitled, 400, 'exchange u2 write@B (not entitled)');
+      expect(notEntitled.oauthError).toBe('invalid_scope');
+      // ... while A, which holds both, narrows to both.
+      const both = await exchange.exchange({
+        clientId: exchangeClientId('A'),
+        subjectToken: tokens.u1.refreshToken,
+        scope: `${SCOPE_API_READ} ${SCOPE_API_WRITE}`,
+        resource: resourceA,
+      });
+      expectStatus(both, 200, 'exchange u1 read+write@A');
+      expect(scopesOf(await verifierFor('A').verify((both.body as { access_token: string }).access_token))).toEqual([...SCOPES_A].sort());
+
       if (topology === 'shared-pool-multi-tenant') {
         const noResource = await exchange.exchange({
           clientId: exchangeClientId('A'),
@@ -923,6 +1093,85 @@ export function defineScenario(topology: Topology): void {
       coverage.record('UpdateTenantUser');
       expectStatus(demote, 200, 'UpdateTenantUser u3 admin=false');
 
+      // ADR-0036: the tenant admin cuts u1 to read only. GetTenantUser shows
+      // the effective set; u1's next token (a refresh re-runs the trigger)
+      // carries it, and u1 can no longer narrow to write on A.
+      const getU1Before = await tenant.call<{ user: { scopes: string[] } }>('GET', `tenant/users/${usernames.u1}`, narrowedAdminTokenA);
+      expectStatus(getU1Before, 200, 'GetTenantUser u1 before the cut');
+      expect([...getU1Before.body.user.scopes].sort()).toEqual([...SCOPES_A].sort());
+      const cut = await tenant.call<{ user: { admin: boolean; scopes: string[] } }>(
+        'PATCH',
+        `tenant/users/${usernames.u1}`,
+        narrowedAdminTokenA,
+        { scopes: [SCOPE_API_READ] },
+      );
+      coverage.record('UpdateTenantUser');
+      expectStatus(cut, 200, 'UpdateTenantUser u1 scopes=[read]');
+      expect(cut.body.user.scopes).toEqual([SCOPE_API_READ]);
+      expect(cut.body.user.admin).toBe(false); // the flag is untouched
+      const listCut = await tenant.call<{ users: { username: string; scopes: string[] }[] }>('GET', 'tenant/users', narrowedAdminTokenA);
+      expectStatus(listCut, 200, 'ListTenantUsers after the cut');
+      expect(listCut.body.users.find((u) => u.username === usernames.u1)?.scopes).toEqual([SCOPE_API_READ]);
+      const afterCut = await platform.call<{ accessToken: string }>(
+        'POST',
+        `platform/tenants/${tenantIds.A}/users/${usernames.u1}/token/refresh`,
+        { refreshToken: tokens.u1.refreshToken },
+      );
+      coverage.record('RefreshToken');
+      expectStatus(afterCut, 200, 'RefreshToken u1 after the cut');
+      expect(scopesOf(await verifierFor('A').verify(afterCut.body.accessToken))).toEqual([SCOPE_API_READ]);
+      const cutExchange = await exchange.exchange({
+        clientId: exchangeClientId('A'),
+        subjectToken: tokens.u1.refreshToken,
+        scope: SCOPE_API_WRITE,
+        resource: topology === 'shared-pool-multi-tenant' ? tenantResource(tenantIds.A) : undefined,
+      });
+      coverage.record('ExchangeToken');
+      expect(cutExchange.oauthError).toBe('invalid_scope');
+      if (topology === 'shared-pool-multi-tenant') {
+        // The cut is per tenant: through B, u1 still holds B's entitlement.
+        const viaB = await platform.call<{ user: { scopes: string[] } }>('GET', `platform/tenants/${tenantIds.B}/users/${usernames.u1}`);
+        expectStatus(viaB, 200, 'GetUser B/u1 after the cut on A');
+        expect(viaB.body.user.scopes).toEqual(SCOPES_B);
+      }
+      // Refusals: a scope the tenant does not hold, and the admin scope
+      // (admin stays a group, ADR-0015). Both 400 invalid_scope.
+      for (const scopes of [['nosuch/scope'], [SCOPE_TENANT_ADMIN], [SCOPE_API_READ, SCOPE_API_READ]]) {
+        const refused = await tenant.call<{ message?: string }>('PATCH', `tenant/users/${usernames.u1}`, narrowedAdminTokenA, { scopes });
+        expectStatus(refused, 400, `UpdateTenantUser u1 scopes=${JSON.stringify(scopes)}`);
+        expect(refused.body.message).toMatch(/^invalid_scope/);
+      }
+      // An empty grant is valid: the user holds nothing; the next token has
+      // no scope at all (single-tenant topologies show it directly).
+      const emptied = await tenant.call<{ user: { scopes: string[] } }>('PATCH', `tenant/users/${usernames.u1}`, narrowedAdminTokenA, { scopes: [] });
+      expectStatus(emptied, 200, 'UpdateTenantUser u1 scopes=[]');
+      expect(emptied.body.user.scopes).toEqual([]);
+      if (topology !== 'shared-pool-multi-tenant') {
+        const noScope = await platform.call<{ accessToken: string }>(
+          'POST',
+          `platform/tenants/${tenantIds.A}/users/${usernames.u1}/token/refresh`,
+          { refreshToken: tokens.u1.refreshToken },
+        );
+        expectStatus(noScope, 200, 'RefreshToken u1 with an empty grant');
+        expect(scopesOf(await verifierFor('A').verify(noScope.body.accessToken))).toEqual([]);
+      }
+      // The platform restores u1 through its own door (platform UpdateUser).
+      const restored = await platform.call<{ user: { scopes: string[] } }>(
+        'PATCH',
+        `platform/tenants/${tenantIds.A}/users/${usernames.u1}`,
+        { scopes: SCOPES_A },
+      );
+      coverage.record('UpdateUser');
+      expectStatus(restored, 200, 'platform UpdateUser u1 scopes restored');
+      expect([...restored.body.user.scopes].sort()).toEqual([...SCOPES_A].sort());
+      const platformRefused = await platform.call<{ message?: string }>(
+        'PATCH',
+        `platform/tenants/${tenantIds.A}/users/${usernames.u1}`,
+        { scopes: ['nosuch/scope'] },
+      );
+      expectStatus(platformRefused, 400, 'platform UpdateUser u1 unregistered scope');
+      expect(platformRefused.body.message).toMatch(/^invalid_scope/);
+
       // DeleteTenantUser u3 → 204, then platform GetUser u3 → 404.
       const delU3 = await tenant.call(
         'DELETE',
@@ -947,7 +1196,7 @@ export function defineScenario(topology: Topology): void {
       );
       expectStatus(unNarrowed, 403, 'un-narrowed admin token → 403');
 
-      // a narrowed token with only tenant-api/read → 403.
+      // a narrowed token with only sample/read → 403.
       const readOnlyExchange = await exchange.exchange({
         clientId: exchangeClientId('A'),
         subjectToken: tokens.a1.refreshToken,
@@ -1047,6 +1296,9 @@ export function defineScenario(topology: Topology): void {
       // Self-promote is refused too: no self-update at all (R-13, T-26).
       const selfPromote = await tenant.call('PATCH', `tenant/users/${usernames.a1}`, narrowedAdminTokenA, { admin: true });
       expectStatus(selfPromote, 409, 'self-promote a1 (R-13)');
+      // ... and so is a self-cut of scopes (ADR-0036 extends R-13).
+      const selfCut = await tenant.call('PATCH', `tenant/users/${usernames.a1}`, narrowedAdminTokenA, { scopes: [] });
+      expectStatus(selfCut, 409, 'self-cut a1 scopes (R-13)');
 
       // T-26: the vendor demotes a1 while its narrowed admin token is still
       // valid. Every mutation re-checks the admin group and answers 409; a
@@ -1100,6 +1352,101 @@ export function defineScenario(topology: Topology): void {
         expectStatus(b1GetU1, 200, 'b1 GetTenantUser u1');
         expect(JSON.stringify(b1GetU1.body.user)).not.toContain(tenantIds.A);
       }
+    });
+
+    // -- step 8b: entitlement and catalogue changes reach tokens (ADR-0034, ADR-0035)
+    test('step 8b: UpdateTenant widens B; DeleteScope drops a scope from every token', async () => {
+      const resourceB = topology === 'shared-pool-multi-tenant' ? tenantResource(tenantIds.B) : undefined;
+
+      // UpdateTenant B -> both scopes: u2's next token carries both and u2
+      // can now narrow to write. In topology 3 u1 (A and B) now gets both
+      // un-narrowed too: the intersection grew.
+      const widened = await platform.call<{ tenant: { scopes: string[] } }>('PATCH', `platform/tenants/${tenantIds.B}`, { scopes: SCOPES_A });
+      coverage.record('UpdateTenant');
+      expectStatus(widened, 200, 'UpdateTenant B scopes=[read, write]');
+      expect([...widened.body.tenant.scopes].sort()).toEqual([...SCOPES_A].sort());
+      const u2Wide = await platform.call<{ accessToken: string }>(
+        'POST',
+        `platform/tenants/${tenantIds.B}/users/${usernames.u2}/token/refresh`,
+        { refreshToken: tokens.u2.refreshToken },
+      );
+      coverage.record('RefreshToken');
+      expectStatus(u2Wide, 200, 'RefreshToken u2 after UpdateTenant B');
+      expect(scopesOf(await verifierFor('B').verify(u2Wide.body.accessToken))).toEqual([...SCOPES_A].sort());
+      const u2Write = await exchange.exchange({
+        clientId: exchangeClientId('B'),
+        subjectToken: tokens.u2.refreshToken,
+        scope: SCOPE_API_WRITE,
+        resource: resourceB,
+      });
+      coverage.record('ExchangeToken');
+      expectStatus(u2Write, 200, 'exchange u2 write@B after UpdateTenant');
+      if (topology === 'shared-pool-multi-tenant') {
+        const u1Wide = await platform.call<{ accessToken: string }>(
+          'POST',
+          `platform/tenants/${tenantIds.A}/users/${usernames.u1}/token/refresh`,
+          { refreshToken: tokens.u1.refreshToken },
+        );
+        expectStatus(u1Wide, 200, 'RefreshToken u1 after UpdateTenant B');
+        expect(scopesOf(await verifierFor('A').verify(u1Wide.body.accessToken))).toEqual([...SCOPES_A].sort());
+      }
+      // UpdateTenant refusals: an unregistered scope (400), an unknown tenant (404).
+      const refused = await platform.call<{ message?: string }>('PATCH', `platform/tenants/${tenantIds.B}`, { scopes: ['nosuch/scope'] });
+      expectStatus(refused, 400, 'UpdateTenant B unregistered scope');
+      expect(refused.body.message).toMatch(/^invalid_scope/);
+      const unknown = await platform.call('PATCH', 'platform/tenants/01ARZ3NDEKTSV4RRFFQ69G5FAV', { scopes: [] });
+      expectStatus(unknown, 404, 'UpdateTenant unknown tenant');
+
+      // DeleteScope sample/write: the tenant rows still name it, but the
+      // catalogue no longer does, so within one cache period (60 s) every
+      // token stops carrying it and the exchange refuses it as unregistered.
+      const del = await platform.call('DELETE', `platform/scopes/${encodeURIComponent(SCOPE_API_WRITE)}`);
+      coverage.record('DeleteScope');
+      expectStatus(del, 204, 'DeleteScope sample/write');
+      const delAgain = await platform.call('DELETE', `platform/scopes/${encodeURIComponent(SCOPE_API_WRITE)}`);
+      expectStatus(delAgain, 204, 'DeleteScope sample/write again (idempotent)');
+      const gone = await platform.call('GET', `platform/scopes/${encodeURIComponent(SCOPE_API_WRITE)}`);
+      expectStatus(gone, 404, 'GetScope sample/write after delete');
+      const stillNamed = await platform.call<{ tenant: { scopes: string[] } }>('GET', `platform/tenants/${tenantIds.A}`);
+      expectStatus(stillNamed, 200, 'GetTenant A after DeleteScope');
+      expect(stillNamed.body.tenant.scopes).toContain(SCOPE_API_WRITE);
+      const u1Shown = await platform.call<{ user: { scopes: string[] } }>('GET', `platform/tenants/${tenantIds.A}/users/${usernames.u1}`);
+      expectStatus(u1Shown, 200, 'GetUser A/u1 after DeleteScope');
+      expect(u1Shown.body.user.scopes).toEqual([SCOPE_API_READ]); // the user API intersects at once
+      await eventually(async () => {
+        const r = await platform.call<{ accessToken: string }>(
+          'POST',
+          `platform/tenants/${tenantIds.A}/users/${usernames.u1}/token/refresh`,
+          { refreshToken: tokens.u1.refreshToken },
+        );
+        expectStatus(r, 200, 'RefreshToken u1 after DeleteScope');
+        return !scopesOf(await verifierFor('A').verify(r.body.accessToken)).includes(SCOPE_API_WRITE);
+      }, 'u1 token without sample/write after DeleteScope');
+      await eventually(async () => {
+        const r = await exchange.exchange({
+          clientId: exchangeClientId('A'),
+          subjectToken: tokens.u1.refreshToken,
+          scope: SCOPE_API_WRITE,
+          resource: topology === 'shared-pool-multi-tenant' ? tenantResource(tenantIds.A) : undefined,
+        });
+        return r.oauthError === 'invalid_scope';
+      }, 'exchange refuses sample/write after DeleteScope');
+      // UpdateTenant that still names the deleted scope is refused.
+      const stale = await platform.call<{ message?: string }>('PATCH', `platform/tenants/${tenantIds.A}`, { scopes: SCOPES_A });
+      expectStatus(stale, 400, 'UpdateTenant A with the deleted scope');
+      expect(stale.body.message).toMatch(/^invalid_scope/);
+      // Re-register it: the scope is held again at the next issuance.
+      const back = await platform.call('PUT', `platform/scopes/${encodeURIComponent(SCOPE_API_WRITE)}`, {});
+      expectStatus(back, 200, 'PutScope sample/write again');
+      await eventually(async () => {
+        const r = await platform.call<{ accessToken: string }>(
+          'POST',
+          `platform/tenants/${tenantIds.A}/users/${usernames.u1}/token/refresh`,
+          { refreshToken: tokens.u1.refreshToken },
+        );
+        expectStatus(r, 200, 'RefreshToken u1 after PutScope again');
+        return scopesOf(await verifierFor('A').verify(r.body.accessToken)).includes(SCOPE_API_WRITE);
+      }, 'u1 token with sample/write after PutScope again');
     });
 
     // -- step 9: offboard (P-2) --------------------------------------------
@@ -1270,15 +1617,18 @@ export function defineScenario(topology: Topology): void {
       // Every platform op, every tenant op, and the exchange ran (§10 step 11).
       expect(coverage.missing(topology)).toEqual([]);
 
-      // Leave one tenant behind on purpose. The stack's TenantDrain must
-      // offboard it on `cdk destroy` (ADR-0022): a leftover pool, group, or
-      // user after the destroy is the failure signal.
-      const leftover = await platform.call<{ tenant: { status: string } }>('POST', 'platform/tenants', {
+      // Leave one tenant behind on purpose, entitled to a scope that stays in
+      // the catalogue. The stack's TenantDrain must offboard it on `cdk
+      // destroy` (ADR-0022): a leftover pool, group, or user after the
+      // destroy is the failure signal. The scope rows go with the table.
+      const leftover = await platform.call<{ tenant: { status: string; scopes: string[] } }>('POST', 'platform/tenants', {
         name: `${runId}-left-for-drain`,
         adminEmail: emailFor(runId, 'drain'),
+        scopes: [SCOPE_API_READ],
       });
       expectStatus(leftover, 201, 'CreateTenant left for the stack drain');
       expect(leftover.body.tenant.status).toBe('ACTIVE');
+      expect(leftover.body.tenant.scopes).toEqual([SCOPE_API_READ]);
     });
   });
 }

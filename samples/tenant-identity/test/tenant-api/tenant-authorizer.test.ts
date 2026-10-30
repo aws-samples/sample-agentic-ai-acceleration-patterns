@@ -3,7 +3,10 @@
 
 import { createSign, generateKeyPairSync } from 'crypto';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
-import { SCOPE_API_READ, SCOPE_TENANT_ADMIN } from '../../src/shared/constants';
+import { SCOPE_TENANT_ADMIN } from '../../src/shared/constants';
+
+// A catalogue scope a token may carry beside the admin scope (ADR-0034).
+const SCOPE_API_READ = 'sample/read';
 import type { RegistryReader, TenantRecord } from '../../src/shared/registry';
 import { authorize, stripBearer, type AuthorizeDeps, type TokenVerifier } from '../../src/tenant-api/tenant-authorizer';
 
@@ -45,6 +48,7 @@ function fakeRegistry(over: Partial<RegistryReader> = {}): RegistryReader {
     get: jest.fn().mockResolvedValue(activeTenant()),
     batchGet: jest.fn().mockResolvedValue([]),
     getByUserPoolId: jest.fn().mockResolvedValue(undefined),
+    listScopeNames: jest.fn().mockResolvedValue([]),
     ...over,
   };
 }

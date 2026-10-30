@@ -25,13 +25,17 @@ import {
   COGNITO_USER_ADMIN_SCOPE,
   NARROW_SCOPE_KEY,
   NARROW_TENANT_KEY,
-  SCOPE_API_READ,
-  SCOPE_API_WRITE,
   TENANT_RESOURCE_PREFIX,
   TOKEN_TYPE_ACCESS,
   TOKEN_TYPE_REFRESH,
   GRANT_TYPE_TOKEN_EXCHANGE,
 } from '../../src/shared/constants';
+import { ScopeCatalogue, StaticScopeCatalogue } from '../../src/shared/scope-catalogue';
+
+// The catalogue the exchange runs against (ADR-0034): two registered scopes.
+const SCOPE_API_READ = 'sample/read';
+const SCOPE_API_WRITE = 'sample/write';
+const CATALOGUE = new StaticScopeCatalogue([SCOPE_API_READ, SCOPE_API_WRITE]);
 import { OAuthError, OAuthServerError } from '../../src/smithy/token/typescript-ssdk-codegen/src';
 import { TokenExchangeService } from '../../src/token-exchange/token-exchange';
 
@@ -82,6 +86,7 @@ function service(): TokenExchangeService<Record<string, unknown>> {
   return new TokenExchangeService<Record<string, unknown>>({
     cognito: cognitoMock as unknown as CognitoIdentityProviderClient,
     acceptOtherClients: false,
+    catalogue: CATALOGUE,
   });
 }
 
@@ -284,6 +289,47 @@ describe('ExchangeToken ADR-0012: reject tokens Cognito did not narrow', () => {
   });
 });
 
+describe('ExchangeToken reads the catalogue only for a well-formed form (ADR-0034)', () => {
+  /** A counting catalogue, so the read can be asserted on. */
+  function countingCatalogue(names: string[]): ScopeCatalogue & { reads: number } {
+    const c = {
+      reads: 0,
+      names: async () => {
+        c.reads += 1;
+        return new Set(names);
+      },
+    };
+    return c;
+  }
+  function serviceWith(catalogue: ScopeCatalogue): TokenExchangeService<Record<string, unknown>> {
+    return new TokenExchangeService<Record<string, unknown>>({
+      cognito: cognitoMock as unknown as CognitoIdentityProviderClient,
+      acceptOtherClients: false,
+      catalogue,
+    });
+  }
+
+  it('a malformed form is refused before the catalogue is consulted', async () => {
+    const catalogue = countingCatalogue([SCOPE_API_READ]);
+    for (const body of [form({ grant_type: 'authorization_code' }), form({ scope: 'Sample/Read' }), form({ subject_token: '' })]) {
+      await expect(serviceWith(catalogue).ExchangeToken({ form: new TextEncoder().encode(body) }, {})).rejects.toBeInstanceOf(OAuthError);
+    }
+    expect(catalogue.reads).toBe(0);
+    expect(cognitoMock.commandCalls(GetTokens)).toHaveLength(0);
+  });
+
+  it('a well-formed form reads the catalogue once; an unregistered scope -> invalid_scope, no Cognito call', async () => {
+    const catalogue = countingCatalogue([SCOPE_API_READ]);
+    const caught = await serviceWith(catalogue)
+      .ExchangeToken({ form: new TextEncoder().encode(form({ scope: 'billing/read' })) }, {})
+      .catch((e) => e);
+    expect(caught).toBeInstanceOf(OAuthError);
+    expect(caught.code).toBe('invalid_scope');
+    expect(catalogue.reads).toBe(1);
+    expect(cognitoMock.commandCalls(GetTokens)).toHaveLength(0);
+  });
+});
+
 describe('ExchangeToken T-28: shared-pool client_id check', () => {
   /** A service bound to a shared-pool app client id, in a single shared topology. */
   function serviceWith(appClientId: string, acceptOtherClients = false): TokenExchangeService<Record<string, unknown>> {
@@ -291,6 +337,7 @@ describe('ExchangeToken T-28: shared-pool client_id check', () => {
       cognito: cognitoMock as unknown as CognitoIdentityProviderClient,
       appClientId,
       acceptOtherClients,
+      catalogue: CATALOGUE,
     });
   }
 

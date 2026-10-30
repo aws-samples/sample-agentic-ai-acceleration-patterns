@@ -194,14 +194,38 @@ describe('tenant/create.sh', () => {
       expect(curlRequests(r)).toEqual([GET_TENANT, POST_TENANTS]);
     });
 
-    it('sends exactly {tenantId, name, adminEmail} with the control-plane id (ADR-0029)', () => {
+    it('sends exactly {tenantId, name, adminEmail, scopes: []} with the control-plane id (ADR-0029, ADR-0035)', () => {
       const post = r.calls.filter((c) => c.tool === 'curl')[1];
+      // No SCOPES in the env: a tenant that holds nothing (fail closed).
       expect(JSON.parse(post.body ?? '')).toEqual({
         tenantId: FIXTURE.tenantId,
         name: FIXTURE.tenantName,
         adminEmail: FIXTURE.adminEmail,
+        scopes: [],
       });
       expect(post.argv).toContain('Content-Type: application/json');
+    });
+
+    it('SCOPES (space-separated) becomes the scopes array (ADR-0035)', () => {
+      const withScopes = run('tenant/create.sh', {
+        env: tenantEnv({ SCOPES: ' billing/read  default/chat ' }),
+        params: allParams(),
+        curl: [notFound, created()],
+      });
+      expect(withScopes.status).toBe(0);
+      const post = withScopes.calls.filter((c) => c.tool === 'curl')[1];
+      expect(JSON.parse(post.body ?? '').scopes).toEqual(['billing/read', 'default/chat']);
+    });
+
+    it('a 400 from CreateTenant (an unregistered scope) exits 1 with the message and parks nothing', () => {
+      const refused = run('tenant/create.sh', {
+        env: tenantEnv({ SCOPES: 'nosuch/scope' }),
+        params: allParams(),
+        curl: [notFound, { status: 400, body: { message: 'invalid_scope: a scope is not registered in the catalogue', reason: 'InvalidInput' } }],
+      });
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toContain('invalid_scope');
+      expect(putParameterCalls(refused)).toHaveLength(0);
     });
 
     it('M-R-10: parks the password as the very next call after the 201', () => {
@@ -489,6 +513,55 @@ describe('tenant/update.sh (§7.2, reconcile only)', () => {
     expect(putParameterCalls(r)).toHaveLength(0);
   });
 
+  describe('SCOPES -> UpdateTenant (ADR-0035)', () => {
+    const PATCH_TENANT = `PATCH ${API}platform/tenants/${FIXTURE.tenantId}`;
+    const updated = (scopes: string[]) => ({ status: 200, body: { tenant: { tenantId: FIXTURE.tenantId, status: 'ACTIVE', scopes } } });
+
+    it('a set SCOPES replaces the entitlement with one PATCH after the status check', () => {
+      const r = run('tenant/update.sh', {
+        env: tenantEnv({ OPERATION: 'update', ADMIN_EMAIL: undefined, SCOPES: 'billing/read default/chat' }),
+        params: allParams(),
+        curl: [tenantActive(), updated(['billing/read', 'default/chat'])],
+      });
+      expect(r.status).toBe(0);
+      expect(curlRequests(r)).toEqual([GET_TENANT, PATCH_TENANT]);
+      const patch = r.calls.filter((c) => c.tool === 'curl')[1];
+      expect(JSON.parse(patch.body ?? '')).toEqual({ scopes: ['billing/read', 'default/chat'] });
+      expect(r.stdout).toContain('scopes set to: billing/read default/chat');
+    });
+
+    it('an empty SCOPES means no scope and still sends the PATCH', () => {
+      const r = run('tenant/update.sh', {
+        env: tenantEnv({ OPERATION: 'update', ADMIN_EMAIL: undefined, SCOPES: '' }),
+        params: allParams(),
+        curl: [tenantActive(), updated([])],
+      });
+      expect(r.status).toBe(0);
+      const patch = r.calls.filter((c) => c.tool === 'curl')[1];
+      expect(JSON.parse(patch.body ?? '')).toEqual({ scopes: [] });
+    });
+
+    it('a 400 (unregistered scope) exits 1 with the message', () => {
+      const r = run('tenant/update.sh', {
+        env: tenantEnv({ OPERATION: 'update', ADMIN_EMAIL: undefined, SCOPES: 'nosuch/scope' }),
+        params: allParams(),
+        curl: [tenantActive(), { status: 400, body: { message: 'invalid_scope: a scope is not registered in the catalogue', reason: 'InvalidInput' } }],
+      });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('invalid_scope');
+    });
+
+    it('a non-ACTIVE tenant is refused before any PATCH', () => {
+      const r = run('tenant/update.sh', {
+        env: tenantEnv({ OPERATION: 'update', ADMIN_EMAIL: undefined, SCOPES: 'billing/read' }),
+        params: allParams(),
+        curl: [tenantActive('DELETING')],
+      });
+      expect(r.status).toBe(1);
+      expect(curlRequests(r)).toEqual([GET_TENANT]);
+    });
+  });
+
   it('any other status exits 1', () => {
     const r = run('tenant/update.sh', { env, params: allParams(), curl: [{ status: 500 }] });
     expect(r.status).toBe(1);
@@ -637,7 +710,11 @@ describe('hygiene across every run (M-P-5, scripts/CONVENTIONS.md)', () => {
     expect(posts.length).toBeGreaterThan(0);
     for (const c of posts) {
       expect(c.stdin).not.toContain(FIXTURE.adminEmail);
-      expect(c.body).toContain(FIXTURE.adminEmail);
+      // Every body with an e-mail carries it in the file; the UpdateTenant
+      // body (ADR-0035) carries scopes only and no e-mail at all.
+      if (!c.argv.includes('PATCH')) {
+        expect(c.body).toContain(FIXTURE.adminEmail);
+      }
       expect(argAfter(c.argv, '--data-binary')).toMatch(/^@\//);
     }
   });

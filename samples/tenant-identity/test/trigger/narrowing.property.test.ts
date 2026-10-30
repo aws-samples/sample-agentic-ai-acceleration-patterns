@@ -5,8 +5,6 @@ import type { PreTokenGenerationV2TriggerEvent } from 'aws-lambda';
 import * as fc from 'fast-check';
 import {
   adminGroupName,
-  ALL_SCOPES,
-  API_SCOPES,
   COGNITO_USER_ADMIN_SCOPE,
   NARROW_SCOPE_KEY,
   NARROW_TENANT_KEY,
@@ -14,18 +12,25 @@ import {
   tenantGroupName,
 } from '../../src/shared/constants';
 import type { RegistryReader, TenantRecord, TenantStatus } from '../../src/shared/registry';
+import { StaticScopeCatalogue } from '../../src/shared/scope-catalogue';
 import type { ResolvedTenants, TenantSource } from '../../src/topology/provisioner';
 import { handlePreTokenGeneration } from '../../src/trigger/pre-token-generation';
 
 /**
- * Property tests (spec §10 unit-assertion paragraph, ADR-0010): narrowing
- * never widens. For arbitrary user tenant sets, arbitrary admin groups, and
- * arbitrary clientMetadata (arbitrary keys and values, plus the two real §8.2
- * keys with random values), the core either throws or produces an output
- * whose tenant(s) are a subset of the user's ACTIVE tenants and whose scopes
- * are a subset of what the user holds for that tenant; a narrowed output
- * equals the request exactly.
+ * Property tests (spec §10 unit-assertion paragraph, ADR-0010, ADR-0035,
+ * ADR-0036): narrowing never widens. For arbitrary user tenant sets,
+ * arbitrary admin groups, an arbitrary catalogue, arbitrary per-tenant
+ * entitlements and per-tenant grants, and arbitrary clientMetadata
+ * (arbitrary keys and values, plus the two real §8.2 keys with random
+ * values), the core either throws or produces an output whose tenant(s) are
+ * a subset of the user's ACTIVE tenants and whose scopes are a subset of
+ * `held` for that tenant; a narrowed output equals the request exactly, and
+ * an un-narrowed multi-tenant output is the intersection of `held` over the
+ * active tenants.
  */
+
+/** Every scope name that can appear anywhere: catalogue, entitlement, grant, request. */
+const SCOPE_UNIVERSE = ['sample/read', 'sample/write', 'billing/read', 'billing/invoke', 'default/chat'];
 
 const NUM_RUNS = 500;
 
@@ -42,14 +47,16 @@ const unusedRegistry: RegistryReader = {
   get: async () => undefined,
   batchGet: async () => [],
   getByUserPoolId: async () => undefined,
+  listScopeNames: async () => [],
 };
 
-function record(tenantId: string, status: TenantStatus): TenantRecord {
+function record(tenantId: string, status: TenantStatus, scopes: readonly string[]): TenantRecord {
   return {
     tenantId,
     name: 'n',
     status,
     topology: 'shared-pool-multi-tenant',
+    scopes,
     createdAt: '2026-10-21T00:00:00.000Z',
     updatedAt: '2026-10-21T00:00:00.000Z',
   };
@@ -59,9 +66,13 @@ interface TenantSpec {
   readonly id: string;
   readonly status: TenantStatus;
   readonly admin: boolean;
+  /** The tenant's entitlement (ADR-0035): any subset of the universe. */
+  readonly entitled: readonly string[];
+  /** The user's grant for the tenant (ADR-0036): absent, or any subset of the universe. */
+  readonly granted: readonly string[] | undefined;
 }
 
-/** Distinct tenants with random statuses and admin flags. */
+/** Distinct tenants with random statuses, admin flags, entitlements and grants. */
 const tenantSpecs = fc
   .uniqueArray(fc.constantFrom(...ULID_POOL), { minLength: 1, maxLength: ULID_POOL.length })
   .chain((ids) =>
@@ -71,10 +82,22 @@ const tenantSpecs = fc
           id: fc.constant(id),
           status: fc.constantFrom<TenantStatus>('ACTIVE', 'DELETING'),
           admin: fc.boolean(),
+          entitled: fc.subarray(SCOPE_UNIVERSE),
+          granted: fc.option(fc.subarray(SCOPE_UNIVERSE), { nil: undefined }),
         }),
       ),
     ),
   ) as fc.Arbitrary<TenantSpec[]>;
+
+/** The catalogue (ADR-0034): any subset of the universe, including empty. */
+const catalogueArb = fc.subarray(SCOPE_UNIVERSE);
+
+/** `held(user, tenant)` minus the admin scope, as spec §8.1 defines it. */
+function heldFor(spec: TenantSpec, catalogue: readonly string[]): Set<string> {
+  return new Set(
+    spec.entitled.filter((s) => catalogue.includes(s) && (spec.granted === undefined || spec.granted.includes(s))),
+  );
+}
 
 /** Arbitrary clientMetadata: random keys/values, plus the two real keys. */
 const clientMetadataArb = fc
@@ -90,7 +113,7 @@ const clientMetadataArb = fc
     fc.option(
       fc.oneof(
         // sometimes a subset of real scopes, sometimes junk, sometimes empty
-        fc.subarray([...ALL_SCOPES]).map((xs) => xs.join(' ')),
+        fc.subarray([...SCOPE_UNIVERSE, SCOPE_TENANT_ADMIN]).map((xs) => xs.join(' ')),
         fc.string(),
       ),
       { nil: undefined },
@@ -136,9 +159,11 @@ function buildEvent(specs: TenantSpec[], md: Record<string, string>): PreTokenGe
 }
 
 function multiSource(specs: TenantSpec[]): TenantSource {
+  const byId = new Map(specs.map((s) => [s.id, s]));
   const resolved: ResolvedTenants = {
     kind: 'multi',
-    records: specs.map((s) => record(s.id, s.status)),
+    records: specs.map((s) => record(s.id, s.status, s.entitled)),
+    grantedScopes: (tenantId) => byId.get(tenantId)?.granted,
   };
   return { topology: 'shared-pool-multi-tenant', resolve: async () => resolved };
 }
@@ -146,18 +171,20 @@ function multiSource(specs: TenantSpec[]): TenantSource {
 describe('ADR-0010: narrowing never widens (property)', () => {
   it('output tenants/scopes are a subset of what the user holds, or it throws', async () => {
     await fc.assert(
-      fc.asyncProperty(tenantSpecs, clientMetadataArb, async (specs, md) => {
+      fc.asyncProperty(tenantSpecs, catalogueArb, clientMetadataArb, async (specs, catalogueNames, md) => {
         const activeIds = new Set(specs.filter((s) => s.status === 'ACTIVE').map((s) => s.id));
         const adminActiveIds = new Set(
           specs.filter((s) => s.status === 'ACTIVE' && s.admin).map((s) => s.id),
         );
+        const byId = new Map(specs.map((s) => [s.id, s]));
         const source = multiSource(specs);
+        const catalogue = new StaticScopeCatalogue(catalogueNames);
         const event = buildEvent(specs, md);
         const isNarrowing = md[NARROW_TENANT_KEY] !== undefined || md[NARROW_SCOPE_KEY] !== undefined;
 
         let result: PreTokenGenerationV2TriggerEvent;
         try {
-          result = await handlePreTokenGeneration(event, { source, registry: unusedRegistry });
+          result = await handlePreTokenGeneration(event, { source, registry: unusedRegistry, catalogue });
         } catch (error) {
           // A refusal is always acceptable. If it refused, prefixes must be the
           // fixed ones (never leaking input).
@@ -182,25 +209,30 @@ describe('ADR-0010: narrowing never widens (property)', () => {
           const requested = (md[NARROW_SCOPE_KEY] ?? '').split(' ').filter((x) => x.length > 0);
           expect([...scopes].sort()).toEqual([...requested].sort());
 
-          // Every output scope is one the user holds for that tenant.
+          // Every output scope is one the user holds for that tenant
+          // (ADR-0035): in the catalogue, in the entitlement, in the grant.
+          const held = heldFor(byId.get(tenantId)!, catalogueNames);
           for (const scope of scopes) {
             if (scope === SCOPE_TENANT_ADMIN) {
               expect(adminActiveIds.has(tenantId)).toBe(true);
             } else {
-              expect(API_SCOPES).toContain(scope);
+              expect(held.has(scope)).toBe(true);
             }
           }
           // A narrowed token suppresses Cognito's own admin scope.
           expect(gen!.scopesToSuppress).toEqual([COGNITO_USER_ADMIN_SCOPE]);
         } else {
           // Un-narrowed multi: tenants are a subset of the ACTIVE set; scopes
-          // are exactly the API scopes and never tenant-admin/users.
+          // are exactly the intersection of `held` over the active tenants
+          // (ADR-0035) and never tenant-admin/users.
           const claims = gen!.claimsToAddOrOverride ?? {};
           const tenants = claims.tenants as unknown as string[];
           for (const t of tenants) {
             expect(activeIds.has(t)).toBe(true);
           }
-          expect([...scopes].sort()).toEqual([...API_SCOPES].sort());
+          const active = specs.filter((s) => s.status === 'ACTIVE');
+          const expected = SCOPE_UNIVERSE.filter((s) => active.every((spec) => heldFor(spec, catalogueNames).has(s)));
+          expect([...scopes].sort()).toEqual(expected.sort());
           expect(scopes).not.toContain(SCOPE_TENANT_ADMIN);
         }
       }),

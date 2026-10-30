@@ -244,6 +244,45 @@ export function requireApiKey(doc: object, pathPrefix: string): object {
   return copy;
 }
 
+/** The validator name the generated documents use for "parameters only". */
+const PARAMS_ONLY_VALIDATOR = 'params-only';
+
+/**
+ * Lets an operation whose request body has no required member be called
+ * without a body. API Gateway's `full` validator rejects an empty body as
+ * `Invalid request body` whenever a model is attached, even when every
+ * property is optional, so `PUT /platform/scopes/{scope}` with no
+ * `description` (and `PATCH .../users/{username}` with neither field) would
+ * never reach the function. Such operations are moved to the generated
+ * `params-only` validator; the Smithy server SDK still validates a body that
+ * is present (types, patterns, lengths), and the service refuses an empty
+ * `PATCH` with its own 400. Operations with a required body member keep
+ * `full`. Returns a deep copy.
+ */
+export function allowEmptyBody(doc: object): object {
+  const copy: Json = deepCopy(doc as Json);
+  const validators: Json = (copy[VALIDATORS_KEY] ??= {});
+  validators[PARAMS_ONLY_VALIDATOR] ??= { validateRequestParameters: true };
+  for (const pathItem of Object.values(copy.paths ?? {}) as Json[]) {
+    for (const [method, operation] of Object.entries(pathItem)) {
+      if (!isHttpMethod(method)) {
+        continue;
+      }
+      const op = operation as Json;
+      const ref: string | undefined = op.requestBody?.content?.['application/json']?.schema?.$ref;
+      if (ref === undefined) {
+        continue;
+      }
+      const schema: Json | undefined = copy.components?.schemas?.[ref.replace('#/components/schemas/', '')];
+      const required: unknown[] = schema?.required ?? [];
+      if (schema !== undefined && required.length === 0) {
+        op[VALIDATOR_KEY] = PARAMS_ONLY_VALIDATOR;
+      }
+    }
+  }
+  return copy;
+}
+
 function isHttpMethod(key: string): boolean {
   return (HTTP_METHODS as readonly string[]).includes(key);
 }

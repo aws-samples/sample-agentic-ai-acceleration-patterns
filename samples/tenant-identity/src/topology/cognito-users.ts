@@ -18,6 +18,7 @@ import {
   AdminInitiateAuthCommand,
   AdminListGroupsForUserCommand,
   AdminSetUserPasswordCommand,
+  AdminUpdateUserAttributesCommand,
   AttributeType,
   type CognitoIdentityProviderClient,
   GroupType,
@@ -25,7 +26,17 @@ import {
   UserType,
 } from '@aws-sdk/client-cognito-identity-provider';
 import type { UserView } from './provisioner';
+import { SCOPES_ATTRIBUTE } from '../shared/constants';
 import { ConflictError, InvalidInputError, NotFoundError } from '../shared/errors';
+import { assertAttributeFits } from '../shared/scopes';
+
+/**
+ * ADR-0036: how a topology reads the user's grant for one tenant out of the
+ * raw `custom:scopes` value. The single-tenant provisioners pass
+ * `decodeScopeList`; topology 3 passes `decodeScopeMapEntry` bound to the
+ * tenant. `undefined` in, `undefined` out (attribute absent = all).
+ */
+export type GrantReader = (value: string | undefined) => readonly string[] | undefined;
 
 /** Cognito exception names the provisioners branch on. */
 export const COGNITO = {
@@ -87,13 +98,17 @@ export function attr(attributes: AttributeType[] | undefined, name: string): str
   return attributes?.find((a) => a.Name === name)?.Value;
 }
 
-/** Maps a Cognito user to the sample's UserView. `admin` is computed by the caller. */
-export function toUserView(user: UserType, admin: boolean): UserView {
+/**
+ * Maps a Cognito user to the sample's UserView. `admin` is computed by the
+ * caller; `grants` reads the user's `custom:scopes` for the caller's tenant.
+ */
+export function toUserView(user: UserType, admin: boolean, grants: GrantReader): UserView {
   return {
     username: user.Username ?? '',
     email: attr(user.Attributes, 'email') ?? '',
     admin,
     status: user.UserStatus ?? 'UNKNOWN',
+    grantedScopes: grants(attr(user.Attributes, SCOPES_ATTRIBUTE)),
     createdAt: user.UserCreateDate ?? new Date(0),
   };
 }
@@ -105,14 +120,45 @@ export function adminGetUserToView(
   status: string | undefined,
   createdAt: Date | undefined,
   admin: boolean,
+  grants: GrantReader,
 ): UserView {
   return {
     username,
     email: attr(attributes, 'email') ?? '',
     admin,
     status: status ?? 'UNKNOWN',
+    grantedScopes: grants(attr(attributes, SCOPES_ATTRIBUTE)),
     createdAt: createdAt ?? new Date(0),
   };
+}
+
+/**
+ * ADR-0036: writes the user's `custom:scopes` attribute. The caller has
+ * encoded the value for its topology; this refuses one Cognito would reject
+ * for its length (400, not a 500 from Cognito) and writes it. Cognito's
+ * UserNotFoundException is R-12's 404.
+ */
+export async function writeScopesAttribute(
+  cognito: CognitoIdentityProviderClient,
+  userPoolId: string,
+  username: string,
+  encoded: string,
+): Promise<void> {
+  assertAttributeFits(encoded);
+  try {
+    await cognito.send(
+      new AdminUpdateUserAttributesCommand({
+        UserPoolId: userPoolId,
+        Username: username,
+        UserAttributes: [{ Name: SCOPES_ATTRIBUTE, Value: encoded }],
+      }),
+    );
+  } catch (error) {
+    if (isCognitoError(error, COGNITO.userNotFound)) {
+      throw new NotFoundError('User not found in tenant');
+    }
+    throw error;
+  }
 }
 
 /**

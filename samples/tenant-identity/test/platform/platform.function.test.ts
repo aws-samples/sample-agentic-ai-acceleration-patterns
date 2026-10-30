@@ -25,6 +25,7 @@ const FIXED_NOW = new Date('2026-10-21T11:00:00.000Z');
 // --- Mocks installed before the handler module is imported -----------------
 
 const store = new Map<string, TenantRecord>();
+const scopeStore = new Map<string, { name: string; owner: string; description?: string; createdAt: string }>();
 const provisionerMock: jest.Mocked<Provisioner> = {
   topology: 'shared-pool-multi-tenant',
   provisionTenant: jest.fn(),
@@ -35,6 +36,7 @@ const provisionerMock: jest.Mocked<Provisioner> = {
   getUser: jest.fn(),
   listUsers: jest.fn(),
   setAdmin: jest.fn(),
+  setScopes: jest.fn(),
   deleteUser: jest.fn(),
   createMembership: jest.fn(),
   deleteMembership: jest.fn(),
@@ -140,8 +142,37 @@ jest.mock('../../src/shared/registry', () => {
     async getByUserPoolId(): Promise<TenantRecord | undefined> {
       return undefined;
     }
+    // ADR-0034 / ADR-0035: the catalogue and the entitlement, in memory.
+    async listScopeNames(): Promise<string[]> {
+      return [...scopeStore.keys()];
+    }
+    async putScope(scope: { name: string; owner: string; description?: string }) {
+      const written = { ...scope, createdAt: scopeStore.get(scope.name)?.createdAt ?? '2026-10-29T00:00:00.000Z' };
+      scopeStore.set(scope.name, written);
+      return written;
+    }
+    async getScope(name: string) {
+      return scopeStore.get(name);
+    }
+    async listScopes() {
+      return { items: [...scopeStore.values()] };
+    }
+    async deleteScope(name: string): Promise<void> {
+      scopeStore.delete(name);
+    }
+    async updateTenantScopes(tenantId: string, scopes: readonly string[]): Promise<TenantRecord> {
+      const existing = store.get(tenantId);
+      if (existing === undefined) {
+        throw new NotFoundError(`Tenant ${tenantId} not found`);
+      }
+      const updated: TenantRecord = { ...existing, scopes: [...scopes] };
+      store.set(tenantId, updated);
+      return updated;
+    }
   }
-  return { DynamoDBRegistry: FakeDynamoDBRegistry };
+  // The module also exports the pure helper the service reads rows with.
+  const tenantScopes = (record: { scopes?: readonly string[] }) => record.scopes ?? [];
+  return { DynamoDBRegistry: FakeDynamoDBRegistry, tenantScopes };
 });
 
 process.env[ENV.topology] = 'shared-pool-multi-tenant';
@@ -198,6 +229,7 @@ function event(
 
 beforeEach(() => {
   store.clear();
+  scopeStore.clear();
 });
 
 describe('platform.function handler (spec §5.1 routing and status codes)', () => {
@@ -468,6 +500,58 @@ describe('platform.function handler (spec §5.1 routing and status codes)', () =
       expect(parsed.tenant.tier).toBe('premium');
       // The key went to the premium tier's plan.
       expect(apiKeysMock.create).toHaveBeenLastCalledWith(parsed.tenant.tenantId, 'premium');
+    });
+  });
+
+  describe('scope catalogue and entitlement routes (ADR-0034, ADR-0035, ADR-0036)', () => {
+    const encoded = encodeURIComponent('billing/read');
+
+    it('PUT/GET/DELETE /platform/scopes/{scope} and GET /platform/scopes route to the catalogue', async () => {
+      const put = await handler(event('PUT', `/platform/scopes/${encoded}`, { description: 'Read invoices' }, { scope: 'billing/read' }));
+      expect(put.statusCode).toBe(200);
+      expect(JSON.parse(put.body).scope).toMatchObject({ name: 'billing/read', owner: 'billing', description: 'Read invoices' });
+      const get = await handler(event('GET', `/platform/scopes/${encoded}`, undefined, { scope: 'billing/read' }));
+      expect(get.statusCode).toBe(200);
+      const list = await handler(event('GET', '/platform/scopes'));
+      expect(list.statusCode).toBe(200);
+      expect(JSON.parse(list.body).scopes.map((s: { name: string }) => s.name)).toEqual(['billing/read']);
+      const del = await handler(event('DELETE', `/platform/scopes/${encoded}`, undefined, { scope: 'billing/read' }));
+      expect(del.statusCode).toBe(204);
+      const gone = await handler(event('GET', `/platform/scopes/${encoded}`, undefined, { scope: 'billing/read' }));
+      expect(gone.statusCode).toBe(404);
+    });
+
+    it('a reserved or malformed scope label is a 400 before the service runs', async () => {
+      const reserved = await handler(event('PUT', '/platform/scopes/tenant-admin%2Fx', undefined, { scope: 'tenant-admin/x' }));
+      expect(reserved.statusCode).toBe(400);
+      expect(JSON.parse(reserved.body).message).toMatch(/^invalid_scope/);
+      const malformed = await handler(event('PUT', '/platform/scopes/Bad%2FName', undefined, { scope: 'Bad/Name' }));
+      expect(malformed.statusCode).toBe(400);
+      expect(scopeStore.size).toBe(0);
+    });
+
+    it('PATCH /platform/tenants/{tenantId} replaces the entitlement; CreateTenant.scopes is validated', async () => {
+      scopeStore.set('billing/read', { name: 'billing/read', owner: 'billing', createdAt: '2026-10-29T00:00:00.000Z' });
+      store.set(TENANT_A, activeTenant());
+      const patch = await handler(event('PATCH', `/platform/tenants/${TENANT_A}`, { scopes: ['billing/read'] }, { tenantId: TENANT_A }));
+      expect(patch.statusCode).toBe(200);
+      expect(JSON.parse(patch.body).tenant.scopes).toEqual(['billing/read']);
+      const refused = await handler(event('PATCH', `/platform/tenants/${TENANT_A}`, { scopes: ['nosuch/scope'] }, { tenantId: TENANT_A }));
+      expect(refused.statusCode).toBe(400);
+      expect(JSON.parse(refused.body).message).toMatch(/^invalid_scope/);
+      const created = await handler(event('POST', '/platform/tenants', { name: 'Acme', adminEmail: 'a@example.com', scopes: ['nosuch/scope'] }));
+      expect(created.statusCode).toBe(400);
+      expect(provisionerMock.provisionTenant).not.toHaveBeenCalled();
+    });
+
+    it('PATCH .../users/{username} with scopes only (no admin) is accepted', async () => {
+      store.set(TENANT_A, { ...activeTenant(), scopes: ['billing/read'] });
+      scopeStore.set('billing/read', { name: 'billing/read', owner: 'billing', createdAt: '2026-10-29T00:00:00.000Z' });
+      provisionerMock.setScopes.mockResolvedValue({ ...userView('u1'), grantedScopes: ['billing/read'] });
+      const res = await handler(event('PATCH', `/platform/tenants/${TENANT_A}/users/u1`, { scopes: ['billing/read'] }, { tenantId: TENANT_A, username: 'u1' }));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).user.scopes).toEqual(['billing/read']);
+      expect(provisionerMock.setAdmin).not.toHaveBeenCalled();
     });
   });
 });

@@ -26,17 +26,20 @@ import {
   adminGetUserToView,
   adminPasswordSignIn,
   adminRefresh,
+  attr,
   COGNITO,
   findUserByEmail,
   generateTemporaryPassword,
   isCognitoError,
   listGroupsForUser,
+  writeScopesAttribute,
 } from './cognito-users';
 import type { ProvisionerDeps } from './index';
 import { listUsersInGroup } from './listing';
 import type { NewUserResult, Provisioner, ProvisionedTenant, TokenSet, UserView } from './provisioner';
 import {
   adminGroupName,
+  SCOPES_ATTRIBUTE,
   TENANT_GROUP_PATTERN,
   tenantGroupName,
   type Topology,
@@ -44,6 +47,15 @@ import {
 import { ConflictError, NotFoundError } from '../shared/errors';
 import { Page } from '../shared/registry';
 import type { TenantRecord } from '../shared/registry';
+import { decodeScopeMapEntry, encodeScopeMap, removeScopeMapEntry } from '../shared/scopes';
+
+/**
+ * ADR-0036: one person belongs to several tenants here, so `custom:scopes`
+ * is a JSON object keyed by tenant id; this reads the one key a view is for.
+ */
+function grantsFor(tenantId: string): (value: string | undefined) => readonly string[] | undefined {
+  return (value) => decodeScopeMapEntry(value, tenantId);
+}
 
 const PAGE_LIMIT = 60;
 
@@ -139,7 +151,14 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
         : admin;
     const source = created ?? existing;
     return {
-      user: adminGetUserToView(username, source?.Attributes, source?.UserStatus, source?.UserCreateDate, isAdmin),
+      user: adminGetUserToView(
+        username,
+        source?.Attributes,
+        source?.UserStatus,
+        source?.UserCreateDate,
+        isAdmin,
+        grantsFor(tenant.tenantId),
+      ),
       temporaryPassword,
     };
   }
@@ -158,11 +177,38 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
       throw new NotFoundError('User not found in tenant');
     }
     const user = await adminGetUser(this.cognito, this.userPoolId, username);
-    return adminGetUserToView(user.username, user.attributes, user.status, user.createdAt, groups.includes(adminGroupName(tenant.tenantId)));
+    return adminGetUserToView(
+      user.username,
+      user.attributes,
+      user.status,
+      user.createdAt,
+      groups.includes(adminGroupName(tenant.tenantId)),
+      grantsFor(tenant.tenantId),
+    );
   }
 
   async listUsers(tenant: TenantRecord, nextToken?: string): Promise<Page<UserView>> {
-    return listUsersInGroup(this.cognito, this.userPoolId, tenantGroupName(tenant.tenantId), adminGroupName(tenant.tenantId), nextToken);
+    return listUsersInGroup(
+      this.cognito,
+      this.userPoolId,
+      tenantGroupName(tenant.tenantId),
+      adminGroupName(tenant.tenantId),
+      grantsFor(tenant.tenantId),
+      nextToken,
+    );
+  }
+
+  async setScopes(tenant: TenantRecord, username: string, scopes: readonly string[]): Promise<UserView> {
+    // ADR-0036: replace this tenant's key in the JSON object and leave the
+    // user's other tenants' grants as they are. Read-modify-write on one
+    // attribute: two admins of different tenants cutting the same person at
+    // the same instant can lose one write; the loser's cut is re-applied by
+    // repeating it (the attribute shows what is held). R-12 first.
+    await this.assertMember(tenant, username);
+    const current = await adminGetUser(this.cognito, this.userPoolId, username);
+    const encoded = encodeScopeMap(attr(current.attributes, SCOPES_ATTRIBUTE), tenant.tenantId, scopes);
+    await writeScopesAttribute(this.cognito, this.userPoolId, username, encoded);
+    return this.getUser(tenant, username);
   }
 
   async setAdmin(tenant: TenantRecord, username: string, admin: boolean): Promise<UserView> {
@@ -180,7 +226,11 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
     await this.assertMember(tenant, username);
     await this.removeFromGroup(username, tenantGroupName(tenant.tenantId));
     await this.removeFromGroup(username, adminGroupName(tenant.tenantId));
-    await this.deleteIfNoTenantGroups(username);
+    if (!(await this.deleteIfNoTenantGroups(username))) {
+      // The user remains for their other tenants: drop this tenant's grant
+      // with the membership (ADR-0036), see deleteMembership.
+      await this.removeScopesKey(username, tenant.tenantId);
+    }
   }
 
   async createMembership(tenant: TenantRecord, username: string): Promise<void> {
@@ -204,7 +254,14 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
     // tenant may have passed its own "not the last tenant" check at the same
     // time, leaving the user in no `t-*` group. Re-list after the removal and
     // delete the orphan, exactly as deleteUser does (P-4, spec §7.3).
-    await this.deleteIfNoTenantGroups(username);
+    if (!(await this.deleteIfNoTenantGroups(username))) {
+      // ADR-0036: the user's `custom:scopes` object keeps one key per
+      // tenant. Drop this tenant's key with the membership, after the group
+      // removal (so the user is never a member with a widened grant), so a
+      // later re-invitation starts from "all of the tenant's scopes" and
+      // the attribute does not accumulate dead tenants' keys.
+      await this.removeScopesKey(username, tenant.tenantId);
+    }
   }
 
   async issueToken(tenant: TenantRecord, username: string, password: string): Promise<TokenSet> {
@@ -217,11 +274,33 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
     return adminRefresh(this.cognito, this.userPoolId, this.appClientId, refreshToken);
   }
 
-  /** Deletes the Cognito user when no `t-*` group remains (P-4). */
-  private async deleteIfNoTenantGroups(username: string): Promise<void> {
+  /** Deletes the Cognito user when no `t-*` group remains (P-4); true when deleted. */
+  private async deleteIfNoTenantGroups(username: string): Promise<boolean> {
     const remaining = (await this.safeListGroups(username)).filter((g) => TENANT_GROUP_PATTERN.test(g));
     if (remaining.length === 0) {
       await this.deleteUserRaw(username);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Removes one tenant's key from the user's `custom:scopes` object
+   * (ADR-0036). Nothing is written when the attribute is absent, lacks the
+   * key, or is not a value the sample wrote; a user deleted under us by a
+   * concurrent call is already gone, which is the outcome wanted.
+   */
+  private async removeScopesKey(username: string, tenantId: string): Promise<void> {
+    try {
+      const current = await adminGetUser(this.cognito, this.userPoolId, username);
+      const encoded = removeScopeMapEntry(attr(current.attributes, SCOPES_ATTRIBUTE), tenantId);
+      if (encoded !== undefined) {
+        await writeScopesAttribute(this.cognito, this.userPoolId, username, encoded);
+      }
+    } catch (error) {
+      if (!(error instanceof NotFoundError)) {
+        throw error;
+      }
     }
   }
 

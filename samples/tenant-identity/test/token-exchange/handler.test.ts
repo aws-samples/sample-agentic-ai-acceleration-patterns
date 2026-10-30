@@ -16,22 +16,36 @@ import {
   GetTokensFromRefreshTokenCommand,
   NotAuthorizedException,
 } from '@aws-sdk/client-cognito-identity-provider';
+import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { AwsStub, mockClient } from 'aws-sdk-client-mock';
 import {
   GRANT_TYPE_TOKEN_EXCHANGE,
-  SCOPE_API_READ,
+  SCOPE_PARTITION_KEY,
   TENANT_RESOURCE_PREFIX,
   TOKEN_TYPE_ACCESS,
   TOKEN_TYPE_REFRESH,
 } from '../../src/shared/constants';
 
-// Cold start parses TOPOLOGY at module load. `require` (not a static import)
-// runs after this assignment; a static import is hoisted above it. No
-// APP_CLIENT_ID: pool-per-tenant has no single client to check (T-28).
+// The one catalogue scope these tests register (ADR-0034).
+const SCOPE_API_READ = 'sample/read';
+
+// Cold start parses TOPOLOGY, TABLE_NAME and POOL_INDEX_NAME at module load.
+// `require` (not a static import) runs after these assignments; a static
+// import is hoisted above them. No APP_CLIENT_ID: pool-per-tenant has no
+// single client to check (T-28).
 process.env.TOPOLOGY = 'pool-per-tenant';
+process.env.TABLE_NAME = 'registry';
+process.env.POOL_INDEX_NAME = 'byUserPoolId';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { handler } = require('../../src/token-exchange/token-exchange.function') as typeof import('../../src/token-exchange/token-exchange.function');
+
+// ADR-0034: the function's one registry read is the catalogue Query. Same
+// duplicated-@smithy/types cast as the Cognito mock above.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const dynamoMock: any = mockClient(DynamoDBDocumentClient as any);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const Query = QueryCommand as any;
 
 // See token-exchange.test.ts: the SDK's duplicated @smithy/types makes the
 // command constructor types diverge from the client's. Cast keeps the mock
@@ -91,6 +105,8 @@ function headers(result: APIGatewayProxyResult): Record<string, string> {
 
 beforeEach(() => {
   cognitoMock.reset();
+  dynamoMock.reset();
+  dynamoMock.on(Query).resolves({ Items: [{ PK: SCOPE_PARTITION_KEY, SK: SCOPE_API_READ }] });
 });
 
 describe('handler success (ADR-0011, §5.4)', () => {
@@ -116,6 +132,29 @@ describe('handler success (ADR-0011, §5.4)', () => {
       expires_in: 300,
       scope: SCOPE_API_READ,
     });
+  });
+});
+
+describe('handler scope catalogue (ADR-0034)', () => {
+  it('reads the catalogue with one Query on the SCOPE partition, then serves it from the cache', async () => {
+    cognitoMock.on(GetTokens).resolves({ AuthenticationResult: { AccessToken: ACCESS, ExpiresIn: 300 } });
+    await handler(event(formBody(), false));
+    await handler(event(formBody(), false));
+    const queries: { args: [{ input: Record<string, unknown> }] }[] = dynamoMock.commandCalls(Query);
+    // The module-level cache was filled by the first describe's calls, so
+    // these two calls read nothing; the catalogue is re-read once a minute.
+    for (const call of queries) {
+      expect(call.args[0].input.KeyConditionExpression).toBe('PK = :scope');
+      expect(call.args[0].input.ExpressionAttributeValues).toEqual({ ':scope': SCOPE_PARTITION_KEY });
+    }
+    expect(queries.length).toBeLessThanOrEqual(1);
+  });
+
+  it('a scope that is not in the catalogue -> 400 invalid_scope before Cognito is called', async () => {
+    const result = await handler(event(formBody({ scope: 'billing/read' }), false));
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error).toBe('invalid_scope');
+    expect(cognitoMock.commandCalls(GetTokens)).toHaveLength(0);
   });
 });
 

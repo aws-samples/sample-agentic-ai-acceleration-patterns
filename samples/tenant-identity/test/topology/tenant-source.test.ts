@@ -13,6 +13,7 @@ function reader(over: Partial<RegistryReader> = {}): RegistryReader {
     get: jest.fn(async () => undefined),
     batchGet: jest.fn(async () => []),
     getByUserPoolId: jest.fn(async () => undefined),
+    listScopeNames: jest.fn(async () => []),
     ...over,
   };
 }
@@ -39,7 +40,7 @@ describe('tenantSourceFor (spec §8 tenant lookup, §4.2, ADR-0027 binding rule)
       const record = tenant({ tenantId: IDS.a, topology: 'pool-per-tenant', userPoolId: 'eu-central-1_p1' });
       const reg = reader({ getByUserPoolId: jest.fn(async () => record) });
       const result = await source.resolve(event({ userPoolId: 'eu-central-1_p1' }), reg);
-      expect(result).toEqual({ kind: 'single', tenantId: IDS.a, record });
+      expect(result).toEqual({ kind: 'single', tenantId: IDS.a, record, grantedScopes: expect.any(Function) });
     });
 
     it('throws on an unknown pool (§4.2)', async () => {
@@ -69,13 +70,13 @@ describe('tenantSourceFor (spec §8 tenant lookup, §4.2, ADR-0027 binding rule)
       const get = jest.fn(async () => record);
       const reg = reader({ get });
       const result = await source.resolve(event({ attributes: { 'custom:tenantId': IDS.a } }), reg);
-      expect(result).toEqual({ kind: 'single', tenantId: IDS.a, record });
+      expect(result).toEqual({ kind: 'single', tenantId: IDS.a, record, grantedScopes: expect.any(Function) });
       expect(get).toHaveBeenCalledWith(IDS.a);
     });
 
     it('returns an undefined record when the registry has no such tenant', async () => {
       const result = await source.resolve(event({ attributes: { 'custom:tenantId': IDS.a } }), reader());
-      expect(result).toEqual({ kind: 'single', tenantId: IDS.a, record: undefined });
+      expect(result).toEqual({ kind: 'single', tenantId: IDS.a, record: undefined, grantedScopes: expect.any(Function) });
     });
 
     it('throws when the attribute is not a ULID (P-3)', async () => {
@@ -110,7 +111,7 @@ describe('tenantSourceFor (spec §8 tenant lookup, §4.2, ADR-0027 binding rule)
         event({ groups: [`t-${IDS.a}`, `t-${IDS.b}`, `admin-${IDS.a}`, 'role-admin'] }),
         reg,
       );
-      expect(result).toEqual({ kind: 'multi', records });
+      expect(result).toEqual({ kind: 'multi', records, grantedScopes: expect.any(Function) });
       expect(batchGet).toHaveBeenCalledWith([IDS.a, IDS.b]);
     });
 
@@ -118,7 +119,7 @@ describe('tenantSourceFor (spec §8 tenant lookup, §4.2, ADR-0027 binding rule)
       const batchGet = jest.fn(async () => []);
       const reg = reader({ batchGet });
       const result = await source.resolve(event({ groups: ['role-admin'] }), reg);
-      expect(result).toEqual({ kind: 'multi', records: [] });
+      expect(result).toEqual({ kind: 'multi', records: [], grantedScopes: expect.any(Function) });
       expect(batchGet).toHaveBeenCalledWith([]);
     });
 
@@ -127,7 +128,7 @@ describe('tenantSourceFor (spec §8 tenant lookup, §4.2, ADR-0027 binding rule)
       const premium = tenant({ tenantId: IDS.b, topology: 'pool-per-tenant', userPoolId: 'eu-central-1_premium' });
       const reg = reader({ batchGet: jest.fn(async () => [standard, premium]) });
       const result = await source.resolve(event({ groups: [`t-${IDS.a}`, `t-${IDS.b}`] }), reg);
-      expect(result).toEqual({ kind: 'multi', records: [standard] });
+      expect(result).toEqual({ kind: 'multi', records: [standard], grantedScopes: expect.any(Function) });
     });
   });
 
@@ -142,7 +143,7 @@ describe('tenantSourceFor (spec §8 tenant lookup, §4.2, ADR-0027 binding rule)
       const getByUserPoolId = jest.fn(async () => undefined);
       const reg = reader({ get, getByUserPoolId });
       const result = await source.resolve(event({ userPoolId: SHARED_POOL, attributes: { 'custom:tenantId': IDS.a } }), reg);
-      expect(result).toEqual({ kind: 'single', tenantId: IDS.a, record });
+      expect(result).toEqual({ kind: 'single', tenantId: IDS.a, record, grantedScopes: expect.any(Function) });
       expect(get).toHaveBeenCalledWith(IDS.a);
       expect(getByUserPoolId).not.toHaveBeenCalled();
     });
@@ -153,7 +154,7 @@ describe('tenantSourceFor (spec §8 tenant lookup, §4.2, ADR-0027 binding rule)
       const getByUserPoolId = jest.fn(async () => record);
       const reg = reader({ get, getByUserPoolId });
       const result = await source.resolve(event({ userPoolId: PREMIUM_POOL }), reg);
-      expect(result).toEqual({ kind: 'single', tenantId: IDS.b, record });
+      expect(result).toEqual({ kind: 'single', tenantId: IDS.b, record, grantedScopes: expect.any(Function) });
       expect(getByUserPoolId).toHaveBeenCalledWith(PREMIUM_POOL);
       expect(get).not.toHaveBeenCalled();
     });
@@ -181,5 +182,49 @@ describe('tenantSourceFor (spec §8 tenant lookup, §4.2, ADR-0027 binding rule)
         source.resolve(event({ userPoolId: SHARED_POOL, attributes: { 'custom:tenantId': 'not-a-ulid' } }), reader()),
       ).rejects.toBeInstanceOf(InvalidInputError);
     });
+  });
+});
+
+describe('tenantSourceFor reads the custom:scopes grant per topology (ADR-0036)', () => {
+  it('single-tenant sources read a space-separated list; absent is undefined', async () => {
+    const record = tenant({ tenantId: IDS.a, topology: 'shared-pool' });
+    const reg = reader({ get: jest.fn(async () => record) });
+    const source = tenantSourceFor('shared-pool');
+    const cut = await source.resolve(
+      event({ attributes: { 'custom:tenantId': IDS.a, 'custom:scopes': 'sample/read  sample/write' } }),
+      reg,
+    );
+    expect(cut.grantedScopes(IDS.a)).toEqual(['sample/read', 'sample/write']);
+    const none = await source.resolve(event({ attributes: { 'custom:tenantId': IDS.a, 'custom:scopes': '-' } }), reg);
+    expect(none.grantedScopes(IDS.a)).toEqual([]);
+    const all = await source.resolve(event({ attributes: { 'custom:tenantId': IDS.a } }), reg);
+    expect(all.grantedScopes(IDS.a)).toBeUndefined();
+  });
+
+  it('shared-pool-multi-tenant reads a JSON object keyed by tenant id; a missing key is undefined', async () => {
+    const records = [tenant({ tenantId: IDS.a, topology: 'shared-pool-multi-tenant' }), tenant({ tenantId: IDS.b, topology: 'shared-pool-multi-tenant' })];
+    const reg = reader({ batchGet: jest.fn(async () => records) });
+    const source = tenantSourceFor('shared-pool-multi-tenant');
+    const result = await source.resolve(
+      event({
+        groups: [`t-${IDS.a}`, `t-${IDS.b}`],
+        attributes: { 'custom:scopes': JSON.stringify({ [IDS.a]: 'sample/read', [IDS.b]: '-' }) },
+      }),
+      reg,
+    );
+    expect(result.grantedScopes(IDS.a)).toEqual(['sample/read']);
+    expect(result.grantedScopes(IDS.b)).toEqual([]);
+    expect(result.grantedScopes('01C0ABCDEFGHJKMNPQRSTVWXYZ')).toBeUndefined();
+  });
+
+  it('shared-pool-multi-tenant reads a value that is not a JSON object as "nothing" (fail closed)', async () => {
+    const records = [tenant({ tenantId: IDS.a, topology: 'shared-pool-multi-tenant' })];
+    const reg = reader({ batchGet: jest.fn(async () => records) });
+    const source = tenantSourceFor('shared-pool-multi-tenant');
+    const result = await source.resolve(
+      event({ groups: [`t-${IDS.a}`], attributes: { 'custom:scopes': 'sample/read' } }),
+      reg,
+    );
+    expect(result.grantedScopes(IDS.a)).toEqual([]);
   });
 });
