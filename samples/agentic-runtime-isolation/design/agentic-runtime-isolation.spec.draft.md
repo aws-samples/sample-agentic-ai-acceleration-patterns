@@ -358,6 +358,21 @@ refresh token, and is refused by the ingress as an identity token. Rules
 out: forwarding the identity token; a token exchange at tenant-identity per
 request; tokens that outlive a conversation turn.
 
+P-14 does not rule out AgentCore Identity at the tools gateway or in the
+agent; it changes which token AgentCore Identity sees. Outbound auth per
+target still works, keyed on the transaction token: 3LO (authorization
+code) stores the user's third-party grant in the token vault under the
+inbound token's `sub` and issuer, and `sub` is the same tenant-identity
+user id in every transaction token, so the grant survives across tokens;
+OBO token exchange (RFC 8693 or RFC 7523) sends the inbound token as the
+subject token, so the third-party authorisation server MUST trust the
+ingress issuer (its discovery URL and JWKS, ADR-0037), not tenant-identity;
+M2M (client credentials) and API key are vendor-shared and unaffected. What
+P-14 does rule out is an OBO exchange that needs the tenant-identity token
+itself as the subject token. The same holds for `GetWorkloadAccessTokenForJWT`
+inside the agent: the JWT it presents is the transaction token, so the
+workload identity's allowed issuer is the ingress. Spike V-15 verifies both.
+
 **P-15. A tool learns its tenant only from a context signed for this call,
 and reaches tenant data only through its own TVM.** (v2, ADR-0034) The tools
 gateway interceptor derives the tenant from the transaction token it has
@@ -1095,6 +1110,7 @@ design depends on these further behaviours.
 | V-12 | KMS `Sign` latency at p50 and p95 from the authoriser and the interceptor Lambdas; the per-request cost of a mint; the mint cache hit ratio in the latency probe; `BatchGetItem` latency and RCU per request | If p95 adds more than 50 ms to TTFB, raise the default reuse margin and lifetime within 900 s, or sign with a key held in the Lambda and rotated from Secrets Manager (rejected unless measured: the private key would leave KMS) |
 | V-13 | The Runtime `requestHeaderAllowlist` carries the transaction token (about 1.2 KB, up to 4 KB at the `scope` bound) beside the credentials header (about 2 KB) from both ingresses, and no log on the path records it (v1 V-7 repeated) | Hash-referenced grant: the token carries `grant` = sha256 of the granted set instead of `scope`, the ingress writes the set to the entitlement store under `GRANT#<hash>` with a TTL, and Policy is replaced by the interceptor's lookup (AWS Prescriptive Guidance's lean-token pattern); recorded in ADR-0031 |
 | V-14 | Policy evaluation latency, and `tools/list` latency, at 100 targets with one policy each (was tool-gateway V-6) | Group tools into fewer targets; document the measured figure in the README |
+| V-15 | AgentCore Identity with the transaction token as the inbound JWT: (a) a 3LO credential provider on a `ToolTarget` keys the vault on the transaction token's `sub` and issuer, and a second transaction token for the same user reuses the stored grant; (b) an OBO `TOKEN_EXCHANGE` provider accepts the ingress as issuer; (c) `GetWorkloadAccessTokenForJWT` in the agent accepts a transaction token when the workload identity names the ingress discovery URL | If (a) fails, 3LO targets are documented as needing the user's consent per token life, or the sample drops 3LO; if (b) fails, OBO targets are out of scope and the README says a third party must trust the ingress issuer; if (c) fails, the agent's outbound identity is M2M only |
 
 The spike stack deploys a throwaway `SharedIngress` with `toolsGateway`, one
 `ToolTarget` of kind `lambda`, and a test-only mint function granted
