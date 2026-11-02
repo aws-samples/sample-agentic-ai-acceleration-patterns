@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0034: Serve tools through one shared AgentCore Gateway that trusts the ingress issuer, with Policy on `scope` and an interceptor that checks `act` and signs the tenant context
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-02
 - Deciders: Dave Roberts (PSA)
 

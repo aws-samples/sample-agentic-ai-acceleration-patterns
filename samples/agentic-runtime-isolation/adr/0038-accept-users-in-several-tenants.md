@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0038: Accept users in several tenants; the request names one the verified token lists
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-02
 - Amends: ADR-0004
 - Deciders: Dave Roberts (PSA)

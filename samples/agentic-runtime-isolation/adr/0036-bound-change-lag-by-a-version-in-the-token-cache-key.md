@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0036: Bound change lag by a version in the token cache key and a 5-minute token life
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-02
 - Deciders: Dave Roberts (PSA)
 

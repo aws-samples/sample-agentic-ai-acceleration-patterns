@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0033: Let a tenant admin cut, never add, with sparse per-user rows
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-02
 - Deciders: Dave Roberts (PSA)
 

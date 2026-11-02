@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0030: Hold entitlements in an ingress-owned store, not in identity-provider scopes
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-02
 - Amends: ADR-0005
 - Supersedes: ADR-0025

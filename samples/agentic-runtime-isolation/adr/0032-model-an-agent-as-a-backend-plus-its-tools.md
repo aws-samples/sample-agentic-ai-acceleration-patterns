@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0032: Model an agent as a product: a backend plus the tools it may use, capped below the tenant's subscription
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-02
 - Amends: ADR-0011, ADR-0024
 - Deciders: Dave Roberts (PSA)

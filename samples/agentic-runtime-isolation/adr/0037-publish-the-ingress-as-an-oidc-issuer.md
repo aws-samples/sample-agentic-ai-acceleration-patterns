@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0037: Publish the ingress as an OIDC issuer: JWKS and discovery on the ingress, keys in KMS with `kid` rotation
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-02
 - Deciders: Dave Roberts (PSA)
 

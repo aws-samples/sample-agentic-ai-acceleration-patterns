@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0031: Mint a transaction token at the ingress; the identity token never leaves it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-02
 - Supersedes: ADR-0006, ADR-0007
 - Deciders: Dave Roberts (PSA)

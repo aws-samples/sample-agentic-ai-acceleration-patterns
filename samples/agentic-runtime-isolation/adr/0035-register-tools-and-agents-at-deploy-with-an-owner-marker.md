@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0035: Register tools and agents at deploy with an owner marker, in the store and the registry
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-02
 - Amends: ADR-0024
 - Deciders: Dave Roberts (PSA)

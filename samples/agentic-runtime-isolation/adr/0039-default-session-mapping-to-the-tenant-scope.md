@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0039: Default session mapping to the tenant scope when it is turned on
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-02
 - Amends: ADR-0013
 - Deciders: Dave Roberts (PSA)
