@@ -89,16 +89,16 @@ entitlement check and the transaction token are always on, per-tenant
 limits and the tools gateway are on by default, and the rest are off by
 default (P-4):
 
-| Module | Adds | Prop |
-|---|---|---|
-| Session mapping | conversations that persist across requests, in a unit derived from the caller's claims, so a user resumes only their own session (P-2, ADR-0002, ADR-0013) | `session` |
-| Scope floor | scopes every identity token must carry (AND, ADR-0005), for example `app/use` | `requiredScopes` on the ingress |
-| TVM | always on (ADR-0018): tenant-scoped AWS credentials for the model call and the agent's data access (P-8) | `tvm` |
-| Per-tenant limits | on by default (ADR-0020): requests per tenant per minute, and on `api-gateway` optionally output tokens; over the limit is 429 | `tenantLimits` |
-| Per-tenant metrics | off by default (ADR-0021): per-tenant CloudWatch metrics (EMF) | `perTenantMetrics` |
-| Entitlements (v2) | always on (ADR-0030): the grant rule decides the agent and the tool set per call | `entitlements` |
-| Transaction token (v2) | always on (ADR-0031, ADR-0037): the only token the agent and the tools see | `transactionToken` |
-| Tools gateway (v2) | on by default (ADR-0034): one MCP endpoint for every tool, Cedar policy on the token's `scope`, a signing interceptor, per-tenant rate limits | `toolsGateway` |
+| Module | Adds | Default | Prop |
+|---|---|---|---|
+| Session mapping | conversations that persist across requests, in a unit derived from the caller's claims, so a user resumes only their own session (P-2, ADR-0002, ADR-0013) | off: a fresh unit per request; `session.scope` is `'user'` when set | `session` |
+| Scope floor | scopes every identity token must carry (AND, ADR-0005), for example `app/use` | off: no floor | `requiredScopes` on the ingress |
+| TVM | tenant-scoped AWS credentials for the model call and the agent's data access (P-8, ADR-0018) | always on: model-only `TenantModelRole`, `TenantId` tag only, 900 s credentials, 1,000 cached sets | `tvm` |
+| Per-tenant limits | requests per tenant per minute, and on `api-gateway` optionally output tokens; over the limit is 429 (ADR-0020) | on: 60 requests per tenant per minute, no token limit | `tenantLimits` |
+| Per-tenant metrics | per-tenant CloudWatch metrics (EMF) (ADR-0021) | off: the ingress log line carries the same figures | `perTenantMetrics` |
+| Entitlements (v2) | the grant rule decides the agent and the tool set per call (ADR-0030) | always on: one table per ingress, PITR on; admin scope `entitlements/admin` | `entitlements` |
+| Transaction token (v2) | the only token the agent and the tools see (ADR-0031, ADR-0037) | always on: RS256, 300 s life, key generation 1 | `transactionToken` |
+| Tools gateway (v2) | one MCP endpoint for every tool, Cedar policy on the token's `scope`, a signing interceptor, per-tenant rate limits (ADR-0034) | on: one Gateway, 10 requests per second per tenant, 60 s context life; `false` creates none | `toolsGateway` |
 
 Removed in v2: the delegation module (`delegation.*`, superseded by the
 transaction token, ADR-0031) and backend scope registration with
