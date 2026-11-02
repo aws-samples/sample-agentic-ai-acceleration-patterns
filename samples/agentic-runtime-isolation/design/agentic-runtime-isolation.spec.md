@@ -1117,6 +1117,119 @@ The spike stack deploys a throwaway `SharedIngress` with `toolsGateway`, one
 `TokenSigner.grantSign`. It is destroyed after the run, and the
 results are added here as §7.1 with the same evidence standard as v1.
 
+### 7.1 Spike results (2026-11-02, pg sandbox, eu-central-1)
+
+Throwaway stack `RiacSpikeV2`, a plain CDK app outside the repo, tagged
+`riac-spike=v2`: three KMS signing keys (`SignKey` RSA_2048, `SignKeyEc`
+P-256, `ContextKey` RSA_2048); a REST API serving OIDC discovery and a JWKS
+rendered from `GetPublicKey` (`Cache-Control: max-age=300`), whose stage URL
+is the issuer; a `Mint` Lambda that signs well-formed and malformed
+transaction tokens; an AgentCore Gateway (MCP, `CUSTOM_JWT` on the discovery
+URL, `allowedAudience: ['tools-gateway']`) with a Policy engine in `ENFORCE`
+mode, a REQUEST interceptor (re-verify, `typ`, `iss`, `aud`, `act.sub`,
+`scope`, sign `_ri_ctx`, one log line) and a Lambda target `crm` with three
+tools; a SigV4 Runtime with an echo agent and a resource policy naming the
+`Invoke` Lambda's role (the ingress stand-in); a workload identity; a mock
+authorisation server for RFC 8693 token exchange and authorisation code. Raw
+outputs are under `/tmp/riac-spike-v2/out/`. Every token used `kid` = KMS
+key id and `typ: txn+jwt`.
+
+| ID | Result | Evidence |
+|---|---|---|
+| V-8 | PASS, with two corrections | Well-formed RS256 token: 200, three tools. ES256 from KMS P-256: 200. `aud` as an array and as a plain string: both 200. Refused: wrong `aud`, a signature from a throwaway key under the real `kid`, expired, wrong `iss`, no `exp`: each **403** `insufficient_scope` (JSON-RPC -32002, `WWW-Authenticate: Bearer error="insufficient_scope"`), not 401. No bearer: 401 `Missing Bearer token`; unknown `kid`: 401 `Invalid Bearer token`. The Gateway accepted a token with `typ: JWT`: the `typ` check is the interceptor's only. The interceptor logged 4 calls for the 4 accepted requests and none for the 7 refused. |
+| V-9 | PASS | The scope claim is read as `principal.getTag("scope")`. `principal.scope` fails validation (`attribute scope on entity type AgentCore::OAuthUser not found`), and so does `context.jwt.scope` (`attribute jwt in context ... not found, did you mean input?`). `like` matches a whole entry with four alternatives and `\*` for a literal `*` (policy below, `FAIL_ON_ANY_FINDINGS`, ACTIVE in 7 s). `crm/*`: 3 tools listed. `crm/get_account crm/list_cases`: 2 listed. `invoices/*`: none. `xcrm/* crm/get_accountx crm`: none. `update_case` as the middle entry of three: listed and callable. Policy refuses `tools/call`: with the interceptor set to pass everything, `update_case` under the two-entry scope returned `Tool Execution Denied ... No policy applies to the request (denied by default)` and the tool was not invoked. |
+| V-10 | PASS | The Lambda target received `_ri_ctx` although its `inputSchema` does not declare it (event keys `accountId`, `_ri_ctx`; `clientContext.custom` carries `bedrockAgentCoreToolName`, `...TargetId`, `...GatewayId`). The tool verified it with `ContextKey`'s public key (`typ`, `exp`, tool, `argsHash`). A client `_ri_ctx` (an `alg: none` JWS for `tenant-b`) and `tenantId: tenant-b` were overwritten: the tool saw `tenant-a` in both. On an OpenAPI target the Gateway drops arguments outside the schema: the endpoint received body keys `["note"]` only, so `_ri_ctx` does not reach a third-party HTTP target. |
+| V-11 | FAIL (order), PASS (fail-closed) | The interceptor runs **before** Policy. A call that Policy would deny reaches the interceptor (it logged `tool refused`, reason `scope`). With the interceptor passing everything, Policy denied the same call afterwards. Interceptor throws: 500 `An internal error occurred. Please retry later.` in 0.56 s, for `tools/call` and `tools/list`. Interceptor timeout (1 s, sleeping 5 s): 500 in 1.5 s. The tool was not invoked in either case (its log has no line in those windows). Restored: 200. |
+| V-12 | PASS | 200 mints: KMS `Sign` p50 8.2 ms, p95 11.1 ms (one cold 193 ms); handler total p50 8.3 ms. 200 interceptor calls: `Sign` for `_ri_ctx` p50 8.6 ms, p95 11.5 ms (one cold 161 ms). Both far below the 50 ms threshold. `Sign` used `MessageType: DIGEST`: `RAW` takes at most 4,096 bytes, which a token at the `scope` bound exceeds. The mint cache hit ratio and `BatchGetItem` were not measured (no store or cache in this stack). |
+| V-13 | PASS for the token; one log finding | Through `InvokeAgentRuntime` with both custom headers on the allowlist, the agent read: transaction token 1,261 bytes (10 scope entries), 4,514 bytes (140 entries) and 8,061 bytes, each beside a 2,048-byte credentials header. The AgentCore Gateway ingress path was not repeated (v1 V-6 covers it). Zero hits for the token signature segments or `eyJ` in all eight Lambda log groups, the API Gateway access and execution logs and the Runtime log group (empty). Gateway application logs, when delivery is turned on, record the request body after the interceptor and the full response body: 20 lines held a signed `_ri_ctx`, none the bearer token. |
+| V-14 | PASS, measured, with a quota | `targets-per-gateway` is 100 (`ServiceQuotaExceededException`, HTTP 402, at the 101st). 98 `ping` targets plus `crm` and an OBO target: created in 3 min. Policies: 7 s to ACTIVE with 1 in the engine, 54 to 90 s each one at a time at 50 to 75; 53 of 98 created in parallel ended `CREATE_FAILED` (`An internal error occurred during creation`). Measured at 100 targets with 75 ACTIVE policies. `tools/list` pages at about 30 tools before filtering, so every caller pays 4 pages at 100 targets. Policy `latencyMs` in the Gateway log: 44 to 100 ms, p50 81 (n = 24 `tools/call`). |
+| V-15 | (a) PASS, against a mock AS; (b) PASS; (c) PASS | (a) URL elicitation needs MCP `2025-11-25`: the Gateway's `supportedVersions` and the client's `MCP-Protocol-Version` header must both name it, or the call fails with `URL elicitation requires MCP version 2025-11-25 or newer`. The consent flow (Identity authorize, AS authorize, Identity callback, return URL with `session_id`) completed from a script. `CompleteResourceTokenAuth` accepted the transaction token as `userToken`. A second token for the same `sub`: served from the vault, no new authorise. A different `sub`: a new elicitation. The same `sub` with another `tenant_id`: **served from the same grant**. Cognito's hosted UI was not used: the mock AS grants at once, which tests the vault, not a login page. (b) The AS log shows `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token_type=...:jwt`, subject `iss` = the spike issuer, signature verified against its JWKS, `scope=obo-echo`, no actor token. The target received `Bearer` with the AS's token (`iss .../as`, `sub user-a1`). Two calls caused one exchange. (c) `GetWorkloadAccessTokenForJWT` from the agent with the transaction token: a 2,268-character workload access token. Expired: `UnauthorizedException: Token has expired`. Throwaway key: `Invalid Signature for bearerToken`. The workload identity has no issuer setting; Identity resolved the key from `iss`. |
+
+The Cedar policy that worked (one per target; ACTIVE with
+`validationMode: FAIL_ON_ANY_FINDINGS`):
+
+```cedar
+permit(
+  principal is AgentCore::OAuthUser,
+  action in [AgentCore::Action::"crm___get_account", AgentCore::Action::"crm___list_cases", AgentCore::Action::"crm___update_case"],
+  resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:eu-central-1:647746915953:gateway/riac-spike-v2-tools-ffa2quenmn"
+) when {
+  principal.hasTag("scope") && ((principal.getTag("scope") == "crm/*" || principal.getTag("scope") like "crm/\* *" || principal.getTag("scope") like "* crm/\*" || principal.getTag("scope") like "* crm/\* *") || (action == AgentCore::Action::"crm___get_account" && (principal.getTag("scope") == "crm/get_account" || principal.getTag("scope") like "crm/get_account *" || principal.getTag("scope") like "* crm/get_account" || principal.getTag("scope") like "* crm/get_account *")) || (action == AgentCore::Action::"crm___list_cases" && (principal.getTag("scope") == "crm/list_cases" || principal.getTag("scope") like "crm/list_cases *" || principal.getTag("scope") like "* crm/list_cases" || principal.getTag("scope") like "* crm/list_cases *")) || (action == AgentCore::Action::"crm___update_case" && (principal.getTag("scope") == "crm/update_case" || principal.getTag("scope") like "crm/update_case *" || principal.getTag("scope") like "* crm/update_case" || principal.getTag("scope") like "* crm/update_case *")))
+};
+```
+
+**Orphaned policy (found during V-14, reproduced twice).** About 60 s after
+a target was deleted while its policy stayed ACTIVE, `tools/list` stopped
+filtering for every caller: a token with `scope: invoices/*` got 30 tools on
+the first page. `tools/call` stayed denied by Policy throughout. Deleting
+the orphaned policy restored filtering within 20 s. Seen for `t098` and
+`t001`.
+
+Latency, measured from the sandbox host (unauthenticated 401 floor p50 42
+ms, p95 106 ms); 50 sequential calls each, ms:
+
+| Targets / ACTIVE policies | Caller scope | `tools/list` page 1 p50 / p95 | full listing p50 / p95 | `tools/call` p50 / p95 |
+|---|---|---|---|---|
+| 2 / 2 | `crm/*` | 130 / 172 | 1 page | 151 / 184 |
+| 2 / 2 | all targets | 125 / 160 | 1 page | 150 / 175 |
+| 100 / 75 | `crm/*` | 249 / 369 | 868 / 973 (4 pages: 3, 0, 0, 0 tools) | 189 / 264 |
+| 100 / 75 | all targets | 206 / 273 | 828 / 948 (4 pages: 30, 21, 18, 7) | 166 / 223 |
+| 2 / 2, 200 calls, 4 parallel | `crm/*` | | | 154 / 249 |
+
+Cost per call from public prices: KMS `Sign` on RSA_2048 is $0.03 per 10,000
+requests ($0.003 per 1,000), on P-256 $0.15 per 10,000 ($0.015 per 1,000);
+each key is $1 a month. One `_ri_ctx` per admitted `tools/call` adds
+$0.003 per 1,000 calls; a mint adds the same per mint, before the cache.
+Every MCP request, `tools/list` included, also costs one interceptor Lambda
+invocation (1 to 6 ms warm, 512 MB arm64).
+
+Log search: every log group on the path was pulled after the run and
+searched for the signature segments of the tokens used, the `eyJ` prefix,
+the `_ri_ctx` JWS header prefix and the string `_ri_ctx`. Mint, Invoke,
+interceptor, tool, mock AS, echo and discovery Lambdas, the API Gateway
+access log and the execution log (INFO, data trace off): zero token or
+context values. The tool's log holds the argument *names* `_ri_ctx` (413
+lines), by construction. The Runtime log group was empty for this agent.
+The Gateway's vended application log (enabled by `PutDeliverySource`
+`APPLICATION_LOGS`) holds no bearer token and no client-forged context.
+It does hold `requestBody` after the interceptor, so 20 lines carry a
+signed `_ri_ctx`, and every `responseBody`, so tool results are logged.
+It also holds `Policy evaluation completed` lines with the decision, the
+determining policy, the principal's `sub` and `latencyMs`.
+
+Consequence for the design:
+
+- V-8: the Gateway accepts any `typ`, so the interceptor's `typ` check stays
+  and is the only one. Refusals are 403, not 401; §5.4 and the tests expect
+  403 for a bad signature, `aud`, `iss` or `exp`.
+- V-11 fallback applies: Policy runs after the interceptor. The interceptor
+  already refuses an ungranted tool and logs it with the tenant, so each
+  denied call costs one interceptor invocation and no KMS `Sign`. Policy
+  sees `context.input` with `_ri_ctx` already injected.
+- V-9 and the orphan finding: `ToolTarget` MUST delete its policy before its
+  target, and the delete path MUST wait for the policy to be gone. A
+  `tools/list` call that returns tools outside `scope` is the symptom; the
+  `tools/call` wall held.
+- V-14: 100 targets per Gateway is the default quota, so the registry caps
+  targets at 100 per tools gateway. Policy writes are slow and fail when
+  concurrent, so the `ToolTarget` custom resource creates policies one at a
+  time with retry. Full listing at 100 targets is about 0.9 s (4 pages);
+  the README states it and suggests grouping tools into fewer targets.
+- V-13: no fallback needed for header size (8 KB passed). Gateway
+  application logs MUST stay off by default, or be documented as holding
+  tool arguments, signed contexts (60 s life) and tool results.
+- V-15(a): the vault keys on (`iss`, `sub`), not on the tenant. With
+  ADR-0038 a user in two tenants shares one 3LO grant across them. The
+  transaction token's `sub` must be tenant-qualified (for example
+  `<tenant_id>#<sub>`), or 3LO targets are refused for multi-tenant users.
+  The Gateway must list MCP `2025-11-25`.
+- V-15(b): the third-party AS receives the transaction token as
+  `subject_token`. That token is a bearer at the tools gateway for the rest
+  of its life, so OBO targets are limited to AS operators the vendor trusts,
+  and the README says so.
+- V-15(c): the agent can get a workload access token from the transaction
+  token; the agent's outbound identity is not limited to M2M.
+
 ---
 
 ## 8. Integration test outline
