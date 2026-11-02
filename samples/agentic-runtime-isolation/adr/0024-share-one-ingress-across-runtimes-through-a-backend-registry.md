@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT-0
 - Status: Accepted
 - Date: 2026-10-28
 - Amends: ADR-0003, ADR-0011, ADR-0013
-- Amended by: ADR-0025
+- Amended by: ADR-0025, ADR-0032, ADR-0035
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -268,3 +268,5 @@ its own Runtime. Revisit if a deployer needs per-backend tenant roles or
 per-backend concurrency.
 
 Amended by ADR-0025: the registry entry's `requiredScopes` (AND on top of the floor, free names from tenant-identity's fixed set) is renamed `scopes` and becomes the backend's own, `<name>/<action>`, checked any-of; `AgentBackend` registers them with tenant-identity before writing the entry, so adding a backend still needs no ingress deploy and now no identity deploy either.
+
+**2026-11-02.** Amended by ADR-0032, ADR-0035: the registry entry gains `needs` and `tools` (ADR-0032); tools and agents are registered with an owner marker in the store and the registry (ADR-0035).

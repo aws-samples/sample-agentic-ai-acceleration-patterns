@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0006: Forward the user token only on opt-in, in a Runtime custom header
 
-- Status: Accepted
+- Status: Superseded by ADR-0031
 - Date: 2026-10-26
 - Deciders: Dave Roberts (PSA)
 
@@ -24,3 +24,5 @@ Option 2. When `forwardUserToken` is false the header is not in the Runtime's `r
 
 ## Consequences
 Easier: least privilege by default. Harder: the agent must never log the header; a unit test asserts redaction.
+
+**2026-11-02.** Superseded by ADR-0031: the identity token never leaves the ingress; the agent receives an ingress-minted transaction token in `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token`, and `delegation.forwardUserToken` is removed.

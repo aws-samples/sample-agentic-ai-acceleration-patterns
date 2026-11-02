@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-10-26
-- Amended by: ADR-0024
+- Amended by: ADR-0024, ADR-0032
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -29,3 +29,5 @@ Easier: adding a backend is a new prop value plus those five things, run through
 Amended by ADR-0024 (2026-10-28): `IsolatedRuntime` is replaced by `SharedIngress` (the ingress alone) plus one `AgentBackend` per Runtime; each `AgentBackend` creates its backend through the `IBackend` interface (`src/backend/backend.cdk.ts`; `BackendKind` still has the one value `'agentcore-runtime'`), which owns the five things listed above, and the shared ingress stays backend-neutral.
 
 Note (2026-10-30): the sample was renamed from `runtime-isolation` to `agentic-runtime-isolation` on 2026-10-28; the backend-neutral name chosen here is kept inside the new one.
+
+**2026-11-02.** Amended by ADR-0032: a backend is now an agent product: its registry entry carries `needs` and `tools`, and the grant is capped at mint to what the product lists.
