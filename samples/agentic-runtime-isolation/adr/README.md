@@ -18,7 +18,7 @@ SPDX-License-Identifier: MIT-0
 | [0010](./0010-declare-the-runtime-gateway-target-with-a-raw-override.md) | Declare the Gateway's Runtime target with a typed raw override | Accepted | - | 2026-10-26 |
 | [0011](./0011-model-the-compute-service-as-a-backend-agentcore-first.md) | Model the compute service as a backend, with AgentCore Runtime first | Accepted | Amended by ADR-0024, ADR-0032 | 2026-10-26 |
 | [0012](./0012-vend-tenant-scoped-credentials-at-ingress-and-forward-them.md) | Vend tenant-scoped credentials at the ingress and forward them to the backend | Accepted | Amended by ADR-0018 | 2026-10-26 |
-| [0013](./0013-make-session-mapping-an-optional-module.md) | Make session mapping an optional module; a fresh unit per request by default | Accepted | Amended by ADR-0024 | 2026-10-26 |
+| [0013](./0013-make-session-mapping-an-optional-module.md) | Make session mapping an optional module; a fresh unit per request by default | Accepted | Amended by ADR-0024, ADR-0039 | 2026-10-26 |
 | [0014](./0014-accept-the-production-hardening-cdk-nag-findings.md) | Accept the production-hardening cdk-nag findings in the sample | Accepted | - | 2026-10-26 |
 | [0015](./0015-verify-the-token-at-every-ingress-stage.md) | Verify the token at every ingress stage, not only at the gateway | Accepted | Amended by ADR-0023 | 2026-10-26 |
 | [0016](./0016-break-the-tenant-role-trust-cycle-with-a-lazy-caller-arn.md) | Break the tenant-role trust cycle in the demo with a lazy caller ARN | Accepted | - | 2026-10-26 |
@@ -44,3 +44,4 @@ SPDX-License-Identifier: MIT-0
 | [0036](./0036-bound-change-lag-by-a-version-in-the-token-cache-key.md) | Bound change lag by a version in the token cache key and a 5-minute token life | Proposed | - | 2026-11-02 |
 | [0037](./0037-publish-the-ingress-as-an-oidc-issuer.md) | Publish the ingress as an OIDC issuer: JWKS and discovery on the ingress, keys in KMS with `kid` rotation | Proposed | - | 2026-11-02 |
 | [0038](./0038-accept-users-in-several-tenants.md) | Accept users in several tenants; the request names one the verified token lists | Proposed | Amends ADR-0004 | 2026-11-02 |
+| [0039](./0039-default-session-mapping-to-the-tenant-scope.md) | Default session mapping to the tenant scope when it is turned on | Proposed | Amends ADR-0013 | 2026-11-02 |

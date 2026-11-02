@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-10-26
-- Amended by: ADR-0024
+- Amended by: ADR-0024, ADR-0039
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -27,3 +27,5 @@ Option 2. `IsolatedRuntime` takes an optional `session: { scope?: 'user' | 'tena
 Easier: the pattern reads as what it is, enforced mapping of a caller to an isolated unit, and a backend without sessions can be added without changing the core. The default deployment is stateless and the simplest to reason about. Harder: the integration suite runs step 4 in both modes (4a without `session`, 4b and 5 with it), and the README must say plainly that conversation memory needs `session`.
 
 Amended by ADR-0024 (2026-10-28): `IsolatedRuntime` is replaced by `SharedIngress` (the ingress alone) plus one `AgentBackend` per Runtime; the optional `session` module is a `SharedIngress` option and applies to every backend behind that ingress.
+
+**2026-11-02.** Amended by ADR-0039: when `session` is set without a `scope`, the scope is `'tenant'`, not `'user'`; the module stays off by default.

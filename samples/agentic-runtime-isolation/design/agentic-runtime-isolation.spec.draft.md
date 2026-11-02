@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT-0
 > **Status:** Draft v2, 2026-11-02. Extends the accepted v1 spec
 > (2026-10-26). On acceptance this file replaces
 > `agentic-runtime-isolation.spec.md` and v1 is kept as
-> `agentic-runtime-isolation.spec.v1.md`. ADR-0030 to ADR-0038 are Proposed.
+> `agentic-runtime-isolation.spec.v1.md`. ADR-0030 to ADR-0039 are Proposed.
 > v1 promises that still hold are kept as they are. Where v2 changes one,
 > the text says so with "(v2, ADR-00NN)". The v1 amendment notes are folded
 > into the text; their ADRs are still cited.
@@ -28,6 +28,7 @@ ADRs this draft proposes:
 | 0036 | Bound change lag by a version in the token cache key and a 5-minute token life | - |
 | 0037 | Publish the ingress as an OIDC issuer: JWKS and discovery on the ingress, keys in KMS with `kid` rotation | - |
 | 0038 | Accept users in several tenants; the request names one the verified token lists | amends ADR-0004 |
+| 0039 | Default session mapping to the tenant scope when it is turned on | amends ADR-0013 |
 
 
 ---
@@ -91,7 +92,7 @@ default (P-4):
 
 | Module | Adds | Default | Prop |
 |---|---|---|---|
-| Session mapping | conversations that persist across requests, in a unit derived from the caller's claims, so a user resumes only their own session (P-2, ADR-0002, ADR-0013) | off: a fresh unit per request; `session.scope` is `'user'` when set | `session` |
+| Session mapping | conversations that persist across requests, in a unit derived from the caller's claims, so a user resumes only their own session (P-2, ADR-0002, ADR-0013) | off: a fresh unit per request. When set, `scope` is `'tenant'` (one conversation per tenant, v2, ADR-0039); `'user'` is the option | `session` |
 | Scope floor | scopes every identity token must carry (AND, ADR-0005), for example `app/use` | off: no floor | `requiredScopes` on the ingress |
 | TVM | tenant-scoped AWS credentials for the model call and the agent's data access (P-8, ADR-0018) | always on: model-only `TenantModelRole`, `TenantId` tag only, 900 s credentials, 1,000 cached sets | `tvm` |
 | Per-tenant limits | requests per tenant per minute, and on `api-gateway` optionally output tokens; over the limit is 429 (ADR-0020) | on: 60 requests per tenant per minute, no token limit | `tenantLimits` |
@@ -231,7 +232,8 @@ never from the request alone.** Without `session`, every request runs in a
 fresh unit: the ingress generates a random unit id and nothing is shared
 between requests. With `session`,
 `runtimeSessionId = "s-" + base32(sha256(tenant_id "|" sub))[0:26] + "-" + conversationId`
-for `session.scope: 'user'`, and `sha256(tenant_id)` for `'tenant'`.
+for `session.scope: 'user'`, and `sha256(tenant_id)` for `'tenant'`, the
+default when `session` is set (v2, ADR-0039).
 `conversationId` is client-chosen (16 to 64 of `[A-Za-z0-9]`), but the prefix
 comes only from the verified token. In both cases a unit id sent by the
 client is ignored and overwritten (ADR-0002, ADR-0013). (v2, R-1, ADR-0038)
@@ -446,7 +448,7 @@ fails with the prop name.
 | `identity.multiTenant` | boolean | `false` | (v2, R-1, ADR-0038) accept tokens that carry `tenants`; off, such a token is refused as in v1 |
 | `backend` | `'agentcore-runtime'` | `'agentcore-runtime'` | ADR-0011 |
 | `ingress` | `'api-gateway' \| 'agentcore-gateway'` | required | C-3a or C-3b |
-| `session.scope` | `'user' \| 'tenant'` | none | P-2, ADR-0013 |
+| `session.scope` | `'tenant' \| 'user'` | `'tenant'` when `session` is set; no session mapping when `session` is absent | (v2, ADR-0039) P-2, ADR-0013 |
 | `requiredScopes` | string[] | none | the floor: every identity token MUST carry all of them (ADR-0005), for example `['app/use']` |
 | `tvm.role`, `tvm.includeUserIdTag`, `tvm.claimTags`, `tvm.durationSeconds`, `tvm.cacheMaxEntries` | as v1 | as v1 | P-8, ADR-0012, ADR-0018, ADR-0022 |
 | `tenantLimits` | `{ requestsPerMinute?, outputTokensPerMinute? } \| false` | `requestsPerMinute: 60` | ADR-0020; keyed on the selected tenant (v2) |
@@ -968,8 +970,9 @@ v1 promises that hold unchanged:
 
 - No principal other than the ingress can invoke the backend (integ step 3).
 - Without `session`, no two requests share a unit (integ step 4a).
-- With `session`, tenant A's token cannot land in tenant B's unit, nor user
-  A1's in A2's under `scope: 'user'` (integ steps 4b, 5).
+- With `session`, tenant A's token cannot land in tenant B's unit; under the
+  default `scope: 'tenant'` A1 and A2 share a conversation they both name,
+  and under `scope: 'user'` A1 cannot land in A2's unit (integ steps 4b, 5).
 - The TVM is always on: a read of the caller's own tenant data succeeds and
   a read of another tenant's fails in IAM; the runner cannot assume the role
   (integ step 8a).
@@ -1151,8 +1154,10 @@ new and run between step 9-registry and step 10.
    denied (P-1).
 4a. `session` off: a `conversationId` in the body is 400; two requests with
    the first's unit id in the session header land in two units (P-2).
-4b. `session` on: A2 and B1 sending A1's `c1` and unit id land in their own
-   units (P-2).
+4b. `session` on, default `scope: 'tenant'`: B1 sending A1's `c1` and unit id
+   lands in tenant B's own unit; A2 sending `c1` shares A1's unit (one
+   conversation per tenant). `scope: 'user'` stack: A2 sending `c1` lands in
+   its own unit (P-2).
 5. `session` on: A1 resumes `c1`: same microVM.
 6. No token, a tampered token, an ID token: 401 or 403 by ingress (§5.1). A
    malformed `conversationId`: 400 or 403.
@@ -1243,8 +1248,8 @@ Limits. As v1: tenant A gets 429 on the `requestsPerMinute: 5` stack while
    tenant-identity if step 1 added them.
 
 Steps 3 to 9, 9-registry and 11 to 20 run on both all-on stacks
-(`api-gateway`, `agentcore-gateway`). Step 4a and the limits step run on
-their own stacks; step 21 on the `api-gateway` stack. The stacks come from
+(`api-gateway`, `agentcore-gateway`). Step 4a, the `scope: 'user'` half of 4b,
+and the limits step run on their own stacks; step 21 on the `api-gateway` stack. The stacks come from
 `test/integ.runtime.ts` and deploy together; the test-only mint function and its
 `grantSign` exist only on the integration stacks, never in the demo stack, and
 the README says so.
