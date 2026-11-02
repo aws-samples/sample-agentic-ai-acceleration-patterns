@@ -16,6 +16,7 @@ import {
   respond,
   type AgentClients,
   type ResponseSink,
+  toolProbe,
   unverifiedClaims,
 } from '../../src/agent/app';
 import { encodeCredentials, RUNTIME_HEADERS } from '../../src/backend/agentcore-runtime.transport';
@@ -23,7 +24,18 @@ import { parseUsageEvent } from '../../src/shared/metrics';
 
 /** The sample agent (spec C-2, ADR-0017): calls the one model, reports what reached it, ends every stream with a usage event, never echoes a header value. */
 const credentials = { accessKeyId: 'ASIA-SYNTHETIC', secretAccessKey: 'synthetic-secret', sessionToken: 'synthetic-token', expiration: '2026-01-01T00:15:00.000Z' };
-const token = `h.${Buffer.from(JSON.stringify({ tenant_id: 'tenant-a', scope: 'tenant-api/read', sub: 'user-a1' })).toString('base64url')}.sig`;
+const token = `h.${Buffer.from(
+  JSON.stringify({
+    tenant_id: 'tenant-a',
+    scope: 'default/chat crm/*',
+    sub: 'tenant-a#user-a1',
+    user: 'user-a1',
+    agent: 'default',
+    aud: ['agent:default', 'tools-gateway'],
+    act: { sub: 'arn:aws:iam::111122223333:role/ingress' },
+    exp: 2_000_000_000,
+  }),
+).toString('base64url')}.sig`;
 const MODEL_ID = 'amazon.nova-lite-v1:0';
 
 const bedrockMock = mockClient(BedrockRuntimeClient);
@@ -144,8 +156,15 @@ describe('isProbe', () => {
 });
 
 describe('unverifiedClaims', () => {
-  it('decodes tenant_id and scope for display only', () => {
-    expect(unverifiedClaims(token)).toEqual({ tenant_id: 'tenant-a', scope: 'tenant-api/read' });
+  it('decodes the transaction token claims the report shows, for display only', () => {
+    expect(unverifiedClaims(token)).toEqual({
+      tenant_id: 'tenant-a',
+      agent: 'default',
+      scope: 'default/chat crm/*',
+      aud: ['agent:default', 'tools-gateway'],
+      actSub: 'arn:aws:iam::111122223333:role/ingress',
+      exp: 2_000_000_000,
+    });
     expect(unverifiedClaims('garbage')).toBeNull();
   });
 });
@@ -157,19 +176,26 @@ describe('buildReport', () => {
       nonce: NONCE,
       unitId: 's-abcdefghijklmnopqrstuvwxyz-conversationA1x0001',
       sessionPrefix: 'abcdefghijklmnopqrstuvwxyz',
-      forwardedToken: false,
-      forwardedTenant: null,
-      forwardedScope: null,
+      transactionToken: false,
+      tokenTenant: null,
+      tokenAgent: null,
+      tokenScope: null,
+      tokenAud: null,
+      tokenActSub: null,
+      tokenExp: null,
       credentials: false,
     });
     expect(NONCE).toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  it('reports the forwarded token by its non-secret claims, never the token itself', async () => {
-    const report = await buildReport({ [RUNTIME_HEADERS.USER_TOKEN.toLowerCase()]: token }, 'report', undefined);
-    expect(report.forwardedToken).toBe(true);
-    expect(report.forwardedTenant).toBe('tenant-a');
-    expect(report.forwardedScope).toBe('tenant-api/read');
+  it('reports the transaction token by its claims, never the token itself (C-2)', async () => {
+    const report = await buildReport({ [RUNTIME_HEADERS.TRANSACTION_TOKEN.toLowerCase()]: token }, 'report', undefined);
+    expect(report.transactionToken).toBe(true);
+    expect(report.tokenTenant).toBe('tenant-a');
+    expect(report.tokenAgent).toBe('default');
+    expect(report.tokenScope).toBe('default/chat crm/*');
+    expect(report.tokenAud).toEqual(['agent:default', 'tools-gateway']);
+    expect(report.tokenActSub).toBe('arn:aws:iam::111122223333:role/ingress');
     expect(JSON.stringify(report)).not.toContain(token);
   });
 
@@ -355,7 +381,7 @@ describe('respond', () => {
     bedrockMock.on(ConverseStreamCommand).resolves({ stream: converseStream(['ok'], { inputTokens: 1, outputTokens: 1 }) } as any);
     const h = {
       ...headers,
-      [RUNTIME_HEADERS.USER_TOKEN.toLowerCase()]: token,
+      [RUNTIME_HEADERS.TRANSACTION_TOKEN.toLowerCase()]: token,
       [RUNTIME_HEADERS.TENANT_CREDENTIALS.toLowerCase()]: encodeCredentials(credentials),
     };
     for (const prompt of ['report', 'hello']) {
@@ -365,5 +391,55 @@ describe('respond', () => {
       expect(c.body).not.toContain('synthetic-secret');
       expect(c.body).not.toContain(encodeCredentials(credentials));
     }
+  });
+});
+
+describe('tool probes (v2, C-2)', () => {
+  const sinkOf = () => {
+    const c = { body: '' };
+    const s: ResponseSink = { head: () => undefined, write: (t) => void (c.body += t), end: () => undefined };
+    return { c, s };
+  };
+
+  it('toolProbe parses `tools` and `tool <target>/<tool> <json>`; anything else is not a tool probe', () => {
+    expect(toolProbe('tools')).toEqual({ method: 'tools/list' });
+    expect(toolProbe('tool crm/get_account {"accountId":"a1"}')).toEqual({ method: 'tools/call', name: 'crm___get_account', arguments: { accountId: 'a1' } });
+    expect(toolProbe('tool crm/list_cases')).toEqual({ method: 'tools/call', name: 'crm___list_cases', arguments: {} });
+    expect(toolProbe('tool crm/get_account [1]')).toBeUndefined();
+    expect(toolProbe('tool crm/get_account {bad')).toBeUndefined();
+    expect(toolProbe('tool Crm/x')).toBeUndefined();
+    expect(toolProbe('tools please')).toBeUndefined();
+  });
+
+  it('calls the tools gateway with the transaction token as bearer and returns the result; never echoes the token', async () => {
+    const seen: { url?: string; init?: RequestInit } = {};
+    const fetcher = (async (url: string, init: RequestInit) => {
+      seen.url = url;
+      seen.init = init;
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: [{ name: 'crm___get_account' }] } }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const { c, s } = sinkOf();
+    const headers = { [RUNTIME_HEADERS.TRANSACTION_TOKEN.toLowerCase()]: token };
+    await respond(headers, 'tools', { toolsGatewayUrl: 'https://tools.example.com/mcp', fetch: fetcher }, s);
+    expect(seen.url).toBe('https://tools.example.com/mcp');
+    expect((seen.init!.headers as Record<string, string>).Authorization).toBe(`Bearer ${token}`);
+    expect(JSON.parse(String(seen.init!.body))).toMatchObject({ method: 'tools/list' });
+    expect(c.body).toContain('crm___get_account');
+    expect(c.body).not.toContain(token);
+    expect(c.body).toContain('event: usage');
+  });
+
+  it('a refused call returns the error message; no gateway or no token is an error event', async () => {
+    const fetcher = (async () =>
+      new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32001, message: 'forbidden: tool_not_granted' } }), { status: 403 })) as unknown as typeof fetch;
+    const one = sinkOf();
+    await respond({ [RUNTIME_HEADERS.TRANSACTION_TOKEN.toLowerCase()]: token }, 'tool invoices/get_invoice {}', { toolsGatewayUrl: 'https://t/mcp', fetch: fetcher }, one.s);
+    expect(one.c.body).toContain('forbidden: tool_not_granted');
+    const two = sinkOf();
+    await respond({}, 'tools', { toolsGatewayUrl: 'https://t/mcp', fetch: fetcher }, two.s);
+    expect(two.c.body).toContain('NoTransactionToken');
+    const three = sinkOf();
+    await respond({ [RUNTIME_HEADERS.TRANSACTION_TOKEN.toLowerCase()]: token }, 'tools', {}, three.s);
+    expect(three.c.body).toContain('NoToolsGateway');
   });
 });

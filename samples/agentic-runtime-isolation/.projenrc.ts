@@ -12,7 +12,7 @@ const project = new awscdk.AwsCdkTypeScriptApp({
   github: false,
   name: 'agentic-runtime-isolation',
   description:
-    'Agentic runtime isolation for a multi-tenant agent: a backend that trusts one ingress, which maps the validated caller to an isolated compute unit, vends tenant-scoped credentials and limits each tenant; one ingress fronts one or more registered backends; optional session mapping, scope checks and delegation; AgentCore Runtime first',
+    'Agentic runtime isolation for a multi-tenant agent: a backend that trusts one ingress, which maps the validated caller to an isolated compute unit, vends tenant-scoped credentials, limits each tenant, enforces entitlements and mints a transaction token; one ingress fronts one or more registered backends and one shared tools gateway; AgentCore Runtime first',
   packageManager: javascript.NodePackageManager.NPM,
   license: 'MIT-0',
   copyrightOwner: 'Amazon.com, Inc. or its affiliates. All Rights Reserved.',
@@ -35,17 +35,23 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     '@aws-sdk/client-bedrock-agentcore@3.1154.0', // InvokeAgentRuntime (backend, ADR-0011)
     '@aws-sdk/client-bedrock-runtime@3.1154.0', // agent's ConverseStream call; token usage for the usage event (P-10, ADR-0017)
     '@aws-sdk/client-sts@3.1154.0', // TVM AssumeRole + TagSession (ADR-0012); agent GetCallerIdentity
-    '@aws-sdk/client-dynamodb@3.1154.0', // echo agent's demo-table read with vended credentials
+    '@aws-sdk/client-dynamodb@3.1154.0', // echo agent's demo-table read with vended credentials; v2 entitlement store (C-12)
+    '@aws-sdk/lib-dynamodb@3.1154.0', // v2: document client for the entitlement rows (C-12, C-14)
     '@aws-sdk/client-ssm@3.1154.0', // backend registry reads at the ingress, writes from the backend's registry-entry custom resource (ADR-0024)
     '@smithy/node-http-handler@4.12.1', // the agent's shared keep-alive handler across its per-request clients
-    // The scope-registration custom resource signs GET/PUT/DELETE /platform/scopes/* on tenant-identity's API (ADR-0025); the same pins as tenant-identity's e2e client, except @smithy/types
-    '@aws-sdk/credential-providers@3.1154.0',
-    '@aws-crypto/sha256-js@5.2.0',
-    '@smithy/signature-v4@5.7.4',
-    '@smithy/protocol-http@5.6.2',
-    // The credential types the scope-registration signer accepts. tenant-identity pins 4.17.2; signature-v4@5.7.4 requires ^4.19.0, so this is the version its lock file resolves (a lower pin would install two copies).
+    // v2: the transaction token and the tool context are signed with KMS only (ADR-0031, ADR-0034, ADR-0037)
+    '@aws-sdk/client-kms@3.1154.0',
+    // v2: the ToolTarget policy custom resource (Create/Update/Delete/GetPolicy, ADR-0040)
+    '@aws-sdk/client-bedrock-agentcore-control@3.1154.0',
+    // v2: Smithy SSDK runtime for the entitlement API (generated code in src/smithy imports these;
+    // versions are the ones this lock file already resolves for the SDK clients, so no second copy)
+    'tslib@2.8.1',
+    '@aws-sdk/core@3.978.7',
+    '@smithy/core@3.37.0',
     '@smithy/types@4.19.0',
-    'jose@5.10.0', // JWT verification against the issuer's JWKS (P-3); 5.x ships CJS, which ts-jest needs (6.x is ESM-only)
+    '@smithy/server-common@0.4.2', // the version smithy-aws-typescript-codegen 0.53.0 generates against
+    '@smithy/server-apigateway@0.3.3', // convertEvent / convertVersion1Response, as tenant-identity
+    'jose@5.10.0', // JWT VERIFICATION only, against a JWKS (P-3, C-15a); never holds a private key: signing is KMS-only (ADR-0037); 5.x ships CJS, which ts-jest needs (6.x is ESM-only)
     // Security linting - AwsSolutionsChecks aspect applied in src/main.ts
     'cdk-nag@3.0.2',
   ],
@@ -64,10 +70,16 @@ const project = new awscdk.AwsCdkTypeScriptApp({
       workerIdleMemoryLimit: '1GB',
       // e2e suites run against deployed stacks through their own task
       testPathIgnorePatterns: ['/node_modules/', '/test/e2e/'],
-      coveragePathIgnorePatterns: ['/node_modules/', '/test/'],
+      coveragePathIgnorePatterns: ['/node_modules/', '/test/', '/src/smithy/'],
     },
   },
 });
+
+// Smithy-generated SSDK output (the entitlement API, C-14) is not linted and
+// not committed: `smithy build` regenerates it before every compile.
+project.eslint?.addIgnorePattern('src/smithy/**/*');
+project.gitignore.exclude('src/smithy/');
+project.preCompileTask.exec('smithy build');
 
 // Local working notes and agent config - not part of the sample
 project.gitignore.exclude('TODO.md');

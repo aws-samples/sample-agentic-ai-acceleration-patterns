@@ -4,7 +4,7 @@
 /**
  * The backend interface, CDK side (spec §3.4, ADR-0011). A backend owns its
  * isolation unit, its invoke call, its resource policy (P-1) and how the
- * unit id, the forwarded user token and the vended credentials reach it.
+ * unit id, the transaction token and the vended credentials reach it.
  * `AgentBackend` (src/agent-backend.cdk.ts) talks to the backend only
  * through this interface, so a later backend is a new implementation and a
  * new `backend` prop value, not a change to the ingress code. The ingress
@@ -19,9 +19,9 @@ import type { IConstruct } from 'constructs';
 
 /** Which transports the deployer turned on; decides what the backend must accept. */
 export interface BackendTransportOptions {
-  /** `delegation.forwardUserToken` (P-5): the backend must accept the user-token transport. */
-  readonly forwardUserToken: boolean;
-  /** `tvm` set (P-8): the backend must accept the credential transport. */
+  /** (v2, P-5, ADR-0031) The backend must accept the transaction-token transport. Always true since v2. */
+  readonly transactionToken: boolean;
+  /** The TVM (P-8): the backend must accept the credential transport. Always true since ADR-0018. */
   readonly tenantCredentials: boolean;
 }
 

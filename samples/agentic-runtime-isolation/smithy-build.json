@@ -1,0 +1,36 @@
+{
+  "version": "1.0",
+  "sources": [
+    "model"
+  ],
+  "outputDirectory": "src/smithy",
+  "maven": {
+    "dependencies": [
+      "software.amazon.smithy:smithy-aws-traits:1.73.0",
+      "software.amazon.smithy:smithy-linters:1.73.0",
+      "software.amazon.smithy:smithy-validation-model:1.73.0",
+      "software.amazon.smithy:smithy-openapi:1.73.0",
+      "software.amazon.smithy:smithy-aws-apigateway-openapi:1.73.0",
+      "software.amazon.smithy:smithy-aws-apigateway-traits:1.73.0",
+      "software.amazon.smithy.typescript:smithy-aws-typescript-codegen:0.53.0"
+    ]
+  },
+  "projections": {
+    "entitlements": {
+      "plugins": {
+        "typescript-ssdk-codegen": {
+          "service": "runtimeisolation#Entitlements",
+          "package": "@agentic-runtime-isolation/entitlements-ssdk",
+          "packageVersion": "0.0.1",
+          "packageDescription": "Server SDK for the agentic-runtime-isolation entitlement API"
+        },
+        "openapi": {
+          "service": "runtimeisolation#Entitlements",
+          "protocol": "aws.protocols#restJson1",
+          "apiGatewayType": "REST",
+          "apiGatewayDefaults": "2023-08-11"
+        }
+      }
+    }
+  }
+}

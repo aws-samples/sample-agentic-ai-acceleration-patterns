@@ -6,7 +6,7 @@
  * ADR-0012, ADR-0024). It owns every AgentCore-specific detail on the request
  * path: the `InvokeAgentRuntime` call on the Runtime the request resolved,
  * `runtimeSessionId` as the unit-id transport, and the two allowlisted custom
- * headers that carry the forwarded user token and the vended credentials
+ * headers that carry the transaction token (v2, ADR-0031) and the vended credentials
  * (base64 JSON). The echo agent uses the same constants to read them back.
  */
 
@@ -15,13 +15,13 @@ import type { BackendResponse, HeaderTransportBackend, InvokeBackend, ValidatedR
 import { endpointHost, preconnect, sharedHandler } from '../shared/http';
 import type { VendedCredentials } from '../shared/tvm';
 
-/** Request headers on the ingress-to-Runtime hop (ADR-0006, ADR-0012). */
+/** Request headers on the ingress-to-Runtime hop (ADR-0012; v2, ADR-0031). */
 export const RUNTIME_HEADERS = {
   /** The unit id; written by the Gateway interceptor, read by the agent. */
   SESSION_ID: 'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id',
-  /** The forwarded user token (P-5). On the Runtime allowlist only with `delegation.forwardUserToken`. */
-  USER_TOKEN: 'X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Token',
-  /** The vended tenant credentials (P-8). On the Runtime allowlist only with `tvm`. */
+  /** (v2, P-5, ADR-0031) The transaction token, the raw JWT. Always on the Runtime allowlist; replaces v1's `...-Custom-User-Token`. */
+  TRANSACTION_TOKEN: 'X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token',
+  /** The vended tenant credentials (P-8). Always on the Runtime allowlist (ADR-0018). */
   TENANT_CREDENTIALS: 'X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Credentials',
 } as const;
 
@@ -47,8 +47,8 @@ export function decodeCredentials(header: string): VendedCredentials {
 /** The custom headers for a request: only those the options put on the request. */
 export function customHeaders(request: ValidatedRequest): Record<string, string> {
   const headers: Record<string, string> = {};
-  if (request.userToken !== undefined) {
-    headers[RUNTIME_HEADERS.USER_TOKEN] = request.userToken;
+  if (request.transactionToken !== undefined) {
+    headers[RUNTIME_HEADERS.TRANSACTION_TOKEN] = request.transactionToken;
   }
   if (request.credentials !== undefined) {
     headers[RUNTIME_HEADERS.TENANT_CREDENTIALS] = encodeCredentials(request.credentials);

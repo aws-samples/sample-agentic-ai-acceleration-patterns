@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { bearerToken, TokenError, TokenVerifier, USER_ADMIN_SCOPE } from '../../src/shared/verifier';
+import { bearerToken, isTransactionToken, TokenError, TokenVerifier } from '../../src/shared/verifier';
 import { CLIENT_ID, DISCOVERY_URL, OTHER_CLIENT_ID, testIssuer, type TestIssuer } from '../helpers';
 
 /** P-3 and spec §6.2: every check the ingress makes on a token, with its status (spec §5). */
@@ -34,7 +34,7 @@ describe('TokenVerifier', () => {
     expect(claims.tenantId).toBe('tenant-a');
     expect(claims.sub).toBe('user-a1');
     expect(claims.clientId).toBe(CLIENT_ID);
-    expect(claims.scopes).toEqual(['default/chat', 'billing/read', USER_ADMIN_SCOPE]);
+    expect(claims.scopes).toEqual(['default/chat', 'billing/read', 'aws.cognito.signin.user.admin']);
     expect(claims.claims.tenant_id).toBe('tenant-a');
   });
 
@@ -86,10 +86,55 @@ describe('TokenVerifier', () => {
     expect(await refusal(verifier().verify(await issuer.mint({ tenant_id: ['tenant-a'] as any })))).toEqual({ status: 403, reason: 'no_tenant' });
   });
 
-  it('403 for a token that still carries a tenants claim (not narrowed to one tenant)', async () => {
-    expect(await refusal(verifier().verify(await issuer.mint({ tenants: ['tenant-a', 'tenant-b'] })))).toEqual({
+  it('403 for a token that carries tenants while identity.multiTenant is off (as in v1)', async () => {
+    expect(await refusal(verifier().verify(await issuer.mint({ tenant_id: undefined, tenants: ['tenant-a', 'tenant-b'] })))).toEqual({
       status: 403,
       reason: 'multi_tenant_token',
+    });
+  });
+
+  describe('tenant selection (v2, R-1, ADR-0038, spec §5.1)', () => {
+    const multi = () => verifier({ multiTenant: true });
+    const many = { tenant_id: undefined, tenants: ['tenant-a', 'tenant-b'] };
+
+    it('tenant_id: no header, or the same value, selects it; another value is 403 tenant_not_allowed', async () => {
+      expect((await verifier().verify(await issuer.mint(), undefined)).tenantId).toBe('tenant-a');
+      expect((await verifier().verify(await issuer.mint(), 'tenant-a')).tenantId).toBe('tenant-a');
+      expect(await refusal(verifier().verify(await issuer.mint(), 'tenant-b'))).toEqual({ status: 403, reason: 'tenant_not_allowed' });
+    });
+
+    it('tenants: the header must name one of them; none is 400 tenant_required', async () => {
+      expect((await multi().verify(await issuer.mint(many), 'tenant-b')).tenantId).toBe('tenant-b');
+      expect(await refusal(multi().verify(await issuer.mint(many), undefined))).toEqual({ status: 400, reason: 'tenant_required' });
+      expect(await refusal(multi().verify(await issuer.mint(many), 'tenant-c'))).toEqual({ status: 403, reason: 'tenant_not_allowed' });
+    });
+
+    it('both claims is 403 tenant_not_allowed; a malformed header is 400', async () => {
+      expect(await refusal(multi().verify(await issuer.mint({ tenants: ['tenant-a'] }), 'tenant-a'))).toEqual({ status: 403, reason: 'tenant_not_allowed' });
+      expect(await refusal(verifier().verify(await issuer.mint(), 'tenant a'))).toEqual({ status: 400, reason: 'malformed_tenant_header' });
+    });
+  });
+
+  describe('a transaction token is never an identity token (P-14, M-36)', () => {
+    const OWN_ISSUER = 'https://abc123.execute-api.eu-central-1.amazonaws.com/prod';
+    const unsigned = (header: object, payload: object) =>
+      `${Buffer.from(JSON.stringify(header)).toString('base64url')}.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.c2ln`;
+
+    it('typ txn+jwt is 401 transaction_token before any key is fetched', async () => {
+      const fetchDiscovery = jest.fn(issuer.fetchDiscovery);
+      const v = new TokenVerifier(
+        { discoveryUrl: DISCOVERY_URL, allowedClientIds: [CLIENT_ID], ownIssuer: OWN_ISSUER },
+        { getKey: issuer.getKey, fetchDiscovery },
+      );
+      expect(await refusal(v.verify(unsigned({ alg: 'RS256', typ: 'txn+jwt', kid: 'k' }, { iss: 'x' })))).toEqual({ status: 401, reason: 'transaction_token' });
+      expect(fetchDiscovery).not.toHaveBeenCalled();
+    });
+
+    it('iss = the ingress issuer is 401 transaction_token, even when signed by a key the JWKS knows', async () => {
+      const v = verifier({ ownIssuer: OWN_ISSUER });
+      expect(await refusal(v.verify(await issuer.mint({ iss: OWN_ISSUER })))).toEqual({ status: 401, reason: 'transaction_token' });
+      expect(isTransactionToken('garbage', OWN_ISSUER)).toBe(false);
+      expect(isTransactionToken(unsigned({ alg: 'RS256' }, { iss: 'other' }), OWN_ISSUER)).toBe(false);
     });
   });
 
@@ -122,31 +167,6 @@ describe('TokenVerifier', () => {
       await expect(v.verify(await issuer.mint())).resolves.toBeDefined();
       expect(await refusal(v.verify(await issuer.mint({ scope: 'billing/read' })))).toEqual({ status: 403, reason: 'scope_missing' });
       expect(await refusal(v.verify(await issuer.mint({ scope: undefined })))).toEqual({ status: 403, reason: 'scope_missing' });
-    });
-  });
-
-  describe('requireNarrowedToken (ADR-0007)', () => {
-    const v = () => verifier({ requireNarrowedToken: true, allowedScopes: ['default/chat'] });
-
-    it('refuses an un-narrowed token (carries user.admin and a scope outside the allowlist)', async () => {
-      expect(await refusal(v().verify(await issuer.mint()))).toEqual({ status: 403, reason: 'not_narrowed' });
-    });
-
-    it('refuses a token with a scope outside allowedScopes', async () => {
-      expect(await refusal(v().verify(await issuer.mint({ scope: 'default/chat billing/read' })))).toEqual({ status: 403, reason: 'not_narrowed' });
-    });
-
-    it('refuses the Cognito user.admin scope even when listed', async () => {
-      const w = verifier({ requireNarrowedToken: true, allowedScopes: ['default/chat', USER_ADMIN_SCOPE] });
-      expect(await refusal(w.verify(await issuer.mint({ scope: `default/chat ${USER_ADMIN_SCOPE}` })))).toEqual({ status: 403, reason: 'not_narrowed' });
-    });
-
-    it('accepts a token whose scopes are a subset of allowedScopes', async () => {
-      await expect(v().verify(await issuer.mint({ scope: 'default/chat' }))).resolves.toBeDefined();
-    });
-
-    it('requires allowedScopes at construction', () => {
-      expect(() => verifier({ requireNarrowedToken: true })).toThrow(/allowedScopes/);
     });
   });
 

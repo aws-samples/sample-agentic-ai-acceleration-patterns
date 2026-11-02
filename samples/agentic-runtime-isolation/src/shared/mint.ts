@@ -1,0 +1,197 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: MIT-0
+
+/**
+ * The transaction-token mint (spec §6.2.2, P-14; ADR-0031, ADR-0036,
+ * ADR-0037, ADR-0040). The ingress mints one token per (tenant, user, agent,
+ * versions) after its own checks: it names exactly one tenant, one user and
+ * one agent, carries exactly the granted `scope`, is bound by `aud` to that
+ * agent and the tools gateway, names the ingress role in `act`, and lives
+ * `ttl` seconds. It is signed by KMS (`MessageType: DIGEST`), never by a key
+ * in this process.
+ *
+ * `sub` is `<tenant_id>#<sub>` (ADR-0040: the AgentCore Identity vault keys
+ * on `iss` and `sub`, so a user in two tenants must have two subjects), and
+ * the identity provider's `sub` is carried in `user` for logs and the
+ * session prefix. Nothing reads the user by splitting `sub`.
+ *
+ * Minted tokens are cached per (tenant, sub, agent, tenant.version,
+ * agent.version, plan.version) and reused while more than the reuse margin
+ * of their life is left, so a busy user costs one KMS call per token life,
+ * not per request (ADR-0036). A write to the tenant or a cut bumps
+ * `tenant.version`, so the next request misses the cache and mints the new
+ * grant. The cache is bounded (LRU), like the TVM's (ADR-0022).
+ */
+
+import { randomBytes, randomUUID } from 'node:crypto';
+import { type DigestSigner, type JwsAlgorithm, signJws } from './jws';
+
+/** The JOSE `typ` of a transaction token (spec §6.2.2). */
+export const TRANSACTION_TOKEN_TYPE = 'txn+jwt';
+/** The tools gateway's audience (spec §3.6). */
+export const TOOLS_GATEWAY_AUDIENCE = 'tools-gateway';
+/** The agent audience prefix: `agent:<backend>`. */
+export const AGENT_AUDIENCE_PREFIX = 'agent:';
+/** Default bound on cached tokens per ingress instance (spec §3.3). */
+export const DEFAULT_MINT_CACHE_MAX_ENTRIES = 1000;
+
+/** The tenant-qualified subject (ADR-0040). */
+export function qualifiedSubject(tenantId: string, sub: string): string {
+  return `${tenantId}#${sub}`;
+}
+
+export interface MintConfig {
+  /** The ingress issuer URL (`<baseUrl>`), the `iss` claim. */
+  readonly issuer: string;
+  /** The KMS key id of the current signing key; the `kid`. */
+  readonly keyId: string;
+  readonly algorithm: JwsAlgorithm;
+  /** `exp - iat`, 60 to 900 seconds (spec §3.3). */
+  readonly ttlSeconds: number;
+  /** A cached token is reused only while more than this many seconds of its life are left. */
+  readonly reuseMarginSeconds: number;
+  /** The ingress role ARN, `act.sub` (RFC 8693). */
+  readonly ingressRoleArn: string;
+  readonly cacheMaxEntries?: number;
+}
+
+export interface MintInput {
+  readonly tenantId: string;
+  /** The identity token's `sub`. */
+  readonly sub: string;
+  readonly agent: string;
+  /** The granted set, space-separated (src/shared/grant.ts). */
+  readonly scope: string;
+  /** The versions in the cache key (ADR-0036). */
+  readonly versions: { readonly tenant: number; readonly agent: number; readonly plan?: number };
+}
+
+/** The claims of a transaction token (spec §6.2.2). */
+export interface TransactionClaims {
+  readonly iss: string;
+  readonly sub: string;
+  readonly user: string;
+  readonly tenant_id: string;
+  readonly agent: string;
+  readonly scope: string;
+  readonly aud: string[];
+  readonly act: { readonly sub: string };
+  readonly txn: string;
+  readonly iat: number;
+  readonly exp: number;
+  readonly jti: string;
+}
+
+export interface MintedToken {
+  readonly token: string;
+  readonly txn: string;
+  readonly exp: number;
+  /** `hit` when served from the cache (no KMS call), `miss` when minted now (P-9). */
+  readonly mint: 'hit' | 'miss';
+}
+
+/** The claims for one mint. `now` is in seconds. Pure. */
+export function transactionClaims(
+  input: MintInput,
+  config: Pick<MintConfig, 'issuer' | 'ttlSeconds' | 'ingressRoleArn'>,
+  now: number,
+  ids: { txn: string; jti: string },
+): TransactionClaims {
+  return {
+    iss: config.issuer,
+    sub: qualifiedSubject(input.tenantId, input.sub),
+    user: input.sub,
+    tenant_id: input.tenantId,
+    agent: input.agent,
+    scope: input.scope,
+    aud: [`${AGENT_AUDIENCE_PREFIX}${input.agent}`, TOOLS_GATEWAY_AUDIENCE],
+    act: { sub: config.ingressRoleArn },
+    txn: ids.txn,
+    iat: now,
+    exp: now + config.ttlSeconds,
+    jti: ids.jti,
+  };
+}
+
+/** The mint cache key: tenant, user, agent and the three versions (spec §3.6). */
+export function mintCacheKey(input: MintInput): string {
+  return JSON.stringify([input.tenantId, input.sub, input.agent, input.versions.tenant, input.versions.agent, input.versions.plan ?? 0, input.scope]);
+}
+
+export interface TokenMinterDependencies {
+  readonly signer: DigestSigner;
+  /** Milliseconds since the epoch. */
+  readonly now?: () => number;
+  readonly txnId?: () => string;
+  readonly jti?: () => string;
+}
+
+export class TokenMinter {
+  private readonly cache = new Map<string, MintedToken>();
+  private readonly inflight = new Map<string, Promise<MintedToken>>();
+  private readonly now: () => number;
+  private readonly txnId: () => string;
+  private readonly jti: () => string;
+
+  constructor(private readonly config: MintConfig, private readonly deps: TokenMinterDependencies) {
+    if (!Number.isInteger(config.ttlSeconds) || config.ttlSeconds < 60 || config.ttlSeconds > 900) {
+      throw new Error('TokenMinter: ttlSeconds must be an integer from 60 to 900');
+    }
+    this.now = deps.now ?? Date.now;
+    // 128 random bits, base64url (spec §6.2.2).
+    this.txnId = deps.txnId ?? (() => randomBytes(16).toString('base64url'));
+    this.jti = deps.jti ?? randomUUID;
+  }
+
+  /** A token for `input`: from the cache while enough life is left, else a fresh KMS-signed one. */
+  async mint(input: MintInput): Promise<MintedToken> {
+    const key = mintCacheKey(input);
+    const nowSeconds = Math.floor(this.now() / 1000);
+    const cached = this.cache.get(key);
+    if (cached !== undefined) {
+      if (cached.exp - nowSeconds > this.config.reuseMarginSeconds) {
+        // LRU: move to the end.
+        this.cache.delete(key);
+        this.cache.set(key, cached);
+        return { ...cached, mint: 'hit' };
+      }
+      this.cache.delete(key);
+    }
+    const pending = this.inflight.get(key);
+    if (pending !== undefined) {
+      return pending.then((t) => ({ ...t, mint: 'hit' as const }));
+    }
+    const minting = this.sign(input, nowSeconds).finally(() => this.inflight.delete(key));
+    this.inflight.set(key, minting);
+    const minted = await minting;
+    this.store(key, minted);
+    return minted;
+  }
+
+  private async sign(input: MintInput, nowSeconds: number): Promise<MintedToken> {
+    const claims = transactionClaims(input, this.config, nowSeconds, { txn: this.txnId(), jti: this.jti() });
+    const token = await signJws(
+      { alg: this.config.algorithm, typ: TRANSACTION_TOKEN_TYPE, kid: this.config.keyId },
+      claims,
+      this.deps.signer,
+    );
+    return { token, txn: claims.txn, exp: claims.exp, mint: 'miss' };
+  }
+
+  private store(key: string, token: MintedToken): void {
+    const max = this.config.cacheMaxEntries ?? DEFAULT_MINT_CACHE_MAX_ENTRIES;
+    while (this.cache.size >= max) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      this.cache.delete(oldest);
+    }
+    this.cache.set(key, token);
+  }
+
+  /** Cached entries, for tests. */
+  get size(): number {
+    return this.cache.size;
+  }
+}

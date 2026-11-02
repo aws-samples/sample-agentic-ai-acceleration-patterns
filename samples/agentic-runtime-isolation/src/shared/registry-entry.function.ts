@@ -4,7 +4,7 @@
 /**
  * The registry-entry custom resource handler (ADR-0024). One backend's stack
  * owns one SSM parameter, `${prefix}backends/<name>`, holding
- * `{ runtimeArn, scopes, status }`:
+ * `{ runtimeArn, needs, tools, version, status }` (v2, ADR-0032):
  *
  * - Create writes the entry with `status: active` and refuses to overwrite:
  *   two stacks claiming one backend name is a deploy-time failure naming
@@ -44,7 +44,8 @@ import { parseRegistryEntry, type RegistryEntry } from './registry';
 export interface RegistryEntryProperties {
   readonly ParameterName: string;
   readonly RuntimeArn: string;
-  readonly Scopes?: string[];
+  readonly Needs?: string[];
+  readonly Tools?: string[];
   readonly DrainSeconds: string | number;
   /** The custom-resource framework's own property; ignored. */
   readonly ServiceToken?: string;
@@ -74,10 +75,19 @@ export interface RegistryEntryDependencies {
 }
 
 /** The entry one request writes; validated with the same parser the ingress uses, so a bad value fails here, not at request time. */
-function entryFrom(properties: RegistryEntryProperties, status: RegistryEntry['status']): RegistryEntry {
+function entryFrom(properties: RegistryEntryProperties, status: RegistryEntry['status'], version: number): RegistryEntry {
   return parseRegistryEntry(
-    JSON.stringify({ runtimeArn: properties.RuntimeArn, scopes: properties.Scopes ?? [], status }),
+    JSON.stringify({ runtimeArn: properties.RuntimeArn, needs: properties.Needs ?? [], tools: properties.Tools ?? [], version, status }),
   );
+}
+
+/**
+ * The entry's current `version` (spec §4.3): 0 when the parameter is gone or
+ * holds no readable version (a v1 entry), so the next write is version 1 or
+ * one more than what is there.
+ */
+async function currentVersion(ssm: SSMClient, name: string): Promise<number> {
+  return (await currentEntry(ssm, name))?.version ?? 0;
 }
 
 /** Writes the entry; `overwrite: false` lets SSM refuse a name another stack already holds. */
@@ -86,24 +96,29 @@ async function put(ssm: SSMClient, name: string, entry: RegistryEntry, overwrite
 }
 
 /**
- * The `runtimeArn` the entry currently holds: undefined when the parameter
- * is gone, null when its value is not an entry (nothing can be routing
- * through it, so the owner cannot be told and it is treated as ours).
+ * The `runtimeArn` and `version` the entry currently holds: undefined when
+ * the parameter is gone; `runtimeArn` null when its value is not an entry
+ * (nothing can be routing through it, so the owner cannot be told and it is
+ * treated as ours).
  */
-async function currentRuntimeArn(ssm: SSMClient, name: string): Promise<string | null | undefined> {
+async function currentEntry(ssm: SSMClient, name: string): Promise<{ runtimeArn: string | null; version: number } | undefined> {
+  let raw: string;
   try {
     const current = await ssm.send(new GetParameterCommand({ Name: name }));
-    const value: unknown = JSON.parse(current.Parameter?.Value ?? '');
-    const arn = typeof value === 'object' && value !== null ? (value as Record<string, unknown>).runtimeArn : undefined;
-    return typeof arn === 'string' ? arn : null;
+    raw = current.Parameter?.Value ?? '';
   } catch (error) {
     if (error instanceof ParameterNotFound) {
       return undefined;
     }
-    if (error instanceof SyntaxError) {
-      return null;
-    }
     throw error;
+  }
+  try {
+    const value = JSON.parse(raw) as unknown;
+    const record = typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+    const version = typeof record.version === 'number' && Number.isInteger(record.version) && record.version > 0 ? record.version : 0;
+    return { runtimeArn: typeof record.runtimeArn === 'string' ? record.runtimeArn : null, version };
+  } catch {
+    return { runtimeArn: null, version: 0 };
   }
 }
 
@@ -126,9 +141,9 @@ export async function handleEvent(event: RegistryEntryEvent, deps: RegistryEntry
   }
 
   if (event.RequestType === 'Delete') {
-    let current: string | null | undefined;
+    let current: { runtimeArn: string | null; version: number } | undefined;
     try {
-      current = await currentRuntimeArn(deps.ssm, name);
+      current = await currentEntry(deps.ssm, name);
     } catch (error) {
       log.error('registry entry read failed', { parameter: name, error: errorName(error) });
       return { status: 'FAILED', physicalResourceId: name, reason: `GetParameter failed: ${errorName(error)}` };
@@ -136,14 +151,14 @@ export async function handleEvent(event: RegistryEntryEvent, deps: RegistryEntry
     if (current === undefined) {
       return { status: 'SUCCESS', physicalResourceId: name };
     }
-    if (current !== null && current !== properties.RuntimeArn) {
+    if (current.runtimeArn !== null && current.runtimeArn !== properties.RuntimeArn) {
       // Another stack holds the name now; its route must keep working.
       log.warn('registry entry owned by another Runtime; left in place', { parameter: name });
       return { status: 'SUCCESS', physicalResourceId: name };
     }
     const drainSeconds = Number(properties.DrainSeconds);
     try {
-      await put(deps.ssm, name, entryFrom(properties, 'draining'), true);
+      await put(deps.ssm, name, entryFrom(properties, 'draining', Math.max(1, current.version)), true);
     } catch (error) {
       // A malformed entry cannot be drained; still remove it below.
       log.error('registry entry drain write failed', { parameter: name, error: errorName(error) });
@@ -163,7 +178,10 @@ export async function handleEvent(event: RegistryEntryEvent, deps: RegistryEntry
   }
 
   try {
-    await put(deps.ssm, name, entryFrom(properties, 'active'), event.RequestType === 'Update');
+    // Create writes version 1; Update bumps it, so the mint cache key changes
+    // and the next request mints the new grant (ADR-0036).
+    const version = event.RequestType === 'Update' ? (await currentVersion(deps.ssm, name)) + 1 : 1;
+    await put(deps.ssm, name, entryFrom(properties, 'active', version), event.RequestType === 'Update');
     return { status: 'SUCCESS', physicalResourceId: name };
   } catch (error) {
     if (error instanceof ParameterAlreadyExists) {
@@ -173,8 +191,9 @@ export async function handleEvent(event: RegistryEntryEvent, deps: RegistryEntry
       // this function; no log, the reason reaches the deployer through
       // CloudFormation.
       try {
-        if ((await currentRuntimeArn(deps.ssm, name)) === properties.RuntimeArn) {
-          await put(deps.ssm, name, entryFrom(properties, 'active'), true);
+        const held = await currentEntry(deps.ssm, name);
+        if (held?.runtimeArn === properties.RuntimeArn) {
+          await put(deps.ssm, name, entryFrom(properties, 'active', held.version + 1), true);
           return { status: 'SUCCESS', physicalResourceId: name };
         }
       } catch (readError) {

@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: MIT-0
 
 import { AgentCoreRuntimeBackend, RUNTIME_HEADERS } from '../../src/backend/agentcore-runtime.transport';
+import { AuthorityError } from '../../src/shared/authority';
 import { ENV } from '../../src/shared/config';
 import type { TenantLimiter } from '../../src/shared/limits';
 import { pipelineFor } from '../../src/shared/request';
 import { sessionPrefix } from '../../src/shared/session';
 import { TokenVerifier } from '../../src/shared/verifier';
-import { baseConfig, CLIENT_ID, DISCOVERY_URL, FIXTURE_ENTRIES, REGISTRY_PREFIX, RUNTIME_ARN, stubRegistry, testIssuer, type TestIssuer } from '../helpers';
+import { baseConfig, CLIENT_ID, DISCOVERY_URL, FIXTURE_ENTRIES, REGISTRY_PREFIX, RUNTIME_ARN, stubAuthority, stubRegistry, testIssuer, TXN_TOKEN, type TestIssuer } from '../helpers';
 
 process.env[ENV.INGRESS] = 'agentcore-gateway';
 process.env[ENV.DISCOVERY_URL] = DISCOVERY_URL;
@@ -50,12 +51,13 @@ describe('intercept', () => {
           discoveryUrl: DISCOVERY_URL,
           allowedClientIds: [CLIENT_ID],
           requiredScopes: config.requiredScopes,
-          requireNarrowedToken: config.delegation.requireNarrowedToken,
-          allowedScopes: config.delegation.allowedScopes,
+          multiTenant: config.multiTenant,
         },
         { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
       ),
       registry: stubRegistry(ENTRIES).registry,
+      // v2: on this ingress the interceptor is the mint (C-3b); the authority step is stubbed here.
+      authority: stubAuthority(),
     }),
     backend,
     metricsOut: (l: string) => metrics.push(l),
@@ -80,7 +82,10 @@ describe('intercept', () => {
     const http = out.http as { transformedGatewayRequest: { headers: Record<string, string>; body: unknown } };
     expect(http.transformedGatewayRequest.headers).toEqual({
       [RUNTIME_HEADERS.SESSION_ID]: `s-${sessionPrefix('tenant-a', 'user-a1', 'user')}-conversationA1x0001`,
+      // v2: the minted transaction token, never the identity token (P-14).
+      [RUNTIME_HEADERS.TRANSACTION_TOKEN]: TXN_TOKEN,
     });
+    expect(JSON.stringify(http.transformedGatewayRequest.headers)).not.toContain(token);
     expect(http.transformedGatewayRequest.body).toBe(body);
   });
 
@@ -120,13 +125,40 @@ describe('intercept', () => {
     expect((refused.http as any).transformedGatewayResponse.statusCode).toBe(400);
   });
 
-  it('forwards the user token and the vended credentials in the Runtime custom headers when on (P-5, P-8)', async () => {
-    const token = await issuer.mint();
-    const d = deps(baseConfig({ ingress: 'agentcore-gateway', sessionScope: 'user', delegation: { forwardUserToken: true, requireNarrowedToken: false } }));
-    const out = await intercept(event({ authorization: `Bearer ${token}` }, body), d);
+  it('v2: writes the transaction token, never the identity token, and selects the tenant from X-Tenant-Id (P-5, P-14, ADR-0038)', async () => {
+    const token = await issuer.mint({ tenant_id: undefined, tenants: ['tenant-a', 'tenant-b'] });
+    const d = deps(baseConfig({ ingress: 'agentcore-gateway', sessionScope: 'user', multiTenant: true }));
+    const out = await intercept(event({ 'authorization': `Bearer ${token}`, 'x-tenant-id': 'tenant-b' }, body), d);
     const headers = (out.http as any).transformedGatewayRequest.headers;
-    expect(headers[RUNTIME_HEADERS.USER_TOKEN]).toBe(token);
-    expect(headers[RUNTIME_HEADERS.TENANT_CREDENTIALS]).toBeUndefined();
+    expect(headers[RUNTIME_HEADERS.TRANSACTION_TOKEN]).toBe(TXN_TOKEN);
+    expect(headers[RUNTIME_HEADERS.SESSION_ID]).toBe(`s-${sessionPrefix('tenant-b', 'user-a1', 'user')}-conversationA1x0001`);
+    expect(Object.values(headers)).not.toContain(token);
+    expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request admitted')).toMatchObject({ tenantId: 'tenant-b', txn: 'txn-1', grantSize: 2, mint: 'miss' });
+    const missing = await intercept(event({ authorization: `Bearer ${token}` }, body), d);
+    const response = (missing.http as any).transformedGatewayResponse;
+    expect(response.statusCode).toBe(400);
+    expect(Buffer.from(response.body, 'base64').toString()).toBe('bad request: tenant_required');
+  });
+
+  it('v2: an entitlement refusal is a fixed-text response with its public reason', async () => {
+    const config = baseConfig({ ingress: 'agentcore-gateway', sessionScope: 'user' });
+    const d = deps(config);
+    const refusing = pipelineFor(config, {
+      verifier: new TokenVerifier(
+        { discoveryUrl: DISCOVERY_URL, allowedClientIds: [CLIENT_ID] },
+        { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
+      ),
+      registry: stubRegistry(ENTRIES).registry,
+      authority: {
+        resolve: async () => {
+          throw new AuthorityError(403, 'agent_not_subscribed');
+        },
+      },
+    });
+    const out = await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body), { ...d, pipeline: refusing });
+    const response = (out.http as any).transformedGatewayResponse;
+    expect(response.statusCode).toBe(403);
+    expect(Buffer.from(response.body, 'base64').toString()).toBe('forbidden: agent_not_subscribed');
   });
 
   it.each<[string, boolean, number, string]>([
@@ -188,14 +220,6 @@ describe('intercept', () => {
       expect(logs.some((l) => l.includes('interceptor path lacks backend'))).toBe(false);
     });
 
-    it("a token with none of the backend's scopes -> 403 backend_scope_missing; any one of them is admitted (ADR-0025)", async () => {
-      const out = await intercept(event({ authorization: `Bearer ${await issuer.mint({ scope: 'default/chat' })}` }, body, { path: '/billing/invocations' }), deps());
-      expect((out.http as any).transformedGatewayResponse.statusCode).toBe(403);
-      expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request refused')).toMatchObject({ status: 403, reason: 'backend_scope_missing', backend: 'billing' });
-      const invokeOnly = await intercept(event({ authorization: `Bearer ${await issuer.mint({ scope: 'billing/invoke' })}` }, body, { path: '/billing/invocations' }), deps());
-      expect('transformedGatewayRequest' in invokeOnly.http).toBe(true);
-    });
-
     it('the name MUST come from the path: a default backend never routes a Gateway request (404, no header forwarded)', async () => {
       // deps() configures `agent` as the default backend; the API Gateway ingress would serve it here.
       for (const path of ['/invocations', undefined]) {
@@ -230,7 +254,7 @@ describe('intercept', () => {
     it('the transport headers are the same for every backend: the Gateway, not the interceptor, picks the Runtime', async () => {
       const out = await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body, { path: '/billing/invocations' }), deps());
       const headers = (out.http as any).transformedGatewayRequest.headers as Record<string, string>;
-      expect(Object.keys(headers)).toEqual([RUNTIME_HEADERS.SESSION_ID]);
+      expect(Object.keys(headers)).toEqual([RUNTIME_HEADERS.SESSION_ID, RUNTIME_HEADERS.TRANSACTION_TOKEN]);
       expect(JSON.stringify(out)).not.toContain(RUNTIME_ARN);
     });
   });

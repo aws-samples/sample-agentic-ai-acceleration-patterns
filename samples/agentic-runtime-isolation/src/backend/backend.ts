@@ -4,7 +4,7 @@
 /**
  * The backend interface, runtime side (spec §3.4, ADR-0011). The shared
  * ingress code produces a ValidatedRequest; a backend maps it onto its own
- * invoke call, unit-id transport and credential/user-token transport. The
+ * invoke call, unit-id transport and credential/transaction-token transport. The
  * ingress never sees anything backend-specific, and the backend never sees
  * the bearer token's raw `Authorization` value.
  *
@@ -32,8 +32,17 @@ export interface ValidatedRequest {
   readonly runtimeArn: string;
   /** The caller's prompt, validated as a string. */
   readonly prompt: string;
-  /** The user's token, only when `delegation.forwardUserToken` is on (P-5). */
-  readonly userToken?: string;
+  /**
+   * (v2, P-5, P-14) The transaction token the ingress minted for this request:
+   * the only token the agent sees. Never the identity token.
+   */
+  readonly transactionToken?: string;
+  /** (v2, P-9) The token's `txn`, for log lines that join an agent request to its tool calls. */
+  readonly txn?: string;
+  /** (v2, P-9) Entries in the token's `scope`. */
+  readonly grantSize?: number;
+  /** (v2, P-9) Whether the token came from the mint cache. */
+  readonly mint?: 'hit' | 'miss';
   /** Tenant-scoped credentials, only when `tvm` is on (P-8). */
   readonly credentials?: VendedCredentials;
 }
@@ -50,7 +59,7 @@ export interface InvokeBackend {
 }
 
 /**
- * A backend whose unit id and credential/user-token transport are request
+ * A backend whose unit id and credential/transaction-token transport are request
  * headers an intermediary writes (the AgentCore Gateway REQUEST interceptor).
  */
 export interface HeaderTransportBackend {

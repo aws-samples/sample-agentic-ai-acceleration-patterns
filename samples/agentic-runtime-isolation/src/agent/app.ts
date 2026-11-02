@@ -11,8 +11,12 @@
  *
  *   `report`           the echo report: the unit id the Runtime handed it,
  *                      the prefix part of that id, a nonce chosen once per
- *                      microVM, whether a user token or tenant credentials
- *                      arrived, and the forwarded token's non-secret claims;
+ *                      microVM, whether a transaction token (v2) and tenant
+ *                      credentials arrived, and the token's claims (`tenant_id`,
+ *                      `agent`, `scope`, `aud`, `act.sub`, `exp`), never the token;
+ *   `tools`            (v2) `tools/list` on the tools gateway with the
+ *                      transaction token as bearer;
+ *   `tool <t>/<n> <json>` (v2) `tools/call` of `<t>___<n>` with those arguments;
  *   `read <tenantId>`  the report plus a GetItem of `TENANT#<tenantId>` from
  *                      the demo table with the vended credentials (P-8; a
  *                      cross-tenant read fails in IAM, not here);
@@ -30,7 +34,7 @@
  * the input and output tokens from the ConverseStream metadata.
  *
  * It never logs or echoes a header value: not the token, not the credentials
- * (ADR-0006, ADR-0012, spike V-7). It validates that `prompt` is a string of
+ * (ADR-0012, ADR-0031, spike V-7, V-13). It validates that `prompt` is a string of
  * bounded length (Runtime input validation best practice).
  */
 
@@ -62,23 +66,47 @@ export interface AgentReport {
   readonly nonce: string;
   readonly unitId: string | null;
   readonly sessionPrefix: string | null;
-  readonly forwardedToken: boolean;
-  readonly forwardedTenant: string | null;
-  readonly forwardedScope: string | null;
+  /** (v2) Whether the transaction-token header arrived; the token itself is never reported. */
+  readonly transactionToken: boolean;
+  readonly tokenTenant: string | null;
+  readonly tokenAgent: string | null;
+  readonly tokenScope: string | null;
+  readonly tokenAud: string[] | null;
+  readonly tokenActSub: string | null;
+  readonly tokenExp: number | null;
   readonly credentials: boolean;
   readonly callerArn?: string;
   readonly read?: { tenant: string; result: 'ok' | 'error'; item?: Record<string, unknown>; error?: string };
   readonly error?: string;
 }
 
-/** Non-secret claims of a JWT, decoded WITHOUT verification: display only, never trusted. */
-export function unverifiedClaims(token: string): { tenant_id?: string; scope?: string } | null {
+/** The claims a report shows. */
+export interface ReportedClaims {
+  readonly tenant_id?: string;
+  readonly agent?: string;
+  readonly scope?: string;
+  readonly aud?: string[];
+  readonly actSub?: string;
+  readonly exp?: number;
+}
+
+/**
+ * Non-secret claims of the transaction token, decoded WITHOUT verification:
+ * display only. Only the ingress can set the header (P-1), so the agent need
+ * not verify; it may with the published JWKS (`RI_ISSUER`).
+ */
+export function unverifiedClaims(token: string): ReportedClaims | null {
   try {
     const payload = token.split('.')[1];
     const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as Record<string, unknown>;
+    const act = parsed.act as Record<string, unknown> | undefined;
     return {
       tenant_id: typeof parsed.tenant_id === 'string' ? parsed.tenant_id : undefined,
+      agent: typeof parsed.agent === 'string' ? parsed.agent : undefined,
       scope: typeof parsed.scope === 'string' ? parsed.scope : undefined,
+      aud: Array.isArray(parsed.aud) ? parsed.aud.filter((a): a is string => typeof a === 'string') : undefined,
+      actSub: typeof act?.sub === 'string' ? act.sub : undefined,
+      exp: typeof parsed.exp === 'number' ? parsed.exp : undefined,
     };
   } catch {
     return null;
@@ -140,16 +168,20 @@ export async function buildReport(
   clients: AgentClients = defaultClients,
 ): Promise<AgentReport> {
   const unitId = headerValue(headers, RUNTIME_HEADERS.SESSION_ID) ?? null;
-  const userToken = headerValue(headers, RUNTIME_HEADERS.USER_TOKEN);
+  const transactionToken = headerValue(headers, RUNTIME_HEADERS.TRANSACTION_TOKEN);
   const credentialHeader = headerValue(headers, RUNTIME_HEADERS.TENANT_CREDENTIALS);
-  const claims = userToken === undefined ? null : unverifiedClaims(userToken);
+  const claims = transactionToken === undefined ? null : unverifiedClaims(transactionToken);
   const report: { -readonly [K in keyof AgentReport]: AgentReport[K] } = {
     nonce: NONCE,
     unitId,
     sessionPrefix: unitId === null ? null : prefixOf(unitId),
-    forwardedToken: userToken !== undefined,
-    forwardedTenant: claims?.tenant_id ?? null,
-    forwardedScope: claims?.scope ?? null,
+    transactionToken: transactionToken !== undefined,
+    tokenTenant: claims?.tenant_id ?? null,
+    tokenAgent: claims?.agent ?? null,
+    tokenScope: claims?.scope ?? null,
+    tokenAud: claims?.aud ?? null,
+    tokenActSub: claims?.actSub ?? null,
+    tokenExp: claims?.exp ?? null,
     credentials: credentialHeader !== undefined,
   };
 
@@ -212,6 +244,68 @@ export interface AgentOptions {
   readonly modelId?: string;
   /** Interval of the `stream N` probe; tests shorten it. */
   readonly streamIntervalMs?: number;
+  /** (v2) The tools gateway MCP endpoint (RI_TOOLS_GATEWAY_URL); without it the tool probes answer `NoToolsGateway`. */
+  readonly toolsGatewayUrl?: string;
+  /** (v2) The HTTP client for the tools gateway; tests inject one. */
+  readonly fetch?: typeof fetch;
+}
+
+/** (v2) The tool probe in a prompt: `tools`, or `tool <target>/<tool> <json>`. */
+export function toolProbe(prompt: string): { method: 'tools/list' } | { method: 'tools/call'; name: string; arguments: Record<string, unknown> } | undefined {
+  if (/^tools\s*$/.test(prompt)) {
+    return { method: 'tools/list' };
+  }
+  const call = /^tool\s+([a-z0-9-]{1,32})\/([a-z0-9_]{1,64})(?:\s+(\{.*\}))?\s*$/s.exec(prompt);
+  if (call === null) {
+    return undefined;
+  }
+  let args: unknown = {};
+  try {
+    args = call[3] === undefined ? {} : JSON.parse(call[3]);
+  } catch {
+    return undefined;
+  }
+  if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+    return undefined;
+  }
+  return { method: 'tools/call', name: `${call[1]}___${call[2]}`, arguments: args as Record<string, unknown> };
+}
+
+/**
+ * (v2, C-2) Calls the tools gateway with the transaction token as bearer:
+ * one JSON-RPC request over MCP streamable HTTP. Returns the JSON-RPC result
+ * or `{ error: <code or status> }`; never the token.
+ * TODO(v2): the MCP `initialize` handshake and `Mcp-Session-Id` if the Gateway starts requiring them (the spike called tools/list directly).
+ */
+export async function callToolsGateway(
+  url: string,
+  token: string,
+  probe: NonNullable<ReturnType<typeof toolProbe>>,
+  fetcher: typeof fetch = fetch,
+): Promise<unknown> {
+  const params = probe.method === 'tools/call' ? { name: probe.name, arguments: probe.arguments } : {};
+  const response = await fetcher(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/event-stream',
+      'MCP-Protocol-Version': '2025-11-25',
+    },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: probe.method, params }),
+  });
+  const text = await response.text();
+  // A streamed answer is SSE: take the last `data:` line.
+  const json = text.trimStart().startsWith('{') ? text : text.split('\n').filter((l) => l.startsWith('data:')).pop()?.slice(5) ?? '';
+  try {
+    const parsed = JSON.parse(json) as { result?: unknown; error?: { message?: unknown } };
+    if (parsed.error !== undefined) {
+      return { error: typeof parsed.error.message === 'string' ? parsed.error.message : `http_${response.status}` };
+    }
+    return response.ok ? parsed.result : { error: `http_${response.status}` };
+  } catch {
+    return { error: `http_${response.status}` };
+  }
 }
 
 /** One SSE event: `event:` (optional) and one `data:` line. */
@@ -315,6 +409,24 @@ export async function respond(
     return;
   }
 
+  const probe = toolProbe(prompt);
+  if (probe !== undefined) {
+    const token = headerValue(headers, RUNTIME_HEADERS.TRANSACTION_TOKEN);
+    sink.head(200, SSE_HEADERS);
+    if (options.toolsGatewayUrl === undefined || token === undefined) {
+      sink.write(sseEvent({ error: options.toolsGatewayUrl === undefined ? 'NoToolsGateway' : 'NoTransactionToken' }, 'error'));
+    } else {
+      try {
+        sink.write(sseEvent({ tool: probe.method, result: await callToolsGateway(options.toolsGatewayUrl, token, probe, options.fetch) }));
+      } catch (error) {
+        sink.write(sseEvent({ error: error instanceof Error ? error.name : 'unknown' }, 'error'));
+      }
+    }
+    sink.write(usageEvent(zero));
+    sink.end();
+    return;
+  }
+
   if (isProbe(prompt)) {
     const report = await buildReport(headers, prompt, options.tableName, clients);
     sink.head(200, SSE_HEADERS);
@@ -403,7 +515,11 @@ async function serve(req: IncomingMessage, res: ServerResponse, options: AgentOp
 
 /** Starts the HTTP server the Runtime talks to. Not called under test. */
 export function main(): void {
-  const options: AgentOptions = { tableName: process.env[AGENT_ENV.TABLE_NAME], modelId: process.env[AGENT_ENV.MODEL_ID] };
+  const options: AgentOptions = {
+    tableName: process.env[AGENT_ENV.TABLE_NAME],
+    modelId: process.env[AGENT_ENV.MODEL_ID],
+    toolsGatewayUrl: process.env[AGENT_ENV.TOOLS_GATEWAY_URL],
+  };
   createServer((req, res) => {
     serve(req, res, options).catch(() => {
       if (!res.headersSent) {

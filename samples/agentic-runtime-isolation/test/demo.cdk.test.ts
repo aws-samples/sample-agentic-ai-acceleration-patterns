@@ -8,10 +8,12 @@ import { AwsSolutionsChecks } from 'cdk-nag';
 import {
   AGENT_RUNTIME_PARAMETERS,
   BILLING_BACKEND,
-  BILLING_SCOPES,
+  BILLING_NEEDS,
+  BILLING_TOOLS,
   dashboardName,
   DEFAULT_MODEL_ID,
-  DEFAULT_SCOPES,
+  DEFAULT_NEEDS,
+  DEFAULT_TOOLS,
   defaultModelId,
   DemoContext,
   IDENTITY_PARAMETERS,
@@ -23,7 +25,6 @@ import {
   wantsBillingBackend,
 } from '../src/demo.cdk';
 import { COST_METRIC_NAMES } from '../src/shared/metrics';
-import { IDENTITY_API_PARAMETERS } from '../src/shared/scope-registration.cdk';
 import { DEFAULT_REGISTRY_PREFIX, GATEWAY_TARGET_NAME, PUBLISHED } from '../src/shared-ingress.cdk';
 
 /** The thin demo stack (spec C-4, §6.4): consumes tenant-identity's parameters, publishes its own, wires the TVM demo. */
@@ -31,8 +32,7 @@ const FIXTURE_AGENT = path.join(__dirname, 'fixtures', 'agent');
 
 const context = (overrides: Partial<DemoContext> = {}): DemoContext => ({
   ingress: 'api-gateway',
-  forwardUserToken: false,
-  requireNarrowedToken: false,
+  multiTenant: false,
   tvm: false,
   includeUserIdTag: false,
   modelId: DEFAULT_MODEL_ID,
@@ -68,9 +68,11 @@ function flatten(value: unknown): string {
   return JSON.stringify(value);
 }
 
-/** DynamoDB tables other than the construct's TenantLimits counters (the only one with a TTL). */
+/** DynamoDB tables other than the construct's TenantLimits counters (the only one with a TTL) and its entitlement store (the only one with a sort key). */
 function demoTables(template: Template): any[] {
-  return (Object.values(template.findResources('AWS::DynamoDB::GlobalTable')) as any[]).filter((t) => t.Properties.TimeToLiveSpecification === undefined);
+  return (Object.values(template.findResources('AWS::DynamoDB::GlobalTable')) as any[]).filter(
+    (t) => t.Properties.TimeToLiveSpecification === undefined && t.Properties.KeySchema.length === 1,
+  );
 }
 
 describe('parseDemoContext (fail-fast, standard §4.3)', () => {
@@ -92,9 +94,7 @@ describe('parseDemoContext (fail-fast, standard §4.3)', () => {
           ingress: 'api-gateway',
           session: 'tenant',
           requiredScopes: 'default/chat, platform/active',
-          forwardUserToken: 'true',
-          requireNarrowedToken: true,
-          allowedScopes: 'default/chat',
+          multiTenant: 'true',
           tvm: 'true',
           includeUserIdTag: 'true',
           modelId: 'amazon.nova-micro-v1:0',
@@ -103,16 +103,14 @@ describe('parseDemoContext (fail-fast, standard §4.3)', () => {
           requestsPerMinute: '30',
           outputTokensPerMinute: 2000,
           publishParameters: 'false',
-          scopeOwner: 'shared-owner',
+          owner: 'shared-owner',
         }),
       ),
     ).toEqual({
       ingress: 'api-gateway',
       sessionScope: 'tenant',
       requiredScopes: ['default/chat', 'platform/active'],
-      forwardUserToken: true,
-      requireNarrowedToken: true,
-      allowedScopes: ['default/chat'],
+      multiTenant: true,
       tvm: true,
       includeUserIdTag: true,
       modelId: 'amazon.nova-micro-v1:0',
@@ -121,16 +119,21 @@ describe('parseDemoContext (fail-fast, standard §4.3)', () => {
       requestsPerMinute: 30,
       outputTokensPerMinute: 2000,
       publishParameters: false,
-      scopeOwner: 'shared-owner',
+      owner: 'shared-owner',
     });
   });
 
-  it('scopeOwner: unset or empty is undefined (each stack owns its scopes alone), otherwise the string as given; AgentBackend validates it at synth (ADR-0025)', () => {
-    expect(parseDemoContext(read({ ingress: 'api-gateway' })).scopeOwner).toBeUndefined();
-    expect(parseDemoContext(read({ ingress: 'api-gateway', scopeOwner: '' })).scopeOwner).toBeUndefined();
-    expect(parseDemoContext(read({ ingress: 'api-gateway', scopeOwner: 'RuntimeIsolationInteg' })).scopeOwner).toBe('RuntimeIsolationInteg');
-    expect(() => parseDemoContext(read({ ingress: 'api-gateway', scopeOwner: true }))).toThrow(/Context 'scopeOwner' must be a string/);
-    expect(() => synth(context({ scopeOwner: 'a#b' }))).toThrow(/AgentBackend: scopeOwner must not contain '#'/);
+  it('owner: unset or empty is undefined (each reservation is its own owner), otherwise the string as given; AgentBackend validates it at synth (ADR-0035)', () => {
+    expect(parseDemoContext(read({ ingress: 'api-gateway' })).owner).toBeUndefined();
+    expect(parseDemoContext(read({ ingress: 'api-gateway', owner: '' })).owner).toBeUndefined();
+    expect(parseDemoContext(read({ ingress: 'api-gateway', owner: 'RuntimeIsolationInteg' })).owner).toBe('RuntimeIsolationInteg');
+    expect(() => parseDemoContext(read({ ingress: 'api-gateway', owner: true }))).toThrow(/Context 'owner' must be a string/);
+    expect(() => synth(context({ owner: 'a#b' }))).toThrow(/AgentBackend: owner must not contain '#'/);
+  });
+
+  it('multiTenant: a flag, default false (ADR-0031)', () => {
+    expect(parseDemoContext(read({ ingress: 'api-gateway', multiTenant: 'true' })).multiTenant).toBe(true);
+    expect(() => parseDemoContext(read({ ingress: 'api-gateway', multiTenant: 'sometimes' }))).toThrow(/'multiTenant'/);
   });
 
   it('billingBackend: explicit true/false, else off (ADR-0024, ADR-0025); the demo scopes are named after their backends', () => {
@@ -142,8 +145,10 @@ describe('parseDemoContext (fail-fast, standard §4.3)', () => {
     expect(wantsBillingBackend(context({ billingBackend: false }))).toBe(false);
     expect(wantsBillingBackend(context({ billingBackend: true }))).toBe(true);
     expect(GATEWAY_TARGET_NAME).toBe('default');
-    expect(DEFAULT_SCOPES).toEqual(['default/chat']);
-    expect(BILLING_SCOPES).toEqual(['billing/read', 'billing/invoke']);
+    expect(DEFAULT_NEEDS).toEqual(['default/chat']);
+    expect(DEFAULT_TOOLS).toEqual(['crm/*']);
+    expect(BILLING_NEEDS).toEqual(['billing/read', 'billing/invoke']);
+    expect(BILLING_TOOLS).toEqual(['invoices/*']);
   });
 
   it('publishParameters defaults to true and must be true or false (the parameter names are account-wide)', () => {
@@ -181,7 +186,7 @@ describe('parseDemoContext (fail-fast, standard §4.3)', () => {
 });
 
 describe('RuntimeIsolationDemoStack', () => {
-  it('reads tenant-identity\'s parameters at deploy time and builds the discovery URL from them (ADR-0004); the scope registration reads the API URL and invoke policy the same way (ADR-0025)', () => {
+  it('reads tenant-identity\'s parameters at deploy time and builds the discovery URL from them (ADR-0004); the registry entry carries needs and tools (ADR-0032)', () => {
     const { template } = synth(context());
     const params = template.toJSON().Parameters as Record<string, any>;
     const ssmParams = Object.values(params).filter((p) => p.Type === 'AWS::SSM::Parameter::Value<String>' && String(p.Default).startsWith('/application-plane/'));
@@ -189,14 +194,12 @@ describe('RuntimeIsolationDemoStack', () => {
       [
         IDENTITY_PARAMETERS.userPoolId,
         IDENTITY_PARAMETERS.appClientId,
-        IDENTITY_API_PARAMETERS.apiUrl,
-        IDENTITY_API_PARAMETERS.platformInvokePolicyArn,
       ].sort(),
     );
-    template.hasResourceProperties('Custom::RuntimeIsolationScopeRegistration', {
-      Backend: GATEWAY_TARGET_NAME,
-      Scopes: DEFAULT_SCOPES,
-      ApiUrl: { Ref: Match.stringLikeRegexp('^SsmParameterValue') },
+    template.hasResourceProperties('Custom::RuntimeIsolationRegistryEntry', {
+      ParameterName: `${DEFAULT_REGISTRY_PREFIX}backends/${GATEWAY_TARGET_NAME}`,
+      Needs: [...DEFAULT_NEEDS],
+      Tools: [...DEFAULT_TOOLS],
     });
     const text = JSON.stringify(template.toJSON());
     expect(text).toContain('cognito-idp.');
@@ -211,28 +214,29 @@ describe('RuntimeIsolationDemoStack', () => {
     expect(params.filter((p) => String(p.Default).startsWith('/application-plane/'))).toHaveLength(0);
     expect(JSON.stringify(template.toJSON())).toContain(PLACEHOLDER.userPoolId);
     expect(JSON.stringify(template.toJSON())).toContain(PLACEHOLDER.appClientId);
-    template.hasResourceProperties('Custom::RuntimeIsolationScopeRegistration', { ApiUrl: PLACEHOLDER.apiUrl });
-    expect(JSON.stringify(template.toJSON())).toContain(PLACEHOLDER.platformInvokePolicyArn);
     const rule = template.toJSON().Rules.RefusePlaceholderDeployment;
     expect(rule.Assertions[0].Assert).toEqual({ 'Fn::Equals': ['build-placeholder', 'deployable'] });
   });
 
-  it('publishes under /application-plane/shared/agent-runtime/: the ingress its six (seven on the Gateway), the demo the default backend\'s runtimeArn (spec §6.4, ADR-0024)', () => {
+  it('publishes under /application-plane/shared/agent-runtime/: every PUBLISHED name on the Gateway, the demo the default backend\'s runtimeArn (spec §6.4, ADR-0024)', () => {
     const { template, stack } = synth(context({ ingress: 'agentcore-gateway' }));
-    template.resourceCountIs('AWS::SSM::Parameter', 8);
-    const names = (Object.values(template.findResources('AWS::SSM::Parameter')) as any[]).map((p) => p.Properties.Name).sort();
+    // Every PUBLISHED name, the demo's runtimeArn, and one registry pointer per demo ToolTarget (crm, invoices).
+    template.resourceCountIs('AWS::SSM::Parameter', Object.keys(PUBLISHED).length + 3);
+    const names = (Object.values(template.findResources('AWS::SSM::Parameter')) as any[]).map((p) => JSON.stringify(p.Properties.Name)).sort();
     expect(names).toEqual(
       [
         AGENT_RUNTIME_PARAMETERS.runtimeArn,
         ...Object.values(PUBLISHED).map((n) => `${DEFAULT_REGISTRY_PREFIX}${n}`),
-      ].sort(),
+        stack.resolve(stack.crm.registryParameterName),
+        stack.resolve(stack.invoices.registryParameterName),
+      ].map((n) => JSON.stringify(n)).sort(),
     );
     template.hasResourceProperties('AWS::SSM::Parameter', { Name: AGENT_RUNTIME_PARAMETERS.runtimeArn, Type: 'String' });
     template.hasResourceProperties('AWS::SSM::Parameter', { Name: `${DEFAULT_REGISTRY_PREFIX}${PUBLISHED.ingress}`, Value: 'agentcore-gateway' });
     expect(stack.registryPrefix).toBe(DEFAULT_REGISTRY_PREFIX);
     expect(AGENT_RUNTIME_PARAMETERS.runtimeArn).toBe('/application-plane/shared/agent-runtime/runtimeArn');
     // The registry entry is a custom resource under the same prefix, not a plain parameter.
-    template.hasResourceProperties('Custom::RuntimeIsolationRegistryEntry', { ParameterName: `${DEFAULT_REGISTRY_PREFIX}backends/${GATEWAY_TARGET_NAME}`, Scopes: DEFAULT_SCOPES });
+    template.hasResourceProperties('Custom::RuntimeIsolationRegistryEntry', { ParameterName: `${DEFAULT_REGISTRY_PREFIX}backends/${GATEWAY_TARGET_NAME}`, Needs: [...DEFAULT_NEEDS] });
   });
 
   it('publishParameters=false (prop or context) moves the registry and the published parameters under a stack-scoped prefix and writes no demo parameter (a second ingress beside the first)', () => {
@@ -256,34 +260,43 @@ describe('RuntimeIsolationDemoStack', () => {
   });
 
   describe.each(['api-gateway', 'agentcore-gateway'] as const)('the billing backend behind the same ingress (ADR-0024), ingress=%s', (ingress) => {
-    const allOn = context({ ingress, sessionScope: 'user', forwardUserToken: true, tvm: true, billingBackend: true });
+    const allOn = context({ ingress, sessionScope: 'user', multiTenant: true, tvm: true, billingBackend: true });
     const { template, stack } = synth(allOn);
 
-    it('an all-on stack has two backends: two Runtimes, two resource policies, two registry entries, two scope registrations, one ingress', () => {
+    it('an all-on stack has two backends: two Runtimes, two resource policies, two registry entries, two name reservations, two tool targets, one ingress', () => {
       template.resourceCountIs('AWS::BedrockAgentCore::Runtime', 2);
       template.resourceCountIs('AWS::BedrockAgentCore::ResourcePolicy', 2);
       template.resourceCountIs('Custom::RuntimeIsolationRegistryEntry', 2);
-      template.resourceCountIs('Custom::RuntimeIsolationScopeRegistration', 2);
-      template.resourceCountIs(ingress === 'api-gateway' ? 'AWS::ApiGateway::RestApi' : 'AWS::BedrockAgentCore::Gateway', 1);
-      template.resourceCountIs('AWS::BedrockAgentCore::GatewayTarget', ingress === 'agentcore-gateway' ? 2 : 0);
+      // Two backend name reservations plus the two ToolTargets' catalogue rows (ADR-0035).
+      template.resourceCountIs('Custom::RuntimeIsolationOwnedRows', 4);
+      // The tools Gateway is always there; the agentcore-gateway ingress adds its own (ADR-0033).
+      template.resourceCountIs('AWS::BedrockAgentCore::Gateway', ingress === 'api-gateway' ? 1 : 2);
+      // Two tool targets on the tools Gateway; two backend targets on the agentcore-gateway ingress.
+      template.resourceCountIs('AWS::BedrockAgentCore::GatewayTarget', ingress === 'agentcore-gateway' ? 4 : 2);
       expect(stack.billing).toBeDefined();
       expect(stack.billing!.name).toBe(BILLING_BACKEND);
       expect(stack.billing!.endpointUrl).toBe(stack.ingress.urlFor(BILLING_BACKEND));
     });
 
-    it('the billing entry owns BILLING_SCOPES and the default entry DEFAULT_SCOPES; each is registered with the identity API (ADR-0025)', () => {
+    it('the billing entry needs BILLING_NEEDS and reaches BILLING_TOOLS, the default entry DEFAULT_NEEDS and DEFAULT_TOOLS (ADR-0032)', () => {
       const entries = Object.values(template.findResources('Custom::RuntimeIsolationRegistryEntry')) as any[];
       const billing = entries.find((e) => e.Properties.ParameterName === `${DEFAULT_REGISTRY_PREFIX}backends/${BILLING_BACKEND}`);
       const agent = entries.find((e) => e.Properties.ParameterName === `${DEFAULT_REGISTRY_PREFIX}backends/${GATEWAY_TARGET_NAME}`);
-      expect(billing.Properties.Scopes).toEqual(BILLING_SCOPES);
-      expect(agent.Properties.Scopes).toEqual(DEFAULT_SCOPES);
-      template.hasResourceProperties('Custom::RuntimeIsolationScopeRegistration', { Backend: BILLING_BACKEND, Scopes: BILLING_SCOPES });
-      template.hasResourceProperties('Custom::RuntimeIsolationScopeRegistration', { Backend: GATEWAY_TARGET_NAME, Scopes: DEFAULT_SCOPES });
-      expect(stack.billing!.scopes).toEqual(BILLING_SCOPES);
-      expect(stack.agentBackend.scopes).toEqual(DEFAULT_SCOPES);
+      expect(billing.Properties.Needs).toEqual(BILLING_NEEDS);
+      expect(billing.Properties.Tools).toEqual(BILLING_TOOLS);
+      expect(agent.Properties.Needs).toEqual(DEFAULT_NEEDS);
+      expect(agent.Properties.Tools).toEqual(DEFAULT_TOOLS);
+      expect(stack.billing!.needs).toEqual(BILLING_NEEDS);
+      expect(stack.agentBackend.needs).toEqual(DEFAULT_NEEDS);
       // Both Runtimes run the same code and model, with the demo table.
       for (const runtime of Object.values(template.findResources('AWS::BedrockAgentCore::Runtime')) as any[]) {
-        expect(runtime.Properties.EnvironmentVariables).toEqual({ TABLE_NAME: stack.resolve(stack.table!.tableName), MODEL_ID: DEFAULT_MODEL_ID });
+        expect(runtime.Properties.EnvironmentVariables).toEqual({
+          TABLE_NAME: stack.resolve(stack.table!.tableName),
+          MODEL_ID: DEFAULT_MODEL_ID,
+          // (v2, ADR-0033) where the agent calls its tools, and the issuer it presents tokens from.
+          RI_ISSUER: expect.anything(),
+          RI_TOOLS_GATEWAY_URL: expect.anything(),
+        });
         expect(runtime.Properties.Tags).toEqual({ 'ri:ingress': stack.ingress.ingressId });
       }
       // One model, one statement on the deployer's tenant role (grantModel is idempotent).
@@ -292,24 +305,30 @@ describe('RuntimeIsolationDemoStack', () => {
       expect(models).toHaveLength(1);
     });
 
-    it('scopeOwner reaches both registrations as Owner (context, or the prop over it); unset, neither carries one (ADR-0025)', () => {
-      for (const reg of Object.values(template.findResources('Custom::RuntimeIsolationScopeRegistration')) as any[]) {
+    it('owner reaches every reservation (context, or the prop over it); unset, none carries one (ADR-0035)', () => {
+      for (const reg of Object.values(template.findResources('Custom::RuntimeIsolationOwnedRows')) as any[]) {
         expect(reg.Properties.Owner).toBeUndefined();
       }
-      const fromContext = synth(context({ ingress, billingBackend: true, scopeOwner: 'RuntimeIsolationInteg' })).template;
-      fromContext.resourceCountIs('Custom::RuntimeIsolationScopeRegistration', 2);
-      fromContext.hasResourceProperties('Custom::RuntimeIsolationScopeRegistration', { Backend: GATEWAY_TARGET_NAME, Owner: 'RuntimeIsolationInteg' });
-      fromContext.hasResourceProperties('Custom::RuntimeIsolationScopeRegistration', { Backend: BILLING_BACKEND, Owner: 'RuntimeIsolationInteg' });
+      const fromContext = synth(context({ ingress, billingBackend: true, owner: 'RuntimeIsolationInteg' })).template;
+      for (const reg of Object.values(fromContext.findResources('Custom::RuntimeIsolationOwnedRows')) as any[]) {
+        expect(reg.Properties.Owner).toBe('RuntimeIsolationInteg');
+      }
       const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
       const overridden = Template.fromStack(
         new RuntimeIsolationDemoStack(app, 'Overridden', {
-          context: context({ ingress, billingBackend: true, scopeOwner: 'from-context' }),
+          context: context({ ingress, billingBackend: true, owner: 'from-context' }),
           agentCodePath: FIXTURE_AGENT,
-          scopeOwner: 'from-prop',
+          owner: 'from-prop',
           env: { account: '111122223333', region: 'eu-central-1' },
         }),
       );
-      expect((Object.values(overridden.findResources('Custom::RuntimeIsolationScopeRegistration')) as any[]).map((r) => r.Properties.Owner)).toEqual(['from-prop', 'from-prop']);
+      const owners = (Object.values(overridden.findResources('Custom::RuntimeIsolationOwnedRows')) as any[]).map((r) => r.Properties.Owner);
+      expect(new Set(owners)).toEqual(new Set(['from-prop']));
+    });
+
+    it('the demo tool targets crm and invoices sit on the tools Gateway (ADR-0033)', () => {
+      expect(stack.crm.name).toBe('crm');
+      expect(stack.invoices.name).toBe('invoices');
     });
 
     it('publishes the billing Runtime ARN beside the default one, and outputs both URLs', () => {
@@ -419,8 +438,8 @@ describe('RuntimeIsolationDemoStack', () => {
 
   it('without tvm (no demo tenant data): no table, no demo TenantRole, but the construct\'s default model-only role and a TenantRoleArn output', () => {
     const { template, stack } = synth(context());
-    // Only the construct's TenantLimits counter table (ADR-0020), no demo data table.
-    template.resourceCountIs('AWS::DynamoDB::GlobalTable', 1);
+    // Only the construct's TenantLimits counter table (ADR-0020) and entitlement store (ADR-0030), no demo data table.
+    template.resourceCountIs('AWS::DynamoDB::GlobalTable', 2);
     expect(demoTables(template)).toHaveLength(0);
     expect(stack.table).toBeUndefined();
     expect(stack.tenantRole).toBeUndefined();
@@ -442,8 +461,8 @@ describe('RuntimeIsolationDemoStack', () => {
   describe.each(['api-gateway', 'agentcore-gateway'] as const)('tvm on, ingress=%s', (ingress) => {
     const { template, stack } = synth(context({ ingress, tvm: true }));
 
-    it('creates the demo table with DESTROY and PITR (beside the construct\'s TenantLimits table)', () => {
-      template.resourceCountIs('AWS::DynamoDB::GlobalTable', 2);
+    it('creates the demo table with DESTROY and PITR (beside the construct\'s TenantLimits and entitlement tables)', () => {
+      template.resourceCountIs('AWS::DynamoDB::GlobalTable', 3);
       const [demo] = demoTables(template);
       expect(demoTables(template)).toHaveLength(1);
       expect(demo.DeletionPolicy).toBe('Delete');
@@ -502,9 +521,7 @@ describe('RuntimeIsolationDemoStack', () => {
           ingress,
           sessionScope: 'user',
           requiredScopes: ['default/chat'],
-          forwardUserToken: true,
-          requireNarrowedToken: true,
-          allowedScopes: ['default/chat'],
+          multiTenant: true,
           tvm: true,
           includeUserIdTag: true,
           identityParameterPlaceholders: true,

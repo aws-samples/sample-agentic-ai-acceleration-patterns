@@ -9,8 +9,8 @@
  * the agent uses the vended tenant credentials for both, ADR-0018), a
  * resource policy that names one ingress principal, the `ri:ingress` tag
  * the ingress role's invoke grant is conditioned on (ADR-0024), and a
- * request-header allowlist that always carries the credential header and
- * carries the user-token header only when forwarding is on.
+ * request-header allowlist that carries the credential header and (v2,
+ * ADR-0031) the transaction-token header, never the v1 user-token header.
  */
 
 import * as fs from 'node:fs';
@@ -165,12 +165,12 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
       'xray:PutTraceSegments/PutTelemetryRecords/GetSampling* and cloudwatch:PutMetricData take no resource ARN; PutMetricData is pinned to the bedrock-agentcore namespace by condition. No data permission at all (ADR-0008).',
     );
 
-    // Headers the Runtime admits from the ingress (ADR-0006, ADR-0012). A
-    // header that is not listed never reaches the agent, so a client cannot
-    // inject one either. Empty when neither option is on.
+    // Headers the Runtime admits from the ingress (ADR-0012; v2, ADR-0031).
+    // A header that is not listed never reaches the agent, so a client
+    // cannot inject one either.
     const allowlist: string[] = [];
-    if (props.transports.forwardUserToken) {
-      allowlist.push(RUNTIME_HEADERS.USER_TOKEN);
+    if (props.transports.transactionToken) {
+      allowlist.push(RUNTIME_HEADERS.TRANSACTION_TOKEN);
     }
     if (props.transports.tenantCredentials) {
       allowlist.push(RUNTIME_HEADERS.TENANT_CREDENTIALS);

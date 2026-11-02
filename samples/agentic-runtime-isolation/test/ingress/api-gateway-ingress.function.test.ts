@@ -7,7 +7,7 @@ import { ENV } from '../../src/shared/config';
 import type { Admission, TenantLimiter } from '../../src/shared/limits';
 import { IngressPipeline, pipelineFor } from '../../src/shared/request';
 import { TokenVerifier } from '../../src/shared/verifier';
-import { baseConfig, CLIENT_ID, DISCOVERY_URL, FIXTURE_ENTRIES, REGISTRY_PREFIX, RUNTIME_ARN, stubRegistry, testIssuer, type TestIssuer } from '../helpers';
+import { baseConfig, CLIENT_ID, DISCOVERY_URL, FIXTURE_ENTRIES, REGISTRY_PREFIX, RUNTIME_ARN, stubRegistry, testIssuer, TXN_TOKEN, type TestIssuer } from '../helpers';
 
 // The handler reads its configuration at cold start only when invoked; the
 // module itself must load without the Lambda streaming global.
@@ -16,7 +16,7 @@ process.env[ENV.DISCOVERY_URL] = DISCOVERY_URL;
 process.env[ENV.ALLOWED_CLIENT_IDS] = CLIENT_ID;
 process.env[ENV.REGISTRY_PREFIX] = REGISTRY_PREFIX;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { handleRequest, handler } = require('../../src/ingress/api-gateway-ingress.function') as typeof import('../../src/ingress/api-gateway-ingress.function');
+const { authorizedContext, handleRequest, handler } = require('../../src/ingress/api-gateway-ingress.function') as typeof import('../../src/ingress/api-gateway-ingress.function');
 
 /** The streaming Lambda (spec C-3a): the pipeline's verdict on the wire, the backend stream relayed, P-9 telemetry. */
 class FakeBackend implements InvokeBackend {
@@ -71,6 +71,18 @@ const ENTRIES = {
   old: FIXTURE_ENTRIES.old,
 };
 
+/** (v2) What the authoriser hands the integration Lambda: the decision and the minted token (spec §3.1 C-3a). */
+const authorizerContext = (backend: string | undefined, tenantId = 'tenant-a') => ({
+  tenantId,
+  sub: 'user-a1',
+  backend,
+  runtimeArn: RUNTIME_ARN,
+  transactionToken: TXN_TOKEN,
+  txn: 'txn-1',
+  grantSize: '2',
+  mint: 'hit',
+});
+
 /** A proxy event as API Gateway sends it for `POST /{backend}/invocations`: `path` is the called path, stage stripped. */
 const event = (authorization: string | undefined, body: string | null, extra: Partial<APIGatewayProxyEvent> = {}): APIGatewayProxyEvent =>
   ({
@@ -79,7 +91,7 @@ const event = (authorization: string | undefined, body: string | null, extra: Pa
     isBase64Encoded: false,
     path: '/default/invocations',
     pathParameters: { backend: 'default' },
-    requestContext: { authorizer: { tenantId: 'tenant-a', sub: 'user-a1', backend: 'default', runtimeArn: RUNTIME_ARN }, path: '/prod/default/invocations', resourcePath: '/{backend}/invocations' } as any,
+    requestContext: { authorizer: authorizerContext('default'), path: '/prod/default/invocations', resourcePath: '/{backend}/invocations' } as any,
     ...extra,
   }) as APIGatewayProxyEvent;
 
@@ -156,7 +168,7 @@ describe('handleRequest', () => {
   describe('backend routing (ADR-0024)', () => {
     const body = '{"prompt":"hi","conversationId":"conversationA1x0001"}';
     const route = (path: string, backend?: string) =>
-      ({ path, pathParameters: backend === undefined ? null : { backend }, requestContext: { authorizer: { tenantId: 'tenant-a', sub: 'user-a1', backend } } }) as unknown as Partial<APIGatewayProxyEvent>;
+      ({ path, pathParameters: backend === undefined ? null : { backend }, requestContext: { authorizer: authorizerContext(backend ?? 'default') } }) as unknown as Partial<APIGatewayProxyEvent>;
 
     it('the path names the backend; its registry entry supplies the Runtime ARN the invoke uses', async () => {
       const backend = new FakeBackend();
@@ -188,14 +200,32 @@ describe('handleRequest', () => {
       expect(JSON.parse(metrics[0])).toMatchObject({ Errors4xx: 1, TenantId: 'tenant-a', Backend: name });
     });
 
-    it("a token without the backend's scopes -> 403 \"forbidden\" backend_scope_missing", async () => {
+    it('v2: forwards the authoriser\'s transaction token to the backend and logs txn, grantSize and mint, never the token', async () => {
       const backend = new FakeBackend();
-      const { w, out } = writer();
-      await handleRequest(event(`Bearer ${await issuer.mint({ scope: 'default/chat' })}`, body, route('/billing/invocations', 'billing')), out, deps(backend));
-      expect(w.status).toBe(403);
-      expect(w.body).toBe('forbidden');
+      await handleRequest(event(`Bearer ${await issuer.mint()}`, body, route('/billing/invocations', 'billing')), writer().out, deps(backend));
+      expect(backend.requests[0]).toMatchObject({ backend: 'billing', transactionToken: TXN_TOKEN, txn: 'txn-1', grantSize: 2, mint: 'hit' });
+      const served = logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request served');
+      expect(served).toMatchObject({ agent: 'billing', txn: 'txn-1', grantSize: 2, mint: 'hit' });
+      expect(logs.join('\n')).not.toContain(TXN_TOKEN);
+    });
+
+    it('v2: no token in the authoriser context (or one for another tenant) is refused before the backend', async () => {
+      const backend = new FakeBackend();
+      const none = writer();
+      await handleRequest(event(`Bearer ${await issuer.mint()}`, body, { requestContext: { authorizer: { tenantId: 'tenant-a', backend: 'default' } } as any }), none.out, deps(backend));
+      expect(none.w.status).toBe(502);
+      const other = writer();
+      await handleRequest(event(`Bearer ${await issuer.mint()}`, body, { requestContext: { authorizer: authorizerContext('default', 'tenant-b') } as any }), other.out, deps(backend));
+      expect(other.w.status).toBe(403);
+      expect(other.w.body).toBe('forbidden: tenant_not_allowed');
       expect(backend.requests).toHaveLength(0);
-      expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request refused')).toMatchObject({ status: 403, reason: 'backend_scope_missing', backend: 'billing' });
+    });
+
+    it('authorizedContext reads the context only when every field is present', () => {
+      expect(authorizedContext(authorizerContext('default'))).toEqual({ tenantId: 'tenant-a', backend: 'default', transactionToken: TXN_TOKEN, txn: 'txn-1', grantSize: 2, mint: 'hit' });
+      expect(authorizedContext({ ...authorizerContext('default'), mint: 'maybe' })).toBeUndefined();
+      expect(authorizedContext({ ...authorizerContext('default'), transactionToken: '' })).toBeUndefined();
+      expect(authorizedContext({ ...authorizerContext('default'), grantSize: 'x' })?.grantSize).toBe(0);
     });
 
     it('the bare /invocations route serves the default backend', async () => {

@@ -1,0 +1,244 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: MIT-0
+
+/**
+ * The entitlement store's rows, keys and access helpers (spec §4.5, C-12;
+ * ADR-0030, ADR-0033, ADR-0035, ADR-0036). One table per `SharedIngress`,
+ * single-table design:
+ *
+ * | Row | PK | SK |
+ * |---|---|---|
+ * | Tenant subscription | `TENANT#<tenantId>` | `#SUB` |
+ * | User cut | `TENANT#<tenantId>` | `USER#<sub>` |
+ * | Plan | `PLAN#<planName>` | `#PLAN` |
+ * | Tool catalogue | `TOOL#<target>` | `TOOL#<tool>` |
+ * | Name reservation | `NAME#<name>` | `#NAME` |
+ *
+ * The ingress only reads (`EntitlementReader`): one `BatchGetItem` for the
+ * tenant row and the user's cut row per request, the plan and the catalogue
+ * from a per-process cache. Writes are the entitlement API's (src/entitlements)
+ * and the deploy-time custom resources' (src/shared/reservation.function.ts).
+ */
+
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import type { EntitlementSet, TenantGrant, ToolCatalogue, UserCutGrant } from './grant';
+import { sharedHandler } from './http';
+
+/** Key attribute names. */
+export const PK = 'PK';
+export const SK = 'SK';
+
+export const KEY_PREFIX = {
+  tenant: 'TENANT#',
+  user: 'USER#',
+  plan: 'PLAN#',
+  tool: 'TOOL#',
+  name: 'NAME#',
+} as const;
+
+export const SORT_KEY = {
+  subscription: '#SUB',
+  plan: '#PLAN',
+  name: '#NAME',
+} as const;
+
+export interface ItemKey {
+  readonly PK: string;
+  readonly SK: string;
+}
+
+export function tenantKey(tenantId: string): ItemKey {
+  return { PK: `${KEY_PREFIX.tenant}${tenantId}`, SK: SORT_KEY.subscription };
+}
+
+export function userCutKey(tenantId: string, sub: string): ItemKey {
+  return { PK: `${KEY_PREFIX.tenant}${tenantId}`, SK: `${KEY_PREFIX.user}${sub}` };
+}
+
+export function planKey(planName: string): ItemKey {
+  return { PK: `${KEY_PREFIX.plan}${planName}`, SK: SORT_KEY.plan };
+}
+
+export function toolKey(target: string, tool: string): ItemKey {
+  return { PK: `${KEY_PREFIX.tool}${target}`, SK: `${KEY_PREFIX.tool}${tool}` };
+}
+
+export function nameKey(name: string): ItemKey {
+  return { PK: `${KEY_PREFIX.name}${name}`, SK: SORT_KEY.name };
+}
+
+/** A tenant subscription row (spec §4.5). */
+export interface TenantSubscriptionItem extends ItemKey {
+  readonly agents: string[];
+  readonly tools: string[];
+  readonly plan?: string;
+  readonly status: 'active' | 'suspended';
+  readonly version: number;
+  readonly updatedAt: string;
+}
+
+/** A user cut row (spec §4.5). No field adds anything (P-12). */
+export interface UserCutItem extends ItemKey {
+  readonly cutAgents: string[];
+  readonly cutTools: string[];
+  readonly version: number;
+  readonly updatedBy: string;
+  readonly updatedAt: string;
+}
+
+/** A plan row (spec §4.5). */
+export interface PlanItem extends ItemKey {
+  readonly agents: string[];
+  readonly tools: string[];
+  readonly version: number;
+  readonly updatedAt: string;
+}
+
+/** A tool catalogue row (spec §4.5), written by `ToolTarget` at deploy. */
+export interface ToolItem extends ItemKey {
+  readonly description: string;
+  /** `<StackId>#<LogicalResourceId>` or the deployer's explicit marker (ADR-0035). */
+  readonly owner: string;
+  readonly addedAt: string;
+}
+
+/** A name reservation row (spec §4.5): agents and tool targets share one namespace (ADR-0035). */
+export interface NameItem extends ItemKey {
+  readonly kind: 'agent' | 'target';
+  readonly owner: string;
+}
+
+/** DynamoDB string sets and lists both arrive here as arrays; a missing list is empty. */
+export function names(value: unknown): string[] {
+  if (value instanceof Set) {
+    return [...value].filter((v): v is string => typeof v === 'string');
+  }
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+}
+
+/** The grant view of a tenant row. */
+export function tenantGrant(item: Record<string, unknown>): TenantGrant & { plan?: string; version: number } {
+  return {
+    agents: names(item.agents),
+    tools: names(item.tools),
+    status: item.status === 'suspended' ? 'suspended' : 'active',
+    plan: typeof item.plan === 'string' && item.plan.length > 0 ? item.plan : undefined,
+    version: typeof item.version === 'number' ? item.version : 0,
+  };
+}
+
+/** The grant view of a cut row. */
+export function cutGrant(item: Record<string, unknown>): UserCutGrant {
+  return { cutAgents: names(item.cutAgents), cutTools: names(item.cutTools) };
+}
+
+/** What the ingress reads per request (spec §3.6). */
+export interface TenantEntitlement {
+  /** Undefined when the tenant has no row. */
+  readonly tenant?: TenantGrant & { readonly plan?: string; readonly version: number };
+  /** Undefined when the user has no cut (the common case). */
+  readonly cut?: UserCutGrant;
+}
+
+interface Cached<T> {
+  readonly value: T;
+  readonly at: number;
+}
+
+/**
+ * The ingress's read side. Its role holds `BatchGetItem`, `GetItem` and
+ * `Query` on the table, never a write (spec §4.5).
+ */
+export class EntitlementReader {
+  private readonly client: DynamoDBDocumentClient;
+  private readonly plans = new Map<string, Cached<(EntitlementSet & { version: number }) | undefined>>();
+  private readonly catalogue = new Map<string, Cached<string[]>>();
+
+  constructor(
+    private readonly tableName: string,
+    /** Cache life of plans and catalogue rows: `registryTtl` (spec §3.3). */
+    private readonly ttlSeconds: number,
+    client?: DynamoDBDocumentClient,
+    private readonly now: () => number = Date.now,
+  ) {
+    this.client = client ?? DynamoDBDocumentClient.from(new DynamoDBClient({ requestHandler: sharedHandler() }));
+  }
+
+  /** One eventually consistent `BatchGetItem` for the tenant row and the user's cut row. */
+  async tenantEntitlement(tenantId: string, sub: string): Promise<TenantEntitlement> {
+    const tenant = tenantKey(tenantId);
+    const cut = userCutKey(tenantId, sub);
+    const out = await this.client.send(
+      new BatchGetCommand({ RequestItems: { [this.tableName]: { Keys: [tenant, cut], ConsistentRead: false } } }),
+    );
+    // TODO(v2): retry UnprocessedKeys once with backoff; today an unprocessed key is read as "absent" only for the cut row.
+    if ((out.UnprocessedKeys?.[this.tableName]?.Keys?.length ?? 0) > 0) {
+      const unprocessed = out.UnprocessedKeys![this.tableName].Keys!;
+      if (unprocessed.some((k) => k.SK === tenant.SK)) {
+        throw new Error('entitlement store throttled the tenant row');
+      }
+    }
+    const items = out.Responses?.[this.tableName] ?? [];
+    const tenantItem = items.find((i) => i.SK === tenant.SK);
+    const cutItem = items.find((i) => i.SK === cut.SK);
+    return {
+      tenant: tenantItem === undefined ? undefined : tenantGrant(tenantItem),
+      cut: cutItem === undefined ? undefined : cutGrant(cutItem),
+    };
+  }
+
+  /** A plan row, cached `ttlSeconds`; undefined when the plan does not exist. */
+  async plan(planName: string): Promise<(EntitlementSet & { version: number }) | undefined> {
+    const hit = this.plans.get(planName);
+    if (hit !== undefined && this.now() - hit.at < this.ttlSeconds * 1000) {
+      return hit.value;
+    }
+    const out = await this.client.send(new GetCommand({ TableName: this.tableName, Key: planKey(planName) }));
+    const value =
+      out.Item === undefined
+        ? undefined
+        : { agents: names(out.Item.agents), tools: names(out.Item.tools), version: typeof out.Item.version === 'number' ? out.Item.version : 0 };
+    this.plans.set(planName, { value, at: this.now() });
+    return value;
+  }
+
+  /** The catalogue rows of `targets` (one `Query` per uncached target), cached `ttlSeconds`. */
+  async catalogueFor(targets: readonly string[]): Promise<ToolCatalogue> {
+    const result = new Map<string, string[]>();
+    await Promise.all(
+      targets.map(async (target) => {
+        const hit = this.catalogue.get(target);
+        if (hit !== undefined && this.now() - hit.at < this.ttlSeconds * 1000) {
+          result.set(target, hit.value);
+          return;
+        }
+        const tools: string[] = [];
+        let start: Record<string, unknown> | undefined;
+        do {
+          const out = await this.client.send(
+            new QueryCommand({
+              TableName: this.tableName,
+              KeyConditionExpression: '#pk = :pk',
+              ExpressionAttributeNames: { '#pk': PK, '#sk': SK },
+              ExpressionAttributeValues: { ':pk': `${KEY_PREFIX.tool}${target}` },
+              ProjectionExpression: '#sk',
+              ExclusiveStartKey: start,
+            }),
+          );
+          for (const item of out.Items ?? []) {
+            const sk = typeof item.SK === 'string' ? item.SK : '';
+            if (sk.startsWith(KEY_PREFIX.tool)) {
+              tools.push(sk.slice(KEY_PREFIX.tool.length));
+            }
+          }
+          start = out.LastEvaluatedKey;
+        } while (start !== undefined);
+        tools.sort();
+        this.catalogue.set(target, { value: tools, at: this.now() });
+        result.set(target, tools);
+      }),
+    );
+    return result;
+  }
+}

@@ -6,11 +6,12 @@
  * ADR-0024). The Gateway has already checked the JWT with its CUSTOM_JWT
  * authoriser (`allowedScopes` is the product floor); the interceptor runs the
  * same shared pipeline again (one contract on both ingresses), resolves the
- * backend the Gateway target names through the registry and requires its
- * scopes, BUILDS the unit id from the validated claims and the body's
+ * backend the Gateway target names through the registry, BUILDS the unit id from the validated claims and the body's
  * `conversationId`, and writes it to the Runtime session header, overwriting
- * whatever the client sent (spike V-3). With the options on it also sets the
- * user-token and credential headers. A refusal is a fixed-text response.
+ * whatever the client sent (spike V-3). (v2) On this ingress the interceptor
+ * is also the mint: it selects the tenant (`X-Tenant-Id`), runs the grant
+ * rule and signs the transaction token, and sets the transaction-token and
+ * credential headers. A refusal is a fixed-text response.
  *
  * The Gateway target is created under the backend's name (`AgentBackend`), so
  * the request path the interceptor event carries is `/<backend>/invocations`
@@ -42,8 +43,9 @@ import { headerValue } from '../shared/headers';
 import { errorName, log } from '../shared/logger';
 import { emitRequestMetrics } from '../shared/metrics';
 import { backendFromPath } from '../shared/registry';
-import { ERROR_TEXT, type ErrorStatus, IngressPipeline, pipelineFor, RequestError } from '../shared/request';
+import { errorBody, type ErrorStatus, IngressPipeline, pipelineFor, RequestError } from '../shared/request';
 import { prefixOf } from '../shared/session';
+import { TENANT_HEADER } from '../shared/tenant';
 
 /** The REQUEST interceptor event for an HTTP (Runtime) target, as the spike observed it. */
 export interface InterceptorEvent {
@@ -109,14 +111,14 @@ export function resetPathWarning(): void {
   warnedPathLacksBackend = false;
 }
 
-function deny(statusCode: ErrorStatus): InterceptorOutput {
+function deny(statusCode: ErrorStatus, reason?: string): InterceptorOutput {
   return {
     interceptorOutputVersion: '1.0',
     http: {
       transformedGatewayResponse: {
         statusCode,
         contentType: 'text/plain',
-        body: Buffer.from(ERROR_TEXT[statusCode], 'utf8').toString('base64'),
+        body: Buffer.from(errorBody(statusCode, reason), 'utf8').toString('base64'),
       },
     },
   };
@@ -149,6 +151,7 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
   try {
     request = await deps.pipeline.validate({
       authorization: headerValue(gatewayRequest?.headers, 'authorization'),
+      tenantHeader: headerValue(gatewayRequest?.headers, TENANT_HEADER),
       body: bodyText(gatewayRequest?.body),
       path,
       requireBackendInPath: true,
@@ -163,7 +166,7 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
       }
       log.warn('request refused', { ingress: 'agentcore-gateway', status: error.status, reason: error.reason, tenantId: error.tenantId, backend });
       metrics(error.status, error.tenantId, backend);
-      return deny(error.status);
+      return deny(error.status, error.reason);
     }
     log.error('pipeline failed', { ingress: 'agentcore-gateway', error: errorName(error) });
     metrics(502);
@@ -174,6 +177,10 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
     ingress: 'agentcore-gateway',
     tenantId: request.tenantId,
     backend: request.backend,
+    agent: request.backend,
+    txn: request.txn,
+    grantSize: request.grantSize,
+    mint: request.mint,
     sessionPrefix: prefixOf(request.unitId),
     status: 200,
   });

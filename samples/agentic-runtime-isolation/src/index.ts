@@ -2,42 +2,77 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * The sample's published build-time interface (standard §1.1, §4.5): the
- * constructs and their props. A consumer declares this sample as a local
- * dependency and imports from here; nothing else in src/ is a contract.
+ * The sample's published build-time interface (standard §1.1, §4.5; spec
+ * §6.4): the constructs and their props. A consumer declares this sample as
+ * a local dependency and imports from here; nothing else in src/ is a
+ * contract.
  *
- * `SharedIngress` plus one `AgentBackend` per agent is the construct. For a
- * single agent, give the ingress a `defaultBackend` and one `AgentBackend` of
- * that name: the backend is then served at the bare `/invocations` URL too
- * (ADR-0024).
+ * `SharedIngress` plus one `AgentBackend` per agent product and one
+ * `ToolTarget` per tool group is the construct. For a single agent, give the
+ * ingress a `defaultBackend` and one `AgentBackend` of that name (ADR-0024).
+ * (v2) `ScopeRegistration` and `backendScopesProblem` are removed (ADR-0030).
  */
 
-export { resolveOptions, STAGE_NAME, INTEGRATION_TIMEOUT, AUTHORIZER_CACHE_TTL, GATEWAY_TARGET_NAME } from './shared-ingress.cdk';
+export {
+  resolveOptions,
+  STAGE_NAME,
+  INTEGRATION_TIMEOUT,
+  AUTHORIZER_CACHE_TTL,
+  GATEWAY_TARGET_NAME,
+  DEFAULT_TRANSACTION_TOKEN_TTL,
+  DEFAULT_ADMIN_SCOPE,
+} from './shared-ingress.cdk';
 export type {
   IdentityProps,
   SessionProps,
-  DelegationProps,
   TvmProps,
   TenantLimitsProps,
   StageThrottleProps,
+  TransactionTokenProps,
+  EntitlementsProps,
+  ToolsGatewayOptions,
+  ToolsGatewayRef,
   ResolvedOptions,
 } from './shared-ingress.cdk';
 export { ROUTE } from './shared/registry';
 export type { AgentProps } from './agent-backend.cdk';
 export { SharedIngress, DEFAULT_REGISTRY_PREFIX, DEFAULT_REGISTRY_TTL, MAX_REGISTRY_TTL, PUBLISHED } from './shared-ingress.cdk';
 export type { SharedIngressProps, SharedIngressRef } from './shared-ingress.cdk';
-export { AgentBackend, SCOPE_OWNER_MAX_LENGTH, scopeOwnerProblem } from './agent-backend.cdk';
+export { AgentBackend } from './agent-backend.cdk';
 export type { AgentBackendProps } from './agent-backend.cdk';
 export { RegistryEntryResource, LONGEST_STREAM, MAX_DRAIN } from './shared/registry-entry.cdk';
 export type { RegistryEntryResourceProps } from './shared/registry-entry.cdk';
-// The scope registration (ADR-0025): what a backend puts in tenant-identity's catalogue, and where it finds the API.
-export { ScopeRegistration, IDENTITY_API_PARAMETERS } from './shared/scope-registration.cdk';
-export type { ScopeRegistrationProps, IdentityApiProps } from './shared/scope-registration.cdk';
-// The registry contract (ADR-0024): a consumer that reads or writes entries by hand uses the same names and schema.
-export { BACKEND_NAME_PATTERN, INGRESS_TAG_KEY, SCOPE_NAME_PATTERN, registryParameterName, backendScopesProblem } from './shared/registry';
+// v2 constructs (spec §6.4)
+export { ToolTarget, MAX_TOOLS_PER_TARGET } from './tool-target.cdk';
+export type { ToolTargetProps, ToolTargetKind, ToolDefinition } from './tool-target.cdk';
+export { ToolsGateway, MAX_TOOL_TARGETS, MCP_SUPPORTED_VERSIONS } from './tools-gateway.cdk';
+export type { ToolsGatewayProps, ResolvedToolsGateway } from './tools-gateway.cdk';
+export { TokenSigner } from './shared/token-signer.cdk';
+export type { TokenSignerProps } from './shared/token-signer.cdk';
+export { EntitlementStore } from './shared/entitlement-store.cdk';
+export type { EntitlementStoreProps } from './shared/entitlement-store.cdk';
+export { OwnedRows, ownerProblem, OWNER_MAX_LENGTH } from './shared/reservation.cdk';
+// The registry contract (ADR-0024, ADR-0032): a consumer that reads or writes entries by hand uses the same names and schema.
+export {
+  BACKEND_NAME_PATTERN,
+  INGRESS_TAG_KEY,
+  NEEDS_NAME_PATTERN,
+  TOOL_NAME_PATTERN,
+  TARGET_NAME_PATTERN,
+  registryParameterName,
+  toolRegistryParameterName,
+  backendNeedsProblem,
+  backendToolsProblem,
+} from './shared/registry';
 export type { RegistryEntry } from './shared/registry';
+// The grant rule (P-11), for consumers that test their own data.
+export { grantFor, expandTools, compressTools, MAX_SCOPE_BYTES } from './shared/grant';
+export type { GrantInputs, GrantResult, ToolCatalogue } from './shared/grant';
+// The tool-side library (C-15b).
+export { verifyToolContext, withTenantCredentials, toolHandler, kmsContextPublicKey, ContextError } from './tools/context';
+export type { ToolContext, ToolInvocation } from './tools/context';
 export type { BackendKind } from './backend/backend';
 export type { IngressKind, UsageEvent } from './shared/metrics';
-// The agent-to-ingress usage event (ADR-0017): a consumer's own agent ends its SSE stream with `event: usage`.
 export { USAGE_EVENT, METRIC_NAMES } from './shared/metrics';
 export type { SessionScope } from './shared/session';
+export { TENANT_HEADER } from './shared/tenant';

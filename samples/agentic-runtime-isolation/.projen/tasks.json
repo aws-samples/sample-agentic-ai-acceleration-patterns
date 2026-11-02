@@ -217,7 +217,12 @@
     },
     "pre-compile": {
       "name": "pre-compile",
-      "description": "Prepare the project for compilation"
+      "description": "Prepare the project for compilation",
+      "steps": [
+        {
+          "exec": "smithy build"
+        }
+      ]
     },
     "synth": {
       "name": "synth",
@@ -299,21 +304,25 @@
             "ts-jest",
             "ts-node",
             "typescript",
-            "@aws-crypto/sha256-js",
+            "@aws-sdk/client-bedrock-agentcore-control",
             "@aws-sdk/client-bedrock-agentcore",
             "@aws-sdk/client-bedrock-runtime",
             "@aws-sdk/client-dynamodb",
+            "@aws-sdk/client-kms",
             "@aws-sdk/client-ssm",
             "@aws-sdk/client-sts",
-            "@aws-sdk/credential-providers",
+            "@aws-sdk/core",
+            "@aws-sdk/lib-dynamodb",
+            "@smithy/core",
             "@smithy/node-http-handler",
-            "@smithy/protocol-http",
-            "@smithy/signature-v4",
+            "@smithy/server-apigateway",
+            "@smithy/server-common",
             "@smithy/types",
             "aws-cdk-lib",
             "cdk-nag",
             "constructs",
-            "jose"
+            "jose",
+            "tslib"
           ]
         },
         {

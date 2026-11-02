@@ -1167,7 +1167,7 @@ The Cedar policy that worked (one per target; ACTIVE with
 permit(
   principal is AgentCore::OAuthUser,
   action in [AgentCore::Action::"crm___get_account", AgentCore::Action::"crm___list_cases", AgentCore::Action::"crm___update_case"],
-  resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:eu-central-1:647746915953:gateway/riac-spike-v2-tools-ffa2quenmn"
+  resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:eu-central-1:111122223333:gateway/riac-spike-v2-tools-ffa2quenmn"
 ) when {
   principal.hasTag("scope") && ((principal.getTag("scope") == "crm/*" || principal.getTag("scope") like "crm/\* *" || principal.getTag("scope") like "* crm/\*" || principal.getTag("scope") like "* crm/\* *") || (action == AgentCore::Action::"crm___get_account" && (principal.getTag("scope") == "crm/get_account" || principal.getTag("scope") like "crm/get_account *" || principal.getTag("scope") like "* crm/get_account" || principal.getTag("scope") like "* crm/get_account *")) || (action == AgentCore::Action::"crm___list_cases" && (principal.getTag("scope") == "crm/list_cases" || principal.getTag("scope") like "crm/list_cases *" || principal.getTag("scope") like "* crm/list_cases" || principal.getTag("scope") like "* crm/list_cases *")) || (action == AgentCore::Action::"crm___update_case" && (principal.getTag("scope") == "crm/update_case" || principal.getTag("scope") like "crm/update_case *" || principal.getTag("scope") like "* crm/update_case" || principal.getTag("scope") like "* crm/update_case *")))
 };

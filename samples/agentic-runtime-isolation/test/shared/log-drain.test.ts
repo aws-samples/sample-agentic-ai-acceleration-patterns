@@ -22,8 +22,7 @@ function synth(ingress: 'api-gateway' | 'agentcore-gateway'): Template {
     name: 'default',
     ingress: sharedIngress,
     agent: { codePath: FIXTURE_AGENT, modelId: 'amazon.nova-lite-v1:0' },
-    scopes: ['default/chat'],
-    identityApi: { apiUrl: 'https://identity.example.com/prod/', platformInvokePolicyArn: 'arn:aws:iam::111122223333:policy/PlatformInvoke' },
+    needs: ['default/chat'],
   });
   return Template.fromStack(stack);
 }
@@ -39,7 +38,7 @@ function logicalIdOf(template: Template, type: string): string[] {
  */
 function expectRegistryEntryBehindDrain(template: Template, drain: string): void {
   const resources = template.toJSON().Resources;
-  for (const [logsId, type] of [['RegistryEntryLogs', 'Custom::RuntimeIsolationRegistryEntry'], ['ScopesLogs', 'Custom::RuntimeIsolationScopeRegistration']]) {
+  for (const [logsId, type] of [['RegistryEntryLogs', 'Custom::RuntimeIsolationRegistryEntry'], ['NameReservationLogs', 'Custom::RuntimeIsolationOwnedRows']]) {
     const [handlerLogs] = logicalIdOf(template, 'AWS::Logs::LogGroup').filter((id) => id.includes(logsId));
     expect(handlerLogs).toBeDefined();
     expect(resources[drain].DependsOn).toContain(handlerLogs);
@@ -58,8 +57,9 @@ describe('teardown leaves no log group (ADR-0019)', () => {
 
     const [drain] = logicalIdOf(template, 'AWS::CloudFormation::CustomResource');
     const drainDeps: string[] = template.toJSON().Resources[drain].DependsOn ?? [];
-    const writerGroups = Object.keys(groups).filter((id) => !id.includes('LogDrain') && !id.includes('RegistryEntry') && !id.includes('ScopesLogs'));
-    expect(writerGroups.length).toBe(4);
+    // The stage's own groups and the functions it invokes: the ingress pair and (v2) the entitlement API pair.
+    const writerGroups = Object.keys(groups).filter((id) => /ApiAccessLogs|ApiExecutionLogs|AuthorizerLogs|IngressLogs|VendorLogs|TenantAdminLogs/.test(id));
+    expect(writerGroups.length).toBe(6);
     for (const id of writerGroups) {
       expect(drainDeps).toContain(id);
     }
