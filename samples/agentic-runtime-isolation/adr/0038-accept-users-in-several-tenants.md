@@ -7,6 +7,7 @@ SPDX-License-Identifier: MIT-0
 - Status: Accepted
 - Date: 2026-11-02
 - Amends: ADR-0004
+- Amended by: ADR-0040
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -27,3 +28,5 @@ Option 2, behind `identity.multiTenant` (default `false`, so a v1 deployment ref
 
 ## Consequences
 Easier: a consumer on `shared-pool-multi-tenant` needs no token exchange; the identity token can stay small. Harder: the `agentcore-gateway` interceptor gains a check and the header must be in the Gateway's passed request headers; the integration test gains a multi-tenant user (step 19). The `X-Tenant-Id` header is not forwarded to the backend (M-8 still holds); the tenant reaches the agent only inside the transaction token. Follow-up: a threat-model entry for the wrong-own-tenant case, and the ingress log line records which path (claim or header) chose the tenant. Revisit if tenant-identity publishes a per-request tenant selection of its own, or if the Gateway's `CUSTOM_JWT` authoriser can read a custom header.
+
+**2026-11-02.** Amended by ADR-0040: the transaction token's `sub` is tenant-qualified so a 3LO grant is never shared across a user's tenants.

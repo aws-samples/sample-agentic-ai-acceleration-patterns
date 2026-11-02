@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-02
+- Amended by: ADR-0040
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -30,3 +31,5 @@ Option 2. The Gateway verifies the transaction token, Policy enforces the grant 
 
 ## Consequences
 Easier: one issuer, one store, one demo; a tool is one `ToolTarget` construct (Lambda, OpenAPI, Smithy or MCP-server target) with one generated Cedar policy; per-tenant rate limits are native on `$.context.jwt.tenant_id`. Harder: per call the Gateway ($0.005 per 1,000), Policy ($0.025 per 1,000), KMS `Sign` ($0.003 per 1,000) and two Lambda invocations (interceptor and tool), prices as reviewed on 2026-10-30; Policy is the largest line and the interceptor-only fallback is named in the README. A known defect denies tools added after a policy is written, so `ToolTarget`'s custom resource issues a no-op `UpdatePolicy` after each sync. Follow-up: the `agentic-tool-gateway` directory is not created; its review doc already lives in this sample's `design/`; the review's spikes V-1 to V-6 run before the spec amendment is accepted. Revisit if the Gateway authoriser gains nested-claim checks (then the interceptor's `act` check moves into it), or if Policy cost per call makes the interceptor-only path the better trade.
+
+**2026-11-02.** Amended by ADR-0040: the interceptor runs before Policy and is the first wall; policy deleted before target, sequential policy writes, 100-target cap, application logs off, OBO only with trusted authorisation servers.

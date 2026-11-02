@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT-0
 > **Status:** v2, Accepted 2026-11-02 (Dave Roberts). Supersedes the v1
 > specification of 2026-10-26, kept as `agentic-runtime-isolation.spec.v1.md`.
 > Not yet implemented: `architecture.md` still describes v1 until the v2
-> integration test passes. ADR-0030 to ADR-0039 are Accepted. v1 promises
+> integration test passes. ADR-0030 to ADR-0040 are Accepted. v1 promises
 > that still hold are kept as they are; where v2 changes one, the text says
 > so with "(v2, ADR-00NN)". The v1 amendment notes are folded into the text;
 > their ADRs are still cited. Spikes V-8 to V-15 (§7) run before code.
@@ -29,6 +29,7 @@ ADRs v2 adds:
 | 0037 | Publish the ingress as an OIDC issuer: JWKS and discovery on the ingress, keys in KMS with `kid` rotation | - |
 | 0038 | Accept users in several tenants; the request names one the verified token lists | amends ADR-0004 |
 | 0039 | Default session mapping to the tenant scope when it is turned on | amends ADR-0013 |
+| 0040 | Apply the spike findings to the tools gateway and the transaction token | amends ADR-0031, ADR-0034, ADR-0038 |
 
 
 ---
@@ -554,6 +555,14 @@ two. A target has at most 1,000 tools; a Gateway at most 100 targets (§3.6).
 
 ### 3.6 Request path and tools gateway detail (v2)
 
+**Amended 2026-11-02 (ADR-0040, spike V-11).** The REQUEST interceptor runs
+before Policy, so it is the first wall: it refuses an ungranted tool and
+logs the refusal with the tenant, and signs `_ri_ctx` only for an admitted
+call. Policy is the second wall and the native `tools/list` filter.
+`ToolTarget` deletes its policy before its target and creates policies one
+at a time; a tools gateway holds at most 100 targets; Gateway application
+logs are off by default.
+
 ```
 client ──identity token (+ X-Tenant-Id when tenants[])──▶ ingress authoriser
    verify identity token (v1 checks); pick tenant; 403 if not in tenants[]
@@ -564,7 +573,7 @@ client ──identity token (+ X-Tenant-Id when tenants[])──▶ ingress auth
    TVM (v1): tenant credentials
 ──▶ ingress Lambda: InvokeAgentRuntime, headers: credentials (v1) + transaction token
 ──▶ agent: reads scope from the transaction token; calls tools gateway with it as bearer
-──▶ tools gateway: CUSTOM_JWT (ingress issuer) ──▶ Policy (scope) ──▶ interceptor (act, aud, scope again, sign context, log)
+──▶ tools gateway: CUSTOM_JWT (ingress issuer) ──▶ interceptor (typ, act, aud, scope; refuse or sign context; log) ──▶ Policy (scope; tools/list filter)
 ──▶ tool: verify context ──▶ TVM TenantId ──▶ data
 ```
 
@@ -839,6 +848,11 @@ reason; 429; 502. Smithy's `StandardOperationVerb` validator runs at
 
 ### 5.4 Tools gateway (v2, ADR-0034)
 
+**Amended 2026-11-02 (ADR-0040, spike V-8).** A token the Gateway refuses
+for its signature, `aud`, `iss` or `exp` is 403 `insufficient_scope`; only a
+missing bearer or an unknown `kid` is 401. The Gateway does not check `typ`;
+the interceptor does.
+
 MCP over streamable HTTP at `<toolsGatewayUrl>/mcp`, bearer = the
 transaction token. `tools/list` returns, page by page (30 tools a page,
 cursor), only the tools Policy permits. `tools/call` runs one tool.
@@ -912,7 +926,8 @@ JOSE header: `{ "alg": "RS256", "typ": "txn+jwt", "kid": "<KMS key id>" }`.
 | Claim | Value |
 |---|---|
 | `iss` | the ingress issuer URL, `<baseUrl>` |
-| `sub` | the identity token's `sub` |
+| `sub` | `<tenant_id>#<sub>`: the tenant and the identity token's `sub` (amended 2026-11-02, ADR-0040: the AgentCore Identity vault keys on `iss` and `sub`, so `sub` MUST differ per tenant) |
+| `user` | the identity token's `sub`, for logs and the session prefix (ADR-0040) |
 | `tenant_id` | exactly one tenant: the selected one |
 | `agent` | the backend name of this request |
 | `scope` | the granted set, space-separated `<owner>/<name>`, sorted, compressed per target (§3.6) |

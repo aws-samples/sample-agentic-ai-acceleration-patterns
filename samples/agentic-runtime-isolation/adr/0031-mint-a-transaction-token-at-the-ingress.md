@@ -7,6 +7,7 @@ SPDX-License-Identifier: MIT-0
 - Status: Accepted
 - Date: 2026-11-02
 - Supersedes: ADR-0006, ADR-0007
+- Amended by: ADR-0040
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -32,3 +33,5 @@ Option 4. The identity token stops at the ingress; the agent receives the transa
 
 ## Consequences
 Easier: the agent holds a token it can use and no more; a stolen one is good for one agent, the tools gateway, and five minutes. Harder: the ingress is now a signer, a new trust. The key lives in KMS with no export, and an alarm watches the `Sign` rate. Verifiers accept two issuers, each in one place only: the identity token at the ingress, the transaction token at the tools gateway and the tools. The ingress MUST refuse its own token presented as an identity token, or a transaction token could be replayed as a fresh sign-in. The `delegation.*` props are removed (breaking), and with them the user-token header. KMS `Sign` scales one to one with token-cache misses, so its Region quota is named in the README. Follow-up: threat-model entries for the signer and for issuer confusion; a unit test that the ingress refuses its own `iss`. Revisit if Cognito gains token exchange, or the Gateway authoriser can read a second header.
+
+**2026-11-02.** Amended by ADR-0040: `sub` is `<tenant_id>#<sub>` and a `user` claim carries the identity provider's `sub`; a refused token is 403 at the Gateway.
