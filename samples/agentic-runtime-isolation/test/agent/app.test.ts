@@ -9,6 +9,8 @@ import 'aws-sdk-client-mock-jest';
 import {
   buildReport,
   converse,
+  gatewayClients,
+  parseGatewayUrls,
   isProbe,
   MAX_PROMPT_CHARS,
   NONCE,
@@ -31,7 +33,7 @@ const token = `h.${Buffer.from(
     sub: 'tenant-a#user-a1',
     user: 'user-a1',
     agent: 'default',
-    aud: ['agent:default', 'tools-gateway'],
+    aud: ['agent:default', 'tools-gateway:default'],
     act: { sub: 'arn:aws:iam::111122223333:role/ingress' },
     exp: 2_000_000_000,
   }),
@@ -161,7 +163,7 @@ describe('unverifiedClaims', () => {
       tenant_id: 'tenant-a',
       agent: 'default',
       scope: 'default/chat crm/*',
-      aud: ['agent:default', 'tools-gateway'],
+      aud: ['agent:default', 'tools-gateway:default'],
       actSub: 'arn:aws:iam::111122223333:role/ingress',
       exp: 2_000_000_000,
     });
@@ -194,7 +196,7 @@ describe('buildReport', () => {
     expect(report.tokenTenant).toBe('tenant-a');
     expect(report.tokenAgent).toBe('default');
     expect(report.tokenScope).toBe('default/chat crm/*');
-    expect(report.tokenAud).toEqual(['agent:default', 'tools-gateway']);
+    expect(report.tokenAud).toEqual(['agent:default', 'tools-gateway:default']);
     expect(report.tokenActSub).toBe('arn:aws:iam::111122223333:role/ingress');
     expect(JSON.stringify(report)).not.toContain(token);
   });
@@ -441,5 +443,53 @@ describe('tool probes (v2, C-2)', () => {
     const three = sinkOf();
     await respond({ [RUNTIME_HEADERS.TRANSACTION_TOKEN.toLowerCase()]: token }, 'tools', {}, three.s);
     expect(three.c.body).toContain('NoToolsGateway');
+  });
+
+  describe('several tools gateways (ADR-0041)', () => {
+    const twoGatewayToken = `h.${Buffer.from(
+      JSON.stringify({ tenant_id: 'tenant-a', scope: 'crm/* invoices/*', agent: 'default', aud: ['agent:default', 'tools-gateway:default', 'tools-gateway:finance'] }),
+    ).toString('base64url')}.sig`;
+    const urls = { default: 'https://default.example.com/mcp', finance: 'https://finance.example.com/mcp', other: 'https://other.example.com/mcp' };
+
+    it('parseGatewayUrls reads the JSON map and refuses anything else', () => {
+      expect(parseGatewayUrls(JSON.stringify(urls))).toEqual(urls);
+      expect(parseGatewayUrls(JSON.stringify({ a: 'u', b: 1 }))).toEqual({ a: 'u' });
+      expect(parseGatewayUrls('[1]')).toBeUndefined();
+      expect(parseGatewayUrls('{bad')).toBeUndefined();
+      expect(parseGatewayUrls(undefined)).toBeUndefined();
+    });
+
+    it('keeps one client per gateway in aud that has a URL; the single-URL option is the default gateway', () => {
+      expect(gatewayClients({ toolsGatewayUrls: urls }, ['agent:default', 'tools-gateway:default', 'tools-gateway:finance'])).toEqual([
+        ['default', urls.default],
+        ['finance', urls.finance],
+      ]);
+      expect(gatewayClients({ toolsGatewayUrls: urls }, ['agent:default'])).toEqual([]);
+      expect(gatewayClients({ toolsGatewayUrl: urls.default }, ['agent:default', 'tools-gateway:finance'])).toEqual([]);
+      expect(gatewayClients({ toolsGatewayUrl: urls.default }, ['tools-gateway:default'])).toEqual([['default', urls.default]]);
+    });
+
+    it('lists every gateway in aud, and calls a tool on the gateway that lists it', async () => {
+      const seen: { url: string; method: string }[] = [];
+      const fetcher = (async (url: string, init: RequestInit) => {
+        const method = JSON.parse(String(init.body)).method as string;
+        seen.push({ url, method });
+        const tools = url === urls.finance ? [{ name: 'invoices___get_invoice' }] : [{ name: 'crm___get_account' }];
+        const result = method === 'tools/list' ? { tools } : { content: [{ type: 'text', text: `from ${url}` }] };
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result }), { status: 200 });
+      }) as unknown as typeof fetch;
+      const headers = { [RUNTIME_HEADERS.TRANSACTION_TOKEN.toLowerCase()]: twoGatewayToken };
+      const list = sinkOf();
+      await respond(headers, 'tools', { toolsGatewayUrls: urls, fetch: fetcher }, list.s);
+      expect(list.c.body).toContain('crm___get_account');
+      expect(list.c.body).toContain('invoices___get_invoice');
+      expect(seen.map((s) => s.url)).toEqual([urls.default, urls.finance]);
+      seen.length = 0;
+      const call = sinkOf();
+      await respond(headers, 'tool invoices/get_invoice {}', { toolsGatewayUrls: urls, fetch: fetcher }, call.s);
+      expect(call.c.body).toContain(`from ${urls.finance}`);
+      expect(seen.filter((s) => s.method === 'tools/call').map((s) => s.url)).toEqual([urls.finance]);
+      expect(seen.some((s) => s.url === urls.other)).toBe(false);
+    });
   });
 });

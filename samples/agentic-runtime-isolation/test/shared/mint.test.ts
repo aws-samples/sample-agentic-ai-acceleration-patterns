@@ -10,7 +10,8 @@ import {
   mintCacheKey,
   qualifiedSubject,
   TokenMinter,
-  TOOLS_GATEWAY_AUDIENCE,
+  toolsGatewayAudience,
+  toolsGatewaysOf,
   TRANSACTION_TOKEN_TYPE,
   transactionClaims,
 } from '../../src/shared/mint';
@@ -31,6 +32,7 @@ const input: MintInput = {
   sub: 'user-1',
   agent: 'default',
   scope: 'crm/* default/chat',
+  gateways: ['default'],
   versions: { tenant: 1, agent: 1 },
 };
 
@@ -43,7 +45,7 @@ describe('transactionClaims', () => {
       tenant_id: 't-a',
       agent: 'default',
       scope: 'crm/* default/chat',
-      aud: [`${AGENT_AUDIENCE_PREFIX}default`, TOOLS_GATEWAY_AUDIENCE],
+      aud: [`${AGENT_AUDIENCE_PREFIX}default`, toolsGatewayAudience('default')],
       act: { sub: INGRESS_ROLE },
       txn: 'txn-1',
       iat: 1000,
@@ -51,6 +53,14 @@ describe('transactionClaims', () => {
       jti: 'jti-1',
     });
     expect(qualifiedSubject('t-b', 'user-1')).toBe('t-b#user-1');
+  });
+
+  it('aud lists tools-gateway:<name> once per gateway, sorted; no granted tools means the agent alone (ADR-0041)', () => {
+    const several = transactionClaims({ ...input, gateways: ['finance', 'default', 'finance'] }, config, 1000, { txn: 't', jti: 'j' });
+    expect(several.aud).toEqual(['agent:default', 'tools-gateway:default', 'tools-gateway:finance']);
+    expect(transactionClaims({ ...input, scope: 'default/chat', gateways: [] }, config, 1000, { txn: 't', jti: 'j' }).aud).toEqual(['agent:default']);
+    expect(toolsGatewaysOf(several.aud)).toEqual(['default', 'finance']);
+    expect(toolsGatewaysOf(['agent:x', 'tools-gateway', 'tools-gateway:BAD', 42, 'tools-gateway:ok'])).toEqual(['ok']);
   });
 });
 
@@ -66,6 +76,7 @@ describe('mintCacheKey', () => {
       { ...input, sub: 'user-2' },
       { ...input, agent: 'billing' },
       { ...input, scope: 'default/chat' },
+      { ...input, gateways: ['default', 'finance'] },
     ]) {
       expect(mintCacheKey(other)).not.toBe(base);
     }

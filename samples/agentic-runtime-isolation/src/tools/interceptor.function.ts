@@ -8,9 +8,12 @@
  * 1. re-verify the transaction token against the ingress JWKS (cached,
  *    refreshed on an unknown `kid`), with header `typ: txn+jwt` (the Gateway
  *    does not check `typ`, spike V-8), `iss` = the ingress issuer, `aud`
- *    holding `tools-gateway` and `agent:<agent>` for the token's own agent,
+ *    holding `tools-gateway:<this gateway's name>` (ADR-0041) and
+ *    `agent:<agent>` for the token's own agent,
  *    `act.sub` = the ingress role, and `exp` in the future;
- * 2. on `tools/call`, check the called tool against `scope`;
+ * 2. on `tools/call`, check the called tool against `scope`. Policy holds
+ *    one star permit per target (ADR-0041), so inside a granted target this
+ *    check is the per-tool wall;
  * 3. compute `argsHash` over the arguments (without `_ri_ctx`, after a
  *    client `tenantId` is overwritten with the token's), sign the tenant
  *    context with `ToolContextKey` (KMS `Sign`), and put it in `_ri_ctx`,
@@ -34,7 +37,7 @@ import { headerValue } from '../shared/headers';
 import { sharedHandler } from '../shared/http';
 import { argsHash, CONTEXT_ARGUMENT, type DigestSigner, kmsDigestSigner, signJws } from '../shared/jws';
 import { errorName, log } from '../shared/logger';
-import { AGENT_AUDIENCE_PREFIX, TOOLS_GATEWAY_AUDIENCE, TRANSACTION_TOKEN_TYPE } from '../shared/mint';
+import { AGENT_AUDIENCE_PREFIX, toolsGatewayAudience, TRANSACTION_TOKEN_TYPE } from '../shared/mint';
 import { bearerToken } from '../shared/verifier';
 
 /** The tool argument a client might use to name a tenant; overwritten with the token's (P-15). */
@@ -46,6 +49,8 @@ export const TOOLS_ENV = {
   INGRESS_ROLE_ARN: 'RI_INGRESS_ROLE_ARN',
   CONTEXT_KEY_ID: 'RI_CONTEXT_KEY_ID',
   CONTEXT_LIFETIME_SECONDS: 'RI_CONTEXT_LIFETIME_SECONDS',
+  /** (ADR-0041) This gateway's name; the token's `aud` must hold `tools-gateway:<name>`. */
+  GATEWAY_NAME: 'RI_TOOLS_GATEWAY_NAME',
 } as const;
 
 /** Refusal reasons (spec §5.4); the response body is `forbidden: <reason>`. */
@@ -82,6 +87,15 @@ export interface ToolInterceptorConfig {
   readonly ingressRoleArn: string;
   readonly contextKeyId: string;
   readonly contextLifetimeSeconds: number;
+  /** The name of the gateway this interceptor serves (ADR-0041). */
+  readonly gatewayName: string;
+}
+
+/** What verifying a transaction token needs (the REQUEST and the RESPONSE interceptor share it). */
+export interface TokenVerification {
+  readonly config: Pick<ToolInterceptorConfig, 'issuer' | 'ingressRoleArn' | 'gatewayName'>;
+  readonly getKey: JWTVerifyGetKey;
+  readonly now?: () => number;
 }
 
 export interface ToolInterceptorDependencies {
@@ -94,7 +108,7 @@ export interface ToolInterceptorDependencies {
   readonly now?: () => number;
 }
 
-class Refusal extends Error {
+export class Refusal extends Error {
   constructor(readonly reason: ToolRefusal) {
     super(reason);
   }
@@ -129,7 +143,7 @@ export interface ToolCaller {
 }
 
 /** Verifies the transaction token (step 1). Throws Refusal. */
-export async function verifyTransactionToken(token: string | undefined, deps: ToolInterceptorDependencies): Promise<ToolCaller> {
+export async function verifyTransactionToken(token: string | undefined, deps: TokenVerification): Promise<ToolCaller> {
   if (token === undefined) {
     throw new Refusal('token_invalid');
   }
@@ -138,7 +152,7 @@ export async function verifyTransactionToken(token: string | undefined, deps: To
   try {
     const verified = await jwtVerify(token, deps.getKey, {
       issuer: deps.config.issuer,
-      audience: TOOLS_GATEWAY_AUDIENCE,
+      audience: toolsGatewayAudience(deps.config.gatewayName),
       algorithms: ['RS256', 'ES256'],
       currentDate: deps.now === undefined ? undefined : new Date(deps.now()),
     });
@@ -244,6 +258,7 @@ function defaultDependencies(): ToolInterceptorDependencies {
       ingressRoleArn: requireEnv(TOOLS_ENV.INGRESS_ROLE_ARN),
       contextKeyId,
       contextLifetimeSeconds: Number.isInteger(lifetime) && lifetime > 0 ? lifetime : 60,
+      gatewayName: requireEnv(TOOLS_ENV.GATEWAY_NAME),
     },
     // jose refetches on an unknown kid, at most once per cooldown (spec §6.2.3: once a minute).
     getKey: createRemoteJWKSet(new URL(`${issuer}/.well-known/jwks.json`), { cooldownDuration: 60_000, cacheMaxAge: 300_000 }),

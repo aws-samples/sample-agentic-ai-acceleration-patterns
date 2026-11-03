@@ -27,6 +27,7 @@ import { AgentCoreRuntimeBackend } from './backend/agentcore-runtime.cdk';
 import { AGENT_ENV } from './shared/config';
 import { nameKey } from './shared/entitlements';
 import { LogDrain } from './shared/log-drain';
+import { DEFAULT_TOOLS_GATEWAY } from './shared/mint';
 import { backendNeedsProblem, backendToolsProblem, BACKEND_NAME_PATTERN, INGRESS_TAG_KEY, ROUTE } from './shared/registry';
 import { LONGEST_STREAM, RegistryEntryResource } from './shared/registry-entry.cdk';
 import { OwnedRows, ownerProblem } from './shared/reservation.cdk';
@@ -149,18 +150,23 @@ export class AgentBackend extends Construct {
           tenantRoleArn: ingress.tenantRole.roleArn,
           issuer: ingress.issuer,
           entitlementsTableName: ingress.entitlementStore.tableName,
-          tools:
-            ingress.toolsGateway === undefined
-              ? undefined
-              : {
-                gatewayIdentifier: ingress.toolsGateway.gatewayIdentifier,
-                gatewayUrl: ingress.toolsGateway.gatewayUrl,
-                gatewayRoleArn: ingress.toolsGateway.gatewayRole.roleArn,
-                policyEngineId: ingress.toolsGateway.policyEngine.attrPolicyEngineId,
-                contextKeyId: ingress.toolsGateway.contextKey.keyId,
+          toolsGateways: Object.fromEntries(
+            Object.entries(ingress.toolsGateways).map(([name, gw]) => [
+              name,
+              {
+                name,
+                gatewayIdentifier: gw.gatewayIdentifier,
+                gatewayUrl: gw.gatewayUrl,
+                gatewayRoleArn: gw.gatewayRole.roleArn,
+                policyEngineId: gw.policyEngine.attrPolicyEngineId,
+                contextKeyId: gw.contextKey.keyId,
               },
+            ]),
+          ),
         }
         : ingress;
+    // ADR-0041: every tools gateway of the ingress by name; `tools` alone is the `default` one.
+    const gateways = ref.toolsGateways ?? (ref.tools === undefined ? {} : { [DEFAULT_TOOLS_GATEWAY]: ref.tools });
     if (ref.ingress === 'agentcore-gateway' && ref.gatewayIdentifier === undefined) {
       fail('ingress.gatewayIdentifier', "is required with the 'agentcore-gateway' ingress");
     }
@@ -168,17 +174,28 @@ export class AgentBackend extends Construct {
       fail('ingress.registryPrefix', 'must start and end with /');
     }
     // P-4: toolsGateway: false plus a backend with tools fails synth (ADR-0034).
-    if (tools.length > 0 && ref.tools === undefined) {
+    if (tools.length > 0 && Object.keys(gateways).length === 0) {
       fail('tools', 'needs an ingress with a tools gateway (toolsGateway is false)');
     }
     if (ref.entitlementsTableName === undefined) {
       fail('ingress.entitlementsTableName', 'is required in v2 (the NAME# reservation, ADR-0035)');
     }
 
-    // The agent's environment (spec §3.3): where the tools gateway is, and the issuer.
+    // The agent's environment (spec §3.3): where the tools gateways are, and the issuer.
+    // ADR-0041: RI_TOOLS_GATEWAY_URLS maps each gateway name to its MCP endpoint; the agent
+    // talks to the gateways its token's aud names. RI_TOOLS_GATEWAY_URL stays as the default's.
     const environment: Record<string, string> = { ...props.agent.environment };
-    if (ref.tools?.gatewayUrl !== undefined) {
-      environment[AGENT_ENV.TOOLS_GATEWAY_URL] = ref.tools.gatewayUrl;
+    const urls = Object.fromEntries(
+      Object.entries(gateways)
+        .filter(([, gw]) => gw.gatewayUrl !== undefined)
+        .map(([name, gw]) => [name, gw.gatewayUrl!]),
+    );
+    if (Object.keys(urls).length > 0) {
+      environment[AGENT_ENV.TOOLS_GATEWAY_URLS] = Stack.of(this).toJsonString(urls);
+    }
+    const defaultUrl = gateways[DEFAULT_TOOLS_GATEWAY]?.gatewayUrl;
+    if (defaultUrl !== undefined) {
+      environment[AGENT_ENV.TOOLS_GATEWAY_URL] = defaultUrl;
     }
     if (ref.issuer !== undefined) {
       environment[AGENT_ENV.ISSUER] = ref.issuer;

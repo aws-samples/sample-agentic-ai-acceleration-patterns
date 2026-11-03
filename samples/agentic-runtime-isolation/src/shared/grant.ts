@@ -23,8 +23,13 @@
  * compressed.
  */
 
-/** The `scope` claim bound (spec §3.6): a longer compressed grant is refused with 502 `grant_too_large`. */
-export const MAX_SCOPE_BYTES = 4096;
+/**
+ * The `scope` claim bound (spec §3.6): a longer compressed grant is refused
+ * with 502 `grant_too_large`. 8,192 bytes passed the tools gateway's
+ * authoriser and Policy (V-16c) and the Runtime (V-13); ADR-0041 raised it
+ * from 4,096.
+ */
+export const MAX_SCOPE_BYTES = 8192;
 
 /** The wildcard tool of a target. */
 export const TARGET_WILDCARD = '*';
@@ -79,6 +84,8 @@ export type GrantResult =
     readonly scope: string;
     /** True when the grant holds only the agent's needs (`no_tools_granted`, not an error). */
     readonly noToolsGranted: boolean;
+    /** The targets of the granted tools, sorted: what the token's `aud` is resolved from (ADR-0041). */
+    readonly toolTargets: readonly string[];
   }
   | { readonly granted: false; readonly reason: GrantRefusal };
 
@@ -187,7 +194,7 @@ export function grantFor(inputs: GrantInputs): GrantResult {
   if (Buffer.byteLength(scope, 'utf8') > MAX_SCOPE_BYTES) {
     return { granted: false, reason: 'grant_too_large' };
   }
-  return { granted: true, entries, scope, noToolsGranted: tools.size === 0 };
+  return { granted: true, entries, scope, noToolsGranted: tools.size === 0, toolTargets: targetsOf(tools) };
 }
 
 /**

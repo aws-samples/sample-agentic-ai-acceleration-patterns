@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * The `ToolTarget` policy custom resource (spec C-16, §3.6; ADR-0040). One
- * Cedar policy per target in the tools gateway's policy engine, with the
- * lifecycle spike V-14 showed the service needs:
+ * The `ToolTarget` policy custom resource (spec C-16, §3.6; ADR-0040,
+ * ADR-0041). One Cedar star permit per target in its tools gateway's policy
+ * engine, never split into groups (the text names no tool, so it stays
+ * about 450 bytes whatever the target holds), with the lifecycle spike V-14
+ * showed the service needs:
  *
  * - Create: `CreatePolicy`, then wait for ACTIVE. Concurrent creates fail
  *   (53 of 98 ended `CREATE_FAILED` in V-14), so the construct chains every
- *   policy resource after the previous one, and this handler retries a
+ *   policy resource after the previous one on the same gateway (one policy
+ *   per target, so the chain runs across targets), and this handler retries a
  *   failed or refused create with backoff, deleting a `CREATE_FAILED`
  *   policy before the next attempt.
  * - Update: `UpdatePolicy` with the current definition and wait for ACTIVE.

@@ -17,7 +17,7 @@ const contextKey = localRsaKey();
 const rogueKey = localRsaKey();
 
 const deps: ToolInterceptorDependencies = {
-  config: { issuer: ISSUER, ingressRoleArn: INGRESS_ROLE, contextKeyId: 'ctx-key', contextLifetimeSeconds: 60 },
+  config: { issuer: ISSUER, ingressRoleArn: INGRESS_ROLE, contextKeyId: 'ctx-key', contextLifetimeSeconds: 60, gatewayName: 'default' },
   getKey: createLocalJWKSet({ keys: [publicJwk(ingressKey.publicKey, 'ingress-key')] }) as ToolInterceptorDependencies['getKey'],
   contextSigner: contextKey.signer,
   now: () => NOW,
@@ -34,7 +34,7 @@ interface TokenOptions {
 
 async function transactionToken(options: TokenOptions = {}): Promise<string> {
   const claims = transactionClaims(
-    { tenantId: 't-a', sub: 'user-1', agent: options.agent ?? 'default', scope: options.scope ?? 'crm/* default/chat', versions: { tenant: 1, agent: 1 } },
+    { tenantId: 't-a', sub: 'user-1', agent: options.agent ?? 'default', scope: options.scope ?? 'crm/* default/chat', gateways: ['default'], versions: { tenant: 1, agent: 1 } },
     { issuer: ISSUER, ttlSeconds: 300, ingressRoleArn: INGRESS_ROLE },
     Math.floor(NOW / 1000),
     { txn: 'txn-1', jti: 'jti-1' },
@@ -154,8 +154,24 @@ describe('interceptTool', () => {
   });
 
   it('refuses a token whose aud does not name its own agent', async () => {
-    const token = await transactionToken({ claims: { aud: ['agent:billing', 'tools-gateway'] } });
+    const token = await transactionToken({ claims: { aud: ['agent:billing', 'tools-gateway:default'] } });
     expect(refusalOf(await interceptTool(event(token, 'tools/call', call({})), deps)).message).toBe('forbidden: aud_mismatch');
+  });
+
+  it('refuses a token minted for another tools gateway, or for the bare pre-ADR-0041 audience (ADR-0041)', async () => {
+    for (const aud of [['agent:default', 'tools-gateway:finance'], ['agent:default', 'tools-gateway'], ['agent:default']]) {
+      const token = await transactionToken({ claims: { aud } });
+      expect(refusalOf(await interceptTool(event(token, 'tools/call', call({})), deps)).message).toBe('forbidden: token_invalid');
+    }
+    const finance: ToolInterceptorDependencies = { ...deps, config: { ...deps.config, gatewayName: 'finance' } };
+    const both = await transactionToken({ claims: { aud: ['agent:default', 'tools-gateway:default', 'tools-gateway:finance'] } });
+    expect(passedBody(await interceptTool(event(both, 'tools/call', call({})), finance)).params.arguments[CONTEXT_ARGUMENT]).toBeDefined();
+  });
+
+  it('a partial-target grant: crm/get_account is admitted, crm/update_case refused, though Policy permits the whole target (ADR-0041)', async () => {
+    const token = await transactionToken({ scope: 'default/chat crm/get_account' });
+    expect(passedBody(await interceptTool(event(token, 'tools/call', call({ accountId: 'a' }, 'crm___get_account')), deps)).params.name).toBe('crm___get_account');
+    expect(refusalOf(await interceptTool(event(token, 'tools/call', call({}, 'crm___update_case')), deps)).message).toBe('forbidden: tool_not_granted');
   });
 
   it('refuses a token whose act is not the ingress role', async () => {

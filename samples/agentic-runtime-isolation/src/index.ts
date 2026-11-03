@@ -8,7 +8,9 @@
  * contract.
  *
  * `SharedIngress` plus one `AgentBackend` per agent product and one
- * `ToolTarget` per tool group is the construct. For a single agent, give the
+ * `ToolTarget` per tool group is the construct; (v2, ADR-0041) the ingress
+ * holds one or more named tools gateways and each `ToolTarget` names one.
+ * For a single agent, give the
  * ingress a `defaultBackend` and one `AgentBackend` of that name (ADR-0024).
  * (v2) `ScopeRegistration` and `backendScopesProblem` are removed (ADR-0030).
  */
@@ -36,8 +38,17 @@ export type {
 } from './shared-ingress.cdk';
 export { ROUTE } from './shared/registry';
 export type { AgentProps } from './agent-backend.cdk';
-export { SharedIngress, DEFAULT_REGISTRY_PREFIX, DEFAULT_REGISTRY_TTL, MAX_REGISTRY_TTL, PUBLISHED } from './shared-ingress.cdk';
-export type { SharedIngressProps, SharedIngressRef } from './shared-ingress.cdk';
+export {
+  SharedIngress,
+  DEFAULT_REGISTRY_PREFIX,
+  DEFAULT_REGISTRY_TTL,
+  MAX_REGISTRY_TTL,
+  PUBLISHED,
+  TOOLS_GATEWAYS_SEGMENT,
+  TOOLS_GATEWAY_PARAMETER_FIELDS,
+  toolsGatewayParameter,
+} from './shared-ingress.cdk';
+export type { SharedIngressProps, SharedIngressRef, ToolsGatewayParameterField } from './shared-ingress.cdk';
 export { AgentBackend } from './agent-backend.cdk';
 export type { AgentBackendProps } from './agent-backend.cdk';
 export { RegistryEntryResource, LONGEST_STREAM, MAX_DRAIN } from './shared/registry-entry.cdk';
@@ -45,7 +56,24 @@ export type { RegistryEntryResourceProps } from './shared/registry-entry.cdk';
 // v2 constructs (spec §6.4)
 export { ToolTarget, MAX_TOOLS_PER_TARGET } from './tool-target.cdk';
 export type { ToolTargetProps, ToolTargetKind, ToolDefinition } from './tool-target.cdk';
-export { ToolsGateway, MAX_TOOL_TARGETS, MCP_SUPPORTED_VERSIONS } from './tools-gateway.cdk';
+export {
+  ToolsGateway,
+  MAX_TOOL_TARGETS,
+  MCP_SUPPORTED_VERSIONS,
+  DEFAULT_MAX_TOOLS_PER_GATEWAY,
+  MAX_TOOLS_PER_GATEWAY_LIMIT,
+} from './tools-gateway.cdk';
+// The token audiences (ADR-0041): `agent:<name>` and `tools-gateway:<gateway>`.
+export {
+  AGENT_AUDIENCE_PREFIX,
+  TOOLS_GATEWAY_AUDIENCE_PREFIX,
+  TOOLS_GATEWAY_NAME_PATTERN,
+  DEFAULT_TOOLS_GATEWAY,
+  toolsGatewayAudience,
+  toolsGatewaysOf,
+} from './shared/mint';
+// The Cedar star permit a ToolTarget writes (ADR-0041), for consumers that write policies by hand.
+export { cedarPolicyFor, MAX_POLICY_STATEMENT_CHARS } from './shared/cedar';
 export type { ToolsGatewayProps, ResolvedToolsGateway } from './tools-gateway.cdk';
 export { TokenSigner } from './shared/token-signer.cdk';
 export type { TokenSignerProps } from './shared/token-signer.cdk';

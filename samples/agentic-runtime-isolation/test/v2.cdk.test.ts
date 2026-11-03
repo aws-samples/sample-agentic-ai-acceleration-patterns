@@ -5,8 +5,9 @@ import * as path from 'node:path';
 import { App, Duration, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
-import { AgentBackend, GATEWAY_TARGET_NAME, SharedIngress, type SharedIngressProps } from '../src/index';
-import { ToolTarget } from '../src/tool-target.cdk';
+import { AgentBackend, GATEWAY_TARGET_NAME, PUBLISHED, SharedIngress, type SharedIngressProps, TOOLS_GATEWAY_PARAMETER_FIELDS, toolsGatewayParameter } from '../src/index';
+import { cedarPolicyFor } from '../src/shared/cedar';
+import { ToolTarget, type ToolDefinition } from '../src/tool-target.cdk';
 import { MAX_TOOL_TARGETS } from '../src/tools-gateway.cdk';
 
 /**
@@ -35,7 +36,7 @@ function build(ingress: Ingress, props: Partial<SharedIngressProps> = {}, target
     defaultBackend: GATEWAY_TARGET_NAME,
     ...props,
   } as SharedIngressProps);
-  const toolsOn = props.toolsGateway !== false;
+  const toolsOn = props.toolsGateway !== false && props.toolsGateways === undefined;
   new AgentBackend(stack, 'Backend', {
     name: GATEWAY_TARGET_NAME,
     ingress: shared,
@@ -126,7 +127,7 @@ describe.each(['api-gateway', 'agentcore-gateway'] as const)('v2 template, ingre
     const [, key] = resources(template, 'AWS::KMS::Key').find(([id]) => id.includes('ToolContextKey'))!;
     const signs = signStatements(key);
     expect(signs).toHaveLength(1);
-    const interceptor = functionAndRole(template, 'tools gateway REQUEST interceptor');
+    const interceptor = functionAndRole(template, 'tools gateway default REQUEST interceptor');
     expect(signs[0].Principal).toEqual({ AWS: { 'Fn::GetAtt': [interceptor.role, 'Arn'] } });
   });
 
@@ -142,11 +143,11 @@ describe.each(['api-gateway', 'agentcore-gateway'] as const)('v2 template, ingre
     template.resourceCountIs('Custom::RuntimeIsolationJwks', 1);
   });
 
-  it('the tools gateway: CUSTOM_JWT on the ingress issuer with audience tools-gateway, MCP 2025-11-25, REQUEST interceptor, Policy ENFORCE (ADR-0034)', () => {
+  it('the tools gateway: CUSTOM_JWT on the ingress issuer with audience tools-gateway:default, MCP 2025-11-25, REQUEST interceptor, Policy ENFORCE (ADR-0034, ADR-0041)', () => {
     const [, gateway] = resources(template, 'AWS::BedrockAgentCore::Gateway').find(([id]) => id.includes('ToolsGateway'))!;
     const p = gateway.Properties;
     expect(p.AuthorizerType).toBe('CUSTOM_JWT');
-    expect(p.AuthorizerConfiguration.CustomJWTAuthorizer.AllowedAudience).toEqual(['tools-gateway']);
+    expect(p.AuthorizerConfiguration.CustomJWTAuthorizer.AllowedAudience).toEqual(['tools-gateway:default']);
     expect(JSON.stringify(p.AuthorizerConfiguration.CustomJWTAuthorizer.DiscoveryUrl)).toContain('/.well-known/openid-configuration');
     expect(JSON.stringify(p.AuthorizerConfiguration.CustomJWTAuthorizer.DiscoveryUrl)).not.toContain('cognito-idp');
     expect(p.ProtocolType).toBe('MCP');
@@ -157,9 +158,10 @@ describe.each(['api-gateway', 'agentcore-gateway'] as const)('v2 template, ingre
   });
 
   it('the tools interceptor knows the issuer, the context key and the context lifetime, and runs on a provisioned alias', () => {
-    const { id, fn } = functionAndRole(template, 'tools gateway REQUEST interceptor');
-    expect(Object.keys(fn.Properties.Environment.Variables).sort()).toEqual(['RI_CONTEXT_KEY_ID', 'RI_CONTEXT_LIFETIME_SECONDS', 'RI_INGRESS_ROLE_ARN', 'RI_ISSUER']);
+    const { id, fn } = functionAndRole(template, 'tools gateway default REQUEST interceptor');
+    expect(Object.keys(fn.Properties.Environment.Variables).sort()).toEqual(['RI_CONTEXT_KEY_ID', 'RI_CONTEXT_LIFETIME_SECONDS', 'RI_INGRESS_ROLE_ARN', 'RI_ISSUER', 'RI_TOOLS_GATEWAY_NAME']);
     expect(fn.Properties.Environment.Variables.RI_CONTEXT_LIFETIME_SECONDS).toBe('60');
+    expect(fn.Properties.Environment.Variables.RI_TOOLS_GATEWAY_NAME).toBe('default');
     const [, alias] = resources(template, 'AWS::Lambda::Alias').find(([, a]) => a.Properties.FunctionName.Ref === id)!;
     expect(alias.Properties.ProvisionedConcurrencyConfig).toEqual({ ProvisionedConcurrentExecutions: 1 });
   });
@@ -177,6 +179,19 @@ describe.each(['api-gateway', 'agentcore-gateway'] as const)('v2 template, ingre
     expect(policy.DependsOn).toContain(targetId);
     expect(policy.Properties.Name).toBe('crm_target');
     expect(policy.Properties.ValidationMode).toBe('FAIL_ON_ANY_FINDINGS');
+  });
+
+  it('the policy is the one star permit of the target, on its gateway ARN (ADR-0041)', () => {
+    const [, policy] = resources(template, 'Custom::RuntimeIsolationToolPolicy')[0];
+    const [gatewayId] = resources(template, 'AWS::BedrockAgentCore::Gateway').find(([id]) => id.includes('ToolsGateway'))!;
+    const expected = built.stack.resolve(cedarPolicyFor('crm', built.ingress.toolsGateway!.gatewayArn));
+    expect(policy.Properties.Statement).toEqual(expected);
+    expect(JSON.stringify(policy.Properties.Statement)).toContain(gatewayId);
+    expect(JSON.stringify(policy.Properties.Statement)).not.toContain('___');
+  });
+
+  it('no RESPONSE interceptor unless responseFilter is on (ADR-0041)', () => {
+    expect(resources(template, 'AWS::Lambda::Function').some(([, f]) => String(f.Properties.Description).includes('RESPONSE interceptor'))).toBe(false);
   });
 });
 
@@ -256,7 +271,7 @@ describe('v2 options', () => {
 
   it(`more than ${MAX_TOOL_TARGETS} ToolTargets fail validation (ADR-0040)`, () => {
     const built = build('api-gateway', {}, MAX_TOOL_TARGETS + 1);
-    expect(() => built.template()).toThrow(/toolsGateway holds at most 100 ToolTargets/);
+    expect(() => built.template()).toThrow(/tools gateway 'default' holds at most 100 ToolTargets/);
   }, 60_000);
 
   it('ToolTarget kinds other than lambda fail synth (TODO(v2))', () => {
@@ -265,5 +280,188 @@ describe('v2 options', () => {
       expect(() => new ToolTarget(stack, `K${kind}`, { name: 'k', ingress, kind })).toThrow(/is not built yet \(TODO\(v2\)\)/);
     }
     expect(() => new ToolTarget(stack, 'Bad', { name: 'Bad', ingress, kind: 'lambda' })).toThrow(/ToolTarget: name must match/);
+  });
+});
+
+/** ADR-0041: several tools gateways, each with its own Policy engine, audience, interceptor and limits. */
+function tools(n: number, prefix = 'tool'): ToolDefinition[] {
+  return Array.from({ length: n }, (_, i) => ({ name: `${prefix}_${i}`, description: `tool ${i}`, inputSchema: { type: 'object' } }));
+}
+
+function twoGateways(props: Partial<SharedIngressProps> = {}) {
+  const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+  const stack = new Stack(app, 'Test', { env: { account: '111122223333', region: 'eu-central-1' } });
+  const ingress = new SharedIngress(stack, 'Ingress', {
+    ingress: 'api-gateway',
+    identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: ['client-one'] },
+    defaultBackend: GATEWAY_TARGET_NAME,
+    toolsGateways: { default: {}, finance: { responseFilter: true, maxToolsPerGateway: 5 } },
+    ...props,
+  });
+  return { app, stack, ingress };
+}
+
+describe('several tools gateways (ADR-0041)', () => {
+  const { stack, ingress } = twoGateways();
+  new AgentBackend(stack, 'Default', { name: 'default', ingress, agent: { codePath: FIXTURE_AGENT, modelId: 'amazon.nova-lite-v1:0' }, needs: ['default/chat'], tools: ['crm/*'] });
+  new AgentBackend(stack, 'Billing', { name: 'billing', ingress, agent: { codePath: FIXTURE_AGENT, modelId: 'amazon.nova-lite-v1:0' }, needs: ['billing/chat'], tools: ['invoices/*'] });
+  const crm = new ToolTarget(stack, 'Crm', { name: 'crm', ingress, kind: 'lambda', function: toolFunction(stack, 'CrmFn'), tools: tools(3) });
+  const invoices = new ToolTarget(stack, 'Invoices', { name: 'invoices', ingress, gateway: 'finance', kind: 'lambda', function: toolFunction(stack, 'InvFn'), tools: tools(2) });
+  const template = Template.fromStack(stack);
+  const gateways = resources(template, 'AWS::BedrockAgentCore::Gateway');
+  const byAudience = (aud: string) => gateways.find(([, g]) => g.Properties.AuthorizerConfiguration.CustomJWTAuthorizer.AllowedAudience[0] === aud)!;
+
+  it('synthesises two gateways, each with its own audience and its own Policy engine', () => {
+    expect(gateways).toHaveLength(2);
+    expect(gateways.map(([, g]) => g.Properties.AuthorizerConfiguration.CustomJWTAuthorizer.AllowedAudience).sort()).toEqual([
+      ['tools-gateway:default'],
+      ['tools-gateway:finance'],
+    ]);
+    template.resourceCountIs('AWS::BedrockAgentCore::PolicyEngine', 2);
+    const engines = gateways.map(([, g]) => JSON.stringify(g.Properties.PolicyEngineConfiguration.Arn));
+    expect(new Set(engines).size).toBe(2);
+    expect(Object.keys(ingress.toolsGateways).sort()).toEqual(['default', 'finance']);
+    expect(ingress.toolsGateway).toBe(ingress.toolsGateways.default);
+  });
+
+  it('the RESPONSE interceptor is on finance only, and verifies with its own gateway name', () => {
+    const [, def] = byAudience('tools-gateway:default');
+    const [, fin] = byAudience('tools-gateway:finance');
+    expect(def.Properties.InterceptorConfigurations.map((c: any) => c.InterceptionPoints)).toEqual([['REQUEST']]);
+    expect(fin.Properties.InterceptorConfigurations.map((c: any) => c.InterceptionPoints)).toEqual([['REQUEST'], ['RESPONSE']]);
+    expect(fin.Properties.InterceptorConfigurations[1].InputConfiguration).toEqual({ PassRequestHeaders: true });
+    const filters = resources(template, 'AWS::Lambda::Function').filter(([, f]) => String(f.Properties.Description).includes('RESPONSE interceptor'));
+    expect(filters).toHaveLength(1);
+    expect(filters[0][1].Properties.Environment.Variables.RI_TOOLS_GATEWAY_NAME).toBe('finance');
+    expect(Object.keys(filters[0][1].Properties.Environment.Variables)).not.toContain('RI_CONTEXT_KEY_ID');
+  });
+
+  it('one shared tool-context key with one Sign statement per gateway interceptor', () => {
+    const keys = resources(template, 'AWS::KMS::Key').filter(([id]) => id.includes('ToolContextKey'));
+    expect(keys).toHaveLength(1);
+    const signs = signStatements(keys[0][1]);
+    expect(signs.map((s) => s.Sid).sort()).toEqual(['SignToolContextsDefault', 'SignToolContextsFinance']);
+    const interceptors = resources(template, 'AWS::Lambda::Function').filter(([, f]) => String(f.Properties.Description).includes('REQUEST interceptor'));
+    expect(interceptors).toHaveLength(2);
+  });
+
+  it('one rate limit per gateway', () => {
+    template.resourceCountIs('AWS::BedrockAgentCore::GatewayRateLimit', 2);
+  });
+
+  it('one policy custom resource per target, each on its own gateway\'s engine, each the target\'s star permit', () => {
+    const policies = resources(template, 'Custom::RuntimeIsolationToolPolicy');
+    expect(policies).toHaveLength(2);
+    const crmPolicy = policies.find(([, p]) => p.Properties.Name === 'crm_target')![1];
+    const invPolicy = policies.find(([, p]) => p.Properties.Name === 'invoices_target')![1];
+    expect(crmPolicy.Properties.PolicyEngineId).toEqual(stack.resolve(ingress.toolsGateways.default.policyEngine.attrPolicyEngineId));
+    expect(invPolicy.Properties.PolicyEngineId).toEqual(stack.resolve(ingress.toolsGateways.finance.policyEngine.attrPolicyEngineId));
+    expect(invPolicy.Properties.Statement).toEqual(stack.resolve(cedarPolicyFor('invoices', ingress.toolsGateways.finance.gatewayArn)));
+    // The two targets are on different gateways: their policies are not chained.
+    expect(invPolicy.DependsOn ?? []).not.toContain(policies.find(([, p]) => p.Properties.Name === 'crm_target')![0]);
+  });
+
+  it('the catalogue rows and the registry pointer carry the gateway', () => {
+    expect(invoices.gateway).toBe('finance');
+    expect(crm.gateway).toBe('default');
+    const rows = resources(template, 'Custom::RuntimeIsolationOwnedRows').map(([, r]) => r.Properties.Rows).flat();
+    expect(rows.filter((r: any) => r.PK === 'TOOL#invoices').map((r: any) => r.attributes.gateway)).toEqual(['finance', 'finance']);
+    expect(rows.filter((r: any) => r.PK === 'TOOL#crm').map((r: any) => r.attributes.gateway)).toEqual(['default', 'default', 'default']);
+    const pointer = resources(template, 'AWS::SSM::Parameter').find(([, p]) => JSON.stringify(p.Properties.Name).includes('tools/invoices'))![1];
+    expect(JSON.stringify(pointer.Properties.Value)).toContain('\\"gateway\\":\\"finance\\"');
+  });
+
+  it('publishes tools-gateways/<name>/* for both, the default aliases, and one context key id', () => {
+    const names = resources(template, 'AWS::SSM::Parameter').map(([, p]) => p.Properties.Name as string);
+    for (const gw of ['default', 'finance']) {
+      for (const field of TOOLS_GATEWAY_PARAMETER_FIELDS) {
+        expect(names).toContain(`/application-plane/shared/agent-runtime/${toolsGatewayParameter(gw, field)}`);
+      }
+    }
+    const aliases = [
+      PUBLISHED.toolsGatewayUrl,
+      PUBLISHED.toolsGatewayIdentifier,
+      PUBLISHED.toolsGatewayRoleArn,
+      PUBLISHED.toolsPolicyEngineId,
+      PUBLISHED.toolContextKeyId,
+    ];
+    for (const alias of aliases) {
+      expect(names.filter((n) => n === `/application-plane/shared/agent-runtime/${alias}`)).toHaveLength(1);
+    }
+  });
+
+  it('the agent gets RI_TOOLS_GATEWAY_URLS with every gateway by name', () => {
+    const runtime = resources(template, 'AWS::BedrockAgentCore::Runtime')[0][1];
+    const urls = JSON.stringify(runtime.Properties.EnvironmentVariables.RI_TOOLS_GATEWAY_URLS);
+    expect(urls).toContain('default');
+    expect(urls).toContain('finance');
+    expect(runtime.Properties.EnvironmentVariables.RI_TOOLS_GATEWAY_URL).toBeDefined();
+  });
+
+  it('passes the default-gateway resolution: a ToolTarget without gateway is on default', () => {
+    expect(ingress.toolsGateways.default.targetCount).toBe(1);
+    expect(ingress.toolsGateways.finance.targetCount).toBe(1);
+    expect(ingress.toolsGateways.finance.toolCount).toBe(2);
+  });
+});
+
+describe('several tools gateways: synth errors (ADR-0041)', () => {
+  it('a ToolTarget on an unknown gateway fails synth, naming the gateways that exist', () => {
+    const { stack, ingress } = twoGateways();
+    expect(() => new ToolTarget(stack, 'X', { name: 'x', ingress, gateway: 'nope', kind: 'lambda', function: toolFunction(stack, 'F'), tools: tools(1) })).toThrow(
+      /ToolTarget: gateway 'nope' is not a tools gateway of the ingress \(it has 'default', 'finance'/,
+    );
+    expect(() => new ToolTarget(stack, 'Y', { name: 'y', ingress, gateway: 'Bad Name', kind: 'lambda', function: toolFunction(stack, 'G'), tools: tools(1) })).toThrow(
+      /ToolTarget: gateway must match/,
+    );
+  });
+
+  it('maxToolsPerGateway exceeded by the ToolTargets on that gateway fails synth; reaching it does not', () => {
+    const { stack, ingress } = twoGateways();
+    new ToolTarget(stack, 'A', { name: 'a', ingress, gateway: 'finance', kind: 'lambda', function: toolFunction(stack, 'FA'), tools: tools(3) });
+    new ToolTarget(stack, 'B', { name: 'b', ingress, gateway: 'finance', kind: 'lambda', function: toolFunction(stack, 'FB'), tools: tools(2) });
+    expect(() => new ToolTarget(stack, 'C', { name: 'c', ingress, gateway: 'finance', kind: 'lambda', function: toolFunction(stack, 'FC'), tools: tools(1) })).toThrow(
+      /ToolTarget: tools would bring tools gateway 'finance' to 6 catalogued tools with target 'c', over maxToolsPerGateway 5/,
+    );
+    // The other gateway keeps its own budget (default 300).
+    expect(() => new ToolTarget(stack, 'D', { name: 'd', ingress, kind: 'lambda', function: toolFunction(stack, 'FD'), tools: tools(300) })).not.toThrow();
+    expect(() => new ToolTarget(stack, 'E', { name: 'e', ingress, kind: 'lambda', function: toolFunction(stack, 'FE'), tools: tools(1) })).toThrow(/over maxToolsPerGateway 300/);
+  });
+
+  it('toolsGateway and toolsGateways together fail synth naming both; names and bounds are checked', () => {
+    expect(() => twoGateways({ toolsGateway: {} })).toThrow(/SharedIngress: toolsGateway and toolsGateways must not both be set/);
+    expect(() => twoGateways({ toolsGateways: { Bad_Name: {} } })).toThrow(/toolsGateways name 'Bad_Name' must match/);
+    expect(() => twoGateways({ toolsGateways: { ['x'.repeat(33)]: {} } })).toThrow(/toolsGateways name/);
+    expect(() => twoGateways({ toolsGateways: {} })).toThrow(/toolsGateways must name at least one gateway/);
+    expect(() => twoGateways({ toolsGateways: { finance: { maxToolsPerGateway: 0 } } })).toThrow(/toolsGateways\.finance\.maxToolsPerGateway must be an integer from 1 to 1000/);
+    expect(() => twoGateways({ toolsGateways: { finance: { maxToolsPerGateway: 1001 } } })).toThrow(/toolsGateways\.finance\.maxToolsPerGateway/);
+    expect(() => twoGateways({ toolsGateways: { finance: { tenantRateLimit: { requestsPerSecond: 0 } } } })).toThrow(/toolsGateways\.finance\.tenantRateLimit/);
+    expect(() => build('api-gateway', { toolsGateway: { maxToolsPerGateway: 1.5 } })).toThrow(/toolsGateway\.maxToolsPerGateway/);
+  });
+
+  it('without a gateway named default there is no toolsGateway alias and a ToolTarget must name its gateway', () => {
+    const { stack, ingress } = twoGateways({ toolsGateways: { finance: {} } });
+    expect(ingress.toolsGateway).toBeUndefined();
+    expect(ingress.toolsGatewayUrl).toBeUndefined();
+    expect(() => new ToolTarget(stack, 'X', { name: 'x', ingress, kind: 'lambda', function: toolFunction(stack, 'F'), tools: tools(1) })).toThrow(/gateway 'default' is not a tools gateway/);
+    new ToolTarget(stack, 'Y', { name: 'y', ingress, gateway: 'finance', kind: 'lambda', function: toolFunction(stack, 'G'), tools: tools(1) });
+    const names = resources(Template.fromStack(stack), 'AWS::SSM::Parameter').map(([, p]) => p.Properties.Name as string);
+    expect(names.some((n) => n.endsWith(`/${PUBLISHED.toolsGatewayUrl}`))).toBe(false);
+    expect(names).toContain(`/application-plane/shared/agent-runtime/${toolsGatewayParameter('finance', 'url')}`);
+  });
+
+  it('a ToolTarget in another stack names its gateway through SharedIngress.fromParameters({ toolsGateways })', () => {
+    const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+    const stack = new Stack(app, 'Tools', { env: { account: '111122223333', region: 'eu-central-1' } });
+    const ref = SharedIngress.fromParameters(stack, 'Ingress', '/application-plane/shared/agent-runtime/', 'api-gateway', { toolsGateways: ['default', 'finance'] });
+    expect(Object.keys(ref.toolsGateways!).sort()).toEqual(['default', 'finance']);
+    expect(ref.tools).toBe(ref.toolsGateways!.default);
+    const target = new ToolTarget(stack, 'Inv', { name: 'invoices', ingress: ref, gateway: 'finance', kind: 'lambda', function: toolFunction(stack, 'F'), tools: tools(1) });
+    expect(target.gateway).toBe('finance');
+    expect(() => new ToolTarget(stack, 'X', { name: 'x', ingress: ref, gateway: 'hr', kind: 'lambda', function: toolFunction(stack, 'G'), tools: tools(1) })).toThrow(
+      /gateway 'hr' is not a tools gateway of the ingress reference/,
+    );
+    const text = JSON.stringify(Template.fromStack(stack).toJSON());
+    expect(text).toContain(toolsGatewayParameter('finance', 'policyEngineId'));
   });
 });

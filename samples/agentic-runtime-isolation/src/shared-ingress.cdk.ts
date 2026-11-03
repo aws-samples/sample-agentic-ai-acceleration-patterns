@@ -17,7 +17,8 @@
  * the log drain (ADR-0019) and the published parameters. (v2) Also the
  * entitlement store (C-12, ADR-0030), the token signer and the issuer's
  * discovery routes (C-13, ADR-0037), the entitlement API (C-14) and, unless
- * `toolsGateway: false`, the shared tools gateway (C-15, ADR-0034). The
+ * `toolsGateway: false`, the tools gateways (C-15, ADR-0034, ADR-0041): one
+ * named `default` unless `toolsGateways` names several. The
  * function that mints (the authoriser on `api-gateway`, the interceptor on
  * `agentcore-gateway`) is the only principal allowed `kms:Sign`.
  *
@@ -32,6 +33,7 @@ import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as kms from 'aws-cdk-lib/aws-kms';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
@@ -45,15 +47,21 @@ import { acknowledgeLambdaFindings, functionProps } from './shared/function.cdk'
 import type { JwsAlgorithm } from './shared/jws';
 import { LogDrain } from './shared/log-drain';
 import type { IngressKind } from './shared/metrics';
-import { DEFAULT_MINT_CACHE_MAX_ENTRIES } from './shared/mint';
+import { DEFAULT_MINT_CACHE_MAX_ENTRIES, DEFAULT_TOOLS_GATEWAY, TOOLS_GATEWAY_NAME_PATTERN } from './shared/mint';
 import { acknowledgeGranularFinding, nagFindingResource } from './shared/nag';
 import { BACKEND_NAME_PATTERN, INGRESS_TAG_KEY, REGISTRY_BACKENDS_SEGMENT, ROUTE } from './shared/registry';
 import { LONGEST_STREAM, MAX_DRAIN } from './shared/registry-entry.cdk';
 import { CONVERSATION_ID_PATTERN, type SessionScope } from './shared/session';
 import { TENANT_HEADER, TENANT_ID_PATTERN } from './shared/tenant';
-import { TokenSigner, WELL_KNOWN } from './shared/token-signer.cdk';
+import { signingKey, TokenSigner, WELL_KNOWN } from './shared/token-signer.cdk';
 import { DEFAULT_CACHE_MAX_ENTRIES, TENANT_TAG_KEY, USER_TAG_KEY } from './shared/tvm';
-import { MAX_TOOL_TARGETS, type ResolvedToolsGateway, ToolsGateway } from './tools-gateway.cdk';
+import {
+  DEFAULT_MAX_TOOLS_PER_GATEWAY,
+  gatewayIdPart,
+  MAX_TOOLS_PER_GATEWAY_LIMIT,
+  type ResolvedToolsGateway,
+  ToolsGateway,
+} from './tools-gateway.cdk';
 
 export { acknowledgeLambdaFindings, functionProps } from './shared/function.cdk';
 
@@ -138,7 +146,11 @@ export interface EntitlementsProps {
   readonly maxToolsPerTenant?: number;
 }
 
-/** (v2, ADR-0034) The shared tools gateway. On by default; `toolsGateway: false` creates none. */
+/**
+ * (v2, ADR-0034, ADR-0041) One tools gateway. On by default as one gateway
+ * named `default`; `toolsGateway: false` creates none; `toolsGateways`
+ * names several.
+ */
 export interface ToolsGatewayOptions {
   /** One native bucket per `tenant_id`. Default `{ requestsPerSecond: 10 }`. */
   readonly tenantRateLimit?: { readonly requestsPerSecond: number };
@@ -148,6 +160,18 @@ export interface ToolsGatewayOptions {
   readonly interceptorProvisionedConcurrency?: number;
   /** `exp` of the signed tenant context. Default 60 s; 10 s to 300 s. */
   readonly contextLifetime?: Duration;
+  /**
+   * (ADR-0041) Synth fails when the `ToolTarget`s on this gateway would
+   * catalogue more tools: the Policy engine's 400 KB schema quota holds about
+   * 330 one-field tools (V-16a). Default 300; 1 to 1,000.
+   */
+  readonly maxToolsPerGateway?: number;
+  /**
+   * (ADR-0041) A RESPONSE interceptor that trims each `tools/list` page to
+   * the exact tools in `scope`. Default false: the list is filtered natively
+   * at target grain.
+   */
+  readonly responseFilter?: boolean;
 }
 
 /** The registry prefix every ingress uses unless told otherwise; one per account and Region (standard §1.1, ADR-0024). */
@@ -203,8 +227,17 @@ export interface SharedIngressProps {
   readonly transactionToken?: TransactionTokenProps;
   /** (v2) The entitlement store and API. */
   readonly entitlements?: EntitlementsProps;
-  /** (v2) The shared tools gateway. Default on; `false` creates none. */
+  /**
+   * (v2) The tools gateway: shorthand for `toolsGateways: { default: ... }`.
+   * Default on; `false` creates none. Not together with `toolsGateways`.
+   */
   readonly toolsGateway?: ToolsGatewayOptions | false;
+  /**
+   * (v2, ADR-0041) Several tools gateways by name (`[a-z0-9-]{1,32}`), each
+   * with its own Policy engine, interceptor and rate limits. A `ToolTarget`
+   * names its gateway (default `default`). Not together with `toolsGateway`.
+   */
+  readonly toolsGateways?: Record<string, ToolsGatewayOptions>;
 }
 
 /** The props after defaults and validation; what the construct and its tests reason about. */
@@ -246,8 +279,49 @@ export interface ResolvedOptions {
   readonly authorizerCacheTtlSeconds: number;
   /** (v2) */
   readonly entitlements: { readonly adminScope: string; readonly maxAgentsPerTenant: number; readonly maxToolsPerTenant: number };
-  /** (v2) Undefined when `toolsGateway: false`. */
-  readonly toolsGateway?: ResolvedToolsGateway;
+  /** (v2, ADR-0041) The tools gateways by name; empty when `toolsGateway: false`. */
+  readonly toolsGateways: Readonly<Record<string, ResolvedToolsGateway>>;
+}
+
+/** Validates one tools gateway's options (spec §3.3); `prop` names it in errors. */
+function resolveToolsGateway(t: ToolsGatewayOptions, prop: string, fail: (prop: string, message: string) => never): ResolvedToolsGateway {
+  const requestsPerSecond = t.tenantRateLimit?.requestsPerSecond ?? 10;
+  if (!Number.isInteger(requestsPerSecond) || requestsPerSecond < 1) {
+    fail(`${prop}.tenantRateLimit.requestsPerSecond`, `must be a positive integer (got ${String(requestsPerSecond)})`);
+  }
+  const overrides = t.tenantRateLimitOverrides ?? {};
+  const entries = Object.entries(overrides);
+  if (entries.length > 1000) {
+    fail(`${prop}.tenantRateLimitOverrides`, `must name at most 1000 tenants (got ${entries.length})`);
+  }
+  for (const [tenantId, rate] of entries) {
+    if (!TENANT_ID_PATTERN.test(tenantId)) {
+      fail(`${prop}.tenantRateLimitOverrides`, `key '${tenantId}' must match ${TENANT_ID_PATTERN.source}`);
+    }
+    if (!Number.isInteger(rate) || rate < 1) {
+      fail(`${prop}.tenantRateLimitOverrides`, `rate for '${tenantId}' must be a positive integer`);
+    }
+  }
+  const pc = t.interceptorProvisionedConcurrency ?? 1;
+  if (!Number.isInteger(pc) || pc < 0) {
+    fail(`${prop}.interceptorProvisionedConcurrency`, `must be a non-negative integer (got ${String(pc)})`);
+  }
+  const contextLifetimeSeconds = (t.contextLifetime ?? Duration.seconds(60)).toSeconds();
+  if (!Number.isInteger(contextLifetimeSeconds) || contextLifetimeSeconds < 10 || contextLifetimeSeconds > 300) {
+    fail(`${prop}.contextLifetime`, `must be a whole number of seconds from 10 to 300 (got ${String(contextLifetimeSeconds)})`);
+  }
+  const maxToolsPerGateway = t.maxToolsPerGateway ?? DEFAULT_MAX_TOOLS_PER_GATEWAY;
+  if (!Number.isInteger(maxToolsPerGateway) || maxToolsPerGateway < 1 || maxToolsPerGateway > MAX_TOOLS_PER_GATEWAY_LIMIT) {
+    fail(`${prop}.maxToolsPerGateway`, `must be an integer from 1 to ${MAX_TOOLS_PER_GATEWAY_LIMIT} (got ${String(maxToolsPerGateway)})`);
+  }
+  return {
+    requestsPerSecond,
+    overrides,
+    interceptorProvisionedConcurrency: pc,
+    contextLifetimeSeconds,
+    maxToolsPerGateway,
+    responseFilter: t.responseFilter ?? false,
+  };
 }
 
 /** IAM tag key shape (`[\p{L}\p{Z}\p{N}_.:/=+\-@]{1,128}`), restricted here to the plain subset. */
@@ -407,36 +481,24 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
     fail('entitlements.maxToolsPerTenant', `must be an integer from 1 to 1000 (got ${String(maxToolsPerTenant)})`);
   }
 
-  // v2: the tools gateway (spec §3.3).
-  let toolsGateway: ResolvedToolsGateway | undefined;
-  if (props.toolsGateway !== false) {
-    const t = props.toolsGateway ?? {};
-    const requestsPerSecond = t.tenantRateLimit?.requestsPerSecond ?? 10;
-    if (!Number.isInteger(requestsPerSecond) || requestsPerSecond < 1) {
-      fail('toolsGateway.tenantRateLimit.requestsPerSecond', `must be a positive integer (got ${String(requestsPerSecond)})`);
+  // v2: the tools gateways (spec §3.3, ADR-0041). `toolsGateway` is shorthand for `{ default: ... }`.
+  const toolsGateways: Record<string, ResolvedToolsGateway> = {};
+  if (props.toolsGateways !== undefined) {
+    if (props.toolsGateway !== undefined) {
+      fail('toolsGateway', 'and toolsGateways must not both be set; toolsGateway is shorthand for toolsGateways: { default: ... } (ADR-0041)');
     }
-    const overrides = t.tenantRateLimitOverrides ?? {};
-    const entries = Object.entries(overrides);
-    if (entries.length > 1000) {
-      fail('toolsGateway.tenantRateLimitOverrides', `must name at most 1000 tenants (got ${entries.length})`);
+    const named = Object.entries(props.toolsGateways);
+    if (named.length === 0) {
+      fail('toolsGateways', 'must name at least one gateway; use toolsGateway: false for none');
     }
-    for (const [tenantId, rate] of entries) {
-      if (!TENANT_ID_PATTERN.test(tenantId)) {
-        fail('toolsGateway.tenantRateLimitOverrides', `key '${tenantId}' must match ${TENANT_ID_PATTERN.source}`);
+    for (const [name, t] of named) {
+      if (!TOOLS_GATEWAY_NAME_PATTERN.test(name)) {
+        fail('toolsGateways', `name '${name}' must match ${TOOLS_GATEWAY_NAME_PATTERN.source}`);
       }
-      if (!Number.isInteger(rate) || rate < 1) {
-        fail('toolsGateway.tenantRateLimitOverrides', `rate for '${tenantId}' must be a positive integer`);
-      }
+      toolsGateways[name] = resolveToolsGateway(t ?? {}, `toolsGateways.${name}`, fail);
     }
-    const pc = t.interceptorProvisionedConcurrency ?? 1;
-    if (!Number.isInteger(pc) || pc < 0) {
-      fail('toolsGateway.interceptorProvisionedConcurrency', `must be a non-negative integer (got ${String(pc)})`);
-    }
-    const contextLifetimeSeconds = (t.contextLifetime ?? Duration.seconds(60)).toSeconds();
-    if (!Number.isInteger(contextLifetimeSeconds) || contextLifetimeSeconds < 10 || contextLifetimeSeconds > 300) {
-      fail('toolsGateway.contextLifetime', `must be a whole number of seconds from 10 to 300 (got ${String(contextLifetimeSeconds)})`);
-    }
-    toolsGateway = { requestsPerSecond, overrides, interceptorProvisionedConcurrency: pc, contextLifetimeSeconds };
+  } else if (props.toolsGateway !== false) {
+    toolsGateways[DEFAULT_TOOLS_GATEWAY] = resolveToolsGateway(props.toolsGateway ?? {}, 'toolsGateway', fail);
   }
 
   return {
@@ -455,7 +517,7 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
     transactionToken: { ttlSeconds, algorithm, keyGeneration, cacheMaxEntries: mintCacheMaxEntries, reuseMarginSeconds },
     authorizerCacheTtlSeconds,
     entitlements: { adminScope, maxAgentsPerTenant, maxToolsPerTenant },
-    toolsGateway,
+    toolsGateways,
   };
 }
 
@@ -470,6 +532,8 @@ export const INTEGRATION_TIMEOUT = Duration.minutes(2);
 
 /** The tools gateway values a `ToolTarget` in another stack needs (published parameters). */
 export interface ToolsGatewayRef {
+  /** (ADR-0041) The gateway's name. Default `default`. */
+  readonly name?: string;
   readonly gatewayIdentifier: string;
   readonly gatewayUrl?: string;
   readonly gatewayRoleArn: string;
@@ -501,8 +565,10 @@ export interface SharedIngressRef {
   readonly issuer?: string;
   /** (v2) The entitlement store table, for the name reservations (ADR-0035). */
   readonly entitlementsTableName?: string;
-  /** (v2) The tools gateway; undefined when the ingress has none (`toolsGateway: false`). */
+  /** (v2) The `default` tools gateway; undefined when the ingress has none. */
   readonly tools?: ToolsGatewayRef;
+  /** (v2, ADR-0041) Every tools gateway by name; `default` is also `tools`. */
+  readonly toolsGateways?: Readonly<Record<string, ToolsGatewayRef>>;
 }
 
 /** What each ingress variant hands back to the constructor. */
@@ -529,19 +595,37 @@ interface IngressWiring {
 export class SharedIngress extends Construct {
   /**
    * Reads another stack's ingress from its published parameters (ADR-0024).
-   * `ingress` must be given, and (v2) whether the ingress has a tools
-   * gateway: both decide at synth which parameters exist.
+   * `ingress` must be given, and (v2) which tools gateways the ingress has
+   * (`toolsGateway: false` for none, `toolsGateways` for their names,
+   * default `['default']`): both decide at synth which parameters exist.
    */
   static fromParameters(
     scope: Construct,
     id: string,
     registryPrefix: string,
     ingress: IngressKind,
-    options: { readonly toolsGateway?: boolean } = {},
+    options: { readonly toolsGateway?: boolean; readonly toolsGateways?: readonly string[] } = {},
   ): SharedIngressRef {
     const holder = new Construct(scope, id);
     const read = (name: string) => ssm.StringParameter.valueForStringParameter(holder, `${registryPrefix}${name}`);
-    const tools = options.toolsGateway ?? true;
+    const names = options.toolsGateway === false ? [] : [...(options.toolsGateways ?? [DEFAULT_TOOLS_GATEWAY])];
+    for (const name of names) {
+      if (!TOOLS_GATEWAY_NAME_PATTERN.test(name)) {
+        throw new Error(`SharedIngress.fromParameters: toolsGateways name '${name}' must match ${TOOLS_GATEWAY_NAME_PATTERN.source}`);
+      }
+    }
+    const contextKeyId = names.length > 0 ? read(PUBLISHED.toolContextKeyId) : undefined;
+    const toolsGateways: Record<string, ToolsGatewayRef> = {};
+    for (const name of names) {
+      toolsGateways[name] = {
+        name,
+        gatewayIdentifier: read(toolsGatewayParameter(name, 'identifier')),
+        gatewayUrl: read(toolsGatewayParameter(name, 'url')),
+        gatewayRoleArn: read(toolsGatewayParameter(name, 'roleArn')),
+        policyEngineId: read(toolsGatewayParameter(name, 'policyEngineId')),
+        contextKeyId: contextKeyId!,
+      };
+    }
     return {
       registryPrefix,
       ingress,
@@ -552,15 +636,8 @@ export class SharedIngress extends Construct {
       gatewayIdentifier: ingress === 'agentcore-gateway' ? read(PUBLISHED.gatewayIdentifier) : undefined,
       issuer: read(PUBLISHED.issuer),
       entitlementsTableName: read(PUBLISHED.entitlementsTableName),
-      tools: tools
-        ? {
-          gatewayIdentifier: read(PUBLISHED.toolsGatewayIdentifier),
-          gatewayUrl: read(PUBLISHED.toolsGatewayUrl),
-          gatewayRoleArn: read(PUBLISHED.toolsGatewayRoleArn),
-          policyEngineId: read(PUBLISHED.toolsPolicyEngineId),
-          contextKeyId: read(PUBLISHED.toolContextKeyId),
-        }
-        : undefined,
+      tools: toolsGateways[DEFAULT_TOOLS_GATEWAY],
+      toolsGateways: names.length > 0 ? toolsGateways : undefined,
     };
   }
 
@@ -594,14 +671,21 @@ export class SharedIngress extends Construct {
   readonly entitlementStore: EntitlementStore;
   /** (v2, C-14) `<baseUrl>/entitlements`. */
   readonly entitlementsApiUrl: string;
-  /** (v2, C-15) Undefined with `toolsGateway: false`. */
+  /** (v2, C-15, ADR-0041) Every tools gateway by name; empty with `toolsGateway: false`. */
+  readonly toolsGateways: Readonly<Record<string, ToolsGateway>>;
+  /** (v2) The `default` tools gateway, when there is one. */
   readonly toolsGateway?: ToolsGateway;
+  /** (v2) Aliases of the `default` gateway's values. */
   readonly toolsGatewayUrl?: string;
   readonly toolsGatewayIdentifier?: string;
   readonly toolsGatewayRole?: iam.IRole;
+  /**
+   * (v2, M-68) The one key that signs tool contexts, for every gateway of
+   * this ingress; undefined with no gateway.
+   */
+  readonly toolContextKey?: kms.Key;
 
   private readonly grantedModels = new Set<string>();
-  private toolTargets = 0;
 
   constructor(scope: Construct, id: string, props: SharedIngressProps) {
     super(scope, id);
@@ -685,25 +769,36 @@ export class SharedIngress extends Construct {
       logDrain: this.logDrain,
     });
 
-    // v2, C-15: the tools gateway, after the discovery routes are deployed (the service fetches them).
-    if (options.toolsGateway !== undefined) {
-      this.toolsGateway = new ToolsGateway(this, 'ToolsGateway', {
+    // v2, C-15, ADR-0041: the tools gateways, after the discovery routes are deployed (the service fetches them).
+    // One ToolContextKey for every gateway, not one each: a tool function verifies `_ri_ctx`
+    // with one public key (`RI_CONTEXT_KEY_ID`) and one published `toolContextKeyId`, whichever
+    // gateway its target is on; a context is bound to its tool, argsHash, txn and a 60 s exp,
+    // and a tool lives on one gateway, so a per-gateway key would add keys without narrowing
+    // what a stolen context could reach. Each interceptor gets its own Sign statement (M-68).
+    const gateways: Record<string, ToolsGateway> = {};
+    const names = Object.keys(options.toolsGateways);
+    if (names.length > 0) {
+      this.toolContextKey = signingKey(this, 'ToolContextKey', kms.KeySpec.RSA_2048, 'runtime-isolation tool context signing key, shared by the tools gateways (ADR-0034, ADR-0041)', {
+        delegatePublicKey: true, // the tool library in another stack reads the public half through IAM (M-68)
+      });
+    }
+    for (const name of names) {
+      gateways[name] = new ToolsGateway(this, name === DEFAULT_TOOLS_GATEWAY ? 'ToolsGateway' : `ToolsGateway${gatewayIdPart(name)}`, {
+        name,
         issuer: this.issuer,
         ingressRoleArn: this.ingressRole.roleArn,
-        options: options.toolsGateway,
+        options: options.toolsGateways[name],
+        contextKey: this.toolContextKey!,
         issuerReady: wiring.issuerApi.deploymentStage,
       });
+    }
+    this.toolsGateways = gateways;
+    this.toolsGateway = gateways[DEFAULT_TOOLS_GATEWAY];
+    if (this.toolsGateway !== undefined) {
       this.toolsGatewayUrl = this.toolsGateway.gatewayUrl;
       this.toolsGatewayIdentifier = this.toolsGateway.gatewayIdentifier;
       this.toolsGatewayRole = this.toolsGateway.gatewayRole;
     }
-    // ADR-0040, V-14: at most 100 targets per tools gateway; the ones this app can see are counted.
-    this.node.addValidation({
-      validate: () =>
-        this.toolTargets > MAX_TOOL_TARGETS
-          ? [`SharedIngress: toolsGateway holds at most ${MAX_TOOL_TARGETS} ToolTargets (got ${this.toolTargets}; ADR-0040)`]
-          : [],
-    });
 
     if (this.limitsTable !== undefined) {
       this.tvmCallerRole.addToPrincipalPolicy(
@@ -735,9 +830,9 @@ export class SharedIngress extends Construct {
     return `${this.endpointUrl}/${backend}/${ROUTE}`;
   }
 
-  /** (v2) Counts a same-app `ToolTarget` against the 100-target cap (ADR-0040). Called by `ToolTarget`. */
-  registerToolTarget(_target: Construct): void {
-    this.toolTargets += 1;
+  /** (v2, ADR-0041) The tools gateway named `name`, or undefined. */
+  toolsGatewayNamed(name: string): ToolsGateway | undefined {
+    return Object.prototype.hasOwnProperty.call(this.toolsGateways, name) ? this.toolsGateways[name] : undefined;
   }
 
   /**
@@ -823,12 +918,23 @@ export class SharedIngress extends Construct {
     put('JwksUrlParameter', PUBLISHED.jwksUrl, this.jwksUrl, 'the transaction-token JWKS URL (ADR-0037)');
     put('EntitlementsTableNameParameter', PUBLISHED.entitlementsTableName, this.entitlementStore.tableName, 'the entitlement store table, for name reservations (ADR-0035)');
     put('EntitlementsApiUrlParameter', PUBLISHED.entitlementsApiUrl, this.entitlementsApiUrl, 'the entitlement API base URL (ADR-0030)');
+    // ADR-0041: tools-gateways/<name>/{url,identifier,roleArn,policyEngineId} per gateway.
+    for (const [name, gw] of Object.entries(this.toolsGateways)) {
+      const part = gatewayIdPart(name);
+      put(`ToolsGateway${part}UrlParameter`, toolsGatewayParameter(name, 'url'), gw.gatewayUrl, `the tools gateway ${name} MCP endpoint (ADR-0041)`);
+      put(`ToolsGateway${part}IdentifierParameter`, toolsGatewayParameter(name, 'identifier'), gw.gatewayIdentifier, `the tools gateway ${name} id, for ToolTarget (ADR-0041)`);
+      put(`ToolsGateway${part}RoleArnParameter`, toolsGatewayParameter(name, 'roleArn'), gw.gatewayRole.roleArn, `the tools gateway ${name} role a tool function trusts (ADR-0041)`);
+      put(`ToolsGateway${part}PolicyEngineIdParameter`, toolsGatewayParameter(name, 'policyEngineId'), gw.policyEngine.attrPolicyEngineId, `the tools gateway ${name} policy engine, for ToolTarget policies (ADR-0041)`);
+    }
+    if (this.toolContextKey !== undefined) {
+      put('ToolContextKeyIdParameter', PUBLISHED.toolContextKeyId, this.toolContextKey.keyId, 'the key that signs tool contexts for every tools gateway; tools read its public half (ADR-0034, ADR-0041)');
+    }
+    // The pre-ADR-0041 names, kept as aliases of the `default` gateway.
     if (this.toolsGateway !== undefined) {
-      put('ToolsGatewayUrlParameter', PUBLISHED.toolsGatewayUrl, this.toolsGateway.gatewayUrl, 'the tools gateway MCP endpoint (ADR-0034)');
-      put('ToolsGatewayIdentifierParameter', PUBLISHED.toolsGatewayIdentifier, this.toolsGateway.gatewayIdentifier, 'the tools gateway id, for ToolTarget (ADR-0034)');
-      put('ToolsGatewayRoleArnParameter', PUBLISHED.toolsGatewayRoleArn, this.toolsGateway.gatewayRole.roleArn, 'the tools gateway role a tool function trusts (ADR-0034)');
-      put('ToolsPolicyEngineIdParameter', PUBLISHED.toolsPolicyEngineId, this.toolsGateway.policyEngine.attrPolicyEngineId, 'the tools gateway policy engine, for ToolTarget policies (ADR-0040)');
-      put('ToolContextKeyIdParameter', PUBLISHED.toolContextKeyId, this.toolsGateway.contextKey.keyId, 'the key that signs tool contexts; tools read its public half (ADR-0034)');
+      put('ToolsGatewayUrlParameter', PUBLISHED.toolsGatewayUrl, this.toolsGateway.gatewayUrl, 'alias of tools-gateways/default/url: the default tools gateway MCP endpoint (ADR-0034)');
+      put('ToolsGatewayIdentifierParameter', PUBLISHED.toolsGatewayIdentifier, this.toolsGateway.gatewayIdentifier, 'alias of tools-gateways/default/identifier (ADR-0034)');
+      put('ToolsGatewayRoleArnParameter', PUBLISHED.toolsGatewayRoleArn, this.toolsGateway.gatewayRole.roleArn, 'alias of tools-gateways/default/roleArn (ADR-0034)');
+      put('ToolsPolicyEngineIdParameter', PUBLISHED.toolsPolicyEngineId, this.toolsGateway.policyEngine.attrPolicyEngineId, 'alias of tools-gateways/default/policyEngineId (ADR-0040)');
     }
   }
 
@@ -1150,6 +1256,19 @@ export const PUBLISHED = {
   toolsPolicyEngineId: 'toolsPolicyEngineId',
   toolContextKeyId: 'toolContextKeyId',
 } as const;
+
+/** (ADR-0041) The segment of the per-gateway published values: `tools-gateways/<name>/<field>`. */
+export const TOOLS_GATEWAYS_SEGMENT = 'tools-gateways/';
+
+/** The per-gateway published values (ADR-0041). */
+export type ToolsGatewayParameterField = 'url' | 'identifier' | 'roleArn' | 'policyEngineId';
+/** Every per-gateway field, in publishing order. */
+export const TOOLS_GATEWAY_PARAMETER_FIELDS: readonly ToolsGatewayParameterField[] = ['url', 'identifier', 'roleArn', 'policyEngineId'];
+
+/** The published name of one tools gateway value, under the registry prefix: `tools-gateways/<name>/<field>`. */
+export function toolsGatewayParameter(name: string, field: ToolsGatewayParameterField): string {
+  return `${TOOLS_GATEWAYS_SEGMENT}${name}/${field}`;
+}
 
 /** Adds one model statement to a tenant role (ADR-0018). */
 export function addModelStatement(scope: Construct, role: iam.IRole, modelId: string, sid: string): void {

@@ -6,7 +6,8 @@
  * ADR-0037, ADR-0040). The ingress mints one token per (tenant, user, agent,
  * versions) after its own checks: it names exactly one tenant, one user and
  * one agent, carries exactly the granted `scope`, is bound by `aud` to that
- * agent and the tools gateway, names the ingress role in `act`, and lives
+ * agent and to each tools gateway its granted tools live on
+ * (`tools-gateway:<name>`, ADR-0041), names the ingress role in `act`, and lives
  * `ttl` seconds. It is signed by KMS (`MessageType: DIGEST`), never by a key
  * in this process.
  *
@@ -28,8 +29,25 @@ import { type DigestSigner, type JwsAlgorithm, signJws } from './jws';
 
 /** The JOSE `typ` of a transaction token (spec §6.2.2). */
 export const TRANSACTION_TOKEN_TYPE = 'txn+jwt';
-/** The tools gateway's audience (spec §3.6). */
-export const TOOLS_GATEWAY_AUDIENCE = 'tools-gateway';
+/** The tools gateway audience prefix: `tools-gateway:<gateway name>` (spec §3.6, ADR-0041). */
+export const TOOLS_GATEWAY_AUDIENCE_PREFIX = 'tools-gateway:';
+/** The tools gateway name pattern (spec §3.3, ADR-0041). */
+export const TOOLS_GATEWAY_NAME_PATTERN = /^[a-z0-9-]{1,32}$/;
+/** The gateway a target lives on when its catalogue rows name none (one gateway, `default`). */
+export const DEFAULT_TOOLS_GATEWAY = 'default';
+
+/** The audience of one tools gateway (its `allowedAudience` and the token's `aud` entry). */
+export function toolsGatewayAudience(gateway: string): string {
+  return `${TOOLS_GATEWAY_AUDIENCE_PREFIX}${gateway}`;
+}
+
+/** The tools gateways a token's `aud` names, in order. */
+export function toolsGatewaysOf(aud: readonly unknown[]): string[] {
+  return aud
+    .filter((a): a is string => typeof a === 'string' && a.startsWith(TOOLS_GATEWAY_AUDIENCE_PREFIX))
+    .map((a) => a.slice(TOOLS_GATEWAY_AUDIENCE_PREFIX.length))
+    .filter((g) => TOOLS_GATEWAY_NAME_PATTERN.test(g));
+}
 /** The agent audience prefix: `agent:<backend>`. */
 export const AGENT_AUDIENCE_PREFIX = 'agent:';
 /** Default bound on cached tokens per ingress instance (spec §3.3). */
@@ -62,6 +80,12 @@ export interface MintInput {
   readonly agent: string;
   /** The granted set, space-separated (src/shared/grant.ts). */
   readonly scope: string;
+  /**
+   * The tools gateways the granted tools live on (ADR-0041), resolved from
+   * the catalogue rows' `gateway`. Empty when no tool is granted: `aud` is
+   * then the agent alone.
+   */
+  readonly gateways: readonly string[];
   /** The versions in the cache key (ADR-0036). */
   readonly versions: { readonly tenant: number; readonly agent: number; readonly plan?: number };
 }
@@ -104,7 +128,7 @@ export function transactionClaims(
     tenant_id: input.tenantId,
     agent: input.agent,
     scope: input.scope,
-    aud: [`${AGENT_AUDIENCE_PREFIX}${input.agent}`, TOOLS_GATEWAY_AUDIENCE],
+    aud: [`${AGENT_AUDIENCE_PREFIX}${input.agent}`, ...[...new Set(input.gateways)].sort().map(toolsGatewayAudience)],
     act: { sub: config.ingressRoleArn },
     txn: ids.txn,
     iat: now,
@@ -113,9 +137,18 @@ export function transactionClaims(
   };
 }
 
-/** The mint cache key: tenant, user, agent and the three versions (spec §3.6). */
+/** The mint cache key: tenant, user, agent, the three versions, the scope and the gateways (spec §3.6). */
 export function mintCacheKey(input: MintInput): string {
-  return JSON.stringify([input.tenantId, input.sub, input.agent, input.versions.tenant, input.versions.agent, input.versions.plan ?? 0, input.scope]);
+  return JSON.stringify([
+    input.tenantId,
+    input.sub,
+    input.agent,
+    input.versions.tenant,
+    input.versions.agent,
+    input.versions.plan ?? 0,
+    input.scope,
+    [...new Set(input.gateways)].sort(),
+  ]);
 }
 
 export interface TokenMinterDependencies {

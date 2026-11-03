@@ -26,6 +26,8 @@ import {
   type SharedIngressProps,
   SharedIngressRef,
   STAGE_NAME,
+  TOOLS_GATEWAY_PARAMETER_FIELDS,
+  toolsGatewayParameter,
 } from '../src/index';
 import { ENV } from '../src/shared/config';
 
@@ -162,7 +164,16 @@ describe('resolveOptions', () => {
       transactionToken: { ttlSeconds: 300, algorithm: 'RS256', keyGeneration: 1, cacheMaxEntries: 1000, reuseMarginSeconds: 180 },
       authorizerCacheTtlSeconds: 60,
       entitlements: { adminScope: 'entitlements/admin', maxAgentsPerTenant: 1000, maxToolsPerTenant: 1000 },
-      toolsGateway: { requestsPerSecond: 10, overrides: {}, interceptorProvisionedConcurrency: 1, contextLifetimeSeconds: 60 },
+      toolsGateways: {
+        default: {
+          requestsPerSecond: 10,
+          overrides: {},
+          interceptorProvisionedConcurrency: 1,
+          contextLifetimeSeconds: 60,
+          maxToolsPerGateway: 300,
+          responseFilter: false,
+        },
+      },
     });
   });
 
@@ -394,6 +405,8 @@ describe.each(INGRESSES)('one-backend defaults, ingress=%s', (ingress) => {
       PUBLISHED.toolsGatewayRoleArn,
       PUBLISHED.toolsPolicyEngineId,
       PUBLISHED.toolContextKeyId,
+      // ADR-0041: the default gateway under its own name too; the four above are its aliases.
+      ...TOOLS_GATEWAY_PARAMETER_FIELDS.map((f) => toolsGatewayParameter('default', f)),
     ];
     const expectedNames = expected
       .concat(ingress === 'agentcore-gateway' ? [PUBLISHED.gatewayIdentifier] : [])
@@ -1183,11 +1196,9 @@ describe.each(INGRESSES)('AgentBackend in its own stack from SharedIngress.fromP
       PUBLISHED.tenantRoleArn,
       PUBLISHED.issuer,
       PUBLISHED.entitlementsTableName,
-      PUBLISHED.toolsGatewayIdentifier,
-      PUBLISHED.toolsGatewayUrl,
-      PUBLISHED.toolsGatewayRoleArn,
-      PUBLISHED.toolsPolicyEngineId,
       PUBLISHED.toolContextKeyId,
+      // ADR-0041: a reference reads each gateway under tools-gateways/<name>/, `default` by default.
+      ...TOOLS_GATEWAY_PARAMETER_FIELDS.map((f) => toolsGatewayParameter('default', f)),
     ];
     const expectedNames = expected
       .concat(ingress === 'agentcore-gateway' ? [PUBLISHED.gatewayIdentifier] : [])

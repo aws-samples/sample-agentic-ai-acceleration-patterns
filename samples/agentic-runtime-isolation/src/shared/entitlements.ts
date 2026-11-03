@@ -24,6 +24,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { EntitlementSet, TenantGrant, ToolCatalogue, UserCutGrant } from './grant';
 import { sharedHandler } from './http';
+import { DEFAULT_TOOLS_GATEWAY, TOOLS_GATEWAY_NAME_PATTERN } from './mint';
 
 /** Key attribute names. */
 export const PK = 'PK';
@@ -98,6 +99,8 @@ export interface PlanItem extends ItemKey {
 /** A tool catalogue row (spec §4.5), written by `ToolTarget` at deploy. */
 export interface ToolItem extends ItemKey {
   readonly description: string;
+  /** (ADR-0041) The tools gateway the target lives on; every row of a target carries the same value. */
+  readonly gateway: string;
   /** `<StackId>#<LogicalResourceId>` or the deployer's explicit marker (ADR-0035). */
   readonly owner: string;
   readonly addedAt: string;
@@ -146,6 +149,13 @@ interface Cached<T> {
   readonly at: number;
 }
 
+/** One target's catalogue rows, as the ingress caches them. */
+interface CataloguedTarget {
+  readonly tools: string[];
+  /** The rows' `gateway`; `default` for rows written before ADR-0041. */
+  readonly gateway: string;
+}
+
 /**
  * The ingress's read side. Its role holds `BatchGetItem`, `GetItem` and
  * `Query` on the table, never a write (spec §4.5).
@@ -153,7 +163,7 @@ interface Cached<T> {
 export class EntitlementReader {
   private readonly client: DynamoDBDocumentClient;
   private readonly plans = new Map<string, Cached<(EntitlementSet & { version: number }) | undefined>>();
-  private readonly catalogue = new Map<string, Cached<string[]>>();
+  private readonly catalogue = new Map<string, Cached<CataloguedTarget>>();
 
   constructor(
     private readonly tableName: string,
@@ -206,39 +216,61 @@ export class EntitlementReader {
   /** The catalogue rows of `targets` (one `Query` per uncached target), cached `ttlSeconds`. */
   async catalogueFor(targets: readonly string[]): Promise<ToolCatalogue> {
     const result = new Map<string, string[]>();
+    await Promise.all(targets.map(async (target) => result.set(target, (await this.catalogued(target)).tools)));
+    return result;
+  }
+
+  /**
+   * (ADR-0041) The tools gateway of each target, from the same cached
+   * catalogue Query (no extra read for a target `catalogueFor` just read).
+   * A target with no catalogue rows is left out.
+   */
+  async gatewaysFor(targets: readonly string[]): Promise<ReadonlyMap<string, string>> {
+    const result = new Map<string, string>();
     await Promise.all(
       targets.map(async (target) => {
-        const hit = this.catalogue.get(target);
-        if (hit !== undefined && this.now() - hit.at < this.ttlSeconds * 1000) {
-          result.set(target, hit.value);
-          return;
+        const entry = await this.catalogued(target);
+        if (entry.tools.length > 0) {
+          result.set(target, entry.gateway);
         }
-        const tools: string[] = [];
-        let start: Record<string, unknown> | undefined;
-        do {
-          const out = await this.client.send(
-            new QueryCommand({
-              TableName: this.tableName,
-              KeyConditionExpression: '#pk = :pk',
-              ExpressionAttributeNames: { '#pk': PK, '#sk': SK },
-              ExpressionAttributeValues: { ':pk': `${KEY_PREFIX.tool}${target}` },
-              ProjectionExpression: '#sk',
-              ExclusiveStartKey: start,
-            }),
-          );
-          for (const item of out.Items ?? []) {
-            const sk = typeof item.SK === 'string' ? item.SK : '';
-            if (sk.startsWith(KEY_PREFIX.tool)) {
-              tools.push(sk.slice(KEY_PREFIX.tool.length));
-            }
-          }
-          start = out.LastEvaluatedKey;
-        } while (start !== undefined);
-        tools.sort();
-        this.catalogue.set(target, { value: tools, at: this.now() });
-        result.set(target, tools);
       }),
     );
     return result;
+  }
+
+  private async catalogued(target: string): Promise<CataloguedTarget> {
+    const hit = this.catalogue.get(target);
+    if (hit !== undefined && this.now() - hit.at < this.ttlSeconds * 1000) {
+      return hit.value;
+    }
+    const tools: string[] = [];
+    let gateway: string | undefined;
+    let start: Record<string, unknown> | undefined;
+    do {
+      const out = await this.client.send(
+        new QueryCommand({
+          TableName: this.tableName,
+          KeyConditionExpression: '#pk = :pk',
+          ExpressionAttributeNames: { '#pk': PK, '#sk': SK, '#gw': 'gateway' },
+          ExpressionAttributeValues: { ':pk': `${KEY_PREFIX.tool}${target}` },
+          ProjectionExpression: '#sk, #gw',
+          ExclusiveStartKey: start,
+        }),
+      );
+      for (const item of out.Items ?? []) {
+        const sk = typeof item.SK === 'string' ? item.SK : '';
+        if (sk.startsWith(KEY_PREFIX.tool)) {
+          tools.push(sk.slice(KEY_PREFIX.tool.length));
+        }
+        if (gateway === undefined && typeof item.gateway === 'string' && TOOLS_GATEWAY_NAME_PATTERN.test(item.gateway)) {
+          gateway = item.gateway;
+        }
+      }
+      start = out.LastEvaluatedKey;
+    } while (start !== undefined);
+    tools.sort();
+    const value = { tools, gateway: gateway ?? DEFAULT_TOOLS_GATEWAY };
+    this.catalogue.set(target, { value, at: this.now() });
+    return value;
   }
 }

@@ -14,9 +14,11 @@
  *                      microVM, whether a transaction token (v2) and tenant
  *                      credentials arrived, and the token's claims (`tenant_id`,
  *                      `agent`, `scope`, `aud`, `act.sub`, `exp`), never the token;
- *   `tools`            (v2) `tools/list` on the tools gateway with the
- *                      transaction token as bearer;
- *   `tool <t>/<n> <json>` (v2) `tools/call` of `<t>___<n>` with those arguments;
+ *   `tools`            (v2) `tools/list` on every tools gateway the token's
+ *                      `aud` names (`tools-gateway:<name>`, ADR-0041), with
+ *                      the transaction token as bearer, one client per gateway;
+ *   `tool <t>/<n> <json>` (v2) `tools/call` of `<t>___<n>` with those arguments,
+ *                      on the gateway that lists the tool;
  *   `read <tenantId>`  the report plus a GetItem of `TENANT#<tenantId>` from
  *                      the demo table with the vended credentials (P-8; a
  *                      cross-tenant read fails in IAM, not here);
@@ -48,6 +50,7 @@ import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { decodeCredentials, RUNTIME_HEADERS } from '../backend/agentcore-runtime.transport';
 import { AGENT_ENV } from '../shared/config';
 import { USAGE_EVENT, type UsageEvent } from '../shared/metrics';
+import { DEFAULT_TOOLS_GATEWAY, toolsGatewaysOf } from '../shared/mint';
 import { prefixOf } from '../shared/session';
 import type { VendedCredentials } from '../shared/tvm';
 
@@ -244,8 +247,15 @@ export interface AgentOptions {
   readonly modelId?: string;
   /** Interval of the `stream N` probe; tests shorten it. */
   readonly streamIntervalMs?: number;
-  /** (v2) The tools gateway MCP endpoint (RI_TOOLS_GATEWAY_URL); without it the tool probes answer `NoToolsGateway`. */
+  /** (v2) The `default` tools gateway MCP endpoint (RI_TOOLS_GATEWAY_URL), used when `toolsGatewayUrls` is unset. */
   readonly toolsGatewayUrl?: string;
+  /**
+   * (v2, ADR-0041) Every tools gateway's MCP endpoint by name
+   * (RI_TOOLS_GATEWAY_URLS); the agent uses the ones its token's `aud`
+   * names. With neither this nor `toolsGatewayUrl`, the tool probes answer
+   * `NoToolsGateway`.
+   */
+  readonly toolsGatewayUrls?: Readonly<Record<string, string>>;
   /** (v2) The HTTP client for the tools gateway; tests inject one. */
   readonly fetch?: typeof fetch;
 }
@@ -306,6 +316,71 @@ export async function callToolsGateway(
   } catch {
     return { error: `http_${response.status}` };
   }
+}
+
+/** (ADR-0041) Reads RI_TOOLS_GATEWAY_URLS; anything malformed is no map. */
+export function parseGatewayUrls(raw: string | undefined): Record<string, string> | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return undefined;
+    }
+    return Object.fromEntries(Object.entries(parsed).filter((e): e is [string, string] => typeof e[1] === 'string'));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * (ADR-0041) One MCP client (here: an endpoint) per tools gateway the
+ * token's `aud` names and the agent knows a URL for, in `aud` order.
+ */
+export function gatewayClients(options: AgentOptions, aud: readonly string[]): [string, string][] {
+  const urls: Readonly<Record<string, string>> =
+    options.toolsGatewayUrls ?? (options.toolsGatewayUrl === undefined ? {} : { [DEFAULT_TOOLS_GATEWAY]: options.toolsGatewayUrl });
+  return toolsGatewaysOf(aud)
+    .filter((name) => Object.prototype.hasOwnProperty.call(urls, name))
+    .map((name) => [name, urls[name]]);
+}
+
+/** The tools of a `tools/list` result, or none. */
+function listedNames(result: unknown): string[] {
+  const tools = (result as { tools?: unknown } | undefined)?.tools;
+  return Array.isArray(tools) ? tools.map((t) => (t as { name?: unknown })?.name).filter((n): n is string => typeof n === 'string') : [];
+}
+
+/**
+ * Runs one tool probe over the gateways in `aud`: `tools/list` on each
+ * (results by gateway name), or `tools/call` on the gateway that lists the
+ * tool (the only one, when `aud` names one).
+ * TODO(v2): cache each gateway's list for the token's life instead of listing per call (spec §3.6).
+ */
+export async function runToolProbe(
+  clients: readonly [string, string][],
+  token: string,
+  probe: NonNullable<ReturnType<typeof toolProbe>>,
+  fetcher: typeof fetch = fetch,
+): Promise<unknown> {
+  if (probe.method === 'tools/list') {
+    const results: Record<string, unknown> = {};
+    for (const [name, url] of clients) {
+      results[name] = await callToolsGateway(url, token, probe, fetcher);
+    }
+    return results;
+  }
+  let url = clients[0][1];
+  if (clients.length > 1) {
+    for (const [, candidate] of clients) {
+      if (listedNames(await callToolsGateway(candidate, token, { method: 'tools/list' }, fetcher)).includes(probe.name)) {
+        url = candidate;
+        break;
+      }
+    }
+  }
+  return callToolsGateway(url, token, probe, fetcher);
 }
 
 /** One SSE event: `event:` (optional) and one `data:` line. */
@@ -413,11 +488,14 @@ export async function respond(
   if (probe !== undefined) {
     const token = headerValue(headers, RUNTIME_HEADERS.TRANSACTION_TOKEN);
     sink.head(200, SSE_HEADERS);
-    if (options.toolsGatewayUrl === undefined || token === undefined) {
-      sink.write(sseEvent({ error: options.toolsGatewayUrl === undefined ? 'NoToolsGateway' : 'NoTransactionToken' }, 'error'));
+    const gateways = token === undefined ? [] : gatewayClients(options, unverifiedClaims(token)?.aud ?? []);
+    if (token === undefined) {
+      sink.write(sseEvent({ error: 'NoTransactionToken' }, 'error'));
+    } else if (gateways.length === 0) {
+      sink.write(sseEvent({ error: 'NoToolsGateway' }, 'error'));
     } else {
       try {
-        sink.write(sseEvent({ tool: probe.method, result: await callToolsGateway(options.toolsGatewayUrl, token, probe, options.fetch) }));
+        sink.write(sseEvent({ tool: probe.method, result: await runToolProbe(gateways, token, probe, options.fetch) }));
       } catch (error) {
         sink.write(sseEvent({ error: error instanceof Error ? error.name : 'unknown' }, 'error'));
       }
@@ -519,6 +597,7 @@ export function main(): void {
     tableName: process.env[AGENT_ENV.TABLE_NAME],
     modelId: process.env[AGENT_ENV.MODEL_ID],
     toolsGatewayUrl: process.env[AGENT_ENV.TOOLS_GATEWAY_URL],
+    toolsGatewayUrls: parseGatewayUrls(process.env[AGENT_ENV.TOOLS_GATEWAY_URLS]),
   };
   createServer((req, res) => {
     serve(req, res, options).catch(() => {

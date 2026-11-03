@@ -25,7 +25,7 @@ import {
   wantsBillingBackend,
 } from '../src/demo.cdk';
 import { COST_METRIC_NAMES } from '../src/shared/metrics';
-import { DEFAULT_REGISTRY_PREFIX, GATEWAY_TARGET_NAME, PUBLISHED } from '../src/shared-ingress.cdk';
+import { DEFAULT_REGISTRY_PREFIX, GATEWAY_TARGET_NAME, PUBLISHED, TOOLS_GATEWAY_PARAMETER_FIELDS, toolsGatewayParameter } from '../src/shared-ingress.cdk';
 
 /** The thin demo stack (spec C-4, §6.4): consumes tenant-identity's parameters, publishes its own, wires the TVM demo. */
 const FIXTURE_AGENT = path.join(__dirname, 'fixtures', 'agent');
@@ -220,13 +220,15 @@ describe('RuntimeIsolationDemoStack', () => {
 
   it('publishes under /application-plane/shared/agent-runtime/: every PUBLISHED name on the Gateway, the demo the default backend\'s runtimeArn (spec §6.4, ADR-0024)', () => {
     const { template, stack } = synth(context({ ingress: 'agentcore-gateway' }));
-    // Every PUBLISHED name, the demo's runtimeArn, and one registry pointer per demo ToolTarget (crm, invoices).
-    template.resourceCountIs('AWS::SSM::Parameter', Object.keys(PUBLISHED).length + 3);
+    // Every PUBLISHED name, the four values of each demo tools gateway (default, finance; ADR-0041),
+    // the demo's runtimeArn, and one registry pointer per demo ToolTarget (crm, invoices).
+    const perGateway = ['default', 'finance'].flatMap((g) => TOOLS_GATEWAY_PARAMETER_FIELDS.map((f) => toolsGatewayParameter(g, f)));
+    template.resourceCountIs('AWS::SSM::Parameter', Object.keys(PUBLISHED).length + perGateway.length + 3);
     const names = (Object.values(template.findResources('AWS::SSM::Parameter')) as any[]).map((p) => JSON.stringify(p.Properties.Name)).sort();
     expect(names).toEqual(
       [
         AGENT_RUNTIME_PARAMETERS.runtimeArn,
-        ...Object.values(PUBLISHED).map((n) => `${DEFAULT_REGISTRY_PREFIX}${n}`),
+        ...[...Object.values(PUBLISHED), ...perGateway].map((n) => `${DEFAULT_REGISTRY_PREFIX}${n}`),
         stack.resolve(stack.crm.registryParameterName),
         stack.resolve(stack.invoices.registryParameterName),
       ].map((n) => JSON.stringify(n)).sort(),
@@ -269,8 +271,8 @@ describe('RuntimeIsolationDemoStack', () => {
       template.resourceCountIs('Custom::RuntimeIsolationRegistryEntry', 2);
       // Two backend name reservations plus the two ToolTargets' catalogue rows (ADR-0035).
       template.resourceCountIs('Custom::RuntimeIsolationOwnedRows', 4);
-      // The tools Gateway is always there; the agentcore-gateway ingress adds its own (ADR-0033).
-      template.resourceCountIs('AWS::BedrockAgentCore::Gateway', ingress === 'api-gateway' ? 1 : 2);
+      // The two demo tools gateways are always there (ADR-0041); the agentcore-gateway ingress adds its own (ADR-0033).
+      template.resourceCountIs('AWS::BedrockAgentCore::Gateway', ingress === 'api-gateway' ? 2 : 3);
       // Two tool targets on the tools Gateway; two backend targets on the agentcore-gateway ingress.
       template.resourceCountIs('AWS::BedrockAgentCore::GatewayTarget', ingress === 'agentcore-gateway' ? 4 : 2);
       expect(stack.billing).toBeDefined();
@@ -296,6 +298,8 @@ describe('RuntimeIsolationDemoStack', () => {
           // (v2, ADR-0033) where the agent calls its tools, and the issuer it presents tokens from.
           RI_ISSUER: expect.anything(),
           RI_TOOLS_GATEWAY_URL: expect.anything(),
+          // (ADR-0041) every tools gateway's endpoint by name.
+          RI_TOOLS_GATEWAY_URLS: expect.anything(),
         });
         expect(runtime.Properties.Tags).toEqual({ 'ri:ingress': stack.ingress.ingressId });
       }

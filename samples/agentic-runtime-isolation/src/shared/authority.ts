@@ -33,7 +33,7 @@ export interface Authority extends MintedToken {
 
 export class AuthorityResolver {
   constructor(
-    private readonly reader: Pick<EntitlementReader, 'tenantEntitlement' | 'plan' | 'catalogueFor'>,
+    private readonly reader: Pick<EntitlementReader, 'tenantEntitlement' | 'plan' | 'catalogueFor' | 'gatewaysFor'>,
     private readonly minter: Pick<TokenMinter, 'mint'>,
   ) {}
 
@@ -41,6 +41,7 @@ export class AuthorityResolver {
   async resolve(tenantId: string, sub: string, agent: string, entry: RegistryEntry): Promise<Authority> {
     let decision;
     let versions;
+    let gateways: string[] = [];
     try {
       const { tenant, cut } = await this.reader.tenantEntitlement(tenantId, sub);
       const plan = tenant?.plan === undefined ? undefined : await this.reader.plan(tenant.plan);
@@ -49,6 +50,11 @@ export class AuthorityResolver {
       const catalogue = await this.reader.catalogueFor(targets);
       decision = grantFor({ tenant, plan, cut, agent: { name: agent, needs: entry.needs, tools: entry.tools }, catalogue });
       versions = { tenant: tenant?.version ?? 0, agent: entry.version, plan: plan?.version };
+      // ADR-0041: aud names the gateway of every granted tool's target, read from the
+      // catalogue rows the Query above already cached (no further read).
+      if (decision.granted) {
+        gateways = [...new Set((await this.reader.gatewaysFor(decision.toolTargets)).values())].sort();
+      }
     } catch {
       throw new AuthorityError(502, 'entitlements_unavailable');
     }
@@ -57,7 +63,7 @@ export class AuthorityResolver {
     }
     let minted: MintedToken;
     try {
-      minted = await this.minter.mint({ tenantId, sub, agent, scope: decision.scope, versions });
+      minted = await this.minter.mint({ tenantId, sub, agent, scope: decision.scope, gateways, versions });
     } catch {
       throw new AuthorityError(502, 'mint_failed');
     }

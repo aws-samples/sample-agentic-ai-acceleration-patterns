@@ -2,21 +2,28 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * `ToolTarget` (spec C-16, §3.5, §3.6; ADR-0034, ADR-0035, ADR-0040): one
- * group of tools behind the shared tools gateway, in the ingress's stack or
- * its own. It creates, in this order:
+ * `ToolTarget` (spec C-16, §3.5, §3.6; ADR-0034, ADR-0035, ADR-0040,
+ * ADR-0041): one group of tools behind one of the ingress's tools gateways
+ * (`gateway`, default `default`), in the ingress's stack or its own. It
+ * creates, in this order:
  *
  * 1. the owner-marked rows in the entitlement store: `NAME#<target>` (one
  *    namespace with agent names) and one `TOOL#<target>` / `TOOL#<tool>`
- *    catalogue row per tool (src/shared/reservation.function.ts);
+ *    catalogue row per tool, each carrying the target's `gateway`, which the
+ *    ingress resolves the token's `aud` from (src/shared/reservation.function.ts);
  * 2. the Gateway target (`GATEWAY_IAM_ROLE` outbound for a Lambda), with the
  *    function's resource policy naming the Gateway role alone (M-61);
- * 3. the target's Cedar policy (src/shared/cedar.ts) through a custom
+ * 3. the target's one Cedar star permit (src/shared/cedar.ts, ADR-0041)
+ *    through a custom
  *    resource that DependsOn the target, so CloudFormation deletes the
  *    policy, and waits for it to be gone, BEFORE the target (V-14), and
  *    that runs after the previous target's policy in the same stack (one at
  *    a time); every update also touches the policy (C-16);
- * 4. the registry pointer `tools/<target>` (spec §4.4).
+ * 4. the registry pointer `tools/<target>` (spec §4.4), with its `gateway`.
+ *
+ * Same-app targets are counted per gateway: synth fails when their
+ * catalogued tools would exceed the gateway's `maxToolsPerGateway`
+ * (ADR-0041) or their number the 100-target quota (ADR-0040).
  *
  * Kinds: `lambda` is built. `openApi`, `smithy` and `mcpServer` are typed
  * props whose bodies are TODO(v2) and fail synth today.
@@ -34,11 +41,12 @@ import { cedarPolicyFor } from './shared/cedar';
 import { customResourceFunction } from './shared/custom-resource.cdk';
 import { nameKey, toolKey } from './shared/entitlements';
 import type { LogDrain } from './shared/log-drain';
+import { DEFAULT_TOOLS_GATEWAY, TOOLS_GATEWAY_NAME_PATTERN } from './shared/mint';
 import { TARGET_NAME_PATTERN, TOOL_SHORT_NAME_PATTERN, toolRegistryParameterName } from './shared/registry';
 import { OwnedRows, ownerProblem } from './shared/reservation.cdk';
 import { SharedIngress, type SharedIngressRef } from './shared-ingress.cdk';
 import { TOOL_ENV } from './tools/context';
-import { grantPolicyWrites } from './tools-gateway.cdk';
+import { grantPolicyWrites, type ToolsGateway } from './tools-gateway.cdk';
 
 /** The most tools one target may hold (spec §3.5). */
 export const MAX_TOOLS_PER_TARGET = 1000;
@@ -59,6 +67,8 @@ export interface ToolTargetProps {
   readonly name: string;
   /** The ingress whose tools gateway this target joins (same stack), or its published values. */
   readonly ingress: SharedIngress | SharedIngressRef;
+  /** (ADR-0041) The name of the ingress's tools gateway this target joins. Default `default`. */
+  readonly gateway?: string;
   readonly kind: ToolTargetKind;
   /** `lambda`: the tools, at least one, at most 1,000. Read from the spec for the other kinds. */
   readonly tools?: ToolDefinition[];
@@ -78,6 +88,7 @@ export interface ToolTargetProps {
 
 /** What `ToolTarget` needs from the ingress, resolved from either form. */
 interface ToolsBinding {
+  readonly gatewayName: string;
   readonly registryPrefix: string;
   readonly gatewayIdentifier: string;
   readonly gatewayArn: string;
@@ -88,7 +99,8 @@ interface ToolsBinding {
   readonly contextKeyArn: string;
   readonly entitlementsTableName: string;
   readonly entitlementsTableArn: string;
-  readonly sameStack?: SharedIngress;
+  /** The same-app gateway construct, when the ingress is in this stack. */
+  readonly sameStack?: ToolsGateway;
   readonly logDrain?: LogDrain;
 }
 
@@ -122,6 +134,8 @@ export class ToolTarget extends Construct {
   readonly targetId: string;
   /** The tool names, as given. */
   readonly tools: readonly string[];
+  /** (ADR-0041) The tools gateway this target is on. */
+  readonly gateway: string;
   /** The Cedar policy id (a deploy-time token). */
   readonly policyId: string;
   /** The SSM parameter name of the registry pointer (spec §4.4). */
@@ -157,11 +171,22 @@ export class ToolTarget extends Construct {
     if (owner !== undefined) {
       fail('owner', owner);
     }
-    const binding = bindingOf(this, props.ingress, fail);
+    const gatewayName = props.gateway ?? DEFAULT_TOOLS_GATEWAY;
+    if (!TOOLS_GATEWAY_NAME_PATTERN.test(gatewayName)) {
+      fail('gateway', `must match ${TOOLS_GATEWAY_NAME_PATTERN.source} (got ${gatewayName})`);
+    }
+    const binding = bindingOf(this, props.ingress, gatewayName, fail);
     const tools = props.tools!;
     const fn = props.function!;
     this.name = props.name;
     this.tools = tools.map((t) => t.name);
+    this.gateway = gatewayName;
+    // ADR-0041: the gateway's Policy engine schema holds about 330 tools; count the same-app ones.
+    // TODO(v2): a ToolTarget in another stack is not counted; enforce it at deploy from the catalogue rows.
+    const overflow = binding.sameStack?.reserveTools(props.name, tools.length);
+    if (overflow !== undefined) {
+      fail('tools', overflow);
+    }
 
     // 1. Owner-marked rows (ADR-0035): the name first, then the catalogue.
     const rows = new OwnedRows(this, 'Catalogue', {
@@ -171,7 +196,7 @@ export class ToolTarget extends Construct {
       logDrain: binding.logDrain,
       rows: [
         { ...nameKey(props.name), attributes: { kind: 'target' } },
-        ...tools.map((t) => ({ ...toolKey(props.name, t.name), attributes: { description: t.description } })),
+        ...tools.map((t) => ({ ...toolKey(props.name, t.name), attributes: { description: t.description, gateway: gatewayName } })),
       ],
     });
 
@@ -186,8 +211,8 @@ export class ToolTarget extends Construct {
     }
     // M-61: only the Gateway role may invoke the function, and it invokes registered functions only.
     fn.addPermission('ToolsGatewayInvoke', { principal: new iam.ArnPrincipal(binding.gatewayRoleArn), action: 'lambda:InvokeFunction' });
-    if (binding.sameStack?.toolsGateway !== undefined) {
-      binding.sameStack.toolsGateway.allowInvoke(fn);
+    if (binding.sameStack !== undefined) {
+      binding.sameStack.allowInvoke(fn);
     } else {
       const role = iam.Role.fromRoleArn(this, 'GatewayRole', binding.gatewayRoleArn, { mutable: true });
       role.addToPrincipalPolicy(new iam.PolicyStatement({ actions: ['lambda:InvokeFunction'], resources: [fn.functionArn] }));
@@ -213,33 +238,32 @@ export class ToolTarget extends Construct {
     this.target.node.addDependency(rows.resource);
     this.targetId = this.target.attrTargetId;
 
-    // 3. The policy, after the target and deleted before it (ADR-0040).
-    let policyFunction = binding.sameStack?.toolsGateway?.policyFunction;
+    // 3. The one star permit, after the target and deleted before it (ADR-0040, ADR-0041).
+    let policyFunction = binding.sameStack?.policyFunction;
     if (policyFunction === undefined) {
       policyFunction = customResourceFunction(
         this,
         'PolicyFunction',
         path.join(__dirname, 'tools', 'tool-policy.function.ts'),
-        'runtime-isolation: the Cedar policy of one tool target (ADR-0040)',
+        'runtime-isolation: the Cedar star permit of one tool target (ADR-0040, ADR-0041)',
         Duration.minutes(15),
       );
       grantPolicyWrites(policyFunction, binding.policyEngineArn);
     }
-    const toolNames = tools.map((t) => t.name);
     this.policy = new CustomResource(this, 'Policy', {
       serviceToken: policyFunction.functionArn,
       resourceType: 'Custom::RuntimeIsolationToolPolicy',
       properties: {
         PolicyEngineId: binding.policyEngineId,
         Name: policyName(props.name),
-        Statement: cedarPolicyFor(props.name, toolNames, binding.gatewayArn),
+        Statement: cedarPolicyFor(props.name, binding.gatewayArn),
         ValidationMode: 'FAIL_ON_ANY_FINDINGS',
+        // The text names no tool, so a tool change only touches the policy through this (C-16).
         TargetVersion: createHash('sha256').update(JSON.stringify(tools)).digest('hex').slice(0, 16),
       },
     });
     this.policy.node.addDependency(this.target);
-    binding.sameStack?.toolsGateway?.registerTarget(this.policy);
-    binding.sameStack?.registerToolTarget(this);
+    binding.sameStack?.registerTarget(this.policy);
     this.policyId = this.policy.getAttString('PolicyId');
 
     // 4. The registry pointer (spec §4.4): no tool names, the catalogue holds them.
@@ -247,23 +271,33 @@ export class ToolTarget extends Construct {
     const pointer = new ssm.StringParameter(this, 'RegistryPointer', {
       parameterName: this.registryParameterName,
       simpleName: false,
-      stringValue: Stack.of(this).toJsonString({ gatewayTargetId: this.targetId, kind: props.kind, status: 'active', version: 1 }),
+      stringValue: Stack.of(this).toJsonString({ gatewayTargetId: this.targetId, gateway: gatewayName, kind: props.kind, status: 'active', version: 1 }),
       description: `runtime-isolation: tool target ${props.name} (spec §4.4)`,
     });
     pointer.node.addDependency(this.policy);
   }
 }
 
-function bindingOf(scope: Construct, ingress: SharedIngress | SharedIngressRef, fail: (prop: string, message: string) => never): ToolsBinding {
+function bindingOf(
+  scope: Construct,
+  ingress: SharedIngress | SharedIngressRef,
+  gatewayName: string,
+  fail: (prop: string, message: string) => never,
+): ToolsBinding {
   if (ingress instanceof SharedIngress) {
     if (Stack.of(ingress) !== Stack.of(scope)) {
       fail('ingress', 'a SharedIngress from another stack must be imported with SharedIngress.fromParameters(...)');
     }
-    const tg = ingress.toolsGateway;
-    if (tg === undefined) {
+    const names = Object.keys(ingress.toolsGateways);
+    if (names.length === 0) {
       fail('ingress', 'has toolsGateway: false; a ToolTarget needs a tools gateway (ADR-0034)');
     }
+    const tg = ingress.toolsGatewayNamed(gatewayName);
+    if (tg === undefined) {
+      fail('gateway', `'${gatewayName}' is not a tools gateway of the ingress (it has ${names.map((n) => `'${n}'`).join(', ')}; ADR-0041)`);
+    }
     return {
+      gatewayName,
       registryPrefix: ingress.registryPrefix,
       gatewayIdentifier: tg!.gatewayIdentifier,
       gatewayArn: tg!.gatewayArn,
@@ -274,17 +308,22 @@ function bindingOf(scope: Construct, ingress: SharedIngress | SharedIngressRef, 
       contextKeyArn: tg!.contextKey.keyArn,
       entitlementsTableName: ingress.entitlementStore.tableName,
       entitlementsTableArn: ingress.entitlementStore.tableArn,
-      sameStack: ingress,
+      sameStack: tg!,
       logDrain: ingress.logDrain,
     };
   }
-  const tools = ingress.tools;
-  if (tools === undefined || ingress.entitlementsTableName === undefined) {
+  const known = ingress.toolsGateways ?? (ingress.tools === undefined ? {} : { [DEFAULT_TOOLS_GATEWAY]: ingress.tools });
+  if (Object.keys(known).length === 0 || ingress.entitlementsTableName === undefined) {
     fail('ingress', 'must carry the tools gateway and the entitlement store (SharedIngress.fromParameters with toolsGateway on)');
+  }
+  const tools = Object.prototype.hasOwnProperty.call(known, gatewayName) ? known[gatewayName] : undefined;
+  if (tools === undefined) {
+    fail('gateway', `'${gatewayName}' is not a tools gateway of the ingress reference (it has ${Object.keys(known).map((n) => `'${n}'`).join(', ')}; ADR-0041)`);
   }
   const stack = Stack.of(scope);
   const tableArn = stack.formatArn({ service: 'dynamodb', resource: 'table', resourceName: ingress.entitlementsTableName });
   return {
+    gatewayName,
     registryPrefix: ingress.registryPrefix,
     gatewayIdentifier: tools!.gatewayIdentifier,
     gatewayArn: stack.formatArn({ service: 'bedrock-agentcore', resource: 'gateway', resourceName: tools!.gatewayIdentifier }),

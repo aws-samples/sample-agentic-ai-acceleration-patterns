@@ -52,7 +52,7 @@ describe('expandTools / compressTools', () => {
 describe('grantFor', () => {
   it('grants the agent needs plus its tools the tenant holds, compressed', () => {
     const result = grantFor(inputs());
-    expect(result).toEqual({ granted: true, entries: ['crm/*', 'default/chat'], scope: 'crm/* default/chat', noToolsGranted: false });
+    expect(result).toEqual({ granted: true, entries: ['crm/*', 'default/chat'], scope: 'crm/* default/chat', noToolsGranted: false, toolTargets: ['crm'] });
   });
 
   it('a tool the agent does not name is never granted, even when the tenant holds it', () => {
@@ -82,6 +82,7 @@ describe('grantFor', () => {
       granted: true,
       entries: ['default/chat'],
       scope: 'default/chat',
+      toolTargets: [],
       noToolsGranted: true,
     });
     expect(grantFor(inputs({ cut: { cutAgents: ['default'], cutTools: [] } }))).toEqual({ granted: false, reason: 'agent_not_subscribed' });
@@ -102,7 +103,8 @@ describe('grantFor', () => {
   });
 
   it(`refuses a scope over ${MAX_SCOPE_BYTES} bytes with grant_too_large`, () => {
-    const many = Array.from({ length: 200 }, (_, i) => `tool_${String(i).padStart(3, '0')}_${'x'.repeat(20)}`);
+    expect(MAX_SCOPE_BYTES).toBe(8192);
+    const many = Array.from({ length: 300 }, (_, i) => `tool_${String(i).padStart(3, '0')}_${'x'.repeat(20)}`);
     const big: ToolCatalogue = new Map([['crm', [...many, 'extra']]]);
     const result = grantFor(inputs({
       catalogue: big,
@@ -110,6 +112,25 @@ describe('grantFor', () => {
       tenant: { status: 'active', agents: ['default'], tools: many.map((t) => `crm/${t}`) },
     }));
     expect(result).toEqual({ granted: false, reason: 'grant_too_large' });
+  });
+
+  it('grants a scope between the old 4,096-byte and the new 8,192-byte bound (ADR-0041, V-16c)', () => {
+    const many = Array.from({ length: 200 }, (_, i) => `tool_${String(i).padStart(3, '0')}_${'x'.repeat(20)}`);
+    const big: ToolCatalogue = new Map([['crm', [...many, 'extra']]]);
+    const result = grantFor(inputs({
+      catalogue: big,
+      agent: { name: 'default', needs: [], tools: many.map((t) => `crm/${t}`) },
+      tenant: { status: 'active', agents: ['default'], tools: many.map((t) => `crm/${t}`) },
+    }));
+    expect(result).toMatchObject({ granted: true, toolTargets: ['crm'] });
+    const bytes = Buffer.byteLength((result as { scope: string }).scope, 'utf8');
+    expect(bytes).toBeGreaterThan(4096);
+    expect(bytes).toBeLessThanOrEqual(MAX_SCOPE_BYTES);
+  });
+
+  it('toolTargets holds the targets of the granted tools only, never of the needs', () => {
+    const result = grantFor(inputs({ agent: { name: 'default', needs: ['default/chat'], tools: [] }, tenant: { status: 'active', agents: ['default'], tools: ['crm/*'] } }));
+    expect(result).toMatchObject({ granted: true, noToolsGranted: true, toolTargets: [] });
   });
 
   it('is deterministic: the same inputs in another order give the same scope string', () => {

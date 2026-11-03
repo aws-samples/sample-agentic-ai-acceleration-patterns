@@ -7,7 +7,7 @@
  * use `crm/*`) and one `AgentBackend` to the sample's dependencies, plus a
  * second agent (`billing`, needs `billing/read` and `billing/invoke`, may use
  * `invoices/*`; ADR-0024, ADR-0032) behind the same ingress on request, and
- * (v2) two `ToolTarget`s, `crm` and `invoices`, behind the tools gateway. It
+ * (v2) two `ToolTarget`s, `crm` and `invoices`, behind two tools gateways (`default` and `finance`, ADR-0041). It
  * reads tenant-identity's published parameters for the issuer (ADR-0004),
  * chooses the ingress and the optional modules from CDK context,
  * and publishes the Runtime ARNs as this sample's parameters (the ingress
@@ -75,6 +75,8 @@ export const DEFAULT_NEEDS = [`${GATEWAY_TARGET_NAME}/chat`] as const;
 export const DEFAULT_TOOLS = ['crm/*'] as const;
 export const BILLING_NEEDS = [`${BILLING_BACKEND}/read`, `${BILLING_BACKEND}/invoke`] as const;
 export const BILLING_TOOLS = ['invoices/*'] as const;
+/** (ADR-0041) The demo's tools gateways: `crm` on `default`, `invoices` on `finance`. */
+export const DEMO_TOOLS_GATEWAYS = { crm: 'default', invoices: 'finance' } as const;
 
 /** The build-time placeholders (standard §4.3). A CloudFormation rule refuses to deploy a stack that carries them. */
 export const PLACEHOLDER = {
@@ -360,6 +362,9 @@ export class RuntimeIsolationDemoStack extends Stack {
           ? undefined
           : { requestsPerMinute: ctx.requestsPerMinute, outputTokensPerMinute: ctx.outputTokensPerMinute },
       defaultBackend: GATEWAY_TARGET_NAME,
+      // ADR-0041: two tools gateways, each with its own Policy engine. `finance` trims
+      // tools/list to the exact tools in scope (its RESPONSE interceptor).
+      toolsGateways: { [DEMO_TOOLS_GATEWAYS.crm]: {}, [DEMO_TOOLS_GATEWAYS.invoices]: { responseFilter: true } },
     });
     this.agentBackend = new AgentBackend(this, 'AgentBackend', {
       name: GATEWAY_TARGET_NAME,
@@ -374,8 +379,8 @@ export class RuntimeIsolationDemoStack extends Stack {
     // v2: the demo tool targets behind the tools gateway (ADR-0034). Their
     // functions answer with synthetic data for the tenant the signed context
     // names (src/tools/demo).
-    this.crm = demoToolTarget(this, 'CrmTools', this.ingress, 'crm', 'crm.function.ts', [...CRM_TOOLS], owner);
-    this.invoices = demoToolTarget(this, 'InvoicesTools', this.ingress, 'invoices', 'invoices.function.ts', [...INVOICES_TOOLS], owner);
+    this.crm = demoToolTarget(this, 'CrmTools', this.ingress, 'crm', 'crm.function.ts', [...CRM_TOOLS], owner, DEMO_TOOLS_GATEWAYS.crm);
+    this.invoices = demoToolTarget(this, 'InvoicesTools', this.ingress, 'invoices', 'invoices.function.ts', [...INVOICES_TOOLS], owner, DEMO_TOOLS_GATEWAYS.invoices);
 
     // A second backend behind the same ingress (ADR-0024): the same agent
     // code and model, its own Runtime, registry entry, needs and tools
@@ -504,6 +509,7 @@ function demoToolTarget(
   file: string,
   tools: ToolDefinition[],
   owner: string | undefined,
+  gateway: string,
 ): ToolTarget {
   const fn = new NodejsFunction(scope, `${id}Function`, {
     ...functionProps(scope, `${id}Logs`, Duration.seconds(10)),
@@ -511,7 +517,7 @@ function demoToolTarget(
     description: `runtime-isolation demo tool target ${name}: synthetic data for the tenant in the signed context (P-15)`,
   });
   acknowledgeLambdaFindings(fn);
-  return new ToolTarget(scope, id, { name, ingress, kind: 'lambda', function: fn, tools, owner });
+  return new ToolTarget(scope, id, { name, ingress, gateway, kind: 'lambda', function: fn, tools, owner });
 }
 
 /** A Contributor Insights rule over a JSON CloudWatch Logs group, enabled; counts by default, sums `ValueOf` with `AggregateOn: 'Sum'`. */

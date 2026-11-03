@@ -67,8 +67,10 @@ export const AGENT_ENV = {
   MODEL_ID: 'MODEL_ID',
   /** The demo's tenant-partitioned table for the `read <tenant>` probe (set by the demo stack, ADR-0012). */
   TABLE_NAME: 'TABLE_NAME',
-  /** (v2) The tools gateway MCP endpoint; unset when the ingress has no tools gateway. */
+  /** (v2) The `default` tools gateway MCP endpoint; unset when the ingress has no gateway named `default`. */
   TOOLS_GATEWAY_URL: 'RI_TOOLS_GATEWAY_URL',
+  /** (v2, ADR-0041) JSON `{ "<gateway name>": "<MCP endpoint>" }` of every tools gateway of the ingress. */
+  TOOLS_GATEWAY_URLS: 'RI_TOOLS_GATEWAY_URLS',
   /** (v2) The transaction-token issuer, so the agent can verify the token with the published JWKS if it wants to. */
   ISSUER: 'RI_ISSUER',
 } as const;
