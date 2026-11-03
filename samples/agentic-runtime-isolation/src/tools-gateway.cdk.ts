@@ -386,7 +386,9 @@ export class ToolsGateway extends Construct {
  * policy names: `InvokeGateway` (the service validates the Cedar actions
  * against the gateway as that action, else the policy ends `CREATE_FAILED`
  * "Insufficient permissions to call gateway") and the permission-only
- * `ManageResourceScopedPolicy` (a policy whose resource is one gateway ARN).
+ * `ManageResourceScopedPolicy` (a policy whose resource is one gateway ARN),
+ * and `GetGateway` and `ListGatewayTargets` (the service reads the gateway and
+ * its targets as the caller; CloudTrail AccessDenied, integ 2026-11-03).
  */
 export function grantPolicyWrites(fn: NodejsFunction, policyEngineArn: string, gatewayArn: string): void {
   const resources = [policyEngineArn, `${policyEngineArn}/policy/*`];
@@ -400,8 +402,14 @@ export function grantPolicyWrites(fn: NodejsFunction, policyEngineArn: string, g
   fn.addToRolePolicy(
     new iam.PolicyStatement({
       sid: 'ValidatePoliciesOnOneGateway',
-      // CreatePolicy reads the gateway with the caller's identity (CloudTrail: GetGateway AccessDenied, integ 2026-11-03).
-      actions: ['bedrock-agentcore:GetGateway', 'bedrock-agentcore:InvokeGateway', 'bedrock-agentcore:ManageResourceScopedPolicy'],
+      // CreatePolicy reads the gateway and lists its targets with the caller's identity
+      // (CloudTrail: GetGateway, then ListGatewayTargets AccessDenied, integ runs 1 and 3 2026-11-03).
+      actions: [
+        'bedrock-agentcore:GetGateway',
+        'bedrock-agentcore:InvokeGateway',
+        'bedrock-agentcore:ListGatewayTargets',
+        'bedrock-agentcore:ManageResourceScopedPolicy',
+      ],
       resources: [gatewayArn],
     }),
   );
