@@ -47,7 +47,7 @@ import { acknowledgeLambdaFindings, functionProps } from './shared/function.cdk'
 import type { JwsAlgorithm } from './shared/jws';
 import { LogDrain } from './shared/log-drain';
 import type { IngressKind } from './shared/metrics';
-import { DEFAULT_MINT_CACHE_MAX_ENTRIES, DEFAULT_TOOLS_GATEWAY, TOOLS_GATEWAY_NAME_PATTERN } from './shared/mint';
+import { DEFAULT_MINT_CACHE_MAX_ENTRIES, DEFAULT_TOOLS_GATEWAY, MAX_TRANSACTION_TTL_SECONDS, MIN_TRANSACTION_TTL_SECONDS, TOOLS_GATEWAY_NAME_PATTERN } from './shared/mint';
 import { acknowledgeGranularFinding, nagFindingResource } from './shared/nag';
 import { BACKEND_NAME_PATTERN, INGRESS_TAG_KEY, REGISTRY_BACKENDS_SEGMENT, ROUTE } from './shared/registry';
 import { LONGEST_STREAM, MAX_DRAIN } from './shared/registry-entry.cdk';
@@ -126,7 +126,7 @@ export interface StageThrottleProps {
 
 /** (v2, ADR-0031, ADR-0036, ADR-0037) The transaction token the ingress mints. Always on. */
 export interface TransactionTokenProps {
-  /** `exp - iat`, 60 s to 900 s. Default 300 s. */
+  /** `exp - iat`, 120 s to 900 s (the AgentCore Gateway refuses a token with 60 s or less left). Default 300 s. */
   readonly ttl?: Duration;
   /** Default `'RS256'`; `'ES256'` was accepted by the Gateway in spike V-8. */
   readonly algorithm?: JwsAlgorithm;
@@ -447,8 +447,8 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
   // v2: the transaction token (spec §3.3).
   const txn = props.transactionToken ?? {};
   const ttlSeconds = (txn.ttl ?? DEFAULT_TRANSACTION_TOKEN_TTL).toSeconds();
-  if (!Number.isInteger(ttlSeconds) || ttlSeconds < 60 || ttlSeconds > 900) {
-    fail('transactionToken.ttl', `must be a whole number of seconds from 60 to 900 (got ${String(ttlSeconds)})`);
+  if (!Number.isInteger(ttlSeconds) || ttlSeconds < MIN_TRANSACTION_TTL_SECONDS || ttlSeconds > MAX_TRANSACTION_TTL_SECONDS) {
+    fail('transactionToken.ttl', `must be a whole number of seconds from ${MIN_TRANSACTION_TTL_SECONDS} to ${MAX_TRANSACTION_TTL_SECONDS} (got ${String(ttlSeconds)})`);
   }
   const algorithm = txn.algorithm ?? 'RS256';
   if (algorithm !== 'RS256' && algorithm !== 'ES256') {

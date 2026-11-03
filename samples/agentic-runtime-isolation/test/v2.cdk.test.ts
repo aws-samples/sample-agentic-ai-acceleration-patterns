@@ -212,8 +212,8 @@ describe('v2 options', () => {
     expect(withSign[0][0]).toMatch(/SigningKey2/);
   });
 
-  it('ttl outside 60 to 900 s fails synth', () => {
-    expect(() => build('api-gateway', { transactionToken: { ttl: Duration.seconds(30) } })).toThrow(/transactionToken.ttl/);
+  it('ttl outside 120 to 900 s fails synth', () => {
+    expect(() => build('api-gateway', { transactionToken: { ttl: Duration.seconds(60) } })).toThrow(/transactionToken.ttl/);
     expect(() => build('api-gateway', { transactionToken: { ttl: Duration.seconds(901) } })).toThrow(/transactionToken.ttl/);
   });
 

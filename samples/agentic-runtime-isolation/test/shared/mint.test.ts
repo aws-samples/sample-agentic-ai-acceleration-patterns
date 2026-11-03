@@ -140,10 +140,10 @@ describe('TokenMinter', () => {
     expect((await minter.mint({ ...input, sub: 'u2' })).mint).toBe('miss');
   });
 
-  it('refuses a ttl outside 60 to 900 seconds', () => {
+  it('refuses a ttl outside 120 to 900 seconds (the Gateway refuses a token with 60 s or less left)', () => {
     const { signer } = localRsaKey();
-    for (const ttlSeconds of [59, 901, 120.5]) {
-      expect(() => new TokenMinter({ ...config, ttlSeconds }, { signer })).toThrow(/ttlSeconds must be an integer from 60 to 900/);
+    for (const ttlSeconds of [60, 119, 901, 120.5]) {
+      expect(() => new TokenMinter({ ...config, ttlSeconds }, { signer })).toThrow(/ttlSeconds must be an integer from 120 to 900/);
     }
   });
 

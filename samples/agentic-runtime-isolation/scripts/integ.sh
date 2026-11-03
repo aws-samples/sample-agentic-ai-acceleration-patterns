@@ -854,8 +854,10 @@ run_all_on() { # SUFFIX
   local tok_old
   status="$(invoke "$ENDPOINT" A1_ACCESS "$(tool_call_body "$C1" crm/update_case '{"caseId":"case-1","status":"closed"}')")"
   check "A1 crm/update_case served before the cut (got '$(tool_payload | head -c 100)' $(probe_error))" jq -e '.updated == true' <<<"$(tool_payload)"
-  mint tok_old "$MINT_FN" "$(mint_event "$TENANT_A" "$(claim A1_ACCESS sub)" default "$DEFAULT_SCOPE_A" '["default"]' '{"ttlSeconds":60}')"
-  local old_exp=$(( $(date +%s) + 60 ))
+  # 150 s: the Gateway refuses a token with 60 s or less left (integ run 7), so the
+  # in-flight call below has 90 s to land; the after-exp check waits past exp.
+  mint tok_old "$MINT_FN" "$(mint_event "$TENANT_A" "$(claim A1_ACCESS sub)" default "$DEFAULT_SCOPE_A" '["default"]' '{"ttlSeconds":150}')"
+  local old_exp=$(( $(date +%s) + 150 ))
   put_ok "AA cuts A1 from crm/update_case" "$(admin_api PUT "users/${A1_SUB}/cut" AA_ACCESS '{"cutAgents":[],"cutTools":["crm/update_case"]}')"
   issue "$TENANT_A" "$A1_USER" A1
   status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "$C1" report)")"
@@ -863,7 +865,7 @@ run_all_on() { # SUFFIX
   status="$(invoke "$ENDPOINT" A1_ACCESS "$(tool_call_body "$C1" crm/update_case '{"caseId":"case-1"}')")"
   check "A1 crm/update_case after the cut: forbidden: tool_not_granted (got '$(probe_error)')" eq "$(probe_error)" "forbidden: tool_not_granted"
   status="$(mcp "$TOOLS_DEFAULT" tok_old tools/call '{"name":"crm___update_case","arguments":{"caseId":"case-1","status":"open"}}')"
-  check "the token minted before the cut is still served until exp (got ${status} '$(mcp_error)')" eq "$(mcp_error)" ""
+  check "the token minted before the cut is still served until 60 s before exp (got ${status} '$(mcp_error)')" eq "$(mcp_error)" ""
   sleep $(( old_exp - $(date +%s) + 20 > 0 ? old_exp - $(date +%s) + 20 : 0 ))
   status="$(mcp "$TOOLS_DEFAULT" tok_old tools/list)"
   check "after exp the old token is 403 insufficient_scope (got ${status}; ADR-0040)" eq "$status" 403

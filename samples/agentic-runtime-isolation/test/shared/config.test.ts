@@ -151,9 +151,9 @@ describe('readMintConfig (v2)', () => {
     expect(readMintConfig({})).toBeUndefined();
     expect(readMintConfig(mintEnv)).toMatchObject({ algorithm: 'RS256', ttlSeconds: 300, reuseMarginSeconds: 60 });
   });
-  it('refuses a bad algorithm, a ttl outside 60 to 900, and a missing issuer or ingress role', () => {
+  it('refuses a bad algorithm, a ttl outside 120 to 900, and a missing issuer or ingress role', () => {
     expect(() => readMintConfig({ ...mintEnv, [ENV.TXN_ALGORITHM]: 'HS256' })).toThrow(ENV.TXN_ALGORITHM);
-    expect(() => readMintConfig({ ...mintEnv, [ENV.TXN_TTL_SECONDS]: '59' })).toThrow(ENV.TXN_TTL_SECONDS);
+    expect(() => readMintConfig({ ...mintEnv, [ENV.TXN_TTL_SECONDS]: '119' })).toThrow(ENV.TXN_TTL_SECONDS);
     expect(() => readMintConfig({ ...mintEnv, [ENV.TXN_TTL_SECONDS]: '901' })).toThrow(ENV.TXN_TTL_SECONDS);
     expect(() => readMintConfig({ ...mintEnv, [ENV.ISSUER]: undefined })).toThrow(ENV.ISSUER);
     expect(() => readMintConfig({ ...mintEnv, [ENV.INGRESS_ROLE_ARN]: undefined })).toThrow(ENV.INGRESS_ROLE_ARN);

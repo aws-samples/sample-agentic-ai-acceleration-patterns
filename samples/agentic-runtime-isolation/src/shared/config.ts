@@ -11,7 +11,7 @@
 
 import type { JwsAlgorithm } from './jws';
 import type { IngressKind } from './metrics';
-import type { MintConfig } from './mint';
+import { MAX_TRANSACTION_TTL_SECONDS, MIN_TRANSACTION_TTL_SECONDS, type MintConfig } from './mint';
 import type { SessionScope } from './session';
 
 /** A backend name: lower-case letters, digits and hyphens, 1 to 32 characters (ADR-0024). */
@@ -189,8 +189,8 @@ export function readMintConfig(env: NodeJS.ProcessEnv = process.env): MintConfig
     throw new Error(`${ENV.TXN_ALGORITHM} must be RS256 or ES256`);
   }
   const ttlSeconds = positiveInteger(ENV.TXN_TTL_SECONDS, env[ENV.TXN_TTL_SECONDS]) ?? 300;
-  if (ttlSeconds < 60 || ttlSeconds > 900) {
-    throw new Error(`${ENV.TXN_TTL_SECONDS} must be from 60 to 900`);
+  if (ttlSeconds < MIN_TRANSACTION_TTL_SECONDS || ttlSeconds > MAX_TRANSACTION_TTL_SECONDS) {
+    throw new Error(`${ENV.TXN_TTL_SECONDS} must be from ${MIN_TRANSACTION_TTL_SECONDS} to ${MAX_TRANSACTION_TTL_SECONDS}`);
   }
   return {
     issuer: requireEnv(ENV.ISSUER, env),

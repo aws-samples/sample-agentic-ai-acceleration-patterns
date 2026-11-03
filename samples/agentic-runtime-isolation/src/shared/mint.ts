@@ -64,7 +64,7 @@ export interface MintConfig {
   /** The KMS key id of the current signing key; the `kid`. */
   readonly keyId: string;
   readonly algorithm: JwsAlgorithm;
-  /** `exp - iat`, 60 to 900 seconds (spec §3.3). */
+  /** `exp - iat`, MIN_TRANSACTION_TTL_SECONDS to MAX_TRANSACTION_TTL_SECONDS (120 to 900 s; spec §3.3). */
   readonly ttlSeconds: number;
   /** A cached token is reused only while more than this many seconds of its life are left. */
   readonly reuseMarginSeconds: number;
@@ -159,6 +159,17 @@ export interface TokenMinterDependencies {
   readonly jti?: () => string;
 }
 
+/**
+ * The shortest transaction-token lifetime (spec §3.3, amended 2026-11-03).
+ * The AgentCore Gateway's JWT authoriser refuses a token with 60 s or less
+ * left before `exp` (integ run 7: a fresh 60 s or 61 s token is 403
+ * insufficient_scope, 62 s and longer are served), so a 60 s token would be
+ * refused at every tools gateway. 120 s leaves at least 60 s of use there.
+ */
+export const MIN_TRANSACTION_TTL_SECONDS = 120;
+/** The longest transaction-token lifetime (spec §3.3). */
+export const MAX_TRANSACTION_TTL_SECONDS = 900;
+
 export class TokenMinter {
   private readonly cache = new Map<string, MintedToken>();
   private readonly inflight = new Map<string, Promise<MintedToken>>();
@@ -167,8 +178,8 @@ export class TokenMinter {
   private readonly jti: () => string;
 
   constructor(private readonly config: MintConfig, private readonly deps: TokenMinterDependencies) {
-    if (!Number.isInteger(config.ttlSeconds) || config.ttlSeconds < 60 || config.ttlSeconds > 900) {
-      throw new Error('TokenMinter: ttlSeconds must be an integer from 60 to 900');
+    if (!Number.isInteger(config.ttlSeconds) || config.ttlSeconds < MIN_TRANSACTION_TTL_SECONDS || config.ttlSeconds > MAX_TRANSACTION_TTL_SECONDS) {
+      throw new Error(`TokenMinter: ttlSeconds must be an integer from ${MIN_TRANSACTION_TTL_SECONDS} to ${MAX_TRANSACTION_TTL_SECONDS}`);
     }
     this.now = deps.now ?? Date.now;
     // 128 random bits, base64url (spec §6.2.2).
