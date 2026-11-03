@@ -177,17 +177,21 @@ identity_use() {
   if [[ "$1" == shared ]]; then IDENTITY_API="$SP_API"; APP_CLIENT_ID="$SP_CLIENT"; else IDENTITY_API="$MT_API"; APP_CLIENT_ID="$MT_CLIENT"; fi
 }
 
+# list-stack-resources, not describe-stack-resources: describe returns at most
+# 100 resources, and the all-on stacks hold more (integ run 7: the interceptor
+# log group was past the first 100, so step 15's log check read nothing).
+stack_resources() { # STACK JMESPATH_FILTER FIELD -> one value per line
+  aws cloudformation list-stack-resources --stack-name "$1" \
+    --query "StackResourceSummaries[?$2].$3" --output text 2>/dev/null | tr '\t' '\n'
+}
 log_groups_of() { # STACK -> the stack's AWS::Logs::LogGroup physical ids
-  aws cloudformation describe-stack-resources --stack-name "$1" \
-    --query "StackResources[?ResourceType=='AWS::Logs::LogGroup'].PhysicalResourceId" --output text 2>/dev/null | tr '\t' '\n'
+  stack_resources "$1" "ResourceType=='AWS::Logs::LogGroup'" PhysicalResourceId
 }
 resources_of() { # STACK TYPE -> physical ids
-  aws cloudformation describe-stack-resources --stack-name "$1" \
-    --query "StackResources[?ResourceType=='$2'].PhysicalResourceId" --output text 2>/dev/null | tr '\t' '\n'
+  stack_resources "$1" "ResourceType=='$2'" PhysicalResourceId
 }
 log_group_like() { # STACK LOGICAL_ID_PART -> the first log group whose logical id contains it
-  aws cloudformation describe-stack-resources --stack-name "$1" \
-    --query "StackResources[?ResourceType=='AWS::Logs::LogGroup' && contains(LogicalResourceId, '$2')].PhysicalResourceId | [0]" --output text 2>/dev/null
+  stack_resources "$1" "ResourceType=='AWS::Logs::LogGroup' && contains(LogicalResourceId, '$2')" PhysicalResourceId | head -1
 }
 # runtimes_of STACK -> the Runtime ids of every *RuntimeArn output; their log groups live outside CloudFormation.
 runtimes_of() {
