@@ -4,12 +4,25 @@ SPDX-License-Identifier: MIT-0
 -->
 # Agentic Runtime Isolation: Architecture
 
-> **Status: v2 (ADR-0040, ADR-0041) implemented; integration not yet green.**
-> 2026-11-03, sandbox account, eu-central-1, five runs of the v2 integration
-> test, none past step 2. Run 5 deployed all six stacks in 315 s with every
-> tool policy ACTIVE in 10.5 to 20.8 s, then stopped at the multi-tenant
-> fixtures (`CreateTenant` 400, a driver bug fixed after the run). Steps 3 to
-> 23 have not run on v2; the coverage below is the v1 run of 2026-10-30.
+> **Status: v2 (ADR-0040, ADR-0041) implemented; every integration step green
+> except the step 10 teardown.** 2026-11-03, sandbox account, eu-central-1,
+> integration run 8 (steps complete in 1703 s; six stacks deployed in about
+> 280 s). Every spec §8 step from 1 to 24 passed on both all-on stacks
+> (`api-gateway`, `agentcore-gateway`): 3 to 9, 9-registry, 9-drain, 12-late,
+> 11 to 18, 19-tenant_id, 20, 22 to 24; on their own stacks 4a, 4b-user,
+> limits and 19 (MU, `shared-pool-multi-tenant`); 21 (key rotation, redeploy
+> in 151 s) on `api-gateway`; then 20-cloudtrail, the log sweep (139 log
+> groups, 351 signature segments, 0 hits) and 8b-metrics. Step 9:
+> `api-gateway` TTFB p50 0.200 s warm, 0.240 s with a cold mint cache;
+> `agentcore-gateway` 0.272 s and 0.329 s. Step 23: one ACTIVE star permit
+> per target, 10.7 to 15.7 s from `CreatePolicy` to ACTIVE. An interceptor
+> refusal reaches the agent as HTTP 403 (step 13). Step 10 fails: the stacks
+> end DELETE_FAILED on SSM `DeleteParameter` (GeneralServiceException); the
+> teardown is not retried yet. Runs 1 to 7 stopped earlier on defects fixed
+> on this branch. Two platform findings: the AgentCore Gateway refuses a
+> transaction token with 60 s or less left (the ttl floor is now 120 s), and
+> the single-tenant authoriser caches its decision per token, not per
+> `X-Tenant-Id`.
 >
 > **v1: implemented and verified by the integration run of 2026-10-30.**
 > Last green integration run: 2026-10-30, a sandbox account, eu-central-1
