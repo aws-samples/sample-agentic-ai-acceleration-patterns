@@ -28,7 +28,8 @@
  * on the `api-gateway` stack (step 21 redeploys it with 2).
  *
  * The published parameters have fixed names, so only the `api-gateway`
- * stack writes them; the others publish under `<prefix><stackName>/`.
+ * stack writes them (none with `INTEG_PUBLISHER=none`); the others publish
+ * under `<prefix><stackName>/`.
  * Dashboards are account-wide names, so each stack names its own after the
  * stack. Each stack has its own entitlement store, so name reservations do
  * not collide across stacks; every stack passes `owner:
@@ -105,7 +106,10 @@ const mtClient = process.env.INTEG_MT_APP_CLIENT_ID;
 if (mtPool !== undefined && mtPool !== '' && mtClient !== undefined && mtClient !== '') {
   INTEG_STACKS['multi-tenant'] = { ...base, ingress: 'api-gateway', multiTenant: true, sessionScope: 'tenant', tvm: true };
 }
-const PUBLISHER = 'api-gateway';
+// INTEG_PUBLISHER=none: no stack writes the fixed-name parameters, because
+// they are already taken (another deployment, or an earlier run's
+// DELETE_FAILED stack); CloudFormation refuses to create an existing name.
+const PUBLISHER = process.env.INTEG_PUBLISHER ?? 'api-gateway';
 
 const app = new App();
 const agentCodePath = bundleAgent();

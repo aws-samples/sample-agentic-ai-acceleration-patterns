@@ -440,13 +440,31 @@ end_step
 # 2. Deploy the stacks, then the fixtures
 # --------------------------------------------------------------------------
 begin 2 "synth and deploy ${STACK_PREFIX}-*; tenants, users, plan, subscriptions, cuts"
+# The api-gateway stack writes the fixed-name published parameters (spec §6.4).
+# When any of them already exists (another deployment of the sample, or an
+# earlier run's DELETE_FAILED stack) CloudFormation cannot create it, so the
+# run deploys with no publisher (INTEG_PUBLISHER=none) and says so; no step
+# reads the fixed names.
+INTEG_PUBLISHER="${INTEG_PUBLISHER:-api-gateway}"
 synth() { # [KEY_GENERATION]
   rm -rf "$OUT"
-  INTEG_PREFIX="$STACK_PREFIX" INTEG_MT_USER_POOL_ID="$MT_POOL" INTEG_MT_APP_CLIENT_ID="$MT_CLIENT" INTEG_KEY_GENERATION="${1:-1}" \
+  INTEG_PUBLISHER="$INTEG_PUBLISHER" INTEG_PREFIX="$STACK_PREFIX" INTEG_MT_USER_POOL_ID="$MT_POOL" INTEG_MT_APP_CLIENT_ID="$MT_CLIENT" INTEG_KEY_GENERATION="${1:-1}" \
     npx cdk synth -q --app "$INTEG_APP" --output "$OUT" >"${LIB_TMP}/synth.log" 2>&1 \
     || { tail -30 "${LIB_TMP}/synth.log" >&2; fail "synth"; }
 }
 synth
+if [[ "$INTEG_PUBLISHER" != none ]]; then
+  TAKEN=()
+  while read -r n; do
+    [[ -n "$n" ]] || continue
+    aws ssm get-parameter --name "$n" --query Parameter.Name --output text >/dev/null 2>&1 && TAKEN+=("$n")
+  done < <(jq -r '.Resources[] | select(.Type == "AWS::SSM::Parameter") | .Properties.Name | strings' "${OUT}/${STACK_PREFIX}-${INTEG_PUBLISHER}.template.json")
+  if (( ${#TAKEN[@]} > 0 )); then
+    note "fixed-name parameters already taken (${TAKEN[*]}): deployed with no publisher (INTEG_PUBLISHER=none)"
+    INTEG_PUBLISHER=none
+    synth
+  fi
+fi
 mapfile -t SUFFIXES < <(find "$OUT" -maxdepth 1 -name "${STACK_PREFIX}-*.template.json" -printf '%f\n' | sed "s/^${STACK_PREFIX}-//; s/\.template\.json$//" | sort)
 DEPLOYED_SAMPLE=1
 DEPLOY_START=$SECONDS
