@@ -157,6 +157,16 @@ async function create(deps: ToolPolicyDependencies, p: ToolPolicyProperties): Pr
   return { status: 'FAILED', physicalResourceId: `policy:${p.Name}`, reason: `policy did not become ACTIVE: ${lastReason}` };
 }
 
+/**
+ * A failed Create keeps the id CloudFormation generated, `<stack>-<logical id>-<suffix>`,
+ * not the one the handler answered with (integ 2026-11-03): no policy was made under it,
+ * and DeletePolicy refuses it with ValidationException.
+ */
+function generatedByCloudFormation(event: ToolPolicyEvent, policyId: string): boolean {
+  const stackName = event.StackId.split('/')[1] ?? '';
+  return stackName.length > 0 && policyId.startsWith(`${stackName}-${event.LogicalResourceId}-`);
+}
+
 export async function handleEvent(event: ToolPolicyEvent, deps: ToolPolicyDependencies): Promise<CustomResourceOutcome> {
   const p = event.ResourceProperties;
   if (event.RequestType === 'Create') {
@@ -164,7 +174,7 @@ export async function handleEvent(event: ToolPolicyEvent, deps: ToolPolicyDepend
   }
   const policyId = event.PhysicalResourceId ?? '';
   if (event.RequestType === 'Delete') {
-    if (!policyId.length || policyId.startsWith('policy:')) {
+    if (!policyId.length || policyId.startsWith('policy:') || generatedByCloudFormation(event, policyId)) {
       return { status: 'SUCCESS', physicalResourceId: policyId || 'policy:none' };
     }
     const final = await deleteAndWait(deps, p.PolicyEngineId, policyId);

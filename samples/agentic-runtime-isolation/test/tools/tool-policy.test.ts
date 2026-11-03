@@ -76,6 +76,12 @@ describe('tool policy handler', () => {
     expect(sent[0]).toBe(UpdatePolicyCommand.name);
   });
 
+  it('Delete of a failed Create (the id CloudFormation generated) calls nothing', async () => {
+    const { d, sent } = deps([]);
+    expect(await handleEvent(event('Delete', { PhysicalResourceId: 's-Policy-163XEPIF4PYQL' }), d)).toMatchObject({ status: 'SUCCESS' });
+    expect(sent).toEqual([]);
+  });
+
   it('Delete waits until the policy is gone (ADR-0040: before its target)', async () => {
     const { d, sent } = deps(['DELETING', 'GONE']);
     expect(await handleEvent(event('Delete', { PhysicalResourceId: 'p-3' }), d)).toMatchObject({ status: 'SUCCESS' });
