@@ -161,7 +161,7 @@ describe('resolveOptions', () => {
       // v2: always-on transaction token and entitlements, tools gateway on by default.
       transactionToken: { ttlSeconds: 300, algorithm: 'RS256', keyGeneration: 1, cacheMaxEntries: 1000, reuseMarginSeconds: 180 },
       authorizerCacheTtlSeconds: 60,
-      entitlements: { adminScope: 'entitlements/admin', maxAgentsPerTenant: 100, maxToolsPerTenant: 1000 },
+      entitlements: { adminScope: 'entitlements/admin', maxAgentsPerTenant: 1000, maxToolsPerTenant: 1000 },
       toolsGateway: { requestsPerSecond: 10, overrides: {}, interceptorProvisionedConcurrency: 1, contextLifetimeSeconds: 60 },
     });
   });
@@ -211,7 +211,7 @@ describe('resolveOptions', () => {
     ['transactionToken.keyGeneration', { transactionToken: { keyGeneration: 0 } }, /transactionToken\.keyGeneration/],
     ['transactionToken.cacheMaxEntries', { transactionToken: { cacheMaxEntries: 0 } }, /transactionToken\.cacheMaxEntries/],
     ['entitlements.adminScope', { entitlements: { adminScope: 'a b' } }, /entitlements\.adminScope/],
-    ['entitlements.maxAgentsPerTenant', { entitlements: { maxAgentsPerTenant: 101 } }, /entitlements\.maxAgentsPerTenant/],
+    ['entitlements.maxAgentsPerTenant', { entitlements: { maxAgentsPerTenant: 1001 } }, /entitlements\.maxAgentsPerTenant/],
     ['entitlements.maxToolsPerTenant', { entitlements: { maxToolsPerTenant: 0 } }, /entitlements\.maxToolsPerTenant/],
     ['identity.multiTenant', { identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: ['c'], multiTenant: 'yes' as any } }, /identity\.multiTenant/],
     ['toolsGateway.tenantRateLimit', { toolsGateway: { tenantRateLimit: { requestsPerSecond: 0 } } }, /toolsGateway\.tenantRateLimit\.requestsPerSecond/],

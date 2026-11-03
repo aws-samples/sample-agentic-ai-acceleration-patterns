@@ -398,9 +398,9 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
   if (adminScope.length === 0 || /\s/.test(adminScope)) {
     fail('entitlements.adminScope', 'must be a scope string without whitespace');
   }
-  const maxAgentsPerTenant = props.entitlements?.maxAgentsPerTenant ?? 100;
-  if (!Number.isInteger(maxAgentsPerTenant) || maxAgentsPerTenant < 1 || maxAgentsPerTenant > 100) {
-    fail('entitlements.maxAgentsPerTenant', `must be an integer from 1 to 100 (got ${String(maxAgentsPerTenant)})`);
+  const maxAgentsPerTenant = props.entitlements?.maxAgentsPerTenant ?? 1000;
+  if (!Number.isInteger(maxAgentsPerTenant) || maxAgentsPerTenant < 1 || maxAgentsPerTenant > 1000) {
+    fail('entitlements.maxAgentsPerTenant', `must be an integer from 1 to 1000 (got ${String(maxAgentsPerTenant)})`);
   }
   const maxToolsPerTenant = props.entitlements?.maxToolsPerTenant ?? 1000;
   if (!Number.isInteger(maxToolsPerTenant) || maxToolsPerTenant < 1 || maxToolsPerTenant > 1000) {

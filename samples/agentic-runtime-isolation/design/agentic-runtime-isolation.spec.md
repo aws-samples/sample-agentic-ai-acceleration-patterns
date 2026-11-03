@@ -72,9 +72,10 @@ ingress:
    product itself does not need.
 
 The model is pool throughout. The design targets 10,000s of tenants,
-100,000s of tenant users, 10s of agents and 100s of tools. None of those
-counts may grow a policy, a Gateway, a role or a token per tenant or per
-user (P-16).
+100,000s of tenant users, 100s of agents and 1,000s of tools (amended
+2026-11-03). None of those counts may grow a policy, a Gateway, a role or a
+token per tenant or per user (P-16). What grows with agents and tools is
+bounded in §3.6 ("Scale at 100s of agents and 1,000s of tools").
 
 v1 forwarded the user's identity token to the agent on opt-in, optionally
 narrowed by an exchange at tenant-identity. v2 replaces that with a
@@ -478,8 +479,8 @@ fails with the prop name.
 | `transactionToken.algorithm` | `'RS256' \| 'ES256'` | `'RS256'` | (v2) key spec of C-13; `ES256` only after V-8 shows the Gateway accepts it |
 | `transactionToken.keyGeneration` | number | 1 | (v2) bump to rotate: a new key signs, the previous stays in the JWKS (§6.2.3) |
 | `entitlements.adminScope` | string | `'entitlements/admin'` | (v2) identity-token scope the tenant-admin operations require |
-| `entitlements.maxAgentsPerTenant` | number | 100 | (v2) bound on `agents` in a tenant or plan row |
-| `entitlements.maxToolsPerTenant` | number | 1000 | (v2) bound on `tools` in a tenant or plan row |
+| `entitlements.maxAgentsPerTenant` | number | 1000 | (v2) bound on `agents` entries in a tenant or plan row (amended 2026-11-03) |
+| `entitlements.maxToolsPerTenant` | number | 1000 | (v2) bound on `tools` entries in a tenant or plan row; a `<target>/*` entry counts once, so a tenant subscribed to whole targets holds 1,000s of tools in 10s of entries |
 | `toolsGateway` | object `\| false` | on | (v2, ADR-0034) `false` creates no tools gateway |
 | `toolsGateway.tenantRateLimit` | `{ requestsPerSecond: number }` | `{ requestsPerSecond: 10 }` | (v2) native limit, one bucket per `tenant_id` (`*` entry) |
 | `toolsGateway.tenantRateLimitOverrides` | `Record<string, number>` | none | (v2) named tenants with their own rate, at most 1,000 |
@@ -551,7 +552,8 @@ defines:
 
 Catalogue names are `<target>/<tool>`. The Gateway's own tool name is
 `<target>___<tool>`; the interceptor and the policy translate between the
-two. A target has at most 1,000 tools; a Gateway at most 100 targets (§3.6).
+two. A target has at most 1,000 tools; a Gateway at most 100 targets, so
+one Gateway holds up to 100,000 tools on count alone (§3.6).
 
 ### 3.6 Request path and tools gateway detail (v2)
 
@@ -596,6 +598,21 @@ compressed `scope` longer than 4,096 bytes is refused with 502 and log
 reason `grant_too_large`; with at most 64 entries in `tools` this cannot
 happen unless a target has hundreds of tools and the user is cut from one
 (V-13 records the fallback).
+
+**Scale at 100s of agents and 1,000s of tools (amended 2026-11-03).** The
+counts that grow with agents and tools, and where each is bounded:
+
+| Grows with | Where | Bound | Rule |
+|---|---|---|---|
+| Agents | registry entries in SSM, one per agent | SSM standard tier, 10,000 parameters | cached per name; no listing on the hot path |
+| Agents | `AgentBackend` Runtimes | AgentCore Runtime quota per account | one Runtime per agent, as v1 |
+| Agents on the `agentcore-gateway` ingress | one Runtime target per agent on the ingress Gateway | 100 targets per Gateway (V-14) | **the `agentcore-gateway` ingress caps at 100 agents**; `api-gateway` has no such cap and is the recommended ingress (ADR-0029). The README says so |
+| Agents per tenant | `agents` entries on the tenant row | `maxAgentsPerTenant`, 1,000 | one row read per mint, cached per tenant version |
+| Tools | catalogue rows `TOOL#` | 1,000 per target, 100 targets | the ingress Queries one target at a time and caches it `registryTtl`; the whole catalogue is never read |
+| Tools | Cedar policy text per target | one policy per target; its size grows with the tools named one by one | V-16 measures a 1,000-tool target; the fallback is one `<target>/*` permit plus per-tool permits in groups of 100 |
+| Tools | `tools/list` pages | about 30 tools per page before Policy filters (V-14) | an agent product lists its own targets only, so a product with 3 targets pays 3 to 100 pages, never the whole catalogue; the agent caches the list for the token life; `toolsGateway.semanticSearch` (off by default) replaces listing for products that span many targets |
+| Tools per tenant | `tools` entries on the tenant row | `maxToolsPerTenant`, 1,000 entries; a 400 KB item holds about 10,000 names | subscribe by `<target>/*`; the row is read once per mint, cached |
+| Tools in a token | `scope` after compression | 4,096 bytes (`grant_too_large`) | whole targets compress to one entry; a user cut from one tool of a 1,000-tool target expands to 999 names and overflows. V-16 decides the fix: a `cut` claim that Policy enforces with one `forbid` per target, or the hash-referenced grant (V-13 fallback). Until then the limitation is named in the README |
 
 **Mint cache (ADR-0036).** Key `(tenant_id, sub, agent, tenant.version, agent.version,
 plan.version)`. A cached token is reused while more than 60 s of its life is
@@ -1125,6 +1142,7 @@ design depends on these further behaviours.
 | V-12 | KMS `Sign` latency at p50 and p95 from the authoriser and the interceptor Lambdas; the per-request cost of a mint; the mint cache hit ratio in the latency probe; `BatchGetItem` latency and RCU per request | If p95 adds more than 50 ms to TTFB, raise the default reuse margin and lifetime within 900 s, or sign with a key held in the Lambda and rotated from Secrets Manager (rejected unless measured: the private key would leave KMS) |
 | V-13 | The Runtime `requestHeaderAllowlist` carries the transaction token (about 1.2 KB, up to 4 KB at the `scope` bound) beside the credentials header (about 2 KB) from both ingresses, and no log on the path records it (v1 V-7 repeated) | Hash-referenced grant: the token carries `grant` = sha256 of the granted set instead of `scope`, the ingress writes the set to the entitlement store under `GRANT#<hash>` with a TTL, and Policy is replaced by the interceptor's lookup (AWS Prescriptive Guidance's lean-token pattern); recorded in ADR-0031 |
 | V-14 | Policy evaluation latency, and `tools/list` latency, at 100 targets with one policy each (was tool-gateway V-6) | Group tools into fewer targets; document the measured figure in the README |
+| V-16 | At 1,000s of tools (amended 2026-11-03): (a) a Cedar policy for a target with 1,000 tools named one by one is accepted, becomes ACTIVE, and `tools/call` latency stays within the V-14 figures; (b) a `forbid` policy on a `cut` claim (`principal.getTag("cut") like "* <target>/<tool> *"`) is accepted beside the permit and removes the tool from `tools/list` and refuses `tools/call`; (c) a `scope` of 4,096 bytes passes the Gateway authoriser | (a) fails: split the permit into groups of 100 tools per policy, cap tools per target in `ToolTarget` at the measured size; (b) fails: keep the 4 KB bound and the hash-referenced grant of V-13 as the fallback, named in the README; (c) fails: lower the bound to the measured size |
 | V-15 | AgentCore Identity with the transaction token as the inbound JWT: (a) a 3LO credential provider on a `ToolTarget` keys the vault on the transaction token's `sub` and issuer, and a second transaction token for the same user reuses the stored grant; (b) an OBO `TOKEN_EXCHANGE` provider accepts the ingress as issuer; (c) `GetWorkloadAccessTokenForJWT` in the agent accepts a transaction token when the workload identity names the ingress discovery URL | If (a) fails, 3LO targets are documented as needing the user's consent per token life, or the sample drops 3LO; if (b) fails, OBO targets are out of scope and the README says a third party must trust the ingress issuer; if (c) fails, the agent's outbound identity is M2M only |
 
 The spike stack deploys a throwaway `SharedIngress` with `toolsGateway`, one

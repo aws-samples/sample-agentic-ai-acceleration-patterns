@@ -25,7 +25,7 @@ import { TENANT_TAG_KEY } from './tvm';
 export { KEY_PREFIX, SORT_KEY, nameKey, planKey, tenantKey, toolKey, userCutKey } from './entitlements';
 
 /** Defaults (spec §3.3). */
-export const DEFAULT_MAX_AGENTS_PER_TENANT = 100;
+export const DEFAULT_MAX_AGENTS_PER_TENANT = 1000;
 export const DEFAULT_MAX_TOOLS_PER_TENANT = 1000;
 
 export interface EntitlementStoreProps {

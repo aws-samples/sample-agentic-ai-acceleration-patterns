@@ -119,7 +119,7 @@ function defaultDependencies(): EntitlementHandlerDependencies {
   const service = new EntitlementServiceImpl({
     tableName,
     client,
-    maxAgentsPerTenant: Number(process.env[ENTITLEMENTS_ENV.MAX_AGENTS] ?? '100'),
+    maxAgentsPerTenant: Number(process.env[ENTITLEMENTS_ENV.MAX_AGENTS] ?? '1000'),
     maxToolsPerTenant: Number(process.env[ENTITLEMENTS_ENV.MAX_TOOLS] ?? '1000'),
   });
   if (side === 'vendor') {
