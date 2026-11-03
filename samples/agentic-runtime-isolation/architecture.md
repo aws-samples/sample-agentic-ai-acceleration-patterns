@@ -4,7 +4,14 @@ SPDX-License-Identifier: MIT-0
 -->
 # Agentic Runtime Isolation: Architecture
 
-> **Status: implemented and verified by the integration run of 2026-10-30.**
+> **Status: v2 (ADR-0040, ADR-0041) implemented; integration not yet green.**
+> 2026-11-03, sandbox account, eu-central-1, five runs of the v2 integration
+> test, none past step 2. Run 5 deployed all six stacks in 315 s with every
+> tool policy ACTIVE in 10.5 to 20.8 s, then stopped at the multi-tenant
+> fixtures (`CreateTenant` 400, a driver bug fixed after the run). Steps 3 to
+> 23 have not run on v2; the coverage below is the v1 run of 2026-10-30.
+>
+> **v1: implemented and verified by the integration run of 2026-10-30.**
 > Last green integration run: 2026-10-30, a sandbox account, eu-central-1
 > (steps complete in 357 s; `api-gateway` TTFB p50 0.198 s, `agentcore-gateway`
 > 0.307 s; both streamed `stream 10` with a first byte under 0.3 s).
