@@ -1608,7 +1608,7 @@ Limits. As v1: tenant A gets 429 on the `requestsPerMinute: 5` stack while
    "refused by Policy".)
 15. Cross-tenant tool call. The runner mints, through the integration stack's
    test-only mint function (`TokenSigner.grantSign`), a token for tenant A and then alters its
-   `tenant_id` to B without re-signing: 401 at the Gateway. A1's agent calls
+   `tenant_id` to B without re-signing: 403 `insufficient_scope` at the Gateway (ADR-0040; V-8). A1's agent calls
    `crm/get_account` with arguments that include
    `_ri_ctx: "<context signed for tenant B by a key not ToolContextKey>"`
    and `tenantId: "B"`: the tool returns tenant A's account only and reports
@@ -1620,16 +1620,16 @@ Limits. As v1: tenant A gets 429 on the `requestsPerMinute: 5` stack while
    (ADR-0041; was "by Policy"). The
    runner keeps a token minted before the cut (from step 15's signer path,
    with the old scope) and shows it is still accepted until `exp`, then
-   refused with 401 after it. AA deletes the cut.
+   refused with 403 `insufficient_scope` after it (ADR-0040). AA deletes the cut.
 17. Interceptor checks. With the signer path the runner mints otherwise
    valid tokens: without `act`: 403 `forbidden: act_missing`; with
    `act.sub` another role: 403 `act_missing`; with `aud: ["agent:default"]`
-   only: 401 at the Gateway; with `aud: ["agent:billing", "tools-gateway:default"]`
+   only: 403 `insufficient_scope` at the Gateway (ADR-0040); with `aud: ["agent:billing", "tools-gateway:default"]`
    and `agent: "default"`: 403 `forbidden: aud_mismatch`. (ADR-0041) With
    `aud: ["agent:default", "tools-gateway:finance"]` on gateway `default`:
    refused at the Gateway authoriser; the interceptor's own check of its
    gateway name is a unit test, because the authoriser refuses first. An identity token
-   as bearer on the tools gateway: 401.
+   as bearer on the tools gateway: 403 `insufficient_scope` (wrong `iss`; ADR-0040).
 18. Self-issued token refused at ingress. A valid transaction token (signer
    path) sent to `/invocations` as the bearer: 401 (`api-gateway`: 403) on
    both ingresses, before any entitlement read.
