@@ -173,6 +173,25 @@ fresh_tokens() {
   issue "$TENANT_B" "$B1_USER" B1
 }
 
+# The shared pool's access tokens live 5 minutes (tenant-identity's app
+# client), shorter than the stretch from fresh_tokens to step 24 (integ run 7:
+# AA's PutUserCut was 401 invalid_token). Every tenant-admin call with AA's
+# token re-issues it when it has under 90 s left.
+aa_fresh() {
+  local exp saved_api="$IDENTITY_API" saved_client="$APP_CLIENT_ID"
+  exp="$(claim AA_ACCESS exp)"
+  if [[ -z "$exp" ]] || (( exp - $(date +%s) < 90 )); then
+    identity_use shared
+    issue "$TENANT_A" "$AA_USER" AA
+    IDENTITY_API="$saved_api"; APP_CLIENT_ID="$saved_client"
+  fi
+}
+eval "lib_$(declare -f admin_api)"
+admin_api() { # as lib.sh's, with AA's token kept fresh
+  [[ "${3:-}" == AA_ACCESS ]] && aa_fresh
+  lib_admin_api "$@"
+}
+
 identity_use() {
   if [[ "$1" == shared ]]; then IDENTITY_API="$SP_API"; APP_CLIENT_ID="$SP_CLIENT"; else IDENTITY_API="$MT_API"; APP_CLIENT_ID="$MT_CLIENT"; fi
 }
@@ -910,9 +929,17 @@ run_all_on() { # SUFFIX
   end_step
 
   begin "19-tenant_id ${INGRESS}" "A1 (a tenant_id token) with X-Tenant-Id B: 403 tenant_not_allowed"
+  # A fresh token on both sides: on a single-tenant ingress X-Tenant-Id is not an
+  # authoriser identity source, so a cached decision for the token would answer
+  # this request, and this Deny would answer A1's next header-less request for the
+  # cache TTL (integ run 7, step 20).
+  issue "$TENANT_A" "$A1_USER" A1
   status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "$C1" report)" "" "$TENANT_B")"
   check "A1 with X-Tenant-Id B: 403 (got ${status})" eq "$status" 403
   check "body names tenant_not_allowed (got '$(body_text | head -c 60)')" contains "$(body_text)" tenant_not_allowed
+  # New tokens for every user: this Deny is cached for A1's token, and the
+  # 5-minute identity tokens from before step 11 would expire during 20 to 24.
+  fresh_tokens
   end_step
 
   begin "20 ${INGRESS}" "tool data isolation: the crm Lambda without a context assumes no role; the tool's credentials cannot read tenant B (P-15)"
