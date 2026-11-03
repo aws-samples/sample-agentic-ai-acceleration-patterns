@@ -63,7 +63,11 @@ source "${SAMPLE_DIR}/scripts/lib.sh"
 OUT="cdk.integ.out"
 CDK=(npx cdk --app "$OUT")
 INTEG_APP="npx ts-node -P tsconfig.json --prefer-ts-exts test/integ.runtime.ts"
-STACK_PREFIX="RuntimeIsolationInteg"
+# INTEG_PREFIX deploys under another stack prefix, beside an earlier run's
+# DELETE_FAILED stacks (CloudFormation refuses updates to them); the leftover
+# check below is scoped to this prefix.
+STACK_PREFIX="${INTEG_PREFIX:-RuntimeIsolationInteg}"
+[[ "$STACK_PREFIX" =~ ^[A-Za-z][A-Za-z0-9]{0,39}$ ]] || { echo "INTEG_PREFIX must be 1 to 40 letters and digits, starting with a letter" >&2; exit 1; }
 IDENTITY_STACK="TenantIdentity-shared-pool"
 MT_IDENTITY_STACK="TenantIdentity-shared-pool-multi-tenant"
 ALL_ON=(api-gateway agentcore-gateway)
@@ -270,7 +274,7 @@ cleanup() {
   fi
   local left
   left="$(aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE DELETE_FAILED ROLLBACK_COMPLETE UPDATE_ROLLBACK_COMPLETE \
-    --query "StackSummaries[?starts_with(StackName, '${STACK_PREFIX}')].StackName" --output text)"
+    --query "StackSummaries[?starts_with(StackName, '${STACK_PREFIX}-')].StackName" --output text)"
   [[ -z "$left" ]] || CUR_FAIL="${CUR_FAIL:+${CUR_FAIL}; }leftover stacks: $left"
   if [[ "$DEPLOYED_SAMPLE" == 1 ]]; then
     local n=0
@@ -438,7 +442,7 @@ end_step
 begin 2 "synth and deploy ${STACK_PREFIX}-*; tenants, users, plan, subscriptions, cuts"
 synth() { # [KEY_GENERATION]
   rm -rf "$OUT"
-  INTEG_MT_USER_POOL_ID="$MT_POOL" INTEG_MT_APP_CLIENT_ID="$MT_CLIENT" INTEG_KEY_GENERATION="${1:-1}" \
+  INTEG_PREFIX="$STACK_PREFIX" INTEG_MT_USER_POOL_ID="$MT_POOL" INTEG_MT_APP_CLIENT_ID="$MT_CLIENT" INTEG_KEY_GENERATION="${1:-1}" \
     npx cdk synth -q --app "$INTEG_APP" --output "$OUT" >"${LIB_TMP}/synth.log" 2>&1 \
     || { tail -30 "${LIB_TMP}/synth.log" >&2; fail "synth"; }
 }

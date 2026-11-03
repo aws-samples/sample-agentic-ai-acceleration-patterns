@@ -43,7 +43,15 @@ import { bundleAgent } from '../src/agent/bundle';
 import { DemoContext, defaultModelId, RuntimeIsolationDemoStack } from '../src/demo.cdk';
 import { acknowledgeLambdaFindings, functionProps } from '../src/shared/function.cdk';
 
-export const STACK_PREFIX = 'RuntimeIsolationInteg';
+/**
+ * Stack name prefix. `INTEG_PREFIX` lets a run deploy beside the stacks of an
+ * earlier run that could not be deleted (DELETE_FAILED stacks cannot be updated);
+ * the owner stays `RuntimeIsolationInteg` (each stack has its own store).
+ */
+export const STACK_PREFIX = process.env.INTEG_PREFIX || 'RuntimeIsolationInteg';
+if (!/^[A-Za-z][A-Za-z0-9]{0,39}$/.test(STACK_PREFIX)) {
+  throw new Error(`INTEG_PREFIX must be 1 to 40 letters and digits, starting with a letter: ${STACK_PREFIX}`);
+}
 export const INTEG_OWNER = 'RuntimeIsolationInteg';
 
 const modelId = process.env.INTEG_MODEL_ID ?? defaultModelId(process.env.AWS_REGION ?? process.env.CDK_DEFAULT_REGION);
