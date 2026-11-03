@@ -1263,6 +1263,107 @@ Consequence for the design:
 - V-15(c): the agent can get a workload access token from the transaction
   token; the agent's outbound identity is not limited to M2M.
 
+### 7.2 Spike results, V-16 (2026-11-03, pg sandbox, eu-central-1)
+
+Throwaway stack `RiacSpikeV16`, a plain CDK app outside the repo, tagged
+`riac-spike=v16`: one KMS signing key (`SignKey` RSA_2048) and `ContextKey`
+(RSA_2048); the v2 issuer (REST API with OIDC discovery and JWKS from
+`GetPublicKey`, `Mint` Lambda that takes arbitrary extra claims); an
+AgentCore Gateway (MCP, `CUSTOM_JWT`, `allowedAudience: ['tools-gateway']`)
+with the v2 REQUEST interceptor and a Policy engine in `ENFORCE` mode; the v2
+`crm` target (3 tools) and a Lambda target `big` whose inline `toolSchema`
+declares `t0001`..`tNNNN` on one Lambda, each with the input schema
+`{ x: string }`. No Runtime, no OBO or 3LO, no ping targets. `big` was
+deployed with 1,000 tools, then redeployed with 500, 330 and 325 to find the
+engine bound below; every measurement after (a)'s bound uses 325. Policies
+were created one at a time with `FAIL_ON_ANY_FINDINGS`. Raw outputs are
+under `/tmp/riac-spike-v16/out/`. Latency is from the sandbox host, 50
+sequential `tools/call` and 10 full listings per case.
+
+| ID | Result | Evidence |
+|---|---|---|
+| V-16(a) | FAIL at 1,000 tools; PASS at 325 with the fallback | **Policy engine schema bound.** With `big` at 1,000 tools, every policy naming `big` ended `CREATE_FAILED`: `The combined Cedar schema size (1199KB) exceeds the maximum allowed size (400KB)`. The bound is the Service Quota `Cedar Schema Size` = 400 KB, not adjustable. It counts every tool of the Gateways the engine controls: 1,199 KB at 1,003 tools, 604 KB at 503, 401 KB at 333; 328 tools (325 + `crm`) fit. That is about 1.2 KB per tool with a one-field input schema, so one engine holds at most about 330 tools; richer schemas hold fewer. The `crm` policy created before the first `big` policy stayed ACTIVE and enforced at 1,003 tools; this was not explored further. **Policy text bound.** `definition.cedar.statement` is 35 to 10,000 characters. The V-9 shape with 1,000 tools is 274,407 bytes: `ValidationException` at once. 36 tools (10,271 bytes): `ValidationException`. 35 tools (9,997 bytes) is accepted by `CreatePolicy` and then `CREATE_FAILED`: `Policy statement exceeds the maximum allowed size of 10000 characters once each action is qualified with the target gateway`. **Fallback.** `action in AgentCore::Action::"big"` (the target as action group) with a `big/*` alternative: 431 bytes, ACTIVE in 109 s. Per-tool permits in the same form: 28 tools (6,972 bytes) ACTIVE, 29 (7,212) and 30 (7,452) fail on the qualified size. Groups of 100 are not possible; 325 tools took 12 group policies plus the star permit. Time to ACTIVE grew with the engine: 33 s for the first policy, 93 to 167 s for policies 3 to 14, 155 to 177 s at 15 to 17. No `ServiceQuotaExceededException`: both bounds surface as a 400 or as `CREATE_FAILED`. `tools/call` against `big` with `big/*`: p50 181 ms, p95 275 ms, against `crm`: 192 / 280 (V-14 at 100 targets: 189 / 264). Full `tools/list` with `big/*`: 11 pages (30 per page, last 25), 325 tools, p50 2.36 s. At 1,003 tools with no `big` policy: 34 pages, 6.5 s and 7.9 s (two runs), 0 `big` tools listed. |
+| V-16(b) | PASS, with one forbid per cut tool or per group of 28 | Forbid for one tool (440 bytes) ACTIVE in 177 s; text below. Token `scope: big/*`, `cut: big/t0300`: `tools/list` 324 tools, `big___t0300` absent, the other 324 present. `tools/call big___t0300`: `Tool Execution Denied: Tool call not allowed due to policy enforcement [Policy evaluation denied due to big_cut_t0300-10qw_mis0z]`, an explicit forbid message naming the policy, not `denied by default`. `tools/call big___t0299`: 200, tool invoked. Two tools, `cut: big/t0300 big/t0200`, one forbid each: 323 listed, both absent, `big___t0200` denied with its own policy named. A group forbid (`action in AgentCore::Action::"big"`, 28 per-tool alternatives on `cut`, 6,746 bytes) was accepted and ACTIVE in 171 s; `cut: big/t0010 big/t0300` hid both (323 listed) and named the group policy on the denial; `cut: big/t0010` left `big___t0011` callable. The forbid applies inside the same evaluation as the permit, after paging: the page that held the cut tool came back with 29 tools, the page count stayed 11. Latency with forbids and no `cut` claim: call p50 174 ms, p95 265; with `cut` of one tool 177 / 238, two tools 180 / 245; full listing p50 2.27 s and 2.26 s against 2.33 s without `cut`. No measurable cost. |
+| V-16(c) | PASS at 4,096 and 8,192 bytes | `scope` of exactly 4,096 bytes (410 entries: `big/t0007`, `big/t0326`.., one padding entry) gave a 6,386-byte token; exactly 8,192 bytes (819 entries) a 11,848-byte token. Both: `CUSTOM_JWT` accepted (200 on every `tools/list` page), Policy filtered correctly (only `big___t0007` listed, 11 pages, 2.75 s and 2.32 s), `tools/call big___t0007` 200 in 237 and 234 ms, `big___t0008` refused by the interceptor (`refused: scope`). With the 325 granted tools named one by one (3,249 bytes), 4,096 and 8,189 bytes of entries: all 325 listed, call p50 185, 175 and 183 ms, p95 247, 240 and 250. |
+| Side | Engine at the end | 17 policies, all ACTIVE, 90,412 bytes of policy text: 1 `crm`, 1 `big/*` star, 12 per-tool groups, 2 single-tool forbids, 1 group forbid. Quota `Policies per Policy Engine` = 1,000, not adjustable. Failed policies were deleted as they occurred. |
+
+The Cedar texts that worked (Gateway ARN with the account redacted; the
+per-tool group repeats the bracketed alternative for each of its 28 tools):
+
+```cedar
+permit(
+  principal is AgentCore::OAuthUser,
+  action in AgentCore::Action::"big",
+  resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:eu-central-1:111122223333:gateway/riac-spike-v16-tools-veyyvpcadj"
+) when {
+  principal.hasTag("scope") && ((principal.getTag("scope") == "big/*" || principal.getTag("scope") like "big/\* *" || principal.getTag("scope") like "* big/\*" || principal.getTag("scope") like "* big/\* *"))
+};
+
+permit(
+  principal is AgentCore::OAuthUser,
+  action in AgentCore::Action::"big",
+  resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:eu-central-1:111122223333:gateway/riac-spike-v16-tools-veyyvpcadj"
+) when {
+  principal.hasTag("scope") && ((action == AgentCore::Action::"big___t0052" && (principal.getTag("scope") == "big/t0052" || principal.getTag("scope") like "big/t0052 *" || principal.getTag("scope") like "* big/t0052" || principal.getTag("scope") like "* big/t0052 *")) || ... || (action == AgentCore::Action::"big___t0079" && (...)))
+};
+
+forbid(
+  principal is AgentCore::OAuthUser,
+  action == AgentCore::Action::"big___t0300",
+  resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:eu-central-1:111122223333:gateway/riac-spike-v16-tools-veyyvpcadj"
+) when {
+  principal.hasTag("cut") && (principal.getTag("cut") == "big/t0300" || principal.getTag("cut") like "big/t0300 *" || principal.getTag("cut") like "* big/t0300" || principal.getTag("cut") like "* big/t0300 *")
+};
+
+forbid(
+  principal is AgentCore::OAuthUser,
+  action in AgentCore::Action::"big",
+  resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:eu-central-1:111122223333:gateway/riac-spike-v16-tools-veyyvpcadj"
+) when {
+  principal.hasTag("cut") && ((action == AgentCore::Action::"big___t0001" && (principal.getTag("cut") == "big/t0001" || principal.getTag("cut") like "big/t0001 *" || principal.getTag("cut") like "* big/t0001" || principal.getTag("cut") like "* big/t0001 *")) || ... || (action == AgentCore::Action::"big___t0028" && (...)))
+};
+```
+
+The cut tool is `t0300` (and `t0200`), not `t0500` (and `t0600`) as
+planned, because `big` holds 325 tools after (a).
+
+Latency, ms (unauthenticated floor from V-14: p50 42, p95 106):
+
+| Target tools / ACTIVE policies | Caller | Full `tools/list` p50 / p95 | Pages | `tools/call` p50 / p95 |
+|---|---|---|---|---|
+| 1,003 / 1 (no `big` policy) | `crm/*` | 7,916 (n = 1) | 34 (33 empty, then 3) | not measured |
+| 1,003 / 1 (no `big` policy) | `big/*` | 6,503 (n = 1) | 34, 0 tools | denied by default |
+| 328 / 14 | `crm/*` | 2,737 / 3,244 | 11 (3 tools) | 192 / 280 |
+| 328 / 14 | `big/*` | 2,364 / 2,573 | 11 (325 tools) | 181 / 275 |
+| 328 / 16 (2 forbids) | `big/*`, no `cut` | 2,326 / 2,897 | 11 | 174 / 265 |
+| 328 / 16 | `big/*`, `cut` one tool | 2,268 / 2,396 | 11 (324) | 177 / 238 |
+| 328 / 16 | `big/*`, `cut` two tools | 2,260 / 2,456 | 11 (323) | 180 / 245 |
+| 328 / 16 | 325 tools by name, 3,249-byte `scope` | 2,239 / 2,523 | 11 | 185 / 247 |
+| 328 / 16 | 4,096-byte `scope` | 2,327 / 2,520 | 11 | 175 / 240 |
+| 328 / 16 | 8,189-byte `scope` | 2,421 / 2,551 | 11 | 183 / 250 |
+
+Consequence for the design:
+
+The evidence supports the hash-referenced grant for targets of hundreds to
+1,000 tools, and the `cut` claim only below about 330 tools per Gateway.
+Policy cannot hold a 1,000-tool target at all: the engine's 400 KB schema
+bound fails every policy that names it, so the case that overflows `scope`
+(a user cut from one tool of a 1,000-tool target) has no Policy wall to put a
+forbid in. Within that bound the `cut` claim works as designed: the forbid
+hides the tool from `tools/list`, refuses `tools/call` with the policy named,
+and costs no measurable latency. It is not one forbid per target, though:
+a forbid names tools one by one and fits 28 per policy, the same as the
+per-tool permits, so a target of N tools needs up to N / 28 forbids beside
+its N / 28 permit groups, and each takes 2 to 3 minutes to become ACTIVE.
+The 4,096-byte `scope` bound is the design's, not the platform's: 8,192
+bytes passed the authoriser and Policy, and V-13 carried 8 KB through the
+Runtime. Separately from the choice: `ToolTarget` cannot write one policy
+per target once a target has more than about 28 tools, so the generator
+must emit a `<target>/*` permit plus groups of at most 28; and `tools/list`
+pays one page per 30 catalogued tools on the Gateway whatever the caller's
+grant (34 pages, about 7 s, at 1,003 tools), which the README must state.
+Dave decides.
+
 ---
 
 ## 8. Integration test outline
