@@ -22,7 +22,7 @@ import * as path from 'node:path';
 import { Duration, Validations } from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
+import { NodejsFunction, NodejsFunctionProps } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { Construct } from 'constructs';
 import { ENTITLEMENTS_ENV } from './entitlements.function';
 import { ENV } from '../shared/config';
@@ -30,6 +30,33 @@ import type { EntitlementStore } from '../shared/entitlement-store.cdk';
 import { acknowledgeLambdaFindings, functionProps } from '../shared/function.cdk';
 import type { LogDrain } from '../shared/log-drain';
 import { TENANT_TAG_KEY } from '../shared/tvm';
+
+/**
+ * The Smithy server SDK validates `@pattern` traits with re2-wasm, which loads
+ * `re2.wasm` from the bundle's own directory at init. esbuild does not copy
+ * it, so without this the function dies in init (integ run 6: ENOENT
+ * /var/task/re2.wasm, every route 502). Resolved through @smithy/server-common,
+ * the package that depends on it.
+ */
+export function re2WasmPath(): string {
+  const serverCommon = path.dirname(require.resolve('@smithy/server-common'));
+  return path.join(path.dirname(require.resolve('re2-wasm', { paths: [serverCommon] })), '..', 'wasm', 're2.wasm');
+}
+
+function withRe2Wasm(props: Omit<NodejsFunctionProps, 'entry'>): Omit<NodejsFunctionProps, 'entry'> {
+  const wasm = re2WasmPath();
+  return {
+    ...props,
+    bundling: {
+      ...props.bundling,
+      commandHooks: {
+        beforeBundling: () => [],
+        beforeInstall: () => [],
+        afterBundling: (_inputDir: string, outputDir: string) => [`cp "${wasm}" "${outputDir}/re2.wasm"`],
+      },
+    },
+  };
+}
 
 export interface EntitlementApiProps {
   readonly api: apigateway.RestApi;
@@ -59,7 +86,7 @@ export class EntitlementApi extends Construct {
     const entry = path.join(__dirname, 'entitlements.function.ts');
 
     this.vendorFunction = new NodejsFunction(this, 'VendorFunction', {
-      ...functionProps(this, 'VendorLogs', Duration.seconds(29)),
+      ...withRe2Wasm(functionProps(this, 'VendorLogs', Duration.seconds(29))),
       entry,
       description: 'runtime-isolation: entitlement API, vendor side (SigV4): tenant subscriptions and plans (ADR-0030)',
       environment: { ...common, [ENTITLEMENTS_ENV.SIDE]: 'vendor' },
@@ -69,7 +96,7 @@ export class EntitlementApi extends Construct {
     // ListPlans and DeletePlan's plan_in_use check Query the plan index rows (src/shared/entitlements.ts): no Scan.
 
     this.tenantAdminFunction = new NodejsFunction(this, 'TenantAdminFunction', {
-      ...functionProps(this, 'TenantAdminLogs', Duration.seconds(29)),
+      ...withRe2Wasm(functionProps(this, 'TenantAdminLogs', Duration.seconds(29))),
       entry,
       description: 'runtime-isolation: entitlement API, tenant-admin side (identity token + admin scope): user cuts (ADR-0033)',
       environment: {
