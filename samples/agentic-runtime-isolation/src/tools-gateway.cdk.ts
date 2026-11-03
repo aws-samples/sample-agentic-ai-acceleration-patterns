@@ -65,8 +65,42 @@ export const MAX_TOOLS_PER_GATEWAY_LIMIT = 1000;
 /** MCP protocol versions the tools gateway lists (V-15a needs `2025-11-25`). */
 export const MCP_SUPPORTED_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26'];
 
-/** The JWT path the per-tenant rate limit is keyed on (spec §3.6). */
+/**
+ * The JWT path the per-tenant rate limit is keyed on (spec §3.6): the
+ * documented `$.context.jwt.<claim>` dimension, read from the token the
+ * Gateway's authoriser validated, with `*` as the per-tenant default entry
+ * (AgentCore developer guide, "Rate limit dimensions").
+ */
 export const TENANT_RATE_LIMIT_DIMENSION = '$.context.jwt.tenant_id';
+
+/**
+ * The actions the Gateway execution role needs to use its Policy engine
+ * (AgentCore developer guide, "AgentCore Gateway and Policy in AgentCore IAM
+ * Permissions"): `GetPolicyEngine` on the engine, `AuthorizeAction` (a
+ * `tools/call`) and `PartiallyAuthorizeActions` (the `tools/list` filter)
+ * on the engine and the gateway. `GetWorkloadAccessToken` is needed only for
+ * temporal policies with IAM inbound auth, which this gateway does not use.
+ */
+export const POLICY_ENGINE_READ_ACTIONS = ['bedrock-agentcore:GetPolicyEngine'] as const;
+export const POLICY_AUTHORIZE_ACTIONS = ['bedrock-agentcore:AuthorizeAction', 'bedrock-agentcore:PartiallyAuthorizeActions'] as const;
+
+/**
+ * The per-tenant rate limit entries (spec §3.6, M-60): one `*` entry at the
+ * default rate, which gives every tenant its own bucket, and one entry per
+ * named override, each `requests` per `second`.
+ */
+export function tenantRateLimitEntries(
+  requestsPerSecond: number,
+  overrides: Readonly<Record<string, number>>,
+): agentcore.CfnGatewayRateLimit.LimitEntryProperty[] {
+  return [
+    { dimensions: { [TENANT_RATE_LIMIT_DIMENSION]: '*' }, requests: [{ period: 'second', rate: requestsPerSecond }] },
+    ...Object.entries(overrides).map(([tenantId, rate]) => ({
+      dimensions: { [TENANT_RATE_LIMIT_DIMENSION]: tenantId },
+      requests: [{ period: 'second', rate }],
+    })),
+  ];
+}
 
 /** One tools gateway's settings after defaults and validation (spec §3.3). */
 export interface ResolvedToolsGateway {
@@ -114,6 +148,8 @@ export class ToolsGateway extends Construct {
   readonly gatewayUrl: string;
   readonly gatewayIdentifier: string;
   readonly gatewayArn: string;
+  /** The Gateway's physical name; its id and its workload identity are `<physicalName>-<suffix>`. */
+  readonly physicalName: string;
   /** The Gateway's role: invokes the interceptors and the registered tool functions only (M-61). */
   readonly gatewayRole: iam.Role;
   readonly policyEngine: agentcore.CfnPolicyEngine;
@@ -174,6 +210,7 @@ export class ToolsGateway extends Construct {
 
     // Gateway names match ^([0-9a-zA-Z][-]?){1,48}$ and are lowercased in the ARN (ADR-0027).
     const gatewayName = `${Names.uniqueResourceName(this, { maxLength: 40, separator: '-' })}-tools`.toLowerCase();
+    this.physicalName = gatewayName;
     this.gatewayRole = new iam.Role(this, 'GatewayRole', {
       assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com', {
         conditions: {
@@ -206,7 +243,8 @@ export class ToolsGateway extends Construct {
       interceptorConfigurations.push({
         interceptor: { lambda: { arn: this.responseFilter.functionArn } },
         interceptionPoints: ['RESPONSE'],
-        // The filter verifies the bearer token from the request headers (TODO(v2): confirm they reach a RESPONSE interceptor).
+        // The filter verifies the bearer token from the request headers (documented for
+        // passRequestHeaders; integ step 24 confirms it on a deployed Gateway).
         inputConfiguration: { passRequestHeaders: true },
       });
     }
@@ -220,20 +258,25 @@ export class ToolsGateway extends Construct {
       name: engineName,
       description: `runtime-isolation tools gateway ${props.name}: one Cedar star permit per tool target on the scope claim (ADR-0034, ADR-0041)`,
     });
-    // TODO(v2): narrow to the exact actions the Gateway calls on its policy engine once a deploy shows them (the spike granted bedrock-agentcore:*).
-    const engineResources = [this.policyEngine.attrPolicyEngineArn, `${this.policyEngine.attrPolicyEngineArn}/*`];
+    // The three documented Policy actions, on this one engine and this one gateway (M-58).
+    // The gateway's own ARN would make the role's policy depend on the gateway, which
+    // depends on the role; its id is `<name>-<suffix>`, so the name pattern the trust
+    // policy uses names it.
+    const ownGatewayArn = `arn:${stack.partition}:bedrock-agentcore:${stack.region}:${stack.account}:gateway/${gatewayName}-*`;
     this.gatewayRole.addToPolicy(
-      new iam.PolicyStatement({ sid: 'EvaluatePolicies', actions: ['bedrock-agentcore:*'], resources: engineResources }),
+      new iam.PolicyStatement({ sid: 'ReadPolicyEngine', actions: [...POLICY_ENGINE_READ_ACTIONS], resources: [this.policyEngine.attrPolicyEngineArn] }),
+    );
+    this.gatewayRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'AuthorizeWithPolicyEngine',
+        actions: [...POLICY_AUTHORIZE_ACTIONS],
+        resources: [this.policyEngine.attrPolicyEngineArn, ownGatewayArn],
+      }),
     );
     acknowledgeGranularFinding(
       this.gatewayRole,
-      'AwsSolutions-IAM5[Action::bedrock-agentcore:*]',
-      'The Gateway evaluates its own policy engine; the action set it needs is not documented yet, so the grant is every action on this one engine and its policies, nothing else (ADR-0034, ADR-0041, M-58).',
-    );
-    acknowledgeGranularFinding(
-      this.gatewayRole,
-      `AwsSolutions-IAM5[Resource::${nagFindingResource(this, `${this.policyEngine.attrPolicyEngineArn}/*`)}]`,
-      'The policies of this one engine; ToolTargets add and remove them without a gateway deploy (ADR-0034, ADR-0041, M-58).',
+      `AwsSolutions-IAM5[Resource::${nagFindingResource(this, ownGatewayArn)}]`,
+      'The gateway this role belongs to, named by its name pattern: its id carries a service suffix and its ARN cannot be referenced without a cycle (ADR-0034, M-58).',
     );
 
     this.gateway = new agentcore.CfnGateway(this, 'Gateway', {
@@ -260,18 +303,12 @@ export class ToolsGateway extends Construct {
     this.gatewayIdentifier = this.gateway.attrGatewayIdentifier;
     this.gatewayArn = this.gateway.attrGatewayArn;
 
-    // M-60: per-tenant fairness, per gateway (ADR-0041). TODO(v2): confirm the dimension key syntax and the '*' default entry against a deployed Gateway.
+    // M-60: per-tenant fairness, per gateway (ADR-0041), as the documented L1 resource.
     new agentcore.CfnGatewayRateLimit(this, 'TenantRateLimit', {
       gatewayIdentifier: this.gatewayIdentifier,
       description: `runtime-isolation: requests per second per tenant on tools gateway ${props.name} (fairness only, fail-open by design; M-60)`,
       dimensionKeys: [TENANT_RATE_LIMIT_DIMENSION],
-      entries: [
-        { dimensions: { [TENANT_RATE_LIMIT_DIMENSION]: '*' }, requests: [{ period: 'second', rate: o.requestsPerSecond }] },
-        ...Object.entries(o.overrides).map(([tenantId, rate]) => ({
-          dimensions: { [TENANT_RATE_LIMIT_DIMENSION]: tenantId },
-          requests: [{ period: 'second', rate }],
-        })),
-      ],
+      entries: tenantRateLimitEntries(o.requestsPerSecond, o.overrides),
     });
 
     this.policyFunction = customResourceFunction(
@@ -281,7 +318,7 @@ export class ToolsGateway extends Construct {
       `runtime-isolation: one Cedar policy (star permit) per tool target on tools gateway ${props.name}; sequential create, delete-then-wait (ADR-0040, ADR-0041)`,
       Duration.minutes(15),
     );
-    grantPolicyWrites(this.policyFunction, this.policyEngine.attrPolicyEngineArn);
+    grantPolicyWrites(this.policyFunction, this.policyEngine.attrPolicyEngineArn, this.gatewayArn);
 
     // ADR-0019: the Gateway invokes the interceptors; their late logs land before the groups go.
     this.logDrain = new LogDrain(this, 'LogDrain');
@@ -343,14 +380,28 @@ export class ToolsGateway extends Construct {
   }
 }
 
-/** The policy custom resource's role: policy CRUD on one engine (ADR-0040). */
-export function grantPolicyWrites(fn: NodejsFunction, policyEngineArn: string): void {
+/**
+ * The policy custom resource's role (ADR-0040): policy CRUD on one engine,
+ * plus what `CreatePolicy` and `UpdatePolicy` need on the gateway the
+ * policy names: `InvokeGateway` (the service validates the Cedar actions
+ * against the gateway as that action, else the policy ends `CREATE_FAILED`
+ * "Insufficient permissions to call gateway") and the permission-only
+ * `ManageResourceScopedPolicy` (a policy whose resource is one gateway ARN).
+ */
+export function grantPolicyWrites(fn: NodejsFunction, policyEngineArn: string, gatewayArn: string): void {
   const resources = [policyEngineArn, `${policyEngineArn}/policy/*`];
   fn.addToRolePolicy(
     new iam.PolicyStatement({
       sid: 'OneEnginePolicies',
       actions: ['bedrock-agentcore:CreatePolicy', 'bedrock-agentcore:GetPolicy', 'bedrock-agentcore:UpdatePolicy', 'bedrock-agentcore:DeletePolicy'],
       resources,
+    }),
+  );
+  fn.addToRolePolicy(
+    new iam.PolicyStatement({
+      sid: 'ValidatePoliciesOnOneGateway',
+      actions: ['bedrock-agentcore:InvokeGateway', 'bedrock-agentcore:ManageResourceScopedPolicy'],
+      resources: [gatewayArn],
     }),
   );
   acknowledgeGranularFinding(

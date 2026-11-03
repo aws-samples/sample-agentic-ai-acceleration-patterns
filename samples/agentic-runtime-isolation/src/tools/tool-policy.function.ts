@@ -22,6 +22,10 @@
  *   it, and this wait ends, BEFORE the target is deleted: an orphaned
  *   policy stops `tools/list` filtering for every caller (V-14).
  *
+ * Create and Update return `SecondsToActive`, the time from the call to
+ * ACTIVE, as a resource attribute (integ step 23 reads it from the stack
+ * outputs; the function logs at ERROR only, ADR-0019).
+ *
  * The policy text is never logged.
  */
 
@@ -63,6 +67,12 @@ export interface ToolPolicyDependencies {
   readonly maxPolls?: number;
   readonly pollMs?: number;
   readonly maxCreateAttempts?: number;
+  /** Milliseconds since the epoch. */
+  readonly now?: () => number;
+}
+
+function seconds(deps: ToolPolicyDependencies, startedMs: number): string {
+  return String(Math.round(((deps.now ?? Date.now)() - startedMs) / 100) / 10);
 }
 
 const DEFAULT_POLL_MS = 5000;
@@ -116,6 +126,7 @@ async function create(deps: ToolPolicyDependencies, p: ToolPolicyProperties): Pr
   let lastReason = 'not attempted';
   for (let attempt = 1; attempt <= attempts; attempt++) {
     let policyId: string | undefined;
+    const started = (deps.now ?? Date.now)();
     try {
       const out = await deps.client.send(
         new CreatePolicyCommand({
@@ -135,7 +146,7 @@ async function create(deps: ToolPolicyDependencies, p: ToolPolicyProperties): Pr
     if (policyId !== undefined) {
       const final = await waitFor(deps, p.PolicyEngineId, policyId, ['ACTIVE']);
       if (final === 'ACTIVE') {
-        return { status: 'SUCCESS', physicalResourceId: policyId, data: { PolicyId: policyId } };
+        return { status: 'SUCCESS', physicalResourceId: policyId, data: { PolicyId: policyId, SecondsToActive: seconds(deps, started) } };
       }
       lastReason = final;
       // A CREATE_FAILED policy is removed before the next attempt (V-14).
@@ -167,6 +178,7 @@ export async function handleEvent(event: ToolPolicyEvent, deps: ToolPolicyDepend
     return create(deps, p);
   }
   // The definition, or the no-op touch with the same definition (C-16).
+  const started = (deps.now ?? Date.now)();
   await deps.client.send(
     new UpdatePolicyCommand({
       policyEngineId: p.PolicyEngineId,
@@ -177,7 +189,7 @@ export async function handleEvent(event: ToolPolicyEvent, deps: ToolPolicyDepend
   );
   const final = await waitFor(deps, p.PolicyEngineId, policyId, ['ACTIVE']);
   return final === 'ACTIVE'
-    ? { status: 'SUCCESS', physicalResourceId: policyId, data: { PolicyId: policyId } }
+    ? { status: 'SUCCESS', physicalResourceId: policyId, data: { PolicyId: policyId, SecondsToActive: seconds(deps, started) } }
     : { status: 'FAILED', physicalResourceId: policyId, reason: `policy update did not become ACTIVE: ${final}` };
 }
 

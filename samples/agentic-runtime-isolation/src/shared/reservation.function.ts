@@ -16,12 +16,21 @@
  * - Delete removes each row under `owner = :owner`; a row another stack has
  *   since claimed is left alone.
  *
+ * - (ADR-0040, ADR-0041) With `GatewayLimit`, a `ToolTarget`'s resource also
+ *   owns a `GATEWAY#<gateway>` / `TARGET#<target>` count row holding its
+ *   tool count. Before any write, Create and Update Query that gateway's
+ *   count rows, from every stack, and fail the deploy when this target
+ *   would take the gateway past `MaxTools` catalogued tools or `MaxTargets`
+ *   targets. Synth counts only the targets of its own app; this counts all.
+ *   Two deploys racing on one gateway can both pass; the Policy engine's
+ *   own schema bound is then the backstop (V-16a).
+ *
  * The handler writes no log on success (ADR-0019) and always answers
  * CloudFormation.
  */
 
 import { ConditionalCheckFailedException, DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DeleteCommand, DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DeleteCommand, DynamoDBDocumentClient, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { respond } from './cfn-response';
 import { KEY_PREFIX } from './entitlements';
 import { errorName, log } from './logger';
@@ -33,9 +42,25 @@ export interface OwnedRow {
   readonly attributes?: Record<string, string>;
 }
 
+/**
+ * The per-gateway bound a `ToolTarget` checks at deploy (ADR-0041). Numbers
+ * arrive as strings: CloudFormation passes custom resource properties so.
+ */
+export interface GatewayLimit {
+  /** The gateway's name, for the message. */
+  readonly Gateway: string;
+  /** The target this resource registers. */
+  readonly Target: string;
+  /** The target's catalogued tools. */
+  readonly Tools: string | number;
+  readonly MaxTools: string | number;
+  readonly MaxTargets: string | number;
+}
+
 export interface ReservationProperties {
   readonly TableName: string;
   readonly Rows: OwnedRow[];
+  readonly GatewayLimit?: GatewayLimit;
   /** An explicit owner marker; absent, `<StackId>#<LogicalResourceId>`. */
   readonly Owner?: string;
   readonly ServiceToken?: string;
@@ -104,6 +129,49 @@ async function release(client: DynamoDBDocumentClient, table: string, row: Owned
   }
 }
 
+/**
+ * Why `limit` refuses this target, or undefined: the gateway's count rows of
+ * every other target, plus this one, against the bounds (ADR-0040, ADR-0041).
+ */
+export async function gatewayLimitProblem(client: DynamoDBDocumentClient, table: string, limit: GatewayLimit): Promise<string | undefined> {
+  const tools = Number(limit.Tools);
+  const maxTools = Number(limit.MaxTools);
+  const maxTargets = Number(limit.MaxTargets);
+  if (![tools, maxTools, maxTargets].every((n) => Number.isInteger(n) && n >= 0)) {
+    return 'GatewayLimit must carry whole numbers';
+  }
+  const ownSk = `${KEY_PREFIX.target}${limit.Target}`;
+  let otherTools = 0;
+  let otherTargets = 0;
+  let start: Record<string, unknown> | undefined;
+  do {
+    const out = await client.send(
+      new QueryCommand({
+        TableName: table,
+        KeyConditionExpression: 'PK = :pk',
+        ExpressionAttributeValues: { ':pk': `${KEY_PREFIX.gateway}${limit.Gateway}` },
+        ProjectionExpression: 'SK, tools',
+        ConsistentRead: true,
+        ExclusiveStartKey: start,
+      }),
+    );
+    for (const item of out.Items ?? []) {
+      if (item.SK !== ownSk) {
+        otherTargets += 1;
+        otherTools += Number(item.tools ?? 0) || 0;
+      }
+    }
+    start = out.LastEvaluatedKey;
+  } while (start !== undefined);
+  if (otherTargets + 1 > maxTargets) {
+    return `tools gateway '${limit.Gateway}' holds at most ${maxTargets} tool targets; target '${limit.Target}' would be number ${otherTargets + 1} (ADR-0040)`;
+  }
+  if (otherTools + tools > maxTools) {
+    return `target '${limit.Target}' would bring tools gateway '${limit.Gateway}' to ${otherTools + tools} catalogued tools, over maxToolsPerGateway ${maxTools} (ADR-0041); put the target on another tools gateway`;
+  }
+  return undefined;
+}
+
 /** Handles one event and returns what to tell CloudFormation. */
 export async function handleEvent(event: ReservationEvent, client: DynamoDBDocumentClient): Promise<ReservationOutcome> {
   const properties = event.ResourceProperties;
@@ -119,6 +187,12 @@ export async function handleEvent(event: ReservationEvent, client: DynamoDBDocum
         await release(client, properties.TableName, row, owner);
       }
       return { status: 'SUCCESS', physicalResourceId };
+    }
+    if (properties.GatewayLimit !== undefined) {
+      const problem = await gatewayLimitProblem(client, properties.TableName, properties.GatewayLimit);
+      if (problem !== undefined) {
+        return { status: 'FAILED', physicalResourceId, reason: problem };
+      }
     }
     for (const row of rows) {
       try {

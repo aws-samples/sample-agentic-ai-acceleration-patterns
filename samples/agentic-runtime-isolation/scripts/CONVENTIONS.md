@@ -66,18 +66,40 @@ that none of those ever reach output.
   sample's prefix, plus the log groups and SSM parameters its own stacks
   owned. It ignores parameters under `/application-plane/shared/agent-runtime/*`
   that another deployment wrote.
-- `integ.sh` deploys the four stacks of `test/integ.runtime.ts` at once and
-  destroys them together from the trap: they all pass
-  `scopeOwner: 'RuntimeIsolationInteg'`, so they co-own the demo scope names
-  in the catalogue, and the first one destroyed removes those scopes. A
-  stack deployed with any other owner marker fails on the same names with
-  `scope <name> already registered by another stack`.
-- `integ.sh` never replaces a published tenant-identity on its own. A
-  published deployment without the scope catalogue is stale; the script
-  fails and names the fix unless `INTEG_REPLACE_STALE_IDENTITY=1` is set,
-  because the replacement deletes the shared user pool and every other
-  consumer's tenants and tokens with it. On a reused deployment the cleanup
-  also checks that the demo scopes are gone from the catalogue.
+- `integ.sh` deploys the stacks of `test/integ.runtime.ts` at once and
+  destroys them together from the trap. Each stack has its own entitlement
+  store, so their name reservations never collide; they all pass
+  `owner: 'RuntimeIsolationInteg'` (ADR-0035). After the destroy the trap
+  checks: no stack with the sample's prefix, none of the stacks' parameters,
+  log groups (the Runtimes' own included), tables, Gateways or Policy
+  engines left, every KMS key pending deletion, and each tool target's
+  policy deleted before its target (ADR-0040, from the deleted stacks'
+  events).
+- `integ.sh` never replaces a published tenant-identity on its own. v2
+  needs a `shared-pool` deployment with the scope catalogue (it registers
+  the vendor scopes `app/use` and `entitlements/admin` there, spec §6.4);
+  one without `/platform/scopes` is stale, and the script fails and names
+  the fix unless `INTEG_REPLACE_STALE_IDENTITY=1` is set, because the
+  replacement deletes the shared user pool and every other consumer's
+  tenants and tokens with it. The vendor scopes are removed at the end only
+  when this run added them, and the trap checks they are gone.
+- The user in several tenants (step 19) signs in at a second tenant-identity
+  deployment, `TenantIdentity-shared-pool-multi-tenant`, deployed beside the
+  first with `publishSharedParameters=false` when it is not there and
+  destroyed at the end only then. `INTEG_SKIP_MULTI_TENANT=1` skips it.
+- Assertions in `integ.sh` do not exit: each records a failure for its step,
+  the run goes on, and the step table (step | PASS/FAIL/SKIP | evidence) is
+  printed at the end, also after a failure. Only set-up that later steps
+  cannot do without calls `fail`. The exit status is non-zero when any step
+  failed. Evidence names statuses, counts, tenant ids and claim names or
+  values that are not credentials; never a token.
+- The test-only mint (`test/integ/mint.function.ts`) exists on the
+  integration stacks only. The script invokes it with its own credentials;
+  the token comes back in a mode-0600 file and goes straight into a shell
+  variable. The signature segment of every token and context the run
+  handles is kept (mode 0600) for the log sweep, which pulls every log
+  group on the path and fails on any `eyJ`, signature segment or `_ri_ctx`
+  value (spec §8, v1 V-7).
 - Exit non-zero on any failure, naming the step, resource or parameter that
   failed (name, not value). Never swallow an error into a success exit.
 
@@ -93,12 +115,16 @@ The scripts read this sample's published parameters under the ingress's
 | `endpointUrl`, `ingress`, `ingressRoleArn`, `ingressId`, `tenantRoleArn`, `gatewayIdentifier` (`agentcore-gateway` only) | the ingress stack (`SharedIngress`) | read only (`demo.sh`, `integ.sh`, `perf.sh`) |
 | `runtimeArn` | the one-backend demo stack | read only |
 | `backends/<name>` | the stack that deployed that `AgentBackend`; its custom resource writes `active`, `draining`, then removes the entry | read only, except `backends/late` |
-| `backends/late` | `integ.sh` step 9-registry, written with `aws ssm put-parameter` to show a backend added after the ingress deploy; it names billing's Runtime and `billing/invoke` (an entry must carry `scopes`, ADR-0025) | the script deletes it at the end of the step and again from the `EXIT` trap, so a failed run leaves no route behind |
+| `backends/late` | `integ.sh` step 9-registry, written with `aws ssm put-parameter` to show a backend added after the ingress deploy; it names billing's Runtime, `needs: ["late/run"]` and `tools: []` (the v2 shape, spec §4.3). Its `NAME#late` reservation row, which a vendor subscription needs (spec §5.3), is written into the entitlement store the same way | the script deletes both at the end of the step and again from the `EXIT` trap, so a failed run leaves no route or row behind |
 
 The scripts also call tenant-identity's platform API with SigV4 (`platform`
 in `lib.sh`): `CreateTenant` with the tenant's `scopes`, `IssueToken`,
 `DeleteTenant`, and `GET /platform/scopes` to tell a stale deployment from
-one with the scope catalogue (ADR-0025). The tenant admin's cut of a user's
+one with the scope catalogue (ADR-0025); (v2) `integ.sh` also puts and
+deletes the vendor scopes and calls `CreateMembership`, and calls this
+sample's entitlement API: the vendor operations with SigV4 (`vendor`) and
+the tenant-admin operations with the tenant admin's identity token
+(`admin_api`). The tenant admin's cut of a user's
 scopes goes through the tenant API with a bearer token narrowed to
 `tenant-admin/users` (`set_user_scopes`). The scopes the scripts create
 tenants with (`DEFAULT_SCOPE`, `BILLING_READ_SCOPE`, `BILLING_INVOKE_SCOPE`

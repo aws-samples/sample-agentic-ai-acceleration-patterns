@@ -25,12 +25,17 @@
  * Event shape: the AgentCore Gateway documentation's RESPONSE input,
  * `mcp.gatewayRequest` (headers present with `passRequestHeaders`) and
  * `mcp.gatewayResponse` `{ statusCode, headers, body }`.
- * TODO(v2): confirm the shape against a deployed Gateway, in particular that
- * `gatewayRequest.headers` reaches a RESPONSE interceptor configured with
- * `passRequestHeaders: true`, and how a streamed (`isStreamingResponse`)
- * `tools/list` arrives. If the headers do not arrive, the REQUEST
- * interceptor must carry the verified scope to this one (for example in a
- * signed `_meta` value), which only a deploy can settle.
+ * The shape is the documented one; integ step 24 confirms on a deployed
+ * Gateway that `gatewayRequest.headers` reaches a RESPONSE interceptor
+ * configured with `passRequestHeaders: true` (a missing header makes every
+ * filtered page empty, which step 24 reports as a shape failure, not a
+ * design one) and how a streamed (`isStreamingResponse`) `tools/list`
+ * arrives. If the headers do not arrive, the REQUEST interceptor must carry
+ * the verified scope to this one (for example in a signed `_meta` value).
+ *
+ * With `RI_RESPONSE_FILTER_FORCE_ERROR=true` in its environment the filter
+ * fails every listing (integ step 24 sets it on the test stacks to show the
+ * fail-closed page). The switch can only remove tools, never add one.
  */
 
 import { createRemoteJWKSet } from 'jose';
@@ -41,6 +46,9 @@ import { scopeGrantsTool } from '../shared/grant';
 import { headerValue } from '../shared/headers';
 import { errorName, log } from '../shared/logger';
 import { bearerToken } from '../shared/verifier';
+
+/** Set to `true` to make the filter fail every listing (fail-closed test, integ step 24). */
+export const RESPONSE_FILTER_FORCE_ERROR_ENV = 'RI_RESPONSE_FILTER_FORCE_ERROR';
 
 /** The MCP RESPONSE interceptor event (AgentCore Gateway documentation). */
 export interface ToolResponseEvent {
@@ -81,7 +89,11 @@ function emptyPage(id: string | number | null | undefined): unknown {
 }
 
 /** The filter's logic (unit-tested directly). */
-export async function filterToolsResponse(event: ToolResponseEvent, deps: TokenVerification): Promise<ToolResponseOutput> {
+export async function filterToolsResponse(
+  event: ToolResponseEvent,
+  deps: TokenVerification,
+  options: { readonly forceError?: boolean } = {},
+): Promise<ToolResponseOutput> {
   const request = event.mcp?.gatewayRequest;
   const response = event.mcp?.gatewayResponse;
   const statusCode = typeof response?.statusCode === 'number' ? response.statusCode : 200;
@@ -94,6 +106,9 @@ export async function filterToolsResponse(event: ToolResponseEvent, deps: TokenV
   try {
     const caller = await verifyTransactionToken(bearerToken(headerValue(request.headers, 'authorization')), deps);
     tenantId = caller.tenantId;
+    if (options.forceError === true) {
+      throw Object.assign(new Error('forced'), { name: 'ForcedFilterError' });
+    }
     const body = response?.body as JsonRpcListResponse | undefined;
     if (body === undefined || typeof body !== 'object' || body === null) {
       throw new Error('unreadable page');
@@ -131,5 +146,5 @@ let deps: TokenVerification | undefined = isLambdaRuntime() ? defaultDependencie
 
 export async function handler(event: ToolResponseEvent): Promise<ToolResponseOutput> {
   deps ??= defaultDependencies();
-  return filterToolsResponse(event, deps);
+  return filterToolsResponse(event, deps, { forceError: process.env[RESPONSE_FILTER_FORCE_ERROR_ENV] === 'true' });
 }

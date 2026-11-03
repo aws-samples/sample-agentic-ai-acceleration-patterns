@@ -19,19 +19,21 @@
  */
 
 import { ConditionalCheckFailedException, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
+import { type DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
+import { batchGetAll, batchWriteAll } from '../shared/batch';
 import {
-  BatchGetCommand,
-  BatchWriteCommand,
-  DeleteCommand,
-  type DynamoDBDocumentClient,
-  GetCommand,
-  QueryCommand,
-  ScanCommand,
-  TransactWriteCommand,
-  UpdateCommand,
-} from '@aws-sdk/lib-dynamodb';
-import { KEY_PREFIX, nameKey, names, planKey, SORT_KEY, tenantKey, userCutKey } from '../shared/entitlements';
-import { expandTools, targetsOf, TARGET_WILDCARD, type ToolCatalogue } from '../shared/grant';
+  KEY_PREFIX,
+  nameKey,
+  names,
+  PLAN_INDEX_PK,
+  planIndexKey,
+  planKey,
+  planMemberKey,
+  SORT_KEY,
+  tenantKey,
+  userCutKey,
+} from '../shared/entitlements';
+import { expandTools, targetsOf, type ToolCatalogue } from '../shared/grant';
 import { errorName, log } from '../shared/logger';
 import {
   ConflictError,
@@ -64,6 +66,8 @@ export interface EntitlementServiceOptions {
   readonly maxAgentsPerTenant: number;
   readonly maxToolsPerTenant: number;
   readonly now?: () => Date;
+  /** The backoff sleep of the batch retries; tests pass a no-op. */
+  readonly sleep?: (ms: number) => Promise<void>;
 }
 
 function invalid(reason: 'unknown_name' | 'not_subscribed' | 'too_many' | 'invalid_input', message: string): never {
@@ -145,11 +149,21 @@ export class EntitlementServiceImpl implements EntitlementsService<EntitlementCo
       invalid('too_many', 'too many names');
     }
     if (agents.length > 0) {
-      // BatchGetItem takes 100 keys; the agent bound is 100.
-      const out = await this.options.client.send(
-        new BatchGetCommand({ RequestItems: { [this.table]: { Keys: agents.map((a) => nameKey(a)) } } }),
-      );
-      const found = new Set((out.Responses?.[this.table] ?? []).filter((i) => i.kind === 'agent').map((i) => String(i.PK)));
+      // BatchGetItem takes 100 keys a call; throttled keys are resent (src/shared/batch.ts).
+      const found = new Set<string>();
+      const unique = [...new Set(agents)];
+      for (let i = 0; i < unique.length; i += 100) {
+        const out = await batchGetAll(
+          this.options.client,
+          { [this.table]: { Keys: unique.slice(i, i + 100).map((a) => nameKey(a)) } },
+          { sleep: this.options.sleep },
+        );
+        for (const item of out[this.table] ?? []) {
+          if (item.kind === 'agent') {
+            found.add(String(item.PK));
+          }
+        }
+      }
       for (const agent of agents) {
         if (!found.has(nameKey(agent).PK)) {
           invalid('unknown_name', 'unknown name');
@@ -174,38 +188,66 @@ export class EntitlementServiceImpl implements EntitlementsService<EntitlementCo
   ): Promise<{ subscription: TenantSubscriptionRow }> {
     this.requireSide(context, 'vendor');
     try {
+      const tenantId = input.tenantId!;
       const agents = input.agents ?? [];
       const tools = input.tools ?? [];
       await this.validateVendorNames(agents, tools);
+      const key = tenantKey(tenantId);
+      // The plan member index (PLAN#<plan> / TENANT#<id>) moves with the row's
+      // `plan`, in one transaction conditioned on the plan the row named when
+      // it was read, so a concurrent write cannot leave a stale member row.
+      const current = await this.options.client.send(
+        new GetCommand({ TableName: this.table, Key: key, ConsistentRead: true, ProjectionExpression: '#p', ExpressionAttributeNames: { '#p': 'plan' } }),
+      );
+      const oldPlan = typeof current.Item?.plan === 'string' && current.Item.plan.length > 0 ? current.Item.plan : undefined;
+      const updatedAt = this.now().toISOString();
+      const items: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+        {
+          Update: {
+            TableName: this.table,
+            Key: key,
+            UpdateExpression:
+              input.plan === undefined
+                ? 'SET agents = :a, tools = :t, #s = :s, updatedAt = :u REMOVE #p ADD version :one'
+                : 'SET agents = :a, tools = :t, #s = :s, updatedAt = :u, #p = :p ADD version :one',
+            ConditionExpression: oldPlan === undefined ? 'attribute_not_exists(#p)' : '#p = :old',
+            ExpressionAttributeNames: { '#s': 'status', '#p': 'plan' },
+            ExpressionAttributeValues: {
+              ':a': agents,
+              ':t': tools,
+              ':s': input.status ?? 'active',
+              ':u': updatedAt,
+              ':one': 1,
+              ...(input.plan === undefined ? {} : { ':p': input.plan }),
+              ...(oldPlan === undefined ? {} : { ':old': oldPlan }),
+            },
+          },
+        },
+      ];
       if (input.plan !== undefined) {
-        const plan = await this.options.client.send(new GetCommand({ TableName: this.table, Key: planKey(input.plan) }));
-        if (plan.Item === undefined) {
-          invalid('unknown_name', 'unknown plan');
+        items.push({ ConditionCheck: { TableName: this.table, Key: planKey(input.plan), ConditionExpression: 'attribute_exists(PK)' } });
+        if (input.plan !== oldPlan) {
+          items.push({ Put: { TableName: this.table, Item: { ...planMemberKey(input.plan, tenantId), updatedAt } } });
         }
       }
-      const updatedAt = this.now().toISOString();
-      const out = await this.options.client.send(
-        new UpdateCommand({
-          TableName: this.table,
-          Key: tenantKey(input.tenantId!),
-          UpdateExpression:
-            input.plan === undefined
-              ? 'SET agents = :a, tools = :t, #s = :s, updatedAt = :u REMOVE #p ADD version :one'
-              : 'SET agents = :a, tools = :t, #s = :s, updatedAt = :u, #p = :p ADD version :one',
-          ExpressionAttributeNames: { '#s': 'status', '#p': 'plan' },
-          ExpressionAttributeValues: {
-            ':a': agents,
-            ':t': tools,
-            ':s': input.status ?? 'active',
-            ':u': updatedAt,
-            ':one': 1,
-            ...(input.plan === undefined ? {} : { ':p': input.plan }),
-          },
-          ReturnValues: 'ALL_NEW',
-        }),
-      );
-      log.info('entitlement written', { operation: 'PutTenantSubscription', tenantId: input.tenantId });
-      return { subscription: tenantRow(input.tenantId!, out.Attributes ?? {}) };
+      if (oldPlan !== undefined && oldPlan !== input.plan) {
+        items.push({ Delete: { TableName: this.table, Key: planMemberKey(oldPlan, tenantId) } });
+      }
+      try {
+        await this.options.client.send(new TransactWriteCommand({ TransactItems: items }));
+      } catch (error) {
+        if (error instanceof TransactionCanceledException) {
+          const reasons = error.CancellationReasons ?? [];
+          if (input.plan !== undefined && reasons[1]?.Code === 'ConditionalCheckFailed') {
+            invalid('unknown_name', 'unknown plan');
+          }
+          throw new ConflictError({ message: 'conflict', reason: 'concurrent_write' });
+        }
+        throw error;
+      }
+      const out = await this.options.client.send(new GetCommand({ TableName: this.table, Key: key, ConsistentRead: true }));
+      log.info('entitlement written', { operation: 'PutTenantSubscription', tenantId });
+      return { subscription: tenantRow(tenantId, out.Item ?? {}) };
     } catch (error) {
       return rethrow(error, 'PutTenantSubscription');
     }
@@ -235,15 +277,24 @@ export class EntitlementServiceImpl implements EntitlementsService<EntitlementCo
             TableName: this.table,
             KeyConditionExpression: 'PK = :pk',
             ExpressionAttributeValues: { ':pk': tenantKey(input.tenantId!).PK },
-            ProjectionExpression: 'PK, SK',
+            ProjectionExpression: 'PK, SK, #p',
+            ExpressionAttributeNames: { '#p': 'plan' },
             ExclusiveStartKey: start,
           }),
         );
-        const keys = (out.Items ?? []).map((i) => ({ PK: i.PK, SK: i.SK }));
+        const keys: Record<string, unknown>[] = (out.Items ?? []).map((i) => ({ PK: i.PK, SK: i.SK }));
+        // The tenant row's plan member index row lives in the plan's partition.
+        for (const item of out.Items ?? []) {
+          if (item.SK === SORT_KEY.subscription && typeof item.plan === 'string' && item.plan.length > 0) {
+            keys.push({ ...planMemberKey(item.plan, input.tenantId!) });
+          }
+        }
         for (let i = 0; i < keys.length; i += 25) {
-          // TODO(v2): retry UnprocessedItems.
-          await this.options.client.send(
-            new BatchWriteCommand({ RequestItems: { [this.table]: keys.slice(i, i + 25).map((Key) => ({ DeleteRequest: { Key } })) } }),
+          // Throttled deletes come back in UnprocessedItems; resent with backoff (src/shared/batch.ts).
+          await batchWriteAll(
+            this.options.client,
+            { [this.table]: keys.slice(i, i + 25).map((Key) => ({ DeleteRequest: { Key } })) },
+            { sleep: this.options.sleep },
           );
         }
         start = out.LastEvaluatedKey;
@@ -258,20 +309,33 @@ export class EntitlementServiceImpl implements EntitlementsService<EntitlementCo
   async PutPlan(input: { planName?: string; agents?: string[]; tools?: string[] }, context: EntitlementContext): Promise<{ plan: PlanRow }> {
     this.requireSide(context, 'vendor');
     try {
+      const planName = input.planName!;
       const agents = input.agents ?? [];
       const tools = input.tools ?? [];
       await this.validateVendorNames(agents, tools);
-      const out = await this.options.client.send(
-        new UpdateCommand({
-          TableName: this.table,
-          Key: planKey(input.planName!),
-          UpdateExpression: 'SET agents = :a, tools = :t, updatedAt = :u ADD version :one',
-          ExpressionAttributeValues: { ':a': agents, ':t': tools, ':u': this.now().toISOString(), ':one': 1 },
-          ReturnValues: 'ALL_NEW',
+      const updatedAt = this.now().toISOString();
+      // The plan row and its listing row (PLANS / PLAN#<name>) in one transaction.
+      await this.options.client.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Update: {
+                TableName: this.table,
+                Key: planKey(planName),
+                UpdateExpression: 'SET agents = :a, tools = :t, updatedAt = :u ADD version :one',
+                ExpressionAttributeValues: { ':a': agents, ':t': tools, ':u': updatedAt, ':one': 1 },
+              },
+            },
+            { Put: { TableName: this.table, Item: { ...planIndexKey(planName), updatedAt } } },
+          ],
         }),
       );
-      return { plan: planRow(input.planName!, out.Attributes ?? {}) };
+      const out = await this.options.client.send(new GetCommand({ TableName: this.table, Key: planKey(planName), ConsistentRead: true }));
+      return { plan: planRow(planName, out.Item ?? {}) };
     } catch (error) {
+      if (error instanceof TransactionCanceledException) {
+        return rethrow(new ConflictError({ message: 'conflict', reason: 'concurrent_write' }), 'PutPlan');
+      }
       return rethrow(error, 'PutPlan');
     }
   }
@@ -292,20 +356,29 @@ export class EntitlementServiceImpl implements EntitlementsService<EntitlementCo
   async DeletePlan(input: { planName?: string }, context: EntitlementContext): Promise<Record<string, never>> {
     this.requireSide(context, 'vendor');
     try {
-      // TODO(v2): a Scan per delete is fine for tens of plans and a sample; a GSI on `plan` would make it a Query.
+      const planName = input.planName!;
+      // plan_in_use: one member row in the plan's own partition is enough (a Query, never a Scan).
       const inUse = await this.options.client.send(
-        new ScanCommand({
+        new QueryCommand({
           TableName: this.table,
-          FilterExpression: 'SK = :sub AND #p = :plan',
-          ExpressionAttributeNames: { '#p': 'plan' },
-          ExpressionAttributeValues: { ':sub': SORT_KEY.subscription, ':plan': input.planName! },
-          ProjectionExpression: 'PK',
+          KeyConditionExpression: 'PK = :pk AND begins_with(SK, :tenant)',
+          ExpressionAttributeValues: { ':pk': planKey(planName).PK, ':tenant': KEY_PREFIX.tenant },
+          ProjectionExpression: 'SK',
+          ConsistentRead: true,
+          Limit: 1,
         }),
       );
       if ((inUse.Items ?? []).length > 0) {
         throw new ConflictError({ message: 'conflict', reason: 'plan_in_use' });
       }
-      await this.options.client.send(new DeleteCommand({ TableName: this.table, Key: planKey(input.planName!) }));
+      await this.options.client.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            { Delete: { TableName: this.table, Key: planKey(planName) } },
+            { Delete: { TableName: this.table, Key: planIndexKey(planName) } },
+          ],
+        }),
+      );
       return {};
     } catch (error) {
       return rethrow(error, 'DeletePlan');
@@ -315,18 +388,28 @@ export class EntitlementServiceImpl implements EntitlementsService<EntitlementCo
   async ListPlans(input: { nextToken?: string }, context: EntitlementContext): Promise<{ plans: PlanRow[]; nextToken?: string }> {
     this.requireSide(context, 'vendor');
     try {
-      // TODO(v2): Scan with a filter; tens of plans. A GSI or a `PLANS` index row would make it a Query.
-      const out = await this.options.client.send(
-        new ScanCommand({
+      // The listing rows name the plans, a page at a time; one BatchGetItem reads the rows themselves.
+      const page = await this.options.client.send(
+        new QueryCommand({
           TableName: this.table,
-          FilterExpression: 'SK = :plan',
-          ExpressionAttributeValues: { ':plan': SORT_KEY.plan },
-          ExclusiveStartKey: decodeToken(input.nextToken),
+          KeyConditionExpression: 'PK = :pk',
+          ExpressionAttributeValues: { ':pk': PLAN_INDEX_PK },
+          ProjectionExpression: 'SK',
+          ExclusiveStartKey: decodeToken(input.nextToken, PLAN_INDEX_PK),
+          Limit: 100,
         }),
       );
+      const planNames = (page.Items ?? []).map((i) => String(i.SK).slice(KEY_PREFIX.plan.length));
+      const rows =
+        planNames.length === 0
+          ? []
+          : ((await batchGetAll(this.options.client, { [this.table]: { Keys: planNames.map((n) => planKey(n)) } }, { sleep: this.options.sleep }))[
+            this.table
+          ] ?? []);
+      const byName = new Map(rows.map((i) => [String(i.PK).slice(KEY_PREFIX.plan.length), i]));
       return {
-        plans: (out.Items ?? []).map((i) => planRow(String(i.PK).slice(KEY_PREFIX.plan.length), i)),
-        nextToken: encodeToken(out.LastEvaluatedKey),
+        plans: planNames.filter((n) => byName.has(n)).map((n) => planRow(n, byName.get(n)!)),
+        nextToken: encodeToken(page.LastEvaluatedKey),
       };
     } catch (error) {
       return rethrow(error, 'ListPlans');
@@ -337,14 +420,24 @@ export class EntitlementServiceImpl implements EntitlementsService<EntitlementCo
   // Tenant-admin side (ADR-0033)
   // -------------------------------------------------------------------------
 
-  /** Every cut name must be something the tenant holds (T), else 400 `not_subscribed`. */
+  /**
+   * Every cut name must be something the tenant holds (T = tenant row and
+   * its plan), else 400 `not_subscribed` (ADR-0033): an agent the tenant
+   * does not hold, a tool outside the catalogue, a `<target>/*` the tenant
+   * does not hold whole, or any tool the tenant does not hold. A cut can
+   * only remove, so naming anything else is a client error, never a no-op.
+   * Returns the tenant row's version.
+   */
   async validateCut(tenantId: string, client: DynamoDBDocumentClient, cutAgents: readonly string[], cutTools: readonly string[]): Promise<number> {
+    if (cutAgents.length > this.options.maxAgentsPerTenant || cutTools.length > this.options.maxToolsPerTenant) {
+      invalid('too_many', 'too many names');
+    }
     const tenant = await client.send(new GetCommand({ TableName: this.table, Key: tenantKey(tenantId) }));
     if (tenant.Item === undefined) {
       throw new ResourceNotFoundError({ message: 'not found' });
     }
     const plan =
-      typeof tenant.Item.plan === 'string'
+      typeof tenant.Item.plan === 'string' && tenant.Item.plan.length > 0
         ? (await this.options.client.send(new GetCommand({ TableName: this.table, Key: planKey(tenant.Item.plan) }))).Item
         : undefined;
     const heldAgents = new Set([...names(tenant.Item.agents), ...names(plan?.agents)]);
@@ -352,13 +445,14 @@ export class EntitlementServiceImpl implements EntitlementsService<EntitlementCo
     if (cutAgents.some((a) => !heldAgents.has(a))) {
       invalid('not_subscribed', 'not subscribed');
     }
-    const catalogue = await this.catalogue(targetsOf([...heldToolNames, ...cutTools]));
-    const held = expandTools(heldToolNames, catalogue);
-    for (const tool of cutTools) {
-      const expanded = expandTools([tool], catalogue);
-      const wildcard = tool.endsWith(`/${TARGET_WILDCARD}`);
-      if (expanded.size === 0 || [...expanded].some((t) => !held.has(t)) || (wildcard && expanded.size === 0)) {
-        invalid('not_subscribed', 'not subscribed');
+    if (cutTools.length > 0) {
+      const catalogue = await this.catalogue(targetsOf([...heldToolNames, ...cutTools]));
+      const held = expandTools(heldToolNames, catalogue);
+      for (const tool of cutTools) {
+        const expanded = expandTools([tool], catalogue);
+        if (expanded.size === 0 || [...expanded].some((t) => !held.has(t))) {
+          invalid('not_subscribed', 'not subscribed');
+        }
       }
     }
     return typeof tenant.Item.version === 'number' ? tenant.Item.version : 0;
@@ -458,7 +552,7 @@ export class EntitlementServiceImpl implements EntitlementsService<EntitlementCo
           TableName: this.table,
           KeyConditionExpression: 'PK = :pk AND begins_with(SK, :user)',
           ExpressionAttributeValues: { ':pk': tenantKey(tenantId).PK, ':user': KEY_PREFIX.user },
-          ExclusiveStartKey: decodeToken(input.nextToken),
+          ExclusiveStartKey: decodeToken(input.nextToken, tenantKey(tenantId).PK),
           Limit: 100,
         }),
       );
@@ -513,13 +607,15 @@ export function encodeToken(key: Record<string, unknown> | undefined): string | 
   return key === undefined ? undefined : Buffer.from(JSON.stringify(key), 'utf8').toString('base64url');
 }
 
-export function decodeToken(token: string | undefined): Record<string, unknown> | undefined {
+export function decodeToken(token: string | undefined, partition?: string): Record<string, unknown> | undefined {
   if (token === undefined) {
     return undefined;
   }
   try {
     const value = JSON.parse(Buffer.from(token, 'base64url').toString('utf8')) as unknown;
-    if (typeof value === 'object' && value !== null && typeof (value as Record<string, unknown>).PK === 'string') {
+    const pk = typeof value === 'object' && value !== null ? (value as Record<string, unknown>).PK : undefined;
+    // A token is a key of the partition being listed; anything else is refused, never followed.
+    if (typeof pk === 'string' && (partition === undefined || pk === partition)) {
       return value as Record<string, unknown>;
     }
   } catch {

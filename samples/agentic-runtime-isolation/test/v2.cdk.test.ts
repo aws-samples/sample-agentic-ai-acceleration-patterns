@@ -274,11 +274,9 @@ describe('v2 options', () => {
     expect(() => built.template()).toThrow(/tools gateway 'default' holds at most 100 ToolTargets/);
   }, 60_000);
 
-  it('ToolTarget kinds other than lambda fail synth (TODO(v2))', () => {
+  it('a ToolTarget of an unknown kind, or with a bad name, fails synth (the kinds are in test/tool-target.cdk.test.ts)', () => {
     const { stack, ingress } = build('api-gateway');
-    for (const kind of ['openApi', 'smithy', 'mcpServer'] as const) {
-      expect(() => new ToolTarget(stack, `K${kind}`, { name: 'k', ingress, kind })).toThrow(/is not built yet \(TODO\(v2\)\)/);
-    }
+    expect(() => new ToolTarget(stack, 'K', { name: 'k', ingress, kind: 'grpc' as never })).toThrow(/ToolTarget: kind must be/);
     expect(() => new ToolTarget(stack, 'Bad', { name: 'Bad', ingress, kind: 'lambda' })).toThrow(/ToolTarget: name must match/);
   });
 });

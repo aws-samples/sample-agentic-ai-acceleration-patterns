@@ -18,9 +18,10 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
+import { KEY_PREFIX } from './entitlements';
 import type { LogDrain } from './log-drain';
 import { acknowledgeGranularFinding } from './nag';
-import type { OwnedRow } from './reservation.function';
+import type { GatewayLimit, OwnedRow } from './reservation.function';
 
 /** The longest explicit owner marker (ADR-0035). */
 export const OWNER_MAX_LENGTH = 200;
@@ -51,6 +52,11 @@ export interface OwnedRowsProps {
   readonly owner?: string;
   /** The log drain (ADR-0019) that holds this function's log group back until its last line has landed. */
   readonly logDrain?: LogDrain;
+  /**
+   * (ADR-0040, ADR-0041) Check the gateway's target and tool counts at
+   * deploy; `rows` must then hold this target's `GATEWAY#` count row.
+   */
+  readonly gatewayLimit?: GatewayLimit;
 }
 
 export class OwnedRows extends Construct {
@@ -92,6 +98,17 @@ export class OwnedRows extends Construct {
         conditions: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': partitions } },
       }),
     );
+    if (props.gatewayLimit !== undefined) {
+      // The gateway's count rows, from every stack: read only, its own partition only.
+      fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          sid: 'CountGatewayTargets',
+          actions: ['dynamodb:Query'],
+          resources: [props.tableArn],
+          conditions: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': [`${KEY_PREFIX.gateway}${props.gatewayLimit.Gateway}`] } },
+        }),
+      );
+    }
     acknowledgeGranularFinding(
       fn,
       'AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]',
@@ -104,6 +121,7 @@ export class OwnedRows extends Construct {
         TableName: props.tableName,
         Rows: props.rows,
         ...(props.owner !== undefined ? { Owner: props.owner } : {}),
+        ...(props.gatewayLimit !== undefined ? { GatewayLimit: props.gatewayLimit } : {}),
       },
     });
     if (props.logDrain !== undefined) {

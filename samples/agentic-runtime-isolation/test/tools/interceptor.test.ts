@@ -5,7 +5,7 @@ import { createLocalJWKSet } from 'jose';
 import { argsHash, CONTEXT_ARGUMENT, decodeJws, publicJwk, signJws, verifyJws } from '../../src/shared/jws';
 import { TRANSACTION_TOKEN_TYPE, transactionClaims } from '../../src/shared/mint';
 import { CONTEXT_TYPE } from '../../src/tools/context';
-import { interceptTool, ToolInterceptorDependencies, ToolInterceptorEvent } from '../../src/tools/interceptor.function';
+import { interceptTool, logReason, REFUSAL_RPC_CODE, ToolInterceptorDependencies, ToolInterceptorEvent } from '../../src/tools/interceptor.function';
 import { localRsaKey } from '../jws-helpers';
 
 /** The tools gateway REQUEST interceptor (spec C-15a, §3.6, P-15, ADR-0034, ADR-0040). */
@@ -172,6 +172,48 @@ describe('interceptTool', () => {
     const token = await transactionToken({ scope: 'default/chat crm/get_account' });
     expect(passedBody(await interceptTool(event(token, 'tools/call', call({ accountId: 'a' }, 'crm___get_account')), deps)).params.name).toBe('crm___get_account');
     expect(refusalOf(await interceptTool(event(token, 'tools/call', call({}, 'crm___update_case')), deps)).message).toBe('forbidden: tool_not_granted');
+  });
+
+  it('a refusal is the documented transformedGatewayResponse: 403, JSON-RPC error -32003, the request id (spec §5.4)', async () => {
+    const token = await transactionToken({ scope: 'default/chat crm/get_account' });
+    const signedBefore = contextKey.calls.length;
+    const output = await interceptTool(event(token, 'tools/call', call({}, 'crm___update_case')), deps);
+    expect(output).toEqual({
+      interceptorOutputVersion: '1.0',
+      mcp: {
+        transformedGatewayResponse: {
+          statusCode: 403,
+          body: { jsonrpc: '2.0', id: 7, error: { code: REFUSAL_RPC_CODE, message: 'forbidden: tool_not_granted' } },
+        },
+      },
+    });
+    expect(REFUSAL_RPC_CODE).toBe(-32003);
+    // A refused call costs no KMS Sign.
+    expect(contextKey.calls.length).toBe(signedBefore);
+  });
+
+  it('a refused call is a `tool admitted` line with decision deny, the tenant, the gateway and reason scope (step 22)', async () => {
+    const token = await transactionToken({ scope: 'default/chat crm/get_account' });
+    await interceptTool(event(token, 'tools/call', call({}, 'crm___update_case')), deps);
+    const line = lines.map((l) => JSON.parse(l)).find((l) => l.decision === 'deny');
+    expect(line).toMatchObject({
+      message: 'tool admitted',
+      decision: 'deny',
+      tenantId: 't-a',
+      gateway: 'default',
+      target: 'crm',
+      tool: 'crm/update_case',
+      reason: 'scope',
+      refusal: 'tool_not_granted',
+    });
+    expect(lines.join('')).not.toContain(token);
+    expect(logReason('act_missing')).toBe('act_missing');
+  });
+
+  it('an admitted call names its gateway', async () => {
+    const token = await transactionToken();
+    await interceptTool(event(token, 'tools/call', call({ accountId: 'a' })), deps);
+    expect(lines.map((l) => JSON.parse(l))).toEqual(expect.arrayContaining([expect.objectContaining({ message: 'tool admitted', decision: 'admit', gateway: 'default' })]));
   });
 
   it('refuses a token whose act is not the ingress role', async () => {

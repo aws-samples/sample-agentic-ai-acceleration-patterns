@@ -5,7 +5,7 @@ import { createLocalJWKSet } from 'jose';
 import { publicJwk, signJws } from '../../src/shared/jws';
 import { TRANSACTION_TOKEN_TYPE, transactionClaims } from '../../src/shared/mint';
 import type { TokenVerification } from '../../src/tools/interceptor.function';
-import { filterToolsResponse, type ToolResponseEvent } from '../../src/tools/response-filter.function';
+import { filterToolsResponse, RESPONSE_FILTER_FORCE_ERROR_ENV, type ToolResponseEvent } from '../../src/tools/response-filter.function';
 import { localRsaKey } from '../jws-helpers';
 
 /** The tools gateway RESPONSE interceptor (spec §3.3 `responseFilter`, ADR-0041). */
@@ -91,6 +91,16 @@ describe('filterToolsResponse', () => {
 
   it('removes everything when scope grants nothing on the page', async () => {
     expect(namesOf(await filterToolsResponse(event(await token('billing/chat crm/*')), deps))).toEqual([]);
+  });
+
+  it('forceError (integ step 24) fails every listing closed, and leaves other methods alone', async () => {
+    const granted = await token('billing/read invoices/*');
+    const output = await filterToolsResponse(event(granted), deps, { forceError: true });
+    expect(namesOf(output)).toEqual([]);
+    expect(output.mcp.transformedGatewayResponse.statusCode).toBe(200);
+    const call = { jsonrpc: '2.0', id: 3, result: { content: [] } };
+    expect((await filterToolsResponse(event(granted, 'tools/call', call), deps, { forceError: true })).mcp.transformedGatewayResponse.body).toEqual(call);
+    expect(RESPONSE_FILTER_FORCE_ERROR_ENV).toBe('RI_RESPONSE_FILTER_FORCE_ERROR');
   });
 
   it('passes a response to any other method unchanged', async () => {

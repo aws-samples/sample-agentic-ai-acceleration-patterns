@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 #
-# Helpers shared by demo.sh and integ.sh. Source it; do not run it.
+# Helpers shared by demo.sh, perf.sh and integ.sh. Source it; do not run it.
 #
 # Hygiene (scripts/CONVENTIONS.md): tokens, passwords and SigV4 keys live in
 # shell variables only. They reach curl through a config on stdin or a
@@ -50,9 +50,9 @@ load_sigv4() {
 # scopes_json "a b c" -> ["a","b","c"] (an empty string is []).
 scopes_json() { printf '%s' "$1" | jq -Rc 'split(" ") | map(select(length > 0))'; }
 
-# platform METHOD PATH [JSON] -> HTTP status; body in $BODY.
-platform() {
-  local method="$1" path="$2" data="${3:-}" config
+# signed METHOD URL [JSON] -> HTTP status of a SigV4 (execute-api) call; body in $BODY.
+signed() {
+  local method="$1" url="$2" data="${3:-}" config
   local args=(-s -o "$BODY" -w '%{http_code}' -X "$method" --aws-sigv4 "aws:amz:${REGION}:execute-api" --config -)
   config="user = \"${SIGV4_AK}:${SIGV4_SK}\""
   [[ -n "$SIGV4_ST" ]] && config+=$'\n'"header = \"x-amz-security-token: ${SIGV4_ST}\""
@@ -60,8 +60,11 @@ platform() {
     printf '%s' "$data" >"$REQ"
     args+=(-H 'Content-Type: application/json' --data-binary "@$REQ")
   fi
-  curl "${args[@]}" "${IDENTITY_API}${path}" <<<"$config"
+  curl "${args[@]}" "$url" <<<"$config"
 }
+
+# platform METHOD PATH [JSON] -> HTTP status; body in $BODY (tenant-identity's platform API).
+platform() { signed "$1" "${IDENTITY_API}$2" "${3:-}"; }
 
 # identity_init: resolves tenant-identity's API and app client from SSM.
 identity_init() {
@@ -116,6 +119,8 @@ stale_identity() {
   [[ "$1" =~ ^(403|404)$ ]] && grep -Eq 'Missing Authentication Token|No method found matching route' "$BODY"
 }
 
+# Tenants this run created, as "<identity api url>|<tenant id>", so the exit
+# trap deletes each at the deployment that holds it (integ uses two).
 CREATED_TENANTS=()
 
 # create_tenant NAME [SCOPES] -> sets TENANT_ID and ADMIN_USERNAME.
@@ -130,7 +135,7 @@ create_tenant() {
   [[ "$status" == 201 ]] || fail "CreateTenant $1: HTTP ${status}"
   TENANT_ID="$(jq -r .tenant.tenantId "$BODY")"
   ADMIN_USERNAME="$(jq -r .admin.user.username "$BODY")"
-  CREATED_TENANTS+=("$TENANT_ID")
+  CREATED_TENANTS+=("${IDENTITY_API}|${TENANT_ID}")
 }
 
 # set_user_scopes ADMIN_REFRESH_VAR TENANT_ID USERNAME SCOPES -> HTTP status of the PATCH; body in $BODY.
@@ -213,12 +218,14 @@ expect_invalid_scope() {
   echo "  $1 -> HTTP 400 invalid_scope"
 }
 
-# delete_tenants: offboards every tenant this run created (exit trap).
+# delete_tenants: offboards every tenant this run created (exit trap), at the
+# tenant-identity deployment that holds it.
 delete_tenants() {
-  local t
-  for t in "${CREATED_TENANTS[@]:-}"; do
-    [[ -n "$t" ]] || continue
-    platform DELETE "platform/tenants/${t}" >/dev/null 2>&1 || true
+  local entry api id
+  for entry in "${CREATED_TENANTS[@]:-}"; do
+    [[ -n "$entry" ]] || continue
+    api="${entry%%|*}"; id="${entry#*|}"
+    signed DELETE "${api}platform/tenants/${id}" >/dev/null 2>&1 || true
   done
   CREATED_TENANTS=()
 }
@@ -239,13 +246,15 @@ LAST_TTFB=""
 LAST_TOTAL=""
 : >"${LIB_TMP}/timing"
 
-# invoke ENDPOINT TOKEN_VAR JSON [SESSION_HEADER_VALUE] -> HTTP status; body in $BODY.
+# invoke ENDPOINT TOKEN_VAR JSON [SESSION_HEADER_VALUE] [X_TENANT_ID] -> HTTP status; body in $BODY.
 # TOKEN_VAR is a variable NAME (empty name: no Authorization header).
+# X_TENANT_ID selects one tenant of a token that carries `tenants` (v2, ADR-0038).
 # Writes TTFB and total seconds for timing().
 invoke() {
-  local endpoint="$1" token_var="$2" json="$3" fake_session="${4:-}" config="" out status ttfb total
+  local endpoint="$1" token_var="$2" json="$3" fake_session="${4:-}" tenant_header="${5:-}" config="" out status ttfb total
   [[ -n "$token_var" ]] && config="header = \"Authorization: Bearer ${!token_var}\""
   [[ -n "$fake_session" ]] && config+=$'\n'"header = \"${SESSION_HEADER}: ${fake_session}\""
+  [[ -n "$tenant_header" ]] && config+=$'\n'"header = \"X-Tenant-Id: ${tenant_header}\""
   printf '%s' "$json" >"$REQ"
   out="$(curl -s -N --max-time 180 -o "$BODY" -w '%{http_code} %{time_starttransfer} %{time_total}' -X POST "$endpoint" \
     -H 'Content-Type: application/json' -H 'Accept: text/event-stream' --data-binary "@$REQ" --config - <<<"$config")"
@@ -274,3 +283,89 @@ expect_status() {
 percentile() {
   sort -n "$2" | awk -v p="$1" '{v[NR]=$1} END {i=int((p/100)*NR+0.999999); if (i<1) i=1; if (i>NR) i=NR; printf "%.3f", v[i]}'
 }
+
+# -- v2: the entitlement API, the tools gateways, the test mint --------------
+#
+# Same hygiene: tokens and contexts stay in shell variables; they reach curl
+# through a config on stdin or a mode-0600 temp file; nothing prints them.
+
+# vendor METHOD PATH [JSON] -> HTTP status of a vendor call (SigV4) on the
+# entitlement API at $ENT_API (spec §5.3); body in $BODY.
+vendor() { signed "$1" "${ENT_API%/}/$2" "${3:-}"; }
+
+# admin_api METHOD PATH TOKEN_VAR [JSON] [X_TENANT_ID] -> HTTP status of a
+# tenant-admin call with an identity token (scope entitlements/admin); body in $BODY.
+admin_api() {
+  local method="$1" path="$2" token_var="$3" data="${4:-}" tenant="${5:-}" config
+  local args=(-s -o "$BODY" -w '%{http_code}' -X "$method" --config -)
+  config="header = \"Authorization: Bearer ${!token_var}\""
+  [[ -n "$tenant" ]] && config+=$'\n'"header = \"X-Tenant-Id: ${tenant}\""
+  if [[ -n "$data" ]]; then
+    printf '%s' "$data" >"$REQ"
+    args+=(-H 'Content-Type: application/json' --data-binary "@$REQ")
+  fi
+  curl "${args[@]}" "${ENT_API%/}/${path}" <<<"$config"
+}
+
+# The signature segment of every token and context this run handled, for the
+# log sweep (spec §8, v1 V-7 method). Mode 0600, removed with LIB_TMP.
+SECRETS="${LIB_TMP}/secrets"
+: >"$SECRETS"
+chmod 600 "$SECRETS"
+
+# remember_token VAR -> records the signature segment of the JWS in VAR.
+remember_token() {
+  local t="${!1:-}"
+  [[ "$t" == *.*.* ]] && printf '%s\n' "${t##*.}" >>"$SECRETS"
+  return 0
+}
+
+# mint OUT_VAR FUNCTION JSON [FIELD] -> FIELD (default token) of the test
+# mint's answer into OUT_VAR, and its kid into MINT_KID (spec §8; the
+# function exists on the integration stacks only).
+mint() {
+  local out="$1" fn="$2" event="$3" field="${4:-token}" file="${LIB_TMP}/mint.out"
+  : >"$file"
+  chmod 600 "$file"
+  printf '%s' "$event" >"$REQ"
+  aws lambda invoke --function-name "$fn" --cli-binary-format raw-in-base64-out --payload "fileb://${REQ}" "$file" >/dev/null \
+    || fail "invoke the test mint ${fn}"
+  printf -v "$out" '%s' "$(jq -r --arg f "$field" '.[$f] // empty' "$file")"
+  MINT_KID="$(jq -r '.kid // empty' "$file")"
+  : >"$file"
+  : >"$REQ"
+  [[ -n "${!out}" ]] || fail "the test mint answered no ${field}"
+  remember_token "$out"
+}
+
+# mcp URL TOKEN_VAR METHOD [PARAMS_JSON] -> HTTP status of one JSON-RPC
+# request to a tools gateway with TOKEN_VAR as bearer; body in $BODY.
+mcp() {
+  local url="$1" token_var="$2" method="$3" params="${4:-}" config
+  [[ -n "$params" ]] || params='{}'
+  config="header = \"Authorization: Bearer ${!token_var}\""
+  jq -nc --arg m "$method" --argjson p "$params" '{jsonrpc: "2.0", id: 1, method: $m, params: $p}' >"$REQ"
+  curl -s -o "$BODY" -w '%{http_code}' -X POST "$url" -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' -H 'MCP-Protocol-Version: 2025-11-25' \
+    --data-binary "@$REQ" --config - <<<"$config"
+}
+
+# mcp_json -> the JSON-RPC message of the last mcp call (a streamed answer: its last data line).
+mcp_json() {
+  if grep -q '^data:' "$BODY"; then grep '^data:' "$BODY" | tail -1 | sed 's/^data: *//'; else cat "$BODY"; fi
+}
+mcp_error() { mcp_json | jq -r '.error.message // empty' 2>/dev/null || true; }
+mcp_tools() { mcp_json | jq -r '[.result.tools[]?.name] | sort | join(" ")' 2>/dev/null || true; }
+# mcp_tool_payload -> the tool's own answer of a tools/call (the Lambda result the Gateway wraps as text content).
+mcp_tool_payload() { mcp_json | jq -c '.result.content[0].text | fromjson' 2>/dev/null || true; }
+
+# Agent tool probes (src/agent/app.ts): `tools` answers { tool, result: { <gateway>: { tools } | { error, status } } },
+# `tool <t>/<n> <json>` answers { tool, result: <tools/call result> | { error, status } }.
+probe_tools() { report_json | jq -r --arg g "$1" '[.result[$g].tools[]?.name] | sort | join(" ")' 2>/dev/null || true; }
+probe_gateway_error() { report_json | jq -r --arg g "$1" '.result[$g].error // empty' 2>/dev/null || true; }
+probe_error() { report_json | jq -r '.result.error // empty' 2>/dev/null || true; }
+probe_status() { report_json | jq -r '.result.status // empty' 2>/dev/null || true; }
+tool_payload() { report_json | jq -c '.result.content[0].text | fromjson' 2>/dev/null || true; }
+
+# tool_call_body CONVERSATION TOOL ARGS_JSON -> the invoke body for the `tool` probe.
+tool_call_body() { jq -nc --arg c "$1" --arg p "tool $2 $3" '{conversationId: $c, prompt: $p}'; }

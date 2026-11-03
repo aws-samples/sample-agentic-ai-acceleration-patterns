@@ -39,7 +39,9 @@ import { TENANT_TAG_KEY, USER_TAG_KEY } from './shared/tvm';
 import { DEFAULT_REGISTRY_PREFIX, GATEWAY_TARGET_NAME, SharedIngress, type SharedIngressProps } from './shared-ingress.cdk';
 import { type ToolDefinition, ToolTarget } from './tool-target.cdk';
 import { CRM_TOOLS } from './tools/demo/crm.function';
+import { DEMO_TOOL_ENV } from './tools/demo/data';
 import { INVOICES_TOOLS } from './tools/demo/invoices.function';
+import { gatewayIdPart } from './tools-gateway.cdk';
 
 /**
  * tenant-identity's published parameters this stack consumes for the issuer
@@ -142,6 +144,8 @@ export interface DemoContext {
    * share an ingress.
    */
   readonly owner?: string;
+  /** (v2) `transactionToken.keyGeneration` (spec §6.2.3); default 1. Bumping it rotates the signing key. */
+  readonly keyGeneration?: number;
 }
 
 type ContextReader = (key: string) => unknown;
@@ -226,6 +230,7 @@ export function parseDemoContext(read: ContextReader, region?: string): DemoCont
     publishParameters: read('publishParameters') === undefined ? true : flag(read, 'publishParameters'),
     billingBackend: read('billingBackend') === undefined ? undefined : flag(read, 'billingBackend'),
     owner: text(read, 'owner'),
+    keyGeneration: integer(read, 'keyGeneration'),
   };
 }
 
@@ -244,6 +249,18 @@ export interface RuntimeIsolationDemoStackProps extends StackProps {
   readonly dashboardName?: string;
   /** The owner marker of the name reservations. Overrides `context.owner`; see `DemoContext.owner`. */
   readonly owner?: string;
+  /**
+   * The issuer's user pool and app client, instead of tenant-identity's
+   * published parameters. The integration test passes a second
+   * tenant-identity deployment's (`shared-pool-multi-tenant`) here.
+   */
+  readonly identity?: { readonly userPoolId: string; readonly appClientId: string };
+  /**
+   * TEST ONLY (integration stacks): the demo tools' test mode, a read of
+   * another tenant's item with the same credentials on request (integ step
+   * 20). Never set in the demo app.
+   */
+  readonly toolTestMode?: boolean;
 }
 
 export class RuntimeIsolationDemoStack extends Stack {
@@ -262,6 +279,10 @@ export class RuntimeIsolationDemoStack extends Stack {
   /** (v2) The demo tool targets. */
   readonly crm: ToolTarget;
   readonly invoices: ToolTarget;
+  /** (v2) The demo tool functions and, with demo tenant data, their tenant roles (P-15). */
+  readonly crmFunction: NodejsFunction;
+  readonly invoicesFunction: NodejsFunction;
+  readonly toolTenantRoles: iam.Role[] = [];
 
   constructor(scope: Construct, id: string, props: RuntimeIsolationDemoStackProps) {
     super(scope, id, props);
@@ -272,7 +293,10 @@ export class RuntimeIsolationDemoStack extends Stack {
     // below makes sure a placeholder template is refused by CloudFormation.
     let userPoolId: string;
     let appClientId: string;
-    if (ctx.identityParameterPlaceholders) {
+    if (props.identity !== undefined) {
+      userPoolId = props.identity.userPoolId;
+      appClientId = props.identity.appClientId;
+    } else if (ctx.identityParameterPlaceholders) {
       userPoolId = PLACEHOLDER.userPoolId;
       appClientId = PLACEHOLDER.appClientId;
       new CfnRule(this, 'RefusePlaceholderDeployment', {
@@ -362,6 +386,7 @@ export class RuntimeIsolationDemoStack extends Stack {
           ? undefined
           : { requestsPerMinute: ctx.requestsPerMinute, outputTokensPerMinute: ctx.outputTokensPerMinute },
       defaultBackend: GATEWAY_TARGET_NAME,
+      transactionToken: ctx.keyGeneration === undefined ? undefined : { keyGeneration: ctx.keyGeneration },
       // ADR-0041: two tools gateways, each with its own Policy engine. `finance` trims
       // tools/list to the exact tools in scope (its RESPONSE interceptor).
       toolsGateways: { [DEMO_TOOLS_GATEWAYS.crm]: {}, [DEMO_TOOLS_GATEWAYS.invoices]: { responseFilter: true } },
@@ -376,11 +401,30 @@ export class RuntimeIsolationDemoStack extends Stack {
     });
     callerRoleArn = this.ingress.tvmCallerRole.roleArn;
 
-    // v2: the demo tool targets behind the tools gateway (ADR-0034). Their
-    // functions answer with synthetic data for the tenant the signed context
-    // names (src/tools/demo).
-    this.crm = demoToolTarget(this, 'CrmTools', this.ingress, 'crm', 'crm.function.ts', [...CRM_TOOLS], owner, DEMO_TOOLS_GATEWAYS.crm);
-    this.invoices = demoToolTarget(this, 'InvoicesTools', this.ingress, 'invoices', 'invoices.function.ts', [...INVOICES_TOOLS], owner, DEMO_TOOLS_GATEWAYS.invoices);
+    // v2: the demo tool targets behind the tools gateways (ADR-0034, ADR-0041).
+    // With demo tenant data each tool reads and writes the calling tenant's
+    // item through its own TVM: a tool tenant role it may assume with the
+    // TenantId tag from the signed context, limited to that tenant's
+    // partition (P-15); without it, synthetic answers (src/tools/demo).
+    const crm = demoToolTarget(this, 'CrmTools', this.ingress, 'crm', 'crm.function.ts', [...CRM_TOOLS], owner, DEMO_TOOLS_GATEWAYS.crm, {
+      table: this.table,
+      actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
+      testMode: props.toolTestMode === true,
+    });
+    const invoices = demoToolTarget(this, 'InvoicesTools', this.ingress, 'invoices', 'invoices.function.ts', [...INVOICES_TOOLS], owner, DEMO_TOOLS_GATEWAYS.invoices, {
+      table: this.table,
+      actions: ['dynamodb:GetItem'],
+      testMode: props.toolTestMode === true,
+    });
+    this.crm = crm.target;
+    this.invoices = invoices.target;
+    this.crmFunction = crm.fn;
+    this.invoicesFunction = invoices.fn;
+    for (const role of [crm.role, invoices.role]) {
+      if (role !== undefined) {
+        this.toolTenantRoles.push(role);
+      }
+    }
 
     // A second backend behind the same ingress (ADR-0024): the same agent
     // code and model, its own Runtime, registry entry, needs and tools
@@ -497,10 +541,42 @@ export class RuntimeIsolationDemoStack extends Stack {
     if (this.table !== undefined) {
       new CfnOutput(this, 'DemoTableName', { value: this.table.tableName });
     }
+    // (v2) What the integration driver and scripts/demo.sh reach directly.
+    new CfnOutput(this, 'Issuer', { value: this.ingress.issuer });
+    new CfnOutput(this, 'EntitlementsApiUrl', { value: this.ingress.entitlementsApiUrl });
+    for (const [name, gateway] of Object.entries(this.ingress.toolsGateways)) {
+      const part = gatewayIdPart(name);
+      new CfnOutput(this, `ToolsGatewayUrl${part}`, { value: gateway.gatewayUrl });
+      new CfnOutput(this, `PolicyEngineId${part}`, { value: gateway.policyEngine.attrPolicyEngineId });
+    }
+    const filter = this.ingress.toolsGatewayNamed(DEMO_TOOLS_GATEWAYS.invoices)?.responseFilter;
+    if (filter !== undefined) {
+      new CfnOutput(this, 'ResponseFilterFunctionName', { value: filter.functionName });
+    }
+    new CfnOutput(this, 'CrmFunctionName', { value: this.crmFunction.functionName });
+    new CfnOutput(this, 'InvoicesFunctionName', { value: this.invoicesFunction.functionName });
+    new CfnOutput(this, 'CrmPolicySecondsToActive', { value: this.crm.policySecondsToActive });
+    new CfnOutput(this, 'InvoicesPolicySecondsToActive', { value: this.invoices.policySecondsToActive });
+    if (this.toolTenantRoles.length > 0) {
+      new CfnOutput(this, 'CrmToolTenantRoleArn', { value: this.toolTenantRoles[0].roleArn });
+    }
   }
 }
 
-/** One demo tool target: a Lambda from src/tools/demo and its `ToolTarget` (spec C-4). */
+/** The demo tools' tenant data access (P-15): the table, what the tool may do there, and the test mode. */
+interface DemoToolData {
+  readonly table?: dynamodb.TableV2;
+  readonly actions: string[];
+  readonly testMode: boolean;
+}
+
+/**
+ * One demo tool target: a Lambda from src/tools/demo and its `ToolTarget`
+ * (spec C-4). With a demo table, the tool's own tenant role (spec §6.1,
+ * P-15): assumable only by this function's role with exactly a non-empty
+ * `TenantId` session tag, and allowing `data.actions` only on the item of
+ * that tenant (`dynamodb:LeadingKeys` = `TENANT#${aws:PrincipalTag/TenantId}`).
+ */
 function demoToolTarget(
   scope: Construct,
   id: string,
@@ -510,14 +586,41 @@ function demoToolTarget(
   tools: ToolDefinition[],
   owner: string | undefined,
   gateway: string,
-): ToolTarget {
+  data: DemoToolData,
+): { target: ToolTarget; fn: NodejsFunction; role?: iam.Role } {
   const fn = new NodejsFunction(scope, `${id}Function`, {
     ...functionProps(scope, `${id}Logs`, Duration.seconds(10)),
     entry: path.join(__dirname, 'tools', 'demo', file),
-    description: `runtime-isolation demo tool target ${name}: synthetic data for the tenant in the signed context (P-15)`,
+    description: `runtime-isolation demo tool target ${name}: the calling tenant's data through the tool's TVM (P-15)`,
   });
   acknowledgeLambdaFindings(fn);
-  return new ToolTarget(scope, id, { name, ingress, gateway, kind: 'lambda', function: fn, tools, owner });
+  let role: iam.Role | undefined;
+  if (data.table !== undefined) {
+    role = new iam.Role(scope, `${id}TenantRole`, {
+      description: `Tool tenant role of ${name} (spec §6.1, P-15): assumable only by the tool function with a TenantId session tag; that tenant's demo item only`,
+      assumedBy: new iam.ArnPrincipal(fn.role!.roleArn)
+        .withConditions({
+          'StringLike': { [`aws:RequestTag/${TENANT_TAG_KEY}`]: '?*' },
+          'ForAllValues:StringEquals': { 'aws:TagKeys': [TENANT_TAG_KEY] },
+        })
+        .withSessionTags(),
+      maxSessionDuration: Duration.hours(1),
+    });
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'OwnTenantItemOnly',
+        actions: data.actions,
+        resources: [data.table.tableArn],
+        conditions: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': [`${TENANT_KEY_PREFIX}\${aws:PrincipalTag/${TENANT_TAG_KEY}}`] } },
+      }),
+    );
+    fn.addEnvironment(DEMO_TOOL_ENV.TABLE_NAME, data.table.tableName);
+  }
+  if (data.testMode) {
+    fn.addEnvironment(DEMO_TOOL_ENV.TEST_MODE, 'true');
+  }
+  const target = new ToolTarget(scope, id, { name, ingress, gateway, kind: 'lambda', function: fn, tools, owner, tvm: role === undefined ? undefined : { role } });
+  return { target, fn, role };
 }
 
 /** A Contributor Insights rule over a JSON CloudWatch Logs group, enabled; counts by default, sums `ValueOf` with `AggregateOn: 'Sum'`. */

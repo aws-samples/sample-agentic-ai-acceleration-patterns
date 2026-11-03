@@ -8,8 +8,13 @@ import { mockClient } from 'aws-sdk-client-mock';
 import 'aws-sdk-client-mock-jest';
 import {
   buildReport,
+  callToolsGateway,
   converse,
   gatewayClients,
+  headerShapes,
+  jwtShape,
+  MCP_PROTOCOL_VERSION,
+  McpSessions,
   parseGatewayUrls,
   isProbe,
   MAX_PROMPT_CHARS,
@@ -159,7 +164,7 @@ describe('isProbe', () => {
 
 describe('unverifiedClaims', () => {
   it('decodes the transaction token claims the report shows, for display only', () => {
-    expect(unverifiedClaims(token)).toEqual({
+    expect(unverifiedClaims(token)).toMatchObject({
       tenant_id: 'tenant-a',
       agent: 'default',
       scope: 'default/chat crm/*',
@@ -185,6 +190,13 @@ describe('buildReport', () => {
       tokenAud: null,
       tokenActSub: null,
       tokenExp: null,
+      tokenIss: null,
+      tokenTyp: null,
+      tokenKid: null,
+      tokenSub: null,
+      tokenUser: null,
+      headerNames: [RUNTIME_HEADERS.SESSION_ID.toLowerCase()],
+      jwtHeaders: [],
       credentials: false,
     });
     expect(NONCE).toMatch(/^[0-9a-f-]{36}$/);
@@ -483,13 +495,112 @@ describe('tool probes (v2, C-2)', () => {
       await respond(headers, 'tools', { toolsGatewayUrls: urls, fetch: fetcher }, list.s);
       expect(list.c.body).toContain('crm___get_account');
       expect(list.c.body).toContain('invoices___get_invoice');
-      expect(seen.map((s) => s.url)).toEqual([urls.default, urls.finance]);
+      expect(seen.filter((s) => s.method === 'tools/list').map((s) => s.url)).toEqual([urls.default, urls.finance]);
+      expect(seen.filter((s) => s.method === 'initialize').map((s) => s.url)).toEqual([urls.default, urls.finance]);
       seen.length = 0;
       const call = sinkOf();
       await respond(headers, 'tool invoices/get_invoice {}', { toolsGatewayUrls: urls, fetch: fetcher }, call.s);
       expect(call.c.body).toContain(`from ${urls.finance}`);
       expect(seen.filter((s) => s.method === 'tools/call').map((s) => s.url)).toEqual([urls.finance]);
+      // The lists of this token's life are cached (spec §3.6): the call lists nothing again.
+      expect(seen.filter((s) => s.method === 'tools/list')).toEqual([]);
       expect(seen.some((s) => s.url === urls.other)).toBe(false);
+    });
+  });
+
+  describe('MCP session (spec §3.6)', () => {
+    const url = 'https://tools.example.com/mcp';
+    interface Seen {
+      readonly method: string;
+      readonly session?: string;
+      readonly params: any;
+    }
+
+    function gateway(options: { sessionId?: string; pages?: string[][]; expireOnce?: boolean; now?: () => number } = {}) {
+      const seen: Seen[] = [];
+      let expired = false;
+      const fetcher = (async (_: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body));
+        const headers = init.headers as Record<string, string>;
+        seen.push({ method: body.method, session: headers['Mcp-Session-Id'], params: body.params });
+        if (body.method === 'initialize') {
+          return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { protocolVersion: '2025-11-25' } }), {
+            status: 200,
+            headers: options.sessionId === undefined ? {} : { 'Mcp-Session-Id': options.sessionId },
+          });
+        }
+        if (body.method === 'notifications/initialized') {
+          return new Response(null, { status: 202 });
+        }
+        if (options.expireOnce === true && !expired && body.method === 'tools/call') {
+          expired = true;
+          return new Response('', { status: 404 });
+        }
+        if (body.method === 'tools/list') {
+          const pages = options.pages ?? [['crm___get_account']];
+          const index = body.params?.cursor === undefined ? 0 : Number(body.params.cursor);
+          const result = { tools: pages[index].map((name) => ({ name })), ...(index + 1 < pages.length ? { nextCursor: String(index + 1) } : {}) };
+          return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { content: [] } }), { status: 200 });
+      }) as unknown as typeof fetch;
+      return { seen, sessions: new McpSessions(fetcher, options.now ?? (() => 1_000_000_000_000)) };
+    }
+
+    it('initialize (protocol 2025-11-25), notifications/initialized, then the request; the session id rides every later request', async () => {
+      const { seen, sessions } = gateway({ sessionId: 'session-1' });
+      await sessions.request(url, token, 2_000_000_000, 'tools/call', { name: 'crm___get_account', arguments: {} });
+      await sessions.request(url, token, 2_000_000_000, 'tools/call', { name: 'crm___list_cases', arguments: {} });
+      expect(seen.map((s) => s.method)).toEqual(['initialize', 'notifications/initialized', 'tools/call', 'tools/call']);
+      expect(seen[0].params).toMatchObject({ protocolVersion: MCP_PROTOCOL_VERSION, clientInfo: { name: 'runtime-isolation-agent' } });
+      expect(seen[0].session).toBeUndefined();
+      expect(seen.slice(1).every((s) => s.session === 'session-1')).toBe(true);
+    });
+
+    it('a gateway without session ids is initialised once per token', async () => {
+      const { seen, sessions } = gateway();
+      await sessions.request(url, token, 2_000_000_000, 'tools/list', {});
+      await sessions.request(url, token, 2_000_000_000, 'tools/list', {});
+      expect(seen.filter((s) => s.method === 'initialize')).toHaveLength(1);
+    });
+
+    it('a 404 on a session initialises again, once', async () => {
+      const { seen, sessions } = gateway({ sessionId: 'session-1', expireOnce: true });
+      const answer = await sessions.request(url, token, 2_000_000_000, 'tools/call', { name: 'x', arguments: {} });
+      expect(answer).toEqual({ result: { content: [] }, status: 200 });
+      expect(seen.filter((s) => s.method === 'initialize')).toHaveLength(2);
+    });
+
+    it('tools/list reads every page and caches the names until the token expires', async () => {
+      let clock = 1_000_000_000_000;
+      const { sessions } = gateway({ pages: [['crm___get_account'], ['crm___list_cases', 'crm___update_case']], now: () => clock });
+      const answer = await sessions.listAll(url, token, 2_000_000_000);
+      expect(((answer as { result: { tools: { name: string }[] } }).result.tools).map((t) => t.name)).toEqual(['crm___get_account', 'crm___list_cases', 'crm___update_case']);
+      expect(sessions.cachedTools(url, token, 2_000_000_000)).toEqual(['crm___get_account', 'crm___list_cases', 'crm___update_case']);
+      // Once the token has expired its session and cache are gone.
+      clock = 2_000_000_001_000;
+      expect(sessions.cachedTools(url, token, 2_000_000_000)).toBeUndefined();
+    });
+
+    it('an initialize refused by the gateway is the answer, with its HTTP status', async () => {
+      const fetcher = (async () =>
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32002, message: 'insufficient_scope' } }), { status: 403 })) as unknown as typeof fetch;
+      expect(await callToolsGateway(url, token, { method: 'tools/list' }, fetcher)).toEqual({ error: 'insufficient_scope', status: 403 });
+    });
+  });
+
+  describe('header shapes (integ step 11)', () => {
+    it('names every header and reports only typ and iss of the JWT-shaped ones, never a value', () => {
+      const identity = `eyJ${Buffer.from(JSON.stringify({ alg: 'RS256' })).toString('base64url').slice(3)}.${Buffer.from(JSON.stringify({ iss: 'https://cognito-idp.example.com/pool' })).toString('base64url')}.sig`;
+      const txn = `${Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'txn+jwt' })).toString('base64url')}.${Buffer.from(JSON.stringify({ iss: 'https://issuer.example.com/prod' })).toString('base64url')}.sig`;
+      const shapes = headerShapes({ 'x-b': 'plain', 'authorization': `Bearer ${identity}`, 'x-a': txn });
+      expect(shapes.headerNames).toEqual(['authorization', 'x-a', 'x-b']);
+      expect(shapes.jwtHeaders).toEqual([
+        { name: 'authorization', typ: null, iss: 'https://cognito-idp.example.com/pool' },
+        { name: 'x-a', typ: 'txn+jwt', iss: 'https://issuer.example.com/prod' },
+      ]);
+      expect(JSON.stringify(shapes)).not.toContain(identity);
+      expect(jwtShape('a.b')).toBeUndefined();
     });
   });
 });

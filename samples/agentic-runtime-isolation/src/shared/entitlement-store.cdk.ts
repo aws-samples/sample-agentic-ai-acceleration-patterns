@@ -19,7 +19,7 @@ import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
-import { KEY_PREFIX, PK, SK } from './entitlements';
+import { KEY_PREFIX, PK, PLAN_INDEX_PK, SK } from './entitlements';
 import { TENANT_TAG_KEY } from './tvm';
 
 export { KEY_PREFIX, SORT_KEY, nameKey, planKey, tenantKey, toolKey, userCutKey } from './entitlements';
@@ -82,16 +82,27 @@ export class EntitlementStore extends Construct {
 
   /**
    * The vendor side of the entitlement API (SigV4): writes tenant and plan
-   * rows and deletes a tenant's cut rows with its subscription; reads the
+   * rows and the plan index rows (`PLANS` and `PLAN#<plan>` / `TENANT#<id>`)
+   * in one transaction, and deletes a tenant's cut rows with its
+   * subscription; reads the
    * catalogue and reservations to validate names. Not the tenant admin's.
    */
   grantVendorWrite(role: iam.IRole): void {
     role.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'VendorEntitlementRows',
-        actions: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:BatchWriteItem'],
+        actions: [
+          'dynamodb:GetItem',
+          'dynamodb:PutItem',
+          'dynamodb:UpdateItem',
+          'dynamodb:DeleteItem',
+          'dynamodb:ConditionCheckItem',
+          'dynamodb:Query',
+          'dynamodb:BatchGetItem',
+          'dynamodb:BatchWriteItem',
+        ],
         resources: [this.table.tableArn],
-        conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': [`${KEY_PREFIX.tenant}*`, `${KEY_PREFIX.plan}*`] } },
+        conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': [`${KEY_PREFIX.tenant}*`, `${KEY_PREFIX.plan}*`, PLAN_INDEX_PK] } },
       }),
     );
     this.grantCatalogueRead(role, 'VendorReadCatalogue');

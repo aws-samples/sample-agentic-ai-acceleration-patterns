@@ -18,8 +18,10 @@
  *    client `tenantId` is overwritten with the token's), sign the tenant
  *    context with `ToolContextKey` (KMS `Sign`), and put it in `_ri_ctx`,
  *    overwriting anything the client sent;
- * 4. write `tool admitted`, or refuse with a fixed reason and write
- *    `tool refused` with the tenant (P-9).
+ * 4. write one `tool admitted` line per `tools/call` with the tenant and
+ *    the gateway (P-9, spec §5.4): `decision: admit`, or `decision: deny`
+ *    with the log reason (`scope` for a tool `scope` does not grant) and a
+ *    fixed refusal (`forbidden: <reason>`).
  *
  * On `tools/list` it verifies and logs only; Policy filters the list. Any
  * failure is a refusal; none passes the call on, and a throw or timeout is
@@ -55,6 +57,18 @@ export const TOOLS_ENV = {
 
 /** Refusal reasons (spec §5.4); the response body is `forbidden: <reason>`. */
 export type ToolRefusal = 'token_invalid' | 'aud_mismatch' | 'act_missing' | 'tool_not_granted';
+
+/**
+ * The JSON-RPC error code of an interceptor refusal. -32002 is the Gateway's
+ * own `insufficient_scope` (spike V-8); the interceptor's refusals use the
+ * next server-defined code so an agent can tell the two walls apart.
+ */
+export const REFUSAL_RPC_CODE = -32003;
+
+/** The `reason` field of the `tool admitted` line (spec §5.4: a tool outside `scope` logs `scope`). */
+export function logReason(refusal: ToolRefusal): string {
+  return refusal === 'tool_not_granted' ? 'scope' : refusal;
+}
 
 /** The MCP REQUEST interceptor event, as spike V-10 observed it. */
 export interface ToolInterceptorEvent {
@@ -118,15 +132,21 @@ function pass(body: unknown): ToolInterceptorOutput {
   return { interceptorOutputVersion: '1.0', mcp: { transformedGatewayRequest: { body } } };
 }
 
-/** A refusal the agent sees as a JSON-RPC error with a fixed message (spec §5.4). */
+/**
+ * A refusal (spec §5.4): the documented `transformedGatewayResponse` with
+ * HTTP 403 and a JSON-RPC error body whose message is the fixed
+ * `forbidden: <reason>`, never input. The spike (V-11) saw the Gateway
+ * answer an interceptor refusal as HTTP 200 carrying the JSON-RPC error, so
+ * the status the agent sees is confirmed by integ step 13; the agent reads
+ * the error message either way.
+ */
 export function refuse(body: JsonRpcRequest | undefined, reason: ToolRefusal): ToolInterceptorOutput {
   return {
     interceptorOutputVersion: '1.0',
     mcp: {
       transformedGatewayResponse: {
-        // TODO(v2): confirm against a deployed Gateway that a 403 from the interceptor reaches the client as 403 (the spike answered 200 with a JSON-RPC error).
         statusCode: 403,
-        body: { jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32001, message: `forbidden: ${reason}` } },
+        body: { jsonrpc: '2.0', id: body?.id ?? null, error: { code: REFUSAL_RPC_CODE, message: `forbidden: ${reason}` } },
       },
     },
   };
@@ -191,7 +211,13 @@ export async function interceptTool(event: ToolInterceptorEvent, deps: ToolInter
     caller = await verifyTransactionToken(bearerToken(headerValue(request?.headers, 'authorization')), deps);
     if (method !== 'tools/call') {
       // tools/list and the protocol methods: verified and logged; Policy filters the list.
-      log.info('tools request admitted', { tenantId: caller.tenantId, agent: caller.agent, txn: caller.txn, method: typeof method === 'string' ? method : 'unknown' });
+      log.info('tools request admitted', {
+        tenantId: caller.tenantId,
+        agent: caller.agent,
+        txn: caller.txn,
+        gateway: deps.config.gatewayName,
+        method: typeof method === 'string' ? method : 'unknown',
+      });
       return pass(body);
     }
     if (tool === undefined || !scopeGrantsTool(caller.scope, tool)) {
@@ -222,6 +248,7 @@ export async function interceptTool(event: ToolInterceptorEvent, deps: ToolInter
       user: caller.user,
       agent: caller.agent,
       txn: caller.txn,
+      gateway: deps.config.gatewayName,
       target: tool.split('/')[0],
       tool,
       decision: 'admit',
@@ -231,14 +258,17 @@ export async function interceptTool(event: ToolInterceptorEvent, deps: ToolInter
     return pass({ ...body, params: { ...body?.params, arguments: { ...args, [CONTEXT_ARGUMENT]: signed } } });
   } catch (error) {
     if (error instanceof Refusal) {
-      log.warn('tool refused', {
+      log.warn(method === 'tools/call' ? 'tool admitted' : 'tools request refused', {
         tenantId: caller?.tenantId,
         user: caller?.user,
         agent: caller?.agent,
         txn: caller?.txn,
+        gateway: deps.config.gatewayName,
+        target: tool?.split('/')[0],
         tool,
-        decision: 'refuse',
-        reason: error.reason,
+        decision: 'deny',
+        reason: logReason(error.reason),
+        refusal: error.reason,
       });
       return refuse(body, error.reason);
     }

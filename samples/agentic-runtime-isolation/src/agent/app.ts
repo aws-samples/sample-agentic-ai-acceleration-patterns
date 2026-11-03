@@ -13,7 +13,12 @@
  *                      the prefix part of that id, a nonce chosen once per
  *                      microVM, whether a transaction token (v2) and tenant
  *                      credentials arrived, and the token's claims (`tenant_id`,
- *                      `agent`, `scope`, `aud`, `act.sub`, `exp`), never the token;
+ *                      `agent`, `scope`, `aud`, `act.sub`, `exp`, `iss`, `sub`,
+ *                      `user`) and header (`typ`, `kid`), never the token; and
+ *                      (integ step 11) the NAMES of every request header it
+ *                      received, plus for each header whose value has the
+ *                      shape of a JWT only that JWT's `typ` and `iss`, so the
+ *                      driver can show no identity token reached it;
  *   `tools`            (v2) `tools/list` on every tools gateway the token's
  *                      `aud` names (`tools-gateway:<name>`, ADR-0041), with
  *                      the transaction token as bearer, one client per gateway;
@@ -40,7 +45,7 @@
  * bounded length (Runtime input validation best practice).
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
 import { BedrockRuntimeClient, ConverseStreamCommand } from '@aws-sdk/client-bedrock-runtime';
@@ -77,6 +82,16 @@ export interface AgentReport {
   readonly tokenAud: string[] | null;
   readonly tokenActSub: string | null;
   readonly tokenExp: number | null;
+  /** (v2, step 11) The token's `iss`, `typ`, `kid`, `sub` and `user`. */
+  readonly tokenIss: string | null;
+  readonly tokenTyp: string | null;
+  readonly tokenKid: string | null;
+  readonly tokenSub: string | null;
+  readonly tokenUser: string | null;
+  /** (v2, step 11) The names of every request header, lowercased and sorted; never a value. */
+  readonly headerNames: string[];
+  /** (v2, step 11) Each header whose value is JWT-shaped: its name and that JWT's `typ` and `iss` only. */
+  readonly jwtHeaders: { readonly name: string; readonly typ: string | null; readonly iss: string | null }[];
   readonly credentials: boolean;
   readonly callerArn?: string;
   readonly read?: { tenant: string; result: 'ok' | 'error'; item?: Record<string, unknown>; error?: string };
@@ -91,6 +106,43 @@ export interface ReportedClaims {
   readonly aud?: string[];
   readonly actSub?: string;
   readonly exp?: number;
+  readonly iss?: string;
+  readonly sub?: string;
+  readonly user?: string;
+  readonly typ?: string;
+  readonly kid?: string;
+}
+
+/** The `typ` and `iss` of a JWT-shaped value, decoded WITHOUT verification; undefined when it is not one. */
+export function jwtShape(value: string): { typ: string | null; iss: string | null } | undefined {
+  const parts = value.split('.');
+  if (parts.length !== 3 || !value.startsWith('eyJ')) {
+    return undefined;
+  }
+  try {
+    const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')) as Record<string, unknown>;
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as Record<string, unknown>;
+    return { typ: typeof header.typ === 'string' ? header.typ : null, iss: typeof payload.iss === 'string' ? payload.iss : null };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Header names and the JWT-shaped headers' `typ` and `iss` (integ step 11); never a value. */
+export function headerShapes(headers: IncomingMessage['headers']): Pick<AgentReport, 'headerNames' | 'jwtHeaders'> {
+  const headerNames = Object.keys(headers).map((h) => h.toLowerCase()).sort();
+  const jwtHeaders: { name: string; typ: string | null; iss: string | null }[] = [];
+  for (const name of headerNames) {
+    const raw = headers[name];
+    for (const value of Array.isArray(raw) ? raw : [raw]) {
+      const candidate = typeof value === 'string' ? value.replace(/^Bearer\s+/i, '') : undefined;
+      const shape = candidate === undefined ? undefined : jwtShape(candidate);
+      if (shape !== undefined) {
+        jwtHeaders.push({ name, ...shape });
+      }
+    }
+  }
+  return { headerNames, jwtHeaders };
 }
 
 /**
@@ -100,10 +152,22 @@ export interface ReportedClaims {
  */
 export function unverifiedClaims(token: string): ReportedClaims | null {
   try {
-    const payload = token.split('.')[1];
+    const [rawHeader, payload] = token.split('.');
     const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as Record<string, unknown>;
+    let header: Record<string, unknown> = {};
+    try {
+      header = JSON.parse(Buffer.from(rawHeader, 'base64url').toString('utf8')) as Record<string, unknown>;
+    } catch {
+      header = {};
+    }
     const act = parsed.act as Record<string, unknown> | undefined;
+    const text = (v: unknown) => (typeof v === 'string' ? v : undefined);
     return {
+      iss: text(parsed.iss),
+      sub: text(parsed.sub),
+      user: text(parsed.user),
+      typ: text(header.typ),
+      kid: text(header.kid),
       tenant_id: typeof parsed.tenant_id === 'string' ? parsed.tenant_id : undefined,
       agent: typeof parsed.agent === 'string' ? parsed.agent : undefined,
       scope: typeof parsed.scope === 'string' ? parsed.scope : undefined,
@@ -185,6 +249,12 @@ export async function buildReport(
     tokenAud: claims?.aud ?? null,
     tokenActSub: claims?.actSub ?? null,
     tokenExp: claims?.exp ?? null,
+    tokenIss: claims?.iss ?? null,
+    tokenTyp: claims?.typ ?? null,
+    tokenKid: claims?.kid ?? null,
+    tokenSub: claims?.sub ?? null,
+    tokenUser: claims?.user ?? null,
+    ...headerShapes(headers),
     credentials: credentialHeader !== undefined,
   };
 
@@ -281,41 +351,207 @@ export function toolProbe(prompt: string): { method: 'tools/list' } | { method: 
   return { method: 'tools/call', name: `${call[1]}___${call[2]}`, arguments: args as Record<string, unknown> };
 }
 
+/** The MCP protocol version the agent speaks; the tools gateway lists it (V-15a). */
+export const MCP_PROTOCOL_VERSION = '2025-11-25';
+
+/** One JSON-RPC answer from a tools gateway: the result, or the error message (or `http_<status>`) and the HTTP status. */
+export type GatewayAnswer = { readonly result: unknown; readonly status: number } | { readonly error: string; readonly status: number };
+
+/** The most `tools/list` pages read for one listing (30 tools a page before Policy, V-14). */
+const MAX_LIST_PAGES = 100;
+/** The most sessions one process keeps; the oldest goes first. */
+const MAX_SESSIONS = 256;
+
+interface McpSession {
+  /** `Mcp-Session-Id` from `initialize`, when the gateway issued one. */
+  sessionId?: string;
+  /** The token's `exp` (seconds): the session and the cached list end with the token. */
+  readonly exp: number;
+  /** The tool names the last full listing returned (spec §3.6: cached for the token life). */
+  tools?: string[];
+  /** The `initialize` handshake completed. */
+  ready?: boolean;
+}
+
 /**
- * (v2, C-2) Calls the tools gateway with the transaction token as bearer:
- * one JSON-RPC request over MCP streamable HTTP. Returns the JSON-RPC result
- * or `{ error: <code or status> }`; never the token.
- * TODO(v2): the MCP `initialize` handshake and `Mcp-Session-Id` if the Gateway starts requiring them (the spike called tools/list directly).
+ * (v2, C-2, spec §3.6) The agent's MCP client: one session per tools gateway
+ * per transaction token. The first request on a session runs the MCP
+ * `initialize` handshake (protocol `2025-11-25`) and `notifications/initialized`,
+ * keeps the `Mcp-Session-Id` the gateway returns and sends it on every later
+ * request; a 404 on a session re-initialises once. `tools/list` reads every
+ * page (`cursor` / `nextCursor`) and caches the names until the token's
+ * `exp`, so a `tools/call` on several gateways finds its gateway without
+ * listing again. Sessions are keyed by a SHA-256 of the token, held in
+ * memory only; nothing here logs or returns the token.
+ */
+export class McpSessions {
+  private readonly sessions = new Map<string, McpSession>();
+  private nextId = 1;
+
+  constructor(
+    private readonly fetcher: typeof fetch = fetch,
+    /** Milliseconds since the epoch. */
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  private key(url: string, token: string): string {
+    return `${url}\u0000${createHash('sha256').update(token).digest('base64url')}`;
+  }
+
+  private session(url: string, token: string, exp: number): McpSession {
+    const key = this.key(url, token);
+    const nowSeconds = Math.floor(this.now() / 1000);
+    let session = this.sessions.get(key);
+    if (session !== undefined && session.exp <= nowSeconds) {
+      this.sessions.delete(key);
+      session = undefined;
+    }
+    if (session === undefined) {
+      for (const [k, s] of this.sessions) {
+        if (s.exp <= nowSeconds || this.sessions.size >= MAX_SESSIONS) {
+          this.sessions.delete(k);
+        }
+      }
+      session = { exp };
+      this.sessions.set(key, session);
+    }
+    return session;
+  }
+
+  /** One POST of a JSON-RPC message; `id` undefined is a notification. */
+  private async post(
+    url: string,
+    token: string,
+    session: McpSession,
+    method: string,
+    params: unknown,
+    id?: number,
+  ): Promise<{ response: Response; text: string }> {
+    const headers: Record<string, string> = {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/event-stream',
+      'MCP-Protocol-Version': MCP_PROTOCOL_VERSION,
+    };
+    if (session.sessionId !== undefined) {
+      headers['Mcp-Session-Id'] = session.sessionId;
+    }
+    const body = id === undefined ? { jsonrpc: '2.0', method, params } : { jsonrpc: '2.0', id, method, params };
+    const response = await this.fetcher(url, { method: 'POST', headers, body: JSON.stringify(body) });
+    return { response, text: await response.text() };
+  }
+
+  private async initialize(url: string, token: string, session: McpSession): Promise<GatewayAnswer | undefined> {
+    session.sessionId = undefined;
+    const { response, text } = await this.post(url, token, session, 'initialize', {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: 'runtime-isolation-agent', version: '2' },
+    }, this.nextId++);
+    const answer = parseAnswer(response, text);
+    if ('error' in answer) {
+      return answer;
+    }
+    const sessionId = response.headers.get('mcp-session-id');
+    session.sessionId = sessionId === null || sessionId.length === 0 ? undefined : sessionId;
+    // The notification has no answer worth reading (202); a failure surfaces on the next request.
+    await this.post(url, token, session, 'notifications/initialized', {});
+    return undefined;
+  }
+
+  /** One request on the session, initialising it first; `exp` is the token's. */
+  async request(url: string, token: string, exp: number, method: string, params: unknown): Promise<GatewayAnswer> {
+    const session = this.session(url, token, exp);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (session.ready !== true) {
+        const failed = await this.initialize(url, token, session);
+        if (failed !== undefined) {
+          return failed;
+        }
+        session.ready = true;
+      }
+      const { response, text } = await this.post(url, token, session, method, params, this.nextId++);
+      if (response.status === 404 && session.sessionId !== undefined && attempt === 0) {
+        // The gateway dropped the session: initialise again, once.
+        session.sessionId = undefined;
+        session.ready = false;
+        continue;
+      }
+      return parseAnswer(response, text);
+    }
+    return { error: 'http_404', status: 404 };
+  }
+
+  /** Every page of `tools/list`; refreshes the cached names. */
+  async listAll(url: string, token: string, exp: number): Promise<GatewayAnswer> {
+    const tools: unknown[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < MAX_LIST_PAGES; page++) {
+      const answer = await this.request(url, token, exp, 'tools/list', cursor === undefined ? {} : { cursor });
+      if ('error' in answer) {
+        return answer;
+      }
+      const result = answer.result as { tools?: unknown; nextCursor?: unknown } | undefined;
+      if (Array.isArray(result?.tools)) {
+        tools.push(...result.tools);
+      }
+      cursor = typeof result?.nextCursor === 'string' && result.nextCursor.length > 0 ? result.nextCursor : undefined;
+      if (cursor === undefined) {
+        break;
+      }
+    }
+    this.session(url, token, exp).tools = listedNames({ tools });
+    return { result: { tools }, status: 200 };
+  }
+
+  /** The cached tool names of a gateway for this token, or undefined when it was not listed in the token's life. */
+  cachedTools(url: string, token: string, exp: number): string[] | undefined {
+    return this.session(url, token, exp).tools;
+  }
+}
+
+function parseAnswer(response: Response, text: string): GatewayAnswer {
+  // A streamed answer is SSE: take the last `data:` line.
+  const json = text.trimStart().startsWith('{') ? text : text.split('\n').filter((l) => l.startsWith('data:')).pop()?.slice(5) ?? '';
+  try {
+    const parsed = JSON.parse(json) as { result?: unknown; error?: { message?: unknown } };
+    if (parsed.error !== undefined) {
+      return { error: typeof parsed.error.message === 'string' ? parsed.error.message : `http_${response.status}`, status: response.status };
+    }
+    return response.ok ? { result: parsed.result, status: response.status } : { error: `http_${response.status}`, status: response.status };
+  } catch {
+    return { error: `http_${response.status}`, status: response.status };
+  }
+}
+
+/** A per-fetcher session store (tests inject a fetcher; the agent runs one process-wide store). */
+const sessionStores = new WeakMap<typeof fetch, McpSessions>();
+export function sessionsFor(fetcher: typeof fetch = fetch): McpSessions {
+  let store = sessionStores.get(fetcher);
+  if (store === undefined) {
+    store = new McpSessions(fetcher);
+    sessionStores.set(fetcher, store);
+  }
+  return store;
+}
+
+/**
+ * (v2, C-2) One probe on one tools gateway with the transaction token as
+ * bearer: the JSON-RPC result, or `{ error, status }`; never the token.
  */
 export async function callToolsGateway(
   url: string,
   token: string,
   probe: NonNullable<ReturnType<typeof toolProbe>>,
   fetcher: typeof fetch = fetch,
+  sessions: McpSessions = sessionsFor(fetcher),
 ): Promise<unknown> {
-  const params = probe.method === 'tools/call' ? { name: probe.name, arguments: probe.arguments } : {};
-  const response = await fetcher(url, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      'Accept': 'application/json, text/event-stream',
-      'MCP-Protocol-Version': '2025-11-25',
-    },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: probe.method, params }),
-  });
-  const text = await response.text();
-  // A streamed answer is SSE: take the last `data:` line.
-  const json = text.trimStart().startsWith('{') ? text : text.split('\n').filter((l) => l.startsWith('data:')).pop()?.slice(5) ?? '';
-  try {
-    const parsed = JSON.parse(json) as { result?: unknown; error?: { message?: unknown } };
-    if (parsed.error !== undefined) {
-      return { error: typeof parsed.error.message === 'string' ? parsed.error.message : `http_${response.status}` };
-    }
-    return response.ok ? parsed.result : { error: `http_${response.status}` };
-  } catch {
-    return { error: `http_${response.status}` };
-  }
+  const exp = unverifiedClaims(token)?.exp ?? Math.floor(Date.now() / 1000) + 60;
+  const answer =
+    probe.method === 'tools/list'
+      ? await sessions.listAll(url, token, exp)
+      : await sessions.request(url, token, exp, 'tools/call', { name: probe.name, arguments: probe.arguments });
+  return 'error' in answer ? { error: answer.error, status: answer.status } : answer.result;
 }
 
 /** (ADR-0041) Reads RI_TOOLS_GATEWAY_URLS; anything malformed is no map. */
@@ -354,33 +590,41 @@ function listedNames(result: unknown): string[] {
 
 /**
  * Runs one tool probe over the gateways in `aud`: `tools/list` on each
- * (results by gateway name), or `tools/call` on the gateway that lists the
- * tool (the only one, when `aud` names one).
- * TODO(v2): cache each gateway's list for the token's life instead of listing per call (spec §3.6).
+ * (results by gateway name; every listing refreshes the cache), or
+ * `tools/call` on the gateway that lists the tool (the only one, when `aud`
+ * names one). With several gateways the cached list of each, for the token's
+ * life, decides; a gateway not listed yet in the token's life is listed once.
  */
 export async function runToolProbe(
   clients: readonly [string, string][],
   token: string,
   probe: NonNullable<ReturnType<typeof toolProbe>>,
   fetcher: typeof fetch = fetch,
+  sessions: McpSessions = sessionsFor(fetcher),
 ): Promise<unknown> {
   if (probe.method === 'tools/list') {
     const results: Record<string, unknown> = {};
     for (const [name, url] of clients) {
-      results[name] = await callToolsGateway(url, token, probe, fetcher);
+      results[name] = await callToolsGateway(url, token, probe, fetcher, sessions);
     }
     return results;
   }
+  const exp = unverifiedClaims(token)?.exp ?? Math.floor(Date.now() / 1000) + 60;
   let url = clients[0][1];
   if (clients.length > 1) {
     for (const [, candidate] of clients) {
-      if (listedNames(await callToolsGateway(candidate, token, { method: 'tools/list' }, fetcher)).includes(probe.name)) {
+      let names = sessions.cachedTools(candidate, token, exp);
+      if (names === undefined) {
+        await sessions.listAll(candidate, token, exp);
+        names = sessions.cachedTools(candidate, token, exp) ?? [];
+      }
+      if (names.includes(probe.name)) {
         url = candidate;
         break;
       }
     }
   }
-  return callToolsGateway(url, token, probe, fetcher);
+  return callToolsGateway(url, token, probe, fetcher, sessions);
 }
 
 /** One SSE event: `event:` (optional) and one `data:` line. */

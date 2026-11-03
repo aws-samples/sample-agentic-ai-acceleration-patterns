@@ -66,8 +66,7 @@ export class EntitlementApi extends Construct {
     });
     acknowledgeLambdaFindings(this.vendorFunction);
     props.store.grantVendorWrite(this.vendorFunction.role!);
-    // ListPlans and DeletePlan's plan_in_use check are Scans (TODO(v2) in src/entitlements/entitlements.ts).
-    this.vendorFunction.addToRolePolicy(new iam.PolicyStatement({ sid: 'ScanPlans', actions: ['dynamodb:Scan'], resources: [props.store.tableArn] }));
+    // ListPlans and DeletePlan's plan_in_use check Query the plan index rows (src/shared/entitlements.ts): no Scan.
 
     this.tenantAdminFunction = new NodejsFunction(this, 'TenantAdminFunction', {
       ...functionProps(this, 'TenantAdminLogs', Duration.seconds(29)),

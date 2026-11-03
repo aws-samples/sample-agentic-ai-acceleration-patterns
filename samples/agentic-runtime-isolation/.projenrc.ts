@@ -109,11 +109,13 @@ project.tasks.tryFind('synth:silent')?.reset(`cdk synth -q ${buildContext}`);
 project.tasks.tryFind('synth')?.reset(`cdk synth ${buildContext}`);
 
 // ---------------------------------------------------------------------------
-// Deployment integration test (test/integ.runtime.ts, scripts/integ.sh).
-// Deploys tenant-identity (shared-pool) unless one is already published,
-// then this sample once per ingress, runs the spec §8 steps, and always
-// destroys what it deployed. Runs in EXACTLY ONE explicitly selected Region;
-// the script fails fast when AWS_REGION is unset.
+// Deployment integration test, v2 (test/integ.runtime.ts, scripts/integ.sh).
+// Reuses or deploys tenant-identity (shared-pool, and shared-pool-multi-tenant
+// for the user in several tenants), deploys this sample's integration stacks
+// (both all-on ingresses, session off, session user, limits, multi-tenant),
+// runs spec §8 steps 1 to 24 and prints a step table, and always destroys
+// what it deployed. Runs in EXACTLY ONE explicitly selected Region; the
+// script fails fast when AWS_REGION is unset.
 // ---------------------------------------------------------------------------
 const integ = project.addTask('integ', {
   description:

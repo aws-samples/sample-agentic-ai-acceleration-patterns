@@ -13,6 +13,19 @@
  * | Plan | `PLAN#<planName>` | `#PLAN` |
  * | Tool catalogue | `TOOL#<target>` | `TOOL#<tool>` |
  * | Name reservation | `NAME#<name>` | `#NAME` |
+ * | Plan listing (index) | `PLANS` | `PLAN#<planName>` |
+ * | Plan member (index) | `PLAN#<planName>` | `TENANT#<tenantId>` |
+ * | Gateway target count | `GATEWAY#<gateway>` | `TARGET#<target>` |
+ *
+ * The two plan index rows are written in the same transaction as the plan
+ * and tenant rows, so `ListPlans` and `DeletePlan`'s `plan_in_use` check are
+ * Queries, never Scans. The table keeps no GSI (spec §4.5): a GSI on the
+ * tenant row's `plan` would replicate every tenant write for a lookup made
+ * only on a plan delete, and the index rows cost one extra item write on the
+ * rare plan change instead. The gateway count rows are written by the
+ * `ToolTarget` reservation and let a deploy refuse a target that takes its
+ * gateway past `maxToolsPerGateway` or 100 targets (ADR-0040, ADR-0041),
+ * whatever stack the other targets came from.
  *
  * The ingress only reads (`EntitlementReader`): one `BatchGetItem` for the
  * tenant row and the user's cut row per request, the plan and the catalogue
@@ -21,7 +34,8 @@
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { batchGetAll } from './batch';
 import type { EntitlementSet, TenantGrant, ToolCatalogue, UserCutGrant } from './grant';
 import { sharedHandler } from './http';
 import { DEFAULT_TOOLS_GATEWAY, TOOLS_GATEWAY_NAME_PATTERN } from './mint';
@@ -36,7 +50,12 @@ export const KEY_PREFIX = {
   plan: 'PLAN#',
   tool: 'TOOL#',
   name: 'NAME#',
+  gateway: 'GATEWAY#',
+  target: 'TARGET#',
 } as const;
+
+/** The partition of the plan listing rows (one per plan). */
+export const PLAN_INDEX_PK = 'PLANS';
 
 export const SORT_KEY = {
   subscription: '#SUB',
@@ -59,6 +78,21 @@ export function userCutKey(tenantId: string, sub: string): ItemKey {
 
 export function planKey(planName: string): ItemKey {
   return { PK: `${KEY_PREFIX.plan}${planName}`, SK: SORT_KEY.plan };
+}
+
+/** The plan listing row of `planName` (ListPlans Queries the `PLANS` partition). */
+export function planIndexKey(planName: string): ItemKey {
+  return { PK: PLAN_INDEX_PK, SK: `${KEY_PREFIX.plan}${planName}` };
+}
+
+/** The member row that records `tenantId` naming `planName` (DeletePlan's `plan_in_use`). */
+export function planMemberKey(planName: string, tenantId: string): ItemKey {
+  return { PK: `${KEY_PREFIX.plan}${planName}`, SK: `${KEY_PREFIX.tenant}${tenantId}` };
+}
+
+/** The count row of one target on one tools gateway (ADR-0041). */
+export function gatewayTargetKey(gateway: string, target: string): ItemKey {
+  return { PK: `${KEY_PREFIX.gateway}${gateway}`, SK: `${KEY_PREFIX.target}${target}` };
 }
 
 export function toolKey(target: string, tool: string): ItemKey {
@@ -171,6 +205,8 @@ export class EntitlementReader {
     private readonly ttlSeconds: number,
     client?: DynamoDBDocumentClient,
     private readonly now: () => number = Date.now,
+    /** The backoff sleep of the batch retry; tests pass a no-op. */
+    private readonly sleep?: (ms: number) => Promise<void>,
   ) {
     this.client = client ?? DynamoDBDocumentClient.from(new DynamoDBClient({ requestHandler: sharedHandler() }));
   }
@@ -179,17 +215,15 @@ export class EntitlementReader {
   async tenantEntitlement(tenantId: string, sub: string): Promise<TenantEntitlement> {
     const tenant = tenantKey(tenantId);
     const cut = userCutKey(tenantId, sub);
-    const out = await this.client.send(
-      new BatchGetCommand({ RequestItems: { [this.tableName]: { Keys: [tenant, cut], ConsistentRead: false } } }),
+    // Throttled keys come back in UnprocessedKeys, not as an error: they are
+    // resent with backoff, and a key still unread after that fails the
+    // request (502) rather than reading a cut row as "no cut" (spec §3.6).
+    const responses = await batchGetAll(
+      this.client,
+      { [this.tableName]: { Keys: [tenant, cut], ConsistentRead: false } },
+      { maxAttempts: 3, sleep: this.sleep },
     );
-    // TODO(v2): retry UnprocessedKeys once with backoff; today an unprocessed key is read as "absent" only for the cut row.
-    if ((out.UnprocessedKeys?.[this.tableName]?.Keys?.length ?? 0) > 0) {
-      const unprocessed = out.UnprocessedKeys![this.tableName].Keys!;
-      if (unprocessed.some((k) => k.SK === tenant.SK)) {
-        throw new Error('entitlement store throttled the tenant row');
-      }
-    }
-    const items = out.Responses?.[this.tableName] ?? [];
+    const items = responses[this.tableName] ?? [];
     const tenantItem = items.find((i) => i.SK === tenant.SK);
     const cutItem = items.find((i) => i.SK === cut.SK);
     return {
