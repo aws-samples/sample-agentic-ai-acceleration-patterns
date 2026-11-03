@@ -53,7 +53,7 @@ import { acknowledgeLambdaFindings, functionProps } from './shared/function.cdk'
 import { LogDrain } from './shared/log-drain';
 import { toolsGatewayAudience } from './shared/mint';
 import { acknowledgeGranularFinding, nagFindingResource } from './shared/nag';
-import { TOOLS_ENV } from './tools/interceptor.function';
+import { TOOLS_ENV } from './tools/transaction-token';
 
 /** The quota on targets per Gateway (V-14: the 101st is `ServiceQuotaExceededException`). */
 export const MAX_TOOL_TARGETS = 100;

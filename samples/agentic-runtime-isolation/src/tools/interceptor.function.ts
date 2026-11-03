@@ -30,8 +30,9 @@
  */
 
 import { KMSClient } from '@aws-sdk/client-kms';
-import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from 'jose';
+import { createRemoteJWKSet, type JWTVerifyGetKey } from 'jose';
 import { CONTEXT_TYPE } from './context';
+import { Refusal, TOOLS_ENV, type ToolCaller, type ToolRefusal, verifyTransactionToken } from './transaction-token';
 import { catalogueToolName } from '../shared/cedar';
 import { requireEnv, isLambdaRuntime } from '../shared/config';
 import { scopeGrantsTool } from '../shared/grant';
@@ -39,24 +40,16 @@ import { headerValue } from '../shared/headers';
 import { sharedHandler } from '../shared/http';
 import { argsHash, CONTEXT_ARGUMENT, type DigestSigner, kmsDigestSigner, signJws } from '../shared/jws';
 import { errorName, log } from '../shared/logger';
-import { AGENT_AUDIENCE_PREFIX, toolsGatewayAudience, TRANSACTION_TOKEN_TYPE } from '../shared/mint';
 import { bearerToken } from '../shared/verifier';
+
+// Re-exported: the RESPONSE filter and the CDK import them from ./transaction-token,
+// which has no load-time side effects (this module builds its dependencies at load).
+export { Refusal, TOOLS_ENV, verifyTransactionToken };
+export type { TokenVerification, ToolCaller, ToolRefusal } from './transaction-token';
 
 /** The tool argument a client might use to name a tenant; overwritten with the token's (P-15). */
 export const TENANT_ARGUMENT = 'tenantId';
 
-/** Environment variables of the interceptor. */
-export const TOOLS_ENV = {
-  ISSUER: 'RI_ISSUER',
-  INGRESS_ROLE_ARN: 'RI_INGRESS_ROLE_ARN',
-  CONTEXT_KEY_ID: 'RI_CONTEXT_KEY_ID',
-  CONTEXT_LIFETIME_SECONDS: 'RI_CONTEXT_LIFETIME_SECONDS',
-  /** (ADR-0041) This gateway's name; the token's `aud` must hold `tools-gateway:<name>`. */
-  GATEWAY_NAME: 'RI_TOOLS_GATEWAY_NAME',
-} as const;
-
-/** Refusal reasons (spec §5.4); the response body is `forbidden: <reason>`. */
-export type ToolRefusal = 'token_invalid' | 'aud_mismatch' | 'act_missing' | 'tool_not_granted';
 
 /**
  * The JSON-RPC error code of an interceptor refusal. -32002 is the Gateway's
@@ -105,12 +98,6 @@ export interface ToolInterceptorConfig {
   readonly gatewayName: string;
 }
 
-/** What verifying a transaction token needs (the REQUEST and the RESPONSE interceptor share it). */
-export interface TokenVerification {
-  readonly config: Pick<ToolInterceptorConfig, 'issuer' | 'ingressRoleArn' | 'gatewayName'>;
-  readonly getKey: JWTVerifyGetKey;
-  readonly now?: () => number;
-}
 
 export interface ToolInterceptorDependencies {
   readonly config: ToolInterceptorConfig;
@@ -122,11 +109,6 @@ export interface ToolInterceptorDependencies {
   readonly now?: () => number;
 }
 
-export class Refusal extends Error {
-  constructor(readonly reason: ToolRefusal) {
-    super(reason);
-  }
-}
 
 function pass(body: unknown): ToolInterceptorOutput {
   return { interceptorOutputVersion: '1.0', mcp: { transformedGatewayRequest: { body } } };
@@ -152,52 +134,6 @@ export function refuse(body: JsonRpcRequest | undefined, reason: ToolRefusal): T
   };
 }
 
-/** The verified transaction-token claims the interceptor acts on. */
-export interface ToolCaller {
-  readonly tenantId: string;
-  readonly sub: string;
-  readonly user: string;
-  readonly agent: string;
-  readonly scope: string;
-  readonly txn: string;
-}
-
-/** Verifies the transaction token (step 1). Throws Refusal. */
-export async function verifyTransactionToken(token: string | undefined, deps: TokenVerification): Promise<ToolCaller> {
-  if (token === undefined) {
-    throw new Refusal('token_invalid');
-  }
-  let payload: JWTPayload;
-  let typ: string | undefined;
-  try {
-    const verified = await jwtVerify(token, deps.getKey, {
-      issuer: deps.config.issuer,
-      audience: toolsGatewayAudience(deps.config.gatewayName),
-      algorithms: ['RS256', 'ES256'],
-      currentDate: deps.now === undefined ? undefined : new Date(deps.now()),
-    });
-    payload = verified.payload;
-    typ = verified.protectedHeader.typ;
-  } catch {
-    throw new Refusal('token_invalid');
-  }
-  if (typ !== TRANSACTION_TOKEN_TYPE) {
-    throw new Refusal('aud_mismatch');
-  }
-  const { tenant_id: tenantId, sub, user, agent, scope, txn, act } = payload as Record<string, unknown>;
-  if (typeof tenantId !== 'string' || typeof sub !== 'string' || typeof user !== 'string' || typeof agent !== 'string' || typeof txn !== 'string') {
-    throw new Refusal('token_invalid');
-  }
-  const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-  if (!aud.includes(`${AGENT_AUDIENCE_PREFIX}${agent}`)) {
-    throw new Refusal('aud_mismatch');
-  }
-  const actSub = typeof act === 'object' && act !== null ? (act as Record<string, unknown>).sub : undefined;
-  if (actSub !== deps.config.ingressRoleArn) {
-    throw new Refusal('act_missing');
-  }
-  return { tenantId, sub, user, agent, scope: typeof scope === 'string' ? scope : '', txn };
-}
 
 /** The interceptor's logic (unit-tested directly). */
 export async function interceptTool(event: ToolInterceptorEvent, deps: ToolInterceptorDependencies): Promise<ToolInterceptorOutput> {

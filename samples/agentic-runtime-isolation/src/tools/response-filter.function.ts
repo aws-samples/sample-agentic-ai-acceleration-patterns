@@ -39,7 +39,7 @@
  */
 
 import { createRemoteJWKSet } from 'jose';
-import { type TokenVerification, TOOLS_ENV, verifyTransactionToken } from './interceptor.function';
+import { type TokenVerification, TOOLS_ENV, verifyTransactionToken } from './transaction-token';
 import { catalogueToolName } from '../shared/cedar';
 import { isLambdaRuntime, requireEnv } from '../shared/config';
 import { scopeGrantsTool } from '../shared/grant';
