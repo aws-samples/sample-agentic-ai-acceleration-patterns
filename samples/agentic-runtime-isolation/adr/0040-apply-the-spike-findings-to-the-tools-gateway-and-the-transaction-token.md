@@ -7,6 +7,7 @@ SPDX-License-Identifier: MIT-0
 - Status: Accepted
 - Date: 2026-11-02
 - Amends: ADR-0031, ADR-0034, ADR-0038
+- Amended by: ADR-0041
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -27,3 +28,5 @@ Option 2. (1) The interceptor is the first wall: it verifies the token, `typ`, `
 
 ## Consequences
 Easier: no orphan window, no cross-tenant 3LO grant, one refusal path per layer. Harder: `sub` is no longer the identity provider's value, so a consumer that joins logs on `sub` must use `user`; the `ToolTarget` custom resource is slower on delete (it waits for the policy) and on create (sequential). Follow-up: threat-model rows for the orphaned policy and the vault key shape; integration steps for policy-before-target delete and for `sub` qualification; the README's quotas table. Revisit if Policy gains a target-scoped lifecycle, if the vault keys on more than (`iss`, `sub`), or if the Gateway's authoriser starts checking `typ`.
+
+**2026-11-03.** Amended by ADR-0041: the `scope` bound rises to 8,192 bytes; the policy-lifecycle rules now apply to one policy per target.

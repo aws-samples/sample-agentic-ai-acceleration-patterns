@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-02
-- Amended by: ADR-0040
+- Amended by: ADR-0040, ADR-0041
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -35,3 +35,5 @@ Easier: one issuer, one store, one demo; a tool is one `ToolTarget` construct (L
 **2026-11-02.** Amended by ADR-0040: the interceptor runs before Policy and is the first wall; policy deleted before target, sequential policy writes, 100-target cap, application logs off, OBO only with trusted authorisation servers.
 
 **2026-11-03.** Reviewed: the tool keeps its own `sts:AssumeRole`, on one tenant role, with the `TenantId` tag taken only from a verified `_ri_ctx`. The agent is denied `AssumeRole` because a model drives it; a tool is vendor code with no model, so the ingress rule applies to it unchanged. Moving the TVM into the interceptor would make one Lambda able to assume every tool role and would put credentials, even encrypted, in the request body and the Gateway application log. Rejected.
+
+**2026-11-03.** Amended by ADR-0041: one star permit per target instead of per-tool policies; several tools gateways under a 300-tool cap each; an optional RESPONSE interceptor for per-tool list filtering.

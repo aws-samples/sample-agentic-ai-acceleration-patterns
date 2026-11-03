@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT-0
 > **Status:** v2, Accepted 2026-11-02 (Dave Roberts). Supersedes the v1
 > specification of 2026-10-26, kept as `agentic-runtime-isolation.spec.v1.md`.
 > Not yet implemented: `architecture.md` still describes v1 until the v2
-> integration test passes. ADR-0030 to ADR-0040 are Accepted. v1 promises
+> integration test passes. ADR-0030 to ADR-0041 are Accepted. v1 promises
 > that still hold are kept as they are; where v2 changes one, the text says
 > so with "(v2, ADR-00NN)". The v1 amendment notes are folded into the text;
 > their ADRs are still cited. Spikes V-8 to V-15 (§7) run before code.
@@ -30,6 +30,7 @@ ADRs v2 adds:
 | 0038 | Accept users in several tenants; the request names one the verified token lists | amends ADR-0004 |
 | 0039 | Default session mapping to the tenant scope when it is turned on | amends ADR-0013 |
 | 0040 | Apply the spike findings to the tools gateway and the transaction token | amends ADR-0031, ADR-0034, ADR-0038 |
+| 0041 | One star permit per target, several tools gateways, and an 8 KB `scope` | amends ADR-0034, ADR-0040 |
 
 
 ---
@@ -481,7 +482,9 @@ fails with the prop name.
 | `entitlements.adminScope` | string | `'entitlements/admin'` | (v2) identity-token scope the tenant-admin operations require |
 | `entitlements.maxAgentsPerTenant` | number | 1000 | (v2) bound on `agents` entries in a tenant or plan row (amended 2026-11-03) |
 | `entitlements.maxToolsPerTenant` | number | 1000 | (v2) bound on `tools` entries in a tenant or plan row; a `<target>/*` entry counts once, so a tenant subscribed to whole targets holds 1,000s of tools in 10s of entries |
-| `toolsGateway` | object `\| false` | on | (v2, ADR-0034) `false` creates no tools gateway |
+| `toolsGateway` | object `\| false` | on | (v2, ADR-0034) `false` creates no tools gateway. **Amended 2026-11-03 (ADR-0041):** also accepted as `toolsGateways: { [name]: ToolsGatewayProps }`, several gateways each with its own Policy engine, rate limits and `responseFilter`; `toolsGateway` is shorthand for one gateway named `default`. A `ToolTarget` names its gateway (`gateway`, default `default`) |
+| `toolsGateways.<name>.maxToolsPerGateway` | number | 300 | (v2, ADR-0041) synth fails when the gateway's catalogued tools would exceed it; the Policy engine's 400 KB schema quota holds about 330 one-field tools (V-16a) |
+| `toolsGateways.<name>.responseFilter` | boolean | `false` | (v2, ADR-0041) a RESPONSE interceptor that trims each `tools/list` page to the exact tools in `scope`; off, the list is filtered natively at target grain |
 | `toolsGateway.tenantRateLimit` | `{ requestsPerSecond: number }` | `{ requestsPerSecond: 10 }` | (v2) native limit, one bucket per `tenant_id` (`*` entry) |
 | `toolsGateway.tenantRateLimitOverrides` | `Record<string, number>` | none | (v2) named tenants with their own rate, at most 1,000 |
 | `toolsGateway.interceptorProvisionedConcurrency` | number | 1 | (v2) on C-15a |
@@ -594,13 +597,22 @@ not in the catalogue are dropped, the rule is applied, and the result is
 compressed back to `<target>/*` for each target whose every catalogued tool
 is granted. The result is sorted, so the same inputs give the same `scope`
 string and the same cache entry. `needs` are not expanded or compressed. A
-compressed `scope` longer than 4,096 bytes is refused with 502 and log
-reason `grant_too_large`; with at most 64 entries in `tools` this cannot
+compressed `scope` longer than 8,192 bytes (amended 2026-11-03, ADR-0041;
+was 4,096) is refused with 502 and log reason `grant_too_large`; with at most 64 entries in `tools` this cannot
 happen unless a target has hundreds of tools and the user is cut from one
 (V-13 records the fallback).
 
-**Scale at 100s of agents and 1,000s of tools (amended 2026-11-03).** The
-counts that grow with agents and tools, and where each is bounded:
+**Scale at 100s of agents and 1,000s of tools (amended 2026-11-03,
+ADR-0041).** Tools are spread over several tools gateways, one Policy engine
+each, at most `maxToolsPerGateway` (300) catalogued tools per gateway, because
+an engine's Cedar schema is capped at 400 KB (V-16a). Policy holds **one
+star permit per target** (any action in the target when `scope` names
+`<target>/*` or any `<target>/<tool>`); the REQUEST interceptor is the
+per-tool wall at call time; `tools/list` is filtered natively at target
+grain and, with `responseFilter`, at tool grain by a RESPONSE interceptor.
+The transaction token's `aud` lists `tools-gateway:<name>` for each gateway
+the agent product's tools live on. The counts that grow with agents and
+tools, and where each is bounded:
 
 | Grows with | Where | Bound | Rule |
 |---|---|---|---|
@@ -609,10 +621,11 @@ counts that grow with agents and tools, and where each is bounded:
 | Agents on the `agentcore-gateway` ingress | one Runtime target per agent on the ingress Gateway | 100 targets per Gateway (V-14) | **the `agentcore-gateway` ingress caps at 100 agents**; `api-gateway` has no such cap and is the recommended ingress (ADR-0029). The README says so |
 | Agents per tenant | `agents` entries on the tenant row | `maxAgentsPerTenant`, 1,000 | one row read per mint, cached per tenant version |
 | Tools | catalogue rows `TOOL#` | 1,000 per target, 100 targets | the ingress Queries one target at a time and caches it `registryTtl`; the whole catalogue is never read |
-| Tools | Cedar policy text per target | one policy per target; its size grows with the tools named one by one | V-16 measures a 1,000-tool target; the fallback is one `<target>/*` permit plus per-tool permits in groups of 100 |
+| Tools | Cedar policy per target | one star permit, about 450 bytes, whatever the tool count (ADR-0041) | V-16a: per-tool permits hold 28 tools each and take 2-3 min to ACTIVE, so they are not used |
+| Tools | Policy engine schema | 400 KB per engine, about 330 tools (V-16a) | `maxToolsPerGateway` 300; several gateways |
 | Tools | `tools/list` pages | about 30 tools per page before Policy filters (V-14) | an agent product lists its own targets only, so a product with 3 targets pays 3 to 100 pages, never the whole catalogue; the agent caches the list for the token life; `toolsGateway.semanticSearch` (off by default) replaces listing for products that span many targets |
 | Tools per tenant | `tools` entries on the tenant row | `maxToolsPerTenant`, 1,000 entries; a 400 KB item holds about 10,000 names | subscribe by `<target>/*`; the row is read once per mint, cached |
-| Tools in a token | `scope` after compression | 4,096 bytes (`grant_too_large`) | whole targets compress to one entry; a user cut from one tool of a 1,000-tool target expands to 999 names and overflows. V-16 decides the fix: a `cut` claim that Policy enforces with one `forbid` per target, or the hash-referenced grant (V-13 fallback). Until then the limitation is named in the README |
+| Tools in a token | `scope` after compression | 8,192 bytes (`grant_too_large`; ADR-0041, proved by V-16c and V-13) | whole targets compress to one entry; a user cut from one tool of a 300-tool target expands to 299 names, about 2.7 KB; a user cut inside three or more large targets at once can overflow and fails loud. The `cut` claim (V-16b) is not adopted: with one star permit per target it has no Policy to act in |
 
 **Mint cache (ADR-0036).** Key `(tenant_id, sub, agent, tenant.version, agent.version,
 plan.version)`. A cached token is reused while more than 60 s of its life is
