@@ -184,9 +184,18 @@ interface ToolsBinding {
   readonly logDrain?: LogDrain;
 }
 
-/** A Cedar policy name from a target name: `[A-Za-z][A-Za-z0-9_]*`. */
-export function policyName(target: string): string {
-  return `${target.replace(/-/g, '_')}_target`;
+/**
+ * A Cedar policy name, `[A-Za-z][A-Za-z0-9_]*`, at most 48 characters: the
+ * target name, then 8 hex of a hash of `owner` (the stack, construct path and
+ * gateway). `CreatePolicy` names are unique within the account and Region,
+ * not the engine (ConflictException, integ runs 3 and 4 2026-11-03), so two
+ * stacks with a target of the same name, or a target moving to another
+ * gateway (the new policy is created before the old one is deleted), need
+ * different names.
+ */
+export function policyName(target: string, owner: string): string {
+  const suffix = createHash('sha256').update(owner).digest('hex').slice(0, 8);
+  return `${target.replace(/-/g, '_')}_target_${suffix}`;
 }
 
 /** Why the tool list of a target is refused, or undefined. `lambda` also needs an input schema per tool. */
@@ -590,7 +599,7 @@ export class ToolTarget extends Construct {
       resourceType: 'Custom::RuntimeIsolationToolPolicy',
       properties: {
         PolicyEngineId: binding.policyEngineId,
-        Name: policyName(props.name),
+        Name: policyName(props.name, `${stack.stackName}/${this.node.path}/${gatewayName}`),
         Statement: cedarPolicyFor(props.name, binding.gatewayArn),
         ValidationMode: 'FAIL_ON_ANY_FINDINGS',
         // The text names no tool, so a tool change only touches the policy through this (C-16).

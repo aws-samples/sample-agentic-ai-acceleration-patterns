@@ -7,7 +7,7 @@ import { Template } from 'aws-cdk-lib/assertions';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { AgentBackend, GATEWAY_TARGET_NAME, PUBLISHED, SharedIngress, type SharedIngressProps, TOOLS_GATEWAY_PARAMETER_FIELDS, toolsGatewayParameter } from '../src/index';
 import { cedarPolicyFor } from '../src/shared/cedar';
-import { ToolTarget, type ToolDefinition } from '../src/tool-target.cdk';
+import { policyName, ToolTarget, type ToolDefinition } from '../src/tool-target.cdk';
 import { MAX_TOOL_TARGETS } from '../src/tools-gateway.cdk';
 
 /**
@@ -177,7 +177,7 @@ describe.each(['api-gateway', 'agentcore-gateway'] as const)('v2 template, ingre
     const [, policy] = resources(template, 'Custom::RuntimeIsolationToolPolicy')[0];
     const [targetId] = resources(template, 'AWS::BedrockAgentCore::GatewayTarget').find(([id]) => id.startsWith('Target0'))!;
     expect(policy.DependsOn).toContain(targetId);
-    expect(policy.Properties.Name).toBe('crm_target');
+    expect(policy.Properties.Name).toMatch(/^crm_target_[0-9a-f]{8}$/);
     expect(policy.Properties.ValidationMode).toBe('FAIL_ON_ANY_FINDINGS');
   });
 
@@ -350,13 +350,13 @@ describe('several tools gateways (ADR-0041)', () => {
   it('one policy custom resource per target, each on its own gateway\'s engine, each the target\'s star permit', () => {
     const policies = resources(template, 'Custom::RuntimeIsolationToolPolicy');
     expect(policies).toHaveLength(2);
-    const crmPolicy = policies.find(([, p]) => p.Properties.Name === 'crm_target')![1];
-    const invPolicy = policies.find(([, p]) => p.Properties.Name === 'invoices_target')![1];
+    const crmPolicy = policies.find(([, p]) => String(p.Properties.Name).startsWith('crm_target_'))![1];
+    const invPolicy = policies.find(([, p]) => String(p.Properties.Name).startsWith('invoices_target_'))![1];
     expect(crmPolicy.Properties.PolicyEngineId).toEqual(stack.resolve(ingress.toolsGateways.default.policyEngine.attrPolicyEngineId));
     expect(invPolicy.Properties.PolicyEngineId).toEqual(stack.resolve(ingress.toolsGateways.finance.policyEngine.attrPolicyEngineId));
     expect(invPolicy.Properties.Statement).toEqual(stack.resolve(cedarPolicyFor('invoices', ingress.toolsGateways.finance.gatewayArn)));
     // The two targets are on different gateways: their policies are not chained.
-    expect(invPolicy.DependsOn ?? []).not.toContain(policies.find(([, p]) => p.Properties.Name === 'crm_target')![0]);
+    expect(invPolicy.DependsOn ?? []).not.toContain(policies.find(([, p]) => String(p.Properties.Name).startsWith('crm_target_'))![0]);
   });
 
   it('the catalogue rows and the registry pointer carry the gateway', () => {
@@ -461,5 +461,21 @@ describe('several tools gateways: synth errors (ADR-0041)', () => {
     );
     const text = JSON.stringify(Template.fromStack(stack).toJSON());
     expect(text).toContain(toolsGatewayParameter('finance', 'policyEngineId'));
+  });
+});
+
+describe('policyName (CreatePolicy names are unique within the account and Region)', () => {
+  it('differs per stack, construct path and gateway; same input, same name', () => {
+    const a = policyName('crm', 'StackA/StackA/Crm/default');
+    expect(a).toMatch(/^crm_target_[0-9a-f]{8}$/);
+    expect(policyName('crm', 'StackA/StackA/Crm/default')).toBe(a);
+    expect(policyName('crm', 'StackB/StackB/Crm/default')).not.toBe(a);
+    expect(policyName('crm', 'StackA/StackA/Crm/finance')).not.toBe(a);
+  });
+
+  it('a 32-character target name gives a valid name of at most 48 characters', () => {
+    const name = policyName('a'.repeat(16) + '-' + 'b'.repeat(15), 'owner');
+    expect(name).toMatch(/^[A-Za-z][A-Za-z0-9_]*$/);
+    expect(name.length).toBeLessThanOrEqual(48);
   });
 });
