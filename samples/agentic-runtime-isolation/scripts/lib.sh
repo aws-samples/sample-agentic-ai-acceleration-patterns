@@ -47,8 +47,9 @@ load_sigv4() {
   SIGV4_ST="$(jq -r '.SessionToken // empty' <<<"$creds")"
 }
 
-# scopes_json "a b c" -> ["a","b","c"] (an empty string is []).
-scopes_json() { printf '%s' "$1" | jq -Rc 'split(" ") | map(select(length > 0))'; }
+# scopes_json "a b c" -> ["a","b","c"] (an empty string is []). -s: with -R
+# alone an empty input is no line, so jq prints nothing (integ run 5 2026-11-03).
+scopes_json() { printf '%s' "$1" | jq -Rsc 'split(" ") | map(select(length > 0))'; }
 
 # signed METHOD URL [JSON] -> HTTP status of a SigV4 (execute-api) call; body in $BODY.
 signed() {
