@@ -109,6 +109,21 @@ async function waitFor(deps: ToolPolicyDependencies, engine: string, policyId: s
   return 'TIMEOUT';
 }
 
+/**
+ * The service's `statusReasons` for a policy that did not become ACTIVE
+ * (e.g. "Insufficient permissions to call gateway ..."), so the stack event
+ * names the cause. Validation messages, never the policy text; capped.
+ */
+async function failureReasons(deps: ToolPolicyDependencies, engine: string, policyId: string): Promise<string> {
+  try {
+    const out = await deps.client.send(new GetPolicyCommand({ policyEngineId: engine, policyId }));
+    const reasons = (out.statusReasons ?? []).join('; ');
+    return reasons.length ? ` (${reasons.slice(0, 300)})` : '';
+  } catch {
+    return '';
+  }
+}
+
 async function deleteAndWait(deps: ToolPolicyDependencies, engine: string, policyId: string): Promise<string> {
   try {
     await deps.client.send(new DeletePolicyCommand({ policyEngineId: engine, policyId }));
@@ -148,7 +163,8 @@ async function create(deps: ToolPolicyDependencies, p: ToolPolicyProperties): Pr
       if (final === 'ACTIVE') {
         return { status: 'SUCCESS', physicalResourceId: policyId, data: { PolicyId: policyId, SecondsToActive: seconds(deps, started) } };
       }
-      lastReason = final;
+      lastReason = `${final}${await failureReasons(deps, p.PolicyEngineId, policyId)}`;
+      log.error('tool policy not ACTIVE', { attempt, policyId, reason: lastReason });
       // A CREATE_FAILED policy is removed before the next attempt (V-14).
       await deleteAndWait(deps, p.PolicyEngineId, policyId).catch(() => undefined);
     }

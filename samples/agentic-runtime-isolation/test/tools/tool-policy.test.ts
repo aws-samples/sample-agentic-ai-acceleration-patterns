@@ -37,7 +37,9 @@ function deps(statuses: string[], options: { createFails?: number } = {}) {
         if (next === 'GONE') {
           throw new ResourceNotFoundException({ message: 'gone', $metadata: {} });
         }
-        return { status: next ?? 'ACTIVE' };
+        // 'STATUS:reason' carries the service's statusReasons.
+        const [status, reason] = (next ?? 'ACTIVE').split(':');
+        return { status, statusReasons: reason === undefined ? [] : [reason] };
       }
       return {};
     },
@@ -62,10 +64,18 @@ describe('tool policy handler', () => {
   });
 
   it('a CREATE_FAILED policy is deleted before the next attempt', async () => {
-    const { d, sent } = deps(['CREATE_FAILED', 'GONE', 'ACTIVE'], { createFails: 1 });
+    const { d, sent } = deps(['CREATE_FAILED', 'CREATE_FAILED', 'GONE', 'ACTIVE'], { createFails: 1 });
     const outcome = await handleEvent(event('Create'), d);
     expect(outcome).toMatchObject({ status: 'SUCCESS', physicalResourceId: 'p-2' });
     expect(sent).toContain(DeletePolicyCommand.name);
+  });
+
+  it('a policy that never becomes ACTIVE fails with the service statusReasons', async () => {
+    const reason = 'Insufficient permissions to call gateway with ID g-1';
+    const { d } = deps([`CREATE_FAILED:${reason}`, `CREATE_FAILED:${reason}`, 'GONE']);
+    const outcome = await handleEvent(event('Create'), d);
+    expect(outcome.status).toBe('FAILED');
+    expect(outcome.reason).toBe(`policy did not become ACTIVE: CREATE_FAILED (${reason})`);
   });
 
   it('Update touches the policy and reports SecondsToActive', async () => {
