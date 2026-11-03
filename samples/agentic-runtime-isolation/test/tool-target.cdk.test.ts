@@ -216,12 +216,12 @@ describe('tools gateway role and rate limit (spec §3.6, M-58, M-60)', () => {
     expect(JSON.stringify(statements)).not.toContain('bedrock-agentcore:*');
   });
 
-  it('the policy writer may InvokeGateway and ManageResourceScopedPolicy on its gateway only (CreatePolicy validation)', () => {
+  it('the policy writer may GetGateway, InvokeGateway and ManageResourceScopedPolicy on its gateway only (CreatePolicy validation)', () => {
     const { template } = target({ kind: 'mcpServer', endpoint: 'https://mcp.example.com/mcp', outboundAuth: oauth('OBO') });
     const statement = Object.values(template.findResources('AWS::IAM::Policy'))
       .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
       .find((s: any) => s.Sid === 'ValidatePoliciesOnOneGateway');
-    expect(statement.Action).toEqual(['bedrock-agentcore:InvokeGateway', 'bedrock-agentcore:ManageResourceScopedPolicy']);
+    expect(statement.Action).toEqual(['bedrock-agentcore:GetGateway', 'bedrock-agentcore:InvokeGateway', 'bedrock-agentcore:ManageResourceScopedPolicy']);
     expect(JSON.stringify(statement.Resource)).toContain('GatewayArn');
   });
 

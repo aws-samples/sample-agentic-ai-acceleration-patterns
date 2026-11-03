@@ -400,7 +400,8 @@ export function grantPolicyWrites(fn: NodejsFunction, policyEngineArn: string, g
   fn.addToRolePolicy(
     new iam.PolicyStatement({
       sid: 'ValidatePoliciesOnOneGateway',
-      actions: ['bedrock-agentcore:InvokeGateway', 'bedrock-agentcore:ManageResourceScopedPolicy'],
+      // CreatePolicy reads the gateway with the caller's identity (CloudTrail: GetGateway AccessDenied, integ 2026-11-03).
+      actions: ['bedrock-agentcore:GetGateway', 'bedrock-agentcore:InvokeGateway', 'bedrock-agentcore:ManageResourceScopedPolicy'],
       resources: [gatewayArn],
     }),
   );
