@@ -948,13 +948,20 @@ Writes:
   session tag from the verified identity token, and its role allows
   `dynamodb:*Item` only where `dynamodb:LeadingKeys` is
   `TENANT#${aws:PrincipalTag/TenantId}`. A tenant admin's cut for another
-  tenant fails in IAM (enforced, P-8 applied to the store).
+  tenant fails in IAM (enforced, P-8 applied to the store). (Amended
+  2026-11-04) The write statement also names only `PK`, `SK`, `cutAgents`,
+  `cutTools`, `updatedBy`, `updatedAt` and `version` in
+  `dynamodb:Attributes`, so the role cannot write `agents` or `tools` on the
+  tenant's own `#SUB` row (ADR-0033).
 - The ingress roles have `dynamodb:BatchGetItem`, `GetItem` and `Query`
   only, never a write.
 - Catalogue and reservation rows carry an owner marker. A create whose
   `NAME#` row names another owner fails the deploy; a delete skips rows owned
   by another stack (the ADR-0025 rule, moved from tenant-identity's
-  catalogue to this table, ADR-0035).
+  catalogue to this table, ADR-0035). (Amended 2026-11-04) A `NAME#` row is
+  also refused when the same owner holds it under the other `kind`, and one
+  CDK app refuses an `AgentBackend` and a `ToolTarget` of one name at synth,
+  so a `need` can never name a tool (ADR-0035).
 
 Scale at the target sizes: 50,000 tenants × 40 KB is 2 GB; cut rows exist
 only for cut users; reads per agent request are one batch get of two items,
@@ -1046,7 +1053,11 @@ there can follow one `kms:Sign` on a mint-cache miss. `agentcore-gateway`
 keeps the stated order. Cost only; no isolation effect.)
 
 **Amended 2026-11-04 (ADR-0043).** `X-Tenant-Id` matches
-`[A-Za-z0-9_-]{1,64}` (else 400 `bad request`, or 403 on `api-gateway`). On
+`[A-Za-z0-9_-]{1,64}` (else 400 `bad request`, or 403 on `api-gateway`); a
+`tenant_id` claim is held to the same pattern (else 403 `no_tenant`). With
+`identity.multiTenant` on `api-gateway`, every request must carry
+`X-Tenant-Id`, including a request with a single-tenant token, whose value
+must equal `tenant_id`; without it API Gateway answers its own 401. On
 a single-tenant `api-gateway` ingress it is checked but is not an
 authoriser identity source (making it one would turn every request without
 it into API Gateway's 401), so the authoriser's decision is cached per
@@ -1220,7 +1231,7 @@ JOSE header: `{ "alg": "RS256", "typ": "txn+jwt", "kid": "<KMS key id>" }`.
 | `scope` | the granted set, space-separated `<owner>/<name>`, sorted, compressed per target (§3.6) |
 | `aud` | `["agent:<agent>", "tools-gateway:<gw>", ...]`: one `tools-gateway:<gw>` for each tools gateway any target of `A.tools` lives on (the catalogue rows' `gateway`), sorted. An agent with no tools gets `["agent:<agent>"]`. (Amended 2026-11-03, ADR-0041: was `["agent:<agent>", "tools-gateway"]`; the bare `tools-gateway` is not accepted by any gateway, `default` included. §7.1 and §7.2 record the spike with the bare value). (Amended 2026-11-04: the implementation, `src/shared/authority.ts`, names the gateways of the targets of the GRANTED tools, `A.tools ∩ T.tools ∩ U.tools`, not of every target of `A.tools`; an agent granted no tool gets `["agent:<agent>"]`, which step 12 relies on for `late`) |
 | `act` | `{ "sub": "<ingress role ARN>" }` (RFC 8693) |
-| `txn` | a unique id per agent request (128 random bits, base64url) |
+| `txn` | a unique id per mint (128 random bits, base64url); one per cached token life, see the divergence note below |
 | `iat`, `exp` | issue time; `iat + lifetime` |
 | `jti` | unique per minted token |
 

@@ -248,7 +248,21 @@ describe.each(['api-gateway', 'agentcore-gateway'] as const)('v2 template, ingre
       .filter(([, p]) => p.Properties.Roles.some((r: any) => r.Ref === roleId))
       .flatMap(([, p]) => p.Properties.PolicyDocument.Statement);
     const own = statements.find((st: any) => st.Sid === 'OwnTenantPartitionOnly');
+    expect(own.Action.sort()).toEqual(['dynamodb:GetItem', 'dynamodb:Query']);
     expect(own.Condition).toEqual({ 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['TENANT#${aws:PrincipalTag/TenantId}'] } });
+    // Writes name only the cut row's attributes and the tenant row's version: a handler defect cannot SET agents or tools on #SUB.
+    const write = statements.find((st: any) => st.Sid === 'OwnTenantCutAttributesOnly');
+    expect(write.Action.sort()).toEqual(['dynamodb:ConditionCheckItem', 'dynamodb:DeleteItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem']);
+    expect(write.Condition).toEqual({
+      'ForAllValues:StringEquals': {
+        'dynamodb:LeadingKeys': ['TENANT#${aws:PrincipalTag/TenantId}'],
+        'dynamodb:Attributes': ['PK', 'SK', 'cutAgents', 'cutTools', 'updatedBy', 'updatedAt', 'version'],
+      },
+      'StringEqualsIfExists': { 'dynamodb:ReturnValues': ['NONE', 'UPDATED_OLD', 'UPDATED_NEW'] },
+    });
+    for (const attr of ['agents', 'tools', 'plan', 'status']) {
+      expect(write.Condition['ForAllValues:StringEquals']['dynamodb:Attributes']).not.toContain(attr);
+    }
     for (const st of statements) {
       expect(st.Condition?.['ForAllValues:StringEquals']?.['dynamodb:LeadingKeys'] ?? null).not.toBeNull();
     }
@@ -354,6 +368,16 @@ describe('v2 options', () => {
     const built = build('api-gateway', {}, MAX_TOOL_TARGETS + 1);
     expect(() => built.template()).toThrow(/tools gateway 'default' holds at most 100 ToolTargets/);
   }, 60_000);
+
+  it('an AgentBackend and a ToolTarget of one app cannot share a name, in either order (ADR-0035)', () => {
+    const { stack, ingress } = build('api-gateway'); // holds agent `default` and target `crm`
+    expect(
+      () => new ToolTarget(stack, 'Clash', { name: GATEWAY_TARGET_NAME, ingress, kind: 'lambda', function: toolFunction(stack, 'ClashFn'), tools: [{ name: 'x', description: 'x', inputSchema: {} }] }),
+    ).toThrow(/name 'default' is already declared in this app as an agent; an agent and a tool target cannot share a name/);
+    expect(
+      () => new AgentBackend(stack, 'Crm', { name: 'crm', ingress, agent: { codePath: FIXTURE_AGENT, modelId: 'm' }, needs: ['crm/chat'], tools: [] }),
+    ).toThrow(/name 'crm' is already declared in this app as a tool target/);
+  });
 
   it('a ToolTarget of an unknown kind, or with a bad name, fails synth (the kinds are in test/tool-target.cdk.test.ts)', () => {
     const { stack, ingress } = build('api-gateway');

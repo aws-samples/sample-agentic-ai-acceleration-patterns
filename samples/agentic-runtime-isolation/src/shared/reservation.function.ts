@@ -98,14 +98,25 @@ export function rowName(row: Pick<OwnedRow, 'PK' | 'SK'>): string {
 
 const keyOf = (row: Pick<OwnedRow, 'PK' | 'SK'>) => `${row.PK}\u0000${row.SK}`;
 
+/**
+ * Puts one row unless another owner holds it. A row that carries `kind`
+ * (`NAME#` rows: `agent` or `target`) is also refused when the same owner
+ * holds it under another kind: an `AgentBackend` and a `ToolTarget` sharing
+ * one explicit `owner` could otherwise claim one name, and a `need` of the
+ * agent would then match a tool of the target in `scope` and in Cedar.
+ */
 async function claim(client: DynamoDBDocumentClient, table: string, row: OwnedRow, owner: string): Promise<void> {
+  const kind = row.attributes?.kind;
   await client.send(
     new PutCommand({
       TableName: table,
       Item: { ...(row.attributes ?? {}), PK: row.PK, SK: row.SK, owner },
-      ConditionExpression: 'attribute_not_exists(PK) OR #owner = :owner',
-      ExpressionAttributeNames: { '#owner': 'owner' },
-      ExpressionAttributeValues: { ':owner': owner },
+      ConditionExpression:
+        kind === undefined
+          ? 'attribute_not_exists(PK) OR #owner = :owner'
+          : 'attribute_not_exists(PK) OR (#owner = :owner AND (attribute_not_exists(#kind) OR #kind = :kind))',
+      ExpressionAttributeNames: kind === undefined ? { '#owner': 'owner' } : { '#owner': 'owner', '#kind': 'kind' },
+      ExpressionAttributeValues: kind === undefined ? { ':owner': owner } : { ':owner': owner, ':kind': kind },
     }),
   );
 }
@@ -199,7 +210,11 @@ export async function handleEvent(event: ReservationEvent, client: DynamoDBDocum
         await claim(client, properties.TableName, row, owner);
       } catch (error) {
         if (error instanceof ConditionalCheckFailedException) {
-          return { status: 'FAILED', physicalResourceId, reason: `name ${rowName(row)} already registered by another stack` };
+          return {
+            status: 'FAILED',
+            physicalResourceId,
+            reason: `name ${rowName(row)} already registered by another stack${row.attributes?.kind === undefined ? '' : ', or by this owner as another kind'}`,
+          };
         }
         throw error;
       }

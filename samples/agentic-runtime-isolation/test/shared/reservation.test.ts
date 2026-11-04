@@ -1,11 +1,11 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { ConditionalCheckFailedException, DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DeleteCommand, DynamoDBDocumentClient, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { mockClient } from 'aws-sdk-client-mock';
 import 'aws-sdk-client-mock-jest';
-import { gatewayTargetKey, toolKey } from '../../src/shared/entitlements';
+import { gatewayTargetKey, nameKey, toolKey } from '../../src/shared/entitlements';
 import { gatewayLimitProblem, handleEvent, type OwnedRow, type ReservationEvent } from '../../src/shared/reservation.function';
 
 /** The owner-marked rows custom resource (ADR-0035) and its deploy-time gateway bound (ADR-0040, ADR-0041). */
@@ -87,5 +87,30 @@ describe('catalogue rows carry the gateway', () => {
     expect(outcome.status).toBe('SUCCESS');
     expect(doc).toHaveReceivedCommandWith(DeleteCommand, { Key: gatewayTargetKey('default', 'crm') });
     expect(doc).toHaveReceivedCommandTimes(QueryCommand, 0);
+  });
+});
+
+describe('name rows carry their kind (ADR-0035)', () => {
+  it('a NAME# row is claimed only while the holder is this owner under the same kind; other rows condition on the owner alone', async () => {
+    doc.on(QueryCommand).resolves({ Items: [] });
+    const rows: OwnedRow[] = [{ ...nameKey('crm'), attributes: { kind: 'target' } }, ...crmRows];
+    const outcome = await handleEvent(event('Create', rows, { GatewayLimit: limit }), client);
+    expect(outcome.status).toBe('SUCCESS');
+    expect(doc).toHaveReceivedCommandWith(PutCommand, {
+      Item: expect.objectContaining({ ...nameKey('crm'), kind: 'target' }),
+      ConditionExpression: 'attribute_not_exists(PK) OR (#owner = :owner AND (attribute_not_exists(#kind) OR #kind = :kind))',
+      ExpressionAttributeValues: { ':owner': 'stack-1#Catalogue', ':kind': 'target' },
+    });
+    expect(doc).toHaveReceivedCommandWith(PutCommand, {
+      Item: expect.objectContaining(toolKey('crm', 'get_account')),
+      ConditionExpression: 'attribute_not_exists(PK) OR #owner = :owner',
+      ExpressionAttributeValues: { ':owner': 'stack-1#Catalogue' },
+    });
+  });
+
+  it('the same owner holding the name as another kind fails the deploy and says so', async () => {
+    doc.on(PutCommand).rejects(new ConditionalCheckFailedException({ message: 'c', $metadata: {} }));
+    const outcome = await handleEvent(event('Create', [{ ...nameKey('crm'), attributes: { kind: 'agent' } }], { Owner: 'shared' }), client);
+    expect(outcome).toEqual({ status: 'FAILED', physicalResourceId: 'reservation:NAME#crm', reason: 'name crm already registered by another stack, or by this owner as another kind' });
   });
 });

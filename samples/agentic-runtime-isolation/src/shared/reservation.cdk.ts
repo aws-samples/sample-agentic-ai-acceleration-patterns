@@ -59,6 +59,35 @@ export interface OwnedRowsProps {
   readonly gatewayLimit?: GatewayLimit;
 }
 
+/** The `NAME#` rows one CDK app has declared so far, by app root: name → kind. */
+const namesByApp = new WeakMap<Construct, Map<string, string>>();
+
+/**
+ * Why `rows` clash with a `NAME#` row another construct of this app already
+ * declared under another kind, or undefined. The deploy-time condition in
+ * reservation.function.ts refuses the same clash across stacks; this catches
+ * it at synth when an `AgentBackend` and a `ToolTarget` of one app share a
+ * name (a `need` of the agent would otherwise match a tool of the target).
+ */
+export function nameClashProblem(scope: Construct, rows: readonly OwnedRow[]): string | undefined {
+  const root = scope.node.root;
+  const names = namesByApp.get(root) ?? new Map<string, string>();
+  namesByApp.set(root, names);
+  for (const row of rows) {
+    const kind = row.attributes?.kind;
+    if (!row.PK.startsWith(KEY_PREFIX.name) || kind === undefined) {
+      continue;
+    }
+    const name = row.PK.slice(KEY_PREFIX.name.length);
+    const held = names.get(name);
+    if (held !== undefined && held !== kind) {
+      return `name '${name}' is already declared in this app as a${held === 'agent' ? 'n agent' : ' tool target'}; an agent and a tool target cannot share a name (ADR-0035)`;
+    }
+    names.set(name, kind);
+  }
+  return undefined;
+}
+
 export class OwnedRows extends Construct {
   readonly resource: CustomResource;
 
@@ -70,6 +99,10 @@ export class OwnedRows extends Construct {
     const problem = ownerProblem(props.owner);
     if (problem !== undefined) {
       throw new Error(`OwnedRows: owner ${problem}`);
+    }
+    const clash = nameClashProblem(this, props.rows);
+    if (clash !== undefined) {
+      throw new Error(`OwnedRows: ${clash}`);
     }
     const logGroup = new logs.LogGroup(this, 'Logs', {
       retention: logs.RetentionDays.ONE_MONTH,

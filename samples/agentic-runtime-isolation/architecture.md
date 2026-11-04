@@ -70,7 +70,7 @@ IAM principals on the path:
 | Tenant role (`TenantModelRole`, or `tvm.role`) | `SharedIngress` or the deployer | the agents' models (one statement per model, ADR-0018); with `tvm.role`, the deployer's tenant data under ABAC |
 | Tools gateway role, one per gateway | `ToolsGateway` | invoke its interceptors and its registered tool functions; `GetPolicyEngine`, `AuthorizeAction`, `PartiallyAuthorizeActions` (M-61) |
 | Tool tenant role, one per tool target with `tvm.role` | the deployer | trusts the tool function's role, requires the `TenantId` tag, scopes data by it (P-15) |
-| `TenantAdminRole` | `EntitlementApi` | item calls on `TENANT#${aws:PrincipalTag/TenantId}` only (ADR-0033) |
+| `TenantAdminRole` | `EntitlementApi` | item calls on `TENANT#${aws:PrincipalTag/TenantId}` only; writes bounded to the cut row's attributes and `version` by `dynamodb:Attributes` (ADR-0033) |
 
 See the [specification](./design/agentic-runtime-isolation.spec.md) §3.2.
 
@@ -281,8 +281,10 @@ stack outputs rather than the document; both depart from
 
 Every owned row is written with `attribute_not_exists(PK) OR owner = :owner`,
 so a row another stack holds fails the deploy with
-`name <name> already registered by another stack`; Delete removes only rows
-still carrying this owner. The function's role may write only the partition
+`name <name> already registered by another stack`; a `NAME#` row also
+carries `kind` (`agent` or `target`) and is refused when the same owner
+holds it under the other kind, and one CDK app refuses the clash at synth.
+Delete removes only rows still carrying this owner. The function's role may write only the partition
 keys it owns (`dynamodb:LeadingKeys`). See the
 [specification](./design/agentic-runtime-isolation.spec.md) §4.
 
@@ -393,7 +395,7 @@ Each item was checked in code on 2026-11-04:
 - A Cedar `<target>/<tool>` entry cannot match another target (`xcrm/a` does not start with `crm/`, ` crm/` needs the space).
 - The TVM cache key is the full sorted session tag set; module scope holds only clients, config and the caches.
 - `conversationId` is `[A-Za-z0-9]{16,64}` and always qualified by a claim-derived prefix (ADR-0002, ADR-0039).
-- `TenantAdminRole` reaches only `TENANT#${aws:PrincipalTag/TenantId}` items; the owned-rows role only its own partition keys.
+- `TenantAdminRole` reaches only `TENANT#${aws:PrincipalTag/TenantId}` items, and its writes may name only `PK`, `SK`, `cutAgents`, `cutTools`, `updatedBy`, `updatedAt` and `version`, so it cannot change its own `#SUB` row's `agents` or `tools`; the owned-rows role only its own partition keys.
 - The registry is a trust boundary: only an agent's registry-entry role may write its entry, the ingress role only reads the prefix, and an entry outside the ingress's account is refused.
 - Each Runtime's resource policy names the one ingress role and denies every other principal; the ingress role's grant is tag-conditioned (ADR-0001, ADR-0024).
 - No log line carries a token, a context value, credentials or a prompt; the integ sweep found no signature segment in 139 log groups.

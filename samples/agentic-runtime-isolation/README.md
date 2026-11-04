@@ -654,7 +654,7 @@ input; a v2 refusal adds a reason code that is also the log line's `reason`:
 | Status | Body | When |
 |---|---|---|
 | 400 | `bad request` | malformed `prompt`, `conversationId` or `X-Tenant-Id`; `conversationId` with `session` off |
-| 400 | `bad request: tenant_required` | `agentcore-gateway`: the token carries `tenants` and no `X-Tenant-Id` was sent. On a multi-tenant `api-gateway` ingress the header is an authoriser identity source, so a request without it is API Gateway's own 401 before the authoriser runs (ADR-0043) |
+| 400 | `bad request: tenant_required` | `agentcore-gateway`: the token carries `tenants` and no `X-Tenant-Id` was sent. On a multi-tenant `api-gateway` ingress the header is an authoriser identity source, so a request without it is API Gateway's own 401 before the authoriser runs, also for a single-tenant token, whose value must equal `tenant_id` (ADR-0043) |
 | 401 | `unauthorized` | missing or invalid token, or a transaction token presented as identity token (403 on `api-gateway`, ADR-0015) |
 | 403 | `forbidden` | no tenant claim, `tenants` without `multiTenant`, a floor scope or a `claimTags` claim missing |
 | 403 | `forbidden: tenant_not_allowed` | `X-Tenant-Id` not in `tenants`, or not the token's `tenant_id` |

@@ -24,6 +24,13 @@ import { TENANT_TAG_KEY } from './tvm';
 
 export { KEY_PREFIX, SORT_KEY, nameKey, planKey, tenantKey, toolKey, userCutKey } from './entitlements';
 
+/**
+ * The only attributes a tenant admin's role may name in a write (ADR-0033,
+ * M-45): the keys, the cut row's fields, and the `version` bump on the
+ * tenant row. `agents`, `tools`, `plan` and `status` are not here.
+ */
+export const TENANT_ADMIN_WRITABLE_ATTRIBUTES: readonly string[] = [PK, SK, 'cutAgents', 'cutTools', 'updatedBy', 'updatedAt', 'version'];
+
 /** Defaults (spec §3.3). */
 export const DEFAULT_MAX_AGENTS_PER_TENANT = 1000;
 export const DEFAULT_MAX_TOOLS_PER_TENANT = 1000;
@@ -128,15 +135,32 @@ export class EntitlementStore extends Construct {
    * call is limited to the caller's own tenant partition, so a cut for
    * another tenant fails in IAM whatever the handler does (P-8 applied to
    * the store). `TransactWriteItems` is authorised per item action.
+   *
+   * Writes are further limited to the cut row's attributes and the tenant
+   * row's `version` (`dynamodb:Attributes`, M-45): the partition also holds
+   * the tenant's `#SUB` subscription row, and without this bound a handler
+   * defect could `SET agents` or `tools` on it and grant the tenant what it
+   * did not buy. "Cut, never add" is then IAM, not only code.
+   * `dynamodb:ReturnValues` is pinned as the condition key requires.
    */
   grantTenantAdminPartition(role: iam.IRole): void {
+    const ownPartition = { 'dynamodb:LeadingKeys': [`${KEY_PREFIX.tenant}\${aws:PrincipalTag/${TENANT_TAG_KEY}}`] };
     role.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'OwnTenantPartitionOnly',
-        actions: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:ConditionCheckItem'],
+        actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+        resources: [this.table.tableArn],
+        conditions: { 'ForAllValues:StringEquals': ownPartition },
+      }),
+    );
+    role.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'OwnTenantCutAttributesOnly',
+        actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:ConditionCheckItem'],
         resources: [this.table.tableArn],
         conditions: {
-          'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': [`${KEY_PREFIX.tenant}\${aws:PrincipalTag/${TENANT_TAG_KEY}}`] },
+          'ForAllValues:StringEquals': { ...ownPartition, 'dynamodb:Attributes': TENANT_ADMIN_WRITABLE_ATTRIBUTES },
+          'StringEqualsIfExists': { 'dynamodb:ReturnValues': ['NONE', 'UPDATED_OLD', 'UPDATED_NEW'] },
         },
       }),
     );

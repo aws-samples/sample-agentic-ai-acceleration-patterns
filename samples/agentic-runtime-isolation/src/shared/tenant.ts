@@ -67,7 +67,7 @@ export function selectTenant(claims: TenantClaims, header: string | undefined, m
     }
     return header;
   }
-  if (typeof single !== 'string' || single.length === 0) {
+  if (typeof single !== 'string' || !TENANT_ID_PATTERN.test(single)) {
     throw new TenantSelectionError(403, 'no_tenant');
   }
   if (header !== undefined && header !== single) {

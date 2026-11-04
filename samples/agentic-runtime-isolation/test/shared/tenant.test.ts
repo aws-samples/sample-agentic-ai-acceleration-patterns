@@ -39,6 +39,10 @@ describe('selectTenant', () => {
     expect(refusal(() => selectTenant({}, undefined, true))).toEqual({ status: 403, reason: 'no_tenant' });
     expect(refusal(() => selectTenant({ tenant_id: '' }, undefined, false))).toEqual({ status: 403, reason: 'no_tenant' });
     expect(refusal(() => selectTenant({ tenant_id: 42 }, undefined, false))).toEqual({ status: 403, reason: 'no_tenant' });
+    // The single claim is held to the same pattern as `tenants[]` entries and the header.
+    expect(refusal(() => selectTenant({ tenant_id: 't a' }, undefined, false))).toEqual({ status: 403, reason: 'no_tenant' });
+    expect(refusal(() => selectTenant({ tenant_id: 'TENANT#x' }, undefined, false))).toEqual({ status: 403, reason: 'no_tenant' });
+    expect(refusal(() => selectTenant({ tenant_id: 'x'.repeat(65) }, undefined, false))).toEqual({ status: 403, reason: 'no_tenant' });
     expect(refusal(() => selectTenant({ tenants: [] }, 't-a', true))).toEqual({ status: 403, reason: 'no_tenant' });
     expect(refusal(() => selectTenant({ tenants: 't-a' }, 't-a', true))).toEqual({ status: 403, reason: 'no_tenant' });
     expect(refusal(() => selectTenant({ tenants: ['t a'] }, 't-a', true))).toEqual({ status: 403, reason: 'no_tenant' });
