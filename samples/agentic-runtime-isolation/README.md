@@ -256,7 +256,9 @@ rule that refuses to deploy.
 The demo's inputs are CDK context keys, parsed by `parseDemoContext` in
 [`src/demo.cdk.ts`](./src/demo.cdk.ts); synthesis fails fast naming a missing
 or malformed key. The demo always creates two tools gateways (`default`, and
-`finance` with `responseFilter`) and the `crm` and `invoices` targets.
+`finance` with `responseFilter`) and the `crm` and `invoices` targets; two,
+so that the integration test covers a multi-gateway `aud` (see "Laying out
+tools gateways" below).
 
 | Context key | Values | Default | What it does |
 |---|---|---|---|
@@ -447,6 +449,28 @@ fails naming the prop. The TSDoc in
 | `toolsGateways.<name>.contextLifetime` | 60 s | `exp` of the signed tool context, 10 s to 300 s |
 | `toolsGateways.<name>.interceptorProvisionedConcurrency` | 1 | On that gateway's interceptor; 0 turns it off |
 | `toolsGateways.<name>.responseFilter` | `false` | Trim `tools/list` to the exact granted tools |
+
+**Laying out tools gateways.** A gateway is a tool partition, not a tenant
+partition: every tenant shares every gateway, and the tenant wall is the
+tool's tenant role (spec §6.1), whichever gateway the call came through.
+Several domains on one gateway is the default and is fine; the split exists
+because one Policy engine's Cedar schema holds about 330 tools (ADR-0041),
+and because the per-tenant rate limit and `responseFilter` are set per
+gateway. Each extra gateway costs one more Policy engine, one more
+interceptor (provisioned concurrency 1 unless turned off), one more MCP
+client in each agent that uses it, and another 10 rps of per-tenant budget.
+Deploy time does not change: a `ToolTarget` is one star permit either way.
+
+| Layout | When | Trade |
+|---|---|---|
+| One gateway, all domains (`{ default: {} }`) | under `maxToolsPerGateway` and one `responseFilter` setting fits all | one rate bucket per tenant, one MCP client per agent |
+| One gateway per tool domain (the demo: `crm` on `default`, `invoices` on `finance`) | a domain needs `responseFilter` or its own rate budget, or a domain nears the bound | a tenant's budget is per domain; an agent holds one client per domain in its `aud` |
+| Pack by count | thousands of tools, no per-domain rules | leave a margin: a target that grows past the bound fails its deploy, and moving a target changes every granted token's `aud` |
+| One gateway per agent | agents use disjoint tool sets | shortest `tools/list`; a tool two agents share needs a target on each gateway, under two names (target names are unique per ingress) |
+
+Pick the first that fits, in that order. The demo uses two gateways only to
+exercise the second layout: an `aud` with two entries, a token for one
+gateway refused by the other, and `responseFilter` on one of them.
 
 `AgentBackend` takes `name` (`[a-z0-9-]{1,32}`), `ingress` (a
 `SharedIngress` or `SharedIngressRef`), `agent` (`{ codePath, modelId,
