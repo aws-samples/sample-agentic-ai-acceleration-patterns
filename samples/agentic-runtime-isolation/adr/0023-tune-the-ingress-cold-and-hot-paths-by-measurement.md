@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0023: Tune the ingress cold and hot paths by measurement
 
-- Status: Accepted
+- Status: Superseded by ADR-0043
 - Date: 2026-10-27
 - Amends: ADR-0015
 - Deciders: Dave Roberts (PSA)
@@ -44,3 +44,5 @@ Harder: `warm()` is now asynchronous and the handlers await `ready`; a test that
 Measured in `eu-central-1` on the ingress Lambda of `api-gateway`, from its log group (the first `request served` line of each log stream whose REPORT line carries an init duration; own work is `totalMs` minus the backend invoke): the ingress's own work on a cold environment's first request went from 545 ms (baseline, ten environments) to 359 ms (changes 1 and 2) to 198 ms (changes 3 and the JWKS fetch at init); init went from 227 ms to about 330 ms. The 200 ms left is the first real `AssumeRole` and `UpdateItem` and the SDK's first-command setup, none of which can run before a tenant arrives. The warm path is unchanged at about 5 ms. The client-side table is in the README under Latency; `scripts/perf.sh` reproduces it.
 
 Revisit if measurement shows the pre-connects are not reused (the Agent keys sockets by host and TLS options; the SDK's request must match), or if SnapStart becomes available for Node.js response streaming.
+
+**2026-11-04.** Superseded by ADR-0043: in v2 the authoriser's Allow carries a minted transaction token, so the result cache is at most 60 s and at most `transactionToken.ttl` minus the longest stream (120 s), and the mint's reuse margin is the cache TTL plus 120 s; with `identity.multiTenant`, `X-Tenant-Id` is a cache identity source. Changes 1 to 5 of this record (warm-up at init, the shared pre-connected pool, TVM refresh-ahead, the bounded limiter client) are unchanged and carry over.

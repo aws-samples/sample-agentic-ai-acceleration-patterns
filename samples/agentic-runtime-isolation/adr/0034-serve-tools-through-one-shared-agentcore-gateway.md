@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-02
-- Amended by: ADR-0040, ADR-0041
+- Amended by: ADR-0040, ADR-0041, integration runs 1 to 9 (2026-11-04)
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -37,3 +37,5 @@ Easier: one issuer, one store, one demo; a tool is one `ToolTarget` construct (L
 **2026-11-03.** Reviewed: the tool keeps its own `sts:AssumeRole`, on one tenant role, with the `TenantId` tag taken only from a verified `_ri_ctx`. The agent is denied `AssumeRole` because a model drives it; a tool is vendor code with no model, so the ingress rule applies to it unchanged. Moving the TVM into the interceptor would make one Lambda able to assume every tool role and would put credentials, even encrypted, in the request body and the Gateway application log. Rejected.
 
 **2026-11-03.** Amended by ADR-0041: one star permit per target instead of per-tool policies; several tools gateways under a 300-tool cap each; an optional RESPONSE interceptor for per-tool list filtering.
+
+**2026-11-04.** Amended by integration runs 1 to 9 (spec §5.4; no new decision): an interceptor refusal is the documented `transformedGatewayResponse`, HTTP 403 with JSON-RPC error code `-32003` and message `forbidden: <reason>` (run 7, step 13); the Gateway's own refusal stays `-32002` `insufficient_scope`. A transaction token minted for another tools gateway fails the interceptor's own signature-and-audience verification and is `token_invalid`, not `aud_mismatch`; a header `typ` other than `txn+jwt` is `aud_mismatch`. Each `tools/call` writes one `tool admitted` line with `decision: admit | deny` (was `tool refused` / `decision: refuse`); refusals of other methods log `tools request refused`.

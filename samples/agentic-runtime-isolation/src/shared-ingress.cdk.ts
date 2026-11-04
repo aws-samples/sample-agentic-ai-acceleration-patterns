@@ -140,7 +140,7 @@ export interface TransactionTokenProps {
 export interface EntitlementsProps {
   /** Identity-token scope the tenant-admin operations require. Default `'entitlements/admin'`. */
   readonly adminScope?: string;
-  /** Bound on `agents` in a tenant or plan row. Default 100. */
+  /** Bound on `agents` in a tenant or plan row. Default 1000. */
   readonly maxAgentsPerTenant?: number;
   /** Bound on `tools` in a tenant or plan row. Default 1000. */
   readonly maxToolsPerTenant?: number;
