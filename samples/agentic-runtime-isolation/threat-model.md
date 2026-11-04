@@ -504,3 +504,22 @@ repository.
 | Holmes (medium) | Supply chain: caret version ranges | `package.json` | Fixed: every dependency pinned to its lock-file version in `.projenrc.ts` | `c6f533e` |
 | Holmes (medium) | bash `ifs-tampering` | `scripts/integ.sh` | Fixed (same change as the ASH finding) | `c6f533e` |
 | Holmes (low, gitleaks) | 3 `generic-api-key` on `getKey: JWTVerifyGetKey` | `src/shared/verifier.ts:90`, `src/shared/verifier.ts:101`, `test/helpers.ts:20` | False positive: a TypeScript type name, not a key. Marked false positive in Holmes | `121d7d3` (still present, accepted) |
+
+### v2 review, 2026-11-04
+
+Run against the v2 tree after `AWS_PROFILE=pg npx projen build` (synth under
+the deploy profile, `cdk.out/` present), one day after integration run 9.
+ASH v3.2.0 in local mode; ProtoShield v0.18.0 with every plugin (license
+headers, Semgrep, CDK NAG, CVE, Checkov, secrets, IAM least privilege).
+Semgrep, CDK NAG and Checkov reported 0 findings. ProtoShield's least-privilege
+agent noted the ABAC session-tag conditions, the scoped resource patterns and
+the per-role grants as positive findings.
+
+| Scanner | Finding | File | Outcome | Commit |
+|---|---|---|---|---|
+| ASH (detect-secrets) | 20 high-entropy strings | `src/smithy/classpath.json` | False positive: Maven artifact hashes in gitignored Smithy codegen output. `src/smithy/**` added to `ignore_paths` in `.ash/.ash.yaml` | this review |
+| ASH, ProtoShield (CVE) | minimatch 10.2.6 ([CVE-2026-118764](https://github.com/isaacs/minimatch/security/advisories/GHSA-g3hv-75wg-m249), pattern amplification), glob 10.5.0 ([CVE-2026-118773](https://github.com/isaacs/node-glob/security/advisories/GHSA-3g3m-2fjr-6pw4)), deepmerge 4.3.1 (CVE-2026-93753) | `package-lock.json` | Accepted: all three are transitive dependencies of build and test tooling (aws-cdk-lib, eslint, jest, Smithy codegen), none is bundled into a Lambda or the agent, and no runtime code hands caller input to a glob. `npm audit` offers only a jest major as a fix. Revisit when the pinned tooling moves | this review |
+| ProtoShield (license headers) | 106 files "MIT instead of Apache 2.0" | every authored file | False positive: the scanner assumes Apache 2.0; the repository's `LICENSE` is MIT-0 and every header says `SPDX-License-Identifier: MIT-0` | - |
+| ProtoShield (secrets) | "hardcoded JWT" `TXN_TOKEN` | `test/helpers.ts:124` | False positive: a stand-in token whose payload is `{"tenant_id":"tenant-a"}` and whose signature segment is the literal `sig`; it verifies against nothing and the authority step is stubbed in the tests that use it | - |
+| ProtoShield (IAM) | `kms:GetPublicKey` on `Resource: *` in the key policy | `src/shared/token-signer.cdk.ts` (`RenderJwks`) | False positive: a KMS key policy applies to its own key only, and `*` is the only resource a key policy accepts; the statement grants the JWKS renderer the public half of that one key (M-40) | - |
+| ProtoShield (IAM) | `xray:*` and `cloudwatch:PutMetricData` on `Resource: *` | `src/backend/agentcore-runtime.cdk.ts` | Accepted (ADR-0014): neither action supports resource ARNs; `PutMetricData` is conditioned on the `bedrock-agentcore` namespace | - |
