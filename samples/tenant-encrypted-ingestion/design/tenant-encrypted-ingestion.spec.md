@@ -47,7 +47,9 @@ not by application code:
 
 The sample ships the pattern as a CDK construct, `TenantEncryptedIngestion`,
 plus a thin demo stack, an integration test that proves the boundary from
-both sides, and a demo script.
+both sides, a demo script, and one example custom validator
+(`examples/validator-pdf-pages`) that shows how a deployer extends the
+validation chain (P-11).
 
 ### 1.1 Deployment model
 
@@ -78,8 +80,11 @@ deliverable (standard §4.5).
   model calls. The pipeline validates and lands; it publishes a
   `DeliveryAccepted` event that a later sample (rule-set-driven extraction
   with a reviewer gate) consumes.
-- **Not malware scanning.** Validation is structural (size, type, magic
-  bytes, archive sanity). A scanner is an extension seam.
+- **Not malware scanning, not content rules.** Built-in validation is
+  structural (size, type, magic bytes, archive sanity). Anything beyond that
+  (a scanner, a schema check, a tenant-specific rule) is a **custom
+  validator** the deployer plugs in (§3.5, P-11); the sample ships the
+  contract and one example validator, not the checks themselves.
 - **Not identity.** Tenant users authenticate with `tenant-identity`; the
   sample verifies its token contract and never issues tokens.
 - **Not a control plane.** Tenant keys are created through this sample's
@@ -200,6 +205,23 @@ is a quarantine with a one-day lifecycle; a rejected object is deleted at
 once. Downstream consumers subscribe to `DeliveryAccepted` and never read
 `ingest/`.
 
+### P-11. Validation is a chain the deployer extends, behind one contract
+
+The processor runs the built-in structural checks first, then every custom
+validator the deployer supplied, in list order, and stops at the first
+`REJECT`. A validator is a function the construct invokes with a JSON
+request and a JSON verdict (§3.5); it never receives AWS credentials and
+never reaches the bucket on its own: it gets a presigned `GET` for the one
+object, signed by the tenant session and short-lived, so a validator that
+misbehaves can read one document for a few minutes and nothing else. The
+contract names no carrier: today it rides on a synchronous Lambda invoke;
+a Step Functions task could carry the same request and verdict later
+(§11). Rules in: validators in any language or account, chained, bounded by
+a timeout, visible per tenant in logs. Rules out: validator code bundled
+into the processor (it would run under the processor's role and break P-8),
+and validators that vote asynchronously over the event bus (a silent voter
+would block every delivery).
+
 ---
 
 ## 3. System shape
@@ -213,7 +235,8 @@ once. Downstream consumers subscribe to `DeliveryAccepted` and never read
 | Registry | Amazon DynamoDB | tenant key rows and delivery rows, tenant-partitioned (§4) |
 | Ingestion API | API Gateway REST + Lambda | `/platform/*` (IAM, vendor) and `/tenant/*` (token authoriser, tenant users), modelled in Smithy |
 | Token authoriser | Lambda | verifies the `tenant-identity` token contract (`ARCHITECTURE.md` §2.1) and passes `tenantId`, `sub` to the integration |
-| Pipeline | EventBridge, SQS (+ DLQ), Lambda | S3 `Object Created` on `ingest/` -> queue -> processor; validates, copies to `documents/`, writes the delivery row, publishes `DeliveryAccepted` or `DeliveryRejected` on the sample's event bus |
+| Pipeline | EventBridge, SQS (+ DLQ), Lambda | S3 `Object Created` on `ingest/` -> queue -> processor; runs the structural checks and the validator chain, copies to `documents/`, writes the delivery row, publishes `DeliveryAccepted` or `DeliveryRejected` on the sample's event bus |
+| Custom validators | Lambda (deployer-owned) | zero or more functions the processor invokes in order with the §3.5 contract; the sample ships one example (`examples/validator-pdf-pages`, rejects a PDF over N pages) to show the shape |
 | Token vending | AWS STS | API and processor assume a tenant role with a `TenantId` session tag and a session policy (P-2) |
 | Observability | CloudWatch Logs, Contributor Insights, optional EMF | `tenantId` field everywhere; top-tenant rules for deliveries, bytes, rejections, key failures |
 
@@ -249,6 +272,9 @@ once. Downstream consumers subscribe to `DeliveryAccepted` and never read
 | `allowedContentTypes` | string[] | `['application/pdf','application/zip','image/png','image/jpeg','image/tiff']` | checked against the declared type and the magic bytes |
 | `uploadUrlTtlSeconds` | 60..3600 | `900` | presigned URL lifetime |
 | `dropRetentionDays` | 1..7 | `1` | lifecycle on `ingest/` |
+| `validators` | `IDeliveryValidator[]` | `[]` | custom validators run after the structural checks, in order (P-11, §3.5). The construct ships `LambdaValidator` |
+| `validatorObjectUrlTtlSeconds` | 60..900 | `300` | lifetime of the presigned `GET` handed to each validator |
+| `onValidatorError` | `'hold' \| 'reject'` | `'hold'` | what happens when a validator fails after retries: `hold` leaves the message in the DLQ with the object in the drop (an operator can replay); `reject` marks the delivery `REJECTED: VALIDATOR_ERROR` and deletes the drop. Neither lands the object |
 | `perTenantMetrics` | boolean | `false` | emit EMF per tenant in addition to the structured log fields (P-9) |
 | `logRetention` | `logs.RetentionDays` | one month | every log group |
 
@@ -261,6 +287,61 @@ prefix) and fails fast when it is missing.
 `bucket`, `apiUrl`, `ingestionRole` (the role every `tenant-key` key policy
 must trust), `eventBus`, `registryTable`, `tenantRole` (the ABAC role both
 functions assume), `keyManagementRole`.
+
+### 3.5 Validator contract
+
+```ts
+export interface IDeliveryValidator {
+  readonly name: string;            // [a-z0-9-]{1,32}, unique in the chain; appears in reasons and logs
+  readonly timeout: Duration;       // <= 10 minutes; the processor's timeout must cover the chain
+  bind(scope: Construct, processor: iam.IGrantable): void;   // grant invoke, nothing else
+  readonly carrier: 'lambda';       // the one carrier today (P-11)
+  readonly functionArn: string;     // for 'lambda'
+}
+```
+
+`LambdaValidator(fn: lambda.IFunction, opts?: { name?, timeout? })` is the
+shipped implementation. Its `bind` grants the processor `lambda:InvokeFunction`
+on `fn`; it grants `fn` nothing.
+
+**Request** (one invocation per validator per delivery):
+
+```json
+{
+  "version": "1",
+  "tenantId": "a1b2c3",
+  "deliveryId": "01JBX...",
+  "fileName": "case-4711.pdf",
+  "contentType": "application/pdf",
+  "sizeBytes": 1834022,
+  "sha256": "9f86d0...",
+  "objectUrl": "https://<bucket>.s3.<region>.amazonaws.com/ingest/a1b2c3/01JBX.../case-4711.pdf?X-Amz-...",
+  "objectUrlExpiresAt": "2026-11-04T13:05:00Z",
+  "previous": [{ "validator": "structural", "verdict": "ACCEPT" }]
+}
+```
+
+`objectUrl` is a presigned `GET` signed by the tenant session (§7.2), so it
+can fetch exactly this object and only until `objectUrlExpiresAt`. It is
+never logged. A validator MUST NOT persist it.
+
+**Verdict:**
+
+```json
+{ "version": "1", "verdict": "ACCEPT" }
+{ "version": "1", "verdict": "REJECT", "code": "TOO_MANY_PAGES", "message": "412 pages, limit 300" }
+```
+
+`code` is `[A-Z0-9_]{1,40}`; the delivery's `reason` becomes
+`<name>:<code>`. `message` is stored on the row and returned by
+`GetDelivery`; it MUST NOT contain document content (the validator author
+owns that promise; the README says so). A verdict that fails schema
+validation, a function error, or a timeout is a **validator error** and
+follows `onValidatorError`; it is never read as `ACCEPT`.
+
+The chain stops at the first `REJECT`. `previous` lets a later validator
+see what ran before it. The processor logs one line per validator call:
+`tenantId`, `deliveryId`, `validator`, `verdict`, `code`, `durationMs`.
 
 ---
 
@@ -296,7 +377,9 @@ see and a retry can finish (the same shape as tenant-identity ADR-0021).
 | `declaredContentType`, `declaredSizeBytes` | from `CreateDelivery` |
 | `sizeBytes`, `sha256` | measured by the processor |
 | `status` | `AWAITING_UPLOAD` -> `PROCESSING` -> `ACCEPTED` \| `REJECTED` \| `KEY_UNAVAILABLE`; `AWAITING_UPLOAD` -> `EXPIRED` when the URL lifetime passes with no object |
-| `reason` | on `REJECTED`: `TOO_LARGE`, `TYPE_MISMATCH`, `UNSUPPORTED_TYPE`, `BAD_ARCHIVE`, `KEY_MISMATCH`; on `KEY_UNAVAILABLE`: the KMS error code |
+| `reason` | on `REJECTED`: `structural:TOO_LARGE`, `structural:TYPE_MISMATCH`, `structural:UNSUPPORTED_TYPE`, `structural:BAD_ARCHIVE`, `structural:KEY_MISMATCH`, `<validator>:<code>` from a custom validator, `<validator>:VALIDATOR_ERROR` under `onValidatorError: reject`; on `KEY_UNAVAILABLE`: the KMS error code |
+| `reasonMessage` | the validator's `message`, if any |
+| `validators` | list of `{validator, verdict, code?, durationMs}` in run order |
 | `createdBy` | `sub` of the requesting user (an id, never user data) |
 | `expiresAt` | TTL for `AWAITING_UPLOAD`/`EXPIRED`/`REJECTED` rows (30 days); `ACCEPTED` rows have no TTL |
 
@@ -502,13 +585,22 @@ tenant PUT (presigned) ──► s3://<bucket>/ingest/<tenantId>/<deliveryId>/<f
               2. assume tenantRole {TenantId}
               3. HeadObject: SSEKMSKeyId == key row's keyArn, else REJECTED KEY_MISMATCH
                  size <= max, else REJECTED TOO_LARGE
-              4. GetObject (streamed): magic bytes vs declared type; ZIP central directory sane
-              5. CopyObject -> documents/<tenantId>/<deliveryId>/<file>, SSE-KMS same key
-              6. DeleteObject on the drop; row -> ACCEPTED (conditional); counters; event
-   KMS AccessDenied / DisabledException / KMSInvalidStateException at 3-5
+              4. GetObject (streamed): magic bytes vs declared type; ZIP central directory sane; sha256
+              5. for each validator in order (P-11, §3.5):
+                   presign GET (tenant session, validatorObjectUrlTtlSeconds) -> Invoke -> verdict
+                   REJECT -> row REJECTED <name>:<code>, delete drop, event, stop
+                   error/timeout/bad verdict -> onValidatorError (hold: throw; reject: as REJECT)
+              6. CopyObject -> documents/<tenantId>/<deliveryId>/<file>, SSE-KMS same key
+              7. DeleteObject on the drop; row -> ACCEPTED (conditional); counters; event
+   KMS AccessDenied / DisabledException / KMSInvalidStateException at 3-6
               -> row KEY_UNAVAILABLE, key row REVOKED, event, message deleted (no retry)
    any other error -> throw (SQS retry, then DLQ)
 ```
+
+The processor's timeout is computed at synth: structural budget plus the
+sum of validator timeouts plus the copy budget, capped at 15 minutes; a
+chain that does not fit fails synth with the validator names and their
+timeouts. The queue's visibility timeout is six times that value.
 
 Idempotency: the `AWAITING_UPLOAD -> PROCESSING` transition is a conditional
 write; a second event for the same object sees `PROCESSING` or a terminal
@@ -573,9 +665,20 @@ demo stack. Steps, in README order:
 6. **Cross-tenant read.** Under a session for A, `GetObject` B's landed
    object -> `AccessDenied` from S3 (session policy) before KMS is reached.
 7. **Rejections.** Declared `application/pdf`, upload a ZIP -> `REJECTED
-   TYPE_MISMATCH`; oversize declared -> 400 at `CreateDelivery`; a URL left
-   unused past its TTL -> `EXPIRED` after the sweep (the test sets a short
-   TTL via context).
+   structural:TYPE_MISMATCH`; oversize declared -> 400 at `CreateDelivery`;
+   a URL left unused past its TTL -> `EXPIRED` after the sweep (the test
+   sets a short TTL via context).
+7b. **Custom validators.** The demo stack wires two `LambdaValidator`s:
+   the shipped `pdf-pages` example (limit 3 pages) and a test validator
+   `always-error` that throws. Upload a 5-page PDF -> `REJECTED
+   pdf-pages:TOO_MANY_PAGES`, `reasonMessage` set, `validators` on the row
+   lists `structural ACCEPT` then `pdf-pages REJECT`, and `always-error` was
+   never invoked (chain stopped). Upload a 2-page PDF with `always-error`
+   enabled via context -> under `onValidatorError: hold` the message lands
+   in the DLQ and the object is still in the drop; under `reject` the row is
+   `REJECTED always-error:VALIDATOR_ERROR`. The test asserts the validator's
+   log line carries `tenantId` and `durationMs` and that no log line
+   contains `X-Amz-Signature`.
 8. **Revocation (`tenant-key`).** Disable B's key; `CreateDelivery` B,
    upload -> `KEY_UNAVAILABLE`, key row `REVOKED`, `DeliveryKeyUnavailable`
    event, DLQ empty. Re-enable; `GetTenantKey` -> `ACTIVE`; a new delivery
@@ -605,7 +708,13 @@ Runtime target: under 25 minutes, under $1 per run.
   tenant-side tooling and a vendor-defined envelope format.
 - **Transfer endpoint.** AWS Transfer Family (SFTP) in front of `ingest/`,
   one server, per-tenant users with a session policy identical to §7.2.
-- **Malware scan** between step 4 and step 5 of the pipeline.
+- **Step Functions carrier for validators.** A second `IDeliveryValidator`
+  carrier (`'state-machine'`) that runs the same §3.5 request and verdict
+  as a Step Functions task, for scans longer than a Lambda invoke or for
+  parallel branches. Validators do not change; the processor starts an
+  execution and waits for a callback instead of invoking.
+- **Malware scan** as a custom validator (a GuardDuty Malware Protection
+  for S3 finding, or a scanner container behind a Lambda).
 - **Download route** on `/tenant/*` returning a presigned `GET` under the
   tenant session.
 - **Bulk offboarding.** `DeleteTenantKey` deletes objects inline; a tenant
