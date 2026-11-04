@@ -4,55 +4,28 @@ SPDX-License-Identifier: MIT-0
 -->
 # Agentic Runtime Isolation: Architecture
 
-> **Status: v2 (ADR-0040, ADR-0041) implemented; every integration step green
-> except the step 10 teardown.** 2026-11-03, sandbox account, eu-central-1,
-> integration run 8 (steps complete in 1703 s; six stacks deployed in about
-> 280 s). Every spec §8 step from 1 to 24 passed on both all-on stacks
-> (`api-gateway`, `agentcore-gateway`): 3 to 9, 9-registry, 9-drain, 12-late,
-> 11 to 18, 19-tenant_id, 20, 22 to 24; on their own stacks 4a, 4b-user,
-> limits and 19 (MU, `shared-pool-multi-tenant`); 21 (key rotation, redeploy
-> in 151 s) on `api-gateway`; then 20-cloudtrail, the log sweep (139 log
-> groups, 351 signature segments, 0 hits) and 8b-metrics. Step 9:
-> `api-gateway` TTFB p50 0.200 s warm, 0.240 s with a cold mint cache;
-> `agentcore-gateway` 0.272 s and 0.329 s. Step 23: one ACTIVE star permit
-> per target, 10.7 to 15.7 s from `CreatePolicy` to ACTIVE. An interceptor
-> refusal reaches the agent as HTTP 403 (step 13). Step 10 fails: the stacks
-> end DELETE_FAILED on SSM `DeleteParameter` (GeneralServiceException); the
-> teardown is not retried yet. Runs 1 to 7 stopped earlier on defects fixed
-> on this branch. Two platform findings: the AgentCore Gateway refuses a
-> transaction token with 60 s or less left (the ttl floor is now 120 s), and
-> the single-tenant authoriser caches its decision per token, not per
-> `X-Tenant-Id`.
->
-> **v1: implemented and verified by the integration run of 2026-10-30.**
-> Last green integration run: 2026-10-30, a sandbox account, eu-central-1
-> (steps complete in 357 s; `api-gateway` TTFB p50 0.198 s, `agentcore-gateway`
-> 0.307 s; both streamed `stream 10` with a first byte under 0.3 s).
-> Both ingresses (`api-gateway` and `agentcore-gateway`) ran spec §8 steps 3
-> to 8b, step 9 (latency) and step 9-registry (ADR-0024, ADR-0025: two
-> backends behind one ingress, each owning its scopes, any one of them
-> admits; tenant and user entitlement refused at the exchange; an unknown
-> backend name refused). On `api-gateway` the authoriser refuses the unknown
-> name; on `agentcore-gateway` the Gateway itself refuses a target it does
-> not have, with its own status, before the interceptor runs, and the run
-> accepts any non-200 there. The `api-gateway` stacks alone ran 4a and
-> 4a-model (`session-off` stack); 8-narrowed, the ingress-wide floor and the
-> per-tenant limit probe at 5 requests per minute (ADR-0020) on the
-> `narrowed` stack; 8b-metrics (and that `agentcore-gateway`, metrics off,
-> emitted none); the late backend add-and-drain; and `scripts/demo.sh`.
-> Step 10 tears down and fails on any stack, parameter or log group the run's
-> own stacks left, and on a demo scope left in a reused catalogue. Step 1
-> reused the published tenant-identity (`GET /platform/scopes` 200). The
-> [README integration test](./README.md#deployment-integration-test) has the step
-> table. Ownership-marker collision (ADR-0025) is unit-tested only
-> (`test/shared/scope-registration.test.ts`).
-> Security scans: 2026-10-27, ASH 0 actionable findings; Holmes CSR v3 0 high,
-> 0 medium; dispositions in the [threat model](./threat-model.md#security-review).
-> Also checked by hand on 2026-10-27 (`api-gateway`, `outputTokensPerMinute=200`,
-> per-tenant metrics off): tenant A was refused with 429 after 233 output tokens
-> while tenant B was served; the ingress log has `tenantId` and the cost figures
-> as top-level fields, with no EMF records; the four Contributor Insights
-> rules reported both tenants (requests, errors, backend seconds, output tokens).
+> **Status: v2 implemented and verified.** Last green integration run: run 9,
+> 2026-11-04, a sandbox account, eu-central-1. All 57 steps of
+> `scripts/integ.sh` passed and the teardown left nothing behind (no stack,
+> parameter, log group, table, Gateway or Policy engine; the KMS keys pending
+> deletion). Six stacks (`api-gateway`, `agentcore-gateway`, `session-off`,
+> `session-user`, `limits`, `multi-tenant`) deployed in 278 s; the steps took
+> 1,669 s. Both all-on stacks ran spec §8 steps 3 to 24: P-1 (direct invoke
+> refused), units and sessions, the grants table, ABAC, model usage, latency
+> (step 9), the registry, a late agent and a drain, the headers that reach the
+> agent (no identity token), cuts landing on the next request, the per-tool
+> wall, forged contexts, token expiry, `aud` and `act` refusals, the tool-side
+> TVM, Policy time-to-ACTIVE and the RESPONSE filter. Step 9 TTFB p50/p95:
+> `api-gateway` warm 0.203/0.244 s, cold mint cache 0.227/0.248 s;
+> `agentcore-gateway` warm 0.265/0.327 s, cold 0.297/0.349 s; `stream 10`
+> first byte at about 0.2 to 0.3 s. Step 23: one ACTIVE star permit per
+> target, 10.6 to 15.7 s from `CreatePolicy`. On their own stacks: 4a, 4b-user,
+> the per-tenant limit (tenant A refused with 429 on call 6, tenant B served)
+> and step 19 (a user in several tenants). Step 21 rotated the signing key in
+> 151 s with two keys in the JWKS. The log sweep read 139 log groups and found
+> 0 token segments. The [README integration test](./README.md#deployment-integration-test)
+> has the step table; the [threat model](./threat-model.md#security-review)
+> records the security scans and their dates.
 
 This file describes what is deployed. The design trail is
 [`design/agentic-runtime-isolation.spec.md`](./design/agentic-runtime-isolation.spec.md), the
@@ -60,262 +33,430 @@ This file describes what is deployed. The design trail is
 
 ## Purpose
 
-A pooled agent backend where each tenant user's conversation runs in its own
-compute unit (an AgentCore Runtime microVM), and every backend trusts exactly
-one ingress. One ingress fronts one or more Runtimes, one per registered
-backend. The ingress verifies the token, looks the backend up from the
-route, requires one of the backend's own scopes, chooses the unit, vends
-tenant-scoped credentials, limits each tenant's share across all its
-backends, and attributes cost per tenant and backend (ADR-0001, ADR-0005,
-ADR-0012, ADR-0017, ADR-0020, ADR-0024, ADR-0025). Each backend owns its
-scopes, named after it, and puts them in the identity provider's catalogue
-when it deploys; who holds a scope is decided at the identity provider, per
-tenant and per user.
+A pooled agent platform where each tenant user's conversation runs in its own
+compute unit (an AgentCore Runtime microVM), every Runtime trusts exactly one
+ingress, and every tool call carries a tenant context the tool can verify. One
+ingress fronts one or more agents (backends) and one or more tools gateways.
+For each request the ingress verifies the identity token, selects the tenant,
+resolves the agent from the route, reads what the tenant and the user are
+entitled to, computes the grant, mints a short-lived transaction token that
+names exactly one tenant, user and agent and carries exactly that grant,
+chooses the unit, vends tenant-scoped credentials, limits each tenant's share,
+and attributes cost per tenant and agent (ADR-0001, ADR-0012, ADR-0017,
+ADR-0020, ADR-0024, ADR-0030, ADR-0031). The agent reaches tools only through
+a tools gateway that accepts that transaction token alone (ADR-0034,
+ADR-0041).
 
 ## Actors and identity
 
-- The **vendor** deploys the ingress and the backends and owns every role;
-  no vendor call path into a session exists.
-- A **tenant** is a tenant-identity tenant, entitled to scopes through
-  `CreateTenant.scopes` or `UpdateTenant`.
-- A **tenant user** signs in to tenant-identity's `shared-pool` and calls the
-  ingress with an access token (a JWT) carrying `tenant_id`, `sub`,
-  `client_id` and `scope`, narrowed at tenant-identity's token exchange when
-  the client needs fewer scopes. Every tenant decision downstream comes from
-  that verified token (ADR-0004, ADR-0015).
-- Two IAM principals carry the request. The **ingress role** (the
-  integration Lambda's role on `api-gateway`, the Gateway's role on
-  `agentcore-gateway`) is the only principal each Runtime's resource policy
-  trusts (ADR-0001). The **tenant role** is assumed by the TVM with a
-  `TenantId` session tag from the verified claim; the agent signs its model
-  and data calls with those credentials (ADR-0012, ADR-0018).
+| Actor | Holds | Acts through |
+|---|---|---|
+| Vendor | every stack and role; the entitlement API's vendor routes | IAM (SigV4) on `/entitlements/tenants*` and `/entitlements/plans*`; no call path into a session |
+| Tenant | a subscription row: agents, tools, an optional plan, `status` | the vendor's writes (ADR-0030) |
+| Tenant admin | a tenant user whose identity token carries `entitlements/admin` | the bearer routes `/entitlements/users*`; can only cut, never add (ADR-0033) |
+| Tenant user | an identity token from tenant-identity's `shared-pool` (`tenant_id` or, with `identity.multiTenant`, `tenants` plus `X-Tenant-Id`) | `POST /{backend}/invocations` (ADR-0004, ADR-0038) |
+| Agent | its registry entry: `needs`, `tools` | the transaction token it receives in the `Transaction-Token` header |
+| Tool | its catalogue rows and its own tenant role | the signed context `_ri_ctx` and its own TVM (P-15) |
+
+IAM principals on the path:
+
+| Role | Owner | May |
+|---|---|---|
+| Ingress role (integration Lambda role on `api-gateway`, Gateway role on `agentcore-gateway`) | `SharedIngress` | `InvokeAgentRuntime` on Runtimes tagged `ri:ingress = <ingressId>`; the only principal each Runtime's resource policy names (ADR-0001, ADR-0024). Named in the token's `act.sub` |
+| Minting role (the authoriser on `api-gateway`, the interceptor on `agentcore-gateway`) | `SharedIngress` | `kms:Sign` on the current signing key, granted in the key policy alone (P-14, ADR-0037); reads the entitlement store |
+| TVM caller role (integration Lambda or interceptor) | `SharedIngress` | `sts:AssumeRole` and `sts:TagSession` on the tenant role; `UpdateItem` on `TenantLimits` |
+| Tenant role (`TenantModelRole`, or `tvm.role`) | `SharedIngress` or the deployer | the agents' models (one statement per model, ADR-0018); with `tvm.role`, the deployer's tenant data under ABAC |
+| Tools gateway role, one per gateway | `ToolsGateway` | invoke its interceptors and its registered tool functions; `GetPolicyEngine`, `AuthorizeAction`, `PartiallyAuthorizeActions` (M-61) |
+| Tool tenant role, one per tool target with `tvm.role` | the deployer | trusts the tool function's role, requires the `TenantId` tag, scopes data by it (P-15) |
+| `TenantAdminRole` | `EntitlementApi` | item calls on `TENANT#${aws:PrincipalTag/TenantId}` only (ADR-0033) |
 
 See the [specification](./design/agentic-runtime-isolation.spec.md) §3.2.
 
-## Backends, routes and the registry
+## Constructs, routes and the registry
 
-| Construct | Creates | Route | Published parameters |
-|---|---|---|---|
-| `SharedIngress` | the ingress alone: API or Gateway, authoriser, TVM, limits, log drain | `POST /{backend}/invocations` on both ingresses, one API resource; with `defaultBackend`, also `POST /invocations` on `api-gateway` | `<registryPrefix>{endpointUrl,baseUrl,ingressRoleArn,ingressId,ingress,tenantRoleArn}` (`gatewayIdentifier` on the Gateway) |
-| `AgentBackend(ingress)` | one Runtime, its resource policy naming the ingress role, its scope registration with tenant-identity, its registry entry, its Gateway target | served under its name | `<registryPrefix>backends/<name>`; its scopes in tenant-identity's catalogue (`GET /platform/scopes`) |
-| One backend: a `SharedIngress` with `defaultBackend` plus one `AgentBackend` of that name | the ingress and one Runtime | `POST /invocations` and `POST /default/invocations` (`api-gateway`); `POST /default/invocations` (`agentcore-gateway`) | the single-backend set; the demo stack adds `runtimeArn` |
+| Construct | Creates | Code |
+|---|---|---|
+| `SharedIngress` | the ingress (API Gateway REST API or AgentCore Gateway), the token verifier, the entitlement store and API, the token signer and discovery routes, the tools gateways, the TVM wiring, `TenantLimits`, the log drain, the published parameter | `src/shared-ingress.cdk.ts` |
+| `AgentBackend(ingress)` | one Runtime, its resource policy, on `agentcore-gateway` its Gateway target, the `NAME#<name>` reservation, its model statement on the tenant role, its registry entry (written last) | `src/agent-backend.cdk.ts` |
+| `ToolTarget(ingress)` | the `NAME#<target>`, `TOOL#<target>` and `GATEWAY#<g>` rows, the Gateway target on one tools gateway, its one Cedar permit, its registry pointer | `src/tool-target.cdk.ts` |
+| `ToolsGateway` | one AgentCore Gateway for tools with its Policy engine, interceptors and rate limit; created by `SharedIngress` | `src/tools-gateway.cdk.ts` |
+| Demo stack | a `SharedIngress` with `defaultBackend: 'default'` and two tools gateways (`default`, `finance` with `responseFilter`); the `default` agent (`needs: ['default/chat']`, `tools: ['crm/*']`); optionally `billing` (`billing/read`, `billing/invoke`, `invoices/*`); tool targets `crm` (`get_account`, `list_cases`, `update_case`) on `default` and `invoices` (`get_invoice`, `list_invoices`) on `finance` | `src/main.ts`, `src/demo.cdk.ts`, `src/tools/demo/*` |
 
-A backend name is `[a-z0-9-]{1,32}`. The registry entry is a JSON string
-`{ "runtimeArn", "scopes": ["<name>/<action>", ...], "status": "active" | "draining" }`
-in SSM Parameter Store under `registryPrefix` (default
-`/application-plane/shared/agent-runtime/`; set it when one account runs
-several ingresses). The ingress caches it per process for `registryTtl`
-(60 s default, at most 750 s) and serves a stale entry while it refreshes;
-a refresh that fails backs off, and an entry older than ten times the TTL
-is no longer served (502 `registry_unavailable`). The ingress accepts an
-entry only when its `runtimeArn` is in the ingress's own partition, Region
-and account. Each backend's registry-entry custom resource writes the entry:
-its function's role may put, get and delete that one parameter only
-(`src/shared/registry-entry.cdk.ts`), the function refuses to create a name
-that already exists and drains only an entry whose `runtimeArn` is its own;
-the ingress role reads the prefix only. Creating, updating or deleting a
-backend never redeploys the ingress: a change is live within one TTL, and a
-delete sets `draining` first so running streams finish (ADR-0024).
+Routes: `POST /{backend}/invocations` on both ingresses (one API resource on
+`api-gateway`, one Runtime target per agent on `agentcore-gateway`); with
+`defaultBackend`, also `POST /invocations` on `api-gateway`. A backend or
+target name is `[a-z0-9-]{1,32}`; agents and tool targets share one name
+space (ADR-0035).
 
-Each backend's `scopes` are its own (ADR-0025): at least one, named
-`<name>/<action>` with `<name>` the backend's name, so two backends cannot
-share a scope. A `ScopeRegistration` custom resource puts them in
-tenant-identity's scope catalogue (`PUT /platform/scopes/{scope}`, SigV4
-signed by a role carrying the published `PlatformInvokePolicy`) before the
-registry entry is written, and removes them on delete (best effort). The
-ingress admits a token that carries any one of them (OR), after the optional
-ingress-wide `requiredScopes` floor (AND). Entitlement is the identity
-provider's: a tenant holds a scope through `CreateTenant.scopes` or
-`UpdateTenant`, a user through the tenant admin's `PATCH
-/tenant/users/{username}`, and a token narrowed to a scope the user does not
-hold is refused at the exchange, never reaching the ingress.
+Under `registryPrefix` (default `/application-plane/shared/agent-runtime/`,
+SSM Parameter Store):
+
+| Parameter | Written by | Value |
+|---|---|---|
+| `backends/<name>` | the agent's `Custom::RuntimeIsolationRegistryEntry` | JSON `{ runtimeArn, needs, tools, version, status }`; `version` 1 on Create, +1 on Update; `status` `active` or `draining` (ADR-0024, ADR-0032) |
+| `tools/<target>` | the tool target's own `AWS::SSM::Parameter` | JSON `{ gatewayTargetId, gateway, kind, status, version }`; no tool names, the catalogue holds them (spec §4.4) |
+| `ingress` | `SharedIngress` with `publish` on | the published interface, below (ADR-0042) |
+
+The ingress caches entries per process for `registryTtl` (60 s, 1 s to
+750 s), serves a stale entry while it refreshes, backs off a failed refresh,
+and refuses an entry older than ten TTLs (502 `registry_unavailable`), one
+outside its own partition, Region and account, or a v1-shaped entry with
+`scopes` (502 `registry_entry_v1`). The registry-entry function's role may
+put, get and delete its one parameter; it refuses to create a name that
+exists and drains only an entry whose `runtimeArn` is its own. Delete sets
+`draining`, waits one TTL plus the longest stream (120 s), then removes the
+entry. Nothing a backend or tool target does redeploys the ingress.
 
 ```
-client ──POST /<backend>/invocations──▶ one ingress ──InvokeAgentRuntime──▶ Runtime <backend>
-                                          │  lookup <backend> in registry      resource policy:
-                                          │  (SSM, cached registryTtl)         ingress role only
-                                          │  token carries one of its scopes?
-                                          └── same token check, TVM, limit, log line for every route
-
-AgentBackend stack ──PUT /platform/scopes/<name>/<action>──▶ tenant-identity catalogue   (no identity deploy)
-                   ──writes──▶ registry entry, Runtime policy, Gateway target          (no ingress deploy)
+tenant user ──POST /<agent>/invocations (identity token)──▶ ingress ──InvokeAgentRuntime──▶ Runtime <agent>
+                                   verify, tenant, registry, entitlements,             (Transaction-Token,
+                                   grant, mint, limit, unit, TVM                        Tenant-Credentials)
+                                                                                                │ MCP, Bearer txn token
+              tool function ◀── Policy (star permit) ◀── REQUEST interceptor ◀── tools gateway <g> ◀┘
+              verifies _ri_ctx,       per target           per tool, signs _ri_ctx      CUSTOM_JWT on the
+              own TVM                                                                    ingress issuer
 ```
 
 ## Components
 
 | Component | What it does | Code |
 |---|---|---|
-| `SharedIngress` | The construct that creates one ingress (either kind), the TVM and limits wiring, the log drain, the ingress role with its tag-conditioned invoke grant, the registry read grant, and the published parameters. `fromParameters(scope, id, prefix, ingress)` imports an ingress from another stack, and is the only way an `AgentBackend` in another stack may name it | `src/shared-ingress.cdk.ts` |
-| `AgentBackend` | The construct that creates one Runtime tagged `ri:ingress = <ingressId>`, writes its resource policy naming the ingress role, adds the one-model statement to the tenant role, on `agentcore-gateway` adds the Gateway target, registers its scopes, and writes the registry entry last. Refuses at synth a scope list that is empty, repeats a name, or names a scope not owned by the backend | `src/agent-backend.cdk.ts` |
-| Scope registration | The custom resource behind each backend's scopes (ADR-0025): Create and Update `PUT /platform/scopes/{scope}` for each (Update also `DELETE`s the dropped ones) and fail the deploy on a refused or unreachable API; Delete `DELETE`s each, best effort. Every `PUT` writes the ownership marker as the scope's description: the `Owner` property, from `AgentBackend.scopeOwner` (non-empty, at most 200 characters, no `#`), default `<StackId>#<LogicalResourceId>`; Create `GET`s each scope first and fails with `scope <name> already registered by another stack; is another backend named <Backend> deployed?` when the marker names another owner, taking the physical id `scope-registration:<backend>:unclaimed` so the rollback's Delete is a no-op; Delete skips a scope whose marker names another owner. Stacks that pass the same `scopeOwner` co-own the names and are destroyed together, because the first one destroyed removes the scopes (the integration test's four stacks pass `RuntimeIsolationInteg`). Each call has a 10 s abort timeout and one retry on 429, 5xx or a transport error, and the handler answers CloudFormation before its own Lambda timeout. `ApiUrl` must be an `https` URL whose hostname ends `.execute-api.<region>.amazonaws.com`. SigV4 over `execute-api` with the function's own role, which carries tenant-identity's published `PlatformInvokePolicy` less an inline Deny on every `/platform/tenants*` route; the API URL and policy ARN are read from `/application-plane/shared/identity/{apiUrl,platformInvokePolicyArn}` at deploy time. Renaming the backend replaces the resource, so the old name's scopes are deleted. Fixed physical id per backend, no log on success | `src/shared/scope-registration.cdk.ts`, `src/shared/scope-registration.function.ts` |
-| Registry entry | The custom resource behind each entry: Create writes `active` and refuses an existing name; Update overwrites; Delete sets `draining`, waits one TTL plus the longest stream, then removes the entry, and only when the entry's `runtimeArn` is its own. Depends on the scope registration | `src/shared/registry-entry.cdk.ts`, `src/shared/registry-entry.function.ts` |
-| Registry cache | Per-process cache of entries keyed by name: stale-while-refresh, back-off on a failed refresh, a maximum stale age of ten times `registryTtl`, and the partition, Region and account check against the ingress's own (`RI_REGISTRY_ACCOUNT`). The parser requires `scopes`; an entry without it is refused with 502, never read as "no scopes" | `src/shared/registry.ts` |
-| Scope checks | The optional ingress-wide `requiredScopes` floor (AND) is checked in the token verifier, one loop over the list, so a token without every floor scope is refused before the route is resolved (403 `scope_missing`). `hasAnyScope` (OR) checks the backend's own scopes, one copy for the authoriser and the pipeline; an empty backend list admits no token | `src/shared/verifier.ts`, `src/shared/headers.ts` |
-| Ingress, `api-gateway` | The recommended ingress (ADR-0029). REST API with a REQUEST Lambda authoriser and a streaming integration Lambda (`responseTransferMode: STREAM`, 2-minute timeout). One `/{backend}/invocations` resource on the same authoriser and Lambda; the authoriser resolves the name through the registry cache and requires one of the backend's scopes, the Lambda reads the resolved Runtime ARN from the authoriser context, calls `InvokeAgentRuntime` and forwards the stream (ADR-0003, ADR-0005, ADR-0009, ADR-0015, ADR-0024, ADR-0025) | `src/ingress/api-gateway-authorizer.function.ts`, `src/ingress/api-gateway-ingress.function.ts` |
-| Ingress, `agentcore-gateway` | AgentCore Gateway with a `CUSTOM_JWT` authoriser (`allowedScopes` is the product floor only, so a backend added later needs no Gateway redeploy), one Runtime target per backend created by the backend's own stack, and one REQUEST interceptor Lambda that re-verifies the token, requires one of the target's `scopes` from the registry and sets the session id and credential headers. The Gateway routes to the target named in the URL and calls that Runtime; the name is always in the path, there is no default backend on this ingress (ADR-0005, ADR-0010, ADR-0015, ADR-0024, ADR-0025). The alternative to `api-gateway` (ADR-0029). The Gateway name is lowercased at synth, because the service lowercases the id in the Gateway ARN and the `aws:SourceArn` condition in the Gateway role's trust compares case-sensitively (ADR-0027) | `src/ingress/gateway-interceptor.function.ts` |
-| Backend | One AgentCore Runtime per backend. Each Runtime's resource policy allows `InvokeAgentRuntime` to the one ingress role only, on the Runtime ARN (the service accepts exactly one resource per statement), and denies the other entry points to `*`; the ingress role is granted the Runtime ARN pattern with a `ri:ingress` tag condition; `InvokeAgentRuntime` honours `aws:ResourceTag` on both the Runtime and its endpoint, and a tag set at creation is copied to the `DEFAULT` endpoint (checked 2026-10-28), so the tag goes on `CfnRuntime.tags` (ADR-0001, ADR-0011, ADR-0024) | `src/backend/agentcore-runtime.cdk.ts`, `src/backend/agentcore-runtime.transport.ts` |
-| Agent | Code in the microVM, one `codePath` and `modelId` per backend. The demo agent calls Amazon Nova Lite through the geography cross-Region inference profile (`eu.`, `us.` or `apac.amazon.nova-lite-v1:0`, from the Region), so the tenant role's foundation-model statement names the model with a Region wildcard (ADR-0028). It builds its AWS clients per request from the vended credentials and ends each stream with a `usage` event (ADR-0008, ADR-0017, ADR-0018) | `src/agent/app.ts` |
-| Token vending machine (TVM) | Always on. `AssumeRole` plus `TagSession` on the tenant role with `TenantId` from the verified claim; a bounded LRU cache per instance with single flight, refreshed ahead of the margin for hot tag sets (ADR-0012, ADR-0018, ADR-0022, ADR-0023) | `src/shared/tvm.ts` |
-| Tenant limits | A DynamoDB fixed-window counter per tenant per minute, shared by every ingress instance and by every backend behind the ingress: the key is `TENANT#<id>#<minute>`, so the limit is the tenant's share of the product, not of one backend; 429 before the TVM and the backend; fail-open after a bounded wait (ADR-0020, ADR-0023, ADR-0024) | `src/shared/limits.ts` |
-| Cold path | One HTTPS pool per ingress process; discovery, JWKS and the connections to STS, DynamoDB and the Runtime endpoint open during Lambda init, and the first request awaits them (ADR-0023) | `src/shared/http.ts`, `warm()` in `src/shared/request.ts` |
-| Logs and metrics | A structured JSON log line per request with `tenantId`, `backend` and the cost figures; per-tenant EMF metrics only with `perTenantMetrics`, with a `Backend` dimension (ADR-0017, ADR-0021, ADR-0024) | `src/shared/logger.ts`, `src/shared/metrics.ts` |
-| Teardown | An owned execution log group and one log drain per ingress (ADR-0019) | `src/shared/log-drain.ts` |
-| Demo stack | A `SharedIngress` wired to tenant-identity `shared-pool` with `defaultBackend: 'default'`, the `default` backend owning `default/chat`, a demo tenant table and role, four Contributor Insights rules on `api-gateway`, and the published SSM parameters, also per backend; with `billingBackend` a second backend, `billing`, owning `billing/read` and `billing/invoke` (ADR-0004, ADR-0016, ADR-0024, ADR-0025) | `src/main.ts`, `src/demo.cdk.ts` |
+| Identity token verifier | Signature, `iss`, `client_id`, `exp`, `token_use`; refuses a transaction token presented as an identity token (`typ: txn+jwt` or `iss` = the ingress issuer); the optional `requiredScopes` floor (AND, 403 `scope_missing`) (ADR-0005, ADR-0015) | `src/shared/verifier.ts` |
+| Tenant selection | One `tenant_id`; or `tenants` plus `X-Tenant-Id` with `identity.multiTenant`. Refusals `no_tenant`, `multi_tenant_token`, `tenant_required` (400), `tenant_not_allowed` (403), `malformed_tenant_header` (400) (ADR-0038) | `src/shared/tenant.ts` |
+| Ingress, `api-gateway` | The recommended ingress (ADR-0029). REST API, REQUEST authoriser (`AuthorizerFunction`) that verifies, resolves the agent, runs the authority step and mints; streaming integration Lambda (`IngressFunction`, `responseTransferMode: STREAM`, 2-minute integration timeout) that re-verifies the identity token, checks the authoriser context names the same tenant and agent, applies the limit, the unit and the TVM, invokes the Runtime and relays the stream. The authoriser cache is min(60 s, `ttl` − longest stream) on `Authorization` and the path, plus `X-Tenant-Id` with `multiTenant`; a Deny renders through the `ACCESS_DENIED` response with `$context.authorizer.reason` | `src/ingress/api-gateway-authorizer.function.ts`, `src/ingress/api-gateway-ingress.function.ts` |
+| Ingress, `agentcore-gateway` | AgentCore Gateway with `CUSTOM_JWT` (the floor scopes only) and a REQUEST interceptor (`InterceptorFunction`) that runs the whole pipeline and sets the session, `Transaction-Token` and `Tenant-Credentials` headers; one Runtime target per agent; a small issuer REST API beside it serves discovery and the entitlement API. Gateway name lowercased (ADR-0010, ADR-0027) | `src/ingress/gateway-interceptor.function.ts` |
+| Pipeline | One check order for both ingresses (spec §5.1) and fixed error bodies | `src/shared/request.ts` |
+| Entitlement reader | One `BatchGetItem` per request for `#SUB` and `USER#<sub>`; plan and catalogue rows cached per process for `registryTtl` | `src/shared/entitlements.ts` |
+| Grant rule | Pure: `granted = A.needs ∪ (A.tools ∩ T.tools ∩ U.tools)` (next section) | `src/shared/grant.ts` |
+| Authority step | Entitlement read, grant rule, mint; refusals `agent_not_subscribed`, `tenant_suspended` (403), `grant_too_large`, `entitlements_unavailable`, `mint_failed` (502) | `src/shared/authority.ts` |
+| Mint | Builds and signs the transaction token with KMS `Sign` (`MessageType: DIGEST`); LRU cache | `src/shared/mint.ts`, `src/shared/jws.ts` |
+| `TokenSigner` | KMS keys per generation, key policy, `Custom::RuntimeIsolationJwks`, the two mock-integration discovery routes | `src/shared/token-signer.cdk.ts`, `src/shared/jwks.function.ts` |
+| `EntitlementStore` | The table and the asymmetric grants (ingress reads; vendor writes tenant and plan rows; tenant admin writes cut rows under its own leading key) | `src/shared/entitlement-store.cdk.ts` |
+| Entitlement API | Two functions: `VendorFunction` (IAM-authorised routes) and `TenantAdminFunction` (verifies the identity token and `adminScope` itself, then assumes `TenantAdminRole`) | `src/entitlements/entitlement-api.cdk.ts`, `src/entitlements/entitlements.function.ts`, `src/entitlements/entitlements.ts`, `model/entitlements.smithy` |
+| Owned rows | `Custom::RuntimeIsolationOwnedRows`: owner-marked rows, the per-gateway count check (ADR-0035, ADR-0041) | `src/shared/reservation.cdk.ts`, `src/shared/reservation.function.ts` |
+| Registry entry | `Custom::RuntimeIsolationRegistryEntry`; SSM client in adaptive retry mode, 8 attempts | `src/shared/registry-entry.cdk.ts`, `src/shared/registry-entry.function.ts` |
+| Registry cache | Stale-while-refresh, back-off, maximum stale age, account check | `src/shared/registry.ts` |
+| TVM | Always on: `AssumeRole` plus `TagSession` with `TenantId` from the verified claim; bounded LRU cache, single flight, refresh ahead (ADR-0012, ADR-0018, ADR-0022) | `src/shared/tvm.ts` |
+| Tenant limits | DynamoDB fixed-window counter per tenant per minute, shared by every agent; 429 before the TVM and the backend; fail-open after a bounded wait (ADR-0020) | `src/shared/limits.ts` |
+| Backend | One Runtime per agent: resource policy names the ingress role on the Runtime ARN, denies the other entry points; `ri:ingress` tag on `CfnRuntime.tags` (ADR-0001, ADR-0011) | `src/backend/agentcore-runtime.cdk.ts`, `src/backend/agentcore-runtime.transport.ts` |
+| Agent | Demo code in the microVM: model prompts through Nova Lite on the geography inference profile, signed by the vended credentials (ADR-0028); probes `report`, `read`, `stream`, `tools`, `tool`; one MCP client per tools gateway its token's `aud` names; ends each stream with `event: usage` | `src/agent/app.ts` |
+| Tools gateways | Next sections | `src/tools-gateway.cdk.ts`, `src/tools/*` |
+| Logs, metrics, teardown | JSON log lines (`src/shared/logger.ts`), EMF only with `perTenantMetrics` (`src/shared/metrics.ts`), one log drain per stack so teardown leaves no log group (ADR-0019, `src/shared/log-drain.ts`) | |
+| Cold path | One HTTPS pool per process; discovery, JWKS, STS, DynamoDB and the default agent's registry entry warmed during init (ADR-0023) | `src/shared/http.ts` |
+
+## Entitlements and the grant rule
+
+The entitlement store is one DynamoDB table per `SharedIngress`: on-demand,
+PITR on, no TTL, no GSI (ADR-0030, spec §4.5). The agent definition stays in
+the registry entry.
+
+```
+T(tenant)       = tenant.agents ∪ plan.agents,  tenant.tools ∪ plan.tools
+U(tenant, user) = T minus the admin's cuts
+A(agent)        = agent.needs, agent.tools
+granted         = A.needs ∪ (A.tools ∩ T.tools ∩ U.tools)
+                  only if agent ∈ T.agents ∩ U.agents, else agent_not_subscribed
+```
+
+No tenant row and an agent the tenant does not hold or the user is cut from
+are both `agent_not_subscribed`; a `suspended` tenant is `tenant_suspended`.
+Tool sets are normalised first: `<target>/*` expands against the catalogue,
+names not catalogued drop, and each target whose every tool is granted is
+compressed back to `<target>/*`, sorted, so equal inputs give the same `scope`
+string and the same mint cache entry. A grant holding only `needs` is
+`no_tools_granted`: logged, served, not refused. A `scope` above 8,192 bytes
+is `grant_too_large` (502) (ADR-0032, ADR-0033, ADR-0041).
+
+Change lag (ADR-0036): every vendor or admin write bumps `tenant.version`,
+which is in the mint cache key, so it lands on the next request; a plan, an
+agent's tools or a tool added to a target lands within `registryTtl`. A
+token in flight keeps its grant until `exp` at the agent and until
+`exp − 60 s` at a tools gateway (the Gateway refuses a token with 60 s or
+less left). No revocation list is kept; lower `transactionToken.ttl` for a
+faster stop. Integ steps 12 and 16 measured both.
+
+## Transaction token
+
+The ingress is an OIDC issuer (ADR-0031, ADR-0037). The issuer is
+`<baseUrl>` of the REST API that serves the discovery routes: the
+`api-gateway` ingress's own API, or the issuer API beside the AgentCore
+Gateway.
+
+| Part | Value |
+|---|---|
+| Header | `alg` `RS256` (default) or `ES256`, `typ: txn+jwt`, `kid` = the KMS key id |
+| Claims | `iss`; `sub` = `<tenant_id>#<sub>` (the AgentCore Identity vault keys on `iss` and `sub`, ADR-0040); `user` = the identity provider's `sub`; `tenant_id`; `agent`; `scope` = the grant; `aud` = `agent:<agent>` plus `tools-gateway:<g>` for each gateway the granted tools live on (sorted, ADR-0041); `act.sub` = the ingress role ARN; `txn`; `iat`; `exp`; `jti` |
+| Lifetime | `transactionToken.ttl`, 120 s to 900 s, default 300 s |
+| Mint cache | Per (tenant, sub, agent, tenant.version, agent.version, plan.version), LRU 1,000 per process; reused while more than the reuse margin (authoriser cache TTL + 120 s, 180 s by default) is left, so a busy user costs one `kms:Sign` per token life. The log field `mint` is `hit` or `miss` |
+| Delivery | `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token` to the Runtime; the identity token never reaches the agent (integ step 11) |
+| Keys | One KMS `SIGN_VERIFY` key per generation (`RSA_2048` or `ECC_NIST_P256`). The key policy grants `kms:Sign` to the minting role only, never to the account, so no IAM policy can add a signer; the account may administer and delegate `GetPublicKey` |
+| JWKS | `Custom::RuntimeIsolationJwks` reads `GetPublicKey` at deploy and renders `{ keys: [...] }`, current key first; `/.well-known/openid-configuration` and `/.well-known/jwks.json` are mock integrations with `Cache-Control: public, max-age=300`: no Lambda or KMS call per read |
+| Rotation | Bump `transactionToken.keyGeneration` (demo context `keyGeneration`): key N+1 signs from that deploy, key N stays in the JWKS without `kms:Sign`; at N+2 key N leaves and is scheduled for deletion (30 days). Two bumps at least `ttl` + 300 s apart. Integ step 21: 151 s, two keys in the JWKS |
+
+KMS `Sign` measured p50 8.2 ms, p95 11.1 ms (spec §7.1); a mint cache miss
+adds about 0.02 to 0.04 s to TTFB (step 9 cold against warm).
+
+## Tools gateways
+
+`SharedIngress` creates one tools gateway named `default` (`toolsGateway`), or
+one per entry of `toolsGateways`, or none (`toolsGateway: false`). Each has its
+own Policy engine, interceptors and rate limit, because one engine's Cedar
+schema holds about 330 tools (ADR-0041).
+
+| Part | Behaviour |
+|---|---|
+| Inbound | `CUSTOM_JWT` on the ingress issuer's discovery URL, `allowedAudience: ['tools-gateway:<g>']`, no `allowedClients`. An identity token fails on `iss`, a token for another gateway on `aud`; a token with 60 s or less to `exp` is refused (403) |
+| REQUEST interceptor | `src/tools/interceptor.function.ts`, `passRequestHeaders: true`, provisioned concurrency 1 on the `InterceptorLive` alias. Runs before Policy, so it is the first wall and the per-tool wall: re-verifies the token against the ingress JWKS (`typ: txn+jwt`, `iss`, `aud` holding `tools-gateway:<g>` and `agent:<agent>`, `act.sub` = the ingress role, `exp`); on `tools/call` checks the tool against `scope` (`tool_not_granted`); overwrites a client `tenantId` argument; computes `argsHash`; signs the tenant context with `ToolContextKey` and writes it to `_ri_ctx`, overwriting anything the client sent. A refusal is HTTP 403 with JSON-RPC error `-32003` `forbidden: <reason>`; a throw or timeout is a Gateway 5xx (fail-closed). A token minted for another gateway is `token_invalid`; a non-`txn+jwt` `typ` is `aud_mismatch`; no `act` is `act_missing` (integ step 17) |
+| Policy | AgentCore Policy in `ENFORCE` mode, default deny. One Cedar star permit per target (`src/shared/cedar.ts`): `action in AgentCore::Action::"<target>"` when `principal.getTag("scope")` holds `<target>/*` or any `<target>/<tool>` as a whole entry; about 450 bytes whatever the tool count. Filters `tools/list` and refuses `tools/call` at target grain |
+| Policy writer | `Custom::RuntimeIsolationToolPolicy` (`src/tools/tool-policy.function.ts`): `CreatePolicy` and wait for ACTIVE, retrying a conflict or throttle with backoff and deleting a `CREATE_FAILED` policy first; Update on every target change (the touch for tools added later); Delete and wait until gone, before the Gateway target is deleted. Name `<target>_target_<8 hex>` (a hash of stack, construct path and gateway). Returns `SecondsToActive` (demo outputs `CrmPolicySecondsToActive`, `InvoicesPolicySecondsToActive`) |
+| RESPONSE filter | Optional (`responseFilter`, demo `finance`): `src/tools/response-filter.function.ts` re-verifies the token from the passed request headers and trims each `tools/list` page to the exact tools in `scope`; only removes; on any error an empty page and `response_filter_failed` (integ step 24) |
+| Tenant context | Compact JWS, RS256, `typ: ri-ctx+jwt`; claims `tenant_id`, `sub`, `user`, `agent`, `tool`, `argsHash`, `txn`, `iat`, `exp` (`contextLifetime`, 60 s, 10 s to 300 s). `ToolContextKey` is one KMS key per ingress, shared by its gateways; each interceptor's role gets `kms:Sign` in the key policy; its public half is never in the JWKS, so a context cannot pass as a transaction token |
+| Tool side | `toolHandler` in `src/tools/context.ts`: verifies `_ri_ctx` with the cached public half of `ToolContextKey`, checks `typ`, `exp`, `tool` and `argsHash`, strips `_ri_ctx`, then assumes the tool's tenant role with the `TenantId` tag from the context (its own TVM; STS from the tool's role). No valid context: `context_invalid`, no credentials, and the tool's own role reaches no tenant data (integ step 20) |
+| Rate limit | `CfnGatewayRateLimit` on `$.context.jwt.tenant_id`, 10 requests per second per tenant by default, up to 1,000 overrides; fairness, fail-open by design (M-60) |
+| Application logs | Off: no delivery source, because those logs hold request and response bodies (ADR-0040) |
+| MCP | `supportedVersions` includes `2025-11-25` |
+
+Target kinds (`ToolTarget.kind`): `lambda` (the inline tool schema, Gateway
+role outbound auth, the only kind that receives `_ri_ctx` and so the only one
+with enforced isolation through the context), `openApi`, `smithy` and
+`mcpServer` (outbound auth `oauth` 3LO, OBO or M2M, `apiKey`, or
+`gatewayIamRole`). The Gateway drops undeclared arguments for non-Lambda
+targets, so they learn the caller only from the outbound credential; synth
+warns `runtime-isolation:filtered-isolation` for each one without 3LO or OBO
+(ADR-0034). Only `lambda` targets are deployed by the integration test.
+
+Deploy-time bounds: a `ToolTarget` reserves its count row
+`GATEWAY#<g>` / `TARGET#<t>`; Create and Update Query every count row of the
+gateway, from every stack, and fail the deploy past `maxToolsPerGateway`
+(300, 1 to 1,000) or 100 targets. Same-app targets are also counted at synth.
+Two deploys racing on one gateway can both pass; the engine's schema quota is
+the backstop.
+
+## Published interface
+
+`SharedIngress` publishes ONE parameter, `<registryPrefix>ingress`
+(`IngressParameter`, intelligent tiering), holding the JSON document
+`PublishedIngress` version 2 (ADR-0042):
+
+```
+{ version, ingress, endpointUrl, baseUrl, ingressRoleArn, ingressId, tenantRoleArn,
+  gatewayIdentifier?, issuer, jwksUrl, entitlementsTableName, entitlementsApiUrl,
+  toolContextKeyId?, toolsGateways: { <g>: { url, identifier, roleArn, policyEngineId } } }
+```
+
+`SharedIngress.fromParameters(scope, id, prefix, ingress?, { toolsGateway?, toolsGateways? })`
+is a synth-time lookup (`ssm.StringParameter.valueFromLookup`, like
+`Vpc.fromLookup`), because CloudFormation cannot parse JSON at deploy time:
+the consuming stack needs `env: { account, region }` and AWS credentials at
+synth, and the value is cached in `cdk.context.json` (reset with
+`cdk context --reset` after the ingress changes). It refuses a non-JSON value
+or another `version`, an `ingress` mismatch and a gateway the document does
+not list; the first synth builds the ref from placeholders. `publish: false`
+writes none of it; the integration stacks deploy that way and read stack
+outputs, because six stacks writing about 20 parameters each hit Parameter
+Store's 3 writes per second on deploy and destroy. An `AgentBackend` or
+`ToolTarget` in another stack must name its ingress through this ref.
 
 ## Data model
 
 | Store | Key | Attributes | Lifecycle |
 |---|---|---|---|
-| Registry entry, SSM Parameter Store | `<registryPrefix>backends/<name>` | JSON `{ runtimeArn, scopes, status }` | `active` on Create; `draining` on Delete, refused with 404 while running streams finish; then the parameter is deleted (removed) (ADR-0024) |
-| `TenantLimits`, DynamoDB, only with `tenantLimits` | `PK = TENANT#<tenantId>#<epochMinute>` | `requests` (Number, `ADD 1` per admitted request), `outputTokens` (Number, added after the stream on `api-gateway`), `expiresAt` (TTL, 180 s after the write) | One item per tenant per minute, removed by TTL (ADR-0020) |
-| Scope catalogue, tenant-identity | `<name>/<action>` | description = ownership marker | Put by the backend's deploy, deleted by its destroy (ADR-0025) |
+| Entitlements: tenant subscription | `TENANT#<tenantId>` / `#SUB` | `agents`, `tools`, `plan?`, `status`, `version`, `updatedAt` | vendor `PutTenantSubscription` (a `TransactWriteItems` conditioned on the plan it read; a lost race is 409 `concurrent_write`) |
+| Entitlements: user cut | `TENANT#<tenantId>` / `USER#<sub>` | `cutAgents`, `cutTools`, `version`, `updatedBy`, `updatedAt` | tenant admin; bumps the tenant row's `version` in the same transaction |
+| Entitlements: plan | `PLAN#<name>` / `#PLAN` | `agents`, `tools`, `version`, `updatedAt` | vendor; `PlanName` `[a-z0-9-]{1,32}` |
+| Entitlements: plan listing | `PLANS` / `PLAN#<name>` | | written with the plan; `ListPlans` Queries it |
+| Entitlements: plan member | `PLAN#<name>` / `TENANT#<id>` | | written with the tenant row; `DeletePlan`'s `plan_in_use` (409) is a `Limit 1` Query |
+| Entitlements: catalogue | `TOOL#<target>` / `TOOL#<tool>` | `gateway`, `owner` | `ToolTarget` deploy |
+| Entitlements: name reservation | `NAME#<name>` / `#NAME` | `owner` | `AgentBackend` and `ToolTarget` deploy |
+| Entitlements: gateway count | `GATEWAY#<g>` / `TARGET#<t>` | `tools`, `owner` | `ToolTarget` deploy |
+| Registry, SSM | `backends/<name>`, `tools/<target>`, `ingress` | JSON, above | deploy, drain, delete |
+| `TenantLimits`, DynamoDB, with `tenantLimits` | `TENANT#<tenantId>#<epochMinute>` | `requests`, `outputTokens`, `expiresAt` (TTL, 180 s) | one item per tenant per minute (ADR-0020) |
+| Demo table, with demo tenant data | `TENANT#<id>` | `crmAccount`, `crmCases`, `invoices` | one item per tenant; the agent's `read` probe and both demo tools read it |
 
-See the [specification](./design/agentic-runtime-isolation.spec.md) §4.
+Every owned row is written with `attribute_not_exists(PK) OR owner = :owner`,
+so a row another stack holds fails the deploy with
+`name <name> already registered by another stack`; Delete removes only rows
+still carrying this owner. The function's role may write only the partition
+keys it owns (`dynamodb:LeadingKeys`). See the
+[specification](./design/agentic-runtime-isolation.spec.md) §4.
 
 ## API
 
-| Route | Ingress | Notes |
+| Route | Auth | Operation |
 |---|---|---|
-| `POST /{backend}/invocations` | both | The backend name selects the Runtime through the registry |
-| `POST /invocations` | `api-gateway` with `defaultBackend` | The default backend |
+| `POST /{backend}/invocations`, `POST /invocations` | identity token, `X-Tenant-Id` when the token carries `tenants` | InvokeAgent; body `{prompt}`, with `session` `{conversationId, prompt}`; `200` `text/event-stream`, last event `event: usage` |
+| `GET /.well-known/openid-configuration`, `GET /.well-known/jwks.json` | none | issuer discovery (ADR-0037) |
+| `PUT`, `GET`, `DELETE /entitlements/tenants/{tenantId}` | IAM (SigV4) | tenant subscription |
+| `PUT`, `GET`, `DELETE /entitlements/plans/{planName}`, `GET /entitlements/plans` | IAM (SigV4) | plans |
+| `PUT`, `GET`, `DELETE /entitlements/users/{sub}/cut`, `GET /entitlements/users` | identity token with `entitlements/admin` | user cuts, own tenant only (ADR-0033) |
+| tools gateway MCP endpoint, one per gateway | transaction token | `initialize`, `tools/list`, `tools/call` |
 
-Request: `Authorization: Bearer <access token>`; body `{"prompt": "..."}`,
-with `session` on `{"conversationId": "...", "prompt": "..."}`. Response:
-`200`, `text/event-stream`, the last event `event: usage`. Errors are fixed
-text bodies that never echo the token, the unit id or the input
-(`src/shared/request.ts`):
+The Smithy service is `Entitlements` (`model/entitlements.smithy`); the
+generated OpenAPI is under `src/smithy/entitlements`. Entitlement write
+refusals: 400 `unknown_name`, `not_subscribed` (a cut naming something the
+tenant does not hold), `too_many`; 409 `plan_in_use`, `concurrent_write`.
 
-| Status | Body | When |
-|---|---|---|
-| 400 | `bad request` | Malformed body, `prompt` or `conversationId` |
-| 401 | `unauthorized` | No token, or one that fails verification |
-| 403 | `forbidden` | No single `tenant_id`, a floor scope or every backend scope missing, the narrowed-token rule failed |
-| 404 | `not found` | Unknown or `draining` backend |
-| 429 | `too many requests` | The tenant's limit for the minute (ADR-0020) |
-| 502 | `upstream error` | STS, the Runtime, or the registry failed |
+InvokeAgent errors are fixed bodies that never echo the token, the unit id or
+the input; a v2 refusal carries its reason code (`forbidden: agent_not_subscribed`):
 
-On `api-gateway` an authoriser Deny is API Gateway's own 403; on
-`agentcore-gateway` the `CUSTOM_JWT` authoriser and an unknown target are
-refused by the Gateway with its own body. The
+| Status | When |
+|---|---|
+| 400 | malformed body or `X-Tenant-Id`; `tenant_required` |
+| 401 | missing or invalid identity token, or a transaction token presented as one |
+| 403 | no tenant; `tenant_not_allowed`; a floor scope missing; `tenant_suspended`; `agent_not_subscribed`; a `tvm.claimTags` claim missing |
+| 404 | unknown or `draining` agent |
+| 429 | the tenant's limit for the minute |
+| 502 | backend, registry or entitlement store failed; `registry_entry_v1`; `grant_too_large`; `mint_failed` |
+
+On `api-gateway` every authoriser Deny renders as 403 through `ACCESS_DENIED`,
+including the authoriser's 404 and 502 cases (integ 9-registry: an unknown
+agent is 403 there, 404 on `agentcore-gateway`); with `multiTenant` a request
+without `X-Tenant-Id` is API Gateway's own 401 before the authoriser runs. The
 [README API section](./README.md#api) has the full table.
 
 ## Request flow
 
-Both ingresses run the same checks in the same order:
+| # | Step | `api-gateway` | `agentcore-gateway` |
+|---|---|---|---|
+| 1 | Verify the identity token, select the tenant, check the floor scopes | authoriser | interceptor |
+| 2 | Resolve the agent from the path through the registry cache | authoriser | interceptor (the Gateway refuses an unknown target first) |
+| 3 | Per-tenant limit, one conditional `UpdateItem` | integration Lambda (after step 4) | interceptor |
+| 4 | Entitlement read, grant rule, mint (`kms:Sign` on a cache miss) | authoriser; Allow carries the token in its context; `request authorised` | interceptor |
+| 5 | Parse the body; derive the unit id from the verified claims (`session.scope` `tenant` by default, ADR-0039) | integration Lambda | interceptor |
+| 6 | TVM: credentials for the tenant role with `TenantId` | integration Lambda | interceptor |
+| 7 | Invoke the Runtime with the session id, `Transaction-Token` and `Tenant-Credentials` headers | integration Lambda; relays the stream, reads `usage`, adds output tokens to the counter, logs `request served` | the Gateway; the interceptor logs `request admitted` and never sees the response |
+| 8 | Tool calls: the agent calls `tools/list` or `tools/call` on each gateway its `aud` names | tools gateway: `CUSTOM_JWT`, REQUEST interceptor (`tools request admitted` or `tool admitted` with `decision: admit` or `deny`), Policy, optional RESPONSE filter (`tools list filtered`), tool (`tool served`) | same |
 
-1. Verify the token: signature, `iss`, `client_id`, `exp`, `token_use`, a single `tenant_id` (ADR-0004, ADR-0015). Refusal: 401 or 403.
-2. Check the ingress-wide required scopes and the narrowed-token rule when configured (ADR-0005, ADR-0007). Refusal: 403.
-3. Resolve the backend from the route: the path is `/{backend}/invocations` exactly (a stage-prefixed path is not accepted); on `api-gateway` the bare `/invocations` resolves to `defaultBackend`. Look the name up in the registry cache (one SSM read per cold instance or expired entry). Unknown or `draining`: 404; an entry outside the ingress's partition, Region or account, or one the cache can no longer serve: 502. Then require any one of the backend's `scopes` on the token (OR): 403 `backend_scope_missing`. The authoriser result is cached per token and route (ADR-0005, ADR-0015, ADR-0024, ADR-0025).
-4. Parse the body: `prompt` a string, `conversationId` matching `[A-Za-z0-9]{16,64}` (spec §5). Refusal: 400.
-5. Check the tenant limit: one conditional `UpdateItem` (ADR-0020). Refusal: 429, with no STS, Runtime or model call. The counter is per tenant, not per backend.
-6. Vend credentials through the TVM, from the cache when possible (ADR-0012, ADR-0022). One `tvm.role` and one cache serve every backend.
-7. Derive the session id from the verified claims (ADR-0002, ADR-0013). Session ids are scoped per Runtime, so the same `conversationId` on two backends is two sessions.
-8. Invoke the resolved Runtime with the session id and the credential header; on `api-gateway`, forward the stream.
-9. On `api-gateway`, read the `usage` event, add output tokens to the tenant's counter, and log `request served` with `backend`. On the interceptor, log `request admitted` before the Gateway calls the Runtime; the interceptor event names the target, so `backend` is present.
+A refusal before step 4 costs no KMS call; a refusal before step 6 costs no
+STS call. Session ids are per Runtime, so the same `conversationId` on two
+agents is two sessions.
 
 ## Scale limits
 
-Values are the defaults or the documented AWS quotas on 2026-10-28. Check
+Values are defaults or documented AWS quotas on 2026-11-04; check
 [Service Quotas](https://docs.aws.amazon.com/general/latest/gr/aws_service_limits.html)
-for your account and Region before sizing.
+for your account and Region.
 
 | Limit | Value | What hits it | What the sample does | Deployer action |
 |---|---|---|---|---|
-| API Gateway stage throttle | 50 rps, burst 25 (defaults) | All tenants and all backends together on `api-gateway` | `stageThrottle` prop; still shared by every tenant and backend (ADR-0020, ADR-0024) | Size it to the Runtime and Lambda limits below; add WAF |
-| Per-tenant requests | 60 per minute per tenant (default) | One tenant's script | DynamoDB fixed-window counter, 429 before STS and the Runtime; up to 2x across a window boundary (ADR-0020) | Set `tenantLimits.requestsPerMinute` per tier; `0` turns it off |
-| AgentCore Runtime active sessions | 2,500 per account outside us-east-1 and us-west-2; 5,000 in those two; adjustable ([source](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/bedrock-agentcore-limits.html)) | Concurrent conversations across all tenants. With `session` off every request is its own session | Per-tenant request limit bounds one tenant's share | Request a quota increase; turn session mapping on so resumed conversations reuse a session |
-| AgentCore Runtime data plane | 1,000 TPS; adjustable ([source](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/bedrock-agentcore-limits.html)) | `InvokeAgentRuntime` across all tenants | As above | Keep the stage throttle below it |
-| STS `AssumeRole` | 600 rps per account per Region, shared with other STS calls; raised by Support case | TVM cache misses: instances × tag sets ÷ credential lifetime | Bounded LRU cache, single flight, limits before STS (ADR-0022) | Keep `includeUserIdTag` off unless needed; watch STS throttling |
-| Lambda concurrency | Per account per Region; see [Lambda quotas](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html) | On `api-gateway` the one integration Lambda is held for the whole stream, up to the 2-minute integration timeout: 50 rps × 120 s = 6,000 concurrent, shared by every backend, so one slow backend can starve the rest | Nothing beyond the stage throttle | Reserved concurrency on the ingress function; prefer `agentcore-gateway` for long streams; a separate `SharedIngress` per backend, or ADR-0024 Option 4, when backends must not share concurrency |
-| SSM Parameter Store reads | 40 TPS per account per Region standard; higher throughput is a paid setting ([source](https://docs.aws.amazon.com/systems-manager/latest/userguide/parameter-store-throughput.html)) | Registry misses: ingress instances × backends ÷ `registryTtl` | Per-process cache, 60 s default and 750 s at most; a miss serves the stale entry while refreshing, a failed refresh backs off, and an entry older than ten TTLs is refused with 502 (ADR-0024) | Raise `registryTtl`; turn on higher throughput for very large fleets |
-| Amazon Bedrock model quota | Per account per model, shared by all tenants | Model tokens across all tenants | Optional `tenantLimits.outputTokensPerMinute` on `api-gateway` (ADR-0020) | Request quota per model; set the token limit per tier |
-| CloudWatch custom metrics | Up to `9 x (1 + number of backends)` per tenant per ingress when on: nine metrics on `[TenantId, Ingress]` and nine more on `[TenantId, Ingress, Backend]` for each backend the tenant calls (`src/shared/metrics.ts`); see [CloudWatch pricing](https://aws.amazon.com/cloudwatch/pricing/) | `perTenantMetrics: true` at many tenants | Off by default, synth warning when on (ADR-0021) | Use Logs Insights and Contributor Insights at scale |
-| Contributor Insights | Top 500 contributors per rule | Rules over the access log and the ingress log line | Four demo rules on `api-gateway`: requests and errors on the access log, backend seconds and output tokens on the `request served` line (ADR-0021) | Use Logs Insights for the long tail |
-| TVM cache | 1000 entries per instance (default), about 1.5 MB | More active tag sets per instance than the bound | LRU eviction, expired entries dropped first (ADR-0022) | Size `tvm.cacheMaxEntries` to active tenants per instance |
+| API Gateway stage throttle | 50 rps, burst 25 (defaults) | all tenants and agents on `api-gateway` | `stageThrottle` prop (ADR-0020) | size it to the limits below; add WAF |
+| Per-tenant requests | 60 per minute per tenant | one tenant's script | fixed-window counter, 429 before STS and the Runtime; up to 2x across a window boundary | `tenantLimits.requestsPerMinute` per tier |
+| Tools gateway per-tenant rate | 10 rps per tenant per gateway | one tenant's tool calls | native rate limit on `tenant_id`, fail-open | `tenantRateLimit`, `tenantRateLimitOverrides` |
+| AgentCore Runtime active sessions | 2,500 per account (5,000 in us-east-1 and us-west-2), adjustable | concurrent conversations | per-tenant limit bounds one tenant's share | quota increase; session mapping |
+| AgentCore Runtime data plane | 1,000 TPS, adjustable | `InvokeAgentRuntime` | as above | keep the stage throttle below it |
+| Lambda concurrency | per account per Region | the integration Lambda is held for the whole stream: 50 rps × 120 s = 6,000 | stage throttle only | reserved concurrency; `agentcore-gateway` for long streams |
+| SSM Parameter Store reads | 40 TPS standard | registry misses: instances × agents ÷ `registryTtl` | per-process cache, stale-while-refresh | raise `registryTtl`; higher throughput |
+| KMS `Sign` | per account per Region, shared request quota for asymmetric keys | mint misses and every `tools/call` (context signing) | mint cache; context per call only | watch KMS throttling; raise the quota |
+| Amazon Bedrock model quota | per account per model | model tokens across tenants | optional `outputTokensPerMinute` on `api-gateway` | quota per model |
+| CloudWatch custom metrics | 9 × (1 + agents) per tenant per ingress when on | `perTenantMetrics` at many tenants | off by default, synth warning (ADR-0021) | Logs Insights and Contributor Insights |
+| Contributor Insights | top 500 contributors per rule | the four demo rules | `api-gateway` only | Logs Insights for the long tail |
+| TVM and mint caches | 1,000 entries each per instance | more active tag sets or users per instance | LRU (ADR-0022) | `tvm.cacheMaxEntries`, `transactionToken.cacheMaxEntries` |
+
+## Quotas that shape the design
+
+| Quota or finding | Value | Design consequence |
+|---|---|---|
+| Policy engine Cedar schema | 400 KB per engine, about 330 tools (spec §7.2) | several tools gateways, one engine each; `maxToolsPerGateway` 300 (ADR-0041) |
+| Per-tool Cedar permits | 28 tools per 10,000-character statement, 2 to 3 min to ACTIVE at 15+ policies | one star permit per target; the interceptor is the per-tool wall (ADR-0041) |
+| `CreatePolicy` | names unique per account and Region; concurrent writes fail; 10.6 to 15.7 s to ACTIVE (run 9) | `<target>_target_<8 hex>` names; each policy resource chained after the previous one on the gateway; retry with backoff |
+| Gateway targets | 100 per Gateway | `agentcore-gateway` ingress caps at 100 agents; tools gateways at 100 targets, checked at deploy |
+| `tools/list` paging | one page per about 30 tools before Policy filters | an agent lists only its own targets' gateways |
+| `scope` claim | 8,192 bytes accepted end to end | `grant_too_large` above it; `<target>/*` compression (ADR-0041) |
+| Token near `exp` | AgentCore Gateway refuses a token with 60 s or less left | `ttl` floor 120 s; usable at a tools gateway until `exp − 60 s` (ADR-0040) |
+| KMS `Sign` latency | p50 8.2 ms, p95 11.1 ms (spec §7.1) | mint on the request path with a cache |
+| SSM Parameter Store writes | 3 `PutParameter` and 3 `DeleteParameter` per second per account | one JSON parameter per ingress; test stacks publish nothing; the integ teardown retries at concurrency 2 (ADR-0042) |
+| STS | 600 rps per account per Region, shared | TVM caches at the ingress and the tool side; limits run before STS |
+| Lambda-backed custom resources | CloudFormation does not retry a failed handler | each handler retries its own throttles: registry entry (SSM adaptive, 8 attempts), tool policy (conflict and throttle backoff); owned rows rely on the SDK's default retries; each handler answers CloudFormation before its Lambda timeout |
 
 ## Cross-tenant data safety
 
-Reviewed on 2026-10-28 for the shared ingress. Each item was checked in code:
+Each item was checked in code on 2026-11-04:
 
-- The TVM cache key is the canonical JSON of the full sorted session tag set (`vend` in `src/shared/tvm.ts`); each TVM instance assumes one role, so the role is implicit and two tenants or users never share an entry (ADR-0022).
-- No per-request tenant state is held in module scope; module scope holds only clients, config, the credential cache and the registry cache.
-- The `api-gateway` path forwards no client headers to the Runtime (M-8).
-- `conversationId` is `[A-Za-z0-9]{16,64}` and is always qualified by a 130-bit prefix of `sha256(tenant_id|sub)` (ADR-0002).
-- The agent builds its AWS clients per request from that request's credentials, never from a previous request's.
-- The `usage` event is attributed to the verified tenant of the request that carried it, never to a tenant the agent names.
-- Demo data access is ABAC: `GetItem` and `Query` with `dynamodb:LeadingKeys = TENANT#${aws:PrincipalTag/TenantId}` (M-10).
-- The API Gateway authoriser cache is keyed on the whole `Authorization` header and the request path, its two identity sources (`src/shared-ingress.cdk.ts`, ADR-0015).
-- The limits counter key is built from the verified `tenant_id` only, and only `tvmCallerRole` can update it (ADR-0020).
-- The Runtime is chosen from the route, never from the body or a header, and only through the registry entry for that name. A wrong entry sends a tenant to the wrong backend, not to another tenant's data: the vended credentials and the session id prefix are built from the verified claims alone (ADR-0002, ADR-0012, ADR-0024).
-- The registry is a trust boundary (threat model B6, T-39): only the backend's registry-entry function role may write its name (`ssm:PutParameter`, `GetParameter` and `DeleteParameter` on that one parameter, `src/shared/registry-entry.cdk.ts`), the ingress role may only read the prefix, and the ingress refuses an entry whose `runtimeArn` is outside its own partition, Region and account.
-- A token reaches only the backends one of whose `scopes` it carries; the ingress-wide list stays as the floor (ADR-0005, ADR-0025). Which scopes a token can carry is decided at the identity provider per tenant and per user, so a tenant not entitled to `billing/*` cannot obtain a token for billing at all.
-- The scope registration's role holds tenant-identity's `PlatformInvokePolicy`, every `/platform/*` route, less an inline Deny on every `/platform/tenants*` route (threat model B7, T-41), so of the policy's routes it reaches the catalogue alone. What remains is wider than one backend's names: a compromised backend stack could delete another backend's scopes from the catalogue, but not register a scope another owner holds (the ownership marker in the scope's description, `scopeOwner` or the stack default, is checked before each Create; co-owners share the marker by choice), not change a tenant's entitlement, users or data, not route a request (the registry entry is pinned to the backend's own name at synth) and not reach another tenant's data. A direct invoker of the registration function can pick any `Backend` in the event; the handler re-validates the shape and the owner rule, and the control on who may invoke the function or assume its role is IAM (residual, T-41).
-- Each Runtime's resource policy names the one ingress role on the Runtime ARN and denies every other principal (ADR-0001). The ingress role's grant is a Runtime ARN pattern with a `ri:ingress` tag condition instead of a list, so the resource policy carries P-1 alone if the condition is not honoured (threat model T-40).
+- The tenant comes from the verified identity token only; with `multiTenant`, `X-Tenant-Id` must be one of its `tenants` (ADR-0038).
+- The grant is computed from the entitlement rows of that tenant and user and the registry entry of the routed agent; nothing in the body or a header adds to it (ADR-0030).
+- The mint cache key holds tenant, user, agent and the three versions; `sub` is `<tenant_id>#<sub>`, so one user in two tenants has two subjects (ADR-0040).
+- `kms:Sign` on the signing key is in the key policy for the minting role alone; no IAM policy can add a signer (P-14).
+- On `api-gateway` the integration Lambda accepts the authoriser's token only for the tenant and agent it verified itself.
+- On a single-tenant `api-gateway` ingress `X-Tenant-Id` is not an identity source, so the authoriser decision is cached per token and path for up to 60 s: after a foreign header the same token is refused until the entry expires, and after a cached Allow a foreign header is ignored. Fail-closed or own-tenant; no cross-tenant effect.
+- The tools gateway accepts only tokens from the ingress issuer with its own `aud`; the interceptor also checks `typ`, `agent` and `act.sub`.
+- The interceptor overwrites a client `tenantId` and `_ri_ctx`; the context is bound to one tool and its `argsHash` and lives 60 s; its key is not in the JWKS.
+- A tool reaches tenant data only with credentials its own TVM vended for the context's tenant; the tool tenant role allows item calls where `dynamodb:LeadingKeys` is `TENANT#${aws:PrincipalTag/TenantId}` (step 20: a probe of another tenant fails in IAM, and no `AssumeRole` follows a direct invoke).
+- A Cedar `<target>/<tool>` entry cannot match another target (`xcrm/a` does not start with `crm/`, ` crm/` needs the space).
+- The TVM cache key is the full sorted session tag set; module scope holds only clients, config and the caches.
+- `conversationId` is `[A-Za-z0-9]{16,64}` and always qualified by a claim-derived prefix (ADR-0002, ADR-0039).
+- `TenantAdminRole` reaches only `TENANT#${aws:PrincipalTag/TenantId}` items; the owned-rows role only its own partition keys.
+- The registry is a trust boundary: only an agent's registry-entry role may write its entry, the ingress role only reads the prefix, and an entry outside the ingress's account is refused.
+- Each Runtime's resource policy names the one ingress role and denies every other principal; the ingress role's grant is tag-conditioned (ADR-0001, ADR-0024).
+- No log line carries a token, a context value, credentials or a prompt; the integ sweep found no signature segment in 139 log groups.
 
 ## Differences from the specification
 
-Where the implemented state differs from
-[`design/agentic-runtime-isolation.spec.md`](./design/agentic-runtime-isolation.spec.md), the
-specification carries a dated amendment that points here.
+The specification carries dated amendments for the implementation findings
+(ADR-0040 to ADR-0043): the 120 s `ttl` floor and the `exp − 60 s` tools
+gateway margin, the authoriser cache formula, policy names, the plan index and
+gateway count rows, the demo tool data layout, the interceptor refusal code,
+the published document and the integ stacks. One difference remains after
+reading code against spec §5.1:
 
-- **ADR-0025 (amended 2026-10-29).** The scope registration claims ownership
-  of each scope: every `PUT /platform/scopes/{scope}` writes the description
-  `<StackId>#<LogicalResourceId>`, Create `GET`s each scope first and fails
-  the deploy with `scope <name> already registered by another stack` when
-  the marker names another stack (the resource then holds the physical id
-  `scope-registration:<backend>:unclaimed`, whose Delete is a no-op), and
-  Delete skips a scope another stack owns. The marker is the optional
-  `AgentBackend.scopeOwner`, default `<StackId>#<LogicalResourceId>`; stacks
-  that pass the same value co-own the names and are destroyed together. The
-  specification's registration was an unconditional `PUT`. Each platform call has a 10 s abort timeout
-  and one retry on 429, 5xx or a transport error; the handler answers
-  CloudFormation before its Lambda timeout. `ApiUrl` must be `https` with a
-  hostname ending `.execute-api.<region>.amazonaws.com`. Renaming a backend
-  replaces the registration, so the old name's scopes are deleted from the
-  catalogue. The function's role carries the `PlatformInvokePolicy` less an
-  inline Deny on every `/platform/tenants*` route; the policy also grants
-  `kms:Encrypt` and `kms:GenerateDataKey` on tenant-identity's admin-password
-  key under `kms:ViaService = ssm`, which the function never uses (inert). The integration driver
-  replaces a stale published tenant-identity only with
-  `INTEG_REPLACE_STALE_IDENTITY=1`, otherwise failing with instructions, and
-  its cleanup verifies that the demo scopes are gone from a reused catalogue.
+- **Check order on `api-gateway`.** The spec orders the per-tenant limit
+  before the mint, so a 429 costs no KMS call. On `api-gateway` the authoriser
+  mints and the limit runs later in the integration Lambda, so a request
+  refused with 429 may already have cost one `kms:Sign` (on a mint cache miss;
+  the authoriser and mint caches absorb most). `agentcore-gateway` follows the
+  spec order. No isolation effect; a cost and quota effect only.
+
+## Per-tenant observability
+
+| Signal | Where | Tenant field |
+|---|---|---|
+| Access log (`api-gateway`) | `ApiAccessLogs` | `tenantId` from the authoriser context, `principalId` |
+| Ingress lines | `request authorised` (authoriser), `request served` (integration Lambda: `ttfbMs`, `streamedBytes`, `backendInvokeSeconds`, `usageInput`, `usageOutput`, `modelId`), `request admitted` (interceptor: `sessionPrefix`), `request refused` and `token refused` with `reason` | `tenantId`, `backend`/`agent`, `txn`, `grantSize`, `mint` |
+| Tools lines | `tools request admitted`, `tool admitted` (`decision`, `gateway`, `target`, `reason`), `tools list filtered` (`listed`, `kept`), `tool served` (`durationMs`, `bytes`), `tool refused` | `tenantId`, `agent`, `txn` |
+| Entitlement API | `entitlement written`, `entitlement deleted`, `entitlement request refused` | the target tenant id |
+| EMF, opt-in | namespace `RuntimeIsolation`, dimensions `[TenantId, Ingress]` and `[TenantId, Ingress, Backend]`: `Requests`, `Errors4xx`, `Errors5xx`, `IngressDurationMs`, `TtfbMs`, `BackendInvokeSeconds`, `StreamedBytes`, `ModelInputTokens`, `ModelOutputTokens` | `perTenantMetrics`, off by default because each tenant adds about nine billed metrics per ingress (ADR-0021); integ 8b-metrics checks it |
+| Contributor Insights (demo, `api-gateway`) | top tenants by requests and errors (access log), by backend seconds and output tokens per agent (`request served`) | `$.tenantId`, `$.backend` |
+| Usage event | the agent's last SSE event `event: usage` `{inputTokens, outputTokens, modelId}` | attributed to the verified tenant of the request, never to a tenant the agent names |
 
 ## Per-tenant cost attribution
 
-    cost(tenant) = Σ over metrics ( metric(tenant) × unit price )
+    cost(tenant) = Σ over drivers ( driver(tenant) × unit price )
                  + share of the unattributable remainder
 
-The metrics are `BackendInvokeSeconds` (AgentCore Runtime vCPU-hour and
-GB-hour, wall time as the share key), `IngressDurationMs` (Lambda
-GB-second), `Requests` (Lambda request price plus the API Gateway REST or
-AgentCore Gateway per-call price) and `StreamedBytes` (data transfer out,
-where billed), read from the per-tenant metrics or, with them off, from the
-same fields on the ingress log line (ADR-0017, ADR-0021). Model cost is the
-CUR 2.0 figure keyed on `iamPrincipal/TenantId` (ADR-0018), added per
-tenant; `ModelInputTokens` and `ModelOutputTokens` are a cross-check only.
+| Driver | Source | Billed item |
+|---|---|---|
+| `BackendInvokeSeconds` | `request served` or EMF | AgentCore Runtime vCPU-hour and GB-hour (wall time as the share key) |
+| `IngressDurationMs`, `Requests` | ingress lines or EMF | Lambda GB-second and requests; API Gateway REST or AgentCore Gateway calls |
+| `StreamedBytes` | `request served` or EMF | data transfer out where billed |
+| Mints with `mint: miss`; `tool admitted` count | ingress and interceptor lines | KMS `Sign` requests |
+| `tools request admitted` + `tool admitted` count | interceptor lines | tools gateway calls and Policy authorizations |
+| `tool served` `durationMs` | tool lines | tool Lambda GB-second |
+| Model tokens | CUR 2.0 by `iamPrincipal/TenantId` (ADR-0018) | Amazon Bedrock; `ModelInputTokens`/`ModelOutputTokens` are a cross-check |
 
-The unattributable remainder is the `TenantLimits` table, SSM reads (the
-registry and the deploy-time parameters), the custom-resource Lambdas
-(scope registration, registry entry, log drain), AgentCore Gateway charges
-for calls the interceptor never sees, log storage and ingestion, the
-dashboard and Contributor Insights rules, the custom metrics themselves,
-X-Ray traces, and the backend time of requests whose stream broke before the
-usage event. This sample apportions it by each tenant's share of
-`Requests`, refusals included, since requests drive the limiter, the log
-lines and the Gateway calls. The [README Costs section](./README.md#costs)
-has the unit prices to apply.
+Every call the agent signs carries the `TenantId` session tag from the TVM,
+and the tool-side TVM tags its credentials the same way, so model and data
+calls are attributed by IAM principal once the `iamPrincipal/TenantId` cost
+allocation tag and the CUR caller-identity option are on (account-level). No
+resource is dedicated to a tenant, so no resource carries a `TenantId` tag.
+
+The unattributable remainder: the KMS keys' monthly charge, the entitlement
+store and `TenantLimits` tables, SSM reads, the custom-resource Lambdas
+(registry entry, owned rows, tool policy, JWKS, log drain), provisioned
+concurrency on the tools interceptors, Gateway calls refused before an
+interceptor runs, log storage and ingestion, Contributor Insights rules and
+the custom metrics themselves, X-Ray traces, and the backend time of streams
+that broke before the usage event. The sample apportions it by each tenant's
+share of `Requests`, refusals included. The [README Costs section](./README.md#costs)
+has the unit prices.
 
 ## What the service cannot carry per tenant
 
-Standard §4.4 asks where a shared component cannot name the tenant:
-
-- **`agentcore-gateway` path.** The interceptor returns before the Runtime is invoked and never sees the response, so backend seconds, model tokens and streamed bytes are not metered there, and the output-token limit does not exist there. Join through the session id prefix in the `request admitted` line and the Runtime's log streams.
-- **Runtime CPU and memory.** The Runtime bills active CPU and memory per session, but does not report them per tenant. Join through the session id: its prefix is logged next to `tenantId` at the ingress (ADR-0002, ADR-0017).
-- **Model cost.** Read from CUR 2.0 by `iamPrincipal/TenantId` (ADR-0018), a day later. Per backend it splits by the model each backend uses; two backends on one model are told apart only by the ingress log line.
-- **Runtime cost per backend.** Each backend is its own Runtime, so the Runtime bill is already per backend; the `backend` field on the log line joins it to the tenant.
-- **X-Ray traces.** The ingress Lambdas trace with X-Ray, but no trace carries `tenantId`. Join through the Lambda request id on the JSON log line or the session id prefix.
-- **`agentcore-gateway` errors after admission.** Once the interceptor has logged `request admitted`, a failure in the Gateway's call to the Runtime is visible only in the Gateway's own logs and metrics, which carry no `tenantId`. Join through the `request admitted` line (time, `backend`, session id prefix).
-- **Top-tenant views.** The demo's four Contributor Insights rules exist only on `api-gateway`; the `agentcore-gateway` demo has none, so its per-tenant views are Logs Insights queries over the `request admitted` line.
+- **`agentcore-gateway` ingress.** The interceptor returns before the Runtime is invoked, so backend seconds, model tokens and streamed bytes are not metered there and the output-token limit does not exist; a failure after admission is only in the Gateway's own logs and metrics. Join through `sessionPrefix` and time on `request admitted`.
+- **Tools gateways.** No access log and no application logs (ADR-0040), no per-tenant metrics; a request refused by `CUSTOM_JWT` or the native rate limit before the interceptor leaves no line with `tenantId`. Per-tenant tool figures are Logs Insights over the interceptor and tool lines.
+- **Runtime CPU and memory.** Billed per session, not reported per tenant; join through the session id prefix.
+- **Model cost.** From CUR 2.0 a day later; two agents on one model are told apart only by the ingress lines.
+- **X-Ray traces.** No trace carries `tenantId`; join through the Lambda request id on the log line.
+- **Non-Lambda tool targets.** The tool learns the caller only from its outbound credential; its own cost is the target owner's to split.
+- **Top-tenant views.** The four Contributor Insights rules exist only on `api-gateway`; elsewhere use Logs Insights.
 
 See the [README](./README.md#scale-and-limits) for the props and the
-[Costs](./README.md#costs) section for the attribution formula.
+[Costs](./README.md#costs) section for the formula.
