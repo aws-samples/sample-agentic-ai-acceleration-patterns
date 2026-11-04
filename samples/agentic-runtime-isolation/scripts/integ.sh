@@ -741,7 +741,7 @@ run_all_on() { # SUFFIX
   if [[ "$INGRESS" == api-gateway ]]; then
     local late_param="${REGISTRY_PREFIX}backends/late" late_url table billing_arn
     late_url="$(backend_url "$ENDPOINT" late)"
-    table="$(param "${REGISTRY_PREFIX}entitlementsTableName")"
+    table="$(output "$INGRESS" EntitlementsTableName)"
     billing_arn="$(output "$INGRESS" BillingRuntimeArn)"
     LATE_PARAMS+=("$late_param")
     # A vendor write names reserved agents only (spec §5.3): reserve `late` as its AgentBackend would.

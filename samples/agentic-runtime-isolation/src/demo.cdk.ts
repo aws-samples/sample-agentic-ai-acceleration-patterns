@@ -245,6 +245,12 @@ export interface RuntimeIsolationDemoStackProps extends StackProps {
   readonly agentCodePath: string;
   /** Publish under `/application-plane/shared/agent-runtime/`. Overrides `context.publishParameters`; the integration test turns it off on all but one stack, which then use a stack-scoped prefix. */
   readonly publishParameters?: boolean;
+  /**
+   * Write the ingress's published interface (spec §6.4) at all. Default true. The integration
+   * test sets it on one stack only: six stacks writing 20-odd parameters each at once exceed
+   * Parameter Store's 3 writes per second per account and fail to delete (ADR-0042).
+   */
+  readonly publishInterface?: boolean;
   /** The cost dashboard's name (account-wide). Default `RuntimeIsolation-<ingress>`; the integration test passes its stack name so several stacks of one ingress coexist. */
   readonly dashboardName?: string;
   /** The owner marker of the name reservations. Overrides `context.owner`; see `DemoContext.owner`. */
@@ -377,6 +383,7 @@ export class RuntimeIsolationDemoStack extends Stack {
       identity: { discoveryUrl, allowedClientIds: [appClientId], multiTenant: ctx.multiTenant ?? false },
       ingress: ctx.ingress,
       registryPrefix: this.registryPrefix,
+      publish: props.publishInterface ?? true,
       session: ctx.sessionScope === undefined ? undefined : { scope: ctx.sessionScope },
       requiredScopes: ctx.requiredScopes,
       tvm,
@@ -544,6 +551,7 @@ export class RuntimeIsolationDemoStack extends Stack {
     // (v2) What the integration driver and scripts/demo.sh reach directly.
     new CfnOutput(this, 'Issuer', { value: this.ingress.issuer });
     new CfnOutput(this, 'EntitlementsApiUrl', { value: this.ingress.entitlementsApiUrl });
+    new CfnOutput(this, 'EntitlementsTableName', { value: this.ingress.entitlementStore.tableName });
     for (const [name, gateway] of Object.entries(this.ingress.toolsGateways)) {
       const part = gatewayIdPart(name);
       new CfnOutput(this, `ToolsGatewayUrl${part}`, { value: gateway.gatewayUrl });

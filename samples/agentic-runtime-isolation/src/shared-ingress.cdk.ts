@@ -219,6 +219,13 @@ export interface SharedIngressProps {
   readonly perTenantMetrics?: boolean;
   /** The SSM parameter prefix of the registry and the published parameters (ADR-0024). Default `/application-plane/shared/agent-runtime/`. */
   readonly registryPrefix?: string;
+  /**
+   * Write the published interface (spec §6.4) under `registryPrefix`. Default true. `false`
+   * writes none of it (the registry entries of backends and tool targets still appear); a
+   * consumer then reads the construct's members or stack outputs. Several ingress stacks
+   * deployed at once share Parameter Store's 3 writes per second per account (ADR-0042).
+   */
+  readonly publish?: boolean;
   /** Cache life of registry entries, plans and the tool catalogue (v2). Default 60 s; 1 s to 750 s. */
   readonly registryTtl?: Duration;
   /** The backend served at the bare `/invocations` route. `[a-z0-9-]{1,32}`. */
@@ -260,6 +267,7 @@ export interface ResolvedOptions {
   readonly stageThrottle: { readonly rateLimit: number; readonly burstLimit: number };
   readonly perTenantMetrics: boolean;
   readonly registryPrefix: string;
+  readonly publish: boolean;
   readonly registryTtlSeconds: number;
   readonly defaultBackend?: string;
   /** (v2) */
@@ -512,6 +520,7 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
     stageThrottle: { rateLimit, burstLimit },
     perTenantMetrics: props.perTenantMetrics ?? false,
     registryPrefix,
+    publish: props.publish ?? true,
     registryTtlSeconds,
     defaultBackend: props.defaultBackend,
     transactionToken: { ttlSeconds, algorithm, keyGeneration, cacheMaxEntries: mintCacheMaxEntries, reuseMarginSeconds },
@@ -819,7 +828,9 @@ export class SharedIngress extends Construct {
       }),
     );
 
-    this.publish(options);
+    if (options.publish) {
+      this.publish(options);
+    }
   }
 
   /** The invocation URL of one backend behind this ingress (spec §5): `${endpointUrl}/${backend}/invocations`. */

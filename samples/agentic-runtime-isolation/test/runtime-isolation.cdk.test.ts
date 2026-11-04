@@ -158,6 +158,7 @@ describe('resolveOptions', () => {
       stageThrottle: { rateLimit: 50, burstLimit: 25 },
       perTenantMetrics: false,
       registryPrefix: DEFAULT_REGISTRY_PREFIX,
+      publish: true,
       registryTtlSeconds: 60,
       defaultBackend: undefined,
       // v2: always-on transaction token and entitlements, tools gateway on by default.

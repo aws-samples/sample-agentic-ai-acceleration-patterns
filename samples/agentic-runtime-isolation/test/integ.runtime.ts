@@ -28,8 +28,9 @@
  * on the `api-gateway` stack (step 21 redeploys it with 2).
  *
  * The published parameters have fixed names, so only the `api-gateway`
- * stack writes them (none with `INTEG_PUBLISHER=none`); the others publish
- * under `<prefix><stackName>/`.
+ * stack writes them (none with `INTEG_PUBLISHER=none`); the others write no
+ * published interface at all (`publishInterface: false`, ADR-0042) and keep
+ * their registry entries under `<prefix><stackName>/`.
  * Dashboards are account-wide names, so each stack names its own after the
  * stack. Each stack has its own entitlement store, so name reservations do
  * not collide across stacks; every stack passes `owner:
@@ -119,6 +120,10 @@ for (const [suffix, context] of Object.entries(INTEG_STACKS)) {
   const stack = new RuntimeIsolationDemoStack(app, stackName, {
     agentCodePath,
     publishParameters: suffix === PUBLISHER,
+    // Only the publisher writes the published interface; the others would write
+    // 20-odd parameters each at once and trip Parameter Store's 3 writes per
+    // second per account (ADR-0042). The driver reads stack outputs instead.
+    publishInterface: suffix === PUBLISHER,
     dashboardName: stackName,
     context,
     identity: suffix === 'multi-tenant' ? { userPoolId: mtPool!, appClientId: mtClient! } : undefined,
