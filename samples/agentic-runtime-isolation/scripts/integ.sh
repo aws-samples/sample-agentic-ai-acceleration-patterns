@@ -268,8 +268,16 @@ cleanup() {
       runtimes_of "${STACK_PREFIX}-${s}" >>"$runtimes"
       aws cloudformation describe-stacks --stack-name "${STACK_PREFIX}-${s}" --query 'Stacks[0].StackId' --output text 2>/dev/null >>"$ids"
     done
-    "${CDK[@]}" destroy --all --force --concurrency 6 >"${LIB_TMP}/destroy.log" 2>&1 \
-      || { tail -20 "${LIB_TMP}/destroy.log" >&2; CUR_FAIL="${CUR_FAIL:+${CUR_FAIL}; }cdk destroy failed"; }
+    # Runs 5-8: at concurrency 6, SSM DeleteParameter fails with
+    # GeneralServiceException in several stacks and they end DELETE_FAILED.
+    # Retry once at concurrency 2 after a pause; CloudFormation deletes a
+    # DELETE_FAILED stack again on a second request.
+    if ! "${CDK[@]}" destroy --all --force --concurrency 6 >"${LIB_TMP}/destroy.log" 2>&1; then
+      echo "  teardown: first attempt failed ($(grep -c DELETE_FAILED "${LIB_TMP}/destroy.log" || true) DELETE_FAILED lines); retrying at concurrency 2 in 60 s" >&2
+      sleep 60
+      "${CDK[@]}" destroy --all --force --concurrency 2 >"${LIB_TMP}/destroy-retry.log" 2>&1 \
+        || { tail -20 "${LIB_TMP}/destroy-retry.log" >&2; CUR_FAIL="${CUR_FAIL:+${CUR_FAIL}; }teardown failed twice (concurrency 6, then 2)"; }
+    fi
     while read -r rt; do
       [[ -n "$rt" && "$rt" != None ]] || continue
       for g in $(aws logs describe-log-groups --log-group-name-prefix "${RUNTIME_LOG_PREFIX}${rt}" --query 'logGroups[].logGroupName' --output text); do
