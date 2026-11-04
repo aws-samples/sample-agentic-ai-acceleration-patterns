@@ -132,6 +132,27 @@ describe.each(['api-gateway', 'agentcore-gateway'] as const)('v2 template, ingre
     expect(signs[0].Principal).toEqual({ AWS: { 'Fn::GetAtt': [interceptor.role, 'Arn'] } });
   });
 
+  it.each(['TokenSigner', 'ToolContextKey'])('the %s key policy: no Create*/CreateGrant/Put* wildcard in any Allow, CreateGrant denied to everyone, Sign only to its minter', (which) => {
+    const [, key] = resources(template, 'AWS::KMS::Key').find(([id]) => id.includes(which))!;
+    const statements: any[] = key.Properties.KeyPolicy.Statement;
+    const allows = statements.filter((s) => s.Effect === 'Allow');
+    for (const s of allows) {
+      const actions = [s.Action].flat();
+      expect(actions.filter((a: string) => a.startsWith('kms:Create'))).toEqual([]);
+      expect(actions).not.toContain('kms:Put*');
+      expect(actions).not.toContain('kms:*');
+    }
+    const admin = statements.find((s) => s.Sid === 'KeyAdministration');
+    expect(admin.Action).toContain('kms:PutKeyPolicy');
+    expect(admin.Action).not.toContain('kms:Sign');
+    const deny = statements.find((s) => s.Sid === 'DenyGrants');
+    expect(deny).toEqual({ Sid: 'DenyGrants', Effect: 'Deny', Principal: { AWS: '*' }, Action: 'kms:CreateGrant', Resource: '*' });
+    const signs = signStatements(key);
+    expect(signs).toHaveLength(1);
+    expect(signs[0].Sid).toMatch(/^Sign/);
+    expect(signs[0].Effect).toBe('Allow');
+  });
+
   it('the two discovery routes are public GETs on a MOCK integration, with no authoriser (spec §5.2)', () => {
     const methods = resources(template, 'AWS::ApiGateway::Method').filter(([id]) => id.includes('wellknown'));
     expect(methods).toHaveLength(2);
@@ -191,12 +212,71 @@ describe.each(['api-gateway', 'agentcore-gateway'] as const)('v2 template, ingre
     expect(JSON.stringify(policy.Properties.Statement)).not.toContain('___');
   });
 
+  it('the entitlement API: vendor routes are AWS_IAM on the vendor function, tenant-admin routes NONE on the tenant-admin function (spec §5.3, ADR-0033)', () => {
+    const vendorFn = functionAndRole(template, 'entitlement API, vendor side').id;
+    const adminFn = functionAndRole(template, 'entitlement API, tenant-admin side').id;
+    const pathOf = new Map(resources(template, 'AWS::ApiGateway::Resource').map(([id, r]) => [id, r.Properties.PathPart as string]));
+    const methods = resources(template, 'AWS::ApiGateway::Method').filter(([id]) => id.includes('entitlements'));
+    const byPart = (part: string) => methods.filter(([, m]) => pathOf.get(m.Properties.ResourceId.Ref) === part);
+    const vendorRoutes = [...byPart('{tenantId}'), ...byPart('plans'), ...byPart('{planName}')];
+    const adminRoutes = [...byPart('users'), ...byPart('cut')];
+    expect(vendorRoutes).toHaveLength(7);
+    expect(adminRoutes).toHaveLength(4);
+    expect(vendorRoutes.length + adminRoutes.length).toBe(methods.length);
+    for (const [, m] of vendorRoutes) {
+      expect(m.Properties.AuthorizationType).toBe('AWS_IAM');
+      expect(JSON.stringify(m.Properties.Integration.Uri)).toContain(vendorFn);
+    }
+    for (const [, m] of adminRoutes) {
+      expect(m.Properties.AuthorizationType).toBe('NONE');
+      expect(JSON.stringify(m.Properties.Integration.Uri)).toContain(adminFn);
+    }
+  });
+
+  it('TenantAdminRole: assumable only by the tenant-admin function with a TenantId session tag, and writes only its own tenant partition (ADR-0033, M-45)', () => {
+    const adminFn = functionAndRole(template, 'entitlement API, tenant-admin side');
+    const [roleId, role] = resources(template, 'AWS::IAM::Role').find(([id]) => id.includes('TenantAdminRole'))!;
+    const trust = role.Properties.AssumeRolePolicyDocument.Statement;
+    expect(trust).toHaveLength(1);
+    expect(trust[0].Principal).toEqual({ AWS: { 'Fn::GetAtt': [adminFn.role, 'Arn'] } });
+    expect([trust[0].Action].flat().sort()).toEqual(['sts:AssumeRole', 'sts:TagSession']);
+    expect(trust[0].Condition).toEqual({
+      'StringLike': { 'aws:RequestTag/TenantId': '?*' },
+      'ForAllValues:StringEquals': { 'aws:TagKeys': ['TenantId'] },
+    });
+    const statements = resources(template, 'AWS::IAM::Policy')
+      .filter(([, p]) => p.Properties.Roles.some((r: any) => r.Ref === roleId))
+      .flatMap(([, p]) => p.Properties.PolicyDocument.Statement);
+    const own = statements.find((st: any) => st.Sid === 'OwnTenantPartitionOnly');
+    expect(own.Condition).toEqual({ 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['TENANT#${aws:PrincipalTag/TenantId}'] } });
+    for (const st of statements) {
+      expect(st.Condition?.['ForAllValues:StringEquals']?.['dynamodb:LeadingKeys'] ?? null).not.toBeNull();
+    }
+    // The function itself may assume the role and tag the session, nothing broader.
+    const assume = resources(template, 'AWS::IAM::Policy')
+      .filter(([, p]) => p.Properties.Roles.some((r: any) => r.Ref === adminFn.role))
+      .flatMap(([, p]) => p.Properties.PolicyDocument.Statement)
+      .find((st: any) => st.Sid === 'AssumeTenantAdminRole');
+    expect(assume.Resource).toEqual({ 'Fn::GetAtt': [roleId, 'Arn'] });
+  });
+
   it('no RESPONSE interceptor unless responseFilter is on (ADR-0041)', () => {
     expect(resources(template, 'AWS::Lambda::Function').some(([, f]) => String(f.Properties.Description).includes('RESPONSE interceptor'))).toBe(false);
   });
 });
 
 describe('v2 options', () => {
+  it('identity.multiTenant on api-gateway: X-Tenant-Id is an authoriser identity source (M-53); off, it is not', () => {
+    const sourcesOf = (multiTenant: boolean): string[] => {
+      const template = build('api-gateway', { identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: ['client-one'], multiTenant } }).template();
+      const authorizers = resources(template, 'AWS::ApiGateway::Authorizer');
+      expect(authorizers).toHaveLength(1);
+      return String(authorizers[0][1].Properties.IdentitySource).split(',');
+    };
+    expect(sourcesOf(true)).toEqual(['method.request.header.Authorization', 'context.path', 'method.request.header.X-Tenant-Id']);
+    expect(sourcesOf(false)).toEqual(['method.request.header.Authorization', 'context.path']);
+  });
+
   it('ES256 makes ECC_NIST_P256 keys signed with ECDSA_SHA_256', () => {
     const template = build('api-gateway', { transactionToken: { algorithm: 'ES256' } }).template();
     const [, key] = resources(template, 'AWS::KMS::Key').find(([id]) => id.includes('TokenSigner'))!;

@@ -133,11 +133,28 @@ describe('intercept', () => {
     expect(headers[RUNTIME_HEADERS.TRANSACTION_TOKEN]).toBe(TXN_TOKEN);
     expect(headers[RUNTIME_HEADERS.SESSION_ID]).toBe(`s-${sessionPrefix('tenant-b', 'user-a1', 'user')}-conversationA1x0001`);
     expect(Object.values(headers)).not.toContain(token);
-    expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request admitted')).toMatchObject({ tenantId: 'tenant-b', txn: 'txn-1', grantSize: 2, mint: 'miss' });
+    expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request admitted')).toMatchObject({ tenantId: 'tenant-b', txn: 'txn-1', grantSize: 2, mint: 'miss', noToolsGranted: false });
     const missing = await intercept(event({ authorization: `Bearer ${token}` }, body), d);
     const response = (missing.http as any).transformedGatewayResponse;
     expect(response.statusCode).toBe(400);
     expect(Buffer.from(response.body, 'base64').toString()).toBe('bad request: tenant_required');
+  });
+
+  it('v2: the request admitted line carries noToolsGranted from the grant (P-9)', async () => {
+    const config = baseConfig({ ingress: 'agentcore-gateway', sessionScope: 'user' });
+    const d = deps(config);
+    const needsOnly = pipelineFor(config, {
+      verifier: new TokenVerifier(
+        { discoveryUrl: DISCOVERY_URL, allowedClientIds: [CLIENT_ID] },
+        { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
+      ),
+      registry: stubRegistry(ENTRIES).registry,
+      authority: {
+        resolve: async () => ({ token: TXN_TOKEN, txn: 'txn-2', exp: 9_999_999_999, mint: 'hit' as const, grantSize: 1, noToolsGranted: true }),
+      },
+    });
+    await intercept(event({ authorization: `Bearer ${await issuer.mint()}` }, body), { ...d, pipeline: needsOnly });
+    expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request admitted')).toMatchObject({ txn: 'txn-2', grantSize: 1, mint: 'hit', noToolsGranted: true });
   });
 
   it('v2: an entitlement refusal is a fixed-text response with its public reason', async () => {

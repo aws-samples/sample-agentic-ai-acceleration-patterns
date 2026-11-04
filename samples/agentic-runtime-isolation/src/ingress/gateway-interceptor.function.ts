@@ -181,6 +181,7 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
     txn: request.txn,
     grantSize: request.grantSize,
     mint: request.mint,
+    noToolsGranted: request.noToolsGranted,
     sessionPrefix: prefixOf(request.unitId),
     status: 200,
   });

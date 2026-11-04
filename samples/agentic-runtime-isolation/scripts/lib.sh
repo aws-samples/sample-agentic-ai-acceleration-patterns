@@ -18,17 +18,6 @@ REFRESH_TYPE='urn:ietf:params:oauth:token-type:refresh_token'
 # The scope a tenant admin narrows to for the tenant API (tenant-identity ADR-0009).
 TENANT_ADMIN_SCOPE='tenant-admin/users'
 
-# The scopes the demo's backends own (ADR-0025). MUST match DEFAULT_SCOPES and
-# BILLING_SCOPES exported by src/demo.cdk.ts: the default backend owns one,
-# billing owns two, any one of a backend's scopes opens that backend. A
-# tenant holds a scope only when CreateTenant lists it (tenant-identity
-# ADR-0035); a user holds it only when the tenant does and the tenant admin
-# has not cut it (ADR-0036). The scripts create their tenants with these.
-DEFAULT_SCOPE='default/chat'
-BILLING_READ_SCOPE='billing/read'
-BILLING_INVOKE_SCOPE='billing/invoke'
-ALL_DEMO_SCOPES="${DEFAULT_SCOPE} ${BILLING_READ_SCOPE} ${BILLING_INVOKE_SCOPE}"
-
 BODY="${LIB_TMP}/body"
 REQ="${LIB_TMP}/request"
 : >"$BODY"
@@ -62,6 +51,18 @@ signed() {
     args+=(-H 'Content-Type: application/json' --data-binary "@$REQ")
   fi
   curl "${args[@]}" "$url" <<<"$config"
+}
+
+# unsigned METHOD URL [JSON] -> HTTP status of a call with no SigV4 signature
+# and no Authorization header (a negative for an AWS_IAM route); body in $BODY.
+unsigned() {
+  local method="$1" url="$2" data="${3:-}"
+  local args=(-s -o "$BODY" -w '%{http_code}' -X "$method")
+  if [[ -n "$data" ]]; then
+    printf '%s' "$data" >"$REQ"
+    args+=(-H 'Content-Type: application/json' --data-binary "@$REQ")
+  fi
+  curl "${args[@]}" "$url"
 }
 
 # platform METHOD PATH [JSON] -> HTTP status; body in $BODY (tenant-identity's platform API).
@@ -125,13 +126,14 @@ stale_identity() {
 CREATED_TENANTS=()
 
 # create_tenant NAME [SCOPES] -> sets TENANT_ID and ADMIN_USERNAME.
-# SCOPES is a space-separated list the tenant is entitled to (ADR-0025,
-# tenant-identity ADR-0035); default: every demo scope. An absent list would
-# leave the tenant with no scopes and every token refused at the ingress.
+# SCOPES is the space-separated list of vendor scopes the tenant holds in
+# tenant-identity (its ADR-0035): `app/use`, plus `entitlements/admin` for a
+# tenant whose admin calls the entitlement API; default `app/use`. What the
+# tenant's agents and tools are is the entitlement store's, not a scope.
 create_tenant() {
   local status
   status="$(platform POST platform/tenants \
-    "$(jq -nc --arg n "$1" --arg e "success+${1}-admin@simulator.amazonses.com" --argjson s "$(scopes_json "${2-$ALL_DEMO_SCOPES}")" \
+    "$(jq -nc --arg n "$1" --arg e "success+${1}-admin@simulator.amazonses.com" --argjson s "$(scopes_json "${2-app/use}")" \
       '{name: $n, adminEmail: $e, scopes: $s}')")"
   [[ "$status" == 201 ]] || fail "CreateTenant $1: HTTP ${status}"
   TENANT_ID="$(jq -r .tenant.tenantId "$BODY")"
@@ -188,8 +190,7 @@ tamper() {
 
 # narrow REFRESH_VAR TENANT_ID SCOPE OUT_VAR -> sets NARROW_STATUS, and OUT_VAR on 200 (RFC 8693, tenant-identity ADR-0009).
 # SCOPE may be several scopes separated by spaces. A scope the user does not
-# hold (not in the catalogue, not the tenant's, or cut by the tenant admin)
-# is 400 invalid_scope (ADR-0025); callers assert on NARROW_STATUS.
+# hold is refused by tenant-identity; callers assert on NARROW_STATUS.
 # Call it directly, never in $(...): a subshell would lose OUT_VAR.
 narrow() {
   local refresh="${!1}" status
@@ -208,15 +209,6 @@ narrow() {
     : >"$BODY"
   fi
   NARROW_STATUS="$status"
-}
-
-# oauth_error -> the RFC 6749 `error` code of the last refused exchange (body in $BODY).
-oauth_error() { jq -r '.error // empty' "$BODY" 2>/dev/null; }
-
-# expect_invalid_scope WHAT -> fails unless the last narrow was 400 invalid_scope.
-expect_invalid_scope() {
-  [[ "$NARROW_STATUS" == 400 && "$(oauth_error)" == invalid_scope ]] || fail "$1: expected HTTP 400 invalid_scope, got HTTP ${NARROW_STATUS} $(oauth_error)"
-  echo "  $1 -> HTTP 400 invalid_scope"
 }
 
 # delete_tenants: offboards every tenant this run created (exit trap), at the

@@ -771,7 +771,7 @@ export class SharedIngress extends Construct {
     if (options.perTenantMetrics) {
       Annotations.of(this).addWarningV2(
         'runtime-isolation:per-tenant-metrics-cost',
-        'perTenantMetrics is on: each tenant adds about 9 CloudWatch custom metrics per ingress, billed monthly (10,000 tenants is about 90,000 metrics). The ingress log carries the same figures with the tenantId; prefer Logs Insights or Contributor Insights at scale (ADR-0021).',
+        'perTenantMetrics is on: each tenant adds up to 9 x (1 + agents) CloudWatch custom metrics per ingress, billed monthly: the 9 metric names on [TenantId, Ingress] and again on [TenantId, Ingress, Backend] for each agent backend the tenant calls (10,000 tenants on one agent is about 180,000 metrics). The ingress log carries the same figures with the tenantId; prefer Logs Insights or Contributor Insights at scale (ADR-0021).',
       );
     }
 

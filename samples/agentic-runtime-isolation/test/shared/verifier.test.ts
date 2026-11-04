@@ -61,6 +61,12 @@ describe('TokenVerifier', () => {
     expect(await refusal(verifier().verify(token))).toEqual({ status: 401, reason: 'invalid_token' });
   });
 
+  it('401 for a token without exp or without iat', async () => {
+    expect(await refusal(verifier().verify(await issuer.mintWithout(['exp'])))).toEqual({ status: 401, reason: 'invalid_token' });
+    expect(await refusal(verifier().verify(await issuer.mintWithout(['iat'])))).toEqual({ status: 401, reason: 'invalid_token' });
+    await expect(verifier().verify(await issuer.mintWithout([]))).resolves.toBeDefined();
+  });
+
   it('401 for another issuer', async () => {
     const token = await issuer.mint({ iss: 'https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_OTHERPOOL0' });
     expect(await refusal(verifier().verify(token))).toEqual({ status: 401, reason: 'invalid_token' });

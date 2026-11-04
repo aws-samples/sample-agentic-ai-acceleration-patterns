@@ -825,6 +825,23 @@ run_all_on() { # SUFFIX
   status="$(invoke "$BILLING_URL" A1_ACCESS "$(body "$C1" report)")"
   check "A1 on billing after the cut is removed: 200 (got ${status})" eq "$status" 200
   note "cut lands on the next request and is lifted on the next"
+  if [[ "$INGRESS" == api-gateway ]]; then
+    # The entitlement API's two doors (spec §5.3, ADR-0033): the tenant-admin
+    # gate in the function, IAM on the vendor routes. One stack is enough:
+    # both all-on stacks deploy the same EntitlementApi construct.
+    local b1_sub denied
+    b1_sub="$(claim B1_ACCESS sub)"
+    status="$(admin_api PUT "users/${b1_sub}/cut" B1_ACCESS '{"cutAgents":[],"cutTools":[]}')"
+    check "B1 (no entitlements/admin) cuts itself: 403 (got ${status})" eq "$status" 403
+    check "B1 self-cut body names admin_scope_missing (got '$(body_text | head -c 80)')" contains "$(body_text)" admin_scope_missing
+    status="$(admin_api PUT "users/${b1_sub}/cut" AA_ACCESS '{"cutAgents":[],"cutTools":[]}' "$TENANT_B")"
+    if contains "$(body_text)" tenant_not_allowed; then denied=tenant_not_allowed; elif contains "$(body_text)" AccessDenied; then denied=AccessDenied; else denied="other: $(body_text | head -c 80)"; fi
+    check "AA with X-Tenant-Id of tenant B: 403 (got ${status})" eq "$status" 403
+    check "AA with X-Tenant-Id of tenant B: tenant_not_allowed or IAM AccessDenied (got ${denied})" status_is "tenant_not_allowed|AccessDenied" "$denied"
+    status="$(unsigned PUT "${ENT_API%/}/tenants/${TENANT_A}" '{"agents":[],"tools":[],"plan":"standard"}')"
+    check "unsigned PUT /entitlements/tenants/<A> (no SigV4): 403 (got ${status} '$(body_text | head -c 60)')" eq "$status" 403
+    note "B1 self-cut 403 admin_scope_missing; AA as tenant B 403 ${denied}; unsigned vendor PUT ${status}"
+  fi
   end_step
 
   begin "13 ${INGRESS}" "tenant tool subscription: B1 lists all three crm tools on default (target grain) and nothing of finance; B1's crm/update_case refused by the interceptor"

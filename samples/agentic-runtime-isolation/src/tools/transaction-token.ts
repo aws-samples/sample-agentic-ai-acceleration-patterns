@@ -61,6 +61,8 @@ export async function verifyTransactionToken(token: string | undefined, deps: To
       issuer: deps.config.issuer,
       audience: toolsGatewayAudience(deps.config.gatewayName),
       algorithms: ['RS256', 'ES256'],
+      // jose checks `exp` only when present; a token without one never verifies.
+      requiredClaims: ['exp', 'iat'],
       currentDate: deps.now === undefined ? undefined : new Date(deps.now()),
     });
     payload = verified.payload;
@@ -69,7 +71,7 @@ export async function verifyTransactionToken(token: string | undefined, deps: To
     throw new Refusal('token_invalid');
   }
   if (typ !== TRANSACTION_TOKEN_TYPE) {
-    throw new Refusal('aud_mismatch');
+    throw new Refusal('token_invalid');
   }
   const { tenant_id: tenantId, sub, user, agent, scope, txn, act } = payload as Record<string, unknown>;
   if (typeof tenantId !== 'string' || typeof sub !== 'string' || typeof user !== 'string' || typeof agent !== 'string' || typeof txn !== 'string') {

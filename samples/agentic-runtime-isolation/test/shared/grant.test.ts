@@ -38,10 +38,12 @@ describe('expandTools / compressTools', () => {
     ]);
   });
 
-  it('compresses a complete target back to <target>/* and sorts', () => {
+  it('compresses a complete target back to <target>/* only when it is a wildcard target, and sorts', () => {
     const full = expandTools(['crm/*', 'invoices/*'], catalogue);
-    expect(compressTools(full, catalogue)).toEqual(['crm/*', 'invoices/*']);
-    expect(compressTools(new Set(['crm/update_case', 'crm/get_account']), catalogue)).toEqual(['crm/get_account', 'crm/update_case']);
+    expect(compressTools(full, catalogue, new Set(['crm', 'invoices']))).toEqual(['crm/*', 'invoices/*']);
+    expect(compressTools(full, catalogue, new Set(['crm']))).toEqual(['crm/*', 'invoices/get_invoice']);
+    expect(compressTools(full, catalogue, new Set())).toEqual(['crm/get_account', 'crm/list_cases', 'crm/update_case', 'invoices/get_invoice']);
+    expect(compressTools(new Set(['crm/update_case', 'crm/get_account']), catalogue, new Set(['crm']))).toEqual(['crm/get_account', 'crm/update_case']);
   });
 
   it('targetsOf names the distinct targets, sorted', () => {
@@ -63,6 +65,34 @@ describe('grantFor', () => {
   it('intersects with the tenant tools: a partial target stays named tool by tool', () => {
     const result = grantFor(inputs({ tenant: { status: 'active', agents: ['default'], tools: ['crm/get_account', 'crm/list_cases'] } }));
     expect(result).toMatchObject({ granted: true, entries: ['crm/get_account', 'crm/list_cases', 'default/chat'] });
+  });
+
+  it('an explicit full list is not compressed; a tool added later is not granted', () => {
+    const explicit = ['crm/get_account', 'crm/list_cases', 'crm/update_case'];
+    // The tenant lists every crm tool by name: still explicit.
+    const byTenant = grantFor(inputs({ tenant: { status: 'active', agents: ['default'], tools: explicit } }));
+    expect(byTenant).toMatchObject({ granted: true, scope: 'crm/get_account crm/list_cases crm/update_case default/chat' });
+    // The agent lists every crm tool by name: still explicit.
+    const byAgent = grantFor(inputs({ agent: { name: 'default', needs: ['default/chat'], tools: explicit } }));
+    expect(byAgent).toMatchObject({ granted: true, scope: 'crm/get_account crm/list_cases crm/update_case default/chat' });
+    for (const result of [byTenant, byAgent]) {
+      const scope = (result as { scope: string }).scope;
+      expect(scope).not.toContain('crm/*');
+      expect(scopeGrantsTool(scope, 'crm/get_account')).toBe(true);
+      // A tool catalogued after the token was minted.
+      expect(scopeGrantsTool(scope, 'crm/delete_account')).toBe(false);
+    }
+    // Both held crm/*: compressed, and the wildcard admits a later tool by design.
+    const wild = grantFor(inputs());
+    expect(wild).toMatchObject({ scope: 'crm/* default/chat' });
+  });
+
+  it('the plan\'s <target>/* counts for T; a cut on the target (even of an uncatalogued tool) keeps the list explicit', () => {
+    expect(grantFor(inputs({ tenant: { status: 'active', agents: ['default'], tools: [] }, plan: { agents: [], tools: ['crm/*'] } }))).toMatchObject({ scope: 'crm/* default/chat' });
+    expect(grantFor(inputs({ cut: { cutAgents: [], cutTools: ['crm/not_yet_catalogued'] } }))).toMatchObject({
+      scope: 'crm/get_account crm/list_cases crm/update_case default/chat',
+    });
+    expect(grantFor(inputs({ cut: { cutAgents: [], cutTools: ['invoices/get_invoice'] } }))).toMatchObject({ scope: 'crm/* default/chat' });
   });
 
   it('a plan adds agents and tools to the tenant row', () => {

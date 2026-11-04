@@ -43,6 +43,12 @@ export interface ValidatedRequest {
   readonly grantSize?: number;
   /** (v2, P-9) Whether the token came from the mint cache. */
   readonly mint?: 'hit' | 'miss';
+  /**
+   * (v2, P-9) True when the grant holds only the agent's needs. Set where
+   * the request was minted (the `agentcore-gateway` interceptor); the
+   * `api-gateway` authoriser logs it on its own `request authorised` line.
+   */
+  readonly noToolsGranted?: boolean;
   /** Tenant-scoped credentials, only when `tvm` is on (P-8). */
   readonly credentials?: VendedCredentials;
 }

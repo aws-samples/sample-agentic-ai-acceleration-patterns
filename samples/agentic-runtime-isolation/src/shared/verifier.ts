@@ -164,7 +164,8 @@ export class TokenVerifier {
     const { issuer, getKey } = await this.resolve();
     let payload: JWTPayload;
     try {
-      ({ payload } = await jwtVerify(token, getKey, { issuer, algorithms: ['RS256'] }));
+      // A token without `exp` or `iat` never verifies: jose checks `exp` only when present.
+      ({ payload } = await jwtVerify(token, getKey, { issuer, algorithms: ['RS256'], requiredClaims: ['exp', 'iat'] }));
     } catch {
       throw new TokenError(401, 'invalid_token');
     }

@@ -1,6 +1,6 @@
 {
   "name": "agentic-runtime-isolation",
-  "description": "Agentic runtime isolation for a multi-tenant agent: a backend that trusts one ingress, which maps the validated caller to an isolated compute unit, vends tenant-scoped credentials, limits each tenant, enforces entitlements and mints a transaction token; one ingress fronts one or more registered backends and one shared tools gateway; AgentCore Runtime first",
+  "description": "Agentic runtime isolation for a multi-tenant agent: a backend that trusts one ingress, which maps the validated caller to an isolated compute unit, vends tenant-scoped credentials, limits each tenant, enforces entitlements and mints a transaction token; one ingress fronts one or more registered backends and tools gateways, one Policy engine each; AgentCore Runtime first",
   "scripts": {
     "build": "projen build",
     "bundle": "projen bundle",

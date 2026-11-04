@@ -11,10 +11,18 @@
  *   from that deploy on; key N stays in the JWKS but may no longer sign. At
  *   N+2 key N leaves the code, CloudFormation deletes it and KMS schedules
  *   its deletion (30-day window).
- * - The key policy is written in full: the account may administer the key
- *   and delegate reads (`GetPublicKey`) through IAM, but `kms:Sign` is
- *   granted in the key policy to the one minting role alone, never to the
- *   account, so no IAM policy anywhere can add a signer (P-14).
+ * - The key policy is written in full (P-14). `kms:Sign` is granted only in
+ *   the key policy, to the one minting role, never to the account, so no
+ *   IAM policy can add a signer. No grant can either: the account root holds
+ *   no `kms:Create*`, and an explicit `Deny` on `kms:CreateGrant` for every
+ *   principal stops a grant whatever an IAM policy says. The residual is
+ *   `kms:PutKeyPolicy`, which the account root keeps so CloudFormation can
+ *   update the policy on a later deploy (a new `grantSign` principal, a
+ *   rotation): a principal holding it through IAM can rewrite the policy and
+ *   add a signer. That is the account's key administrators, i.e. the
+ *   deployer's own privilege, and every `PutKeyPolicy` is in CloudTrail.
+ *   The account may delegate reads (`GetPublicKey`) through IAM only when
+ *   `delegatePublicKey` is set.
  * - The JWKS is rendered at deploy by a custom resource reading
  *   `GetPublicKey` (src/shared/jwks.function.ts) and served with the OIDC
  *   discovery document from mock integrations, `Cache-Control: public,
@@ -52,14 +60,16 @@ export const KEY_SPEC: Record<JwsAlgorithm, kms.KeySpec> = {
 /**
  * The key-policy actions the account keeps: administration only. Never
  * `kms:Sign`, and not `kms:GetPublicKey` either unless the key delegates it
- * (M-40: the public half only to the roles that render or verify).
+ * (M-40: the public half only to the roles that render or verify). No
+ * `kms:Create*` (it covers `CreateGrant`; the sample creates no alias, so
+ * no create action is needed), and `kms:PutKeyPolicy` alone rather than
+ * `kms:Put*`: CloudFormation needs it to update the policy on later deploys.
  */
 export const KEY_ADMIN_ACTIONS = [
-  'kms:Create*',
   'kms:Describe*',
   'kms:Enable*',
   'kms:List*',
-  'kms:Put*',
+  'kms:PutKeyPolicy',
   'kms:Update*',
   'kms:Revoke*',
   'kms:Disable*',
@@ -81,7 +91,7 @@ export interface TokenSignerProps {
   readonly signer: iam.IRole;
 }
 
-/** An asymmetric signing key with a key policy that never grants the account `kms:Sign`. */
+/** An asymmetric signing key with a key policy that never grants the account `kms:Sign` and denies `kms:CreateGrant` to everyone. */
 export function signingKey(
   scope: Construct,
   id: string,
@@ -101,6 +111,15 @@ export function signingKey(
           sid: 'KeyAdministration',
           principals: [new iam.AccountRootPrincipal()],
           actions: options.delegatePublicKey === true ? [...KEY_ADMIN_ACTIONS, 'kms:GetPublicKey'] : KEY_ADMIN_ACTIONS,
+          resources: ['*'],
+        }),
+        // No grant on a signing key, for anyone: a grant is the one path to
+        // `kms:Sign` that bypasses the key policy's named principals.
+        new iam.PolicyStatement({
+          sid: 'DenyGrants',
+          effect: iam.Effect.DENY,
+          principals: [new iam.AnyPrincipal()],
+          actions: ['kms:CreateGrant'],
           resources: ['*'],
         }),
       ],

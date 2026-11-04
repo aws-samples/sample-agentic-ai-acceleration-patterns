@@ -16,11 +16,16 @@
  * ```
  *
  * Every tool set is normalised first: each `<target>/*` is expanded against
- * the catalogue, names not in the catalogue are dropped; the result is
- * compressed back to `<target>/*` for each target whose every catalogued tool
- * is granted, and sorted, so the same inputs always give the same `scope`
- * string (and the same mint cache entry). `needs` are not expanded or
- * compressed.
+ * the catalogue, names not in the catalogue are dropped. The result is
+ * compressed back to `<target>/*` only for a target that every contributing
+ * set held as `<target>/*` itself: A.tools, T.tools (the tenant row or the
+ * plan) and U.tools (no cut names any tool of the target). An explicit list
+ * stays explicit even when it happens to cover the whole catalogue today, so
+ * a tool added to the target later is not granted by a token minted from it
+ * (`<target>/*` in `scope` admits every tool of the target, catalogued or
+ * not, at the interceptor and in Policy). The result is sorted, so the same
+ * inputs always give the same `scope` string (and the same mint cache
+ * entry). `needs` are not expanded or compressed.
  */
 
 /**
@@ -127,9 +132,11 @@ export function expandTools(names: Iterable<string>, catalogue: ToolCatalogue): 
 
 /**
  * Compresses a set of full tool names back to `<target>/*` for each target
- * whose every catalogued tool is in the set, and sorts the result.
+ * in `wildcardTargets` whose every catalogued tool is in the set, and sorts
+ * the result. A target not in `wildcardTargets` keeps its tools named one
+ * by one, however many of them there are.
  */
-export function compressTools(tools: ReadonlySet<string>, catalogue: ToolCatalogue): string[] {
+export function compressTools(tools: ReadonlySet<string>, catalogue: ToolCatalogue, wildcardTargets: ReadonlySet<string>): string[] {
   const byTarget = new Map<string, string[]>();
   for (const name of tools) {
     const parts = splitTool(name);
@@ -143,7 +150,7 @@ export function compressTools(tools: ReadonlySet<string>, catalogue: ToolCatalog
   const out: string[] = [];
   for (const [target, names] of byTarget) {
     const known = catalogue.get(target) ?? [];
-    if (known.length > 0 && known.every((t) => tools.has(`${target}/${t}`))) {
+    if (wildcardTargets.has(target) && known.length > 0 && known.every((t) => tools.has(`${target}/${t}`))) {
       out.push(`${target}/${TARGET_WILDCARD}`);
     } else {
       out.push(...names);
@@ -162,6 +169,18 @@ export function targetsOf(names: Iterable<string>): string[] {
     }
   }
   return [...out].sort();
+}
+
+/** The targets a list of tool names holds as `<target>/*`. */
+function wildcardTargetsOf(names: Iterable<string>): Set<string> {
+  const out = new Set<string>();
+  for (const name of names) {
+    const parts = splitTool(name);
+    if (parts !== undefined && parts[1] === TARGET_WILDCARD) {
+      out.add(parts[0]);
+    }
+  }
+  return out;
 }
 
 /** The grant rule (P-11). Pure; never throws for well-formed inputs. */
@@ -189,7 +208,14 @@ export function grantFor(inputs: GrantInputs): GrantResult {
       tools.add(tool);
     }
   }
-  const entries = [...new Set([...agent.needs, ...compressTools(tools, catalogue)])].sort();
+  // Compress a target only when A, T and U each held it as `<target>/*`: U
+  // does when T does and no cut names the target (a cut of an uncatalogued
+  // tool counts, so a tool added later is never let back in by a wildcard).
+  const agentWild = wildcardTargetsOf(agent.tools);
+  const tenantWild = wildcardTargetsOf([...tenant.tools, ...(plan?.tools ?? [])]);
+  const cutTargets = new Set(targetsOf(cut?.cutTools ?? []));
+  const wildcards = new Set([...agentWild].filter((t) => tenantWild.has(t) && !cutTargets.has(t)));
+  const entries = [...new Set([...agent.needs, ...compressTools(tools, catalogue, wildcards)])].sort();
   const scope = entries.join(' ');
   if (Buffer.byteLength(scope, 'utf8') > MAX_SCOPE_BYTES) {
     return { granted: false, reason: 'grant_too_large' };

@@ -150,7 +150,15 @@ describe('interceptTool', () => {
 
   it('refuses a token of another typ (the Gateway does not check typ, spike V-8)', async () => {
     const token = await transactionToken({ typ: 'JWT' });
-    expect(refusalOf(await interceptTool(event(token, 'tools/list'), deps)).message).toBe('forbidden: aud_mismatch');
+    expect(refusalOf(await interceptTool(event(token, 'tools/list'), deps)).message).toBe('forbidden: token_invalid');
+  });
+
+  it('refuses a token without exp or without iat as token_invalid', async () => {
+    for (const claims of [{ exp: undefined }, { iat: undefined }]) {
+      const token = await transactionToken({ claims });
+      expect(decodeJws(token).payload).not.toHaveProperty(Object.keys(claims)[0]);
+      expect(refusalOf(await interceptTool(event(token, 'tools/call', call({})), deps)).message).toBe('forbidden: token_invalid');
+    }
   });
 
   it('refuses a token whose aud does not name its own agent', async () => {

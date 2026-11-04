@@ -136,6 +136,15 @@ export async function authorize(event: APIGatewayRequestAuthorizerEvent, deps: A
       mint: authority.mint,
       noToolsGranted: authority.noToolsGranted,
     });
+    // UNVERIFIED BOUND: the transaction token rides in the Allow `context`.
+    // At the 8,192-byte `scope` bound (MAX_SCOPE_BYTES) the token is about
+    // 11.8 KB, and no run has yet carried a token that size through an API
+    // Gateway REQUEST authoriser context to the ingress function: V-13
+    // proved the size through InvokeAgentRuntime directly, not this path.
+    // Spike V-17 (a max-size grant through this authoriser, cached and
+    // uncached, read back by api-gateway-ingress) would settle it; until
+    // then the bound is not changed and the gap is recorded in the spec and
+    // the threat model.
     return buildPolicy(event.methodArn, 'Allow', {
       tenantId,
       sub,

@@ -119,6 +119,8 @@ export interface AuthorizedContext {
   readonly txn: string;
   readonly grantSize: number;
   readonly mint: 'hit' | 'miss';
+  /** Set when minted here; the authoriser logs its own and does not pass it on. */
+  readonly noToolsGranted?: boolean;
 }
 
 export interface RequestInputs {
@@ -225,6 +227,7 @@ export class IngressPipeline {
       txn: authority.txn,
       grantSize: authority.grantSize,
       mint: authority.mint,
+      ...(authority.noToolsGranted === undefined ? {} : { noToolsGranted: authority.noToolsGranted }),
     };
     if (this.tvm !== undefined) {
       try {
@@ -261,7 +264,8 @@ export class IngressPipeline {
     }
     try {
       const minted = await this.authority.resolve(claims.tenantId, claims.sub, backend, entry);
-      return { transactionToken: minted.token, txn: minted.txn, grantSize: minted.grantSize, mint: minted.mint };
+      const { token: transactionToken, txn, grantSize, mint, noToolsGranted } = minted;
+      return { transactionToken, txn, grantSize, mint, noToolsGranted };
     } catch (error) {
       if (error instanceof AuthorityError) {
         throw new RequestError(error.status, error.reason, claims.tenantId);

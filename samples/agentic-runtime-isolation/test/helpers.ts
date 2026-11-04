@@ -23,6 +23,8 @@ export interface TestIssuer {
   readonly fetchDiscovery: (url: string) => Promise<Discovery>;
   /** A valid access token for the given overrides (defaults: tenant-a, user-a1, the default backend's scope and billing/read). */
   mint(overrides?: JWTPayload & { exp?: number }, headerKid?: string): Promise<string>;
+  /** A token signed by the known key without the named registered claims (no `exp`, no `iat`). */
+  mintWithout(claims: readonly ('exp' | 'iat')[], overrides?: JWTPayload): Promise<string>;
   /** A token signed by a key the JWKS does not know. */
   mintForeign(overrides?: JWTPayload): Promise<string>;
 }
@@ -57,6 +59,12 @@ export async function testIssuer(): Promise<TestIssuer> {
     },
     mint: (overrides, kid) => sign(privateKey, overrides, kid),
     mintForeign: (overrides) => sign(foreign.privateKey, overrides),
+    mintWithout: async (omit, overrides = {}) => {
+      let jwt = new SignJWT({ ...DEFAULT_CLAIMS, ...overrides }).setProtectedHeader({ alg: 'RS256', kid: 'k1' }).setIssuer(ISSUER);
+      jwt = omit.includes('iat') ? jwt : jwt.setIssuedAt();
+      jwt = omit.includes('exp') ? jwt : jwt.setExpirationTime('5m');
+      return jwt.sign(privateKey);
+    },
   };
 }
 

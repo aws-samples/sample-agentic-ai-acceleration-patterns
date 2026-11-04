@@ -285,7 +285,7 @@ expect_grant() {
 }
 expect_grant A1 "$ENDPOINT" default "crm/* default/chat" '["agent:default","tools-gateway:default"]'
 expect_grant A2 "$ENDPOINT" default "crm/get_account crm/list_cases default/chat" '["agent:default","tools-gateway:default"]'
-echo "  A2: the tenant admin's cut removed crm/update_case; crm/* was expanded, cut and compressed back (ADR-0032)"
+echo "  A2: the tenant admin's cut removed crm/update_case; crm/* was expanded and cut, and a cut target stays an explicit list (ADR-0032)"
 expect_grant B1 "$ENDPOINT" default "crm/get_account crm/list_cases default/chat" '["agent:default","tools-gateway:default"]'
 if [[ -n "$BILLING_URL" ]]; then
   fresh B1

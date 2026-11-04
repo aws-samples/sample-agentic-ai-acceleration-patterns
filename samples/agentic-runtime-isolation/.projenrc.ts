@@ -12,7 +12,7 @@ const project = new awscdk.AwsCdkTypeScriptApp({
   github: false,
   name: 'agentic-runtime-isolation',
   description:
-    'Agentic runtime isolation for a multi-tenant agent: a backend that trusts one ingress, which maps the validated caller to an isolated compute unit, vends tenant-scoped credentials, limits each tenant, enforces entitlements and mints a transaction token; one ingress fronts one or more registered backends and one shared tools gateway; AgentCore Runtime first',
+    'Agentic runtime isolation for a multi-tenant agent: a backend that trusts one ingress, which maps the validated caller to an isolated compute unit, vends tenant-scoped credentials, limits each tenant, enforces entitlements and mints a transaction token; one ingress fronts one or more registered backends and tools gateways, one Policy engine each; AgentCore Runtime first',
   packageManager: javascript.NodePackageManager.NPM,
   license: 'MIT-0',
   copyrightOwner: 'Amazon.com, Inc. or its affiliates. All Rights Reserved.',

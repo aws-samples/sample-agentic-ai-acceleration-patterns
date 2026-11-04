@@ -132,6 +132,7 @@ describe('IngressPipeline', () => {
       txn: 'txn-1',
       grantSize: 2,
       mint: 'miss',
+      noToolsGranted: false,
     });
     // The identity token never leaves the ingress (P-14).
     expect(JSON.stringify(a)).not.toContain(token);
