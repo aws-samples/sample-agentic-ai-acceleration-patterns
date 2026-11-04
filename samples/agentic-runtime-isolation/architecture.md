@@ -4,13 +4,15 @@ SPDX-License-Identifier: MIT-0
 -->
 # Agentic Runtime Isolation: Architecture
 
-> **Status: v2 implemented and verified.** Last green integration run: run 9,
-> 2026-11-04, a sandbox account, eu-central-1. All 57 steps of
+> **Status: v2 implemented and verified.** Last green integration run: run 11,
+> 2026-11-04, a sandbox account, eu-central-1, after the 2026-11-04 review
+> fixes (ADR-0044, the key-policy Deny on grants, `exp` required, explicit
+> tool lists). All 57 steps of
 > `scripts/integ.sh` (the CDK CLI driver, ADR-0044) passed and the teardown left nothing behind (no stack,
 > parameter, log group, table, Gateway or Policy engine; the KMS keys pending
 > deletion). Six stacks (`api-gateway`, `agentcore-gateway`, `session-off`,
-> `session-user`, `limits`, `multi-tenant`) deployed in 278 s; the steps took
-> 1,669 s. Both all-on stacks ran spec §8 steps 3 to 24: P-1 (direct invoke
+> `session-user`, `limits`, `multi-tenant`) deployed in 272 s; the steps took
+> 1,814 s (run 9: 278 s and 1,669 s). Both all-on stacks ran spec §8 steps 3 to 24: P-1 (direct invoke
 > refused), units and sessions, the grants table, ABAC, model usage, latency
 > (step 9), the registry, a late agent and a drain, the headers that reach the
 > agent (no identity token), cuts landing on the next request, the per-tool

@@ -507,9 +507,10 @@ CloudWatch and the few Nova Lite calls add cents.
 
 **Last run: run 9, 2026-11-04, eu-central-1: all 57 steps PASS**, deploy
 278 s, steps 1,669 s, teardown clean (no stack, parameter, log group, table,
-Gateway or Policy engine left; KMS keys pending deletion). The three
-tenant-admin negatives added to step 12 after the 2026-11-04 review: run 10
-after the 2026-11-04 review fixes: pending.
+Gateway or Policy engine left; KMS keys pending deletion). Run 11 (2026-11-04, eu-central-1), after the review fixes: 57 steps PASS,
+deploy 272 s, steps 1,814 s, teardown clean; the three tenant-admin
+negatives added to step 12 pass; the rotated JWKS was served 10 s after the
+key-generation deploy returned.
 
 Steps 3 to 24 run on both all-on stacks except 9-drain and 12-late, which
 run on `api-gateway` only (a backend added there is not also a Gateway
