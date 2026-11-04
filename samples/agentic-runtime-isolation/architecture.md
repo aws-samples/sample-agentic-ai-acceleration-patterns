@@ -166,8 +166,9 @@ Tool sets are normalised first: `<target>/*` expands against the catalogue,
 names not catalogued drop, and each target whose every tool is granted is
 compressed back to `<target>/*`, sorted, so equal inputs give the same `scope`
 string and the same mint cache entry. A grant holding only `needs` is
-`no_tools_granted`: logged, served, not refused. A `scope` above 8,192 bytes
-is `grant_too_large` (502) (ADR-0032, ADR-0033, ADR-0041).
+`no_tools_granted`: logged, served, not refused. A `scope` above 6,144 bytes,
+or a signed token above 10,240 bytes, is `grant_too_large` (502) (ADR-0032,
+ADR-0033, ADR-0041, ADR-0045).
 
 Change lag (ADR-0036): every vendor or admin write bumps `tenant.version`,
 which is in the mint cache key, so it lands on the next request; a plan, an
@@ -366,7 +367,8 @@ for your account and Region.
 | `CreatePolicy` | names unique per account and Region; concurrent writes fail; 10.6 to 15.7 s to ACTIVE (run 9) | `<target>_target_<8 hex>` names; each policy resource chained after the previous one on the gateway; retry with backoff |
 | Gateway targets | 100 per Gateway | `agentcore-gateway` ingress caps at 100 agents; tools gateways at 100 targets, checked at deploy |
 | `tools/list` paging | one page per about 30 tools before Policy filters | an agent lists only its own targets' gateways |
-| `scope` claim | 8,192 bytes accepted end to end | `grant_too_large` above it; `<target>/*` compression (ADR-0041) |
+| `InvokeAgentRuntime` custom header value | 10,240 bytes enforced (documented 4 KB; spike V-17); the API Gateway authoriser context carried 24,000 bytes | `MAX_TOKEN_BYTES` 10,240 checked on the signed token, `grant_too_large` above it (ADR-0045) |
+| `scope` claim | 6,144 bytes, a token of about 9.7 KB with long claims | `grant_too_large` above it, before the KMS call; `<target>/*` compression (ADR-0041, ADR-0045) |
 | Token near `exp` | AgentCore Gateway refuses a token with 60 s or less left | `ttl` floor 120 s; usable at a tools gateway until `exp − 60 s` (ADR-0040) |
 | KMS `Sign` latency | p50 8.2 ms, p95 11.1 ms (spec §7.1) | mint on the request path with a cache |
 | SSM Parameter Store writes | 3 `PutParameter` and 3 `DeleteParameter` per second per account | one JSON parameter per ingress; test stacks publish nothing; the integ teardown retries at concurrency 2 (ADR-0042) |
@@ -399,7 +401,7 @@ Each item was checked in code on 2026-11-04:
 ## Differences from the specification
 
 The specification carries dated amendments for the implementation findings
-(ADR-0040 to ADR-0044): the 120 s `ttl` floor and the `exp − 60 s` tools
+(ADR-0040 to ADR-0045): the 120 s `ttl` floor and the `exp − 60 s` tools
 gateway margin, the authoriser cache formula, policy names, the plan index and
 gateway count rows, the demo tool data layout, the interceptor refusal code,
 the published document and the integ stacks. The 2026-11-04 review added

@@ -734,7 +734,8 @@ tools is bounded here (spec §3.6; the quotas each value protects are in
 | Targets | per Gateway | 100 |
 | Tools | `tools/list` pages | about 30 tools a page; an agent lists only the gateways in its `aud` |
 | Tools per tenant | `tools` on the tenant row | `maxToolsPerTenant`, 1,000 entries; subscribe by `<target>/*` |
-| Tools in a token | `scope` after compression | 8,192 bytes; over it is 502 `grant_too_large` |
+| Tools in a token | `scope` after compression | 6,144 bytes; over it is 502 `grant_too_large` |
+| Tools in a token | the encoded transaction token | 10,240 bytes, the Runtime's custom header cap; over it is 502 `grant_too_large` |
 
 Spike findings behind those bounds (spec §7):
 
@@ -746,10 +747,25 @@ Spike findings behind those bounds (spec §7):
 - Policy names are unique per account and policy writes must be sequential:
   `ToolTarget` creates one at a time with retry, and deletes its policy
   before its target.
-- `scope` is bounded at 8,192 bytes. Whole targets compress to one entry; a
-  user cut from one tool of a 300-tool target expands to 299 names (about
-  2.7 KB); a user cut from one tool in several big targets at once can
-  overflow, and the request fails loud with `grant_too_large`.
+- Both ingresses forward the transaction token to the Runtime in a custom
+  header, and `InvokeAgentRuntime` refuses a header value over 10,240 bytes
+  (spike V-17), so the mint refuses a token longer than that
+  (`MAX_TOKEN_BYTES`) and `scope` is bounded at 6,144 bytes
+  (`MAX_SCOPE_BYTES`, checked before the KMS call; ADR-0045). The token is
+  about 4/3 of `scope` plus 1.3 to 1.6 KB of other claims and signature, so
+  a full `scope` gives a token of about 9.7 KB. Whole targets compress to
+  one entry, and `scope` holds about 600 short names (`crm/t0001`). A user
+  cut from one tool of a 300-tool target expands to 299 names (about
+  2.7 KB): two such targets still fit, three overflow, and one 300-tool
+  target with 24-byte tool names overflows alone (about 7.5 KB). Every
+  overflow fails loud with 502 `grant_too_large` before any Runtime call.
+- The Runtime's header-allowlist page documents 4 KB per header value; the
+  service enforces 10,240 bytes, and the sample relies on the enforced
+  figure (threat model T-101). If the Runtime starts enforcing 4 KB, a
+  token over it fails at the Runtime with a 400 (`scope` of about 2 KB);
+  lower `MAX_TOKEN_BYTES` and `MAX_SCOPE_BYTES` to match.
+- The API Gateway REQUEST authoriser's context is not a limit: it carried
+  24,000 bytes to the integration, cached and uncached (V-17).
 - The Gateway refuses a token with 60 s or less left: a token works at a
   gateway until `exp − 60 s`, so `ttl` is at least 120 s.
 - KMS `Sign` takes 8.2 ms at p50; Parameter Store allows 3 writes per second
@@ -782,11 +798,10 @@ requests if DynamoDB errors.
   and a tools gateway's per-tenant rate limit fails open by design.
 - The `agentcore-gateway` ingress never sees the response, so backend
   seconds, tokens and bytes are not attributed there.
-- On `api-gateway` the authoriser hands the transaction token to the
-  integration in its authoriser context. At the 8,192-byte `scope` bound the
-  token is about 11.8 KB, and that path is unverified: run 9 used smaller
-  grants. Spike V-17 is planned (threat model T-100); keep grants well below
-  the bound until it reports.
+- A grant whose token would exceed 10,240 bytes is refused, not served
+  (502 `grant_too_large`): resolved by spike V-17 and ADR-0045 (threat
+  model T-100). The bound rests on the Runtime's enforced header limit,
+  which is above its documented 4 KB (T-101).
 
 ## Costs
 
@@ -955,10 +970,10 @@ must add. Each item is a deployer action or an accepted risk in
 ## Design trail
 
 - Specification: [`design/agentic-runtime-isolation.spec.md`](./design/agentic-runtime-isolation.spec.md);
-  spike results in §7 (§7.1, §7.2)
-- Decisions: [`adr/`](./adr/), ADR-0001 to ADR-0044, indexed in
+  spike results in §7 (§7.1, §7.2, §7.4 for V-17)
+- Decisions: [`adr/`](./adr/), ADR-0001 to ADR-0045, indexed in
   [`adr/README.md`](./adr/README.md); the latest is
-  [ADR-0044, publish from the construct and drive the integration test with the CDK CLI](./adr/0044-publish-from-the-construct-and-drive-the-integration-test-with-the-cdk-cli.md)
+  [ADR-0045, bound the transaction token at 10,240 bytes](./adr/0045-bound-the-transaction-token-at-10240-bytes.md)
 - Threats and mitigations: [`threat-model.md`](./threat-model.md)
 - Implemented state: [`architecture.md`](./architecture.md)
 - Diagram: [`diagrams/agentic-runtime-isolation.drawio`](./diagrams/agentic-runtime-isolation.drawio),

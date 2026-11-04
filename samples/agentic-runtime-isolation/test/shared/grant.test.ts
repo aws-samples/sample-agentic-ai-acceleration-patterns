@@ -133,8 +133,9 @@ describe('grantFor', () => {
   });
 
   it(`refuses a scope over ${MAX_SCOPE_BYTES} bytes with grant_too_large`, () => {
-    expect(MAX_SCOPE_BYTES).toBe(8192);
-    const many = Array.from({ length: 300 }, (_, i) => `tool_${String(i).padStart(3, '0')}_${'x'.repeat(20)}`);
+    expect(MAX_SCOPE_BYTES).toBe(6144);
+    // 230 entries of 33 bytes plus separators: 7,819 bytes, over the bound (ADR-0045).
+    const many = Array.from({ length: 230 }, (_, i) => `tool_${String(i).padStart(3, '0')}_${'x'.repeat(20)}`);
     const big: ToolCatalogue = new Map([['crm', [...many, 'extra']]]);
     const result = grantFor(inputs({
       catalogue: big,
@@ -144,8 +145,9 @@ describe('grantFor', () => {
     expect(result).toEqual({ granted: false, reason: 'grant_too_large' });
   });
 
-  it('grants a scope between the old 4,096-byte and the new 8,192-byte bound (ADR-0041, V-16c)', () => {
-    const many = Array.from({ length: 200 }, (_, i) => `tool_${String(i).padStart(3, '0')}_${'x'.repeat(20)}`);
+  it('grants a scope between 4,096 bytes and the 6,144-byte bound (ADR-0041, ADR-0045)', () => {
+    // 180 entries of 33 bytes plus separators: 6,119 bytes.
+    const many = Array.from({ length: 180 }, (_, i) => `tool_${String(i).padStart(3, '0')}_${'x'.repeat(20)}`);
     const big: ToolCatalogue = new Map([['crm', [...many, 'extra']]]);
     const result = grantFor(inputs({
       catalogue: big,

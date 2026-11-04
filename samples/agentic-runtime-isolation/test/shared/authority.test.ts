@@ -5,7 +5,7 @@ import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { mockClient } from 'aws-sdk-client-mock';
 import { AuthorityResolver } from '../../src/shared/authority';
 import { EntitlementReader } from '../../src/shared/entitlements';
-import type { MintInput } from '../../src/shared/mint';
+import { type MintInput, TokenTooLargeError } from '../../src/shared/mint';
 import type { RegistryEntry } from '../../src/shared/registry';
 
 /** The authority step resolves the token's tools gateways from the catalogue rows (ADR-0041). */
@@ -98,5 +98,14 @@ describe('EntitlementReader.gatewaysFor (ADR-0041)', () => {
     ddb.on(QueryCommand).resolves({ Items: [{ SK: 'TOOL#a', gateway: 'Bad Name' }] });
     const store = new EntitlementReader('table', 60, undefined, () => 1000);
     expect(await store.gatewaysFor(['x'])).toEqual(new Map([['x', 'default']]));
+  });
+});
+
+describe('AuthorityResolver token bound (ADR-0045)', () => {
+  it('a token over MAX_TOKEN_BYTES is grant_too_large (502), any other mint fault is mint_failed', async () => {
+    const tooLarge = { mint: async () => { throw new TokenTooLargeError(10241); } };
+    await expect(new AuthorityResolver(reader(['crm/*']), tooLarge).resolve('t-a', 'user-1', 'default', entry(['crm/*']))).rejects.toMatchObject({ status: 502, reason: 'grant_too_large' });
+    const failing = { mint: async () => { throw new Error('kms throttled'); } };
+    await expect(new AuthorityResolver(reader(['crm/*']), failing).resolve('t-a', 'user-1', 'default', entry(['crm/*']))).rejects.toMatchObject({ status: 502, reason: 'mint_failed' });
   });
 });

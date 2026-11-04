@@ -30,11 +30,17 @@
 
 /**
  * The `scope` claim bound (spec §3.6): a longer compressed grant is refused
- * with 502 `grant_too_large`. 8,192 bytes passed the tools gateway's
- * authoriser and Policy (V-16c) and the Runtime (V-13); ADR-0041 raised it
- * from 4,096.
+ * with 502 `grant_too_large`, before any KMS call. ADR-0041 raised it from
+ * 4,096 to 8,192; ADR-0045 lowered it to 6,144 because the encoded token,
+ * not the scope, is what the Runtime bounds (spec V-17: `InvokeAgentRuntime`
+ * refuses a custom header value over 10,240 bytes, MAX_TOKEN_BYTES in
+ * src/shared/mint.ts). The token is about 4/3 of the scope plus 1.3 KB of
+ * the other claims, header and RS256 signature (test/shared/mint.test.ts
+ * measures it): a 6,144-byte scope gives a token of about 9.7 KB with long
+ * claims, at least 400 bytes under the cap. The mint checks the token
+ * itself after signing; this check is the cheap one before it.
  */
-export const MAX_SCOPE_BYTES = 8192;
+export const MAX_SCOPE_BYTES = 6144;
 
 /** The wildcard tool of a target. */
 export const TARGET_WILDCARD = '*';

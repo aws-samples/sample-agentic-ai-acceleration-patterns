@@ -26,6 +26,31 @@
 
 import { randomBytes, randomUUID } from 'node:crypto';
 import { type DigestSigner, type JwsAlgorithm, signJws } from './jws';
+import { log } from './logger';
+
+/**
+ * The encoded transaction-token bound (spec §3.6, ADR-0045). Every ingress
+ * forwards the token in `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token`,
+ * and `InvokeAgentRuntime` refuses a custom header value over 10,240 bytes
+ * (spike V-17, 2026-11-04: 10,240 passes, 10,241 is `ValidationException`,
+ * 16,000 is HTTP 413; the header-allowlist page documents 4 KB). A token
+ * over this bound is refused at mint with `grant_too_large` instead of
+ * failing at the Runtime with an opaque 400. Lowering it is the one change
+ * needed if the Runtime ever enforces its documented value (threat model
+ * T-101).
+ */
+export const MAX_TOKEN_BYTES = 10240;
+
+/**
+ * The signed token is longer than MAX_TOKEN_BYTES. The authority step
+ * answers it with 502 `grant_too_large` (src/shared/authority.ts).
+ */
+export class TokenTooLargeError extends Error {
+  constructor(readonly encodedBytes: number) {
+    super('transaction token too large');
+    this.name = 'TokenTooLargeError';
+  }
+}
 
 /** The JOSE `typ` of a transaction token (spec §6.2.2). */
 export const TRANSACTION_TOKEN_TYPE = 'txn+jwt';
@@ -219,6 +244,20 @@ export class TokenMinter {
       claims,
       this.deps.signer,
     );
+    // The real bound (ADR-0045): the scope check in grantFor ran before the
+    // KMS call; this one measures what the Runtime will measure. The token
+    // is ASCII (base64url and dots), so its length is its byte count. It is
+    // not cached, so every retry is refused the same way.
+    if (token.length > MAX_TOKEN_BYTES) {
+      log.warn('transaction token over the runtime header bound', {
+        tenantId: input.tenantId,
+        agent: input.agent,
+        encodedBytes: token.length,
+        limitBytes: MAX_TOKEN_BYTES,
+        scopeBytes: Buffer.byteLength(input.scope, 'utf8'),
+      });
+      throw new TokenTooLargeError(token.length);
+    }
     return { token, txn: claims.txn, exp: claims.exp, mint: 'miss' };
   }
 

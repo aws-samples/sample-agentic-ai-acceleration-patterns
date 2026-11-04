@@ -61,7 +61,7 @@ export {
   DEFAULT_MAX_TOOLS_PER_GATEWAY,
   MAX_TOOLS_PER_GATEWAY_LIMIT,
 } from './tools-gateway.cdk';
-// The token audiences (ADR-0041): `agent:<name>` and `tools-gateway:<gateway>`.
+// The token audiences (ADR-0041): `agent:<name>` and `tools-gateway:<gateway>`; the encoded token bound (ADR-0045).
 export {
   AGENT_AUDIENCE_PREFIX,
   TOOLS_GATEWAY_AUDIENCE_PREFIX,
@@ -69,6 +69,7 @@ export {
   DEFAULT_TOOLS_GATEWAY,
   toolsGatewayAudience,
   toolsGatewaysOf,
+  MAX_TOKEN_BYTES,
 } from './shared/mint';
 // The Cedar star permit a ToolTarget writes (ADR-0041), for consumers that write policies by hand.
 export { cedarPolicyFor, MAX_POLICY_STATEMENT_CHARS } from './shared/cedar';

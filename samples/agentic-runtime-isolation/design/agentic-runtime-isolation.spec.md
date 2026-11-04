@@ -40,6 +40,7 @@ ADRs v2 adds:
 | 0042 | Publish one JSON parameter, and let test stacks publish nothing | amends ADR-0024 |
 | 0043 | Cap the authoriser cache at 60 seconds | amends ADR-0015, ADR-0023 |
 | 0044 | Publish from the construct, and drive the integration test with the CDK CLI over stack outputs | records three deviations from the sample standard (§1.1, §4.5, §5.2) |
+| 0045 | Bound the transaction token at 10,240 bytes | amends ADR-0041 |
 
 
 ---
@@ -684,6 +685,14 @@ happen unless a target has hundreds of tools and the user is cut from one
 names a tool of the target). An explicit list stays explicit even when it
 covers the whole catalogue today, so a tool added to the target later is
 not granted by it (`compressTools` in `src/shared/grant.ts`).
+**Amended 2026-11-04 (V-17, ADR-0045).** The `scope` bound is 6,144
+bytes (`MAX_SCOPE_BYTES`), checked before the KMS call, and the encoded
+token is bounded at 10,240 bytes (`MAX_TOKEN_BYTES`, `src/shared/mint.ts`),
+checked after signing; both refusals are 502 `grant_too_large`, and a
+token over the bound is logged with its length and never cached. The
+Runtime refuses a custom header value over 10,240 bytes (§7.4), and both
+ingresses forward the token in one, so the 8,192-byte bound of ADR-0041
+produced a token (about 11.8 KB) the Runtime refused after the mint.
 
 **Scale at 100s of agents and 1,000s of tools (amended 2026-11-03,
 ADR-0041).** Tools are spread over several tools gateways, one Policy engine
@@ -709,7 +718,8 @@ tools, and where each is bounded:
 | Tools | Policy engine schema | 400 KB per engine, about 330 tools (V-16a) | `maxToolsPerGateway` 300; several gateways |
 | Tools | `tools/list` pages | about 30 tools per page before Policy filters (V-14) | an agent product lists its own targets only, so a product with 3 targets pays 3 to 100 pages, never the whole catalogue; the agent caches the list for the token life; `toolsGateway.semanticSearch` (off by default) replaces listing for products that span many targets (amended 2026-11-04: `semanticSearch` is not implemented; a consumer may enable the Gateway's semantic search outside the construct) |
 | Tools per tenant | `tools` entries on the tenant row | `maxToolsPerTenant`, 1,000 entries; a 400 KB item holds about 10,000 names | subscribe by `<target>/*`; the row is read once per mint, cached |
-| Tools in a token | `scope` after compression | 8,192 bytes (`grant_too_large`; ADR-0041, proved by V-16c and V-13) | whole targets compress to one entry; a user cut from one tool of a 300-tool target expands to 299 names, about 2.7 KB; a user cut inside three or more large targets at once can overflow and fails loud. The `cut` claim (V-16b) is not adopted: with one star permit per target it has no Policy to act in |
+| Tools in a token | `scope` after compression | 8,192 bytes (`grant_too_large`; ADR-0041, proved by V-16c and V-13). **Amended 2026-11-04 (V-17, ADR-0045): 6,144 bytes**, about 600 names of 9 bytes (`crm/t0001`) where 8,192 held about 800 | whole targets compress to one entry; a user cut from one tool of a 300-tool target expands to 299 names, about 2.7 KB; a user cut inside three or more large targets at once can overflow and fails loud (amended 2026-11-04: two such targets, about 5.4 KB, still fit; one 300-tool target with 24-byte names cut by one tool, about 7.5 KB, overflows alone). The `cut` claim (V-16b) is not adopted: with one star permit per target it has no Policy to act in |
+| Tools in a token | the encoded transaction token (added 2026-11-04, V-17, ADR-0045) | 10,240 bytes (`MAX_TOKEN_BYTES`, `grant_too_large`): the Runtime's custom header cap, which its docs give as 4 KB | the token is about 4/3 of (`scope` plus the other claims) plus header and signature: 1,542 bytes with an empty `scope` and long claims, 9,734 at the 6,144-byte bound (`test/shared/mint.test.ts`). If the Runtime enforces the documented 4 KB, lower this one constant (threat model T-101) |
 
 **Amended 2026-11-04 (review).** On `api-gateway` the REQUEST authoriser
 hands the whole transaction token to the integration Lambda in its
@@ -718,6 +728,12 @@ authoriser context. At the 8,192-byte `scope` bound the token is about
 authoriser-context path at the bound is unverified. Spike V-17 (§7) is
 planned to measure it; until then the README lists it as a known
 limitation (threat model T-100).
+**Settled 2026-11-04 by V-17 (§7.4, ADR-0045).** The authoriser context is
+not a limit: it carried 24,000 bytes intact, cached and uncached. The
+Runtime header is: `InvokeAgentRuntime` refuses a custom header value over
+10,240 bytes, on both ingresses. The mint enforces it with
+`MAX_TOKEN_BYTES`, so a token over it is refused with `grant_too_large`
+before any Runtime call (T-100 mitigated by M-81).
 
 **Mint cache (ADR-0036).** Key `(tenant_id, sub, agent, tenant.version, agent.version,
 plan.version)`. A cached token is reused while more than 60 s of its life is
@@ -1414,7 +1430,7 @@ design depends on these further behaviours.
 | V-14 | Policy evaluation latency, and `tools/list` latency, at 100 targets with one policy each (was tool-gateway V-6) | Group tools into fewer targets; document the measured figure in the README |
 | V-16 | At 1,000s of tools (amended 2026-11-03): (a) a Cedar policy for a target with 1,000 tools named one by one is accepted, becomes ACTIVE, and `tools/call` latency stays within the V-14 figures; (b) a `forbid` policy on a `cut` claim (`principal.getTag("cut") like "* <target>/<tool> *"`) is accepted beside the permit and removes the tool from `tools/list` and refuses `tools/call`; (c) a `scope` of 4,096 bytes passes the Gateway authoriser | (a) fails: split the permit into groups of 100 tools per policy, cap tools per target in `ToolTarget` at the measured size; (b) fails: keep the 4 KB bound and the hash-referenced grant of V-13 as the fallback, named in the README; (c) fails: lower the bound to the measured size |
 | V-15 | AgentCore Identity with the transaction token as the inbound JWT: (a) a 3LO credential provider on a `ToolTarget` keys the vault on the transaction token's `sub` and issuer, and a second transaction token for the same user reuses the stored grant; (b) an OBO `TOKEN_EXCHANGE` provider accepts the ingress as issuer; (c) `GetWorkloadAccessTokenForJWT` in the agent accepts a transaction token when the workload identity names the ingress discovery URL | If (a) fails, 3LO targets are documented as needing the user's consent per token life, or the sample drops 3LO; if (b) fails, OBO targets are out of scope and the README says a third party must trust the ingress issuer; if (c) fails, the agent's outbound identity is M2M only |
-| V-17 | (Added 2026-11-04, review) On `api-gateway`, a transaction token at the 8,192-byte `scope` bound (about 11.8 KB) passes from the REQUEST authoriser's context to the integration Lambda and on to the Runtime header unchanged | Lower the `scope` bound on `api-gateway` to the largest size that passes, and say so in the README |
+| V-17 | (Added 2026-11-04, review) On `api-gateway`, a transaction token at the 8,192-byte `scope` bound (about 11.8 KB) passes from the REQUEST authoriser's context to the integration Lambda and on to the Runtime header unchanged | Lower the `scope` bound on `api-gateway` to the largest size that passes, and say so in the README. **Result 2026-11-04 (§7.4): FAIL at the bound.** The authoriser context carried 24,000 bytes; the Runtime refused a header value over 10,240 bytes, so the 11.8 KB token failed. The fallback applies on both ingresses: `MAX_TOKEN_BYTES` 10,240 and `scope` 6,144 bytes (ADR-0045) |
 
 The spike stack deploys a throwaway `SharedIngress` with `toolsGateway`, one
 `ToolTarget` of kind `lambda`, and a test-only mint function granted
@@ -1666,6 +1682,55 @@ call 6, tenant B 200. Earlier runs on 2026-11-03 settled the shapes this
 spec now states: the interceptor refusal is HTTP 403 (run 7), and the
 Gateway refuses a token with 60 s or less left before `exp` (run 7: fresh
 60 s and 61 s tokens 403 `insufficient_scope`, 62 s and longer served).
+
+### 7.4 Spike V-17, 2026-11-04
+
+pg sandbox, eu-central-1, a throwaway stack (deploy 57 s): a REST API with
+a REQUEST authoriser (payload 1.0, TTL 60 s, identity sources
+`Authorization` and `X-Spike-Size`) in front of an integration Lambda, and
+an echo agent on AgentCore Runtime with the transaction-token header on its
+allowlist. The sample was not deployed.
+
+Probe (a)+(b), authoriser `context.transactionToken` to the integration
+Lambda, a second call 2 s later served from the authoriser cache (same
+nonce, no new authoriser invocation):
+
+| Size (bytes) | 1st call | 2nd call (cached) | Intact | Proxy event bytes |
+|---|---|---|---|---|
+| 8,192 | 200 | 200 | yes | 11,016 |
+| 12,000 | 200 | 200 | yes | 14,826 |
+| 16,000 | 200 | 200 | yes | 18,826 |
+| 24,000 | 200 | 200 | yes | 26,825 |
+
+Probe (c), `InvokeAgentRuntime` (SigV4) with the value in
+`X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token` and a 19-byte
+payload:
+
+| Header value (bytes) | Status | Agent saw | Error |
+|---|---|---|---|
+| 8,192 | 200 | 8,192, intact | none |
+| 10,000 | 200 | 10,000, intact | none |
+| 10,240 | 200 | 10,240, intact | none |
+| 10,241 | 400 | - | `ValidationException`: exceeds 10KB size limit (actual: 10241 bytes) |
+| 12,000 and 14,000 | 400 | - | `ValidationException`, same message |
+| 16,000 | 413 | - | non-JSON front-door body, before validation |
+
+Documented and observed limits:
+
+| Limit | Documented | Observed |
+|---|---|---|
+| API Gateway REST, all request header names and values | 20,480 bytes (private API 8,000) | not tested; covers the client request only |
+| API Gateway REST payload | 10 MB | the 26.8 KB proxy event was fine |
+| Lambda authoriser `context` | no size limit documented; string, number or boolean values | 24,000 bytes passed, cached and uncached; ceiling not sought |
+| AgentCore Runtime custom header value | 4 KB per value, up to 20 allowlisted headers (runtime-header-allowlist page) | **10,240 bytes enforced**; V-13's 8 KB pass was already above the documented value |
+| AgentCore Runtime payload | 100 MB | not tested |
+
+Conclusion: the Runtime header is the only binding limit on either
+ingress; the largest token that passes is 10,240 bytes. The sample bounds
+the encoded token there and lowers the `scope` bound to 6,144 bytes, the
+measured ceiling of about 6,600 rounded down to a multiple of 512 (§3.6,
+ADR-0045). The sample relies on the enforced 10 KB, not the documented
+4 KB (threat model T-101); doc feedback to AgentCore Runtime is open.
 
 ---
 

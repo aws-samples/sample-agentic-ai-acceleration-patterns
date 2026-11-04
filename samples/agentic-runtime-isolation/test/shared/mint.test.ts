@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: MIT-0
 
 import { generateKeyPairSync, sign as cryptoSign, verify as cryptoVerify } from 'node:crypto';
+import { MAX_SCOPE_BYTES } from '../../src/shared/grant';
 import { decodeJws, derToJose, verifyJws } from '../../src/shared/jws';
 import {
   AGENT_AUDIENCE_PREFIX,
+  MAX_TOKEN_BYTES,
   MintConfig,
   MintInput,
   mintCacheKey,
@@ -12,6 +14,7 @@ import {
   TokenMinter,
   toolsGatewayAudience,
   toolsGatewaysOf,
+  TokenTooLargeError,
   TRANSACTION_TOKEN_TYPE,
   transactionClaims,
 } from '../../src/shared/mint';
@@ -152,6 +155,90 @@ describe('TokenMinter', () => {
     const minted = await new TokenMinter(config, { signer }).mint(input);
     expect(Buffer.from(minted.txn, 'base64url')).toHaveLength(16);
     expect(decodeJws(minted.token).payload.jti).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+describe('TokenMinter token bound (ADR-0045, spike V-17)', () => {
+  // Long but valid claims: a 64-character tenant id, a 32-character agent,
+  // four 32-character tools gateways, a UUID sub and kid, a CDK-length role
+  // ARN, an execute-api issuer. RS256 with a 2048-bit key (what KMS signs
+  // with), so the signature is 342 characters; ES256 would be 86.
+  const longConfig: MintConfig = {
+    ...config,
+    issuer: 'https://abcdefghij.execute-api.eu-central-1.amazonaws.com/prod',
+    keyId: '1234abcd-12ab-34cd-56ef-1234567890ab',
+    ingressRoleArn: 'arn:aws:iam::111122223333:role/RuntimeIsolationDemo-SharedIngressIngressRoleABCDEF-ABCDEFGHIJKL',
+  };
+  const longInput = (scope: string): MintInput => ({
+    tenantId: `t-${'a'.repeat(62)}`,
+    sub: '0123abcd-4567-89ef-0123-456789abcdef',
+    agent: 'a'.repeat(32),
+    scope,
+    gateways: Array.from({ length: 4 }, (_, i) => `${'g'.repeat(31)}${i}`),
+    versions: { tenant: 1, agent: 1 },
+  });
+  const fixed = { now: () => 1_000_000_000, txnId: () => 'A'.repeat(22), jti: () => '0123abcd-4567-89ef-0123-456789abcdef' };
+  const scopeOf = (bytes: number): string => 'x'.repeat(bytes);
+  let written: string[];
+  beforeEach(() => {
+    written = [];
+    jest.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      written.push(String(chunk));
+      return true;
+    });
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  it('measures the overhead: token = 4/3 x (scope + other claims) + header + signature', async () => {
+    const { signer } = localRsaKey();
+    const minter = new TokenMinter(longConfig, { signer, ...fixed });
+    const empty = (await minter.mint(longInput(''))).token.length;
+    const atBound = (await minter.mint(longInput(scopeOf(MAX_SCOPE_BYTES)))).token.length;
+    // Measured 2026-11-04: 1,542 characters with an empty scope, 9,734 at 6,144 (506 under the cap).
+    expect(empty).toBe(1542);
+    expect(atBound).toBe(9734);
+    expect(atBound - empty).toBe(Math.ceil((MAX_SCOPE_BYTES * 4) / 3));
+    // A scope at the bound leaves at least 400 bytes under the Runtime cap.
+    expect(MAX_TOKEN_BYTES).toBe(10240);
+    expect(MAX_TOKEN_BYTES - atBound).toBeGreaterThanOrEqual(400);
+  });
+
+  it('the old 8,192-byte scope bound would have produced a token over the Runtime cap', async () => {
+    const { signer } = localRsaKey();
+    const minter = new TokenMinter(config, { signer, ...fixed });
+    // Even with the short test claims (one gateway, short ids).
+    const token = (await minter.mint({ ...input, scope: scopeOf(8192) }).catch((e: unknown) => e)) as TokenTooLargeError;
+    expect(token).toBeInstanceOf(TokenTooLargeError);
+    expect(token.encodedBytes).toBeGreaterThan(MAX_TOKEN_BYTES);
+  });
+
+  it('refuses a token over MAX_TOKEN_BYTES after signing even when the scope is under its bound, and caches nothing', async () => {
+    const key = localRsaKey();
+    const huge: MintConfig = { ...longConfig, issuer: `https://example.com/${'i'.repeat(400)}` };
+    const minter = new TokenMinter(huge, { signer: key.signer, ...fixed });
+    const scope = scopeOf(MAX_SCOPE_BYTES);
+    const big = { ...longInput(scope), sub: 's'.repeat(200) };
+    await expect(minter.mint(big)).rejects.toBeInstanceOf(TokenTooLargeError);
+    await expect(minter.mint(big)).rejects.toMatchObject({ encodedBytes: expect.any(Number) });
+    expect(minter.size).toBe(0);
+    // Each attempt cost one Sign: the check measures the signed token.
+    expect(key.calls).toHaveLength(2);
+    // The log line names the length and the bound, never the token.
+    const line = JSON.parse(written[0]) as Record<string, unknown>;
+    expect(line).toMatchObject({ level: 'WARN', message: 'transaction token over the runtime header bound', limitBytes: 10240, scopeBytes: MAX_SCOPE_BYTES });
+    expect(line.encodedBytes).toBeGreaterThan(MAX_TOKEN_BYTES);
+    expect(written.join('')).not.toContain('eyJ');
+  });
+
+  it('a token of exactly MAX_TOKEN_BYTES is served', async () => {
+    const { signer } = localRsaKey();
+    const minter = new TokenMinter(longConfig, { signer, ...fixed });
+    const atBound = (await minter.mint(longInput(scopeOf(MAX_SCOPE_BYTES)))).token.length;
+    // Every 3 scope bytes add 4 characters: grow to exactly 10,240 if the arithmetic allows, else just under.
+    const extra = Math.floor(((MAX_TOKEN_BYTES - atBound) * 3) / 4);
+    const minted = await minter.mint(longInput(scopeOf(MAX_SCOPE_BYTES + extra)));
+    expect(minted.token.length).toBeLessThanOrEqual(MAX_TOKEN_BYTES);
+    expect(minted.token.length).toBeGreaterThan(MAX_TOKEN_BYTES - 4);
   });
 });
 

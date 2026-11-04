@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT-0
 - Status: Accepted
 - Date: 2026-11-03
 - Amends: ADR-0034, ADR-0040
-- Amended by: integration runs 1 to 9 (2026-11-04)
+- Amended by: integration runs 1 to 9 (2026-11-04), ADR-0045
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -30,3 +30,5 @@ Option 2, with two companions. (1) Tools are spread over several tools gateways,
 Easier: a `ToolTarget` deploy is one policy and minutes; the Cedar generator is one template; the policy count is the target count. Harder: the per-tool call decision inside a granted target rests on the REQUEST interceptor, so its unit tests and the integration steps must prove a partial-target grant (a user with `crm/get_account` calling `crm/update_case` is refused) and the threat model records the interceptor as the per-tool wall; the agent holds one MCP client per gateway in `aud`; a tenant's rate-limit budget is per gateway, not shared. Follow-up: spec §3.3 (`toolsGateways`, `maxToolsPerGateway`, `responseFilter`), §3.6 (star permit, 8 KB), §6.2.2 (`aud` list), §6.4 (parameters per gateway), threat model, scaffold. Revisit if the schema quota becomes adjustable, if Policy gains a target-scoped action group that needs no per-tool naming, or if partial-target grants turn out to be common (then the RESPONSE filter becomes the default).
 
 **2026-11-04.** Amended by the scaffold and integration runs 1 to 9 (no new decision): one `ToolContextKey` is shared by every gateway's interceptor; the per-gateway props type is `ToolsGatewayOptions`; the gateway constructs are `ToolsGateway` (for `default`) and `ToolsGateway<Name>`; the interceptor reads its gateway name from `RI_TOOLS_GATEWAY_NAME`, and the agent reads the gateway URLs from `RI_TOOLS_GATEWAY_URLS` (the spec said `RI_TOOLS_GATEWAYS`). The deploy-time bound counts over every stack: each `ToolTarget` owns a `GATEWAY#<gateway>` / `TARGET#<target>` count row in the entitlement store and the deploy refuses a target past `maxToolsPerGateway` tools or 100 targets on its gateway; a target whose ingress is in another stack passes `ToolTarget.maxToolsPerGateway` (default 300). A token minted for another gateway is refused by the interceptor as `token_invalid`. Run 9 (2026-11-04) measured one star permit per target ACTIVE in 10.6 to 15.7 s.
+
+**2026-11-04.** Amended by ADR-0045: spike V-17 found that `InvokeAgentRuntime` refuses a custom header value over 10,240 bytes, so the 11.8 KB token an 8,192-byte `scope` produces fails at the Runtime. The encoded token is bounded at 10,240 bytes (`MAX_TOKEN_BYTES`) and the `scope` bound is lowered to 6,144 bytes; both refusals stay `grant_too_large`.

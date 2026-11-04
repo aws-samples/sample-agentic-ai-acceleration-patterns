@@ -8,8 +8,8 @@ SPDX-License-Identifier: MIT-0
 > (eu-central-1, all 57 steps PASS, teardown clean); security review
 > 2026-11-04 (ASH, ProtoShield), dispositions in
 > [Security review](#security-review); run 11 after the 2026-11-04 review
-> fixes: green (57 steps, teardown clean).** 100 threats (T-1 to T-100), 80 mitigations (M-1 to
-> M-80).
+> fixes: green (57 steps, teardown clean).** 101 threats (T-1 to T-101), 81 mitigations (M-1 to
+> M-81).
 >
 > First written 2026-10-26 from
 > [`design/agentic-runtime-isolation.spec.md`](./design/agentic-runtime-isolation.spec.md)
@@ -48,8 +48,12 @@ SPDX-License-Identifier: MIT-0
 > every v2 mitigation names its code and unit tests, and T-97 to T-100 and
 > M-78 to M-80 record the review fixes (the signer key policy, required
 > `exp` and `iat`, the grant compression rule, the authoriser-context
-> bound). Every mitigation points at the principle, spec clause or ADR that
-> motivates it and at the code that implements it.
+> bound). Extended 2026-11-04 for spike V-17 and ADR-0045 (the transaction
+> token bounded at the Runtime's 10,240-byte header cap): T-100 is
+> mitigated by M-81, and T-101 records the gap between the Runtime's
+> enforced and documented header limits. Every mitigation points at the
+> principle, spec clause or ADR that motivates it and at the code that
+> implements it.
 
 Scope: the `SharedIngress` and `AgentBackend` constructs (one ingress, one
 or more AgentCore Runtimes, a backend registry in SSM Parameter Store;
@@ -227,7 +231,8 @@ shared responsibility; T-24).
 | T-97 | (v2, 2026-11-04 review) A principal holding `kms:PutKeyPolicy` on the `TokenSigner` or `ToolContextKey` key (the account's key administrators, the deploying role) rewrites the key policy to add a signer | Valid transaction tokens, or signed tenant contexts, for any tenant (T-52, T-84) | **Accepted residual**: `kms:PutKeyPolicy` is the deployer's own administrative privilege, which CloudFormation needs to update the key; no IAM policy and no grant can add a signer (M-78). Detection: CloudTrail `PutKeyPolicy` on the signer and context keys outside a deploy of the ingress stack | M-78, M-40, M-68 |
 | T-98 | (v2, 2026-11-04 review) An identity token or transaction token without `exp` (or without `iat`), signed by a key a verifier trusts (a test minter, a misconfigured issuer), is accepted with no lifetime | A bearer that never expires at the ingress, the tools interceptor or the list filter | Mitigated: every token verifier requires `exp` and `iat` (`requiredClaims`); a signed context without a numeric `exp` is `context_invalid`; unit-tested; integration verified by integration run 11 (2026-11-04), step 12 | M-79 |
 | T-99 | (v2, 2026-11-04 review) A grant built from an explicit full tool list (an agent, a tenant or a plan that names every tool of a target one by one) is compressed to `<target>/*`, so a tool added to the catalogue later is granted to it without anyone choosing to | A tool the tenant or the agent product never named reached through an old grant (within the tenant; never another tenant's data) | Mitigated: a grant compresses to `<target>/*` only when every contributing set (agent, tenant or plan, user) held `<target>/*` itself; an explicit full list stays explicit; unit-tested; integration verified by integration run 11 (2026-11-04), step 12 | M-80, M-51 |
-| T-100 | (v2, 2026-11-04 review) On `api-gateway` the REQUEST authoriser hands the full transaction token to the integration in its authoriser context; at the 8,192-byte `scope` bound (about an 11.8 KB token, V-16c) that path is unverified, so the request could fail or the token be cut | A request refused (502) for a user with a very large grant; never a wider grant (a cut token fails verification downstream) | **Open**: bounded by `grant_too_large` at 8,192 bytes of `scope`; run 9 exercised tokens well below the bound only; spike V-17 (planned) measures the authoriser-context limit on `api-gateway` (spec §3.6, Scale) | M-49 |
+| T-100 | (v2, 2026-11-04 review) On `api-gateway` the REQUEST authoriser hands the full transaction token to the integration in its authoriser context; at the 8,192-byte `scope` bound (about an 11.8 KB token, V-16c) that path is unverified, so the request could fail or the token be cut | A request refused (502) for a user with a very large grant; never a wider grant (a cut token fails verification downstream) | **Mitigated 2026-11-04** (V-17, ADR-0045; was Open, bounded by `grant_too_large` at 8,192 bytes of `scope`): the authoriser context carried 24,000 bytes intact, cached and uncached, so it is not a limit; the limit is the Runtime's 10,240-byte custom header cap, which the 11.8 KB token failed. The mint now refuses a token over 10,240 bytes and a `scope` over 6,144 bytes with 502 `grant_too_large` before any Runtime call; unit-tested (spec §3.6, §7.4) | M-81, M-49 |
+| T-101 | (v2, V-17, 2026-11-04) The Runtime enforces a custom header value of up to 10,240 bytes, but its header-allowlist page documents 4 KB per value; the sample's tokens (up to 10,240 bytes) rely on the enforced figure | If AWS enforces the documented value, every token over 4 KB (a `scope` over about 2 KB) fails at the Runtime with a 400 after the mint; requests are refused, never a wider grant | **Accepted**: the bound is one constant, `MAX_TOKEN_BYTES`; detection is the Runtime `ValidationException` rate (the ingress's upstream-error 502s for tenants with larger grants); mitigation is lowering `MAX_TOKEN_BYTES` (and `MAX_SCOPE_BYTES`) to the enforced value. Doc feedback to AgentCore Runtime is open | M-81 |
 
 ## Mitigations
 
@@ -313,6 +318,7 @@ production hardening checklist. Code locations are paths in this sample.
 | M-75 | Authoriser cache and reuse margin (v2, ADR-0043, 2026-11-04): on `api-gateway` the result cache is `min(60 s, transactionToken.ttl - 120 s)`, keyed on `Authorization` and `context.path`, plus `X-Tenant-Id` with `identity.multiTenant`; the mint reuses a token only while more than the cache TTL plus 120 s is left; `transactionToken.ttl` is 120 s to 900 s | spec §3.3, §4.6, §5.1, [ADR-0043](./adr/0043-cap-the-authoriser-cache-at-60-seconds.md); `src/shared-ingress.cdk.ts` (`AUTHORIZER_CACHE_TTL`, `authorizerCacheTtlSeconds`, `reuseMarginSeconds`, `identitySources`), `src/shared/mint.ts` (`MIN_TRANSACTION_TTL_SECONDS`); `test/runtime-isolation.cdk.test.ts` asserts `AuthorizerResultTtlInSeconds: 60`; integ steps 16, 19-tenant_id, 19 | T-12, T-65, T-93, T-94 |
 | M-76 | Account-unique policy names (v2, ADR-0040 note, 2026-11-04): `ToolTarget` names its policy `<target>_target_<8 hex>` from the stack name, construct path and gateway; the policy writer holds `GetGateway` and `ListGatewayTargets` beside `InvokeGateway` and `ManageResourceScopedPolicy` | spec C-16, §3.6, [ADR-0040](./adr/0040-apply-the-spike-findings-to-the-tools-gateway-and-the-transaction-token.md); `src/tool-target.cdk.ts` (`policyName`), `src/tools-gateway.cdk.ts` (`grantPolicyWrites`); `test/v2.cdk.test.ts` matches `crm_target_[0-9a-f]{8}`; integ step 2 (run 9 deployed six stacks' policies with no name conflict) and step 23 | T-95 |
 | M-77 | Teardown retry and leftover check (v2, ADR-0040 note, 2026-11-04): `scripts/integ.sh` step 10 retries a failed teardown once at concurrency 2 after 60 s (commit `63b4aa9`), then fails the run on any leftover stack, parameter, log group, table, Gateway or Policy engine of its own stacks; integration stacks publish no interface parameters but the publisher's (ADR-0042) | spec §8 step 10, [ADR-0042](./adr/0042-publish-one-json-parameter-and-let-test-stacks-publish-nothing.md); `scripts/integ.sh` | T-96 |
+| M-81 | Encoded token bound (v2, V-17, ADR-0045, 2026-11-04): after signing, the mint refuses a transaction token longer than `MAX_TOKEN_BYTES` (10,240 bytes, the Runtime's custom header cap) with `TokenTooLargeError`, logged with `encodedBytes`, `limitBytes` and `scopeBytes` and never cached; the authority step answers it 502 `grant_too_large`. `MAX_SCOPE_BYTES` (6,144) catches the common case before the KMS call | [ADR-0045](./adr/0045-bound-the-transaction-token-at-10240-bytes.md); `src/shared/mint.ts` (`MAX_TOKEN_BYTES`, `TokenMinter.sign`), `src/shared/grant.ts` (`MAX_SCOPE_BYTES`), `src/shared/authority.ts`; `test/shared/mint.test.ts` (measured overhead, a scope under its bound with a token over 10,240 bytes refused, a token of exactly the bound served), `test/shared/authority.test.ts`, `test/shared/grant.test.ts` | T-100, T-101 |
 
 ## Accepted risks
 
@@ -342,11 +348,15 @@ checklist unless marked "by design".
   signer. That is the deployer's own administrative privilege, which
   CloudFormation needs; the key policy leaves no other path (M-78).
 - **T-100, the authoriser-context path at the `scope` bound (v2,
-  2026-11-04).** Open, not accepted: on `api-gateway` the authoriser hands
-  the transaction token to the integration in its context, and at the
-  8,192-byte `scope` bound (about an 11.8 KB token) that path is
-  unverified. A failure there refuses the request; it never widens a grant.
-  Spike V-17 is planned.
+  2026-11-04).** Mitigated 2026-11-04 (was open): spike V-17 found the
+  authoriser context is not a limit (24,000 bytes passed) and the Runtime's
+  10,240-byte header cap is; the mint enforces it (M-81, ADR-0045).
+- **T-101, the Runtime's documented header limit (v2, V-17, 2026-11-04).**
+  The Runtime enforces 10,240 bytes per custom header value and documents
+  4 KB. The sample relies on the enforced value; if AWS tightens it, tokens
+  over 4 KB fail at the Runtime with a 400 (a refusal, never a wider grant).
+  Watch the Runtime `ValidationException` rate; the fix is one constant,
+  `MAX_TOKEN_BYTES`.
 - **T-84, tools interceptor compromise (v2, ADR-0034).** The tools-side twin:
   the interceptor alone signs tenant contexts, and a context is what a tool's
   TVM trusts. Pinned dependencies, a minimal bundle and a `Sign` alarm on

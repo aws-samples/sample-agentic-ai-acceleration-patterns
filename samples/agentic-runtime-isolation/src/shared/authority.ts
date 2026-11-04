@@ -10,7 +10,7 @@
 
 import { type EntitlementReader } from './entitlements';
 import { grantFor, targetsOf } from './grant';
-import type { MintedToken, TokenMinter } from './mint';
+import { type MintedToken, type TokenMinter, TokenTooLargeError } from './mint';
 import type { RegistryEntry } from './registry';
 
 /** Why the authority step refused, with the status the ingress answers (spec §5.1). */
@@ -64,8 +64,10 @@ export class AuthorityResolver {
     let minted: MintedToken;
     try {
       minted = await this.minter.mint({ tenantId, sub, agent, scope: decision.scope, gateways, versions });
-    } catch {
-      throw new AuthorityError(502, 'mint_failed');
+    } catch (error) {
+      // A token over MAX_TOKEN_BYTES (ADR-0045) is the same refusal as a scope
+      // over MAX_SCOPE_BYTES: the grant is too large to carry.
+      throw new AuthorityError(502, error instanceof TokenTooLargeError ? 'grant_too_large' : 'mint_failed');
     }
     return { ...minted, grantSize: decision.entries.length, noToolsGranted: decision.noToolsGranted };
   }
