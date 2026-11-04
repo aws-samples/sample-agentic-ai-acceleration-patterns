@@ -6,6 +6,7 @@ import { App, CfnOutput, Duration, Stack, Validations } from 'aws-cdk-lib';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { AwsSolutionsChecks } from 'cdk-nag';
+import { publishedIngress, seedPublishedIngress, TEST_ENV } from './published-ingress';
 import { baseModelId, isInferenceProfileId } from '../src/backend/agentcore-runtime.cdk';
 import { RUNTIME_HEADERS } from '../src/backend/agentcore-runtime.transport';
 import {
@@ -26,8 +27,6 @@ import {
   type SharedIngressProps,
   SharedIngressRef,
   STAGE_NAME,
-  TOOLS_GATEWAY_PARAMETER_FIELDS,
-  toolsGatewayParameter,
 } from '../src/index';
 import { ENV } from '../src/shared/config';
 
@@ -387,41 +386,36 @@ describe.each(INGRESSES)('one-backend defaults, ingress=%s', (ingress) => {
     expect(writer.Properties.Timeout).toBe(210);
   });
 
-  it('publishes endpointUrl, baseUrl, ingressRoleArn, ingressId, ingress and tenantRoleArn under the prefix (ADR-0024)', () => {
+  it('publishes ONE JSON parameter, <prefix>ingress, with every published value (ADR-0024, ADR-0042)', () => {
     const params = Object.values(template.findResources('AWS::SSM::Parameter')) as any[];
-    const names = params.map((p) => p.Properties.Name as string).sort();
-    const expected: string[] = [
-      PUBLISHED.endpointUrl,
-      PUBLISHED.baseUrl,
-      PUBLISHED.ingressRoleArn,
-      PUBLISHED.ingressId,
-      PUBLISHED.ingress,
-      PUBLISHED.tenantRoleArn,
-      PUBLISHED.issuer,
-      PUBLISHED.jwksUrl,
-      PUBLISHED.entitlementsTableName,
-      PUBLISHED.entitlementsApiUrl,
-      PUBLISHED.toolsGatewayUrl,
-      PUBLISHED.toolsGatewayIdentifier,
-      PUBLISHED.toolsGatewayRoleArn,
-      PUBLISHED.toolsPolicyEngineId,
-      PUBLISHED.toolContextKeyId,
-      // ADR-0041: the default gateway under its own name too; the four above are its aliases.
-      ...TOOLS_GATEWAY_PARAMETER_FIELDS.map((f) => toolsGatewayParameter('default', f)),
-    ];
-    const expectedNames = expected
-      .concat(ingress === 'agentcore-gateway' ? [PUBLISHED.gatewayIdentifier] : [])
-      .map((n) => `${DEFAULT_REGISTRY_PREFIX}${n}`)
-      .sort();
-    expect(names).toEqual(expectedNames);
-    const byName = (n: string) => params.find((p) => p.Properties.Name === `${DEFAULT_REGISTRY_PREFIX}${n}`).Properties.Value;
-    expect(byName(PUBLISHED.ingress)).toBe(ingress);
-    // endpointUrl keeps the spec §6.4 meaning (the default backend's invocation URL, what the scripts POST to); baseUrl is the base.
-    expect(byName(PUBLISHED.endpointUrl)).toEqual(Stack.of(construct.ingress).resolve(construct.endpointUrl));
-    expect(byName(PUBLISHED.baseUrl)).toEqual(Stack.of(construct.ingress).resolve(construct.ingress.endpointUrl));
-    expect(byName(PUBLISHED.ingressId)).toBe(construct.ingress.ingressId);
-    expect(byName(PUBLISHED.ingressRoleArn)).toEqual(Stack.of(construct.ingress).resolve(construct.ingressRole.roleArn));
-    expect(byName(PUBLISHED.tenantRoleArn)).toEqual(Stack.of(construct.ingress).resolve(construct.tenantRole.roleArn));
+    expect(params.map((p) => p.Properties.Name)).toEqual([`${DEFAULT_REGISTRY_PREFIX}${PUBLISHED.ingress}`]);
+    const [param] = params;
+    expect(param.Properties.Tier).toBe('Intelligent-Tiering');
+    const join = param.Properties.Value['Fn::Join'];
+    expect(join).toBeDefined();
+    const literal = (join[1] as unknown[]).filter((x) => typeof x === 'string').join('');
+    expect(literal).toContain('"version":2');
+    expect(literal).toContain(`"ingress":"${ingress}"`);
+    for (const key of ['endpointUrl', 'baseUrl', 'ingressRoleArn', 'ingressId', 'tenantRoleArn', 'issuer', 'jwksUrl', 'entitlementsTableName', 'entitlementsApiUrl', 'toolContextKeyId', 'toolsGateways']) {
+      expect(literal).toContain(`"${key}":`);
+    }
+    expect(literal).toContain('"default":{"url":');
+    for (const key of ['identifier', 'roleArn', 'policyEngineId']) {
+      expect(literal).toContain(`"${key}":`);
+    }
+    expect(literal.includes('"gatewayIdentifier":')).toBe(ingress === 'agentcore-gateway');
+    // The pre-ADR-0042 aliases are gone.
+    expect(literal).not.toContain('toolsGatewayUrl');
+    // endpointUrl keeps the spec §6.4 meaning (the default backend's invocation URL); baseUrl is the base.
+    const resolved = JSON.stringify(param.Properties.Value);
+    expect(resolved).toContain(JSON.stringify(Stack.of(construct.ingress).resolve(construct.ingressRole.roleArn)));
+    expect(literal).toContain(`"ingressId":"${construct.ingress.ingressId}"`);
+  });
+
+  it('publish: false writes no published parameter (ADR-0042)', () => {
+    const { template: quiet } = synth({ ingress, publish: false });
+    const names = (Object.values(quiet.findResources('AWS::SSM::Parameter')) as any[]).map((p) => JSON.stringify(p.Properties.Name));
+    expect(names.filter((n) => !n.includes('backends/') && !n.includes('tools/'))).toEqual([]);
   });
 
   it('the execution role holds its code object, its log prefix and traces, and NO model and no data permission (P-6, ADR-0008 amended by ADR-0018)', () => {
@@ -755,11 +749,13 @@ describe('agentcore-gateway ingress', () => {
     expect(JSON.stringify(Stack.of(construct.ingress).resolve(construct.ingress.endpointUrl))).not.toContain(ROUTE);
   });
 
-  it('publishes the Gateway identifier so a backend stack can add its target (ADR-0024)', () => {
-    template.hasResourceProperties('AWS::SSM::Parameter', {
-      Name: `${DEFAULT_REGISTRY_PREFIX}${PUBLISHED.gatewayIdentifier}`,
-      Value: { 'Fn::GetAtt': [Object.keys(template.findResources('AWS::BedrockAgentCore::Gateway'))[0], 'GatewayIdentifier'] },
-    });
+  it('publishes the Gateway identifier in the document so a backend stack can add its target (ADR-0024, ADR-0042)', () => {
+    const [param] = Object.values(template.findResources('AWS::SSM::Parameter')) as any[];
+    expect(param.Properties.Name).toBe(`${DEFAULT_REGISTRY_PREFIX}${PUBLISHED.ingress}`);
+    const gatewayId = Object.keys(template.findResources('AWS::BedrockAgentCore::Gateway'))[0];
+    expect(JSON.stringify(param.Properties.Value)).toContain(`{"Fn::GetAtt":["${gatewayId}","GatewayIdentifier"]}`);
+    const literal = (param.Properties.Value['Fn::Join'][1] as unknown[]).filter((x) => typeof x === 'string').join('');
+    expect(literal).toContain('"gatewayIdentifier":"');
   });
 
   it('creates one small REST API only: the issuer routes and the entitlement API (C-13, C-14)', () => {
@@ -1171,10 +1167,12 @@ describe.each(INGRESSES)('SharedIngress with several AgentBackends, ingress=%s (
   });
 });
 
-describe.each(INGRESSES)('AgentBackend in its own stack from SharedIngress.fromParameters, ingress=%s (ADR-0024)', (ingress) => {
+describe.each(INGRESSES)('AgentBackend in its own stack from SharedIngress.fromParameters, ingress=%s (ADR-0024, ADR-0042)', (ingress) => {
   const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
   Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true }));
-  const stack = new Stack(app, 'BackendStack', { env: { account: '111122223333', region: 'eu-central-1' } });
+  const doc = publishedIngress(ingress);
+  seedPublishedIngress(app, doc);
+  const stack = new Stack(app, 'BackendStack', { env: TEST_ENV });
   const ref = SharedIngress.fromParameters(stack, 'Ingress', DEFAULT_REGISTRY_PREFIX, ingress);
   const backend = new AgentBackend(stack, 'Billing', {
     name: 'billing',
@@ -1187,27 +1185,26 @@ describe.each(INGRESSES)('AgentBackend in its own stack from SharedIngress.fromP
   new CfnOutput(stack, 'BillingEndpointUrl', { value: backend.endpointUrl! });
   const template = Template.fromStack(stack);
 
-  it('reads the published parameters: baseUrl, ingressRoleArn, ingressId, tenantRoleArn, (v2) the issuer, the store and the tools gateway and, on the Gateway, gatewayIdentifier', () => {
-    const all = Object.values(template.toJSON().Parameters as Record<string, any>).filter((p) => p.Type === 'AWS::SSM::Parameter::Value<String>');
-    const params = all.filter((p) => String(p.Default).startsWith(DEFAULT_REGISTRY_PREFIX));
-    const expected: string[] = [
-      PUBLISHED.baseUrl,
-      PUBLISHED.ingressRoleArn,
-      PUBLISHED.ingressId,
-      PUBLISHED.tenantRoleArn,
-      PUBLISHED.issuer,
-      PUBLISHED.entitlementsTableName,
-      PUBLISHED.toolContextKeyId,
-      // ADR-0041: a reference reads each gateway under tools-gateways/<name>/, `default` by default.
-      ...TOOLS_GATEWAY_PARAMETER_FIELDS.map((f) => toolsGatewayParameter('default', f)),
-    ];
-    const expectedNames = expected
-      .concat(ingress === 'agentcore-gateway' ? [PUBLISHED.gatewayIdentifier] : [])
-      .map((n) => `${DEFAULT_REGISTRY_PREFIX}${n}`)
-      .sort();
-    expect(params.map((p) => p.Default).sort()).toEqual(expectedNames);
+  it('reads the one published document at synth: no deploy-time parameter, every value from the document (ADR-0042)', () => {
+    const all = Object.values((template.toJSON().Parameters ?? {}) as Record<string, any>).filter((p) => String(p.Type).startsWith('AWS::SSM::Parameter::Value'));
+    expect(all.filter((p) => String(p.Default).startsWith(DEFAULT_REGISTRY_PREFIX))).toEqual([]);
     expect(all.map((p) => p.Default).some((d) => String(d).includes('/identity/'))).toBe(false);
     expect(ref.ingress).toBe(ingress);
+    expect(ref.endpointUrl).toBe(doc.baseUrl);
+    expect(ref.ingressRoleArn).toBe(doc.ingressRoleArn);
+    expect(ref.ingressId).toBe(doc.ingressId);
+    expect(ref.tenantRoleArn).toBe(doc.tenantRoleArn);
+    expect(ref.issuer).toBe(doc.issuer);
+    expect(ref.entitlementsTableName).toBe(doc.entitlementsTableName);
+    expect(ref.gatewayIdentifier).toBe(ingress === 'agentcore-gateway' ? doc.gatewayIdentifier : undefined);
+    expect(ref.tools).toEqual({
+      name: 'default',
+      gatewayIdentifier: doc.toolsGateways.default.identifier,
+      gatewayUrl: doc.toolsGateways.default.url,
+      gatewayRoleArn: doc.toolsGateways.default.roleArn,
+      policyEngineId: doc.toolsGateways.default.policyEngineId,
+      contextKeyId: doc.toolContextKeyId,
+    });
   });
 
   it('creates the Runtime tagged with the read ingressId, the resource policy on the read role ARN, the target on the read Gateway, and the entry under the prefix', () => {
@@ -1220,7 +1217,7 @@ describe.each(INGRESSES)('AgentBackend in its own stack from SharedIngress.fromP
       RUNTIME_HEADERS.TRANSACTION_TOKEN,
       RUNTIME_HEADERS.TENANT_CREDENTIALS,
     ]);
-    expect(JSON.stringify(resourcePolicy(template))).toContain(JSON.stringify(JSON.stringify(stack.resolve(ref.ingressRoleArn))).slice(1, -1));
+    expect(JSON.stringify(resourcePolicy(template))).toContain(JSON.stringify(ref.ingressRoleArn));
     template.hasResourceProperties('Custom::RuntimeIsolationRegistryEntry', {
       ParameterName: `${DEFAULT_REGISTRY_PREFIX}backends/billing`,
       Needs: ['billing/read', 'billing/invoke'],
@@ -1258,12 +1255,83 @@ describe.each(INGRESSES)('AgentBackend in its own stack from SharedIngress.fromP
     const statement = model.Properties.PolicyDocument.Statement.find((s: any) => s.Sid === 'OneModel');
     expect(statement.Action).toEqual(['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream']);
     expect(JSON.stringify(statement.Resource)).toContain('foundation-model/amazon.nova-lite-v1:0');
-    // Attached by the role NAME parsed from the ARN parameter, not to a role of this stack.
-    expect(JSON.stringify(model.Properties.Roles)).toContain('Fn::Select');
+    // Attached by the role NAME parsed from the published ARN, not to a role of this stack.
+    expect(model.Properties.Roles).toEqual(['ri-tenant-model-role']);
     expect(JSON.stringify(template.toJSON())).not.toContain('TenantModelRole');
   });
 
   it('passes cdk-nag', () => {
     expect(() => template.toJSON()).not.toThrow();
+  });
+});
+
+describe('SharedIngress.fromParameters: the synth-time lookup (ADR-0042)', () => {
+  const fresh = () => new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+
+  it('without the context yet (first synth) returns placeholder values of the right shape and records the missing lookup', () => {
+    const app = fresh();
+    const stack = new Stack(app, 'Consumer', { env: TEST_ENV });
+    const ref = SharedIngress.fromParameters(stack, 'Ingress', DEFAULT_REGISTRY_PREFIX, 'agentcore-gateway', { toolsGateways: ['default', 'finance'] });
+    expect(ref.ingress).toBe('agentcore-gateway');
+    expect(ref.ingressId).toMatch(/^dummy-value-for-/);
+    expect(ref.gatewayIdentifier).toMatch(/^dummy-value-for-/);
+    expect(stack.resolve(ref.ingressRoleArn)).toBeDefined();
+    expect(Object.keys(ref.toolsGateways!).sort()).toEqual(['default', 'finance']);
+    expect(ref.tools).toBe(ref.toolsGateways!.default);
+    expect(() => app.synth()).not.toThrow();
+    const missing = app.synth().manifest.missing ?? [];
+    expect(missing.map((m) => m.key)).toContain(`ssm:account=111122223333:parameterName=${DEFAULT_REGISTRY_PREFIX}ingress:region=eu-central-1`);
+    const none = SharedIngress.fromParameters(new Stack(fresh(), 'C2', { env: TEST_ENV }), 'Ingress', DEFAULT_REGISTRY_PREFIX, undefined, { toolsGateway: false });
+    expect(none.ingress).toBe('api-gateway');
+    expect(none.toolsGateways).toBeUndefined();
+    expect(none.tools).toBeUndefined();
+  });
+
+  it('needs env: { account, region } on the consuming stack', () => {
+    expect(() => SharedIngress.fromParameters(new Stack(fresh(), 'NoEnv'), 'Ingress', DEFAULT_REGISTRY_PREFIX)).toThrow(/needs env: \{ account, region \}/);
+  });
+
+  it('refuses a document of another version, naming the parameter', () => {
+    const app = fresh();
+    seedPublishedIngress(app, { ...publishedIngress('api-gateway'), version: 1 });
+    expect(() => SharedIngress.fromParameters(new Stack(app, 'C', { env: TEST_ENV }), 'Ingress', DEFAULT_REGISTRY_PREFIX)).toThrow(
+      /SharedIngress\.fromParameters\(\/application-plane\/shared\/agent-runtime\/ingress\): version 1, expected 2/,
+    );
+    const legacy = fresh();
+    legacy.node.setContext(`ssm:account=111122223333:parameterName=${DEFAULT_REGISTRY_PREFIX}ingress:region=eu-central-1`, 'api-gateway');
+    expect(() => SharedIngress.fromParameters(new Stack(legacy, 'C', { env: TEST_ENV }), 'Ingress', DEFAULT_REGISTRY_PREFIX)).toThrow(/is not JSON/);
+  });
+
+  it('refuses an ingress argument the document contradicts; without one it takes the document\'s', () => {
+    const app = fresh();
+    seedPublishedIngress(app, publishedIngress('agentcore-gateway'));
+    expect(() => SharedIngress.fromParameters(new Stack(app, 'C', { env: TEST_ENV }), 'Ingress', DEFAULT_REGISTRY_PREFIX, 'api-gateway')).toThrow(
+      /the ingress is 'agentcore-gateway', not 'api-gateway'/,
+    );
+    const ref = SharedIngress.fromParameters(new Stack(app, 'D', { env: TEST_ENV }), 'Ingress', DEFAULT_REGISTRY_PREFIX);
+    expect(ref.ingress).toBe('agentcore-gateway');
+    expect(ref.gatewayIdentifier).toBe('ri-gateway-abc123');
+  });
+
+  it('refuses a tools gateway the document lacks, listing the ones it has; defaults to every published gateway', () => {
+    const app = fresh();
+    seedPublishedIngress(app, publishedIngress('api-gateway', ['default', 'finance']));
+    expect(() => SharedIngress.fromParameters(new Stack(app, 'C', { env: TEST_ENV }), 'Ingress', DEFAULT_REGISTRY_PREFIX, 'api-gateway', { toolsGateways: ['default', 'hr'] })).toThrow(
+      /no tools gateway hr; the ingress publishes \[default, finance\]/,
+    );
+    const all = SharedIngress.fromParameters(new Stack(app, 'D', { env: TEST_ENV }), 'Ingress', DEFAULT_REGISTRY_PREFIX);
+    expect(Object.keys(all.toolsGateways!).sort()).toEqual(['default', 'finance']);
+    expect(() => SharedIngress.fromParameters(new Stack(app, 'E', { env: TEST_ENV }), 'Ingress', DEFAULT_REGISTRY_PREFIX, undefined, { toolsGateways: ['Bad Name'] })).toThrow(
+      /toolsGateways name 'Bad Name' must match/,
+    );
+  });
+
+  it('toolsGateway: false returns no gateway even when the document has some', () => {
+    const app = fresh();
+    seedPublishedIngress(app, publishedIngress('api-gateway', ['default', 'finance']));
+    const ref = SharedIngress.fromParameters(new Stack(app, 'C', { env: TEST_ENV }), 'Ingress', DEFAULT_REGISTRY_PREFIX, 'api-gateway', { toolsGateway: false });
+    expect(ref.toolsGateways).toBeUndefined();
+    expect(ref.tools).toBeUndefined();
+    expect(ref.issuer).toBe(publishedIngress('api-gateway').issuer);
   });
 });

@@ -71,8 +71,11 @@ trap cleanup EXIT
 if [[ -n "${ENDPOINT:-}" ]]; then
   INGRESS="${INGRESS:-unknown}"
 else
-  ENDPOINT="$(param "${PARAM_PREFIX}/endpointUrl")" || fail "parameter ${PARAM_PREFIX}/endpointUrl not found; deploy this sample first or set ENDPOINT"
-  INGRESS="$(param "${PARAM_PREFIX}/ingress")"
+  # One JSON document (ADR-0042).
+  PUBLISHED="$(param "${PARAM_PREFIX}/ingress")" || fail "parameter ${PARAM_PREFIX}/ingress not found; deploy this sample first or set ENDPOINT"
+  [[ "$(jq -r '.version // empty' <<<"$PUBLISHED" 2>/dev/null)" == 2 ]] || fail "parameter ${PARAM_PREFIX}/ingress is not a version 2 document (ADR-0042); redeploy this sample or set ENDPOINT"
+  ENDPOINT="$(jq -r '.endpointUrl' <<<"$PUBLISHED")"
+  INGRESS="$(jq -r '.ingress' <<<"$PUBLISHED")"
 fi
 identity_init
 

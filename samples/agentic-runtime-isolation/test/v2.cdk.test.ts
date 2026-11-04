@@ -5,7 +5,8 @@ import * as path from 'node:path';
 import { App, Duration, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
-import { AgentBackend, GATEWAY_TARGET_NAME, PUBLISHED, SharedIngress, type SharedIngressProps, TOOLS_GATEWAY_PARAMETER_FIELDS, toolsGatewayParameter } from '../src/index';
+import { publishedIngress, seedPublishedIngress, TEST_ENV } from './published-ingress';
+import { AgentBackend, GATEWAY_TARGET_NAME, PUBLISHED, SharedIngress, type SharedIngressProps } from '../src/index';
 import { cedarPolicyFor } from '../src/shared/cedar';
 import { policyName, ToolTarget, type ToolDefinition } from '../src/tool-target.cdk';
 import { MAX_TOOL_TARGETS } from '../src/tools-gateway.cdk';
@@ -369,23 +370,15 @@ describe('several tools gateways (ADR-0041)', () => {
     expect(JSON.stringify(pointer.Properties.Value)).toContain('\\"gateway\\":\\"finance\\"');
   });
 
-  it('publishes tools-gateways/<name>/* for both, the default aliases, and one context key id', () => {
-    const names = resources(template, 'AWS::SSM::Parameter').map(([, p]) => p.Properties.Name as string);
+  it('publishes both gateways inside the one ingress document, with one context key id and no aliases (ADR-0041, ADR-0042)', () => {
+    const published = resources(template, 'AWS::SSM::Parameter').filter(([, p]) => p.Properties.Name === `/application-plane/shared/agent-runtime/${PUBLISHED.ingress}`);
+    expect(published).toHaveLength(1);
+    const literal = (published[0][1].Properties.Value['Fn::Join'][1] as unknown[]).filter((x) => typeof x === 'string').join('');
     for (const gw of ['default', 'finance']) {
-      for (const field of TOOLS_GATEWAY_PARAMETER_FIELDS) {
-        expect(names).toContain(`/application-plane/shared/agent-runtime/${toolsGatewayParameter(gw, field)}`);
-      }
+      expect(literal).toContain(`"${gw}":{"url":`);
     }
-    const aliases = [
-      PUBLISHED.toolsGatewayUrl,
-      PUBLISHED.toolsGatewayIdentifier,
-      PUBLISHED.toolsGatewayRoleArn,
-      PUBLISHED.toolsPolicyEngineId,
-      PUBLISHED.toolContextKeyId,
-    ];
-    for (const alias of aliases) {
-      expect(names.filter((n) => n === `/application-plane/shared/agent-runtime/${alias}`)).toHaveLength(1);
-    }
+    expect(literal.match(/"toolContextKeyId":/g)).toHaveLength(1);
+    expect(literal).not.toContain('toolsGatewayUrl');
   });
 
   it('the agent gets RI_TOOLS_GATEWAY_URLS with every gateway by name', () => {
@@ -443,14 +436,17 @@ describe('several tools gateways: synth errors (ADR-0041)', () => {
     expect(ingress.toolsGatewayUrl).toBeUndefined();
     expect(() => new ToolTarget(stack, 'X', { name: 'x', ingress, kind: 'lambda', function: toolFunction(stack, 'F'), tools: tools(1) })).toThrow(/gateway 'default' is not a tools gateway/);
     new ToolTarget(stack, 'Y', { name: 'y', ingress, gateway: 'finance', kind: 'lambda', function: toolFunction(stack, 'G'), tools: tools(1) });
-    const names = resources(Template.fromStack(stack), 'AWS::SSM::Parameter').map(([, p]) => p.Properties.Name as string);
-    expect(names.some((n) => n.endsWith(`/${PUBLISHED.toolsGatewayUrl}`))).toBe(false);
-    expect(names).toContain(`/application-plane/shared/agent-runtime/${toolsGatewayParameter('finance', 'url')}`);
+    const [published] = resources(Template.fromStack(stack), 'AWS::SSM::Parameter').filter(([, p]) => p.Properties.Name === `/application-plane/shared/agent-runtime/${PUBLISHED.ingress}`);
+    const literal = (published[1].Properties.Value['Fn::Join'][1] as unknown[]).filter((x) => typeof x === 'string').join('');
+    expect(literal).toContain('"finance":{"url":');
+    expect(literal).not.toContain('"default":{');
   });
 
   it('a ToolTarget in another stack names its gateway through SharedIngress.fromParameters({ toolsGateways })', () => {
     const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
-    const stack = new Stack(app, 'Tools', { env: { account: '111122223333', region: 'eu-central-1' } });
+    const doc = publishedIngress('api-gateway', ['default', 'finance']);
+    seedPublishedIngress(app, doc);
+    const stack = new Stack(app, 'Tools', { env: TEST_ENV });
     const ref = SharedIngress.fromParameters(stack, 'Ingress', '/application-plane/shared/agent-runtime/', 'api-gateway', { toolsGateways: ['default', 'finance'] });
     expect(Object.keys(ref.toolsGateways!).sort()).toEqual(['default', 'finance']);
     expect(ref.tools).toBe(ref.toolsGateways!.default);
@@ -460,7 +456,7 @@ describe('several tools gateways: synth errors (ADR-0041)', () => {
       /gateway 'hr' is not a tools gateway of the ingress reference/,
     );
     const text = JSON.stringify(Template.fromStack(stack).toJSON());
-    expect(text).toContain(toolsGatewayParameter('finance', 'policyEngineId'));
+    expect(text).toContain(doc.toolsGateways.finance.policyEngineId);
   });
 });
 

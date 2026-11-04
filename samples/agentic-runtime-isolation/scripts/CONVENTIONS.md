@@ -112,8 +112,7 @@ The scripts read this sample's published parameters under the ingress's
 
 | Parameter | Owner | Scripts |
 |---|---|---|
-| `endpointUrl`, `ingress`, `ingressRoleArn`, `ingressId`, `tenantRoleArn`, `gatewayIdentifier` (`agentcore-gateway` only) | the ingress stack (`SharedIngress`) | read only (`demo.sh`, `integ.sh`, `perf.sh`) |
-| `runtimeArn` | the one-backend demo stack | read only |
+| `ingress`: one JSON document (`version: 2`, `ingress`, `endpointUrl`, `baseUrl`, `ingressRoleArn`, `ingressId`, `tenantRoleArn`, `gatewayIdentifier` on `agentcore-gateway`, `issuer`, `jwksUrl`, `entitlementsTableName`, `entitlementsApiUrl`, `toolContextKeyId`, `toolsGateways`; ADR-0042) | the ingress stack (`SharedIngress`) | read only, with `jq` (`demo.sh`, `perf.sh`); `integ.sh` reads stack outputs |
 | `backends/<name>` | the stack that deployed that `AgentBackend`; its custom resource writes `active`, `draining`, then removes the entry | read only, except `backends/late` |
 | `backends/late` | `integ.sh` step 9-registry, written with `aws ssm put-parameter` to show a backend added after the ingress deploy; it names billing's Runtime, `needs: ["late/run"]` and `tools: []` (the v2 shape, spec §4.3). Its `NAME#late` reservation row, which a vendor subscription needs (spec §5.3), is written into the entitlement store the same way | the script deletes both at the end of the step and again from the `EXIT` trap, so a failed run leaves no route or row behind |
 

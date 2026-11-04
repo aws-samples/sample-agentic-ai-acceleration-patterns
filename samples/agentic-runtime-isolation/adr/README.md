@@ -29,7 +29,7 @@ SPDX-License-Identifier: MIT-0
 | [0021](./0021-make-per-tenant-cloudwatch-metrics-opt-in.md) | Make per-tenant CloudWatch metrics opt-in, off by default | Accepted | Amends ADR-0017 | 2026-10-27 |
 | [0022](./0022-bound-the-tvm-credential-cache-and-share-one-sts-call-per-tag-set.md) | Bound the TVM credential cache and share one STS call per tag set | Accepted | - | 2026-10-27 |
 | [0023](./0023-tune-the-ingress-cold-and-hot-paths-by-measurement.md) | Tune the ingress cold and hot paths by measurement | Accepted | Amends ADR-0015 | 2026-10-27 |
-| [0024](./0024-share-one-ingress-across-runtimes-through-a-backend-registry.md) | Share one ingress across several Runtimes through a backend registry | Accepted | Amends ADR-0003, ADR-0011, ADR-0013; Amended by ADR-0025, ADR-0032, ADR-0035 | 2026-10-28 |
+| [0024](./0024-share-one-ingress-across-runtimes-through-a-backend-registry.md) | Share one ingress across several Runtimes through a backend registry | Accepted | Amends ADR-0003, ADR-0011, ADR-0013; Amended by ADR-0025, ADR-0032, ADR-0035, ADR-0042 | 2026-10-28 |
 | [0025](./0025-give-each-backend-its-own-scopes-registered-at-deploy.md) | Give each backend its own scopes, registered with the identity provider at deploy | Superseded by ADR-0030 | Amends ADR-0005, ADR-0024 | 2026-10-29 |
 | [0026](./0026-defer-requiremmdsv2-until-cloudformation-exposes-it.md) | Defer `requireMMDSV2` until CloudFormation exposes it | Accepted | Amends ADR-0008 | 2026-10-30 |
 | [0027](./0027-lowercase-the-gateway-name-to-match-its-arn.md) | Lowercase the Gateway name to match its ARN | Accepted | - | 2026-10-30 |
@@ -47,3 +47,4 @@ SPDX-License-Identifier: MIT-0
 | [0039](./0039-default-session-mapping-to-the-tenant-scope.md) | Default session mapping to the tenant scope when it is turned on | Accepted | Amends ADR-0013 | 2026-11-02 |
 | [0040](./0040-apply-the-spike-findings-to-the-tools-gateway-and-the-transaction-token.md) | Apply the spike findings to the tools gateway and the transaction token | Accepted | Amends ADR-0031, ADR-0034, ADR-0038; Amended by ADR-0041 | 2026-11-02 |
 | [0041](./0041-one-star-permit-per-target-several-tools-gateways-and-an-8-kb-scope.md) | One star permit per target, several tools gateways, and an 8 KB `scope` | Accepted | Amends ADR-0034, ADR-0040 | 2026-11-03 |
+| [0042](./0042-publish-one-json-parameter-and-let-test-stacks-publish-nothing.md) | Publish one JSON parameter, and let test stacks publish nothing | Accepted | Amends ADR-0024 | 2026-11-04 |

@@ -10,8 +10,8 @@
  * (v2) two `ToolTarget`s, `crm` and `invoices`, behind two tools gateways (`default` and `finance`, ADR-0041). It
  * reads tenant-identity's published parameters for the issuer (ADR-0004),
  * chooses the ingress and the optional modules from CDK context,
- * and publishes the Runtime ARNs as this sample's parameters (the ingress
- * publishes its own, src/shared-ingress.cdk.ts). The TVM is always on (ADR-0018):
+ * and leaves the published interface to the ingress (one JSON parameter,
+ * ADR-0042); the Runtime ARNs are stack outputs. The TVM is always on (ADR-0018):
  * the `tvm` context flag now means "demo tenant data". When true, the demo
  * adds a tenant-partitioned table and its own data-bearing TenantRole and
  * passes it (ADR-0016 lazy trust ARN); when false, the demo passes no role
@@ -51,18 +51,6 @@ import { gatewayIdPart } from './tools-gateway.cdk';
 export const IDENTITY_PARAMETERS = {
   userPoolId: '/application-plane/shared/identity/userPoolId',
   appClientId: '/application-plane/shared/identity/appClientId',
-} as const;
-
-/**
- * This sample's published parameters (spec §6.4, ARCHITECTURE.md §5.1).
- * `SharedIngress` publishes `endpointUrl`, `ingress`, `ingressRoleArn`,
- * `ingressId` and `tenantRoleArn` under the same prefix itself (ADR-0024);
- * the demo keeps `runtimeArn` for the default backend (back-compat) and adds
- * the billing backend's ARN.
- */
-export const AGENT_RUNTIME_PARAMETERS = {
-  runtimeArn: `${DEFAULT_REGISTRY_PREFIX}runtimeArn`,
-  billingRuntimeArn: `${DEFAULT_REGISTRY_PREFIX}backends-info/billing/runtimeArn`,
 } as const;
 
 /** The second backend's name (ADR-0024): the integ's step 9 calls `/billing/invocations`. */
@@ -511,26 +499,9 @@ export class RuntimeIsolationDemoStack extends Stack {
       this.dashboard = costDashboard(this, ctx.ingress, props.dashboardName ?? dashboardName(ctx.ingress));
     }
 
-    // The published interface (spec §6.4, standard §1.1). The ingress
-    // publishes endpointUrl, baseUrl, ingress, ingressRoleArn, ingressId,
-    // tenantRoleArn and, on agentcore-gateway, gatewayIdentifier under its
-    // prefix (ADR-0024); the demo adds the Runtime ARNs. The default prefix
-    // is account-wide, so one stack per account and Region publishes there.
-    if (publish) {
-      new ssm.StringParameter(this, 'RuntimeArnParameter', {
-        parameterName: AGENT_RUNTIME_PARAMETERS.runtimeArn,
-        stringValue: this.agentBackend.runtimeArn,
-        description: 'runtime-isolation: the default backend\'s AgentCore Runtime ARN',
-      });
-      if (this.billing !== undefined) {
-        new ssm.StringParameter(this, 'BillingRuntimeArnParameter', {
-          parameterName: AGENT_RUNTIME_PARAMETERS.billingRuntimeArn,
-          stringValue: this.billing.runtimeArn,
-          description: 'runtime-isolation: the billing backend\'s AgentCore Runtime ARN (ADR-0024)',
-        });
-      }
-    }
-
+    // The published interface (spec §6.4, ADR-0042) is the ingress's one JSON
+    // parameter; the Runtime ARNs are the RuntimeArn and BillingRuntimeArn
+    // outputs below, not parameters of their own.
     const endpointUrl = ctx.ingress === 'api-gateway' ? `${this.ingress.endpointUrl}/${ROUTE}` : this.ingress.urlFor(GATEWAY_TARGET_NAME);
     new CfnOutput(this, 'EndpointUrl', { value: endpointUrl });
     new CfnOutput(this, 'RuntimeArn', { value: this.agentBackend.runtimeArn });

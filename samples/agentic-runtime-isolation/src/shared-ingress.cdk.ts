@@ -14,7 +14,7 @@
  * Everything that is identical across backends lives here: the token check,
  * the product-wide scope floor (`requiredScopes`), the token vending machine
  * (always on, ADR-0018), the per-tenant limit (ADR-0020), the stage throttle,
- * the log drain (ADR-0019) and the published parameters. (v2) Also the
+ * the log drain (ADR-0019) and the published parameter (ADR-0042). (v2) Also the
  * entitlement store (C-12, ADR-0030), the token signer and the issuer's
  * discovery routes (C-13, ADR-0037), the entitlement API (C-14) and, unless
  * `toolsGateway: false`, the tools gateways (C-15, ADR-0034, ADR-0041): one
@@ -539,7 +539,7 @@ export const STAGE_NAME = 'prod';
 /** Spike V-5: the integration timeout caps the stream; two minutes, not the 29 s default. */
 export const INTEGRATION_TIMEOUT = Duration.minutes(2);
 
-/** The tools gateway values a `ToolTarget` in another stack needs (published parameters). */
+/** The tools gateway values a `ToolTarget` in another stack needs (the published document, ADR-0042). */
 export interface ToolsGatewayRef {
   /** (ADR-0041) The gateway's name. Default `default`. */
   readonly name?: string;
@@ -553,7 +553,7 @@ export interface ToolsGatewayRef {
 /**
  * What `AgentBackend` and `ToolTarget` need from an ingress in another stack
  * (ADR-0024): the values `SharedIngress` publishes under its registry
- * prefix. Build one with `SharedIngress.fromParameters`.
+ * prefix, one JSON document (ADR-0042). Build one with `SharedIngress.fromParameters`.
  */
 export interface SharedIngressRef {
   /** The registry prefix the ingress resolves routes through. */
@@ -603,48 +603,96 @@ interface IngressWiring {
 
 export class SharedIngress extends Construct {
   /**
-   * Reads another stack's ingress from its published parameters (ADR-0024).
-   * `ingress` must be given, and (v2) which tools gateways the ingress has
-   * (`toolsGateway: false` for none, `toolsGateways` for their names,
-   * default `['default']`): both decide at synth which parameters exist.
+   * Reads another stack's ingress from its one published parameter,
+   * `<registryPrefix>ingress` (ADR-0024, ADR-0042): a JSON `PublishedIngress`
+   * document. CloudFormation cannot parse JSON at deploy time, so this is a
+   * synth-time context lookup (`ssm.StringParameter.valueFromLookup`, like
+   * `Vpc.fromLookup`): synth needs AWS credentials for the ingress's account
+   * and Region, the consuming stack needs `env: { account, region }`, and the
+   * value is cached in `cdk.context.json`. After the ingress is replaced (or
+   * its values change), run `cdk context --reset <key>` (the key is
+   * `ssm:account=<account>:parameterName=<registryPrefix>ingress:region=<region>`)
+   * so the next synth reads it again.
+   *
+   * `ingress`, when given, must match the document's. (v2) Which tools
+   * gateways the ref carries: none with `toolsGateway: false`, the named ones
+   * with `toolsGateways` (each must be in the document), else every gateway
+   * the document lists. On the first synth, before the context provider has
+   * run, CDK hands back a `dummy-value-for-` placeholder; the ref is then
+   * built from placeholder values (gateways `toolsGateways ?? ['default']`)
+   * so the synth succeeds and the toolkit can fill the context in.
    */
   static fromParameters(
     scope: Construct,
     id: string,
     registryPrefix: string,
-    ingress: IngressKind,
+    ingress?: IngressKind,
     options: { readonly toolsGateway?: boolean; readonly toolsGateways?: readonly string[] } = {},
   ): SharedIngressRef {
     const holder = new Construct(scope, id);
-    const read = (name: string) => ssm.StringParameter.valueForStringParameter(holder, `${registryPrefix}${name}`);
-    const names = options.toolsGateway === false ? [] : [...(options.toolsGateways ?? [DEFAULT_TOOLS_GATEWAY])];
-    for (const name of names) {
+    const stack = Stack.of(holder);
+    const parameterName = `${registryPrefix}${PUBLISHED.ingress}`;
+    const where = `SharedIngress.fromParameters(${parameterName})`;
+    for (const name of options.toolsGateways ?? []) {
       if (!TOOLS_GATEWAY_NAME_PATTERN.test(name)) {
         throw new Error(`SharedIngress.fromParameters: toolsGateways name '${name}' must match ${TOOLS_GATEWAY_NAME_PATTERN.source}`);
       }
     }
-    const contextKeyId = names.length > 0 ? read(PUBLISHED.toolContextKeyId) : undefined;
+    if (Token.isUnresolved(stack.account) || Token.isUnresolved(stack.region)) {
+      throw new Error(
+        `${where}: the parameter is read at synth (ADR-0042), so stack ${stack.node.path} needs env: { account, region }; it has none`,
+      );
+    }
+    const value = ssm.StringParameter.valueFromLookup(holder, parameterName);
+    if (value.startsWith(LOOKUP_PLACEHOLDER_PREFIX)) {
+      return placeholderRef(stack, registryPrefix, ingress ?? 'api-gateway', options);
+    }
+    let doc: PublishedIngress;
+    try {
+      doc = JSON.parse(value) as PublishedIngress;
+    } catch {
+      throw new Error(`${where}: the value is not JSON; is the ingress stack older than ADR-0042?`);
+    }
+    if (doc === null || typeof doc !== 'object' || doc.version !== PUBLISHED_INGRESS_VERSION) {
+      throw new Error(
+        `${where}: version ${String((doc as { version?: unknown } | null)?.version)}, expected ${PUBLISHED_INGRESS_VERSION} (ADR-0042); redeploy the ingress stack or run cdk context --reset`,
+      );
+    }
+    if (ingress !== undefined && ingress !== doc.ingress) {
+      throw new Error(`${where}: the ingress is '${doc.ingress}', not '${ingress}'`);
+    }
+    const published = doc.toolsGateways ?? {};
+    const available = Object.keys(published);
+    const names = options.toolsGateway === false ? [] : [...(options.toolsGateways ?? available)];
+    const missing = names.filter((n) => !(n in published));
+    if (missing.length > 0) {
+      throw new Error(`${where}: no tools gateway ${missing.join(', ')}; the ingress publishes [${available.join(', ')}]`);
+    }
+    if (names.length > 0 && doc.toolContextKeyId === undefined) {
+      throw new Error(`${where}: the document has tools gateways but no toolContextKeyId`);
+    }
     const toolsGateways: Record<string, ToolsGatewayRef> = {};
     for (const name of names) {
+      const gw = published[name];
       toolsGateways[name] = {
         name,
-        gatewayIdentifier: read(toolsGatewayParameter(name, 'identifier')),
-        gatewayUrl: read(toolsGatewayParameter(name, 'url')),
-        gatewayRoleArn: read(toolsGatewayParameter(name, 'roleArn')),
-        policyEngineId: read(toolsGatewayParameter(name, 'policyEngineId')),
-        contextKeyId: contextKeyId!,
+        gatewayIdentifier: gw.identifier,
+        gatewayUrl: gw.url,
+        gatewayRoleArn: gw.roleArn,
+        policyEngineId: gw.policyEngineId,
+        contextKeyId: doc.toolContextKeyId!,
       };
     }
     return {
       registryPrefix,
-      ingress,
-      endpointUrl: read(PUBLISHED.baseUrl),
-      ingressRoleArn: read(PUBLISHED.ingressRoleArn),
-      ingressId: read(PUBLISHED.ingressId),
-      tenantRoleArn: read(PUBLISHED.tenantRoleArn),
-      gatewayIdentifier: ingress === 'agentcore-gateway' ? read(PUBLISHED.gatewayIdentifier) : undefined,
-      issuer: read(PUBLISHED.issuer),
-      entitlementsTableName: read(PUBLISHED.entitlementsTableName),
+      ingress: doc.ingress,
+      endpointUrl: doc.baseUrl,
+      ingressRoleArn: doc.ingressRoleArn,
+      ingressId: doc.ingressId,
+      tenantRoleArn: doc.tenantRoleArn,
+      gatewayIdentifier: doc.ingress === 'agentcore-gateway' ? doc.gatewayIdentifier : undefined,
+      issuer: doc.issuer,
+      entitlementsTableName: doc.entitlementsTableName,
       tools: toolsGateways[DEFAULT_TOOLS_GATEWAY],
       toolsGateways: names.length > 0 ? toolsGateways : undefined,
     };
@@ -900,53 +948,56 @@ export class SharedIngress extends Construct {
     );
   }
 
-  /** The published interface (spec §6.4, standard §1.1), under the registry prefix. */
+  /**
+   * The published interface (spec §6.4, standard §1.1, ADR-0042): ONE
+   * parameter, `<registryPrefix>ingress`, holding the `PublishedIngress`
+   * JSON document. Parameter Store allows 3 PutParameter / DeleteParameter
+   * per second per account and Region, so one parameter per value (20-26 a
+   * stack) throttled stacks deployed or destroyed together.
+   * The construct id stays `IngressParameter` (the pre-ADR-0042 parameter of
+   * the same name), so an update rewrites the value in place instead of a
+   * replacement colliding with its own fixed name.
+   */
   private publish(options: ResolvedOptions): void {
-    const put = (id: string, name: string, value: string, description: string) =>
-      new ssm.StringParameter(this, id, {
-        parameterName: `${this.registryPrefix}${name}`,
-        simpleName: false,
-        stringValue: value,
-        description: `runtime-isolation: ${description}`,
-      });
     const defaultBackendUrl =
       options.defaultBackend === undefined
         ? this.endpointUrl
         : options.ingress === 'api-gateway'
           ? `${this.endpointUrl}/${ROUTE}`
           : this.urlFor(options.defaultBackend);
-    put('EndpointUrlParameter', PUBLISHED.endpointUrl, defaultBackendUrl, 'the invocation URL (POST, bearer token): the default backend when one is set, else the ingress base URL');
-    put('BaseUrlParameter', PUBLISHED.baseUrl, this.endpointUrl, 'the ingress base URL; a backend is at <url>/<backend>/invocations');
-    put('IngressRoleArnParameter', PUBLISHED.ingressRoleArn, this.ingressRole.roleArn, 'the one principal every Runtime behind this ingress trusts (P-1)');
-    put('IngressIdParameter', PUBLISHED.ingressId, this.ingressId, 'the ri:ingress tag value a Runtime must carry (ADR-0024)');
-    put('IngressParameter', PUBLISHED.ingress, options.ingress, 'the deployed ingress (api-gateway or agentcore-gateway)');
-    put('TenantRoleArnParameter', PUBLISHED.tenantRoleArn, this.tenantRole.roleArn, 'the tenant role every model call is signed by (ADR-0018)');
-    if (this.gatewayIdentifier !== undefined) {
-      put('GatewayIdentifierParameter', PUBLISHED.gatewayIdentifier, this.gatewayIdentifier, 'the AgentCore Gateway a backend adds its target to (ADR-0010)');
-    }
-    // v2 (spec §6.4)
-    put('IssuerParameter', PUBLISHED.issuer, this.issuer, 'the transaction-token issuer URL (ADR-0037)');
-    put('JwksUrlParameter', PUBLISHED.jwksUrl, this.jwksUrl, 'the transaction-token JWKS URL (ADR-0037)');
-    put('EntitlementsTableNameParameter', PUBLISHED.entitlementsTableName, this.entitlementStore.tableName, 'the entitlement store table, for name reservations (ADR-0035)');
-    put('EntitlementsApiUrlParameter', PUBLISHED.entitlementsApiUrl, this.entitlementsApiUrl, 'the entitlement API base URL (ADR-0030)');
-    // ADR-0041: tools-gateways/<name>/{url,identifier,roleArn,policyEngineId} per gateway.
+    const toolsGateways: Record<string, PublishedToolsGateway> = {};
     for (const [name, gw] of Object.entries(this.toolsGateways)) {
-      const part = gatewayIdPart(name);
-      put(`ToolsGateway${part}UrlParameter`, toolsGatewayParameter(name, 'url'), gw.gatewayUrl, `the tools gateway ${name} MCP endpoint (ADR-0041)`);
-      put(`ToolsGateway${part}IdentifierParameter`, toolsGatewayParameter(name, 'identifier'), gw.gatewayIdentifier, `the tools gateway ${name} id, for ToolTarget (ADR-0041)`);
-      put(`ToolsGateway${part}RoleArnParameter`, toolsGatewayParameter(name, 'roleArn'), gw.gatewayRole.roleArn, `the tools gateway ${name} role a tool function trusts (ADR-0041)`);
-      put(`ToolsGateway${part}PolicyEngineIdParameter`, toolsGatewayParameter(name, 'policyEngineId'), gw.policyEngine.attrPolicyEngineId, `the tools gateway ${name} policy engine, for ToolTarget policies (ADR-0041)`);
+      toolsGateways[name] = {
+        url: gw.gatewayUrl,
+        identifier: gw.gatewayIdentifier,
+        roleArn: gw.gatewayRole.roleArn,
+        policyEngineId: gw.policyEngine.attrPolicyEngineId,
+      };
     }
-    if (this.toolContextKey !== undefined) {
-      put('ToolContextKeyIdParameter', PUBLISHED.toolContextKeyId, this.toolContextKey.keyId, 'the key that signs tool contexts for every tools gateway; tools read its public half (ADR-0034, ADR-0041)');
-    }
-    // The pre-ADR-0041 names, kept as aliases of the `default` gateway.
-    if (this.toolsGateway !== undefined) {
-      put('ToolsGatewayUrlParameter', PUBLISHED.toolsGatewayUrl, this.toolsGateway.gatewayUrl, 'alias of tools-gateways/default/url: the default tools gateway MCP endpoint (ADR-0034)');
-      put('ToolsGatewayIdentifierParameter', PUBLISHED.toolsGatewayIdentifier, this.toolsGateway.gatewayIdentifier, 'alias of tools-gateways/default/identifier (ADR-0034)');
-      put('ToolsGatewayRoleArnParameter', PUBLISHED.toolsGatewayRoleArn, this.toolsGateway.gatewayRole.roleArn, 'alias of tools-gateways/default/roleArn (ADR-0034)');
-      put('ToolsPolicyEngineIdParameter', PUBLISHED.toolsPolicyEngineId, this.toolsGateway.policyEngine.attrPolicyEngineId, 'alias of tools-gateways/default/policyEngineId (ADR-0040)');
-    }
+    const doc: PublishedIngress = {
+      version: PUBLISHED_INGRESS_VERSION,
+      ingress: options.ingress,
+      endpointUrl: defaultBackendUrl,
+      baseUrl: this.endpointUrl,
+      ingressRoleArn: this.ingressRole.roleArn,
+      ingressId: this.ingressId,
+      tenantRoleArn: this.tenantRole.roleArn,
+      ...(this.gatewayIdentifier !== undefined ? { gatewayIdentifier: this.gatewayIdentifier } : {}),
+      issuer: this.issuer,
+      jwksUrl: this.jwksUrl,
+      entitlementsTableName: this.entitlementStore.tableName,
+      entitlementsApiUrl: this.entitlementsApiUrl,
+      ...(this.toolContextKey !== undefined ? { toolContextKeyId: this.toolContextKey.keyId } : {}),
+      toolsGateways,
+    };
+    new ssm.StringParameter(this, 'IngressParameter', {
+      parameterName: `${this.registryPrefix}${PUBLISHED.ingress}`,
+      simpleName: false,
+      // Standard up to 4 KB, advanced up to 8 KB: roughly 15-20 tools gateways (ADR-0042).
+      tier: ssm.ParameterTier.INTELLIGENT_TIERING,
+      stringValue: Stack.of(this).toJsonString(doc),
+      description: 'runtime-isolation: the published ingress interface, one JSON document (spec §6.4, ADR-0042)',
+    });
   }
 
   /** The default tenant role (ADR-0018): trusted by `tvmCallerRole` only, `TenantId` tag required; model statements only. */
@@ -1246,39 +1297,99 @@ export class SharedIngress extends Construct {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** The names under the registry prefix that `SharedIngress` publishes (spec §6.4). */
+/** The names under the registry prefix that `SharedIngress` publishes (spec §6.4, ADR-0042): one JSON document. */
 export const PUBLISHED = {
-  endpointUrl: 'endpointUrl',
-  baseUrl: 'baseUrl',
-  ingressRoleArn: 'ingressRoleArn',
-  ingressId: 'ingressId',
   ingress: 'ingress',
-  tenantRoleArn: 'tenantRoleArn',
-  gatewayIdentifier: 'gatewayIdentifier',
-  /** (v2) */
-  issuer: 'issuer',
-  jwksUrl: 'jwksUrl',
-  entitlementsTableName: 'entitlementsTableName',
-  entitlementsApiUrl: 'entitlementsApiUrl',
-  toolsGatewayUrl: 'toolsGatewayUrl',
-  toolsGatewayIdentifier: 'toolsGatewayIdentifier',
-  /** (v2, not yet in spec §6.4) what a ToolTarget in another stack needs. */
-  toolsGatewayRoleArn: 'toolsGatewayRoleArn',
-  toolsPolicyEngineId: 'toolsPolicyEngineId',
-  toolContextKeyId: 'toolContextKeyId',
 } as const;
 
-/** (ADR-0041) The segment of the per-gateway published values: `tools-gateways/<name>/<field>`. */
-export const TOOLS_GATEWAYS_SEGMENT = 'tools-gateways/';
+/** (ADR-0042) The `version` of the `PublishedIngress` document. */
+export const PUBLISHED_INGRESS_VERSION = 2;
 
-/** The per-gateway published values (ADR-0041). */
-export type ToolsGatewayParameterField = 'url' | 'identifier' | 'roleArn' | 'policyEngineId';
-/** Every per-gateway field, in publishing order. */
-export const TOOLS_GATEWAY_PARAMETER_FIELDS: readonly ToolsGatewayParameterField[] = ['url', 'identifier', 'roleArn', 'policyEngineId'];
+/** CDK's first-synth value of a context lookup, before the context provider has run. */
+const LOOKUP_PLACEHOLDER_PREFIX = 'dummy-value-for-';
 
-/** The published name of one tools gateway value, under the registry prefix: `tools-gateways/<name>/<field>`. */
-export function toolsGatewayParameter(name: string, field: ToolsGatewayParameterField): string {
-  return `${TOOLS_GATEWAYS_SEGMENT}${name}/${field}`;
+/** (ADR-0041, ADR-0042) One tools gateway in the `PublishedIngress` document. */
+export interface PublishedToolsGateway {
+  /** The gateway's MCP endpoint. */
+  readonly url: string;
+  /** The gateway id, for `ToolTarget`. */
+  readonly identifier: string;
+  /** The gateway role a tool function trusts. */
+  readonly roleArn: string;
+  /** The gateway's policy engine, for `ToolTarget` policies. */
+  readonly policyEngineId: string;
+}
+
+/**
+ * (ADR-0042) The published interface: the JSON document `SharedIngress`
+ * writes to `<registryPrefix>ingress` and `SharedIngress.fromParameters`
+ * reads at synth.
+ */
+export interface PublishedIngress {
+  /** Always `2` (ADR-0042); before it the parameter held only the ingress kind. */
+  readonly version: 2;
+  /** The deployed ingress. */
+  readonly ingress: IngressKind;
+  /** The invocation URL (POST, bearer token): the default backend when one is set, else the ingress base URL. */
+  readonly endpointUrl: string;
+  /** The ingress base URL; a backend is at `<baseUrl>/<backend>/invocations`. */
+  readonly baseUrl: string;
+  /** The one principal every Runtime behind this ingress trusts (P-1). */
+  readonly ingressRoleArn: string;
+  /** The `ri:ingress` tag value a Runtime must carry (ADR-0024). */
+  readonly ingressId: string;
+  /** The tenant role every model call is signed by (ADR-0018). */
+  readonly tenantRoleArn: string;
+  /** The AgentCore Gateway a backend adds its target to (`agentcore-gateway` only, ADR-0010). */
+  readonly gatewayIdentifier?: string;
+  /** The transaction-token issuer URL (ADR-0037). */
+  readonly issuer: string;
+  /** The transaction-token JWKS URL (ADR-0037). */
+  readonly jwksUrl: string;
+  /** The entitlement store table, for name reservations (ADR-0035). */
+  readonly entitlementsTableName: string;
+  /** The entitlement API base URL (ADR-0030). */
+  readonly entitlementsApiUrl: string;
+  /** The key that signs tool contexts for every tools gateway; absent with no gateway (ADR-0034, ADR-0041). */
+  readonly toolContextKeyId?: string;
+  /** Every tools gateway by name (ADR-0041); empty with `toolsGateway: false`. */
+  readonly toolsGateways: Readonly<Record<string, PublishedToolsGateway>>;
+}
+
+/** The first-synth ref (ADR-0042): placeholder values of the right shape, so the synth that triggers the lookup succeeds. */
+function placeholderRef(
+  stack: Stack,
+  registryPrefix: string,
+  ingress: IngressKind,
+  options: { readonly toolsGateway?: boolean; readonly toolsGateways?: readonly string[] },
+): SharedIngressRef {
+  const dummy = (what: string) => `${LOOKUP_PLACEHOLDER_PREFIX}${what}`;
+  const roleArn = (what: string) => stack.formatArn({ service: 'iam', region: '', resource: 'role', resourceName: dummy(what) });
+  const names = options.toolsGateway === false ? [] : [...(options.toolsGateways ?? [DEFAULT_TOOLS_GATEWAY])];
+  const toolsGateways: Record<string, ToolsGatewayRef> = {};
+  for (const name of names) {
+    toolsGateways[name] = {
+      name,
+      gatewayIdentifier: dummy(`${name}-gateway`),
+      gatewayUrl: `https://${dummy(name)}.example.com/mcp`,
+      gatewayRoleArn: roleArn(`${name}-gateway-role`),
+      policyEngineId: dummy(`${name}-policy-engine`),
+      contextKeyId: dummy('tool-context-key'),
+    };
+  }
+  return {
+    registryPrefix,
+    ingress,
+    endpointUrl: `https://${dummy('ingress')}.example.com`,
+    ingressRoleArn: roleArn('ingress-role'),
+    ingressId: dummy('ingress-id'),
+    tenantRoleArn: roleArn('tenant-role'),
+    gatewayIdentifier: ingress === 'agentcore-gateway' ? dummy('gateway') : undefined,
+    issuer: `https://${dummy('issuer')}.example.com`,
+    entitlementsTableName: dummy('entitlements'),
+    tools: toolsGateways[DEFAULT_TOOLS_GATEWAY],
+    toolsGateways: names.length > 0 ? toolsGateways : undefined,
+  };
 }
 
 /** Adds one model statement to a tenant role (ADR-0018). */

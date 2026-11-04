@@ -241,7 +241,9 @@ export function respond(event: RegistryEntryEvent, outcome: RegistryEntryOutcome
 }
 
 const defaults: RegistryEntryDependencies = {
-  ssm: new SSMClient({}),
+  // Parameter Store allows 3 PutParameter / DeleteParameter per second per account and
+  // Region (ADR-0042): retry a throttled write with backoff instead of failing the stack.
+  ssm: new SSMClient({ retryMode: 'adaptive', maxAttempts: 8 }),
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
 

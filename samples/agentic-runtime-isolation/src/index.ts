@@ -44,11 +44,9 @@ export {
   DEFAULT_REGISTRY_TTL,
   MAX_REGISTRY_TTL,
   PUBLISHED,
-  TOOLS_GATEWAYS_SEGMENT,
-  TOOLS_GATEWAY_PARAMETER_FIELDS,
-  toolsGatewayParameter,
+  PUBLISHED_INGRESS_VERSION,
 } from './shared-ingress.cdk';
-export type { SharedIngressProps, SharedIngressRef, ToolsGatewayParameterField } from './shared-ingress.cdk';
+export type { PublishedIngress, PublishedToolsGateway, SharedIngressProps, SharedIngressRef } from './shared-ingress.cdk';
 export { AgentBackend } from './agent-backend.cdk';
 export type { AgentBackendProps } from './agent-backend.cdk';
 export { RegistryEntryResource, LONGEST_STREAM, MAX_DRAIN } from './shared/registry-entry.cdk';

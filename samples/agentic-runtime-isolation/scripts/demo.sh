@@ -75,9 +75,12 @@ content_type() { awk 'tolower($1)=="content-type:"{sub(/;.*/,"",$2); gsub(/\r/,"
 # tick_events: the `stream N` probe's timed events, {"t": n}, one per two seconds plus t=0.
 tick_events() { grep '^data: ' "$BODY" | sed 's/^data: //' | jq -s '[.[] | select(has("t"))] | length'; }
 
-ENDPOINT="$(param "${PARAM_PREFIX}/endpointUrl")" || fail "parameter ${PARAM_PREFIX}/endpointUrl not found; deploy this sample first"
-INGRESS="$(param "${PARAM_PREFIX}/ingress")"
-RUNTIME_ARN="$(param "${PARAM_PREFIX}/runtimeArn")"
+# The ingress publishes one JSON document (ADR-0042); the Runtime ARN is a stack output.
+PUBLISHED="$(param "${PARAM_PREFIX}/ingress")" || fail "parameter ${PARAM_PREFIX}/ingress not found; deploy this sample first"
+[[ "$(jq -r '.version // empty' <<<"$PUBLISHED" 2>/dev/null)" == 2 ]] || fail "parameter ${PARAM_PREFIX}/ingress is not a version 2 document (ADR-0042); redeploy this sample"
+ENDPOINT="$(jq -r '.endpointUrl' <<<"$PUBLISHED")"
+INGRESS="$(jq -r '.ingress' <<<"$PUBLISHED")"
+RUNTIME_ARN=""
 identity_init
 
 # The stack that published the parameters, for the optional table and for module discovery.
@@ -87,6 +90,9 @@ if [[ -n "$STACK" && "$STACK" != None ]]; then
   TABLE="$(aws cloudformation describe-stacks --stack-name "$STACK" \
     --query "Stacks[0].Outputs[?OutputKey=='DemoTableName'].OutputValue" --output text)"
   [[ "$TABLE" == None ]] && TABLE=""
+  RUNTIME_ARN="$(aws cloudformation describe-stacks --stack-name "$STACK" \
+    --query "Stacks[0].Outputs[?OutputKey=='RuntimeArn'].OutputValue" --output text)"
+  [[ "$RUNTIME_ARN" == None ]] && RUNTIME_ARN=""
 fi
 echo "ingress=${INGRESS} stack=${STACK:-unknown} (endpoint and identifiers resolved from SSM; not printed)"
 
@@ -232,4 +238,5 @@ else
 fi
 echo "  in CUR 2.0 the Bedrock line items carry iamPrincipal/TenantId=${TENANT_A} (ADR-0018)"
 
-step "Demo complete (runtime ${RUNTIME_ARN##*/})"
+RUNTIME_NAME="${RUNTIME_ARN##*/}"
+step "Demo complete (runtime ${RUNTIME_NAME:-unknown})"

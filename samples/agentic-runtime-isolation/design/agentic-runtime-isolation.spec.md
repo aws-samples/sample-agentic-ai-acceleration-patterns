@@ -492,6 +492,7 @@ fails with the prop name.
 | `stageThrottle` | `{ rateLimit?, burstLimit? }` | 50 rps, burst 25 | `api-gateway` only |
 | `perTenantMetrics` | boolean | `false` | ADR-0021 |
 | `registryPrefix` | string | `/application-plane/shared/agent-runtime/` | ADR-0024 |
+| `publish` | boolean | true | ADR-0042 |
 | `registryTtl` | `Duration` | 60 s | cache life of registry entries, plans and the tool catalogue, 1 s to 750 s |
 | `defaultBackend` | string | none | backend for the bare `/invocations` route |
 | `transactionToken.ttl` | `Duration` | 300 s | (v2) `exp - iat`; 60 s to 900 s |
@@ -1223,21 +1224,15 @@ Read-only members:
   `registryParameterName`.
 
 Parameters under `/application-plane/shared/agent-runtime/` (the
-`registryPrefix`):
+`registryPrefix`) (amended 2026-11-04, ADR-0042: one JSON parameter for the
+published interface instead of one parameter per value; the demo's
+`runtimeArn` parameters are gone, the Runtime ARNs are stack outputs):
 
 | Name | Value | Written by |
 |---|---|---|
-| `endpointUrl`, `baseUrl`, `ingress`, `ingressRoleArn`, `ingressId`, `tenantRoleArn`, `gatewayIdentifier` | as v1 (ADR-0024) | `SharedIngress` |
-| `issuer` | (v2) the transaction-token issuer URL | `SharedIngress` |
-| `jwksUrl` | (v2) `<issuer>/.well-known/jwks.json` | `SharedIngress` |
-| `entitlementsTableName` | (v2) C-12's table name, for `AgentBackend` and `ToolTarget` reservations | `SharedIngress` |
-| `entitlementsApiUrl` | (v2) `<baseUrl>/entitlements` | `SharedIngress` |
-| `toolsGatewayUrl` | (v2) the MCP endpoint. (ADR-0041) An alias of `tools-gateways/default/url` | `SharedIngress` |
-| `toolsGatewayIdentifier` | (v2) the Gateway id, for `ToolTarget`. (ADR-0041) An alias of `tools-gateways/default/identifier` | `SharedIngress` |
-| `tools-gateways/<name>/{url,identifier,roleArn,policyEngineId}` | (v2, ADR-0041) per tools gateway: the MCP endpoint, the Gateway id, the Gateway role ARN and the Policy engine id, for `ToolTarget` and the agent | `SharedIngress` |
+| `ingress` | (ADR-0042) one JSON document, `Intelligent-Tiering` (up to 8 KB): `version` (2), `ingress`, `endpointUrl`, `baseUrl`, `ingressRoleArn`, `ingressId`, `tenantRoleArn`, `gatewayIdentifier` (`agentcore-gateway` only), `issuer`, `jwksUrl`, `entitlementsTableName`, `entitlementsApiUrl`, `toolContextKeyId` (with a tools gateway), `toolsGateways: { <name>: { url, identifier, roleArn, policyEngineId } }`. `SharedIngress.fromParameters` reads it at synth (a context lookup); none with `publish: false` | `SharedIngress` |
 | `backends/<name>` | registry entry (§4.3) | each `AgentBackend` |
 | `tools/<target>` | (v2) tool registry pointer (§4.4) | each `ToolTarget` |
-| `runtimeArn`, `backends-info/billing/runtimeArn` | as v1 | demo stack |
 
 `ARCHITECTURE.md` §5.1 and §6 are updated in the same change that accepts
 this draft. Renaming `scopes` to `needs`, removing `delegation.*`, removing

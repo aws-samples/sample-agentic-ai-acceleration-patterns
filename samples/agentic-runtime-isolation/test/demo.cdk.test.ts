@@ -6,7 +6,6 @@ import { App, Validations } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import {
-  AGENT_RUNTIME_PARAMETERS,
   BILLING_BACKEND,
   BILLING_NEEDS,
   BILLING_TOOLS,
@@ -25,7 +24,7 @@ import {
   wantsBillingBackend,
 } from '../src/demo.cdk';
 import { COST_METRIC_NAMES } from '../src/shared/metrics';
-import { DEFAULT_REGISTRY_PREFIX, GATEWAY_TARGET_NAME, PUBLISHED, TOOLS_GATEWAY_PARAMETER_FIELDS, toolsGatewayParameter } from '../src/shared-ingress.cdk';
+import { DEFAULT_REGISTRY_PREFIX, GATEWAY_TARGET_NAME, PUBLISHED } from '../src/shared-ingress.cdk';
 
 /** The thin demo stack (spec C-4, §6.4): consumes tenant-identity's parameters, publishes its own, wires the TVM demo. */
 const FIXTURE_AGENT = path.join(__dirname, 'fixtures', 'agent');
@@ -218,25 +217,26 @@ describe('RuntimeIsolationDemoStack', () => {
     expect(rule.Assertions[0].Assert).toEqual({ 'Fn::Equals': ['build-placeholder', 'deployable'] });
   });
 
-  it('publishes under /application-plane/shared/agent-runtime/: every PUBLISHED name on the Gateway, the demo the default backend\'s runtimeArn (spec §6.4, ADR-0024)', () => {
+  it('publishes under /application-plane/shared/agent-runtime/: the one JSON ingress parameter and the registry pointers, no demo parameter (spec §6.4, ADR-0024, ADR-0042)', () => {
     const { template, stack } = synth(context({ ingress: 'agentcore-gateway' }));
-    // Every PUBLISHED name, the four values of each demo tools gateway (default, finance; ADR-0041),
-    // the demo's runtimeArn, and one registry pointer per demo ToolTarget (crm, invoices).
-    const perGateway = ['default', 'finance'].flatMap((g) => TOOLS_GATEWAY_PARAMETER_FIELDS.map((f) => toolsGatewayParameter(g, f)));
-    template.resourceCountIs('AWS::SSM::Parameter', Object.keys(PUBLISHED).length + perGateway.length + 3);
+    // The ingress document (both demo tools gateways inside it, ADR-0041) and one registry pointer per demo ToolTarget (crm, invoices).
+    template.resourceCountIs('AWS::SSM::Parameter', 3);
     const names = (Object.values(template.findResources('AWS::SSM::Parameter')) as any[]).map((p) => JSON.stringify(p.Properties.Name)).sort();
     expect(names).toEqual(
       [
-        AGENT_RUNTIME_PARAMETERS.runtimeArn,
-        ...[...Object.values(PUBLISHED), ...perGateway].map((n) => `${DEFAULT_REGISTRY_PREFIX}${n}`),
+        `${DEFAULT_REGISTRY_PREFIX}${PUBLISHED.ingress}`,
         stack.resolve(stack.crm.registryParameterName),
         stack.resolve(stack.invoices.registryParameterName),
       ].map((n) => JSON.stringify(n)).sort(),
     );
-    template.hasResourceProperties('AWS::SSM::Parameter', { Name: AGENT_RUNTIME_PARAMETERS.runtimeArn, Type: 'String' });
-    template.hasResourceProperties('AWS::SSM::Parameter', { Name: `${DEFAULT_REGISTRY_PREFIX}${PUBLISHED.ingress}`, Value: 'agentcore-gateway' });
+    const [doc] = (Object.values(template.findResources('AWS::SSM::Parameter')) as any[]).filter((p) => p.Properties.Name === `${DEFAULT_REGISTRY_PREFIX}${PUBLISHED.ingress}`);
+    const literal = flatten(doc.Properties.Value);
+    expect(literal).toContain('"ingress":"agentcore-gateway"');
+    expect(literal).toContain('"default":{"url":');
+    expect(literal).toContain('"finance":{"url":');
+    expect(JSON.stringify(template.toJSON())).not.toContain(`${DEFAULT_REGISTRY_PREFIX}runtimeArn`);
+    expect(Object.keys(template.toJSON().Outputs)).toEqual(expect.arrayContaining(['RuntimeArn']));
     expect(stack.registryPrefix).toBe(DEFAULT_REGISTRY_PREFIX);
-    expect(AGENT_RUNTIME_PARAMETERS.runtimeArn).toBe('/application-plane/shared/agent-runtime/runtimeArn');
     // The registry entry is a custom resource under the same prefix, not a plain parameter.
     template.hasResourceProperties('Custom::RuntimeIsolationRegistryEntry', { ParameterName: `${DEFAULT_REGISTRY_PREFIX}backends/${GATEWAY_TARGET_NAME}`, Needs: [...DEFAULT_NEEDS] });
   });
@@ -247,9 +247,7 @@ describe('RuntimeIsolationDemoStack', () => {
       expect(prefix).toContain(DEFAULT_REGISTRY_PREFIX);
       expect(prefix).toContain('AWS::StackName');
       const text = JSON.stringify(template.toJSON());
-      for (const name of Object.values(AGENT_RUNTIME_PARAMETERS)) {
-        expect(text).not.toContain(`"${name}"`);
-      }
+      expect(text).not.toContain(`"${DEFAULT_REGISTRY_PREFIX}${PUBLISHED.ingress}"`);
       // Every published parameter and the registry entry carry the stack name.
       for (const param of Object.values(template.findResources('AWS::SSM::Parameter')) as any[]) {
         expect(JSON.stringify(param.Properties.Name)).toContain('AWS::StackName');
@@ -335,9 +333,8 @@ describe('RuntimeIsolationDemoStack', () => {
       expect(stack.invoices.name).toBe('invoices');
     });
 
-    it('publishes the billing Runtime ARN beside the default one, and outputs both URLs', () => {
-      template.hasResourceProperties('AWS::SSM::Parameter', { Name: AGENT_RUNTIME_PARAMETERS.billingRuntimeArn, Type: 'String' });
-      expect(AGENT_RUNTIME_PARAMETERS.billingRuntimeArn).toBe('/application-plane/shared/agent-runtime/backends-info/billing/runtimeArn');
+    it('outputs the billing Runtime ARN beside the default one, and both URLs; no Runtime ARN parameter (ADR-0042)', () => {
+      expect(JSON.stringify(template.toJSON())).not.toContain('backends-info/billing/runtimeArn');
       const outputs = Object.keys(template.toJSON().Outputs);
       expect(outputs).toEqual(expect.arrayContaining(['EndpointUrl', 'BillingEndpointUrl', 'BillingRuntimeArn', 'RegistryPrefix']));
     });
