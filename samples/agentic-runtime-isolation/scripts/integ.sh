@@ -1126,7 +1126,17 @@ ROTATE_START=$SECONDS
 synth 2
 "${CDK[@]}" deploy "${STACK_PREFIX}-api-gateway" --exclusively --require-approval never --outputs-file "${LIB_TMP}/outputs-rotated.json" >"${LIB_TMP}/rotate.log" 2>&1 \
   || { tail -20 "${LIB_TMP}/rotate.log" >&2; check "redeploy with keyGeneration 2" false; }
+# A new API Gateway deployment takes a few seconds to reach every edge, so the
+# first fetch after the deploy can still answer from the previous one (run 10,
+# 2026-11-04). Poll for up to 90 s; a relying party caches the JWKS for 300 s
+# anyway (spec §5.2), so the wait is well inside the rotation window.
+PROPAGATE_START=$SECONDS
 jwks="$(curl -s "${ISSUER}/.well-known/jwks.json")"
+while (( SECONDS - PROPAGATE_START < 90 )) && ! jq -e '(.keys | length) == 2' <<<"$jwks" >/dev/null 2>&1; do
+  sleep 5
+  jwks="$(curl -s "${ISSUER}/.well-known/jwks.json")"
+done
+note "the rotated JWKS was served $((SECONDS - PROPAGATE_START))s after the deploy returned"
 check "the JWKS lists two keys, the old kid among them (got $(jq -c '[.keys[].kid]' <<<"$jwks" 2>/dev/null))" jq -e --arg k "$OLD_KID" '(.keys | length) == 2 and any(.keys[]; .kid == $k)' <<<"$jwks"
 status="$(mcp "$TOOLS_DEFAULT" tok21 tools/list)"
 check "the token signed by the old key is still accepted at the tools gateway (got ${status})" eq "$status" 200
