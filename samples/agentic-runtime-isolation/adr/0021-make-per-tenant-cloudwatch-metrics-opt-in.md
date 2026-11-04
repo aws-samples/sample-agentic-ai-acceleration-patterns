@@ -35,3 +35,5 @@ Easier: the default deployment's metric cost no longer grows with tenants; cost 
 Harder: per-tenant graphs need a Logs Insights query or a Contributor Insights rule; Contributor Insights reports the top 500 contributors per rule, so a long tail is visible only through Logs Insights. Deployers who relied on the ADR-0017 metrics must set `perTenantMetrics: true`.
 
 Revisit if CloudWatch prices high-cardinality dimensions differently.
+
+**2026-11-04.** Note (no new decision): the ingress also emits each metric on the `[TenantId, Ingress, Backend]` dimension set, so with `perTenantMetrics` on the count is 9 × (1 + agents) custom metrics per tenant per ingress, not nine; the synth warning and the README state that figure.

@@ -99,7 +99,8 @@ AgentCore Runtimes and makes it the only principal each Runtime trusts. The
 ingress verifies the tenant-identity token, resolves the grant (agent needs
 ∪ agent tools ∩ tenant tools ∩ user tools) from an entitlement store, mints
 a 5-minute transaction token naming one tenant, one user and one agent, and
-invokes the Runtime in a per-tenant microVM session with `TenantId`-tagged
+invokes the Runtime in a fresh microVM session per request by default (with
+`session` set, one per tenant, or per user) with `TenantId`-tagged
 credentials from an always-on token vending machine; the identity token
 never leaves the ingress. Tools are served by several AgentCore Gateways
 with one Policy engine each: a REQUEST interceptor is the per-tool wall and

@@ -1,3 +1,5 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 # Holmes scans source only. Everything below is generated or local state.
 node_modules/
 cdk.out/

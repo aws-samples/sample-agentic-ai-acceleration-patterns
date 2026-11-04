@@ -6,8 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-04
-- Amends: ADR-0015
-- Supersedes: ADR-0023
+- Amends: ADR-0015, ADR-0023
 - Deciders: Dave Roberts (PSA)
 
 ## Context

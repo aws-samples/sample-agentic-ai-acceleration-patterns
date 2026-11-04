@@ -1,3 +1,5 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 # ASH (Automated Security Helper) v3 config for this sample.
 # Run from samples/agentic-runtime-isolation:
 #   ash --mode local --source-dir . --output-dir .ash/ash_output

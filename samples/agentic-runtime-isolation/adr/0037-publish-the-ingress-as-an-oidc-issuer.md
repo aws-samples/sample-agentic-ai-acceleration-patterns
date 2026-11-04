@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-02
+- Amended by: the 2026-11-04 review (key policy)
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -26,3 +27,5 @@ Option 2. The signing key is a KMS asymmetric `SIGN_VERIFY` key; `kid` is the KM
 
 ## Consequences
 Easier: verifiers need only the discovery URL; rotation is a key swap with no verifier redeploy. Harder: a new public, anonymous route on the ingress. Under `builder-security` it may serve anonymous content only, and a JWKS is public by design; the routes take no input and set cache headers. `kms:Sign` is granted to the mint role only and `kms:GetPublicKey` to the JWKS Lambda only. Follow-up: a test that the routes answer without a token and expose nothing but the discovery document and the keys; a rotation runbook; an alarm on `Sign` errors. Revisit if the Gateway can take a JWKS inline, or the `agentcore-gateway` ingress gains a route of its own.
+
+**Amended 2026-11-04.** From the review of the implemented sample (no new ADR): the key policy of every `TokenSigner` key and of `ToolContextKey` gives the account root `kms:PutKeyPolicy` and the other administrative actions but no `kms:Create*`, and denies `kms:CreateGrant` to every principal. `kms:Sign` is granted only in the key policy, to the minting role (the interceptor role for `ToolContextKey`); grants are denied in the key policy, so no IAM policy and no grant can add a signer. The residual is `kms:PutKeyPolicy`, held by the account's key administrators (the deployer's own privilege, which CloudFormation needs to update the key) and visible in CloudTrail (`src/shared/token-signer.cdk.ts`, `signingKey`; threat model T-97, M-78). `kms:GetPublicKey` goes to the JWKS renderer and the verifiers, not to "the JWKS Lambda only": the JWKS is rendered at deploy into a mock integration.

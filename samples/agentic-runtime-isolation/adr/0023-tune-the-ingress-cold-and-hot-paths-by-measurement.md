@@ -4,9 +4,10 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0023: Tune the ingress cold and hot paths by measurement
 
-- Status: Superseded by ADR-0043
+- Status: Accepted
 - Date: 2026-10-27
 - Amends: ADR-0015
+- Amended by: ADR-0043 (change 6)
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -45,4 +46,4 @@ Measured in `eu-central-1` on the ingress Lambda of `api-gateway`, from its log 
 
 Revisit if measurement shows the pre-connects are not reused (the Agent keys sockets by host and TLS options; the SDK's request must match), or if SnapStart becomes available for Node.js response streaming.
 
-**2026-11-04.** Superseded by ADR-0043: in v2 the authoriser's Allow carries a minted transaction token, so the result cache is at most 60 s and at most `transactionToken.ttl` minus the longest stream (120 s), and the mint's reuse margin is the cache TTL plus 120 s; with `identity.multiTenant`, `X-Tenant-Id` is a cache identity source. Changes 1 to 5 of this record (warm-up at init, the shared pre-connected pool, TVM refresh-ahead, the bounded limiter client) are unchanged and carry over.
+**2026-11-04.** Amended by ADR-0043 (change 6 is superseded): in v2 the authoriser's Allow carries a minted transaction token, so the result cache is at most 60 s and at most `transactionToken.ttl` minus the longest stream (120 s), and the mint's reuse margin is the cache TTL plus 120 s; with `identity.multiTenant`, `X-Tenant-Id` is a cache identity source. Changes 1 to 5 of this record (warm-up at init, the shared pre-connected pool, TVM refresh-ahead, the bounded limiter client) are unchanged and carry over.

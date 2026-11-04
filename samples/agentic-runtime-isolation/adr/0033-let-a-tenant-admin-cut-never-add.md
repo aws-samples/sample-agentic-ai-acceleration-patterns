@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-02
+- Amended by: ADR-0038
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -26,3 +27,5 @@ Option 2. The cut API lives on the ingress as a Smithy `restJson1` service. The 
 
 ## Consequences
 Easier: adding back is deleting the cut; the common case, a user with the full set, needs no row and no write. A cut bumps `tenant.version`, so the next mint for that tenant sees it at once (ADR-0036). Harder: two authentication schemes on one API; the ingress must refuse a transaction token on the admin API (ADR-0031); a failed cut read must fail closed. Follow-up: the Smithy model, a test that a tenant admin cannot cut across tenants or add a tool the tenant lacks, and a threat-model entry for the admin scope. Revisit if tenants ask for group cuts (option 3) or for per-user additions beyond the tenant set, which this design forbids on purpose.
+
+**Amended 2026-11-04.** Recorded from ADR-0038: when the identity token lists several tenants (`tenants`, `identity.multiTenant`), the tenant-admin operations take the tenant from `X-Tenant-Id`, which must name one entry the verified token lists; the tenant still never comes from the path or the body.

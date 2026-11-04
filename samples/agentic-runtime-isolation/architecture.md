@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 > **Status: v2 implemented and verified.** Last green integration run: run 9,
 > 2026-11-04, a sandbox account, eu-central-1. All 57 steps of
-> `scripts/integ.sh` passed and the teardown left nothing behind (no stack,
+> `scripts/integ.sh` (the CDK CLI driver, ADR-0044) passed and the teardown left nothing behind (no stack,
 > parameter, log group, table, Gateway or Policy engine; the KMS keys pending
 > deletion). Six stacks (`api-gateway`, `agentcore-gateway`, `session-off`,
 > `session-user`, `limits`, `multi-tenant`) deployed in 278 s; the steps took
@@ -187,9 +187,9 @@ Gateway.
 | Header | `alg` `RS256` (default) or `ES256`, `typ: txn+jwt`, `kid` = the KMS key id |
 | Claims | `iss`; `sub` = `<tenant_id>#<sub>` (the AgentCore Identity vault keys on `iss` and `sub`, ADR-0040); `user` = the identity provider's `sub`; `tenant_id`; `agent`; `scope` = the grant; `aud` = `agent:<agent>` plus `tools-gateway:<g>` for each gateway the granted tools live on (sorted, ADR-0041); `act.sub` = the ingress role ARN; `txn`; `iat`; `exp`; `jti` |
 | Lifetime | `transactionToken.ttl`, 120 s to 900 s, default 300 s |
-| Mint cache | Per (tenant, sub, agent, tenant.version, agent.version, plan.version), LRU 1,000 per process; reused while more than the reuse margin (authoriser cache TTL + 120 s, 180 s by default) is left, so a busy user costs one `kms:Sign` per token life. The log field `mint` is `hit` or `miss` |
+| Mint cache | Per (tenant, sub, agent, tenant.version, agent.version, plan.version, scope, gateways), LRU 1,000 per process (`mintCacheKey`; a catalogue change that changes the grant or its gateways re-mints); reused while more than the reuse margin (authoriser cache TTL + 120 s, 180 s by default) is left, so a busy user costs one `kms:Sign` per token life. The log field `mint` is `hit` or `miss` |
 | Delivery | `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token` to the Runtime; the identity token never reaches the agent (integ step 11) |
-| Keys | One KMS `SIGN_VERIFY` key per generation (`RSA_2048` or `ECC_NIST_P256`). The key policy grants `kms:Sign` to the minting role only, never to the account, so no IAM policy can add a signer; the account may administer and delegate `GetPublicKey` |
+| Keys | One KMS `SIGN_VERIFY` key per generation (`RSA_2048` or `ECC_NIST_P256`). `kms:Sign` is granted only in the key policy, to the minting role; grants are denied in the key policy (`kms:CreateGrant` for every principal) and the account root keeps the administrative actions but no `kms:Create*`, so no IAM policy and no grant can add a signer. The residual is `kms:PutKeyPolicy`, held by the account's key administrators (the deployer's own privilege) and visible in CloudTrail (ADR-0037 amendment, threat model T-97). `ToolContextKey` has the same policy with the interceptor role as signer |
 | JWKS | `Custom::RuntimeIsolationJwks` reads `GetPublicKey` at deploy and renders `{ keys: [...] }`, current key first; `/.well-known/openid-configuration` and `/.well-known/jwks.json` are mock integrations with `Cache-Control: public, max-age=300`: no Lambda or KMS call per read |
 | Rotation | Bump `transactionToken.keyGeneration` (demo context `keyGeneration`): key N+1 signs from that deploy, key N stays in the JWKS without `kms:Sign`; at N+2 key N leaves and is scheduled for deletion (30 days). Two bumps at least `ttl` + 300 s apart. Integ step 21: 151 s, two keys in the JWKS |
 
@@ -206,7 +206,7 @@ schema holds about 330 tools (ADR-0041).
 | Part | Behaviour |
 |---|---|
 | Inbound | `CUSTOM_JWT` on the ingress issuer's discovery URL, `allowedAudience: ['tools-gateway:<g>']`, no `allowedClients`. An identity token fails on `iss`, a token for another gateway on `aud`; a token with 60 s or less to `exp` is refused (403) |
-| REQUEST interceptor | `src/tools/interceptor.function.ts`, `passRequestHeaders: true`, provisioned concurrency 1 on the `InterceptorLive` alias. Runs before Policy, so it is the first wall and the per-tool wall: re-verifies the token against the ingress JWKS (`typ: txn+jwt`, `iss`, `aud` holding `tools-gateway:<g>` and `agent:<agent>`, `act.sub` = the ingress role, `exp`); on `tools/call` checks the tool against `scope` (`tool_not_granted`); overwrites a client `tenantId` argument; computes `argsHash`; signs the tenant context with `ToolContextKey` and writes it to `_ri_ctx`, overwriting anything the client sent. A refusal is HTTP 403 with JSON-RPC error `-32003` `forbidden: <reason>`; a throw or timeout is a Gateway 5xx (fail-closed). A token minted for another gateway is `token_invalid`; a non-`txn+jwt` `typ` is `aud_mismatch`; no `act` is `act_missing` (integ step 17) |
+| REQUEST interceptor | `src/tools/interceptor.function.ts`, `passRequestHeaders: true`, provisioned concurrency 1 on the `InterceptorLive` alias. Runs before Policy, so it is the first wall and the per-tool wall: re-verifies the token against the ingress JWKS (`typ: txn+jwt`, `iss`, `aud` holding `tools-gateway:<g>` and `agent:<agent>`, `act.sub` = the ingress role, `exp`); on `tools/call` checks the tool against `scope` (`tool_not_granted`); overwrites a client `tenantId` argument; computes `argsHash`; signs the tenant context with `ToolContextKey` and writes it to `_ri_ctx`, overwriting anything the client sent. A refusal is HTTP 403 with JSON-RPC error `-32003` `forbidden: <reason>`; a throw or timeout is a Gateway 5xx (fail-closed). A token minted for another gateway is `token_invalid`; a non-`txn+jwt` `typ`, or a token without `exp` or `iat`, is `token_invalid`; no `act` is `act_missing` (integ step 17) |
 | Policy | AgentCore Policy in `ENFORCE` mode, default deny. One Cedar star permit per target (`src/shared/cedar.ts`): `action in AgentCore::Action::"<target>"` when `principal.getTag("scope")` holds `<target>/*` or any `<target>/<tool>` as a whole entry; about 450 bytes whatever the tool count. Filters `tools/list` and refuses `tools/call` at target grain |
 | Policy writer | `Custom::RuntimeIsolationToolPolicy` (`src/tools/tool-policy.function.ts`): `CreatePolicy` and wait for ACTIVE, retrying a conflict or throttle with backoff and deleting a `CREATE_FAILED` policy first; Update on every target change (the touch for tools added later); Delete and wait until gone, before the Gateway target is deleted. Name `<target>_target_<8 hex>` (a hash of stack, construct path and gateway). Returns `SecondsToActive` (demo outputs `CrmPolicySecondsToActive`, `InvoicesPolicySecondsToActive`) |
 | RESPONSE filter | Optional (`responseFilter`, demo `finance`): `src/tools/response-filter.function.ts` re-verifies the token from the passed request headers and trims each `tools/list` page to the exact tools in `scope`; only removes; on any error an empty page and `response_filter_failed` (integ step 24) |
@@ -254,7 +254,10 @@ or another `version`, an `ingress` mismatch and a gateway the document does
 not list; the first synth builds the ref from placeholders. `publish: false`
 writes none of it; the integration stacks deploy that way and read stack
 outputs, because six stacks writing about 20 parameters each hit Parameter
-Store's 3 writes per second on deploy and destroy. An `AgentBackend` or
+Store's 3 writes per second on deploy and destroy. The construct writes the
+document itself rather than the demo stack, and the integration driver reads
+stack outputs rather than the document; both depart from
+`docs/sample-standard.md` and are recorded in ADR-0044. An `AgentBackend` or
 `ToolTarget` in another stack must name its ingress through this ref.
 
 ## Data model
@@ -374,8 +377,10 @@ Each item was checked in code on 2026-11-04:
 
 - The tenant comes from the verified identity token only; with `multiTenant`, `X-Tenant-Id` must be one of its `tenants` (ADR-0038).
 - The grant is computed from the entitlement rows of that tenant and user and the registry entry of the routed agent; nothing in the body or a header adds to it (ADR-0030).
-- The mint cache key holds tenant, user, agent and the three versions; `sub` is `<tenant_id>#<sub>`, so one user in two tenants has two subjects (ADR-0040).
-- `kms:Sign` on the signing key is in the key policy for the minting role alone; no IAM policy can add a signer (P-14).
+- The mint cache key holds tenant, user, agent, the three versions, the granted `scope` and the gateway list; `sub` is `<tenant_id>#<sub>`, so one user in two tenants has two subjects (ADR-0040).
+- `kms:Sign` is granted only in the key policy, to the minting role (the interceptor role on `ToolContextKey`); grants are denied in the key policy, so no IAM policy can add a signer; the residual is `kms:PutKeyPolicy`, held by the account's key administrators (the deployer's own privilege), visible in CloudTrail (P-14, ADR-0037 amendment).
+- Every verifier (the ingress, the tools interceptor, the list filter) requires `exp` and `iat` (`requiredClaims`); a wrong `typ` at the interceptor is `token_invalid`.
+- A grant compresses to `<target>/*` only when the agent, the tenant (or plan) and the user each held `<target>/*`; an explicit full list stays explicit, so a tool added to the catalogue later is not granted by it (`compressTools`, ADR-0032 amendment).
 - On `api-gateway` the integration Lambda accepts the authoriser's token only for the tenant and agent it verified itself.
 - On a single-tenant `api-gateway` ingress `X-Tenant-Id` is not an identity source, so the authoriser decision is cached per token and path for up to 60 s: after a foreign header the same token is refused until the entry expires, and after a cached Allow a foreign header is ignored. Fail-closed or own-tenant; no cross-tenant effect.
 - The tools gateway accepts only tokens from the ingress issuer with its own `aud`; the interceptor also checks `typ`, `agent` and `act.sub`.
@@ -392,10 +397,17 @@ Each item was checked in code on 2026-11-04:
 ## Differences from the specification
 
 The specification carries dated amendments for the implementation findings
-(ADR-0040 to ADR-0043): the 120 s `ttl` floor and the `exp − 60 s` tools
+(ADR-0040 to ADR-0044): the 120 s `ttl` floor and the `exp − 60 s` tools
 gateway margin, the authoriser cache formula, policy names, the plan index and
 gateway count rows, the demo tool data layout, the interceptor refusal code,
-the published document and the integ stacks. One difference remains after
+the published document and the integ stacks. The 2026-11-04 review added
+notes for what the code does where the text said otherwise: `aud` names the
+gateways of the granted tools, `toolsGateways: {}` fails synth, the Gateway
+refuses an altered token with 403, the mint cache key includes `scope` and
+the gateways, the grant compression rule, required `exp` and `iat`, the list
+filter's empty page and log lines, the catalogue row attributes, the tool
+pointer's fixed `version`, the same-stack synth tool count, and the
+`ToolsGateway` members. With those notes, one difference remains after
 reading code against spec §5.1:
 
 - **Check order on `api-gateway`.** The spec orders the per-tenant limit

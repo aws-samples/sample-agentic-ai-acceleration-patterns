@@ -11,6 +11,12 @@ SPDX-License-Identifier: MIT-0
 > that still hold are kept as they are; where v2 changes one, the text says
 > so with "(v2, ADR-00NN)". The v1 amendment notes are folded into the text;
 > their ADRs are still cited. Spikes V-8 to V-15 (§7) run before code.
+>
+> **Amended 2026-11-04.** Implemented; verified by integration run 9,
+> 2026-11-04 (§7.3); `architecture.md` describes the implemented state.
+> ADR-0042 to ADR-0044 are Accepted. The dated notes below record where the
+> implementation, run 9 and the 2026-11-04 review of the implemented sample
+> differ from the text above them.
 
 The keywords MUST, MUST NOT, SHOULD, and MAY are to be interpreted as in
 RFC 2119.
@@ -31,6 +37,9 @@ ADRs v2 adds:
 | 0039 | Default session mapping to the tenant scope when it is turned on | amends ADR-0013 |
 | 0040 | Apply the spike findings to the tools gateway and the transaction token | amends ADR-0031, ADR-0034, ADR-0038 |
 | 0041 | One star permit per target, several tools gateways, and an 8 KB `scope` | amends ADR-0034, ADR-0040 |
+| 0042 | Publish one JSON parameter, and let test stacks publish nothing | amends ADR-0024 |
+| 0043 | Cap the authoriser cache at 60 seconds | amends ADR-0015, ADR-0023 |
+| 0044 | Publish from the construct, and drive the integration test with the CDK CLI over stack outputs | records three deviations from the sample standard (§1.1, §4.5, §5.2) |
 
 
 ---
@@ -267,7 +276,9 @@ ADR-0031): there is no setting under which an agent sees the identity token
 or more than the granted set. The tools gateway is on by default
 (ADR-0034); `toolsGateway: false` creates none (as does an empty
 `toolsGateways`, ADR-0041), and then any `AgentBackend`
-with a non-empty `tools` fails synth.
+with a non-empty `tools` fails synth. (Amended 2026-11-04: an empty
+`toolsGateways` fails synth instead, "name at least one gateway; use
+toolsGateway: false"; only `toolsGateway: false` creates none.)
 
 **P-5. A delegated token is the narrowest token that works, in a header the
 agent asked for.** (v2, ADR-0031) The agent receives the transaction token,
@@ -313,7 +324,9 @@ transaction token's id), `grantSize` (entries in `scope`) and `mint`
 (`hit` or `miss`). The tools gateway interceptor writes `tool admitted` with
 `tenantId`, `sub`, `agent`, `txn`, `target`, `tool` and `decision`, and each
 tool writes `tool served` with `tenantId`, `txn`, duration and bytes. `txn`
-joins one agent request to every tool call it made.
+joins one agent request to every tool call it made. (Amended 2026-11-04,
+ADR-0040: the `tool admitted` line carries `user`, the identity provider's
+`sub`, in place of `sub`, and also `gateway`.)
 
 **P-10. Every request's cost is attributable to its tenant.** The ingress
 meters, per tenant, what each billed service charges for: ingress requests,
@@ -438,8 +451,8 @@ tenants or users.
 | C-15 | **Tools gateway** (v2, ADR-0034, ADR-0041) | One AgentCore Gateway per entry of `toolsGateways` (one, `default`, unless more are named), protocol MCP; `CUSTOM_JWT` with `discoveryUrl` = the ingress's discovery URL and `allowedAudience: ['tools-gateway:<name>']`; each gateway with its own AgentCore Policy engine (Cedar), default deny, one generated star permit per target on the `scope` claim; its own REQUEST interceptor (C-15a: the same Lambda code, one function per gateway); its own native per-tenant rate limits keyed on `$.context.jwt.tenant_id`; and, with `responseFilter`, a RESPONSE interceptor (C-15c). One second KMS key, `ToolContextKey`, for the tenant context, shared by every gateway's interceptor. Detail in §3.6. **Amended 2026-11-03 (ADR-0041):** was one Gateway with `allowedAudience: ['tools-gateway']` and one Policy engine |
 | C-15a | **Tools interceptor** (v2) | Lambda, provisioned concurrency (`toolsGateways.<name>.interceptorProvisionedConcurrency`, default 1). Re-verifies the transaction token against the JWKS, requires `typ`, `iss`, `aud`, `act` and `exp`, checks the tool against `scope`, signs the tenant context into the reserved argument `_ri_ctx`, writes `tool admitted`. On `tools/list` it only verifies and logs. **Amended 2026-11-03 (ADR-0041):** it is the per-tool wall (Policy decides per target), so its `scope` check is the decision, not a recheck; `aud` must contain `tools-gateway:<name>` for its own gateway; the log line carries `gateway`. (Amended 2026-11-04) Every `tools/call` writes `tool admitted` with `decision: admit | deny` (was `tool refused`, `decision: refuse`); a refusal of any other method logs `tools request refused`; the signed context also carries `user` (§6.2.4) |
 | C-15b | **Tool-side library** (v2, `src/tools/context.ts`) | Verifies `_ri_ctx` with the cached public half of `ToolContextKey`, checks `tool`, `argsHash` and `exp`, strips the argument, runs the TVM (C-7) with `TenantId` from the context, writes `tool served`. Exported from `src/index.ts` for tool authors |
-| C-15c | **Tools list filter** (v2, ADR-0041, `src/tools/response-filter.function.ts`) | RESPONSE interceptor, created only on a gateway with `responseFilter: true`. On a `tools/list` page it verifies the transaction token as C-15a does and removes every tool `scope` does not name (exact `<target>/<tool>` or `<target>/*`). It never adds a tool and never edits one. Any error, an unverifiable token included, returns the page with an empty `tools` array and the cursor kept, and logs `tools filtered` with `tenantId`, `gateway`, `txn`, `kept`, `removed` and `reason`. Other methods pass through unchanged. A UX control: the call wall is C-15a |
-| C-16 | **Tool target** (`ToolTarget`, v2, ADR-0035) | One per tool group: a Gateway target of kind `lambda`, `openApi`, `smithy` or `mcpServer`; catalogue rows `TOOL#<target>` for each tool and a `NAME#<target>` reservation, both with an owner marker as ADR-0025 did; the target's Cedar policy; a no-op `UpdatePolicy` touch after the target syncs, for the known defect that denies tools added after a policy was written; the registry pointer `tools/<target>`. **Amended 2026-11-03 (ADR-0041):** the `gateway` prop (default `default`) names the tools gateway; a name not in `toolsGateways` fails synth. The policy is ONE Cedar star permit per target (text in §3.6, the `big/*` shape of §7.2 widened to per-tool entries), whatever the tool count. The policy-before-target delete ordering and the one-at-a-time create with retry stay (ADR-0040). Synth fails when the gateway's catalogued tools, summed over its `ToolTarget`s in the app, would exceed `maxToolsPerGateway`; the custom resource checks the catalogue again at deploy, because targets of other apps share the gateway. **Amended 2026-11-04 (integration runs 1 to 9; ADR-0040 and ADR-0041 notes):** the policy is a `Custom::RuntimeIsolationToolPolicy`, not a `CfnPolicy`, named `<target>_target_<8 hex>` (the hex a SHA-256 of the stack name, the construct path and the gateway), because `CreatePolicy` names are unique per account and Region and six stacks naming `crm_target` conflicted (run 4); it returns `SecondsToActive`, the time from the call to ACTIVE. The catalogue rows, the `NAME#<target>` reservation and the target's `GATEWAY#<gateway>` / `TARGET#<target>` count row are one `OwnedRows` resource (`Custom::RuntimeIsolationOwnedRows`, construct id `Catalogue`; `AgentBackend`'s is `NameReservation`), and the deploy-time check counts over every stack: it refuses a target past `maxToolsPerGateway` tools or 100 targets on its gateway. The policy writer holds `GetGateway` and `ListGatewayTargets` on the gateway as well as `InvokeGateway` and `ManageResourceScopedPolicy` (CloudTrail `AccessDenied` in runs 1 and 3) |
+| C-15c | **Tools list filter** (v2, ADR-0041, `src/tools/response-filter.function.ts`) | RESPONSE interceptor, created only on a gateway with `responseFilter: true`. On a `tools/list` page it verifies the transaction token as C-15a does and removes every tool `scope` does not name (exact `<target>/<tool>` or `<target>/*`). It never adds a tool and never edits one. Any error, an unverifiable token included, returns the page with an empty `tools` array and the cursor kept, and logs `tools filtered` with `tenantId`, `gateway`, `txn`, `kept`, `removed` and `reason`. Other methods pass through unchanged. A UX control: the call wall is C-15a. **Amended 2026-11-04.** The implementation differs in two details: on any error it returns a page with an empty `tools` array and no `nextCursor` (the cursor is not kept, so the agent stops paging), and it logs `tools list filtered` with `tenantId`, `agent`, `txn`, `listed` and `kept` on success and `response_filter_failed` with `tenantId` and the error name on failure, not the `tools filtered` line |
+| C-16 | **Tool target** (`ToolTarget`, v2, ADR-0035) | One per tool group: a Gateway target of kind `lambda`, `openApi`, `smithy` or `mcpServer`; catalogue rows `TOOL#<target>` for each tool and a `NAME#<target>` reservation, both with an owner marker as ADR-0025 did; the target's Cedar policy; a no-op `UpdatePolicy` touch after the target syncs, for the known defect that denies tools added after a policy was written; the registry pointer `tools/<target>`. **Amended 2026-11-03 (ADR-0041):** the `gateway` prop (default `default`) names the tools gateway; a name not in `toolsGateways` fails synth. The policy is ONE Cedar star permit per target (text in §3.6, the `big/*` shape of §7.2 widened to per-tool entries), whatever the tool count. The policy-before-target delete ordering and the one-at-a-time create with retry stay (ADR-0040). Synth fails when the gateway's catalogued tools, summed over its `ToolTarget`s in the app, would exceed `maxToolsPerGateway`; the custom resource checks the catalogue again at deploy, because targets of other apps share the gateway. **Amended 2026-11-04 (integration runs 1 to 9; ADR-0040 and ADR-0041 notes):** the policy is a `Custom::RuntimeIsolationToolPolicy`, not a `CfnPolicy`, named `<target>_target_<8 hex>` (the hex a SHA-256 of the stack name, the construct path and the gateway), because `CreatePolicy` names are unique per account and Region and six stacks naming `crm_target` conflicted (run 4); it returns `SecondsToActive`, the time from the call to ACTIVE. The catalogue rows, the `NAME#<target>` reservation and the target's `GATEWAY#<gateway>` / `TARGET#<target>` count row are one `OwnedRows` resource (`Custom::RuntimeIsolationOwnedRows`, construct id `Catalogue`; `AgentBackend`'s is `NameReservation`), and the deploy-time check counts over every stack: it refuses a target past `maxToolsPerGateway` tools or 100 targets on its gateway. The policy writer holds `GetGateway` and `ListGatewayTargets` on the gateway as well as `InvokeGateway` and `ManageResourceScopedPolicy` (CloudTrail `AccessDenied` in runs 1 and 3). **Amended 2026-11-04 (review).** The synth-time tool count sums the `ToolTarget`s in the gateway's own stack only; a target in another stack (through `SharedIngress.fromParameters`) is bounded at deploy by the `GATEWAY#` count rows |
 | C-17 | **Agent product** (`AgentBackend`, v2, ADR-0032) | The class keeps the name `AgentBackend`. The prop `scopes` is renamed `needs` (breaking, v2), and a new prop `tools` lists the tools the agent may use. The backend also reserves `NAME#<name>` in the entitlement store, so an agent and a tool target can never share an owner name |
 
 ### 3.2 Caller and identity model
@@ -490,7 +503,7 @@ fails with the prop name.
 | `tvm.role`, `tvm.includeUserIdTag`, `tvm.claimTags`, `tvm.durationSeconds`, `tvm.cacheMaxEntries` | as v1 | as v1 | P-8, ADR-0012, ADR-0018, ADR-0022 |
 | `tenantLimits` | `{ requestsPerMinute?, outputTokensPerMinute? } \| false` | `requestsPerMinute: 60` | ADR-0020; keyed on the selected tenant (v2) |
 | `stageThrottle` | `{ rateLimit?, burstLimit? }` | 50 rps, burst 25 | `api-gateway` only |
-| `perTenantMetrics` | boolean | `false` | ADR-0021 |
+| `perTenantMetrics` | boolean | `false` | ADR-0021. (Amended 2026-11-04) When on, 9 × (1 + agents) custom metrics per tenant per ingress: nine on `[TenantId, Ingress]` and the same nine on `[TenantId, Ingress, Backend]` for each agent |
 | `registryPrefix` | string | `/application-plane/shared/agent-runtime/` | ADR-0024 |
 | `publish` | boolean | true | ADR-0042 |
 | `registryTtl` | `Duration` | 60 s | cache life of registry entries, plans and the tool catalogue, 1 s to 750 s |
@@ -503,7 +516,7 @@ fails with the prop name.
 | `entitlements.maxAgentsPerTenant` | number | 1000 | (v2) bound on `agents` entries in a tenant or plan row (amended 2026-11-03) |
 | `entitlements.maxToolsPerTenant` | number | 1000 | (v2) bound on `tools` entries in a tenant or plan row; a `<target>/*` entry counts once, so a tenant subscribed to whole targets holds 1,000s of tools in 10s of entries |
 | `toolsGateway` | `ToolsGatewayProps \| false` | on | (v2, ADR-0034) `false` creates no tools gateway. **Amended 2026-11-03 (ADR-0041):** `toolsGateway: {...}` is shorthand for `toolsGateways: { default: {...} }`; setting both fails synth |
-| `toolsGateways` | `Record<string, ToolsGatewayProps>` | `{ default: {} }` | (v2, ADR-0041) several gateways, names `[a-z0-9-]{1,32}`, each with its own Policy engine, interceptor, rate limits and `responseFilter`; `{}` creates none, as `toolsGateway: false` does. A `ToolTarget` names its gateway (`gateway`, default `default`). The rows below are per gateway; the rate-limit and interceptor rows were `toolsGateway.<prop>` (amended 2026-11-03) and under the shorthand are still written so |
+| `toolsGateways` | `Record<string, ToolsGatewayProps>` | `{ default: {} }` | (v2, ADR-0041) several gateways, names `[a-z0-9-]{1,32}`, each with its own Policy engine, interceptor, rate limits and `responseFilter`; `{}` creates none, as `toolsGateway: false` does. A `ToolTarget` names its gateway (`gateway`, default `default`). The rows below are per gateway; the rate-limit and interceptor rows were `toolsGateway.<prop>` (amended 2026-11-03) and under the shorthand are still written so. **Amended 2026-11-04:** `toolsGateways: {}` fails synth ("name at least one gateway; use toolsGateway: false"); only `toolsGateway: false` creates none. The per-gateway prop type is `ToolsGatewayOptions` |
 | `toolsGateways.<name>.maxToolsPerGateway` | number | 300 | (v2, ADR-0041) synth fails when the gateway's catalogued tools would exceed it; the Policy engine's 400 KB schema quota holds about 330 one-field tools (V-16a) |
 | `toolsGateways.<name>.responseFilter` | boolean | `false` | (v2, ADR-0041) a RESPONSE interceptor that trims each `tools/list` page to the exact tools in `scope`; off, the list is filtered natively at target grain |
 | `toolsGateways.<name>.tenantRateLimit` | `{ requestsPerSecond: number }` | `{ requestsPerSecond: 10 }` | (v2) native limit, one bucket per `tenant_id` (`*` entry), per gateway (ADR-0041) |
@@ -665,6 +678,12 @@ compressed `scope` longer than 8,192 bytes (amended 2026-11-03, ADR-0041;
 was 4,096) is refused with 502 and log reason `grant_too_large`; with at most 64 entries in `tools` this cannot
 happen unless a target has hundreds of tools and the user is cut from one
 (V-13 records the fallback).
+**Amended 2026-11-04 (review; ADR-0032 note).** A target compresses to
+`<target>/*` only when every contributing set held `<target>/*` itself:
+`A.tools`, `T.tools` (the tenant row or its plan) and `U.tools` (no cut
+names a tool of the target). An explicit list stays explicit even when it
+covers the whole catalogue today, so a tool added to the target later is
+not granted by it (`compressTools` in `src/shared/grant.ts`).
 
 **Scale at 100s of agents and 1,000s of tools (amended 2026-11-03,
 ADR-0041).** Tools are spread over several tools gateways, one Policy engine
@@ -675,7 +694,8 @@ star permit per target** (any action in the target when `scope` names
 per-tool wall at call time; `tools/list` is filtered natively at target
 grain and, with `responseFilter`, at tool grain by a RESPONSE interceptor.
 The transaction token's `aud` lists `tools-gateway:<name>` for each gateway
-the agent product's tools live on. The counts that grow with agents and
+the agent product's tools live on (amended 2026-11-04: for each gateway a
+granted tool's target lives on, `src/shared/authority.ts`). The counts that grow with agents and
 tools, and where each is bounded:
 
 | Grows with | Where | Bound | Rule |
@@ -687,15 +707,26 @@ tools, and where each is bounded:
 | Tools | catalogue rows `TOOL#` | 1,000 per target, 100 targets | the ingress Queries one target at a time and caches it `registryTtl`; the whole catalogue is never read |
 | Tools | Cedar policy per target | one star permit, about 450 bytes, whatever the tool count (ADR-0041) | V-16a: per-tool permits hold 28 tools each and take 2-3 min to ACTIVE, so they are not used |
 | Tools | Policy engine schema | 400 KB per engine, about 330 tools (V-16a) | `maxToolsPerGateway` 300; several gateways |
-| Tools | `tools/list` pages | about 30 tools per page before Policy filters (V-14) | an agent product lists its own targets only, so a product with 3 targets pays 3 to 100 pages, never the whole catalogue; the agent caches the list for the token life; `toolsGateway.semanticSearch` (off by default) replaces listing for products that span many targets |
+| Tools | `tools/list` pages | about 30 tools per page before Policy filters (V-14) | an agent product lists its own targets only, so a product with 3 targets pays 3 to 100 pages, never the whole catalogue; the agent caches the list for the token life; `toolsGateway.semanticSearch` (off by default) replaces listing for products that span many targets (amended 2026-11-04: `semanticSearch` is not implemented; a consumer may enable the Gateway's semantic search outside the construct) |
 | Tools per tenant | `tools` entries on the tenant row | `maxToolsPerTenant`, 1,000 entries; a 400 KB item holds about 10,000 names | subscribe by `<target>/*`; the row is read once per mint, cached |
 | Tools in a token | `scope` after compression | 8,192 bytes (`grant_too_large`; ADR-0041, proved by V-16c and V-13) | whole targets compress to one entry; a user cut from one tool of a 300-tool target expands to 299 names, about 2.7 KB; a user cut inside three or more large targets at once can overflow and fails loud. The `cut` claim (V-16b) is not adopted: with one star permit per target it has no Policy to act in |
+
+**Amended 2026-11-04 (review).** On `api-gateway` the REQUEST authoriser
+hands the whole transaction token to the integration Lambda in its
+authoriser context. At the 8,192-byte `scope` bound the token is about
+11.8 KB (V-16c); run 9 carried tokens well below that, so the
+authoriser-context path at the bound is unverified. Spike V-17 (§7) is
+planned to measure it; until then the README lists it as a known
+limitation (threat model T-100).
 
 **Mint cache (ADR-0036).** Key `(tenant_id, sub, agent, tenant.version, agent.version,
 plan.version)`. A cached token is reused while more than 60 s of its life is
 left (amended 2026-11-04, ADR-0043: more than the reuse margin, the authoriser
 cache TTL plus 120 s, so 180 s at the defaults and 120 s on
-`agentcore-gateway`). `tenant.version` is bumped by every write to the tenant row or to any
+`agentcore-gateway`). (Amended 2026-11-04, review: the key also
+includes `scope` and the sorted gateway list, `mintCacheKey` in
+`src/shared/mint.ts`, so a catalogue change that adds a tool to a granted
+target or moves a target to another gateway re-mints.) `tenant.version` is bumped by every write to the tenant row or to any
 cut row of that tenant, so a write is seen by the very next request.
 
 **Tools gateway.**
@@ -760,7 +791,10 @@ cut row of that tenant, so a write is seen by the very next request.
   with `decision: deny`, amended 2026-11-04). Any failure returns a refusal
   (§5.4); none passes the call on. (Amended 2026-11-03, ADR-0041: the `aud` check was
   `tools-gateway`; the `scope` check is the per-tool decision, no longer a
-  recheck behind Policy.)
+  recheck behind Policy.) (Amended 2026-11-04, ADR-0040 note: a wrong
+  `typ` is `token_invalid`, not `aud_mismatch`; every verifier, here, in
+  C-15c and at the ingress, requires `exp` and `iat` through
+  `requiredClaims`.)
 - List filter (C-15c, ADR-0041), only with `responseFilter`: on each
   `tools/list` page, keep the tools `scope` names and drop the rest; never
   add; on any error return the page with no tools. Off, a caller sees every
@@ -846,6 +880,10 @@ tools gateway name (amended 2026-11-03, ADR-0041). It holds no tool names; the
 catalogue rows (§4.5) do. Consumers use it to discover targets; the ingress
 does not read it.
 
+**Amended 2026-11-04.** The pointer's `version` is fixed at 1: an update of
+the target rewrites the pointer without bumping it (the ingress does not
+read the pointer, so no cache key depends on it).
+
 ### 4.5 Entitlement store (v2, ADR-0030)
 
 One table per `SharedIngress`, `PK` and `SK` strings, on-demand, PITR on,
@@ -854,10 +892,10 @@ names matching the patterns in §3.3.
 
 | Row | PK | SK | Attributes | Written by | Read by | Size bound |
 |---|---|---|---|---|---|---|
-| Tenant subscription | `TENANT#<tenantId>` | `#SUB` | `agents: string[]`, `tools: string[]`, `plan?: string`, `status: active \| suspended`, `version: number`, `updatedAt` | vendor, `PutTenantSubscription` / `DeleteTenantSubscription`; `version` also by every cut write | ingress, every request (batch get) | ≤ 100 agents, ≤ 1,000 tools: about 40 KB at 1,000 tools of 40 bytes |
+| Tenant subscription | `TENANT#<tenantId>` | `#SUB` | `agents: string[]`, `tools: string[]`, `plan?: string`, `status: active \| suspended`, `version: number`, `updatedAt` | vendor, `PutTenantSubscription` / `DeleteTenantSubscription`; `version` also by every cut write | ingress, every request (batch get) | ≤ 100 agents, ≤ 1,000 tools: about 40 KB at 1,000 tools of 40 bytes (amended 2026-11-04: ≤ `maxAgentsPerTenant`, 1,000 agents, §3.3) |
 | User cut | `TENANT#<tenantId>` | `USER#<sub>` | `cutAgents: string[]`, `cutTools: string[]`, `version: number`, `updatedBy` (admin `sub`), `updatedAt` | tenant admin, `PutUserCut` / `DeleteUserCut` | ingress, every request (batch get, usually a miss) | ≤ 100 + 1,000 names; one row per cut user, absent = full |
 | Plan | `PLAN#<planName>` | `#PLAN` | `agents: string[]`, `tools: string[]`, `version: number`, `updatedAt` | vendor, `PutPlan` / `DeletePlan` | ingress, cached `registryTtl` | as tenant row; tens of plans |
-| Tool catalogue | `TOOL#<target>` | `TOOL#<tool>` | `description`, `gateway` (ADR-0041), `owner` (`<StackId>#<LogicalResourceId>`), `addedAt` | `ToolTarget` custom resource at deploy | ingress (Query per target, cached `registryTtl`; `gateway` gives the token's `aud`), entitlement API validation | ≤ 1,000 rows per target, ≤ 100 targets; (ADR-0041) ≤ `maxToolsPerGateway` rows over the targets of one gateway |
+| Tool catalogue | `TOOL#<target>` | `TOOL#<tool>` | `description`, `gateway` (ADR-0041), `owner` (`<StackId>#<LogicalResourceId>`), `addedAt` (amended 2026-11-04: the code writes `description`, `gateway` and `owner`; no `addedAt`) | `ToolTarget` custom resource at deploy | ingress (Query per target, cached `registryTtl`; `gateway` gives the token's `aud`), entitlement API validation | ≤ 1,000 rows per target, ≤ 100 targets; (ADR-0041) ≤ `maxToolsPerGateway` rows over the targets of one gateway |
 | Name reservation | `NAME#<name>` | `#NAME` | `kind: agent \| target`, `owner` | `AgentBackend` and `ToolTarget` custom resources, conditional put | the same, on create and delete | tens of rows |
 | Plan listing (index, amended 2026-11-04) | `PLANS` | `PLAN#<planName>` | `updatedAt` | `PutPlan` / `DeletePlan`, in the plan row's transaction | `ListPlans` (Query) | one row per plan |
 | Plan member (index, amended 2026-11-04) | `PLAN#<planName>` | `TENANT#<tenantId>` | `updatedAt` | `PutTenantSubscription`, in the tenant row's transaction, when the row's `plan` changes; `DeleteTenantSubscription` deletes it with the tenant's rows | `DeletePlan`'s `plan_in_use` (Query, `Limit 1`) | one row per tenant on a plan |
@@ -1081,7 +1119,7 @@ which permits the whole `crm` target for that token.
 | 401 | Gateway `CUSTOM_JWT` | no token, bad signature, expired or (amended 2026-11-04, ADR-0043) 60 s or less before `exp`, wrong `iss` (an identity token), `aud` without `tools-gateway:<name>` for this gateway (ADR-0041; 403 for all but a missing bearer or unknown `kid`, per the ADR-0040 note above) |
 | tool absent from `tools/list`; `tools/call` refused with the Gateway's not-authorised error | Policy | (amended 2026-11-03, ADR-0041: target grain) `scope` names no entry of the tool's target: a target the tenant has not subscribed to, the user was cut from entirely, or the agent does not list. On `tools/call` the interceptor refuses these first (`tool_not_granted`); Policy is the second wall |
 | 403 `forbidden: act_missing` | interceptor | `act` absent or `act.sub` is not the ingress role |
-| 403 `forbidden: aud_mismatch` | interceptor | `aud` lacks `agent:<agent>` for the token's `agent`, or lacks `tools-gateway:<name>` for this gateway (ADR-0041), or `typ` is not `txn+jwt`. (Amended 2026-11-04) A token without `tools-gateway:<name>` for this gateway fails the interceptor's own signature-and-audience verification and is `token_invalid`; in practice the Gateway's authoriser refuses it first |
+| 403 `forbidden: aud_mismatch` | interceptor | `aud` lacks `agent:<agent>` for the token's `agent`, or lacks `tools-gateway:<name>` for this gateway (ADR-0041), or `typ` is not `txn+jwt`. (Amended 2026-11-04) A token without `tools-gateway:<name>` for this gateway fails the interceptor's own signature-and-audience verification and is `token_invalid`; in practice the Gateway's authoriser refuses it first. (Amended 2026-11-04, review) A wrong `typ` is `token_invalid` too, not `aud_mismatch` |
 | 403 `forbidden: tool_not_granted` | interceptor | the called tool is not in `scope` by name or `<target>/*`. (Amended 2026-11-03, ADR-0041) The per-tool wall: inside a target the token holds part of, the only refusal; was "recheck of `scope` fails (Policy should already have refused)" |
 | page with fewer tools, or none | list filter (C-15c), `responseFilter` only | tools `scope` does not name are removed; on a filter error the page is empty (fail-closed for the list; the call wall is unaffected) |
 | 403 `forbidden: token_invalid` | interceptor | signature or claims fail the interceptor's own verification, including (amended 2026-11-04) a token minted for another tools gateway |
@@ -1164,7 +1202,7 @@ JOSE header: `{ "alg": "RS256", "typ": "txn+jwt", "kid": "<KMS key id>" }`.
 | `tenant_id` | exactly one tenant: the selected one |
 | `agent` | the backend name of this request |
 | `scope` | the granted set, space-separated `<owner>/<name>`, sorted, compressed per target (§3.6) |
-| `aud` | `["agent:<agent>", "tools-gateway:<gw>", ...]`: one `tools-gateway:<gw>` for each tools gateway any target of `A.tools` lives on (the catalogue rows' `gateway`), sorted. An agent with no tools gets `["agent:<agent>"]`. (Amended 2026-11-03, ADR-0041: was `["agent:<agent>", "tools-gateway"]`; the bare `tools-gateway` is not accepted by any gateway, `default` included. §7.1 and §7.2 record the spike with the bare value) |
+| `aud` | `["agent:<agent>", "tools-gateway:<gw>", ...]`: one `tools-gateway:<gw>` for each tools gateway any target of `A.tools` lives on (the catalogue rows' `gateway`), sorted. An agent with no tools gets `["agent:<agent>"]`. (Amended 2026-11-03, ADR-0041: was `["agent:<agent>", "tools-gateway"]`; the bare `tools-gateway` is not accepted by any gateway, `default` included. §7.1 and §7.2 record the spike with the bare value). (Amended 2026-11-04: the implementation, `src/shared/authority.ts`, names the gateways of the targets of the GRANTED tools, `A.tools ∩ T.tools ∩ U.tools`, not of every target of `A.tools`; an agent granted no tool gets `["agent:<agent>"]`, which step 12 relies on for `late`) |
 | `act` | `{ "sub": "<ingress role ARN>" }` (RFC 8693) |
 | `txn` | a unique id per agent request (128 random bits, base64url) |
 | `iat`, `exp` | issue time; `iat + lifetime` |
@@ -1258,7 +1296,9 @@ New promises (v2):
 - A transaction token from tenant A cannot call a tool for tenant B. The
   tool sees tenant A's context only, a client-written `_ri_ctx` naming
   tenant B is overwritten, and a token whose `tenant_id` is altered fails
-  the signature check (401) (integ step 15).
+  the signature check (401) (integ step 15). (Amended 2026-11-04,
+  ADR-0040: at the tools gateway that refusal is 403 `insufficient_scope`,
+  as run 9 recorded.)
 - A tool the tenant has not subscribed to is absent from `tools/list` and
   refused on `tools/call` (integ step 13).
 - A tool the agent product does not list is refused even when the tenant
@@ -1323,7 +1363,9 @@ Read-only members:
   `toolsGatewayUrl`, `toolsGatewayIdentifier`, `toolsGatewayRole`; and
   (ADR-0041) `toolsGateways`, a map of name to `{ url, identifier, role,
   policyEngineId }`, of which the three single members are the `default`
-  entry's.
+  entry's. (Amended 2026-11-04: the map holds `ToolsGateway` constructs,
+  with `gatewayUrl`, `gatewayIdentifier`, `gatewayRole` and `policyEngine`;
+  the per-gateway prop type is `ToolsGatewayOptions`.)
 - `AgentBackend`: `runtimeArn`, `executionRole`, `endpointUrl`, `name`,
   `needs` (was `scopes`), `tools`, `registryParameterName`, `backend`.
 - `ToolTarget`: `name`, `targetId`, `tools`, `policyId`,
@@ -1372,6 +1414,7 @@ design depends on these further behaviours.
 | V-14 | Policy evaluation latency, and `tools/list` latency, at 100 targets with one policy each (was tool-gateway V-6) | Group tools into fewer targets; document the measured figure in the README |
 | V-16 | At 1,000s of tools (amended 2026-11-03): (a) a Cedar policy for a target with 1,000 tools named one by one is accepted, becomes ACTIVE, and `tools/call` latency stays within the V-14 figures; (b) a `forbid` policy on a `cut` claim (`principal.getTag("cut") like "* <target>/<tool> *"`) is accepted beside the permit and removes the tool from `tools/list` and refuses `tools/call`; (c) a `scope` of 4,096 bytes passes the Gateway authoriser | (a) fails: split the permit into groups of 100 tools per policy, cap tools per target in `ToolTarget` at the measured size; (b) fails: keep the 4 KB bound and the hash-referenced grant of V-13 as the fallback, named in the README; (c) fails: lower the bound to the measured size |
 | V-15 | AgentCore Identity with the transaction token as the inbound JWT: (a) a 3LO credential provider on a `ToolTarget` keys the vault on the transaction token's `sub` and issuer, and a second transaction token for the same user reuses the stored grant; (b) an OBO `TOKEN_EXCHANGE` provider accepts the ingress as issuer; (c) `GetWorkloadAccessTokenForJWT` in the agent accepts a transaction token when the workload identity names the ingress discovery URL | If (a) fails, 3LO targets are documented as needing the user's consent per token life, or the sample drops 3LO; if (b) fails, OBO targets are out of scope and the README says a third party must trust the ingress issuer; if (c) fails, the agent's outbound identity is M2M only |
+| V-17 | (Added 2026-11-04, review) On `api-gateway`, a transaction token at the 8,192-byte `scope` bound (about 11.8 KB) passes from the REQUEST authoriser's context to the integration Lambda and on to the Runtime header unchanged | Lower the `scope` bound on `api-gateway` to the largest size that passes, and say so in the README |
 
 The spike stack deploys a throwaway `SharedIngress` with `toolsGateway`, one
 `ToolTarget` of kind `lambda`, and a test-only mint function granted
@@ -1734,7 +1777,11 @@ Limits. As v1: tenant A gets 429 on the `requestsPerMinute: 5` stack while
    call it makes is refused at the gateway (not an ingress error). (Amended
    2026-11-04) Its token's `aud` is `["agent:late"]`, naming no tools
    gateway, so the agent has no MCP client and reports `NoToolsGateway`; the
-   Gateway's refusal of such a token is shown in step 17 (403).
+   Gateway's refusal of such a token is shown in step 17 (403). (Amended
+   2026-11-04, review) On `api-gateway` step 12 also checks the tenant-admin
+   door: an identity token without the admin scope is 403
+   `admin_scope_missing`, an `X-Tenant-Id` naming a tenant the token does not
+   list is 403, and a vendor call without a SigV4 signature is 403.
 13. Tenant tool subscription. B1's agent runs `tools`: on gateway
    `default` (no `responseFilter`) the list holds all three `crm` tools,
    because Policy filters at target grain, and nothing from `invoices`, whose
@@ -1857,3 +1904,7 @@ the interface (ADR-0042), and `toolTestMode` is on for `api-gateway`,
 `agentcore-gateway` and `multi-tenant`); the test-only mint function and its
 `grantSign` exist only on the integration stacks, never in the demo stack, and
 the README says so.
+
+(Amended 2026-11-04.) `12-late`, like 9-drain, runs on `api-gateway` only,
+inside 9-registry (a backend added there is not also a Gateway target), and
+the three tenant-admin negatives of step 12 run on `api-gateway` only.

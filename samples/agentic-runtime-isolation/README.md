@@ -115,8 +115,8 @@ misses (a cost, not an isolation effect; ADR-0043).
 2. **Select the tenant** (ADR-0038). A token with one `tenant_id` acts for
    it; an `X-Tenant-Id` that disagrees is 403 `tenant_not_allowed`. With
    `identity.multiTenant` on, a token with `tenants` must name one with
-   `X-Tenant-Id` (400 `tenant_required` without it, 403 when it is not in
-   the list). One request always acts for exactly one tenant.
+   `X-Tenant-Id` (without it: 400 `tenant_required` on `agentcore-gateway`,
+   API Gateway's own 401 on `api-gateway`; 403 when it is not in the list). One request always acts for exactly one tenant.
 3. **Check the floor**: every scope in `requiredScopes` (for example
    `app/use`) must be in the token (ADR-0005). The identity token carries no
    agent and no tool names.
@@ -278,11 +278,14 @@ or malformed key. The demo always creates two tools gateways (`default`, and
 The demo agents are products: `default` needs `default/chat` and may use
 `crm/*`; `billing` needs `billing/read` and `billing/invoke` and may use
 `invoices/*`. A tenant reaches neither until the vendor writes its
-subscription through the Entitlements API (SigV4). For example, tenant
-`<tenantId>` subscribed to `default` and two `crm` tools:
+subscription through the Entitlements API (SigV4). Read the API's base URL
+from the published document's `entitlementsApiUrl` (see
+[Published interface](#published-interface)), then send the subscription
+there. For example, tenant `<tenantId>` subscribed to `default` and two
+`crm` tools:
 
 ```bash
-ENT_API="$(aws cloudformation describe-stacks --stack-name RuntimeIsolation-api-gateway --query "Stacks[0].Outputs[?OutputKey=='EntitlementsApiUrl'].OutputValue" --output text)"
+ENT_API="$(aws ssm get-parameter --name /application-plane/shared/agent-runtime/ingress --query Parameter.Value --output text | jq -r .entitlementsApiUrl)"
 curl -s -w '\n%{http_code}\n' -X PUT --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" -H "x-amz-security-token: ${AWS_SESSION_TOKEN}" -H 'Content-Type: application/json' --data '{"agents":["default"],"tools":["crm/get_account","crm/list_cases"]}' "${ENT_API%/}/tenants/<tenantId>"
 ```
 
@@ -462,8 +465,10 @@ driven by [`scripts/integ.sh`](./scripts/integ.sh)) is the reference
 implementation of this sample's wiring ([sample standard
 §5.2](../../docs/sample-standard.md#52-integration-test)): it deploys or
 reuses tenant-identity through tenant-identity's own deploy path, registers
-the vendor scopes, wires the stacks through the published interface only,
-writes subscriptions, a plan and a cut through the public Entitlements API,
+the vendor scopes, wires the stacks through the published document where a
+consumer would and reads stack outputs for the values a step needs (the
+non-publishing stacks write no parameters and the test-only hooks are never
+published; ADR-0044), writes subscriptions, a plan and a cut through the public Entitlements API,
 drives every step through the public routes, and tears everything down. Its
 steps are named and ordered as the table below, so the two read side by
 side.
@@ -472,7 +477,7 @@ Use a non-production, CDK-bootstrapped account, in exactly one Region: the
 script fails fast when `AWS_REGION` is unset.
 
 ```bash
-AWS_PROFILE=pg AWS_REGION=eu-central-1 npx projen integ
+AWS_PROFILE=<profile> AWS_REGION=eu-central-1 npx projen integ
 ```
 
 Optional knobs: `INTEG_PREFIX` (another stack prefix, default
@@ -502,7 +507,9 @@ CloudWatch and the few Nova Lite calls add cents.
 
 **Last run: run 9, 2026-11-04, eu-central-1: all 57 steps PASS**, deploy
 278 s, steps 1,669 s, teardown clean (no stack, parameter, log group, table,
-Gateway or Policy engine left; KMS keys pending deletion).
+Gateway or Policy engine left; KMS keys pending deletion). The three
+tenant-admin negatives added to step 12 after the 2026-11-04 review: run 10
+after the 2026-11-04 review fixes: pending.
 
 Steps 3 to 24 run on both all-on stacks except 9-drain and 12-late, which
 run on `api-gateway` only (a backend added there is not also a Gateway
@@ -524,7 +531,7 @@ target).
 | 12-late | an agent with `needs` only is served; its token names no tools gateway |
 | 9-drain | the late backend, once `draining`, is refused within 90 s |
 | 11 | the identity token stays at the ingress: header names, `typ: txn+jwt`, `iss` the ingress; the tool's context holds no token |
-| 12 | agent subscription: B1 on `billing` 403; AA cuts A1 from `billing` (next request 403), deletes the cut (200) |
+| 12 | agent subscription: B1 on `billing` 403; AA cuts A1 from `billing` (next request 403), deletes the cut (200); on `api-gateway` the tenant-admin door refuses a token without the admin scope (403 `admin_scope_missing`), an `X-Tenant-Id` naming a foreign tenant (403) and an unsigned vendor call (403) |
 | 13 | tenant tool subscription: B1 lists the `crm` tools on `default` and nothing of `finance`; B1's `crm/update_case` refused by the interceptor |
 | 14 | agent product bound: `default`'s token cannot reach `finance`; with `finance` in `aud` the interceptor refuses; A1 on `billing` is served |
 | 15 | cross-tenant: an altered `tenant_id` is 403 at the Gateway; a client `_ri_ctx` for B is overwritten; B1 gets B's data |
@@ -622,7 +629,7 @@ input; a v2 refusal adds a reason code that is also the log line's `reason`:
 | Status | Body | When |
 |---|---|---|
 | 400 | `bad request` | malformed `prompt`, `conversationId` or `X-Tenant-Id`; `conversationId` with `session` off |
-| 400 | `bad request: tenant_required` | the token carries `tenants` and no `X-Tenant-Id` was sent |
+| 400 | `bad request: tenant_required` | `agentcore-gateway`: the token carries `tenants` and no `X-Tenant-Id` was sent. On a multi-tenant `api-gateway` ingress the header is an authoriser identity source, so a request without it is API Gateway's own 401 before the authoriser runs (ADR-0043) |
 | 401 | `unauthorized` | missing or invalid token, or a transaction token presented as identity token (403 on `api-gateway`, ADR-0015) |
 | 403 | `forbidden` | no tenant claim, `tenants` without `multiTenant`, a floor scope or a `claimTags` claim missing |
 | 403 | `forbidden: tenant_not_allowed` | `X-Tenant-Id` not in `tenants`, or not the token's `tenant_id` |
@@ -685,7 +692,8 @@ JOSE header `{ "alg": "RS256", "typ": "txn+jwt", "kid": "<KMS key id>" }`
 No refresh token, and no claim of the identity token beyond `sub` and the
 tenant. Rotation: bumping `keyGeneration` from N to N+1 makes N+1 the signer
 and leaves N in the JWKS without `kms:Sign`; bumping to N+2 drops N and
-schedules its deletion. Wait at least 15 minutes between bumps.
+schedules its deletion. Wait at least `transactionToken.ttl` + 5 minutes
+between bumps (20 minutes at the 900 s maximum).
 
 ### Signed tool context and tools gateway
 
@@ -773,6 +781,11 @@ requests if DynamoDB errors.
   and a tools gateway's per-tenant rate limit fails open by design.
 - The `agentcore-gateway` ingress never sees the response, so backend
   seconds, tokens and bytes are not attributed there.
+- On `api-gateway` the authoriser hands the transaction token to the
+  integration in its authoriser context. At the 8,192-byte `scope` bound the
+  token is about 11.8 KB, and that path is unverified: run 9 used smaller
+  grants. Spike V-17 is planned (threat model T-100); keep grants well below
+  the bound until it reports.
 
 ## Costs
 
@@ -792,8 +805,9 @@ What one deployment adds, pooled across tenants:
   optional list filter and the tool functions.
 - **DynamoDB**: on-demand tables (entitlements, tenant limits), PITR on
   every table.
-- **Per-tenant metrics** (opt-in): about nine CloudWatch custom metrics per
-  tenant per ingress, billed monthly; 90,000 metrics at 10,000 tenants.
+- **Per-tenant metrics** (opt-in): 9 × (1 + agents) CloudWatch custom
+  metrics per tenant per ingress, billed monthly; 180,000 metrics at 10,000
+  tenants on one agent.
 
 Nothing in the bill carries a tenant tag, so two mechanisms attribute cost
 per tenant. **Model tokens come from the bill, by IAM principal**
@@ -824,7 +838,8 @@ unchanged and reads the event as a cross-check against the bill, not the
 billing source (ADR-0017); your own agent keeps the metering by emitting it.
 
 **The metrics**, only with `perTenantMetrics` (namespace `RuntimeIsolation`,
-dimensions `TenantId` and `Ingress`, ADR-0021): `Requests`,
+dimension sets `[TenantId, Ingress]` and `[TenantId, Ingress, Backend]`,
+ADR-0021): `Requests`,
 `IngressDurationMs`, `Errors4xx`, `Errors5xx` and `TtfbMs` on both
 ingresses; `BackendInvokeSeconds`, `ModelInputTokens`, `ModelOutputTokens`
 and `StreamedBytes` on `api-gateway` only. The demo's four Contributor
@@ -847,8 +862,8 @@ authorisation, interceptor and tool Lambda and KMS `Sign` prices, and
 The **unattributable remainder** is KMS key-months, provisioned
 concurrency, log storage and ingestion, dashboards and Contributor Insights
 rules, custom metrics, and the backend time of streams that broke before the
-usage event. Apportion it equally across active tenants or by `Requests`,
-and say which.
+usage event. The sample apportions it by each tenant's share of
+`Requests`, refusals included ([`architecture.md`](./architecture.md)).
 
 ## Security notes
 
@@ -873,9 +888,15 @@ Threats, mitigations and accepted risks: [`threat-model.md`](./threat-model.md).
   `TenantId` request tag. The agent role has no `sts:AssumeRole`, no model
   permission and no data; the model and tenant data are reached only with
   the ingress-vended credentials.
-- **Signing keys.** `kms:Sign` on the token signer belongs to the minting
-  role alone, on `ToolContextKey` to the interceptor alone; neither private
-  key can be exported.
+- **Signing keys.** `kms:Sign` is granted only in the key policy: on the
+  token signer to the minting role, on `ToolContextKey` to the interceptor.
+  Grants are denied in the key policy (`kms:CreateGrant` for every
+  principal) and the account root has no `kms:Create*`, so no IAM policy can
+  add a signer. The residual is `kms:PutKeyPolicy`, held by the account's
+  key administrators (the deployer's own privilege), visible in CloudTrail.
+  Neither private key can be exported.
+- **Token lifetime.** Every verifier requires `exp` and `iat`; a token
+  without them is refused whatever its signature.
 - **No token in any log.** Header-free access logs, `dataTraceEnabled:
   false`, field-allowlisted loggers, and Gateway application logs off (they
   record the request body after the interceptor). The integration run's
@@ -891,10 +912,12 @@ must add. Each item is a deployer action or an accepted risk in
 [`threat-model.md`](./threat-model.md#mitigations).
 
 - [ ] **Rotate the signing key** by bumping `transactionToken.keyGeneration`
-      on a schedule, at least 15 minutes between bumps (M-64).
+      on a schedule, at least `transactionToken.ttl` + 5 minutes between
+      bumps, 20 minutes at the 900 s maximum (M-64).
 - [ ] **Alarm on KMS `Sign`**: its rate, its errors, and any `Sign` in
       CloudTrail by a principal other than the minting role or the
-      interceptor (M-40, M-68, T-52, T-84).
+      interceptor, and any `PutKeyPolicy` on either key outside a deploy
+      (M-40, M-68, M-78, T-52, T-84, T-97).
 - [ ] **Keep Gateway application logs off**: they record the signed context
       and every tool result (ADR-0040, M-67).
 - [ ] **Use OBO only with authorisation servers you trust**: the transaction
@@ -923,8 +946,8 @@ must add. Each item is a deployer action or an accepted risk in
       backend-deploying roles (M-20, M-29, M-30, T-39, T-40).
 - [ ] **Alarm on any other principal** calling `InvokeAgentRuntime` or
       assuming a tenant role, from CloudTrail (M-22, T-32).
-- [ ] **Leave `perTenantMetrics` off at scale**, or accept about nine custom
-      metrics per tenant per ingress (M-28, T-38).
+- [ ] **Leave `perTenantMetrics` off at scale**, or accept 9 × (1 + agents)
+      custom metrics per tenant per ingress (M-28, T-38).
 - [ ] **Change the removal policies**: the sample sets `DESTROY` everywhere
       so teardown is total (M-23).
 
@@ -932,9 +955,9 @@ must add. Each item is a deployer action or an accepted risk in
 
 - Specification: [`design/agentic-runtime-isolation.spec.md`](./design/agentic-runtime-isolation.spec.md);
   spike results in §7 (§7.1, §7.2)
-- Decisions: [`adr/`](./adr/), ADR-0001 to ADR-0043, indexed in
+- Decisions: [`adr/`](./adr/), ADR-0001 to ADR-0044, indexed in
   [`adr/README.md`](./adr/README.md); the latest is
-  [ADR-0043, cap the authoriser cache at 60 seconds](./adr/0043-cap-the-authoriser-cache-at-60-seconds.md)
+  [ADR-0044, publish from the construct and drive the integration test with the CDK CLI](./adr/0044-publish-from-the-construct-and-drive-the-integration-test-with-the-cdk-cli.md)
 - Threats and mitigations: [`threat-model.md`](./threat-model.md)
 - Implemented state: [`architecture.md`](./architecture.md)
 - Diagram: [`diagrams/agentic-runtime-isolation.drawio`](./diagrams/agentic-runtime-isolation.drawio),

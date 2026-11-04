@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT-0
 - Status: Accepted
 - Date: 2026-11-02
 - Amends: ADR-0031, ADR-0034, ADR-0038
-- Amended by: ADR-0041, integration runs 1 to 9 (2026-11-04)
+- Amended by: ADR-0041, integration runs 1 to 9 (2026-11-04), the 2026-11-04 review
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -32,3 +32,5 @@ Easier: no orphan window, no cross-tenant 3LO grant, one refusal path per layer.
 **2026-11-03.** Amended by ADR-0041: the `scope` bound rises to 8,192 bytes; the policy-lifecycle rules now apply to one policy per target.
 
 **2026-11-04.** Amended by integration runs 1 to 9 (no new decision). (a) `CreatePolicy` names are unique within the account and Region, not within the engine: in run 4 six stacks each creating `crm_target` conflicted and only the first won. `ToolTarget` names its policy `<target>_target_<8 hex>`, the hex a SHA-256 of the stack name, construct path and gateway, so two stacks or two gateways never collide. (b) The policy writer needs `bedrock-agentcore:GetGateway` and `ListGatewayTargets` on the gateway beside the documented `InvokeGateway` and `ManageResourceScopedPolicy` (CloudTrail `AccessDenied` in runs 1 and 3; the policy-permissions page lists neither); run 3's `ConflictException`s were a retry racing the delete of a `CREATE_FAILED` policy of the same name. (c) When a stack ends `DELETE_FAILED` (runs 2 and 5, SSM `DeleteParameter` throttling) its tools gateway and Policy engine can stay `READY` / `ACTIVE` with no targets or policies; they hold no tenant data and no grant, but cost quota until the stack is deleted again. The integration driver now retries a failed teardown once at concurrency 2 after 60 s (commit `63b4aa9`) and ADR-0042 removed the parameter burst; run 9 tore down clean.
+
+**2026-11-04 (review).** From the review of the implemented sample (no new decision): (d) a token whose `typ` is not `txn+jwt` is refused by the interceptor and the list filter as `token_invalid`, not `aud_mismatch`; (e) every verifier requires `exp` and `iat` (`requiredClaims: ['exp', 'iat']` in `src/shared/verifier.ts` and `src/tools/transaction-token.ts`), so a token without a lifetime is refused even when its signature is good (threat model T-98, M-79).
