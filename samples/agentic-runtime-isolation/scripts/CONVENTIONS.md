@@ -21,7 +21,7 @@ that none of those ever reach output.
   `set -euo pipefail` only.
 - **Never print a token, credential, password, session id or header value.**
   Log the HTTP status, the tenant id, the step name, and the agent's
-  non-secret report fields (`sessionPrefix`, `nonce`, `forwardedScope`,
+  non-secret report fields (`sessionPrefix`, `nonce`, `tokenScope`,
   `read.result`) instead. Good, the status, the tenant and the prefix the
   agent derived:
 
@@ -38,7 +38,7 @@ that none of those ever reach output.
 - **The full unit id stays out of logs too.** The agent reports `unitId`; the
   scripts compare it in variables and print only `sessionPrefix` (spec P-9:
   the prefix, never the token, and the conversation part is the client's).
-- **AWS CLI output counts as output.** Narrow it with `--query` /
+- **AWS CLI output counts as output.** Filter it with `--query` /
   `--output text` into a variable, or send it to `/dev/null` when only the
   exit status matters. `aws sts assume-role` output in particular is never
   printed: the step 8a negative check reads only the exit status.
@@ -58,8 +58,10 @@ that none of those ever reach output.
   (`AWS_REGION`, and the tools the script needs: `aws`, `curl`, `jq`,
   `npx`), so a missing input fails fast with a message that names it.
 - Register an `EXIT` trap that cleans up whatever the script created.
-  `demo.sh` deletes the demo table items and users it wrote and removes its
-  temp files on every exit; `perf.sh` deletes its tenant and, unless
+  `demo.sh` deletes the subscriptions and the plan it wrote through the
+  Entitlements API (subscriptions first: a plan a tenant names is 409), the
+  demo table items and its tenants, and removes its temp files on every exit;
+  `perf.sh` deletes its subscription and its tenant and, unless
   `PERF_OUT` asked to keep the raw samples, its output directory; `integ.sh` destroys every stack it deployed from
   the trap, so the destroy runs even when the deploy or a step fails, and
   then checks that nothing it created was left behind: stacks with the
@@ -120,16 +122,19 @@ The scripts also call tenant-identity's platform API with SigV4 (`platform`
 in `lib.sh`): `CreateTenant` with the tenant's `scopes`, `IssueToken`,
 `DeleteTenant`, and `GET /platform/scopes` to tell a stale deployment from
 one with the scope catalogue (ADR-0025); (v2) `integ.sh` also puts and
-deletes the vendor scopes and calls `CreateMembership`, and calls this
-sample's entitlement API: the vendor operations with SigV4 (`vendor`) and
-the tenant-admin operations with the tenant admin's identity token
-(`admin_api`). The tenant admin's cut of a user's
-scopes goes through the tenant API with a bearer token narrowed to
-`tenant-admin/users` (`set_user_scopes`). The scopes the scripts create
-tenants with (`DEFAULT_SCOPE`, `BILLING_READ_SCOPE`, `BILLING_INVOKE_SCOPE`
-in `lib.sh`) must match `DEFAULT_SCOPES` and `BILLING_SCOPES` in
-`src/demo.cdk.ts`: a tenant created without them holds no scope and every
-token is refused at the ingress.
+deletes the vendor scopes and calls `CreateMembership`. All three scripts
+call this sample's entitlement API: the vendor operations with SigV4
+(`vendor`; `perf.sh` writes one subscription) and, in `demo.sh` and
+`integ.sh`, the tenant-admin operations with the tenant admin's identity
+token (`admin_api`). `integ.sh` also has the tenant admin cut A1 and A2 to
+`app/use` through tenant-identity's tenant API (`PATCH /tenant/users/{username}`),
+so only the admin's identity token carries `entitlements/admin`. The scripts
+create tenants with the vendor scopes only, passed explicitly to
+`create_tenant` (`app/use`, plus `entitlements/admin` for a tenant whose admin
+writes cuts): agents and tools are not identity-provider scopes in v2, they
+are entitlements the vendor writes (spec §5.3). A tenant created without
+`app/use` fails the floor of a stack deployed with `requiredScopes=app/use`,
+and every token is refused at the ingress.
 
 A script that writes a registry entry owns its deletion. Never overwrite a
 `backends/<name>` entry a stack wrote: CloudFormation does not see the

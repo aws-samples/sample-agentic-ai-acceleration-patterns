@@ -562,17 +562,42 @@ ADR-0029, not a benchmark):
 
 ## End-to-end demo
 
-[`scripts/demo.sh`](./scripts/demo.sh) and [`scripts/perf.sh`](./scripts/perf.sh)
-still walk the earlier scope-based flow (narrowed tokens, backend scopes in
-the identity provider's catalogue) and do not run against this design:
-`demo.sh` creates tenants with scopes that are no longer registered and
-writes no subscriptions. Bringing them to the entitlement model is open in
-[`TODO.md`](./TODO.md), and `integ.sh` no longer runs `demo.sh`.
+[`scripts/demo.sh`](./scripts/demo.sh) walks the v2 flow against a deployed
+`RuntimeIsolation-<ingress>` stack. It needs the full demo deploy from
+[Build and deploy the demo](#build-and-deploy-the-demo) and the two vendor
+scopes `app/use` and `entitlements/admin` registered in tenant-identity
+([Prerequisites](#prerequisites)); it checks both before it starts.
 
-Until then the integration test is the runnable walk. By hand, the demo
-agent answers the probe prompts `report` (unit, nonce and the token's
-claims, never the token), `read <tenantId>`, `stream 10`, `tools` and
-`tool <target>/<tool> <json>`.
+```bash
+AWS_REGION=eu-central-1 scripts/demo.sh
+```
+
+| Step | What it shows | Needs |
+|---|---|---|
+| 1 | Tenants A (`app/use entitlements/admin`, admin AA) and B (`app/use`), users A1, A2, B1; the vendor writes plan `demo-standard` and both subscriptions; AA cuts A2 from `crm/update_case` | |
+| 2 | A1's `report`: unit prefix, nonce, the transaction token's `typ`, `iss`, `sub`, `user`, and the header names: no identity token reached the agent | |
+| 3 | A2 sending c1 lands in A1's unit; B1 with c1 and A1's unit id gets its own | `session=tenant` |
+| 4 | A1 resumes c1 on the same microVM (same nonce) | `session` |
+| 5 | No token, a tampered token, an ID token: 401 or 403; the transaction token's `iss` is the ingress's, which the ingress refuses as an identity token | |
+| 6 | Grants: A1 `crm/* default/chat`, A2 `crm/get_account crm/list_cases default/chat`, B1 the same, B1 on `billing` 403 `agent_not_subscribed`, A1 on `billing` `billing/invoke billing/read invoices/*` | `billingBackend` for the billing rows |
+| 7 | `tools` on `default` lists the three `crm` tools (target grain); A2's `crm/update_case` is `tool_not_granted`, its `crm/get_account` is served; `finance` lists A1's two invoice tools (RESPONSE filter) | `billingBackend` for `finance` |
+| 8 | `crm/get_account` returns tenant A's account for A1 and B's for B1; A1's `read` of tenant B is refused by IAM | `tvm` |
+| 9 | The vendor drops `crm/list_cases` from B; B1's next request (fresh identity token, ADR-0043) carries `crm/get_account default/chat` | |
+| 10 | `stream 10` arrives as `text/event-stream` | |
+| 11 | A one-word model prompt ends with `event: usage` | |
+
+A step whose module is off is skipped with a note. The script prints
+statuses, ids, claim names and timings, never a token, credential or header
+value, and on every exit, also on failure, deletes what it wrote: the
+subscriptions, the plan, the demo table items and the tenants.
+
+[`scripts/perf.sh`](./scripts/perf.sh) measures client-side latency on one
+tenant subscribed to `default` with `crm/*` (deleted on exit): scenarios 0 to
+5 (first request, new and warm conversations with `report` and a model
+prompt, parallel requests) and 6 (`tool crm/get_account {}`, the
+tools-gateway path); arguments `[N_COLD] [N_WARM] [N_MODEL] [N_PAR]`
+(default 8 20 8 10), `PERF_OUT=<dir>` keeps the raw samples, and
+`ENDPOINT` with `ENTITLEMENTS_API` measures an unpublished stack.
 
 ## API
 
@@ -748,7 +773,6 @@ requests if DynamoDB errors.
   and a tools gateway's per-tenant rate limit fails open by design.
 - The `agentcore-gateway` ingress never sees the response, so backend
   seconds, tokens and bytes are not attributed there.
-- `scripts/demo.sh` and `scripts/perf.sh` are not yet on this model.
 
 ## Costs
 

@@ -370,3 +370,13 @@ tool_payload() { report_json | jq -c '.result.content[0].text | fromjson' 2>/dev
 
 # tool_call_body CONVERSATION TOOL ARGS_JSON -> the invoke body for the `tool` probe.
 tool_call_body() { jq -nc --arg c "$1" --arg p "tool $2 $3" '{conversationId: $c, prompt: $p}'; }
+
+# jwt_claim TOKEN_VAR NAME -> one claim of the JWT in TOKEN_VAR, decoded and not
+# verified (`sub`, `iss`, `scope`, `exp`), or empty. For non-secret claims only;
+# the token itself is never printed. integ.sh keeps its own `claim`.
+jwt_claim() {
+  local t="${!1:-}" p
+  p="${t#*.}"; p="${p%%.*}"; p="$(printf '%s' "$p" | tr '_-' '/+')"
+  while (( ${#p} % 4 )); do p+='='; done
+  printf '%s' "$p" | base64 -d 2>/dev/null | jq -r --arg c "$2" '.[$c] // empty' 2>/dev/null || true
+}
