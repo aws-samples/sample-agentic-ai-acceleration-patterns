@@ -22,9 +22,24 @@ pipelines that act on that tenant's behalf. The documents are the most
 sensitive data the application holds, and every tenant shares one drop zone
 and one pipeline.
 
+Two problems come with that shared path:
+
+1. **Isolation.** One tenant's documents must never be readable with another
+   tenant's key or by code acting for another tenant, and a tenant must be
+   able to leave with its documents made unreadable.
+2. **Admission.** What counts as an acceptable delivery differs per
+   deployment and per tenant: a page limit, a required form type, a malware
+   scan, a schema check on a sidecar file, a rule a regulated tenant imposes.
+   The vendor cannot know these checks in advance, and a check that reads a
+   tenant's document must run inside the same isolation as the pipeline, not
+   with broad access of its own. The pipeline therefore needs a **validation
+   chain the deployer extends** without touching the pipeline's code or its
+   permissions.
+
 This sample demonstrates **per-tenant encryption of a shared ingestion path
 with AWS KMS**, where the boundary between tenants is enforced by KMS and IAM,
-not by application code:
+not by application code, and **pluggable admission validation** that runs
+inside that boundary:
 
 - Every tenant has **its own KMS key**. Every object a tenant delivers, and
   every object the pipeline derives from it, is encrypted with that key and
@@ -44,6 +59,13 @@ not by application code:
 - **Offboarding is cryptographic.** Deleting a tenant schedules its key for
   deletion; every object encrypted with it becomes unreadable, whether or not
   the object delete has completed.
+- **Validation is a chain, not a hard-coded step.** Built-in structural
+  checks run first; then every **custom validator** the deployer plugged in,
+  in order, each a function in any language or account that receives a
+  short-lived, single-object URL signed by the tenant's session and returns
+  a verdict. A validator holds no AWS permission of its own, so a bad one
+  can read one document for a few minutes and nothing else (P-11, §3.5).
+  Nothing lands until the whole chain accepts.
 
 The sample ships the pattern as a CDK construct, `TenantEncryptedIngestion`,
 plus a thin demo stack, an integration test that proves the boundary from
