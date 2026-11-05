@@ -3,15 +3,15 @@
 
 /**
  * The demo stack (spec C-4, §6.4; standard §4.5): a thin wiring of a
- * `SharedIngress` (with a `default` backend owning `default/chat`) and one
- * `AgentBackend` to the sample's dependencies, plus a second backend
- * (`billing`, owning `billing/read` and `billing/invoke`; ADR-0024,
- * ADR-0025) behind the same ingress on request. It reads tenant-identity's
- * published parameters for the issuer (ADR-0004) and for the scope
- * registration's API (ADR-0025), chooses the ingress and the optional
- * modules from CDK context,
- * and publishes the Runtime ARNs as this sample's parameters (the ingress
- * publishes its own, src/shared-ingress.cdk.ts). The TVM is always on (ADR-0018):
+ * `SharedIngress` (with a `default` agent that needs `default/chat` and may
+ * use `crm/*`) and one `AgentBackend` to the sample's dependencies, plus a
+ * second agent (`billing`, needs `billing/read` and `billing/invoke`, may use
+ * `invoices/*`; ADR-0024, ADR-0032) behind the same ingress on request, and
+ * (v2) two `ToolTarget`s, `crm` and `invoices`, behind two tools gateways (`default` and `finance`, ADR-0041). It
+ * reads tenant-identity's published parameters for the issuer (ADR-0004),
+ * chooses the ingress and the optional modules from CDK context,
+ * and leaves the published interface to the ingress (one JSON parameter,
+ * ADR-0042); the Runtime ARNs are stack outputs. The TVM is always on (ADR-0018):
  * the `tvm` context flag now means "demo tenant data". When true, the demo
  * adds a tenant-partitioned table and its own data-bearing TenantRole and
  * passes it (ADR-0016 lazy trust ARN); when false, the demo passes no role
@@ -20,63 +20,58 @@
  * test name tenant-identity; the construct does not.
  */
 
+import * as path from 'node:path';
 import { Aws, CfnOutput, CfnRule, Duration, Fn, Lazy, RemovalPolicy, Stack, StackProps } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { AgentBackend, type AgentProps } from './agent-backend.cdk';
 import { AGENT_ENV } from './shared/config';
+import { acknowledgeLambdaFindings, functionProps } from './shared/function.cdk';
 import { COST_METRIC_NAMES, type IngressKind, METRIC_NAMES, METRICS_NAMESPACE } from './shared/metrics';
 import { ROUTE } from './shared/registry';
-import type { IdentityApiProps } from './shared/scope-registration.cdk';
 import type { SessionScope } from './shared/session';
 import { TENANT_TAG_KEY, USER_TAG_KEY } from './shared/tvm';
 import { DEFAULT_REGISTRY_PREFIX, GATEWAY_TARGET_NAME, SharedIngress, type SharedIngressProps } from './shared-ingress.cdk';
+import { type ToolDefinition, ToolTarget } from './tool-target.cdk';
+import { CRM_TOOLS } from './tools/demo/crm.function';
+import { DEMO_TOOL_ENV } from './tools/demo/data';
+import { INVOICES_TOOLS } from './tools/demo/invoices.function';
+import { gatewayIdPart } from './tools-gateway.cdk';
 
 /**
  * tenant-identity's published parameters this stack consumes for the issuer
- * (ARCHITECTURE.md §5.1, ADR-0004). The scope registration reads two more,
- * `apiUrl` and `platformInvokePolicyArn` (`IDENTITY_API_PARAMETERS`, ADR-0025).
+ * (ARCHITECTURE.md §5.1, ADR-0004). (v2, ADR-0030) The stack no longer reads
+ * tenant-identity's API: backends register no scopes there.
  */
 export const IDENTITY_PARAMETERS = {
   userPoolId: '/application-plane/shared/identity/userPoolId',
   appClientId: '/application-plane/shared/identity/appClientId',
 } as const;
 
-/**
- * This sample's published parameters (spec §6.4, ARCHITECTURE.md §5.1).
- * `SharedIngress` publishes `endpointUrl`, `ingress`, `ingressRoleArn`,
- * `ingressId` and `tenantRoleArn` under the same prefix itself (ADR-0024);
- * the demo keeps `runtimeArn` for the default backend (back-compat) and adds
- * the billing backend's ARN.
- */
-export const AGENT_RUNTIME_PARAMETERS = {
-  runtimeArn: `${DEFAULT_REGISTRY_PREFIX}runtimeArn`,
-  billingRuntimeArn: `${DEFAULT_REGISTRY_PREFIX}backends-info/billing/runtimeArn`,
-} as const;
-
 /** The second backend's name (ADR-0024): the integ's step 9 calls `/billing/invocations`. */
 export const BILLING_BACKEND = 'billing';
 /**
- * The scopes the demo's backends own (ADR-0025), named after the backend.
- * The default backend owns one; billing owns two, so the agent behind it can
- * tell a read-only token from one that may invoke. A tenant is entitled to a
- * scope by `CreateTenant.scopes` (tenant-identity ADR-0035) and a user by the
- * tenant admin (ADR-0036); the integration test gives tenant A all three and
- * tenant B `default/chat` only.
+ * The demo's agent products (v2, ADR-0032): each agent's own `needs`, named
+ * after the backend, and the `tools` it may use. Which of them a tenant and
+ * a user actually get is the entitlement store's (subscriptions, plans,
+ * cuts), written by the integration driver, not this stack.
  */
-export const DEFAULT_SCOPES = [`${GATEWAY_TARGET_NAME}/chat`] as const;
-export const BILLING_SCOPES = [`${BILLING_BACKEND}/read`, `${BILLING_BACKEND}/invoke`] as const;
+export const DEFAULT_NEEDS = [`${GATEWAY_TARGET_NAME}/chat`] as const;
+export const DEFAULT_TOOLS = ['crm/*'] as const;
+export const BILLING_NEEDS = [`${BILLING_BACKEND}/read`, `${BILLING_BACKEND}/invoke`] as const;
+export const BILLING_TOOLS = ['invoices/*'] as const;
+/** (ADR-0041) The demo's tools gateways: `crm` on `default`, `invoices` on `finance`. */
+export const DEMO_TOOLS_GATEWAYS = { crm: 'default', invoices: 'finance' } as const;
 
 /** The build-time placeholders (standard §4.3). A CloudFormation rule refuses to deploy a stack that carries them. */
 export const PLACEHOLDER = {
   userPoolId: 'PLACEHOLDER-NOT-A-USER-POOL',
   appClientId: 'PLACEHOLDER-NOT-A-CLIENT-ID',
-  apiUrl: 'https://placeholder-not-an-api.example.com/',
-  platformInvokePolicyArn: 'arn:aws:iam::111122223333:policy/PLACEHOLDER-NOT-A-POLICY',
 } as const;
 
 /** Base model id for the demo: the one model the agent calls and the tenant role allows (P-6, ADR-0018). */
@@ -103,9 +98,8 @@ export interface DemoContext {
   readonly ingress: IngressKind;
   readonly sessionScope?: SessionScope;
   readonly requiredScopes?: string[];
-  readonly forwardUserToken: boolean;
-  readonly requireNarrowedToken: boolean;
-  readonly allowedScopes?: string[];
+  /** (v2, ADR-0038) Accept identity tokens that carry `tenants`. Default false. */
+  readonly multiTenant?: boolean;
   readonly tvm: boolean;
   readonly includeUserIdTag: boolean;
   readonly modelId: string;
@@ -126,19 +120,20 @@ export interface DemoContext {
    */
   readonly publishParameters: boolean;
   /**
-   * Add the `billing` backend behind the same ingress (ADR-0024), owning `BILLING_SCOPES`
-   * (ADR-0025). Default off: the one-backend form. The demo deploy and the integration
+   * Add the `billing` backend behind the same ingress (ADR-0024), needing `BILLING_NEEDS`
+   * (ADR-0032). Default off: the one-backend form. The demo deploy and the integration
    * stacks turn it on.
    */
   readonly billingBackend?: boolean;
   /**
-   * The owner marker both backends register their scopes under (`AgentBackend.scopeOwner`,
-   * ADR-0025). Unset: each stack owns its scopes alone, so a second demo stack in the
-   * same account fails its deploy on `default/chat`. Several stacks that share one
-   * tenant-identity catalogue (the integration test's four) pass one value and MUST be
-   * destroyed together: the first one destroyed removes the scopes.
+   * The owner marker of the backends' and tool targets' name reservations
+   * (`AgentBackend.owner`, `ToolTarget.owner`, ADR-0035). Each stack has its own
+   * entitlement store, so the default per-stack marker is right unless stacks
+   * share an ingress.
    */
-  readonly scopeOwner?: string;
+  readonly owner?: string;
+  /** (v2) `transactionToken.keyGeneration` (spec §6.2.3); default 1. Bumping it rotates the signing key. */
+  readonly keyGeneration?: number;
 }
 
 type ContextReader = (key: string) => unknown;
@@ -212,9 +207,7 @@ export function parseDemoContext(read: ContextReader, region?: string): DemoCont
     ingress,
     sessionScope,
     requiredScopes: list(read, 'requiredScopes'),
-    forwardUserToken: flag(read, 'forwardUserToken'),
-    requireNarrowedToken: flag(read, 'requireNarrowedToken'),
-    allowedScopes: list(read, 'allowedScopes'),
+    multiTenant: flag(read, 'multiTenant'),
     tvm: flag(read, 'tvm'),
     includeUserIdTag: flag(read, 'includeUserIdTag'),
     modelId,
@@ -224,7 +217,8 @@ export function parseDemoContext(read: ContextReader, region?: string): DemoCont
     outputTokensPerMinute: integer(read, 'outputTokensPerMinute'),
     publishParameters: read('publishParameters') === undefined ? true : flag(read, 'publishParameters'),
     billingBackend: read('billingBackend') === undefined ? undefined : flag(read, 'billingBackend'),
-    scopeOwner: text(read, 'scopeOwner'),
+    owner: text(read, 'owner'),
+    keyGeneration: integer(read, 'keyGeneration'),
   };
 }
 
@@ -239,10 +233,28 @@ export interface RuntimeIsolationDemoStackProps extends StackProps {
   readonly agentCodePath: string;
   /** Publish under `/application-plane/shared/agent-runtime/`. Overrides `context.publishParameters`; the integration test turns it off on all but one stack, which then use a stack-scoped prefix. */
   readonly publishParameters?: boolean;
+  /**
+   * Write the ingress's published interface (spec §6.4) at all. Default true. The integration
+   * test sets it on one stack only: six stacks writing 20-odd parameters each at once exceed
+   * Parameter Store's 3 writes per second per account and fail to delete (ADR-0042).
+   */
+  readonly publishInterface?: boolean;
   /** The cost dashboard's name (account-wide). Default `RuntimeIsolation-<ingress>`; the integration test passes its stack name so several stacks of one ingress coexist. */
   readonly dashboardName?: string;
-  /** The scope owner marker for both backends. Overrides `context.scopeOwner`; see `DemoContext.scopeOwner`. */
-  readonly scopeOwner?: string;
+  /** The owner marker of the name reservations. Overrides `context.owner`; see `DemoContext.owner`. */
+  readonly owner?: string;
+  /**
+   * The issuer's user pool and app client, instead of tenant-identity's
+   * published parameters. The integration test passes a second
+   * tenant-identity deployment's (`shared-pool-multi-tenant`) here.
+   */
+  readonly identity?: { readonly userPoolId: string; readonly appClientId: string };
+  /**
+   * TEST ONLY (integration stacks): the demo tools' test mode, a read of
+   * another tenant's item with the same credentials on request (integ step
+   * 20). Never set in the demo app.
+   */
+  readonly toolTestMode?: boolean;
 }
 
 export class RuntimeIsolationDemoStack extends Stack {
@@ -258,23 +270,29 @@ export class RuntimeIsolationDemoStack extends Stack {
   readonly tenantRole?: iam.Role;
   /** The per-tenant cost dashboard, `RuntimeIsolation-<ingress>` (P-10); only with `perTenantMetrics` (ADR-0021). */
   readonly dashboard?: cloudwatch.Dashboard;
+  /** (v2) The demo tool targets. */
+  readonly crm: ToolTarget;
+  readonly invoices: ToolTarget;
+  /** (v2) The demo tool functions and, with demo tenant data, their tenant roles (P-15). */
+  readonly crmFunction: NodejsFunction;
+  readonly invoicesFunction: NodejsFunction;
+  readonly toolTenantRoles: iam.Role[] = [];
 
   constructor(scope: Construct, id: string, props: RuntimeIsolationDemoStackProps) {
     super(scope, id, props);
     const ctx = props.context;
 
     // The issuer (ADR-0004): tenant-identity's shared pool, read from its
-    // published parameters at deploy time; the scope registration reads the
-    // identity API's URL and invoke policy the same way (ADR-0025). The build
-    // synthesises with placeholders no account can resolve, and the rule
+    // published parameters at deploy time. The build synthesises with placeholders no account can resolve, and the rule
     // below makes sure a placeholder template is refused by CloudFormation.
     let userPoolId: string;
     let appClientId: string;
-    let identityApi: IdentityApiProps | undefined;
-    if (ctx.identityParameterPlaceholders) {
+    if (props.identity !== undefined) {
+      userPoolId = props.identity.userPoolId;
+      appClientId = props.identity.appClientId;
+    } else if (ctx.identityParameterPlaceholders) {
       userPoolId = PLACEHOLDER.userPoolId;
       appClientId = PLACEHOLDER.appClientId;
-      identityApi = { apiUrl: PLACEHOLDER.apiUrl, platformInvokePolicyArn: PLACEHOLDER.platformInvokePolicyArn };
       new CfnRule(this, 'RefusePlaceholderDeployment', {
         assertions: [
           {
@@ -347,19 +365,15 @@ export class RuntimeIsolationDemoStack extends Stack {
     }
 
     const agent: AgentProps = { codePath: props.agentCodePath, modelId: ctx.modelId, environment: agentEnvironment };
-    // One marker for both backends (ADR-0025): unset, each registration is its own owner.
-    const scopeOwner = props.scopeOwner ?? ctx.scopeOwner;
+    // One marker for every reservation of this stack (ADR-0035); unset, each resource is its own owner.
+    const owner = props.owner ?? ctx.owner;
     this.ingress = new SharedIngress(this, 'SharedIngress', {
-      identity: { discoveryUrl, allowedClientIds: [appClientId] },
+      identity: { discoveryUrl, allowedClientIds: [appClientId], multiTenant: ctx.multiTenant ?? false },
       ingress: ctx.ingress,
       registryPrefix: this.registryPrefix,
+      publish: props.publishInterface ?? true,
       session: ctx.sessionScope === undefined ? undefined : { scope: ctx.sessionScope },
       requiredScopes: ctx.requiredScopes,
-      delegation: {
-        forwardUserToken: ctx.forwardUserToken,
-        requireNarrowedToken: ctx.requireNarrowedToken,
-        allowedScopes: ctx.allowedScopes,
-      },
       tvm,
       perTenantMetrics: ctx.perTenantMetrics ?? false,
       tenantLimits:
@@ -367,30 +381,57 @@ export class RuntimeIsolationDemoStack extends Stack {
           ? undefined
           : { requestsPerMinute: ctx.requestsPerMinute, outputTokensPerMinute: ctx.outputTokensPerMinute },
       defaultBackend: GATEWAY_TARGET_NAME,
+      transactionToken: ctx.keyGeneration === undefined ? undefined : { keyGeneration: ctx.keyGeneration },
+      // ADR-0041: two tools gateways, each with its own Policy engine. `finance` trims
+      // tools/list to the exact tools in scope (its RESPONSE interceptor).
+      toolsGateways: { [DEMO_TOOLS_GATEWAYS.crm]: {}, [DEMO_TOOLS_GATEWAYS.invoices]: { responseFilter: true } },
     });
     this.agentBackend = new AgentBackend(this, 'AgentBackend', {
       name: GATEWAY_TARGET_NAME,
       ingress: this.ingress,
       agent,
-      scopes: [...DEFAULT_SCOPES],
-      identityApi,
-      scopeOwner,
+      needs: [...DEFAULT_NEEDS],
+      tools: [...DEFAULT_TOOLS],
+      owner,
     });
     callerRoleArn = this.ingress.tvmCallerRole.roleArn;
 
+    // v2: the demo tool targets behind the tools gateways (ADR-0034, ADR-0041).
+    // With demo tenant data each tool reads and writes the calling tenant's
+    // item through its own TVM: a tool tenant role it may assume with the
+    // TenantId tag from the signed context, limited to that tenant's
+    // partition (P-15); without it, synthetic answers (src/tools/demo).
+    const crm = demoToolTarget(this, 'CrmTools', this.ingress, 'crm', 'crm.function.ts', [...CRM_TOOLS], owner, DEMO_TOOLS_GATEWAYS.crm, {
+      table: this.table,
+      actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
+      testMode: props.toolTestMode === true,
+    });
+    const invoices = demoToolTarget(this, 'InvoicesTools', this.ingress, 'invoices', 'invoices.function.ts', [...INVOICES_TOOLS], owner, DEMO_TOOLS_GATEWAYS.invoices, {
+      table: this.table,
+      actions: ['dynamodb:GetItem'],
+      testMode: props.toolTestMode === true,
+    });
+    this.crm = crm.target;
+    this.invoices = invoices.target;
+    this.crmFunction = crm.fn;
+    this.invoicesFunction = invoices.fn;
+    for (const role of [crm.role, invoices.role]) {
+      if (role !== undefined) {
+        this.toolTenantRoles.push(role);
+      }
+    }
+
     // A second backend behind the same ingress (ADR-0024): the same agent
-    // code and model, its own Runtime, registry entry and scopes (ADR-0025).
-    // A token carrying `default/chat` alone reaches `/default/invocations`
-    // and gets 403 on `/billing/invocations`; one carrying `billing/read` or
-    // `billing/invoke` reaches billing.
+    // code and model, its own Runtime, registry entry, needs and tools
+    // (ADR-0032). Which tenants may use it is the entitlement store's.
     if (wantsBillingBackend(ctx)) {
       this.billing = new AgentBackend(this, 'BillingBackend', {
         name: BILLING_BACKEND,
         ingress: this.ingress,
         agent,
-        scopes: [...BILLING_SCOPES],
-        identityApi,
-        scopeOwner,
+        needs: [...BILLING_NEEDS],
+        tools: [...BILLING_TOOLS],
+        owner,
       });
     }
 
@@ -458,26 +499,9 @@ export class RuntimeIsolationDemoStack extends Stack {
       this.dashboard = costDashboard(this, ctx.ingress, props.dashboardName ?? dashboardName(ctx.ingress));
     }
 
-    // The published interface (spec §6.4, standard §1.1). The ingress
-    // publishes endpointUrl, baseUrl, ingress, ingressRoleArn, ingressId,
-    // tenantRoleArn and, on agentcore-gateway, gatewayIdentifier under its
-    // prefix (ADR-0024); the demo adds the Runtime ARNs. The default prefix
-    // is account-wide, so one stack per account and Region publishes there.
-    if (publish) {
-      new ssm.StringParameter(this, 'RuntimeArnParameter', {
-        parameterName: AGENT_RUNTIME_PARAMETERS.runtimeArn,
-        stringValue: this.agentBackend.runtimeArn,
-        description: 'runtime-isolation: the default backend\'s AgentCore Runtime ARN',
-      });
-      if (this.billing !== undefined) {
-        new ssm.StringParameter(this, 'BillingRuntimeArnParameter', {
-          parameterName: AGENT_RUNTIME_PARAMETERS.billingRuntimeArn,
-          stringValue: this.billing.runtimeArn,
-          description: 'runtime-isolation: the billing backend\'s AgentCore Runtime ARN (ADR-0024)',
-        });
-      }
-    }
-
+    // The published interface (spec §6.4, ADR-0042) is the ingress's one JSON
+    // parameter; the Runtime ARNs are the RuntimeArn and BillingRuntimeArn
+    // outputs below, not parameters of their own.
     const endpointUrl = ctx.ingress === 'api-gateway' ? `${this.ingress.endpointUrl}/${ROUTE}` : this.ingress.urlFor(GATEWAY_TARGET_NAME);
     new CfnOutput(this, 'EndpointUrl', { value: endpointUrl });
     new CfnOutput(this, 'RuntimeArn', { value: this.agentBackend.runtimeArn });
@@ -495,7 +519,87 @@ export class RuntimeIsolationDemoStack extends Stack {
     if (this.table !== undefined) {
       new CfnOutput(this, 'DemoTableName', { value: this.table.tableName });
     }
+    // (v2) What the integration driver and scripts/demo.sh reach directly.
+    new CfnOutput(this, 'Issuer', { value: this.ingress.issuer });
+    new CfnOutput(this, 'EntitlementsApiUrl', { value: this.ingress.entitlementsApiUrl });
+    new CfnOutput(this, 'EntitlementsTableName', { value: this.ingress.entitlementStore.tableName });
+    for (const [name, gateway] of Object.entries(this.ingress.toolsGateways)) {
+      const part = gatewayIdPart(name);
+      new CfnOutput(this, `ToolsGatewayUrl${part}`, { value: gateway.gatewayUrl });
+      new CfnOutput(this, `PolicyEngineId${part}`, { value: gateway.policyEngine.attrPolicyEngineId });
+    }
+    const filter = this.ingress.toolsGatewayNamed(DEMO_TOOLS_GATEWAYS.invoices)?.responseFilter;
+    if (filter !== undefined) {
+      new CfnOutput(this, 'ResponseFilterFunctionName', { value: filter.functionName });
+    }
+    new CfnOutput(this, 'CrmFunctionName', { value: this.crmFunction.functionName });
+    new CfnOutput(this, 'InvoicesFunctionName', { value: this.invoicesFunction.functionName });
+    new CfnOutput(this, 'CrmPolicySecondsToActive', { value: this.crm.policySecondsToActive });
+    new CfnOutput(this, 'InvoicesPolicySecondsToActive', { value: this.invoices.policySecondsToActive });
+    if (this.toolTenantRoles.length > 0) {
+      new CfnOutput(this, 'CrmToolTenantRoleArn', { value: this.toolTenantRoles[0].roleArn });
+    }
   }
+}
+
+/** The demo tools' tenant data access (P-15): the table, what the tool may do there, and the test mode. */
+interface DemoToolData {
+  readonly table?: dynamodb.TableV2;
+  readonly actions: string[];
+  readonly testMode: boolean;
+}
+
+/**
+ * One demo tool target: a Lambda from src/tools/demo and its `ToolTarget`
+ * (spec C-4). With a demo table, the tool's own tenant role (spec §6.1,
+ * P-15): assumable only by this function's role with exactly a non-empty
+ * `TenantId` session tag, and allowing `data.actions` only on the item of
+ * that tenant (`dynamodb:LeadingKeys` = `TENANT#${aws:PrincipalTag/TenantId}`).
+ */
+function demoToolTarget(
+  scope: Construct,
+  id: string,
+  ingress: SharedIngress,
+  name: string,
+  file: string,
+  tools: ToolDefinition[],
+  owner: string | undefined,
+  gateway: string,
+  data: DemoToolData,
+): { target: ToolTarget; fn: NodejsFunction; role?: iam.Role } {
+  const fn = new NodejsFunction(scope, `${id}Function`, {
+    ...functionProps(scope, `${id}Logs`, Duration.seconds(10)),
+    entry: path.join(__dirname, 'tools', 'demo', file),
+    description: `runtime-isolation demo tool target ${name}: the calling tenant's data through the tool's TVM (P-15)`,
+  });
+  acknowledgeLambdaFindings(fn);
+  let role: iam.Role | undefined;
+  if (data.table !== undefined) {
+    role = new iam.Role(scope, `${id}TenantRole`, {
+      description: `Tool tenant role of ${name} (spec §6.1, P-15): assumable only by the tool function with a TenantId session tag; that tenant's demo item only`,
+      assumedBy: new iam.ArnPrincipal(fn.role!.roleArn)
+        .withConditions({
+          'StringLike': { [`aws:RequestTag/${TENANT_TAG_KEY}`]: '?*' },
+          'ForAllValues:StringEquals': { 'aws:TagKeys': [TENANT_TAG_KEY] },
+        })
+        .withSessionTags(),
+      maxSessionDuration: Duration.hours(1),
+    });
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'OwnTenantItemOnly',
+        actions: data.actions,
+        resources: [data.table.tableArn],
+        conditions: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': [`${TENANT_KEY_PREFIX}\${aws:PrincipalTag/${TENANT_TAG_KEY}}`] } },
+      }),
+    );
+    fn.addEnvironment(DEMO_TOOL_ENV.TABLE_NAME, data.table.tableName);
+  }
+  if (data.testMode) {
+    fn.addEnvironment(DEMO_TOOL_ENV.TEST_MODE, 'true');
+  }
+  const target = new ToolTarget(scope, id, { name, ingress, gateway, kind: 'lambda', function: fn, tools, owner, tvm: role === undefined ? undefined : { role } });
+  return { target, fn, role };
 }
 
 /** A Contributor Insights rule over a JSON CloudWatch Logs group, enabled; counts by default, sums `ValueOf` with `AggregateOn: 'Sum'`. */

@@ -2,36 +2,42 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * API Gateway Lambda authoriser (spec C-3a, P-3, ADR-0024). Verifies the
- * bearer token with the shared verifier, resolves the backend the route names
- * through the registry and requires one of that backend's scopes (ADR-0025),
- * then returns Allow
- * with `{ tenantId, sub, backend, runtimeArn }` as context, so the stage's
- * JSON access log carries the tenant and the backend on every request (P-9).
- * Any refusal is an explicit Deny; the body API Gateway returns is its fixed
- * text, never anything from the token.
+ * API Gateway Lambda authoriser (spec C-3a, P-3, ADR-0024; v2, ADR-0030,
+ * ADR-0031, ADR-0038). Verifies the identity token with the shared verifier
+ * and selects the tenant (`tenant_id`, or `tenants` plus `X-Tenant-Id`),
+ * resolves the backend the route names through the registry, then runs the
+ * v2 authority step: one `BatchGetItem` for the tenant row and the user's
+ * cut row, the grant rule, and the mint (KMS `Sign`, cached). It returns
+ * Allow with `{ tenantId, sub, backend, runtimeArn, transactionToken, txn,
+ * grantSize, mint }` as context: the stage's JSON access log carries the
+ * tenant (P-9), and the integration Lambda forwards the token to the agent.
+ * Any refusal is an explicit Deny whose context carries only a fixed reason
+ * code, which the `ACCESS_DENIED` gateway response renders (spec §5.1).
  *
- * The integration Lambda re-runs the same checks itself (one shared pipeline
- * on both ingresses, src/shared/request.ts); this authoriser is the gate
- * that keeps a bad token, an unknown route or a token without the backend's
- * scopes from ever starting the streaming Lambda. API Gateway caches the
- * result per `Authorization` header AND `context.path` (ADR-0015, amended by
- * ADR-0024; src/shared-ingress.cdk.ts), so one token's Allow for one route is
- * never served for another; the policy also names the one method ARN.
+ * This function's role is the only one allowed `kms:Sign` on the signing key
+ * on this ingress (C-13). API Gateway caches the result per `Authorization`
+ * header, `context.path` and, with `identity.multiTenant`, `X-Tenant-Id`
+ * (src/shared-ingress.cdk.ts), so one token's Allow for one route and one
+ * tenant is never served for another. The cache life is shorter than the
+ * mint's reuse margin, so a cached token always has a stream's worth of life
+ * left.
  */
 
 import type { APIGatewayAuthorizerResult, APIGatewayRequestAuthorizerEvent } from 'aws-lambda';
-import { readIngressConfig } from '../shared/config';
-import { hasAnyScope, headerValue } from '../shared/headers';
+import { AuthorityError, type AuthorityResolver } from '../shared/authority';
+import { isLambdaRuntime, readIngressConfig } from '../shared/config';
+import { headerValue } from '../shared/headers';
 import { errorName, log } from '../shared/logger';
 import { BackendRegistry, backendFromPath, isValidBackendName, RegistryError } from '../shared/registry';
-import type { RegistryResolver } from '../shared/request';
-import { bearerToken, TokenError, TokenVerifier } from '../shared/verifier';
+import { authorityFor, PUBLIC_REASONS, type RegistryResolver, verifierFor } from '../shared/request';
+import { TENANT_HEADER } from '../shared/tenant';
+import { bearerToken, TokenError, type TokenVerifier } from '../shared/verifier';
 
 /** What the authoriser needs; the Lambda entry point builds them at init, tests inject them. */
 export interface AuthorizerDependencies {
-  readonly verifier: TokenVerifier;
+  readonly verifier: Pick<TokenVerifier, 'verify'>;
   readonly registry: RegistryResolver;
+  readonly authority: Pick<AuthorityResolver, 'resolve'>;
   /** The backend served at the bare `/invocations` route; undefined when there is none. */
   readonly defaultBackend?: string;
   /** Resolves once init's fetches are done (ADR-0023); the first request awaits it. */
@@ -44,26 +50,36 @@ export interface AuthorizerContext {
   readonly sub: string;
   readonly backend: string;
   readonly runtimeArn: string;
+  /** (v2) The transaction token for the integration Lambda to forward. Never logged. */
+  readonly transactionToken: string;
+  readonly txn: string;
+  readonly grantSize: string;
+  readonly mint: 'hit' | 'miss';
 }
 
-/** The policy for one method ARN. Allow carries the tenant and backend context; Deny carries none. */
-export function buildPolicy(methodArn: string, effect: 'Allow' | 'Deny', context?: AuthorizerContext): APIGatewayAuthorizerResult {
+/** The policy for one method ARN. Allow carries the context; Deny carries at most a public reason code. */
+export function buildPolicy(
+  methodArn: string,
+  effect: 'Allow' | 'Deny',
+  context?: AuthorizerContext,
+  reason?: string,
+): APIGatewayAuthorizerResult {
+  const denyContext = reason !== undefined && PUBLIC_REASONS.has(reason) ? { reason } : undefined;
   return {
     principalId: context?.sub ?? 'unauthorized',
     policyDocument: {
       Version: '2012-10-17',
       Statement: [{ Action: 'execute-api:Invoke', Effect: effect, Resource: methodArn }],
     },
-    ...(context === undefined ? {} : { context: { ...context } }),
+    ...(context !== undefined ? { context: { ...context } } : denyContext !== undefined ? { context: denyContext } : {}),
   };
 }
 
 /**
  * The backend name of the request. API Gateway fills `pathParameters.backend`
- * for the `/{backend}/invocations` resource; the bare `/invocations` route of
- * the one-agent form (bare `/invocations`) has no parameter, so the path is read and the
- * default backend applies (ADR-0024). A parameter that is not a valid name is
- * undefined (404), so an arbitrary client segment is never logged or looked up.
+ * for the `/{backend}/invocations` resource; the bare `/invocations` route
+ * has no parameter, so the path is read and the default backend applies
+ * (ADR-0024). A parameter that is not a valid name is undefined (404).
  */
 function backendOf(event: APIGatewayRequestAuthorizerEvent, defaultBackend: string | undefined): string | undefined {
   const parameter = event.pathParameters?.backend;
@@ -79,32 +95,27 @@ export async function authorize(event: APIGatewayRequestAuthorizerEvent, deps: A
   const fields = { ingress: 'api-gateway', component: 'authorizer' };
   let tenantId: string;
   let sub: string;
-  let scopes: string[];
   try {
-    ({ tenantId, sub, scopes } = await deps.verifier.verify(bearerToken(headerValue(event.headers, 'authorization'))));
+    ({ tenantId, sub } = await deps.verifier.verify(
+      bearerToken(headerValue(event.headers, 'authorization')),
+      headerValue(event.headers, TENANT_HEADER),
+    ));
   } catch (error) {
     if (error instanceof TokenError) {
       log.warn('token refused', { ...fields, reason: error.reason, status: error.status });
-    } else {
-      log.error('authorizer failed', { ...fields, error: errorName(error) });
+      return buildPolicy(event.methodArn, 'Deny', undefined, error.reason);
     }
+    log.error('authorizer failed', { ...fields, error: errorName(error) });
     return buildPolicy(event.methodArn, 'Deny');
   }
-  // The route's backend (ADR-0024): unknown or draining is refused here, so
-  // the streaming Lambda never starts for a route the registry does not serve.
   const backend = backendOf(event, deps.defaultBackend);
   if (backend === undefined) {
     log.warn('request refused', { ...fields, tenantId, reason: 'unknown_backend', status: 404 });
     return buildPolicy(event.methodArn, 'Deny');
   }
-  let runtimeArn: string;
+  let entry;
   try {
-    const entry = await deps.registry.resolve(backend);
-    if (!hasAnyScope(scopes, entry.scopes)) {
-      log.warn('request refused', { ...fields, tenantId, backend, reason: 'backend_scope_missing', status: 403 });
-      return buildPolicy(event.methodArn, 'Deny');
-    }
-    runtimeArn = entry.runtimeArn;
+    entry = await deps.registry.resolve(backend);
   } catch (error) {
     if (error instanceof RegistryError) {
       log.warn('request refused', { ...fields, tenantId, backend, reason: error.reason });
@@ -113,33 +124,68 @@ export async function authorize(event: APIGatewayRequestAuthorizerEvent, deps: A
     }
     return buildPolicy(event.methodArn, 'Deny');
   }
-  return buildPolicy(event.methodArn, 'Allow', { tenantId, sub, backend, runtimeArn });
+  // v2: entitlement read, grant rule, mint (spec §3.6). A refusal costs no KMS call.
+  try {
+    const authority = await deps.authority.resolve(tenantId, sub, backend, entry);
+    log.info('request authorised', {
+      ...fields,
+      tenantId,
+      agent: backend,
+      txn: authority.txn,
+      grantSize: authority.grantSize,
+      mint: authority.mint,
+      noToolsGranted: authority.noToolsGranted,
+    });
+    // The transaction token rides in the Allow `context`. Spike V-17
+    // (2026-11-04) settled the bound: the REQUEST authoriser context carried
+    // 24,000 bytes intact to the integration, cached and uncached, so it is
+    // not a limit (and it is not a header, so the 20,480-byte client header
+    // quota does not apply). The limit is the Runtime's: InvokeAgentRuntime
+    // refuses a custom header value over 10,240 bytes, and api-gateway-ingress
+    // forwards this token in one. The mint enforces it (MAX_TOKEN_BYTES,
+    // src/shared/mint.ts, ADR-0045): a larger token is refused here with
+    // grant_too_large and never reaches the context.
+    return buildPolicy(event.methodArn, 'Allow', {
+      tenantId,
+      sub,
+      backend,
+      runtimeArn: entry.runtimeArn,
+      transactionToken: authority.token,
+      txn: authority.txn,
+      grantSize: String(authority.grantSize),
+      mint: authority.mint,
+    });
+  } catch (error) {
+    if (error instanceof AuthorityError) {
+      log.warn('request refused', { ...fields, tenantId, backend, reason: error.reason, status: error.status });
+      return buildPolicy(event.methodArn, 'Deny', undefined, error.reason);
+    }
+    log.error('authorizer failed', { ...fields, tenantId, backend, error: errorName(error) });
+    return buildPolicy(event.methodArn, 'Deny');
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Lambda entry point. Built at module load: the config read, the verifier's
 // discovery and JWKS fetch and the default backend's registry read run during
-// init, at boosted CPU and off the first request's path (ADR-0023). The first
-// request awaits `ready`; a failed fetch resolves too and the first call
-// retries. A missing or malformed variable fails init, naming it (intended).
+// init, at boosted CPU and off the first request's path (ADR-0023).
 // ---------------------------------------------------------------------------
 
 function defaultDependencies(): AuthorizerDependencies {
   const config = readIngressConfig();
-  const verifier = new TokenVerifier({
-    discoveryUrl: config.discoveryUrl,
-    allowedClientIds: config.allowedClientIds,
-    requiredScopes: config.requiredScopes,
-    requireNarrowedToken: config.delegation.requireNarrowedToken,
-    allowedScopes: config.delegation.allowedScopes,
-  });
+  const verifier = verifierFor(config);
   const registry = new BackendRegistry(config.registry);
+  const authority = authorityFor(config);
+  if (authority === undefined) {
+    throw new Error('The API Gateway authoriser mints the transaction token: RI_TXN_KEY_ID must be set');
+  }
   const ready = Promise.all([verifier.warm(), registry.warm(config.registry.defaultBackend)]).then(() => undefined);
-  return { verifier, registry, defaultBackend: config.registry.defaultBackend, ready };
+  return { verifier, registry, authority, defaultBackend: config.registry.defaultBackend, ready };
 }
 
-const deps = defaultDependencies();
+let deps: AuthorizerDependencies | undefined = isLambdaRuntime() ? defaultDependencies() : undefined;
 
 export async function handler(event: APIGatewayRequestAuthorizerEvent): Promise<APIGatewayAuthorizerResult> {
+  deps ??= defaultDependencies();
   return authorize(event, deps);
 }

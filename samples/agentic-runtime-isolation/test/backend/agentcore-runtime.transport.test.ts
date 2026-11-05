@@ -47,13 +47,13 @@ describe('customHeaders', () => {
     expect(customHeaders(request())).toEqual({});
   });
 
-  it('sets the user-token header only with a forwarded token, the credential header only with credentials', () => {
-    expect(customHeaders(request({ userToken: 'jwt' }))).toEqual({ [RUNTIME_HEADERS.USER_TOKEN]: 'jwt' });
+  it('sets the transaction-token header only with a minted token, the credential header only with credentials (ADR-0031)', () => {
+    expect(customHeaders(request({ transactionToken: 'jwt' }))).toEqual({ [RUNTIME_HEADERS.TRANSACTION_TOKEN]: 'jwt' });
     expect(customHeaders(request({ credentials }))).toEqual({ [RUNTIME_HEADERS.TENANT_CREDENTIALS]: encodeCredentials(credentials) });
   });
 
   it('the header names are the Runtime custom-header family the Gateway allows (ADR-0006)', () => {
-    expect(RUNTIME_HEADERS.USER_TOKEN).toMatch(/^X-Amzn-Bedrock-AgentCore-Runtime-Custom-/);
+    expect(RUNTIME_HEADERS.TRANSACTION_TOKEN).toMatch(/^X-Amzn-Bedrock-AgentCore-Runtime-Custom-/);
     expect(RUNTIME_HEADERS.TENANT_CREDENTIALS).toMatch(/^X-Amzn-Bedrock-AgentCore-Runtime-Custom-/);
   });
 });
@@ -64,14 +64,14 @@ describe('AgentCoreRuntimeBackend', () => {
 
   it('transportHeaders carries the unit id plus the custom headers (the Gateway path, ADR-0002)', () => {
     const backend = new AgentCoreRuntimeBackend();
-    expect(backend.transportHeaders(request({ userToken: 'jwt' }))).toEqual({
+    expect(backend.transportHeaders(request({ transactionToken: 'jwt' }))).toEqual({
       [RUNTIME_HEADERS.SESSION_ID]: 's-abcdefghijklmnopqrstuvwxyz-conversationA1x0001',
-      [RUNTIME_HEADERS.USER_TOKEN]: 'jwt',
+      [RUNTIME_HEADERS.TRANSACTION_TOKEN]: 'jwt',
     });
   });
 
   it('runtimePayload is {prompt} and nothing else from the request', () => {
-    expect(JSON.parse(Buffer.from(runtimePayload(request({ userToken: 'jwt', credentials }))).toString())).toEqual({ prompt: 'hello' });
+    expect(JSON.parse(Buffer.from(runtimePayload(request({ transactionToken: 'jwt', credentials }))).toString())).toEqual({ prompt: 'hello' });
   });
 
   it("invoke calls InvokeAgentRuntime on the request's Runtime with the unit id as runtimeSessionId and streams the response", async () => {
@@ -117,7 +117,7 @@ describe('AgentCoreRuntimeBackend', () => {
     }
     mock.on(InvokeAgentRuntimeCommand).resolves({ contentType: 'application/json', response: body() as any });
     const backend = new AgentCoreRuntimeBackend(new BedrockAgentCoreClient({}));
-    await backend.invoke(request({ userToken: 'jwt', credentials }));
+    await backend.invoke(request({ transactionToken: 'jwt', credentials }));
     const command = mock.commandCalls(InvokeAgentRuntimeCommand)[0].args[0];
     // The middleware is registered on the command's stack under its name.
     const names = (command.middlewareStack as any).identify() as string[];
@@ -129,5 +129,12 @@ describe('AgentCoreRuntimeBackend', () => {
     expect(mock).toHaveReceivedCommandTimes(InvokeAgentRuntimeCommand, 0);
     mock.on(InvokeAgentRuntimeCommand).resolves({ contentType: 'application/json' });
     await expect(new AgentCoreRuntimeBackend(new BedrockAgentCoreClient({})).invoke(request())).rejects.toThrow(/no response body/);
+  });
+});
+
+describe('v2 header names (ADR-0031)', () => {
+  it('the transaction-token header replaces the v1 user-token header', () => {
+    expect(RUNTIME_HEADERS.TRANSACTION_TOKEN).toBe('X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token');
+    expect(Object.values(RUNTIME_HEADERS)).not.toContain('X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Token');
   });
 });

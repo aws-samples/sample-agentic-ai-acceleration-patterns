@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0007: Downscope by requiring a narrowed bearer token, not by exchanging at ingress
 
-- Status: Accepted
+- Status: Superseded by ADR-0031
 - Date: 2026-10-26
 - Deciders: Dave Roberts (PSA)
 
@@ -24,3 +24,5 @@ Option 2, only valid with `forwardUserToken`.
 
 ## Consequences
 Easier: no new issuer. Harder: clients must know the exchange; the README shows the call. Revisit with an IdP that supports RFC 8693 on access tokens, or a passport-token sample.
+
+**2026-11-02.** Superseded by ADR-0031: the ingress mints a narrowed transaction token itself from the entitlement store, so clients no longer narrow with a refresh token and `delegation.requireNarrowedToken` is removed.

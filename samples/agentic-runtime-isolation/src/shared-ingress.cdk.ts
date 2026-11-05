@@ -14,10 +14,13 @@
  * Everything that is identical across backends lives here: the token check,
  * the product-wide scope floor (`requiredScopes`), the token vending machine
  * (always on, ADR-0018), the per-tenant limit (ADR-0020), the stage throttle,
- * the log drain (ADR-0019) and the published parameters. The ingress role's
- * invoke grant is a Runtime ARN pattern conditioned on the `ri:ingress` tag
- * that `AgentBackend` sets at creation; the Runtime's own resource policy
- * remains the hard gate (P-1, ADR-0001).
+ * the log drain (ADR-0019) and the published parameter (ADR-0042). (v2) Also the
+ * entitlement store (C-12, ADR-0030), the token signer and the issuer's
+ * discovery routes (C-13, ADR-0037), the entitlement API (C-14) and, unless
+ * `toolsGateway: false`, the tools gateways (C-15, ADR-0034, ADR-0041): one
+ * named `default` unless `toolsGateways` names several. The
+ * function that mints (the authoriser on `api-gateway`, the interceptor on
+ * `agentcore-gateway`) is the only principal allowed `kms:Sign`.
  *
  * The construct creates none of its data dependencies: the issuer and, with
  * `tvm`, a data-bearing tenant role are props. It applies no cdk-nag aspect
@@ -25,53 +28,65 @@
  */
 
 import * as path from 'node:path';
-import { Annotations, Duration, Lazy, Names, RemovalPolicy, Stack, Token, Validations } from 'aws-cdk-lib';
+import { Annotations, CfnResource, Duration, Lazy, Names, RemovalPolicy, Stack, Token, Validations } from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import * as lambda from 'aws-cdk-lib/aws-lambda';
-import { NodejsFunction, NodejsFunctionProps } from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as kms from 'aws-cdk-lib/aws-kms';
+import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { baseModelId, foundationModelArn, INVOKE_ACTION, isInferenceProfileId, modelResourceArns } from './backend/agentcore-runtime.cdk';
 import type { BackendKind } from './backend/backend';
+import { EntitlementApi } from './entitlements/entitlement-api.cdk';
 import { ENV } from './shared/config';
+import { EntitlementStore } from './shared/entitlement-store.cdk';
+import { acknowledgeLambdaFindings, functionProps } from './shared/function.cdk';
+import type { JwsAlgorithm } from './shared/jws';
 import { LogDrain } from './shared/log-drain';
 import type { IngressKind } from './shared/metrics';
+import { DEFAULT_MINT_CACHE_MAX_ENTRIES, DEFAULT_TOOLS_GATEWAY, MAX_TRANSACTION_TTL_SECONDS, MIN_TRANSACTION_TTL_SECONDS, TOOLS_GATEWAY_NAME_PATTERN } from './shared/mint';
 import { acknowledgeGranularFinding, nagFindingResource } from './shared/nag';
 import { BACKEND_NAME_PATTERN, INGRESS_TAG_KEY, REGISTRY_BACKENDS_SEGMENT, ROUTE } from './shared/registry';
 import { LONGEST_STREAM, MAX_DRAIN } from './shared/registry-entry.cdk';
 import { CONVERSATION_ID_PATTERN, type SessionScope } from './shared/session';
+import { TENANT_HEADER, TENANT_ID_PATTERN } from './shared/tenant';
+import { KEY_SPEC, signingKey, TokenSigner, WELL_KNOWN } from './shared/token-signer.cdk';
 import { DEFAULT_CACHE_MAX_ENTRIES, TENANT_TAG_KEY, USER_TAG_KEY } from './shared/tvm';
+import {
+  DEFAULT_MAX_TOOLS_PER_GATEWAY,
+  gatewayIdPart,
+  MAX_TOOLS_PER_GATEWAY_LIMIT,
+  type ResolvedToolsGateway,
+  ToolsGateway,
+} from './tools-gateway.cdk';
+
+export { acknowledgeLambdaFindings, functionProps } from './shared/function.cdk';
 
 // ---------------------------------------------------------------------------
 // Props (spec §3.3)
 // ---------------------------------------------------------------------------
 
-/** The issuer whose access tokens the ingress accepts (spec §6.2). */
+/** The issuer whose access tokens the ingress accepts (spec §6.2.1). */
 export interface IdentityProps {
   /** OIDC discovery URL of the issuer (`.../.well-known/openid-configuration`). */
   readonly discoveryUrl: string;
   /** `client_id` values accepted. Non-empty. */
   readonly allowedClientIds: string[];
+  /**
+   * (v2, R-1, ADR-0038) Accept identity tokens that carry `tenants`; the
+   * request then names one with `X-Tenant-Id`. Default false: such a token
+   * is refused as in v1.
+   */
+  readonly multiTenant?: boolean;
 }
 
 /** The `session` module (ADR-0013, ADR-0002): conversations persist in a claim-derived unit. */
 export interface SessionProps {
-  /** `'user'` hashes `tenant_id|sub`; `'tenant'` hashes `tenant_id` only. Default `'user'`. */
+  /** `'tenant'` hashes `tenant_id` only; `'user'` hashes `tenant_id|sub`. Default `'tenant'` (v2, ADR-0039). */
   readonly scope?: SessionScope;
-}
-
-/** The `delegation` module (P-5, ADR-0006, ADR-0007). */
-export interface DelegationProps {
-  /** Forward the user's token to the agent in the backend's user-token transport. Default false. */
-  readonly forwardUserToken?: boolean;
-  /** Refuse a token whose scopes are not a subset of `allowedScopes`. Only valid with `forwardUserToken`. Default false. */
-  readonly requireNarrowedToken?: boolean;
-  /** The scopes a forwarded token may carry. Required with `requireNarrowedToken`. */
-  readonly allowedScopes?: string[];
 }
 
 /** The `tvm` module (P-8, ADR-0012, ADR-0018). The TVM is always on; this prop only customises it. */
@@ -89,11 +104,7 @@ export interface TvmProps {
   readonly claimTags?: Record<string, string>;
   /** Credential lifetime, 900 to 3600. Default 900. */
   readonly durationSeconds?: number;
-  /**
-   * Bound on cached credential sets per ingress instance (ADR-0022): least
-   * recently used evicted first. One entry is one tag set: one per tenant,
-   * or one per user with `includeUserIdTag`. Default 1000.
-   */
+  /** Bound on cached credential sets per ingress instance (ADR-0022). Default 1000. */
   readonly cacheMaxEntries?: number;
 }
 
@@ -101,11 +112,7 @@ export interface TvmProps {
 export interface TenantLimitsProps {
   /** Requests one tenant may make per minute, across all backends. Default 60. `0` turns the request limit off. */
   readonly requestsPerMinute?: number;
-  /**
-   * Model output tokens one tenant may use per minute. Unset: no token limit.
-   * `api-gateway` ingress only: the AgentCore Gateway interceptor never sees
-   * the response, so it cannot count tokens.
-   */
+  /** Model output tokens one tenant may use per minute. Unset: no token limit. `api-gateway` ingress only. */
   readonly outputTokensPerMinute?: number;
 }
 
@@ -117,22 +124,74 @@ export interface StageThrottleProps {
   readonly burstLimit?: number;
 }
 
+/** (v2, ADR-0031, ADR-0036, ADR-0037) The transaction token the ingress mints. Always on. */
+export interface TransactionTokenProps {
+  /** `exp - iat`, 120 s to 900 s (the AgentCore Gateway refuses a token with 60 s or less left). Default 300 s. */
+  readonly ttl?: Duration;
+  /** Default `'RS256'`; `'ES256'` was accepted by the Gateway in spike V-8. */
+  readonly algorithm?: JwsAlgorithm;
+  /** Bump to rotate: a new key signs, the previous stays in the JWKS (spec §6.2.3). Default 1. */
+  readonly keyGeneration?: number;
+  /** Minted tokens kept per ingress instance, LRU. Default 1000. */
+  readonly cacheMaxEntries?: number;
+}
+
+/** (v2, ADR-0030, ADR-0033) The entitlement store and API. Always on. */
+export interface EntitlementsProps {
+  /** Identity-token scope the tenant-admin operations require. Default `'entitlements/admin'`. */
+  readonly adminScope?: string;
+  /** Bound on `agents` in a tenant or plan row. Default 1000. */
+  readonly maxAgentsPerTenant?: number;
+  /** Bound on `tools` in a tenant or plan row. Default 1000. */
+  readonly maxToolsPerTenant?: number;
+}
+
+/**
+ * (v2, ADR-0034, ADR-0041) One tools gateway. On by default as one gateway
+ * named `default`; `toolsGateway: false` creates none; `toolsGateways`
+ * names several.
+ */
+export interface ToolsGatewayOptions {
+  /** One native bucket per `tenant_id`. Default `{ requestsPerSecond: 10 }`. */
+  readonly tenantRateLimit?: { readonly requestsPerSecond: number };
+  /** Named tenants with their own rate (requests per second), at most 1,000. */
+  readonly tenantRateLimitOverrides?: Record<string, number>;
+  /** Provisioned concurrency on the tools interceptor. Default 1; 0 turns it off. */
+  readonly interceptorProvisionedConcurrency?: number;
+  /** `exp` of the signed tenant context. Default 60 s; 10 s to 300 s. */
+  readonly contextLifetime?: Duration;
+  /**
+   * (ADR-0041) Synth fails when the `ToolTarget`s on this gateway would
+   * catalogue more tools: the Policy engine's 400 KB schema quota holds about
+   * 330 one-field tools (V-16a). Default 300; 1 to 1,000.
+   */
+  readonly maxToolsPerGateway?: number;
+  /**
+   * (ADR-0041) A RESPONSE interceptor that trims each `tools/list` page to
+   * the exact tools in `scope`. Default false: the list is filtered natively
+   * at target grain.
+   */
+  readonly responseFilter?: boolean;
+}
+
 /** The registry prefix every ingress uses unless told otherwise; one per account and Region (standard §1.1, ADR-0024). */
 export const DEFAULT_REGISTRY_PREFIX = '/application-plane/shared/agent-runtime/';
 /** How long an ingress process serves a registry entry before refreshing it (ADR-0024). */
 export const DEFAULT_REGISTRY_TTL = Duration.seconds(60);
-/**
- * The longest `registryTtl`: a backend's entry drains for one TTL plus the
- * longest stream inside one Lambda invocation of the registry-entry handler,
- * which must stay under Lambda's 15-minute ceiling (750 s).
- */
+/** The longest `registryTtl` (750 s): a drain plus the longest stream fits one registry-entry Lambda invocation. */
 export const MAX_REGISTRY_TTL = MAX_DRAIN.minus(LONGEST_STREAM);
-/**
- * The conventional default backend name, and so the Gateway target name for
- * the one-agent form (ADR-0024). `default`, since ADR-0025 names a backend's
- * scopes after it (`default/chat`); the registry entry and the route follow.
- */
+/** The conventional default backend name, and so the Gateway target name for the one-agent form (ADR-0024). */
 export const GATEWAY_TARGET_NAME = 'default';
+/** Default transaction-token life (spec §3.3). */
+export const DEFAULT_TRANSACTION_TOKEN_TTL = Duration.seconds(300);
+/** Default admin scope of the tenant-admin entitlement operations (spec §3.3). */
+export const DEFAULT_ADMIN_SCOPE = 'entitlements/admin';
+/**
+ * The longest API Gateway authoriser cache (v2). The authoriser's Allow now
+ * carries a minted token, so the cache must be shorter than the token's
+ * reuse margin; v1's five minutes (ADR-0023) would hand out expired tokens.
+ */
+export const AUTHORIZER_CACHE_TTL = Duration.seconds(60);
 
 export interface SharedIngressProps {
   readonly identity: IdentityProps;
@@ -142,71 +201,80 @@ export interface SharedIngressProps {
   readonly ingress: IngressKind;
   /** Session mapping (ADR-0013). Unset: a fresh unit per request. */
   readonly session?: SessionProps;
-  /**
-   * Scopes every token must carry, whatever the backend (ADR-0005, AND): the
-   * product floor, for a scope every backend shares (say `platform/active`).
-   * Each backend owns its own scopes on top (`AgentBackend.scopes`, any one
-   * of them, ADR-0025); on `agentcore-gateway` the floor is also the
-   * `CUSTOM_JWT` authoriser's `allowedScopes`, so a token narrowed to one
-   * backend's scope alone must still carry the floor. Unset: no ingress-wide
-   * scope check, which is the usual choice since ADR-0025.
-   */
+  /** Scopes every identity token must carry (ADR-0005, AND): the application floor, for example `app/use`. */
   readonly requiredScopes?: string[];
-  readonly delegation?: DelegationProps;
   /**
-   * The TVM is always on (ADR-0018). Unset: the construct creates a
-   * model-only `TenantModelRole`. Set: customise the TVM, and optionally
-   * supply a role that also reaches tenant data. One tenant role serves
-   * every backend (ADR-0024).
+   * Removed in v2 (ADR-0031): the agent receives a transaction token. Setting
+   * it fails synth.
+   * @deprecated
    */
+  readonly delegation?: never;
+  /** The TVM is always on (ADR-0018); this customises it. */
   readonly tvm?: TvmProps;
-  /**
-   * Per-tenant limits (ADR-0020), on by default at 60 requests per tenant per
-   * minute, so one tenant cannot use the shared stage, Runtimes and model
-   * quota for all. Pass `false` to turn them off.
-   */
+  /** Per-tenant limits (ADR-0020), on by default at 60 requests per tenant per minute. `false` turns them off. */
   readonly tenantLimits?: TenantLimitsProps | false;
-  /** The shared stage throttle on the `api-gateway` ingress. Default 50 rps, burst 25. */
+  /**
+   * The shared stage throttle on the `api-gateway` ingress. Default 50 rps,
+   * burst 25, and a synth warning when left unset: the stage is one bucket
+   * for every tenant and every refusal, and the per-tenant limit runs behind
+   * it, so size it to tenants x `tenantLimits.requestsPerMinute` / 60 (scale
+   * review 2026-11-05).
+   */
   readonly stageThrottle?: StageThrottleProps;
   /**
-   * Emit per-tenant CloudWatch metrics (EMF, ADR-0021). Default false.
-   * COST: about 9 custom metrics per tenant per ingress (10,000 tenants is
-   * about 90,000 metrics, billed monthly per metric). Without it the ingress
-   * log carries the same figures per request with the tenantId, for Logs
-   * Insights and Contributor Insights.
+   * Reserved concurrency for the `api-gateway` integration Lambda, which is
+   * held for the whole stream (up to 2 minutes). Unset, it draws on the
+   * account pool with the authoriser, the tools interceptors and every tool
+   * function, and a burst of long streams starves them (scale review
+   * 2026-11-05). Concurrency needed is about rps x average stream seconds.
    */
-  readonly perTenantMetrics?: boolean;
+  readonly ingressReservedConcurrency?: number;
   /**
-   * The SSM parameter prefix of the backend registry and of this ingress's
-   * published parameters (ADR-0024). Must start and end with `/`. Default
-   * `/application-plane/shared/agent-runtime/`; the default is one per
-   * account and Region, so a second ingress in the same account must set
-   * its own.
+   * The key that signs tool contexts (`_ri_ctx`) for every tools gateway.
+   * `algorithm` default `RS256`; `ES256` moves the one `kms:Sign` per
+   * admitted `tools/call` onto the KMS ECC request quota, separate from the
+   * RSA quota the transaction-token mint shares (scale review 2026-11-05).
    */
+  readonly toolContextKey?: { readonly algorithm?: JwsAlgorithm };
+  /** Emit per-tenant CloudWatch metrics (EMF, ADR-0021). Default false (cost per tenant). */
+  readonly perTenantMetrics?: boolean;
+  /** The SSM parameter prefix of the registry and the published parameters (ADR-0024). Default `/application-plane/shared/agent-runtime/`. */
   readonly registryPrefix?: string;
   /**
-   * How long an ingress process serves a registry entry before refreshing it.
-   * Default 60 seconds; from 1 to `MAX_REGISTRY_TTL` (750) seconds (ADR-0024).
+   * Write the published interface (spec §6.4) under `registryPrefix`. Default true. `false`
+   * writes none of it (the registry entries of backends and tool targets still appear); a
+   * consumer then reads the construct's members or stack outputs. Several ingress stacks
+   * deployed at once share Parameter Store's 3 writes per second per account (ADR-0042).
    */
+  readonly publish?: boolean;
+  /** Cache life of registry entries, plans and the tool catalogue (v2). Default 60 s; 1 s to 750 s. */
   readonly registryTtl?: Duration;
-  /**
-   * The backend served at the bare `/invocations` route, so a deployment of
-   * one backend keeps today's URL (the one-agent form, a `SharedIngress`
-   * with `defaultBackend`, sets it; the demo uses `default`). Must match
-   * `[a-z0-9-]{1,32}`. Unset: only `/{backend}/invocations` exists.
-   */
+  /** The backend served at the bare `/invocations` route. `[a-z0-9-]{1,32}`. */
   readonly defaultBackend?: string;
+  /** (v2) The transaction token. */
+  readonly transactionToken?: TransactionTokenProps;
+  /** (v2) The entitlement store and API. */
+  readonly entitlements?: EntitlementsProps;
+  /**
+   * (v2) The tools gateway: shorthand for `toolsGateways: { default: ... }`.
+   * Default on; `false` creates none. Not together with `toolsGateways`.
+   */
+  readonly toolsGateway?: ToolsGatewayOptions | false;
+  /**
+   * (v2, ADR-0041) Several tools gateways by name (`[a-z0-9-]{1,32}`), each
+   * with its own Policy engine, interceptor and rate limits. A `ToolTarget`
+   * names its gateway (default `default`). Not together with `toolsGateway`.
+   */
+  readonly toolsGateways?: Record<string, ToolsGatewayOptions>;
 }
 
 /** The props after defaults and validation; what the construct and its tests reason about. */
 export interface ResolvedOptions {
   readonly backend: BackendKind;
   readonly ingress: IngressKind;
+  readonly multiTenant: boolean;
   readonly sessionScope?: SessionScope;
   readonly requiredScopes?: string[];
-  readonly forwardUserToken: boolean;
-  readonly requireNarrowedToken: boolean;
-  readonly allowedScopes?: string[];
   /** The TVM is always on (ADR-0018); `role` undefined means the construct's default model-only role. */
   readonly tvm: {
     readonly role?: iam.IRole;
@@ -217,12 +285,74 @@ export interface ResolvedOptions {
   };
   /** Undefined when per-tenant limits are off. */
   readonly tenantLimits?: { readonly requestsPerMinute: number; readonly outputTokensPerMinute?: number };
-  readonly stageThrottle: { readonly rateLimit: number; readonly burstLimit: number };
+  readonly stageThrottle: { readonly rateLimit: number; readonly burstLimit: number; readonly explicit: boolean };
+  readonly ingressReservedConcurrency?: number;
+  readonly toolContextAlgorithm: JwsAlgorithm;
   readonly perTenantMetrics: boolean;
-  /** The registry (ADR-0024). */
   readonly registryPrefix: string;
+  readonly publish: boolean;
   readonly registryTtlSeconds: number;
   readonly defaultBackend?: string;
+  /** (v2) */
+  readonly transactionToken: {
+    readonly ttlSeconds: number;
+    readonly algorithm: JwsAlgorithm;
+    readonly keyGeneration: number;
+    readonly cacheMaxEntries: number;
+    /** A cached token is reused only while more than this is left (see `authorizerCacheTtlSeconds`). */
+    readonly reuseMarginSeconds: number;
+  };
+  /**
+   * (v2) The API Gateway authoriser cache: at most 60 s and at most
+   * `ttl - LONGEST_STREAM`, so a token handed from the cache still outlives
+   * a whole stream. The mint's reuse margin is this plus the longest stream.
+   */
+  readonly authorizerCacheTtlSeconds: number;
+  /** (v2) */
+  readonly entitlements: { readonly adminScope: string; readonly maxAgentsPerTenant: number; readonly maxToolsPerTenant: number };
+  /** (v2, ADR-0041) The tools gateways by name; empty when `toolsGateway: false`. */
+  readonly toolsGateways: Readonly<Record<string, ResolvedToolsGateway>>;
+}
+
+/** Validates one tools gateway's options (spec §3.3); `prop` names it in errors. */
+function resolveToolsGateway(t: ToolsGatewayOptions, prop: string, fail: (prop: string, message: string) => never): ResolvedToolsGateway {
+  const requestsPerSecond = t.tenantRateLimit?.requestsPerSecond ?? 10;
+  if (!Number.isInteger(requestsPerSecond) || requestsPerSecond < 1) {
+    fail(`${prop}.tenantRateLimit.requestsPerSecond`, `must be a positive integer (got ${String(requestsPerSecond)})`);
+  }
+  const overrides = t.tenantRateLimitOverrides ?? {};
+  const entries = Object.entries(overrides);
+  if (entries.length > 1000) {
+    fail(`${prop}.tenantRateLimitOverrides`, `must name at most 1000 tenants (got ${entries.length})`);
+  }
+  for (const [tenantId, rate] of entries) {
+    if (!TENANT_ID_PATTERN.test(tenantId)) {
+      fail(`${prop}.tenantRateLimitOverrides`, `key '${tenantId}' must match ${TENANT_ID_PATTERN.source}`);
+    }
+    if (!Number.isInteger(rate) || rate < 1) {
+      fail(`${prop}.tenantRateLimitOverrides`, `rate for '${tenantId}' must be a positive integer`);
+    }
+  }
+  const pc = t.interceptorProvisionedConcurrency ?? 1;
+  if (!Number.isInteger(pc) || pc < 0) {
+    fail(`${prop}.interceptorProvisionedConcurrency`, `must be a non-negative integer (got ${String(pc)})`);
+  }
+  const contextLifetimeSeconds = (t.contextLifetime ?? Duration.seconds(60)).toSeconds();
+  if (!Number.isInteger(contextLifetimeSeconds) || contextLifetimeSeconds < 10 || contextLifetimeSeconds > 300) {
+    fail(`${prop}.contextLifetime`, `must be a whole number of seconds from 10 to 300 (got ${String(contextLifetimeSeconds)})`);
+  }
+  const maxToolsPerGateway = t.maxToolsPerGateway ?? DEFAULT_MAX_TOOLS_PER_GATEWAY;
+  if (!Number.isInteger(maxToolsPerGateway) || maxToolsPerGateway < 1 || maxToolsPerGateway > MAX_TOOLS_PER_GATEWAY_LIMIT) {
+    fail(`${prop}.maxToolsPerGateway`, `must be an integer from 1 to ${MAX_TOOLS_PER_GATEWAY_LIMIT} (got ${String(maxToolsPerGateway)})`);
+  }
+  return {
+    requestsPerSecond,
+    overrides,
+    interceptorProvisionedConcurrency: pc,
+    contextLifetimeSeconds,
+    maxToolsPerGateway,
+    responseFilter: t.responseFilter ?? false,
+  };
 }
 
 /** IAM tag key shape (`[\p{L}\p{Z}\p{N}_.:/=+\-@]{1,128}`), restricted here to the plain subset. */
@@ -242,6 +372,10 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
   if (props.identity.allowedClientIds.length === 0 || props.identity.allowedClientIds.some((c) => c.length === 0)) {
     fail('identity.allowedClientIds', 'must be a non-empty list of non-empty client ids');
   }
+  const multiTenant = props.identity.multiTenant ?? false;
+  if (typeof multiTenant !== 'boolean') {
+    fail('identity.multiTenant', 'must be a boolean');
+  }
 
   const backend = props.backend ?? 'agentcore-runtime';
   if (backend !== 'agentcore-runtime') {
@@ -250,13 +384,15 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
   if (props.ingress !== 'api-gateway' && props.ingress !== 'agentcore-gateway') {
     fail('ingress', `must be 'api-gateway' or 'agentcore-gateway' (got ${String(props.ingress)})`);
   }
-  if (props.ingress === 'agentcore-gateway' && backend !== 'agentcore-runtime') {
-    fail('ingress', "'agentcore-gateway' is valid only with the 'agentcore-runtime' backend");
+
+  if ((props as { delegation?: unknown }).delegation !== undefined) {
+    fail('delegation', 'is removed in v2; the agent receives a transaction token (ADR-0031)');
   }
 
   let sessionScope: SessionScope | undefined;
   if (props.session !== undefined) {
-    sessionScope = props.session.scope ?? 'user';
+    // v2, ADR-0039: tenant scope by default when session mapping is on.
+    sessionScope = props.session.scope ?? 'tenant';
     if (sessionScope !== 'user' && sessionScope !== 'tenant') {
       fail('session.scope', `must be 'user' or 'tenant' (got ${String(sessionScope)})`);
     }
@@ -268,24 +404,7 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
     }
   }
 
-  const forwardUserToken = props.delegation?.forwardUserToken ?? false;
-  const requireNarrowedToken = props.delegation?.requireNarrowedToken ?? false;
-  const allowedScopes = props.delegation?.allowedScopes;
-  if (requireNarrowedToken && !forwardUserToken) {
-    fail('delegation.requireNarrowedToken', 'is valid only with delegation.forwardUserToken');
-  }
-  if (requireNarrowedToken && (allowedScopes === undefined || allowedScopes.length === 0)) {
-    fail('delegation.allowedScopes', 'is required with delegation.requireNarrowedToken');
-  }
-  if (!requireNarrowedToken && allowedScopes !== undefined) {
-    fail('delegation.allowedScopes', 'is only meaningful with delegation.requireNarrowedToken');
-  }
-  if (allowedScopes?.some((s) => s.trim().length === 0 || /\s/.test(s))) {
-    fail('delegation.allowedScopes', 'must contain scope strings without whitespace');
-  }
-
-  // The TVM is always on (ADR-0018). `props.tvm` only customises it; its
-  // absence is the default model-only role, not an off switch.
+  // The TVM is always on (ADR-0018).
   const tvmProps = props.tvm ?? {};
   const durationSeconds = tvmProps.durationSeconds ?? 900;
   if (!Number.isInteger(durationSeconds) || durationSeconds < 900 || durationSeconds > 3600) {
@@ -340,12 +459,23 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
   if (props.stageThrottle !== undefined && props.ingress !== 'api-gateway') {
     fail('stageThrottle', "is valid only with the 'api-gateway' ingress");
   }
+  const ingressReservedConcurrency = props.ingressReservedConcurrency;
+  if (ingressReservedConcurrency !== undefined) {
+    if (props.ingress !== 'api-gateway') {
+      fail('ingressReservedConcurrency', "is valid only with the 'api-gateway' ingress");
+    }
+    if (!Number.isInteger(ingressReservedConcurrency) || ingressReservedConcurrency < 1) {
+      fail('ingressReservedConcurrency', `must be a positive integer (got ${String(ingressReservedConcurrency)})`);
+    }
+  }
+  const toolContextAlgorithm = props.toolContextKey?.algorithm ?? 'RS256';
+  if (toolContextAlgorithm !== 'RS256' && toolContextAlgorithm !== 'ES256') {
+    fail('toolContextKey.algorithm', `must be 'RS256' or 'ES256' (got ${String(toolContextAlgorithm)})`);
+  }
   if (!(rateLimit > 0) || !Number.isInteger(burstLimit) || burstLimit < 1) {
     fail('stageThrottle', 'rateLimit must be > 0 and burstLimit a positive integer');
   }
 
-  // The registry (ADR-0024). A token inside the prefix (a stack name) is
-  // allowed; the two slashes around it must be literal.
   const registryPrefix = props.registryPrefix ?? DEFAULT_REGISTRY_PREFIX;
   if (!registryPrefix.startsWith('/') || !registryPrefix.endsWith('/')) {
     fail('registryPrefix', `must start and end with / (got ${registryPrefix})`);
@@ -358,21 +488,83 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
     fail('defaultBackend', `must match ${BACKEND_NAME_PATTERN.source} (got ${props.defaultBackend})`);
   }
 
+  // v2: the transaction token (spec §3.3).
+  const txn = props.transactionToken ?? {};
+  const ttlSeconds = (txn.ttl ?? DEFAULT_TRANSACTION_TOKEN_TTL).toSeconds();
+  if (!Number.isInteger(ttlSeconds) || ttlSeconds < MIN_TRANSACTION_TTL_SECONDS || ttlSeconds > MAX_TRANSACTION_TTL_SECONDS) {
+    fail('transactionToken.ttl', `must be a whole number of seconds from ${MIN_TRANSACTION_TTL_SECONDS} to ${MAX_TRANSACTION_TTL_SECONDS} (got ${String(ttlSeconds)})`);
+  }
+  const algorithm = txn.algorithm ?? 'RS256';
+  if (algorithm !== 'RS256' && algorithm !== 'ES256') {
+    fail('transactionToken.algorithm', `must be 'RS256' or 'ES256' (got ${String(algorithm)})`);
+  }
+  const keyGeneration = txn.keyGeneration ?? 1;
+  if (!Number.isInteger(keyGeneration) || keyGeneration < 1) {
+    fail('transactionToken.keyGeneration', `must be a positive integer (got ${String(keyGeneration)})`);
+  }
+  const mintCacheMaxEntries = txn.cacheMaxEntries ?? DEFAULT_MINT_CACHE_MAX_ENTRIES;
+  if (!Number.isInteger(mintCacheMaxEntries) || mintCacheMaxEntries < 1) {
+    fail('transactionToken.cacheMaxEntries', `must be a positive integer (got ${String(mintCacheMaxEntries)})`);
+  }
+  const streamSeconds = LONGEST_STREAM.toSeconds();
+  const authorizerCacheTtlSeconds =
+    props.ingress === 'api-gateway' ? Math.min(AUTHORIZER_CACHE_TTL.toSeconds(), Math.max(0, ttlSeconds - streamSeconds)) : 0;
+  const reuseMarginSeconds = authorizerCacheTtlSeconds + streamSeconds;
+
+  // v2: entitlements (spec §3.3).
+  const adminScope = props.entitlements?.adminScope ?? DEFAULT_ADMIN_SCOPE;
+  if (adminScope.length === 0 || /\s/.test(adminScope)) {
+    fail('entitlements.adminScope', 'must be a scope string without whitespace');
+  }
+  const maxAgentsPerTenant = props.entitlements?.maxAgentsPerTenant ?? 1000;
+  if (!Number.isInteger(maxAgentsPerTenant) || maxAgentsPerTenant < 1 || maxAgentsPerTenant > 1000) {
+    fail('entitlements.maxAgentsPerTenant', `must be an integer from 1 to 1000 (got ${String(maxAgentsPerTenant)})`);
+  }
+  const maxToolsPerTenant = props.entitlements?.maxToolsPerTenant ?? 1000;
+  if (!Number.isInteger(maxToolsPerTenant) || maxToolsPerTenant < 1 || maxToolsPerTenant > 1000) {
+    fail('entitlements.maxToolsPerTenant', `must be an integer from 1 to 1000 (got ${String(maxToolsPerTenant)})`);
+  }
+
+  // v2: the tools gateways (spec §3.3, ADR-0041). `toolsGateway` is shorthand for `{ default: ... }`.
+  const toolsGateways: Record<string, ResolvedToolsGateway> = {};
+  if (props.toolsGateways !== undefined) {
+    if (props.toolsGateway !== undefined) {
+      fail('toolsGateway', 'and toolsGateways must not both be set; toolsGateway is shorthand for toolsGateways: { default: ... } (ADR-0041)');
+    }
+    const named = Object.entries(props.toolsGateways);
+    if (named.length === 0) {
+      fail('toolsGateways', 'must name at least one gateway; use toolsGateway: false for none');
+    }
+    for (const [name, t] of named) {
+      if (!TOOLS_GATEWAY_NAME_PATTERN.test(name)) {
+        fail('toolsGateways', `name '${name}' must match ${TOOLS_GATEWAY_NAME_PATTERN.source}`);
+      }
+      toolsGateways[name] = resolveToolsGateway(t ?? {}, `toolsGateways.${name}`, fail);
+    }
+  } else if (props.toolsGateway !== false) {
+    toolsGateways[DEFAULT_TOOLS_GATEWAY] = resolveToolsGateway(props.toolsGateway ?? {}, 'toolsGateway', fail);
+  }
+
   return {
     backend,
     ingress: props.ingress,
+    multiTenant,
     sessionScope,
     requiredScopes: props.requiredScopes,
-    forwardUserToken,
-    requireNarrowedToken,
-    allowedScopes,
     tvm,
     tenantLimits,
-    stageThrottle: { rateLimit, burstLimit },
+    stageThrottle: { rateLimit, burstLimit, explicit: props.stageThrottle !== undefined },
+    ingressReservedConcurrency,
+    toolContextAlgorithm,
     perTenantMetrics: props.perTenantMetrics ?? false,
     registryPrefix,
+    publish: props.publish ?? true,
     registryTtlSeconds,
     defaultBackend: props.defaultBackend,
+    transactionToken: { ttlSeconds, algorithm, keyGeneration, cacheMaxEntries: mintCacheMaxEntries, reuseMarginSeconds },
+    authorizerCacheTtlSeconds,
+    entitlements: { adminScope, maxAgentsPerTenant, maxToolsPerTenant },
+    toolsGateways,
   };
 }
 
@@ -380,22 +572,31 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
 // The construct
 // ---------------------------------------------------------------------------
 
-/** API Gateway stage name; part of `endpointUrl` on the `api-gateway` ingress. */
+/** API Gateway stage name; part of `endpointUrl` on the `api-gateway` ingress and of the issuer API's URL. */
 export const STAGE_NAME = 'prod';
 /** Spike V-5: the integration timeout caps the stream; two minutes, not the 29 s default. */
 export const INTEGRATION_TIMEOUT = Duration.minutes(2);
-/** How long API Gateway caches an authoriser result per `Authorization` header and request path (ADR-0015, ADR-0023, ADR-0024). */
-export const AUTHORIZER_CACHE_TTL = Duration.minutes(5);
+
+/** The tools gateway values a `ToolTarget` in another stack needs (the published document, ADR-0042). */
+export interface ToolsGatewayRef {
+  /** (ADR-0041) The gateway's name. Default `default`. */
+  readonly name?: string;
+  readonly gatewayIdentifier: string;
+  readonly gatewayUrl?: string;
+  readonly gatewayRoleArn: string;
+  readonly policyEngineId: string;
+  readonly contextKeyId: string;
+}
 
 /**
- * What `AgentBackend` needs from an ingress in another stack (ADR-0024):
- * the values `SharedIngress` publishes under its registry prefix. Build one
- * with `SharedIngress.fromParameters`, or by hand from the same parameters.
+ * What `AgentBackend` and `ToolTarget` need from an ingress in another stack
+ * (ADR-0024): the values `SharedIngress` publishes under its registry
+ * prefix, one JSON document (ADR-0042). Build one with `SharedIngress.fromParameters`.
  */
 export interface SharedIngressRef {
-  /** The registry prefix the ingress resolves routes through; the backend writes `${registryPrefix}backends/<name>`. */
+  /** The registry prefix the ingress resolves routes through. */
   readonly registryPrefix: string;
-  /** The ingress base URL, so the backend can state its own `endpointUrl`. Optional. */
+  /** The ingress base URL. Optional. */
   readonly endpointUrl?: string;
   /** The one principal every Runtime behind this ingress trusts (P-1). */
   readonly ingressRoleArn: string;
@@ -405,14 +606,16 @@ export interface SharedIngressRef {
   readonly ingress: IngressKind;
   /** The Gateway identifier; required with the `'agentcore-gateway'` ingress. */
   readonly gatewayIdentifier?: string;
-  /** The tenant role every model call is signed by; the backend adds its one-model statement to it (ADR-0018). */
+  /** The tenant role every model call is signed by (ADR-0018). */
   readonly tenantRoleArn: string;
-  /**
-   * Whether the ingress forwards the user's token (`delegation.forwardUserToken`),
-   * so the Runtime admits that header (ADR-0006). Not a published parameter:
-   * the header allowlist is decided at synth. Default false.
-   */
-  readonly forwardUserToken?: boolean;
+  /** (v2) The transaction-token issuer, for the agent's environment. */
+  readonly issuer?: string;
+  /** (v2) The entitlement store table, for the name reservations (ADR-0035). */
+  readonly entitlementsTableName?: string;
+  /** (v2) The `default` tools gateway; undefined when the ingress has none. */
+  readonly tools?: ToolsGatewayRef;
+  /** (v2, ADR-0041) Every tools gateway by name; `default` is also `tools`. */
+  readonly toolsGateways?: Readonly<Record<string, ToolsGatewayRef>>;
 }
 
 /** What each ingress variant hands back to the constructor. */
@@ -426,32 +629,114 @@ interface IngressWiring {
   registryReaders: iam.IRole[];
   /** The drain between this variant's writers and its log groups (ADR-0019). */
   logDrain: LogDrain;
+  /** (v2) The one function that mints the transaction token. */
+  minter: NodejsFunction;
+  /** (v2) The REST API that serves the issuer's routes and the entitlement API. */
+  issuerApi: apigateway.RestApi;
+  /** (v2) `<baseUrl>`: the issuer. */
+  issuer: string;
+  /** (v2) Every function that needs `RI_ISSUER` (the identity-token verifiers refuse it). */
+  verifiers: NodejsFunction[];
 }
 
 export class SharedIngress extends Construct {
   /**
-   * Reads another stack's ingress from its published parameters (ADR-0024).
-   * `ingress` must be given: which parameters exist and whether a Gateway
-   * target is created are decided at synth, before a parameter can be read.
+   * Reads another stack's ingress from its one published parameter,
+   * `<registryPrefix>ingress` (ADR-0024, ADR-0042): a JSON `PublishedIngress`
+   * document. CloudFormation cannot parse JSON at deploy time, so this is a
+   * synth-time context lookup (`ssm.StringParameter.valueFromLookup`, like
+   * `Vpc.fromLookup`): synth needs AWS credentials for the ingress's account
+   * and Region, the consuming stack needs `env: { account, region }`, and the
+   * value is cached in `cdk.context.json`. After the ingress is replaced (or
+   * its values change), run `cdk context --reset <key>` (the key is
+   * `ssm:account=<account>:parameterName=<registryPrefix>ingress:region=<region>`)
+   * so the next synth reads it again.
+   *
+   * `ingress`, when given, must match the document's. (v2) Which tools
+   * gateways the ref carries: none with `toolsGateway: false`, the named ones
+   * with `toolsGateways` (each must be in the document), else every gateway
+   * the document lists. On the first synth, before the context provider has
+   * run, CDK hands back a `dummy-value-for-` placeholder; the ref is then
+   * built from placeholder values (gateways `toolsGateways ?? ['default']`)
+   * so the synth succeeds and the toolkit can fill the context in.
    */
   static fromParameters(
     scope: Construct,
     id: string,
     registryPrefix: string,
-    ingress: IngressKind,
-    options: { readonly forwardUserToken?: boolean } = {},
+    ingress?: IngressKind,
+    options: { readonly toolsGateway?: boolean; readonly toolsGateways?: readonly string[] } = {},
   ): SharedIngressRef {
     const holder = new Construct(scope, id);
-    const read = (name: string) => ssm.StringParameter.valueForStringParameter(holder, `${registryPrefix}${name}`);
+    const stack = Stack.of(holder);
+    const parameterName = `${registryPrefix}${PUBLISHED.ingress}`;
+    const where = `SharedIngress.fromParameters(${parameterName})`;
+    for (const name of options.toolsGateways ?? []) {
+      if (!TOOLS_GATEWAY_NAME_PATTERN.test(name)) {
+        throw new Error(`SharedIngress.fromParameters: toolsGateways name '${name}' must match ${TOOLS_GATEWAY_NAME_PATTERN.source}`);
+      }
+    }
+    if (Token.isUnresolved(stack.account) || Token.isUnresolved(stack.region)) {
+      throw new Error(
+        `${where}: the parameter is read at synth (ADR-0042), so stack ${stack.node.path} needs env: { account, region }; it has none`,
+      );
+    }
+    const value = ssm.StringParameter.valueFromLookup(holder, parameterName);
+    if (value.startsWith(LOOKUP_PLACEHOLDER_PREFIX)) {
+      return placeholderRef(stack, registryPrefix, ingress ?? 'api-gateway', options);
+    }
+    let doc: PublishedIngress;
+    try {
+      doc = JSON.parse(value) as PublishedIngress;
+    } catch {
+      throw new Error(`${where}: the value is not JSON; is the ingress stack older than ADR-0042?`);
+    }
+    if (doc === null || typeof doc !== 'object' || doc.version !== PUBLISHED_INGRESS_VERSION) {
+      throw new Error(
+        `${where}: version ${String((doc as { version?: unknown } | null)?.version)}, expected ${PUBLISHED_INGRESS_VERSION} (ADR-0042); redeploy the ingress stack or run cdk context --reset`,
+      );
+    }
+    if (ingress !== undefined && ingress !== doc.ingress) {
+      throw new Error(`${where}: the ingress is '${doc.ingress}', not '${ingress}'`);
+    }
+    const shape = publishedIngressProblem(doc, stack.account);
+    if (shape !== undefined) {
+      throw new Error(`${where}: ${shape}`);
+    }
+    const published = doc.toolsGateways ?? {};
+    const available = Object.keys(published);
+    const names = options.toolsGateway === false ? [] : [...(options.toolsGateways ?? available)];
+    const missing = names.filter((n) => !(n in published));
+    if (missing.length > 0) {
+      throw new Error(`${where}: no tools gateway ${missing.join(', ')}; the ingress publishes [${available.join(', ')}]`);
+    }
+    if (names.length > 0 && doc.toolContextKeyId === undefined) {
+      throw new Error(`${where}: the document has tools gateways but no toolContextKeyId`);
+    }
+    const toolsGateways: Record<string, ToolsGatewayRef> = {};
+    for (const name of names) {
+      const gw = published[name];
+      toolsGateways[name] = {
+        name,
+        gatewayIdentifier: gw.identifier,
+        gatewayUrl: gw.url,
+        gatewayRoleArn: gw.roleArn,
+        policyEngineId: gw.policyEngineId,
+        contextKeyId: doc.toolContextKeyId!,
+      };
+    }
     return {
       registryPrefix,
-      ingress,
-      endpointUrl: read(PUBLISHED.baseUrl),
-      ingressRoleArn: read(PUBLISHED.ingressRoleArn),
-      ingressId: read(PUBLISHED.ingressId),
-      tenantRoleArn: read(PUBLISHED.tenantRoleArn),
-      gatewayIdentifier: ingress === 'agentcore-gateway' ? read(PUBLISHED.gatewayIdentifier) : undefined,
-      forwardUserToken: options.forwardUserToken,
+      ingress: doc.ingress,
+      endpointUrl: doc.baseUrl,
+      ingressRoleArn: doc.ingressRoleArn,
+      ingressId: doc.ingressId,
+      tenantRoleArn: doc.tenantRoleArn,
+      gatewayIdentifier: doc.ingress === 'agentcore-gateway' ? doc.gatewayIdentifier : undefined,
+      issuer: doc.issuer,
+      entitlementsTableName: doc.entitlementsTableName,
+      tools: toolsGateways[DEFAULT_TOOLS_GATEWAY],
+      toolsGateways: names.length > 0 ? toolsGateways : undefined,
     };
   }
 
@@ -461,24 +746,43 @@ export class SharedIngress extends Construct {
   readonly ingressRole: iam.IRole;
   /** The role that validates the token and assumes the tenant role: the integration Lambda or the interceptor. */
   readonly tvmCallerRole: iam.IRole;
-  /** The tenant role every model call is signed by (ADR-0018): the deployer's role, or the construct's default `TenantModelRole`. */
+  /** The tenant role every model call is signed by (ADR-0018). */
   readonly tenantRole: iam.IRole;
   /** The resolved options, for consumers and tests. */
   readonly options: ResolvedOptions;
   /** The per-tenant usage counters (ADR-0020); undefined when `tenantLimits` is `false`. */
   readonly limitsTable?: dynamodb.TableV2;
-  /** The registry prefix (ADR-0024); entries live at `${registryPrefix}backends/<name>`. */
+  /** The registry prefix (ADR-0024). */
   readonly registryPrefix: string;
-  /**
-   * This ingress's identity: the `ri:ingress` tag value a Runtime must carry
-   * for the ingress role's invoke grant to apply (ADR-0024). Stable across
-   * deploys of the same construct path; lower case; at most 48 characters.
-   */
+  /** This ingress's `ri:ingress` tag value (ADR-0024). */
   readonly ingressId: string;
   /** The Gateway identifier (`agentcore-gateway` only), for `AgentBackend` targets. */
   readonly gatewayIdentifier?: string;
-  /** The log drain (ADR-0019) between this ingress's writers and its log groups; a same-stack `AgentBackend` puts its registry entry behind it. */
+  /** The log drain (ADR-0019) between this ingress's writers and its log groups. */
   readonly logDrain: LogDrain;
+  /** (v2, ADR-0037) The transaction-token issuer: `<baseUrl>` of the REST API that serves the discovery routes. */
+  readonly issuer: string;
+  /** (v2) `<issuer>/.well-known/jwks.json`. */
+  readonly jwksUrl: string;
+  /** (v2, C-13) */
+  readonly tokenSigner: TokenSigner;
+  /** (v2, C-12) */
+  readonly entitlementStore: EntitlementStore;
+  /** (v2, C-14) `<baseUrl>/entitlements`. */
+  readonly entitlementsApiUrl: string;
+  /** (v2, C-15, ADR-0041) Every tools gateway by name; empty with `toolsGateway: false`. */
+  readonly toolsGateways: Readonly<Record<string, ToolsGateway>>;
+  /** (v2) The `default` tools gateway, when there is one. */
+  readonly toolsGateway?: ToolsGateway;
+  /** (v2) Aliases of the `default` gateway's values. */
+  readonly toolsGatewayUrl?: string;
+  readonly toolsGatewayIdentifier?: string;
+  readonly toolsGatewayRole?: iam.IRole;
+  /**
+   * (v2, M-68) The one key that signs tool contexts, for every gateway of
+   * this ingress; undefined with no gateway.
+   */
+  readonly toolContextKey?: kms.Key;
 
   private readonly grantedModels = new Set<string>();
 
@@ -489,12 +793,8 @@ export class SharedIngress extends Construct {
     this.registryPrefix = options.registryPrefix;
     this.ingressId = Names.uniqueResourceName(this, { maxLength: 48, separator: '-' }).toLowerCase();
 
-    // The tenant-role ARN the ingress assumes. The default role is created
-    // after the ingress (it trusts tvmCallerRole), so resolve its ARN lazily.
     const tenantRoleArn = options.tvm.role?.roleArn ?? Lazy.string({ produce: () => this.tenantRole.roleArn });
 
-    // Per-tenant limits (ADR-0020): one fixed-window counter per tenant per
-    // minute, shared by every ingress instance and every backend (ADR-0024).
     if (options.tenantLimits !== undefined) {
       this.limitsTable = new dynamodb.TableV2(this, 'TenantLimits', {
         partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING },
@@ -503,40 +803,122 @@ export class SharedIngress extends Construct {
         pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       });
     }
+    // v2, C-12: the entitlement store, created before the functions that read it.
+    this.entitlementStore = new EntitlementStore(this, 'Entitlements', {
+      maxAgentsPerTenant: options.entitlements.maxAgentsPerTenant,
+      maxToolsPerTenant: options.entitlements.maxToolsPerTenant,
+    });
     const environment = ingressEnvironment(props, options, tenantRoleArn, this.limitsTable?.tableName, Stack.of(this).account);
 
     if (options.perTenantMetrics) {
       Annotations.of(this).addWarningV2(
         'runtime-isolation:per-tenant-metrics-cost',
-        'perTenantMetrics is on: each tenant adds about 9 CloudWatch custom metrics per ingress, billed monthly (10,000 tenants is about 90,000 metrics). The ingress log carries the same figures with the tenantId; prefer Logs Insights or Contributor Insights at scale (ADR-0021).',
+        'perTenantMetrics is on: each tenant adds up to 9 x (1 + agents) CloudWatch custom metrics per ingress, billed monthly: the 9 metric names on [TenantId, Ingress] and again on [TenantId, Ingress, Backend] for each agent backend the tenant calls (10,000 tenants on one agent is about 180,000 metrics). The ingress log carries the same figures with the tenantId; prefer Logs Insights or Contributor Insights at scale (ADR-0021).',
       );
     }
 
-    let registryReaders: iam.IRole[];
-    if (options.ingress === 'api-gateway') {
-      const api = this.apiGatewayIngress(props, options, environment);
-      this.endpointUrl = api.endpointUrl;
-      this.ingressRole = api.ingressRole;
-      this.tvmCallerRole = api.tvmCallerRole;
-      this.logDrain = api.logDrain;
-      registryReaders = api.registryReaders;
-    } else {
-      const gw = this.agentCoreGatewayIngress(props, options, environment);
-      this.endpointUrl = gw.endpointUrl;
-      this.ingressRole = gw.ingressRole;
-      this.tvmCallerRole = gw.tvmCallerRole;
-      this.gatewayIdentifier = gw.gatewayIdentifier;
-      this.logDrain = gw.logDrain;
-      registryReaders = gw.registryReaders;
+    if (options.ingress === 'api-gateway' && !options.stageThrottle.explicit) {
+      Annotations.of(this).addWarningV2(
+        'runtime-isolation:stage-throttle-default',
+        `stageThrottle is unset: the api-gateway stage is one bucket of ${options.stageThrottle.rateLimit} rps (burst ${options.stageThrottle.burstLimit}) shared by every tenant, every agent and every refusal, and the per-tenant limit runs behind it, so one tenant at the stage rate starves the rest. Set stageThrottle.rateLimit to at least tenants x tenantLimits.requestsPerMinute / 60, and put a per-tenant WAF rate rule in front for an edge limit (scale review 2026-11-05).`,
+      );
     }
+    if (options.sessionScope === 'tenant') {
+      Annotations.of(this).addWarningV2(
+        'runtime-isolation:shared-session-scope',
+        "session.scope is 'tenant' (the default when session is set, ADR-0039): every user of a tenant who sends the same client-chosen conversationId resumes the same Runtime session and whatever state the agent kept there. The agent MUST read the token from each request and keep no per-user state in the session, or the deployer sets session.scope: 'user' (T-23, T-81).",
+      );
+    }
+    const wiring = options.ingress === 'api-gateway' ? this.apiGatewayIngress(props, options, environment) : this.agentCoreGatewayIngress(props, options, environment);
+    this.endpointUrl = wiring.endpointUrl;
+    this.ingressRole = wiring.ingressRole;
+    this.tvmCallerRole = wiring.tvmCallerRole;
+    this.logDrain = wiring.logDrain;
+    this.issuer = wiring.issuer;
+    this.jwksUrl = `${this.issuer}/${WELL_KNOWN.segment}/${WELL_KNOWN.jwks}`;
+    this.entitlementsApiUrl = `${this.issuer}/entitlements`;
 
     this.grantInvokeTaggedRuntimes(this.ingressRole);
-    for (const reader of registryReaders) {
+    for (const reader of wiring.registryReaders) {
       this.grantReadRegistry(reader);
     }
 
-    // ADR-0020: the token-validating role counts requests and tokens, and
-    // may do nothing else with the table.
+    // v2, C-13: the signing key, Sign for the minting function alone (M-40).
+    this.tokenSigner = new TokenSigner(this, 'TokenSigner', {
+      algorithm: options.transactionToken.algorithm,
+      keyGeneration: options.transactionToken.keyGeneration,
+      signer: wiring.minter.role!,
+    });
+    this.tokenSigner.addDiscoveryRoutes(wiring.issuerApi, this.issuer);
+    for (const fn of wiring.verifiers) {
+      fn.addEnvironment(ENV.ISSUER, this.issuer);
+      if (fn !== wiring.minter) {
+        // M-82: the function that verifies the forwarded token holds the JWKS
+        // itself, updated in the same deployment as the minter's key id, and
+        // is updated BEFORE the minter so no token arrives with a kid it lacks.
+        fn.addEnvironment(ENV.TXN_JWKS, this.tokenSigner.jwks);
+        (wiring.minter.node.defaultChild as CfnResource).addDependency(fn.node.defaultChild as CfnResource);
+      }
+    }
+    const mintEnv: Record<string, string> = {
+      [ENV.TXN_KEY_ID]: this.tokenSigner.keyId,
+      [ENV.TXN_ALGORITHM]: options.transactionToken.algorithm,
+      [ENV.TXN_TTL_SECONDS]: String(options.transactionToken.ttlSeconds),
+      [ENV.TXN_REUSE_MARGIN_SECONDS]: String(options.transactionToken.reuseMarginSeconds),
+      [ENV.TXN_CACHE_MAX_ENTRIES]: String(options.transactionToken.cacheMaxEntries),
+      [ENV.INGRESS_ROLE_ARN]: this.ingressRole.roleArn,
+      [ENV.ENTITLEMENTS_TABLE]: this.entitlementStore.tableName,
+    };
+    for (const [key, value] of Object.entries(mintEnv)) {
+      wiring.minter.addEnvironment(key, value);
+    }
+    // M-44: the minting role reads the store and never writes it.
+    this.entitlementStore.grantIngressRead(wiring.minter.role!);
+
+    // v2, C-14: the entitlement API on the issuer's REST API.
+    new EntitlementApi(this, 'EntitlementApi', {
+      api: wiring.issuerApi,
+      store: this.entitlementStore,
+      discoveryUrl: props.identity.discoveryUrl,
+      allowedClientIds: props.identity.allowedClientIds,
+      multiTenant: options.multiTenant,
+      adminScope: options.entitlements.adminScope,
+      issuer: this.issuer,
+      logDrain: this.logDrain,
+    });
+
+    // v2, C-15, ADR-0041: the tools gateways, after the discovery routes are deployed (the service fetches them).
+    // One ToolContextKey for every gateway, not one each: a tool function verifies `_ri_ctx`
+    // with one public key (`RI_CONTEXT_KEY_ID`) and one published `toolContextKeyId`, whichever
+    // gateway its target is on; a context is bound to its tool, argsHash, txn and a 60 s exp,
+    // and a tool lives on one gateway, so a per-gateway key would add keys without narrowing
+    // what a stolen context could reach. Each interceptor gets its own Sign statement (M-68).
+    const gateways: Record<string, ToolsGateway> = {};
+    const names = Object.keys(options.toolsGateways);
+    if (names.length > 0) {
+      this.toolContextKey = signingKey(this, 'ToolContextKey', KEY_SPEC[options.toolContextAlgorithm], 'runtime-isolation tool context signing key, shared by the tools gateways (ADR-0034, ADR-0041)', {
+        delegatePublicKey: true, // the tool library in another stack reads the public half through IAM (M-68)
+      });
+    }
+    for (const name of names) {
+      gateways[name] = new ToolsGateway(this, name === DEFAULT_TOOLS_GATEWAY ? 'ToolsGateway' : `ToolsGateway${gatewayIdPart(name)}`, {
+        name,
+        issuer: this.issuer,
+        ingressRoleArn: this.ingressRole.roleArn,
+        options: options.toolsGateways[name],
+        contextKey: this.toolContextKey!,
+        contextAlgorithm: options.toolContextAlgorithm,
+        issuerReady: wiring.issuerApi.deploymentStage,
+      });
+    }
+    this.toolsGateways = gateways;
+    this.toolsGateway = gateways[DEFAULT_TOOLS_GATEWAY];
+    if (this.toolsGateway !== undefined) {
+      this.toolsGatewayUrl = this.toolsGateway.gatewayUrl;
+      this.toolsGatewayIdentifier = this.toolsGateway.gatewayIdentifier;
+      this.toolsGatewayRole = this.toolsGateway.gatewayRole;
+    }
+
     if (this.limitsTable !== undefined) {
       this.tvmCallerRole.addToPrincipalPolicy(
         new iam.PolicyStatement({
@@ -547,17 +929,7 @@ export class SharedIngress extends Construct {
       );
     }
 
-    // The TVM is always on (ADR-0018). When the deployer supplies a role it
-    // owns (and may use for tenant data), use it; otherwise create a
-    // model-only `TenantModelRole` trusted by tvmCallerRole alone, built
-    // AFTER tvmCallerRole exists so its trust names exactly that principal.
-    // The model statements are added per backend (`grantModel`).
     this.tenantRole = options.tvm.role ?? this.defaultTenantRole(options);
-
-    // P-8 (ADR-0012): only the token-validating role may assume the tenant
-    // role. For a deployer-supplied role the trust policy must name
-    // tvmCallerRole and require the TenantId request tag (spec §6.1); the
-    // default role's trust does that by construction.
     this.tvmCallerRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'AssumeTenantRole',
@@ -566,7 +938,9 @@ export class SharedIngress extends Construct {
       }),
     );
 
-    this.publish(options);
+    if (options.publish) {
+      this.publish(options);
+    }
   }
 
   /** The invocation URL of one backend behind this ingress (spec §5): `${endpointUrl}/${backend}/invocations`. */
@@ -577,14 +951,14 @@ export class SharedIngress extends Construct {
     return `${this.endpointUrl}/${backend}/${ROUTE}`;
   }
 
+  /** (v2, ADR-0041) The tools gateway named `name`, or undefined. */
+  toolsGatewayNamed(name: string): ToolsGateway | undefined {
+    return Object.prototype.hasOwnProperty.call(this.toolsGateways, name) ? this.toolsGateways[name] : undefined;
+  }
+
   /**
-   * Adds the one-model statement for `modelId` to the tenant role
-   * (`bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream` on
-   * `modelResourceArns(modelId)`), with the inference-profile Region-wildcard
-   * acknowledgment where the id is a cross-Region profile (ADR-0018, was the
-   * execution role's `OneModel` under ADR-0008). Idempotent per model id, so
-   * several backends on one model add one statement. An imported role (no
-   * `addToPrincipalPolicy` effect) must already carry it; the README says so.
+   * Adds the one-model statement for `modelId` to the tenant role (ADR-0018).
+   * Idempotent per model id.
    */
   grantModel(modelId: string): void {
     if (this.grantedModels.has(modelId)) {
@@ -597,16 +971,8 @@ export class SharedIngress extends Construct {
 
   /**
    * ADR-0024: the ingress role may invoke any Runtime of this account and
-   * Region that carries `ri:ingress = <ingressId>`, which `AgentBackend` sets
-   * in `CfnRuntime.tags` at creation. Backends come and go without an
-   * ingress deploy, so the grant is a pattern plus a tag condition, not a
-   * list. The Service Authorization Reference lists `aws:ResourceTag` for
-   * `InvokeAgentRuntime` on `runtime` and `runtime-endpoint`; a tag given at
-   * creation is copied to the DEFAULT endpoint, and a role with this exact
-   * grant reached a tagged Runtime and was refused on an untagged one
-   * (sandbox test, eu-central-1, 2026-10-28). The Runtime's resource policy
-   * (P-1, ADR-0001) remains the hard gate if the condition were ever not
-   * honoured.
+   * Region that carries `ri:ingress = <ingressId>`. The Runtime's resource
+   * policy (P-1, ADR-0001) remains the hard gate.
    */
   private grantInvokeTaggedRuntimes(role: iam.IRole): void {
     const stack = Stack.of(this);
@@ -629,7 +995,6 @@ export class SharedIngress extends Construct {
   /** ADR-0024: a route resolver may read registry entries under the prefix, and nothing else in Parameter Store. */
   private grantReadRegistry(role: iam.IRole): void {
     const stack = Stack.of(this);
-    // No slash between `parameter` and the name: the name's own leading slash is it.
     const entries = `arn:${stack.partition}:ssm:${stack.region}:${stack.account}:parameter${this.registryPrefix}${REGISTRY_BACKENDS_SEGMENT}*`;
     role.addToPrincipalPolicy(
       new iam.PolicyStatement({
@@ -646,48 +1011,58 @@ export class SharedIngress extends Construct {
   }
 
   /**
-   * The published interface (spec §6.4, standard §1.1), under the registry
-   * prefix: what `AgentBackend` in another stack needs
-   * (`SharedIngress.fromParameters`) and what a client needs to call.
+   * The published interface (spec §6.4, standard §1.1, ADR-0042): ONE
+   * parameter, `<registryPrefix>ingress`, holding the `PublishedIngress`
+   * JSON document. Parameter Store allows 3 PutParameter / DeleteParameter
+   * per second per account and Region, so one parameter per value (20-26 a
+   * stack) throttled stacks deployed or destroyed together.
+   * The construct id stays `IngressParameter` (the pre-ADR-0042 parameter of
+   * the same name), so an update rewrites the value in place instead of a
+   * replacement colliding with its own fixed name.
    */
   private publish(options: ResolvedOptions): void {
-    const put = (id: string, name: string, value: string, description: string) =>
-      new ssm.StringParameter(this, id, {
-        parameterName: `${this.registryPrefix}${name}`,
-        // The prefix starts with `/`, so the name is never simple; said
-        // explicitly because a prefix may carry a token (a stack name).
-        simpleName: false,
-        stringValue: value,
-        description: `runtime-isolation: ${description}`,
-      });
-    // `endpointUrl` keeps its spec §6.4 meaning for the one-agent form and
-    // the scripts that POST to it: with a default backend it is that backend's
-    // invocation URL (the bare `/invocations` route on api-gateway, the target
-    // route on the Gateway); without one, the base URL. `baseUrl` is always the base.
     const defaultBackendUrl =
       options.defaultBackend === undefined
         ? this.endpointUrl
         : options.ingress === 'api-gateway'
           ? `${this.endpointUrl}/${ROUTE}`
           : this.urlFor(options.defaultBackend);
-    put('EndpointUrlParameter', PUBLISHED.endpointUrl, defaultBackendUrl, 'the invocation URL (POST, bearer token): the default backend when one is set, else the ingress base URL');
-    put('BaseUrlParameter', PUBLISHED.baseUrl, this.endpointUrl, 'the ingress base URL; a backend is at <url>/<backend>/invocations');
-    put('IngressRoleArnParameter', PUBLISHED.ingressRoleArn, this.ingressRole.roleArn, 'the one principal every Runtime behind this ingress trusts (P-1)');
-    put('IngressIdParameter', PUBLISHED.ingressId, this.ingressId, 'the ri:ingress tag value a Runtime must carry (ADR-0024)');
-    put('IngressParameter', PUBLISHED.ingress, options.ingress, 'the deployed ingress (api-gateway or agentcore-gateway)');
-    put('TenantRoleArnParameter', PUBLISHED.tenantRoleArn, this.tenantRole.roleArn, 'the tenant role every model call is signed by (ADR-0018)');
-    if (this.gatewayIdentifier !== undefined) {
-      put('GatewayIdentifierParameter', PUBLISHED.gatewayIdentifier, this.gatewayIdentifier, 'the AgentCore Gateway a backend adds its target to (ADR-0010)');
+    const toolsGateways: Record<string, PublishedToolsGateway> = {};
+    for (const [name, gw] of Object.entries(this.toolsGateways)) {
+      toolsGateways[name] = {
+        url: gw.gatewayUrl,
+        identifier: gw.gatewayIdentifier,
+        roleArn: gw.gatewayRole.roleArn,
+        policyEngineId: gw.policyEngine.attrPolicyEngineId,
+      };
     }
+    const doc: PublishedIngress = {
+      version: PUBLISHED_INGRESS_VERSION,
+      ingress: options.ingress,
+      endpointUrl: defaultBackendUrl,
+      baseUrl: this.endpointUrl,
+      ingressRoleArn: this.ingressRole.roleArn,
+      ingressId: this.ingressId,
+      tenantRoleArn: this.tenantRole.roleArn,
+      ...(this.gatewayIdentifier !== undefined ? { gatewayIdentifier: this.gatewayIdentifier } : {}),
+      issuer: this.issuer,
+      jwksUrl: this.jwksUrl,
+      entitlementsTableName: this.entitlementStore.tableName,
+      entitlementsApiUrl: this.entitlementsApiUrl,
+      ...(this.toolContextKey !== undefined ? { toolContextKeyId: this.toolContextKey.keyId } : {}),
+      toolsGateways,
+    };
+    new ssm.StringParameter(this, 'IngressParameter', {
+      parameterName: `${this.registryPrefix}${PUBLISHED.ingress}`,
+      simpleName: false,
+      // Standard up to 4 KB, advanced up to 8 KB: roughly 15-20 tools gateways (ADR-0042).
+      tier: ssm.ParameterTier.INTELLIGENT_TIERING,
+      stringValue: Stack.of(this).toJsonString(doc),
+      description: 'runtime-isolation: the published ingress interface, one JSON document (spec §6.4, ADR-0042)',
+    });
   }
 
-  /**
-   * The default tenant role (ADR-0018): trusted by `tvmCallerRole` only,
-   * requiring a non-empty `TenantId` request tag and `aws:TagKeys` pinned to
-   * the configured tag set, with `sts:TagSession` and a one-hour maximum
-   * session (role chaining caps there). It carries only the model statements
-   * (added per backend via `grantModel`), no data permission.
-   */
+  /** The default tenant role (ADR-0018): trusted by `tvmCallerRole` only, `TenantId` tag required; model statements only. */
   private defaultTenantRole(options: ResolvedOptions): iam.Role {
     const tagKeys = [TENANT_TAG_KEY];
     if (options.tvm.includeUserIdTag) {
@@ -706,52 +1081,16 @@ export class SharedIngress extends Construct {
     });
   }
 
-  // -------------------------------------------------------------------------
-  // Ingress A: API Gateway REST API, Lambda authoriser, streaming Lambda proxy
-  // -------------------------------------------------------------------------
-  private apiGatewayIngress(
-    props: SharedIngressProps,
-    options: ResolvedOptions,
-    environment: Record<string, string>,
-  ): IngressWiring {
-    const authorizerFn = new NodejsFunction(this, 'AuthorizerFunction', {
-      ...functionProps(this, 'AuthorizerLogs', Duration.seconds(10)),
-      entry: path.join(__dirname, 'ingress', 'api-gateway-authorizer.function.ts'),
-      description: 'runtime-isolation: verifies the bearer token, resolves the backend and returns both as authoriser context (P-3, P-9, ADR-0024)',
-      environment,
-    });
-    acknowledgeLambdaFindings(authorizerFn);
-
-    // The integration Lambda runs for the whole stream (ADR-0009), so its
-    // timeout exceeds the integration timeout that caps the stream (V-5).
-    const ingressFn = new NodejsFunction(this, 'IngressFunction', {
-      ...functionProps(this, 'IngressLogs', INTEGRATION_TIMEOUT.plus(Duration.seconds(30))),
-      entry: path.join(__dirname, 'ingress', 'api-gateway-ingress.function.ts'),
-      description: 'runtime-isolation: chooses the unit from validated claims and relays the backend stream (P-2)',
-      memorySize: 512,
-      environment,
-    });
-    acknowledgeLambdaFindings(ingressFn);
-
-    const accessLogs = new logs.LogGroup(this, 'ApiAccessLogs', {
-      retention: logs.RetentionDays.ONE_MONTH,
-      removalPolicy: RemovalPolicy.DESTROY, // sample only
-    });
-
-    const api = new apigateway.RestApi(this, 'Api', {
-      restApiName: `${Names.uniqueResourceName(this, { maxLength: 48, separator: '-' })}-ingress`,
-      description: 'runtime-isolation ingress: POST /{backend}/invocations, bearer token verified by a Lambda authoriser (ADR-0024)',
-      // The account-level API Gateway CloudWatch role is one setting per
-      // account and Region, retained on destroy; the account must already
-      // have one (README prerequisites, as in tenant-identity ADR-0019).
+  /** A stage access log and the cdk-nag acknowledgments every REST API of this construct shares. */
+  private restApi(id: string, description: string, deployOptions: Partial<apigateway.StageOptions>, accessLogs: logs.LogGroup): apigateway.RestApi {
+    const api = new apigateway.RestApi(this, id, {
+      restApiName: `${Names.uniqueResourceName(this, { maxLength: 40, separator: '-' })}-${id.toLowerCase()}`,
+      description,
+      // The account-level API Gateway CloudWatch role must already exist (README prerequisites).
       cloudWatchRole: false,
       endpointTypes: [apigateway.EndpointType.REGIONAL],
       deployOptions: {
         stageName: STAGE_NAME,
-        // P-9: who called and for which tenant. The authoriser puts the
-        // verified tenantId in its context; the access log records it as a
-        // field. dataTraceEnabled stays off: data trace logs request
-        // headers, which would record the bearer token (spike V-7).
         accessLogDestination: new apigateway.LogGroupLogDestination(accessLogs),
         accessLogFormat: apigateway.AccessLogFormat.custom(
           JSON.stringify({
@@ -768,39 +1107,89 @@ export class SharedIngress extends Construct {
             tenantId: apigateway.AccessLogField.contextAuthorizer('tenantId'),
           }),
         ),
+        // P-9, M-12, M-67: data trace logs request headers, which would record a bearer token.
         loggingLevel: apigateway.MethodLoggingLevel.INFO,
         dataTraceEnabled: false,
         tracingEnabled: true,
         metricsEnabled: true,
-        // Shared by every tenant and every backend (ADR-0020, ADR-0024): the
-        // per-tenant limit sits in front of it, so one tenant cannot use the
-        // whole stage.
-        throttlingRateLimit: options.stageThrottle.rateLimit,
-        throttlingBurstLimit: options.stageThrottle.burstLimit,
+        ...deployOptions,
+      },
+    });
+    Validations.of(api).acknowledge({
+      id: 'AwsSolutions-APIG3',
+      reason: 'WAFv2 association is production hardening (README checklist, ADR-0014): every route is authorised (Lambda authoriser, IAM or in-function token verification) or public by design (ADR-0037), and the stage is throttled.',
+    });
+    Validations.of(api).acknowledge({
+      id: 'AwsSolutions-COG4',
+      reason: 'The routes use a custom Lambda authoriser, IAM, or in-function verification by the shared verifier rather than a Cognito authoriser, so the construct accepts any OIDC issuer that meets the token contract (ADR-0004).',
+    });
+    Validations.of(api).acknowledge({
+      id: 'AwsSolutions-APIG4',
+      reason: 'Every route is authorised: the custom Lambda authoriser (P-3, ADR-0001), IAM (vendor entitlement operations, ADR-0030), the tenant-admin function\'s own verification (ADR-0033), or public by design (discovery and JWKS, ADR-0037).',
+    });
+    const executionLogs = new logs.LogGroup(this, `${id}ExecutionLogs`, {
+      logGroupName: `API-Gateway-Execution-Logs_${api.restApiId}/${STAGE_NAME}`,
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.DESTROY, // sample only
+    });
+    void executionLogs;
+    return api;
+  }
+
+  // -------------------------------------------------------------------------
+  // Ingress A: API Gateway REST API, Lambda authoriser, streaming Lambda proxy
+  // -------------------------------------------------------------------------
+  private apiGatewayIngress(props: SharedIngressProps, options: ResolvedOptions, environment: Record<string, string>): IngressWiring {
+    const authorizerFn = new NodejsFunction(this, 'AuthorizerFunction', {
+      ...functionProps(this, 'AuthorizerLogs', Duration.seconds(10)),
+      entry: path.join(__dirname, 'ingress', 'api-gateway-authorizer.function.ts'),
+      description: 'runtime-isolation: verifies the identity token, selects the tenant, resolves the backend, applies the grant rule and mints the transaction token (P-3, P-11, P-14)',
+      memorySize: 512,
+      environment,
+    });
+    acknowledgeLambdaFindings(authorizerFn);
+
+    const ingressFn = new NodejsFunction(this, 'IngressFunction', {
+      ...functionProps(this, 'IngressLogs', INTEGRATION_TIMEOUT.plus(Duration.seconds(30))),
+      entry: path.join(__dirname, 'ingress', 'api-gateway-ingress.function.ts'),
+      description: 'runtime-isolation: chooses the unit from validated claims, forwards the transaction token and relays the backend stream (P-2, P-5)',
+      memorySize: 512,
+      environment,
+      reservedConcurrentExecutions: options.ingressReservedConcurrency,
+    });
+    acknowledgeLambdaFindings(ingressFn);
+
+    const accessLogs = new logs.LogGroup(this, 'ApiAccessLogs', {
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.DESTROY, // sample only
+    });
+    const api = this.restApi(
+      'Api',
+      'runtime-isolation ingress: POST /{backend}/invocations, bearer token verified by a Lambda authoriser (ADR-0024); issuer routes (ADR-0037); entitlement API (ADR-0030)',
+      { throttlingRateLimit: options.stageThrottle.rateLimit, throttlingBurstLimit: options.stageThrottle.burstLimit },
+      accessLogs,
+    );
+
+    const identitySources = [apigateway.IdentitySource.header('Authorization'), apigateway.IdentitySource.context('path')];
+    if (options.multiTenant) {
+      // The cached Allow is for one tenant; a second tenant of the same token must not reuse it (M-53).
+      identitySources.push(apigateway.IdentitySource.header(TENANT_HEADER));
+    }
+    const authorizer = new apigateway.RequestAuthorizer(this, 'Authorizer', {
+      handler: authorizerFn,
+      identitySources,
+      // (v2) at most 60 s and at most ttl - longest stream: the Allow carries a minted token.
+      resultsCacheTtl: Duration.seconds(options.authorizerCacheTtlSeconds),
+    });
+    // spec §5.1: the Deny's fixed reason code, when the authoriser set one.
+    api.addGatewayResponse('AccessDenied', {
+      type: apigateway.ResponseType.ACCESS_DENIED,
+      statusCode: '403',
+      templates: {
+        'application/json': '#if($context.authorizer.reason != "")forbidden: $context.authorizer.reason#{else}forbidden#end',
       },
     });
 
-    const authorizer = new apigateway.RequestAuthorizer(this, 'Authorizer', {
-      handler: authorizerFn,
-      // ADR-0024: the result names the resolved backend and its scope check,
-      // so the cache key must include the route. API Gateway accepts
-      // `context.*` variables as REQUEST identity sources; `context.path` is
-      // the request path (`/prod/billing/invocations`), where
-      // `context.resourcePath` would be the template (`/{backend}/invocations`)
-      // and a path parameter is not an accepted identity source.
-      identitySources: [apigateway.IdentitySource.header('Authorization'), apigateway.IdentitySource.context('path')],
-      // Cached per Authorization header value and path for five minutes
-      // (ADR-0015, amended by ADR-0023 and ADR-0024): the same token on the
-      // same route re-verifies here at most once in five minutes. The cache
-      // never extends a token's life: the integration Lambda re-verifies it,
-      // including `exp`, before any invoke, so a token is refused there the
-      // moment it expires.
-      resultsCacheTtl: AUTHORIZER_CACHE_TTL,
-    });
-
-    // Request validation (AwsSolutions-APIG2): the body shape is enforced at
-    // the gateway, before the streaming Lambda runs. With `session` the
-    // conversationId is required and patterned; without it, it is refused.
     const bodyModel = api.addModel('InvokeModel', {
       contentType: 'application/json',
       modelName: 'InvokeAgentRequest',
@@ -834,62 +1223,36 @@ export class SharedIngress extends Construct {
       requestValidator: validator,
       requestModels: { 'application/json': bodyModel },
     };
-
-    // One resource for every backend (ADR-0024): the name is a path
-    // parameter the authoriser resolves through the registry. An unknown
-    // name reaches the authoriser and is refused there (404), not by API
-    // Gateway.
     api.root
       .addResource('{backend}')
       .addResource(ROUTE)
       .addMethod('POST', integration(), { ...methodOptions, requestParameters: { 'method.request.path.backend': true } });
-    // The bare route of the one-backend deployment (today's URL): the same
-    // authoriser and Lambda resolve it to `defaultBackend`.
     if (options.defaultBackend !== undefined) {
       api.root.addResource(ROUTE).addMethod('POST', integration(), methodOptions);
     }
 
-    // ADR-0019: teardown leaves no log group. API Gateway creates the
-    // execution log group itself (outside the stack) and delivers access and
-    // execution logs a few seconds late, so a deleted group comes back with
-    // no retention. The construct owns the execution group by its fixed name,
-    // and one drain waits between the stage (the writer, which also invokes
-    // both functions) and every log group on this path.
-    const executionLogs = new logs.LogGroup(this, 'ApiExecutionLogs', {
-      logGroupName: `API-Gateway-Execution-Logs_${api.restApiId}/${STAGE_NAME}`,
-      retention: logs.RetentionDays.ONE_MONTH,
-      removalPolicy: RemovalPolicy.DESTROY, // sample only
-    });
+    const executionLogs = this.node.findChild('ApiExecutionLogs') as logs.LogGroup;
     const drain = new LogDrain(this, 'LogDrain');
     for (const group of [accessLogs, executionLogs, authorizerFn.logGroup, ingressFn.logGroup]) {
       drain.protect(group);
     }
     drain.writer(api.deploymentStage);
 
-    Validations.of(api).acknowledge({
-      id: 'AwsSolutions-APIG3',
-      reason:
-        'WAFv2 association is production hardening (README checklist, ADR-0014): the route is behind a Lambda authoriser that verifies every token, and the stage is throttled.',
-    });
-    Validations.of(api).acknowledge({
-      id: 'AwsSolutions-COG4',
-      reason:
-        'The route uses a custom Lambda authoriser (the shared verifier) rather than a Cognito authoriser so the construct accepts any OIDC issuer that meets the token contract (ADR-0004).',
-    });
-    Validations.of(api).acknowledge({
-      id: 'AwsSolutions-APIG4',
-      reason: 'POST /{backend}/invocations is authorised by the custom Lambda authoriser (P-3, ADR-0001); cdk-nag reads the CUSTOM type without a Cognito pool as unauthorised.',
-    });
-
     const stack = Stack.of(this);
+    // The stage name as a literal, not `deploymentStage.stageName`: the issuer
+    // URL is rendered into the discovery route, and a Ref to the stage there
+    // would make the deployment depend on itself.
+    const endpointUrl = `https://${api.restApiId}.execute-api.${stack.region}.${stack.urlSuffix}/${STAGE_NAME}`;
     return {
-      // `api.url` ends in a slash; the base URL does not, so `urlFor` can join.
-      endpointUrl: `https://${api.restApiId}.execute-api.${stack.region}.${stack.urlSuffix}/${api.deploymentStage.stageName}`,
+      endpointUrl,
       ingressRole: ingressFn.role!,
       tvmCallerRole: ingressFn.role!,
-      // Both resolve the route: the authoriser decides, the integration Lambda re-reads the entry before the invoke.
       registryReaders: [authorizerFn.role!, ingressFn.role!],
       logDrain: drain,
+      minter: authorizerFn,
+      issuerApi: api,
+      issuer: endpointUrl,
+      verifiers: [authorizerFn, ingressFn],
     };
   }
 
@@ -900,20 +1263,17 @@ export class SharedIngress extends Construct {
     props: SharedIngressProps,
     options: ResolvedOptions,
     environment: Record<string, string>,
-  ): IngressWiring & { gatewayIdentifier: string } {
+  ): IngressWiring {
     const interceptorFn = new NodejsFunction(this, 'InterceptorFunction', {
       ...functionProps(this, 'InterceptorLogs', Duration.seconds(10)),
       entry: path.join(__dirname, 'ingress', 'gateway-interceptor.function.ts'),
-      description: 'runtime-isolation: Gateway REQUEST interceptor; builds the unit id and overwrites the session header (P-2)',
+      description: 'runtime-isolation: Gateway REQUEST interceptor; selects the tenant, mints the transaction token, builds the unit id (P-2, P-14)',
+      memorySize: 512,
       environment,
     });
     acknowledgeLambdaFindings(interceptorFn);
 
     const stack = Stack.of(this);
-    // Gateway names match ^([0-9a-zA-Z][-]?){1,48}$. The service lowercases
-    // the name in the gateway id, and so in the ARN the role's aws:SourceArn
-    // condition compares case-sensitively: a mixed-case name makes the Gateway
-    // unable to assume its role (first integ run, 2026-10-27). Lowercase here.
     const gatewayName = `${Names.uniqueResourceName(this, { maxLength: 40, separator: '-' })}-gw`.toLowerCase();
     const gatewayRole = new iam.Role(this, 'GatewayRole', {
       assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com', {
@@ -924,7 +1284,6 @@ export class SharedIngress extends Construct {
       }),
       description: 'AgentCore Gateway role: the one principal every Runtime behind this ingress trusts (ADR-0001, ADR-0024)',
     });
-    // The one function, by exact ARN (grantInvoke would add a `:*` version wildcard).
     gatewayRole.addToPolicy(
       new iam.PolicyStatement({
         sid: 'InvokeInterceptor',
@@ -942,15 +1301,7 @@ export class SharedIngress extends Construct {
         customJwtAuthorizer: {
           discoveryUrl: props.identity.discoveryUrl,
           allowedClients: props.identity.allowedClientIds,
-          // ADR-0005: the service checks the product floor before the
-          // interceptor runs; the interceptor enforces the floor again (AND)
-          // and the target's own scopes from the registry (any one, ADR-0025).
-          // CUSTOM_JWT's allowedScopes is ANY-OF: a token holding any one of
-          // the listed scopes passes the service's check. With a floor of
-          // several scopes, only the interceptor enforces that the token
-          // holds ALL of them; the service alone would admit a token with one.
-          // Only the floor goes here: a backend added after this deploy must
-          // not need a Gateway redeploy.
+          // ADR-0005: CUSTOM_JWT's allowedScopes is ANY-OF; the interceptor enforces the floor again (AND).
           ...(options.requiredScopes !== undefined ? { allowedScopes: options.requiredScopes } : {}),
         },
       },
@@ -958,27 +1309,49 @@ export class SharedIngress extends Construct {
         {
           interceptor: { lambda: { arn: interceptorFn.functionArn } },
           interceptionPoints: ['REQUEST'],
-          // The interceptor needs the Authorization header (to re-verify the
-          // token) and the session header (to overwrite it): spike V-3.
+          // The Authorization, session and (v2) X-Tenant-Id headers (spike V-3).
           inputConfiguration: { passRequestHeaders: true },
         },
       ],
     });
     gateway.node.addDependency(gatewayRole);
+    (this as { gatewayIdentifier?: string }).gatewayIdentifier = gateway.attrGatewayIdentifier;
 
-    // ADR-0019: the Gateway invokes the interceptor; its late logs must land
-    // before the interceptor's log group is deleted.
+    // v2, C-13/C-14: a small REST API for the issuer routes and the entitlement API.
+    const accessLogs = new logs.LogGroup(this, 'IssuerAccessLogs', {
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.DESTROY, // sample only
+    });
+    const issuerApi = this.restApi(
+      'IssuerApi',
+      'runtime-isolation issuer: OIDC discovery and JWKS (ADR-0037) and the entitlement API (ADR-0030) beside the AgentCore Gateway ingress',
+      { throttlingRateLimit: 50, throttlingBurstLimit: 25 },
+      accessLogs,
+    );
+    // AwsSolutions-APIG2: the only bodies on this API are the entitlement operations, validated by the Smithy SSDK.
+    Validations.of(issuerApi).acknowledge({
+      id: 'AwsSolutions-APIG2',
+      reason: 'The entitlement operations validate their bodies in the Smithy-generated server SDK (model constraints, ValidationException); the discovery routes take no input (ADR-0030, ADR-0037).',
+    });
+
     const drain = new LogDrain(this, 'LogDrain');
     drain.protect(interceptorFn.logGroup);
+    drain.protect(accessLogs);
+    drain.protect(this.node.findChild('IssuerApiExecutionLogs') as logs.LogGroup);
     drain.writer(gateway);
+    drain.writer(issuerApi.deploymentStage);
 
+    const issuer = `https://${issuerApi.restApiId}.execute-api.${stack.region}.${stack.urlSuffix}/${STAGE_NAME}`;
     return {
       endpointUrl: gateway.attrGatewayUrl,
       ingressRole: gatewayRole,
       tvmCallerRole: interceptorFn.role!,
-      gatewayIdentifier: gateway.attrGatewayIdentifier,
       registryReaders: [interceptorFn.role!],
       logDrain: drain,
+      minter: interceptorFn,
+      issuerApi,
+      issuer,
+      verifiers: [interceptorFn],
     };
   }
 }
@@ -987,25 +1360,148 @@ export class SharedIngress extends Construct {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** The names under the registry prefix that `SharedIngress` publishes (spec §6.4). */
+/** The names under the registry prefix that `SharedIngress` publishes (spec §6.4, ADR-0042): one JSON document. */
 export const PUBLISHED = {
-  /** The invocation URL (spec §6.4): the default backend's when `defaultBackend` is set (today's meaning), else the base URL. */
-  endpointUrl: 'endpointUrl',
-  /** The ingress base URL; a backend is at `<baseUrl>/<backend>/invocations`. */
-  baseUrl: 'baseUrl',
-  ingressRoleArn: 'ingressRoleArn',
-  ingressId: 'ingressId',
   ingress: 'ingress',
-  tenantRoleArn: 'tenantRoleArn',
-  gatewayIdentifier: 'gatewayIdentifier',
 } as const;
 
+/** (ADR-0042) The `version` of the `PublishedIngress` document. */
+export const PUBLISHED_INGRESS_VERSION = 2;
+
+/** CDK's first-synth value of a context lookup, before the context provider has run. */
+const LOOKUP_PLACEHOLDER_PREFIX = 'dummy-value-for-';
+
+/** (ADR-0041, ADR-0042) One tools gateway in the `PublishedIngress` document. */
+export interface PublishedToolsGateway {
+  /** The gateway's MCP endpoint. */
+  readonly url: string;
+  /** The gateway id, for `ToolTarget`. */
+  readonly identifier: string;
+  /** The gateway role a tool function trusts. */
+  readonly roleArn: string;
+  /** The gateway's policy engine, for `ToolTarget` policies. */
+  readonly policyEngineId: string;
+}
+
 /**
- * Adds one model statement to a tenant role (ADR-0018): both invoke actions
- * on exactly the ARN forms this one model id needs, and the Region-wildcard
- * acknowledgment where the id is a cross-Region inference profile. Shared by
- * `SharedIngress.grantModel` and `AgentBackend` on an imported ingress.
+ * (ADR-0042) The published interface: the JSON document `SharedIngress`
+ * writes to `<registryPrefix>ingress` and `SharedIngress.fromParameters`
+ * reads at synth.
  */
+const PUBLISHED_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const PUBLISHED_TABLE_PATTERN = /^[A-Za-z0-9_.-]{3,255}$/;
+const PUBLISHED_ROLE_ARN_PATTERN = /^arn:(aws|aws-cn|aws-us-gov):iam::(\d{12}):role\/[\w+=,.@/-]{1,512}$/;
+
+/**
+ * Why a published document is not one `SharedIngress` wrote, or undefined
+ * (2026-11-04 security review). Its values land in resource policies (the
+ * Runtime trusts `ingressRoleArn`; every tool function trusts a gateway's
+ * `roleArn`), in `formatArn` and in Cedar text, so each is held to a shape
+ * before use, and every role must belong to the consuming stack's account.
+ */
+export function publishedIngressProblem(doc: PublishedIngress, account: string): string | undefined {
+  const https = (name: string, value: unknown): string | undefined =>
+    typeof value === 'string' && /^https:\/\/[^\s/]+(\/[^\s]*)?$/.test(value) ? undefined : `${name} is not an https URL`;
+  const roleArn = (name: string, value: unknown): string | undefined => {
+    const m = typeof value === 'string' ? PUBLISHED_ROLE_ARN_PATTERN.exec(value) : null;
+    if (m === null) {
+      return `${name} is not an IAM role ARN`;
+    }
+    return m[2] === account ? undefined : `${name} belongs to account ${m[2]}, not this stack's ${account}`;
+  };
+  const id = (name: string, value: unknown): string | undefined =>
+    typeof value === 'string' && PUBLISHED_ID_PATTERN.test(value) ? undefined : `${name} is not an identifier`;
+  const problems = [
+    https('baseUrl', doc.baseUrl),
+    https('endpointUrl', doc.endpointUrl),
+    https('issuer', doc.issuer),
+    https('jwksUrl', doc.jwksUrl),
+    https('entitlementsApiUrl', doc.entitlementsApiUrl),
+    roleArn('ingressRoleArn', doc.ingressRoleArn),
+    roleArn('tenantRoleArn', doc.tenantRoleArn),
+    id('ingressId', doc.ingressId),
+    typeof doc.entitlementsTableName === 'string' && PUBLISHED_TABLE_PATTERN.test(doc.entitlementsTableName) ? undefined : 'entitlementsTableName is not a table name',
+    doc.gatewayIdentifier === undefined ? undefined : id('gatewayIdentifier', doc.gatewayIdentifier),
+    doc.toolContextKeyId === undefined ? undefined : id('toolContextKeyId', doc.toolContextKeyId),
+    ...Object.entries(doc.toolsGateways ?? {}).flatMap(([name, gw]) => [
+      id(`toolsGateways.${name}`, name),
+      https(`toolsGateways.${name}.url`, gw?.url),
+      id(`toolsGateways.${name}.identifier`, gw?.identifier),
+      roleArn(`toolsGateways.${name}.roleArn`, gw?.roleArn),
+      id(`toolsGateways.${name}.policyEngineId`, gw?.policyEngineId),
+    ]),
+  ].filter((p): p is string => p !== undefined);
+  return problems.length === 0 ? undefined : `the published document is not one SharedIngress wrote: ${problems.join('; ')}`;
+}
+
+export interface PublishedIngress {
+  /** Always `2` (ADR-0042); before it the parameter held only the ingress kind. */
+  readonly version: 2;
+  /** The deployed ingress. */
+  readonly ingress: IngressKind;
+  /** The invocation URL (POST, bearer token): the default backend when one is set, else the ingress base URL. */
+  readonly endpointUrl: string;
+  /** The ingress base URL; a backend is at `<baseUrl>/<backend>/invocations`. */
+  readonly baseUrl: string;
+  /** The one principal every Runtime behind this ingress trusts (P-1). */
+  readonly ingressRoleArn: string;
+  /** The `ri:ingress` tag value a Runtime must carry (ADR-0024). */
+  readonly ingressId: string;
+  /** The tenant role every model call is signed by (ADR-0018). */
+  readonly tenantRoleArn: string;
+  /** The AgentCore Gateway a backend adds its target to (`agentcore-gateway` only, ADR-0010). */
+  readonly gatewayIdentifier?: string;
+  /** The transaction-token issuer URL (ADR-0037). */
+  readonly issuer: string;
+  /** The transaction-token JWKS URL (ADR-0037). */
+  readonly jwksUrl: string;
+  /** The entitlement store table, for name reservations (ADR-0035). */
+  readonly entitlementsTableName: string;
+  /** The entitlement API base URL (ADR-0030). */
+  readonly entitlementsApiUrl: string;
+  /** The key that signs tool contexts for every tools gateway; absent with no gateway (ADR-0034, ADR-0041). */
+  readonly toolContextKeyId?: string;
+  /** Every tools gateway by name (ADR-0041); empty with `toolsGateway: false`. */
+  readonly toolsGateways: Readonly<Record<string, PublishedToolsGateway>>;
+}
+
+/** The first-synth ref (ADR-0042): placeholder values of the right shape, so the synth that triggers the lookup succeeds. */
+function placeholderRef(
+  stack: Stack,
+  registryPrefix: string,
+  ingress: IngressKind,
+  options: { readonly toolsGateway?: boolean; readonly toolsGateways?: readonly string[] },
+): SharedIngressRef {
+  const dummy = (what: string) => `${LOOKUP_PLACEHOLDER_PREFIX}${what}`;
+  const roleArn = (what: string) => stack.formatArn({ service: 'iam', region: '', resource: 'role', resourceName: dummy(what) });
+  const names = options.toolsGateway === false ? [] : [...(options.toolsGateways ?? [DEFAULT_TOOLS_GATEWAY])];
+  const toolsGateways: Record<string, ToolsGatewayRef> = {};
+  for (const name of names) {
+    toolsGateways[name] = {
+      name,
+      gatewayIdentifier: dummy(`${name}-gateway`),
+      gatewayUrl: `https://${dummy(name)}.example.com/mcp`,
+      gatewayRoleArn: roleArn(`${name}-gateway-role`),
+      policyEngineId: dummy(`${name}-policy-engine`),
+      contextKeyId: dummy('tool-context-key'),
+    };
+  }
+  return {
+    registryPrefix,
+    ingress,
+    endpointUrl: `https://${dummy('ingress')}.example.com`,
+    ingressRoleArn: roleArn('ingress-role'),
+    ingressId: dummy('ingress-id'),
+    tenantRoleArn: roleArn('tenant-role'),
+    gatewayIdentifier: ingress === 'agentcore-gateway' ? dummy('gateway') : undefined,
+    issuer: `https://${dummy('issuer')}.example.com`,
+    entitlementsTableName: dummy('entitlements'),
+    tools: toolsGateways[DEFAULT_TOOLS_GATEWAY],
+    toolsGateways: names.length > 0 ? toolsGateways : undefined,
+  };
+}
+
+/** Adds one model statement to a tenant role (ADR-0018). */
 export function addModelStatement(scope: Construct, role: iam.IRole, modelId: string, sid: string): void {
   role.addToPrincipalPolicy(
     new iam.PolicyStatement({
@@ -1035,8 +1531,7 @@ function ingressEnvironment(
     [ENV.INGRESS]: options.ingress,
     [ENV.DISCOVERY_URL]: props.identity.discoveryUrl,
     [ENV.ALLOWED_CLIENT_IDS]: props.identity.allowedClientIds.join(','),
-    [ENV.FORWARD_USER_TOKEN]: String(options.forwardUserToken),
-    [ENV.REQUIRE_NARROWED_TOKEN]: String(options.requireNarrowedToken),
+    [ENV.MULTI_TENANT]: String(options.multiTenant),
   };
   if (options.requiredScopes !== undefined) {
     env[ENV.REQUIRED_SCOPES] = options.requiredScopes.join(',');
@@ -1044,10 +1539,6 @@ function ingressEnvironment(
   if (options.sessionScope !== undefined) {
     env[ENV.SESSION_SCOPE] = options.sessionScope;
   }
-  if (options.allowedScopes !== undefined) {
-    env[ENV.ALLOWED_SCOPES] = options.allowedScopes.join(',');
-  }
-  // The TVM is always on (ADR-0018), so these are always set.
   env[ENV.TVM_ROLE_ARN] = tenantRoleArn;
   env[ENV.TVM_INCLUDE_USER_ID_TAG] = String(options.tvm.includeUserIdTag);
   env[ENV.TVM_CLAIM_TAGS] = JSON.stringify(options.tvm.claimTags);
@@ -1061,57 +1552,11 @@ function ingressEnvironment(
     }
   }
   env[ENV.PER_TENANT_METRICS] = String(options.perTenantMetrics);
-  // The registry (ADR-0024): the ingress resolves `/{backend}/invocations` here.
   env[ENV.REGISTRY_PREFIX] = options.registryPrefix;
   env[ENV.REGISTRY_TTL_SECONDS] = String(options.registryTtlSeconds);
-  // The account the registry lives in, so a resolver refuses an entry whose
-  // Runtime ARN names another account; the Region is AWS_REGION.
   env[ENV.REGISTRY_ACCOUNT] = registryAccount;
   if (options.defaultBackend !== undefined) {
     env[ENV.DEFAULT_BACKEND] = options.defaultBackend;
   }
   return env;
-}
-
-/** Shared NodejsFunction properties: runtime, arch, tracing, JSON logs, bundling, log group. */
-export function functionProps(scope: Construct, logGroupId: string, timeout: Duration): Omit<NodejsFunctionProps, 'entry'> {
-  return {
-    handler: 'handler',
-    runtime: lambda.Runtime.NODEJS_24_X,
-    architecture: lambda.Architecture.ARM_64,
-    memorySize: 256,
-    timeout,
-    tracing: lambda.Tracing.ACTIVE,
-    logGroup: new logs.LogGroup(scope, logGroupId, {
-      retention: logs.RetentionDays.ONE_MONTH,
-      removalPolicy: RemovalPolicy.DESTROY, // sample only
-    }),
-    // The logger writes one JSON object per line; the JSON format passes it
-    // through as fields (P-9). EMF records bypass console (src/shared/metrics.ts).
-    loggingFormat: lambda.LoggingFormat.JSON,
-    bundling: {
-      minify: true,
-      // No source maps: the logger writes error names only, never stacks, and
-      // NODE_OPTIONS=--enable-source-maps is not set, so a map is only
-      // artifact weight on every cold start.
-      sourceMap: false,
-      // Bundle the SDK clients so the artifact pins the versions the sample
-      // was tested against.
-      externalModules: [],
-    },
-  };
-}
-
-/** Acknowledges the two findings every NodejsFunction here raises, with the same reasons. */
-export function acknowledgeLambdaFindings(fn: NodejsFunction): void {
-  acknowledgeGranularFinding(
-    fn,
-    'AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]',
-    'AWSLambdaBasicExecutionRole is the logs-only managed policy NodejsFunction attaches; a scoped replacement adds boilerplate for no change in access (ADR-0014).',
-  );
-  acknowledgeGranularFinding(
-    fn,
-    'AwsSolutions-IAM5[Resource::*]',
-    "Active X-Ray tracing grants xray:PutTraceSegments/PutTelemetryRecords, which the X-Ray API accepts only on '*' (no resource ARN). Not over-breadth (ADR-0014).",
-  );
 }

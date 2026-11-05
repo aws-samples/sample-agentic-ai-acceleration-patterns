@@ -1,6 +1,6 @@
 {
   "name": "agentic-runtime-isolation",
-  "description": "Agentic runtime isolation for a multi-tenant agent: a backend that trusts one ingress, which maps the validated caller to an isolated compute unit, vends tenant-scoped credentials and limits each tenant; one ingress fronts one or more registered backends; optional session mapping, scope checks and delegation; AgentCore Runtime first",
+  "description": "Agentic runtime isolation for a multi-tenant agent: a backend that trusts one ingress, which maps the validated caller to an isolated compute unit, vends tenant-scoped credentials, limits each tenant, enforces entitlements and mints a transaction token; one ingress fronts one or more registered backends and tools gateways, one Policy engine each; AgentCore Runtime first",
   "scripts": {
     "build": "projen build",
     "bundle": "projen bundle",
@@ -47,21 +47,25 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
-    "@aws-crypto/sha256-js": "5.2.0",
     "@aws-sdk/client-bedrock-agentcore": "3.1154.0",
+    "@aws-sdk/client-bedrock-agentcore-control": "3.1154.0",
     "@aws-sdk/client-bedrock-runtime": "3.1154.0",
     "@aws-sdk/client-dynamodb": "3.1154.0",
+    "@aws-sdk/client-kms": "3.1154.0",
     "@aws-sdk/client-ssm": "3.1154.0",
     "@aws-sdk/client-sts": "3.1154.0",
-    "@aws-sdk/credential-providers": "3.1154.0",
+    "@aws-sdk/core": "3.978.7",
+    "@aws-sdk/lib-dynamodb": "3.1154.0",
+    "@smithy/core": "3.37.0",
     "@smithy/node-http-handler": "4.12.1",
-    "@smithy/protocol-http": "5.6.2",
-    "@smithy/signature-v4": "5.7.4",
+    "@smithy/server-apigateway": "0.3.3",
+    "@smithy/server-common": "0.4.2",
     "@smithy/types": "4.19.0",
     "aws-cdk-lib": "2.274.0",
     "cdk-nag": "3.0.2",
     "constructs": "10.8.1",
-    "jose": "5.10.0"
+    "jose": "5.10.0",
+    "tslib": "2.8.1"
   },
   "engines": {
     "node": ">= 24.0.0"
@@ -87,7 +91,8 @@
     ],
     "coveragePathIgnorePatterns": [
       "/node_modules/",
-      "/test/"
+      "/test/",
+      "/src/smithy/"
     ],
     "testMatch": [
       "<rootDir>/@(src|test)/**/*(*.)@(spec|test).ts?(x)",

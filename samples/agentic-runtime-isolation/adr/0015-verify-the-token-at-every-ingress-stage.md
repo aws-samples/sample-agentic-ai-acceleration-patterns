@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-10-26
-- Amended by: ADR-0023
+- Amended by: ADR-0023, ADR-0043
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -27,3 +27,5 @@ Option 2. The REQUEST authoriser caches results for 60 seconds keyed on the `Aut
 Easier: one verifier, one test suite, one error table for both ingresses. Harder: a change to the token contract (§6.2) touches the verifier and the authoriser's identity expression together. Revisit if AgentCore Gateway passes verified claims to interceptors.
 
 Amended by ADR-0023 (2026-10-27): the REQUEST authoriser's result cache is 5 minutes, not 60 seconds (ADR-0023 item 6); the integration Lambda still re-verifies the token, including `exp`, before any invoke, so a cached Allow never outlives the Lambda's own check.
+
+Amended by ADR-0043 (2026-11-04): the cache is back to at most 60 seconds, and at most `transactionToken.ttl` minus the longest stream (120 s), because in v2 the cached Allow carries a minted transaction token; with `identity.multiTenant` the cache key also holds `X-Tenant-Id`.

@@ -26,8 +26,9 @@ import { isLambdaRuntime, readIngressConfig } from '../shared/config';
 import { headerValue } from '../shared/headers';
 import { errorName, log } from '../shared/logger';
 import { emitRequestMetrics, type RequestMetrics, UsageEventScanner } from '../shared/metrics';
-import { ERROR_TEXT, type ErrorStatus, IngressPipeline, pipelineFor, RequestError } from '../shared/request';
+import { type AuthorizedContext, errorBody, type ErrorStatus, IngressPipeline, pipelineFor, RequestError } from '../shared/request';
 import { prefixOf } from '../shared/session';
+import { TENANT_HEADER } from '../shared/tenant';
 
 /** What the handler needs from the response stream; the Lambda global supplies it. */
 export interface ResponseWriter {
@@ -45,6 +46,26 @@ export interface HandlerDependencies {
   readonly perTenantMetrics?: boolean;
   /** Resolves once init's pre-connects are done (ADR-0023); the first request awaits it. */
   readonly ready?: Promise<void>;
+}
+
+/**
+ * (v2) The authoriser's decision and transaction token from its context
+ * (spec §3.1 C-3a), or undefined when the context lacks any of them.
+ */
+export function authorizedContext(authorizer: Record<string, unknown>): AuthorizedContext | undefined {
+  const { tenantId, backend, transactionToken, txn, grantSize, mint } = authorizer;
+  if (
+    typeof tenantId !== 'string' ||
+    typeof backend !== 'string' ||
+    typeof transactionToken !== 'string' ||
+    transactionToken.length === 0 ||
+    typeof txn !== 'string' ||
+    (mint !== 'hit' && mint !== 'miss')
+  ) {
+    return undefined;
+  }
+  const size = Number(grantSize);
+  return { tenantId, backend, transactionToken, txn, grantSize: Number.isInteger(size) ? size : 0, mint };
 }
 
 function decodeBody(event: APIGatewayProxyEvent): string | null {
@@ -91,7 +112,7 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
     log.warn('request refused', { ingress: 'api-gateway', status, reason, tenantId, backend });
     tenantForMetrics(status, tenantId, { backend });
     out.start(status, { 'Content-Type': 'text/plain' });
-    out.write(ERROR_TEXT[status]);
+    out.write(errorBody(status, reason));
     out.end();
   };
 
@@ -102,7 +123,16 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
     // `requestContext.resourcePath` is the template (`/{backend}/invocations`)
     // and `requestContext.path` carries the stage prefix. The registry
     // resolves the name (ADR-0024).
-    request = await deps.pipeline.validate({ authorization: headerValue(event.headers, 'authorization'), body: decodeBody(event), path: event.path });
+    // (v2) The authoriser minted the transaction token; this Lambda forwards
+    // it after checking it is for the tenant and backend it verified itself.
+    // Without one in the context the pipeline refuses with 502 mint_failed.
+    request = await deps.pipeline.validate({
+      authorization: headerValue(event.headers, 'authorization'),
+      tenantHeader: headerValue(event.headers, TENANT_HEADER),
+      body: decodeBody(event),
+      path: event.path,
+      authorized: authorizedContext(authorizer),
+    });
   } catch (error) {
     if (error instanceof RequestError) {
       return fail(error.status, error.reason, error.tenantId);
@@ -111,7 +141,18 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
     return fail(502, 'pipeline_failed');
   }
 
-  const fields = { ingress: 'api-gateway', tenantId: request.tenantId, backend: request.backend, sessionPrefix: prefixOf(request.unitId) };
+  // P-9 (v2): `agent`, `txn`, `grantSize` and `mint` join this line to the
+  // tools gateway's `tool admitted` lines; never the token itself.
+  const fields = {
+    ingress: 'api-gateway',
+    tenantId: request.tenantId,
+    backend: request.backend,
+    agent: request.backend,
+    txn: request.txn,
+    grantSize: request.grantSize,
+    mint: request.mint,
+    sessionPrefix: prefixOf(request.unitId),
+  };
   // Backend invoke wall time runs from the invoke call to the end of the
   // stream: the AgentCore Runtime bills the session's active CPU and memory
   // over that window (P-10).

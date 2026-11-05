@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { ENV, readIngressConfig, readRegistryConfig, requireEnv } from '../../src/shared/config';
+import { ENV, readIngressConfig, readMintConfig, readRegistryConfig, requireEnv } from '../../src/shared/config';
 
 /** The construct writes these variables; the handlers read them back (one encoding, one file). */
 describe('readIngressConfig', () => {
@@ -18,12 +18,15 @@ describe('readIngressConfig', () => {
       discoveryUrl: 'https://issuer.example/.well-known/openid-configuration',
       allowedClientIds: ['c1', 'c2'],
       requiredScopes: undefined,
+      multiTenant: false,
+      issuer: undefined,
       sessionScope: undefined,
-      delegation: { forwardUserToken: false, requireNarrowedToken: false, allowedScopes: undefined },
       tvm: undefined,
       limits: undefined,
       perTenantMetrics: false,
       registry: { prefix: '/application-plane/shared/agent-runtime/', ttlSeconds: 60, defaultBackend: undefined },
+      entitlementsTable: undefined,
+      mint: undefined,
     });
   });
 
@@ -33,9 +36,15 @@ describe('readIngressConfig', () => {
       [ENV.INGRESS]: 'agentcore-gateway',
       [ENV.REQUIRED_SCOPES]: 'tenant-api/read',
       [ENV.SESSION_SCOPE]: 'tenant',
-      [ENV.FORWARD_USER_TOKEN]: 'true',
-      [ENV.REQUIRE_NARROWED_TOKEN]: 'true',
-      [ENV.ALLOWED_SCOPES]: 'tenant-api/read',
+      [ENV.MULTI_TENANT]: 'true',
+      [ENV.ISSUER]: 'https://abc.execute-api.eu-central-1.amazonaws.com/prod',
+      [ENV.ENTITLEMENTS_TABLE]: 'Entitlements',
+      [ENV.TXN_KEY_ID]: '1234abcd-12ab-34cd-56ef-1234567890ab',
+      [ENV.TXN_ALGORITHM]: 'ES256',
+      [ENV.TXN_TTL_SECONDS]: '600',
+      [ENV.TXN_REUSE_MARGIN_SECONDS]: '180',
+      [ENV.TXN_CACHE_MAX_ENTRIES]: '10',
+      [ENV.INGRESS_ROLE_ARN]: 'arn:aws:iam::111122223333:role/ingress',
       [ENV.TVM_ROLE_ARN]: 'arn:aws:iam::111122223333:role/tenant',
       [ENV.TVM_INCLUDE_USER_ID_TAG]: 'true',
       [ENV.TVM_CLAIM_TAGS]: '{"Tier":"custom:tier"}',
@@ -51,7 +60,17 @@ describe('readIngressConfig', () => {
     expect(config.ingress).toBe('agentcore-gateway');
     expect(config.requiredScopes).toEqual(['tenant-api/read']);
     expect(config.sessionScope).toBe('tenant');
-    expect(config.delegation).toEqual({ forwardUserToken: true, requireNarrowedToken: true, allowedScopes: ['tenant-api/read'] });
+    expect(config.multiTenant).toBe(true);
+    expect(config.entitlementsTable).toBe('Entitlements');
+    expect(config.mint).toEqual({
+      issuer: 'https://abc.execute-api.eu-central-1.amazonaws.com/prod',
+      keyId: '1234abcd-12ab-34cd-56ef-1234567890ab',
+      algorithm: 'ES256',
+      ttlSeconds: 600,
+      reuseMarginSeconds: 180,
+      ingressRoleArn: 'arn:aws:iam::111122223333:role/ingress',
+      cacheMaxEntries: 10,
+    });
     expect(config.tvm).toEqual({
       roleArn: 'arn:aws:iam::111122223333:role/tenant',
       includeUserIdTag: true,
@@ -119,5 +138,24 @@ describe('readIngressConfig', () => {
     expect(() => readIngressConfig({ ...base, [ENV.SESSION_SCOPE]: 'global' })).toThrow(ENV.SESSION_SCOPE);
     expect(() => readIngressConfig({ ...base, [ENV.TVM_ROLE_ARN]: 'arn', [ENV.TVM_DURATION_SECONDS]: '60' })).toThrow(ENV.TVM_DURATION_SECONDS);
     expect(() => requireEnv('MISSING', {})).toThrow('MISSING');
+  });
+});
+
+describe('readMintConfig (v2)', () => {
+  const mintEnv = {
+    [ENV.TXN_KEY_ID]: 'key-1',
+    [ENV.ISSUER]: 'https://issuer.example/prod',
+    [ENV.INGRESS_ROLE_ARN]: 'arn:aws:iam::111122223333:role/ingress',
+  };
+  it('is undefined without a key id (a function that does not mint); defaults RS256, 300 s, margin 60', () => {
+    expect(readMintConfig({})).toBeUndefined();
+    expect(readMintConfig(mintEnv)).toMatchObject({ algorithm: 'RS256', ttlSeconds: 300, reuseMarginSeconds: 60 });
+  });
+  it('refuses a bad algorithm, a ttl outside 120 to 900, and a missing issuer or ingress role', () => {
+    expect(() => readMintConfig({ ...mintEnv, [ENV.TXN_ALGORITHM]: 'HS256' })).toThrow(ENV.TXN_ALGORITHM);
+    expect(() => readMintConfig({ ...mintEnv, [ENV.TXN_TTL_SECONDS]: '119' })).toThrow(ENV.TXN_TTL_SECONDS);
+    expect(() => readMintConfig({ ...mintEnv, [ENV.TXN_TTL_SECONDS]: '901' })).toThrow(ENV.TXN_TTL_SECONDS);
+    expect(() => readMintConfig({ ...mintEnv, [ENV.ISSUER]: undefined })).toThrow(ENV.ISSUER);
+    expect(() => readMintConfig({ ...mintEnv, [ENV.INGRESS_ROLE_ARN]: undefined })).toThrow(ENV.INGRESS_ROLE_ARN);
   });
 });

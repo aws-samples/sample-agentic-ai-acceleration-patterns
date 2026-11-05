@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-10-26
+- Amended by: ADR-0038
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -24,3 +25,5 @@ Option 3, topology `shared-pool` only (one tenant per user). Only the demo app a
 
 ## Consequences
 Easier: one identity implementation in the repo. Harder: the integ runtime and cost include a tenant-identity deployment; ADR-0017 of tenant-identity means only one CLI-deployed topology may own the shared parameters per account, so the driver checks for an existing deployment first.
+
+**2026-11-02.** Amended by ADR-0038: the ingress also accepts `shared-pool-multi-tenant` tokens carrying `tenants`, with `X-Tenant-Id` selecting one of them, behind `identity.multiTenant`.

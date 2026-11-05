@@ -4,14 +4,18 @@
 import { AssumeRoleCommand, STSClient } from '@aws-sdk/client-sts';
 import { mockClient } from 'aws-sdk-client-mock';
 import 'aws-sdk-client-mock-jest';
+import { AuthorityError } from '../../src/shared/authority';
 import type { IngressConfig } from '../../src/shared/config';
 import { type Admission, TenantLimiter } from '../../src/shared/limits';
 import { BackendRegistry, RegistryError } from '../../src/shared/registry';
-import { ERROR_TEXT, IngressPipeline, parseBody, pipelineFor, type RegistryResolver, RequestError } from '../../src/shared/request';
+import { type AuthoritySource, ERROR_TEXT, errorBody, forwardedTokenVerifierFor, IngressPipeline, parseBody, pipelineFor, type RegistryResolver, RequestError, type ForwardedTokenVerifier } from '../../src/shared/request';
+import { publicJwk, signJws } from '../../src/shared/jws';
+import { TRANSACTION_TOKEN_TYPE, transactionClaims } from '../../src/shared/mint';
+import { localRsaKey } from '../jws-helpers';
 import { PREFIX_PATTERN, RANDOM_UNIT_ID_PATTERN, sessionPrefix } from '../../src/shared/session';
 import { TokenVendingMachine } from '../../src/shared/tvm';
 import { TokenVerifier } from '../../src/shared/verifier';
-import { baseConfig, CLIENT_ID, DISCOVERY_URL, FIXTURE_ENTRIES, RUNTIME_ARN, stubRegistry, testIssuer, type TestIssuer } from '../helpers';
+import { baseConfig, CLIENT_ID, DISCOVERY_URL, FIXTURE_ENTRIES, RUNTIME_ARN, stubAuthority, stubForwarded, stubRegistry, testIssuer, TXN_TOKEN, type TestIssuer } from '../helpers';
 
 /** The one request contract both ingresses enforce (spec §5, ADR-0002, ADR-0013). */
 
@@ -81,19 +85,25 @@ describe('IngressPipeline', () => {
     });
   });
 
-  const pipeline = (config: IngressConfig, limiter?: TenantLimiter, registry: RegistryResolver = stubRegistry().registry) => {
+  const pipeline = (
+    config: IngressConfig,
+    limiter?: TenantLimiter,
+    registry: RegistryResolver = stubRegistry().registry,
+    authority: AuthoritySource | null = stubAuthority(),
+    forwarded: ForwardedTokenVerifier | null = stubForwarded,
+  ) => {
     const verifier = new TokenVerifier(
       {
         discoveryUrl: config.discoveryUrl,
         allowedClientIds: config.allowedClientIds,
         requiredScopes: config.requiredScopes,
-        requireNarrowedToken: config.delegation.requireNarrowedToken,
-        allowedScopes: config.delegation.allowedScopes,
+        multiTenant: config.multiTenant,
+        ownIssuer: config.issuer,
       },
       { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
     );
     const tvm = config.tvm === undefined ? undefined : new TokenVendingMachine(config.tvm, { sts: new STSClient({}) });
-    return new IngressPipeline(config, verifier, registry, tvm, limiter);
+    return new IngressPipeline(config, verifier, registry, tvm, limiter, authority ?? undefined, forwarded ?? undefined);
   };
 
   const refusal = async (promise: Promise<unknown>) => {
@@ -108,15 +118,28 @@ describe('IngressPipeline', () => {
     throw new Error('expected a refusal');
   };
 
-  it('session off: a fresh random unit per request, no token, no credentials (P-2, P-4)', async () => {
+  it('session off: a fresh random unit per request, the minted token, no credentials without tvm (P-2, P-4, P-14)', async () => {
     const p = pipeline(baseConfig());
     const token = await issuer.mint();
     const a = await p.validate({ authorization: `Bearer ${token}`, body: '{"prompt":"hi"}' });
     const b = await p.validate({ authorization: `Bearer ${token}`, body: '{"prompt":"hi"}' });
     expect(a.unitId).toMatch(RANDOM_UNIT_ID_PATTERN);
     expect(a.unitId).not.toBe(b.unitId);
-    expect(a).toEqual({ tenantId: 'tenant-a', sub: 'user-a1', unitId: a.unitId, backend: 'default', runtimeArn: RUNTIME_ARN, prompt: 'hi' });
-    expect(a.userToken).toBeUndefined();
+    expect(a).toEqual({
+      tenantId: 'tenant-a',
+      sub: 'user-a1',
+      unitId: a.unitId,
+      backend: 'default',
+      runtimeArn: RUNTIME_ARN,
+      prompt: 'hi',
+      transactionToken: TXN_TOKEN,
+      txn: 'txn-1',
+      grantSize: 2,
+      mint: 'miss',
+      noToolsGranted: false,
+    });
+    // The identity token never leaves the ingress (P-14).
+    expect(JSON.stringify(a)).not.toContain(token);
     expect(a.credentials).toBeUndefined();
   });
 
@@ -174,17 +197,85 @@ describe('IngressPipeline', () => {
     await expect(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body: '{"prompt":"hi"}' })).resolves.toBeDefined();
   });
 
-  it('forwardUserToken attaches the raw token; requireNarrowedToken refuses an un-narrowed one (P-5)', async () => {
-    const forward = pipeline(baseConfig({ delegation: { forwardUserToken: true, requireNarrowedToken: false } }));
-    const token = await issuer.mint();
-    expect((await forward.validate({ authorization: `Bearer ${token}`, body: '{"prompt":"hi"}' })).userToken).toBe(token);
+  describe('the authority step (v2, spec §3.6)', () => {
+    const body = '{"prompt":"hi"}';
 
-    const narrowed = pipeline(
-      baseConfig({ delegation: { forwardUserToken: true, requireNarrowedToken: true, allowedScopes: ['default/chat'] } }),
-    );
-    expect(await refusal(narrowed.validate({ authorization: `Bearer ${token}`, body: '{"prompt":"hi"}' }))).toEqual({ status: 403, reason: 'not_narrowed' });
-    const small = await issuer.mint({ scope: 'default/chat' });
-    expect((await narrowed.validate({ authorization: `Bearer ${small}`, body: '{"prompt":"hi"}' })).userToken).toBe(small);
+    it('mints for the selected tenant, the verified sub and the route backend', async () => {
+      const calls: Array<{ tenantId: string; sub: string; agent: string }> = [];
+      const p = pipeline(baseConfig(), undefined, stubRegistry(FIXTURE_ENTRIES).registry, stubAuthority(calls));
+      await p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, path: '/billing/invocations' });
+      expect(calls).toEqual([{ tenantId: 'tenant-a', sub: 'user-a1', agent: 'billing' }]);
+    });
+
+    it('a refusal keeps its status and reason (agent_not_subscribed 403, mint_failed 502), attributed to the tenant', async () => {
+      for (const [status, reason] of [[403, 'agent_not_subscribed'], [403, 'tenant_suspended'], [502, 'grant_too_large'], [502, 'mint_failed']] as const) {
+        const refusing: AuthoritySource = {
+          resolve: async () => {
+            throw new AuthorityError(status, reason);
+          },
+        };
+        let caught: unknown;
+        await pipeline(baseConfig(), undefined, undefined, refusing)
+          .validate({ authorization: `Bearer ${await issuer.mint()}`, body })
+          .catch((e) => (caught = e));
+        expect(caught).toMatchObject({ status, reason, tenantId: 'tenant-a' });
+      }
+    });
+
+    it("api-gateway: the authoriser's token is forwarded, only for the tenant and backend verified here; no authority step runs", async () => {
+      const calls: Array<{ tenantId: string; sub: string; agent: string }> = [];
+      const p = pipeline(baseConfig(), undefined, undefined, stubAuthority(calls));
+      const authorized = { tenantId: 'tenant-a', backend: 'default', transactionToken: 'from-authoriser', txn: 'txn-9', grantSize: 1, mint: 'hit' as const };
+      const r = await p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, authorized });
+      expect(r).toMatchObject({ transactionToken: 'from-authoriser', txn: 'txn-9', grantSize: 1, mint: 'hit' });
+      expect(calls).toEqual([]);
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, authorized: { ...authorized, tenantId: 'tenant-b' } }))).toEqual({
+        status: 403,
+        reason: 'tenant_not_allowed',
+      });
+      // M-82: the forwarded token itself must verify and name this tenant and agent; a hand-written context cannot.
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, authorized: { ...authorized, transactionToken: 'forged' } }))).toEqual({
+        status: 403,
+        reason: 'tenant_not_allowed',
+      });
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, authorized: { ...authorized, transactionToken: 'for-billing' } }))).toEqual({
+        status: 403,
+        reason: 'tenant_not_allowed',
+      });
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, authorized: { ...authorized, transactionToken: 'for-tenant-b' } }))).toEqual({
+        status: 403,
+        reason: 'tenant_not_allowed',
+      });
+      const unverifiable = pipeline(baseConfig(), undefined, stubRegistry().registry, null, null);
+      expect(await refusal(unverifiable.validate({ authorization: `Bearer ${await issuer.mint()}`, body, authorized }))).toEqual({ status: 502, reason: 'mint_failed' });
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, authorized: { ...authorized, backend: 'billing' } }))).toEqual({
+        status: 403,
+        reason: 'tenant_not_allowed',
+      });
+    });
+
+    it('neither an authoriser token nor a mint here is 502 mint_failed (a deployment fault)', async () => {
+      const p = pipeline(baseConfig(), undefined, undefined, null);
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body }))).toEqual({ status: 502, reason: 'mint_failed' });
+    });
+
+    it('the tenant header selects among tenants (ADR-0038); the limit and the mint see the selected tenant', async () => {
+      const calls: Array<{ tenantId: string; sub: string; agent: string }> = [];
+      const p = pipeline(baseConfig({ multiTenant: true }), undefined, undefined, stubAuthority(calls));
+      const token = `Bearer ${await issuer.mint({ tenant_id: undefined, tenants: ['tenant-a', 'tenant-b'] })}`;
+      expect((await p.validate({ authorization: token, tenantHeader: 'tenant-b', body })).tenantId).toBe('tenant-b');
+      expect(calls.map((c) => c.tenantId)).toEqual(['tenant-b']);
+      expect(await refusal(p.validate({ authorization: token, body }))).toEqual({ status: 400, reason: 'tenant_required' });
+      expect(await refusal(p.validate({ authorization: token, tenantHeader: 'tenant-c', body }))).toEqual({ status: 403, reason: 'tenant_not_allowed' });
+    });
+
+    it('refusal bodies carry the public v2 reason code only (spec §5.1)', () => {
+      expect(errorBody(403, 'agent_not_subscribed')).toBe('forbidden: agent_not_subscribed');
+      expect(errorBody(400, 'tenant_required')).toBe('bad request: tenant_required');
+      expect(errorBody(403, 'scope_missing')).toBe('forbidden');
+      expect(errorBody(502, 'mint_failed')).toBe('upstream error');
+      expect(errorBody(401)).toBe('unauthorized');
+    });
   });
 
   describe('tvm (P-8)', () => {
@@ -273,37 +364,19 @@ describe('IngressPipeline', () => {
     });
 
     it('a registry fault is 502 with its reason', async () => {
-      const faulty = (reason: 'registry_entry_invalid' | 'registry_unavailable'): RegistryResolver => ({
+      const faulty = (reason: 'registry_entry_invalid' | 'registry_unavailable' | 'registry_entry_v1'): RegistryResolver => ({
         resolve: async () => {
           throw new RegistryError(reason);
         },
         warm: async () => undefined,
       });
-      for (const reason of ['registry_entry_invalid', 'registry_unavailable'] as const) {
+      for (const reason of ['registry_entry_invalid', 'registry_unavailable', 'registry_entry_v1'] as const) {
         const p = pipeline(baseConfig(), undefined, faulty(reason));
         expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, path: '/default/invocations' }))).toEqual({ status: 502, reason });
       }
     });
 
-    it("a token passes a backend with ANY ONE of the backend's scopes; none of them is 403 backend_scope_missing (ADR-0025)", async () => {
-      const p = pipeline(baseConfig(), undefined, stubRegistry(entries).registry);
-      const chatOnly = `Bearer ${await issuer.mint({ scope: 'default/chat' })}`;
-      expect(await refusal(p.validate({ authorization: chatOnly, body, path: '/billing/invocations' }))).toEqual({ status: 403, reason: 'backend_scope_missing' });
-      await expect(p.validate({ authorization: chatOnly, body, path: '/default/invocations' })).resolves.toMatchObject({ backend: 'default' });
-      // Either of billing's two scopes alone opens billing (OR), and neither opens the default backend.
-      for (const scope of ['billing/read', 'billing/invoke']) {
-        const one = `Bearer ${await issuer.mint({ scope })}`;
-        await expect(p.validate({ authorization: one, body, path: '/billing/invocations' })).resolves.toMatchObject({ backend: 'billing' });
-        expect(await refusal(p.validate({ authorization: one, body, path: '/default/invocations' }))).toEqual({ status: 403, reason: 'backend_scope_missing' });
-      }
-      // A token with no scope at all reaches nothing.
-      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint({ scope: undefined })}`, body, path: '/default/invocations' }))).toEqual({
-        status: 403,
-        reason: 'backend_scope_missing',
-      });
-    });
-
-    it('the ingress-wide floor (AND) is checked before the backend scopes (ADR-0005 order)', async () => {
+    it('the ingress-wide floor (AND) is checked at the verifier, before the registry (ADR-0005)', async () => {
       const p = pipeline(baseConfig({ requiredScopes: ['default/chat'] }), undefined, stubRegistry(entries).registry);
       // billing/read alone fails the floor at the verifier, not at the backend.
       expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint({ scope: 'billing/read' })}`, body, path: '/billing/invocations' }))).toEqual({
@@ -312,14 +385,10 @@ describe('IngressPipeline', () => {
       });
       // The floor plus one billing scope passes billing; the floor alone passes default only.
       await expect(p.validate({ authorization: `Bearer ${await issuer.mint({ scope: 'default/chat billing/invoke' })}`, body, path: '/billing/invocations' })).resolves.toMatchObject({ backend: 'billing' });
+      // v2: no per-backend scope check; the floor alone reaches every backend, and the grant rule decides the rest.
       const floorOnly = `Bearer ${await issuer.mint({ scope: 'default/chat' })}`;
-      expect(await refusal(p.validate({ authorization: floorOnly, body, path: '/billing/invocations' }))).toEqual({ status: 403, reason: 'backend_scope_missing' });
+      await expect(p.validate({ authorization: floorOnly, body, path: '/billing/invocations' })).resolves.toMatchObject({ backend: 'billing' });
       await expect(p.validate({ authorization: floorOnly, body, path: '/default/invocations' })).resolves.toMatchObject({ backend: 'default' });
-    });
-
-    it('an entry with an empty scope list admits no token (fail closed)', async () => {
-      const p = pipeline(baseConfig(), undefined, stubRegistry({ none: { runtimeArn: RUNTIME_ARN, scopes: [], status: 'active' } }).registry);
-      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, path: '/none/invocations' }))).toEqual({ status: 403, reason: 'backend_scope_missing' });
     });
 
     it('the backend is resolved after the token and before the body: a bad token is 401, an unknown route costs no body parse', async () => {
@@ -389,5 +458,32 @@ describe('IngressPipeline', () => {
       expect(pipelineFor(baseConfig()).limiter).toBeUndefined();
       expect(pipelineFor(baseConfig({ limits: { tableName: 'TenantLimits', requestsPerMinute: 60 } })).limiter).toBeInstanceOf(TenantLimiter);
     });
+  });
+});
+
+describe('forwardedTokenVerifierFor (M-82)', () => {
+  const TXN_ISSUER = 'https://example.execute-api.eu-central-1.amazonaws.com/prod';
+  const key = localRsaKey();
+  const jwks = JSON.stringify({ keys: [publicJwk(key.publicKey, 'gen-1')] });
+  const mintFor = (agent: string, extra: Record<string, unknown> = {}, typ = TRANSACTION_TOKEN_TYPE, kid = 'gen-1') =>
+    signJws(
+      { alg: 'RS256', typ, kid },
+      { ...transactionClaims({ tenantId: 'tenant-a', sub: 'u', agent, scope: `${agent}/chat`, gateways: [], versions: { tenant: 1, agent: 1 } }, { issuer: TXN_ISSUER, ttlSeconds: 300, ingressRoleArn: 'arn:aws:iam::111122223333:role/ingress' }, Math.floor(Date.now() / 1000), { txn: 't', jti: 'j' }), ...extra },
+      key.signer,
+    );
+
+  it('verifies a token against the deployed JWKS document without a fetch and returns its tenant and agent', async () => {
+    const verify = forwardedTokenVerifierFor(TXN_ISSUER, jwks);
+    expect(await verify(await mintFor('default'))).toEqual({ tenantId: 'tenant-a', agent: 'default' });
+    expect(await verify(await mintFor('billing'))).toEqual({ tenantId: 'tenant-a', agent: 'billing' });
+  });
+
+  it('refuses another typ, another issuer, a missing exp, or an unknown kid (the route fetch fails in a unit test)', async () => {
+    const verify = forwardedTokenVerifierFor(TXN_ISSUER, jwks);
+    await expect(verify(await mintFor('default', {}, 'at+jwt'))).rejects.toThrow();
+    await expect(verify(await mintFor('default', { iss: 'https://other.example.com' }))).rejects.toThrow();
+    await expect(verify(await mintFor('default', { exp: undefined }))).rejects.toThrow();
+    await expect(verify(await mintFor('default', {}, TRANSACTION_TOKEN_TYPE, 'gen-2'))).rejects.toThrow();
+    await expect(verify('not-a-token')).rejects.toThrow();
   });
 });

@@ -23,6 +23,8 @@ export interface TestIssuer {
   readonly fetchDiscovery: (url: string) => Promise<Discovery>;
   /** A valid access token for the given overrides (defaults: tenant-a, user-a1, the default backend's scope and billing/read). */
   mint(overrides?: JWTPayload & { exp?: number }, headerKid?: string): Promise<string>;
+  /** A token signed by the known key without the named registered claims (no `exp`, no `iat`). */
+  mintWithout(claims: readonly ('exp' | 'iat')[], overrides?: JWTPayload): Promise<string>;
   /** A token signed by a key the JWKS does not know. */
   mintForeign(overrides?: JWTPayload): Promise<string>;
 }
@@ -57,22 +59,30 @@ export async function testIssuer(): Promise<TestIssuer> {
     },
     mint: (overrides, kid) => sign(privateKey, overrides, kid),
     mintForeign: (overrides) => sign(foreign.privateKey, overrides),
+    mintWithout: async (omit, overrides = {}) => {
+      let jwt = new SignJWT({ ...DEFAULT_CLAIMS, ...overrides }).setProtectedHeader({ alg: 'RS256', kid: 'k1' }).setIssuer(ISSUER);
+      jwt = omit.includes('iat') ? jwt : jwt.setIssuedAt();
+      jwt = omit.includes('exp') ? jwt : jwt.setExpirationTime('5m');
+      return jwt.sign(privateKey);
+    },
   };
 }
 
-/** The registry prefix and the one backend the fixtures resolve (ADR-0024), with its one scope (ADR-0025). */
+/** The registry prefix and the one backend the fixtures resolve (ADR-0024), with its one need (v2, ADR-0032). */
 export const REGISTRY_PREFIX = '/application-plane/shared/agent-runtime/';
 export const DEFAULT_BACKEND = 'default';
-export const DEFAULT_SCOPE = 'default/chat';
+export const DEFAULT_NEED = 'default/chat';
+/** The tools the default backend may use (v2). */
+export const DEFAULT_TOOLS = ['crm/*'];
 export const RUNTIME_ARN = 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_test-abc123';
-/** A second backend the fixtures add: two scopes of its own, any one admits (ADR-0025). */
+/** A second backend the fixtures add: two needs of its own (ADR-0032). */
 export const BILLING_RUNTIME_ARN = 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_billing-1';
-export const BILLING_SCOPES = ['billing/read', 'billing/invoke'];
+export const BILLING_NEEDS = ['billing/read', 'billing/invoke'];
 /** A draining backend. */
 export const OLD_RUNTIME_ARN = 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_old-1';
 export const FIXTURE_ENTRIES: Record<string, RegistryEntry> = {
-  billing: { runtimeArn: BILLING_RUNTIME_ARN, scopes: BILLING_SCOPES, status: 'active' },
-  old: { runtimeArn: OLD_RUNTIME_ARN, scopes: ['old/chat'], status: 'draining' },
+  billing: { runtimeArn: BILLING_RUNTIME_ARN, needs: BILLING_NEEDS, tools: ['invoices/*'], version: 1, status: 'active' },
+  old: { runtimeArn: OLD_RUNTIME_ARN, needs: ['old/chat'], tools: [], version: 1, status: 'draining' },
 };
 
 /** An ingress configuration with every module off; tests override what they need. */
@@ -80,7 +90,7 @@ export const baseConfig = (overrides: Partial<IngressConfig> = {}): IngressConfi
   ingress: 'api-gateway',
   discoveryUrl: DISCOVERY_URL,
   allowedClientIds: [CLIENT_ID],
-  delegation: { forwardUserToken: false, requireNarrowedToken: false },
+  multiTenant: false,
   perTenantMetrics: false,
   registry: { prefix: REGISTRY_PREFIX, ttlSeconds: 60, defaultBackend: DEFAULT_BACKEND },
   ...overrides,
@@ -88,12 +98,15 @@ export const baseConfig = (overrides: Partial<IngressConfig> = {}): IngressConfi
 
 /**
  * A registry stub with no SSM behind it: `default` resolves to RUNTIME_ARN
- * with the one scope `default/chat`, plus whatever entries a test adds; any
+ * with the one need `default/chat` and tools `crm/*`, plus whatever entries a test adds; any
  * other name is `unknown_backend`. `warmed` records the names `warm()` was
  * asked for.
  */
 export const stubRegistry = (entries: Record<string, RegistryEntry> = {}) => {
-  const table: Record<string, RegistryEntry> = { [DEFAULT_BACKEND]: { runtimeArn: RUNTIME_ARN, scopes: [DEFAULT_SCOPE], status: 'active' }, ...entries };
+  const table: Record<string, RegistryEntry> = {
+    [DEFAULT_BACKEND]: { runtimeArn: RUNTIME_ARN, needs: [DEFAULT_NEED], tools: DEFAULT_TOOLS, version: 1, status: 'active' },
+    ...entries,
+  };
   const warmed: string[] = [];
   const registry: RegistryResolver = {
     resolve: async (backend: string) => {
@@ -114,3 +127,37 @@ export const stubRegistry = (entries: Record<string, RegistryEntry> = {}) => {
   };
   return { registry, warmed };
 };
+
+/** A minted transaction token stand-in (the authority step is stubbed in pipeline tests). */
+export const TXN_TOKEN = 'eyJhbGciOiJSUzI1NiIsInR5cCI6InR4bitqd3QifQ.eyJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtYSJ9.c2ln';
+
+/**
+ * A forwarded-token verifier stub (M-82): TXN_TOKEN and 'from-authoriser' are
+ * tenant-a tokens for the agent `forwardedAgent` names (default `default`);
+ * 'for-billing' and 'for-tenant-b' name another agent or tenant; anything
+ * else fails verification.
+ */
+export let forwardedAgent = 'default';
+export function setForwardedAgent(agent: string): void {
+  forwardedAgent = agent;
+}
+export const stubForwarded = async (token: string): Promise<{ tenantId: string; agent: string }> => {
+  if (token === TXN_TOKEN || token === 'from-authoriser') {
+    return { tenantId: 'tenant-a', agent: forwardedAgent };
+  }
+  if (token === 'for-billing') {
+    return { tenantId: 'tenant-a', agent: 'billing' };
+  }
+  if (token === 'for-tenant-b') {
+    return { tenantId: 'tenant-b', agent: forwardedAgent };
+  }
+  throw new Error('not a transaction token');
+};
+
+/** An authority stub: every agent granted its needs, one fixed token (tests that need refusals pass their own). */
+export const stubAuthority = (calls: Array<{ tenantId: string; sub: string; agent: string }> = []) => ({
+  resolve: async (tenantId: string, sub: string, agent: string) => {
+    calls.push({ tenantId, sub, agent });
+    return { token: TXN_TOKEN, txn: 'txn-1', exp: 9_999_999_999, mint: 'miss' as const, grantSize: 2, noToolsGranted: false };
+  },
+});

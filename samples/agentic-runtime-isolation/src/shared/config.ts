@@ -5,10 +5,13 @@
  * The ingress Lambdas' configuration: the construct writes it as environment
  * variables (src/shared-ingress.cdk.ts) and the handlers read it back
  * here, so the names and the encoding live in one file. Everything in it is
- * configuration a deployer chose; nothing is a secret.
+ * configuration a deployer chose; nothing is a secret (a KMS key id is an
+ * identifier, not key material).
  */
 
+import type { JwsAlgorithm } from './jws';
 import type { IngressKind } from './metrics';
+import { MAX_TRANSACTION_TTL_SECONDS, MIN_TRANSACTION_TTL_SECONDS, type MintConfig } from './mint';
 import type { SessionScope } from './session';
 
 /** A backend name: lower-case letters, digits and hyphens, 1 to 32 characters (ADR-0024). */
@@ -23,10 +26,9 @@ export const ENV = {
   DISCOVERY_URL: 'RI_DISCOVERY_URL',
   ALLOWED_CLIENT_IDS: 'RI_ALLOWED_CLIENT_IDS',
   REQUIRED_SCOPES: 'RI_REQUIRED_SCOPES',
+  /** (v2, ADR-0038) Accept identity tokens that carry `tenants`; off unless 'true'. */
+  MULTI_TENANT: 'RI_MULTI_TENANT',
   SESSION_SCOPE: 'RI_SESSION_SCOPE',
-  FORWARD_USER_TOKEN: 'RI_FORWARD_USER_TOKEN',
-  REQUIRE_NARROWED_TOKEN: 'RI_REQUIRE_NARROWED_TOKEN',
-  ALLOWED_SCOPES: 'RI_ALLOWED_SCOPES',
   TVM_ROLE_ARN: 'RI_TVM_ROLE_ARN',
   TVM_INCLUDE_USER_ID_TAG: 'RI_TVM_INCLUDE_USER_ID_TAG',
   TVM_CLAIM_TAGS: 'RI_TVM_CLAIM_TAGS',
@@ -45,21 +47,35 @@ export const ENV = {
   REGISTRY_ACCOUNT: 'RI_REGISTRY_ACCOUNT',
   /** The backend served at the bare `/invocations` route (the one-agent form); unset when there is none. */
   DEFAULT_BACKEND: 'RI_DEFAULT_BACKEND',
+  /** (v2, ADR-0037) The transaction-token issuer, `<baseUrl>`; also refused as an identity issuer (P-14). */
+  ISSUER: 'RI_ISSUER',
+  /** (v2) The entitlement store table (C-12). */
+  ENTITLEMENTS_TABLE: 'RI_ENTITLEMENTS_TABLE',
+  /** (v2) Set only on the function that mints (the authoriser or the interceptor): the KMS key id of the current signing key. */
+  TXN_KEY_ID: 'RI_TXN_KEY_ID',
+  TXN_ALGORITHM: 'RI_TXN_ALGORITHM',
+  /** (v2, M-82) Set on the function that receives the authoriser's token: the issuer's JWKS document, so the forwarded token is verified without a fetch and without a propagation race. */
+  TXN_JWKS: 'RI_TXN_JWKS',
+  TXN_TTL_SECONDS: 'RI_TXN_TTL_SECONDS',
+  TXN_REUSE_MARGIN_SECONDS: 'RI_TXN_REUSE_MARGIN_SECONDS',
+  TXN_CACHE_MAX_ENTRIES: 'RI_TXN_CACHE_MAX_ENTRIES',
+  /** (v2) The ingress role ARN, written into every token as `act.sub`. */
+  INGRESS_ROLE_ARN: 'RI_INGRESS_ROLE_ARN',
 } as const;
 
 /** Environment variables the construct sets for the agent process (src/agent/app.ts reads them). */
 export const AGENT_ENV = {
-  /** The one model the execution role allows; the agent calls exactly this id (P-6, ADR-0017). */
+  /** The one model the tenant role allows for this backend; the agent calls exactly this id (P-6, ADR-0017). */
   MODEL_ID: 'MODEL_ID',
   /** The demo's tenant-partitioned table for the `read <tenant>` probe (set by the demo stack, ADR-0012). */
   TABLE_NAME: 'TABLE_NAME',
+  /** (v2) The `default` tools gateway MCP endpoint; unset when the ingress has no gateway named `default`. */
+  TOOLS_GATEWAY_URL: 'RI_TOOLS_GATEWAY_URL',
+  /** (v2, ADR-0041) JSON `{ "<gateway name>": "<MCP endpoint>" }` of every tools gateway of the ingress. */
+  TOOLS_GATEWAY_URLS: 'RI_TOOLS_GATEWAY_URLS',
+  /** (v2) The transaction-token issuer, so the agent can verify the token with the published JWKS if it wants to. */
+  ISSUER: 'RI_ISSUER',
 } as const;
-
-export interface DelegationConfig {
-  readonly forwardUserToken: boolean;
-  readonly requireNarrowedToken: boolean;
-  readonly allowedScopes?: string[];
-}
 
 export interface TvmConfig {
   readonly roleArn: string;
@@ -81,7 +97,7 @@ export interface LimitsConfig {
 export interface RegistryConfig {
   /** SSM parameter prefix, with a trailing slash; entries live at `${prefix}backends/<name>`. */
   readonly prefix: string;
-  /** Seconds an entry is served from the per-process cache before a refresh; default 60. */
+  /** Seconds an entry is served from the per-process cache before a refresh; default 60. Also the plan and catalogue cache life (v2). */
   readonly ttlSeconds: number;
   /** The backend the bare `/invocations` route resolves to (the one-agent form); undefined when there is none. */
   readonly defaultBackend?: string;
@@ -96,10 +112,15 @@ export interface IngressConfig {
   readonly discoveryUrl: string;
   readonly allowedClientIds: string[];
   readonly requiredScopes?: string[];
+  /** (v2, ADR-0038) */
+  readonly multiTenant: boolean;
+  /** (v2) The transaction-token issuer; refused as an identity issuer (P-14). Undefined only in v1-shaped test configs. */
+  readonly issuer?: string;
+  /** (v2, M-82) The issuer's JWKS, on the function that verifies a forwarded token; absent, the JWKS route is fetched. */
+  readonly txnJwks?: string;
   /** Set when the `session` module is on (ADR-0013). */
   readonly sessionScope?: SessionScope;
-  readonly delegation: DelegationConfig;
-  /** Set when the `tvm` module is on (ADR-0012). */
+  /** The TVM (ADR-0012, always on since ADR-0018). */
   readonly tvm?: TvmConfig;
   /** Set when per-tenant limits are on (ADR-0020). */
   readonly limits?: LimitsConfig;
@@ -107,6 +128,10 @@ export interface IngressConfig {
   readonly perTenantMetrics: boolean;
   /** The backend registry (ADR-0024). */
   readonly registry: RegistryConfig;
+  /** (v2) The entitlement store table (C-12). */
+  readonly entitlementsTable?: string;
+  /** (v2) Set only on the function that mints the transaction token. */
+  readonly mint?: MintConfig;
 }
 
 function positiveInteger(name: string, value: string | undefined, allowZero = false): number | undefined {
@@ -150,6 +175,38 @@ function flag(value: string | undefined): boolean {
   return value === 'true';
 }
 
+function optional(value: string | undefined): string | undefined {
+  return value === undefined || value === '' ? undefined : value;
+}
+
+/**
+ * The mint configuration (v2), present only when `RI_TXN_KEY_ID` is set:
+ * the construct sets it on the one function whose role may call `kms:Sign`.
+ */
+export function readMintConfig(env: NodeJS.ProcessEnv = process.env): MintConfig | undefined {
+  const keyId = optional(env[ENV.TXN_KEY_ID]);
+  if (keyId === undefined) {
+    return undefined;
+  }
+  const algorithm = env[ENV.TXN_ALGORITHM] ?? 'RS256';
+  if (algorithm !== 'RS256' && algorithm !== 'ES256') {
+    throw new Error(`${ENV.TXN_ALGORITHM} must be RS256 or ES256`);
+  }
+  const ttlSeconds = positiveInteger(ENV.TXN_TTL_SECONDS, env[ENV.TXN_TTL_SECONDS]) ?? 300;
+  if (ttlSeconds < MIN_TRANSACTION_TTL_SECONDS || ttlSeconds > MAX_TRANSACTION_TTL_SECONDS) {
+    throw new Error(`${ENV.TXN_TTL_SECONDS} must be from ${MIN_TRANSACTION_TTL_SECONDS} to ${MAX_TRANSACTION_TTL_SECONDS}`);
+  }
+  return {
+    issuer: requireEnv(ENV.ISSUER, env),
+    keyId,
+    algorithm: algorithm as JwsAlgorithm,
+    ttlSeconds,
+    reuseMarginSeconds: positiveInteger(ENV.TXN_REUSE_MARGIN_SECONDS, env[ENV.TXN_REUSE_MARGIN_SECONDS], true) ?? 60,
+    ingressRoleArn: requireEnv(ENV.INGRESS_ROLE_ARN, env),
+    cacheMaxEntries: positiveInteger(ENV.TXN_CACHE_MAX_ENTRIES, env[ENV.TXN_CACHE_MAX_ENTRIES]),
+  };
+}
+
 /** Parses the ingress configuration from the environment. */
 export function readIngressConfig(env: NodeJS.ProcessEnv = process.env): IngressConfig {
   const ingress = requireEnv(ENV.INGRESS, env);
@@ -191,16 +248,16 @@ export function readIngressConfig(env: NodeJS.ProcessEnv = process.env): Ingress
     discoveryUrl: requireEnv(ENV.DISCOVERY_URL, env),
     allowedClientIds: list(requireEnv(ENV.ALLOWED_CLIENT_IDS, env)) ?? [],
     requiredScopes: list(env[ENV.REQUIRED_SCOPES]),
+    multiTenant: flag(env[ENV.MULTI_TENANT]),
+    issuer: optional(env[ENV.ISSUER]),
+    txnJwks: optional(env[ENV.TXN_JWKS]),
     sessionScope: sessionScope === undefined || sessionScope === '' ? undefined : sessionScope,
-    delegation: {
-      forwardUserToken: flag(env[ENV.FORWARD_USER_TOKEN]),
-      requireNarrowedToken: flag(env[ENV.REQUIRE_NARROWED_TOKEN]),
-      allowedScopes: list(env[ENV.ALLOWED_SCOPES]),
-    },
     tvm,
     limits,
     perTenantMetrics: flag(env[ENV.PER_TENANT_METRICS]),
     registry: readRegistryConfig(env),
+    entitlementsTable: optional(env[ENV.ENTITLEMENTS_TABLE]),
+    mint: readMintConfig(env),
   };
 }
 

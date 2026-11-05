@@ -51,8 +51,10 @@ export interface RequestMetrics {
   /**
    * The backend the route resolved to (ADR-0024); when set, the record also
    * carries the `[TenantId, Ingress, Backend]` dimension set. Callers emit
-   * records only with `perTenantMetrics` on (ADR-0021), so the extra series
-   * cost only what that opt-in already pays for.
+   * records only with `perTenantMetrics` on (ADR-0021). The second set
+   * repeats every metric name per backend, so a tenant costs up to
+   * 9 x (1 + agents) custom metrics per ingress, not 9 (the synth warning
+   * `runtime-isolation:per-tenant-metrics-cost` says so).
    */
   readonly backend?: string;
   /** HTTP status the ingress returned. */
