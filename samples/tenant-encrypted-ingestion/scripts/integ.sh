@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Deployment integration test (spec §10, docs/sample-standard.md §5.2).
+#
+#   AWS_REGION=eu-central-1 scripts/integ.sh      # or: npx projen integ
+#   INTEG_TENANT_KEY_ACCOUNT=<second account> INTEG_TENANT_KEY_ARN=<key arn> ...   # optional, step 1 tenant-key
+#
+# Flow:
+#   0. Refuse an account without the tei:test-account tag (M-33).
+#   1. tenant-identity (shared-pool): reuse a published deployment; deploy
+#      one through its own path only when none is published, and destroy only
+#      that one at the end.
+#   2. Synthesise test/integ/app.ts into cdk.integ.out/ and deploy the
+#      test-aid stack and the demo stack (test profile, TestConsumerRole as
+#      its consumer role) with the CDK CLI.
+#   3. Run the spec §10 steps (test/integ.ingestion.ts).
+#   4. Destroy from the EXIT trap (also on failure); list what is left: stacks
+#      with the sample's prefix, and keys tagged with its stacks (only
+#      PendingDeletion is acceptable, step 12).
+#
+# Deploys into the account of the ambient AWS credentials, which must be
+# CDK-bootstrapped in AWS_REGION. Conventions: scripts/CONVENTIONS.md.
+
+set -euo pipefail
+
+REGION="${AWS_REGION:-}"
+: "${REGION:?Set AWS_REGION to the single Region to test in (e.g. export AWS_REGION=eu-central-1)}"
+export AWS_DEFAULT_REGION="$REGION"
+for tool in aws curl jq npx; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
+done
+
+SAMPLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+IDENTITY_DIR="$(cd "${SAMPLE_DIR}/../tenant-identity" && pwd)"
+cd "$SAMPLE_DIR"
+LIB_TMP="$(mktemp -d)"
+# shellcheck source=lib.sh
+source "${SAMPLE_DIR}/scripts/lib.sh"
+
+OUT="cdk.integ.out"
+CDK=(npx cdk --app "$OUT")
+STACK_PREFIX="TenantEncryptedIngestion"
+TEST_AID_STACK="${STACK_PREFIX}TestAid"
+DEMO_STACK="${STACK_PREFIX}Integ"
+IDENTITY_STACK="TenantIdentity-shared-pool"
+DEPLOYED_IDENTITY=0
+DEPLOYED_SAMPLE=0
+FAILED=0
+
+step() { echo "== $1"; }
+
+cleanup() {
+  local status=$?
+  set +e
+  step "teardown (spec §10 step 12)"
+  local stack_ids="${LIB_TMP}/stack-ids" s
+  : >"$stack_ids"
+  if [[ "$DEPLOYED_SAMPLE" == 1 ]]; then
+    for s in "$DEMO_STACK" "$TEST_AID_STACK"; do
+      aws cloudformation describe-stacks --stack-name "$s" --query 'Stacks[0].StackId' --output text >>"$stack_ids" 2>/dev/null
+    done
+    "${CDK[@]}" destroy --all --force --concurrency 2 >"${LIB_TMP}/destroy.log" 2>&1 \
+      || { echo "destroy failed: ${STACK_PREFIX} stacks" >&2; tail -20 "${LIB_TMP}/destroy.log" >&2; FAILED=1; }
+  fi
+  if [[ "$DEPLOYED_IDENTITY" == 1 ]]; then
+    (cd "$IDENTITY_DIR" && npx cdk destroy "$IDENTITY_STACK" --context topology=shared-pool --force >"${LIB_TMP}/identity-destroy.log" 2>&1) \
+      || { echo "destroy failed: ${IDENTITY_STACK}" >&2; FAILED=1; }
+  fi
+  local left
+  left="$(aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE DELETE_FAILED ROLLBACK_COMPLETE \
+    --query "StackSummaries[?starts_with(StackName, '${STACK_PREFIX}')].StackName" --output text)"
+  if [[ -n "$left" && "$left" != None ]]; then echo "leftover stacks: $left" >&2; FAILED=1; fi
+  # Keys the stacks created: only PendingDeletion may remain (spec §6.2).
+  while read -r sid; do
+    [[ -n "$sid" && "$sid" != None ]] || continue
+    for key in $(aws kms list-keys --query 'Keys[].KeyArn' --output text); do
+      if aws kms list-resource-tags --key-id "$key" --query "Tags[?TagKey=='tei:stack' && TagValue=='${sid}'] | length(@)" --output text 2>/dev/null | grep -q '^1$'; then
+        state="$(aws kms describe-key --key-id "$key" --query KeyMetadata.KeyState --output text)"
+        echo "  key ${key##*/}: ${state}"
+        [[ "$state" == PendingDeletion ]] || { echo "leftover key not pending deletion: ${key##*/}" >&2; FAILED=1; }
+      fi
+    done
+  done <"$stack_ids"
+  rm -rf "$LIB_TMP"
+  if [[ "$status" -ne 0 ]] || [[ "$FAILED" -ne 0 ]]; then
+    echo "integ: FAILED" >&2
+    exit 1
+  fi
+  echo "integ: PASSED"
+}
+trap cleanup EXIT
+
+# --------------------------------------------------------------------------
+# 0. Only in an account an operator marked for this test (M-33)
+# --------------------------------------------------------------------------
+step "0: account guard"
+ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+if ! aws organizations list-tags-for-resource --resource-id "$ACCOUNT" --query "Tags[?Key=='tei:test-account'] | length(@)" --output text 2>/dev/null | grep -q '^1$'; then
+  fail "the account does not carry the tei:test-account tag (M-33); tag it in AWS Organizations to allow this test"
+fi
+echo "  account tagged tei:test-account"
+
+# --------------------------------------------------------------------------
+# 1. tenant-identity (shared-pool): reuse, or deploy through its own path
+# --------------------------------------------------------------------------
+step "1: tenant-identity shared-pool"
+if aws ssm get-parameter --name "${IDENTITY_PREFIX}/apiUrl" --query Parameter.Name --output text >/dev/null 2>&1; then
+  echo "  reusing the published tenant-identity deployment"
+else
+  DEPLOYED_IDENTITY=1
+  echo "  deploying ${IDENTITY_STACK} through its own path"
+  if [[ ! -d "${IDENTITY_DIR}/node_modules" ]]; then
+    (cd "$IDENTITY_DIR" && npm ci --no-audit --no-fund >"${LIB_TMP}/identity-install.log" 2>&1) || fail "npm ci in ${IDENTITY_DIR}"
+  fi
+  (cd "$IDENTITY_DIR" && npx projen build >"${LIB_TMP}/identity-build.log" 2>&1) || fail "projen build in ${IDENTITY_DIR}"
+  (cd "$IDENTITY_DIR" && npx cdk deploy "$IDENTITY_STACK" --context topology=shared-pool --require-approval never >"${LIB_TMP}/identity-deploy.log" 2>&1) \
+    || { tail -30 "${LIB_TMP}/identity-deploy.log" >&2; fail "deploy ${IDENTITY_STACK}"; }
+fi
+
+# --------------------------------------------------------------------------
+# 2. The test-aid stack and the demo stack (test/integ/app.ts)
+# --------------------------------------------------------------------------
+step "2: synthesise and deploy ${TEST_AID_STACK}, ${DEMO_STACK}"
+CONTEXT=()
+[[ -n "${INTEG_TENANT_KEY_ACCOUNT:-}" ]] && CONTEXT+=(--context "tenantKeyAccount=${INTEG_TENANT_KEY_ACCOUNT}")
+npx cdk synth -q --app "npx ts-node -P tsconfig.json --prefer-ts-exts test/integ/app.ts" --output "$OUT" ${CONTEXT[@]+"${CONTEXT[@]}"} >"${LIB_TMP}/synth.log" 2>&1 \
+  || { tail -30 "${LIB_TMP}/synth.log" >&2; fail "synth test/integ/app.ts"; }
+DEPLOYED_SAMPLE=1
+"${CDK[@]}" deploy --all --require-approval never --concurrency 2 --outputs-file "${OUT}/outputs.json" >"${LIB_TMP}/deploy.log" 2>&1 \
+  || { tail -30 "${LIB_TMP}/deploy.log" >&2; fail "deploy ${STACK_PREFIX} stacks"; }
+echo "  deployed"
+
+# --------------------------------------------------------------------------
+# 3. The spec §10 steps
+# --------------------------------------------------------------------------
+step "3: spec §10 steps (test/integ.ingestion.ts)"
+INTEG_OUTPUTS="${OUT}/outputs.json" npx ts-node -P tsconfig.json --prefer-ts-exts test/integ.ingestion.ts || FAILED=1
