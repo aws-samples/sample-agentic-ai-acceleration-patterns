@@ -403,6 +403,7 @@ export function pipelineFor(
   const limiter = config.limits === undefined ? undefined : deps.limiter ?? new TenantLimiter(config.limits);
   const authority = deps.authority ?? authorityFor(config);
   // The function that does not mint receives the authoriser's token and must verify it (M-82).
-  const forwarded = deps.forwarded ?? (authority === undefined && config.issuer !== undefined ? forwardedTokenVerifierFor(config.issuer, config.txnJwks) : undefined);
+  const forwarded =
+    deps.forwarded ?? (authority === undefined && config.issuer !== undefined ? forwardedTokenVerifierFor(config.issuer, config.txnJwks) : undefined);
   return new IngressPipeline(config, verifier, registry, tvm, limiter, authority, forwarded);
 }
