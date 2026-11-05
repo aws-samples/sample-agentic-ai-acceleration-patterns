@@ -4,11 +4,10 @@ SPDX-License-Identifier: MIT-0
 -->
 # Multi-tenant tool gateway for agentic applications: feature review
 
-> Status: review of the proposed feature list, 2026-10-30. Precedes the
-> specification (`agentic-tool-gateway.spec.md`); the verdicts below become
-> its scope boundary and principles. Research: AgentCore Gateway developer
-> guide, quotas and pricing pages as of 2026-10-30, plus internal field
-> reports (not cited here; see the working notes).
+> Status: Historical. Folded into `agentic-runtime-isolation.spec.md` v2
+> (ADR-0034); no separate spec exists. Review of the proposed feature list,
+> 2026-10-30. Research: AgentCore Gateway developer guide, quotas and pricing
+> pages as of 2026-10-30.
 
 ## 1. What the sample is
 

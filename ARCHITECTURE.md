@@ -227,19 +227,41 @@ sequenceDiagram
   participant U as Tenant user
   participant ID as Tenant identity
   participant IN as Ingress
+  participant ES as Entitlement store
+  participant TVM as TVM (STS)
   participant RT as AgentCore Runtime
+  participant TG as Tools gateway
+  participant TL as Tool
   U->>ID: sign in
-  ID-->>U: access token {sub, tenant_id, scope}
-  U->>IN: request + bearer token
-  IN->>IN: verify token, resolve /{backend}/invocations from the registry
-  IN->>IN: set session id (fresh, or from tenant_id + sub with session mapping)
-  IN->>RT: InvokeAgentRuntime (SigV4, ingress-set session id)
-  RT-->>U: streamed response
+  ID-->>U: identity token {sub, tenant_id or tenants, scope}
+  U->>IN: POST /{backend}/invocations + bearer token (+ X-Tenant-Id)
+  IN->>IN: verify identity token, select the tenant, resolve the agent (needs, tools) from the registry
+  IN->>ES: read the tenant row (or its plan), the user's cut and the tool catalogue
+  ES-->>IN: entitlements
+  IN->>IN: grant = needs ∪ (agent tools ∩ tenant tools ∩ user tools)
+  IN->>IN: mint transaction token (one tenant, user, agent; KMS Sign on a cache miss)
+  IN->>TVM: AssumeRole on the tenant role, TenantId session tag
+  TVM-->>IN: tenant-scoped credentials
+  IN->>RT: InvokeAgentRuntime (ingress-set session id, transaction token, tenant credentials)
+  RT->>TG: tools/call with the transaction token
+  TG->>TG: REQUEST interceptor admits the one tool, signs a tenant context
+  TG->>TG: AgentCore Policy admits the target
+  TG->>TL: call with the signed tenant context
+  TL-->>RT: result, read with the tool's own tenant role
+  RT-->>IN: streamed response
+  IN-->>U: streamed response
 ```
 
 The ingress is the only principal the Runtime trusts, so a stolen token
-cannot pick another tenant's session. When the agent reaches tenant data, it
-does so with tenant-scoped credentials derived from the same claims.
+cannot pick another tenant's session. The session id comes from the
+verified claims alone: a fresh microVM session per request by default, or,
+with `session` set, one per tenant (the default scope) or per user. The
+identity token never leaves the ingress; the agent and the tools see only
+the transaction token, and each reaches tenant data with credentials scoped
+to the tenant the token names. On `api-gateway` every authoriser refusal is
+403; on `agentcore-gateway` a refusal keeps its own status (401 for a bad
+token, 404 for an unknown agent, 502 for an ingress fault, 403 for the
+rest).
 
 ## 6. Samples map
 
@@ -247,7 +269,7 @@ does so with tenant-scoped credentials derived from the same claims.
 |---|---|---|---|
 | [`control-plane`](./samples/control-plane/) | control plane: tenant and cell lifecycle | a vendor IdP | `/control-plane/tenant-api-url`; scripts write `/application-plane/cells/*` and `/application-plane/tenants/*` |
 | [`tenant-identity`](./samples/tenant-identity/) | tenant identity: the token contract on Cognito | nothing | `/application-plane/shared/identity/*` |
-| [`agentic-runtime-isolation`](./samples/agentic-runtime-isolation/) | Agentic runtime isolation: runtime, tools and entitlements. Enforced isolation at the invocation, delegation and data layers, with a Policy and interceptor check at the tools layer: one ingress, the only principal each AgentCore Runtime trusts, verifies the identity token, resolves the grant (agent needs ∪ agent tools ∩ tenant tools ∩ user tools) from an entitlement store, mints a 5-minute transaction token (the identity token never leaves the ingress) and invokes a per-tenant Runtime session with tenant-scoped credentials from an always-on TVM; several AgentCore Gateways, one Policy engine each, serve the tools, a REQUEST interceptor is the per-tool wall and signs a tenant context, and each tool assumes its own tenant role | `tenant-identity` `shared-pool` (its parameters; the integration driver uses its `/platform/*` API to register scopes and create demo tenants) | constructs `SharedIngress`, `AgentBackend`, `ToolTarget`, `TokenSigner`, `EntitlementStore`; one JSON parameter `/application-plane/shared/agent-runtime/ingress` plus registry rows `backends/<name>` and `tools/<target>` |
+| [`agentic-runtime-isolation`](./samples/agentic-runtime-isolation/) | Agentic runtime isolation: runtime, tools and entitlements for multi-tenant agents. Enforced isolation at the invocation, delegation and data layers, with a Policy and interceptor check at the tools layer: one ingress, the only principal each AgentCore Runtime trusts, verifies the identity token, resolves the grant (agent needs ∪ agent tools ∩ tenant tools ∩ user tools) from an entitlement store, mints a 5-minute transaction token (the identity token never leaves the ingress) and invokes the agent's Runtime with tenant-scoped credentials from an always-on TVM, in a fresh microVM session per request by default (with `session` set, one per tenant, the default scope, or per user); one tools gateway by default (more optional), each with its own Policy engine, serves the tools: a REQUEST interceptor is the per-tool wall and signs a tenant context, Policy then admits the target, and each tool assumes its own tenant role | `tenant-identity` `shared-pool` (its parameters; the integration driver uses its `/platform/*` API to register scopes and create demo tenants) | constructs `SharedIngress`, `AgentBackend`, `ToolTarget`, `TokenSigner`, `EntitlementStore`; one JSON parameter `/application-plane/shared/agent-runtime/ingress` plus registry rows `backends/<name>` and `tools/<target>` |
 
 `agentic-runtime-isolation` vends the data layer's tenant-scoped
 credentials: its TVM is always on and signs every model call

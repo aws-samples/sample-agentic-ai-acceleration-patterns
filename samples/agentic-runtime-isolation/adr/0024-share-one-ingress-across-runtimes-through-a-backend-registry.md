@@ -91,63 +91,18 @@ condition rather than a list; the registry is a new trust boundary.
 
 ## Decision
 Option 5, verified by implementation (integration run 2026-10-28, eu-central-1,
-both ingresses, step 9-registry green).
-
-**Shape.** `SharedIngress` is the ingress alone: API or Gateway, authoriser,
-TVM, limits, log drain, and the registry prefix it reads. `AgentBackend`
-(one per backend, in its own stack if the deployer wants) creates the
-Runtime, sets the Runtime's resource policy to the ingress role it reads
-from the ingress's published parameters (P-1 per Runtime, ADR-0001), writes
-its registry entry, and on `agentcore-gateway` creates its Gateway target.
-The one-backend form is a `SharedIngress` with a `defaultBackend` plus one
-`AgentBackend` of that name, so today's bare `/invocations` URL and published
-values do not change; no separate wrapper construct is kept.
-
-**Route.** `POST /{backend}/invocations` on both ingresses. The name is
-`[a-z0-9-]{1,32}`. The authoriser looks the name up; an unknown or
-`draining` name is refused (404) before the body is read.
-
-**Registry.** SSM Parameter Store,
-`/application-plane/shared/agent-runtime/backends/<name>`, a JSON string
-`{ "runtimeArn", "requiredScopes": [], "status": "active" | "draining" }`.
-The ingress caches entries per process for 60 seconds (`registryTtl`), so a
-write is live within one TTL and a cold instance pays one `GetParameter`.
-Each backend role may `PutParameter` and `DeleteParameter` on its own name
-only; the ingress role may read the prefix only.
-
-**Scopes.** The ingress-wide `requiredScopes` stays as the product floor
-(and as the Gateway authoriser's `allowedScopes`). On top, the authoriser
-requires the route's `requiredScopes` from the registry; the API Gateway
-authoriser result is cached per token and route, and the interceptor runs
-the same check per Gateway target. Refusal: 403 (ADR-0005 order holds).
-
-**Grant.** The ingress role's `InvokeAgentRuntime` grant is the Runtime
-ARN pattern of the account and Region with a condition that the Runtime
-carries the tag `ri:ingress = <ingress id>`, which `AgentBackend` sets. The
-Runtime's resource policy remains the hard gate (ADR-0001). The Service
-Authorization Reference (read 2026-10-28) lists `aws:ResourceTag/${TagKey}`
-for `InvokeAgentRuntime` on both `runtime` and `runtime-endpoint`, so the
-condition is honoured. The grant names two resources, `<arn>` and `<arn>/*`
-(the endpoint), and the endpoint carries its own tags. Checked on
-2026-10-28 in the sandbox (eu-central-1) against a deployed Runtime: tags
-given at `CreateAgentRuntime` (the `CfnRuntime.tags` property) are copied to
-the `DEFAULT` endpoint; a later `TagResource` on the Runtime is not, and the
-endpoint ARN can be tagged on its own. So `AgentBackend` sets `ri:ingress`
-in `CfnRuntime.tags` at synth and the grant holds for both resource forms.
-A tag changed after creation must be put on both ARNs. Tested end-to-end
-the same day: a role allowed `InvokeAgentRuntime` on `runtime/*` and
-`runtime/*/runtime-endpoint/*` with `StringEquals aws:ResourceTag/ri:ingress`
-reached a Runtime created with that tag (HTTP 200; the agent then refused for
-want of the credential header, as expected) and was refused on an untagged
-Runtime with `AccessDeniedException ... no identity-based policy allows`.
-Integ step 9 repeats this against the deployed construct.
-
-**CRUDL.** Create: Runtime, policy, target, then the registry entry; live
-within one TTL. Read and list: `GetParameter`, `GetParametersByPath`.
-Update: overwrite `runtimeArn`; the old Runtime serves streams already
-running, new requests move within one TTL. Delete: set `draining`, wait one
-TTL plus the longest stream (2 minutes on `api-gateway`), delete the
-Runtime and target, remove the entry. No row redeploys the ingress.
+both ingresses, step 9-registry green): `SharedIngress` is the ingress alone,
+and one `AgentBackend` per backend creates its Runtime, sets the Runtime's
+resource policy to the ingress role, and writes its registry entry; both
+ingresses route `POST /{backend}/invocations` and refuse an unknown or
+`draining` name; the registry is SSM Parameter Store under
+`/application-plane/shared/agent-runtime/backends/<name>`, cached per process
+for 60 seconds; the route's `requiredScopes` add to the ingress-wide floor; the
+ingress role's `InvokeAgentRuntime` grant is the account's Runtime ARN pattern
+conditioned on the `ri:ingress` tag, with the Runtime's resource policy as the
+hard gate (ADR-0001); and no backend create, update or delete redeploys the
+ingress. Shape, route, registry, scopes, grant and lifecycle are set out under
+Details, after Consequences.
 
 ## Consequences
 Easier: one hostname and one bearer token path per product; one tenant
@@ -213,7 +168,7 @@ pattern and the registry is small and slow-changing):
 - *No push.* The ingress learns of a change through the cache TTL, not an
   event.
 
-What implementation changed in the text above (verified on the 2026-10-28
+What implementation changed in the Decision and its Details (verified on the 2026-10-28
 integration run):
 
 - *Create refuses an existing name.* The registry custom resource writes
@@ -266,6 +221,63 @@ ingresses on 2026-10-28. Confirmed on that run: the interceptor event names the 
 so the `request admitted` line carries `backend` and `/billing` routed to
 its own Runtime. Revisit if a deployer needs per-backend tenant roles or
 per-backend concurrency.
+
+## Details
+**Shape.** `SharedIngress` is the ingress alone: API or Gateway, authoriser,
+TVM, limits, log drain, and the registry prefix it reads. `AgentBackend`
+(one per backend, in its own stack if the deployer wants) creates the
+Runtime, sets the Runtime's resource policy to the ingress role it reads
+from the ingress's published parameters (P-1 per Runtime, ADR-0001), writes
+its registry entry, and on `agentcore-gateway` creates its Gateway target.
+The one-backend form is a `SharedIngress` with a `defaultBackend` plus one
+`AgentBackend` of that name, so today's bare `/invocations` URL and published
+values do not change; no separate wrapper construct is kept.
+
+**Route.** `POST /{backend}/invocations` on both ingresses. The name is
+`[a-z0-9-]{1,32}`. The authoriser looks the name up; an unknown or
+`draining` name is refused (404) before the body is read.
+
+**Registry.** SSM Parameter Store,
+`/application-plane/shared/agent-runtime/backends/<name>`, a JSON string
+`{ "runtimeArn", "requiredScopes": [], "status": "active" | "draining" }`.
+The ingress caches entries per process for 60 seconds (`registryTtl`), so a
+write is live within one TTL and a cold instance pays one `GetParameter`.
+Each backend role may `PutParameter` and `DeleteParameter` on its own name
+only; the ingress role may read the prefix only.
+
+**Scopes.** The ingress-wide `requiredScopes` stays as the product floor
+(and as the Gateway authoriser's `allowedScopes`). On top, the authoriser
+requires the route's `requiredScopes` from the registry; the API Gateway
+authoriser result is cached per token and route, and the interceptor runs
+the same check per Gateway target. Refusal: 403 (ADR-0005 order holds).
+
+**Grant.** The ingress role's `InvokeAgentRuntime` grant is the Runtime
+ARN pattern of the account and Region with a condition that the Runtime
+carries the tag `ri:ingress = <ingress id>`, which `AgentBackend` sets. The
+Runtime's resource policy remains the hard gate (ADR-0001). The Service
+Authorization Reference (read 2026-10-28) lists `aws:ResourceTag/${TagKey}`
+for `InvokeAgentRuntime` on both `runtime` and `runtime-endpoint`, so the
+condition is honoured. The grant names two resources, `<arn>` and `<arn>/*`
+(the endpoint), and the endpoint carries its own tags. Checked on
+2026-10-28 in the sandbox (eu-central-1) against a deployed Runtime: tags
+given at `CreateAgentRuntime` (the `CfnRuntime.tags` property) are copied to
+the `DEFAULT` endpoint; a later `TagResource` on the Runtime is not, and the
+endpoint ARN can be tagged on its own. So `AgentBackend` sets `ri:ingress`
+in `CfnRuntime.tags` at synth and the grant holds for both resource forms.
+A tag changed after creation must be put on both ARNs. Tested end-to-end
+the same day: a role allowed `InvokeAgentRuntime` on `runtime/*` and
+`runtime/*/runtime-endpoint/*` with `StringEquals aws:ResourceTag/ri:ingress`
+reached a Runtime created with that tag (HTTP 200; the agent then refused for
+want of the credential header, as expected) and was refused on an untagged
+Runtime with `AccessDeniedException ... no identity-based policy allows`.
+Integ step 9 repeats this against the deployed construct.
+
+**CRUDL.** Create: Runtime, policy, target, then the registry entry; live
+within one TTL. Read and list: `GetParameter`, `GetParametersByPath`.
+Update: overwrite `runtimeArn`; the old Runtime serves streams already
+running, new requests move within one TTL. Delete: set `draining`, wait one
+TTL plus the longest stream (2 minutes on `api-gateway`), delete the
+Runtime and target, remove the entry. No row redeploys the ingress.
 
 Amended by ADR-0025: the registry entry's `requiredScopes` (AND on top of the floor, free names from tenant-identity's fixed set) is renamed `scopes` and becomes the backend's own, `<name>/<action>`, checked any-of; `AgentBackend` registers them with tenant-identity before writing the entry, so adding a backend still needs no ingress deploy and now no identity deploy either.
 

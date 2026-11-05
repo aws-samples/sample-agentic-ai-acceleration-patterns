@@ -6,16 +6,16 @@ import { mockClient } from 'aws-sdk-client-mock';
 import 'aws-sdk-client-mock-jest';
 import { AuthorityError } from '../../src/shared/authority';
 import type { IngressConfig } from '../../src/shared/config';
+import { publicJwk, signJws } from '../../src/shared/jws';
 import { type Admission, TenantLimiter } from '../../src/shared/limits';
+import { TRANSACTION_TOKEN_TYPE, transactionClaims } from '../../src/shared/mint';
 import { BackendRegistry, RegistryError } from '../../src/shared/registry';
 import { type AuthoritySource, ERROR_TEXT, errorBody, forwardedTokenVerifierFor, IngressPipeline, parseBody, pipelineFor, type RegistryResolver, RequestError, type ForwardedTokenVerifier } from '../../src/shared/request';
-import { publicJwk, signJws } from '../../src/shared/jws';
-import { TRANSACTION_TOKEN_TYPE, transactionClaims } from '../../src/shared/mint';
-import { localRsaKey } from '../jws-helpers';
 import { PREFIX_PATTERN, RANDOM_UNIT_ID_PATTERN, sessionPrefix } from '../../src/shared/session';
 import { TokenVendingMachine } from '../../src/shared/tvm';
 import { TokenVerifier } from '../../src/shared/verifier';
 import { baseConfig, CLIENT_ID, DISCOVERY_URL, FIXTURE_ENTRIES, RUNTIME_ARN, stubAuthority, stubForwarded, stubRegistry, testIssuer, TXN_TOKEN, type TestIssuer } from '../helpers';
+import { localRsaKey } from '../jws-helpers';
 
 /** The one request contract both ingresses enforce (spec §5, ADR-0002, ADR-0013). */
 
