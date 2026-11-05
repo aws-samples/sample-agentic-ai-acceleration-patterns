@@ -46,7 +46,7 @@ import { requireEnv, isLambdaRuntime } from '../shared/config';
 import { scopeGrantsTool } from '../shared/grant';
 import { headerValue } from '../shared/headers';
 import { sharedHandler } from '../shared/http';
-import { argsHash, CONTEXT_ARGUMENT, type DigestSigner, kmsDigestSigner, signJws } from '../shared/jws';
+import { argsHash, CONTEXT_ARGUMENT, type DigestSigner, type JwsAlgorithm, kmsDigestSigner, signJws } from '../shared/jws';
 import { errorName, log } from '../shared/logger';
 import { bearerToken } from '../shared/verifier';
 
@@ -108,6 +108,8 @@ export interface ToolInterceptorConfig {
   readonly issuer: string;
   readonly ingressRoleArn: string;
   readonly contextKeyId: string;
+  /** The algorithm `ToolContextKey` signs with; default `RS256`. */
+  readonly contextAlgorithm?: JwsAlgorithm;
   readonly contextLifetimeSeconds: number;
   /** The name of the gateway this interceptor serves (ADR-0041). */
   readonly gatewayName: string;
@@ -203,7 +205,7 @@ export async function interceptTool(event: ToolInterceptorEvent, deps: ToolInter
       iat: now,
       exp: now + deps.config.contextLifetimeSeconds,
     };
-    const signed = await signJws({ alg: 'RS256', typ: CONTEXT_TYPE, kid: deps.config.contextKeyId }, context, deps.contextSigner);
+    const signed = await signJws({ alg: deps.config.contextAlgorithm ?? 'RS256', typ: CONTEXT_TYPE, kid: deps.config.contextKeyId }, context, deps.contextSigner);
     log.info('tool admitted', {
       tenantId: caller.tenantId,
       user: caller.user,
@@ -243,17 +245,22 @@ function defaultDependencies(): ToolInterceptorDependencies {
   const issuer = requireEnv(TOOLS_ENV.ISSUER);
   const contextKeyId = requireEnv(TOOLS_ENV.CONTEXT_KEY_ID);
   const lifetime = Number(process.env[TOOLS_ENV.CONTEXT_LIFETIME_SECONDS] ?? '60');
+  const contextAlgorithm = process.env[TOOLS_ENV.CONTEXT_ALGORITHM] ?? 'RS256';
+  if (contextAlgorithm !== 'RS256' && contextAlgorithm !== 'ES256') {
+    throw new Error(`${TOOLS_ENV.CONTEXT_ALGORITHM} must be RS256 or ES256`);
+  }
   return {
     config: {
       issuer,
       ingressRoleArn: requireEnv(TOOLS_ENV.INGRESS_ROLE_ARN),
       contextKeyId,
+      contextAlgorithm,
       contextLifetimeSeconds: Number.isInteger(lifetime) && lifetime > 0 ? lifetime : 60,
       gatewayName: requireEnv(TOOLS_ENV.GATEWAY_NAME),
     },
     // jose refetches on an unknown kid, at most once per cooldown (spec §6.2.3: once a minute).
     getKey: createRemoteJWKSet(new URL(`${issuer}/.well-known/jwks.json`), { cooldownDuration: 60_000, cacheMaxAge: 300_000 }),
-    contextSigner: kmsDigestSigner(new KMSClient({ requestHandler: sharedHandler() }), contextKeyId, 'RS256'),
+    contextSigner: kmsDigestSigner(new KMSClient({ requestHandler: sharedHandler() }), contextKeyId, contextAlgorithm),
   };
 }
 

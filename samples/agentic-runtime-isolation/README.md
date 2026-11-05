@@ -147,7 +147,9 @@ interceptor refusals, not with code in the agent (threat model T-22, T-63).
 
 Both ingresses run the same checks in the same order from one shared
 pipeline ([`src/shared/request.ts`](./src/shared/request.ts)). A refused
-request costs no STS call and, on `agentcore-gateway`, no KMS call. On
+request costs no STS call and, on `agentcore-gateway`, no KMS call (on
+`api-gateway` the authoriser mints before the integration applies the
+per-tenant limit, M-50). On
 `api-gateway` the authoriser mints before the integration Lambda checks the
 per-tenant limit, so a 429 can follow one `kms:Sign` when the mint cache
 misses (a cost, not an isolation effect; ADR-0043).
@@ -806,6 +808,18 @@ tools is bounded here (spec §3.6; the quotas each value protects are in
 | Tools in a token | `scope` after compression | 6,144 bytes; over it is 502 `grant_too_large` |
 | Tools in a token | the encoded transaction token | 10,240 bytes, the Runtime's custom header cap; over it is 502 `grant_too_large` |
 
+Pooled resources every tenant shares, in the order they give out (scale
+review 2026-11-05; T-105). Each has a prop or a formula:
+
+| Pool | Default | Gives out at | Size it with |
+|---|---|---|---|
+| `api-gateway` stage throttle | 50 rps, burst 25, one bucket for every tenant and every refusal; the per-tenant limit runs behind it | 50 tenants at the default 60/min; one tenant at 50 rps starves the rest | `stageThrottle.rateLimit` >= tenants x `tenantLimits.requestsPerMinute` / 60 (synth warns when unset); WAF rate rules for an edge limit per tenant |
+| Lambda concurrency | account pool (1,000); the integration function is held for the whole stream | rps x average stream seconds (50 rps at 20 s, 8 rps at 120 s) | `ingressReservedConcurrency` on the streaming function; raise the account quota |
+| KMS `Sign` | 1,000 RSA requests/s per account per Region, shared by the mint, one `Sign` per admitted `tools/call` and every other RSA key | about active (tenant, user, agent) triples / 120 s + tool calls/s | `toolContextKey.algorithm: 'ES256'` (the ECC quota); `transactionToken.algorithm: 'ES256'`; a quota increase |
+| STS `AssumeRole` | 600 rps per account per Region; the ingress TVM, every tool's TVM and the tenant-admin TVM share it | cold-start fan-out: new instances x tenants each; steady state is instances x tag sets / 780 s | reserved concurrency to bound fan-out; `tvm.includeUserIdTag` off |
+| SSM `GetParameter` | 40 TPS; a throttled cold registry read is cached as `registry_unavailable` for one TTL on that instance | 40 cold reads in one second (a deploy, a burst) | Parameter Store higher throughput; fewer distinct backends per instance |
+| Per-tenant limiter item | one conditional `UpdateItem` per request on `TENANT#<id>#<minute>` | 1,000 writes/s from one tenant, then the limiter fails open | reachable only above the stage throttle |
+
 Spike findings behind those bounds (spec §7):
 
 - The Cedar schema caps an engine at 400 KB (about 330 tools), hence
@@ -1017,11 +1031,18 @@ must add. Each item is a deployer action or an accepted risk in
       role; require `aws:RequestTag/TenantId`, pin `aws:TagKeys`, scope data
       by `${aws:PrincipalTag/TenantId}`, and map only vendor-set claims in
       `tvm.claimTags` (M-10, M-11, T-16, T-17).
-- [ ] **Use the tenant `suspended` status as the kill switch**:
-      `PutTenantSubscription` with `status: suspended` refuses every request
-      for the tenant at the next mint, keeping its cuts; lower
-      `transactionToken.ttl` if tokens in flight must stop sooner.
+- [ ] **Use the tenant `suspended` status as the kill switch for new
+      requests**: `PutTenantSubscription` with `status: suspended` refuses
+      every request for the tenant at the next mint, keeping its cuts. A
+      token in flight lives to its `exp` (up to `transactionToken.ttl`, plus
+      the 60 s authoriser cache on `api-gateway`) and vended credentials to
+      theirs (`tvm.durationSeconds`); lower both if they must stop sooner.
 - [ ] **Keep PITR on the entitlement table** and decide its retention (M-48).
+- [ ] **Restrict `lambda:InvokeFunction` on the request-path functions** to
+      the service principals (an SCP or permission boundary): Lambda
+      resource policies cannot deny, and a direct invoke of the ingress
+      interceptor returns the caller's own tenant credentials and token
+      (T-102).
 - [ ] **Add edge protection and size the shared limits**: AWS WAF on the
       REST API stages, reserved concurrency, Bedrock and Gateway quotas, and
       `tenantLimits` and `tenantRateLimit` per tier (M-19, M-25, M-60).

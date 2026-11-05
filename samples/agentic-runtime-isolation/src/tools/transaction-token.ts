@@ -19,6 +19,8 @@ export const TOOLS_ENV = {
   INGRESS_ROLE_ARN: 'RI_INGRESS_ROLE_ARN',
   CONTEXT_KEY_ID: 'RI_CONTEXT_KEY_ID',
   CONTEXT_LIFETIME_SECONDS: 'RI_CONTEXT_LIFETIME_SECONDS',
+  /** The JOSE algorithm of `ToolContextKey`: `RS256` (default) or `ES256`. */
+  CONTEXT_ALGORITHM: 'RI_CONTEXT_ALGORITHM',
   /** (ADR-0041) This gateway's name; the token's `aud` must hold `tools-gateway:<name>`. */
   GATEWAY_NAME: 'RI_TOOLS_GATEWAY_NAME',
 } as const;

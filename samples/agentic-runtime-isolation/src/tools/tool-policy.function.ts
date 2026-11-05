@@ -39,6 +39,7 @@ import {
   ThrottlingException,
   UpdatePolicyCommand,
 } from '@aws-sdk/client-bedrock-agentcore-control';
+import { cedarPolicyProblem } from '../shared/cedar';
 import { type CustomResourceEventBase, type CustomResourceOutcome, respond } from '../shared/cfn-response';
 import { errorName, log } from '../shared/logger';
 
@@ -185,6 +186,12 @@ function generatedByCloudFormation(event: ToolPolicyEvent, policyId: string): bo
 
 export async function handleEvent(event: ToolPolicyEvent, deps: ToolPolicyDependencies): Promise<CustomResourceOutcome> {
   const p = event.ResourceProperties;
+  // Only the one star permit of a target is ever written (M-83): a direct
+  // invoke with any other Cedar text fails before the engine is called.
+  const problem = event.RequestType === 'Delete' ? undefined : cedarPolicyProblem(p.Statement);
+  if (problem !== undefined) {
+    return { status: 'FAILED', physicalResourceId: event.PhysicalResourceId ?? `policy:${p.Name}`, reason: problem };
+  }
   if (event.RequestType === 'Create') {
     return create(deps, p);
   }

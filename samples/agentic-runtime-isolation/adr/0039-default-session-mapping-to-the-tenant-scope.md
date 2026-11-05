@@ -27,3 +27,5 @@ Option 2. The module default (off) does not change; only the scope used when the
 
 ## Consequences
 Easier: a vendor turning session mapping on gets tenant-wide continuity without reading the prop table. Harder: the demo agent and the README state that unit state is tenant-shared under the default; the transaction token (ADR-0031) is per user and per request, so the agent MUST read it from each request's header and never from unit state. The integration test's step 4b splits: the default stack shows A2 sharing A1's conversation and B1 refused, and a `scope: 'user'` stack shows A2 refused. Revisit if a consumer needs a third scope (for example per agent) or a per-tenant choice of scope.
+
+**2026-11-05.** Amended by the red team: the default stands, and synth now warns `runtime-isolation:shared-session-scope` whenever the scope resolves to `'tenant'`, naming the convention the agent must keep (read the token from each request, no per-user state in the session; T-23, T-81).

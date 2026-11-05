@@ -86,7 +86,9 @@ export async function verifyToolContext(
   }
   let payload: Record<string, unknown>;
   try {
-    const decoded = verifyJws(raw, await options.publicKey(), ['RS256']);
+    // The key decides the algorithm (RSA -> RS256, EC -> ES256): a token cannot pick one the key does not match.
+    const key = await options.publicKey();
+    const decoded = verifyJws(raw, key, [key.asymmetricKeyType === 'ec' ? 'ES256' : 'RS256']);
     if (decoded.header.typ !== CONTEXT_TYPE) {
       throw new Error('typ');
     }

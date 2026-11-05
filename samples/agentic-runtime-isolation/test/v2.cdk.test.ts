@@ -3,7 +3,7 @@
 
 import * as path from 'node:path';
 import { App, Duration, Stack } from 'aws-cdk-lib';
-import { Template } from 'aws-cdk-lib/assertions';
+import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { publishedIngress, seedPublishedIngress, TEST_ENV } from './published-ingress';
 import { AgentBackend, GATEWAY_TARGET_NAME, PUBLISHED, SharedIngress, type SharedIngressProps } from '../src/index';
@@ -181,7 +181,8 @@ describe.each(['api-gateway', 'agentcore-gateway'] as const)('v2 template, ingre
 
   it('the tools interceptor knows the issuer, the context key and the context lifetime, and runs on a provisioned alias', () => {
     const { id, fn } = functionAndRole(template, 'tools gateway default REQUEST interceptor');
-    expect(Object.keys(fn.Properties.Environment.Variables).sort()).toEqual(['RI_CONTEXT_KEY_ID', 'RI_CONTEXT_LIFETIME_SECONDS', 'RI_INGRESS_ROLE_ARN', 'RI_ISSUER', 'RI_TOOLS_GATEWAY_NAME']);
+    expect(Object.keys(fn.Properties.Environment.Variables).sort()).toEqual(['RI_CONTEXT_ALGORITHM', 'RI_CONTEXT_KEY_ID', 'RI_CONTEXT_LIFETIME_SECONDS', 'RI_INGRESS_ROLE_ARN', 'RI_ISSUER', 'RI_TOOLS_GATEWAY_NAME']);
+    expect(fn.Properties.Environment.Variables.RI_CONTEXT_ALGORITHM).toBe('RS256');
     expect(fn.Properties.Environment.Variables.RI_CONTEXT_LIFETIME_SECONDS).toBe('60');
     expect(fn.Properties.Environment.Variables.RI_TOOLS_GATEWAY_NAME).toBe('default');
     const [, alias] = resources(template, 'AWS::Lambda::Alias').find(([, a]) => a.Properties.FunctionName.Ref === id)!;
@@ -289,6 +290,37 @@ describe('v2 options', () => {
     };
     expect(sourcesOf(true)).toEqual(['method.request.header.Authorization', 'context.path', 'method.request.header.X-Tenant-Id']);
     expect(sourcesOf(false)).toEqual(['method.request.header.Authorization', 'context.path']);
+  });
+
+  it('toolContextKey.algorithm ES256: an ECC context key, ECDSA Sign for the interceptor, RI_CONTEXT_ALGORITHM ES256 (scale review 2026-11-05)', () => {
+    const { template } = build('api-gateway', { toolContextKey: { algorithm: 'ES256' } });
+    const keys = resources(template(), 'AWS::KMS::Key').filter(([, k]) => String(k.Properties.Description).includes('tool context'));
+    expect(keys).toHaveLength(1);
+    expect(keys[0][1].Properties.KeySpec).toBe('ECC_NIST_P256');
+    const sign = keys[0][1].Properties.KeyPolicy.Statement.find((s: any) => String(s.Sid).startsWith('SignToolContexts'));
+    expect(sign.Condition).toEqual({ StringEquals: { 'kms:SigningAlgorithm': 'ECDSA_SHA_256' } });
+    const { fn } = functionAndRole(template(), 'tools gateway default REQUEST interceptor');
+    expect(fn.Properties.Environment.Variables.RI_CONTEXT_ALGORITHM).toBe('ES256');
+    expect(() => build('api-gateway', { toolContextKey: { algorithm: 'HS256' as never } })).toThrow(/toolContextKey\.algorithm/);
+  });
+
+  it('ingressReservedConcurrency caps the streaming integration Lambda; api-gateway only (scale review 2026-11-05)', () => {
+    const { template } = build('api-gateway', { ingressReservedConcurrency: 200 });
+    const { fn } = functionAndRole(template(), 'relays the backend stream');
+    expect(fn.Properties.ReservedConcurrentExecutions).toBe(200);
+    expect(() => build('agentcore-gateway', { ingressReservedConcurrency: 200 })).toThrow(/ingressReservedConcurrency/);
+    expect(() => build('api-gateway', { ingressReservedConcurrency: 0 })).toThrow(/ingressReservedConcurrency/);
+  });
+
+  it('warns when stageThrottle is left at its shared default and when session.scope resolves to tenant (scale and security reviews)', () => {
+    const throttle = Match.stringLikeRegexp('runtime-isolation:stage-throttle-default');
+    const shared = Match.stringLikeRegexp('runtime-isolation:shared-session-scope');
+    Annotations.fromStack(build('api-gateway').stack).hasWarning('*', throttle);
+    Annotations.fromStack(build('api-gateway', { stageThrottle: { rateLimit: 500, burstLimit: 250 } }).stack).hasNoWarning('*', throttle);
+    Annotations.fromStack(build('agentcore-gateway').stack).hasNoWarning('*', throttle);
+    Annotations.fromStack(build('api-gateway', { session: {} }).stack).hasWarning('*', shared);
+    Annotations.fromStack(build('api-gateway', { session: { scope: 'user' } }).stack).hasNoWarning('*', shared);
+    Annotations.fromStack(build('api-gateway').stack).hasNoWarning('*', shared);
   });
 
   it('ES256 makes ECC_NIST_P256 keys signed with ECDSA_SHA_256', () => {

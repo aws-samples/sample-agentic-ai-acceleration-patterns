@@ -53,7 +53,7 @@ import { BACKEND_NAME_PATTERN, INGRESS_TAG_KEY, REGISTRY_BACKENDS_SEGMENT, ROUTE
 import { LONGEST_STREAM, MAX_DRAIN } from './shared/registry-entry.cdk';
 import { CONVERSATION_ID_PATTERN, type SessionScope } from './shared/session';
 import { TENANT_HEADER, TENANT_ID_PATTERN } from './shared/tenant';
-import { signingKey, TokenSigner, WELL_KNOWN } from './shared/token-signer.cdk';
+import { KEY_SPEC, signingKey, TokenSigner, WELL_KNOWN } from './shared/token-signer.cdk';
 import { DEFAULT_CACHE_MAX_ENTRIES, TENANT_TAG_KEY, USER_TAG_KEY } from './shared/tvm';
 import {
   DEFAULT_MAX_TOOLS_PER_GATEWAY,
@@ -213,8 +213,29 @@ export interface SharedIngressProps {
   readonly tvm?: TvmProps;
   /** Per-tenant limits (ADR-0020), on by default at 60 requests per tenant per minute. `false` turns them off. */
   readonly tenantLimits?: TenantLimitsProps | false;
-  /** The shared stage throttle on the `api-gateway` ingress. Default 50 rps, burst 25. */
+  /**
+   * The shared stage throttle on the `api-gateway` ingress. Default 50 rps,
+   * burst 25, and a synth warning when left unset: the stage is one bucket
+   * for every tenant and every refusal, and the per-tenant limit runs behind
+   * it, so size it to tenants x `tenantLimits.requestsPerMinute` / 60 (scale
+   * review 2026-11-05).
+   */
   readonly stageThrottle?: StageThrottleProps;
+  /**
+   * Reserved concurrency for the `api-gateway` integration Lambda, which is
+   * held for the whole stream (up to 2 minutes). Unset, it draws on the
+   * account pool with the authoriser, the tools interceptors and every tool
+   * function, and a burst of long streams starves them (scale review
+   * 2026-11-05). Concurrency needed is about rps x average stream seconds.
+   */
+  readonly ingressReservedConcurrency?: number;
+  /**
+   * The key that signs tool contexts (`_ri_ctx`) for every tools gateway.
+   * `algorithm` default `RS256`; `ES256` moves the one `kms:Sign` per
+   * admitted `tools/call` onto the KMS ECC request quota, separate from the
+   * RSA quota the transaction-token mint shares (scale review 2026-11-05).
+   */
+  readonly toolContextKey?: { readonly algorithm?: JwsAlgorithm };
   /** Emit per-tenant CloudWatch metrics (EMF, ADR-0021). Default false (cost per tenant). */
   readonly perTenantMetrics?: boolean;
   /** The SSM parameter prefix of the registry and the published parameters (ADR-0024). Default `/application-plane/shared/agent-runtime/`. */
@@ -264,7 +285,9 @@ export interface ResolvedOptions {
   };
   /** Undefined when per-tenant limits are off. */
   readonly tenantLimits?: { readonly requestsPerMinute: number; readonly outputTokensPerMinute?: number };
-  readonly stageThrottle: { readonly rateLimit: number; readonly burstLimit: number };
+  readonly stageThrottle: { readonly rateLimit: number; readonly burstLimit: number; readonly explicit: boolean };
+  readonly ingressReservedConcurrency?: number;
+  readonly toolContextAlgorithm: JwsAlgorithm;
   readonly perTenantMetrics: boolean;
   readonly registryPrefix: string;
   readonly publish: boolean;
@@ -436,6 +459,19 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
   if (props.stageThrottle !== undefined && props.ingress !== 'api-gateway') {
     fail('stageThrottle', "is valid only with the 'api-gateway' ingress");
   }
+  const ingressReservedConcurrency = props.ingressReservedConcurrency;
+  if (ingressReservedConcurrency !== undefined) {
+    if (props.ingress !== 'api-gateway') {
+      fail('ingressReservedConcurrency', "is valid only with the 'api-gateway' ingress");
+    }
+    if (!Number.isInteger(ingressReservedConcurrency) || ingressReservedConcurrency < 1) {
+      fail('ingressReservedConcurrency', `must be a positive integer (got ${String(ingressReservedConcurrency)})`);
+    }
+  }
+  const toolContextAlgorithm = props.toolContextKey?.algorithm ?? 'RS256';
+  if (toolContextAlgorithm !== 'RS256' && toolContextAlgorithm !== 'ES256') {
+    fail('toolContextKey.algorithm', `must be 'RS256' or 'ES256' (got ${String(toolContextAlgorithm)})`);
+  }
   if (!(rateLimit > 0) || !Number.isInteger(burstLimit) || burstLimit < 1) {
     fail('stageThrottle', 'rateLimit must be > 0 and burstLimit a positive integer');
   }
@@ -517,7 +553,9 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
     requiredScopes: props.requiredScopes,
     tvm,
     tenantLimits,
-    stageThrottle: { rateLimit, burstLimit },
+    stageThrottle: { rateLimit, burstLimit, explicit: props.stageThrottle !== undefined },
+    ingressReservedConcurrency,
+    toolContextAlgorithm,
     perTenantMetrics: props.perTenantMetrics ?? false,
     registryPrefix,
     publish: props.publish ?? true,
@@ -779,6 +817,18 @@ export class SharedIngress extends Construct {
       );
     }
 
+    if (options.ingress === 'api-gateway' && !options.stageThrottle.explicit) {
+      Annotations.of(this).addWarningV2(
+        'runtime-isolation:stage-throttle-default',
+        `stageThrottle is unset: the api-gateway stage is one bucket of ${options.stageThrottle.rateLimit} rps (burst ${options.stageThrottle.burstLimit}) shared by every tenant, every agent and every refusal, and the per-tenant limit runs behind it, so one tenant at the stage rate starves the rest. Set stageThrottle.rateLimit to at least tenants x tenantLimits.requestsPerMinute / 60, and put a per-tenant WAF rate rule in front for an edge limit (scale review 2026-11-05).`,
+      );
+    }
+    if (options.sessionScope === 'tenant') {
+      Annotations.of(this).addWarningV2(
+        'runtime-isolation:shared-session-scope',
+        "session.scope is 'tenant' (the default when session is set, ADR-0039): every user of a tenant who sends the same client-chosen conversationId resumes the same Runtime session and whatever state the agent kept there. The agent MUST read the token from each request and keep no per-user state in the session, or the deployer sets session.scope: 'user' (T-23, T-81).",
+      );
+    }
     const wiring = options.ingress === 'api-gateway' ? this.apiGatewayIngress(props, options, environment) : this.agentCoreGatewayIngress(props, options, environment);
     this.endpointUrl = wiring.endpointUrl;
     this.ingressRole = wiring.ingressRole;
@@ -839,7 +889,7 @@ export class SharedIngress extends Construct {
     const gateways: Record<string, ToolsGateway> = {};
     const names = Object.keys(options.toolsGateways);
     if (names.length > 0) {
-      this.toolContextKey = signingKey(this, 'ToolContextKey', kms.KeySpec.RSA_2048, 'runtime-isolation tool context signing key, shared by the tools gateways (ADR-0034, ADR-0041)', {
+      this.toolContextKey = signingKey(this, 'ToolContextKey', KEY_SPEC[options.toolContextAlgorithm], 'runtime-isolation tool context signing key, shared by the tools gateways (ADR-0034, ADR-0041)', {
         delegatePublicKey: true, // the tool library in another stack reads the public half through IAM (M-68)
       });
     }
@@ -850,6 +900,7 @@ export class SharedIngress extends Construct {
         ingressRoleArn: this.ingressRole.roleArn,
         options: options.toolsGateways[name],
         contextKey: this.toolContextKey!,
+        contextAlgorithm: options.toolContextAlgorithm,
         issuerReady: wiring.issuerApi.deploymentStage,
       });
     }
@@ -1097,6 +1148,7 @@ export class SharedIngress extends Construct {
       description: 'runtime-isolation: chooses the unit from validated claims, forwards the transaction token and relays the backend stream (P-2, P-5)',
       memorySize: 512,
       environment,
+      reservedConcurrentExecutions: options.ingressReservedConcurrency,
     });
     acknowledgeLambdaFindings(ingressFn);
 

@@ -50,6 +50,7 @@ import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { Construct, type IConstruct } from 'constructs';
 import { customResourceFunction } from './shared/custom-resource.cdk';
 import { acknowledgeLambdaFindings, functionProps } from './shared/function.cdk';
+import { type JwsAlgorithm, KMS_SIGNING_ALGORITHM } from './shared/jws';
 import { LogDrain } from './shared/log-drain';
 import { toolsGatewayAudience } from './shared/mint';
 import { acknowledgeGranularFinding, nagFindingResource } from './shared/nag';
@@ -124,6 +125,8 @@ export interface ToolsGatewayProps {
   readonly options: ResolvedToolsGateway;
   /** The ingress's one tool-context signing key, shared by every gateway (M-68). */
   readonly contextKey: kms.Key;
+  /** The JOSE algorithm `contextKey` signs with (`RS256` default, `ES256` for the KMS ECC quota). */
+  readonly contextAlgorithm?: JwsAlgorithm;
   /**
    * Something the Gateway must be created after: the issuer's deployed
    * discovery routes, which the service fetches at create time.
@@ -188,6 +191,7 @@ export class ToolsGateway extends Construct {
       environment: {
         ...verifierEnv,
         [TOOLS_ENV.CONTEXT_KEY_ID]: this.contextKey.keyId,
+        [TOOLS_ENV.CONTEXT_ALGORITHM]: props.contextAlgorithm ?? 'RS256',
         [TOOLS_ENV.CONTEXT_LIFETIME_SECONDS]: String(o.contextLifetimeSeconds),
       },
     });
@@ -199,7 +203,7 @@ export class ToolsGateway extends Construct {
         principals: [this.interceptor.grantPrincipal],
         actions: ['kms:Sign'],
         resources: ['*'],
-        conditions: { StringEquals: { 'kms:SigningAlgorithm': 'RSASSA_PKCS1_V1_5_SHA_256' } },
+        conditions: { StringEquals: { 'kms:SigningAlgorithm': KMS_SIGNING_ALGORITHM[props.contextAlgorithm ?? 'RS256'] } },
       }),
     );
     const live = new lambda.Alias(this, 'InterceptorLive', {

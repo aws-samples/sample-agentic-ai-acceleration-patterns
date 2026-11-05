@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: MIT-0
 
 import { CreatePolicyCommand, DeletePolicyCommand, GetPolicyCommand, ResourceNotFoundException, UpdatePolicyCommand } from '@aws-sdk/client-bedrock-agentcore-control';
+import { cedarPolicyFor } from '../../src/shared/cedar';
 import { handleEvent, type ToolPolicyDependencies, type ToolPolicyEvent } from '../../src/tools/tool-policy.function';
 
 /** The ToolTarget policy custom resource (C-16, ADR-0040, ADR-0041). */
-const props = { PolicyEngineId: 'engine-1', Name: 'crm_target', Statement: 'permit(...);', ValidationMode: 'FAIL_ON_ANY_FINDINGS' };
+const GATEWAY_ARN = 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:gateway/ri-default-abc123';
+const props = { PolicyEngineId: 'engine-1', Name: 'crm_target', Statement: cedarPolicyFor('crm', GATEWAY_ARN), ValidationMode: 'FAIL_ON_ANY_FINDINGS' };
 
 function event(RequestType: ToolPolicyEvent['RequestType'], extra: Partial<ToolPolicyEvent> = {}): ToolPolicyEvent {
   return {
@@ -96,5 +98,16 @@ describe('tool policy handler', () => {
     const { d, sent } = deps(['DELETING', 'GONE']);
     expect(await handleEvent(event('Delete', { PhysicalResourceId: 'p-3' }), d)).toMatchObject({ status: 'SUCCESS' });
     expect(sent).toEqual(['DeletePolicyCommand', 'GetPolicyCommand', 'GetPolicyCommand']);
+  });
+});
+
+describe('statement bound (M-83, red team 2026-11-04)', () => {
+  it('refuses any Statement that is not the star permit of one target, before calling the engine', async () => {
+    for (const Statement of ['permit(principal, action, resource);', 'forbid(principal, action, resource);', cedarPolicyFor('crm', GATEWAY_ARN).replace('permit(', 'forbid('), 42]) {
+      const ev = { RequestType: 'Create', ResponseURL: 'https://example.com', StackId: 's', RequestId: 'r', LogicalResourceId: 'P', ResourceProperties: { ...props, Statement } } as any;
+      const outcome = await handleEvent(ev, { client: { send: async () => { throw new Error('engine must not be called'); } } as any });
+      expect(outcome.status).toBe('FAILED');
+      expect(outcome.reason).toMatch(/Statement/);
+    }
   });
 });

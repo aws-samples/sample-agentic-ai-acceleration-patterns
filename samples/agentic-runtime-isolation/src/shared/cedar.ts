@@ -62,6 +62,28 @@ function scopeMatch(target: string): string {
 }
 
 /**
+ * Whether `statement` is exactly the star permit `cedarPolicyFor` writes for
+ * some target and gateway, or why not. The policy custom resource accepts
+ * nothing else (2026-11-04 red team): invoked directly with a hand-written
+ * `Statement`, it would otherwise write any Cedar text, a blanket permit
+ * included, to the engine.
+ */
+export function cedarPolicyProblem(statement: unknown): string | undefined {
+  if (typeof statement !== 'string') {
+    return 'Statement must be a string';
+  }
+  const target = /action in AgentCore::Action::"([^"]*)",/.exec(statement)?.[1];
+  const gatewayArn = /resource == AgentCore::Gateway::"([^"]*)"/.exec(statement)?.[1];
+  if (target === undefined || !TARGET_NAME_PATTERN.test(target)) {
+    return 'Statement names no valid target';
+  }
+  if (gatewayArn === undefined || !/^arn:[a-z-]+:bedrock-agentcore:[a-z0-9-]+:\d{12}:gateway\/[A-Za-z0-9_-]+$/.test(gatewayArn)) {
+    return 'Statement names no gateway ARN';
+  }
+  return statement === cedarPolicyFor(target, gatewayArn) ? undefined : 'Statement is not the star permit of one target (cedarPolicyFor)';
+}
+
+/**
  * The one star permit of a target. `gatewayArn` may be a CDK token: it is
  * only interpolated. The target name is checked first, so nothing but
  * `[a-z0-9-]` reaches the Cedar text.

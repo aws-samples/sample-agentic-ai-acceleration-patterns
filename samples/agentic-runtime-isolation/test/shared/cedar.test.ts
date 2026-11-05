@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { catalogueToolName, cedarPolicyFor, gatewayToolName, MAX_POLICY_STATEMENT_CHARS } from '../../src/shared/cedar';
+import { catalogueToolName, cedarPolicyFor, cedarPolicyProblem, gatewayToolName, MAX_POLICY_STATEMENT_CHARS } from '../../src/shared/cedar';
 
 /** The per-target star permit (spec §3.6, P-16, ADR-0034, ADR-0040, ADR-0041) in the shape spike V-16a proved ACTIVE. */
 const GATEWAY_ARN = 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:gateway/tools-abc';
@@ -97,5 +97,18 @@ describe('gatewayToolName / catalogueToolName', () => {
     expect(catalogueToolName('CRM___get_account')).toBeUndefined();
     expect(catalogueToolName('crm___')).toBeUndefined();
     expect(catalogueToolName('x-amz-bedrock-agentcore-search')).toBeUndefined();
+  });
+});
+
+describe('cedarPolicyProblem (M-83)', () => {
+  const arn = 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:gateway/ri-default-abc123';
+  it('accepts exactly what cedarPolicyFor writes and nothing else', () => {
+    expect(cedarPolicyProblem(cedarPolicyFor('crm', arn))).toBeUndefined();
+    expect(cedarPolicyProblem(cedarPolicyFor('a-b-1', arn))).toBeUndefined();
+    expect(cedarPolicyProblem('permit(principal, action, resource);')).toMatch(/no valid target/);
+    expect(cedarPolicyProblem(cedarPolicyFor('crm', arn).replace('permit(', 'forbid('))).toMatch(/not the star permit/);
+    expect(cedarPolicyProblem(cedarPolicyFor('crm', arn).replace('principal.hasTag("scope") && ', ''))).toMatch(/not the star permit/);
+    expect(cedarPolicyProblem(cedarPolicyFor('crm', arn).replace(arn, 'not-an-arn'))).toMatch(/no gateway ARN/);
+    expect(cedarPolicyProblem(42)).toMatch(/must be a string/);
   });
 });

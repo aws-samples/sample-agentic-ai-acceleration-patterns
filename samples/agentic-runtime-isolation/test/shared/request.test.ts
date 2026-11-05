@@ -8,11 +8,11 @@ import { AuthorityError } from '../../src/shared/authority';
 import type { IngressConfig } from '../../src/shared/config';
 import { type Admission, TenantLimiter } from '../../src/shared/limits';
 import { BackendRegistry, RegistryError } from '../../src/shared/registry';
-import { type AuthoritySource, ERROR_TEXT, errorBody, IngressPipeline, parseBody, pipelineFor, type RegistryResolver, RequestError } from '../../src/shared/request';
+import { type AuthoritySource, ERROR_TEXT, errorBody, IngressPipeline, parseBody, pipelineFor, type RegistryResolver, RequestError, type ForwardedTokenVerifier } from '../../src/shared/request';
 import { PREFIX_PATTERN, RANDOM_UNIT_ID_PATTERN, sessionPrefix } from '../../src/shared/session';
 import { TokenVendingMachine } from '../../src/shared/tvm';
 import { TokenVerifier } from '../../src/shared/verifier';
-import { baseConfig, CLIENT_ID, DISCOVERY_URL, FIXTURE_ENTRIES, RUNTIME_ARN, stubAuthority, stubRegistry, testIssuer, TXN_TOKEN, type TestIssuer } from '../helpers';
+import { baseConfig, CLIENT_ID, DISCOVERY_URL, FIXTURE_ENTRIES, RUNTIME_ARN, stubAuthority, stubForwarded, stubRegistry, testIssuer, TXN_TOKEN, type TestIssuer } from '../helpers';
 
 /** The one request contract both ingresses enforce (spec §5, ADR-0002, ADR-0013). */
 
@@ -87,6 +87,7 @@ describe('IngressPipeline', () => {
     limiter?: TenantLimiter,
     registry: RegistryResolver = stubRegistry().registry,
     authority: AuthoritySource | null = stubAuthority(),
+    forwarded: ForwardedTokenVerifier | null = stubForwarded,
   ) => {
     const verifier = new TokenVerifier(
       {
@@ -99,7 +100,7 @@ describe('IngressPipeline', () => {
       { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
     );
     const tvm = config.tvm === undefined ? undefined : new TokenVendingMachine(config.tvm, { sts: new STSClient({}) });
-    return new IngressPipeline(config, verifier, registry, tvm, limiter, authority ?? undefined);
+    return new IngressPipeline(config, verifier, registry, tvm, limiter, authority ?? undefined, forwarded ?? undefined);
   };
 
   const refusal = async (promise: Promise<unknown>) => {
@@ -229,6 +230,21 @@ describe('IngressPipeline', () => {
         status: 403,
         reason: 'tenant_not_allowed',
       });
+      // M-82: the forwarded token itself must verify and name this tenant and agent; a hand-written context cannot.
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, authorized: { ...authorized, transactionToken: 'forged' } }))).toEqual({
+        status: 403,
+        reason: 'tenant_not_allowed',
+      });
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, authorized: { ...authorized, transactionToken: 'for-billing' } }))).toEqual({
+        status: 403,
+        reason: 'tenant_not_allowed',
+      });
+      expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, authorized: { ...authorized, transactionToken: 'for-tenant-b' } }))).toEqual({
+        status: 403,
+        reason: 'tenant_not_allowed',
+      });
+      const unverifiable = pipeline(baseConfig(), undefined, stubRegistry().registry, null, null);
+      expect(await refusal(unverifiable.validate({ authorization: `Bearer ${await issuer.mint()}`, body, authorized }))).toEqual({ status: 502, reason: 'mint_failed' });
       expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, authorized: { ...authorized, backend: 'billing' } }))).toEqual({
         status: 403,
         reason: 'tenant_not_allowed',

@@ -503,7 +503,9 @@ fails with the prop name.
 | `requiredScopes` | string[] | none | the floor: every identity token MUST carry all of them (ADR-0005), for example `['app/use']` |
 | `tvm.role`, `tvm.includeUserIdTag`, `tvm.claimTags`, `tvm.durationSeconds`, `tvm.cacheMaxEntries` | as v1 | as v1 | P-8, ADR-0012, ADR-0018, ADR-0022 |
 | `tenantLimits` | `{ requestsPerMinute?, outputTokensPerMinute? } \| false` | `requestsPerMinute: 60` | ADR-0020; keyed on the selected tenant (v2) |
-| `stageThrottle` | `{ rateLimit?, burstLimit? }` | 50 rps, burst 25 | `api-gateway` only |
+| `stageThrottle` | `{ rateLimit?, burstLimit? }` | 50 rps, burst 25 | `api-gateway` only; (added 2026-11-05, scale review) synth warns when unset: one bucket for every tenant, the per-tenant limit behind it (T-105) |
+| `ingressReservedConcurrency` | positive integer | unset | `api-gateway` only (added 2026-11-05): reserved concurrency on the streaming integration function (T-105) |
+| `toolContextKey` | `{ algorithm?: 'RS256' \| 'ES256' }` | `RS256` | (added 2026-11-05) `ES256` moves tool-context `kms:Sign` to the KMS ECC quota, off the RSA quota the mint shares (T-105) |
 | `perTenantMetrics` | boolean | `false` | ADR-0021. (Amended 2026-11-04) When on, 9 × (1 + agents) custom metrics per tenant per ingress: nine on `[TenantId, Ingress]` and the same nine on `[TenantId, Ingress, Backend]` for each agent |
 | `registryPrefix` | string | `/application-plane/shared/agent-runtime/` | ADR-0024 |
 | `publish` | boolean | true | ADR-0042 |

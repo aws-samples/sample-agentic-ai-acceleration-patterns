@@ -20,6 +20,7 @@
  */
 
 import { KMSClient } from '@aws-sdk/client-kms';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { AuthorityError, AuthorityResolver } from './authority';
 import type { IngressConfig } from './config';
 import { EntitlementReader } from './entitlements';
@@ -152,6 +153,29 @@ export type RegistryResolver = Pick<BackendRegistry, 'resolve' | 'warm'>;
 /** What the pipeline needs from the authority step; `AuthorityResolver` is the implementation. */
 export type AuthoritySource = Pick<AuthorityResolver, 'resolve'>;
 
+/**
+ * Verifies a transaction token the authoriser forwarded in the Allow context
+ * and returns the tenant and agent it was minted for; throws on any failure.
+ * The integration Lambda is a separate invocation target (2026-11-04 red
+ * team): an in-account principal with `lambda:InvokeFunction` can hand it a
+ * hand-written authorizer context, so the forwarded token is verified like
+ * any other bearer before it is trusted (M-82).
+ */
+export type ForwardedTokenVerifier = (token: string) => Promise<{ tenantId: string; agent: string }>;
+
+/** The default verifier: the ingress's own JWKS, `typ: txn+jwt`, `iss`, `exp` and `iat`. */
+export function forwardedTokenVerifierFor(issuer: string): ForwardedTokenVerifier {
+  const getKey = createRemoteJWKSet(new URL(`${issuer}/.well-known/jwks.json`), { cooldownDuration: 60_000, cacheMaxAge: 300_000 });
+  return async (token) => {
+    const { payload, protectedHeader } = await jwtVerify(token, getKey, { issuer, algorithms: ['RS256', 'ES256'], requiredClaims: ['exp', 'iat'] });
+    const { tenant_id: tenantId, agent } = payload as Record<string, unknown>;
+    if (protectedHeader.typ !== 'txn+jwt' || typeof tenantId !== 'string' || typeof agent !== 'string') {
+      throw new Error('not a transaction token');
+    }
+    return { tenantId, agent };
+  };
+}
+
 export class IngressPipeline {
   constructor(
     private readonly config: IngressConfig,
@@ -163,6 +187,8 @@ export class IngressPipeline {
     readonly limiter?: TenantLimiter,
     /** (v2) The authority step; present only on the function that mints. */
     private readonly authority?: AuthoritySource,
+    /** (v2) Verifies a token the authoriser forwarded; present on the function that does not mint. */
+    private readonly forwarded?: ForwardedTokenVerifier,
   ) {
     if (config.tvm !== undefined && tvm === undefined) {
       throw new Error('IngressPipeline: tvm module is configured but no TokenVendingMachine was given');
@@ -256,6 +282,21 @@ export class IngressPipeline {
       if (inputs.authorized.tenantId !== claims.tenantId || inputs.authorized.backend !== backend) {
         throw new RequestError(403, 'tenant_not_allowed', claims.tenantId);
       }
+      // The context is trusted only once its token verifies against our own
+      // JWKS and names this tenant and this agent (M-82): a direct invoke with
+      // a hand-written context cannot run an agent the tenant does not hold.
+      if (this.forwarded === undefined) {
+        throw new RequestError(502, 'mint_failed', claims.tenantId); // deployment fault: nothing can vouch for the context
+      }
+      let minted: { tenantId: string; agent: string };
+      try {
+        minted = await this.forwarded(inputs.authorized.transactionToken);
+      } catch {
+        throw new RequestError(403, 'tenant_not_allowed', claims.tenantId);
+      }
+      if (minted.tenantId !== claims.tenantId || minted.agent !== backend) {
+        throw new RequestError(403, 'tenant_not_allowed', claims.tenantId);
+      }
       return inputs.authorized;
     }
     if (this.authority === undefined) {
@@ -335,6 +376,7 @@ export function pipelineFor(
     limiter?: TenantLimiter;
     registry?: RegistryResolver;
     authority?: AuthoritySource;
+    forwarded?: ForwardedTokenVerifier;
   } = {},
 ): IngressPipeline {
   const verifier = deps.verifier ?? verifierFor(config);
@@ -342,5 +384,7 @@ export function pipelineFor(
   const tvm = config.tvm === undefined ? undefined : deps.tvm ?? new TokenVendingMachine(config.tvm);
   const limiter = config.limits === undefined ? undefined : deps.limiter ?? new TenantLimiter(config.limits);
   const authority = deps.authority ?? authorityFor(config);
-  return new IngressPipeline(config, verifier, registry, tvm, limiter, authority);
+  // The function that does not mint receives the authoriser's token and must verify it (M-82).
+  const forwarded = deps.forwarded ?? (authority === undefined && config.issuer !== undefined ? forwardedTokenVerifierFor(config.issuer) : undefined);
+  return new IngressPipeline(config, verifier, registry, tvm, limiter, authority, forwarded);
 }

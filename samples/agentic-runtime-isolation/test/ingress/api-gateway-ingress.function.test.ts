@@ -7,7 +7,7 @@ import { ENV } from '../../src/shared/config';
 import type { Admission, TenantLimiter } from '../../src/shared/limits';
 import { IngressPipeline, pipelineFor } from '../../src/shared/request';
 import { TokenVerifier } from '../../src/shared/verifier';
-import { baseConfig, CLIENT_ID, DISCOVERY_URL, FIXTURE_ENTRIES, REGISTRY_PREFIX, RUNTIME_ARN, stubRegistry, testIssuer, TXN_TOKEN, type TestIssuer } from '../helpers';
+import { baseConfig, CLIENT_ID, DISCOVERY_URL, FIXTURE_ENTRIES, REGISTRY_PREFIX, RUNTIME_ARN, setForwardedAgent, stubForwarded, stubRegistry, testIssuer, TXN_TOKEN, type TestIssuer } from '../helpers';
 
 // The handler reads its configuration at cold start only when invoked; the
 // module itself must load without the Lambda streaming global.
@@ -73,6 +73,7 @@ const ENTRIES = {
 
 /** (v2) What the authoriser hands the integration Lambda: the decision and the minted token (spec §3.1 C-3a). */
 const authorizerContext = (backend: string | undefined, tenantId = 'tenant-a') => ({
+  ...(backend === undefined ? {} : setForwardedAgent(backend)),
   tenantId,
   sub: 'user-a1',
   backend,
@@ -91,7 +92,7 @@ const event = (authorization: string | undefined, body: string | null, extra: Pa
     isBase64Encoded: false,
     path: '/default/invocations',
     pathParameters: { backend: 'default' },
-    requestContext: { authorizer: authorizerContext('default'), path: '/prod/default/invocations', resourcePath: '/{backend}/invocations' } as any,
+    requestContext: extra.requestContext ?? ({ authorizer: authorizerContext('default'), path: '/prod/default/invocations', resourcePath: '/{backend}/invocations' } as any),
     ...extra,
   }) as APIGatewayProxyEvent;
 
@@ -110,6 +111,7 @@ describe('handleRequest', () => {
         { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
       ),
       registry: stubRegistry(ENTRIES).registry,
+      forwarded: stubForwarded,
     });
   });
   beforeEach(() => {
@@ -410,6 +412,7 @@ describe('handleRequest', () => {
         ),
         limiter,
         registry: stubRegistry().registry,
+        forwarded: stubForwarded,
       });
       return { p, recorded };
     };

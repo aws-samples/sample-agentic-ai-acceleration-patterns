@@ -53,3 +53,5 @@ Harder:
 - While DynamoDB is failing, no tenant is limited.
 
 Revisit if exact rates are needed (a sliding window or token bucket), or if per-tenant limits must differ by tier.
+
+**2026-11-05.** Amended by the scale review: the stage throttle is one bucket for every tenant and the per-tenant limit runs behind it, so synth warns `runtime-isolation:stage-throttle-default` when `stageThrottle` is unset, and `ingressReservedConcurrency` caps the streaming function's share of the account pool (T-105).

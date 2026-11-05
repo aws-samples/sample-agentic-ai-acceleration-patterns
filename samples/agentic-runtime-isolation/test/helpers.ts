@@ -131,6 +131,29 @@ export const stubRegistry = (entries: Record<string, RegistryEntry> = {}) => {
 /** A minted transaction token stand-in (the authority step is stubbed in pipeline tests). */
 export const TXN_TOKEN = 'eyJhbGciOiJSUzI1NiIsInR5cCI6InR4bitqd3QifQ.eyJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtYSJ9.c2ln';
 
+/**
+ * A forwarded-token verifier stub (M-82): TXN_TOKEN and 'from-authoriser' are
+ * tenant-a tokens for the agent `forwardedAgent` names (default `default`);
+ * 'for-billing' and 'for-tenant-b' name another agent or tenant; anything
+ * else fails verification.
+ */
+export let forwardedAgent = 'default';
+export function setForwardedAgent(agent: string): void {
+  forwardedAgent = agent;
+}
+export const stubForwarded = async (token: string): Promise<{ tenantId: string; agent: string }> => {
+  if (token === TXN_TOKEN || token === 'from-authoriser') {
+    return { tenantId: 'tenant-a', agent: forwardedAgent };
+  }
+  if (token === 'for-billing') {
+    return { tenantId: 'tenant-a', agent: 'billing' };
+  }
+  if (token === 'for-tenant-b') {
+    return { tenantId: 'tenant-b', agent: forwardedAgent };
+  }
+  throw new Error('not a transaction token');
+};
+
 /** An authority stub: every agent granted its needs, one fixed token (tests that need refusals pass their own). */
 export const stubAuthority = (calls: Array<{ tenantId: string; sub: string; agent: string }> = []) => ({
   resolve: async (tenantId: string, sub: string, agent: string) => {
