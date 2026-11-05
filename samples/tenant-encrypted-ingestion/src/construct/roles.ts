@@ -49,6 +49,24 @@ export const TENANT_ROLE_TRUST_CONDITIONS = {
 
 export const KMS_USE_ACTIONS = ['kms:Encrypt', 'kms:Decrypt', 'kms:GenerateDataKey*', 'kms:ReEncrypt*'];
 
+/**
+ * A base role may never use a TENANT key (spec §7.1). The Deny is scoped to
+ * keys that carry a `TenantId` tag: Lambda decrypts a function's environment
+ * variables with `kms:Decrypt` under the execution role (the AWS-managed
+ * `aws/lambda` key, untagged), so an unconditioned Deny on `kms:Decrypt`
+ * stops every function of that role from starting, with no log line to show
+ * for it (found on the first deployment, 2026-11-05).
+ */
+export function denyTenantKeyUse(): iam.PolicyStatement {
+  return new iam.PolicyStatement({
+    sid: 'DenyTenantKeyUse',
+    effect: iam.Effect.DENY,
+    actions: KMS_USE_ACTIONS,
+    resources: ['*'],
+    conditions: { Null: { [`aws:ResourceTag/${TENANT_TAG_KEY}`]: 'false' } },
+  });
+}
+
 export interface RoleResources {
   readonly bucketArn: string;
   readonly tableArn: string;
@@ -299,12 +317,13 @@ export function createRoles(scope: Construct, resources: RoleResources): { base:
   assume(kf, tenant.platform);
   kf.addToPrincipalPolicy(
     new iam.PolicyStatement({
-      sid: 'DenyKeyPolicyGrantRetagAndUse',
+      sid: 'DenyKeyPolicyGrantAndRetag',
       effect: iam.Effect.DENY,
-      actions: ['kms:PutKeyPolicy', 'kms:CreateGrant', 'kms:UntagResource', ...KMS_USE_ACTIONS],
+      actions: ['kms:PutKeyPolicy', 'kms:CreateGrant', 'kms:UntagResource'],
       resources: ['*'],
     }),
   );
+  kf.addToPrincipalPolicy(denyTenantKeyUse());
 
   // platformRole.
   const pr = base.platformRole;
@@ -346,12 +365,13 @@ export function createRoles(scope: Construct, resources: RoleResources): { base:
   }
   pr.addToPrincipalPolicy(
     new iam.PolicyStatement({
-      sid: 'DenyKeyCreationTaggingPolicyGrantAndUse',
+      sid: 'DenyKeyCreationTaggingPolicyAndGrant',
       effect: iam.Effect.DENY,
-      actions: ['kms:CreateKey', 'kms:TagResource', 'kms:UntagResource', 'kms:PutKeyPolicy', 'kms:CreateGrant', ...KMS_USE_ACTIONS],
+      actions: ['kms:CreateKey', 'kms:TagResource', 'kms:UntagResource', 'kms:PutKeyPolicy', 'kms:CreateGrant'],
       resources: ['*'],
     }),
   );
+  pr.addToPrincipalPolicy(denyTenantKeyUse());
 
   if (resources.tenantThrottle) {
     // Ids are found at run time (the usage plan by name): an ARN of the plan
