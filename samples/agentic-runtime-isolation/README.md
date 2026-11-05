@@ -778,7 +778,8 @@ Each tools gateway speaks MCP over streamable HTTP, bearer = the transaction
 token. A bad signature, `aud`, `iss` or `exp` is 403 `insufficient_scope`
 from the Gateway; only a missing bearer or an unknown `kid` is 401. The
 interceptor refuses with 403 `act_missing`, `aud_mismatch`,
-`tool_not_granted` or `token_invalid`; Policy refuses a target the token
+`tool_not_granted`, `token_invalid` or `malformed_request` (a JSON-RPC
+batch, an unknown method, or non-object `arguments`); Policy refuses a target the token
 names no entry of; an empty tenant bucket is 429; an interceptor error or
 timeout is a Gateway 5xx, never a pass-through.
 

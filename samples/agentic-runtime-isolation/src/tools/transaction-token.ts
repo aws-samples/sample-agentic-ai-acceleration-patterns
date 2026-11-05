@@ -24,7 +24,7 @@ export const TOOLS_ENV = {
 } as const;
 
 /** Refusal reasons (spec §5.4); the response body is `forbidden: <reason>`. */
-export type ToolRefusal = 'token_invalid' | 'aud_mismatch' | 'act_missing' | 'tool_not_granted';
+export type ToolRefusal = 'token_invalid' | 'aud_mismatch' | 'act_missing' | 'tool_not_granted' | 'malformed_request';
 
 /** What verifying a transaction token needs (the REQUEST and the RESPONSE interceptor share it). */
 export interface TokenVerification {

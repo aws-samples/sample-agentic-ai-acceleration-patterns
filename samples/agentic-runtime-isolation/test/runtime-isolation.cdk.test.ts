@@ -1302,6 +1302,23 @@ describe('SharedIngress.fromParameters: the synth-time lookup (ADR-0042)', () =>
     expect(() => SharedIngress.fromParameters(new Stack(legacy, 'C', { env: TEST_ENV }), 'Ingress', DEFAULT_REGISTRY_PREFIX)).toThrow(/is not JSON/);
   });
 
+  it('refuses a document whose values are not the shapes SharedIngress writes, or whose roles are in another account (security review 2026-11-04)', () => {
+    const broken = (patch: Record<string, unknown>) => {
+      const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+      seedPublishedIngress(app, { ...publishedIngress('api-gateway'), ...patch });
+      const stack = new Stack(app, 'S', { env: TEST_ENV });
+      return () => SharedIngress.fromParameters(stack, 'Ingress', DEFAULT_REGISTRY_PREFIX);
+    };
+    expect(broken({ ingressRoleArn: 'arn:aws:iam::999988887777:role/evil' })).toThrow(/ingressRoleArn belongs to account 999988887777, not this stack's 111122223333/);
+    expect(broken({ ingressRoleArn: 'not-an-arn' })).toThrow(/ingressRoleArn is not an IAM role ARN/);
+    expect(broken({ issuer: 'http://plain.example.com' })).toThrow(/issuer is not an https URL/);
+    expect(broken({ entitlementsTableName: 'x' })).toThrow(/entitlementsTableName is not a table name/);
+    expect(broken({ toolContextKeyId: 'a"b' })).toThrow(/toolContextKeyId is not an identifier/);
+    const doc = publishedIngress('api-gateway');
+    expect(broken({ toolsGateways: { default: { ...doc.toolsGateways.default, roleArn: 'arn:aws:iam::999988887777:role/gw' } } })).toThrow(/toolsGateways\.default\.roleArn belongs to account 999988887777/);
+    expect(broken({ toolsGateways: { default: { ...doc.toolsGateways.default, identifier: 'id with spaces' } } })).toThrow(/toolsGateways\.default\.identifier is not an identifier/);
+  });
+
   it('refuses an ingress argument the document contradicts; without one it takes the document\'s', () => {
     const app = fresh();
     seedPublishedIngress(app, publishedIngress('agentcore-gateway'));

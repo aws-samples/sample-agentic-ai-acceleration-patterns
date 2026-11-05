@@ -888,6 +888,12 @@ written by that backend's stack, read by the ingress, JSON, 4 KB.
 refused with 502 and log reason `registry_entry_v1`, so an entry in the old
 shape fails loudly rather than granting the wrong set.
 
+(Amended 2026-11-04, security review) The ingress also refuses an entry whose
+`needs` are not all `<backend>/<action>` for the backend it is read for
+(`registry_entry_invalid`): a need rides in `scope` verbatim, so a need owned
+by another name (`crm/getaccount`) would read as a tool grant at the tools
+gateway. Synth checks the same rule (ADR-0032); this is the read-time check.
+
 ### 4.4 Tool registry pointer (v2, ADR-0035)
 
 One SSM `String` parameter per tool target at `<registryPrefix>tools/<target>`:
@@ -1150,6 +1156,7 @@ which permits the whole `crm` target for that token.
 | 403 `forbidden: tool_not_granted` | interceptor | the called tool is not in `scope` by name or `<target>/*`. (Amended 2026-11-03, ADR-0041) The per-tool wall: inside a target the token holds part of, the only refusal; was "recheck of `scope` fails (Policy should already have refused)" |
 | page with fewer tools, or none | list filter (C-15c), `responseFilter` only | tools `scope` does not name are removed; on a filter error the page is empty (fail-closed for the list; the call wall is unaffected) |
 | 403 `forbidden: token_invalid` | interceptor | signature or claims fail the interceptor's own verification, including (amended 2026-11-04) a token minted for another tools gateway |
+| 403 `forbidden: malformed_request` | interceptor | (Amended 2026-11-04, security review) the body is not one JSON-RPC object, `method` is not one of `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`, or a `tools/call` carries `arguments` that are not a plain object. A batch array would otherwise reach the target with the token verified but no per-tool check and no `_ri_ctx` |
 | 429 | Gateway rate limit | the tenant's bucket is empty |
 | tool error `context_invalid` | tool library (C-15b) | `_ri_ctx` missing, expired, for another tool, or `argsHash` mismatch; the tool assumes no role |
 | 5xx | Gateway | interceptor timeout or error (fail-closed, V-11) |

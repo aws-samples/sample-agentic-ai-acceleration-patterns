@@ -27,6 +27,14 @@
  * failure is a refusal; none passes the call on, and a throw or timeout is
  * a Gateway 5xx (fail-closed, V-11). It never logs a token or a context
  * value, only names.
+ *
+ * The body must be ONE JSON-RPC object whose `method` is in
+ * `ALLOWED_METHODS`; a JSON-RPC batch (an array), a non-string or unknown
+ * method, or a `tools/call` whose `params.arguments` is not a plain object
+ * is refused with `malformed_request` (2026-11-04 security review). Without
+ * this, such a body would reach the target with the token verified but no
+ * per-tool check and no `_ri_ctx`; a Lambda tool fails closed on the
+ * missing context, but a target with vendor-shared outbound auth would not.
  */
 
 import { KMSClient } from '@aws-sdk/client-kms';
@@ -49,6 +57,13 @@ export type { TokenVerification, ToolCaller, ToolRefusal } from './transaction-t
 
 /** The tool argument a client might use to name a tenant; overwritten with the token's (P-15). */
 export const TENANT_ARGUMENT = 'tenantId';
+
+/** The JSON-RPC methods the interceptor passes on. Anything else is `malformed_request`. */
+export const ALLOWED_METHODS: ReadonlySet<string> = new Set(['initialize', 'notifications/initialized', 'ping', 'tools/list', 'tools/call']);
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 
 /**
@@ -138,13 +153,19 @@ export function refuse(body: JsonRpcRequest | undefined, reason: ToolRefusal): T
 /** The interceptor's logic (unit-tested directly). */
 export async function interceptTool(event: ToolInterceptorEvent, deps: ToolInterceptorDependencies): Promise<ToolInterceptorOutput> {
   const request = event.mcp?.gatewayRequest;
-  const body = request?.body;
+  const rawBody: unknown = request?.body;
+  const body: JsonRpcRequest | undefined = isPlainObject(rawBody) ? (rawBody as JsonRpcRequest) : undefined;
   const method = body?.method;
   const gatewayTool = typeof body?.params?.name === 'string' ? body.params.name : undefined;
   const tool = gatewayTool === undefined ? undefined : catalogueToolName(gatewayTool);
   let caller: ToolCaller | undefined;
   try {
     caller = await verifyTransactionToken(bearerToken(headerValue(request?.headers, 'authorization')), deps);
+    // One JSON-RPC object with a known method, else refused: a batch array or an
+    // unknown method would otherwise pass with no per-tool check and no context.
+    if (body === undefined || typeof method !== 'string' || !ALLOWED_METHODS.has(method)) {
+      throw new Refusal('malformed_request');
+    }
     if (method !== 'tools/call') {
       // tools/list and the protocol methods: verified and logged; Policy filters the list.
       log.info('tools request admitted', {
@@ -152,14 +173,18 @@ export async function interceptTool(event: ToolInterceptorEvent, deps: ToolInter
         agent: caller.agent,
         txn: caller.txn,
         gateway: deps.config.gatewayName,
-        method: typeof method === 'string' ? method : 'unknown',
+        method,
       });
       return pass(body);
     }
     if (tool === undefined || !scopeGrantsTool(caller.scope, tool)) {
       throw new Refusal('tool_not_granted');
     }
-    const args: Record<string, unknown> = { ...(body?.params?.arguments ?? {}) };
+    const rawArgs: unknown = body.params?.arguments;
+    if (rawArgs !== undefined && !isPlainObject(rawArgs)) {
+      throw new Refusal('malformed_request'); // never sign a context over a shape the tool will not read
+    }
+    const args: Record<string, unknown> = { ...((rawArgs as Record<string, unknown> | undefined) ?? {}) };
     const clientContext = CONTEXT_ARGUMENT in args;
     delete args[CONTEXT_ARGUMENT];
     const clientTenant = TENANT_ARGUMENT in args && args[TENANT_ARGUMENT] !== caller.tenantId;
@@ -191,7 +216,7 @@ export async function interceptTool(event: ToolInterceptorEvent, deps: ToolInter
       clientContextOverwritten: clientContext,
       clientTenantOverwritten: clientTenant,
     });
-    return pass({ ...body, params: { ...body?.params, arguments: { ...args, [CONTEXT_ARGUMENT]: signed } } });
+    return pass({ ...body, params: { ...body.params, arguments: { ...args, [CONTEXT_ARGUMENT]: signed } } });
   } catch (error) {
     if (error instanceof Refusal) {
       log.warn(method === 'tools/call' ? 'tool admitted' : 'tools request refused', {

@@ -165,6 +165,8 @@ export function partitionOf(region: string): string {
 export interface RegistryScope {
   readonly region?: string;
   readonly account?: string;
+  /** The backend the entry is read for: every need must be `<backend>/<action>` (ADR-0032). */
+  readonly backend?: string;
 }
 
 /** A v1-shaped entry (`scopes`, or no `needs`/`tools`): refused loudly (spec §4.3, `registry_entry_v1`). */
@@ -211,6 +213,11 @@ export function parseRegistryEntry(raw: string, scope: RegistryScope = {}): Regi
   }
   if (!Array.isArray(needs) || needs.length === 0 || needs.some((n) => !isValidNeedName(n))) {
     throw new Error('registry entry needs must be a non-empty list of need names');
+  }
+  // A need rides in `scope` verbatim, so one owned by another name (`crm/getaccount`)
+  // would read as a tool grant at the tools gateway (2026-11-04 security review).
+  if (scope.backend !== undefined && (needs as string[]).some((n) => nameOwner(n) !== scope.backend)) {
+    throw new Error(`registry entry needs must be owned by the backend: ${scope.backend}/<action>`);
   }
   if (!Array.isArray(tools) || tools.some((t) => !isValidToolName(t))) {
     throw new Error('registry entry tools must be a list of tool names');
@@ -402,7 +409,7 @@ export class BackendRegistry {
       return { miss: 'unknown_backend' };
     }
     try {
-      return { entry: parseRegistryEntry(value, { region: this.config.region, account: this.config.account }) };
+      return { entry: parseRegistryEntry(value, { region: this.config.region, account: this.config.account, backend }) };
     } catch (error) {
       return { miss: error instanceof RegistryEntryV1Error ? 'registry_entry_v1' : 'registry_entry_invalid' };
     }

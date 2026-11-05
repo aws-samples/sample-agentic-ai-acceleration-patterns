@@ -126,6 +126,43 @@ describe('interceptTool', () => {
     expect(lines.join('')).not.toContain(token);
   });
 
+  it('refuses a JSON-RPC batch (an array body): no per-tool check could run, so nothing passes (security review 2026-11-04)', async () => {
+    const before = contextKey.calls.length;
+    const token = await transactionToken({ scope: 'crm/get_account default/chat' });
+    const batch = [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: call({}, 'crm___update_case') }];
+    const output = await interceptTool({ interceptorInputVersion: '1.0', mcp: { gatewayRequest: { headers: { Authorization: `Bearer ${token}` }, body: batch as never } } }, deps);
+    expect(refusalOf(output)).toEqual({ statusCode: 403, message: 'forbidden: malformed_request' });
+    expect(contextKey.calls.length).toBe(before);
+  });
+
+  it('refuses a method outside the allowlist, a non-string method, and a non-object body; passes the protocol methods', async () => {
+    const before = contextKey.calls.length;
+    const token = await transactionToken();
+    for (const method of ['resources/read', 'prompts/get', 'tools/call/x']) {
+      expect(refusalOf(await interceptTool(event(token, method), deps)).message).toBe('forbidden: malformed_request');
+    }
+    const numeric = { ...event(token, 'tools/list'), mcp: { gatewayRequest: { headers: { Authorization: `Bearer ${token}` }, body: { jsonrpc: '2.0', id: 1, method: 42 } as never } } };
+    expect(refusalOf(await interceptTool(numeric, deps)).message).toBe('forbidden: malformed_request');
+    const text = { interceptorInputVersion: '1.0', mcp: { gatewayRequest: { headers: { Authorization: `Bearer ${token}` }, body: 'hello' as never } } };
+    expect(refusalOf(await interceptTool(text, deps)).message).toBe('forbidden: malformed_request');
+    for (const method of ['initialize', 'notifications/initialized', 'ping', 'tools/list']) {
+      expect(passedBody(await interceptTool(event(token, method), deps)).method).toBe(method);
+    }
+    expect(contextKey.calls.length).toBe(before);
+  });
+
+  it('refuses a tools/call whose arguments are not a plain object instead of signing over them', async () => {
+    const before = contextKey.calls.length;
+    const token = await transactionToken();
+    for (const args of ['abc', 7, ['a'], null]) {
+      const output = await interceptTool(event(token, 'tools/call', { name: 'crm___get_account', arguments: args }), deps);
+      expect(refusalOf(output).message).toBe('forbidden: malformed_request');
+    }
+    expect(contextKey.calls.length).toBe(before);
+    // absent arguments are an empty object, as before
+    expect(passedBody(await interceptTool(event(token, 'tools/call', { name: 'crm___get_account' }), deps)).params.arguments._ri_ctx).toBeDefined();
+  });
+
   it('refuses a tool the scope does not grant', async () => {
     const token = await transactionToken({ scope: 'default/chat crm/get_account' });
     expect(refusalOf(await interceptTool(event(token, 'tools/call', call({}, 'crm___update_case')), deps))).toEqual({ statusCode: 403, message: 'forbidden: tool_not_granted' });

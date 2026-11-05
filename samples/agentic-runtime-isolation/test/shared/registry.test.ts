@@ -28,7 +28,7 @@ import { REGISTRY_PREFIX, RUNTIME_ARN } from '../helpers';
 
 /** The backend registry (ADR-0024): the entry schema, the route parser and the cached SSM client. */
 
-const NEEDS = ['billing/read', 'billing/invoke'];
+const NEEDS = ['agent/read', 'agent/invoke']; // owned by backend `agent`, which the BackendRegistry tests resolve
 const TOOLS = ['invoices/*', 'crm/get_account'];
 const entryOf = (fields: Record<string, unknown> = {}) => JSON.stringify({ runtimeArn: RUNTIME_ARN, needs: NEEDS, tools: TOOLS, version: 1, status: 'active', ...fields });
 const ENTRY = entryOf();
@@ -93,6 +93,12 @@ describe('parseRegistryEntry', () => {
     expect(() => parseRegistryEntry(entryOf({ scopes: ['billing/read'] }))).toThrow(RegistryEntryV1Error);
     expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, tools: [], version: 1, status: 'active' }))).toThrow(RegistryEntryV1Error);
     expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, needs: NEEDS, version: 1, status: 'active' }))).toThrow(RegistryEntryV1Error);
+  });
+
+  it('with a backend in scope, every need must be owned by it: a need named like a tool (crm/getaccount) is refused (security review 2026-11-04)', () => {
+    expect(parseRegistryEntry(ENTRY, { backend: 'agent' })).toEqual(PARSED);
+    expect(() => parseRegistryEntry(entryOf({ needs: ['agent/read', 'crm/getaccount'] }), { backend: 'agent' })).toThrow(/needs must be owned by the backend: agent\/<action>/);
+    expect(() => parseRegistryEntry(ENTRY, { backend: 'billing' })).toThrow(/owned by the backend: billing/);
   });
 
   it('refuses malformed needs, tools or version', () => {
@@ -268,12 +274,15 @@ describe('BackendRegistry', () => {
 
   it('a draining backend is backend_draining', async () => {
     ssm.on(GetParameterCommand).resolves({ Parameter: { Value: entryOf({ runtimeArn: RUNTIME_ARN, status: 'draining' }) } });
-    expect(await miss(registry().resolve('old'))).toBe('backend_draining');
+    expect(await miss(registry().resolve('agent'))).toBe('backend_draining');
   });
 
   it('an entry the schema rejects is registry_entry_invalid', async () => {
     ssm.on(GetParameterCommand).resolves({ Parameter: { Value: entryOf({ runtimeArn: 'nope' }) } });
     expect(await miss(registry().resolve('bad'))).toBe('registry_entry_invalid');
+    // a need another name owns reads as a tool grant in `scope`: refused at read time
+    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: entryOf({ needs: ['crm/getaccount'] }) } });
+    expect(await miss(registry().resolve('agent'))).toBe('registry_entry_invalid');
     ssm.on(GetParameterCommand).resolves({ Parameter: { Value: 'not json' } });
     expect(await miss(registry().resolve('worse'))).toBe('registry_entry_invalid');
   });
@@ -323,8 +332,8 @@ describe('BackendRegistry', () => {
     expect(ssm).toHaveReceivedCommandTimes(GetParameterCommand, 3);
     // Once SSM is back the next retry refreshes and the normal TTL resumes.
     clock += REFRESH_RETRY_SECONDS * 1000;
-    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: entryOf({ needs: ['billing/chat'] }) } });
-    expect((await r.resolve('agent')).needs).toEqual(['billing/chat']);
+    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: entryOf({ needs: ['agent/chat'] }) } });
+    expect((await r.resolve('agent')).needs).toEqual(['agent/chat']);
     clock += 59_000;
     await r.resolve('agent');
     expect(ssm).toHaveReceivedCommandTimes(GetParameterCommand, 4);
@@ -379,8 +388,8 @@ describe('BackendRegistry', () => {
     await r.resolve('agent');
     expect(ssm).toHaveReceivedCommandTimes(GetParameterCommand, 1);
     clock += 2_000;
-    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: entryOf({ needs: ['billing/chat'] }) } });
-    expect((await r.resolve('agent')).needs).toEqual(['billing/chat']);
+    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: entryOf({ needs: ['agent/chat'] }) } });
+    expect((await r.resolve('agent')).needs).toEqual(['agent/chat']);
     expect(ssm).toHaveReceivedCommandTimes(GetParameterCommand, 2);
     clock += 31_000;
     ssm.on(GetParameterCommand).rejects(notFound());

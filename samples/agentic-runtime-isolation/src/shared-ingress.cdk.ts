@@ -661,6 +661,10 @@ export class SharedIngress extends Construct {
     if (ingress !== undefined && ingress !== doc.ingress) {
       throw new Error(`${where}: the ingress is '${doc.ingress}', not '${ingress}'`);
     }
+    const shape = publishedIngressProblem(doc, stack.account);
+    if (shape !== undefined) {
+      throw new Error(`${where}: ${shape}`);
+    }
     const published = doc.toolsGateways ?? {};
     const available = Object.keys(published);
     const names = options.toolsGateway === false ? [] : [...(options.toolsGateways ?? available)];
@@ -1325,6 +1329,52 @@ export interface PublishedToolsGateway {
  * writes to `<registryPrefix>ingress` and `SharedIngress.fromParameters`
  * reads at synth.
  */
+const PUBLISHED_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const PUBLISHED_TABLE_PATTERN = /^[A-Za-z0-9_.-]{3,255}$/;
+const PUBLISHED_ROLE_ARN_PATTERN = /^arn:(aws|aws-cn|aws-us-gov):iam::(\d{12}):role\/[\w+=,.@/-]{1,512}$/;
+
+/**
+ * Why a published document is not one `SharedIngress` wrote, or undefined
+ * (2026-11-04 security review). Its values land in resource policies (the
+ * Runtime trusts `ingressRoleArn`; every tool function trusts a gateway's
+ * `roleArn`), in `formatArn` and in Cedar text, so each is held to a shape
+ * before use, and every role must belong to the consuming stack's account.
+ */
+export function publishedIngressProblem(doc: PublishedIngress, account: string): string | undefined {
+  const https = (name: string, value: unknown): string | undefined =>
+    typeof value === 'string' && /^https:\/\/[^\s/]+(\/[^\s]*)?$/.test(value) ? undefined : `${name} is not an https URL`;
+  const roleArn = (name: string, value: unknown): string | undefined => {
+    const m = typeof value === 'string' ? PUBLISHED_ROLE_ARN_PATTERN.exec(value) : null;
+    if (m === null) {
+      return `${name} is not an IAM role ARN`;
+    }
+    return m[2] === account ? undefined : `${name} belongs to account ${m[2]}, not this stack's ${account}`;
+  };
+  const id = (name: string, value: unknown): string | undefined =>
+    typeof value === 'string' && PUBLISHED_ID_PATTERN.test(value) ? undefined : `${name} is not an identifier`;
+  const problems = [
+    https('baseUrl', doc.baseUrl),
+    https('endpointUrl', doc.endpointUrl),
+    https('issuer', doc.issuer),
+    https('jwksUrl', doc.jwksUrl),
+    https('entitlementsApiUrl', doc.entitlementsApiUrl),
+    roleArn('ingressRoleArn', doc.ingressRoleArn),
+    roleArn('tenantRoleArn', doc.tenantRoleArn),
+    id('ingressId', doc.ingressId),
+    typeof doc.entitlementsTableName === 'string' && PUBLISHED_TABLE_PATTERN.test(doc.entitlementsTableName) ? undefined : 'entitlementsTableName is not a table name',
+    doc.gatewayIdentifier === undefined ? undefined : id('gatewayIdentifier', doc.gatewayIdentifier),
+    doc.toolContextKeyId === undefined ? undefined : id('toolContextKeyId', doc.toolContextKeyId),
+    ...Object.entries(doc.toolsGateways ?? {}).flatMap(([name, gw]) => [
+      id(`toolsGateways.${name}`, name),
+      https(`toolsGateways.${name}.url`, gw?.url),
+      id(`toolsGateways.${name}.identifier`, gw?.identifier),
+      roleArn(`toolsGateways.${name}.roleArn`, gw?.roleArn),
+      id(`toolsGateways.${name}.policyEngineId`, gw?.policyEngineId),
+    ]),
+  ].filter((p): p is string => p !== undefined);
+  return problems.length === 0 ? undefined : `the published document is not one SharedIngress wrote: ${problems.join('; ')}`;
+}
+
 export interface PublishedIngress {
   /** Always `2` (ADR-0042); before it the parameter held only the ingress kind. */
   readonly version: 2;
