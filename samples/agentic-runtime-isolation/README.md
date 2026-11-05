@@ -147,9 +147,7 @@ interceptor refusals, not with code in the agent (threat model T-22, T-63).
 
 Both ingresses run the same checks in the same order from one shared
 pipeline ([`src/shared/request.ts`](./src/shared/request.ts)). A refused
-request costs no STS call and, on `agentcore-gateway`, no KMS call (on
-`api-gateway` the authoriser mints before the integration applies the
-per-tenant limit, M-50). On
+request costs no STS call and, on `agentcore-gateway`, no KMS call. On
 `api-gateway` the authoriser mints before the integration Lambda checks the
 per-tenant limit, so a 429 can follow one `kms:Sign` when the mint cache
 misses (a cost, not an isolation effect; ADR-0043).
