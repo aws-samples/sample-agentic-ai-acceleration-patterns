@@ -58,13 +58,17 @@ building its own ingress can reuse. A thin demo stack adds two agents
 
 ## Architecture
 
-![Architecture: a tenant user signs in to tenant-identity and calls the shared ingress with an identity token, plus X-Tenant-Id when the user is in several tenants. The ingress, API Gateway REST with a Lambda authoriser and a streaming Lambda, or AgentCore Gateway with a CUSTOM_JWT authoriser and a REQUEST interceptor, verifies the token, selects the tenant, checks the per-tenant limit in a DynamoDB counter, resolves the backend from the SSM registry (backends/<name>: runtimeArn, needs, tools, version, status), reads the tenant subscription and the user cut from the entitlement table, applies the grant rule, mints a transaction token with KMS Sign, assumes the tenant role with a TenantId session tag, and invokes the agent's AgentCore Runtime as the one principal its resource policy allows, passing the credentials and the transaction token in allowlisted headers. The ingress serves its own JWKS and OIDC discovery routes and the Entitlements API. The agent calls each tools gateway named in the token's aud with the token as bearer; the gateway checks the token against the ingress issuer, the REQUEST interceptor checks the tool against scope and signs a tenant context into _ri_ctx, AgentCore Policy permits the target, and the tool Lambda verifies the context, assumes its own tenant role with TenantId and reads only that tenant's data](./diagrams/agentic-runtime-isolation.drawio.svg)
+![Architecture: a tenant user signs in to tenant-identity and calls the shared ingress with an identity token, plus X-Tenant-Id when the user is in several tenants. The ingress, API Gateway REST with a Lambda authoriser and a streaming Lambda, or AgentCore Gateway with a CUSTOM_JWT authoriser and a REQUEST interceptor, verifies the token, selects the tenant, checks the per-tenant limit in a DynamoDB counter, resolves the backend from the SSM registry (backends/<name>: runtimeArn, needs, tools, version, status), reads the tenant subscription and the user cut from the entitlement table, applies the grant rule, mints a transaction token with KMS Sign, assumes the tenant role with a TenantId session tag, and invokes the agent's AgentCore Runtime as the one principal its resource policy allows, passing the credentials and the transaction token in allowlisted headers. The ingress serves its own JWKS and OIDC discovery routes and the Entitlements API. The agent calls each tools gateway named in the token's aud with the token as bearer; the gateway checks the token against the ingress issuer, the REQUEST interceptor checks the tool against scope and signs a tenant context into _ri_ctx, AgentCore Policy permits the target, and the tool Lambda verifies the context, assumes its own tenant role with TenantId and reads only that tenant's data. Frame titles name the three trust zones (the ingress is trusted and alone sees the identity token, the agent is untrusted code, a tool trusts the signed context only) and IAM badges mark the walls IAM enforces: the Runtime resource policy, the two KMS key policies, the tenant roles behind the TVMs and the entitlement store's tenant-admin role](./diagrams/agentic-runtime-isolation.drawio.svg)
 
 A tenant user's identity token reaches the ingress, which mints a
 per-agent transaction token and passes it to the agent in the AgentCore
 Runtime, the agent presents it to the tools gateway, the gateway's
 interceptor signs a tenant context for the one tool call, and the tool
-verifies that context and reads only that tenant's data.
+verifies that context and reads only that tenant's data. Three trust
+zones: the ingress alone sees the identity token, the agent is untrusted
+code holding only tenant-scoped material, and a tool trusts the signed
+context alone; the `IAM` badges mark the walls IAM enforces (next
+section).
 
 Components ([`architecture.md`](./architecture.md#components) has the code
 locations):
@@ -98,6 +102,46 @@ locations):
 - **Tenant limits, logs, metrics**: a DynamoDB fixed-window counter per
   tenant (ADR-0020); one structured line per request with `tenantId`,
   `backend` and `txn`; per-tenant EMF metrics only on opt-in (ADR-0021).
+
+## Tenant isolation
+
+Everything is pooled: one ingress, one Runtime per agent, one entitlement
+table, one tools gateway per tool domain and one table of tenant data serve
+every tenant. What separates tenants is the material each request carries
+and the walls that material meets. Three trust zones hold it:
+
+| Zone | Trusts | Holds |
+|---|---|---|
+| Ingress (`SharedIngress`) | the identity provider | the identity token, the signing keys, the entitlement store; the only code that sees the identity token |
+| Agent (`AgentBackend`) | the ingress, through the Runtime resource policy | untrusted code: a transaction token for one tenant, user and agent, and `TenantId`-tagged credentials; nothing else (ADR-0018, ADR-0031) |
+| Tool (`ToolTarget`) | the signed tenant context `_ri_ctx` alone | its own tenant role, assumed with the context's `TenantId` (P-15) |
+
+Each layer of the repository's isolation model
+([`ARCHITECTURE.md` §3.3](../../ARCHITECTURE.md#33-the-isolation-layers))
+has one wall. An **IAM** wall is enforced isolation: the service refuses a
+cross-tenant call even when the code is wrong. A **check** runs in the
+ingress's or the gateway's own code and decides what the agent may do; it
+sits in front of an IAM wall, never in place of one. The boundary ids are
+the [threat model's](./threat-model.md#assets-and-trust-boundaries); the
+proof is the [integration test](#deployment-integration-test) step.
+
+| Layer | Boundary | Wall | Kind | Proof |
+|---|---|---|---|---|
+| Identity: which tenant is calling? | B1 | the ingress verifies the identity token and takes the tenant from its `tenant_id` claim (or `tenants` plus `X-Tenant-Id`); nothing in a body or header names a tenant | check | 6, 18, 19 |
+| Invocation: who may call the agent? | B2 | each Runtime's resource policy allows `InvokeAgentRuntime` to the ingress role only and denies every other principal (ADR-0001) | IAM | 3 |
+| Session: which microVM? | B3 | the ingress derives the unit id from verified claims; a client session header is ignored; only the ingress can set it, by the same resource policy (ADR-0002, ADR-0039) | IAM | 4a, 4b, 5 |
+| Delegation: what may the agent do? | B2, B8, B13 | a transaction token naming one tenant, user and agent with exactly the granted set, 300 s; signed by a KMS key whose key policy lets only the minting role `kms:Sign`; the identity token never leaves the ingress (ADR-0031, ADR-0037) | IAM (key policy) | 7, 11, 15, 17, 18, 21 |
+| Tools: which tools, for this tenant user? | B8 | AgentCore Policy, one Cedar star permit per target on `scope`; the REQUEST interceptor refuses any tool outside `scope` and signs the tenant context (ADR-0041) | check | 13, 14, 22, 24 |
+| Data, from the agent | B4 | the TVM assumes the tenant role with `TenantId` from the verified claim; the role scopes every model and data call by `${aws:PrincipalTag/TenantId}` (ADR-0012, ADR-0018) | IAM | 8a |
+| Data, from a tool | B9 | the tool verifies `_ri_ctx`, assumes its own tenant role with the context's `TenantId`, and reaches `TENANT#<id>` items only; a `lambda` target with no valid context assumes no role | IAM; **filtered** for `openApi`, `smithy` and `mcpServer` targets with 2LO or an API key (ADR-0034) | 15, 20, 20-cloudtrail |
+| Entitlement writes | B10, B11 | `TenantAdminRole` reaches `TENANT#${aws:PrincipalTag/TenantId}` items only and may write the cut attributes only; vendor routes are SigV4; deploy rows carry an owner marker (ADR-0033, ADR-0035) | IAM | 12 |
+
+The diagram marks the IAM walls with an `IAM` badge. The "two walls"
+at `tools/call` are both checks: Policy at target grain and the interceptor
+per tool. The tenant wall for tool data is the tool's tenant role, whichever
+gateway the call came through. Prompt injection can make the agent ask for
+another tenant's data or tool; the walls answer with IAM denies and
+interceptor refusals, not with code in the agent (threat model T-22, T-63).
 
 ## How it works
 

@@ -49,6 +49,45 @@ ADR-0020, ADR-0024, ADR-0030, ADR-0031). The agent reaches tools only through
 a tools gateway that accepts that transaction token alone (ADR-0034,
 ADR-0041).
 
+## Tenant isolation
+
+Deployment model: pool at every layer (`ARCHITECTURE.md` §3.1). One
+ingress, one Runtime per agent (a microVM per session, one tenant per
+microVM), one entitlement table, one tools gateway per tool domain and one
+tenant-data table serve every tenant; no resource is dedicated to a tenant.
+Isolation is the material a request carries and the walls it meets.
+
+Trust zones:
+
+| Zone | Code | Trusts | Holds |
+|---|---|---|---|
+| Ingress | `SharedIngress`: authoriser or interceptor, integration Lambda, entitlement API | the identity provider (`identity.discoveryUrl`, `allowedClientIds`) | the identity token (never forwarded), `kms:Sign` on the signing keys, read and write on the entitlement store |
+| Agent | `AgentBackend`: the Runtime and the agent code in it | the ingress role, named in its resource policy | untrusted: the transaction token (one tenant, user, agent, grant) and `TenantId`-tagged credentials; an execution role with logs and traces only (ADR-0018) |
+| Tool | `ToolTarget`: the tool function | `_ri_ctx` signed by `ToolContextKey`, nothing else | its own tenant role, assumed with the context's `TenantId` (P-15) |
+
+Walls per layer (`ARCHITECTURE.md` §3.3). **IAM** is enforced isolation:
+the service refuses a cross-tenant call when the code is wrong. A **check**
+is vendor code deciding what the agent may do, in front of an IAM wall.
+Boundary ids are the [threat model's](./threat-model.md#assets-and-trust-boundaries);
+proof is the integration step in the [README](./README.md#deployment-integration-test).
+
+| Layer | Boundary | Wall | Kind | Code | Proof |
+|---|---|---|---|---|---|
+| Identity | B1 | identity token verified; tenant from `tenant_id`, or `tenants` plus `X-Tenant-Id`; a transaction token refused as an identity token | check | `src/shared/verifier.ts`, `src/shared/tenant.ts` | 6, 18, 19 |
+| Invocation | B2 | Runtime resource policy: `InvokeAgentRuntime` for the ingress role only, every other principal denied; the ingress role's grant conditioned on `ri:ingress` (ADR-0001, ADR-0024) | IAM | `src/backend/agentcore-runtime.cdk.ts` | 3 |
+| Session | B3 | unit id derived from verified claims (`session.scope`), client header ignored; only the ingress can set it (ADR-0002, ADR-0039) | IAM (same resource policy) | `src/shared/request.ts` | 4a, 4b, 4b-user, 5 |
+| Delegation | B2, B8, B13 | transaction token: `sub` `<tenant_id>#<sub>`, `agent`, `scope`, `aud`, `act.sub`, 300 s; `kms:Sign` granted in the key policy to the minting role alone, grants denied; the identity token stays at the ingress (ADR-0031, ADR-0037) | IAM (key policy) | `src/shared/mint.ts`, `src/shared/token-signer.cdk.ts` | 7, 11, 15, 17, 18, 21 |
+| Tools | B8 | `CUSTOM_JWT` on the ingress issuer and `aud`; REQUEST interceptor: `typ`, `iss`, `aud`, `act.sub`, `exp`, tool in `scope`; AgentCore Policy: one star permit per target on `scope`, default deny (ADR-0041) | check | `src/tools/interceptor.function.ts`, `src/shared/cedar.ts` | 13, 14, 17, 22, 23, 24 |
+| Data, agent | B4 | TVM: `AssumeRole` plus `TagSession` `TenantId` from the verified claim; the tenant role scopes model and data calls by `${aws:PrincipalTag/TenantId}` (ADR-0012, ADR-0018) | IAM | `src/shared/tvm.ts` | 8a |
+| Data, tool | B9 | `_ri_ctx` verified (`typ`, `exp`, `tool`, `argsHash`); the tool's own TVM assumes its tenant role with the context's `TenantId`; `dynamodb:LeadingKeys` `TENANT#${aws:PrincipalTag/TenantId}`; no context, no role | IAM for `lambda` targets; filtered for 2LO and API-key targets (synth warns, ADR-0034) | `src/tools/context.ts` | 15, 20, 20-cloudtrail |
+| Entitlement writes | B10, B11 | `TenantAdminRole`: items under `TENANT#${aws:PrincipalTag/TenantId}` only, writes bounded by `dynamodb:Attributes`; vendor routes SigV4; owned rows by owner marker (ADR-0033, ADR-0035) | IAM | `src/shared/entitlement-store.cdk.ts`, `src/shared/reservation.function.ts` | 12 |
+
+Not a wall: the microVM boundary itself (T-24, the service's), the
+per-tenant limits and rate limits (fairness, fail-open, ADR-0020, M-60), and
+the RESPONSE list filter (it only removes names, ADR-0041). The
+[Cross-tenant data safety](#cross-tenant-data-safety) list below is the
+item-by-item code check behind this table.
+
 ## Actors and identity
 
 | Actor | Holds | Acts through |
@@ -379,7 +418,8 @@ for your account and Region.
 
 ## Cross-tenant data safety
 
-Each item was checked in code on 2026-11-04:
+The code check behind the [Tenant isolation](#tenant-isolation) table. Each
+item was checked in code on 2026-11-04:
 
 - The tenant comes from the verified identity token only; with `multiTenant`, `X-Tenant-Id` must be one of its `tenants` (ADR-0038).
 - The grant is computed from the entitlement rows of that tenant and user and the registry entry of the routed agent; nothing in the body or a header adds to it (ADR-0030).
