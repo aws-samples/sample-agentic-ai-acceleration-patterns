@@ -20,7 +20,7 @@
  */
 
 import { KMSClient } from '@aws-sdk/client-kms';
-import { createRemoteJWKSet, jwtVerify } from 'jose';
+import { createLocalJWKSet, createRemoteJWKSet, type JWTVerifyGetKey, jwtVerify } from 'jose';
 import { AuthorityError, AuthorityResolver } from './authority';
 import type { IngressConfig } from './config';
 import { EntitlementReader } from './entitlements';
@@ -163,11 +163,29 @@ export type AuthoritySource = Pick<AuthorityResolver, 'resolve'>;
  */
 export type ForwardedTokenVerifier = (token: string) => Promise<{ tenantId: string; agent: string }>;
 
-/** The default verifier: the ingress's own JWKS, `typ: txn+jwt`, `iss`, `exp` and `iat`. */
-export function forwardedTokenVerifierFor(issuer: string): ForwardedTokenVerifier {
-  const getKey = createRemoteJWKSet(new URL(`${issuer}/.well-known/jwks.json`), { cooldownDuration: 60_000, cacheMaxAge: 300_000 });
+/**
+ * The default verifier: `typ: txn+jwt`, `iss`, `exp` and `iat` against the
+ * ingress's own JWKS. The JWKS document is given in the environment when the
+ * construct knows it (the integration function, M-82): it changes in the same
+ * deployment as the minter's key id, so a rotation never leaves this function
+ * holding a cached JWKS without the new `kid` (integration run 13). Without
+ * it, or when a `kid` is not in it, the JWKS route is fetched.
+ */
+export function forwardedTokenVerifierFor(issuer: string, jwks?: string): ForwardedTokenVerifier {
+  const remote = createRemoteJWKSet(new URL(`${issuer}/.well-known/jwks.json`), { cooldownDuration: 60_000, cacheMaxAge: 300_000 });
+  const local: JWTVerifyGetKey | undefined = jwks === undefined ? undefined : createLocalJWKSet(JSON.parse(jwks));
+  const options = { issuer, algorithms: ['RS256', 'ES256'], requiredClaims: ['exp', 'iat'] };
   return async (token) => {
-    const { payload, protectedHeader } = await jwtVerify(token, getKey, { issuer, algorithms: ['RS256', 'ES256'], requiredClaims: ['exp', 'iat'] });
+    let verified;
+    try {
+      verified = await jwtVerify(token, local ?? remote, options);
+    } catch (error) {
+      if (local === undefined) {
+        throw error;
+      }
+      verified = await jwtVerify(token, remote, options); // a kid the deployed document lacks: ask the route once
+    }
+    const { payload, protectedHeader } = verified;
     const { tenant_id: tenantId, agent } = payload as Record<string, unknown>;
     if (protectedHeader.typ !== 'txn+jwt' || typeof tenantId !== 'string' || typeof agent !== 'string') {
       throw new Error('not a transaction token');
@@ -385,6 +403,6 @@ export function pipelineFor(
   const limiter = config.limits === undefined ? undefined : deps.limiter ?? new TenantLimiter(config.limits);
   const authority = deps.authority ?? authorityFor(config);
   // The function that does not mint receives the authoriser's token and must verify it (M-82).
-  const forwarded = deps.forwarded ?? (authority === undefined && config.issuer !== undefined ? forwardedTokenVerifierFor(config.issuer) : undefined);
+  const forwarded = deps.forwarded ?? (authority === undefined && config.issuer !== undefined ? forwardedTokenVerifierFor(config.issuer, config.txnJwks) : undefined);
   return new IngressPipeline(config, verifier, registry, tvm, limiter, authority, forwarded);
 }

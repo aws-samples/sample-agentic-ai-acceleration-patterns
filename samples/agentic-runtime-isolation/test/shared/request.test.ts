@@ -8,7 +8,10 @@ import { AuthorityError } from '../../src/shared/authority';
 import type { IngressConfig } from '../../src/shared/config';
 import { type Admission, TenantLimiter } from '../../src/shared/limits';
 import { BackendRegistry, RegistryError } from '../../src/shared/registry';
-import { type AuthoritySource, ERROR_TEXT, errorBody, IngressPipeline, parseBody, pipelineFor, type RegistryResolver, RequestError, type ForwardedTokenVerifier } from '../../src/shared/request';
+import { type AuthoritySource, ERROR_TEXT, errorBody, forwardedTokenVerifierFor, IngressPipeline, parseBody, pipelineFor, type RegistryResolver, RequestError, type ForwardedTokenVerifier } from '../../src/shared/request';
+import { publicJwk, signJws } from '../../src/shared/jws';
+import { TRANSACTION_TOKEN_TYPE, transactionClaims } from '../../src/shared/mint';
+import { localRsaKey } from '../jws-helpers';
 import { PREFIX_PATTERN, RANDOM_UNIT_ID_PATTERN, sessionPrefix } from '../../src/shared/session';
 import { TokenVendingMachine } from '../../src/shared/tvm';
 import { TokenVerifier } from '../../src/shared/verifier';
@@ -455,5 +458,32 @@ describe('IngressPipeline', () => {
       expect(pipelineFor(baseConfig()).limiter).toBeUndefined();
       expect(pipelineFor(baseConfig({ limits: { tableName: 'TenantLimits', requestsPerMinute: 60 } })).limiter).toBeInstanceOf(TenantLimiter);
     });
+  });
+});
+
+describe('forwardedTokenVerifierFor (M-82)', () => {
+  const TXN_ISSUER = 'https://example.execute-api.eu-central-1.amazonaws.com/prod';
+  const key = localRsaKey();
+  const jwks = JSON.stringify({ keys: [publicJwk(key.publicKey, 'gen-1')] });
+  const mintFor = (agent: string, extra: Record<string, unknown> = {}, typ = TRANSACTION_TOKEN_TYPE, kid = 'gen-1') =>
+    signJws(
+      { alg: 'RS256', typ, kid },
+      { ...transactionClaims({ tenantId: 'tenant-a', sub: 'u', agent, scope: `${agent}/chat`, gateways: [], versions: { tenant: 1, agent: 1 } }, { issuer: TXN_ISSUER, ttlSeconds: 300, ingressRoleArn: 'arn:aws:iam::111122223333:role/ingress' }, Math.floor(Date.now() / 1000), { txn: 't', jti: 'j' }), ...extra },
+      key.signer,
+    );
+
+  it('verifies a token against the deployed JWKS document without a fetch and returns its tenant and agent', async () => {
+    const verify = forwardedTokenVerifierFor(TXN_ISSUER, jwks);
+    expect(await verify(await mintFor('default'))).toEqual({ tenantId: 'tenant-a', agent: 'default' });
+    expect(await verify(await mintFor('billing'))).toEqual({ tenantId: 'tenant-a', agent: 'billing' });
+  });
+
+  it('refuses another typ, another issuer, a missing exp, or an unknown kid (the route fetch fails in a unit test)', async () => {
+    const verify = forwardedTokenVerifierFor(TXN_ISSUER, jwks);
+    await expect(verify(await mintFor('default', {}, 'at+jwt'))).rejects.toThrow();
+    await expect(verify(await mintFor('default', { iss: 'https://other.example.com' }))).rejects.toThrow();
+    await expect(verify(await mintFor('default', { exp: undefined }))).rejects.toThrow();
+    await expect(verify(await mintFor('default', {}, TRANSACTION_TOKEN_TYPE, 'gen-2'))).rejects.toThrow();
+    await expect(verify('not-a-token')).rejects.toThrow();
   });
 });

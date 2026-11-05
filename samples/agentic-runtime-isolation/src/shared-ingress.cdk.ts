@@ -28,7 +28,7 @@
  */
 
 import * as path from 'node:path';
-import { Annotations, Duration, Lazy, Names, RemovalPolicy, Stack, Token, Validations } from 'aws-cdk-lib';
+import { Annotations, CfnResource, Duration, Lazy, Names, RemovalPolicy, Stack, Token, Validations } from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -852,6 +852,13 @@ export class SharedIngress extends Construct {
     this.tokenSigner.addDiscoveryRoutes(wiring.issuerApi, this.issuer);
     for (const fn of wiring.verifiers) {
       fn.addEnvironment(ENV.ISSUER, this.issuer);
+      if (fn !== wiring.minter) {
+        // M-82: the function that verifies the forwarded token holds the JWKS
+        // itself, updated in the same deployment as the minter's key id, and
+        // is updated BEFORE the minter so no token arrives with a kid it lacks.
+        fn.addEnvironment(ENV.TXN_JWKS, this.tokenSigner.jwks);
+        (wiring.minter.node.defaultChild as CfnResource).addDependency(fn.node.defaultChild as CfnResource);
+      }
     }
     const mintEnv: Record<string, string> = {
       [ENV.TXN_KEY_ID]: this.tokenSigner.keyId,

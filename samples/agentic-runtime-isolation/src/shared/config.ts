@@ -54,6 +54,8 @@ export const ENV = {
   /** (v2) Set only on the function that mints (the authoriser or the interceptor): the KMS key id of the current signing key. */
   TXN_KEY_ID: 'RI_TXN_KEY_ID',
   TXN_ALGORITHM: 'RI_TXN_ALGORITHM',
+  /** (v2, M-82) Set on the function that receives the authoriser's token: the issuer's JWKS document, so the forwarded token is verified without a fetch and without a propagation race. */
+  TXN_JWKS: 'RI_TXN_JWKS',
   TXN_TTL_SECONDS: 'RI_TXN_TTL_SECONDS',
   TXN_REUSE_MARGIN_SECONDS: 'RI_TXN_REUSE_MARGIN_SECONDS',
   TXN_CACHE_MAX_ENTRIES: 'RI_TXN_CACHE_MAX_ENTRIES',
@@ -114,6 +116,8 @@ export interface IngressConfig {
   readonly multiTenant: boolean;
   /** (v2) The transaction-token issuer; refused as an identity issuer (P-14). Undefined only in v1-shaped test configs. */
   readonly issuer?: string;
+  /** (v2, M-82) The issuer's JWKS, on the function that verifies a forwarded token; absent, the JWKS route is fetched. */
+  readonly txnJwks?: string;
   /** Set when the `session` module is on (ADR-0013). */
   readonly sessionScope?: SessionScope;
   /** The TVM (ADR-0012, always on since ADR-0018). */
@@ -246,6 +250,7 @@ export function readIngressConfig(env: NodeJS.ProcessEnv = process.env): Ingress
     requiredScopes: list(env[ENV.REQUIRED_SCOPES]),
     multiTenant: flag(env[ENV.MULTI_TENANT]),
     issuer: optional(env[ENV.ISSUER]),
+    txnJwks: optional(env[ENV.TXN_JWKS]),
     sessionScope: sessionScope === undefined || sessionScope === '' ? undefined : sessionScope,
     tvm,
     limits,

@@ -304,6 +304,18 @@ describe('v2 options', () => {
     expect(() => build('api-gateway', { toolContextKey: { algorithm: 'HS256' as never } })).toThrow(/toolContextKey\.algorithm/);
   });
 
+  it('the integration function holds the JWKS document (M-82) and is updated before the authoriser, so a rotation never hands it a kid it lacks', () => {
+    const { template } = build('api-gateway');
+    const t = template();
+    const { id: ingressId, fn: ingress } = functionAndRole(t, 'relays the backend stream');
+    const { fn: authorizer } = functionAndRole(t, 'verifies the identity');
+    const jwksEnv = ingress.Properties.Environment.Variables.RI_TXN_JWKS;
+    expect(jwksEnv['Fn::GetAtt'][0]).toMatch(/TokenSignerJwks/);
+    expect(jwksEnv['Fn::GetAtt'][1]).toBe('Jwks');
+    expect(authorizer.Properties.Environment.Variables.RI_TXN_JWKS).toBeUndefined();
+    expect([authorizer.DependsOn].flat()).toContain(ingressId);
+  });
+
   it('ingressReservedConcurrency caps the streaming integration Lambda; api-gateway only (scale review 2026-11-05)', () => {
     const { template } = build('api-gateway', { ingressReservedConcurrency: 200 });
     const { fn } = functionAndRole(template(), 'relays the backend stream');

@@ -1301,6 +1301,9 @@ reserved argument `_ri_ctx`. Never logged by the interceptor or the
 library. `ToolContextKey` signs contexts only; its public half is not in
 the JWKS, so a context can never pass as a transaction token.
 
+
+(Amended 2026-11-05, M-82.) On `api-gateway` the integration function verifies the forwarded token against the JWKS document in its own environment (`RI_TXN_JWKS`), not the route, and CloudFormation updates it before the authoriser, so during a rotation deploy no token reaches it with a `kid` it does not hold; a `kid` outside the document falls back to one fetch of the route.
+
 ### 6.3 What the sample promises
 
 v1 promises that hold unchanged:
