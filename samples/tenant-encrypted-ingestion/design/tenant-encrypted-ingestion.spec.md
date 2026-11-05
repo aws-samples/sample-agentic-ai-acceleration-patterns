@@ -377,7 +377,7 @@ status, never document content).
 
 | Attribute | Value |
 |---|---|
-| `PK` / `SK` | `TENANT#<tenantId>` / `KEY` |
+| `PK` / `SK` | `TENANT#<tenantId>` / `KEY`; plus a `KEYARN#<keyArn>` / `KEY` uniqueness item written in the same transaction, and a `SYSTEM` / `DRAINING` sentinel written by the stack-delete drain |
 | `tier` | `vendor-key` \| `tenant-key` |
 | `keyArn` | the key the prefix is bound to |
 | `keyAlias` | `alias/tenant-<tenantId>-ingestion` (`vendor-key` only) |
@@ -420,7 +420,7 @@ Modelled in Smithy with the `StandardOperationVerb` validator (standard
 
 | Operation | Route | Result |
 |---|---|---|
-| `CreateTenantKey` | `POST /platform/tenants/{tenantId}/key` `{tier, keyArn?}` | 201 with the key row. `vendor-key`: creates the key, alias, tags, policy (§7.1), enables rotation. `tenant-key`: requires `keyArn`; verifies the key under a tenant-scoped session (`DescribeKey`, `GenerateDataKey` with a probe context, `Decrypt` of the result), so the row is `ACTIVE` only if the pipeline will actually be able to use the key. 400 `UnsupportedInDeployment` when `allowTenantKeys` is off; 409 if a row exists; 422 `KeyNotUsable` with the KMS error when the probe fails |
+| `CreateTenantKey` | `POST /platform/tenants/{tenantId}/key` `{tier, keyArn?}` | 201 with the key row. `vendor-key`: creates the key, alias, tags, policy (§7.1), enables rotation. `tenant-key`: requires `keyArn`; verifies the key under a tenant-scoped session (`DescribeKey`, `GenerateDataKey` with a probe context, `Decrypt` of the result), requires `KeySpec SYMMETRIC_DEFAULT` and the `TenantId` tag, and writes a `KEYARN#<keyArn>` uniqueness item in the same transaction as the key row, so one key can never serve two tenants and the row is `ACTIVE` only if the pipeline will actually be able to use the key. 400 `UnsupportedInDeployment` when `allowTenantKeys` is off; 409 if a row exists; 422 `KeyNotUsable` with the KMS error when the probe fails |
 | `GetTenantKey` | `GET /platform/tenants/{tenantId}/key` | 200; refreshes `status` with a `DescribeKey` (`REVOKED` if the key is disabled, pending deletion, or the grant is gone), `lastKeyCheckAt` |
 | `RotateTenantKey` | `POST /platform/tenants/{tenantId}/key/rotate` | 200; `vendor-key`: KMS `RotateKeyOnDemand` (the alias and ARN do not change; old material stays for decrypt). `tenant-key`: 400 `UnsupportedInTier` |
 | `DeleteTenantKey` | `DELETE /platform/tenants/{tenantId}/key` | 202; sets `DELETING`, deletes the tenant's objects under both prefixes, then `vendor-key`: deletes the alias and schedules key deletion; `tenant-key`: nothing on the key. Removes the row last. Idempotent on a missing row (204) |
@@ -495,7 +495,11 @@ credentials; the event carries no presigned URL.
 - Clean teardown: `cdk destroy` leaves no bucket, table, API, bus, queue,
   role, alias, parameter, or log group with the sample's prefix. Keys
   created by tenants the test did not delete are scheduled for deletion by a
-  registry drain on stack delete (as tenant-identity ADR-0022); pending
+  registry drain on stack delete (as tenant-identity ADR-0022). The drain
+  runs after the API and the platform function are deleted (CloudFormation
+  dependency order) and writes a `DRAINING` sentinel row that
+  `CreateTenantKey` checks in its transaction, so a create cannot race the
+  drain; pending
   deletion is the best KMS allows and is documented.
 - Per-tenant observability and cost attribution per P-9.
 
@@ -542,10 +546,13 @@ with the same `TenantId`, so an agent reads only its tenant's documents.
 Three statements:
 
 1. **Key administration** for the `keyManagementRole`: `kms:Create*`,
-   `kms:Describe*`, `kms:Enable*`, `kms:Put*`, `kms:Update*`, `kms:Revoke*`,
+   `kms:Describe*`, `kms:Enable*`, `kms:Update*`, `kms:Revoke*`,
    `kms:Disable*`, `kms:Get*`, `kms:Delete*`, `kms:TagResource`,
    `kms:ScheduleKeyDeletion`, `kms:CancelKeyDeletion`, `kms:RotateKeyOnDemand`.
-   No `kms:Encrypt`, `kms:Decrypt`, `kms:GenerateDataKey*`.
+   No `kms:Encrypt`, `kms:Decrypt`, `kms:GenerateDataKey*`, and no
+   `kms:PutKeyPolicy`: the policy is set once at `CreateKey`, so the role
+   that creates keys can never widen statement 2 on an existing key
+   (threat model M-28).
 2. **Use via S3, bound to the prefix** for the `tenantRole`:
    `kms:GenerateDataKey`, `kms:Decrypt`, `kms:DescribeKey`, condition
    `kms:ViaService = s3.<region>.amazonaws.com` **and**
@@ -612,7 +619,8 @@ tenant PUT (presigned) ──► s3://<bucket>/ingest/<tenantId>/<deliveryId>/<f
                    presign GET (tenant session, validatorObjectUrlTtlSeconds) -> Invoke -> verdict
                    REJECT -> row REJECTED <name>:<code>, delete drop, event, stop
                    error/timeout/bad verdict -> onValidatorError (hold: throw; reject: as REJECT)
-              6. CopyObject -> documents/<tenantId>/<deliveryId>/<file>, SSE-KMS same key
+              6. CopyObject -> documents/<tenantId>/<deliveryId>/<file>, SSE-KMS same key,
+                 CopySourceIfMatch = ETag read at step 3 (an overwrite after validation fails the copy; retry from 1)
               7. DeleteObject on the drop; row -> ACCEPTED (conditional); counters; event
    KMS AccessDenied / DisabledException / KMSInvalidStateException at 3-6
               -> row KEY_UNAVAILABLE, key row REVOKED, event, message deleted (no retry)
