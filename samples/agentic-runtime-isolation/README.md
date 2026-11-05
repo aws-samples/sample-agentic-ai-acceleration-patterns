@@ -633,7 +633,11 @@ npx cdk destroy --context ingress=api-gateway
 Every resource has `RemovalPolicy.DESTROY`; policies go before their
 targets (ADR-0040), the log drain waits about 90 s (ADR-0019), and KMS keys
 enter their deletion window. Afterwards remove the two vendor scopes
-(`DELETE /platform/scopes/{scope}`) if you added them.
+(`DELETE /platform/scopes/{scope}`) if you added them, and check that no
+`/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT` log group is left:
+the stack deletes it (ADR-0047), but a line the Runtime writes in the
+seconds between that delete and its own recreates the group outside the
+stack, with no retention.
 
 ## API
 
@@ -756,6 +760,10 @@ Each item is a deployer action or an accepted risk in
 - [ ] **Leave `perTenantMetrics` off at scale**, or accept 9 × (1 + agents)
       custom metrics per tenant per ingress (M-28, T-38).
 - [ ] **Change the removal policies** from `DESTROY` (M-23).
+- [ ] **Alarm on `LogEventsWithFindings`** (AWS/Logs, dimension `LogGroupName`)
+      for the Runtime log groups: one finding means a header value reached
+      a log line and was masked (T-18, ADR-0047). Data protection is billed
+      per GB scanned; keep `logs:Unmask` off every role but the responders'.
 
 ## Design trail
 

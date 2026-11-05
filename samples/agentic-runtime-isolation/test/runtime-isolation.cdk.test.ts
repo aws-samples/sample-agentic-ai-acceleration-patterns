@@ -8,7 +8,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { publishedIngress, seedPublishedIngress, TEST_ENV } from './published-ingress';
 import { baseModelId, isInferenceProfileId } from '../src/backend/agentcore-runtime.cdk';
-import { RUNTIME_HEADERS } from '../src/backend/agentcore-runtime.transport';
+import { encodeCredentials, RUNTIME_HEADERS } from '../src/backend/agentcore-runtime.transport';
 import {
   AgentBackend,
   OWNER_MAX_LENGTH,
@@ -289,6 +289,74 @@ describe.each(INGRESSES)('one-backend defaults, ingress=%s', (ingress) => {
       RequestHeaderConfiguration: { RequestHeaderAllowlist: [RUNTIME_HEADERS.TRANSACTION_TOKEN, RUNTIME_HEADERS.TENANT_CREDENTIALS] },
     });
     expect(JSON.stringify(template.toJSON())).not.toContain('Custom-User-Token');
+  });
+
+  it('a custom resource settles the service-created Runtime log group: retention and a data protection policy that masks a JWT, the credential header and the decoded credential fields (T-18, M-12, ADR-0047)', () => {
+    // Not an AWS::Logs::LogGroup: the service creates the group at CreateAgentRuntime (AlreadyExists otherwise).
+    for (const group of Object.values(template.findResources('AWS::Logs::LogGroup')) as any[]) {
+      expect(JSON.stringify(group.Properties.LogGroupName ?? '')).not.toContain('/aws/bedrock-agentcore/runtimes/');
+    }
+    const [resource] = Object.values(template.findResources('Custom::RuntimeIsolationRuntimeLogGroup')) as any[];
+    expect(resource).toBeDefined();
+    expect(resource.DependsOn).toEqual(expect.arrayContaining([expect.stringMatching(/^BackendRuntime[0-9A-F]+$/)]));
+    const name = JSON.stringify(resource.Properties.LogGroupName);
+    expect(name).toContain('/aws/bedrock-agentcore/runtimes/');
+    expect(name).toContain('-DEFAULT');
+    expect(name).toContain('AgentRuntimeId');
+    expect(resource.Properties.RetentionInDays).toBe(30);
+    // toJsonString: a Fn::Join whose only non-string part is the partition Ref.
+    const parts = Stack.of(construct.ingress).resolve(resource.Properties.DataProtectionPolicy)['Fn::Join'][1] as unknown[];
+    const policy = JSON.parse(parts.map((part) => (typeof part === 'string' ? part : 'aws')).join(''));
+    expect(policy.Version).toBe('2021-06-01');
+    expect(policy.Statement).toHaveLength(2);
+    const identifiers = policy.Statement[0].DataIdentifier as string[];
+    expect(identifiers).toEqual(policy.Statement[1].DataIdentifier);
+    expect(JSON.stringify(identifiers)).toContain(':dataprotection::aws:data-identifier/AwsSecretKey');
+    expect(identifiers).toContain('JsonWebToken');
+    expect(identifiers).toContain('TenantCredentialsHeader');
+    expect(identifiers).toContain('SecretAccessKeyField');
+    expect(identifiers).toContain('SessionTokenField');
+    expect(policy.Statement[0].Operation).toEqual({ Audit: { FindingsDestination: {} } });
+    expect(policy.Statement[1].Operation).toEqual({ Deidentify: { MaskConfig: {} } });
+    // Each custom pattern covers a whole value, as the ingress emits it, within the 200-character cap.
+    const patterns = Object.fromEntries(policy.Configuration.CustomDataIdentifier.map((c: any) => [c.Name, new RegExp(c.Regex)]));
+    const token = 'eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0.eyJ0ZW5hbnRfaWQiOiJBIn0.MEUCIQDx_-abc'; // gitleaks:allow
+    expect(token.replace(patterns.JsonWebToken, '*')).toBe('*');
+    const header = encodeCredentials({ accessKeyId: 'ASIAEXAMPLE', secretAccessKey: 's', sessionToken: 't', expiration: '2026-01-01T00:00:00Z' });
+    expect(header.replace(patterns.TenantCredentialsHeader, '*')).toBe('*');
+    // The decoded object in the three spellings a Node process produces; each secret value is inside one match, the access key id and expiration stay.
+    const object = { accessKeyId: 'ASIAEXAMPLEEXAMPLE12', secretAccessKey: 'a'.repeat(40), sessionToken: 'IQoJb3JpZ2luX2VjEXAMPLEtoken', expiration: '2026-01-01T00:00:00Z' };
+    const spellings = [
+      JSON.stringify(object),
+      JSON.stringify({ level: 'INFO', message: JSON.stringify(object) }),
+      "{ accessKeyId: 'ASIAEXAMPLEEXAMPLE12', secretAccessKey: '" + 'a'.repeat(40) + "', sessionToken: 'IQoJb3JpZ2luX2VjEXAMPLEtoken' }",
+    ];
+    for (const line of spellings) {
+      const masked = line.replace(patterns.SecretAccessKeyField, '*').replace(patterns.SessionTokenField, '*');
+      expect(masked).not.toContain('a'.repeat(40));
+      expect(masked).not.toContain('IQoJb3JpZ2luX2VjEXAMPLEtoken');
+      expect(masked).toContain('ASIAEXAMPLEEXAMPLE12');
+    }
+    // No open-ended repeat: CloudWatch Logs accepts `{n,}` but never matches it (probed 2026-11-06).
+    for (const c of policy.Configuration.CustomDataIdentifier) {
+      expect(c.Regex).not.toMatch(/\{\d+,\}/);
+    }
+    // Ordinary log content is left alone: a short base64 word, a session prefix, a timestamp, a tenant id.
+    const plain = 'request served tenantId=01JC0000000000000000000000 prefix=a1b2c3d4 blob=Zm9vYmFyYmF6cXV4 at 2026-11-06T10:00:00Z';
+    for (const pattern of Object.values(patterns) as RegExp[]) {
+      expect(plain.replace(pattern, '*')).toBe(plain);
+    }
+    for (const c of policy.Configuration.CustomDataIdentifier) {
+      expect(c.Regex.length).toBeLessThanOrEqual(200);
+    }
+    // The function may touch Runtime log groups (the prefix, so a replaced Runtime's old group can still be deleted) and nothing else in Logs.
+    const fnRole = Object.keys(template.findResources('AWS::IAM::Role')).find((id) => id.includes('RuntimeLogGroupFunctionServiceRole'));
+    expect(fnRole).toBeDefined();
+    const own = statementsForRole(template, fnRole!).find((s) => s.Sid === 'RuntimeLogGroups');
+    expect(own.Action).toEqual(['logs:CreateLogGroup', 'logs:DeleteLogGroup', 'logs:PutRetentionPolicy', 'logs:PutDataProtectionPolicy']);
+    expect(JSON.stringify(own.Resource)).toContain(':log-group:/aws/bedrock-agentcore/runtimes/*"');
+    expect(JSON.stringify(own.Resource)).not.toContain('log-stream');
+    expect(JSON.stringify(statementsForRole(template, fnRole!))).not.toContain('logs:Unmask');
   });
 
   it('the resource policy allows InvokeAgentRuntime for the ingress principal only and denies everything to everyone else, on the Runtime ARN (P-1, ADR-0001, ADR-0024)', () => {

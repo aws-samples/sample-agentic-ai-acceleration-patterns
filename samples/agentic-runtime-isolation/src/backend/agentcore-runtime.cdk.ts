@@ -11,18 +11,22 @@
  * the ingress role's invoke grant is conditioned on (ADR-0024), and a
  * request-header allowlist that carries the credential header and (v2,
  * ADR-0031) the transaction-token header, never the v1 user-token header.
+ * A custom resource puts a data protection policy on the Runtime's log group
+ * that masks any header value an agent might log (T-18, M-12).
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Aws, Names, Stack, Token } from 'aws-cdk-lib';
+import { Aws, CustomResource, Names, Stack, Token } from 'aws-cdk-lib';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3assets from 'aws-cdk-lib/aws-s3-assets';
 import { Construct } from 'constructs';
 import { RUNTIME_HEADERS } from './agentcore-runtime.transport';
 import type { BackendTransportOptions, IBackend } from './backend.cdk';
 import { AGENT_ENV } from '../shared/config';
+import { customResourceFunction } from '../shared/custom-resource.cdk';
 import { acknowledgeGranularFinding, nagFindingResource } from '../shared/nag';
 
 /** The entry file the Runtime starts inside `codePath`. */
@@ -83,11 +87,78 @@ export interface AgentCoreRuntimeBackendProps {
   readonly tags?: Record<string, string>;
 }
 
+/** The endpoint the Runtime logs under; the only one this sample creates. */
+const RUNTIME_ENDPOINT = 'DEFAULT';
+
+/**
+ * What the data protection policy masks (T-18, M-12). Each pattern covers a
+ * WHOLE value: a masked prefix alone would leave the rest decodable.
+ * - a JWT: three base64url segments starting with `eyJ` (`{"` encoded), so
+ *   the transaction token, or any identity token, in any log line;
+ * - the credential header: base64 of `{"accessKeyId":"...` as the ingress
+ *   encodes it (`encodeCredentials`, JSON key order of `VendedCredentials`);
+ * - the decoded credential object, field by field: the secret access key
+ *   (40 base64 characters) and the session token, each led by its field
+ *   name so the match is a whole value, in the three spellings a Node
+ *   process produces: `JSON.stringify` (`"secretAccessKey":"..."`), the same
+ *   nested in a JSON log line (`\"secretAccessKey\":\"...`), and
+ *   `console.log` of an object (`secretAccessKey: '...'`). The managed
+ *   `AwsSecretKey` identifier is kept beside them for the CLI and SDK
+ *   spellings it knows (`aws_secret_access_key`, `secret key`, ...); it needs
+ *   one of those keywords nearby and the object forms have none.
+ * A custom identifier's regex is capped at 200 characters by CloudWatch
+ * Logs, and an open-ended quantifier (`{16,}`) is accepted but never
+ * matches (probed 2026-11-06): bound every repeat.
+ */
+export const MASKED_PATTERNS = {
+  JWT: 'eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+',
+  CREDENTIAL_HEADER: 'eyJhY2Nlc3NLZXlJZCI6[A-Za-z0-9+/=]+',
+  SECRET_ACCESS_KEY_FIELD: 'secretAccessKey\\\\?["\']?\\s*:\\s*\\\\?["\'][A-Za-z0-9/+=]{40}',
+  SESSION_TOKEN_FIELD: 'sessionToken\\\\?["\']?\\s*:\\s*\\\\?["\'][A-Za-z0-9/+=]{16,4096}',
+} as const;
+
+/**
+ * The data protection policy for the Runtime log group (T-18, M-12), in the
+ * CloudWatch Logs document form: an Audit statement and a Deidentify
+ * statement over the same identifiers, plus the custom identifiers. Masking
+ * applies at ingest; `logs:Unmask` reads the original.
+ */
+export function runtimeLogDataProtectionPolicy(): Record<string, unknown> {
+  const identifiers = [
+    `arn:${Aws.PARTITION}:dataprotection::aws:data-identifier/AwsSecretKey`,
+    'JsonWebToken',
+    'TenantCredentialsHeader',
+    'SecretAccessKeyField',
+    'SessionTokenField',
+  ];
+  return {
+    Name: 'RuntimeIsolationHeaderValues',
+    Description: 'Masks a JWT, the tenant credential header or a decoded credential field an agent might log (T-18, M-12)',
+    Version: '2021-06-01',
+    Configuration: {
+      CustomDataIdentifier: [
+        { Name: 'JsonWebToken', Regex: MASKED_PATTERNS.JWT },
+        { Name: 'TenantCredentialsHeader', Regex: MASKED_PATTERNS.CREDENTIAL_HEADER },
+        { Name: 'SecretAccessKeyField', Regex: MASKED_PATTERNS.SECRET_ACCESS_KEY_FIELD },
+        { Name: 'SessionTokenField', Regex: MASKED_PATTERNS.SESSION_TOKEN_FIELD },
+      ],
+    },
+    Statement: [
+      { Sid: 'audit-policy', DataIdentifier: identifiers, Operation: { Audit: { FindingsDestination: {} } } },
+      { Sid: 'redact-policy', DataIdentifier: identifiers, Operation: { Deidentify: { MaskConfig: {} } } },
+    ],
+  };
+}
+
 export class AgentCoreRuntimeBackend extends Construct implements IBackend {
   readonly resourceArn: string;
   readonly executionRole: iam.Role;
   /** The L1, for the Gateway target helper and for tests. */
   readonly runtime: agentcore.CfnRuntime;
+  /** The Runtime's own log group name, `/aws/bedrock-agentcore/runtimes/<id>-DEFAULT`, settled by `logGroupResource` (T-18). */
+  readonly logGroupName: string;
+  /** The custom resource that puts retention and the data protection policy on that group (T-18, M-12). */
+  readonly logGroupResource: CustomResource;
   /** The resource policy written by `bindIngress`; undefined until then. */
   resourcePolicy?: agentcore.CfnResourcePolicy;
 
@@ -197,6 +268,52 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
     });
     this.runtime.node.addDependency(this.executionRole);
     this.resourceArn = this.runtime.attrAgentRuntimeArn;
+
+    // The Runtime logs to `/aws/bedrock-agentcore/runtimes/<id>-DEFAULT`, a
+    // group the SERVICE creates at CreateAgentRuntime, so the stack cannot
+    // own it as an AWS::Logs::LogGroup (AlreadyExists, integration run
+    // 2026-11-06). A custom resource that runs after the Runtime settles the
+    // group instead: a retention and a data protection policy (T-18, M-12).
+    // CloudWatch Logs then masks at ingest any JWT, any credential header and
+    // a decoded credential's secret fields, so an agent that goes rogue and logs a header
+    // value hands it only to a reader who also holds `logs:Unmask`. A wall
+    // behind the agent code, which never logs a header value. Audit findings
+    // land in the `LogEventsWithFindings` metric (AWS/Logs), so a deployer
+    // can alarm on the first hit. On delete the resource removes the group;
+    // the Runtime goes after it (the name references its id), so a line
+    // written in between recreates the group outside the stack. It cannot
+    // join the LogDrain (ADR-0019) without a dependency cycle; the
+    // integration test deletes such a leftover and the README says to check
+    // (ADR-0047).
+    this.logGroupName = `/aws/bedrock-agentcore/runtimes/${this.runtime.attrAgentRuntimeId}-${RUNTIME_ENDPOINT}`;
+    const logGroupFn = customResourceFunction(
+      this,
+      'LogGroupFunction',
+      path.join(__dirname, 'runtime-log-group.function.ts'),
+      'runtime-isolation: retention and data protection policy on the Runtime log group the service created (T-18, M-12)',
+    );
+    // The Runtime prefix, not the one name: when the Runtime is replaced,
+    // CloudFormation deletes the OLD group through the new resource's role,
+    // which would hold only the new name. Same resource as the execution
+    // role's log statement, same reason.
+    logGroupFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'RuntimeLogGroups',
+        actions: ['logs:CreateLogGroup', 'logs:DeleteLogGroup', 'logs:PutRetentionPolicy', 'logs:PutDataProtectionPolicy'],
+        resources: [logGroupArn],
+      }),
+    );
+    acknowledgeGranularFinding(logGroupFn, `AwsSolutions-IAM5[Resource::${nagFindingResource(this, logGroupArn)}]`, logReason);
+    this.logGroupResource = new CustomResource(this, 'LogGroup', {
+      serviceToken: logGroupFn.functionArn,
+      resourceType: 'Custom::RuntimeIsolationRuntimeLogGroup',
+      properties: {
+        LogGroupName: this.logGroupName,
+        RetentionInDays: logs.RetentionDays.ONE_MONTH,
+        DataProtectionPolicy: Stack.of(this).toJsonString(runtimeLogDataProtectionPolicy()),
+      },
+    });
+    this.logGroupResource.node.addDependency(this.runtime);
   }
 
   /**

@@ -43,6 +43,8 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     '@aws-sdk/client-kms@3.1154.0',
     // v2: the ToolTarget policy custom resource (Create/Update/Delete/GetPolicy, ADR-0040)
     '@aws-sdk/client-bedrock-agentcore-control@3.1154.0',
+    // the Runtime log group custom resource: retention and data protection policy on the service-created group (T-18, M-12)
+    '@aws-sdk/client-cloudwatch-logs@3.1154.0',
     // v2: Smithy SSDK runtime for the entitlement API (generated code in src/smithy imports these;
     // versions are the ones this lock file already resolves for the SDK clients, so no second copy)
     'tslib@2.8.1',

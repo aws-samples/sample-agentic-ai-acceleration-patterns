@@ -170,8 +170,8 @@ interface ToolsBinding {
   readonly gatewayIdentifier: string;
   readonly gatewayArn: string;
   readonly gatewayRoleArn: string;
-  /** The Gateway's physical name, for its workload identity; undefined across stacks. */
-  readonly gatewayPhysicalName?: string;
+  /** The Gateway's physical name, for its workload identity `<physicalName>-*`; across stacks, the published identifier less its `-<suffix>`. */
+  readonly gatewayPhysicalName: string;
   readonly policyEngineId: string;
   readonly policyEngineArn: string;
   readonly contextKeyId: string;
@@ -182,6 +182,15 @@ interface ToolsBinding {
   /** The same-app gateway construct, when the ingress is in this stack. */
   readonly sameStack?: ToolsGateway;
   readonly logDrain?: LogDrain;
+}
+
+/** The Gateway's physical name from its identifier, `<physicalName>-<suffix>`: everything before the last `-`. */
+export function gatewayPhysicalNameOf(gatewayIdentifier: string): string {
+  const cut = gatewayIdentifier.lastIndexOf('-');
+  if (cut <= 0 || cut === gatewayIdentifier.length - 1) {
+    throw new Error(`ToolTarget: gateway identifier '${gatewayIdentifier}' is not <name>-<suffix>`);
+  }
+  return gatewayIdentifier.slice(0, cut);
 }
 
 /**
@@ -637,7 +646,7 @@ export class ToolTarget extends Construct {
     const provider = 'oauth' in auth ? auth.oauth : 'apiKey' in auth ? auth.apiKey : undefined;
     if (provider !== undefined) {
       const directory = stack.formatArn({ service: 'bedrock-agentcore', resource: 'workload-identity-directory', resourceName: 'default' });
-      const identity = `${directory}/workload-identity/${binding.gatewayPhysicalName ?? '*'}-*`;
+      const identity = `${directory}/workload-identity/${binding.gatewayPhysicalName}-*`;
       role.addToPrincipalPolicy(
         new iam.PolicyStatement({ actions: ['bedrock-agentcore:GetWorkloadAccessToken'], resources: [directory, identity] }),
       );
@@ -712,6 +721,9 @@ function bindingOf(scope: Construct, props: ToolTargetProps, gatewayName: string
     gatewayName,
     registryPrefix: ingress.registryPrefix,
     gatewayIdentifier: tools!.gatewayIdentifier,
+    // The identifier is `<physicalName>-<suffix>` (ToolsGateway), so the workload-identity
+    // grant names this gateway's identities, not every gateway's in the account.
+    gatewayPhysicalName: gatewayPhysicalNameOf(tools!.gatewayIdentifier),
     gatewayArn: stack.formatArn({ service: 'bedrock-agentcore', resource: 'gateway', resourceName: tools!.gatewayIdentifier }),
     gatewayRoleArn: tools!.gatewayRoleArn,
     policyEngineId: tools!.policyEngineId,

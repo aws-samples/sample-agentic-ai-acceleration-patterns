@@ -307,6 +307,7 @@
             "@aws-sdk/client-bedrock-agentcore-control",
             "@aws-sdk/client-bedrock-agentcore",
             "@aws-sdk/client-bedrock-runtime",
+            "@aws-sdk/client-cloudwatch-logs",
             "@aws-sdk/client-dynamodb",
             "@aws-sdk/client-kms",
             "@aws-sdk/client-ssm",
