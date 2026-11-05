@@ -23,3 +23,5 @@ SPDX-License-Identifier: MIT-0
 | [0015](./0015-limit-each-tenant-with-a-usage-plan-key-and-an-in-flight-counter.md) | Limit each tenant with a usage plan key and an in-flight counter | Accepted | 2026-11-05 |
 | [0016](./0016-make-processing-a-lease-not-a-terminal-state.md) | Make PROCESSING a lease, not a terminal state | Accepted | 2026-11-05 |
 | [0017](./0017-write-each-drop-object-once-under-a-key-without-a-file-name.md) | Write each drop object once under a key without a file name | Accepted | 2026-11-05 |
+| [0018](./0018-create-keys-from-a-dedicated-role-and-never-rebind-a-tenant.md) | Create keys from a dedicated role and never rebind a tenant | Accepted | 2026-11-05 |
+| [0019](./0019-version-the-bucket-and-scope-writes-and-deletes-to-the-tenant-roles.md) | Version the bucket and scope writes and deletes to the tenant roles | Accepted | 2026-11-05 |
