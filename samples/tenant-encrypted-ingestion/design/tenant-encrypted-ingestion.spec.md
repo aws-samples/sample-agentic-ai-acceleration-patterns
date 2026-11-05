@@ -674,9 +674,16 @@ when all three fail):
   kms:EncryptionContext:aws:s3:arn` = the two prefix patterns.
 
 **5. Deny tagging.** `kms:TagResource`, `kms:UntagResource` to `*`, so no
-key the factory created can be retagged. Whether `CreateKey`'s own tags
-meet this statement, and whether `aws:ResourceTag` is populated during
-`CreateKey`, is a spike in the README's implementation notes.
+key the factory created can be retagged. Verified by spike on 2026-11-05:
+`CreateKey` with tags succeeds under a key policy that carries this Deny
+(the new policy is not applied to the create call's own tagging); a later
+`TagResource TenantId=other` by the factory is refused, by this statement
+and, even without it, because no key-policy statement grants
+`kms:TagResource` to anyone. The same spike showed that
+`aws:ResourceTag/TenantId` **is** populated from the request tags during
+`CreateKey`, so an identity Deny on `Null aws:ResourceTag/TenantId = false`
+would block every create; the factory's tagging Allow is conditioned on
+`aws:RequestTag` and `aws:TagKeys` for that reason.
 
 Reading a tenant's documents as an administrator, or adding a consumer,
 takes `PutKeyPolicy`, which CloudTrail records and a metric filter alarms
@@ -706,10 +713,13 @@ tagged with the session's tenant, and the tenant's policy trusts only the
 vendor's roles via S3 on its own prefix. The tag check at
 `CreateTenantKey` is **implicit**: `DescribeKey` returns no tags; the
 `tenantPlatformRole` session for `<t>` being admitted at all proves the
-tag. Whether `aws:ResourceTag/TenantId` evaluates on a key in another
-account is undocumented; §10 step 1 uses a real second account, and
-ADR-0004 names the fallback (identity policies list the registered
-`keyArn`s). KMS tag and policy changes take up to five minutes.
+tag. `aws:ResourceTag/TenantId` **does** evaluate on a key in another
+account, verified by spike on 2026-11-05 with a second account: a vendor
+session tagged for the key's tenant was admitted to a direct `DescribeKey`
+and to `PutObject` and `GetObject` through S3 with that key, and a session
+tagged for another tenant was refused on both paths although the key
+policy itself allowed any `ingest/*` prefix. §10 step 1 repeats it in the
+integration test. KMS tag and policy changes take up to five minutes.
 
 ### 7.4 Bucket policy and bucket settings
 

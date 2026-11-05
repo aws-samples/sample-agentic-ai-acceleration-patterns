@@ -211,7 +211,7 @@ named integration step decides it.
 | T-16 | M-10, M-11, M-21 | Mitigated by design |
 | T-17 | M-12, M-17, M-32 | Mitigated by design |
 | T-18 | M-18, M-19 | Mitigated by design |
-| T-19 | M-12, M-19, M-32 | Unverified: cross-account `aws:ResourceTag` until integ step 1 runs against a second account |
+| T-19 | M-12, M-19, M-32 | Mitigated by design; cross-account `aws:ResourceTag` verified by spike 2026-11-05, repeated by integ step 1 |
 | T-20 | none | Accepted (by design): plaintext in flight behind TLS |
 | T-21 | M-20, M-27 | Accepted (residual): a validator reads the one document it is given, for minutes |
 | T-22 | M-14, M-20 | Mitigated by design |
@@ -269,14 +269,14 @@ hardening checklist unless marked "by design".
    `vendor-key` key and then read with it, or cancel a pending deletion
    during the window. CloudTrail records the call and a metric filter alarms
    (M-25); adding a consumer is the same alarmed call.
-5. **Cross-account `aws:ResourceTag` is unverified (T-19).** Whether
-   `aws:ResourceTag/TenantId` evaluates on a key in another account is not
-   documented. The design depends on it for the implicit tag check at
-   `CreateTenantKey` and for every `tenant-key` use. Integ step 1 decides it
-   with a real second account (`tenantKeyAccount`); until then the README
-   says the claim is unproven, and
+5. **Cross-account `aws:ResourceTag` (T-19) is verified, not documented.**
+   AWS documentation shows only same-account examples. A spike on
+   2026-11-05 with a second account showed the condition is evaluated on
+   the tenant's key for a direct `DescribeKey` and for S3-initiated use, in
+   both the allow and the refuse direction. Integ step 1 repeats it on
+   every run; the fallback in
    [ADR-0004](./adr/0004-offer-two-key-tiers-and-fail-closed-through-an-s3-probe.md)
-   names the fallback: identity policies list the registered `keyArn`s.
+   stays documented in case the behaviour changes.
 6. **S3 access logs record presigned URIs (T-32).** Server access logs hold
    query strings with signatures and access key ids. They go to a separate
    bucket that Denies `s3:GetObject` to every principal but
@@ -322,8 +322,10 @@ them: cross-account `aws:ResourceTag` (step 1); extra unsigned headers on a
 presigned PUT and a 412 for a signed `If-None-Match` (step 4); the S3 error
 shape of a KMS failure behind the probe (step 8); whether SQS's own move to
 the DLQ meets the DLQ policy (step 7b); `Object Created` on the default bus
-(step 3). Whether `CreateKey`'s own tags meet statement 5 is a spike in the
-README's implementation notes.
+(step 3). Two spikes ran before implementation (2026-11-05): `CreateKey`
+with tags is not blocked by the new key's Deny-tagging statement, a later
+retag is; and `aws:ResourceTag` is populated at `CreateKey` from the
+request tags, so no identity Deny may test it there.
 
 ## Appendix A: Review history
 

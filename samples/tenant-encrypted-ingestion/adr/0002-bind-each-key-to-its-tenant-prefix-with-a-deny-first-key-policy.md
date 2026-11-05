@@ -84,7 +84,10 @@ Deny is invisible (§10 step 5), and a unit test runs IAM Access Analyzer
 request per object write and read; adding a consumer is an alarmed
 `PutKeyPolicy` per key, a bulk operation the README documents and the sample
 does not build; the `PutKeyPolicy` alarm needs an account trail, a deployer
-action; whether `CreateKey`'s own tags meet statement 5 is a spike in the
-README's implementation notes. Revisit if S3 adds a condition key for the
+action; a spike (2026-11-05) showed that statement 5 does not block
+`CreateKey`'s own tags and does block a later retag, and that
+`aws:ResourceTag` is populated from the request tags at `CreateKey`, so
+the factory's tagging Allow conditions on `aws:RequestTag`, never on
+`aws:ResourceTag`. Revisit if S3 adds a condition key for the
 bucket-key header, if Bucket Keys gain a per-prefix context, or if KMS offers
 an immutable key policy.
