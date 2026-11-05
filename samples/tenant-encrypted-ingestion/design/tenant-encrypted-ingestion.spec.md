@@ -524,7 +524,7 @@ that writes once.
 
 ### 7.0 Tenant id grammar
 
-`^[a-z0-9][a-z0-9-]{1,34}$`, checked wherever a tenant id enters: the
+`^[A-Za-z0-9][A-Za-z0-9-]{1,34}$`, (upper and lower case, so tenant-identity's ULID tenant ids pass), checked wherever a tenant id enters: the
 authoriser (401), the Smithy path parameter (400), the processor on the
 key's second segment (deleted, no event). It keeps `/` out, so
 `ingest/${tag}/*` never nests one tenant in another, and keeps session

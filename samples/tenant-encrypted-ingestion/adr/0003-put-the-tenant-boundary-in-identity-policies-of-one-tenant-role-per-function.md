@@ -56,7 +56,7 @@ without creation), `sweepRole` (assumes `tenantProcessRole` only) and
 and trust only named base roles, with `ForAllValues:StringEquals aws:TagKeys
 = [TenantId]`, `Null aws:RequestTag/TenantId = false` and a `StringNotLike`
 guard on `/`, `:`, `=`, `+`, `@`, `.`, space and comma; code enforces
-`^[a-z0-9][a-z0-9-]{1,34}$` at the authoriser, the model and the processor.
+`^[A-Za-z0-9][A-Za-z0-9-]{1,34}$` at the authoriser, the model and the processor.
 `RoleSessionName` is `t-<tenantId>-<16-char suffix>`, under 64 characters,
 so logs name the tenant. Sessions last 3600 s; a cached one presigns only
 with TTL plus 60 s left and starts a run only with T left. In the registry a
