@@ -26,7 +26,7 @@ SPDX-License-Identifier: MIT-0
 | [0018](./0018-always-vend-tenant-credentials-and-attribute-model-cost-by-iam-principal.md) | Always vend tenant credentials, and attribute model cost by IAM principal | Accepted | Amends ADR-0008, ADR-0012, ADR-0017 | 2026-10-26 |
 | [0019](./0019-teardown-leaves-no-log-group.md) | Teardown leaves no log group: own the execution log group and drain late logs | Accepted | - | 2026-10-27 |
 | [0020](./0020-limit-each-tenant-at-the-ingress-with-a-shared-fixed-window-counter.md) | Limit each tenant at the ingress with a shared fixed-window counter | Accepted | - | 2026-10-27 |
-| [0021](./0021-make-per-tenant-cloudwatch-metrics-opt-in.md) | Make per-tenant CloudWatch metrics opt-in, off by default | Accepted | Amends ADR-0017; 2026-11-04 note (metric count) | 2026-10-27 |
+| [0021](./0021-make-per-tenant-cloudwatch-metrics-opt-in.md) | Make per-tenant CloudWatch metrics opt-in, off by default | Accepted | Amends ADR-0017 | 2026-10-27 |
 | [0022](./0022-bound-the-tvm-credential-cache-and-share-one-sts-call-per-tag-set.md) | Bound the TVM credential cache and share one STS call per tag set | Accepted | - | 2026-10-27 |
 | [0023](./0023-tune-the-ingress-cold-and-hot-paths-by-measurement.md) | Tune the ingress cold and hot paths by measurement | Accepted | Amends ADR-0015; Amended by ADR-0043 (change 6) | 2026-10-27 |
 | [0024](./0024-share-one-ingress-across-runtimes-through-a-backend-registry.md) | Share one ingress across several Runtimes through a backend registry | Accepted | Amends ADR-0003, ADR-0011, ADR-0013; Amended by ADR-0025, ADR-0032, ADR-0035, ADR-0042 | 2026-10-28 |
@@ -37,12 +37,12 @@ SPDX-License-Identifier: MIT-0
 | [0029](./0029-recommend-api-gateway-as-the-default-ingress.md) | Recommend API Gateway as the default ingress | Accepted | Amends ADR-0009 | 2026-10-30 |
 | [0030](./0030-hold-entitlements-in-an-ingress-owned-store.md) | Hold entitlements in an ingress-owned store, not in identity-provider scopes | Accepted | Supersedes ADR-0025; Amends ADR-0005 | 2026-11-02 |
 | [0031](./0031-mint-a-transaction-token-at-the-ingress.md) | Mint a transaction token at the ingress; the identity token never leaves it | Accepted | Supersedes ADR-0006, ADR-0007; Amended by ADR-0040 | 2026-11-02 |
-| [0032](./0032-model-an-agent-as-a-backend-plus-its-tools.md) | Model an agent as a product: a backend plus the tools it may use, capped below the tenant's subscription | Accepted | Amends ADR-0011, ADR-0024 | 2026-11-02 |
+| [0032](./0032-model-an-agent-as-a-backend-plus-its-tools.md) | Model an agent as a product: a backend plus the tools it may use, capped below the tenant's subscription | Accepted | Amends ADR-0011, ADR-0024; Amended by ADR-0046 | 2026-11-02 |
 | [0033](./0033-let-a-tenant-admin-cut-never-add.md) | Let a tenant admin cut, never add, with sparse per-user rows | Accepted | Amended by ADR-0038 | 2026-11-02 |
 | [0034](./0034-serve-tools-through-one-shared-agentcore-gateway.md) | Serve tools through one shared AgentCore Gateway that trusts the ingress issuer, with Policy on `scope` and an interceptor that checks `act` and signs the tenant context | Accepted | Amended by ADR-0040, ADR-0041 | 2026-11-02 |
 | [0035](./0035-register-tools-and-agents-at-deploy-with-an-owner-marker.md) | Register tools and agents at deploy with an owner marker, in the store and the registry | Accepted | Amends ADR-0024 | 2026-11-02 |
 | [0036](./0036-bound-change-lag-by-a-version-in-the-token-cache-key.md) | Bound change lag by a version in the token cache key and a 5-minute token life | Accepted | Amended by ADR-0043 | 2026-11-02 |
-| [0037](./0037-publish-the-ingress-as-an-oidc-issuer.md) | Publish the ingress as an OIDC issuer: JWKS and discovery on the ingress, keys in KMS with `kid` rotation | Accepted | | 2026-11-02 |
+| [0037](./0037-publish-the-ingress-as-an-oidc-issuer.md) | Publish the ingress as an OIDC issuer: JWKS and discovery on the ingress, keys in KMS with `kid` rotation | Accepted | Amended by ADR-0046 | 2026-11-02 |
 | [0038](./0038-accept-users-in-several-tenants.md) | Accept users in several tenants; the request names one the verified token lists | Accepted | Amends ADR-0004; Amended by ADR-0040 | 2026-11-02 |
 | [0039](./0039-default-session-mapping-to-the-tenant-scope.md) | Default session mapping to the tenant scope when it is turned on | Accepted | Amends ADR-0013 | 2026-11-02 |
 | [0040](./0040-apply-the-spike-findings-to-the-tools-gateway-and-the-transaction-token.md) | Apply the spike findings to the tools gateway and the transaction token | Accepted | Amends ADR-0031, ADR-0034, ADR-0038; Amended by ADR-0041 | 2026-11-02 |
@@ -51,3 +51,4 @@ SPDX-License-Identifier: MIT-0
 | [0043](./0043-cap-the-authoriser-cache-at-60-seconds.md) | Cap the authoriser cache at 60 seconds | Accepted | Amends ADR-0015, ADR-0023 | 2026-11-04 |
 | [0044](./0044-publish-from-the-construct-and-drive-the-integration-test-with-the-cdk-cli.md) | Publish from the construct, and drive the integration test with the CDK CLI over stack outputs | Accepted | - (records three deviations from `docs/sample-standard.md` §1.1, §4.5, §5.2) | 2026-11-04 |
 | [0045](./0045-bound-the-transaction-token-at-10240-bytes.md) | Bound the transaction token at 10,240 bytes | Accepted | Amends ADR-0041 | 2026-11-04 |
+| [0046](./0046-close-the-signer-grant-path-keep-explicit-tool-lists-and-recheck-need-ownership.md) | Close the signer grant path, keep explicit tool lists explicit, and re-check need ownership at the ingress | Accepted | Amends ADR-0032, ADR-0037 | 2026-11-04 |

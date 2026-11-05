@@ -4,7 +4,11 @@ SPDX-License-Identifier: MIT-0
 -->
 # Specification: Agentic Runtime Isolation (v2)
 
-> **Status:** v2, Accepted 2026-11-02 (Dave Roberts). Supersedes the v1
+> **Status, current (2026-11-05):** implemented; verified by integration
+> run 14 (57/57, eu-central-1, commit 6acb991). `architecture.md` describes
+> the implemented state. The dated notes below are the design-time record.
+>
+> **Historical, 2026-11-02 (as accepted):** v2, Accepted 2026-11-02 (Dave Roberts). Supersedes the v1
 > specification of 2026-10-26, kept as `agentic-runtime-isolation.spec.v1.md`.
 > Not yet implemented: `architecture.md` still describes v1 until the v2
 > integration test passes. ADR-0030 to ADR-0041 are Accepted. v1 promises
@@ -12,7 +16,7 @@ SPDX-License-Identifier: MIT-0
 > so with "(v2, ADR-00NN)". The v1 amendment notes are folded into the text;
 > their ADRs are still cited. Spikes V-8 to V-15 (§7) run before code.
 >
-> **Amended 2026-11-04.** Implemented; verified by integration run 9,
+> **Historical, amended 2026-11-04.** Implemented; verified by integration run 9,
 > 2026-11-04 (§7.3); `architecture.md` describes the implemented state.
 > ADR-0042 to ADR-0044 are Accepted. The dated notes below record where the
 > implementation, run 9 and the 2026-11-04 review of the implemented sample
@@ -32,7 +36,7 @@ ADRs v2 adds:
 | 0034 | Serve tools through one shared AgentCore Gateway that trusts the ingress issuer, with Policy on `scope` and an interceptor that checks `act` and signs the tenant context | - |
 | 0035 | Register tools and agents at deploy with an owner marker, in the store and the registry | amends ADR-0024 |
 | 0036 | Bound change lag by a version in the token cache key and a 5-minute token life | - |
-| 0037 | Publish the ingress as an OIDC issuer: JWKS and discovery on the ingress, keys in KMS with `kid` rotation | - |
+| 0037 | Publish the ingress as an OIDC issuer: JWKS and discovery on the ingress, keys in KMS with `kid` rotation | - (amended by ADR-0046) |
 | 0038 | Accept users in several tenants; the request names one the verified token lists | amends ADR-0004 |
 | 0039 | Default session mapping to the tenant scope when it is turned on | amends ADR-0013 |
 | 0040 | Apply the spike findings to the tools gateway and the transaction token | amends ADR-0031, ADR-0034, ADR-0038 |
@@ -41,6 +45,7 @@ ADRs v2 adds:
 | 0043 | Cap the authoriser cache at 60 seconds | amends ADR-0015, ADR-0023 |
 | 0044 | Publish from the construct, and drive the integration test with the CDK CLI over stack outputs | records three deviations from the sample standard (§1.1, §4.5, §5.2) |
 | 0045 | Bound the transaction token at 10,240 bytes | amends ADR-0041 |
+| 0046 | Close the signer grant path, keep explicit tool lists explicit, and re-check need ownership at the ingress | amends ADR-0032, ADR-0037 |
 
 
 ---
@@ -681,7 +686,7 @@ compressed `scope` longer than 8,192 bytes (amended 2026-11-03, ADR-0041;
 was 4,096) is refused with 502 and log reason `grant_too_large`; with at most 64 entries in `tools` this cannot
 happen unless a target has hundreds of tools and the user is cut from one
 (V-13 records the fallback).
-**Amended 2026-11-04 (review; ADR-0032 note).** A target compresses to
+**Amended 2026-11-04 (review; ADR-0046).** A target compresses to
 `<target>/*` only when every contributing set held `<target>/*` itself:
 `A.tools`, `T.tools` (the tenant row or its plan) and `U.tools` (no cut
 names a tool of the target). An explicit list stays explicit even when it
@@ -890,7 +895,7 @@ written by that backend's stack, read by the ingress, JSON, 4 KB.
 refused with 502 and log reason `registry_entry_v1`, so an entry in the old
 shape fails loudly rather than granting the wrong set.
 
-(Amended 2026-11-04, security review) The ingress also refuses an entry whose
+(Amended 2026-11-04, security review, ADR-0046) The ingress also refuses an entry whose
 `needs` are not all `<backend>/<action>` for the backend it is read for
 (`registry_entry_invalid`): a need rides in `scope` verbatim, so a need owned
 by another name (`crm/getaccount`) would read as a tool grant at the tools
@@ -1071,8 +1076,10 @@ authoriser identity source (making it one would turn every request without
 it into API Gateway's 401), so the authoriser's decision is cached per
 token and path for up to 60 s. A request with a foreign `X-Tenant-Id` (403
 `tenant_not_allowed`) makes the same token's next header-less request 403
-too, and after a cached Allow a foreign header is ignored and the request
-is served as the token's own tenant. Either way the result is fail-closed
+too. After a cached Allow the integration Lambda re-verifies the token
+with the header (`src/ingress/api-gateway-ingress.function.ts`, through the
+tenant selection in `src/shared/tenant.ts`), so a foreign header is still
+refused with 403 `tenant_not_allowed`. Either way the result is fail-closed
 or own-tenant; no request acts for another tenant. With `multiTenant` the
 header is in the cache key, so each tenant of a token is decided on its own.
 
@@ -1460,7 +1467,7 @@ The spike stack deploys a throwaway `SharedIngress` with `toolsGateway`, one
 `TokenSigner.grantSign`. It is destroyed after the run, and the
 results are added here as §7.1 with the same evidence standard as v1.
 
-### 7.1 Spike results (2026-11-02, pg sandbox, eu-central-1)
+### 7.1 Spike results (2026-11-02, a sandbox account, eu-central-1)
 
 Throwaway stack `RiacSpikeV2`, a plain CDK app outside the repo, tagged
 `riac-spike=v2`: three KMS signing keys (`SignKey` RSA_2048, `SignKeyEc`
@@ -1581,7 +1588,7 @@ the authoriser matches `allowedAudience` against an array `aud`, so a named
 audience is the same check with another string. The V-9 per-tool permit is
 superseded by the star permit of §3.6 (V-16a).
 
-### 7.2 Spike results, V-16 (2026-11-03, pg sandbox, eu-central-1)
+### 7.2 Spike results, V-16 (2026-11-03, a sandbox account, eu-central-1)
 
 Throwaway stack `RiacSpikeV16`, a plain CDK app outside the repo, tagged
 `riac-spike=v16`: one KMS signing key (`SignKey` RSA_2048) and `ContextKey`
@@ -1682,7 +1689,7 @@ pays one page per 30 catalogued tools on the Gateway whatever the caller's
 grant (34 pages, about 7 s, at 1,003 tools), which the README must state.
 Dave decides.
 
-### 7.3 Integration run 9 (2026-11-04, pg sandbox, eu-central-1)
+### 7.3 Integration run 9 (2026-11-04, a sandbox account, eu-central-1)
 
 `npx projen integ` with the six stacks of `test/integ.runtime.ts`
 (`api-gateway`, `agentcore-gateway`, `session-off`, `session-user`,
@@ -1708,7 +1715,7 @@ Gateway refuses a token with 60 s or less left before `exp` (run 7: fresh
 
 ### 7.4 Spike V-17, 2026-11-04
 
-pg sandbox, eu-central-1, a throwaway stack (deploy 57 s): a REST API with
+a sandbox account, eu-central-1, a throwaway stack (deploy 57 s): a REST API with
 a REQUEST authoriser (payload 1.0, TTL 60 s, identity sources
 `Authorization` and `X-Spike-Size`) in front of an integration Lambda, and
 an echo agent on AgentCore Runtime with the transaction-token header on its

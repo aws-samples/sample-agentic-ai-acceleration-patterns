@@ -24,7 +24,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 - [Samples](#samples)
   - [The Simple Cell-Based Control Plane](#the-simple-cell-based-control-plane)
   - [Tenant Identity with Amazon Cognito](#tenant-identity-with-amazon-cognito)
-  - [Agentic Runtime Isolation: Runtime, Tools and Entitlements](#agentic-runtime-isolation-runtime-tools-and-entitlements)
+  - [Agentic runtime isolation: runtime, tools and entitlements for multi-tenant agents](#agentic-runtime-isolation-runtime-tools-and-entitlements-for-multi-tenant-agents)
 - [Contributing a sample](#contributing-a-sample)
 - [Further Reading](#further-reading)
 - [Costs](#costs)
@@ -37,7 +37,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 |---|---|
 | [The Simple Cell-Based Control Plane](./samples/control-plane/) | A minimal multi-tenant control plane for cell-based deployments — one service, one API, one DynamoDB table, one Step Functions workflow, script-driven provisioning via AWS CodeBuild. `maxTenants: 1` degenerates the model to a silo. |
 | [Tenant Identity with Amazon Cognito](./samples/tenant-identity/) | An identity layer that makes Amazon Cognito the trusted source of tenant identity, in three user-pool topologies chosen at deploy time — plus a `tiered` mode that runs two of them side by side — with RFC 8693 token narrowing to one tenant. |
-| [Agentic Runtime Isolation: Runtime, Tools and Entitlements](./samples/agentic-runtime-isolation/) | A pooled agent platform on Amazon Bedrock AgentCore: one ingress verifies the tenant token, resolves the agent and tool grant from an entitlement store, mints a 5-minute transaction token and invokes a per-tenant microVM with tenant-scoped credentials, while AgentCore Gateways with a Policy engine and a per-tool interceptor serve the tools. |
+| [Agentic runtime isolation: runtime, tools and entitlements for multi-tenant agents](./samples/agentic-runtime-isolation/) | A pooled agent platform on Amazon Bedrock AgentCore: one ingress verifies the tenant token, resolves the agent and tool grant from an entitlement store, mints a 5-minute transaction token and invokes the agent's Runtime (a fresh microVM session per request by default, one per tenant or per user with session mapping) with tenant-scoped credentials, while a tools gateway (one by default, more optional) checks each call with a per-tool interceptor and then AgentCore Policy. |
 
 ## The Simple Cell-Based Control Plane
 
@@ -84,7 +84,7 @@ The sample stops at the token: verifying it and scoping a request belongs to
 the consuming service, which is an extension seam rather than built here. See
 [Tenant Identity with Amazon Cognito](./samples/tenant-identity/).
 
-## Agentic Runtime Isolation: Runtime, Tools and Entitlements
+## Agentic runtime isolation: runtime, tools and entitlements for multi-tenant agents
 
 A pooled agent platform serves every tenant from shared compute and shared
 tools, so three questions follow on every request: which compute unit may
@@ -102,17 +102,21 @@ a 5-minute transaction token naming one tenant, one user and one agent, and
 invokes the Runtime in a fresh microVM session per request by default (with
 `session` set, one per tenant, or per user) with `TenantId`-tagged
 credentials from an always-on token vending machine; the identity token
-never leaves the ingress. Tools are served by several AgentCore Gateways
-with one Policy engine each: a REQUEST interceptor is the per-tool wall and
-hands the tool a signed tenant context, and each tool assumes its own
-tenant role, so IAM, not agent or tool code, keeps each tenant to its own
-data.
+never leaves the ingress. Tools are served by one AgentCore Gateway (the
+tools gateway) by default, or several, each with its own Policy engine: a
+REQUEST interceptor runs first as the per-tool wall and hands the tool a
+signed tenant context, Policy then admits the target, and each tool assumes
+its own tenant role, so IAM, not agent or tool code, keeps each tenant to
+its own data. On the recommended `api-gateway` ingress every authoriser
+refusal reaches the client as 403; the `agentcore-gateway` ingress keeps
+each refusal's own status (401 for a bad token, 404 for an unknown agent,
+502 for an ingress fault, 403 for the rest).
 
 It consumes `tenant-identity` (`shared-pool`) and ships as CDK constructs
 that later samples can consume (`SharedIngress`, `AgentBackend`,
 `ToolTarget`, `TokenSigner`, `EntitlementStore`); the ingress publishes its
 interface as one JSON parameter. See
-[Agentic Runtime Isolation: Runtime, Tools and Entitlements](./samples/agentic-runtime-isolation/).
+[Agentic runtime isolation: runtime, tools and entitlements for multi-tenant agents](./samples/agentic-runtime-isolation/).
 
 ## Contributing a sample
 
