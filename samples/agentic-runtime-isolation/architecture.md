@@ -161,6 +161,53 @@ tenant user ──POST /<agent>/invocations (identity token)──▶ ingress �
               own TVM                                                                    ingress issuer
 ```
 
+### Construct props
+
+Every prop is validated at synth, failing with the prop's name.
+The TSDoc in
+[`src/shared-ingress.cdk.ts`](./src/shared-ingress.cdk.ts),
+[`src/agent-backend.cdk.ts`](./src/agent-backend.cdk.ts) and
+[`src/tool-target.cdk.ts`](./src/tool-target.cdk.ts) has the rest.
+
+| Prop (`SharedIngress`) | Default | Meaning |
+|---|---|---|
+| `identity.discoveryUrl`, `identity.allowedClientIds` | required | The identity issuer |
+| `identity.multiTenant` | `false` | Accept `tenants` with `X-Tenant-Id` (ADR-0038) |
+| `ingress` | required | `api-gateway` or `agentcore-gateway` |
+| `backend` | `agentcore-runtime` | The isolating compute service; the only value (ADR-0011) |
+| `session` | off: a fresh unit per request | `{ scope: 'tenant' }` when set; `'user'` is the option (ADR-0039) |
+| `requiredScopes` | off | The scope floor (AND) |
+| `tvm` | always on: model-only `TenantModelRole`, `TenantId` tag, 900 s, 1,000 cached sets | `role`, `includeUserIdTag`, `claimTags`, `durationSeconds` (900 to 3,600), `cacheMaxEntries` |
+| `tenantLimits` | `{ requestsPerMinute: 60 }` | `outputTokensPerMinute` on `api-gateway` only; `false` turns limits off |
+| `stageThrottle` | `{ rateLimit: 50, burstLimit: 25 }` | `api-gateway` only, one bucket for every tenant; synth warns when unset |
+| `ingressReservedConcurrency` | unset (account pool) | Reserved concurrency of the `api-gateway` streaming Lambda, a positive integer; about rps x average stream seconds |
+| `toolContextKey.algorithm` | `'RS256'` | `'RS256'` or `'ES256'`; `ES256` moves tool-context signing onto the KMS ECC request quota |
+| `perTenantMetrics` | `false` | EMF metrics per tenant (ADR-0021) |
+| `registryPrefix` | `/application-plane/shared/agent-runtime/` | Where the registry and the published document live |
+| `publish` | `true` | Write the published document (ADR-0042) |
+| `registryTtl` | 60 s | Cache life of registry entries, plans and the catalogue, 1 s to 750 s |
+| `defaultBackend` | unset | The agent at the bare `/invocations` route |
+| `transactionToken.ttl` | 300 s | 120 s to 900 s |
+| `transactionToken.algorithm` | `'RS256'` | `'RS256'` or `'ES256'`; the tools gateway accepts both (spec §7) |
+| `transactionToken.keyGeneration` | 1 | Bump to rotate ([Rotate the signing key](./README.md#rotate-the-signing-key)) |
+| `transactionToken.cacheMaxEntries` | 1,000 | Minted tokens per ingress instance, LRU |
+| `entitlements.adminScope` | `entitlements/admin` | Scope of the tenant-admin operations |
+| `entitlements.maxAgentsPerTenant`, `maxToolsPerTenant` | 1,000 each | Entries in a tenant or plan row (`<target>/*` counts once) |
+| `toolsGateways` | `{ default: {} }` | Named gateways; `toolsGateway: {...}` is shorthand for `default`, `toolsGateway: false` creates none |
+| `toolsGateways.<name>.maxToolsPerGateway` | 300 | Synth fails above it (Cedar schema bound) |
+| `toolsGateways.<name>.tenantRateLimit` | `{ requestsPerSecond: 10 }` | Tool rate limit per `tenant_id`; `tenantRateLimitOverrides` for up to 1,000 named tenants |
+| `toolsGateways.<name>.contextLifetime` | 60 s | `exp` of the signed tool context, 10 s to 300 s |
+| `toolsGateways.<name>.interceptorProvisionedConcurrency` | 1 | On that gateway's interceptor; 0 turns it off |
+| `toolsGateways.<name>.responseFilter` | `false` | Trim `tools/list` to the exact granted tools |
+
+`AgentBackend` takes `name` (`[a-z0-9-]{1,32}`), `ingress` (a
+`SharedIngress` or `SharedIngressRef`), `agent` (`{ codePath, modelId,
+environment? }`), `needs` (required, `<name>/<action>`, always granted with
+the agent), `tools` (default `[]`, `<target>/<tool>` or `<target>/*`, at most
+64) and `owner` (default `<StackId>#<LogicalResourceId>`). `TokenSigner`
+takes `algorithm`, `keyGeneration` and `signer`; `EntitlementStore` takes
+`maxAgentsPerTenant` and `maxToolsPerTenant`.
+
 ## Components
 
 | Component | What it does | Code |
