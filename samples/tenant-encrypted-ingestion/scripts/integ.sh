@@ -5,7 +5,13 @@
 # Deployment integration test (spec §10, docs/sample-standard.md §5.2).
 #
 #   AWS_REGION=eu-central-1 scripts/integ.sh      # or: npx projen integ
-#   INTEG_TENANT_KEY_ACCOUNT=<second account> INTEG_TENANT_KEY_ARN=<key arn> ...   # optional, step 1 tenant-key
+#   TEI_TENANT_KEY_PROFILE=<aws profile of a second account> ...   # optional: tenant-key in another account
+#
+# With TEI_TENANT_KEY_PROFILE set, that profile's account is passed as the
+# tenantKeyAccount context (allowTenantKeys on), and the steps create, tag,
+# disable and re-enable tenant B's key under that profile. Unset, B is a
+# second vendor-key tenant and the steps say the cross-account claim is not
+# exercised in this run.
 #
 # Flow:
 #   0. Refuse an account without the tei:test-account tag (M-33).
@@ -13,9 +19,11 @@
 #      one through its own path only when none is published, and destroy only
 #      that one at the end.
 #   2. Synthesise test/integ/app.ts into cdk.integ.out/ and deploy the
-#      test-aid stack and the demo stack (test profile, TestConsumerRole as
-#      its consumer role) with the CDK CLI.
-#   3. Run the spec §10 steps (test/integ.ingestion.ts).
+#      test-aid stack and the demo stack (the §10 test profile below,
+#      TestConsumerRole as its consumer role) with the CDK CLI.
+#   3. Run the spec §10 steps (test/integ.ingestion.ts); it prints a summary
+#      table and exits non-zero on any failed step. Teardown (step 12) is
+#      this script's.
 #   4. Destroy from the EXIT trap (also on failure); list what is left: stacks
 #      with the sample's prefix, and keys tagged with its stacks (only
 #      PendingDeletion is acceptable, step 12).
@@ -97,10 +105,17 @@ trap cleanup EXIT
 # --------------------------------------------------------------------------
 step "0: account guard"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
-if ! aws organizations list-tags-for-resource --resource-id "$ACCOUNT" --query "Tags[?Key=='tei:test-account'] | length(@)" --output text 2>/dev/null | grep -q '^1$'; then
-  fail "the account does not carry the tei:test-account tag (M-33); tag it in AWS Organizations to allow this test"
+# Either the account tag (readable from the Organizations management account)
+# or the SSM parameter /tenant-encrypted-ingestion/test-account = true, which
+# an operator sets once in an account that is a test account (member accounts
+# cannot read their own Organizations tags).
+if aws organizations list-tags-for-resource --resource-id "$ACCOUNT" --query "Tags[?Key=='tei:test-account'] | length(@)" --output text 2>/dev/null | grep -q '^1$'; then
+  echo "  account tagged tei:test-account"
+elif [[ "$(aws ssm get-parameter --name /tenant-encrypted-ingestion/test-account --query Parameter.Value --output text 2>/dev/null)" == "true" ]]; then
+  echo "  account marked by /tenant-encrypted-ingestion/test-account"
+else
+  fail "the account carries neither the tei:test-account tag nor the SSM parameter /tenant-encrypted-ingestion/test-account=true (M-33)"
 fi
-echo "  account tagged tei:test-account"
 
 # --------------------------------------------------------------------------
 # 1. tenant-identity (shared-pool): reuse, or deploy through its own path
@@ -123,9 +138,27 @@ fi
 # 2. The test-aid stack and the demo stack (test/integ/app.ts)
 # --------------------------------------------------------------------------
 step "2: synthesise and deploy ${TEST_AID_STACK}, ${DEMO_STACK}"
-CONTEXT=()
-[[ -n "${INTEG_TENANT_KEY_ACCOUNT:-}" ]] && CONTEXT+=(--context "tenantKeyAccount=${INTEG_TENANT_KEY_ACCOUNT}")
-npx cdk synth -q --app "npx ts-node -P tsconfig.json --prefer-ts-exts test/integ/app.ts" --output "$OUT" ${CONTEXT[@]+"${CONTEXT[@]}"} >"${LIB_TMP}/synth.log" 2>&1 \
+# The spec §10 test profile. uploadUrlTtlSeconds is 120 s, not the spec's
+# 60 s, so the presigned PUTs of the slower steps stay valid; step 7 waits
+# TTL plus grace for EXPIRED.
+CONTEXT=(
+  --context maxReceiveCount=1
+  --context visibilityTimeoutFactor=2
+  --context abandonGraceSeconds=60
+  --context uploadUrlTtlSeconds=120
+  --context maxInFlightPerTenant=5
+)
+if [[ -n "${TEI_TENANT_KEY_PROFILE:-}" ]]; then
+  TENANT_KEY_ACCOUNT="$(aws sts get-caller-identity --profile "$TEI_TENANT_KEY_PROFILE" --query Account --output text)" \
+    || fail "no credentials for TEI_TENANT_KEY_PROFILE"
+  [[ "$TENANT_KEY_ACCOUNT" != "$ACCOUNT" ]] || fail "TEI_TENANT_KEY_PROFILE must name a second account, not the test account"
+  CONTEXT+=(--context "tenantKeyAccount=${TENANT_KEY_ACCOUNT}")
+  export TEI_TENANT_KEY_PROFILE
+  echo "  tenant-key account: set (profile ${TEI_TENANT_KEY_PROFILE})"
+else
+  echo "  tenant-key account: none; the cross-account claim is not exercised in this run"
+fi
+npx cdk synth -q --app "npx ts-node -P tsconfig.json --prefer-ts-exts test/integ/app.ts" --output "$OUT" "${CONTEXT[@]}" >"${LIB_TMP}/synth.log" 2>&1 \
   || { tail -30 "${LIB_TMP}/synth.log" >&2; fail "synth test/integ/app.ts"; }
 DEPLOYED_SAMPLE=1
 "${CDK[@]}" deploy --all --require-approval never --concurrency 2 --outputs-file "${OUT}/outputs.json" >"${LIB_TMP}/deploy.log" 2>&1 \

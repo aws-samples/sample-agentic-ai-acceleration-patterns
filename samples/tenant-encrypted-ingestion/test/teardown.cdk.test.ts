@@ -12,7 +12,7 @@
 import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { mockClient } from 'aws-sdk-client-mock';
 import { logicalIdOf, synthConstruct } from './helpers';
-import { handler as testSwitch } from '../src/validators/test-switch.function';
+import { handler as testSwitch, PAUSE_SECONDS, pauseMillis } from '../src/validators/test-switch.function';
 
 describe('stack-delete order (M-26)', () => {
   const { template } = synthConstruct();
@@ -53,6 +53,20 @@ describe('test-switch validator', () => {
   it('throws in mode throw (a validator error)', async () => {
     ssm.on(GetParameterCommand).resolves({ Parameter: { Value: 'throw' } });
     await expect(testSwitch({}, context)).rejects.toThrow(/throw/);
+  });
+
+  it('pauses for PAUSE_SECONDS, or the seconds of pause:<n>, capped below the remaining time', async () => {
+    expect(pauseMillis('pause', 600_000)).toBe(PAUSE_SECONDS * 1000);
+    expect(pauseMillis('pause:150', 600_000)).toBe(150_000);
+    expect(pauseMillis('pause:150', 60_000)).toBe(59_000);
+    expect(pauseMillis('pause:x', 600_000)).toBeUndefined();
+    expect(pauseMillis('sleep', 600_000)).toBeUndefined();
+    jest.useFakeTimers();
+    ssm.on(GetParameterCommand).resolves({ Parameter: { Value: 'pause:5' } });
+    const pending = testSwitch({}, { getRemainingTimeInMillis: () => 60_000 });
+    await jest.advanceTimersByTimeAsync(5000);
+    await expect(pending).resolves.toEqual({ version: '1', verdict: 'ACCEPT' });
+    jest.useRealTimers();
   });
 
   it('sleeps past its remaining time in mode sleep', async () => {

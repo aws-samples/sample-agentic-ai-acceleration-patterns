@@ -290,6 +290,8 @@
             "npm",
             "update",
             "@aws-sdk/client-cloudformation",
+            "@aws-sdk/client-cloudtrail",
+            "@aws-sdk/client-cloudwatch-logs",
             "@aws-sdk/client-iam",
             "@stylistic/eslint-plugin",
             "@types/aws-lambda",

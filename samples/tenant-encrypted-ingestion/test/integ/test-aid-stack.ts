@@ -19,11 +19,22 @@
  *   `TestScratchWriterRole` as its tenant role, `TestConsumerRole` as its
  *   consumer, and a MISTAKEN Allow of every use action for `TestProbeRole`,
  *   so each Deny (4a-i, 4a-ii, 4b, 4c) can be met alone (step 5).
+ * - `TestEventCaptureQueue`: the target of a rule on the demo stack's bus
+ *   (`addEventCapture`, created with the demo stack because the bus does
+ *   not exist yet), so the test reads the `Delivery*` events (steps 3, 7b,
+ *   7c, 8).
+ * - `TestRedriveOperatorRole`: the demo stack's `redriveOperatorRole`
+ *   (spec §7.7), trusted by the runner for one hour, allowed only the DLQ
+ *   move of the demo stack's queues (step 7b).
+ * - `TestAccessLogReaderRole`: the demo stack's `accessLogReaderRole`, so
+ *   the test reads the access-log `Requester` (step 10).
  */
 
 import { CfnOutput, Duration, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
+import * as events from 'aws-cdk-lib/aws-events';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type { Construct } from 'constructs';
 import { createIngestionBucket } from '../../src/construct/bucket';
 import { addIngestionBucketPolicy } from '../../src/construct/bucket-policy';
@@ -31,6 +42,9 @@ import { buildVendorKeyPolicy } from '../../src/construct/key-policy';
 import { TENANT_ROLE_TRUST_CONDITIONS, TENANT_TAG_VARIABLE } from '../../src/construct/roles';
 
 export const SCRATCH_TENANT = 'tenant-a';
+
+/** CloudFormation names the demo stack's queues `<stack name>-...`; the redrive role reaches only those. */
+export const DEMO_QUEUE_NAME_PREFIX = 'TenantEncryptedIngestionInteg-';
 
 /** The Denies that keep TestProbeRole from changing what it tests (M-33). */
 export const PROBE_DENIED_ACTIONS = [
@@ -48,6 +62,9 @@ export class TestAidStack extends Stack {
   readonly probeRole: iam.Role;
   readonly consumerRole: iam.Role;
   readonly scratchWriterRole: iam.Role;
+  readonly eventCaptureQueue: sqs.Queue;
+  readonly redriveOperatorRole: iam.Role;
+  readonly accessLogReaderRole: iam.Role;
 
   constructor(scope: Construct, id: string, props: StackProps = {}) {
     super(scope, id, props);
@@ -124,10 +141,74 @@ export class TestAidStack extends Stack {
     });
     key.applyRemovalPolicy(RemovalPolicy.DESTROY);
 
+    // Event capture (steps 3, 7b, 7c, 8): any rule of this account and Region
+    // may send; the one rule is created with the demo stack (addEventCapture).
+    this.eventCaptureQueue = new sqs.Queue(this, 'TestEventCaptureQueue', {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      retentionPeriod: Duration.days(1),
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    this.eventCaptureQueue.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: 'AllowEventBridgeRulesOfThisAccount',
+        principals: [new iam.ServicePrincipal('events.amazonaws.com')],
+        actions: ['sqs:SendMessage'],
+        resources: [this.eventCaptureQueue.queueArn],
+        conditions: {
+          StringEquals: { 'aws:SourceAccount': this.account },
+          ArnLike: { 'aws:SourceArn': `arn:${this.partition}:events:${this.region}:${this.account}:rule/*` },
+        },
+      }),
+    );
+
+    // The redrive operator (step 7b, spec §7.7).
+    const demoQueues = `arn:${this.partition}:sqs:${this.region}:${this.account}:${DEMO_QUEUE_NAME_PREFIX}*`;
+    this.redriveOperatorRole = new iam.Role(this, 'TestRedriveOperatorRole', {
+      assumedBy: runner,
+      maxSessionDuration: Duration.hours(1),
+      description: 'tenant-encrypted-ingestion integ: the redriveOperatorRole, moves the DLQ back to the pipeline queue (spec §7.7)',
+    });
+    this.redriveOperatorRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['sqs:StartMessageMoveTask', 'sqs:ListMessageMoveTasks', 'sqs:CancelMessageMoveTask', 'sqs:ReceiveMessage', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes', 'sqs:SendMessage'],
+        resources: [demoQueues],
+      }),
+    );
+
+    // The access-log reader (step 10).
+    this.accessLogReaderRole = new iam.Role(this, 'TestAccessLogReaderRole', {
+      assumedBy: runner,
+      maxSessionDuration: Duration.hours(1),
+      description: 'tenant-encrypted-ingestion integ: the accessLogReaderRole, reads the Requester field (spec §10 step 10)',
+    });
+    this.accessLogReaderRole.addToPolicy(new iam.PolicyStatement({ actions: ['s3:ListBucket', 's3:GetObject'], resources: ['arn:aws:s3:::*'] }));
+    this.accessLogReaderRole.addToPolicy(new iam.PolicyStatement({ actions: ['s3:GetObject'], resources: ['arn:aws:s3:::*/*'] }));
+
     new CfnOutput(this, 'TestProbeRoleArn', { value: this.probeRole.roleArn });
     new CfnOutput(this, 'TestConsumerRoleArn', { value: this.consumerRole.roleArn });
     new CfnOutput(this, 'TestScratchWriterRoleArn', { value: this.scratchWriterRole.roleArn });
     new CfnOutput(this, 'ScratchBucketName', { value: scratch.bucketName });
     new CfnOutput(this, 'ScratchKeyArn', { value: key.attrArn });
+    new CfnOutput(this, 'EventCaptureQueueUrl', { value: this.eventCaptureQueue.queueUrl });
+    new CfnOutput(this, 'TestRedriveOperatorRoleArn', { value: this.redriveOperatorRole.roleArn });
+    new CfnOutput(this, 'TestAccessLogReaderRoleArn', { value: this.accessLogReaderRole.roleArn });
   }
+}
+
+/**
+ * The event capture rule, on the demo stack's bus, created in the demo
+ * stack (the bus is its own; the queue's policy above admits any rule of the
+ * account, so no reference points back at the demo stack). L1, because the
+ * L2 SQS target would write the queue policy into the test-aid stack with
+ * the rule's ARN, a cross-stack cycle.
+ */
+export function addEventCapture(scope: Construct, bus: events.IEventBus, queue: sqs.IQueue, source: string): events.CfnRule {
+  return new events.CfnRule(scope, 'IntegEventCaptureRule', {
+    description: 'tenant-encrypted-ingestion integ: Delivery* events to the test-aid capture queue (spec §10)',
+    eventBusName: bus.eventBusName,
+    eventPattern: { source: [source] },
+    state: 'ENABLED',
+    targets: [{ id: 'capture', arn: queue.queueArn }],
+  });
 }

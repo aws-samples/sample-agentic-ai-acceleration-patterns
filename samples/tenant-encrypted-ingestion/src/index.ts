@@ -10,6 +10,8 @@
 export {
   DEFAULTS,
   type IdentityProps,
+  type IngestionLogGroupName,
+  type PipelineTiming,
   SUPPORTED_CONTENT_TYPES,
   TenantEncryptedIngestion,
   type TenantEncryptedIngestionProps,

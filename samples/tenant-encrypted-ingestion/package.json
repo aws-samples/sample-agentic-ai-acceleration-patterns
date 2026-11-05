@@ -27,6 +27,8 @@
   },
   "devDependencies": {
     "@aws-sdk/client-cloudformation": "3.1154.0",
+    "@aws-sdk/client-cloudtrail": "3.1154.0",
+    "@aws-sdk/client-cloudwatch-logs": "3.1154.0",
     "@aws-sdk/client-iam": "3.1154.0",
     "@stylistic/eslint-plugin": "2.13.0",
     "@types/aws-lambda": "8.10.164",

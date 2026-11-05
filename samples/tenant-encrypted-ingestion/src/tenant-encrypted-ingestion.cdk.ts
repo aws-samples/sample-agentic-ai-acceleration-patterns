@@ -211,6 +211,30 @@ const WILDCARD_REASONS: Record<string, string> = {
   ProcessorRole: 'Granted by the SQS event source mapping on the one pipeline queue (spec §8).',
 };
 
+/** {@link TenantEncryptedIngestion.pipelineTiming}. */
+export interface PipelineTiming {
+  /** T. */
+  readonly processorTimeoutSeconds: number;
+  /** `visibilityTimeoutFactor` × T. */
+  readonly visibilityTimeoutSeconds: number;
+  readonly maxReceiveCount: number;
+  readonly abandonGraceSeconds: number;
+  readonly uploadUrlTtlSeconds: number;
+  readonly maxInFlightPerTenant: number;
+}
+
+/** The keys of {@link TenantEncryptedIngestion.logGroups}. */
+export type IngestionLogGroupName =
+  | 'authoriser'
+  | 'tenantApi'
+  | 'keyFactory'
+  | 'platform'
+  | 'processor'
+  | 'sweep'
+  | 'watch'
+  | 'keyDrain'
+  | 'apiAccess';
+
 export class TenantEncryptedIngestion extends Construct {
   /** The ingestion bucket: `ingest/<tenantId>/` (drop), `documents/<tenantId>/` (landed). */
   readonly bucket: s3.Bucket;
@@ -239,6 +263,16 @@ export class TenantEncryptedIngestion extends Construct {
   readonly consumerRoleArns: string[];
   /** T, the processor timeout (spec §8). */
   readonly processorTimeout: Duration;
+  /**
+   * Every log group the construct writes, by writer: the functions and the
+   * API access log (spec §3.4). The integration test scans them (§10 steps
+   * 7b, 10).
+   */
+  readonly logGroups: Readonly<Record<IngestionLogGroupName, logs.ILogGroup>>;
+  /** The names of the Contributor Insights top-tenant rules (P-9). */
+  readonly contributorInsightRuleNames: string[];
+  /** The resolved pipeline timings and limits (spec §8 "Timing"), in seconds. */
+  readonly pipelineTiming: PipelineTiming;
   readonly alarms: IngestionAlarms;
 
   constructor(scope: Construct, id: string, props: TenantEncryptedIngestionProps) {
@@ -251,6 +285,14 @@ export class TenantEncryptedIngestion extends Construct {
     const stack = Stack.of(this);
     const T = processorTimeout(p.validators);
     this.processorTimeout = T;
+    this.pipelineTiming = {
+      processorTimeoutSeconds: T.toSeconds(),
+      visibilityTimeoutSeconds: T.toSeconds() * p.visibilityTimeoutFactor,
+      maxReceiveCount: p.maxReceiveCount,
+      abandonGraceSeconds: p.abandonGraceSeconds,
+      uploadUrlTtlSeconds: p.uploadUrlTtlSeconds,
+      maxInFlightPerTenant: p.maxInFlightPerTenant,
+    };
     const visibility = Duration.seconds(T.toSeconds() * p.visibilityTimeoutFactor);
     this.consumerRoleArns = p.consumerRoles.map((r) => r.roleArn);
 
@@ -452,7 +494,19 @@ export class TenantEncryptedIngestion extends Construct {
     ingestionApi.api.node.addDependency(scopes.resource);
 
     // ---- observability and alarms -------------------------------------------
-    createTopTenantRules(this, { processorLogs: processor.logGroup, apiAccessLogs: ingestionApi.accessLogs });
+    const insightRules = createTopTenantRules(this, { processorLogs: processor.logGroup, apiAccessLogs: ingestionApi.accessLogs });
+    this.contributorInsightRuleNames = insightRules.map((r) => r.ruleName);
+    this.logGroups = {
+      authoriser: authoriser.logGroup,
+      tenantApi: tenantApi.logGroup,
+      keyFactory: keyFactory.logGroup,
+      platform: platform.logGroup,
+      processor: processor.logGroup,
+      sweep: sweep.logGroup,
+      watch: watch.logGroup,
+      keyDrain: drain.logGroup,
+      apiAccess: ingestionApi.accessLogs,
+    };
     this.alarms = createAlarms(this, { logRetention: p.logRetention });
 
     // ADR-0019 (of agentic-runtime-isolation, copied): late log lines land

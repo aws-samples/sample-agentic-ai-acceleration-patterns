@@ -919,7 +919,9 @@ S3 under the tenant session):
 
 The integration test is the reference implementation (standard §5.2):
 `scripts/integ.sh`, one Region, refused unless the account carries the
-`tei:test-account` tag. Stacks in order: `tenant-identity` (`shared-pool`,
+`tei:test-account` tag or the SSM parameter
+`/tenant-encrypted-ingestion/test-account = true` (a member account
+cannot read its own Organizations tags). Stacks in order: `tenant-identity` (`shared-pool`,
 reused if present), the **test-aid stack**, the demo stack with
 `TestConsumerRole` as its consumer role. The test-aid stack holds:
 

@@ -89,6 +89,8 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     'esbuild@0.28.2', // local NodejsFunction bundling, no Docker needed
     '@aws-sdk/client-iam@3.1154.0', // integ step 5: SimulatePrincipalPolicy on the deployed tenant roles
     '@aws-sdk/client-cloudformation@3.1154.0', // integ: stack status checks
+    '@aws-sdk/client-cloudwatch-logs@3.1154.0', // integ steps 7b, 10: FilterLogEvents over the stack's log groups
+    '@aws-sdk/client-cloudtrail@3.1154.0', // integ step 10: kmsRequests against CloudTrail for one delivery
   ],
   jestOptions: {
     jestConfig: {

@@ -67,7 +67,15 @@ export interface DemoContext {
   /** The spec §10 test profile (short timings, small limits, tenantThrottle). */
   readonly integProfile: boolean;
   readonly accessLogReaderRoleArn?: string;
+  /** The queue's one other sender (spec §7.7); the integration test's redrive role. */
+  readonly redriveOperatorRoleArn?: string;
+  /** Per-prop overrides of the timings and limits, from context (spec §3.3); applied over the test profile. */
+  readonly profile: DemoProfileOverrides;
 }
+
+/** The props a deployer (or scripts/integ.sh) may set from context. The construct validates the ranges. */
+export const PROFILE_CONTEXT_KEYS = ['maxReceiveCount', 'visibilityTimeoutFactor', 'abandonGraceSeconds', 'uploadUrlTtlSeconds', 'maxInFlightPerTenant'] as const;
+export type DemoProfileOverrides = Partial<Record<(typeof PROFILE_CONTEXT_KEYS)[number], number>>;
 
 export type ContextReader = (key: string) => unknown;
 
@@ -107,6 +115,22 @@ export function parseDemoContext(read: ContextReader): DemoContext {
   if (reader !== undefined && (typeof reader !== 'string' || !ROLE_ARN.test(reader))) {
     throw new Error('context accessLogReaderRoleArn must be an IAM role ARN');
   }
+  const redrive = read('redriveOperatorRoleArn');
+  if (redrive !== undefined && (typeof redrive !== 'string' || !ROLE_ARN.test(redrive))) {
+    throw new Error('context redriveOperatorRoleArn must be an IAM role ARN');
+  }
+  const profile: Record<string, number> = {};
+  for (const key of PROFILE_CONTEXT_KEYS) {
+    const raw = read(key);
+    if (raw === undefined) {
+      continue;
+    }
+    const value = typeof raw === 'number' ? raw : typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : NaN;
+    if (!Number.isInteger(value)) {
+      throw new Error(`context ${key} must be an integer`);
+    }
+    profile[key] = value;
+  }
   return {
     identityParameterPlaceholders: bool(read, 'identityParameterPlaceholders'),
     identityParams,
@@ -114,6 +138,8 @@ export function parseDemoContext(read: ContextReader): DemoContext {
     allowTenantKeys: bool(read, 'allowTenantKeys'),
     integProfile: bool(read, 'integProfile'),
     accessLogReaderRoleArn: reader as string | undefined,
+    redriveOperatorRoleArn: redrive as string | undefined,
+    profile: profile as DemoProfileOverrides,
   };
 }
 
@@ -174,8 +200,11 @@ export class TenantEncryptedIngestionDemoStack extends Stack {
       stringValue: 'accept',
     });
     const testSwitch = this.validatorFunction('TestSwitchValidator', path.join(__dirname, 'validators', 'test-switch.function.ts'), {
-      // The function may run 2 minutes; it declares 60 s to the chain, so `sleep` outlasts the processor (spec §10 step 7c).
-      timeout: Duration.minutes(2),
+      // The function may run 5 minutes; it declares 60 s to the chain. T is then
+      // 60 + 30 + 60 + 60 = 210 s, so `sleep` (until its own 300 s timeout)
+      // outlasts the processor (spec §10 step 7c), and `pause:<n>` up to
+      // about 140 s stays inside T (step 8).
+      timeout: Duration.minutes(5),
       environment: { [TEST_SWITCH_PARAMETER_ENV]: this.testSwitchParameter.parameterName },
       description: 'tenant-encrypted-ingestion test-switch validator: behaviour from an SSM parameter (spec §10)',
     });
@@ -193,7 +222,10 @@ export class TenantEncryptedIngestionDemoStack extends Stack {
       ],
       accessLogReaderRole:
         ctx.accessLogReaderRoleArn === undefined ? undefined : iam.Role.fromRoleArn(this, 'AccessLogReader', ctx.accessLogReaderRoleArn, { mutable: false }),
+      redriveOperatorRole:
+        ctx.redriveOperatorRoleArn === undefined ? undefined : iam.Role.fromRoleArn(this, 'RedriveOperator', ctx.redriveOperatorRoleArn, { mutable: false }),
       ...(ctx.integProfile ? INTEG_PROFILE : {}),
+      ...ctx.profile,
     });
 
     // Published parameters (spec §6.3), written by CloudFormation only (M-30).
@@ -224,6 +256,16 @@ export class TenantEncryptedIngestionDemoStack extends Stack {
     new CfnOutput(this, 'SweepFunctionName', { value: ing.sweepFunction.functionName });
     new CfnOutput(this, 'ProcessorFunctionName', { value: ing.processorFunction.functionName });
     new CfnOutput(this, 'DeadLetterQueueUrl', { value: ing.deadLetterQueue.queueUrl });
+    new CfnOutput(this, 'DeadLetterQueueArn', { value: ing.deadLetterQueue.queueArn });
+    new CfnOutput(this, 'QueueUrl', { value: ing.queue.queueUrl });
+    new CfnOutput(this, 'QueueArn', { value: ing.queue.queueArn });
+    new CfnOutput(this, 'PipelineTiming', { value: JSON.stringify(ing.pipelineTiming) });
+    new CfnOutput(this, 'LogGroupNames', {
+      value: this.toJsonString(Object.fromEntries(Object.entries(ing.logGroups).map(([k, g]) => [k, g.logGroupName]))),
+    });
+    new CfnOutput(this, 'ContributorInsightRuleNames', { value: ing.contributorInsightRuleNames.join(',') });
+    new CfnOutput(this, 'AccessLogBucketName', { value: ing.accessLogBucket.bucketName });
+    new CfnOutput(this, 'KeyBindingChangedAlarmName', { value: ing.alarms.bindingChanged.alarmName });
     new CfnOutput(this, 'RegistryTableName', { value: ing.registryTable.tableName });
     new CfnOutput(this, 'EventBusName', { value: ing.eventBus.eventBusName });
     new CfnOutput(this, 'TenantRoleArns', {

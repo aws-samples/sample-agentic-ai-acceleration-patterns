@@ -26,6 +26,9 @@ describe('demo context', () => {
     ['consumerRoleArns', { consumerRoleArns: 'not-an-arn' }],
     ['accessLogReaderRoleArn', { accessLogReaderRoleArn: 'arn:aws:iam::111122223333:user/x' }],
     ['integProfile', { integProfile: 'maybe' }],
+    ['redriveOperatorRoleArn', { redriveOperatorRoleArn: 'not-an-arn' }],
+    ['maxReceiveCount', { maxReceiveCount: '1.5' }],
+    ['uploadUrlTtlSeconds', { uploadUrlTtlSeconds: 'soon' }],
   ])('fails fast naming %s', (key, context) => {
     expect(() => parseDemoContext((k) => (context as Record<string, unknown>)[k])).toThrow(new RegExp(key));
   });
@@ -68,6 +71,41 @@ describe('demo stack', () => {
     const integ = synth({ identityParameterPlaceholders: 'true', integProfile: 'true' });
     integ.hasResourceProperties('AWS::SQS::Queue', { RedrivePolicy: Match.objectLike({ maxReceiveCount: 1 }) });
     integ.hasResourceProperties('AWS::ApiGateway::UsagePlan', {});
+  });
+
+  it('applies profile overrides from context over the test profile, and the redrive operator to the queue Deny', () => {
+    const t = synth({
+      identityParameterPlaceholders: 'true',
+      integProfile: 'true',
+      uploadUrlTtlSeconds: '120',
+      maxReceiveCount: '2',
+      redriveOperatorRoleArn: 'arn:aws:iam::111122223333:role/TestRedriveOperatorRole',
+    });
+    t.hasResourceProperties('AWS::SQS::Queue', { RedrivePolicy: Match.objectLike({ maxReceiveCount: 2 }) });
+    const timing = JSON.parse(t.toJSON().Outputs.PipelineTiming.Value);
+    expect(timing).toEqual(
+      expect.objectContaining({ uploadUrlTtlSeconds: 120, maxReceiveCount: 2, abandonGraceSeconds: 60, maxInFlightPerTenant: 5 }),
+    );
+    expect(timing.visibilityTimeoutSeconds).toBe(2 * timing.processorTimeoutSeconds);
+    const queuePolicies = JSON.stringify(t.findResources('AWS::SQS::QueuePolicy'));
+    expect(queuePolicies).toContain('arn:aws:iam::111122223333:role/TestRedriveOperatorRole');
+  });
+
+  it('gives test-switch a function timeout above the processor timeout, so sleep outlasts the processor', () => {
+    const integ = synth({ identityParameterPlaceholders: 'true', integProfile: 'true' });
+    const timing = JSON.parse(integ.toJSON().Outputs.PipelineTiming.Value);
+    const testSwitch = Object.values(integ.findResources('AWS::Lambda::Function')).find(
+      (f) => f.Properties.Environment?.Variables?.TEI_TEST_SWITCH_PARAMETER !== undefined,
+    )!;
+    expect(testSwitch.Properties.Timeout).toBeGreaterThan(timing.processorTimeoutSeconds);
+  });
+
+  it('outputs the log groups and the Contributor Insights rule names the integration test reads', () => {
+    const outputs = placeholder.toJSON().Outputs;
+    for (const name of ['LogGroupNames', 'ContributorInsightRuleNames', 'AccessLogBucketName', 'QueueArn', 'DeadLetterQueueArn', 'KeyBindingChangedAlarmName']) {
+      expect(outputs[name]).toBeDefined();
+    }
+    expect(outputs.ContributorInsightRuleNames.Value.split(',')).toHaveLength(3);
   });
 
   it('passes consumer roles into the key factory environment', () => {

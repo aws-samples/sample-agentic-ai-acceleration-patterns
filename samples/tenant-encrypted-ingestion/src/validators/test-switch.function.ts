@@ -8,8 +8,11 @@
  *
  * - `accept` (and any unknown value): ACCEPT.
  * - `throw`: a function error (a validator error; step 7b).
- * - `pause`: waits `PAUSE_SECONDS`, then ACCEPT, so the test can disable a
- *   key while the delivery is `PROCESSING` (step 8).
+ * - `pause` or `pause:<seconds>`: waits `PAUSE_SECONDS` (or the given
+ *   seconds, capped a second short of the function's remaining time), then
+ *   ACCEPT, so the test can disable a key or change its policy while the
+ *   delivery is `PROCESSING` (step 8). The processor waits on the invoke, so
+ *   the pause must stay under the processor timeout T less its other work.
  * - `sleep`: sleeps until its own function timeout, past the timeout it
  *   declares to the chain, so the processor times out holding the lease
  *   (step 7c).
@@ -26,6 +29,16 @@ export const TEST_SWITCH_PARAMETER_ENV = 'TEI_TEST_SWITCH_PARAMETER';
 export const TEST_SWITCH_MODES = ['accept', 'throw', 'pause', 'sleep'] as const;
 export const PAUSE_SECONDS = 45;
 
+/** The pause in milliseconds for a `pause` or `pause:<seconds>` mode, or undefined for any other mode. */
+export function pauseMillis(mode: string, remainingMillis: number): number | undefined {
+  const match = /^pause(?::(\d{1,4}))?$/.exec(mode);
+  if (match === null) {
+    return undefined;
+  }
+  const requested = (match[1] === undefined ? PAUSE_SECONDS : Number(match[1])) * 1000;
+  return Math.max(0, Math.min(requested, remainingMillis - 1000));
+}
+
 const ssm = new SSMClient({});
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -33,12 +46,14 @@ export async function handler(_request: unknown, context: Pick<Context, 'getRema
   const parameter = await ssm.send(new GetParameterCommand({ Name: requireEnv(TEST_SWITCH_PARAMETER_ENV) }));
   const mode = parameter.Parameter?.Value ?? 'accept';
   log.info('test-switch called', { validator: 'test-switch', outcome: mode });
+  const pause = pauseMillis(mode, context.getRemainingTimeInMillis());
+  if (pause !== undefined) {
+    await wait(pause);
+    return { version: '1', verdict: 'ACCEPT' };
+  }
   switch (mode) {
     case 'throw':
       throw new Error('test-switch: mode throw');
-    case 'pause':
-      await wait(PAUSE_SECONDS * 1000);
-      break;
     case 'sleep':
       await wait(context.getRemainingTimeInMillis() + 1000);
       break;

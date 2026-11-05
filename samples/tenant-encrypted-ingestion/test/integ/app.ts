@@ -7,12 +7,20 @@
  * as its consumer role. `scripts/integ.sh` synthesises it into
  * `cdk.integ.out/` and deploys both with the CDK CLI. The demo stack is the
  * sample's own (src/demo.cdk.ts), so the test wires nothing a deployer
- * could not.
+ * could not: its consumer, redrive operator and access-log reader roles come
+ * from the test-aid stack, and one extra rule on its bus feeds the test's
+ * event capture queue.
+ *
+ * Context (scripts/integ.sh): `tenantKeyAccount` (enables `tenant-key`),
+ * and the profile overrides `maxReceiveCount`, `visibilityTimeoutFactor`,
+ * `abandonGraceSeconds`, `uploadUrlTtlSeconds`, `maxInFlightPerTenant`
+ * (src/demo.cdk.ts PROFILE_CONTEXT_KEYS), applied over the §10 profile.
  */
 
 import { App } from 'aws-cdk-lib';
-import { TestAidStack } from './test-aid-stack';
+import { addEventCapture, TestAidStack } from './test-aid-stack';
 import { parseDemoContext, TenantEncryptedIngestionDemoStack } from '../../src/demo.cdk';
+import { EVENT_SOURCE } from '../../src/shared/constants';
 
 export const TEST_AID_STACK = 'TenantEncryptedIngestionTestAid';
 export const DEMO_STACK = 'TenantEncryptedIngestionInteg';
@@ -27,8 +35,10 @@ const demo = new TenantEncryptedIngestionDemoStack(app, DEMO_STACK, {
     integProfile: true,
     allowTenantKeys: app.node.tryGetContext('tenantKeyAccount') !== undefined,
     consumerRoleArns: [aid.consumerRole.roleArn],
-    accessLogReaderRoleArn: undefined,
+    accessLogReaderRoleArn: aid.accessLogReaderRole.roleArn,
+    redriveOperatorRoleArn: aid.redriveOperatorRole.roleArn,
   },
 });
 demo.addDependency(aid);
+addEventCapture(demo, demo.ingestion.eventBus, aid.eventCaptureQueue, EVENT_SOURCE);
 app.synth();
