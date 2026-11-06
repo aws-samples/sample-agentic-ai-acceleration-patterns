@@ -57,7 +57,50 @@ export interface RuntimeLogGroupEvent extends CustomResourceEventBase {
 
 const LOG_GROUP_PREFIX = '/aws/bedrock-agentcore/runtimes/';
 
-export async function handleEvent(event: RuntimeLogGroupEvent, logsClient: CloudWatchLogsClient): Promise<CustomResourceOutcome> {
+/**
+ * Errors the service returns for a call that may well pass a moment later.
+ * `PutDataProtectionPolicy` compiles the policy's regexes on the call and
+ * answers `HttpTimeoutException` when that takes longer than its own limit
+ * (integration run 2026-11-06: about 5 s with a `{16,4096}` bound, half the
+ * calls timed out); `OperationAbortedException` is a write racing the
+ * service's own setup of a group it just created. The SDK's retry mode
+ * treats neither as retryable, so the handler does.
+ */
+const TRANSIENT_ERRORS = new Set([
+  'HttpTimeoutException',
+  'OperationAbortedException',
+  'ThrottlingException',
+  'ServiceUnavailableException',
+]);
+const RETRY_ATTEMPTS = 5;
+const RETRY_BASE_MS = 2_000;
+
+export interface RuntimeLogGroupDependencies {
+  readonly logs: CloudWatchLogsClient;
+  /** The backoff sleep between attempts; tests pass a no-op. */
+  readonly sleep: (ms: number) => Promise<void>;
+}
+
+/** Runs a Logs write, retrying a transient service error with exponential backoff and full jitter. */
+async function withRetry<T>(deps: RuntimeLogGroupDependencies, call: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await call();
+    } catch (error) {
+      if (attempt + 1 >= RETRY_ATTEMPTS || !TRANSIENT_ERRORS.has(errorName(error))) {
+        throw error;
+      }
+      await deps.sleep(Math.floor(Math.random() * RETRY_BASE_MS * 2 ** attempt));
+    }
+  }
+}
+
+export async function handleEvent(
+  event: RuntimeLogGroupEvent,
+  logsClient: CloudWatchLogsClient,
+  sleep: RuntimeLogGroupDependencies['sleep'] = defaultSleep,
+): Promise<CustomResourceOutcome> {
+  const deps: RuntimeLogGroupDependencies = { logs: logsClient, sleep };
   const properties = event.ResourceProperties;
 
   if (event.RequestType === 'Delete') {
@@ -101,8 +144,10 @@ export async function handleEvent(event: RuntimeLogGroupEvent, logsClient: Cloud
         throw error;
       }
     }
-    await logsClient.send(new PutRetentionPolicyCommand({ logGroupName: name, retentionInDays: retention }));
-    await logsClient.send(new PutDataProtectionPolicyCommand({ logGroupIdentifier: name, policyDocument: properties.DataProtectionPolicy }));
+    await withRetry(deps, () => logsClient.send(new PutRetentionPolicyCommand({ logGroupName: name, retentionInDays: retention })));
+    await withRetry(deps, () =>
+      logsClient.send(new PutDataProtectionPolicyCommand({ logGroupIdentifier: name, policyDocument: properties.DataProtectionPolicy })),
+    );
     return { status: 'SUCCESS', physicalResourceId: name };
   } catch (error) {
     log.error('runtime log group settle failed', { logGroup: name, error: errorName(error) });
@@ -110,6 +155,7 @@ export async function handleEvent(event: RuntimeLogGroupEvent, logsClient: Cloud
   }
 }
 
+const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const logsClient = new CloudWatchLogsClient({ retryMode: 'adaptive', maxAttempts: 8 });
 
 /** The Lambda entry point. */

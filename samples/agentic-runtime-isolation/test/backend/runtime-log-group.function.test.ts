@@ -58,10 +58,37 @@ describe('the Runtime log group custom resource (T-18, M-12)', () => {
     logs.on(CreateLogGroupCommand).resolves({});
     logs.on(PutRetentionPolicyCommand).resolves({});
     logs.on(PutDataProtectionPolicyCommand).rejects(Object.assign(new Error('bad regex'), { name: 'InvalidParameterException' }));
-    const outcome = await handleEvent(event('Create'), client);
+    const outcome = await handleEvent(event('Create'), client, async () => { throw new Error('must not sleep'); });
     expect(outcome.status).toBe('FAILED');
     expect(outcome.reason).toContain('InvalidParameterException');
     expect(outcome.physicalResourceId).toBe(NAME);
+    expect(logs).toHaveReceivedCommandTimes(PutDataProtectionPolicyCommand, 1);
+  });
+
+  it('Create: a transient service error on the policy write (HttpTimeoutException, OperationAbortedException) is retried with backoff, then succeeds', async () => {
+    logs.on(CreateLogGroupCommand).resolves({});
+    logs.on(PutRetentionPolicyCommand).resolves({});
+    logs.on(PutDataProtectionPolicyCommand)
+      .rejectsOnce(Object.assign(new Error('slow'), { name: 'HttpTimeoutException' }))
+      .rejectsOnce(Object.assign(new Error('busy'), { name: 'OperationAbortedException' }))
+      .resolves({});
+    const sleeps: number[] = [];
+    const outcome = await handleEvent(event('Create'), client, async (ms) => { sleeps.push(ms); });
+    expect(outcome).toEqual({ status: 'SUCCESS', physicalResourceId: NAME });
+    expect(logs).toHaveReceivedCommandTimes(PutDataProtectionPolicyCommand, 3);
+    expect(sleeps).toHaveLength(2);
+    expect(sleeps[0]).toBeLessThan(2_000);
+    expect(sleeps[1]).toBeLessThan(4_000);
+  });
+
+  it('Create: a transient error that never clears fails after the last attempt with its name', async () => {
+    logs.on(CreateLogGroupCommand).resolves({});
+    logs.on(PutRetentionPolicyCommand).resolves({});
+    logs.on(PutDataProtectionPolicyCommand).rejects(Object.assign(new Error('slow'), { name: 'HttpTimeoutException' }));
+    const outcome = await handleEvent(event('Create'), client, async () => {});
+    expect(outcome.status).toBe('FAILED');
+    expect(outcome.reason).toContain('HttpTimeoutException');
+    expect(logs).toHaveReceivedCommandTimes(PutDataProtectionPolicyCommand, 5);
   });
 
   it('refuses a name outside the Runtime prefix, a bad retention and an empty policy before any call', async () => {

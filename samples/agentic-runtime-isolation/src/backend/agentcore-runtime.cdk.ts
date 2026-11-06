@@ -115,9 +115,14 @@ const RUNTIME_ENDPOINT = 'DEFAULT';
  *   `{1,50}` segments are rejected, `{1,100}` is accepted, while `+` is
  *   accepted and matches. So the two values whose length is not known
  *   (a JWT segment, the base64 credential header) use `+`, and the two
- *   whose length is (a 40-character secret access key, a session token of
- *   at most 4096) use a `{m,n}` bound, which the engine takes behind a
- *   longer literal prefix.
+ *   whose length is (a 40-character secret access key, a session token)
+ *   use a `{m,n}` bound, which the engine takes behind a longer literal
+ *   prefix. The bound also sets how long the service takes to compile the
+ *   policy: `{16,2048}` took about 5 s per PutDataProtectionPolicy and
+ *   half the calls came back HttpTimeoutException from the service itself
+ *   (integration run 2026-11-06, every Runtime group failed); `{16,2048}`
+ *   takes about 2 s and `{16,1024}` about 1 s. 2048 covers an STS session
+ *   token (about 1,000 to 1,600 characters with session tags).
  * The integration test (step `mask`) writes probe lines into a Runtime
  * group and reads them back masked and with `--unmask`, so the patterns are
  * proven on CloudWatch's engine every run, not only in the JS one the unit
@@ -127,7 +132,7 @@ export const MASKED_PATTERNS = {
   JWT: 'eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+',
   CREDENTIAL_HEADER: 'eyJhY2Nlc3NLZXlJZCI6[A-Za-z0-9+/=]+',
   SECRET_ACCESS_KEY_FIELD: 'secretAccessKey\\\\?["\']?\\s*:\\s*\\\\?["\'][A-Za-z0-9/+=]{40}',
-  SESSION_TOKEN_FIELD: 'sessionToken\\\\?["\']?\\s*:\\s*\\\\?["\'][A-Za-z0-9/+=]{16,4096}',
+  SESSION_TOKEN_FIELD: 'sessionToken\\\\?["\']?\\s*:\\s*\\\\?["\'][A-Za-z0-9/+=]{16,2048}',
 } as const;
 
 /**
