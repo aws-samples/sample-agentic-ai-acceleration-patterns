@@ -277,8 +277,13 @@ rest).
 credentials: its TVM is always on and signs every model call
 (agentic-runtime-isolation ADR-0018), and each tool assumes its own tenant
 role from the signed tenant context the interceptor hands it.
-`tenant-encrypted-ingestion` is the first data-layer sample those
-credentials unlock: documents land under one KMS key per tenant, and a
-consumer role that holds the `TenantId` session tag reads only its tenant's
-prefix. Memory and retrieval have no sample yet.
+`tenant-encrypted-ingestion` is the first data-layer sample: documents land
+under one KMS key per tenant, and a consumer role, assumed with the
+tenant's `TenantId` session tag, reads only that tenant's prefix. The two
+compose only when a deployer wires them: naming a TVM-assumed role in
+`tenant-encrypted-ingestion`'s `consumerRoles` prop puts it in each new
+key's policy (statement 2b), and the deployer grants the role's own read
+of `documents/<t>/*`; nothing in either sample does that automatically, and
+neither sample's integration test exercises it. Memory and retrieval have
+no sample yet.
 

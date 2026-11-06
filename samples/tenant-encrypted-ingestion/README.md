@@ -427,9 +427,22 @@ The deployment integration test
 of this sample's wiring ([sample standard §5.2](../../docs/sample-standard.md#5-tests)):
 it reuses tenant-identity through its published parameters, deploys the
 sample's own demo stack, drives the flow through the public API and the
-construct's read-only properties, and tears down what it deployed. Run it in
-exactly one Region: set `AWS_REGION`; the script fails fast when it is
-unset.
+published parameters under `/application-plane/shared/ingestion/`, and
+tears down what it deployed. Run it in exactly one Region: set
+`AWS_REGION`; the script fails fast when it is unset.
+
+One shortcut is a test's only. The driver is a separate process, so it
+cannot read construct properties; `scripts/integ.sh` deploys with the CDK
+CLI's `--outputs-file`, and the driver reads the test's own stacks' outputs
+from that file: the processor and sweep function names, queue and DLQ URLs
+and ARNs, the registry table, event bus, log group, Contributor Insights
+rule and alarm names, the pipeline timing and the test-switch parameter
+from the demo stack, and the probe, consumer, scratch and capture
+resources from the test-aid stack. These are test-only wiring standing for
+the construct properties (`processorFunction`, `queue`, `registryTable`,
+...) that your own CDK code reads; do not copy them as the composition
+contract, which is the published parameters
+([ADR-0014](./adr/0014-drive-the-integration-test-with-the-cdk-cli-and-read-test-wiring-from-outputs.md)).
 
 ```bash
 export AWS_REGION=eu-central-1 && npx projen integ
@@ -468,9 +481,10 @@ mistaken Allow for the probe role, an event capture queue, and the redrive
 and access-log reader roles) and the **demo stack**
 (`TenantEncryptedIngestionInteg`, the sample's own demo stack with the test
 profile and `uploadUrlTtlSeconds 120`, `TestConsumerRole` as consumer).
-Teardown runs from the exit trap, also on failure, and fails the run if a
-stack with the sample's prefix is left or a key it tagged is not
-`PendingDeletion`.
+The driver deletes the tenants it created in the shared pool before it
+exits and names any it could not delete. Teardown runs from the exit trap,
+also on failure, and fails the run if a stack with the sample's prefix is
+left or a key it tagged is not `PendingDeletion`.
 
 | Step | What it checks |
 |---|---|
@@ -491,7 +505,10 @@ stack with the sample's prefix is left or a key it tagged is not
 | 12 | Teardown, by `scripts/integ.sh`: `cdk destroy --all`, then the leftover check |
 
 Last green run: 2026-11-06, eu-central-1, a vendor test account plus a second
-account owning tenant B's key, about 73 minutes; every step passed
+account owning tenant B's key, about 73 minutes end to end. CloudFormation
+took about 4 minutes to create the two stacks (test aid 1 min 10 s, demo stack
+2 min 17 s) and about 5 minutes to delete them (demo stack 3 min 9 s, test aid
+1 min 35 s), so N-4 holds; the rest is the driver's waits. Every step passed
 (`architecture.md` status block). Plan on about 75 minutes: the driver waits
 five minutes after each key policy or tag change and on URL TTLs, leases and
 the sweep. The spec's cost target is under $2 per run; the cost of a run has
@@ -505,10 +522,9 @@ recorded rather than checked, and offboarding saw 409 from the handler, not
 [`scripts/demo.sh`](./scripts/demo.sh) walks the delivery flow against a
 deployed demo stack. It reads the published `apiUrl` and `bucketName`, calls
 `/platform/*` with the ambient credentials (SigV4) and `/tenant/*` with an
-access token it reads from a file and never prints. Today it is a skeleton:
-it does not create the tenant or the token, so the operator brings a
-tenant-identity tenant entitled to both scopes and a token for one of its
-users.
+access token it reads from a file and never prints. It does not create the
+tenant or the token: bring a tenant-identity tenant entitled to both scopes
+and a token for one of its users.
 
 ```bash
 export AWS_REGION=eu-central-1
@@ -517,19 +533,20 @@ DEMO_TENANT=<tenantId> DEMO_TOKEN_FILE=<file with an access token> scripts/demo.
 
 | Step | Call | Expect |
 |---|---|---|
-| 1 | `CreateTenantKey` for `DEMO_TENANT`, `vendor-key` | 201 and `keyStatus` `ACTIVE` (a repeat on an existing key is 409) |
+| 1 | `CreateTenantKey` for `DEMO_TENANT`, `vendor-key` | 201 and `keyStatus` `ACTIVE`; on 409 (the key exists) `GetTenantKey` 200 and `ACTIVE` |
 | 2 | `CreateDelivery` for a synthetic 2-page PDF, the PUT with the returned headers, then `GetDelivery` every 5 s until terminal | 201, 200, then `ACCEPTED` |
 | 3 | The same with a 5-page PDF | `REJECTED` with reason `pdf-pages:TOO_MANY_PAGES` (page limit 3) |
-| 4 | Only with `DEMO_OFFBOARD=1`: `DeleteTenantKey` | 202 |
+| Exit | `DeleteTenantKey`, when this run created the key or `DEMO_OFFBOARD=1`; skipped with `KEEP=1` | 202 |
 
-What the script does today: it fails on an unexpected status of
-`CreateDelivery` and the PUT; for `CreateTenantKey`, the terminal status and
-the rejection reason it prints the result and does not check it; it stops
-polling after three minutes. On exit it removes only its temporary files;
-the tenant key and the two deliveries stay unless `DEMO_OFFBOARD=1` is set,
-in which case offboarding deletes the tenant's objects under both
-prefixes and schedules the key for deletion. The script has not been part of the
-integration run. Tokens live five minutes, so issue one just before the run.
+The script checks every response against the table and exits non-zero on
+the first mismatch, including a delivery not terminal after three minutes
+of polling. Its EXIT trap runs also on failure: when this run created the
+tenant key, or `DEMO_OFFBOARD=1` is set, it calls `DeleteTenantKey`, which
+deletes the tenant's objects under both prefixes, the two deliveries
+included, and schedules the key for deletion; a key that existed before the
+run is left alone and the trap names the deliveries it leaves. `KEEP=1`
+keeps everything for inspection. Tokens live five minutes, so issue one
+just before the run.
 
 ## API
 

@@ -7,12 +7,15 @@ SPDX-License-Identifier: MIT-0
 > **Status: implemented and verified by the integration run of 2026-11-06.**
 > Last green run: 2026-11-06, eu-central-1, a vendor test account plus a
 > second account owning tenant B's `tenant-key` key (cross-account claim
-> exercised), about 73 minutes. Coverage: spec §10 steps 1 to 11 (with 7b
+> exercised), about 73 minutes end to end; CloudFormation create 1 min 10 s
+> (test aid) and 2 min 17 s (demo stack), delete 3 min 9 s and 1 min 35 s, from
+> the stack events of that run (N-4: each under 5 minutes). Coverage: spec §10 steps 1 to 11 (with 7b
 > and 7c) and the driver's step 0 prelude all passed; step 12 ran as
 > `scripts/integ.sh`'s teardown: both stacks destroyed, no stack with the
 > sample's prefix left, only the two `vendor-key` keys left, both
 > `PendingDeletion`, and the second account's three test keys scheduled for
-> deletion. Unit tests: 288 passed. **Not exercised:** the access-log
+> deletion. Unit tests: 289 and growing on 2026-11-06; see the build.
+> **Not exercised:** the access-log
 > `Requester` check (step 10) is best effort and no access log arrived
 > within 3 minutes; `kmsRequests` against CloudTrail is recorded, not
 > checked (6 against 19, [§11](#11-observability-and-per-tenant-cost-attribution));
@@ -63,7 +66,9 @@ construct with a demo stack (ADR-0012).
   `documents/<t>/` under its own session tagged with the tenant.
 - Seven **base roles** (one per function) and three **tenant roles**
   (assumed with a `TenantId` session tag) carry the work; every call made
-  for a tenant is signed by a tenant-role session (ADR-0003).
+  for a tenant is signed by a tenant-role session (ADR-0003). The
+  `ScopeRegistration` role, the `LogDrain` role and CDK's singleton
+  provider roles ([§3](#3-components)) sit outside the pipeline.
 
 ## 3. Components
 
@@ -91,9 +96,9 @@ at init.
 | `SweepFunction`, hourly (15 min) | `sweepRole` -> `tenantProcessRole` | `sweep/handler.ts` |
 | `RegistryWatchFunction`, stream filter `SK = KEY`, on-failure queue | `watchRole` | `registry-watch/handler.ts` |
 | `KeyDrainFunction` + `Custom::TenantKeyDrain` | `platformRole` | `platform/drain.ts` |
-| `ScopeRegistration` | tenant-identity's `PlatformInvokePolicy` less a Deny on `/platform/tenants*` | `shared/scope-registration.*.ts` |
-| `LogDrain` (90 s hold on log-group deletion) | a role with no permissions | `shared/log-drain.ts` |
-| Alarms: key binding; `PutKeyPolicy` (rule, audit queue, alarm) | - | `construct/alarms.ts` |
+| `ScopeRegistration` (copied, ADR-0015) | tenant-identity's `PlatformInvokePolicy` less a Deny on `/platform/tenants*` | `shared/scope-registration.*.ts` |
+| `LogDrain` (90 s hold on log-group deletion; copied, ADR-0015) | a role with no permissions | `shared/log-drain.ts` |
+| Alarms: key binding; `PutKeyPolicy` (rule, audit queue, alarm; ADR-0016) | - | `construct/alarms.ts` |
 | Three Contributor Insights rules | - | `construct/observability.ts` |
 | Demo validators `pdf-pages`, `test-switch` | own logs-only roles | `../examples/validator-pdf-pages`, `validators/` |
 
@@ -112,9 +117,9 @@ plus `sts:TagSession` on exactly one tenant role (`src/construct/roles.ts`).
 | `authoriserRole` | its log group only |
 | `apiRole` | assume `tenantUploadRole` |
 | `processorRole` | assume `tenantProcessRole`; receive, delete, change visibility on the queue; `events:PutEvents` on the bus; invoke each bound validator; `dynamodb:UpdateItem` with `dynamodb:Attributes` within `[PK, SK, keyStatus, lastKeyCheckAt, updatedAt]` and `ReturnValues NONE` (sets `REVOKED`) |
-| `keyFactoryRole` | `kms:CreateKey` with `KeySpec SYMMETRIC_DEFAULT`, `KeyOrigin AWS_KMS`, `KeyUsage ENCRYPT_DECRYPT`, `MultiRegion false`; `kms:TagResource` with `Null aws:RequestTag/TenantId = false` and `aws:TagKeys` within `[TenantId, tei:stack]`; the statement 1 actions of [§5.1](#51-vendor-key-as-built) on this account's keys and tenant aliases; `PutItem`, `UpdateItem`, `ConditionCheckItem`, `GetItem` on the table; assume `tenantPlatformRole`; Deny `PutKeyPolicy`, `CreateGrant`, `UntagResource`; the tenant-key use Deny; with `tenantThrottle`, `apigateway:POST`/`GET` on `/apikeys`, `/usageplans`, `/usageplans/*/keys` |
+| `keyFactoryRole` | `kms:CreateKey` with `KeySpec SYMMETRIC_DEFAULT`, `KeyOrigin AWS_KMS`, `KeyUsage ENCRYPT_DECRYPT`, `MultiRegion false`; `kms:TagResource` with `Null aws:RequestTag/TenantId = false` and `aws:TagKeys` within `[TenantId, tei:stack]`; the statement 1 actions of [§5.1](#51-vendor-key-as-built) on this account's keys and tenant aliases; `PutItem`, `UpdateItem`, `ConditionCheckItem`, `GetItem` on the table, no attribute Deny (ADR-0017); assume `tenantPlatformRole`; Deny `PutKeyPolicy`, `CreateGrant`, `UntagResource`; the tenant-key use Deny; with `tenantThrottle`, `apigateway:POST`/`GET` on `/apikeys`, `/usageplans`, `/usageplans/*/keys` |
 | `platformRole` | assume `tenantPlatformRole`; the statement 1 actions of [§5.1](#51-vendor-key-as-built) on this account's keys; `ListKeys`; table-wide `GetItem`, `Query`, `Scan`, `UpdateItem`, `DeleteItem`, `ConditionCheckItem`; Deny `UpdateItem` naming `keyArn` or `tier`; Deny `CreateKey`, `TagResource`, `UntagResource`, `PutKeyPolicy`, `CreateGrant`; the tenant-key use Deny; with `tenantThrottle`, `apigateway:DELETE` on `/apikeys/*` |
-| `sweepRole` | assume `tenantProcessRole`; `Query` on the GSIs; `GetItem`, `UpdateItem` with the same `keyArn`/`tier` Deny; `events:PutEvents` on the bus |
+| `sweepRole` | assume `tenantProcessRole`; `Query` on the GSIs; `GetItem`, `UpdateItem` with the same `keyArn`/`tier` Deny; `events:PutEvents` on the bus (ADR-0017) |
 | `watchRole` | read the stream; `PutMetricData` in namespace `TenantEncryptedIngestion`; `UpdateItem` with `LeadingKeys = SYSTEM`; send to its on-failure queue |
 
 The usage plan is found by name at run time: passing its id to the
@@ -125,8 +130,8 @@ factory's environment is a CloudFormation cycle.
 `ReEncrypt*` on `*` with `Null aws:ResourceTag/TenantId = false`, never
 unconditioned: Lambda decrypts a function's environment variables with
 `kms:Decrypt` under the execution role (the untagged `aws/lambda` key), and
-an unconditioned Deny stops the function at init with no log line. The
-other base roles hold no KMS Allow.
+an unconditioned Deny stops the function at init with no log line
+(ADR-0013). The other base roles hold no KMS Allow.
 
 ### 4.2 Tenant roles
 
@@ -153,7 +158,8 @@ Sessions last 3600 s and are cached per tenant, reused only with the
 caller's minimum left (URL TTL + 60 s in the API, T in the processor, 5
 minutes in the sweep). `RoleSessionName` is `t-<tenantId>-<suffix>`, the
 suffix the last 16 characters of the delivery id or an operation name of
-the call that first assumed the cached session.
+the call that first assumed the cached session; the sweep's is always
+`sweep`.
 
 ### 4.3 DynamoDB write rules
 
@@ -306,8 +312,8 @@ each handler. REST, Regional, stage `v1`, stage throttle 100 rps / burst
 | Operation | Route | Statuses |
 |---|---|---|
 | `CreateTenantKey` | `POST /platform/tenants/{tenantId}/key` | 201; 409 row or binding exists; 422 `KeyNotUsable` (key in the vendor account, untagged, tagged for another tenant, another tenant's key); 400 `UnsupportedInDeployment` |
-| `GetTenantKey` | `GET .../key` | 200, `keyStatus` refreshed by the probe; 404 |
-| `RotateTenantKey` | `POST .../key/rotate` | 200 `vendor-key`; 400 `UnsupportedInTier`; 409 not `ACTIVE`, limit reached or rotation in progress |
+| `GetTenantKey` | `GET .../key` | 200, `keyStatus` refreshed by the probe for an `ACTIVE` or `REVOKED` row, returned as stored for `CREATING` or `DELETING`; 404 without a row |
+| `RotateTenantKey` | `POST .../key/rotate` | 200 `vendor-key`; 400 `UnsupportedInTier`; 404 without a row; 409 not `ACTIVE`, limit reached or rotation in progress |
 | `DeleteTenantKey` | `DELETE .../key` | 202; 204 when absent |
 | `CreateDelivery` | `POST /tenant/deliveries` | 201 `{deliveryId, uploadUrl, headers, expiresAt}`; 400; 403 `Forbidden` without the scope; 409 `TenantKeyUnavailable` (key missing or not `ACTIVE`); 429 `TooManyDeliveries` |
 | `GetDelivery` | `GET /tenant/deliveries/{deliveryId}` | 200; 404 outside the caller's tenant |
@@ -405,7 +411,7 @@ at most 900 s or synth fails (`src/construct/pipeline.ts`); the demo's T is
 Every S3 call at steps 3 to 8 goes through `guardS3`
 (`src/processor/probe.ts`). The probe runs on a 403 or `AccessDenied` and
 on any error whose code or message names KMS (`kms:` or `KMS.`), since a
-disabled or pending-deletion key is a 400 from S3. The classifier matches
+disabled or pending-deletion key is a 400 from S3 (ADR-0016). The classifier matches
 the KMS code in the message; the probe through S3 confirms, under the same
 session: `PutObject` of `ingest/<t>/_probe/<ulid>` with the registry key,
 `GetObject`, delete that version (`src/shared/probe.ts`). A KMS-sourced
@@ -423,7 +429,7 @@ tenant `REVOKED` (ADR-0004). Step 8: a key disabled mid-delivery gave
   `aws:PrincipalArn` is `redriveOperatorRole`.
 - DLQ: Deny `SendMessage` unless `aws:SourceArn` is the queue. SQS's own
   move meets it (step 7b), and a redrive by the operator worked.
-- Bus: Deny `PutEvents` unless `processorRole` or `sweepRole`. Readers are
+- Bus: Deny `PutEvents` unless `processorRole` or `sweepRole` (ADR-0017). Readers are
   filtered: any rule in the vendor account sees every tenant's events.
 - Event detail is `{tenantId, deliveryId, landedKey?, sizeBytes?,
   contentType?, reason?}` through an allowlist: no file name, key ARN or
@@ -474,7 +480,7 @@ grants the processor `lambda:InvokeFunction` and `fn` nothing; `name` is
 - one log line per call; never the URL, body or error message.
 
 The processor does not abort a validator at its declared timeout; the
-declared timeout feeds T. A validator past it meets its own function
+declared timeout feeds T (ADR-0018). A validator past it meets its own function
 timeout (an error) or the processor's, which leaves the lease to the next
 receive or the sweep (step 7c: `test-switch` declares 60 s and may run 5
 minutes). Step 7b: a 5-page PDF was `pdf-pages:TOO_MANY_PAGES` without
@@ -557,7 +563,10 @@ and the capture queue, redrive and access-log reader roles.
 
 ## 13. Integration test
 
-`scripts/integ.sh` with `test/integ/app.ts` and `test/integ.ingestion.ts`:
+`scripts/integ.sh` with `test/integ/app.ts` and `test/integ.ingestion.ts`,
+driven by the CDK CLI; the driver reads the test's own stacks' outputs from
+`--outputs-file` as test-only wiring, standing for the construct
+properties a consumer reads in its own CDK code (ADR-0014):
 
 1. **Account guard**: refuses an account without the `tei:test-account`
    Organizations tag or the SSM parameter
@@ -572,7 +581,10 @@ and the capture queue, redrive and access-log reader roles.
    `maxInFlightPerTenant 5`, `tenantThrottle`), and with
    `TEI_TENANT_KEY_PROFILE` a second account for `tenant-key`.
 4. Runs the steps 0 (prelude: tenants A, B, D) to 11, named as spec §10;
-   step 8 changes B's key in the second account.
+   step 8 changes B's key in the second account. Before it exits, the
+   driver deletes the tenants step 0 created in the shared pool
+   (`DELETE /platform/tenants/{tenantId}`) and names any it could not
+   delete; the pool itself stays.
 5. Teardown (step 12) from the EXIT trap: `cdk destroy --all`, then fail on
    any stack with the prefix or tagged key not `PendingDeletion`.
 
@@ -599,8 +611,12 @@ Open:
   still admitted the request was not established; the tenant is refused
   either way.
 - **`PutKeyPolicy` alarm** needs CloudTrail management events on
-  EventBridge in the account.
-- **Security scans** not yet run.
+  EventBridge in the account (ADR-0016).
+- **IAM Access Analyzer check of the key policy** (spec §7.2): the unit
+  test running `check-no-new-access` against a baseline holding every Deny
+  is not implemented, since it calls an AWS API. The template tests in
+  `test/key-policy.test.ts` and integ step 5 on the scratch key are the
+  control (ADR-0002 note, threat model M-17).
 
 Refinements of the specification, implemented as described above:
 
@@ -608,10 +624,23 @@ Refinements of the specification, implemented as described above:
   GSI; `boundTenantId` on `KEYARN#`.
 - `sweepRole` holds `events:PutEvents` and is exempt from the bus Deny;
   `keyFactoryRole` holds `GetItem`, a table-wide registry grant (spec:
-  `KEY`, `KEYARN#`, `SYSTEM` items) and the API Gateway routes.
-- The probe also runs on an error naming KMS; the sweep reads a HEAD 403 as
-  absent; the usage plan is found by name; the processor does not abort a
-  validator at its declared timeout.
+  `KEY`, `KEYARN#`, `SYSTEM` items) and the API Gateway routes (ADR-0017).
+- The probe also runs on an error naming KMS (ADR-0016); the sweep reads a
+  HEAD 403 as absent, since `tenantProcessRole` has no `ListBucket`; the
+  usage plan is found by name; the processor does not abort a validator at
+  its declared timeout (ADR-0018).
+- `RotateTenantKey` is 404 without a row and 409 when the key is not
+  `ACTIVE` or a rotation is in progress; `GetTenantKey` is 404 without a
+  row and returns a `CREATING` or `DELETING` row unprobed.
+- `RoleSessionName`'s suffix names the call that first assumed the cached
+  session, not every call made with it; the sweep's is `sweep`.
+- `TestProbeRole` holds `GetObject` and `PutObject` on every sample bucket
+  (spec §10's test-aid bullet: Get only on the ingestion bucket), because
+  step 5 needs its PUT to the ingestion bucket refused by the bucket
+  policy, not by its own identity policy.
+- The integration test is driven by the CDK CLI and reads the test's own
+  stack outputs (ADR-0014); `LogDrain` and `ScopeRegistration` are copies
+  of agentic-runtime-isolation's (ADR-0015).
 - Another tenant's `keyArn` is 422 (spec step 1: 409); a disabled or
   pending-deletion key is an S3 400 (spec steps 8, 11: 403).
 - `Forbidden` is a code §5.3 lacks; `RotationLimitReached` is a 409

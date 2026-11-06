@@ -1,6 +1,10 @@
+<!--
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+SPDX-License-Identifier: MIT-0
+-->
 # Specification: Per-Tenant Encrypted Ingestion for Agentic Applications
 
-> **Status:** Draft, 2026-11-05. Reviewed three times by independent blind reviewers before implementation; the review history is in [`threat-model.md`](../threat-model.md), appendix A.
+> **Status:** Accepted 2026-11-05; implemented 2026-11-06. Reviewed three times by independent blind reviewers before implementation; the review history is in [`threat-model.md`](../threat-model.md), appendix A.
 
 > **Amended 2026-11-06 (architecture.md §8):** §5.3 adds `Forbidden` (403,
 > the route's scope missing); `RotationLimitReached` is the message of a 409
@@ -11,7 +15,14 @@
 > check refuses it before the `KEYARN#` uniqueness check runs, and the 409
 > branch is a unit test (§5.1, §10 step 1).
 >
-> **Amended 2026-11-06 (architecture.md §6, §9.2; ADR-0007):** S3 surfaces
+> **Amended 2026-11-06 (architecture.md §8):** `RotateTenantKey` is also 404
+> `NotFound` when the tenant has no key row, and 409 `Conflict` when the key
+> is not `ACTIVE` or a rotation of it is already in progress.
+> `GetTenantKey` is 404 `NotFound` when the row is missing; for a row that
+> is neither `ACTIVE` nor `REVOKED` (`CREATING`, `DELETING`) it returns the
+> row without a probe (§5.1).
+>
+> **Amended 2026-11-06 (ADR-0016; architecture.md §6, §9.2):** S3 surfaces
 > a disabled key as 400 `KMS.DisabledException` and a key pending deletion
 > as 400 `KMS.KMSInvalidStateException`; the processor runs the through-S3
 > probe on any S3 error that is a 403 or names KMS and classifies by the
@@ -20,14 +31,27 @@
 > handler, while API Gateway's usage-plan cache lasts), and the in-flight
 > PUT fails with 400 or 403 (§10 step 11).
 >
-> **Amended 2026-11-06 (architecture.md §4.1, §9.3):** `sweepRole` holds
-> `events:PutEvents` and is exempt from the bus Deny: it republishes owed
-> events and publishes `DeliveryRejected` for abandoned leases (§7.1, §7.7).
+> **Amended 2026-11-06 (ADR-0017; architecture.md §4.1, §9.3):** `sweepRole`
+> holds `events:PutEvents` and is exempt from the bus Deny: it republishes
+> owed events and publishes `DeliveryRejected` for abandoned leases (§7.1,
+> §7.7).
 >
-> **Amended 2026-11-06 (architecture.md §4.1):** `keyFactoryRole` also
-> holds `dynamodb:GetItem` (to resume a `CREATING` row) and, with
+> **Amended 2026-11-06 (ADR-0017; architecture.md §4.1):** `keyFactoryRole`
+> also holds `dynamodb:GetItem` (to resume a `CREATING` row) and, with
 > `tenantThrottle`, the API Gateway usage-plan key actions; its registry
-> grant is table-wide, filtered like `platformRole`'s (§7.1).
+> grant is table-wide `PutItem`, `UpdateItem`, `ConditionCheckItem` and
+> `GetItem`, without the `keyArn`/`tier` Deny of `platformRole` (§7.1).
+>
+> **Amended 2026-11-06 (architecture.md §3, §4):** P-8 and §7.1 count seven
+> base and three tenant roles, the pipeline's. The deployment also has the
+> `ScopeRegistration` custom-resource role (ADR-0015), the `LogDrain` role
+> (no permissions) and CDK's singleton provider roles, all outside the
+> pipeline (P-8, §7.1).
+>
+> **Amended 2026-11-06 (architecture.md §4.2):** sessions are cached per
+> tenant, so the `RoleSessionName` suffix names whichever delivery or
+> operation first assumed the session, not every call made with it; the
+> sweep's suffix is always `sweep` (§7.1).
 >
 > **Amended 2026-11-06 (architecture.md §7, §9.4):** `statusBucket` takes a
 > third value, `OWED` (a terminal row whose event is not yet published; the
@@ -35,22 +59,43 @@
 > serves the sweep's `REVOKED` re-check and the `inFlight` reconcile; the
 > `KEYARN#` item carries `boundTenantId` (§4.1, §4.2, §8).
 >
-> **Amended 2026-11-06 (architecture.md §14; ADR-0002):** the
-> `PutKeyPolicy` alarm is an EventBridge rule on the CloudTrail
-> `PutKeyPolicy` event whose target is an SQS audit queue, alarmed on the
-> rule's `TriggeredRules` metric, not a CloudWatch Logs metric filter; a
-> CloudTrail trail delivering management events to EventBridge is a
-> deployer prerequisite (§6.1, §7.2; threat model M-25).
+> **Amended 2026-11-06 (architecture.md §9.4):** the sweep treats a
+> `HeadObject` 403 on the drop as absent, like 404: `tenantProcessRole` has
+> no `s3:ListBucket`, so S3 answers 403 for a missing key (§8).
 >
-> **Amended 2026-11-06 (architecture.md §10, §14):** the processor does not
-> abort a validator at the validator's declared timeout; that timeout only
-> sizes the processor's timeout T, and a validator that hangs makes the
+> **Amended 2026-11-06 (ADR-0016; ADR-0002):** the `PutKeyPolicy` alarm is
+> an EventBridge rule on the CloudTrail `PutKeyPolicy` event whose target
+> is an SQS audit queue, alarmed on the rule's `TriggeredRules` metric, not
+> a CloudWatch Logs metric filter; a CloudTrail trail delivering management
+> events to EventBridge is a deployer prerequisite (§6.1, §7.2; threat
+> model M-25).
+>
+> **Amended 2026-11-06 (ADR-0002; architecture.md §14):** the unit test
+> running IAM Access Analyzer `check-no-new-access` against a baseline
+> holding every Deny (§7.2, last paragraph) is not implemented: it calls an
+> AWS API, which the unit tests do not. The control is the template tests
+> of `test/key-policy.test.ts` plus §10 step 5; the gap is listed as open
+> (§7.2).
+>
+> **Amended 2026-11-06 (ADR-0018; architecture.md §10):** the processor does
+> not abort a validator at the validator's declared timeout; that timeout
+> only sizes the processor's timeout T, and a validator that hangs makes the
 > processor itself time out, after which the sweep abandons the lease. A
 > known gap (P-11, §3.5, §8).
 >
-> **Amended 2026-11-06 (architecture.md §13):** the integration profile's
-> `uploadUrlTtlSeconds` is 120, not 60, so presigned PUTs of the slower
-> steps stay valid; the `EXPIRED` step waits TTL plus grace (§10).
+> **Amended 2026-11-06 (ADR-0014; architecture.md §13):** the integration
+> profile's `uploadUrlTtlSeconds` is 120, not 60, so presigned PUTs of the
+> slower steps stay valid; the `EXPIRED` step waits TTL plus grace. The
+> driver is the CDK CLI in `scripts/integ.sh` and reads the test's own
+> stacks' outputs through `--outputs-file` as test-only wiring (§10).
+>
+> **Amended 2026-11-06 (test/integ/test-aid-stack.ts):** §10's test-aid
+> bullet gives `TestProbeRole` `s3:GetObject` on the ingestion bucket and
+> Get and Put on the scratch bucket only, but step 5 has it `PutObject` on
+> the ingestion bucket so that the 403 comes from the bucket policy's Deny,
+> not from its identity policy. The bullet contradicted the step; as built
+> the role holds `GetObject` and `PutObject` on every bucket of the sample
+> (`tenantencryptedingestion*`), and the step governs (§10).
 >
 > **Amended 2026-11-06 (architecture.md §11, §14):** `kmsRequests` as
 > metered by the processor (6 for one accepted delivery with two
@@ -62,7 +107,8 @@
 > the second account's credentials for the whole run (its `tenant-key` steps
 > fall at minutes ~10 and ~60); tenant-identity's access tokens live five
 > minutes, so the driver re-issues a token on 401; the shared pool stays a
-> fixture the run never destroys (§6.1, §10).
+> fixture the run never destroys, and the run deletes the tenants it created
+> in it (§6.1, §10).
 >
 > **Amended 2026-11-06 (architecture.md §6):** S3 asks KMS for the data key
 > before it evaluates the bucket policy, so §7.4's principal-scoped Deny
@@ -630,9 +676,9 @@ plus `sts:TagSession`.
 | `authoriserRole` | token authoriser | logs only |
 | `apiRole` | API Lambda | assume `tenantUploadRole` only |
 | `processorRole` | processor | assume `tenantProcessRole` only; receive, delete, change visibility on the queue; `events:PutEvents` on the bus; invoke bound validators; `dynamodb:UpdateItem` with `ForAllValues:StringEquals dynamodb:Attributes = [PK, SK, keyStatus, lastKeyCheckAt, updatedAt]`, `ReturnValues NONE` (sets `REVOKED`) |
-| `keyFactoryRole` | `CreateTenantKey` | `kms:CreateKey` with `StringEquals` `kms:KeySpec = SYMMETRIC_DEFAULT`, `kms:KeyOrigin = AWS_KMS`, `kms:KeyUsage = ENCRYPT_DECRYPT` and `"Bool": {"kms:MultiRegion": "false"}` (the call passes all four); `kms:TagResource` with `Null aws:RequestTag/TenantId = false` and `ForAllValues:StringEquals aws:TagKeys = [TenantId, tei:stack]`; `kms:CreateAlias`, `EnableKeyRotation`, `DescribeKey`, `ScheduleKeyDeletion` (undo); table-wide `dynamodb:PutItem`, `UpdateItem`, `ConditionCheckItem` and `GetItem` (to resume a `CREATING` row), without the `keyArn`/`tier` attribute Deny of `platformRole` (the factory is the one writer of the binding, guarded in code by `attribute_not_exists(keyArn)` and watched by the stream; its `UpdateItem` to `ACTIVE` names `keyArn` in its condition); with `tenantThrottle`, the usage-plan key actions `apigateway:POST` and `GET` on `/apikeys`, `/usageplans` and `/usageplans/*/keys`; assume `tenantPlatformRole`; Deny `kms:PutKeyPolicy`, `CreateGrant`, `UntagResource`; Deny every use action on keys tagged `TenantId` (`Null aws:ResourceTag/TenantId = false`: Lambda decrypts a function's environment variables under its execution role with the untagged `aws/lambda` key, so the Deny must not reach that key) |
-| `platformRole` | other `/platform/*`, drain | assume `tenantPlatformRole`; `kms:DescribeKey`, `DeleteAlias`, `GetKeyRotationStatus`, `RotateKeyOnDemand`, `ListResourceTags`, `GetKeyPolicy`, `ScheduleKeyDeletion`, `CancelKeyDeletion`, `ListKeys`; `apigateway:DELETE` on the plan's keys (offboarding); table-wide `GetItem`, `Query`, `Scan`, `UpdateItem`, `DeleteItem`, `ConditionCheckItem`, with `UpdateItem` denied on `ForAnyValue:StringEquals dynamodb:Attributes = [keyArn, tier]`; Deny `kms:CreateKey`, `TagResource`, `UntagResource`, `PutKeyPolicy`, `CreateGrant`; Deny every use action on keys tagged `TenantId` (as for `keyFactoryRole`) |
-| `sweepRole` | sweep | assume `tenantProcessRole` only; `Query` on the two GSIs, `GetItem`, `UpdateItem` with the same Deny; `events:PutEvents` on the bus, exempt from the bus Deny (§7.7): it republishes owed events and publishes `DeliveryRejected` for abandoned leases |
+| `keyFactoryRole` | `CreateTenantKey` | `kms:CreateKey` with `StringEquals` `kms:KeySpec = SYMMETRIC_DEFAULT`, `kms:KeyOrigin = AWS_KMS`, `kms:KeyUsage = ENCRYPT_DECRYPT` and `"Bool": {"kms:MultiRegion": "false"}` (the call passes all four); `kms:TagResource` with `Null aws:RequestTag/TenantId = false` and `ForAllValues:StringEquals aws:TagKeys = [TenantId, tei:stack]`; `kms:CreateAlias`, `EnableKeyRotation`, `DescribeKey`, `ScheduleKeyDeletion` (undo); table-wide `dynamodb:PutItem`, `UpdateItem`, `ConditionCheckItem` and `GetItem` (to resume a `CREATING` row), without the `keyArn`/`tier` attribute Deny of `platformRole` (the factory is the one writer of the binding, guarded in code by `attribute_not_exists(keyArn)` and watched by the stream; its `UpdateItem` to `ACTIVE` names `keyArn` in its condition; ADR-0017); with `tenantThrottle`, the usage-plan key actions `apigateway:POST` and `GET` on `/apikeys`, `/usageplans` and `/usageplans/*/keys`; assume `tenantPlatformRole`; Deny `kms:PutKeyPolicy`, `CreateGrant`, `UntagResource`; Deny every use action on keys tagged `TenantId` (`Null aws:ResourceTag/TenantId = false`: Lambda decrypts a function's environment variables under its execution role with the untagged `aws/lambda` key, so the Deny must not reach that key; ADR-0013) |
+| `platformRole` | other `/platform/*`, drain | assume `tenantPlatformRole`; `kms:DescribeKey`, `DeleteAlias`, `GetKeyRotationStatus`, `RotateKeyOnDemand`, `ListResourceTags`, `GetKeyPolicy`, `ScheduleKeyDeletion`, `CancelKeyDeletion`, `ListKeys`; `apigateway:DELETE` on the plan's keys (offboarding); table-wide `GetItem`, `Query`, `Scan`, `UpdateItem`, `DeleteItem`, `ConditionCheckItem`, with `UpdateItem` denied on `ForAnyValue:StringEquals dynamodb:Attributes = [keyArn, tier]`; Deny `kms:CreateKey`, `TagResource`, `UntagResource`, `PutKeyPolicy`, `CreateGrant`; Deny every use action on keys tagged `TenantId` (as for `keyFactoryRole`; ADR-0013) |
+| `sweepRole` | sweep | assume `tenantProcessRole` only; `Query` on the two GSIs, `GetItem`, `UpdateItem` with the same Deny; `events:PutEvents` on the bus, exempt from the bus Deny (§7.7, ADR-0017): it republishes owed events and publishes `DeliveryRejected` for abandoned leases |
 | `watchRole` | registry watch | `dynamodb:GetRecords`, `GetShardIterator`, `DescribeStream`, `ListStreams` on the stream; `cloudwatch:PutMetricData`; `UpdateItem` with `LeadingKeys = SYSTEM`; send to its on-failure queue |
 | `tenantUploadRole` | `apiRole` | `s3:PutObject` on `ingest/${tag}/*` with SSE-KMS; `kms:GenerateDataKey` on `*` with `aws:ResourceTag/TenantId = ${tag}` and `kms:ViaService = s3.<region>.amazonaws.com`; `kms:DescribeKey` with the tag; registry statement with allowlist `PK, SK, objectKey, fileName, declaredContentType, declaredSizeBytes, status, statusBucket, urlExpiresAt, createdBy, createdAt, updatedAt, inFlight` |
 | `tenantProcessRole` | `processorRole`, `sweepRole` | `s3:GetObject`, `DeleteObjectVersion` on `ingest/${tag}/*`; `s3:PutObject` with SSE-KMS on `ingest/${tag}/_probe/*` and `documents/${tag}/*`; `kms:Decrypt`, `GenerateDataKey` with tag and ViaService; `DescribeKey` with the tag; registry statement below |
