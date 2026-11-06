@@ -6,8 +6,8 @@ SPDX-License-Identifier: MIT-0
 
 > Status: **Implemented (v2).** 102 current threats and 80 current mitigations
 > (ids T-1 to T-105 and M-1 to M-83; T-14, T-15, T-41, M-8, M-9 and M-31 are
-> [retired with v1](#retired-v1)). Last review 2026-11-05. Last green integration
-> run: run 14, 2026-11-05, eu-central-1, 57/57 steps, commit `6acb991` on PR 19.
+> [retired with v1](#retired-v1)). Last review 2026-11-06. Last green integration
+> run: run 15, 2026-11-06, eu-central-1, 58/58 steps, commit `3b2d727` on PR 21.
 > History is in the [ADRs](./adr/) and the git log.
 
 Scope: the `SharedIngress` and `AgentBackend` constructs (one ingress, one

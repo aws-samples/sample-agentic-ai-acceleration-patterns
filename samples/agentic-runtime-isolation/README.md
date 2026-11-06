@@ -486,8 +486,8 @@ It deploys six stacks at once (`--concurrency 6`):
 
 A run takes **about 45 minutes** and costs **about $3 per run** at on-demand
 rates, mostly AgentCore Runtime session time and the Gateways across six
-stacks. Last green integration run: run 14, 2026-11-05, eu-central-1,
-57/57 steps; timings and coverage are in the
+stacks. Last green integration run: run 15, 2026-11-06, eu-central-1,
+58/58 steps; timings and coverage are in the
 [`architecture.md` status block](./architecture.md).
 
 Steps 3 to 24 run on both all-on stacks except 9-drain and 12-late, which

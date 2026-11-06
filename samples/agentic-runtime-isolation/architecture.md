@@ -4,9 +4,10 @@ SPDX-License-Identifier: MIT-0
 -->
 # Agentic Runtime Isolation: Architecture
 
-> **Status: implemented and verified.** Last green integration run: run 14,
-> 2026-11-05, eu-central-1, 57/57 steps, deploy 280 s, steps 1,842 s, key
-> rotation 167 s, teardown clean (commit 6acb991). The run used a sandbox
+> **Status: implemented and verified.** Last green integration run: run 15,
+> 2026-11-06, eu-central-1, 58/58 steps, deploy 272 s, whole run about 36
+> min, key rotation 172 s, teardown clean (commit 3b2d727 on PR 21). The run
+> used a sandbox
 > account and `scripts/integ.sh` (the CDK CLI driver, ADR-0044) with six
 > stacks (`api-gateway`, `agentcore-gateway`, `session-off`, `session-user`,
 > `limits`, `multi-tenant`); it covered the 2026-11-05 scale changes
