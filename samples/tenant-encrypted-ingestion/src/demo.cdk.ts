@@ -143,12 +143,16 @@ export function parseDemoContext(read: ContextReader): DemoContext {
   };
 }
 
-/** The spec §10 test profile. */
+/**
+ * The spec §10 test profile, the one source for scripts/integ.sh (through
+ * test/integ/app.ts). The URL TTL is 120 s so the presigned PUTs of the
+ * slower integration steps stay valid.
+ */
 export const INTEG_PROFILE: Partial<TenantEncryptedIngestionProps> = {
   maxReceiveCount: 1,
   visibilityTimeoutFactor: 2,
   abandonGraceSeconds: 60,
-  uploadUrlTtlSeconds: 60,
+  uploadUrlTtlSeconds: 120,
   maxInFlightPerTenant: 5,
   tenantThrottle: { rateLimit: 10, burstLimit: 20 },
 };

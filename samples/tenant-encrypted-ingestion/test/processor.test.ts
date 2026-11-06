@@ -82,7 +82,7 @@ function sqsEvent(key = OBJECT_KEY, receiveCount = 1, extraDetail: object = {}):
   };
 }
 
-const KEY_ROW = { PK: 'TENANT#tenant-a', SK: 'KEY', tier: 'vendor-key', keyArn: KEY_ARN_A, keyStatus: 'ACTIVE', inFlight: 1 };
+const KEY_ROW = { PK: 'TENANT#tenant-a', SK: 'KEY', tier: 'vendor-key', keyArn: KEY_ARN_A, keyStatus: 'ACTIVE', inFlight: 1, createdAt: '2026-11-01T00:00:00.000Z' };
 const AWAITING = {
   PK: 'TENANT#tenant-a',
   SK: `DELIVERY#${DELIVERY_ID}`,
@@ -440,6 +440,54 @@ describe('the probe classifier (M-18)', () => {
     const probe = s3.commandCalls(PutObjectCommand)[0].args[0].input;
     expect(probe.Key).toMatch(/^ingest\/tenant-a\/_probe\/[0-9A-Z]{26}$/);
     expect(probe).toMatchObject({ SSEKMSKeyId: KEY_ARN_A, BucketKeyEnabled: false, IfNoneMatch: '*' });
+  });
+
+  it('sets REVOKED before the drop delete and the event, so a failed publish still leaves the key REVOKED', async () => {
+    rows(AWAITING);
+    s3.on(HeadObjectCommand).rejects(s3Error('AccessDenied', 403));
+    s3.on(PutObjectCommand).rejects(s3Error('KMS.DisabledException', 400, 'The key is disabled'));
+    events.on(PutEventsCommand).rejects(new Error('EventBridge unavailable'));
+    const result = await processor()(sqsEvent());
+    // The publish failure retries the message ...
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: MESSAGE_ID }]);
+    // ... but the key row was already REVOKED.
+    const revoke = ddb
+      .commandCalls(UpdateCommand)
+      .map((c) => c.args[0].input)
+      .find((i) => i.Key!.SK === 'KEY');
+    expect(revoke?.ExpressionAttributeValues![':set_keyStatus']).toBe('REVOKED');
+    expect(revoke?.ConditionExpression).toBe('#keyStatus = :active');
+    const seen = order().filter((l) => ['TransactWrite', 'Update', 'DeleteObject', 'PutEvents'].includes(l));
+    expect(seen.slice(seen.indexOf('TransactWrite'))).toEqual(['TransactWrite', 'Update', 'DeleteObject', 'PutEvents']);
+  });
+
+  it('on re-entry with a KEY_UNAVAILABLE row whose event is owed, sets REVOKED (idempotently) and publishes', async () => {
+    rows({ ...AWAITING, status: 'KEY_UNAVAILABLE', statusBucket: 'OWED', reason: 'KMS.DisabledException', dropVersionId: 'v-drop' });
+    ddb.on(UpdateCommand).callsFake((input: { Key: { SK: string } }) => {
+      if (input.Key.SK === 'KEY') {
+        throw Object.assign(new Error('already revoked'), { name: 'ConditionalCheckFailedException' });
+      }
+      return {};
+    });
+    const result = await processor()(sqsEvent());
+    expect(result.batchItemFailures).toEqual([]);
+    const revoke = ddb
+      .commandCalls(UpdateCommand)
+      .map((c) => c.args[0].input)
+      .find((i) => i.Key!.SK === 'KEY');
+    expect(revoke?.ExpressionAttributeValues![':set_keyStatus']).toBe('REVOKED');
+    expect(events.commandCalls(PutEventsCommand)[0].args[0].input.Entries![0].DetailType).toBe('DeliveryKeyUnavailable');
+  });
+
+  it('on re-entry with an owed KEY_UNAVAILABLE row, leaves a key onboarded after the delivery alone and still publishes', async () => {
+    rows(
+      { ...AWAITING, status: 'KEY_UNAVAILABLE', statusBucket: 'OWED', reason: 'KMS.DisabledException', dropVersionId: 'v-drop' },
+      { ...KEY_ROW, createdAt: '2026-11-06T00:00:00.000Z' },
+    );
+    const result = await processor()(sqsEvent());
+    expect(result.batchItemFailures).toEqual([]);
+    expect(ddb.commandCalls(UpdateCommand).filter((c) => c.args[0].input.Key!.SK === 'KEY')).toHaveLength(0);
+    expect(events.commandCalls(PutEventsCommand)[0].args[0].input.Entries![0].DetailType).toBe('DeliveryKeyUnavailable');
   });
 
   it('throws and never marks REVOKED when an S3 403 meets a succeeding probe (the pipeline is at fault)', async () => {

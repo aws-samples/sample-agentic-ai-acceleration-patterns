@@ -71,6 +71,11 @@ describe('demo stack', () => {
     const integ = synth({ identityParameterPlaceholders: 'true', integProfile: 'true' });
     integ.hasResourceProperties('AWS::SQS::Queue', { RedrivePolicy: Match.objectLike({ maxReceiveCount: 1 }) });
     integ.hasResourceProperties('AWS::ApiGateway::UsagePlan', {});
+    // The integration profile scripts/integ.sh relies on (S-3).
+    const timing = JSON.parse(integ.toJSON().Outputs.PipelineTiming.Value);
+    expect(timing).toEqual(
+      expect.objectContaining({ uploadUrlTtlSeconds: 120, maxReceiveCount: 1, abandonGraceSeconds: 60, maxInFlightPerTenant: 5 }),
+    );
   });
 
   it('applies profile overrides from context over the test profile, and the redrive operator to the queue Deny', () => {

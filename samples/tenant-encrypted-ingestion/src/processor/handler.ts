@@ -13,7 +13,8 @@
  *     wrong id is `AccessDenied`, never another tenant's row.
  *  2. Row and key row, `ConsistentRead`:
  *     - row or key row missing, or `DELETING`: delete the drop version, stop;
- *     - terminal: delete a leftover drop version; publish an owed event; stop;
+ *     - terminal: delete a leftover drop version; on an owed
+ *       KEY_UNAVAILABLE event set the key REVOKED; publish an owed event; stop;
  *     - `AWAITING_UPLOAD`, or `PROCESSING` with own or expired lease: lease;
  *     - `PROCESSING` with another live lease: stop.
  *  3. `HeadObject`: `dropEtag`, `dropVersionId`; key, storage class, size.
@@ -31,7 +32,8 @@
  * Copy, flip, delete, publish: a crash after the copy leaves a lease the
  * next receive re-takes (the copy repeats, pinned to the same ETag); a crash
  * after the flip leaves a terminal row, and step 2 removes the drop and
- * publishes the owed event.
+ * publishes the owed event. KEY_UNAVAILABLE runs row, key REVOKED, drop,
+ * event, so a failed publish never leaves the key ACTIVE.
  *
  * Every tenant-role write is an `UpdateItem` naming only
  * `PROCESS_ROLE_ATTRIBUTES` (src/shared/registry.ts); the one base-role
@@ -180,6 +182,31 @@ export function createProcessor(deps: ProcessorDependencies) {
     }
   }
 
+  /**
+   * Sets `REVOKED` on the key row under `processorRole`. Conditioned on
+   * `ACTIVE`, so a repeat (a retry, a second delivery) is a no-op.
+   */
+  async function revokeKey(tenantId: string, deliveryId: string): Promise<void> {
+    const iso = isoNow(now());
+    try {
+      await deps.baseDdb.send(
+        new UpdateCommand(
+          updateInput(
+            config.tableName,
+            keyRowKey(tenantId),
+            { set: { keyStatus: 'REVOKED', lastKeyCheckAt: iso, updatedAt: iso }, condition: '#keyStatus = :active', values: { ':active': 'ACTIVE' } },
+            PROCESSOR_KEY_ROW_ATTRIBUTES,
+          ),
+        ),
+      );
+      log.warn('tenant key revoked', { tenantId, deliveryId, keyStatus: 'REVOKED' });
+    } catch (error) {
+      if (!isConditionalCheckFailed(error)) {
+        throw error;
+      }
+    }
+  }
+
   async function publish(
     ddb: DynamoDBDocumentClient,
     type: DeliveryEventType,
@@ -299,6 +326,13 @@ export function createProcessor(deps: ProcessorDependencies) {
       }
       const type = eventTypeOf(row.status);
       if (type !== undefined && row.eventPublishedAt === undefined) {
+        // The key is revoked before the event is published: an owed
+        // KEY_UNAVAILABLE event means the revoke may not have landed. A key
+        // onboarded after the delivery (offboard, re-onboard, late redrive)
+        // is not the key that failed and stays as it is.
+        if (row.status === 'KEY_UNAVAILABLE' && keyRow.createdAt <= row.createdAt) {
+          await revokeKey(tenantId, deliveryId);
+        }
         await publish(ddb, type, tenantId, deliveryId, row);
       }
       log.info('terminal delivery re-entered', { tenantId, deliveryId, step: '2', status: row.status });
@@ -343,6 +377,11 @@ export function createProcessor(deps: ProcessorDependencies) {
       if (!(await finish(ddb, tenantId, deliveryId, record.messageId, terminal))) {
         log.info('lease lost before the flip', { tenantId, deliveryId });
         return;
+      }
+      // Fail closed (P-5): row KEY_UNAVAILABLE, then key REVOKED, before the
+      // drop delete and the event, so a failure in either cannot skip it.
+      if (terminal.status === 'KEY_UNAVAILABLE') {
+        await revokeKey(tenantId, deliveryId);
       }
       await guardS3(() => deleteVersion(s3, drop.key, terminal.dropVersionId ?? dropVersionId), probe).catch((error: unknown) => {
         if (!(error instanceof KeyUnavailableError)) {
@@ -490,24 +529,6 @@ export function createProcessor(deps: ProcessorDependencies) {
       }
       // Fail closed (P-5): the delivery, the key, the drop, the event; no retry.
       await done({ status: 'KEY_UNAVAILABLE', reason: error.kmsError, dropEtag, dropVersionId, kmsRequests: meter.total });
-      const iso = isoNow(now());
-      try {
-        await deps.baseDdb.send(
-          new UpdateCommand(
-            updateInput(
-              config.tableName,
-              keyRowKey(tenantId),
-              { set: { keyStatus: 'REVOKED', lastKeyCheckAt: iso, updatedAt: iso }, condition: '#keyStatus = :active', values: { ':active': 'ACTIVE' } },
-              PROCESSOR_KEY_ROW_ATTRIBUTES,
-            ),
-          ),
-        );
-        log.warn('tenant key revoked', { tenantId, deliveryId, keyStatus: 'REVOKED' });
-      } catch (revokeError) {
-        if (!isConditionalCheckFailed(revokeError)) {
-          throw revokeError;
-        }
-      }
     }
   }
 

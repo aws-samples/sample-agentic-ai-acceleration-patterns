@@ -76,8 +76,19 @@ describe('registry watch', () => {
 
   it('alarms on an INSERT while the tombstone exists', async () => {
     await watch()(event(record('INSERT', undefined, image(KEY_ARN_A))));
-    expect(ddb.commandCalls(UpdateCommand)[0].args[0].input.ConditionExpression).toBe('attribute_exists(#PK)');
+    const update = ddb.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(update.ConditionExpression).toBe('attribute_exists(#PK) AND #ttl > :now');
+    expect(update.ExpressionAttributeNames!['#ttl']).toBe('ttl');
+    expect(update.ExpressionAttributeValues![':now']).toBe(Math.floor(NOW / 1000));
     expect(cloudwatch.commandCalls(PutMetricDataCommand)).toHaveLength(1);
+  });
+
+  it('does not alarm on an INSERT after an expired tombstone TTL deletion has not removed yet', async () => {
+    // DynamoDB evaluates `#ttl > :now` false for the expired item and fails the condition.
+    ddb.on(UpdateCommand).rejects(Object.assign(new Error('c'), { name: 'ConditionalCheckFailedException' }));
+    await watch()(event(record('INSERT', undefined, image(KEY_ARN_A))));
+    expect(ddb.commandCalls(UpdateCommand)[0].args[0].input.ConditionExpression).toContain('#ttl > :now');
+    expect(cloudwatch.calls()).toHaveLength(0);
   });
 
   it('does not alarm on a first INSERT (no tombstone), and creates nothing', async () => {

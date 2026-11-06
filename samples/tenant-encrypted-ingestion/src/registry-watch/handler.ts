@@ -13,15 +13,17 @@
  * - `MODIFY` of a tenant key row that changes `keyArn` or `tier`: alarm.
  * - `REMOVE` of a tenant key row: write `SYSTEM / TOMBSTONE#<tenantId>`
  *   with a 7-day `ttl`.
- * - `INSERT` of a tenant key row while that tombstone exists: alarm (a
- *   re-onboarding within 7 days, which the operator acknowledges).
+ * - `INSERT` of a tenant key row while that tombstone is live (its `ttl`
+ *   not yet passed): alarm (a re-onboarding within 7 days, which the
+ *   operator acknowledges).
  *
  * The alarm is the `KeyBindingChanged` metric (src/construct/alarms.ts) plus
  * one WARN line naming the tenant and the case. Images are never logged:
  * only the tenant id from the key and the record's event name. `watchRole`
  * may only `UpdateItem` in the `SYSTEM` partition, so the tombstone check is
- * an update conditioned on the item existing (it creates nothing when the
- * tombstone is absent). A failed batch is retried and then goes to the
+ * an update conditioned on the item existing with a `ttl` in the future (it
+ * creates nothing when the tombstone is absent, and TTL deletion lagging
+ * expiry does not alarm). A failed batch is retried and then goes to the
  * on-failure SQS queue.
  */
 
@@ -100,13 +102,16 @@ export function createWatch(deps: WatchDependencies) {
             new UpdateCommand(
               updateInput(deps.tableName, tombstoneKey(tenantId), {
                 set: { reinsertedAt: isoNow(now()) },
-                condition: 'attribute_exists(#PK)',
+                // TTL deletion lags expiry: an expired tombstone still on the
+                // table is no tombstone.
+                condition: 'attribute_exists(#PK) AND #ttl > :now',
+                values: { ':now': Math.floor(now() / 1000) },
               }),
             ),
           );
         } catch (error) {
           if (isConditionalCheckFailed(error)) {
-            return undefined; // no tombstone: a first onboarding
+            return undefined; // no live tombstone: a first onboarding, or one past its TTL
           }
           throw error;
         }

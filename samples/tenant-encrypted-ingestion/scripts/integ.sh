@@ -140,16 +140,11 @@ fi
 # 2. The test-aid stack and the demo stack (test/integ/app.ts)
 # --------------------------------------------------------------------------
 step "2: synthesise and deploy ${TEST_AID_STACK}, ${DEMO_STACK}"
-# The spec §10 test profile. uploadUrlTtlSeconds is 120 s, not the spec's
-# 60 s, so the presigned PUTs of the slower steps stay valid; step 7 waits
-# TTL plus grace for EXPIRED.
-CONTEXT=(
-  --context maxReceiveCount=1
-  --context visibilityTimeoutFactor=2
-  --context abandonGraceSeconds=60
-  --context uploadUrlTtlSeconds=120
-  --context maxInFlightPerTenant=5
-)
+# The spec §10 test profile is INTEG_PROFILE (src/demo.cdk.ts), which
+# test/integ/app.ts always applies: uploadUrlTtlSeconds 120 s, so the
+# presigned PUTs of the slower steps stay valid; step 7 waits TTL plus grace
+# for EXPIRED. Only run-specific context goes here.
+CONTEXT=()
 if [[ -n "${TEI_TENANT_KEY_PROFILE:-}" ]]; then
   TENANT_KEY_ACCOUNT="$(aws sts get-caller-identity --profile "$TEI_TENANT_KEY_PROFILE" --query Account --output text)" \
     || fail "no credentials for TEI_TENANT_KEY_PROFILE"
@@ -160,7 +155,7 @@ if [[ -n "${TEI_TENANT_KEY_PROFILE:-}" ]]; then
 else
   echo "  tenant-key account: none; the cross-account claim is not exercised in this run"
 fi
-npx cdk synth -q --app "npx ts-node -P tsconfig.json --prefer-ts-exts test/integ/app.ts" --output "$OUT" "${CONTEXT[@]}" >"${LIB_TMP}/synth.log" 2>&1 \
+npx cdk synth -q --app "npx ts-node -P tsconfig.json --prefer-ts-exts test/integ/app.ts" --output "$OUT" ${CONTEXT[@]+"${CONTEXT[@]}"} >"${LIB_TMP}/synth.log" 2>&1 \
   || { tail -30 "${LIB_TMP}/synth.log" >&2; fail "synth test/integ/app.ts"; }
 DEPLOYED_SAMPLE=1
 "${CDK[@]}" deploy --all --require-approval never --concurrency 2 --outputs-file "${OUT}/outputs.json" >"${LIB_TMP}/deploy.log" 2>&1 \
