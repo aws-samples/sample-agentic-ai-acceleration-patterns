@@ -1328,8 +1328,16 @@ async function main(): Promise<void> {
   const demo = outputs[DEMO_STACK];
   const aid = outputs[TEST_AID_STACK];
   const run = Date.now().toString(36);
+  // Read the profile again on every call: the second account's credentials
+  // are short-lived and may be renewed in the file while the run is on.
   const tenantCredentials: AwsCredentialIdentityProvider | undefined =
-    TENANT_KEY_PROFILE === undefined ? undefined : fromIni({ profile: TENANT_KEY_PROFILE });
+    TENANT_KEY_PROFILE === undefined
+      ? undefined
+      : async () => ({
+          ...(await fromIni({ profile: TENANT_KEY_PROFILE, ignoreCache: true })()),
+          // A five-minute expiry makes the SDK re-read the profile instead of keeping the first credentials for the whole run.
+          expiration: new Date(Date.now() + 5 * 60 * 1000),
+        });
   WORLD = {
     outputs,
     demo,
