@@ -24,7 +24,7 @@ SPDX-License-Identifier: MIT-0
 | [0016](./0016-break-the-tenant-role-trust-cycle-with-a-lazy-caller-arn.md) | Break the tenant-role trust cycle in the demo with a lazy caller ARN | Accepted | - | 2026-10-26 |
 | [0017](./0017-meter-pooled-cost-per-tenant-at-the-ingress.md) | Meter pooled cost per tenant at the ingress, with the agent reporting usage | Accepted | Amended by ADR-0018, ADR-0021 | 2026-10-26 |
 | [0018](./0018-always-vend-tenant-credentials-and-attribute-model-cost-by-iam-principal.md) | Always vend tenant credentials, and attribute model cost by IAM principal | Accepted | Amends ADR-0008, ADR-0012, ADR-0017 | 2026-10-26 |
-| [0019](./0019-teardown-leaves-no-log-group.md) | Teardown leaves no log group: own the execution log group and drain late logs | Accepted | - | 2026-10-27 |
+| [0019](./0019-teardown-leaves-no-log-group.md) | Teardown leaves no log group: own the execution log group and drain late logs | Accepted | Amended by ADR-0047 | 2026-10-27 |
 | [0020](./0020-limit-each-tenant-at-the-ingress-with-a-shared-fixed-window-counter.md) | Limit each tenant at the ingress with a shared fixed-window counter | Accepted | - | 2026-10-27 |
 | [0021](./0021-make-per-tenant-cloudwatch-metrics-opt-in.md) | Make per-tenant CloudWatch metrics opt-in, off by default | Accepted | Amends ADR-0017 | 2026-10-27 |
 | [0022](./0022-bound-the-tvm-credential-cache-and-share-one-sts-call-per-tag-set.md) | Bound the TVM credential cache and share one STS call per tag set | Accepted | - | 2026-10-27 |
@@ -52,3 +52,4 @@ SPDX-License-Identifier: MIT-0
 | [0044](./0044-publish-from-the-construct-and-drive-the-integration-test-with-the-cdk-cli.md) | Publish from the construct, and drive the integration test with the CDK CLI over stack outputs | Accepted | - (records three deviations from `docs/sample-standard.md` §1.1, §4.5, §5.2) | 2026-11-04 |
 | [0045](./0045-bound-the-transaction-token-at-10240-bytes.md) | Bound the transaction token at 10,240 bytes | Accepted | Amends ADR-0041 | 2026-11-04 |
 | [0046](./0046-close-the-signer-grant-path-keep-explicit-tool-lists-and-recheck-need-ownership.md) | Close the signer grant path, keep explicit tool lists explicit, and re-check need ownership at the ingress | Accepted | Amends ADR-0032, ADR-0037 | 2026-11-04 |
+| [0047](./0047-mask-header-values-in-the-runtime-log-group.md) | Mask header values in the Runtime log group with a data protection policy, set from a custom resource | Accepted | Amends ADR-0019 | 2026-11-06 |

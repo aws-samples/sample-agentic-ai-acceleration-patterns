@@ -212,7 +212,9 @@ resources_of() { # STACK TYPE -> physical ids
 log_group_like() { # STACK LOGICAL_ID_PART -> the first log group whose logical id contains it
   stack_resources "$1" "ResourceType=='AWS::Logs::LogGroup' && contains(LogicalResourceId, '$2')" PhysicalResourceId | head -1
 }
-# runtimes_of STACK -> the Runtime ids of every *RuntimeArn output; their log groups live outside CloudFormation.
+# runtimes_of STACK -> the Runtime ids of every *RuntimeArn output. Their log groups are created by the
+# service and managed by a Custom::RuntimeIsolationRuntimeLogGroup resource (ADR-0047); a line written after
+# that resource's Delete recreates the group outside the stack, which is what the teardown below removes.
 runtimes_of() {
   aws cloudformation describe-stacks --stack-name "$1" \
     --query "Stacks[0].Outputs[?ends_with(OutputKey, 'RuntimeArn')].OutputValue" --output text 2>/dev/null | tr '\t' '\n' | sed 's#.*/##'
@@ -1191,11 +1193,23 @@ for s in "${SUFFIXES[@]}"; do
   done
 done
 swept=0
+unmask_failed=0
 while read -r g; do
   [[ -n "$g" && "$g" != None ]] || continue
-  aws logs filter-log-events --log-group-name "$g" --start-time "$RUN_START_MS" --query 'events[].message' --output json 2>/dev/null | jq -r '.[]' >>"$sweep_file" 2>/dev/null || true
+  if [[ "$g" == "${RUNTIME_LOG_PREFIX}"* ]]; then
+    # The Runtime groups carry the data protection policy (ADR-0047): a leaked value is stored masked, so a
+    # plain read would show asterisks and the greps below would pass regardless. Read the originals, and
+    # treat a failed read as a failure of this step rather than as zero lines.
+    if ! aws logs filter-log-events --log-group-name "$g" --start-time "$RUN_START_MS" --unmask --query 'events[].message' --output json 2>"${LIB_TMP}/sweep-err" | jq -r '.[]' >>"$sweep_file"; then
+      unmask_failed=$((unmask_failed + 1))
+      echo "  unmask read of ${g} failed: $(head -c 300 "${LIB_TMP}/sweep-err")" >&2
+    fi
+  else
+    aws logs filter-log-events --log-group-name "$g" --start-time "$RUN_START_MS" --query 'events[].message' --output json 2>/dev/null | jq -r '.[]' >>"$sweep_file" 2>/dev/null || true
+  fi
   swept=$((swept + 1))
 done < <(sort -u "$groups_file")
+check "${unmask_failed} Runtime log groups could not be read with --unmask" eq "$unmask_failed" 0
 hits_eyj="$(grep -c 'eyJ' "$sweep_file" || true)"
 hits_sig="$(grep -c -F -f "$SECRETS" "$sweep_file" || true)"
 hits_ctx="$(grep -c -E '_ri_ctx"?[[:space:]]*[:=][[:space:]]*"?[A-Za-z0-9_-]{8,}' "$sweep_file" || true)"
@@ -1203,7 +1217,84 @@ check "${hits_eyj} log lines hold eyJ" eq "$hits_eyj" 0
 check "${hits_sig} log lines hold a signature segment of a token or context this run used" eq "$hits_sig" 0
 check "${hits_ctx} log lines hold an _ri_ctx value" eq "$hits_ctx" 0
 : >"$sweep_file"
-note "${swept} log groups, $(wc -l <"$SECRETS") signature segments: 0 hits"
+# The service-side count no mask can hide: LogEventsWithFindings (AWS/Logs) per Runtime group over the run.
+# The metric only exists once a line matched, so no datapoint is zero.
+findings_total=0
+findings_unread=0
+while read -r g; do
+  [[ -n "$g" && "$g" == "${RUNTIME_LOG_PREFIX}"* ]] || continue
+  if ! f="$(aws cloudwatch get-metric-statistics --namespace AWS/Logs --metric-name LogEventsWithFindings \
+    --dimensions Name=LogGroupName,Value="$g" --statistics Sum --period 86400 \
+    --start-time "$STARTED" --end-time "$(date -u -d '+5 min' +%FT%TZ)" --query 'sum(Datapoints[].Sum)' --output text 2>"${LIB_TMP}/findings-err")"; then
+    findings_unread=$((findings_unread + 1))
+    echo "  LogEventsWithFindings read of ${g} failed: $(head -c 300 "${LIB_TMP}/findings-err")" >&2
+    continue
+  fi
+  [[ "$f" == None || -z "$f" ]] && f=0
+  findings_total="$(awk -v a="$findings_total" -v b="$f" 'BEGIN { print a + b }')"
+done < <(sort -u "$groups_file")
+check "${findings_unread} Runtime log groups whose LogEventsWithFindings could not be read" eq "$findings_unread" 0
+check "LogEventsWithFindings over the Runtime groups this run is ${findings_total}" eq "$findings_total" 0
+note "swept ${swept} log groups (Runtime groups read with --unmask), $(wc -l <"$SECRETS") signature segments; LogEventsWithFindings ${findings_total}"
+end_step
+
+# --------------------------------------------------------------------------
+# The mask itself, on CloudWatch's engine (ADR-0047). Runs after the sweep: the probe lines hold a fake JWT,
+# a fake credential header and a fake decoded credential object, which the sweep would otherwise count.
+# --------------------------------------------------------------------------
+begin mask "data protection policy on a Runtime log group masks a JWT, the credential header and the decoded credential fields (ADR-0047)"
+probe_group=""
+for s in "${SUFFIXES[@]}"; do
+  for rt in $(runtimes_of "${STACK_PREFIX}-${s}"); do
+    probe_group="$(aws logs describe-log-groups --log-group-name-prefix "${RUNTIME_LOG_PREFIX}${rt}" --query 'logGroups[0].logGroupName' --output text 2>/dev/null)"
+    [[ -n "$probe_group" && "$probe_group" != None ]] && break 2
+  done
+done
+if [[ -z "$probe_group" || "$probe_group" == None ]]; then
+  check "no Runtime log group found to probe" eq 1 0
+else
+  status="$(aws logs describe-log-groups --log-group-name-prefix "$probe_group" --query 'logGroups[0].dataProtectionStatus' --output text 2>/dev/null)"
+  retention="$(aws logs describe-log-groups --log-group-name-prefix "$probe_group" --query 'logGroups[0].retentionInDays' --output text 2>/dev/null)"
+  check "dataProtectionStatus on ${probe_group} is ${status}" eq "$status" ACTIVATED
+  check "retention on ${probe_group} is ${retention}" eq "$retention" 30
+  probe_stream="integ-mask-probe-${RUN}"
+  probe_jwt='eyJhbGciOiJFUzI1NiIsImtpZCI6InByb2JlIn0.eyJ0ZW5hbnRfaWQiOiJBIiwicHJvYmUiOnRydWV9.MEUCIQDprobe_signature_segment_0123456789abcdef' # gitleaks:allow
+  probe_secret='PROBEsecretAccessKeyPROBEsecretAccessKey' # 40 characters, gitleaks:allow
+  probe_session='IQoJb3JpZ2luX2VjPROBEsessionTokenPROBEsessionToken' # gitleaks:allow
+  probe_header="$(printf '{"accessKeyId":"ASIAPROBEPROBEPROBE1","secretAccessKey":"%s","sessionToken":"%s","expiration":"2026-01-01T00:00:00Z"}' "$probe_secret" "$probe_session" | base64 -w0)"
+  probe_plain="probe plain line tenantId=01JC0000000000000000000000 prefix=a1b2c3d4 at $(date -u +%FT%TZ)"
+  probe_lines=(
+    "probe jwt ${probe_jwt}"
+    "probe header ${probe_header}"
+    "probe stringify {\"accessKeyId\":\"ASIAPROBEPROBEPROBE1\",\"secretAccessKey\":\"${probe_secret}\",\"sessionToken\":\"${probe_session}\"}"
+    "probe nested {\"level\":\"INFO\",\"message\":\"{\\\"accessKeyId\\\":\\\"ASIAPROBEPROBEPROBE1\\\",\\\"secretAccessKey\\\":\\\"${probe_secret}\\\",\\\"sessionToken\\\":\\\"${probe_session}\\\"}\"}"
+    "probe inspect { accessKeyId: 'ASIAPROBEPROBEPROBE1', secretAccessKey: '${probe_secret}', sessionToken: '${probe_session}' }"
+    "$probe_plain"
+  )
+  aws logs create-log-stream --log-group-name "$probe_group" --log-stream-name "$probe_stream" >/dev/null 2>&1 || true
+  probe_ts="$(date +%s%3N)"
+  events="$(for i in "${!probe_lines[@]}"; do jq -cn --argjson t "$((probe_ts + i))" --arg m "${probe_lines[$i]}" '{timestamp: $t, message: $m}'; done | jq -cs '.')"
+  put_ok=0
+  aws logs put-log-events --log-group-name "$probe_group" --log-stream-name "$probe_stream" --log-events "$events" >/dev/null 2>"${LIB_TMP}/probe-err" && put_ok=1
+  check "put-log-events into ${probe_group}/${probe_stream} ($(head -c 200 "${LIB_TMP}/probe-err"))" eq "$put_ok" 1
+  masked=""
+  for _ in $(seq 1 12); do
+    masked="$(aws logs get-log-events --log-group-name "$probe_group" --log-stream-name "$probe_stream" --start-from-head --query 'events[].message' --output json 2>/dev/null | jq -r '.[]' 2>/dev/null || true)"
+    [[ "$(printf '%s\n' "$masked" | grep -c '^probe ' || true)" -ge "${#probe_lines[@]}" ]] && break
+    sleep 5
+  done
+  unmasked="$(aws logs get-log-events --log-group-name "$probe_group" --log-stream-name "$probe_stream" --start-from-head --unmask --query 'events[].message' --output json 2>/dev/null | jq -r '.[]' 2>/dev/null || true)"
+  check "the probe lines were read back ($(printf '%s\n' "$masked" | grep -c '^probe ' || true) of ${#probe_lines[@]})" eq "$(printf '%s\n' "$masked" | grep -c '^probe ' || true)" "${#probe_lines[@]}"
+  check "the masked read holds no eyJ" eq "$(printf '%s' "$masked" | grep -c 'eyJ' || true)" 0
+  check "the masked read holds no probe secret access key" eq "$(printf '%s' "$masked" | grep -c -F "$probe_secret" || true)" 0
+  check "the masked read holds no probe session token" eq "$(printf '%s' "$masked" | grep -c -F "$probe_session" || true)" 0
+  check "the masked read keeps the access key id (whole-value masks, the id stays)" eq "$(printf '%s' "$masked" | grep -c -F 'ASIAPROBEPROBEPROBE1' || true)" 3
+  check "the masked read keeps the plain line unchanged" eq "$(printf '%s' "$masked" | grep -c -F "$probe_plain" || true)" 1
+  check "the --unmask read returns the JWT" eq "$(printf '%s' "$unmasked" | grep -c -F "$probe_jwt" || true)" 1
+  check "the --unmask read returns the header" eq "$(printf '%s' "$unmasked" | grep -c -F "$probe_header" || true)" 1
+  check "the --unmask read returns the session token in all three spellings" eq "$(printf '%s' "$unmasked" | grep -c -F "$probe_session" || true)" 3
+  note "probe stream ${probe_stream} in ${probe_group}: $(printf '%s\n' "$masked" | grep -c '\*' || true) masked lines"
+fi
 end_step
 
 # --------------------------------------------------------------------------

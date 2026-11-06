@@ -129,7 +129,7 @@ export const stubRegistry = (entries: Record<string, RegistryEntry> = {}) => {
 };
 
 /** A minted transaction token stand-in (the authority step is stubbed in pipeline tests). */
-export const TXN_TOKEN = 'eyJhbGciOiJSUzI1NiIsInR5cCI6InR4bitqd3QifQ.eyJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtYSJ9.c2ln';
+export const TXN_TOKEN = 'eyJhbGciOiJSUzI1NiIsInR5cCI6InR4bitqd3QifQ.eyJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtYSJ9.c2ln'; // gitleaks:allow
 
 /**
  * A forwarded-token verifier stub (M-82): TXN_TOKEN and 'from-authoriser' are

@@ -1,0 +1,40 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# ProtoShield config for this sample: `protoshield scan -d . -o <dir outside /tmp>`.
+# The repo is MIT-0, so the license-headers plugin checks for that, not its Apache 2.0 default.
+protoshield_version: v0.18.0
+model_id: global.anthropic.claude-haiku-4-5-20251001-v1:0
+enabled_plugins:
+    - bandit
+    - cdknag
+    - cfnnag
+    - checkov
+    - cve
+    - iam-least-privilege
+    - license-headers
+    - markdown-report
+    - secrets
+    - semgrep
+plugins:
+    bandit:
+        timeout: "300"
+    cdknag:
+        timeout: "300"
+    cfnnag:
+        timeout: "300"
+    checkov:
+        timeout: "300"
+    cve:
+        timeout: "600"
+    iam-least-privilege:
+        timeout: "300"
+    license-headers:
+        license_text: MIT-0
+        timeout: "120"
+    markdown-report:
+        report_filename: summary.md
+        timeout: "300"
+    secrets:
+        timeout: "300"
+    semgrep:
+        timeout: "300"

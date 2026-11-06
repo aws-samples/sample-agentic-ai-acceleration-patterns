@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-10-27
+- Amended by: ADR-0047
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -36,3 +37,5 @@ Option 3. The construct owns `API-Gateway-Execution-Logs_<apiId>/prod`. One `Log
 
 ## Consequences
 Easier: a destroy leaves no orphaned log group from the ingress path; the integration test's leftover check passes without special cases. Harder: about 90 seconds more per destroy; a new caller of an ingress function must be added as a drain writer. Revisit if the Runtime gains a log-group setting or the drain's wait proves too short.
+
+Amended by ADR-0047 (2026-11-06): the Runtime's own log group is now settled by a custom resource after the Runtime (30-day retention, a data protection policy, deleted on destroy); it still cannot join the drain, so a line written after that Delete recreates it outside the stack.

@@ -8,7 +8,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { publishedIngress, seedPublishedIngress, TEST_ENV } from './published-ingress';
 import { AgentBackend, GATEWAY_TARGET_NAME, PUBLISHED, SharedIngress, type SharedIngressProps } from '../src/index';
 import { cedarPolicyFor } from '../src/shared/cedar';
-import { policyName, ToolTarget, type ToolDefinition } from '../src/tool-target.cdk';
+import { gatewayPhysicalNameOf, policyName, ToolTarget, type ToolDefinition } from '../src/tool-target.cdk';
 import { MAX_TOOL_TARGETS } from '../src/tools-gateway.cdk';
 
 /**
@@ -605,6 +605,40 @@ describe('several tools gateways: synth errors (ADR-0041)', () => {
     );
     const text = JSON.stringify(Template.fromStack(stack).toJSON());
     expect(text).toContain(doc.toolsGateways.finance.policyEngineId);
+  });
+
+  it('a ToolTarget in another stack with outbound OAuth grants GetWorkloadAccessToken on ITS gateway\'s workload identities, not every gateway\'s', () => {
+    const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+    const doc = publishedIngress('api-gateway', ['default', 'finance']);
+    seedPublishedIngress(app, doc);
+    const stack = new Stack(app, 'Tools', { env: TEST_ENV });
+    const ref = SharedIngress.fromParameters(stack, 'Ingress', '/application-plane/shared/agent-runtime/', 'api-gateway', { toolsGateways: ['default', 'finance'] });
+    new ToolTarget(stack, 'Crm', {
+      name: 'crm',
+      ingress: ref,
+      gateway: 'finance',
+      kind: 'openApi',
+      spec: { inlinePayload: JSON.stringify({ openapi: '3.0.1', info: { title: 'crm', version: '1' }, paths: { '/a': { get: { operationId: 'get_account' } } } }) },
+      outboundAuth: {
+        oauth: {
+          providerArn: `arn:aws:bedrock-agentcore:${TEST_ENV.region}:${TEST_ENV.account}:token-vault/default/oauth2credentialprovider/crm`,
+          secretArn: `arn:aws:secretsmanager:${TEST_ENV.region}:${TEST_ENV.account}:secret:crm-AbCdEf`,
+          scopes: ['crm.read'],
+          grant: 'OBO',
+        },
+      },
+      tools: [{ name: 'get_account', description: 'Reads one account' }],
+    });
+    const statements = Object.values(Template.fromStack(stack).findResources('AWS::IAM::Policy')).flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+    const grant = statements.find((st: any) => [st.Action].flat().includes('bedrock-agentcore:GetWorkloadAccessToken'));
+    const identities = JSON.stringify(grant.Resource);
+    // `gw-finance-abc123` -> identities `gw-finance-*`; never the `*-*` of every gateway.
+    expect(identities).toContain('/workload-identity/gw-finance-*');
+    expect(identities).not.toContain('/workload-identity/*');
+    expect(gatewayPhysicalNameOf('gw-finance-abc123')).toBe('gw-finance');
+    expect(gatewayPhysicalNameOf('ri_x_tools-AbC123xYz0')).toBe('ri_x_tools');
+    expect(() => gatewayPhysicalNameOf('nodash')).toThrow(/not <name>-<suffix>/);
+    expect(() => gatewayPhysicalNameOf('trailing-')).toThrow(/not <name>-<suffix>/);
   });
 });
 

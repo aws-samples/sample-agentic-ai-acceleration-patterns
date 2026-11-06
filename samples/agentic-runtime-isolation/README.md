@@ -486,8 +486,8 @@ It deploys six stacks at once (`--concurrency 6`):
 
 A run takes **about 45 minutes** and costs **about $3 per run** at on-demand
 rates, mostly AgentCore Runtime session time and the Gateways across six
-stacks. Last green integration run: run 14, 2026-11-05, eu-central-1,
-57/57 steps; timings and coverage are in the
+stacks. Last green integration run: run 15, 2026-11-06, eu-central-1,
+58/58 steps; timings and coverage are in the
 [`architecture.md` status block](./architecture.md).
 
 Steps 3 to 24 run on both all-on stacks except 9-drain and 12-late, which
@@ -528,12 +528,13 @@ target per agent, which the agent added after the deploy does not get.
 | 19 | `multi-tenant`: user MU in tenants A' and M: no header refused, B' not allowed, M and A' each their own grant and data |
 | 21 | key rotation on `api-gateway` (redeploy with `keyGeneration` 2): the JWKS lists both `kid`s; the old token is accepted until `exp`; new tokens carry the new `kid` |
 | 20-cloudtrail | no `AssumeRole` on the `crm` tool tenant role for the direct invoke (with a positive control) |
-| sweep | no token, signature segment or `_ri_ctx` value in any log group on the path |
+| sweep | no token, signature segment or `_ri_ctx` value in any log group on the path; the Runtime groups are read with `--unmask` (their policy would otherwise hide a leak), and `LogEventsWithFindings` over them is 0 |
+| mask | probe lines in one Runtime group (a fake JWT, credential header and decoded credential object in three spellings) read back masked, a plain line unchanged, `--unmask` returns the originals (ADR-0047) |
 | 8b-metrics | per-tenant `ModelOutputTokens` for tenant A on `api-gateway`; none on `agentcore-gateway` |
 | 10 | destroy from the exit trap (also on failure) and verify nothing is left |
 
-That is 35 rows; the 22 per-ingress rows run on both all-on stacks, so the
-table the script prints holds 57 steps.
+That is 36 rows; the 22 per-ingress rows run on both all-on stacks, so the
+table the script prints holds 58 steps.
 
 ## End-to-end demo
 
@@ -633,7 +634,12 @@ npx cdk destroy --context ingress=api-gateway
 Every resource has `RemovalPolicy.DESTROY`; policies go before their
 targets (ADR-0040), the log drain waits about 90 s (ADR-0019), and KMS keys
 enter their deletion window. Afterwards remove the two vendor scopes
-(`DELETE /platform/scopes/{scope}`) if you added them.
+(`DELETE /platform/scopes/{scope}`) if you added them, and check that no
+`/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT` log group is left:
+the stack deletes it (ADR-0047), but a line the Runtime writes in the
+seconds between that delete and its own recreates the group outside the
+stack, with no retention. The same check applies after a deploy that
+replaced the Runtime: the old Runtime's group is deleted while it drains.
 
 ## API
 
@@ -756,6 +762,10 @@ Each item is a deployer action or an accepted risk in
 - [ ] **Leave `perTenantMetrics` off at scale**, or accept 9 × (1 + agents)
       custom metrics per tenant per ingress (M-28, T-38).
 - [ ] **Change the removal policies** from `DESTROY` (M-23).
+- [ ] **Alarm on `LogEventsWithFindings`** (AWS/Logs, dimension `LogGroupName`)
+      for the Runtime log groups: one finding means a header value reached
+      a log line and was masked (T-18, ADR-0047). Data protection is billed
+      per GB scanned; keep `logs:Unmask` off every role but the responders'.
 
 ## Design trail
 

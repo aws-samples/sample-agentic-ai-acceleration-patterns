@@ -50,6 +50,7 @@
     "@aws-sdk/client-bedrock-agentcore": "3.1154.0",
     "@aws-sdk/client-bedrock-agentcore-control": "3.1154.0",
     "@aws-sdk/client-bedrock-runtime": "3.1154.0",
+    "@aws-sdk/client-cloudwatch-logs": "3.1154.0",
     "@aws-sdk/client-dynamodb": "3.1154.0",
     "@aws-sdk/client-kms": "3.1154.0",
     "@aws-sdk/client-ssm": "3.1154.0",

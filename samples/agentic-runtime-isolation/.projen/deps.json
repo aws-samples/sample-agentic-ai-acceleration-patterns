@@ -111,6 +111,11 @@
       "type": "runtime"
     },
     {
+      "name": "@aws-sdk/client-cloudwatch-logs",
+      "version": "3.1154.0",
+      "type": "runtime"
+    },
+    {
       "name": "@aws-sdk/client-dynamodb",
       "version": "3.1154.0",
       "type": "runtime"

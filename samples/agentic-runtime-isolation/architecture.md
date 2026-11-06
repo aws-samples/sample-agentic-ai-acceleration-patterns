@@ -4,9 +4,10 @@ SPDX-License-Identifier: MIT-0
 -->
 # Agentic Runtime Isolation: Architecture
 
-> **Status: implemented and verified.** Last green integration run: run 14,
-> 2026-11-05, eu-central-1, 57/57 steps, deploy 280 s, steps 1,842 s, key
-> rotation 167 s, teardown clean (commit 6acb991). The run used a sandbox
+> **Status: implemented and verified.** Last green integration run: run 15,
+> 2026-11-06, eu-central-1, 58/58 steps, deploy 272 s, whole run about 36
+> min, key rotation 172 s, teardown clean (commit 3b2d727 on PR 21). The run
+> used a sandbox
 > account and `scripts/integ.sh` (the CDK CLI driver, ADR-0044) with six
 > stacks (`api-gateway`, `agentcore-gateway`, `session-off`, `session-user`,
 > `limits`, `multi-tenant`); it covered the 2026-11-05 scale changes
@@ -233,6 +234,7 @@ takes `algorithm`, `keyGeneration` and `signer`; `EntitlementStore` takes
 | Agent | Demo code in the microVM: model prompts through Nova Lite on the geography inference profile, signed by the vended credentials (ADR-0028); probes `report`, `read`, `stream`, `tools`, `tool`; one MCP client per tools gateway its token's `aud` names; ends each stream with `event: usage` | `src/agent/app.ts` |
 | Tools gateways | Next sections | `src/tools-gateway.cdk.ts`, `src/tools/*` |
 | Logs, metrics, teardown | JSON log lines (`src/shared/logger.ts`), EMF only with `perTenantMetrics` (`src/shared/metrics.ts`), one log drain per stack so teardown leaves no log group (ADR-0019, `src/shared/log-drain.ts`) | |
+| Runtime log group | The service creates `/aws/bedrock-agentcore/runtimes/<id>-DEFAULT` at `CreateAgentRuntime`; a custom resource after the Runtime puts a 30-day retention and a data protection policy on it that masks a whole JWT, the whole credential header and the decoded credential's secret fields at ingest (T-18, M-12, ADR-0047; `logs:Unmask` reads the original), and deletes it on destroy (`src/backend/agentcore-runtime.cdk.ts`, `src/backend/runtime-log-group.function.ts`) | |
 | Cold path | One HTTPS pool per process; discovery, JWKS, STS, DynamoDB and the default agent's registry entry warmed during init (ADR-0023) | `src/shared/http.ts` |
 
 ## Entitlements and the grant rule
