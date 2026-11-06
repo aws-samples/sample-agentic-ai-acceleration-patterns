@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * `ScopeRegistration`, copied from agentic-runtime-isolation (its ADR-0025;
- * ADR and T- numbers below are that sample's; here it registers
+ * `ScopeRegistration`, copied from agentic-runtime-isolation ADR-0025, not
+ * imported (ADR-0015; other ADR and T- numbers below are that sample's
+ * unless they name tenant-identity; here it registers
  * `ingestion/deliver` and `ingestion/read`, spec §3.2, §6.4): a custom resource that puts a backend's
  * scopes in tenant-identity's scope catalogue when the backend deploys and
  * removes them when it is deleted. The handler (`scope-registration.function.ts`)
@@ -91,7 +92,7 @@ export interface ScopeRegistrationProps {
    */
   readonly owner?: string;
   /**
-   * The log drain (ADR-0019) that holds back this function's log group until
+   * The log drain (ADR-0015) that holds back this function's log group until
    * the custom resource is gone and its last lines have landed.
    */
   readonly logDrain?: LogDrain;
@@ -123,7 +124,7 @@ export class ScopeRegistration extends Construct {
       props.identityApi?.platformInvokePolicyArn ??
       ssm.StringParameter.valueForStringParameter(this, IDENTITY_API_PARAMETERS.platformInvokePolicyArn);
 
-    // Explicit, deletable log group (ADR-0019). The handler writes nothing on
+    // Explicit, deletable log group (ADR-0015). The handler writes nothing on
     // success and Lambda's own START/END/REPORT lines are below WARN.
     const logGroup = new logs.LogGroup(this, 'Logs', {
       retention: logs.RetentionDays.ONE_MONTH,
@@ -186,7 +187,7 @@ export class ScopeRegistration extends Construct {
     // The policy must be attached before the first call, and detached only after the last.
     this.resource.node.addDependency(fn.role!);
 
-    // ADR-0019: the custom resource (whose Delete invokes the function) goes
+    // ADR-0015: the custom resource (whose Delete invokes the function) goes
     // before the drain waits, and the log group only after.
     if (props.logDrain !== undefined) {
       props.logDrain.writer(this.resource);

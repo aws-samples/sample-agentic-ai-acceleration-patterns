@@ -24,9 +24,9 @@
  *    the GSI is eventually consistent, and a delivery created a moment ago
  *    may not be in the count yet.
  *
- * Publishing (3 and 2) needs `events:PutEvents`, which spec §7.1 does not
- * list for `sweepRole`; the construct grants it and exempts `sweepRole` from
- * the bus Deny (see src/construct/events.ts).
+ * Publishing (3 and 2) needs `events:PutEvents`: spec §7.1 grants it to
+ * `sweepRole` and the bus Deny exempts it (ADR-0017,
+ * src/construct/events.ts).
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';

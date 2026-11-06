@@ -3,9 +3,10 @@
 
 /**
  * The scope-registration custom resource handler, copied from
- * agentic-runtime-isolation's src/shared/scope-registration.function.ts (its
- * ADR-0025; samples share only constructs and parameters, standard §1.1).
- * ADR, T- and M- numbers below are the source sample's unless they name
+ * agentic-runtime-isolation's src/shared/scope-registration.function.ts
+ * (its ADR-0025), not imported (ADR-0015): samples share only constructs
+ * and parameters, standard §1.1. Other ADR,
+ * T- and M- numbers below are the source sample's unless they name
  * this sample (spec §3.2, §6.4: this sample registers `ingestion/deliver`
  * and `ingestion/read` the same way). A backend owns
  * one or more scopes named `<backend>/<action>`; this handler puts them in
@@ -67,7 +68,7 @@
  * stack for an hour).
  *
  * The handler writes no log on success (its log group would otherwise be
- * recreated by a late line after the stack deleted it, ADR-0019), one error
+ * recreated by a late line after the stack deleted it, ADR-0015), one error
  * line per failed call, and always answers CloudFormation.
  */
 
@@ -493,7 +494,7 @@ export function respond(
 ): Promise<void> {
   const body = JSON.stringify({
     Status: outcome.status,
-    Reason: outcome.reason ?? 'See ADR-0025',
+    Reason: outcome.reason ?? 'See ADR-0015',
     PhysicalResourceId: outcome.physicalResourceId,
     StackId: event.StackId,
     RequestId: event.RequestId,

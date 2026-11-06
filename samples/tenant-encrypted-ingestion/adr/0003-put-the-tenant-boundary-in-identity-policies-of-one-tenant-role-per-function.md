@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-05
+- Amended by: ADR-0017
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -85,3 +86,18 @@ must be mapped; compromised function code can act as any one tenant, visible
 in CloudTrail but not prevented; a compromised `keyFactoryRole` can bind a
 new tenant to a key it chose. Revisit if IAM gains a regex operator or a
 sort-key condition key, or AWS can bind a tag value to a verified source.
+
+Amended 2026-11-06 (ADR-0017): `keyFactoryRole` holds table-wide
+`PutItem`, `UpdateItem`, `ConditionCheckItem` and `GetItem`, without the
+`keyArn`/`tier` Deny, because the key row and its `KEYARN#` item sit in
+different partitions and its `UpdateItem` to `ACTIVE` names `keyArn` in its
+condition; the claim above is unchanged, and the stream watch does not
+cover delivery rows the factory could also overwrite. Implemented
+2026-11-06 otherwise as decided (`src/construct/roles.ts`), with the base
+roles' KMS use Deny scoped to `TenantId`-tagged keys (ADR-0013). Sessions
+are cached per tenant (`src/shared/tenant-session.ts`), so the
+`RoleSessionName` suffix names the delivery or operation that first
+assumed the session; the sweep's is always `sweep`. Outside the ten roles
+the deployment also has the `ScopeRegistration` custom-resource role
+(ADR-0015), the `LogDrain` role (no permissions) and CDK's singleton
+provider roles; none is in the pipeline (architecture.md §3).

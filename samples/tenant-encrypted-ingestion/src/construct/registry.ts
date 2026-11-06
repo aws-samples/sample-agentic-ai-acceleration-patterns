@@ -12,9 +12,9 @@
  * - `statusBucket-urlExpiresAt` (spec §4.2): delivery rows while `OPEN`, and
  *   terminal rows while their event is `OWED` (src/shared/registry.ts). One
  *   constant value is one hot GSI partition, well within limits at N-2 rates.
- * - `keyStatus`: key rows only (no delivery row carries `keyStatus`). Not in
- *   the spec's data model: the sweep must find `REVOKED` keys and reconcile
- *   `inFlight` per key row, and `sweepRole` holds no `Scan`.
+ * - `keyStatus`: key rows only (no delivery row carries `keyStatus`). The
+ *   sweep must find `REVOKED` keys and reconcile `inFlight` per key row, and
+ *   `sweepRole` holds no `Scan` (architecture.md §14 refinements).
  */
 
 import { RemovalPolicy } from 'aws-cdk-lib';

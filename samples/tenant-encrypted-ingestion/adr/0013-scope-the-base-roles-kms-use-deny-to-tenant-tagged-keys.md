@@ -67,3 +67,11 @@ resource whose function cannot start cannot answer CloudFormation, and the
 stack waits the full custom-resource timeout before it fails; the drain
 handler answers inside its own deadline for every other failure. Revisit if
 a base role ever needs a tagged key for its own purposes, which none does.
+
+Clarified 2026-11-06: the unconditioned administration Denies listed
+above apply as each role needs. `platformRole` denies `kms:CreateKey`,
+`TagResource`, `UntagResource`, `PutKeyPolicy` and `CreateGrant`;
+`keyFactoryRole` denies `PutKeyPolicy`, `CreateGrant` and `UntagResource`
+but not `kms:TagResource`, which it holds conditioned on a `TenantId`
+request tag and the tag keys `[TenantId, tei:stack]` to tag a key at
+`CreateKey` (ADR-0002 statement 5 stops any later retag).

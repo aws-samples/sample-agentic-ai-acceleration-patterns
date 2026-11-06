@@ -11,8 +11,9 @@
  * - `PutKeyPolicy`: reading a tenant's documents as an administrator, or
  *   adding a consumer, takes `kms:PutKeyPolicy` on that tenant's key, which
  *   is the residual of the key-policy binding (spec §7.2). A rule on the
- *   default bus matches the CloudTrail management event and writes it to a
- *   log group; the alarm watches the rule's `TriggeredRules` metric.
+ *   default bus matches the CloudTrail management event and sends it to an
+ *   SQS audit queue; the alarm watches the rule's `TriggeredRules` metric
+ *   (ADR-0016).
  *   CloudTrail management events reach EventBridge from the account's
  *   CloudTrail; the README names this as a prerequisite.
  */

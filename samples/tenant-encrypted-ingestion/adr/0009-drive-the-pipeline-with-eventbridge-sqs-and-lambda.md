@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-05
+- Amended by: ADR-0017
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -68,3 +69,11 @@ creates, so reading events is filtered and the README says so; a
 per-tenant subscription with fixed `detail.tenantId` rules is a hardening
 seam (§11). Revisit if EventBridge offers rule-level read permissions on a
 bus, or if S3 events can omit the source IP.
+
+Amended 2026-11-06 (ADR-0017): the bus denies `events:PutEvents` unless
+the principal is `processorRole` or `sweepRole`; the sweep publishes
+`DeliveryRejected` for abandoned leases and republishes owed events. So
+"nothing in the account but `processorRole` can publish an outcome" above
+reads, as built, "nothing but `processorRole` and `sweepRole`".
+Implemented 2026-11-06 (`src/construct/events.ts`, `src/construct/queues.ts`);
+§10 step 7b showed SQS's own move meets the DLQ Deny, so the Deny stays.

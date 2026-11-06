@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-05
+- Amended by: ADR-0018
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -67,3 +68,9 @@ which log delivery latency nearly consumes (N-6); a validator that is down
 rejects deliveries on the last receive, so validator health is the
 deployer's alarm. Revisit if a carrier needs callbacks longer than one
 processor run, or if a manual hold of validator errors is built (§11).
+
+Amended 2026-11-06 (ADR-0018): the processor does not abort a validator
+at its declared timeout. A validator function's own Lambda timeout is a
+validator error as decided above; a validator that outlives the
+processor's timeout T leaves the delivery to the lease, ending as
+`structural:PROCESSING_ABANDONED` through the sweep.

@@ -65,3 +65,11 @@ after offboarding, `CreateDelivery` is 403 from API Gateway with throttling
 on and 409 from the handler with it off; a token stays usable for up to 300 s
 after revocation. Revisit if API Gateway raises the API key quota, or offers
 per-identity throttling without keys.
+
+Implemented 2026-11-06 (`src/authoriser/`, `src/api/handler.ts`,
+`src/construct/api.ts`). Offboarding with `tenantThrottle` on deletes the
+tenant's API key (`src/platform/delete-tenant-key.ts`), but API Gateway may
+still admit the key while its usage-plan cache lasts, so `CreateDelivery`
+after offboarding is 403 from API Gateway or 409 `TenantKeyUnavailable`
+from the handler; the run of 2026-11-06, with throttling on, saw 409. The
+tenant is refused either way (architecture.md §14).

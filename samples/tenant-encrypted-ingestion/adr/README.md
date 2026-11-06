@@ -19,5 +19,10 @@ SPDX-License-Identifier: MIT-0
 | [0011](./0011-authenticate-tenants-with-the-token-contract-and-throttle-per-tenant-optionally.md) | Authenticate tenants with the token contract and throttle per tenant optionally | Accepted | 2026-11-05 |
 | [0012](./0012-deliver-the-pattern-as-a-construct-with-per-tenant-observability.md) | Deliver the pattern as a construct with per-tenant observability | Accepted | 2026-11-05 |
 | [0013](./0013-scope-the-base-roles-kms-use-deny-to-tenant-tagged-keys.md) | Scope the base roles' KMS use Deny to tenant-tagged keys | Accepted | 2026-11-06 |
+| [0014](./0014-drive-the-integration-test-with-the-cdk-cli-and-read-test-wiring-from-outputs.md) | Drive the integration test with the CDK CLI and read test wiring from stack outputs | Accepted | 2026-11-06 |
+| [0015](./0015-copy-logdrain-and-scoperegistration-from-agentic-runtime-isolation.md) | Copy LogDrain and ScopeRegistration from agentic-runtime-isolation | Accepted | 2026-11-06 |
+| [0016](./0016-alarm-on-putkeypolicy-through-eventbridge-and-probe-on-any-403-or-kms-error.md) | Alarm on PutKeyPolicy through EventBridge, and probe on any 403 or KMS-named error | Accepted | 2026-11-06 |
+| [0017](./0017-let-the-sweep-publish-and-give-the-key-factory-a-table-wide-registry-grant.md) | Let the sweep publish to the bus, and give the key factory a table-wide registry grant | Accepted | 2026-11-06 |
+| [0018](./0018-rely-on-the-invoke-timeout-and-the-lease-for-a-hanging-validator.md) | Rely on the invoke timeout and the lease for a hanging validator | Accepted | 2026-11-06 |
 
 Renumbered 2026-11-05 before implementation; earlier drafts were never merged.

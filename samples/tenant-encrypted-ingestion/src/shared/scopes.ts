@@ -3,7 +3,7 @@
 
 /**
  * Scope-name helpers for the scope registration (copied from
- * agentic-runtime-isolation's src/shared/registry.ts, its ADR-0025). A scope
+ * agentic-runtime-isolation's src/shared/registry.ts, its ADR-0025; ADR-0015). A scope
  * name is `<owner>/<action>` as tenant-identity's catalogue accepts it; this
  * sample owns `ingestion/deliver` and `ingestion/read` (spec §3.2).
  */

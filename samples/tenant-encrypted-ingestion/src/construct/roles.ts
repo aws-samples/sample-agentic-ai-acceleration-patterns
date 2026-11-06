@@ -307,6 +307,8 @@ export function createRoles(scope: Construct, resources: RoleResources): { base:
       resources: [ownKeys, tenantAliases],
     }),
   );
+  // Table-wide: the key row and its `KEYARN#` item sit in different
+  // partitions (ADR-0017).
   kf.addToPrincipalPolicy(
     new iam.PolicyStatement({
       sid: 'WriteBindings',
@@ -394,8 +396,8 @@ export function createRoles(scope: Construct, resources: RoleResources): { base:
   base.sweepRole.addToPrincipalPolicy(
     new iam.PolicyStatement({ sid: 'ReadAndUpdateRows', actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem'], resources: [resources.tableArn] }),
   );
-  // Not in spec §7.1: the sweep publishes the events of the deliveries it
-  // terminates and of owed events (spec §8), so it may put on the bus.
+  // The sweep publishes the events of the deliveries it terminates and of
+  // owed events (spec §8), so it may put on the bus (spec §7.1, ADR-0017).
   base.sweepRole.addToPrincipalPolicy(new iam.PolicyStatement({ sid: 'PublishDeliveryEvents', actions: ['events:PutEvents'], resources: [resources.eventBusArn] }));
 
   // watchRole.

@@ -11,7 +11,7 @@
  * Out: the sample's own bus for `Delivery*` events. Its policy Denies
  * `events:PutEvents` unless `aws:PrincipalArn` is `processorRole` or
  * `sweepRole` (the sweep publishes the events of deliveries it terminates,
- * spec §8; §7.7 names only `processorRole`). The bus is vendor-side and
+ * spec §7.7, §8; ADR-0017). The bus is vendor-side and
  * FILTERED for readers: any rule in the vendor's account sees every
  * tenant's events, so a consumer filters on `detail.tenantId`.
  */

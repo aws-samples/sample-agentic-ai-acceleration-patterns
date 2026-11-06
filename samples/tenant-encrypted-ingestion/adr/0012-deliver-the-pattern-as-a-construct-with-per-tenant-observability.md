@@ -68,3 +68,10 @@ activated in Billing by the deployer; pooled costs (S3, Lambda, SQS) are
 apportioned from counters, not billed per tenant. Revisit if CloudWatch
 offers per-dimension metrics priced by use, or if CDK's auto-delete provider
 stops depending on the bucket policy.
+
+Implemented 2026-11-06 with three Contributor Insights rules
+(`src/construct/observability.ts`): deliveries by `tenantId` and `status`,
+accepted bytes by `tenantId`, and API requests to `/tenant/deliveries` by
+`tenantId` and `status`. Rejections and key failures appear as the
+`status` split of the deliveries rule (`REJECTED`, `KEY_UNAVAILABLE`), not
+as rules of their own.

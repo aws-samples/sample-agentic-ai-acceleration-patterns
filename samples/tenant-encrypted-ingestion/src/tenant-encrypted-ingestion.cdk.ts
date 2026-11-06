@@ -509,8 +509,9 @@ export class TenantEncryptedIngestion extends Construct {
     };
     this.alarms = createAlarms(this, { logRetention: p.logRetention });
 
-    // ADR-0019 (of agentic-runtime-isolation, copied): late log lines land
-    // before their groups go. Writers are removed before the drain waits.
+    // LogDrain (ADR-0015, copied from agentic-runtime-isolation ADR-0019):
+    // late log lines land before their groups go. Writers are removed before
+    // the drain waits.
     for (const group of [authoriser, tenantApi, keyFactory, platform, processor, sweep, watch, drain]) {
       logDrain.protect(group.logGroup);
       logDrain.writer(group.fn);

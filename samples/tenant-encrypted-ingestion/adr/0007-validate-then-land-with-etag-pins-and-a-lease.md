@@ -69,6 +69,7 @@ events are at least once, so consumers de-duplicate on `deliveryId`
 (ADR-0009); `T` must stay under 15 minutes or synth fails naming the
 validators; manual hold and redrive of validator errors is not built (§11).
 Revisit if S3 offers an atomic conditional move between prefixes.
-Implemented 2026-11-06: the classifier runs the probe on any S3 error that
-is a 403 or names KMS (`kms:` or `KMS.`), because S3 surfaces a disabled or
+Implemented 2026-11-06 (classifier recorded in ADR-0016, which amends
+ADR-0004): the classifier runs the probe on any S3 error that is a 403 or
+names KMS (`kms:` or `KMS.`), because S3 surfaces a disabled or
 pending-deletion key as a 400, and decides by the probe's outcome.

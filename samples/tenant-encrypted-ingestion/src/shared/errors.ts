@@ -8,7 +8,8 @@
  * S3 reports a key-policy denial as a plain `AccessDenied` (spec P-5), so
  * no caller classifies a key as gone from an error code: on any 403 the
  * processor and the platform functions run the probe (src/shared/probe.ts),
- * and only a probe failure that names KMS counts as `KEY_UNAVAILABLE`.
+ * and only a probe failure that names KMS counts as `KEY_UNAVAILABLE`
+ * (ADR-0016).
  */
 
 interface SdkErrorLike {

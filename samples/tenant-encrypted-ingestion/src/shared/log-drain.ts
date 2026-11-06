@@ -9,9 +9,10 @@ import { Construct, IConstruct } from 'constructs';
 
 /**
  * Holds back the deletion of log groups until their writers have stopped
- * and their buffered logs have landed (copied from agentic-runtime-isolation,
- * its ADR-0019, which copied tenant-identity's ADR-0024; not imported: samples share only
- * constructs and parameters, Sample Standard §1.1).
+ * and their buffered logs have landed (ADR-0015: copied, not imported, from
+ * agentic-runtime-isolation ADR-0019, which copied tenant-identity's
+ * ADR-0024; samples share only constructs and parameters, Sample Standard
+ * §1.1).
  *
  * API Gateway and Lambda deliver logs a few seconds after the request. If
  * CloudFormation deletes a log group first, the late delivery recreates it,
@@ -35,7 +36,7 @@ export class LogDrain extends Construct {
 
     const role = new iam.Role(this, 'Role', {
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
-      description: 'Log drain waiter: no permissions, so it cannot create a log group (ADR-0019)',
+      description: 'Log drain waiter: no permissions, so it cannot create a log group (ADR-0015)',
     });
 
     // An explicit, deletable log group. The waiter never writes to it, but
@@ -54,7 +55,7 @@ export class LogDrain extends Construct {
       role,
       timeout: delay.plus(Duration.seconds(30)),
       memorySize: 128,
-      description: 'Waits on stack delete so buffered logs land before their log groups go (ADR-0019)',
+      description: 'Waits on stack delete so buffered logs land before their log groups go (ADR-0015)',
       code: lambda.Code.fromInline(WAITER_SOURCE),
       // Write nothing at all: Lambda's own START/END/REPORT lines are INFO
       // system logs, and any write would create a log group no stack owns.
@@ -83,7 +84,7 @@ export class LogDrain extends Construct {
 /**
  * The waiter. Answers Create and Update at once; on Delete it sleeps for
  * DelaySeconds, then answers. It reports through the pre-signed ResponseURL
- * only, never through logs. Exported so a unit test can assert the ADR-0019
+ * only, never through logs. Exported so a unit test can assert the ADR-0015
  * try/finally without synthesising a stack.
  */
 export const WAITER_SOURCE = `
@@ -92,7 +93,7 @@ const { URL } = require('url');
 function respond(event, context, status) {
   const body = JSON.stringify({
     Status: status,
-    Reason: 'See ADR-0019',
+    Reason: 'See ADR-0015',
     PhysicalResourceId: event.PhysicalResourceId || 'log-drain',
     StackId: event.StackId,
     RequestId: event.RequestId,
@@ -110,7 +111,7 @@ function respond(event, context, status) {
   });
 }
 exports.handler = async (event, context) => {
-  // ADR-0019: respond() must always run, even if the Delete sleep path throws:
+  // ADR-0015: respond() must always run, even if the Delete sleep path throws:
   // a throw before respond would leave CloudFormation waiting the full
   // custom-resource timeout (an hour) on every stack operation.
   try {

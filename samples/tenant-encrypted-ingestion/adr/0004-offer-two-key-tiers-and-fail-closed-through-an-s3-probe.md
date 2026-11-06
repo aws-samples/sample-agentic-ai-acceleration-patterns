@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-05
+- Amended by: ADR-0016
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -75,3 +76,11 @@ changes take up to five minutes; the probe writes and deletes an object under
 the vendor's KMS quota. Revisit if S3 surfaces the KMS cause in its error, if
 KMS documents cross-account `aws:ResourceTag` (drop the fallback), or if a
 third tier (the sealed drop, §11) is built.
+
+Amended 2026-11-06 (ADR-0016): the probe also runs on any S3 error whose
+code or message names KMS, because S3 surfaces a disabled key and a key
+pending deletion as 400, not 403; the probe still decides. Implemented
+2026-11-06 (`src/processor/probe.ts`, `src/shared/errors.ts`,
+`src/shared/probe.ts`); §10 step 8 saw `KMS.DisabledException` and a
+removed use statement both set `REVOKED` with the DLQ unchanged, and
+`CreateDelivery` answered 409 `TenantKeyUnavailable` while `REVOKED`.
