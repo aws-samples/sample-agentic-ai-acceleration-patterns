@@ -528,12 +528,13 @@ target per agent, which the agent added after the deploy does not get.
 | 19 | `multi-tenant`: user MU in tenants A' and M: no header refused, B' not allowed, M and A' each their own grant and data |
 | 21 | key rotation on `api-gateway` (redeploy with `keyGeneration` 2): the JWKS lists both `kid`s; the old token is accepted until `exp`; new tokens carry the new `kid` |
 | 20-cloudtrail | no `AssumeRole` on the `crm` tool tenant role for the direct invoke (with a positive control) |
-| sweep | no token, signature segment or `_ri_ctx` value in any log group on the path |
+| sweep | no token, signature segment or `_ri_ctx` value in any log group on the path; the Runtime groups are read with `--unmask` (their policy would otherwise hide a leak), and `LogEventsWithFindings` over them is 0 |
+| mask | probe lines in one Runtime group (a fake JWT, credential header and decoded credential object in three spellings) read back masked, a plain line unchanged, `--unmask` returns the originals (ADR-0047) |
 | 8b-metrics | per-tenant `ModelOutputTokens` for tenant A on `api-gateway`; none on `agentcore-gateway` |
 | 10 | destroy from the exit trap (also on failure) and verify nothing is left |
 
-That is 35 rows; the 22 per-ingress rows run on both all-on stacks, so the
-table the script prints holds 57 steps.
+That is 36 rows; the 22 per-ingress rows run on both all-on stacks, so the
+table the script prints holds 58 steps.
 
 ## End-to-end demo
 
@@ -637,7 +638,8 @@ enter their deletion window. Afterwards remove the two vendor scopes
 `/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT` log group is left:
 the stack deletes it (ADR-0047), but a line the Runtime writes in the
 seconds between that delete and its own recreates the group outside the
-stack, with no retention.
+stack, with no retention. The same check applies after a deploy that
+replaced the Runtime: the old Runtime's group is deleted while it drains.
 
 ## API
 

@@ -107,12 +107,18 @@ const RUNTIME_ENDPOINT = 'DEFAULT';
  *   spellings it knows (`aws_secret_access_key`, `secret key`, ...); it needs
  *   one of those keywords nearby and the object forms have none.
  * A custom identifier's regex is capped at 200 characters by CloudWatch
- * Logs, and an open-ended quantifier (`{16,}`) is accepted but never
- * matches (probed 2026-11-06): bound every repeat.
+ * Logs, and an open-ended `{n,}` quantifier is accepted but never matches
+ * (probed 2026-11-06 with `{16,}`; `+` did match). Every repeat here carries
+ * an explicit upper bound anyway, so the two engines (CloudWatch's and the
+ * JS one the unit tests use) read the same thing; 4096 covers a JWT segment
+ * and the whole base64 credential header (about 1.8 KB for a role session).
+ * The integration test (step `mask`) writes probe lines into a Runtime
+ * group and reads them back masked and with `--unmask`, so the patterns are
+ * also proven on CloudWatch's engine, not only in JS.
  */
 export const MASKED_PATTERNS = {
-  JWT: 'eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+',
-  CREDENTIAL_HEADER: 'eyJhY2Nlc3NLZXlJZCI6[A-Za-z0-9+/=]+',
+  JWT: 'eyJ[A-Za-z0-9_-]{1,4096}\\.[A-Za-z0-9_-]{1,4096}\\.[A-Za-z0-9_-]{1,4096}',
+  CREDENTIAL_HEADER: 'eyJhY2Nlc3NLZXlJZCI6[A-Za-z0-9+/=]{1,4096}',
   SECRET_ACCESS_KEY_FIELD: 'secretAccessKey\\\\?["\']?\\s*:\\s*\\\\?["\'][A-Za-z0-9/+=]{40}',
   SESSION_TOKEN_FIELD: 'sessionToken\\\\?["\']?\\s*:\\s*\\\\?["\'][A-Za-z0-9/+=]{16,4096}',
 } as const;
