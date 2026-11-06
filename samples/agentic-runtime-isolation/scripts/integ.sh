@@ -1220,16 +1220,22 @@ check "${hits_ctx} log lines hold an _ri_ctx value" eq "$hits_ctx" 0
 # The service-side count no mask can hide: LogEventsWithFindings (AWS/Logs) per Runtime group over the run.
 # The metric only exists once a line matched, so no datapoint is zero.
 findings_total=0
+findings_unread=0
 while read -r g; do
   [[ -n "$g" && "$g" == "${RUNTIME_LOG_PREFIX}"* ]] || continue
-  f="$(aws cloudwatch get-metric-statistics --namespace AWS/Logs --metric-name LogEventsWithFindings \
+  if ! f="$(aws cloudwatch get-metric-statistics --namespace AWS/Logs --metric-name LogEventsWithFindings \
     --dimensions Name=LogGroupName,Value="$g" --statistics Sum --period 86400 \
-    --start-time "$STARTED" --end-time "$(date -u -d '+5 min' +%FT%TZ)" --query 'sum(Datapoints[].Sum)' --output text 2>/dev/null || echo 0)"
+    --start-time "$STARTED" --end-time "$(date -u -d '+5 min' +%FT%TZ)" --query 'sum(Datapoints[].Sum)' --output text 2>"${LIB_TMP}/findings-err")"; then
+    findings_unread=$((findings_unread + 1))
+    echo "  LogEventsWithFindings read of ${g} failed: $(head -c 300 "${LIB_TMP}/findings-err")" >&2
+    continue
+  fi
   [[ "$f" == None || -z "$f" ]] && f=0
   findings_total="$(awk -v a="$findings_total" -v b="$f" 'BEGIN { print a + b }')"
 done < <(sort -u "$groups_file")
+check "${findings_unread} Runtime log groups whose LogEventsWithFindings could not be read" eq "$findings_unread" 0
 check "LogEventsWithFindings over the Runtime groups this run is ${findings_total}" eq "$findings_total" 0
-note "swept ${swept} log groups (Runtime groups read with --unmask); LogEventsWithFindings ${findings_total}"
+note "swept ${swept} log groups (Runtime groups read with --unmask), $(wc -l <"$SECRETS") signature segments; LogEventsWithFindings ${findings_total}"
 end_step
 
 # --------------------------------------------------------------------------
@@ -1289,7 +1295,6 @@ else
   check "the --unmask read returns the session token in all three spellings" eq "$(printf '%s' "$unmasked" | grep -c -F "$probe_session" || true)" 3
   note "probe stream ${probe_stream} in ${probe_group}: $(printf '%s\n' "$masked" | grep -c '\*' || true) masked lines"
 fi
-note "${swept} log groups, $(wc -l <"$SECRETS") signature segments: 0 hits"
 end_step
 
 # --------------------------------------------------------------------------

@@ -138,7 +138,7 @@ export async function handleEvent(
   }
   try {
     try {
-      await logsClient.send(new CreateLogGroupCommand({ logGroupName: name }));
+      await withRetry(deps, () => logsClient.send(new CreateLogGroupCommand({ logGroupName: name })));
     } catch (error) {
       if (!(error instanceof ResourceAlreadyExistsException)) {
         throw error;

@@ -339,7 +339,8 @@ describe.each(INGRESSES)('one-backend defaults, ingress=%s', (ingress) => {
     }
     // No open-ended `{n,}`: CloudWatch Logs accepts it but never matches it (probed 2026-11-06). `+` is the
     // accepted form for a value of unknown length; a large explicit bound after a short literal is refused as
-    // "too complex" (`eyJ[A-Za-z0-9_-]{1,200}`, probed the same day), so `*` and `{n,}` are the forbidden forms.
+    // "too complex" (`eyJ[A-Za-z0-9_-]{1,200}`, probed the same day). Forbidden here: `{n,}`, and `*` after a
+    // class or group (a value repeat); `\s*` around the colon stays and is proven matching by integ step `mask`.
     for (const c of policy.Configuration.CustomDataIdentifier) {
       expect(c.Regex).not.toMatch(/\{\d+,\}/);
       expect(c.Regex).not.toMatch(/[\])]\*/);

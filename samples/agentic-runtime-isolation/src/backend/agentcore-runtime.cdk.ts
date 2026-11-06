@@ -118,7 +118,7 @@ const RUNTIME_ENDPOINT = 'DEFAULT';
  *   whose length is (a 40-character secret access key, a session token)
  *   use a `{m,n}` bound, which the engine takes behind a longer literal
  *   prefix. The bound also sets how long the service takes to compile the
- *   policy: `{16,2048}` took about 5 s per PutDataProtectionPolicy and
+ *   policy: `{16,4096}` took about 5 s per PutDataProtectionPolicy and
  *   half the calls came back HttpTimeoutException from the service itself
  *   (integration run 2026-11-06, every Runtime group failed); `{16,2048}`
  *   takes about 2 s and `{16,1024}` about 1 s. 2048 covers an STS session
