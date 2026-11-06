@@ -59,6 +59,18 @@ export function createFunction(scope: Construct, id: string, options: FunctionOp
       sourceMap: false,
       // Bundle the SDK clients so the artifact pins the versions the sample was tested against.
       externalModules: [],
+      // The Smithy SSDK validates `@pattern` with re2-wasm, which loads
+      // `re2.wasm` from `__dirname` at init; esbuild inlines the JavaScript
+      // but not the .wasm file, so without this copy every function that
+      // imports an SSDK model fails at init with ENOENT /var/task/re2.wasm
+      // (found on the first deployment, 2026-11-06).
+      commandHooks: {
+        beforeBundling: () => [],
+        beforeInstall: () => [],
+        afterBundling: (inputDir: string, outputDir: string) => [
+          `cp "${path.join(inputDir, 'node_modules', 're2-wasm', 'build', 'wasm', 're2.wasm')}" "${outputDir}/re2.wasm"`,
+        ],
+      },
     },
   });
   logGroup.grantWrite(options.role);
