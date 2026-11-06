@@ -182,6 +182,35 @@ describe('CreateTenantKey vendor-key (M-17, M-22)', () => {
     expect(ddb.commandCalls(UpdateCommand)[0].args[0].input.ExpressionAttributeValues![':set_apiKeyId']).toBe('key1');
   });
 
+  it('retries a throttled API Gateway control-plane call with backoff and finishes (parallel deploy in the account)', async () => {
+    keyRowAfter('vendor-key', KEY_ARN_A);
+    kms.on(CreateKeyCommand).resolves({ KeyMetadata: { KeyId: 'k', Arn: KEY_ARN_A } });
+    probeOk();
+    apigw.on(GetUsagePlansCommand).resolves({ items: [{ id: 'plan1', name: 'plan-name' }] });
+    const throttle = Object.assign(new Error('Too Many Requests'), { name: 'TooManyRequestsException', $metadata: { httpStatusCode: 429 } });
+    apigw.on(CreateApiKeyCommand).rejectsOnce(throttle).rejectsOnce(throttle).resolves({ id: 'key1' });
+    apigw.on(CreateUsagePlanKeyCommand).rejectsOnce(throttle).resolves({});
+    const slept: number[] = [];
+    const d = { ...deps({ tenantThrottle: true, usagePlanName: 'plan-name' }), sleep: async (ms: number) => void slept.push(ms) };
+    await createTenantKey(d, { tenantId: 'tenant-a', tier: 'vendor-key' });
+    expect(apigw.commandCalls(CreateApiKeyCommand)).toHaveLength(3);
+    expect(apigw.commandCalls(CreateUsagePlanKeyCommand)).toHaveLength(2);
+    expect(slept.filter((ms) => ms >= 1000)).toEqual([1000, 2000, 1000]);
+  });
+
+  it('gives up after five throttled attempts; the row stays CREATING for a repeated call', async () => {
+    keyRowAfter('vendor-key', KEY_ARN_A);
+    kms.on(CreateKeyCommand).resolves({ KeyMetadata: { KeyId: 'k', Arn: KEY_ARN_A } });
+    probeOk();
+    apigw.on(GetUsagePlansCommand).resolves({ items: [{ id: 'plan1', name: 'plan-name' }] });
+    apigw.on(CreateApiKeyCommand).rejects(Object.assign(new Error('Too Many Requests'), { name: 'TooManyRequestsException' }));
+    await expect(createTenantKey(deps({ tenantThrottle: true, usagePlanName: 'plan-name' }), { tenantId: 'tenant-a', tier: 'vendor-key' })).rejects.toMatchObject({
+      name: 'TooManyRequestsException',
+    });
+    expect(apigw.commandCalls(CreateApiKeyCommand)).toHaveLength(5);
+    expect(ddb.commandCalls(UpdateCommand).some((c) => c.args[0].input.ExpressionAttributeValues?.[':set_keyStatus'] === 'ACTIVE')).toBe(false);
+  });
+
   it('refuses keyArn with vendor-key', async () => {
     await expect(createTenantKey(deps(), { tenantId: 'tenant-a', tier: 'vendor-key', keyArn: KEY_ARN_A })).rejects.toMatchObject({
       name: 'ValidationError',

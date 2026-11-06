@@ -39,6 +39,37 @@ export function errorCode(error: unknown): string {
   return 'Unknown';
 }
 
+/** A control-plane throttle (API Gateway `TooManyRequestsException`, `ThrottlingException`, HTTP 429). */
+export function isThrottled(error: unknown): boolean {
+  return httpStatus(error) === 429 || ['TooManyRequestsException', 'ThrottlingException', 'Throttling'].includes(errorCode(error));
+}
+
+/**
+ * Runs `call`, retrying only a throttle, with exponential backoff
+ * (1 s, 2 s, 4 s, ... capped at 8 s) up to `attempts` tries. The SDK's own
+ * three retries span about a second, which is not enough while another
+ * stack deploys API Gateway resources in the same account (seen on the
+ * 2026-11-06 integration run beside a parallel deploy). The caller bounds
+ * the total with the function timeout; anything other than a throttle
+ * propagates at once.
+ */
+export async function retryThrottled<T>(
+  call: () => Promise<T>,
+  attempts = 5,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await call();
+    } catch (error) {
+      if (!isThrottled(error) || attempt >= attempts) {
+        throw error;
+      }
+      await sleep(Math.min(8000, 1000 * 2 ** (attempt - 1)));
+    }
+  }
+}
+
 /** A 403 or an `AccessDenied` from S3 (spec §8: triggers the probe). */
 export function isAccessDenied(error: unknown): boolean {
   return httpStatus(error) === 403 || errorCode(error) === 'AccessDenied';

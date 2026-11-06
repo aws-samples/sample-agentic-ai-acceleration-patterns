@@ -45,7 +45,7 @@ import { buildVendorKeyPolicy } from './key-policy';
 import { apiError, ApiError } from '../api/errors';
 import { usageKeyName, usageKeyValue } from '../authoriser/usage-key';
 import { STACK_TAG_KEY, TENANT_TAG_KEY } from '../shared/constants';
-import { cancellationCodes, errorCode } from '../shared/errors';
+import { cancellationCodes, errorCode, retryThrottled } from '../shared/errors';
 import { log } from '../shared/logger';
 import { probeKeyThroughS3 } from '../shared/probe';
 import { isoNow, keyArnItemKey, type KeyRow, keyRowKey, type KeyTier, updateInput } from '../shared/registry';
@@ -322,28 +322,37 @@ export async function findUsagePlan(apiGateway: NonNullable<PlatformDependencies
   throw apiError.internal('the tenant usage plan was not found');
 }
 
+/**
+ * The API Gateway control plane is throttled per account, and a parallel
+ * deploy in the same account eats the quota: every call here retries a
+ * throttle with backoff (ADR-0011). The row stays `CREATING` if the budget
+ * runs out, so a repeated `CreateTenantKey` resumes.
+ */
 async function ensureApiKey(deps: PlatformDependencies, tenantId: string): Promise<string> {
   const { config } = deps;
-  if (deps.apiGateway === undefined || config.usagePlanName === undefined) {
+  const apiGateway = deps.apiGateway;
+  if (apiGateway === undefined || config.usagePlanName === undefined) {
     throw apiError.internal();
   }
-  const usagePlanId = await findUsagePlan(deps.apiGateway, config.usagePlanName);
+  const sleep = deps.sleep ?? defaultSleep;
+  const send = <T>(call: () => Promise<T>) => retryThrottled(call, 5, sleep);
+  const usagePlanId = await send(() => findUsagePlan(apiGateway, config.usagePlanName!));
   const name = usageKeyName(tenantId);
   let id: string | undefined;
   try {
-    id = (await deps.apiGateway.send(new CreateApiKeyCommand({ name, value: usageKeyValue(config.stackId, tenantId), enabled: true }))).id;
+    id = (await send(() => apiGateway.send(new CreateApiKeyCommand({ name, value: usageKeyValue(config.stackId, tenantId), enabled: true })))).id;
   } catch (error) {
     if (!(error instanceof ConflictException) && errorCode(error) !== 'ConflictException') {
       throw error;
     }
-    const found = await deps.apiGateway.send(new GetApiKeysCommand({ nameQuery: name, includeValues: false }));
+    const found = await send(() => apiGateway.send(new GetApiKeysCommand({ nameQuery: name, includeValues: false })));
     id = found.items?.find((k) => k.name === name)?.id;
   }
   if (id === undefined) {
     throw apiError.internal();
   }
   try {
-    await deps.apiGateway.send(new CreateUsagePlanKeyCommand({ usagePlanId, keyId: id, keyType: 'API_KEY' }));
+    await send(() => apiGateway.send(new CreateUsagePlanKeyCommand({ usagePlanId, keyId: id, keyType: 'API_KEY' })));
   } catch (error) {
     if (!(error instanceof ConflictException) && errorCode(error) !== 'ConflictException') {
       throw error;

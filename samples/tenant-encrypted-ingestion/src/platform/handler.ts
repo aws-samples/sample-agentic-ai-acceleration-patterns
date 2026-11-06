@@ -29,7 +29,7 @@ import { createTenantKey } from './create-tenant-key';
 import { deleteTenantKey } from './delete-tenant-key';
 import { getTenantKey } from './get-tenant-key';
 import { rotateTenantKey } from './rotate-tenant-key';
-import { apiError, normaliseErrorResponse } from '../api/errors';
+import { apiError, ApiError, normaliseErrorResponse } from '../api/errors';
 import { boolEnv, ENV, requireEnv, requireIntEnv } from '../shared/constants';
 import { errorName, log } from '../shared/logger';
 import { TenantClients, type TenantCredentials, TenantSessions } from '../shared/tenant-session';
@@ -45,32 +45,54 @@ function wrongFunction(): never {
   throw apiError.internal('operation routed to the wrong function');
 }
 
+/**
+ * Runs an operation; an error that is not a modelled `ApiError` becomes the
+ * SSDK's 500 with no cause in the response, so its type and message are
+ * logged here first (never a request body or a key value). The 2026-11-06
+ * integration run hit API Gateway control-plane throttling and the log
+ * showed only the 500.
+ */
+async function guarded<T>(operation: string, tenantId: string | undefined, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (!(error instanceof ApiError)) {
+      log.error('platform operation failed', { operation, tenantId, errorType: errorName(error), errorMessage: error instanceof Error ? error.message : String(error) });
+    }
+    throw error;
+  }
+}
+
 export function createPlatformService(role: PlatformRole, deps: PlatformDependencies): IngestionPlatformServiceService<PlatformContext> {
   return {
-    CreateTenantKey: async (input) => {
-      if (role !== 'keyFactory') {
-        wrongFunction();
-      }
-      return { key: await createTenantKey(deps, { tenantId: input.tenantId!, tier: input.tier as 'vendor-key' | 'tenant-key', keyArn: input.keyArn }) };
-    },
-    GetTenantKey: async (input) => {
-      if (role !== 'platform') {
-        wrongFunction();
-      }
-      return { key: await getTenantKey(deps, input.tenantId!) };
-    },
-    RotateTenantKey: async (input) => {
-      if (role !== 'platform') {
-        wrongFunction();
-      }
-      return rotateTenantKey(deps, input.tenantId!);
-    },
-    DeleteTenantKey: async (input) => {
-      if (role !== 'platform') {
-        wrongFunction();
-      }
-      return deleteTenantKey(deps, input.tenantId!);
-    },
+    CreateTenantKey: async (input) =>
+      guarded('CreateTenantKey', input.tenantId, async () => {
+        if (role !== 'keyFactory') {
+          wrongFunction();
+        }
+        return { key: await createTenantKey(deps, { tenantId: input.tenantId!, tier: input.tier as 'vendor-key' | 'tenant-key', keyArn: input.keyArn }) };
+      }),
+    GetTenantKey: async (input) =>
+      guarded('GetTenantKey', input.tenantId, async () => {
+        if (role !== 'platform') {
+          wrongFunction();
+        }
+        return { key: await getTenantKey(deps, input.tenantId!) };
+      }),
+    RotateTenantKey: async (input) =>
+      guarded('RotateTenantKey', input.tenantId, async () => {
+        if (role !== 'platform') {
+          wrongFunction();
+        }
+        return rotateTenantKey(deps, input.tenantId!);
+      }),
+    DeleteTenantKey: async (input) =>
+      guarded('DeleteTenantKey', input.tenantId, async () => {
+        if (role !== 'platform') {
+          wrongFunction();
+        }
+        return deleteTenantKey(deps, input.tenantId!);
+      }),
   };
 }
 
