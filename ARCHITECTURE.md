@@ -190,6 +190,7 @@ Every published parameter sits under one of these paths, owned by one writer:
 | `/application-plane/shared/*` | shared application-plane stacks, one owner per sub-path | resources every cell and tenant uses |
 | `/application-plane/shared/identity/*` | `tenant-identity` stack | `apiUrl`, `topology`, `platformInvokePolicyArn` (the managed policy that may call `/platform/*`; `agentic-runtime-isolation`'s integration driver uses it to register the vendor scopes), and for shared pools `userPoolId`, `appClientId` |
 | `/application-plane/shared/agent-runtime/*` | `agentic-runtime-isolation`: the `SharedIngress` (its `registryPrefix`), each `AgentBackend` and each `ToolTarget` | `ingress`, one JSON document (`version`, `ingress`, `endpointUrl`, `baseUrl`, `ingressRoleArn`, `ingressId`, `tenantRoleArn`, `gatewayIdentifier` (Gateway ingress only), `issuer`, `jwksUrl`, `entitlementsTableName`, `entitlementsApiUrl`, `toolContextKeyId` (with a tools gateway), `toolsGateways: { <name>: { url, identifier, roleArn, policyEngineId } }`); registry rows `backends/<name>`, one per `AgentBackend`, and `tools/<target>`, one per `ToolTarget` |
+| `/application-plane/shared/ingestion/*` | `tenant-encrypted-ingestion` demo stack | `apiUrl`, `bucketName`, `tenantRoleArns` (`upload,process,platform`, the roles a `tenant-key` key policy trusts), `consumerRoleArns` (or `none`), `eventBusArn`, `accessLogBucketName` |
 | `/application-plane/cells/<cellId>/*` | the cell create script | a cell's shared deployment |
 | `/application-plane/tenants/<tenantId>` | the tenant create script | a tenant's own deployment state |
 
@@ -270,9 +271,14 @@ rest).
 | [`control-plane`](./samples/control-plane/) | control plane: tenant and cell lifecycle | a vendor IdP | `/control-plane/tenant-api-url`; scripts write `/application-plane/cells/*` and `/application-plane/tenants/*` |
 | [`tenant-identity`](./samples/tenant-identity/) | tenant identity: the token contract on Cognito | nothing | `/application-plane/shared/identity/*` |
 | [`agentic-runtime-isolation`](./samples/agentic-runtime-isolation/) | Agentic runtime isolation: runtime, tools and entitlements for multi-tenant agents. Enforced isolation at the invocation, delegation and data layers, with a Policy and interceptor check at the tools layer: one ingress, the only principal each AgentCore Runtime trusts, verifies the identity token, resolves the grant (agent needs ∪ agent tools ∩ tenant tools ∩ user tools) from an entitlement store, mints a 5-minute transaction token (the identity token never leaves the ingress) and invokes the agent's Runtime with tenant-scoped credentials from an always-on TVM, in a fresh microVM session per request by default (with `session` set, one per tenant, the default scope, or per user); one tools gateway by default (more optional), each with its own Policy engine, serves the tools: a REQUEST interceptor is the per-tool wall and signs a tenant context, Policy then admits the target, and each tool assumes its own tenant role | `tenant-identity` `shared-pool` (its parameters; the integration driver uses its `/platform/*` API to register scopes and create demo tenants) | constructs `SharedIngress`, `AgentBackend`, `ToolTarget`, `TokenSigner`, `EntitlementStore`; one JSON parameter `/application-plane/shared/agent-runtime/ingress` plus registry rows `backends/<name>` and `tools/<target>` |
+| [`tenant-encrypted-ingestion`](./samples/tenant-encrypted-ingestion/) | data layer: per-tenant encrypted ingestion; one bucket and pipeline for every tenant, each tenant's documents encrypted with its own KMS key (vendor-owned `vendor-key` or tenant-owned `tenant-key`) bound to its prefixes by key policy, tenant-scoped roles with ABAC on `TenantId`, write-once presigned uploads, a deployer-extensible validator chain before anything lands, cryptographic offboarding | `tenant-identity` `shared-pool` (its parameters and its `PUT|GET|DELETE /platform/scopes/{scope}`) | construct `TenantEncryptedIngestion`; `/application-plane/shared/ingestion/*` |
 
 `agentic-runtime-isolation` vends the data layer's tenant-scoped
 credentials: its TVM is always on and signs every model call
 (agentic-runtime-isolation ADR-0018), and each tool assumes its own tenant
-role from the signed tenant context the interceptor hands it. What those
-credentials unlock in memory and retrieval has no sample yet.
+role from the signed tenant context the interceptor hands it.
+`tenant-encrypted-ingestion` is the first data-layer sample those
+credentials unlock: documents land under one KMS key per tenant, and a
+consumer role that holds the `TenantId` session tag reads only its tenant's
+prefix. Memory and retrieval have no sample yet.
+
