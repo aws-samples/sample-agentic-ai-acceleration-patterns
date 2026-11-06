@@ -817,12 +817,22 @@ async function step5(w: World): Promise<StepResult> {
   await read.Body?.transformToString();
   await refusedByKms('bucket key: TestScratchWriterRole PUT with bucket-key-enabled true', () => put(writer, `documents/tenant-a/bk-${Date.now()}`, true));
 
-  try {
-    await put(probe, `ingest/${w.tenants.A.tenantId}/z-${Date.now()}`, false, w.bucket, w.tenants.A.keyArn);
-    c.expect(false, 'TestProbeRole PUT on the ingestion bucket with every header right: succeeded');
-  } catch (error) {
-    const msg = ((error as Error).message ?? '').replace(/https?:\/\/\S+/g, '<url>').slice(0, 160);
-    c.expect(!errorMentionsKms(error) && errorName(error) === 'AccessDenied', `TestProbeRole PUT on the ingestion bucket -> ${errorName(error)} (${errorMentionsKms(error) ? 'KMS' : 'S3'}): ${msg}`);
+  // On the ingestion bucket both walls refuse TestProbeRole. S3 asks KMS for
+  // the data key before it evaluates the bucket policy, so a PUT naming A's
+  // key is answered by A's key policy (4a-i); the principal-scoped bucket
+  // Deny is isolated with the AWS managed aws/s3 key, which the probe may use.
+  await refusedByKms('TestProbeRole PUT ingest/A with A\'s key (key policy answers first)', () =>
+    put(probe, `ingest/${w.tenants.A.tenantId}/z-${Date.now()}`, false, w.bucket, w.tenants.A.keyArn),
+  );
+  for (const prefix of ['ingest', 'documents'] as const) {
+    try {
+      await probe.send(
+        new PutObjectCommand({ Bucket: w.bucket, Key: `${prefix}/${w.tenants.A.tenantId}/z-${Date.now()}`, Body: 'x', ServerSideEncryption: 'aws:kms', IfNoneMatch: prefix === 'ingest' ? '*' : undefined }),
+      );
+      c.expect(false, `TestProbeRole PUT ${prefix}/A with the aws/s3 key: succeeded`);
+    } catch (error) {
+      c.expect(!errorMentionsKms(error) && errorName(error) === 'AccessDenied', `TestProbeRole PUT ${prefix}/A with the aws/s3 key -> ${errorName(error)} (${errorMentionsKms(error) ? 'KMS' : 'S3, the principal-scoped Deny'})`);
+    }
   }
 
   const [upload, processRole, platform] = w.demo.TenantRoleArns.split(',');

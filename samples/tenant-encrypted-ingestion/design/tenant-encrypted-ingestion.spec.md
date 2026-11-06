@@ -971,7 +971,11 @@ processor. The test waits 5 minutes after each key policy or tag change.
    `TestScratchWriterRole`) -> KMS 403 (4a-ii); `TestConsumerRole` for A
    -> 200 (2b). `TestScratchWriterRole` PUT with `bucket-key-enabled:
    true` -> KMS 403. On the ingestion bucket, `TestProbeRole` PUT to
-   `ingest/A/z` with every header right -> 403 from S3. The
+   `ingest/A/z` naming A's key -> KMS 403 (S3 asks KMS for the data key
+   before it evaluates the bucket policy, so the key policy answers
+   first); PUT to `ingest/A/z` and `documents/A/z` with `aws:kms` and the
+   AWS managed `aws/s3` key, which the probe may use -> 403 from S3 (the
+   principal-scoped bucket Deny alone). The
    identity-policy wall: `SimulatePrincipalPolicy` on the deployed tenant
    roles with `TenantId = A` denies every S3, KMS and DynamoDB action on
    B's resources, any `PutItem` or `DeleteItem`, and any write naming
