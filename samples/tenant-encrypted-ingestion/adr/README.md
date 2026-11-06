@@ -18,5 +18,6 @@ SPDX-License-Identifier: MIT-0
 | [0010](./0010-keep-one-tenant-partitioned-registry-with-a-stream-watch.md) | Keep one tenant-partitioned registry with a stream watch | Accepted | 2026-11-05 |
 | [0011](./0011-authenticate-tenants-with-the-token-contract-and-throttle-per-tenant-optionally.md) | Authenticate tenants with the token contract and throttle per tenant optionally | Accepted | 2026-11-05 |
 | [0012](./0012-deliver-the-pattern-as-a-construct-with-per-tenant-observability.md) | Deliver the pattern as a construct with per-tenant observability | Accepted | 2026-11-05 |
+| [0013](./0013-scope-the-base-roles-kms-use-deny-to-tenant-tagged-keys.md) | Scope the base roles' KMS use Deny to tenant-tagged keys | Accepted | 2026-11-06 |
 
 Renumbered 2026-11-05 before implementation; earlier drafts were never merged.

@@ -13,7 +13,7 @@ import { Duration } from 'aws-cdk-lib';
 import { Match, type Template } from 'aws-cdk-lib/assertions';
 import { asArray, flat, importedRole, logicalIdOf, statementsOf, synthConstruct, validatorFor } from './helpers';
 import { PUT_KEY_POLICY_PATTERN } from '../src/construct/alarms';
-import { TENANT_TAG_FORBIDDEN_PATTERNS } from '../src/construct/roles';
+import { KMS_USE_ACTIONS, TENANT_TAG_FORBIDDEN_PATTERNS } from '../src/construct/roles';
 import { PROCESS_ROLE_ATTRIBUTES, PROTECTED_ATTRIBUTES, UPLOAD_ROLE_ATTRIBUTES } from '../src/shared/registry';
 
 const { template } = synthConstruct({ consumerRoles: [] });
@@ -150,6 +150,22 @@ describe('base roles (M-14, M-22)', () => {
     for (const role of ['PlatformRole', 'SweepRole']) {
       const deny = denies(template, role).find((s) => s.Sid === 'DenyBindingUpdates')!;
       expect(deny.Condition).toEqual({ 'ForAnyValue:StringEquals': { 'dynamodb:Attributes': ['keyArn', 'tier'] } });
+    }
+  });
+
+  it('keyFactoryRole and platformRole deny KMS use on tenant-tagged keys only; no base role denies it unconditioned (ADR-0013)', () => {
+    const tagCondition = { Null: { 'aws:ResourceTag/TenantId': 'false' } };
+    for (const role of ['KeyFactoryRole', 'PlatformRole']) {
+      const deny = denies(template, role).find((s) => s.Sid === 'DenyTenantKeyUse')!;
+      expect(deny.Action).toEqual(KMS_USE_ACTIONS);
+      expect(deny.Resource).toBe('*');
+      expect(deny.Condition).toEqual(tagCondition);
+    }
+    for (const role of BASE) {
+      for (const s of denies(template, role)) {
+        const usesKms = asArray<string>(s.Action).some((a) => KMS_USE_ACTIONS.includes(a) || a === 'kms:*');
+        if (usesKms) expect(s.Condition).toEqual(tagCondition);
+      }
     }
   });
 

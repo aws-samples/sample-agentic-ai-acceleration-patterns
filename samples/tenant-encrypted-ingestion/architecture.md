@@ -16,8 +16,8 @@ SPDX-License-Identifier: MIT-0
 > `Requester` check (step 10) is best effort and no access log arrived
 > within 3 minutes; `kmsRequests` against CloudTrail is recorded, not
 > checked (6 against 19, [§11](#11-observability-and-per-tenant-cost-attribution));
-> the standard §6 security scans have not run yet
-> ([threat model](./threat-model.md#security-review)).
+> the standard §6 security scans ran on 2026-11-06 and are dispositioned in the
+> [threat model](./threat-model.md#security-review).
 
 This file describes what is deployed. The design trail is the
 [specification](./design/tenant-encrypted-ingestion.spec.md), the
