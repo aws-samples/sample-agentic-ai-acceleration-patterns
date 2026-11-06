@@ -20,7 +20,7 @@ to
 No code exists yet: every "planned location" names the file the
 implementation must put the control in, and the unit test, template test
 or integration step named in the same row is the check that will prove it.
-Integration steps are spec §10's numbering. Security scans are pending
+Integration steps are spec §10's numbering. Security scans ran 2026-11-06
 (last section).
 
 Scope: the `TenantEncryptedIngestion` construct (one versioned ingestion
@@ -309,23 +309,37 @@ hardening checklist unless marked "by design".
 
 ## Security review
 
-Scans pending: no code has been written yet. Before the pull request, the
-security scans of the sample standard (`docs/sample-standard.md` §6) run on
-the synthesised tree: `npx projen build` under the deployment profile, then
-ProtoShield and the Automated Security Helper against the sample directory
-with `cdk.out/` present. Every finding will be dispositioned here (fixed,
-accepted with reason, or false positive with evidence); scanner outputs stay
-out of the repository.
+Run 2026-11-06 on the synthesised tree (`npx projen build` under the
+deployment profile, then ProtoShield and the Automated Security Helper 3.2.0
+against the sample directory with `cdk.out/` present). Scanner outputs stay
+out of the repository. Dispositions:
 
-Carried as integration checks, because the documentation does not settle
-them: cross-account `aws:ResourceTag` (step 1); extra unsigned headers on a
-presigned PUT and a 412 for a signed `If-None-Match` (step 4); the S3 error
-shape of a KMS failure behind the probe (step 8); whether SQS's own move to
-the DLQ meets the DLQ policy (step 7b); `Object Created` on the default bus
-(step 3). Two spikes ran before implementation (2026-11-05): `CreateKey`
-with tags is not blocked by the new key's Deny-tagging statement, a later
-retag is; and `aws:ResourceTag` is populated at `CreateKey` from the
-request tags, so no identity Deny may test it there.
+| Scanner | Finding | Disposition |
+|---|---|---|
+| ProtoShield license headers | 80 files "carry MIT headers, Apache 2.0 required" | False positive: ProtoShield's default plugin configuration expects Apache-2.0; this repository is MIT-0 by its `LICENSE` and the sample standard §4.1, and every authored file carries the MIT-0 header |
+| ProtoShield IAM (High) | `TestProbeRole` holds KMS use actions on `*` and S3 object actions on every bucket | Accepted for the probe's KMS scope, by design (M-32): the role must be admitted by its identity policy so a denial it meets can only come from a key or bucket policy; it is trusted by the test account only, one-hour sessions, denied every administration action, and deployed only into an account that carries the test marker (M-33). Its S3 scope is **fixed** to the sample's buckets (`arn:aws:s3:::tenantencryptedingestion*`) |
+| ProtoShield IAM (High) | `TestAccessLogReaderRole` reads every bucket | **Fixed**: scoped to the sample's buckets |
+| ProtoShield IAM (Medium) | `TestConsumerRole` reads `documents/<tenant>/*` of any bucket | **Fixed**: scoped to the sample's buckets |
+| ProtoShield IAM (Info) | `PlatformInvokePolicy` broader than needed, narrowed by an explicit Deny | No change; the scanner calls it good practice |
+| ProtoShield CVE, ASH grype (Medium) | `minimatch` GHSA-g3hv-75wg-m249 (DoS), `glob` AbortSignal bypass | Accepted: both are transitive dependencies of `aws-cdk-lib` and the development toolchain; `npm ls --omit=dev` shows `minimatch` only under `aws-cdk-lib`, and neither is in any Lambda bundle (esbuild output grepped). Refreshed with the next `npx projen upgrade` |
+| ASH opengrep, semgrep (High) | non-literal `RegExp` in `src/shared/registry.ts` | **Fixed**: the placeholder scan is a plain string walk (`mentionsPlaceholder`); the input was code-defined attribute names, never caller data |
+| ASH detect-secrets (High) | an access key id and secret in `test/runtime-helpers.ts`; high-entropy strings in `test/shared.test.ts`, `test/processor.test.ts` | False positive: the key is `AKIAEXAMPLEEXAMPLE00` with `example-secret-not-real`, returned by a mocked STS; the strings are a fixed ULID and a SHA-256 fixture |
+| ASH cfn-nag (Medium, 158) and checkov | on `cdk.out/` and `cdk.integ.out/` templates | Not dispositioned one by one: the synthesised templates are machine output the cdk-nag aspect already checks (0 unsuppressed errors, every suppression cites an ADR or M-n); cfn-nag's generic rules (log group retention, Lambda in a VPC, SQS policies) repeat what `cdk-nag` evaluated with context. Checkov and detect-secrets ran as SKIPPED in ASH's final table because of the global threshold |
+
+Carried as integration checks and settled by the green run of 2026-11-06
+(eu-central-1, a vendor account and a second tenant-key account):
+cross-account `aws:ResourceTag` (step 1); a 412 for a signed
+`If-None-Match` and a 403 for an extra unsigned header (step 4); S3 asks KMS
+for the data key before it evaluates the bucket policy (step 5); the S3 error
+shape of a KMS failure is 400 with the KMS code in the message, confirmed by
+the probe (step 8); SQS's own move to the DLQ meets the DLQ policy (step 7b);
+`Object Created` arrives on the default bus (step 3). Two spikes ran before
+implementation (2026-11-05): `CreateKey` with tags is not blocked by the new
+key's Deny-tagging statement, a later retag is; and `aws:ResourceTag` is
+populated at `CreateKey` from the request tags, so no identity Deny may test
+it there. Found at the first deployment: Lambda decrypts a function's
+environment variables under its execution role, so the base roles' KMS use
+Deny is scoped to keys tagged `TenantId`.
 
 ## Appendix A: Review history
 

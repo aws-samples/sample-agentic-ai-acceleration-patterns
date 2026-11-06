@@ -46,6 +46,9 @@ export const SCRATCH_TENANT = 'tenant-a';
 /** CloudFormation names the demo stack's queues `<stack name>-...`; the redrive role reaches only those. */
 export const DEMO_QUEUE_NAME_PREFIX = 'TenantEncryptedIngestionInteg-';
 
+/** CloudFormation names the sample's buckets `<lower-case stack name>-<logical id>-<hash>`; the test-aid roles reach only those and the scratch bucket. */
+const SAMPLE_BUCKETS = 'arn:aws:s3:::tenantencryptedingestion*';
+
 /** The Denies that keep TestProbeRole from changing what it tests (M-33). */
 export const PROBE_DENIED_ACTIONS = [
   'kms:PutKeyPolicy',
@@ -78,7 +81,7 @@ export class TestAidStack extends Stack {
     this.probeRole.addToPolicy(
       new iam.PolicyStatement({ actions: ['kms:Encrypt', 'kms:Decrypt', 'kms:GenerateDataKey*', 'kms:ReEncrypt*', 'kms:DescribeKey'], resources: ['*'] }),
     );
-    this.probeRole.addToPolicy(new iam.PolicyStatement({ actions: ['s3:GetObject', 's3:PutObject'], resources: ['arn:aws:s3:::*/*'] }));
+    this.probeRole.addToPolicy(new iam.PolicyStatement({ actions: ['s3:GetObject', 's3:PutObject'], resources: [`${SAMPLE_BUCKETS}/*`] }));
     this.probeRole.addToPolicy(new iam.PolicyStatement({ sid: 'DenyChangingWhatIsTested', effect: iam.Effect.DENY, actions: PROBE_DENIED_ACTIONS, resources: ['*'] }));
 
     const tagged = new iam.AccountPrincipal(this.account).withConditions(TENANT_ROLE_TRUST_CONDITIONS).withSessionTags();
@@ -88,7 +91,7 @@ export class TestAidStack extends Stack {
       description: 'tenant-encrypted-ingestion integ: a consumer role reading documents/<tenant>/ (spec §7.2 2b)',
     });
     this.consumerRole.addToPolicy(
-      new iam.PolicyStatement({ actions: ['s3:GetObject'], resources: [`arn:aws:s3:::*/documents/${TENANT_TAG_VARIABLE}/*`] }),
+      new iam.PolicyStatement({ actions: ['s3:GetObject'], resources: [`${SAMPLE_BUCKETS}/documents/${TENANT_TAG_VARIABLE}/*`] }),
     );
     this.consumerRole.addToPolicy(
       new iam.PolicyStatement({
@@ -182,8 +185,8 @@ export class TestAidStack extends Stack {
       maxSessionDuration: Duration.hours(1),
       description: 'tenant-encrypted-ingestion integ: the accessLogReaderRole, reads the Requester field (spec §10 step 10)',
     });
-    this.accessLogReaderRole.addToPolicy(new iam.PolicyStatement({ actions: ['s3:ListBucket', 's3:GetObject'], resources: ['arn:aws:s3:::*'] }));
-    this.accessLogReaderRole.addToPolicy(new iam.PolicyStatement({ actions: ['s3:GetObject'], resources: ['arn:aws:s3:::*/*'] }));
+    this.accessLogReaderRole.addToPolicy(new iam.PolicyStatement({ actions: ['s3:ListBucket'], resources: [SAMPLE_BUCKETS] }));
+    this.accessLogReaderRole.addToPolicy(new iam.PolicyStatement({ actions: ['s3:GetObject'], resources: [`${SAMPLE_BUCKETS}/*`] }));
 
     new CfnOutput(this, 'TestProbeRoleArn', { value: this.probeRole.roleArn });
     new CfnOutput(this, 'TestConsumerRoleArn', { value: this.consumerRole.roleArn });

@@ -218,6 +218,22 @@ export class AttributeNotAllowedError extends Error {
 
 const NAME_TOKEN = /#([A-Za-z][A-Za-z0-9]*)/g;
 
+/** True when `text` holds `placeholder` as a whole token (not as a prefix of a longer name); a plain scan, no dynamic RegExp. */
+function mentionsPlaceholder(text: string, placeholder: string): boolean {
+  let from = 0;
+  for (;;) {
+    const at = text.indexOf(placeholder, from);
+    if (at < 0) {
+      return false;
+    }
+    const next = text.charAt(at + placeholder.length);
+    if (next === '' || !/[A-Za-z0-9]/.test(next)) {
+      return true;
+    }
+    from = at + 1;
+  }
+}
+
 /**
  * An `UpdateItem` input (without `TableName`) for `spec`. Every attribute
  * name is a `#name` placeholder, so `ExpressionAttributeNames` is exactly the
@@ -279,7 +295,7 @@ export function updateExpression(
   // refuses unused names).
   const used = `${clauses.join(' ')} ${spec.condition ?? ''}`;
   for (const placeholder of Object.keys(names)) {
-    if (!new RegExp(`${placeholder}(?![A-Za-z0-9])`).test(used)) {
+    if (!mentionsPlaceholder(used, placeholder)) {
       delete names[placeholder];
     }
   }
