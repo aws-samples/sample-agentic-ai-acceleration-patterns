@@ -611,10 +611,31 @@ async function step1(w: World): Promise<StepResult> {
   return c.result('1');
 }
 
+const password = () => `Tei-${Math.random().toString(36).slice(2)}A1!`;
+
+/**
+ * Access tokens live one hour and the run is longer (steps 7 to 8 wait on
+ * TTLs, leases and KMS propagation), so the long steps re-issue the admin
+ * tokens first. tenant-identity's IssueToken test aid sets the password.
+ */
+async function refreshTokens(w: World, c: Check): Promise<void> {
+  for (const label of ['A', 'B', 'D'] as const) {
+    const t = w.tenants[label];
+    if (t.adminUsername === undefined) {
+      continue;
+    }
+    const issued = await signed('POST', `${w.identityApi}platform/tenants/${t.tenantId}/users/${t.adminUsername}/token`, { password: password() });
+    if (issued.status === 200) {
+      t.token = issued.json.accessToken;
+    } else {
+      c.note(`token refresh ${label} -> ${issued.status}`);
+    }
+  }
+}
+
 /** 2. Users and tokens from tenant-identity (its IssueToken test aid). */
 async function step2(w: World): Promise<StepResult> {
   const c = new Check();
-  const password = () => `Tei-${Math.random().toString(36).slice(2)}A1!`;
   for (const label of ['A', 'B', 'D'] as const) {
     const t = w.tenants[label];
     const issued = await signed('POST', `${w.identityApi}platform/tenants/${t.tenantId}/users/${t.adminUsername}/token`, { password: password() });
@@ -865,6 +886,7 @@ async function step7(w: World): Promise<StepResult> {
 /** 7b. Validators. */
 async function step7b(w: World): Promise<StepResult> {
   const c = new Check();
+  await refreshTokens(w, c);
   const t = w.tenants.A;
   if (t.token === undefined) {
     return { step: '7b', outcome: 'fail', notes: ['no token for A'] };
@@ -941,6 +963,7 @@ async function step7b(w: World): Promise<StepResult> {
 /** 7c. Abandoned lease. */
 async function step7c(w: World): Promise<StepResult> {
   const c = new Check();
+  await refreshTokens(w, c);
   const t = w.tenants.A;
   if (t.token === undefined) {
     return { step: '7c', outcome: 'fail', notes: ['no token for A'] };
@@ -988,6 +1011,7 @@ async function step7c(w: World): Promise<StepResult> {
 /** 8. Revocation, decided by the probe. */
 async function step8(w: World): Promise<StepResult> {
   const c = new Check();
+  await refreshTokens(w, c);
   const t = w.tenants.B;
   const keyArn = t.keyArn;
   if (t.token === undefined || keyArn === undefined) {
@@ -1093,6 +1117,7 @@ async function step8(w: World): Promise<StepResult> {
 /** 9. Rotation. */
 async function step9(w: World): Promise<StepResult> {
   const c = new Check();
+  await refreshTokens(w, c);
   const a = await signed('POST', `${w.apiUrl}platform/tenants/${w.tenants.A.tenantId}/key/rotate`);
   c.expect(a.status === 200, `RotateTenantKey A -> ${a.status}`);
   if (w.tenantKey.crossAccount) {
@@ -1211,6 +1236,7 @@ async function step10(w: World): Promise<StepResult> {
 /** 11. Offboarding. */
 async function step11(w: World): Promise<StepResult> {
   const c = new Check();
+  await refreshTokens(w, c);
   const a = w.tenants.A;
   const b = w.tenants.B;
   const platform = `${w.apiUrl}platform/tenants`;
