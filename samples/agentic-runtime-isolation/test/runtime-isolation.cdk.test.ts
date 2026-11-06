@@ -337,11 +337,12 @@ describe.each(INGRESSES)('one-backend defaults, ingress=%s', (ingress) => {
       expect(masked).not.toContain('IQoJb3JpZ2luX2VjEXAMPLEtoken');
       expect(masked).toContain('ASIAEXAMPLEEXAMPLE12');
     }
-    // Every repeat is bounded: CloudWatch Logs accepts `{n,}` but never matches it (probed 2026-11-06),
-    // and `+` / `*` after a class or group are kept out so the bound is explicit everywhere.
+    // No open-ended `{n,}`: CloudWatch Logs accepts it but never matches it (probed 2026-11-06). `+` is the
+    // accepted form for a value of unknown length; a large explicit bound after a short literal is refused as
+    // "too complex" (`eyJ[A-Za-z0-9_-]{1,200}`, probed the same day), so `*` and `{n,}` are the forbidden forms.
     for (const c of policy.Configuration.CustomDataIdentifier) {
       expect(c.Regex).not.toMatch(/\{\d+,\}/);
-      expect(c.Regex).not.toMatch(/[\])][+*]/);
+      expect(c.Regex).not.toMatch(/[\])]\*/);
     }
     // Ordinary log content is left alone: a short base64 word, a session prefix, a timestamp, a tenant id.
     const plain = 'request served tenantId=01JC0000000000000000000000 prefix=a1b2c3d4 blob=Zm9vYmFyYmF6cXV4 at 2026-11-06T10:00:00Z';

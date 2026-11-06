@@ -106,19 +106,26 @@ const RUNTIME_ENDPOINT = 'DEFAULT';
  *   `AwsSecretKey` identifier is kept beside them for the CLI and SDK
  *   spellings it knows (`aws_secret_access_key`, `secret key`, ...); it needs
  *   one of those keywords nearby and the object forms have none.
- * A custom identifier's regex is capped at 200 characters by CloudWatch
- * Logs, and an open-ended `{n,}` quantifier is accepted but never matches
- * (probed 2026-11-06 with `{16,}`; `+` did match). Every repeat here carries
- * an explicit upper bound anyway, so the two engines (CloudWatch's and the
- * JS one the unit tests use) read the same thing; 4096 covers a JWT segment
- * and the whole base64 credential header (about 1.8 KB for a role session).
+ * Three CloudWatch Logs regex rules, all probed 2026-11-06 with
+ * `PutDataProtectionPolicy` in the sandbox account:
+ * - a custom identifier's regex is capped at 200 characters;
+ * - an open-ended `{n,}` quantifier is accepted but never matches;
+ * - a large explicit bound is refused as "Regexes in Custom Data
+ *   Identifiers are too complex": `eyJ[A-Za-z0-9_-]{1,200}` and three
+ *   `{1,50}` segments are rejected, `{1,100}` is accepted, while `+` is
+ *   accepted and matches. So the two values whose length is not known
+ *   (a JWT segment, the base64 credential header) use `+`, and the two
+ *   whose length is (a 40-character secret access key, a session token of
+ *   at most 4096) use a `{m,n}` bound, which the engine takes behind a
+ *   longer literal prefix.
  * The integration test (step `mask`) writes probe lines into a Runtime
  * group and reads them back masked and with `--unmask`, so the patterns are
- * also proven on CloudWatch's engine, not only in JS.
+ * proven on CloudWatch's engine every run, not only in the JS one the unit
+ * tests use.
  */
 export const MASKED_PATTERNS = {
-  JWT: 'eyJ[A-Za-z0-9_-]{1,4096}\\.[A-Za-z0-9_-]{1,4096}\\.[A-Za-z0-9_-]{1,4096}',
-  CREDENTIAL_HEADER: 'eyJhY2Nlc3NLZXlJZCI6[A-Za-z0-9+/=]{1,4096}',
+  JWT: 'eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+',
+  CREDENTIAL_HEADER: 'eyJhY2Nlc3NLZXlJZCI6[A-Za-z0-9+/=]+',
   SECRET_ACCESS_KEY_FIELD: 'secretAccessKey\\\\?["\']?\\s*:\\s*\\\\?["\'][A-Za-z0-9/+=]{40}',
   SESSION_TOKEN_FIELD: 'sessionToken\\\\?["\']?\\s*:\\s*\\\\?["\'][A-Za-z0-9/+=]{16,4096}',
 } as const;
