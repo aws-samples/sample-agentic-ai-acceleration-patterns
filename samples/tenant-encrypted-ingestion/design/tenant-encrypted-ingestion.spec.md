@@ -922,7 +922,8 @@ The integration test is the reference implementation (standard §5.2):
 `tei:test-account` tag or the SSM parameter
 `/tenant-encrypted-ingestion/test-account = true` (a member account
 cannot read its own Organizations tags). Stacks in order: `tenant-identity` (`shared-pool`,
-reused if present), the **test-aid stack**, the demo stack with
+reused if present, deployed if not, and never destroyed by the test: it is
+the test account's shared fixture), the **test-aid stack**, the demo stack with
 `TestConsumerRole` as its consumer role. The test-aid stack holds:
 
 - `TestProbeRole`, trusted by the runner for one hour: KMS use actions and

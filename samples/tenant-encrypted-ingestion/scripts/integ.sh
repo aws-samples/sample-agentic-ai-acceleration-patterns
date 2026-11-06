@@ -16,8 +16,8 @@
 # Flow:
 #   0. Refuse an account without the tei:test-account tag (M-33).
 #   1. tenant-identity (shared-pool): reuse a published deployment; deploy
-#      one through its own path only when none is published, and destroy only
-#      that one at the end.
+#      one through its own path only when none is published. It is the
+#      account's shared fixture and is never destroyed by this script.
 #   2. Synthesise test/integ/app.ts into cdk.integ.out/ and deploy the
 #      test-aid stack and the demo stack (the §10 test profile below,
 #      TestConsumerRole as its consumer role) with the CDK CLI.
@@ -72,9 +72,11 @@ cleanup() {
     "${CDK[@]}" destroy --all --force --concurrency 2 >"${LIB_TMP}/destroy.log" 2>&1 \
       || { echo "destroy failed: ${STACK_PREFIX} stacks" >&2; tail -20 "${LIB_TMP}/destroy.log" >&2; FAILED=1; }
   fi
+  # The tenant-identity shared pool is a long-lived fixture of the test
+  # account: other samples' runs share it, so a run that had to deploy it
+  # leaves it in place and says so (never destroyed by a test).
   if [[ "$DEPLOYED_IDENTITY" == 1 ]]; then
-    (cd "$IDENTITY_DIR" && npx cdk destroy "$IDENTITY_STACK" --context topology=shared-pool --force >"${LIB_TMP}/identity-destroy.log" 2>&1) \
-      || { echo "destroy failed: ${IDENTITY_STACK}" >&2; FAILED=1; }
+    echo "  ${IDENTITY_STACK} was deployed by this run and is left in place as the account's shared fixture"
   fi
   local left
   left="$(aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE DELETE_FAILED ROLLBACK_COMPLETE \
