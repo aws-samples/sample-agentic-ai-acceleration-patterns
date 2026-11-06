@@ -504,8 +504,10 @@ left or a key it tagged is not `PendingDeletion`.
 | 11 | Offboarding: `DeleteTenantKey` A 202, no version left under A's prefixes, alias gone, key `PendingDeletion`, `CreateDelivery` A refused, the in-flight PUT fails; `DeleteTenantKey` B leaves B's key untouched and writes the tombstone without an alarm |
 | 12 | Teardown, by `scripts/integ.sh`: `cdk destroy --all`, then the leftover check |
 
-Last green run: 2026-11-06, eu-central-1, a vendor test account plus a second
-account owning tenant B's key, about 73 minutes end to end. CloudFormation
+Last green run: 2026-11-06 (run 9, the second green run that day), eu-central-1,
+a vendor test account plus a second account owning tenant B's key, about 65
+minutes end to end; the run's cleanup step also deleted the three tenants it
+had created in the shared tenant-identity pool. CloudFormation
 took about 4 minutes to create the two stacks (test aid 1 min 10 s, demo stack
 2 min 17 s) and about 5 minutes to delete them (demo stack 3 min 9 s, test aid
 1 min 35 s), so N-4 holds; the rest is the driver's waits. Every step passed
@@ -545,7 +547,9 @@ tenant key, or `DEMO_OFFBOARD=1` is set, it calls `DeleteTenantKey`, which
 deletes the tenant's objects under both prefixes, the two deliveries
 included, and schedules the key for deletion; a key that existed before the
 run is left alone and the trap names the deliveries it leaves. `KEEP=1`
-keeps everything for inspection. Tokens live five minutes, so issue one
+keeps everything for inspection. Last run 2026-11-06 in eu-central-1 against
+a freshly deployed demo stack: every step as in the table, `DeleteTenantKey`
+202 from the trap. Tokens live five minutes, so issue one
 just before the run.
 
 ## API

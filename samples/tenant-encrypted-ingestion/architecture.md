@@ -4,10 +4,11 @@ SPDX-License-Identifier: MIT-0
 -->
 # Tenant Encrypted Ingestion: Architecture
 
-> **Status: implemented and verified by the integration run of 2026-11-06.**
-> Last green run: 2026-11-06, eu-central-1, a vendor test account plus a
+> **Status: implemented and verified by the integration runs of 2026-11-06.**
+> Last green run: 2026-11-06 (run 9, after the blind-review fixes; run 7 on
+> the same day was the first), eu-central-1, a vendor test account plus a
 > second account owning tenant B's `tenant-key` key (cross-account claim
-> exercised), about 73 minutes end to end; CloudFormation create 1 min 10 s
+> exercised), about 65 minutes end to end; CloudFormation create 1 min 10 s
 > (test aid) and 2 min 17 s (demo stack), delete 3 min 9 s and 1 min 35 s, from
 > the stack events of that run (N-4: each under 5 minutes). Coverage: spec §10 steps 1 to 11 (with 7b
 > and 7c) and the driver's step 0 prelude all passed; step 12 ran as
@@ -600,6 +601,16 @@ The design's residuals are the threat model's
 [accepted risks](./threat-model.md#accepted-risks) (plaintext behind TLS,
 compromised code acting as one tenant, key-factory binding, the
 administrator's `PutKeyPolicy`, presigned URIs in access logs, and more).
+
+Found and fixed between the two green runs: integration run 8 ran beside
+another sample's six-stack deploy in the same account, and the API Gateway
+control plane throttled the key factory's `CreateApiKey` and
+`CreateUsagePlanKey` (`TooManyRequestsException`, an account-wide limit).
+The SDK's three quick retries gave up, `CreateTenantKey` answered 500 and
+the log held no cause. `ensureApiKey` now retries a throttle with backoff
+(1, 2, 4, 8 s, five tries; the row stays `CREATING` so a repeated call
+resumes), and an unmodelled error behind a 500 is logged with its type
+(`src/platform/handler.ts`, `src/shared/errors.ts`).
 
 Open:
 
