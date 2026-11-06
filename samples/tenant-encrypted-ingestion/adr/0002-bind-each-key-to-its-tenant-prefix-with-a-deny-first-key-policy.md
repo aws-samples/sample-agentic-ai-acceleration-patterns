@@ -90,4 +90,7 @@ action; a spike (2026-11-05) showed that statement 5 does not block
 the factory's tagging Allow conditions on `aws:RequestTag`, never on
 `aws:ResourceTag`. Revisit if S3 adds a condition key for the
 bucket-key header, if Bucket Keys gain a per-prefix context, or if KMS offers
-an immutable key policy.
+an immutable key policy. Implemented 2026-11-06: the `PutKeyPolicy` alarm is
+an EventBridge rule on the CloudTrail event, targeting an SQS audit queue and
+alarmed on the rule's `TriggeredRules` metric, not a CloudWatch Logs metric
+filter; the account trail must deliver management events to EventBridge.
