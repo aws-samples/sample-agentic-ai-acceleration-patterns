@@ -283,8 +283,15 @@ describe('queues and bus (M-16, N-7)', () => {
     expect(Object.keys(queueDeny.Condition.ArnNotEquals)).toEqual(['aws:SourceArn']);
     const dlqDeny = policies.find((s) => s.Sid === 'DenySendExceptSourceQueue')!;
     expect(Object.keys(dlqDeny.Condition.ArnNotEquals)).toEqual(['aws:SourceArn']);
-    const busPolicies = Object.values(template.findResources('AWS::Events::EventBusPolicy'));
-    expect(flat(busPolicies)).toContain('DenyPutEventsExceptPipeline');
+    const busStatements = Object.values(template.findResources('AWS::Events::EventBusPolicy')).flatMap(
+      (p) => asArray(p.Properties.Statement) as Record<string, any>[],
+    );
+    // CDK prefixes the Sid of a bus policy statement with `cdk-`.
+    const busDeny = busStatements.find((s) => s.Sid === 'cdk-DenyPutEventsExceptPipeline')!;
+    expect(busDeny.Effect).toBe('Deny');
+    // Exactly the two publishers: processorRole and sweepRole (ADR-0017).
+    const arn = (r: string) => flat({ 'Fn::GetAtt': [roleId(template, r), 'Arn'] });
+    expect(asArray(busDeny.Condition.ArnNotEquals['aws:PrincipalArn']).map(flat).sort()).toEqual([arn('ProcessorRole'), arn('SweepRole')].sort());
   });
 
   it('adds the redrive operator to the queue Deny when set', () => {

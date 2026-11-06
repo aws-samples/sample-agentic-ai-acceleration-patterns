@@ -131,6 +131,8 @@ interface World {
   readonly tenantKey: TenantKeyAccount;
   readonly events: EventCapture;
   readonly tenants: Record<'A' | 'B' | 'D', Tenant>;
+  /** Every tenant id this run created in tenant-identity's shared pool; deleted in main()'s finally. */
+  readonly identityTenants: string[];
   readonly deliveries: Record<string, { tenantId: string; deliveryId: string; landedKey?: string }>;
 }
 
@@ -563,6 +565,9 @@ async function step0(w: World): Promise<StepResult> {
     });
     c.expect(created.status === 201, `tenant-identity CreateTenant ${label} -> ${created.status}`);
     const tenantId = created.json.tenant?.tenantId;
+    if (typeof tenantId === 'string' && tenantId.length > 0) {
+      w.identityTenants.push(tenantId);
+    }
     if (typeof tenantId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9-]{1,34}$/.test(tenantId)) {
       c.expect(false, `tenant-identity tenant id for ${label} matches spec §7.0`);
       continue;
@@ -1353,6 +1358,50 @@ function step12(): StepResult {
   return { step: '12', outcome: 'skip', notes: ['     teardown is scripts/integ.sh (destroy, then it lists what is left and the keys pending deletion)'] };
 }
 
+/**
+ * The tenants this run created in tenant-identity's shared pool, which
+ * outlives the run: `DeleteTenant` (idempotent; it removes the tenant's
+ * users too) up to three times each, then `GetTenant` must be 404. Never
+ * throws: a failure is reported, and any tenant left makes the run fail.
+ */
+async function cleanupIdentityTenants(w: World): Promise<StepResult> {
+  const notes: string[] = [];
+  const left: string[] = [];
+  for (const tenantId of w.identityTenants) {
+    const url = `${w.identityApi}platform/tenants/${tenantId}`;
+    let deleted = false;
+    for (let attempt = 1; attempt <= 3 && !deleted; attempt++) {
+      try {
+        const r = await signed('DELETE', url);
+        deleted = r.status === 204 || r.status === 404;
+        if (!deleted) {
+          notes.push(`tenant-identity DeleteTenant ${tenantId} attempt ${attempt} -> ${r.status}`);
+        }
+      } catch (error) {
+        notes.push(`tenant-identity DeleteTenant ${tenantId} attempt ${attempt} threw ${errorName(error)}`);
+      }
+      if (!deleted && attempt < 3) {
+        await sleep(5000);
+      }
+    }
+    try {
+      const after = await signed('GET', url);
+      if (after.status !== 404) {
+        left.push(tenantId);
+        notes.push(`FAIL leftover tenant-identity tenant ${tenantId}: GetTenant -> ${after.status} (${after.json.tenant?.status ?? 'unknown status'})`);
+      }
+    } catch (error) {
+      left.push(tenantId);
+      notes.push(`FAIL leftover check for tenant-identity tenant ${tenantId} threw ${errorName(error)}`);
+    }
+  }
+  notes.push(`${w.identityTenants.length - left.length} of ${w.identityTenants.length} tenant-identity tenants deleted`);
+  if (left.length > 0) {
+    notes.push(`FAIL WARNING: tenants left in the shared pool: ${left.join(', ')}; delete them with DELETE /platform/tenants/{tenantId}`);
+  }
+  return { step: 'cleanup', outcome: left.length === 0 ? 'pass' : 'fail', notes };
+}
+
 /** Keys this run created in the second account: scheduled for deletion (the vendor's leftovers are integ.sh's). */
 async function cleanupTenantAccount(w: World): Promise<void> {
   let scheduled = 0;
@@ -1409,6 +1458,7 @@ async function main(): Promise<void> {
     },
     events: new EventCapture(aid.EventCaptureQueueUrl),
     tenants: { A: { tenantId: '' }, B: { tenantId: '' }, D: { tenantId: '' } },
+    identityTenants: [],
     deliveries: {},
   };
   const w = WORLD;
@@ -1451,6 +1501,8 @@ async function main(): Promise<void> {
   } finally {
     await setMode(w, 'accept').catch(() => undefined);
     await cleanupTenantAccount(w);
+    // Last, after every step that uses the tenants; its own row in the summary.
+    await run1('cleanup', () => cleanupIdentityTenants(w));
     summary(results);
   }
 }
