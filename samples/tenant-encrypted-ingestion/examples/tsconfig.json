@@ -1,0 +1,13 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: MIT-0
+//
+// Type-checks and lints the example validators with the project's compiler
+// options. The demo stack bundles them with esbuild; nothing is emitted here.
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".."
+  },
+  "include": ["**/*.ts"]
+}

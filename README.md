@@ -25,6 +25,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
   - [The Simple Cell-Based Control Plane](#the-simple-cell-based-control-plane)
   - [Tenant Identity with Amazon Cognito](#tenant-identity-with-amazon-cognito)
   - [Agentic runtime isolation: runtime, tools and entitlements for multi-tenant agents](#agentic-runtime-isolation-runtime-tools-and-entitlements-for-multi-tenant-agents)
+  - [Per-Tenant Encrypted Ingestion for Agentic Applications](#per-tenant-encrypted-ingestion-for-agentic-applications)
 - [Contributing a sample](#contributing-a-sample)
 - [Further Reading](#further-reading)
 - [Costs](#costs)
@@ -38,6 +39,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 | [The Simple Cell-Based Control Plane](./samples/control-plane/) | A minimal multi-tenant control plane for cell-based deployments — one service, one API, one DynamoDB table, one Step Functions workflow, script-driven provisioning via AWS CodeBuild. `maxTenants: 1` degenerates the model to a silo. |
 | [Tenant Identity with Amazon Cognito](./samples/tenant-identity/) | An identity layer that makes Amazon Cognito the trusted source of tenant identity, in three user-pool topologies chosen at deploy time — plus a `tiered` mode that runs two of them side by side — with RFC 8693 token narrowing to one tenant. |
 | [Agentic runtime isolation: runtime, tools and entitlements for multi-tenant agents](./samples/agentic-runtime-isolation/) | A pooled agent platform on Amazon Bedrock AgentCore: one ingress verifies the tenant token, resolves the agent and tool grant from an entitlement store, mints a 5-minute transaction token and invokes the agent's Runtime (a fresh microVM session per request by default, one per tenant or per user with session mapping) with tenant-scoped credentials, while a tools gateway (one by default, more optional) checks each call with a per-tool interceptor and then AgentCore Policy. |
+| [Per-Tenant Encrypted Ingestion for Agentic Applications](./samples/tenant-encrypted-ingestion/) | One drop zone and pipeline for every tenant's documents, each tenant's encrypted with its own AWS KMS key, kept apart by key policy and identity-policy ABAC rather than code, validated by a deployer-extensible chain before it lands, in a vendor-owned or tenant-owned key tier, with cryptographic offboarding. |
 
 ## The Simple Cell-Based Control Plane
 
@@ -117,6 +119,32 @@ that later samples can consume (`SharedIngress`, `AgentBackend`,
 `ToolTarget`, `TokenSigner`, `EntitlementStore`); the ingress publishes its
 interface as one JSON parameter. See
 [Agentic runtime isolation: runtime, tools and entitlements for multi-tenant agents](./samples/agentic-runtime-isolation/).
+
+## Per-Tenant Encrypted Ingestion for Agentic Applications
+
+Agentic applications are fed with tenant documents, the most sensitive data
+they hold, and every tenant shares one drop zone and one pipeline. One
+tenant's documents must never be readable with another tenant's key or by
+code acting for another tenant, a tenant must be able to leave with its
+documents made unreadable, and each deployment needs its own admission
+checks without giving them broad access.
+
+This sample gives every tenant its own AWS KMS key and makes KMS and IAM
+enforce the separation: the key policy binds each key to the tenant's S3
+prefixes and the pipeline's tenant roles, and those roles' own identity
+policies scope every call by a `TenantId` session tag, so a wrong-tenant bug
+is refused by AWS. A tenant user uploads to a presigned, write-once URL that
+fixes the tenant's key; the pipeline runs structural checks and then the
+deployer's validator chain under a tenant session, and only then lands the
+document and publishes `DeliveryAccepted`. The key is the vendor's
+(`vendor-key`) or lives in the tenant's own account (`tenant-key`), where the
+tenant can withdraw it and the pipeline fails closed; offboarding schedules
+the key for deletion.
+
+It ships as one CDK construct, `TenantEncryptedIngestion`. Its demo stack,
+integration test and demo use tenant-identity's `shared-pool`; the construct
+accepts any OIDC issuer that meets the token contract. See
+[Per-Tenant Encrypted Ingestion for Agentic Applications](./samples/tenant-encrypted-ingestion/).
 
 ## Contributing a sample
 
