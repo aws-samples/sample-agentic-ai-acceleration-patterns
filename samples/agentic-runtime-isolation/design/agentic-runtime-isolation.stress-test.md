@@ -35,7 +35,7 @@ that is right at 1 rps and wrong at 500 rps is a leak, not a slow path.
 |---|---|
 | Account, Region | a non-production test account, `eu-central-1` |
 | Identity | the long-lived `TenantIdentity-shared-pool` deployment the integration runs reuse; tenants created for a run are deleted at its end, the pool itself is never touched |
-| Stack | `RuntimeIsolation-api-gateway` deployed from `main` with the stress props of §3.1, `publishParameters=false`, stack name suffixed `-stress` |
+| Stack | `RuntimeIsolation-api-gateway` deployed from `main` with the stress props of §3.1, `publishParameters=false`, `--context tvm=true` (the demo table and the vended-credential path), stack name suffixed `-stress` |
 | Driver host | one EC2 instance, `c6i.2xlarge`, private subnet, no inbound rule, no public IP, reached through SSM Session Manager; k6 and the AWS CLI v2 installed by user data |
 | Driver | [k6](https://k6.io/) for the ingress path (bearer token, SSE); bash and the AWS CLI for seeding and teardown, reusing `scripts/lib.sh` |
 | Results | k6 JSON summary plus `scripts/stress/collect.sh` output, kept outside the repo with the run date |
@@ -93,7 +93,7 @@ Proves the first claim with a seed script and single requests.
 |---|---|---|---|
 | 1.1 | Deploy the stress stack with 100 `AgentBackend`s and 10 `ToolTarget`s | deploy time; `SecondsToActive` per policy (ADR-0040) | deploy under 45 min; one star permit per target, about 450 bytes each |
 | 1.2 | Seed 10,000 tenants (`CreateTenant`, `app/use`, one admin user) at 20 rps | wall time; Cognito and platform API status histogram | 0 non-201 after retry |
-| 1.3 | Subscribe each tenant: `PutTenantSubscription` with `agents: ["default"]`, `tools: ["crm/*"]`; 1,000 of them with all 100 agents and `<target>/*` for all 10 targets | wall time; 4xx | 0 4xx; the 1,000 wide rows are under 40 KB each (spec §3.6) |
+| 1.3 | Subscribe each tenant: `PutTenantSubscription` with `agents: ["default"]`, `tools: ["crm/*"]`; 1,000 of them with all 100 agents and `<target>/*` for all 10 targets. Write one demo-table row per tenant, `PK = TENANT#<tenantId>` with a label, by `BatchWriteItem` (25 a batch), as `scripts/demo.sh` does one at a time; the `read <A>` positive control of §6 needs it | wall time; 4xx; unprocessed items | 0 4xx; 0 unprocessed after retry; the 1,000 wide rows are under 40 KB each (spec §3.6) |
 | 1.4 | 1,000 `report` probes, one per tenant, at 20 a second, after the subscription writes | grant time from the authoriser log; p90 TTFB | p90 TTFB within 20 % of a 100-tenant sample: the grant is a `GetItem`, flat in tenant count |
 | 1.5 | One tenant with all 1,000 tools: `report`, then `tools/list` on each gateway | `scope` bytes after compression; encoded token bytes; pages | under 6,144 and 10,240 bytes, or a 502 `grant_too_large` and nothing else; about 30 tools a page |
 | 1.6 | Provoke `grant_too_large`: widen the token with `tvm.includeUserIdTag` and 1,000 named tools until it tips | the status | 502 `grant_too_large`, never a 500 or a truncated token |
