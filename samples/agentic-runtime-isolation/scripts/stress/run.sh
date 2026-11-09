@@ -95,7 +95,7 @@ RUN_ID="${SCENARIO}-${SCALE}-$(date -u +%Y%m%dT%H%M%SZ)"
 # is set; S1 must have run within the Runtime's idle window.
 CONVERSATION_RUN_ID="${CONVERSATION_RUN_ID:-}"
 if [[ "$SCENARIO" == s2 && -z "$CONVERSATION_RUN_ID" ]]; then
-  CONVERSATION_RUN_ID="$(ls -1 "${STATE_DIR}/runs" 2>/dev/null | grep -E "^s1-${SCALE}-" | sort | tail -1 || true)"
+  CONVERSATION_RUN_ID="$(find "${STATE_DIR}/runs" -mindepth 1 -maxdepth 1 -name "s1-${SCALE}-*" -printf '%f\n' 2>/dev/null | sort | tail -1 || true)"
   [[ -n "$CONVERSATION_RUN_ID" ]] || fail "s2 needs an S1 run at scale ${SCALE} to reuse its conversations (or set CONVERSATION_RUN_ID)"
   echo "s2 reuses the conversations of ${CONVERSATION_RUN_ID}"
 fi
