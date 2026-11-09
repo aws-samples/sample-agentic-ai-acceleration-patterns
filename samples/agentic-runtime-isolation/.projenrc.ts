@@ -91,6 +91,9 @@ project.gitignore.exclude('.kiro/');
 project.gitignore.exclude('cdk.integ.out/');
 // Machine output of the stress-test app (scripts/stress/deploy.sh).
 project.gitignore.exclude('cdk.stress.out/');
+// The stress driver stack looks up availability zones at synth; the lookup
+// lands in cdk.context.json keyed by account id, which stays out of the repo.
+project.gitignore.exclude('cdk.context.json');
 project.gitignore.exclude('test/*.snapshot/');
 
 // Scanner-local state (Holmes MCP project link, ASH reports).
