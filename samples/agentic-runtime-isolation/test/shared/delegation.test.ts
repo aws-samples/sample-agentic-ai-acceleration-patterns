@@ -264,7 +264,20 @@ describe('IngressPipeline on /{backend}/delegations', () => {
   });
 
   it('takes the authoriser token once it verifies for this tenant and target; a mismatch is tenant_not_allowed', async () => {
-    const forwarded = async (token: string) => (token === 'ok' ? { tenantId: 't-a', agent: 'billing' } : { tenantId: 't-a', agent: 'default' });
+    // M-82 on this route: the forwarded token must nest agent:<caller> over the caller's act and carry the caller's txn.
+    const expectedAct = { sub: 'agent:default', act: ROOT };
+    const forwarded = async (token: string) => {
+      if (token === 'ok') {
+        return { tenantId: 't-a', agent: 'billing', act: expectedAct, txn: 'txn-caller' };
+      }
+      if (token === 'other-chain') {
+        return { tenantId: 't-a', agent: 'billing', act: { sub: 'agent:planner', act: ROOT }, txn: 'txn-caller' };
+      }
+      if (token === 'other-txn') {
+        return { tenantId: 't-a', agent: 'billing', act: expectedAct, txn: 'txn-other' };
+      }
+      return { tenantId: 't-a', agent: 'default', act: ROOT, txn: 'txn-x' };
+    };
     const pipeline = pipelineFor(cfg({ maxDepth: 1 }), { registry: registry(), forwarded, delegationVerifier: verifyCaller });
     const authorized = { tenantId: 't-a', backend: 'billing', transactionToken: 'ok', txn: 'txn-caller', grantSize: 3, mint: 'miss' as const };
     const token = await callerToken(key);
@@ -272,13 +285,25 @@ describe('IngressPipeline on /{backend}/delegations', () => {
     expect(request).toMatchObject({ backend: 'billing', transactionToken: 'ok', delegatedFrom: 'default', depth: 1 });
     await expect(pipeline.validate({ authorization: `Bearer ${token}`, body: '{"prompt":"hi"}', path: '/billing/delegations', authorized: { ...authorized, transactionToken: 'other' } })).rejects.toMatchObject({ status: 403, reason: 'tenant_not_allowed' });
     await expect(pipeline.validate({ authorization: `Bearer ${token}`, body: '{"prompt":"hi"}', path: '/billing/delegations', authorized: { ...authorized, backend: 'default' } })).rejects.toMatchObject({ status: 403, reason: 'tenant_not_allowed' });
+    for (const transactionToken of ['other-chain', 'other-txn']) {
+      await expect(pipeline.validate({ authorization: `Bearer ${token}`, body: '{"prompt":"hi"}', path: '/billing/delegations', authorized: { ...authorized, transactionToken } })).rejects.toMatchObject({ status: 403, reason: 'tenant_not_allowed' });
+    }
+  });
+
+  it('an undeclared target is refused before it is looked up: 403 delegation_not_declared, never a 404 that reveals whether it exists', async () => {
+    const a = authority();
+    const pipeline = pipelineFor(cfg({ maxDepth: 1 }), { registry: registry(), authority: a, delegationVerifier: verifyCaller });
+    await expect(pipeline.validate({ authorization: `Bearer ${await callerToken(key)}`, body: '{"prompt":"hi"}', path: '/nobody/delegations' })).rejects.toMatchObject({ status: 403, reason: 'delegation_not_declared' });
+    expect(a.calls).toHaveLength(0);
   });
 
   it('refuses an identity token or no bearer with 401, an unknown target with 404, and a transaction token on /invocations is still 401', async () => {
     const pipeline = pipelineFor(cfg({ maxDepth: 1 }), { registry: registry(), authority: authority(), delegationVerifier: verifyCaller });
     await expect(pipeline.validate({ body: '{"prompt":"hi"}', path: '/billing/delegations' })).rejects.toMatchObject({ status: 401, reason: 'token_invalid' });
     await expect(pipeline.validate({ authorization: 'Bearer not-a-token', body: '{"prompt":"hi"}', path: '/billing/delegations' })).rejects.toMatchObject({ status: 401 });
-    await expect(pipeline.validate({ authorization: `Bearer ${await callerToken(key)}`, body: '{"prompt":"hi"}', path: '/nobody/delegations' })).rejects.toMatchObject({ status: 404, reason: 'unknown_backend' });
+    const declaredButGone = stubRegistry({ default: { ...FIXTURE_ENTRIES.billing, needs: ['default/chat'], delegatesTo: ['gone'] } }).registry;
+    const p2 = pipelineFor(cfg({ maxDepth: 1 }), { registry: declaredButGone, authority: authority(), delegationVerifier: verifyCaller });
+    await expect(p2.validate({ authorization: `Bearer ${await callerToken(key)}`, body: '{"prompt":"hi"}', path: '/gone/delegations' })).rejects.toMatchObject({ status: 404, reason: 'unknown_backend' });
     await expect(pipeline.validate({ authorization: `Bearer ${await callerToken(key)}`, body: '{"prompt":"hi"}', path: '/billing/invocations' })).rejects.toMatchObject({ status: 401 });
   });
 

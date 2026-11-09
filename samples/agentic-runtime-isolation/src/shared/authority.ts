@@ -43,6 +43,27 @@ export interface Authority extends MintedToken {
   readonly noToolsGranted: boolean;
 }
 
+/**
+ * (ADR-0048, spec §5.1.1) The three delegation checks, which need only the
+ * caller's registry entry and cost nothing: the entry names the target
+ * (`delegation_not_declared`), the chain after the hop fits `maxDepth`
+ * (`delegation_depth`), the target is neither the caller nor already in the
+ * chain (`delegation_loop`). Run before the target is looked up, so an
+ * undeclared target is refused without revealing whether it exists.
+ */
+export function checkDelegation(caller: DelegationCaller, target: string, callerEntry: RegistryEntry, maxDepth: number): void {
+  if (!callerEntry.delegatesTo.includes(target)) {
+    throw new AuthorityError(403, 'delegation_not_declared');
+  }
+  // The chain after the hop holds the caller's chain plus the caller.
+  if (caller.chain.length + 1 > maxDepth) {
+    throw new AuthorityError(403, 'delegation_depth');
+  }
+  if (target === caller.agent || caller.chain.includes(target)) {
+    throw new AuthorityError(403, 'delegation_loop');
+  }
+}
+
 export class AuthorityResolver {
   constructor(
     private readonly reader: Pick<EntitlementReader, 'tenantEntitlement' | 'plan' | 'catalogueFor' | 'gatewaysFor'>,
@@ -72,16 +93,7 @@ export class AuthorityResolver {
     callerEntry: RegistryEntry,
     maxDepth: number,
   ): Promise<Authority> {
-    if (!callerEntry.delegatesTo.includes(target)) {
-      throw new AuthorityError(403, 'delegation_not_declared');
-    }
-    // The chain after the hop holds the caller's chain plus the caller.
-    if (caller.chain.length + 1 > maxDepth) {
-      throw new AuthorityError(403, 'delegation_depth');
-    }
-    if (target === caller.agent || caller.chain.includes(target)) {
-      throw new AuthorityError(403, 'delegation_loop');
-    }
+    checkDelegation(caller, target, callerEntry, maxDepth);
     return this.grant(caller.tenantId, caller.sub, target, targetEntry, { from: caller.agent, act: caller.act, txn: caller.txn });
   }
 

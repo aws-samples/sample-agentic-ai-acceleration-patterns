@@ -24,7 +24,7 @@
  */
 
 import type { APIGatewayAuthorizerResult, APIGatewayRequestAuthorizerEvent } from 'aws-lambda';
-import { AuthorityError, type AuthorityResolver } from '../shared/authority';
+import { AuthorityError, type AuthorityResolver, checkDelegation } from '../shared/authority';
 import { type DelegationConfig, isLambdaRuntime, readIngressConfig } from '../shared/config';
 import type { DelegationCaller, DelegationTokenVerifier } from '../shared/delegation';
 import { headerValue } from '../shared/headers';
@@ -127,20 +127,37 @@ async function authorizeDelegation(
     return buildPolicy(event.methodArn, 'Deny');
   }
   const attributed = { ...fields, tenantId: caller.tenantId, from: caller.agent, to: target, depth: caller.chain.length + 1, txn: caller.txn };
-  const entries: RegistryEntry[] = [];
-  for (const name of [caller.agent, target]) {
+  const resolve = async (name: string): Promise<RegistryEntry | undefined> => {
     try {
-      entries.push(await deps.registry.resolve(name));
+      return await deps.registry.resolve(name);
     } catch (error) {
       if (error instanceof RegistryError) {
         log.warn('delegation refused', { ...attributed, backend: name, reason: error.reason });
       } else {
         log.error('authorizer failed', { ...attributed, backend: name, error: errorName(error) });
       }
-      return buildPolicy(event.methodArn, 'Deny');
+      return undefined;
     }
+  };
+  // Spec §5.1.1 order: the caller's entry, the three delegation checks, then the target's
+  // entry, so an undeclared target is 403 whether or not it exists.
+  const callerEntry = await resolve(caller.agent);
+  if (callerEntry === undefined) {
+    return buildPolicy(event.methodArn, 'Deny');
   }
-  const [callerEntry, targetEntry] = entries;
+  try {
+    checkDelegation(caller, target, callerEntry, deps.delegation.config.maxDepth);
+  } catch (error) {
+    if (error instanceof AuthorityError) {
+      log.warn('delegation refused', { ...attributed, reason: error.reason, status: error.status });
+      return buildPolicy(event.methodArn, 'Deny', undefined, error.reason);
+    }
+    throw error;
+  }
+  const targetEntry = await resolve(target);
+  if (targetEntry === undefined) {
+    return buildPolicy(event.methodArn, 'Deny');
+  }
   try {
     const authority = await deps.authority.delegate(caller, target, targetEntry, callerEntry, deps.delegation.config.maxDepth);
     log.info('delegation admitted', { ...attributed, grantSize: authority.grantSize, noToolsGranted: authority.noToolsGranted });

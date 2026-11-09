@@ -28,7 +28,15 @@ import { AGENT_ENV } from './shared/config';
 import { nameKey } from './shared/entitlements';
 import { LogDrain } from './shared/log-drain';
 import { DEFAULT_TOOLS_GATEWAY } from './shared/mint';
-import { backendDelegatesToProblem, backendNeedsProblem, backendToolsProblem, BACKEND_NAME_PATTERN, INGRESS_TAG_KEY, ROUTE } from './shared/registry';
+import {
+  backendDelegatesToProblem,
+  backendNeedsProblem,
+  backendToolsProblem,
+  BACKEND_NAME_PATTERN,
+  DELEGATION_ROUTE,
+  INGRESS_TAG_KEY,
+  ROUTE,
+} from './shared/registry';
 import { LONGEST_STREAM, RegistryEntryResource } from './shared/registry-entry.cdk';
 import { OwnedRows, ownerProblem } from './shared/reservation.cdk';
 import { addModelStatement, SharedIngress, type SharedIngressRef } from './shared-ingress.cdk';
@@ -120,6 +128,10 @@ export class AgentBackend extends Construct {
     }
     if (!BACKEND_NAME_PATTERN.test(props.name)) {
       fail('name', `must match ${BACKEND_NAME_PATTERN.source} (got ${props.name})`);
+    }
+    // The route words are not names: /<name>/invocations and /<name>/delegations must parse (review 2026-11-09).
+    if (props.name === ROUTE || props.name === DELEGATION_ROUTE) {
+      fail('name', `must not be the route word '${props.name}'`);
     }
     if (props.agent.codePath.length === 0) {
       fail('agent.codePath', 'must be a directory path');

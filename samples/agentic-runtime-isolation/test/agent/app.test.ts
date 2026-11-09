@@ -646,6 +646,7 @@ describe('delegation probe (ADR-0048, C-2)', () => {
     expect(calls[0].url).toBe('https://api.example.com/prod/billing/delegations');
     expect(calls[0].init.method).toBe('POST');
     expect((calls[0].init.headers as Record<string, string>).authorization).toBe(`Bearer ${callerToken}`);
+    expect((calls[0].init.headers as Record<string, string>)['x-tenant-id']).toBe('tenant-a'); // multiTenant identity source (review finding 1)
     expect(JSON.parse(String(calls[0].init.body))).toEqual({ prompt: 'what is due?', conversationId: 'conversationA1x0001' });
     const evs = events(c.body);
     expect(evs[0].event).toBe('delegated');

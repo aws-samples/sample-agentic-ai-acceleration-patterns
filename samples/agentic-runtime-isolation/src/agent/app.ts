@@ -384,9 +384,17 @@ export async function delegateTo(
   write: (event: string) => void,
   fetcher: typeof fetch = fetch,
 ): Promise<void> {
+  // With `identity.multiTenant` the api-gateway authoriser lists X-Tenant-Id as an identity
+  // source, so a request without it is API Gateway's own 401 before the authoriser runs. The
+  // route itself takes the tenant from the token; the header only has to be present and equal.
+  const tenantId = unverifiedClaims(token)?.tenant_id;
   const response = await fetcher(`${delegationUrl.replace(/\/$/, '')}/${agent}/delegations`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'authorization': `Bearer ${token}` },
+    headers: {
+      'content-type': 'application/json',
+      'authorization': `Bearer ${token}`,
+      ...(tenantId === undefined ? {} : { 'x-tenant-id': tenantId }),
+    },
     body: JSON.stringify({ prompt, ...(conversationId === undefined ? {} : { conversationId }) }),
   });
   if (!response.ok || response.body === null) {

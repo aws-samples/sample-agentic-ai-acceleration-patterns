@@ -21,14 +21,14 @@
 
 import { KMSClient } from '@aws-sdk/client-kms';
 import { createLocalJWKSet, createRemoteJWKSet, type JWTVerifyGetKey, jwtVerify } from 'jose';
-import { AuthorityError, AuthorityResolver } from './authority';
+import { AuthorityError, AuthorityResolver, checkDelegation } from './authority';
 import type { IngressConfig } from './config';
 import { type DelegationCaller, type DelegationTokenVerifier, delegationTokenVerifierFor } from './delegation';
 import { EntitlementReader } from './entitlements';
 import { endpointHost, preconnect, sharedHandler } from './http';
 import { kmsDigestSigner } from './jws';
 import { TenantLimiter } from './limits';
-import { TokenMinter } from './mint';
+import { AGENT_AUDIENCE_PREFIX, TokenMinter } from './mint';
 import { BackendRegistry, backendFromPath, DELEGATION_ROUTE, type RegistryEntry, RegistryError, type RegistryMiss, ROUTE, routeFromPath } from './registry';
 import { isValidConversationId, randomUnitId, sessionUnitId } from './session';
 import { ClaimMissingError, TokenVendingMachine } from './tvm';
@@ -166,7 +166,16 @@ export type AuthoritySource = Pick<AuthorityResolver, 'resolve'>;
  * hand-written authorizer context, so the forwarded token is verified like
  * any other bearer before it is trusted (M-82).
  */
-export type ForwardedTokenVerifier = (token: string) => Promise<{ tenantId: string; agent: string }>;
+export type ForwardedTokenVerifier = (token: string) => Promise<ForwardedToken>;
+
+/** What the forwarded-token verifier returns: the claims the receiving function compares with its own decision. */
+export interface ForwardedToken {
+  readonly tenantId: string;
+  readonly agent: string;
+  /** (ADR-0048) The token's `act` and `txn`, compared with the verified caller on the delegation route. */
+  readonly act?: unknown;
+  readonly txn?: string;
+}
 
 /**
  * The default verifier: `typ: txn+jwt`, `iss`, `exp` and `iat` against the
@@ -191,11 +200,11 @@ export function forwardedTokenVerifierFor(issuer: string, jwks?: string): Forwar
       verified = await jwtVerify(token, remote, options); // a kid the deployed document lacks: ask the route once
     }
     const { payload, protectedHeader } = verified;
-    const { tenant_id: tenantId, agent } = payload as Record<string, unknown>;
+    const { tenant_id: tenantId, agent, act, txn } = payload as Record<string, unknown>;
     if (protectedHeader.typ !== 'txn+jwt' || typeof tenantId !== 'string' || typeof agent !== 'string') {
       throw new Error('not a transaction token');
     }
-    return { tenantId, agent };
+    return { tenantId, agent, act, txn: typeof txn === 'string' ? txn : undefined };
   };
 }
 
@@ -324,7 +333,19 @@ export class IngressPipeline {
     } catch {
       throw new RequestError(401, 'token_invalid');
     }
+    // Spec §5.1.1 order: the three delegation checks need only the caller's entry and run
+    // before the target is looked up, so an undeclared target is 403, never a 404 that
+    // tells an agent whether a backend exists (review 2026-11-09, finding 3).
     const callerEntry = await this.entryFor(caller.agent, caller.tenantId);
+    const maxDepth = this.config.delegation!.maxDepth;
+    try {
+      checkDelegation(caller, target, callerEntry, maxDepth);
+    } catch (error) {
+      if (error instanceof AuthorityError) {
+        throw new RequestError(error.status, error.reason, caller.tenantId);
+      }
+      throw error;
+    }
     const targetEntry = await this.entryFor(target, caller.tenantId);
     const body = parseBody(inputs.body, this.config.sessionScope !== undefined);
     if (this.limiter !== undefined && (await this.limiter.admit(caller.tenantId)) === 'limited') {
@@ -396,13 +417,22 @@ export class IngressPipeline {
       if (this.forwarded === undefined) {
         throw new RequestError(502, 'mint_failed', caller.tenantId);
       }
-      let minted: { tenantId: string; agent: string };
+      let minted: ForwardedToken;
       try {
         minted = await this.forwarded(inputs.authorized.transactionToken);
       } catch {
         throw new RequestError(403, 'tenant_not_allowed', caller.tenantId);
       }
-      if (minted.tenantId !== caller.tenantId || minted.agent !== target) {
+      // M-82 on this route (review 2026-11-09, finding 2): the forwarded token must be the
+      // replacement for THIS caller, so its act nests agent:<caller> over the caller's own act
+      // and its txn is the caller's; a hand-written context cannot pair another chain with it.
+      const expectedAct = { sub: `${AGENT_AUDIENCE_PREFIX}${caller.agent}`, act: caller.act };
+      if (
+        minted.tenantId !== caller.tenantId ||
+        minted.agent !== target ||
+        minted.txn !== caller.txn ||
+        JSON.stringify(minted.act) !== JSON.stringify(expectedAct)
+      ) {
         throw new RequestError(403, 'tenant_not_allowed', caller.tenantId);
       }
       return inputs.authorized;

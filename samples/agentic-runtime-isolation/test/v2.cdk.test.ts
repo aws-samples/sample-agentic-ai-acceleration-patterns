@@ -481,6 +481,8 @@ describe('v2 options', () => {
         } as never);
       expect(() => backend({ delegatesTo: ['planner'] })).toThrow(/delegatesTo must not name this agent itself/);
       expect(() => backend({ delegatesTo: ['Bad Name'] })).toThrow(/delegatesTo 'Bad Name' must match/);
+      expect(() => backend({ name: 'delegations' })).toThrow(/name must not be the route word 'delegations'/);
+      expect(() => backend({ name: 'invocations' })).toThrow(/name must not be the route word 'invocations'/);
       backend({ name: 'planner', delegatesTo: [GATEWAY_TARGET_NAME, 'elsewhere'] });
       const t = Template.fromStack(stack);
       const entry = (Object.values(t.findResources('Custom::RuntimeIsolationRegistryEntry')) as any[]).find((r) => r.Properties.ParameterName && JSON.stringify(r.Properties.ParameterName).includes('planner'));

@@ -573,11 +573,13 @@ scope claim did.
 
 **Delegation targets (ADR-0048).** `delegatesTo` is a list of agent names
 (`[a-z0-9-]{1,32}`), at most 32 entries, no duplicates, never the agent's
-own name. Synth checks the shape and, for an `AgentBackend` in the same
-app, that the name exists; a name in another stack is resolved at request
-time through the registry, and a name with no entry is 404 `not found`, as a
-direct call to it would be. An agent with an empty `delegatesTo` cannot
-delegate, whatever the ingress allows.
+own name, and never a route word (`invocations`, `delegations`, which no
+agent may be named either). Synth checks the shape and warns for a name that
+is no `AgentBackend` of the same app, since it may live in another stack; a
+name is resolved at request time through the registry, and a name with no
+entry is 404 `not found` once the caller has declared it, as a direct call
+to it would be. An agent with an empty `delegatesTo` cannot delegate,
+whatever the ingress allows.
 
 ### 3.4 Backend interface
 
@@ -918,6 +920,10 @@ Rules:
   (the vendor decides which agents may chain), and the token's tenant holds
   the target after the user's cuts, by the same `grantFor` path a direct
   call uses (a tenant that bought A but not B does not reach B through A).
+  The caller's entry is read first and the three delegation checks run on it
+  before the target is looked up, so an undeclared target is 403 whether or
+  not it exists. A caller whose own entry is `draining` or gone is refused
+  (404, as a direct call to it would be).
 - **Scope of the target.** `grant(B)` for the token's tenant and user,
   exactly what a direct call to B by that user would carry. The caller's
   `scope` plays no part: B's tools are B's, and a hop can neither widen nor
@@ -927,9 +933,14 @@ Rules:
   the caller over the caller's own `act`, so the innermost `act.sub` is
   always the ingress role and the chain reads outward; `txn` copied, so one
   transaction id covers every session of the transaction; `jti`, `iat` and
-  `exp` fresh with `transactionToken.ttl`. Minted per delegation, never
-  cached: the chain must be exact. Each `act` level adds about 100 bytes
-  within the 10,240-byte bound (ADR-0045).
+  `exp` fresh with `transactionToken.ttl`. The mint signs every delegation
+  and caches nothing: the chain must be exact. On `api-gateway` the
+  authoriser result cache still hands the same replacement token to the same
+  caller token for the same target for up to 60 s, as it does for a direct
+  call, so `Sign` grows by one per delegation per cache life, not per
+  request. Each `act` level adds about 100 bytes within the 10,240-byte
+  bound (ADR-0045). One `txn` can therefore be live for up to
+  `(maxDepth + 1) × ttl`: each hop's token is fresh and the id is copied.
 - **Depth and loops.** `agentDelegation.maxDepth` (1 to 3) is the number of
   `agent:` entries a chain may hold after the hop. A caller whose chain is
   already at the cap is refused `delegation_depth`; a target equal to the
@@ -1201,7 +1212,7 @@ Present only with `agentDelegation`, on the `api-gateway` ingress.
 |---|---|
 | URL | `POST https://<api>/prod/<backend>/delegations`, `<backend>` the target agent |
 | Auth | `Authorization: Bearer <transaction token of the caller>` |
-| Tenant | from the token's `tenant_id`; `X-Tenant-Id` is not read |
+| Tenant | from the token's `tenant_id`. `X-Tenant-Id` is not read by the route; with `identity.multiTenant` it is an authoriser identity source, so the agent sends the token's `tenant_id` in it (API Gateway answers its own 401 without it) |
 | Body | `{prompt}`; with `session`, `{conversationId, prompt}` |
 | Unit | chosen by the integration Lambda, as for `/invocations` |
 | Response | `text/event-stream`, streamed to the caller |

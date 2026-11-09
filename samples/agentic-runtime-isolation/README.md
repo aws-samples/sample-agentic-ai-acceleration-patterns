@@ -426,6 +426,9 @@ reads one issuer) and is absent until `agentDelegation` is set; `/invocations`
 still refuses a transaction token, and `/delegations` refuses an identity
 token. `agentDelegation` cannot be combined with `tvm.claimTags` (the
 replacement token carries the tenant and the user, no identity claims).
+With `identity.multiTenant` the agent also sends `X-Tenant-Id` with the
+token's `tenant_id`: the header is an authoriser identity source there, and
+the route takes the tenant from the token.
 
 **Options.** Every prop is validated at synth, failing with the prop's
 name. The full props table with defaults is in

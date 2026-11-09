@@ -327,8 +327,13 @@ describe('authorize on /{backend}/delegations (ADR-0048)', () => {
     expect(logs.filter((l) => l.includes('delegation refused') && l.includes('token_invalid'))).toHaveLength(3);
   });
 
-  it('a target without a registry entry is Deny (404 in the log); the three delegation refusals carry their public reason', async () => {
-    const unknown = await authorizer.authorize(event('Bearer caller-token', '/nobody/delegations', 'nobody'), deps());
+  it('an undeclared target is delegation_not_declared before any lookup; a declared target without an entry is Deny (404 in the log); the three delegation refusals carry their public reason', async () => {
+    const undeclared = await authorizer.authorize(event('Bearer caller-token', '/nobody/delegations', 'nobody'), deps());
+    expect(effectOf(undeclared)).toBe('Deny');
+    expect(undeclared.context).toEqual({ reason: 'delegation_not_declared' });
+    expect(logs.some((l) => l.includes('unknown_backend'))).toBe(false);
+    const declaredButGone = stubRegistry({ default: { ...FIXTURE_ENTRIES.billing, needs: ['default/chat'], delegatesTo: ['gone'] } }).registry;
+    const unknown = await authorizer.authorize(event('Bearer caller-token', '/gone/delegations', 'gone'), deps({ registry: declaredButGone }));
     expect(effectOf(unknown)).toBe('Deny');
     expect(logs.some((l) => l.includes('unknown_backend'))).toBe(true);
     for (const reason of ['delegation_not_declared', 'delegation_depth', 'delegation_loop'] as const) {
