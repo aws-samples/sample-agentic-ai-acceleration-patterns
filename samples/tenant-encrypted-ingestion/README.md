@@ -54,6 +54,18 @@ The two tiers side by side (spec §1.3):
 
 ## Architecture
 
+![Components: a tenant user presents an access token to the ingestion API, which returns a presigned PUT with the tenant's key fixed; the upload lands in the drop prefix, an Object Created event via SQS wakes the processor, which validates the object and copies it pinned under the tenant's key into the documents prefix, and the downstream consumer reads it after a DeliveryAccepted event; the API and the processor use the tenant keys, registry, tenant roles, validators, sweep and watch, and delivery bus; the vendor drives key lifecycle through the platform API; each box names the pattern it carries](./diagrams/tenant-encrypted-ingestion.components.drawio.svg)
+
+Each box is one component and its pill names the pattern it carries. The
+ingestion API takes the tenant from the verified claim only and presigns the
+PUT under a tenant-role session, with the tenant's key fixed in the signed
+headers; the tenant user PUTs the file to the drop prefix with that URL. The
+processor assumes the tenant's process role before reading anything,
+validates and then lands the object under `documents/<tenantId>/`, and the
+consumer role may decrypt under that prefix only. Shared components on the
+second row are reached under tenant-role sessions: the key policy and the
+roles' own ABAC policies hold the tenants apart even when code omits a check.
+
 ![Architecture: a tenant user holds an access token from tenant-identity and calls the ingestion API's /tenant/* routes through a token authoriser; the API Lambda assumes the tenant upload role with a TenantId session tag, writes the delivery row in the DynamoDB registry and returns a presigned PUT with the tenant's KMS key fixed in the signed headers. The upload lands under ingest/<tenantId>/ in the shared S3 bucket, which asks KMS for a data key from that tenant's key; the key policy admits only the three tenant roles via S3 on the tenant's own prefixes. An Object Created event on the default EventBridge bus goes to an SQS queue with a DLQ; the processor Lambda assumes the tenant process role, runs the structural checks and invokes the deployer's custom validators in order, each with a short-lived single-object URL, then copies the document to documents/<tenantId>/ and publishes DeliveryAccepted, Rejected or KeyUnavailable on the sample's event bus for a downstream consumer, whose consumer role may decrypt under documents/<tenantId>/ only. The vendor calls /platform/* with IAM; the platform Lambda creates keys through the key factory, rotates them and schedules their deletion. An hourly sweep expires and abandons stale deliveries and re-checks revoked keys, a registry watch on the table stream alarms when a key binding changes, and server access logs go to a separate access-log bucket with a single reader. In the tenant-key tier the key lives in the tenant's own AWS account, tagged TenantId, with a key policy that trusts the three tenant roles](./diagrams/tenant-encrypted-ingestion.drawio.svg)
 
 A tenant user asks the API for a delivery, PUTs the file to a presigned URL
@@ -884,7 +896,8 @@ Each item is a deployer action in [`threat-model.md`](./threat-model.md#mitigati
 - Decisions: [`adr/`](./adr/) (indexed in [`adr/README.md`](./adr/README.md))
 - Implemented state: [`architecture.md`](./architecture.md)
 - Threats and mitigations: [`threat-model.md`](./threat-model.md)
-- Diagram source: [`diagrams/tenant-encrypted-ingestion.drawio`](./diagrams/tenant-encrypted-ingestion.drawio)
+- Diagram sources: [`diagrams/tenant-encrypted-ingestion.components.drawio`](./diagrams/tenant-encrypted-ingestion.components.drawio)
+  and [`diagrams/tenant-encrypted-ingestion.drawio`](./diagrams/tenant-encrypted-ingestion.drawio)
 
 Three independent blind reviews of the specification, ADRs and threat model
 ran before any code was written, and every finding was adopted
