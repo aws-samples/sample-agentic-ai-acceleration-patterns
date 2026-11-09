@@ -4,16 +4,18 @@
 /**
  * Shared runtime pieces: the registry schemas and write rules (M-23), the
  * tenant id grammar and session names (M-13), session freshness (M-11),
- * the field-allowlisted logger (M-27), the event schema (M-29), and the
- * KMS classifier (M-18).
+ * the field-allowlisted logger (M-27), per-tenant metering (M-28), the
+ * event schema (M-29), and the KMS classifier (M-18).
  */
 
 import { AssumeRoleCommand, STSClient } from '@aws-sdk/client-sts';
 import { mockClient } from 'aws-sdk-client-mock';
 import { captureStdout, NOW } from './runtime-helpers';
+import { METRICS_NAMESPACE } from '../src/shared/constants';
 import { isKmsSourced } from '../src/shared/errors';
 import { eventDetail } from '../src/shared/events';
 import { log } from '../src/shared/logger';
+import { emitDeliveryMetric, KMS_REQUESTS_COPY, KMS_REQUESTS_PUT, KMS_REQUESTS_READ, KmsMeter } from '../src/shared/metering';
 import {
   AttributeNotAllowedError,
   DELIVERY_ROW_ATTRIBUTES,
@@ -140,6 +142,68 @@ describe('logger (M-27)', () => {
     const first = JSON.parse(lines[0]);
     expect(first).toEqual({ level: 'INFO', message: 'x', tenantId: 'tenant-a', code: 'OK' });
     expect(JSON.parse(lines[1]).tenantId).toBe('-');
+  });
+});
+
+describe('metering (P-9, M-28, ADR-0012)', () => {
+  it('counts KMS requests per delivery: the PUT, one per read, two per copy', () => {
+    const meter = new KmsMeter();
+    expect(meter.total).toBe(KMS_REQUESTS_PUT);
+    meter.read();
+    meter.read();
+    meter.copy();
+    expect(meter.total).toBe(KMS_REQUESTS_PUT + 2 * KMS_REQUESTS_READ + KMS_REQUESTS_COPY);
+    // Four plus one per validator for an accepted delivery with one validator.
+    expect(meter.total).toBe(5);
+  });
+
+  const metric = { tenantId: 'tenant-a', status: 'ACCEPTED', sizeBytes: 1234, kmsRequests: 5, durationMs: 876 };
+
+  it('writes nothing when per-tenant metrics are off (the default)', async () => {
+    const { lines } = await captureStdout(async () => emitDeliveryMetric(false, metric, NOW));
+    expect(lines).toEqual([]);
+  });
+
+  it('writes one EMF record per delivery with TenantId and Status as the dimensions and the four metrics', async () => {
+    const { lines } = await captureStdout(async () => emitDeliveryMetric(true, metric, NOW));
+    expect(lines).toHaveLength(1);
+    expect(lines[0].endsWith('\n')).toBe(true);
+    const record = JSON.parse(lines[0]);
+    expect(record).toEqual({
+      _aws: {
+        Timestamp: NOW,
+        CloudWatchMetrics: [
+          {
+            Namespace: METRICS_NAMESPACE,
+            Dimensions: [['TenantId', 'Status']],
+            Metrics: [
+              { Name: 'Deliveries', Unit: 'Count' },
+              { Name: 'DeliveryBytes', Unit: 'Bytes' },
+              { Name: 'KmsRequests', Unit: 'Count' },
+              { Name: 'DeliveryDuration', Unit: 'Milliseconds' },
+            ],
+          },
+        ],
+      },
+      TenantId: 'tenant-a',
+      Status: 'ACCEPTED',
+      Deliveries: 1,
+      DeliveryBytes: 1234,
+      KmsRequests: 5,
+      DeliveryDuration: 876,
+    });
+    // Every metric named in the header is a top-level number, as EMF requires.
+    for (const m of record._aws.CloudWatchMetrics[0].Metrics as Array<{ Name: string }>) {
+      expect(typeof record[m.Name]).toBe('number');
+    }
+    for (const d of record._aws.CloudWatchMetrics[0].Dimensions[0] as string[]) {
+      expect(typeof record[d]).toBe('string');
+    }
+  });
+
+  it('carries no delivery id, file name, key ARN or URL (M-27)', async () => {
+    const { lines } = await captureStdout(async () => emitDeliveryMetric(true, metric, NOW));
+    expect(Object.keys(JSON.parse(lines[0])).sort()).toEqual(['Deliveries', 'DeliveryBytes', 'DeliveryDuration', 'KmsRequests', 'Status', 'TenantId', '_aws']);
   });
 });
 

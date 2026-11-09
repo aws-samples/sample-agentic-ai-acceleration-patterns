@@ -529,7 +529,9 @@ processor line carried `tenantId`, `status`, `sizeBytes`, `kmsRequests`.
 **Contributor Insights**, three rules (all `ENABLED` in the run), cost
 independent of tenant count: `<addr>-tei-top-deliveries` (processor,
 `tenantId` and `status`, count), `<addr>-tei-top-bytes` (processor,
-accepted `sizeBytes` summed by `tenantId`), `<addr>-tei-top-requests` (API
+`sizeBytes` of the accepted `delivery processed` lines summed by
+`tenantId`; the message filter keeps a re-entry line, which also carries a
+status, out of the sum), `<addr>-tei-top-requests` (API
 access log, `/tenant/deliveries` and `/tenant/deliveries/{deliveryId}` by
 `tenantId` and `status`). Gap: `tei-top-deliveries` counts only the
 processor's `delivery processed` lines; deliveries the sweep ends
@@ -539,7 +541,18 @@ counted there. The registry counters and the delivery rows hold them.
 **EMF, opt-in** (`perTenantMetrics`, default off): one record per delivery
 in `TenantEncryptedIngestion` with dimensions `TenantId`, `Status` and
 `Deliveries`, `DeliveryBytes`, `KmsRequests`, `DeliveryDuration`. Off by
-default: a dimension per tenant is a custom metric per tenant.
+default: a dimension per tenant is a custom metric per tenant. The record
+shape (header, dimensions, the four metrics as top-level numbers, no other
+field) is a unit test; the demo stack leaves it off, so no run exercises
+it.
+
+**Checked in integ step 10b**: the counters that `GetTenantKey` returns for
+tenant A equal the tenant's own `ListDeliveries` view (`deliveriesAccepted`
+and `deliveriesRejected` as counts, `bytesStored` as the sum of accepted
+`sizeBytes`, `kmsRequests` at least four per accepted delivery, `inFlight`
+0); A's key carries the `TenantId` tag; the `tei-top-bytes` and
+`tei-top-deliveries` reports (`GetInsightRuleReport` over the run) name A
+with the same bytes and the same count of processor-terminated deliveries.
 
 **RoleSessionName** `t-<tenantId>-...` names the tenant in CloudTrail and
 S3 access logs without a join. **TenantId cost allocation tag**: every

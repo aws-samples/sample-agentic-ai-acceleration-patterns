@@ -488,6 +488,25 @@ describe('Contributor Insights rules (ADR-0012)', () => {
     const body = JSON.parse(text) as { Contribution: { Filters: unknown[] } };
     expect(body.Contribution.Filters).toEqual([{ Match: '$.resourcePath', In: ['/tenant/deliveries', '/tenant/deliveries/{deliveryId}'] }]);
   });
+
+  it('sums bytes only over the one delivery-processed line per accepted delivery', () => {
+    const rules = Object.values(template.findResources('AWS::CloudWatch::InsightRule')) as Array<{ Properties: { RuleName: unknown; RuleBody: unknown } }>;
+    const bytes = rules.find((r) => JSON.stringify(r.Properties.RuleName).includes('tei-top-bytes'));
+    expect(bytes).toBeDefined();
+    const raw = bytes!.Properties.RuleBody;
+    const text =
+      typeof raw === 'string'
+        ? raw
+        : ((raw as { 'Fn::Join': [string, unknown[]] })['Fn::Join'][1]).map((part) => (typeof part === 'string' ? part : 'TOKEN')).join('');
+    const body = JSON.parse(text) as { AggregateOn: string; Contribution: { Keys: string[]; ValueOf: string; Filters: unknown[] } };
+    expect(body.AggregateOn).toBe('Sum');
+    expect(body.Contribution.Keys).toEqual(['$.tenantId']);
+    expect(body.Contribution.ValueOf).toBe('$.sizeBytes');
+    expect(body.Contribution.Filters).toEqual([
+      { Match: '$.message', In: ['delivery processed'] },
+      { Match: '$.status', In: ['ACCEPTED'] },
+    ]);
+  });
 });
 
 describe('props validation (spec §3.3)', () => {

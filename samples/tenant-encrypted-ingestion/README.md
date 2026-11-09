@@ -570,6 +570,7 @@ left or a key it tagged is not `PendingDeletion`.
 | 8 | Revocation decided by the probe: B's key disabled mid-delivery, then its use statement removed: `KEY_UNAVAILABLE`, `REVOKED`, DLQ unchanged, `CreateDelivery` 409; back to `ACTIVE` after the sweep |
 | 9 | Rotation: `RotateTenantKey` A 200 and step 3's document still reads; B 400 `UnsupportedInTier` |
 | 10 | Observability: one processor line per delivery with `tenantId`, `status`, `kmsRequests`; `kmsRequests` compared with CloudTrail (informational); the access-log `Requester` (best effort) |
+| 10b | Cost attribution: A's registry counters (`GetTenantKey`) equal the tenant's own `ListDeliveries` view (`deliveriesAccepted`, `deliveriesRejected`, `bytesStored` as the sum of accepted `sizeBytes`, `kmsRequests` at least four per accepted delivery, `inFlight` 0); A's key carries the `TenantId` cost allocation tag; the `tei-top-bytes` and `tei-top-deliveries` Contributor Insights reports name A with the same figures |
 | 11 | Offboarding: `DeleteTenantKey` A 202, no version left under A's prefixes, alias gone, key `PendingDeletion`, `CreateDelivery` A refused, the in-flight PUT fails; `DeleteTenantKey` B leaves B's key untouched and writes the tombstone without an alarm |
 | 12 | Teardown, by `scripts/integ.sh`: `cdk destroy --all`, then the leftover check (the driver reports the step as skipped) |
 | cleanup | The driver deletes the tenants it created in tenant-identity's shared pool, each then 404; a tenant left fails the run |
