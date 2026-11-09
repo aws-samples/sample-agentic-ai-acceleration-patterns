@@ -34,12 +34,12 @@ that is right at 1 rps and wrong at 500 rps is a leak, not a slow path.
 
 | Item | Value |
 |---|---|
-| Account, Region | `pg` 647746915953, `eu-central-1` |
-| Identity | the long-lived `TenantIdentity-shared-pool` fixture (`aaa-samples.md`); tenants created for a run are deleted at its end, the pool itself is never touched |
+| Account, Region | a non-production test account, `eu-central-1` |
+| Identity | the long-lived `TenantIdentity-shared-pool` deployment the integration runs reuse; tenants created for a run are deleted at its end, the pool itself is never touched |
 | Stack | `RuntimeIsolation-api-gateway` deployed from `main` with the stress props of §3.1, `publishParameters=false`, stack name suffixed `-stress` |
 | Driver host | one EC2 instance, `c6i.2xlarge`, private subnet, no inbound rule, no public IP, reached through SSM Session Manager; k6 and the AWS CLI v2 installed by user data |
 | Driver | [k6](https://k6.io/) for the ingress path (bearer token, SSE); bash and the AWS CLI for seeding and teardown, reusing `scripts/lib.sh` |
-| Results | k6 JSON summary plus `scripts/stress/collect.sh` output, copied to the OneDrive work folder `__refresh26/SAIL/Library/RuntimeIsolationStress/` |
+| Results | k6 JSON summary plus `scripts/stress/collect.sh` output, kept outside the repo with the run date |
 
 ### 3.1 Stress props
 
@@ -50,7 +50,7 @@ so the ingress, not its throttle, is what is measured.
 |---|---|---|---|
 | `stageThrottle` | 50 rps, burst 25 | 1,200 rps, burst 600 | above the top scenario rate; the per-tenant limit must be what refuses |
 | `tenantLimits.requestsPerMinute` | 60 | 60 | unchanged: the noisy-neighbour scenario needs a real limit |
-| `ingressReservedConcurrency` | unset | 800 | leaves 200 of the account's 1,000 for everything else in `pg` |
+| `ingressReservedConcurrency` | unset | 800 | leaves 200 of the account's 1,000 for everything else in the account |
 | `transactionToken.ttl` | 120 s | 120 s | unchanged: the mint rate is a measured output |
 | `perTenantMetrics` | off | off | 1,000 tenants would be 9,000+ custom metrics (ADR-0021) |
 | `toolsGateways` | `default` | `default`, `finance`, `hr`, `ops` | 1,000 tools need four engines at `maxToolsPerGateway` 300 |
@@ -81,7 +81,7 @@ Pass criteria, every scenario:
 | p90 TTFB, `report` probe, warm | within 1.5x of the single-tenant `perf.sh` figure of the same day |
 | p90 TTFB flat | the 1,000-tenant steady run and a 100-tenant run differ by under 20 % |
 
-Deploy and destroy time are results, not footnotes (`testing-and-spikes.md`).
+Deploy and destroy time are results, not footnotes.
 Every phase reports them.
 
 ## 5. Phases
@@ -196,11 +196,11 @@ on failure. `seed.sh` and `teardown.sh` reuse `scripts/lib.sh`.
 
 ## 9. Quotas the run itself can trip
 
-Checked before the run, as `testing-and-spikes.md` asks.
+Checked before the run.
 
-| Quota | Account-wide in `pg` | How the plan stays inside it |
+| Quota | Account-wide | How the plan stays inside it |
 |---|---|---|
-| Lambda concurrency, 1,000 | shared with every other stack in `pg` | reserved 800; S5 sized at 720; no other integ run during the window |
+| Lambda concurrency, 1,000 | shared with every other stack in the account | reserved 800; S5 sized at 720; no other integ run during the window |
 | STS `AssumeRole`, 600 rps | shared with every TVM in the account | S2 is the one scenario expected to approach it; its throttle count is a result |
 | KMS RSA `Sign`, 1,000 rps | shared with every RSA key | S4 at 200 rps plus mints well under; S7 is the one that climbs |
 | Cognito `UserAuthentication`, about 120 rps | shared pool | refresh cycle sized at 42 rps |
@@ -217,7 +217,7 @@ Checked before the run, as `testing-and-spikes.md` asks.
   for the same; no model calls at rate. Estimate before the run from the
   current price list; expect tens of dollars, not hundreds. Reported next to
   the results.
-- `pg` is a shared account. Announce the window in the team channel first;
+- The test account is shared. Announce the window to its other users first;
   an integ run of another sample during S5 or S6 fails on Lambda concurrency.
 - The seeded tenants live in the shared identity pool for the run. Teardown
   deletes them; a run that dies leaves them, and `teardown.sh` is idempotent
@@ -228,7 +228,7 @@ Checked before the run, as `testing-and-spikes.md` asks.
 ## 11. Deliverables
 
 1. `scripts/stress/` as in §8, with its README.
-2. One results file per run in the OneDrive work folder, with deploy time,
+2. One results file per run, kept outside the repo, with deploy time,
    destroy time, the pass table and the k6 summary.
 3. `architecture.md` Scale limits: each row that the run measured gets its
    measured value next to the documented one, with the run date.
