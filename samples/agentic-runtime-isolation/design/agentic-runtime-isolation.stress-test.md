@@ -59,9 +59,9 @@ so the ingress, not its throttle, is what is measured.
 | Dimension | Target | Source |
 |---|---|---|
 | Tenants seeded | 10,000 | spec §3.6 "10,000s" lower bound |
-| Tenants active in traffic | 1,000 | bounded by the Runtime's 2,500 active sessions |
+| Tenants active in traffic | 1,000 | bounded by the Runtime's 2,500 active session workloads and its 25 new sessions a second (measured in the test account, 2026-11-09) |
 | Users | 1 per tenant seeded, 10 per active tenant | user count does not touch the design (P-16); 10 is enough to exercise the `(tenant, user, agent)` mint key |
-| Agents | 100 | one Runtime each; registry entries in SSM |
+| Agents | 100 | one Runtime each (quota 1,000 agents per account, measured 2026-11-09); registry entries in SSM |
 | Tools | 1,000 across 10 `ToolTarget`s and four gateways | 100 tools per target |
 | Steady rate | 500 rps | ten times the default stage throttle |
 | Peak rate | 1,000 rps for 60 s | at the Runtime data-plane quota |
@@ -94,7 +94,7 @@ Proves the first claim with a seed script and single requests.
 | 1.1 | Deploy the stress stack with 100 `AgentBackend`s and 10 `ToolTarget`s | deploy time; `SecondsToActive` per policy (ADR-0040) | deploy under 45 min; one star permit per target, about 450 bytes each |
 | 1.2 | Seed 10,000 tenants (`CreateTenant`, `app/use`, one admin user) at 20 rps | wall time; Cognito and platform API status histogram | 0 non-201 after retry |
 | 1.3 | Subscribe each tenant: `PutTenantSubscription` with `agents: ["default"]`, `tools: ["crm/*"]`; 1,000 of them with all 100 agents and `<target>/*` for all 10 targets | wall time; 4xx | 0 4xx; the 1,000 wide rows are under 40 KB each (spec §3.6) |
-| 1.4 | 1,000 `report` probes, one per tenant, after the subscription writes | grant time from the authoriser log; p90 TTFB | p90 TTFB within 20 % of a 100-tenant sample: the grant is a `GetItem`, flat in tenant count |
+| 1.4 | 1,000 `report` probes, one per tenant, at 20 a second, after the subscription writes | grant time from the authoriser log; p90 TTFB | p90 TTFB within 20 % of a 100-tenant sample: the grant is a `GetItem`, flat in tenant count |
 | 1.5 | One tenant with all 1,000 tools: `report`, then `tools/list` on each gateway | `scope` bytes after compression; encoded token bytes; pages | under 6,144 and 10,240 bytes, or a 502 `grant_too_large` and nothing else; about 30 tools a page |
 | 1.6 | Provoke `grant_too_large`: widen the token with `tvm.includeUserIdTag` and 1,000 named tools until it tips | the status | 502 `grant_too_large`, never a 500 or a truncated token |
 | 1.7 | Cold registry read of all 100 agents in one second (restart the ingress by a config change, then 100 parallel probes, one per agent) | SSM `GetParameter` throttles; `registry_unavailable` count | documented behaviour: a throttled read is cached as `registry_unavailable` for one `registryTtl` on that instance; report how many |
@@ -117,7 +117,7 @@ k6 summary.
 
 | Scenario | Shape | What it stresses | Watch |
 |---|---|---|---|
-| S1 steady | 1,000 tenants, 10 users each, 500 rps, `report` probe, one warm conversation per VU, 10 min | the authoriser cache, the grant, the mint cache, the TVM cache | p50/p90 TTFB, 5xx, mint hit rate (`mint` on `request served`) |
+| S1 steady | 1,000 tenants, 10 users each, 500 rps, `report` probe, one warm conversation per VU (warmed at 20 new conversations a second, about 7 min, untimed), 10 min | the authoriser cache, the grant, the mint cache, the TVM cache | p50/p90 TTFB, 5xx, mint hit rate (`mint` on `request served`) |
 | S2 thundering herd | fresh deploy (no warm instance), then 0 to 800 rps in 5 s, 1,000 tenants, 2 min | cold-start fan-out: new instances × tenants each on STS; SSM cold reads; KMS `Sign` on first mint | STS throttles, Lambda cold starts, `registry_unavailable`, TTFB max |
 | S3 noisy neighbour | S1 plus one tenant at 600 rpm (10x its limit) for 5 min | the per-tenant limit as the fairness control; the stage throttle behind it | that tenant: 429 after 60 requests in each minute, 2x at a minute boundary at most (ADR-0020); every other tenant: 0 429, p90 unchanged against S1 |
 | S4 tool storm | 200 rps of `tool crm/get_account {}` across 1,000 tenants, 5 min | KMS `Sign` one per admitted `tools/call`; the gateway's 10 rps per tenant; the REQUEST interceptor's TVM | KMS throttles, gateway 429 per tenant, interceptor duration |
@@ -204,7 +204,8 @@ Checked before the run.
 | KMS RSA `Sign`, 1,000 rps | shared with every RSA key | S4 at 200 rps plus mints well under; S7 is the one that climbs |
 | Cognito `UserAuthentication`, about 120 rps | shared pool | refresh cycle sized at 42 rps |
 | Cognito user write categories, tens of rps | shared pool | seed and teardown at 20 rps |
-| AgentCore Runtime active sessions, 2,500 | account | 1,000 active tenants × 1 warm conversation, S5 500; never a new conversation per request at rate |
+| AgentCore Runtime active session workloads, 2,500 | account | 1,000 active tenants × 1 warm conversation, S5 500; never a new conversation per request at rate |
+| AgentCore Runtime new session creation, 25 a second | account | every warm-up (S1: 10,000 conversations, about 7 min) and step 1.4 run at 20 new conversations a second; S2's herd reuses the conversations the Runtime already holds |
 | AgentCore Runtime data plane, 1,000 TPS | account | S6 is at the quota on purpose, for 60 s |
 | SSM `PutParameter`, 3 TPS | account | the stress stack publishes nothing |
 | API Gateway control plane | account, low TPS | one deploy at a time; no parallel runs |
