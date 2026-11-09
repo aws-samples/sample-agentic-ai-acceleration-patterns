@@ -81,8 +81,8 @@ export const BILLING_NEEDS = ['billing/read', 'billing/invoke'];
 /** A draining backend. */
 export const OLD_RUNTIME_ARN = 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_old-1';
 export const FIXTURE_ENTRIES: Record<string, RegistryEntry> = {
-  billing: { runtimeArn: BILLING_RUNTIME_ARN, needs: BILLING_NEEDS, tools: ['invoices/*'], version: 1, status: 'active' },
-  old: { runtimeArn: OLD_RUNTIME_ARN, needs: ['old/chat'], tools: [], version: 1, status: 'draining' },
+  billing: { runtimeArn: BILLING_RUNTIME_ARN, needs: BILLING_NEEDS, tools: ['invoices/*'], delegatesTo: [], version: 1, status: 'active' },
+  old: { runtimeArn: OLD_RUNTIME_ARN, needs: ['old/chat'], tools: [], delegatesTo: [], version: 1, status: 'draining' },
 };
 
 /** An ingress configuration with every module off; tests override what they need. */
@@ -104,7 +104,7 @@ export const baseConfig = (overrides: Partial<IngressConfig> = {}): IngressConfi
  */
 export const stubRegistry = (entries: Record<string, RegistryEntry> = {}) => {
   const table: Record<string, RegistryEntry> = {
-    [DEFAULT_BACKEND]: { runtimeArn: RUNTIME_ARN, needs: [DEFAULT_NEED], tools: DEFAULT_TOOLS, version: 1, status: 'active' },
+    [DEFAULT_BACKEND]: { runtimeArn: RUNTIME_ARN, needs: [DEFAULT_NEED], tools: DEFAULT_TOOLS, delegatesTo: ['billing'], version: 1, status: 'active' },
     ...entries,
   };
   const warmed: string[] = [];

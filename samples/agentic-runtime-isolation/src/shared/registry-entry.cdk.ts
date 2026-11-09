@@ -46,8 +46,8 @@ export interface RegistryEntryResourceProps {
   readonly needs: string[];
   /** (v2, ADR-0032) The tools the agent may use, `<target>/<tool>` or `<target>/*`; may be empty. */
   readonly tools: string[];
-  /** (ADR-0048) The agents this agent may hand a transaction to; may be empty. */
-  readonly delegatesTo: string[];
+  /** (ADR-0048) The agents this agent may hand a transaction to; default none. */
+  readonly delegatesTo?: string[];
   /**
    * How long Delete keeps the entry at `draining` before removing it: one
    * registry TTL (so every ingress instance has stopped routing here) plus
@@ -130,7 +130,7 @@ export class RegistryEntryResource extends Construct {
         RuntimeArn: props.runtimeArn,
         Needs: props.needs,
         Tools: props.tools,
-        DelegatesTo: props.delegatesTo,
+        DelegatesTo: props.delegatesTo ?? [],
         DrainSeconds: drain.toSeconds(),
       },
     });

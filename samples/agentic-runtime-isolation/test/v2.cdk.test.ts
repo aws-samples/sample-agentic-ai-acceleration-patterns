@@ -4,6 +4,7 @@
 import * as path from 'node:path';
 import { App, Duration, Stack } from 'aws-cdk-lib';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { publishedIngress, seedPublishedIngress, TEST_ENV } from './published-ingress';
 import { AgentBackend, GATEWAY_TARGET_NAME, PUBLISHED, SharedIngress, type SharedIngressProps } from '../src/index';
@@ -421,6 +422,103 @@ describe('v2 options', () => {
     expect(
       () => new AgentBackend(stack, 'Crm', { name: 'crm', ingress, agent: { codePath: FIXTURE_AGENT, modelId: 'm' }, needs: ['crm/chat'], tools: [] }),
     ).toThrow(/name 'crm' is already declared in this app as a tool target/);
+  });
+
+  describe('agentDelegation (ADR-0048)', () => {
+    const pathParts = (t: Template) => (Object.values(t.findResources('AWS::ApiGateway::Resource')) as any[]).map((r) => r.Properties.PathPart).sort();
+    const envOf = (t: Template, text: string) => functionAndRole(t, text).fn.Properties.Environment.Variables;
+
+    it('off by default: no delegations resource, no RI_DELEGATION_MAX_DEPTH, no RI_DELEGATION_URL on the agent, nothing in the published document', () => {
+      const t = build('api-gateway').template();
+      expect(pathParts(t)).not.toContain('delegations');
+      expect(envOf(t, 'verifies the identity').RI_DELEGATION_MAX_DEPTH).toBeUndefined();
+      expect(envOf(t, 'relays the backend stream').RI_DELEGATION_MAX_DEPTH).toBeUndefined();
+      const runtime = (Object.values(t.findResources('AWS::BedrockAgentCore::Runtime')) as any[])[0];
+      expect(runtime.Properties.EnvironmentVariables.RI_DELEGATION_URL).toBeUndefined();
+      const doc = JSON.stringify((Object.values(t.findResources('AWS::SSM::Parameter')) as any[]).find((p) => JSON.stringify(p.Properties.Name).includes(PUBLISHED.ingress)).Properties.Value);
+      expect(doc).not.toContain('delegationUrl');
+    });
+
+    it('on: a /{backend}/delegations POST with the same authoriser; depth and the ingress role on both functions; the agent gets RI_DELEGATION_URL; the document publishes delegationUrl', () => {
+      const { ingress, template } = build('api-gateway', { agentDelegation: { maxDepth: 2 } });
+      const t = template();
+      expect(pathParts(t).filter((p) => p === 'delegations')).toHaveLength(1);
+      const methods = (Object.values(t.findResources('AWS::ApiGateway::Method')) as any[]).filter((m) => m.Properties.HttpMethod === 'POST' && m.Properties.AuthorizationType === 'CUSTOM');
+      expect(methods).toHaveLength(3); // /invocations, /{backend}/invocations, /{backend}/delegations
+      const authorizerEnv = envOf(t, 'verifies the identity');
+      const ingressEnv = envOf(t, 'relays the backend stream');
+      expect(authorizerEnv.RI_DELEGATION_MAX_DEPTH).toBe('2');
+      expect(ingressEnv.RI_DELEGATION_MAX_DEPTH).toBe('2');
+      expect(ingressEnv.RI_INGRESS_ROLE_ARN).toEqual(authorizerEnv.RI_INGRESS_ROLE_ARN);
+      expect(ingress.delegationUrl).toBe(ingress.endpointUrl);
+      const runtime = (Object.values(t.findResources('AWS::BedrockAgentCore::Runtime')) as any[])[0];
+      expect(runtime.Properties.EnvironmentVariables.RI_DELEGATION_URL).toBeDefined();
+      const doc = JSON.stringify((Object.values(t.findResources('AWS::SSM::Parameter')) as any[]).find((p) => JSON.stringify(p.Properties.Name).includes(PUBLISHED.ingress)).Properties.Value);
+      expect(doc).toContain('delegationUrl');
+    });
+
+    it('fails synth on agentcore-gateway, outside 1 to 3, and with tvm.claimTags', () => {
+      expect(() => build('agentcore-gateway', { agentDelegation: { maxDepth: 1 } })).toThrow(/agentDelegation is valid only with the 'api-gateway' ingress/);
+      expect(() => build('api-gateway', { agentDelegation: { maxDepth: 4 as never } })).toThrow(/agentDelegation.maxDepth must be an integer from 1 to 3/);
+      expect(() => build('api-gateway', { agentDelegation: { maxDepth: 0 as never } })).toThrow(/agentDelegation.maxDepth/);
+      expect(() =>
+        build('api-gateway', {
+          agentDelegation: { maxDepth: 1 },
+          tvm: { role: iam.Role.fromRoleArn(new Stack(new App(), 'R'), 'Role', 'arn:aws:iam::111122223333:role/Tenant'), claimTags: { Dept: 'custom:dept' } } as never,
+        }),
+      ).toThrow(/cannot be combined with tvm.claimTags/);
+    });
+
+    it('AgentBackend.delegatesTo: shape checked, needs the route, written to the registry entry, warns on a name not in this app', () => {
+      const { stack, ingress } = build('api-gateway', { agentDelegation: { maxDepth: 1 } });
+      const backend = (props: Record<string, unknown>) =>
+        new AgentBackend(stack, `B${Math.random().toString(36).slice(2, 8)}`, {
+          name: 'planner',
+          ingress,
+          agent: { codePath: FIXTURE_AGENT, modelId: 'amazon.nova-lite-v1:0' },
+          needs: ['planner/chat'],
+          ...props,
+        } as never);
+      expect(() => backend({ delegatesTo: ['planner'] })).toThrow(/delegatesTo must not name this agent itself/);
+      expect(() => backend({ delegatesTo: ['Bad Name'] })).toThrow(/delegatesTo 'Bad Name' must match/);
+      backend({ name: 'planner', delegatesTo: [GATEWAY_TARGET_NAME, 'elsewhere'] });
+      const t = Template.fromStack(stack);
+      const entry = (Object.values(t.findResources('Custom::RuntimeIsolationRegistryEntry')) as any[]).find((r) => r.Properties.ParameterName && JSON.stringify(r.Properties.ParameterName).includes('planner'));
+      expect(entry.Properties.DelegatesTo).toEqual([GATEWAY_TARGET_NAME, 'elsewhere']);
+      Annotations.fromStack(stack).hasWarning('*', Match.stringLikeRegexp('delegatesTo names elsewhere not found in this app'));
+    });
+
+    it('AgentBackend.delegatesTo without the route fails synth', () => {
+      const { stack, ingress } = build('api-gateway');
+      expect(
+        () =>
+          new AgentBackend(stack, 'Planner', {
+            name: 'planner',
+            ingress,
+            agent: { codePath: FIXTURE_AGENT, modelId: 'amazon.nova-lite-v1:0' },
+            needs: ['planner/chat'],
+            delegatesTo: [GATEWAY_TARGET_NAME],
+          }),
+      ).toThrow(/delegatesTo needs an ingress with agentDelegation/);
+    });
+
+    it('fromParameters carries delegationUrl when the document has it, and an imported backend receives RI_DELEGATION_URL', () => {
+      const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+      const doc = { ...publishedIngress('api-gateway'), delegationUrl: 'https://abc.execute-api.eu-central-1.amazonaws.com/prod' };
+      seedPublishedIngress(app, doc);
+      const stack = new Stack(app, 'Consumer', { env: TEST_ENV });
+      const ref = SharedIngress.fromParameters(stack, 'Ref', doc.ingressRoleArn.split(':')[4] === TEST_ENV.account ? '/application-plane/shared/agent-runtime/' : '/x/', 'api-gateway');
+      expect(ref.delegationUrl).toBe(doc.delegationUrl);
+      new AgentBackend(stack, 'Imported', {
+        name: 'planner',
+        ingress: ref,
+        agent: { codePath: FIXTURE_AGENT, modelId: 'amazon.nova-lite-v1:0' },
+        needs: ['planner/chat'],
+        delegatesTo: [GATEWAY_TARGET_NAME],
+      });
+      const runtime = (Object.values(Template.fromStack(stack).findResources('AWS::BedrockAgentCore::Runtime')) as any[])[0];
+      expect(runtime.Properties.EnvironmentVariables.RI_DELEGATION_URL).toBe(doc.delegationUrl);
+    });
   });
 
   it('a ToolTarget of an unknown kind, or with a bad name, fails synth (the kinds are in test/tool-target.cdk.test.ts)', () => {

@@ -167,6 +167,7 @@ export class AgentBackend extends Construct {
           tenantRoleArn: ingress.tenantRole.roleArn,
           issuer: ingress.issuer,
           entitlementsTableName: ingress.entitlementStore.tableName,
+          delegationUrl: ingress.delegationUrl,
           toolsGateways: Object.fromEntries(
             Object.entries(ingress.toolsGateways).map(([name, gw]) => [
               name,
