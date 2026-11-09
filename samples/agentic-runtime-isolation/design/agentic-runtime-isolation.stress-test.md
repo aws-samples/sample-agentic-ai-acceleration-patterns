@@ -228,10 +228,10 @@ driver, because it is a test asset and no part of the construct.
 
 | Resource | Setting | Why |
 |---|---|---|
-| VPC | one private isolated subnet, one AZ, no NAT, no internet gateway | the host talks to AWS endpoints only |
-| Interface endpoints | `ssm`, `ssmmessages`, `ec2messages`, `execute-api`, `sts`, `logs`, `s3` (gateway) | Session Manager, the ingress and the Entitlements API, token refresh, k6 summary upload |
+| VPC | one AZ, one public subnet holding one NAT gateway, one private subnet holding the host; no public IP on the host | every call (the ingress, the Entitlements API, the platform API, STS, SSM, S3) leaves through the NAT gateway to the public AWS endpoints, as a tenant's client would |
+| Endpoints | `s3` gateway endpoint only (free); no interface endpoints, in particular no `execute-api` one | an `execute-api` interface endpoint turns on private DNS for every `*.execute-api` name in the VPC and reaches only APIs whose resource policy admits that endpoint; the stress stack's API is a regional endpoint and would need a policy change for the test alone |
 | Instance | `c6i.2xlarge`, Amazon Linux 2023, IMDSv2 required, 30 GB gp3, no key pair, no public IP | one process holds 10,000 tokens and 1,000 rps of SSE |
-| Security group | no inbound rule; outbound 443 to the endpoints only | nothing listens |
+| Security group | no inbound rule; outbound 443 only | nothing listens |
 | Instance role | `AmazonSSMManagedInstanceCore`; `execute-api:Invoke` on the stress stack's Entitlements API and tenant-identity's platform API; `s3:PutObject` on the results prefix | least privilege; the identity tokens come from the platform API, not from IAM |
 | User data | installs k6 from its RPM, the AWS CLI v2 and `jq`; creates `/opt/stress` | no interactive step |
 | Results bucket | one bucket, SSE-S3, block public access, 30-day expiry, `autoDeleteObjects` | the k6 summaries leave the host before it is destroyed |
@@ -242,7 +242,8 @@ cdk-nag runs on it as on every stack in the sample; the one expected
 suppression is the missing flow log (cost, a test VPC).
 
 Deploy and destroy time of this stack are reported with the run (expected:
-interface endpoints dominate, about 4 minutes up and 3 down).
+the NAT gateway dominates, about 3 minutes up and 2 down). The NAT gateway
+costs about $0.05 an hour plus $0.05 a GB; a run moves a few GB.
 
 ## 9. Quotas the run itself can trip
 
@@ -260,6 +261,7 @@ Checked before the run.
 | AgentCore Runtime data plane, 1,000 TPS | account | S6 is at the quota on purpose, for 60 s |
 | SSM `PutParameter`, 3 TPS | account | the stress stack publishes nothing |
 | API Gateway control plane | account, low TPS | one deploy at a time; no parallel runs |
+| NAT gateway, 55,000 concurrent connections per destination, 45 Gbps | the driver stack's own | S5 holds 720 streams at once, S6 about 1,000 short ones; k6 reuses connections |
 
 ## 10. Cost and risk
 
@@ -291,7 +293,7 @@ Checked before the run.
 
 | Option | Deploy time | Destroy time | For | Against |
 |---|---|---|---|---|
-| k6 on one EC2 host, as a CDK stack (chosen) | about 4 min | about 3 min | one process holds 10,000 tokens and the refresh cycle; SSE supported; JSON summary; no listening socket | one host caps at about 1,000 to 2,000 rps for SSE; enough for the targets |
+| k6 on one EC2 host, as a CDK stack (chosen) | about 3 min | about 2 min | one process holds 10,000 tokens and the refresh cycle; SSE supported; JSON summary; no listening socket | one host caps at about 1,000 to 2,000 rps for SSE; enough for the targets |
 | Lambda fan-out (Step Functions distributed map) | about 2 min | about 1 min | scales past 10,000 rps | token refresh and per-tenant counters are spread over thousands of invocations; the driver's own Lambda concurrency competes with the ingress's in the same account |
 | Extend `scripts/perf.sh` | none | none | already there | bash subshells and curl fork per request; one tenant; no assertion counters; stops well under 100 rps |
 | Distributed k6 on ECS | about 10 min | about 3 min | scales horizontally | more to build than the targets need |
