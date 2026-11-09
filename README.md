@@ -141,8 +141,9 @@ document and publishes `DeliveryAccepted`. The key is the vendor's
 tenant can withdraw it and the pipeline fails closed; offboarding schedules
 the key for deletion.
 
-It ships as one CDK construct, `TenantEncryptedIngestion`, and consumes
-tenant-identity's `shared-pool` for the token contract. See
+It ships as one CDK construct, `TenantEncryptedIngestion`. Its demo stack,
+integration test and demo use tenant-identity's `shared-pool`; the construct
+accepts any OIDC issuer that meets the token contract. See
 [Per-Tenant Encrypted Ingestion for Agentic Applications](./samples/tenant-encrypted-ingestion/).
 
 ## Contributing a sample

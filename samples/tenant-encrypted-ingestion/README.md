@@ -34,9 +34,9 @@ demo stack, an integration test, a demo script and an example validator
   lands the document and publishes `DeliveryAccepted` for a later sample.
 - Not malware scanning or content rules. The built-in checks are
   structural; anything more is a custom validator.
-- Not identity. Tenant users authenticate with
-  [`tenant-identity`](../tenant-identity/); this sample verifies its token
-  contract.
+- Not identity. The demo authenticates tenant users with
+  [`tenant-identity`](../tenant-identity/); the construct verifies a token
+  contract any OIDC issuer can meet (ADR-0019).
 - Not a control plane, and not multi-Region.
 
 The two tiers side by side (spec §1.3):
@@ -54,7 +54,7 @@ The two tiers side by side (spec §1.3):
 
 ## Architecture
 
-![Architecture: a tenant user holds an access token from tenant-identity and calls the ingestion API's /tenant/* routes through a token authoriser; the API Lambda assumes the tenant upload role with a TenantId session tag, writes the delivery row in the DynamoDB registry and returns a presigned PUT with the tenant's KMS key fixed in the signed headers. The upload lands under ingest/<tenantId>/ in the shared S3 bucket, which asks KMS for a data key from that tenant's key; the key policy admits only the three tenant roles via S3 on the tenant's own prefixes. An Object Created event on the default EventBridge bus goes to an SQS queue with a DLQ; the processor Lambda assumes the tenant process role, runs the structural checks and invokes the deployer's custom validators in order, each with a short-lived single-object URL, then copies the document to documents/<tenantId>/ and publishes DeliveryAccepted, Rejected or KeyUnavailable on the sample's event bus for a downstream consumer, whose consumer role may decrypt under documents/<tenantId>/ only. The vendor operator calls /platform/* with IAM; the platform Lambda creates keys through the key factory, rotates them and schedules their deletion. An hourly sweep expires and abandons stale deliveries and re-checks revoked keys, a registry watch on the table stream alarms when a key binding changes, and server access logs go to a separate access-log bucket with a single reader. In the tenant-key tier the key lives in the tenant's own AWS account, tagged TenantId, with a key policy that trusts the three tenant roles](./diagrams/tenant-encrypted-ingestion.drawio.svg)
+![Architecture: a tenant user holds an access token from tenant-identity and calls the ingestion API's /tenant/* routes through a token authoriser; the API Lambda assumes the tenant upload role with a TenantId session tag, writes the delivery row in the DynamoDB registry and returns a presigned PUT with the tenant's KMS key fixed in the signed headers. The upload lands under ingest/<tenantId>/ in the shared S3 bucket, which asks KMS for a data key from that tenant's key; the key policy admits only the three tenant roles via S3 on the tenant's own prefixes. An Object Created event on the default EventBridge bus goes to an SQS queue with a DLQ; the processor Lambda assumes the tenant process role, runs the structural checks and invokes the deployer's custom validators in order, each with a short-lived single-object URL, then copies the document to documents/<tenantId>/ and publishes DeliveryAccepted, Rejected or KeyUnavailable on the sample's event bus for a downstream consumer, whose consumer role may decrypt under documents/<tenantId>/ only. The vendor calls /platform/* with IAM; the platform Lambda creates keys through the key factory, rotates them and schedules their deletion. An hourly sweep expires and abandons stale deliveries and re-checks revoked keys, a registry watch on the table stream alarms when a key binding changes, and server access logs go to a separate access-log bucket with a single reader. In the tenant-key tier the key lives in the tenant's own AWS account, tagged TenantId, with a key policy that trusts the three tenant roles](./diagrams/tenant-encrypted-ingestion.drawio.svg)
 
 A tenant user asks the API for a delivery, PUTs the file to a presigned URL
 that fixes the tenant's key, S3 encrypts it with that key, an `Object
@@ -101,7 +101,8 @@ code locations):
 ## How it works
 
 The primary flow, a `vendor-key` tenant delivering one PDF
-([`architecture.md` §8 and §9](./architecture.md#9-pipeline) for depth):
+([`architecture.md` §8](./architecture.md#8-api) and
+[§9](./architecture.md#9-pipeline) for depth):
 
 1. **Onboard the key.** The vendor calls `CreateTenantKey` (SigV4). The key
    factory creates a key with the tenant's key policy, tags `TenantId=<t>`,
@@ -169,7 +170,8 @@ Two walls keep tenants apart, each proven alone by the integration test
 Prerequisites:
 
 - An AWS account, non-production, bootstrapped for AWS CDK in the Region you
-  deploy to. The integration test runs in `eu-central-1`.
+  deploy to. The integration test runs in the Region `AWS_REGION` names;
+  the last run was in `eu-central-1`.
 - **Node.js 24**, and the **Smithy CLI** for a build from source: `npx
   projen build` runs `smithy build` before every compile to generate the
   server SDKs from [`model/`](./model/). Docker is not needed: the
@@ -331,7 +333,7 @@ Synthesis fails fast and names the key when a value is malformed.
 | `consumerRoleArns` | comma-separated IAM role ARNs, e.g. `arn:aws:iam::111122223333:role/ExtractionReader` | none | The roles that may decrypt landed documents (key policy statement 2b). Fixed into each key's policy at key creation, so decide them before the first tenant is onboarded. Published as `none` when empty |
 | `accessLogReaderRoleArn` | an IAM role ARN | none | The one principal the access-log bucket lets read objects; unset, nobody can |
 | `redriveOperatorRoleArn` | an IAM role ARN | none | The queue's one sender besides the EventBridge rule, for a DLQ redrive; unset, no redrive |
-| `integProfile` | `true`, `false` | `false` | Apply the spec §10 test profile: `maxReceiveCount 1`, `visibilityTimeoutFactor 2`, `abandonGraceSeconds 60`, `uploadUrlTtlSeconds 60`, `maxInFlightPerTenant 5`, `tenantThrottle` 10 rps / burst 20 |
+| `integProfile` | `true`, `false` | `false` | Apply the spec §10 test profile: `maxReceiveCount 1`, `visibilityTimeoutFactor 2`, `abandonGraceSeconds 60`, `uploadUrlTtlSeconds 120`, `maxInFlightPerTenant 5`, `tenantThrottle` 10 rps / burst 20 |
 | `maxReceiveCount`, `visibilityTimeoutFactor`, `abandonGraceSeconds`, `uploadUrlTtlSeconds`, `maxInFlightPerTenant` | integers | construct defaults 3, 6, 3600, 900, 100 | Per-prop overrides applied over the profile; the construct validates the ranges (spec §3.3) and fails synth naming the prop |
 
 The demo stack wires two validators: `pdf-pages`
@@ -366,13 +368,16 @@ afterwards from its own directory if nothing else uses it.
 ### Bring your own identity provider
 
 tenant-identity is what the demo stack, the integration test and the demo
-script use; the construct itself does not need it. `identity` takes any
-OIDC issuer: `discoveryUrl` is the issuer's discovery document (the
-verifier reads `issuer` and `jwks_uri` from it) and `allowedClientIds` the
-clients whose tokens it admits. Set `identityApi: 'none'` and define the
-two scopes `ingestion/deliver` and `ingestion/read` in your own provider
-instead; the construct then creates no scope registration and reads no
-tenant-identity parameter. Nothing else in it talks to tenant-identity.
+script use; the construct itself does not need it and never reads
+tenant-identity's parameters (ADR-0019). `identity` takes any OIDC issuer:
+`discoveryUrl` is the issuer's discovery document (the verifier reads
+`issuer` and `jwks_uri` from it) and `allowedClientIds` the clients whose
+tokens it admits. `identityApi` is required: set it to `'none'`, define the
+two scopes `ingestion/deliver` and `ingestion/read` in your own provider,
+and have the provider issue the `tenant_id` claim. The construct then
+creates no scope registration. Nothing else in it talks to tenant-identity.
+This path is covered by unit tests only; the integration run of 2026-11-09
+used tenant-identity (Cognito) tokens.
 
 ```ts
 const ingestion = new TenantEncryptedIngestion(this, 'Ingestion', {
@@ -390,7 +395,7 @@ The access token the verifier admits
 
 | Check | Cognito and tenant-identity | Any other OIDC issuer |
 |---|---|---|
-| Signature | RS256, a key in the issuer's JWKS | same |
+| Signature | RS256 only, a key in the issuer's JWKS | same |
 | `iss`, `exp` | match the discovery document; not expired | same |
 | Client | `client_id` in `allowedClientIds` | `aud` (a string or an array) holds a value in `allowedClientIds`; when `client_id` is present it decides alone |
 | Access token, not ID token | `token_use: access` | JOSE header `typ: at+jwt` (RFC 9068; `application/at+jwt` too); a token with neither mark is refused |
@@ -411,24 +416,33 @@ in your `.projenrc.ts` and import from its package entry,
 [`src/index.ts`](./src/index.ts) (standard §1.1). The construct creates none
 of its dependencies and publishes nothing: it takes the issuer, the consumer
 roles and the validators as props and hands back what the next component
-needs as read-only properties. Unless given `identityApi`, it reads
-tenant-identity's published `apiUrl` and `platformInvokePolicyArn` at deploy
-time to register its two scopes.
+needs as read-only properties. `identityApi` is required and the
+construct reads no parameter to fill it: with tenant-identity, pass its
+scope-catalogue API (`apiUrl`) and the managed policy that may call it
+(`platformInvokePolicyArn`), read from its published parameters as the demo
+stack does, and the construct registers its two scopes there at deploy
+(ADR-0019).
 
 ```ts
 import { Duration } from 'aws-cdk-lib';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { LambdaValidator, TenantEncryptedIngestion } from 'tenant-encrypted-ingestion/src';
 
-const userPoolId = ssm.StringParameter.valueForStringParameter(this, '/application-plane/shared/identity/userPoolId');
-const appClientId = ssm.StringParameter.valueForStringParameter(this, '/application-plane/shared/identity/appClientId');
+const identityParam = (name: string) =>
+  ssm.StringParameter.valueForStringParameter(this, `/application-plane/shared/identity/${name}`);
+const userPoolId = identityParam('userPoolId');
+const appClientId = identityParam('appClientId');
 
 const ingestion = new TenantEncryptedIngestion(this, 'Ingestion', {
   identity: {
     discoveryUrl: `https://cognito-idp.${this.region}.amazonaws.com/${userPoolId}/.well-known/openid-configuration`,
     allowedClientIds: [appClientId],
   },
-  // identityApi unset: reads /application-plane/shared/identity/{apiUrl,platformInvokePolicyArn} at deploy
+  identityApi: {
+    // where ingestion/deliver and ingestion/read are registered at deploy
+    apiUrl: identityParam('apiUrl'),
+    platformInvokePolicyArn: identityParam('platformInvokePolicyArn'),
+  },
   consumerRoles: [extractionRole], // fixed into each key's policy at key creation
   validators: [
     new LambdaValidator(pageLimitFn, { name: 'pdf-pages', timeout: Duration.seconds(30) }),
@@ -505,11 +519,12 @@ steps fall at about minutes 10 and 60. tenant-identity's access tokens live
 five minutes, so the driver re-issues a run-issued token on a 401 and
 retries once.
 
-**Account guard.** The script refuses an account that carries neither the
-Organizations tag `tei:test-account` nor the SSM parameter
-`/tenant-encrypted-ingestion/test-account` with the value `true` (a member
-account cannot read its own Organizations tags, so the parameter is the
-usual marker). Set it once in a non-production test account (M-33).
+**Account guard.** The script runs only in an account that carries the
+Organizations tag `tei:test-account` or the SSM parameter
+`/tenant-encrypted-ingestion/test-account` set to `true`, and refuses any
+other (M-33). A member account cannot read its own Organizations tags, so
+the parameter is the usual marker; set it once in a non-production test
+account.
 
 **What it stands up.** It reuses the account's tenant-identity `shared-pool`
 deployment, deploying it through its own path only when none is published,
@@ -521,7 +536,7 @@ scratch bucket and scratch key built from the same policy builders with a
 mistaken Allow for the probe role, an event capture queue, and the redrive
 and access-log reader roles) and the **demo stack**
 (`TenantEncryptedIngestionInteg`, the sample's own demo stack with the test
-profile and `uploadUrlTtlSeconds 120`, `TestConsumerRole` as consumer).
+profile, `TestConsumerRole` as consumer).
 The driver deletes the tenants it created in the shared pool before it
 exits and names any it could not delete. Teardown runs from the exit trap,
 also on failure, and fails the run if a stack with the sample's prefix is
@@ -543,19 +558,20 @@ left or a key it tagged is not `PendingDeletion`.
 | 9 | Rotation: `RotateTenantKey` A 200 and step 3's document still reads; B 400 `UnsupportedInTier` |
 | 10 | Observability: one processor line per delivery with `tenantId`, `status`, `kmsRequests`; `kmsRequests` compared with CloudTrail (informational); the access-log `Requester` (best effort) |
 | 11 | Offboarding: `DeleteTenantKey` A 202, no version left under A's prefixes, alias gone, key `PendingDeletion`, `CreateDelivery` A refused, the in-flight PUT fails; `DeleteTenantKey` B leaves B's key untouched and writes the tombstone without an alarm |
-| 12 | Teardown, by `scripts/integ.sh`: `cdk destroy --all`, then the leftover check |
+| 12 | Teardown, by `scripts/integ.sh`: `cdk destroy --all`, then the leftover check (the driver reports the step as skipped) |
+| cleanup | The driver deletes the tenants it created in tenant-identity's shared pool, each then 404; a tenant left fails the run |
 
-Last green run: 2026-11-09 (run 11, after the identity-provider change; runs 7
-and 9 on 2026-11-06 were green too), eu-central-1, a vendor test account plus
-a second account owning tenant B's key, about 65 minutes end to end; the run's
-cleanup step also deleted the three tenants it had created in the shared
-tenant-identity pool. CloudFormation
+Last green run: 2026-11-09, after the identity-provider change (two runs
+on 2026-11-06, before it, were green too), in eu-central-1, a vendor test
+account plus a second account owning tenant B's key: about 65 minutes end
+to end (integration run of 2026-11-09). The run's cleanup step deleted the
+three tenants it had created in the shared tenant-identity pool.
+CloudFormation
 took about 4 minutes to create the two stacks (test aid 1 min 10 s, demo stack
 2 min 17 s) and about 5 minutes to delete them (demo stack 3 min 9 s, test aid
 1 min 35 s), so N-4 holds; the rest is the driver's waits. Every step passed
-(`architecture.md` status block). Plan on about 75 minutes: the driver waits
-five minutes after each key policy or tag change and on URL TTLs, leases and
-the sweep. The spec's cost target is under $2 per run; the cost of a run has
+(`architecture.md` status block). The driver waits five minutes after each
+key policy or tag change and on URL TTLs, leases and the sweep. The spec's cost target is under $2 per run; the cost of a run has
 not been measured. Not covered by that run: no access log arrived within
 three minutes for the `Requester` check, `kmsRequests` against CloudTrail is
 recorded rather than checked, and offboarding saw 409 from the handler, not
@@ -591,8 +607,9 @@ included, and schedules the key for deletion; a key that existed before the
 run is left alone and the trap names the deliveries it leaves. `KEEP=1`
 keeps everything for inspection. Last run 2026-11-06 in eu-central-1 against
 a freshly deployed demo stack: every step as in the table, `DeleteTenantKey`
-202 from the trap. Tokens live five minutes, so issue one
-just before the run.
+202 from the trap. That run predates the identity-provider change of
+2026-11-09, which the integration run of 2026-11-09 covers. Tokens live five
+minutes, so issue one just before the run.
 
 ## API
 
@@ -607,7 +624,7 @@ cache 300 s ([`architecture.md` §8](./architecture.md#8-api)).
 |---|---|---|
 | `CreateTenantKey` | `POST /platform/tenants/{tenantId}/key` `{tier, keyArn?}` | 201; 409 key row or binding exists; 422 `KeyNotUsable`; 400 `UnsupportedInDeployment` (`tenant-key` without `allowTenantKeys`) |
 | `GetTenantKey` | `GET /platform/tenants/{tenantId}/key` | 200, `keyStatus` refreshed by a probe; 404 |
-| `RotateTenantKey` | `POST /platform/tenants/{tenantId}/key/rotate` | 200 `vendor-key`; 400 `UnsupportedInTier` for `tenant-key`; 409 not `ACTIVE`, rotation in progress, or a `Conflict` whose message starts `RotationLimitReached` |
+| `RotateTenantKey` | `POST /platform/tenants/{tenantId}/key/rotate` | 200 `vendor-key`; 404 no key; 400 `UnsupportedInTier` for `tenant-key`; 409 not `ACTIVE`, rotation in progress, or a `Conflict` whose message starts `RotationLimitReached` |
 | `DeleteTenantKey` | `DELETE /platform/tenants/{tenantId}/key` | 202; 204 when there is no key. Idempotent: a half-done call is finished by repeating it |
 | `CreateDelivery` | `POST /tenant/deliveries` `{fileName, contentType, sizeBytes}`, scope `ingestion/deliver` | 201 `{deliveryId, uploadUrl, headers, expiresAt}`; 400; 403 `Forbidden` without the scope; 409 `TenantKeyUnavailable` (key missing or not `ACTIVE`); 429 `TooManyDeliveries` |
 | `GetDelivery` | `GET /tenant/deliveries/{deliveryId}`, scope `ingestion/read` | 200; 404 outside the caller's tenant |
@@ -631,9 +648,11 @@ AWAITING_UPLOAD -> EXPIRED            (no upload before urlExpiresAt + abandonGr
 that errs on the last receive) or the KMS error for `KEY_UNAVAILABLE`. Key
 status: `CREATING -> ACTIVE <-> REVOKED`, and `-> DELETING`.
 
-**Errors.** Every error is `{code, message, requestId}` with a fixed
-message: no `tenantId` in a `/tenant/*` error, no key ARN, no echoed input
-([`src/api/errors.ts`](./src/api/errors.ts)).
+**Errors.** Every error is `{code, message, requestId}`. The table shows
+the `code` field: the error shape's name without its `Error` suffix
+(`ValidationError` and `InternalError` keep the full name). A message never
+echoes the input, a tenant id or a key ARN
+([`src/api/errors.ts`](./src/api/errors.ts), ADR-0022).
 
 | Status | Code |
 |---|---|
@@ -684,9 +703,10 @@ knows the tenant ([`architecture.md` §11](./architecture.md#11-observability-an
   after 1 day and unprocessed drops after `dropRetentionDays`.
 - **Per delivery**: Lambda, SQS, EventBridge and DynamoDB scale with
   `deliveriesAccepted` plus `deliveriesRejected`; API Gateway with the
-  tenant's `/tenant` requests (a Contributor Insights rule ranks them).
-- **The integration test**: the spec's target is under $2 per run; a run's
-  cost has not been measured.
+  tenant's `/tenant` requests (a Contributor Insights rule ranks them,
+  `/tenant/deliveries` and `/tenant/deliveries/{deliveryId}` both).
+- **The integration test**: about 65 minutes per run; the spec's target is
+  under $2 per run, and a run's cost has not been measured.
 
 Attribution formula:
 
@@ -807,8 +827,9 @@ Each item is a deployer action in [`threat-model.md`](./threat-model.md#mitigati
       processor time out and the sweep abandons the lease. Set each
       validator function's own timeout at or below what it declares (M-11,
       M-21).
-- [ ] **Size the per-tenant limits.** Keep `maxInFlightPerTenant` (STS
-      `AssumeRole` is 600 rps per account). With `tenantThrottle`, API
+- [ ] **Size the per-tenant limits.** Size `maxInFlightPerTenant` so
+      tenants × in-flight stays under the STS `AssumeRole` limit of 600 rps
+      per account. With `tenantThrottle`, API
       Gateway allows 10,000 API keys per account and Region, not adjustable
       and shared with tenant-identity's per-tenant keys, so a composed
       deployment caps at 5,000 tenants, and `CreateApiKey` at 5 rps bounds
@@ -827,8 +848,35 @@ Each item is a deployer action in [`threat-model.md`](./threat-model.md#mitigati
       (accepted risks 3 and 12).
 - [ ] **Keep your dependencies and function code reviewed**: compromised
       code acts as one tenant per session (accepted risk 2).
+- [ ] **If you bring your own issuer, you own `tenant_id` uniqueness and the
+      two scopes.** With `identityApi: 'none'` your provider issues one
+      `tenant_id` per token, never reused across tenants, and defines
+      `ingestion/deliver` and `ingestion/read`; that path is covered by unit
+      tests only (T-39, ADR-0019, accepted risk 13).
+- [ ] **Restrict who can run code as the scope registration.** Its role can
+      put or delete any scope in tenant-identity's catalogue; limit
+      `lambda:InvokeFunction` and `lambda:UpdateFunctionCode` on the
+      function to the deployment role (T-38, M-34, accepted risk 14).
+- [ ] **Keep `uploadUrlTtlSeconds` short.** Once the processor deletes a
+      drop, its PUT URL can write again until the TTL; the processor
+      discards that upload at the cost of one run (accepted risk 7).
+- [ ] **Tell tenants what offboarding keeps.** PITR keeps an offboarded
+      tenant's file names and hashes, never content, for 35 days (accepted
+      risk 8).
+- [ ] **Watch the KMS key quota.** Keys pending deletion count against the
+      100,000-key quota for `keyDeletionWindowDays` after `DeleteTenantKey`
+      or a destroy; size the window to your offboarding rate (accepted risk
+      9).
+- [ ] **Restrict who may read the queue and its DLQ.** S3 events carry the
+      uploader's IP address and requester, and the DLQ holds them up to 14
+      days (accepted risk 10).
+- [ ] **Set `tenantThrottle` at scale.** Compromised code under a tenant
+      role can reset its own tenant's `inFlight` counter; the sweep
+      reconciles it hourly and API Gateway enforces `tenantThrottle`
+      regardless (accepted risk 11).
 - [ ] **Change the removal policies.** The sample sets `DESTROY` on every
-      resource so teardown is total.
+      resource so teardown is total; keep the bucket, registry and log
+      groups in a deployment that holds tenant data (M-31).
 
 ## Design trail
 

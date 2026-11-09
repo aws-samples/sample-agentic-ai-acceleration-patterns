@@ -14,7 +14,9 @@
 # exercised in this run.
 #
 # Flow:
-#   0. Refuse an account without the tei:test-account tag (M-33).
+#   0. Run only in an account with the Organizations tag tei:test-account or
+#      the SSM parameter /tenant-encrypted-ingestion/test-account = true;
+#      refuse any other (M-33).
 #   1. tenant-identity (shared-pool): reuse a published deployment; deploy
 #      one through its own path only when none is published. It is the
 #      account's shared fixture and is never destroyed by this script.

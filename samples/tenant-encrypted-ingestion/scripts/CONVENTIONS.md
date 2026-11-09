@@ -4,14 +4,15 @@ SPDX-License-Identifier: MIT-0
 -->
 # Script Conventions
 
-Conventions for the shell scripts in this directory. They run locally against
-a deployed `TenantEncryptedIngestion` stack: `demo.sh` walks the primary flow,
-`integ.sh` drives the deployment integration test (spec §10, the steps in
-`test/integ.ingestion.ts`). What they print lands in the operator's terminal
-and, in CI, the job log; both are an audience, not a scratchpad. A script on
-this path handles access tokens, temporary passwords, SigV4 credentials and
-**presigned URLs**, which carry a signature that writes or reads a tenant's
-document until it expires; none of those ever reaches output.
+Conventions for the shell scripts in this directory. `demo.sh` walks the
+primary flow against a deployed demo stack; `integ.sh` deploys its own
+stacks and drives the deployment integration test (spec §10, the steps in
+`test/integ.ingestion.ts`). What they print lands in the terminal of the
+person running them and, in CI, the job log; both are an audience, not a
+scratchpad. A script on this path handles access tokens, temporary
+passwords, SigV4 credentials and **presigned URLs**, which carry a signature
+that writes or reads a tenant's document until it expires; none of those
+ever reaches output.
 
 ## Log hygiene
 
@@ -50,19 +51,24 @@ document until it expires; none of those ever reaches output.
 ## Failure behaviour and cleanup
 
 - `set -euo pipefail`, plus a `: "${VAR:?...}"` guard for each required input
-  (`AWS_REGION`) and a check for each tool (`aws`, `curl`, `jq`, `npx`), so a
-  missing input fails fast with a message that names it.
-- `integ.sh` refuses an account without the `tei:test-account` tag (M-33):
-  the test deploys roles that can use any key the account's key policies
-  admit, so it runs only where an operator said it may.
+  (`AWS_REGION`) and a check for each tool (`aws`, `curl`, `jq`; `npx` in
+  `integ.sh` only), so a missing input fails fast with a message that names
+  it.
+- `integ.sh` runs only in an account that carries the Organizations tag
+  `tei:test-account` or the SSM parameter
+  `/tenant-encrypted-ingestion/test-account` set to `true`, and refuses any
+  other (M-33): the test deploys roles that can use any key the account's
+  key policies admit, so it runs only where the vendor marked the account
+  for it.
 - Register an `EXIT` trap that cleans up whatever the script created.
   `integ.sh` destroys every stack it deployed from the trap, so the destroy
   runs even when the deploy or a step fails, and then lists what was left:
   stacks with the sample's prefix, and the KMS keys tagged with its stacks,
   which can only be pending deletion (spec §6.2, §10 step 12).
-- `integ.sh` never replaces a published tenant-identity. It reuses one it
-  finds and deploys one only when none is published, and destroys only what
-  it deployed.
+- `integ.sh` never replaces or destroys tenant-identity, not even one it
+  deployed: it reuses a published one, deploys one only when none is
+  published, and leaves it as the account's shared fixture. It destroys
+  only its own stacks.
 - Exit non-zero on any failure, naming the step, resource or parameter that
   failed (name, not value). Never swallow an error into a success exit.
 
