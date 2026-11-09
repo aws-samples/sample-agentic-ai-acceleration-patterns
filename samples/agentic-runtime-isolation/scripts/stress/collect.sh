@@ -69,6 +69,14 @@ SCENARIO="$(jq -r .scenario "$WINDOW")"
 SCALE="$(jq -r .scale "$WINDOW")"
 START="$(jq -r .start "$WINDOW")"
 END="$(jq -r .end "$WINDOW")"
+# Log delivery and Logs Insights indexing lag the request by up to about two
+# minutes; a query run right after the run undercounts (seen 2026-11-09: 117
+# of 474 refusals). Wait until the window is 150 s old.
+settle=$(( END + 150 - $(date +%s) ))
+if (( settle > 0 )); then
+  echo "waiting ${settle}s for the log group to settle"
+  sleep "$settle"
+fi
 # Log delivery lags; read a minute past the end.
 END_LOGS=$((END + 60))
 iso() { date -u -d "@$1" +%FT%TZ; }
@@ -207,7 +215,10 @@ else
 fi
 R429="$(v .refused429)"; K429="$(v '.k6.status429 // "n/a"')"
 verdict=FAIL
-if [[ "$(v .refused429Untagged)" == 0 && "$(v .refused429UnderLimit)" == 0 ]] && { [[ "$K429" == n/a ]] || zero "$((K429 - R429))"; }; then verdict=PASS; fi
+# The k6 count and the logged count may differ by the requests in flight at
+# the window's edges (log delivery lags a few seconds): equal within 1 % or 2.
+if [[ "$(v .refused429Untagged)" == 0 && "$(v .refused429UnderLimit)" == 0 ]] \
+  && { [[ "$K429" == n/a ]] || awk -v k="$K429" -v r="$R429" 'BEGIN { d = k - r; if (d < 0) d = -d; t = r / 100; if (t < 2) t = 2; exit !(d <= t) }'; }; then verdict=PASS; fi
 row "429 attribution" "logged 429 ${R429} over $(v .tenants429) tenants, untagged $(v .refused429Untagged), tenant-minutes under the limit $(v .refused429UnderLimit), k6 429 ${K429}" "$verdict"
 STS="$(v '.sdkRetried.sts.retries // 0')"; KMS="$(v '.sdkRetried.kms.retries // 0')"
 if [[ "$SCENARIO" == s2 ]]; then

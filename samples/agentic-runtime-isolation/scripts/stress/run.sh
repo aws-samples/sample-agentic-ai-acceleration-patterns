@@ -154,6 +154,15 @@ PARAMS="${LIB_TMP}/params.json"
 jq -Rs '{commands: (split("\n") | map(select(length > 0))), executionTimeout: ["14400"]}' "$REMOTE" >"$PARAMS"
 
 # -- run and wait ------------------------------------------------------------
+# The per-tenant limit is a fixed one-minute window (ADR-0020): a scenario
+# that starts in the minute the previous one filled up inherits its 429s
+# (seen 2026-11-09, S4 after S3). Start at least 3 s into a fresh minute.
+now="$(date +%s)"
+if (( now % 60 > 3 )); then
+  wait_s=$(( 60 - now % 60 + 3 ))
+  echo "waiting ${wait_s}s for a fresh limiter minute"
+  sleep "$wait_s"
+fi
 START_EPOCH="$(date +%s)"
 COMMAND_ID="$(aws ssm send-command --instance-ids "$INSTANCE" --document-name AWS-RunShellScript \
   --comment "runtime-isolation stress ${RUN_ID}" --parameters "file://${PARAMS}" \
