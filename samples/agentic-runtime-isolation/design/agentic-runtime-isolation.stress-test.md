@@ -247,6 +247,99 @@ Deploy and destroy time of this stack are reported with the run (expected:
 the NAT gateway dominates, about 3 minutes up and 2 down). The NAT gateway
 costs about $0.05 an hour plus $0.05 a GB; a run moves a few GB.
 
+### 8.2 Scale tiers and reuse
+
+The same scripts run at three scales. A run is validated at `small` before
+`medium`, and at `medium` before `large`; a failure at a smaller scale is
+fixed and rerun there first. `STRESS_SCALE` selects the tier; `small` is
+the default.
+
+| | `small` | `medium` | `large` |
+|---|---|---|---|
+| Agents | 2 (`default` and `a001`, both in the ingress stack) | 10 (`default` plus `a001`..`a009` in one agents stack) | 100 (`default` plus `a001`..`a099` in five agents stacks of 20) |
+| Tool targets | 2 x 10 tools (`t01`, `t02`) | 4 x 100 tools (`t01`..`t04`) | 10 x 100 tools (`t01`..`t10`) |
+| Tools gateways | `default`, `finance` | `default`, `finance`, `hr`, `ops` | the same four |
+| Tenants seeded | 20 | 200 | 10,000 |
+| Tenants active | 20 | 200 | 1,000 (S7: 2,000) |
+| Users per active tenant | 2 | 2 | 4 |
+| Steady rate (S1) | 10 rps | 100 rps | 500 rps |
+| Peak rate (S6) | 40 rps | 300 rps | 1,000 rps |
+| Scenario length | 1 min | 3 min | the §5 figures |
+| `stageThrottle` | 100 / 50 | 300 / 150 | 1,200 / 600 |
+| `ingressReservedConcurrency` | 50 | 200 | 800 |
+| Driver instance | `t3.large` | `c6i.xlarge` | `c6i.2xlarge` |
+
+Seeded tenants and their users are reused across runs, because Cognito
+bills per monthly active user and a month of runs must fit the pool's free
+tier: `seed.sh` keeps a manifest outside the repo
+(`~/.runtime-isolation-stress/<prefix>/manifest.json`: tenant ids, user
+names, the scale; never a token or a password), reuses the tenants it lists
+when they still exist, and creates only what is missing. `teardown.sh`
+keeps the tenants unless `--tenants` is passed. Each tenant is created once
+and its users authenticate many times: one MAU per user per month, however
+many runs.
+
+### 8.3 Implementation contract
+
+The pieces are built in parallel against this contract. Names are exact.
+
+**Stacks** (`test/stress.runtime.ts`, the CDK app; stack classes in
+`test/stress/`). Prefix `RuntimeIsolationStress`, overridable with
+`STRESS_PREFIX`, same pattern as `INTEG_PREFIX`.
+
+| Stack | Class, file | Holds |
+|---|---|---|
+| `<prefix>-ingress` | `StressIngressStack`, `test/stress/stress-ingress.cdk.ts` | the identity lookup as `RuntimeIsolationDemoStack` does it (tenant-identity's published parameters, or placeholders with `identityParameterPlaceholders`); a demo table and a tenant role as the demo stack's `tvm` branch; `SharedIngress` with `ingress: 'api-gateway'`, `session: { scope: 'tenant' }`, `tvm: { role }`, `tenantLimits` default, `stageThrottle` and `ingressReservedConcurrency` from the tier, `toolsGateways` from the tier (`finance` with `responseFilter: true`), `publish: true`, `registryPrefix: '/application-plane/shared/agent-runtime/<stackName>/'` (a stack-scoped prefix, so the account-wide one stays free; the agents stacks read this prefix); `AgentBackend` `default` with `needs: ['default/chat']` and `tools: ['<target>/*']` for every target; one `ToolTarget` per tier target, `kind: 'lambda'`, one `NodejsFunction` per target over the stress tool (below), `tvm: { role: <tool tenant role> }` on `t01` only, the targets spread over the gateways round-robin; for `small` also `AgentBackend` `a001`. Outputs: `EndpointUrl`, `EntitlementsApiUrl`, `EntitlementsTableName`, `DemoTableName`, `Issuer`, `RegistryPrefix`, `RestApiId`, `StageName`, `IngressLogGroupName`, `AuthorizerFunctionName`, `IngressFunctionName`, `ToolsGatewayUrl<Name>` and `PolicyEngineId<Name>` per gateway, `PolicySecondsToActive<Target>` per target, `InterceptorFunctionNames` (comma-separated) |
+| `<prefix>-agents-<k>` | `StressAgentsStack`, `test/stress/stress-agents.cdk.ts` | `SharedIngress.fromParameters(this, 'Ingress', registryPrefix, 'api-gateway')`; `AgentBackend` `a<NNN>` for its slice, `needs: ['a<NNN>/chat']`, `tools: ['t01/*']`, `owner: 'RuntimeIsolationStress'`. Needs `env: { account, region }`. Exists for `medium` (k = 1) and `large` (k = 1..5). Deployed after the ingress stack, because the lookup reads the published document |
+| `<prefix>-driver` | `StressDriverStack`, `test/stress/stress-driver.cdk.ts` | §8.1. Outputs `InstanceId`, `ResultsBucketName`. The instance role holds `execute-api:Invoke` on `arn:aws:execute-api:<region>:<account>:*/*/*/*` (the Entitlements API and the platform API have ids the stack does not know), `ssm:GetParameter` on `/application-plane/shared/identity/*` and on the stress registry prefix, `s3:GetObject`/`PutObject`/`ListBucket` on the results bucket; no other grant |
+
+The stress tool (`test/stress/stress-tool.function.ts`): `toolHandler` over
+an implementation that returns `{ tool: context.tool, tenantId:
+context.tenantId, callerArn }` where `callerArn` is `GetCallerIdentity` with
+the vended credentials when they are present, else `null`. The tool list of
+a target is generated: `tool_001`..`tool_NNN`, each with a one-line
+description and `inputSchema: { type: 'object', properties: { id: { type:
+'string' } } }`.
+
+`test/stress.runtime.ts` reads `STRESS_SCALE`, builds the tier (exported as
+`STRESS_TIERS` and `tierOf(scale)` from `test/stress/tiers.ts`), and
+creates the stacks; `STRESS_DRIVER=false` leaves the driver stack out;
+`STRESS_AGENTS=false` leaves the agents stacks out (the first deploy, before
+the published document exists). Unit tests in `test/stress/*.cdk.test.ts`
+synthesise each stack with placeholders at `small` and assert the resource
+counts stay under 450 and the outputs exist.
+
+**Scripts** (`scripts/stress/`, bash, `scripts/CONVENTIONS.md`, sourcing
+`scripts/lib.sh`). Every script takes `AWS_REGION` and reads
+`STRESS_SCALE` and `STRESS_PREFIX` with the defaults above. The CDK app is
+`npx ts-node -P tsconfig.json --prefer-ts-exts test/stress.runtime.ts`
+synthesised into `cdk.stress.out/` (gitignored), as `integ.sh` does.
+
+| Script | Does | Prints |
+|---|---|---|
+| `deploy.sh` | checks the shared identity deployment exists (as `integ.sh`, never deploys or destroys it); synth and deploy `<prefix>-ingress` with `STRESS_AGENTS=false STRESS_DRIVER=false`; then synth again and deploy the agents stacks (concurrency 1) and the driver stack | one line per stack: name, deploy seconds; the `PolicySecondsToActive*` outputs |
+| `seed.sh` | §8.2 reuse; `CreateTenant` with `app/use` at 8 rps for the tier's seeded count, `PutTenantSubscription` on the Entitlements API (`agents: ['default', 'a001', ...]` all agents, `tools: ['<target>/*']` all targets) for the active tenants, `BatchWriteItem` one demo-table row per tenant (`PK`, a `label`, `crmAccount`); `CreateUser` to the tier's users per active tenant; writes the manifest; `--tenants N` overrides the seeded count | counts created and reused, wall seconds, status histogram |
+| `count.sh` | Phase 1 steps 1.4 to 1.7 at the tier's size | the step table |
+| `run.sh <s1..s7>` | uploads `k6/` and the manifest to `s3://<bucket>/in/`, runs k6 on the host through `ssm send-command` (`AWS-RunShellScript`), waits, downloads `s3://<bucket>/out/<run-id>/summary.json` and the k6 stdout; `s2` first applies the §13 recipe (env marker on the authoriser, the ingress function and every interceptor; `flush-stage-authorizers-cache`; 60 s idle) | the scenario's summary line and the isolation counters |
+| `collect.sh <run-id>` | Logs Insights on the ingress log group for the run window (`request served` percentiles, 429 by tenant and minute, `sdk retried` sums by service), CloudWatch metrics (API Gateway, Lambda, DynamoDB), the k6 summary; writes `design/stress-results/<YYYY-MM-DD>-<scale>.md` after a redaction check (`[0-9]{12}`, tenant ids and user names from the manifest, `eyJ`, `https://`) | the pass table |
+| `teardown.sh [--tenants]` | destroys driver, agents, ingress stacks in that order (concurrency 1); with `--tenants`, first deletes the manifest's tenants at 8 rps | one line per stack: name, destroy seconds |
+
+**k6** (`scripts/stress/k6/`). `lib.js` exports `setupTokens(manifest,
+tier)` (SigV4 `IssueToken` on the platform API with k6's `SignatureV4`,
+at 8 rps; a random password per call; tokens live in memory only),
+`refreshIfNeeded(entry)` (the `/token` exchange when under 90 s remain, at
+most 17 rps), `probe(entry, kind)` for `report`, `read-own`, `read-other`,
+`tool` with the §6 assertions, and the counters `isolation_mismatch`,
+`positive_control_fail`, `status_<code>`, `tenant_429` (tagged by tenant).
+`s1-steady.js`..`s7-eviction.js` read `__ENV.TIER` (JSON) and `__ENV.MANIFEST`
+(path), apply the §5 shapes at the tier's rate and length, and write
+`summary.json` with `handleSummary`. The pass table is computed in
+`collect.sh`, not in k6.
+
+**Order of work.** The three pieces (stacks, scripts, k6) are independent
+against this contract; each is built and unit-tested on its own, then
+`deploy.sh` at `small` is the first integration.
+
 ## 9. Quotas the run itself can trip
 
 Checked before the run.
