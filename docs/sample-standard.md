@@ -280,9 +280,6 @@ Mermaid is acceptable for small sequence or state diagrams inside
 - Labels are one to three words; the sentences go in the README under the
   diagram and in `architecture.md`.
 
-The former single-diagram rule (§3 before 2026-11-09) is the architecture
-diagram; samples merged before that date add the components diagram when
-next touched.
 ## 4. Code
 
 ### 4.1 Project

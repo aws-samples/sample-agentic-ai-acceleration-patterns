@@ -26,6 +26,16 @@ CodeBuild projects whose separate service roles enforce the
 cell-script/tenant-script permission boundary. Diagram source:
 [`diagrams/control-plane.drawio`](./diagrams/control-plane.drawio).
 
+![Components: a vendor operator calls the control-plane API, which hands a caller context to the tenant service, which starts the provisioning workflow; the workflow runs the cell build for a new cell only, then the tenant build, which publishes to and reads the application-plane namespaces; the API uses the vendor IdP and the service and workflow use the control-plane table; each box names the pattern it carries](./diagrams/control-plane.components.drawio.svg)
+
+The same path without the AWS icons: each box is one component and its
+pill names the pattern it carries. The API gates on the vendor IdP's role
+claim; the tenant service claims a cell slot atomically and answers 202; the
+workflow runs the cell build (shared cell deployment) only for a new cell and
+then the tenant build (per-tenant deployment), each under its own role; the
+builds exchange resource identifiers through SSM namespaces; the service and
+the workflow share one single-table record of cells and tenants.
+
 ## How it works
 
 ```

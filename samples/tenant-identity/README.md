@@ -186,6 +186,17 @@ attribute, chosen once:
 
 The vendor manages tenants through `/platform/*` with IAM. A client trades its refresh token at `/oauth2/token`. Cognito runs the trigger, which narrows the token to one tenant. The client sends only that narrowed token to the service.
 
+![Components: a tenant user posts a refresh token and scope to the token exchange, which runs the refresh-token grant against the user pool; the pool fires the pre-token trigger, which reads the tenant registry and adds the tenant claim; the client presents the narrowed token to the tenant API; the vendor's platform API writes the registry; the exchange, trigger and tenant API use the registry, the tenant-scoped role and the usage plan; each box names the pattern it carries](./diagrams/tenant-identity.components.drawio.svg)
+
+The same path without the AWS icons: each box is one component and its
+pill names the pattern it carries. The token exchange narrows a token to one
+tenant; the user pool carries the tenant overlay (a pool, an attribute or a
+group, by topology); the trigger adds the tenant claim from the registry; the
+tenant API takes the tenant only from the verified token, throttles it through
+a per-tenant usage plan and, in `pool-per-tenant`, reaches the tenant's pool
+through a tenant-scoped role (a token vending machine); the platform API is
+the vendor's door for tenant lifecycle and the registry's only writer.
+
 Components (one stack per deployment, [`src/identity.cdk.ts`](./src/identity.cdk.ts)):
 
 - **One REST API** (`SpecRestApi`) built from three merged Smithy OpenAPI
