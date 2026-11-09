@@ -60,7 +60,7 @@ so the ingress, not its throttle, is what is measured.
 |---|---|---|
 | Tenants seeded | 10,000 | spec §3.6 "10,000s" lower bound |
 | Tenants active in traffic | 1,000 | bounded by the Runtime's 2,500 active session workloads and its 25 new sessions a second (measured in the test account, 2026-11-09) |
-| Users | 1 per tenant seeded, 10 per active tenant | user count does not touch the design (P-16); 10 is enough to exercise the `(tenant, user, agent)` mint key |
+| Users | 1 per tenant seeded, 4 per active tenant | user count does not touch the design (P-16); 4 is enough to exercise the `(tenant, user, agent)` mint key, and 4,000 live tokens is what the identity `/token` route can refresh (§13, question 1) |
 | Agents | 100 | one Runtime each (quota 1,000 agents per account, measured 2026-11-09); registry entries in SSM |
 | Tools | 1,000 across 10 `ToolTarget`s and four gateways | 100 tools per target |
 | Steady rate | 500 rps | ten times the default stage throttle |
@@ -92,7 +92,7 @@ Proves the first claim with a seed script and single requests.
 | Step | Action | Measure | Pass |
 |---|---|---|---|
 | 1.1 | Deploy the stress stack with 100 `AgentBackend`s and 10 `ToolTarget`s | deploy time; `SecondsToActive` per policy (ADR-0040) | deploy under 45 min; one star permit per target, about 450 bytes each |
-| 1.2 | Seed 10,000 tenants (`CreateTenant`, `app/use`, one admin user) at 20 rps | wall time; Cognito and platform API status histogram | 0 non-201 after retry |
+| 1.2 | Seed 10,000 tenants (`CreateTenant`, `app/use`, one admin user) at 8 rps, under the platform API's 10 rps stage throttle (about 21 min) | wall time; Cognito and platform API status histogram | 0 non-201 after retry |
 | 1.3 | Subscribe each tenant: `PutTenantSubscription` with `agents: ["default"]`, `tools: ["crm/*"]`; 1,000 of them with all 100 agents and `<target>/*` for all 10 targets. Write one demo-table row per tenant, `PK = TENANT#<tenantId>` with a label, by `BatchWriteItem` (25 a batch), as `scripts/demo.sh` does one at a time; the `read <A>` positive control of §6 needs it | wall time; 4xx; unprocessed items | 0 4xx; 0 unprocessed after retry; the 1,000 wide rows are under 40 KB each (spec §3.6) |
 | 1.4 | 1,000 `report` probes, one per tenant, at 20 a second, after the subscription writes | grant time from the authoriser log; p90 TTFB | p90 TTFB within 20 % of a 100-tenant sample: the grant is a `GetItem`, flat in tenant count |
 | 1.5 | One tenant with all 1,000 tools: `report`, then `tools/list` on each gateway | `scope` bytes after compression; encoded token bytes; pages | under 6,144 and 10,240 bytes, or a 502 `grant_too_large` and nothing else; about 30 tools a page |
@@ -100,25 +100,27 @@ Proves the first claim with a seed script and single requests.
 | 1.7 | Cold registry read of all 100 agents in one second (restart the ingress by a config change, then 100 parallel probes, one per agent) | SSM `GetParameter` throttles; `registry_unavailable` count | documented behaviour: a throttled read is cached as `registry_unavailable` for one `registryTtl` on that instance; report how many |
 | 1.8 | Destroy the stack | destroy time | clean, no `DELETE_FAILED` |
 
-Cognito user writes are the slow part. The pool's user write categories are
-tens of requests per second; 10,000 tenants with one user each is about ten
-minutes to seed and ten to delete at 20 rps. Seed once, keep the tenants for
-Phase 2, delete at the very end.
+The platform API's stage throttle (10 rps, burst 20, tenant-identity N-5)
+is the slow part, not Cognito: 10,000 tenants with one user each is about
+21 minutes to seed and 21 to delete at 8 rps, and the 6,000 first tokens
+(`IssueToken`, the same route family) another 13 minutes. Seed once, keep
+the tenants for Phase 2, delete at the very end.
 
 ### Phase 2: rate scale (k6, about 40 minutes of traffic)
 
 The driver holds one access token per (tenant, user). Shared-pool access
 tokens live 5 minutes, so the driver refreshes each one at 4 minutes with
-its refresh token (RFC 8693 exchange through tenant-identity, as
-`scripts/lib.sh` `narrow` does), outside the timed request. 10,000 tokens on
-a 4-minute cycle is about 42 refreshes a second, inside Cognito's
-`UserAuthentication` category. Tokens are never written to disk or to the
-k6 summary.
+its refresh token (RFC 8693 exchange through tenant-identity's `/token`
+route, as `scripts/lib.sh` `narrow` does), outside the timed request. That
+route is throttled at 20 rps, burst 40 (tenant-identity N-6), so at most
+4,000 tokens can be live at once (17 refreshes a second on a 4-minute cycle,
+§13 question 1); the shapes below stay under that. Tokens are never written
+to disk or to the k6 summary.
 
 | Scenario | Shape | What it stresses | Watch |
 |---|---|---|---|
-| S1 steady | 1,000 tenants, 10 users each, 500 rps, `report` probe, one warm conversation per VU (warmed at 20 new conversations a second, about 7 min, untimed), 10 min | the authoriser cache, the grant, the mint cache, the TVM cache | p50/p90 TTFB, 5xx, mint hit rate (`mint` on `request served`) |
-| S2 thundering herd | fresh deploy (no warm instance), then 0 to 800 rps in 5 s, 1,000 tenants, 2 min | cold-start fan-out: new instances × tenants each on STS; SSM cold reads; KMS `Sign` on first mint | STS throttles, Lambda cold starts, `registry_unavailable`, TTFB max |
+| S1 steady | 1,000 tenants, 4 users each, 500 rps, `report` probe, one warm conversation per VU (warmed at 20 new conversations a second, about 3.5 min, untimed), 10 min | the authoriser cache, the grant, the mint cache, the TVM cache | p50/p90 TTFB, 5xx, mint hit rate (`mint` on `request served`) |
+| S2 thundering herd | an instance-free ingress (the §13 question 2 recipe: new Lambda instances, the authoriser cache flushed, 60 s idle), then 0 to 800 rps in 5 s, 1,000 tenants, 2 min | cold-start fan-out: new instances × tenants each on STS; SSM cold reads; KMS `Sign` on first mint | STS throttles, Lambda cold starts, `registry_unavailable`, TTFB max |
 | S3 noisy neighbour | S1 plus one tenant at 600 rpm (10x its limit) for 5 min | the per-tenant limit as the fairness control; the stage throttle behind it | that tenant: 429 after 60 requests in each minute, 2x at a minute boundary at most (ADR-0020); every other tenant: 0 429, p90 unchanged against S1 |
 | S4 tool storm | 200 rps of `tool crm/get_account {}` across 1,000 tenants, 5 min | KMS `Sign` one per admitted `tools/call`; the gateway's 10 rps per tenant; the REQUEST interceptor's TVM | KMS throttles, gateway 429 per tenant, interceptor duration |
 | S5 long streams | `stream 60` at 12 rps across 500 tenants, 5 min | Lambda concurrency held for the whole stream (12 × 60 = 720 of the 800 reserved) | `ConcurrentExecutions`, `Throttles` as it approaches 800, stream breaks (`stream interrupted`) |
@@ -254,10 +256,11 @@ Checked before the run.
 | Lambda concurrency, 1,000 | shared with every other stack in the account | reserved 800; S5 sized at 720; no other integ run during the window |
 | STS `AssumeRole`, 600 rps | shared with every TVM in the account | S2 is the one scenario expected to approach it; its throttle count is a result |
 | KMS RSA `Sign`, 1,000 rps | shared with every RSA key | S4 at 200 rps plus mints well under; S7 is the one that climbs |
-| Cognito `UserAuthentication`, about 120 rps | shared pool | refresh cycle sized at 42 rps |
-| Cognito user write categories, tens of rps | shared pool | seed and teardown at 20 rps |
+| tenant-identity platform routes, 10 rps, burst 20 (N-5) | the shared identity deployment | seed, first tokens and teardown at 8 rps |
+| tenant-identity `/token` route, 20 rps, burst 40 (N-6) | the shared identity deployment | at most 4,000 live tokens, refreshed at 17 rps |
+| Cognito `UserAuthentication`, about 120 rps | shared pool | behind the two throttles above; never reached |
 | AgentCore Runtime active session workloads, 2,500 | account | 1,000 active tenants × 1 warm conversation, S5 500; never a new conversation per request at rate |
-| AgentCore Runtime new session creation, 25 a second | account | every warm-up (S1: 10,000 conversations, about 7 min) and step 1.4 run at 20 new conversations a second; S2's herd reuses the conversations the Runtime already holds |
+| AgentCore Runtime new session creation, 25 a second | account | every warm-up (S1: 4,000 conversations, about 3.5 min) and step 1.4 run at 20 new conversations a second; S2's herd reuses the conversations the Runtime already holds |
 | AgentCore Runtime data plane, 1,000 TPS | account | S6 is at the quota on purpose, for 60 s |
 | SSM `PutParameter`, 3 TPS | account | the stress stack publishes nothing |
 | API Gateway control plane | account, low TPS | one deploy at a time; no parallel runs |
@@ -273,14 +276,14 @@ reports the actual ones.
 
 | Line | Quantity in one full run | Where it comes from |
 |---|---|---|
-| AgentCore Runtime session-seconds (CPU and memory) | about 1,000 warm microVMs across the 40-minute Phase 2 window, plus 2,000 for S7; 12,000 session starts | the largest line: every active tenant holds a microVM for the whole window, idle time included until the Runtime's idle timeout |
+| AgentCore Runtime session-seconds (CPU and memory) | about 1,000 warm microVMs across the 40-minute Phase 2 window, plus 2,000 for S7; about 7,000 session starts | the largest line: every active tenant holds a microVM for the whole window, idle time included until the Runtime's idle timeout |
 | AgentCore Runtime invocations | about 1.4 million | S1 300k, S2 96k, S3 150k, S4 60k, S5 3.6k, S6 60k, S7 90k, warm-ups and Phase 1 |
 | Lambda GB-seconds | authoriser about 1.4 million short invocations; integration Lambda the same count, held for each stream (S5: 720 × 300 s) | the second line; `ingressReservedConcurrency` caps it at 800 |
 | API Gateway REST requests | about 1.4 million | one per ingress call, refusals included |
 | KMS `Sign` | about 70,000 | one per mint miss (120 s TTL per active triple) and one per admitted `tools/call` in S4 (60,000) |
 | STS `AssumeRole` | about 20,000 | one per TVM miss; S2 and S7 dominate |
 | DynamoDB on-demand | about 3 million reads and writes | the grant's `GetItem`, the limiter's `UpdateItem`, the seed's `BatchWriteItem` |
-| Cognito | 10,000 monthly active users (§10.2) | one token per seeded user |
+| Cognito | about 6,000 monthly active users (§10.2) | one token per user that sends traffic: 1,000 × 4 in S1 to S6, 2,000 in S7, 1,000 in step 1.4; the other seeded tenants never authenticate |
 | NAT gateway | about 2 hours and a few GB | the driver's egress |
 | EC2 `c6i.2xlarge` | about 2 hours | the driver host |
 | CloudWatch Logs ingestion | about 1.5 GB | one `request served` line per request plus the authoriser's |
@@ -291,13 +294,12 @@ are single-digit dollars each. Say the total in the results, not here.
 
 ### 10.2 Risks
 
-- Cognito bills by monthly active user, and every seeded user is active once
-  its token is issued: 10,000 MAUs per run in the shared pool. One run a
-  month stays inside the pool's free tier for Essentials (10,000); a second
-  run in the same calendar month, or a run on a pool that already has active
-  users, is billed per MAU. Check the pool's MAU count for the month before
-  seeding; a run with 10,000 tenants and a run with 2,000 (S7's count) in
-  the same month need separate approval.
+- Cognito bills by monthly active user, and a user is active once its
+  token is issued: about 6,000 MAUs per run in the shared pool (§10.1). One
+  run a month stays inside the pool's free tier for Essentials (10,000); a
+  second run in the same calendar month, or a run on a pool that already has
+  active users, is billed per MAU. Check the pool's MAU count for the month
+  before seeding.
 - The test account is shared. Announce the window to its other users first;
   an integ run of another sample during S5 or S6 fails on Lambda concurrency.
 - The seeded tenants live in the shared identity pool for the run. Teardown
@@ -336,11 +338,29 @@ are single-digit dollars each. Say the total in the results, not here.
 | Extend `scripts/perf.sh` | none | none | already there | bash subshells and curl fork per request; one tenant; no assertion counters; stops well under 100 rps |
 | Distributed k6 on ECS | about 10 min | about 3 min | scales horizontally | more to build than the targets need |
 
-## 13. Open questions
+## 13. Questions answered from the code
 
-1. Does tenant-identity's platform API accept 20 `CreateTenant` a second, or
-   does it hold its own stage throttle? Check `samples/tenant-identity`
-   before `seed.sh` is written.
-2. The S2 herd needs an instance-free ingress. A config change to the
-   integration Lambda forces new instances; confirm it also empties the
-   authoriser cache, or run S2 right after `deploy.sh`.
+1. **Does tenant-identity's platform API accept 20 `CreateTenant` a second?**
+   No. `src/identity.cdk.ts` throttles the route families per method (N-5
+   to N-7): platform routes (`CreateTenant`, `CreateUser`, `IssueToken`,
+   `DeleteTenant`) at 10 rps, burst 20; the `/token` exchange at 20 rps,
+   burst 40; `/tenant/*` at 50 rps shared and 10 rps per tenant key. The
+   shared identity deployment is a fixture other runs use, so its limits
+   are not raised for this test. Consequences, applied above: the seed, the
+   first tokens and the teardown run at 8 rps (§5 Phase 1, §9); at most
+   4,000 tokens are live at once, so S1 has 4 users per tenant, not 10 (§4,
+   §5); the refresh cycle is 17 rps (§5 Phase 2). The Cognito app client
+   allows `adminUserPassword` only, so there is no shorter path to a token
+   than the platform API.
+2. **How does S2 get an instance-free ingress?** Two caches, two steps,
+   because a Lambda configuration change does not touch API Gateway's
+   authoriser cache. The per-instance caches (TVM, mint, registry, JWKS)
+   go with the instance: `aws lambda update-function-configuration` with a
+   changed environment marker on the authoriser, the integration Lambda and
+   each interceptor retires every warm instance. The authoriser result cache
+   lives in API Gateway, keyed on `Authorization` and the path, TTL at most
+   60 s (ADR-0043): `aws apigateway flush-stage-authorizers-cache` empties
+   it at once. `run.sh s2` does both, then waits 60 s with no traffic (so
+   nothing re-warms an instance), then fires. Running S2 right after
+   `deploy.sh` is the same state with a longer wait; the recipe lets S2
+   rerun without a deploy.
