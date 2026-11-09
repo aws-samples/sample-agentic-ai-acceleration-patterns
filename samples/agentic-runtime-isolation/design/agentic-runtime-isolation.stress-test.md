@@ -2,7 +2,6 @@
 
 - Status: Proposed
 - Date: 2026-11-09
-- Owner: Dave Roberts (PSA)
 - Target: the `api-gateway` ingress of this sample at the scale named in
   `architecture.md` (Scale limits) and the spec §3.6
 
