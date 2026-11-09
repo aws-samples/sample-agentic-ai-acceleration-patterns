@@ -69,27 +69,27 @@ Spec §1.2 has the full list.
 
 ## Architecture
 
-![Architecture: a tenant user calls the shared ingress with an identity token; the ingress grants, mints a transaction token and invokes the agent's AgentCore Runtime, which calls each tools gateway with that token, where a REQUEST interceptor and AgentCore Policy admit the call and the tool reads only that tenant's data. Frames mark the three trust zones and IAM badges mark the walls IAM enforces](./diagrams/agentic-runtime-isolation.drawio.svg)
-
-A tenant user's identity token reaches the ingress, which mints a per-agent
-transaction token and passes it to the agent in the AgentCore Runtime; the
-agent presents it to a tools gateway, whose interceptor signs a tenant
-context for the one tool call, and the tool verifies that context and reads
-only that tenant's data. The long-form data path, frame by frame, is
-[`diagrams/CAPTION.md`](./diagrams/CAPTION.md); components and their code
-locations are in [`architecture.md`](./architecture.md#components).
-
 ![Components: the request path runs tenant user, ingress, agent, tools gateway, tool, tenant data across three trust zones; a second row of shared components (entitlement store, backend registry, token signer, tenant limits, TVM) is fed by the ingress, the tools gateway and the tool, and the entitlement API writes the store for the vendor and tenant admins; each box names the pattern it carries](./diagrams/agentic-runtime-isolation.components.drawio.svg)
 
-The same path without the AWS icons: each box is one component and its
-pill names the pattern it carries. The ingress runs the shared pipeline and
-uses the entitlement store (grant rule), the backend registry (discovery),
-the token signer (transaction token), the tenant limits (per-tenant rate
-limit) and the TVM (token vending machine); the agent runs in a pooled
-Runtime; the tools gateway admits a call with its interceptor and policy; the
-tool assumes an ABAC tenant role and reads tenant-keyed items; the
-entitlement API gives the vendor and tenant admins asymmetric grants on the
-store.
+Each box is one component and its pill names the pattern it carries. The
+ingress runs the shared pipeline and uses the entitlement store (grant rule),
+the backend registry (discovery), the token signer (transaction token), the
+tenant limits (per-tenant rate limit) and the TVM (token vending machine); the
+agent runs in a pooled Runtime; the tools gateway admits a call with its
+interceptor and policy; the tool assumes an ABAC tenant role and reads
+tenant-keyed items; the entitlement API gives the vendor and tenant admins
+asymmetric grants on the store.
+
+![Architecture: a tenant user calls the shared ingress with an identity token; the ingress grants, mints a transaction token and invokes the agent's AgentCore Runtime, which calls each tools gateway with that token, where a REQUEST interceptor and AgentCore Policy admit the call and the tool reads only that tenant's data. Frames mark the three trust zones and IAM badges mark the walls IAM enforces](./diagrams/agentic-runtime-isolation.drawio.svg)
+
+On the AWS resources the sample deploys: a tenant user's identity token
+reaches the ingress, which mints a per-agent transaction token and passes it
+to the agent in the AgentCore Runtime; the agent presents it to a tools
+gateway, whose interceptor signs a tenant context for the one tool call, and
+the tool verifies that context and reads only that tenant's data. The
+long-form data path, frame by frame, is
+[`diagrams/CAPTION.md`](./diagrams/CAPTION.md); components and their code
+locations are in [`architecture.md`](./architecture.md#components).
 
 ## Tenant isolation
 

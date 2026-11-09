@@ -56,10 +56,10 @@ samples/<name>/
 ├── design/
 │   └── <name>.spec.md        # the specification the sample was built from (§2.1)
 ├── diagrams/
-│   ├── <name>.drawio                # architecture diagram source (§3.1)
-│   ├── <name>.drawio.svg            # exported, embedded in README
-│   ├── <name>.components.drawio     # components diagram source (§3.2)
-│   └── <name>.components.drawio.svg # exported, embedded in README
+│   ├── <name>.components.drawio     # components diagram source (§3.1)
+│   ├── <name>.components.drawio.svg # exported, embedded in README
+│   ├── <name>.drawio                # architecture diagram source (§3.2)
+│   └── <name>.drawio.svg            # exported, embedded in README
 ├── .projenrc.ts              # the only hand-edited project file (§4.1)
 ├── src/                      # CDK app (main.ts), the exported construct (§4.5), runtime code
 ├── test/                     # unit tests and integ.<flow>.ts (§5)
@@ -220,11 +220,11 @@ the link resolves for anyone who copies the sample out.
 
 ## 3. Diagrams
 
-Two diagrams per sample, both embedded in the README's Architecture section:
-the architecture diagram (§3.1) shows the AWS resources the sample deploys;
-the components diagram (§3.2) shows the components and the patterns each one
-carries, without AWS icons. A reader who wants the pattern reads §3.2; a
-reader who wants to deploy it reads §3.1.
+Two diagrams per sample, both embedded in the README's Architecture section,
+components first: the components diagram (§3.1) shows the components and the
+patterns each one carries, without AWS icons; the architecture diagram (§3.2)
+shows the AWS resources the sample deploys. A reader who wants the pattern
+reads §3.1; a reader who wants to deploy it reads §3.2.
 
 Rules shared by both:
 
@@ -249,18 +249,7 @@ Rules shared by both:
 Mermaid is acceptable for small sequence or state diagrams inside
 `architecture.md`; the two README diagrams are draw.io.
 
-### 3.1 Architecture diagram
-
-`diagrams/<name>.drawio` and `diagrams/<name>.drawio.svg`.
-
-- **AWS Architecture Icons** (the current official set), with group frames for
-  the AWS account and Region boundaries.
-- One icon per deployed resource the reader needs; the arrows carry what
-  moves between them (a token, a request, a credential).
-- Trust boundaries the sample enforces are drawn as frames or badges, so the
-  isolation story is visible without reading the text.
-
-### 3.2 Components diagram
+### 3.1 Components diagram
 
 `diagrams/<name>.components.drawio` and `diagrams/<name>.components.drawio.svg`.
 
@@ -279,6 +268,17 @@ Mermaid is acceptable for small sequence or state diagrams inside
   who holds what (`Ingress trust zone`, `Agent trust zone`, `Tool trust zone`).
 - Labels are one to three words; the sentences go in the README under the
   diagram and in `architecture.md`.
+
+### 3.2 Architecture diagram
+
+`diagrams/<name>.drawio` and `diagrams/<name>.drawio.svg`.
+
+- **AWS Architecture Icons** (the current official set), with group frames for
+  the AWS account and Region boundaries.
+- One icon per deployed resource the reader needs; the arrows carry what
+  moves between them (a token, a request, a credential).
+- Trust boundaries the sample enforces are drawn as frames or badges, so the
+  isolation story is visible without reading the text.
 
 ## 4. Code
 
@@ -519,8 +519,8 @@ Sections, in this order, omitting only those that do not apply:
 
 1. **Title and summary**: the pattern in one paragraph, and what the sample
    is NOT.
-2. **Architecture**: the embedded architecture diagram (§3.1) with its
-   one-sentence data path, then the embedded components diagram (§3.2) with
+2. **Architecture**: the embedded components diagram (§3.1) with its
+   one-sentence data path, then the embedded architecture diagram (§3.2) with
    its one-sentence data path, and a short component list.
 3. **How it works**: the primary flow, step by step, with pointers into
    `architecture.md` for depth.
@@ -577,12 +577,13 @@ A sample is ready to merge when every line is true:
       verification status.
 - [ ] `threat-model.md` present; every mitigation points at code, an ADR, or a
       suppression; scan findings dispositioned.
-- [ ] Architecture diagram follows §3.1: AWS icons, left to right, high
+- [ ] Components diagram follows §3.1 and comes first in the README: plain
+      boxes with a pattern pill each, request path on one row, trust-zone
+      frames, draw.io source and embedded SVG committed, one-sentence data
+      path, no text overlaps.
+- [ ] Architecture diagram follows §3.2: AWS icons, left to right, high
       level, draw.io source and embedded SVG committed, one-sentence data
       path, no text overlaps.
-- [ ] Components diagram follows §3.2: plain boxes with a pattern pill each,
-      request path on one row, trust-zone frames, draw.io source and embedded
-      SVG committed, one-sentence data path, no text overlaps.
 - [ ] projen project per §4.1; dependencies pinned; MIT-0 header on every
       authored file and on no generated file.
 - [ ] The pattern is a construct exported from `src/index.ts` with typed,
