@@ -36,8 +36,8 @@ SPDX-License-Identifier: MIT-0
 | [0028](./0028-run-the-demo-agent-on-nova-lite-through-a-cross-region-inference-profile.md) | Run the demo agent on Nova Lite through a cross-Region inference profile | Accepted | - | 2026-10-30 |
 | [0029](./0029-recommend-api-gateway-as-the-default-ingress.md) | Recommend API Gateway as the default ingress | Accepted | Amends ADR-0009 | 2026-10-30 |
 | [0030](./0030-hold-entitlements-in-an-ingress-owned-store.md) | Hold entitlements in an ingress-owned store, not in identity-provider scopes | Accepted | Supersedes ADR-0025; Amends ADR-0005 | 2026-11-02 |
-| [0031](./0031-mint-a-transaction-token-at-the-ingress.md) | Mint a transaction token at the ingress; the identity token never leaves it | Accepted | Supersedes ADR-0006, ADR-0007; Amended by ADR-0040 | 2026-11-02 |
-| [0032](./0032-model-an-agent-as-a-backend-plus-its-tools.md) | Model an agent as a product: a backend plus the tools it may use, capped below the tenant's subscription | Accepted | Amends ADR-0011, ADR-0024; Amended by ADR-0046 | 2026-11-02 |
+| [0031](./0031-mint-a-transaction-token-at-the-ingress.md) | Mint a transaction token at the ingress; the identity token never leaves it | Accepted | Supersedes ADR-0006, ADR-0007; Amended by ADR-0040, ADR-0048 | 2026-11-02 |
+| [0032](./0032-model-an-agent-as-a-backend-plus-its-tools.md) | Model an agent as a product: a backend plus the tools it may use, capped below the tenant's subscription | Accepted | Amends ADR-0011, ADR-0024; Amended by ADR-0046, ADR-0048 | 2026-11-02 |
 | [0033](./0033-let-a-tenant-admin-cut-never-add.md) | Let a tenant admin cut, never add, with sparse per-user rows | Accepted | Amended by ADR-0038 | 2026-11-02 |
 | [0034](./0034-serve-tools-through-one-shared-agentcore-gateway.md) | Serve tools through one shared AgentCore Gateway that trusts the ingress issuer, with Policy on `scope` and an interceptor that checks `act` and signs the tenant context | Accepted | Amended by ADR-0040, ADR-0041 | 2026-11-02 |
 | [0035](./0035-register-tools-and-agents-at-deploy-with-an-owner-marker.md) | Register tools and agents at deploy with an owner marker, in the store and the registry | Accepted | Amends ADR-0024 | 2026-11-02 |
@@ -53,3 +53,4 @@ SPDX-License-Identifier: MIT-0
 | [0045](./0045-bound-the-transaction-token-at-10240-bytes.md) | Bound the transaction token at 10,240 bytes | Accepted | Amends ADR-0041 | 2026-11-04 |
 | [0046](./0046-close-the-signer-grant-path-keep-explicit-tool-lists-and-recheck-need-ownership.md) | Close the signer grant path, keep explicit tool lists explicit, and re-check need ownership at the ingress | Accepted | Amends ADR-0032, ADR-0037 | 2026-11-04 |
 | [0047](./0047-mask-header-values-in-the-runtime-log-group.md) | Mask header values in the Runtime log group with a data protection policy, set from a custom resource | Accepted | Amends ADR-0019 | 2026-11-06 |
+| [0048](./0048-delegate-between-agents-through-the-ingress.md) | Delegate between agents through the ingress, with a replacement transaction token | Proposed | Amends ADR-0031, ADR-0032 | 2026-11-09 |

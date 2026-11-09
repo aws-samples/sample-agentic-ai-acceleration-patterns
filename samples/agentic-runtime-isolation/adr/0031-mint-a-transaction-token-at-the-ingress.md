@@ -37,3 +37,5 @@ Easier: the agent holds a token it can use and no more; a stolen one is good for
 **2026-11-02.** Amended by ADR-0040: `sub` is `<tenant_id>#<sub>` and a `user` claim carries the identity provider's `sub`; a refused token is 403 at the Gateway.
 
 **2026-11-04.** Amended by the red team: on `api-gateway` the integration function verifies the token the authoriser forwarded (JWKS, `typ`, `iss`, `exp`, tenant and agent) before it trusts the Allow context, because an in-account principal with `lambda:InvokeFunction` can hand the function a hand-written context (T-102, M-82).
+
+**2026-11-09.** Amended by ADR-0048 (Proposed): the ingress accepts its own token as the bearer on `POST /{backend}/delegations` only, re-issuing it for the next agent with the caller pushed onto `act`; `/invocations` still refuses it.
