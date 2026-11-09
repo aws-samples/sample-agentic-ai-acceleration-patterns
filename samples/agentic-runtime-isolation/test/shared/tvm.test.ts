@@ -224,6 +224,45 @@ describe('TokenVendingMachine', () => {
     await expect(tvm().vend(claims())).rejects.toThrow(/no credentials/);
   });
 
+  describe('retried AssumeRole calls are logged by count (stress-test plan §7.1)', () => {
+    let lines: string[];
+    let out: jest.SpyInstance;
+    beforeEach(() => {
+      lines = [];
+      out = jest.spyOn(process.stdout, 'write').mockImplementation((line: any) => {
+        lines.push(String(line).trimEnd());
+        return true;
+      });
+    });
+    afterEach(() => out.mockRestore());
+    const retried = () => lines.map((l) => JSON.parse(l)).filter((l) => l.message === 'sdk retried');
+
+    it('writes nothing when STS answered on the first attempt', async () => {
+      await tvm().vend(claims());
+      expect(retried()).toEqual([]);
+    });
+
+    it('writes one sdk retried line when the SDK retried, with no tag value or credential', async () => {
+      sts.on(AssumeRoleCommand).resolves({
+        $metadata: { attempts: 3 },
+        Credentials: { AccessKeyId: 'ASIA-SYNTHETIC', SecretAccessKey: 'synthetic-secret', SessionToken: 't', Expiration: expiration(900_000) },
+      });
+      await tvm().vend(claims());
+      expect(retried()).toEqual([{ level: 'WARN', message: 'sdk retried', service: 'sts', operation: 'AssumeRole', attempts: 3 }]);
+      expect(lines.join('\n')).not.toContain('tenant-a');
+      expect(lines.join('\n')).not.toContain('synthetic-secret');
+    });
+
+    it('writes the line with the error name when every attempt failed, then rethrows', async () => {
+      const error = Object.assign(new Error('Rate exceeded'), { name: 'ThrottlingException', $metadata: { attempts: 3 } });
+      sts.on(AssumeRoleCommand).rejects(error);
+      await expect(tvm().vend(claims())).rejects.toThrow('Rate exceeded');
+      expect(retried()).toEqual([
+        { level: 'WARN', message: 'sdk retried', service: 'sts', operation: 'AssumeRole', attempts: 3, error: 'ThrottlingException' },
+      ]);
+    });
+  });
+
   it('never logs a tag value or a credential', async () => {
     const spy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
     const out = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);

@@ -16,6 +16,7 @@
 
 import { createHash, createPublicKey, type KeyObject, verify as cryptoVerify } from 'node:crypto';
 import { GetPublicKeyCommand, type KMSClient, SignCommand } from '@aws-sdk/client-kms';
+import { logRetries } from './logger';
 
 export type JwsAlgorithm = 'RS256' | 'ES256';
 
@@ -75,9 +76,17 @@ export type DigestSigner = (digest: Uint8Array) => Promise<Uint8Array>;
 /** A DigestSigner over KMS `Sign` with `MessageType: DIGEST`. */
 export function kmsDigestSigner(kms: KMSClient, keyId: string, alg: JwsAlgorithm): DigestSigner {
   return async (digest) => {
-    const out = await kms.send(
-      new SignCommand({ KeyId: keyId, Message: digest, MessageType: 'DIGEST', SigningAlgorithm: KMS_SIGNING_ALGORITHM[alg] }),
-    );
+    const command = new SignCommand({ KeyId: keyId, Message: digest, MessageType: 'DIGEST', SigningAlgorithm: KMS_SIGNING_ALGORITHM[alg] });
+    let out;
+    try {
+      out = await kms.send(command);
+    } catch (error) {
+      // A throttle that beat every attempt: counted here, by name, before the
+      // caller turns it into a 502 `mint_failed` without one.
+      logRetries('kms', 'Sign', error, error);
+      throw error;
+    }
+    logRetries('kms', 'Sign', out);
     if (out.Signature === undefined) {
       throw new Error('KMS Sign returned no signature');
     }

@@ -161,31 +161,41 @@ The 429 attribution check reads the ingress log group after the run:
 | Source | Fields | Use |
 |---|---|---|
 | k6 summary | `http_req_duration` p50/p90/max, `http_req_failed`, custom counters `isolation_mismatch`, `positive_control_fail`, per-status counts, per-tenant 429 | the pass table |
-| Ingress log group, `request served` | `totalMs`, `ttfbMs`, `backendInvokeSeconds`, `mint` hit or miss, `tenantId`, and (new, §7.1) `stsAttempts`, `kmsAttempts` | server-side latency split; mint cache rate; retried throttles |
+| Ingress log group, `request served` | `totalMs`, `ttfbMs`, `backendInvokeSeconds`, `mint` hit or miss, `tenantId` | server-side latency split; mint cache rate |
+| Ingress and interceptor log groups, `sdk retried` (§7.1) | `service` (`sts`, `kms`), `operation`, `attempts`, `error` when every attempt failed | retried throttles and timeouts on STS and KMS |
 | Ingress log group, Lambda `REPORT` | init duration, duration, memory | cold-start count in S2 |
 | CloudWatch, API Gateway | `Count`, `4XXError`, `5XXError`, `Latency`, `IntegrationLatency` | shape of each scenario |
 | CloudWatch, Lambda | `ConcurrentExecutions`, `Throttles`, `Duration` for the authoriser and the integration Lambda | S5 and S6 |
 | CloudWatch, DynamoDB | `ThrottledRequests` on the entitlement store and `TenantLimits` | the limiter's `UpdateItem` under S3 |
 | CloudWatch, AgentCore Runtime | active sessions, throttles, invocation latency | S6 and the 2,500-session ceiling |
-| CloudTrail | `AssumeRole` and `Sign` events with `errorCode: ThrottlingException`, `Decrypt` for the tool context; management events, free, 5 to 15 minutes late | the cross-check of `stsAttempts` and `kmsAttempts`; STS and KMS have no throttle metric |
+| CloudTrail | `AssumeRole` and `Sign` events with `errorCode: ThrottlingException`, `Decrypt` for the tool context; management events, free, 5 to 15 minutes late | the cross-check of the `sdk retried` lines; STS and KMS have no throttle metric |
 | Contributor Insights, the demo rules | top tenants by requests, by 429, by backend seconds | the S3 tenant must be the top contributor by 429 and by nothing else |
 
 `scripts/stress/collect.sh` pulls all of these for the run window into one
 JSON file and prints the pass table.
 
-### 7.1 Retried throttles are invisible today
+### 7.1 Retried throttles: the `sdk retried` line
 
 The STS client (`src/shared/tvm.ts`) and the KMS client (`src/shared/jws.ts`)
-use the SDK's default retry, three attempts. A throttle the retry absorbs is
-logged nowhere; only a throttle that beats all three attempts surfaces, as a
-502 `tvm_failed` or `mint_failed` with the reason and no error name. A run at
-590 STS calls a second looks clean in the log while every third call retries.
+use the SDK's default retry, three attempts. Before 2026-11-09 a throttle the
+retry absorbed was logged nowhere; only a throttle that beat all three
+attempts surfaced, as a 502 `tvm_failed` or `mint_failed` with the reason and
+no error name. A run at 590 STS calls a second looked clean in the log while
+every third call retried.
 
-Before the first run: read `$metadata.attempts` from every `AssumeRole` and
-`Sign` response and carry it onto the `request served` line as `stsAttempts`
-and `kmsAttempts`. A value above 1 is a retried throttle or timeout. Sum
-them per minute in `collect.sh`; the pass criteria of §4 for STS and KMS
-read these fields, CloudTrail is the cross-check.
+Now every `AssumeRole` and `Sign` call reads `$metadata.attempts` from its
+response or its error (`logRetries` in `src/shared/logger.ts`) and, when it
+is above 1, writes one WARN line `sdk retried` with `service`, `operation`,
+`attempts` and, when every attempt failed, the error's name. Nothing from the
+request or the response. The line is written where the call is made, so the
+tools interceptor's TVM and context signer emit it too. It is a separate line
+rather than a field on `request served` because the signer behind the mint
+is a plain `DigestSigner` function shared with the tools context and the
+tests; a throttle is account-wide, not a per-tenant fact, so per-request
+attribution adds nothing.
+
+`collect.sh` sums `attempts - 1` per service per minute; the §4 pass lines
+for STS and KMS read that sum, CloudTrail is the cross-check.
 
 ## 8. Driver layout
 
