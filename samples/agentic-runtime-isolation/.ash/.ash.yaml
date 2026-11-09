@@ -36,3 +36,18 @@ global_settings:
     - rule_id: SECRET-BASE64-HIGH-ENTROPY-STRING
       path: src/shared/session.ts
       reason: The RFC 4648 base32 alphabet constant used to encode session ids. Not a secret.
+    # Step 11 of the integration driver writes PROBE values (an access key id spelled PROBE, a JWT
+    # whose signature segment is the word 'probe') into the Runtime log group to prove the data
+    # protection policy masks them (ADR-0047, T-18). They are fixtures, not credentials.
+    - rule_id: SECRET-*
+      path: scripts/integ.sh
+      reason: Synthetic probe values for the log-masking check (ADR-0047 step 11); marked gitleaks:allow at the source.
+    - rule_id: generic.secrets.security.detected-aws-access-key-id-value.detected-aws-access-key-id-value
+      path: scripts/integ.sh
+      reason: The same synthetic probe access key id (ADR-0047 step 11); it is spelled PROBE and opens nothing.
+    - rule_id: generic.secrets.security.detected-jwt-token.detected-jwt-token
+      path: scripts/integ.sh
+      reason: The same probe JWT; its signature segment is literal text and verifies against nothing.
+    - rule_id: SECRET-SECRET-KEYWORD
+      path: threat-model.md
+      reason: Prose in mitigation M-12 names the access-log fields; no value is present.
