@@ -4,9 +4,9 @@ SPDX-License-Identifier: MIT-0
 -->
 # Tenant Encrypted Ingestion: Architecture
 
-> **Status: implemented and verified by the integration runs of 2026-11-06.**
-> Last green run: 2026-11-06 (run 9, after the blind-review fixes; run 7 on
-> the same day was the first), eu-central-1, a vendor test account plus a
+> **Status: implemented and verified by the integration runs of 2026-11-06 and 2026-11-09.**
+> Last green run: 2026-11-09 (run 11, after the identity-provider change;
+> runs 7 and 9 on 2026-11-06 were green too), eu-central-1, a vendor test account plus a
 > second account owning tenant B's `tenant-key` key (cross-account claim
 > exercised), about 65 minutes end to end; CloudFormation create 1 min 10 s
 > (test aid) and 2 min 17 s (demo stack), delete 3 min 9 s and 1 min 35 s, from
