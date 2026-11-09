@@ -563,8 +563,8 @@ left or a key it tagged is not `PendingDeletion`.
 
 Last green run: 2026-11-09, after the identity-provider change (two runs
 on 2026-11-06, before it, were green too), in eu-central-1, a vendor test
-account plus a second account owning tenant B's key: about 65 minutes end
-to end (integration run of 2026-11-09). The run's cleanup step deleted the
+account plus a second account owning tenant B's key: 53 to 65 minutes end
+to end (the two integration runs of 2026-11-09). The run's cleanup step deleted the
 three tenants it had created in the shared tenant-identity pool.
 CloudFormation
 took about 4 minutes to create the two stacks (test aid 1 min 10 s, demo stack
@@ -705,7 +705,7 @@ knows the tenant ([`architecture.md` §11](./architecture.md#11-observability-an
   `deliveriesAccepted` plus `deliveriesRejected`; API Gateway with the
   tenant's `/tenant` requests (a Contributor Insights rule ranks them,
   `/tenant/deliveries` and `/tenant/deliveries/{deliveryId}` both).
-- **The integration test**: about 65 minutes per run; the spec's target is
+- **The integration test**: 53 to 65 minutes per run; the spec's target is
   under $2 per run, and a run's cost has not been measured.
 
 Attribution formula:

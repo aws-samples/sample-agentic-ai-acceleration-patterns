@@ -1161,8 +1161,8 @@ processor. The test waits 5 minutes after each key policy or tag change.
     stack and its scratch bucket are gone, nothing with the sample's prefix
     remains but keys pending deletion, which the test lists.
 
-Runtime target: 60 to 90 minutes, under $2 per run; the run of
-2026-11-09, with a second account, took about 65 minutes.
+Runtime target: 60 to 90 minutes, under $2 per run; the two runs of
+2026-11-09, with a second account, took 53 and 65 minutes.
 
 ---
 

@@ -4,10 +4,11 @@ SPDX-License-Identifier: MIT-0
 -->
 # Tenant Encrypted Ingestion: Architecture
 
-> **Status: implemented and verified by the integration run of 2026-11-09
+> **Status: implemented and verified by two integration runs of 2026-11-09
 > in eu-central-1**, a vendor test account plus a second account owning
-> tenant B's `tenant-key` key (cross-account claim exercised), about 65
-> minutes end to end. Coverage: spec §10 steps 1 to 11 (with 7b and 7c) and
+> tenant B's `tenant-key` key (cross-account claim exercised), 53 and 65
+> minutes end to end; the later run followed the `identityApi`, error-model
+> and insight-rule changes of that day. Coverage: spec §10 steps 1 to 11 (with 7b and 7c) and
 > the driver's step 0 prelude passed; step 12 ran as `scripts/integ.sh`'s
 > teardown: both stacks destroyed, no stack with the sample's prefix left,
 > only the two `vendor-key` keys left, both `PendingDeletion`, and the
@@ -648,7 +649,7 @@ script's steps, by its own labels:
 **Lifetimes.** Access tokens live 5 minutes and several steps wait longer,
 so a 401 on a run-issued token re-issues it and retries once. Sessions are
 3600 s. After a key policy or tag change the driver waits up to 5 minutes.
-**Runtime** about 65 minutes (spec target 60 to 90); the dollar cost was
+**Runtime** 53 to 65 minutes (spec target 60 to 90); the dollar cost was
 not measured (spec target under $2).
 
 ## 14. Known gaps and residuals
