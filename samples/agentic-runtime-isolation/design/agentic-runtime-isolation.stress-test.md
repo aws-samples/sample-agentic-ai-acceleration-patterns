@@ -38,7 +38,7 @@ that is right at 1 rps and wrong at 500 rps is a leak, not a slow path.
 | Stack | `RuntimeIsolation-api-gateway` deployed from `main` with the stress props of §3.1, `publishParameters=false`, `--context tvm=true` (the demo table and the vended-credential path), stack name suffixed `-stress` |
 | Driver host | the `StressDriver` CDK stack (§8.1): one EC2 instance, `c6i.2xlarge`, isolated subnet, no inbound rule, no public IP, reached through SSM Session Manager; k6 and the AWS CLI v2 installed by user data |
 | Driver | [k6](https://k6.io/) for the ingress path (bearer token, SSE); bash and the AWS CLI for seeding and teardown, reusing `scripts/lib.sh` |
-| Results | k6 JSON summary plus `scripts/stress/collect.sh` output, kept outside the repo with the run date |
+| Results | the pass table as `design/stress-results/<date>.md` in the repo (§11); the raw k6 JSON and log exports outside it |
 
 ### 3.1 Stress props
 
@@ -314,8 +314,14 @@ are single-digit dollars each. Say the total in the results, not here.
 ## 11. Deliverables
 
 1. `scripts/stress/` as in §8, with its README.
-2. One results file per run, kept outside the repo, with deploy time,
-   destroy time, the pass table and the k6 summary.
+2. One results file per run in the repo,
+   `design/stress-results/<YYYY-MM-DD>.md`, written by `collect.sh`: the
+   commit tested, the scenario shapes as run, deploy and destroy time of both
+   stacks, the §4 pass table with measured values, the §10.1 cost lines with
+   actual quantities, and the `sdk retried` sums per service. No account id,
+   no tenant id, no user name, no token, no endpoint URL; `collect.sh`
+   refuses to write a file that matches any of those shapes. The raw k6
+   JSON and the log exports stay outside the repo.
 3. `architecture.md` Scale limits: each row that the run measured gets its
    measured value next to the documented one, with the run date.
 4. An ADR if a run changes a default (for example the stage throttle
