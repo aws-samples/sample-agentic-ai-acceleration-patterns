@@ -2,7 +2,7 @@
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 -->
-# ADR-0017: Let the sweep publish to the bus, and give the key factory a table-wide registry grant
+# ADR-0017: Let the sweep publish, and give the key factory a table-wide registry grant
 
 - Status: Accepted
 - Date: 2026-11-06

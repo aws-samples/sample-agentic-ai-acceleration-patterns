@@ -2,7 +2,7 @@
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 -->
-# ADR-0016: Alarm on PutKeyPolicy through EventBridge, and probe on any 403 or KMS-named error
+# ADR-0016: Alarm on PutKeyPolicy through EventBridge and probe on any 403 or KMS error
 
 - Status: Accepted
 - Date: 2026-11-06

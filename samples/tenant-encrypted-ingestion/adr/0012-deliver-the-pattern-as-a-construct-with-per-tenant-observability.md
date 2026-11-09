@@ -75,3 +75,7 @@ accepted bytes by `tenantId`, and API requests to `/tenant/deliveries` by
 `tenantId` and `status`. Rejections and key failures appear as the
 `status` split of the deliveries rule (`REJECTED`, `KEY_UNAVAILABLE`), not
 as rules of their own.
+
+Changed 2026-11-09: the requests rule counts both tenant resource paths,
+`/tenant/deliveries` and `/tenant/deliveries/{deliveryId}`, so a
+`GetDelivery` poll is ranked with the other calls.

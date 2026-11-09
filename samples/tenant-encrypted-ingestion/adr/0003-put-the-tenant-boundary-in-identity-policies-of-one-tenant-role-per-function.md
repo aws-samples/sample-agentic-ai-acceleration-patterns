@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-05
-- Amended by: ADR-0017
+- Amended by: ADR-0017, ADR-0020
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -35,14 +35,21 @@ filtered; 2,048-character cap; every function holds the same reach.
 Pros: enforced, nothing to omit, no per-tenant IAM resource, the asymmetry is
 in the roles. Cons: ten roles; an `AssumeRole` per tenant context (600 rps per
 account); the tenant id needs a grammar code enforces.
-### Registry part: second table, one table update-only, alias binding, accept
-A second table for bindings separates them by resource, but splits every
-transaction across tables and doubles PITR, streams and policies. One table
-with tenant roles limited to `UpdateItem` on an attribute allowlist keeps one
-transaction and is enforced for tenant roles, but leaves key-factory code able
-to rewrite a binding. Binding keys by `kms:ResourceAliases` adds a KMS-side
-check but only for `vendor-key` (kept as a seam, §11). Accepting the gap
-leaves tenant code able to rebind itself.
+
+The registry part of the boundary (a tenant role must not rewrite its own
+key binding) has four options of its own.
+### Option 5: Registry: a second table for bindings
+Pros: separates bindings from delivery rows by resource. Cons: splits every
+transaction across tables; doubles PITR, streams and policies.
+### Option 6: Registry: one table, tenant roles update-only
+Tenant roles limited to `UpdateItem` on an attribute allowlist. Pros: keeps
+one transaction; enforced for tenant roles. Cons: leaves key-factory code
+able to rewrite a binding.
+### Option 7: Registry: bind keys by alias
+`kms:ResourceAliases` in the key's use statements. Pros: adds a KMS-side
+check. Cons: only for `vendor-key` (kept as a seam, §11).
+### Option 8: Registry: accept the gap
+Pros: nothing to build. Cons: leaves tenant code able to rebind itself.
 
 ## Decision
 Option 4 and one table update-only (spec §7.0, §7.1). Seven base roles reach
@@ -57,7 +64,7 @@ without creation), `sweepRole` (assumes `tenantProcessRole` only) and
 and trust only named base roles, with `ForAllValues:StringEquals aws:TagKeys
 = [TenantId]`, `Null aws:RequestTag/TenantId = false` and a `StringNotLike`
 guard on `/`, `:`, `=`, `+`, `@`, `.`, space and comma; code enforces
-`^[A-Za-z0-9][A-Za-z0-9-]{1,34}$` at the authoriser, the model and the processor.
+`^[a-z0-9][a-z0-9-]{1,34}$` at the authoriser, the model and the processor.
 `RoleSessionName` is `t-<tenantId>-<16-char suffix>`, under 64 characters,
 so logs name the tenant. Sessions last 3600 s; a cached one presigns only
 with TTL plus 60 s left and starts a run only with T left. In the registry a
@@ -101,3 +108,9 @@ assumed the session; the sweep's is always `sweep`. Outside the ten roles
 the deployment also has the `ScopeRegistration` custom-resource role
 (ADR-0015), the `LogDrain` role (no permissions) and CDK's singleton
 provider roles; none is in the pipeline (architecture.md §3).
+
+Amended 2026-11-09 by ADR-0020: the grammar is
+`^[A-Za-z0-9][A-Za-z0-9-]{1,34}$`, so tenant-identity's upper-case ULID
+tenant ids pass; two ids that differ only by case are two tenants. The
+`StringNotLike` trust guard is unchanged. The registry options were split
+into named options on 2026-11-09; the decision text is unchanged.

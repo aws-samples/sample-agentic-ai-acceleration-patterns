@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-05
-- Amended by: ADR-0016
+- Amended by: ADR-0016, ADR-0023
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -85,23 +85,21 @@ Deny is invisible (§10 step 5), and a unit test runs IAM Access Analyzer
 request per object write and read; adding a consumer is an alarmed
 `PutKeyPolicy` per key, a bulk operation the README documents and the sample
 does not build; the `PutKeyPolicy` alarm needs an account trail, a deployer
-action; a spike (2026-11-05) showed that statement 5 does not block
-`CreateKey`'s own tags and does block a later retag, and that
-`aws:ResourceTag` is populated from the request tags at `CreateKey`, so
-the factory's tagging Allow conditions on `aws:RequestTag`, never on
-`aws:ResourceTag`. Revisit if S3 adds a condition key for the
+action; whether `CreateKey`'s own tags meet statement 5 is a spike in the
+README's implementation notes. Revisit if S3 adds a condition key for the
 bucket-key header, if Bucket Keys gain a per-prefix context, or if KMS offers
-an immutable key policy. Implemented 2026-11-06 (ADR-0016): the
-`PutKeyPolicy` alarm is an EventBridge rule on the CloudTrail event, targeting an SQS audit queue and
-alarmed on the rule's `TriggeredRules` metric, not a CloudWatch Logs metric
-filter; the account trail must deliver management events to EventBridge.
+an immutable key policy.
 
-Amended 2026-11-06 (ADR-0016): the alarm is the EventBridge rule and audit
-queue above, not a CloudWatch Logs metric filter. Not implemented
-2026-11-06: the unit test running IAM Access Analyzer `check-no-new-access`
-against a baseline holding every Deny does not exist; it calls an AWS API,
-which the unit tests do not. The control is the template tests in
-`test/key-policy.test.ts` (every statement by Sid, the four use Denies as
-separate statements, no `kms:Create*` or `CreateGrant` Allow, tagging
-denied to everyone) plus §10 step 5 against the deployed scratch key; the
-gap is in architecture.md §14 and threat model M-17.
+Amended 2026-11-06 (ADR-0016): the `PutKeyPolicy` alarm is an EventBridge
+rule on the CloudTrail event, targeting an SQS audit queue and alarmed on
+the rule's `TriggeredRules` metric, not a CloudWatch Logs metric filter;
+the account trail must deliver management events to EventBridge. The
+`CreateKey` spike ran on 2026-11-05: statement 5 does not block
+`CreateKey`'s own tags and does block a later retag, and `aws:ResourceTag`
+is populated from the request tags at `CreateKey`, so the factory's
+tagging Allow conditions on `aws:RequestTag`, never on `aws:ResourceTag`.
+Amended 2026-11-09 (ADR-0023): the unit test running IAM Access Analyzer
+`check-no-new-access` was not built; the template tests in
+`test/key-policy.test.ts` and §10 step 5 against the deployed scratch key
+replace it, and step 5 isolates the principal-scoped bucket Deny with the
+`aws/s3` key because S3 asks KMS before it evaluates the bucket policy.

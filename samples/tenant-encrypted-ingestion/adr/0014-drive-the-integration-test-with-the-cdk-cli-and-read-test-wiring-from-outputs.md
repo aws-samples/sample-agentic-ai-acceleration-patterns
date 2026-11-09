@@ -2,7 +2,7 @@
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 -->
-# ADR-0014: Drive the integration test with the CDK CLI and read test wiring from stack outputs
+# ADR-0014: Drive the integration test with the CDK CLI and read test wiring from outputs
 
 - Status: Accepted
 - Date: 2026-11-06
@@ -26,10 +26,10 @@ processor and sweep function names, the queue and DLQ URLs and ARNs, the
 registry table name, the event bus name, the log group names, the
 Contributor Insights rule names, the binding alarm name, the pipeline
 timing, the tenant role ARNs and the test-switch parameter name from the
-demo stack (`src/demo.cdk.ts:256-277`), and the probe, consumer, scratch
+demo stack (`src/demo.cdk.ts`), and the probe, consumer, scratch
 writer, redrive and access-log reader role ARNs, the scratch bucket and key
 and the event capture queue from the test-aid stack
-(`test/integ/test-aid-stack.ts:191-198`): 25 outputs in all. A separate
+(`test/integ/test-aid-stack.ts`): 25 outputs in all. A separate
 process cannot read construct properties. `docs/sample-standard.md` §5.2
 says the test uses no stack outputs.
 
@@ -37,7 +37,7 @@ says the test uses no stack outputs.
 ### Option 1: integ-runner with integ-tests-alpha assertions
 Pros: the default driver of §5.2; assertions can read construct properties
 inside the app. Cons: the steps need two accounts, wait on KMS
-propagation, re-issue tokens and run about 73 minutes of stateful
+propagation, re-issue tokens and run over an hour of stateful
 sequence, which `awsApiCall` chains express badly; stacks deploy one at a
 time; the reused pool fits no integ-runner concept.
 ### Option 2: The CDK CLI in `scripts/integ.sh`, driver reads published parameters only
@@ -50,7 +50,7 @@ test's purpose in every demo deployment.
 then the driver, then `cdk destroy --all --force --concurrency 2` from the
 EXIT trap. Pros: the two sample stacks deploy at once; the pool is reused
 by a plain lookup; the driver reads the outputs file once
-(`test/integ.ingestion.ts:72`, `:1380`). Cons: a deviation from §5.2's
+(`test/integ.ingestion.ts`). Cons: a deviation from §5.2's
 "no stack outputs".
 
 ## Decision
@@ -76,3 +76,15 @@ carries the outputs in every deployment, not only the test's; they reveal
 resource names, no secrets. Revisit if the driver moves into the CDK app
 (assertions reading properties directly) or if integ-runner gains reuse of
 a fixture stack and deploy concurrency.
+
+Corrected 2026-11-09: the driver does not read everything the composition
+needs from the published parameters. From SSM it reads only this sample's
+`apiUrl` and `bucketName` and tenant-identity's `apiUrl`. The tenant role
+ARNs, the access-log bucket, the registry table, the log groups, the
+alarm, the queues, the sweep function, the Contributor Insights rules, the
+pipeline timing and the test-switch parameter come from the demo stack's
+outputs, and the test roles, scratch bucket and key and event capture
+queue from the test-aid stack's. The decision stands; the published
+parameters remain the composition contract a consumer uses. The
+integration run of 2026-11-09 took about 65 minutes. Line references were
+dropped from this record on the same date.

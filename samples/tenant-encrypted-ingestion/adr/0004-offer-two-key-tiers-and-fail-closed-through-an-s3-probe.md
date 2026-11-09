@@ -58,12 +58,10 @@ REVOKED` (by `processorRole`), deletes the drop version, publishes
 DLQ; a probe success means the fault is the pipeline's own, which is thrown
 and never classified by code alone. `CreateDelivery` answers 409 while the
 key is `REVOKED`; `GetTenantKey` and the hourly sweep re-probe and restore
-`ACTIVE` only on success. `aws:ResourceTag/TenantId` evaluates on a key in
-another account: undocumented, but verified by spike on 2026-11-05 with a
-second account (allowed for the matching tenant session, refused for
-another, on `DescribeKey` and through S3). §10 step 1 repeats it; the
-fallback, identity policies that list the registered `keyArn`s, stays
-documented.
+`ACTIVE` only on success. Whether `aws:ResourceTag/TenantId` evaluates on a
+key in another account is undocumented: §10 step 1 uses a real second
+account, and the fallback is identity policies that list the registered
+`keyArn`s instead of a tag condition.
 
 ## Consequences
 Easier: one pipeline, one API and one data model for both tiers; a tenant
@@ -84,3 +82,10 @@ pending deletion as 400, not 403; the probe still decides. Implemented
 `src/shared/probe.ts`); §10 step 8 saw `KMS.DisabledException` and a
 removed use statement both set `REVOKED` with the DLQ unchanged, and
 `CreateDelivery` answered 409 `TenantKeyUnavailable` while `REVOKED`.
+
+Spike result, recorded 2026-11-09 (it ran 2026-11-05 with a second
+account): `aws:ResourceTag/TenantId` evaluates on a key in another account
+(allowed for the matching tenant session, refused for another, on
+`DescribeKey` and through S3). It is still undocumented; §10 step 1
+repeats it, and the fallback (identity policies that list the registered
+`keyArn`s) stays documented.

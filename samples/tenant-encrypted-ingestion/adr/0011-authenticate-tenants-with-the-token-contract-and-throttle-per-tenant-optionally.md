@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-05
+- Amended by: ADR-0019
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -73,3 +74,11 @@ still admit the key while its usage-plan cache lasts, so `CreateDelivery`
 after offboarding is 403 from API Gateway or 409 `TenantKeyUnavailable`
 from the handler; the run of 2026-11-06, with throttling on, saw 409. The
 tenant is refused either way (architecture.md §14).
+
+Amended 2026-11-09 (ADR-0019): "any compliant OIDC issuer works" was not
+true of the implementation of 2026-11-06, which needed `client_id` and
+`token_use` (Cognito's claims) and read tenant-identity's parameters to
+register the scopes. ADR-0019 makes it true: the verifier accepts `aud`
+when `client_id` is absent and the header `typ: at+jwt` when `token_use`
+is absent (RS256 only), and `identityApi` is a required prop whose
+`'none'` skips the scope registration.

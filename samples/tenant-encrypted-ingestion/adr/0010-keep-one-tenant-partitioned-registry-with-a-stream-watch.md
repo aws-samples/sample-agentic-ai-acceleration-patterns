@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-05
+- Amended by: ADR-0021
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -65,3 +66,9 @@ needs an acknowledgement; PITR keeps file names and hashes of offboarded
 tenants for 35 days (ADR-0005). Revisit if IAM adds a sort-key condition key
 for DynamoDB (ADR-0003),
 or if sweep volume outgrows one GSI partition, then shard `statusBucket`.
+
+Amended 2026-11-09 (ADR-0021): `statusBucket` also takes `OWED` on a
+terminal row whose event is not yet published, so the sweep finds and
+publishes it from the same GSI, and a second sparse GSI on `keyStatus`
+holds key rows only, which the sweep queries for `REVOKED` and `ACTIVE`
+keys instead of scanning.
