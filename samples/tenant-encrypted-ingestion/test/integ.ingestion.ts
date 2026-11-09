@@ -1338,7 +1338,7 @@ async function step10b(w: World): Promise<StepResult> {
   }
 
   // The tenant's view: every delivery row of A, paged.
-  const listed: Array<{ status: string; sizeBytes: number }> = [];
+  const listed: Array<{ status: string; sizeBytes: number; reason?: string }> = [];
   let nextToken: string | undefined;
   let pages = 0;
   do {
@@ -1349,7 +1349,7 @@ async function step10b(w: World): Promise<StepResult> {
       break;
     }
     pages += 1;
-    listed.push(...((r.json.deliveries ?? []) as Array<{ status: string; sizeBytes: number }>));
+    listed.push(...((r.json.deliveries ?? []) as Array<{ status: string; sizeBytes: number; reason?: string }>));
     nextToken = r.json.nextToken;
   } while (nextToken !== undefined);
   const accepted = listed.filter((d) => d.status === 'ACCEPTED');
@@ -1360,7 +1360,7 @@ async function step10b(w: World): Promise<StepResult> {
   // The platform's view: the key row's counters.
   const key = await signed('GET', `${w.apiUrl}platform/tenants/${a.tenantId}/key`);
   c.expect(key.status === 200, `GetTenantKey A -> ${key.status}`);
-  const counters = key.json ?? {};
+  const counters = key.json?.key ?? {};
   c.expect(counters.deliveriesAccepted === accepted.length, `deliveriesAccepted ${String(counters.deliveriesAccepted)} = ACCEPTED deliveries listed ${accepted.length}`);
   c.expect(counters.deliveriesRejected === refused.length, `deliveriesRejected ${String(counters.deliveriesRejected)} = REJECTED and KEY_UNAVAILABLE deliveries listed ${refused.length}`);
   c.expect(counters.bytesStored === bytes, `bytesStored ${String(counters.bytesStored)} = sum of ACCEPTED sizeBytes ${bytes}`);
@@ -1396,7 +1396,9 @@ async function step10b(w: World): Promise<StepResult> {
     const mine = (r.Contributors ?? []).filter((x) => (x.Keys ?? [])[0] === a.tenantId);
     return mine.length === 0 ? undefined : mine.reduce((sum, x) => sum + (x.ApproximateAggregateValue ?? 0), 0);
   };
-  const terminated = accepted.length + refused.length;
+  // The sweep ends an abandoned lease as REJECTED and counts it on the key row, but writes no processor line.
+  const abandoned = refused.filter((d) => d.reason === 'structural:PROCESSING_ABANDONED').length;
+  const terminated = accepted.length + refused.length - abandoned;
   // Contributor Insights reads the log stream with a delay of minutes.
   const sums = await pollUntil(
     async () => ({ bytes: await report('-tei-top-bytes'), deliveries: await report('-tei-top-deliveries') }),
@@ -1405,7 +1407,7 @@ async function step10b(w: World): Promise<StepResult> {
     30_000,
   );
   c.expect(sums.bytes === bytes, `tei-top-bytes for A -> ${String(sums.bytes)} (bytesStored ${bytes})`);
-  c.expect(sums.deliveries === terminated, `tei-top-deliveries for A -> ${String(sums.deliveries)} (processor-terminated deliveries ${terminated})`);
+  c.expect(sums.deliveries === terminated, `tei-top-deliveries for A -> ${String(sums.deliveries)} (processor-terminated deliveries ${terminated}; ${abandoned} ended by the sweep)`);
   c.note('per-tenant EMF (perTenantMetrics) is off in the demo stack; its record shape is a unit test');
   return c.result('10b');
 }

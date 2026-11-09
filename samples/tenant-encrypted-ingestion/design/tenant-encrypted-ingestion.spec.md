@@ -1157,9 +1157,10 @@ processor. The test waits 5 minutes after each key policy or tag change.
     accepted and one per refused delivery, `inFlight` 0; A's `vendor-key`
     key carries the `TenantId` tag with A's id; the `tei-top-bytes` and
     `tei-top-deliveries` Contributor Insights reports over the run name A
-    with `bytesStored` and the count of processor-terminated deliveries
-    (Contributor Insights lags the log by minutes; the test polls up to
-    five). Per-tenant EMF is off in the demo stack; its record shape is a
+    with `bytesStored` and the count of processor-terminated deliveries,
+    which leaves out the lease the sweep abandoned in step 7c: the sweep
+    counts it on the key row but writes no processor line (Contributor
+    Insights lags the log by minutes; the test polls up to five). Per-tenant EMF is off in the demo stack; its record shape is a
     unit test.
 11. **Offboarding.** URL in flight, `DeleteTenantKey A` -> 202; no version
     under either A prefix; alias gone; key `PendingDeletion`;

@@ -552,7 +552,9 @@ and `deliveriesRejected` as counts, `bytesStored` as the sum of accepted
 `sizeBytes`, `kmsRequests` at least four per accepted delivery, `inFlight`
 0); A's key carries the `TenantId` tag; the `tei-top-bytes` and
 `tei-top-deliveries` reports (`GetInsightRuleReport` over the run) name A
-with the same bytes and the same count of processor-terminated deliveries.
+with the same bytes and the same count of processor-terminated deliveries
+(the lease the sweep abandons in step 7c is on the key row's
+`deliveriesRejected` but not in the processor's log, so not in the rule).
 
 **RoleSessionName** `t-<tenantId>-...` names the tenant in CloudTrail and
 S3 access logs without a join. **TenantId cost allocation tag**: every
