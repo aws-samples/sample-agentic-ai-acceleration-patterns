@@ -4,23 +4,26 @@ SPDX-License-Identifier: MIT-0
 -->
 # Tenant Encrypted Ingestion: Architecture
 
-> **Status: implemented and verified by the integration runs of 2026-11-06 and 2026-11-09.**
-> Last green run: 2026-11-09 (run 11, after the identity-provider change;
-> runs 7 and 9 on 2026-11-06 were green too), eu-central-1, a vendor test account plus a
-> second account owning tenant B's `tenant-key` key (cross-account claim
-> exercised), about 65 minutes end to end; CloudFormation create 1 min 10 s
-> (test aid) and 2 min 17 s (demo stack), delete 3 min 9 s and 1 min 35 s, from
-> the stack events of that run (N-4: each under 5 minutes). Coverage: spec §10 steps 1 to 11 (with 7b
-> and 7c) and the driver's step 0 prelude all passed; step 12 ran as
-> `scripts/integ.sh`'s teardown: both stacks destroyed, no stack with the
-> sample's prefix left, only the two `vendor-key` keys left, both
-> `PendingDeletion`, and the second account's three test keys scheduled for
-> deletion. Unit tests: 289 and growing on 2026-11-06; see the build.
-> **Not exercised:** the access-log
-> `Requester` check (step 10) is best effort and no access log arrived
-> within 3 minutes; `kmsRequests` against CloudTrail is recorded, not
-> checked (6 against 19, [§11](#11-observability-and-per-tenant-cost-attribution));
-> the standard §6 security scans ran on 2026-11-06 and are dispositioned in the
+> **Status: implemented and verified by the integration run of 2026-11-09
+> in eu-central-1**, a vendor test account plus a second account owning
+> tenant B's `tenant-key` key (cross-account claim exercised), about 65
+> minutes end to end. Coverage: spec §10 steps 1 to 11 (with 7b and 7c) and
+> the driver's step 0 prelude passed; step 12 ran as `scripts/integ.sh`'s
+> teardown: both stacks destroyed, no stack with the sample's prefix left,
+> only the two `vendor-key` keys left, both `PendingDeletion`, and the
+> second account's three test keys scheduled for deletion. The runs of
+> 2026-11-06 were green too; their stack events gave the CloudFormation
+> timings: create 1 min 10 s (test aid) and 2 min 17 s (demo stack), delete
+> 3 min 9 s and 1 min 35 s (N-4: each under 5 minutes). Unit tests: 310 on
+> 2026-11-09.
+> **Not exercised:** the bring-your-own issuer path (`aud`, the header
+> `typ: at+jwt`, `identityApi: 'none'`) is covered by unit tests only; the
+> integration run used Cognito tokens from tenant-identity (ADR-0019). The
+> access-log `Requester` check (step 10) is best effort; on 2026-11-06 no
+> access log arrived within 3 minutes. `kmsRequests` against CloudTrail is
+> recorded, not checked (ADR-0023; 2026-11-06: 6 against 19,
+> [§11](#11-observability-and-per-tenant-cost-attribution)). The standard
+> §6 security scans are dispositioned in the
 > [threat model](./threat-model.md#security-review).
 
 This file describes what is deployed. The design trail is the
@@ -51,38 +54,55 @@ construct with a demo stack (ADR-0012).
 - The **vendor** owns every role and calls `/platform/*` with SigV4
   (`AWS_IAM`).
 - A **tenant** is a tenant-identity tenant. Its id matches
-  `^[A-Za-z0-9][A-Za-z0-9-]{1,34}$` (spec §7.0, so ULIDs pass), checked in
+  `^[A-Za-z0-9][A-Za-z0-9-]{1,34}$` (spec §7.0; upper case admitted so
+  tenant-identity's ULIDs pass, ADR-0020), checked in
   the authoriser (401), the Smithy path pattern (400), before every
   `AssumeRole`, and on the object key's second segment in the processor.
-- A **tenant user** calls `/tenant/*` with a tenant-identity access token
-  (5-minute lifetime), or one from any OIDC issuer given as `identity`
-  (README "Bring your own identity provider"; `identityApi: 'none'` then
-  skips the scope registration). The TOKEN authoriser verifies the token
-  contract (signature, `iss`, `exp`, the client by `client_id` or else
-  `aud`, the access-token mark by `token_use` or else the header `typ:
-  at+jwt`, `sub`, no `tenants`,
-  one valid `tenant_id`), answers every refusal with 401, and passes
-  `tenantId`, `sub`, `scope` and the usage key (ADR-0011). The handler
-  checks `ingestion/deliver` or `ingestion/read` per route; both scopes are
-  registered in tenant-identity's catalogue at deploy.
+- A **tenant user** calls `/tenant/*` with an access token from the OIDC
+  issuer given as `identity`: tenant-identity's (5-minute lifetime) in the
+  demo stack and the integration test, or any issuer that meets the token
+  contract (README "Bring your own identity provider") (ADR-0019). The
+  TOKEN authoriser verifies the contract (RS256 signature, `iss`, `exp`,
+  the client by `client_id` or else `aud`, the access-token mark by
+  `token_use` or else the header `typ: at+jwt`, `sub`, no `tenants`, one
+  valid `tenant_id`), answers every refusal with 401, and passes
+  `tenantId`, `sub`, `scope` and the usage key (ADR-0011, ADR-0019). The
+  handler checks `ingestion/deliver` or `ingestion/read` per route. The
+  `identityApi` prop is required: tenant-identity's API, whose catalogue
+  then receives both scopes at deploy through `ScopeRegistration`, or
+  `'none'` for a bring-your-own issuer, which skips the registration and
+  leaves the scopes `ingestion/deliver`, `ingestion/read` and the
+  `tenant_id` claim to the deployer (ADR-0019). The construct reads no
+  tenant-identity parameter; the demo stack does
+  ([§12](#12-deployment-and-teardown)).
 - The **tenant's account** appears only for `tenant-key`, owning a key
   tagged `TenantId=<t>` whose policy trusts the tenant roles ([§5.2](#52-tenant-key-template)).
 - A **consumer** role (`consumerRoles`, deployer-owned) reads
   `documents/<t>/` under its own session tagged with the tenant.
-- Seven **base roles** (one per function) and three **tenant roles**
-  (assumed with a `TenantId` session tag) carry the work; every call made
+- Eight construct functions run under seven **base roles** (one per
+  function, except the key drain, which runs under `platformRole`), and
+  three **tenant roles** (assumed with a `TenantId` session tag) carry the
+  work; every call made
   for a tenant is signed by a tenant-role session (ADR-0003). The
   `ScopeRegistration` role, the `LogDrain` role and CDK's singleton
   provider roles ([§3](#3-components)) sit outside the pipeline.
 
 ## 3. Components
 
-Every function: Node.js 24, ARM64, esbuild with the SDK bundled, JSON log
-format, its own `DESTROY` log group, the role passed in so CDK adds no
-managed policy (`src/construct/functions.ts`). Each bundle copies
-`re2.wasm` beside `index.js` (an `afterBundling` hook): the Smithy SSDK
-validates `@pattern` with re2-wasm, which loads `re2.wasm` from `__dirname`
-at init.
+The eight construct functions are built by `createFunction`
+(`src/construct/functions.ts`): Node.js 24, ARM64, esbuild with the SDK
+bundled, JSON log format, its own `DESTROY` log group with write granted to
+the role, and the role passed in so CDK adds no managed policy. Each of
+these bundles copies `re2.wasm` beside `index.js` (an `afterBundling`
+hook): the Smithy SSDK validates `@pattern` with re2-wasm, which loads
+`re2.wasm` from `__dirname` at init (ADR-0024). The other functions differ:
+`LogDrain` is inline code (`lambda.Code.fromInline`) under a role with no
+permissions, beside a `DESTROY` log group it never writes to;
+`ScopeRegistration` is a `NodejsFunction` whose role carries
+`AWSLambdaBasicExecutionRole` beside tenant-identity's policy (ADR-0015);
+the demo validators are plain `NodejsFunction`s (`src/demo.cdk.ts`), each
+with its own `DESTROY` log group and a logs-only role, and `test-switch`'s
+role also reads its SSM mode parameter (`grantRead`).
 
 | Resource | Role it runs under | Code (under `src/`) |
 |---|---|---|
@@ -101,11 +121,11 @@ at init.
 | `SweepFunction`, hourly (15 min) | `sweepRole` -> `tenantProcessRole` | `sweep/handler.ts` |
 | `RegistryWatchFunction`, stream filter `SK = KEY`, on-failure queue | `watchRole` | `registry-watch/handler.ts` |
 | `KeyDrainFunction` + `Custom::TenantKeyDrain` | `platformRole` | `platform/drain.ts` |
-| `ScopeRegistration` (copied, ADR-0015) | tenant-identity's `PlatformInvokePolicy` less a Deny on `/platform/tenants*` | `shared/scope-registration.*.ts` |
+| `ScopeRegistration` (copied, ADR-0015; absent with `identityApi: 'none'`, ADR-0019) | tenant-identity's `PlatformInvokePolicy` less a Deny on `/platform/tenants*`, plus `AWSLambdaBasicExecutionRole` | `shared/scope-registration.*.ts` |
 | `LogDrain` (90 s hold on log-group deletion; copied, ADR-0015) | a role with no permissions | `shared/log-drain.ts` |
-| Alarms: key binding; `PutKeyPolicy` (rule, audit queue, alarm; ADR-0016) | - | `construct/alarms.ts` |
+| Alarms: key binding; `PutKeyPolicy` (rule, audit queue, alarm; ADR-0016). No alarm actions: routing them is the deployer's (threat model M-25) | - | `construct/alarms.ts` |
 | Three Contributor Insights rules | - | `construct/observability.ts` |
-| Demo validators `pdf-pages`, `test-switch` | own logs-only roles | `../examples/validator-pdf-pages`, `validators/` |
+| Demo validators `pdf-pages`, `test-switch` | own logs-only roles; `test-switch`'s also reads its SSM parameter | `../examples/validator-pdf-pages`, `validators/` |
 
 The construct creates none of its dependencies and publishes nothing; the
 demo stack publishes the parameters ([§12](#12-deployment-and-teardown)).
@@ -121,7 +141,7 @@ plus `sts:TagSession` on exactly one tenant role (`src/construct/roles.ts`).
 |---|---|
 | `authoriserRole` | its log group only |
 | `apiRole` | assume `tenantUploadRole` |
-| `processorRole` | assume `tenantProcessRole`; receive, delete, change visibility on the queue; `events:PutEvents` on the bus; invoke each bound validator; `dynamodb:UpdateItem` with `dynamodb:Attributes` within `[PK, SK, keyStatus, lastKeyCheckAt, updatedAt]` and `ReturnValues NONE` (sets `REVOKED`) |
+| `processorRole` | assume `tenantProcessRole`; receive, delete, change visibility on the queue; `events:PutEvents` on the bus; invoke each bound validator; `RevokeKeyRow`: `dynamodb:UpdateItem` on the table with `dynamodb:Attributes` within `[PK, SK, keyStatus, lastKeyCheckAt, updatedAt]` and `ReturnValues NONE`, with no `LeadingKeys` or sort-key condition, so IAM admits those attributes on any item; that the processor writes only key rows (to set `REVOKED`) is enforced by code, and the registry watch sees only the case where such a write recreates a removed key row (`INSERT` while a tombstone is live) |
 | `keyFactoryRole` | `kms:CreateKey` with `KeySpec SYMMETRIC_DEFAULT`, `KeyOrigin AWS_KMS`, `KeyUsage ENCRYPT_DECRYPT`, `MultiRegion false`; `kms:TagResource` with `Null aws:RequestTag/TenantId = false` and `aws:TagKeys` within `[TenantId, tei:stack]`; the statement 1 actions of [§5.1](#51-vendor-key-as-built) on this account's keys and tenant aliases; `PutItem`, `UpdateItem`, `ConditionCheckItem`, `GetItem` on the table, no attribute Deny (ADR-0017); assume `tenantPlatformRole`; Deny `PutKeyPolicy`, `CreateGrant`, `UntagResource`; the tenant-key use Deny; with `tenantThrottle`, `apigateway:POST`/`GET` on `/apikeys`, `/usageplans`, `/usageplans/*/keys` |
 | `platformRole` | assume `tenantPlatformRole`; the statement 1 actions of [§5.1](#51-vendor-key-as-built) on this account's keys; `ListKeys`; table-wide `GetItem`, `Query`, `Scan`, `UpdateItem`, `DeleteItem`, `ConditionCheckItem`; Deny `UpdateItem` naming `keyArn` or `tier`; Deny `CreateKey`, `TagResource`, `UntagResource`, `PutKeyPolicy`, `CreateGrant`; the tenant-key use Deny; with `tenantThrottle`, `apigateway:DELETE` on `/apikeys/*` |
 | `sweepRole` | assume `tenantProcessRole`; `Query` on the GSIs; `GetItem`, `UpdateItem` with the same `keyArn`/`tier` Deny; `events:PutEvents` on the bus (ADR-0017) |
@@ -264,7 +284,7 @@ by a principal the key policy does not admit is refused by KMS (4a-i), not
 by the principal-scoped bucket Deny. The bucket Deny is observed with the
 AWS managed `aws/s3` key: in step 5, `TestProbeRole` naming A's key was
 refused by KMS, and naming `aws/s3` on `ingest/<A>/` and `documents/<A>/`
-by S3.
+by S3 (ADR-0023).
 
 **A broken key is a 400.** S3 returns 400 `KMS.DisabledException` for a
 disabled key and 400 `KMS.KMSInvalidStateException` for a key pending
@@ -298,10 +318,10 @@ apart by attribute name; a unit test asserts the schemas share only `PK`,
   30 days on, on `EXPIRED`, `REJECTED` and `KEY_UNAVAILABLE` rows only.
 - `statusBucket`: `OPEN` while open; `OWED` on a terminal row whose event
   is not yet on the bus, removed when `eventPublishedAt` is set; `EXPIRED`
-  publishes no event and drops it at once.
+  publishes no event and drops it at once (ADR-0021).
 - GSI `statusBucket-urlExpiresAt`: open and owed rows. GSI `keyStatus`: key
   rows only (no delivery row carries `keyStatus`), so the sweep finds
-  `REVOKED` and `ACTIVE` keys without `Scan`.
+  `REVOKED` and `ACTIVE` keys without `Scan` (ADR-0021).
 - `CreateDelivery` creates the row (`attribute_not_exists(PK)`) and adds 1
   to `inFlight` in one transaction conditioned on `inFlight <
   maxInFlightPerTenant`; every terminal transition subtracts it in the same
@@ -353,7 +373,8 @@ nothing, conditional on the status read.
 `Forbidden` (403), `NotFound` (404), `Conflict`, `TenantKeyUnavailable`
 (409), `KeyNotUsable` (422), `TooManyDeliveries` (429), `InternalError`
 (500). Messages are fixed strings: no `tenantId` in a `/tenant/*` error, no
-key ARN, no echoed input (`src/api/errors.ts`).
+key ARN, no echoed input (`src/api/errors.ts`). `DeleteTenantKey` raises
+no `Conflict`: each step is idempotent, so a repeat resumes (ADR-0022).
 
 **Usage-plan key** (N-8, ADR-0011). With `tenantThrottle`: `apiKeySource:
 AUTHORIZER`, `apiKeyRequired` on every `/tenant/*` method, a usage plan on
@@ -508,7 +529,11 @@ processor line carried `tenantId`, `status`, `sizeBytes`, `kmsRequests`.
 independent of tenant count: `<addr>-tei-top-deliveries` (processor,
 `tenantId` and `status`, count), `<addr>-tei-top-bytes` (processor,
 accepted `sizeBytes` summed by `tenantId`), `<addr>-tei-top-requests` (API
-access log, `/tenant/deliveries` by `tenantId` and `status`).
+access log, `/tenant/deliveries` and `/tenant/deliveries/{deliveryId}` by
+`tenantId` and `status`). Gap: `tei-top-deliveries` counts only the
+processor's `delivery processed` lines; deliveries the sweep ends
+(`EXPIRED`, `PROCESSING_ABANDONED`) log to the sweep's group and are not
+counted there. The registry counters and the delivery rows hold them.
 
 **EMF, opt-in** (`perTenantMetrics`, default off): one record per delivery
 in `TenantEncryptedIngestion` with dimensions `TenantId`, `Status` and
@@ -526,21 +551,41 @@ metered as four plus one per validator for an accepted delivery (PUT,
 structural read, one per validator GET, two for the copy;
 `src/shared/metering.ts`).
 
-**Known gap: `kmsRequests` does not match CloudTrail.** For one accepted
-delivery with two validators the processor metered 6; CloudTrail held 19
-KMS events for the processor session. The breakdown of the 19 has not been
-done (the driver's note names the probe and S3's own retries as
-candidates). The attribution formula for KMS is pending until the
-accounting is reconciled. The other drivers are per tenant: `bytesStored`
-(S3 storage), deliveries (Lambda, SQS, EventBridge, DynamoDB), `/tenant`
-requests (API Gateway). The sweep, the watch, Contributor Insights and log
-storage carry no tenant and are apportioned by deliveries.
+**Attribution formulas.** Each shared cost is attributed to a tenant as
+its metered driver times the service's unit price in the Region:
+
+| Cost | Per-tenant driver (where it is read) | Formula |
+|---|---|---|
+| S3 storage | `bytesStored` (registry counter) | `bytesStored` (GB) × S3 Standard GB-month price, prorated over the month |
+| S3 requests | deliveries (`deliveriesAccepted + deliveriesRejected`) | deliveries × (PUT, HEAD, GET, COPY and DELETE requests per delivery, plus one GET per validator) × the request prices |
+| Pipeline compute and messaging | deliveries | deliveries × (processor GB-s per delivery × Lambda GB-s price + Lambda request price + SQS requests per delivery × SQS request price + EventBridge events per delivery (`Object Created`, `Delivery*`) × event price + DynamoDB write and read request units per delivery × on-demand unit prices), with validator GB-s added per validator |
+| KMS requests | `kmsRequests` (registry counter, metered as 4 + one per validator for an accepted delivery) | `kmsRequests` × KMS request price |
+| KMS key-month | the `TenantId` cost allocation tag on `vendor-key` keys | billed per tenant by Cost Explorer once the tag is activated; `tenant-key` keys bill to the tenant's account |
+| API Gateway | `/tenant/*` requests (`tei-top-requests`, the access log's `tenantId`) | requests × REST API request price |
+
+The figures per delivery (GB-s, requests, units) are read from one
+delivery's logs and CloudTrail; the sample does not publish them as
+constants. **Known gap: `kmsRequests` undercounts CloudTrail.** On
+2026-11-06, for one accepted delivery with two validators, the processor
+metered 6 and CloudTrail held 19 KMS events for the processor session; the
+19 have not been broken down (the probe and S3's own retries are the
+candidates). The KMS formula uses the metered count, so it is a lower
+bound until the accounting is reconciled; the run checks the count only
+informationally (ADR-0023).
+
+**Unattributable remainder**: the sweep, the registry watch, the key drain
+and log drain, Contributor Insights, the alarms and audit queue, log
+ingestion and storage, the access-log bucket, the DynamoDB stream and PITR
+carry no tenant. Apportion them by each tenant's share of deliveries in
+the period; a vendor that prefers an equal split per active tenant can use
+that instead, and should say which.
 
 ## 12. Deployment and teardown
 
 **Demo stack** `TenantEncryptedIngestion` (`src/demo.cdk.ts`): cdk-nag on
 the app; tenant-identity's pool and API read at deploy from
-`/application-plane/shared/identity/`; validators `pdf-pages` (limit 3)
+`/application-plane/shared/identity/` by the demo stack, not the construct
+(ADR-0019); validators `pdf-pages` (limit 3)
 and `test-switch` (mode in SSM); roles, tiers and timings from context. A
 placeholder build carries a CloudFormation rule that refuses to deploy.
 
@@ -564,39 +609,46 @@ their groups go.
 (KMS use on `*`, Denies on policy, grant and tag changes, so any denial
 comes from a key or bucket policy), `TestConsumerRole`, a scratch bucket
 and key from the same builders with a mistaken Allow for the probe role,
-and the capture queue, redrive and access-log reader roles.
+`TestScratchWriterRole` (the scratch key's tenant role, read and write on
+the scratch bucket; `test/integ/test-aid-stack.ts`), and the capture
+queue, redrive and access-log reader roles.
 
 ## 13. Integration test
 
 `scripts/integ.sh` with `test/integ/app.ts` and `test/integ.ingestion.ts`,
-driven by the CDK CLI; the driver reads the test's own stacks' outputs from
-`--outputs-file` as test-only wiring, standing for the construct
-properties a consumer reads in its own CDK code (ADR-0014):
+driven by the CDK CLI. The driver reads `apiUrl` and `bucketName` from the
+demo stack's published SSM parameters and the rest from the test's own
+stacks' outputs (`--outputs-file`), as test-only wiring standing for the
+construct properties a consumer reads in its own CDK code (ADR-0014). The
+script's steps, by its own labels:
 
-1. **Account guard**: refuses an account without the `tei:test-account`
-   Organizations tag or the SSM parameter
-   `/tenant-encrypted-ingestion/test-account = true` (a member account
-   cannot read its own tags). The run passed on the parameter.
-2. **Fixture rule**: the tenant-identity shared pool is a long-lived fixture
-   of the test account; the script reuses it, deploys it only when absent,
-   and never destroys it.
-3. Deploys the test-aid stack and `TenantEncryptedIngestionInteg` with the
-   test profile (`maxReceiveCount 1`, `visibilityTimeoutFactor 2`,
-   `abandonGraceSeconds 60`, `uploadUrlTtlSeconds 120`,
-   `maxInFlightPerTenant 5`, `tenantThrottle`), and with
-   `TEI_TENANT_KEY_PROFILE` a second account for `tenant-key`.
-4. Runs the steps 0 (prelude: tenants A, B, D) to 11, named as spec §10;
-   step 8 changes B's key in the second account. Before it exits, the
-   driver deletes the tenants step 0 created in the shared pool
-   (`DELETE /platform/tenants/{tenantId}`) and names any it could not
-   delete; the pool itself stays.
-5. Teardown (step 12) from the EXIT trap: `cdk destroy --all`, then fail on
-   any stack with the prefix or tagged key not `PendingDeletion`.
+- **`0: account guard`**: refuses an account without the
+  `tei:test-account` Organizations tag or the SSM parameter
+  `/tenant-encrypted-ingestion/test-account = true` (a member account
+  cannot read its own tags). The run of 2026-11-09 passed on the
+  parameter.
+- **`1: tenant-identity shared-pool`**: the shared pool is a long-lived
+  fixture of the test account; the script reuses it, deploys it only when
+  absent, and never destroys it.
+- **`2: synthesise and deploy`** the test-aid stack and
+  `TenantEncryptedIngestionInteg` with the test profile
+  (`maxReceiveCount 1`, `visibilityTimeoutFactor 2`, `abandonGraceSeconds
+  60`, `uploadUrlTtlSeconds 120`, `maxInFlightPerTenant 5`,
+  `tenantThrottle`), and with `TEI_TENANT_KEY_PROFILE` a second account
+  for `tenant-key`.
+- **`3: spec §10 steps`**: the driver runs step 0 (prelude: tenants A, B,
+  D) to step 11, named as spec §10; step 8 changes B's key in the second
+  account. Before it exits, the driver deletes the tenants step 0 created
+  in the shared pool (`DELETE /platform/tenants/{tenantId}`) and names any
+  it could not delete; the pool itself stays.
+- **`teardown (spec §10 step 12)`**, from the EXIT trap: `cdk destroy
+  --all`, then fail on any stack with the prefix or tagged key not
+  `PendingDeletion`.
 
 **Lifetimes.** Access tokens live 5 minutes and several steps wait longer,
 so a 401 on a run-issued token re-issues it and retries once. Sessions are
 3600 s. After a key policy or tag change the driver waits up to 5 minutes.
-**Runtime** about 73 minutes (spec target 60 to 90); the dollar cost was
+**Runtime** about 65 minutes (spec target 60 to 90); the dollar cost was
 not measured (spec target under $2).
 
 ## 14. Known gaps and residuals
@@ -606,21 +658,26 @@ The design's residuals are the threat model's
 compromised code acting as one tenant, key-factory binding, the
 administrator's `PutKeyPolicy`, presigned URIs in access logs, and more).
 
-Found and fixed between the two green runs: integration run 8 ran beside
-another sample's six-stack deploy in the same account, and the API Gateway
-control plane throttled the key factory's `CreateApiKey` and
-`CreateUsagePlanKey` (`TooManyRequestsException`, an account-wide limit).
-The SDK's three quick retries gave up, `CreateTenantKey` answered 500 and
-the log held no cause. `ensureApiKey` now retries a throttle with backoff
+Found and fixed on 2026-11-06, between the green runs of that day: an
+integration run beside another sample's six-stack deploy in the same
+account met the API Gateway control plane's account-wide throttle on the
+key factory's `CreateApiKey` and `CreateUsagePlanKey`
+(`TooManyRequestsException`). The SDK's three quick retries gave up,
+`CreateTenantKey` answered 500 and the log held no cause. `ensureApiKey`
+(`src/platform/create-tenant-key.ts`) now retries a throttle with backoff
 (1, 2, 4, 8 s, five tries; the row stays `CREATING` so a repeated call
-resumes), and an unmodelled error behind a 500 is logged with its type
-(`src/platform/handler.ts`, `src/shared/errors.ts`).
+resumes) (ADR-0025), and an unmodelled error behind a 500 is logged with
+its type (`src/platform/handler.ts`, `src/shared/errors.ts`).
 
 Open:
 
-- **`kmsRequests` against CloudTrail** (6 against 19); KMS attribution
-  pending ([§11](#11-observability-and-per-tenant-cost-attribution)).
-- **Access-log `Requester`** not observed within 3 minutes (best effort).
+- **`kmsRequests` against CloudTrail** (2026-11-06: 6 against 19); the
+  KMS formula uses the metered count as a lower bound
+  ([§11](#11-observability-and-per-tenant-cost-attribution)).
+- **Access-log `Requester`** not observed within 3 minutes on 2026-11-06
+  (best effort).
+- **Bring-your-own issuer** (`aud`, `typ: at+jwt`, `identityApi: 'none'`)
+  is covered by unit tests only (ADR-0019).
 - **Offboarding at API Gateway**: spec step 11 expects 403 (API key gone);
   the run saw 409 `TenantKeyUnavailable` from the handler. Why API Gateway
   still admitted the request was not established; the tenant is refused
@@ -631,12 +688,14 @@ Open:
   test running `check-no-new-access` against a baseline holding every Deny
   is not implemented, since it calls an AWS API. The template tests in
   `test/key-policy.test.ts` and integ step 5 on the scratch key are the
-  control (ADR-0002 note, threat model M-17).
+  control (ADR-0023, threat model M-17).
 
 Refinements of the specification, implemented as described above:
 
 - `statusBucket = OWED` and the sweep's owed-event pass; the `keyStatus`
-  GSI; `boundTenantId` on `KEYARN#`.
+  GSI (ADR-0021); `boundTenantId` on `KEYARN#`.
+- The tenant-id grammar admits upper case (ADR-0020); the error model as
+  built, without `Conflict` on `DeleteTenantKey` (ADR-0022).
 - `sweepRole` holds `events:PutEvents` and is exempt from the bus Deny;
   `keyFactoryRole` holds `GetItem`, a table-wide registry grant (spec:
   `KEY`, `KEYARN#`, `SYSTEM` items) and the API Gateway routes (ADR-0017).
@@ -659,7 +718,7 @@ Refinements of the specification, implemented as described above:
 - Another tenant's `keyArn` is 422 (spec step 1: 409); a disabled or
   pending-deletion key is an S3 400 (spec steps 8, 11: 403).
 - `Forbidden` is a code §5.3 lacks; `RotationLimitReached` is a 409
-  `Conflict` message, not a code.
+  `Conflict` message, not a code (ADR-0022).
 - The `PutKeyPolicy` alarm is an EventBridge rule plus `TriggeredRules`,
   not a CloudTrail metric filter.
 - The integration profile's `uploadUrlTtlSeconds` is 120, not 60.

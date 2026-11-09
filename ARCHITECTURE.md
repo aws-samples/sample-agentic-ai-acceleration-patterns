@@ -60,11 +60,17 @@ access token with this shape, whichever provider issued it:
 
 | Claim | Meaning |
 |---|---|
-| `iss`, `exp`, `client_id` | issuer, expiry, and app client, all verified |
-| `token_use: "access"` | an access token, never an ID token |
+| `iss`, `exp`, `client_id` (or `aud` for issuers that emit no `client_id`) | issuer, expiry, and app client in the allowlist, all verified |
+| `token_use: "access"` (or the JWT header `typ: at+jwt`) | an access token, never an ID token |
 | `sub` | the tenant user |
 | `tenant_id` | the one tenant the token acts for |
 | `scope` | space-separated API scopes |
+
+`tenant-identity` emits the first form of each (`client_id`, `token_use`),
+and every sample accepts it. The alternatives in brackets are accepted by
+`tenant-encrypted-ingestion` only (its ADR-0019), so its construct takes
+any OIDC issuer that meets the rest of the contract;
+`agentic-runtime-isolation` still requires `client_id` and `token_use`.
 
 A token that names several tenants (a `tenants` claim) is first narrowed to
 one through an RFC 8693 token exchange; a component that needs a single
@@ -271,7 +277,7 @@ rest).
 | [`control-plane`](./samples/control-plane/) | control plane: tenant and cell lifecycle | a vendor IdP | `/control-plane/tenant-api-url`; scripts write `/application-plane/cells/*` and `/application-plane/tenants/*` |
 | [`tenant-identity`](./samples/tenant-identity/) | tenant identity: the token contract on Cognito | nothing | `/application-plane/shared/identity/*` |
 | [`agentic-runtime-isolation`](./samples/agentic-runtime-isolation/) | Agentic runtime isolation: runtime, tools and entitlements for multi-tenant agents. Enforced isolation at the invocation, delegation and data layers, with a Policy and interceptor check at the tools layer: one ingress, the only principal each AgentCore Runtime trusts, verifies the identity token, resolves the grant (agent needs ∪ agent tools ∩ tenant tools ∩ user tools) from an entitlement store, mints a 5-minute transaction token (the identity token never leaves the ingress) and invokes the agent's Runtime with tenant-scoped credentials from an always-on TVM, in a fresh microVM session per request by default (with `session` set, one per tenant, the default scope, or per user); one tools gateway by default (more optional), each with its own Policy engine, serves the tools: a REQUEST interceptor is the per-tool wall and signs a tenant context, Policy then admits the target, and each tool assumes its own tenant role | `tenant-identity` `shared-pool` (its parameters; the integration driver uses its `/platform/*` API to register scopes and create demo tenants) | constructs `SharedIngress`, `AgentBackend`, `ToolTarget`, `TokenSigner`, `EntitlementStore`; one JSON parameter `/application-plane/shared/agent-runtime/ingress` plus registry rows `backends/<name>` and `tools/<target>` |
-| [`tenant-encrypted-ingestion`](./samples/tenant-encrypted-ingestion/) | data layer: per-tenant encrypted ingestion; one bucket and pipeline for every tenant, each tenant's documents encrypted with its own KMS key (vendor-owned `vendor-key` or tenant-owned `tenant-key`) bound to its prefixes by key policy, tenant-scoped roles with ABAC on `TenantId`, write-once presigned uploads, a deployer-extensible validator chain before anything lands, cryptographic offboarding | `tenant-identity` `shared-pool` (its parameters and its `PUT|GET|DELETE /platform/scopes/{scope}`) | construct `TenantEncryptedIngestion`; `/application-plane/shared/ingestion/*` |
+| [`tenant-encrypted-ingestion`](./samples/tenant-encrypted-ingestion/) | data layer: per-tenant encrypted ingestion; one bucket and pipeline for every tenant, each tenant's documents encrypted with its own KMS key (vendor-owned `vendor-key` or tenant-owned `tenant-key`) bound to its prefixes by key policy, tenant-scoped roles with ABAC on `TenantId`, write-once presigned uploads, a deployer-extensible validator chain before anything lands, cryptographic offboarding | `tenant-identity` `shared-pool` (demo stack, integration test and demo only: its parameters and its `PUT|GET|DELETE /platform/scopes/{scope}`); the construct takes any issuer meeting §2.1, with `identityApi: 'none'` | construct `TenantEncryptedIngestion`; `/application-plane/shared/ingestion/*` |
 
 `agentic-runtime-isolation` vends the data layer's tenant-scoped
 credentials: its TVM is always on and signs every model call
@@ -286,4 +292,3 @@ key's policy (statement 2b), and the deployer grants the role's own read
 of `documents/<t>/*`; nothing in either sample does that automatically, and
 neither sample's integration test exercises it. Memory and retrieval have
 no sample yet.
-
