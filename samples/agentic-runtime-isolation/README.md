@@ -79,6 +79,18 @@ only that tenant's data. The long-form data path, frame by frame, is
 [`diagrams/CAPTION.md`](./diagrams/CAPTION.md); components and their code
 locations are in [`architecture.md`](./architecture.md#components).
 
+![Components: the request path runs tenant user, ingress, agent, tools gateway, tool, tenant data across three trust zones; a second row of shared components (entitlement store, backend registry, token signer, tenant limits, TVM) is fed by the ingress, the tools gateway and the tool, and the entitlement API writes the store for the vendor and tenant admins; each box names the pattern it carries](./diagrams/agentic-runtime-isolation.components.drawio.svg)
+
+The same path without the AWS icons: each box is one component and its
+pill names the pattern it carries. The ingress runs the shared pipeline and
+uses the entitlement store (grant rule), the backend registry (discovery),
+the token signer (transaction token), the tenant limits (per-tenant rate
+limit) and the TVM (token vending machine); the agent runs in a pooled
+Runtime; the tools gateway admits a call with its interceptor and policy; the
+tool assumes an ABAC tenant role and reads tenant-keyed items; the
+entitlement API gives the vendor and tenant admins asymmetric grants on the
+store.
+
 ## Tenant isolation
 
 Everything is pooled: one ingress, one Runtime per agent, one entitlement
