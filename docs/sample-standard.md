@@ -39,6 +39,7 @@ multi-tenant system, and the label narrows how readers place them.
 7. [Sample README](#7-sample-readme)
 8. [Root README](#8-root-readme)
 9. [Definition of done](#9-definition-of-done)
+10. [Pull request review](#10-pull-request-review)
 
 ## 1. Layout
 
@@ -616,3 +617,26 @@ A sample is ready to merge when every line is true:
 - [ ] Sample README has every applicable §7 section in order.
 - [ ] Root README table row, section, and Contents entry added;
       `ARCHITECTURE.md` concept map and parameter namespace updated.
+
+## 10. Pull request review
+
+A reviewer of a sample pull request, new sample or change to one, confirms
+every §9 line against the tree, not against the pull request description.
+Three lines are missed most often and are restated here:
+
+- **Both diagrams present and current** (§3). `diagrams/<name>.components.drawio`
+  with its `.drawio.svg`, and `diagrams/<name>.drawio` with its `.drawio.svg`,
+  exist; both are embedded in the README's Architecture section, components
+  first, each with its one-sentence data path; both show the components the
+  pull request leaves in place. A pull request that ships the architecture
+  diagram alone, or changes a component without changing the diagrams, is not
+  ready.
+- **Design trail current** (§2). The specification reads as built, with no
+  dated notes; every implementation-time decision has an ADR in the same
+  change; the ADR index lists it.
+- **Evidence dated after the code** (§5, §6). The integration run and the scan
+  results in the pull request description carry dates later than the last
+  code change.
+
+A missing line is a change request on the pull request, not a note for a
+follow-up.
