@@ -989,18 +989,47 @@ async function step7b(w: World): Promise<StepResult> {
     c.expect(inDlq, `the delivery's Object Created message is in deadLetterQueue (DLQ depth before ${dlqBefore})`);
 
     // Redrive under the redriveOperatorRole, which the queue's Deny exempts (§7.7).
+    // A move task on a standard queue samples the queue and can report
+    // COMPLETED with 0 moved while the one message is still there (runs 6 and
+    // 10, 2026-11-06 and 2026-11-09), so the check is that the message LEFT
+    // the DLQ, with up to three tasks.
     if (inDlq) {
       await sleep(5000);
       const operator = new SQSClient({ region: REGION, credentials: await assume(w.aid.TestRedriveOperatorRoleArn) });
-      try {
-        await operator.send(new StartMessageMoveTaskCommand({ SourceArn: w.demo.DeadLetterQueueArn, DestinationArn: w.demo.QueueArn }));
-        const task = await pollUntil(
-          async () => (await operator.send(new ListMessageMoveTasksCommand({ SourceArn: w.demo.DeadLetterQueueArn, MaxResults: 1 }))).Results?.[0],
-          (r) => ['COMPLETED', 'FAILED', 'CANCELLED'].includes(r?.Status ?? ''),
-          180_000,
-          10_000,
+      const stillInDlq = async () => {
+        const r = await sqs.send(
+          new ReceiveMessageCommand({ QueueUrl: w.demo.DeadLetterQueueUrl, MaxNumberOfMessages: 10, WaitTimeSeconds: 5, VisibilityTimeout: 1 }),
         );
-        c.expect(task?.Status === 'COMPLETED' && (task.ApproximateNumberOfMessagesMoved ?? 0) >= 1, `StartMessageMoveTask as redriveOperatorRole -> ${task?.Status} moved ${task?.ApproximateNumberOfMessagesMoved ?? 0}${task?.FailureReason !== undefined ? ` ${task.FailureReason}` : ''}`);
+        return (r.Messages ?? []).some((m) => safeJson(m.Body ?? '').detail?.object?.key === dropKey);
+      };
+      try {
+        let moved = 0;
+        let status = '';
+        let attempts = 0;
+        let left = false;
+        while (!left && attempts < 3) {
+          attempts++;
+          await operator.send(new StartMessageMoveTaskCommand({ SourceArn: w.demo.DeadLetterQueueArn, DestinationArn: w.demo.QueueArn }));
+          const task = await pollUntil(
+            async () => (await operator.send(new ListMessageMoveTasksCommand({ SourceArn: w.demo.DeadLetterQueueArn, MaxResults: 1 }))).Results?.[0],
+            (r) => ['COMPLETED', 'FAILED', 'CANCELLED'].includes(r?.Status ?? ''),
+            180_000,
+            10_000,
+          );
+          status = task?.Status ?? 'unknown';
+          moved += task?.ApproximateNumberOfMessagesMoved ?? 0;
+          if (status !== 'COMPLETED') {
+            c.expect(false, `StartMessageMoveTask as redriveOperatorRole -> ${status}${task?.FailureReason !== undefined ? ` ${task.FailureReason}` : ''}`);
+            break;
+          }
+          left = !(await pollUntil(stillInDlq, (present) => !present, 30_000, 5_000));
+          if (!left) {
+            await sleep(5000);
+          }
+        }
+        if (status === 'COMPLETED') {
+          c.expect(left, `StartMessageMoveTask as redriveOperatorRole -> the message left the DLQ (${attempts} task${attempts === 1 ? '' : 's'}, moved ${moved})`);
+        }
       } catch (error) {
         c.expect(false, `StartMessageMoveTask as redriveOperatorRole -> ${errorName(error)}`);
       }
