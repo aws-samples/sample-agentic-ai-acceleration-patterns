@@ -51,6 +51,9 @@ export interface ValidatedRequest {
   readonly noToolsGranted?: boolean;
   /** Tenant-scoped credentials, only when `tvm` is on (P-8). */
   readonly credentials?: VendedCredentials;
+  /** (ADR-0048) On the delegation route: the calling agent, and the agents in the chain after this hop. */
+  readonly delegatedFrom?: string;
+  readonly depth?: number;
 }
 
 /** A backend's streamed answer. */

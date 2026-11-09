@@ -46,6 +46,8 @@ export interface RegistryEntryProperties {
   readonly RuntimeArn: string;
   readonly Needs?: string[];
   readonly Tools?: string[];
+  /** (ADR-0048) The agents this agent may hand a transaction to; absent writes an empty list. */
+  readonly DelegatesTo?: string[];
   readonly DrainSeconds: string | number;
   /** The custom-resource framework's own property; ignored. */
   readonly ServiceToken?: string;
@@ -77,7 +79,14 @@ export interface RegistryEntryDependencies {
 /** The entry one request writes; validated with the same parser the ingress uses, so a bad value fails here, not at request time. */
 function entryFrom(properties: RegistryEntryProperties, status: RegistryEntry['status'], version: number): RegistryEntry {
   return parseRegistryEntry(
-    JSON.stringify({ runtimeArn: properties.RuntimeArn, needs: properties.Needs ?? [], tools: properties.Tools ?? [], version, status }),
+    JSON.stringify({
+      runtimeArn: properties.RuntimeArn,
+      needs: properties.Needs ?? [],
+      tools: properties.Tools ?? [],
+      delegatesTo: properties.DelegatesTo ?? [],
+      version,
+      status,
+    }),
   );
 }
 

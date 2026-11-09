@@ -20,7 +20,7 @@
  * decides what a caller may do with it.
  */
 
-import { Duration, Stack, Token } from 'aws-cdk-lib';
+import { Annotations, Aspects, Duration, Stack, Token } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { AgentCoreRuntimeBackend } from './backend/agentcore-runtime.cdk';
@@ -28,7 +28,7 @@ import { AGENT_ENV } from './shared/config';
 import { nameKey } from './shared/entitlements';
 import { LogDrain } from './shared/log-drain';
 import { DEFAULT_TOOLS_GATEWAY } from './shared/mint';
-import { backendNeedsProblem, backendToolsProblem, BACKEND_NAME_PATTERN, INGRESS_TAG_KEY, ROUTE } from './shared/registry';
+import { backendDelegatesToProblem, backendNeedsProblem, backendToolsProblem, BACKEND_NAME_PATTERN, INGRESS_TAG_KEY, ROUTE } from './shared/registry';
 import { LONGEST_STREAM, RegistryEntryResource } from './shared/registry-entry.cdk';
 import { OwnedRows, ownerProblem } from './shared/reservation.cdk';
 import { addModelStatement, SharedIngress, type SharedIngressRef } from './shared-ingress.cdk';
@@ -67,6 +67,15 @@ export interface AgentBackendProps {
    */
   readonly tools?: string[];
   /**
+   * (ADR-0048, spec §3.7) The agents this agent may hand a transaction to
+   * through `POST /<agent>/delegations`: backend names, at most 32, no
+   * duplicates, never its own. Default `[]`: the agent cannot delegate. A
+   * name in this app must be an `AgentBackend` of the app; a name in another
+   * stack is resolved at request time (404 when absent). Needs an ingress
+   * with `agentDelegation`.
+   */
+  readonly delegatesTo?: string[];
+  /**
    * The owner marker of the `NAME#<name>` reservation (ADR-0035; was
    * `scopeOwner`). Default `<StackId>#<LogicalResourceId>`. Stacks that pass
    * the same value co-own the name and MUST be destroyed together.
@@ -93,6 +102,8 @@ export class AgentBackend extends Construct {
   readonly needs: readonly string[];
   /** (v2) `A.tools`, as given. */
   readonly tools: readonly string[];
+  /** (ADR-0048) `delegatesTo`, as given. */
+  readonly delegatesTo: readonly string[];
 
   constructor(scope: Construct, id: string, props: AgentBackendProps) {
     super(scope, id);
@@ -126,6 +137,11 @@ export class AgentBackend extends Construct {
     if (toolsProblem !== undefined) {
       fail('tools', toolsProblem);
     }
+    const delegatesTo = props.delegatesTo ?? [];
+    const delegatesToProblem = backendDelegatesToProblem(props.name, delegatesTo);
+    if (delegatesToProblem !== undefined) {
+      fail('delegatesTo', delegatesToProblem);
+    }
     const ownerIssue = ownerProblem(props.owner);
     if (ownerIssue !== undefined) {
       fail('owner', ownerIssue);
@@ -133,6 +149,7 @@ export class AgentBackend extends Construct {
     this.name = props.name;
     this.needs = [...props.needs];
     this.tools = [...tools];
+    this.delegatesTo = [...delegatesTo];
 
     const ingress = props.ingress;
     if (ingress instanceof SharedIngress && Stack.of(ingress) !== Stack.of(this)) {
@@ -180,6 +197,29 @@ export class AgentBackend extends Construct {
     if (ref.entitlementsTableName === undefined) {
       fail('ingress.entitlementsTableName', 'is required in v2 (the NAME# reservation, ADR-0035)');
     }
+    // ADR-0048: a delegating agent needs the route; the route is the api-gateway ingress's.
+    if (delegatesTo.length > 0 && ref.delegationUrl === undefined) {
+      fail('delegatesTo', 'needs an ingress with agentDelegation on the api-gateway ingress (ADR-0048)');
+    }
+    if (delegatesTo.length > 0) {
+      // Same-app names are checked once the app is assembled (spec §3.3); other stacks' names at request time.
+      Aspects.of(this).add({
+        visit: (node) => {
+          if (node !== this) {
+            return;
+          }
+          const names = new Set(
+            node.node.root.node.findAll().filter((c): c is AgentBackend => c instanceof AgentBackend).map((b) => b.name),
+          );
+          const missing = delegatesTo.filter((n) => !names.has(n));
+          if (missing.length > 0) {
+            Annotations.of(this).addWarning(
+              `AgentBackend ${props.name}: delegatesTo names ${missing.join(', ')} not found in this app; they are resolved at request time (404 when absent)`,
+            );
+          }
+        },
+      });
+    }
 
     // The agent's environment (spec §3.3): where the tools gateways are, and the issuer.
     // ADR-0041: RI_TOOLS_GATEWAY_URLS maps each gateway name to its MCP endpoint; the agent
@@ -199,6 +239,11 @@ export class AgentBackend extends Construct {
     }
     if (ref.issuer !== undefined) {
       environment[AGENT_ENV.ISSUER] = ref.issuer;
+    }
+    // ADR-0048: where to delegate; set whenever the ingress has the route, so an agent
+    // can be given delegatesTo later without a Runtime redeploy.
+    if (ref.delegationUrl !== undefined) {
+      environment[AGENT_ENV.DELEGATION_URL] = ref.delegationUrl;
     }
 
     this.backend = new AgentCoreRuntimeBackend(this, 'Runtime', {
@@ -243,6 +288,7 @@ export class AgentBackend extends Construct {
       runtimeArn: this.runtimeArn,
       needs: this.needs as string[],
       tools: this.tools as string[],
+      delegatesTo: this.delegatesTo as string[],
       drain: ttl.plus(LONGEST_STREAM),
       logDrain,
     });

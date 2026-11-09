@@ -152,6 +152,9 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
     grantSize: request.grantSize,
     mint: request.mint,
     sessionPrefix: prefixOf(request.unitId),
+    // ADR-0048: set on the delegation route; the token's `txn` above is the caller's.
+    delegatedFrom: request.delegatedFrom,
+    depth: request.depth,
   };
   // Backend invoke wall time runs from the invoke call to the end of the
   // stream: the AgentCore Runtime bills the session's active CPU and memory

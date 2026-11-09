@@ -54,7 +54,7 @@ describe('registry-entry custom resource handler', () => {
     expect(outcome).toEqual({ status: 'SUCCESS', physicalResourceId: NAME });
     expect(ssm).toHaveReceivedCommandTimes(PutParameterCommand, 1);
     expect(ssm).toHaveReceivedCommandWith(PutParameterCommand, { Name: NAME, Type: 'String', Overwrite: false });
-    expect(written()).toEqual({ runtimeArn: RUNTIME_ARN, needs: ['billing/read', 'billing/invoke'], tools: ['invoices/*'], version: 1, status: 'active' });
+    expect(written()).toEqual({ runtimeArn: RUNTIME_ARN, needs: ['billing/read', 'billing/invoke'], tools: ['invoices/*'], delegatesTo: [], version: 1, status: 'active' });
     expect(ssm).not.toHaveReceivedCommand(GetParameterCommand);
     expect(ssm).not.toHaveReceivedCommand(DeleteParameterCommand);
     expect(slept).toEqual([]);
@@ -82,7 +82,7 @@ describe('registry-entry custom resource handler', () => {
     expect(outcome).toEqual({ status: 'SUCCESS', physicalResourceId: NAME });
     expect(ssm).toHaveReceivedCommandTimes(PutParameterCommand, 2);
     expect(ssm.commandCalls(PutParameterCommand)[1].args[0].input).toMatchObject({ Name: NAME, Overwrite: true });
-    expect(written(1)).toEqual({ runtimeArn: RUNTIME_ARN, needs: ['billing/read', 'billing/invoke'], tools: ['invoices/*'], version: 4, status: 'active' });
+    expect(written(1)).toEqual({ runtimeArn: RUNTIME_ARN, needs: ['billing/read', 'billing/invoke'], tools: ['invoices/*'], delegatesTo: [], version: 4, status: 'active' });
     expect(logs).toEqual([]);
   });
 
@@ -99,7 +99,7 @@ describe('registry-entry custom resource handler', () => {
     const outcome = await handleEvent(event('Update', { RuntimeArn: OTHER_ARN, Tools: undefined }, NAME), deps());
     expect(outcome.status).toBe('SUCCESS');
     expect(ssm).toHaveReceivedCommandWith(PutParameterCommand, { Name: NAME, Overwrite: true });
-    expect(written()).toEqual({ runtimeArn: OTHER_ARN, needs: ['billing/read', 'billing/invoke'], tools: [], version: 4, status: 'active' });
+    expect(written()).toEqual({ runtimeArn: OTHER_ARN, needs: ['billing/read', 'billing/invoke'], tools: [], delegatesTo: [], version: 4, status: 'active' });
   });
 
   it('Update over a v1 entry (no version) writes version 1; missing Needs fails (the entry would be refused at the ingress)', async () => {
@@ -123,7 +123,7 @@ describe('registry-entry custom resource handler', () => {
     const outcome = await handleEvent(event('Delete', {}, NAME), deps());
     expect(outcome).toEqual({ status: 'SUCCESS', physicalResourceId: NAME });
     expect(ssm).toHaveReceivedCommandWith(GetParameterCommand, { Name: NAME });
-    expect(written()).toEqual({ runtimeArn: RUNTIME_ARN, needs: ['billing/read', 'billing/invoke'], tools: ['invoices/*'], version: 3, status: 'draining' });
+    expect(written()).toEqual({ runtimeArn: RUNTIME_ARN, needs: ['billing/read', 'billing/invoke'], tools: ['invoices/*'], delegatesTo: [], version: 3, status: 'draining' });
     expect(slept).toEqual([180_000]);
     expect(ssm).toHaveReceivedCommandWith(DeleteParameterCommand, { Name: NAME });
     // Order: get, put, sleep, delete.

@@ -23,12 +23,13 @@ import { KMSClient } from '@aws-sdk/client-kms';
 import { createLocalJWKSet, createRemoteJWKSet, type JWTVerifyGetKey, jwtVerify } from 'jose';
 import { AuthorityError, AuthorityResolver } from './authority';
 import type { IngressConfig } from './config';
+import { type DelegationCaller, type DelegationTokenVerifier, delegationTokenVerifierFor } from './delegation';
 import { EntitlementReader } from './entitlements';
 import { endpointHost, preconnect, sharedHandler } from './http';
 import { kmsDigestSigner } from './jws';
 import { TenantLimiter } from './limits';
 import { TokenMinter } from './mint';
-import { BackendRegistry, backendFromPath, type RegistryEntry, RegistryError, type RegistryMiss, ROUTE } from './registry';
+import { BackendRegistry, backendFromPath, DELEGATION_ROUTE, type RegistryEntry, RegistryError, type RegistryMiss, ROUTE, routeFromPath } from './registry';
 import { isValidConversationId, randomUnitId, sessionUnitId } from './session';
 import { ClaimMissingError, TokenVendingMachine } from './tvm';
 import { bearerToken, TokenError, TokenVerifier, type VerifiedClaims } from './verifier';
@@ -52,6 +53,10 @@ export const PUBLIC_REASONS: ReadonlySet<string> = new Set([
   'tenant_not_allowed',
   'tenant_suspended',
   'agent_not_subscribed',
+  // ADR-0048, spec §5.1.1
+  'delegation_not_declared',
+  'delegation_depth',
+  'delegation_loop',
 ]);
 
 /** The fixed body for a refusal: the status text, plus the reason when it is one of PUBLIC_REASONS. */
@@ -194,6 +199,9 @@ export function forwardedTokenVerifierFor(issuer: string, jwks?: string): Forwar
   };
 }
 
+/** What the pipeline needs from the authority step for a delegation (ADR-0048). */
+export type DelegationAuthoritySource = Pick<AuthorityResolver, 'resolve' | 'delegate'>;
+
 export class IngressPipeline {
   constructor(
     private readonly config: IngressConfig,
@@ -204,9 +212,11 @@ export class IngressPipeline {
     /** Per-tenant limits (ADR-0020); undefined when off. */
     readonly limiter?: TenantLimiter,
     /** (v2) The authority step; present only on the function that mints. */
-    private readonly authority?: AuthoritySource,
+    private readonly authority?: AuthoritySource | DelegationAuthoritySource,
     /** (v2) Verifies a token the authoriser forwarded; present on the function that does not mint. */
     private readonly forwarded?: ForwardedTokenVerifier,
+    /** (ADR-0048) Verifies the caller's transaction token on the delegation route; present when `config.delegation` is set. */
+    private readonly delegationVerifier?: DelegationTokenVerifier,
   ) {
     if (config.tvm !== undefined && tvm === undefined) {
       throw new Error('IngressPipeline: tvm module is configured but no TokenVendingMachine was given');
@@ -241,8 +251,18 @@ export class IngressPipeline {
     }
   }
 
-  /** Runs every check, in the order of spec §5.1; throws RequestError with the status to return. */
+  /** Runs every check, in the order of spec §5.1 (or §5.1.1 on the delegation route); throws RequestError with the status to return. */
   async validate(inputs: RequestInputs): Promise<ValidatedRequest> {
+    // ADR-0048: `/<target>/delegations` is its own pipeline; the bearer is a
+    // transaction token, not an identity token. Without the module the route
+    // does not exist on the API, so a path that names it is an unknown route.
+    const route = routeFromPath(inputs.path ?? `/${ROUTE}`, inputs.requireBackendInPath === true ? undefined : this.config.registry.defaultBackend);
+    if (route?.route === DELEGATION_ROUTE) {
+      if (this.config.delegation === undefined) {
+        throw new RequestError(404, 'unknown_backend');
+      }
+      return this.validateDelegation(inputs, route.backend);
+    }
     const claims = await this.verify(inputs);
     // The backend comes from the route and the registry alone (ADR-0024).
     // Resolved before the body is read, so an unknown route costs no parse.
@@ -284,6 +304,120 @@ export class IngressPipeline {
       }
     }
     return request;
+  }
+
+  /**
+   * (ADR-0048, spec §3.7, §5.1.1) The delegation pipeline: verify the caller's
+   * transaction token, resolve the caller's and the target's registry entries,
+   * parse, the per-tenant limit for the token's tenant, the replacement token
+   * (the authoriser's, checked for this tenant and target, or minted here),
+   * the unit, the TVM for the copied tenant and user. Throws RequestError.
+   */
+  private async validateDelegation(inputs: RequestInputs, target: string): Promise<ValidatedRequest> {
+    if (this.delegationVerifier === undefined) {
+      throw new RequestError(502, 'delegation_unavailable'); // deployment fault: the route exists but nothing can verify its bearer
+    }
+    let caller: DelegationCaller;
+    try {
+      caller = await this.delegationVerifier(bearerToken(inputs.authorization));
+    } catch {
+      throw new RequestError(401, 'token_invalid');
+    }
+    const callerEntry = await this.entryFor(caller.agent, caller.tenantId);
+    const targetEntry = await this.entryFor(target, caller.tenantId);
+    const body = parseBody(inputs.body, this.config.sessionScope !== undefined);
+    if (this.limiter !== undefined && (await this.limiter.admit(caller.tenantId)) === 'limited') {
+      throw new RequestError(429, 'tenant_rate_limited', caller.tenantId);
+    }
+    const authority = await this.delegationAuthorityFor(inputs, caller, target, targetEntry, callerEntry);
+    const unitId =
+      this.config.sessionScope !== undefined
+        ? sessionUnitId(caller.tenantId, caller.sub, this.config.sessionScope, body.conversationId!)
+        : randomUnitId();
+    const request: {
+      -readonly [K in keyof ValidatedRequest]: ValidatedRequest[K];
+    } = {
+      tenantId: caller.tenantId,
+      sub: caller.sub,
+      unitId,
+      backend: target,
+      runtimeArn: targetEntry.runtimeArn,
+      prompt: body.prompt,
+      transactionToken: authority.transactionToken,
+      txn: authority.txn,
+      grantSize: authority.grantSize,
+      mint: authority.mint,
+      ...(authority.noToolsGranted === undefined ? {} : { noToolsGranted: authority.noToolsGranted }),
+      delegatedFrom: caller.agent,
+      depth: caller.chain.length + 1,
+    };
+    if (this.tvm !== undefined) {
+      // The replacement token carries the tenant and the user; `tvm.claimTags`
+      // needs identity claims it does not have, and synth refuses that pairing.
+      const claims: VerifiedClaims = { tenantId: caller.tenantId, sub: caller.sub, clientId: '', scopes: [], claims: { tenant_id: caller.tenantId, sub: caller.sub } };
+      try {
+        request.credentials = (await this.tvm.vend(claims)).credentials;
+      } catch (error) {
+        if (error instanceof ClaimMissingError) {
+          throw new RequestError(403, 'claim_missing', caller.tenantId);
+        }
+        throw new RequestError(502, 'tvm_failed', caller.tenantId);
+      }
+    }
+    return request;
+  }
+
+  /** A registry entry by name, with the spec §5.1 statuses for a miss; attributed to the tenant. */
+  private async entryFor(backend: string, tenantId: string): Promise<RegistryEntry> {
+    try {
+      return await this.registry.resolve(backend);
+    } catch (error) {
+      if (error instanceof RegistryError) {
+        throw new RequestError(REGISTRY_MISS_STATUS[error.reason], error.reason, tenantId);
+      }
+      throw error;
+    }
+  }
+
+  /** The replacement token for a delegation: the authoriser's, or minted here. Throws RequestError. */
+  private async delegationAuthorityFor(
+    inputs: RequestInputs,
+    caller: DelegationCaller,
+    target: string,
+    targetEntry: RegistryEntry,
+    callerEntry: RegistryEntry,
+  ): Promise<Omit<AuthorizedContext, 'tenantId' | 'backend'>> {
+    if (inputs.authorized !== undefined) {
+      if (inputs.authorized.tenantId !== caller.tenantId || inputs.authorized.backend !== target) {
+        throw new RequestError(403, 'tenant_not_allowed', caller.tenantId);
+      }
+      if (this.forwarded === undefined) {
+        throw new RequestError(502, 'mint_failed', caller.tenantId);
+      }
+      let minted: { tenantId: string; agent: string };
+      try {
+        minted = await this.forwarded(inputs.authorized.transactionToken);
+      } catch {
+        throw new RequestError(403, 'tenant_not_allowed', caller.tenantId);
+      }
+      if (minted.tenantId !== caller.tenantId || minted.agent !== target) {
+        throw new RequestError(403, 'tenant_not_allowed', caller.tenantId);
+      }
+      return inputs.authorized;
+    }
+    if (this.authority === undefined || !('delegate' in this.authority)) {
+      throw new RequestError(502, 'mint_failed', caller.tenantId);
+    }
+    try {
+      const minted = await this.authority.delegate(caller, target, targetEntry, callerEntry, this.config.delegation!.maxDepth);
+      const { token: transactionToken, txn, grantSize, mint, noToolsGranted } = minted;
+      return { transactionToken, txn, grantSize, mint, noToolsGranted };
+    } catch (error) {
+      if (error instanceof AuthorityError) {
+        throw new RequestError(error.status, error.reason, caller.tenantId);
+      }
+      throw error;
+    }
   }
 
   /**
@@ -393,8 +527,9 @@ export function pipelineFor(
     verifier?: TokenVerifier;
     limiter?: TenantLimiter;
     registry?: RegistryResolver;
-    authority?: AuthoritySource;
+    authority?: AuthoritySource | DelegationAuthoritySource;
     forwarded?: ForwardedTokenVerifier;
+    delegationVerifier?: DelegationTokenVerifier;
   } = {},
 ): IngressPipeline {
   const verifier = deps.verifier ?? verifierFor(config);
@@ -405,5 +540,19 @@ export function pipelineFor(
   // The function that does not mint receives the authoriser's token and must verify it (M-82).
   const forwarded =
     deps.forwarded ?? (authority === undefined && config.issuer !== undefined ? forwardedTokenVerifierFor(config.issuer, config.txnJwks) : undefined);
-  return new IngressPipeline(config, verifier, registry, tvm, limiter, authority, forwarded);
+  // ADR-0048: the delegation route's bearer is verified against our own JWKS; the ingress role ARN is the chain's root.
+  const delegationVerifier = deps.delegationVerifier ?? delegationVerifierFor(config);
+  return new IngressPipeline(config, verifier, registry, tvm, limiter, authority, forwarded, delegationVerifier);
+}
+
+/** The caller-token verifier for a configuration with the delegation module, else undefined. */
+export function delegationVerifierFor(config: IngressConfig): DelegationTokenVerifier | undefined {
+  if (config.delegation === undefined || config.issuer === undefined) {
+    return undefined;
+  }
+  const ingressRoleArn = config.mint?.ingressRoleArn ?? config.ingressRoleArn;
+  if (ingressRoleArn === undefined) {
+    throw new Error('delegationVerifierFor: the delegation route needs the ingress role ARN (RI_INGRESS_ROLE_ARN)');
+  }
+  return delegationTokenVerifierFor({ issuer: config.issuer, ingressRoleArn, jwks: config.txnJwks });
 }
