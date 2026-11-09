@@ -1227,12 +1227,16 @@ export class SharedIngress extends Construct {
       // (v2) at most 60 s and at most ttl - longest stream: the Allow carries a minted token.
       resultsCacheTtl: Duration.seconds(options.authorizerCacheTtlSeconds),
     });
-    // spec §5.1: the Deny's fixed reason code, when the authoriser set one.
+    // spec §5.1: the Deny's fixed reason code, when the authoriser set one. A gateway
+    // response template substitutes $context variables and evaluates no VTL directive
+    // (integration run 16, 2026-11-09: an #if rendered as literal text), so the authoriser
+    // writes the whole suffix (': <reason>') and the template appends it; without a public
+    // reason the context has no suffix and the body is the bare text.
     api.addGatewayResponse('AccessDenied', {
       type: apigateway.ResponseType.ACCESS_DENIED,
       statusCode: '403',
       templates: {
-        'application/json': '#if($context.authorizer.reason != "")forbidden: $context.authorizer.reason#{else}forbidden#end',
+        'application/json': 'forbidden$context.authorizer.reasonSuffix',
       },
     });
 

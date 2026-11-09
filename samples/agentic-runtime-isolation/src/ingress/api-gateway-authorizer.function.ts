@@ -70,7 +70,8 @@ export function buildPolicy(
   context?: AuthorizerContext,
   reason?: string,
 ): APIGatewayAuthorizerResult {
-  const denyContext = reason !== undefined && PUBLIC_REASONS.has(reason) ? { reason } : undefined;
+  // `reason` for the access log, `reasonSuffix` for the ACCESS_DENIED body (`forbidden$context.authorizer.reasonSuffix`).
+  const denyContext = reason !== undefined && PUBLIC_REASONS.has(reason) ? { reason, reasonSuffix: `: ${reason}` } : undefined;
   return {
     principalId: context?.sub ?? 'unauthorized',
     policyDocument: {

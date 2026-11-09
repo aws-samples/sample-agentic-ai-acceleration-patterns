@@ -890,8 +890,8 @@ agent A ──transaction token A (bearer)──▶ POST /<B>/delegations  (api-
    verify token A against the ingress's own JWKS: iss = self, typ txn+jwt,
      aud ∋ agent:<A>, innermost act.sub = ingress role, exp - 60 s ahead   ──▶ 401 token_invalid
    A's registry entry names B in delegatesTo                                ──▶ 403 delegation_not_declared
-   chain depth (agent: entries in act) < agentDelegation.maxDepth           ──▶ 403 delegation_depth
    B ≠ A and B ∉ chain                                                       ──▶ 403 delegation_loop
+   chain depth (agent: entries in act) < agentDelegation.maxDepth           ──▶ 403 delegation_depth
    per-tenant limit, tenant_id from token A                                  ──▶ 429
    read TENANT row, USER cut row, B's registry entry; granted = rule for B  ──▶ 403 agent_not_subscribed / tenant_suspended
    mint token B (KMS Sign, never cached): scope = grant(B), aud for B,
@@ -941,11 +941,14 @@ Rules:
   request. Each `act` level adds about 100 bytes within the 10,240-byte
   bound (ADR-0045). One `txn` can therefore be live for up to
   `(maxDepth + 1) × ttl`: each hop's token is fresh and the id is copied.
-- **Depth and loops.** `agentDelegation.maxDepth` (1 to 3) is the number of
-  `agent:` entries a chain may hold after the hop. A caller whose chain is
-  already at the cap is refused `delegation_depth`; a target equal to the
-  caller or already in the chain is refused `delegation_loop`. A refusal
-  costs no KMS call and no STS call.
+- **Loops and depth.** A target equal to the caller or already in the chain
+  is refused `delegation_loop`, checked before the depth bound because it is
+  the stronger signal. `agentDelegation.maxDepth` (1 to 3) is the number of
+  `agent:` entries a chain may hold after the hop; a caller whose chain is
+  already at the cap is refused `delegation_depth`. Both come after
+  `delegatesTo`, so an agent delegating to itself is `delegation_not_declared`
+  (synth forbids an agent naming itself). A refusal costs no KMS call and no
+  STS call.
 - **Invoke.** As a direct call: unit chosen by the ingress (P-1), session
   id from the claims and `conversationId` (ADR-0002), token B in
   `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token`, vended
@@ -1148,9 +1151,13 @@ Errors written by the ingress code. Bodies are fixed; (v2) a 403 or 400 from
 the v2 checks carries a fixed reason code after the text, for example
 `forbidden: agent_not_subscribed`, and the same code is the `reason` field of
 the log line. On `api-gateway` the authoriser's Deny surfaces through the
-`ACCESS_DENIED` gateway response, whose template reads the code from
-`$context.authorizer.reason`; if that context is empty the body is API
-Gateway's own and the code is in the log only. (Amended 2026-11-04) The
+`ACCESS_DENIED` gateway response, whose template is
+`forbidden$context.authorizer.reasonSuffix`: the authoriser puts
+`reasonSuffix: ': <code>'` beside `reason` in the Deny context for a public
+code, so the body is `forbidden: <code>`, and leaves both out otherwise, so
+the body is the bare `forbidden`. (A gateway response template substitutes
+`$context` variables and evaluates no VTL directive; integration run 16
+showed an `#if` rendered as text.) (Amended 2026-11-04) The
 Deny reasons rendered are `tenant_required`, `tenant_not_allowed`,
 `tenant_suspended` and `agent_not_subscribed`; every other refusal renders
 the bare text, its reason in the log only. On `api-gateway` every Deny is
@@ -1219,7 +1226,7 @@ Present only with `agentDelegation`, on the `api-gateway` ingress.
 
 Errors, same conventions as §5.1 (fixed body, reason code after the text,
 the same code in the log line). The Deny reasons rendered through
-`$context.authorizer.reason` are extended with `delegation_not_declared`,
+`$context.authorizer.reasonSuffix` are extended with `delegation_not_declared`,
 `delegation_depth` and `delegation_loop`.
 
 | Status | Body | When |
@@ -1235,7 +1242,7 @@ the same code in the log line). The Deny reasons rendered through
 | 429 | `too many requests` | over `tenantLimits` for the token's tenant |
 | 502 | `upstream error` | as §5.1 |
 
-Check order: verify the caller's token, `delegatesTo`, depth, loop, registry
+Check order: verify the caller's token, the caller's registry entry, `delegatesTo`, loop, depth, registry
 entry of the target, per-tenant limit, entitlement read, grant rule, mint,
 TVM, invoke. On `api-gateway` the authoriser runs through the mint and the
 integration Lambda checks the limit, as §5.1 describes for `/invocations`.
@@ -2141,16 +2148,21 @@ Limits. As v1: tenant A gets 429 on the `requestsPerMinute: 5` stack while
    `default` prompts `delegate billing <prompt>`: the answer is `billing`'s
    report with `agent: billing`, `chain: ["default"]`, `scope` equal to A1's
    direct call to `billing` (step 7), the same `txn` as A1's own token, and
-   `billing`'s tool call on `finance` served. Negatives: `billing` prompting
-   `delegate default ...` is 403 `delegation_not_declared`; `default`
-   prompting `delegate default ...` is 403 `delegation_loop`; with the
-   test-only mint function, a token whose chain already holds one agent is
-   403 `delegation_depth`; B1 (tenant B, no `billing`) on `default` is 403
-   `agent_not_subscribed`; an identity token on `/billing/delegations` is 401
-   (403 on `api-gateway`); A1's transaction token on `/billing/invocations`
-   is still 401. The ingress log holds one `delegation admitted` and one
-   `delegation refused` per case, with `from`, `to`, `depth` and `txn`. On
-   the `agentcore-gateway` stack synth with `agentDelegation` fails.
+   `billing`'s tool call on `finance` served. Negatives, each body exactly
+   `forbidden: <code>` relayed by the agent as `DelegationRefused 403 ...`:
+   `billing` prompting `delegate default ...` is `delegation_not_declared`;
+   `default` prompting `delegate default ...` is `delegation_not_declared`
+   too (synth forbids an agent naming itself); B1 (tenant B, no `billing`)
+   on `default` is `agent_not_subscribed`; with the test-only mint function,
+   a `default` token whose chain already holds `billing` is
+   `delegation_loop` on `/billing/delegations`, and one whose chain holds
+   another agent is `delegation_depth` at `maxDepth` 1; an identity token on
+   `/billing/delegations` is 401 (403 on `api-gateway`); A1's transaction
+   token on `/billing/invocations` is still 401 (403 on `api-gateway`) with
+   the bare body `forbidden`. The authoriser log holds one `delegation
+   admitted` and one `delegation refused` per case, with `from`, `to`,
+   `depth` and `txn`; the replacement token's `txn` equals the caller's. On
+   the `agentcore-gateway` stack the step is skipped.
 10. Destroy; delete the Runtime's service-created log groups; assert no
    stacks, parameters, log groups or tables are left (ADR-0019). (v2) Also
    assert the tools gateway and its targets are gone, both KMS keys are

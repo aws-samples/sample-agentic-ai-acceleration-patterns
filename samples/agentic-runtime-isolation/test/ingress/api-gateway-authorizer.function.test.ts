@@ -42,7 +42,7 @@ describe('buildPolicy', () => {
     expect(result.principalId).toBe('unauthorized');
     expect(effectOf(result)).toBe('Deny');
     expect(result.context).toBeUndefined();
-    expect(authorizer.buildPolicy(METHOD_ARN, 'Deny', undefined, 'agent_not_subscribed').context).toEqual({ reason: 'agent_not_subscribed' });
+    expect(authorizer.buildPolicy(METHOD_ARN, 'Deny', undefined, 'agent_not_subscribed').context).toEqual({ reason: 'agent_not_subscribed', reasonSuffix: ': agent_not_subscribed' });
     expect(authorizer.buildPolicy(METHOD_ARN, 'Deny', undefined, 'invalid_token').context).toBeUndefined();
   });
 });
@@ -161,7 +161,7 @@ describe('authorize', () => {
     };
     const denied = await authorizer.authorize(event({ Authorization: token }), deps(undefined, refusing));
     expect(effectOf(denied)).toBe('Deny');
-    expect(denied.context).toEqual({ reason: 'agent_not_subscribed' });
+    expect(denied.context).toEqual({ reason: 'agent_not_subscribed', reasonSuffix: ': agent_not_subscribed' });
     expect(refusal()).toMatchObject({ reason: 'agent_not_subscribed', status: 403, tenantId: 'tenant-a', backend: 'default' });
     const floor = new TokenVerifier(
       { discoveryUrl: DISCOVERY_URL, allowedClientIds: [CLIENT_ID], requiredScopes: ['app/use'] },
@@ -191,7 +191,7 @@ describe('authorize', () => {
     expect(logs.join('\n')).not.toContain(TXN_TOKEN);
     expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request authorised')).toMatchObject({ tenantId: 'tenant-b', agent: 'billing', txn: 'txn-1', grantSize: 2, mint: 'miss' });
     const missing = await authorizer.authorize(event({ Authorization: token }), { ...deps(), verifier: multi });
-    expect(missing.context).toEqual({ reason: 'tenant_required' });
+    expect(missing.context).toEqual({ reason: 'tenant_required', reasonSuffix: ': tenant_required' });
   });
 
   it('denies a missing or non-bearer header without consulting the issuer or the registry, and never logs a header value', async () => {
@@ -330,7 +330,7 @@ describe('authorize on /{backend}/delegations (ADR-0048)', () => {
   it('an undeclared target is delegation_not_declared before any lookup; a declared target without an entry is Deny (404 in the log); the three delegation refusals carry their public reason', async () => {
     const undeclared = await authorizer.authorize(event('Bearer caller-token', '/nobody/delegations', 'nobody'), deps());
     expect(effectOf(undeclared)).toBe('Deny');
-    expect(undeclared.context).toEqual({ reason: 'delegation_not_declared' });
+    expect(undeclared.context).toEqual({ reason: 'delegation_not_declared', reasonSuffix: ': delegation_not_declared' });
     expect(logs.some((l) => l.includes('unknown_backend'))).toBe(false);
     const declaredButGone = stubRegistry({ default: { ...FIXTURE_ENTRIES.billing, needs: ['default/chat'], delegatesTo: ['gone'] } }).registry;
     const unknown = await authorizer.authorize(event('Bearer caller-token', '/gone/delegations', 'gone'), deps({ registry: declaredButGone }));
@@ -340,7 +340,7 @@ describe('authorize on /{backend}/delegations (ADR-0048)', () => {
       const refusing = { resolve: stubAuthority().resolve, delegate: async () => { throw new AuthorityError(403, reason); } };
       const result = await authorizer.authorize(event('Bearer caller-token'), deps({ authority: refusing }));
       expect(effectOf(result)).toBe('Deny');
-      expect(result.context).toEqual({ reason });
+      expect(result.context).toEqual({ reason, reasonSuffix: `: ${reason}` });
     }
   });
 

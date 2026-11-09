@@ -571,7 +571,7 @@ target per agent, which the agent added after the deploy does not get.
 | 22 | partial-target grant: A2 served `crm/get_account`, refused `crm/update_case` by the interceptor; the Lambda is not invoked |
 | 23 | one star permit per target (`crm` on `default`, `invoices` on `finance`); time to ACTIVE recorded |
 | 24 | list filter on `finance`: a cut `list_invoices` disappears from A1's list and comes back; a failing filter lists nothing, the call is still served |
-| 25 | delegation (ADR-0048, `api-gateway` only): `default` hands A1's transaction to `billing`; the relayed report is `billing`'s with chain `[default]`, the same `scope` as A1's direct call and the caller's `txn`; `billing` to `default` is `delegation_not_declared`, `default` to itself `delegation_loop`, B1 `agent_not_subscribed`, a chain at `maxDepth` `delegation_depth`; an identity token on `/delegations` and a transaction token on `/invocations` are refused |
+| 25 | delegation (ADR-0048, `api-gateway` only): `default` hands A1's transaction to `billing`; the relayed report is `billing`'s with chain `[default]`, the same `scope` as A1's direct call and the caller's `txn`; `billing` to `default` and `default` to itself are `delegation_not_declared`, B1 `agent_not_subscribed`, a chain that comes back to `billing` `delegation_loop`, a chain at `maxDepth` `delegation_depth`; an identity token on `/delegations` and a transaction token on `/invocations` are refused |
 | 4a | `session-off`: `conversationId` is 400; two requests land in two units |
 | 4b-user | `session-user`: A2 sending A1's conversation lands in its own unit |
 | limits | `limits`: tenant A limited at 5 a minute, B served; the scope floor `app/use` admits both |
