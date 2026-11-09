@@ -8,7 +8,7 @@
  * `NEW_AND_OLD_IMAGES` for the registry watch, TTL on `ttl`, an AWS-owned key
  * (identifiers and status only), `DESTROY` (sample only).
  *
- * Two sparse GSIs:
+ * Two sparse GSIs (ADR-0021):
  * - `statusBucket-urlExpiresAt` (spec §4.2): delivery rows while `OPEN`, and
  *   terminal rows while their event is `OWED` (src/shared/registry.ts). One
  *   constant value is one hot GSI partition, well within limits at N-2 rates.

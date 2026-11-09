@@ -168,7 +168,4 @@ operation DeleteTenantKey {
         @httpResponseCode
         statusCode: Integer
     }
-    errors: [
-        ConflictError
-    ]
 }

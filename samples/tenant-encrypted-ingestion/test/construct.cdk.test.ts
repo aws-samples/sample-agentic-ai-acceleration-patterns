@@ -456,9 +456,14 @@ describe('alarms (M-24, M-25)', () => {
   });
 });
 
-describe('identityApi (README "Bring your own identity provider")', () => {
-  it('registers the two scopes with tenant-identity by default', () => {
-    template.hasResourceProperties('Custom::IngestionScopeRegistration', { Scopes: ['ingestion/deliver', 'ingestion/read'] });
+describe('identityApi (README "Bring your own identity provider", ADR-0019)', () => {
+  it('registers the two scopes at the API it is given and reads no parameter itself', () => {
+    template.hasResourceProperties('Custom::IngestionScopeRegistration', {
+      Scopes: ['ingestion/deliver', 'ingestion/read'],
+      ApiUrl: 'https://abc123defg.execute-api.eu-central-1.amazonaws.com/v1/',
+    });
+    expect(JSON.stringify(template.toJSON())).not.toContain('/application-plane/shared/identity/');
+    expect(Object.keys(template.toJSON().Parameters ?? {}).filter((k) => k.startsWith('SsmParameterValue'))).toEqual([]);
   });
 
   it("with 'none' creates no scope registration and reads no tenant-identity parameter", () => {
@@ -466,6 +471,22 @@ describe('identityApi (README "Bring your own identity provider")', () => {
     byo.resourceCountIs('Custom::IngestionScopeRegistration', 0);
     expect(JSON.stringify(byo.toJSON())).not.toContain('/application-plane/shared/identity/');
     byo.resourceCountIs('AWS::ApiGateway::RestApi', 1);
+  });
+});
+
+describe('Contributor Insights rules (ADR-0012)', () => {
+  it('ranks API requests on both tenant resource paths', () => {
+    const rules = Object.values(template.findResources('AWS::CloudWatch::InsightRule')) as Array<{ Properties: { RuleName: unknown; RuleBody: unknown } }>;
+    const requests = rules.find((r) => JSON.stringify(r.Properties.RuleName).includes('tei-top-requests'));
+    expect(requests).toBeDefined();
+    // The body embeds the log group's token, so it synthesises as a Fn::Join: rebuild its text.
+    const raw = requests!.Properties.RuleBody;
+    const text =
+      typeof raw === 'string'
+        ? raw
+        : ((raw as { 'Fn::Join': [string, unknown[]] })['Fn::Join'][1]).map((part) => (typeof part === 'string' ? part : 'TOKEN')).join('');
+    const body = JSON.parse(text) as { Contribution: { Filters: unknown[] } };
+    expect(body.Contribution.Filters).toEqual([{ Match: '$.resourcePath', In: ['/tenant/deliveries', '/tenant/deliveries/{deliveryId}'] }]);
   });
 });
 
@@ -482,6 +503,8 @@ describe('props validation (spec §3.3)', () => {
     ['allowedContentTypes', { allowedContentTypes: ['text/csv'] }],
     ['tenantThrottle', { tenantThrottle: { rateLimit: 0, burstLimit: 1 } }],
     ['allowedClientIds', { identity: { discoveryUrl: 'https://x', allowedClientIds: [] } }],
+    ['identityApi', { identityApi: undefined }],
+    ['identityApi', { identityApi: { apiUrl: '', platformInvokePolicyArn: 'arn:aws:iam::111122223333:policy/P' } }],
   ])('fails synth naming %s', (name, props) => {
     expect(() => synthConstruct(props as never)).toThrow(new RegExp(name));
   });

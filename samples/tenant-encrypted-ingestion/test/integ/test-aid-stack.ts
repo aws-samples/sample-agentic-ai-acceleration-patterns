@@ -7,7 +7,7 @@
  *
  * - `TestProbeRole`: trusted by the runner's account for one hour. KMS use
  *   actions and `DescribeKey` on `*`, `s3:GetObject` and `s3:PutObject` on
- *   every bucket of the account; explicit Denies of `kms:PutKeyPolicy`,
+ *   the sample's buckets and the scratch bucket; explicit Denies of `kms:PutKeyPolicy`,
  *   `CreateGrant`, `ScheduleKeyDeletion`, `TagResource`, `UntagResource`,
  *   `s3:PutBucketPolicy`, `DeleteBucketPolicy`, `PutBucketEncryption`. Any
  *   denial it meets therefore comes from a key or bucket policy.

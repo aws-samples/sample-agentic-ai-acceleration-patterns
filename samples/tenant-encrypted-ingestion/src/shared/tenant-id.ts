@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * The tenant id grammar (spec §7.0, M-13) and the object key layout
+ * The tenant id grammar (spec §7.0, M-13; ADR-0003, ADR-0020: upper case
+ * admitted, ids differing only by case are distinct tenants) and the object key layout
  * (spec §4.2, P-7). The grammar is checked wherever a tenant id enters:
  * the authoriser (401), the Smithy path parameter (400) and the processor
  * on the key's second segment (deleted, no event). It keeps `/` out, so

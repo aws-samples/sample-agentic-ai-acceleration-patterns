@@ -325,7 +325,7 @@ export async function findUsagePlan(apiGateway: NonNullable<PlatformDependencies
 /**
  * The API Gateway control plane is throttled per account, and a parallel
  * deploy in the same account eats the quota: every call here retries a
- * throttle with backoff (ADR-0011). The row stays `CREATING` if the budget
+ * throttle with backoff (ADR-0025). The row stays `CREATING` if the budget
  * runs out, so a repeated `CreateTenantKey` resumes.
  */
 async function ensureApiKey(deps: PlatformDependencies, tenantId: string): Promise<string> {

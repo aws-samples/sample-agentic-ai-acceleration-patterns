@@ -47,10 +47,11 @@ function wrongFunction(): never {
 
 /**
  * Runs an operation; an error that is not a modelled `ApiError` becomes the
- * SSDK's 500 with no cause in the response, so its type and message are
- * logged here first (never a request body or a key value). The 2026-11-06
- * integration run hit API Gateway control-plane throttling and the log
- * showed only the 500.
+ * SSDK's 500 with no cause in the response, so it is logged here first.
+ * Only its type reaches the log: the logger drops `errorMessage`, which is
+ * not in `LOG_FIELD_ALLOWLIST`, so no request body, key value or message
+ * text is written (ADR-0025). The 2026-11-06 integration run hit API
+ * Gateway control-plane throttling and the log showed only the 500.
  */
 async function guarded<T>(operation: string, tenantId: string | undefined, run: () => Promise<T>): Promise<T> {
   try {

@@ -63,7 +63,7 @@ export function createFunction(scope: Construct, id: string, options: FunctionOp
       // `re2.wasm` from `__dirname` at init; esbuild inlines the JavaScript
       // but not the .wasm file, so without this copy every function that
       // imports an SSDK model fails at init with ENOENT /var/task/re2.wasm
-      // (found on the first deployment, 2026-11-06).
+      // (found on the first deployment, 2026-11-06; ADR-0024).
       commandHooks: {
         beforeBundling: () => [],
         beforeInstall: () => [],

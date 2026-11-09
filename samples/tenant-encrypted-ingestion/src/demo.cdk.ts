@@ -17,8 +17,9 @@
  *   `/application-plane/shared/ingestion/` (ARCHITECTURE.md §5.1): written
  *   by CloudFormation only (M-30).
  *
- * Only this file and the integration test name tenant-identity; the
- * construct does not.
+ * Only this file and the integration test read tenant-identity's published
+ * parameters; the construct takes the issuer and the scope-registration API
+ * as props and reads none of them (ADR-0019, standard §1.1).
  */
 
 import * as path from 'node:path';

@@ -6,8 +6,9 @@
  * the `vendor-key` policy by Sid, the three separate use Denies, no
  * `kms:Create*` wildcard, and the `tenant-key` template.
  *
- * Not covered here: the IAM Access Analyzer `check-no-new-access` check the
- * spec names; it calls an AWS API, which unit tests do not.
+ * Not covered here: an IAM Access Analyzer `check-no-new-access` check; it
+ * calls an AWS API, which unit tests do not. These template tests and
+ * integration step 5 replace it (ADR-0023).
  */
 
 import { buildTenantKeyTemplate, buildVendorKeyPolicy, type PolicyStatement } from '../src/platform/key-policy';

@@ -58,7 +58,7 @@
  * names. It does not stop a direct invoker from choosing any `Backend`:
  * whoever can invoke the function (or run code as its role, which the
  * `PlatformInvokePolicy` lets reach the whole catalogue) can register or
- * remove any backend's scopes (threat model T-41). The owner marker guards
+ * remove any backend's scopes (this sample's threat model T-38, M-34). The owner marker guards
  * against a second stack, not against that invoker.
  *
  * Every platform call is bounded (10 s per attempt, one retry after a short
@@ -209,7 +209,7 @@ function scopesOf(properties: ScopeRegistrationProperties, region: string): stri
     return 'ApiUrl must be an https URL';
   }
   // The role's SigV4 signature for `execute-api` in this Region is only ever
-  // sent to an API Gateway endpoint in this Region (threat model T-41: a
+  // sent to an API Gateway endpoint in this Region (this sample's T-38, M-34: a
   // direct invoker cannot point the function at a host of their choosing).
   if (!isApiGatewayHost(hostname, region)) {
     return `ApiUrl must be an API Gateway URL in ${region || 'this Region'} (<api>.execute-api.${region || '<region>'}.amazonaws.com)`;
@@ -224,7 +224,7 @@ function scopesOf(properties: ScopeRegistrationProperties, region: string): stri
   // The construct's own rule (at least one, no duplicates, each a valid name
   // owned by Backend), applied again here: a direct invoke of the function
   // bypasses the construct. This ties the names to the Backend the event
-  // names; it does not stop the invoker from naming any Backend (T-41).
+  // names; it does not stop the invoker from naming any Backend (this sample's T-38).
   const problem = backendScopesProblem(properties.Backend, scopes);
   if (problem !== undefined) {
     return `Scopes ${problem}`;

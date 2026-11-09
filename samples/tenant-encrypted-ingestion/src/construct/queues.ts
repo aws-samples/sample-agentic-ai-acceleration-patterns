@@ -13,9 +13,8 @@
  *   `redriveOperatorRole`. Unset, only the rule sends and an operator
  *   redrive is not possible. Two conditions in one Deny are ANDed, which is
  *   exactly "unless A or B".
- * - DLQ: Deny `sqs:SendMessage` unless `aws:SourceArn` is the queue. Whether
- *   SQS's automatic move meets this is undocumented; spec §10 step 7b shows
- *   it, and the Deny is to be dropped if it blocks the move.
+ * - DLQ: Deny `sqs:SendMessage` unless `aws:SourceArn` is the queue. SQS's
+ *   automatic move meets it; spec §10 step 7b shows it (M-16).
  * - EventBridge target DLQ: its own rule-only policy (CDK's target writes it).
  * - SSE-SQS everywhere; both DLQs keep messages 14 days (the uploader's IP
  *   address in S3 events is kept that long).

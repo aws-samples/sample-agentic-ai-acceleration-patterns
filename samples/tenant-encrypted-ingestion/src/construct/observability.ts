@@ -12,14 +12,14 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import type * as logs from 'aws-cdk-lib/aws-logs';
 import type { Construct } from 'constructs';
 
-function rule(logGroup: logs.ILogGroup, keys: string[], filter: { match: string; equals: string }, valueOf?: string): string {
+function rule(logGroup: logs.ILogGroup, keys: string[], filter: { match: string; in: string[] }, valueOf?: string): string {
   return JSON.stringify({
     Schema: { Name: 'CloudWatchLogRule', Version: 1 },
     LogGroupNames: [logGroup.logGroupName],
     LogFormat: 'JSON',
     Contribution: {
       Keys: keys,
-      Filters: [{ Match: filter.match, In: [filter.equals] }],
+      Filters: [{ Match: filter.match, In: filter.in }],
       ...(valueOf !== undefined ? { ValueOf: valueOf } : {}),
     },
     AggregateOn: valueOf !== undefined ? 'Sum' : 'Count',
@@ -34,17 +34,21 @@ export function createTopTenantRules(
     new cloudwatch.CfnInsightRule(scope, 'TopTenantsByDeliveries', {
       ruleName: `${scope.node.addr.slice(0, 12)}-tei-top-deliveries`,
       ruleState: 'ENABLED',
-      ruleBody: rule(props.processorLogs, ['$.tenantId', '$.status'], { match: '$.message', equals: 'delivery processed' }),
+      ruleBody: rule(props.processorLogs, ['$.tenantId', '$.status'], { match: '$.message', in: ['delivery processed'] }),
     }),
     new cloudwatch.CfnInsightRule(scope, 'TopTenantsByBytes', {
       ruleName: `${scope.node.addr.slice(0, 12)}-tei-top-bytes`,
       ruleState: 'ENABLED',
-      ruleBody: rule(props.processorLogs, ['$.tenantId'], { match: '$.status', equals: 'ACCEPTED' }, '$.sizeBytes'),
+      ruleBody: rule(props.processorLogs, ['$.tenantId'], { match: '$.status', in: ['ACCEPTED'] }, '$.sizeBytes'),
     }),
     new cloudwatch.CfnInsightRule(scope, 'TopTenantsByRequests', {
       ruleName: `${scope.node.addr.slice(0, 12)}-tei-top-requests`,
       ruleState: 'ENABLED',
-      ruleBody: rule(props.apiAccessLogs, ['$.tenantId', '$.status'], { match: '$.resourcePath', equals: '/tenant/deliveries' }),
+      // Every tenant route: POST and GET on the collection, GET on one delivery.
+      ruleBody: rule(props.apiAccessLogs, ['$.tenantId', '$.status'], {
+        match: '$.resourcePath',
+        in: ['/tenant/deliveries', '/tenant/deliveries/{deliveryId}'],
+      }),
     }),
   ];
 }

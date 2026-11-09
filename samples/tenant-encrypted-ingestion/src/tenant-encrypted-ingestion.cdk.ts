@@ -50,7 +50,7 @@ import { type IDeliveryValidator, VALIDATOR_NAME_PATTERN } from './validators/la
 export interface IdentityProps {
   /** OIDC discovery URL of the issuer. */
   readonly discoveryUrl: string;
-  /** Accepted `client_id`s; at least one. */
+  /** Accepted `client_id` or `aud` values; at least one (ADR-0019). */
   readonly allowedClientIds: string[];
 }
 
@@ -64,12 +64,14 @@ export interface TenantThrottleProps {
 export interface TenantEncryptedIngestionProps {
   readonly identity: IdentityProps;
   /**
-   * Where to register `ingestion/deliver` and `ingestion/read` with
-   * tenant-identity. Default: its published parameters. `'none'` skips the
-   * registration for an issuer that is not tenant-identity (README "Bring
-   * your own identity provider"); the two scopes are then yours to define.
+   * Required (ADR-0019). Where to register `ingestion/deliver` and
+   * `ingestion/read`: the scope-catalogue API and the managed policy that
+   * may call it. The construct reads no parameter of its own to find them.
+   * `'none'` skips the registration for an issuer without that API (README
+   * "Bring your own identity provider"); the deployer then owns the two
+   * scopes and the `tenant_id` claim.
    */
-  readonly identityApi?: IdentityApiProps | 'none';
+  readonly identityApi: IdentityApiProps | 'none';
   /** Enables `tenant-key`. Default false. */
   readonly allowTenantKeys?: boolean;
   /** May decrypt under `documents/<tenantId>/` (statement 2b). Fixed at key creation. Default none. */
@@ -145,6 +147,18 @@ export function resolveProps(props: TenantEncryptedIngestionProps) {
   if (!Array.isArray(props.identity.allowedClientIds) || props.identity.allowedClientIds.length === 0) {
     throw new Error('TenantEncryptedIngestion: identity.allowedClientIds must name at least one client');
   }
+  const identityApi = props.identityApi;
+  if (
+    identityApi !== 'none' &&
+    (typeof identityApi !== 'object' ||
+      identityApi === null ||
+      typeof identityApi.apiUrl !== 'string' ||
+      identityApi.apiUrl.length === 0 ||
+      typeof identityApi.platformInvokePolicyArn !== 'string' ||
+      identityApi.platformInvokePolicyArn.length === 0)
+  ) {
+    throw new Error("TenantEncryptedIngestion: identityApi is required: { apiUrl, platformInvokePolicyArn } or 'none' (ADR-0019)");
+  }
   const allowedContentTypes = props.allowedContentTypes ?? [...DEFAULT_ALLOWED_CONTENT_TYPES];
   if (allowedContentTypes.length === 0 || allowedContentTypes.some((t) => !SUPPORTED_CONTENT_TYPES.includes(t))) {
     throw new Error(`TenantEncryptedIngestion: allowedContentTypes must be a non-empty subset of ${SUPPORTED_CONTENT_TYPES.join(', ')}`);
@@ -171,7 +185,7 @@ export function resolveProps(props: TenantEncryptedIngestionProps) {
   }
   return {
     identity: props.identity,
-    identityApi: props.identityApi,
+    identityApi,
     allowTenantKeys: props.allowTenantKeys ?? false,
     consumerRoles: props.consumerRoles ?? [],
     keyRotation: props.keyRotation ?? DEFAULTS.keyRotation,
@@ -211,9 +225,9 @@ const WILDCARD_REASONS: Record<string, string> = {
     'kms:CreateKey and kms:TagResource accept no resource ARN and are conditioned on key spec, origin, usage, single-Region and the request tags (M-22); the alias pattern is alias/tenant-*-ingestion and this account\'s keys are usable only where the key policy names the role (M-17); API key routes are found at run time, a plan ARN here would be a cycle (M-5).',
   PlatformRole:
     'This account\'s keys and alias/tenant-*-ingestion, reachable only where the key policy names the role (M-17); kms:ListKeys has no resource ARN (the drain backstop, M-26); the registry GSIs (index/*); the tenant API keys, found by id at run time (M-5).',
-  SweepRole: 'The registry GSIs (index/*) the sweep queries for open deliveries and key rows (spec §8).',
+  SweepRole: 'The registry GSIs (index/*) the sweep queries for open deliveries and key rows (spec §8); the sweep assumes only its tenant role and publishes only to the construct bus (M-14, ADR-0017).',
   WatchRole: 'cloudwatch:PutMetricData has no resource ARN and is conditioned on the sample namespace (M-24).',
-  ProcessorRole: 'Granted by the SQS event source mapping on the one pipeline queue (spec §8).',
+  ProcessorRole: 'Granted by the SQS event source mapping on the one pipeline queue, whose resource policy admits only the rule and the redrive operator (M-16, ADR-0009).',
 };
 
 /** {@link TenantEncryptedIngestion.pipelineTiming}. */
@@ -538,9 +552,9 @@ export class TenantEncryptedIngestion extends Construct {
         acknowledgeGranularFinding(
           child,
           'AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]',
-          'CDK\'s bucket-notifications provider (eventBridgeEnabled, spec §8) carries the logs-only managed policy; the sample does not own it (M-31).',
+          'CDK\'s bucket-notifications provider (eventBridgeEnabled, spec §8, ADR-0009) carries the logs-only managed policy; the sample does not own it (M-31).',
         );
-        acknowledgeWildcards(child, () => 'CDK\'s bucket-notifications provider: s3:PutBucketNotification accepts the bucket only through its own handler (M-31).');
+        acknowledgeWildcards(child, () => 'CDK\'s bucket-notifications provider (ADR-0009): s3:PutBucketNotification accepts the bucket only through its own handler (M-31).');
       }
     }
     acknowledgeWildcards(this, (policyPath) => {

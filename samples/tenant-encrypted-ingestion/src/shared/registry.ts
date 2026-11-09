@@ -80,7 +80,7 @@ export const TERMINAL_STATUSES: readonly DeliveryStatus[] = ['ACCEPTED', 'REJECT
  * (spec §4.2), and `OWED` on a terminal row whose event is not yet on the
  * bus, so the sweep can find and publish it (spec §6.2 "published at least
  * once"); removed once `eventPublishedAt` is set. `EXPIRED` publishes no
- * event and drops the attribute at once.
+ * event and drops the attribute at once (ADR-0021).
  */
 export const STATUS_BUCKET = { open: 'OPEN', owed: 'OWED' } as const;
 

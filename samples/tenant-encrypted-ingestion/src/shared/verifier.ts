@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * The token verifier (spec §3.2, §7.0, M-1; ADR-0011). Adapted from
+ * The token verifier (spec §3.2, §7.0, M-1; ADR-0011, ADR-0019). Adapted from
  * agentic-runtime-isolation's src/shared/verifier.ts (copied, not imported,
  * standard §1.1): the signature against the issuer's JWKS (found through the
  * OIDC discovery document), then `iss`, `exp`, the client in the allowlist

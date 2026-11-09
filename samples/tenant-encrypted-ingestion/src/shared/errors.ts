@@ -49,7 +49,7 @@ export function isThrottled(error: unknown): boolean {
  * (1 s, 2 s, 4 s, ... capped at 8 s) up to `attempts` tries. The SDK's own
  * three retries span about a second, which is not enough while another
  * stack deploys API Gateway resources in the same account (seen on the
- * 2026-11-06 integration run beside a parallel deploy). The caller bounds
+ * 2026-11-06 integration run beside a parallel deploy; ADR-0025). The caller bounds
  * the total with the function timeout; anything other than a throttle
  * propagates at once.
  */

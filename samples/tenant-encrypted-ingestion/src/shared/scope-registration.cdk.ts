@@ -2,21 +2,20 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * `ScopeRegistration`, copied from agentic-runtime-isolation ADR-0025, not
- * imported (ADR-0015; other ADR and T- numbers below are that sample's
- * unless they name tenant-identity; here it registers
- * `ingestion/deliver` and `ingestion/read`, spec §3.2, §6.4): a custom resource that puts a backend's
+ * `ScopeRegistration`, copied from agentic-runtime-isolation (its ADR-0025),
+ * not imported (ADR-0015). ADR numbers below are this sample's unless they
+ * name tenant-identity; T- and M- numbers are this sample's threat model.
+ * Here it registers `ingestion/deliver` and `ingestion/read` (spec §3.2,
+ * §6.4). It is a custom resource that puts a backend's
  * scopes in tenant-identity's scope catalogue when the backend deploys and
  * removes them when it is deleted. The handler (`scope-registration.function.ts`)
  * calls `PUT` and `DELETE /platform/scopes/{scope}` on the identity API with
- * SigV4; the API URL comes from tenant-identity's published parameter
- * `/application-plane/shared/identity/apiUrl` and the function's role carries
- * the managed policy published at
- * `/application-plane/shared/identity/platformInvokePolicyArn`
- * (tenant-identity ADR-0030), read at deploy time the way the demo stack
- * reads the pool id (`AWS::SSM::Parameter::Value` template parameters). The
- * registry entry of the backend depends on this resource, so a route is
- * never live for a scope the issuer does not know. Each scope's description
+ * SigV4. The API URL and the managed policy the function's role carries
+ * (tenant-identity ADR-0030) are props: this copy reads no parameter itself,
+ * so the construct that uses it stays producer-agnostic (ADR-0019, standard
+ * §1.1); the demo stack reads tenant-identity's published parameters and
+ * passes them in. The registry entry of the backend depends on this
+ * resource, so a route is never live for a scope the issuer does not know. Each scope's description
  * is an owner marker (the handler's default, or the `owner` prop) that a
  * second registration of the same name is checked against.
  *
@@ -30,8 +29,8 @@
  * role's behalf. The role carries an inline Deny on `execute-api:Invoke` for
  * every `/platform/tenants*` route, so what it can reach is the catalogue
  * alone; that is still wider than this one backend's names: whoever can run
- * code as this function's role can register or remove any scope (threat
- * model T-41). The handler also refuses an `ApiUrl` whose host is not
+ * code as this function's role can register or remove any scope (T-38,
+ * mitigated by M-34). The handler also refuses an `ApiUrl` whose host is not
  * `<api>.execute-api.<AWS_REGION>.amazonaws.com`, so the role's signature is
  * never sent to a host of a direct invoker's choosing. The function runs the
  * handler in this file's sibling and nothing else, and its role holds this
@@ -44,38 +43,32 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
-import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { LogDrain } from './log-drain';
 import { acknowledgeGranularFinding } from './nag';
 import { backendScopesProblem } from './scopes';
 
-/** tenant-identity's published parameters the registration consumes (ARCHITECTURE.md §5.1, tenant-identity ADR-0017, ADR-0030). */
-export const IDENTITY_API_PARAMETERS = {
-  apiUrl: '/application-plane/shared/identity/apiUrl',
-  platformInvokePolicyArn: '/application-plane/shared/identity/platformInvokePolicyArn',
-} as const;
-
 /**
  * The execute-api ARN pattern of every `/platform/tenants*` route on any API
  * in this account and Region (`<api>/<stage>/<method>/platform/tenants` and
  * everything under it): the part of `PlatformInvokePolicy` the registration
- * role is denied (T-41).
+ * role is denied (T-38, M-34).
  */
 export function platformTenantRoutesArn(scope: Construct): string {
   return Stack.of(scope).formatArn({ service: 'execute-api', resource: '*', resourceName: '*/*/platform/tenants*' });
 }
 
 /**
- * Where the identity API is. Unset, both values are read from the published
- * parameters at deploy time. A build that must synthesise without an account
- * passes placeholders (the demo stack's `identityParameterPlaceholders`).
+ * Where the scope-catalogue API is (ADR-0019). Both values are required; the
+ * demo stack reads them from tenant-identity's published parameters, and a
+ * build that must synthesise without an account passes placeholders (the
+ * demo stack's `identityParameterPlaceholders`).
  */
 export interface IdentityApiProps {
-  /** tenant-identity's API base URL. Default: the `apiUrl` parameter. */
-  readonly apiUrl?: string;
-  /** The managed policy that may call `/platform/*`. Default: the `platformInvokePolicyArn` parameter. */
-  readonly platformInvokePolicyArn?: string;
+  /** Base URL of the API that serves `PUT|GET|DELETE /platform/scopes/{scope}`. */
+  readonly apiUrl: string;
+  /** The managed policy that may call `/platform/scopes*` on it. */
+  readonly platformInvokePolicyArn: string;
 }
 
 export interface ScopeRegistrationProps {
@@ -83,7 +76,7 @@ export interface ScopeRegistrationProps {
   readonly backend: string;
   /** The scopes to register: at least one, no duplicates, each owned by `backend`. */
   readonly scopes: string[];
-  readonly identityApi?: IdentityApiProps;
+  readonly identityApi: IdentityApiProps;
   /**
    * The owner marker written as each scope's description and compared on
    * Create, Update and Delete. Unset: the handler uses
@@ -116,13 +109,7 @@ export class ScopeRegistration extends Construct {
     }
     this.scopes = [...props.scopes];
 
-    // Deploy-time reads of tenant-identity's published values (ADR-0004
-    // mechanism). `valueForStringParameter` is one template parameter per
-    // name per stack, so several backends in one stack share the two reads.
-    const apiUrl = props.identityApi?.apiUrl ?? ssm.StringParameter.valueForStringParameter(this, IDENTITY_API_PARAMETERS.apiUrl);
-    const policyArn =
-      props.identityApi?.platformInvokePolicyArn ??
-      ssm.StringParameter.valueForStringParameter(this, IDENTITY_API_PARAMETERS.platformInvokePolicyArn);
+    const { apiUrl, platformInvokePolicyArn: policyArn } = props.identityApi;
 
     // Explicit, deletable log group (ADR-0015). The handler writes nothing on
     // success and Lambda's own START/END/REPORT lines are below WARN.
@@ -151,14 +138,14 @@ export class ScopeRegistration extends Construct {
     });
     this.role = fn.role!;
     // The published PlatformInvokePolicy (tenant-identity ADR-0030): the
-    // only way into `/platform/*`. Wider than one backend's names; T-41.
+    // only way into `/platform/*`. Wider than one backend's names; T-38.
     fn.role!.addManagedPolicy(iam.ManagedPolicy.fromManagedPolicyArn(this, 'PlatformInvokePolicy', policyArn));
     // The policy also grants the tenant routes (`POST /platform/tenants`,
     // `GET|PATCH|DELETE /platform/tenants/*`, `POST /platform/tenants/*/users`),
     // which this function never calls and which reach tenant data (CreateUser
     // returns a temporary password). An explicit Deny on that route family
     // wins over the managed Allow, so the role keeps `/platform/scopes*`
-    // alone (T-41; tenant-identity's T-34 expects each holder to do this).
+    // alone (M-34; tenant-identity's T-34 expects each holder to do this).
     fn.role!.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'DenyPlatformTenantRoutes',
@@ -170,7 +157,7 @@ export class ScopeRegistration extends Construct {
     acknowledgeGranularFinding(
       fn,
       'AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]',
-      'AWSLambdaBasicExecutionRole is the logs-only managed policy NodejsFunction attaches; a scoped replacement adds boilerplate for no change in access (M-31, ADR-0012).',
+      'AWSLambdaBasicExecutionRole is the logs-only managed policy NodejsFunction attaches; a scoped replacement adds boilerplate for no change in access (M-31, ADR-0015).',
     );
 
     this.resource = new CustomResource(this, 'Resource', {

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * The error model (spec §5.3, M-2). Both services throw these; the
+ * The error model (spec §5.3, M-2, ADR-0022). Both services throw these; the
  * generated SSDK serialisers pick an error by its `name`, so one class per
  * modelled shape name serves both. The Lambda wrapper then renders every
  * error response, modelled or not, as `{code, message, requestId}`.

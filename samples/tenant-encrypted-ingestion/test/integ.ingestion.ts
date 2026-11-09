@@ -990,8 +990,8 @@ async function step7b(w: World): Promise<StepResult> {
 
     // Redrive under the redriveOperatorRole, which the queue's Deny exempts (§7.7).
     // A move task on a standard queue samples the queue and can report
-    // COMPLETED with 0 moved while the one message is still there (runs 6 and
-    // 10, 2026-11-06 and 2026-11-09), so the check is that the message LEFT
+    // COMPLETED with 0 moved while the one message is still there (seen on
+    // 2026-11-06 and 2026-11-09), so the check is that the message LEFT
     // the DLQ, with up to three tasks.
     if (inDlq) {
       await sleep(5000);
