@@ -220,16 +220,27 @@ job_create_tenant() { # INDEX
   local name st
   job_init
   name="rtiso-stress-${RUN}-$1"
-  st="$(retry '429' platform POST platform/tenants \
+  # 5xx and curl failures are retried too: CreateTenant answered 500 in
+  # bursts at 8 rps on 2026-11-09 (139 of 180 calls) and succeeded on rerun.
+  st="$(retry '429|5[0-9][0-9]|000' platform POST platform/tenants \
     "$(jq -nc --arg n "$name" --arg e "success+${name}-admin@simulator.amazonses.com" '{name: $n, adminEmail: $e, scopes: ["app/use"]}')")"
   echo "CreateTenant ${st}" >>"$STATUSES"
+  # The first non-201 answer's body, once, for the diagnosis (an error body carries no credential).
+  if [[ "$st" != 201 ]] && ( set -o noclobber; : >"${LIB_TMP}/first-create-error" ) 2>/dev/null; then
+    echo "CreateTenant ${st}: $(head -c 300 "$BODY" | tr '\n' ' ')" >&2
+  fi
   [[ "$st" == 201 ]] && jq -c --arg n "$name" '{tenantId: .tenant.tenantId, name: $n, admin: .admin.user.username, users: [], active: false}' "$BODY" >>"$PENDING"
   : >"$BODY"   # the answer carries the admin's temporary password
   rm -rf "$JOB_TMP"
 }
 TO_CREATE=$(( SEEDED > REUSED ? SEEDED - REUSED : 0 ))
 START=$SECONDS
+# CreateTenant writes a Cognito group and a user; above about 4 a second
+# Cognito answers TooManyRequestsException, which tenant-identity returns as
+# 500 (2026-11-09, medium seed: 139 of 180 at 8 rps). Half pace here.
+INTERVAL_MS=250
 for ((i = 1; i <= TO_CREATE; i++)); do launch job_create_tenant "$i"; done
+INTERVAL_MS=125
 wait
 merge_pending
 CREATED=$(( $(jq '.tenants | length' "$MANIFEST") - REUSED ))

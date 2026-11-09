@@ -120,7 +120,7 @@ to disk or to the k6 summary.
 | Scenario | Shape | What it stresses | Watch |
 |---|---|---|---|
 | S1 steady | 1,000 tenants, 4 users each, 500 rps, `report` probe, one warm conversation per VU (warmed at 20 new conversations a second, about 3.5 min, untimed), 10 min | the authoriser cache, the grant, the mint cache, the TVM cache | p50/p90 TTFB, 5xx, mint hit rate (`mint` on `request served`) |
-| S2 thundering herd | an instance-free ingress (the §13 question 2 recipe: new Lambda instances, the authoriser cache flushed, 60 s idle), then 0 to 800 rps in 5 s, 1,000 tenants, 2 min | cold-start fan-out: new instances × tenants each on STS; SSM cold reads; KMS `Sign` on first mint | STS throttles, Lambda cold starts, `registry_unavailable`, TTFB max |
+| S2 thundering herd | an instance-free ingress (the §13 question 2 recipe: new Lambda instances, the authoriser cache flushed, 60 s idle), then 0 to 800 rps in 5 s, 1,000 tenants, 2 min, on the warm conversations of the last S1 run (F-2) | cold-start fan-out: new instances × tenants each on STS; SSM cold reads; KMS `Sign` on first mint | STS throttles, Lambda cold starts, `registry_unavailable`, TTFB max |
 | S3 noisy neighbour | S1 plus one tenant at 600 rpm (10x its limit) for 5 min | the per-tenant limit as the fairness control; the stage throttle behind it | that tenant: 429 after 60 requests in each minute, 2x at a minute boundary at most (ADR-0020); every other tenant: 0 429, p90 unchanged against S1 |
 | S4 tool storm | 200 rps of `tool crm/get_account {}` across 1,000 tenants, 5 min | KMS `Sign` one per admitted `tools/call`; the gateway's 10 rps per tenant; the REQUEST interceptor's TVM | KMS throttles, gateway 429 per tenant, interceptor duration |
 | S5 long streams | `stream 60` at 12 rps across 500 tenants, 5 min | Lambda concurrency held for the whole stream (12 × 60 = 720 of the 800 reserved) | `ConcurrentExecutions`, `Throttles` as it approaches 800, stream breaks (`stream interrupted`) |
@@ -421,6 +421,24 @@ are single-digit dollars each. Say the total in the results, not here.
    measured value next to the documented one, with the run date.
 4. An ADR if a run changes a default (for example the stage throttle
    warning, the cache sizes or `registryTtl`).
+
+## 11.1 Findings from the runs
+
+Run on 2026-11-09 at `small` and `medium` (results in `design/stress-results/`).
+Every scenario passed the isolation assertions at both scales: 0 mismatches
+over about 130,000 requests, every `read <B>` denied, every `read <A>`
+served. What the runs found beyond that:
+
+| Id | Finding | Where | Consequence |
+|---|---|---|---|
+| F-1 | A cold herd above `ingressReservedConcurrency` divided by the cold-start seconds throttles the integration Lambda, and API Gateway answers those requests with a 500 that names no tenant and no reason (medium S2: 300 rps in 5 s against 200 reserved; 19 throttles, 19 bare 500s). The stage throttle, which would answer 429 with a reason, sits above that point (300 rps) | the sample's `api-gateway` ingress | `architecture.md` Scale limits: size `stageThrottle.rateLimit` at or under `ingressReservedConcurrency` / p99 cold-start seconds, or accept bare 500s in a herd. Candidate for an ADR |
+| F-2 | A herd of new conversations is a Runtime session-creation test, not an ingress test: 300 new sessions a second against the 25 a second quota gave 167 `backend_failed` 502s (with tenant and reason, so the ingress behaved) | AgentCore Runtime quota | S2 reuses the conversations of the last S1 run (`run.sh`); the plan's §5 S2 row says so. A real deployment that restarts with many live conversations sees the same, and sees it correctly as 502 `backend_failed` |
+| F-3 | tenant-identity's `CreateTenant` returns 500 `Internal server error` when Cognito answers `TooManyRequestsException` (medium seed at 8 rps: 139 of 180 calls; its platform function logged the exception). A throttle should surface as 429 or 503 with `Retry-After` | the `tenant-identity` sample | an issue on tenant-identity; `seed.sh` creates tenants at 4 a second and retries 5xx |
+| F-4 | The tools path is slow under a tool storm: medium S4 (200 tenants, 100 tools a target, 4 gateways) p90 5.4 s against 0.14 s for `report`. The chain is ingress, Runtime, MCP `tools/call`, REQUEST interceptor (verify, policy, tool TVM), the tool Lambda, and back | the tools gateway path | measure the split with the interceptor's log before tuning; `interceptorProvisionedConcurrency` is the first knob |
+| F-5 | The limiter bins by request start, the `request served` line by request end: a request that crosses a minute boundary appears in the next bin. Attribution checks over logs must allow for it | `collect.sh` | the under-limit rule skips the window's first and last minute and allows 5 under the limit |
+| F-6 | Logs Insights undercounts for about two minutes after a run (117 of 474 refusals when queried at once) | `collect.sh` | wait 150 s after the window before querying |
+| F-7 | The k6 host's first-boot `dnf install k6` lost the rpm lock to the image's own update and the GPG key import failed, so k6 was missing | `StressDriver` user data | every install retries until the lock is free; `k6 version` at the end fails the boot loudly |
+| F-8 | An integ run deletes the vendor scopes it registered on the shared identity deployment at its end, so a stress deploy after an integ run finds no `app/use` | shared fixture | `deploy.sh` registers the two vendor scopes when missing and leaves them |
 
 ## 12. Options considered for the driver
 

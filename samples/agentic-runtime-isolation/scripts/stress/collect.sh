@@ -176,7 +176,15 @@ jq -n --argjson w "$(cat "$WINDOW")" --argjson k6 "$K6" --argjson m "$(cat "${RU
                     | ($mint[0] | map(.n | num) | add // 0) as $t | if $t == 0 then null else ($h / $t) end),
      refused429: ($r429[0] | map(.n | num) | add // 0),
      refused429Untagged: ($r429[0] | map(select((.tenantId // "") == "") | .n | num) | add // 0),
-     refused429UnderLimit: ($r429[0] | map(select((.tenantId // "") != "" and (($servedAt["\(.tenantId)|\(.minute)"] // 0) < 60))) | length),
+     # A 429 in a minute where the tenant had under 60 served requests. The
+     # limiter bins by request start, the served line by request end, so a
+     # request that crosses a minute boundary lands in the next bin: a
+     # tenant-minute counts only when it is more than 5 under the limit, and
+     # the first and last minutes of the window are skipped (they are partial).
+     refused429UnderLimit: ($r429[0] | map(select((.tenantId // "") != ""
+        and (.minute | .[0:16]) != ($w.start | todate | .[0:16] | sub("T"; " "))
+        and (.minute | .[0:16]) != ($w.end | todate | .[0:16] | sub("T"; " "))
+        and (($servedAt["\(.tenantId)|\(.minute)"] // 0) < 55))) | length),
      tenants429: ($r429[0] | map(.tenantId) | unique | length),
      refused5xx: ($r5[0] | map(.n | num) | add // 0),
      refused5xxWithTenant: ($r5[0] | map(select(.withTenant == "1" or .withTenant == "true") | .n | num) | add // 0),
@@ -207,9 +215,16 @@ else
 fi
 E5="$(v '.metrics.apiGateway["5xx"]')"
 R5T="$(v .refused5xxWithTenant)"
+LT="$(v '(.metrics.lambda.authorizerThrottles // 0) + (.metrics.lambda.ingressThrottles // 0)')"
 if [[ "$SCENARIO" == s6 ]]; then
   row "5xx from the ingress" "API Gateway 5xx ${E5}; refusals naming a tenant ${R5T} ($(v '.refused5xxReasons | to_entries | map("\(.key)=\(.value)") | join(", ")'))" \
     "$(pf awk -v a="$E5" -v b="$R5T" 'BEGIN { exit !(a <= b) }')"
+elif [[ "$SCENARIO" == s2 ]]; then
+  # The herd is the one scenario that may throttle the ingress Lambda; each
+  # throttle is one API Gateway 500 with no tenant (finding F-1 in the plan).
+  # Every other 5xx must name a tenant and a reason.
+  row "5xx from the ingress" "API Gateway 5xx ${E5}; refusals naming a tenant ${R5T}; Lambda throttles ${LT} ($(v '.refused5xxReasons | to_entries | map("\(.key)=\(.value)") | join(", ")'))" \
+    "$(pf awk -v a="$E5" -v b="$R5T" -v c="$LT" 'BEGIN { exit !(a <= b + c) }')"
 else
   row "5xx from the ingress" "API Gateway 5xx ${E5} ($(v '.refused5xxReasons | to_entries | map("\(.key)=\(.value)") | join(", ")'))" "$(pf zero "$E5")"
 fi
@@ -228,7 +243,11 @@ else
 fi
 row "KMS Sign throttles (sdk retried)" "retries ${KMS}" "$(pf zero "$KMS")"
 LT=$(( $(v .metrics.lambda.authorizerThrottles | cut -d. -f1) + $(v .metrics.lambda.ingressThrottles | cut -d. -f1) ))
+if [[ "$SCENARIO" == s2 ]]; then
+  row "Lambda Throttles" "${LT} (concurrency max authoriser $(v .metrics.lambda.authorizerConcurrencyMax), ingress $(v .metrics.lambda.ingressConcurrencyMax)); counted for the herd (F-1)" "INFO"
+else
 row "Lambda Throttles" "${LT} (concurrency max authoriser $(v .metrics.lambda.authorizerConcurrencyMax), ingress $(v .metrics.lambda.ingressConcurrencyMax))" "$(pf zero "$LT")"
+fi
 DDB="$(v .metrics.dynamodb.entitlementsThrottledRequests)"
 row "DynamoDB ThrottledRequests (entitlement store)" "${DDB}" "$(pf zero "$DDB")"
 TTFB90="$(v '.k6.ttfbP90Ms // "n/a"')"
@@ -286,6 +305,12 @@ if [[ -n "$LEAK" ]]; then
   fail "redaction check: the results section holds${LEAK}; nothing written (the data is in ${RUN_DIR}/collect.json)"
 fi
 mkdir -p "$RESULTS_DIR"
+# A second collect of the same run replaces its section (the first may have
+# run before the log group settled).
+if [[ -s "$RESULTS" ]]; then
+  awk -v id="## ${RUN_ID}" 'index($0, "## ") == 1 { skip = ($0 == id) } !skip' "$RESULTS" >"${RESULTS}.new"
+  mv "${RESULTS}.new" "$RESULTS"
+fi
 cat "$SECTION" >>"$RESULTS"
 
 echo "== pass table (${RUN_ID})"

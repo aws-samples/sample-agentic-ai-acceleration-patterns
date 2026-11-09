@@ -88,6 +88,17 @@ jq -e 'type == "object" and has("scenarioSeconds")' <<<"$TIER" >/dev/null 2>&1 \
 identity_init   # IDENTITY_API (the platform API) and APP_CLIENT_ID for the /token refresh
 
 RUN_ID="${SCENARIO}-${SCALE}-$(date -u +%Y%m%dT%H%M%SZ)"
+# S2's herd must land on warm microVMs: a herd of new conversations is a
+# Runtime session-creation test (25 a second, §9), not an ingress cold-start
+# test (medium, 2026-11-09: 167 `backend_failed`). The herd reuses the
+# conversations of the latest S1 run at this scale unless CONVERSATION_RUN_ID
+# is set; S1 must have run within the Runtime's idle window.
+CONVERSATION_RUN_ID="${CONVERSATION_RUN_ID:-}"
+if [[ "$SCENARIO" == s2 && -z "$CONVERSATION_RUN_ID" ]]; then
+  CONVERSATION_RUN_ID="$(ls -1 "${STATE_DIR}/runs" 2>/dev/null | grep -E "^s1-${SCALE}-" | sort | tail -1 || true)"
+  [[ -n "$CONVERSATION_RUN_ID" ]] || fail "s2 needs an S1 run at scale ${SCALE} to reuse its conversations (or set CONVERSATION_RUN_ID)"
+  echo "s2 reuses the conversations of ${CONVERSATION_RUN_ID}"
+fi
 RUN_DIR="${STATE_DIR}/runs/${RUN_ID}"
 mkdir -p "$RUN_DIR"
 chmod 700 "$RUN_DIR"
@@ -139,6 +150,7 @@ export APP_CLIENT_ID=$(sq "$APP_CLIENT_ID")
 export ISSUER=$(sq "$ISSUER")
 export REGION=$(sq "$REGION")
 export RUN_ID=$(sq "$RUN_ID")
+${CONVERSATION_RUN_ID:+export CONVERSATION_RUN_ID=$(sq "$CONVERSATION_RUN_ID")}
 export AWS_REGION=$(sq "$REGION")
 # k6 signs IssueToken with SigV4 and needs the instance role credentials in its environment (never printed).
 eval "\$(aws configure export-credentials --format env)"
