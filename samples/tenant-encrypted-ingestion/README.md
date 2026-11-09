@@ -54,13 +54,14 @@ The two tiers side by side (spec §1.3):
 
 ## Architecture
 
-![Components: a tenant user presents an access token to the ingestion API, which returns a presigned PUT with the tenant's key fixed; the upload lands in the drop prefix, an Object Created event via SQS wakes the processor, which validates the object and copies it pinned under the tenant's key into the documents prefix, and the downstream consumer reads it after a DeliveryAccepted event; the API and the processor use the tenant keys, registry, tenant roles, validators, sweep and watch, and delivery bus; the vendor drives key lifecycle through the platform API; each box names the pattern it carries](./diagrams/tenant-encrypted-ingestion.components.drawio.svg)
+![Components: (1) a tenant user presents an access token to the ingestion API and gets an uploadUrl back; (2) the user PUTs the file to that URL, straight into the drop prefix, with the headers as given; (3) an Object Created event via SQS wakes the processor, which (4) validates the object and copies it pinned under the tenant's key into the documents prefix; (5) the downstream consumer reads it after a DeliveryAccepted event; the API and the processor use the tenant keys, registry, tenant roles, validators, sweep and watch, and delivery bus; the vendor drives key lifecycle through the platform API; each box names the pattern it carries](./diagrams/tenant-encrypted-ingestion.components.drawio.svg)
 
 Each box is one component and its pill names the pattern it carries. The
-ingestion API takes the tenant from the verified claim only and presigns the
-PUT under a tenant-role session, with the tenant's key fixed in the signed
-headers; the tenant user PUTs the file to the drop prefix with that URL. The
-processor assumes the tenant's process role before reading anything,
+tenant user makes two calls: `CreateDelivery` on the ingestion API, which
+takes the tenant from the verified claim only and answers with a URL presigned
+under a tenant-role session, the tenant's key fixed in the signed headers; then
+a PUT of the file to that URL, which lands in the drop prefix without passing
+through the API. The processor assumes the tenant's process role before reading anything,
 validates and then lands the object under `documents/<tenantId>/`, and the
 consumer role may decrypt under that prefix only. Shared components on the
 second row are reached under tenant-role sessions: the key policy and the
