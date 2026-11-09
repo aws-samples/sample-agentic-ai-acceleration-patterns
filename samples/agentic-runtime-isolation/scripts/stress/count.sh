@@ -296,8 +296,10 @@ LIB_TMP="$MAIN_TMP"; BODY="${MAIN_TMP}/body"; REQ="${MAIN_TMP}/request"
 rm -f "$T_FILE"
 HIST="$(cat "${RES_DIR}"/agent-* | sort | uniq -c | awk '{printf "%s:%s ", $2, $1}')"
 log_count() { # FILTER_PATTERN -> lines in the ingress log group since SINCE_MS
+  # One number: a paginated answer prints one count per page, so sum them;
+  # a failed call counts as 0.
   aws logs filter-log-events --log-group-name "$LOG_GROUP" --start-time "$SINCE_MS" --filter-pattern "$1" \
-    --query 'length(events)' --output text 2>/dev/null || echo 0
+    --query 'length(events)' --output text 2>/dev/null | awk '{ s += $1 } END { print s + 0 }'
 }
 seen=0
 for _ in 1 2 3 4 5 6; do   # log delivery lags a few seconds; 15 s between reads, 90 s at most

@@ -265,7 +265,9 @@ SECTION="${LIB_TMP}/section.md"
 PATTERNS="${LIB_TMP}/manifest-ids"
 jq -r '.tenants[] | .tenantId, .name, .admin, (.users[]?)' "$MANIFEST" | grep -v '^$' >"$PATTERNS" || true
 LEAK=""
-grep -Eq '[0-9]{12}' "$SECTION" && LEAK="${LEAK} a-12-digit-number"
+# An account id is twelve digits on their own; the fraction of a float
+# (0.193415637860) is not one.
+grep -Eq '(^|[^0-9.])[0-9]{12}($|[^0-9])' "$SECTION" && LEAK="${LEAK} a-12-digit-number"
 [[ -s "$PATTERNS" ]] && grep -Fq -f "$PATTERNS" "$SECTION" && LEAK="${LEAK} a-manifest-id-or-name"
 grep -Fq 'eyJ' "$SECTION" && LEAK="${LEAK} eyJ"
 grep -Fq 'https://' "$SECTION" && LEAK="${LEAK} https://"

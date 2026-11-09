@@ -114,10 +114,16 @@ export class StressDriverStack extends Stack {
     const userData = ec2.UserData.forLinux();
     userData.addCommands(
       'set -euo pipefail',
-      // The AWS CLI v2 is preinstalled on Amazon Linux 2023.
-      'dnf install -y jq',
-      'dnf install -y https://dl.k6.io/rpm/repo.rpm',
-      'dnf install -y k6',
+      // The AWS CLI v2 is preinstalled on Amazon Linux 2023. At first boot
+      // another dnf (the image's own update) may hold the rpm lock, and the
+      // k6 GPG key import then fails with "can't create transaction lock"
+      // (seen 2026-11-09); each install retries until the lock is free.
+      'retry() { for i in $(seq 1 30); do "$@" && return 0; sleep 10; done; return 1; }',
+      'retry dnf install -y jq',
+      'retry dnf install -y https://dl.k6.io/rpm/repo.rpm',
+      'retry rpm --import https://dl.k6.io/key.gpg',
+      'retry dnf install -y k6',
+      'k6 version',
       `mkdir -p ${STRESS_HOME}`,
     );
 

@@ -234,7 +234,7 @@ wait
 merge_pending
 CREATED=$(( $(jq '.tenants | length' "$MANIFEST") - REUSED ))
 echo "create: ${CREATED} of ${TO_CREATE} tenants created in $((SECONDS - START))s"
-(( CREATED == TO_CREATE )) || echo "WARN: $((TO_CREATE - CREATED)) CreateTenant calls failed after retry (see the status histogram)" >&2
+(( CREATED == TO_CREATE )) || echo "WARN: $((TO_CREATE - CREATED)) CreateTenant calls failed after retry; statuses: $(sort "$STATUSES" | uniq -c | awk '{printf "%s=%s ", $2 "_" $3, $1}')" >&2
 
 # -- active flags, subscriptions --------------------------------------------
 jq --argjson a "$ACTIVE" --arg s "$SCALE" --arg p "$PREFIX" \
@@ -291,7 +291,8 @@ while read -r items; do
   for attempt in 1 2 3 4 5 6; do
     aws dynamodb batch-write-item --request-items "file://${batch}" --query UnprocessedItems --output json >"${batch}.left" \
       || fail "BatchWriteItem on the demo table"
-    if jq -e 'length == 0' "${batch}.left" >/dev/null 2>&1; then : >"${batch}.left"; break; fi
+    # No unprocessed items: the CLI prints nothing (null) or {} for the query.
+    if [[ ! -s "${batch}.left" ]] || jq -e 'length == 0' "${batch}.left" >/dev/null 2>&1; then : >"${batch}.left"; break; fi
     mv "${batch}.left" "$batch"
     (( attempt < 6 )) && { sleep "$delay"; delay=$((delay * 2)); }
   done

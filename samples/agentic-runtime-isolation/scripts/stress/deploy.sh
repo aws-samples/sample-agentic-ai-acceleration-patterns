@@ -70,9 +70,22 @@ if [[ "$status" != 200 ]]; then
   stale_identity "$status" && fail "the published tenant-identity has no /platform/scopes (stale). Redeploy TenantIdentity-shared-pool in place from current main by hand; this script never replaces it"
   fail "GET /platform/scopes on the published tenant-identity: HTTP ${status}"
 fi
-status="$(platform GET "platform/scopes/$(jq -rn '"app/use" | @uri')")"
-[[ "$status" == 200 ]] || fail "the vendor scope app/use is not registered on tenant-identity (HTTP ${status}); an integ run registers it, or PUT platform/scopes/app%2Fuse by hand"
-echo "identity: shared-pool with the scope catalogue and app/use (reused)"
+# The vendor scopes the ingress needs (the floor and the admin scope), as
+# integ.sh registers them. An integ run removes the ones it added at its
+# end, so a stress deploy registers what is missing and leaves it: a later
+# run reuses it (the identity deployment is a shared fixture).
+ADDED_SCOPES=()
+for sc in app/use entitlements/admin; do
+  status="$(platform GET "platform/scopes/$(jq -rn --arg s "$sc" '$s | @uri')")"
+  if [[ "$status" == 404 ]]; then
+    status="$(platform PUT "platform/scopes/$(jq -rn --arg s "$sc" '$s | @uri')" "$(jq -nc --arg d "runtime-isolation stress ${PREFIX}" '{description: $d}')")"
+    [[ "$status" == 200 ]] || fail "PutScope ${sc}: HTTP ${status}"
+    ADDED_SCOPES+=("$sc")
+  elif [[ "$status" != 200 ]]; then
+    fail "GET platform/scopes/${sc} on tenant-identity: HTTP ${status}"
+  fi
+done
+echo "identity: shared-pool with the scope catalogue (reused); vendor scopes added by this deploy: ${ADDED_SCOPES[*]:-none}"
 
 # -- helpers ----------------------------------------------------------------
 synth() { # AGENTS DRIVER
