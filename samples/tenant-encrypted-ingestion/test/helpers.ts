@@ -27,7 +27,7 @@ export const CLIENT_ID = 'testclient0000000000000000';
 export interface TestIssuer {
   readonly getKey: JWTVerifyGetKey;
   readonly fetchDiscovery: (url: string) => Promise<Discovery>;
-  mint(overrides?: JWTPayload & { exp?: number }, remove?: string[]): Promise<string>;
+  mint(overrides?: JWTPayload & { exp?: number }, remove?: string[], typ?: string): Promise<string>;
   mintForeign(overrides?: JWTPayload): Promise<string>;
 }
 
@@ -44,12 +44,12 @@ export async function testIssuer(): Promise<TestIssuer> {
   const foreign = await generateKeyPair('RS256');
   const jwk = { ...(await exportJWK(publicKey)), kid: 'k1', alg: 'RS256', use: 'sig' };
   const getKey = createLocalJWKSet({ keys: [jwk] });
-  const sign = async (key: KeyLike, overrides: JWTPayload = {}, remove: string[] = []) => {
+  const sign = async (key: KeyLike, overrides: JWTPayload = {}, remove: string[] = [], typ?: string) => {
     const claims: JWTPayload = { ...DEFAULT_CLAIMS, ...overrides };
     for (const name of remove) {
       delete claims[name];
     }
-    let jwt = new SignJWT(claims).setProtectedHeader({ alg: 'RS256', kid: 'k1' }).setIssuedAt();
+    let jwt = new SignJWT(claims).setProtectedHeader({ alg: 'RS256', kid: 'k1', ...(typ === undefined ? {} : { typ }) }).setIssuedAt();
     jwt = claims.iss === undefined ? jwt.setIssuer(ISSUER) : jwt;
     jwt = claims.exp === undefined ? jwt.setExpirationTime('5m') : jwt;
     return jwt.sign(key);
@@ -62,7 +62,7 @@ export async function testIssuer(): Promise<TestIssuer> {
       }
       return { issuer: ISSUER, jwksUri: `${ISSUER}/.well-known/jwks.json` };
     },
-    mint: (overrides, remove) => sign(privateKey, overrides, remove),
+    mint: (overrides, remove, typ) => sign(privateKey, overrides, remove, typ),
     mintForeign: (overrides) => sign(foreign.privateKey, overrides),
   };
 }

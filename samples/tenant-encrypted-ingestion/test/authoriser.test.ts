@@ -40,6 +40,11 @@ describe('authoriser refusals (every one a 401)', () => {
     ['an expired token', () => issuer.mint({ exp: Math.floor(Date.now() / 1000) - 60 })],
     ['a client outside the allowlist', () => issuer.mint({ client_id: 'otherclient000000000000000' })],
     ['an id token', () => issuer.mint({ token_use: 'id' })],
+    ['a client_id outside the allowlist even when aud is inside it', () => issuer.mint({ client_id: 'otherclient000000000000000', aud: CLIENT_ID })],
+    ['no client_id and an aud outside the allowlist', () => issuer.mint({ aud: 'https://api.example.com' }, ['client_id'], 'at+jwt')],
+    ['no client_id and no aud', () => issuer.mint({}, ['client_id'], 'at+jwt')],
+    ['no token_use and no typ (a plain OIDC id token)', () => issuer.mint({ aud: CLIENT_ID }, ['client_id', 'token_use'])],
+    ['no token_use and typ JWT', () => issuer.mint({ aud: CLIENT_ID }, ['client_id', 'token_use'], 'JWT')],
     ['no sub', () => issuer.mint({}, ['sub'])],
     ['a multi-tenant token', () => issuer.mint({ tenants: ['tenant-a', 'tenant-b'] })],
     ['no tenant_id', () => issuer.mint({}, ['tenant_id'])],
@@ -55,6 +60,21 @@ describe('authoriser refusals (every one a 401)', () => {
     expect(error).toEqual(new Error('Unauthorized'));
     // The refusal is logged by reason, never with the token.
     expect(lines.join('')).not.toContain(token ?? 'no-token-at-all');
+  });
+});
+
+describe('authoriser allow for a non-Cognito issuer (aud and typ at+jwt)', () => {
+  const byo: [string, () => Promise<string>][] = [
+    ['aud as a string', () => issuer.mint({ aud: CLIENT_ID }, ['client_id', 'token_use'], 'at+jwt')],
+    ['aud as an array with the client among resource servers', () => issuer.mint({ aud: ['https://api.example.com', CLIENT_ID] }, ['client_id', 'token_use'], 'at+jwt')],
+    ['typ application/at+jwt', () => issuer.mint({ aud: CLIENT_ID }, ['client_id', 'token_use'], 'application/at+jwt')],
+    ['typ in upper case', () => issuer.mint({ aud: CLIENT_ID }, ['client_id', 'token_use'], 'AT+JWT')],
+    ['token_use access with aud and no client_id', () => issuer.mint({ aud: CLIENT_ID }, ['client_id'])],
+  ];
+  it.each(byo)('admits %s', async (_name, mint) => {
+    const result = await authoriser()(event(await mint()));
+    expect(result.principalId).toBe('user-a1');
+    expect(result.context).toMatchObject({ tenantId: 'tenant-a', sub: 'user-a1' });
   });
 });
 

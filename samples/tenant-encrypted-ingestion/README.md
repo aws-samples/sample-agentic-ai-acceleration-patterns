@@ -363,6 +363,47 @@ never touched. The scope registration removes `ingestion/deliver` and
 `ingestion/read` from tenant-identity's catalogue. Destroy tenant-identity
 afterwards from its own directory if nothing else uses it.
 
+### Bring your own identity provider
+
+tenant-identity is what the demo stack, the integration test and the demo
+script use; the construct itself does not need it. `identity` takes any
+OIDC issuer: `discoveryUrl` is the issuer's discovery document (the
+verifier reads `issuer` and `jwks_uri` from it) and `allowedClientIds` the
+clients whose tokens it admits. Set `identityApi: 'none'` and define the
+two scopes `ingestion/deliver` and `ingestion/read` in your own provider
+instead; the construct then creates no scope registration and reads no
+tenant-identity parameter. Nothing else in it talks to tenant-identity.
+
+```ts
+const ingestion = new TenantEncryptedIngestion(this, 'Ingestion', {
+  identity: {
+    discoveryUrl: 'https://login.example.com/.well-known/openid-configuration',
+    allowedClientIds: ['ingestion-api'],
+  },
+  identityApi: 'none',
+  validators: [new LambdaValidator(pageLimitFn, { name: 'pdf-pages', timeout: Duration.seconds(30) })],
+});
+```
+
+The access token the verifier admits
+([`src/shared/verifier.ts`](./src/shared/verifier.ts), M-1):
+
+| Check | Cognito and tenant-identity | Any other OIDC issuer |
+|---|---|---|
+| Signature | RS256, a key in the issuer's JWKS | same |
+| `iss`, `exp` | match the discovery document; not expired | same |
+| Client | `client_id` in `allowedClientIds` | `aud` (a string or an array) holds a value in `allowedClientIds`; when `client_id` is present it decides alone |
+| Access token, not ID token | `token_use: access` | JOSE header `typ: at+jwt` (RFC 9068; `application/at+jwt` too); a token with neither mark is refused |
+| `sub` | non-empty | same |
+| `tenant_id` | one string matching `^[A-Za-z0-9][A-Za-z0-9-]{1,34}$`; a `tenants` claim refuses the token | same |
+| `scope` | space-separated; the handler checks `ingestion/deliver` or `ingestion/read` per route | same |
+
+Your provider therefore has to put the tenant into a `tenant_id` claim, one
+tenant per token, and mark its access tokens. For Okta, Auth0, Entra ID and
+Keycloak that is a custom claim on the access token plus the standard
+`at+jwt` header they already set. The authoriser result is cached per token
+for up to 300 s, so a revoked token keeps working for that long (M-1).
+
 ### Use the construct in your own app
 
 Declare this sample as a local dependency (`file:../tenant-encrypted-ingestion`)

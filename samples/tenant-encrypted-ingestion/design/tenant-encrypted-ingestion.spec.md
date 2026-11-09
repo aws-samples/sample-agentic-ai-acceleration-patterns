@@ -374,7 +374,12 @@ voting over the bus (a silent voter blocks every delivery).
 - A **tenant user** holds a `tenant-identity` access token (`tenant_id`,
   `sub`, `client_id`, `scope`). The authoriser checks issuer, client,
   expiry, `token_use`, refuses a token carrying `tenants`, and passes
-  `tenantId`, `sub`, `scope`. The **handler** enforces the scope per route:
+  `tenantId`, `sub`, `scope`. *Amended 2026-11-09:* any OIDC issuer may
+  stand in for tenant-identity; the client then comes from `aud` and the
+  access-token mark from the header `typ: at+jwt` (RFC 9068), `client_id`
+  and `token_use` deciding alone when present. With `identityApi: 'none'`
+  the construct registers no scopes (README "Bring your own identity
+  provider"). The **handler** enforces the scope per route:
   `ingestion/deliver` for `CreateDelivery`, `ingestion/read` for the reads.
   Both scopes are registered in `tenant-identity` at deploy (`PutScope`).
 - The **vendor** calls `/platform/*` with SigV4, typically from a
@@ -391,8 +396,8 @@ voting over the bus (a silent voter blocks every delivery).
 | Prop | Type | Default | Meaning |
 |---|---|---|---|
 | `identity.discoveryUrl` | string | required | issuer discovery URL |
-| `identity.allowedClientIds` | string[] | required | accepted `client_id`s |
-| `identityApi` | `{ apiUrl, platformInvokePolicyArn }` | from `/application-plane/shared/identity/*` | where to register scopes |
+| `identity.allowedClientIds` | string[] | required | accepted clients (`client_id`, or `aud` for another issuer) |
+| `identityApi` | `{ apiUrl, platformInvokePolicyArn }` or `'none'` | from `/application-plane/shared/identity/*` | where to register scopes; `'none'` for an issuer that is not tenant-identity |
 | `allowTenantKeys` | boolean | `false` | enables `tenant-key` |
 | `consumerRoles` | `iam.IRole[]` | `[]` | may decrypt under `documents/<tenantId>/` (statement 2b); fixed at key creation |
 | `keyRotation` | boolean | `true` | rotation on `vendor-key` keys |

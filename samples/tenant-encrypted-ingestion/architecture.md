@@ -55,8 +55,12 @@ construct with a demo stack (ADR-0012).
   the authoriser (401), the Smithy path pattern (400), before every
   `AssumeRole`, and on the object key's second segment in the processor.
 - A **tenant user** calls `/tenant/*` with a tenant-identity access token
-  (5-minute lifetime). The TOKEN authoriser verifies the token contract
-  (signature, `iss`, `exp`, `client_id`, `token_use`, `sub`, no `tenants`,
+  (5-minute lifetime), or one from any OIDC issuer given as `identity`
+  (README "Bring your own identity provider"; `identityApi: 'none'` then
+  skips the scope registration). The TOKEN authoriser verifies the token
+  contract (signature, `iss`, `exp`, the client by `client_id` or else
+  `aud`, the access-token mark by `token_use` or else the header `typ:
+  at+jwt`, `sub`, no `tenants`,
   one valid `tenant_id`), answers every refusal with 401, and passes
   `tenantId`, `sub`, `scope` and the usage key (ADR-0011). The handler
   checks `ingestion/deliver` or `ingestion/read` per route; both scopes are

@@ -456,6 +456,19 @@ describe('alarms (M-24, M-25)', () => {
   });
 });
 
+describe('identityApi (README "Bring your own identity provider")', () => {
+  it('registers the two scopes with tenant-identity by default', () => {
+    template.hasResourceProperties('Custom::IngestionScopeRegistration', { Scopes: ['ingestion/deliver', 'ingestion/read'] });
+  });
+
+  it("with 'none' creates no scope registration and reads no tenant-identity parameter", () => {
+    const byo = synthConstruct({ identityApi: 'none' }).template;
+    byo.resourceCountIs('Custom::IngestionScopeRegistration', 0);
+    expect(JSON.stringify(byo.toJSON())).not.toContain('/application-plane/shared/identity/');
+    byo.resourceCountIs('AWS::ApiGateway::RestApi', 1);
+  });
+});
+
 describe('props validation (spec §3.3)', () => {
   it.each([
     ['keyDeletionWindowDays', { keyDeletionWindowDays: 6 }],

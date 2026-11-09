@@ -63,8 +63,13 @@ export interface TenantThrottleProps {
 /** Deployment inputs (spec §3.3). Every option is off or secure unless set. */
 export interface TenantEncryptedIngestionProps {
   readonly identity: IdentityProps;
-  /** Where to register `ingestion/deliver` and `ingestion/read`. Default: tenant-identity's published parameters. */
-  readonly identityApi?: IdentityApiProps;
+  /**
+   * Where to register `ingestion/deliver` and `ingestion/read` with
+   * tenant-identity. Default: its published parameters. `'none'` skips the
+   * registration for an issuer that is not tenant-identity (README "Bring
+   * your own identity provider"); the two scopes are then yours to define.
+   */
+  readonly identityApi?: IdentityApiProps | 'none';
   /** Enables `tenant-key`. Default false. */
   readonly allowTenantKeys?: boolean;
   /** May decrypt under `documents/<tenantId>/` (statement 2b). Fixed at key creation. Default none. */
@@ -485,13 +490,15 @@ export class TenantEncryptedIngestion extends Construct {
 
     // ---- scopes (spec §3.2) ----------------------------------------------------
     const logDrain = new LogDrain(this, 'LogDrain');
-    const scopes = new ScopeRegistration(this, 'ScopeRegistration', {
-      backend: 'ingestion',
-      scopes: [SCOPES.deliver, SCOPES.read],
-      identityApi: p.identityApi,
-      logDrain,
-    });
-    ingestionApi.api.node.addDependency(scopes.resource);
+    if (p.identityApi !== 'none') {
+      const scopes = new ScopeRegistration(this, 'ScopeRegistration', {
+        backend: 'ingestion',
+        scopes: [SCOPES.deliver, SCOPES.read],
+        identityApi: p.identityApi,
+        logDrain,
+      });
+      ingestionApi.api.node.addDependency(scopes.resource);
+    }
 
     // ---- observability and alarms -------------------------------------------
     const insightRules = createTopTenantRules(this, { processorLogs: processor.logGroup, apiAccessLogs: ingestionApi.accessLogs });
