@@ -9,7 +9,7 @@ SPDX-License-Identifier: MIT-0
 > [retired with v1](#retired-v1)). T-106 to T-108 and M-84 to M-86 cover
 > delegation between agents (ADR-0048, spec §3.7), designed on 2026-11-09 and
 > not yet in code; their status says so until the integration test passes.
-> Last review 2026-11-06. Last green integration
+> Last review 2026-11-09 (delegation review, scans only). Last green integration
 > run: run 15, 2026-11-06, eu-central-1, 58/58 steps, commit `3b2d727` on PR 21.
 > History is in the [ADRs](./adr/) and the git log.
 
@@ -473,6 +473,23 @@ the per-role grants as positive findings.
 | ProtoShield (secrets) | "hardcoded JWT" `TXN_TOKEN` | `test/helpers.ts:124` | False positive: a stand-in token whose payload is `{"tenant_id":"tenant-a"}` and whose signature segment is the literal `sig`; it verifies against nothing and the authority step is stubbed in the tests that use it | - |
 | ProtoShield (IAM) | `kms:GetPublicKey` on `Resource: *` in the key policy | `src/shared/token-signer.cdk.ts` (`RenderJwks`) | False positive: a KMS key policy applies to its own key only, and `*` is the only resource a key policy accepts; the statement grants the JWKS renderer the public half of that one key (M-40) | - |
 | ProtoShield (IAM) | `xray:*` and `cloudwatch:PutMetricData` on `Resource: *` | `src/backend/agentcore-runtime.cdk.ts` | Accepted (ADR-0014): neither action supports resource ARNs; `PutMetricData` is conditioned on the `bedrock-agentcore` namespace | - |
+
+### Delegation review, 2026-11-09
+
+Run on branch `docs/runtime-isolation-delegation-adr` (ADR-0048, spec §3.7)
+after `npx projen build` (42 suites, 823 tests). ProtoShield v0.18.0 with
+every plugin, ASH v3.2.0 in local mode, Holmes CSR rubric v3 with
+`HolmesContentSecurityReviewBaselinePolicy` (scan `86afcbe4`, 193 files).
+No finding is in code the branch added or changed for delegation.
+
+| Scanner | Finding | File | Outcome |
+|---|---|---|---|
+| ProtoShield (Semgrep, CDK NAG, Checkov, Secrets, License headers) | 0 | - | - |
+| ProtoShield (IAM least privilege) | 1 critical, 3 high, 2 medium, 1 low: `resources: ['*']` in the KMS key policies; X-Ray and `PutMetricData` | `src/shared/token-signer.cdk.ts`, `src/tools-gateway.cdk.ts`, `src/backend/agentcore-runtime.cdk.ts` | Unchanged since the v2 review: a KMS key policy applies to its own key and `*` is the only resource it accepts; X-Ray and `PutMetricData` accepted (ADR-0014) |
+| ProtoShield, ASH (CVE) | minimatch, glob, deepmerge | `package-lock.json` | Accepted since the v2 review (transitive dev-time dependencies) |
+| ASH (detect-secrets, Semgrep) | 16 on the ADR-0047 log-masking probe fixtures (an access key id spelled PROBE, a probe JWT), 1 on prose in M-12 | `scripts/integ.sh`, `threat-model.md` | False positive: fixtures written to the Runtime log group to prove the mask; suppressed with reasons in `.ash/.ash.yaml` |
+| Holmes (Semgrep, ACAT, gitleaks) | 9 high, 21 low on the same probe fixtures, the `TXN_TOKEN` stand-in, the data-protection regex test literal, `getKey: JWTVerifyGetKey` type names and the documentation account id | `scripts/integ.sh`, `test/helpers.ts`, `test/runtime-isolation.cdk.test.ts`, `src/shared/verifier.ts`, `src/tools/*.ts`, `test/shared/*.test.ts` | False positive: marked so in Holmes with reasons |
+| Holmes (CSR rubric, medium) | KMS `Sign` latency stated without a source | `adr/0036` | Fixed: a dated note attributes the figure to spike V-12 (p50 8.2 ms, p95 11.1 ms) |
 
 ## Retired (v1)
 
