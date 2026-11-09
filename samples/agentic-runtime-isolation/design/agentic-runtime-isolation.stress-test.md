@@ -141,9 +141,9 @@ list. Each request is one of three probes, chosen per iteration:
 
 | Probe | Share | Expect | What a failure means |
 |---|---|---|---|
-| `report` | 70 % | `result.claims.tenant_id` equals A; `result.unit` is A's unit prefix; `result.tokenPresent` true | the wrong token, grant or unit reached the Runtime |
-| `read <A>` | 20 % | 200 with A's row (positive control) | the vended credential is not usable: a deny-all role would pass the next line and still be broken |
-| `read <B>` | 10 % | the report's `result.error` names an IAM `AccessDeniedException`, never B's row | the vended credential is not scoped to A |
+| `report` | 70 % | `tokenTenant` equals A; `tokenUser` is the VU's user; `unitId` and `sessionPrefix` are A's; `transactionToken` and `credentials` true; `callerArn` names A's tenant role session | the wrong token, grant, unit or credential reached the Runtime |
+| `read <A>` | 20 % | `read.result` is `ok` with A's row (positive control) | the vended credential is not usable: a deny-all role would pass the next line and still be broken |
+| `read <B>` | 10 % | `read.result` is `error` and `read.error` names `AccessDeniedException`; never B's row | the vended credential is not scoped to A |
 
 The positive control runs before the deny check counts: a scenario whose
 `read <A>` success rate is under 99.9 % does not pass on its `read <B>`
@@ -249,9 +249,6 @@ Checked before the run, as `testing-and-spikes.md` asks.
 1. Does tenant-identity's platform API accept 20 `CreateTenant` a second, or
    does it hold its own stage throttle? Check `samples/tenant-identity`
    before `seed.sh` is written.
-2. Does the `report` probe return the unit prefix in a stable field for the
-   assertion in §6, or only inside `headerNames`? Read `src/agent/app.ts`
-   `AgentReport` when `lib.js` is written.
-3. The S2 herd needs an instance-free ingress. A config change to the
+2. The S2 herd needs an instance-free ingress. A config change to the
    integration Lambda forces new instances; confirm it also empties the
    authoriser cache, or run S2 right after `deploy.sh`.
