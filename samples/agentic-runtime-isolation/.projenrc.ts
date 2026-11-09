@@ -89,6 +89,8 @@ project.gitignore.exclude('.kiro/');
 
 // Machine output of the integration test (scripts/integ.sh) and of integ-runner.
 project.gitignore.exclude('cdk.integ.out/');
+// Machine output of the stress-test app (scripts/stress/deploy.sh).
+project.gitignore.exclude('cdk.stress.out/');
 project.gitignore.exclude('test/*.snapshot/');
 
 // Scanner-local state (Holmes MCP project link, ASH reports).
