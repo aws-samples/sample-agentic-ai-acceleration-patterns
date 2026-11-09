@@ -578,7 +578,8 @@ left or a key it tagged is not `PendingDeletion`.
 Last green run: 2026-11-09, after the identity-provider change (two runs
 on 2026-11-06, before it, were green too), in eu-central-1, a vendor test
 account plus a second account owning tenant B's key: 53 to 65 minutes end
-to end (the two integration runs of 2026-11-09). The run's cleanup step deleted the
+to end (the three integration runs of 2026-11-09; the last, with step 10b,
+54 minutes and 179 checks). The run's cleanup step deleted the
 three tenants it had created in the shared tenant-identity pool.
 CloudFormation
 took about 4 minutes to create the two stacks (test aid 1 min 10 s, demo stack

@@ -6,16 +6,17 @@ SPDX-License-Identifier: MIT-0
 
 > **Status: implemented and verified by two integration runs of 2026-11-09
 > in eu-central-1**, a vendor test account plus a second account owning
-> tenant B's `tenant-key` key (cross-account claim exercised), 53 and 65
-> minutes end to end; the later run followed the `identityApi`, error-model
-> and insight-rule changes of that day. Coverage: spec §10 steps 1 to 11 (with 7b and 7c) and
+> tenant B's `tenant-key` key (cross-account claim exercised), 53 to 65
+> minutes end to end; the last run (54 minutes, 179 checks) followed the
+> `identityApi`, error-model and insight-rule changes of that day and added
+> step 10b (cost attribution). Coverage: spec §10 steps 1 to 11 (with 7b, 7c and 10b) and
 > the driver's step 0 prelude passed; step 12 ran as `scripts/integ.sh`'s
 > teardown: both stacks destroyed, no stack with the sample's prefix left,
 > only the two `vendor-key` keys left, both `PendingDeletion`, and the
 > second account's three test keys scheduled for deletion. The runs of
 > 2026-11-06 were green too; their stack events gave the CloudFormation
 > timings: create 1 min 10 s (test aid) and 2 min 17 s (demo stack), delete
-> 3 min 9 s and 1 min 35 s (N-4: each under 5 minutes). Unit tests: 310 on
+> 3 min 9 s and 1 min 35 s (N-4: each under 5 minutes). Unit tests: 315 on
 > 2026-11-09.
 > **Not exercised:** the bring-your-own issuer path (`aud`, the header
 > `typ: at+jwt`, `identityApi: 'none'`) is covered by unit tests only; the
@@ -555,6 +556,10 @@ and `deliveriesRejected` as counts, `bytesStored` as the sum of accepted
 with the same bytes and the same count of processor-terminated deliveries
 (the lease the sweep abandons in step 7c is on the key row's
 `deliveriesRejected` but not in the processor's log, so not in the rule).
+In the run of 2026-11-09 tenant A had 2 accepted and 4 refused deliveries
+(one of them abandoned by the sweep): `bytesStored` 215 in the registry,
+215 in `tei-top-bytes`; 5 in `tei-top-deliveries`; `kmsRequests` 21 against
+a floor of 12; `inFlight` 0.
 
 **RoleSessionName** `t-<tenantId>-...` names the tenant in CloudTrail and
 S3 access logs without a join. **TenantId cost allocation tag**: every
