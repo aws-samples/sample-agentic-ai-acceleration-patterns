@@ -31,4 +31,4 @@ Easier: an agent is one construct with its compute, its needs and its tools; a r
 
 Amended by: ADR-0046
 
-**2026-11-09.** Amended by ADR-0048 (Proposed): the registry entry gains `delegatesTo`, the agents this agent may hand work to; the grant of the target is computed per hop for the same tenant and user.
+**2026-11-09.** Amended by ADR-0048: the registry entry gains `delegatesTo`, the agents this agent may hand work to; the grant of the target is computed per hop for the same tenant and user.

@@ -53,4 +53,4 @@ SPDX-License-Identifier: MIT-0
 | [0045](./0045-bound-the-transaction-token-at-10240-bytes.md) | Bound the transaction token at 10,240 bytes | Accepted | Amends ADR-0041 | 2026-11-04 |
 | [0046](./0046-close-the-signer-grant-path-keep-explicit-tool-lists-and-recheck-need-ownership.md) | Close the signer grant path, keep explicit tool lists explicit, and re-check need ownership at the ingress | Accepted | Amends ADR-0032, ADR-0037 | 2026-11-04 |
 | [0047](./0047-mask-header-values-in-the-runtime-log-group.md) | Mask header values in the Runtime log group with a data protection policy, set from a custom resource | Accepted | Amends ADR-0019 | 2026-11-06 |
-| [0048](./0048-delegate-between-agents-through-the-ingress.md) | Delegate between agents through the ingress, with a replacement transaction token | Proposed | Amends ADR-0031, ADR-0032 | 2026-11-09 |
+| [0048](./0048-delegate-between-agents-through-the-ingress.md) | Delegate between agents through the ingress, with a replacement transaction token | Accepted | Amends ADR-0031, ADR-0032 | 2026-11-09 |

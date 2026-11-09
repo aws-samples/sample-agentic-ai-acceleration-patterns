@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0048: Delegate between agents through the ingress, with a replacement transaction token
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-09
 - Amends: ADR-0031 (the ingress accepts its own token on one route), ADR-0032 (the grant is computed per hop)
 - Deciders: Dave Roberts (PSA)
