@@ -65,7 +65,13 @@ export class AuthorityResolver {
    * and the token is minted with the caller nested in `act` and the caller's
    * `txn`, uncached.
    */
-  async delegate(caller: DelegationCaller, target: string, targetEntry: RegistryEntry, callerEntry: RegistryEntry, maxDepth: number): Promise<Authority> {
+  async delegate(
+    caller: DelegationCaller,
+    target: string,
+    targetEntry: RegistryEntry,
+    callerEntry: RegistryEntry,
+    maxDepth: number,
+  ): Promise<Authority> {
     if (!callerEntry.delegatesTo.includes(target)) {
       throw new AuthorityError(403, 'delegation_not_declared');
     }
@@ -104,7 +110,15 @@ export class AuthorityResolver {
     }
     let minted: MintedToken;
     try {
-      minted = await this.minter.mint({ tenantId, sub, agent, scope: decision.scope, gateways, versions, ...(delegation === undefined ? {} : { delegation }) });
+      minted = await this.minter.mint({
+        tenantId,
+        sub,
+        agent,
+        scope: decision.scope,
+        gateways,
+        versions,
+        ...(delegation === undefined ? {} : { delegation }),
+      });
     } catch (error) {
       // A token over MAX_TOKEN_BYTES (ADR-0045) is the same refusal as a scope
       // over MAX_SCOPE_BYTES: the grant is too large to carry.

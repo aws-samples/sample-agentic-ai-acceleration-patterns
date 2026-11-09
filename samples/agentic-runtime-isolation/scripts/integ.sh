@@ -23,7 +23,8 @@
 #      stack with the vendor operations (SigV4); AA writes A2's cut; seed the
 #      demo items.
 #   3..9, 9-registry, 11..20, 22..24 on both all-on stacks (api-gateway,
-#      agentcore-gateway); 4a, the `scope: 'user'` half of 4b and the limits
+#      agentcore-gateway); 25 (delegation, ADR-0048) on api-gateway, SKIP on
+#      agentcore-gateway; 4a, the `scope: 'user'` half of 4b and the limits
 #      step on their own stacks; 19 (MU) on the multi-tenant stack; 21 on the
 #      api-gateway stack (a redeploy with keyGeneration 2); then the log
 #      sweep and the metrics.
@@ -610,7 +611,20 @@ stack_vars() { # SUFFIX
   [[ "$REGISTRY_PREFIX" == */ ]] || REGISTRY_PREFIX="${REGISTRY_PREFIX}/"
   INTERCEPTOR_LOGS="$(log_group_like "${STACK_PREFIX}-${s}" ToolsGatewayInterceptorLogs)"
   CRM_LOGS="$(log_group_like "${STACK_PREFIX}-${s}" CrmToolsLogs)"
+  # api-gateway only (ADR-0048): the authoriser's log group, read by step 25.
+  AUTHORIZER_LOGS="$(log_group_like "${STACK_PREFIX}-${s}" SharedIngressAuthorizerLogs)"
 }
+
+# delegation_url AGENT -> the api-gateway delegation route of AGENT (ADR-0048, spec §5.1.1).
+delegation_url() { local u; u="$(backend_url "$ENDPOINT" "$1")"; echo "${u%/invocations}/delegations"; }
+# The target's SSE stream comes back inside `delegated` events (C-2): their chunks, joined, are the target's own SSE.
+delegated_text() { grep '^data: ' "$BODY" | sed 's/^data: //' | jq -r 'select(.chunk != null) | .chunk' 2>/dev/null | tr -d '\r' || true; }
+delegated_report() { delegated_text | grep -m1 '^data: ' | sed 's/^data: //' || true; }
+drf() { delegated_report 2>/dev/null | jq -r "$@" 2>/dev/null || true; }
+# The target's tool result (a `tool` SSE event inside the relayed stream).
+delegated_tool_payload() { delegated_text | awk '/^data: /{sub(/^data: /,""); print}' | jq -c 'select(.tool != null) | .result' 2>/dev/null | head -1 || true; }
+# A refusal the agent relayed: "DelegationRefused <status> <body>".
+delegated_error() { grep '^data: ' "$BODY" | sed 's/^data: //' | jq -r 'select(.error != null) | [.error, (.status // "" | tostring), (.body // "")] | join(" ")' 2>/dev/null | head -1 || true; }
 
 # mint_for TENANT SUB AGENT SCOPE GATEWAYS_JSON [EXTRA_JSON] -> a test-mint event.
 mint_event() {
@@ -1044,6 +1058,59 @@ run_all_on() { # SUFFIX
   aws lambda wait function-updated-v2 --function-name "$FILTER_FN" 2>/dev/null || aws lambda wait function-updated --function-name "$FILTER_FN"
   FILTER_RESTORE=()
   note "filtered to the grant; fail-closed list; call wall unaffected"
+  end_step
+
+  if [[ "$INGRESS" != api-gateway ]]; then
+    skip_step "25 ${INGRESS}" "delegation is an api-gateway route (ADR-0048); the Gateway authoriser reads one issuer"
+    return
+  fi
+  begin "25 ${INGRESS}" "delegation (ADR-0048): default hands A1's transaction to billing; same scope as a direct call, chain and txn carried; not_declared, loop, depth, not_subscribed, identity token and route confusion refused"
+  local DELEG_BILLING direct_scope since25
+  DELEG_BILLING="$(delegation_url billing)"
+  issue "$TENANT_A" "$A1_USER" A1
+  status="$(invoke "$BILLING_URL" A1_ACCESS "$(body "$C1" report)")"
+  direct_scope="$(rf .tokenScope)"
+  check "A1's direct call to billing is served (got ${status})" eq "$status" 200
+  since25="$(( $(date +%s) * 1000 ))"
+  status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "$C1" "delegate billing report")")"
+  check "A1 on default delegating to billing: 200 (got ${status}; $(delegated_error))" eq "$status" 200
+  check "the relayed report is billing's (got '$(drf .tokenAgent)')" eq "$(drf .tokenAgent)" billing
+  check "its chain names default (got '$(drf '.chain | join(",")')')" eq "$(drf '.chain | join(",")')" default
+  check "its act.sub is agent:default (got '$(drf .tokenActSub)')" eq "$(drf .tokenActSub)" "agent:default"
+  check "its scope equals A1's direct call to billing (got '$(drf .tokenScope)' vs '${direct_scope}')" eq "$(drf .tokenScope)" "$direct_scope"
+  check "its tenant is A (got '$(drf .tokenTenant)')" eq "$(drf .tokenTenant)" "$TENANT_A"
+  check "a delegation admitted line: from default to billing, depth 1, tenant A" \
+    wait_log "$AUTHORIZER_LOGS" "$since25" '"delegation admitted"' ".from == \"default\" and .to == \"billing\" and .depth == 1 and .tenantId == \"${TENANT_A}\""
+  local parent_txn child_txn
+  parent_txn="$(log_lines "$AUTHORIZER_LOGS" "$since25" '"request authorised"' | jq -r 'select(.agent == "default") | .txn' | head -1)"
+  child_txn="$(log_lines "$AUTHORIZER_LOGS" "$since25" '"delegation admitted"' | jq -r '.txn' | head -1)"
+  check "the replacement token carries the caller's txn (parent '${parent_txn}', child '${child_txn}')" eq "$parent_txn" "$child_txn"
+  status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "$C1" 'delegate billing tool invoices/get_invoice {"invoiceId":"inv-1"}')")"
+  check "billing's tool call on finance is served through the delegation (got '$(delegated_tool_payload | head -c 80)' $(delegated_error))" \
+    jq -e '.invoice.invoiceId == "inv-1"' <<<"$(delegated_tool_payload)"
+  status="$(invoke "$BILLING_URL" A1_ACCESS "$(body "$C1" "delegate default report")")"
+  check "billing delegating to default: forbidden: delegation_not_declared (got '$(delegated_error)')" contains "$(delegated_error)" "403 forbidden: delegation_not_declared"
+  status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "$C1" "delegate default report")")"
+  check "default delegating to itself: forbidden: delegation_loop (got '$(delegated_error)')" contains "$(delegated_error)" "403 forbidden: delegation_loop"
+  status="$(invoke "$ENDPOINT" B1_ACCESS "$(body "$C1" "delegate billing report")")"
+  check "B1 (tenant B holds no billing) delegating to billing: agent_not_subscribed (got '$(delegated_error)')" contains "$(delegated_error)" "403 forbidden: agent_not_subscribed"
+  local t25 deep25
+  mint t25 "$MINT_FN" "$(mint_event "$TENANT_A" "$A1_SUB" default "$DEFAULT_SCOPE_A" '["default"]')"
+  status="$(invoke "$BILLING_URL" t25 "$(body "$C1" report)")"
+  check "a transaction token on /billing/invocations is still refused (got ${status})" status_is "401|403" "$status"
+  status="$(invoke "$DELEG_BILLING" t25 "$(body "$C1" report)")"
+  check "the test-minted default token on /billing/delegations is served (got ${status}; $(body_text | head -c 60))" eq "$status" 200
+  deep25=""
+  mint deep25 "$MINT_FN" "$(mint_event "$TENANT_A" "$A1_SUB" default "$DEFAULT_SCOPE_A" '["default"]' \
+    "$(jq -nc --arg r "$INGRESS_ROLE" '{claims: {act: {sub: "agent:planner", act: {sub: $r}}}}')")"
+  status="$(invoke "$DELEG_BILLING" deep25 "$(body "$C1" report)")"
+  check "a chain already one deep at maxDepth 1: 403 delegation_depth (got ${status} '$(body_text | head -c 60)')" contains "$(body_text)" delegation_depth
+  status="$(invoke "$DELEG_BILLING" A1_ACCESS "$(body "$C1" report)")"
+  check "an identity token on /billing/delegations is refused (got ${status})" status_is "401|403" "$status"
+  check "a delegation refused line with reason delegation_loop, from default" \
+    wait_log "$AUTHORIZER_LOGS" "$since25" '"delegation refused"' '.reason == "delegation_loop" and .from == "default" and .to == "default"'
+  t25=""; deep25=""
+  note "delegated report from billing with chain [default], same scope and txn as the direct call; not_declared, loop, depth, not_subscribed, identity token and txn-on-invocations all refused"
   end_step
 }
 

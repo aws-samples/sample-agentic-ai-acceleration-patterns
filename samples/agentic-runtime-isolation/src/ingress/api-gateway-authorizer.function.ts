@@ -108,7 +108,11 @@ function delegationTarget(event: APIGatewayRequestAuthorizerEvent): string | und
  * checks and mints the replacement token. The Allow context carries the
  * target as `backend`, plus `delegatedFrom` and `depth`.
  */
-async function authorizeDelegation(event: APIGatewayRequestAuthorizerEvent, target: string, deps: AuthorizerDependencies): Promise<APIGatewayAuthorizerResult> {
+async function authorizeDelegation(
+  event: APIGatewayRequestAuthorizerEvent,
+  target: string,
+  deps: AuthorizerDependencies,
+): Promise<APIGatewayAuthorizerResult> {
   const fields = { ingress: 'api-gateway', component: 'authorizer', route: DELEGATION_ROUTE };
   if (deps.delegation === undefined || !('delegate' in deps.authority)) {
     // The route exists only with the module; a request here without it is a deployment fault.

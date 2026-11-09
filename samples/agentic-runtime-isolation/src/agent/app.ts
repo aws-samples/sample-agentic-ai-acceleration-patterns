@@ -386,7 +386,7 @@ export async function delegateTo(
 ): Promise<void> {
   const response = await fetcher(`${delegationUrl.replace(/\/$/, '')}/${agent}/delegations`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    headers: { 'content-type': 'application/json', 'authorization': `Bearer ${token}` },
     body: JSON.stringify({ prompt, ...(conversationId === undefined ? {} : { conversationId }) }),
   });
   if (!response.ok || response.body === null) {
@@ -814,7 +814,8 @@ export async function respond(
       sink.write(sseEvent({ error: 'NoDelegation' }, 'error'));
     } else {
       try {
-        await delegateTo(options.delegationUrl, delegation.agent, delegation.prompt, token, options.conversationId, (event) => sink.write(event), options.fetch);
+        const write = (event: string) => sink.write(event);
+        await delegateTo(options.delegationUrl, delegation.agent, delegation.prompt, token, options.conversationId, write, options.fetch);
       } catch (error) {
         sink.write(sseEvent({ error: error instanceof Error ? error.name : 'unknown' }, 'error'));
       }

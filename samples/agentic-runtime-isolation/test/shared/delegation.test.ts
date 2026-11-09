@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { createLocalJWKSet } from 'jose';
 import { AuthorityError, AuthorityResolver } from '../../src/shared/authority';
 import { type DelegationCaller, DELEGATION_EXP_MARGIN_SECONDS, delegationTokenVerifierFor } from '../../src/shared/delegation';
 import { publicJwk, signJws } from '../../src/shared/jws';
@@ -19,7 +20,6 @@ import { IngressPipeline, pipelineFor, RequestError } from '../../src/shared/req
 import { verifyTransactionToken } from '../../src/tools/transaction-token';
 import { baseConfig, FIXTURE_ENTRIES, RUNTIME_ARN, stubRegistry, TXN_TOKEN } from '../helpers';
 import { localRsaKey } from '../jws-helpers';
-import { createLocalJWKSet } from 'jose';
 
 /** Delegation between agents (ADR-0048, spec §3.7, §5.1.1, §6.2.2). */
 const INGRESS_ROLE = 'arn:aws:iam::111122223333:role/IngressRole';
@@ -118,7 +118,11 @@ describe('delegatesTo', () => {
 });
 
 /** A caller token signed by the test key, as the ingress would have minted it. */
-async function callerToken(key: ReturnType<typeof localRsaKey>, overrides: Record<string, unknown> = {}, header: Record<string, string> = {}): Promise<string> {
+async function callerToken(
+  key: ReturnType<typeof localRsaKey>,
+  overrides: Record<string, unknown> = {},
+  header: Record<string, string> = {},
+): Promise<string> {
   const now = 1_000_000;
   const claims = {
     iss: ISSUER,
@@ -191,7 +195,11 @@ describe('AuthorityResolver.delegate', () => {
   };
   const minter = () => {
     const inputs: MintInput[] = [];
-    return { inputs, mint: async (input: MintInput) => (inputs.push(input), { token: 't', txn: input.delegation?.txn ?? 'x', exp: 1, mint: 'miss' as const }) };
+    const mint = async (input: MintInput) => {
+      inputs.push(input);
+      return { token: 't', txn: input.delegation?.txn ?? 'x', exp: 1, mint: 'miss' as const };
+    };
+    return { inputs, mint };
   };
 
   it('grants the target as a direct call would, with the caller nested in act and the caller txn copied', async () => {

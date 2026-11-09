@@ -396,6 +396,37 @@ in `cdk.context.json`. After the ingress changes, reset it:
 npx cdk context --reset "ssm:account=111122223333:parameterName=/application-plane/shared/agent-runtime/ingress:region=eu-central-1"
 ```
 
+#### Delegation between agents
+
+An agent can hand part of its job to another agent for the same tenant and
+user (ADR-0048, spec §3.7). Turn it on with `agentDelegation` on the
+`api-gateway` ingress and name, per agent, the agents it may call:
+
+```ts
+const ingress = new SharedIngress(this, 'Ingress', { /* ... */ ingress: 'api-gateway', agentDelegation: { maxDepth: 1 } });
+new AgentBackend(this, 'Support', { name: 'support', ingress, /* ... */ delegatesTo: ['billing'] });
+new AgentBackend(this, 'Billing', { name: 'billing', ingress, /* ... */ needs: ['billing/read'], tools: ['invoices/*'] });
+```
+
+The agent posts `{ prompt, conversationId? }` to
+`${RI_DELEGATION_URL}/<agent>/delegations` with its own transaction token as
+bearer. The ingress verifies that token against its own JWKS, checks that
+the caller's registry entry names the target and that the tenant holds the
+target (after the user's cuts), mints a replacement token for the target
+with `scope = grant(target)` exactly as a direct call would, the caller
+nested in `act` and the caller's `txn` copied, invokes the target's Runtime
+and streams the answer back. The caller's `scope` plays no part: a hop can
+neither widen nor narrow what the user could ask the target directly.
+`maxDepth` (1 to 3) bounds the agents a transaction may pass through; a
+loop, an undeclared target or a chain at the bound is refused before any
+KMS or STS call (`delegation_loop`, `delegation_not_declared`,
+`delegation_depth`). Every delegation counts against the tenant's
+per-minute limit. The route is `api-gateway` only (the Gateway authoriser
+reads one issuer) and is absent until `agentDelegation` is set; `/invocations`
+still refuses a transaction token, and `/delegations` refuses an identity
+token. `agentDelegation` cannot be combined with `tvm.claimTags` (the
+replacement token carries the tenant and the user, no identity claims).
+
 **Options.** Every prop is validated at synth, failing with the prop's
 name. The full props table with defaults is in
 [`architecture.md`](./architecture.md#construct-props); the TSDoc in
@@ -411,11 +442,11 @@ What the Runtime hands your agent, and what the ingress expects back
 | | |
 |---|---|
 | Endpoint | The AgentCore Runtime HTTP contract: `POST /invocations` and `GET /ping` on port 8080 |
-| Body | `{"prompt": "..."}`; the ingress forwards nothing else from the request |
+| Body | `{"prompt": "..."}` and, with `session` on, the validated `conversationId`; the ingress forwards nothing else from the request |
 | `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` | The unit id, derived by the ingress from verified claims |
 | `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token` | The transaction token, a raw JWT |
 | `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Credentials` | Base64 JSON `{ accessKeyId, secretAccessKey, sessionToken, expiration }` for the tenant role (`decodeCredentials` in [`src/backend/agentcore-runtime.transport.ts`](./src/backend/agentcore-runtime.transport.ts)) |
-| Environment | `MODEL_ID`; `RI_TOOLS_GATEWAY_URLS`, JSON `{ <gateway>: <MCP URL> }`; `RI_ISSUER` |
+| Environment | `MODEL_ID`; `RI_TOOLS_GATEWAY_URLS`, JSON `{ <gateway>: <MCP URL> }`; `RI_ISSUER`; `RI_DELEGATION_URL` when the ingress has `agentDelegation` (ADR-0048) |
 
 The agent must:
 
@@ -429,6 +460,9 @@ The agent must:
 - Call tools over MCP (streamable HTTP) with the transaction token as
   bearer, holding one MCP client per `tools-gateway:<name>` entry in the
   token's `aud` (ADR-0041).
+- Delegate, if at all, only through `POST ${RI_DELEGATION_URL}/<agent>/delegations`
+  with its transaction token as bearer (ADR-0048); the demo agent does so
+  for the prompt `delegate <agent> <prompt>`.
 - Never log or echo a header value.
 
 #### Tool contract
@@ -534,6 +568,7 @@ target per agent, which the agent added after the deploy does not get.
 | 22 | partial-target grant: A2 served `crm/get_account`, refused `crm/update_case` by the interceptor; the Lambda is not invoked |
 | 23 | one star permit per target (`crm` on `default`, `invoices` on `finance`); time to ACTIVE recorded |
 | 24 | list filter on `finance`: a cut `list_invoices` disappears from A1's list and comes back; a failing filter lists nothing, the call is still served |
+| 25 | delegation (ADR-0048, `api-gateway` only): `default` hands A1's transaction to `billing`; the relayed report is `billing`'s with chain `[default]`, the same `scope` as A1's direct call and the caller's `txn`; `billing` to `default` is `delegation_not_declared`, `default` to itself `delegation_loop`, B1 `agent_not_subscribed`, a chain at `maxDepth` `delegation_depth`; an identity token on `/delegations` and a transaction token on `/invocations` are refused |
 | 4a | `session-off`: `conversationId` is 400; two requests land in two units |
 | 4b-user | `session-user`: A2 sending A1's conversation lands in its own unit |
 | limits | `limits`: tenant A limited at 5 a minute, B served; the scope floor `app/use` admits both |
@@ -661,6 +696,7 @@ replaced the Runtime: the old Runtime's group is deleted while it drains.
 |---|---|---|
 | `POST <baseUrl>/<backend>/invocations` | `Authorization: Bearer <identity token>`; `X-Tenant-Id` when the token carries `tenants` | Invoke an agent; `text/event-stream`, last event `event: usage` |
 | `POST <baseUrl>/invocations` | same | The `defaultBackend` (`api-gateway`; on `agentcore-gateway` the name is always in the path) |
+| `POST <baseUrl>/<backend>/delegations` | `Authorization: Bearer <transaction token of the calling agent>` | (ADR-0048, `api-gateway` with `agentDelegation`) Hand the transaction to `<backend>`: a replacement token for it, its Runtime invoked, the stream relayed. 403 `delegation_not_declared`, `delegation_depth`, `delegation_loop`, `agent_not_subscribed`; an identity token is refused |
 | `GET <baseUrl>/.well-known/openid-configuration` | none | `{ issuer, jwks_uri, ... }`; `issuer` = `<baseUrl>` |
 | `GET <baseUrl>/.well-known/jwks.json` | none | One key, two during rotation; `Cache-Control: public, max-age=300` |
 | `<baseUrl>/entitlements/*` | SigV4 or identity token | The Entitlements API, below |
@@ -739,6 +775,9 @@ Each item is a deployer action or an accepted risk in
 [`threat-model.md`](./threat-model.md#mitigations).
 
 - [ ] **Rotate the signing key** on a schedule ([procedure](#rotate-the-signing-key); M-64).
+- [ ] **Review every `delegatesTo`** when `agentDelegation` is on: it is the
+      vendor's list of which agents may chain, and `maxDepth` bounds the
+      fan-out one user request can start (M-84, M-86; T-106 to T-108).
 - [ ] **Alarm on KMS**: `Sign` rate and errors, `Sign` by any principal but
       the minting role or the interceptor, `PutKeyPolicy` outside a deploy
       (M-40, M-68, M-78, T-52, T-84, T-97).

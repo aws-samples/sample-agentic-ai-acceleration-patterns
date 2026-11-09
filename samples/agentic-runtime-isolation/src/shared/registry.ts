@@ -270,7 +270,14 @@ export function parseRegistryEntry(raw: string, scope: RegistryScope = {}): Regi
   if (status !== 'active' && status !== 'draining') {
     throw new Error('registry entry status must be active or draining');
   }
-  return { runtimeArn: runtimeArn as string, needs: needs as string[], tools: tools as string[], delegatesTo: delegates as string[], version, status };
+  return {
+    runtimeArn: runtimeArn as string,
+    needs: needs as string[],
+    tools: tools as string[],
+    delegatesTo: delegates as string[],
+    version,
+    status,
+  };
 }
 
 /**

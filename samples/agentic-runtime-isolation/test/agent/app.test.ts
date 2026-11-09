@@ -609,8 +609,8 @@ describe('tool probes (v2, C-2)', () => {
 });
 
 describe('delegation probe (ADR-0048, C-2)', () => {
-  const token = `h.${Buffer.from(JSON.stringify({ tenant_id: 'tenant-a', agent: 'default', aud: ['agent:default'], act: { sub: 'arn:aws:iam::111122223333:role/ingress' } })).toString('base64url')}.sig`;
-  const headers = { [RUNTIME_HEADERS.TRANSACTION_TOKEN.toLowerCase()]: token };
+  const callerToken = `h.${Buffer.from(JSON.stringify({ tenant_id: 'tenant-a', agent: 'default', aud: ['agent:default'], act: { sub: 'arn:aws:iam::111122223333:role/ingress' } })).toString('base64url')}.sig`;
+  const headers = { [RUNTIME_HEADERS.TRANSACTION_TOKEN.toLowerCase()]: callerToken };
 
   it('delegateProbe reads the target and the prompt; anything else is not a delegation', () => {
     expect(delegateProbe('delegate billing what is due?')).toEqual({ agent: 'billing', prompt: 'what is due?' });
@@ -645,7 +645,7 @@ describe('delegation probe (ADR-0048, C-2)', () => {
     await respond(headers, 'delegate billing what is due?', { delegationUrl: 'https://api.example.com/prod/', conversationId: 'conversationA1x0001', fetch: fetcher }, s, clients({}));
     expect(calls[0].url).toBe('https://api.example.com/prod/billing/delegations');
     expect(calls[0].init.method).toBe('POST');
-    expect((calls[0].init.headers as Record<string, string>).authorization).toBe(`Bearer ${token}`);
+    expect((calls[0].init.headers as Record<string, string>).authorization).toBe(`Bearer ${callerToken}`);
     expect(JSON.parse(String(calls[0].init.body))).toEqual({ prompt: 'what is due?', conversationId: 'conversationA1x0001' });
     const evs = events(c.body);
     expect(evs[0].event).toBe('delegated');

@@ -63,25 +63,25 @@ export interface DelegationVerifierOptions {
 export function delegationTokenVerifierFor(options: DelegationVerifierOptions): DelegationTokenVerifier {
   const remote = createRemoteJWKSet(new URL(`${options.issuer}/.well-known/jwks.json`), { cooldownDuration: 60_000, cacheMaxAge: 300_000 });
   const local: JWTVerifyGetKey | undefined = options.jwks === undefined ? undefined : createLocalJWKSet(JSON.parse(options.jwks));
-  const verifyOptions = {
-    issuer: options.issuer,
-    algorithms: ['RS256', 'ES256'],
-    requiredClaims: ['exp', 'iat', 'sub'],
-    currentDate: options.now === undefined ? undefined : new Date(options.now()),
-  };
   return async (token) => {
     if (token === undefined || token.length === 0) {
       throw new DelegationTokenError();
     }
+    const verifyOptions = {
+      issuer: options.issuer,
+      algorithms: ['RS256', 'ES256'],
+      requiredClaims: ['exp', 'iat', 'sub'],
+      currentDate: options.now === undefined ? undefined : new Date(options.now()),
+    };
     let verified;
     try {
       try {
-        verified = await jwtVerify(token, local ?? remote, { ...verifyOptions, currentDate: options.now === undefined ? undefined : new Date(options.now()) });
+        verified = await jwtVerify(token, local ?? remote, verifyOptions);
       } catch (error) {
         if (local === undefined) {
           throw error;
         }
-        verified = await jwtVerify(token, remote, { ...verifyOptions, currentDate: options.now === undefined ? undefined : new Date(options.now()) });
+        verified = await jwtVerify(token, remote, verifyOptions); // a kid the deployed document lacks: ask the route once
       }
     } catch {
       throw new DelegationTokenError();
