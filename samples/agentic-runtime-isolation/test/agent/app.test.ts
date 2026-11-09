@@ -8,6 +8,8 @@ import { mockClient } from 'aws-sdk-client-mock';
 import 'aws-sdk-client-mock-jest';
 import {
   buildReport,
+  conversationIdOf,
+  delegateProbe,
   callToolsGateway,
   converse,
   gatewayClients,
@@ -189,6 +191,7 @@ describe('buildReport', () => {
       tokenScope: null,
       tokenAud: null,
       tokenActSub: null,
+      chain: [],
       tokenExp: null,
       tokenIss: null,
       tokenTyp: null,
@@ -602,5 +605,72 @@ describe('tool probes (v2, C-2)', () => {
       expect(JSON.stringify(shapes)).not.toContain(identity);
       expect(jwtShape('a.b')).toBeUndefined();
     });
+  });
+});
+
+describe('delegation probe (ADR-0048, C-2)', () => {
+  const token = `h.${Buffer.from(JSON.stringify({ tenant_id: 'tenant-a', agent: 'default', aud: ['agent:default'], act: { sub: 'arn:aws:iam::111122223333:role/ingress' } })).toString('base64url')}.sig`;
+  const headers = { [RUNTIME_HEADERS.TRANSACTION_TOKEN.toLowerCase()]: token };
+
+  it('delegateProbe reads the target and the prompt; anything else is not a delegation', () => {
+    expect(delegateProbe('delegate billing what is due?')).toEqual({ agent: 'billing', prompt: 'what is due?' });
+    expect(delegateProbe('delegate billing   report ')).toEqual({ agent: 'billing', prompt: 'report' });
+    expect(delegateProbe('delegate Billing x')).toBeUndefined();
+    expect(delegateProbe('delegate billing')).toBeUndefined();
+    expect(delegateProbe('delegated billing x')).toBeUndefined();
+  });
+
+  it('conversationIdOf reads a well-formed id from the Runtime payload, else nothing', () => {
+    expect(conversationIdOf('{"prompt":"x","conversationId":"conversationA1x0001"}')).toBe('conversationA1x0001');
+    expect(conversationIdOf('{"input":{"prompt":"x","conversationId":"c-1"}}')).toBe('c-1');
+    expect(conversationIdOf('{"prompt":"x"}')).toBeUndefined();
+    expect(conversationIdOf('{"prompt":"x","conversationId":"bad id"}')).toBeUndefined();
+    expect(conversationIdOf('nope')).toBeUndefined();
+  });
+
+  it('posts to <url>/<agent>/delegations with the token as bearer and the conversation, relays the stream as delegated events, then usage', async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const fetcher = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init! });
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('event: report\ndata: {"a":1}\n\n'));
+          controller.enqueue(new TextEncoder().encode('event: usage\ndata: {}\n\n'));
+          controller.close();
+        },
+      });
+      return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }) as typeof fetch;
+    const { c, s } = sink();
+    await respond(headers, 'delegate billing what is due?', { delegationUrl: 'https://api.example.com/prod/', conversationId: 'conversationA1x0001', fetch: fetcher }, s, clients({}));
+    expect(calls[0].url).toBe('https://api.example.com/prod/billing/delegations');
+    expect(calls[0].init.method).toBe('POST');
+    expect((calls[0].init.headers as Record<string, string>).authorization).toBe(`Bearer ${token}`);
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ prompt: 'what is due?', conversationId: 'conversationA1x0001' });
+    const evs = events(c.body);
+    expect(evs[0].event).toBe('delegated');
+    expect(JSON.parse(evs[0].data)).toMatchObject({ agent: 'billing' });
+    expect(evs.map((e) => e.event).filter((e) => e === 'delegated').length).toBeGreaterThanOrEqual(1);
+    expect(evs[evs.length - 1].event).toBe('usage');
+  });
+
+  it('a refusal is one error event with the status and the fixed body; no URL is NoDelegation; no token is NoTransactionToken', async () => {
+    const refusing = (async () => new Response('forbidden: delegation_not_declared', { status: 403 })) as typeof fetch;
+    const one = sink();
+    await respond(headers, 'delegate billing x', { delegationUrl: 'https://api.example.com/prod', fetch: refusing }, one.s, clients({}));
+    expect(events(one.c.body)[0]).toEqual({ event: 'error', data: '{"error":"DelegationRefused","status":403,"body":"forbidden: delegation_not_declared"}' });
+    const two = sink();
+    await respond(headers, 'delegate billing x', {}, two.s, clients({}));
+    expect(two.c.body).toContain('NoDelegation');
+    const three = sink();
+    await respond({}, 'delegate billing x', { delegationUrl: 'https://api.example.com/prod' }, three.s, clients({}));
+    expect(three.c.body).toContain('NoTransactionToken');
+  });
+
+  it('the report shows the chain of a nested act, outermost first', async () => {
+    const nested = `h.${Buffer.from(JSON.stringify({ tenant_id: 'tenant-a', agent: 'billing', act: { sub: 'agent:planner', act: { sub: 'agent:default', act: { sub: 'arn:aws:iam::111122223333:role/ingress' } } } })).toString('base64url')}.sig`;
+    const report = await buildReport({ [RUNTIME_HEADERS.TRANSACTION_TOKEN.toLowerCase()]: nested }, 'report', undefined, clients({}));
+    expect(report.chain).toEqual(['planner', 'default']);
+    expect(report.tokenActSub).toBe('agent:planner');
   });
 });

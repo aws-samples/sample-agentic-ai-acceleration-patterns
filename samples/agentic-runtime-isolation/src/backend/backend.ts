@@ -32,6 +32,8 @@ export interface ValidatedRequest {
   readonly runtimeArn: string;
   /** The caller's prompt, validated as a string. */
   readonly prompt: string;
+  /** The validated `conversationId`, when the `session` module is on (ADR-0002); handed to the agent so a delegation can stay in the conversation (ADR-0048). */
+  readonly conversationId?: string;
   /**
    * (v2, P-5, P-14) The transaction token the ingress minted for this request:
    * the only token the agent sees. Never the identity token.
