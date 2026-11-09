@@ -64,6 +64,11 @@ source "${SAMPLE_DIR}/scripts/lib.sh"
 OUT="cdk.integ.out"
 CDK=(npx cdk --app "$OUT")
 INTEG_APP="npx ts-node -P tsconfig.json --prefer-ts-exts test/integ.runtime.ts"
+# INTEG_DEPLOY_CONCURRENCY (default 6) is the `cdk deploy --all` concurrency. Six
+# stacks each creating a REST API at once trip the API Gateway control-plane
+# throttle in a Region at its default quota (us-east-1, 2026-11-09: CreateModel
+# 429 after five SDK attempts, `RuntimeIsolationInteg-session-user` rolled back);
+# set it to 2 there.
 # INTEG_PREFIX deploys under another stack prefix, beside an earlier run's
 # DELETE_FAILED stacks (CloudFormation refuses updates to them); the leftover
 # check below is scoped to this prefix.
@@ -502,7 +507,7 @@ fi
 mapfile -t SUFFIXES < <(find "$OUT" -maxdepth 1 -name "${STACK_PREFIX}-*.template.json" -printf '%f\n' | sed "s/^${STACK_PREFIX}-//; s/\.template\.json$//" | sort)
 DEPLOYED_SAMPLE=1
 DEPLOY_START=$SECONDS
-"${CDK[@]}" deploy --all --require-approval never --concurrency 6 --outputs-file "$OUTPUTS" >"${LIB_TMP}/deploy.log" 2>&1 \
+"${CDK[@]}" deploy --all --require-approval never --concurrency "${INTEG_DEPLOY_CONCURRENCY:-6}" --outputs-file "$OUTPUTS" >"${LIB_TMP}/deploy.log" 2>&1 \
   || { grep -E "FAILED|Error|error" "${LIB_TMP}/deploy.log" | tail -30 >&2; tail -15 "${LIB_TMP}/deploy.log" >&2; fail "deploy"; }
 note "deployed ${#SUFFIXES[@]} stacks (${SUFFIXES[*]}) in $((SECONDS - DEPLOY_START))s"
 
