@@ -265,11 +265,39 @@ Checked before the run.
 
 ## 10. Cost and risk
 
-- Compute: one `c6i.2xlarge` for about two hours; the ingress Lambda at 500
-  rps for 30 minutes (about 900,000 invocations); AgentCore Runtime seconds
-  for the same; no model calls at rate. Estimate before the run from the
-  current price list; expect tens of dollars, not hundreds. Reported next to
-  the results.
+### 10.1 Cost lines
+
+Priced from the public price list before the run, written into the results
+file next to the measured usage. Quantities below are the plan's; the run
+reports the actual ones.
+
+| Line | Quantity in one full run | Where it comes from |
+|---|---|---|
+| AgentCore Runtime session-seconds (CPU and memory) | about 1,000 warm microVMs across the 40-minute Phase 2 window, plus 2,000 for S7; 12,000 session starts | the largest line: every active tenant holds a microVM for the whole window, idle time included until the Runtime's idle timeout |
+| AgentCore Runtime invocations | about 1.4 million | S1 300k, S2 96k, S3 150k, S4 60k, S5 3.6k, S6 60k, S7 90k, warm-ups and Phase 1 |
+| Lambda GB-seconds | authoriser about 1.4 million short invocations; integration Lambda the same count, held for each stream (S5: 720 × 300 s) | the second line; `ingressReservedConcurrency` caps it at 800 |
+| API Gateway REST requests | about 1.4 million | one per ingress call, refusals included |
+| KMS `Sign` | about 70,000 | one per mint miss (120 s TTL per active triple) and one per admitted `tools/call` in S4 (60,000) |
+| STS `AssumeRole` | about 20,000 | one per TVM miss; S2 and S7 dominate |
+| DynamoDB on-demand | about 3 million reads and writes | the grant's `GetItem`, the limiter's `UpdateItem`, the seed's `BatchWriteItem` |
+| Cognito | 10,000 monthly active users (§10.2) | one token per seeded user |
+| NAT gateway | about 2 hours and a few GB | the driver's egress |
+| EC2 `c6i.2xlarge` | about 2 hours | the driver host |
+| CloudWatch Logs ingestion | about 1.5 GB | one `request served` line per request plus the authoriser's |
+| Amazon Bedrock | a handful of one-word prompts | the day's baseline only; no model call at rate |
+
+Expect the Runtime line to be the largest and Lambda the second; the rest
+are single-digit dollars each. Say the total in the results, not here.
+
+### 10.2 Risks
+
+- Cognito bills by monthly active user, and every seeded user is active once
+  its token is issued: 10,000 MAUs per run in the shared pool. One run a
+  month stays inside the pool's free tier for Essentials (10,000); a second
+  run in the same calendar month, or a run on a pool that already has active
+  users, is billed per MAU. Check the pool's MAU count for the month before
+  seeding; a run with 10,000 tenants and a run with 2,000 (S7's count) in
+  the same month need separate approval.
 - The test account is shared. Announce the window to its other users first;
   an integ run of another sample during S5 or S6 fails on Lambda concurrency.
 - The seeded tenants live in the shared identity pool for the run. Teardown
@@ -278,6 +306,10 @@ Checked before the run.
 - The driver host has no inbound path and goes with its stack in
   `teardown.sh`. Tokens live only in k6 memory; the results bucket holds
   k6 summaries, never a token.
+- The Runtime holds a microVM per active conversation until its idle timeout
+  after the last request. `teardown.sh` runs after that timeout, or the
+  stack delete waits on the Runtime; the window between the last scenario
+  and the teardown is paid Runtime time.
 
 ## 11. Deliverables
 
