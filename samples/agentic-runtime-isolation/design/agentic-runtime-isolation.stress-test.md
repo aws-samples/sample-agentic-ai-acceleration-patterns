@@ -36,7 +36,7 @@ that is right at 1 rps and wrong at 500 rps is a leak, not a slow path.
 | Account, Region | a non-production test account, `eu-central-1` |
 | Identity | the long-lived `TenantIdentity-shared-pool` deployment the integration runs reuse; tenants created for a run are deleted at its end, the pool itself is never touched |
 | Stack | `RuntimeIsolation-api-gateway` deployed from `main` with the stress props of §3.1, `publishParameters=false`, `--context tvm=true` (the demo table and the vended-credential path), stack name suffixed `-stress` |
-| Driver host | one EC2 instance, `c6i.2xlarge`, private subnet, no inbound rule, no public IP, reached through SSM Session Manager; k6 and the AWS CLI v2 installed by user data |
+| Driver host | the `StressDriver` CDK stack (§8.1): one EC2 instance, `c6i.2xlarge`, isolated subnet, no inbound rule, no public IP, reached through SSM Session Manager; k6 and the AWS CLI v2 installed by user data |
 | Driver | [k6](https://k6.io/) for the ingress path (bearer token, SSE); bash and the AWS CLI for seeding and teardown, reusing `scripts/lib.sh` |
 | Results | k6 JSON summary plus `scripts/stress/collect.sh` output, kept outside the repo with the run date |
 
@@ -202,20 +202,47 @@ for STS and KMS read that sum, CloudTrail is the cross-check.
 ```
 scripts/stress/
   README.md          how to run, in the order below; expected durations
-  deploy.sh          cdk deploy of the stress stack with the §3.1 props; prints deploy time
+  deploy.sh          cdk deploy of the stress stack (§3.1 props) and the StressDriver stack; prints both deploy times
   seed.sh            Phase 1 steps 1.2 and 1.3; writes tenant ids and usernames to a local manifest (no tokens)
   count.sh           Phase 1 steps 1.4 to 1.7
-  host.sh            launches and terminates the EC2 driver host; copies k6/ and the manifest over SSM
+  run.sh             copies k6/ and the manifest to the driver over SSM, starts one scenario, streams its summary back
   k6/
     lib.js           token refresh, probe builder, isolation assertions, per-tenant counters
     s1-steady.js ... s7-eviction.js
   collect.sh         Section 7 for a run window; prints the pass table
-  teardown.sh        deletes the seeded tenants at 20 rps, then the stack; prints destroy time
+  teardown.sh        deletes the seeded tenants at 20 rps, then both stacks; prints both destroy times
+test/stress/
+  stress-driver.cdk.ts   the StressDriver stack (§8.1)
+  stress-driver.cdk.test.ts
 ```
 
 The scripts follow `scripts/CONVENTIONS.md`: statuses and timings on stdout,
 never a token, a credential or a header value; `set -euo pipefail`; cleanup
 on failure. `seed.sh` and `teardown.sh` reuse `scripts/lib.sh`.
+
+### 8.1 The StressDriver stack
+
+The driver host is infrastructure, so it is a CDK stack, not a
+`run-instances` call in bash. It lives under `test/`, beside the integ
+driver, because it is a test asset and no part of the construct.
+
+| Resource | Setting | Why |
+|---|---|---|
+| VPC | one private isolated subnet, one AZ, no NAT, no internet gateway | the host talks to AWS endpoints only |
+| Interface endpoints | `ssm`, `ssmmessages`, `ec2messages`, `execute-api`, `sts`, `logs`, `s3` (gateway) | Session Manager, the ingress and the Entitlements API, token refresh, k6 summary upload |
+| Instance | `c6i.2xlarge`, Amazon Linux 2023, IMDSv2 required, 30 GB gp3, no key pair, no public IP | one process holds 10,000 tokens and 1,000 rps of SSE |
+| Security group | no inbound rule; outbound 443 to the endpoints only | nothing listens |
+| Instance role | `AmazonSSMManagedInstanceCore`; `execute-api:Invoke` on the stress stack's Entitlements API and tenant-identity's platform API; `s3:PutObject` on the results prefix | least privilege; the identity tokens come from the platform API, not from IAM |
+| User data | installs k6 from its RPM, the AWS CLI v2 and `jq`; creates `/opt/stress` | no interactive step |
+| Results bucket | one bucket, SSE-S3, block public access, 30-day expiry, `autoDeleteObjects` | the k6 summaries leave the host before it is destroyed |
+| Outputs | instance id, bucket name | `run.sh` and `collect.sh` read them; nothing in SSM Parameter Store (the 3 TPS rule) |
+| Context | `--context stressDriver=true` | the stack is in the app only when asked for; `cdk synth` of the sample is unchanged |
+
+cdk-nag runs on it as on every stack in the sample; the one expected
+suppression is the missing flow log (cost, a test VPC).
+
+Deploy and destroy time of this stack are reported with the run (expected:
+interface endpoints dominate, about 4 minutes up and 3 down).
 
 ## 9. Quotas the run itself can trip
 
@@ -246,8 +273,9 @@ Checked before the run.
 - The seeded tenants live in the shared identity pool for the run. Teardown
   deletes them; a run that dies leaves them, and `teardown.sh` is idempotent
   from the manifest.
-- The driver host has no inbound path and is terminated by `host.sh` at the
-  end. Tokens live only in k6 memory.
+- The driver host has no inbound path and goes with its stack in
+  `teardown.sh`. Tokens live only in k6 memory; the results bucket holds
+  k6 summaries, never a token.
 
 ## 11. Deliverables
 
@@ -263,7 +291,7 @@ Checked before the run.
 
 | Option | Deploy time | Destroy time | For | Against |
 |---|---|---|---|---|
-| k6 on one EC2 host (chosen) | about 3 min | about 1 min | one process holds 10,000 tokens and the refresh cycle; SSE supported; JSON summary; no listening socket | one host caps at about 1,000 to 2,000 rps for SSE; enough for the targets |
+| k6 on one EC2 host, as a CDK stack (chosen) | about 4 min | about 3 min | one process holds 10,000 tokens and the refresh cycle; SSE supported; JSON summary; no listening socket | one host caps at about 1,000 to 2,000 rps for SSE; enough for the targets |
 | Lambda fan-out (Step Functions distributed map) | about 2 min | about 1 min | scales past 10,000 rps | token refresh and per-tenant counters are spread over thousands of invocations; the driver's own Lambda concurrency competes with the ingress's in the same account |
 | Extend `scripts/perf.sh` | none | none | already there | bash subshells and curl fork per request; one tenant; no assertion counters; stops well under 100 rps |
 | Distributed k6 on ECS | about 10 min | about 3 min | scales horizontally | more to build than the targets need |
