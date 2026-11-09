@@ -71,7 +71,7 @@ Pass criteria, every scenario:
 | Check | Pass |
 |---|---|
 | Cross-tenant mismatch (§6) | 0, with the positive control passing |
-| 5xx from the ingress | 0, excluding documented 502 `grant_too_large` where provoked |
+| 5xx from the ingress | 0, excluding documented 502 `grant_too_large` where provoked and the 503s of S6 that carry a tenant and a throttle reason |
 | 429 attribution | every 429 carries a `tenantId` that is over its limit in that minute; tenants under their limit see none |
 | STS `AssumeRole` throttles (CloudTrail) | 0 at steady state; counted and reported for the herd |
 | KMS `Sign` throttles (CloudTrail) | 0 |
@@ -122,8 +122,8 @@ k6 summary.
 | S3 noisy neighbour | S1 plus one tenant at 600 rpm (10x its limit) for 5 min | the per-tenant limit as the fairness control; the stage throttle behind it | that tenant: 429 after 60 requests in each minute, 2x at a minute boundary at most (ADR-0020); every other tenant: 0 429, p90 unchanged against S1 |
 | S4 tool storm | 200 rps of `tool crm/get_account {}` across 1,000 tenants, 5 min | KMS `Sign` one per admitted `tools/call`; the gateway's 10 rps per tenant; the REQUEST interceptor's TVM | KMS throttles, gateway 429 per tenant, interceptor duration |
 | S5 long streams | `stream 60` at 12 rps across 500 tenants, 5 min | Lambda concurrency held for the whole stream (12 × 60 = 720 of the 800 reserved) | `ConcurrentExecutions`, `Throttles` as it approaches 800, stream breaks (`stream interrupted`) |
-| S6 peak | S1 shape at 1,000 rps for 60 s | the Runtime data plane at its quota | 5xx, Runtime throttles, TTFB |
-| S7 cache eviction | S1 shape with 10,000 tenants, 1 user each, 300 rps, 5 min | more than 1,000 tag sets per instance: the TVM and mint caches evict (ADR-0022) | STS and KMS call rate rising to one per request; TTFB p90 |
+| S6 peak | S1 shape at 1,000 rps for 60 s | the Runtime data plane at its quota (1,000 rps, no margin): throttles are expected | every Runtime throttle surfaces as a 429 or 503 that names the right tenant, none as a 500; the throttle count; TTFB of the admitted requests |
+| S7 cache eviction | 2,000 tenants, 1 user each, 300 rps, 5 min; each VU walks its tenants in turn, one request per tenant per pass, so at most 2,000 session workloads live at once (warm-up 100 s at 20 a second) | more than 1,000 tag sets per instance: the TVM and mint caches evict (ADR-0022) | STS and KMS call rate rising to one per request; TTFB p90 |
 
 S5 uses the model-free `stream <N>` probe. No scenario calls the model at
 rate; model spend across the run is a handful of `perf.sh`-style
