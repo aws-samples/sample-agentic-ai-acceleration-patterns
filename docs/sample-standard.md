@@ -140,9 +140,14 @@ The working specification the sample was built from. Sections, in order:
 6. **Contracts**: what a deployer must supply, what the sample promises in
    return, the samples it consumes, and its published interface (§1.1).
 
-The specification is not rewritten to match the implementation. When the
-implementation diverges, record an ADR and, if the divergence changes a
-promise, amend the specification with a dated note that points at the ADR.
+The specification is kept current. When the implementation diverges from it,
+for an implementation constraint or a later change of requirement, record an
+ADR for the decision and rewrite the affected specification text as if it had
+always been written that way: no dated notes, no "X, not Y" markers, no
+review breadcrumbs. The history of the change lives in the ADR and in git,
+not in the specification. A reader of the specification sees one coherent
+design that matches the code; a reader who wants to know why it changed
+follows the ADR citations.
 
 ### 2.2 Architecture decision records (`adr/`)
 
