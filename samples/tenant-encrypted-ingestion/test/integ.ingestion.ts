@@ -1354,7 +1354,10 @@ async function step10b(w: World): Promise<StepResult> {
   } while (nextToken !== undefined);
   const accepted = listed.filter((d) => d.status === 'ACCEPTED');
   const refused = listed.filter((d) => d.status === 'REJECTED' || d.status === 'KEY_UNAVAILABLE');
+  // ListDeliveries returns the declared size; it equals the measured size for ACCEPTED (SIZE_MISMATCH rejects the rest).
   const bytes = accepted.reduce((sum, d) => sum + d.sizeBytes, 0);
+  // The sweep ends an abandoned lease (step 7c) as REJECTED on the key row, but it made no KMS request and wrote no processor line.
+  const abandoned = refused.filter((d) => d.reason === 'structural:PROCESSING_ABANDONED').length;
   c.expect(pages > 0 && accepted.length > 0, `ListDeliveries A -> ${listed.length} deliveries in ${pages} pages, ${accepted.length} ACCEPTED, ${refused.length} REJECTED or KEY_UNAVAILABLE`);
 
   // The platform's view: the key row's counters.
@@ -1364,10 +1367,11 @@ async function step10b(w: World): Promise<StepResult> {
   c.expect(counters.deliveriesAccepted === accepted.length, `deliveriesAccepted ${String(counters.deliveriesAccepted)} = ACCEPTED deliveries listed ${accepted.length}`);
   c.expect(counters.deliveriesRejected === refused.length, `deliveriesRejected ${String(counters.deliveriesRejected)} = REJECTED and KEY_UNAVAILABLE deliveries listed ${refused.length}`);
   c.expect(counters.bytesStored === bytes, `bytesStored ${String(counters.bytesStored)} = sum of ACCEPTED sizeBytes ${bytes}`);
-  // Four plus one per validator for an accepted delivery, at least the PUT for a refused one.
+  // Four plus one per validator for an accepted delivery, at least the PUT for a delivery the processor refused.
   const kmsFloor = KMS_REQUESTS_PUT + KMS_REQUESTS_READ + KMS_REQUESTS_COPY;
-  c.expect(typeof counters.kmsRequests === 'number' && counters.kmsRequests >= kmsFloor * accepted.length + KMS_REQUESTS_PUT * refused.length,
-    `kmsRequests ${String(counters.kmsRequests)} >= ${kmsFloor} per ACCEPTED + ${KMS_REQUESTS_PUT} per refused = ${kmsFloor * accepted.length + KMS_REQUESTS_PUT * refused.length}`);
+  const floor = kmsFloor * accepted.length + KMS_REQUESTS_PUT * (refused.length - abandoned);
+  c.expect(typeof counters.kmsRequests === 'number' && counters.kmsRequests >= floor,
+    `kmsRequests ${String(counters.kmsRequests)} >= ${kmsFloor} per ACCEPTED + ${KMS_REQUESTS_PUT} per processor-refused = ${floor}`);
   c.expect(counters.inFlight === 0, `inFlight ${String(counters.inFlight)} = 0 with no upload open`);
 
   // The bill's view: the vendor-key key carries the TenantId cost allocation tag.
@@ -1396,8 +1400,6 @@ async function step10b(w: World): Promise<StepResult> {
     const mine = (r.Contributors ?? []).filter((x) => (x.Keys ?? [])[0] === a.tenantId);
     return mine.length === 0 ? undefined : mine.reduce((sum, x) => sum + (x.ApproximateAggregateValue ?? 0), 0);
   };
-  // The sweep ends an abandoned lease as REJECTED and counts it on the key row, but writes no processor line.
-  const abandoned = refused.filter((d) => d.reason === 'structural:PROCESSING_ABANDONED').length;
   const terminated = accepted.length + refused.length - abandoned;
   // Contributor Insights reads the log stream with a delay of minutes.
   const sums = await pollUntil(

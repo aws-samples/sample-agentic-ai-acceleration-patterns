@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # Tenant Encrypted Ingestion: Architecture
 
-> **Status: implemented and verified by two integration runs of 2026-11-09
+> **Status: implemented and verified by three integration runs of 2026-11-09
 > in eu-central-1**, a vendor test account plus a second account owning
 > tenant B's `tenant-key` key (cross-account claim exercised), 53 to 65
 > minutes end to end; the last run (54 minutes, 179 checks) followed the
@@ -550,8 +550,8 @@ it.
 **Checked in integ step 10b**: the counters that `GetTenantKey` returns for
 tenant A equal the tenant's own `ListDeliveries` view (`deliveriesAccepted`
 and `deliveriesRejected` as counts, `bytesStored` as the sum of accepted
-`sizeBytes`, `kmsRequests` at least four per accepted delivery, `inFlight`
-0); A's key carries the `TenantId` tag; the `tei-top-bytes` and
+`sizeBytes`, `kmsRequests` at least four per accepted and one per
+processor-refused delivery, `inFlight` 0); A's key carries the `TenantId` tag; the `tei-top-bytes` and
 `tei-top-deliveries` reports (`GetInsightRuleReport` over the run) name A
 with the same bytes and the same count of processor-terminated deliveries
 (the lease the sweep abandons in step 7c is on the key row's

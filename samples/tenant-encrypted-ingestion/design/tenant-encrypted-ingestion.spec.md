@@ -1154,7 +1154,8 @@ processor. The test waits 5 minutes after each key policy or tag change.
     and the `REJECTED` plus `KEY_UNAVAILABLE` deliveries that
     `ListDeliveries A` returns, `bytesStored` equal to the sum of the
     accepted deliveries' `sizeBytes`, `kmsRequests` at least four per
-    accepted and one per refused delivery, `inFlight` 0; A's `vendor-key`
+    accepted and one per delivery the processor refused (the lease the
+    sweep abandons in step 7c made no KMS request), `inFlight` 0; A's `vendor-key`
     key carries the `TenantId` tag with A's id; the `tei-top-bytes` and
     `tei-top-deliveries` Contributor Insights reports over the run name A
     with `bytesStored` and the count of processor-terminated deliveries,
