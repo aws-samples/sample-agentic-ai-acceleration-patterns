@@ -1,0 +1,25 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# ASH (Automated Security Helper) v3 config for this sample. Run from samples/tenant-memory-isolation
+# after `npx projen build` under the deployment profile, so cdk.out/ is scanned too:
+#   uvx --from "git+https://github.com/awslabs/automated-security-helper.git@v3" ash --mode container --source-dir . --output-dir /tmp/ash-output-tmi
+#
+# ignore_paths: machine output and dependencies that are not committed (ASH does not read .gitignore).
+# cdk.out/ is deliberately scanned: it is the synthesised tree the security review covers (standard §6).
+project_name: tenant-memory-isolation
+fail_on_findings: true
+global_settings:
+  severity_threshold: MEDIUM
+  ignore_paths:
+    - path: node_modules/**
+      reason: Third-party dependencies; npm-audit covers them from package-lock.json.
+    - path: cdk.integ.out/**
+      reason: The integration test's own synth of the same app (scripts/integ.sh), gitignored.
+    - path: lib/**
+      reason: tsc output, gitignored.
+    - path: coverage/**
+      reason: Jest coverage report, gitignored.
+    - path: test-reports/**
+      reason: Jest JUnit report, gitignored.
+    - path: integ-report*.json
+      reason: Machine output of the integration test, gitignored.

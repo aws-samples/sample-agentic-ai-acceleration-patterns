@@ -84,8 +84,10 @@ Memory's application logs go to CloudWatch Logs.
    tenant ([architecture.md, Identity](architecture.md#identity-and-claims)).
 2. **The Gateway authenticates.** The agent sends a native Memory request to
    `<gateway>/tenant-memory/memories/<memoryId>/...` with the token as a
-   bearer. The Gateway validates signature, expiry, issuer, and client; a bad
-   or expired token gets 401.
+   bearer. The Gateway validates signature, expiry, issuer, and client. It
+   refuses a missing token with 401 and an expired or otherwise invalid one
+   with 403, both with a `WWW-Authenticate: Bearer error="invalid_token"`
+   challenge; a Policy denial is a 403 without that challenge.
 3. **Policy compares the request with the claims.** `CreateEvent` is
    permitted only when `actorId` is the token's `tenant_id`, `sessionId` is
    its `sub`, and there is no extraction override. `RetrieveMemoryRecords`
@@ -188,9 +190,15 @@ driven by [`scripts/integ.sh`](scripts/integ.sh), ADR-0010). It runs in
 exactly the one Region in `AWS_REGION`, refuses an account the operator has
 not confirmed in `TMI_INTEG_ACCOUNT`, refuses to run when the demo stack is
 already deployed, and destroys the stack from an exit trap, then proves that
-nothing it created is left, IAM roles and log groups included. One run takes
-about 20 minutes, most of it waiting for extraction and for the first token
-to expire, and costs well under one US dollar.
+nothing it created is left, IAM roles and log groups included. The steps
+take about 10 minutes, most of it waiting for extraction, the policy re-test,
+and the first token to expire; the deploy and the destroy usually add 10
+more. AgentCore can take much longer to delete a Memory: in one run on
+2026-11-10 it stayed `DELETING` for more than five hours and CloudFormation's
+delete timed out, so give the script no timeout of its own. If the stack ends
+`DELETE_FAILED` on the Memory, wait until `aws bedrock-agentcore-control
+get-memory` returns not found, then run `npx cdk destroy` again. A run costs
+well under one US dollar.
 
 | Step | Proves |
 | --- | --- |
@@ -203,7 +211,7 @@ to expire, and costs well under one US dollar.
 | 7. Record-ID access | `GetMemoryRecord` is denied |
 | 8. Outside the Gateway | Direct retrieve, `IngestData`, batch create, and `AssumeRole` on the Gateway role are denied, each checked first to be allowed by the operator's own policies |
 | 9-11. Re-tests | Whether the Gateway stamps `aws:SourceArn`; whether Policy sees `ListEvents` path parameters; a foreign `memoryId` in the path |
-| 12. Expiry | An expired token fails with 401 on a request its scope permits |
+| 12. Expiry | An expired token is refused by the Gateway's authoriser (403 with the `invalid_token` challenge), not by Policy, while a fresh token on the same request is allowed |
 | 13. Telemetry | Memory application logs name each tenant and hold no fact content |
 
 ## End-to-end demo
@@ -240,7 +248,10 @@ defines the request and response shapes.
 | The nine other connector operations | never | 403 |
 | Batch operations, `IngestData` | not connector operations; denied by the fence outside the Gateway | |
 
-A missing, expired, or foreign-client token is 401.
+A missing token is 401; an expired, invalid, or foreign-client token is 403.
+Both carry `WWW-Authenticate: Bearer error="invalid_token"`, which tells
+them from a Policy denial (403, body `Request Denied: ... policy
+enforcement`, no challenge).
 
 ## Observability and costs
 

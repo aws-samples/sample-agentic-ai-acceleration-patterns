@@ -74,9 +74,11 @@ The native Memory API through the Gateway at
 | `CreateEvent` | `actorId` = `tenant_id`, `sessionId` = session claim, no `extractionConfig` |
 | `RetrieveMemoryRecords`, `ListMemoryRecords` | `namespace` = `tenant_id`, no `namespacePath` |
 
-Every other connector operation is denied. Errors: 401 for a missing,
-invalid, or expired token or a foreign client; 403 for a Policy denial;
-429 above the tenant's rate.
+Every other connector operation is denied. Errors: 401 for a missing token;
+403 with `WWW-Authenticate: Bearer error="invalid_token"` for an expired,
+invalid, or foreign-client token; 403 without that challenge for a Policy
+denial; 400 for a `memoryId` other than the target's; 429 above the
+tenant's rate.
 
 ## 6. Contracts
 

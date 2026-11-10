@@ -13,28 +13,35 @@
 | T-7: An agent writes misleading facts into its tenant's shared memory | Accepted: any user of a tenant may write events that become facts for the whole tenant; extraction overrides are denied (M-7) so facts land only in the writer's own tenant | `src/policies.ts` `eventWritePolicy`; provenance and review are the vendor's (production hardening) |
 | T-8: An ID token or another client's token is accepted | M-8: `allowedClients`; Cedar requires `token_use == "access"` | `src/tenant-memory-isolation.ts`; integ step 4 |
 | T-9: Errors, logs, or reports disclose tokens or memory content | M-9: Generic Gateway errors (no `exceptionLevel`); Gateway application logs off; scripts print names and statuses only; Memory application logs carry ids and counts | ADR-0012; `scripts/CONVENTIONS.md`; integ step 13 |
-| T-10: An expired token keeps working | M-10: The Gateway validates expiry; demo tokens last five minutes | integ step 12 |
+| T-10: An expired token keeps working | M-10: The Gateway's authoriser validates expiry before Policy runs; demo tokens last five minutes | integ step 12: the expired token is refused with the Bearer `invalid_token` challenge while a fresh token on the same request is allowed |
 | T-11: One tenant exhausts shared capacity | M-11: Per-tenant Gateway rate limit on `tenant_id` (fairness, not isolation) | `CfnGatewayRateLimit`; construct test |
 | T-12: Memory data at rest under a key the vendor does not control | Accepted for the sample: AgentCore encrypts at rest with an AWS-owned key; M-12 a customer-managed key is a production option | production hardening |
 | T-13: A Memory operation ships before the pinned SDK knows it | Accepted: the fence covers what the SDK models; the fence test forces review on each SDK upgrade | ADR-0007 |
 
 ## Security review
 
-Scans run 2026-11-10 on this tree after `npx projen build`, with `cdk.out/`
-synthesised account-agnostic: cdk-nag `AwsSolutionsChecks` (in the build),
-checkov 3.3.9 on `cdk.out/`, semgrep 1.172.0 (`p/default`, `p/typescript`,
-`p/secrets`) on `src/`, `test/`, `scripts/`, and `npm audit`. These are the
-scanners the Automated Security Helper wraps. The standard's ProtoShield and
-ASH runs on a synthesis under the deployment profile follow the integration
-run.
+Scans run 2026-11-10 on this branch after `npx projen build` under the
+deployment profile (`cdk.out/` synthesised for the test account in
+`us-east-1`):
+
+- **ASH v3.7.1** (`awslabs/automated-security-helper`, container mode, config
+  [`.ash/.ash.yaml`](.ash/.ash.yaml)): bandit, cdk-nag, cfn-nag, checkov,
+  detect-secrets, grype, npm-audit, opengrep, semgrep, syft. Summary:
+  [`reports/ash.summary.md`](reports/ash.summary.md). Exit 2: six actionable
+  findings, all dispositioned below.
+- **cdk-nag `AwsSolutionsChecks`** in the build (`src/main.ts`): no
+  unacknowledged finding.
+- **ProtoShield:** not run. No install path was available outside the
+  team's own tooling; the pull request description says so.
 
 | Scanner | Finding | Disposition |
 | --- | --- | --- |
-| cdk-nag | IAM5 on the pre-token role's log-stream ARN (`<log group>:*`) | Accepted: the function's own log group; Lambda names streams at run time (acknowledged in `src/demo.cdk.ts`) |
-| cdk-nag | COG2 (MFA), COG3 (threat protection), COG8 (Plus tier) on the demo user pool | Accepted for the synthetic issuer: no self sign-up, no hosted sign-in, admin-created users; Essentials is the tier with access-token customisation; a production issuer brings its own (M-1, production hardening) |
-| checkov CKV_AWS_158 | Both log groups use CloudWatch Logs' default encryption, not a customer-managed key | Accepted: encrypted at rest by default; the logs carry ids and counts, never tokens or content (M-9); a customer-managed key is production hardening (M-12) |
+| cdk-nag (build) | IAM5 on the pre-token role's log-stream ARN (`<log group>:*`) | Accepted: the function's own log group; Lambda names streams at run time (acknowledged in `src/demo.cdk.ts`) |
+| cdk-nag (build) | COG2 (MFA), COG3 (threat protection), COG8 (Plus tier) on the demo user pool | Accepted for the synthetic issuer: no self sign-up, no hosted sign-in, admin-created users; Essentials is the tier with access-token customisation; a production issuer brings its own (M-1, production hardening) |
+| ASH cdk-nag | ERROR: the wrapper parsed `tsconfig.json`, `test/tsconfig.json`, `projenrc/tsconfig.json`, and `.eslintrc.json` as templates and evaluated no rule | Tooling, not a finding: the same rule pack runs in the build on the synthesised app, clean |
+| checkov CKV_AWS_158 (×2) | Both log groups use CloudWatch Logs' default encryption, not a customer-managed key | Accepted: encrypted at rest by default; the logs carry ids and counts, never tokens or content (M-9, integ step 13); a customer-managed key is production hardening (M-12) |
 | checkov CKV_AWS_117 | The pre-token Lambda is not in a VPC | False positive for this function: it calls no network resource |
 | checkov CKV_AWS_116 | The pre-token Lambda has no DLQ | Not applicable: Cognito invokes it synchronously; a failure stops token issuance |
 | checkov CKV_AWS_115 | The pre-token Lambda has no reserved concurrency | Accepted for the demo issuer; sign-in volume is the issuer's concern in production |
-| semgrep | No findings | — |
-| npm audit | 27 moderate/low advisories, all in build-time tooling (jest, eslint, glob, minimatch via aws-cdk-lib and cdk-nag); none high or critical | Accepted: nothing ships to AWS but the 8 KB bundled trigger, which has no dependencies; versions are pinned to the repository's shared set (aws-cdk-lib 2.274.0, cdk-nag 3.0.2) |
+| grype GHSA-g3hv-75wg-m249 | `minimatch` (medium) in `package-lock.json`, through jest, eslint, aws-cdk-lib, and cdk-nag | Accepted: build-time only; nothing ships to AWS but the 8 KB bundled trigger, which has no dependencies; versions are pinned to the repository's shared set (aws-cdk-lib 2.274.0, cdk-nag 3.0.2) |
+| bandit, cfn-nag, detect-secrets, npm-audit (at MEDIUM), opengrep, semgrep, syft | No actionable findings | — |

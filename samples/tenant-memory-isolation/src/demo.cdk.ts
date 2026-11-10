@@ -138,7 +138,7 @@ export class TenantMemoryIsolationDemoStack extends Stack {
     acknowledgeResourceWildcard(
       role,
       `${logGroup.logGroupArn}:*`,
-      'The log streams of the function\'s own log group; Lambda names each stream at run time (standard §4.4).',
+      'The log streams of the function\'s own log group; Lambda names each stream at run time, and the logs carry no secrets (M-9).',
     );
     const preToken = new NodejsFunction(this, 'PreTokenFunction', {
       entry: path.join(__dirname, 'issuer', 'pre-token.function.ts'),

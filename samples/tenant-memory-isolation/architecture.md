@@ -2,17 +2,47 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Implemented architecture
 
-**Status:** Implemented as the `TenantMemoryIsolation` CDK construct and
-demo stack. Verified by `npx projen build` on 2026-11-10: 74 unit tests,
-cdk-nag clean, synth clean. **Integration run of this implementation: pending**
-(`npx projen integ`; the run's date, Region, and coverage are recorded here
-when it passes).
+**Status:** Implemented and verified. Last green integration run:
+**2026-11-10, `us-east-1`**, on commit `651816e` (`npx projen integ`, all 13
+steps passed). `npx projen build` the same day: 74 unit tests, cdk-nag clean.
 
-The design was first exercised live on 2026-10-26 in `ap-southeast-2` by the
-SDK driver this construct replaced (ADR-0013). That run established the
-`aws:PrincipalArn` fence (ADR-0004), the missing `ListEvents` path
-parameters (ADR-0005), and the protocol-neutral Gateway (ADR-0006), and
-showed shared recall within a tenant and isolation between tenants.
+Teardown: runs 2, 3, and 4 the same day each deployed and destroyed the
+construct and proved nothing left (stack, Memory, Gateway, Policy engine,
+user pool, both IAM roles, log groups, log delivery, published parameter,
+insight rules; CloudWatch Logs resource policies unchanged). In run 5 every
+resource but the Memory was deleted within a minute; AgentCore held the
+Memory in `DELETING` for more than five hours, CloudFormation's delete timed
+out, and the service refuses a second delete while the first is in
+progress. That deletion is being watched to completion before the stack is
+deleted again and the teardown re-proven.
+
+| Coverage of that run | Result |
+| --- | --- |
+| Gateway, connector, role trust, fence as deployed | `CUSTOM_JWT`, `ENFORCE`, no MCP, generic errors; trust pattern matches the Gateway; fence names all 16 data operations |
+| Token claims | `tenant_id`, `sub`, `client_id`, `token_use: access`, nothing else |
+| Scoped writes; write denials | Allowed for each user's own tenant and session; denied for another tenant, another user's session, an extraction override, an ID token |
+| Recall denials | Another tenant's namespace both ways (`tenant-a`, `tenant-ab`), any `namespacePath`, `*`, actor enumeration, event reads, record-ID reads: 403 |
+| Shared recall | Both tenant-a users recalled tenant-a's fact; tenant-ab only its own (extraction observed in 84 s) |
+| Outside the Gateway | Direct retrieve, `IngestData`, batch create, and `AssumeRole` on the Gateway role denied, each first shown to be allowed by the operator's own policies |
+| Expiry | Expired token: 403 with `WWW-Authenticate: Bearer error="invalid_token"`; no token: 401 with the same challenge; Cedar denial: 403 without it; the same request with a fresh token: 200 |
+| Per-tenant telemetry | Memory application logs carry `actor_id` / `namespace` = `tenant-a` and `tenant-ab`; no fact content |
+
+Live re-tests of documented behaviour (the same results in runs 2 to 5):
+
+| Question | Observed | Record |
+| --- | --- | --- |
+| Does the Gateway stamp `aws:SourceArn` on Memory calls? | No: a Deny unless `aws:SourceArn` equals the Gateway ARN refused 4 of 4 Gateway retrievals, against the connector guide | ADR-0004: `aws:PrincipalArn` fence |
+| Does Policy see `ListEvents` path parameters? | No: with a `has`-guarded per-session permit and the role grant, the caller's own session was still 403 | ADR-0005 accepted |
+| A `memoryId` in the path other than the target's | 400 | — |
+| `IngestData` in the resource-policy Deny | Accepted by the service, deployed, read back | ADR-0007 |
+
+Transient refusals right after a change, handled by the test rather than
+hidden: one 400 on a first write just after deploy (run 1), and one 403 on an
+allowed request just after the re-test policy was removed (run 3); later
+runs recorded none.
+
+The design was first exercised on 2026-10-26 in `ap-southeast-2` by the SDK
+driver this construct replaced (ADR-0013).
 
 ## Purpose
 

@@ -12,5 +12,7 @@
   proves the teardown.
 - Each script runs in exactly one Region, `AWS_REGION`, and fails fast when
   it is unset.
-- A negative Gateway probe passes only on the status it names (403 for a
-  Policy denial, 401 for an expired token); any other status fails it.
+- A negative Gateway probe passes only on the refusal it names: 403 for a
+  Policy denial; for a refused token, 401 (missing) or 403 (expired,
+  invalid) with the `WWW-Authenticate: Bearer error="invalid_token"`
+  challenge. Any other status fails it.
