@@ -20,5 +20,21 @@
 
 ## Security review
 
-No scan of the synthesised tree has been dispositioned yet; findings will be
-recorded here.
+Scans run 2026-11-10 on this tree after `npx projen build`, with `cdk.out/`
+synthesised account-agnostic: cdk-nag `AwsSolutionsChecks` (in the build),
+checkov 3.3.9 on `cdk.out/`, semgrep 1.172.0 (`p/default`, `p/typescript`,
+`p/secrets`) on `src/`, `test/`, `scripts/`, and `npm audit`. These are the
+scanners the Automated Security Helper wraps. The standard's ProtoShield and
+ASH runs on a synthesis under the deployment profile follow the integration
+run.
+
+| Scanner | Finding | Disposition |
+| --- | --- | --- |
+| cdk-nag | IAM5 on the pre-token role's log-stream ARN (`<log group>:*`) | Accepted: the function's own log group; Lambda names streams at run time (acknowledged in `src/demo.cdk.ts`) |
+| cdk-nag | COG2 (MFA), COG3 (threat protection), COG8 (Plus tier) on the demo user pool | Accepted for the synthetic issuer: no self sign-up, no hosted sign-in, admin-created users; Essentials is the tier with access-token customisation; a production issuer brings its own (M-1, production hardening) |
+| checkov CKV_AWS_158 | Both log groups use CloudWatch Logs' default encryption, not a customer-managed key | Accepted: encrypted at rest by default; the logs carry ids and counts, never tokens or content (M-9); a customer-managed key is production hardening (M-12) |
+| checkov CKV_AWS_117 | The pre-token Lambda is not in a VPC | False positive for this function: it calls no network resource |
+| checkov CKV_AWS_116 | The pre-token Lambda has no DLQ | Not applicable: Cognito invokes it synchronously; a failure stops token issuance |
+| checkov CKV_AWS_115 | The pre-token Lambda has no reserved concurrency | Accepted for the demo issuer; sign-in volume is the issuer's concern in production |
+| semgrep | No findings | — |
+| npm audit | 27 moderate/low advisories, all in build-time tooling (jest, eslint, glob, minimatch via aws-cdk-lib and cdk-nag); none high or critical | Accepted: nothing ships to AWS but the 8 KB bundled trigger, which has no dependencies; versions are pinned to the repository's shared set (aws-cdk-lib 2.274.0, cdk-nag 3.0.2) |
