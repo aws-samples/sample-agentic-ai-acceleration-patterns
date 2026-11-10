@@ -99,17 +99,21 @@ list TenantList {
 // ---------------------------------------------------------------------------
 
 /// Onboards a tenant. Atomically claims a slot in an ACTIVE cell with free
-/// capacity - or creates a new cell record when none has capacity (ADR-013) -
-/// persists the tenant in CREATING status with its cellId, and starts the
-/// provisioning workflow (the tenant create build, preceded by the cell
-/// create build if a new cell was needed). Carries no resource definition -
-/// the cell's stamped definition applies (ADR-012). Asynchronous: returns
-/// 202 immediately; poll GetTenant for the terminal status (ACTIVE or
-/// CREATE_FAILED).
+/// capacity - or creates a new cell record when none has capacity (ADR-013),
+/// claiming a cell slot on its account (ADR-024) - persists the tenant in
+/// CREATING status with its cellId, and starts the provisioning workflow
+/// (the tenant create build, preceded by the cell create build if a new cell
+/// was needed). Without accountId, placement considers vendor-owned accounts
+/// only; with accountId, only that registered account (the only way into a
+/// tenant-owned account). Carries no resource definition - the cell's
+/// stamped definition applies (ADR-012). Asynchronous: returns 202
+/// immediately; poll GetTenant for the terminal status (ACTIVE or
+/// CREATE_FAILED). InsufficientCapacityError when no eligible account has
+/// cell capacity; ResourceNotFoundError for an unregistered accountId.
 @authorizer("vendor-authorizer")
 @http(method: "POST", uri: "/tenants", code: 202)
 operation CreateTenant {
-    input := {
+    input := @references([{resource: Account}]) {
         /// Human-readable tenant name.
         @required
         name: TenantName
@@ -122,6 +126,11 @@ operation CreateTenant {
         /// bootstrap; never persisted on the tenant record.
         @required
         adminEmail: EmailAddress
+
+        /// Pin the tenant to one registered account. Required to place into
+        /// a tenant-owned account; optional for a vendor-owned one. Absent,
+        /// placement chooses among vendor-owned accounts.
+        accountId: AccountId
 
         /// Optional idempotency token. Retrying CreateTenant with the same
         /// token returns the previously onboarded tenant instead of
@@ -141,7 +150,9 @@ operation CreateTenant {
     }
 
     errors: [
+        ResourceNotFoundError
         ConflictError
+        InsufficientCapacityError
     ]
 }
 
@@ -303,7 +314,7 @@ operation GetResource {
         tenantId: TenantId
     }
 
-    output := @references([{resource: Cell}]) {
+    output := @references([{resource: Cell}, {resource: Account}]) {
         /// The build input source, resolved from the cell's stamped
         /// definition.
         @required
@@ -327,6 +338,10 @@ operation GetResource {
         /// The cell whose stamped definition applies to this deployment.
         @required
         cellId: CellId
+
+        /// The account the cell - and so this deployment - lives in.
+        @required
+        accountId: AccountId
     }
 
     errors: [

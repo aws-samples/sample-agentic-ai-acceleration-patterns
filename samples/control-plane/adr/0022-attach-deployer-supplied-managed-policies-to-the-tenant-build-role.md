@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-26
+- Amended by: ADR-0025
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -22,3 +23,7 @@ Option 1. Generic, reviewable in the deploy command, and torn down with the stac
 
 ## Consequences
 The reach of the build role becomes deployer-defined; the blast-radius bound of ADR-021 now includes whatever is attached, and the README must say so. A cell-build variant can follow if a cell script needs one.
+
+---
+
+**Amended by ADR-0025 (2026-11-09):** the policies attach to the tenant provisioning role of the stack's own account (the control plane stack for the home account, the `CellAccountStack` for any other), not to the CodeBuild project role. The input name and the same-account ARN check are unchanged.

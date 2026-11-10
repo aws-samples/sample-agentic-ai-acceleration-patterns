@@ -28,3 +28,7 @@ present record is moved conditionally to `DELETE_FAILED` with a
 cannot resurrect a deleted cell as a ghost item. Auto-scale-in policies (e.g.
 delete after N days empty) are a business-plane concern layered on the
 explicit API, not built into the control plane.
+
+---
+
+**Amended by ADR-024 (2026-11-09):** the terminal cell delete is a two-item transaction that also decrements the account's `cellCount`, with the same absence-is-success read on cancellation. `DeleteAccount` applies the same empty-only rule one level up.

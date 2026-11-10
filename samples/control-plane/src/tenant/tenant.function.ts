@@ -3,9 +3,12 @@
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { SFNClient } from '@aws-sdk/client-sfn';
+import { STSClient } from '@aws-sdk/client-sts';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { convertEvent, convertVersion1Response } from '@smithy/server-apigateway';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
+import { AccountDataModel, AccountItem, AccountRecord } from './account.data-model';
+import { stsHandshakeProbe } from './account.handshake';
 import { CellDataModel, CellItem, CellRecord } from './cell.data-model';
 import { IdempotencyDataModel, IdempotencyItem, IdempotencyRecord } from './idempotency.data-model';
 import { parseCellDefinition, TenantService, TenantServiceConfig } from './tenant';
@@ -25,6 +28,10 @@ import { getTenantServiceServiceHandler } from '../smithy/source/typescript-ssdk
  */
 
 const tableName = requireEnv('TABLE_NAME');
+// ADR-025: the fleet name derives every provisioning role ARN; the partition
+// those ARNs live in follows from the Region the function runs in.
+const fleetName = requireEnv('FLEET_NAME');
+const partition = partitionForRegion(requireEnv('AWS_REGION'));
 const tenantDataModel = new TenantDataModel();
 const cellDataModel = new CellDataModel();
 // One document client shared by both repositories and the placement
@@ -49,12 +56,22 @@ const config: TenantServiceConfig = {
     new IdempotencyDataModel(),
     documentClient,
   ),
+  accountRepository: new DynamoDBRepository<AccountRecord, AccountItem>(
+    tableName,
+    new AccountDataModel(),
+    documentClient,
+  ),
   placement: new PlacementTransactions<CellRecord, CellItem, TenantRecord, TenantItem>(
     tableName,
     cellDataModel,
     tenantDataModel,
     documentClient,
   ),
+  fleetName,
+  partition,
+  // ADR-027: PutAccount assumes both halves of the pair and discards the
+  // credentials — registration fails closed when the account is not ready.
+  handshake: stsHandshakeProbe(new STSClient({}), partition, fleetName),
   // The deployment-configured CellDefinition (§10) — parsed and validated
   // once at cold start; a failure here is deployment drift, never a client
   // error.
@@ -87,4 +104,31 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
   const httpResponse = await serviceHandler.handle(convertEvent(event), context);
   return convertVersion1Response(httpResponse);
+}
+
+/**
+ * The AWS partition a Region belongs to — the only partition-dependent
+ * value the runtime needs (provisioning role ARNs), and the one thing the
+ * Lambda environment does not carry directly.
+ */
+function partitionForRegion(region: string): string {
+  if (region.startsWith('cn-')) {
+    return 'aws-cn';
+  }
+  if (region.startsWith('us-gov-')) {
+    return 'aws-us-gov';
+  }
+  if (region.startsWith('us-iso-')) {
+    return 'aws-iso';
+  }
+  if (region.startsWith('us-isob-')) {
+    return 'aws-iso-b';
+  }
+  if (region.startsWith('eu-isoe-')) {
+    return 'aws-iso-e';
+  }
+  if (region.startsWith('us-isof-')) {
+    return 'aws-iso-f';
+  }
+  return 'aws';
 }

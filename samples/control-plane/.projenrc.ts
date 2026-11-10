@@ -30,6 +30,7 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     '@aws-sdk/client-dynamodb@3.1125.0',
     '@aws-sdk/lib-dynamodb@3.1125.0',
     '@aws-sdk/client-sfn@3.1125.0',
+    '@aws-sdk/client-sts@3.1125.0',
     'ulid@3.0.2', // tenant id generation
     // Security linting - AwsSolutionsChecks aspect applied in src/main.ts
     'cdk-nag@3.0.2',
@@ -94,19 +95,28 @@ project.tasks.tryFind('synth:silent')?.reset(`cdk synth -q ${buildOnlyPlaceholde
 project.tasks.tryFind('synth')?.reset(`cdk synth ${buildOnlyPlaceholderContext}`);
 
 // End-to-end integration test (test/integ.tenant.ts) - deploys real
-// infrastructure and drives the API through the full lifecycle (~25 min).
+// infrastructure in TWO accounts (the current one and CP_INTEG_ACCOUNT_B,
+// spec §10) and drives the API through the full lifecycle (~35 min).
 // Must run in EXACTLY ONE explicitly selected Region (integration-test.md):
-// the guard fails fast when AWS_REGION is unset so
-// integ-runner's multi-Region defaults can never apply to this test.
+// the guard fails fast when AWS_REGION is unset so integ-runner's
+// multi-Region defaults can never apply to this test, and when the second
+// account is unset so the failure is this message, not a synth error deep
+// in the runner.
 const integ = project.addTask('integ', {
   description:
-    'Run the deployment integration test in $AWS_REGION (deploys to the current AWS account, ~25 min)',
+    'Run the deployment integration test in $AWS_REGION across the current AWS account and $CP_INTEG_ACCOUNT_B (~45 min)',
 });
 integ.exec(
   'sh -c \'[ -n "$AWS_REGION" ] || { echo "Set AWS_REGION to the single Region to test in (e.g. export AWS_REGION=eu-central-1)"; exit 1; }\'',
 );
 integ.exec(
-  'sh -c \'AWS_DEFAULT_REGION="$AWS_REGION" exec integ-runner --language typescript --parallel-regions "$AWS_REGION" --update-on-failed --force integ.tenant.ts\'',
+  'sh -c \'[ -n "$CP_INTEG_ACCOUNT_B" ] || { echo "Set CP_INTEG_ACCOUNT_B to the second (tenant-owned) test account id; it must be CDK-bootstrapped to trust this account (integration-test.md)"; exit 1; }\'',
+);
+// integ-runner synthesizes the app directly (no CDK CLI), so CDK_DEFAULT_ACCOUNT
+// is not set for it; the test needs the current account id at synth time (it
+// is account A of the two-account scenario), so resolve it here once.
+integ.exec(
+  'sh -c \'export CDK_DEFAULT_ACCOUNT="${CDK_DEFAULT_ACCOUNT:-$(aws sts get-caller-identity --query Account --output text)}"; AWS_DEFAULT_REGION="$AWS_REGION" exec integ-runner --language typescript --parallel-regions "$AWS_REGION" --update-on-failed --force integ.tenant.ts\'',
 );
 
 project.synth();

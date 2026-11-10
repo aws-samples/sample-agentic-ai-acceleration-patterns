@@ -8,6 +8,7 @@ import {
   CellRecord,
   DELETABLE_CELL_STATUSES,
   deleteCellTransition,
+  listCellsByAccountQuery,
   listCellsQuery,
 } from '../../src/tenant/cell.data-model';
 
@@ -15,6 +16,7 @@ const dataModel = new CellDataModel();
 
 const record: CellRecord = {
   cellId: '01CELL',
+  accountId: '111111111111',
   status: LifecycleStatus.ACTIVE,
   maxTenants: 5,
   tenantCount: 2,
@@ -46,9 +48,13 @@ describe('CellDataModel.toItem', () => {
     expect(item.GSI1SK).toBe('CELL#01CELL');
   });
 
-  test('carries NO GSI-2 attributes — cells never appear in the sparse GSI-2 (§4)', () => {
-    expect(item).not.toHaveProperty('GSI2PK');
-    expect(item).not.toHaveProperty('GSI2SK');
+  test('carries GSI-2 attributes partitioned by account for ListCells?accountId= (§4.5, ADR-024)', () => {
+    expect(item.GSI2PK).toBe('ACCOUNT#111111111111');
+    expect(item.GSI2SK).toBe('CELL#01CELL');
+  });
+
+  test('carries the immutable accountId', () => {
+    expect(item.accountId).toBe('111111111111');
   });
 
   test('persists the counters and the stamped definition', () => {
@@ -105,6 +111,15 @@ describe('deleteCellTransition (ADR-014)', () => {
       conditionExpression: '#tenantCount = :zero',
       expressionAttributeNames: { '#tenantCount': 'tenantCount' },
       expressionAttributeValues: { ':zero': 0 },
+    });
+  });
+});
+
+describe('listCellsByAccountQuery', () => {
+  test('queries the GSI-2 ACCOUNT#<id> partition', () => {
+    expect(listCellsByAccountQuery('111111111111')).toEqual({
+      indexName: 'GSI2',
+      partitionKey: { name: 'GSI2PK', value: 'ACCOUNT#111111111111' },
     });
   });
 });

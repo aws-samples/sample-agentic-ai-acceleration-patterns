@@ -36,7 +36,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 
 | Sample | Description |
 |---|---|
-| [The Simple Cell-Based Control Plane](./samples/control-plane/) | A minimal multi-tenant control plane for cell-based deployments — one service, one API, one DynamoDB table, one Step Functions workflow, script-driven provisioning via AWS CodeBuild. `maxTenants: 1` degenerates the model to a silo. |
+| [The Simple Cell-Based Control Plane](./samples/control-plane/) | A minimal multi-tenant control plane for cell-based deployments across accounts — one service, one API, one DynamoDB table, one Step Functions workflow, script-driven provisioning via AWS CodeBuild under a role pair installed in each account. Vendor-owned accounts are fleet capacity with a cell limit; a tenant-owned account is a customer's own, reached only by name. `maxTenants: 1` degenerates the model to a silo. |
 | [Tenant Identity with Amazon Cognito](./samples/tenant-identity/) | An identity layer that makes Amazon Cognito the trusted source of tenant identity, in three user-pool topologies chosen at deploy time — plus a `tiered` mode that runs two of them side by side — with RFC 8693 token narrowing to one tenant. |
 | [Agentic runtime isolation: the agent platform at scale](./samples/agentic-runtime-isolation/) | A pooled agent platform on Amazon Bedrock AgentCore: one ingress verifies the tenant token, resolves the agent and tool grant from an entitlement store, mints a 5-minute transaction token and invokes the agent's Runtime (a fresh microVM session per request by default, one per tenant or per user with session mapping) with tenant-scoped credentials, while a tools gateway (one by default, more optional) checks each call with a per-tool interceptor and then AgentCore Policy. With `agentDelegation` on the `api-gateway` ingress, an agent hands the transaction to another agent through that ingress, which re-issues the token for the next hop. |
 | [Per-Tenant Encrypted Ingestion for Agentic Applications](./samples/tenant-encrypted-ingestion/) | One drop zone and pipeline for every tenant's documents, each tenant's encrypted with its own AWS KMS key, kept apart by key policy and identity-policy ABAC rather than code, validated by a deployer-extensible chain before it lands, in a vendor-owned or tenant-owned key tier, with cryptographic offboarding. |
@@ -49,14 +49,20 @@ is a deployment unit: one shared application deployment plus up to
 cell. Set `maxTenants: 1` and the model degenerates to a silo — one tenant
 per cell.
 
+Cells live in registered AWS accounts. A vendor-owned account is fleet
+capacity with a cell limit, so the fleet scales to a second account when the
+first is full; a tenant-owned account is a customer's own, receives only the
+tenants that name it, and is reached through a role pair the customer installs
+and can revoke. The control plane holds no credentials for any account.
+
 Tenant onboarding is a single `POST /tenants` call: placement claims a slot
-in an existing cell or creates a new cell implicitly, then a Step Functions
-workflow runs your provisioning scripts in AWS CodeBuild — the cell create
-script first when a new cell is needed, then the tenant create script.
-Provisioning is defined once, at deployment time, by a CellDefinition; cells
-are homogeneous by construction and callers can never supply code. Every API
-operation requires a JWT from your vendor IdP, validated by a Lambda
-Authorizer.
+in an existing cell or creates a new cell implicitly in an eligible account,
+then a Step Functions workflow runs your provisioning scripts in AWS CodeBuild
+under that account's provisioning role — the cell create script first when a
+new cell is needed, then the tenant create script. Provisioning is defined
+once, at deployment time, by a CellDefinition; cells are homogeneous by
+construction and callers can never supply code. Every API operation requires
+a JWT from your vendor IdP, validated by a Lambda Authorizer.
 
 [The Simple Cell-Based Control Plane](./samples/control-plane/)
 

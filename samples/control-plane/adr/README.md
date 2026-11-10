@@ -32,3 +32,11 @@ Template for new records: [`docs/sample-standard.md` §2.2](../../../docs/sample
 | [ADR-0021](0021-bounded-blast-radius.md) | Bounded blast radius for amplification and log exposure (threat model M15/M17) | Accepted | 2026-09-15 |
 | [ADR-0022](0022-attach-deployer-supplied-managed-policies-to-the-tenant-build-role.md) | Attach deployer-supplied managed policies to the tenant build role | Accepted | 2026-10-26 |
 | [ADR-0023](0023-pass-the-tenant-name-to-tenant-scripts.md) | Pass the tenant name to tenant scripts as `TENANT_NAME` | Accepted | 2026-10-26 |
+| [ADR-0024](0024-register-accounts-at-run-time-and-claim-cell-slots-atomically.md) | Register accounts at run time and claim cell slots atomically (amends ADR-013, ADR-014) | Accepted | 2026-11-09 |
+| [ADR-0025](0025-provision-through-a-per-account-role-pair.md) | Provision through a per-account role pair assumed by the build projects (amends ADR-002, ADR-012, ADR-019, ADR-022) | Accepted | 2026-11-09 |
+| [ADR-0026](0026-fleet-full-is-a-modelled-error.md) | Fleet full is a modelled `InsufficientCapacityError`, never new capacity | Accepted | 2026-11-09 |
+| [ADR-0027](0027-verify-the-account-handshake-at-registration.md) | Verify the account handshake at registration | Accepted | 2026-11-09 |
+| [ADR-0028](0028-the-role-pair-also-trusts-the-control-plane-api-role.md) | The account role pair also trusts the control plane API role (amends ADR-025, ADR-027) | Accepted | 2026-11-09 |
+| [ADR-0029](0029-require-an-external-id-for-tenant-owned-accounts.md) | Require an external id for tenant-owned accounts (amends ADR-025) | Accepted | 2026-11-09 |
+| [ADR-0030](0030-prove-the-pair-enforces-the-external-id.md) | Prove the pair enforces the external id with a negative probe (amends ADR-0027, ADR-0029) | Accepted | 2026-11-10 |
+| [ADR-0031](0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md) | Lost placement races on a full fleet are a retryable conflict (amends ADR-0026) | Accepted | 2026-11-10 |

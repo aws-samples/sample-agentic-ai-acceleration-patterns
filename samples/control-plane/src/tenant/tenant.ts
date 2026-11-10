@@ -4,10 +4,20 @@
 import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
 import { ulid } from 'ulid';
 import {
+  ACCOUNT_EMPTY_CONDITION,
+  AccountItem,
+  AccountRecord,
+  accountKey,
+  listAccountsQuery,
+  putAccountUpdate,
+} from './account.data-model';
+import { HandshakeProbe, HandshakeRefusal, HandshakeUnavailableError } from './account.handshake';
+import {
   CellItem,
   CellRecord,
   cellKey,
   deleteCellTransition,
+  listCellsByAccountQuery,
   listCellsQuery,
 } from './cell.data-model';
 import {
@@ -25,9 +35,13 @@ import {
   listTenantsQuery,
   tenantKey,
 } from './tenant.data-model';
+import { provisioningRoleArn, sessionNameFor } from '../shared/fleet';
 import {
+  AccountFullError,
+  ConditionFailedError,
   DuplicateTokenError,
   DynamoDBRepository,
+  GsiQuery,
   PlacementRaceLostError,
   PlacementTransactions,
   RecordGoneError,
@@ -35,27 +49,39 @@ import {
 } from '../shared/repository';
 import { CallerContext, ServiceConfig } from '../shared/service-config';
 import {
+  AccountOwner,
+  AccountSummary,
   CellSummary,
   ConflictError,
   CreateTenantServerInput,
   CreateTenantServerOutput,
+  DeleteAccountServerInput,
+  DeleteAccountServerOutput,
   DeleteCellServerInput,
   DeleteCellServerOutput,
   DeleteTenantServerInput,
   DeleteTenantServerOutput,
+  GetAccountServerInput,
+  GetAccountServerOutput,
   GetCellServerInput,
   GetCellServerOutput,
   GetResourceServerInput,
   GetResourceServerOutput,
   GetTenantServerInput,
   GetTenantServerOutput,
+  InsufficientCapacityError,
   InternalServerError,
   LifecycleStatus,
+  ListAccountsServerInput,
+  ListAccountsServerOutput,
   ListCellsServerInput,
   ListCellsServerOutput,
   ListTenantsServerInput,
   ListTenantsServerOutput,
+  PutAccountServerInput,
+  PutAccountServerOutput,
   ResourceNotFoundError,
+  ValidationException,
   ScriptLocations,
   SourceDefinition,
   TenantServiceService,
@@ -92,7 +118,7 @@ interface TenantBuildPhaseInput extends BuildPhaseInput {
 }
 
 /**
- * Resolved Step Functions execution input (ADR-011 retained): the service
+ * Resolved Step Functions execution input (ADR-011): the service
  * resolves sources, script paths, and failure statuses; the workflow rereads
  * no mutable records. `cellBuild`/`tenantBuild` are each optional — the
  * combination encodes the trigger (§7).
@@ -100,6 +126,15 @@ interface TenantBuildPhaseInput extends BuildPhaseInput {
 interface ProvisioningWorkflowInput {
   readonly sourceType: string;
   readonly sourceLocation: string;
+  /** The account the cell lives in (ADR-024) — the cell-delete transaction releases its slot. */
+  readonly accountId: string;
+  /** The account's external id, or '' when none; presented on AssumeRole (ADR-025). */
+  readonly externalId: string;
+  /** The provisioning role pair in that account, resolved by name (R-20, ADR-025). */
+  readonly cellRoleArn: string;
+  readonly tenantRoleArn: string;
+  /** The STS-safe operator session name (M23). */
+  readonly sessionName: string;
   /**
    * The stamped supply-chain pin (T5/M10) — always present; the empty
    * string means unpinned. A non-empty value becomes the CodeBuild
@@ -179,8 +214,16 @@ export interface TenantServiceConfig extends ServiceConfig {
   readonly idempotencyRepository: DynamoDBRepository<IdempotencyRecord, IdempotencyItem>;
   /** The placement/compensation transaction shapes (workstream B, §6). */
   readonly placement: PlacementTransactions<CellRecord, CellItem, TenantRecord, TenantItem>;
+  /** Repository over account items in the same table (ADR-024). */
+  readonly accountRepository: DynamoDBRepository<AccountRecord, AccountItem>;
   /** The deployment-configured CellDefinition, parsed once at cold start (§10). */
   readonly cellDefinition: CellDefinition;
+  /** Names the provisioning role pair in every account (§3.3, ADR-025). */
+  readonly fleetName: string;
+  /** The deployment's partition, for role ARNs. */
+  readonly partition: string;
+  /** The PutAccount handshake probe (ADR-027); injectable for tests. */
+  readonly handshake: HandshakeProbe;
   /** ARN of the provisioning Step Functions state machine. */
   readonly stateMachineArn: string;
   /** Step Functions client (shared across invocations). */
@@ -216,12 +259,42 @@ const MAX_CLAIM_ATTEMPTS = 5;
 /** A best-effort compensation write for a rejected StartExecution (ADR-011, §6). */
 type Compensation = (reason: string) => Promise<unknown>;
 
+/**
+ * §7 step 0 — the resolved placement target: the eligible accounts in
+ * placement order, the same accounts by id (the eligibility filter for
+ * candidate cells), the candidate-cell query, and whether the request named
+ * an account (shapes the capacity error).
+ */
+interface PlacementTarget {
+  readonly accounts: readonly AccountRecord[];
+  readonly accountsById: ReadonlyMap<string, AccountRecord>;
+  readonly candidateQuery: GsiQuery;
+  readonly targeted: boolean;
+}
+
+/** A tenant placed into an existing cell, with the account that hosts it. */
+interface PlacementResult {
+  readonly cell: CellRecord;
+  readonly tenant: TenantRecord;
+  readonly account: AccountRecord;
+}
+
+/**
+ * No existing cell was claimed. `budgetExhausted` is true when every one of
+ * the {@link MAX_CLAIM_ATTEMPTS} claims lost a race against a cell that
+ * still had room — capacity exists, the request just did not win it — and
+ * false when no candidate was eligible at all.
+ */
+interface PlacementMiss {
+  readonly budgetExhausted: boolean;
+}
+
 /** Converts idempotency records to their transact-item form (ADR-017). */
 const idempotencyDataModel = new IdempotencyDataModel();
 
 /**
  * The cell-based control plane tenant service. Implements the
- * Smithy-generated `TenantServiceService` interface (all eleven operations).
+ * Smithy-generated `TenantServiceService` interface (all fifteen operations).
  * Receives static config in the constructor (cold start) and an immutable
  * `CallerContext` per operation — it never sees the raw event or a JWT
  * (context separation).
@@ -250,7 +323,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
     const requestHash =
       clientToken === undefined
         ? undefined
-        : createTenantRequestHash({ name, description: input.description, adminEmail });
+        : createTenantRequestHash({ name, description: input.description, adminEmail, accountId: input.accountId });
     const idempotencyItem =
       clientToken === undefined || requestHash === undefined
         ? undefined
@@ -272,10 +345,17 @@ export class TenantService implements TenantServiceService<CallerContext> {
       updatedAt: now,
     });
 
-    // §6 steps 1–2: candidate scan + bounded claim loop against existing cells.
-    let placed;
+    // §7 step 0 — TARGET: which accounts may host a new cell and which
+    // existing cells are candidates. A named account is the only eligible
+    // one (any owner; 404 if unregistered); otherwise vendor-owned accounts,
+    // oldest registered first — tenant-owned accounts are never eligible
+    // without a target (ADR-024).
+    const target = await this.resolvePlacementTarget(input.accountId);
+
+    // §7 steps 1–2: candidate scan + bounded claim loop against existing cells.
+    let placed: PlacementResult | PlacementMiss;
     try {
-      placed = await this.placeIntoExistingCell(makeTenant, now.toISOString(), idempotencyItem);
+      placed = await this.placeIntoExistingCell(target, makeTenant, now.toISOString(), idempotencyItem);
     } catch (error) {
       return this.replayOrRethrow(error, clientToken, requestHash);
     }
@@ -284,15 +364,13 @@ export class TenantService implements TenantServiceService<CallerContext> {
     let workflowInput: ProvisioningWorkflowInput;
     let compensate: Compensation;
 
-    if (placed !== undefined) {
+    if ('cell' in placed) {
       // Existing cell: tenant create build only. Compensation is a single
-      // CAS moving the tenant CREATING → CREATE_FAILED (§6).
+      // CAS moving the tenant CREATING → CREATE_FAILED (§7.4).
       tenant = placed.tenant;
       workflowInput = {
         ...this.workflowSource(placed.cell),
-        // M12 (T10): the initiating operator rides the execution input into
-        // every build — resolved here, at StartExecution time (ADR-011).
-        operatorId: context.operatorId,
+        ...this.workflowAccount(placed.account, context),
         cellId: placed.cell.cellId,
         tenantId,
         tenantBuild: {
@@ -305,42 +383,33 @@ export class TenantService implements TenantServiceService<CallerContext> {
       };
       compensate = this.tenantCompensation(tenantId, 'CREATING', 'CREATE_FAILED');
     } else {
-      // §6 step 3 — no candidate claimed (none found or budget exhausted):
-      // create a new cell (CREATING, slot pre-claimed, definition stamped
-      // from deployment config) together with the tenant, atomically.
-      const definition = this.config.cellDefinition;
-      const cell: CellRecord = {
-        cellId: ulid(),
-        status: 'CREATING',
-        maxTenants: definition.maxTenants,
-        tenantCount: 1,
-        source: definition.source,
-        cellScripts: definition.cellScripts,
-        tenantScripts: definition.tenantScripts,
-        createdAt: now,
-        updatedAt: now,
-      };
-      tenant = makeTenant(cell.cellId);
+      // §7 step 3 — no candidate claimed (none found or budget exhausted):
+      // for each eligible account in order, one transaction claims a cell
+      // slot on the account and creates the cell (CREATING, tenant slot
+      // pre-claimed, accountId set, definition stamped) together with the
+      // tenant. Every account refusing → InsufficientCapacityError (R-28),
+      // unless the claim budget was spent on cells that still had room: then
+      // capacity exists and the failure is a retryable ConflictError, not
+      // the terminal "raise maxCells" (ADR-031).
+      let created;
       try {
-        await this.config.placement.createCellWithTenant({
-          cell,
-          tenant,
-          clientRequestToken: ulid(),
-          idempotencyItem,
-        });
+        created = await this.createCellInEligibleAccount(target, makeTenant, now, idempotencyItem);
       } catch (error) {
-        if (error instanceof DuplicateTokenError) {
-          return this.replayOrRethrow(error, clientToken, requestHash);
-        }
-        // Any other new-cell transaction failure is ambiguous: fail the
-        // request, never retarget the same tenant (§6).
-        throw new InternalServerError({
-          message: `Tenant placement failed ambiguously: ${errorMessage(error)}`,
-        });
+        const failure =
+          placed.budgetExhausted && error instanceof InsufficientCapacityError
+            ? new ConflictError({
+              message:
+                  `Tenant placement lost ${MAX_CLAIM_ATTEMPTS} claim races against cells with free capacity and no eligible account`
+                  + ' has a free cell slot; nothing was written. Retry the request (spec R-18, ADR-031).',
+            })
+            : error;
+        return this.replayOrRethrow(failure, clientToken, requestHash);
       }
+      const { cell, account } = created;
+      tenant = created.tenant;
       workflowInput = {
         ...this.workflowSource(cell),
-        operatorId: context.operatorId,
+        ...this.workflowAccount(account, context),
         cellId: cell.cellId,
         cellBuild: {
           operation: 'create',
@@ -358,7 +427,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
       };
       // New-cell compensation is the paired transaction: BOTH records move
       // CREATING → CREATE_FAILED so compensation cannot leave only one
-      // record recoverable (§6).
+      // record recoverable (§7.4). The account's cell slot stays held by the
+      // CREATE_FAILED cell until DeleteCell releases it.
       compensate = (reason) =>
         this.config.placement.failCreatingCellAndTenant({
           cellKey: cellKey(cell.cellId),
@@ -436,16 +506,18 @@ export class TenantService implements TenantServiceService<CallerContext> {
       });
     }
 
-    // Delete is allowed regardless of cell status (§5) — the cell record is
-    // read only to resolve the stamped source and tenant delete script.
+    // Delete is allowed regardless of cell status (§5) — the cell and
+    // account records are read only to resolve the stamped source, the
+    // tenant delete script, and the provisioning role to assume.
     const cell = await this.getCellForTenant(existing);
+    const account = await this.getAccountForCell(cell);
 
     const deleting = await this.transitionTenant(tenantId, TENANT_DELETABLE_STATUSES, 'DELETING');
     await this.startWorkflow(
       `${tenantId}-delete-${Date.now()}`,
       {
         ...this.workflowSource(cell),
-        operatorId: context.operatorId,
+        ...this.workflowAccount(account, context),
         cellId: existing.cellId,
         tenantId,
         tenantBuild: {
@@ -497,6 +569,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
       statusReason: tenant.statusReason,
       lastBuildId: tenant.lastBuildId,
       cellId: tenant.cellId,
+      accountId: cell.accountId,
     };
   };
 
@@ -526,12 +599,13 @@ export class TenantService implements TenantServiceService<CallerContext> {
       });
     }
 
+    const account = await this.getAccountForCell(cell);
     const updating = await this.transitionTenant(tenantId, UPDATABLE_STATUSES, 'UPDATING');
     await this.startWorkflow(
       `${tenantId}-update-${Date.now()}`,
       {
         ...this.workflowSource(cell),
-        operatorId: context.operatorId,
+        ...this.workflowAccount(account, context),
         cellId: existing.cellId,
         tenantId,
         tenantBuild: {
@@ -563,8 +637,13 @@ export class TenantService implements TenantServiceService<CallerContext> {
     input: ListCellsServerInput,
     _context: CallerContext,
   ): Promise<ListCellsServerOutput> => {
+    // Unfiltered listing uses GSI-1's static CELL partition; the ?accountId=
+    // filter uses the cell items' GSI-2 ACCOUNT#<id> partition. An unknown
+    // accountId yields an empty page — a query predicate, not a lookup (§5).
+    const query =
+      input.accountId === undefined ? listCellsQuery() : listCellsByAccountQuery(input.accountId);
     const page = await this.config.cellRepository.queryIndex(
-      listCellsQuery(),
+      query,
       input.maxResults,
       input.nextToken,
     );
@@ -591,12 +670,13 @@ export class TenantService implements TenantServiceService<CallerContext> {
       });
     }
 
+    const account = await this.getAccountForCell(existing);
     const updating = await this.transitionCell(cellId, UPDATABLE_STATUSES, 'UPDATING');
     await this.startWorkflow(
       `${cellId}-cell-update-${Date.now()}`,
       {
         ...this.workflowSource(existing),
-        operatorId: context.operatorId,
+        ...this.workflowAccount(account, context),
         cellId,
         cellBuild: {
           operation: 'update',
@@ -615,6 +695,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
   ): Promise<DeleteCellServerOutput> => {
     const cellId = requireField(input.cellId, 'cellId');
     const existing = await this.getCellOrThrow(cellId);
+    const account = await this.getAccountForCell(existing);
 
     // ADR-014: the emptiness check and the DELETING transition are ONE
     // atomic conditional UpdateItem (status IN {ACTIVE, *_FAILED} AND
@@ -639,7 +720,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
       `${cellId}-cell-delete-${Date.now()}`,
       {
         ...this.workflowSource(existing),
-        operatorId: context.operatorId,
+        ...this.workflowAccount(account, context),
         cellId,
         cellBuild: {
           operation: 'delete',
@@ -653,36 +734,212 @@ export class TenantService implements TenantServiceService<CallerContext> {
   };
 
   // -------------------------------------------------------------------
-  // Placement (§6)
+  // Account operations (§5.3, ADR-024, ADR-027)
+  // -------------------------------------------------------------------
+
+  PutAccount = async (
+    input: PutAccountServerInput,
+    context: CallerContext,
+  ): Promise<PutAccountServerOutput> => {
+    const accountId = requireField(input.accountId, 'accountId');
+    const owner = requireField(input.owner, 'owner');
+    const maxCells = requireField(input.maxCells, 'maxCells');
+
+    // §6.4 (ADR-029): a tenant-owned account is a third party handing the
+    // control plane a role, so its pair MUST carry an external id. Checked
+    // before the probe so a missing value gets the plain message without
+    // an STS round trip; the probe then verifies the pair enforces the
+    // value (ADR-030). Vendor-owned accounts sit inside the vendor's own
+    // trust and may omit it.
+    if (owner === 'TENANT' && input.externalId === undefined) {
+      throw new ValidationException({
+        message:
+          `Account ${accountId}: externalId is required when owner is TENANT. Install the ${this.config.fleetName} role pair`
+          + ' in that account with an externalId and pass the same value here (spec §6.4, ADR-029).',
+      });
+    }
+
+    // R-26 (ADR-027, ADR-030): verify the handshake BEFORE writing — assume
+    // both halves of the pair with the supplied external id, prove the pair
+    // refuses the call without it, and discard the credentials. The
+    // operator is present now and can act on the error; the first build is
+    // not the place to find out. A probe that STS could not answer is a
+    // 500, not a refusal: the pair may be fine and the operator retries.
+    let refusals: HandshakeRefusal[];
+    try {
+      refusals = await this.config.handshake({
+        accountId,
+        externalId: input.externalId,
+        operatorId: context.operatorId,
+      });
+    } catch (error) {
+      if (error instanceof HandshakeUnavailableError) {
+        throw new InternalServerError({
+          message: `Account ${accountId}: ${error.message}. The handshake could not be verified; retry.`,
+        });
+      }
+      throw error;
+    }
+    if (refusals.length > 0) {
+      throw new ValidationException({
+        message:
+          `Account ${accountId} is not ready: ${refusals
+            .map((r) => `${r.roleArn} ${r.reason}`)
+            .join('; ')}. Install the ${this.config.fleetName} role pair in that account`
+          + (input.externalId === undefined ? '' : ' with the same externalId')
+          + ' and retry (spec §6.4).',
+      });
+    }
+
+    // One conditional create-or-replace write (R-24): owner is immutable,
+    // cellCount is never touched, policy fields are replaced.
+    try {
+      const account = await this.config.accountRepository.update(
+        accountKey(accountId),
+        putAccountUpdate({
+          accountId,
+          owner,
+          maxCells,
+          externalId: input.externalId,
+          now: new Date().toISOString(),
+        }),
+      );
+      return { account: toAccountSummary(account) };
+    } catch (error) {
+      if (error instanceof ConditionFailedError) {
+        throw new ConflictError({
+          message: `Account ${accountId} is already registered with a different owner; owner is immutable (delete and re-register an empty account to change it)`,
+        });
+      }
+      throw error;
+    }
+  };
+
+  GetAccount = async (
+    input: GetAccountServerInput,
+    _context: CallerContext,
+  ): Promise<GetAccountServerOutput> => {
+    const account = await this.getAccountOrThrow(requireField(input.accountId, 'accountId'));
+    return { account: toAccountSummary(account) };
+  };
+
+  ListAccounts = async (
+    input: ListAccountsServerInput,
+    _context: CallerContext,
+  ): Promise<ListAccountsServerOutput> => {
+    const page = await this.config.accountRepository.queryIndex(
+      listAccountsQuery(),
+      input.maxResults,
+      input.nextToken,
+    );
+    return {
+      accounts: page.items.map(toAccountSummary),
+      nextToken: page.nextToken,
+    };
+  };
+
+  DeleteAccount = async (
+    input: DeleteAccountServerInput,
+    _context: CallerContext,
+  ): Promise<DeleteAccountServerOutput> => {
+    const accountId = requireField(input.accountId, 'accountId');
+    const existing = await this.getAccountOrThrow(accountId);
+
+    // Empty accounts only (P-10): ONE conditional delete on cellCount = 0 —
+    // the counterpart of the cell-slot claim (ADR-024). A read-then-delete
+    // would let a concurrent new-cell placement claim a slot in between;
+    // the condition rejects that as the 409.
+    try {
+      await this.config.accountRepository.delete(accountKey(accountId), ACCOUNT_EMPTY_CONDITION);
+    } catch (error) {
+      if (error instanceof ConditionFailedError) {
+        throw new ConflictError({
+          message: `Account ${accountId} cannot be deregistered — it still holds cells (delete them first) or was modified concurrently`,
+        });
+      }
+      throw error;
+    }
+    return { account: toAccountSummary(existing) };
+  };
+
+  // -------------------------------------------------------------------
+  // Placement (§7)
   // -------------------------------------------------------------------
 
   /**
-   * §6 steps 1–2: nominate candidates from GSI-1 (eventually consistent —
-   * never a guard; the conditional claim on the base table decides), filter
-   * client-side for ACTIVE with free capacity, and attempt at most
-   * {@link MAX_CLAIM_ATTEMPTS} claims, oldest first. A lost race moves to
-   * the next candidate; an ambiguous outcome fails the request — the same
-   * tenant is never retargeted. Returns `undefined` when no candidate was
-   * claimed (fall through to new-cell creation).
+   * §7 step 0 — TARGET. With an `accountId`: that one registered account
+   * (404 otherwise), any owner, and its cells as candidates. Without: every
+   * vendor-owned account, oldest registered first, and all cells in those
+   * accounts as candidates. The account records are read once here and
+   * carried through: the workflow input needs the account's external id,
+   * and the account map is what excludes tenant-owned cells from an
+   * untargeted scan.
+   */
+  private async resolvePlacementTarget(accountId: string | undefined): Promise<PlacementTarget> {
+    if (accountId !== undefined) {
+      const account = await this.config.accountRepository.get(accountKey(accountId));
+      if (account === undefined) {
+        throw new ResourceNotFoundError({
+          message: `Account ${accountId} is not registered; register it with PutAccount first`,
+        });
+      }
+      return {
+        accounts: [account],
+        accountsById: new Map([[accountId, account]]),
+        candidateQuery: listCellsByAccountQuery(accountId),
+        targeted: true,
+      };
+    }
+    const vendorAccounts: AccountRecord[] = [];
+    let nextToken: string | undefined;
+    do {
+      const page = await this.config.accountRepository.queryIndex(listAccountsQuery(), undefined, nextToken);
+      nextToken = page.nextToken;
+      vendorAccounts.push(...page.items.filter((account) => account.owner === AccountOwner.VENDOR));
+    } while (nextToken !== undefined);
+    vendorAccounts.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    return {
+      accounts: vendorAccounts,
+      accountsById: new Map(vendorAccounts.map((account) => [account.accountId, account])),
+      candidateQuery: listCellsQuery(),
+      targeted: false,
+    };
+  }
+
+  /**
+   * §7 steps 1–2: nominate candidates from the index (eventually consistent
+   * — never a guard; the conditional claim on the base table decides),
+   * filter client-side for ACTIVE with free capacity in an eligible
+   * account, and attempt at most {@link MAX_CLAIM_ATTEMPTS} claims, oldest
+   * first. A lost race moves to the next candidate; an ambiguous outcome
+   * fails the request — the same tenant is never retargeted. Returns a
+   * {@link PlacementMiss} when no candidate was claimed (fall through to
+   * new-cell creation), saying whether the miss was "no candidate" or
+   * "budget spent on cells that still have room" — the caller needs the
+   * difference to report a full fleet correctly (ADR-031).
    */
   private async placeIntoExistingCell(
+    target: PlacementTarget,
     makeTenant: (cellId: string) => TenantRecord,
     updatedAt: string,
     idempotencyItem?: IdempotencyItem,
-  ): Promise<{ cell: CellRecord; tenant: TenantRecord } | undefined> {
+  ): Promise<PlacementResult | PlacementMiss> {
     let attempts = 0;
     let nextToken: string | undefined;
     do {
       const page = await this.config.cellRepository.queryIndex(
-        listCellsQuery(),
+        target.candidateQuery,
         undefined,
         nextToken,
       );
       nextToken = page.nextToken;
       for (const cell of page.items) {
-        // Client-side filter (§6 step 1): placement requires the cell ACTIVE
-        // with free capacity — the same condition the claim re-checks.
-        if (cell.status !== 'ACTIVE' || cell.tenantCount >= cell.maxTenants) {
+        // Client-side filter (§7 step 1): placement requires the cell ACTIVE
+        // with free capacity — the same condition the claim re-checks — in
+        // an eligible account (a tenant-owned account's cells are skipped by
+        // an untargeted scan).
+        const account = target.accountsById.get(cell.accountId);
+        if (account === undefined || cell.status !== 'ACTIVE' || cell.tenantCount >= cell.maxTenants) {
           continue;
         }
         const tenant = makeTenant(cell.cellId);
@@ -695,13 +952,15 @@ export class TenantService implements TenantServiceService<CallerContext> {
             clientRequestToken: ulid(),
             idempotencyItem,
           });
-          return { cell, tenant };
+          return { cell, tenant, account };
         } catch (error) {
           if (error instanceof PlacementRaceLostError) {
             if (attempts >= MAX_CLAIM_ATTEMPTS) {
-              // Candidate budget exhausted: fall through to new-cell
-              // creation — over-provisioning, never a failed onboard (§6).
-              return undefined;
+              // Candidate budget exhausted while capacity exists: fall
+              // through to new-cell creation — over-provisioning rather
+              // than a failed onboard (R-18). The caller learns that the
+              // miss was the budget, not an empty fleet.
+              return { budgetExhausted: true };
             }
             continue;
           }
@@ -718,7 +977,70 @@ export class TenantService implements TenantServiceService<CallerContext> {
         }
       }
     } while (nextToken !== undefined);
-    return undefined;
+    return { budgetExhausted: false };
+  }
+
+  /**
+   * §7 step 3: for each eligible account in order, one transaction claims a
+   * cell slot on the account (`cellCount < maxCells`) and creates the cell
+   * and the tenant. A refused account condition means the account is full
+   * (or gone): try the next. When every eligible account refuses — or there
+   * is none — the request fails with `InsufficientCapacityError` and
+   * nothing was written (R-28, ADR-026). A duplicate idempotency token
+   * propagates for the caller to replay; anything else is ambiguous.
+   */
+  private async createCellInEligibleAccount(
+    target: PlacementTarget,
+    makeTenant: (cellId: string) => TenantRecord,
+    now: Date,
+    idempotencyItem?: IdempotencyItem,
+  ): Promise<{ cell: CellRecord; tenant: TenantRecord; account: AccountRecord }> {
+    const definition = this.config.cellDefinition;
+    for (const account of target.accounts) {
+      const cell: CellRecord = {
+        cellId: ulid(),
+        accountId: account.accountId,
+        status: 'CREATING',
+        maxTenants: definition.maxTenants,
+        tenantCount: 1,
+        source: definition.source,
+        cellScripts: definition.cellScripts,
+        tenantScripts: definition.tenantScripts,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const tenant = makeTenant(cell.cellId);
+      try {
+        await this.config.placement.createCellWithTenant({
+          accountKey: accountKey(account.accountId),
+          cell,
+          tenant,
+          updatedAt: now.toISOString(),
+          clientRequestToken: ulid(),
+          idempotencyItem,
+        });
+        return { cell, tenant, account };
+      } catch (error) {
+        if (error instanceof AccountFullError) {
+          continue;
+        }
+        if (error instanceof DuplicateTokenError) {
+          throw error;
+        }
+        // Any other new-cell transaction failure is ambiguous: fail the
+        // request, never retarget the same tenant (§7).
+        throw new InternalServerError({
+          message: `Tenant placement failed ambiguously: ${errorMessage(error)}`,
+        });
+      }
+    }
+    throw new InsufficientCapacityError({
+      message: target.targeted
+        ? `Account ${target.accounts[0].accountId} has no free cell slot (cellCount = maxCells); raise maxCells with PutAccount or free a cell`
+        : target.accounts.length === 0
+          ? 'No vendor-owned account is registered; register one with PutAccount, or name a tenant-owned account in CreateTenant'
+          : `Every vendor-owned account is full (${target.accounts.map((a) => `${a.accountId} ${a.cellCount}/${a.maxCells}`).join(', ')}); raise maxCells or register another account`,
+    });
   }
 
   /**
@@ -785,6 +1107,31 @@ export class TenantService implements TenantServiceService<CallerContext> {
       throw new ResourceNotFoundError({ message: `Cell ${cellId} not found` });
     }
     return cell;
+  }
+
+  /** Reads an account or throws the modelled 404. */
+  private async getAccountOrThrow(accountId: string): Promise<AccountRecord> {
+    const account = await this.config.accountRepository.get(accountKey(accountId));
+    if (account === undefined) {
+      throw new ResourceNotFoundError({ message: `Account ${accountId} is not registered` });
+    }
+    return account;
+  }
+
+  /**
+   * Resolves the account a cell lives in. Cell slot lifetime = cell record
+   * lifetime and `DeleteAccount` refuses while `cellCount > 0` (ADR-024), so
+   * a cell referencing a missing account is an invariant violation — an
+   * internal error, never a client 404.
+   */
+  private async getAccountForCell(cell: CellRecord): Promise<AccountRecord> {
+    const account = await this.config.accountRepository.get(accountKey(cell.accountId));
+    if (account === undefined) {
+      throw new InternalServerError({
+        message: `Cell ${cell.cellId} references unregistered account ${cell.accountId}`,
+      });
+    }
+    return account;
   }
 
   /**
@@ -900,6 +1247,31 @@ export class TenantService implements TenantServiceService<CallerContext> {
   }
 
   /**
+   * Resolves the workflow's per-account fields (R-20, ADR-025): the account
+   * id, its external id ('' when none — the buildspec then omits
+   * `--external-id`), both provisioning role ARNs derived by name, the
+   * operator id (M12), and the STS-safe session name (M23). All resolved at
+   * accept time; the workflow rereads no record.
+   */
+  private workflowAccount(
+    account: AccountRecord,
+    context: CallerContext,
+  ): Pick<
+      ProvisioningWorkflowInput,
+    'accountId' | 'externalId' | 'cellRoleArn' | 'tenantRoleArn' | 'operatorId' | 'sessionName'
+    > {
+    const { partition, fleetName } = this.config;
+    return {
+      accountId: account.accountId,
+      externalId: account.externalId ?? '',
+      cellRoleArn: provisioningRoleArn(partition, account.accountId, fleetName, 'cell'),
+      tenantRoleArn: provisioningRoleArn(partition, account.accountId, fleetName, 'tenant'),
+      operatorId: context.operatorId,
+      sessionName: sessionNameFor(context.operatorId),
+    };
+  }
+
+  /**
    * Starts provisioning; a rejected start is compensated exactly for the
    * in-flight state the operation created (§6). Compensation is best-effort
    * (ADR-011) — its own failure must not mask the original start failure.
@@ -945,10 +1317,27 @@ function toSummary(record: TenantRecord): TenantSummary {
   };
 }
 
+/**
+ * Projects the account record to the API summary. The external id is never
+ * returned (N-10) — only whether one is configured.
+ */
+function toAccountSummary(record: AccountRecord): AccountSummary {
+  return {
+    accountId: record.accountId,
+    owner: record.owner,
+    maxCells: record.maxCells,
+    cellCount: record.cellCount,
+    externalIdConfigured: record.externalId !== undefined,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
 /** Projects the cell domain record to the API summary (stamped definition included). */
 function toCellSummary(record: CellRecord): CellSummary {
   return {
     cellId: record.cellId,
+    accountId: record.accountId,
     status: record.status,
     maxTenants: record.maxTenants,
     tenantCount: record.tenantCount,

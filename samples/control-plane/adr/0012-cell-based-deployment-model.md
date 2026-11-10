@@ -37,3 +37,7 @@ the baseline API is ever revised. What is lost:
 heterogeneous per-tenant deployments — that is the silo model, preserved in
 `architecture.md`'s history. A definition-replacing `UpdateCell` body is a
 noted extension, deliberately excluded.
+
+---
+
+**Amended by ADR-025 (2026-11-09):** the cell/tenant permission asymmetry moves from the two CodeBuild project roles to a role pair installed in every account that hosts cells, the control plane's own included. Cells also gain an immutable `accountId` (ADR-024).

@@ -1,18 +1,16 @@
 # Control Plane — Threat Model
 
-> Status: **Reconstructed 2026-10-11.** The sample was built against a threat
-> model kept outside the repository (`.threatmodel/threat_model.md`), which
-> was never committed. This file records the threats and mitigations the
-> sample itself cites in its README, ADRs, code comments, and tests, under
-> their original identifiers so those citations stay valid. Identifiers not
-> cited anywhere in the sample (T3–T4, T6–T8, T11–T12, T14–T15, T17–T19,
-> M1–M8, M14, M16) are not reproduced; the numbering gaps are deliberate.
-> New threats and mitigations continue the sequence (T21, M18).
+> Threat (`T`) and mitigation (`M`) identifiers are stable keys cited by the
+> README, the ADRs, code comments, and tests. Only cited identifiers are
+> listed; the gaps in the numbering are deliberate and are never reused.
 
 Scope: the control plane's API edge, its identity model, the provisioning
-path into CodeBuild, and the operational data it emits. The application plane
-a CellDefinition provisions is out of scope here, except where the control
-plane's choices bound its blast radius.
+path into CodeBuild and from there into each registered account, and the
+operational data it emits. The application plane a CellDefinition provisions
+is out of scope here, except where the control plane's choices bound its
+blast radius. Two trust populations matter: the vendor, who runs the control
+plane and owns the fleet accounts, and customers, who own tenant-owned
+accounts and install the provisioning role pair there (spec §6.4).
 
 ## Threats
 
@@ -26,7 +24,19 @@ plane's choices bound its blast radius.
 | T13 | Log exposure: build logs readable by anyone with log-group access, scripts echoing fetched values, service-created log groups that never expire | Build logs become an unintended secrets store with unbounded retention | Mitigated in code and by script conventions | M15 |
 | T16 | Cost and concurrency amplification: each `CreateTenant` can create a cell and run up to two hour-long builds | A leaked token or runaway client drives CodeBuild cost and exhausts concurrency | Mitigated in code (caps, throttling, alarms); tighter per-method limits are operational | M11, M17 |
 | T20 | Issuer scope creep: gradual client or audience reuse on the dedicated issuer | Silent widening of the admin population without any configuration change on the control plane | Mitigated in code (role gate) and operationally (client review) | M9, M13 |
-| T21 | Over-broad deployer-supplied policy on the tenant build role: `tenantBuildManagedPolicyArns` attaches a managed policy wider than the tenant scripts need | The shared tenant build role, which runs every tenant's script, gains that reach, so a compromised source or a bad script acts with it across the fleet | Mitigated in code (synth-time ARN validation) and by deployer responsibility (attach only least-privilege policies the producer publishes) | M18 |
+| T21 | Over-broad deployer-supplied policy on the tenant provisioning role: `tenantBuildManagedPolicyArns` attaches a managed policy wider than the tenant scripts need | That account's tenant provisioning role, which runs every tenant script in the account, gains that reach, so a compromised source or a bad script acts with it across the account's cells | Mitigated in code (synth-time ARN validation, same-account only) and by owner responsibility (attach only least-privilege policies the producer publishes); the owner of each account attaches their own (ADR-025) | M18, M22 |
+| T22 | Confused deputy against a customer account: a third party learns a customer's provisioning role ARN and has the control plane act there (by registering the account, or because the customer's trust policy admits the control plane account alone) | The control plane provisions, updates, or deletes resources in a customer's account on behalf of someone who is not that customer | Mitigated in code: the trust policy pins `aws:PrincipalArn` to the control plane's three roles, so no other account can assume the pair; `PutAccount` refuses a tenant-owned account without an external id (ADR-029) and refuses any account whose pair admits the call without the supplied id (ADR-030), so registration needs a value only the owner handed out and the pair is proven to enforce it. The external id gates registration only: any operator uses the stored value afterwards (T27) | M19, M20, M13 |
+| T23 | Wildcard-account AssumeRole: the build roles (and the API function's probe) may assume `<fleet>-cell-provisioning` / `<fleet>-tenant-provisioning` in *any* account, because accounts are registered at run time | A mistyped or malicious `PutAccount` can point the fleet at an account the vendor did not intend — but only one whose owner already installed a role with that name trusting this control plane | Mitigated in code (fixed role names, handshake probe, explicit registration); the target trust policy is the gate; an organisation-scoped condition (`aws:ResourceOrgID`) on the build roles is operational for vendor-only fleets | M20, M19 |
+| T24 | Assumed-role credential exposure in builds: the buildspec exports the provisioning role's credentials to the script as environment variables; `set -x`, `env`, or an echo lands them in the build log | One-hour credentials for a customer's account in a log group readable by anyone with log access | Mitigated in code (credentials fetched into shell variables inside the buildspec, never into CodeBuild environment variables or execution input; role chaining caps them at one hour) and by script conventions; log retention bounds the window | M21, M15 |
+| T25 | Over-privileged provisioning role pair in an account: an owner installs the pair and then widens it (inline edits, extra policies) beyond spec §6.2 | A poisoned source (T5) or a bad script acts with that reach in that account; for a customer account, that is the customer's own blast radius | Mitigated by the shipped least-privilege pair and the cell/tenant asymmetry; widening is the owner's deliberate act and stays theirs | M22, M10 |
+| T26 | Revoked or broken pair under live cells: the owner deletes or changes the role pair while cells exist in the account | Builds there fail into `*_FAILED`; cleanup needs the pair back, so cell and account records in that account cannot be deleted through the API until the owner restores it | Accepted: revocation is the owner's right and the control plane must not hold a way around it; the records stay consistent and the remediation (restore the pair, then delete; or manual record repair) is documented | M23 (detective only) |
+| T27 | Cross-customer placement: an operator targets customer B's tenant-owned account for a tenant that belongs to customer A, by mistake or intent | Customer B's account hosts a stranger's deployment; B's data is not exposed, but B pays for and is responsible for the resources | Not mitigated in code: operators are fully privileged (ADR-015/018) and the control plane has no customer concept beyond `owner`. Accepted at sample scope; a per-operation authorization matrix with account scoping is the recorded seam (spec §11). Detective: the operator id in the account's CloudTrail | M23, M12 |
+| T28 | External id leakage: the value rides the resolved execution input (as a plaintext CodeBuild environment-variable override, readable by anyone with `codebuild:BatchGetBuilds` or Step Functions history access) to reach the AssumeRole call | A leaked external id removes the T22 guard for that account until the owner rotates it | Mitigated in code (never returned by the API, never logged by the sample; the readers above are the operator role and the account's own administrators) and operationally (rotate by redeploying the pair and re-running `PutAccount`) | M19 |
+| T29 | Provisioning script reaches the build role: the script runs in the same container as the agent that assumed the pair, and the CodeBuild container credential endpoint (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`) hands out the BUILD role's credentials to any process that asks; with them the script can assume the pair in every registered account, not just the one it was placed in | A tenant-controlled script in one account provisions, reads or deletes in every other account of the fleet | Mitigated in code: the buildspec removes the container credential variables and the external id from the script's environment before it runs, and fails closed when AssumeRole returns no credentials. Residual: the agent process still holds both, so an attacker with a container escape or `/proc` access to the agent is not stopped; that is the CodeBuild trust boundary (T13) | M24, M22 |
+| T30 | API role reach: the `<fleet>-api` role may assume both halves of the pair in every registered account (for the registration probe, ADR-028), so a compromise of the API function — a dependency with a payload, an injection through a request field — reaches every account's SSM namespaces, not just the control plane's table | Full provisioning rights in every registered account from one Lambda | Partially mitigated in code: the probe passes a deny-all session policy on every AssumeRole, so the credentials it receives can do nothing even if captured (`src/tenant/account.handshake.ts`, `PROBE_SESSION_POLICY`; `test/tenant/account.handshake.test.ts`), and the API role's grant is bounded to the two role names (M20). Residual: code running as the API role could call AssumeRole itself without the session policy; the grant exists. Hardening: an `aws:ResourceOrgID` condition on the API role's grant for vendor-only fleets, and the API function's dependency pinning (M10) | M20, M13 |
+| T31 | Name collision: the pair's role names and the pair stack's name derive from `fleetName` alone. An account that already has a role or stack of that name (another vendor's fleet with the same default, a customer's own `control-plane-*` roles) fails the install, or — if the names belong to another control plane's pair — is registered against a trust policy written for someone else | Install failure at best; at worst an account registered by vendor A whose pair trusts vendor B (B's roles are named, so A's probe is refused — the handshake catches it) | Mitigated by the handshake (M20: a pair trusting another control plane refuses A's probe) and by the stack name carrying the fleet name. Residual: pick a fleet name the vendor owns, not the default, for any fleet that leaves the vendor's accounts; recorded in the README hardening checklist | M20 |
+| T32 | Trust outliving the control plane: a customer's pair trusts `<control plane account>` narrowed to three role names. If the vendor deletes the control plane and the account is later reused or the role names recreated for something else, the customer's pair still trusts them | Whatever next holds those role ARNs in that account can act in the customer's account | Not mitigated in code: the control plane cannot reach into a customer's trust policy, and must not (T26). Accepted at sample scope; the README tells the customer that `DeleteAccount` deregisters the account on the vendor's side only and that removing the pair is their act | — |
+| T33 | Customer runs the vendor's CDK app: installing the pair means synthesising the sample's `CellAccountStack` from the vendor's repository with the customer's credentials, so the customer executes vendor-supplied code with administrative rights in their account | Supply chain: a malicious or compromised revision of the app does anything in the customer's account at install time | Not mitigated in code. Accepted at sample scope, with the mitigation in the customer's hands: review the synthesised template (two roles, two policies, one optional parameter) before deploy, or install the pair from the template directly instead of the CDK app; `cdk synth --context cellAccount=...` produces it | — |
 
 ## Mitigations
 
@@ -43,10 +53,18 @@ responsibility and appear in the README's production hardening checklist.
 | M15 | Bounded log exposure: explicit log groups with one-month retention for the Lambda functions and both CodeBuild projects; provisioning scripts never use `set -x` and log names and status, not values | [ADR-021](./adr/0021-bounded-blast-radius.md); `src/tenant/tenant.cdk.ts`, `src/tenant/tenant.sfn.ts`; `scripts/CONVENTIONS.md`; `test/main.test.ts` (every log group has bounded retention) | T13 |
 | M17 | Bounded amplification: `concurrentBuildLimit: 5` on both CodeBuild projects; CloudWatch alarms (no actions) on more than 20 provisioning executions or more than 50 4XX responses in five minutes; stage throttling as in M11 | [ADR-021](./adr/0021-bounded-blast-radius.md); `src/tenant/tenant.sfn.ts`, `src/tenant/tenant.cdk.ts`; `test/main.test.ts` (build caps, alarms) | T16 |
 | M18 | Bounded managed-policy attachment: `tenantBuildManagedPolicyArns` is validated at synth to be managed-policy ARNs in the stack's own partition and account (AWS managed policies and other accounts rejected; a non-empty list on an environment-agnostic stack, where account or Region is still a CDK token, fails synth rather than skipping the account check — `cdk deploy` via `src/main.ts` always resolves both), and attached by reference only — the control plane never reads what a policy grants (P-3). Choosing a least-privilege policy is the deployer's responsibility; the producer publishes one (e.g. tenant-identity `PlatformInvokePolicy`, its ADR-0030) rather than the deployer hand-writing a grant | [ADR-022](./adr/0022-attach-deployer-supplied-managed-policies-to-the-tenant-build-role.md); `src/tenant/tenant.cdk.ts` (`validateTenantBuildManagedPolicyArns`, attachment), `src/main.ts`, `src/tenant/tenant.sfn.ts`; `test/main.test.ts` (ARN validation, environment-agnostic rejection, attachment); README, Production hardening checklist | T21 |
+| M19 | External id handshake: the account owner sets `externalId` on the role pair stack, whose trust policies then require `sts:ExternalId`; the operator supplies the same value at `PutAccount`, which refuses `owner: TENANT` without one (ADR-029) and proves the pair enforces a supplied id by assuming each half once more without it and requiring a refusal (ADR-030); the control plane presents it on every AssumeRole (probe and builds). `GetAccount` reports only whether one is set; the sample never logs it, though it is readable by whoever can read the execution input or the build's environment overrides (T28) | [ADR-025](./adr/0025-provision-through-a-per-account-role-pair.md), [ADR-027](./adr/0027-verify-the-account-handshake-at-registration.md), [ADR-029](./adr/0029-require-an-external-id-for-tenant-owned-accounts.md), [ADR-030](./adr/0030-prove-the-pair-enforces-the-external-id.md); `src/cell-account/cell-account.cdk.ts` (trust policies, pattern check at synth), `src/tenant/tenant.ts` (`PutAccount` rule and probe), `src/tenant/account.handshake.ts` (the probe, positive and negative; `test/tenant/account.handshake.test.ts`), `src/tenant/tenant.sfn.ts` (AssumeRole in the buildspec); README, Production hardening checklist | T22, T23, T28 |
+| M20 | Registration is the gate: an account is usable only after an operator calls `PutAccount` and the handshake probe (run by the control plane's `<fleet>-api` role, which the pair trusts beside the build roles, ADR-028) assumes both roles successfully; the AssumeRole resource in IAM is the fixed role name, so the owner's trust policy — not a vendor-side list — decides which accounts the fleet can reach; an `aws:ResourceOrgID` condition on the build roles is the operational tightening for fleets that never leave the vendor's organisation | [ADR-024](./adr/0024-register-accounts-at-run-time-and-claim-cell-slots-atomically.md), [ADR-027](./adr/0027-verify-the-account-handshake-at-registration.md); `src/tenant/tenant.ts` (PutAccount), `src/tenant/tenant.sfn.ts` (build role policies); `test/main.test.ts` (role-name-bound AssumeRole resources); README, Production hardening checklist | T22, T23 |
+| M21 | Credential handling in builds: the inline buildspec calls `sts assume-role` with session name `OPERATOR_SESSION_NAME` (the operator id made STS-safe, M23), reads the result into shell variables, exports the three standard AWS variables, and runs the script; no credential is ever written to a CodeBuild environment variable, the execution input, or the log; role chaining caps the credentials at one hour, equal to the build task budget (spec N-7) | [ADR-025](./adr/0025-provision-through-a-per-account-role-pair.md); `src/tenant/tenant.sfn.ts` (buildspec); `scripts/CONVENTIONS.md` (no `set -x`, no `env`); `test/main.test.ts` (buildspec shape) | T24 |
+| M22 | Owner-controlled least privilege: the role pair stack ships the §6.2 asymmetric permissions and nothing else; any widening (`tenantBuildManagedPolicyArns`, edits) is done by the account owner in their own account and never by the control plane | [ADR-025](./adr/0025-provision-through-a-per-account-role-pair.md); `src/cell-account/cell-account.cdk.ts`; `test/main.test.ts` (pair permissions equal the namespace grants); README, Deploy (account role pair) | T21, T25 |
+| M23 | Operator identity in the target account: the AssumeRole session name is the verified operator id, so the account owner's CloudTrail attributes every provisioning call to the operator who caused it — the cross-account counterpart of M12. The mapping (`sessionNameFor`) replaces characters STS refuses and clamps to 64, so two operator ids can share a session name; the control plane's own CloudTrail and the Step Functions execution input hold the exact id. A deployment that needs an exact, unforgeable id in the target account passes `--source-identity` as well | [ADR-025](./adr/0025-provision-through-a-per-account-role-pair.md) (extends [ADR-019](./adr/0019-operator-identity-end-to-end.md)); `src/shared/fleet.ts` (`sessionNameFor`), `src/tenant/tenant.sfn.ts`; `test/main.test.ts` (session name), `test/shared/fleet.test.ts` | T10, T26, T27 |
+| M24 | Script sees the pair only: before the resolved script runs, the buildspec exports the assumed pair credentials and unsets the CodeBuild container credential variables (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, `_FULL_URI`, `AWS_CONTAINER_AUTHORIZATION_TOKEN`) plus the external id, so the AWS SDKs and CLI in the script resolve to the one account's role and cannot fall back to the BUILD role; an empty AssumeRole result exits the build before the script starts | `src/tenant/tenant.sfn.ts` (`INLINE_BUILDSPEC`); `test/main.test.ts` (order of check, export, unset and script run) | T29 |
 
 Related design decisions without a mitigation number: role asymmetry between
-the cell and tenant CodeBuild roles bounds what lifecycle scripts may write
-(spec P-12, README "Security notes"); the 60-second authorizer result cache
+the cell and tenant provisioning roles, installed per account, bounds what
+lifecycle scripts may write there (spec P-12, §6.4, README "Security notes");
+the account cell limit (`maxCells`) bounds how many cells a leaked token can
+create per account (narrows T16, ADR-024); the 60-second authorizer result cache
 (`model/__global.smithy`) bounds how long a revoked token keeps access (T1);
 unsigned pagination tokens are harmless because queries are partition-pinned
 ([ADR-016](./adr/0016-unsigned-pagination-tokens.md)).
@@ -64,6 +82,36 @@ cdk-nag, cfn_nag, and checkov suppressions in `src/tenant/tenant.cdk.ts` and
 - Lambda reserved concurrency is not partitioned; API Gateway stage
   throttling bounds the invoke rate (cfn_nag W92, checkov CKV_AWS_115).
 
+### Security scan (2026-11-10)
+
+ProtoShield v0.18.0 (Semgrep, Bandit, CDK NAG, cfn-nag, CVE, Checkov,
+Secrets, IAM least privilege, license headers) and ASH v3.2.0 (bandit,
+cdk-nag, cfn-nag, checkov, detect-secrets, grype, npm-audit, opengrep,
+semgrep, syft) ran on the synthesised tree after the last code change.
+ProtoShield: 0 critical, 0 high (the 44 licence-header findings below are
+the scanner's default and clear with `license_text=MIT-0`), 2 medium and 1
+low (CVEs below); the IAM least-privilege plugin reports the wildcard-account
+AssumeRole below as documented by design. ASH: 39 findings, all in the
+categories below. Dispositions:
+
+| Finding | Tool | Disposition |
+|---|---|---|
+| 44 files "wrong license (MIT instead of Apache 2.0)" | ProtoShield license headers | False positive from the scanner's default; the repository standard is MIT-0. Re-run with `license_text=MIT-0`: 44 of 44 compliant. |
+| API function and build roles may `sts:AssumeRole` on `<fleet>-cell-provisioning` / `<fleet>-tenant-provisioning` in any account | ProtoShield IAM | By design: T23, T30, M20, spec N-8, ADR-027/028. The target trust policy is the gate; the probe's credentials carry a deny-all session policy (M24 row T30); an `aws:ResourceOrgID` condition is the operational tightening for vendor-only fleets. |
+| Integ assertion provider: SSM `Resource: *`, Cognito `Resource: *` | ProtoShield IAM | Scoped to `/application-plane/*` in the test account and to the throwaway user pool ARN; the remaining finding is the service-level action below. |
+| Integ assertion provider: `secretsmanager:GetRandomPassword` on `*` | ProtoShield IAM | Accepted: a service-level action with no resource ARN; `*` is the only valid resource. |
+| `minimatch` 10.2.6, `glob` 10.5.0, `deepmerge` 4.3.1 CVEs | ProtoShield CVE, grype | Build toolchain only (eslint, jest, ts-jest, the copy bundled inside `aws-cdk-lib` for synth). None is in the Lambda bundles. Picked up when the upstream pins move. |
+| High-entropy strings | detect-secrets | Jar hashes in the generated `src/smithy/classpath.json`, CDK asset hashes in `cdk.out/`, and two synthetic commit SHAs used as pin fixtures in the unit tests. No secrets. |
+| The `ACCOUNT_KEY_PREFIX` constant in `account.data-model.ts` flagged as a secret keyword | detect-secrets | A DynamoDB key prefix constant whose value is the word ACCOUNT. |
+| `CKV_OPENAPI_20`, `CKV_OPENAPI_21` on the generated OpenAPI | checkov | The `httpApiKeyAuth` scheme is how Smithy models the Lambda token authorizer on the `Authorization` header; API Gateway serves TLS only. Generated file, pre-existing. |
+| `CKV_AWS_115/116/117/120/158/173` on the synthesised `control-plane-dev` template | checkov | The suppressed set above (reserved concurrency, DLQ, VPC, API cache, log-group CMK, environment-variable CMK), each with its reason in `src/tenant/tenant.cdk.ts` and `src/tenant/tenant.sfn.ts`; checkov reads the template, not the suppressions. |
+| `express-data-exfiltration` on `src/smithy/source/typescript-ssdk-codegen/src/protocols/Aws_restJson1.ts` (3), `detect-non-literal-regexp` on `coverage/lcov-report/prettify.js` | semgrep, opengrep | Generated code: the Smithy server SDK's response serialisers write the operation output the service returns, which is what the rule pattern-matches; the coverage report is jest machine output. Neither file is authored or committed. |
+
+The integ snapshot directory (`test/*.snapshot/`, gitignored machine output
+that includes the assertion provider's bundled awscli layer) is excluded from
+the scan: it produced about 1,100 findings against third-party code that is
+not part of the sample.
+
 ## Open items
 
 - **T5 remains the highest-consequence open item.** The sample warns on an
@@ -73,3 +121,16 @@ cdk-nag, cfn_nag, and checkov suppressions in `src/tenant/tenant.cdk.ts` and
   `Annotations.addWarningV2` call in `src/main.ts` to `addError`.
 - Alarms have no actions. Wiring them to a notification target is the
   deployer's choice of channel.
+- **T27 (cross-customer placement) is accepted, not mitigated.** Any
+  operator may target any registered account. A control plane serving
+  several customers' accounts needs the per-operation authorization matrix
+  (spec §11) extended with account scoping before a broader operator
+  population connects. The sample's trust model (one fully privileged
+  operator population, ADR-015) is where this is stated.
+- **T26 (revoked pair under live cells) is accepted by design.** The owner's
+  ability to cut access must not have a control-plane bypass. The cost is
+  that cleanup of that account's records needs the pair restored first, or
+  manual repair; the README's remediation section states both.
+- The handshake probe (M20) is point-in-time. A periodic read-only re-probe
+  of registered accounts would turn a silent revocation into a signal
+  before the next build fails; noted, not built.

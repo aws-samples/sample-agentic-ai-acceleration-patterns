@@ -57,15 +57,21 @@ export function idempotencyKey(clientToken: string): ItemKey {
 /**
  * Canonical hash over the CreateTenant parameters that define the request's
  * identity. Positional array form — key order cannot vary; an absent
- * description hashes as null, distinct from an empty string.
+ * description or accountId hashes as null, distinct from an empty string.
+ * accountId is part of the identity: the same token with a different target
+ * account is a different request and must be refused (409), not replayed.
  */
 export function createTenantRequestHash(params: {
   readonly name: string;
   readonly description?: string;
   readonly adminEmail: string;
+  readonly accountId?: string;
 }): string {
   return createHash('sha256')
-    .update(JSON.stringify([params.name, params.description ?? null, params.adminEmail]), 'utf8')
+    .update(
+      JSON.stringify([params.name, params.description ?? null, params.adminEmail, params.accountId ?? null]),
+      'utf8',
+    )
     .digest('hex');
 }
 

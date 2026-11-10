@@ -28,6 +28,13 @@ describe('createTenantRequestHash (ADR-017)', () => {
       createTenantRequestHash({ ...base, adminEmail: 'success+2@simulator.amazonses.com' }),
     ).not.toBe(hash);
     expect(createTenantRequestHash({ ...base, description: 'x' })).not.toBe(hash);
+    expect(createTenantRequestHash({ ...base, accountId: '111111111111' })).not.toBe(hash);
+  });
+
+  test('two target accounts with otherwise identical parameters hash differently', () => {
+    expect(createTenantRequestHash({ ...base, accountId: '111111111111' })).not.toBe(
+      createTenantRequestHash({ ...base, accountId: '222222222222' }),
+    );
   });
 
   test('an absent description hashes differently from an empty string', () => {

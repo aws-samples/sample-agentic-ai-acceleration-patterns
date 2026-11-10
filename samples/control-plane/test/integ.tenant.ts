@@ -2,60 +2,96 @@
 // SPDX-License-Identifier: MIT-0
 
 import * as path from 'path';
-import { ExpectedResult, IntegTest } from '@aws-cdk/integ-tests-alpha';
-import { App, Aspects, CfnResource, Duration, IAspect, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ExpectedResult, IntegTest, Match } from '@aws-cdk/integ-tests-alpha';
+import { App, Aspects, Aws, CfnResource, Duration, IAspect, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { ApplicationLogLevel } from 'aws-cdk-lib/aws-lambda';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import { WriteNagSuppressionsToCloudFormationAspect } from 'cdk-nag';
 import { IConstruct } from 'constructs';
+import { CellAccountStack } from '../src/cell-account/cell-account.cdk';
 import { suppressTemplateScanners } from '../src/shared/nag';
 import { CellDefinition, TenantStack } from '../src/tenant/tenant.cdk';
 
 /**
- * End-to-end integration test for the cell-based control plane
- * (architecture.md §11, workstream F).
+ * End-to-end integration test for the cell-based control plane across TWO
+ * accounts (spec §10, ADR-024..027).
  *
- * Setup: a throwaway Cognito user pool acts as the vendor IdP (its ID tokens
- * carry iss + aud, which the authorizer validates via OIDC discovery, plus
- * the `role: "operator"` claim ADR-018 requires, added by a pre token
- * generation trigger), and
- * the sample cell + tenant scripts are hosted in an S3 bucket used as the
- * stamped CodeBuild ProjectSource. maxTenants = 2 so filling a cell is cheap.
+ * Accounts: A is the account the test runs in (the control plane's own,
+ * registered as vendor-owned with room for two cells); B is a second
+ * account, named by `CP_INTEG_ACCOUNT_B`, registered as tenant-owned with
+ * room for one cell and an external id. B must be CDK-bootstrapped trusting
+ * A (`cdk bootstrap aws://<B>/<region> --trust <A>`), because this app
+ * deploys the account role pair into B with A's credentials.
+ *
+ * Setup (in A): a throwaway Cognito user pool acts as the vendor IdP (its ID
+ * tokens carry iss + aud, which the authorizer validates via OIDC discovery,
+ * plus the `role: "operator"` claim ADR-018 requires, added by a pre token
+ * generation trigger); the sample cell + tenant scripts are hosted in an S3
+ * bucket used as the stamped CodeBuild ProjectSource; and a probe Lambda
+ * that assumes a read-only role in B to count SSM parameters there (the
+ * assertion provider itself runs in A only). maxTenants = 1: every cell is a
+ * silo, so cells — not tenants — are what the accounts count.
  *
  * Flow (every API operation is exercised):
  *   1. unauthenticated request → 401
  *   2. mint an operator: adminCreateUser → adminSetUserPassword →
  *      adminInitiateAuth → ID token
- *   3. CreateTenant #1 (202, includes cellId) → poll GetTenant until ACTIVE
- *      (cell create build + tenant create build ran); exactly one cell,
- *      ACTIVE, 1/2 occupied; the cell namespace and tenant parameter exist
- *   4. CreateTenant #2 (with clientToken) → same cell (reuse before create);
- *      cell now 2/2; replaying the identical request returns the SAME tenant
- *      (already ACTIVE — no duplicate onboard, ADR-017); reusing the token
- *      with different parameters → 409; still exactly one cell at 2/2
- *   5. CreateTenant #3 → NEW cell (first cell full); two cells;
- *      an in-flight DeleteTenant on #3 while CREATING → 409
- *   6. GetResource resolves the stamped definition; ListTenants?cellId=
- *      returns exactly the cell's tenants; unknown cellId → empty page
- *   7. UpdateTenant (metadata, 200, reflected); UpdateResource (202) → ACTIVE
- *   8. UpdateCell (202) → poll GetCell until ACTIVE again
- *   9. DeleteCell on the occupied cell → 409 (ADR-014)
- *  10. DeleteTenant #1 (202) → poll until 404; slot freed (1/2); tenant
- *      parameter gone
- *  11. DeleteTenant #2 and #3 → poll until 404; tenant namespace empty
- *  12. DeleteCell both cells (202) → poll GetCell until 404; no cells left;
- *      the cell SSM namespaces are empty
+ *   3. PutAccount for an account with no role pair → 400 (handshake);
+ *      PutAccount A as TENANT with an external id its pair does not
+ *      require → 400 naming the role (ADR-030);
+ *      PutAccount B as TENANT without an external id → 400 (ADR-029), with
+ *      the wrong one → 400 naming the role;
+ *      PutAccount A (VENDOR, 2) and B (TENANT, 1, external id) → 200;
+ *      ListAccounts shows both at 0/n; GetAccount B hides the external id
+ *   4. CreateTenant #1 (clientToken) → cell 1 in A → poll ACTIVE; the cell
+ *      namespace and tenant parameter exist in A; account A is 1/2;
+ *      replaying the identical request returns the SAME tenant (ADR-017);
+ *      the token with different parameters → 409; still one cell
+ *   5. CreateTenant #2 → cell 2 in A (cell 1 is full); account A is 2/2
+ *   6. CreateTenant #3 untargeted → 409 InsufficientCapacity (A full, B is
+ *      tenant-owned); still two cells
+ *   7. CreateTenant #3 targeted at B → cell 3 in B; an in-flight
+ *      DeleteTenant while CREATING → 409; poll ACTIVE; GetCell names B;
+ *      the cell namespace and tenant parameter exist in B and not in A;
+ *      account B is 1/1
+ *   8. CreateTenant #4 targeted at B → 409 (full); DeleteAccount B → 409
+ *      (occupied); PutAccount B with another owner → 409
+ *   9. reads: ListCells (three cells with accountId), ListCells?accountId=A
+ *      (cells 1 and 2), unknown account → empty page; ListTenants?cellId=;
+ *      GetResource names cell and account; UpdateTenant edits metadata
+ *  10. UpdateResource #1 (in A) and UpdateCell cell 3 (in B) → ACTIVE
+ *  11. DeleteCell on the occupied cell 1 → 409; DeleteTenant #1 → 404;
+ *      cell 1 stays at 0/1 and account A stays 2/2; CreateTenant #5
+ *      untargeted reuses cell 1 (no new cell)
+ *  12. DeleteTenant #5, #2, #3 → 404; tenant namespaces empty in A and B;
+ *      DeleteCell 1, 2, 3 → 404; A → 0/2, B → 0/1; cell namespaces empty
+ *      in both accounts; DeleteAccount A and B → 200; ListAccounts empty
  *
- * Run with the single-Region command documented in integration-test.md
- * (deploys real infrastructure).
+ * Run with the single-Region, two-account command documented in
+ * integration-test.md (deploys real infrastructure in both accounts).
  */
+
+const accountA = requireEnv('CDK_DEFAULT_ACCOUNT', 'the account the test runs in (the integ task resolves it with sts get-caller-identity)');
+const accountB = requireEnv('CP_INTEG_ACCOUNT_B', 'the second, tenant-owned test account (12 digits), CDK-bootstrapped to trust this one');
+const region = process.env.AWS_REGION ?? requireEnv('CDK_DEFAULT_REGION', 'the single Region to test in (the integ task sets AWS_REGION)');
+if (!/^\d{12}$/.test(accountB) || accountB === accountA) {
+  throw new Error('CP_INTEG_ACCOUNT_B must be a 12-digit AWS account id different from the account the test runs in');
+}
+/** No account has the pair installed under this id: the handshake must refuse it. */
+const unregisteredAccount = '000000000000';
+/** The external id account B's role pair requires (spec §6.4) — a handshake value, not a secret. */
+const accountBExternalId = 'control-plane-integ-handshake';
 
 const app = new App();
 
-// --- Setup stack: vendor IdP + script source -------------------------------
+// --- Setup stack (account A): vendor IdP + script source + probe ----------
+// The account A stacks stay environment-agnostic (they deploy to the ambient
+// account, as the assertion stack does); only the account B stack names its
+// environment.
 const setup = new Stack(app, 'control-plane-integ-setup');
 
 const vendorIdp = new cognito.UserPool(setup, 'VendorIdp', {
@@ -114,9 +150,78 @@ new s3deploy.BucketDeployment(setup, 'DeployTenantScripts', {
   sources: [s3deploy.Source.asset(path.join(__dirname, '../scripts/sample-tenant'))],
 });
 
-// --- Stack under test -------------------------------------------------------
+// The assertion provider runs in account A. To check what the scripts did
+// in account B, this probe assumes a read-only role there (installed by the
+// account B stack below, trusted by this function's role) and counts SSM
+// parameters: by path (recursive) and/or by exact names. Returns the count.
+const probeRoleName = 'control-plane-integ-probe';
+const probeRoleArn = `arn:${setup.partition}:iam::${accountB}:role/${probeRoleName}`;
+const ssmProbe = new lambda.Function(setup, 'SsmProbe', {
+  runtime: lambda.Runtime.NODEJS_24_X,
+  handler: 'index.handler',
+  timeout: Duration.seconds(30),
+  code: lambda.Code.fromInline(`
+    const { STSClient, AssumeRoleCommand } = require('@aws-sdk/client-sts');
+    const { SSMClient, GetParametersByPathCommand, GetParametersCommand } = require('@aws-sdk/client-ssm');
+    exports.handler = async (event) => {
+      const sts = new STSClient({});
+      const assumed = await sts.send(new AssumeRoleCommand({
+        RoleArn: event.roleArn, RoleSessionName: 'control-plane-integ-probe',
+      }));
+      const c = assumed.Credentials;
+      const ssm = new SSMClient({
+        region: event.region,
+        credentials: { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken },
+      });
+      let count = 0;
+      if (event.path) {
+        let token;
+        do {
+          const page = await ssm.send(new GetParametersByPathCommand({ Path: event.path, Recursive: true, NextToken: token }));
+          count += (page.Parameters || []).length;
+          token = page.NextToken;
+        } while (token);
+      }
+      if (event.names && event.names.length > 0) {
+        const got = await ssm.send(new GetParametersCommand({ Names: event.names }));
+        count += (got.Parameters || []).length;
+      }
+      return count;
+    };
+  `),
+});
+ssmProbe.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['sts:AssumeRole'],
+  resources: [probeRoleArn],
+}));
+
+// --- Account B stack: the role pair a customer installs + the test probe role
+// Deployed into B with A's credentials (B is bootstrapped to trust A). The
+// pair trusts A's build roles by ARN with the external id; nothing in A has
+// to exist first (the trust is account + aws:PrincipalArn, ADR-025).
+const accountBStack = new CellAccountStack(app, 'control-plane-integ-account-b', {
+  controlPlaneAccountId: accountA,
+  externalId: accountBExternalId,
+  // The sample cell script reads the demo shared parameter (ADR-010).
+  demoSharedParameters: true,
+  env: { account: accountB, region },
+});
+const probeRole = new iam.Role(accountBStack, 'IntegProbeRole', {
+  roleName: probeRoleName,
+  description: 'control-plane integ test only: lets the probe Lambda in the control plane account count SSM parameters here',
+  assumedBy: new iam.PrincipalWithConditions(new iam.AccountPrincipal(accountA), {
+    ArnLike: { 'aws:PrincipalArn': `arn:${accountBStack.partition}:iam::${accountA}:role/control-plane-integ-setup-SsmProbe*` },
+  }),
+});
+probeRole.addToPolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameter', 'ssm:GetParameters', 'ssm:GetParametersByPath'],
+  resources: [accountBStack.formatArn({ service: 'ssm', resource: 'parameter', resourceName: 'application-plane/*' })],
+}));
+
+// --- Stack under test (account A) ------------------------------------------
 // The deployment-configured CellDefinition (§10) — stamped onto every cell
-// this test creates. maxTenants = 2 keeps fill-to-capacity cheap.
+// this test creates. maxTenants = 1: every cell is a silo, so the account
+// cell limits are what fill up.
 const cellDefinition: CellDefinition = {
   source: { type: 'S3', location: `${scriptsBucket.bucketName}/scripts/` },
   cellScripts: {
@@ -129,7 +234,7 @@ const cellDefinition: CellDefinition = {
     update: 'sample-tenant/update.sh',
     delete: 'sample-tenant/delete.sh',
   },
-  maxTenants: 2,
+  maxTenants: 1,
 };
 
 const stack = new TenantStack(app, 'control-plane-integ', {
@@ -137,13 +242,15 @@ const stack = new TenantStack(app, 'control-plane-integ', {
   vendorIdpAudience: idpClient.userPoolClientId,
   cellDefinition,
 });
-// Both shared CodeBuild projects pull the stamped source from the test bucket.
+// Both shared CodeBuild projects pull the stamped source from the test
+// bucket (the source fetch runs under the build role, before the buildspec
+// assumes the account's provisioning role).
 scriptsBucket.grantRead(stack.provisioning.cellProject);
 scriptsBucket.grantRead(stack.provisioning.tenantProject);
 
 // --- Assertions --------------------------------------------------------------
 const integ = new IntegTest(app, 'ControlPlaneInteg', {
-  testCases: [stack],
+  testCases: [setup, accountBStack, stack],
   // INFO makes the assertion provider log each request/response to
   // CloudWatch - invaluable when an ApiCall attribute fails to resolve.
   providerLogLevel: ApplicationLogLevel.INFO,
@@ -152,9 +259,9 @@ const integ = new IntegTest(app, 'ControlPlaneInteg', {
 
 // Template-scanner (cfn_nag/checkov) annotations for CDK-owned constructs
 // this test does not author: the setup stack's custom-resource providers
-// (S3 auto-delete, BucketDeployment) and the integ-tests-alpha assertion
-// harness. The stack under test carries targeted annotations in source
-// instead, so it is deliberately excluded here.
+// (S3 auto-delete, BucketDeployment), the probe, the account B test role,
+// and the integ-tests-alpha assertion harness. The stack under test carries
+// targeted annotations in source instead, so it is deliberately excluded.
 const HARNESS_REASON =
   'CDK-managed custom resource provider / integ-test assertion harness - test scaffolding, not part of the sample\'s deployable surface.';
 class HarnessScannerSuppressions implements IAspect {
@@ -203,8 +310,8 @@ const adminEmail = 'success+integ-operator@simulator.amazonses.com';
 const apiUrl = stack.apiUrl;
 
 // Polling budgets: onboarding into a NEW cell runs two CodeBuild builds in
-// one execution (cell create, then tenant create) — roughly twice the silo
-// budget. Single-build operations keep the original 15-minute budget.
+// one execution (cell create, then tenant create). Single-build operations
+// keep the 15-minute budget.
 const newCellPoll = {
   totalTimeout: Duration.minutes(30),
   interval: Duration.seconds(30),
@@ -218,11 +325,21 @@ const singleBuildPoll = {
 // listing must yield an empty page, not a 404 (§5).
 const unknownCellId = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
 
+// Assertion-provider grants, scoped to what the checks read: the
+// application-plane namespaces in this account (the provider runs in A).
 const ssmReadPolicy = {
   Effect: 'Allow',
   Action: ['ssm:GetParameter', 'ssm:GetParameters', 'ssm:GetParametersByPath'],
-  Resource: ['*'],
+  Resource: [`arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter/application-plane/*`],
 };
+
+/** Counts SSM parameters in account B through the probe (path and/or names). */
+function probeB(id: string, query: { path?: string; names?: string[] }) {
+  return integ.assertions.invokeFunction({
+    functionName: ssmProbe.functionName,
+    payload: JSON.stringify({ roleArn: probeRoleArn, region, ...query }),
+  });
+}
 
 // 1. No vendor JWT → API Gateway rejects before any Lambda runs.
 integ.assertions
@@ -237,7 +354,7 @@ const cognitoPolicy = {
     'cognito-idp:AdminSetUserPassword',
     'cognito-idp:AdminInitiateAuth',
   ],
-  Resource: ['*'],
+  Resource: [vendorIdp.userPoolArn],
 };
 
 const createUser = integ.assertions.awsApiCall('cognito-identity-provider', 'adminCreateUser', {
@@ -259,6 +376,8 @@ const randomPassword = integ.assertions.awsApiCall('secrets-manager', 'getRandom
   // (and shell-sensitive quotes) out of the generated password.
   ExcludeCharacters: '"\'\\`',
 });
+// GetRandomPassword is a service-level action with no resource ARN; `*` is
+// the only valid resource for it.
 randomPassword.provider.addToRolePolicy({
   Effect: 'Allow',
   Action: ['secretsmanager:GetRandomPassword'],
@@ -296,17 +415,121 @@ const authHeaders = {
   'Content-Type': 'application/json',
 };
 
-// 3. Onboard tenant #1 — CreateTenant carries no resource definition (§5):
-//    placement creates the first cell implicitly and returns the tenant
-//    CREATING with its cellId.
+// 3. Accounts (ADR-024, ADR-027). The handshake is checked before any write:
+//    an account with no role pair is refused with a 400 naming the role.
+const putUnregisteredAccount = integ.assertions
+  .httpApiCall(`${apiUrl}accounts/${unregisteredAccount}`, {
+    method: 'PUT',
+    headers: authHeaders,
+    body: JSON.stringify({ owner: 'VENDOR', maxCells: 1 }),
+  })
+  .expect(ExpectedResult.objectLike({ status: 400 }));
+
+// A's pair was installed WITHOUT an external id, so it admits an AssumeRole
+// that omits one. Registering A with an external id (as if it were a
+// customer's account) must be refused by the probe's negative call: the
+// pair does not require the id it was given (ADR-030). Comes before A's
+// real registration so the refusal is the handshake, not an owner change.
+const putAccountANotEnforcingExternalId = integ.assertions
+  .httpApiCall(`${apiUrl}accounts/${accountA}`, {
+    method: 'PUT',
+    headers: authHeaders,
+    body: JSON.stringify({ owner: 'TENANT', maxCells: 1, externalId: accountBExternalId }),
+  })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 400,
+      body: { message: Match.stringLikeRegexp('control-plane-cell-provisioning does not require the external id') },
+    }),
+  );
+
+// Account A: the control plane's own account, vendor-owned, two cells. The
+// control plane stack installed the pair here (R-25); no external id.
+const putAccountA = integ.assertions
+  .httpApiCall(`${apiUrl}accounts/${accountA}`, {
+    method: 'PUT',
+    headers: authHeaders,
+    body: JSON.stringify({ owner: 'VENDOR', maxCells: 2 }),
+  })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 200,
+      body: { account: { accountId: accountA, owner: 'VENDOR', maxCells: 2, cellCount: 0, externalIdConfigured: false } },
+    }),
+  );
+
+// A tenant-owned account must carry an external id (ADR-029): refused
+// before the probe, so no AssumeRole is attempted.
+const putAccountBNoExternalId = integ.assertions
+  .httpApiCall(`${apiUrl}accounts/${accountB}`, {
+    method: 'PUT',
+    headers: authHeaders,
+    body: JSON.stringify({ owner: 'TENANT', maxCells: 1 }),
+  })
+  .expect(ExpectedResult.objectLike({ status: 400, body: { message: Match.stringLikeRegexp('externalId is required') } }));
+
+// The wrong external id is refused by B's trust policy; the probe reports
+// the role that refused (R-26).
+const putAccountBWrongExternalId = integ.assertions
+  .httpApiCall(`${apiUrl}accounts/${accountB}`, {
+    method: 'PUT',
+    headers: authHeaders,
+    body: JSON.stringify({ owner: 'TENANT', maxCells: 1, externalId: `${accountBExternalId}-wrong` }),
+  })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 400,
+      body: { message: Match.stringLikeRegexp('control-plane-(cell|tenant)-provisioning could not be assumed') },
+    }),
+  );
+
+// Account B: a customer's account, tenant-owned, one cell, external id.
+const putAccountB = integ.assertions
+  .httpApiCall(`${apiUrl}accounts/${accountB}`, {
+    method: 'PUT',
+    headers: authHeaders,
+    body: JSON.stringify({ owner: 'TENANT', maxCells: 1, externalId: accountBExternalId }),
+  })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 200,
+      body: { account: { accountId: accountB, owner: 'TENANT', maxCells: 1, cellCount: 0, externalIdConfigured: true } },
+    }),
+  );
+
+// ListAccounts sorts by account id (the GSI-1 sort key); both ids are known
+// at synth time, so the expected order is too. Exact-length match.
+const accountsInListOrder = [accountA, accountB].sort();
+const listAccountsTwo = integ.assertions
+  .httpApiCall(`${apiUrl}accounts`, { method: 'GET', headers: authHeaders })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 200,
+      body: {
+        accounts: accountsInListOrder.map((accountId) => ({
+          accountId,
+          cellCount: 0,
+          maxCells: accountId === accountA ? 2 : 1,
+        })),
+      },
+    }),
+  );
+
+// 4. Onboard tenant #1 — CreateTenant carries no resource definition (§5)
+//    and no accountId: placement considers vendor-owned accounts only,
+//    creates the first cell in A implicitly, and returns the tenant
+//    CREATING with its cellId. Carries a clientToken for the replay below.
+const clientToken1 = 'integ-retry-token-tenant-1';
+const createTenant1Body = JSON.stringify({
+  name: 'integ-tenant-1',
+  description: 'created by the integ test',
+  adminEmail: 'success+integ-tenant-1@simulator.amazonses.com',
+  clientToken: clientToken1,
+});
 const createTenant1 = integ.assertions.httpApiCall(`${apiUrl}tenants`, {
   method: 'POST',
   headers: authHeaders,
-  body: JSON.stringify({
-    name: 'integ-tenant-1',
-    description: 'created by the integ test',
-    adminEmail: 'success+integ-tenant-1@simulator.amazonses.com',
-  }),
+  body: createTenant1Body,
 });
 // Note: no .expect() here - combining expect() with getAttString() on the
 // same HttpApiCall is unsupported (response flattening breaks the internal
@@ -322,7 +545,7 @@ const waitForActive1 = integ.assertions
   .expect(ExpectedResult.objectLike({ status: 200, body: { tenant: { status: 'ACTIVE' } } }))
   .waitForAssertions(newCellPoll);
 
-// Exactly one cell: ACTIVE, one of two slots occupied. The plain array in
+// Exactly one cell: in A, ACTIVE, its one slot occupied. The plain array in
 // the pattern is matched exact-length, element-wise (deep-partial per
 // element) — one element asserts "exactly one cell".
 const listCellsOne = integ.assertions
@@ -330,11 +553,11 @@ const listCellsOne = integ.assertions
   .expect(
     ExpectedResult.objectLike({
       status: 200,
-      body: { cells: [{ cellId: cellId1, status: 'ACTIVE', tenantCount: 1, maxTenants: 2 }] },
+      body: { cells: [{ cellId: cellId1, accountId: accountA, status: 'ACTIVE', tenantCount: 1, maxTenants: 1 }] },
     }),
   );
 
-// GetCell returns the stamped definition (ADR-012).
+// GetCell returns the stamped definition (ADR-012) and the account (ADR-024).
 const getCell1 = integ.assertions
   .httpApiCall(`${apiUrl}cells/${cellId1}`, { method: 'GET', headers: authHeaders })
   .expect(
@@ -343,9 +566,10 @@ const getCell1 = integ.assertions
       body: {
         cell: {
           cellId: cellId1,
+          accountId: accountA,
           status: 'ACTIVE',
           tenantCount: 1,
-          maxTenants: 2,
+          maxTenants: 1,
           source: cellDefinition.source,
           cellScripts: cellDefinition.cellScripts,
           tenantScripts: cellDefinition.tenantScripts,
@@ -354,61 +578,40 @@ const getCell1 = integ.assertions
     }),
   );
 
-// The cell's shared deployment published its namespace (the cell → tenant
-// contract, §7) …
+// The account claim landed with the cell (ADR-024).
+const getAccountAOne = integ.assertions
+  .httpApiCall(`${apiUrl}accounts/${accountA}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { account: { cellCount: 1, maxCells: 2 } } }));
+
+// The cell's shared deployment published its namespace in A (the cell →
+// tenant contract, §6.2) …
 const checkCellParam = integ.assertions.awsApiCall('SSM', 'getParameter', {
   Name: `/application-plane/cells/${cellId1}/shared-endpoint`,
 });
 checkCellParam.provider.addToRolePolicy(ssmReadPolicy);
 checkCellParam.expect(ExpectedResult.objectLike({ Parameter: { Type: 'String' } }));
 
-// … and the tenant create script provisioned the per-tenant deployment.
+// … and the tenant create script provisioned the per-tenant deployment in A.
 const checkTenantParam1 = integ.assertions.awsApiCall('SSM', 'getParameter', {
   Name: `/application-plane/tenants/${tenantId1}`,
 });
 checkTenantParam1.provider.addToRolePolicy(ssmReadPolicy);
 checkTenantParam1.expect(ExpectedResult.objectLike({ Parameter: { Type: 'String' } }));
 
-// 4. Onboard tenant #2 — placement must REUSE cell #1 (reuse before create,
-//    §6): the ACTIVE poll pins the cellId to cell #1. Carries a clientToken
-//    so the replay below can exercise CreateTenant idempotency (ADR-017).
-const clientToken2 = 'integ-retry-token-tenant-2';
-const createTenant2Body = JSON.stringify({
-  name: 'integ-tenant-2',
-  adminEmail: 'success+integ-tenant-2@simulator.amazonses.com',
-  clientToken: clientToken2,
-});
-const createTenant2 = integ.assertions.httpApiCall(`${apiUrl}tenants`, {
-  method: 'POST',
-  headers: authHeaders,
-  body: createTenant2Body,
-});
-const tenantId2 = createTenant2.getAttString('body.tenant.tenantId');
-
-const waitForActive2 = integ.assertions
-  .httpApiCall(`${apiUrl}tenants/${tenantId2}`, { method: 'GET', headers: authHeaders })
-  .expect(
-    ExpectedResult.objectLike({
-      status: 200,
-      body: { tenant: { status: 'ACTIVE', cellId: cellId1 } },
-    }),
-  )
-  .waitForAssertions(singleBuildPoll);
-
 // Replay the IDENTICAL request (same clientToken, same parameters): the
 // original tenant comes back — same tenantId, and already ACTIVE, which a
 // fresh onboard could never be (it would start CREATING). No new tenant,
-// no new build (ADR-017).
-const replayCreateTenant2 = integ.assertions
+// no new cell, no account slot (ADR-017).
+const replayCreateTenant1 = integ.assertions
   .httpApiCall(`${apiUrl}tenants`, {
     method: 'POST',
     headers: authHeaders,
-    body: createTenant2Body,
+    body: createTenant1Body,
   })
   .expect(
     ExpectedResult.objectLike({
       status: 202,
-      body: { tenant: { tenantId: tenantId2, cellId: cellId1, status: 'ACTIVE' } },
+      body: { tenant: { tenantId: tenantId1, cellId: cellId1, status: 'ACTIVE' } },
     }),
   );
 
@@ -418,31 +621,96 @@ const reuseTokenMismatch = integ.assertions
     method: 'POST',
     headers: authHeaders,
     body: JSON.stringify({
-      name: 'integ-tenant-2-different',
-      adminEmail: 'success+integ-tenant-2@simulator.amazonses.com',
-      clientToken: clientToken2,
+      name: 'integ-tenant-1-different',
+      adminEmail: 'success+integ-tenant-1@simulator.amazonses.com',
+      clientToken: clientToken1,
     }),
   })
   .expect(ExpectedResult.objectLike({ status: 409 }));
 
-// Still exactly one cell — now full (2/2). Sequenced AFTER the replay and
+// Still exactly one cell and A still 1/2. Sequenced AFTER the replay and
 // the mismatch: neither may have claimed a slot or created a cell.
 const listCellsStillOne = integ.assertions
   .httpApiCall(`${apiUrl}cells`, { method: 'GET', headers: authHeaders })
   .expect(
     ExpectedResult.objectLike({
       status: 200,
-      body: { cells: [{ cellId: cellId1, status: 'ACTIVE', tenantCount: 2, maxTenants: 2 }] },
+      body: { cells: [{ cellId: cellId1, status: 'ACTIVE', tenantCount: 1, maxTenants: 1 }] },
     }),
   );
 
-// 5. Onboard tenant #3 — cell #1 is full, so placement creates a NEW cell.
+// 5. Onboard tenant #2 — cell 1 is full, so placement creates cell 2, in A
+//    again (its second and last cell slot).
+const createTenant2 = integ.assertions.httpApiCall(`${apiUrl}tenants`, {
+  method: 'POST',
+  headers: authHeaders,
+  body: JSON.stringify({
+    name: 'integ-tenant-2',
+    adminEmail: 'success+integ-tenant-2@simulator.amazonses.com',
+  }),
+});
+const tenantId2 = createTenant2.getAttString('body.tenant.tenantId');
+const cellId2 = createTenant2.getAttString('body.tenant.cellId');
+
+const waitForActive2 = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId2}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { tenant: { status: 'ACTIVE' } } }))
+  .waitForAssertions(newCellPoll);
+
+// Account A is now full (2/2); two cells, both in A, ULID order.
+const getAccountAFull = integ.assertions
+  .httpApiCall(`${apiUrl}accounts/${accountA}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { account: { cellCount: 2, maxCells: 2 } } }));
+
+const listCellsTwo = integ.assertions
+  .httpApiCall(`${apiUrl}cells`, { method: 'GET', headers: authHeaders })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 200,
+      body: {
+        cells: [
+          { cellId: cellId1, accountId: accountA, status: 'ACTIVE', tenantCount: 1 },
+          { cellId: cellId2, accountId: accountA, status: 'ACTIVE', tenantCount: 1 },
+        ],
+      },
+    }),
+  );
+
+// 6. Tenant-owned accounts are not fleet capacity (§7 step 0): with A full
+//    and B tenant-owned, an untargeted onboard is a 409
+//    InsufficientCapacityError and writes nothing (R-28, ADR-026).
+const createTenant3Untargeted = integ.assertions
+  .httpApiCall(`${apiUrl}tenants`, {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify({
+      name: 'integ-tenant-3',
+      adminEmail: 'success+integ-tenant-3@simulator.amazonses.com',
+    }),
+  })
+  // The error TYPE tells it apart from a ConflictError 409 (ADR-026); the
+  // message names the full accounts and is not matched here.
+  .expect(ExpectedResult.objectLike({ status: 409, headers: { 'x-amzn-errortype': ['InsufficientCapacityError'] } }));
+
+const listCellsStillTwo = integ.assertions
+  .httpApiCall(`${apiUrl}cells`, { method: 'GET', headers: authHeaders })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 200,
+      body: { cells: [{ cellId: cellId1 }, { cellId: cellId2 }] },
+    }),
+  );
+
+// 7. Onboard tenant #3 INTO account B: the only way into a tenant-owned
+//    account is to name it. Cell 3 is created there; the cell and tenant
+//    builds assume B's provisioning role pair with the external id (ADR-025).
 const createTenant3 = integ.assertions.httpApiCall(`${apiUrl}tenants`, {
   method: 'POST',
   headers: authHeaders,
   body: JSON.stringify({
     name: 'integ-tenant-3',
     adminEmail: 'success+integ-tenant-3@simulator.amazonses.com',
+    accountId: accountB,
   }),
 });
 const tenantId3 = createTenant3.getAttString('body.tenant.tenantId');
@@ -459,25 +727,98 @@ const waitForActive3 = integ.assertions
   .expect(ExpectedResult.objectLike({ status: 200, body: { tenant: { status: 'ACTIVE' } } }))
   .waitForAssertions(newCellPoll);
 
-// Two cells now: cell #1 untouched at 2/2 (proving tenant #3 did NOT land
-// there), the new cell at 1/2. ULIDs are time-ordered, so cell #1 sorts
-// first; cellId3 pins the second element to tenant #3's placement.
-const listCellsTwo = integ.assertions
+const getCell3 = integ.assertions
+  .httpApiCall(`${apiUrl}cells/${cellId3}`, { method: 'GET', headers: authHeaders })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 200,
+      body: { cell: { cellId: cellId3, accountId: accountB, status: 'ACTIVE', tenantCount: 1, maxTenants: 1 } },
+    }),
+  );
+
+// The scripts ran IN account B: the cell namespace (two parameters:
+// shared-endpoint and provisioned) and the tenant parameter exist there …
+const probeCell3InB = probeB('ProbeCell3InB', { path: `/application-plane/cells/${cellId3}` })
+  .expect(ExpectedResult.objectLike({ Payload: '2' }));
+const probeTenant3InB = probeB('ProbeTenant3InB', { names: [`/application-plane/tenants/${tenantId3}`] })
+  .expect(ExpectedResult.objectLike({ Payload: '1' }));
+
+// … and NOT in A. GetParameters (plural) reports a missing name in
+// InvalidParameters instead of throwing.
+const checkCell3NotInA = integ.assertions
+  .awsApiCall('SSM', 'getParameters', {
+    Names: [`/application-plane/cells/${cellId3}/shared-endpoint`, `/application-plane/tenants/${tenantId3}`],
+  })
+  .expect(
+    ExpectedResult.objectLike({
+      Parameters: [],
+      InvalidParameters: [`/application-plane/cells/${cellId3}/shared-endpoint`, `/application-plane/tenants/${tenantId3}`],
+    }),
+  );
+checkCell3NotInA.provider.addToRolePolicy(ssmReadPolicy);
+
+const getAccountBFull = integ.assertions
+  .httpApiCall(`${apiUrl}accounts/${accountB}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { account: { cellCount: 1, maxCells: 1, externalIdConfigured: true } } }));
+
+// 8. Account B is full: a targeted onboard → 409 InsufficientCapacity;
+//    deregistering an occupied account → 409; changing its owner → 409.
+const createTenant4AtFullB = integ.assertions
+  .httpApiCall(`${apiUrl}tenants`, {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify({
+      name: 'integ-tenant-4',
+      adminEmail: 'success+integ-tenant-4@simulator.amazonses.com',
+      accountId: accountB,
+    }),
+  })
+  .expect(ExpectedResult.objectLike({ status: 409, headers: { 'x-amzn-errortype': ['InsufficientCapacityError'] } }));
+
+const deleteAccountBOccupied = integ.assertions
+  .httpApiCall(`${apiUrl}accounts/${accountB}`, { method: 'DELETE', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 409 }));
+
+const putAccountBOwnerChange = integ.assertions
+  .httpApiCall(`${apiUrl}accounts/${accountB}`, {
+    method: 'PUT',
+    headers: authHeaders,
+    body: JSON.stringify({ owner: 'VENDOR', maxCells: 1, externalId: accountBExternalId }),
+  })
+  .expect(ExpectedResult.objectLike({ status: 409 }));
+
+// 9. Reads. Three cells with their accounts (ULID order); ?accountId= is a
+//    query predicate (unknown account → empty page, §5).
+const listCellsThree = integ.assertions
   .httpApiCall(`${apiUrl}cells`, { method: 'GET', headers: authHeaders })
   .expect(
     ExpectedResult.objectLike({
       status: 200,
       body: {
         cells: [
-          { cellId: cellId1, status: 'ACTIVE', tenantCount: 2, maxTenants: 2 },
-          { cellId: cellId3, status: 'ACTIVE', tenantCount: 1, maxTenants: 2 },
+          { cellId: cellId1, accountId: accountA },
+          { cellId: cellId2, accountId: accountA },
+          { cellId: cellId3, accountId: accountB },
         ],
       },
     }),
   );
 
-// 6. GetResource resolves source + scripts from the cell's stamped
-//    definition (the cell's tenantScripts) and names the cell (§5).
+const listCellsInA = integ.assertions
+  .httpApiCall(`${apiUrl}cells?accountId=${accountA}`, { method: 'GET', headers: authHeaders })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 200,
+      body: { cells: [{ cellId: cellId1, accountId: accountA }, { cellId: cellId2, accountId: accountA }] },
+    }),
+  );
+
+const listCellsUnknownAccount = integ.assertions
+  .httpApiCall(`${apiUrl}cells?accountId=${unregisteredAccount}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { cells: [] } }));
+
+// GetResource resolves source + scripts from the cell's stamped definition
+// (the cell's tenantScripts) and names the cell and its account (§5).
 const getResource1 = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId1}/resource`, { method: 'GET', headers: authHeaders })
   .expect(
@@ -486,19 +827,20 @@ const getResource1 = integ.assertions
       body: {
         status: 'ACTIVE',
         cellId: cellId1,
+        accountId: accountA,
         source: cellDefinition.source,
         scripts: cellDefinition.tenantScripts,
       },
     }),
   );
 
-// ListTenants?cellId= — exactly the cell's tenants (ULID order: #1, #2).
+// ListTenants?cellId= — exactly the cell's tenant.
 const listTenantsByCell1 = integ.assertions
   .httpApiCall(`${apiUrl}tenants?cellId=${cellId1}`, { method: 'GET', headers: authHeaders })
   .expect(
     ExpectedResult.objectLike({
       status: 200,
-      body: { tenants: [{ tenantId: tenantId1, cellId: cellId1 }, { tenantId: tenantId2, cellId: cellId1 }] },
+      body: { tenants: [{ tenantId: tenantId1, cellId: cellId1 }] },
     }),
   );
 
@@ -507,8 +849,7 @@ const listTenantsUnknownCell = integ.assertions
   .httpApiCall(`${apiUrl}tenants?cellId=${unknownCellId}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { tenants: [] } }));
 
-// 7. Updates: metadata (sync 200, reflected in GetTenant), then re-apply the
-//    tenant deployment (202 → ACTIVE again).
+// Metadata update (sync 200, reflected in GetTenant).
 const updateTenant1 = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId1}`, {
     method: 'PUT',
@@ -526,6 +867,9 @@ const getTenant1Updated = integ.assertions
     }),
   );
 
+// 10. Re-apply across accounts: the tenant deployment in A (202 → ACTIVE)
+//     and the shared cell deployment in B (202 → ACTIVE) — the update
+//     scripts run under the respective account's provisioning role.
 const updateResource1 = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId1}/resource`, { method: 'PUT', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 202, body: { tenant: { status: 'UPDATING' } } }));
@@ -535,24 +879,24 @@ const waitForTenant1Updated = integ.assertions
   .expect(ExpectedResult.objectLike({ status: 200, body: { tenant: { status: 'ACTIVE' } } }))
   .waitForAssertions(singleBuildPoll);
 
-// 8. Re-apply the shared cell deployment (202 → GetCell polls back to ACTIVE).
-const updateCell1 = integ.assertions
-  .httpApiCall(`${apiUrl}cells/${cellId1}`, { method: 'PUT', headers: authHeaders })
+const updateCell3 = integ.assertions
+  .httpApiCall(`${apiUrl}cells/${cellId3}`, { method: 'PUT', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 202, body: { cell: { status: 'UPDATING' } } }));
 
-const waitForCell1Updated = integ.assertions
-  .httpApiCall(`${apiUrl}cells/${cellId1}`, { method: 'GET', headers: authHeaders })
+const waitForCell3Updated = integ.assertions
+  .httpApiCall(`${apiUrl}cells/${cellId3}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { cell: { status: 'ACTIVE' } } }))
   .waitForAssertions(singleBuildPoll);
 
-// 9. Occupancy guard: deleting a cell that still holds tenants → 409
-//    (ADR-014 — the atomic emptiness check rejects it).
+// 11. Occupancy guard: deleting a cell that still holds a tenant → 409
+//     (ADR-014). Then offboard tenant #1: the record disappears when the
+//     tenant delete script has run and the terminal transaction freed the
+//     slot — the CELL slot, not the account's: cell 1 stays (explicit
+//     scale-in, ADR-014) and A stays 2/2.
 const deleteCellOccupied = integ.assertions
   .httpApiCall(`${apiUrl}cells/${cellId1}`, { method: 'DELETE', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 409 }));
 
-// 10. Offboard tenant #1 — 202; the record disappears when the tenant delete
-//     script has run and the terminal transaction freed the slot.
 const deleteTenant1 = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId1}`, { method: 'DELETE', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 202, body: { tenant: { status: 'DELETING' } } }));
@@ -562,18 +906,19 @@ const waitForTenant1Gone = integ.assertions
   .expect(ExpectedResult.objectLike({ status: 404 }))
   .waitForAssertions(singleBuildPoll);
 
-// The slot was freed transactionally with the record removal (§6).
 const getCell1SlotFreed = integ.assertions
   .httpApiCall(`${apiUrl}cells/${cellId1}`, { method: 'GET', headers: authHeaders })
   .expect(
     ExpectedResult.objectLike({
       status: 200,
-      body: { cell: { status: 'ACTIVE', tenantCount: 1, maxTenants: 2 } },
+      body: { cell: { status: 'ACTIVE', tenantCount: 0, maxTenants: 1 } },
     }),
   );
 
-// The tenant delete script removed the per-tenant deployment. GetParameters
-// (plural) reports a missing name in InvalidParameters instead of throwing.
+const getAccountAStillFull = integ.assertions
+  .httpApiCall(`${apiUrl}accounts/${accountA}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { account: { cellCount: 2, maxCells: 2 } } }));
+
 const checkTenantParam1Gone = integ.assertions
   .awsApiCall('SSM', 'getParameters', {
     Names: [`/application-plane/tenants/${tenantId1}`],
@@ -586,7 +931,37 @@ const checkTenantParam1Gone = integ.assertions
   );
 checkTenantParam1Gone.provider.addToRolePolicy(ssmReadPolicy);
 
-// 11. Offboard tenants #2 and #3.
+// Reuse before create (§7 steps 1–2): an untargeted onboard now finds the
+// empty cell 1 and places into it — no new cell, no 409, one build only.
+const createTenant5 = integ.assertions.httpApiCall(`${apiUrl}tenants`, {
+  method: 'POST',
+  headers: authHeaders,
+  body: JSON.stringify({
+    name: 'integ-tenant-5',
+    adminEmail: 'success+integ-tenant-5@simulator.amazonses.com',
+  }),
+});
+const tenantId5 = createTenant5.getAttString('body.tenant.tenantId');
+
+const waitForActive5 = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId5}`, { method: 'GET', headers: authHeaders })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 200,
+      body: { tenant: { status: 'ACTIVE', cellId: cellId1 } },
+    }),
+  )
+  .waitForAssertions(singleBuildPoll);
+
+// 12. Teardown. Offboard tenants #5, #2, #3 …
+const deleteTenant5 = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId5}`, { method: 'DELETE', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 202, body: { tenant: { status: 'DELETING' } } }));
+const waitForTenant5Gone = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId5}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 404 }))
+  .waitForAssertions(singleBuildPoll);
+
 const deleteTenant2 = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId2}`, { method: 'DELETE', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 202, body: { tenant: { status: 'DELETING' } } }));
@@ -603,22 +978,34 @@ const waitForTenant3Gone = integ.assertions
   .expect(ExpectedResult.objectLike({ status: 404 }))
   .waitForAssertions(singleBuildPoll);
 
-// No per-tenant deployments remain.
-const checkTenantNamespaceEmpty = integ.assertions
+// … no per-tenant deployments remain, in either account …
+const checkTenantNamespaceEmptyA = integ.assertions
   .awsApiCall('SSM', 'getParametersByPath', {
     Path: '/application-plane/tenants',
     Recursive: true,
   })
   .expect(ExpectedResult.objectLike({ Parameters: [] }));
-checkTenantNamespaceEmpty.provider.addToRolePolicy(ssmReadPolicy);
+checkTenantNamespaceEmptyA.provider.addToRolePolicy(ssmReadPolicy);
 
-// 12. Deprovision both (now empty) cells — 202; each record disappears when
-//     the cell delete script has run.
+const probeTenantNamespaceEmptyB = probeB('ProbeTenantsEmptyB', { path: '/application-plane/tenants' })
+  .expect(ExpectedResult.objectLike({ Payload: '0' }));
+
+// … deprovision the three (now empty) cells; each record disappears when
+// the cell delete script has run and the terminal transaction released the
+// account's cell slot (ADR-024) …
 const deleteCell1 = integ.assertions
   .httpApiCall(`${apiUrl}cells/${cellId1}`, { method: 'DELETE', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 202, body: { cell: { status: 'DELETING' } } }));
 const waitForCell1Gone = integ.assertions
   .httpApiCall(`${apiUrl}cells/${cellId1}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 404 }))
+  .waitForAssertions(singleBuildPoll);
+
+const deleteCell2 = integ.assertions
+  .httpApiCall(`${apiUrl}cells/${cellId2}`, { method: 'DELETE', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 202, body: { cell: { status: 'DELETING' } } }));
+const waitForCell2Gone = integ.assertions
+  .httpApiCall(`${apiUrl}cells/${cellId2}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 404 }))
   .waitForAssertions(singleBuildPoll);
 
@@ -630,18 +1017,41 @@ const waitForCell3Gone = integ.assertions
   .expect(ExpectedResult.objectLike({ status: 404 }))
   .waitForAssertions(singleBuildPoll);
 
-// The fleet is empty and the cell delete scripts cleaned their namespaces.
+// … both accounts are empty again, the fleet has no cells, and the cell
+// delete scripts cleaned their namespaces in both accounts …
+const getAccountAEmpty = integ.assertions
+  .httpApiCall(`${apiUrl}accounts/${accountA}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { account: { cellCount: 0, maxCells: 2 } } }));
+const getAccountBEmpty = integ.assertions
+  .httpApiCall(`${apiUrl}accounts/${accountB}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { account: { cellCount: 0, maxCells: 1 } } }));
+
 const listCellsEmpty = integ.assertions
   .httpApiCall(`${apiUrl}cells`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { cells: [] } }));
 
-const checkCellNamespacesEmpty = integ.assertions
+const checkCellNamespacesEmptyA = integ.assertions
   .awsApiCall('SSM', 'getParametersByPath', {
     Path: '/application-plane/cells',
     Recursive: true,
   })
   .expect(ExpectedResult.objectLike({ Parameters: [] }));
-checkCellNamespacesEmpty.provider.addToRolePolicy(ssmReadPolicy);
+checkCellNamespacesEmptyA.provider.addToRolePolicy(ssmReadPolicy);
+
+const probeCellNamespacesEmptyB = probeB('ProbeCellsEmptyB', { path: '/application-plane/cells' })
+  .expect(ExpectedResult.objectLike({ Payload: '0' }));
+
+// … and the accounts can be deregistered (empty-only, ADR-024).
+const deleteAccountA = integ.assertions
+  .httpApiCall(`${apiUrl}accounts/${accountA}`, { method: 'DELETE', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { account: { accountId: accountA } } }));
+const deleteAccountB = integ.assertions
+  .httpApiCall(`${apiUrl}accounts/${accountB}`, { method: 'DELETE', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { account: { accountId: accountB } } }));
+
+const listAccountsEmpty = integ.assertions
+  .httpApiCall(`${apiUrl}accounts`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { accounts: [] } }));
 
 // Sequence the lifecycle strictly (references alone order most of it, but
 // the reads/guards must not race the polls, and the in-flight 409 must fire
@@ -650,51 +1060,98 @@ createUser
   .next(randomPassword)
   .next(setPassword)
   .next(authenticate)
-  // onboard #1 → first cell
+  // accounts
+  .next(putUnregisteredAccount)
+  .next(putAccountANotEnforcingExternalId)
+  .next(putAccountA)
+  .next(putAccountBNoExternalId)
+  .next(putAccountBWrongExternalId)
+  .next(putAccountB)
+  .next(listAccountsTwo)
+  // onboard #1 → cell 1 in A (+ clientToken replay + mismatch 409, ADR-017)
   .next(createTenant1)
   .next(waitForActive1)
   .next(listCellsOne)
   .next(getCell1)
+  .next(getAccountAOne)
   .next(checkCellParam)
   .next(checkTenantParam1)
-  // onboard #2 → cell reuse (+ clientToken replay + mismatch 409, ADR-017)
-  .next(createTenant2)
-  .next(waitForActive2)
-  .next(replayCreateTenant2)
+  .next(replayCreateTenant1)
   .next(reuseTokenMismatch)
   .next(listCellsStillOne)
-  // onboard #3 → new cell (+ in-flight guard)
+  // onboard #2 → cell 2 in A; A full
+  .next(createTenant2)
+  .next(waitForActive2)
+  .next(getAccountAFull)
+  .next(listCellsTwo)
+  // untargeted onboard with only tenant-owned capacity left → 409
+  .next(createTenant3Untargeted)
+  .next(listCellsStillTwo)
+  // onboard #3 → cell 3 in B (+ in-flight guard)
   .next(createTenant3)
   .next(deleteWhileCreating)
   .next(waitForActive3)
-  .next(listCellsTwo)
+  .next(getCell3)
+  .next(probeCell3InB)
+  .next(probeTenant3InB)
+  .next(checkCell3NotInA)
+  .next(getAccountBFull)
+  // B full: targeted 409, occupied-account 409, owner-change 409
+  .next(createTenant4AtFullB)
+  .next(deleteAccountBOccupied)
+  .next(putAccountBOwnerChange)
   // reads
+  .next(listCellsThree)
+  .next(listCellsInA)
+  .next(listCellsUnknownAccount)
   .next(getResource1)
   .next(listTenantsByCell1)
   .next(listTenantsUnknownCell)
-  // updates
   .next(updateTenant1)
   .next(getTenant1Updated)
+  // re-apply in A and in B
   .next(updateResource1)
   .next(waitForTenant1Updated)
-  .next(updateCell1)
-  .next(waitForCell1Updated)
-  // guards
+  .next(updateCell3)
+  .next(waitForCell3Updated)
+  // guards, offboard #1, reuse cell 1 for #5
   .next(deleteCellOccupied)
-  // offboard tenants
   .next(deleteTenant1)
   .next(waitForTenant1Gone)
   .next(getCell1SlotFreed)
+  .next(getAccountAStillFull)
   .next(checkTenantParam1Gone)
+  .next(createTenant5)
+  .next(waitForActive5)
+  // teardown
+  .next(deleteTenant5)
+  .next(waitForTenant5Gone)
   .next(deleteTenant2)
   .next(waitForTenant2Gone)
   .next(deleteTenant3)
   .next(waitForTenant3Gone)
-  .next(checkTenantNamespaceEmpty)
-  // deprovision cells
+  .next(checkTenantNamespaceEmptyA)
+  .next(probeTenantNamespaceEmptyB)
   .next(deleteCell1)
   .next(waitForCell1Gone)
+  .next(deleteCell2)
+  .next(waitForCell2Gone)
   .next(deleteCell3)
   .next(waitForCell3Gone)
+  .next(getAccountAEmpty)
+  .next(getAccountBEmpty)
   .next(listCellsEmpty)
-  .next(checkCellNamespacesEmpty);
+  .next(checkCellNamespacesEmptyA)
+  .next(probeCellNamespacesEmptyB)
+  .next(deleteAccountA)
+  .next(deleteAccountB)
+  .next(listAccountsEmpty);
+
+/** Reads a required environment variable or fails synth with the reason it is needed. */
+function requireEnv(name: string, purpose: string): string {
+  const value = process.env[name];
+  if (value === undefined || value === '') {
+    throw new Error(`${name} must be set: ${purpose}`);
+  }
+  return value;
+}

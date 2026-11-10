@@ -49,3 +49,7 @@ aged-transitional-record sweep noted in the architecture covers both gaps in
 production. Cell `CREATE_FAILED` remediation follows the existing cleanup
 contract: delete the tenant (frees the slot), then delete the empty cell —
 both delete scripts are idempotent and tolerate partial provisioning.
+
+---
+
+**Amended by ADR-024 (2026-11-09):** the new-cell transaction also claims a cell slot on the hosting account (`cellCount += 1 IF cellCount < maxCells`); when every eligible account refuses, placement fails with `InsufficientCapacityError` (ADR-026) instead of creating a cell. The tolerated over-provisioning races are now bounded by `maxCells`.

@@ -3,7 +3,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { CfnOutput, Duration, RemovalPolicy, Stack, StackProps, Token, Validations } from 'aws-cdk-lib';
+import { CfnOutput, Duration, RemovalPolicy, Stack, StackProps, Validations } from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -12,9 +12,11 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
-import { RegionInfo } from 'aws-cdk-lib/region-info';
 import { Construct } from 'constructs';
 import { ProvisioningWorkflow } from './tenant.sfn';
+import { CellDefinition, stackIdentity, validateCellDefinition, validateTenantBuildManagedPolicyArns } from './validation';
+import { CellAccountRoles } from '../cell-account/cell-account.cdk';
+import { apiRoleName, DEFAULT_FLEET_NAME, provisioningRoleArn, validateFleetName } from '../shared/fleet';
 import { nagFindingResource, acknowledgeGranularFinding, suppressTemplateScanners } from '../shared/nag';
 
 export interface TenantStackProps extends StackProps {
@@ -29,181 +31,44 @@ export interface TenantStackProps extends StackProps {
    */
   readonly cellDefinition: CellDefinition;
   /**
-   * Optional deployment input (ADR-022): customer-managed IAM policy ARNs
-   * attached to the tenant build role in addition to its SSM namespace
-   * grants (spec §6.2). Lets a tenant script call an application-plane API
-   * with a policy the application plane publishes (producer-owned least
-   * privilege) while the control plane learns only an ARN list - never what
-   * the policy is for (P-3). Every entry must be a managed-policy ARN in
-   * this stack's partition and account; synth fails otherwise. Default: none.
+   * Names the five physical roles of the fleet (spec §3.3, ADR-025/028):
+   * the pair every account installs, `<fleetName>-cell-provisioning` and
+   * `<fleetName>-tenant-provisioning`; the control plane's build roles,
+   * `<fleetName>-cell-build` and `<fleetName>-tenant-build`; and its API
+   * role, `<fleetName>-api`. `[a-z0-9-]{1,32}`; default `control-plane`.
+   * Two control planes in one account need different fleet names, and the
+   * names must be free in every account the fleet will register (T31).
+   */
+  readonly fleetName?: string;
+  /**
+   * Optional deployment input (ADR-022, narrowed by ADR-025): customer-managed
+   * IAM policy ARNs attached to the tenant provisioning role this stack
+   * installs in its OWN account, in addition to its SSM namespace grants
+   * (spec §6.2). Lets a tenant script call an application-plane API with a
+   * policy the application plane publishes (producer-owned least privilege)
+   * while the control plane learns only an ARN list - never what the policy
+   * is for (P-3). Every entry must be a managed-policy ARN in this stack's
+   * partition and account; synth fails otherwise. Other accounts attach
+   * their own through the `CellAccountStack`. Default: none.
    */
   readonly tenantBuildManagedPolicyArns?: string[];
 }
 
-/** Where provisioning code lives - a CodeBuild ProjectSource reference. */
-export interface SourceDefinition {
-  /** CodeBuild source type, e.g. GITHUB, S3, CODECOMMIT. */
-  readonly type: string;
-  /** Source location, e.g. a git clone URL. */
-  readonly location: string;
-  /**
-   * Optional git ref forwarded to CodeBuild StartBuild as `SourceVersion`.
-   * A full 40-character commit SHA pins the provisioning source immutably
-   * (threat model T5, mitigation M10) — anything else is a mutable ref and
-   * triggers a synth-time warning in `main.ts`.
-   */
-  readonly sourceVersion?: string;
-}
-
-/** The three lifecycle script paths within the source. */
-export interface ScriptLocations {
-  readonly create: string;
-  readonly update: string;
-  readonly delete: string;
-}
-
-/**
- * The deployment-configured CellDefinition (ADR-012): one source plus two
- * script sets. Changing it affects only cells created afterwards - existing
- * cells keep their stamped definition.
- */
-export interface CellDefinition {
-  /** Provisioning source, stamped onto new cell records. */
-  readonly source: SourceDefinition;
-  /** Shared cell deployment lifecycle scripts. */
-  readonly cellScripts: ScriptLocations;
-  /** Per-tenant deployment lifecycle scripts. */
-  readonly tenantScripts: ScriptLocations;
-  /** Cell capacity, stamped at cell creation. Integer >= 1. */
-  readonly maxTenants: number;
-}
-
-/** GSI-1: cell listing + per-cell tenant lookup (architecture.md §4). */
+/** GSI-1: cell + account listing, per-cell tenant lookup (architecture.md §4). */
 export const GSI1_NAME = 'GSI1';
-/** GSI-2: unfiltered tenant listing - sparse, tenants only (§4). */
+/** GSI-2: unfiltered tenant listing and per-account cell lookup (§4). */
 export const GSI2_NAME = 'GSI2';
 
-/**
- * Synth-time validation of the cellDefinition deployment input (§10):
- * `maxTenants` must be an integer of at least one; source and every script
- * value must be non-empty. Throws with a clear message otherwise.
- */
-export function validateCellDefinition(definition: CellDefinition): void {
-  const problems: string[] = [];
-  const requireNonEmpty = (name: string, value: unknown) => {
-    if (typeof value !== 'string' || value.trim() === '') {
-      problems.push(`${name} must be a non-empty string`);
-    }
-  };
-
-  requireNonEmpty('cellDefinition.source.type', definition?.source?.type);
-  requireNonEmpty('cellDefinition.source.location', definition?.source?.location);
-  for (const scriptSet of ['cellScripts', 'tenantScripts'] as const) {
-    for (const operation of ['create', 'update', 'delete'] as const) {
-      requireNonEmpty(`cellDefinition.${scriptSet}.${operation}`, definition?.[scriptSet]?.[operation]);
-    }
-  }
-  if (!Number.isInteger(definition?.maxTenants) || definition.maxTenants < 1) {
-    problems.push(`cellDefinition.maxTenants must be an integer >= 1 (got: ${JSON.stringify(definition?.maxTenants)})`);
-  }
-
-  if (problems.length > 0) {
-    throw new Error(
-      'Invalid cellDefinition deployment input (architecture.md §10):\n'
-      + problems.map((p) => `  - ${p}`).join('\n')
-      + '\nSupply it via CDK context, e.g. cdk.json or --context cellDefinition=\'{"source":{"type":"GITHUB","location":"https://..."},"cellScripts":{"create":"...","update":"...","delete":"..."},"tenantScripts":{"create":"...","update":"...","delete":"..."},"maxTenants":10}\'',
-    );
-  }
-}
-
-/**
- * A customer-managed IAM policy ARN: `arn:<partition>:iam::<account>:policy/<path><name>`.
- * The account segment is twelve digits, which also rejects AWS managed
- * policies (`iam::aws:policy/...`) - the input is for policies the deployer
- * owns in this account (ADR-022). The path is zero or more non-empty
- * segments, each followed by `/`, then a non-empty name, so `policy//`,
- * `policy/foo/` and `policy/a//b` are rejected at synth rather than by IAM
- * at deploy.
- */
-const MANAGED_POLICY_ARN = /^arn:([a-z][a-z0-9-]*):iam::(\d{12}):policy\/(?:[\w+=,.@-]+\/)*[\w+=,.@-]+$/;
-
-/** The partition and account a managed-policy ARN must belong to. */
-export interface StackIdentity {
-  readonly partition: string;
-  readonly account: string;
-}
-
-/**
- * The stack's partition and account for ARN validation. `Stack.partition`
- * is the `AWS::Partition` pseudo-parameter unless the
- * `@aws-cdk/core:enablePartitionLiterals` flag is on, so the partition is
- * derived here from the Region when that is resolved (the same RegionInfo
- * lookup CDK itself uses); the account is `Stack.account` as given.
- */
-export function stackIdentity(stack: Stack): StackIdentity {
-  const partition = Token.isUnresolved(stack.region)
-    ? stack.partition
-    : RegionInfo.get(stack.region).partition ?? stack.partition;
-  return { partition, account: stack.account };
-}
-
-/**
- * Synth-time validation of the `tenantBuildManagedPolicyArns` deployment
- * input (ADR-022): every entry must be a literal customer-managed IAM policy
- * ARN in the stack's own partition and account. Throws with every problem
- * listed otherwise.
- *
- * The partition (derived from the Region, see `stackIdentity`) and the
- * account must be resolved at synth time for that comparison, so a non-empty
- * list on an environment-agnostic stack (either one still a CDK token) fails
- * synth rather than deferring the cross-account check to IAM at deploy.
- * `src/main.ts` passes `CDK_DEFAULT_ACCOUNT` / `CDK_DEFAULT_REGION`, so a
- * real `cdk deploy` resolves both; an omitted or empty list never needs them.
- */
-export function validateTenantBuildManagedPolicyArns(
-  arns: unknown,
-  stack: StackIdentity,
-): void {
-  if (arns === undefined) {
-    return;
-  }
-  const problems: string[] = [];
-  if (!Array.isArray(arns)) {
-    problems.push(`must be an array of strings (got: ${JSON.stringify(arns)})`);
-  } else if (arns.length > 0 && (Token.isUnresolved(stack.partition) || Token.isUnresolved(stack.account))) {
-    const unresolved = [
-      ...(Token.isUnresolved(stack.partition) ? ['region (partition)'] : []),
-      ...(Token.isUnresolved(stack.account) ? ['account'] : []),
-    ].join(' and ');
-    problems.push(
-      `the stack's ${unresolved} must be resolved at synth time to check that each ARN belongs to this stack; `
-      + 'this stack is environment-agnostic. Deploy with `cdk deploy` (src/main.ts passes CDK_DEFAULT_ACCOUNT / '
-      + 'CDK_DEFAULT_REGION) or set `env: { account, region }` on the stack',
-    );
-  } else {
-    arns.forEach((arn, index) => {
-      const match = typeof arn === 'string' ? MANAGED_POLICY_ARN.exec(arn) : null;
-      if (match === null) {
-        problems.push(`[${index}] ${JSON.stringify(arn)} is not a customer-managed IAM policy ARN (arn:<partition>:iam::<account>:policy/<name>)`);
-        return;
-      }
-      const [, partition, account] = match;
-      if (partition !== stack.partition) {
-        problems.push(`[${index}] ${arn} is in partition '${partition}'; this stack deploys to '${stack.partition}'`);
-      }
-      if (account !== stack.account) {
-        problems.push(`[${index}] ${arn} is in account ${account}; this stack deploys to ${stack.account}`);
-      }
-    });
-  }
-  if (problems.length > 0) {
-    throw new Error(
-      'Invalid tenantBuildManagedPolicyArns deployment input (ADR-022):\n'
-      + problems.map((p) => `  - ${p}`).join('\n')
-      + '\nEach entry must be a managed-policy ARN in this stack\'s partition and account, e.g. --context tenantBuildManagedPolicyArns=\'["arn:aws:iam::123456789012:policy/MyPolicy"]\'',
-    );
-  }
-}
+// Re-exported so existing imports of the input shapes and validators keep working.
+export {
+  CellDefinition,
+  ScriptLocations,
+  SourceDefinition,
+  StackIdentity,
+  stackIdentity,
+  validateCellDefinition,
+  validateTenantBuildManagedPolicyArns,
+} from './validation';
 
 /**
  * The cell-based control plane - one stack: API Gateway (generated from the
@@ -214,6 +79,14 @@ export function validateTenantBuildManagedPolicyArns(
 export class TenantStack extends Stack {
   /** The provisioning workflow (exposed so tests can grant script-source access). */
   readonly provisioning: ProvisioningWorkflow;
+  /**
+   * The account role pair installed in this stack's own account (spec R-25,
+   * ADR-025): the home account is reached exactly like any other, so it needs
+   * the same `<fleet>-cell-provisioning` / `<fleet>-tenant-provisioning` roles.
+   */
+  readonly homeAccountRoles: CellAccountRoles;
+  /** The validated fleet name. */
+  readonly fleetName: string;
   /** The deployed API base URL (with trailing slash). */
   readonly apiUrl: string;
 
@@ -222,16 +95,21 @@ export class TenantStack extends Stack {
 
     // Fail synth on an invalid cellDefinition (§10).
     validateCellDefinition(props.cellDefinition);
+    this.fleetName = validateFleetName(props.fleetName ?? DEFAULT_FLEET_NAME);
     // Fail synth on a policy ARN outside this partition/account (ADR-022).
-    validateTenantBuildManagedPolicyArns(props.tenantBuildManagedPolicyArns, stackIdentity(this));
+    const identity = stackIdentity(this);
+    validateTenantBuildManagedPolicyArns(props.tenantBuildManagedPolicyArns, identity);
 
-    // --- Control plane table (cells + tenants, single table) --------------
-    // PK=CELL#<id>|TENANT#<id>, SK=META. GSI-1/GSI-2 serve the three listing
-    // patterns (§4); both project ALL attributes - the placement candidate
-    // scan needs status/tenantCount/maxTenants, and both listings return
-    // full summaries. GSI-2 is sparse (tenants only). The GSIs are
-    // eventually consistent and never authoritative - tenantCount on the
-    // cell record is the occupancy guard (§6).
+    // --- Control plane table (accounts + cells + tenants, single table) ---
+    // PK=ACCOUNT#<id>|CELL#<id>|TENANT#<id>, SK=META. GSI-1 (static ACCOUNT
+    // and CELL partitions, CELL#<id> for a cell's tenants) and GSI-2 (static
+    // TENANT partition, ACCOUNT#<id> for an account's cells) serve the
+    // listing patterns and the two placement scans (§4); both project ALL
+    // attributes - the candidate scan needs status/tenantCount/maxTenants,
+    // and the listings return full summaries. Account items are absent from
+    // GSI-2. The GSIs are eventually consistent and never authoritative -
+    // tenantCount on the cell and cellCount on the account are the
+    // occupancy guards (§6).
     const table = new dynamodb.TableV2(this, 'TenantTable', {
       partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'SK', type: dynamodb.AttributeType.STRING },
@@ -263,9 +141,25 @@ export class TenantStack extends Stack {
     // The workflow grants itself least-privilege table access internally.
     const workflow = new ProvisioningWorkflow(this, 'Provisioning', {
       table,
-      tenantBuildManagedPolicyArns: props.tenantBuildManagedPolicyArns,
+      fleetName: this.fleetName,
     });
     this.provisioning = workflow;
+
+    // --- The home account's role pair (R-25, ADR-025) ----------------------
+    // The control plane's own account is just another registered account:
+    // the pair it installs here is what the CellAccountStack installs in
+    // every other account, trusting the build roles above by ARN. The
+    // deployer registers this account with PutAccount like any other.
+    this.homeAccountRoles = new CellAccountRoles(this, 'HomeAccountRoles', {
+      controlPlaneAccountId: this.account,
+      fleetName: this.fleetName,
+      tenantBuildManagedPolicyArns: props.tenantBuildManagedPolicyArns,
+      identity,
+    });
+    // Same-stack ordering only: the trust is by account + aws:PrincipalArn
+    // condition, so IAM does not need the build roles to exist first.
+    this.homeAccountRoles.node.addDependency(workflow.cellBuildRole, workflow.tenantBuildRole);
+    // (The API role is created below; the trust is by name, so no ordering is needed.)
 
     // --- Lambda Authorizer (the ingress layer) ----------------------------
     const authorizerFn = new NodejsFunction(this, 'AuthorizerFunction', {
@@ -291,10 +185,22 @@ export class TenantStack extends Stack {
     acknowledgeLambdaBasicExecutionRole(authorizerFn);
 
     // --- API handler (pass-through to the Smithy service handler) ---------
+    // The role has the physical name `<fleet>-api` (ADR-028): every account
+    // role pair trusts it by ARN for the PutAccount handshake probe.
+    const apiRole = new iam.Role(this, 'ApiFunctionRole', {
+      roleName: apiRoleName(this.fleetName),
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      description: `${this.fleetName} control plane API: table access, workflow start, and the PutAccount handshake probe into registered accounts (ADR-027)`,
+      managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole')],
+    });
+    suppressTemplateScanners(apiRole, {
+      cfnNag: [{ id: 'W28', reason: 'The physical name is the cross-account contract: every account role pair trusts this role by ARN for the registration probe (ADR-027/028).' }],
+    });
     const apiFn = new NodejsFunction(this, 'ApiFunction', {
       entry: path.join(__dirname, 'tenant.function.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_24_X,
+      role: apiRole,
       // M15 (T13) — see AuthorizerFunction.
       logGroup: functionLogGroup(this, 'ApiFunctionLogs'),
       bundling: {
@@ -323,13 +229,43 @@ export class TenantStack extends Stack {
         CELL_DEFINITION: JSON.stringify(props.cellDefinition),
         CELL_PROJECT_NAME: workflow.cellProject.projectName,
         TENANT_PROJECT_NAME: workflow.tenantProject.projectName,
+        // ADR-025: the service derives each cell's provisioning role ARNs
+        // from the fleet name and the account id (resolved input, R-20).
+        FLEET_NAME: this.fleetName,
       },
     });
     table.grantReadWriteData(apiFn);
     workflow.stateMachine.grantStartExecution(apiFn);
+    // ADR-027 (M20): PutAccount probes both halves of the pair in the account
+    // being registered. The resource is the role NAME in any account (N-8) -
+    // the same bound the build roles carry; the target trust policy is the
+    // gate. The probe makes no call under the assumed credentials.
+    const probeTargets = (['cell', 'tenant'] as const).map((kind) =>
+      provisioningRoleArn(this.partition, '*', this.fleetName, kind));
+    apiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'ProbeAccountHandshake',
+        actions: ['sts:AssumeRole'],
+        resources: probeTargets,
+      }),
+    );
+    for (const target of probeTargets) {
+      acknowledgeGranularFinding(
+        apiRole,
+        `AwsSolutions-IAM5[Resource::${nagFindingResource(this, target)}]`,
+        'PutAccount verifies the account handshake by assuming the provisioning role pair (ADR-027); accounts are registered at run time, so the resource is the role name in any account (spec N-8) and the target trust policy is the gate (M20).',
+      );
+    }
     acknowledgeLambdaBasicExecutionRole(apiFn);
+    // The explicit role is not a child of the function, so the findings on
+    // its policies are acknowledged on the role itself.
     acknowledgeGranularFinding(
-      apiFn,
+      apiRole,
+      'AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]',
+      'Logs-only managed policy; a scoped customer-managed replacement adds boilerplate with marginal benefit.',
+    );
+    acknowledgeGranularFinding(
+      apiRole,
       `AwsSolutions-IAM5[Resource::${nagFindingResource(this, `${table.tableArn}/index/*`)}]`,
       'grantReadWriteData grants Query on the table\'s own GSIs - the wildcard is scoped to this table\'s index namespace, not across resources.',
     );
@@ -447,16 +383,22 @@ export class TenantStack extends Stack {
       stringValue: api.url,
     });
 
-    // DEMO ONLY: stands in for application-plane shared infrastructure
-    // (ADR-010). In a real deployment the application plane publishes its own
-    // shared resource identifiers - the control plane is not involved.
+    // DEMO ONLY: stands in for application-plane shared infrastructure in
+    // the home account (ADR-010). In a real deployment the application plane
+    // publishes its own shared resource identifiers - the control plane is
+    // not involved. Every other account gets its own from the CellAccountStack.
     new ssm.StringParameter(this, 'DemoSharedBaseDomain', {
       parameterName: '/application-plane/shared/base-domain',
-      stringValue: 'silo.example.com',
+      stringValue: 'cells.example.com',
     });
 
     new CfnOutput(this, 'ApiUrl', { value: api.url });
     new CfnOutput(this, 'StateMachineArn', { value: workflow.stateMachine.stateMachineArn });
+    new CfnOutput(this, 'FleetName', { value: this.fleetName });
+    new CfnOutput(this, 'ControlPlaneAccountId', {
+      value: this.account,
+      description: 'Pass as controlPlaneAccountId when installing the account role pair in another account (spec §6.4)',
+    });
   }
 }
 

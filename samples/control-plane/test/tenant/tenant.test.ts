@@ -4,7 +4,9 @@
 import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
 import { mockClient } from 'aws-sdk-client-mock';
 import {
+  AccountFullError,
   AmbiguousTransactionError,
+  ConditionFailedError,
   DuplicateTokenError,
   DynamoDBRepository,
   PlacementRaceLostError,
@@ -15,9 +17,12 @@ import {
 import { CallerContext } from '../../src/shared/service-config';
 import {
   ConflictError,
+  InsufficientCapacityError,
   InternalServerError,
   ResourceNotFoundError,
 } from '../../src/smithy/source/typescript-ssdk-codegen/src';
+import { AccountItem, AccountRecord } from '../../src/tenant/account.data-model';
+import { HandshakeProbe, HandshakeUnavailableError } from '../../src/tenant/account.handshake';
 import { CellItem, CellRecord } from '../../src/tenant/cell.data-model';
 import {
   IdempotencyItem,
@@ -33,6 +38,13 @@ const context: CallerContext = { operatorId: 'op-1', role: 'operator' };
 const TENANT_ID = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
 const CELL_ID = '01BX5ZZKBKACTAV9WEVGEMMVRZ';
 const OTHER_CELL_ID = '01BX5ZZKBKACTAV9WEVGEMMVS0';
+/** The vendor-owned home account every fixture cell lives in (synthetic). */
+const ACCOUNT_ID = '111111111111';
+/** A second, tenant-owned account (synthetic). */
+const TENANT_ACCOUNT_ID = '222222222222';
+const FLEET = 'control-plane';
+const CELL_ROLE_ARN = `arn:aws:iam::${ACCOUNT_ID}:role/${FLEET}-cell-provisioning`;
+const TENANT_ROLE_ARN = `arn:aws:iam::${ACCOUNT_ID}:role/${FLEET}-tenant-provisioning`;
 
 /** The deployment-configured definition — deliberately distinct from the stamped fixtures below. */
 const cellDefinition: CellDefinition = {
@@ -63,9 +75,22 @@ const stampedTenantScripts = {
   delete: 'stamped/tenant/delete.sh',
 };
 
+function accountRecord(overrides: Partial<AccountRecord> = {}): AccountRecord {
+  return {
+    accountId: ACCOUNT_ID,
+    owner: 'VENDOR',
+    maxCells: 2,
+    cellCount: 1,
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    updatedAt: new Date('2026-01-01T00:00:00Z'),
+    ...overrides,
+  };
+}
+
 function cellRecord(overrides: Partial<CellRecord> = {}): CellRecord {
   return {
     cellId: CELL_ID,
+    accountId: ACCOUNT_ID,
     status: 'ACTIVE',
     maxTenants: 5,
     tenantCount: 1,
@@ -93,22 +118,40 @@ function tenantRecord(overrides: Partial<TenantRecord> = {}): TenantRecord {
 type TenantRepo = DynamoDBRepository<TenantRecord, TenantItem>;
 type CellRepo = DynamoDBRepository<CellRecord, CellItem>;
 type IdempotencyRepo = DynamoDBRepository<IdempotencyRecord, IdempotencyItem>;
+type AccountRepo = DynamoDBRepository<AccountRecord, AccountItem>;
 type Placement = PlacementTransactions<CellRecord, CellItem, TenantRecord, TenantItem>;
 
 interface Mocks {
   tenantRepo?: Partial<TenantRepo>;
   cellRepo?: Partial<CellRepo>;
   idempotencyRepo?: Partial<IdempotencyRepo>;
+  /** Defaults to one registered vendor-owned account (ACCOUNT_ID) with a free cell slot. */
+  accountRepo?: Partial<AccountRepo>;
   placement?: Partial<Placement>;
+  /** Defaults to a passing handshake. */
+  handshake?: HandshakeProbe;
+}
+
+/** One-page account listing result. */
+function accountPage(...accounts: AccountRecord[]) {
+  return jest.fn().mockResolvedValue({ items: accounts, nextToken: undefined });
 }
 
 function makeService(mocks: Mocks = {}) {
+  const defaultAccountRepo: Partial<AccountRepo> = {
+    get: jest.fn().mockResolvedValue(accountRecord()),
+    queryIndex: accountPage(accountRecord()),
+  };
   return new TenantService({
     tenantRepository: (mocks.tenantRepo ?? {}) as TenantRepo,
     cellRepository: (mocks.cellRepo ?? {}) as CellRepo,
     idempotencyRepository: (mocks.idempotencyRepo ?? {}) as IdempotencyRepo,
+    accountRepository: (mocks.accountRepo ?? defaultAccountRepo) as AccountRepo,
     placement: (mocks.placement ?? {}) as Placement,
     cellDefinition,
+    fleetName: FLEET,
+    partition: 'aws',
+    handshake: mocks.handshake ?? jest.fn().mockResolvedValue([]),
     stateMachineArn: 'arn:aws:states:eu-central-1:123456789012:stateMachine:provisioning',
     sfnClient: new SFNClient({}),
   });
@@ -122,6 +165,15 @@ function cellPage(...cells: CellRecord[]) {
 function startedWorkflowInput(call = 0) {
   return JSON.parse(sfnMock.commandCalls(StartExecutionCommand)[call].args[0].input.input!);
 }
+
+/** The per-account workflow fields every execution carries (R-20, ADR-025) — the home account, no external id. */
+const accountInput = {
+  accountId: ACCOUNT_ID,
+  externalId: '',
+  cellRoleArn: CELL_ROLE_ARN,
+  tenantRoleArn: TENANT_ROLE_ARN,
+  sessionName: 'op-1',
+};
 
 beforeEach(() => {
   sfnMock.reset();
@@ -158,6 +210,7 @@ describe('CreateTenant placement (§6)', () => {
       sourceLocation: 'https://github.com/acme/stamped.git',
       sourceVersion: '', // unpinned stamped source (T5/M10)
       operatorId: 'op-1', // the initiating operator (T10/M12)
+      ...accountInput,
       cellId: CELL_ID,
       tenantId: output.tenant?.tenantId,
       tenantBuild: {
@@ -267,6 +320,7 @@ describe('CreateTenant placement (§6)', () => {
       sourceLocation: 'https://github.com/acme/deployment-config.git',
       sourceVersion: '',
       operatorId: 'op-1',
+      ...accountInput,
       cellId: cell.cellId,
       cellBuild: {
         operation: 'create',
@@ -454,6 +508,7 @@ describe('DeleteTenant', () => {
         sourceLocation: 'https://github.com/acme/stamped.git',
         sourceVersion: '',
         operatorId: 'op-1',
+        ...accountInput,
         cellId: CELL_ID,
         tenantId: TENANT_ID,
         tenantBuild: {
@@ -747,6 +802,7 @@ describe('UpdateCell', () => {
         sourceLocation: 'https://github.com/acme/stamped.git',
         sourceVersion: '',
         operatorId: 'op-1',
+        ...accountInput,
         cellId: CELL_ID,
         cellBuild: {
           operation: 'update',
@@ -803,6 +859,7 @@ describe('DeleteCell', () => {
       sourceLocation: 'https://github.com/acme/stamped.git',
       sourceVersion: '',
       operatorId: 'op-1',
+      ...accountInput,
       cellId: CELL_ID,
       cellBuild: {
         operation: 'delete',
@@ -976,6 +1033,23 @@ describe('CreateTenant idempotency (ADR-017)', () => {
     await expect(service.CreateTenant(createInput, context)).rejects.toBeInstanceOf(ConflictError);
   });
 
+  test('token reuse with a different target accountId is a 409, not a replay of the first placement', async () => {
+    // The stored hash is the one the first call (no accountId) produced; the
+    // retry targets the same account explicitly, so the request identity
+    // differs even though the placement would land in the same cell.
+    const service = makeService({
+      cellRepo: { queryIndex: cellPage(cellRecord()) },
+      placement: {
+        placeTenantInCell: jest.fn().mockRejectedValue(new DuplicateTokenError('duplicate')),
+      },
+      idempotencyRepo: { get: jest.fn().mockResolvedValue(idempotencyRecord()) },
+    });
+
+    await expect(
+      service.CreateTenant({ ...createInput, accountId: ACCOUNT_ID }, context),
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
+
   test('a replay whose tenant was since deleted is a 409, not a silent re-onboard', async () => {
     const service = makeService({
       cellRepo: { queryIndex: cellPage(cellRecord()) },
@@ -1021,5 +1095,432 @@ describe('operator propagation and source pinning (M12 / M10)', () => {
     expect(startedWorkflowInput().sourceVersion).toBe(sha);
     // M12 (T10): the operator is the CALLER's verified sub, per request.
     expect(startedWorkflowInput().operatorId).toBe('op-2');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Accounts (ADR-024, ADR-025, ADR-026, ADR-027)
+// ---------------------------------------------------------------------------
+
+describe('CreateTenant across accounts (§7 step 0 and 3, ADR-024)', () => {
+  const tenantAccount = accountRecord({
+    accountId: TENANT_ACCOUNT_ID,
+    owner: 'TENANT',
+    maxCells: 1,
+    cellCount: 0,
+    externalId: 'customer-handshake-1',
+    createdAt: new Date('2026-02-01T00:00:00Z'),
+  });
+  const input = { name: 'acme', adminEmail: 'success@simulator.amazonses.com' };
+
+  test('untargeted placement considers vendor-owned accounts only, oldest registered first', async () => {
+    const olderVendor = accountRecord({
+      accountId: '333333333333',
+      cellCount: 0,
+      createdAt: new Date('2025-12-01T00:00:00Z'),
+    });
+    const createCellWithTenant = jest.fn().mockResolvedValue(undefined);
+    const service = makeService({
+      // Listing order differs from registration order on purpose.
+      accountRepo: { queryIndex: accountPage(accountRecord(), tenantAccount, olderVendor) },
+      cellRepo: { queryIndex: cellPage() },
+      placement: { createCellWithTenant },
+    });
+
+    await service.CreateTenant(input, context);
+
+    expect(createCellWithTenant).toHaveBeenCalledTimes(1);
+    expect(createCellWithTenant.mock.calls[0][0]).toMatchObject({
+      accountKey: { PK: 'ACCOUNT#333333333333', SK: 'META' },
+      cell: expect.objectContaining({ accountId: '333333333333', status: 'CREATING', tenantCount: 1 }),
+    });
+    expect(startedWorkflowInput()).toMatchObject({
+      accountId: '333333333333',
+      cellRoleArn: 'arn:aws:iam::333333333333:role/control-plane-cell-provisioning',
+      tenantRoleArn: 'arn:aws:iam::333333333333:role/control-plane-tenant-provisioning',
+      externalId: '',
+    });
+  });
+
+  test('an untargeted scan skips ACTIVE cells with capacity that live in a tenant-owned account', async () => {
+    const placeTenantInCell = jest.fn().mockResolvedValue(undefined);
+    const createCellWithTenant = jest.fn().mockResolvedValue(undefined);
+    const service = makeService({
+      accountRepo: { queryIndex: accountPage(accountRecord({ cellCount: 0 }), tenantAccount) },
+      cellRepo: { queryIndex: cellPage(cellRecord({ accountId: TENANT_ACCOUNT_ID, tenantCount: 0 })) },
+      placement: { placeTenantInCell, createCellWithTenant },
+    });
+
+    await service.CreateTenant(input, context);
+
+    expect(placeTenantInCell).not.toHaveBeenCalled();
+    expect(createCellWithTenant.mock.calls[0][0]).toMatchObject({
+      accountKey: { PK: `ACCOUNT#${ACCOUNT_ID}`, SK: 'META' },
+    });
+  });
+
+  test('a full account refuses the claim and placement moves to the next vendor-owned account', async () => {
+    const createCellWithTenant = jest
+      .fn()
+      .mockRejectedValueOnce(new AccountFullError('full'))
+      .mockResolvedValueOnce(undefined);
+    const second = accountRecord({ accountId: '444444444444', cellCount: 0, createdAt: new Date('2026-03-01T00:00:00Z') });
+    const service = makeService({
+      accountRepo: { queryIndex: accountPage(accountRecord({ cellCount: 2 }), second) },
+      cellRepo: { queryIndex: cellPage() },
+      placement: { createCellWithTenant },
+    });
+
+    const output = await service.CreateTenant(input, context);
+
+    expect(createCellWithTenant).toHaveBeenCalledTimes(2);
+    expect(createCellWithTenant.mock.calls[1][0].accountKey).toEqual({ PK: 'ACCOUNT#444444444444', SK: 'META' });
+    expect(output.tenant!.status).toBe('CREATING');
+  });
+
+  test('every vendor-owned account full → InsufficientCapacityError, nothing started (R-28, ADR-026)', async () => {
+    const createCellWithTenant = jest.fn().mockRejectedValue(new AccountFullError('full'));
+    const service = makeService({
+      accountRepo: { queryIndex: accountPage(accountRecord({ cellCount: 2 }), tenantAccount) },
+      cellRepo: { queryIndex: cellPage() },
+      placement: { createCellWithTenant },
+    });
+
+    await expect(service.CreateTenant(input, context)).rejects.toBeInstanceOf(InsufficientCapacityError);
+    expect(createCellWithTenant).toHaveBeenCalledTimes(1); // the tenant-owned account was never tried
+    expect(sfnMock.commandCalls(StartExecutionCommand)).toHaveLength(0);
+  });
+
+  test('claim budget spent on cells with room, then every account full → retryable ConflictError, not InsufficientCapacityError (R-18, ADR-031)', async () => {
+    const candidates = Array.from({ length: 6 }, (_, i) =>
+      cellRecord({ cellId: `01BX5ZZKBKACTAV9WEVGEMMV${(i + 10).toString(36).toUpperCase()}` }),
+    );
+    const placeTenantInCell = jest.fn().mockRejectedValue(new PlacementRaceLostError('lost'));
+    const createCellWithTenant = jest.fn().mockRejectedValue(new AccountFullError('full'));
+    const service = makeService({
+      accountRepo: { queryIndex: accountPage(accountRecord({ cellCount: 2 })) },
+      cellRepo: { queryIndex: cellPage(...candidates) },
+      placement: { placeTenantInCell, createCellWithTenant },
+    });
+
+    await expect(service.CreateTenant(input, context)).rejects.toMatchObject({
+      name: 'ConflictError',
+      message: expect.stringContaining('Retry the request'),
+    });
+    expect(placeTenantInCell).toHaveBeenCalledTimes(5);
+    expect(createCellWithTenant).toHaveBeenCalledTimes(1);
+    expect(sfnMock.commandCalls(StartExecutionCommand)).toHaveLength(0);
+  });
+
+  test('no vendor-owned account registered at all → InsufficientCapacityError naming the remedy', async () => {
+    const service = makeService({
+      accountRepo: { queryIndex: accountPage(tenantAccount) },
+      cellRepo: { queryIndex: cellPage() },
+      placement: { createCellWithTenant: jest.fn() },
+    });
+    await expect(service.CreateTenant(input, context)).rejects.toMatchObject({
+      name: 'InsufficientCapacityError',
+      message: expect.stringContaining('No vendor-owned account is registered'),
+    });
+  });
+
+  test('a targeted request places into the named account only — the way into a tenant-owned account', async () => {
+    const createCellWithTenant = jest.fn().mockResolvedValue(undefined);
+    const accountRepo = {
+      get: jest.fn().mockResolvedValue(tenantAccount),
+      queryIndex: jest.fn(),
+    };
+    const cellQuery = cellPage();
+    const service = makeService({
+      accountRepo,
+      cellRepo: { queryIndex: cellQuery },
+      placement: { createCellWithTenant },
+    });
+
+    await service.CreateTenant({ ...input, accountId: TENANT_ACCOUNT_ID }, context);
+
+    expect(accountRepo.get).toHaveBeenCalledWith({ PK: `ACCOUNT#${TENANT_ACCOUNT_ID}`, SK: 'META' });
+    expect(accountRepo.queryIndex).not.toHaveBeenCalled(); // no account scan for a targeted request
+    // The candidate scan is the account's own GSI-2 partition.
+    expect(cellQuery.mock.calls[0][0]).toEqual({
+      indexName: 'GSI2',
+      partitionKey: { name: 'GSI2PK', value: `ACCOUNT#${TENANT_ACCOUNT_ID}` },
+    });
+    expect(createCellWithTenant.mock.calls[0][0].accountKey).toEqual({ PK: `ACCOUNT#${TENANT_ACCOUNT_ID}`, SK: 'META' });
+    // The account's external id and roles ride the execution input (R-20, ADR-025).
+    expect(startedWorkflowInput()).toMatchObject({
+      accountId: TENANT_ACCOUNT_ID,
+      externalId: 'customer-handshake-1',
+      cellRoleArn: `arn:aws:iam::${TENANT_ACCOUNT_ID}:role/control-plane-cell-provisioning`,
+      tenantRoleArn: `arn:aws:iam::${TENANT_ACCOUNT_ID}:role/control-plane-tenant-provisioning`,
+      sessionName: 'op-1',
+    });
+  });
+
+  test('a targeted request reuses an existing cell with capacity in that account before creating one', async () => {
+    const placeTenantInCell = jest.fn().mockResolvedValue(undefined);
+    const createCellWithTenant = jest.fn();
+    const service = makeService({
+      accountRepo: { get: jest.fn().mockResolvedValue(tenantAccount) },
+      cellRepo: { queryIndex: cellPage(cellRecord({ accountId: TENANT_ACCOUNT_ID, tenantCount: 0 })) },
+      placement: { placeTenantInCell, createCellWithTenant },
+    });
+
+    const output = await service.CreateTenant({ ...input, accountId: TENANT_ACCOUNT_ID }, context);
+
+    expect(placeTenantInCell).toHaveBeenCalledTimes(1);
+    expect(createCellWithTenant).not.toHaveBeenCalled();
+    expect(output.tenant!.cellId).toBe(CELL_ID);
+  });
+
+  test('a targeted request at a full account → InsufficientCapacityError naming the account', async () => {
+    const service = makeService({
+      accountRepo: { get: jest.fn().mockResolvedValue(accountRecord({ accountId: TENANT_ACCOUNT_ID, owner: 'TENANT', maxCells: 1, cellCount: 1 })) },
+      cellRepo: { queryIndex: cellPage() },
+      placement: { createCellWithTenant: jest.fn().mockRejectedValue(new AccountFullError('full')) },
+    });
+    await expect(service.CreateTenant({ ...input, accountId: TENANT_ACCOUNT_ID }, context)).rejects.toMatchObject({
+      name: 'InsufficientCapacityError',
+      message: expect.stringContaining(TENANT_ACCOUNT_ID),
+    });
+  });
+
+  test('a targeted request at an unregistered account is a 404, not a capacity error', async () => {
+    const service = makeService({
+      accountRepo: { get: jest.fn().mockResolvedValue(undefined) },
+      cellRepo: { queryIndex: jest.fn() },
+    });
+    await expect(service.CreateTenant({ ...input, accountId: '555555555555' }, context)).rejects.toBeInstanceOf(
+      ResourceNotFoundError,
+    );
+  });
+
+  test('a duplicate clientToken on the new-cell path replays even when the account claim also failed', async () => {
+    const original = tenantRecord({ status: 'ACTIVE' });
+    const service = makeService({
+      cellRepo: { queryIndex: cellPage() },
+      placement: { createCellWithTenant: jest.fn().mockRejectedValue(new DuplicateTokenError('dup')) },
+      idempotencyRepo: {
+        get: jest.fn().mockResolvedValue({
+          clientToken: 'tok',
+          tenantId: TENANT_ID,
+          requestHash: createTenantRequestHash({ name: 'acme', description: undefined, adminEmail: input.adminEmail }),
+          createdAt: new Date(),
+          expiresAt: 0,
+        }),
+      },
+      tenantRepo: { get: jest.fn().mockResolvedValue(original) },
+    });
+    const output = await service.CreateTenant({ ...input, clientToken: 'tok' }, context);
+    expect(output.tenant!.tenantId).toBe(TENANT_ID);
+  });
+
+  test('the STS session name is the operator id made STS-safe (M23)', async () => {
+    const service = makeService({
+      cellRepo: { queryIndex: cellPage(cellRecord()) },
+      placement: { placeTenantInCell: jest.fn().mockResolvedValue(undefined) },
+    });
+    await service.CreateTenant(input, { operatorId: 'auth0|user 42', role: 'operator' });
+    expect(startedWorkflowInput()).toMatchObject({ operatorId: 'auth0|user 42', sessionName: 'auth0-user-42' });
+  });
+});
+
+describe('workflow input carries the cell account for every build (R-20, ADR-025)', () => {
+  test('DeleteCell resolves the account and its external id into the execution input', async () => {
+    const service = makeService({
+      cellRepo: {
+        get: jest.fn().mockResolvedValue(cellRecord({ tenantCount: 0, accountId: TENANT_ACCOUNT_ID })),
+        transitionStatus: jest.fn().mockResolvedValue(cellRecord({ status: 'DELETING', tenantCount: 0, accountId: TENANT_ACCOUNT_ID })),
+      },
+      accountRepo: {
+        get: jest.fn().mockResolvedValue(accountRecord({ accountId: TENANT_ACCOUNT_ID, owner: 'TENANT', externalId: 'ext-9' })),
+      },
+    });
+    await service.DeleteCell({ cellId: CELL_ID }, context);
+    expect(startedWorkflowInput()).toMatchObject({
+      accountId: TENANT_ACCOUNT_ID,
+      externalId: 'ext-9',
+      cellRoleArn: `arn:aws:iam::${TENANT_ACCOUNT_ID}:role/control-plane-cell-provisioning`,
+    });
+  });
+
+  test('a cell whose account record is missing is an invariant violation (500), never a 404', async () => {
+    const service = makeService({
+      cellRepo: { get: jest.fn().mockResolvedValue(cellRecord()) },
+      accountRepo: { get: jest.fn().mockResolvedValue(undefined) },
+    });
+    await expect(service.UpdateCell({ cellId: CELL_ID }, context)).rejects.toBeInstanceOf(InternalServerError);
+  });
+});
+
+describe('ListCells?accountId= and GetResource.accountId', () => {
+  test('?accountId= filters via the cell items GSI-2 partition; unfiltered uses GSI-1', async () => {
+    const queryIndex = cellPage(cellRecord());
+    const service = makeService({ cellRepo: { queryIndex } });
+    await service.ListCells({ accountId: ACCOUNT_ID }, context);
+    expect(queryIndex.mock.calls[0][0]).toEqual({
+      indexName: 'GSI2',
+      partitionKey: { name: 'GSI2PK', value: `ACCOUNT#${ACCOUNT_ID}` },
+    });
+    await service.ListCells({}, context);
+    expect(queryIndex.mock.calls[1][0]).toEqual({
+      indexName: 'GSI1',
+      partitionKey: { name: 'GSI1PK', value: 'CELL' },
+    });
+  });
+
+  test('an unknown accountId yields an empty page, not a 404 (§5)', async () => {
+    const service = makeService({ cellRepo: { queryIndex: cellPage() } });
+    await expect(service.ListCells({ accountId: '555555555555' }, context)).resolves.toEqual({
+      cells: [],
+      nextToken: undefined,
+    });
+  });
+
+  test('cell summaries and GetResource name the account', async () => {
+    const service = makeService({
+      tenantRepo: { get: jest.fn().mockResolvedValue(tenantRecord()) },
+      cellRepo: { get: jest.fn().mockResolvedValue(cellRecord()) },
+    });
+    await expect(service.GetCell({ cellId: CELL_ID }, context)).resolves.toMatchObject({
+      cell: { accountId: ACCOUNT_ID },
+    });
+    await expect(service.GetResource({ tenantId: TENANT_ID }, context)).resolves.toMatchObject({
+      cellId: CELL_ID,
+      accountId: ACCOUNT_ID,
+    });
+  });
+});
+
+describe('PutAccount (§5.3, ADR-027)', () => {
+  const putInput = { accountId: TENANT_ACCOUNT_ID, owner: 'TENANT' as const, maxCells: 1, externalId: 'ext-1' };
+
+  test('probes both roles with the external id, then writes the create-or-replace update', async () => {
+    const handshake = jest.fn().mockResolvedValue([]);
+    const update = jest.fn().mockResolvedValue(accountRecord({ ...putInput, cellCount: 0 }));
+    const service = makeService({ handshake, accountRepo: { update } });
+
+    const output = await service.PutAccount(putInput, context);
+
+    expect(handshake).toHaveBeenCalledWith({ accountId: TENANT_ACCOUNT_ID, externalId: 'ext-1', operatorId: 'op-1' });
+    expect(update).toHaveBeenCalledWith(
+      { PK: `ACCOUNT#${TENANT_ACCOUNT_ID}`, SK: 'META' },
+      expect.objectContaining({ conditionExpression: 'attribute_not_exists(PK) OR #owner = :owner' }),
+    );
+    // The external id is never returned (N-10) — only that one is set.
+    expect(output.account).toMatchObject({ accountId: TENANT_ACCOUNT_ID, owner: 'TENANT', externalIdConfigured: true });
+    expect(output.account).not.toHaveProperty('externalId');
+  });
+
+  test('a refused handshake is a 400 naming the role and the reason, and nothing is written (R-26)', async () => {
+    const update = jest.fn();
+    const service = makeService({
+      handshake: jest.fn().mockResolvedValue([
+        {
+          kind: 'tenant',
+          roleArn: 'arn:aws:iam::222222222222:role/control-plane-tenant-provisioning',
+          reason: 'could not be assumed (AccessDenied: not authorized)',
+        },
+        {
+          kind: 'cell',
+          roleArn: 'arn:aws:iam::222222222222:role/control-plane-cell-provisioning',
+          reason: 'does not require the external id (its trust policy has no sts:ExternalId condition; redeploy the pair with externalId)',
+        },
+      ]),
+      accountRepo: { update },
+    });
+    await expect(service.PutAccount(putInput, context)).rejects.toMatchObject({
+      name: 'ValidationException',
+      message: expect.stringMatching(
+        /control-plane-tenant-provisioning could not be assumed \(AccessDenied: not authorized\); .*control-plane-cell-provisioning does not require the external id/,
+      ),
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('a probe STS could not answer is a 500 asking for a retry, not a refusal, and nothing is written', async () => {
+    const update = jest.fn();
+    const service = makeService({
+      handshake: jest.fn().mockRejectedValue(
+        new HandshakeUnavailableError('arn:aws:iam::222222222222:role/control-plane-cell-provisioning', Object.assign(new Error('Rate exceeded'), { name: 'Throttling' })),
+      ),
+      accountRepo: { update },
+    });
+    await expect(service.PutAccount(putInput, context)).rejects.toMatchObject({
+      name: 'InternalServerError',
+      message: expect.stringMatching(/Throttling: Rate exceeded.*retry/),
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('a tenant-owned account without an externalId is a 400 before the probe runs (§6.4, ADR-029)', async () => {
+    const handshake = jest.fn().mockResolvedValue([]);
+    const update = jest.fn();
+    const service = makeService({ handshake, accountRepo: { update } });
+    await expect(
+      service.PutAccount({ accountId: TENANT_ACCOUNT_ID, owner: 'TENANT', maxCells: 1 }, context),
+    ).rejects.toMatchObject({ name: 'ValidationException', message: expect.stringContaining('externalId is required') });
+    expect(handshake).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('a vendor-owned account may omit the externalId', async () => {
+    const handshake = jest.fn().mockResolvedValue([]);
+    const update = jest.fn().mockResolvedValue(accountRecord({ cellCount: 0 }));
+    const service = makeService({ handshake, accountRepo: { update } });
+    const output = await service.PutAccount({ accountId: ACCOUNT_ID, owner: 'VENDOR', maxCells: 2 }, context);
+    expect(handshake).toHaveBeenCalledWith({ accountId: ACCOUNT_ID, externalId: undefined, operatorId: 'op-1' });
+    expect(output.account).toMatchObject({ accountId: ACCOUNT_ID, owner: 'VENDOR' });
+  });
+
+  test('an owner change on a registered account is a 409 (immutable owner)', async () => {
+    const service = makeService({
+      accountRepo: { update: jest.fn().mockRejectedValue(new ConditionFailedError('owner')) },
+    });
+    await expect(service.PutAccount({ ...putInput, owner: 'VENDOR' }, context)).rejects.toBeInstanceOf(ConflictError);
+  });
+});
+
+describe('GetAccount / ListAccounts / DeleteAccount (§5.3)', () => {
+  test('GetAccount returns the record without the external id value; 404 when unregistered', async () => {
+    const service = makeService({
+      accountRepo: { get: jest.fn().mockResolvedValueOnce(accountRecord({ externalId: 'secret-ish' })).mockResolvedValueOnce(undefined) },
+    });
+    const output = await service.GetAccount({ accountId: ACCOUNT_ID }, context);
+    expect(output.account).toMatchObject({ accountId: ACCOUNT_ID, cellCount: 1, maxCells: 2, externalIdConfigured: true });
+    expect(JSON.stringify(output)).not.toContain('secret-ish');
+    await expect(service.GetAccount({ accountId: ACCOUNT_ID }, context)).rejects.toBeInstanceOf(ResourceNotFoundError);
+  });
+
+  test('ListAccounts pages the static GSI-1 ACCOUNT partition', async () => {
+    const queryIndex = jest.fn().mockResolvedValue({ items: [accountRecord()], nextToken: 'next' });
+    const service = makeService({ accountRepo: { queryIndex } });
+    const output = await service.ListAccounts({ maxResults: 10, nextToken: 'prev' }, context);
+    expect(queryIndex).toHaveBeenCalledWith(
+      { indexName: 'GSI1', partitionKey: { name: 'GSI1PK', value: 'ACCOUNT' } },
+      10,
+      'prev',
+    );
+    expect(output).toMatchObject({ accounts: [{ accountId: ACCOUNT_ID }], nextToken: 'next' });
+  });
+
+  test('DeleteAccount is one conditional delete on cellCount = 0; condition failure is a 409', async () => {
+    const del = jest.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new ConditionFailedError('occupied'));
+    const service = makeService({
+      accountRepo: { get: jest.fn().mockResolvedValue(accountRecord({ cellCount: 0 })), delete: del },
+    });
+    await expect(service.DeleteAccount({ accountId: ACCOUNT_ID }, context)).resolves.toMatchObject({
+      account: { accountId: ACCOUNT_ID },
+    });
+    expect(del).toHaveBeenCalledWith(
+      { PK: `ACCOUNT#${ACCOUNT_ID}`, SK: 'META' },
+      expect.objectContaining({ conditionExpression: 'attribute_exists(PK) AND #cellCount = :zero' }),
+    );
+    await expect(service.DeleteAccount({ accountId: ACCOUNT_ID }, context)).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  test('DeleteAccount of an unregistered account is a 404', async () => {
+    const service = makeService({ accountRepo: { get: jest.fn().mockResolvedValue(undefined), delete: jest.fn() } });
+    await expect(service.DeleteAccount({ accountId: '555555555555' }, context)).rejects.toBeInstanceOf(ResourceNotFoundError);
   });
 });
