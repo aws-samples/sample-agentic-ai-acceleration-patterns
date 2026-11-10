@@ -4,12 +4,13 @@ SPDX-License-Identifier: MIT-0
 -->
 # Tenant Encrypted Ingestion: Architecture
 
-> **Status: implemented and verified by three integration runs of 2026-11-09
+> **Status: implemented and verified by four integration runs of 2026-11-09
 > in eu-central-1**, a vendor test account plus a second account owning
 > tenant B's `tenant-key` key (cross-account claim exercised), 53 to 65
-> minutes end to end; the last run (54 minutes, 179 checks) followed the
+> minutes end to end; the last two runs (179 checks each) followed the
 > `identityApi`, error-model and insight-rule changes of that day and added
-> step 10b (cost attribution). Coverage: spec §10 steps 1 to 11 (with 7b, 7c and 10b) and
+> step 10b (cost attribution), the last one with the step's final
+> `kmsRequests` floor. Coverage: spec §10 steps 1 to 11 (with 7b, 7c and 10b) and
 > the driver's step 0 prelude passed; step 12 ran as `scripts/integ.sh`'s
 > teardown: both stacks destroyed, no stack with the sample's prefix left,
 > only the two `vendor-key` keys left, both `PendingDeletion`, and the
@@ -559,7 +560,8 @@ with the same bytes and the same count of processor-terminated deliveries
 In the run of 2026-11-09 tenant A had 2 accepted and 4 refused deliveries
 (one of them abandoned by the sweep): `bytesStored` 215 in the registry,
 215 in `tei-top-bytes`; 5 in `tei-top-deliveries`; `kmsRequests` 21 against
-a floor of 12; `inFlight` 0.
+a floor of 11 (6 per accepted delivery with the demo stack's two
+validators, 1 per processor-refused delivery); `inFlight` 0.
 
 **RoleSessionName** `t-<tenantId>-...` names the tenant in CloudTrail and
 S3 access logs without a join. **TenantId cost allocation tag**: every
