@@ -212,6 +212,7 @@ scripts/stress/
     lib.js           token refresh, probe builder, isolation assertions, per-tenant counters
     s1-steady.js ... s7-eviction.js
   collect.sh         Section 7 for a run window; prints the pass table
+  cost.sh            the next day: Cost Explorer cost by service, run day against a baseline day (§10.1)
   teardown.sh        deletes the seeded tenants at 20 rps, then both stacks; prints both destroy times
 test/stress/
   stress-driver.cdk.ts   the StressDriver stack (§8.1)
@@ -363,9 +364,14 @@ Checked before the run.
 
 ### 10.1 Cost lines
 
-Priced from the public price list before the run, written into the results
-file next to the measured usage. Quantities below are the plan's; the run
-reports the actual ones.
+Priced from the public price list before the run. The day after the run,
+`scripts/stress/cost.sh` reads the account's unblended cost by service from
+Cost Explorer for the run day and for a quiet baseline day and writes the
+delta into the results file: that is the run's measured cost. A member
+account of an organization cannot activate cost allocation tags, so the
+stacks cannot be billed apart from the rest of the account; the baseline
+delta stands in. Quantities below are the plan's; the run reports the actual
+ones.
 
 | Line | Quantity in one full run | Where it comes from |
 |---|---|---|
@@ -412,8 +418,9 @@ are single-digit dollars each. Say the total in the results, not here.
 2. One results file per run in the repo,
    `design/stress-results/<YYYY-MM-DD>.md`, written by `collect.sh`: the
    commit tested, the scenario shapes as run, deploy and destroy time of both
-   stacks, the §4 pass table with measured values, the §10.1 cost lines with
-   actual quantities, and the `sdk retried` sums per service. No account id,
+   stacks, the §4 pass table with measured values, the `sdk retried` sums
+   per service, and, written by `cost.sh` the next day, the run day's cost by
+   service against a baseline day (§10.1). No account id,
    no tenant id, no user name, no token, no endpoint URL; `collect.sh`
    refuses to write a file that matches any of those shapes. The raw k6
    JSON and the log exports stay outside the repo.

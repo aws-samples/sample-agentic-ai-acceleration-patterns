@@ -53,6 +53,7 @@ scripts/stress/count.sh
 scripts/stress/run.sh s1
 scripts/stress/collect.sh <run-id printed by run.sh>
 scripts/stress/teardown.sh
+scripts/stress/cost.sh <run-date> --baseline <quiet day> --scale <tier>
 ```
 
 Repeat `run.sh` and `collect.sh` for `s2` to `s7`. Each `collect.sh` appends
@@ -68,6 +69,7 @@ or user name from the manifest, `eyJ` and `https://`.
 | `run.sh s1..s7` | runs one k6 scenario on the driver host over SSM; `s2` first retires every warm Lambda instance, flushes the authoriser cache and idles 60 s; prints the summary line and the isolation counters |
 | `collect.sh <run-id>` | Logs Insights, CloudWatch metrics and the k6 summary for the run window; prints and writes the pass table |
 | `teardown.sh [--tenants]` | destroys driver, agents and ingress stacks in that order; with `--tenants`, deletes the seeded tenants first at 8 rps |
+| `cost.sh <run-date> [--baseline <day>] [--scale <tier>]` | the next day: the account's cost by service from Cost Explorer for the run day and a quiet baseline day; writes the "Cost (Cost Explorer)" section of the results file, replacing an earlier one. The delta is the run's cost; the account is shared and a member account cannot activate cost allocation tags |
 
 `count.sh` and `run.sh s2` change an environment variable on the stress
 stack's Lambda functions to retire warm instances; the next `deploy.sh`
@@ -99,3 +101,4 @@ Estimates from the plan; the scripts print the measured figures.
 | `run.sh`, each scenario | 1 min plus token set-up | 3 min plus token set-up | the plan's §5 figures, 5 to 10 min plus warm-up |
 | `collect.sh` | about 1 min | about 1 min | a few minutes |
 | `teardown.sh` | about 10 min | about 15 min | about 30 min; `--tenants` adds 21 min |
+| `cost.sh` | seconds, the next day | seconds, the next day | seconds, the next day |

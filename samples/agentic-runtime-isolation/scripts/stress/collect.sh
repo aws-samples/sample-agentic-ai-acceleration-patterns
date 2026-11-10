@@ -288,7 +288,7 @@ SECTION="${LIB_TMP}/section.md"
     printf '\nDeploy and destroy times on record (seconds):\n\n'
     sed "s/^/- /" "$TIMINGS"
   fi
-  printf '\nCost lines (§10.1): not computed by the script; price the counters above.\n'
+  printf '\nCost (§10.1): the "Cost (Cost Explorer)" section of this file, written by `scripts/stress/cost.sh` the next day.\n'
 } >"$SECTION"
 
 # Redaction check (§11): nothing that identifies the account, a tenant, a user, a token or an endpoint.
