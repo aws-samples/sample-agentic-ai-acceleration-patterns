@@ -10,7 +10,7 @@
 
 Several agents in one tenant need shared facts while each agent's
 conversation history stays its own. Tenant A's shopping and support agents
-share `/tenants/tenant-a/shared/` but write to different sessions; Tenant B
+share Tenant A's facts but write to different sessions; Tenant B
 has its own actor and namespace. Callers authenticate with OAuth tokens. The
 vendor needs one place that decides, per request, which actor, session, and
 namespace a caller may use, and a Memory resource that cannot be reached
@@ -22,7 +22,7 @@ around that place.
 
 Gateway validates issuer-signed JWTs (`CUSTOM_JWT`). AgentCore Policy in
 `ENFORCE` mode compares the requested `actorId`, `sessionId`, or
-`namespacePath` with the token's claims before the native `agentcore-memory`
+`namespace` with the token's claims before the native `agentcore-memory`
 connector calls Memory as the Gateway execution role
 (`GATEWAY_IAM_ROLE`, the only outbound mode `CUSTOM_JWT` supports for this
 connector). A Memory resource policy denies data access to every other

@@ -31,9 +31,10 @@ boundary.
 
 Option 2. The resource policy denies every Memory data operation (ADR-0007)
 unless `aws:PrincipalArn` is the Gateway execution role. The role trusts only
-`bedrock-agentcore.amazonaws.com`, pinned to the vendor's account and to the
-Gateway and Policy engine ARNs. The live harness checks both documents
-together (`assert_fence`, `assert_execution_role`).
+`bedrock-agentcore.amazonaws.com`, pinned to the vendor's account, the
+Gateway's name, and the Policy engine (ADR-0011). The construct tests assert
+both documents, and the integration test reads them back from the deployed
+stack.
 
 ## Consequences
 

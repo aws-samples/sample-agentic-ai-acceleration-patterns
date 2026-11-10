@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0003: Provision a disposable validation issuer
 
-- Status: Accepted
+- Status: Superseded by ADR-0013
 - Date: 2026-10-22
 - Deciders: Daniel Wirjo (Solutions Architect)
 

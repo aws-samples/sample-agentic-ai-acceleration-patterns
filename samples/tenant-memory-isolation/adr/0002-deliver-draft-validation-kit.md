@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0002: Deliver a draft validation kit before a deployable contribution
 
-- Status: Proposed
+- Status: Superseded by ADR-0013
 - Date: 2026-10-21
 - Deciders: Pending repository maintainer review
 

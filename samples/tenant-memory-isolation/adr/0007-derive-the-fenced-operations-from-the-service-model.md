@@ -10,8 +10,8 @@
 
 The Memory resource policy denies data-plane access to every principal
 except the Gateway execution role (ADR-0004). A Deny only covers the
-actions it names. The first fence named 16 operations by hand. The Memory
-service model in the pinned SDK has a 17th, `IngestData`
+actions it names. The first fence named 15 operations by hand. The Memory
+service model in the pinned SDK has a 16th, `IngestData`
 (`POST /memories/{memoryId}/ingest`), which writes content straight into
 long-term extraction. Any principal in the vendor's account with an identity
 Allow could use it to place facts in any tenant's namespace without passing
@@ -45,11 +45,13 @@ it.
 
 ## Decision
 
-Option 3. `memory_data_actions()` in `src/render_config.py` reads the
-pinned botocore model; `test/test_fence.py` holds the reviewed set and fails
-on any difference. `IngestData` is fenced and has no Cedar permit and no role
-grant. The SDK is pinned exactly so the derived list changes only when the
-pin does.
+Option 3. `MEMORY_DATA_ACTIONS` in `src/fence.ts` is the reviewed set;
+`test/fence.test.ts` derives the Memory data operations from the HTTP traits
+of the pinned `@aws-sdk/client-bedrock-agentcore` and fails on any
+difference. `IngestData` is fenced and has no Cedar permit and no role
+grant. The SDK is pinned exactly so the derived set changes only when the
+pin does. (The first version of this check read the botocore model in the
+Python kit that ADR-0013 replaced.)
 
 ## Consequences
 
@@ -62,6 +64,5 @@ so for them the fence is the only control.
 A new Memory data operation is denied outside Gateway as soon as the SDK pin
 includes it, and the review is forced rather than remembered. A new
 operation that the service ships before the SDK models it is not covered;
-the threat model names this (T-4). The live check (`assert_fence`) compares
-the deployed policy with the same derived set, so a deployed fence that
-predates an operation fails validation.
+the threat model names this (T-4). The integration test reads the deployed
+policy back and checks it names the same set.
