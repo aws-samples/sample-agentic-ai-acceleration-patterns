@@ -25,18 +25,6 @@ A control plane that places tenants into cells across accounts it never
 holds credentials for: every account's owner installs one role pair, and
 that trust policy is the only thing the builds can act through.
 
-Each box is one component and its pill names the pattern it carries. The API
-gates on the vendor IdP's role claim; the tenant service claims a tenant slot
-on a cell and, for a new cell, a cell slot on an account, atomically, and
-answers 202; the workflow runs the cell build (shared cell deployment) only
-for a new cell and then the tenant build (per-tenant deployment); each build
-assumes the provisioning role pair installed in the cell's account — the
-vendor's own account A or a customer's account B — and the scripts exchange
-resource identifiers through that account's SSM namespaces; at registration
-the tenant service probes the same pair once and discards the credentials;
-the service and the workflow share one single-table record of accounts,
-cells, and tenants.
-
 ![Architecture: a vendor operator calls API Gateway (the Lambda Authorizer validates the vendor IdP JWT), which invokes the Tenant Service Lambda; the service writes the DynamoDB table of accounts, cells and tenants and starts Step Functions, which runs the cell-scripts and tenant-scripts CodeBuild projects; each project calls sts:AssumeRole (with an external id) into the cell-provisioning or tenant-provisioning role of Account A or Account B, which writes or reads and writes that account's SSM Parameter Store namespaces; the Tenant Service's own role also assumes both roles once at PutAccount as a registration probe](./diagrams/control-plane.drawio.svg)
 
 On the AWS resources the sample deploys: operator JWT -> API Gateway (Lambda
