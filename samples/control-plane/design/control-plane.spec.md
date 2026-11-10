@@ -1,4 +1,4 @@
-# Specification: A Simple Cell-Based Control Plane
+# Specification: A Cell-Based Control Plane
 
 > **Status:** This document is the *requirements and principles* layer of
 > the control plane design: it states what a correct implementation must do
@@ -21,7 +21,7 @@ state, and offboards them. Most published control plane examples are either
 toy CRUD APIs (no real provisioning) or sprawling platforms (dozens of
 services obscuring the core ideas).
 
-This spec defines a **simple correct control plane for cell-based
+This spec defines a **control plane for cell-based
 deployments** — small enough to read in a sitting, complete enough to be
 correct under concurrency and failure.
 
@@ -540,7 +540,7 @@ request already named; it can never widen the result set. Preserve this
 invariant — reintroducing an unpinned scan, or letting a token select the
 partition, reopens the token-signing question.
 
-Static partitions are an accepted simplicity trade-off at sample fleet
+Static partitions are an accepted trade-off at sample fleet
 sizes; a production fleet would shard them. Full-attribute projections
 (single-query listings, no follow-up reads) are the same trade — trim to
 included attributes at scale.

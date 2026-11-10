@@ -22,7 +22,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 
 - [Architecture Overview](./ARCHITECTURE.md)
 - [Samples](#samples)
-  - [The Simple Cell-Based Control Plane](#the-simple-cell-based-control-plane)
+  - [The Cell-Based Control Plane](#the-cell-based-control-plane)
   - [Tenant Identity with Amazon Cognito](#tenant-identity-with-amazon-cognito)
   - [Agentic runtime isolation: the agent platform at scale](#agentic-runtime-isolation-the-agent-platform-at-scale)
   - [Per-Tenant Encrypted Ingestion for Agentic Applications](#per-tenant-encrypted-ingestion-for-agentic-applications)
@@ -36,14 +36,14 @@ described in [the Sample Standard](./docs/sample-standard.md).
 
 | Sample | Description |
 |---|---|
-| [The Simple Cell-Based Control Plane](./samples/control-plane/) | A minimal multi-tenant control plane for cell-based deployments across accounts — one service, one API, one DynamoDB table, one Step Functions workflow, script-driven provisioning via AWS CodeBuild under a role pair installed in each account. Vendor-owned accounts are fleet capacity with a cell limit; a tenant-owned account is a customer's own, reached only by name. `maxTenants: 1` degenerates the model to a silo. |
+| [The Cell-Based Control Plane](./samples/control-plane/) | A multi-tenant control plane for cell-based deployments across accounts — one service, one API, one DynamoDB table, one Step Functions workflow, script-driven provisioning via AWS CodeBuild under a role pair installed in each account. Vendor-owned accounts are fleet capacity with a cell limit; a tenant-owned account is a customer's own, reached only by name. `maxTenants: 1` degenerates the model to a silo. |
 | [Tenant Identity with Amazon Cognito](./samples/tenant-identity/) | An identity layer that makes Amazon Cognito the trusted source of tenant identity, in three user-pool topologies chosen at deploy time — plus a `tiered` mode that runs two of them side by side — with RFC 8693 token narrowing to one tenant. |
 | [Agentic runtime isolation: the agent platform at scale](./samples/agentic-runtime-isolation/) | A pooled agent platform on Amazon Bedrock AgentCore: one ingress verifies the tenant token, resolves the agent and tool grant from an entitlement store, mints a 5-minute transaction token and invokes the agent's Runtime (a fresh microVM session per request by default, one per tenant or per user with session mapping) with tenant-scoped credentials, while a tools gateway (one by default, more optional) checks each call with a per-tool interceptor and then AgentCore Policy. With `agentDelegation` on the `api-gateway` ingress, an agent hands the transaction to another agent through that ingress, which re-issues the token for the next hop. |
 | [Per-Tenant Encrypted Ingestion for Agentic Applications](./samples/tenant-encrypted-ingestion/) | One drop zone and pipeline for every tenant's documents, each tenant's encrypted with its own AWS KMS key, kept apart by key policy and identity-policy ABAC rather than code, validated by a deployer-extensible chain before it lands, in a vendor-owned or tenant-owned key tier, with cryptographic offboarding. |
 
-## The Simple Cell-Based Control Plane
+## The Cell-Based Control Plane
 
-A minimal multi-tenant control plane for cell-based deployments. A cell
+A multi-tenant control plane for cell-based deployments. A cell
 is a deployment unit: one shared application deployment plus up to
 `maxTenants` tenants, each with its own per-tenant deployment inside the
 cell. Set `maxTenants: 1` and the model degenerates to a silo — one tenant
@@ -64,7 +64,7 @@ once, at deployment time, by a CellDefinition; cells are homogeneous by
 construction and callers can never supply code. Every API operation requires
 a JWT from your vendor IdP, validated by a Lambda Authorizer.
 
-[The Simple Cell-Based Control Plane](./samples/control-plane/)
+[The Cell-Based Control Plane](./samples/control-plane/)
 
 ## Tenant Identity with Amazon Cognito
 
