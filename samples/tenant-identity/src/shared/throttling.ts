@@ -7,13 +7,18 @@ import { errorName } from './logger';
  * Error names the AWS SDK raises when a dependency refuses a call for rate,
  * not for content: Cognito (`TooManyRequestsException`,
  * `LimitExceededException`), DynamoDB (`ProvisionedThroughputExceededException`,
- * `RequestLimitExceeded`) and the generic `ThrottlingException`. None of them
- * changed anything; all of them pass on retry (ADR-0037).
+ * `RequestLimitExceeded`), STS (`Throttling`) and the generic
+ * `ThrottlingException`. The refused call changed nothing and passes on
+ * retry; what earlier steps of the same operation changed is the
+ * operation's business (ADR-0037).
  */
 export const DEPENDENCY_THROTTLE_ERROR_NAMES: ReadonlySet<string> = new Set([
   'TooManyRequestsException',
   'LimitExceededException',
   'ThrottlingException',
+  // STS (query protocol) spells it without the suffix: the pool-per-tenant
+  // tenant API meets it on AssumeRole (ADR-0026).
+  'Throttling',
   'ProvisionedThroughputExceededException',
   'RequestLimitExceeded',
 ]);

@@ -1924,6 +1924,50 @@ describe('PlatformService (spec §5.1)', () => {
         ).rejects.toMatchObject({ name: 'ThrottlingError', retryAfterSeconds: 1 });
         expect(registry.calls).toContain(`delete:${TENANT_A}`);
         expect(registry.items.size).toBe(0);
+        expect(provisioner.deprovisionTenant).not.toHaveBeenCalled();
+      });
+
+      it('a throttle on the API key step deprovisions Cognito, deletes the row, and is a 503', async () => {
+        const registry = new FakeRegistry();
+        const provisioner = mockProvisioner();
+        provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
+        apiKeys.create.mockRejectedValue(cognitoThrottle('TooManyRequestsException'));
+        await expect(
+          makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT),
+        ).rejects.toMatchObject({ name: 'ThrottlingError', retryAfterSeconds: 1 });
+        expect(provisioner.deprovisionTenant).toHaveBeenCalledWith(
+          expect.objectContaining({ tenantId: TENANT_A, groupName: `t-${TENANT_A}` }),
+        );
+        expect(registry.items.size).toBe(0);
+      });
+
+      it('a throttle on activation deprovisions Cognito, deletes the row and the key, and is a 503', async () => {
+        const registry = new FakeRegistry();
+        jest.spyOn(registry, 'activate').mockRejectedValue(cognitoThrottle('ProvisionedThroughputExceededException'));
+        const provisioner = mockProvisioner();
+        provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
+        await expect(
+          makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT),
+        ).rejects.toMatchObject({ name: 'ThrottlingError', retryAfterSeconds: 1 });
+        expect(provisioner.deprovisionTenant).toHaveBeenCalled();
+        expect(apiKeys.delete).toHaveBeenCalled();
+        expect(registry.items.size).toBe(0);
+      });
+
+      it('a throttle on the first-admin step after activation leaves the ACTIVE tenant without its admin, slot released, 503 (spec §5.1)', async () => {
+        const registry = new FakeRegistry();
+        const provisioner = mockProvisioner();
+        provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
+        provisioner.createUser.mockRejectedValue(cognitoThrottle('TooManyRequestsException'));
+        await expect(
+          makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT),
+        ).rejects.toMatchObject({ name: 'ThrottlingError', retryAfterSeconds: 1 });
+        // The tenant exists and is usable; the caller finishes with
+        // CreateUser {firstAdmin: true}, not with a second CreateTenant.
+        const row = registry.items.get(TENANT_A);
+        expect(row?.status).toBe('ACTIVE');
+        expect(row).not.toHaveProperty('firstAdminEmail');
+        expect(provisioner.deprovisionTenant).not.toHaveBeenCalled();
       });
 
       it('a modelled ThrottlingError passes through unchanged', async () => {

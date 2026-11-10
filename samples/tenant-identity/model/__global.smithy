@@ -289,10 +289,12 @@ structure InternalServerError {
     message: String
 }
 
-/// A dependency (Cognito, DynamoDB) throttled the operation. The request was
-/// inside the caller's own quota, so this is the server's fault, not the
-/// client's: 503, not 429. Nothing was changed by the refused call; retry
-/// after the Retry-After seconds (ADR-0037).
+/// A dependency (Cognito, DynamoDB, STS) throttled the operation. The request
+/// was inside the caller's own quota, so this is the server's fault, not the
+/// client's: 503, not 429. The refused call changed nothing; earlier steps of
+/// the same operation may have (CreateTenant: an ACTIVE tenant without its
+/// first admin, see the operation). Retry after the Retry-After seconds, the
+/// same way as for any other failure of that operation (ADR-0037).
 @error("server")
 @httpError(503)
 @retryable(throttling: true)

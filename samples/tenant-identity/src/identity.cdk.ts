@@ -1025,7 +1025,7 @@ export class TenantIdentityStack extends Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       alarmDescription:
-        'At least 5 5XX responses in 5 minutes - a function, the authoriser, or a downstream Cognito/DynamoDB call is failing (M-31).',
+        'At least 5 5XX responses in 5 minutes - a function, the authoriser, or a downstream Cognito/DynamoDB call is failing, or a dependency is throttling (503 ThrottlingError, ADR-0037) (M-31).',
     });
     for (const alarm of [clientErrorAlarm, serverErrorAlarm]) {
       alarm.addAlarmAction(alarmAction);

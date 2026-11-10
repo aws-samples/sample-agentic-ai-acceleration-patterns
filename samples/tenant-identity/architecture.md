@@ -1,22 +1,24 @@
 # Tenant Identity with Amazon Cognito — Architecture
 
 > Status: **Implemented and verified.** Last green deployment integration
-> test: 2026-10-29, eu-central-1, all four stacks (the three topologies and
+> test: 2026-11-10, eu-central-1, all four stacks (the three topologies and
 > `tiered`, ADR-0027) deployed as `TenantIdentityScopes-*`
 > (`E2E_STACK_PREFIX=TenantIdentityScopes E2E_PUBLISHER=none`, beside a
 > standing deployment), spec §10 steps 1b and 2–9 including 8b, 11 and the
 > ADR-0027 tiered scenario (step 12), with the scope catalogue, entitlement
-> and grant checks of ADR-0034..0036: 51/51 e2e assertions passed. The
+> and grant checks of ADR-0034..0036: 51/51 e2e assertions passed in 11.5
+> minutes, all 8 alarm actions published, and the leftover check found no
+> pool, REST API or log group. The
 > previous green run (2026-10-23, 45/45, with the R-6 parameter check and all
 > 8 alarm actions published to the SNS topic, M-31) verified teardown leaves
 > no stack, pool, table, parameter, role or log group: the destroy's
 > leftover check reported no tagged pool and no owned log group 90 s after
 > `TenantDrain` and the API stage were gone. Last green control-plane mount
-> integration test (`npx projen integ:control-plane`): 2026-10-27, eu-west-1,
+> integration test (`npx projen integ:control-plane`): 2026-11-10, eu-central-1,
 > mounting spec §10 steps 1–12 including 5b and 9b: 11/11 e2e assertions
 > passed in about 11 minutes, and teardown left no stack, parameter, pool,
 > REST API or log group. ADRs: see
-> [`adr/`](./adr/README.md) (ADR-0001..0036).
+> [`adr/`](./adr/README.md) (ADR-0001..0037).
 
 This document describes what the sample deploys and runs, not the plan. Where
 the code and the specification diverge, the code and its ADRs win; the
