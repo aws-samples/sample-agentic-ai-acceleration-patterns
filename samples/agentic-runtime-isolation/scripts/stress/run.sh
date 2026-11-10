@@ -150,6 +150,8 @@ export APP_CLIENT_ID=$(sq "$APP_CLIENT_ID")
 export ISSUER=$(sq "$ISSUER")
 export REGION=$(sq "$REGION")
 export RUN_ID=$(sq "$RUN_ID")
+$(jq -r '.k6.vuPerRps // empty | "export VU_PER_RPS=\(.)"' <<<"$TIER")
+$(jq -r '.k6.tokensIn // empty | "export TOKENS_IN=\(.)"' <<<"$TIER")
 ${CONVERSATION_RUN_ID:+export CONVERSATION_RUN_ID=$(sq "$CONVERSATION_RUN_ID")}
 export AWS_REGION=$(sq "$REGION")
 # k6 signs IssueToken with SigV4 and needs the instance role credentials in its environment (never printed).
@@ -188,6 +190,17 @@ while :; do
     --query Status --output text 2>/dev/null || echo Pending)"
   [[ "$status" != "$last" ]] && { echo "  $(date -u +%T) ${status}"; last="$status"; }
   [[ "$status" =~ ^(Pending|InProgress|Delayed)$ ]] || break
+  # A host k6 has run out of memory takes its SSM agent with it (F-14); the
+  # command then stays InProgress for its whole timeout. Fail after 3 minutes
+  # without a ping instead; the operator reboots the instance.
+  ping="$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=${INSTANCE}" \
+    --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo Online)"
+  if [[ "$ping" == ConnectionLost ]]; then
+    lost=$(( ${lost:-0} + 15 ))
+    (( lost < 180 )) || { status=HostLost; echo "  $(date -u +%T) ${status}"; break; }
+  else
+    lost=0
+  fi
   sleep 15
 done
 DONE=1

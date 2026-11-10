@@ -32,6 +32,8 @@ export interface StressTier {
   readonly stageThrottle: { readonly rateLimit: number; readonly burstLimit: number };
   readonly ingressReservedConcurrency: number;
   readonly driverInstanceType: string;
+  /** k6 driver sizing (F-14); run.sh exports these as VU_PER_RPS and TOKENS_IN. Defaults in lib.js when unset. */
+  readonly k6?: { readonly vuPerRps?: number; readonly tokensIn?: 'setup' | 'vu' };
 }
 
 export const STRESS_TIERS: Record<'small' | 'medium' | 'large', StressTier> = {
@@ -90,13 +92,23 @@ export const STRESS_TIERS: Record<'small' | 'medium' | 'large', StressTier> = {
     // more than one pool, which the ingress's multiTenant issuer list allows.
     tenantsSeeded: 4_000,
     tenantsActive: 1_000,
-    usersPerActiveTenant: 4,
+    // One user per active tenant: 4,000 live tokens on a 5-minute life need
+    // 13 refreshes a second against the identity /token route at 20 rps,
+    // and the 2026-11-10 S1 run lost 2,338 refreshes to it (F-13). 1,000
+    // tokens refresh at 3.3 a second. User count does not touch the design.
+    usersPerActiveTenant: 1,
     steadyRps: 500,
     peakRps: 1_000,
     scenarioSeconds: 600,
     stageThrottle: { rateLimit: 1_200, burstLimit: 600 },
     ingressReservedConcurrency: 800,
-    driverInstanceType: 'c6i.2xlarge',
+    // 32 GB: k6 ran a c6i.2xlarge out of memory at 1,600 VUs (F-14).
+    driverInstanceType: 'c6i.4xlarge',
+    // k6 driver sizing (F-14): VUs per rps and where tokens live. A report
+    // probe takes about 130 ms, so one VU serves several requests a second;
+    // 0.25 VUs per rps leaves k6 headroom without 1,600 JavaScript runtimes.
+    // 'vu' keeps each VU's tokens in that VU only, not a copy of every entry.
+    k6: { vuPerRps: 0.25, tokensIn: 'vu' },
   },
 };
 
