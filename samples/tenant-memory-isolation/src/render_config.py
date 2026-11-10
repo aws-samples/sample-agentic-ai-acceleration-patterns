@@ -11,11 +11,22 @@ from botocore.validate import validate_parameters
 
 ALLOWED = ["CreateEvent", "RetrieveMemoryRecords", "ListMemoryRecords"]
 BATCH = ["BatchCreateMemoryRecords", "BatchUpdateMemoryRecords", "BatchDeleteMemoryRecords"]
-DATA_ACTIONS = ALLOWED + [
-    "ListEvents", "GetEvent", "DeleteEvent", "ListActors", "ListSessions",
-    "GetMemoryRecord", "DeleteMemoryRecord",
-    "ListMemoryExtractionJobs", "StartMemoryExtractionJob",
-] + BATCH
+
+
+def memory_data_actions():
+    """Every data-plane operation on one Memory resource, read from the service model.
+
+    The resource fence denies all of them outside the Gateway execution role
+    (ADR-0007). Deriving the list means a new operation, such as IngestData,
+    is fenced as soon as the pinned SDK knows it, and a unit test fails until
+    someone has reviewed the new operation against the Cedar policies.
+    """
+    model = Session().get_service_model("bedrock-agentcore")
+    return sorted(name for name in model.operation_names
+                  if model.operation_model(name).http["requestUri"].startswith("/memories/{memoryId}/"))
+
+
+DATA_ACTIONS = memory_data_actions()
 FIXTURE_GATEWAY = "arn:aws:bedrock-agentcore:us-west-2:000000000000:gateway/example"
 FIXTURE_MEMORY = "ExampleMemory-1234567890"
 TARGET = "tenant-memory"

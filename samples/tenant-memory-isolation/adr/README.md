@@ -7,3 +7,4 @@
 | 0001 | Use issuer-scoped claims with the native Memory connector | Proposed | 2026-10-21 |
 | 0002 | Deliver a draft validation kit before a deployable contribution | Proposed | 2026-10-21 |
 | 0003 | Provision a disposable validation issuer | Accepted | 2026-10-22 |
+| 0007 | Derive the fenced operations from the service model | Accepted | 2026-11-10 |
