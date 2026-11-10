@@ -1339,6 +1339,49 @@ describe.each(INGRESSES)('AgentBackend in its own stack from SharedIngress.fromP
   });
 });
 
+describe('AgentBackend from a ref: the one-model statement on the imported tenant role (ADR-0018, F-10)', () => {
+  const build = (modelIds: string[]) => {
+    const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+    seedPublishedIngress(app, publishedIngress('api-gateway'));
+    const stack = new Stack(app, 'Agents', { env: TEST_ENV });
+    const ref = SharedIngress.fromParameters(stack, 'Ingress', DEFAULT_REGISTRY_PREFIX, 'api-gateway');
+    modelIds.forEach((modelId, i) =>
+      new AgentBackend(stack, `A${i}`, { name: `a${i}`, ingress: ref, agent: agentOf(modelId), needs: [`a${i}/chat`] }),
+    );
+    const policies = Object.values(Template.fromStack(stack).findResources('AWS::IAM::Policy')) as any[];
+    return policies.flatMap((p) => p.Properties.PolicyDocument.Statement).filter((s: any) => s.Sid === 'OneModel');
+  };
+
+  it('twenty backends on one model add ONE inline policy to the role, not twenty (IAM caps a role at 10,240 bytes of inline policy)', () => {
+    const one = build(Array.from({ length: 20 }, () => 'amazon.nova-lite-v1:0'));
+    expect(one).toHaveLength(1);
+    expect(one[0].Action).toEqual(['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream']);
+  });
+
+  it('the policy name carries the stack, so two agents stacks on one ingress do not fight over one inline policy', () => {
+    const names = (stackName: string) => {
+      const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+      seedPublishedIngress(app, publishedIngress('api-gateway'));
+      const stack = new Stack(app, stackName, { env: TEST_ENV });
+      const ref = SharedIngress.fromParameters(stack, 'Ingress', DEFAULT_REGISTRY_PREFIX, 'api-gateway');
+      new AgentBackend(stack, 'A', { name: 'a', ingress: ref, agent: agentOf('amazon.nova-lite-v1:0'), needs: ['a/chat'] });
+      return (Object.values(Template.fromStack(stack).findResources('AWS::IAM::Policy')) as any[])
+        .filter((p) => JSON.stringify(p.Properties.PolicyDocument).includes('"OneModel"'))
+        .map((p) => p.Properties.PolicyName);
+    };
+    const [one] = names('AgentsOne');
+    const [two] = names('AgentsTwo');
+    expect(one).toMatch(/OneModel$/);
+    expect(one).not.toEqual(two);
+  });
+
+  it('a second model in the same stack adds a second statement', () => {
+    const two = build(['amazon.nova-lite-v1:0', 'amazon.nova-micro-v1:0', 'amazon.nova-lite-v1:0']);
+    expect(two).toHaveLength(2);
+    expect(JSON.stringify(two.map((s: any) => s.Resource))).toContain('nova-micro');
+  });
+});
+
 describe('SharedIngress.fromParameters: the synth-time lookup (ADR-0042)', () => {
   const fresh = () => new App({ context: { 'aws:cdk:bundling-stacks': [] } });
 

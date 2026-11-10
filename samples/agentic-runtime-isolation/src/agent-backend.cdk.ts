@@ -20,7 +20,7 @@
  * decides what a caller may do with it.
  */
 
-import { Annotations, Aspects, Duration, Stack, Token } from 'aws-cdk-lib';
+import { Annotations, Aspects, Duration, Names, Stack, Token } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { AgentCoreRuntimeBackend } from './backend/agentcore-runtime.cdk';
@@ -276,8 +276,7 @@ export class AgentBackend extends Construct {
     if (ingress instanceof SharedIngress) {
       ingress.grantModel(props.agent.modelId);
     } else {
-      const tenantRole = iam.Role.fromRoleArn(this, 'TenantRole', ref.tenantRoleArn, { mutable: true });
-      addModelStatement(this, tenantRole, props.agent.modelId, 'OneModel');
+      grantModelFromStack(this, ref.tenantRoleArn, props.agent.modelId);
     }
 
     const ttl = ingress instanceof SharedIngress ? Duration.seconds(ingress.options.registryTtlSeconds) : Duration.seconds(60);
@@ -310,5 +309,34 @@ export class AgentBackend extends Construct {
       entry.resource.node.addDependency(target);
     }
     this.registryParameterName = entry.parameterName;
+  }
+}
+
+/**
+ * The one-model statement for a backend in another stack than its ingress
+ * (ADR-0018). The imported tenant role gets ONE inline policy per stack and
+ * model, shared by every `AgentBackend` of that stack: each `AgentBackend`
+ * adding its own copy put 308 bytes on the role per agent, and IAM caps a
+ * role's inline policies at 10,240 bytes in all, so about 30 agents filled
+ * it (2026-11-09, stress tier `large`, finding F-10). The holder construct
+ * lives at the stack root under a name derived from the model id, so a
+ * second backend of the same model in the same stack finds it.
+ */
+function grantModelFromStack(scope: Construct, tenantRoleArn: string, modelId: string): void {
+  const stack = Stack.of(scope);
+  const id = `TenantRoleModelGrant${modelId.replace(/[^A-Za-z0-9]/g, '')}`;
+  if (stack.node.tryFindChild(id) !== undefined) {
+    return;
+  }
+  const holder = new Construct(stack, id);
+  const tenantRole = iam.Role.fromRoleArn(holder, 'TenantRole', tenantRoleArn, { mutable: true });
+  addModelStatement(holder, tenantRole, modelId, 'OneModel');
+  // An inline policy on an imported role is named by its logical id, and
+  // CloudFormation refuses one inline policy managed from two stacks: the
+  // name carries the stack so two agents stacks on one ingress coexist.
+  const policy = tenantRole.node.tryFindChild('Policy') as iam.Policy | undefined;
+  const cfnPolicy = policy?.node.defaultChild as iam.CfnPolicy | undefined;
+  if (cfnPolicy !== undefined) {
+    cfnPolicy.policyName = `${Names.uniqueResourceName(holder, { maxLength: 64 })}OneModel`.slice(0, 128);
   }
 }

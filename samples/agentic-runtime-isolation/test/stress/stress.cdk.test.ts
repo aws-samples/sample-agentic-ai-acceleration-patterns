@@ -51,8 +51,21 @@ describe('tiers (stress-test plan §8.2)', () => {
   it('spreads the targets over the gateways round-robin', () => {
     expect(targetNames(STRESS_TIERS.small).map((_, i) => gatewayOf(STRESS_TIERS.small, i))).toEqual(['default', 'finance']);
     expect(targetNames(STRESS_TIERS.large).map((_, i) => gatewayOf(STRESS_TIERS.large, i))).toEqual([
-      'default', 'finance', 'hr', 'ops', 'default', 'finance', 'hr', 'ops', 'default', 'finance',
+      'default', 'finance', 'hr', 'ops', 'sales', 'default', 'finance', 'hr', 'ops', 'sales',
     ]);
+  });
+
+  it('keeps every gateway under 300 tools at every tier (the Cedar schema bound, F-9)', () => {
+    for (const tier of Object.values(STRESS_TIERS)) {
+      const perGateway = new Map<string, number>();
+      targetNames(tier).forEach((_, i) => {
+        const g = gatewayOf(tier, i);
+        perGateway.set(g, (perGateway.get(g) ?? 0) + tier.toolsPerTarget);
+      });
+      for (const [, n] of perGateway) {
+        expect(n).toBeLessThan(300);
+      }
+    }
   });
 
   it('slices the non-default agents over the agents stacks', () => {

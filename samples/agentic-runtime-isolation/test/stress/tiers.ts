@@ -78,7 +78,11 @@ export const STRESS_TIERS: Record<'small' | 'medium' | 'large', StressTier> = {
     agentStacks: 5,
     toolTargets: 10,
     toolsPerTarget: 100,
-    toolsGateways: ['default', 'finance', 'hr', 'ops'],
+    // Five gateways, 200 tools each. Four gave two gateways 300 tools, and
+    // the policy engine's Cedar schema was 413 KB at 300 of these tools,
+    // over its 400 KB bound (2026-11-09, finding F-9): the schema holds
+    // about 290 tools of this shape, not the 330 the architecture quotes.
+    toolsGateways: ['default', 'finance', 'hr', 'ops', 'sales'],
     tenantsSeeded: 10_000,
     tenantsActive: 1_000,
     usersPerActiveTenant: 4,
