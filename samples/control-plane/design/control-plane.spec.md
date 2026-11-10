@@ -639,7 +639,7 @@ compare-and-set maps to 409.
 | `ValidationException` | 400 | malformed input, malformed pagination token; `PutAccount` handshake refusal (R-26: a half could not be assumed, or admits the call without the supplied external id) |
 | `UnauthorizedError` | 401/403 | missing/invalid JWT |
 | `ResourceNotFoundError` | 404 | unknown tenant, cell, or account (including an unregistered `CreateTenant.accountId`) |
-| `ConflictError` | 409 | in-flight mutation; occupied-cell delete; occupied-account delete; `owner` change on `PutAccount`; cell-not-ACTIVE guard; `clientToken` reuse with different parameters; `CreateTenant` lost every bounded claim against cells with free capacity and no account had a free cell slot — retry ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)) |
+| `ConflictError` | 409 | in-flight mutation; occupied-cell delete; occupied-account delete; `owner` change on `PutAccount`; cell-not-ACTIVE guard; `clientToken` reuse with different parameters; `CreateTenant` lost every bounded claim on candidate cells and no account had a free cell slot — retry ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)) |
 | `InsufficientCapacityError` | 409 | `CreateTenant` found no eligible cell and no eligible account with cell capacity: every vendor-owned account is full (untargeted), or the named account is full (targeted). Nothing was written. The remedy is an operator act — raise `maxCells` or register an account — so the error is distinct from `ConflictError`, which a client may simply retry later ([ADR-026](../adr/0026-fleet-full-is-a-modelled-error.md)) |
 | `InternalServerError` | 500 | everything else, including a `PutAccount` whose handshake probe STS could not answer (throttling, network): the handshake is unknown, not refused, and the operator retries |
 
@@ -858,11 +858,12 @@ same insert **and** claim the account's cell slot in the same transaction
 
 **R-18 (bounded work):** the candidate loop MUST be bounded so `CreateTenant`
 stays inside the synchronous gateway window. The miss case — every attempt
-loses a race while capacity exists elsewhere — falls through to new-cell
-creation: over-provisioning rather than a failed onboard (P-7). When that
-fall-through meets a full fleet, the request MUST fail with a retryable
-`ConflictError`, not `InsufficientCapacityError`: capacity exists, the
-request did not win it, and a retry will
+loses a race on a cell that read as ACTIVE with room — falls through to
+new-cell creation: over-provisioning rather than a failed onboard (P-7).
+When that fall-through meets a full fleet, the request MUST fail with a
+retryable `ConflictError`, not `InsufficientCapacityError`: the candidates
+were there moments ago and the fleet is changing under the request, so a
+retry may succeed where a terminal error would be wrong
 ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)).
 The account loop is bounded by the number of eligible accounts, which is
 operator-controlled and small.
@@ -882,9 +883,9 @@ or place into an ineligible account. Capacity is an operator decision
   (placement requires `ACTIVE`), again up to `maxCells`.
 - Two onboards racing for an account's last cell slot: one claims, the
   other moves to the next eligible account or gets the 409. No corruption.
-- Five consecutive lost claims against cells with room, on a fleet with no
-  free cell slot: the request fails with `ConflictError` and nothing is
-  written; the client retries and almost certainly places (R-18, ADR-031).
+- Five consecutive lost claims on candidate cells, on a fleet with no free
+  cell slot: the request fails with `ConflictError` and nothing is written;
+  the client retries against the fleet as it then is (R-18, ADR-031).
 - Oldest-first ordering funnels concurrent claims at the same candidate —
   one cancelled transaction per contended cell before spreading. At
   production scale, randomise candidate order or use power-of-two-choices.

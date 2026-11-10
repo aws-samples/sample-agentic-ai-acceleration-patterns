@@ -28,7 +28,7 @@ import { EntitlementReader } from './entitlements';
 import { endpointHost, preconnect, sharedHandler } from './http';
 import { kmsDigestSigner } from './jws';
 import { TenantLimiter } from './limits';
-import { AGENT_AUDIENCE_PREFIX, TokenMinter } from './mint';
+import { AGENT_AUDIENCE_PREFIX, sameActChain, TokenMinter } from './mint';
 import { BackendRegistry, backendFromPath, DELEGATION_ROUTE, type RegistryEntry, RegistryError, type RegistryMiss, ROUTE, routeFromPath } from './registry';
 import { isValidConversationId, randomUnitId, sessionUnitId } from './session';
 import { ClaimMissingError, TokenVendingMachine } from './tvm';
@@ -335,7 +335,7 @@ export class IngressPipeline {
     }
     // Spec §5.1.1 order: the three delegation checks need only the caller's entry and run
     // before the target is looked up, so an undeclared target is 403, never a 404 that
-    // tells an agent whether a backend exists (review 2026-11-09, finding 3).
+    // tells an agent whether a backend exists (ADR-0048).
     const callerEntry = await this.entryFor(caller.agent, caller.tenantId);
     const maxDepth = this.config.delegation!.maxDepth;
     try {
@@ -423,7 +423,7 @@ export class IngressPipeline {
       } catch {
         throw new RequestError(403, 'tenant_not_allowed', caller.tenantId);
       }
-      // M-82 on this route (review 2026-11-09, finding 2): the forwarded token must be the
+      // M-82 on this route (ADR-0048): the forwarded token must be the
       // replacement for THIS caller, so its act nests agent:<caller> over the caller's own act
       // and its txn is the caller's; a hand-written context cannot pair another chain with it.
       const expectedAct = { sub: `${AGENT_AUDIENCE_PREFIX}${caller.agent}`, act: caller.act };
@@ -431,7 +431,7 @@ export class IngressPipeline {
         minted.tenantId !== caller.tenantId ||
         minted.agent !== target ||
         minted.txn !== caller.txn ||
-        JSON.stringify(minted.act) !== JSON.stringify(expectedAct)
+        !sameActChain(minted.act, expectedAct)
       ) {
         throw new RequestError(403, 'tenant_not_allowed', caller.tenantId);
       }

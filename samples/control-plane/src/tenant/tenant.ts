@@ -281,12 +281,22 @@ interface PlacementResult {
 
 /**
  * No existing cell was claimed. `budgetExhausted` is true when every one of
- * the {@link MAX_CLAIM_ATTEMPTS} claims lost a race against a cell that
- * still had room — capacity exists, the request just did not win it — and
- * false when no candidate was eligible at all.
+ * the {@link MAX_CLAIM_ATTEMPTS} claims lost a race on a candidate cell —
+ * the cell read as ACTIVE with room, and the conditional claim then failed
+ * because another request took the slot or an operator moved the cell out
+ * of ACTIVE — and false when no candidate was eligible at all. The
+ * candidates were read moments ago, so the miss is worth a retry; it is
+ * not proof that capacity still exists.
  */
 interface PlacementMiss {
   readonly budgetExhausted: boolean;
+}
+
+/** The R-24 refusal for a `PutAccount` that names another owner. */
+function ownerImmutableError(accountId: string): ConflictError {
+  return new ConflictError({
+    message: `Account ${accountId} is already registered with a different owner; owner is immutable (delete and re-register an empty account to change it)`,
+  });
 }
 
 /** Converts idempotency records to their transact-item form (ADR-017). */
@@ -388,9 +398,9 @@ export class TenantService implements TenantServiceService<CallerContext> {
       // slot on the account and creates the cell (CREATING, tenant slot
       // pre-claimed, accountId set, definition stamped) together with the
       // tenant. Every account refusing → InsufficientCapacityError (R-28),
-      // unless the claim budget was spent on cells that still had room: then
-      // capacity exists and the failure is a retryable ConflictError, not
-      // the terminal "raise maxCells" (ADR-031).
+      // unless the claim budget was spent on candidate cells: the fleet was
+      // changing under the request, so the failure is a retryable
+      // ConflictError, not the terminal "raise maxCells" (ADR-031).
       let created;
       try {
         created = await this.createCellInEligibleAccount(target, makeTenant, now, idempotencyItem);
@@ -399,7 +409,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           placed.budgetExhausted && error instanceof InsufficientCapacityError
             ? new ConflictError({
               message:
-                  `Tenant placement lost ${MAX_CLAIM_ATTEMPTS} claim races against cells with free capacity and no eligible account`
+                  `Tenant placement lost ${MAX_CLAIM_ATTEMPTS} claim races on candidate cells and no eligible account`
                   + ' has a free cell slot; nothing was written. Retry the request (spec R-18, ADR-031).',
             })
             : error;
@@ -759,6 +769,16 @@ export class TenantService implements TenantServiceService<CallerContext> {
       });
     }
 
+    // Owner is immutable (R-24). A re-registration with another owner is
+    // refused from the stored record before any STS traffic, so a
+    // misdirected PutAccount costs no probe; the conditional write below
+    // still carries the same check for the race between this read and the
+    // write.
+    const existing = await this.config.accountRepository.get(accountKey(accountId));
+    if (existing !== undefined && existing.owner !== owner) {
+      throw ownerImmutableError(accountId);
+    }
+
     // R-26 (ADR-027, ADR-030): verify the handshake BEFORE writing — assume
     // both halves of the pair with the supplied external id, prove the pair
     // refuses the call without it, and discard the credentials. The
@@ -807,9 +827,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
       return { account: toAccountSummary(account) };
     } catch (error) {
       if (error instanceof ConditionFailedError) {
-        throw new ConflictError({
-          message: `Account ${accountId} is already registered with a different owner; owner is immutable (delete and re-register an empty account to change it)`,
-        });
+        throw ownerImmutableError(accountId);
       }
       throw error;
     }

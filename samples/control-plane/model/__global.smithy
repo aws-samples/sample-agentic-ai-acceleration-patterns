@@ -209,8 +209,8 @@ structure ResourceNotFoundError {
 /// tenants, deleting an account that still holds cells, changing a
 /// registered account's owner, a CreateTenant clientToken reused with
 /// different parameters, or a CreateTenant that lost every bounded
-/// placement claim against cells with free capacity while no account had a
-/// free cell slot (nothing was written; retry - ADR-031).
+/// placement claim on candidate cells while no account had a free cell
+/// slot (nothing was written; retry - ADR-031).
 @error("client")
 @httpError(409)
 structure ConflictError {

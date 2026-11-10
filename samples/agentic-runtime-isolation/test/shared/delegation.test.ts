@@ -9,6 +9,7 @@ import {
   type ActClaim,
   agentChainOf,
   MAX_DELEGATION_DEPTH,
+  sameActChain,
   type MintConfig,
   type MintInput,
   TokenMinter,
@@ -27,6 +28,31 @@ const ISSUER = 'https://abc123.execute-api.eu-central-1.amazonaws.com/prod';
 const ROOT: ActClaim = { sub: INGRESS_ROLE };
 const config: MintConfig = { issuer: ISSUER, keyId: 'key-1', algorithm: 'RS256', ttlSeconds: 300, reuseMarginSeconds: 180, ingressRoleArn: INGRESS_ROLE };
 const direct: MintInput = { tenantId: 't-a', sub: 'user-1', agent: 'billing', scope: 'billing/read invoices/*', gateways: ['finance'], versions: { tenant: 1, agent: 1 } };
+
+describe('sameActChain', () => {
+  it('matches the same chain whatever the key order or extra properties, and nothing else', () => {
+    const chain = { sub: 'agent:planner', act: { sub: 'agent:default', act: ROOT } };
+    expect(sameActChain(chain, chain)).toBe(true);
+    expect(sameActChain(chain, { act: { act: { sub: INGRESS_ROLE }, sub: 'agent:default' }, sub: 'agent:planner' })).toBe(true);
+    expect(sameActChain(chain, { sub: 'agent:planner', act: { sub: 'agent:default', act: ROOT }, extra: 1 })).toBe(true);
+    let legal: ActClaim = ROOT;
+    for (let i = 0; i < MAX_DELEGATION_DEPTH; i += 1) {
+      legal = { sub: `agent:a${i}`, act: legal };
+    }
+    expect(sameActChain(legal, legal)).toBe(true); // MAX_DELEGATION_DEPTH agents plus the root: the deepest legal chain
+    expect(sameActChain(chain, { sub: 'agent:planner', act: ROOT })).toBe(false); // one level short
+    expect(sameActChain(chain, { sub: 'agent:planner', act: { sub: 'agent:billing', act: ROOT } })).toBe(false);
+    expect(sameActChain(chain, { sub: 'agent:planner', act: { sub: 'agent:default', act: { sub: INGRESS_ROLE, act: ROOT } } })).toBe(false); // one level long
+    expect(sameActChain(ROOT, undefined)).toBe(false);
+    expect(sameActChain({ act: ROOT }, { act: ROOT })).toBe(false); // no sub
+    expect(sameActChain([ROOT], [ROOT])).toBe(false);
+    let deep: ActClaim = ROOT;
+    for (let i = 0; i <= MAX_DELEGATION_DEPTH; i += 1) {
+      deep = { sub: `agent:a${i}`, act: deep };
+    }
+    expect(sameActChain(deep, deep)).toBe(false); // past the walk bound
+  });
+});
 
 describe('agentChainOf', () => {
   it('a first-hop act is an empty chain; each nested level adds its agent, outermost first', () => {

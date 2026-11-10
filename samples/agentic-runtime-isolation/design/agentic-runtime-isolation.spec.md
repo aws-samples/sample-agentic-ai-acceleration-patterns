@@ -4,8 +4,8 @@ SPDX-License-Identifier: MIT-0
 -->
 # Specification: Agentic Runtime Isolation (v2)
 
-> **Status, current (2026-11-05):** implemented; verified by integration
-> run 14 (57/57, eu-central-1, commit 6acb991). `architecture.md` describes
+> **Status, current (2026-11-09):** implemented; verified by integration
+> run 18 (58/58, us-east-1, commit 7e0f793). `architecture.md` describes
 > the implemented state. The dated notes below are the design-time record.
 >
 > **Historical, 2026-11-02 (as accepted):** v2, Accepted 2026-11-02 (Dave Roberts). Supersedes the v1
@@ -78,7 +78,7 @@ v2 widens the sample from the runtime to what the agent may do once it runs
 (ADR-0030, ADR-0034). It now covers three things, all behind one shared
 ingress:
 
-1. **The isolated agent runtime.** The v1 design, unchanged in its promises.
+1. **The isolated agent runtime.** The v1 design, with the same promises.
 2. **The tools the agent may call**, through shared Amazon Bedrock
    AgentCore Gateways the vendor owns: one by default, several when the
    tool count needs them (amended 2026-11-03, ADR-0041). Folded in from the tool-gateway
@@ -298,8 +298,8 @@ computes the narrowest set itself (P-11) and signs it. The v1 header
 
 **P-6. The agent's own role cannot cross tenants because it holds nothing
 tenant-scoped, and holds no model permission either.** The execution role
-grants logs and traces only; it has no data permission and, since ADR-0018,
-no `bedrock:Invoke*`. The agent invokes the model with the vended tenant
+grants logs and traces only; it has no data permission and no
+`bedrock:Invoke*` (ADR-0018). The agent invokes the model with the vended tenant
 credentials (P-8). (v2) It holds no permission on the tools gateway either:
 the gateway's inbound authoriser is the transaction token, not IAM.
 
@@ -1482,7 +1482,7 @@ the JWKS, so a context can never pass as a transaction token.
 
 ### 6.3 What the sample promises
 
-v1 promises that hold unchanged:
+v1 promises that hold:
 
 - No principal other than the ingress can invoke the backend (integ step 3).
 - Without `session`, no two requests share a unit (integ step 4a).
@@ -1750,7 +1750,7 @@ Consequence for the design:
 - V-15(c): the agent can get a workload access token from the transaction
   token; the agent's outbound identity is not limited to M2M.
 
-**Note 2026-11-03 (ADR-0041).** The evidence above is unchanged. The spike
+**Note 2026-11-03 (ADR-0041).** The evidence above stands as recorded. The spike
 used `allowedAudience: ['tools-gateway']` and a bare `tools-gateway` entry in
 `aud`; the design now names each gateway, `tools-gateway:<name>`. V-8 showed
 the authoriser matches `allowedAudience` against an array `aud`, so a named
