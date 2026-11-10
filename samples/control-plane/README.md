@@ -1,16 +1,16 @@
 # The Cell-Based Control Plane
 
-A multi-tenant control plane for **cell-based deployments across
-accounts**. A cell is a deployment unit: one **shared application deployment**
-plus up to `maxTenants` tenants, each with its **own per-tenant deployment**
-inside the cell. Set `maxTenants: 1` and the model degenerates to a silo —
-one tenant per cell. Cells live in **registered AWS accounts**: vendor-owned
-accounts are fleet capacity with a cell limit, so the fleet scales to a second
-account when the first is full; a tenant-owned account is a customer's own,
-receives only the tenants that name it, and is reached through a role pair
-the customer installs and can revoke. One service, one API (15 operations),
-one DynamoDB table, one Step Functions workflow, two shared AWS CodeBuild
-projects, one role pair per account.
+A control plane that onboards tenants into cells across either the vendor's
+or the customer's AWS accounts. A cell is one **shared application
+deployment** plus up to `maxTenants` tenants, each with its **own per-tenant
+deployment** inside the cell; `maxTenants: 1` yields dedicated tenant cells.
+Accounts are **registered through the API**: a vendor account holds one to
+many cells up to a cell limit, and when every vendor account is full the fleet
+moves on to the next registered one; a customer account receives only the
+tenants that name it. Each account is reached through a role pair installed in
+that account, which the account owner can revoke. One service, one API (15
+operations), one DynamoDB table, one Step Functions workflow, two shared AWS
+CodeBuild projects, one role pair per account.
 
 - Design: [`architecture.md`](./architecture.md)
 - Decisions and their reasoning trail: [`adr/`](./adr/) (one file per ADR, indexed in [`adr/README.md`](./adr/README.md))
