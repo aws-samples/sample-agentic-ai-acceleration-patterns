@@ -186,8 +186,13 @@ echo "k6 started on the driver host at $(date -u -d "@${START_EPOCH}" +%FT%TZ)"
 last=""
 status=Pending
 while :; do
-  status="$(aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE" \
-    --query Status --output text 2>/dev/null || echo Pending)"
+  # A failed read (expired credentials, a throttle) is reported, not read as
+  # Pending: S7 at large waited an hour on expired credentials (2026-11-10).
+  if ! status="$(aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE" \
+    --query Status --output text 2>"${LIB_TMP}/poll.err")"; then
+    status=Pending
+    grep -q -i "expired" "${LIB_TMP}/poll.err" && fail "AWS credentials expired while waiting for ${COMMAND_ID}; renew them and rerun collect.sh once the host has uploaded out/${RUN_ID}/"
+  fi
   [[ "$status" != "$last" ]] && { echo "  $(date -u +%T) ${status}"; last="$status"; }
   [[ "$status" =~ ^(Pending|InProgress|Delayed)$ ]] || break
   # A host k6 has run out of memory takes its SSM agent with it (F-14); the
