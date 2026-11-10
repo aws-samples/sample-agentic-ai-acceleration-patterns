@@ -42,7 +42,7 @@ describe('buildPolicy', () => {
     expect(result.principalId).toBe('unauthorized');
     expect(effectOf(result)).toBe('Deny');
     expect(result.context).toBeUndefined();
-    expect(authorizer.buildPolicy(METHOD_ARN, 'Deny', undefined, 'agent_not_subscribed').context).toEqual({ reason: 'agent_not_subscribed' });
+    expect(authorizer.buildPolicy(METHOD_ARN, 'Deny', undefined, 'agent_not_subscribed').context).toEqual({ reason: 'agent_not_subscribed', reasonSuffix: ': agent_not_subscribed' });
     expect(authorizer.buildPolicy(METHOD_ARN, 'Deny', undefined, 'invalid_token').context).toBeUndefined();
   });
 });
@@ -161,7 +161,7 @@ describe('authorize', () => {
     };
     const denied = await authorizer.authorize(event({ Authorization: token }), deps(undefined, refusing));
     expect(effectOf(denied)).toBe('Deny');
-    expect(denied.context).toEqual({ reason: 'agent_not_subscribed' });
+    expect(denied.context).toEqual({ reason: 'agent_not_subscribed', reasonSuffix: ': agent_not_subscribed' });
     expect(refusal()).toMatchObject({ reason: 'agent_not_subscribed', status: 403, tenantId: 'tenant-a', backend: 'default' });
     const floor = new TokenVerifier(
       { discoveryUrl: DISCOVERY_URL, allowedClientIds: [CLIENT_ID], requiredScopes: ['app/use'] },
@@ -191,7 +191,7 @@ describe('authorize', () => {
     expect(logs.join('\n')).not.toContain(TXN_TOKEN);
     expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request authorised')).toMatchObject({ tenantId: 'tenant-b', agent: 'billing', txn: 'txn-1', grantSize: 2, mint: 'miss' });
     const missing = await authorizer.authorize(event({ Authorization: token }), { ...deps(), verifier: multi });
-    expect(missing.context).toEqual({ reason: 'tenant_required' });
+    expect(missing.context).toEqual({ reason: 'tenant_required', reasonSuffix: ': tenant_required' });
   });
 
   it('denies a missing or non-bearer header without consulting the issuer or the registry, and never logs a header value', async () => {
@@ -253,5 +253,100 @@ describe('handler', () => {
       spy.mockRestore();
       fetchSpy.mockRestore();
     }
+  });
+});
+
+describe('authorize on /{backend}/delegations (ADR-0048)', () => {
+  const DELEGATION_ARN = 'arn:aws:execute-api:eu-central-1:111122223333:abc123/prod/POST/billing/delegations';
+  const caller = { tenantId: 'tenant-a', sub: 'user-a1', agent: 'default', chain: [], act: { sub: 'arn:aws:iam::111122223333:role/ingress' }, txn: 'txn-caller' };
+  const verify = async (token: string | undefined) => {
+    if (token === 'caller-token') {
+      return caller;
+    }
+    throw new Error('token_invalid');
+  };
+  const delegating = (calls: unknown[] = []) => ({
+    resolve: stubAuthority().resolve,
+    delegate: async (c: unknown, target: string, _t: unknown, _c: unknown, maxDepth: number) => {
+      calls.push({ c, target, maxDepth });
+      return { token: 'replacement', txn: 'txn-caller', exp: 1, mint: 'miss' as const, grantSize: 3, noToolsGranted: false };
+    },
+  });
+  const event = (authorization: string | undefined, path = '/billing/delegations', backend = 'billing'): APIGatewayRequestAuthorizerEvent =>
+    ({
+      type: 'REQUEST',
+      methodArn: DELEGATION_ARN,
+      path,
+      pathParameters: { backend },
+      headers: authorization === undefined ? {} : { authorization },
+      requestContext: {},
+    }) as unknown as APIGatewayRequestAuthorizerEvent;
+  const deps = (overrides: Partial<Parameters<typeof authorizer.authorize>[1]> = {}) => ({
+    verifier: { verify: async () => { throw new Error('the identity verifier must not run on the delegation route'); } } as never,
+    registry: stubRegistry({ billing: FIXTURE_ENTRIES.billing }).registry,
+    authority: delegating(),
+    delegation: { config: { maxDepth: 2 }, verify },
+    ...overrides,
+  });
+  let logs: string[];
+  let spy: jest.SpyInstance;
+  beforeEach(() => {
+    logs = [];
+    spy = jest.spyOn(process.stdout, 'write').mockImplementation((line: string | Uint8Array) => (logs.push(String(line)), true));
+  });
+  afterEach(() => spy.mockRestore());
+
+  it('Allow with the target as backend, the replacement token, the caller txn, delegatedFrom and depth; logs delegation admitted, never the token', async () => {
+    const calls: unknown[] = [];
+    const result = await authorizer.authorize(event('Bearer caller-token'), deps({ authority: delegating(calls) }));
+    expect(effectOf(result)).toBe('Allow');
+    expect(result.context).toEqual({
+      tenantId: 'tenant-a',
+      sub: 'user-a1',
+      backend: 'billing',
+      runtimeArn: FIXTURE_ENTRIES.billing.runtimeArn,
+      transactionToken: 'replacement',
+      txn: 'txn-caller',
+      grantSize: '3',
+      mint: 'miss',
+      delegatedFrom: 'default',
+      depth: '1',
+    });
+    expect(calls[0]).toMatchObject({ target: 'billing', maxDepth: 2, c: { agent: 'default' } });
+    const line = JSON.parse(logs.find((l) => l.includes('delegation admitted'))!);
+    expect(line).toMatchObject({ tenantId: 'tenant-a', from: 'default', to: 'billing', depth: 1, txn: 'txn-caller', route: 'delegations' });
+    expect(logs.join('')).not.toContain('replacement');
+  });
+
+  it('an identity token or no bearer is Deny with no public reason (401 in the log)', async () => {
+    for (const authorization of [undefined, 'Bearer an-identity-token', 'Basic x']) {
+      const result = await authorizer.authorize(event(authorization), deps());
+      expect(effectOf(result)).toBe('Deny');
+      expect(result.context).toBeUndefined();
+    }
+    expect(logs.filter((l) => l.includes('delegation refused') && l.includes('token_invalid'))).toHaveLength(3);
+  });
+
+  it('an undeclared target is delegation_not_declared before any lookup; a declared target without an entry is Deny (404 in the log); the three delegation refusals carry their public reason', async () => {
+    const undeclared = await authorizer.authorize(event('Bearer caller-token', '/nobody/delegations', 'nobody'), deps());
+    expect(effectOf(undeclared)).toBe('Deny');
+    expect(undeclared.context).toEqual({ reason: 'delegation_not_declared', reasonSuffix: ': delegation_not_declared' });
+    expect(logs.some((l) => l.includes('unknown_backend'))).toBe(false);
+    const declaredButGone = stubRegistry({ default: { ...FIXTURE_ENTRIES.billing, needs: ['default/chat'], delegatesTo: ['gone'] } }).registry;
+    const unknown = await authorizer.authorize(event('Bearer caller-token', '/gone/delegations', 'gone'), deps({ registry: declaredButGone }));
+    expect(effectOf(unknown)).toBe('Deny');
+    expect(logs.some((l) => l.includes('unknown_backend'))).toBe(true);
+    for (const reason of ['delegation_not_declared', 'delegation_depth', 'delegation_loop'] as const) {
+      const refusing = { resolve: stubAuthority().resolve, delegate: async () => { throw new AuthorityError(403, reason); } };
+      const result = await authorizer.authorize(event('Bearer caller-token'), deps({ authority: refusing }));
+      expect(effectOf(result)).toBe('Deny');
+      expect(result.context).toEqual({ reason, reasonSuffix: `: ${reason}` });
+    }
+  });
+
+  it('without the delegation module the route is Deny and logged as a deployment fault', async () => {
+    const result = await authorizer.authorize(event('Bearer caller-token'), deps({ delegation: undefined }));
+    expect(effectOf(result)).toBe('Deny');
+    expect(logs.some((l) => l.includes('delegation_unavailable'))).toBe(true);
   });
 });

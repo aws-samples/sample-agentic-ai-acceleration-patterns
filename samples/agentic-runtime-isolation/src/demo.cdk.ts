@@ -367,6 +367,7 @@ export class RuntimeIsolationDemoStack extends Stack {
     const agent: AgentProps = { codePath: props.agentCodePath, modelId: ctx.modelId, environment: agentEnvironment };
     // One marker for every reservation of this stack (ADR-0035); unset, each resource is its own owner.
     const owner = props.owner ?? ctx.owner;
+    const delegationOn = ctx.ingress === 'api-gateway' && wantsBillingBackend(ctx);
     this.ingress = new SharedIngress(this, 'SharedIngress', {
       identity: { discoveryUrl, allowedClientIds: [appClientId], multiTenant: ctx.multiTenant ?? false },
       ingress: ctx.ingress,
@@ -385,6 +386,10 @@ export class RuntimeIsolationDemoStack extends Stack {
       // ADR-0041: two tools gateways, each with its own Policy engine. `finance` trims
       // tools/list to the exact tools in scope (its RESPONSE interceptor).
       toolsGateways: { [DEMO_TOOLS_GATEWAYS.crm]: {}, [DEMO_TOOLS_GATEWAYS.invoices]: { responseFilter: true } },
+      // ADR-0048: on the api-gateway demo with the billing backend, `default` may
+      // hand a transaction to `billing` (one hop). The Gateway ingress has no
+      // delegation route.
+      ...(delegationOn ? { agentDelegation: { maxDepth: 1 as const } } : {}),
     });
     this.agentBackend = new AgentBackend(this, 'AgentBackend', {
       name: GATEWAY_TARGET_NAME,
@@ -392,6 +397,7 @@ export class RuntimeIsolationDemoStack extends Stack {
       agent,
       needs: [...DEFAULT_NEEDS],
       tools: [...DEFAULT_TOOLS],
+      ...(delegationOn ? { delegatesTo: [BILLING_BACKEND] } : {}),
       owner,
     });
     callerRoleArn = this.ingress.tvmCallerRole.roleArn;

@@ -32,7 +32,7 @@ const NEEDS = ['agent/read', 'agent/invoke']; // owned by backend `agent`, which
 const TOOLS = ['invoices/*', 'crm/get_account'];
 const entryOf = (fields: Record<string, unknown> = {}) => JSON.stringify({ runtimeArn: RUNTIME_ARN, needs: NEEDS, tools: TOOLS, version: 1, status: 'active', ...fields });
 const ENTRY = entryOf();
-const PARSED = { runtimeArn: RUNTIME_ARN, needs: NEEDS, tools: TOOLS, version: 1, status: 'active' };
+const PARSED = { runtimeArn: RUNTIME_ARN, needs: NEEDS, tools: TOOLS, delegatesTo: [], version: 1, status: 'active' };
 
 describe('need and tool names (v2, ADR-0032)', () => {
   it('isValidNeedName: <owner>/<action> of [a-z0-9-], 3 to 128 characters', () => {

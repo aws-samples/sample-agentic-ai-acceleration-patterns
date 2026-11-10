@@ -210,6 +210,7 @@ export async function interceptTool(event: ToolInterceptorEvent, deps: ToolInter
       tenantId: caller.tenantId,
       user: caller.user,
       agent: caller.agent,
+      chain: caller.chain.length === 0 ? undefined : caller.chain.join(','),
       txn: caller.txn,
       gateway: deps.config.gatewayName,
       target: tool.split('/')[0],

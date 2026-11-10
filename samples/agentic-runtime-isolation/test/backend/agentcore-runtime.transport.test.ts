@@ -70,8 +70,12 @@ describe('AgentCoreRuntimeBackend', () => {
     });
   });
 
-  it('runtimePayload is {prompt} and nothing else from the request', () => {
+  it('runtimePayload is {prompt}, plus the validated conversationId with sessions on (ADR-0048), and nothing else from the request', () => {
     expect(JSON.parse(Buffer.from(runtimePayload(request({ transactionToken: 'jwt', credentials }))).toString())).toEqual({ prompt: 'hello' });
+    expect(JSON.parse(Buffer.from(runtimePayload(request({ conversationId: 'conversationA1x0001' }))).toString())).toEqual({
+      prompt: 'hello',
+      conversationId: 'conversationA1x0001',
+    });
   });
 
   it("invoke calls InvokeAgentRuntime on the request's Runtime with the unit id as runtimeSessionId and streams the response", async () => {

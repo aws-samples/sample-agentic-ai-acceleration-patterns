@@ -24,12 +24,13 @@
  */
 
 import type { APIGatewayAuthorizerResult, APIGatewayRequestAuthorizerEvent } from 'aws-lambda';
-import { AuthorityError, type AuthorityResolver } from '../shared/authority';
-import { isLambdaRuntime, readIngressConfig } from '../shared/config';
+import { AuthorityError, type AuthorityResolver, checkDelegation } from '../shared/authority';
+import { type DelegationConfig, isLambdaRuntime, readIngressConfig } from '../shared/config';
+import type { DelegationCaller, DelegationTokenVerifier } from '../shared/delegation';
 import { headerValue } from '../shared/headers';
 import { errorName, log } from '../shared/logger';
-import { BackendRegistry, backendFromPath, isValidBackendName, RegistryError } from '../shared/registry';
-import { authorityFor, PUBLIC_REASONS, type RegistryResolver, verifierFor } from '../shared/request';
+import { BackendRegistry, backendFromPath, DELEGATION_ROUTE, isValidBackendName, type RegistryEntry, RegistryError, routeFromPath } from '../shared/registry';
+import { authorityFor, delegationVerifierFor, PUBLIC_REASONS, type RegistryResolver, verifierFor } from '../shared/request';
 import { TENANT_HEADER } from '../shared/tenant';
 import { bearerToken, TokenError, type TokenVerifier } from '../shared/verifier';
 
@@ -37,9 +38,11 @@ import { bearerToken, TokenError, type TokenVerifier } from '../shared/verifier'
 export interface AuthorizerDependencies {
   readonly verifier: Pick<TokenVerifier, 'verify'>;
   readonly registry: RegistryResolver;
-  readonly authority: Pick<AuthorityResolver, 'resolve'>;
+  readonly authority: Pick<AuthorityResolver, 'resolve' | 'delegate'> | Pick<AuthorityResolver, 'resolve'>;
   /** The backend served at the bare `/invocations` route; undefined when there is none. */
   readonly defaultBackend?: string;
+  /** (ADR-0048) The delegation module and the caller-token verifier; both present or both absent. */
+  readonly delegation?: { readonly config: DelegationConfig; readonly verify: DelegationTokenVerifier };
   /** Resolves once init's fetches are done (ADR-0023); the first request awaits it. */
   readonly ready?: Promise<void>;
 }
@@ -55,6 +58,9 @@ export interface AuthorizerContext {
   readonly txn: string;
   readonly grantSize: string;
   readonly mint: 'hit' | 'miss';
+  /** (ADR-0048) On the delegation route: the calling agent and the chain length after this hop. */
+  readonly delegatedFrom?: string;
+  readonly depth?: string;
 }
 
 /** The policy for one method ARN. Allow carries the context; Deny carries at most a public reason code. */
@@ -64,7 +70,8 @@ export function buildPolicy(
   context?: AuthorizerContext,
   reason?: string,
 ): APIGatewayAuthorizerResult {
-  const denyContext = reason !== undefined && PUBLIC_REASONS.has(reason) ? { reason } : undefined;
+  // `reason` for the access log, `reasonSuffix` for the ACCESS_DENIED body (`forbidden$context.authorizer.reasonSuffix`).
+  const denyContext = reason !== undefined && PUBLIC_REASONS.has(reason) ? { reason, reasonSuffix: `: ${reason}` } : undefined;
   return {
     principalId: context?.sub ?? 'unauthorized',
     policyDocument: {
@@ -89,9 +96,102 @@ function backendOf(event: APIGatewayRequestAuthorizerEvent, defaultBackend: stri
   return backendFromPath(event.path, defaultBackend);
 }
 
+/** Whether the event is for `/{backend}/delegations` (ADR-0048); the target is the path parameter. */
+function delegationTarget(event: APIGatewayRequestAuthorizerEvent): string | undefined {
+  const route = routeFromPath(event.path);
+  return route?.route === DELEGATION_ROUTE ? route.backend : undefined;
+}
+
+/**
+ * (ADR-0048, spec §3.7, §5.1.1) The delegation route: the bearer is a
+ * transaction token this ingress minted; the caller's and the target's
+ * registry entries are read; the authority step runs the three delegation
+ * checks and mints the replacement token. The Allow context carries the
+ * target as `backend`, plus `delegatedFrom` and `depth`.
+ */
+async function authorizeDelegation(
+  event: APIGatewayRequestAuthorizerEvent,
+  target: string,
+  deps: AuthorizerDependencies,
+): Promise<APIGatewayAuthorizerResult> {
+  const fields = { ingress: 'api-gateway', component: 'authorizer', route: DELEGATION_ROUTE };
+  if (deps.delegation === undefined || !('delegate' in deps.authority)) {
+    // The route exists only with the module; a request here without it is a deployment fault.
+    log.error('delegation refused', { ...fields, to: target, reason: 'delegation_unavailable', status: 502 });
+    return buildPolicy(event.methodArn, 'Deny');
+  }
+  let caller: DelegationCaller;
+  try {
+    caller = await deps.delegation.verify(bearerToken(headerValue(event.headers, 'authorization')));
+  } catch {
+    log.warn('delegation refused', { ...fields, to: target, reason: 'token_invalid', status: 401 });
+    return buildPolicy(event.methodArn, 'Deny');
+  }
+  const attributed = { ...fields, tenantId: caller.tenantId, from: caller.agent, to: target, depth: caller.chain.length + 1, txn: caller.txn };
+  const resolve = async (name: string): Promise<RegistryEntry | undefined> => {
+    try {
+      return await deps.registry.resolve(name);
+    } catch (error) {
+      if (error instanceof RegistryError) {
+        log.warn('delegation refused', { ...attributed, backend: name, reason: error.reason });
+      } else {
+        log.error('authorizer failed', { ...attributed, backend: name, error: errorName(error) });
+      }
+      return undefined;
+    }
+  };
+  // Spec §5.1.1 order: the caller's entry, the three delegation checks, then the target's
+  // entry, so an undeclared target is 403 whether or not it exists.
+  const callerEntry = await resolve(caller.agent);
+  if (callerEntry === undefined) {
+    return buildPolicy(event.methodArn, 'Deny');
+  }
+  try {
+    checkDelegation(caller, target, callerEntry, deps.delegation.config.maxDepth);
+  } catch (error) {
+    if (error instanceof AuthorityError) {
+      log.warn('delegation refused', { ...attributed, reason: error.reason, status: error.status });
+      return buildPolicy(event.methodArn, 'Deny', undefined, error.reason);
+    }
+    throw error;
+  }
+  const targetEntry = await resolve(target);
+  if (targetEntry === undefined) {
+    return buildPolicy(event.methodArn, 'Deny');
+  }
+  try {
+    const authority = await deps.authority.delegate(caller, target, targetEntry, callerEntry, deps.delegation.config.maxDepth);
+    log.info('delegation admitted', { ...attributed, grantSize: authority.grantSize, noToolsGranted: authority.noToolsGranted });
+    return buildPolicy(event.methodArn, 'Allow', {
+      tenantId: caller.tenantId,
+      sub: caller.sub,
+      backend: target,
+      runtimeArn: targetEntry.runtimeArn,
+      transactionToken: authority.token,
+      txn: authority.txn,
+      grantSize: String(authority.grantSize),
+      mint: authority.mint,
+      delegatedFrom: caller.agent,
+      depth: String(caller.chain.length + 1),
+    });
+  } catch (error) {
+    if (error instanceof AuthorityError) {
+      log.warn('delegation refused', { ...attributed, reason: error.reason, status: error.status });
+      return buildPolicy(event.methodArn, 'Deny', undefined, error.reason);
+    }
+    log.error('authorizer failed', { ...attributed, error: errorName(error) });
+    return buildPolicy(event.methodArn, 'Deny');
+  }
+}
+
 /** The authoriser's logic (unit-tested directly). */
 export async function authorize(event: APIGatewayRequestAuthorizerEvent, deps: AuthorizerDependencies): Promise<APIGatewayAuthorizerResult> {
   await deps.ready;
+  // ADR-0048: `/<target>/delegations` takes a transaction token, never an identity token.
+  const target = delegationTarget(event);
+  if (target !== undefined) {
+    return authorizeDelegation(event, target, deps);
+  }
   const fields = { ingress: 'api-gateway', component: 'authorizer' };
   let tenantId: string;
   let sub: string;
@@ -180,7 +280,9 @@ function defaultDependencies(): AuthorizerDependencies {
     throw new Error('The API Gateway authoriser mints the transaction token: RI_TXN_KEY_ID must be set');
   }
   const ready = Promise.all([verifier.warm(), registry.warm(config.registry.defaultBackend)]).then(() => undefined);
-  return { verifier, registry, authority, defaultBackend: config.registry.defaultBackend, ready };
+  const verify = delegationVerifierFor(config);
+  const delegation = config.delegation === undefined || verify === undefined ? undefined : { config: config.delegation, verify };
+  return { verifier, registry, authority, defaultBackend: config.registry.defaultBackend, ready, delegation };
 }
 
 let deps: AuthorizerDependencies | undefined = isLambdaRuntime() ? defaultDependencies() : undefined;

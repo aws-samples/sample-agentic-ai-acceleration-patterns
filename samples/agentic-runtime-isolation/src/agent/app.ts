@@ -81,6 +81,8 @@ export interface AgentReport {
   readonly tokenScope: string | null;
   readonly tokenAud: string[] | null;
   readonly tokenActSub: string | null;
+  /** (ADR-0048) The agents that delegated to this one, outermost first, read from the nested `act`; empty on a direct call. */
+  readonly chain: string[];
   readonly tokenExp: number | null;
   /** (v2, step 11) The token's `iss`, `typ`, `kid`, `sub` and `user`. */
   readonly tokenIss: string | null;
@@ -105,6 +107,8 @@ export interface ReportedClaims {
   readonly scope?: string;
   readonly aud?: string[];
   readonly actSub?: string;
+  /** (ADR-0048) The `agent:` entries of a nested `act`, outermost first. */
+  readonly chain?: string[];
   readonly exp?: number;
   readonly iss?: string;
   readonly sub?: string;
@@ -161,6 +165,12 @@ export function unverifiedClaims(token: string): ReportedClaims | null {
       header = {};
     }
     const act = parsed.act as Record<string, unknown> | undefined;
+    const chain: string[] = [];
+    for (let level = act, depth = 0; level !== undefined && depth < 8; level = level.act as Record<string, unknown> | undefined, depth += 1) {
+      if (typeof level.sub === 'string' && level.sub.startsWith('agent:') && level.act !== undefined) {
+        chain.push(level.sub.slice('agent:'.length));
+      }
+    }
     const text = (v: unknown) => (typeof v === 'string' ? v : undefined);
     return {
       iss: text(parsed.iss),
@@ -173,6 +183,7 @@ export function unverifiedClaims(token: string): ReportedClaims | null {
       scope: typeof parsed.scope === 'string' ? parsed.scope : undefined,
       aud: Array.isArray(parsed.aud) ? parsed.aud.filter((a): a is string => typeof a === 'string') : undefined,
       actSub: typeof act?.sub === 'string' ? act.sub : undefined,
+      chain,
       exp: typeof parsed.exp === 'number' ? parsed.exp : undefined,
     };
   } catch {
@@ -187,6 +198,18 @@ export function promptOf(body: string): string | undefined {
     const nested = parsed.input as Record<string, unknown> | undefined;
     const prompt = parsed.prompt ?? nested?.prompt;
     return typeof prompt === 'string' && prompt.length <= MAX_PROMPT_CHARS ? prompt : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** (ADR-0048) The validated `conversationId` the ingress forwards with the prompt, when sessions are on. */
+export function conversationIdOf(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body === '' ? '{}' : body) as Record<string, unknown>;
+    const nested = parsed.input as Record<string, unknown> | undefined;
+    const id = parsed.conversationId ?? nested?.conversationId;
+    return typeof id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : undefined;
   } catch {
     return undefined;
   }
@@ -248,6 +271,7 @@ export async function buildReport(
     tokenScope: claims?.scope ?? null,
     tokenAud: claims?.aud ?? null,
     tokenActSub: claims?.actSub ?? null,
+    chain: claims?.chain ?? [],
     tokenExp: claims?.exp ?? null,
     tokenIss: claims?.iss ?? null,
     tokenTyp: claims?.typ ?? null,
@@ -328,6 +352,66 @@ export interface AgentOptions {
   readonly toolsGatewayUrls?: Readonly<Record<string, string>>;
   /** (v2) The HTTP client for the tools gateway; tests inject one. */
   readonly fetch?: typeof fetch;
+  /**
+   * (ADR-0048) The `api-gateway` base URL to delegate through
+   * (RI_DELEGATION_URL); the agent posts to `<url>/<agent>/delegations`
+   * with its transaction token. Unset: the `delegate` probe answers
+   * `NoDelegation`.
+   */
+  readonly delegationUrl?: string;
+  /** (ADR-0048) The conversation this request is in, forwarded to a delegation so the target's session is the same conversation. */
+  readonly conversationId?: string;
+}
+
+/** (ADR-0048, C-2) The delegation probe in a prompt: `delegate <agent> <prompt>`. */
+export function delegateProbe(prompt: string): { agent: string; prompt: string } | undefined {
+  const match = /^delegate\s+([a-z0-9-]{1,32})\s+([\s\S]+)$/.exec(prompt);
+  return match === null ? undefined : { agent: match[1], prompt: match[2].trim() };
+}
+
+/**
+ * (ADR-0048, C-2) Posts `prompt` to `<delegationUrl>/<agent>/delegations` with
+ * the transaction token as bearer and relays the answer: the target's SSE
+ * events are forwarded as they arrive (wrapped as `delegated` events), a
+ * refusal is one `error` event with the status and the fixed body.
+ */
+export async function delegateTo(
+  delegationUrl: string,
+  agent: string,
+  prompt: string,
+  token: string,
+  conversationId: string | undefined,
+  write: (event: string) => void,
+  fetcher: typeof fetch = fetch,
+): Promise<void> {
+  // With `identity.multiTenant` the api-gateway authoriser lists X-Tenant-Id as an identity
+  // source, so a request without it is API Gateway's own 401 before the authoriser runs. The
+  // route itself takes the tenant from the token; the header only has to be present and equal.
+  const tenantId = unverifiedClaims(token)?.tenant_id;
+  const response = await fetcher(`${delegationUrl.replace(/\/$/, '')}/${agent}/delegations`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'authorization': `Bearer ${token}`,
+      ...(tenantId === undefined ? {} : { 'x-tenant-id': tenantId }),
+    },
+    body: JSON.stringify({ prompt, ...(conversationId === undefined ? {} : { conversationId }) }),
+  });
+  if (!response.ok || response.body === null) {
+    const text = (await response.text()).slice(0, 200);
+    write(sseEvent({ error: 'DelegationRefused', status: response.status, body: text }, 'error'));
+    return;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    // The target's stream is SSE too; each chunk is relayed as data of a `delegated` event, never parsed.
+    write(sseEvent({ agent, chunk: decoder.decode(value, { stream: true }) }, 'delegated'));
+  }
 }
 
 /** (v2) The tool probe in a prompt: `tools`, or `tool <target>/<tool> <json>`. */
@@ -728,6 +812,27 @@ export async function respond(
     return;
   }
 
+  const delegation = delegateProbe(prompt);
+  if (delegation !== undefined) {
+    const token = headerValue(headers, RUNTIME_HEADERS.TRANSACTION_TOKEN);
+    sink.head(200, SSE_HEADERS);
+    if (token === undefined) {
+      sink.write(sseEvent({ error: 'NoTransactionToken' }, 'error'));
+    } else if (options.delegationUrl === undefined) {
+      sink.write(sseEvent({ error: 'NoDelegation' }, 'error'));
+    } else {
+      try {
+        const write = (event: string) => sink.write(event);
+        await delegateTo(options.delegationUrl, delegation.agent, delegation.prompt, token, options.conversationId, write, options.fetch);
+      } catch (error) {
+        sink.write(sseEvent({ error: error instanceof Error ? error.name : 'unknown' }, 'error'));
+      }
+    }
+    sink.write(usageEvent(zero));
+    sink.end();
+    return;
+  }
+
   const probe = toolProbe(prompt);
   if (probe !== undefined) {
     const token = headerValue(headers, RUNTIME_HEADERS.TRANSACTION_TOKEN);
@@ -826,13 +931,15 @@ async function serve(req: IncomingMessage, res: ServerResponse, options: AgentOp
     res.end(JSON.stringify({ status: 'Healthy' }));
     return;
   }
-  const prompt = promptOf(await readBody(req));
+  const body = await readBody(req);
+  const prompt = promptOf(body);
   if (prompt === undefined) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: `prompt must be a string of at most ${MAX_PROMPT_CHARS} characters` }));
     return;
   }
-  await respond(req.headers, prompt, options, sinkFor(req, res));
+  // ADR-0048: a delegation stays in this request's conversation when the ingress forwarded one.
+  await respond(req.headers, prompt, { ...options, conversationId: conversationIdOf(body) }, sinkFor(req, res));
 }
 
 /** Starts the HTTP server the Runtime talks to. Not called under test. */
@@ -842,6 +949,7 @@ export function main(): void {
     modelId: process.env[AGENT_ENV.MODEL_ID],
     toolsGatewayUrl: process.env[AGENT_ENV.TOOLS_GATEWAY_URL],
     toolsGatewayUrls: parseGatewayUrls(process.env[AGENT_ENV.TOOLS_GATEWAY_URLS]),
+    delegationUrl: process.env[AGENT_ENV.DELEGATION_URL],
   };
   createServer((req, res) => {
     serve(req, res, options).catch(() => {

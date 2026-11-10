@@ -11,7 +11,7 @@
 
 import type { JwsAlgorithm } from './jws';
 import type { IngressKind } from './metrics';
-import { MAX_TRANSACTION_TTL_SECONDS, MIN_TRANSACTION_TTL_SECONDS, type MintConfig } from './mint';
+import { MAX_DELEGATION_DEPTH, MAX_TRANSACTION_TTL_SECONDS, MIN_TRANSACTION_TTL_SECONDS, type MintConfig } from './mint';
 import type { SessionScope } from './session';
 
 /** A backend name: lower-case letters, digits and hyphens, 1 to 32 characters (ADR-0024). */
@@ -61,6 +61,8 @@ export const ENV = {
   TXN_CACHE_MAX_ENTRIES: 'RI_TXN_CACHE_MAX_ENTRIES',
   /** (v2) The ingress role ARN, written into every token as `act.sub`. */
   INGRESS_ROLE_ARN: 'RI_INGRESS_ROLE_ARN',
+  /** (ADR-0048) Set on the `api-gateway` functions when `agentDelegation` is on: the most agents a chain may hold after a hop, 1 to 3. Unset: no delegation route. */
+  DELEGATION_MAX_DEPTH: 'RI_DELEGATION_MAX_DEPTH',
 } as const;
 
 /** Environment variables the construct sets for the agent process (src/agent/app.ts reads them). */
@@ -75,6 +77,8 @@ export const AGENT_ENV = {
   TOOLS_GATEWAY_URLS: 'RI_TOOLS_GATEWAY_URLS',
   /** (v2) The transaction-token issuer, so the agent can verify the token with the published JWKS if it wants to. */
   ISSUER: 'RI_ISSUER',
+  /** (ADR-0048) The `api-gateway` base URL; the agent appends `/<agent>/delegations`. Unset when the ingress has no delegation route. */
+  DELEGATION_URL: 'RI_DELEGATION_URL',
 } as const;
 
 export interface TvmConfig {
@@ -107,6 +111,12 @@ export interface RegistryConfig {
   readonly account?: string;
 }
 
+/** (ADR-0048) The delegation route's one setting (spec §3.3 `agentDelegation`). */
+export interface DelegationConfig {
+  /** The most agents a chain may hold after the hop, 1 to MAX_DELEGATION_DEPTH. */
+  readonly maxDepth: number;
+}
+
 export interface IngressConfig {
   readonly ingress: IngressKind;
   readonly discoveryUrl: string;
@@ -132,6 +142,10 @@ export interface IngressConfig {
   readonly entitlementsTable?: string;
   /** (v2) Set only on the function that mints the transaction token. */
   readonly mint?: MintConfig;
+  /** (ADR-0048) Set on the `api-gateway` functions when the delegation route exists. */
+  readonly delegation?: DelegationConfig;
+  /** (ADR-0048) The ingress role ARN on a function that does not mint but verifies a caller's chain; the minting function reads it from `mint`. */
+  readonly ingressRoleArn?: string;
 }
 
 function positiveInteger(name: string, value: string | undefined, allowZero = false): number | undefined {
@@ -258,7 +272,24 @@ export function readIngressConfig(env: NodeJS.ProcessEnv = process.env): Ingress
     registry: readRegistryConfig(env),
     entitlementsTable: optional(env[ENV.ENTITLEMENTS_TABLE]),
     mint: readMintConfig(env),
+    delegation: readDelegationConfig(env, ingress),
+    ingressRoleArn: optional(env[ENV.INGRESS_ROLE_ARN]),
   };
+}
+
+/** The delegation setting (ADR-0048), present only with `RI_DELEGATION_MAX_DEPTH`; valid on `api-gateway` alone. */
+export function readDelegationConfig(env: NodeJS.ProcessEnv, ingress: IngressKind): DelegationConfig | undefined {
+  const maxDepth = positiveInteger(ENV.DELEGATION_MAX_DEPTH, env[ENV.DELEGATION_MAX_DEPTH]);
+  if (maxDepth === undefined) {
+    return undefined;
+  }
+  if (maxDepth > MAX_DELEGATION_DEPTH) {
+    throw new Error(`${ENV.DELEGATION_MAX_DEPTH} must be from 1 to ${MAX_DELEGATION_DEPTH}`);
+  }
+  if (ingress !== 'api-gateway') {
+    throw new Error(`${ENV.DELEGATION_MAX_DEPTH} is valid only on the api-gateway ingress`);
+  }
+  return { maxDepth };
 }
 
 /**

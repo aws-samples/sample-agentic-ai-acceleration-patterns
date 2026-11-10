@@ -75,6 +75,52 @@ export function toolsGatewaysOf(aud: readonly unknown[]): string[] {
 }
 /** The agent audience prefix: `agent:<backend>`. */
 export const AGENT_AUDIENCE_PREFIX = 'agent:';
+
+/**
+ * The `act` claim (RFC 8693 §4.1). A token minted from an identity token
+ * carries `{ sub: <ingress role ARN> }`. A replacement token minted for a
+ * delegation (spec §3.7, ADR-0048) nests the calling agent over the caller's
+ * own `act`, so the innermost `sub` is always the ingress role and the chain
+ * of agents reads from the outside in.
+ */
+export interface ActClaim {
+  readonly sub: string;
+  readonly act?: ActClaim;
+}
+
+/** The most agents a chain may hold after a hop (spec §3.3, `agentDelegation.maxDepth`). */
+export const MAX_DELEGATION_DEPTH = 3;
+
+/**
+ * The agents named in an `act` chain, outermost first (`agent:` prefix
+ * removed), or undefined when the chain is not well formed: a level that is
+ * not an object with a string `sub`, an outer level whose `sub` is not an
+ * `agent:` entry, or an innermost `sub` that is not the ingress role. Bounded
+ * at MAX_DELEGATION_DEPTH + 1 levels, so a hostile token cannot drive a long
+ * walk.
+ */
+export function agentChainOf(act: unknown, ingressRoleArn: string): string[] | undefined {
+  const chain: string[] = [];
+  let level: unknown = act;
+  for (let depth = 0; depth <= MAX_DELEGATION_DEPTH; depth += 1) {
+    if (typeof level !== 'object' || level === null || Array.isArray(level)) {
+      return undefined;
+    }
+    const { sub, act: inner } = level as Record<string, unknown>;
+    if (typeof sub !== 'string') {
+      return undefined;
+    }
+    if (inner === undefined) {
+      return sub === ingressRoleArn ? chain : undefined;
+    }
+    if (!sub.startsWith(AGENT_AUDIENCE_PREFIX) || sub.length === AGENT_AUDIENCE_PREFIX.length) {
+      return undefined;
+    }
+    chain.push(sub.slice(AGENT_AUDIENCE_PREFIX.length));
+    level = inner;
+  }
+  return undefined;
+}
 /** Default bound on cached tokens per ingress instance (spec §3.3). */
 export const DEFAULT_MINT_CACHE_MAX_ENTRIES = 1000;
 
@@ -113,6 +159,22 @@ export interface MintInput {
   readonly gateways: readonly string[];
   /** The versions in the cache key (ADR-0036). */
   readonly versions: { readonly tenant: number; readonly agent: number; readonly plan?: number };
+  /**
+   * (ADR-0048) Set when this is a replacement token for a delegation: the
+   * calling agent, the caller's `act` (nested under the caller) and the
+   * caller's `txn` (copied). Such a token is signed every time, never cached.
+   */
+  readonly delegation?: DelegationInput;
+}
+
+/** What a replacement token takes from the caller's token (spec §3.7). */
+export interface DelegationInput {
+  /** The calling agent's backend name. */
+  readonly from: string;
+  /** The caller's `act`, already verified to end in the ingress role. */
+  readonly act: ActClaim;
+  /** The caller's `txn`. */
+  readonly txn: string;
 }
 
 /** The claims of a transaction token (spec §6.2.2). */
@@ -124,7 +186,7 @@ export interface TransactionClaims {
   readonly agent: string;
   readonly scope: string;
   readonly aud: string[];
-  readonly act: { readonly sub: string };
+  readonly act: ActClaim;
   readonly txn: string;
   readonly iat: number;
   readonly exp: number;
@@ -154,8 +216,8 @@ export function transactionClaims(
     agent: input.agent,
     scope: input.scope,
     aud: [`${AGENT_AUDIENCE_PREFIX}${input.agent}`, ...[...new Set(input.gateways)].sort().map(toolsGatewayAudience)],
-    act: { sub: config.ingressRoleArn },
-    txn: ids.txn,
+    act: input.delegation === undefined ? { sub: config.ingressRoleArn } : { sub: `${AGENT_AUDIENCE_PREFIX}${input.delegation.from}`, act: input.delegation.act },
+    txn: input.delegation === undefined ? ids.txn : input.delegation.txn,
     iat: now,
     exp: now + config.ttlSeconds,
     jti: ids.jti,
@@ -212,10 +274,18 @@ export class TokenMinter {
     this.jti = deps.jti ?? randomUUID;
   }
 
-  /** A token for `input`: from the cache while enough life is left, else a fresh KMS-signed one. */
+  /**
+   * A token for `input`: from the cache while enough life is left, else a
+   * fresh KMS-signed one. A replacement token (`input.delegation`) is signed
+   * every time: its `act` and `txn` are the caller's, so no two delegations
+   * share one (spec §3.7).
+   */
   async mint(input: MintInput): Promise<MintedToken> {
-    const key = mintCacheKey(input);
     const nowSeconds = Math.floor(this.now() / 1000);
+    if (input.delegation !== undefined) {
+      return this.sign(input, nowSeconds);
+    }
+    const key = mintCacheKey(input);
     const cached = this.cache.get(key);
     if (cached !== undefined) {
       if (cached.exp - nowSeconds > this.config.reuseMarginSeconds) {

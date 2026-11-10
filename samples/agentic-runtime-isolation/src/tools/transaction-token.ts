@@ -11,7 +11,7 @@
  */
 
 import { jwtVerify, type JWTPayload, type JWTVerifyGetKey } from 'jose';
-import { AGENT_AUDIENCE_PREFIX, toolsGatewayAudience, TRANSACTION_TOKEN_TYPE } from '../shared/mint';
+import { AGENT_AUDIENCE_PREFIX, agentChainOf, toolsGatewayAudience, TRANSACTION_TOKEN_TYPE } from '../shared/mint';
 
 /** Environment variables of the interceptor. */
 export const TOOLS_ENV = {
@@ -49,6 +49,8 @@ export interface ToolCaller {
   readonly agent: string;
   readonly scope: string;
   readonly txn: string;
+  /** (ADR-0048) The agents that delegated to this one, outermost first; empty for a token minted from an identity token. */
+  readonly chain: readonly string[];
 }
 
 /** Verifies the transaction token (step 1). Throws Refusal. */
@@ -83,9 +85,11 @@ export async function verifyTransactionToken(token: string | undefined, deps: To
   if (!aud.includes(`${AGENT_AUDIENCE_PREFIX}${agent}`)) {
     throw new Refusal('aud_mismatch');
   }
-  const actSub = typeof act === 'object' && act !== null ? (act as Record<string, unknown>).sub : undefined;
-  if (actSub !== deps.config.ingressRoleArn) {
+  // The innermost `act.sub` must be the ingress role; a replacement token
+  // (spec §3.7) nests the delegating agents above it, and they are reported.
+  const chain = agentChainOf(act, deps.config.ingressRoleArn);
+  if (chain === undefined) {
     throw new Refusal('act_missing');
   }
-  return { tenantId, sub, user, agent, scope: typeof scope === 'string' ? scope : '', txn };
+  return { tenantId, sub, user, agent, scope: typeof scope === 'string' ? scope : '', txn, chain };
 }

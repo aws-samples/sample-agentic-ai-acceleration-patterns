@@ -286,6 +286,9 @@ describe('RuntimeIsolationDemoStack', () => {
       expect(billing.Properties.Tools).toEqual(BILLING_TOOLS);
       expect(agent.Properties.Needs).toEqual(DEFAULT_NEEDS);
       expect(agent.Properties.Tools).toEqual(DEFAULT_TOOLS);
+      // ADR-0048: on api-gateway `default` may hand a transaction to `billing`; `billing` delegates to nobody.
+      expect(agent.Properties.DelegatesTo).toEqual(ingress === 'api-gateway' ? [BILLING_BACKEND] : []);
+      expect(billing.Properties.DelegatesTo).toEqual([]);
       expect(stack.billing!.needs).toEqual(BILLING_NEEDS);
       expect(stack.agentBackend.needs).toEqual(DEFAULT_NEEDS);
       // Both Runtimes run the same code and model, with the demo table.
@@ -298,6 +301,8 @@ describe('RuntimeIsolationDemoStack', () => {
           RI_TOOLS_GATEWAY_URL: expect.anything(),
           // (ADR-0041) every tools gateway's endpoint by name.
           RI_TOOLS_GATEWAY_URLS: expect.anything(),
+          // (ADR-0048) the delegation route, api-gateway only.
+          ...(ingress === 'api-gateway' ? { RI_DELEGATION_URL: expect.anything() } : {}),
         });
         expect(runtime.Properties.Tags).toEqual({ 'ri:ingress': stack.ingress.ingressId });
       }

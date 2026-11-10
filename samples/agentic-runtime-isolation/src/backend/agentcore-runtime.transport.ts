@@ -56,9 +56,9 @@ export function customHeaders(request: ValidatedRequest): Record<string, string>
   return headers;
 }
 
-/** The payload the Runtime receives: the prompt and nothing else from the request. */
+/** The payload the Runtime receives: the validated prompt and, with sessions on, the validated conversationId; nothing else from the request. */
 export function runtimePayload(request: ValidatedRequest): Uint8Array {
-  return Buffer.from(JSON.stringify({ prompt: request.prompt }), 'utf8');
+  return Buffer.from(JSON.stringify({ prompt: request.prompt, ...(request.conversationId === undefined ? {} : { conversationId: request.conversationId }) }), 'utf8');
 }
 
 export class AgentCoreRuntimeBackend implements InvokeBackend, HeaderTransportBackend {

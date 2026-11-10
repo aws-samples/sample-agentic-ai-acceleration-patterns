@@ -23,7 +23,8 @@
 #      stack with the vendor operations (SigV4); AA writes A2's cut; seed the
 #      demo items.
 #   3..9, 9-registry, 11..20, 22..24 on both all-on stacks (api-gateway,
-#      agentcore-gateway); 4a, the `scope: 'user'` half of 4b and the limits
+#      agentcore-gateway); 25 (delegation, ADR-0048) on api-gateway, SKIP on
+#      agentcore-gateway; 4a, the `scope: 'user'` half of 4b and the limits
 #      step on their own stacks; 19 (MU) on the multi-tenant stack; 21 on the
 #      api-gateway stack (a redeploy with keyGeneration 2); then the log
 #      sweep and the metrics.
@@ -63,6 +64,11 @@ source "${SAMPLE_DIR}/scripts/lib.sh"
 OUT="cdk.integ.out"
 CDK=(npx cdk --app "$OUT")
 INTEG_APP="npx ts-node -P tsconfig.json --prefer-ts-exts test/integ.runtime.ts"
+# INTEG_DEPLOY_CONCURRENCY (default 6) is the `cdk deploy --all` concurrency. Six
+# stacks each creating a REST API at once trip the API Gateway control-plane
+# throttle in a Region at its default quota (us-east-1, 2026-11-09: CreateModel
+# 429 after five SDK attempts, `RuntimeIsolationInteg-session-user` rolled back);
+# set it to 2 there.
 # INTEG_PREFIX deploys under another stack prefix, beside an earlier run's
 # DELETE_FAILED stacks (CloudFormation refuses updates to them); the leftover
 # check below is scoped to this prefix.
@@ -501,7 +507,7 @@ fi
 mapfile -t SUFFIXES < <(find "$OUT" -maxdepth 1 -name "${STACK_PREFIX}-*.template.json" -printf '%f\n' | sed "s/^${STACK_PREFIX}-//; s/\.template\.json$//" | sort)
 DEPLOYED_SAMPLE=1
 DEPLOY_START=$SECONDS
-"${CDK[@]}" deploy --all --require-approval never --concurrency 6 --outputs-file "$OUTPUTS" >"${LIB_TMP}/deploy.log" 2>&1 \
+"${CDK[@]}" deploy --all --require-approval never --concurrency "${INTEG_DEPLOY_CONCURRENCY:-6}" --outputs-file "$OUTPUTS" >"${LIB_TMP}/deploy.log" 2>&1 \
   || { grep -E "FAILED|Error|error" "${LIB_TMP}/deploy.log" | tail -30 >&2; tail -15 "${LIB_TMP}/deploy.log" >&2; fail "deploy"; }
 note "deployed ${#SUFFIXES[@]} stacks (${SUFFIXES[*]}) in $((SECONDS - DEPLOY_START))s"
 
@@ -610,7 +616,20 @@ stack_vars() { # SUFFIX
   [[ "$REGISTRY_PREFIX" == */ ]] || REGISTRY_PREFIX="${REGISTRY_PREFIX}/"
   INTERCEPTOR_LOGS="$(log_group_like "${STACK_PREFIX}-${s}" ToolsGatewayInterceptorLogs)"
   CRM_LOGS="$(log_group_like "${STACK_PREFIX}-${s}" CrmToolsLogs)"
+  # api-gateway only (ADR-0048): the authoriser's log group, read by step 25.
+  AUTHORIZER_LOGS="$(log_group_like "${STACK_PREFIX}-${s}" SharedIngressAuthorizerLogs)"
 }
+
+# delegation_url AGENT -> the api-gateway delegation route of AGENT (ADR-0048, spec §5.1.1).
+delegation_url() { local u; u="$(backend_url "$ENDPOINT" "$1")"; echo "${u%/invocations}/delegations"; }
+# The target's SSE stream comes back inside `delegated` events (C-2): their chunks, joined, are the target's own SSE.
+delegated_text() { grep '^data: ' "$BODY" | sed 's/^data: //' | jq -r 'select(.chunk != null) | .chunk' 2>/dev/null | tr -d '\r' || true; }
+delegated_report() { delegated_text | grep -m1 '^data: ' | sed 's/^data: //' || true; }
+drf() { delegated_report 2>/dev/null | jq -r "$@" 2>/dev/null || true; }
+# The target's tool result (a `tool` SSE event inside the relayed stream).
+delegated_tool_payload() { delegated_text | awk '/^data: /{sub(/^data: /,""); print}' | jq -c 'select(.tool != null) | .result.content[0].text | fromjson' 2>/dev/null | head -1 || true; }
+# A refusal the agent relayed: "DelegationRefused <status> <body>".
+delegated_error() { grep '^data: ' "$BODY" | sed 's/^data: //' | jq -r 'select(.error != null) | [.error, (.status // "" | tostring), (.body // "")] | join(" ")' 2>/dev/null | head -1 || true; }
 
 # mint_for TENANT SUB AGENT SCOPE GATEWAYS_JSON [EXTRA_JSON] -> a test-mint event.
 mint_event() {
@@ -1045,6 +1064,66 @@ run_all_on() { # SUFFIX
   FILTER_RESTORE=()
   note "filtered to the grant; fail-closed list; call wall unaffected"
   end_step
+
+  if [[ "$INGRESS" != api-gateway ]]; then
+    skip_step "25 ${INGRESS}" "delegation is an api-gateway route (ADR-0048); the Gateway authoriser reads one issuer"
+    return
+  fi
+  begin "25 ${INGRESS}" "delegation (ADR-0048): default hands A1's transaction to billing; same scope as a direct call, chain and txn carried; not_declared, loop, depth, not_subscribed, identity token and route confusion refused"
+  local DELEG_BILLING direct_scope since25
+  DELEG_BILLING="$(delegation_url billing)"
+  issue "$TENANT_A" "$A1_USER" A1
+  status="$(invoke "$BILLING_URL" A1_ACCESS "$(body "$C1" report)")"
+  direct_scope="$(rf .tokenScope)"
+  check "A1's direct call to billing is served (got ${status})" eq "$status" 200
+  since25="$(( $(date +%s) * 1000 ))"
+  status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "$C1" "delegate billing report")")"
+  check "A1 on default delegating to billing: 200 (got ${status}; $(delegated_error))" eq "$status" 200
+  check "the relayed report is billing's (got '$(drf .tokenAgent)')" eq "$(drf .tokenAgent)" billing
+  check "its chain names default (got '$(drf '.chain | join(",")')')" eq "$(drf '.chain | join(",")')" default
+  check "its act.sub is agent:default (got '$(drf .tokenActSub)')" eq "$(drf .tokenActSub)" "agent:default"
+  check "its scope equals A1's direct call to billing (got '$(drf .tokenScope)' vs '${direct_scope}')" eq "$(drf .tokenScope)" "$direct_scope"
+  check "its tenant is A (got '$(drf .tokenTenant)')" eq "$(drf .tokenTenant)" "$TENANT_A"
+  check "a delegation admitted line: from default to billing, depth 1, tenant A" \
+    wait_log "$AUTHORIZER_LOGS" "$since25" '"delegation admitted"' ".from == \"default\" and .to == \"billing\" and .depth == 1 and .tenantId == \"${TENANT_A}\""
+  local parent_txn child_txn
+  parent_txn="$(log_lines "$AUTHORIZER_LOGS" "$since25" '"request authorised"' | jq -r 'select(.agent == "default") | .txn' | head -1)"
+  child_txn="$(log_lines "$AUTHORIZER_LOGS" "$since25" '"delegation admitted"' | jq -r '.txn' | head -1)"
+  check "the replacement token carries the caller's txn (parent '${parent_txn}', child '${child_txn}')" eq "$parent_txn" "$child_txn"
+  status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "$C1" 'delegate billing tool invoices/get_invoice {"invoiceId":"inv-1"}')")"
+  check "billing's tool call on finance is served through the delegation (got '$(delegated_tool_payload | head -c 80)' $(delegated_error))" \
+    jq -e '.invoice.invoiceId == "inv-1"' <<<"$(delegated_tool_payload)"
+  # The ACCESS_DENIED body is exactly `forbidden: <code>` (spec §5.1); the agent relays it as `DelegationRefused 403 <body>`.
+  status="$(invoke "$BILLING_URL" A1_ACCESS "$(body "$C1" "delegate default report")")"
+  check "billing delegating to default: forbidden: delegation_not_declared (got '$(delegated_error)')" eq "$(delegated_error)" "DelegationRefused 403 forbidden: delegation_not_declared"
+  status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "$C1" "delegate default report")")"
+  check "default delegating to itself: delegation_not_declared (synth forbids self in delegatesTo; got '$(delegated_error)')" eq "$(delegated_error)" "DelegationRefused 403 forbidden: delegation_not_declared"
+  status="$(invoke "$ENDPOINT" B1_ACCESS "$(body "$C1" "delegate billing report")")"
+  check "B1 (tenant B holds no billing) delegating to billing: agent_not_subscribed (got '$(delegated_error)')" eq "$(delegated_error)" "DelegationRefused 403 forbidden: agent_not_subscribed"
+  local t25 loop25 deep25
+  mint t25 "$MINT_FN" "$(mint_event "$TENANT_A" "$A1_SUB" default "$DEFAULT_SCOPE_A" '["default"]')"
+  status="$(invoke "$BILLING_URL" t25 "$(body "$C1" report)")"
+  check "a transaction token on /billing/invocations is still refused (got ${status})" status_is "401|403" "$status"
+  check "a refusal without a public code renders the bare text (got '$(body_text | head -c 60)')" eq "$(body_text)" forbidden
+  status="$(invoke "$DELEG_BILLING" t25 "$(body "$C1" report)")"
+  check "the test-minted default token on /billing/delegations is served (got ${status}; $(body_text | head -c 60))" eq "$status" 200
+  loop25=""
+  mint loop25 "$MINT_FN" "$(mint_event "$TENANT_A" "$A1_SUB" default "$DEFAULT_SCOPE_A" '["default"]' \
+    "$(jq -nc --arg r "$INGRESS_ROLE" '{claims: {act: {sub: "agent:billing", act: {sub: $r}}}}')")"
+  status="$(invoke "$DELEG_BILLING" loop25 "$(body "$C1" report)")"
+  check "default with billing already in its chain delegating to billing: 403 forbidden: delegation_loop (got ${status} '$(body_text | head -c 60)')" eq "$(body_text)" "forbidden: delegation_loop"
+  deep25=""
+  mint deep25 "$MINT_FN" "$(mint_event "$TENANT_A" "$A1_SUB" default "$DEFAULT_SCOPE_A" '["default"]' \
+    "$(jq -nc --arg r "$INGRESS_ROLE" '{claims: {act: {sub: "agent:planner", act: {sub: $r}}}}')")"
+  status="$(invoke "$DELEG_BILLING" deep25 "$(body "$C1" report)")"
+  check "a chain already one deep at maxDepth 1: 403 forbidden: delegation_depth (got ${status} '$(body_text | head -c 60)')" eq "$(body_text)" "forbidden: delegation_depth"
+  status="$(invoke "$DELEG_BILLING" A1_ACCESS "$(body "$C1" report)")"
+  check "an identity token on /billing/delegations is refused (got ${status})" status_is "401|403" "$status"
+  check "a delegation refused line with reason delegation_loop, from default to billing" \
+    wait_log "$AUTHORIZER_LOGS" "$since25" '"delegation refused"' '.reason == "delegation_loop" and .from == "default" and .to == "billing"'
+  t25=""; loop25=""; deep25=""
+  note "delegated report from billing with chain [default], same scope and txn as the direct call; not_declared, loop, depth, not_subscribed, identity token and txn-on-invocations all refused"
+  end_step
 }
 
 for INGRESS in "${ALL_ON[@]}"; do run_all_on "$INGRESS"; done
@@ -1200,12 +1279,12 @@ while read -r g; do
     # The Runtime groups carry the data protection policy (ADR-0047): a leaked value is stored masked, so a
     # plain read would show asterisks and the greps below would pass regardless. Read the originals, and
     # treat a failed read as a failure of this step rather than as zero lines.
-    if ! aws logs filter-log-events --log-group-name "$g" --start-time "$RUN_START_MS" --unmask --query 'events[].message' --output json 2>"${LIB_TMP}/sweep-err" | jq -r '.[]' >>"$sweep_file"; then
+    if ! aws logs filter-log-events --log-group-name "$g" --start-time "$RUN_START_MS" --unmask --query 'events[].message' --output json 2>"${LIB_TMP}/sweep-err" | jq -r --arg g "$g" '.[] | $g + "\t" + .' >>"$sweep_file"; then
       unmask_failed=$((unmask_failed + 1))
       echo "  unmask read of ${g} failed: $(head -c 300 "${LIB_TMP}/sweep-err")" >&2
     fi
   else
-    aws logs filter-log-events --log-group-name "$g" --start-time "$RUN_START_MS" --query 'events[].message' --output json 2>/dev/null | jq -r '.[]' >>"$sweep_file" 2>/dev/null || true
+    aws logs filter-log-events --log-group-name "$g" --start-time "$RUN_START_MS" --query 'events[].message' --output json 2>/dev/null | jq -r --arg g "$g" '.[] | $g + "\t" + .' >>"$sweep_file" 2>/dev/null || true
   fi
   swept=$((swept + 1))
 done < <(sort -u "$groups_file")
@@ -1214,6 +1293,11 @@ hits_eyj="$(grep -c 'eyJ' "$sweep_file" || true)"
 hits_sig="$(grep -c -F -f "$SECRETS" "$sweep_file" || true)"
 hits_ctx="$(grep -c -E '_ri_ctx"?[[:space:]]*[:=][[:space:]]*"?[A-Za-z0-9_-]{8,}' "$sweep_file" || true)"
 check "${hits_eyj} log lines hold eyJ" eq "$hits_eyj" 0
+if [[ "$hits_eyj" != 0 ]]; then
+  # Diagnosis only: the log group and the field around the hit, with every eyJ value redacted to its first three
+  # characters. Never a value (CONVENTIONS.md).
+  grep 'eyJ' "$sweep_file" | sed -E 's/eyJ[A-Za-z0-9_.-]*/eyJ<redacted>/g' | cut -c1-220 | sort | uniq -c | sort -rn | head -7 | sed 's/^/  eyJ hit: /' >&2
+fi
 check "${hits_sig} log lines hold a signature segment of a token or context this run used" eq "$hits_sig" 0
 check "${hits_ctx} log lines hold an _ri_ctx value" eq "$hits_ctx" 0
 : >"$sweep_file"

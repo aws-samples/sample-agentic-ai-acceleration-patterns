@@ -47,9 +47,16 @@ import { acknowledgeLambdaFindings, functionProps } from './shared/function.cdk'
 import type { JwsAlgorithm } from './shared/jws';
 import { LogDrain } from './shared/log-drain';
 import type { IngressKind } from './shared/metrics';
-import { DEFAULT_MINT_CACHE_MAX_ENTRIES, DEFAULT_TOOLS_GATEWAY, MAX_TRANSACTION_TTL_SECONDS, MIN_TRANSACTION_TTL_SECONDS, TOOLS_GATEWAY_NAME_PATTERN } from './shared/mint';
+import {
+  DEFAULT_MINT_CACHE_MAX_ENTRIES,
+  DEFAULT_TOOLS_GATEWAY,
+  MAX_DELEGATION_DEPTH,
+  MAX_TRANSACTION_TTL_SECONDS,
+  MIN_TRANSACTION_TTL_SECONDS,
+  TOOLS_GATEWAY_NAME_PATTERN,
+} from './shared/mint';
 import { acknowledgeGranularFinding, nagFindingResource } from './shared/nag';
-import { BACKEND_NAME_PATTERN, INGRESS_TAG_KEY, REGISTRY_BACKENDS_SEGMENT, ROUTE } from './shared/registry';
+import { BACKEND_NAME_PATTERN, DELEGATION_ROUTE, INGRESS_TAG_KEY, REGISTRY_BACKENDS_SEGMENT, ROUTE } from './shared/registry';
 import { LONGEST_STREAM, MAX_DRAIN } from './shared/registry-entry.cdk';
 import { CONVERSATION_ID_PATTERN, type SessionScope } from './shared/session';
 import { TENANT_HEADER, TENANT_ID_PATTERN } from './shared/tenant';
@@ -266,6 +273,21 @@ export interface SharedIngressProps {
    * names its gateway (default `default`). Not together with `toolsGateway`.
    */
   readonly toolsGateways?: Record<string, ToolsGatewayOptions>;
+  /**
+   * (ADR-0048, spec §3.7) Delegation between agents: creates
+   * `POST /{backend}/delegations` on the `api-gateway` ingress, whose bearer
+   * is a transaction token this ingress minted, and sets `RI_DELEGATION_URL`
+   * on every agent. `maxDepth` (1 to 3) is the number of agents a transaction
+   * may pass through after the one the user called. Unset: no route. Not
+   * with the `agentcore-gateway` ingress, and not with `tvm.claimTags` (a
+   * replacement token carries no identity claims).
+   */
+  readonly agentDelegation?: AgentDelegationProps;
+}
+
+/** (ADR-0048) See `SharedIngressProps.agentDelegation`. */
+export interface AgentDelegationProps {
+  readonly maxDepth: 1 | 2 | 3;
 }
 
 /** The props after defaults and validation; what the construct and its tests reason about. */
@@ -310,6 +332,8 @@ export interface ResolvedOptions {
   readonly authorizerCacheTtlSeconds: number;
   /** (v2) */
   readonly entitlements: { readonly adminScope: string; readonly maxAgentsPerTenant: number; readonly maxToolsPerTenant: number };
+  /** (ADR-0048) The delegation route's depth bound; undefined when there is no route. */
+  readonly delegationMaxDepth?: number;
   /** (v2, ADR-0041) The tools gateways by name; empty when `toolsGateway: false`. */
   readonly toolsGateways: Readonly<Record<string, ResolvedToolsGateway>>;
 }
@@ -545,6 +569,19 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
     toolsGateways[DEFAULT_TOOLS_GATEWAY] = resolveToolsGateway(props.toolsGateway ?? {}, 'toolsGateway', fail);
   }
 
+  // ADR-0048: the delegation route lives on the api-gateway ingress; its bearer carries tenant and user only.
+  const delegationMaxDepth = props.agentDelegation?.maxDepth;
+  if (delegationMaxDepth !== undefined) {
+    if (!Number.isInteger(delegationMaxDepth) || delegationMaxDepth < 1 || delegationMaxDepth > MAX_DELEGATION_DEPTH) {
+      fail('agentDelegation.maxDepth', `must be an integer from 1 to ${MAX_DELEGATION_DEPTH} (got ${String(delegationMaxDepth)})`);
+    }
+    if (props.ingress !== 'api-gateway') {
+      fail('agentDelegation', "is valid only with the 'api-gateway' ingress: the Gateway authoriser reads one issuer (ADR-0048)");
+    }
+    if (tvm !== undefined && Object.keys(tvm.claimTags).length > 0) {
+      fail('agentDelegation', 'cannot be combined with tvm.claimTags: a replacement token carries the tenant and the user, no identity claims (ADR-0048)');
+    }
+  }
   return {
     backend,
     ingress: props.ingress,
@@ -565,6 +602,7 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
     authorizerCacheTtlSeconds,
     entitlements: { adminScope, maxAgentsPerTenant, maxToolsPerTenant },
     toolsGateways,
+    ...(delegationMaxDepth === undefined ? {} : { delegationMaxDepth }),
   };
 }
 
@@ -616,6 +654,8 @@ export interface SharedIngressRef {
   readonly tools?: ToolsGatewayRef;
   /** (v2, ADR-0041) Every tools gateway by name; `default` is also `tools`. */
   readonly toolsGateways?: Readonly<Record<string, ToolsGatewayRef>>;
+  /** (ADR-0048) The `api-gateway` base URL an agent delegates through (`<url>/<agent>/delegations`); undefined without the route. */
+  readonly delegationUrl?: string;
 }
 
 /** What each ingress variant hands back to the constructor. */
@@ -737,11 +777,14 @@ export class SharedIngress extends Construct {
       entitlementsTableName: doc.entitlementsTableName,
       tools: toolsGateways[DEFAULT_TOOLS_GATEWAY],
       toolsGateways: names.length > 0 ? toolsGateways : undefined,
+      ...(doc.delegationUrl === undefined ? {} : { delegationUrl: doc.delegationUrl }),
     };
   }
 
   /** The ingress base URL, without a route: `https://.../prod` or the Gateway URL. See `urlFor`. */
   readonly endpointUrl: string;
+  /** (ADR-0048) The base URL agents delegate through; undefined without `agentDelegation`. */
+  readonly delegationUrl?: string;
   /** The one principal every backend trusts (P-1): the integration Lambda's role, or the Gateway's role. */
   readonly ingressRole: iam.IRole;
   /** The role that validates the token and assumes the tenant role: the integration Lambda or the interceptor. */
@@ -831,6 +874,8 @@ export class SharedIngress extends Construct {
     }
     const wiring = options.ingress === 'api-gateway' ? this.apiGatewayIngress(props, options, environment) : this.agentCoreGatewayIngress(props, options, environment);
     this.endpointUrl = wiring.endpointUrl;
+    // ADR-0048: on api-gateway the delegation route shares the base URL; agents append /<agent>/delegations.
+    this.delegationUrl = options.delegationMaxDepth === undefined ? undefined : wiring.endpointUrl;
     this.ingressRole = wiring.ingressRole;
     this.tvmCallerRole = wiring.tvmCallerRole;
     this.logDrain = wiring.logDrain;
@@ -1051,6 +1096,7 @@ export class SharedIngress extends Construct {
       entitlementsApiUrl: this.entitlementsApiUrl,
       ...(this.toolContextKey !== undefined ? { toolContextKeyId: this.toolContextKey.keyId } : {}),
       toolsGateways,
+      ...(this.delegationUrl === undefined ? {} : { delegationUrl: this.delegationUrl }),
     };
     new ssm.StringParameter(this, 'IngressParameter', {
       parameterName: `${this.registryPrefix}${PUBLISHED.ingress}`,
@@ -1181,12 +1227,16 @@ export class SharedIngress extends Construct {
       // (v2) at most 60 s and at most ttl - longest stream: the Allow carries a minted token.
       resultsCacheTtl: Duration.seconds(options.authorizerCacheTtlSeconds),
     });
-    // spec §5.1: the Deny's fixed reason code, when the authoriser set one.
+    // spec §5.1: the Deny's fixed reason code, when the authoriser set one. A gateway
+    // response template substitutes $context variables and evaluates no VTL directive
+    // (integration run 17, 2026-11-09: an #if rendered as literal text), so the authoriser
+    // writes the whole suffix (': <reason>') and the template appends it; without a public
+    // reason the context has no suffix and the body is the bare text.
     api.addGatewayResponse('AccessDenied', {
       type: apigateway.ResponseType.ACCESS_DENIED,
       statusCode: '403',
       templates: {
-        'application/json': '#if($context.authorizer.reason != "")forbidden: $context.authorizer.reason#{else}forbidden#end',
+        'application/json': 'forbidden$context.authorizer.reasonSuffix',
       },
     });
 
@@ -1223,12 +1273,24 @@ export class SharedIngress extends Construct {
       requestValidator: validator,
       requestModels: { 'application/json': bodyModel },
     };
-    api.root
-      .addResource('{backend}')
+    const backendResource = api.root.addResource('{backend}');
+    backendResource
       .addResource(ROUTE)
       .addMethod('POST', integration(), { ...methodOptions, requestParameters: { 'method.request.path.backend': true } });
     if (options.defaultBackend !== undefined) {
       api.root.addResource(ROUTE).addMethod('POST', integration(), methodOptions);
+    }
+    // ADR-0048: the delegation route, same authoriser and integration; the
+    // functions tell the routes apart by path, and the authoriser's cache key
+    // (`context.path`) keeps a caller's Allow per target route.
+    if (options.delegationMaxDepth !== undefined) {
+      backendResource
+        .addResource(DELEGATION_ROUTE)
+        .addMethod('POST', integration(), { ...methodOptions, requestParameters: { 'method.request.path.backend': true } });
+      for (const fn of [authorizerFn, ingressFn]) {
+        fn.addEnvironment(ENV.DELEGATION_MAX_DEPTH, String(options.delegationMaxDepth));
+        fn.addEnvironment(ENV.INGRESS_ROLE_ARN, ingressFn.role!.roleArn);
+      }
     }
 
     const executionLogs = this.node.findChild('ApiExecutionLogs') as logs.LogGroup;
@@ -1463,6 +1525,8 @@ export interface PublishedIngress {
   readonly toolContextKeyId?: string;
   /** Every tools gateway by name (ADR-0041); empty with `toolsGateway: false`. */
   readonly toolsGateways: Readonly<Record<string, PublishedToolsGateway>>;
+  /** (ADR-0048) The base URL of the delegation route; absent without `agentDelegation`. */
+  readonly delegationUrl?: string;
 }
 
 /** The first-synth ref (ADR-0042): placeholder values of the right shape, so the synth that triggers the lookup succeeds. */

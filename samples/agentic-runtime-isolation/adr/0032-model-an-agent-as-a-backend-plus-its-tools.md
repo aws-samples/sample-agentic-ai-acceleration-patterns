@@ -30,3 +30,5 @@ Option 2, computed at the ingress when it mints the transaction token (ADR-0031)
 Easier: an agent is one construct with its compute, its needs and its tools; a reviewer sees an agent's maximum reach in one place. Harder: `AgentBackend.scopes` is renamed `needs` (breaking) and `tools` is added; the registry entry gains `needs` and `tools`. An agent with no granted tools still runs with its `needs`, so a tenant can subscribe to an agent before any of its tools. Follow-up: synth checks that each `tools` entry is `<target>/<tool>`; the e2e suite proves a tool outside the agent's `tools` is absent from `tools/list` and refused on `tools/call`. Revisit if agents need tools chosen at run time, or per-call conditions the intersection cannot express.
 
 Amended by: ADR-0046
+
+**2026-11-09.** Amended by ADR-0048: the registry entry gains `delegatesTo`, the agents this agent may hand work to; the grant of the target is computed per hop for the same tenant and user.

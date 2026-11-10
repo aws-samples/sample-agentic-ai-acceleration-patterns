@@ -27,6 +27,12 @@ export { BACKEND_NAME_PATTERN };
 /** The route suffix under every backend name (spec §5). */
 export const ROUTE = 'invocations';
 
+/** The delegation route suffix, `POST /{backend}/delegations` (spec §3.7, §5.1.1, ADR-0048); `api-gateway` only. */
+export const DELEGATION_ROUTE = 'delegations';
+
+/** Which of the two routes a path names. */
+export type RouteKind = typeof ROUTE | typeof DELEGATION_ROUTE;
+
 /** The tag `AgentBackend` puts on its Runtime at creation; the ingress role's invoke grant is conditioned on it (ADR-0024). */
 export const INGRESS_TAG_KEY = 'ri:ingress';
 
@@ -44,6 +50,8 @@ export interface RegistryEntry {
   readonly needs: string[];
   /** `A.tools` (P-13): `<target>/<tool>` or `<target>/*`. May be empty: the agent then holds only its needs. */
   readonly tools: string[];
+  /** (ADR-0048) The agents this agent may hand a transaction to (spec §3.7). Empty: it cannot delegate. */
+  readonly delegatesTo: string[];
   /** Bumped on every update of the entry; part of the mint cache key (ADR-0036). */
   readonly version: number;
   /** `draining` refuses new requests (404) while running streams finish; the entry is removed afterwards. */
@@ -83,6 +91,8 @@ export const TOOL_SHORT_NAME_PATTERN = /^[a-z0-9_]{1,64}$/;
 export const TOOL_NAME_PATTERN = /^[a-z0-9-]{1,32}\/([a-z0-9_]{1,64}|\*)$/;
 /** The most entries `AgentBackend.tools` may list (spec §3.3). */
 export const MAX_AGENT_TOOLS = 64;
+/** The most entries `AgentBackend.delegatesTo` may list (spec §3.3, ADR-0048). */
+export const MAX_DELEGATES_TO = 32;
 
 /** Whether `need` is a well-formed need name. */
 export function isValidNeedName(need: unknown): need is string {
@@ -150,6 +160,33 @@ export function backendToolsProblem(tools: readonly string[]): string | undefine
   return undefined;
 }
 
+/**
+ * Checks a backend's `delegatesTo` at synth (spec §3.3, ADR-0048): at most
+ * `MAX_DELEGATES_TO`, no duplicates, each a valid backend name, never the
+ * backend's own. Whether a name exists is decided elsewhere (same-app
+ * backends at synth, others at request time). Empty is valid.
+ */
+export function backendDelegatesToProblem(backend: string, delegatesTo: readonly string[]): string | undefined {
+  if (!Array.isArray(delegatesTo)) {
+    return 'must be a list of agent names';
+  }
+  if (delegatesTo.length > MAX_DELEGATES_TO) {
+    return `must list at most ${MAX_DELEGATES_TO} agents (got ${delegatesTo.length})`;
+  }
+  for (const name of delegatesTo) {
+    if (!isValidBackendName(name)) {
+      return `'${String(name)}' must match ${BACKEND_NAME_PATTERN.source}`;
+    }
+    if (name === backend) {
+      return `must not name this agent itself (${backend})`;
+    }
+  }
+  if (new Set(delegatesTo).size !== delegatesTo.length) {
+    return 'must not repeat an agent';
+  }
+  return undefined;
+}
+
 /** The partition a Region belongs to, so an entry's ARN can be checked against the Lambda's own. */
 export function partitionOf(region: string): string {
   if (region.startsWith('cn-')) {
@@ -196,7 +233,7 @@ export function parseRegistryEntry(raw: string, scope: RegistryScope = {}): Regi
     throw new Error('registry entry is not an object');
   }
   const record = value as Record<string, unknown>;
-  const { runtimeArn, needs, tools, version, status } = record;
+  const { runtimeArn, needs, tools, version, status, delegatesTo } = record;
   if ('scopes' in record || needs === undefined || tools === undefined) {
     throw new RegistryEntryV1Error();
   }
@@ -222,13 +259,50 @@ export function parseRegistryEntry(raw: string, scope: RegistryScope = {}): Regi
   if (!Array.isArray(tools) || tools.some((t) => !isValidToolName(t))) {
     throw new Error('registry entry tools must be a list of tool names');
   }
+  // ADR-0048: absent reads as empty, so an entry written before the field existed stays valid.
+  const delegates = delegatesTo === undefined ? [] : delegatesTo;
+  if (!Array.isArray(delegates) || delegates.length > MAX_DELEGATES_TO || delegates.some((d) => !isValidBackendName(d))) {
+    throw new Error('registry entry delegatesTo must be a list of agent names');
+  }
   if (typeof version !== 'number' || !Number.isInteger(version) || version < 1) {
     throw new Error('registry entry version must be a positive integer');
   }
   if (status !== 'active' && status !== 'draining') {
     throw new Error('registry entry status must be active or draining');
   }
-  return { runtimeArn: runtimeArn as string, needs: needs as string[], tools: tools as string[], version, status };
+  return {
+    runtimeArn: runtimeArn as string,
+    needs: needs as string[],
+    tools: tools as string[],
+    delegatesTo: delegates as string[],
+    version,
+    status,
+  };
+}
+
+/**
+ * Reads the route and the backend from a request path (spec §5.1, §5.1.1):
+ * `/<name>/invocations` and `/<name>/delegations` yield the name and the
+ * route; the bare `/invocations` yields `defaultBackend` when one is
+ * configured. There is no bare delegation route. Anything else is undefined.
+ */
+export function routeFromPath(path: string | undefined, defaultBackend?: string): { backend: string; route: RouteKind } | undefined {
+  if (path === undefined) {
+    return undefined;
+  }
+  const segments = path.split('?')[0].split('/').filter((s) => s.length > 0);
+  if (segments.length === 0 || segments.length > 2) {
+    return undefined;
+  }
+  const last = segments[segments.length - 1];
+  if (last !== ROUTE && last !== DELEGATION_ROUTE) {
+    return undefined;
+  }
+  if (segments.length === 1) {
+    return last === ROUTE && defaultBackend !== undefined ? { backend: defaultBackend, route: ROUTE } : undefined;
+  }
+  const name = segments[0];
+  return name !== ROUTE && name !== DELEGATION_ROUTE && isValidBackendName(name) ? { backend: name, route: last } : undefined;
 }
 
 /**
@@ -241,18 +315,8 @@ export function parseRegistryEntry(raw: string, scope: RegistryScope = {}): Regi
  * the route word itself.
  */
 export function backendFromPath(path: string | undefined, defaultBackend?: string): string | undefined {
-  if (path === undefined) {
-    return undefined;
-  }
-  const segments = path.split('?')[0].split('/').filter((s) => s.length > 0);
-  if (segments.length === 0 || segments.length > 2 || segments[segments.length - 1] !== ROUTE) {
-    return undefined;
-  }
-  if (segments.length === 1) {
-    return defaultBackend;
-  }
-  const name = segments[0];
-  return name !== ROUTE && isValidBackendName(name) ? name : undefined;
+  const parsed = routeFromPath(path, defaultBackend);
+  return parsed?.route === ROUTE ? parsed.backend : undefined;
 }
 
 /** Why a lookup produced no backend. */

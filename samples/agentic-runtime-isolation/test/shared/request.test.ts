@@ -474,8 +474,8 @@ describe('forwardedTokenVerifierFor (M-82)', () => {
 
   it('verifies a token against the deployed JWKS document without a fetch and returns its tenant and agent', async () => {
     const verify = forwardedTokenVerifierFor(TXN_ISSUER, jwks);
-    expect(await verify(await mintFor('default'))).toEqual({ tenantId: 'tenant-a', agent: 'default' });
-    expect(await verify(await mintFor('billing'))).toEqual({ tenantId: 'tenant-a', agent: 'billing' });
+    expect(await verify(await mintFor('default'))).toMatchObject({ tenantId: 'tenant-a', agent: 'default', txn: expect.any(String), act: { sub: expect.any(String) } });
+    expect(await verify(await mintFor('billing'))).toMatchObject({ tenantId: 'tenant-a', agent: 'billing' });
   });
 
   it('refuses another typ, another issuer, a missing exp, or an unknown kid (the route fetch fails in a unit test)', async () => {
