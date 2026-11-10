@@ -239,16 +239,16 @@ TO_CREATE=$(( SEEDED > REUSED ? SEEDED - REUSED : 0 ))
 # so it runs only when something is to be created.
 if (( TO_CREATE > 0 )); then
   POOL_ID="$(aws ssm get-parameter --name "${IDENTITY_PREFIX}/userPoolId" --query Parameter.Value --output text)"
-  GROUPS=0; TOKEN=""
+  POOL_GROUPS=0; TOKEN=""
   while :; do
     if [[ -n "$TOKEN" ]]; then page="$(aws cognito-idp list-groups --user-pool-id "$POOL_ID" --limit 60 --next-token "$TOKEN" --output json)"
     else page="$(aws cognito-idp list-groups --user-pool-id "$POOL_ID" --limit 60 --output json)"; fi
-    GROUPS=$(( GROUPS + $(jq '.Groups | length' <<<"$page") ))
+    POOL_GROUPS=$(( POOL_GROUPS + $(jq '.Groups | length' <<<"$page") ))
     TOKEN="$(jq -r '.NextToken // empty' <<<"$page")"
     [[ -n "$TOKEN" ]] || break
   done
-  ROOM=$(( (10000 - GROUPS) / 2 ))
-  echo "pool groups: ${GROUPS} of 10,000; room for ${ROOM} more tenants"
+  ROOM=$(( (10000 - POOL_GROUPS) / 2 ))
+  echo "pool groups: ${POOL_GROUPS} of 10,000; room for ${ROOM} more tenants"
   (( TO_CREATE <= ROOM )) || fail "the identity pool has room for ${ROOM} more tenants, ${TO_CREATE} wanted: lower the tier's tenantsSeeded or --tenants, or free orphan groups (two per tenant, t-<id> and admin-<id>) that no tenant row owns"
 fi
 START=$SECONDS
