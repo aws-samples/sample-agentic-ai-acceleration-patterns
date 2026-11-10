@@ -398,9 +398,9 @@ export class TenantService implements TenantServiceService<CallerContext> {
       // slot on the account and creates the cell (CREATING, tenant slot
       // pre-claimed, accountId set, definition stamped) together with the
       // tenant. Every account refusing → InsufficientCapacityError (R-28),
-      // unless the claim budget was spent on cells that still had room: then
-      // capacity exists and the failure is a retryable ConflictError, not
-      // the terminal "raise maxCells" (ADR-031).
+      // unless the claim budget was spent on candidate cells: the fleet was
+      // changing under the request, so the failure is a retryable
+      // ConflictError, not the terminal "raise maxCells" (ADR-031).
       let created;
       try {
         created = await this.createCellInEligibleAccount(target, makeTenant, now, idempotencyItem);

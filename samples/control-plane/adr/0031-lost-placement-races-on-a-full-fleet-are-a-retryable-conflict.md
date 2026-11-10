@@ -23,3 +23,5 @@ Option 1. `placeIntoExistingCell` returns a `PlacementMiss` with `budgetExhauste
 
 ## Consequences
 `ConflictError`'s model documentation lists the case; `InsufficientCapacityError` keeps its "will not clear by waiting" clause truthfully. Spec R-18 and §7.2 name the race and its outcome; `architecture.md` follows. A unit test provokes the path (five lost races, then `AccountFullError` from the only vendor-owned account) and asserts the 409 is a `ConflictError` with no workflow started. Revisit if a queueing semantics is ever added (ADR-026's own trigger); the budget miss would then park rather than conflict.
+
+**2026-11-10.** The message no longer asserts free capacity. A lost claim means the cell read as ACTIVE with room and the conditional write then failed, whether another request took the slot or an operator moved the cell out of ACTIVE; the loop cannot tell which. The `ConflictError` reads "lost N claim races on candidate cells" and the retry is justified by the fleet changing under the request, not by capacity the code observed.

@@ -405,8 +405,8 @@ was refused), `UnauthorizedError` 401/403, `ResourceNotFoundError` 404 (unknown
 tenant, cell, or account — including an unregistered `CreateTenant.accountId`),
 `ConflictError` 409 (in-flight mutations; occupied-cell and occupied-account
 deletes; `owner` change; cell-not-ACTIVE guards; a `CreateTenant` that lost
-every bounded claim against cells with room while no account had a free
-cell slot — retry, ADR-031; `clientToken` reuse with
+every bounded claim on candidate cells while no account had a free cell
+slot — retry, ADR-031; `clientToken` reuse with
 different parameters, ADR-017), `InsufficientCapacityError` 409 (no eligible
 account has cell capacity; nothing was written; the remedy is an operator
 act — ADR-026), `InternalServerError` 500.

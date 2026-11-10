@@ -35,6 +35,11 @@ describe('sameActChain', () => {
     expect(sameActChain(chain, chain)).toBe(true);
     expect(sameActChain(chain, { act: { act: { sub: INGRESS_ROLE }, sub: 'agent:default' }, sub: 'agent:planner' })).toBe(true);
     expect(sameActChain(chain, { sub: 'agent:planner', act: { sub: 'agent:default', act: ROOT }, extra: 1 })).toBe(true);
+    let legal: ActClaim = ROOT;
+    for (let i = 0; i < MAX_DELEGATION_DEPTH; i += 1) {
+      legal = { sub: `agent:a${i}`, act: legal };
+    }
+    expect(sameActChain(legal, legal)).toBe(true); // MAX_DELEGATION_DEPTH agents plus the root: the deepest legal chain
     expect(sameActChain(chain, { sub: 'agent:planner', act: ROOT })).toBe(false); // one level short
     expect(sameActChain(chain, { sub: 'agent:planner', act: { sub: 'agent:billing', act: ROOT } })).toBe(false);
     expect(sameActChain(chain, { sub: 'agent:planner', act: { sub: 'agent:default', act: { sub: INGRESS_ROLE, act: ROOT } } })).toBe(false); // one level long

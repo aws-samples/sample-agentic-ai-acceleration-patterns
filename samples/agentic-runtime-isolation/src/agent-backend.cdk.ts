@@ -129,7 +129,7 @@ export class AgentBackend extends Construct {
     if (!BACKEND_NAME_PATTERN.test(props.name)) {
       fail('name', `must match ${BACKEND_NAME_PATTERN.source} (got ${props.name})`);
     }
-    // The route words are not names: /<name>/invocations and /<name>/delegations must parse (ADR-0048).
+    // The route words are not names: /<name>/invocations and /<name>/delegations must parse (spec §3.3).
     if (props.name === ROUTE || props.name === DELEGATION_ROUTE) {
       fail('name', `must not be the route word '${props.name}'`);
     }

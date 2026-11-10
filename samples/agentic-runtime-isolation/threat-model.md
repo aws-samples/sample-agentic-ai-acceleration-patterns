@@ -8,7 +8,7 @@ SPDX-License-Identifier: MIT-0
 > (ids T-1 to T-108 and M-1 to M-86; T-14, T-15, T-41, M-8, M-9 and M-31 are
 > [retired with v1](#retired-v1)). T-106 to T-108 and M-84 to M-86 cover
 > delegation between agents (ADR-0048, spec §3.7).
-> Last review 2026-11-09 (delegation review). Last green integration
+> Last review 2026-11-09 (ADR-0048, delegation). Last green integration
 > run: run 18, 2026-11-09, us-east-1, 58 of 58 steps (step 25 SKIP on
 > `agentcore-gateway` by design), commit `7e0f793` on the delegation branch.
 > History is in the [ADRs](./adr/) and the git log.
