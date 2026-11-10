@@ -1394,11 +1394,13 @@ describe('ListCells?accountId= and GetResource.accountId', () => {
 
 describe('PutAccount (§5.3, ADR-027)', () => {
   const putInput = { accountId: TENANT_ACCOUNT_ID, owner: 'TENANT' as const, maxCells: 1, externalId: 'ext-1' };
+  /** The account is not registered yet, so the owner check reads nothing. */
+  const unregistered = () => jest.fn().mockResolvedValue(undefined);
 
   test('probes both roles with the external id, then writes the create-or-replace update', async () => {
     const handshake = jest.fn().mockResolvedValue([]);
     const update = jest.fn().mockResolvedValue(accountRecord({ ...putInput, cellCount: 0 }));
-    const service = makeService({ handshake, accountRepo: { update } });
+    const service = makeService({ handshake, accountRepo: { get: unregistered(), update } });
 
     const output = await service.PutAccount(putInput, context);
 
@@ -1427,7 +1429,7 @@ describe('PutAccount (§5.3, ADR-027)', () => {
           reason: 'does not require the external id (its trust policy has no sts:ExternalId condition; redeploy the pair with externalId)',
         },
       ]),
-      accountRepo: { update },
+      accountRepo: { get: unregistered(), update },
     });
     await expect(service.PutAccount(putInput, context)).rejects.toMatchObject({
       name: 'ValidationException',
@@ -1444,7 +1446,7 @@ describe('PutAccount (§5.3, ADR-027)', () => {
       handshake: jest.fn().mockRejectedValue(
         new HandshakeUnavailableError('arn:aws:iam::222222222222:role/control-plane-cell-provisioning', Object.assign(new Error('Rate exceeded'), { name: 'Throttling' })),
       ),
-      accountRepo: { update },
+      accountRepo: { get: unregistered(), update },
     });
     await expect(service.PutAccount(putInput, context)).rejects.toMatchObject({
       name: 'InternalServerError',
@@ -1456,7 +1458,7 @@ describe('PutAccount (§5.3, ADR-027)', () => {
   test('a tenant-owned account without an externalId is a 400 before the probe runs (§6.4, ADR-029)', async () => {
     const handshake = jest.fn().mockResolvedValue([]);
     const update = jest.fn();
-    const service = makeService({ handshake, accountRepo: { update } });
+    const service = makeService({ handshake, accountRepo: { get: unregistered(), update } });
     await expect(
       service.PutAccount({ accountId: TENANT_ACCOUNT_ID, owner: 'TENANT', maxCells: 1 }, context),
     ).rejects.toMatchObject({ name: 'ValidationException', message: expect.stringContaining('externalId is required') });
@@ -1467,17 +1469,47 @@ describe('PutAccount (§5.3, ADR-027)', () => {
   test('a vendor-owned account may omit the externalId', async () => {
     const handshake = jest.fn().mockResolvedValue([]);
     const update = jest.fn().mockResolvedValue(accountRecord({ cellCount: 0 }));
-    const service = makeService({ handshake, accountRepo: { update } });
+    const service = makeService({ handshake, accountRepo: { get: unregistered(), update } });
     const output = await service.PutAccount({ accountId: ACCOUNT_ID, owner: 'VENDOR', maxCells: 2 }, context);
     expect(handshake).toHaveBeenCalledWith({ accountId: ACCOUNT_ID, externalId: undefined, operatorId: 'op-1' });
     expect(output.account).toMatchObject({ accountId: ACCOUNT_ID, owner: 'VENDOR' });
   });
 
-  test('an owner change on a registered account is a 409 (immutable owner)', async () => {
+  test('an owner change on a registered account is a 409 from the stored record, before any probe (R-24)', async () => {
+    const handshake = jest.fn().mockResolvedValue([]);
+    const update = jest.fn();
     const service = makeService({
-      accountRepo: { update: jest.fn().mockRejectedValue(new ConditionFailedError('owner')) },
+      handshake,
+      accountRepo: { get: jest.fn().mockResolvedValue(accountRecord({ accountId: TENANT_ACCOUNT_ID, owner: 'TENANT' })), update },
+    });
+    await expect(service.PutAccount({ ...putInput, owner: 'VENDOR' }, context)).rejects.toMatchObject({
+      name: 'ConflictError',
+      message: expect.stringContaining('owner is immutable'),
+    });
+    expect(handshake).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('an owner change that lands between the read and the write is still a 409 (the conditional write)', async () => {
+    const service = makeService({
+      accountRepo: {
+        get: unregistered(),
+        update: jest.fn().mockRejectedValue(new ConditionFailedError('owner')),
+      },
     });
     await expect(service.PutAccount({ ...putInput, owner: 'VENDOR' }, context)).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  test('re-registering with the same owner probes and replaces the policy fields', async () => {
+    const handshake = jest.fn().mockResolvedValue([]);
+    const update = jest.fn().mockResolvedValue(accountRecord({ ...putInput, maxCells: 3, cellCount: 1 }));
+    const service = makeService({
+      handshake,
+      accountRepo: { get: jest.fn().mockResolvedValue(accountRecord({ ...putInput, cellCount: 1 })), update },
+    });
+    const output = await service.PutAccount({ ...putInput, maxCells: 3 }, context);
+    expect(handshake).toHaveBeenCalledTimes(1);
+    expect(output.account).toMatchObject({ accountId: TENANT_ACCOUNT_ID, owner: 'TENANT', maxCells: 3, cellCount: 1 });
   });
 });
 

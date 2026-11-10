@@ -113,8 +113,9 @@ table the script prints holds 58 steps.
 
 A run takes **about 45 minutes** and costs **about $3 per run** at on-demand
 rates, mostly AgentCore Runtime session time and the Gateways across six
-stacks. Last green integration run: run 15, 2026-11-06, eu-central-1,
-58/58 steps; timings and coverage are in the
+stacks. Last green integration run: run 18, 2026-11-09, us-east-1, 58/58
+steps (step 25 SKIP on `agentcore-gateway` by design); timings and coverage
+are in the
 [`architecture.md` status block](./architecture.md).
 
 ## After an interruption

@@ -81,9 +81,9 @@ export class AuthorityResolver {
    * (ADR-0048, spec §3.7) Decides a delegation from `caller` to `target` and
    * mints the replacement token. The three delegation checks run first and
    * cost nothing: the caller's registry entry must name the target
-   * (`delegation_not_declared`), the chain after the hop must fit `maxDepth`
-   * (`delegation_depth`), and the target must be neither the caller nor an
-   * agent already in the chain (`delegation_loop`). Then the target is
+   * (`delegation_not_declared`), the target must be neither the caller nor an
+   * agent already in the chain (`delegation_loop`), and the chain after the
+   * hop must fit `maxDepth` (`delegation_depth`). Then the target is
    * granted exactly as a direct call by the same tenant and user would be,
    * and the token is minted with the caller nested in `act` and the caller's
    * `txn`, uncached.

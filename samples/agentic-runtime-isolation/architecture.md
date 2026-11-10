@@ -4,21 +4,23 @@ SPDX-License-Identifier: MIT-0
 -->
 # Agentic Runtime Isolation: Architecture
 
-> **Status: implemented and verified.** Last green integration run: run 15,
-> 2026-11-06, eu-central-1, 58/58 steps, deploy 272 s, whole run about 36
-> min, key rotation 172 s, teardown clean (commit 3b2d727 on PR 21). The run
-> used a sandbox
-> account and `scripts/integ.sh` (the CDK CLI driver, ADR-0044) with six
-> stacks (`api-gateway`, `agentcore-gateway`, `session-off`, `session-user`,
-> `limits`, `multi-tenant`); it covered the 2026-11-05 scale changes
-> (`ingressReservedConcurrency`, `toolContextKey.algorithm` and the
-> stage-throttle synth warning). Both all-on stacks ran spec §8 steps 3 to
-> 24: P-1 (direct invoke refused), units and sessions, the grants table,
-> ABAC, model usage, latency, the registry, a late agent and a drain, the
-> headers that reach the agent (no identity token), cuts landing on the next
-> request, the per-tool wall, forged contexts, token expiry, `aud` and `act`
-> refusals, the tool-side TVM, AgentCore Policy time-to-ACTIVE and the
-> RESPONSE filter. Step 9, total time of a `report` call (a one-event
+> **Status: implemented and verified.** Last green integration run: run 18,
+> 2026-11-09 15:44 to 16:55 UTC, us-east-1, 58/58 steps, teardown clean,
+> sweep 0 hits (commit 7e0f793 on PR 27, `INTEG_DEPLOY_CONCURRENCY=2`). The
+> run used a sandbox account and `scripts/integ.sh` (the CDK CLI driver,
+> ADR-0044) with six stacks (`api-gateway`, `agentcore-gateway`,
+> `session-off`, `session-user`, `limits`, `multi-tenant`). Both all-on
+> stacks ran spec §8 steps 3 to 25: P-1 (direct invoke refused), units and
+> sessions, the grants table, ABAC, model usage, latency, the registry, a
+> late agent and a drain, the headers that reach the agent (no identity
+> token), cuts landing on the next request, the per-tool wall, forged
+> contexts, token expiry, `aud` and `act` refusals, the tool-side TVM,
+> AgentCore Policy time-to-ACTIVE, the RESPONSE filter and delegation
+> between agents (step 25, ADR-0048: PASS on `api-gateway`, SKIP on
+> `agentcore-gateway`, which has no delegation route). The timings below
+> are from run 15 (2026-11-06, eu-central-1, 58/58 steps, deploy 272 s,
+> whole run about 36 min, key rotation 172 s), the last run that recorded
+> them. Step 9, total time of a `report` call (a one-event
 > stream, so TTFB is within 1 ms of it), p50/p95: `api-gateway` warm mint
 > cache 0.204/0.247 s, cold 0.229/0.244 s; `agentcore-gateway` warm
 > 0.248/0.306 s, cold 0.308/0.405 s; `stream 10` first byte at about 0.2 to

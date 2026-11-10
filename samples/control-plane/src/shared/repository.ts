@@ -123,12 +123,6 @@ export class PlacementRaceLostError extends ConditionFailedError {
 }
 
 /**
- * A placement transaction was cancelled because the idempotency item's
- * `attribute_not_exists(PK)` condition failed: the caller's `clientToken`
- * was already used by an earlier CreateTenant (ADR-017). The service
- * replays the original outcome instead of onboarding a duplicate.
- */
-/**
  * Thrown by the new-cell placement transaction when the account's cell-slot
  * condition (`cellCount < maxCells`, the FIRST transact item) is the only
  * failed check (ADR-024): the account is full (or was deregistered
@@ -141,6 +135,12 @@ export class AccountFullError extends ConditionFailedError {
   }
 }
 
+/**
+ * A placement transaction was cancelled because the idempotency item's
+ * `attribute_not_exists(PK)` condition failed: the caller's `clientToken`
+ * was already used by an earlier CreateTenant (ADR-017). The service
+ * replays the original outcome instead of onboarding a duplicate.
+ */
 export class DuplicateTokenError extends ConditionFailedError {
   constructor(message: string) {
     super(message);

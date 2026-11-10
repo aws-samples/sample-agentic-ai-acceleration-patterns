@@ -858,11 +858,12 @@ same insert **and** claim the account's cell slot in the same transaction
 
 **R-18 (bounded work):** the candidate loop MUST be bounded so `CreateTenant`
 stays inside the synchronous gateway window. The miss case — every attempt
-loses a race while capacity exists elsewhere — falls through to new-cell
-creation: over-provisioning rather than a failed onboard (P-7). When that
-fall-through meets a full fleet, the request MUST fail with a retryable
-`ConflictError`, not `InsufficientCapacityError`: capacity exists, the
-request did not win it, and a retry will
+loses a race on a cell that read as ACTIVE with room — falls through to
+new-cell creation: over-provisioning rather than a failed onboard (P-7).
+When that fall-through meets a full fleet, the request MUST fail with a
+retryable `ConflictError`, not `InsufficientCapacityError`: the candidates
+were there moments ago and the fleet is changing under the request, so a
+retry may succeed where a terminal error would be wrong
 ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)).
 The account loop is bounded by the number of eligible accounts, which is
 operator-controlled and small.

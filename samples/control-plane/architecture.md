@@ -1,4 +1,4 @@
-# Multi-Tenant Control Plane — Architecture (Cell-Based, Multi-Account)
+# The Cell-Based Control Plane: Architecture
 
 > Status: **Implemented and verified** — the current architecture. The
 > integration test (`test/integ.tenant.ts`) passed against deployed
@@ -502,12 +502,13 @@ counters, two code paths each, all four transactional.
   candidate order (or use power-of-two-choices) to spread claim contention.
 - The candidate budget (at most 5 claim attempts) keeps `CreateTenant`
   comfortably inside the synchronous API Gateway window. Its miss case —
-  every attempt loses a race while capacity still exists elsewhere — falls
-  through to new-cell creation: over-provisioning again rather than a
-  failed onboard. If that fall-through meets a full fleet, the request
-  fails with a retryable `ConflictError` (the loop reports that its budget,
-  not the fleet, ran out), never with the terminal
-  `InsufficientCapacityError` (ADR-031).
+  every attempt loses a race on a cell that read as ACTIVE with room,
+  whether another request took the slot or an operator moved the cell out
+  of ACTIVE — falls through to new-cell creation: over-provisioning again
+  rather than a failed onboard. If that fall-through meets a full fleet,
+  the request fails with a retryable `ConflictError` (the loop reports that
+  its budget, not the fleet, ran out; the fleet was changing under the
+  request), never with the terminal `InsufficientCapacityError` (ADR-031).
 
 A non-`ACTIVE` cell accepts no placements — in particular, a cell stuck in
 `UPDATE_FAILED` removes its remaining capacity from the fleet until an

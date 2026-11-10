@@ -121,6 +121,36 @@ export function agentChainOf(act: unknown, ingressRoleArn: string): string[] | u
   }
   return undefined;
 }
+
+/**
+ * Whether two `act` chains are the same chain: the same `sub` at every level
+ * and the same depth. Compared level by level, so key order and any
+ * property other than `sub` and `act` do not matter. False for anything that
+ * is not a well-formed level, and for a chain deeper than the walk bound.
+ */
+export function sameActChain(a: unknown, b: unknown): boolean {
+  let left: unknown = a;
+  let right: unknown = b;
+  for (let depth = 0; depth <= MAX_DELEGATION_DEPTH; depth += 1) {
+    if (!isActLevel(left) || !isActLevel(right)) {
+      return false;
+    }
+    if (left.sub !== right.sub) {
+      return false;
+    }
+    if (left.act === undefined || right.act === undefined) {
+      return left.act === undefined && right.act === undefined;
+    }
+    left = left.act;
+    right = right.act;
+  }
+  return false;
+}
+
+function isActLevel(level: unknown): level is { sub: string; act?: unknown } {
+  return typeof level === 'object' && level !== null && !Array.isArray(level) && typeof (level as Record<string, unknown>).sub === 'string';
+}
+
 /** Default bound on cached tokens per ingress instance (spec §3.3). */
 export const DEFAULT_MINT_CACHE_MAX_ENTRIES = 1000;
 
