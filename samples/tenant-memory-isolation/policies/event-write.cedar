@@ -7,6 +7,10 @@ permit (
 )
 when {
     principal.hasTag("memory_actor") && principal.hasTag("memory_session") &&
+    // One path segment: an actor such as "tenant-a/shared/x" would extract into
+    // a namespace nested under tenant-a's shared facts.
+    !(principal.getTag("memory_actor") like "*/*") &&
+    !(principal.getTag("memory_actor") like "*:*") &&
     context has input &&
     context.input has actorId && context.input has sessionId &&
     context.input.actorId == principal.getTag("memory_actor") &&

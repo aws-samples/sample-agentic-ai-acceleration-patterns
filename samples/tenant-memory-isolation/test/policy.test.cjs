@@ -29,6 +29,7 @@ const actions = {
   recordId: 'GET:/memories/{memoryId}/memoryRecord/{memoryRecordId}',
   deleteRecord: 'DELETE:/memories/{memoryId}/memoryRecords/{memoryRecordId}',
   extraction: 'POST:/memories/{memoryId}/extractionJobs/start',
+  ingest: 'POST:/memories/{memoryId}/ingest',
 };
 function decide(operation, input, tags = claim, resource = gateway, type = 'AgentCore::OAuthUser') {
   const principal = { type, id: 'synthetic-agent' };
@@ -76,9 +77,17 @@ for (const field of Object.keys(claim)) {
       field === 'memory_namespace' ? namespace : session, tags), 'deny');
   });
 }
-for (const operation of ['list', 'get', 'delete', 'actors', 'sessions', 'recordId', 'deleteRecord', 'extraction']) {
+for (const operation of ['list', 'get', 'delete', 'actors', 'sessions', 'recordId', 'deleteRecord', 'extraction', 'ingest']) {
   test(`no tenant permit for ${operation}`, () =>
     assert.equal(decide(operation, { ...session, ...namespace }), 'deny'));
+}
+for (const actor of ['tenant-a/shared/x', 'tenant-a:x', '/tenant-a']) {
+  test(`create: denies a nested or delimited actor claim ${actor}`, () =>
+    assert.equal(decide('create', { ...session, actorId: actor }, { ...claim, memory_actor: actor }), 'deny'));
+}
+for (const path of ['/tenants/tenant-a/shared/x/shared/', '/tenants/', '/', '/other/tenant-a/shared/']) {
+  test(`retrieve: denies a namespace claim outside one tenant's shared path ${path}`, () =>
+    assert.equal(decide('retrieve', { ...namespace, namespacePath: path }, { ...claim, memory_namespace: path }), 'deny'));
 }
 test('denies client-supplied extraction namespace overrides', () =>
   assert.equal(decide('create', { ...session, extractionConfig: { namespaceVariables: { tenant: 'tenant-b' } } }), 'deny'));

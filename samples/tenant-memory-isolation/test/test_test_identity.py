@@ -3,7 +3,7 @@
 """Tests for the synthetic issuer used only by the live validation deployment."""
 import unittest
 
-from src.test_identity import handler
+from src.test_identity import handler, scope_claims
 
 
 class TestIdentityTest(unittest.TestCase):
@@ -30,6 +30,16 @@ class TestIdentityTest(unittest.TestCase):
         claims = event["response"]["claimsAndScopeOverrideDetails"][
             "accessTokenGeneration"]["claimsToAddOrOverride"]
         self.assertEqual(claims["memory_actor"], "tenant-a")
+
+    def test_namespace_is_always_the_actors_own_shared_path(self):
+        claims = scope_claims("tenant-a", "shopping-001")
+        self.assertEqual(claims["memory_namespace"], f'/tenants/{claims["memory_actor"]}/shared/')
+
+    def test_ids_cannot_span_a_path_segment(self):
+        for tenant, session in [("tenant-a/shared/x", "s-1"), ("tenant-a:x", "s-1"),
+                                ("Tenant-A", "s-1"), ("", "s-1"), ("tenant-a", "s/1")]:
+            with self.subTest(tenant=tenant, session=session), self.assertRaises(ValueError):
+                scope_claims(tenant, session)
 
     def test_unknown_identity_has_no_entitlement(self):
         with self.assertRaises(ValueError):

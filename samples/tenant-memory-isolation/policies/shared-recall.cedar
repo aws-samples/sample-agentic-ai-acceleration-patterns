@@ -10,6 +10,10 @@ permit (
 )
 when {
     principal.hasTag("memory_namespace") &&
+    // Exactly one tenant's shared path: retrieval includes every namespace
+    // under namespacePath, so a broader or deeper claim must not match.
+    principal.getTag("memory_namespace") like "/tenants/*/shared/" &&
+    !(principal.getTag("memory_namespace") like "/tenants/*/*/shared/") &&
     context has input &&
     context.input has namespacePath &&
     context.input.namespacePath == principal.getTag("memory_namespace") &&
