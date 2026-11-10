@@ -570,6 +570,39 @@ call. If the Runtime starts enforcing its documented 4 KB, a token over it
 fails at the Runtime with a 400 (`scope` of about 2 KB); lower
 `MAX_TOKEN_BYTES` and `MAX_SCOPE_BYTES` to match (ADR-0045).
 
+### Where scopes stop
+
+OAuth scopes in the identity token stop when the token has to carry a
+product catalogue per tenant and per user, and then be handed to an agent.
+The limits below are Amazon Cognito's, the identity provider in the demo, as
+of 2026-11-10
+([quotas](https://docs.aws.amazon.com/cognito/latest/developerguide/quotas.html));
+other providers have different numbers and the same shape.
+
+| Limit | Value | At 10,000 tenants and 1,000 tools |
+|---|---|---|
+| Scopes per app client | 50, not adjustable | one app's access token carries at most 50 custom scopes; 1,000 tools do not fit, and 1,000 tools x agents never will |
+| Scopes per resource server; resource servers per pool | 100, not adjustable; 100 (300 max) | at most 30,000 scope names exist in the pool, and they are global, not per tenant |
+| App clients per pool | 1,000 (10,000 max) | an app client per tenant, to give tenants different scope sets, runs out at the tenants |
+| Custom attribute, if scopes are held in `custom:scopes` instead | 2,048 bytes, not adjustable | about 60 `<target>/<tool>` names per user |
+| Pre token generation Lambda, claims plus scopes per token | 5,000 (adjustable) | the ceiling of the fat-token workaround |
+| API Gateway, all request headers combined | 20,480 bytes | the bearer travels in a header, with everything else |
+| AgentCore Runtime custom header | 10,240 bytes enforced (4 KB documented) | anything forwarded to the agent fits here |
+| Access token lifetime | 5 minutes to 1 day | a sold or removed tool reaches the user at the next token, not the next request |
+| Token exchange (RFC 8693) | not offered | nothing downstream can trade a fat token for a narrow one |
+
+Each limit moves as follows:
+
+| Scopes | This sample |
+|---|---|
+| 50 scopes per app client | the grant lives in the transaction token's `scope`, bounded by the 10,240-byte Runtime header; whole targets compress to `<target>/*`, so about 600 explicit tool names or hundreds of whole targets fit, per agent (ADR-0031, ADR-0045) |
+| scope names global to the pool | tenant and user entitlements are rows (`TENANT#<id>`, sparse `TENANT#<id>/USER#<sub>`); an agent's cap is its own registry entry (ADR-0030) |
+| an app client per tenant | one app client; the tenant comes from the token's `tenant_id`, or from `tenants` plus an `X-Tenant-Id` header the token must list (ADR-0038) |
+| a write per tenant for a new tool | a tenant subscribed to `crm/*` holds a new `crm` tool at once; a plan change is one write (ADR-0030) |
+| next token, up to a day | every write bumps the tenant's `version`, which is in the mint cache key: the next request that misses the 60 s authoriser cache (ADR-0036, ADR-0043); a token in flight lives `transactionToken.ttl` (300 s by default) |
+| no token exchange | the ingress does not exchange, it narrows: it mints a new token as an OIDC issuer with JWKS and discovery, signing with a KMS key only it can use (ADR-0031, ADR-0037); there is no RFC 8693 endpoint |
+| the identity provider holds the catalogue | the identity provider holds users and tenants; the Entitlements API holds products, plans, subscriptions and cuts (ADR-0030) |
+
 ## Known limitations
 
 - Revocation lags: a cut or an unsubscription reaches tokens in flight only

@@ -66,27 +66,15 @@ enough when all of these hold:
 - a permission change may wait until the next token.
 
 Scopes stop when the token has to carry a product catalogue per tenant and
-per user, and then be handed to an agent. The limits below are Amazon
-Cognito's, the identity provider in the demo, as of 2026-11-10
-([quotas](https://docs.aws.amazon.com/cognito/latest/developerguide/quotas.html));
-other providers have different numbers and the same shape.
-
-| Limit | Value | At 10,000 tenants and 1,000 tools |
-|---|---|---|
-| Scopes per app client | 50, not adjustable | one app's access token carries at most 50 custom scopes; 1,000 tools do not fit, and 1,000 tools x agents never will |
-| Scopes per resource server; resource servers per pool | 100, not adjustable; 100 (300 max) | at most 30,000 scope names exist in the pool, and they are global, not per tenant |
-| App clients per pool | 1,000 (10,000 max) | an app client per tenant, to give tenants different scope sets, runs out at the tenants |
-| Custom attribute, if scopes are held in `custom:scopes` instead | 2,048 bytes, not adjustable | about 60 `<target>/<tool>` names per user |
-| Pre token generation Lambda, claims plus scopes per token | 5,000 (adjustable) | the ceiling of the fat-token workaround |
-| API Gateway, all request headers combined | 20,480 bytes | the bearer travels in a header, with everything else |
-| AgentCore Runtime custom header | 10,240 bytes enforced (4 KB documented) | anything forwarded to the agent fits here |
-| Access token lifetime | 5 minutes to 1 day | a sold or removed tool reaches the user at the next token, not the next request |
-| Token exchange (RFC 8693) | not offered | nothing downstream can trade a fat token for a narrow one |
-
-Two costs have no quota number: a new tool means a write per tenant (or per
-user) at the identity provider before anyone can hold it, and the identity
-provider learns every product decision (plans, bundles, who bought what,
-admin cuts).
+per user, and then be handed to an agent. At 10,000 tenants and 1,000 tools
+the identity provider's quotas give out first: 50 scopes per app client,
+scope names global to the pool, an app client per tenant, a token that
+changes only at the next token, and no token exchange. The quota table, with
+Amazon Cognito's numbers, is in
+[`architecture.md`](./architecture.md#where-scopes-stop). Two costs have no
+quota number: a new tool means a write per tenant (or per user) at the
+identity provider before anyone can hold it, and the identity provider
+learns every product decision (plans, bundles, who bought what, admin cuts).
 
 Even with unlimited scopes the token would say the wrong thing. A scope
 describes what the user may do; the agent needs what this agent, for this
@@ -106,17 +94,11 @@ in three ways:
   tool and every tenant the user belongs to, for up to a day.
 
 In a pooled platform, use this sample when one of the five conditions above
-breaks. Each limit moves as follows:
-
-| Scopes | This sample |
-|---|---|
-| 50 scopes per app client | the grant lives in the transaction token's `scope`, bounded by the 10,240-byte Runtime header; whole targets compress to `<target>/*`, so about 600 explicit tool names or hundreds of whole targets fit, per agent (ADR-0031, ADR-0045) |
-| scope names global to the pool | tenant and user entitlements are rows (`TENANT#<id>`, sparse `TENANT#<id>/USER#<sub>`); an agent's cap is its own registry entry (ADR-0030) |
-| an app client per tenant | one app client; the tenant comes from the token's `tenant_id`, or from `tenants` plus an `X-Tenant-Id` header the token must list (ADR-0038) |
-| a write per tenant for a new tool | a tenant subscribed to `crm/*` holds a new `crm` tool at once; a plan change is one write (ADR-0030) |
-| next token, up to a day | every write bumps the tenant's `version`, which is in the mint cache key: the next request that misses the 60 s authoriser cache (ADR-0036, ADR-0043); a token in flight lives `transactionToken.ttl` (300 s by default) |
-| no token exchange | the ingress does not exchange, it narrows: it mints a new token as an OIDC issuer with JWKS and discovery, signing with a KMS key only it can use (ADR-0031, ADR-0037); there is no RFC 8693 endpoint |
-| the identity provider holds the catalogue | the identity provider holds users and tenants; the [Entitlements API](#entitlements-api) holds products, plans, subscriptions and cuts (ADR-0030) |
+breaks. The grant lives in a per-agent transaction token, entitlements are
+rows in a store the ingress owns, a change lands on the next request that
+misses the 60 s authoriser cache, and the ingress mints a narrower token
+instead of exchanging one. How each scope limit moves, limit by limit, is in
+[`architecture.md`](./architecture.md#where-scopes-stop).
 
 ## What it is
 
