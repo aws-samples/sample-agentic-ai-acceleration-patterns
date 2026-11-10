@@ -575,97 +575,16 @@ and [0035](./adr/0035-entitle-scopes-per-tenant-on-the-registry-row.md).
 
 ## Deployment integration test
 
-The deployment integration test ([`test/integ.identity.ts`](./test/integ.identity.ts),
-driven by [`scripts/integ.sh`](./scripts/integ.sh)) deploys temporary
-infrastructure into a real account and drives the full lifecycle. Use a
-non-production, CDK-bootstrapped account. Run it in exactly one Region: the
-script fails fast when `AWS_REGION` is unset.
-
 ```bash
 export AWS_REGION=eu-central-1
 npx projen integ
 ```
 
-It deploys **all four stacks at once** (the three topologies and `tiered`) with
-`cdk deploy --all`, runs the spec §10 scenario (steps 1b–9 and
-11, plus the R-6 parameter check) against each, then destroys them at once.
-The scenario registers `sample/read` and `sample/write` in each stack's
-catalogue, entitles tenant A to both and B to read only, and proves on real
-tokens that B cannot narrow to write, that a tenant admin's cut shows in the
-user's next token, that `UpdateTenant` widens B, and that `DeleteScope` drops
-the scope from every token within the 60 s catalogue cache (ADR-0034,
-ADR-0035, ADR-0036).
-In the `tiered` stack the scenario creates one tenant per tier and adds the
-binding-rule refusals (§10 step 12). After the scenario it forces each
-stack's alarms into `ALARM` and fails unless the alarm history shows a
-successful publish to the alarm topic (M-31). The destroy
-always runs, also when the deploy or the scenario fails. Step 11
-leaves one tenant in every stack on purpose, so the destroy also proves the
-stack's own `TenantDrain` (ADR-0022). It also checks for a stack-named REST
-API after destroy; if a failed `PutRestApi` left an untracked API shell, the
-run fails and deletes it at API Gateway's allowed rate (T-33/M-32). The CDK CLI drives the run rather than
-integ-runner, which deploys a test's stacks one at a time (ADR-0023). One run
-with all four stacks took **about 10.5 minutes** (the last green run was 630 s,
-of which two 60 s waits per stack let a `DeleteScope` and a re-registration
-reach the catalogue cache) and cost well under 1 USD. Only the `shared-pool-multi-tenant` stack publishes
-the shared `/application-plane/shared/identity/*` parameters during the test,
-because those names are fixed per account and Region and two stacks cannot own
-the same name (ADR-0017); the scenario checks that the publisher's parameters
-name its own stack. To run beside another deployment of this sample in the
-same account, set `E2E_STACK_PREFIX` (renames the four stacks) and
-`E2E_PUBLISHER=none` (no integ stack publishes the parameters):
-
-```bash
-E2E_STACK_PREFIX=TenantIdentityScopes E2E_PUBLISHER=none AWS_REGION=eu-central-1 scripts/integ.sh
-```
-
-### Joint control-plane mount test
-
-A second deployment integration test
-([`test/integ.control-plane.ts`](./test/integ.control-plane.ts), driven by
-[`scripts/integ-control-plane.sh`](./scripts/integ-control-plane.sh)) proves
-the mount end to end and, per [sample standard §5.2](../../docs/sample-standard.md#5-tests),
-is the **reference implementation of the control-plane wiring**: it deploys
-control-plane through control-plane's own deploy path, never by importing its
-`src/`, and drives the whole flow with only the published parameters and the
-public APIs.
-
-```bash
-export AWS_REGION=eu-central-1
-npx projen integ:control-plane
-```
-
-It stands up `TenantIdentity-shared-pool`, a `TenantIdentityCpSetup` stack (a
-throwaway vendor IdP minting `role: operator` and an S3 bucket holding
-`scripts/control-plane/`), and control-plane itself, then runs the scenario in
-[`test/e2e/control-plane/mount.cp-e2e.test.ts`](./test/e2e/control-plane/mount.cp-e2e.test.ts):
-
-| # | Step | Expected |
-|---|---|---|
-| 1–2 | control-plane `CreateTenant {name, adminEmail=success+…@simulator.amazonses.com}` | 202, cell and tenant poll to `ACTIVE`; `cell/create.sh` found the identity parameters |
-| 3 | tenant-identity `GetTenant(T)` via the test's own SigV4 | 200 `ACTIVE`, same `name` |
-| 4 | tenant-identity `ListUsers(T)` | exactly one user, `admin: true`; `GetTenant` leaks no `firstAdminEmail` |
-| 5 | the parked parameter | `SecureString`, `KeyId` = `adminPasswordKeyArn`; value never printed |
-| 5b | IAM policy simulator, build role, `kms:Decrypt` on the key | `implicitDeny` |
-| 6 | `IssueToken` for the admin with the parked password | 200; access token's `tenant_id` is `T` |
-| 7 | control-plane `UpdateResource(T)` (re-runs `tenant/update.sh`) | `ACTIVE`; still one admin; parked parameter version unchanged |
-| 8 | run `tenant/create.sh` a second time with the build's env | exit 0, `already has its first admin`; still one user and one parameter version |
-| 9 | tenant-identity `CreateTenant` with the existing `tenantId` | 409, nothing changed |
-| 9b | `CreateUser {firstAdmin: true}` (taken slot) then `CreateUser {admin: true}` | 409, then 201 — a second *first* admin is refused, a second admin is allowed |
-| 10–11 | control-plane `DeleteTenant(T)` | completes; `GetTenant(T)` 404; parked parameter gone |
-| 12 | teardown from an exit trap: control-plane, setup, identity | no stack, parameter, user pool, REST API or log group of the run remains; a leftover parked parameter or orphan REST API is deleted and still fails the run |
-
-Step 6 **needs the test-aid routes** (`IssueToken`, ADR-0006, the first
-hardening item below): the test asserts they exist and fails with a clear
-message if they were removed. The run takes **about 11 minutes** observed (the
-spec estimated 25–35) and costs under 1 USD. Every AWS call in the teardown
-trap is guarded, so the trap always reaches its final report. One known
-issue it works around: control-plane's API access log group is recreated
-while its stack is being deleted, because control-plane has no log drain like
-this sample's (ADR-0024). The trap deletes that group and prints a `WARNING`
-naming the control-plane issue instead of failing the run; a recreated
-tenant-identity log group still fails it. The `AdminPasswordKey` stays
-`PendingDeletion` for 7 days after teardown (ADR-0033).
+This deploys the three topologies and `tiered` into a non-production account,
+drives the spec §10 scenario against them, and destroys them, in about 10.5
+minutes for well under 1 USD. A second test, `npx projen integ:control-plane`,
+proves the control-plane mount end to end. What each test stands up, its
+steps, knobs and shortcuts are in [integration-test.md](./integration-test.md).
 
 ## End-to-end demo
 

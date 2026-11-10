@@ -29,7 +29,7 @@ SPDX-License-Identifier: MIT-0
 > the deploy returned. The log sweep read 139 log groups and found 0 token
 > segments; the teardown left no stack, parameter, log group, table, Gateway
 > or policy engine (13 KMS keys pending deletion). The
-> [README integration test](./README.md#deployment-integration-test) has the
+> [integration test](./integration-test.md#steps) has the
 > step table; the [threat model](./threat-model.md#security-review) records
 > the security scans and their dates.
 
@@ -73,7 +73,7 @@ Walls per layer (`ARCHITECTURE.md` §3.3). **IAM** is enforced isolation:
 the service refuses a cross-tenant call when the code is wrong. A **check**
 is vendor code deciding what the agent may do, in front of an IAM wall.
 Boundary ids are the [threat model's](./threat-model.md#assets-and-trust-boundaries);
-proof is the integration step in the [README](./README.md#deployment-integration-test).
+proof is the integration step in [integration-test.md](./integration-test.md#steps).
 
 | Layer | Boundary | Wall | Kind | Code | Proof |
 |---|---|---|---|---|---|

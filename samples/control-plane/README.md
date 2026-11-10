@@ -157,49 +157,14 @@ for it — read it rather than copying the wiring from prose.
 
 ## Deployment integration test
 
-The [AWS CDK integration test](https://docs.aws.amazon.com/cdk/api/v2/docs/integ-tests-alpha-readme.html)
-deploys temporary infrastructure into a real AWS account and exercises the
-complete cell and tenant lifecycle. Use a non-production account that is
-bootstrapped for AWS CDK deployments. Per
-[sample standard §5.2](../../docs/sample-standard.md#5-tests) the test,
-[`test/integ.tenant.ts`](./test/integ.tenant.ts), is the reference
-implementation of this sample's wiring: how the vendor IdP, the stamped
-script source and the `cellDefinition` fit together is read from that file,
-not from prose.
-
-Run it in one explicitly selected Region — the `integ` task pins
-integ-runner to `$AWS_REGION` (overriding its multi-Region defaults) and
-fails fast when the variable is unset:
-
 ```bash
 export AWS_REGION=eu-central-1
 npx projen integ
 ```
 
-The test stands up a throwaway Cognito user pool as the vendor IdP and hosts
-the sample scripts in an S3 bucket as the stamped source, with
-`maxTenants: 2`. It verifies the unauthenticated response, operator
-authentication, implicit creation of the first cell, cell reuse by the second
-tenant, fill-to-capacity, the `clientToken` replay (same request returns the
-original tenant; token reuse with different parameters is a 409), second-cell
-placement for the third tenant, the in-flight and occupied-cell 409 guards,
-reads (including the `?cellId=` filter and the stamped definition via
-`GetResource`/`GetCell`), metadata, resource, and cell updates, and complete
-teardown — tenants, then both cells, leaving the SSM namespaces empty. Every
-operation runs at least once; expect a runtime around 25 minutes. Success is
-reported as one passing integration test.
-
-The runner destroys its CloudFormation stacks after the test by default. If
-execution is interrupted, inspect active stacks containing
-`control-plane-integ` and parameters under `/application-plane/cells/` and
-`/application-plane/tenants/` before removing test resources.
-
-The integ-runner snapshot (`test/integ.tenant.ts.snapshot/`) is intentionally
-not committed: it is generated output that would ship megabytes of bundled
-third-party code (a vendored AWS CLI layer, esbuild-bundled custom-resource
-handlers) with the sample. The `integ` task always runs with `--force`, so
-no workflow depends on a committed snapshot; your local snapshot is kept
-(gitignored) to speed up repeated runs.
+A run takes about 25 minutes and costs the usage of its throwaway resources
+for that time; see [integration-test.md](./integration-test.md) for what it
+stands up, its steps and its knobs.
 
 ## End-to-end demo
 

@@ -49,8 +49,8 @@ import { CellDefinition, TenantStack } from '../src/tenant/tenant.cdk';
  *  12. DeleteCell both cells (202) → poll GetCell until 404; no cells left;
  *      the cell SSM namespaces are empty
  *
- * Run with the single-Region command documented in README.md under
- * "Deployment integration test" (deploys real infrastructure).
+ * Run with the single-Region command documented in integration-test.md
+ * (deploys real infrastructure).
  */
 
 const app = new App();

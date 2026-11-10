@@ -54,6 +54,7 @@ samples/<name>/
 │   ├── README.md             # index: number, title, status, date
 │   └── NNNN-short-title.md   # one file per decision (§2.2)
 ├── threat-model.md           # threats and mitigations (§2.4)
+├── integration-test.md       # how to run the integration test and what it proves (§5.3)
 ├── design/
 │   └── <name>.spec.md        # the specification the sample was built from (§2.1)
 ├── diagrams/
@@ -477,7 +478,7 @@ Either way, the test:
   demonstrated flow, including the failure paths the specification models,
   and teardown. The test passing means the sample can be created, used, and
   destroyed without leaving resources behind.
-- The README states the runtime and approximate cost of one run.
+- Is documented in `integration-test.md` (§5.3), not in the README.
 
 **The integration test is a reference implementation**, not only a check. It
 is the one place where the sample is deployed, wired to what it depends on,
@@ -493,12 +494,38 @@ copy from it, so write it to be read:
   that composition: it deploys the producer through the producer's own
   deploy path and names it explicitly, so the wiring between the two is
   shown once, end to end, and nowhere else has to describe it in prose.
-- Steps are named and ordered as the README's step table is, so the table
-  and the code can be read side by side.
-- The README's integration-test section says so, and points at the file.
+- Steps are named and ordered as the step table in `integration-test.md`
+  is, so the table and the code can be read side by side.
+- `integration-test.md` says so, and points at the file.
 
 Record the date, Region, and coverage of the last green run in the
 `architecture.md` status block.
+
+### 5.3 Integration test document (`integration-test.md`)
+
+One file at the sample root describes the integration test. The README
+carries only the command and a link (§7); everything else about the test
+lives here, so the README stays a guide to the pattern and the test has one
+place that is read next to its code. Sections, in this order, omitting only
+those that do not apply:
+
+1. **What it is**: the test file and its driver, linked; the statement that
+   the test is the reference implementation of the sample's wiring (§5.2),
+   and which composition it is the reference for.
+2. **How to run it**: the account requirements (non-production,
+   CDK-bootstrapped, any account guard), the single-Region rule, the exact
+   `npx projen integ` command, and every environment knob with its default.
+3. **What it stands up**: each stack or fixture the run deploys, what it
+   reuses (a shared fixture it never destroys), and what it tears down.
+4. **Steps**: a table of step name and what it checks, in the order the
+   code runs them.
+5. **Runtime and cost**: the duration and approximate cost of one run, and
+   the last green run (number, date, Region, steps passed) with a link to
+   the `architecture.md` status block.
+6. **After an interruption**: what to look for and remove by hand when a run
+   stops before its teardown.
+7. **Test-only shortcuts**: anything the test does that a consumer could
+   not, and what a consumer does instead (§5.2).
 
 ## 6. Security review
 
@@ -535,10 +562,10 @@ Sections, in this order, omitting only those that do not apply:
    `npx cdk deploy` commands with every `--context` input explained,
    teardown, and a short snippet that instantiates the construct in a
    consumer's own app (§4.5).
-5. **Deployment integration test**: how to run `npx projen integ`, what it
-   stands up, runtime, cost, and the single-Region rule. State that the test
-   is the reference implementation of the sample's wiring (§5.2) and link
-   the file.
+5. **Deployment integration test**: one short paragraph: the `npx projen
+   integ` command, the runtime and cost in one sentence, and a link to
+   `integration-test.md` (§5.3). What the test stands up, its steps, its
+   knobs and its shortcuts belong in that file, not here.
 6. **End-to-end demo**: a runnable `scripts/demo.sh` that walks the flow
    against a deployed stack, checks each response, and cleans up what it
    created on exit (also on failure). The README section gives the command
@@ -612,6 +639,9 @@ A sample is ready to merge when every line is true:
 - [ ] Integration test green in one Region (integ-runner with `--force`, or
       the CDK CLI driver); date, Region, and coverage recorded in
       `architecture.md`.
+- [ ] `integration-test.md` present with every applicable §5.3 section; the
+      step table matches the code; the README's integration-test section is
+      one paragraph that links it.
 - [ ] Security review run on the synthesised tree; results summarised in the
       pull request.
 - [ ] Sample README has every applicable §7 section in order.
