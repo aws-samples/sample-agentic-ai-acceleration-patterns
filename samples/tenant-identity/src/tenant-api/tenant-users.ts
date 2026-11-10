@@ -7,10 +7,12 @@ import { errorName, log } from '../shared/logger';
 import type { RegistryReader, TenantRecord } from '../shared/registry';
 import { tenantScopes } from '../shared/registry';
 import { assertGrantableScopes, effectiveScopes } from '../shared/scopes';
+import { isDependencyThrottle, THROTTLE_RETRY_AFTER_SECONDS, THROTTLED_MESSAGE } from '../shared/throttling';
 import {
   ConflictError as ModeledConflictError,
   InternalServerError,
   ResourceNotFoundError,
+  ThrottlingError,
   ValidationError,
 } from '../smithy/tenant/typescript-ssdk-codegen/src/models/errors';
 import type {
@@ -102,9 +104,16 @@ function toModeledError(error: unknown): never {
   if (
     error instanceof ResourceNotFoundError ||
     error instanceof ModeledConflictError ||
-    error instanceof ValidationError
+    error instanceof ValidationError ||
+    error instanceof ThrottlingError
   ) {
     throw error;
+  }
+  if (isDependencyThrottle(error)) {
+    // A dependency refused the call for rate, not content: 503 with
+    // Retry-After (ADR-0037). The caller's WARN line above already names the
+    // SDK error.
+    throw new ThrottlingError({ message: THROTTLED_MESSAGE, retryAfterSeconds: THROTTLE_RETRY_AFTER_SECONDS });
   }
   throw new InternalServerError({ message: 'Internal server error' });
 }

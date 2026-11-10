@@ -28,6 +28,7 @@ service PlatformService {
         ValidationException
         ValidationError
         InternalServerError
+        ThrottlingError
     ]
 }
 

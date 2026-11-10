@@ -45,6 +45,7 @@ service TenantService {
         ValidationException
         ValidationError
         InternalServerError
+        ThrottlingError
     ]
 }
 

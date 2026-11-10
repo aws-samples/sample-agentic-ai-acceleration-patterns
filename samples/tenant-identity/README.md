@@ -702,7 +702,13 @@ broken — the message then starts `invalid_scope` — or
 `UnsupportedInTopology`), `ResourceNotFoundError` 404 (unknown tenant, scope
 or user, or a user outside the path's tenant), `ConflictError` 409 (tenant `DELETING`
 on mutation, last-membership removal, duplicate e-mail in a shared pool, a
-tenant admin demoting or deleting themselves), `InternalServerError` 500. IAM
+tenant admin demoting or deleting themselves), `ThrottlingError` 503 with
+`Retry-After: 1` (Cognito, DynamoDB or STS refused a call for rate while the
+caller was inside its own quota; retry the operation the same way as after
+any other failure of it — a `CreateTenant` throttled on its first-admin step
+leaves an `ACTIVE` tenant that needs `CreateUser {firstAdmin: true}`, not a
+second `CreateTenant` — ADR-0037),
+`InternalServerError` 500. IAM
 401/403 on `/platform/*` and the authoriser's 401/403 on `/tenant/*` are API
 Gateway's own. The exchange returns RFC 6749 §5.2 codes instead:
 `invalid_request`, `unsupported_grant_type`, `invalid_target` (tenant not held,
