@@ -1,167 +1,303 @@
-<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. -->
-<!-- SPDX-License-Identifier: MIT-0 -->
-# Tenant memory isolation through Gateway
+<!--
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+SPDX-License-Identifier: MIT-0
+-->
+# Tenant Memory Isolation through AgentCore Gateway
 
-A reference solution for vendors designing shared agent memory with
-Amazon Bedrock AgentCore Memory and AgentCore Gateway. The sample combines a
-tenant memory model, signed identity claims, Cedar policies, and IAM controls
-to define which conversations and facts each agent can access.
+Agents that serve many tenants need memory that remembers what a tenant has
+told them, shares it with the tenant's other agents and users, and never
+shows it to another tenant. This sample pools one Amazon Bedrock AgentCore
+Memory for every tenant and makes the platform, not agent code, keep the
+tenants apart. Agents reach Memory only through an AgentCore Gateway with the
+native `agentcore-memory` connector. The Gateway authenticates each caller's
+access token, AgentCore Policy in `ENFORCE` mode compares every request with
+the token's `tenant_id` and `sub` claims, and a Memory resource policy denies
+every data operation to every principal except the Gateway's own role. Each
+tenant's facts land in the namespace that equals its tenant id, so the one
+claim decides both where a tenant writes and what it can recall (ADR-0001,
+ADR-0004, ADR-0009).
 
-Use this solution to give multiple agents a common set of tenant facts while
-keeping each agent's conversation history separate. The native
-`agentcore-memory` Gateway connector provides a central entry point for
-memory requests.
+It ships as one CDK construct, **`TenantMemoryIsolation`**, plus a thin demo
+stack with a synthetic issuer, an integration test, and a demo script.
 
-## Use cases
+**What this sample is NOT** (spec §1):
 
-| Use case | Facts shared within a tenant | Conversations kept separate |
+- Not an identity provider. The construct trusts any OIDC issuer whose
+  access tokens carry the repository token contract (`ARCHITECTURE.md`
+  §2.1); the demo bundles a synthetic Cognito issuer (ADR-0013).
+- Not a store for private user facts. The shared namespace is tenant-wide;
+  private facts need their own strategy and policy.
+- Not a conversation-history service. Agents write events and recall
+  extracted facts; stored event reads are not offered (ADR-0005).
+- Not credential vending. Memory sees one role, the Gateway's; tenant scope
+  is enforced by Policy on signed claims (ADR-0001).
+- Not multi-Region, and not a control plane.
+
+## Contents
+
+- [Architecture](#architecture)
+- [How it works](#how-it-works)
+- [Deploy](#deploy)
+- [Deployment integration test](#deployment-integration-test)
+- [End-to-end demo](#end-to-end-demo)
+- [API](#api)
+- [Observability and costs](#observability-and-costs)
+- [Security notes](#security-notes)
+- [Production hardening checklist](#production-hardening-checklist)
+- [Design trail](#design-trail)
+
+## Architecture
+
+![Components: tenant agent, Memory Gateway, request policy, Memory connector and pooled memory on the request path; issuer, tenant rate limit, resource fence and tenant telemetry below](diagrams/tenant-memory-isolation.components.drawio.svg)
+
+A tenant agent sends its access token and a native Memory request to the
+Memory Gateway, which checks the token, has the request policy compare the
+request with the token's tenant and session claims, and forwards only allowed
+requests through the Memory connector to the pooled memory as the Gateway
+role, the one principal the resource fence admits.
+
+![Architecture: tenant agents call AgentCore Gateway, which authorises with AgentCore Policy and calls AgentCore Memory as the Gateway execution role; a resource fence surrounds Memory; Cognito issues tokens; logs go to CloudWatch](diagrams/tenant-memory-isolation.drawio.svg)
+
+Tenant agents present Cognito access tokens to AgentCore Gateway, which asks
+AgentCore Policy to authorise each request and calls AgentCore Memory as the
+Gateway execution role, the only principal Memory's resource fence admits;
+Memory's application logs go to CloudWatch Logs.
+
+| Component | Built from | Role |
 | --- | --- | --- |
-| Retail assistants | A retailer's return policy, product guidance, and fulfilment rules. | Shopping and support conversations. |
-| Business account assistants | An organisation's delivery requirements and support procedures. | Procurement and service conversations. |
-| Internal operations assistants | A tenant's operating procedures and approved terminology. | Each team's agent conversations. |
+| Memory Gateway | `AWS::BedrockAgentCore::Gateway` | `CUSTOM_JWT` on the issuer, no MCP protocol type (ADR-0006), Policy `ENFORCE`, generic errors |
+| Memory connector | `AWS::BedrockAgentCore::GatewayTarget` | Native `agentcore-memory` connector, outbound as the Gateway role |
+| Request policy | `AWS::BedrockAgentCore::PolicyEngine`, two `Policy` | Cedar permits for scoped writes and exact-namespace recall; everything else denied |
+| Gateway execution role | `AWS::IAM::Role` | Trusts only this Gateway and its Policy engine (ADR-0011); three Memory actions |
+| Pooled memory | `AWS::BedrockAgentCore::Memory` | One semantic strategy with the namespace template `{actorId}` |
+| Resource fence | `AWS::BedrockAgentCore::ResourcePolicy` | Denies all 16 Memory data operations outside the Gateway role (ADR-0004, ADR-0007) |
+| Tenant rate limit | `AWS::BedrockAgentCore::GatewayRateLimit` | Requests per second per `tenant_id` |
+| Tenant telemetry | Logs delivery, log group, two Contributor Insights rules | Memory application logs keyed by actor id (ADR-0012) |
+| Demo issuer (demo stack) | Cognito user pool, pre-token Lambda | `tenant_id` from an immutable, vendor-set attribute |
 
-Choose the sharing boundary around the data's audience. Tenant-wide
-organisational facts fit a shared tenant namespace. Private user preferences
-need a separate actor and namespace with their own access rules.
+## How it works
 
-## AgentCore Memory concepts
+1. **The issuer signs the tenant.** The vendor creates each user with an
+   immutable `custom:tenantId`. The pre-token trigger copies it into the
+   access token's `tenant_id`; Cognito adds `sub`, `client_id`, and
+   `token_use: access`. No client can write the attribute or choose its
+   tenant ([architecture.md, Identity](architecture.md#identity-and-claims)).
+2. **The Gateway authenticates.** The agent sends a native Memory request to
+   `<gateway>/tenant-memory/memories/<memoryId>/...` with the token as a
+   bearer. The Gateway validates signature, expiry, issuer, and client; a bad
+   or expired token gets 401.
+3. **Policy compares the request with the claims.** `CreateEvent` is
+   permitted only when `actorId` is the token's `tenant_id`, `sessionId` is
+   its `sub`, and there is no extraction override. `RetrieveMemoryRecords`
+   and `ListMemoryRecords` are permitted only for the exact `namespace` equal
+   to `tenant_id`, never a hierarchical `namespacePath`. Each permit also
+   requires `token_use: access` and a tenant id with no `/`, `:`, or `*`.
+   Everything else is denied with 403 ([architecture.md, Authorisation](architecture.md#authorisation)).
+4. **The connector calls Memory as the Gateway role.** The role can
+   perform only the three agent operations on this Memory, and the Memory
+   resource policy denies every data operation to every other principal.
+5. **Memory extracts shared facts per tenant.** The semantic strategy turns a
+   tenant's events into records in the namespace `{actorId}`, which is the
+   tenant id. Every user and agent of the tenant can recall them; no other
+   tenant can name that namespace.
 
-| Construct | Purpose in this solution |
-| --- | --- |
-| Memory resource | The shared container for events, extraction strategies, and long-term records. |
-| Actor ID | A canonical tenant identifier, such as `tenant-a`. |
-| Session ID | One agent conversation within an actor, such as `shopping-001`. |
-| Short-term memory | Events stored under an actor and session, preserving conversation history. |
-| Memory strategy | A semantic extraction strategy that derives selected facts from events. |
-| Long-term memory | Extracted records that agents can recall across conversations. |
-| Namespace | A path organising long-term records, such as `/tenants/tenant-a/shared/`. |
+## Deploy
 
-The semantic strategy uses `/tenants/{actorId}/shared/`, placing each tenant's
-extracted facts in its own namespace. Extraction is asynchronous, so new facts
-become available for recall after processing.
-
-Actors, sessions, and namespaces organise the data. Access policies define who
-can read or change it.
-
-## Reference architecture
-
-![Tenant agents access AgentCore Memory through Gateway and Policy](diagrams/agentcore-memory-tenant-isolation.png)
-
-[Editable AWS architecture diagram](diagrams/agentcore-memory-tenant-isolation.drawio).
-
-The reference architecture combines four controls:
-
-- **Trusted identity:** An OIDC issuer signs JSON Web Tokens (JWTs) containing
-  the agent's permitted tenant actor, conversation session, and shared namespace.
-- **Gateway authentication:** Gateway validates the token using `CUSTOM_JWT`
-  and routes requests through the native Memory connector.
-- **Request authorization:** AgentCore Policy evaluates Cedar rules in
-  `ENFORCE` mode, comparing the requested memory scope with the signed claims.
-- **Memory access boundary:** The Gateway execution role has permissions for
-  one Memory resource. A Memory resource policy explicitly denies data access
-  unless the caller is the dedicated Gateway execution role.
-
-The execution role's trust policy limits assumption to the AgentCore service,
-the vendor's account, and the relevant Gateway and Policy engine source ARNs.
-Tenant scope comes from the signed JWT claims evaluated by Cedar
-([ADR-0001](adr/0001-enforce-tenant-memory-scope-in-agentcore-gateway.md)).
-
-## Tenant and agent memory model
-
-The example uses two agents in Tenant A and one agent in Tenant B:
-
-| Agent identity | `memory_actor` | `memory_session` | `memory_namespace` |
-| --- | --- | --- | --- |
-| Tenant A shopping | `tenant-a` | `shopping-001` | `/tenants/tenant-a/shared/` |
-| Tenant A support | `tenant-a` | `support-001` | `/tenants/tenant-a/shared/` |
-| Tenant B shopping | `tenant-b` | `shopping-001` | `/tenants/tenant-b/shared/` |
-
-Have your identity provider derive these claims from verified tenant membership
-and the application's conversation assignment, building all three from one
-tenant id so the namespace is always the actor's own shared path. Each id is
-a single path segment; the policies deny claims that are not. A permitted session is the exact
-`sessionId` that the issuer authorizes for that token. The event policies match
-both `actorId` and `sessionId`; reusing a session name in another tenant does
-not grant access to that tenant's events.
-
-Tenant A's shopping and support agents have different event histories and the
-same long-term namespace entitlement. This supports sharing extracted facts
-without granting access to each other's conversation history. Tenant B has
-its own actor and namespace.
-
-The recall policy matches the full requested `namespacePath` to
-`memory_namespace`. Every descendant of that path must belong to the same
-sharing boundary.
-
-## Access policies
-
-| Policy | Scope |
-| --- | --- |
-| [Event writes](policies/event-write.cedar) | `CreateEvent` for the token's actor and session in the configured Memory resource. |
-| [Shared fact recall](policies/shared-recall.cedar) | `RetrieveMemoryRecords` and `ListMemoryRecords` for the token's full namespace path. |
-
-The supplied policies require the relevant claims and request fields.
-Operations without a matching permit are denied. Event writes exclude
-caller-supplied extraction overrides, keeping the shared namespace assignment
-under the configured strategy.
-
-The execution role grants the three listed data operations on the configured
-Memory ARN, plus the metadata and Policy permissions needed by the connector.
-The Memory resource policy denies every Memory data operation, including
-direct ingestion, to every principal except the dedicated Gateway execution
-role through `aws:PrincipalArn` ([ADR-0004](adr/0004-fence-memory-by-the-gateway-role-principal-arn.md)).
-The operation list comes from the service model, and a unit test fails when
-the model gains one ([ADR-0007](adr/0007-derive-the-fenced-operations-from-the-service-model.md)).
-The connector exposes 12 Memory operations as Cedar actions; batch writes and
-`IngestData` are not among them, so only the resource fence governs those.
-Record-ID operations, tenant enumeration, extraction administration, direct
-ingestion, and batch writes are outside the agent-facing policy set.
-
-Keep the context needed to continue an active conversation in the application's
-session layer. The reference solution exposes scoped event writes and shared
-fact recall. Stored event reads and deletion remain outside its agent-facing
-policy set ([ADR-0005](adr/0005-keep-stored-event-reads-out-of-the-agent-api.md)).
-If your application requires stored conversation reads, introduce a
-trusted service that checks the caller's tenant and session entitlement.
-
-## Solution components
-
-| Component | Purpose |
-| --- | --- |
-| [Gateway Memory client](src/gateway_memory.py) | Sends native Memory HTTP requests through a named Gateway target, using the botocore service model for serialization. |
-| [Configuration renderer](src/render_config.py) | Generates Memory, Gateway, connector, IAM, and Cedar configuration for the reference architecture. |
-| [Cedar policies](policies/) | Defines the conversation and shared-fact access rules. |
-| [Architecture](architecture.md) | Explains the memory model and authorization boundaries. |
-| [Threat model](threat-model.md) | Describes the risks and controls to consider when adapting the solution. |
-| [Design specification](design/tenant-memory-isolation.spec.md) | Records the solution requirements. |
-| [Architecture decisions](adr/README.md) | Explains the design choices and trade-offs. |
-
-## Adapt the solution
-
-1. **Define the sharing boundary.** Select the facts that all agents in a
-   tenant may recall, and assign separate scopes for private data.
-2. **Map application identity to memory scope.** Derive tenant, agent, and
-   conversation entitlements in your trusted identity provider.
-3. **Align policies with your application.** Use the supplied Cedar rules and
-   resource policies as the starting point for your required Memory operations.
-4. **Design the memory lifecycle.** Choose event retention, fact provenance,
-   deletion, and cache boundaries for your tenants' requirements.
-
-## Tests
-
-Run from this directory. Neither suite calls AWS.
+**Prerequisites:** Node.js 24, the AWS CLI, credentials for the target
+account, a Region with AgentCore Memory, Gateway, and Policy, and the account
+CDK-bootstrapped in that Region. The sample consumes no other sample.
 
 ```bash
-npm ci && npm test                      # Cedar policies in the Cedar evaluator
-python -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m unittest            # serialization, configuration, fence, harness
+npm ci
+npx projen build                                   # compile, unit tests, cdk-nag, synth
+AWS_REGION=us-east-1 npx cdk deploy TenantMemoryIsolation
 ```
 
-## AWS documentation
+| Context key | Required | Meaning |
+| --- | --- | --- |
+| `issuerDiscoveryUrl` | no | An existing issuer's OIDC discovery URL. With `issuerClientIds`, the demo trusts that issuer instead of bundling one. |
+| `issuerClientIds` | with the above | Comma-separated app client ids whose access tokens are accepted. |
 
-- [Native Memory connector](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-gateway-connector.html)
-- [Memory action and context reference](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-gateway-fgac.html)
-- [Memory access policy examples](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-gateway-fgac-policy-examples.html)
-- [HTTP Gateway target routing](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-target-http-passthrough.html)
-- [Restrict direct Memory access](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-gateway-restrict-access.html)
-- [Policy evaluation IAM permissions](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy-permissions.html)
+Without context the demo stack bundles the synthetic issuer. Synth fails with
+a message naming the key if only one of the two is given.
+
+**Teardown:** `AWS_REGION=us-east-1 npx cdk destroy TenantMemoryIsolation`.
+Every resource has a `DESTROY` removal policy; the Memory and its events and
+records are deleted with the stack.
+
+### Bring your own issuer
+
+Point the demo at tenant-identity's `shared-pool`, or any issuer that meets
+the token contract (`tenant_id`, `sub`, `client_id`, `token_use: access`):
+
+```bash
+POOL=$(aws ssm get-parameter --name /application-plane/shared/identity/userPoolId --query Parameter.Value --output text)
+CLIENT=$(aws ssm get-parameter --name /application-plane/shared/identity/appClientId --query Parameter.Value --output text)
+npx cdk deploy TenantMemoryIsolation \
+  --context issuerDiscoveryUrl="https://cognito-idp.${AWS_REGION}.amazonaws.com/${POOL}/.well-known/openid-configuration" \
+  --context issuerClientIds="${CLIENT}"
+```
+
+### Use the construct in your own app
+
+```ts
+import { TenantMemoryIsolation } from 'tenant-memory-isolation'; // file:../tenant-memory-isolation
+
+const memory = new TenantMemoryIsolation(this, 'TenantMemory', {
+  issuer: {
+    discoveryUrl: 'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_EXAMPLE/.well-known/openid-configuration',
+    allowedClients: ['example-client-id'],
+  },
+  // claims: { tenant: 'tenant_id', session: 'sub', tokenUse: 'access' },  // the defaults
+  // eventExpiryDays: 30, tenantRequestsPerSecond: 25,
+});
+// memory.gatewayUrl, memory.targetName, memory.memoryId, memory.gatewayRole, memory.policyEngineArn
+```
+
+An issuer without `token_use` (for example agentic-runtime-isolation's
+transaction token) is supported with `issuer.allowedAudience` and
+`claims: { tokenUse: false, session: 'agent' }` (ADR-0008, Proposed).
+
+### Published interface
+
+The construct's props and read-only properties are the build-time interface
+(spec §6.3). The demo stack publishes one JSON parameter,
+`/application-plane/shared/memory/gateway`:
+
+| Field | Meaning |
+| --- | --- |
+| `version` | `1` |
+| `gatewayUrl`, `targetName` | Memory calls go to `<origin of gatewayUrl>/<targetName>/memories/<memoryId>/...` |
+| `gatewayArn`, `gatewayRoleArn`, `policyEngineArn` | The Gateway, the one role Memory admits, the Policy engine |
+| `memoryId`, `memoryArn` | The pooled Memory |
+| `tenantClaim`, `sessionClaim` | The claims the policies read (`tenant_id`, `sub`) |
+| `applicationLogGroup` | Memory application logs, keyed by actor id |
+| `demoIssuer` | `userPoolId`, `appClientId` of the bundled issuer; absent with an external issuer |
+
+## Deployment integration test
+
+```bash
+AWS_REGION=us-east-1 TMI_INTEG_ACCOUNT=<account id> npx projen integ
+```
+
+The test is the reference implementation of the sample's wiring: it deploys
+the demo stack, reads only the published parameter, signs users in through
+the published issuer, and calls Memory only through the Gateway, except where
+it proves the fence ([`test/integ.memory-isolation.ts`](test/integ.memory-isolation.ts),
+driven by [`scripts/integ.sh`](scripts/integ.sh), ADR-0010). It runs in
+exactly the one Region in `AWS_REGION`, refuses an account the operator has
+not confirmed in `TMI_INTEG_ACCOUNT`, refuses to run when the demo stack is
+already deployed, and destroys the stack from an exit trap, then proves that
+nothing it created is left, IAM roles and log groups included. One run takes
+about 20 minutes, most of it waiting for extraction and for the first token
+to expire, and costs well under one US dollar.
+
+| Step | Proves |
+| --- | --- |
+| 1. Preflight | `CUSTOM_JWT`, `ENFORCE`, no MCP, generic errors; the native connector; the role trust matches the deployed Gateway; the deployed fence names all 16 data operations |
+| 2. Issue tokens | Tokens carry `tenant_id`, `sub`, `client_id`, `token_use` and nothing else |
+| 3. Scoped writes | Each user writes its own tenant and session |
+| 4. Write denials | Another tenant, another user's session, an extraction override, an ID token |
+| 5. Recall denials | Another tenant's namespace (both ways, with a tenant id that extends the other), any `namespacePath`, `*`, actor enumeration, event reads |
+| 6. Shared recall | Both tenant-a users recall tenant-a's fact; tenant-ab sees only its own |
+| 7. Record-ID access | `GetMemoryRecord` is denied |
+| 8. Outside the Gateway | Direct retrieve, `IngestData`, batch create, and `AssumeRole` on the Gateway role are denied, each checked first to be allowed by the operator's own policies |
+| 9-11. Re-tests | Whether the Gateway stamps `aws:SourceArn`; whether Policy sees `ListEvents` path parameters; a foreign `memoryId` in the path |
+| 12. Expiry | An expired token fails with 401 on a request its scope permits |
+| 13. Telemetry | Memory application logs name each tenant and hold no fact content |
+
+## End-to-end demo
+
+```bash
+AWS_REGION=us-east-1 scripts/demo.sh
+```
+
+Against a deployed demo stack, the script signs in alice and bob (tenant-a)
+and carol (tenant-ab), walks the steps below, and deletes the users on exit,
+also on failure.
+
+| Step | Call | Expected |
+| --- | --- | --- |
+| 1 | alice `CreateEvent` in her own session | 201 |
+| 2 | alice `CreateEvent` in bob's session | 403 |
+| 3 | carol `CreateEvent` under tenant-a | 403 |
+| 4 | carol `RetrieveMemoryRecords` in tenant-a's namespace | 403 |
+| 5 | bob `RetrieveMemoryRecords` in tenant-a's namespace | 200, with alice's fact once extracted |
+| 6 | carol `RetrieveMemoryRecords` in her own namespace | 200, without tenant-a's fact |
+
+## API
+
+Agents call the native Memory API through the Gateway, at
+`<origin>/tenant-memory/memories/<memoryId>/...`, with an access token from
+the issuer. The [Memory API reference](https://docs.aws.amazon.com/bedrock-agentcore/latest/APIReference/API_Operations_Amazon_Bedrock_AgentCore_Data_Plane.html)
+defines the request and response shapes.
+
+| Operation | Allowed when | Otherwise |
+| --- | --- | --- |
+| `CreateEvent` | `actorId` = `tenant_id`, `sessionId` = `sub`, no `extractionConfig` | 403 |
+| `RetrieveMemoryRecords` | `namespace` = `tenant_id`, no `namespacePath` | 403 |
+| `ListMemoryRecords` | `namespace` = `tenant_id`, no `namespacePath` | 403 |
+| The nine other connector operations | never | 403 |
+| Batch operations, `IngestData` | not connector operations; denied by the fence outside the Gateway | |
+
+A missing, expired, or foreign-client token is 401.
+
+## Observability and costs
+
+**Per tenant.** No vendor code runs on the request path, so per-tenant
+telemetry comes from the managed services (ADR-0012). Memory's application
+logs, delivered to the published `applicationLogGroup`, carry `actor_id` and
+`namespace` for extraction and consolidation; both are the tenant id. Two
+Contributor Insights rules rank tenants by extraction and by consolidation.
+The Gateway's rate limit is keyed on `tenant_id`. Gateway and Policy metrics
+have no tenant dimension; per-request counts per tenant come from Memory's
+spans (`actor.id`, `namespace`) once the account enables CloudWatch
+Transaction Search ([architecture.md, Observability](architecture.md#observability)).
+
+**Costs.** Everything is pooled, so nothing is tagged per tenant. A tenant's
+cost is its share of the Memory cost drivers, each times the unit price on
+the [AgentCore pricing page](https://aws.amazon.com/bedrock/agentcore/pricing/):
+
+```
+tenant cost ≈ events created × short-term event price
+            + long-term records stored × record storage price
+            + retrievals × retrieval price
+            + (Gateway invocations + Policy authorisations) × their prices × tenant share of Memory operations
+```
+
+Events and retrievals per tenant come from Memory spans; records per tenant
+from the extraction logs. Gateway and Policy cannot report a tenant, so they
+are apportioned by each tenant's share of Memory operations. The demo issuer
+and the logs are fixed costs, split equally.
+
+## Security notes
+
+- **Identity:** the tenant is the signed `tenant_id` claim; the session is
+  `sub`. Tokens must be access tokens for an allowed client. Nothing in a
+  request can widen either.
+- **Trust boundaries:** the Gateway is the only path to Memory data; the
+  resource fence and the role trust together keep every other principal out,
+  including administrators of the same account.
+- **Default deny:** two permits; every other operation, field combination,
+  and principal type is denied.
+
+The threats and their mitigations are in [threat-model.md](threat-model.md).
+
+## Production hardening checklist
+
+| Item | Mitigation |
+| --- | --- |
+| Use your own issuer with MFA and threat protection; keep the tenant attribute vendor-set and immutable | M-1 |
+| Decide what agents may write to shared memory; add provenance or review for facts that steer other agents | T-7 (accepted in the sample) |
+| Monitor the fence, role, and policies for drift (AWS Config or a scheduled check) | M-6 |
+| Use a customer-managed KMS key for Memory and the Gateway if your policy requires one | M-12 |
+| Turn on Transaction Search for per-request tenant telemetry | ADR-0012 |
+| Re-run the fence test on every SDK upgrade and review new Memory operations | M-4 |
+| Keep Gateway application logs off, or treat them as holding request bodies | M-9 |
+
+## Design trail
+
+- [Specification](design/tenant-memory-isolation.spec.md)
+- [Architecture decisions](adr/README.md)
+- [Implemented architecture](architecture.md)
+- [Threat model](threat-model.md)

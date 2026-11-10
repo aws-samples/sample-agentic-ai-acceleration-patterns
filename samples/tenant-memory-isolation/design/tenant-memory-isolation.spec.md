@@ -2,84 +2,123 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Tenant memory isolation specification
 
-## Problem statement
+## 1. Problem statement
 
-Demonstrate a pool of tenant organisations sharing one AgentCore Memory
-resource through its native HTTP connector on AgentCore Gateway. Two agents
-in a tenant share deliberately selected long-term facts while keeping
-separate short-term sessions; another tenant sees none of them. The
-deployment model is pool: one Memory, one Gateway, one Policy engine for all
-tenants.
+Agents that serve many tenants need long-term memory that a tenant's agents
+and users share and that no other tenant can read or write. The sample pools
+one AgentCore Memory resource for every tenant (pool model) behind an
+AgentCore Gateway with the native Memory connector, and enforces the tenant
+boundary in Gateway, Policy, and IAM rather than in agent code.
 
 What this is NOT:
 
-- Not an identity provider. Tenant membership and conversation assignment
-  belong to the vendor's issuer; the sample's Cognito issuer is a synthetic
-  fixture (ADR-0003).
-- Not a store for private user facts. Those need their own actor and
-  namespace claims.
-- Not a conversation history service. Stored event reads and deletion are not
-  offered to agents (ADR-0005).
-- Not a credential vending design. Memory sees the Gateway execution role
-  only (ADR-0001).
+- Not an identity provider: the construct trusts an issuer that meets the
+  token contract (§6.1); the demo bundles a synthetic one (ADR-0013).
+- Not a store for private user facts: the shared namespace is tenant-wide.
+- Not a conversation-history service: stored event reads and deletion are
+  not offered to agents (ADR-0005).
+- Not credential vending: Memory sees only the Gateway's role (ADR-0001).
+- Not multi-Region, not a control plane, not tenant onboarding.
 
-## Guiding principles
+## 2. Guiding principles
 
-1. **P-1: The vendor's identity provider owns the memory scope.** A caller
-   cannot obtain a broader actor, session, or namespace by changing request
-   arguments; every scope value comes from a signed claim, and the claims are
-   built from one tenant id.
-2. **P-2: Share only the facts the tenant has agreed to share.** Tenant-wide
-   memory contains organisational facts, not private user preferences.
-3. **P-3: A missing claim or an unlisted operation denies access.** Each
-   Cedar permit names its operations and Gateway; the connector fixes the
-   Memory ID; IAM permissions pin the Memory ARN; the resource fence denies
-   every data operation the service model lists outside the Gateway role.
-4. **P-4: Evidence distinguishes policy evaluation from deployed
-   enforcement.** Local Cedar tests are real language evaluation but do not
-   prove JWT validation, Gateway context mapping, extraction, or
-   resource-policy enforcement; each live probe tests exactly what it names.
+1. **P-1: The issuer owns the tenant.** Every scope value an agent may use
+   comes from a signed claim; nothing in a request can widen it. One claim,
+   `tenant_id`, decides both the actor and the namespace, so the two cannot
+   disagree (ADR-0009).
+2. **P-2: Share only what the tenant shares.** Tenant-wide memory holds
+   facts every agent and user of the tenant may see; each user's events stay
+   in that user's session.
+3. **P-3: Deny by default, at every layer.** Policy permits three operations
+   under exact conditions; the role holds three actions on one Memory; the
+   fence denies every data operation outside the Gateway role. A new Memory
+   operation is denied until reviewed (ADR-0007).
+4. **P-4: Evidence names what it proves.** Unit tests prove policy logic and
+   synthesised configuration; the integration test proves deployed
+   enforcement; a probe that cannot prove its claim fails rather than
+   passes.
 
-## System shape
+## 3. System shape
 
-The vendor supplies an OIDC issuer, a client restriction, a Gateway
-execution role, one Memory resource with a semantic strategy, and a Policy
-engine in `ENFORCE` mode. The issuer verifies tenant membership and
-agent-session entitlement before issuing `memory_actor`, `memory_session`,
-and `memory_namespace` claims. Gateway authenticates each bearer token
-(`CUSTOM_JWT`) and calls Memory as its execution role (`GATEWAY_IAM_ROLE`).
-The Gateway has no MCP protocol type, so it accepts the native HTTP target
-(ADR-0006).
+Components: an OIDC issuer (supplied); one Memory with a semantic strategy;
+one Gateway (`CUSTOM_JWT`, no MCP protocol type, Policy `ENFORCE`); one
+`agentcore-memory` connector target using the Gateway role; one Policy engine
+with two policies; the Gateway execution role; the Memory resource policy;
+a per-tenant rate limit; Memory application-log delivery with top-tenant
+rules.
 
-## Data model
+Callers are tenant agents or applications presenting a user's access token.
+The vendor operates the stack. Deployment inputs are the construct props
+(§6.1); the demo stack's are the optional `issuerDiscoveryUrl` and
+`issuerClientIds` context keys.
 
-`actorId=tenant-a` represents a tenant organisation. Its semantic strategy
-writes to `/tenants/{actorId}/shared/`. Agent sessions such as `shopping-001`
-and `support-001` stay separate under that actor. A token carries exactly one
-session and the actor's own shared path. Actor and session ids are single
-lowercase path segments.
+## 4. Data model
 
-## API surface
+| Entity | Key | Notes |
+| --- | --- | --- |
+| Actor | `actorId` = `tenant_id` | One per tenant |
+| Session | `sessionId` = the user's `sub` | One per user within the tenant |
+| Event | `eventId` within actor and session | Kept `eventExpiryDays` (default 30) |
+| Memory record | `memoryRecordId` in namespace = `tenant_id` | Written by the `TenantFacts` semantic strategy (template `{actorId}`) |
 
-Native Memory HTTP operations are routed through `/{targetName}/{Memory path}`.
-The SDK model supplies the method, path, and wire serialization. Agents may
-call `CreateEvent` only for the signed actor and session, without an
-extraction override, and `RetrieveMemoryRecords` and `ListMemoryRecords` only
-for the signed `namespacePath`. Every other Memory operation is denied: event
-reads and deletion, actor and session enumeration, record-ID access, batch
-writes, direct ingestion, and extraction administration. Gateway returns 401
-for a missing or expired token and 403 for a Policy denial.
+Tenant ids match `[A-Za-z0-9_-]{1,64}`; the policies also refuse `/`, `:`,
+and `*`.
 
-## Contracts
+## 5. API surface
 
-The deployer supplies an issuer whose access tokens carry the three claims
-above, built from one verified tenant id, and a Region with AgentCore Memory,
-Gateway, and Policy. The sample promises repeatable local Cedar tests, SDK
-serialization tests, configuration generation, an explicit live isolation
-harness, and journalled cleanup of its disposable environment. No deployment
-credentials belong in its source.
+The native Memory API through the Gateway at
+`<gateway origin>/tenant-memory/memories/<memoryId>/...`:
 
-The Gateway is created with account-and-Region-scoped Policy evaluation
-permissions because `CreateGateway` checks them before it returns an ID;
-the driver narrows them and the role trust to the returned Gateway and
-Policy engine ARNs before it adds the Memory target (ADR-0003).
+| Operation | Permitted when |
+| --- | --- |
+| `CreateEvent` | `actorId` = `tenant_id`, `sessionId` = session claim, no `extractionConfig` |
+| `RetrieveMemoryRecords`, `ListMemoryRecords` | `namespace` = `tenant_id`, no `namespacePath` |
+
+Every other connector operation is denied. Errors: 401 for a missing,
+invalid, or expired token or a foreign client; 403 for a Policy denial;
+429 above the tenant's rate.
+
+## 6. Contracts
+
+### 6.1 What the deployer supplies
+
+An issuer whose access tokens carry `tenant_id` (one tenant), `sub`,
+`client_id` in `allowedClients` (or `aud` in `allowedAudience`), and
+`token_use: access`, with the tenant set by the vendor and immutable by the
+user. Props:
+
+| Prop | Default | Meaning |
+| --- | --- | --- |
+| `issuer.discoveryUrl` | required | https OIDC discovery URL |
+| `issuer.allowedClients` / `allowedAudience` | one required | Which tokens of the issuer are accepted |
+| `claims.tenant` | `tenant_id` | Tenant claim |
+| `claims.session` | `sub` | Session claim, must differ from the tenant claim |
+| `claims.tokenUse` | `access` | `false` only with `allowedAudience` |
+| `eventExpiryDays` | 30 | 7 to 365 |
+| `tenantRequestsPerSecond` | 25 | Per-tenant Gateway rate |
+| `logRetention` | one month | Memory application logs |
+
+Invalid props fail synth with a message naming the prop.
+
+### 6.2 What the sample promises
+
+Tenant isolation of writes and recall as in §5; shared recall within a
+tenant; no data path to Memory except the Gateway; per-tenant extraction
+telemetry; complete teardown.
+
+### 6.3 Published interface
+
+- **Construct** `TenantMemoryIsolation` (src/index.ts), read-only
+  properties `gatewayUrl`, `targetName`, `gatewayId`, `gatewayArn`,
+  `memoryId`, `memoryArn`, `gatewayRole`, `policyEngine`, `policyEngineArn`,
+  `applicationLogs`, `claims`.
+- **Published parameter** (demo stack) `/application-plane/shared/memory/gateway`,
+  one JSON document: `version`, `gatewayUrl`, `targetName`, `gatewayArn`,
+  `memoryId`, `memoryArn`, `policyEngineArn`, `gatewayRoleArn`,
+  `tenantClaim`, `sessionClaim`, `applicationLogGroup`, and `demoIssuer`
+  (`userPoolId`, `appClientId`) with the bundled issuer.
+
+### 6.4 Samples consumed
+
+None. tenant-identity's `shared-pool` or agentic-runtime-isolation's ingress
+can be the issuer through props or context (ADR-0008, ADR-0013).

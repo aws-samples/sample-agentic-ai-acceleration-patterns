@@ -2,119 +2,135 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Implemented architecture
 
-**Status:** Reference solution, verified locally on 2026-11-10 and last run
-live in `ap-southeast-2` on 2026-10-26.
+**Status:** Implemented as the `TenantMemoryIsolation` CDK construct and
+demo stack. Verified by `npx projen build` on 2026-11-10: 74 unit tests,
+cdk-nag clean, synth clean. **Integration run of this implementation: pending**
+(`npx projen integ`; the run's date, Region, and coverage are recorded here
+when it passes).
 
-| Check (live run 2026-10-26, SDK driver) | Observed outcome |
+The design was first exercised live on 2026-10-26 in `ap-southeast-2` by the
+SDK driver this construct replaced (ADR-0013). That run established the
+`aws:PrincipalArn` fence (ADR-0004), the missing `ListEvents` path
+parameters (ADR-0005), and the protocol-neutral Gateway (ADR-0006), and
+showed shared recall within a tenant and isolation between tenants.
+
+## Purpose
+
+One AgentCore Memory resource serves every tenant (pool model). Agents of a
+tenant share deliberately extracted facts; another tenant sees none of them;
+each user's conversation events are its own. The Gateway is the only way in.
+
+## Identity and claims
+
+The construct trusts one OIDC issuer (`issuer.discoveryUrl`) and the app
+clients or audiences it names. The policies read three claims, the
+repository token contract (`ARCHITECTURE.md` §2.1, ADR-0009):
+
+| Claim | Used as |
 | --- | --- |
-| Gateway authentication and authorization | `CUSTOM_JWT`, Policy `ENFORCE`, Gateway `READY` |
-| Scoped event writes | Allowed for Tenant A shopping, Tenant A support, and Tenant B shopping |
-| Cross-tenant write | Denied by Cedar |
-| Caller-supplied extraction override | Denied by Cedar |
-| Exact tenant namespace retrieval | Allowed for both tenants |
-| Two agents sharing Tenant A long-term memory | Both returned the same Tenant A record |
-| Tenant B isolation | Tenant B returned only its own record; no Tenant A canary appeared |
-| Changed namespace paths (retrieve) | Tenant B, tenant root, and actor root paths denied |
-| Actor enumeration and record-ID access | Denied by default |
-| Direct IAM retrieval and direct role assumption | Denied |
-| New semantic extraction | Both tenant canaries became retrievable through Gateway |
+| `tenant_id` | The actor id of every write and the exact namespace of every recall |
+| `sub` | The session id of every write: one conversation history per user |
+| `token_use` | Must be `access`; an ID token is refused |
 
-The run removed every service resource it created; its two IAM roles were
-emptied of permissions and left for later deletion. Teardown now deletes both
-roles.
-
-Changes since that run, verified by the unit and Cedar suites only: the fence
-covers `IngestData` (ADR-0007), the policies reject actor and namespace claims
-outside one tenant path, and the harness adds cross-session write,
-`ListMemoryRecords` namespace, direct `IngestData`, and 401 expired-token
-probes, with direct probes attributable to the fence (see Validation).
-
-## Purpose and identity
-
-The vendor pools one Memory resource for synthetic tenant organisations.
-The issuer supplies full memory scopes; Gateway validates signed JWTs and
-enforces Cedar. Both A agents have the same actor/shared path and distinct
-session claims ([ADR-0001](adr/0001-enforce-tenant-memory-scope-in-agentcore-gateway.md)). Clients cannot
-construct a broader permit.
-
-Inbound `CUSTOM_JWT` and outbound `GATEWAY_IAM_ROLE` make the dedicated Gateway
-role the identity that reaches Memory. Cedar evaluates claims on the typed
-`AgentCore::OAuthUser` principal; those claims do not become IAM session tags
-on the execution role. Enforcement sits in Gateway and Policy, with no
-interceptor or credential vending on the path (ADR-0001).
+The demo issuer is a Cognito user pool (Essentials tier, admin-created users
+only). Its V2 pre-token trigger copies the immutable `custom:tenantId`
+attribute into `tenant_id`; no app client may write any attribute, and the
+app client has no OAuth redirect flows (ADR-0013). Access tokens last five
+minutes.
 
 ## Components
 
-`src/gateway_memory.py` routes SDK-serialized native HTTP requests through the
-named connector. `src/render_config.py` emits resource, target, role, and policy
-configuration without submitting it. `src/validate_live.py` explicitly opts
-into real calls and reports observed status. `src/live_environment.py` creates
-the dedicated environment and tears it down in a `finally` block.
-`src/test_identity.py` supplies Cognito access-token scopes for three fixed
-synthetic identities (ADR-0003), building actor, session, and namespace from
-one tenant id; production tenant membership is an external responsibility.
+| Construct part | Resource | Notes |
+| --- | --- | --- |
+| Memory | `CfnMemory` | Semantic strategy `TenantFacts`, namespace template `{actorId}`; events kept 30 days by default |
+| Policy engine | `CfnPolicyEngine` | One per construct |
+| Gateway execution role | `iam.Role` | Trust: `bedrock-agentcore.amazonaws.com`, `aws:SourceAccount`, `aws:SourceArn` in `gateway/<name>-??????????` or the engine ARN (ADR-0011). Grants: `CreateEvent`, `RetrieveMemoryRecords`, `ListMemoryRecords`, `GetMemory` on the Memory; `GetPolicyEngine`, `AuthorizeAction`, `PartiallyAuthorizeActions` on the engine and the Gateway pattern |
+| Gateway | `CfnGateway` | `CUSTOM_JWT` with `allowedClients` or `allowedAudience`; Policy `ENFORCE`; no `protocolType` (ADR-0006); no `exceptionLevel`, so callers see generic errors; no interceptors |
+| Target | `CfnGatewayTarget` | `http.connector` `agentcore-memory`, `memoryId` parameter, `GATEWAY_IAM_ROLE` |
+| Policies | two `CfnPolicy` | Created after the target and one after the other; `FAIL_ON_ANY_FINDINGS`; deleted before the target |
+| Fence | `CfnResourcePolicy` | Deny all 16 Memory data operations unless `aws:PrincipalArn` is the role (ADR-0004, ADR-0007) |
+| Rate limit | `CfnGatewayRateLimit` | `$.context.jwt.tenant_id`, one bucket per tenant |
+| Telemetry | log group, `CfnDeliverySource`/`Destination`/`Delivery`, two `CfnInsightRule` | Memory `APPLICATION_LOGS`, one month retention (ADR-0012) |
 
-## Data model and workflows
+Names derive from the construct path, so two stacks never collide; policy
+names carry the engine name because policy names are unique in the account
+and Region.
 
-Events belong to an actor and session. The strategy extracts tenant-wide facts
-to `/tenants/{actorId}/shared/`. Retrieval uses only the exact issuer-provided
-namespacePath; descendants must have the same sharing entitlement, so the
-policies accept only actor claims of one path segment and namespace claims of
-exactly `/tenants/<one segment>/shared/`. CreateEvent cannot supply
-extractionConfig.
+## Authorisation
 
-Event creation has its own permit. Short-term event reads and deletion are
-excluded because their live request context did not expose the actor and
-session path parameters needed for a safe tenant check (ADR-0005). Retrieve/List records
-share a namespace permit. Record-ID access is excluded because the ID alone
-does not prove namespace ownership.
-Resource-based IAM denies every Memory data operation in the service model
-outside the exact Gateway execution role, using `aws:PrincipalArn` (ADR-0004,
-ADR-0007). The connector exposes 12 of those operations as Cedar actions; the
-batch record operations and `IngestData` are not connector operations, so the
-resource fence is their only control. Its trust allows only the
-AgentCore service with the exact source account and Gateway/Policy engine
-ARNs. Gateway's role grants only the demonstrated Memory operations.
+Two Cedar policies, generated by `src/policies.ts` and evaluated in the unit
+tests by the Cedar evaluator:
 
-## Deployment details
+- **Event writes:** `CreateEvent` when `context.input.actorId ==
+  principal.getTag("tenant_id")`, `context.input.sessionId ==
+  principal.getTag("sub")`, and `!(context.input has extractionConfig)`.
+- **Shared recall:** `RetrieveMemoryRecords` and `ListMemoryRecords` when
+  `context.input.namespace == principal.getTag("tenant_id")` and
+  `!(context.input has namespacePath)`.
 
-The native Memory target uses the HTTP connector. Gateway creation omits
-`protocolType`; an explicitly MCP-only Gateway rejects that target (ADR-0006).
-Gateway errors use the default exception level, so callers see no service
-detail.
-Policy engine and policy names use letters, digits, and underscores.
+Both require `principal is AgentCore::OAuthUser`, the Gateway's own ARN as
+resource, `token_use == "access"`, and a tenant id without `/`, `:`, or `*`.
+Every field is guarded with `has`, and each policy names only the actions
+whose requests carry the fields it reads. The other nine connector
+operations have no permit (event reads, ADR-0005; enumeration; record-ID
+access; extraction jobs). The batch record operations and `IngestData` are
+not connector operations; only the fence governs them.
 
-The Gateway role also needs `AuthorizeAction`, `PartiallyAuthorizeActions`, and
-`GetPolicyEngine` for its Policy engine. During creation, Policy evaluation
-temporarily permits `gateway/*` in the selected account and Region, while Memory
-permissions stay pinned to the dedicated resource. Before adding a target, the
-driver replaces the wildcard with the actual Gateway ARN and narrows role trust
-to the Gateway and engine ARNs. JWT authentication and ENFORCE remain enabled
-throughout. The role separately allows `GetMemory` on the dedicated resource
-for target metadata validation; the three tenant data actions stay unchanged.
+Exact `namespace` matching, rather than hierarchical `namespacePath`, is what
+makes a namespace without slashes safe: no tenant's namespace can sit under
+another's (ADR-0009).
+
+## Workflows
+
+```mermaid
+sequenceDiagram
+  participant A as Tenant agent
+  participant G as Gateway
+  participant P as Policy
+  participant M as Memory
+  A->>G: POST /tenant-memory/memories/{id}/events (bearer access token)
+  G->>G: validate JWT (issuer, client, expiry)
+  G->>P: AuthorizeAction(principal tags, action, input)
+  P-->>G: ALLOW only if actorId = tenant_id and sessionId = sub
+  G->>M: CreateEvent as the Gateway role
+  M-->>M: extract facts into namespace = actorId (async)
+  A->>G: POST .../retrieve {namespace: tenant_id}
+  G->>P: AuthorizeAction
+  P-->>G: ALLOW only for the exact own namespace
+  G->>M: RetrieveMemoryRecords as the Gateway role
+```
+
+## Observability
+
+| Question | Answered by | Tenant field |
+| --- | --- | --- |
+| Which tenant's facts are being extracted, and how much? | Memory application logs, Contributor Insights `memory-extraction` | `actor_id` |
+| Which tenant's namespaces are being consolidated? | Contributor Insights `memory-consolidation` | `namespace` |
+| Which tenant is calling, and how often? | Memory spans (`actor.id`, `namespace`) with Transaction Search on | `actor.id`, `namespace` |
+| Is a tenant throttled? | Gateway rate limit on `tenant_id`; Gateway `Throttles` metric | per gateway only |
+| Requests, errors, latency | Gateway and Policy metrics in `AWS/Bedrock-AgentCore` | none |
+
+**Gaps.** Gateway and Policy metrics carry no tenant dimension, and Gateway
+application logs, which could, hold request and response bodies, so the
+construct leaves them off. Per-request tenant counts need Memory spans,
+which need account-level Transaction Search; the join key is the actor id or
+namespace, both the tenant id. Policy denials appear in Policy metrics
+(`DenyDecisions`) without the tenant.
+
+## Costs
+
+Pooled resources only; the attribution formula is in the README's
+Observability and costs section. Cost drivers per tenant: events created,
+long-term records stored, retrievals; Gateway invocations and Policy
+authorisations are apportioned by the tenant's share of Memory operations.
 
 ## Validation
 
-`npm test` runs 37 policy cases in Cedar WASM 4.14.0. `python -m unittest`
-runs 44 tests: SDK wire serialization, HTTP error classification, redirects,
-endpoint and target validation, generated IAM and connector configuration,
-the fence against the service model, live harness inputs, issuer-controlled
-scopes, idempotent readiness retries, diagnostic redaction, failure cleanup,
-and the combined resource-policy and role-trust boundary.
-
-The cloud harness requires the real Gateway URL and connector configuration to
-match its inputs, three separately scoped signed JWTs, and AWS read permissions
-for preflight checks. It submits synthetic facts, waits for both tenants'
-canaries, and probes cross-tenant and cross-session writes, changed namespaces
-for retrieve and list, and record-ID access. A
-direct call outside Gateway (retrieve, ingest, role assumption) runs only when
-`iam:SimulatePrincipalPolicy` shows the caller's own policies would allow it,
-so its denial is attributable to the fence or the role trust; otherwise it is
-recorded `NOT_RUN`. An expired token must fail with 401 on a request its scope
-permits. Failed extraction is a failed run, not an isolation result.
-
-Access tokens last 60 minutes and are not refreshed, so the extraction wait is
-capped at 30 minutes.
-
-The repository contribution requirements remain documented in
-[ADR-0002](adr/0002-deliver-draft-validation-kit.md).
+`npx projen build` runs 74 unit tests: the policies in the Cedar evaluator
+(allow and deny per claim, field, and operation; claim options), the fence
+against the HTTP traits of the pinned Memory SDK, the construct synthesised
+per option with assertions on the Gateway, role, trust, fence, policy order,
+rate limit, telemetry, and removal policies, prop validation, the demo
+stack's issuer and published parameter, cdk-nag on the construct and the
+demo, and the pre-token trigger. The integration test and its steps are in
+the README.
