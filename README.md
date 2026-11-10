@@ -111,40 +111,6 @@ with 1,000s of agents and 1,000s of tools, while a cut or a subscription
 change takes effect on the next request and every hop holds the narrowest
 token that works.
 
-A pooled agent platform serves every tenant from shared compute and shared
-tools, so three questions follow on every request: which compute unit may
-this caller reach, which agents and tools has this tenant user been granted,
-and whose permissions does each call use? If the client picks the session,
-the agent holds one role for all tenants, or the user's identity token is
-handed on to the agent and its tools, a stolen token or a prompt-injected
-agent can reach another tenant's conversation, tools or data.
-
-This sample puts one ingress in front of one or more Amazon Bedrock
-AgentCore Runtimes and makes it the only principal each Runtime trusts. The
-ingress verifies the tenant-identity token, resolves the grant (agent needs
-∪ agent tools ∩ tenant tools ∩ user tools) from an entitlement store, mints
-a 5-minute transaction token naming one tenant, one user and one agent, and
-invokes the Runtime in a fresh microVM session per request by default (with
-`session` set, one per tenant, or per user) with `TenantId`-tagged
-credentials from an always-on token vending machine; the identity token
-never leaves the ingress. Tools are served by one AgentCore Gateway (the
-tools gateway) by default, or several, each with its own Policy engine: a
-REQUEST interceptor runs first as the per-tool wall and hands the tool a
-signed tenant context, Policy then admits the target, and each tool assumes
-its own tenant role, so IAM, not agent or tool code, keeps each tenant to
-its own data. On the recommended `api-gateway` ingress every authoriser
-refusal reaches the client as 403; the `agentcore-gateway` ingress keeps
-each refusal's own status (401 for a bad token, 404 for an unknown agent,
-502 for an ingress fault, 403 for the rest). With `agentDelegation` on the
-`api-gateway` ingress, an agent may hand part of its job to another agent
-for the same tenant and user: it posts to `/{agent}/delegations` with its
-own transaction token, and the ingress verifies that token, checks that the
-caller's registry entry names the target and that the tenant holds it
-(after the user's cuts), mints a replacement token for the target with the
-caller recorded in `act`, and invokes the target's Runtime. A loop, an
-undeclared target or a chain already at `maxDepth` is refused before any
-KMS or STS call.
-
 It consumes `tenant-identity` (`shared-pool`) and ships as CDK constructs
 that later samples can consume (`SharedIngress`, `AgentBackend`,
 `ToolTarget`, `TokenSigner`, `EntitlementStore`); the ingress publishes its
