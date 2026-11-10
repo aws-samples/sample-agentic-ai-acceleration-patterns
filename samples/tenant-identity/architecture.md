@@ -755,6 +755,12 @@ changes: the trigger **refuses duplicate scopes** with `invalid_scope` rather
 than deduping (a documented choice in `pre-token-generation.ts`, keeping
 "output equals the request" unambiguous); the exchange maps Cognito throttling
 and 5xx to `server_error` (retryable) and everything else it rejects to
-`invalid_grant` (§5.4). No behavioural divergence from the spec was found in
+`invalid_grant` (§5.4); the platform and tenant APIs map a dependency
+throttle (Cognito `TooManyRequestsException` and kin, DynamoDB
+`ProvisionedThroughputExceededException`) to `ThrottlingError` 503 with
+`Retry-After: 1`, logged at `WARN`, instead of the 500 every other unmodelled
+error gets (ADR-0037, `src/shared/throttling.ts`; both `mapErrors` in
+`src/platform/platform.ts` and `toModeledError` in
+`src/tenant-api/tenant-users.ts` call it). No behavioural divergence from the spec was found in
 the registry, provisioner, platform, tenant-user, or trigger core beyond the
 ADRs above.

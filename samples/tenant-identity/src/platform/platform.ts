@@ -14,6 +14,7 @@ import type { Registry, ScopeRecord, TenantRecord } from '../shared/registry';
 import { tenantScopes } from '../shared/registry';
 import { assertGrantableScopes, assertRegistrableScope, assertTenantScopes, effectiveScopes, scopeOwner } from '../shared/scopes';
 import type { TenantApiKey, TenantApiKeys } from '../shared/tenant-api-keys';
+import { isDependencyThrottle, THROTTLE_RETRY_AFTER_SECONDS, THROTTLED_MESSAGE } from '../shared/throttling';
 import {
   ConflictError,
   CreateMembershipServerInput,
@@ -53,6 +54,7 @@ import {
   ResourceNotFoundError,
   Scope,
   Tenant,
+  ThrottlingError,
   UpdateTenantServerInput,
   UpdateTenantServerOutput,
   UpdateUserServerInput,
@@ -837,7 +839,8 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
         error instanceof ResourceNotFoundError ||
         error instanceof ConflictError ||
         error instanceof ValidationError ||
-        error instanceof InternalServerError
+        error instanceof InternalServerError ||
+        error instanceof ThrottlingError
       ) {
         // Already a modelled Smithy error (e.g. requireField's 500).
         throw error;
@@ -853,6 +856,17 @@ export class PlatformService implements PlatformServiceService<PlatformContext> 
       }
       if (error instanceof InvalidInputError) {
         throw new ValidationError({ message: error.message, reason: 'InvalidInput' });
+      }
+      if (isDependencyThrottle(error)) {
+        // A dependency refused the call for rate, not content: 503 with
+        // Retry-After, so a client that retries only 429/503 keeps going,
+        // and a WARN, not an ERROR, because nothing is broken (ADR-0037).
+        log.warn('Platform operation throttled by a dependency', {
+          operation,
+          tenantId,
+          errorName: errorName(error),
+        });
+        throw new ThrottlingError({ message: THROTTLED_MESSAGE, retryAfterSeconds: THROTTLE_RETRY_AFTER_SECONDS });
       }
       // Unknown: do not leak the message (N-6). Log the class name only.
       log.error('Platform operation failed', {

@@ -16,6 +16,7 @@ import {
   CreateTenantInput,
   InternalServerError,
   ResourceNotFoundError,
+  ThrottlingError,
   ValidationError,
 } from '../../src/smithy/platform/typescript-ssdk-codegen/src';
 import type { ProvisionersFor } from '../../src/topology';
@@ -982,7 +983,7 @@ describe('PlatformService (spec §5.1)', () => {
       const registry = new FakeRegistry();
       const provisioner = mockProvisioner();
       provisioner.provisionTenant.mockResolvedValue({ groupName: `t-${TENANT_A}` });
-      apiKeys.create.mockRejectedValue(Object.assign(new Error('limit'), { name: 'LimitExceededException' }));
+      apiKeys.create.mockRejectedValue(Object.assign(new Error('bad'), { name: 'BadRequestException' }));
 
       await expect(
         makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT),
@@ -1877,6 +1878,59 @@ describe('PlatformService (spec §5.1)', () => {
       await expect(service.GetUser({ tenantId: TENANT_A, username: 'u1' }, CONTEXT)).rejects.toMatchObject({
         name: 'InternalServerError',
         message: 'Internal server error',
+      });
+    });
+
+    describe('dependency throttles -> ThrottlingError 503 with Retry-After, logged at WARN (ADR-0037)', () => {
+      const cognitoThrottle = (name: string): Error => {
+        const error = new Error('Rate exceeded for operation AdminCreateUser; sensitive detail');
+        error.name = name;
+        return error;
+      };
+
+      for (const name of ['TooManyRequestsException', 'LimitExceededException', 'ThrottlingException', 'ProvisionedThroughputExceededException']) {
+        it(`${name} on CreateUser`, async () => {
+          const { service, provisioner } = serviceWithActiveTenant();
+          provisioner.createUser.mockRejectedValue(cognitoThrottle(name));
+          const logSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+          try {
+            await expect(
+              service.CreateUser({ tenantId: TENANT_A, email: 'u1@example.com' }, CONTEXT),
+            ).rejects.toMatchObject({
+              name: 'ThrottlingError',
+              $fault: 'server',
+              message: 'A dependency throttled the request; retry after a short wait',
+              retryAfterSeconds: 1,
+            });
+            const lines = logSpy.mock.calls.map((c) => JSON.parse(String(c[0])));
+            const throttled = lines.filter((l) => l.message === 'Platform operation throttled by a dependency');
+            expect(throttled).toHaveLength(1);
+            expect(throttled[0]).toMatchObject({ level: 'WARN', operation: 'CreateUser', tenantId: TENANT_A, errorName: name });
+            // Neither the SDK message nor an ERROR line reaches the log (N-6).
+            expect(JSON.stringify(lines)).not.toContain('sensitive detail');
+            expect(lines.filter((l) => l.level === 'ERROR')).toHaveLength(0);
+          } finally {
+            logSpy.mockRestore();
+          }
+        });
+      }
+
+      it('a throttle during CreateTenant provisioning still cleans up the row and is a 503', async () => {
+        const registry = new FakeRegistry();
+        const provisioner = mockProvisioner();
+        provisioner.provisionTenant.mockRejectedValue(cognitoThrottle('TooManyRequestsException'));
+        await expect(
+          makeService(registry, provisioner).CreateTenant({ name: 'Acme', adminEmail: 'a@example.com' }, CONTEXT),
+        ).rejects.toMatchObject({ name: 'ThrottlingError', retryAfterSeconds: 1 });
+        expect(registry.calls).toContain(`delete:${TENANT_A}`);
+        expect(registry.items.size).toBe(0);
+      });
+
+      it('a modelled ThrottlingError passes through unchanged', async () => {
+        const { service, provisioner } = serviceWithActiveTenant();
+        const modelled = new ThrottlingError({ message: 'm', retryAfterSeconds: 2 });
+        provisioner.getUser.mockRejectedValue(modelled);
+        await expect(service.GetUser({ tenantId: TENANT_A, username: 'u1' }, CONTEXT)).rejects.toBe(modelled);
       });
     });
   });

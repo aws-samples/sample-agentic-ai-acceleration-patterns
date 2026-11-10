@@ -329,6 +329,21 @@ describe('TenantUsersService — error mapping (§5.3)', () => {
     });
   });
 
+  it('a Cognito throttle → ThrottlingError 503 with Retry-After and a fixed message (ADR-0037)', async () => {
+    const throttled = new Error('Rate exceeded; sensitive detail');
+    throttled.name = 'TooManyRequestsException';
+    const provisioner = mockProvisioner({
+      createUser: jest.fn().mockRejectedValue(throttled),
+    });
+    const service = new TenantUsersService(fakeRegistry(), provisioner);
+    await expect(service.CreateTenantUser({ email: 'a@example.com' }, context)).rejects.toMatchObject({
+      name: 'ThrottlingError',
+      $fault: 'server',
+      message: 'A dependency throttled the request; retry after a short wait',
+      retryAfterSeconds: 1,
+    });
+  });
+
   it('re-throws a modeled ValidationError unchanged', async () => {
     const provisioner = mockProvisioner({
       getUser: jest.fn().mockRejectedValue(new ValidationError({ message: 'm', reason: 'InvalidInput' })),

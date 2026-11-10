@@ -45,3 +45,4 @@ Template: [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md#2-d
 | [ADR-0034](0034-backends-register-their-scopes-in-a-catalogue.md) | Let backends register their own scopes in a catalogue through the platform API | Accepted | 2026-10-29 |
 | [ADR-0035](0035-entitle-scopes-per-tenant-on-the-registry-row.md) | Entitle scopes per tenant on the registry row | Accepted | 2026-10-29 |
 | [ADR-0036](0036-let-tenant-admins-cut-user-scopes-with-a-cognito-attribute.md) | Let tenant admins cut a user's scopes with a Cognito attribute | Accepted | 2026-10-29 |
+| [ADR-0037](0037-map-dependency-throttles-to-a-retryable-503.md) | Map dependency throttles to a retryable 503 | Accepted | 2026-11-10 |
