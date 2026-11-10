@@ -2,7 +2,7 @@
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 -->
-# Agentic runtime isolation: runtime, tools and entitlements for multi-tenant agents
+# Agentic runtime isolation: the agent platform at scale
 
 ## Use cases
 
