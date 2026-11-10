@@ -27,17 +27,6 @@ that trust policy is the only thing the builds can act through.
 
 ![Architecture: a vendor operator calls API Gateway (the Lambda Authorizer validates the vendor IdP JWT), which invokes the Tenant Service Lambda; the service writes the DynamoDB table of accounts, cells and tenants and starts Step Functions, which runs the cell-scripts and tenant-scripts CodeBuild projects; each project calls sts:AssumeRole (with an external id) into the cell-provisioning or tenant-provisioning role of Account A or Account B, which writes or reads and writes that account's SSM Parameter Store namespaces; the Tenant Service's own role also assumes both roles once at PutAccount as a registration probe](./diagrams/control-plane.drawio.svg)
 
-On the AWS resources the sample deploys: operator JWT -> API Gateway (Lambda
-Authorizer) -> Tenant Service -> DynamoDB and, for async operations, Step
-Functions -> CodeBuild cell scripts (new cell only) then tenant scripts ->
-`sts:AssumeRole` (with the account's external id) into the
-`<fleet>-cell-provisioning` or `<fleet>-tenant-provisioning` role of the
-cell's account -> that account's SSM Parameter Store namespaces; the workflow
-writes the terminal status back to DynamoDB. The dashed line from the Tenant
-Service to the same roles is the `PutAccount` registration probe (ADR-027/028):
-one `AssumeRole` per half under a deny-all session policy, credentials
-discarded.
-
 One service, one API, one DynamoDB table, one state machine, two shared
 CodeBuild projects — and in every account that hosts cells, the control plane's
 own included, one role pair whose asymmetry enforces the
