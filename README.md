@@ -24,7 +24,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 - [Samples](#samples)
   - [The Simple Cell-Based Control Plane](#the-simple-cell-based-control-plane)
   - [Tenant Identity with Amazon Cognito](#tenant-identity-with-amazon-cognito)
-  - [Agentic runtime isolation: runtime, tools and entitlements for multi-tenant agents](#agentic-runtime-isolation-runtime-tools-and-entitlements-for-multi-tenant-agents)
+  - [Agentic runtime isolation: the agent platform at scale](#agentic-runtime-isolation-the-agent-platform-at-scale)
   - [Per-Tenant Encrypted Ingestion for Agentic Applications](#per-tenant-encrypted-ingestion-for-agentic-applications)
 - [Contributing a sample](#contributing-a-sample)
 - [Further Reading](#further-reading)
@@ -38,7 +38,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 |---|---|
 | [The Simple Cell-Based Control Plane](./samples/control-plane/) | A minimal multi-tenant control plane for cell-based deployments — one service, one API, one DynamoDB table, one Step Functions workflow, script-driven provisioning via AWS CodeBuild. `maxTenants: 1` degenerates the model to a silo. |
 | [Tenant Identity with Amazon Cognito](./samples/tenant-identity/) | An identity layer that makes Amazon Cognito the trusted source of tenant identity, in three user-pool topologies chosen at deploy time — plus a `tiered` mode that runs two of them side by side — with RFC 8693 token narrowing to one tenant. |
-| [Agentic runtime isolation: runtime, tools and entitlements for multi-tenant agents](./samples/agentic-runtime-isolation/) | A pooled agent platform on Amazon Bedrock AgentCore: one ingress verifies the tenant token, resolves the agent and tool grant from an entitlement store, mints a 5-minute transaction token and invokes the agent's Runtime (a fresh microVM session per request by default, one per tenant or per user with session mapping) with tenant-scoped credentials, while a tools gateway (one by default, more optional) checks each call with a per-tool interceptor and then AgentCore Policy. |
+| [Agentic runtime isolation: the agent platform at scale](./samples/agentic-runtime-isolation/) | A pooled agent platform on Amazon Bedrock AgentCore: one ingress verifies the tenant token, resolves the agent and tool grant from an entitlement store, mints a 5-minute transaction token and invokes the agent's Runtime (a fresh microVM session per request by default, one per tenant or per user with session mapping) with tenant-scoped credentials, while a tools gateway (one by default, more optional) checks each call with a per-tool interceptor and then AgentCore Policy. With `agentDelegation` on the `api-gateway` ingress, an agent hands the transaction to another agent through that ingress, which re-issues the token for the next hop. |
 | [Per-Tenant Encrypted Ingestion for Agentic Applications](./samples/tenant-encrypted-ingestion/) | One drop zone and pipeline for every tenant's documents, each tenant's encrypted with its own AWS KMS key, kept apart by key policy and identity-policy ABAC rather than code, validated by a deployer-extensible chain before it lands, in a vendor-owned or tenant-owned key tier, with cryptographic offboarding. |
 
 ## The Simple Cell-Based Control Plane
@@ -86,39 +86,36 @@ The sample stops at the token: verifying it and scoping a request belongs to
 the consuming service, which is an extension seam rather than built here. See
 [Tenant Identity with Amazon Cognito](./samples/tenant-identity/).
 
-## Agentic runtime isolation: runtime, tools and entitlements for multi-tenant agents
+## Agentic runtime isolation: the agent platform at scale
 
-A pooled agent platform serves every tenant from shared compute and shared
-tools, so three questions follow on every request: which compute unit may
-this caller reach, which agents and tools has this tenant user been granted,
-and whose permissions does each call use? If the client picks the session,
-the agent holds one role for all tenants, or the user's identity token is
-handed on to the agent and its tools, a stolen token or a prompt-injected
-agent can reach another tenant's conversation, tools or data.
+Building an agent platform for a scale of 10,000s of tenants and agents and
+1,000s of tools introduces challenges which are not present at lower
+volumes. Enforcing least-privilege isolation and per-tenant and per-user
+entitlements goes beyond the limits of what OAuth scopes can handle: a scope
+list in the identity token must name every tool the user may use with any
+agent, grows past the token size caps of the identity provider, and changes
+only at the next sign-in.
 
-This sample puts one ingress in front of one or more Amazon Bedrock
-AgentCore Runtimes and makes it the only principal each Runtime trusts. The
-ingress verifies the tenant-identity token, resolves the grant (agent needs
-∪ agent tools ∩ tenant tools ∩ user tools) from an entitlement store, mints
-a 5-minute transaction token naming one tenant, one user and one agent, and
-invokes the Runtime in a fresh microVM session per request by default (with
-`session` set, one per tenant, or per user) with `TenantId`-tagged
-credentials from an always-on token vending machine; the identity token
-never leaves the ingress. Tools are served by one AgentCore Gateway (the
-tools gateway) by default, or several, each with its own Policy engine: a
-REQUEST interceptor runs first as the per-tool wall and hands the tool a
-signed tenant context, Policy then admits the target, and each tool assumes
-its own tenant role, so IAM, not agent or tool code, keeps each tenant to
-its own data. On the recommended `api-gateway` ingress every authoriser
-refusal reaches the client as 403; the `agentcore-gateway` ingress keeps
-each refusal's own status (401 for a bad token, 404 for an unknown agent,
-502 for an ingress fault, 403 for the rest).
+This sample describes a reference architecture in which one shared ingress
+is the only code that sees the identity token. It computes each agent's
+grant per request from an entitlement store (what the agent needs, what the
+tenant bought, what the tenant admin cut), mints a short-lived transaction
+token bound to that one agent and its tools gateways, and invokes the agent
+in its own AgentCore Runtime microVM with tenant-scoped credentials. Tools
+gateways and tools trust that token and a signed per-call context, never
+the agent. An agent can also hand a transaction to another agent through
+the same ingress, which re-issues the token for the next hop with the
+caller recorded in `act`. Entitlement cardinality lives in data, not in
+policies or roles, so the design lets you scale to 10,000s of tenants, each
+with 1,000s of agents and 1,000s of tools, while a cut or a subscription
+change takes effect on the next request and every hop holds the narrowest
+token that works.
 
 It consumes `tenant-identity` (`shared-pool`) and ships as CDK constructs
 that later samples can consume (`SharedIngress`, `AgentBackend`,
 `ToolTarget`, `TokenSigner`, `EntitlementStore`); the ingress publishes its
 interface as one JSON parameter. See
-[Agentic runtime isolation: runtime, tools and entitlements for multi-tenant agents](./samples/agentic-runtime-isolation/).
+[Agentic runtime isolation: the agent platform at scale](./samples/agentic-runtime-isolation/).
 
 ## Per-Tenant Encrypted Ingestion for Agentic Applications
 
