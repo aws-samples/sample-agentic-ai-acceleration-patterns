@@ -32,7 +32,7 @@
 import { readFileSync } from 'node:fs';
 import { Sha256 } from '@aws-crypto/sha256-js';
 import { CloudTrailClient, LookupEventsCommand } from '@aws-sdk/client-cloudtrail';
-import { CloudWatchClient, DescribeAlarmsCommand, DescribeInsightRulesCommand } from '@aws-sdk/client-cloudwatch';
+import { CloudWatchClient, DescribeAlarmsCommand, DescribeInsightRulesCommand, GetInsightRuleReportCommand } from '@aws-sdk/client-cloudwatch';
 import { CloudWatchLogsClient, FilterLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
 import { DynamoDBClient, GetItemCommand } from '@aws-sdk/client-dynamodb';
 import { IAMClient, SimulatePrincipalPolicyCommand } from '@aws-sdk/client-iam';
@@ -45,6 +45,7 @@ import {
   GetKeyPolicyCommand,
   KMSClient,
   ListAliasesCommand,
+  ListResourceTagsCommand,
   PutKeyPolicyCommand,
   ScheduleKeyDeletionCommand,
 } from '@aws-sdk/client-kms';
@@ -66,6 +67,7 @@ import { SignatureV4 } from '@smithy/signature-v4';
 import type { AwsCredentialIdentity, AwsCredentialIdentityProvider } from '@smithy/types';
 import { buildTenantKeyTemplate, type PolicyDocument, type PolicyStatement } from '../src/platform/key-policy';
 import { EVENT_SOURCE } from '../src/shared/constants';
+import { KMS_REQUESTS_COPY, KMS_REQUESTS_PUT, KMS_REQUESTS_READ } from '../src/shared/metering';
 import { keyArnItemKey, keyRowKey, tombstoneKey } from '../src/shared/registry';
 
 const REGION = process.env.AWS_REGION ?? '';
@@ -1318,6 +1320,100 @@ async function step10(w: World): Promise<StepResult> {
   return c.result('10');
 }
 
+/**
+ * 10b. Cost attribution (P-9, M-28). The three per-tenant figures of tenant A
+ * agree with each other and with the tenant's own view of its deliveries: the
+ * registry counters read through `GetTenantKey`, the `TenantId` cost
+ * allocation tag on the vendor-key key, and the `tei-top-bytes` and
+ * `tei-top-deliveries` Contributor Insights reports. Before step 11, which
+ * removes A's key row.
+ */
+async function step10b(w: World): Promise<StepResult> {
+  const c = new Check();
+  await refreshTokens(w, c);
+  const a = w.tenants.A;
+  if (a.token === undefined) {
+    c.expect(false, 'no token for A');
+    return c.result('10b');
+  }
+
+  // The tenant's view: every delivery row of A, paged.
+  const listed: Array<{ status: string; sizeBytes: number; reason?: string }> = [];
+  let nextToken: string | undefined;
+  let pages = 0;
+  do {
+    const query = nextToken === undefined ? '' : `?nextToken=${encodeURIComponent(nextToken)}`;
+    const r = await tenantCall('GET', `tenant/deliveries${query}`, a.token);
+    if (r.status !== 200) {
+      c.expect(false, `ListDeliveries A page ${pages + 1} -> ${r.status}`);
+      break;
+    }
+    pages += 1;
+    listed.push(...((r.json.deliveries ?? []) as Array<{ status: string; sizeBytes: number; reason?: string }>));
+    nextToken = r.json.nextToken;
+  } while (nextToken !== undefined);
+  const accepted = listed.filter((d) => d.status === 'ACCEPTED');
+  const refused = listed.filter((d) => d.status === 'REJECTED' || d.status === 'KEY_UNAVAILABLE');
+  // ListDeliveries returns the declared size; it equals the measured size for ACCEPTED (SIZE_MISMATCH rejects the rest).
+  const bytes = accepted.reduce((sum, d) => sum + d.sizeBytes, 0);
+  // The sweep ends an abandoned lease (step 7c) as REJECTED on the key row, but it made no KMS request and wrote no processor line.
+  const abandoned = refused.filter((d) => d.reason === 'structural:PROCESSING_ABANDONED').length;
+  c.expect(pages > 0 && accepted.length > 0, `ListDeliveries A -> ${listed.length} deliveries in ${pages} pages, ${accepted.length} ACCEPTED, ${refused.length} REJECTED or KEY_UNAVAILABLE`);
+
+  // The platform's view: the key row's counters.
+  const key = await signed('GET', `${w.apiUrl}platform/tenants/${a.tenantId}/key`);
+  c.expect(key.status === 200, `GetTenantKey A -> ${key.status}`);
+  const counters = key.json?.key ?? {};
+  c.expect(counters.deliveriesAccepted === accepted.length, `deliveriesAccepted ${String(counters.deliveriesAccepted)} = ACCEPTED deliveries listed ${accepted.length}`);
+  c.expect(counters.deliveriesRejected === refused.length, `deliveriesRejected ${String(counters.deliveriesRejected)} = REJECTED and KEY_UNAVAILABLE deliveries listed ${refused.length}`);
+  c.expect(counters.bytesStored === bytes, `bytesStored ${String(counters.bytesStored)} = sum of ACCEPTED sizeBytes ${bytes}`);
+  // Four plus one per validator for an accepted delivery, at least the PUT for a delivery the processor refused.
+  const kmsFloor = KMS_REQUESTS_PUT + KMS_REQUESTS_READ + KMS_REQUESTS_COPY;
+  const floor = kmsFloor * accepted.length + KMS_REQUESTS_PUT * (refused.length - abandoned);
+  c.expect(typeof counters.kmsRequests === 'number' && counters.kmsRequests >= floor,
+    `kmsRequests ${String(counters.kmsRequests)} >= ${kmsFloor} per ACCEPTED + ${KMS_REQUESTS_PUT} per processor-refused = ${floor}`);
+  c.expect(counters.inFlight === 0, `inFlight ${String(counters.inFlight)} = 0 with no upload open`);
+
+  // The bill's view: the vendor-key key carries the TenantId cost allocation tag.
+  if (a.keyArn === undefined) {
+    c.expect(false, "step 1's key of A is needed");
+  } else {
+    const tags = (await kms.send(new ListResourceTagsCommand({ KeyId: a.keyArn }))).Tags ?? [];
+    const tenantTag = tags.find((t) => t.TagKey === 'TenantId')?.TagValue;
+    c.expect(tenantTag === a.tenantId, `TenantId tag on A's key -> ${String(tenantTag)}`);
+  }
+  c.note("B's tenant-key key carries the tag this test set in step 1; the vendor never tags it");
+
+  // The dashboard's view: the Contributor Insights reports over this run name A with the same figures.
+  const names = w.demo.ContributorInsightRuleNames.split(',');
+  const report = async (suffix: string): Promise<number | undefined> => {
+    const name = names.find((n) => n.endsWith(suffix));
+    if (name === undefined) {
+      return undefined;
+    }
+    const start = new Date(Math.floor(w.startedAt / 60_000) * 60_000);
+    const end = new Date(Math.ceil(Date.now() / 60_000) * 60_000);
+    const r = await cloudwatch.send(
+      new GetInsightRuleReportCommand({ RuleName: name, StartTime: start, EndTime: end, Period: 60, MaxContributorCount: 100, Metrics: ['Sum'] }),
+    );
+    // Keys are [tenantId] or [tenantId, status]: sum every contributor of A.
+    const mine = (r.Contributors ?? []).filter((x) => (x.Keys ?? [])[0] === a.tenantId);
+    return mine.length === 0 ? undefined : mine.reduce((sum, x) => sum + (x.ApproximateAggregateValue ?? 0), 0);
+  };
+  const terminated = accepted.length + refused.length - abandoned;
+  // Contributor Insights reads the log stream with a delay of minutes.
+  const sums = await pollUntil(
+    async () => ({ bytes: await report('-tei-top-bytes'), deliveries: await report('-tei-top-deliveries') }),
+    (s) => s.bytes === bytes && s.deliveries === terminated,
+    5 * 60 * 1000,
+    30_000,
+  );
+  c.expect(sums.bytes === bytes, `tei-top-bytes for A -> ${String(sums.bytes)} (bytesStored ${bytes})`);
+  c.expect(sums.deliveries === terminated, `tei-top-deliveries for A -> ${String(sums.deliveries)} (processor-terminated deliveries ${terminated}; ${abandoned} ended by the sweep)`);
+  c.note('per-tenant EMF (perTenantMetrics) is off in the demo stack; its record shape is a unit test');
+  return c.result('10b');
+}
+
 /** 11. Offboarding. */
 async function step11(w: World): Promise<StepResult> {
   const c = new Check();
@@ -1525,6 +1621,7 @@ async function main(): Promise<void> {
     await run1('8', () => step8(w));
     await run1('9', () => step9(w));
     await run1('10', () => step10(w));
+    await run1('10b', () => step10b(w));
     await run1('11', () => step11(w));
     await run1('12', () => step12());
   } finally {

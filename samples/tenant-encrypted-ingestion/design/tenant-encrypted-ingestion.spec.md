@@ -1148,6 +1148,21 @@ processor. The test waits 5 minutes after each key policy or tag change.
     the count is informational and carries no assertion (ADR-0023): the
     processor meters 6 for one accepted delivery with two validators,
     CloudTrail records 19.
+10b. **Cost attribution.** The per-tenant figures of A agree with each
+    other and with A's own view: `GetTenantKey A` returns
+    `deliveriesAccepted` and `deliveriesRejected` equal to the `ACCEPTED`
+    and the `REJECTED` plus `KEY_UNAVAILABLE` deliveries that
+    `ListDeliveries A` returns, `bytesStored` equal to the sum of the
+    accepted deliveries' `sizeBytes`, `kmsRequests` at least four per
+    accepted and one per delivery the processor refused (the lease the
+    sweep abandons in step 7c made no KMS request), `inFlight` 0; A's `vendor-key`
+    key carries the `TenantId` tag with A's id; the `tei-top-bytes` and
+    `tei-top-deliveries` Contributor Insights reports over the run name A
+    with `bytesStored` and the count of processor-terminated deliveries,
+    which leaves out the lease the sweep abandoned in step 7c: the sweep
+    counts it on the key row but writes no processor line (Contributor
+    Insights lags the log by minutes; the test polls up to five). Per-tenant EMF is off in the demo stack; its record shape is a
+    unit test.
 11. **Offboarding.** URL in flight, `DeleteTenantKey A` -> 202; no version
     under either A prefix; alias gone; key `PendingDeletion`;
     `CreateDelivery A` -> 403 from API Gateway (API key gone) or 409
@@ -1161,8 +1176,8 @@ processor. The test waits 5 minutes after each key policy or tag change.
     stack and its scratch bucket are gone, nothing with the sample's prefix
     remains but keys pending deletion, which the test lists.
 
-Runtime target: 60 to 90 minutes, under $2 per run; the two runs of
-2026-11-09, with a second account, took 53 and 65 minutes.
+Runtime target: 60 to 90 minutes, under $2 per run; the four green runs of
+2026-11-09, with a second account, took 53 to 65 minutes (54 with step 10b).
 
 ---
 
