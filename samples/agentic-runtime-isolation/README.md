@@ -69,13 +69,15 @@ Spec §1.2 has the full list.
 
 ## Architecture
 
-![Components: the request path runs tenant user, ingress, agent, tools gateway, tool, tenant data across three trust zones; a second row of shared components (entitlement store, backend registry, token signer, tenant limits, TVM) is fed by the ingress, the tools gateway and the tool, and the entitlement API writes the store for the vendor and tenant admins; each box names the pattern it carries](./diagrams/agentic-runtime-isolation.components.drawio.svg)
+![Components: the request path runs tenant user, ingress, agent, tools gateway, tool, tenant data across three trust zones, with a dashed delegation edge from the agent back to the ingress; a second row of shared components (entitlement store, backend registry, token signer, tenant limits, TVM) is fed by the ingress, the tools gateway and the tool, and the entitlement API writes the store for the vendor and tenant admins; each box names the pattern it carries](./diagrams/agentic-runtime-isolation.components.drawio.svg)
 
 Each box is one component and its pill names the pattern it carries. The
 ingress runs the shared pipeline and uses the entitlement store (grant rule),
 the backend registry (discovery), the token signer (transaction token), the
 tenant limits (per-tenant rate limit) and the TVM (token vending machine); the
-agent runs in a pooled Runtime; the tools gateway admits a call with its
+agent runs in a pooled Runtime, and with `agentDelegation` on it can hand
+the transaction back to the ingress, which re-issues the token for the next
+agent (the dashed return edge); the tools gateway admits a call with its
 interceptor and policy; the tool assumes an ABAC tenant role and reads
 tenant-keyed items; the entitlement API gives the vendor and tenant admins
 asymmetric grants on the store.
@@ -86,7 +88,10 @@ On the AWS resources the sample deploys: a tenant user's identity token
 reaches the ingress, which mints a per-agent transaction token and passes it
 to the agent in the AgentCore Runtime; the agent presents it to a tools
 gateway, whose interceptor signs a tenant context for the one tool call, and
-the tool verifies that context and reads only that tenant's data. The
+the tool verifies that context and reads only that tenant's data. With
+`agentDelegation` the agent may also call `POST /{agent}/delegations` on the
+same API with its transaction token (the dashed return edge), and the ingress
+re-issues the token for the next agent. The
 long-form data path, frame by frame, is
 [`diagrams/CAPTION.md`](./diagrams/CAPTION.md); components and their code
 locations are in [`architecture.md`](./architecture.md#components).

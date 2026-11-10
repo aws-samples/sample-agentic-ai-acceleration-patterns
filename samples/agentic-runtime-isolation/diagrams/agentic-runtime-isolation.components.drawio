@@ -3,7 +3,7 @@
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 -->
-<mxfile host="drawio" modified="2026-11-09T00:00:00.000Z" agent="generator" version="26.0.0" type="device">
+<mxfile host="drawio" modified="2026-11-10T00:00:00.000Z" agent="generator" version="26.0.0" type="device">
   <diagram name="Components" id="components">
     <mxGraphModel dx="1600" dy="500" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1830" pageHeight="470" math="0" shadow="0">
       <root>
@@ -84,6 +84,8 @@ SPDX-License-Identifier: MIT-0
         <mxCell id="c74" value="" style="endArrow=block;endFill=1;html=0;rounded=0;strokeColor=#545B64;strokeWidth=1.5;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" target="c57"><mxGeometry relative="1" as="geometry"><mxPoint x="1305" y="280" as="sourcePoint"/><mxPoint x="1305" y="340" as="targetPoint"/></mxGeometry></mxCell>
         <mxCell id="c75" value="" style="endArrow=block;endFill=1;html=0;rounded=0;strokeColor=#545B64;strokeWidth=1.5;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" target="c61"><mxGeometry relative="1" as="geometry"><mxPoint x="1505" y="280" as="sourcePoint"/><mxPoint x="1505" y="340" as="targetPoint"/></mxGeometry></mxCell>
         <mxCell id="c76" value="uses" style="text;html=0;align=left;verticalAlign=top;fontSize=11;fontStyle=2;fontColor=#545B64;spacing=0;spacingTop=0;" vertex="1" parent="1"><mxGeometry x="433" y="256" width="40" height="16" as="geometry"/></mxCell>
+        <mxCell id="c77" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;strokeColor=#545B64;strokeWidth=1.5;dashed=1;dashPattern=6 3;endArrow=block;endFill=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.9;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="c12" target="c8"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="702" y="275"/><mxPoint x="493" y="275"/></Array></mxGeometry></mxCell>
+        <mxCell id="c78" value="delegation: transaction token,&#xa;re-issued for the next agent" style="text;html=0;align=center;verticalAlign=top;fontSize=11;fontStyle=2;fontColor=#545B64;spacing=0;spacingTop=0;" vertex="1" parent="1"><mxGeometry x="500" y="279" width="170" height="31" as="geometry"/></mxCell>
       </root>
     </mxGraphModel>
   </diagram>
