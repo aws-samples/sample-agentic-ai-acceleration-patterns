@@ -117,6 +117,27 @@ stacks. Last green integration run: run 15, 2026-11-06, eu-central-1,
 58/58 steps; timings and coverage are in the
 [`architecture.md` status block](./architecture.md).
 
+## After an interruption
+
+The destroy runs from the script's exit trap, also when the deploy or a
+step fails, and the run fails if anything the stacks owned is left. When
+the script itself is stopped before the trap runs, look for and remove by
+hand, in the Region of the run:
+
+- CloudFormation stacks named `<INTEG_PREFIX>-*` (default
+  `RuntimeIsolationInteg-*`), including any in `DELETE_FAILED`.
+  CloudFormation refuses updates to those, so a rerun beside them needs
+  another `INTEG_PREFIX`; the leftover check is scoped to that prefix.
+- The fixed-name SSM parameters the publishing stack wrote, the log groups
+  the stacks owned, the AgentCore Runtime log groups of the deployed
+  agents, the DynamoDB tables, the Gateways and the Policy engines of the
+  run. The script records each of these at deploy time and checks them
+  after the destroy ([`scripts/integ.sh`](./scripts/integ.sh)).
+
+The tenant-identity `shared-pool` stacks are a shared fixture of the
+account and stay; the run never destroys them unless it deployed them
+itself.
+
 ## Test-only shortcuts
 
 - The test reads stack outputs for the values a step needs, because the

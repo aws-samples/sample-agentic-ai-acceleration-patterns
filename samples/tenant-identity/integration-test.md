@@ -99,9 +99,10 @@ steps.
 
 One run with all four stacks took **about 10.5 minutes** (the last green run
 was 630 s, of which two 60 s waits per stack let a `DeleteScope` and a
-re-registration reach the catalogue cache) and cost well under 1 USD. The
-last green run, with its date, Region, steps and assertion count, is in the
-[`architecture.md`](./architecture.md) status block.
+re-registration reach the catalogue cache) and cost well under 1 USD. Last
+green run: 2026-10-29, eu-central-1, all four stacks deployed as
+`TenantIdentityScopes-*` beside a standing deployment, 51/51 e2e assertions;
+coverage is in the [`architecture.md`](./architecture.md) status block.
 
 ### After an interruption
 
@@ -182,7 +183,8 @@ a recreated tenant-identity log group still fails it.
 ### Runtime and cost
 
 The run takes **about 11 minutes** observed (the spec estimated 25–35) and
-costs under 1 USD. The last green run is in the
+costs under 1 USD. Last green run: 2026-10-27, eu-west-1, mounting spec §10
+steps 1–12 including 5b and 9b, 11/11 e2e assertions; coverage is in the
 [`architecture.md`](./architecture.md) status block.
 
 ### After an interruption

@@ -1,5 +1,9 @@
 # The Simple Cell-Based Control Plane: deployment integration test
 
+This file describes the sample's deployment integration test, as the
+[sample standard §5.3](../../docs/sample-standard.md#53-integration-test-document-integration-testmd)
+lays it out. The [README](./README.md) carries the command and a link here.
+
 ## What it is
 
 [`test/integ.tenant.ts`](./test/integ.tenant.ts) is an
@@ -45,7 +49,7 @@ repeated runs.
 |---|---|
 | `control-plane-integ-setup` | A throwaway Cognito user pool as the vendor IdP, with a pre token generation trigger that adds the `role: "operator"` claim (ADR-018), and an S3 bucket hosting `scripts/sample-cell` and `scripts/sample-tenant` as the stamped source |
 | `control-plane-integ` | The stack under test: `TenantStack` with a `cellDefinition` that points both shared CodeBuild projects at the test bucket, with `maxTenants: 2` |
-| integ-tests-alpha assertion stack (`ControlPlaneInteg`) | The API calls and polls that drive the steps below |
+| `ControlPlaneIntegDefaultTestDeployAssert<hash>` | The integ-tests-alpha assertion stack of the `ControlPlaneInteg` test: the API calls and polls that drive the steps below |
 
 The test reuses nothing that exists in the account. Its own steps tear down
 every tenant and both cells, leaving the SSM namespaces empty; the runner then
