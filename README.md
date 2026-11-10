@@ -43,26 +43,27 @@ described in [the Sample Standard](./docs/sample-standard.md).
 
 ## The Cell-Based Control Plane
 
-A multi-tenant control plane for cell-based deployments. A cell
-is a deployment unit: one shared application deployment plus up to
-`maxTenants` tenants, each with its own per-tenant deployment inside the
-cell. Set `maxTenants: 1` and the model degenerates to a silo — one tenant
-per cell.
+A control plane that onboards tenants into cells across either the vendor's
+or the customer's AWS accounts.
 
-Cells live in registered AWS accounts. A vendor-owned account is fleet
-capacity with a cell limit, so the fleet scales to a second account when the
-first is full; a tenant-owned account is a customer's own, receives only the
-tenants that name it, and is reached through a role pair the customer installs
-and can revoke. The control plane holds no credentials for any account.
+A cell is one shared application deployment plus up to `maxTenants` tenants,
+each with its own per-tenant deployment inside the cell. `maxTenants: 1`
+yields dedicated tenant cells.
 
-Tenant onboarding is a single `POST /tenants` call: placement claims a slot
-in an existing cell or creates a new cell implicitly in an eligible account,
-then a Step Functions workflow runs your provisioning scripts in AWS CodeBuild
-under that account's provisioning role — the cell create script first when a
-new cell is needed, then the tenant create script. Provisioning is defined
-once, at deployment time, by a CellDefinition; cells are homogeneous by
-construction and callers can never supply code. Every API operation requires
-a JWT from your vendor IdP, validated by a Lambda Authorizer.
+Accounts are registered through the API. A vendor account holds one to many
+cells up to a cell limit; when every vendor account is full, the fleet moves
+on to the next registered one. A customer account receives only the tenants
+that name it. Each account is reached through a role pair installed in that
+account, which the account owner can revoke. The control plane stores no
+credentials for any account.
+
+`POST /tenants` places the tenant in an existing cell or creates a new cell
+in an eligible account, then runs your provisioning scripts in AWS CodeBuild
+under that account's provisioning role through a Step Functions workflow:
+the cell create script first when a new cell is needed, then the tenant
+create script. Scripts are fixed at deployment time by a CellDefinition;
+callers cannot supply code. Every API operation requires a JWT from your
+vendor IdP, validated by a Lambda Authorizer.
 
 [The Cell-Based Control Plane](./samples/control-plane/)
 
