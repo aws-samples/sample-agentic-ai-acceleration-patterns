@@ -226,7 +226,7 @@ destroy() {
   fi
   # control-plane has no log drain, so its API access log group is recreated
   # while the stack is being deleted (known control-plane issue, recorded in
-  # the README). That is control-plane's bug, not this mount's: delete the
+  # integration-test.md). That is control-plane's bug, not this mount's: delete the
   # group(s) and warn, without failing the run.
   if [ "${#cp_log_groups[@]}" -gt 0 ]; then
     leftovers="$(leftover_log_groups "${cp_log_groups[@]}" || true)"

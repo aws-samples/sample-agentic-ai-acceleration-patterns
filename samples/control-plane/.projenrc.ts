@@ -95,8 +95,8 @@ project.tasks.tryFind('synth')?.reset(`cdk synth ${buildOnlyPlaceholderContext}`
 
 // End-to-end integration test (test/integ.tenant.ts) - deploys real
 // infrastructure and drives the API through the full lifecycle (~25 min).
-// Must run in EXACTLY ONE explicitly selected Region (README "Deployment
-// integration test"): the guard fails fast when AWS_REGION is unset so
+// Must run in EXACTLY ONE explicitly selected Region (integration-test.md):
+// the guard fails fast when AWS_REGION is unset so
 // integ-runner's multi-Region defaults can never apply to this test.
 const integ = project.addTask('integ', {
   description:
