@@ -154,7 +154,10 @@ It stands up `TenantIdentity-shared-pool`, a `TenantIdentityCpSetup` stack (a
 throwaway vendor IdP minting `role: operator` and an S3 bucket holding
 `scripts/control-plane/`), and control-plane itself, then runs the scenario in
 [`test/e2e/control-plane/mount.cp-e2e.test.ts`](./test/e2e/control-plane/mount.cp-e2e.test.ts).
-The teardown destroys all three: control-plane first, then setup and identity.
+The scenario first registers the home account with control-plane
+(`PutAccount`, vendor-owned; control-plane ADR-024: cells live in registered
+accounts) and deregisters it once the cell is gone. The teardown destroys all
+three stacks: control-plane first, then setup and identity.
 
 ### Steps
 
@@ -164,7 +167,7 @@ The teardown destroys all three: control-plane first, then setup and identity.
 | 3 | tenant-identity `GetTenant(T)` via the test's own SigV4 | 200 `ACTIVE`, same `name` |
 | 4 | tenant-identity `ListUsers(T)` | exactly one user, `admin: true`; `GetTenant` leaks no `firstAdminEmail` |
 | 5 | the parked parameter | `SecureString`, `KeyId` = `adminPasswordKeyArn`; value never printed |
-| 5b | IAM policy simulator, build role, `kms:Decrypt` on the key | `implicitDeny` |
+| 5b | IAM policy simulator, tenant provisioning role, `kms:Decrypt` on the key | `implicitDeny` |
 | 6 | `IssueToken` for the admin with the parked password | 200; access token's `tenant_id` is `T` |
 | 7 | control-plane `UpdateResource(T)` (re-runs `tenant/update.sh`) | `ACTIVE`; still one admin; parked parameter version unchanged |
 | 8 | run `tenant/create.sh` a second time with the build's env | exit 0, `already has its first admin`; still one user and one parameter version |
@@ -183,8 +186,8 @@ a recreated tenant-identity log group still fails it.
 ### Runtime and cost
 
 The run takes **about 11 minutes** observed (the spec estimated 25–35) and
-costs under 1 USD. Last green run: 2026-10-27, eu-west-1, mounting spec §10
-steps 1–12 including 5b and 9b, 11/11 e2e assertions; coverage is in the
+costs under 1 USD. Last green run: 2026-11-10, eu-central-1, mounting spec §10
+steps 1–12 including 5b and 9b, 11/11 e2e assertions, 11 minutes; coverage is in the
 [`architecture.md`](./architecture.md) status block.
 
 ### After an interruption

@@ -128,6 +128,19 @@ export class PlacementRaceLostError extends ConditionFailedError {
  * was already used by an earlier CreateTenant (ADR-017). The service
  * replays the original outcome instead of onboarding a duplicate.
  */
+/**
+ * Thrown by the new-cell placement transaction when the account's cell-slot
+ * condition (`cellCount < maxCells`, the FIRST transact item) is the only
+ * failed check (ADR-024): the account is full (or was deregistered
+ * meanwhile), and the caller may try the next eligible account.
+ */
+export class AccountFullError extends ConditionFailedError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AccountFullError';
+  }
+}
+
 export class DuplicateTokenError extends ConditionFailedError {
   constructor(message: string) {
     super(message);
@@ -588,21 +601,34 @@ export class PlacementTransactions<
   }
 
   /**
-   * §6 step 3 — no candidate claimed: create the new cell record (status
-   * `CREATING`, `tenantCount = 1` pre-claimed, definition stamped) together
-   * with the tenant, atomically. Both `Put`s are conditional on
-   * `attribute_not_exists(PK)` — fresh ULIDs make a collision negligible,
-   * but no write in this design is unconditional. When the caller supplied a
-   * CreateTenant `clientToken`, the idempotency item joins as a third `Put`
-   * (ADR-017) — a failed idempotency condition throws
-   * {@link DuplicateTokenError}. Any other failure is ambiguous: fail the
-   * request, never retarget.
+   * §7 step 3 — no candidate claimed: claim a cell slot on the hosting
+   * account and create the new cell record (status `CREATING`,
+   * `tenantCount = 1` pre-claimed, `accountId` set, definition stamped)
+   * together with the tenant, atomically (ADR-013, ADR-024):
+   *
+   * - `Update` account: `SET cellCount = cellCount + 1`, condition
+   *   `attribute_exists(PK) AND cellCount < maxCells` — the FIRST item, so
+   *   its cancellation code has a fixed position
+   * - `Put` cell, condition `attribute_not_exists(PK)`
+   * - `Put` tenant, condition `attribute_not_exists(PK)`
+   *
+   * Fresh ULIDs make a `Put` collision negligible, but no write in this
+   * design is unconditional. When the caller supplied a CreateTenant
+   * `clientToken`, the idempotency item joins LAST (ADR-017) — a failed
+   * idempotency condition throws {@link DuplicateTokenError} and wins over
+   * every other classification. A failed account condition alone throws
+   * {@link AccountFullError} (try the next eligible account). Any other
+   * failure is ambiguous: fail the request, never retarget.
    */
   async createCellWithTenant(params: {
+    /** Base-table key of the account the cell is created in. */
+    readonly accountKey: ItemKey;
     /** The new cell record — status CREATING, tenantCount 1, stamped definition. */
     readonly cell: TCellSchema;
     /** The tenant record — status CREATING, cellId = the new cell. */
     readonly tenant: TTenantSchema;
+    /** ISO-8601 timestamp stamped onto the account's `updatedAt`. */
+    readonly updatedAt: string;
     /** Stable idempotency token — same value on identical retries. */
     readonly clientRequestToken: string;
     /** CreateTenant idempotency item (ADR-017); absent when no clientToken. */
@@ -612,6 +638,23 @@ export class PlacementTransactions<
       await this.client.send(
         new TransactWriteCommand({
           TransactItems: [
+            {
+              Update: {
+                TableName: this.tableName,
+                Key: params.accountKey,
+                UpdateExpression: 'SET #cellCount = #cellCount + :one, #updatedAt = :updatedAt',
+                ConditionExpression: 'attribute_exists(PK) AND #cellCount < #maxCells',
+                ExpressionAttributeNames: {
+                  '#cellCount': 'cellCount',
+                  '#maxCells': 'maxCells',
+                  '#updatedAt': 'updatedAt',
+                },
+                ExpressionAttributeValues: {
+                  ':one': 1,
+                  ':updatedAt': params.updatedAt,
+                },
+              },
+            },
             {
               Put: {
                 TableName: this.tableName,
@@ -632,7 +675,15 @@ export class PlacementTransactions<
         }),
       );
     } catch (error) {
-      throwIfDuplicateToken(cancellationCodes(error), params.idempotencyItem);
+      const codes = cancellationCodes(error);
+      throwIfDuplicateToken(codes, params.idempotencyItem);
+      if (
+        codes !== undefined &&
+        codes[0] === 'ConditionalCheckFailed' &&
+        codes.slice(1).every((code) => code !== 'ConditionalCheckFailed')
+      ) {
+        throw new AccountFullError('The account has no free cell slot');
+      }
       throw new AmbiguousTransactionError('New-cell placement transaction failed', error);
     }
   }

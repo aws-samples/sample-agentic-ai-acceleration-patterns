@@ -101,6 +101,11 @@
       "type": "runtime"
     },
     {
+      "name": "@aws-sdk/client-sts",
+      "version": "3.1125.0",
+      "type": "runtime"
+    },
+    {
       "name": "@aws-sdk/core",
       "version": "3.977.9",
       "type": "runtime"

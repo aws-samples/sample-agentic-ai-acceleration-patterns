@@ -191,13 +191,16 @@
     },
     "integ": {
       "name": "integ",
-      "description": "Run the deployment integration test in $AWS_REGION (deploys to the current AWS account, ~25 min)",
+      "description": "Run the deployment integration test in $AWS_REGION across the current AWS account and $CP_INTEG_ACCOUNT_B (~45 min)",
       "steps": [
         {
           "exec": "sh -c '[ -n \"$AWS_REGION\" ] || { echo \"Set AWS_REGION to the single Region to test in (e.g. export AWS_REGION=eu-central-1)\"; exit 1; }'"
         },
         {
-          "exec": "sh -c 'AWS_DEFAULT_REGION=\"$AWS_REGION\" exec integ-runner --language typescript --parallel-regions \"$AWS_REGION\" --update-on-failed --force integ.tenant.ts'"
+          "exec": "sh -c '[ -n \"$CP_INTEG_ACCOUNT_B\" ] || { echo \"Set CP_INTEG_ACCOUNT_B to the second (tenant-owned) test account id; it must be CDK-bootstrapped to trust this account (integration-test.md)\"; exit 1; }'"
+        },
+        {
+          "exec": "sh -c 'export CDK_DEFAULT_ACCOUNT=\"${CDK_DEFAULT_ACCOUNT:-$(aws sts get-caller-identity --query Account --output text)}\"; AWS_DEFAULT_REGION=\"$AWS_REGION\" exec integ-runner --language typescript --parallel-regions \"$AWS_REGION\" --update-on-failed --force integ.tenant.ts'"
         }
       ]
     },
@@ -322,6 +325,7 @@
             "typescript",
             "@aws-sdk/client-dynamodb",
             "@aws-sdk/client-sfn",
+            "@aws-sdk/client-sts",
             "@aws-sdk/core",
             "@aws-sdk/lib-dynamodb",
             "@smithy/core",

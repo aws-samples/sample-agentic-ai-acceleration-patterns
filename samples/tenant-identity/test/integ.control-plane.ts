@@ -76,8 +76,9 @@ const scripts = new s3.Bucket(setup, 'MountScripts', {
   autoDeleteObjects: true,
 });
 // The control-plane cell and tenant build roles do not exist yet (control-
-// plane deploys after this stack), so the bucket names them by ARN pattern.
-// Same account only.
+// plane deploys after this stack), so the bucket names them by ARN pattern:
+// `<fleet>-cell-build` / `<fleet>-tenant-build` with the default fleet name
+// (control-plane ADR-025). Same account only.
 scripts.addToResourcePolicy(new iam.PolicyStatement({
   sid: 'ControlPlaneBuildsReadScripts',
   principals: [new iam.AnyPrincipal()],
@@ -85,7 +86,7 @@ scripts.addToResourcePolicy(new iam.PolicyStatement({
   resources: [scripts.bucketArn, scripts.arnForObjects('*')],
   conditions: {
     StringEquals: { 'aws:PrincipalAccount': setup.account },
-    ArnLike: { 'aws:PrincipalArn': `arn:${setup.partition}:iam::${setup.account}:role/${CONTROL_PLANE_STACK}-*` },
+    ArnLike: { 'aws:PrincipalArn': `arn:${setup.partition}:iam::${setup.account}:role/control-plane-*-build` },
   },
 }));
 new s3deploy.BucketDeployment(setup, 'DeployMountScripts', {

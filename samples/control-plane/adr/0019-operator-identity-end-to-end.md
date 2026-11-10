@@ -27,3 +27,7 @@ operator into what they provision. `operatorId` is always present in
 execution input (empty string never occurs — the authorizer guarantees a
 non-empty `sub`). CloudTrail data events remain a deployment-side option;
 the sample provides the identity propagation they would correlate with.
+
+---
+
+**Amended by ADR-025 (2026-11-09):** the operator id also becomes the AssumeRole session name into the hosting account, so the account owner's CloudTrail attributes provisioning calls to the operator.

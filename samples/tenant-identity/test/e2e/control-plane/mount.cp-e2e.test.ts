@@ -113,6 +113,7 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
   let keyArn: string;
   let tenantId: string;
   let cellId: string;
+  let homeAccountId: string;
   let adminUsername: string;
   const parked = () => `/application-plane/tenants/${tenantId}/identity/admin-temporary-password`;
 
@@ -138,6 +139,14 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
       AuthParameters: { USERNAME: operator, PASSWORD: password },
     }));
     cp = new ControlPlaneClient(cpOut.ApiUrl, auth.AuthenticationResult!.IdToken!);
+
+    // control-plane ADR-024: cells live in registered accounts. Register the
+    // control plane's own account as a vendor-owned fleet account with room
+    // for the one cell this scenario creates; PutAccount verifies the role
+    // pair the control-plane stack installed there (ADR-027).
+    homeAccountId = cpOut.ControlPlaneAccountId;
+    const account = await cp.call('PUT', `accounts/${homeAccountId}`, { owner: 'VENDOR', maxCells: 1 });
+    expectStatus(account, 200, 'control-plane PutAccount (home account)');
   });
 
   test('steps 1-2: CreateTenant creates the cell and onboards the identity', async () => {
@@ -190,10 +199,13 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
     expect(keyId === keyArn || keyArn.endsWith(`/${keyId}`) || keyArn.endsWith(keyId)).toBe(true);
   });
 
-  test('step 5b: the tenant build role cannot decrypt the parked password', async () => {
+  test('step 5b: the tenant provisioning role (which runs tenant scripts) cannot decrypt the parked password', async () => {
+    // control-plane ADR-025: tenant scripts run under the home account's
+    // `<fleet>-tenant-provisioning` role, which carries the mount's managed
+    // policy; the CodeBuild role only assumes it.
     const res = await cfn.send(new DescribeStackResourcesCommand({ StackName: CONTROL_PLANE_STACK }));
     const roles = (res.StackResources ?? []).filter(
-      (r) => r.ResourceType === 'AWS::IAM::Role' && /TenantProject.*Role/.test(r.LogicalResourceId ?? ''),
+      (r) => r.ResourceType === 'AWS::IAM::Role' && /TenantProvisioningRole/.test(r.LogicalResourceId ?? ''),
     );
     expect(roles).toHaveLength(1);
     const account = keyArn.split(':')[4];
@@ -298,5 +310,8 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
       const c = await cp.call('GET', `cells/${cellId}`);
       return c.status === 404 ? true : undefined;
     });
+    // The cell delete released the account's cell slot; deregister it too.
+    const account = await cp.call('DELETE', `accounts/${homeAccountId}`);
+    expectStatus(account, 200, 'DeleteAccount (home account)');
   });
 });

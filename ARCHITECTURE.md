@@ -163,18 +163,34 @@ Four rules hold at every layer:
 
 ## 4. The control plane
 
-The control plane owns the tenant lifecycle and placement; it knows nothing
-about tenant users or tokens.
+The control plane owns the account registry, the tenant lifecycle, and
+placement; it knows nothing about tenant users or tokens.
 
+- **Cells live in registered accounts.** An operator registers an AWS account
+  with a cell limit and an owner (control-plane ADR-024). A **vendor-owned**
+  account is fleet capacity that placement fills, oldest first; registering a
+  second one is how the fleet scales past the first. A **tenant-owned** account
+  is a customer's: it receives only tenants whose onboarding names it, so a
+  customer who wants the deployment in their own account gets exactly that.
+  The control plane's own account is registered like any other.
 - **Onboarding** is one `POST /tenants`. Placement claims a slot in a cell with
-  free capacity, or creates a cell first. A Step Functions workflow then runs
-  the vendor's provisioning scripts in AWS CodeBuild: the cell create script
-  when a new cell is needed, then the tenant create script.
+  free capacity, or claims a cell slot on an eligible account and creates a
+  cell there first. A Step Functions workflow then runs the vendor's
+  provisioning scripts in AWS CodeBuild: the cell create script when a new
+  cell is needed, then the tenant create script. When every eligible account
+  is full, onboarding fails with a modelled error; capacity is never created
+  implicitly.
+- **Scripts run in the cell's account** under a role pair the account owner
+  installs (`<fleet>-cell-provisioning`, `<fleet>-tenant-provisioning`,
+  control-plane ADR-025). The pair trusts the control plane's build roles and
+  API role, optionally behind an external id, and the owner can revoke it; the
+  control plane holds no credentials for any account. Registration verifies
+  the handshake by assuming both roles (ADR-027).
 - **Provisioning is defined once**, at deployment, by a CellDefinition. Cells
   are homogeneous, and callers can never supply code.
-- **Scripts publish what they create** to SSM Parameter Store (§5.1), which is
-  how application-plane components find a cell's shared resources and a
-  tenant's own state.
+- **Scripts publish what they create** to SSM Parameter Store in the cell's
+  account (§5.1), which is how application-plane components find a cell's
+  shared resources and a tenant's own state.
 
 Tenant identity is an application-plane concern (control-plane ADR-004): the
 control plane creates the tenant, and an identity component registers it with
@@ -188,7 +204,10 @@ build time, and its published SSM parameters at deploy time.
 
 ### 5.1 Parameter namespace
 
-Every published parameter sits under one of these paths, owned by one writer:
+Every published parameter sits under one of these paths, owned by one writer.
+The `/application-plane/*` paths exist **per account**: each account that
+hosts cells has its own shared, cell, and tenant namespaces, and a cell's
+scripts read and write only the namespaces of the account the cell lives in.
 
 | Path | Written by | Holds |
 |---|---|---|
@@ -215,8 +234,10 @@ sequenceDiagram
   participant CP as Control plane
   participant CB as CodeBuild scripts
   participant ID as Tenant identity
-  V->>CP: POST /tenants
-  CP->>CB: cell create (if no free cell), then tenant create
+  V->>CP: PUT /accounts/{accountId} (once per account; verifies its role pair)
+  V->>CP: POST /tenants (optionally naming the account)
+  CP->>CB: cell create (if no free cell; claims the account's cell slot), then tenant create
+  CB->>CB: assume the account's provisioning role
   CB->>CB: provision tenant resources, write /application-plane/tenants/<tenantId>
   V->>ID: CreateTenant, create first tenant admin (IAM)
   ID-->>V: tenant registered in the identity provider
@@ -274,7 +295,7 @@ rest).
 
 | Sample | Concept | Consumes | Publishes |
 |---|---|---|---|
-| [`control-plane`](./samples/control-plane/) | control plane: tenant and cell lifecycle | a vendor IdP | `/control-plane/tenant-api-url`; scripts write `/application-plane/cells/*` and `/application-plane/tenants/*` |
+| [`control-plane`](./samples/control-plane/) | control plane: account registry, cell and tenant lifecycle across vendor-owned and tenant-owned accounts | a vendor IdP; a role pair installed in every account that hosts cells (its `CellAccountStack`) | `/control-plane/tenant-api-url`; constructs `CellAccountRoles`, `CellAccountStack`; scripts write `/application-plane/cells/*` and `/application-plane/tenants/*` in the cell's account |
 | [`tenant-identity`](./samples/tenant-identity/) | tenant identity: the token contract on Cognito | nothing | `/application-plane/shared/identity/*` |
 | [`agentic-runtime-isolation`](./samples/agentic-runtime-isolation/) | Agentic runtime isolation: the agent platform at scale. Enforced isolation at the invocation, delegation and data layers, with a Policy and interceptor check at the tools layer: one ingress, the only principal each AgentCore Runtime trusts, verifies the identity token, resolves the grant (agent needs ∪ agent tools ∩ tenant tools ∩ user tools) from an entitlement store, mints a 5-minute transaction token (the identity token never leaves the ingress) and invokes the agent's Runtime with tenant-scoped credentials from an always-on TVM, in a fresh microVM session per request by default (with `session` set, one per tenant, the default scope, or per user); one tools gateway by default (more optional), each with its own Policy engine, serves the tools: a REQUEST interceptor is the per-tool wall and signs a tenant context, Policy then admits the target, and each tool assumes its own tenant role; with `agentDelegation` on the `api-gateway` ingress, an agent hands the transaction to a declared target agent through `POST /{agent}/delegations`, and the ingress re-issues the token for that hop (the caller nested in `act`, `maxDepth` bounding the chain) | `tenant-identity` `shared-pool` (its parameters; the integration driver uses its `/platform/*` API to register scopes and create demo tenants) | constructs `SharedIngress`, `AgentBackend`, `ToolTarget`, `TokenSigner`, `EntitlementStore`; one JSON parameter `/application-plane/shared/agent-runtime/ingress` plus registry rows `backends/<name>` and `tools/<target>` |
 | [`tenant-encrypted-ingestion`](./samples/tenant-encrypted-ingestion/) | data layer: per-tenant encrypted ingestion; one bucket and pipeline for every tenant, each tenant's documents encrypted with its own KMS key (vendor-owned `vendor-key` or tenant-owned `tenant-key`) bound to its prefixes by key policy, tenant-scoped roles with ABAC on `TenantId`, write-once presigned uploads, a deployer-extensible validator chain before anything lands, cryptographic offboarding | `tenant-identity` `shared-pool` (demo stack, integration test and demo only: its parameters and its `PUT|GET|DELETE /platform/scopes/{scope}`); the construct takes any issuer meeting §2.1, with `identityApi: 'none'` | construct `TenantEncryptedIngestion`; `/application-plane/shared/ingestion/*` |

@@ -10,18 +10,19 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import { Construct } from 'constructs';
+import { buildRoleName, provisioningRoleArn, ProvisioningRoleKind } from '../shared/fleet';
 import { nagFindingResource, acknowledgeGranularFinding, suppressTemplateScanners } from '../shared/nag';
 
 export interface ProvisioningWorkflowProps {
-  /** The control plane table (cells + tenants; terminal state is written directly to it). */
+  /** The control plane table (accounts + cells + tenants; terminal state is written directly to it). */
   readonly table: dynamodb.ITable;
   /**
-   * Customer-managed policy ARNs attached to the tenant build role in
-   * addition to its SSM namespace grants (ADR-022). Validated by the stack
-   * before construction; the workflow attaches them without interpreting
-   * them (P-3). Cell builds get none.
+   * Names the two build roles (`<fleet>-cell-build`, `<fleet>-tenant-build`)
+   * and the provisioning role pair they may assume in any registered
+   * account (`<fleet>-cell-provisioning`, `<fleet>-tenant-provisioning`),
+   * spec §3.3 / §6.4, ADR-025. Already validated by the stack.
    */
-  readonly tenantBuildManagedPolicyArns?: string[];
+  readonly fleetName: string;
 }
 
 /**
@@ -47,13 +48,50 @@ const EXECUTION_TIMEOUT = Duration.hours(3);
  */
 const CONCURRENT_BUILD_LIMIT = 5;
 
-/** The inline buildspec — every execution overrides source and runs its resolved script. */
+/**
+ * The inline buildspec — every execution overrides source and runs its
+ * resolved script. Before the script starts, the build assumes the hosting
+ * account's provisioning role (ADR-025, spec §6.1 "Credentials"): the role
+ * ARN, the account's external id (empty when none), and the operator
+ * session name (M23) arrive as environment variables resolved by the
+ * service; the credentials are read into shell variables and exported as
+ * the three standard AWS variables — never written to CodeBuild environment
+ * variables, the execution input, or the log (M21, T24). The container
+ * credential variables that would let the script fetch the BUILD role's own
+ * credentials (and with them assume the pair in any registered account) are
+ * removed from the script's environment (T29, M24); the external id is
+ * removed too, which keeps it out of the script's environment though not out
+ * of the build's (the agent process still holds both). An AssumeRole that
+ * returns nothing fails closed before the script runs. Role chaining caps the
+ * credentials at one hour, equal to BUILD_TIMEOUT (N-7). A refused AssumeRole
+ * fails the build like any script failure and lands in `*_FAILED`.
+ */
 const INLINE_BUILDSPEC = [
   'version: 0.2',
+  'env:',
+  '  shell: bash',
   'phases:',
   '  build:',
   '    commands:',
-  '      - bash "$SCRIPT_PATH"',
+  // Brace-less `$VAR` expansions throughout: the buildspec is embedded in the
+  // state machine DefinitionString, where `${...}` reads as an Fn::Sub
+  // placeholder to CloudFormation's template validator.
+  '      - |',
+  '        set -euo pipefail',
+  '        set --',
+  '        if [ -n "$PROVISIONING_EXTERNAL_ID" ]; then set -- --external-id "$PROVISIONING_EXTERNAL_ID"; fi',
+  '        CREDENTIALS=$(aws sts assume-role --role-arn "$PROVISIONING_ROLE_ARN" --role-session-name "$OPERATOR_SESSION_NAME" "$@" --query "Credentials.[AccessKeyId,SecretAccessKey,SessionToken]" --output text)',
+  '        read -r AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN <<< "$CREDENTIALS"',
+  '        if [ -z "$AWS_SESSION_TOKEN" ]; then',
+  '          echo "AssumeRole returned no credentials"',
+  '          exit 1',
+  '        fi',
+  '        export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN',
+  '        unset CREDENTIALS PROVISIONING_EXTERNAL_ID',
+  '        unset AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONTAINER_CREDENTIALS_FULL_URI AWS_CONTAINER_AUTHORIZATION_TOKEN',
+  '        set --',
+  '        echo "Assumed $PROVISIONING_ROLE_ARN in account $CELL_ACCOUNT_ID"',
+  '        bash "$SCRIPT_PATH"',
 ].join('\n');
 
 /**
@@ -66,7 +104,10 @@ const INLINE_BUILDSPEC = [
  * {
  *   "sourceType": "GITHUB", "sourceLocation": "https://...",
  *   "sourceVersion": "<full commit SHA or ''>",
- *   "operatorId": "<authorizer sub>",
+ *   "operatorId": "<authorizer sub>", "sessionName": "<STS-safe operator id>",
+ *   "accountId": "<12 digits>", "externalId": "<account external id or ''>",
+ *   "cellRoleArn": "arn:...:role/<fleet>-cell-provisioning",
+ *   "tenantRoleArn": "arn:...:role/<fleet>-tenant-provisioning",
  *   "cellId": "...",
  *   "cellBuild":   { "operation": "create|update|delete",
  *                    "scriptPath": "...", "failedStatus": "..." },   // optional
@@ -96,11 +137,16 @@ const INLINE_BUILDSPEC = [
  * role (T10/M12).
  *
  * Two shared CodeBuild projects with distinct service roles separate cell
- * builds from tenant builds (ADR-002, ADR-012). Every lifecycle transition
- * is compare-and-set on the exact expected status; failure writes are
- * conditional on attribute_exists(PK); the tenant-delete terminal write is a
- * TransactWriteItems (record removal + slot release, §6) with a stable
- * ClientRequestToken derived from the execution id. No unconditional writes.
+ * builds from tenant builds (ADR-002, ADR-012). The project roles hold no
+ * application-plane permission (ADR-025): each may only assume its half
+ * of the provisioning role pair in the cell's account (`accountId`,
+ * `cellRoleArn` / `tenantRoleArn`, `externalId` in the input), and the
+ * buildspec does so before the script runs. Every lifecycle transition is
+ * compare-and-set on the exact expected status; failure writes are
+ * conditional on attribute_exists(PK); the tenant-delete and cell-delete
+ * terminal writes are TransactWriteItems (record removal + slot release on
+ * the cell, resp. the account — §8.2) with a stable ClientRequestToken
+ * derived from the execution id. No unconditional writes.
  *
  * CustomState raw ASL is required because the typed CodeBuildStartBuild task
  * does not expose Source*Override parameters, and there is no typed
@@ -108,10 +154,14 @@ const INLINE_BUILDSPEC = [
  */
 export class ProvisioningWorkflow extends Construct {
   readonly stateMachine: sfn.StateMachine;
-  /** Shared project for cell builds — its role owns /application-plane/cells/*. */
+  /** Shared project for cell builds — its role may assume `<fleet>-cell-provisioning` in any registered account. */
   readonly cellProject: codebuild.Project;
-  /** Shared project for tenant builds — its role reads cell parameters but cannot mutate them. */
+  /** Shared project for tenant builds — its role may assume `<fleet>-tenant-provisioning` in any registered account. */
   readonly tenantProject: codebuild.Project;
+  /** The cell build role, `<fleet>-cell-build` (physical name: the account role pair trusts it by ARN). */
+  readonly cellBuildRole: iam.Role;
+  /** The tenant build role, `<fleet>-tenant-build`. */
+  readonly tenantBuildRole: iam.Role;
 
   private readonly table: dynamodb.ITable;
 
@@ -120,17 +170,21 @@ export class ProvisioningWorkflow extends Construct {
     this.table = props.table;
 
     // ------------------------------------------------------------------
-    // Two shared CodeBuild projects (ADR-002 refined by ADR-012). Base
-    // source is NO_SOURCE + dummy buildspec: every execution overrides both.
-    // ⚠️ The service roles are the provisioning blast radius — THE hardening
-    // point of the sample. Distinct roles enforce the cell-script /
-    // tenant-script permission boundary (§7).
+    // Two shared CodeBuild projects (ADR-002 refined by ADR-012, ADR-025).
+    // Base source is NO_SOURCE + dummy buildspec: every execution overrides
+    // both. The project roles carry NO application-plane permission: each
+    // may only assume its half of the provisioning role pair, by name, in
+    // any registered account (N-8). The pair in each account — installed by
+    // the account owner — is the provisioning blast radius and THE hardening
+    // point of the sample (P-12, §6.4).
     // ------------------------------------------------------------------
     // M15 (T13): explicit CodeBuild log groups with bounded retention —
     // the service-created default groups never expire.
+    this.cellBuildRole = buildRole(this, 'CellBuildRole', props.fleetName, 'cell');
     const cellProjectLogs = projectLogGroup(this, 'CellProjectLogs');
     this.cellProject = new codebuild.Project(this, 'CellProject', {
       description: 'Cell provisioning (shared cell deployment) - source and buildspec are overridden per StartBuild',
+      role: this.cellBuildRole,
       buildSpec: codebuild.BuildSpec.fromObject({
         version: '0.2',
         phases: { build: { commands: ['echo "This buildspec is always overridden"'] } },
@@ -142,28 +196,12 @@ export class ProvisioningWorkflow extends Construct {
       logging: { cloudWatch: { logGroup: cellProjectLogs } },
     });
     acknowledgeCodeBuildDefaults(this.cellProject, cellProjectLogs);
-    // Cell role: read shared resources; own the per-cell namespace.
-    this.cellProject.addToRolePolicy(readSharedResourcesStatement(this));
-    this.cellProject.addToRolePolicy(
-      new iam.PolicyStatement({
-        sid: 'ManageCellNamespace',
-        actions: [
-          'ssm:GetParameter',
-          'ssm:GetParameters',
-          'ssm:GetParametersByPath',
-          'ssm:PutParameter',
-          'ssm:DeleteParameter',
-          'ssm:AddTagsToResource',
-        ],
-        resources: [ssmParameterArn(this, '/application-plane/cells/*')],
-      }),
-    );
-    acknowledgeSsmNamespaceGrant(this.cellProject, '/application-plane/shared/*');
-    acknowledgeSsmNamespaceGrant(this.cellProject, '/application-plane/cells/*');
 
+    this.tenantBuildRole = buildRole(this, 'TenantBuildRole', props.fleetName, 'tenant');
     const tenantProjectLogs = projectLogGroup(this, 'TenantProjectLogs');
     this.tenantProject = new codebuild.Project(this, 'TenantProject', {
       description: 'Tenant provisioning (per-tenant deployment) - source and buildspec are overridden per StartBuild',
+      role: this.tenantBuildRole,
       buildSpec: codebuild.BuildSpec.fromObject({
         version: '0.2',
         phases: { build: { commands: ['echo "This buildspec is always overridden"'] } },
@@ -174,36 +212,6 @@ export class ProvisioningWorkflow extends Construct {
       logging: { cloudWatch: { logGroup: tenantProjectLogs } },
     });
     acknowledgeCodeBuildDefaults(this.tenantProject, tenantProjectLogs);
-    // Tenant role: read shared AND cell parameters (the ADR-010 contract
-    // extended by §7 — tenants read their cell's published identifiers), own
-    // the per-tenant namespace. It must NOT be able to mutate cell parameters.
-    this.tenantProject.addToRolePolicy(readSharedResourcesStatement(this));
-    this.tenantProject.addToRolePolicy(
-      new iam.PolicyStatement({
-        sid: 'ReadCellNamespace',
-        actions: ['ssm:GetParameter', 'ssm:GetParameters', 'ssm:GetParametersByPath'],
-        resources: [ssmParameterArn(this, '/application-plane/cells/*')],
-      }),
-    );
-    this.tenantProject.addToRolePolicy(
-      new iam.PolicyStatement({
-        sid: 'ManageTenantNamespace',
-        actions: ['ssm:GetParameter', 'ssm:PutParameter', 'ssm:DeleteParameter', 'ssm:AddTagsToResource'],
-        resources: [ssmParameterArn(this, '/application-plane/tenants/*')],
-      }),
-    );
-    acknowledgeSsmNamespaceGrant(this.tenantProject, '/application-plane/shared/*');
-    acknowledgeSsmNamespaceGrant(this.tenantProject, '/application-plane/cells/*');
-    acknowledgeSsmNamespaceGrant(this.tenantProject, '/application-plane/tenants/*');
-    // ADR-022: deployer-supplied managed policies widen the tenant build
-    // role by exactly what the deployer attaches - the ADR-021 blast-radius
-    // bound now includes them. Attached by reference, never read: the
-    // control plane learns an ARN list, not what the policy is for (P-3).
-    (props.tenantBuildManagedPolicyArns ?? []).forEach((arn, index) => {
-      this.tenantProject.role!.addManagedPolicy(
-        iam.ManagedPolicy.fromManagedPolicyArn(this, `TenantBuildManagedPolicy${index}`, arn),
-      );
-    });
 
     // ------------------------------------------------------------------
     // States — defined leaf-first so transitions can reference them.
@@ -353,6 +361,9 @@ export class ProvisioningWorkflow extends Construct {
       // build logs can attribute application-plane changes to an operator,
       // not just the shared fleet role.
       envVar('OPERATOR_ID', '$.operatorId'),
+      // ADR-025: the account the cell lives in and the role the buildspec
+      // assumes there before the script runs (§6.1 "Credentials").
+      ...accountEnvVars('$.tenantRoleArn'),
     ]);
     for (const variant of runTenantBuild.variants) {
       variant.addCatch(tenantBuildFailure, { resultPath: '$.error' });
@@ -526,14 +537,49 @@ export class ProvisioningWorkflow extends Construct {
       .otherwise(done);
     getCellRecord.next(cellDeleteOutcome);
 
-    // Terminal cell delete: conditional on emptiness as defence in depth —
-    // the atomic DELETING transition (§5) already excluded occupancy.
-    const deleteCellRecord = new tasks.DynamoDeleteItem(this, 'RemoveCellRecord', {
-      table: this.table,
-      key: cellKey(),
-      conditionExpression: 'attribute_exists(PK) AND tenantCount = :zero',
-      expressionAttributeValues: { ':zero': tasks.DynamoAttributeValue.fromNumber(0) },
-      resultPath: sfn.JsonPath.DISCARD,
+    // Terminal cell delete (§8.2, ADR-024): ONE transaction removes the cell
+    // and releases its slot on the account — the mirror of the tenant delete
+    // one level up. DeleteItem cell CONDITION attribute_exists(PK) AND
+    // status = DELETING AND tenantCount = 0 (emptiness as defence in depth —
+    // the atomic DELETING transition already excluded occupancy) + UpdateItem
+    // account cellCount - 1 CONDITION attribute_exists(PK) AND cellCount > 0.
+    // Item-state conditions make replays safe beyond the token window: after
+    // a committed delete the replay cancels on the cell condition before
+    // touching the counter, and the Catch reads the cell — absence proves
+    // the prior transaction committed.
+    const deleteCellRecord = new sfn.CustomState(this, 'RemoveCellRecord', {
+      stateJson: {
+        Type: 'Task',
+        Resource: 'arn:aws:states:::aws-sdk:dynamodb:transactWriteItems',
+        Parameters: {
+          'TransactItems': [
+            {
+              Delete: {
+                TableName: this.table.tableName,
+                Key: rawCellKey(),
+                ConditionExpression: 'attribute_exists(PK) AND #status = :deleting AND tenantCount = :zero',
+                ExpressionAttributeNames: { '#status': 'status' },
+                ExpressionAttributeValues: { ':deleting': { S: 'DELETING' }, ':zero': { N: '0' } },
+              },
+            },
+            {
+              Update: {
+                TableName: this.table.tableName,
+                Key: rawAccountKey(),
+                UpdateExpression: 'SET cellCount = cellCount - :one, updatedAt = :now',
+                ConditionExpression: 'attribute_exists(PK) AND cellCount > :zero',
+                ExpressionAttributeValues: {
+                  ':one': { N: '1' },
+                  ':zero': { N: '0' },
+                  ':now': { 'S.$': '$$.State.EnteredTime' },
+                },
+              },
+            },
+          ],
+          'ClientRequestToken.$': "States.Hash(States.Format('cell-delete:{}', $$.Execution.Id), 'MD5')",
+        },
+        ResultPath: null,
+      },
     });
     addTerminalWriteRetries(deleteCellRecord);
     deleteCellRecord.addCatch(getCellRecord, { resultPath: '$.error' });
@@ -563,6 +609,8 @@ export class ProvisioningWorkflow extends Construct {
       envVar('OPERATION', '$.cellBuild.operation'),
       // M12 (T10) — see the tenant build.
       envVar('OPERATOR_ID', '$.operatorId'),
+      // ADR-025 — see the tenant build.
+      ...accountEnvVars('$.cellRoleArn'),
     ]);
     for (const variant of runCellBuild.variants) {
       variant.addCatch(cellBuildFailure, { resultPath: '$.error' });
@@ -655,8 +703,8 @@ export class ProvisioningWorkflow extends Construct {
       cfnNag: [{ id: 'W84', reason: 'Workflow logs carry state-transition metadata; default CloudWatch Logs SSE encryption at rest is sufficient for this sample.' }],
       checkov: [{ id: 'CKV_AWS_158', comment: 'Workflow logs carry state-transition metadata; default CloudWatch Logs SSE encryption at rest is sufficient for this sample.' }],
     });
-    const spcmReason = 'Least-privilege policy with granular per-namespace statements (ADR-010); the statement-point count reflects explicit scoping, not over-breadth.';
-    for (const role of [this.cellProject.role!, this.tenantProject.role!, this.stateMachine.role]) {
+    const spcmReason = 'Least-privilege policy with granular per-resource statements; the statement-point count reflects explicit scoping, not over-breadth.';
+    for (const role of [this.cellBuildRole, this.tenantBuildRole, this.stateMachine.role]) {
       suppressTemplateScanners(role.node.findChild('DefaultPolicy'), {
         cfnNag: [{ id: 'W76', reason: spcmReason }],
       });
@@ -867,6 +915,64 @@ function rawCellKey(): object {
   };
 }
 
+/** Raw ASL key for the account record (the cell-delete slot release, ADR-024). */
+function rawAccountKey(): object {
+  return {
+    PK: { 'S.$': "States.Format('ACCOUNT#{}', $.accountId)" },
+    SK: { S: 'META' },
+  };
+}
+
+/**
+ * The per-account build environment (ADR-025): the account the cell lives
+ * in, the provisioning role the buildspec assumes there (cell or tenant
+ * half), the account's external id (empty string when none — the buildspec
+ * then omits `--external-id`), and the STS-safe operator session name (M23).
+ */
+function accountEnvVars(roleArnPath: string): Array<Record<string, string>> {
+  return [
+    envVar('CELL_ACCOUNT_ID', '$.accountId'),
+    envVar('PROVISIONING_ROLE_ARN', roleArnPath),
+    envVar('PROVISIONING_EXTERNAL_ID', '$.externalId'),
+    envVar('OPERATOR_SESSION_NAME', '$.sessionName'),
+  ];
+}
+
+/**
+ * A control-plane build role with its physical name (`<fleet>-<kind>-build`,
+ * ADR-025): the account role pair trusts it by ARN, so the name is the
+ * cross-account contract. Its only application-facing permission is
+ * AssumeRole on `<fleet>-<kind>-provisioning` in ANY account (N-8): accounts
+ * are registered at run time, and the target role's trust policy — written
+ * by the account owner — is the gate (M20). The CodeBuild Project adds its
+ * own log-group grant.
+ */
+function buildRole(scope: Construct, id: string, fleetName: string, kind: ProvisioningRoleKind): iam.Role {
+  const stack = Stack.of(scope);
+  const role = new iam.Role(scope, id, {
+    roleName: buildRoleName(fleetName, kind),
+    assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com'),
+    description: `${fleetName} control plane ${kind} build: may only assume ${fleetName}-${kind}-provisioning in registered accounts (ADR-025)`,
+  });
+  const target = provisioningRoleArn(stack.partition, '*', fleetName, kind);
+  role.addToPolicy(
+    new iam.PolicyStatement({
+      sid: 'AssumeProvisioningRole',
+      actions: ['sts:AssumeRole'],
+      resources: [target],
+    }),
+  );
+  acknowledgeGranularFinding(
+    role,
+    `AwsSolutions-IAM5[Resource::${nagFindingResource(role, target)}]`,
+    'Accounts are registered at run time (ADR-024), so the AssumeRole resource names the provisioning role by fixed name in any account (spec N-8); the target role\'s trust policy, written by the account owner, is the gate (M20).',
+  );
+  suppressTemplateScanners(role, {
+    cfnNag: [{ id: 'W28', reason: 'The physical name is the cross-account contract: every account role pair trusts this role by ARN (spec §6.4, ADR-025).' }],
+  });
+  return role;
+}
+
 function attr(value: string): tasks.DynamoAttributeValue {
   return tasks.DynamoAttributeValue.fromString(value);
 }
@@ -933,15 +1039,6 @@ function transientRetry(): sfn.RetryProps {
   };
 }
 
-function ssmParameterArn(scope: Construct, path: string): string {
-  return Stack.of(scope).formatArn({
-    service: 'ssm',
-    resource: 'parameter',
-    resourceName: path.replace(/^\//, ''),
-    arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
-  });
-}
-
 function eventsRuleArn(scope: Construct, ruleName: string): string {
   return Stack.of(scope).formatArn({
     service: 'events',
@@ -978,19 +1075,24 @@ function acknowledgeCodeBuildDefaults(project: codebuild.Project, logGroup: logs
   });
   // The Project construct grants on the default log path regardless of the
   // explicit log group (which it grants separately, wildcard-free) — both
-  // acknowledgments are kept so either grant shape stays covered.
-  for (const arn of [`${defaultLogGroupArn}:*`, `${logGroup.logGroupArn}:*`]) {
+  // acknowledgments are kept so either grant shape stays covered. The grant
+  // lands on the build role's DefaultPolicy (the role is created by this
+  // construct, ADR-025), so the acknowledgment is recorded on the role as
+  // well as on the project.
+  for (const scope of [project, project.role!]) {
+    for (const arn of [`${defaultLogGroupArn}:*`, `${logGroup.logGroupArn}:*`]) {
+      acknowledgeGranularFinding(
+        scope,
+        `AwsSolutions-IAM5[Resource::${nagFindingResource(project, arn)}]`,
+        'CDK-generated grant on the project\'s own log group - the wildcard is the log-stream suffix.',
+      );
+    }
     acknowledgeGranularFinding(
-      project,
-      `AwsSolutions-IAM5[Resource::${nagFindingResource(project, arn)}]`,
-      'CDK-generated grant on the project\'s own log group - the wildcard is the log-stream suffix.',
+      scope,
+      `AwsSolutions-IAM5[Resource::${nagFindingResource(project, reportGroupArn)}]`,
+      'CDK-generated grant on the project\'s own report group namespace.',
     );
   }
-  acknowledgeGranularFinding(
-    project,
-    `AwsSolutions-IAM5[Resource::${nagFindingResource(project, reportGroupArn)}]`,
-    'CDK-generated grant on the project\'s own report group namespace.',
-  );
   Validations.of(project).acknowledge({
     id: 'AwsSolutions-CB4',
     reason: 'No build artifacts to encrypt: source and buildspec are overridden per StartBuild; output goes to CloudWatch Logs and SSM.',
@@ -1014,27 +1116,4 @@ function projectLogGroup(scope: Construct, id: string): logs.LogGroup {
     checkov: [{ id: 'CKV_AWS_158', comment: 'Build logs carry provisioning script output; default CloudWatch Logs SSE encryption at rest is sufficient for this sample.' }],
   });
   return logGroup;
-}
-
-/**
- * Acknowledges the AwsSolutions-IAM5 finding for a prefix-scoped SSM
- * parameter grant. Prefix-scoped parameter namespaces ARE the isolation
- * contract between the control plane and provisioning scripts (ADR-010):
- * the wildcard is the namespace boundary, not an over-grant.
- */
-function acknowledgeSsmNamespaceGrant(scope: Construct, parameterPath: string): void {
-  acknowledgeGranularFinding(
-    scope,
-    `AwsSolutions-IAM5[Resource::${nagFindingResource(scope, ssmParameterArn(scope, parameterPath))}]`,
-    `Prefix-scoped parameter namespace '${parameterPath}' is the ADR-010 contract between the control plane and provisioning scripts - the wildcard is the namespace boundary.`,
-  );
-}
-
-/** Shared application-plane resources are read-only for both roles (ADR-010). */
-function readSharedResourcesStatement(scope: Construct): iam.PolicyStatement {
-  return new iam.PolicyStatement({
-    sid: 'ReadSharedResources',
-    actions: ['ssm:GetParameter', 'ssm:GetParameters', 'ssm:GetParametersByPath'],
-    resources: [ssmParameterArn(scope, '/application-plane/shared/*')],
-  });
 }

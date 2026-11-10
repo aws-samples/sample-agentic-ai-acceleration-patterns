@@ -3,6 +3,7 @@
 
 import { App, Environment } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import { CellAccountStack, CellAccountStackProps } from '../src/cell-account/cell-account.cdk';
 import { isFullCommitSha, sourcePinningWarning } from '../src/shared/service-config';
 import {
   CellDefinition,
@@ -85,8 +86,10 @@ describe('TenantStack', () => {
     const authorizer =
       body.components.securitySchemes['vendor-authorizer']['x-amazon-apigateway-authorizer'];
     expect(authorizer.type).toBe('token');
-    // All eleven operations across five paths exist
+    // All fifteen operations across seven paths exist
     expect(Object.keys(body.paths).sort()).toEqual([
+      '/accounts',
+      '/accounts/{accountId}',
       '/cells',
       '/cells/{cellId}',
       '/tenants',
@@ -335,15 +338,21 @@ describe('tenantBuildManagedPolicyArns (ADR-022)', () => {
   const policyA = `arn:aws:iam::${account}:policy/PlatformInvokePolicy`;
   const policyB = `arn:aws:iam::${account}:policy/with/a/path/Second`;
 
-  test('every given ARN is attached to the tenant build role and to nothing else', () => {
+  test('every given ARN is attached to the home account tenant provisioning role and to nothing else (ADR-025)', () => {
     const template = synth({ tenantBuildManagedPolicyArns: [policyA, policyB] }, env);
+    const roles = template.findResources('AWS::IAM::Role');
+    const byName = (name: string) =>
+      Object.values(roles).find((role: any) => role.Properties.RoleName === name) as any;
+    const tenantRole = byName('control-plane-tenant-provisioning');
+    const cellRole = byName('control-plane-cell-provisioning');
     const { cell, tenant } = buildProjects(template);
-    const tenantRole = serviceRole(template, tenant);
-    const cellRole = serviceRole(template, cell);
 
     expect(tenantRole.Properties.ManagedPolicyArns).toEqual([policyA, policyB]);
-    // Cell builds get none (the ADR is explicit about the tenant role only).
+    // Cell provisioning gets none (the ADR is explicit about the tenant role only).
     expect(cellRole.Properties.ManagedPolicyArns).toBeUndefined();
+    // The build roles never carry them: they only assume the pair (ADR-025).
+    expect(serviceRole(template, tenant).Properties.ManagedPolicyArns).toBeUndefined();
+    expect(serviceRole(template, cell).Properties.ManagedPolicyArns).toBeUndefined();
     // No other role in the stack picks them up.
     const rolesWithPolicyA = Object.values(template.findResources('AWS::IAM::Role'))
       .filter((role: any) => JSON.stringify(role.Properties.ManagedPolicyArns ?? []).includes(policyA));
@@ -457,9 +466,282 @@ describe('TENANT_NAME in the tenant script environment (ADR-023)', () => {
       expect(environment.TENANT_NAME).toBeUndefined();
       expect(environment.TENANT_ID).toBeUndefined();
       expect(environment.ADMIN_EMAIL).toBeUndefined();
-      expect(Object.keys(environment).sort()).toEqual(['CELL_ID', 'OPERATION', 'OPERATOR_ID', 'SCRIPT_PATH']);
+      expect(Object.keys(environment).sort()).toEqual([
+        'CELL_ACCOUNT_ID',
+        'CELL_ID',
+        'OPERATION',
+        'OPERATOR_ID',
+        'OPERATOR_SESSION_NAME',
+        'PROVISIONING_EXTERNAL_ID',
+        'PROVISIONING_ROLE_ARN',
+        'SCRIPT_PATH',
+      ]);
     }
     // Exactly four startBuild tasks exist: two per project.
     expect(Object.keys(tasks).sort()).toEqual(['RunCellBuild', 'RunCellBuildPinned', 'RunTenantBuild', 'RunTenantBuildPinned']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Multi-account cells (ADR-024, ADR-025, ADR-027)
+// ---------------------------------------------------------------------------
+
+describe('build roles and the home account role pair (ADR-025)', () => {
+  const template = synth();
+  const roles = Object.values(template.findResources('AWS::IAM::Role')) as any[];
+  const byName = (name: string) => roles.find((role) => role.Properties.RoleName === name);
+  const policyFor = (roleLogicalId: string) =>
+    (Object.values(template.findResources('AWS::IAM::Policy')) as any[]).find((policy) =>
+      JSON.stringify(policy.Properties.Roles).includes(roleLogicalId));
+  const logicalIdOf = (name: string) =>
+    Object.entries(template.findResources('AWS::IAM::Role')).find(
+      ([, role]: [string, any]) => role.Properties.RoleName === name,
+    )![0];
+
+  test('the five fleet roles exist with their physical names', () => {
+    for (const name of [
+      'control-plane-api',
+      'control-plane-cell-build',
+      'control-plane-tenant-build',
+      'control-plane-cell-provisioning',
+      'control-plane-tenant-provisioning',
+    ]) {
+      expect(byName(name)).toBeDefined();
+    }
+  });
+
+  test('each build role may ONLY assume its half of the pair, by name, in any account (N-8); no SSM grant', () => {
+    for (const kind of ['cell', 'tenant']) {
+      const policy = policyFor(logicalIdOf(`control-plane-${kind}-build`));
+      const statements = policy.Properties.PolicyDocument.Statement as any[];
+      const assume = statements.find((s) => s.Sid === 'AssumeProvisioningRole');
+      expect(assume.Action).toBe('sts:AssumeRole');
+      expect(JSON.stringify(assume.Resource)).toContain(`:iam::*:role/control-plane-${kind}-provisioning`);
+      expect(JSON.stringify(statements)).not.toContain('ssm:');
+    }
+    // The CodeBuild projects run under exactly those roles.
+    const { cell, tenant } = buildProjects(template);
+    expect(serviceRole(template, cell).Properties.RoleName).toBe('control-plane-cell-build');
+    expect(serviceRole(template, tenant).Properties.RoleName).toBe('control-plane-tenant-build');
+  });
+
+  test('the home pair trusts the control plane account narrowed to the matching build role and the API role (aws:PrincipalArn)', () => {
+    for (const kind of ['cell', 'tenant']) {
+      const role = byName(`control-plane-${kind}-provisioning`);
+      const [statement] = role.Properties.AssumeRolePolicyDocument.Statement;
+      expect(statement.Action).toBe('sts:AssumeRole');
+      expect(JSON.stringify(statement.Principal.AWS)).toContain(':root');
+      const principals = JSON.stringify(statement.Condition.ArnEquals['aws:PrincipalArn']);
+      expect(principals).toContain(`:role/control-plane-${kind}-build`);
+      expect(principals).toContain(':role/control-plane-api');
+      // Never the other half's build role.
+      expect(principals).not.toContain(`:role/control-plane-${kind === 'cell' ? 'tenant' : 'cell'}-build`);
+      // No external id on the home account unless asked for.
+      expect(statement.Condition.StringEquals).toBeUndefined();
+    }
+  });
+
+  test('the home pair carries the §6.2 asymmetry: cell role owns cells/*, tenant role reads it and owns tenants/*', () => {
+    const sids = (kind: string) =>
+      (policyFor(logicalIdOf(`control-plane-${kind}-provisioning`)).Properties.PolicyDocument.Statement as any[])
+        .map((s) => s.Sid)
+        .sort();
+    expect(sids('cell')).toEqual(['ManageCellNamespace', 'ReadSharedResources']);
+    expect(sids('tenant')).toEqual(['ManageTenantNamespace', 'ReadCellNamespace', 'ReadSharedResources']);
+  });
+
+  test('a custom fleetName renames all five roles; an invalid one fails synth', () => {
+    const custom = synth({ fleetName: 'fleet-b' });
+    const names = (Object.values(custom.findResources('AWS::IAM::Role')) as any[])
+      .map((role) => role.Properties.RoleName)
+      .filter((name) => typeof name === 'string')
+      .sort();
+    expect(names).toEqual([
+      'fleet-b-api',
+      'fleet-b-cell-build',
+      'fleet-b-cell-provisioning',
+      'fleet-b-tenant-build',
+      'fleet-b-tenant-provisioning',
+    ]);
+    expect(() => synth({ fleetName: 'Fleet_B' })).toThrow(/Invalid fleetName/);
+  });
+
+  test('the API function may assume the pair for the PutAccount probe and receives FLEET_NAME (ADR-027)', () => {
+    const fns = Object.values(template.findResources('AWS::Lambda::Function')) as any[];
+    const apiFn = fns.find((fn) => fn.Properties.Environment?.Variables?.CELL_DEFINITION !== undefined);
+    expect(apiFn.Properties.Environment.Variables.FLEET_NAME).toBe('control-plane');
+    const [roleLogicalId] = apiFn.Properties.Role['Fn::GetAtt'];
+    expect(template.findResources('AWS::IAM::Role')[roleLogicalId].Properties.RoleName).toBe('control-plane-api');
+    const statements = policyFor(roleLogicalId).Properties.PolicyDocument.Statement as any[];
+    const probe = statements.find((s) => s.Sid === 'ProbeAccountHandshake');
+    expect(probe.Action).toBe('sts:AssumeRole');
+    expect(JSON.stringify(probe.Resource)).toContain(':iam::*:role/control-plane-cell-provisioning');
+    expect(JSON.stringify(probe.Resource)).toContain(':iam::*:role/control-plane-tenant-provisioning');
+  });
+});
+
+describe('the workflow assumes the account role before every script and releases the account slot on cell delete', () => {
+  const template = synth();
+  const definition = stateMachineDefinition(template);
+  const tasks = startBuildTasks(definition);
+  const envOf = (task: any): Record<string, string> =>
+    Object.fromEntries(
+      (task.Parameters.EnvironmentVariablesOverride as any[]).map((v) => [v.Name, v['Value.$']]),
+    );
+
+  test('the inline buildspec assumes PROVISIONING_ROLE_ARN with the external id and operator session, then runs the script (M21)', () => {
+    for (const task of Object.values(tasks)) {
+      const buildspec: string = task.Parameters.BuildspecOverride;
+      expect(buildspec).toContain('shell: bash');
+      expect(buildspec).toContain('aws sts assume-role --role-arn "$PROVISIONING_ROLE_ARN"');
+      expect(buildspec).toContain('--role-session-name "$OPERATOR_SESSION_NAME"');
+      expect(buildspec).toContain('--external-id "$PROVISIONING_EXTERNAL_ID"');
+      // No `${...}` anywhere: CloudFormation's validator reads it as Fn::Sub.
+      expect(buildspec).not.toContain('${');
+      expect(buildspec).toContain('export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN');
+      expect(buildspec).toMatch(/bash "\$SCRIPT_PATH"\s*$/);
+      // Credentials are read into shell variables, never echoed or passed as build env.
+      expect(buildspec).not.toMatch(/echo .*AWS_SECRET/);
+      expect(buildspec).not.toContain('set -x');
+    }
+  });
+
+  test('the buildspec fails closed on empty credentials and hides the BUILD role credential source from the script (T29, M24)', () => {
+    for (const task of Object.values(tasks)) {
+      const buildspec: string = task.Parameters.BuildspecOverride;
+      const lines = buildspec.split('\n').map((l) => l.trim());
+      const check = lines.indexOf('if [ -z "$AWS_SESSION_TOKEN" ]; then');
+      const exportLine = lines.indexOf('export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN');
+      const unsetContainer = lines.indexOf(
+        'unset AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONTAINER_CREDENTIALS_FULL_URI AWS_CONTAINER_AUTHORIZATION_TOKEN',
+      );
+      const run = lines.findIndex((l) => l === 'bash "$SCRIPT_PATH"');
+      expect(check).toBeGreaterThan(-1);
+      expect(lines[check + 2]).toBe('exit 1');
+      expect(check).toBeLessThan(exportLine);
+      expect(unsetContainer).toBeGreaterThan(exportLine);
+      expect(unsetContainer).toBeLessThan(run);
+      expect(lines.indexOf('unset CREDENTIALS PROVISIONING_EXTERNAL_ID')).toBeLessThan(run);
+    }
+  });
+
+  test('cell builds assume the cell role; tenant builds the tenant role; both get the account id', () => {
+    for (const name of ['RunCellBuild', 'RunCellBuildPinned']) {
+      expect(envOf(tasks[name])).toMatchObject({
+        CELL_ACCOUNT_ID: '$.accountId',
+        PROVISIONING_ROLE_ARN: '$.cellRoleArn',
+        PROVISIONING_EXTERNAL_ID: '$.externalId',
+        OPERATOR_SESSION_NAME: '$.sessionName',
+      });
+    }
+    for (const name of ['RunTenantBuild', 'RunTenantBuildPinned']) {
+      expect(envOf(tasks[name])).toMatchObject({
+        CELL_ACCOUNT_ID: '$.accountId',
+        PROVISIONING_ROLE_ARN: '$.tenantRoleArn',
+      });
+    }
+  });
+
+  test('the terminal cell delete is one transaction: cell DeleteItem + account cellCount decrement (ADR-024)', () => {
+    const remove = definition.States.RemoveCellRecord;
+    expect(remove.Resource).toBe('arn:aws:states:::aws-sdk:dynamodb:transactWriteItems');
+    const [del, upd] = remove.Parameters.TransactItems;
+    expect(del.Delete.Key.PK['S.$']).toBe("States.Format('CELL#{}', $.cellId)");
+    expect(del.Delete.ConditionExpression).toBe('attribute_exists(PK) AND #status = :deleting AND tenantCount = :zero');
+    expect(upd.Update.Key.PK['S.$']).toBe("States.Format('ACCOUNT#{}', $.accountId)");
+    expect(upd.Update.UpdateExpression).toBe('SET cellCount = cellCount - :one, updatedAt = :now');
+    expect(upd.Update.ConditionExpression).toBe('attribute_exists(PK) AND cellCount > :zero');
+    expect(remove.Parameters['ClientRequestToken.$']).toContain('cell-delete');
+    // Absence-is-success read on cancellation, as for the tenant delete.
+    expect(remove.Catch[0].Next).toBe('GetCellRecord');
+  });
+
+  test('exactly two transactional writers touch a counter: tenant delete (tenantCount) and cell delete (cellCount)', () => {
+    const transactions = Object.entries(definition.States).filter(
+      ([, state]: [string, any]) => String(state.Resource).endsWith('transactWriteItems'),
+    );
+    const decrements = transactions.filter(([, state]: [string, any]) =>
+      JSON.stringify(state.Parameters).includes('Count - :one'));
+    expect(decrements.map(([name]) => name).sort()).toEqual(['DeleteTenantRecord', 'RemoveCellRecord']);
+  });
+});
+
+describe('CellAccountStack (spec R-25, ADR-025)', () => {
+  const controlPlaneAccountId = '999999999999';
+
+  function synthAccountStack(extra: Partial<CellAccountStackProps> = {}): Template {
+    const app = new App();
+    const stack = new CellAccountStack(app, 'account-b', {
+      controlPlaneAccountId,
+      env: { account: '222222222222', region: 'eu-central-1' },
+      ...extra,
+    });
+    return Template.fromStack(stack);
+  }
+
+  test('installs the pair trusting the control plane account narrowed to the build roles, with the external id when given', () => {
+    const template = synthAccountStack({ externalId: 'customer-handshake-1' });
+    const roles = Object.values(template.findResources('AWS::IAM::Role')) as any[];
+    expect(roles.map((r) => r.Properties.RoleName).sort()).toEqual([
+      'control-plane-cell-provisioning',
+      'control-plane-tenant-provisioning',
+    ]);
+    for (const role of roles) {
+      const [statement] = role.Properties.AssumeRolePolicyDocument.Statement;
+      expect(JSON.stringify(statement.Principal.AWS)).toContain(`:${controlPlaneAccountId}:root`);
+      const principals = statement.Condition.ArnEquals['aws:PrincipalArn'] as string[];
+      expect(principals).toHaveLength(2);
+      expect(principals[0]).toContain(`:iam::${controlPlaneAccountId}:role/control-plane-`);
+      expect(principals[0]).toMatch(/-build$/);
+      expect(principals[1]).toBe(`arn:aws:iam::${controlPlaneAccountId}:role/control-plane-api`);
+      expect(statement.Condition.StringEquals).toEqual({ 'sts:ExternalId': 'customer-handshake-1' });
+    }
+  });
+
+  test('without an external id the trust has no sts:ExternalId condition', () => {
+    const template = synthAccountStack();
+    for (const role of Object.values(template.findResources('AWS::IAM::Role')) as any[]) {
+      expect(role.Properties.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals).toBeUndefined();
+    }
+  });
+
+  test('an external id STS would refuse fails synth (ADR-029)', () => {
+    expect(() => synthAccountStack({ externalId: 'has space' })).toThrow(/Invalid externalId/);
+    expect(() => synthAccountStack({ externalId: 'x' })).toThrow(/Invalid externalId/);
+  });
+
+  test('the pair carries only the §6.2 namespace grants; managed policies attach to the tenant role in THIS account', () => {
+    const policy = 'arn:aws:iam::222222222222:policy/CustomerPlatformInvoke';
+    const template = synthAccountStack({ tenantBuildManagedPolicyArns: [policy] });
+    const roles = Object.values(template.findResources('AWS::IAM::Role')) as any[];
+    const tenantRole = roles.find((r) => r.Properties.RoleName === 'control-plane-tenant-provisioning');
+    const cellRole = roles.find((r) => r.Properties.RoleName === 'control-plane-cell-provisioning');
+    expect(tenantRole.Properties.ManagedPolicyArns).toEqual([policy]);
+    expect(cellRole.Properties.ManagedPolicyArns).toBeUndefined();
+    const statements = (Object.values(template.findResources('AWS::IAM::Policy')) as any[])
+      .flatMap((p) => p.Properties.PolicyDocument.Statement as any[]);
+    expect(statements.map((s) => s.Sid).sort()).toEqual([
+      'ManageCellNamespace',
+      'ManageTenantNamespace',
+      'ReadCellNamespace',
+      'ReadSharedResources',
+      'ReadSharedResources',
+    ]);
+    // Every grant is an SSM namespace in this account; nothing else.
+    expect(statements.every((s) => JSON.stringify(s.Action).split('"').filter((a) => a.includes(':')).every((a) => a.startsWith('ssm:')))).toBe(true);
+  });
+
+  test('a policy ARN in another account fails synth; so does a malformed control plane account id', () => {
+    expect(() =>
+      synthAccountStack({ tenantBuildManagedPolicyArns: ['arn:aws:iam::333333333333:policy/Elsewhere'] }),
+    ).toThrow(/is in account 333333333333/);
+    expect(() => synthAccountStack({ controlPlaneAccountId: '12' })).toThrow(/Invalid controlPlaneAccountId/);
+  });
+
+  test('installs only the two roles by default; the demo shared parameter is opt-in', () => {
+    expect(Object.keys(synthAccountStack().findResources('AWS::SSM::Parameter'))).toHaveLength(0);
+    synthAccountStack({ demoSharedParameters: true }).hasResourceProperties('AWS::SSM::Parameter', {
+      Name: '/application-plane/shared/base-domain',
+    });
   });
 });

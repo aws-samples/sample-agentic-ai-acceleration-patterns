@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { DataModel, DynamoDBItem, GSI1_INDEX_NAME } from '../shared/data-model';
+import { DataModel, DynamoDBItem, GSI1_INDEX_NAME, GSI2_INDEX_NAME } from '../shared/data-model';
 import { KeyBuilder } from '../shared/key-builder';
 import { GsiQuery, ItemKey, StatusTransition, WriteCondition } from '../shared/repository';
 import {
@@ -16,6 +16,8 @@ export const CELL_KEY_PREFIX = 'CELL';
 export const CELL_SORT_KEY = 'META';
 /** GSI-1 static partition value shared by all cell items (§4). */
 export const CELL_GSI1_PARTITION = 'CELL';
+/** Prefix of the GSI-2 partition that groups a cell under its account (§4.5). */
+export const ACCOUNT_GSI2_PREFIX = 'ACCOUNT';
 
 /**
  * Cell statuses from which `DeleteCell` may transition to `DELETING`
@@ -39,6 +41,8 @@ export const DELETABLE_CELL_STATUSES: readonly LifecycleStatus[] = [
  */
 export interface CellRecord {
   readonly cellId: string;
+  /** The account the cell is provisioned in — assigned at creation, immutable (ADR-024). */
+  readonly accountId: string;
   readonly status: LifecycleStatus;
   /** Stamped capacity — maximum tenants this cell can hold. */
   readonly maxTenants: number;
@@ -58,14 +62,18 @@ export interface CellRecord {
 
 /**
  * DynamoDB item representation of a {@link CellRecord}. Cell items carry
- * GSI-1 attributes only (static `CELL` partition for `ListCells` and the
- * placement candidate scan) — GSI-2 is sparse and cells never appear in it
- * (§4).
+ * both GSI key sets (§4.5): GSI-1's static `CELL` partition serves
+ * `ListCells` and the placement candidate scan; GSI-2 partitions them by
+ * account (`ACCOUNT#<accountId>`) for `ListCells?accountId=` and the
+ * targeted candidate scan.
  */
 export interface CellItem extends DynamoDBItem {
   readonly GSI1PK: string;
   readonly GSI1SK: string;
+  readonly GSI2PK: string;
+  readonly GSI2SK: string;
   readonly cellId: string;
+  readonly accountId: string;
   readonly status: LifecycleStatus;
   readonly maxTenants: number;
   readonly tenantCount: number;
@@ -92,6 +100,17 @@ export function listCellsQuery(): GsiQuery {
   return {
     indexName: GSI1_INDEX_NAME,
     partitionKey: { name: 'GSI1PK', value: CELL_GSI1_PARTITION },
+  };
+}
+
+/**
+ * GSI-2 query serving `ListCells?accountId=` and the targeted placement
+ * candidate scan (§4.5). An unknown account yields an empty page.
+ */
+export function listCellsByAccountQuery(accountId: string): GsiQuery {
+  return {
+    indexName: GSI2_INDEX_NAME,
+    partitionKey: { name: 'GSI2PK', value: KeyBuilder.build(ACCOUNT_GSI2_PREFIX, accountId) },
   };
 }
 
@@ -127,7 +146,10 @@ export class CellDataModel implements DataModel<CellRecord, CellItem> {
       ...cellKey(record.cellId),
       GSI1PK: CELL_GSI1_PARTITION,
       GSI1SK: KeyBuilder.build(CELL_KEY_PREFIX, record.cellId),
+      GSI2PK: KeyBuilder.build(ACCOUNT_GSI2_PREFIX, record.accountId),
+      GSI2SK: KeyBuilder.build(CELL_KEY_PREFIX, record.cellId),
       cellId: record.cellId,
+      accountId: record.accountId,
       status: record.status,
       maxTenants: record.maxTenants,
       tenantCount: record.tenantCount,
@@ -144,6 +166,7 @@ export class CellDataModel implements DataModel<CellRecord, CellItem> {
   fromItem(item: CellItem): CellRecord {
     return {
       cellId: item.cellId,
+      accountId: item.accountId,
       status: item.status,
       maxTenants: item.maxTenants,
       tenantCount: item.tenantCount,

@@ -11,13 +11,15 @@ use aws.apigateway#requestValidator
 use aws.protocols#restJson1
 use smithy.framework#ValidationException
 
-/// The cell-based control plane. Manages tenant and cell lifecycle for a
-/// multi-tenant application using the cell deployment model: a cell is
+/// The cell-based control plane. Manages account, cell, and tenant lifecycle
+/// for a multi-tenant application using the cell deployment model: a cell is
 /// a deployment unit containing one shared application deployment plus up to
 /// maxTenants tenants, each with its own per-tenant application deployment.
-/// Cells are created implicitly by tenant placement; deployments are
-/// provisioned by running lifecycle scripts in AWS CodeBuild. All operations
-/// require a vendor IdP JWT validated by a Lambda Authorizer.
+/// Cells live in registered AWS accounts (vendor-owned fleet accounts or a
+/// customer's tenant-owned account) and are created implicitly by tenant
+/// placement; deployments are provisioned by running lifecycle scripts in
+/// AWS CodeBuild under a role pair installed in the cell's account. All
+/// operations require a vendor IdP JWT validated by a Lambda Authorizer.
 @title("Cell-Based Control Plane - Tenant Service")
 @restJson1
 @httpApiKeyAuth(name: "Authorization", in: "header")
@@ -44,6 +46,7 @@ service TenantService {
     resources: [
         Tenant
         Cell
+        Account
     ]
     errors: [
         ValidationException
@@ -189,7 +192,8 @@ structure ScriptLocations {
 // Errors
 // ---------------------------------------------------------------------------
 
-/// The requested tenant or cell does not exist.
+/// The requested tenant, cell, or account does not exist - including an
+/// unregistered accountId named by CreateTenant.
 @error("client")
 @httpError(404)
 structure ResourceNotFoundError {
@@ -202,11 +206,28 @@ structure ResourceNotFoundError {
 /// mutation on an in-flight tenant or cell (CREATING/UPDATING/DELETING), an
 /// update from CREATE_FAILED (remediation is delete + recreate), a tenant
 /// build while the cell is not ACTIVE, deleting a cell that still holds
-/// tenants, or a CreateTenant clientToken reused with different parameters.
+/// tenants, deleting an account that still holds cells, changing a
+/// registered account's owner, a CreateTenant clientToken reused with
+/// different parameters, or a CreateTenant that lost every bounded
+/// placement claim against cells with free capacity while no account had a
+/// free cell slot (nothing was written; retry - ADR-031).
 @error("client")
 @httpError(409)
 structure ConflictError {
     /// Details of the conflicting state.
+    @required
+    message: String
+}
+
+/// CreateTenant found no eligible cell and no eligible account with cell
+/// capacity: every vendor-owned account is full (untargeted), or the named
+/// account is full (targeted). Nothing was written. Unlike ConflictError
+/// this will not clear by waiting - an operator must raise maxCells or
+/// register an account (ADR-026).
+@error("client")
+@httpError(409)
+structure InsufficientCapacityError {
+    /// Which limit was hit.
     @required
     message: String
 }

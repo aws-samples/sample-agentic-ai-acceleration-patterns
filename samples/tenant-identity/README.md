@@ -454,8 +454,9 @@ control-plane. Both samples need `npx projen build` once before their first
 `cdk deploy` (it runs `smithy build`, which generates the `src/smithy/` the
 CDK app imports). Deploy this sample in a single, non-`tiered` topology, then
 deploy control-plane with its cell definition pointing at `scripts/control-plane/`
-and its tenant build role granted the published
-`platformInvokePolicyArn`:
+and the tenant provisioning role of its own account granted the published
+`platformInvokePolicyArn`; then register that account with control-plane
+(its ADR-024: cells live in registered accounts):
 
 ```bash
 export AWS_REGION=eu-central-1
@@ -486,6 +487,12 @@ npx cdk deploy control-plane-dev \
     },
     "maxTenants": 10
   }'
+
+API_URL=$(aws ssm get-parameter --name /control-plane/tenant-api-url --query Parameter.Value --output text)
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+curl -s -X PUT "${API_URL}accounts/${ACCOUNT_ID}" \
+  -H "Authorization: Bearer <operator JWT>" -H "Content-Type: application/json" \
+  -d '{ "owner": "VENDOR", "maxCells": 10 }'
 ```
 
 The exact context is what
@@ -501,11 +508,13 @@ ARN in its own partition and account (ADR-0022).
 
 `YOUR_BUCKET` is yours to create and fill (`aws s3 sync scripts/
 s3://YOUR_BUCKET/scripts/`). control-plane's cell and tenant CodeBuild
-projects read the scripts with their own roles, which do not exist until
+projects read the scripts with their build roles, which do not exist until
 control-plane is deployed, so the bucket policy has to admit them by name
 pattern: allow `s3:GetObject`, `s3:GetObjectVersion`, `s3:GetBucketLocation`
 and `s3:ListBucket` to principals in your account whose ARN matches
-`arn:<partition>:iam::<account>:role/control-plane-dev-*`. The setup stack in
+`arn:<partition>:iam::<account>:role/control-plane-*-build` (the roles are
+`control-plane-cell-build` and `control-plane-tenant-build`, control-plane
+ADR-025). The setup stack in
 [`test/integ.control-plane.ts`](./test/integ.control-plane.ts)
 (`ControlPlaneBuildsReadScripts`) is the statement to copy.
 
@@ -530,7 +539,7 @@ aws ssm get-parameter --with-decryption \
 
 `--with-decryption` needs `kms:Decrypt` on `AdminPasswordKey`, which the
 deployer grants to whoever collects the password. The control-plane tenant
-build role holds `kms:Encrypt` through SSM only and **cannot** decrypt
+provisioning role (the role tenant scripts run as) holds `kms:Encrypt` through SSM only and **cannot** decrypt
 (ADR-0033), so a parked password is never readable from the build log or by
 the role that wrote it.
 
@@ -765,7 +774,7 @@ text per code and never echoes Cognito's message or a token.
   mounted (see [Mounting under the control plane](#mounting-under-the-control-plane)),
   `tenant/create.sh` parks the first admin's temporary password in an SSM
   `SecureString` encrypted with `AdminPasswordKey` (ADR-0031, ADR-0033). The
-  control-plane tenant build role that writes it holds `kms:Encrypt` through
+  control-plane tenant provisioning role that writes it holds `kms:Encrypt` through
   SSM only; only a principal the deployer grants `kms:Decrypt` can read it
   back, so the password is never exposed in a build log or to the role that
   parked it. Parking is a sample stand-in for real invite delivery (a
@@ -843,7 +852,7 @@ Each item maps to a threat-model mitigation (M-n) or threat (T-n).
       which also reach `GetUser`, `UpdateUser`, `DeleteUser` and
       `DeleteMembership`, which the mount never calls, because execute-api
       ARNs cannot exclude them (T-34, M-33); `ListUsers` it calls only to
-      verify a 409. It also gives the mount's build role the four
+      verify a 409. It also gives the mount's tenant provisioning role the four
       `/platform/scopes` routes and a backend's registration role the tenant
       routes (ADR-0034). Watch both holders in CloudTrail and the API access
       log, which attributes every `/platform/*` call to its role; a deployer

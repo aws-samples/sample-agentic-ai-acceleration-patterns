@@ -13,7 +13,8 @@ use aws.apigateway#authorizer
 
 /// A cell - a deployment unit containing one shared application deployment
 /// plus up to maxTenants tenants, each with its own per-tenant application
-/// deployment. Cells are homogeneous by construction: the deployment
+/// deployment, provisioned in one registered account (ADR-024). Cells are
+/// homogeneous by construction: the deployment
 /// configuration (source, cell scripts, tenant scripts, maxTenants) is
 /// stamped onto the cell record at creation and is immutable for the cell's
 /// lifetime (ADR-012). There is deliberately no create operation - cells are
@@ -50,10 +51,16 @@ integer TenantCount
 
 /// A cell as returned by the API: lifecycle status, capacity/occupancy, the
 /// stamped deployment definition, and build bookkeeping.
+@references([{resource: Account}])
 structure CellSummary {
     /// Unique cell identifier.
     @required
     cellId: CellId
+
+    /// The account the cell is provisioned in - assigned at creation, never
+    /// changes (ADR-024).
+    @required
+    accountId: AccountId
 
     /// Current lifecycle status of the cell and its shared deployment.
     @required
@@ -202,15 +209,22 @@ operation DeleteCell {
 // ListCells - GET /cells -> 200
 // ---------------------------------------------------------------------------
 
-/// Lists cells with pagination - the fleet topology view: status and
-/// tenantCount/maxTenants per cell. Statuses are always current - terminal
-/// state is written by the provisioning workflow, not repaired by readers.
+/// Lists cells with pagination - the fleet topology view: accountId, status
+/// and tenantCount/maxTenants per cell. The accountId filter is a query
+/// predicate, not a resource lookup - an unknown accountId yields an empty
+/// page, not a 404. Statuses are always current - terminal state is written
+/// by the provisioning workflow, not repaired by readers.
 @authorizer("vendor-authorizer")
 @readonly
 @paginated(inputToken: "nextToken", outputToken: "nextToken", pageSize: "maxResults", items: "cells")
 @http(method: "GET", uri: "/cells", code: 200)
 operation ListCells {
-    input := {
+    input := @references([{resource: Account}]) {
+        /// Only return cells in this account. An unknown accountId yields an
+        /// empty page.
+        @httpQuery("accountId")
+        accountId: AccountId
+
         /// Pagination token from a previous response.
         @httpQuery("nextToken")
         nextToken: PaginationToken

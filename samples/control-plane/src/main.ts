@@ -3,6 +3,8 @@
 
 import { Annotations, App, Aspects, Validations } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
+import { CellAccountStack } from './cell-account/cell-account.cdk';
+import { DEFAULT_FLEET_NAME, validateFleetName } from './shared/fleet';
 import { sourcePinningWarning } from './shared/service-config';
 import { CellDefinition, TenantStack } from './tenant/tenant.cdk';
 
@@ -28,38 +30,75 @@ Validations.of(app).addPlugins(
 //   Authorizer. Customer identity is an application plane decision (ADR-004).
 // - the CellDefinition - one source + two script sets + maxTenants, stamped
 //   onto each cell record at creation (ADR-012). Validated at synth time.
-// A fourth input, tenantBuildManagedPolicyArns, is optional (ADR-022).
-const vendorIdpIssuerUrl = requireContext('vendorIdpIssuerUrl');
-const vendorIdpAudience = requireContext('vendorIdpAudience');
-const cellDefinition = parseCellDefinitionContext(requireContext('cellDefinition'));
-// Optional (ADR-022): customer-managed policy ARNs attached to the tenant
-// build role, e.g. a least-privilege policy an application-plane sample
-// publishes for its API. Validated in the stack (fails synth on an ARN
-// outside this partition/account). Default: none.
-const tenantBuildManagedPolicyArns = parseJsonContext<string[]>('tenantBuildManagedPolicyArns');
+// Optional inputs: tenantBuildManagedPolicyArns (ADR-022) and fleetName
+// (ADR-025, default `control-plane`).
+//
+// A second mode (ADR-025): `--context cellAccount='{...}'` synthesizes ONLY
+// the account role pair stack, for deployment into another account by its
+// owner (the vendor's second fleet account, or a customer's). That mode needs
+// none of the control plane inputs.
+const env = {
+  account: process.env.CDK_DEFAULT_ACCOUNT,
+  region: process.env.CDK_DEFAULT_REGION,
+};
+const fleetName = app.node.tryGetContext('fleetName') as string | undefined;
+const cellAccount = parseJsonContext<CellAccountContext>('cellAccount');
 
-const stack = new TenantStack(app, 'control-plane-dev', {
-  vendorIdpIssuerUrl: String(vendorIdpIssuerUrl),
-  vendorIdpAudience: String(vendorIdpAudience),
-  cellDefinition,
-  tenantBuildManagedPolicyArns,
-  env: {
-    account: process.env.CDK_DEFAULT_ACCOUNT,
-    region: process.env.CDK_DEFAULT_REGION,
-  },
-});
+if (cellAccount !== undefined) {
+  // The account role pair (spec R-25, §6.4): deployed by the owner of the
+  // account that will host cells, with the control plane's account id and
+  // fleet name, an optional external id, and optional managed policies for
+  // the tenant provisioning role (attached in THIS account, ADR-022/025).
+  // The stack name carries the fleet name so two fleets' pairs can be
+  // installed in one account without a CloudFormation stack collision (T31).
+  new CellAccountStack(app, `${validateFleetName(fleetName ?? DEFAULT_FLEET_NAME)}-cell-account`, {
+    controlPlaneAccountId: String(cellAccount.controlPlaneAccountId ?? ''),
+    fleetName,
+    externalId: cellAccount.externalId,
+    tenantBuildManagedPolicyArns: cellAccount.tenantBuildManagedPolicyArns,
+    demoSharedParameters: cellAccount.demoSharedParameters,
+    env,
+  });
+} else {
+  const vendorIdpIssuerUrl = requireContext('vendorIdpIssuerUrl');
+  const vendorIdpAudience = requireContext('vendorIdpAudience');
+  const cellDefinition = parseCellDefinitionContext(requireContext('cellDefinition'));
+  // Optional (ADR-022): customer-managed policy ARNs attached to the tenant
+  // provisioning role in the control plane's own account, e.g. a
+  // least-privilege policy an application-plane sample publishes for its
+  // API. Validated in the stack (fails synth on an ARN outside this
+  // partition/account). Default: none.
+  const tenantBuildManagedPolicyArns = parseJsonContext<string[]>('tenantBuildManagedPolicyArns');
 
-// Supply-chain pinning check (threat model T5, mitigation M10): the
-// CellDefinition source is fetched fresh by CodeBuild on every lifecycle
-// build. Warn — do not fail — when source.sourceVersion is absent or a
-// mutable ref instead of a full commit SHA. Structural validation of the
-// rest of the definition happens in the stack (fails synth, §10).
-const pinningWarning = sourcePinningWarning(cellDefinition.source);
-if (pinningWarning !== undefined) {
-  Annotations.of(stack).addWarningV2('control-plane:mutable-source-ref', pinningWarning);
+  const stack = new TenantStack(app, 'control-plane-dev', {
+    vendorIdpIssuerUrl: String(vendorIdpIssuerUrl),
+    vendorIdpAudience: String(vendorIdpAudience),
+    cellDefinition,
+    fleetName,
+    tenantBuildManagedPolicyArns,
+    env,
+  });
+
+  // Supply-chain pinning check (threat model T5, mitigation M10): the
+  // CellDefinition source is fetched fresh by CodeBuild on every lifecycle
+  // build. Warn — do not fail — when source.sourceVersion is absent or a
+  // mutable ref instead of a full commit SHA. Structural validation of the
+  // rest of the definition happens in the stack (fails synth, §10).
+  const pinningWarning = sourcePinningWarning(cellDefinition.source);
+  if (pinningWarning !== undefined) {
+    Annotations.of(stack).addWarningV2('control-plane:mutable-source-ref', pinningWarning);
+  }
 }
 
 app.synth();
+
+/** The `cellAccount` context shape (spec §3.3, "Account role pair"). */
+interface CellAccountContext {
+  readonly controlPlaneAccountId?: string;
+  readonly externalId?: string;
+  readonly tenantBuildManagedPolicyArns?: string[];
+  readonly demoSharedParameters?: boolean;
+}
 
 /** Fails synthesis with the complete required-context recipe when a deployment input is missing. */
 function requireContext(key: string): unknown {
@@ -67,7 +106,8 @@ function requireContext(key: string): unknown {
   if (value === undefined || value === '') {
     throw new Error(
       [
-        `Missing required CDK context '${key}'. This app needs all three deployment inputs (architecture.md §10):`,
+        `Missing required CDK context '${key}'. This app needs all three deployment inputs (architecture.md §10)`
+        + ' - or `--context cellAccount=\'{"controlPlaneAccountId":"..."}\'` to synthesize only the account role pair stack:',
         '',
         '  npx cdk deploy \\',
         '    --context vendorIdpIssuerUrl=https://YOUR_ISSUER \\',

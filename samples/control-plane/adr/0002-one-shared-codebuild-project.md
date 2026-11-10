@@ -20,3 +20,7 @@ projects on offboarding. One IAM service role is the single provisioning
 blast radius (documented hardening point). Trade-off: source auth for private
 repos is configured at the project level (CodeConnections), not per tenant —
 acceptable for a sample; per-tenant `auth` support is a noted extension.
+
+---
+
+**Amended by ADR-025 (2026-11-09):** the projects' roles no longer hold application-plane permissions; each build assumes the hosting account's provisioning role before the script runs. The per-execution override model is unchanged.

@@ -3,34 +3,37 @@
 
 /**
  * Name of GSI-1. Cell items use the static partition `CELL` (fleet listing
- * and placement candidate scan); tenant items use `CELL#<cellId>` (per-cell
- * tenant listing). The index projects all attributes (`ProjectionType: ALL`).
+ * and placement candidate scan); account items use the static partition
+ * `ACCOUNT` (account listing and placement account scan); tenant items use
+ * `CELL#<cellId>` (per-cell tenant listing). The index projects all
+ * attributes (`ProjectionType: ALL`).
  */
 export const GSI1_INDEX_NAME = 'GSI1';
 
 /**
- * Name of GSI-2. Sparse — only tenant items carry GSI-2 attributes, under
- * the static partition `TENANT` (unfiltered tenant listing). Cell items
- * never appear in it. The index projects all attributes.
+ * Name of GSI-2. Tenant items use the static partition `TENANT` (unfiltered
+ * tenant listing); cell items use `ACCOUNT#<accountId>` (per-account cell
+ * listing and the targeted candidate scan). Account items never appear in
+ * it. The index projects all attributes.
  */
 export const GSI2_INDEX_NAME = 'GSI2';
 
 /**
  * Base shape of every item in the single-table design: a composite
  * partition/sort key pair built with `KeyBuilder`, plus optional GSI key
- * attributes. GSI-2 attributes are sparse (tenant items only), which is what
- * keeps cell items out of GSI-2.
+ * attributes (§4.5). Idempotency records carry none; account items carry
+ * GSI-1 only.
  */
 export interface DynamoDBItem {
   readonly PK: string;
   readonly SK: string;
-  /** GSI-1 partition key — `CELL` (cell items) or `CELL#<cellId>` (tenant items). */
+  /** GSI-1 partition key — `CELL` (cells), `ACCOUNT` (accounts), or `CELL#<cellId>` (tenants). */
   readonly GSI1PK?: string;
-  /** GSI-1 sort key — `CELL#<cellId>` (cell items) or `TENANT#<tenantId>` (tenant items). */
+  /** GSI-1 sort key — `CELL#<cellId>`, `ACCOUNT#<accountId>`, or `TENANT#<tenantId>`. */
   readonly GSI1SK?: string;
-  /** GSI-2 partition key — static `TENANT`; tenant items only (sparse index). */
+  /** GSI-2 partition key — static `TENANT` (tenants) or `ACCOUNT#<accountId>` (cells). */
   readonly GSI2PK?: string;
-  /** GSI-2 sort key — `TENANT#<tenantId>`; tenant items only (sparse index). */
+  /** GSI-2 sort key — `TENANT#<tenantId>` (tenants) or `CELL#<cellId>` (cells). */
   readonly GSI2SK?: string;
 }
 
