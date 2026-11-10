@@ -259,7 +259,7 @@ the default.
 | Agents | 2 (`default` and `a001`, both in the ingress stack) | 10 (`default` plus `a001`..`a009` in one agents stack) | 100 (`default` plus `a001`..`a099` in five agents stacks of 20) |
 | Tool targets | 2 x 10 tools (`t01`, `t02`) | 4 x 100 tools (`t01`..`t04`) | 10 x 100 tools (`t01`..`t10`) |
 | Tools gateways | `default`, `finance` | `default`, `finance`, `hr`, `ops` | the same four |
-| Tenants seeded | 20 | 200 | 10,000 |
+| Tenants seeded | 20 | 200 | 4,000 (one pool holds 5,000, F-11) |
 | Tenants active | 20 | 200 | 1,000 (S7: 2,000) |
 | Users per active tenant | 2 | 2 | 4 |
 | Steady rate (S1) | 10 rps | 100 rps | 500 rps |
@@ -438,6 +438,9 @@ served. What the runs found beyond that:
 | F-5 | The limiter bins by request start, the `request served` line by request end: a request that crosses a minute boundary appears in the next bin. Attribution checks over logs must allow for it | `collect.sh` | the under-limit rule skips the window's first and last minute and allows 5 under the limit |
 | F-6 | Logs Insights undercounts for about two minutes after a run (117 of 474 refusals when queried at once) | `collect.sh` | wait 150 s after the window before querying |
 | F-7 | The k6 host's first-boot `dnf install k6` lost the rpm lock to the image's own update and the GPG key import failed, so k6 was missing | `StressDriver` user data | every install retries until the lock is free; `k6 version` at the end fails the boot loudly |
+| F-9 | At 300 tools of the stress shape on one gateway the policy engine's Cedar schema was 413 KB, over its 400 KB bound, and the `ToolTarget` policy failed to create. The construct's `maxToolsPerGateway` default of 300 and the "about 330 tools" in `architecture.md` are both over the real ceiling for tools with a one-line description and a one-property schema | the `ToolsGateway` default and `architecture.md` | lower the default to 250 or make the synth check sum the tool definitions' bytes; the large tier spreads 1,000 tools over five gateways |
+| F-10 | An `AgentBackend` whose ingress is in another stack added its own inline policy with the one-model statement to the imported tenant role, 308 bytes per agent; IAM caps a role's inline policies at 10,240 bytes in all, so about 30 cross-stack agents filled the role and the 31st failed to deploy. Fixed: one policy per stack and model, named with the stack (`grantModelFromStack`, `src/agent-backend.cdk.ts`) | the construct | fixed in this branch; the 100-agent tier deploys (five stacks, five policies) |
+| F-11 | tenant-identity holds two Cognito groups per tenant (`t-<id>`, `admin-<id>`) and a user pool holds 10,000 groups, a hard quota: one pool caps at 5,000 tenants. Two seeds killed mid-run left 2,822 tenants' groups with no tenant row, which `DeleteTenant` cannot remove (404); they were removed with `DeleteGroup` by hand | the `tenant-identity` sample and `seed.sh` | the large tier seeds 4,000 tenants; `seed.sh` checks the pool's group headroom first and folds the manifest every 50 tenants; the spec's "10,000s of tenants" needs more than one pool (an issuer per pool on the ingress's `multiTenant` list), which the plan should say |
 | F-8 | An integ run deletes the vendor scopes it registered on the shared identity deployment at its end, so a stress deploy after an integ run finds no `app/use` | shared fixture | `deploy.sh` registers the two vendor scopes when missing and leaves them |
 
 ## 12. Options considered for the driver

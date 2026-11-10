@@ -83,7 +83,12 @@ export const STRESS_TIERS: Record<'small' | 'medium' | 'large', StressTier> = {
     // over its 400 KB bound (2026-11-09, finding F-9): the schema holds
     // about 290 tools of this shape, not the 330 the architecture quotes.
     toolsGateways: ['default', 'finance', 'hr', 'ops', 'sales'],
-    tenantsSeeded: 10_000,
+    // tenant-identity holds two Cognito groups per tenant (t-<id>, admin-<id>)
+    // and a user pool holds 10,000 groups, a hard quota: one pool caps at
+    // 5,000 tenants (2026-11-10, finding F-11). 4,000 leaves room for the
+    // other users of the shared pool. The spec's "10,000s of tenants" needs
+    // more than one pool, which the ingress's multiTenant issuer list allows.
+    tenantsSeeded: 4_000,
     tenantsActive: 1_000,
     usersPerActiveTenant: 4,
     steadyRps: 500,

@@ -234,12 +234,36 @@ job_create_tenant() { # INDEX
   rm -rf "$JOB_TMP"
 }
 TO_CREATE=$(( SEEDED > REUSED ? SEEDED - REUSED : 0 ))
+# Headroom check (F-11): a user pool holds 10,000 groups and tenant-identity
+# takes two per tenant. Counting the groups costs one ListGroups page per 60,
+# so it runs only when something is to be created.
+if (( TO_CREATE > 0 )); then
+  POOL_ID="$(aws ssm get-parameter --name "${IDENTITY_PREFIX}/userPoolId" --query Parameter.Value --output text)"
+  GROUPS=0; TOKEN=""
+  while :; do
+    if [[ -n "$TOKEN" ]]; then page="$(aws cognito-idp list-groups --user-pool-id "$POOL_ID" --limit 60 --next-token "$TOKEN" --output json)"
+    else page="$(aws cognito-idp list-groups --user-pool-id "$POOL_ID" --limit 60 --output json)"; fi
+    GROUPS=$(( GROUPS + $(jq '.Groups | length' <<<"$page") ))
+    TOKEN="$(jq -r '.NextToken // empty' <<<"$page")"
+    [[ -n "$TOKEN" ]] || break
+  done
+  ROOM=$(( (10000 - GROUPS) / 2 ))
+  echo "pool groups: ${GROUPS} of 10,000; room for ${ROOM} more tenants"
+  (( TO_CREATE <= ROOM )) || fail "the identity pool has room for ${ROOM} more tenants, ${TO_CREATE} wanted: lower the tier's tenantsSeeded or --tenants, or free orphan groups (two per tenant, t-<id> and admin-<id>) that no tenant row owns"
+fi
 START=$SECONDS
 # CreateTenant writes a Cognito group and a user; above about 4 a second
 # Cognito answers TooManyRequestsException, which tenant-identity returns as
 # 500 (2026-11-09, medium seed: 139 of 180 at 8 rps). Half pace here.
 INTERVAL_MS=250
-for ((i = 1; i <= TO_CREATE; i++)); do launch job_create_tenant "$i"; done
+# The manifest is folded every 50 launches, so a seed killed mid-run (a shell
+# timeout, 2026-11-10) loses at most 50 answered tenants: an answered tenant
+# the manifest never learns of is two orphan Cognito groups the pool counts
+# against its 10,000 (F-11).
+for ((i = 1; i <= TO_CREATE; i++)); do
+  launch job_create_tenant "$i"
+  (( i % 50 == 0 )) && { wait; merge_pending; }
+done
 INTERVAL_MS=125
 wait
 merge_pending
