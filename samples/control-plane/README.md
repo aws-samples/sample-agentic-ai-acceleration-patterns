@@ -1,16 +1,16 @@
 # The Cell-Based Control Plane
 
-A multi-tenant control plane for **cell-based deployments across
-accounts**. A cell is a deployment unit: one **shared application deployment**
-plus up to `maxTenants` tenants, each with its **own per-tenant deployment**
-inside the cell. Set `maxTenants: 1` and the model degenerates to a silo —
-one tenant per cell. Cells live in **registered AWS accounts**: vendor-owned
-accounts are fleet capacity with a cell limit, so the fleet scales to a second
-account when the first is full; a tenant-owned account is a customer's own,
-receives only the tenants that name it, and is reached through a role pair
-the customer installs and can revoke. One service, one API (15 operations),
-one DynamoDB table, one Step Functions workflow, two shared AWS CodeBuild
-projects, one role pair per account.
+A control plane that onboards tenants into cells across either the vendor's
+or the customer's AWS accounts. A cell is one **shared application
+deployment** plus up to `maxTenants` tenants, each with its **own per-tenant
+deployment** inside the cell; `maxTenants: 1` yields dedicated tenant cells.
+Accounts are **registered through the API**: a vendor account holds one to
+many cells up to a cell limit, and when every vendor account is full the fleet
+moves on to the next registered one; a customer account receives only the
+tenants that name it. Each account is reached through a role pair installed in
+that account, which the account owner can revoke. One service, one API (15
+operations), one DynamoDB table, one Step Functions workflow, two shared AWS
+CodeBuild projects, one role pair per account.
 
 - Design: [`architecture.md`](./architecture.md)
 - Decisions and their reasoning trail: [`adr/`](./adr/) (one file per ADR, indexed in [`adr/README.md`](./adr/README.md))
@@ -25,36 +25,21 @@ A control plane that places tenants into cells across accounts it never
 holds credentials for: every account's owner installs one role pair, and
 that trust policy is the only thing the builds can act through.
 
-Each box is one component and its pill names the pattern it carries. The API
-gates on the vendor IdP's role claim; the tenant service claims a tenant slot
-on a cell and, for a new cell, a cell slot on an account, atomically, and
-answers 202; the workflow runs the cell build (shared cell deployment) only
-for a new cell and then the tenant build (per-tenant deployment); each build
-assumes the provisioning role pair installed in the cell's account — the
-vendor's own account A or a customer's account B — and the scripts exchange
-resource identifiers through that account's SSM namespaces; at registration
-the tenant service probes the same pair once and discards the credentials;
-the service and the workflow share one single-table record of accounts,
-cells, and tenants.
-
 ![Architecture: a vendor operator calls API Gateway (the Lambda Authorizer validates the vendor IdP JWT), which invokes the Tenant Service Lambda; the service writes the DynamoDB table of accounts, cells and tenants and starts Step Functions, which runs the cell-scripts and tenant-scripts CodeBuild projects; each project calls sts:AssumeRole (with an external id) into the cell-provisioning or tenant-provisioning role of Account A or Account B, which writes or reads and writes that account's SSM Parameter Store namespaces; the Tenant Service's own role also assumes both roles once at PutAccount as a registration probe](./diagrams/control-plane.drawio.svg)
 
-On the AWS resources the sample deploys: operator JWT -> API Gateway (Lambda
-Authorizer) -> Tenant Service -> DynamoDB and, for async operations, Step
-Functions -> CodeBuild cell scripts (new cell only) then tenant scripts ->
-`sts:AssumeRole` (with the account's external id) into the
-`<fleet>-cell-provisioning` or `<fleet>-tenant-provisioning` role of the
-cell's account -> that account's SSM Parameter Store namespaces; the workflow
-writes the terminal status back to DynamoDB. The dashed line from the Tenant
-Service to the same roles is the `PutAccount` registration probe (ADR-027/028):
-one `AssumeRole` per half under a deny-all session policy, credentials
-discarded.
-
-One service, one API, one DynamoDB table, one state machine, two shared
-CodeBuild projects — and in every account that hosts cells, the control plane's
-own included, one role pair whose asymmetry enforces the
-cell-script/tenant-script permission boundary and whose trust policy the
-account owner controls. Diagram source:
+The application a cell runs comes from the **CellDefinition**, a deployment
+input: a CodeBuild source (`type`, `location`, optional `sourceVersion`) and
+two script sets, `cellScripts` and `tenantScripts`, each with `create`,
+`update` and `delete`. Lifecycle operations run the matching script:
+`CreateTenant` runs cell create (new cell only) then tenant create,
+`UpdateCell` and `UpdateResource` run the update scripts, `DeleteCell` and
+`DeleteTenant` the delete scripts. A full commit SHA in `sourceVersion` pins
+the source; a branch or tag is accepted with a synthesis warning. The
+definition is stamped onto each cell at creation, so a later change applies
+to new cells only and existing cells keep their version. One control plane
+deployment runs one application. To run several applications, deploy the
+control plane once per application with its own `fleetName`; the deployments
+can share accounts, because the role pair is named per fleet. Diagram source:
 [`diagrams/control-plane.drawio`](./diagrams/control-plane.drawio).
 
 ## How it works

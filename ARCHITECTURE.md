@@ -111,7 +111,7 @@ compute, session, or data. Two vocabularies describe it.
 | **Pool** | everything | only the tenant key on each record or request |
 | **Cell** | one shared deployment per cell | a per-tenant deployment inside the cell, up to `maxTenants` per cell |
 
-A cell with `maxTenants: 1` is a silo. The models compose: a system can pool
+A cell with `maxTenants: 1` is a dedicated tenant cell, a silo. The models compose: a system can pool
 its agents, bridge its storage, and silo a premium tier.
 
 ### 3.2 Isolation styles: what enforces the boundary
@@ -166,13 +166,14 @@ Four rules hold at every layer:
 The control plane owns the account registry, the tenant lifecycle, and
 placement; it knows nothing about tenant users or tokens.
 
-- **Cells live in registered accounts.** An operator registers an AWS account
-  with a cell limit and an owner (control-plane ADR-024). A **vendor-owned**
-  account is fleet capacity that placement fills, oldest first; registering a
-  second one is how the fleet scales past the first. A **tenant-owned** account
-  is a customer's: it receives only tenants whose onboarding names it, so a
-  customer who wants the deployment in their own account gets exactly that.
-  The control plane's own account is registered like any other.
+- **Cells live in registered accounts**, the vendor's or the customer's. An
+  operator registers an AWS account with a cell limit and an owner
+  (control-plane ADR-024). A **vendor-owned** account holds one to many cells
+  up to its limit; placement fills vendor accounts oldest first and moves on
+  to the next registered one when every earlier one is full. A
+  **tenant-owned** account is a customer's: it receives only tenants whose
+  onboarding names it. The control plane's own account is registered like any
+  other.
 - **Onboarding** is one `POST /tenants`. Placement claims a slot in a cell with
   free capacity, or claims a cell slot on an eligible account and creates a
   cell there first. A Step Functions workflow then runs the vendor's
