@@ -4,6 +4,29 @@ SPDX-License-Identifier: MIT-0
 -->
 # Agentic runtime isolation: the agent platform at scale
 
+Building an agent platform for a scale of 10,000s of tenants and agents and
+1,000s of tools introduces challenges which are not present at lower
+volumes. Enforcing least-privilege isolation and per-tenant and per-user
+entitlements goes beyond the limits of what OAuth scopes can handle: a scope
+list in the identity token must name every tool the user may use with any
+agent, grows past the token size caps of the identity provider, and changes
+only at the next sign-in.
+
+This sample describes a reference architecture in which one shared ingress
+is the only code that sees the identity token. It computes each agent's
+grant per request from an entitlement store (what the agent needs, what the
+tenant bought, what the tenant admin cut), mints a short-lived transaction
+token bound to that one agent and its tools gateways, and invokes the agent
+in its own AgentCore Runtime microVM with tenant-scoped credentials. Tools
+gateways and tools trust that token and a signed per-call context, never
+the agent. An agent can also hand a transaction to another agent through
+the same ingress, which re-issues the token for the next hop with the
+caller recorded in `act`. Entitlement cardinality lives in data, not in
+policies or roles, so the design lets you scale to 10,000s of tenants, each
+with 1,000s of agents and 1,000s of tools, while a cut or a subscription
+change takes effect on the next request and every hop holds the narrowest
+token that works.
+
 ## Use cases
 
 Use this sample when one agent fleet serves many tenants and every request
