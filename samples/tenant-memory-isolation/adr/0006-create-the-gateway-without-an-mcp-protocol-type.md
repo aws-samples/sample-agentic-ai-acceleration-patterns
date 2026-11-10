@@ -28,9 +28,14 @@ Gateway.
 ## Decision
 
 Option 2. The Gateway is created without `protocolType`, and a unit test
-fails if the rendered request sets it.
+fails if the rendered request sets it. The current documentation agrees: the
+connector is an `http` target configuration
+([setup guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-gateway-setup.html)),
+and HTTP targets need a Gateway created without `--protocol-type MCP`
+([HTTP passthrough targets](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-target-http-passthrough.html)).
 
 ## Consequences
 
 This Gateway serves native Memory requests, not MCP tools. A deployment that
-also serves MCP tools runs them on a separate MCP Gateway.
+also serves MCP tools runs them on a separate MCP Gateway; in particular, the
+Memory connector cannot be a target of an existing MCP tools gateway.

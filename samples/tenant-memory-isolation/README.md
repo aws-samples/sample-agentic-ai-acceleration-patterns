@@ -112,6 +112,8 @@ direct ingestion, to every principal except the dedicated Gateway execution
 role through `aws:PrincipalArn` ([ADR-0004](adr/0004-fence-memory-by-the-gateway-role-principal-arn.md)).
 The operation list comes from the service model, and a unit test fails when
 the model gains one ([ADR-0007](adr/0007-derive-the-fenced-operations-from-the-service-model.md)).
+The connector exposes 12 Memory operations as Cedar actions; batch writes and
+`IngestData` are not among them, so only the resource fence governs those.
 Record-ID operations, tenant enumeration, extraction administration, direct
 ingestion, and batch writes are outside the agent-facing policy set.
 

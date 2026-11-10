@@ -53,6 +53,12 @@ pin does.
 
 ## Consequences
 
+The connector exposes 12 of these operations as Cedar actions; the batch
+record operations and `IngestData` are not connector operations
+([connector guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-gateway-connector.html#memory-gateway-connector-what),
+[IngestData](https://docs.aws.amazon.com/bedrock-agentcore/latest/APIReference/API_IngestData.html)),
+so for them the fence is the only control.
+
 A new Memory data operation is denied outside Gateway as soon as the SDK pin
 includes it, and the review is forced rather than remembered. A new
 operation that the service ships before the SDK models it is not covered;

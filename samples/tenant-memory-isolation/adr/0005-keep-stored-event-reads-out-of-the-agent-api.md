@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0005: Keep stored event reads and deletion out of the agent API
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-10-26
 - Deciders: Daniel Wirjo (Solutions Architect)
 
@@ -40,3 +40,14 @@ The live probe for event reads shows they are off for everyone; it is not
 evidence of per-tenant read scoping. Revisit when Policy receives path
 parameters for these operations, verified live, and add per-session read
 permits with their own allow and deny tests.
+
+This record stays Proposed until a live re-test. The current FGAC reference
+lists `actorId` and `sessionId` as path parameters in `context.input` and
+shows a `ListEvents` permit on `context.input.actorId`
+([FGAC reference](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-gateway-fgac.html#memory-gateway-fgac-context-fields),
+[policy examples](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-gateway-fgac-policy-examples.html)).
+The same reference warns that a permit reading a field the request lacks
+denies with 403 and no creation-time finding, which matches what the
+2026-10-26 run saw. The re-test runs a per-session `ListEvents` permit, guarded
+with `has`, in `LOG_ONLY` and then `ENFORCE`; if the fields arrive, this record
+is superseded by one that adds per-session event reads.

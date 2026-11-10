@@ -41,3 +41,13 @@ The fence and the role trust are one boundary and are reviewed together; a
 broader trust policy would let a caller obtain the role and step inside the
 fence. Changing the outbound identity (for example to caller credentials)
 means rewriting the fence.
+
+The current connector guide recommends `aws:PrincipalArn` on the execution
+role for `GATEWAY_IAM_ROLE`, as decided here, and also states that the
+Gateway stamps `aws:SourceArn` with its ARN in both outbound modes
+([connector guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-gateway-connector.html#memory-gateway-connector-credential-modes),
+[restrict direct access](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-gateway-restrict-access.html)).
+That differs from the 2026-10-26 observation, so the next live run re-tests
+it. If `aws:SourceArn` is present, the fence adds it as a second condition;
+the Deny form stays, because an Allow-only resource policy does not stop a
+principal in the same account whose identity policy already allows the call.

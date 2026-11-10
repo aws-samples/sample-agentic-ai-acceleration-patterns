@@ -303,8 +303,6 @@ def run(config, extraction_timeout, report):
                  "ListMemoryRecords", {"memoryId": config["memoryId"], "namespacePath": path})
         deny("A cannot enumerate tenant actors", clients["a-shopping"], "ListActors",
              {"memoryId": config["memoryId"]})
-        deny("Direct ingestion has no agent permit", clients["a-shopping"], "IngestData",
-             ingest_params("a-shopping"))
 
         # Observe extraction rather than turning eventual consistency into an authorization claim.
         deadline = time.monotonic() + extraction_timeout

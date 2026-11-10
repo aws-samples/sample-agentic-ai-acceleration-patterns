@@ -29,7 +29,6 @@ const actions = {
   recordId: 'GET:/memories/{memoryId}/memoryRecord/{memoryRecordId}',
   deleteRecord: 'DELETE:/memories/{memoryId}/memoryRecords/{memoryRecordId}',
   extraction: 'POST:/memories/{memoryId}/extractionJobs/start',
-  ingest: 'POST:/memories/{memoryId}/ingest',
 };
 function decide(operation, input, tags = claim, resource = gateway, type = 'AgentCore::OAuthUser') {
   const principal = { type, id: 'synthetic-agent' };
@@ -77,7 +76,7 @@ for (const field of Object.keys(claim)) {
       field === 'memory_namespace' ? namespace : session, tags), 'deny');
   });
 }
-for (const operation of ['list', 'get', 'delete', 'actors', 'sessions', 'recordId', 'deleteRecord', 'extraction', 'ingest']) {
+for (const operation of ['list', 'get', 'delete', 'actors', 'sessions', 'recordId', 'deleteRecord', 'extraction']) {
   test(`no tenant permit for ${operation}`, () =>
     assert.equal(decide(operation, { ...session, ...namespace }), 'deny'));
 }

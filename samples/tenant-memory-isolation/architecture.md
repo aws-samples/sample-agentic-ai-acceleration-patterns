@@ -70,7 +70,9 @@ share a namespace permit. Record-ID access is excluded because the ID alone
 does not prove namespace ownership.
 Resource-based IAM denies every Memory data operation in the service model
 outside the exact Gateway execution role, using `aws:PrincipalArn` (ADR-0004,
-ADR-0007). Its trust allows only the
+ADR-0007). The connector exposes 12 of those operations as Cedar actions; the
+batch record operations and `IngestData` are not connector operations, so the
+resource fence is their only control. Its trust allows only the
 AgentCore service with the exact source account and Gateway/Policy engine
 ARNs. Gateway's role grants only the demonstrated Memory operations.
 
@@ -93,7 +95,7 @@ for target metadata validation; the three tenant data actions stay unchanged.
 
 ## Validation
 
-`npm test` runs 38 policy cases in Cedar WASM 4.14.0. `python -m unittest`
+`npm test` runs 37 policy cases in Cedar WASM 4.14.0. `python -m unittest`
 runs 44 tests: SDK wire serialization, HTTP error classification, redirects,
 endpoint and target validation, generated IAM and connector configuration,
 the fence against the service model, live harness inputs, issuer-controlled
@@ -104,7 +106,7 @@ The cloud harness requires the real Gateway URL and connector configuration to
 match its inputs, three separately scoped signed JWTs, and AWS read permissions
 for preflight checks. It submits synthetic facts, waits for both tenants'
 canaries, and probes cross-tenant and cross-session writes, changed namespaces
-for retrieve and list, ingestion through Gateway, and record-ID access. A
+for retrieve and list, and record-ID access. A
 direct call outside Gateway (retrieve, ingest, role assumption) runs only when
 `iam:SimulatePrincipalPolicy` shows the caller's own policies would allow it,
 so its denial is attributable to the fence or the role trust; otherwise it is
