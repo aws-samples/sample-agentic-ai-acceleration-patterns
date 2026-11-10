@@ -51,6 +51,55 @@ does this tenant user hold, and whose permissions does each tool call use.
 Not a fit: one agent per tenant on dedicated infrastructure (silo), or a
 single-tenant agent. There the walls below separate nothing.
 
+## When scopes are enough, and when they stop
+
+OAuth scopes in the identity token (`scope: "crm/read crm/write"`) are the
+right default for one application with a few dozen permissions, and the
+demo keeps one scope that way, as an optional floor: with `requiredScopes`
+set, every identity token must carry `app/use` (ADR-0005). Scopes alone are
+enough when all of these hold:
+
+- one application with under 50 permissions;
+- the same permission set for every tenant;
+- no tenant admin narrowing their own users;
+- no agent handing its credential on to another service;
+- a permission change may wait until the next token.
+
+Scopes stop when the token has to carry a product catalogue per tenant and
+per user, and then be handed to an agent. At 10,000 tenants and 1,000 tools
+the identity provider's quotas give out first: 50 scopes per app client,
+scope names global to the pool, an app client per tenant, a token that
+changes only at the next token, and no token exchange. The quota table, with
+Amazon Cognito's numbers, is in
+[`architecture.md`](./architecture.md#where-scopes-stop). Two costs have no
+quota number: a new tool means a write per tenant (or per user) at the
+identity provider before anyone can hold it, and the identity provider
+learns every product decision (plans, bundles, who bought what, admin cuts).
+
+Even with unlimited scopes the token would say the wrong thing. A scope
+describes what the user may do; the agent needs what this agent, for this
+tenant, for this user, may do right now (ADR-0030, ADR-0031). Those differ
+in three ways:
+
+- **The agent caps the user.** The billing agent must never call
+  `crm/update_case`, however many scopes the user holds. A prompt-injected
+  agent that inherits the user's full scope set calls any tool the user could.
+- **The tenant caps the user.** A tenant bought two CRM tools and its admin
+  has not shared them with every user. A user's scopes would have to be the
+  intersection of what the tenant bought and what the admin left, recomputed
+  at every change, per user.
+- **The token is handed on.** The agent presents its credential to a tools
+  gateway on the user's behalf. If that credential is the user's identity
+  token, a compromised agent holds a credential good for every agent, every
+  tool and every tenant the user belongs to, for up to a day.
+
+In a pooled platform, use this sample when one of the five conditions above
+breaks. The grant lives in a per-agent transaction token, entitlements are
+rows in a store the ingress owns, a change lands on the next request that
+misses the 60 s authoriser cache, and the ingress mints a narrower token
+instead of exchanging one. How each scope limit moves, limit by limit, is in
+[`architecture.md`](./architecture.md#where-scopes-stop).
+
 ## What it is
 
 One shared ingress fronts every agent. Per request it verifies the tenant
