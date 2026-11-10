@@ -13,6 +13,7 @@
 | [0007](0007-derive-the-fenced-operations-from-the-service-model.md) | Derive the fenced operations from the service model | Accepted | 2026-11-10 |
 | [0008](0008-take-memory-claims-from-the-agent-runtime-ingress.md) | Take memory claims from the agent runtime ingress | Proposed | 2026-11-10 |
 | [0009](0009-bind-each-tenant-to-the-namespace-equal-to-its-tenant-id.md) | Bind each tenant to the namespace equal to its tenant id | Accepted | 2026-11-10 |
+| [0010](0010-drive-the-integration-test-with-the-cdk-cli.md) | Drive the integration test with the CDK CLI | Accepted | 2026-11-10 |
 | [0011](0011-pin-the-gateway-role-to-its-own-gateway-from-the-first-deploy.md) | Pin the Gateway role to its own Gateway from the first deploy | Accepted | 2026-11-10 |
 | [0012](0012-attribute-memory-telemetry-and-cost-by-actor-id.md) | Attribute Memory telemetry and cost by actor id | Accepted | 2026-11-10 |
 | [0013](0013-ship-a-construct-with-a-bundled-standard-claims-issuer.md) | Ship a construct with a bundled standard-claims issuer | Accepted | 2026-11-10 |
