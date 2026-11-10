@@ -7,6 +7,7 @@ SPDX-License-Identifier: MIT-0
 - Status: Accepted
 - Date: 2026-11-04
 - Amends: ADR-0015, ADR-0023
+- Amended by: the implementation (2026-11-10)
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -31,3 +32,5 @@ Option 3. On `api-gateway` the authoriser result cache is `min(60 s, transaction
 
 ## Consequences
 Easier: a cached Allow never carries a token that expires before its stream ends, and a cached Deny lasts at most a minute. Harder: a busy client reaches the authoriser once a minute per token and path instead of once in five; a client that sends a wrong `X-Tenant-Id` on a single-tenant ingress sees its next requests with that token refused for up to 60 s, so the README and spec §5.1 say so and the integration driver uses fresh identity tokens around step 19-tenant_id. A stream that outlives `exp - 60 s` loses its tool calls 60 s before `exp`; the reuse margin (180 s by default) keeps that out of reach for a stream that starts on a cached token. ADR-0023's change 6 and the threat model's M-6 and T-12 figures of 300 s are superseded; the rest of ADR-0023 (warm-up at init, pre-connects, TVM refresh-ahead, the bounded limiter client) stands. Revisit if API Gateway lets an optional header be an identity source, or if the AgentCore Gateway's 60 s refusal margin changes.
+
+**2026-11-10.** Amended by the implementation (no new decision): on a single-tenant `api-gateway` ingress a foreign `X-Tenant-Id` after a cached Allow is not served as the token's own tenant. The integration Lambda re-verifies the token against the header (`src/ingress/api-gateway-ingress.function.ts`, through the tenant selection in `src/shared/tenant.ts`) and refuses it with 403 `tenant_not_allowed`. The outcome stays fail-closed; the cache still answers the authoriser step, not the tenant check.
