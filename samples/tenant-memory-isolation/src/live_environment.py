@@ -28,16 +28,14 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from .render_config import render
-from .test_identity import SCOPES
+from .test_identity import SCOPES, scope_claims
 from .validate_live import run
 
 
 def assert_token_scope(token, username, client_id):
     """Check issued fixture claims; Gateway independently verifies signatures."""
-    actor, session = SCOPES[username]
     expected = {
-        "memory_actor": actor, "memory_session": session,
-        "memory_namespace": f"/tenants/{actor}/shared/",
+        **scope_claims(*SCOPES[username]),
         "client_id": client_id,
         "token_use": "access",  # nosec B105
     }
@@ -90,25 +88,10 @@ class LiveEnvironment:
         self.path.write_text(json.dumps(self.state, indent=2) + "\n")
         self.path.chmod(0o600)
 
-    def create_or_reuse_role(self, role_name, trust):
-        """Create a test role, or safely reuse the known empty retained role."""
-        try:
-            return self.iam.create_role(
-                RoleName=role_name,
-                AssumeRolePolicyDocument=json.dumps(trust))["Role"]
-        except ClientError as error:
-            if error.response["Error"]["Code"] != "EntityAlreadyExists":
-                raise
-        if (self.iam.list_role_policies(RoleName=role_name)["PolicyNames"] or
-                self.iam.list_attached_role_policies(RoleName=role_name)["AttachedPolicies"]):
-            raise RuntimeError(f"Refusing to reuse non-empty IAM role {role_name}")
-        retained_roles = set(self.state.get("retainedRoles", []))
-        retained_roles.add(role_name)
-        self.save(retainedRoles=sorted(retained_roles))
-        self.iam.update_assume_role_policy(
-            RoleName=role_name, PolicyDocument=json.dumps(trust))
-        print(f"REUSE empty retained IAM role {role_name}", flush=True)
-        return self.iam.get_role(RoleName=role_name)["Role"]
+    def create_role(self, role_name, trust):
+        """Create a run-scoped role; a name collision fails rather than adopting it."""
+        return self.iam.create_role(
+            RoleName=role_name, AssumeRolePolicyDocument=json.dumps(trust))["Role"]
 
     @staticmethod
     def wait(fetch, expected, label, timeout=600):
@@ -148,8 +131,7 @@ class LiveEnvironment:
             "Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"},
             "Action": "sts:AssumeRole",
         }]}
-        identity_role = self.create_or_reuse_role(
-            self.state.get("identityRole", name + "-issuer"), trust)
+        identity_role = self.create_role(name + "-issuer", trust)
         self.save(identityRole=identity_role["RoleName"])
         function_name = name + "-issuer"
         log_group = f"/aws/lambda/{function_name}"
@@ -233,8 +215,7 @@ class LiveEnvironment:
                           "ArnLike": {"aws:SourceArn":
                               f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:*"}},
         }]}
-        role = self.create_or_reuse_role(
-            self.state.get("gatewayRole", name + "-gateway"), gateway_trust)
+        role = self.create_role(name + "-gateway", gateway_trust)
         self.save(gatewayRole=role["RoleName"])
         discovery = f"https://cognito-idp.{self.region}.amazonaws.com/{pool_id}/.well-known/openid-configuration"
         config = render(self.region, self.account, "pending", memory["id"], role["Arn"],
@@ -245,7 +226,6 @@ class LiveEnvironment:
             PolicyDocument=json.dumps(config["gateway-role-policy.json"]))
         gateway_request = config["create-gateway.json"]
         gateway_request["name"] = name
-        gateway_request["exceptionLevel"] = "DEBUG"
         # Newly created IAM roles are eventually consistent at service callers.
         for attempt in range(24):
             try:
@@ -378,10 +358,7 @@ class LiveEnvironment:
                 remove(key, self.iam.delete_role_policy,
                        display_label=f"{key} inline policy",
                        RoleName=self.state[key], PolicyName=policy_name)
-                if self.state[key] in self.state.get("retainedRoles", []):
-                    print(f"RETAIN pre-existing empty role {self.state[key]}", flush=True)
-                else:
-                    remove(key, self.iam.delete_role, RoleName=self.state[key])
+                remove(key, self.iam.delete_role, RoleName=self.state[key])
         remove("logGroup", self.logs.delete_log_group, logGroupName=self.state.get("logGroup"))
         for username in SCOPES:
             os.environ.pop(username.upper().replace("-", "_") + "_TOKEN", None)
@@ -455,9 +432,12 @@ def main():
                 "note": "Provisioning failed before the live authorization matrix.",
             }, indent=2) + "\n")
         print(f"LIVE FAILED ({type(error).__name__}); inspect ignored live-diagnostics.json", flush=True)
+        try:
+            env.cleanup()
+        except Exception as cleanup_error:  # keep the original failure as the exit cause
+            print(f"CLEANUP FAILED ({type(cleanup_error).__name__}); rerun with --cleanup", flush=True)
         raise
-    finally:
-        env.cleanup()
+    env.cleanup()
 
 
 if __name__ == "__main__":

@@ -112,6 +112,50 @@ def assert_execution_role(policy, trust, config, engine_arn):
         raise AssertionError("Gateway role trust must pin the account, Gateway, and Policy engine")
 
 
+def policy_source_arn(sts, iam):
+    """The IAM user or role whose identity policies sign this run's direct probes."""
+    arn = sts.get_caller_identity()["Arn"]
+    resource = arn.split(":", 5)[5]
+    if resource.startswith("user/"):
+        return arn
+    if resource.startswith("assumed-role/"):
+        return iam.get_role(RoleName=resource.split("/")[1])["Role"]["Arn"]
+    return None
+
+
+def identity_allows(iam, source, action, resource):
+    """True only when the caller's identity policies allow the action.
+
+    A direct probe proves the fence or the role trust only when the caller's
+    own permissions would otherwise allow the call; otherwise any denial passes.
+    """
+    if source is None:
+        return False
+    try:
+        result = iam.simulate_principal_policy(
+            PolicySourceArn=source, ActionNames=[action], ResourceArns=[resource])
+    except ClientError:
+        return False
+    return all(entry["EvalDecision"] == "allowed" for entry in result["EvaluationResults"])
+
+
+def expect_unauthenticated(client, operation, parameters):
+    """Require a 401 for a request the token's scope would otherwise permit.
+
+    A 403 means the token passed authentication and reached Policy, so it
+    says nothing about expiry.
+    """
+    try:
+        client.call(operation, parameters)
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code != 401:
+            raise
+        return
+    except GatewayDenied as error:
+        raise AssertionError("Expired token reached Policy instead of failing authentication") from error
+    raise AssertionError("Expired token accepted")
+
+
 def call_when_ready(client, operation, parameters, timeout=300):
     """Bound readiness retries for expected positive cases, never negatives."""
     if operation not in ALLOWED:
@@ -189,6 +233,16 @@ def run(config, extraction_timeout, report):
             "searchCriteria": {"searchQuery": "warehouse codename", "topK": 10},
         })
 
+    def ingest_params(key):
+        return {"memoryId": config["memoryId"], "actorId": config["identities"][key]["actorId"],
+                "contentTimestamp": datetime.now(timezone.utc),
+                "source": {"inline": {"payload": [{"conversational": {"role": "USER", "content": {
+                    "text": "Synthetic rejected ingestion"}}}]}}}
+
+    def not_run(name, reason):
+        results.append({"case": name, "result": "NOT_RUN", "reason": reason})
+        print(f"NOT_RUN {name}: {reason}")
+
     def session_params(key):
         identity = config["identities"][key]
         return {"memoryId": config["memoryId"], "actorId": identity["actorId"],
@@ -207,7 +261,7 @@ def run(config, extraction_timeout, report):
         passed("Memory resource has an explicit execution-role data-plane fence")
 
         for key, marker in markers.items():
-            event = create_probe_event(clients[key], {
+            create_probe_event(clients[key], {
                 **session_params(key), "eventTimestamp": datetime.now(timezone.utc),
                 "clientToken": str(uuid.uuid4()),
                 "payload": [{"conversational": {"role": "USER", "content": {
@@ -215,7 +269,7 @@ def run(config, extraction_timeout, report):
                 }}}],
             })
             passed(f"{key}: writes its own scoped event")
-        support_event = create_probe_event(clients["a-support"], {
+        create_probe_event(clients["a-support"], {
             **session_params("a-support"), "eventTimestamp": datetime.now(timezone.utc),
             "clientToken": str(uuid.uuid4()),
             "payload": [{"conversational": {"role": "USER", "content": {
@@ -223,28 +277,34 @@ def run(config, extraction_timeout, report):
             }}}],
         })
         passed("a-support: writes its own scoped event")
-        deny("Short-term event reads are not exposed to agents", clients["a-support"],
+        # No ListEvents permit exists, so this one probe shows reads are off for
+        # every caller; it is not evidence of per-tenant read scoping (ADR-0005).
+        deny("Short-term event reads have no agent permit", clients["a-support"],
              "ListEvents", session_params("a-support"))
-        deny("A cannot read B's short-term session", clients["a-shopping"], "ListEvents",
-             session_params("b-shopping"))
-        deny("A shopping cannot read A support session", clients["a-shopping"], "ListEvents",
-             session_params("a-support"))
-        changed_write = {
-            **session_params("b-shopping"), "eventTimestamp": datetime.now(timezone.utc),
-            "payload": [{"conversational": {"role": "USER", "content": {"text": "Synthetic rejected write"}}}],
-        }
-        deny("A cannot write events under B actor", clients["a-shopping"], "CreateEvent", changed_write)
-        changed_write.update(session_params("a-shopping"))
-        changed_write["extractionConfig"] = {"namespaceVariables": {"tenant": "tenant-b"}}
+
+        def rejected_write(key, **extra):
+            return {**session_params(key), "eventTimestamp": datetime.now(timezone.utc),
+                    "payload": [{"conversational": {"role": "USER", "content": {
+                        "text": "Synthetic rejected write"}}}], **extra}
+
+        deny("A cannot write events under B actor", clients["a-shopping"], "CreateEvent",
+             rejected_write("b-shopping"))
+        deny("A shopping cannot write into A support session", clients["a-shopping"],
+             "CreateEvent", rejected_write("a-support"))
         deny("A cannot override extraction namespace variables", clients["a-shopping"],
-             "CreateEvent", changed_write)
+             "CreateEvent", rejected_write(
+                 "a-shopping", extractionConfig={"namespaceVariables": {"tenant": "tenant-b"}}))
         for path in [config["identities"]["b-shopping"]["namespacePath"], "/tenants/",
                      f'/tenants/{config["identities"]["a-shopping"]["actorId"]}/']:
             deny("A cannot retrieve changed namespace " + path, clients["a-shopping"],
                  "RetrieveMemoryRecords", {"memoryId": config["memoryId"],
                      "namespacePath": path, "searchCriteria": {"searchQuery": "warehouse codename"}})
+            deny("A cannot list records in changed namespace " + path, clients["a-shopping"],
+                 "ListMemoryRecords", {"memoryId": config["memoryId"], "namespacePath": path})
         deny("A cannot enumerate tenant actors", clients["a-shopping"], "ListActors",
              {"memoryId": config["memoryId"]})
+        deny("Direct ingestion has no agent permit", clients["a-shopping"], "IngestData",
+             ingest_params("a-shopping"))
 
         # Observe extraction rather than turning eventual consistency into an authorization claim.
         deadline = time.monotonic() + extraction_timeout
@@ -275,45 +335,51 @@ def run(config, extraction_timeout, report):
         deny("Record-ID lookup has no tenant permit", clients["a-shopping"], "GetMemoryRecord",
              {"memoryId": config["memoryId"], "memoryRecordId": record_id})
 
+        sts = boto3.client("sts", region_name=config["region"])
+        source = policy_source_arn(sts, iam)
         direct = boto3.client("bedrock-agentcore", region_name=config["region"])
-        try:
-            direct.retrieve_memory_records(
-                memoryId=config["memoryId"],
-                namespacePath=config["identities"]["a-shopping"]["namespacePath"],
-                searchCriteria={"searchQuery": "warehouse codename"})
-        except ClientError as error:
-            if error.response["Error"]["Code"] not in {"AccessDeniedException", "AccessDenied"}:
-                raise
-            passed("Direct IAM call is denied outside Gateway")
-        else:
-            raise AssertionError("Direct Memory call bypassed Gateway")
-        try:
-            boto3.client("sts", region_name=config["region"]).assume_role(
-                RoleArn=config["gatewayRoleArn"], RoleSessionName="outside-gateway-probe")
-        except ClientError as error:
-            if error.response["Error"]["Code"] not in {"AccessDeniedException", "AccessDenied"}:
-                raise
-            passed("Direct caller cannot assume the Gateway execution role")
-        else:
-            raise AssertionError("Direct caller obtained Gateway execution-role credentials")
-        # Optional expired token check is explicitly recorded when the fixture is absent.
+
+        def outside_gateway(name, action, resource, call):
+            if not identity_allows(iam, source, action, resource):
+                not_run(name, f"the caller's identity policies do not allow {action}")
+                return
+            try:
+                call()
+            except ClientError as error:
+                if error.response["Error"]["Code"] not in {"AccessDeniedException", "AccessDenied"}:
+                    raise
+                passed(name)
+            else:
+                raise AssertionError(f"{name}: request was allowed")
+
+        outside_gateway("Direct retrieval is denied outside Gateway",
+                        "bedrock-agentcore:RetrieveMemoryRecords", config["memoryArn"],
+                        lambda: direct.retrieve_memory_records(
+                            memoryId=config["memoryId"],
+                            namespacePath=config["identities"]["a-shopping"]["namespacePath"],
+                            searchCriteria={"searchQuery": "warehouse codename"}))
+        outside_gateway("Direct ingestion is denied outside Gateway",
+                        "bedrock-agentcore:IngestData", config["memoryArn"],
+                        lambda: direct.ingest_data(**ingest_params("a-shopping")))
+        outside_gateway("Direct caller cannot assume the Gateway execution role",
+                        "sts:AssumeRole", config["gatewayRoleArn"],
+                        lambda: sts.assume_role(RoleArn=config["gatewayRoleArn"],
+                                                RoleSessionName="outside-gateway-probe"))
+        # An expired token must fail authentication (401) on a request its scope
+        # would otherwise permit; a 403 would mean the token reached Policy.
         expired = os.environ.get("EXPIRED_TEST_TOKEN")
         if expired:
             client = GatewayMemory(config["gatewayUrl"], config["targetName"], expired)
             try:
-                client.call("ListEvents", session_params("a-shopping"))
-            except GatewayDenied:
-                passed("Expired token denied")
-            except httpx.HTTPStatusError as error:
-                if error.response.status_code != 401:
-                    raise
-                passed("Expired token denied")
-            else:
-                raise AssertionError("Expired token accepted")
+                expect_unauthenticated(client, "RetrieveMemoryRecords", {
+                    "memoryId": config["memoryId"],
+                    "namespacePath": config["identities"]["a-shopping"]["namespacePath"],
+                    "searchCriteria": {"searchQuery": "warehouse codename"}})
+                passed("Expired token fails authentication")
             finally:
                 client.close()
         else:
-            results.append({"case": "Expired-token fixture", "result": "NOT_RUN"})
+            not_run("Expired token fails authentication", "EXPIRED_TEST_TOKEN not supplied")
         complete = True
         return results
     except Exception as error:
@@ -342,12 +408,14 @@ def main():
         print("DRY RUN: three identities; scoped event writes, Cedar denial probes, shared recall, and direct-bypass probe.")
         print("No tokens read. No AWS calls made. Pass --execute only for a dedicated test Memory.")
         return
-    if not 30 <= args.extraction_timeout <= 3600:
-        parser.error("--extraction-timeout must be 30–3600 seconds")
+    # Access tokens last 60 minutes and are not refreshed; the setup writes can
+    # retry for up to 15 minutes, so extraction gets at most 30.
+    if not 30 <= args.extraction_timeout <= 1800:
+        parser.error("--extraction-timeout must be 30–1800 seconds")
     try:
         results = run(config, args.extraction_timeout, args.report)
         if any(case["result"] == "FAILED" for case in results):
-            raise AssertionError("Cleanup failed")
+            raise AssertionError("Live matrix has failed cases")
     except Exception as error:
         # Status only. Exceptions can carry response payloads or deployment details.
         print(f"LIVE VALIDATION FAILED ({type(error).__name__}); inspect the test configuration and AWS logs.")
@@ -355,7 +423,8 @@ def main():
             args.report.write_text(json.dumps({"status": "FAILED", "results": [],
                 "errorType": type(error).__name__, "note": "Preflight failed; no complete live matrix."}, indent=2))
         raise SystemExit(1) from None
-    print("LIVE VALIDATION PASSED; inspect report for NOT_RUN cases and remove the test Memory.")
+    skipped = sum(case["result"] == "NOT_RUN" for case in results)
+    print(f"LIVE VALIDATION PASSED with {skipped} NOT_RUN cases; remove the test Memory.")
 
 
 if __name__ == "__main__":

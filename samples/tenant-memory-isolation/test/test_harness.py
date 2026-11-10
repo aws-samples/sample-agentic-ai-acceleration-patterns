@@ -7,7 +7,12 @@ from unittest.mock import Mock, patch
 from pathlib import Path
 
 from src.render_config import render
-from src.validate_live import validate_config, assert_fence, assert_execution_role, create_probe_event, call_when_ready
+import httpx
+from botocore.exceptions import ClientError
+
+from src.validate_live import (
+    validate_config, assert_fence, assert_execution_role, create_probe_event, call_when_ready,
+    expect_unauthenticated, identity_allows, policy_source_arn)
 from src.gateway_memory import GatewayDenied
 
 
@@ -101,6 +106,47 @@ class HarnessTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             call_when_ready(client, "ListEvents", {})
         client.call.assert_not_called()
+
+    def test_expired_token_must_fail_authentication_not_policy(self):
+        request = httpx.Request("POST", "https://example.com")
+        unauthenticated = httpx.HTTPStatusError(
+            "fixture", request=request, response=httpx.Response(401, request=request))
+        client = Mock()
+        client.call.side_effect = unauthenticated
+        expect_unauthenticated(client, "RetrieveMemoryRecords", {})
+        for outcome in [GatewayDenied("fixture"), {"memoryRecordSummaries": []}]:
+            client.call.side_effect = [outcome]
+            with self.subTest(outcome=type(outcome).__name__), self.assertRaises(AssertionError):
+                expect_unauthenticated(client, "RetrieveMemoryRecords", {})
+
+    def test_direct_probe_source_is_the_callers_role_or_user(self):
+        iam = Mock()
+        iam.get_role.return_value = {"Role": {"Arn": "arn:aws:iam::000000000000:role/path/Operator"}}
+        for arn, expected in [
+            ("arn:aws:sts::000000000000:assumed-role/Operator/session",
+             "arn:aws:iam::000000000000:role/path/Operator"),
+            ("arn:aws:iam::000000000000:user/operator", "arn:aws:iam::000000000000:user/operator"),
+            ("arn:aws:iam::000000000000:root", None),
+        ]:
+            sts = Mock()
+            sts.get_caller_identity.return_value = {"Arn": arn}
+            with self.subTest(arn=arn):
+                self.assertEqual(policy_source_arn(sts, iam), expected)
+
+    def test_direct_probe_runs_only_when_the_identity_would_allow_it(self):
+        iam = Mock()
+        resource = "arn:aws:bedrock-agentcore:us-west-2:000000000000:memory/ExampleMemory-1234567890"
+        iam.simulate_principal_policy.return_value = {"EvaluationResults": [{"EvalDecision": "allowed"}]}
+        self.assertTrue(identity_allows(iam, "arn:aws:iam::000000000000:role/Operator",
+                                        "bedrock-agentcore:IngestData", resource))
+        iam.simulate_principal_policy.return_value = {"EvaluationResults": [{"EvalDecision": "implicitDeny"}]}
+        self.assertFalse(identity_allows(iam, "arn:aws:iam::000000000000:role/Operator",
+                                         "bedrock-agentcore:IngestData", resource))
+        iam.simulate_principal_policy.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "fixture"}}, "SimulatePrincipalPolicy")
+        self.assertFalse(identity_allows(iam, "arn:aws:iam::000000000000:role/Operator",
+                                         "bedrock-agentcore:IngestData", resource))
+        self.assertFalse(identity_allows(iam, None, "bedrock-agentcore:IngestData", resource))
 
 
 if __name__ == "__main__":

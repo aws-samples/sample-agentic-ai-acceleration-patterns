@@ -5,7 +5,9 @@ import contextlib
 import base64
 import io
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from botocore.exceptions import ClientError
@@ -70,24 +72,45 @@ class LiveEnvironmentTest(unittest.TestCase):
         session.assert_not_called()
         self.assertIn("No AWS calls made", output.getvalue())
 
-    def test_reused_empty_role_is_recorded_for_retention(self):
+    def test_existing_role_is_never_adopted(self):
         env = object.__new__(LiveEnvironment)
-        env.state = {}
-        env.save = lambda **updates: env.state.update(updates)
         exists = ClientError(
-            {"Error": {"Code": "EntityAlreadyExists", "Message": "fixture"}},
-            "CreateRole")
-        env.iam = SimpleNamespace(
-            create_role=Mock(side_effect=exists),
-            list_role_policies=Mock(return_value={"PolicyNames": []}),
-            list_attached_role_policies=Mock(return_value={"AttachedPolicies": []}),
-            update_assume_role_policy=Mock(),
-            get_role=Mock(return_value={"Role": {"RoleName": "fixture-role"}}),
-        )
-        role = env.create_or_reuse_role(
-            "fixture-role", {"Version": "2012-10-17", "Statement": []})
-        self.assertEqual(role["RoleName"], "fixture-role")
-        self.assertEqual(env.state["retainedRoles"], ["fixture-role"])
+            {"Error": {"Code": "EntityAlreadyExists", "Message": "fixture"}}, "CreateRole")
+        env.iam = SimpleNamespace(create_role=Mock(side_effect=exists))
+        with self.assertRaises(ClientError):
+            env.create_role("fixture-role", {"Version": "2012-10-17", "Statement": []})
+
+    def test_gateway_is_created_without_verbose_errors(self):
+        source = Path(__file__).parent.parent.joinpath("src", "live_environment.py").read_text()
+        self.assertNotIn("exceptionLevel", source)
+
+    def test_cleanup_deletes_both_roles(self):
+        env = object.__new__(LiveEnvironment)
+        env.state = {"gatewayRole": "fixture-gateway", "identityRole": "fixture-issuer", "policies": []}
+        env.iam = SimpleNamespace(delete_role_policy=Mock(), delete_role=Mock())
+        env.cognito = SimpleNamespace(delete_user_pool=Mock())
+        env.functions = SimpleNamespace(delete_function=Mock())
+        env.logs = SimpleNamespace(delete_log_group=Mock())
+        env.save = Mock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            env.cleanup()
+        self.assertEqual({call.kwargs["RoleName"] for call in env.iam.delete_role.call_args_list},
+                         {"fixture-gateway", "fixture-issuer"})
+        self.assertTrue(env.save.call_args.kwargs["cleanedUp"])
+
+    def test_cleanup_failure_does_not_replace_the_original_error(self):
+        env = Mock()
+        env.state = {}
+        env.provision.side_effect = ValueError("fixture")
+        env.cleanup.side_effect = RuntimeError("fixture cleanup")
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("sys.argv", ["live_environment", "--region", "ap-southeast-2", "--execute",
+                                   "--report", f"{directory}/report.json"]), \
+                patch("src.live_environment.LiveEnvironment", return_value=env), \
+                patch("src.live_environment.Path", side_effect=lambda name: Path(directory) / name), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(ValueError):
+            main()
+        env.cleanup.assert_called_once()
 
     def test_cleanup_continues_after_a_resource_wait_fails(self):
         env = object.__new__(LiveEnvironment)
