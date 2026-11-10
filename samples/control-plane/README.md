@@ -1,6 +1,6 @@
-# The Simple Cell-Based Control Plane
+# The Cell-Based Control Plane
 
-A minimal multi-tenant control plane for **cell-based deployments across
+A multi-tenant control plane for **cell-based deployments across
 accounts**. A cell is a deployment unit: one **shared application deployment**
 plus up to `maxTenants` tenants, each with its **own per-tenant deployment**
 inside the cell. Set `maxTenants: 1` and the model degenerates to a silo —

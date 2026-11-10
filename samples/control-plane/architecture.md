@@ -21,10 +21,10 @@
 
 ## 1. Purpose
 
-**Goal: a simple cell-based control plane for a single deployment model,
+**Goal: a cell-based control plane for a single deployment model,
 across accounts.**
 
-A minimal multi-tenant control plane sample for **cell-based
+A multi-tenant control plane sample for **cell-based
 deployments**.
 
 A *cell* is a deployment unit containing one **shared
@@ -289,7 +289,7 @@ shapes, GSI-2 two:
 
 Account items carry no GSI-2 attributes and never appear in it. ULID sort
 keys give the cell and tenant listings creation order; accounts list by
-account id. The static partitions are a deliberate simplicity trade-off, fine
+account id. The static partitions are a deliberate trade-off, fine
 at sample fleet sizes.
 
 Both GSIs project **all attributes** (`ProjectionType: ALL`): the placement
@@ -497,7 +497,7 @@ counters, two code paths each, all four transactional.
   which is out of scope.
 - Oldest-first candidate order funnels concurrent claims at the same cell,
   so racing onboards burn one cancelled transaction per contended candidate
-  before spreading. Accepted at sample fleet sizes — the same simplicity
+  before spreading. Accepted at sample fleet sizes — the same
   trade-off as the static GSI partitions; a production fleet would randomise
   candidate order (or use power-of-two-choices) to spread claim contention.
 - The candidate budget (at most 5 claim attempts) keeps `CreateTenant`

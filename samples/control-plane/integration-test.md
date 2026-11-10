@@ -1,4 +1,4 @@
-# The Simple Cell-Based Control Plane: deployment integration test
+# The Cell-Based Control Plane: deployment integration test
 
 This file describes the sample's deployment integration test, as the
 [sample standard §5.3](../../docs/sample-standard.md#53-integration-test-document-integration-testmd)
