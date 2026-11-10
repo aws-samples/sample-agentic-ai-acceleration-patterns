@@ -7,7 +7,7 @@ flowchart TB
     subgraph AWS["Vendor AWS account and Region"]
         GW["AgentCore Gateway<br/>CUSTOM_JWT"]
         POL["AgentCore Policy<br/>Cedar · ENFORCE"]
-        ROLE["Gateway execution role<br/>Six Memory operations"]
+        ROLE["Gateway execution role<br/>Three Memory operations"]
         MEM["AgentCore Memory<br/>Native connector target"]
         NS["Tenant A shared facts<br/>Tenant B shared facts<br/>Separate actor/session histories"]
         GW -. "Evaluate each request" .-> POL

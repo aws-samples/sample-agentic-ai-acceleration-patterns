@@ -10,8 +10,8 @@
 
 The requested output is a blog draft and code to validate its isolation design.
 The initial iteration preceded selection of a test environment. ADR-0003 adds a
-disposable SDK environment and synthetic issuer; `VALIDATION.md` records its
-actual cloud results.
+disposable SDK environment and synthetic issuer; the `architecture.md` status
+block records its cloud results.
 
 ## Options considered
 

@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Tenant memory isolation through Gateway
 
-A reference solution for SaaS builders designing shared agent memory with
+A reference solution for vendors designing shared agent memory with
 Amazon Bedrock AgentCore Memory and AgentCore Gateway. The sample combines a
 tenant memory model, signed identity claims, Cedar policies, and IAM controls
 to define which conversations and facts each agent can access.
@@ -12,7 +12,7 @@ keeping each agent's conversation history separate. The native
 `agentcore-memory` Gateway connector provides a central entry point for
 memory requests.
 
-## Customer use cases
+## Use cases
 
 | Use case | Facts shared within a tenant | Conversations kept separate |
 | --- | --- | --- |
@@ -63,35 +63,8 @@ The reference architecture combines four controls:
 
 The execution role's trust policy limits assumption to the AgentCore service,
 the vendor's account, and the relevant Gateway and Policy engine source ARNs.
-Tenant scope comes from the signed JWT claims evaluated by Cedar.
-
-## Choose where to enforce tenant access
-
-The reference solution uses JWT authentication and Cedar with the native Memory
-connector. Token vending offers another identity path: a trusted service
-exchanges verified application identity for scoped temporary credentials.
-Cedar authorizes requests; it does not issue credentials.
-
-| Path | Best fit | Identity that reaches Memory |
-| --- | --- | --- |
-| **JWT and Cedar, implemented here** | OAuth applications using the native Memory connector. | The dedicated Gateway execution role; Cedar checks tenant, session, and namespace claims first. |
-| **Upstream token vending and caller IAM credentials** | IAM-federated workloads or downstream IAM attribution. | The caller's scoped IAM identity, obtained before signing an `AWS_IAM` Gateway request with SigV4 and forwarded through `CALLER_IAM_CREDENTIALS`. |
-| **Interceptor vending and a custom target** | Custom tools needing credential exchange or current entitlement lookups. | The vended IAM identity, explicitly consumed by a custom Memory SDK client. |
-
-For native Memory, `CUSTOM_JWT` requires `GATEWAY_IAM_ROLE`. Credentials
-issued by an interceptor do not automatically become the connector's signing
-credentials. OAuth principal tags in Cedar also do not become IAM session tags
-on that role.
-
-Each path needs the same deliberate sharing model: a common recall entitlement
-and separate write-session entitlements. The IAM and custom-target paths are
-design alternatives to the implemented solution.
-
-[ADR-0001](adr/0001-use-issuer-scoped-claims.md) explains the choices, an optional
-interceptor-and-Cedar hybrid, and credential lifecycle responsibilities. See
-the [connector compatibility matrix](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-gateway-connector.html)
-and the [AWS Policy and interceptor comparison](https://aws.amazon.com/blogs/machine-learning/secure-ai-agents-with-policy-and-lambda-interceptors-in-amazon-bedrock-agentcore-gateway/)
-for service details.
+Tenant scope comes from the signed JWT claims evaluated by Cedar
+([ADR-0001](adr/0001-enforce-tenant-memory-scope-in-agentcore-gateway.md)).
 
 ## Tenant and agent memory model
 
@@ -104,7 +77,9 @@ The example uses two agents in Tenant A and one agent in Tenant B:
 | Tenant B shopping | `tenant-b` | `shopping-001` | `/tenants/tenant-b/shared/` |
 
 Have your identity provider derive these claims from verified tenant membership
-and the application's conversation assignment. A permitted session is the exact
+and the application's conversation assignment, building all three from one
+tenant id so the namespace is always the actor's own shared path. Each id is
+a single path segment; the policies deny claims that are not. A permitted session is the exact
 `sessionId` that the issuer authorizes for that token. The event policies match
 both `actorId` and `sessionId`; reusing a session name in another tenant does
 not grant access to that tenant's events.
@@ -132,15 +107,19 @@ under the configured strategy.
 
 The execution role grants the three listed data operations on the configured
 Memory ARN, plus the metadata and Policy permissions needed by the connector.
-The Memory resource policy restricts data access to the dedicated Gateway
-execution role through `aws:PrincipalArn`. Record-ID operations, tenant
-enumeration, extraction administration, and batch writes are outside the
-agent-facing policy set.
+The Memory resource policy denies every Memory data operation, including
+direct ingestion, to every principal except the dedicated Gateway execution
+role through `aws:PrincipalArn` ([ADR-0004](adr/0004-fence-memory-by-the-gateway-role-principal-arn.md)).
+The operation list comes from the service model, and a unit test fails when
+the model gains one ([ADR-0007](adr/0007-derive-the-fenced-operations-from-the-service-model.md)).
+Record-ID operations, tenant enumeration, extraction administration, direct
+ingestion, and batch writes are outside the agent-facing policy set.
 
 Keep the context needed to continue an active conversation in the application's
 session layer. The reference solution exposes scoped event writes and shared
 fact recall. Stored event reads and deletion remain outside its agent-facing
-policy set. If your application requires stored conversation reads, introduce a
+policy set ([ADR-0005](adr/0005-keep-stored-event-reads-out-of-the-agent-api.md)).
+If your application requires stored conversation reads, introduce a
 trusted service that checks the caller's tenant and session entitlement.
 
 ## Solution components
@@ -164,7 +143,17 @@ trusted service that checks the caller's tenant and session entitlement.
 3. **Align policies with your application.** Use the supplied Cedar rules and
    resource policies as the starting point for your required Memory operations.
 4. **Design the memory lifecycle.** Choose event retention, fact provenance,
-   deletion, and cache boundaries for your customers' requirements.
+   deletion, and cache boundaries for your tenants' requirements.
+
+## Tests
+
+Run from this directory. Neither suite calls AWS.
+
+```bash
+npm ci && npm test                      # Cedar policies in the Cedar evaluator
+python -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python -m unittest            # serialization, configuration, fence, harness
+```
 
 ## AWS documentation
 

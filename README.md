@@ -147,7 +147,7 @@ accepts any OIDC issuer that meets the token contract. See
 
 ## Tenant Memory Isolation through Gateway
 
-A reference solution for SaaS builders designing memory access for multiple
+A reference solution for vendors designing memory access for multiple
 agents and tenants. It uses a shared AgentCore Memory resource with tenant
 namespaces for selected long-term facts and separate sessions for agent
 conversation histories.
