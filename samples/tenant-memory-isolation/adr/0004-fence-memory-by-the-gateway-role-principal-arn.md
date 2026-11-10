@@ -48,7 +48,11 @@ role for `GATEWAY_IAM_ROLE`, as decided here, and also states that the
 Gateway stamps `aws:SourceArn` with its ARN in both outbound modes
 ([connector guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-gateway-connector.html#memory-gateway-connector-credential-modes),
 [restrict direct access](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-gateway-restrict-access.html)).
-That differs from the 2026-10-26 observation, so the next live run re-tests
-it. If `aws:SourceArn` is present, the fence adds it as a second condition;
-the Deny form stays, because an Allow-only resource policy does not stop a
-principal in the same account whose identity policy already allows the call.
+That differs from the 2026-10-26 observation, so the integration test
+re-tests it (step 9): it adds a Deny on `RetrieveMemoryRecords` unless
+`aws:SourceArn` equals the Gateway's ARN. On 2026-11-10 in `us-east-1` that
+Deny refused every Gateway-forwarded retrieval (four of four 403), so the
+key is absent from, or differs on, the connector's calls, as on 2026-10-26.
+The fence keeps `aws:PrincipalArn` alone. The Deny form stays in any case,
+because an Allow-only resource policy does not stop a principal in the same
+account whose identity policy already allows the call.

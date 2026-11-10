@@ -95,10 +95,41 @@ interface StepResult {
 
 const results: StepResult[] = [];
 const findings: Record<string, string> = {};
+const evidence: Record<string, unknown> = {};
+
+/** A response with token-like strings, account ids, and request ids removed. */
+function shapeOf(response: { status: number; body: unknown; headers: Record<string, string> }): Record<string, unknown> {
+  const redact = (text: string) =>
+    text
+      .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '<token>')
+      .replace(/\b\d{12}\b/g, '<account>')
+      .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>');
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(response.headers)) {
+    if (!['date', 'content-length', 'connection', 'x-amzn-requestid', 'x-amzn-trace-id', 'x-amz-apigw-id'].includes(name)) {
+      headers[name] = redact(value);
+    }
+  }
+  return { status: response.status, headers, body: redact(JSON.stringify(response.body ?? null)).slice(0, 600) };
+}
+
+/** What tells one refusal from another: status, the auth challenge header, and the error body's shape. */
+function signatureOf(response: { status: number; body: unknown; headers: Record<string, string> }): string {
+  const shape = shapeOf(response) as { headers: Record<string, string>; body: string };
+  return `${response.status}|${shape.headers['www-authenticate'] ?? ''}|${shape.headers['x-amzn-errortype'] ?? ''}|${shape.body}`;
+}
 const sessions = new Map<User, Session>();
 const cleanups: Array<{ name: string; run: () => Promise<void> }> = [];
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The error type and first words of a Gateway error body, for diagnosis; never a token or record. */
+function errorType(body: unknown): string {
+  const b = (body ?? {}) as Record<string, unknown>;
+  const type = String(b.__type ?? b.code ?? b.type ?? 'unknown').split('#').pop();
+  const message = typeof b.message === 'string' ? b.message : typeof b.Message === 'string' ? b.Message : '';
+  return message ? `${type} (${message.slice(0, 120)})` : String(type);
+}
 
 function check(condition: boolean, message: string): void {
   if (!condition) {
@@ -210,21 +241,28 @@ async function main(): Promise<void> {
   // ---------------------------------------------------------------------
   const markers = { 'tenant-a': `Amber${RUN}`, 'tenant-ab': `Blue${RUN}` };
   await step('3. Scoped writes: each user writes its own tenant and session', async () => {
-    for (const user of ['a-shopping', 'b-shopping'] as const) {
-      const marker = markers[tenantOf(user)];
-      let status = 0;
-      for (let attempt = 0; attempt < 12; attempt++) {
-        ({ status } = await gateway.createEvent(await token(user), tenantOf(user), sub(user), `Our organisation's warehouse codename is ${marker}. Remember this shared operational fact.`, { clientToken: `${user}-${RUN}-fact` }));
-        if (status < 300) {
-          break;
+    // Positive setup writes retry with a stable clientToken while a newly deployed Gateway,
+    // policy, and role settle; every refusal seen on the way is recorded, never hidden.
+    const settling: string[] = [];
+    const write = async (user: User, text: string) => {
+      for (let attempt = 0; attempt < 18; attempt++) {
+        const { status, body } = await gateway.createEvent(await token(user), tenantOf(user), sub(user), text, { clientToken: `${user}-${RUN}-setup` });
+        if (status >= 200 && status < 300) {
+          return;
         }
-        await sleep(10_000); // newly ACTIVE policies and IAM grants settle within seconds
+        settling.push(`${user}:${status}:${errorType(body)}`);
+        await sleep(10_000);
       }
-      check(status >= 200 && status < 300, `${user} write returned ${status}`);
+      throw new Error(`${user} write never accepted: ${settling.join(', ')}`);
+    };
+    for (const user of ['a-shopping', 'b-shopping'] as const) {
+      await write(user, `Our organisation's warehouse codename is ${markers[tenantOf(user)]}. Remember this shared operational fact.`);
     }
-    const support = await gateway.createEvent(await token('a-support'), 'tenant-a', sub('a-support'), 'Synthetic support conversation.');
-    check(support.status < 300, `a-support write returned ${support.status}`);
-    return 'three writes allowed';
+    await write('a-support', 'Synthetic support conversation.');
+    if (settling.length > 0) {
+      findings['Refusals while the deployment settled'] = settling.join(', ');
+    }
+    return settling.length === 0 ? 'three writes allowed' : `three writes allowed after ${settling.length} settling refusals`;
   });
 
   // ---------------------------------------------------------------------
@@ -448,7 +486,21 @@ async function main(): Promise<void> {
     cleanups.pop();
     await iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: 'IntegRetestListEvents' }));
     cleanups.pop();
-    return findings['ListEvents path parameters in Policy context'];
+    // Back to the deployed policies: own recall must be allowed again before the next step.
+    const restored = Date.now();
+    let last = 0;
+    for (;;) {
+      const response = await gateway.retrieve(await token('a-shopping'), { namespace: 'tenant-a' });
+      last = response.status;
+      if (last === 200) {
+        break;
+      }
+      evidence['Refusal while the policy engine settled'] = shapeOf(response);
+      check(Date.now() - restored < 10 * 60_000, `own recall still ${last} 10 minutes after the re-test policy was removed`);
+      await sleep(10_000);
+    }
+    findings['Own recall after removing a policy'] = `allowed again after ${Math.round((Date.now() - restored) / 1000)} s`;
+    return `${findings['ListEvents path parameters in Policy context']}; ${findings['Own recall after removing a policy']}`;
   });
 
   // ---------------------------------------------------------------------
@@ -460,13 +512,38 @@ async function main(): Promise<void> {
   });
 
   // ---------------------------------------------------------------------
-  await step('12. An expired token fails authentication (401) on a request its scope permits', async () => {
+  await step('12. An expired token is refused for expiry, not by Policy', async () => {
+    // Three refusals side by side: a Cedar denial (valid token, another tenant's namespace),
+    // no token, and an expired token on a request its scope permits. A fresh token of the same
+    // user on that same request is the control that it is allowed.
+    const fresh = await gateway.retrieve(await token('a-shopping'), { namespace: 'tenant-a' });
+    check(fresh.status === 200, `the control request with a fresh token returned ${fresh.status}`);
+    const cedar = await gateway.retrieve(await token('a-shopping'), { namespace: 'tenant-ab' });
+    check(cedar.status === 403, `the Cedar denial returned ${cedar.status}`);
+    const none = await gateway.retrieve('', { namespace: 'tenant-a' });
     const wait = firstAccess.exp * 1000 + 10_000 - Date.now();
     if (wait > 0) {
       await sleep(wait);
     }
-    const { status } = await gateway.retrieve(firstAccess.token, { namespace: 'tenant-a' });
-    check(status === 401, `expired token returned ${status}`);
+    const expired = await gateway.retrieve(firstAccess.token, { namespace: 'tenant-a' });
+    evidence['Cedar denial (valid token)'] = shapeOf(cedar);
+    evidence['No token'] = shapeOf(none);
+    evidence['Expired token'] = shapeOf(expired);
+    for (const [name, value] of Object.entries(evidence)) {
+      console.log(`  ${name}: ${JSON.stringify(value)}`);
+    }
+    check(expired.status === 401 || expired.status === 403, `expired token returned ${expired.status}`);
+    check(none.status === 401 || none.status === 403, `a request without a token returned ${none.status}`);
+    // The proof: the expired refusal is the Gateway authoriser's (a Bearer invalid_token
+    // challenge, RFC 6750), which a Cedar denial never carries. The Gateway answers an expired
+    // token with 403 and a missing one with 401 (us-east-1, 2026-11-10).
+    const challenge = (r: { headers: Record<string, string> }) => r.headers['www-authenticate'] ?? '';
+    check(challenge(expired).includes('error="invalid_token"'), 'the expired-token refusal carries no Bearer invalid_token challenge');
+    check(challenge(none).includes('error="invalid_token"'), 'the missing-token refusal carries no Bearer invalid_token challenge');
+    check(challenge(cedar) === '', 'a Cedar denial carried an authentication challenge');
+    check(signatureOf(expired) !== signatureOf(cedar), 'an expired token is refused exactly like a Cedar denial');
+    findings['Refused tokens at the Gateway'] = `expired HTTP ${expired.status} [${signatureOf(expired)}], none HTTP ${none.status} [${signatureOf(none)}], Cedar denial HTTP ${cedar.status} [${signatureOf(cedar)}]; fresh token 200`;
+    return `expired ${expired.status} and none ${none.status} carry the invalid_token challenge; the Cedar denial does not; fresh token 200`;
   });
 
   // ---------------------------------------------------------------------
@@ -526,7 +603,7 @@ main()
   .finally(async () => {
     await cleanup();
     const failed = results.some((r) => r.result === 'FAIL') || results.length < 13;
-    const report = { status: failed ? 'FAILED' : 'PASSED', date: new Date().toISOString(), region, run: RUN, id: randomUUID(), steps: results, findings };
+    const report = { status: failed ? 'FAILED' : 'PASSED', date: new Date().toISOString(), region, run: RUN, id: randomUUID(), steps: results, findings, evidence };
     writeFileSync('integ-report.json', `${JSON.stringify(report, null, 2)}\n`);
     console.log(`\n${failed ? 'FAILED' : 'PASSED'}: ${results.filter((r) => r.result === 'PASS').length} steps passed; findings:`);
     for (const [key, value] of Object.entries(findings)) {

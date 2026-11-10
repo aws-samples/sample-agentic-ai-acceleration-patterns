@@ -48,6 +48,22 @@ fail() { echo "integ: $1" >&2; exit 1; }
 IDS="${TMP}/ids.json"
 echo '{}' >"$IDS"
 
+still_exists() { # arn -> 0 if the resource still exists (or its service is not known here)
+  local arn="$1" id="${1##*/}"
+  case "$arn" in
+    arn:aws:cognito-idp:*:userpool/*) aws cognito-idp describe-user-pool --user-pool-id "$id" >/dev/null 2>&1 ;;
+    arn:aws:lambda:*) aws lambda get-function --function-name "$arn" >/dev/null 2>&1 ;;
+    arn:aws:iam::*:role/*) aws iam get-role --role-name "$id" >/dev/null 2>&1 ;;
+    arn:aws:ssm:*:parameter/*) aws ssm get-parameter --name "/${arn#*:parameter/}" >/dev/null 2>&1 ;;
+    arn:aws:logs:*) local group="${arn#*:log-group:}"; group="${group%:\*}"
+      aws logs describe-log-groups --log-group-name-prefix "$group" --query 'length(logGroups)' --output text 2>/dev/null | grep -qv '^0$' ;;
+    arn:aws:bedrock-agentcore:*:memory/*) aws bedrock-agentcore-control get-memory --memory-id "$id" >/dev/null 2>&1 ;;
+    arn:aws:bedrock-agentcore:*:gateway/*) aws bedrock-agentcore-control get-gateway --gateway-identifier "$id" >/dev/null 2>&1 ;;
+    arn:aws:bedrock-agentcore:*:policy-engine/*) aws bedrock-agentcore-control get-policy-engine --policy-engine-id "$id" >/dev/null 2>&1 ;;
+    *) return 0 ;;
+  esac
+}
+
 prove_teardown() {
   local left=0 v
   check_gone() { # name, command...
@@ -74,9 +90,14 @@ prove_teardown() {
   local rules
   rules="$(aws cloudwatch describe-insight-rules --query "InsightRules[?contains(Name, '-memory-')].Name" --output text)"
   if [[ -n "$rules" && "$rules" != None ]]; then echo "  LEFT: Contributor Insights rules ${rules}" >&2; left=1; else echo "  gone: Contributor Insights rules"; fi
-  local tagged
-  tagged="$(aws resourcegroupstaggingapi get-resources --tag-filters "Key=aws:cloudformation:stack-name,Values=${STACK}" --query 'length(ResourceTagMappingList)' --output text)"
-  if [[ "$tagged" != 0 ]]; then echo "  LEFT: ${tagged} resources tagged with the stack" >&2; left=1; else echo "  gone: tagged resources"; fi
+  # The tagging index lags deletions, so each ARN it still lists is checked against its own
+  # service; only one that still exists counts as left.
+  local arn
+  for arn in $(aws resourcegroupstaggingapi get-resources --tag-filters "Key=aws:cloudformation:stack-name,Values=${STACK}" \
+      --query 'ResourceTagMappingList[].ResourceARN' --output text); do
+    if still_exists "$arn"; then echo "  LEFT: tagged ${arn##*:}" >&2; left=1; else echo "  gone: tagged ${arn##*:} (stale tag index entry)"; fi
+  done
+  echo "  checked: resources tagged with the stack"
   aws logs describe-resource-policies --query 'resourcePolicies[].policyName' --output json >"${TMP}/policies-after.json"
   if ! diff -q "${TMP}/policies-before.json" "${TMP}/policies-after.json" >/dev/null; then
     echo "  LEFT: CloudWatch Logs resource policies changed: $(jq -c --slurpfile b "${TMP}/policies-before.json" '. - $b[0]' "${TMP}/policies-after.json")" >&2; left=1

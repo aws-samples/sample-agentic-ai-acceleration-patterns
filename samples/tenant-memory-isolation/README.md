@@ -283,6 +283,12 @@ and the logs are fixed costs, split equally.
 
 The threats and their mitigations are in [threat-model.md](threat-model.md).
 
+Security and compliance are a shared responsibility between AWS and you
+([AWS Shared Responsibility Model](https://aws.amazon.com/compliance/shared-responsibility-model/)).
+This sample demonstrates a pattern with synthetic data; before using it with
+real tenants, review it against your own security, privacy, and compliance
+requirements and complete the production hardening checklist below.
+
 ## Production hardening checklist
 
 | Item | Mitigation |

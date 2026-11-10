@@ -12,6 +12,8 @@
 export interface GatewayResponse {
   readonly status: number;
   readonly body: unknown;
+  /** Response headers, lower-cased names. */
+  readonly headers: Record<string, string>;
 }
 
 export class MemoryGateway {
@@ -34,7 +36,8 @@ export class MemoryGateway {
     const response = await fetch(`${this.origin}/${this.targetName}/memories/${encodeURIComponent(memoryId)}${path}`, {
       method,
       redirect: 'manual',
-      headers: { 'authorization': `Bearer ${token}`, 'content-type': 'application/json' },
+      // An empty token sends no Authorization header (the unauthenticated probe).
+      headers: token === '' ? { 'content-type': 'application/json' } : { 'authorization': `Bearer ${token}`, 'content-type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await response.text();
@@ -44,7 +47,11 @@ export class MemoryGateway {
     } catch {
       parsed = undefined;
     }
-    return { status: response.status, body: parsed };
+    const headers: Record<string, string> = {};
+    response.headers.forEach((value, name) => {
+      headers[name] = value;
+    });
+    return { status: response.status, body: parsed, headers };
   }
 
   createEvent(token: string, actorId: string, sessionId: string, text: string, extra: object = {}): Promise<GatewayResponse> {
