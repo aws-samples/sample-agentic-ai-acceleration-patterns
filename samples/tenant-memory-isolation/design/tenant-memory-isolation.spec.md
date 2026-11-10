@@ -85,7 +85,8 @@ invalid, or expired token or a foreign client; 403 for a Policy denial;
 An issuer whose access tokens carry `tenant_id` (one tenant), `sub`,
 `client_id` in `allowedClients` (or `aud` in `allowedAudience`), and
 `token_use: access`, with the tenant set by the vendor and immutable by the
-user. Props:
+user. Tenant ids match `[A-Za-z0-9_-]{1,64}`; the policies refuse `/`, `:`,
+and `*` as a backstop for issuers that do not check. Props:
 
 | Prop | Default | Meaning |
 | --- | --- | --- |

@@ -354,11 +354,13 @@ async function main(): Promise<void> {
     const restore = async () => void (await control.send(new PutResourcePolicyCommand({ resourceArn: published.memoryArn, policy: original })));
     cleanups.push({ name: 'restore the fence', run: restore });
     await control.send(new PutResourcePolicyCommand({ resourceArn: published.memoryArn, policy: JSON.stringify(probe) }));
-    await sleep(30_000);
+    // Resource-policy changes propagate in seconds; sample well after that, over a minute,
+    // so a slow propagation cannot read as "present".
+    await sleep(60_000);
     const statuses: number[] = [];
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 4; i++) {
       statuses.push((await gateway.retrieve(await token('a-shopping'), { namespace: 'tenant-a' })).status);
-      await sleep(5_000);
+      await sleep(15_000);
     }
     await restore();
     cleanups.pop();
