@@ -51,6 +51,70 @@ does this tenant user hold, and whose permissions does each tool call use.
 Not a fit: one agent per tenant on dedicated infrastructure (silo), or a
 single-tenant agent. There the walls below separate nothing.
 
+## When scopes are enough, and when they stop
+
+OAuth scopes in the identity token (`scope: "crm/read crm/write"`) are the
+right default for one application with a few dozen permissions, and this
+sample keeps one scope that way, as a floor: every identity token must carry
+`app/use` (ADR-0005). Scopes alone are enough when all of these hold:
+
+- one application with under 50 permissions;
+- the same permission set for every tenant;
+- no tenant admin narrowing their own users;
+- no agent handing its credential on to another service;
+- a permission change may wait until the next sign-in.
+
+Scopes stop when the token has to carry a product catalogue per tenant and
+per user, and then be handed to an agent. The limits below are Amazon
+Cognito's, the identity provider in the demo; other providers have different
+numbers and the same shape.
+
+| Limit | Value | At 10,000 tenants and 1,000 tools |
+|---|---|---|
+| Scopes per app client | 50, not adjustable | one app's access token carries at most 50 custom scopes; 1,000 tools do not fit, and 1,000 tools x agents never will |
+| Scopes per resource server; resource servers per pool | 100; 100 (300 max) | at most 30,000 scope names exist in the pool, and they are global, not per tenant |
+| App clients per pool | 1,000 (10,000 max) | an app client per tenant, to give tenants different scope sets, runs out before the tenants do |
+| Custom attribute, if scopes are held in `custom:scopes` instead | 2,048 bytes | about 60 `<target>/<tool>` names per user |
+| Pre token generation Lambda, claims plus scopes per token | 5,000 | the ceiling of the fat-token workaround |
+| API Gateway, all request headers combined | 20,480 bytes | the bearer travels in a header, with everything else |
+| AgentCore Runtime custom header | 10,240 bytes | anything forwarded to the agent fits here |
+| Access token lifetime | 5 minutes to 1 day | a sold or removed tool reaches the user at the next token, not the next request |
+| Token exchange (RFC 8693) | not offered | nothing downstream can trade a fat token for a narrow one |
+
+Two costs have no quota number: a new tool means a write per tenant (or per
+user) at the identity provider before anyone can hold it, and the identity
+provider learns every product decision (plans, bundles, who bought what,
+admin cuts).
+
+Even with unlimited scopes the token would say the wrong thing. A scope
+describes what the user may do; the agent needs what this agent, for this
+tenant, for this user, may do right now. Those differ in three ways:
+
+- **The agent caps the user.** The billing agent must never call
+  `crm/update_case`, however many scopes the user holds. A prompt-injected
+  agent that inherits the user's full scope set calls any tool the user could.
+- **The tenant caps the user.** A tenant bought two CRM tools and its admin
+  has not shared them with every user. A user's scopes would have to be the
+  intersection of what the tenant bought and what the admin left, recomputed
+  at every change, per user.
+- **The token is handed on.** The agent presents its credential to a tools
+  gateway on the user's behalf. If that credential is the user's identity
+  token, a compromised agent holds a credential good for every agent, every
+  tool and every tenant the user belongs to, for up to a day.
+
+Use this sample when one of the five conditions above breaks. Each limit
+moves as follows:
+
+| Scopes | This sample |
+|---|---|
+| 50 scopes per app client | the grant lives in the transaction token's `scope`, bounded by the 10,240-byte Runtime header; whole targets compress to `<target>/*`, so about 600 explicit tool names or any number of whole targets fit, per agent (ADR-0045) |
+| scope names global to the pool | tenant and user entitlements are rows (`TENANT#<id>`, sparse `TENANT#<id>/USER#<sub>`); an agent's cap is its own registry entry |
+| an app client per tenant | one app client; the tenant comes from the token's `tenant_id`, or from `tenants` plus an `X-Tenant-Id` header the token must list (ADR-0038) |
+| a write per tenant for a new tool | a tenant subscribed to `crm/*` holds a new `crm` tool at once; a plan change is one write |
+| next token, up to a day | every write bumps the tenant's `version`, which is in the mint cache key: next request; a token in flight lives `transactionToken.ttl` (300 s by default) |
+| no token exchange | the ingress is the exchange: an OIDC issuer with JWKS and discovery, signing with a KMS key only it can use |
+| the identity provider holds the catalogue | the identity provider holds users and tenants; the [Entitlements API](#entitlements-api) holds products, plans, subscriptions and cuts |
+
 ## What it is
 
 One shared ingress fronts every agent. Per request it verifies the tenant
