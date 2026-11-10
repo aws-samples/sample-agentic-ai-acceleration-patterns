@@ -1229,7 +1229,7 @@ export class SharedIngress extends Construct {
     });
     // spec §5.1: the Deny's fixed reason code, when the authoriser set one. A gateway
     // response template substitutes $context variables and evaluates no VTL directive
-    // (integration run 16, 2026-11-09: an #if rendered as literal text), so the authoriser
+    // (integration run 17, 2026-11-09: an #if rendered as literal text), so the authoriser
     // writes the whole suffix (': <reason>') and the template appends it; without a public
     // reason the context has no suffix and the body is the bare text.
     api.addGatewayResponse('AccessDenied', {

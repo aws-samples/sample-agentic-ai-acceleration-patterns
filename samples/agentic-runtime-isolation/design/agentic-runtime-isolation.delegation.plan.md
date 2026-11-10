@@ -4,8 +4,11 @@ SPDX-License-Identifier: MIT-0
 -->
 # Implementation plan: delegation between agents (ADR-0048, spec §3.7)
 
-Status: in progress. Each phase is one or more commits on
-`docs/runtime-isolation-delegation-adr`; the PR opens once phase 6 passes.
+Status: done. Every phase landed on `docs/runtime-isolation-delegation-adr`;
+phase 6 passed with integration run 18 (2026-11-09, us-east-1, 58 of 58
+steps, step 25 SKIP on `agentcore-gateway` by design) after runs 16 (deploy
+throttled by the API Gateway control plane at concurrency 6) and 17 (step 25
+assertions and the ACCESS_DENIED template, both fixed).
 
 ## Scope
 

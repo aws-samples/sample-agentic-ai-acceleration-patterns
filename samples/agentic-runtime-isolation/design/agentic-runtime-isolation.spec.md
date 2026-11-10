@@ -1156,8 +1156,8 @@ the log line. On `api-gateway` the authoriser's Deny surfaces through the
 `reasonSuffix: ': <code>'` beside `reason` in the Deny context for a public
 code, so the body is `forbidden: <code>`, and leaves both out otherwise, so
 the body is the bare `forbidden`. (A gateway response template substitutes
-`$context` variables and evaluates no VTL directive; integration run 16
-showed an `#if` rendered as text.) (Amended 2026-11-04) The
+`$context` variables and evaluates no VTL directive; integration run 17
+showed an `#if` rendered as text, run 18 the bare and suffixed bodies.) (Amended 2026-11-04) The
 Deny reasons rendered are `tenant_required`, `tenant_not_allowed`,
 `tenant_suspended` and `agent_not_subscribed`; every other refusal renders
 the bare text, its reason in the log only. On `api-gateway` every Deny is
