@@ -27,11 +27,19 @@ that trust policy is the only thing the builds can act through.
 
 ![Architecture: a vendor operator calls API Gateway (the Lambda Authorizer validates the vendor IdP JWT), which invokes the Tenant Service Lambda; the service writes the DynamoDB table of accounts, cells and tenants and starts Step Functions, which runs the cell-scripts and tenant-scripts CodeBuild projects; each project calls sts:AssumeRole (with an external id) into the cell-provisioning or tenant-provisioning role of Account A or Account B, which writes or reads and writes that account's SSM Parameter Store namespaces; the Tenant Service's own role also assumes both roles once at PutAccount as a registration probe](./diagrams/control-plane.drawio.svg)
 
-One service, one API, one DynamoDB table, one state machine, two shared
-CodeBuild projects — and in every account that hosts cells, the control plane's
-own included, one role pair whose asymmetry enforces the
-cell-script/tenant-script permission boundary and whose trust policy the
-account owner controls. Diagram source:
+The application a cell runs comes from the **CellDefinition**, a deployment
+input: a CodeBuild source (`type`, `location`, optional `sourceVersion`) and
+two script sets, `cellScripts` and `tenantScripts`, each with `create`,
+`update` and `delete`. Lifecycle operations run the matching script:
+`CreateTenant` runs cell create (new cell only) then tenant create,
+`UpdateCell` and `UpdateResource` run the update scripts, `DeleteCell` and
+`DeleteTenant` the delete scripts. A full commit SHA in `sourceVersion` pins
+the source; a branch or tag is accepted with a synthesis warning. The
+definition is stamped onto each cell at creation, so a later change applies
+to new cells only and existing cells keep their version. One control plane
+deployment runs one application. To run several applications, deploy the
+control plane once per application with its own `fleetName`; the deployments
+can share accounts, because the role pair is named per fleet. Diagram source:
 [`diagrams/control-plane.drawio`](./diagrams/control-plane.drawio).
 
 ## How it works
