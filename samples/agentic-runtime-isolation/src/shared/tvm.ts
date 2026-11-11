@@ -20,7 +20,7 @@
 import { AssumeRoleCommand, STSClient, type Tag } from '@aws-sdk/client-sts';
 import type { TvmConfig } from './config';
 import { sharedHandler } from './http';
-import { errorName, log } from './logger';
+import { errorName, log, logRetries } from './logger';
 import type { VerifiedClaims } from './verifier';
 
 /** Reserved tag keys the ingress always sets or owns (spec §3.3). */
@@ -166,14 +166,22 @@ export class TokenVendingMachine {
   }
 
   private async assume(claims: VerifiedClaims, tags: Tag[], key: string): Promise<VendedCredentials> {
-    const response = await this.sts.send(
-      new AssumeRoleCommand({
-        RoleArn: this.config.roleArn,
-        RoleSessionName: roleSessionName(claims.tenantId),
-        DurationSeconds: this.config.durationSeconds,
-        Tags: tags,
-      }),
-    );
+    const command = new AssumeRoleCommand({
+      RoleArn: this.config.roleArn,
+      RoleSessionName: roleSessionName(claims.tenantId),
+      DurationSeconds: this.config.durationSeconds,
+      Tags: tags,
+    });
+    let response;
+    try {
+      response = await this.sts.send(command);
+    } catch (error) {
+      // A throttle that beat every attempt: counted here, by name, before the
+      // caller turns it into a 502 `tvm_failed` without one.
+      logRetries('sts', 'AssumeRole', error, error);
+      throw error;
+    }
+    logRetries('sts', 'AssumeRole', response);
     const c = response.Credentials;
     if (!c?.AccessKeyId || !c.SecretAccessKey || !c.SessionToken || !c.Expiration) {
       throw new Error('AssumeRole returned no credentials');
