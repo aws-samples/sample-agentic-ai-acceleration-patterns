@@ -476,7 +476,7 @@ npx cdk context --reset "ssm:account=111122223333:parameterName=/application-pla
 #### Delegation between agents
 
 An agent can hand part of its job to another agent for the same tenant and
-user (ADR-0048, spec §3.7). Turn it on with `agentDelegation` on the
+user (ADR-0049, spec §3.7). Turn it on with `agentDelegation` on the
 `api-gateway` ingress and name, per agent, the agents it may call:
 
 ```ts
@@ -526,7 +526,7 @@ What the Runtime hands your agent, and what the ingress expects back
 | `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` | The unit id, derived by the ingress from verified claims |
 | `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token` | The transaction token, a raw JWT |
 | `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Credentials` | Base64 JSON `{ accessKeyId, secretAccessKey, sessionToken, expiration }` for the tenant role (`decodeCredentials` in [`src/backend/agentcore-runtime.transport.ts`](./src/backend/agentcore-runtime.transport.ts)) |
-| Environment | `MODEL_ID`; `RI_TOOLS_GATEWAY_URLS`, JSON `{ <gateway>: <MCP URL> }`; `RI_ISSUER`; `RI_DELEGATION_URL` when the ingress has `agentDelegation` (ADR-0048) |
+| Environment | `MODEL_ID`; `RI_TOOLS_GATEWAY_URLS`, JSON `{ <gateway>: <MCP URL> }`; `RI_ISSUER`; `RI_DELEGATION_URL` when the ingress has `agentDelegation` (ADR-0049) |
 
 The agent must:
 
@@ -541,7 +541,7 @@ The agent must:
   bearer, holding one MCP client per `tools-gateway:<name>` entry in the
   token's `aud` (ADR-0041).
 - Delegate, if at all, only through `POST ${RI_DELEGATION_URL}/<agent>/delegations`
-  with its transaction token as bearer (ADR-0048); the demo agent does so
+  with its transaction token as bearer (ADR-0049); the demo agent does so
   for the prompt `delegate <agent> <prompt>`.
 - Never log or echo a header value.
 
@@ -628,6 +628,14 @@ meets first:
   `stageThrottle.rateLimit` to at least tenants x tenant limit / 60.
 - The streaming Lambda is held for the whole stream: set
   `ingressReservedConcurrency` to about rps x average stream seconds.
+- That reserve is taken from the account pool the authoriser draws on, and
+  the authoriser's peak is the token-refresh burst (every live access token
+  misses its 60 s cache once per refresh), not a share of the request rate:
+  set `authorizerReservedConcurrency` to about live tokens / 60 x 2, and
+  keep `stageThrottle.rateLimit` under both reserves. Above them API Gateway
+  answers a throttled Lambda with a bare 500, no tenant and no reason, where
+  the stage throttle answers 429 with both (ADR-0049). Synth warns when the
+  three do not fit.
 - KMS `Sign` (one per mint miss and one per admitted tool call) shares the
   account's RSA request quota: `toolContextKey.algorithm: 'ES256'` moves tool
   contexts onto the ECC quota.
@@ -695,7 +703,7 @@ replaced the Runtime: the old Runtime's group is deleted while it drains.
 |---|---|---|
 | `POST <baseUrl>/<backend>/invocations` | `Authorization: Bearer <identity token>`; `X-Tenant-Id` when the token carries `tenants` | Invoke an agent; `text/event-stream`, last event `event: usage` |
 | `POST <baseUrl>/invocations` | same | The `defaultBackend` (`api-gateway`; on `agentcore-gateway` the name is always in the path) |
-| `POST <baseUrl>/<backend>/delegations` | `Authorization: Bearer <transaction token of the calling agent>` | (ADR-0048, `api-gateway` with `agentDelegation`) Hand the transaction to `<backend>`: a replacement token for it, its Runtime invoked, the stream relayed. 403 `delegation_not_declared`, `delegation_depth`, `delegation_loop`, `agent_not_subscribed`; an identity token is refused |
+| `POST <baseUrl>/<backend>/delegations` | `Authorization: Bearer <transaction token of the calling agent>` | (ADR-0049, `api-gateway` with `agentDelegation`) Hand the transaction to `<backend>`: a replacement token for it, its Runtime invoked, the stream relayed. 403 `delegation_not_declared`, `delegation_depth`, `delegation_loop`, `agent_not_subscribed`; an identity token is refused |
 | `GET <baseUrl>/.well-known/openid-configuration` | none | `{ issuer, jwks_uri, ... }`; `issuer` = `<baseUrl>` |
 | `GET <baseUrl>/.well-known/jwks.json` | none | One key, two during rotation; `Cache-Control: public, max-age=300` |
 | `<baseUrl>/entitlements/*` | SigV4 or identity token | The Entitlements API, below |

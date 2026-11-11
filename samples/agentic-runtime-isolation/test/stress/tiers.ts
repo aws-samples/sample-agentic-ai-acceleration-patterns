@@ -31,6 +31,8 @@ export interface StressTier {
   readonly scenarioSeconds: number;
   readonly stageThrottle: { readonly rateLimit: number; readonly burstLimit: number };
   readonly ingressReservedConcurrency: number;
+  /** ADR-0049: live tokens / 60 x 2 (tenantsActive x usersPerActiveTenant). */
+  readonly authorizerReservedConcurrency: number;
   readonly driverInstanceType: string;
   /** k6 driver sizing (F-14); run.sh exports these as VU_PER_RPS and TOKENS_IN. Defaults in lib.js when unset. */
   readonly k6?: { readonly vuPerRps?: number; readonly tokensIn?: 'setup' | 'vu' };
@@ -53,6 +55,7 @@ export const STRESS_TIERS: Record<'small' | 'medium' | 'large', StressTier> = {
     scenarioSeconds: 60,
     stageThrottle: { rateLimit: 100, burstLimit: 50 },
     ingressReservedConcurrency: 50,
+    authorizerReservedConcurrency: 4,
     driverInstanceType: 't3.large',
   },
   medium: {
@@ -71,6 +74,7 @@ export const STRESS_TIERS: Record<'small' | 'medium' | 'large', StressTier> = {
     scenarioSeconds: 180,
     stageThrottle: { rateLimit: 300, burstLimit: 150 },
     ingressReservedConcurrency: 200,
+    authorizerReservedConcurrency: 14,
     driverInstanceType: 'c6i.xlarge',
   },
   large: {
@@ -102,6 +106,7 @@ export const STRESS_TIERS: Record<'small' | 'medium' | 'large', StressTier> = {
     scenarioSeconds: 600,
     stageThrottle: { rateLimit: 1_200, burstLimit: 600 },
     ingressReservedConcurrency: 800,
+    authorizerReservedConcurrency: 34,
     // 32 GB: k6 ran a c6i.2xlarge out of memory at 1,600 VUs (F-14).
     driverInstanceType: 'c6i.4xlarge',
     // k6 driver sizing (F-14): VUs per rps and where tokens live. A report

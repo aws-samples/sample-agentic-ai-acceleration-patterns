@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0049: Reserve concurrency for the authoriser as well as the integration Lambda, and size the stage throttle under it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-11
 - Amends: ADR-0023 (the cold and hot paths), ADR-0029 (the `api-gateway` ingress), ADR-0043 (the authoriser cache)
 - Source: the stress test, `design/agentic-runtime-isolation.stress-test.md` §11.1, findings F-1, F-12 and F-16
@@ -53,6 +53,10 @@ Option 3, with Option 4 left as the existing optional knob.
 5. The README's deployment section says: set the three props together, and gives the three formulas in one place.
 
 Not changed: the authoriser cache TTL (ADR-0043), the mint's place (ADR-0031), the stage throttle's defaults. The refresh burst itself is a client-side shape; the construct cannot spread it, and should not pretend to.
+
+## Implementation (2026-11-11)
+
+`authorizerReservedConcurrency` on `SharedIngressProps` (api-gateway only, a positive integer), set on `AuthorizerFunction`. Two synth warnings: `runtime-isolation:authorizer-unreserved` when `ingressReservedConcurrency` is set and this is not; `runtime-isolation:stage-throttle-above-concurrency` when `stageThrottle.rateLimit` is above `ingressReservedConcurrency` or above `authorizerReservedConcurrency x 20`. `architecture.md` Scale limits carries one row per Lambda with the measured figures; the README's scale section gives the three formulas together. The stress tiers set all three (`large`: 800, 34, 1,200 rps, which still warns on the stage throttle: the peak scenario is meant to run past the reserve, and the warning is the point).
 
 ## Consequences
 

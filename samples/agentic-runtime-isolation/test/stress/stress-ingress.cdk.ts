@@ -128,6 +128,7 @@ export class StressIngressStack extends Stack {
       tvm: { role: this.tenantRole },
       stageThrottle: { rateLimit: tier.stageThrottle.rateLimit, burstLimit: tier.stageThrottle.burstLimit },
       ingressReservedConcurrency: tier.ingressReservedConcurrency,
+      authorizerReservedConcurrency: tier.authorizerReservedConcurrency,
       defaultBackend: GATEWAY_TARGET_NAME,
       toolsGateways,
     });

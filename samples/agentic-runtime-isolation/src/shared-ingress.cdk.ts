@@ -199,6 +199,8 @@ export const DEFAULT_ADMIN_SCOPE = 'entitlements/admin';
  * reuse margin; v1's five minutes (ADR-0023) would hand out expired tokens.
  */
 export const AUTHORIZER_CACHE_TTL = Duration.seconds(60);
+/** Authoriser cache misses one reserved concurrency unit serves per second (a call is about 50 ms; ADR-0049). */
+const AUTHORIZER_CALLS_PER_UNIT_SECOND = 20;
 
 export interface SharedIngressProps {
   readonly identity: IdentityProps;
@@ -234,8 +236,20 @@ export interface SharedIngressProps {
    * account pool with the authoriser, the tools interceptors and every tool
    * function, and a burst of long streams starves them (scale review
    * 2026-11-05). Concurrency needed is about rps x average stream seconds.
+   * Reserving here takes from the account pool the authoriser draws on:
+   * set `authorizerReservedConcurrency` with it (ADR-0049).
    */
   readonly ingressReservedConcurrency?: number;
+  /**
+   * Reserved concurrency for the `api-gateway` REQUEST authoriser (ADR-0049).
+   * Its peak is not a share of the request rate but the token-refresh
+   * burst: every live access token misses the authoriser cache once per
+   * refresh, and clients that took their tokens together refresh together.
+   * Size it at live tokens / the authoriser cache TTL (60 s) x 2; 4,000 live
+   * tokens is 134. A throttled authoriser is a bare 500 from API Gateway,
+   * with no tenant and no reason (stress test 2026-11-10, F-12, F-16).
+   */
+  readonly authorizerReservedConcurrency?: number;
   /**
    * The key that signs tool contexts (`_ri_ctx`) for every tools gateway.
    * `algorithm` default `RS256`; `ES256` moves the one `kms:Sign` per
@@ -274,7 +288,7 @@ export interface SharedIngressProps {
    */
   readonly toolsGateways?: Record<string, ToolsGatewayOptions>;
   /**
-   * (ADR-0048, spec §3.7) Delegation between agents: creates
+   * (ADR-0049, spec §3.7) Delegation between agents: creates
    * `POST /{backend}/delegations` on the `api-gateway` ingress, whose bearer
    * is a transaction token this ingress minted, and sets `RI_DELEGATION_URL`
    * on every agent. `maxDepth` (1 to 3) is the number of agents a transaction
@@ -285,7 +299,7 @@ export interface SharedIngressProps {
   readonly agentDelegation?: AgentDelegationProps;
 }
 
-/** (ADR-0048) See `SharedIngressProps.agentDelegation`. */
+/** (ADR-0049) See `SharedIngressProps.agentDelegation`. */
 export interface AgentDelegationProps {
   readonly maxDepth: 1 | 2 | 3;
 }
@@ -309,6 +323,7 @@ export interface ResolvedOptions {
   readonly tenantLimits?: { readonly requestsPerMinute: number; readonly outputTokensPerMinute?: number };
   readonly stageThrottle: { readonly rateLimit: number; readonly burstLimit: number; readonly explicit: boolean };
   readonly ingressReservedConcurrency?: number;
+  readonly authorizerReservedConcurrency?: number;
   readonly toolContextAlgorithm: JwsAlgorithm;
   readonly perTenantMetrics: boolean;
   readonly registryPrefix: string;
@@ -332,7 +347,7 @@ export interface ResolvedOptions {
   readonly authorizerCacheTtlSeconds: number;
   /** (v2) */
   readonly entitlements: { readonly adminScope: string; readonly maxAgentsPerTenant: number; readonly maxToolsPerTenant: number };
-  /** (ADR-0048) The delegation route's depth bound; undefined when there is no route. */
+  /** (ADR-0049) The delegation route's depth bound; undefined when there is no route. */
   readonly delegationMaxDepth?: number;
   /** (v2, ADR-0041) The tools gateways by name; empty when `toolsGateway: false`. */
   readonly toolsGateways: Readonly<Record<string, ResolvedToolsGateway>>;
@@ -492,6 +507,15 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
       fail('ingressReservedConcurrency', `must be a positive integer (got ${String(ingressReservedConcurrency)})`);
     }
   }
+  const authorizerReservedConcurrency = props.authorizerReservedConcurrency;
+  if (authorizerReservedConcurrency !== undefined) {
+    if (props.ingress !== 'api-gateway') {
+      fail('authorizerReservedConcurrency', "is valid only with the 'api-gateway' ingress");
+    }
+    if (!Number.isInteger(authorizerReservedConcurrency) || authorizerReservedConcurrency < 1) {
+      fail('authorizerReservedConcurrency', `must be a positive integer (got ${String(authorizerReservedConcurrency)})`);
+    }
+  }
   const toolContextAlgorithm = props.toolContextKey?.algorithm ?? 'RS256';
   if (toolContextAlgorithm !== 'RS256' && toolContextAlgorithm !== 'ES256') {
     fail('toolContextKey.algorithm', `must be 'RS256' or 'ES256' (got ${String(toolContextAlgorithm)})`);
@@ -569,17 +593,17 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
     toolsGateways[DEFAULT_TOOLS_GATEWAY] = resolveToolsGateway(props.toolsGateway ?? {}, 'toolsGateway', fail);
   }
 
-  // ADR-0048: the delegation route lives on the api-gateway ingress; its bearer carries tenant and user only.
+  // ADR-0049: the delegation route lives on the api-gateway ingress; its bearer carries tenant and user only.
   const delegationMaxDepth = props.agentDelegation?.maxDepth;
   if (delegationMaxDepth !== undefined) {
     if (!Number.isInteger(delegationMaxDepth) || delegationMaxDepth < 1 || delegationMaxDepth > MAX_DELEGATION_DEPTH) {
       fail('agentDelegation.maxDepth', `must be an integer from 1 to ${MAX_DELEGATION_DEPTH} (got ${String(delegationMaxDepth)})`);
     }
     if (props.ingress !== 'api-gateway') {
-      fail('agentDelegation', "is valid only with the 'api-gateway' ingress: the Gateway authoriser reads one issuer (ADR-0048)");
+      fail('agentDelegation', "is valid only with the 'api-gateway' ingress: the Gateway authoriser reads one issuer (ADR-0049)");
     }
     if (tvm !== undefined && Object.keys(tvm.claimTags).length > 0) {
-      fail('agentDelegation', 'cannot be combined with tvm.claimTags: a replacement token carries the tenant and the user, no identity claims (ADR-0048)');
+      fail('agentDelegation', 'cannot be combined with tvm.claimTags: a replacement token carries the tenant and the user, no identity claims (ADR-0049)');
     }
   }
   return {
@@ -592,6 +616,7 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
     tenantLimits,
     stageThrottle: { rateLimit, burstLimit, explicit: props.stageThrottle !== undefined },
     ingressReservedConcurrency,
+    authorizerReservedConcurrency,
     toolContextAlgorithm,
     perTenantMetrics: props.perTenantMetrics ?? false,
     registryPrefix,
@@ -654,7 +679,7 @@ export interface SharedIngressRef {
   readonly tools?: ToolsGatewayRef;
   /** (v2, ADR-0041) Every tools gateway by name; `default` is also `tools`. */
   readonly toolsGateways?: Readonly<Record<string, ToolsGatewayRef>>;
-  /** (ADR-0048) The `api-gateway` base URL an agent delegates through (`<url>/<agent>/delegations`); undefined without the route. */
+  /** (ADR-0049) The `api-gateway` base URL an agent delegates through (`<url>/<agent>/delegations`); undefined without the route. */
   readonly delegationUrl?: string;
 }
 
@@ -783,7 +808,7 @@ export class SharedIngress extends Construct {
 
   /** The ingress base URL, without a route: `https://.../prod` or the Gateway URL. See `urlFor`. */
   readonly endpointUrl: string;
-  /** (ADR-0048) The base URL agents delegate through; undefined without `agentDelegation`. */
+  /** (ADR-0049) The base URL agents delegate through; undefined without `agentDelegation`. */
   readonly delegationUrl?: string;
   /** The one principal every backend trusts (P-1): the integration Lambda's role, or the Gateway's role. */
   readonly ingressRole: iam.IRole;
@@ -866,6 +891,36 @@ export class SharedIngress extends Construct {
         `stageThrottle is unset: the api-gateway stage is one bucket of ${options.stageThrottle.rateLimit} rps (burst ${options.stageThrottle.burstLimit}) shared by every tenant, every agent and every refusal, and the per-tenant limit runs behind it, so one tenant at the stage rate starves the rest. Set stageThrottle.rateLimit to at least tenants x tenantLimits.requestsPerMinute / 60, and put a per-tenant WAF rate rule in front for an edge limit (scale review 2026-11-05).`,
       );
     }
+    if (options.ingress === 'api-gateway') {
+      // ADR-0049: the stage throttle is the one refusal that names a tenant
+      // and a reason before any Lambda runs. Above either Lambda's reserve,
+      // API Gateway answers a throttled Lambda with a bare 500 instead.
+      const over: string[] = [];
+      if (options.ingressReservedConcurrency !== undefined && options.stageThrottle.rateLimit > options.ingressReservedConcurrency) {
+        over.push(`ingressReservedConcurrency ${options.ingressReservedConcurrency} (a stream holds its instance for at least a second, so the integration Lambda admits at most that many requests a second)`);
+      }
+      if (
+        options.authorizerReservedConcurrency !== undefined
+        && options.stageThrottle.rateLimit > options.authorizerReservedConcurrency * AUTHORIZER_CALLS_PER_UNIT_SECOND
+      ) {
+        over.push(
+          `authorizerReservedConcurrency ${options.authorizerReservedConcurrency} x ${AUTHORIZER_CALLS_PER_UNIT_SECOND} `
+          + `(an authoriser call is about 50 ms, so one reserved unit serves about ${AUTHORIZER_CALLS_PER_UNIT_SECOND} cache misses a second)`,
+        );
+      }
+      if (options.ingressReservedConcurrency !== undefined && options.authorizerReservedConcurrency === undefined) {
+        Annotations.of(this).addWarningV2(
+          'runtime-isolation:authorizer-unreserved',
+          `ingressReservedConcurrency is set (${options.ingressReservedConcurrency}) and authorizerReservedConcurrency is not: the reserve is taken from the account pool the authoriser draws on, and the authoriser's peak is the token-refresh burst (every live access token misses its cache once per refresh), not a share of the request rate. Set authorizerReservedConcurrency to about live tokens / 60 x 2, or a refresh burst answers with bare 500s (ADR-0049).`,
+        );
+      }
+      if (over.length > 0) {
+        Annotations.of(this).addWarningV2(
+          'runtime-isolation:stage-throttle-above-concurrency',
+          `stageThrottle.rateLimit ${options.stageThrottle.rateLimit} rps is above ${over.join(' and above ')}: past that point API Gateway answers a throttled Lambda with a bare 500 that names no tenant and no reason, where the stage throttle would have answered 429 with both. Lower stageThrottle.rateLimit or raise the reserve (ADR-0049).`,
+        );
+      }
+    }
     if (options.sessionScope === 'tenant') {
       Annotations.of(this).addWarningV2(
         'runtime-isolation:shared-session-scope',
@@ -874,7 +929,7 @@ export class SharedIngress extends Construct {
     }
     const wiring = options.ingress === 'api-gateway' ? this.apiGatewayIngress(props, options, environment) : this.agentCoreGatewayIngress(props, options, environment);
     this.endpointUrl = wiring.endpointUrl;
-    // ADR-0048: on api-gateway the delegation route shares the base URL; agents append /<agent>/delegations.
+    // ADR-0049: on api-gateway the delegation route shares the base URL; agents append /<agent>/delegations.
     this.delegationUrl = options.delegationMaxDepth === undefined ? undefined : wiring.endpointUrl;
     this.ingressRole = wiring.ingressRole;
     this.tvmCallerRole = wiring.tvmCallerRole;
@@ -1192,6 +1247,7 @@ export class SharedIngress extends Construct {
       description: 'runtime-isolation: verifies the identity token, selects the tenant, resolves the backend, applies the grant rule and mints the transaction token (P-3, P-11, P-14)',
       memorySize: 512,
       environment,
+      reservedConcurrentExecutions: options.authorizerReservedConcurrency,
     });
     acknowledgeLambdaFindings(authorizerFn);
 
@@ -1280,7 +1336,7 @@ export class SharedIngress extends Construct {
     if (options.defaultBackend !== undefined) {
       api.root.addResource(ROUTE).addMethod('POST', integration(), methodOptions);
     }
-    // ADR-0048: the delegation route, same authoriser and integration; the
+    // ADR-0049: the delegation route, same authoriser and integration; the
     // functions tell the routes apart by path, and the authoriser's cache key
     // (`context.path`) keeps a caller's Allow per target route.
     if (options.delegationMaxDepth !== undefined) {
@@ -1525,7 +1581,7 @@ export interface PublishedIngress {
   readonly toolContextKeyId?: string;
   /** Every tools gateway by name (ADR-0041); empty with `toolsGateway: false`. */
   readonly toolsGateways: Readonly<Record<string, PublishedToolsGateway>>;
-  /** (ADR-0048) The base URL of the delegation route; absent without `agentDelegation`. */
+  /** (ADR-0049) The base URL of the delegation route; absent without `agentDelegation`. */
   readonly delegationUrl?: string;
 }
 
