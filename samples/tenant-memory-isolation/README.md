@@ -158,7 +158,7 @@ const memory = new TenantMemoryIsolation(this, 'TenantMemory', {
 
 An issuer without `token_use` (for example agentic-runtime-isolation's
 transaction token) is supported with `issuer.allowedAudience` and
-`claims: { tokenUse: false, session: 'agent' }` (ADR-0008, Proposed).
+`claims: { tokenUse: false, session: 'agent' }`.
 
 ### Published interface
 

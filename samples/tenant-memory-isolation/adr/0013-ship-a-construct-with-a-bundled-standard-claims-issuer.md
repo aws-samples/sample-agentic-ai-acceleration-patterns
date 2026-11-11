@@ -42,5 +42,5 @@ tenant-identity's shared pool. The Python kit is removed.
 
 The sample is one CDK app in TypeScript, built and tested by projen. The
 construct consumes no other sample, so composition is the published
-interface alone (spec §6.3). Moving to tenant-identity, or to the agent
-runtime ingress (ADR-0008), changes context, not code.
+interface alone (spec §6.3). Moving to tenant-identity, or to any issuer that
+meets the token contract, changes context, not code.

@@ -123,5 +123,5 @@ telemetry; complete teardown.
 
 ### 6.4 Samples consumed
 
-None. tenant-identity's `shared-pool` or agentic-runtime-isolation's ingress
-can be the issuer through props or context (ADR-0008, ADR-0013).
+None. tenant-identity's `shared-pool`, or any issuer that meets §6.1, can be
+the issuer through props or context (ADR-0013).
