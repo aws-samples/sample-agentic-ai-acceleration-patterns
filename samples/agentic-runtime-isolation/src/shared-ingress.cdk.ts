@@ -199,10 +199,6 @@ export const DEFAULT_ADMIN_SCOPE = 'entitlements/admin';
  * reuse margin; v1's five minutes (ADR-0023) would hand out expired tokens.
  */
 export const AUTHORIZER_CACHE_TTL = Duration.seconds(60);
-<<<<<<< HEAD
-/** Authoriser cache misses one reserved concurrency unit serves per second (a call is about 50 ms; ADR-0049). */
-const AUTHORIZER_CALLS_PER_UNIT_SECOND = 20;
-=======
 /**
  * Authoriser cache misses one reserved concurrency unit serves per second in
  * a burst (ADR-0049). A warm call is about 20 ms, but a refresh burst lands
@@ -212,7 +208,6 @@ const AUTHORIZER_CALLS_PER_UNIT_SECOND = 20;
  * about one miss a second while the burst lasts, not twenty.
  */
 const AUTHORIZER_CALLS_PER_UNIT_SECOND = 1;
->>>>>>> 0f092ce (Agentic runtime isolation: ADR-0048 amended, the authoriser reserve is sized for cold-start bursts (F-17); large-tier S1/S6 rerun results)
 
 export interface SharedIngressProps {
   readonly identity: IdentityProps;
@@ -929,11 +924,7 @@ export class SharedIngress extends Construct {
       if (options.ingressReservedConcurrency !== undefined && options.authorizerReservedConcurrency === undefined) {
         Annotations.of(this).addWarningV2(
           'runtime-isolation:authorizer-unreserved',
-<<<<<<< HEAD
-          `ingressReservedConcurrency is set (${options.ingressReservedConcurrency}) and authorizerReservedConcurrency is not: the reserve is taken from the account pool the authoriser draws on, and the authoriser's peak is the token-refresh burst (every live access token misses its cache once per refresh), not a share of the request rate. Set authorizerReservedConcurrency to about live tokens / 60 x 2, or a refresh burst answers with bare 500s (ADR-0049).`,
-=======
           `ingressReservedConcurrency is set (${options.ingressReservedConcurrency}) and authorizerReservedConcurrency is not: the reserve is taken from the account pool the authoriser draws on, and the authoriser's peak is the token-refresh burst (every live access token misses its cache once per refresh), not a share of the request rate. Set authorizerReservedConcurrency to the live tokens that may refresh in one second (the whole live set when they were issued together), or a refresh burst answers with bare 500s (ADR-0049).`,
->>>>>>> 0f092ce (Agentic runtime isolation: ADR-0048 amended, the authoriser reserve is sized for cold-start bursts (F-17); large-tier S1/S6 rerun results)
         );
       }
       if (over.length > 0) {

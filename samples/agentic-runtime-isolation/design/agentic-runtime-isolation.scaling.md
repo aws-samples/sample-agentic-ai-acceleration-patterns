@@ -80,13 +80,13 @@ refusal in the test that could not be attributed.
 
 | Option | Effect | Cost | Blast radius |
 |---|---|---|---|
-| Both reserves, sized together, stage throttle under them (ADR-0048) | every refusal names a tenant and a reason; synth warns when the three do not fit | the reserves leave the account pool: 800 + 1,000 is more than the default 1,000, so a Lambda concurrency quota increase first (Service Quotas, adjustable, usually same day) | every other function in the account has less |
+| Both reserves, sized together, stage throttle under them (ADR-0049) | every refusal names a tenant and a reason; synth warns when the three do not fit | the reserves leave the account pool: 800 + 1,000 is more than the default 1,000, so a Lambda concurrency quota increase first (Service Quotas, adjustable, usually same day) | every other function in the account has less |
 | Provisioned concurrency on the authoriser | removes the cold start from the burst: 20 ms a call, so a reserve of live tokens / 50 does | billed while idle (per GB-second provisioned); for 1,000 tokens about 20 to 40 provisioned instances | none beyond cost |
 | Spread the token refresh client-side | clients that jitter their refresh over the token life turn the burst into a trickle of live tokens / 300 a second | a client change the ingress cannot make; the SDKs most clients use refresh at expiry minus a fixed margin | none |
 | A longer authoriser cache | not available: the cache is capped at 60 s because the Allow carries a minted token (ADR-0043) | - | - |
 | The `agentcore-gateway` ingress | no authoriser Lambda, no stage throttle, the Gateway holds the connection; the interceptor is the one Lambda | per-tenant metrics and output-token limits are not available there (the interceptor sees the request only); caps at 100 agents | none |
 
-Recommendation: ADR-0048's three props plus the quota increase, and
+Recommendation: ADR-0049's three props plus the quota increase, and
 provisioned concurrency on the authoriser for a deployment whose clients
 refresh together (a mobile fleet after a push, a batch system). The Lambda
 quota is the cheapest ceiling to raise in this list.
@@ -187,7 +187,7 @@ every tenant and every refusal.
 
 | Option | Effect | Cost |
 |---|---|---|
-| `stageThrottle.rateLimit` >= tenants x `requestsPerMinute` / 60, and under both Lambda reserves (ADR-0048) | the stage refuses with 429 and a reason before a Lambda throttles with a bare 500 | - |
+| `stageThrottle.rateLimit` >= tenants x `requestsPerMinute` / 60, and under both Lambda reserves (ADR-0049) | the stage refuses with 429 and a reason before a Lambda throttles with a bare 500 | - |
 | A WAF rate rule per tenant in front | an edge limit per tenant, before API Gateway counts the request | WAF per-request and per-rule cost; the tenant must be visible at the edge (a header or a path) |
 | `tenantLimits.outputTokensPerMinute` | caps model spend per tenant, not only requests | `api-gateway` only |
 

@@ -31,11 +31,7 @@ export interface StressTier {
   readonly scenarioSeconds: number;
   readonly stageThrottle: { readonly rateLimit: number; readonly burstLimit: number };
   readonly ingressReservedConcurrency: number;
-<<<<<<< HEAD
-  /** ADR-0049: live tokens / 60 x 2 (tenantsActive x usersPerActiveTenant). */
-=======
-  /** ADR-0048: the live tokens that may refresh in one second; the driver issues them together, so the whole set (tenantsActive x usersPerActiveTenant). */
->>>>>>> 0f092ce (Agentic runtime isolation: ADR-0048 amended, the authoriser reserve is sized for cold-start bursts (F-17); large-tier S1/S6 rerun results)
+  /** ADR-0049: the live tokens that may refresh in one second; the driver issues them together, so the whole set (tenantsActive x usersPerActiveTenant). */
   readonly authorizerReservedConcurrency: number;
   readonly driverInstanceType: string;
   /** k6 driver sizing (F-14); run.sh exports these as VU_PER_RPS and TOKENS_IN. Defaults in lib.js when unset. */
