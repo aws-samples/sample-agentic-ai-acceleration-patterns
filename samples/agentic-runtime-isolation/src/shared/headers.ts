@@ -5,9 +5,9 @@
  * Checks every ingress stage runs the same way: a case-insensitive header
  * lookup (API Gateway and the AgentCore Gateway each hand headers in the
  * client's casing) and the floor-scope test, which is AND (ADR-0005). One
- * copy, so the stages cannot drift. (v2) The v1 per-backend OR test
- * (`hasAnyScope`, ADR-0025) is gone: what a caller may do with an agent is
- * the grant rule's (src/shared/grant.ts, ADR-0030).
+ * copy, so the stages cannot drift. There is no per-backend scope test:
+ * what a caller may do with an agent is the grant rule's
+ * (src/shared/grant.ts, ADR-0030).
  */
 
 /** The first header whose name matches `name` case-insensitively, else undefined. */

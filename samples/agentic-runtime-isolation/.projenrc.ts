@@ -35,17 +35,17 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     '@aws-sdk/client-bedrock-agentcore@3.1154.0', // InvokeAgentRuntime (backend, ADR-0011)
     '@aws-sdk/client-bedrock-runtime@3.1154.0', // agent's ConverseStream call; token usage for the usage event (P-10, ADR-0017)
     '@aws-sdk/client-sts@3.1154.0', // TVM AssumeRole + TagSession (ADR-0012); agent GetCallerIdentity
-    '@aws-sdk/client-dynamodb@3.1154.0', // echo agent's demo-table read with vended credentials; v2 entitlement store (C-12)
-    '@aws-sdk/lib-dynamodb@3.1154.0', // v2: document client for the entitlement rows (C-12, C-14)
+    '@aws-sdk/client-dynamodb@3.1154.0', // echo agent's demo-table read with vended credentials; the entitlement store (C-12)
+    '@aws-sdk/lib-dynamodb@3.1154.0', // document client for the entitlement rows (C-12, C-14)
     '@aws-sdk/client-ssm@3.1154.0', // backend registry reads at the ingress, writes from the backend's registry-entry custom resource (ADR-0024)
     '@smithy/node-http-handler@4.12.1', // the agent's shared keep-alive handler across its per-request clients
-    // v2: the transaction token and the tool context are signed with KMS only (ADR-0031, ADR-0034, ADR-0037)
+    // the transaction token and the tool context are signed with KMS only (ADR-0031, ADR-0034, ADR-0037)
     '@aws-sdk/client-kms@3.1154.0',
-    // v2: the ToolTarget policy custom resource (Create/Update/Delete/GetPolicy, ADR-0040)
+    // the ToolTarget policy custom resource (Create/Update/Delete/GetPolicy, ADR-0040)
     '@aws-sdk/client-bedrock-agentcore-control@3.1154.0',
     // the Runtime log group custom resource: retention and data protection policy on the service-created group (T-18, M-12)
     '@aws-sdk/client-cloudwatch-logs@3.1154.0',
-    // v2: Smithy SSDK runtime for the entitlement API (generated code in src/smithy imports these;
+    // Smithy SSDK runtime for the entitlement API (generated code in src/smithy imports these;
     // versions are the ones this lock file already resolves for the SDK clients, so no second copy)
     'tslib@2.8.1',
     '@aws-sdk/core@3.978.7',
@@ -111,7 +111,7 @@ project.tasks.tryFind('synth:silent')?.reset(`cdk synth -q ${buildContext}`);
 project.tasks.tryFind('synth')?.reset(`cdk synth ${buildContext}`);
 
 // ---------------------------------------------------------------------------
-// Deployment integration test, v2 (test/integ.runtime.ts, scripts/integ.sh).
+// Deployment integration test (test/integ.runtime.ts, scripts/integ.sh).
 // Reuses or deploys tenant-identity (shared-pool, and shared-pool-multi-tenant
 // for the user in several tenants), deploys this sample's integration stacks
 // (both all-on ingresses, session off, session user, limits, multi-tenant),

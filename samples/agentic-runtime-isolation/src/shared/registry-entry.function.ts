@@ -4,7 +4,7 @@
 /**
  * The registry-entry custom resource handler (ADR-0024). One backend's stack
  * owns one SSM parameter, `${prefix}backends/<name>`, holding
- * `{ runtimeArn, needs, tools, version, status }` (v2, ADR-0032):
+ * `{ runtimeArn, needs, tools, version, status }` (ADR-0032):
  *
  * - Create writes the entry with `status: active` and refuses to overwrite:
  *   two stacks claiming one backend name is a deploy-time failure naming
@@ -92,7 +92,7 @@ function entryFrom(properties: RegistryEntryProperties, status: RegistryEntry['s
 
 /**
  * The entry's current `version` (spec §4.3): 0 when the parameter is gone or
- * holds no readable version (a v1 entry), so the next write is version 1 or
+ * holds no readable version, so the next write is version 1 or
  * one more than what is there.
  */
 async function currentVersion(ssm: SSMClient, name: string): Promise<number> {

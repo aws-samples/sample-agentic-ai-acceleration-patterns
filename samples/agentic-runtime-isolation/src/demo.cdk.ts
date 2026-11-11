@@ -7,7 +7,7 @@
  * use `crm/*`) and one `AgentBackend` to the sample's dependencies, plus a
  * second agent (`billing`, needs `billing/read` and `billing/invoke`, may use
  * `invoices/*`; ADR-0024, ADR-0032) behind the same ingress on request, and
- * (v2) two `ToolTarget`s, `crm` and `invoices`, behind two tools gateways (`default` and `finance`, ADR-0041). It
+ * two `ToolTarget`s, `crm` and `invoices`, behind two tools gateways (`default` and `finance`, ADR-0041). It
  * reads tenant-identity's published parameters for the issuer (ADR-0004),
  * chooses the ingress and the optional modules from CDK context,
  * and leaves the published interface to the ingress (one JSON parameter,
@@ -45,8 +45,8 @@ import { gatewayIdPart } from './tools-gateway.cdk';
 
 /**
  * tenant-identity's published parameters this stack consumes for the issuer
- * (ARCHITECTURE.md §5.1, ADR-0004). (v2, ADR-0030) The stack no longer reads
- * tenant-identity's API: backends register no scopes there.
+ * (ARCHITECTURE.md §5.1, ADR-0004). The stack does not read
+ * tenant-identity's API: backends register no scopes there (ADR-0030).
  */
 export const IDENTITY_PARAMETERS = {
   userPoolId: '/application-plane/shared/identity/userPoolId',
@@ -56,7 +56,7 @@ export const IDENTITY_PARAMETERS = {
 /** The second backend's name (ADR-0024): the integ's step 9 calls `/billing/invocations`. */
 export const BILLING_BACKEND = 'billing';
 /**
- * The demo's agent products (v2, ADR-0032): each agent's own `needs`, named
+ * The demo's agent products (ADR-0032): each agent's own `needs`, named
  * after the backend, and the `tools` it may use. Which of them a tenant and
  * a user actually get is the entitlement store's (subscriptions, plans,
  * cuts), written by the integration driver, not this stack.
@@ -98,7 +98,7 @@ export interface DemoContext {
   readonly ingress: IngressKind;
   readonly sessionScope?: SessionScope;
   readonly requiredScopes?: string[];
-  /** (v2, ADR-0038) Accept identity tokens that carry `tenants`. Default false. */
+  /** (ADR-0038) Accept identity tokens that carry `tenants`. Default false. */
   readonly multiTenant?: boolean;
   readonly tvm: boolean;
   readonly includeUserIdTag: boolean;
@@ -132,7 +132,7 @@ export interface DemoContext {
    * share an ingress.
    */
   readonly owner?: string;
-  /** (v2) `transactionToken.keyGeneration` (spec §6.2.3); default 1. Bumping it rotates the signing key. */
+  /** `transactionToken.keyGeneration` (spec §6.2.3); default 1. Bumping it rotates the signing key. */
   readonly keyGeneration?: number;
 }
 
@@ -270,10 +270,10 @@ export class RuntimeIsolationDemoStack extends Stack {
   readonly tenantRole?: iam.Role;
   /** The per-tenant cost dashboard, `RuntimeIsolation-<ingress>` (P-10); only with `perTenantMetrics` (ADR-0021). */
   readonly dashboard?: cloudwatch.Dashboard;
-  /** (v2) The demo tool targets. */
+  /** The demo tool targets. */
   readonly crm: ToolTarget;
   readonly invoices: ToolTarget;
-  /** (v2) The demo tool functions and, with demo tenant data, their tenant roles (P-15). */
+  /** The demo tool functions and, with demo tenant data, their tenant roles (P-15). */
   readonly crmFunction: NodejsFunction;
   readonly invoicesFunction: NodejsFunction;
   readonly toolTenantRoles: iam.Role[] = [];
@@ -402,7 +402,7 @@ export class RuntimeIsolationDemoStack extends Stack {
     });
     callerRoleArn = this.ingress.tvmCallerRole.roleArn;
 
-    // v2: the demo tool targets behind the tools gateways (ADR-0034, ADR-0041).
+    // the demo tool targets behind the tools gateways (ADR-0034, ADR-0041).
     // With demo tenant data each tool reads and writes the calling tenant's
     // item through its own TVM: a tool tenant role it may assume with the
     // TenantId tag from the signed context, limited to that tenant's
@@ -525,7 +525,7 @@ export class RuntimeIsolationDemoStack extends Stack {
     if (this.table !== undefined) {
       new CfnOutput(this, 'DemoTableName', { value: this.table.tableName });
     }
-    // (v2) What the integration driver and scripts/demo.sh reach directly.
+    // What the integration driver and scripts/demo.sh reach directly.
     new CfnOutput(this, 'Issuer', { value: this.ingress.issuer });
     new CfnOutput(this, 'EntitlementsApiUrl', { value: this.ingress.entitlementsApiUrl });
     new CfnOutput(this, 'EntitlementsTableName', { value: this.ingress.entitlementStore.tableName });

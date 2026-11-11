@@ -296,7 +296,7 @@ describe('RuntimeIsolationDemoStack', () => {
         expect(runtime.Properties.EnvironmentVariables).toEqual({
           TABLE_NAME: stack.resolve(stack.table!.tableName),
           MODEL_ID: DEFAULT_MODEL_ID,
-          // (v2, ADR-0033) where the agent calls its tools, and the issuer it presents tokens from.
+          // (ADR-0033) where the agent calls its tools, and the issuer it presents tokens from.
           RI_ISSUER: expect.anything(),
           RI_TOOLS_GATEWAY_URL: expect.anything(),
           // (ADR-0041) every tools gateway's endpoint by name.

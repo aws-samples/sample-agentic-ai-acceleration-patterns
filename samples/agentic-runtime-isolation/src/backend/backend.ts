@@ -35,18 +35,18 @@ export interface ValidatedRequest {
   /** The validated `conversationId`, when the `session` module is on (ADR-0002); handed to the agent so a delegation can stay in the conversation (ADR-0048). */
   readonly conversationId?: string;
   /**
-   * (v2, P-5, P-14) The transaction token the ingress minted for this request:
+   * (P-5, P-14) The transaction token the ingress minted for this request:
    * the only token the agent sees. Never the identity token.
    */
   readonly transactionToken?: string;
-  /** (v2, P-9) The token's `txn`, for log lines that join an agent request to its tool calls. */
+  /** (P-9) The token's `txn`, for log lines that join an agent request to its tool calls. */
   readonly txn?: string;
-  /** (v2, P-9) Entries in the token's `scope`. */
+  /** (P-9) Entries in the token's `scope`. */
   readonly grantSize?: number;
-  /** (v2, P-9) Whether the token came from the mint cache. */
+  /** (P-9) Whether the token came from the mint cache. */
   readonly mint?: 'hit' | 'miss';
   /**
-   * (v2, P-9) True when the grant holds only the agent's needs. Set where
+   * (P-9) True when the grant holds only the agent's needs. Set where
    * the request was minted (the `agentcore-gateway` interceptor); the
    * `api-gateway` authoriser logs it on its own `request authorised` line.
    */

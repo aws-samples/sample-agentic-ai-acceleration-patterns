@@ -6,7 +6,7 @@ import { mockClient } from 'aws-sdk-client-mock';
 import 'aws-sdk-client-mock-jest';
 import {
   BACKEND_NAME_PATTERN,
-  RegistryEntryV1Error,
+  RegistryEntryShapeError,
   BackendRegistry,
   backendFromPath,
   backendNeedsProblem,
@@ -34,7 +34,7 @@ const entryOf = (fields: Record<string, unknown> = {}) => JSON.stringify({ runti
 const ENTRY = entryOf();
 const PARSED = { runtimeArn: RUNTIME_ARN, needs: NEEDS, tools: TOOLS, delegatesTo: [], version: 1, status: 'active' };
 
-describe('need and tool names (v2, ADR-0032)', () => {
+describe('need and tool names (ADR-0032)', () => {
   it('isValidNeedName: <owner>/<action> of [a-z0-9-], 3 to 128 characters', () => {
     expect(NEEDS_NAME_PATTERN.source).toBe('^[a-z0-9-]+\\/[a-z0-9-]+$');
     for (const ok of ['a/b', 'default/chat', 'billing/invoke', `x/${'y'.repeat(126)}`]) {
@@ -83,16 +83,16 @@ describe('need and tool names (v2, ADR-0032)', () => {
 });
 
 describe('parseRegistryEntry', () => {
-  it('accepts a well-formed v2 entry; an empty tool list parses (the agent then holds only its needs)', () => {
+  it('accepts a well-formed entry; an empty tool list parses (the agent then holds only its needs)', () => {
     expect(parseRegistryEntry(ENTRY)).toEqual(PARSED);
     expect(parseRegistryEntry(entryOf({ tools: [], status: 'draining', version: 7 }))).toEqual({ ...PARSED, tools: [], status: 'draining', version: 7 });
   });
 
-  it('refuses a v1-shaped entry (scopes, or no needs/tools) with RegistryEntryV1Error (registry_entry_v1)', () => {
-    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, scopes: ['billing/read'], status: 'active' }))).toThrow(RegistryEntryV1Error);
-    expect(() => parseRegistryEntry(entryOf({ scopes: ['billing/read'] }))).toThrow(RegistryEntryV1Error);
-    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, tools: [], version: 1, status: 'active' }))).toThrow(RegistryEntryV1Error);
-    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, needs: NEEDS, version: 1, status: 'active' }))).toThrow(RegistryEntryV1Error);
+  it('refuses an entry with scopes, or without needs or tools, with RegistryEntryShapeError (registry_entry_shape)', () => {
+    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, scopes: ['billing/read'], status: 'active' }))).toThrow(RegistryEntryShapeError);
+    expect(() => parseRegistryEntry(entryOf({ scopes: ['billing/read'] }))).toThrow(RegistryEntryShapeError);
+    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, tools: [], version: 1, status: 'active' }))).toThrow(RegistryEntryShapeError);
+    expect(() => parseRegistryEntry(JSON.stringify({ runtimeArn: RUNTIME_ARN, needs: NEEDS, version: 1, status: 'active' }))).toThrow(RegistryEntryShapeError);
   });
 
   it('with a backend in scope, every need must be owned by it: a need named like a tool (crm/getaccount) is refused (security review 2026-11-04)', () => {
@@ -287,9 +287,9 @@ describe('BackendRegistry', () => {
     expect(await miss(registry().resolve('worse'))).toBe('registry_entry_invalid');
   });
 
-  it('a v1-shaped entry is registry_entry_v1 (502), never read as an empty grant (spec §4.3)', async () => {
+  it('an entry with scopes or without needs or tools is registry_entry_shape (502), never read as an empty grant (spec §4.3)', async () => {
     ssm.on(GetParameterCommand).resolves({ Parameter: { Value: JSON.stringify({ runtimeArn: RUNTIME_ARN, scopes: ['agent/chat'], status: 'active' }) } });
-    expect(await miss(registry().resolve('agent'))).toBe('registry_entry_v1');
+    expect(await miss(registry().resolve('agent'))).toBe('registry_entry_shape');
   });
 
   it('an SSM error with nothing cached is registry_unavailable, held for one TTL, then retried', async () => {

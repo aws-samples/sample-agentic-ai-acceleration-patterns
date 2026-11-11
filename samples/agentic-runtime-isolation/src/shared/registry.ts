@@ -2,16 +2,16 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * The backend registry (ADR-0024; v2, ADR-0032, ADR-0035). One shared
+ * The backend registry (ADR-0024, ADR-0032, ADR-0035). One shared
  * ingress serves `POST /{backend}/invocations`; each backend's own stack
  * writes an entry at `${prefix}backends/<name>` in SSM Parameter Store, and
  * the ingress resolves the name through this client with a per-process
  * cache. The ingress never holds a Runtime ARN in its environment, so
  * creating, changing or removing a backend never redeploys the ingress.
  *
- * (v2) An entry is an agent product (ADR-0032): the Runtime plus the agent's
+ * An entry is an agent product (ADR-0032): the Runtime plus the agent's
  * `needs` and the `tools` it may use, and a `version` that is part of the
- * mint cache key (ADR-0036). The v1 `scopes` field is refused.
+ * mint cache key (ADR-0036). An entry with a `scopes` field is refused.
  *
  * Two halves share this file: the CDK side imports the schema, the name
  * rules and the parameter-name builders; the Lambda side uses the client.
@@ -42,7 +42,7 @@ export const REGISTRY_BACKENDS_SEGMENT = 'backends/';
 /** The path segment under the prefix that holds tool registry pointers (spec §4.4). */
 export const REGISTRY_TOOLS_SEGMENT = 'tools/';
 
-/** The registry entry one backend writes (spec §4.3; v2, ADR-0032, ADR-0035). */
+/** The registry entry one backend writes (spec §4.3, ADR-0032, ADR-0035). */
 export interface RegistryEntry {
   /** The AgentCore Runtime ARN the route invokes. */
   readonly runtimeArn: string;
@@ -76,8 +76,7 @@ const RUNTIME_ARN_PATTERN = /^arn:([a-z-]+):bedrock-agentcore:([a-z0-9-]+):(\d{1
 
 /**
  * A need (spec §3.3, ADR-0032): `<name>/<action>`, both sides `[a-z0-9-]`,
- * 3 to 128 characters in all; for a backend the name is its own. (v2: was
- * `SCOPE_NAME_PATTERN`.)
+ * 3 to 128 characters in all; for a backend the name is its own.
  */
 export const NEEDS_NAME_PATTERN = /^[a-z0-9-]+\/[a-z0-9-]+$/;
 export const NEEDS_NAME_MIN_LENGTH = 3;
@@ -206,11 +205,11 @@ export interface RegistryScope {
   readonly backend?: string;
 }
 
-/** A v1-shaped entry (`scopes`, or no `needs`/`tools`): refused loudly (spec §4.3, `registry_entry_v1`). */
-export class RegistryEntryV1Error extends Error {
+/** An entry with `scopes`, or without `needs` or `tools`: refused loudly (spec §4.3, `registry_entry_shape`). */
+export class RegistryEntryShapeError extends Error {
   constructor() {
-    super('registry entry is in the v1 shape');
-    this.name = 'RegistryEntryV1Error';
+    super('registry entry has scopes, or lacks needs or tools');
+    this.name = 'RegistryEntryShapeError';
   }
 }
 
@@ -218,8 +217,9 @@ export class RegistryEntryV1Error extends Error {
  * Parses and validates an entry's JSON. Throws on anything the ingress must
  * not act on: a malformed ARN, an ARN outside the ingress's own partition,
  * Region or account, a malformed `needs` or `tools` list, a bad `version`,
- * an unknown status. An entry in the v1 shape throws RegistryEntryV1Error,
- * so it fails with 502 `registry_entry_v1` rather than granting the wrong
+ * an unknown status. An entry with `scopes`, or without `needs` or `tools`,
+ * throws RegistryEntryShapeError,
+ * so it fails with 502 `registry_entry_shape` rather than granting the wrong
  * set (spec §4.3).
  */
 export function parseRegistryEntry(raw: string, scope: RegistryScope = {}): RegistryEntry {
@@ -235,7 +235,7 @@ export function parseRegistryEntry(raw: string, scope: RegistryScope = {}): Regi
   const record = value as Record<string, unknown>;
   const { runtimeArn, needs, tools, version, status, delegatesTo } = record;
   if ('scopes' in record || needs === undefined || tools === undefined) {
-    throw new RegistryEntryV1Error();
+    throw new RegistryEntryShapeError();
   }
   const arn = typeof runtimeArn === 'string' ? RUNTIME_ARN_PATTERN.exec(runtimeArn) : null;
   if (arn === null) {
@@ -320,7 +320,7 @@ export function backendFromPath(path: string | undefined, defaultBackend?: strin
 }
 
 /** Why a lookup produced no backend. */
-export type RegistryMiss = 'unknown_backend' | 'backend_draining' | 'registry_unavailable' | 'registry_entry_invalid' | 'registry_entry_v1';
+export type RegistryMiss = 'unknown_backend' | 'backend_draining' | 'registry_unavailable' | 'registry_entry_invalid' | 'registry_entry_shape';
 
 export class RegistryError extends Error {
   constructor(readonly reason: RegistryMiss) {
@@ -387,7 +387,7 @@ export class BackendRegistry {
    * Resolves one backend. Throws RegistryError: `unknown_backend` for a name
    * with no entry, `backend_draining` for a draining one,
    * `registry_entry_invalid` for an entry the schema rejects,
-   * `registry_entry_v1` for an entry in the v1 shape, and
+   * `registry_entry_shape` for an entry with `scopes` or without `needs` or `tools`, and
    * `registry_unavailable` when SSM cannot be read and nothing is cached.
    */
   async resolve(backend: string): Promise<RegistryEntry> {
@@ -475,7 +475,7 @@ export class BackendRegistry {
     try {
       return { entry: parseRegistryEntry(value, { region: this.config.region, account: this.config.account, backend }) };
     } catch (error) {
-      return { miss: error instanceof RegistryEntryV1Error ? 'registry_entry_v1' : 'registry_entry_invalid' };
+      return { miss: error instanceof RegistryEntryShapeError ? 'registry_entry_shape' : 'registry_entry_invalid' };
     }
   }
 }

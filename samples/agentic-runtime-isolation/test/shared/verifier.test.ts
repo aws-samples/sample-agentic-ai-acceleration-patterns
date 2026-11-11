@@ -92,14 +92,14 @@ describe('TokenVerifier', () => {
     expect(await refusal(verifier().verify(await issuer.mint({ tenant_id: ['tenant-a'] as any })))).toEqual({ status: 403, reason: 'no_tenant' });
   });
 
-  it('403 for a token that carries tenants while identity.multiTenant is off (as in v1)', async () => {
+  it('403 for a token that carries tenants while identity.multiTenant is off', async () => {
     expect(await refusal(verifier().verify(await issuer.mint({ tenant_id: undefined, tenants: ['tenant-a', 'tenant-b'] })))).toEqual({
       status: 403,
       reason: 'multi_tenant_token',
     });
   });
 
-  describe('tenant selection (v2, R-1, ADR-0038, spec §5.1)', () => {
+  describe('tenant selection (R-1, ADR-0038, spec §5.1)', () => {
     const multi = () => verifier({ multiTenant: true });
     const many = { tenant_id: undefined, tenants: ['tenant-a', 'tenant-b'] };
 

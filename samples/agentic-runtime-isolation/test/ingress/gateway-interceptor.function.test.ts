@@ -56,7 +56,7 @@ describe('intercept', () => {
         { getKey: issuer.getKey, fetchDiscovery: issuer.fetchDiscovery },
       ),
       registry: stubRegistry(ENTRIES).registry,
-      // v2: on this ingress the interceptor is the mint (C-3b); the authority step is stubbed here.
+      // on this ingress the interceptor is the mint (C-3b); the authority step is stubbed here.
       authority: stubAuthority(),
     }),
     backend,
@@ -82,7 +82,7 @@ describe('intercept', () => {
     const http = out.http as { transformedGatewayRequest: { headers: Record<string, string>; body: unknown } };
     expect(http.transformedGatewayRequest.headers).toEqual({
       [RUNTIME_HEADERS.SESSION_ID]: `s-${sessionPrefix('tenant-a', 'user-a1', 'user')}-conversationA1x0001`,
-      // v2: the minted transaction token, never the identity token (P-14).
+      // the minted transaction token, never the identity token (P-14).
       [RUNTIME_HEADERS.TRANSACTION_TOKEN]: TXN_TOKEN,
     });
     expect(JSON.stringify(http.transformedGatewayRequest.headers)).not.toContain(token);
@@ -125,7 +125,7 @@ describe('intercept', () => {
     expect((refused.http as any).transformedGatewayResponse.statusCode).toBe(400);
   });
 
-  it('v2: writes the transaction token, never the identity token, and selects the tenant from X-Tenant-Id (P-5, P-14, ADR-0038)', async () => {
+  it('writes the transaction token, never the identity token, and selects the tenant from X-Tenant-Id (P-5, P-14, ADR-0038)', async () => {
     const token = await issuer.mint({ tenant_id: undefined, tenants: ['tenant-a', 'tenant-b'] });
     const d = deps(baseConfig({ ingress: 'agentcore-gateway', sessionScope: 'user', multiTenant: true }));
     const out = await intercept(event({ 'authorization': `Bearer ${token}`, 'x-tenant-id': 'tenant-b' }, body), d);
@@ -140,7 +140,7 @@ describe('intercept', () => {
     expect(Buffer.from(response.body, 'base64').toString()).toBe('bad request: tenant_required');
   });
 
-  it('v2: the request admitted line carries noToolsGranted from the grant (P-9)', async () => {
+  it('the request admitted line carries noToolsGranted from the grant (P-9)', async () => {
     const config = baseConfig({ ingress: 'agentcore-gateway', sessionScope: 'user' });
     const d = deps(config);
     const needsOnly = pipelineFor(config, {
@@ -157,7 +157,7 @@ describe('intercept', () => {
     expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request admitted')).toMatchObject({ txn: 'txn-2', grantSize: 1, mint: 'hit', noToolsGranted: true });
   });
 
-  it('v2: an entitlement refusal is a fixed-text response with its public reason', async () => {
+  it('an entitlement refusal is a fixed-text response with its public reason', async () => {
     const config = baseConfig({ ingress: 'agentcore-gateway', sessionScope: 'user' });
     const d = deps(config);
     const refusing = pipelineFor(config, {

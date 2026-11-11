@@ -494,8 +494,8 @@ fails with the prop name.
 | `toolsGateways.<name>.contextLifetime` | `Duration` | 60 s | `exp` of the signed tenant context; 10 s to 300 s |
 
 There is no `delegation` prop (ADR-0031): synth fails with `delegation is
-removed in v2; the agent receives a transaction token (ADR-0031)` when one
-is set, so a consumer of an older construct learns where the token went.
+not a prop; the agent receives a transaction token (ADR-0031)` when one is
+set, so a consumer of an older construct learns where the token went.
 
 On `api-gateway` the authoriser result cache is
 `min(60 s, transactionToken.ttl - 120 s)` (ADR-0043), keyed on
@@ -510,7 +510,7 @@ Constructs:
 | Construct | Props | Meaning |
 |---|---|---|
 | `SharedIngress` | the table above | the ingress: API or Gateway, authoriser, TVM, limits, log drain, entitlement store, token signer, entitlement API and, unless `toolsGateway: false`, the tools gateways (one per `toolsGateways` entry, ADR-0041). `SharedIngress.fromParameters(scope, id, prefix, ingress?, { toolsGateway?, toolsGateways? })` returns a `SharedIngressRef` read from the published parameters (§6.4; ADR-0041, ADR-0042): `ingress`, when given, must match the published document; `toolsGateway: false` carries no gateway, `toolsGateways` names the ones the ref carries (each must be in the document), and by default the ref carries every gateway the document lists. |
-| `AgentBackend` | `name` (`[a-z0-9-]{1,32}`), `ingress`, `agent` (`{ codePath, modelId, environment? }`), `needs` (required), `tools` (default `[]`), `delegatesTo` (default `[]`, ADR-0048), `owner?` (default `<StackId>#<LogicalResourceId>`) | one agent product: the Runtime tagged `ri:ingress = <ingressId>`, its resource policy naming the ingress role, on `agentcore-gateway` a Gateway target named `name`, the `NAME#<name>` reservation and the registry entry `{ runtimeArn, needs, tools, delegatesTo, status, version }`. The agent's environment receives `RI_TOOLS_GATEWAY_URL` and `RI_ISSUER`, and (ADR-0041) `RI_TOOLS_GATEWAY_URLS`, a JSON map of gateway name to MCP URL; `RI_TOOLS_GATEWAY_URL` is the `default` gateway's; and, when the ingress has `agentDelegation`, `RI_DELEGATION_URL`, the `api-gateway` base URL to which the agent appends `/<agent>/delegations` (§3.7). `scopes`, `identityApi` and `scopeOwner` are not props (ADR-0032): synth fails on `scopes` with `is renamed to needs in v2 (ADR-0032)`, so a consumer of an older construct learns the new name |
+| `AgentBackend` | `name` (`[a-z0-9-]{1,32}`), `ingress`, `agent` (`{ codePath, modelId, environment? }`), `needs` (required), `tools` (default `[]`), `delegatesTo` (default `[]`, ADR-0048), `owner?` (default `<StackId>#<LogicalResourceId>`) | one agent product: the Runtime tagged `ri:ingress = <ingressId>`, its resource policy naming the ingress role, on `agentcore-gateway` a Gateway target named `name`, the `NAME#<name>` reservation and the registry entry `{ runtimeArn, needs, tools, delegatesTo, status, version }`. The agent's environment receives `RI_TOOLS_GATEWAY_URL` and `RI_ISSUER`, and (ADR-0041) `RI_TOOLS_GATEWAY_URLS`, a JSON map of gateway name to MCP URL; `RI_TOOLS_GATEWAY_URL` is the `default` gateway's; and, when the ingress has `agentDelegation`, `RI_DELEGATION_URL`, the `api-gateway` base URL to which the agent appends `/<agent>/delegations` (§3.7). `scopes`, `identityApi` and `scopeOwner` are not props (ADR-0032): synth fails on `scopes` with `is not a prop: name the agent's own actions in needs (ADR-0032)`, so a consumer of an older construct learns where the actions go |
 | `ToolTarget` | `name` (`[a-z0-9-]{1,32}`), `ingress`, `kind` (`'lambda' \| 'openApi' \| 'smithy' \| 'mcpServer'`), `tools` (`{ name, description, inputSchema? }[]`, required for every kind, because it is the catalogue; `inputSchema` only for `lambda`), `function?` (`lambda`), `spec?` (`openApi`, `smithy`), `endpoint?` (`mcpServer`), `outboundAuth?`, `tvm?` (`{ role }`, the tool's tenant role), `gateway?` (default `'default'`, a key of `toolsGateways`; ADR-0041), `owner?` | (ADR-0035) one Gateway target on its gateway and its catalogue rows, star permit and registry pointer (§3.6). Changing `gateway` replaces the target: the old policy and target are deleted in the ADR-0040 order, then both are created on the new gateway. `outboundAuth` names exactly one of `{ gatewayIamRole: { service?, region? } }`, `{ oauth: { providerArn, secretArn, scopes, grant: '3LO' \| 'OBO' \| 'M2M', defaultReturnUrl?, customParameters? } }` or `{ apiKey: { providerArn, secretArn, location: 'HEADER' \| 'QUERY_PARAMETER', name, prefix? } }` (§3.5). `maxToolsPerGateway?` (default 300) is read only when the ingress is in another stack; a same-stack target reads its gateway's |
 | `TokenSigner` | `algorithm`, `keyGeneration`, `signer` (the role allowed `kms:Sign`); method `grantSign(grantee)` for a second minting principal, used by the integration stacks only | C-13; created by `SharedIngress`, exported for a consumer that builds its own ingress |
 | `EntitlementStore` | `maxAgentsPerTenant`, `maxToolsPerTenant` | C-12; created by `SharedIngress`, exported for the same reason |
@@ -943,7 +943,7 @@ written by that backend's stack, read by the ingress, JSON, 4 KB.
 | `status` | `active` or `draining` | `draining` refuses new requests (404) while streams finish |
 
 An entry without `needs` or `tools`, or with a `scopes` field, is refused
-with 502 and log reason `registry_entry_v1`, so an entry in another shape
+with 502 and log reason `registry_entry_shape`, so an entry in another shape
 fails loudly rather than granting the wrong set.
 
 The ingress also refuses an entry whose `needs` are not all
@@ -1099,7 +1099,7 @@ the bare text, its reason in the log only. On `api-gateway` every Deny is
 | 403 | `forbidden: agent_not_subscribed` | the agent is not in `T.agents ∩ U.agents`, including a tenant with no row |
 | 404 | `not found` | no registry entry, or the entry is `draining` |
 | 429 | `too many requests` | over `tenantLimits` (ADR-0020) |
-| 502 | `upstream error` | backend invoke failed; registry or entitlement store unreadable; a registry entry without `needs` or `tools`, or with `scopes` (`registry_entry_v1`); `grant_too_large`; `kms:Sign` failed (`mint_failed`) |
+| 502 | `upstream error` | backend invoke failed; registry or entitlement store unreadable; a registry entry without `needs` or `tools`, or with `scopes` (`registry_entry_shape`); `grant_too_large`; `kms:Sign` failed (`mint_failed`) |
 
 Not an error: `no_tools_granted`, an agent whose grant holds only its `needs`.
 It is served with `scope` = its needs; any tool call it makes is refused at

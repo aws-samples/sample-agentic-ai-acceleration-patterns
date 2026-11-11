@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * API Gateway Lambda authoriser (spec C-3a, P-3, ADR-0024; v2, ADR-0030,
+ * API Gateway Lambda authoriser (spec C-3a, P-3, ADR-0024, ADR-0030,
  * ADR-0031, ADR-0038). Verifies the identity token with the shared verifier
  * and selects the tenant (`tenant_id`, or `tenants` plus `X-Tenant-Id`),
  * resolves the backend the route names through the registry, then runs the
- * v2 authority step: one `BatchGetItem` for the tenant row and the user's
+ * authority step: one `BatchGetItem` for the tenant row and the user's
  * cut row, the grant rule, and the mint (KMS `Sign`, cached). It returns
  * Allow with `{ tenantId, sub, backend, runtimeArn, transactionToken, txn,
  * grantSize, mint }` as context: the stage's JSON access log carries the
@@ -53,7 +53,7 @@ export interface AuthorizerContext {
   readonly sub: string;
   readonly backend: string;
   readonly runtimeArn: string;
-  /** (v2) The transaction token for the integration Lambda to forward. Never logged. */
+  /** The transaction token for the integration Lambda to forward. Never logged. */
   readonly transactionToken: string;
   readonly txn: string;
   readonly grantSize: string;
@@ -224,7 +224,7 @@ export async function authorize(event: APIGatewayRequestAuthorizerEvent, deps: A
     }
     return buildPolicy(event.methodArn, 'Deny');
   }
-  // v2: entitlement read, grant rule, mint (spec §3.6). A refusal costs no KMS call.
+  // entitlement read, grant rule, mint (spec §3.6). A refusal costs no KMS call.
   try {
     const authority = await deps.authority.resolve(tenantId, sub, backend, entry);
     log.info('request authorised', {

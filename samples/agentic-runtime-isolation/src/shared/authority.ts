@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * The v2 authority step (spec §3.6, P-11, P-14): entitlement read, grant
+ * The authority step (spec §3.6, P-11, P-14): entitlement read, grant
  * rule, mint. Run by the function that mints (the API Gateway authoriser,
- * or the AgentCore Gateway interceptor), after the v1 checks and before the
- * TVM. A refusal costs no KMS call (spec §5.1 check order).
+ * or the AgentCore Gateway interceptor), after the token, tenant, floor,
+ * registry and (on `agentcore-gateway`) per-tenant-limit checks and before
+ * the TVM. A refusal costs no KMS call (spec §5.1 check order).
  */
 
 import type { DelegationCaller } from './delegation';

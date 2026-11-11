@@ -6,7 +6,7 @@
  * ADR-0012, ADR-0024). It owns every AgentCore-specific detail on the request
  * path: the `InvokeAgentRuntime` call on the Runtime the request resolved,
  * `runtimeSessionId` as the unit-id transport, and the two allowlisted custom
- * headers that carry the transaction token (v2, ADR-0031) and the vended credentials
+ * headers that carry the transaction token (ADR-0031) and the vended credentials
  * (base64 JSON). The echo agent uses the same constants to read them back.
  */
 
@@ -15,11 +15,11 @@ import type { BackendResponse, HeaderTransportBackend, InvokeBackend, ValidatedR
 import { endpointHost, preconnect, sharedHandler } from '../shared/http';
 import type { VendedCredentials } from '../shared/tvm';
 
-/** Request headers on the ingress-to-Runtime hop (ADR-0012; v2, ADR-0031). */
+/** Request headers on the ingress-to-Runtime hop (ADR-0012, ADR-0031). */
 export const RUNTIME_HEADERS = {
   /** The unit id; written by the Gateway interceptor, read by the agent. */
   SESSION_ID: 'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id',
-  /** (v2, P-5, ADR-0031) The transaction token, the raw JWT. Always on the Runtime allowlist; replaces v1's `...-Custom-User-Token`. */
+  /** (P-5, ADR-0031) The transaction token, the raw JWT. Always on the Runtime allowlist. */
   TRANSACTION_TOKEN: 'X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token',
   /** The vended tenant credentials (P-8). Always on the Runtime allowlist (ADR-0018). */
   TENANT_CREDENTIALS: 'X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Credentials',
