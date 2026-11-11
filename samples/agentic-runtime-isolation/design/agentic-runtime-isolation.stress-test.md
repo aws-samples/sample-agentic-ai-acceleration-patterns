@@ -427,7 +427,9 @@ are single-digit dollars each. Say the total in the results, not here.
 3. `architecture.md` Scale limits: each row that the run measured gets its
    measured value next to the documented one, with the run date.
 4. An ADR if a run changes a default (for example the stage throttle
-   warning, the cache sizes or `registryTtl`).
+   warning, the cache sizes or `registryTtl`). ADR-0049 (proposed) records
+   F-1, F-12 and F-16: reserved concurrency for the authoriser and the
+   stage throttle sized under both Lambdas.
 
 ## 11.1 Findings from the runs
 
