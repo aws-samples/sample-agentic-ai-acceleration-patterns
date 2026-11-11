@@ -2,39 +2,15 @@
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 -->
-# Specification: Agentic Runtime Isolation (v2)
+# Specification: Agentic Runtime Isolation
 
 > **Status (2026-11-09):** implemented; verified by integration run 18
 > (58/58, us-east-1, commit 7e0f793). `architecture.md` describes the
-> implemented state. This is the v2 specification (Dave Roberts); it
-> supersedes the v1 specification of 2026-10-26, kept as
-> `agentic-runtime-isolation.spec.v1.md`. Where v2 changes a v1 promise,
-> the text marks it "(v2, ADR-00NN)" and the ADR records the change.
+> implemented state. Decisions are cited inline as `(ADR-00NN)`; the index
+> is `adr/README.md`.
 
 The keywords MUST, MUST NOT, SHOULD, and MAY are to be interpreted as in
 RFC 2119.
-
-ADRs v2 adds:
-
-| ADR | Title | Amends / supersedes |
-|---|---|---|
-| 0030 | Hold entitlements in an ingress-owned store, not in identity-provider scopes | amends ADR-0005; supersedes ADR-0025 |
-| 0031 | Mint a transaction token at the ingress; the identity token never leaves it | supersedes ADR-0006, ADR-0007 |
-| 0032 | Model an agent as a product: a backend plus the tools it may use, capped below the tenant's subscription | amends ADR-0011, ADR-0024 |
-| 0033 | Let a tenant admin cut, never add, with sparse per-user rows | - |
-| 0034 | Serve tools through one shared AgentCore Gateway that trusts the ingress issuer, with Policy on `scope` and an interceptor that checks `act` and signs the tenant context | - |
-| 0035 | Register tools and agents at deploy with an owner marker, in the store and the registry | amends ADR-0024 |
-| 0036 | Bound change lag by a version in the token cache key and a 5-minute token life | - |
-| 0037 | Publish the ingress as an OIDC issuer: JWKS and discovery on the ingress, keys in KMS with `kid` rotation | - (amended by ADR-0046) |
-| 0038 | Accept users in several tenants; the request names one the verified token lists | amends ADR-0004 |
-| 0039 | Default session mapping to the tenant scope when it is turned on | amends ADR-0013 |
-| 0040 | Apply the spike findings to the tools gateway and the transaction token | amends ADR-0031, ADR-0034, ADR-0038 |
-| 0041 | One star permit per target, several tools gateways, and an 8 KB `scope` | amends ADR-0034, ADR-0040 |
-| 0042 | Publish one JSON parameter, and let test stacks publish nothing | amends ADR-0024 |
-| 0043 | Cap the authoriser cache at 60 seconds | amends ADR-0015, ADR-0023 |
-| 0044 | Publish from the construct, and drive the integration test with the CDK CLI over stack outputs | records three deviations from the sample standard (§1.1, §4.5, §5.2) |
-| 0045 | Bound the transaction token at 10,240 bytes | amends ADR-0041 |
-| 0046 | Close the signer grant path, keep explicit tool lists explicit, and re-check need ownership at the ingress | amends ADR-0032, ADR-0037 |
 
 
 ---
@@ -63,11 +39,11 @@ invokes the service with SigV4. A leaked or forged JWT, or a guessed unit id,
 cannot reach a unit the ingress would not have chosen for that caller. Every
 check sits in front of the compute, never inside it.
 
-v2 widens the sample from the runtime to what the agent may do once it runs
-(ADR-0030, ADR-0034). It now covers three things, all behind one shared
-ingress:
+The sample covers the runtime and what the agent may do once it runs
+(ADR-0030, ADR-0034): three things, all behind one shared ingress.
 
-1. **The isolated agent runtime.** The v1 design, with the same promises.
+1. **The isolated agent runtime**: one trusted ingress chooses the unit
+   and invokes it (P-1 to P-10).
 2. **The tools the agent may call**, through shared Amazon Bedrock
    AgentCore Gateways the vendor owns: one by default, several when the
    tool count needs them (ADR-0034, ADR-0041). The tool-gateway feature
@@ -83,35 +59,30 @@ those counts may grow a policy, a Gateway, a role or a token per tenant or
 per user (P-16). What grows with agents and tools is
 bounded in §3.6 ("Scale at 100s of agents and 1,000s of tools").
 
-v1 forwarded the user's identity token to the agent on opt-in, optionally
-narrowed by an exchange at tenant-identity. v2 replaces that with a
-**transaction token** the ingress mints for each call (ADR-0031). It names
+The agent never sees the user's identity token. The ingress mints a
+**transaction token** for each call (ADR-0031). It names
 one tenant, one user and one agent, carries exactly the granted set, lives
 five minutes, and is useless outside this sample's trust domain. The
 identity token never leaves the ingress.
 
 The pattern is a core plus optional modules. The core is the trusted ingress,
 the one-principal resource policy (P-1, P-3), the always-on token vending
-machine (P-8, ADR-0018), and in v2 the entitlement check and the transaction
-token (P-11, P-14). The modules below each add a check; the TVM, the
+machine (P-8, ADR-0018), the entitlement check and the transaction token
+(P-11, P-14). The modules below each add a check; the TVM, the
 entitlement check and the transaction token are always on, per-tenant
 limits and the tools gateway are on by default, and the rest are off by
 default (P-4):
 
 | Module | Adds | Default | Prop |
 |---|---|---|---|
-| Session mapping | conversations that persist across requests, in a unit derived from the caller's claims, so a user resumes only their own session (P-2, ADR-0002, ADR-0013) | off: a fresh unit per request. When set, `scope` is `'tenant'` (one conversation per tenant, v2, ADR-0039); `'user'` is the option | `session` |
+| Session mapping | conversations that persist across requests, in a unit derived from the caller's claims, so a user resumes only their own session (P-2, ADR-0002, ADR-0013) | off: a fresh unit per request. When set, `scope` is `'tenant'` (one conversation per tenant, ADR-0039); `'user'` is the option | `session` |
 | Scope floor | scopes every identity token must carry (AND, ADR-0005), for example `app/use` | off: no floor | `requiredScopes` on the ingress |
 | TVM | tenant-scoped AWS credentials for the model call and the agent's data access (P-8, ADR-0018) | always on: model-only `TenantModelRole`, `TenantId` tag only, 900 s credentials, 1,000 cached sets | `tvm` |
 | Per-tenant limits | requests per tenant per minute, and on `api-gateway` optionally output tokens; over the limit is 429 (ADR-0020) | on: 60 requests per tenant per minute, no token limit | `tenantLimits` |
 | Per-tenant metrics | per-tenant CloudWatch metrics (EMF) (ADR-0021) | off: the ingress log line carries the same figures | `perTenantMetrics` |
-| Entitlements (v2) | the grant rule decides the agent and the tool set per call (ADR-0030) | always on: one table per ingress, PITR on; admin scope `entitlements/admin` | `entitlements` |
-| Transaction token (v2) | the only token the agent and the tools see (ADR-0031, ADR-0037) | always on: RS256, 300 s life, key generation 1 | `transactionToken` |
-| Tools gateway (v2) | an MCP endpoint per tools gateway, Cedar policy on the token's `scope` at target grain, a signing interceptor that checks each tool, per-tenant rate limits (ADR-0034, ADR-0041) | on: one gateway named `default`; several with `toolsGateways`. 10 requests per second per tenant per gateway, 60 s context life; `false` creates none | `toolsGateway`, `toolsGateways` |
-
-Removed in v2: the delegation module (`delegation.*`, superseded by the
-transaction token, ADR-0031) and backend scope registration with
-tenant-identity's catalogue (`ScopeRegistration`, C-8, ADR-0030).
+| Entitlements | the grant rule decides the agent and the tool set per call (ADR-0030) | always on: one table per ingress, PITR on; admin scope `entitlements/admin` | `entitlements` |
+| Transaction token | the only token the agent and the tools see (ADR-0031, ADR-0037) | always on: RS256, 300 s life, key generation 1 | `transactionToken` |
+| Tools gateway | an MCP endpoint per tools gateway, Cedar policy on the token's `scope` at target grain, a signing interceptor that checks each tool, per-tenant rate limits (ADR-0034, ADR-0041) | on: one gateway named `default`; several with `toolsGateways`. 10 requests per second per tenant per gateway, 60 s context life; `false` creates none | `toolsGateway`, `toolsGateways` |
 
 Without session mapping every request runs in a fresh unit and nothing
 carries over between requests: the strictest setting. With it, the sample
@@ -123,13 +94,13 @@ The pattern is not tied to one service. The construct models the compute
 service as a **backend**, a typed prop (ADR-0011). AgentCore Runtime is the
 first and only backend built; AWS Lambda's microVMs are a candidate for a
 later one. The sample ships as CDK constructs (standard §4.5): `SharedIngress`,
-`AgentBackend`, and in v2 `ToolTarget`, `TokenSigner` and `EntitlementStore`.
+`AgentBackend`, `ToolTarget`, `TokenSigner` and `EntitlementStore`.
 The ingress is a deploy-time choice: an Amazon API Gateway REST API with
 response streaming, or an AgentCore Gateway with a Runtime target. The
-tenant-identity sample is the identity provider, topology `shared-pool` or,
-in v2, `shared-pool-multi-tenant` (R-1, ADR-0038).
+tenant-identity sample is the identity provider, topology `shared-pool` or
+`shared-pool-multi-tenant` (R-1, ADR-0038).
 
-### Requirements (v2)
+### Requirements
 
 | ID | Requirement |
 |---|---|
@@ -178,14 +149,14 @@ or one conversation per user or per tenant with `session` set.
 | Layer | What isolates tenants |
 |---|---|
 | Who may invoke the backend | Backend resource policy: only the ingress principal (P-1) |
-| Which tenant a request acts for | The verified identity token's `tenant_id`, or one tenant of its `tenants` named by `X-Tenant-Id` (P-3, v2) |
-| Which agent and tools the caller may use | The grant rule over subscriptions, cuts and the agent product (P-11, P-12, P-13, v2) |
+| Which tenant a request acts for | The verified identity token's `tenant_id`, or one tenant of its `tenants` named by `X-Tenant-Id` (P-3, ADR-0038) |
+| Which agent and tools the caller may use | The grant rule over subscriptions, cuts and the agent product (P-11, P-12, P-13) |
 | Which unit a request lands in | Ingress chooses the unit: fresh per request, or derived from validated claims with `session` (P-2) |
 | What the agent can reach | Execution role: logs and traces only; no model and no tenant data (P-6) |
 | What model and tenant data the agent may reach | Always-on TVM: tenant-scoped credentials vended at ingress (P-8) |
-| What the agent can do on the user's behalf | Transaction token: one tenant, one agent, the granted set, five minutes (P-5, P-14, v2) |
-| Which tools the agent may call | Tools gateways: `CUSTOM_JWT` on the ingress issuer with `aud` `tools-gateway:<name>`; the interceptor checks each tool against `scope`; a Cedar policy on `scope` decides per target (P-15, P-16, v2, ADR-0041) |
-| What tenant data a tool may reach | Signed tenant context, then the tool's own TVM with a `TenantId` session tag (P-15, v2) |
+| What the agent can do on the user's behalf | Transaction token: one tenant, one agent, the granted set, five minutes (P-5, P-14) |
+| Which tools the agent may call | Tools gateways: `CUSTOM_JWT` on the ingress issuer with `aud` `tools-gateway:<name>`; the interceptor checks each tool against `scope`; a Cedar policy on `scope` decides per target (P-15, P-16, ADR-0041) |
+| What tenant data a tool may reach | Signed tenant context, then the tool's own TVM with a `TenantId` session tag (P-15) |
 
 ### 1.2 What this sample is NOT
 
@@ -206,16 +177,14 @@ or one conversation per user or per tenant with `session` set.
   and cuts so it can enforce them. Pricing, invoicing and plan design are the
   vendor's.
 - Not a data-layer sample. The TVM vends tenant-scoped credentials to the
-  agent and, in v2, to each tool; what they unlock (memory, RAG stores) is
+  agent and to each tool; what they unlock (memory, RAG stores) is
   the data layer (`ARCHITECTURE.md` §3.3). The demo ships one
   tenant-partitioned table only to prove the credentials work.
-- (v2, R-1, ADR-0038) The v1 line "Not multi-tenant-per-user" is withdrawn. A
-  user may belong to several tenants (R-1). A single request still acts for
-  exactly one.
-- (v2, ADR-0034) The v1 line "Not a tool gateway" is withdrawn. The sample
-  now owns one shared tools gateway. AgentCore Gateway is still not used as
-  an aggregator of third-party MCP servers the vendor does not register as
-  `ToolTarget`s.
+- Not one request for several tenants. A user may belong to several
+  tenants (R-1, ADR-0038); a single request acts for exactly one.
+- Not an aggregator of third-party MCP servers. The sample owns its shared
+  tools gateways (ADR-0034); a server the vendor does not register as a
+  `ToolTarget` is not reachable through them.
 - Not a model gateway. Inference targets and model routing on AgentCore
   Gateway are out of scope (review §2 item 9).
 - Not a Gateway per tenant. Every tools gateway serves every tenant
@@ -245,17 +214,17 @@ fresh unit: the ingress generates a random unit id and nothing is shared
 between requests. With `session`,
 `runtimeSessionId = "s-" + base32(sha256(tenant_id "|" sub))[0:26] + "-" + conversationId`
 for `session.scope: 'user'`, and `sha256(tenant_id)` for `'tenant'`, the
-default when `session` is set (v2, ADR-0039).
+default when `session` is set (ADR-0039).
 `conversationId` is client-chosen (16 to 64 of `[A-Za-z0-9]`), but the prefix
 comes only from the verified token. In both cases a unit id sent by the
-client is ignored and overwritten (ADR-0002, ADR-0013). (v2, R-1, ADR-0038)
+client is ignored and overwritten (ADR-0002, ADR-0013). (R-1, ADR-0038)
 `tenant_id` here is the tenant the request acts for, chosen under P-3, so a
 user in two tenants has two disjoint sets of sessions.
 
 **P-3. Tenant context comes only from the validated identity token.**
 `tenant_id` and `sub` are read from a token whose signature, issuer, client,
 expiry, and `token_use: access` were checked at ingress. Nothing in the body
-or query names a tenant. (v2, R-1, ADR-0038) A token may instead carry `tenants`,
+or query names a tenant. (R-1, ADR-0038) A token may instead carry `tenants`,
 the list of tenants the user belongs to. The request then MUST name one with
 `X-Tenant-Id`, and the ingress MUST refuse a value that is not in the
 verified list. The header selects among tenants the token already names; it
@@ -265,7 +234,7 @@ can never add one.
 scope floor and per-tenant metrics are off by default. The TVM is always on
 (ADR-0018). Per-tenant limits are on by default, at 60 requests per tenant
 per minute (ADR-0020). Turning a module on adds a check; none removes one.
-(v2) Entitlements and the transaction token are always on (ADR-0030,
+Entitlements and the transaction token are always on (ADR-0030,
 ADR-0031): there is no setting under which an agent sees the identity token
 or more than the granted set. The tools gateway is on by default
 (ADR-0034); only `toolsGateway: false` creates none, and then any
@@ -274,28 +243,27 @@ or more than the granted set. The tools gateway is on by default
 toolsGateway: false for none".
 
 **P-5. A delegated token is the narrowest token that works, in a header the
-agent asked for.** (v2, ADR-0031) The agent receives the transaction token,
+agent asked for.** (ADR-0031) The agent receives the transaction token,
 never the identity token, in
 `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token`, never in
-`Authorization` (which carries SigV4 to the Runtime). Narrowing is no longer
-the client's job (v1 ADR-0007: present a narrowed bearer): the ingress
-computes the narrowest set itself (P-11) and signs it. The v1 header
-`...-Custom-User-Token` and the props `delegation.forwardUserToken`,
-`delegation.requireNarrowedToken` and `delegation.allowedScopes` are removed.
+`Authorization` (which carries SigV4 to the Runtime). Narrowing is not the
+client's job: the ingress computes the narrowest set itself (P-11) and
+signs it. Rules out: forwarding the identity token, narrowed or not, to the
+agent.
 
 **P-6. The agent's own role cannot cross tenants because it holds nothing
 tenant-scoped, and holds no model permission either.** The execution role
 grants logs and traces only; it has no data permission and no
 `bedrock:Invoke*` (ADR-0018). The agent invokes the model with the vended tenant
-credentials (P-8). (v2) It holds no permission on the tools gateway either:
+credentials (P-8). It holds no permission on the tools gateway either:
 the gateway's inbound authoriser is the transaction token, not IAM.
 
 **P-7. Security first, then latency, then cost.** Both ingress options MUST
-meet P-1 to P-6 and, in v2, P-11 to P-15 identically. They are compared on
+meet P-1 to P-6 and P-11 to P-15 identically. They are compared on
 measured latency and per-request cost (ADR-0009). The README recommends
 `api-gateway` as the default: both ingresses stream, and `api-gateway` had
 the lower TTFB, p50 0.198 s against 0.274 s (2026-10-27, eu-central-1;
-ADR-0029). (v2) The mint adds one KMS `Sign` per cache miss on both
+ADR-0029). The mint adds one KMS `Sign` per cache miss on both
 ingresses; spike V-12 measures it.
 
 **P-8. Tenant data and the model are reached only with credentials vended
@@ -305,14 +273,14 @@ built from the claims it has just verified (`TenantId` always; `UserId` and
 allowlisted claims on opt-in) and forwards the credentials to the backend
 (§3.4; ADR-0011, ADR-0012). A data-bearing role's policy scopes data by
 `${aws:PrincipalTag/TenantId}`, so a cross-tenant call fails in IAM whatever
-the agent does. (v2, ADR-0034) A tool reaches tenant data the same way, with
+the agent does. (ADR-0034) A tool reaches tenant data the same way, with
 credentials its own TVM vends from the signed tenant context (P-15).
 
 **P-9. Every request is attributable to a tenant in telemetry.** The ingress
 writes the verified `tenant_id` (and the session prefix, never a token) as a
 top-level field of one structured log line per request (ADR-0021). On
 `api-gateway` it is `request served`; on `agentcore-gateway` the interceptor
-writes `request admitted`. (v2) The line also carries `agent`, `txn` (the
+writes `request admitted`. The line also carries `agent`, `txn` (the
 transaction token's id), `grantSize` (entries in `scope`) and `mint`
 (`hit` or `miss`). The tools gateway interceptor writes `tool admitted` with
 `tenantId`, `user` (the identity provider's `sub`), `agent`, `txn`,
@@ -326,14 +294,14 @@ ingress compute milliseconds, backend invocation seconds and streamed bytes
 (backend seconds, bytes and tokens on `api-gateway` only, ADR-0021). Model
 cost is read from the bill: the agent signs every model call with
 credentials tagged `TenantId`, so CUR 2.0 attributes it per tenant
-(ADR-0018). (v2) Tool calls are metered per tenant from the `tool admitted`
+(ADR-0018). Tool calls are metered per tenant from the `tool admitted`
 and `tool served` lines: Gateway calls, Policy evaluations, interceptor and
 tool Lambda milliseconds, KMS `Sign` calls (one per mint miss, one per tool
 call). Only usage figures leave the agent, never content (ADR-0017).
 
 **P-11. The authority an agent holds is computed at the ingress, per agent,
-tenant and user, and is never more than the grant rule allows.** (v2,
-ADR-0030, ADR-0032) The ingress evaluates the rule below on every request and mints
+tenant and user, and is never more than the grant rule allows.** (ADR-0030,
+ADR-0032) The ingress evaluates the rule below on every request and mints
 exactly its result. The client cannot ask for more and does not need to ask
 for less. Rules out: forwarding the user's full scope set to the agent;
 asking the agent to drop scopes it does not need; computing the grant in
@@ -349,14 +317,14 @@ granted(agent, tenant, user) = A.needs ∪ (A.tools ∩ T.tools ∩ U.tools)
 ```
 
 **P-12. A tenant's entitlement is its subscriptions; a tenant admin can only
-subtract.** (v2, ADR-0033) Subscriptions are written by the vendor, directly
+subtract.** (ADR-0033) Subscriptions are written by the vendor, directly
 or through a plan. A tenant admin writes cuts, and a cut row has no field
 that adds an agent or a tool. A user with no cut row holds the tenant's full
 set. Rules out: per-user grants; an admin role that edits the tenant's
 subscriptions.
 
 **P-13. An agent product declares what it needs and which tools it may use;
-nothing else is ever granted through it.** (v2, ADR-0032,
+nothing else is ever granted through it.** (ADR-0032,
 ADR-0035) `needs` are the
 agent's own actions (`<agent>/<action>`), granted whenever the agent is.
 `tools` are the tools the agent may call; a tool the agent does not list is
@@ -365,7 +333,7 @@ lists but the tenant has not subscribed to is not granted either (R-5). The
 definition is registered by the agent's own stack at deploy.
 
 **P-14. The identity token never leaves the ingress. Everything downstream
-sees only a transaction token the ingress minted.** (v2, ADR-0031,
+sees only a transaction token the ingress minted.** (ADR-0031,
 ADR-0037) The transaction token is signed by a KMS key the ingress alone may
 use, names exactly one tenant, one user and one agent, is bound by `aud` to
 that agent and the tools gateways its tools live on (ADR-0041), lives 300 s
@@ -393,7 +361,7 @@ inside the agent: the JWT it presents is the transaction token, so the
 workload identity's allowed issuer is the ingress. Spike V-15 verifies both.
 
 **P-15. A tool learns its tenant only from a context signed for this call,
-and reaches tenant data only through its own TVM.** (v2, ADR-0034) The tools
+and reaches tenant data only through its own TVM.** (ADR-0034) The tools
 gateway interceptor derives the tenant from the transaction token it has
 verified, signs `{tenant_id, sub, agent, tool, argsHash, exp}` with a second
 KMS key, and writes it into a reserved argument, overwriting anything the
@@ -404,7 +372,7 @@ reaches no tenant data. Rules out: tenant id as a plain argument;
 credentials in the request body.
 
 **P-16. Entitlement cardinality lives in data, never in policy, roles or
-Gateways.** (v2, ADR-0030, ADR-0034) The Gateway holds one Cedar policy per
+Gateways.** (ADR-0030, ADR-0034) The Gateway holds one Cedar policy per
 target (O(targets)), the ingress one role and one key, the table one row per
 tenant, plan, agent name, tool and cut. Adding a tenant or a user adds rows,
 never a deploy. The token carries the granted set compressed per target
@@ -428,39 +396,38 @@ tenants or users.
 
 | ID | Component | Notes |
 |---|---|---|
-| C-1 | **Backend: AgentCore Runtime** (ADR-0011) | TypeScript agent, direct code deployment; IAM inbound auth; resource policy per P-1; `requireMMDSV2` deferred until CloudFormation exposes it (ADR-0026, threat model T-13); execution role grants logs and traces only (ADR-0018). (v2) `requestHeaderAllowlist` always holds the credentials header and the transaction-token header, and never the v1 user-token header |
-| C-2 | **Agent** | Echoes its unit id and a per-VM nonce and calls one Bedrock model; validates `prompt` is a string. (v2) Reports the transaction token's claims (`tenant_id`, `agent`, `scope`, `aud`, `act.sub`, `exp`), never the token. A prompt `tool <target>/<tool> <json>` makes it call that tool through the tools gateway with the transaction token as bearer, and `tools` makes it call `tools/list`; it returns the result or the error code. The agent holds one MCP client per `tools-gateway:<name>` in `aud`, with URLs from `RI_TOOLS_GATEWAY_URLS` (ADR-0041); `tools` lists every gateway in `aud`, and a call goes to the gateway whose list held the tool. The report also carries `tokenIss`, `tokenTyp`, `tokenKid`, `tokenSub` and `tokenUser`, the names of the request headers it received (`headerNames`) and, for each header that holds a JWT, its name, `typ` and `iss` only (`jwtHeaders`), never a value (step 11). A tool probe answers `{ error, status }` on a refusal; a tool prompt whose token's `aud` names no tools gateway answers the error `NoToolsGateway`. (ADR-0048) A prompt `delegate <agent> <prompt>` makes it POST `{ prompt }`, plus the `conversationId` it received when there was one, to `RI_DELEGATION_URL/<agent>/delegations` with its transaction token as bearer; the target's stream is relayed as `delegated` SSE events (`{ agent, chunk }`, one per chunk, never parsed), a refusal is one `error` event `{ error: "DelegationRefused", status, body }`, and the caller's own stream still ends with `event: usage`; without `RI_DELEGATION_URL` it answers `NoDelegation`, without a transaction token `NoTransactionToken`. The report also carries the token's `act` chain as agent names, outermost first (`chain`, empty on a direct call), never the token |
-| C-3a | **Ingress A: API Gateway** | Regional REST API, `POST /invocations` (with a `defaultBackend`) and `POST /{backend}/invocations`, a Lambda request authoriser and a Lambda proxy integration with `responseTransferMode: STREAM` and a 2 min timeout. (v2) The authoriser also selects the tenant (P-3), evaluates the grant rule (P-11) and mints the transaction token (P-14); the integration Lambda forwards it. The same REST API carries the JWKS and discovery routes (C-13) and the entitlement API (C-14) |
-| C-3b | **Ingress B: AgentCore Gateway** | `CUSTOM_JWT` on the identity issuer, one Runtime target per `AgentBackend`, `GATEWAY_IAM_ROLE` outbound, a REQUEST interceptor that chooses the unit and overwrites the session header (P-2). (v2) The interceptor also selects the tenant, evaluates the grant rule and mints the token, and writes the token header in `transformedGatewayRequest.headers`. JWKS, discovery and the entitlement API live on a small REST API the construct creates beside it (C-13, C-14) |
-| C-4 | **Demo app** | `src/main.ts`: a `SharedIngress` with `defaultBackend: 'default'`, its `AgentBackend`, plus a `billing` backend with `billingBackend=true`. (v2) Also `ToolTarget`s `crm` and `invoices` (Lambda), a plan `standard` and the demo tenants' subscriptions, written by the integration driver, not the stack. `crm` is on gateway `default`; `invoices` is on gateway `finance`, which has `responseFilter` on (ADR-0041). The demo stack also takes the props `identity` (a user pool and app client in place of the published shared-pool ones) and `toolTestMode` (integration stacks only), and the context value `keyGeneration`; it outputs `Issuer`, `EntitlementsApiUrl`, `ToolsGatewayUrl<Name>` and `PolicyEngineId<Name>` per gateway, `ResponseFilterFunctionName`, `CrmFunctionName`, `InvoicesFunctionName`, `CrmToolTenantRoleArn`, `CrmPolicySecondsToActive` and `InvoicesPolicySecondsToActive`, which the integration driver reads instead of parameters |
-| C-5 | **Integration driver** | `scripts/integ.sh`: deploys or reuses tenant-identity, deploys this sample's stacks, runs the e2e suite and the latency probe, destroys everything (ADR-0019). (v2) No longer checks `/platform/scopes` for backend scopes; registers the vendor application scopes `app/use` and `entitlements/admin` once (§6.4) |
+| C-1 | **Backend: AgentCore Runtime** (ADR-0011) | TypeScript agent, direct code deployment; IAM inbound auth; resource policy per P-1; `requireMMDSV2` deferred until CloudFormation exposes it (ADR-0026, threat model T-13); execution role grants logs and traces only (ADR-0018). `requestHeaderAllowlist` always holds the credentials header and the transaction-token header, and nothing else |
+| C-2 | **Agent** | Echoes its unit id and a per-VM nonce and calls one Bedrock model; validates `prompt` is a string. Reports the transaction token's claims (`tenant_id`, `agent`, `scope`, `aud`, `act.sub`, `exp`), never the token. A prompt `tool <target>/<tool> <json>` makes it call that tool through the tools gateway with the transaction token as bearer, and `tools` makes it call `tools/list`; it returns the result or the error code. The agent holds one MCP client per `tools-gateway:<name>` in `aud`, with URLs from `RI_TOOLS_GATEWAY_URLS` (ADR-0041); `tools` lists every gateway in `aud`, and a call goes to the gateway whose list held the tool. The report also carries `tokenIss`, `tokenTyp`, `tokenKid`, `tokenSub` and `tokenUser`, the names of the request headers it received (`headerNames`) and, for each header that holds a JWT, its name, `typ` and `iss` only (`jwtHeaders`), never a value (step 11). A tool probe answers `{ error, status }` on a refusal; a tool prompt whose token's `aud` names no tools gateway answers the error `NoToolsGateway`. (ADR-0048) A prompt `delegate <agent> <prompt>` makes it POST `{ prompt }`, plus the `conversationId` it received when there was one, to `RI_DELEGATION_URL/<agent>/delegations` with its transaction token as bearer; the target's stream is relayed as `delegated` SSE events (`{ agent, chunk }`, one per chunk, never parsed), a refusal is one `error` event `{ error: "DelegationRefused", status, body }`, and the caller's own stream still ends with `event: usage`; without `RI_DELEGATION_URL` it answers `NoDelegation`, without a transaction token `NoTransactionToken`. The report also carries the token's `act` chain as agent names, outermost first (`chain`, empty on a direct call), never the token |
+| C-3a | **Ingress A: API Gateway** | Regional REST API, `POST /invocations` (with a `defaultBackend`) and `POST /{backend}/invocations`, a Lambda request authoriser and a Lambda proxy integration with `responseTransferMode: STREAM` and a 2 min timeout. The authoriser also selects the tenant (P-3), evaluates the grant rule (P-11) and mints the transaction token (P-14); the integration Lambda forwards it. The same REST API carries the JWKS and discovery routes (C-13) and the entitlement API (C-14) |
+| C-3b | **Ingress B: AgentCore Gateway** | `CUSTOM_JWT` on the identity issuer, one Runtime target per `AgentBackend`, `GATEWAY_IAM_ROLE` outbound, a REQUEST interceptor that chooses the unit and overwrites the session header (P-2). The interceptor also selects the tenant, evaluates the grant rule and mints the token, and writes the token header in `transformedGatewayRequest.headers`. JWKS, discovery and the entitlement API live on a small REST API the construct creates beside it (C-13, C-14) |
+| C-4 | **Demo app** | `src/main.ts`: a `SharedIngress` with `defaultBackend: 'default'`, its `AgentBackend`, plus a `billing` backend with `billingBackend=true`. Also `ToolTarget`s `crm` and `invoices` (Lambda), a plan `standard` and the demo tenants' subscriptions, written by the integration driver, not the stack. `crm` is on gateway `default`; `invoices` is on gateway `finance`, which has `responseFilter` on (ADR-0041). The demo stack also takes the props `identity` (a user pool and app client in place of the published shared-pool ones) and `toolTestMode` (integration stacks only), and the context value `keyGeneration`; it outputs `Issuer`, `EntitlementsApiUrl`, `ToolsGatewayUrl<Name>` and `PolicyEngineId<Name>` per gateway, `ResponseFilterFunctionName`, `CrmFunctionName`, `InvoicesFunctionName`, `CrmToolTenantRoleArn`, `CrmPolicySecondsToActive` and `InvoicesPolicySecondsToActive`, which the integration driver reads instead of parameters |
+| C-5 | **Integration driver** | `scripts/integ.sh`: deploys or reuses tenant-identity, deploys this sample's stacks, runs the e2e suite and the latency probe, destroys everything (ADR-0019). Registers the vendor application scopes `app/use` and `entitlements/admin` once (§6.4) |
 | C-6 | **Unit module** | Shared by both ingress Lambdas: random unit id, or with `session` the claim-derived id (P-2) |
-| C-7 | **TVM module** | Shared by both ingress Lambdas and, in v2, by the tool-side library: claims to session tags, `AssumeRole` + `TagSession`, bounded per-tag-set cache with one STS call per tag set (ADR-0022) |
-| C-8 | ~~Scope registration~~ | (v2, ADR-0030) Removed. A backend no longer registers scopes with tenant-identity's catalogue. Its needs and tools are data in its own registry entry |
-| C-9 | **Registry entry** (`RegistryEntryResource`, ADR-0024) | One per `AgentBackend`: writes `<registryPrefix>backends/<name>`; on delete sets it to `draining`, holds it, then removes it (§4). (v2) The entry carries `needs`, `tools` and `version` instead of `scopes` |
+| C-7 | **TVM module** | Shared by both ingress Lambdas and by the tool-side library: claims to session tags, `AssumeRole` + `TagSession`, bounded per-tag-set cache with one STS call per tag set (ADR-0022) |
+| C-9 | **Registry entry** (`RegistryEntryResource`, ADR-0024) | One per `AgentBackend`: writes `<registryPrefix>backends/<name>`; on delete sets it to `draining`, holds it, then removes it (§4). The entry carries `needs`, `tools` and `version` |
 | C-10 | **Tenant limits table** (`TenantLimits`, ADR-0020) | Per-tenant fixed-window counters, `UpdateItem` only |
 | C-11 | **Log drain** (`LogDrain`, ADR-0019) | Waits between writers and their log groups on delete |
-| C-12 | **Entitlement store** (`EntitlementStore`, DynamoDB, v2, ADR-0030) | One table per `SharedIngress`, single-table design: tenant subscriptions, user cuts, plans, the tool catalogue and name reservations (§4). On-demand, PITR on, no TTL, AWS-owned encryption. The agent definition is not here: it stays in the SSM registry entry `backends/<name>` (fields `needs` and `tools` replace `scopes`), so one writer owns one record and the ingress reads one cache. The table also holds two plan index row kinds and one count row per tool target (§4.5); it has no GSI |
-| C-13 | **Token signer** (`TokenSigner`, v2, ADR-0037) | One KMS asymmetric key, `SIGN_VERIFY`, `RSA_2048` (`RS256`, default) or `ECC_NIST_P256` (`ES256`). `kms:Sign` per mint, granted to the minting role alone; public key fetched once per process with `GetPublicKey` and cached. Two unauthenticated `GET` routes: `<baseUrl>/.well-known/jwks.json` and `<baseUrl>/.well-known/openid-configuration`, answered by a mock integration with the JWKS rendered at deploy, `Cache-Control: max-age=300`. `kid` is the KMS key id. During rotation the JWKS lists two keys (§6.2.3) |
-| C-14 | **Entitlement API** (v2, ADR-0030) | Smithy model, `aws.protocols#restJson1`, on the ingress REST API (or C-13's REST API on `agentcore-gateway`). Vendor operations under IAM (SigV4); tenant-admin operations under the identity token with scope `entitlements/admin`. Operations in §5.3. Lifecycle verbs only (standard §4.2). The Smithy service is named `Entitlements`. The API is two functions: `VendorFunction`, on routes under IAM auth, writes `TENANT#` and `PLAN#` rows; `TenantAdminFunction`, on routes with no API Gateway authoriser, verifies the identity token and the admin scope itself and does every item call through `TenantAdminRole`, assumed with the `TenantId` session tag (§4.5) |
-| C-15 | **Tools gateway** (v2, ADR-0034, ADR-0041) | One AgentCore Gateway per entry of `toolsGateways` (one, `default`, unless more are named), protocol MCP; `CUSTOM_JWT` with `discoveryUrl` = the ingress's discovery URL and `allowedAudience: ['tools-gateway:<name>']`; each gateway with its own AgentCore Policy engine (Cedar), default deny, one generated star permit per target on the `scope` claim; its own REQUEST interceptor (C-15a: the same Lambda code, one function per gateway); its own native per-tenant rate limits keyed on `$.context.jwt.tenant_id`; and, with `responseFilter`, a RESPONSE interceptor (C-15c). One second KMS key, `ToolContextKey`, for the tenant context, shared by every gateway's interceptor. Detail in §3.6 |
-| C-15a | **Tools interceptor** (v2) | Lambda, provisioned concurrency (`toolsGateways.<name>.interceptorProvisionedConcurrency`, default 1). Re-verifies the transaction token against the JWKS, requires `typ`, `iss`, `aud` (containing `tools-gateway:<name>` for its own gateway), `act` (the ingress role at the innermost `act.sub`, §3.7) and `exp`, and checks the tool against `scope`: it is the per-tool wall, and Policy decides per target (ADR-0041). It signs the tenant context, `user` included (§6.2.4), into the reserved argument `_ri_ctx`. Every `tools/call` writes `tool admitted` with `decision: admit | deny` and `gateway`. On `tools/list` it only verifies and logs; a refusal of any other method logs `tools request refused` |
-| C-15b | **Tool-side library** (v2, `src/tools/context.ts`) | Verifies `_ri_ctx` with the cached public half of `ToolContextKey`, checks `tool`, `argsHash` and `exp`, strips the argument, runs the TVM (C-7) with `TenantId` from the context, writes `tool served`. Exported from `src/index.ts` for tool authors |
-| C-15c | **Tools list filter** (v2, ADR-0041, `src/tools/response-filter.function.ts`) | RESPONSE interceptor, created only on a gateway with `responseFilter: true`. On a `tools/list` page it verifies the transaction token as C-15a does and removes every tool `scope` does not name (exact `<target>/<tool>` or `<target>/*`). It never adds a tool and never edits one. Any error, an unverifiable token included, returns a page with an empty `tools` array and no `nextCursor`, so the agent stops paging. It logs `tools list filtered` with `tenantId`, `agent`, `txn`, `listed` and `kept` on success and `response_filter_failed` with `tenantId` and the error name on failure. Other methods pass through unchanged. A UX control: the call wall is C-15a |
-| C-16 | **Tool target** (`ToolTarget`, v2, ADR-0035) | One per tool group: a Gateway target of kind `lambda`, `openApi`, `smithy` or `mcpServer` on the tools gateway its `gateway` prop names (default `default`; a name not in `toolsGateways` fails synth); catalogue rows `TOOL#<target>` for each tool and a `NAME#<target>` reservation, both with an owner marker as ADR-0025 did; the target's Cedar policy, ONE star permit per target (text in §3.6, the `big/*` shape of §7.2 widened to per-tool entries), whatever the tool count (ADR-0041); a no-op `UpdatePolicy` touch after the target syncs, for the known defect that denies tools added after a policy was written; the registry pointer `tools/<target>`. The policy is deleted before the target, and policies are created one at a time with retry (ADR-0040). The policy is a `Custom::RuntimeIsolationToolPolicy` named `<target>_target_<8 hex>` (the hex a SHA-256 of the stack name, the construct path and the gateway), because `CreatePolicy` names are unique per account and Region (ADR-0040); it returns `SecondsToActive`, the time from the call to ACTIVE. The catalogue rows, the `NAME#<target>` reservation and the target's `GATEWAY#<gateway>` / `TARGET#<target>` count row are one `OwnedRows` resource (`Custom::RuntimeIsolationOwnedRows`, construct id `Catalogue`; `AgentBackend`'s is `NameReservation`). Synth fails when the catalogued tools of the `ToolTarget`s in the gateway's own stack would exceed `maxToolsPerGateway`. Targets of other stacks and apps share the gateway (through `SharedIngress.fromParameters`), so the custom resource checks again at deploy, counting over every stack through the `GATEWAY#` count rows: it refuses a target past `maxToolsPerGateway` tools or 100 targets on its gateway. The policy writer holds `GetGateway` and `ListGatewayTargets` on the gateway as well as `InvokeGateway` and `ManageResourceScopedPolicy` |
-| C-17 | **Agent product** (`AgentBackend`, v2, ADR-0032) | The class keeps the name `AgentBackend`. The prop `scopes` is renamed `needs` (breaking, v2), and a new prop `tools` lists the tools the agent may use. The backend also reserves `NAME#<name>` in the entitlement store, so an agent and a tool target can never share an owner name |
+| C-12 | **Entitlement store** (`EntitlementStore`, DynamoDB, ADR-0030) | One table per `SharedIngress`, single-table design: tenant subscriptions, user cuts, plans, the tool catalogue and name reservations (§4). On-demand, PITR on, no TTL, AWS-owned encryption. The agent definition is not here: it stays in the SSM registry entry `backends/<name>` (fields `needs` and `tools`), so one writer owns one record and the ingress reads one cache. The table also holds two plan index row kinds and one count row per tool target (§4.5); it has no GSI |
+| C-13 | **Token signer** (`TokenSigner`, ADR-0037) | One KMS asymmetric key, `SIGN_VERIFY`, `RSA_2048` (`RS256`, default) or `ECC_NIST_P256` (`ES256`). `kms:Sign` per mint, granted to the minting role alone; public key fetched once per process with `GetPublicKey` and cached. Two unauthenticated `GET` routes: `<baseUrl>/.well-known/jwks.json` and `<baseUrl>/.well-known/openid-configuration`, answered by a mock integration with the JWKS rendered at deploy, `Cache-Control: max-age=300`. `kid` is the KMS key id. During rotation the JWKS lists two keys (§6.2.3) |
+| C-14 | **Entitlement API** (ADR-0030) | Smithy model, `aws.protocols#restJson1`, on the ingress REST API (or C-13's REST API on `agentcore-gateway`). Vendor operations under IAM (SigV4); tenant-admin operations under the identity token with scope `entitlements/admin`. Operations in §5.3. Lifecycle verbs only (standard §4.2). The Smithy service is named `Entitlements`. The API is two functions: `VendorFunction`, on routes under IAM auth, writes `TENANT#` and `PLAN#` rows; `TenantAdminFunction`, on routes with no API Gateway authoriser, verifies the identity token and the admin scope itself and does every item call through `TenantAdminRole`, assumed with the `TenantId` session tag (§4.5) |
+| C-15 | **Tools gateway** (ADR-0034, ADR-0041) | One AgentCore Gateway per entry of `toolsGateways` (one, `default`, unless more are named), protocol MCP; `CUSTOM_JWT` with `discoveryUrl` = the ingress's discovery URL and `allowedAudience: ['tools-gateway:<name>']`; each gateway with its own AgentCore Policy engine (Cedar), default deny, one generated star permit per target on the `scope` claim; its own REQUEST interceptor (C-15a: the same Lambda code, one function per gateway); its own native per-tenant rate limits keyed on `$.context.jwt.tenant_id`; and, with `responseFilter`, a RESPONSE interceptor (C-15c). One second KMS key, `ToolContextKey`, for the tenant context, shared by every gateway's interceptor. Detail in §3.6 |
+| C-15a | **Tools interceptor** | Lambda, provisioned concurrency (`toolsGateways.<name>.interceptorProvisionedConcurrency`, default 1). Re-verifies the transaction token against the JWKS, requires `typ`, `iss`, `aud` (containing `tools-gateway:<name>` for its own gateway), `act` (the ingress role at the innermost `act.sub`, §3.7) and `exp`, and checks the tool against `scope`: it is the per-tool wall, and Policy decides per target (ADR-0041). It signs the tenant context, `user` included (§6.2.4), into the reserved argument `_ri_ctx`. Every `tools/call` writes `tool admitted` with `decision: admit \| deny` and `gateway`. On `tools/list` it only verifies and logs; a refusal of any other method logs `tools request refused` |
+| C-15b | **Tool-side library** (`src/tools/context.ts`) | Verifies `_ri_ctx` with the cached public half of `ToolContextKey`, checks `tool`, `argsHash` and `exp`, strips the argument, runs the TVM (C-7) with `TenantId` from the context, writes `tool served`. Exported from `src/index.ts` for tool authors |
+| C-15c | **Tools list filter** (ADR-0041, `src/tools/response-filter.function.ts`) | RESPONSE interceptor, created only on a gateway with `responseFilter: true`. On a `tools/list` page it verifies the transaction token as C-15a does and removes every tool `scope` does not name (exact `<target>/<tool>` or `<target>/*`). It never adds a tool and never edits one. Any error, an unverifiable token included, returns a page with an empty `tools` array and no `nextCursor`, so the agent stops paging. It logs `tools list filtered` with `tenantId`, `agent`, `txn`, `listed` and `kept` on success and `response_filter_failed` with `tenantId` and the error name on failure. Other methods pass through unchanged. A UX control: the call wall is C-15a |
+| C-16 | **Tool target** (`ToolTarget`, ADR-0035) | One per tool group: a Gateway target of kind `lambda`, `openApi`, `smithy` or `mcpServer` on the tools gateway its `gateway` prop names (default `default`; a name not in `toolsGateways` fails synth); catalogue rows `TOOL#<target>` for each tool and a `NAME#<target>` reservation, both with an owner marker as ADR-0025 did; the target's Cedar policy, ONE star permit per target (text in §3.6, the `big/*` shape of §7.2 widened to per-tool entries), whatever the tool count (ADR-0041); a no-op `UpdatePolicy` touch after the target syncs, for the known defect that denies tools added after a policy was written; the registry pointer `tools/<target>`. The policy is deleted before the target, and policies are created one at a time with retry (ADR-0040). The policy is a `Custom::RuntimeIsolationToolPolicy` named `<target>_target_<8 hex>` (the hex a SHA-256 of the stack name, the construct path and the gateway), because `CreatePolicy` names are unique per account and Region (ADR-0040); it returns `SecondsToActive`, the time from the call to ACTIVE. The catalogue rows, the `NAME#<target>` reservation and the target's `GATEWAY#<gateway>` / `TARGET#<target>` count row are one `OwnedRows` resource (`Custom::RuntimeIsolationOwnedRows`, construct id `Catalogue`; `AgentBackend`'s is `NameReservation`). Synth fails when the catalogued tools of the `ToolTarget`s in the gateway's own stack would exceed `maxToolsPerGateway`. Targets of other stacks and apps share the gateway (through `SharedIngress.fromParameters`), so the custom resource checks again at deploy, counting over every stack through the `GATEWAY#` count rows: it refuses a target past `maxToolsPerGateway` tools or 100 targets on its gateway. The policy writer holds `GetGateway` and `ListGatewayTargets` on the gateway as well as `InvokeGateway` and `ManageResourceScopedPolicy` |
+| C-17 | **Agent product** (`AgentBackend`, ADR-0032) | The prop `needs` names the agent's own actions (`<name>/<action>`, P-13), always granted with the agent, and `tools` lists the tools the agent may use. The backend also reserves `NAME#<name>` in the entitlement store, so an agent and a tool target can never share an owner name |
 
 ### 3.2 Caller and identity model
 
 - A **tenant user** signs in to tenant-identity and receives an identity
   token (an access token) with `sub`, `client_id`, `scope` and either
   `tenant_id` (`shared-pool`) or `tenants` (`shared-pool-multi-tenant`).
-  (v2) `scope` holds the application floor only (for example `app/use`,
+  `scope` holds the application floor only (for example `app/use`,
   and `entitlements/admin` for a tenant admin). It holds no agent and no
   tool names; those come from the entitlement store (ADR-0030).
 - The client calls the ingress with the identity token as bearer and, when
   the token carries `tenants`, `X-Tenant-Id: <tenantId>`. No token exchange
-  happens before the call (v2, ADR-0031).
+  happens before the call (ADR-0031).
 - The **ingress** is the issuer of the transaction token. Its role ARN is the
   `act.sub` of every token it mints.
 - The **agent** is a holder of the transaction token. It presents it as
@@ -490,13 +457,17 @@ fails with the prop name.
 |---|---|---|---|
 | `identity.discoveryUrl` | string | required | OIDC discovery URL of the identity issuer |
 | `identity.allowedClientIds` | string[] | required, non-empty | `client_id` values accepted |
-| `identity.multiTenant` | boolean | `false` | (v2, R-1, ADR-0038) accept tokens that carry `tenants`; off, such a token is refused as in v1 |
+| `identity.multiTenant` | boolean | `false` | (R-1, ADR-0038) accept tokens that carry `tenants`; off, such a token is refused |
 | `backend` | `'agentcore-runtime'` | `'agentcore-runtime'` | ADR-0011 |
 | `ingress` | `'api-gateway' \| 'agentcore-gateway'` | required | C-3a or C-3b |
-| `session.scope` | `'tenant' \| 'user'` | `'tenant'` when `session` is set; no session mapping when `session` is absent | (v2, ADR-0039) P-2, ADR-0013 |
+| `session.scope` | `'tenant' \| 'user'` | `'tenant'` when `session` is set; no session mapping when `session` is absent | (ADR-0039) P-2, ADR-0013 |
 | `requiredScopes` | string[] | none | the floor: every identity token MUST carry all of them (ADR-0005), for example `['app/use']` |
-| `tvm.role`, `tvm.includeUserIdTag`, `tvm.claimTags`, `tvm.durationSeconds`, `tvm.cacheMaxEntries` | as v1 | as v1 | P-8, ADR-0012, ADR-0018, ADR-0022 |
-| `tenantLimits` | `{ requestsPerMinute?, outputTokensPerMinute? } \| false` | `requestsPerMinute: 60` | ADR-0020; keyed on the selected tenant (v2) |
+| `tvm.role` | `iam.IRole` | none (construct creates a model-only role) | the TVM is always on (ADR-0018); unset, the construct creates `TenantModelRole` that may invoke only the one model; set, a role that also reaches tenant data, whose trust and ABAC the deployer owns and to which the construct adds the model grant (P-8, ADR-0012, ADR-0018) |
+| `tvm.includeUserIdTag` | boolean | `false` | add `UserId = sub` as a session tag |
+| `tvm.claimTags` | `Record<string, string>` | none | extra session tags, tag key to claim name; a claim missing from the token fails the request with 403; `TenantId` and `UserId` are reserved keys |
+| `tvm.durationSeconds` | number | `900` | 900 to 3600; credential lifetime |
+| `tvm.cacheMaxEntries` | number | `1000` | cached credential sets per ingress instance, one per tag set; least recently used evicted first (ADR-0022) |
+| `tenantLimits` | `{ requestsPerMinute?, outputTokensPerMinute? } \| false` | `requestsPerMinute: 60` | ADR-0020; keyed on the selected tenant |
 | `stageThrottle` | `{ rateLimit?, burstLimit? }` | 50 rps, burst 25 | `api-gateway` only; synth warns when unset: one bucket for every tenant, the per-tenant limit behind it (T-105) |
 | `ingressReservedConcurrency` | positive integer | unset | `api-gateway` only: reserved concurrency on the streaming integration function (T-105) |
 | `toolContextKey` | `{ algorithm?: 'RS256' \| 'ES256' }` | `RS256` | `ES256` moves tool-context `kms:Sign` to the KMS ECC quota, off the RSA quota the mint shares (T-105) |
@@ -505,28 +476,26 @@ fails with the prop name.
 | `publish` | boolean | true | ADR-0042 |
 | `registryTtl` | `Duration` | 60 s | cache life of registry entries, plans and the tool catalogue, 1 s to 750 s |
 | `defaultBackend` | string | none | backend for the bare `/invocations` route |
-| `transactionToken.ttl` | `Duration` | 300 s | (v2) `exp - iat`; 120 s to 900 s (ADR-0043). A tools gateway refuses a token with 60 s or less left, so a token is usable there until `exp - 60 s` |
-| `transactionToken.cacheMaxEntries` | number | 1000 | (v2) minted tokens kept per ingress instance, LRU |
-| `transactionToken.algorithm` | `'RS256' \| 'ES256'` | `'RS256'` | (v2) key spec of C-13; `ES256` only after V-8 shows the Gateway accepts it |
-| `transactionToken.keyGeneration` | number | 1 | (v2) bump to rotate: a new key signs, the previous stays in the JWKS (§6.2.3) |
+| `transactionToken.ttl` | `Duration` | 300 s | `exp - iat`; 120 s to 900 s (ADR-0043). A tools gateway refuses a token with 60 s or less left, so a token is usable there until `exp - 60 s` |
+| `transactionToken.cacheMaxEntries` | number | 1000 | minted tokens kept per ingress instance, LRU |
+| `transactionToken.algorithm` | `'RS256' \| 'ES256'` | `'RS256'` | key spec of C-13; `ES256` only after V-8 shows the Gateway accepts it |
+| `transactionToken.keyGeneration` | number | 1 | bump to rotate: a new key signs, the previous stays in the JWKS (§6.2.3) |
 | `agentDelegation.maxDepth` | `1 \| 2 \| 3` | unset: no delegation route | (ADR-0048) creates `POST /{backend}/delegations` on the `api-gateway` ingress and sets `RI_DELEGATION_URL` on every agent of the ingress; the number of agents a transaction may pass through after the one the user called (§3.7). Fails synth on an `agentcore-gateway` ingress (its authoriser reads one issuer) and together with a non-empty `tvm.claimTags` (a replacement token carries the tenant and the user, no identity claims to tag from) |
-| `entitlements.adminScope` | string | `'entitlements/admin'` | (v2) identity-token scope the tenant-admin operations require |
-| `entitlements.maxAgentsPerTenant` | number | 1000 | (v2) bound on `agents` entries in a tenant or plan row |
-| `entitlements.maxToolsPerTenant` | number | 1000 | (v2) bound on `tools` entries in a tenant or plan row; a `<target>/*` entry counts once, so a tenant subscribed to whole targets holds 1,000s of tools in 10s of entries |
-| `toolsGateway` | `ToolsGatewayOptions \| false` | on | (v2, ADR-0034) `false` creates no tools gateway; `toolsGateway: {...}` is shorthand for `toolsGateways: { default: {...} }` (ADR-0041); setting both fails synth |
-| `toolsGateways` | `Record<string, ToolsGatewayOptions>` | `{ default: {} }` | (v2, ADR-0041) several gateways, names `[a-z0-9-]{1,32}`, each with its own Policy engine, interceptor, rate limits and `responseFilter`; `{}` fails synth ("must name at least one gateway; use toolsGateway: false for none"), since only `toolsGateway: false` creates none. A `ToolTarget` names its gateway (`gateway`, default `default`). The rows below are per gateway; under the shorthand they are written `toolsGateway.<prop>` |
-| `toolsGateways.<name>.maxToolsPerGateway` | number | 300 | (v2, ADR-0041) synth fails when the gateway's catalogued tools would exceed it; the Policy engine's 400 KB schema quota holds about 330 one-field tools (V-16a) |
-| `toolsGateways.<name>.responseFilter` | boolean | `false` | (v2, ADR-0041) a RESPONSE interceptor that trims each `tools/list` page to the exact tools in `scope`; off, the list is filtered natively at target grain |
-| `toolsGateways.<name>.tenantRateLimit` | `{ requestsPerSecond: number }` | `{ requestsPerSecond: 10 }` | (v2) native limit, one bucket per `tenant_id` (`*` entry), per gateway (ADR-0041) |
-| `toolsGateways.<name>.tenantRateLimitOverrides` | `Record<string, number>` | none | (v2) named tenants with their own rate, at most 1,000, per gateway |
-| `toolsGateways.<name>.interceptorProvisionedConcurrency` | number | 1 | (v2) on that gateway's C-15a |
-| `toolsGateways.<name>.contextLifetime` | `Duration` | 60 s | (v2) `exp` of the signed tenant context; 10 s to 300 s |
+| `entitlements.adminScope` | string | `'entitlements/admin'` | identity-token scope the tenant-admin operations require |
+| `entitlements.maxAgentsPerTenant` | number | 1000 | bound on `agents` entries in a tenant or plan row |
+| `entitlements.maxToolsPerTenant` | number | 1000 | bound on `tools` entries in a tenant or plan row; a `<target>/*` entry counts once, so a tenant subscribed to whole targets holds 1,000s of tools in 10s of entries |
+| `toolsGateway` | `ToolsGatewayOptions \| false` | on | (ADR-0034) `false` creates no tools gateway; `toolsGateway: {...}` is shorthand for `toolsGateways: { default: {...} }` (ADR-0041); setting both fails synth |
+| `toolsGateways` | `Record<string, ToolsGatewayOptions>` | `{ default: {} }` | (ADR-0041) several gateways, names `[a-z0-9-]{1,32}`, each with its own Policy engine, interceptor, rate limits and `responseFilter`; `{}` fails synth ("must name at least one gateway; use toolsGateway: false for none"), since only `toolsGateway: false` creates none. A `ToolTarget` names its gateway (`gateway`, default `default`). The rows below are per gateway; under the shorthand they are written `toolsGateway.<prop>` |
+| `toolsGateways.<name>.maxToolsPerGateway` | number | 300 | (ADR-0041) synth fails when the gateway's catalogued tools would exceed it; the Policy engine's 400 KB schema quota holds about 330 one-field tools (V-16a) |
+| `toolsGateways.<name>.responseFilter` | boolean | `false` | (ADR-0041) a RESPONSE interceptor that trims each `tools/list` page to the exact tools in `scope`; off, the list is filtered natively at target grain |
+| `toolsGateways.<name>.tenantRateLimit` | `{ requestsPerSecond: number }` | `{ requestsPerSecond: 10 }` | native limit, one bucket per `tenant_id` (`*` entry), per gateway (ADR-0041) |
+| `toolsGateways.<name>.tenantRateLimitOverrides` | `Record<string, number>` | none | named tenants with their own rate, at most 1,000, per gateway |
+| `toolsGateways.<name>.interceptorProvisionedConcurrency` | number | 1 | on that gateway's C-15a |
+| `toolsGateways.<name>.contextLifetime` | `Duration` | 60 s | `exp` of the signed tenant context; 10 s to 300 s |
 
-Removed (v2, ADR-0031): `delegation.forwardUserToken`,
-`delegation.requireNarrowedToken`, `delegation.allowedScopes`. Synth fails
-with `delegation is removed in v2; the agent receives a transaction token
-(ADR-0031)` when any is set. The v1 limitation that a static
-`allowedScopes` list forced an ingress redeploy per backend goes with them.
+There is no `delegation` prop (ADR-0031): synth fails with `delegation is
+removed in v2; the agent receives a transaction token (ADR-0031)` when one
+is set, so a consumer of an older construct learns where the token went.
 
 On `api-gateway` the authoriser result cache is
 `min(60 s, transactionToken.ttl - 120 s)` (ADR-0043), keyed on
@@ -540,13 +509,13 @@ Constructs:
 
 | Construct | Props | Meaning |
 |---|---|---|
-| `SharedIngress` | the table above | the ingress: API or Gateway, authoriser, TVM, limits, log drain, entitlement store, token signer, entitlement API and, unless `toolsGateway: false`, the tools gateways (one per `toolsGateways` entry, ADR-0041). `SharedIngress.fromParameters(scope, id, prefix, ingress?, { toolsGateway?, toolsGateways? })` returns a `SharedIngressRef` read from the published parameters (§6.4; ADR-0041, ADR-0042): `ingress`, when given, must match the published document; `toolsGateway: false` carries no gateway, `toolsGateways` names the ones the ref carries (each must be in the document), and by default the ref carries every gateway the document lists. The v1 option `{ forwardUserToken? }` is removed (v2) |
-| `AgentBackend` | `name` (`[a-z0-9-]{1,32}`), `ingress`, `agent` (`{ codePath, modelId, environment? }`), `needs` (required, v2), `tools` (default `[]`, v2), `delegatesTo` (default `[]`, ADR-0048), `owner?` (default `<StackId>#<LogicalResourceId>`) | one agent product: the Runtime tagged `ri:ingress = <ingressId>`, its resource policy naming the ingress role, on `agentcore-gateway` a Gateway target named `name`, the `NAME#<name>` reservation and the registry entry `{ runtimeArn, needs, tools, delegatesTo, status, version }`. The agent's environment receives `RI_TOOLS_GATEWAY_URL` and `RI_ISSUER` (v2), and (ADR-0041) `RI_TOOLS_GATEWAY_URLS`, a JSON map of gateway name to MCP URL; `RI_TOOLS_GATEWAY_URL` is the `default` gateway's; and, when the ingress has `agentDelegation`, `RI_DELEGATION_URL`, the `api-gateway` base URL to which the agent appends `/<agent>/delegations` (§3.7). The props `scopes`, `identityApi` and `scopeOwner` are removed (v2, ADR-0032): synth fails naming `scopes` with `renamed to needs in v2` |
-| `ToolTarget` | `name` (`[a-z0-9-]{1,32}`), `ingress`, `kind` (`'lambda' \| 'openApi' \| 'smithy' \| 'mcpServer'`), `tools` (`{ name, description, inputSchema? }[]`, required for every kind, because it is the catalogue; `inputSchema` only for `lambda`), `function?` (`lambda`), `spec?` (`openApi`, `smithy`), `endpoint?` (`mcpServer`), `outboundAuth?`, `tvm?` (`{ role }`, the tool's tenant role), `gateway?` (default `'default'`, a key of `toolsGateways`; ADR-0041), `owner?` | (v2, ADR-0035) one Gateway target on its gateway and its catalogue rows, star permit and registry pointer (§3.6). Changing `gateway` replaces the target: the old policy and target are deleted in the ADR-0040 order, then both are created on the new gateway. `outboundAuth` names exactly one of `{ gatewayIamRole: { service?, region? } }`, `{ oauth: { providerArn, secretArn, scopes, grant: '3LO' \| 'OBO' \| 'M2M', defaultReturnUrl?, customParameters? } }` or `{ apiKey: { providerArn, secretArn, location: 'HEADER' \| 'QUERY_PARAMETER', name, prefix? } }` (§3.5). `maxToolsPerGateway?` (default 300) is read only when the ingress is in another stack; a same-stack target reads its gateway's |
-| `TokenSigner` | `algorithm`, `keyGeneration`, `signer` (the role allowed `kms:Sign`); method `grantSign(grantee)` for a second minting principal, used by the integration stacks only | (v2) C-13; created by `SharedIngress`, exported for a consumer that builds its own ingress |
-| `EntitlementStore` | `maxAgentsPerTenant`, `maxToolsPerTenant` | (v2) C-12; created by `SharedIngress`, exported for the same reason |
+| `SharedIngress` | the table above | the ingress: API or Gateway, authoriser, TVM, limits, log drain, entitlement store, token signer, entitlement API and, unless `toolsGateway: false`, the tools gateways (one per `toolsGateways` entry, ADR-0041). `SharedIngress.fromParameters(scope, id, prefix, ingress?, { toolsGateway?, toolsGateways? })` returns a `SharedIngressRef` read from the published parameters (§6.4; ADR-0041, ADR-0042): `ingress`, when given, must match the published document; `toolsGateway: false` carries no gateway, `toolsGateways` names the ones the ref carries (each must be in the document), and by default the ref carries every gateway the document lists. |
+| `AgentBackend` | `name` (`[a-z0-9-]{1,32}`), `ingress`, `agent` (`{ codePath, modelId, environment? }`), `needs` (required), `tools` (default `[]`), `delegatesTo` (default `[]`, ADR-0048), `owner?` (default `<StackId>#<LogicalResourceId>`) | one agent product: the Runtime tagged `ri:ingress = <ingressId>`, its resource policy naming the ingress role, on `agentcore-gateway` a Gateway target named `name`, the `NAME#<name>` reservation and the registry entry `{ runtimeArn, needs, tools, delegatesTo, status, version }`. The agent's environment receives `RI_TOOLS_GATEWAY_URL` and `RI_ISSUER`, and (ADR-0041) `RI_TOOLS_GATEWAY_URLS`, a JSON map of gateway name to MCP URL; `RI_TOOLS_GATEWAY_URL` is the `default` gateway's; and, when the ingress has `agentDelegation`, `RI_DELEGATION_URL`, the `api-gateway` base URL to which the agent appends `/<agent>/delegations` (§3.7). `scopes`, `identityApi` and `scopeOwner` are not props (ADR-0032): synth fails on `scopes` with `is renamed to needs in v2 (ADR-0032)`, so a consumer of an older construct learns the new name |
+| `ToolTarget` | `name` (`[a-z0-9-]{1,32}`), `ingress`, `kind` (`'lambda' \| 'openApi' \| 'smithy' \| 'mcpServer'`), `tools` (`{ name, description, inputSchema? }[]`, required for every kind, because it is the catalogue; `inputSchema` only for `lambda`), `function?` (`lambda`), `spec?` (`openApi`, `smithy`), `endpoint?` (`mcpServer`), `outboundAuth?`, `tvm?` (`{ role }`, the tool's tenant role), `gateway?` (default `'default'`, a key of `toolsGateways`; ADR-0041), `owner?` | (ADR-0035) one Gateway target on its gateway and its catalogue rows, star permit and registry pointer (§3.6). Changing `gateway` replaces the target: the old policy and target are deleted in the ADR-0040 order, then both are created on the new gateway. `outboundAuth` names exactly one of `{ gatewayIamRole: { service?, region? } }`, `{ oauth: { providerArn, secretArn, scopes, grant: '3LO' \| 'OBO' \| 'M2M', defaultReturnUrl?, customParameters? } }` or `{ apiKey: { providerArn, secretArn, location: 'HEADER' \| 'QUERY_PARAMETER', name, prefix? } }` (§3.5). `maxToolsPerGateway?` (default 300) is read only when the ingress is in another stack; a same-stack target reads its gateway's |
+| `TokenSigner` | `algorithm`, `keyGeneration`, `signer` (the role allowed `kms:Sign`); method `grantSign(grantee)` for a second minting principal, used by the integration stacks only | C-13; created by `SharedIngress`, exported for a consumer that builds its own ingress |
+| `EntitlementStore` | `maxAgentsPerTenant`, `maxToolsPerTenant` | C-12; created by `SharedIngress`, exported for the same reason |
 
-**Agent product names (v2, ADR-0032).** `needs` is a non-empty list of
+**Agent product names (ADR-0032).** `needs` is a non-empty list of
 `<name>/<action>`, where `<name>` is the backend's own name, both sides
 `[a-z0-9-]`, 3 to 128 characters in all. `tools` is a list of
 `<target>/<tool>` or `<target>/*`, at most 64 entries, no duplicates; a
@@ -578,22 +547,22 @@ backend-neutral.
 | Invoke call | `InvokeAgentRuntime`, SigV4 | its own call |
 | Who may invoke (P-1) | Runtime resource policy, ingress principal only | its own resource policy |
 | Unit id transport (P-2) | `runtimeSessionId` | its own field |
-| Credential and token transport (P-5, P-8) | allowlisted headers `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Credentials` (base64 JSON, ADR-0018) and, (v2, ADR-0031), `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token` (the raw JWT), both always | its own payload or context field, with V-13 repeated |
+| Credential and token transport (P-5, P-8) | allowlisted headers `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Credentials` (base64 JSON, ADR-0018) and, (ADR-0031), `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token` (the raw JWT), both always | its own payload or context field, with V-13 repeated |
 
 The ingress hands the backend a validated request (`tenant_id`, `sub`, the
 chosen unit id, `prompt`, the validated `conversationId` when the `session`
-module is on, the vended credentials and, in v2, the transaction token). The
+module is on, the vended credentials and the transaction token). The
 Runtime payload is `{ prompt }`, or `{ prompt, conversationId }` with
 sessions on, and nothing else from the request; the `conversationId` lets an
 agent delegate inside the same conversation (§3.7). The backend never sees
-the identity token (v2; in v1 it could, on opt-in).
+the identity token.
 
 "Who may invoke" has two halves (ADR-0024). `bindIngress` writes only the
 Runtime's resource policy, naming the ingress role. The identity-side grant
 is the ingress's own: `InvokeAgentRuntime` on the account's Runtime ARN
 pattern, conditioned on `aws:ResourceTag/ri:ingress = <ingressId>`.
 
-### 3.5 Tool target interface (v2, ADR-0034, ADR-0035)
+### 3.5 Tool target interface (ADR-0034, ADR-0035)
 
 A tool target is what `ToolTarget` registers behind the tools gateway. It
 defines:
@@ -629,7 +598,7 @@ Gateway role is granted `secretsmanager:GetSecretValue` on, beside
 Non-Lambda kinds are built and template-tested; the integration test has no
 third-party target.
 
-### 3.6 Request path and tools gateway detail (v2)
+### 3.6 Request path and tools gateway detail
 
 The REQUEST interceptor runs before Policy, so it is the first wall
 (ADR-0040) and the wall at tool grain: inside a target the user holds, it
@@ -648,13 +617,13 @@ reuse margin (below) keeps a cached token above that (ADR-0043).
 
 ```
 client ──identity token (+ X-Tenant-Id when tenants[])──▶ ingress authoriser
-   verify identity token (v1 checks); pick tenant; 403 if not in tenants[]
-   per-tenant limit (v1)                                                  ──▶ 429
+   verify identity token; pick tenant; 403 if not in tenants[]
+   per-tenant limit                                                       ──▶ 429
    read TENANT row, USER cut row (often a miss), AGENT def (registry cache)
    granted = rule; agent ∉ T∩U ──▶ 403 agent_not_subscribed
    mint transaction token (KMS Sign); cache per (tenant, sub, agent, tenant.version) for its life
-   TVM (v1): tenant credentials
-──▶ ingress Lambda: InvokeAgentRuntime, headers: credentials (v1) + transaction token
+   TVM: tenant credentials
+──▶ ingress Lambda: InvokeAgentRuntime, headers: credentials + transaction token
 ──▶ agent: reads scope and aud from the transaction token; calls each tools gateway in aud with it as bearer
 ──▶ tools gateway <gw>: CUSTOM_JWT (ingress issuer, aud tools-gateway:<gw>) ──▶ interceptor (tool grain: typ, act, aud, scope; refuse or sign context; log) ──▶ Policy (target grain; tools/list filter)
       tools/list on a gateway with responseFilter ──▶ RESPONSE interceptor (tool grain; only removes)
@@ -662,8 +631,7 @@ client ──identity token (+ X-Tenant-Id when tenants[])──▶ ingress auth
       agent ──transaction token──▶ POST /<other agent>/delegations: the same path again for the next agent (§3.7)
 ```
 
-On `agentcore-gateway` the first two boxes are one REQUEST interceptor, as
-in v1.
+On `agentcore-gateway` the first two boxes are one REQUEST interceptor.
 
 **Reads per request.** One `BatchGetItem` (eventually consistent) for
 `TENANT#<id>` / `#SUB` and `TENANT#<id>` / `USER#<sub>`. The plan row, the
@@ -707,7 +675,7 @@ that grow with agents and tools, and where each is bounded:
 | Grows with | Where | Bound | Rule |
 |---|---|---|---|
 | Agents | registry entries in SSM, one per agent | SSM standard tier, 10,000 parameters | cached per name; no listing on the hot path |
-| Agents | `AgentBackend` Runtimes | AgentCore Runtime quota per account | one Runtime per agent, as v1 |
+| Agents | `AgentBackend` Runtimes | AgentCore Runtime quota per account | one Runtime per agent |
 | Agents on the `agentcore-gateway` ingress | one Runtime target per agent on the ingress Gateway | 100 targets per Gateway (V-14) | **the `agentcore-gateway` ingress caps at 100 agents**; `api-gateway` has no such cap and is the recommended ingress (ADR-0029). The README says so |
 | Agents per tenant | `agents` entries on the tenant row | `maxAgentsPerTenant`, 1,000 | one row read per mint, cached per tenant version |
 | Tools | catalogue rows `TOOL#` | 1,000 per target, 100 targets | the ingress Queries one target at a time and caches it `registryTtl`; the whole catalogue is never read |
@@ -826,12 +794,12 @@ Rejected alternatives, kept from the review (§4) and recorded in ADR-0034:
   2 to 3 minutes each to ACTIVE, and about 40 such targets reach the
   1,000-policy engine quota (V-16a). Rejected for one star permit per
   target.
-- (v2) **Scopes in the identity token** (the review's plan: tool scopes in
+- **Scopes in the identity token** (the review's plan: tool scopes in
   tenant-identity's catalogue). The identity token would carry every tool
   the user may use with any agent, not the ones this agent may use, so it
   fails R-6; and at 100s of tools it would pass Cognito's 2,048-character
   `custom:scopes` bound. Rejected in ADR-0030.
-- (v2) **The identity token as the tools bearer.** It is not bound to an
+- **The identity token as the tools bearer.** It is not bound to an
   agent (RFC 8707) and the MCP specification forbids passing a client token
   through. Rejected in ADR-0031.
 
@@ -944,23 +912,23 @@ would reach each other without the vendor's say).
 
 ## 4. Data model
 
-### 4.1 Derived values (v1)
+### 4.1 Derived values
 
 | Field | Source | Shape |
 |---|---|---|
 | random id (no `session`) | `s-` + base32 of 32 random bytes | `s-[a-z2-7]{52}` |
-| prefix (`session`) | `sha256(tenant_id "|" sub)` or `sha256(tenant_id)`, base32, first 26 chars | `[a-z2-7]{26}` |
+| prefix (`session`) | `sha256(tenant_id "\|" sub)` or `sha256(tenant_id)`, base32, first 26 chars | `[a-z2-7]{26}` |
 | `conversationId` (`session`) | client, in the body | `[A-Za-z0-9]{16,64}` |
 | `runtimeSessionId` | the random id, or `s-<prefix>-<conversationId>` | 45 to 93 chars |
 
 Model cost per tenant is not stored; it is read from the bill (ADR-0018).
 
-### 4.2 Tenant limits (v1, ADR-0020)
+### 4.2 Tenant limits (ADR-0020)
 
 `TenantLimits`: `PK = TENANT#<tenantId>#<epochMinute>`, attributes
 `requests` and `outputTokens`, TTL on `expiresAt` (180 s). Counters only.
 
-### 4.3 Backend registry (ADR-0024; v2, ADR-0032, ADR-0035)
+### 4.3 Backend registry (ADR-0024, ADR-0032, ADR-0035)
 
 One SSM `String` parameter per backend at `<registryPrefix>backends/<name>`,
 written by that backend's stack, read by the ingress, JSON, 4 KB.
@@ -968,15 +936,15 @@ written by that backend's stack, read by the ingress, JSON, 4 KB.
 | Field | Shape | Meaning |
 |---|---|---|
 | `runtimeArn` | `arn:<partition>:bedrock-agentcore:<region>:<account>:runtime/<id>` | the Runtime the route invokes |
-| `needs` | string[], required, non-empty (v2) | `A.needs`, always granted with the agent |
-| `tools` | string[], required, may be empty (v2) | `A.tools`, `<target>/<tool>` or `<target>/*` |
+| `needs` | string[], required, non-empty | `A.needs`, always granted with the agent |
+| `tools` | string[], required, may be empty | `A.tools`, `<target>/<tool>` or `<target>/*` |
 | `delegatesTo` | string[], optional, default `[]` (ADR-0048) | the agents this agent may hand a transaction to (§3.7); an absent field reads as empty, so existing entries stay valid |
-| `version` | integer (v2) | 1 on Create, +1 on each Update; part of the mint cache key |
+| `version` | integer | 1 on Create, +1 on each Update; part of the mint cache key |
 | `status` | `active` or `draining` | `draining` refuses new requests (404) while streams finish |
 
-(v2) An entry without `needs` or `tools`, or with the v1 field `scopes`, is
-refused with 502 and log reason `registry_entry_v1`, so an entry in the old
-shape fails loudly rather than granting the wrong set.
+An entry without `needs` or `tools`, or with a `scopes` field, is refused
+with 502 and log reason `registry_entry_v1`, so an entry in another shape
+fails loudly rather than granting the wrong set.
 
 The ingress also refuses an entry whose `needs` are not all
 `<backend>/<action>` for the backend it is read for
@@ -985,7 +953,7 @@ need owned by another name (`crm/getaccount`) would read as a tool grant at
 the tools gateway. Synth checks the same rule (ADR-0032); this is the
 read-time check.
 
-### 4.4 Tool registry pointer (v2, ADR-0035)
+### 4.4 Tool registry pointer (ADR-0035)
 
 One SSM `String` parameter per tool target at `<registryPrefix>tools/<target>`:
 `{ gatewayTargetId, gateway, kind, status, version }`, where `gateway` is
@@ -994,7 +962,7 @@ tool names; the catalogue rows (§4.5) do. Consumers use it to discover
 targets; the ingress does not read it, so no cache key depends on the
 pointer and an update of the target rewrites it without bumping `version`.
 
-### 4.5 Entitlement store (v2, ADR-0030)
+### 4.5 Entitlement store (ADR-0030)
 
 One table per `SharedIngress`, `PK` and `SK` strings, on-demand, PITR on,
 no TTL, no GSI. Every list attribute is a DynamoDB string set or list of
@@ -1061,7 +1029,7 @@ Scale at the target sizes: 50,000 tenants × 40 KB is 2 GB; cut rows exist
 only for cut users; reads per agent request are one batch get of two items,
 about 1 RCU in all at the sizes above (V-12 records the measured figure).
 
-### 4.6 Change lag (v2, ADR-0036)
+### 4.6 Change lag (ADR-0036)
 
 | Change | Who | Lands for new mints | Lands for tokens in flight |
 |---|---|---|---|
@@ -1099,13 +1067,13 @@ integration driver uses (§8).
 |---|---|---|
 | URL | `POST https://<api>/prod/invocations` (a `defaultBackend`); `POST https://<api>/prod/<backend>/invocations` | `POST https://<gw>.gateway.bedrock-agentcore.<region>.amazonaws.com/<backend>/invocations` |
 | Auth | `Authorization: Bearer <identity token>` | same |
-| Tenant | (v2) `X-Tenant-Id: <tenantId>`, required when the token carries `tenants`, optional and checked when it carries `tenant_id` | same |
+| Tenant | `X-Tenant-Id: <tenantId>`, required when the token carries `tenants`, optional and checked when it carries `tenant_id` | same |
 | Body | `{prompt}`; with `session`, `{conversationId, prompt}` | same |
 | Unit | chosen by the integration Lambda | chosen by the interceptor, written to the session header; a client value is overwritten |
 | Response | `text/event-stream`, streamed | same |
 
-Errors written by the ingress code. Bodies are fixed; (v2) a 403 or 400 from
-the v2 checks carries a fixed reason code after the text, for example
+Errors written by the ingress code. Bodies are fixed; a 403 or 400 from
+the ingress checks carries a fixed reason code after the text, for example
 `forbidden: agent_not_subscribed`, and the same code is the `reason` field of
 the log line. On `api-gateway` the authoriser's Deny surfaces through the
 `ACCESS_DENIED` gateway response, whose template is
@@ -1123,15 +1091,15 @@ the bare text, its reason in the log only. On `api-gateway` every Deny is
 | Status | Body | When |
 |---|---|---|
 | 400 | `bad request` | malformed `prompt` or `conversationId`, `conversationId` without `session`, or a malformed `X-Tenant-Id` |
-| 400 | `bad request: tenant_required` | (v2) on `agentcore-gateway`, the token carries `tenants` and no `X-Tenant-Id` was sent. On `api-gateway` with `identity.multiTenant` the header is an authoriser identity source, so a request without it is API Gateway's own 401 before the authoriser runs (ADR-0043) |
-| 401 | `unauthorized` | missing or invalid token, or (v2) a transaction token presented as the identity token (`typ: txn+jwt` or `iss` = the ingress issuer); on `api-gateway` surfaces as 403 (ADR-0015) |
+| 400 | `bad request: tenant_required` | on `agentcore-gateway`, the token carries `tenants` and no `X-Tenant-Id` was sent. On `api-gateway` with `identity.multiTenant` the header is an authoriser identity source, so a request without it is API Gateway's own 401 before the authoriser runs (ADR-0043) |
+| 401 | `unauthorized` | missing or invalid token, or a transaction token presented as the identity token (`typ: txn+jwt` or `iss` = the ingress issuer); on `api-gateway` surfaces as 403 (ADR-0015) |
 | 403 | `forbidden` | `tenant_id` and `tenants` both absent; `tenants` present with `identity.multiTenant` off; a floor scope missing (ADR-0005); a `tvm.claimTags` claim missing |
-| 403 | `forbidden: tenant_not_allowed` | (v2) `X-Tenant-Id` not in `tenants`, or different from `tenant_id`, or both claims present |
-| 403 | `forbidden: tenant_suspended` | (v2) the tenant row has `status: suspended` |
-| 403 | `forbidden: agent_not_subscribed` | (v2) the agent is not in `T.agents ∩ U.agents`, including a tenant with no row |
+| 403 | `forbidden: tenant_not_allowed` | `X-Tenant-Id` not in `tenants`, or different from `tenant_id`, or both claims present |
+| 403 | `forbidden: tenant_suspended` | the tenant row has `status: suspended` |
+| 403 | `forbidden: agent_not_subscribed` | the agent is not in `T.agents ∩ U.agents`, including a tenant with no row |
 | 404 | `not found` | no registry entry, or the entry is `draining` |
 | 429 | `too many requests` | over `tenantLimits` (ADR-0020) |
-| 502 | `upstream error` | backend invoke failed; registry or entitlement store unreadable; a v1-shaped registry entry (`registry_entry_v1`); `grant_too_large`; `kms:Sign` failed (`mint_failed`) |
+| 502 | `upstream error` | backend invoke failed; registry or entitlement store unreadable; a registry entry without `needs` or `tools`, or with `scopes` (`registry_entry_v1`); `grant_too_large`; `kms:Sign` failed (`mint_failed`) |
 
 Not an error: `no_tools_granted`, an agent whose grant holds only its `needs`.
 It is served with `scope` = its needs; any tool call it makes is refused at
@@ -1203,7 +1171,7 @@ entry of the target, per-tenant limit, entitlement read, grant rule, mint,
 TVM, invoke. On `api-gateway` the authoriser runs through the mint and the
 integration Lambda checks the limit, as §5.1 describes for `/invocations`.
 
-### 5.2 Token discovery routes (v2, ADR-0037)
+### 5.2 Token discovery routes (ADR-0037)
 
 | Route | Auth | Body |
 |---|---|---|
@@ -1216,7 +1184,7 @@ call per read), with `Cache-Control: public, max-age=300`. On
 route is behind the per-tenant limit or the stage throttle's tenant logic;
 the stage throttle applies.
 
-### 5.3 Entitlement API (v2, ADR-0030, ADR-0033, C-14)
+### 5.3 Entitlement API (ADR-0030, ADR-0033, C-14)
 
 Smithy service `Entitlements`, `restJson1`, resources `TenantSubscription`,
 `Plan` and `UserCut`. Paths are under `<baseUrl>/entitlements`.
@@ -1254,7 +1222,7 @@ or `PutPlan` that lost a race); 429; 502. A vendor write or a cut above the
 store bounds is 400 `too_many`. Smithy's `StandardOperationVerb` validator
 runs at `DANGER` (standard §4.2).
 
-### 5.4 Tools gateway (v2, ADR-0034)
+### 5.4 Tools gateway (ADR-0034)
 
 MCP over streamable HTTP at `<toolsGatewayUrl of name>/mcp`, one URL per
 tools gateway (§6.4), bearer = the transaction token. `tools/list` returns,
@@ -1322,7 +1290,7 @@ refusal of a method other than `tools/call` logs `tools request refused`.
   `sts:AssumeRole` and `sts:TagSession` to the tool's role only, requires
   the `TenantId` request tag, and scopes data by
   `${aws:PrincipalTag/TenantId}`.
-- Optionally `tvm.role` for the agent, as v1 (ADR-0012, ADR-0018).
+- Optionally `tvm.role` for the agent (ADR-0012, ADR-0018).
 - Subscriptions and plans, written through the vendor operations of §5.3.
 - Service quota headroom for the tools gateway (200 TPS per Gateway and per
   account, 5,000 connections) and KMS `Sign` at the expected call rate
@@ -1337,21 +1305,21 @@ Access token, RS256, with `iss`, `exp`, `client_id`, `token_use: "access"`,
 tool names) and exactly one of:
 
 - `tenant_id`: one string; or
-- (v2, R-1, ADR-0038) `tenants`: an array of tenant ids, accepted only with
+- (R-1, ADR-0038) `tenants`: an array of tenant ids, accepted only with
   `identity.multiTenant` on; the request selects one with `X-Tenant-Id`.
 
 A token with both, or neither, is refused (403). A token whose `iss` is the
 ingress's own issuer, or whose header `typ` is `txn+jwt`, is refused as an
 identity token (401) on every route; `/{backend}/delegations` takes it as
 the bearer of a running transaction instead (§3.7), never as a sign-in. The
-identity token MUST NOT be forwarded beyond the ingress (v2, ADR-0031).
+identity token MUST NOT be forwarded beyond the ingress (ADR-0031).
 
-#### 6.2.2 Transaction token (v2, ADR-0031, ADR-0037)
+#### 6.2.2 Transaction token (ADR-0031, ADR-0037)
 
 | Token | Issuer | Carries | Life |
 |---|---|---|---|
-| Identity token (v1 contract) | tenant-identity (Cognito) | `sub`, `tenant_id` or `tenants[]`, `scope` (application floor only, no tools) | IdP's |
-| Transaction token (new) | the `SharedIngress`: KMS asymmetric key, RS256 (default) or ES256; JWKS at `<baseUrl>/.well-known/jwks.json`, OIDC discovery at `<baseUrl>/.well-known/openid-configuration` | see below | 300 s default (`transactionToken.ttl`); 120 s to 900 s, usable at a tools gateway until `exp - 60 s` (ADR-0043) |
+| Identity token | tenant-identity (Cognito) | `sub`, `tenant_id` or `tenants[]`, `scope` (application floor only, no tools) | IdP's |
+| Transaction token | the `SharedIngress`: KMS asymmetric key, RS256 (default) or ES256; JWKS at `<baseUrl>/.well-known/jwks.json`, OIDC discovery at `<baseUrl>/.well-known/openid-configuration` | see below | 300 s default (`transactionToken.ttl`); 120 s to 900 s, usable at a tools gateway until `exp - 60 s` (ADR-0043) |
 
 JOSE header: `{ "alg": "RS256", "typ": "txn+jwt", "kid": "<KMS key id>" }`.
 
@@ -1394,8 +1362,7 @@ Divergences from IETF draft-09, stated in ADR-0031:
   `CUSTOM_JWT` authoriser reads only `Authorization: Bearer`, so inside this
   sample the transaction token is the bearer on the tools path. The agent
   receives it in the Runtime custom header
-  `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token`, which replaces
-  v1's `...-Custom-User-Token`.
+  `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token`.
 - The draft's `aud` names the trust domain. Here it names the relying
   parties, the agent and each tools gateway (RFC 8707; ADR-0041), so a token minted for agent `default` is not accepted
   for agent `billing`'s bearer checks.
@@ -1406,10 +1373,9 @@ Divergences from IETF draft-09, stated in ADR-0031:
   ingress mints in-process after its own verification; there is no exchange
   endpoint (§1.2).
 
-The identity token never leaves the ingress. v2 supersedes ADR-0006 and
-ADR-0007 through ADR-0031.
+The identity token never leaves the ingress (ADR-0031).
 
-#### 6.2.3 Key rotation (v2, ADR-0037)
+#### 6.2.3 Key rotation (ADR-0037)
 
 `kid` is the KMS key id. Bumping `transactionToken.keyGeneration` from N to
 N+1 creates key N+1, which signs from the deploy on; the JWKS lists N+1 and
@@ -1421,7 +1387,7 @@ time between deploys, so the README runbook says to wait 15 minutes.
 Relying parties refresh their JWKS cache on an unknown `kid`, at most once a
 minute.
 
-#### 6.2.4 Tenant context (v2, ADR-0034)
+#### 6.2.4 Tenant context (ADR-0034)
 
 Compact JWS, `alg` per `ToolContextKey` (RS256), `typ: ri-ctx+jwt`, claims
 `tenant_id`, `sub`, `user` (ADR-0040), `agent`, `tool` (`<target>/<tool>`), `argsHash`, `txn`,
@@ -1439,7 +1405,7 @@ the document falls back to one fetch of the route (M-82).
 
 ### 6.3 What the sample promises
 
-v1 promises that hold:
+The runtime:
 
 - No principal other than the ingress can invoke the backend (integ step 3).
 - Without `session`, no two requests share a unit (integ step 4a).
@@ -1450,20 +1416,17 @@ v1 promises that hold:
   a read of another tenant's fails in IAM; the runner cannot assume the role
   (integ step 8a).
 - Both ingresses pass the same e2e suite; the README reports measured TTFB
-  and total latency (p50, p95). Per-request cost was not measured and that
-  promise is withdrawn (ADR-0029).
+  and total latency (p50, p95), not per-request cost (ADR-0029).
 - With `tenantLimits`, a tenant over its limit gets 429 while another is
   served (integ limits step).
 
-v1 promise changed:
+The token (ADR-0031):
 
-- (v2, ADR-0031) "The user token reaches the agent only when forwarding is
-  on" becomes: the identity token never reaches the agent or a tool. The
-  agent reports the headers it received and its claims; neither holds an
-  identity token, and the Runtime allowlist has no user-token header
-  (integ step 11).
+- The identity token never reaches the agent or a tool. The agent reports
+  the headers it received and its claims; neither holds an identity token,
+  and the Runtime allowlist has no header for one (integ step 11).
 
-New promises (v2):
+Tools, entitlements, tenants and teardown:
 
 - A transaction token from tenant A cannot call a tool for tenant B. The
   tool sees tenant A's context only, a client-written `_ri_ctx` naming
@@ -1498,38 +1461,34 @@ New promises (v2):
   granted tools (integ step 24).
 - `cdk destroy` plus the integration script's teardown leaves no stacks,
   log groups, parameters, Gateways, KMS keys pending outside their deletion
-  window, or entitlement tables with the sample's prefix (v1 promise,
-  extended; integ step 10).
+  window, or entitlement tables with the sample's prefix (integ step 10).
 
 ### 6.4 Composition (standard §1.1)
 
-**Consumes:** `tenant-identity`, topology `shared-pool` and, (v2,
-R-1), `shared-pool-multi-tenant` (tokens with `tenants`), through
+**Consumes:** `tenant-identity`, topology `shared-pool` and (R-1)
+`shared-pool-multi-tenant` (tokens with `tenants`), through
 `/application-plane/shared/identity/{userPoolId,appClientId}` (ADR-0004).
 Only the demo app and the integration driver read them; the constructs take
-the issuer as props. (v2, ADR-0030) The constructs no longer call
-`/platform/scopes` and no longer read `apiUrl` or `platformInvokePolicyArn`;
-the integration driver uses them once to register `app/use` and
+the issuer as props and write nothing to tenant-identity (ADR-0030). The
+integration driver uses `/platform/scopes` once to register `app/use` and
 `entitlements/admin`, and tenant-identity's own API to create the demo
-tenants, users and tenant admins. Removing the registration also removes
-threat-model T-41's residual (a direct invoke of the registration function).
+tenants, users and tenant admins.
 
 **Published interface.**
 
 Constructs, exported from `src/index.ts`: `SharedIngress`, `AgentBackend`,
-and (v2) `ToolTarget`, `TokenSigner`, `EntitlementStore`, plus the
+`ToolTarget`, `TokenSigner` and `EntitlementStore`, plus the
 tool-side library `verifyToolContext` / `withTenantCredentials` (C-15b) and
 the helpers `registryParameterName`, `BACKEND_NAME_PATTERN`,
 `NEEDS_NAME_PATTERN`, `TOOL_NAME_PATTERN`,
 `INGRESS_TAG_KEY` and `grantFor` (the rule, for consumers that test their
-own data). `ScopeRegistration` and `backendScopesProblem` are removed (v2,
-breaking).
+own data).
 
 Read-only members:
 
-- `SharedIngress`: v1's `endpointUrl`, `ingressRole`, `tvmCallerRole`,
+- `SharedIngress`: `endpointUrl`, `ingressRole`, `tvmCallerRole`,
   `tenantRole`, `ingressId`, `registryPrefix`, `gatewayIdentifier`,
-  `limitsTable`, `logDrain`, `options`, `urlFor(name)`; (v2) `issuer`,
+  `limitsTable`, `logDrain`, `options`, `urlFor(name)`; `issuer`,
   `jwksUrl`, `tokenSigner`, `entitlementStore`, `entitlementsApiUrl`,
   `toolsGatewayUrl`, `toolsGatewayIdentifier`, `toolsGatewayRole`; and
   (ADR-0041) `toolsGateways`, a map of name to `ToolsGateway` construct
@@ -1550,46 +1509,109 @@ the demo's Runtime ARNs are stack outputs (ADR-0042):
 |---|---|---|
 | `ingress` | (ADR-0042) one JSON document, `Intelligent-Tiering` (up to 8 KB): `version` (2), `ingress`, `endpointUrl`, `baseUrl`, `ingressRoleArn`, `ingressId`, `tenantRoleArn`, `gatewayIdentifier` (`agentcore-gateway` only), `issuer`, `jwksUrl`, `entitlementsTableName`, `entitlementsApiUrl`, `toolContextKeyId` (with a tools gateway), `toolsGateways: { <name>: { url, identifier, roleArn, policyEngineId } }`. `SharedIngress.fromParameters` reads it at synth (a context lookup); none with `publish: false` | `SharedIngress` |
 | `backends/<name>` | registry entry (§4.3) | each `AgentBackend` |
-| `tools/<target>` | (v2) tool registry pointer (§4.4) | each `ToolTarget` |
+| `tools/<target>` | tool registry pointer (§4.4) | each `ToolTarget` |
 
 The registry rows have fixed names, so an earlier deployment's leftovers
 (for example a `DELETE_FAILED` stack's) collide with a new stack's: the
 integration driver deploys with no publisher (`INTEG_PUBLISHER=none`) when
 a fixed name is taken, and says so.
 
-`ARCHITECTURE.md` §5.1 and §6 are updated in the same change that accepts
-this draft. Renaming `scopes` to `needs`, removing `delegation.*`, removing
-`ScopeRegistration` and the `forwardUserToken` import option are breaking
-changes to a published interface and are recorded in ADR-0030, ADR-0031 and ADR-0032
-(standard §1.1). No sample consumes them today.
+The published interface is recorded in `ARCHITECTURE.md` §5.1 and §6
+(standard §1.1). No other sample consumes it today.
 
 ---
 
-## 7. Spikes to run before acceptance (v2)
+## 7. Spikes to run before acceptance
 
-V-1 to V-7 were run on 2026-10-26 and passed; their results are in v1 §7
-(kept as `agentic-runtime-isolation.spec.v1.md` §7 on acceptance). The v2
-design depends on these further behaviours.
+The design depends on these behaviours. V-1 to V-7 cover the runtime path
+and were run on 2026-10-26 (§7.0); V-8 to V-17 cover the tools path, the
+token and the entitlements and were run on 2026-11-02 to 2026-11-04 (§7.1,
+§7.2, §7.4).
 
 | ID | Behaviour | Fallback if it fails |
 |---|---|---|
+| V-1 | A Runtime resource policy that allows only one role denies SigV4 calls from another role in the same account | Add `aws:PrincipalArn` deny on the Runtime and its endpoint; if still open, stop: the pattern does not hold |
+| V-2 | `AWS::BedrockAgentCore::GatewayTarget` accepts `TargetConfiguration.Http.AgentcoreRuntime` through `addPropertyOverride` (CDK L1 lacks it, aws-cdk#37999) | Custom resource calling `CreateGatewayTarget` (ADR-0010) |
+| V-3 | A Gateway REQUEST interceptor sees `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` and can deny the request; whether it can overwrite it | Deny-only check is sufficient for P-2; if the interceptor cannot see the header, `agentcore-gateway` is dropped and ADR-0003 is superseded |
+| V-4 | A REQUEST interceptor runs on a streaming Runtime invocation and the response still streams (docs say buffered only; field reports say request interceptors work) | Accept buffered responses on `agentcore-gateway` and report it in the latency table |
+| V-5 | API Gateway REST `responseTransferMode: STREAM` with a Lambda proxy relays the Runtime's SSE stream past 29 s | Buffered response with a 29 s cap, documented |
+| V-6 | Runtime `requestHeaderAllowlist` passes `X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Token` from both ingresses | Forward the token in the payload under a reserved key the agent strips; ADR records it |
+| V-7 | A second allowlisted header of about 2 KB (base64 STS credentials) reaches the agent from both ingresses, and neither API Gateway access logs nor Gateway/interceptor logs record request header values | Split the credential across headers, or forward only a reference the agent redeems; if a log records headers and cannot be configured not to, the TVM is dropped on that ingress (ADR-0012) |
 | V-8 | The tools gateway's `CUSTOM_JWT` authoriser accepts the ingress as issuer through a discovery URL served by API Gateway (no Cognito), fetches the JWKS, accepts `RS256` from a KMS key, and enforces `allowedAudience: ['tools-gateway']` against an array `aud`. Also: whether `ES256` is accepted | The interceptor becomes the only verifier of the transaction token: the Gateway keeps `CUSTOM_JWT` on the identity issuer only if the agent may send both tokens, which P-14 forbids, so instead the Gateway runs with IAM inbound auth for the agent's tenant credentials and the interceptor verifies the transaction token from a second header. The loss of the native check is recorded in ADR-0034. If only `ES256` fails, `RS256` stays the one algorithm |
 | V-9 | A Cedar policy can read the `scope` claim and match `<target>/*` and `<target>/<tool>` as whole space-separated tokens with `like` | One policy per tool rather than per target, still O(tools) not O(tenants); or a `scope_targets` claim (array) the ingress adds for Policy |
 | V-10 | The REQUEST interceptor can add `_ri_ctx` to `tools/call` arguments when the tool's `inputSchema` does not declare it, and the Lambda target receives it | `ToolTarget` adds `_ri_ctx` (string, optional) to every tool's `inputSchema`; or carry the context in `params._meta` if the Gateway passes it to the target |
 | V-11 | A call denied by Policy does not invoke the interceptor; an interceptor timeout or error is a Gateway error, never a pass-through | If denied calls reach the interceptor, it refuses them too and logs them with the tenant (better telemetry, more cost). If failure passes through, the tools gateway is not shipped: the design depends on fail-closed |
 | V-12 | KMS `Sign` latency at p50 and p95 from the authoriser and the interceptor Lambdas; the per-request cost of a mint; the mint cache hit ratio in the latency probe; `BatchGetItem` latency and RCU per request | If p95 adds more than 50 ms to TTFB, raise the default reuse margin and lifetime within 900 s, or sign with a key held in the Lambda and rotated from Secrets Manager (rejected unless measured: the private key would leave KMS) |
-| V-13 | The Runtime `requestHeaderAllowlist` carries the transaction token (about 1.2 KB, up to 4 KB at the `scope` bound) beside the credentials header (about 2 KB) from both ingresses, and no log on the path records it (v1 V-7 repeated) | Hash-referenced grant: the token carries `grant` = sha256 of the granted set instead of `scope`, the ingress writes the set to the entitlement store under `GRANT#<hash>` with a TTL, and Policy is replaced by the interceptor's lookup (AWS Prescriptive Guidance's lean-token pattern); recorded in ADR-0031 |
+| V-13 | The Runtime `requestHeaderAllowlist` carries the transaction token (about 1.2 KB, up to 4 KB at the `scope` bound) beside the credentials header (about 2 KB) from both ingresses, and no log on the path records it (V-7 repeated for the token) | Hash-referenced grant: the token carries `grant` = sha256 of the granted set instead of `scope`, the ingress writes the set to the entitlement store under `GRANT#<hash>` with a TTL, and Policy is replaced by the interceptor's lookup (AWS Prescriptive Guidance's lean-token pattern); recorded in ADR-0031 |
 | V-14 | Policy evaluation latency, and `tools/list` latency, at 100 targets with one policy each | Group tools into fewer targets; document the measured figure in the README |
 | V-16 | At 1,000s of tools: (a) a Cedar policy for a target with 1,000 tools named one by one is accepted, becomes ACTIVE, and `tools/call` latency stays within the V-14 figures; (b) a `forbid` policy on a `cut` claim (`principal.getTag("cut") like "* <target>/<tool> *"`) is accepted beside the permit and removes the tool from `tools/list` and refuses `tools/call`; (c) a `scope` of 4,096 bytes passes the Gateway authoriser | (a) fails: split the permit into groups of 100 tools per policy, cap tools per target in `ToolTarget` at the measured size; (b) fails: keep the 4 KB bound and the hash-referenced grant of V-13 as the fallback, named in the README; (c) fails: lower the bound to the measured size |
 | V-15 | AgentCore Identity with the transaction token as the inbound JWT: (a) a 3LO credential provider on a `ToolTarget` keys the vault on the transaction token's `sub` and issuer, and a second transaction token for the same user reuses the stored grant; (b) an OBO `TOKEN_EXCHANGE` provider accepts the ingress as issuer; (c) `GetWorkloadAccessTokenForJWT` in the agent accepts a transaction token when the workload identity names the ingress discovery URL | If (a) fails, 3LO targets are documented as needing the user's consent per token life, or the sample drops 3LO; if (b) fails, OBO targets are out of scope and the README says a third party must trust the ingress issuer; if (c) fails, the agent's outbound identity is M2M only |
 | V-17 | On `api-gateway`, a transaction token at the 8,192-byte `scope` bound (about 11.8 KB) passes from the REQUEST authoriser's context to the integration Lambda and on to the Runtime header unchanged | Lower the `scope` bound on `api-gateway` to the largest size that passes, and say so in the README. **Result 2026-11-04 (§7.4): FAIL at the bound.** The authoriser context carried 24,000 bytes; the Runtime refused a header value over 10,240 bytes, so the 11.8 KB token failed. The fallback applies on both ingresses: `MAX_TOKEN_BYTES` 10,240 and `scope` 6,144 bytes (ADR-0045) |
 
-The spike stack deploys a throwaway `SharedIngress` with `toolsGateway`, one
-`ToolTarget` of kind `lambda`, and a test-only mint function granted
-`TokenSigner.grantSign`. It is destroyed after the run, and the
-results are added here as §7.1 with the same evidence standard as v1.
+Each spike stack is deployed, probed and destroyed; the results follow with
+the same evidence standard.
 
-### 7.1 Spike results (2026-11-02, a sandbox account, eu-central-1)
+### 7.0 Spike results, V-1 to V-7 (2026-10-26, a sandbox account, eu-central-1)
+
+Throwaway stack `RiacSpike` (Cognito, SigV4 Runtime with an echo agent, API
+Gateway REST + streaming Lambda proxy, AgentCore Gateway + REQUEST
+interceptor). Deployed, probed, destroyed; no fallback is needed.
+
+| ID | Result | Evidence |
+|---|---|---|
+| V-1 | PASS | Admin role and a same-account role whose identity policy allows `InvokeAgentRuntime` both get `AccessDeniedException ... explicit deny in a resource-based policy`. A deny on the runtime ARN alone is enough; the endpoint needs no policy of its own. |
+| V-2 | PASS | `addPropertyDeletionOverride('TargetConfiguration.Http.Connector')` plus `addPropertyOverride('TargetConfiguration.Http.AgentcoreRuntime', {Arn, Qualifier})` deploys; target `READY`. A placeholder `connector` must be deleted, or the merge keeps both keys. |
+| V-3 | PASS | Interceptor sees the session header (and `Authorization`) with `passRequestHeaders: true`. A2 or B1 sending A1's session id: 403; no header: 403. Returning the header in `transformedGatewayRequest.headers` **overwrites** it: the Runtime received the interceptor's value, not the client's. |
+| V-4 | PASS | With the REQUEST interceptor on, a 36 s SSE response streamed: TTFB 0.33 s, total 36.3 s, all 20 events. |
+| V-5 | PASS, with a setting | With the integration timeout at 29 s the stream is cut at 29.1 s (15 of 20 events). With `timeout: Duration.minutes(2)` it streams the full 36 s, TTFB 0.25 s. STREAM mode allows up to 15 min; the construct must set it. |
+| V-6 | PASS | The allowlisted header reaches the agent from both ingresses (Lambda via an SDK `build` middleware; Gateway via the interceptor's `transformedGatewayRequest.headers`). The Gateway does not pass the client's `Authorization` to a SigV4 Runtime. |
+
+**V-7 (run separately, same day, same account):** PASS. Rebuilt the spike with
+a `riacspike-tenant` role (trusts only the two token-validating Lambda roles,
+requires `aws:RequestTag/TenantId`, `aws:TagKeys` pinned to `TenantId`,
+`UserId`; `dynamodb:GetItem` with `dynamodb:LeadingKeys =
+TENANT#${aws:PrincipalTag/TenantId}`), a table with one item per tenant, and
+the credential header on the Runtime allowlist.
+
+| Check | API Gateway | AgentCore Gateway |
+|---|---|---|
+| Credential header reaches the agent | yes, 1,240 bytes | yes, 1,240 bytes |
+| Agent's caller identity | `assumed-role/riacspike-tenant/tenant-tenanta` | same |
+| A1 reads tenant A (positive control) | item returned | item returned |
+| A1 reads tenant B | `AccessDeniedException` from DynamoDB | same |
+| B1 reads tenant A | not run | `AccessDeniedException` |
+| Second call, same tenant | served from the Lambda's cache | same |
+| Runner assumes the tenant role directly | `AccessDenied` | |
+
+CloudTrail shows one `AssumeRole` on the tenant role per ingress Lambda per
+tenant, not per request, plus the runner's denied attempt. After the run,
+every log group on the path was pulled and searched for the access key prefix
+`ASIA`, `secretAccessKey`, the base64 of `{"accessKeyId":`, the header name,
+and a JWT prefix: API Gateway execution logs (INFO, data trace off) and the
+JSON access log hold request ids, status, and timings only; the ingress and
+interceptor Lambda logs hold header *names* only (by construction); the
+Runtime log group's per-session, `otel-rt-logs`, and `spans` streams were
+empty for this agent; AgentCore Gateway vends no log group. Zero hits.
+
+Two things the construct must carry from this: `dataTraceEnabled` MUST stay
+off on the API Gateway stage (data trace logs request headers), and the agent
+and any OTEL instrumentation MUST not record request headers. Cold-start TTFB
+with a fresh `AssumeRole` was 1.5 to 3.7 s; a cached credential added about
+0.1 s.
+
+Also seen: the same session id from both ingresses lands in the same microVM
+(same per-VM nonce), and A2 using A1's `conversationId` gets a different
+session and microVM. Single-call latencies were 0.2-0.3 s warm on both
+ingresses; this is not the §8 step 9 measurement.
+
+Consequence for the design: because V-3 overwrite works, the
+`agentcore-gateway` ingress chooses the unit itself, as API Gateway does
+(ADR-0002, decided 2026-10-26). Both ingresses share one request contract. The same overwrite
+carries the random per-request id when `session` is off (ADR-0013).
+
+---
+
+### 7.1 Spike results, V-8 to V-15 (2026-11-02, a sandbox account, eu-central-1)
 
 Throwaway stack `RiacSpikeV2`, a plain CDK app outside the repo, tagged
 `riac-spike=v2`: three KMS signing keys (`SignKey` RSA_2048, `SignKeyEc`
@@ -1613,7 +1635,7 @@ key id and `typ: txn+jwt`.
 | V-10 | PASS | The Lambda target received `_ri_ctx` although its `inputSchema` does not declare it (event keys `accountId`, `_ri_ctx`; `clientContext.custom` carries `bedrockAgentCoreToolName`, `...TargetId`, `...GatewayId`). The tool verified it with `ContextKey`'s public key (`typ`, `exp`, tool, `argsHash`). A client `_ri_ctx` (an `alg: none` JWS for `tenant-b`) and `tenantId: tenant-b` were overwritten: the tool saw `tenant-a` in both. On an OpenAPI target the Gateway drops arguments outside the schema: the endpoint received body keys `["note"]` only, so `_ri_ctx` does not reach a third-party HTTP target. |
 | V-11 | FAIL (order), PASS (fail-closed) | The interceptor runs **before** Policy. A call that Policy would deny reaches the interceptor (it logged `tool refused`, reason `scope`). With the interceptor passing everything, Policy denied the same call afterwards. Interceptor throws: 500 `An internal error occurred. Please retry later.` in 0.56 s, for `tools/call` and `tools/list`. Interceptor timeout (1 s, sleeping 5 s): 500 in 1.5 s. The tool was not invoked in either case (its log has no line in those windows). Restored: 200. |
 | V-12 | PASS | 200 mints: KMS `Sign` p50 8.2 ms, p95 11.1 ms (one cold 193 ms); handler total p50 8.3 ms. 200 interceptor calls: `Sign` for `_ri_ctx` p50 8.6 ms, p95 11.5 ms (one cold 161 ms). Both far below the 50 ms threshold. `Sign` used `MessageType: DIGEST`: `RAW` takes at most 4,096 bytes, which a token at the `scope` bound exceeds. The mint cache hit ratio and `BatchGetItem` were not measured (no store or cache in this stack). |
-| V-13 | PASS for the token; one log finding | Through `InvokeAgentRuntime` with both custom headers on the allowlist, the agent read: transaction token 1,261 bytes (10 scope entries), 4,514 bytes (140 entries) and 8,061 bytes, each beside a 2,048-byte credentials header. The AgentCore Gateway ingress path was not repeated (v1 V-6 covers it). Zero hits for the token signature segments or `eyJ` in all eight Lambda log groups, the API Gateway access and execution logs and the Runtime log group (empty). Gateway application logs, when delivery is turned on, record the request body after the interceptor and the full response body: 20 lines held a signed `_ri_ctx`, none the bearer token. |
+| V-13 | PASS for the token; one log finding | Through `InvokeAgentRuntime` with both custom headers on the allowlist, the agent read: transaction token 1,261 bytes (10 scope entries), 4,514 bytes (140 entries) and 8,061 bytes, each beside a 2,048-byte credentials header. The AgentCore Gateway ingress path was not repeated (V-6 covers it). Zero hits for the token signature segments or `eyJ` in all eight Lambda log groups, the API Gateway access and execution logs and the Runtime log group (empty). Gateway application logs, when delivery is turned on, record the request body after the interceptor and the full response body: 20 lines held a signed `_ri_ctx`, none the bearer token. |
 | V-14 | PASS, measured, with a quota | `targets-per-gateway` is 100 (`ServiceQuotaExceededException`, HTTP 402, at the 101st). 98 `ping` targets plus `crm` and an OBO target: created in 3 min. Policies: 7 s to ACTIVE with 1 in the engine, 54 to 90 s each one at a time at 50 to 75; 53 of 98 created in parallel ended `CREATE_FAILED` (`An internal error occurred during creation`). Measured at 100 targets with 75 ACTIVE policies. `tools/list` pages at about 30 tools before filtering, so every caller pays 4 pages at 100 targets. Policy `latencyMs` in the Gateway log: 44 to 100 ms, p50 81 (n = 24 `tools/call`). |
 | V-15 | (a) PASS, against a mock AS; (b) PASS; (c) PASS | (a) URL elicitation needs MCP `2025-11-25`: the Gateway's `supportedVersions` and the client's `MCP-Protocol-Version` header must both name it, or the call fails with `URL elicitation requires MCP version 2025-11-25 or newer`. The consent flow (Identity authorize, AS authorize, Identity callback, return URL with `session_id`) completed from a script. `CompleteResourceTokenAuth` accepted the transaction token as `userToken`. A second token for the same `sub`: served from the vault, no new authorise. A different `sub`: a new elicitation. The same `sub` with another `tenant_id`: **served from the same grant**. Cognito's hosted UI was not used: the mock AS grants at once, which tests the vault, not a login page. (b) The AS log shows `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token_type=...:jwt`, subject `iss` = the spike issuer, signature verified against its JWKS, `scope=obo-echo`, no actor token. The target received `Bearer` with the AS's token (`iss .../as`, `sub user-a1`). Two calls caused one exchange. (c) `GetWorkloadAccessTokenForJWT` from the agent with the transaction token: a 2,268-character workload access token. Expired: `UnauthorizedException: Token has expired`. Throwaway key: `Invalid Signature for bearerToken`. The workload identity has no issuer setting; Identity resolved the key from `iss`. |
 
@@ -1714,11 +1736,11 @@ superseded by the star permit of §3.6 (V-16a).
 
 Throwaway stack `RiacSpikeV16`, a plain CDK app outside the repo, tagged
 `riac-spike=v16`: one KMS signing key (`SignKey` RSA_2048) and `ContextKey`
-(RSA_2048); the v2 issuer (REST API with OIDC discovery and JWKS from
+(RSA_2048); the §7.1 issuer (REST API with OIDC discovery and JWKS from
 `GetPublicKey`, `Mint` Lambda that takes arbitrary extra claims); an
 AgentCore Gateway (MCP, `CUSTOM_JWT`, `allowedAudience: ['tools-gateway']`)
-with the v2 REQUEST interceptor and a Policy engine in `ENFORCE` mode; the v2
-`crm` target (3 tools) and a Lambda target `big` whose inline `toolSchema`
+with the §7.1 REQUEST interceptor and a Policy engine in `ENFORCE` mode; the
+§7.1 `crm` target (3 tools) and a Lambda target `big` whose inline `toolSchema`
 declares `t0001`..`tNNNN` on one Lambda, each with the input schema
 `{ x: string }`. No Runtime, no OBO or 3LO, no ping targets. `big` was
 deployed with 1,000 tools, then redeployed with 500, 330 and 325 to find the
@@ -1888,7 +1910,7 @@ ADR-0045). The sample relies on the enforced 10 KB, not the documented
 
 ## 8. Integration test outline
 
-Fixtures (v2):
+Fixtures:
 
 | Kind | Name | Definition |
 |---|---|---|
@@ -1931,10 +1953,9 @@ next request mints from the current entitlements (§4.6). Tool test mode
 
 Steps 11 to 25 run between step 9-registry and step 10.
 
-1. Deploy tenant-identity, or reuse a published one. (v2) Both topologies
+1. Deploy tenant-identity, or reuse a published one. Both topologies
    are needed: `shared-pool` for A, B and their users, and a
-   `shared-pool-multi-tenant` deployment for MU. Reuse needs no scope
-   catalogue check any more; the driver registers `app/use` and
+   `shared-pool-multi-tenant` deployment for MU. The driver registers `app/use` and
    `entitlements/admin` if absent and removes them in step 10 only if it
    added them. Registering `entitlements/admin` needs the pool's
    `/platform/scopes`, so a published shared-pool without it fails the run
@@ -1956,25 +1977,26 @@ Steps 11 to 25 run between step 9-registry and step 10.
 5. `session` on: A1 resumes `c1`: same microVM.
 6. No token, a tampered token, an ID token: 401 or 403 by ingress (§5.1). A
    malformed `conversationId`: 400 or 403.
-7. (v2) Grants: for each row of the expected grants table, the agent
+7. Grants: for each row of the expected grants table, the agent
    reports `scope`, `tenant_id`, `agent`, `aud` and `act.sub` equal to the
-   expected values. Replaces v1 step 7 (backend scopes).
-8. (v2) Replaced by step 11. The v1 forwarding cases (`forwardUserToken`,
-   `requireNarrowedToken`) no longer exist.
-8a. TVM, as v1: A1's agent reads tenant A's item, and fails in IAM for
+   expected values.
+8a. TVM: A1's agent reads tenant A's item, and fails in IAM for
    tenant B's; B1 likewise; the runner cannot assume the tenant role.
-8b. A model prompt ends with `event: usage` (P-10); per-tenant metrics as
-   v1.
-Limits. As v1: tenant A gets 429 on the `requestsPerMinute: 5` stack while
+8b. A model prompt ends with `event: usage` (P-10). Per-tenant metrics:
+   tenant A has a `ModelOutputTokens` datapoint on the `api-gateway` stack
+   (`perTenantMetrics` on) and no per-tenant metric on `agentcore-gateway`
+   (off, ADR-0021).
+Limits. Tenant A gets 429 on the `requestsPerMinute: 5` stack while
    B is served.
-9. Latency probe, as v1, plus (v2) the mint: 20 invocations with a cold
+9. Latency probe, with the mint: 20 invocations with a cold
    mint cache and 20 warm, TTFB and total, p50 and p95; the README reports
    the difference (V-12).
-9-registry. As v1 (ADR-0024), with `needs` in place of `scopes`: `late`
-   registered with `needs: ["late/run"]`, `tools: []` is refused with
+9-registry (ADR-0024). The `billing` and `default` entries hold `needs`,
+   `tools`, `status: active` and a numeric `version`; `/nosuch` is refused.
+   `late` registered with `needs: ["late/run"]`, `tools: []` is refused with
    `agent_not_subscribed` until the driver adds `late` to tenant A's
    subscription, then 200 within 90 s, then `draining` refuses within 90 s.
-   On `api-gateway` only, as v1.
+   On `api-gateway` only.
 11. Identity token stays at the ingress (P-14). A1 calls `default`; the
    agent reports the names of every request header it received and the
    claims of the transaction token. The header names hold the credentials
@@ -2108,7 +2130,7 @@ Limits. As v1: tenant A gets 429 on the `requestsPerMinute: 5` stack while
    `depth` and `txn`; the replacement token's `txn` equals the caller's. On
    the `agentcore-gateway` stack the step is skipped.
 10. Destroy; delete the Runtime's service-created log groups; assert no
-   stacks, parameters, log groups or tables are left (ADR-0019). (v2) Also
+   stacks, parameters, log groups or tables are left (ADR-0019). Also
    assert the tools gateway and its targets are gone, both KMS keys are
    pending deletion, and `app/use` and `entitlements/admin` are removed from
    tenant-identity if step 1 added them. The driver destroys at concurrency
