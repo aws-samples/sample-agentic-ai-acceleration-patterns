@@ -3,22 +3,23 @@
 # Implemented architecture
 
 **Status:** Implemented and verified. Last green integration run:
-**2026-11-10, `us-east-1`**, on commit `651816e` (`npx projen integ`, all 13
-steps passed). `npx projen build` on 2026-11-11: 80 unit tests, cdk-nag
-clean.
-
-Teardown: runs 2, 3, and 4 the same day each deployed and destroyed the
-construct and proved nothing left (stack, Memory, Gateway, Policy engine,
+**2026-11-11, `us-east-1`**, on commit `7c38f53` (`npx projen integ`, all 13
+steps passed, teardown proven clean: stack, Memory, Gateway, Policy engine,
 user pool, both IAM roles, log groups, log delivery, published parameter,
-insight rules; CloudWatch Logs resource policies unchanged). In run 5 every
-resource but the Memory was deleted within a minute; AgentCore held the
+insight rules, and this run's tagged resources gone; CloudWatch Logs
+resource policies unchanged). `npx projen build` the same day: 80 unit
+tests, cdk-nag clean.
+
+Earlier runs on 2026-11-10 (runs 1 to 5) shaped the test: settling refusals
+right after a deploy or a policy change are retried and recorded; the expiry
+check proves the authoriser's refusal rather than any 403; and Memory
+deletion is asynchronous and can take hours. In run 5 AgentCore held the
 Memory in `DELETING` for more than fifteen hours, CloudFormation's delete
-timed out, and the service refuses a second delete while the first is in
-progress. On 2026-11-11 the stack was deleted with the Memory retained and
-everything else was re-proven gone; the Memory's own deletion is the
-service's. `scripts/integ.sh` now handles this case itself
-(`scripts/teardown-lib.sh`, unit-tested): Memory deletion is asynchronous
-and can take hours.
+timed out, and the next deploy collided with the Memory's name. The stack
+was then deleted with the Memory retained and everything else re-proven
+gone. `scripts/integ.sh` now finishes such a teardown itself
+(`scripts/teardown-lib.sh`, unit-tested), and the Memory name is unique per
+stack instance (ADR-0014).
 
 | Coverage of that run | Result |
 | --- | --- |
@@ -26,12 +27,12 @@ and can take hours.
 | Token claims | `tenant_id`, `sub`, `client_id`, `token_use: access`, nothing else |
 | Scoped writes; write denials | Allowed for each user's own tenant and session; denied for another tenant, another user's session, an extraction override, an ID token |
 | Recall denials | Another tenant's namespace both ways (`tenant-a`, `tenant-ab`), any `namespacePath`, `*`, actor enumeration, event reads, record-ID reads: 403 |
-| Shared recall | Both tenant-a users recalled tenant-a's fact; tenant-ab only its own (extraction observed in 84 s) |
+| Shared recall | Both tenant-a users recalled tenant-a's fact; tenant-ab only its own (extraction observed in 67 s) |
 | Outside the Gateway | Direct retrieve, `IngestData`, batch create, and `AssumeRole` on the Gateway role denied, each first shown to be allowed by the operator's own policies |
 | Expiry | Expired token: 403 with `WWW-Authenticate: Bearer error="invalid_token"`; no token: 401 with the same challenge; Cedar denial: 403 without it; the same request with a fresh token: 200 |
 | Per-tenant telemetry | Memory application logs carry `actor_id` / `namespace` = `tenant-a` and `tenant-ab`; no fact content |
 
-Live re-tests of documented behaviour (the same results in runs 2 to 5):
+Live re-tests of documented behaviour (the same results in runs 2 to 5 and 7):
 
 | Question | Observed | Record |
 | --- | --- | --- |

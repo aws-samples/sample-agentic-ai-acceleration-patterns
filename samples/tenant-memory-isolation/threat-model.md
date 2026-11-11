@@ -20,7 +20,7 @@
 
 ## Security review
 
-Scans run 2026-11-10 on this branch after `npx projen build` under the
+Scans run 2026-11-11 on commit `7c38f53` after `npx projen build` under the
 deployment profile (`cdk.out/` synthesised for the test account in
 `us-east-1`):
 
