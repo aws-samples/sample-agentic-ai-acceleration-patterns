@@ -4,17 +4,21 @@
 
 **Status:** Implemented and verified. Last green integration run:
 **2026-11-10, `us-east-1`**, on commit `651816e` (`npx projen integ`, all 13
-steps passed). `npx projen build` the same day: 74 unit tests, cdk-nag clean.
+steps passed). `npx projen build` on 2026-11-11: 79 unit tests, cdk-nag
+clean.
 
 Teardown: runs 2, 3, and 4 the same day each deployed and destroyed the
 construct and proved nothing left (stack, Memory, Gateway, Policy engine,
 user pool, both IAM roles, log groups, log delivery, published parameter,
 insight rules; CloudWatch Logs resource policies unchanged). In run 5 every
 resource but the Memory was deleted within a minute; AgentCore held the
-Memory in `DELETING` for more than five hours, CloudFormation's delete timed
-out, and the service refuses a second delete while the first is in
-progress. That deletion is being watched to completion before the stack is
-deleted again and the teardown re-proven.
+Memory in `DELETING` for more than fifteen hours, CloudFormation's delete
+timed out, and the service refuses a second delete while the first is in
+progress. On 2026-11-11 the stack was deleted with the Memory retained and
+everything else was re-proven gone; the Memory's own deletion is the
+service's. `scripts/integ.sh` now handles this case itself
+(`scripts/teardown-lib.sh`, unit-tested): Memory deletion is asynchronous
+and can take hours.
 
 | Coverage of that run | Result |
 | --- | --- |
@@ -156,11 +160,12 @@ authorisations are apportioned by the tenant's share of Memory operations.
 
 ## Validation
 
-`npx projen build` runs 74 unit tests: the policies in the Cedar evaluator
+`npx projen build` runs 79 unit tests: the policies in the Cedar evaluator
 (allow and deny per claim, field, and operation; claim options), the fence
 against the HTTP traits of the pinned Memory SDK, the construct synthesised
 per option with assertions on the Gateway, role, trust, fence, policy order,
 rate limit, telemetry, and removal policies, prop validation, the demo
 stack's issuer and published parameter, cdk-nag on the construct and the
-demo, and the pre-token trigger. The integration test and its steps are in
+demo, the pre-token trigger, and the integration test's Memory-teardown
+helper against a fake AWS CLI. The integration test and its steps are in
 the README.

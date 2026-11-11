@@ -26,13 +26,13 @@ deployment profile (`cdk.out/` synthesised for the test account in
 
 - **ASH v3.7.1** (`awslabs/automated-security-helper`, container mode, config
   [`.ash/.ash.yaml`](.ash/.ash.yaml)): bandit, cdk-nag, cfn-nag, checkov,
-  detect-secrets, grype, npm-audit, opengrep, semgrep, syft. Summary:
-  [`reports/ash.summary.md`](reports/ash.summary.md). Exit 2: six actionable
-  findings, all dispositioned below.
+  detect-secrets, grype, npm-audit, opengrep, semgrep, syft. The summary is
+  in the pull request description (scanner output stays out of the
+  repository). Exit 2: six actionable findings, all dispositioned below.
 - **cdk-nag `AwsSolutionsChecks`** in the build (`src/main.ts`): no
   unacknowledged finding.
-- **ProtoShield:** not run. No install path was available outside the
-  team's own tooling; the pull request description says so.
+- **ProtoShield:** not run (no public install path); the pull request
+  description says so.
 
 | Scanner | Finding | Disposition |
 | --- | --- | --- |

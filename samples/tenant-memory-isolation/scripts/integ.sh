@@ -18,7 +18,12 @@
 #      that nothing it created is left: the stack, the Memory, Gateway, and
 #      Policy engine, the user pool, the IAM roles, the log groups, the
 #      published parameter, the Contributor Insights rules, and any resource
-#      still carrying the stack's tag.
+#      still carrying the stack's tag. AgentCore deletes a Memory
+#      asynchronously and can outlast CloudFormation's wait; if the stack ends
+#      DELETE_FAILED on the Memory alone, it is deleted with the Memory
+#      retained and the Memory is polled for TMI_MEMORY_DELETE_WAIT seconds
+#      (default 7200, scripts/teardown-lib.sh); a Memory still deleting then is
+#      reported by id and fails the run.
 #
 # Requires the account to be CDK-bootstrapped in AWS_REGION. Conventions:
 # scripts/CONVENTIONS.md (no tracing, names and statuses only).
@@ -40,6 +45,9 @@ PARAMETER="/application-plane/shared/memory/gateway"
 TMP="$(mktemp -d)"
 DEPLOYED=0
 FAILED=0
+
+# shellcheck source=scripts/teardown-lib.sh
+source "${SAMPLE_DIR}/scripts/teardown-lib.sh"
 
 step() { echo "== $1"; }
 fail() { echo "integ: $1" >&2; exit 1; }
@@ -110,15 +118,27 @@ cleanup() {
   set +e
   if [[ "$DEPLOYED" == 1 ]]; then
     step "3: destroy and prove teardown"
-    npx cdk destroy --app "$OUT" "$STACK" --force >"${TMP}/destroy.log" 2>&1 \
-      || { echo "destroy failed; retrying once in 60 s" >&2; sleep 60; npx cdk destroy --app "$OUT" "$STACK" --force >>"${TMP}/destroy.log" 2>&1 \
-        || { tail -20 "${TMP}/destroy.log" >&2; FAILED=1; }; }
+    local memory_pending=0 rc
+    if ! npx cdk destroy --app "$OUT" "$STACK" --force >"${TMP}/destroy.log" 2>&1; then
+      # A Memory that AgentCore is still deleting fails the stack delete; finish it without hiding it.
+      finish_memory_teardown "$STACK" "${TMI_MEMORY_DELETE_WAIT:-7200}" 60
+      rc=$?
+      if [[ "$rc" == 2 ]]; then
+        memory_pending=1; FAILED=1
+      elif [[ "$rc" != 0 ]]; then
+        echo "destroy failed; retrying once in 60 s" >&2; sleep 60
+        npx cdk destroy --app "$OUT" "$STACK" --force >>"${TMP}/destroy.log" 2>&1 || { tail -20 "${TMP}/destroy.log" >&2; FAILED=1; }
+      fi
+    fi
     local tries=0
     until prove_teardown; do
       tries=$((tries + 1))
       if [[ "$tries" -ge 6 ]]; then FAILED=1; break; fi
       echo "  waiting 30 s for eventual consistency (attempt ${tries})"; sleep 30
     done
+    if [[ "$memory_pending" == 1 ]]; then
+      echo "integ: teardown incomplete only because AgentCore is still deleting the Memory (see above); everything else was checked" >&2
+    fi
   fi
   rm -rf "$TMP"
   if [[ "$status" -ne 0 || "$FAILED" -ne 0 ]]; then echo "integ: FAILED" >&2; exit 1; fi

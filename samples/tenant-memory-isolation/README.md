@@ -193,12 +193,20 @@ already deployed, and destroys the stack from an exit trap, then proves that
 nothing it created is left, IAM roles and log groups included. The steps
 take about 10 minutes, most of it waiting for extraction, the policy re-test,
 and the first token to expire; the deploy and the destroy usually add 10
-more. AgentCore can take much longer to delete a Memory: in one run on
-2026-11-10 it stayed `DELETING` for more than five hours and CloudFormation's
-delete timed out, so give the script no timeout of its own. If the stack ends
-`DELETE_FAILED` on the Memory, wait until `aws bedrock-agentcore-control
-get-memory` returns not found, then run `npx cdk destroy` again. A run costs
+more. AgentCore deletes a Memory asynchronously, and it can take hours: in one run
+on 2026-11-10 the Memory stayed `DELETING` for more than fifteen hours and
+CloudFormation's delete timed out. The script handles that case: when the
+stack ends `DELETE_FAILED` on the Memory alone, it deletes the stack with the
+Memory retained, polls the Memory for `TMI_MEMORY_DELETE_WAIT` seconds
+(default two hours), and, if it is still deleting, fails the run naming the
+Memory id to check later. Give the script no timeout of its own. A run costs
 well under one US dollar.
+
+The same applies to `npx cdk destroy` of a demo deployment: if it ends
+`DELETE_FAILED` on the Memory, run
+`aws cloudformation delete-stack --stack-name TenantMemoryIsolation --retain-resources <Memory logical id>`
+and check `aws bedrock-agentcore-control get-memory` until it returns not
+found; the Memory and its records are deleted by the service either way.
 
 | Step | Proves |
 | --- | --- |
