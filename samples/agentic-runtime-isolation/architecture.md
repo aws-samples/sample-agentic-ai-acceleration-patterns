@@ -4,9 +4,12 @@ SPDX-License-Identifier: MIT-0
 -->
 # Agentic Runtime Isolation: Architecture
 
-> **Status: implemented and verified.** Last green integration run: run 18,
-> 2026-11-09 15:44 to 16:55 UTC, us-east-1, 58/58 steps, teardown clean,
-> sweep 0 hits (commit 7e0f793 on PR 27, `INTEG_DEPLOY_CONCURRENCY=2`). The
+> **Status: implemented and verified.** Last green integration run: run 19,
+> 2026-11-11 14:06 to 14:51 UTC, eu-central-1, 60/60 steps (59 PASS, 1 SKIP),
+> deploy 705 s at `INTEG_DEPLOY_CONCURRENCY=2`, key rotation 172 s, sweep of
+> 147 log groups clean, teardown clean (commit 4fec24a on PR 38; the first
+> attempt at the default concurrency 6 failed on an API Gateway control-plane
+> 429 at `CreateModel`, the second at 2 went through). The
 > run used a sandbox account and `scripts/integ.sh` (the CDK CLI driver,
 > ADR-0044) with six stacks (`api-gateway`, `agentcore-gateway`,
 > `session-off`, `session-user`, `limits`, `multi-tenant`). Both all-on

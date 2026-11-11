@@ -4,8 +4,8 @@ SPDX-License-Identifier: MIT-0
 -->
 # Specification: Agentic Runtime Isolation (v2)
 
-> **Status, current (2026-11-09):** implemented; verified by integration
-> run 18 (58/58, us-east-1, commit 7e0f793). `architecture.md` describes
+> **Status, current (2026-11-11):** implemented; verified by integration
+> run 19 (60/60, eu-central-1, commit 4fec24a). `architecture.md` describes
 > the implemented state. The dated notes below are the design-time record.
 >
 > **Historical, 2026-11-02 (as accepted):** v2, Accepted 2026-11-02 (Dave Roberts). Supersedes the v1
