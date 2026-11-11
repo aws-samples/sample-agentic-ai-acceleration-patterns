@@ -621,8 +621,10 @@ The design targets 10,000s of tenants, 100,000s of tenant users, 100s of
 agents and 1,000s of tools; none of those counts grows a policy, a Gateway, a
 role or a token per tenant or per user (P-16). The bounds that do apply, the
 shared pools every tenant draws on and the known limitations are in
-[`architecture.md`](./architecture.md#scale-limits). The ones a deployer
-meets first:
+[`architecture.md`](./architecture.md#scale-limits); the options and
+trade-offs for each pool, with the stress test's measured figures, are in
+[`design/agentic-runtime-isolation.scaling.md`](./design/agentic-runtime-isolation.scaling.md).
+The ones a deployer meets first:
 
 - The `api-gateway` stage throttle is one bucket for every tenant: size
   `stageThrottle.rateLimit` to at least tenants x tenant limit / 60.

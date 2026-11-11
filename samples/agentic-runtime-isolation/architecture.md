@@ -506,6 +506,9 @@ agents is two sessions.
 
 ## Scale limits
 
+What to do about each limit, with the stress test's measured figures, is in
+[`design/agentic-runtime-isolation.scaling.md`](./design/agentic-runtime-isolation.scaling.md).
+
 The design targets 10,000s of tenants, 100,000s of tenant users, 100s of
 agents and 1,000s of tools; none of those counts grows a policy, a Gateway,
 a role or a token per tenant or per user (P-16, spec §3.6). Values are
