@@ -411,7 +411,7 @@ describe('respond', () => {
   });
 });
 
-describe('tool probes (v2, C-2)', () => {
+describe('tool probes (C-2)', () => {
   const sinkOf = () => {
     const c = { body: '' };
     const s: ResponseSink = { head: () => undefined, write: (t) => void (c.body += t), end: () => undefined };

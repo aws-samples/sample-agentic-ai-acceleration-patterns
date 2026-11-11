@@ -57,7 +57,7 @@ describe('teardown leaves no log group (ADR-0019)', () => {
 
     const [drain] = logicalIdOf(template, 'AWS::CloudFormation::CustomResource');
     const drainDeps: string[] = template.toJSON().Resources[drain].DependsOn ?? [];
-    // The stage's own groups and the functions it invokes: the ingress pair and (v2) the entitlement API pair.
+    // The stage's own groups and the functions it invokes: the ingress pair and the entitlement API pair.
     const writerGroups = Object.keys(groups).filter((id) => /ApiAccessLogs|ApiExecutionLogs|AuthorizerLogs|IngressLogs|VendorLogs|TenantAdminLogs/.test(id));
     expect(writerGroups.length).toBe(6);
     for (const id of writerGroups) {

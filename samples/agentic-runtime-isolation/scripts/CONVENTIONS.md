@@ -77,7 +77,7 @@ that none of those ever reach output.
   engines left, every KMS key pending deletion, and each tool target's
   policy deleted before its target (ADR-0040, from the deleted stacks'
   events).
-- `integ.sh` never replaces a published tenant-identity on its own. v2
+- `integ.sh` never replaces a published tenant-identity on its own. The run
   needs a `shared-pool` deployment with the scope catalogue (it registers
   the vendor scopes `app/use` and `entitlements/admin` there, spec §6.4);
   one without `/platform/scopes` is stale, and the script fails and names
@@ -101,7 +101,7 @@ that none of those ever reach output.
   variable. The signature segment of every token and context the run
   handles is kept (mode 0600) for the log sweep, which pulls every log
   group on the path and fails on any `eyJ`, signature segment or `_ri_ctx`
-  value (spec §8, v1 V-7).
+  value (spec §8, V-7).
 - Exit non-zero on any failure, naming the step, resource or parameter that
   failed (name, not value). Never swallow an error into a success exit.
 
@@ -116,12 +116,12 @@ The scripts read this sample's published parameters under the ingress's
 |---|---|---|
 | `ingress`: one JSON document (`version: 2`, `ingress`, `endpointUrl`, `baseUrl`, `ingressRoleArn`, `ingressId`, `tenantRoleArn`, `gatewayIdentifier` on `agentcore-gateway`, `issuer`, `jwksUrl`, `entitlementsTableName`, `entitlementsApiUrl`, `toolContextKeyId`, `toolsGateways`; ADR-0042) | the ingress stack (`SharedIngress`) | read only, with `jq` (`demo.sh`, `perf.sh`); `integ.sh` reads stack outputs |
 | `backends/<name>` | the stack that deployed that `AgentBackend`; its custom resource writes `active`, `draining`, then removes the entry | read only, except `backends/late` |
-| `backends/late` | `integ.sh` step 9-registry, written with `aws ssm put-parameter` to show a backend added after the ingress deploy; it names billing's Runtime, `needs: ["late/run"]` and `tools: []` (the v2 shape, spec §4.3). Its `NAME#late` reservation row, which a vendor subscription needs (spec §5.3), is written into the entitlement store the same way | the script deletes both at the end of the step and again from the `EXIT` trap, so a failed run leaves no route or row behind |
+| `backends/late` | `integ.sh` step 9-registry, written with `aws ssm put-parameter` to show a backend added after the ingress deploy; it names billing's Runtime, `needs: ["late/run"]` and `tools: []` (spec §4.3). Its `NAME#late` reservation row, which a vendor subscription needs (spec §5.3), is written into the entitlement store the same way | the script deletes both at the end of the step and again from the `EXIT` trap, so a failed run leaves no route or row behind |
 
 The scripts also call tenant-identity's platform API with SigV4 (`platform`
 in `lib.sh`): `CreateTenant` with the tenant's `scopes`, `IssueToken`,
 `DeleteTenant`, and `GET /platform/scopes` to tell a stale deployment from
-one with the scope catalogue (ADR-0025); (v2) `integ.sh` also puts and
+one with the scope catalogue (ADR-0025); `integ.sh` also puts and
 deletes the vendor scopes and calls `CreateMembership`. All three scripts
 call this sample's entitlement API: the vendor operations with SigV4
 (`vendor`; `perf.sh` writes one subscription) and, in `demo.sh` and
@@ -131,7 +131,7 @@ token (`admin_api`). `integ.sh` also has the tenant admin cut A1 and A2 to
 so only the admin's identity token carries `entitlements/admin`. The scripts
 create tenants with the vendor scopes only, passed explicitly to
 `create_tenant` (`app/use`, plus `entitlements/admin` for a tenant whose admin
-writes cuts): agents and tools are not identity-provider scopes in v2, they
+writes cuts): agents and tools are not identity-provider scopes, they
 are entitlements the vendor writes (spec §5.3). A tenant created without
 `app/use` fails the floor of a stack deployed with `requiredScopes=app/use`,
 and every token is refused at the ingress.

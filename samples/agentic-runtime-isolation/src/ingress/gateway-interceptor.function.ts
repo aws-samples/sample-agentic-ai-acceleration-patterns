@@ -8,7 +8,7 @@
  * same shared pipeline again (one contract on both ingresses), resolves the
  * backend the Gateway target names through the registry, BUILDS the unit id from the validated claims and the body's
  * `conversationId`, and writes it to the Runtime session header, overwriting
- * whatever the client sent (spike V-3). (v2) On this ingress the interceptor
+ * whatever the client sent (spike V-3). On this ingress the interceptor
  * is also the mint: it selects the tenant (`X-Tenant-Id`), runs the grant
  * rule and signs the transaction token, and sets the transaction-token and
  * credential headers. A refusal is a fixed-text response.

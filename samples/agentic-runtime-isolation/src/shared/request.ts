@@ -7,7 +7,7 @@
  * ingresses enforce one contract. Check order (spec §5.1): verify the
  * identity token and select the tenant (P-3, ADR-0038), the floor scopes
  * (ADR-0005), the registry entry (ADR-0024), the per-tenant limit
- * (ADR-0020), (v2) the entitlement read, the grant rule and the mint
+ * (ADR-0020), the entitlement read, the grant rule and the mint
  * (P-11, P-14), the unit (P-2) and the TVM (P-8). A refused request costs no
  * KMS call and no STS call.
  *
@@ -47,7 +47,7 @@ export const ERROR_TEXT: Record<ErrorStatus, string> = {
   502: 'upstream error',
 };
 
-/** The v2 reason codes a refusal body carries after its text (spec §5.1, for example `forbidden: agent_not_subscribed`). */
+/** The reason codes a refusal body carries after its text (spec §5.1, for example `forbidden: agent_not_subscribed`). */
 export const PUBLIC_REASONS: ReadonlySet<string> = new Set([
   'tenant_required',
   'tenant_not_allowed',
@@ -77,7 +77,7 @@ const REGISTRY_MISS_STATUS: Record<RegistryMiss, ErrorStatus> = {
   unknown_backend: 404,
   backend_draining: 404,
   registry_entry_invalid: 502,
-  registry_entry_v1: 502,
+  registry_entry_shape: 502,
   registry_unavailable: 502,
 };
 
@@ -132,7 +132,7 @@ export interface AuthorizedContext {
 export interface RequestInputs {
   /** The `Authorization` header value as received. */
   readonly authorization?: string;
-  /** (v2) The `X-Tenant-Id` header value as received, if any (P-3). */
+  /** The `X-Tenant-Id` header value as received, if any (P-3). */
   readonly tenantHeader?: string;
   /** The request body as received. */
   readonly body?: string | null;
@@ -148,7 +148,7 @@ export interface RequestInputs {
    * when a default backend is configured. The Gateway ingress sets this.
    */
   readonly requireBackendInPath?: boolean;
-  /** (v2) The authoriser's decision and token (`api-gateway`); absent where this pipeline mints. */
+  /** The authoriser's decision and token (`api-gateway`); absent where this pipeline mints. */
   readonly authorized?: AuthorizedContext;
 }
 
@@ -220,9 +220,9 @@ export class IngressPipeline {
     private readonly tvm?: TokenVendingMachine,
     /** Per-tenant limits (ADR-0020); undefined when off. */
     readonly limiter?: TenantLimiter,
-    /** (v2) The authority step; present only on the function that mints. */
+    /** The authority step; present only on the function that mints. */
     private readonly authority?: AuthoritySource | DelegationAuthoritySource,
-    /** (v2) Verifies a token the authoriser forwarded; present on the function that does not mint. */
+    /** Verifies a token the authoriser forwarded; present on the function that does not mint. */
     private readonly forwarded?: ForwardedTokenVerifier,
     /** (ADR-0048) Verifies the caller's transaction token on the delegation route; present when `config.delegation` is set. */
     private readonly delegationVerifier?: DelegationTokenVerifier,
@@ -501,9 +501,9 @@ export class IngressPipeline {
 
   /**
    * Resolves the route's backend (ADR-0024): an unparseable path, an unknown
-   * name or a draining backend is 404; a registry fault or a v1-shaped entry
+   * name or a draining backend is 404; a registry fault or an entry without `needs` or `tools`
    * is 502. With `requireBackendInPath` the default backend is not consulted.
-   * (v2) There is no per-backend scope check: what the caller may do with
+   * There is no per-backend scope check: what the caller may do with
    * the agent is the grant rule's (ADR-0030).
    */
   async resolveBackend(

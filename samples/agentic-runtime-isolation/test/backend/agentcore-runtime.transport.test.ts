@@ -136,8 +136,8 @@ describe('AgentCoreRuntimeBackend', () => {
   });
 });
 
-describe('v2 header names (ADR-0031)', () => {
-  it('the transaction-token header replaces the v1 user-token header', () => {
+describe('header names (ADR-0031)', () => {
+  it('the transaction-token header is the only token header', () => {
     expect(RUNTIME_HEADERS.TRANSACTION_TOKEN).toBe('X-Amzn-Bedrock-AgentCore-Runtime-Custom-Transaction-Token');
     expect(Object.values(RUNTIME_HEADERS)).not.toContain('X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Token');
   });

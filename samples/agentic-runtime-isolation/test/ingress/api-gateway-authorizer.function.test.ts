@@ -13,7 +13,7 @@ process.env[ENV.INGRESS] = 'api-gateway';
 process.env[ENV.DISCOVERY_URL] = DISCOVERY_URL;
 process.env[ENV.ALLOWED_CLIENT_IDS] = CLIENT_ID;
 process.env[ENV.REGISTRY_PREFIX] = REGISTRY_PREFIX;
-// v2: the authoriser mints, so its environment names the signing key, the issuer and the store.
+// the authoriser mints, so its environment names the signing key, the issuer and the store.
 process.env[ENV.TXN_KEY_ID] = '1234abcd-12ab-34cd-56ef-1234567890ab';
 process.env[ENV.ISSUER] = 'https://abc123.execute-api.eu-central-1.amazonaws.com/prod';
 process.env[ENV.INGRESS_ROLE_ARN] = 'arn:aws:iam::111122223333:role/ingress';
@@ -37,7 +37,7 @@ describe('buildPolicy', () => {
     expect(result.context).toEqual(CONTEXT);
   });
 
-  it('Deny carries no context, or only a public v2 reason code for the ACCESS_DENIED template (spec §5.1)', () => {
+  it('Deny carries no context, or only a public reason code for the ACCESS_DENIED template (spec §5.1)', () => {
     const result = authorizer.buildPolicy(METHOD_ARN, 'Deny');
     expect(result.principalId).toBe('unauthorized');
     expect(effectOf(result)).toBe('Deny');
@@ -152,7 +152,7 @@ describe('authorize', () => {
     expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'authorizer failed')).toMatchObject({ error: 'TypeError' });
   });
 
-  it('v2: an entitlement refusal is a Deny carrying its public reason; the floor still applies first, before the registry (ADR-0005)', async () => {
+  it('an entitlement refusal is a Deny carrying its public reason; the floor still applies first, before the registry (ADR-0005)', async () => {
     const token = `Bearer ${await issuer.mint()}`;
     const refusing = {
       resolve: async () => {
@@ -175,7 +175,7 @@ describe('authorize', () => {
     expect(resolve).not.toHaveBeenCalled();
   });
 
-  it('v2: the authority step gets the selected tenant (X-Tenant-Id) and the route backend; the token never reaches a log line', async () => {
+  it('the authority step gets the selected tenant (X-Tenant-Id) and the route backend; the token never reaches a log line', async () => {
     const calls: Array<{ tenantId: string; sub: string; agent: string }> = [];
     const multi = new TokenVerifier(
       { discoveryUrl: DISCOVERY_URL, allowedClientIds: [CLIENT_ID], multiTenant: true },

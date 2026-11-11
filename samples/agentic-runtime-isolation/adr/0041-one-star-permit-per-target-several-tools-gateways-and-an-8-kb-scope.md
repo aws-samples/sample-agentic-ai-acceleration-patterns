@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT-0
 - Status: Accepted
 - Date: 2026-11-03
 - Amends: ADR-0034, ADR-0040
-- Amended by: integration runs 1 to 9 (2026-11-04), ADR-0045
+- Amended by: integration runs 1 to 9 (2026-11-04), ADR-0045, the implementation (2026-11-10)
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -36,3 +36,5 @@ Easier: a `ToolTarget` deploy is one policy and minutes; the Cedar generator is 
 **2026-11-04.** Amended by the security review: the interceptor is the per-tool wall only for requests it understands, so it now admits one JSON-RPC object whose `method` is `initialize`, `notifications/initialized`, `ping`, `tools/list` or `tools/call`, with plain-object `arguments` on a call, and refuses everything else with `malformed_request`. A JSON-RPC batch carrying `tools/call` had passed with the token verified and no per-tool check (T-85, M-69).
 
 **2026-11-04.** Amended by the red team: the policy custom resource writes only the exact star permit `cedarPolicyFor` produces (`cedarPolicyProblem`, M-83); invoked directly it had written any Cedar text (T-102). **2026-11-05.** Amended by the scale review: one `kms:Sign` per admitted `tools/call` shares the account's RSA request quota with the mint; `toolContextKey.algorithm: 'ES256'` moves it to the ECC quota (T-105).
+
+**2026-11-10.** Amended by the implementation (no new decision): `toolsGateways: {}` fails synth ("must name at least one gateway; use toolsGateway: false for none"), so `toolsGateway: false` is the one way to create no tools gateway; an empty map is more often a mistake than a choice. `toolsGateway: {...}` is shorthand for `toolsGateways: { default: {...} }`, and setting both fails synth.

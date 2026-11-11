@@ -102,7 +102,7 @@ describe('registry-entry custom resource handler', () => {
     expect(written()).toEqual({ runtimeArn: OTHER_ARN, needs: ['billing/read', 'billing/invoke'], tools: [], delegatesTo: [], version: 4, status: 'active' });
   });
 
-  it('Update over a v1 entry (no version) writes version 1; missing Needs fails (the entry would be refused at the ingress)', async () => {
+  it('Update over an entry with no version writes version 1; missing Needs fails (the entry would be refused at the ingress)', async () => {
     ssm.on(GetParameterCommand).resolves({ Parameter: { Name: NAME, Value: JSON.stringify({ runtimeArn: RUNTIME_ARN, scopes: ['billing/read'], status: 'active' }) } });
     expect((await handleEvent(event('Update', {}, NAME), deps())).status).toBe('SUCCESS');
     expect(written().version).toBe(1);
