@@ -4,7 +4,7 @@
 
 **Status:** Implemented and verified. Last green integration run:
 **2026-11-10, `us-east-1`**, on commit `651816e` (`npx projen integ`, all 13
-steps passed). `npx projen build` on 2026-11-11: 79 unit tests, cdk-nag
+steps passed). `npx projen build` on 2026-11-11: 80 unit tests, cdk-nag
 clean.
 
 Teardown: runs 2, 3, and 4 the same day each deployed and destroyed the
@@ -88,7 +88,9 @@ minutes.
 
 Names derive from the construct path, so two stacks never collide; policy
 names carry the engine name because policy names are unique in the account
-and Region.
+and Region. The Memory name also carries the first segment of the stack's id,
+because a Memory being deleted keeps its name, sometimes for hours, and a
+redeploy must not wait for it (ADR-0014).
 
 ## Authorisation
 
@@ -160,7 +162,7 @@ authorisations are apportioned by the tenant's share of Memory operations.
 
 ## Validation
 
-`npx projen build` runs 79 unit tests: the policies in the Cedar evaluator
+`npx projen build` runs 80 unit tests: the policies in the Cedar evaluator
 (allow and deny per claim, field, and operation; claim options), the fence
 against the HTTP traits of the pinned Memory SDK, the construct synthesised
 per option with assertions on the Gateway, role, trust, fence, policy order,

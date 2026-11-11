@@ -16,7 +16,7 @@
  * §2.1) fits.
  */
 
-import { CfnResource, Names, RemovalPolicy, Stack, Token } from 'aws-cdk-lib';
+import { CfnResource, Fn, Names, RemovalPolicy, Stack, Token } from 'aws-cdk-lib';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -134,8 +134,13 @@ export class TenantMemoryIsolation extends Construct {
     const arn = (resource: string) => `arn:${stack.partition}:bedrock-agentcore:${stack.region}:${stack.account}:${resource}`;
 
     // --- Memory: one pooled resource, one semantic strategy keyed by tenant ---
+    // Memory names are unique in the account and Region, and a Memory that AgentCore is still
+    // deleting keeps its name, sometimes for hours. The first segment of the stack's id makes the
+    // name unique per stack instance, so a redeploy never waits on an old deletion (ADR-0014).
+    const stackInstance = Fn.select(0, Fn.split('-', Fn.select(2, Fn.split('/', stack.stackId))));
+    const memoryName = `${Names.uniqueResourceName(this, { maxLength: 39, separator: '', allowedSpecialCharacters: '' }).replace(/^[^A-Za-z]+/, 'M')}_${stackInstance}`;
     this.memory = new agentcore.CfnMemory(this, 'Memory', {
-      name: Names.uniqueResourceName(this, { maxLength: 48, separator: '', allowedSpecialCharacters: '' }).replace(/^[^A-Za-z]+/, 'M'),
+      name: memoryName,
       description: 'Tenant memory isolation: pooled Memory reached only through the tenant memory Gateway (ADR-0004)',
       eventExpiryDuration: props.eventExpiryDays ?? DEFAULT_EVENT_EXPIRY_DAYS,
       memoryStrategies: [

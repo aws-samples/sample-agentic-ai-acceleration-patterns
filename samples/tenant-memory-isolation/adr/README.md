@@ -17,3 +17,4 @@
 | [0011](0011-pin-the-gateway-role-to-its-own-gateway-from-the-first-deploy.md) | Pin the Gateway role to its own Gateway from the first deploy | Accepted | 2026-11-10 |
 | [0012](0012-attribute-memory-telemetry-and-cost-by-actor-id.md) | Attribute Memory telemetry and cost by actor id | Accepted | 2026-11-10 |
 | [0013](0013-ship-a-construct-with-a-bundled-standard-claims-issuer.md) | Ship a construct with a bundled standard-claims issuer | Accepted | 2026-11-10 |
+| [0014](0014-name-the-memory-per-stack-instance.md) | Name the Memory per stack instance | Accepted | 2026-11-11 |

@@ -67,6 +67,13 @@ describe('defaults', () => {
     });
   });
 
+  it('names the Memory per stack instance, so a redeploy never collides with a Memory still being deleted', () => {
+    const [memory] = Object.values(template.findResources('AWS::BedrockAgentCore::Memory'));
+    const name = JSON.stringify(memory.Properties.Name);
+    expect(name).toContain('AWS::StackId');
+    expect(name).toMatch(/"[A-Za-z][A-Za-z0-9]{0,38}_"/);
+  });
+
   it('trusts only the AgentCore service for this account, this Gateway\'s name, and its Policy engine', () => {
     const roles = template.findResources('AWS::IAM::Role');
     const [role] = Object.values(roles);
