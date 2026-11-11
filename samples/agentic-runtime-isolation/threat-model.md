@@ -8,9 +8,10 @@ SPDX-License-Identifier: MIT-0
 > and M-1 to M-86; T-14, T-15, T-41, M-8, M-9, M-31, B7 and A-11 are not
 > used and are not reused; ADR-0030, ADR-0031). T-106 to T-108 and M-84 to M-86 cover
 > delegation between agents (ADR-0048, spec §3.7).
-> Last review 2026-11-09 (ADR-0048, delegation). Last green integration
-> run: run 18, 2026-11-09, us-east-1, 58 of 58 steps (step 25 SKIP on
-> `agentcore-gateway` by design), commit `7e0f793` on the delegation branch.
+> Last review 2026-11-11 (ADR-0049, authoriser reserve; stress test at three
+> scales). Last green integration run: run 19, 2026-11-11, eu-central-1,
+> 60 of 60 steps (step 25 SKIP on `agentcore-gateway` by design), commit
+> `4fec24a` on the stress-test branch.
 > History is in the [ADRs](./adr/) and the git log.
 
 Scope: the `SharedIngress` and `AgentBackend` constructs (one ingress, one
