@@ -79,6 +79,7 @@ Pass criteria, every scenario:
 | DynamoDB `ThrottledRequests` (entitlement store, `TenantLimits`) | 0 |
 | p90 TTFB, `report` probe, warm | within 1.5x of the single-tenant `perf.sh` figure of the same day |
 | p90 TTFB flat | the 1,000-tenant steady run and a 100-tenant run differ by under 20 % |
+| Per-tenant cost attribution (P-10) | every `request served` line carries a `tenantId` and `backendInvokeSeconds`; 0 served lines without a tenant; the per-tenant sum equals the run's backend time, and the day's sum tracks the Runtime line in Cost Explorer (§11.2) |
 
 Deploy and destroy time are results, not footnotes.
 Every phase reports them.
@@ -457,7 +458,40 @@ served. What the runs found beyond that:
 | F-17 | The first ADR-0049 formula (live tokens / 60 x 2) undersized the authoriser reserve by a factor of 30: a refresh burst lands on cold instances at about 900 ms a call (p99 of the burst minute), not the warm 20 ms, so 1,000 misses in a few seconds need about 1,000 concurrent. The rerun with the reserve at 34 pinned the authoriser's concurrency at 34 and threw 40 (S1) and 369 (S6) throttles: the reserve had become the cap. Formula and warning amended; `large` now reserves 1,000 for the authoriser, which with the 800 for the integration Lambda exceeds the account's default pool, so the Lambda concurrency quota must be raised to about 2,500 before the tier deploys | the sample (ADR-0049, amended) and the test account's quota | the rerun needs the quota increase first |
 | F-8 | An integ run deletes the vendor scopes it registered on the shared identity deployment at its end, so a stress deploy after an integ run finds no `app/use` | shared fixture | `deploy.sh` registers the two vendor scopes when missing and leaves them |
 
-## 12. Options considered for the driver
+## 11.2 Cost of a run, and cost per tenant
+
+Two checks, two sources.
+
+**The run's cost** is read from Cost Explorer the next day by
+`scripts/stress/cost.sh <run-date>`: the account's unblended cost by service
+for the run day against a quiet baseline day, written into the day's results
+file. Measured: 2026-11-09 (`small` and `medium`) $36.7 above baseline,
+2026-11-10 (`large`: seed, two S1, S2 to S7) $129.2 above baseline; 97 % of
+both is AgentCore Runtime vCPU (9 and 31 vCPU-hours). Lambda, API Gateway,
+DynamoDB, KMS and STS were under $2 a day together. The Runtime bill is the
+microVMs held between scenarios, not the requests: the `large` day held 1,000
+to 2,000 of them for about two hours. A rerun that destroys nothing between
+scenarios pays for the idle hour; a deployment pays for its idle timeout.
+
+**Cost per tenant** is the sample's own attribution (P-10): the `request
+served` line carries `tenantId`, `backendInvokeSeconds`, `usageInput` and
+`usageOutput`, and the demo's Contributor Insights rules rank tenants by
+them. `collect.sh` sums the line per tenant (`cost_by_tenant`) and the pass
+table checks that no served line lacks a tenant and reports the attributed
+backend seconds with their per-tenant spread. The validation of the
+attribution against the bill is: the day's summed `backendInvokeSeconds`
+across runs, times the Runtime's vCPU-second rate for the microVM size,
+should track the `Runtime:Consumption-based:vCPU` usage Cost Explorer shows
+for the day, less the idle time between scenarios (which no request owns).
+The stress agent makes no model calls at rate, so `usageOutput` stays 0 and
+the token side of the attribution is proven by the integration test
+(`perf.sh` scenario 3 and the demo), not here.
+
+Not yet measured: the runs before 2026-11-11 did not collect
+`cost_by_tenant` (the query was added after them, and their log groups went
+with the stacks), so the first per-tenant figures come from the next run.
+
+
 
 | Option | Deploy time | Destroy time | For | Against |
 |---|---|---|---|---|

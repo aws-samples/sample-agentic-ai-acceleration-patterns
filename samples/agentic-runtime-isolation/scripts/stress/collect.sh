@@ -108,6 +108,12 @@ insights served_by_minute 'filter message = "request served" | stats count(*) as
 insights refused_429 'filter message = "request refused" and status = 429 | stats count(*) as n by tenantId, bin(1m) as minute | limit 10000'
 insights refused_5xx 'filter message = "request refused" and status >= 500 | fields ispresent(tenantId) as withTenant | stats count(*) as n by status, reason, withTenant'
 insights retried 'filter message = "sdk retried" | fields attempts - 1 as extra, ispresent(error) as failedAll | stats sum(extra) as retries, count(*) as lines, sum(failedAll) as exhausted by service'
+# Per-tenant cost attribution (P-10, plan §11.2): the figures the `request
+# served` line carries per tenant, summed, so the run's Runtime seconds can be
+# split by tenant and the sum compared with the Cost Explorer line (cost.sh).
+insights cost_by_tenant 'filter message = "request served"
+| stats count(*) as requests, sum(backendInvokeSeconds) as backendSeconds, sum(usageInput) as inputTokens, sum(usageOutput) as outputTokens by tenantId
+| sort backendSeconds desc | limit 10000'
 
 # -- CloudWatch metrics ------------------------------------------------------
 # metric NAMESPACE NAME STAT DIMENSIONS... -> the sum (Sum) or the max (Maximum, Average) over the window.
@@ -166,7 +172,7 @@ K6="$(jq -n \
 I="$RUN_DIR"
 jq -n --argjson w "$(cat "$WINDOW")" --argjson k6 "$K6" --argjson m "$(cat "${RUN_DIR}/metrics.json")" \
   --slurpfile served "${I}/insights-served.json" --slurpfile mint "${I}/insights-mint.json" \
-  --slurpfile sbm "${I}/insights-served_by_minute.json" --slurpfile r429 "${I}/insights-refused_429.json" \
+  --slurpfile sbm "${I}/insights-served_by_minute.json" --slurpfile r429 "${I}/insights-refused_429.json" --slurpfile cbt "${I}/insights-cost_by_tenant.json" \
   --slurpfile r5 "${I}/insights-refused_5xx.json" --slurpfile retried "${I}/insights-retried.json" '
   def num: if . == null then 0 else tonumber end;
   ($sbm[0] | map({key: "\(.tenantId)|\(.minute)", value: (.n | num)}) | from_entries) as $servedAt
@@ -189,7 +195,16 @@ jq -n --argjson w "$(cat "$WINDOW")" --argjson k6 "$K6" --argjson m "$(cat "${RU
      refused5xx: ($r5[0] | map(.n | num) | add // 0),
      refused5xxWithTenant: ($r5[0] | map(select(.withTenant == "1" or .withTenant == "true") | .n | num) | add // 0),
      refused5xxReasons: ($r5[0] | map({key: "\(.status) \(.reason // "none")", value: (.n | num)}) | from_entries),
-     sdkRetried: ($retried[0] | map({key: (.service // "unknown"), value: {retries: (.retries | num), lines: (.lines | num), exhausted: (.exhausted | num)}}) | from_entries)}' \
+     sdkRetried: ($retried[0] | map({key: (.service // "unknown"), value: {retries: (.retries | num), lines: (.lines | num), exhausted: (.exhausted | num)}}) | from_entries),
+     costByTenant: (($cbt[0] | map(select((.tenantId // "") != "") | {requests: (.requests | num), backendSeconds: (.backendSeconds | num), inputTokens: (.inputTokens | num), outputTokens: (.outputTokens | num)})) as $rows
+       | ($rows | length) as $tenants | ($rows | map(.backendSeconds) | add // 0) as $seconds | ($rows | map(.requests) | add // 0) as $reqs
+       | {tenants: $tenants, backendSeconds: $seconds, requests: $reqs,
+          secondsPerTenantAvg: (if $tenants == 0 then 0 else $seconds / $tenants end),
+          secondsPerTenantMax: ($rows | map(.backendSeconds) | max // 0),
+          secondsPerTenantMin: ($rows | map(.backendSeconds) | min // 0),
+          secondsPerRequest: (if $reqs == 0 then 0 else $seconds / $reqs end),
+          inputTokens: ($rows | map(.inputTokens) | add // 0), outputTokens: ($rows | map(.outputTokens) | add // 0),
+          untagged: ($cbt[0] | map(select((.tenantId // "") == "")) | length)})}' \
   >"${RUN_DIR}/collect.json"
 C="${RUN_DIR}/collect.json"
 v() { jq -r "$1" "$C"; }
@@ -258,6 +273,12 @@ else
   row "p90 TTFB within 1.5x of perf.sh" "${TTFB90} ms; no STRESS_BASELINE_TTFB_P90_MS" N/A
 fi
 row "p90 TTFB flat (large vs 100 tenants)" "compare this file with the medium-tier result" N/A
+# Per-tenant cost attribution (P-10): every served request carries a tenantId
+# and its backend seconds, so the run's Runtime time splits by tenant with
+# nothing left over. The sum is what cost.sh compares with the Runtime line.
+CT_UNTAGGED="$(v .costByTenant.untagged)"; CT_TENANTS="$(v .costByTenant.tenants)"; CT_SECONDS="$(v '.costByTenant.backendSeconds | . * 10 | round / 10')"
+row "Per-tenant cost attribution (P-10)" "${CT_TENANTS} tenants, ${CT_SECONDS} backend seconds attributed, ${CT_UNTAGGED} served lines without a tenant; per tenant avg/min/max $(v '.costByTenant.secondsPerTenantAvg | . * 10 | round / 10')/$(v '.costByTenant.secondsPerTenantMin | . * 10 | round / 10')/$(v '.costByTenant.secondsPerTenantMax | . * 10 | round / 10') s" \
+  "$(pf zero "$CT_UNTAGGED")"
 
 # -- the results file --------------------------------------------------------
 DATE="$(date -u +%F)"
@@ -277,6 +298,10 @@ SECTION="${LIB_TMP}/section.md"
   jq -r '[
       ["k6 requests", .k6.requests], ["k6 http_req_duration p90 ms", .k6.durationP90Ms], ["k6 TTFB p90 ms", .k6.ttfbP90Ms],
       ["k6 http_req_failed rate", .k6.failedRate], ["request served", .served.served],
+      ["backend seconds attributed to tenants", (.costByTenant.backendSeconds | . * 10 | round / 10)],
+      ["backend seconds per request", (.costByTenant.secondsPerRequest | . * 1000 | round / 1000)],
+      ["backend seconds per tenant avg / min / max", "\(.costByTenant.secondsPerTenantAvg | . * 10 | round / 10) / \(.costByTenant.secondsPerTenantMin | . * 10 | round / 10) / \(.costByTenant.secondsPerTenantMax | . * 10 | round / 10)"],
+      ["model tokens in / out (none at rate by design)", "\(.costByTenant.inputTokens) / \(.costByTenant.outputTokens)"],
       ["totalMs p50/p90/max", "\(.served.totalP50)/\(.served.totalP90)/\(.served.totalMax)"],
       ["ttfbMs p50/p90/max", "\(.served.ttfbP50)/\(.served.ttfbP90)/\(.served.ttfbMax)"],
       ["mint hit ratio", .mintHitRatio], ["API Gateway Count", .metrics.apiGateway.count],
