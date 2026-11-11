@@ -1380,6 +1380,28 @@ describe('AgentBackend from a ref: the one-model statement on the imported tenan
     expect(two).toHaveLength(2);
     expect(JSON.stringify(two.map((s: any) => s.Resource))).toContain('nova-micro');
   });
+
+  it('two ingress refs in one stack with the same model each get their own grant: the second tenant role is not left without InvokeModel', () => {
+    const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+    const otherPrefix = '/application-plane/other/agent-runtime/';
+    const otherRole = `arn:aws:iam::${TEST_ENV.account}:role/ri-other-tenant-model-role`;
+    seedPublishedIngress(app, publishedIngress('api-gateway'));
+    seedPublishedIngress(app, { ...publishedIngress('api-gateway'), tenantRoleArn: otherRole }, otherPrefix);
+    const stack = new Stack(app, 'Agents', { env: TEST_ENV });
+    const one = SharedIngress.fromParameters(stack, 'IngressOne', DEFAULT_REGISTRY_PREFIX, 'api-gateway');
+    const two = SharedIngress.fromParameters(stack, 'IngressTwo', otherPrefix, 'api-gateway');
+    new AgentBackend(stack, 'A1', { name: 'a1', ingress: one, agent: agentOf('amazon.nova-lite-v1:0'), needs: ['a1/chat'] });
+    new AgentBackend(stack, 'A2', { name: 'a2', ingress: two, agent: agentOf('amazon.nova-lite-v1:0'), needs: ['a2/chat'] });
+    new AgentBackend(stack, 'A3', { name: 'a3', ingress: two, agent: agentOf('amazon.nova-lite-v1:0'), needs: ['a3/chat'] });
+    const policies = (Object.values(Template.fromStack(stack).findResources('AWS::IAM::Policy')) as any[]).filter((p) =>
+      JSON.stringify(p.Properties.PolicyDocument).includes('"OneModel"'),
+    );
+    expect(policies).toHaveLength(2);
+    const roles = policies.map((p) => JSON.stringify(p.Properties.Roles));
+    expect(roles.some((r) => r.includes('ri-tenant-model-role'))).toBe(true);
+    expect(roles.some((r) => r.includes('ri-other-tenant-model-role'))).toBe(true);
+    expect(new Set(policies.map((p) => p.Properties.PolicyName)).size).toBe(2);
+  });
 });
 
 describe('SharedIngress.fromParameters: the synth-time lookup (ADR-0042)', () => {

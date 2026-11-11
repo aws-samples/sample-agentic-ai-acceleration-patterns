@@ -29,6 +29,11 @@ export interface StressTier {
   readonly peakRps: number;
   /** Scenario length in seconds. At `large` this is the S1 length; the other scenarios use their §5 figures. */
   readonly scenarioSeconds: number;
+  // Every tier sets rateLimit above at least one reserve, on purpose: the
+  // peak scenario (S6) runs past the reserve to see the refusal land as a
+  // 429 with a tenant, not a bare 500, so every stress synth prints
+  // `runtime-isolation:stage-throttle-above-concurrency` (ADR-0049; plan
+  // §8.2). stress.cdk.test.ts asserts it.
   readonly stageThrottle: { readonly rateLimit: number; readonly burstLimit: number };
   readonly ingressReservedConcurrency: number;
   /** ADR-0049: the live tokens that may refresh in one second; the driver issues them together, so the whole set (tenantsActive x usersPerActiveTenant). */

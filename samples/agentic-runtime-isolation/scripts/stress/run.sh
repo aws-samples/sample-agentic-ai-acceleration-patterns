@@ -59,12 +59,14 @@ LIB_TMP="$(mktemp -d)"
 source "${SCRIPT_DIR}/../lib.sh"
 COMMAND_ID=""
 DONE=0
+MARKER_RESTORE=()
 cleanup() {
   local code=$?
   set +e
   if [[ -n "$COMMAND_ID" && "$DONE" == 0 ]]; then
     aws ssm cancel-command --command-id "$COMMAND_ID" >/dev/null 2>&1 && echo "cancelled the k6 command on the driver host" >&2
   fi
+  restore_instances
   rm -rf "$LIB_TMP"
   exit "$code"
 }
@@ -106,14 +108,28 @@ echo "run_id=${RUN_ID} scenario=${SCENARIO} (${K6_FILE}) scale=${SCALE} prefix=$
 
 # -- s2: an instance-free ingress (§13 question 2) ---------------------------
 new_instances() { # FUNCTION: an environment marker change retires every warm instance
-  local env="${LIB_TMP}/env.json"
+  local env="${LIB_TMP}/env.json" before
   : >"$env"; chmod 600 "$env"
-  aws lambda get-function-configuration --function-name "$1" --query 'Environment.Variables' --output json \
-    | jq -c --arg m "$RUN_ID" '{Variables: ((. // {}) + {STRESS_INSTANCE_MARKER: $m})}' >"$env"
+  before="$(aws lambda get-function-configuration --function-name "$1" --query 'Environment.Variables' --output json)"
+  # The environment as deployed, put back from the trap (as scripts/integ.sh
+  # does): the marker is for this run only, and a stack left with it drifts
+  # from its template until the next deploy.
+  MARKER_RESTORE+=("$1|$(jq -c '{Variables: (. // {})}' <<<"$before")")
+  jq -c --arg m "$RUN_ID" '{Variables: ((. // {}) + {STRESS_INSTANCE_MARKER: $m})}' <<<"$before" >"$env"
   aws lambda update-function-configuration --function-name "$1" --environment "file://${env}" >/dev/null \
     || fail "update-function-configuration $1"
   : >"$env"
   aws lambda wait function-updated --function-name "$1" || fail "wait function-updated $1"
+}
+restore_instances() { # puts every marked function's environment back and waits for each
+  local r
+  for r in "${MARKER_RESTORE[@]:-}"; do
+    [[ -n "$r" ]] || continue
+    aws lambda update-function-configuration --function-name "${r%%|*}" --environment "${r#*|}" >/dev/null 2>&1 \
+      && aws lambda wait function-updated --function-name "${r%%|*}" 2>/dev/null \
+      || echo "cleanup: restore the environment of ${r%%|*} failed; redeploy the stack to clear STRESS_INSTANCE_MARKER" >&2
+  done
+  MARKER_RESTORE=()
 }
 if [[ "$SCENARIO" == s2 ]]; then
   echo "== s2 recipe: new Lambda instances, authoriser cache flushed, 60 s idle"

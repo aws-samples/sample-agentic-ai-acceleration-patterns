@@ -513,6 +513,7 @@ fails with the prop name.
 | `tenantLimits` | `{ requestsPerMinute?, outputTokensPerMinute? } \| false` | `requestsPerMinute: 60` | ADR-0020; keyed on the selected tenant (v2) |
 | `stageThrottle` | `{ rateLimit?, burstLimit? }` | 50 rps, burst 25 | `api-gateway` only; (added 2026-11-05, scale review) synth warns when unset: one bucket for every tenant, the per-tenant limit behind it (T-105) |
 | `ingressReservedConcurrency` | positive integer | unset | `api-gateway` only (added 2026-11-05): reserved concurrency on the streaming integration function (T-105) |
+| `authorizerReservedConcurrency` | positive integer | unset | `api-gateway` only (added 2026-11-11, ADR-0049): reserved concurrency on the REQUEST authoriser, sized at the live tokens that may refresh in one second (the whole live set when they were issued together). Synth warns when `ingressReservedConcurrency` is set without it, and when `stageThrottle.rateLimit` is above either reserve |
 | `toolContextKey` | `{ algorithm?: 'RS256' \| 'ES256' }` | `RS256` | (added 2026-11-05) `ES256` moves tool-context `kms:Sign` to the KMS ECC quota, off the RSA quota the mint shares (T-105) |
 | `perTenantMetrics` | boolean | `false` | ADR-0021. (Amended 2026-11-04) When on, 9 × (1 + agents) custom metrics per tenant per ingress: nine on `[TenantId, Ingress]` and the same nine on `[TenantId, Ingress, Backend]` for each agent |
 | `registryPrefix` | string | `/application-plane/shared/agent-runtime/` | ADR-0024 |

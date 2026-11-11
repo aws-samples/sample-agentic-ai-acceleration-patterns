@@ -34,7 +34,9 @@ TENANTS_OVERRIDE=""
 while (( $# > 0 )); do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
-    --tenants) TENANTS_OVERRIDE="${2:-}"; shift ;;
+    --tenants)
+      [[ -n "${2:-}" ]] || { echo "--tenants needs a value; usage: $0 [--tenants N] [--dry-run]" >&2; exit 2; }
+      TENANTS_OVERRIDE="$2"; shift ;;
     *) echo "usage: $0 [--tenants N] [--dry-run]" >&2; exit 2 ;;
   esac
   shift

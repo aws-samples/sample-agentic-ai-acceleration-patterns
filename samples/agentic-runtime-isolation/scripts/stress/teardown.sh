@@ -10,12 +10,17 @@
 # <prefix>-ingress, one at a time (cdk destroy --force), and prints one
 # `stack=<name> destroy_seconds=<n>` line per stack. Stacks that are not
 # there are skipped, so a rerun after a partial teardown finishes the job.
+# After the destroy it removes the Runtime log groups a late line recreated
+# outside the stacks (ADR-0047) and fails if a stack, a Runtime log group or
+# a registry parameter with this prefix is still there.
 #
 # The seeded tenants are kept for the next run (§8.2: Cognito bills per
 # monthly active user). With --tenants, they are deleted first, at 8 a second
 # (DeleteTenant on tenant-identity's platform API, 204 or 404 both done), and
-# each deleted one leaves the manifest. The shared identity deployment itself
-# is never touched. Conventions: scripts/CONVENTIONS.md.
+# each deleted one leaves the manifest; tenants that would not delete stay in
+# it, the stacks are destroyed anyway, and the script fails at the end naming
+# the count (rerun with --tenants to retry them). The shared identity
+# deployment itself is never touched. Conventions: scripts/CONVENTIONS.md.
 
 # Functions run from the trap.
 # shellcheck disable=SC2329
@@ -23,6 +28,7 @@
 set -euo pipefail
 
 DELETE_TENANTS=0
+TENANTS_LEFT=0
 case "${1:-}" in
   "") ;;
   --tenants) DELETE_TENANTS=1 ;;
@@ -119,7 +125,10 @@ if [[ "$DELETE_TENANTS" == 1 ]]; then
     GONE="$(wc -l <"$DELETED")"
     drop_deleted
     echo "tenants: ${GONE} of ${TOTAL} deleted in $((SECONDS - START))s; status $(sort "$STATUSES" | uniq -c | awk '{printf "%s:%s=%s ", $2, $3, $1}')"
-    (( GONE == TOTAL )) || fail "$((TOTAL - GONE)) tenants were not deleted; they stay in the manifest, rerun with --tenants"
+    # Not a stop: the stacks are destroyed below either way, and the script
+    # fails at the end so the undeleted tenants (still in the manifest) are
+    # reported after the stacks are gone. A rerun with --tenants retries them.
+    TENANTS_LEFT=$((TOTAL - GONE))
   else
     echo "tenants: no manifest, nothing to delete"
   fi
@@ -142,6 +151,7 @@ STACKS+=("${LIVE_AGENTS[@]}")
 exists "${PREFIX}-ingress" && STACKS+=("${PREFIX}-ingress")
 if (( ${#STACKS[@]} == 0 )); then
   echo "stacks: none with prefix ${PREFIX}; nothing to destroy"
+  (( TENANTS_LEFT == 0 )) || fail "${TENANTS_LEFT} tenants were not deleted; they stay in the manifest, rerun with --tenants"
   exit 0
 fi
 
@@ -158,6 +168,27 @@ for s in "${STACKS[@]}"; do
   [[ -f "${OUT}/${s}.template.json" ]] || fail "${s} exists but the ${SCALE} app does not synthesise it; set STRESS_SCALE to the tier it was deployed at"
 done
 
+# What CloudFormation does not take with it, collected before the destroy
+# (the ids are gone after): the Runtime ids, whose log groups under
+# /aws/bedrock-agentcore/runtimes/<id>-* are owned by a custom resource that a
+# line written after its Delete recreates outside the stack (ADR-0047; what
+# scripts/integ.sh removes too), and the registry prefix the ingress published
+# under, to check no parameter stays behind.
+RUNTIME_LOG_PREFIX="/aws/bedrock-agentcore/runtimes/"
+RUNTIMES="${MAIN_TMP}/runtimes"
+: >"$RUNTIMES"
+REGISTRY_PREFIX=""
+for s in "${STACKS[@]}"; do
+  aws cloudformation list-stack-resources --stack-name "$s" \
+    --query "StackResourceSummaries[?ResourceType=='AWS::BedrockAgentCore::Runtime'].PhysicalResourceId" --output text 2>/dev/null \
+    | tr '\t' '\n' | sed 's#.*/##' | grep -v '^$' >>"$RUNTIMES" || true
+done
+if exists "${PREFIX}-ingress"; then
+  REGISTRY_PREFIX="$(aws cloudformation describe-stacks --stack-name "${PREFIX}-ingress" \
+    --query "Stacks[0].Outputs[?OutputKey=='RegistryPrefix'].OutputValue" --output text 2>/dev/null || true)"
+  [[ "$REGISTRY_PREFIX" == None ]] && REGISTRY_PREFIX=""
+fi
+
 for s in "${STACKS[@]}"; do
   echo "== destroy ${s}"
   start=$SECONDS
@@ -168,4 +199,33 @@ for s in "${STACKS[@]}"; do
   echo "$(date -u +%F) scale=${SCALE} stack=${s} destroy_seconds=${secs}" >>"$TIMINGS"
 done
 if ! exists "${PREFIX}-ingress"; then rm -f "$OUTPUTS"; fi
+
+# -- 3. what the destroy leaves: Runtime log groups removed, then a check -----
+REMOVED=0
+while read -r rt; do
+  [[ -n "$rt" && "$rt" != None ]] || continue
+  for g in $(aws logs describe-log-groups --log-group-name-prefix "${RUNTIME_LOG_PREFIX}${rt}" --query 'logGroups[].logGroupName' --output text 2>/dev/null); do
+    [[ -n "$g" && "$g" != None ]] || continue
+    aws logs delete-log-group --log-group-name "$g" >/dev/null 2>&1 && REMOVED=$((REMOVED + 1))
+  done
+done <"$RUNTIMES"
+echo "runtime log groups: $(wc -l <"$RUNTIMES") runtimes, ${REMOVED} leftover groups removed"
+
+LEFT=""
+left_stacks="$(aws cloudformation list-stacks --output text \
+  --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE UPDATE_ROLLBACK_COMPLETE ROLLBACK_COMPLETE CREATE_FAILED DELETE_FAILED UPDATE_ROLLBACK_FAILED ROLLBACK_FAILED DELETE_IN_PROGRESS \
+  --query "StackSummaries[?starts_with(StackName, '${PREFIX}-')].StackName" 2>/dev/null | tr '\t' ' ' || true)"
+[[ -z "$left_stacks" || "$left_stacks" == None ]] || LEFT="${LEFT}; stacks ${left_stacks}"
+while read -r rt; do
+  [[ -n "$rt" && "$rt" != None ]] || continue
+  left="$(aws logs describe-log-groups --log-group-name-prefix "${RUNTIME_LOG_PREFIX}${rt}" --query 'logGroups[].logGroupName' --output text 2>/dev/null || true)"
+  [[ -z "$left" || "$left" == None ]] || LEFT="${LEFT}; runtime log groups ${left}"
+done <"$RUNTIMES"
+if [[ -n "$REGISTRY_PREFIX" ]]; then
+  left_params="$(aws ssm get-parameters-by-path --path "$REGISTRY_PREFIX" --recursive --query 'Parameters[].Name' --output text 2>/dev/null | tr '\t' ' ' || true)"
+  [[ -z "$left_params" || "$left_params" == None ]] || LEFT="${LEFT}; parameters ${left_params}"
+fi
+[[ -z "$LEFT" ]] || fail "leftovers after teardown${LEFT}"
+echo "leftovers: none (stacks, runtime log groups, registry parameters)"
 echo "destroyed ${#STACKS[@]} stacks in ${SECONDS}s"
+(( TENANTS_LEFT == 0 )) || fail "${TENANTS_LEFT} tenants were not deleted; they stay in the manifest, rerun with --tenants"

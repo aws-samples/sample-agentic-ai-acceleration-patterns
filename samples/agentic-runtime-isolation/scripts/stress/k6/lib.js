@@ -5,9 +5,9 @@
 // §5, §6, §8.3): identity tokens, token refresh, the probes and their isolation assertions,
 // and the counters the pass table is computed from.
 //
-// Credentials. The k6 aws jslib does not read the instance metadata service. run.sh fetches
-// the instance role's credentials from IMDSv2 (`curl` on the metadata endpoint) and exports
-// them before k6 starts, as:
+// Credentials. The k6 aws jslib does not read the instance metadata service. run.sh resolves
+// the instance role's credentials on the host (`aws configure export-credentials --format env`,
+// which reads IMDSv2 for it) and exports them before k6 starts, as:
 //   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, AWS_REGION (REGION is also read)
 // They sign IssueToken calls on tenant-identity's platform API (SigV4, execute-api) only.
 //

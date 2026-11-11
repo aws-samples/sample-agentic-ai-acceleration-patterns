@@ -54,11 +54,18 @@ MAIN_TMP="$LIB_TMP"
 # shellcheck source=../lib.sh
 source "${SCRIPT_DIR}/../lib.sh"
 SUB_RESTORE=""
+MARKER_RESTORE=()
 cleanup() {
   local code=$?
   set +e
   jobs -rp | xargs -r kill 2>/dev/null
   wait 2>/dev/null
+  for r in "${MARKER_RESTORE[@]:-}"; do
+    [[ -n "$r" ]] || continue
+    aws lambda update-function-configuration --function-name "${r%%|*}" --environment "${r#*|}" >/dev/null 2>&1 \
+      && aws lambda wait function-updated --function-name "${r%%|*}" 2>/dev/null \
+      || echo "cleanup: restore the environment of ${r%%|*} failed; redeploy the stack to clear STRESS_INSTANCE_MARKER" >&2
+  done
   if [[ -n "$SUB_RESTORE" ]]; then
     LIB_TMP="$MAIN_TMP"; BODY="${MAIN_TMP}/body"; REQ="${MAIN_TMP}/request"
     st="$(vendor PUT "tenants/${SUB_RESTORE}" "$SUBSCRIPTION")"
@@ -147,10 +154,14 @@ body() { jq -nc --arg c "$1" --arg p "$2" '{conversationId: $c, prompt: $p}'; }
 
 # new_instances FUNCTION: an environment marker change retires every warm instance (§13 question 2).
 new_instances() {
-  local env="${LIB_TMP}/env.json"
+  local env="${LIB_TMP}/env.json" before
   : >"$env"; chmod 600 "$env"
-  aws lambda get-function-configuration --function-name "$1" --query 'Environment.Variables' --output json \
-    | jq -c --arg m "$RUN" '{Variables: ((. // {}) + {STRESS_INSTANCE_MARKER: $m})}' >"$env"
+  before="$(aws lambda get-function-configuration --function-name "$1" --query 'Environment.Variables' --output json)"
+  # The environment as deployed, put back from the trap (as scripts/integ.sh
+  # does): the marker is for this run only, and a stack left with it drifts
+  # from its template until the next deploy.
+  MARKER_RESTORE+=("$1|$(jq -c '{Variables: (. // {})}' <<<"$before")")
+  jq -c --arg m "$RUN" '{Variables: ((. // {}) + {STRESS_INSTANCE_MARKER: $m})}' <<<"$before" >"$env"
   aws lambda update-function-configuration --function-name "$1" --environment "file://${env}" >/dev/null \
     || fail "update-function-configuration $1"
   : >"$env"

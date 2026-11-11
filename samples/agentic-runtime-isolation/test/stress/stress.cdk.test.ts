@@ -3,7 +3,7 @@
 
 import * as path from 'node:path';
 import { App, Stack, Validations } from 'aws-cdk-lib';
-import { Match, Template } from 'aws-cdk-lib/assertions';
+import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { StressAgentsStack } from './stress-agents.cdk';
 import { StressDriverStack } from './stress-driver.cdk';
@@ -145,6 +145,7 @@ describe('StressIngressStack at small, placeholders', () => {
       MethodSettings: Match.arrayWith([Match.objectLike({ ThrottlingRateLimit: 100, ThrottlingBurstLimit: 50 })]),
     });
     template.hasResourceProperties('AWS::Lambda::Function', { ReservedConcurrentExecutions: 50 });
+    template.hasResourceProperties('AWS::Lambda::Function', { ReservedConcurrentExecutions: 40 });
     expect(stack.targets.map((t) => [t.name, t.gateway, t.tools.length])).toEqual([
       ['t01', 'default', 10],
       ['t02', 'finance', 10],
@@ -153,6 +154,17 @@ describe('StressIngressStack at small, placeholders', () => {
       ['default', ['default/chat'], ['t01/*', 't02/*']],
       ['a001', ['a001/chat'], ['t01/*']],
     ]);
+  });
+
+  it('warns that the stage throttle is above a reserve, on purpose: the peak scenario runs past the reserve (plan §8.2, ADR-0049)', () => {
+    Annotations.fromStack(stack).hasWarning('*', Match.stringLikeRegexp('runtime-isolation:stage-throttle-above-concurrency'));
+  });
+});
+
+describe('every tier sets the stage throttle above a reserve (plan §8.2)', () => {
+  it.each(Object.values(STRESS_TIERS).map((t) => [t.name, t] as const))('%s', (_name, tier) => {
+    const over = tier.stageThrottle.rateLimit > tier.ingressReservedConcurrency || tier.stageThrottle.rateLimit > tier.authorizerReservedConcurrency;
+    expect(over).toBe(true);
   });
 });
 

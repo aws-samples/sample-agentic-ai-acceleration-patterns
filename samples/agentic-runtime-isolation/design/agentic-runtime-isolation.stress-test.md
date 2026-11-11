@@ -259,16 +259,24 @@ the default.
 |---|---|---|---|
 | Agents | 2 (`default` and `a001`, both in the ingress stack) | 10 (`default` plus `a001`..`a009` in one agents stack) | 100 (`default` plus `a001`..`a099` in five agents stacks of 20) |
 | Tool targets | 2 x 10 tools (`t01`, `t02`) | 4 x 100 tools (`t01`..`t04`) | 10 x 100 tools (`t01`..`t10`) |
-| Tools gateways | `default`, `finance` | `default`, `finance`, `hr`, `ops` | the same four |
+| Tools gateways | `default`, `finance` | `default`, `finance`, `hr`, `ops` | the four plus `sales`: five of 200 tools each (F-9) |
 | Tenants seeded | 20 | 200 | 4,000 (one pool holds 5,000, F-11) |
 | Tenants active | 20 | 200 | 1,000 (S7: 2,000) |
-| Users per active tenant | 2 | 2 | 4 |
+| Users per active tenant | 2 | 2 | 1 (F-13) |
 | Steady rate (S1) | 10 rps | 100 rps | 500 rps |
 | Peak rate (S6) | 40 rps | 300 rps | 1,000 rps |
-| Scenario length | 1 min | 3 min | the §5 figures |
+| Scenario length | 1 min | 3 min | 10 min |
 | `stageThrottle` | 100 / 50 | 300 / 150 | 1,200 / 600 |
 | `ingressReservedConcurrency` | 50 | 200 | 800 |
+| `authorizerReservedConcurrency` (ADR-0049) | 40 | 400 | 1,000 (F-17: the account's Lambda quota raised to about 2,500 first) |
 | Driver instance | `t3.large` | `c6i.xlarge` | `c6i.4xlarge` (F-14) |
+
+Every tier sets `stageThrottle.rateLimit` above at least one reserve, so
+every stress synth prints `runtime-isolation:stage-throttle-above-concurrency`
+on purpose: the peak scenario (S6) runs past the reserve to see the refusal
+land as a 429 with a tenant, not as a bare 500, and the warning is the
+construct saying so. `test/stress/stress.cdk.test.ts` asserts the warning
+is there for each tier.
 
 Seeded tenants and their users are reused across runs, because Cognito
 bills per monthly active user and a month of runs must fit the pool's free
@@ -290,7 +298,7 @@ The pieces are built in parallel against this contract. Names are exact.
 
 | Stack | Class, file | Holds |
 |---|---|---|
-| `<prefix>-ingress` | `StressIngressStack`, `test/stress/stress-ingress.cdk.ts` | the identity lookup as `RuntimeIsolationDemoStack` does it (tenant-identity's published parameters, or placeholders with `identityParameterPlaceholders`); a demo table and a tenant role as the demo stack's `tvm` branch; `SharedIngress` with `ingress: 'api-gateway'`, `session: { scope: 'tenant' }`, `tvm: { role }`, `tenantLimits` default, `stageThrottle` and `ingressReservedConcurrency` from the tier, `toolsGateways` from the tier (`finance` with `responseFilter: true`), `publish: true`, `registryPrefix: '/application-plane/shared/agent-runtime/<stackName>/'` (a stack-scoped prefix, so the account-wide one stays free; the agents stacks read this prefix); `AgentBackend` `default` with `needs: ['default/chat']` and `tools: ['<target>/*']` for every target; one `ToolTarget` per tier target, `kind: 'lambda'`, one `NodejsFunction` per target over the stress tool (below), `tvm: { role: <tool tenant role> }` on `t01` only, the targets spread over the gateways round-robin; for `small` also `AgentBackend` `a001`. Outputs: `EndpointUrl`, `EntitlementsApiUrl`, `EntitlementsTableName`, `DemoTableName`, `Issuer`, `RegistryPrefix`, `RestApiId`, `StageName`, `IngressLogGroupName`, `AuthorizerFunctionName`, `IngressFunctionName`, `ToolsGatewayUrl<Name>` and `PolicyEngineId<Name>` per gateway, `PolicySecondsToActive<Target>` per target, `InterceptorFunctionNames` (comma-separated) |
+| `<prefix>-ingress` | `StressIngressStack`, `test/stress/stress-ingress.cdk.ts` | the identity lookup as `RuntimeIsolationDemoStack` does it (tenant-identity's published parameters, or placeholders with `identityParameterPlaceholders`); a demo table and a tenant role as the demo stack's `tvm` branch; `SharedIngress` with `ingress: 'api-gateway'`, `session: { scope: 'tenant' }`, `tvm: { role }`, `tenantLimits` default, `stageThrottle`, `ingressReservedConcurrency` and `authorizerReservedConcurrency` from the tier, `toolsGateways` from the tier (`finance` with `responseFilter: true`), `publish: true`, `registryPrefix: '/application-plane/shared/agent-runtime/<stackName>/'` (a stack-scoped prefix, so the account-wide one stays free; the agents stacks read this prefix); `AgentBackend` `default` with `needs: ['default/chat']` and `tools: ['<target>/*']` for every target; one `ToolTarget` per tier target, `kind: 'lambda'`, one `NodejsFunction` per target over the stress tool (below), `tvm: { role: <tool tenant role> }` on `t01` only, the targets spread over the gateways round-robin; for `small` also `AgentBackend` `a001`. Outputs: `EndpointUrl`, `EntitlementsApiUrl`, `EntitlementsTableName`, `DemoTableName`, `Issuer`, `RegistryPrefix`, `RestApiId`, `StageName`, `IngressLogGroupName`, `AuthorizerFunctionName`, `IngressFunctionName`, `ToolsGatewayUrl<Name>` and `PolicyEngineId<Name>` per gateway, `PolicySecondsToActive<Target>` per target, `InterceptorFunctionNames` (comma-separated) |
 | `<prefix>-agents-<k>` | `StressAgentsStack`, `test/stress/stress-agents.cdk.ts` | `SharedIngress.fromParameters(this, 'Ingress', registryPrefix, 'api-gateway')`; `AgentBackend` `a<NNN>` for its slice, `needs: ['a<NNN>/chat']`, `tools: ['t01/*']`, `owner: 'RuntimeIsolationStress'`. Needs `env: { account, region }`. Exists for `medium` (k = 1) and `large` (k = 1..5). Deployed after the ingress stack, because the lookup reads the published document |
 | `<prefix>-driver` | `StressDriverStack`, `test/stress/stress-driver.cdk.ts` | §8.1. Outputs `InstanceId`, `ResultsBucketName`. The instance role holds `execute-api:Invoke` on `arn:aws:execute-api:<region>:<account>:*/*/*/*` (the Entitlements API and the platform API have ids the stack does not know), `ssm:GetParameter` on `/application-plane/shared/identity/*` and on the stress registry prefix, `s3:GetObject`/`PutObject`/`ListBucket` on the results bucket; no other grant |
 
