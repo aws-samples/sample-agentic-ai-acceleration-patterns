@@ -332,8 +332,9 @@ function grantModelFromStack(scope: Construct, tenantRoleArn: string, modelId: s
   const tenantRole = iam.Role.fromRoleArn(holder, 'TenantRole', tenantRoleArn, { mutable: true });
   addModelStatement(holder, tenantRole, modelId, 'OneModel');
   // An inline policy on an imported role is named by its logical id, and
-  // CloudFormation refuses one inline policy managed from two stacks: the
-  // name carries the stack so two agents stacks on one ingress coexist.
+  // two stacks writing one inline policy name silently overwrite each other
+  // (the second deploy wins): the name carries the stack so two agents
+  // stacks on one ingress each keep their own.
   const policy = tenantRole.node.tryFindChild('Policy') as iam.Policy | undefined;
   const cfnPolicy = policy?.node.defaultChild as iam.CfnPolicy | undefined;
   if (cfnPolicy !== undefined) {

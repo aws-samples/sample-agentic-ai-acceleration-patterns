@@ -16,7 +16,7 @@ SPDX-License-Identifier: MIT-0
 > token), cuts landing on the next request, the per-tool wall, forged
 > contexts, token expiry, `aud` and `act` refusals, the tool-side TVM,
 > AgentCore Policy time-to-ACTIVE, the RESPONSE filter and delegation
-> between agents (step 25, ADR-0049: PASS on `api-gateway`, SKIP on
+> between agents (step 25, ADR-0048: PASS on `api-gateway`, SKIP on
 > `agentcore-gateway`, which has no delegation route). The timings below
 > are from run 15 (2026-11-06, eu-central-1, 58/58 steps, deploy 272 s,
 > whole run about 36 min, key rotation 172 s), the last run that recorded

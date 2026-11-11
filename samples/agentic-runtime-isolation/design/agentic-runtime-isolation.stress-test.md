@@ -233,16 +233,15 @@ driver, because it is a test asset and no part of the construct.
 |---|---|---|
 | VPC | one AZ, one public subnet holding one NAT gateway, one private subnet holding the host; no public IP on the host | every call (the ingress, the Entitlements API, the platform API, STS, SSM, S3) leaves through the NAT gateway to the public AWS endpoints, as a tenant's client would |
 | Endpoints | `s3` gateway endpoint only (free); no interface endpoints, in particular no `execute-api` one | an `execute-api` interface endpoint turns on private DNS for every `*.execute-api` name in the VPC and reaches only APIs whose resource policy admits that endpoint; the stress stack's API is a regional endpoint and would need a policy change for the test alone |
-| Instance | `c6i.2xlarge`, Amazon Linux 2023, IMDSv2 required, 30 GB gp3, no key pair, no public IP | one process holds 10,000 tokens and 1,000 rps of SSE |
+| Instance | the tier's `driverInstanceType` (`t3.large`, `c6i.xlarge`, `c6i.4xlarge`), Amazon Linux 2023, IMDSv2 required, 30 GB gp3 encrypted, no key pair, no public IP | one k6 process holds the tier's tokens and rate; 32 GB at `large` after F-14 |
 | Security group | no inbound rule; outbound 443 only | nothing listens |
-| Instance role | `AmazonSSMManagedInstanceCore`; `execute-api:Invoke` on the stress stack's Entitlements API and tenant-identity's platform API; `s3:PutObject` on the results prefix | least privilege; the identity tokens come from the platform API, not from IAM |
+| Instance role | `AmazonSSMManagedInstanceCore`; `execute-api:Invoke` on every API in the account and Region (`*/*/*/*`: the Entitlements API and the platform API have ids the stack does not know at synth, and the platform API's SigV4 routes make this role a tenant-identity platform caller, acceptable in a test account and acknowledged in cdk-nag with that reason); `ssm:GetParameter` on `/application-plane/shared/identity/*` and the stress registry prefix; `s3:GetObject`, `PutObject` and `ListBucket` on the results bucket | nothing else |
 | User data | installs k6 from its RPM, the AWS CLI v2 and `jq`; creates `/opt/stress` | no interactive step |
 | Results bucket | one bucket, SSE-S3, block public access, 30-day expiry, `autoDeleteObjects` | the k6 summaries leave the host before it is destroyed |
 | Outputs | instance id, bucket name | `run.sh` and `collect.sh` read them; nothing in SSM Parameter Store (the 3 TPS rule) |
-| Context | `--context stressDriver=true` | the stack is in the app only when asked for; `cdk synth` of the sample is unchanged |
+| Selection | `STRESS_DRIVER=false` leaves the stack out of `test/stress.runtime.ts` (the first deploy); the sample's own `cdk synth` never includes it |
 
-cdk-nag runs on it as on every stack in the sample; the one expected
-suppression is the missing flow log (cost, a test VPC).
+cdk-nag runs on it as on every stack in the sample. Acknowledged with reasons: no VPC flow log (VPC7, a test VPC), no bucket access log (S1), no detailed monitoring and no termination protection on the host (EC28, EC29), the SSM managed policy (IAM4), and the four wildcards above (IAM5).
 
 Deploy and destroy time of this stack are reported with the run (expected:
 the NAT gateway dominates, about 3 minutes up and 2 down). The NAT gateway
@@ -268,7 +267,7 @@ the default.
 | Scenario length | 1 min | 3 min | the §5 figures |
 | `stageThrottle` | 100 / 50 | 300 / 150 | 1,200 / 600 |
 | `ingressReservedConcurrency` | 50 | 200 | 800 |
-| Driver instance | `t3.large` | `c6i.xlarge` | `c6i.2xlarge` |
+| Driver instance | `t3.large` | `c6i.xlarge` | `c6i.4xlarge` (F-14) |
 
 Seeded tenants and their users are reused across runs, because Cognito
 bills per monthly active user and a month of runs must fit the pool's free
@@ -427,7 +426,7 @@ are single-digit dollars each. Say the total in the results, not here.
 3. `architecture.md` Scale limits: each row that the run measured gets its
    measured value next to the documented one, with the run date.
 4. An ADR if a run changes a default (for example the stage throttle
-   warning, the cache sizes or `registryTtl`). ADR-0049 (proposed) records
+   warning, the cache sizes or `registryTtl`). ADR-0049 (accepted) records
    F-1, F-12 and F-16: reserved concurrency for the authoriser and the
    stage throttle sized under both Lambdas.
 

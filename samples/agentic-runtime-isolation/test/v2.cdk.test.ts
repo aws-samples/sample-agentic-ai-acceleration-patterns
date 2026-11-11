@@ -453,7 +453,7 @@ describe('v2 options', () => {
     ).toThrow(/name 'crm' is already declared in this app as a tool target/);
   });
 
-  describe('agentDelegation (ADR-0049)', () => {
+  describe('agentDelegation (ADR-0048)', () => {
     const pathParts = (t: Template) => (Object.values(t.findResources('AWS::ApiGateway::Resource')) as any[]).map((r) => r.Properties.PathPart).sort();
     const envOf = (t: Template, text: string) => functionAndRole(t, text).fn.Properties.Environment.Variables;
 

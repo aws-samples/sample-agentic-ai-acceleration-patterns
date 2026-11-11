@@ -255,8 +255,9 @@ export interface SharedIngressProps {
    * The burst lands on a fleet that must grow for it, so each call costs a
    * cold start (about 900 ms at p99), not the warm 20 ms: size it at the
    * live tokens that may refresh in one second, which is the whole live set
-   * when they were issued together (1,000 tokens: 1,000), or live tokens /
-   * 60 x 2 when their refresh times are spread. Too small a value caps the
+   * when they were issued together (1,000 tokens: 1,000); when their refresh
+   * times are known to be spread over the token life, the largest second's
+   * share. The synth warning assumes the whole set. Too small a value caps the
    * authoriser at exactly the point it was meant to protect (the 2026-11-11
    * run at 34 for 1,000 tokens threw 369 throttles). A throttled authoriser
    * is a bare 500 from API Gateway, with no tenant and no reason (stress
@@ -301,7 +302,7 @@ export interface SharedIngressProps {
    */
   readonly toolsGateways?: Record<string, ToolsGatewayOptions>;
   /**
-   * (ADR-0049, spec §3.7) Delegation between agents: creates
+   * (ADR-0048, spec §3.7) Delegation between agents: creates
    * `POST /{backend}/delegations` on the `api-gateway` ingress, whose bearer
    * is a transaction token this ingress minted, and sets `RI_DELEGATION_URL`
    * on every agent. `maxDepth` (1 to 3) is the number of agents a transaction
@@ -312,7 +313,7 @@ export interface SharedIngressProps {
   readonly agentDelegation?: AgentDelegationProps;
 }
 
-/** (ADR-0049) See `SharedIngressProps.agentDelegation`. */
+/** (ADR-0048) See `SharedIngressProps.agentDelegation`. */
 export interface AgentDelegationProps {
   readonly maxDepth: 1 | 2 | 3;
 }
@@ -360,7 +361,7 @@ export interface ResolvedOptions {
   readonly authorizerCacheTtlSeconds: number;
   /** (v2) */
   readonly entitlements: { readonly adminScope: string; readonly maxAgentsPerTenant: number; readonly maxToolsPerTenant: number };
-  /** (ADR-0049) The delegation route's depth bound; undefined when there is no route. */
+  /** (ADR-0048) The delegation route's depth bound; undefined when there is no route. */
   readonly delegationMaxDepth?: number;
   /** (v2, ADR-0041) The tools gateways by name; empty when `toolsGateway: false`. */
   readonly toolsGateways: Readonly<Record<string, ResolvedToolsGateway>>;
@@ -606,17 +607,17 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
     toolsGateways[DEFAULT_TOOLS_GATEWAY] = resolveToolsGateway(props.toolsGateway ?? {}, 'toolsGateway', fail);
   }
 
-  // ADR-0049: the delegation route lives on the api-gateway ingress; its bearer carries tenant and user only.
+  // ADR-0048: the delegation route lives on the api-gateway ingress; its bearer carries tenant and user only.
   const delegationMaxDepth = props.agentDelegation?.maxDepth;
   if (delegationMaxDepth !== undefined) {
     if (!Number.isInteger(delegationMaxDepth) || delegationMaxDepth < 1 || delegationMaxDepth > MAX_DELEGATION_DEPTH) {
       fail('agentDelegation.maxDepth', `must be an integer from 1 to ${MAX_DELEGATION_DEPTH} (got ${String(delegationMaxDepth)})`);
     }
     if (props.ingress !== 'api-gateway') {
-      fail('agentDelegation', "is valid only with the 'api-gateway' ingress: the Gateway authoriser reads one issuer (ADR-0049)");
+      fail('agentDelegation', "is valid only with the 'api-gateway' ingress: the Gateway authoriser reads one issuer (ADR-0048)");
     }
     if (tvm !== undefined && Object.keys(tvm.claimTags).length > 0) {
-      fail('agentDelegation', 'cannot be combined with tvm.claimTags: a replacement token carries the tenant and the user, no identity claims (ADR-0049)');
+      fail('agentDelegation', 'cannot be combined with tvm.claimTags: a replacement token carries the tenant and the user, no identity claims (ADR-0048)');
     }
   }
   return {
@@ -692,7 +693,7 @@ export interface SharedIngressRef {
   readonly tools?: ToolsGatewayRef;
   /** (v2, ADR-0041) Every tools gateway by name; `default` is also `tools`. */
   readonly toolsGateways?: Readonly<Record<string, ToolsGatewayRef>>;
-  /** (ADR-0049) The `api-gateway` base URL an agent delegates through (`<url>/<agent>/delegations`); undefined without the route. */
+  /** (ADR-0048) The `api-gateway` base URL an agent delegates through (`<url>/<agent>/delegations`); undefined without the route. */
   readonly delegationUrl?: string;
 }
 
@@ -821,7 +822,7 @@ export class SharedIngress extends Construct {
 
   /** The ingress base URL, without a route: `https://.../prod` or the Gateway URL. See `urlFor`. */
   readonly endpointUrl: string;
-  /** (ADR-0049) The base URL agents delegate through; undefined without `agentDelegation`. */
+  /** (ADR-0048) The base URL agents delegate through; undefined without `agentDelegation`. */
   readonly delegationUrl?: string;
   /** The one principal every backend trusts (P-1): the integration Lambda's role, or the Gateway's role. */
   readonly ingressRole: iam.IRole;
@@ -942,7 +943,7 @@ export class SharedIngress extends Construct {
     }
     const wiring = options.ingress === 'api-gateway' ? this.apiGatewayIngress(props, options, environment) : this.agentCoreGatewayIngress(props, options, environment);
     this.endpointUrl = wiring.endpointUrl;
-    // ADR-0049: on api-gateway the delegation route shares the base URL; agents append /<agent>/delegations.
+    // ADR-0048: on api-gateway the delegation route shares the base URL; agents append /<agent>/delegations.
     this.delegationUrl = options.delegationMaxDepth === undefined ? undefined : wiring.endpointUrl;
     this.ingressRole = wiring.ingressRole;
     this.tvmCallerRole = wiring.tvmCallerRole;
@@ -1349,7 +1350,7 @@ export class SharedIngress extends Construct {
     if (options.defaultBackend !== undefined) {
       api.root.addResource(ROUTE).addMethod('POST', integration(), methodOptions);
     }
-    // ADR-0049: the delegation route, same authoriser and integration; the
+    // ADR-0048: the delegation route, same authoriser and integration; the
     // functions tell the routes apart by path, and the authoriser's cache key
     // (`context.path`) keeps a caller's Allow per target route.
     if (options.delegationMaxDepth !== undefined) {
@@ -1594,7 +1595,7 @@ export interface PublishedIngress {
   readonly toolContextKeyId?: string;
   /** Every tools gateway by name (ADR-0041); empty with `toolsGateway: false`. */
   readonly toolsGateways: Readonly<Record<string, PublishedToolsGateway>>;
-  /** (ADR-0049) The base URL of the delegation route; absent without `agentDelegation`. */
+  /** (ADR-0048) The base URL of the delegation route; absent without `agentDelegation`. */
   readonly delegationUrl?: string;
 }
 

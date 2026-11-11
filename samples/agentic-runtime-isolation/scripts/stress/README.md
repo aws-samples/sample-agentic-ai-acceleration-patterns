@@ -102,3 +102,12 @@ Estimates from the plan; the scripts print the measured figures.
 | `collect.sh` | about 1 min | about 1 min | a few minutes |
 | `teardown.sh` | about 10 min | about 15 min | about 30 min; `--tenants` adds 21 min |
 | `cost.sh` | seconds, the next day | seconds, the next day | seconds, the next day |
+
+## Also
+
+- `host.sh '<command>'` runs one shell command on the driver host through
+  Run Command and prints its output (read back from the results bucket);
+  a debugging aid, nothing listens on the host.
+- `large` reserves 800 + 1,000 Lambda concurrency (ADR-0049): the account's
+  Lambda concurrency quota must be at least about 2,500 before
+  `deploy.sh` at that scale, or CloudFormation refuses the reserve.
