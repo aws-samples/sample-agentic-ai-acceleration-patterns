@@ -19,7 +19,7 @@ import type { IConstruct } from 'constructs';
 
 /** Which transports the deployer turned on; decides what the backend must accept. */
 export interface BackendTransportOptions {
-  /** (v2, P-5, ADR-0031) The backend must accept the transaction-token transport. Always true since v2. */
+  /** (P-5, ADR-0031) The backend must accept the transaction-token transport. Always true. */
   readonly transactionToken: boolean;
   /** The TVM (P-8): the backend must accept the credential transport. Always true since ADR-0018. */
   readonly tenantCredentials: boolean;

@@ -49,7 +49,7 @@ export interface HandlerDependencies {
 }
 
 /**
- * (v2) The authoriser's decision and transaction token from its context
+ * The authoriser's decision and transaction token from its context
  * (spec §3.1 C-3a), or undefined when the context lacks any of them.
  */
 export function authorizedContext(authorizer: Record<string, unknown>): AuthorizedContext | undefined {
@@ -123,7 +123,7 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
     // `requestContext.resourcePath` is the template (`/{backend}/invocations`)
     // and `requestContext.path` carries the stage prefix. The registry
     // resolves the name (ADR-0024).
-    // (v2) The authoriser minted the transaction token; this Lambda forwards
+    // The authoriser minted the transaction token; this Lambda forwards
     // it after checking it is for the tenant and backend it verified itself.
     // Without one in the context the pipeline refuses with 502 mint_failed.
     request = await deps.pipeline.validate({
@@ -141,7 +141,7 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
     return fail(502, 'pipeline_failed');
   }
 
-  // P-9 (v2): `agent`, `txn`, `grantSize` and `mint` join this line to the
+  // P-9: `agent`, `txn`, `grantSize` and `mint` join this line to the
   // tools gateway's `tool admitted` lines; never the token itself.
   const fields = {
     ingress: 'api-gateway',

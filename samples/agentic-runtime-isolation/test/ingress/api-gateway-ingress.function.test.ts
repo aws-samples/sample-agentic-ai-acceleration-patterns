@@ -71,7 +71,7 @@ const ENTRIES = {
   old: FIXTURE_ENTRIES.old,
 };
 
-/** (v2) What the authoriser hands the integration Lambda: the decision and the minted token (spec §3.1 C-3a). */
+/** What the authoriser hands the integration Lambda: the decision and the minted token (spec §3.1 C-3a). */
 const authorizerContext = (backend: string | undefined, tenantId = 'tenant-a') => ({
   ...(backend === undefined ? {} : setForwardedAgent(backend)),
   tenantId,
@@ -202,7 +202,7 @@ describe('handleRequest', () => {
       expect(JSON.parse(metrics[0])).toMatchObject({ Errors4xx: 1, TenantId: 'tenant-a', Backend: name });
     });
 
-    it('v2: forwards the authoriser\'s transaction token to the backend and logs txn, grantSize and mint, never the token', async () => {
+    it('forwards the authoriser\'s transaction token to the backend and logs txn, grantSize and mint, never the token', async () => {
       const backend = new FakeBackend();
       await handleRequest(event(`Bearer ${await issuer.mint()}`, body, route('/billing/invocations', 'billing')), writer().out, deps(backend));
       expect(backend.requests[0]).toMatchObject({ backend: 'billing', transactionToken: TXN_TOKEN, txn: 'txn-1', grantSize: 2, mint: 'hit' });
@@ -211,7 +211,7 @@ describe('handleRequest', () => {
       expect(logs.join('\n')).not.toContain(TXN_TOKEN);
     });
 
-    it('v2: no token in the authoriser context (or one for another tenant) is refused before the backend', async () => {
+    it('no token in the authoriser context (or one for another tenant) is refused before the backend', async () => {
       const backend = new FakeBackend();
       const none = writer();
       await handleRequest(event(`Bearer ${await issuer.mint()}`, body, { requestContext: { authorizer: { tenantId: 'tenant-a', backend: 'default' } } as any }), none.out, deps(backend));

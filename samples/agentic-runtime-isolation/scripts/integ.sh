@@ -2,7 +2,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 #
-# Deployment integration test, v2 (spec §8, docs/sample-standard.md §5.2).
+# Deployment integration test (spec §8, docs/sample-standard.md §5.2).
 #
 #   AWS_PROFILE=<profile> AWS_REGION=eu-central-1 npx projen integ      # or: scripts/integ.sh
 #
@@ -411,7 +411,7 @@ stack_output() { # STACK KEY
 begin 1 "tenant-identity shared-pool (and shared-pool-multi-tenant for MU)"
 if aws ssm get-parameter --name "${IDENTITY_PREFIX}/apiUrl" --query Parameter.Name --output text >/dev/null 2>&1; then
   identity_init
-  # What v2 needs from a reused deployment: shared-pool (identity_init checks it) and the
+  # What the run needs from a reused deployment: shared-pool (identity_init checks it) and the
   # scope catalogue, so the tenant admin's token can carry entitlements/admin (spec §6.4).
   status="$(scope_catalogue_status)"
   if [[ "$status" == 200 ]]; then
@@ -419,8 +419,8 @@ if aws ssm get-parameter --name "${IDENTITY_PREFIX}/apiUrl" --query Parameter.Na
   elif stale_identity "$status"; then
     if [[ "${INTEG_REPLACE_STALE_IDENTITY:-0}" != 1 ]]; then
       cat >&2 <<STALE
-the published tenant-identity (${IDENTITY_STACK}) is stale for v2: GET /platform/scopes -> HTTP ${status} (no such route).
-v2 registers the vendor scopes app/use and entitlements/admin there (spec §6.4), so the tenant admin's identity
+the published tenant-identity (${IDENTITY_STACK}) is stale: GET /platform/scopes -> HTTP ${status} (no such route).
+The run registers the vendor scopes app/use and entitlements/admin there (spec §6.4), so the tenant admin's identity
 token can carry entitlements/admin. To replace it with the current ${IDENTITY_DIR}, rerun with
 
   INTEG_REPLACE_STALE_IDENTITY=1 AWS_REGION=${REGION} scripts/integ.sh
@@ -759,7 +759,7 @@ run_all_on() { # SUFFIX
   check "backends/default needs default/chat, tools crm/*" jq -e '.needs == ["default/chat"] and .tools == ["crm/*"]' <<<"$entry"
   status="$(invoke "$(backend_url "$ENDPOINT" nosuch)" A1_ACCESS "$(body "$C1" report)")"
   check "unknown backend refused (got ${status})" ne "$status" 200
-  note "billing and default entries in the v2 shape; /nosuch HTTP ${status}"
+  note "billing and default entries hold needs and tools; /nosuch HTTP ${status}"
   if [[ "$INGRESS" == api-gateway ]]; then
     local late_param="${REGISTRY_PREFIX}backends/late" late_url table billing_arn
     late_url="$(backend_url "$ENDPOINT" late)"
@@ -1255,7 +1255,7 @@ note "no AssumeRole in the direct-invoke windows"
 end_step
 
 # --------------------------------------------------------------------------
-# The log sweep (spec §8, v1 V-7 method)
+# The log sweep (spec §8, V-7 method)
 # --------------------------------------------------------------------------
 begin sweep "no token, signature segment or _ri_ctx value in any log group on the path"
 sweep_file="${LIB_TMP}/sweep"

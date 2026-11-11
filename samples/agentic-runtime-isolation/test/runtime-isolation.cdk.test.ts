@@ -42,7 +42,7 @@ import { ENV } from '../src/shared/config';
 
 const FIXTURE_AGENT = path.join(__dirname, 'fixtures', 'agent');
 const DISCOVERY_URL = 'https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_TESTPOOL00/.well-known/openid-configuration';
-/** The default backend's one need (v2, ADR-0032). */
+/** The default backend's one need (ADR-0032). */
 const DEFAULT_NEEDS = [`${GATEWAY_TARGET_NAME}/chat`];
 const agentOf = (modelId = 'm'): AgentProps => ({ codePath: FIXTURE_AGENT, modelId });
 
@@ -162,7 +162,7 @@ describe('resolveOptions', () => {
       publish: true,
       registryTtlSeconds: 60,
       defaultBackend: undefined,
-      // v2: always-on transaction token and entitlements, tools gateway on by default.
+      // always-on transaction token and entitlements, tools gateway on by default.
       transactionToken: { ttlSeconds: 300, algorithm: 'RS256', keyGeneration: 1, cacheMaxEntries: 1000, reuseMarginSeconds: 180 },
       authorizerCacheTtlSeconds: 60,
       entitlements: { adminScope: 'entitlements/admin', maxAgentsPerTenant: 1000, maxToolsPerTenant: 1000 },
@@ -201,7 +201,7 @@ describe('resolveOptions', () => {
     });
   });
 
-  it("session defaults to scope 'tenant' when set (v2, ADR-0039)", () => {
+  it("session defaults to scope 'tenant' when set (ADR-0039)", () => {
     expect(resolveOptions({ ...valid, session: {} }).sessionScope).toBe('tenant');
     expect(resolveOptions({ ...valid, session: { scope: 'user' } }).sessionScope).toBe('user');
     expect(resolveOptions({ ...valid, session: { scope: 'tenant' } }).sessionScope).toBe('tenant');
@@ -217,7 +217,7 @@ describe('resolveOptions', () => {
     ['session.scope', { session: { scope: 'global' as any } }, /session\.scope/],
     ['requiredScopes empty', { requiredScopes: [] }, /requiredScopes/],
     ['requiredScopes whitespace', { requiredScopes: ['a b'] }, /requiredScopes/],
-    ['delegation (removed in v2)', { delegation: { forwardUserToken: true } as never }, /SharedIngress: delegation is removed in v2; the agent receives a transaction token \(ADR-0031\)/],
+    ['delegation', { delegation: { forwardUserToken: true } as never }, /SharedIngress: delegation is not a prop; the agent receives a transaction token \(ADR-0031\)/],
     ['transactionToken.ttl low', { transactionToken: { ttl: Duration.seconds(59) } }, /transactionToken\.ttl/],
     ['transactionToken.ttl high', { transactionToken: { ttl: Duration.seconds(901) } }, /transactionToken\.ttl/],
     ['transactionToken.algorithm', { transactionToken: { algorithm: 'HS256' as any } }, /transactionToken\.algorithm/],
@@ -284,7 +284,7 @@ describe.each(INGRESSES)('one-backend defaults, ingress=%s', (ingress) => {
     });
   });
 
-  it('the Runtime always admits the transaction-token and credential headers, never the v1 user-token header (C-1, ADR-0031)', () => {
+  it('the Runtime always admits the transaction-token and credential headers and nothing else (C-1, ADR-0031)', () => {
     template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
       RequestHeaderConfiguration: { RequestHeaderAllowlist: [RUNTIME_HEADERS.TRANSACTION_TOKEN, RUNTIME_HEADERS.TENANT_CREDENTIALS] },
     });
@@ -679,7 +679,7 @@ describe('api-gateway ingress', () => {
     template.hasResourceProperties('AWS::ApiGateway::Authorizer', {
       Type: 'REQUEST',
       IdentitySource: 'method.request.header.Authorization,context.path',
-      // v2: at most 60 s, so a cached Allow's token still outlives a stream (AUTHORIZER_CACHE_TTL).
+      // at most 60 s, so a cached Allow's token still outlives a stream (AUTHORIZER_CACHE_TTL).
       AuthorizerResultTtlInSeconds: 60,
     });
   });
@@ -855,7 +855,7 @@ describe.each(INGRESSES)('options, ingress=%s', (ingress) => {
 
   it('session: scope reaches the Lambdas', () => {
     expect(lambdaEnv(synth({ ingress, session: { scope: 'tenant' } }).template, fnDescription)[ENV.SESSION_SCOPE]).toBe('tenant');
-    // v2, ADR-0039: tenant scope by default when session mapping is on.
+    // ADR-0039: tenant scope by default when session mapping is on.
     expect(lambdaEnv(synth({ ingress, session: {} }).template, fnDescription)[ENV.SESSION_SCOPE]).toBe('tenant');
     expect(lambdaEnv(synth({ ingress, session: { scope: 'user' } }).template, fnDescription)[ENV.SESSION_SCOPE]).toBe('user');
   });
@@ -1168,8 +1168,8 @@ describe.each(INGRESSES)('SharedIngress with several AgentBackends, ingress=%s (
     expect(make(['ok/read'], ['crm/*', 'crm/*'])).toThrow(/AgentBackend: tools must not repeat a tool/);
     expect(make(['ok/read'], Array.from({ length: 65 }, (_, i) => `t${i}/x`))).toThrow(/AgentBackend: tools must list at most 64 tools/);
     expect(() => new AgentBackend(other, 'Missing', { name: 'ok', ingress: sharedOther, agent: agentOf() } as any)).toThrow(/AgentBackend: needs/);
-    expect(() => new AgentBackend(other, 'V1', { name: 'ok', ingress: sharedOther, agent: agentOf(), scopes: ['ok/x'] } as any)).toThrow(/AgentBackend: scopes is renamed to needs in v2/);
-    expect(() => new AgentBackend(other, 'V1b', { name: 'ok', ingress: sharedOther, agent: agentOf(), needs: ['ok/x'], identityApi: {} } as any)).toThrow(/AgentBackend: identityApi is removed in v2/);
+    expect(() => new AgentBackend(other, 'V1', { name: 'ok', ingress: sharedOther, agent: agentOf(), scopes: ['ok/x'] } as any)).toThrow(/AgentBackend: scopes is not a prop: name the agent's own actions in needs/);
+    expect(() => new AgentBackend(other, 'V1b', { name: 'ok', ingress: sharedOther, agent: agentOf(), needs: ['ok/x'], identityApi: {} } as any)).toThrow(/AgentBackend: identityApi is not a prop/);
     make(['ok/read'], ['crm/*', 'crm/get_account', 'my-target/do_it'])();
   });
 

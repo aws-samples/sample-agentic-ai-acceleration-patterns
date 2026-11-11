@@ -8,11 +8,11 @@
  * contract.
  *
  * `SharedIngress` plus one `AgentBackend` per agent product and one
- * `ToolTarget` per tool group is the construct; (v2, ADR-0041) the ingress
+ * `ToolTarget` per tool group is the construct; (ADR-0041) the ingress
  * holds one or more named tools gateways and each `ToolTarget` names one.
  * For a single agent, give the
  * ingress a `defaultBackend` and one `AgentBackend` of that name (ADR-0024).
- * (v2) `ScopeRegistration` and `backendScopesProblem` are removed (ADR-0030).
+ * A backend registers nothing with the identity provider (ADR-0030).
  */
 
 export {
@@ -51,7 +51,7 @@ export { AgentBackend } from './agent-backend.cdk';
 export type { AgentBackendProps } from './agent-backend.cdk';
 export { RegistryEntryResource, LONGEST_STREAM, MAX_DRAIN } from './shared/registry-entry.cdk';
 export type { RegistryEntryResourceProps } from './shared/registry-entry.cdk';
-// v2 constructs (spec §6.4)
+// The token, entitlement and tools constructs (spec §6.4)
 export { ToolTarget, MAX_TOOLS_PER_TARGET } from './tool-target.cdk';
 export type { ToolTargetProps, ToolTargetKind, ToolDefinition } from './tool-target.cdk';
 export {

@@ -141,7 +141,7 @@ describe('readIngressConfig', () => {
   });
 });
 
-describe('readMintConfig (v2)', () => {
+describe('readMintConfig', () => {
   const mintEnv = {
     [ENV.TXN_KEY_ID]: 'key-1',
     [ENV.ISSUER]: 'https://issuer.example/prod',

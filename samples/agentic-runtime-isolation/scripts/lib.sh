@@ -241,7 +241,7 @@ LAST_TOTAL=""
 
 # invoke ENDPOINT TOKEN_VAR JSON [SESSION_HEADER_VALUE] [X_TENANT_ID] -> HTTP status; body in $BODY.
 # TOKEN_VAR is a variable NAME (empty name: no Authorization header).
-# X_TENANT_ID selects one tenant of a token that carries `tenants` (v2, ADR-0038).
+# X_TENANT_ID selects one tenant of a token that carries `tenants` (ADR-0038).
 # Writes TTFB and total seconds for timing().
 invoke() {
   local endpoint="$1" token_var="$2" json="$3" fake_session="${4:-}" tenant_header="${5:-}" config="" out status ttfb total
@@ -277,7 +277,7 @@ percentile() {
   sort -n "$2" | awk -v p="$1" '{v[NR]=$1} END {i=int((p/100)*NR+0.999999); if (i<1) i=1; if (i>NR) i=NR; printf "%.3f", v[i]}'
 }
 
-# -- v2: the entitlement API, the tools gateways, the test mint --------------
+# -- the entitlement API, the tools gateways, the test mint --------------
 #
 # Same hygiene: tokens and contexts stay in shell variables; they reach curl
 # through a config on stdin or a mode-0600 temp file; nothing prints them.
@@ -301,7 +301,7 @@ admin_api() {
 }
 
 # The signature segment of every token and context this run handled, for the
-# log sweep (spec §8, v1 V-7 method). Mode 0600, removed with LIB_TMP.
+# log sweep (spec §8, V-7 method). Mode 0600, removed with LIB_TMP.
 SECRETS="${LIB_TMP}/secrets"
 : >"$SECRETS"
 chmod 600 "$SECRETS"

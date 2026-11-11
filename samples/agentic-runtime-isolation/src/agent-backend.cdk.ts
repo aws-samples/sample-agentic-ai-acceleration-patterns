@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * `AgentBackend` (ADR-0024; v2, ADR-0032, ADR-0035): one agent product
+ * `AgentBackend` (ADR-0024, ADR-0032, ADR-0035): one agent product
  * behind a `SharedIngress`, in the same stack or in its own. It creates the
  * AgentCore Runtime (ADR-0011), tagged `ri:ingress = <ingressId>` so the
  * ingress role's invoke grant applies; writes the Runtime's resource policy
@@ -14,8 +14,8 @@
  * status }`, which is what makes the route live. Creating, changing or
  * removing a backend never redeploys the ingress.
  *
- * (v2) `scopes`, `identityApi` and `scopeOwner` are removed: the backend no
- * longer registers scopes with the identity provider (ADR-0030). Its
+ * There are no `scopes`, `identityApi` or `scopeOwner` props: the backend
+ * registers nothing with the identity provider (ADR-0030). Its
  * `needs` and `tools` are data in its registry entry, and the grant rule
  * decides what a caller may do with it.
  */
@@ -62,13 +62,13 @@ export interface AgentBackendProps {
   readonly ingress: SharedIngress | SharedIngressRef;
   readonly agent: AgentProps;
   /**
-   * (v2, ADR-0032) The agent's own actions, `A.needs`: at least one, no
+   * (ADR-0032) The agent's own actions, `A.needs`: at least one, no
    * duplicates, each `<name>/<action>` with this backend's name, 3 to 128
    * characters of `[a-z0-9-]` and one slash. Granted whenever the agent is.
    */
   readonly needs: string[];
   /**
-   * (v2, ADR-0032) The tools the agent may use, `A.tools`: each
+   * (ADR-0032) The tools the agent may use, `A.tools`: each
    * `<target>/<tool>` or `<target>/*`, `[a-z0-9_-]`, at most 64, no
    * duplicates. A tool is granted only when the tenant subscribes to it and
    * the user is not cut from it (R-5). Default `[]`. A non-empty list needs
@@ -90,7 +90,7 @@ export interface AgentBackendProps {
    * the same value co-own the name and MUST be destroyed together.
    */
   readonly owner?: string;
-  /** Removed in v2: renamed to `needs`. Setting it fails synth. @deprecated */
+  /** Not a prop: the agent's own actions go in `needs`. Setting it fails synth. @deprecated */
   readonly scopes?: never;
 }
 
@@ -107,9 +107,9 @@ export class AgentBackend extends Construct {
   readonly name: string;
   /** The compute, for tests and for a consumer that needs the L1. */
   readonly backend: AgentCoreRuntimeBackend;
-  /** (v2) `A.needs`, as given. */
+  /** `A.needs`, as given. */
   readonly needs: readonly string[];
-  /** (v2) `A.tools`, as given. */
+  /** `A.tools`, as given. */
   readonly tools: readonly string[];
   /** (ADR-0048) `delegatesTo`, as given. */
   readonly delegatesTo: readonly string[];
@@ -120,11 +120,11 @@ export class AgentBackend extends Construct {
       throw new Error(`AgentBackend: ${prop} ${message}`);
     };
     if ((props as { scopes?: unknown }).scopes !== undefined) {
-      fail('scopes', 'is renamed to needs in v2 (ADR-0032)');
+      fail('scopes', 'is not a prop: name the agent\'s own actions in needs (ADR-0032)');
     }
     for (const removed of ['identityApi', 'scopeOwner']) {
       if ((props as unknown as Record<string, unknown>)[removed] !== undefined) {
-        fail(removed, 'is removed in v2: backends no longer register scopes with the identity provider (ADR-0030)');
+        fail(removed, 'is not a prop: a backend does not register scopes with the identity provider (ADR-0030)');
       }
     }
     if (!BACKEND_NAME_PATTERN.test(props.name)) {
@@ -209,7 +209,7 @@ export class AgentBackend extends Construct {
       fail('tools', 'needs an ingress with a tools gateway (toolsGateway is false)');
     }
     if (ref.entitlementsTableName === undefined) {
-      fail('ingress.entitlementsTableName', 'is required in v2 (the NAME# reservation, ADR-0035)');
+      fail('ingress.entitlementsTableName', 'is required (the NAME# reservation, ADR-0035)');
     }
     // ADR-0048: a delegating agent needs the route; the route is the api-gateway ingress's.
     if (delegatesTo.length > 0 && ref.delegationUrl === undefined) {

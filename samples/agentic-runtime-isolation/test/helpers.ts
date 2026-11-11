@@ -68,11 +68,11 @@ export async function testIssuer(): Promise<TestIssuer> {
   };
 }
 
-/** The registry prefix and the one backend the fixtures resolve (ADR-0024), with its one need (v2, ADR-0032). */
+/** The registry prefix and the one backend the fixtures resolve (ADR-0024), with its one need (ADR-0032). */
 export const REGISTRY_PREFIX = '/application-plane/shared/agent-runtime/';
 export const DEFAULT_BACKEND = 'default';
 export const DEFAULT_NEED = 'default/chat';
-/** The tools the default backend may use (v2). */
+/** The tools the default backend may use. */
 export const DEFAULT_TOOLS = ['crm/*'];
 export const RUNTIME_ARN = 'arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/ri_test-abc123';
 /** A second backend the fixtures add: two needs of its own (ADR-0032). */

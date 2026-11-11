@@ -13,7 +13,7 @@ import { gatewayPhysicalNameOf, policyName, ToolTarget, type ToolDefinition } fr
 import { MAX_TOOL_TARGETS } from '../src/tools-gateway.cdk';
 
 /**
- * The v2 template shape (spec §3.3, §3.5, §3.6, §6.2; ADR-0030 to ADR-0040):
+ * The ingress modules' template shape (spec §3.3, §3.5, §3.6, §6.2; ADR-0030 to ADR-0048):
  * the entitlement store, the signing keys and their key policies, the public
  * discovery routes, the tools gateway, its interceptor, its rate limits and
  * the per-target policies.
@@ -82,7 +82,7 @@ function signStatements(key: any): any[] {
   return key.Properties.KeyPolicy.Statement.filter((s: any) => [s.Action].flat().includes('kms:Sign'));
 }
 
-describe.each(['api-gateway', 'agentcore-gateway'] as const)('v2 template, ingress=%s', (ingress) => {
+describe.each(['api-gateway', 'agentcore-gateway'] as const)('ingress modules template, ingress=%s', (ingress) => {
   const built = build(ingress);
   const template = built.template();
   // The authoriser (api-gateway) or the ingress interceptor (agentcore-gateway) mints.
@@ -281,7 +281,7 @@ describe.each(['api-gateway', 'agentcore-gateway'] as const)('v2 template, ingre
   });
 });
 
-describe('v2 options', () => {
+describe('ingress module options', () => {
   it('identity.multiTenant on api-gateway: X-Tenant-Id is an authoriser identity source (M-53); off, it is not', () => {
     const sourcesOf = (multiTenant: boolean): string[] => {
       const template = build('api-gateway', { identity: { discoveryUrl: DISCOVERY_URL, allowedClientIds: ['client-one'], multiTenant } }).template();

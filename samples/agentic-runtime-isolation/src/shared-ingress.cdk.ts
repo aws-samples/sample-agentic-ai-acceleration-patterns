@@ -14,7 +14,7 @@
  * Everything that is identical across backends lives here: the token check,
  * the product-wide scope floor (`requiredScopes`), the token vending machine
  * (always on, ADR-0018), the per-tenant limit (ADR-0020), the stage throttle,
- * the log drain (ADR-0019) and the published parameter (ADR-0042). (v2) Also the
+ * the log drain (ADR-0019) and the published parameter (ADR-0042). Also the
  * entitlement store (C-12, ADR-0030), the token signer and the issuer's
  * discovery routes (C-13, ADR-0037), the entitlement API (C-14) and, unless
  * `toolsGateway: false`, the tools gateways (C-15, ADR-0034, ADR-0041): one
@@ -83,16 +83,16 @@ export interface IdentityProps {
   /** `client_id` values accepted. Non-empty. */
   readonly allowedClientIds: string[];
   /**
-   * (v2, R-1, ADR-0038) Accept identity tokens that carry `tenants`; the
+   * (R-1, ADR-0038) Accept identity tokens that carry `tenants`; the
    * request then names one with `X-Tenant-Id`. Default false: such a token
-   * is refused as in v1.
+   * is refused.
    */
   readonly multiTenant?: boolean;
 }
 
 /** The `session` module (ADR-0013, ADR-0002): conversations persist in a claim-derived unit. */
 export interface SessionProps {
-  /** `'tenant'` hashes `tenant_id` only; `'user'` hashes `tenant_id|sub`. Default `'tenant'` (v2, ADR-0039). */
+  /** `'tenant'` hashes `tenant_id` only; `'user'` hashes `tenant_id|sub`. Default `'tenant'` (ADR-0039). */
   readonly scope?: SessionScope;
 }
 
@@ -131,7 +131,7 @@ export interface StageThrottleProps {
   readonly burstLimit?: number;
 }
 
-/** (v2, ADR-0031, ADR-0036, ADR-0037) The transaction token the ingress mints. Always on. */
+/** (ADR-0031, ADR-0036, ADR-0037) The transaction token the ingress mints. Always on. */
 export interface TransactionTokenProps {
   /** `exp - iat`, 120 s to 900 s (the AgentCore Gateway refuses a token with 60 s or less left). Default 300 s. */
   readonly ttl?: Duration;
@@ -143,7 +143,7 @@ export interface TransactionTokenProps {
   readonly cacheMaxEntries?: number;
 }
 
-/** (v2, ADR-0030, ADR-0033) The entitlement store and API. Always on. */
+/** (ADR-0030, ADR-0033) The entitlement store and API. Always on. */
 export interface EntitlementsProps {
   /** Identity-token scope the tenant-admin operations require. Default `'entitlements/admin'`. */
   readonly adminScope?: string;
@@ -154,7 +154,7 @@ export interface EntitlementsProps {
 }
 
 /**
- * (v2, ADR-0034, ADR-0041) One tools gateway. On by default as one gateway
+ * (ADR-0034, ADR-0041) One tools gateway. On by default as one gateway
  * named `default`; `toolsGateway: false` creates none; `toolsGateways`
  * names several.
  */
@@ -194,9 +194,9 @@ export const DEFAULT_TRANSACTION_TOKEN_TTL = Duration.seconds(300);
 /** Default admin scope of the tenant-admin entitlement operations (spec §3.3). */
 export const DEFAULT_ADMIN_SCOPE = 'entitlements/admin';
 /**
- * The longest API Gateway authoriser cache (v2). The authoriser's Allow now
+ * The longest API Gateway authoriser cache. The authoriser's Allow now
  * carries a minted token, so the cache must be shorter than the token's
- * reuse margin; v1's five minutes (ADR-0023) would hand out expired tokens.
+ * reuse margin; a five-minute cache would hand out expired tokens (ADR-0043).
  */
 export const AUTHORIZER_CACHE_TTL = Duration.seconds(60);
 /**
@@ -220,7 +220,7 @@ export interface SharedIngressProps {
   /** Scopes every identity token must carry (ADR-0005, AND): the application floor, for example `app/use`. */
   readonly requiredScopes?: string[];
   /**
-   * Removed in v2 (ADR-0031): the agent receives a transaction token. Setting
+   * Not a prop (ADR-0031): the agent receives a transaction token. Setting
    * it fails synth.
    * @deprecated
    */
@@ -282,21 +282,21 @@ export interface SharedIngressProps {
    * deployed at once share Parameter Store's 3 writes per second per account (ADR-0042).
    */
   readonly publish?: boolean;
-  /** Cache life of registry entries, plans and the tool catalogue (v2). Default 60 s; 1 s to 750 s. */
+  /** Cache life of registry entries, plans and the tool catalogue. Default 60 s; 1 s to 750 s. */
   readonly registryTtl?: Duration;
   /** The backend served at the bare `/invocations` route. `[a-z0-9-]{1,32}`. */
   readonly defaultBackend?: string;
-  /** (v2) The transaction token. */
+  /** The transaction token. */
   readonly transactionToken?: TransactionTokenProps;
-  /** (v2) The entitlement store and API. */
+  /** The entitlement store and API. */
   readonly entitlements?: EntitlementsProps;
   /**
-   * (v2) The tools gateway: shorthand for `toolsGateways: { default: ... }`.
+   * The tools gateway: shorthand for `toolsGateways: { default: ... }`.
    * Default on; `false` creates none. Not together with `toolsGateways`.
    */
   readonly toolsGateway?: ToolsGatewayOptions | false;
   /**
-   * (v2, ADR-0041) Several tools gateways by name (`[a-z0-9-]{1,32}`), each
+   * (ADR-0041) Several tools gateways by name (`[a-z0-9-]{1,32}`), each
    * with its own Policy engine, interceptor and rate limits. A `ToolTarget`
    * names its gateway (default `default`). Not together with `toolsGateway`.
    */
@@ -344,7 +344,6 @@ export interface ResolvedOptions {
   readonly publish: boolean;
   readonly registryTtlSeconds: number;
   readonly defaultBackend?: string;
-  /** (v2) */
   readonly transactionToken: {
     readonly ttlSeconds: number;
     readonly algorithm: JwsAlgorithm;
@@ -354,16 +353,15 @@ export interface ResolvedOptions {
     readonly reuseMarginSeconds: number;
   };
   /**
-   * (v2) The API Gateway authoriser cache: at most 60 s and at most
+   * The API Gateway authoriser cache: at most 60 s and at most
    * `ttl - LONGEST_STREAM`, so a token handed from the cache still outlives
    * a whole stream. The mint's reuse margin is this plus the longest stream.
    */
   readonly authorizerCacheTtlSeconds: number;
-  /** (v2) */
   readonly entitlements: { readonly adminScope: string; readonly maxAgentsPerTenant: number; readonly maxToolsPerTenant: number };
   /** (ADR-0048) The delegation route's depth bound; undefined when there is no route. */
   readonly delegationMaxDepth?: number;
-  /** (v2, ADR-0041) The tools gateways by name; empty when `toolsGateway: false`. */
+  /** (ADR-0041) The tools gateways by name; empty when `toolsGateway: false`. */
   readonly toolsGateways: Readonly<Record<string, ResolvedToolsGateway>>;
 }
 
@@ -439,12 +437,12 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
   }
 
   if ((props as { delegation?: unknown }).delegation !== undefined) {
-    fail('delegation', 'is removed in v2; the agent receives a transaction token (ADR-0031)');
+    fail('delegation', 'is not a prop; the agent receives a transaction token (ADR-0031)');
   }
 
   let sessionScope: SessionScope | undefined;
   if (props.session !== undefined) {
-    // v2, ADR-0039: tenant scope by default when session mapping is on.
+    // ADR-0039: tenant scope by default when session mapping is on.
     sessionScope = props.session.scope ?? 'tenant';
     if (sessionScope !== 'user' && sessionScope !== 'tenant') {
       fail('session.scope', `must be 'user' or 'tenant' (got ${String(sessionScope)})`);
@@ -550,7 +548,7 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
     fail('defaultBackend', `must match ${BACKEND_NAME_PATTERN.source} (got ${props.defaultBackend})`);
   }
 
-  // v2: the transaction token (spec §3.3).
+  // the transaction token (spec §3.3).
   const txn = props.transactionToken ?? {};
   const ttlSeconds = (txn.ttl ?? DEFAULT_TRANSACTION_TOKEN_TTL).toSeconds();
   if (!Number.isInteger(ttlSeconds) || ttlSeconds < MIN_TRANSACTION_TTL_SECONDS || ttlSeconds > MAX_TRANSACTION_TTL_SECONDS) {
@@ -573,7 +571,7 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
     props.ingress === 'api-gateway' ? Math.min(AUTHORIZER_CACHE_TTL.toSeconds(), Math.max(0, ttlSeconds - streamSeconds)) : 0;
   const reuseMarginSeconds = authorizerCacheTtlSeconds + streamSeconds;
 
-  // v2: entitlements (spec §3.3).
+  // entitlements (spec §3.3).
   const adminScope = props.entitlements?.adminScope ?? DEFAULT_ADMIN_SCOPE;
   if (adminScope.length === 0 || /\s/.test(adminScope)) {
     fail('entitlements.adminScope', 'must be a scope string without whitespace');
@@ -587,7 +585,7 @@ export function resolveOptions(props: SharedIngressProps, construct = 'SharedIng
     fail('entitlements.maxToolsPerTenant', `must be an integer from 1 to 1000 (got ${String(maxToolsPerTenant)})`);
   }
 
-  // v2: the tools gateways (spec §3.3, ADR-0041). `toolsGateway` is shorthand for `{ default: ... }`.
+  // the tools gateways (spec §3.3, ADR-0041). `toolsGateway` is shorthand for `{ default: ... }`.
   const toolsGateways: Record<string, ResolvedToolsGateway> = {};
   if (props.toolsGateways !== undefined) {
     if (props.toolsGateway !== undefined) {
@@ -685,13 +683,13 @@ export interface SharedIngressRef {
   readonly gatewayIdentifier?: string;
   /** The tenant role every model call is signed by (ADR-0018). */
   readonly tenantRoleArn: string;
-  /** (v2) The transaction-token issuer, for the agent's environment. */
+  /** The transaction-token issuer, for the agent's environment. */
   readonly issuer?: string;
-  /** (v2) The entitlement store table, for the name reservations (ADR-0035). */
+  /** The entitlement store table, for the name reservations (ADR-0035). */
   readonly entitlementsTableName?: string;
-  /** (v2) The `default` tools gateway; undefined when the ingress has none. */
+  /** The `default` tools gateway; undefined when the ingress has none. */
   readonly tools?: ToolsGatewayRef;
-  /** (v2, ADR-0041) Every tools gateway by name; `default` is also `tools`. */
+  /** (ADR-0041) Every tools gateway by name; `default` is also `tools`. */
   readonly toolsGateways?: Readonly<Record<string, ToolsGatewayRef>>;
   /** (ADR-0048) The `api-gateway` base URL an agent delegates through (`<url>/<agent>/delegations`); undefined without the route. */
   readonly delegationUrl?: string;
@@ -708,13 +706,13 @@ interface IngressWiring {
   registryReaders: iam.IRole[];
   /** The drain between this variant's writers and its log groups (ADR-0019). */
   logDrain: LogDrain;
-  /** (v2) The one function that mints the transaction token. */
+  /** The one function that mints the transaction token. */
   minter: NodejsFunction;
-  /** (v2) The REST API that serves the issuer's routes and the entitlement API. */
+  /** The REST API that serves the issuer's routes and the entitlement API. */
   issuerApi: apigateway.RestApi;
-  /** (v2) `<baseUrl>`: the issuer. */
+  /** `<baseUrl>`: the issuer. */
   issuer: string;
-  /** (v2) Every function that needs `RI_ISSUER` (the identity-token verifiers refuse it). */
+  /** Every function that needs `RI_ISSUER` (the identity-token verifiers refuse it). */
   verifiers: NodejsFunction[];
 }
 
@@ -731,7 +729,7 @@ export class SharedIngress extends Construct {
    * `ssm:account=<account>:parameterName=<registryPrefix>ingress:region=<region>`)
    * so the next synth reads it again.
    *
-   * `ingress`, when given, must match the document's. (v2) Which tools
+   * `ingress`, when given, must match the document's. Which tools
    * gateways the ref carries: none with `toolsGateway: false`, the named ones
    * with `toolsGateways` (each must be in the document), else every gateway
    * the document lists. On the first synth, before the context provider has
@@ -842,26 +840,26 @@ export class SharedIngress extends Construct {
   readonly gatewayIdentifier?: string;
   /** The log drain (ADR-0019) between this ingress's writers and its log groups. */
   readonly logDrain: LogDrain;
-  /** (v2, ADR-0037) The transaction-token issuer: `<baseUrl>` of the REST API that serves the discovery routes. */
+  /** (ADR-0037) The transaction-token issuer: `<baseUrl>` of the REST API that serves the discovery routes. */
   readonly issuer: string;
-  /** (v2) `<issuer>/.well-known/jwks.json`. */
+  /** `<issuer>/.well-known/jwks.json`. */
   readonly jwksUrl: string;
-  /** (v2, C-13) */
+  /** (C-13) */
   readonly tokenSigner: TokenSigner;
-  /** (v2, C-12) */
+  /** (C-12) */
   readonly entitlementStore: EntitlementStore;
-  /** (v2, C-14) `<baseUrl>/entitlements`. */
+  /** (C-14) `<baseUrl>/entitlements`. */
   readonly entitlementsApiUrl: string;
-  /** (v2, C-15, ADR-0041) Every tools gateway by name; empty with `toolsGateway: false`. */
+  /** (C-15, ADR-0041) Every tools gateway by name; empty with `toolsGateway: false`. */
   readonly toolsGateways: Readonly<Record<string, ToolsGateway>>;
-  /** (v2) The `default` tools gateway, when there is one. */
+  /** The `default` tools gateway, when there is one. */
   readonly toolsGateway?: ToolsGateway;
-  /** (v2) Aliases of the `default` gateway's values. */
+  /** Aliases of the `default` gateway's values. */
   readonly toolsGatewayUrl?: string;
   readonly toolsGatewayIdentifier?: string;
   readonly toolsGatewayRole?: iam.IRole;
   /**
-   * (v2, M-68) The one key that signs tool contexts, for every gateway of
+   * (M-68) The one key that signs tool contexts, for every gateway of
    * this ingress; undefined with no gateway.
    */
   readonly toolContextKey?: kms.Key;
@@ -885,7 +883,7 @@ export class SharedIngress extends Construct {
         pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       });
     }
-    // v2, C-12: the entitlement store, created before the functions that read it.
+    // C-12: the entitlement store, created before the functions that read it.
     this.entitlementStore = new EntitlementStore(this, 'Entitlements', {
       maxAgentsPerTenant: options.entitlements.maxAgentsPerTenant,
       maxToolsPerTenant: options.entitlements.maxToolsPerTenant,
@@ -957,7 +955,7 @@ export class SharedIngress extends Construct {
       this.grantReadRegistry(reader);
     }
 
-    // v2, C-13: the signing key, Sign for the minting function alone (M-40).
+    // C-13: the signing key, Sign for the minting function alone (M-40).
     this.tokenSigner = new TokenSigner(this, 'TokenSigner', {
       algorithm: options.transactionToken.algorithm,
       keyGeneration: options.transactionToken.keyGeneration,
@@ -989,7 +987,7 @@ export class SharedIngress extends Construct {
     // M-44: the minting role reads the store and never writes it.
     this.entitlementStore.grantIngressRead(wiring.minter.role!);
 
-    // v2, C-14: the entitlement API on the issuer's REST API.
+    // C-14: the entitlement API on the issuer's REST API.
     new EntitlementApi(this, 'EntitlementApi', {
       api: wiring.issuerApi,
       store: this.entitlementStore,
@@ -1001,7 +999,7 @@ export class SharedIngress extends Construct {
       logDrain: this.logDrain,
     });
 
-    // v2, C-15, ADR-0041: the tools gateways, after the discovery routes are deployed (the service fetches them).
+    // C-15, ADR-0041: the tools gateways, after the discovery routes are deployed (the service fetches them).
     // One ToolContextKey for every gateway, not one each: a tool function verifies `_ri_ctx`
     // with one public key (`RI_CONTEXT_KEY_ID`) and one published `toolContextKeyId`, whichever
     // gateway its target is on; a context is bound to its tool, argsHash, txn and a 60 s exp,
@@ -1065,7 +1063,7 @@ export class SharedIngress extends Construct {
     return `${this.endpointUrl}/${backend}/${ROUTE}`;
   }
 
-  /** (v2, ADR-0041) The tools gateway named `name`, or undefined. */
+  /** (ADR-0041) The tools gateway named `name`, or undefined. */
   toolsGatewayNamed(name: string): ToolsGateway | undefined {
     return Object.prototype.hasOwnProperty.call(this.toolsGateways, name) ? this.toolsGateways[name] : undefined;
   }
@@ -1294,7 +1292,7 @@ export class SharedIngress extends Construct {
     const authorizer = new apigateway.RequestAuthorizer(this, 'Authorizer', {
       handler: authorizerFn,
       identitySources,
-      // (v2) at most 60 s and at most ttl - longest stream: the Allow carries a minted token.
+      // at most 60 s and at most ttl - longest stream: the Allow carries a minted token.
       resultsCacheTtl: Duration.seconds(options.authorizerCacheTtlSeconds),
     });
     // spec §5.1: the Deny's fixed reason code, when the authoriser set one. A gateway
@@ -1441,7 +1439,7 @@ export class SharedIngress extends Construct {
         {
           interceptor: { lambda: { arn: interceptorFn.functionArn } },
           interceptionPoints: ['REQUEST'],
-          // The Authorization, session and (v2) X-Tenant-Id headers (spike V-3).
+          // The Authorization, session and X-Tenant-Id headers (spike V-3).
           inputConfiguration: { passRequestHeaders: true },
         },
       ],
@@ -1449,7 +1447,7 @@ export class SharedIngress extends Construct {
     gateway.node.addDependency(gatewayRole);
     (this as { gatewayIdentifier?: string }).gatewayIdentifier = gateway.attrGatewayIdentifier;
 
-    // v2, C-13/C-14: a small REST API for the issuer routes and the entitlement API.
+    // C-13/C-14: a small REST API for the issuer routes and the entitlement API.
     const accessLogs = new logs.LogGroup(this, 'IssuerAccessLogs', {
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: RemovalPolicy.DESTROY, // sample only

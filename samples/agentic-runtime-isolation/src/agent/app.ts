@@ -11,7 +11,7 @@
  *
  *   `report`           the echo report: the unit id the Runtime handed it,
  *                      the prefix part of that id, a nonce chosen once per
- *                      microVM, whether a transaction token (v2) and tenant
+ *                      microVM, whether a transaction token and tenant
  *                      credentials arrived, and the token's claims (`tenant_id`,
  *                      `agent`, `scope`, `aud`, `act.sub`, `exp`, `iss`, `sub`,
  *                      `user`) and header (`typ`, `kid`), never the token; and
@@ -19,10 +19,10 @@
  *                      received, plus for each header whose value has the
  *                      shape of a JWT only that JWT's `typ` and `iss`, so the
  *                      driver can show no identity token reached it;
- *   `tools`            (v2) `tools/list` on every tools gateway the token's
+ *   `tools`            `tools/list` on every tools gateway the token's
  *                      `aud` names (`tools-gateway:<name>`, ADR-0041), with
  *                      the transaction token as bearer, one client per gateway;
- *   `tool <t>/<n> <json>` (v2) `tools/call` of `<t>___<n>` with those arguments,
+ *   `tool <t>/<n> <json>` `tools/call` of `<t>___<n>` with those arguments,
  *                      on the gateway that lists the tool;
  *   `read <tenantId>`  the report plus a GetItem of `TENANT#<tenantId>` from
  *                      the demo table with the vended credentials (P-8; a
@@ -74,7 +74,7 @@ export interface AgentReport {
   readonly nonce: string;
   readonly unitId: string | null;
   readonly sessionPrefix: string | null;
-  /** (v2) Whether the transaction-token header arrived; the token itself is never reported. */
+  /** Whether the transaction-token header arrived; the token itself is never reported. */
   readonly transactionToken: boolean;
   readonly tokenTenant: string | null;
   readonly tokenAgent: string | null;
@@ -84,15 +84,15 @@ export interface AgentReport {
   /** (ADR-0048) The agents that delegated to this one, outermost first, read from the nested `act`; empty on a direct call. */
   readonly chain: string[];
   readonly tokenExp: number | null;
-  /** (v2, step 11) The token's `iss`, `typ`, `kid`, `sub` and `user`. */
+  /** (step 11) The token's `iss`, `typ`, `kid`, `sub` and `user`. */
   readonly tokenIss: string | null;
   readonly tokenTyp: string | null;
   readonly tokenKid: string | null;
   readonly tokenSub: string | null;
   readonly tokenUser: string | null;
-  /** (v2, step 11) The names of every request header, lowercased and sorted; never a value. */
+  /** (step 11) The names of every request header, lowercased and sorted; never a value. */
   readonly headerNames: string[];
-  /** (v2, step 11) Each header whose value is JWT-shaped: its name and that JWT's `typ` and `iss` only. */
+  /** (step 11) Each header whose value is JWT-shaped: its name and that JWT's `typ` and `iss` only. */
   readonly jwtHeaders: { readonly name: string; readonly typ: string | null; readonly iss: string | null }[];
   readonly credentials: boolean;
   readonly callerArn?: string;
@@ -341,16 +341,16 @@ export interface AgentOptions {
   readonly modelId?: string;
   /** Interval of the `stream N` probe; tests shorten it. */
   readonly streamIntervalMs?: number;
-  /** (v2) The `default` tools gateway MCP endpoint (RI_TOOLS_GATEWAY_URL), used when `toolsGatewayUrls` is unset. */
+  /** The `default` tools gateway MCP endpoint (RI_TOOLS_GATEWAY_URL), used when `toolsGatewayUrls` is unset. */
   readonly toolsGatewayUrl?: string;
   /**
-   * (v2, ADR-0041) Every tools gateway's MCP endpoint by name
+   * (ADR-0041) Every tools gateway's MCP endpoint by name
    * (RI_TOOLS_GATEWAY_URLS); the agent uses the ones its token's `aud`
    * names. With neither this nor `toolsGatewayUrl`, the tool probes answer
    * `NoToolsGateway`.
    */
   readonly toolsGatewayUrls?: Readonly<Record<string, string>>;
-  /** (v2) The HTTP client for the tools gateway; tests inject one. */
+  /** The HTTP client for the tools gateway; tests inject one. */
   readonly fetch?: typeof fetch;
   /**
    * (ADR-0048) The `api-gateway` base URL to delegate through
@@ -414,7 +414,7 @@ export async function delegateTo(
   }
 }
 
-/** (v2) The tool probe in a prompt: `tools`, or `tool <target>/<tool> <json>`. */
+/** The tool probe in a prompt: `tools`, or `tool <target>/<tool> <json>`. */
 export function toolProbe(prompt: string): { method: 'tools/list' } | { method: 'tools/call'; name: string; arguments: Record<string, unknown> } | undefined {
   if (/^tools\s*$/.test(prompt)) {
     return { method: 'tools/list' };
@@ -458,7 +458,7 @@ interface McpSession {
 }
 
 /**
- * (v2, C-2, spec §3.6) The agent's MCP client: one session per tools gateway
+ * (C-2, spec §3.6) The agent's MCP client: one session per tools gateway
  * per transaction token. The first request on a session runs the MCP
  * `initialize` handshake (protocol `2025-11-25`) and `notifications/initialized`,
  * keeps the `Mcp-Session-Id` the gateway returns and sends it on every later
@@ -620,7 +620,7 @@ export function sessionsFor(fetcher: typeof fetch = fetch): McpSessions {
 }
 
 /**
- * (v2, C-2) One probe on one tools gateway with the transaction token as
+ * (C-2) One probe on one tools gateway with the transaction token as
  * bearer: the JSON-RPC result, or `{ error, status }`; never the token.
  */
 export async function callToolsGateway(

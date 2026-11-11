@@ -2,7 +2,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 #
-# Latency harness, v2, against a deployed RuntimeIsolation-<ingress> stack and
+# Latency harness against a deployed RuntimeIsolation-<ingress> stack and
 # a published tenant-identity shared-pool (ADR-0009, ADR-0023). It measures
 # the shapes a caller sees, client-side with curl, and prints one summary
 # line per scenario (p50/p90/max of TTFB and total, in seconds):
@@ -26,7 +26,7 @@
 # PERF_OUT=<directory> to keep one line per request ("status ttfb total") per
 # scenario; otherwise the raw samples live in a temp directory removed on exit.
 #
-# Every request runs the full v2 path: the floor, the grant and the mint of
+# Every request runs the full path: the floor, the grant and the mint of
 # a transaction token. Server-side figures come from the ingress log group:
 # the REPORT lines (Lambda init, duration) and the `request served` line's
 # `totalMs`, `backendInvokeSeconds` and `mint` (hit or miss of the mint cache).
@@ -36,7 +36,7 @@
 # and the tenant id; never a token, a credential or a header value.
 # Conventions: scripts/CONVENTIONS.md.
 #
-# Needs: bash, aws (v2), curl >= 7.75 (--aws-sigv4), jq, base64. The AWS
+# Needs: bash, aws (AWS CLI v2), curl >= 7.75 (--aws-sigv4), jq, base64. The AWS
 # credentials need execute-api:Invoke on tenant-identity's platform API and on
 # the Entitlements API, and ssm:GetParameter.
 
@@ -95,7 +95,7 @@ else
   ENDPOINT="$(jq -r '.endpointUrl' <<<"$PUBLISHED")"
   INGRESS="$(jq -r '.ingress' <<<"$PUBLISHED")"
   ENT_API="${ENTITLEMENTS_API:-$(jq -r '.entitlementsApiUrl // empty' <<<"$PUBLISHED")}"
-  [[ -n "$ENT_API" ]] || fail "the published document has no entitlementsApiUrl; redeploy this sample (v2)"
+  [[ -n "$ENT_API" ]] || fail "the published document has no entitlementsApiUrl; redeploy this sample"
 fi
 identity_init
 

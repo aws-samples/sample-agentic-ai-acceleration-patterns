@@ -2,7 +2,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 #
-# End-to-end demo, v2 (docs/sample-standard.md §7.6) against a deployed
+# End-to-end demo (docs/sample-standard.md §7.6) against a deployed
 # RuntimeIsolation-<ingress> stack and a published tenant-identity shared-pool.
 #
 #   AWS_REGION=eu-central-1 scripts/demo.sh
@@ -31,7 +31,7 @@
 # ids and timings, never a token, credential or header value.
 # Conventions: scripts/CONVENTIONS.md.
 #
-# Needs: bash, aws (v2), curl >= 7.75 (--aws-sigv4), jq, base64. The AWS
+# Needs: bash, aws (AWS CLI v2), curl >= 7.75 (--aws-sigv4), jq, base64. The AWS
 # credentials need execute-api:Invoke on tenant-identity's platform API and on
 # the Entitlements API, ssm:GetParameter, cloudformation:DescribeStacks and
 # DescribeStackResources, and dynamodb:PutItem/DeleteItem on the demo table.
@@ -144,7 +144,7 @@ ENDPOINT="$(jq -r '.endpointUrl' <<<"$PUBLISHED")"
 INGRESS="$(jq -r '.ingress' <<<"$PUBLISHED")"
 ISSUER="$(jq -r '.issuer // empty' <<<"$PUBLISHED")"
 ENT_API="$(jq -r '.entitlementsApiUrl // empty' <<<"$PUBLISHED")"
-[[ -n "$ISSUER" && -n "$ENT_API" ]] || fail "the published document has no issuer or entitlementsApiUrl; redeploy this sample (v2)"
+[[ -n "$ISSUER" && -n "$ENT_API" ]] || fail "the published document has no issuer or entitlementsApiUrl; redeploy this sample"
 identity_init
 
 # The stack that published the document, for the module outputs.

@@ -42,9 +42,9 @@ export interface RegistryEntryResourceProps {
   readonly backend: string;
   /** The Runtime ARN the route invokes. */
   readonly runtimeArn: string;
-  /** (v2, ADR-0032) The agent's needs, `<backend>/<action>`, granted whenever the agent is. */
+  /** (ADR-0032) The agent's needs, `<backend>/<action>`, granted whenever the agent is. */
   readonly needs: string[];
-  /** (v2, ADR-0032) The tools the agent may use, `<target>/<tool>` or `<target>/*`; may be empty. */
+  /** (ADR-0032) The tools the agent may use, `<target>/<tool>` or `<target>/*`; may be empty. */
   readonly tools: string[];
   /** (ADR-0048) The agents this agent may hand a transaction to; default none. */
   readonly delegatesTo?: string[];

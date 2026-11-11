@@ -151,7 +151,7 @@ The ingress caches entries per process for `registryTtl` (60 s, 1 s to
 750 s), serves a stale entry while it refreshes, backs off a failed refresh,
 and refuses an entry older than ten TTLs (502 `registry_unavailable`), one
 outside its own partition, Region and account, or an entry without `needs`
-and `tools` (502, log reason `registry_entry_v1`). The registry-entry function's role may
+and `tools` (502, log reason `registry_entry_shape`). The registry-entry function's role may
 put, get and delete its one parameter; it refuses to create a name that
 exists and drains only an entry whose `runtimeArn` is its own. Delete sets
 `draining`, waits one TTL plus the longest stream (120 s), then removes the
@@ -469,7 +469,7 @@ authoriser runs; a body that fails the request model is API Gateway's own
 | 403 | `forbidden: agent_not_subscribed` | the agent is not in `T.agents ∩ U.agents`, including a tenant with no row |
 | 404 | `not found` | `agentcore-gateway`: no registry entry, or it is `draining` |
 | 429 | `too many requests` | over the tenant limit |
-| 502 | `upstream error` | `agentcore-gateway`, and the `api-gateway` integration Lambda: backend invoke failed; registry or entitlement store unreadable; an entry without `needs` and `tools` (`registry_entry_v1`); `grant_too_large`; `mint_failed`; `tvm_failed` |
+| 502 | `upstream error` | `agentcore-gateway`, and the `api-gateway` integration Lambda: backend invoke failed; registry or entitlement store unreadable; an entry without `needs` and `tools` (`registry_entry_shape`); `grant_too_large`; `mint_failed`; `tvm_failed` |
 
 An agent whose grant holds only its `needs` is served (`no_tools_granted`
 is a log reason, not an error); its tool calls are refused at the gateway.

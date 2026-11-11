@@ -26,7 +26,7 @@ export const ENV = {
   DISCOVERY_URL: 'RI_DISCOVERY_URL',
   ALLOWED_CLIENT_IDS: 'RI_ALLOWED_CLIENT_IDS',
   REQUIRED_SCOPES: 'RI_REQUIRED_SCOPES',
-  /** (v2, ADR-0038) Accept identity tokens that carry `tenants`; off unless 'true'. */
+  /** (ADR-0038) Accept identity tokens that carry `tenants`; off unless 'true'. */
   MULTI_TENANT: 'RI_MULTI_TENANT',
   SESSION_SCOPE: 'RI_SESSION_SCOPE',
   TVM_ROLE_ARN: 'RI_TVM_ROLE_ARN',
@@ -47,19 +47,19 @@ export const ENV = {
   REGISTRY_ACCOUNT: 'RI_REGISTRY_ACCOUNT',
   /** The backend served at the bare `/invocations` route (the one-agent form); unset when there is none. */
   DEFAULT_BACKEND: 'RI_DEFAULT_BACKEND',
-  /** (v2, ADR-0037) The transaction-token issuer, `<baseUrl>`; also refused as an identity issuer (P-14). */
+  /** (ADR-0037) The transaction-token issuer, `<baseUrl>`; also refused as an identity issuer (P-14). */
   ISSUER: 'RI_ISSUER',
-  /** (v2) The entitlement store table (C-12). */
+  /** The entitlement store table (C-12). */
   ENTITLEMENTS_TABLE: 'RI_ENTITLEMENTS_TABLE',
-  /** (v2) Set only on the function that mints (the authoriser or the interceptor): the KMS key id of the current signing key. */
+  /** Set only on the function that mints (the authoriser or the interceptor): the KMS key id of the current signing key. */
   TXN_KEY_ID: 'RI_TXN_KEY_ID',
   TXN_ALGORITHM: 'RI_TXN_ALGORITHM',
-  /** (v2, M-82) Set on the function that receives the authoriser's token: the issuer's JWKS document, so the forwarded token is verified without a fetch and without a propagation race. */
+  /** (M-82) Set on the function that receives the authoriser's token: the issuer's JWKS document, so the forwarded token is verified without a fetch and without a propagation race. */
   TXN_JWKS: 'RI_TXN_JWKS',
   TXN_TTL_SECONDS: 'RI_TXN_TTL_SECONDS',
   TXN_REUSE_MARGIN_SECONDS: 'RI_TXN_REUSE_MARGIN_SECONDS',
   TXN_CACHE_MAX_ENTRIES: 'RI_TXN_CACHE_MAX_ENTRIES',
-  /** (v2) The ingress role ARN, written into every token as `act.sub`. */
+  /** The ingress role ARN, written into every token as `act.sub`. */
   INGRESS_ROLE_ARN: 'RI_INGRESS_ROLE_ARN',
   /** (ADR-0048) Set on the `api-gateway` functions when `agentDelegation` is on: the most agents a chain may hold after a hop, 1 to 3. Unset: no delegation route. */
   DELEGATION_MAX_DEPTH: 'RI_DELEGATION_MAX_DEPTH',
@@ -71,11 +71,11 @@ export const AGENT_ENV = {
   MODEL_ID: 'MODEL_ID',
   /** The demo's tenant-partitioned table for the `read <tenant>` probe (set by the demo stack, ADR-0012). */
   TABLE_NAME: 'TABLE_NAME',
-  /** (v2) The `default` tools gateway MCP endpoint; unset when the ingress has no gateway named `default`. */
+  /** The `default` tools gateway MCP endpoint; unset when the ingress has no gateway named `default`. */
   TOOLS_GATEWAY_URL: 'RI_TOOLS_GATEWAY_URL',
-  /** (v2, ADR-0041) JSON `{ "<gateway name>": "<MCP endpoint>" }` of every tools gateway of the ingress. */
+  /** (ADR-0041) JSON `{ "<gateway name>": "<MCP endpoint>" }` of every tools gateway of the ingress. */
   TOOLS_GATEWAY_URLS: 'RI_TOOLS_GATEWAY_URLS',
-  /** (v2) The transaction-token issuer, so the agent can verify the token with the published JWKS if it wants to. */
+  /** The transaction-token issuer, so the agent can verify the token with the published JWKS if it wants to. */
   ISSUER: 'RI_ISSUER',
   /** (ADR-0048) The `api-gateway` base URL; the agent appends `/<agent>/delegations`. Unset when the ingress has no delegation route. */
   DELEGATION_URL: 'RI_DELEGATION_URL',
@@ -101,7 +101,7 @@ export interface LimitsConfig {
 export interface RegistryConfig {
   /** SSM parameter prefix, with a trailing slash; entries live at `${prefix}backends/<name>`. */
   readonly prefix: string;
-  /** Seconds an entry is served from the per-process cache before a refresh; default 60. Also the plan and catalogue cache life (v2). */
+  /** Seconds an entry is served from the per-process cache before a refresh; default 60. Also the plan and catalogue cache life. */
   readonly ttlSeconds: number;
   /** The backend the bare `/invocations` route resolves to (the one-agent form); undefined when there is none. */
   readonly defaultBackend?: string;
@@ -122,11 +122,11 @@ export interface IngressConfig {
   readonly discoveryUrl: string;
   readonly allowedClientIds: string[];
   readonly requiredScopes?: string[];
-  /** (v2, ADR-0038) */
+  /** (ADR-0038) */
   readonly multiTenant: boolean;
-  /** (v2) The transaction-token issuer; refused as an identity issuer (P-14). Undefined only in v1-shaped test configs. */
+  /** The transaction-token issuer; refused as an identity issuer (P-14). Undefined only in test configs without a mint. */
   readonly issuer?: string;
-  /** (v2, M-82) The issuer's JWKS, on the function that verifies a forwarded token; absent, the JWKS route is fetched. */
+  /** (M-82) The issuer's JWKS, on the function that verifies a forwarded token; absent, the JWKS route is fetched. */
   readonly txnJwks?: string;
   /** Set when the `session` module is on (ADR-0013). */
   readonly sessionScope?: SessionScope;
@@ -138,9 +138,9 @@ export interface IngressConfig {
   readonly perTenantMetrics: boolean;
   /** The backend registry (ADR-0024). */
   readonly registry: RegistryConfig;
-  /** (v2) The entitlement store table (C-12). */
+  /** The entitlement store table (C-12). */
   readonly entitlementsTable?: string;
-  /** (v2) Set only on the function that mints the transaction token. */
+  /** Set only on the function that mints the transaction token. */
   readonly mint?: MintConfig;
   /** (ADR-0048) Set on the `api-gateway` functions when the delegation route exists. */
   readonly delegation?: DelegationConfig;
@@ -194,7 +194,7 @@ function optional(value: string | undefined): string | undefined {
 }
 
 /**
- * The mint configuration (v2), present only when `RI_TXN_KEY_ID` is set:
+ * The mint configuration, present only when `RI_TXN_KEY_ID` is set:
  * the construct sets it on the one function whose role may call `kms:Sign`.
  */
 export function readMintConfig(env: NodeJS.ProcessEnv = process.env): MintConfig | undefined {

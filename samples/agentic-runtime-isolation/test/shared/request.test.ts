@@ -197,7 +197,7 @@ describe('IngressPipeline', () => {
     await expect(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body: '{"prompt":"hi"}' })).resolves.toBeDefined();
   });
 
-  describe('the authority step (v2, spec §3.6)', () => {
+  describe('the authority step (spec §3.6)', () => {
     const body = '{"prompt":"hi"}';
 
     it('mints for the selected tenant, the verified sub and the route backend', async () => {
@@ -269,7 +269,7 @@ describe('IngressPipeline', () => {
       expect(await refusal(p.validate({ authorization: token, tenantHeader: 'tenant-c', body }))).toEqual({ status: 403, reason: 'tenant_not_allowed' });
     });
 
-    it('refusal bodies carry the public v2 reason code only (spec §5.1)', () => {
+    it('refusal bodies carry the public reason code only (spec §5.1)', () => {
       expect(errorBody(403, 'agent_not_subscribed')).toBe('forbidden: agent_not_subscribed');
       expect(errorBody(400, 'tenant_required')).toBe('bad request: tenant_required');
       expect(errorBody(403, 'scope_missing')).toBe('forbidden');
@@ -364,13 +364,13 @@ describe('IngressPipeline', () => {
     });
 
     it('a registry fault is 502 with its reason', async () => {
-      const faulty = (reason: 'registry_entry_invalid' | 'registry_unavailable' | 'registry_entry_v1'): RegistryResolver => ({
+      const faulty = (reason: 'registry_entry_invalid' | 'registry_unavailable' | 'registry_entry_shape'): RegistryResolver => ({
         resolve: async () => {
           throw new RegistryError(reason);
         },
         warm: async () => undefined,
       });
-      for (const reason of ['registry_entry_invalid', 'registry_unavailable', 'registry_entry_v1'] as const) {
+      for (const reason of ['registry_entry_invalid', 'registry_unavailable', 'registry_entry_shape'] as const) {
         const p = pipeline(baseConfig(), undefined, faulty(reason));
         expect(await refusal(p.validate({ authorization: `Bearer ${await issuer.mint()}`, body, path: '/default/invocations' }))).toEqual({ status: 502, reason });
       }
@@ -385,7 +385,7 @@ describe('IngressPipeline', () => {
       });
       // The floor plus one billing scope passes billing; the floor alone passes default only.
       await expect(p.validate({ authorization: `Bearer ${await issuer.mint({ scope: 'default/chat billing/invoke' })}`, body, path: '/billing/invocations' })).resolves.toMatchObject({ backend: 'billing' });
-      // v2: no per-backend scope check; the floor alone reaches every backend, and the grant rule decides the rest.
+      // no per-backend scope check; the floor alone reaches every backend, and the grant rule decides the rest.
       const floorOnly = `Bearer ${await issuer.mint({ scope: 'default/chat' })}`;
       await expect(p.validate({ authorization: floorOnly, body, path: '/billing/invocations' })).resolves.toMatchObject({ backend: 'billing' });
       await expect(p.validate({ authorization: floorOnly, body, path: '/default/invocations' })).resolves.toMatchObject({ backend: 'default' });
