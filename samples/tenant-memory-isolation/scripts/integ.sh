@@ -45,6 +45,7 @@ PARAMETER="/application-plane/shared/memory/gateway"
 TMP="$(mktemp -d)"
 DEPLOYED=0
 FAILED=0
+RUN_TAG="$(date +%s)"
 
 # shellcheck source=scripts/teardown-lib.sh
 source "${SAMPLE_DIR}/scripts/teardown-lib.sh"
@@ -101,7 +102,8 @@ prove_teardown() {
   # The tagging index lags deletions, so each ARN it still lists is checked against its own
   # service; only one that still exists counts as left.
   local arn
-  for arn in $(aws resourcegroupstaggingapi get-resources --tag-filters "Key=aws:cloudformation:stack-name,Values=${STACK}" \
+  # Only this run's resources: an earlier run's retained Memory carries the same stack tag.
+  for arn in $(aws resourcegroupstaggingapi get-resources --tag-filters "Key=aws:cloudformation:stack-name,Values=${STACK}" "Key=integ-run,Values=${RUN_TAG}" \
       --query 'ResourceTagMappingList[].ResourceARN' --output text); do
     if still_exists "$arn"; then echo "  LEFT: tagged ${arn##*:}" >&2; left=1; else echo "  gone: tagged ${arn##*:} (stale tag index entry)"; fi
   done
@@ -159,7 +161,7 @@ echo "  Region ${REGION}; account confirmed"
 step "1: synthesise and deploy ${STACK}"
 npx cdk synth -q --output "$OUT" >"${TMP}/synth.log" 2>&1 || { tail -30 "${TMP}/synth.log" >&2; fail "synth"; }
 DEPLOYED=1
-npx cdk deploy --app "$OUT" "$STACK" --require-approval never --tags "integ-run=$(date +%s)" >"${TMP}/deploy.log" 2>&1 \
+npx cdk deploy --app "$OUT" "$STACK" --require-approval never --tags "integ-run=${RUN_TAG}" >"${TMP}/deploy.log" 2>&1 \
   || { tail -40 "${TMP}/deploy.log" >&2; fail "deploy"; }
 aws ssm get-parameter --name "$PARAMETER" --query Parameter.Value --output text \
   | jq '{memoryId, gatewayId: (.gatewayArn | split("/") | last), policyEngineId: (.policyEngineArn | split("/") | last), userPoolId: .demoIssuer.userPoolId, applicationLogGroup}' >"$IDS"
