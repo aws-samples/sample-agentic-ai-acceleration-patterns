@@ -199,8 +199,20 @@ export const DEFAULT_ADMIN_SCOPE = 'entitlements/admin';
  * reuse margin; v1's five minutes (ADR-0023) would hand out expired tokens.
  */
 export const AUTHORIZER_CACHE_TTL = Duration.seconds(60);
+<<<<<<< HEAD
 /** Authoriser cache misses one reserved concurrency unit serves per second (a call is about 50 ms; ADR-0049). */
 const AUTHORIZER_CALLS_PER_UNIT_SECOND = 20;
+=======
+/**
+ * Authoriser cache misses one reserved concurrency unit serves per second in
+ * a burst (ADR-0049). A warm call is about 20 ms, but a refresh burst lands
+ * on a fleet that has to grow for it, and a new instance pays its init
+ * (discovery, JWKS, the first DynamoDB and KMS calls): the burst minute's
+ * p99 was 900 ms in the 2026-11-11 stress run. One unit therefore serves
+ * about one miss a second while the burst lasts, not twenty.
+ */
+const AUTHORIZER_CALLS_PER_UNIT_SECOND = 1;
+>>>>>>> 0f092ce (Agentic runtime isolation: ADR-0048 amended, the authoriser reserve is sized for cold-start bursts (F-17); large-tier S1/S6 rerun results)
 
 export interface SharedIngressProps {
   readonly identity: IdentityProps;
@@ -245,9 +257,15 @@ export interface SharedIngressProps {
    * Its peak is not a share of the request rate but the token-refresh
    * burst: every live access token misses the authoriser cache once per
    * refresh, and clients that took their tokens together refresh together.
-   * Size it at live tokens / the authoriser cache TTL (60 s) x 2; 4,000 live
-   * tokens is 134. A throttled authoriser is a bare 500 from API Gateway,
-   * with no tenant and no reason (stress test 2026-11-10, F-12, F-16).
+   * The burst lands on a fleet that must grow for it, so each call costs a
+   * cold start (about 900 ms at p99), not the warm 20 ms: size it at the
+   * live tokens that may refresh in one second, which is the whole live set
+   * when they were issued together (1,000 tokens: 1,000), or live tokens /
+   * 60 x 2 when their refresh times are spread. Too small a value caps the
+   * authoriser at exactly the point it was meant to protect (the 2026-11-11
+   * run at 34 for 1,000 tokens threw 369 throttles). A throttled authoriser
+   * is a bare 500 from API Gateway, with no tenant and no reason (stress
+   * test 2026-11-10 and 2026-11-11, F-12, F-16, F-17).
    */
   readonly authorizerReservedConcurrency?: number;
   /**
@@ -905,13 +923,17 @@ export class SharedIngress extends Construct {
       ) {
         over.push(
           `authorizerReservedConcurrency ${options.authorizerReservedConcurrency} x ${AUTHORIZER_CALLS_PER_UNIT_SECOND} `
-          + `(an authoriser call is about 50 ms, so one reserved unit serves about ${AUTHORIZER_CALLS_PER_UNIT_SECOND} cache misses a second)`,
+          + `(a refresh burst lands on cold instances at about 900 ms a call, so one reserved unit serves about ${AUTHORIZER_CALLS_PER_UNIT_SECOND} cache miss a second while it lasts)`,
         );
       }
       if (options.ingressReservedConcurrency !== undefined && options.authorizerReservedConcurrency === undefined) {
         Annotations.of(this).addWarningV2(
           'runtime-isolation:authorizer-unreserved',
+<<<<<<< HEAD
           `ingressReservedConcurrency is set (${options.ingressReservedConcurrency}) and authorizerReservedConcurrency is not: the reserve is taken from the account pool the authoriser draws on, and the authoriser's peak is the token-refresh burst (every live access token misses its cache once per refresh), not a share of the request rate. Set authorizerReservedConcurrency to about live tokens / 60 x 2, or a refresh burst answers with bare 500s (ADR-0049).`,
+=======
+          `ingressReservedConcurrency is set (${options.ingressReservedConcurrency}) and authorizerReservedConcurrency is not: the reserve is taken from the account pool the authoriser draws on, and the authoriser's peak is the token-refresh burst (every live access token misses its cache once per refresh), not a share of the request rate. Set authorizerReservedConcurrency to the live tokens that may refresh in one second (the whole live set when they were issued together), or a refresh burst answers with bare 500s (ADR-0049).`,
+>>>>>>> 0f092ce (Agentic runtime isolation: ADR-0048 amended, the authoriser reserve is sized for cold-start bursts (F-17); large-tier S1/S6 rerun results)
         );
       }
       if (over.length > 0) {

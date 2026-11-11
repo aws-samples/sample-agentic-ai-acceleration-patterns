@@ -328,12 +328,12 @@ describe('v2 options', () => {
   describe('authorizerReservedConcurrency and the stage throttle (ADR-0049)', () => {
     const unreserved = Match.stringLikeRegexp('runtime-isolation:authorizer-unreserved');
     const above = Match.stringLikeRegexp('runtime-isolation:stage-throttle-above-concurrency');
-    const fit = { ingressReservedConcurrency: 800, authorizerReservedConcurrency: 134, stageThrottle: { rateLimit: 500, burstLimit: 250 } };
+    const fit = { ingressReservedConcurrency: 800, authorizerReservedConcurrency: 1000, stageThrottle: { rateLimit: 500, burstLimit: 250 } };
 
     it('reserves concurrency for the authoriser; api-gateway only; a positive integer', () => {
       const { template } = build('api-gateway', fit);
       const { fn } = functionAndRole(template(), 'mints the transaction token');
-      expect(fn.Properties.ReservedConcurrentExecutions).toBe(134);
+      expect(fn.Properties.ReservedConcurrentExecutions).toBe(1000);
       expect(() => build('agentcore-gateway', { authorizerReservedConcurrency: 10 })).toThrow(/authorizerReservedConcurrency/);
       expect(() => build('api-gateway', { authorizerReservedConcurrency: 1.5 })).toThrow(/authorizerReservedConcurrency/);
     });
@@ -347,7 +347,7 @@ describe('v2 options', () => {
     it('warns when stageThrottle.rateLimit is above either reserve, naming the bare-500 consequence', () => {
       const over = build('api-gateway', { ingressReservedConcurrency: 200, authorizerReservedConcurrency: 10, stageThrottle: { rateLimit: 300, burstLimit: 150 } }).stack;
       Annotations.fromStack(over).hasWarning('*', Match.stringLikeRegexp('ingressReservedConcurrency 200'));
-      Annotations.fromStack(over).hasWarning('*', Match.stringLikeRegexp('authorizerReservedConcurrency 10 x 20'));
+      Annotations.fromStack(over).hasWarning('*', Match.stringLikeRegexp('authorizerReservedConcurrency 10 x 1'));
       Annotations.fromStack(over).hasWarning('*', Match.stringLikeRegexp('bare 500'));
       Annotations.fromStack(build('api-gateway', fit).stack).hasNoWarning('*', above);
       Annotations.fromStack(build('api-gateway', { stageThrottle: { rateLimit: 5000, burstLimit: 2500 } }).stack).hasNoWarning('*', above);

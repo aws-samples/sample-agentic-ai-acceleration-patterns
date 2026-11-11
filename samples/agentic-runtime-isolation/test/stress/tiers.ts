@@ -31,7 +31,11 @@ export interface StressTier {
   readonly scenarioSeconds: number;
   readonly stageThrottle: { readonly rateLimit: number; readonly burstLimit: number };
   readonly ingressReservedConcurrency: number;
+<<<<<<< HEAD
   /** ADR-0049: live tokens / 60 x 2 (tenantsActive x usersPerActiveTenant). */
+=======
+  /** ADR-0048: the live tokens that may refresh in one second; the driver issues them together, so the whole set (tenantsActive x usersPerActiveTenant). */
+>>>>>>> 0f092ce (Agentic runtime isolation: ADR-0048 amended, the authoriser reserve is sized for cold-start bursts (F-17); large-tier S1/S6 rerun results)
   readonly authorizerReservedConcurrency: number;
   readonly driverInstanceType: string;
   /** k6 driver sizing (F-14); run.sh exports these as VU_PER_RPS and TOKENS_IN. Defaults in lib.js when unset. */
@@ -55,7 +59,7 @@ export const STRESS_TIERS: Record<'small' | 'medium' | 'large', StressTier> = {
     scenarioSeconds: 60,
     stageThrottle: { rateLimit: 100, burstLimit: 50 },
     ingressReservedConcurrency: 50,
-    authorizerReservedConcurrency: 4,
+    authorizerReservedConcurrency: 40,
     driverInstanceType: 't3.large',
   },
   medium: {
@@ -74,7 +78,7 @@ export const STRESS_TIERS: Record<'small' | 'medium' | 'large', StressTier> = {
     scenarioSeconds: 180,
     stageThrottle: { rateLimit: 300, burstLimit: 150 },
     ingressReservedConcurrency: 200,
-    authorizerReservedConcurrency: 14,
+    authorizerReservedConcurrency: 400,
     driverInstanceType: 'c6i.xlarge',
   },
   large: {
@@ -106,7 +110,11 @@ export const STRESS_TIERS: Record<'small' | 'medium' | 'large', StressTier> = {
     scenarioSeconds: 600,
     stageThrottle: { rateLimit: 1_200, burstLimit: 600 },
     ingressReservedConcurrency: 800,
-    authorizerReservedConcurrency: 34,
+    // Together with the 800 for the integration Lambda that is 1,800 of a
+    // 1,000 account pool: the account needs its Lambda concurrency quota
+    // raised to about 2,500 before this tier deploys (F-17). CloudFormation
+    // refuses a reserve the pool cannot hold.
+    authorizerReservedConcurrency: 1_000,
     // 32 GB: k6 ran a c6i.2xlarge out of memory at 1,600 VUs (F-14).
     driverInstanceType: 'c6i.4xlarge',
     // k6 driver sizing (F-14): VUs per rps and where tokens live. A report

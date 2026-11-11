@@ -631,8 +631,11 @@ meets first:
 - That reserve is taken from the account pool the authoriser draws on, and
   the authoriser's peak is the token-refresh burst (every live access token
   misses its 60 s cache once per refresh), not a share of the request rate:
-  set `authorizerReservedConcurrency` to about live tokens / 60 x 2, and
-  keep `stageThrottle.rateLimit` under both reserves. Above them API Gateway
+  set `authorizerReservedConcurrency` to the live tokens that may refresh
+  in one second (the whole live set when they were issued together: the
+  burst lands on cold instances at about 900 ms a call), and keep
+  `stageThrottle.rateLimit` under both reserves. Both reserves come out of
+  the account's Lambda pool: raise that quota first. Above them API Gateway
   answers a throttled Lambda with a bare 500, no tenant and no reason, where
   the stage throttle answers 429 with both (ADR-0049). Synth warns when the
   three do not fit.
