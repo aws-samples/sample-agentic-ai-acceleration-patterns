@@ -940,12 +940,18 @@ concurrent delete → 404; an insert that finds the deployment already there
 item that failed shows a changed `parameters` (or kept list) under a
 status the operation admits, or the status `CREATING` or `UPDATING`
 (in flight, and it ends in a state the update admits). Every other status (`CREATE_FAILED`, `DELETE_FAILED`,
-`DELETING`, a cell not `ACTIVE` under `UpdateDeployment`) is a 409
-without a hint: a retry cannot succeed, and the remedy is a delete or
-an operator `UpdateCell`. The service classifies from the item returned
-by `ReturnValuesOnConditionCheckFailure: ALL_OLD` (or the transaction's
-cancellation reasons), never from a second read, so the label describes
-the state that actually failed the condition.
+`DELETING`) is a 409 without a hint: a retry cannot succeed, and the
+remedy is a delete. The merge is a single conditional `UpdateItem` on
+the record being updated; the service classifies from the item returned
+by `ReturnValuesOnConditionCheckFailure: ALL_OLD`, never from a second
+read, so the label describes the state that actually failed the
+condition. When `ALL_OLD` returns no item the record was deleted → 404.
+Under `UpdateDeployment` the cell-`ACTIVE` guard is checked on the read
+before the write (R-13) and a cell not `ACTIVE` is a 409 without a hint
+from that read; the cell MUST NOT be added to the merge write as a
+transaction `ConditionCheck`, because placements and deployment deletes
+write the cell in their own transactions and would cancel the merge with
+no item to classify.
 
 ---
 
@@ -1425,8 +1431,15 @@ input, and a CodeBuild `Build` result echoes the build's environment
 variables, values included. So each build task MUST keep only what the
 terminal writes read (a `ResultSelector` holding the build ARN and
 status); a full result kept in state would add a second copy of each
-parameter set and pass the limit. Keeping the results small also keeps
-the values out of execution history a second time (N-11).
+parameter set and pass the limit. The same holds on the failure path,
+which `ResultSelector` does not reach: a build task's `Catch` MUST keep
+only the build ARN and status from the error before it enters state,
+never the raw `Cause` string or a parsed copy of the `Build`. A payload
+over the limit fails the execution with `States.DataLimitExceeded`,
+which `States.ALL` does not catch, so no `*_FAILED` write would run.
+Keeping state small does not keep values out of the task history events
+(they record the raw service result); N-11 already accepts values in
+execution history.
 
 ### 8.2 Terminal writes
 
