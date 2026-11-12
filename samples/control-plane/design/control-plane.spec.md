@@ -608,10 +608,10 @@ the application's current `cellParameters` and refuse with 400 an
 undeclared name in `parameters` (a tenant parameter name included), a
 value over 1,024 bytes (UTF-8), more than 20 stored entries after the
 merge, or a name in both `parameters` and `removeParameters`. The merge
-and its precedence follow R-33 exactly: per-name `SET` and `REMOVE` in the
-conditional update that moves the cell to `UPDATING`, conditioned on the
-status guard **and** on the cell's `parameters` map equalling the one the
-request read; the same `removeParameters` rules, character rule and
+and its precedence follow R-33 exactly: the whole merged map written in
+the conditional update that moves the cell to `UPDATING`, conditioned on
+the status guard **and** on the cell's `parameters` attribute being
+exactly as the request read it; the same `removeParameters` rules, character rule and
 error classification; validation before the status check. The map
 condition matters most here: placements and deployment deletes write the
 cell's counter and `updatedAt` while it is `ACTIVE`, and they must not
@@ -693,16 +693,20 @@ in both lists is a 400; removing a required parameter is a 400.
 (400 otherwise); it may name any stored entry, declared or not, so stale
 values can be cleared, and a name that is not stored is a no-op. The merge
 MUST be written in the same conditional update that moves the deployment
-to `UPDATING` (per-name `SET` and `REMOVE` on the map), conditioned on the
-status guard **and** on the stored `parameters` map equalling the one the
-request read (`attribute_not_exists` when it read none). The status
+to `UPDATING`, as one `SET #parameters = :merged` of the whole merged map
+the request validated, never per-name `SET` (a nested path is invalid
+on a record with no `parameters` attribute, which includes every record
+written before parameters existed). The write is conditioned on the
+status guard **and** on the `parameters` attribute being exactly as the
+request read it: `attribute_not_exists(#parameters)` when the attribute
+was absent, `#parameters = :read` when it was present, an empty `{}`
+included. An implementation MUST NOT treat absent and `{}` as the same
+read, or the condition can never pass. The status
 condition stops two updates from interleaving; the map condition stops a
 request from writing a merge it validated against a map that a whole
 update cycle has since replaced. The map is the guard, not `updatedAt`,
 because only these requests write the map (R-21) while other writers
-move `updatedAt`. Failures are classified (R-14): a changed map, or a
-record still in flight, → 409, retryable; a record `DELETING` → 409,
-not retryable. Validation runs on the read record before the conditional
+move `updatedAt`. Failures are classified (R-14). Validation runs on the read record before the conditional
 write, so a request that is both invalid and in flight is a 400, with
 nothing written. A value MUST NOT contain a control character (U+0000 to
 U+001F, U+007F): 400. A build environment cannot carry NUL, and the rule
@@ -873,7 +877,7 @@ All synchronous: no application operation runs a build
 
 | Op | HTTP | Code | Contract |
 |---|---|---|---|
-| `PutApplication` | `PUT /applications/{applicationId}` | 200 | Create-or-replace. Input `{source, cellScripts, tenantScripts, maxTenants, placementStrategy?, parameters?, cellParameters?}` — the definition of §4.1 plus the strategy and both sets of parameter declarations, validated as a whole (400 on a missing script path, a malformed source, `maxTenants < 1`, an unknown strategy, an id outside `[a-z0-9-]{1,32}`, a parameter name outside `[A-Z][A-Z0-9_]{0,63}`, a duplicate name within or across the two lists, more than 20 declarations in either list, a `default` on a required parameter, or a cell parameter without a `default`). On an existing application the definition fields and the strategy are replaced. The two declaration lists are replaced only when sent: an absent `parameters` or `cellParameters` **keeps** the current list, and an empty list `[]` clears it, so a `PutApplication` that only changes `maxTenants` cannot silently drop every required check and default. On a new application an absent list declares none. Existing cells and deployments keep their stored values. A cell parameter added since reaches each cell's next build as its default. A newly required parameter makes the next `UpdateDeployment` of every deployment lacking it a 400 until the operator supplies the value; it never blocks a `DeleteDeployment`. `cellCount` is untouched (R-29). The "one name in one list" check runs against the lists the request sent plus any list it keeps. One write, with `cellCount` and `createdAt` set through `if_not_exists`, so a replace never resets them. When both lists are sent the write carries no condition — an application has no immutable field, so it is correct in every prior state (P-5). When a list is kept, the write is conditioned on that list still equalling what the request read (`attribute_not_exists` when it read none), so two concurrent puts that each send one list cannot store one name in both; a failed condition → 409, retryable. The condition is never on `updatedAt`, which cell creates and deletes also write. Cells already created keep their stamp (P-4). |
+| `PutApplication` | `PUT /applications/{applicationId}` | 200 | Create-or-replace. Input `{source, cellScripts, tenantScripts, maxTenants, placementStrategy?, parameters?, cellParameters?}` — the definition of §4.1 plus the strategy and both sets of parameter declarations, validated as a whole (400 on a missing script path, a malformed source, `maxTenants < 1`, an unknown strategy, an id outside `[a-z0-9-]{1,32}`, a parameter name outside `[A-Z][A-Z0-9_]{0,63}`, a duplicate name within or across the two lists, more than 20 declarations in either list, a `default` on a required parameter, or a cell parameter without a `default`). On an existing application the definition fields and the strategy are replaced. The two declaration lists are replaced only when sent: an absent `parameters` or `cellParameters` **keeps** the current list, and an empty list `[]` clears it, so a `PutApplication` that only changes `maxTenants` cannot silently drop every required check and default. On a new application an absent list declares none. Existing cells and deployments keep their stored values. A cell parameter added since reaches each cell's next build as its default. A newly required parameter makes the next `UpdateDeployment` of every deployment lacking it a 400 until the operator supplies the value; it never blocks a `DeleteDeployment`. `cellCount` is untouched (R-29). The "one name in one list" check runs against the lists the request sent plus any list it keeps. One write, with `cellCount` and `createdAt` set through `if_not_exists`, so a replace never resets them. When both lists are sent the write carries no condition — an application has no immutable field, so it is correct in every prior state (P-5). When a list is kept, the write is conditioned on that list being exactly as the request read it (`attribute_not_exists` when the attribute was absent, equality when present, an empty `[]` included; absent and `[]` are different reads), so two concurrent puts that each send one list cannot store one name in both; a failed condition → 409, retryable. The condition is never on `updatedAt`, which cell creates and deletes also write. Cells already created keep their stamp (P-4). |
 | `GetApplication` | `GET /applications/{applicationId}` | 200 | The record: the definition, `placementStrategy`, both sets of parameter declarations and `cellCount`. 404 if unregistered. |
 | `ListApplications` | `GET /applications` | 200 | Paginated: `applicationId`, `maxTenants`, `placementStrategy`, `cellCount` per application. |
 | `DeleteApplication` | `DELETE /applications/{applicationId}` | 200 | **Empty applications only** (P-10): a single conditional delete (`attribute_exists AND cellCount = 0`), the counterpart of the cell-slot claim; condition failure → 409. Accounts that name the application in `applicationIds` are not touched (§4.5). |
@@ -931,10 +935,17 @@ compare-and-set maps to 409.
 **R-14:** Repository condition failures MUST be classified, not blanket-500d:
 a stale lifecycle transition → 409; a metadata write that loses a
 concurrent delete → 404; an insert that finds the deployment already there
-→ 409. A parameter merge (R-33, R-34) or a `PutApplication` that keeps a
-list (§5.5) whose read went stale → 409 with a retry hint; a merge that
-finds the record `DELETING` → 409 without one. The service tells the
-cases apart by re-reading the record after the condition fails.
+→ 409. A failed parameter merge (R-33, R-34) or list-keeping
+`PutApplication` (§5.5) is a 409, with a **retry hint only** when the
+item that failed shows a changed `parameters` (or kept list) under a
+status the operation admits, or the status `CREATING` or `UPDATING`
+(in flight, and it ends in a state the update admits). Every other status (`CREATE_FAILED`, `DELETE_FAILED`,
+`DELETING`, a cell not `ACTIVE` under `UpdateDeployment`) is a 409
+without a hint: a retry cannot succeed, and the remedy is a delete or
+an operator `UpdateCell`. The service classifies from the item returned
+by `ReturnValuesOnConditionCheckFailure: ALL_OLD` (or the transaction's
+cancellation reasons), never from a second read, so the label describes
+the state that actually failed the condition.
 
 ---
 
@@ -1408,8 +1419,14 @@ bytes (a 64-byte name and a 1,024-byte value), about 43 KiB raw. The
 execution input is JSON. With control characters refused (R-33), only
 `"` and `\` need escaping, so a value grows at most twofold: about 87 KiB
 per set. A new-cell create carries a cell set and a tenant set, about
-174 KiB, inside the 256 KiB Step Functions execution input limit with the
-rest of the R-20 input.
+174 KiB, inside the 256 KiB Step Functions limit with the rest of the
+R-20 input. That limit applies to every state's payload, not only the
+input, and a CodeBuild `Build` result echoes the build's environment
+variables, values included. So each build task MUST keep only what the
+terminal writes read (a `ResultSelector` holding the build ARN and
+status); a full result kept in state would add a second copy of each
+parameter set and pass the limit. Keeping the results small also keeps
+the values out of execution history a second time (N-11).
 
 ### 8.2 Terminal writes
 
