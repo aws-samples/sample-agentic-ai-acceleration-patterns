@@ -9,6 +9,7 @@ import {
   DELETABLE_CELL_STATUSES,
   deleteCellTransition,
   listCellsByAccountQuery,
+  listCellsByApplicationQuery,
   listCellsQuery,
 } from '../../src/tenant/cell.data-model';
 
@@ -16,6 +17,7 @@ const dataModel = new CellDataModel();
 
 const record: CellRecord = {
   cellId: '01CELL',
+  applicationId: 'app-x',
   accountId: '111111111111',
   status: LifecycleStatus.ACTIVE,
   maxTenants: 5,
@@ -53,8 +55,14 @@ describe('CellDataModel.toItem', () => {
     expect(item.GSI2SK).toBe('CELL#01CELL');
   });
 
-  test('carries the immutable accountId', () => {
+  test('carries GSI-3 attributes partitioned by application for ListCells?applicationId= (§4.7, ADR-032)', () => {
+    expect(item.GSI3PK).toBe('APPLICATION#app-x');
+    expect(item.GSI3SK).toBe('CELL#01CELL');
+  });
+
+  test('carries the immutable accountId and applicationId', () => {
     expect(item.accountId).toBe('111111111111');
+    expect(item.applicationId).toBe('app-x');
   });
 
   test('persists the counters and the stamped definition', () => {
@@ -120,6 +128,16 @@ describe('listCellsByAccountQuery', () => {
     expect(listCellsByAccountQuery('111111111111')).toEqual({
       indexName: 'GSI2',
       partitionKey: { name: 'GSI2PK', value: 'ACCOUNT#111111111111' },
+    });
+  });
+});
+
+describe('listCellsByApplicationQuery', () => {
+  test('queries the GSI-3 APPLICATION#<id> partition, cells only by sort-key prefix (§4.7)', () => {
+    expect(listCellsByApplicationQuery('app-x')).toEqual({
+      indexName: 'GSI3',
+      partitionKey: { name: 'GSI3PK', value: 'APPLICATION#app-x' },
+      sortKeyPrefix: 'CELL#',
     });
   });
 });

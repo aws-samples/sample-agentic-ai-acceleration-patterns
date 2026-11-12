@@ -237,7 +237,7 @@ pool, so either would be a dependency cycle (ADR-0024). The waiter function
 has a role with no permissions and log levels above anything it emits, so it
 writes no logs and cannot recreate a group.
 
-### 3.7 Control-plane mount (ADR-0028..0033)
+### 3.7 Control-plane mount (ADR-0028..0033, ADR-0038)
 
 The stack that publishes the shared parameters (`publishSharedParameters`,
 ADR-0017) also owns the two fixed-name resources the `control-plane` mount
@@ -274,10 +274,15 @@ needs ([`src/identity.cdk.ts`](./src/identity.cdk.ts), `PlatformInvokePolicy` an
   `/application-plane/shared/identity/adminPasswordKeyArn`.
 
 The mount's calling code is not in the stack: `scripts/control-plane/{lib.sh,tenant/*.sh,cell/*.sh}`
-run in control-plane's CodeBuild projects, read these parameters, call the
-platform API, and park each first admin's temporary password at
-`/application-plane/tenants/<T>/identity/admin-temporary-password` as a
-`SecureString` under `AdminPasswordKey` (ADR-0031). The create path is the
+are the scripts of one control-plane application (`identity-mount`,
+registered with control-plane `PutApplication`, ADR-0038). They run in
+control-plane's CodeBuild projects, read these parameters from the
+account-wide shared namespace `/application-plane/shared/*` that both halves
+of control-plane's role pair read (control-plane ADR-038), call the platform
+API, and park each deployment's first-admin temporary password at
+`/application-plane/tenants/<T>/<A>/admin-temporary-password` (`<A>` =
+`APPLICATION_ID`, the deployment's own namespace) as a `SecureString` under
+`AdminPasswordKey` (ADR-0031). The create path is the
 reference implementation in [`test/integ.control-plane.ts`](./test/integ.control-plane.ts)
 and [`scripts/integ-control-plane.sh`](./scripts/integ-control-plane.sh); the
 mount as a whole is specified in
@@ -569,11 +574,13 @@ group outside the stack (ADR-0019, ADR-0024). The stack owns the API execution l
 `cloudWatchRole: false`, destroy touches no account-wide setting. The result is
 no stack, pool, table, parameter, role, or log group with the sample's prefix.
 
-### 6.7 Control-plane mount: the create path (ADR-0028..0033)
+### 6.7 Control-plane mount: the create path (ADR-0028..0033, ADR-0038)
 
-When mounted under the `control-plane` sample, one vendor `CreateTenant` call
-drives both planes. control-plane runs `scripts/control-plane/tenant/create.sh`
-in its tenant CodeBuild project; the script calls this sample's platform API
+When mounted under the `control-plane` sample, one vendor `CreateDeployment`
+of the `identity-mount` application drives both planes, after a synchronous
+control-plane `CreateTenant` has recorded the customer and returned its id.
+control-plane runs `scripts/control-plane/tenant/create.sh` in its tenant
+CodeBuild project; the script calls this sample's platform API
 with SigV4 under the **same** tenant id (ADR-0029) and parks the first admin's
 temporary password. Only the paths the script actually takes are shown.
 
@@ -584,15 +591,16 @@ sequenceDiagram
     participant S as tenant/create.sh
     participant SSM as SSM Parameter Store
     participant P as Platform API (SigV4)
-    V->>CP: CreateTenant {name, adminEmail} (202, tenantId=T)
-    CP->>S: run with TENANT_ID=T, TENANT_NAME, ADMIN_EMAIL, OPERATOR_ID
+    V->>CP: CreateTenant {name} (200, tenantId=T)
+    V->>CP: CreateDeployment T {applicationId: A, adminEmail} (202, cellId)
+    CP->>S: run with TENANT_ID=T, TENANT_NAME, APPLICATION_ID=A, CELL_ID, ADMIN_EMAIL, OPERATOR_ID
     S->>SSM: read /application-plane/shared/identity/{apiUrl,topology,adminPasswordKeyArn}
     S->>S: refuse if topology == tiered (M-R-7)
     S->>P: GET /platform/tenants/{T}
     alt 404 (absent)
         S->>P: POST /platform/tenants {tenantId:T, name, adminEmail[, scopes from SCOPES]}
         P-->>S: 201 {admin.temporaryPassword}
-        S->>SSM: put SecureString /application-plane/tenants/T/identity/admin-temporary-password (key=AdminPasswordKey)
+        S->>SSM: put SecureString /application-plane/tenants/T/A/admin-temporary-password (key=AdminPasswordKey)
     else 200 ACTIVE (replay)
         S->>P: POST /platform/tenants/{T}/users {email, firstAdmin:true}
         alt 201
@@ -602,7 +610,7 @@ sequenceDiagram
             S->>SSM: get-parameter version, no decryption (WARNING if the parked password is gone)
         end
     end
-    S-->>CP: exit 0 -> build SUCCEEDED -> tenant ACTIVE
+    S-->>CP: exit 0 -> build SUCCEEDED -> deployment ACTIVE
 ```
 
 The park is the next call after the 201 (M-R-10) and gets three attempts, so
@@ -731,7 +739,7 @@ and at ADR-0034..0036. These are the divergences found in the implementation:
   lists: the attribute holds the e-mail (the username is a UUID in
   `pool-per-tenant`), the claim is re-asserted after the Cognito create, and
   a vanished row is 404. §4.1, §5.1 and §5.3 are amended.
-- **ADR-0028, ADR-0030, ADR-0031, ADR-0033 — the control-plane mount.** Not
+- **ADR-0028, ADR-0030, ADR-0031, ADR-0033, ADR-0038 — the control-plane mount.** Not
   divergences but an addition that fills the spec's §11 "Control-plane
   mounting" seam, specified in
   [`design/control-plane-mounting.spec.md`](./design/control-plane-mounting.spec.md)

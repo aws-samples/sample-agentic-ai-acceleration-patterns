@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * Control-plane mounting scenario (mounting spec §10 steps 1-11). Run by
+ * Control-plane mounting scenario (mounting spec §10 steps 0-11b). Run by
  * `scripts/integ-control-plane.sh` after it has deployed tenant-identity
- * (shared-pool), the setup stack and control-plane. Teardown (step 12) is the
- * script's exit trap, not this file.
+ * (shared-pool), the setup stack and control-plane; the script hands over the
+ * setup stack's script source location in E2E_CP_SCRIPT_SOURCE. Teardown
+ * (step 12) is the script's exit trap, not this file.
  *
  * Everything here is what a consumer could do: control-plane's public API
  * with a vendor-IdP JWT, tenant-identity's platform API with SigV4, the
@@ -35,6 +36,14 @@ import { decodeClaims, HttpResult, PlatformClient, region } from '../clients';
 const IDENTITY_NS = '/application-plane/shared/identity';
 const SETUP_STACK = 'TenantIdentityCpSetup';
 const CONTROL_PLANE_STACK = 'control-plane-dev';
+/** The mount's application on the control plane (mounting spec §3.4). */
+const APPLICATION_ID = 'identity-mount';
+/** Lifecycle scripts relative to the script source root (the bucket holds scripts/control-plane/). */
+const scripts = (kind: 'cell' | 'tenant') => ({
+  create: `control-plane/${kind}/create.sh`,
+  update: `control-plane/${kind}/update.sh`,
+  delete: `control-plane/${kind}/delete.sh`,
+});
 const SAMPLE_DIR = path.resolve(__dirname, '../../..');
 
 const cfn = new CloudFormationClient({ region: region() });
@@ -115,9 +124,23 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
   let cellId: string;
   let homeAccountId: string;
   let adminUsername: string;
-  const parked = () => `/application-plane/tenants/${tenantId}/identity/admin-temporary-password`;
+  const parked = () => `/application-plane/tenants/${tenantId}/${APPLICATION_ID}/admin-temporary-password`;
+  const deploymentRoute = () => `tenants/${tenantId}/deployments/${APPLICATION_ID}`;
+
+  /** Polls GetDeployment until `status`; a *_FAILED status fails at once. */
+  const deploymentStatus = (status: string, failed: string, timeoutMs: number) =>
+    poll(`deployment ${status}`, timeoutMs, async () => {
+      const d = await cp.call('GET', deploymentRoute());
+      const s = d.body?.deployment?.status;
+      if (s === failed) throw new Error(`deployment ${failed}; see the tenant CodeBuild log`);
+      return s === status ? d.body.deployment : undefined;
+    });
 
   beforeAll(async () => {
+    const scriptSource = process.env.E2E_CP_SCRIPT_SOURCE;
+    if (!scriptSource) {
+      throw new Error('E2E_CP_SCRIPT_SOURCE is not set: run this through scripts/integ-control-plane.sh');
+    }
     const setup = await outputs(SETUP_STACK);
     const cpOut = await outputs(CONTROL_PLANE_STACK);
     platform = new PlatformClient(await param(`${IDENTITY_NS}/apiUrl`));
@@ -140,34 +163,47 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
     }));
     cp = new ControlPlaneClient(cpOut.ApiUrl, auth.AuthenticationResult!.IdToken!);
 
-    // control-plane ADR-024: cells live in registered accounts. Register the
-    // control plane's own account as a vendor-owned fleet account with room
-    // for the one cell this scenario creates; PutAccount verifies the role
-    // pair the control-plane stack installed there (ADR-027).
+    // Step 0, control-plane ADR-032: the mount is an application registered
+    // at run time. Registered before the account, so a dedicated account
+    // could name it in applicationIds.
+    const application = await cp.call('PUT', `applications/${APPLICATION_ID}`, {
+      source: { type: 'S3', location: scriptSource },
+      cellScripts: scripts('cell'),
+      tenantScripts: scripts('tenant'),
+      maxTenants: 2,
+    });
+    expectStatus(application, 200, 'control-plane PutApplication');
+
+    // Step 0, control-plane ADR-024: cells live in registered accounts.
+    // Register the control plane's own account as a shared vendor-owned
+    // fleet account (no applicationIds, ADR-033) with room for the one cell
+    // this scenario creates; PutAccount verifies the role pair the
+    // control-plane stack installed there (ADR-027).
     homeAccountId = cpOut.ControlPlaneAccountId;
     const account = await cp.call('PUT', `accounts/${homeAccountId}`, { owner: 'VENDOR', maxCells: 1 });
     expectStatus(account, 200, 'control-plane PutAccount (home account)');
   });
 
-  test('steps 1-2: CreateTenant creates the cell and onboards the identity', async () => {
-    const res = await cp.call('POST', 'tenants', { name: tenantName, adminEmail });
-    expectStatus(res, 202, 'control-plane CreateTenant');
-    tenantId = res.body.tenant.tenantId;
-    cellId = res.body.tenant.cellId;
+  test('steps 1-2: CreateTenant, then CreateDeployment creates the cell and onboards the identity', async () => {
+    // A tenant is a record and runs no build (control-plane ADR-037).
+    const tenant = await cp.call('POST', 'tenants', { name: tenantName });
+    expectStatus(tenant, 200, 'control-plane CreateTenant');
+    tenantId = tenant.body.tenant.tenantId;
 
-    const tenant = await poll('tenant ACTIVE', 30 * 60_000, async () => {
-      const t = await cp.call('GET', `tenants/${tenantId}`);
-      const status = t.body?.tenant?.status;
-      if (status === 'CREATE_FAILED') throw new Error('tenant CREATE_FAILED; see the tenant CodeBuild log');
-      return status === 'ACTIVE' ? t.body.tenant : undefined;
-    });
-    expect(tenant.cellId).toBe(cellId);
+    // The deployment runs placement and the cell and tenant builds.
+    const res = await cp.call('POST', `tenants/${tenantId}/deployments`, { applicationId: APPLICATION_ID, adminEmail });
+    expectStatus(res, 202, 'control-plane CreateDeployment');
+    cellId = res.body.deployment.cellId;
+
+    const deployment = await deploymentStatus('ACTIVE', 'CREATE_FAILED', 30 * 60_000);
+    expect(deployment.cellId).toBe(cellId);
 
     // Step 1: the implicit cell ran cell/create.sh, which fails without the
     // identity parameters.
     const cell = await cp.call('GET', `cells/${cellId}`);
     expectStatus(cell, 200, 'GetCell');
     expect(cell.body.cell.status).toBe('ACTIVE');
+    expect(cell.body.cell.applicationId).toBe(APPLICATION_ID);
   });
 
   test('step 3: tenant-identity holds the same tenant id', async () => {
@@ -230,16 +266,11 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
     expect(decodeClaims(issued.body.accessToken).tenant_id).toBe(tenantId);
   });
 
-  test('step 7: UpdateResource re-runs update.sh; nothing is re-written', async () => {
+  test('step 7: UpdateDeployment re-runs update.sh; nothing is re-written', async () => {
     const before = await ssm.send(new GetParameterCommand({ Name: parked() }));
-    const res = await cp.call('PUT', `tenants/${tenantId}/resource`);
-    expectStatus(res, 202, 'UpdateResource');
-    await poll('tenant ACTIVE after update', 15 * 60_000, async () => {
-      const t = await cp.call('GET', `tenants/${tenantId}`);
-      const status = t.body?.tenant?.status;
-      if (status === 'UPDATE_FAILED') throw new Error('tenant UPDATE_FAILED; see the tenant CodeBuild log');
-      return status === 'ACTIVE' ? true : undefined;
-    });
+    const res = await cp.call('PUT', deploymentRoute());
+    expectStatus(res, 202, 'UpdateDeployment');
+    await deploymentStatus('ACTIVE', 'UPDATE_FAILED', 15 * 60_000);
     const users = await platform.call<any>('GET', `platform/tenants/${tenantId}/users`);
     expect(users.body.users).toHaveLength(1);
     const after = await ssm.send(new GetParameterCommand({ Name: parked() }));
@@ -253,6 +284,7 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
         ...process.env,
         TENANT_ID: tenantId,
         TENANT_NAME: tenantName,
+        APPLICATION_ID,
         CELL_ID: cellId,
         OPERATION: 'create',
         ADMIN_EMAIL: adminEmail,
@@ -288,13 +320,13 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
     expect([200, 204]).toContain(del.status);
   });
 
-  test('steps 10-11: DeleteTenant offboards the identity and the parked password', async () => {
-    const res = await cp.call('DELETE', `tenants/${tenantId}`);
-    expectStatus(res, 202, 'control-plane DeleteTenant');
-    await poll('control-plane tenant gone', 15 * 60_000, async () => {
-      const t = await cp.call('GET', `tenants/${tenantId}`);
-      if (t.body?.tenant?.status === 'DELETE_FAILED') throw new Error('tenant DELETE_FAILED; see the tenant CodeBuild log');
-      return t.status === 404 ? true : undefined;
+  test('steps 10-11: DeleteDeployment offboards the identity and the parked password', async () => {
+    const res = await cp.call('DELETE', deploymentRoute());
+    expectStatus(res, 202, 'control-plane DeleteDeployment');
+    await poll('control-plane deployment gone', 15 * 60_000, async () => {
+      const d = await cp.call('GET', deploymentRoute());
+      if (d.body?.deployment?.status === 'DELETE_FAILED') throw new Error('deployment DELETE_FAILED; see the tenant CodeBuild log');
+      return d.status === 404 ? true : undefined;
     });
     await poll('tenant-identity tenant gone', 10 * 60_000, async () => {
       const t = await platform.call('GET', `platform/tenants/${tenantId}`);
@@ -302,6 +334,14 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
     });
     const p = await ssm.send(new GetParametersCommand({ Names: [parked()] }));
     expect(p.InvalidParameters).toEqual([parked()]);
+  });
+
+  test('step 11b: the control plane is emptied: tenant, cell, account, application', async () => {
+    // The deployment delete released the tenant's count (control-plane ADR-037).
+    const tenant = await cp.call('GET', `tenants/${tenantId}`);
+    expectStatus(tenant, 200, 'GetTenant');
+    expect(tenant.body.tenant.deploymentCount).toBe(0);
+    expectStatus(await cp.call('DELETE', `tenants/${tenantId}`), 200, 'DeleteTenant');
 
     // Leave the fleet empty so teardown has nothing to drain.
     const cell = await cp.call('DELETE', `cells/${cellId}`);
@@ -310,8 +350,11 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
       const c = await cp.call('GET', `cells/${cellId}`);
       return c.status === 404 ? true : undefined;
     });
-    // The cell delete released the account's cell slot; deregister it too.
+    // The cell delete released the account's and the application's cell
+    // slots; deregister both.
     const account = await cp.call('DELETE', `accounts/${homeAccountId}`);
     expectStatus(account, 200, 'DeleteAccount (home account)');
+    const application = await cp.call('DELETE', `applications/${APPLICATION_ID}`);
+    expectStatus(application, 200, 'DeleteApplication');
   });
 });

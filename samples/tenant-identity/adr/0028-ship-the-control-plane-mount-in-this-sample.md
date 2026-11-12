@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-26
+- Amended by: [ADR-0038](0038-the-mount-follows-the-control-planes-deployment-model.md)
 - Deciders: Dave Roberts (SA)
 
 ## Context

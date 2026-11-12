@@ -86,9 +86,15 @@ the `control-plane` sample runs in its tenant and cell CodeBuild projects
 readable by anyone with log-group access:
 
 - **Inputs are environment variables, guarded.** `TENANT_ID`, `TENANT_NAME`,
-  `CELL_ID`, `OPERATION`, `ADMIN_EMAIL` (create only), `OPERATOR_ID` and
-  `AWS_REGION` (spec §6.1), each behind a `: "${VAR:?...}"` guard, before
-  `lib.sh` is sourced.
+  `APPLICATION_ID`, `CELL_ID`, `OPERATION`, `ADMIN_EMAIL` (create only),
+  `OPERATOR_ID` and `AWS_REGION` (spec §6.1), each behind a
+  `: "${VAR:?...}"` guard, before `lib.sh` is sourced. Every script's header
+  lists the variables it runs with, `APPLICATION_ID` included where the
+  script does not use it.
+- **Ids spliced into a path are checked first.** `lib.sh` refuses a
+  `TENANT_ID` that is not a ULID and an `APPLICATION_ID` outside
+  `[a-z0-9-]{1,32}` before any call, because both become segments of a URL
+  path or a parameter name; the message names the variable, never the value.
 - **Log the operator beside the tenant id** (`OPERATOR_ID`, spec §3.3), so a
   platform-API access-log line, which shows only the build role, can be joined
   to the operator through the build log.

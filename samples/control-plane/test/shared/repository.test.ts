@@ -16,13 +16,16 @@ import { DataModel, DynamoDBItem } from '../../src/shared/data-model';
 import {
   AccountFullError,
   AmbiguousTransactionError,
+  ApplicationGoneError,
   ConditionFailedError,
+  DeploymentExistsError,
   DuplicateTokenError,
   DynamoDBRepository,
   PlacementRaceLostError,
   PlacementTransactions,
   RecordGoneError,
   StaleTransitionError,
+  TenantGoneError,
 } from '../../src/shared/repository';
 import { ValidationException } from '../../src/smithy/source/typescript-ssdk-codegen/src';
 
@@ -342,278 +345,461 @@ describe('DynamoDBRepository.transitionStatus', () => {
   });
 });
 
+describe('DynamoDBRepository.queryIndex sortKeyPrefix (§4.7: one GSI-3 partition, two item types)', () => {
+  test('adds begins_with on the index sort key named after the partition key', async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    await repo.queryIndex(
+      {
+        indexName: 'GSI3',
+        partitionKey: { name: 'GSI3PK', value: 'APPLICATION#app-x' },
+        sortKeyPrefix: 'CELL#',
+      },
+      25,
+    );
+    expect(ddbMock.commandCalls(QueryCommand)[0].args[0].input).toMatchObject({
+      IndexName: 'GSI3',
+      KeyConditionExpression: '#pk = :pk AND begins_with(#sk, :skPrefix)',
+      ExpressionAttributeNames: { '#pk': 'GSI3PK', '#sk': 'GSI3SK' },
+      ExpressionAttributeValues: { ':pk': 'APPLICATION#app-x', ':skPrefix': 'CELL#' },
+      Limit: 25,
+    });
+  });
+
+  test('without a prefix the query carries no sort-key condition', async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    await repo.queryIndex({ indexName: 'GSI2', partitionKey: { name: 'GSI2PK', value: 'TENANT' } });
+    const input = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    expect(input.KeyConditionExpression).toBe('#pk = :pk');
+    expect(input.ExpressionAttributeNames).toEqual({ '#pk': 'GSI2PK' });
+  });
+});
+
+describe('DynamoDBRepository.queryPartition (§4.7: a tenant\'s deployments, base table)', () => {
+  test('queries the base table partition with a sort-key prefix and no index', async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{ PK: 'TEST#1', SK: 'META', id: '1', name: 'a' }],
+      LastEvaluatedKey: { PK: 'TENANT#t1', SK: 'DEPLOYMENT#app-x' },
+    });
+    const page = await repo.queryPartition(
+      { partitionKey: 'TENANT#t1', sortKeyPrefix: 'DEPLOYMENT#' },
+      5,
+    );
+    expect(page.items).toEqual([{ id: '1', name: 'a' }]);
+    expect(page.nextToken).toBeDefined();
+    const input = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    expect(input.IndexName).toBeUndefined();
+    expect(input).toMatchObject({
+      TableName: 'test-table',
+      KeyConditionExpression: '#pk = :pk AND begins_with(#sk, :skPrefix)',
+      ExpressionAttributeNames: { '#pk': 'PK', '#sk': 'SK' },
+      ExpressionAttributeValues: { ':pk': 'TENANT#t1', ':skPrefix': 'DEPLOYMENT#' },
+      Limit: 5,
+    });
+  });
+
+  test('a malformed nextToken is the modelled 400 here too', async () => {
+    await expect(
+      repo.queryPartition({ partitionKey: 'TENANT#t1', sortKeyPrefix: 'DEPLOYMENT#' }, 5, '%%%'),
+    ).rejects.toBeInstanceOf(ValidationException);
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+  });
+});
+
 describe('PlacementTransactions', () => {
   const cellDataModel: DataModel<{ cellId: string }, DynamoDBItem & { cellId: string }> = {
     toItem: (c) => ({ PK: `CELL#${c.cellId}`, SK: 'META', cellId: c.cellId }),
     fromItem: (i) => ({ cellId: i.cellId }),
   };
-  const tenantDataModel: DataModel<TestSchema, TestItem> = {
-    toItem: (t) => ({ PK: `TENANT#${t.id}`, SK: 'META', id: t.id, name: t.name }),
-    fromItem: (i) => ({ id: i.id, name: i.name }),
+  interface TestDeployment {
+    tenantId: string;
+    applicationId: string;
+  }
+  const deploymentDataModel: DataModel<TestDeployment, DynamoDBItem & TestDeployment> = {
+    toItem: (d) => ({
+      PK: `TENANT#${d.tenantId}`,
+      SK: `DEPLOYMENT#${d.applicationId}`,
+      tenantId: d.tenantId,
+      applicationId: d.applicationId,
+    }),
+    fromItem: (i) => ({ tenantId: i.tenantId, applicationId: i.applicationId }),
   };
   const transactions = new PlacementTransactions(
     'test-table',
     cellDataModel,
-    tenantDataModel,
+    deploymentDataModel,
     client,
   );
 
+  const deployment = { tenantId: 't1', applicationId: 'app-x' };
+  const deploymentItem = {
+    PK: 'TENANT#t1',
+    SK: 'DEPLOYMENT#app-x',
+    tenantId: 't1',
+    applicationId: 'app-x',
+  };
+
+  /** The §7.1 step-2 inputs shared by the claim tests. */
   const placement = {
     cellKey: { PK: 'CELL#c1', SK: 'META' },
-    tenant: { id: 't1', name: 'acme' },
+    tenantKey: { PK: 'TENANT#t1', SK: 'META' },
+    deployment,
     updatedAt: '2026-09-07T00:00:00.000Z',
     clientRequestToken: 'token-t1',
   };
 
-  test('placeTenantInCell sends the §6 step-2 transaction shape', async () => {
-    ddbMock.on(TransactWriteCommand).resolves({});
-    await transactions.placeTenantInCell(placement);
+  /** The §7.1 step-3 inputs shared by the new-cell tests. */
+  const newCell = {
+    accountKey: { PK: 'ACCOUNT#111111111111', SK: 'META' },
+    applicationKey: { PK: 'APPLICATION#app-x', SK: 'META' },
+    cell: { cellId: 'c-new' },
+    tenantKey: { PK: 'TENANT#t1', SK: 'META' },
+    deployment,
+    updatedAt: '2026-11-09T00:00:00.000Z',
+    clientRequestToken: 'token-t1',
+  };
 
-    const input = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
-    expect(input.ClientRequestToken).toBe('token-t1');
-    expect(input.TransactItems).toHaveLength(2);
+  const idempotencyItem = {
+    PK: 'IDEMPOTENCY#tok-1',
+    SK: 'META',
+    clientToken: 'tok-1',
+    tenantId: 't1',
+    applicationId: 'app-x',
+    requestHash: 'abc',
+    createdAt: '2026-09-07T00:00:00.000Z',
+    expiresAt: 1757203200,
+  };
 
-    const cellUpdate = input.TransactItems![0].Update!;
-    expect(cellUpdate.Key).toEqual({ PK: 'CELL#c1', SK: 'META' });
-    expect(cellUpdate.UpdateExpression).toBe(
-      'SET #tenantCount = #tenantCount + :one, #updatedAt = :updatedAt',
+  /** The tenant deploymentCount claim — the same shape in both paths (ADR-037). */
+  function expectTenantClaim(update: any, updatedAt: string): void {
+    expect(update.Key).toEqual({ PK: 'TENANT#t1', SK: 'META' });
+    expect(update.UpdateExpression).toBe(
+      'SET #deploymentCount = #deploymentCount + :one, #updatedAt = :updatedAt',
     );
-    expect(cellUpdate.ConditionExpression).toBe('#status = :active AND #tenantCount < #maxTenants');
-    expect(cellUpdate.ExpressionAttributeValues).toMatchObject({ ':one': 1, ':active': 'ACTIVE' });
+    expect(update.ConditionExpression).toBe('attribute_exists(PK)');
+    expect(update.ExpressionAttributeValues).toEqual({ ':one': 1, ':updatedAt': updatedAt });
+  }
 
-    const tenantPut = input.TransactItems![1].Put!;
-    expect(tenantPut.ConditionExpression).toBe('attribute_not_exists(PK)');
-    expect(tenantPut.Item).toEqual({ PK: 'TENANT#t1', SK: 'META', id: 't1', name: 'acme' });
-  });
-
-  test('classifies a cell status/capacity cancellation as a lost race', async () => {
-    ddbMock.on(TransactWriteCommand).rejects(transactionCanceled(['ConditionalCheckFailed', 'None']));
-    await expect(transactions.placeTenantInCell(placement)).rejects.toBeInstanceOf(
-      PlacementRaceLostError,
-    );
-  });
-
-  test('a lost race with an undefined tenant reason code is still a lost race', async () => {
-    ddbMock.on(TransactWriteCommand).rejects(transactionCanceled(['ConditionalCheckFailed', undefined]));
-    await expect(transactions.placeTenantInCell(placement)).rejects.toBeInstanceOf(
-      PlacementRaceLostError,
-    );
-  });
-
-  test('a failed tenant Put condition is ambiguous — never retarget', async () => {
-    ddbMock.on(TransactWriteCommand).rejects(transactionCanceled(['None', 'ConditionalCheckFailed']));
-    await expect(transactions.placeTenantInCell(placement)).rejects.toBeInstanceOf(
-      AmbiguousTransactionError,
-    );
-  });
-
-  test('both conditions failing is ambiguous — never retarget', async () => {
-    ddbMock
-      .on(TransactWriteCommand)
-      .rejects(transactionCanceled(['ConditionalCheckFailed', 'ConditionalCheckFailed']));
-    await expect(transactions.placeTenantInCell(placement)).rejects.toBeInstanceOf(
-      AmbiguousTransactionError,
-    );
-  });
-
-  test('non-cancellation transaction errors are ambiguous — never retarget', async () => {
-    ddbMock.on(TransactWriteCommand).rejects(new Error('network sadness'));
-    await expect(transactions.placeTenantInCell(placement)).rejects.toBeInstanceOf(
-      AmbiguousTransactionError,
-    );
-  });
-
-  describe('CreateTenant idempotency (ADR-017)', () => {
-    const idempotencyItem = {
-      PK: 'IDEMPOTENCY#tok-1',
-      SK: 'META',
-      clientToken: 'tok-1',
-      tenantId: 't1',
-      requestHash: 'abc',
-      createdAt: '2026-09-07T00:00:00.000Z',
-      expiresAt: 1757203200,
-    };
-
-    test('the idempotency item joins placeTenantInCell as a third conditional Put', async () => {
+  describe('placeDeploymentInCell (§7.1 step 2)', () => {
+    test('sends cell claim, tenant count claim and deployment insert, in that order', async () => {
       ddbMock.on(TransactWriteCommand).resolves({});
-      await transactions.placeTenantInCell({ ...placement, idempotencyItem });
+      await transactions.placeDeploymentInCell(placement);
 
       const input = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
+      expect(input.ClientRequestToken).toBe('token-t1');
       expect(input.TransactItems).toHaveLength(3);
-      const idempotencyPut = input.TransactItems![2].Put!;
-      expect(idempotencyPut.Item).toEqual(idempotencyItem);
-      expect(idempotencyPut.ConditionExpression).toBe('attribute_not_exists(PK)');
+
+      const cellUpdate = input.TransactItems![0].Update!;
+      expect(cellUpdate.Key).toEqual({ PK: 'CELL#c1', SK: 'META' });
+      expect(cellUpdate.UpdateExpression).toBe(
+        'SET #tenantCount = #tenantCount + :one, #updatedAt = :updatedAt',
+      );
+      expect(cellUpdate.ConditionExpression).toBe('#status = :active AND #tenantCount < #maxTenants');
+      expect(cellUpdate.ExpressionAttributeValues).toMatchObject({ ':one': 1, ':active': 'ACTIVE' });
+
+      expectTenantClaim(input.TransactItems![1].Update!, '2026-09-07T00:00:00.000Z');
+
+      const deploymentPut = input.TransactItems![2].Put!;
+      expect(deploymentPut.ConditionExpression).toBe('attribute_not_exists(PK)');
+      expect(deploymentPut.Item).toEqual(deploymentItem);
+    });
+
+    test('a cell status/capacity cancellation alone is a lost race (next candidate)', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['ConditionalCheckFailed', 'None', 'None']));
+      await expect(transactions.placeDeploymentInCell(placement)).rejects.toBeInstanceOf(
+        PlacementRaceLostError,
+      );
+    });
+
+    test('a lost race with undefined reason codes on the other items is still a lost race', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['ConditionalCheckFailed', undefined, undefined]));
+      await expect(transactions.placeDeploymentInCell(placement)).rejects.toBeInstanceOf(
+        PlacementRaceLostError,
+      );
+    });
+
+    test('a failed deployment insert is DeploymentExistsError (→ 409), even beside a lost race', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['None', 'None', 'ConditionalCheckFailed']));
+      await expect(transactions.placeDeploymentInCell(placement)).rejects.toBeInstanceOf(
+        DeploymentExistsError,
+      );
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['ConditionalCheckFailed', 'None', 'ConditionalCheckFailed']));
+      await expect(transactions.placeDeploymentInCell(placement)).rejects.toBeInstanceOf(
+        DeploymentExistsError,
+      );
+    });
+
+    test('a failed tenant existence claim is TenantGoneError (→ 404)', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['None', 'ConditionalCheckFailed', 'None']));
+      await expect(transactions.placeDeploymentInCell(placement)).rejects.toBeInstanceOf(
+        TenantGoneError,
+      );
+    });
+
+    test('a cancellation with no failed condition is ambiguous — never retarget', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['None', 'TransactionConflict', 'None']));
+      await expect(transactions.placeDeploymentInCell(placement)).rejects.toBeInstanceOf(
+        AmbiguousTransactionError,
+      );
+    });
+
+    test('non-cancellation transaction errors are ambiguous — never retarget', async () => {
+      ddbMock.on(TransactWriteCommand).rejects(new Error('network sadness'));
+      await expect(transactions.placeDeploymentInCell(placement)).rejects.toBeInstanceOf(
+        AmbiguousTransactionError,
+      );
+    });
+  });
+
+  describe('createCellWithDeployment (§7.1 step 3, ADR-024, ADR-032, ADR-037)', () => {
+    test('sends account claim, application count, cell insert, tenant count, deployment insert', async () => {
+      ddbMock.on(TransactWriteCommand).resolves({});
+      await transactions.createCellWithDeployment(newCell);
+
+      const input = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
+      expect(input.ClientRequestToken).toBe('token-t1');
+      expect(input.TransactItems).toHaveLength(5);
+
+      const accountClaim = input.TransactItems![0].Update!;
+      expect(accountClaim.Key).toEqual({ PK: 'ACCOUNT#111111111111', SK: 'META' });
+      expect(accountClaim.UpdateExpression).toBe(
+        'SET #cellCount = #cellCount + :one, #updatedAt = :updatedAt',
+      );
+      expect(accountClaim.ConditionExpression).toBe('attribute_exists(PK) AND #cellCount < #maxCells');
+      expect(accountClaim.ExpressionAttributeNames).toEqual({
+        '#cellCount': 'cellCount',
+        '#maxCells': 'maxCells',
+        '#updatedAt': 'updatedAt',
+      });
+      expect(accountClaim.ExpressionAttributeValues).toEqual({
+        ':one': 1,
+        ':updatedAt': '2026-11-09T00:00:00.000Z',
+      });
+
+      // The application counter has no cap — only existence (§7.1)
+      const applicationClaim = input.TransactItems![1].Update!;
+      expect(applicationClaim.Key).toEqual({ PK: 'APPLICATION#app-x', SK: 'META' });
+      expect(applicationClaim.UpdateExpression).toBe(
+        'SET #cellCount = #cellCount + :one, #updatedAt = :updatedAt',
+      );
+      expect(applicationClaim.ConditionExpression).toBe('attribute_exists(PK)');
+      expect(applicationClaim.ExpressionAttributeNames).toEqual({
+        '#cellCount': 'cellCount',
+        '#updatedAt': 'updatedAt',
+      });
+
+      const cellPut = input.TransactItems![2].Put!;
+      expect(cellPut.Item).toEqual({ PK: 'CELL#c-new', SK: 'META', cellId: 'c-new' });
+      expect(cellPut.ConditionExpression).toBe('attribute_not_exists(PK)');
+
+      expectTenantClaim(input.TransactItems![3].Update!, '2026-11-09T00:00:00.000Z');
+
+      const deploymentPut = input.TransactItems![4].Put!;
+      expect(deploymentPut.Item).toEqual(deploymentItem);
+      expect(deploymentPut.ConditionExpression).toBe('attribute_not_exists(PK)');
+    });
+
+    test('a failed account condition alone is AccountFullError (try the next account)', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['ConditionalCheckFailed', 'None', 'None', 'None', 'None']));
+      await expect(transactions.createCellWithDeployment(newCell)).rejects.toBeInstanceOf(
+        AccountFullError,
+      );
+    });
+
+    test('a failed application existence claim is ApplicationGoneError (→ 404)', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['None', 'ConditionalCheckFailed', 'None', 'None', 'None']));
+      await expect(transactions.createCellWithDeployment(newCell)).rejects.toBeInstanceOf(
+        ApplicationGoneError,
+      );
+    });
+
+    test('a failed tenant existence claim is TenantGoneError (→ 404)', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['None', 'None', 'None', 'ConditionalCheckFailed', 'None']));
+      await expect(transactions.createCellWithDeployment(newCell)).rejects.toBeInstanceOf(
+        TenantGoneError,
+      );
+    });
+
+    test('a failed deployment insert is DeploymentExistsError and wins over a full account', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(
+          transactionCanceled(['ConditionalCheckFailed', 'None', 'None', 'None', 'ConditionalCheckFailed']),
+        );
+      await expect(transactions.createCellWithDeployment(newCell)).rejects.toBeInstanceOf(
+        DeploymentExistsError,
+      );
+    });
+
+    test('a failed cell insert is ambiguous, never a full account', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(
+          transactionCanceled(['ConditionalCheckFailed', 'None', 'ConditionalCheckFailed', 'None', 'None']),
+        );
+      await expect(transactions.createCellWithDeployment(newCell)).rejects.toBeInstanceOf(
+        AmbiguousTransactionError,
+      );
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['None', 'None', 'ConditionalCheckFailed', 'None', 'None']));
+      await expect(transactions.createCellWithDeployment(newCell)).rejects.toBeInstanceOf(
+        AmbiguousTransactionError,
+      );
+    });
+
+    test('a non-cancellation failure is ambiguous', async () => {
+      ddbMock.on(TransactWriteCommand).rejects(new Error('throttled'));
+      await expect(transactions.createCellWithDeployment(newCell)).rejects.toBeInstanceOf(
+        AmbiguousTransactionError,
+      );
+    });
+  });
+
+  describe('CreateDeployment idempotency (ADR-017, §7.3)', () => {
+    test('the idempotency item joins placeDeploymentInCell as the LAST conditional Put', async () => {
+      ddbMock.on(TransactWriteCommand).resolves({});
+      await transactions.placeDeploymentInCell({ ...placement, idempotencyItem });
+
+      const input = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
+      expect(input.TransactItems).toHaveLength(4);
+      const put = input.TransactItems![3].Put!;
+      expect(put.Item).toEqual(idempotencyItem);
+      expect(put.ConditionExpression).toBe('attribute_not_exists(PK)');
     });
 
     test('a failed idempotency condition classifies as DuplicateTokenError', async () => {
       ddbMock
         .on(TransactWriteCommand)
-        .rejects(transactionCanceled(['None', 'None', 'ConditionalCheckFailed']));
+        .rejects(transactionCanceled(['None', 'None', 'None', 'ConditionalCheckFailed']));
       await expect(
-        transactions.placeTenantInCell({ ...placement, idempotencyItem }),
+        transactions.placeDeploymentInCell({ ...placement, idempotencyItem }),
       ).rejects.toBeInstanceOf(DuplicateTokenError);
     });
 
-    test('a duplicate token wins over a simultaneous lost race', async () => {
+    test('a duplicate token wins over every other failure', async () => {
       ddbMock
         .on(TransactWriteCommand)
-        .rejects(transactionCanceled(['ConditionalCheckFailed', 'None', 'ConditionalCheckFailed']));
+        .rejects(
+          transactionCanceled([
+            'ConditionalCheckFailed',
+            'ConditionalCheckFailed',
+            'ConditionalCheckFailed',
+            'ConditionalCheckFailed',
+          ]),
+        );
       await expect(
-        transactions.placeTenantInCell({ ...placement, idempotencyItem }),
+        transactions.placeDeploymentInCell({ ...placement, idempotencyItem }),
       ).rejects.toBeInstanceOf(DuplicateTokenError);
     });
 
     test('a lost race with a clean idempotency condition is still a lost race', async () => {
       ddbMock
         .on(TransactWriteCommand)
-        .rejects(transactionCanceled(['ConditionalCheckFailed', 'None', 'None']));
+        .rejects(transactionCanceled(['ConditionalCheckFailed', 'None', 'None', 'None']));
       await expect(
-        transactions.placeTenantInCell({ ...placement, idempotencyItem }),
+        transactions.placeDeploymentInCell({ ...placement, idempotencyItem }),
       ).rejects.toBeInstanceOf(PlacementRaceLostError);
     });
 
-    test('without an idempotency item a failed LAST condition is the tenant Put — ambiguous, never a replay', async () => {
+    test('without an idempotency item a failed LAST condition is the deployment insert — never a replay', async () => {
       ddbMock
         .on(TransactWriteCommand)
-        .rejects(transactionCanceled(['None', 'ConditionalCheckFailed']));
-      await expect(transactions.placeTenantInCell(placement)).rejects.toBeInstanceOf(
+        .rejects(transactionCanceled(['None', 'None', 'ConditionalCheckFailed']));
+      await expect(transactions.placeDeploymentInCell(placement)).rejects.toBeInstanceOf(
+        DeploymentExistsError,
+      );
+    });
+
+    test('the idempotency item joins createCellWithDeployment as the LAST conditional Put', async () => {
+      ddbMock.on(TransactWriteCommand).resolves({});
+      await transactions.createCellWithDeployment({ ...newCell, idempotencyItem });
+
+      const input = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
+      expect(input.TransactItems).toHaveLength(6);
+      expect(input.TransactItems![5].Put!.Item).toEqual(idempotencyItem);
+      expect(input.TransactItems![5].Put!.ConditionExpression).toBe('attribute_not_exists(PK)');
+    });
+
+    test('createCellWithDeployment: a duplicate token wins over a simultaneous full account', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(
+          transactionCanceled(['ConditionalCheckFailed', 'None', 'None', 'None', 'None', 'ConditionalCheckFailed']),
+        );
+      await expect(
+        transactions.createCellWithDeployment({ ...newCell, idempotencyItem }),
+      ).rejects.toBeInstanceOf(DuplicateTokenError);
+    });
+
+    test('createCellWithDeployment: a full account with a clean token is still AccountFullError', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['ConditionalCheckFailed', 'None', 'None', 'None', 'None', 'None']));
+      await expect(
+        transactions.createCellWithDeployment({ ...newCell, idempotencyItem }),
+      ).rejects.toBeInstanceOf(AccountFullError);
+    });
+  });
+
+  describe('failCreatingCellAndDeployment (§7.4 R-19)', () => {
+    const compensation = {
+      cellKey: { PK: 'CELL#c-new', SK: 'META' },
+      deploymentKey: { PK: 'TENANT#t1', SK: 'DEPLOYMENT#app-x' },
+      statusReason: 'StartExecution rejected',
+      updatedAt: '2026-09-07T00:00:00.000Z',
+    };
+
+    test('sends the paired CREATING→CREATE_FAILED compensation, cell first', async () => {
+      ddbMock.on(TransactWriteCommand).resolves({});
+      await transactions.failCreatingCellAndDeployment(compensation);
+
+      const input = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
+      expect(input.TransactItems).toHaveLength(2);
+      for (const [index, key] of [compensation.cellKey, compensation.deploymentKey].entries()) {
+        const update = input.TransactItems![index].Update!;
+        expect(update.Key).toEqual(key);
+        expect(update.ConditionExpression).toBe('#status = :creating');
+        expect(update.UpdateExpression).toBe(
+          'SET #status = :failed, #statusReason = :reason, #updatedAt = :updatedAt',
+        );
+        expect(update.ExpressionAttributeValues).toMatchObject({
+          ':failed': 'CREATE_FAILED',
+          ':creating': 'CREATING',
+          ':reason': 'StartExecution rejected',
+        });
+      }
+    });
+
+    test('maps a condition failure to StaleTransitionError', async () => {
+      ddbMock.on(TransactWriteCommand).rejects(transactionCanceled(['None', 'ConditionalCheckFailed']));
+      await expect(transactions.failCreatingCellAndDeployment(compensation)).rejects.toBeInstanceOf(
+        StaleTransitionError,
+      );
+    });
+
+    test('maps other failures to AmbiguousTransactionError', async () => {
+      ddbMock.on(TransactWriteCommand).rejects(new Error('throttled'));
+      await expect(transactions.failCreatingCellAndDeployment(compensation)).rejects.toBeInstanceOf(
         AmbiguousTransactionError,
       );
     });
-
-    test('the idempotency item joins createCellWithTenant as the LAST conditional Put', async () => {
-      ddbMock.on(TransactWriteCommand).resolves({});
-      await transactions.createCellWithTenant({ ...newCell, idempotencyItem });
-
-      const input = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
-      expect(input.TransactItems).toHaveLength(4);
-      expect(input.TransactItems![3].Put!.Item).toEqual(idempotencyItem);
-      expect(input.TransactItems![3].Put!.ConditionExpression).toBe('attribute_not_exists(PK)');
-    });
-
-    test('createCellWithTenant classifies a failed idempotency condition as DuplicateTokenError', async () => {
-      ddbMock
-        .on(TransactWriteCommand)
-        .rejects(transactionCanceled(['None', 'None', 'None', 'ConditionalCheckFailed']));
-      await expect(
-        transactions.createCellWithTenant({ ...newCell, idempotencyItem }),
-      ).rejects.toBeInstanceOf(DuplicateTokenError);
-    });
-
-    test('a duplicate token wins over a simultaneous full account', async () => {
-      ddbMock
-        .on(TransactWriteCommand)
-        .rejects(transactionCanceled(['ConditionalCheckFailed', 'None', 'None', 'ConditionalCheckFailed']));
-      await expect(
-        transactions.createCellWithTenant({ ...newCell, idempotencyItem }),
-      ).rejects.toBeInstanceOf(DuplicateTokenError);
-    });
-
-    test('createCellWithTenant with a clean idempotency condition and a failed cell Put stays ambiguous', async () => {
-      ddbMock
-        .on(TransactWriteCommand)
-        .rejects(transactionCanceled(['None', 'ConditionalCheckFailed', 'None', 'None']));
-      await expect(
-        transactions.createCellWithTenant({ ...newCell, idempotencyItem }),
-      ).rejects.toBeInstanceOf(AmbiguousTransactionError);
-    });
-  });
-
-  /** The §7 step-3 inputs shared by the new-cell tests. */
-  const newCell = {
-    accountKey: { PK: 'ACCOUNT#111111111111', SK: 'META' },
-    cell: { cellId: 'c-new' },
-    tenant: { id: 't1', name: 'acme' },
-    updatedAt: '2026-11-09T00:00:00.000Z',
-    clientRequestToken: 'token-t1',
-  };
-
-  test('createCellWithTenant sends the §7 step-3 transaction shape: account claim first, then cell and tenant Puts (ADR-024)', async () => {
-    ddbMock.on(TransactWriteCommand).resolves({});
-    await transactions.createCellWithTenant(newCell);
-
-    const input = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
-    expect(input.ClientRequestToken).toBe('token-t1');
-    expect(input.TransactItems).toHaveLength(3);
-    const accountClaim = input.TransactItems![0].Update!;
-    expect(accountClaim.Key).toEqual({ PK: 'ACCOUNT#111111111111', SK: 'META' });
-    expect(accountClaim.UpdateExpression).toBe('SET #cellCount = #cellCount + :one, #updatedAt = :updatedAt');
-    expect(accountClaim.ConditionExpression).toBe('attribute_exists(PK) AND #cellCount < #maxCells');
-    expect(accountClaim.ExpressionAttributeValues).toEqual({ ':one': 1, ':updatedAt': '2026-11-09T00:00:00.000Z' });
-    const [cellPut, tenantPut] = input.TransactItems!.slice(1).map((item) => item.Put!);
-    expect(cellPut.Item).toEqual({ PK: 'CELL#c-new', SK: 'META', cellId: 'c-new' });
-    expect(cellPut.ConditionExpression).toBe('attribute_not_exists(PK)');
-    expect(tenantPut.Item).toEqual({ PK: 'TENANT#t1', SK: 'META', id: 't1', name: 'acme' });
-    expect(tenantPut.ConditionExpression).toBe('attribute_not_exists(PK)');
-  });
-
-  test('createCellWithTenant: a failed account condition alone is AccountFullError (try the next account)', async () => {
-    ddbMock.on(TransactWriteCommand).rejects(transactionCanceled(['ConditionalCheckFailed', 'None', 'None']));
-    await expect(transactions.createCellWithTenant(newCell)).rejects.toBeInstanceOf(AccountFullError);
-  });
-
-  test('createCellWithTenant: a failed cell or tenant Put is ambiguous, never a full account', async () => {
-    ddbMock.on(TransactWriteCommand).rejects(transactionCanceled(['ConditionalCheckFailed', 'ConditionalCheckFailed', 'None']));
-    await expect(transactions.createCellWithTenant(newCell)).rejects.toBeInstanceOf(AmbiguousTransactionError);
-    ddbMock.on(TransactWriteCommand).rejects(transactionCanceled(['None', 'None', 'ConditionalCheckFailed']));
-    await expect(transactions.createCellWithTenant(newCell)).rejects.toBeInstanceOf(AmbiguousTransactionError);
-  });
-
-  test('createCellWithTenant: a non-cancellation failure is ambiguous', async () => {
-    ddbMock.on(TransactWriteCommand).rejects(new Error('throttled'));
-    await expect(transactions.createCellWithTenant(newCell)).rejects.toBeInstanceOf(AmbiguousTransactionError);
-  });
-
-  test('failCreatingCellAndTenant sends the paired CREATING→CREATE_FAILED compensation', async () => {
-    ddbMock.on(TransactWriteCommand).resolves({});
-    await transactions.failCreatingCellAndTenant({
-      cellKey: { PK: 'CELL#c-new', SK: 'META' },
-      tenantKey: { PK: 'TENANT#t1', SK: 'META' },
-      statusReason: 'StartExecution rejected',
-      updatedAt: '2026-09-07T00:00:00.000Z',
-    });
-
-    const input = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input;
-    expect(input.TransactItems).toHaveLength(2);
-    for (const [index, key] of [
-      { PK: 'CELL#c-new', SK: 'META' },
-      { PK: 'TENANT#t1', SK: 'META' },
-    ].entries()) {
-      const update = input.TransactItems![index].Update!;
-      expect(update.Key).toEqual(key);
-      expect(update.ConditionExpression).toBe('#status = :creating');
-      expect(update.UpdateExpression).toBe(
-        'SET #status = :failed, #statusReason = :reason, #updatedAt = :updatedAt',
-      );
-      expect(update.ExpressionAttributeValues).toMatchObject({
-        ':failed': 'CREATE_FAILED',
-        ':creating': 'CREATING',
-        ':reason': 'StartExecution rejected',
-      });
-    }
-  });
-
-  test('failCreatingCellAndTenant maps a condition failure to StaleTransitionError', async () => {
-    ddbMock.on(TransactWriteCommand).rejects(transactionCanceled(['None', 'ConditionalCheckFailed']));
-    await expect(
-      transactions.failCreatingCellAndTenant({
-        cellKey: { PK: 'CELL#c-new', SK: 'META' },
-        tenantKey: { PK: 'TENANT#t1', SK: 'META' },
-        statusReason: 'StartExecution rejected',
-        updatedAt: '2026-09-07T00:00:00.000Z',
-      }),
-    ).rejects.toBeInstanceOf(StaleTransitionError);
-  });
-
-  test('failCreatingCellAndTenant maps other failures to AmbiguousTransactionError', async () => {
-    ddbMock.on(TransactWriteCommand).rejects(new Error('throttled'));
-    await expect(
-      transactions.failCreatingCellAndTenant({
-        cellKey: { PK: 'CELL#c-new', SK: 'META' },
-        tenantKey: { PK: 'TENANT#t1', SK: 'META' },
-        statusReason: 'StartExecution rejected',
-        updatedAt: '2026-09-07T00:00:00.000Z',
-      }),
-    ).rejects.toBeInstanceOf(AmbiguousTransactionError);
   });
 });

@@ -11,9 +11,13 @@
 # 1. Deploys test/integ.control-plane.ts (TenantIdentity-shared-pool and the
 #    setup stack: throwaway vendor IdP + script bucket) at once.
 # 2. Deploys control-plane through its own deploy path (`npx cdk deploy` in
-#    ../control-plane) with the §3.4 context, read from the published
-#    parameters and the setup stack outputs. No control-plane code is imported.
-# 3. Runs the §10 scenario (test/e2e/control-plane).
+#    ../control-plane) with the §3.4 stack context (vendor IdP and the
+#    published PlatformInvokePolicy ARN). No control-plane code is imported.
+# 3. Runs the §10 scenario (test/e2e/control-plane). The scenario registers
+#    the mount as the control plane's `identity-mount` application
+#    (PutApplication, §3.4), with the setup stack's ScriptSourceLocation
+#    handed over in E2E_CP_SCRIPT_SOURCE, then drives the tenant and its
+#    deployment through the control-plane API.
 # 4. Always destroys, also on failure: control-plane first, then both
 #    tenant-identity stacks; then checks nothing is left.
 #
@@ -58,21 +62,16 @@ output() {
     --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" --output text
 }
 
-# The §3.4 deployment inputs for control-plane.
+# The §3.4 stack inputs for control-plane. The application (source, scripts,
+# maxTenants) is not a stack input: the scenario registers it through the API.
 control_plane_context() {
-  local issuer audience source policy
+  local issuer audience policy
   issuer="$(output "$SETUP_STACK" VendorIdpIssuerUrl)" || return 1
   audience="$(output "$SETUP_STACK" VendorIdpAudience)" || return 1
-  source="$(output "$SETUP_STACK" ScriptSourceLocation)" || return 1
   policy="$(aws ssm get-parameter --name "$IDENTITY_NS/platformInvokePolicyArn" --query Parameter.Value --output text)" || return 1
   CP_CONTEXT=(
     --context "vendorIdpIssuerUrl=$issuer"
     --context "vendorIdpAudience=$audience"
-    --context "cellDefinition=$(jq -nc --arg loc "$source" '{
-      source: {type: "S3", location: $loc},
-      cellScripts: {create: "control-plane/cell/create.sh", update: "control-plane/cell/update.sh", delete: "control-plane/cell/delete.sh"},
-      tenantScripts: {create: "control-plane/tenant/create.sh", update: "control-plane/tenant/update.sh", delete: "control-plane/tenant/delete.sh"},
-      maxTenants: 2}')"
     --context "tenantBuildManagedPolicyArns=$(jq -nc --arg p "$policy" '[$p]')"
   )
 }
@@ -130,6 +129,10 @@ destroy() {
   capture_resources pools AWS::Cognito::UserPool "$CP_STACK" "$SETUP_STACK" TenantIdentity-shared-pool
   capture_resources apis AWS::ApiGateway::RestApi "$CP_STACK" "$SETUP_STACK" TenantIdentity-shared-pool
 
+  # The control-plane records a failed scenario leaves behind (application,
+  # tenant, deployment, cell, account) go with its table when its stack is
+  # destroyed. The mount's cells provision nothing, and a deployment's only
+  # state outside the two stacks is its parked password, handled below.
   echo "=== destroy ($(date -u +%H:%M:%S) UTC)"
   if aws cloudformation describe-stacks --stack-name "$CP_STACK" >/dev/null 2>&1; then
     if [ "${#CP_CONTEXT[@]}" -eq 0 ] && ! control_plane_context; then
@@ -155,9 +158,10 @@ destroy() {
     fi
   done
 
-  # Parameters. A leftover parked password (/application-plane/tenants/*) is
-  # a SecureString holding a temporary password: delete it, but the run still
-  # fails, because a clean teardown would not have left it.
+  # Parameters. A leftover parked password
+  # (/application-plane/tenants/<tenantId>/<applicationId>/admin-temporary-password)
+  # is a SecureString holding a temporary password: delete it, but the run
+  # still fails, because a clean teardown would not have left it.
   for ns in /application-plane /control-plane; do
     params="$(aws ssm get-parameters-by-path --path "$ns" --recursive --query 'Parameters[].Name' --output text 2>/dev/null | tr '\t' '\n' | sed '/^$/d' || true)"
     if [ -n "$params" ] && [ "$params" != "None" ]; then
@@ -262,4 +266,6 @@ control_plane_context
 (cd "$CP_DIR" && npx cdk deploy "$CP_STACK" --require-approval never --progress events "${CP_CONTEXT[@]}")
 
 echo "=== scenario ($(date -u +%H:%M:%S) UTC)"
+E2E_CP_SCRIPT_SOURCE="$(output "$SETUP_STACK" ScriptSourceLocation)"
+export E2E_CP_SCRIPT_SOURCE
 npx jest --config test/e2e/control-plane/jest.config.json

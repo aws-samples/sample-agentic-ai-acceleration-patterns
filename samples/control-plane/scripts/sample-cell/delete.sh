@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT-0
 # Sample cell DELETE script.
 #
-# Runs in AWS CodeBuild with: CELL_ID, OPERATION. Deprovisions the shared
+# Runs in AWS CodeBuild with: APPLICATION_ID, CELL_ID, OPERATION. Deprovisions the shared
 # cell deployment and cleans up EVERYTHING the cell published under
 # /application-plane/cells/<cellId>/. Must tolerate partial provisioning -
 # it is also the remediation path for CREATE_FAILED cells, so an empty

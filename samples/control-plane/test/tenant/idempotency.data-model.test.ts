@@ -4,7 +4,7 @@
 import {
   IdempotencyDataModel,
   IdempotencyRecord,
-  createTenantRequestHash,
+  createDeploymentRequestHash,
   idempotencyKey,
 } from '../../src/tenant/idempotency.data-model';
 
@@ -14,32 +14,42 @@ describe('idempotencyKey', () => {
   });
 });
 
-describe('createTenantRequestHash (ADR-017)', () => {
-  const base = { name: 'acme', adminEmail: 'success@simulator.amazonses.com' };
+describe('createDeploymentRequestHash (ADR-017, §7.3)', () => {
+  const base = {
+    tenantId: '01TENANT',
+    applicationId: 'app-x',
+    adminEmail: 'success@simulator.amazonses.com',
+  };
 
   test('is deterministic for identical parameters', () => {
-    expect(createTenantRequestHash(base)).toBe(createTenantRequestHash({ ...base }));
+    expect(createDeploymentRequestHash(base)).toBe(createDeploymentRequestHash({ ...base }));
   });
 
-  test('differs when any parameter differs', () => {
-    const hash = createTenantRequestHash(base);
-    expect(createTenantRequestHash({ ...base, name: 'other' })).not.toBe(hash);
+  test('covers tenantId, applicationId, adminEmail and accountId', () => {
+    const hash = createDeploymentRequestHash(base);
+    expect(createDeploymentRequestHash({ ...base, tenantId: '01OTHER' })).not.toBe(hash);
+    expect(createDeploymentRequestHash({ ...base, applicationId: 'app-y' })).not.toBe(hash);
     expect(
-      createTenantRequestHash({ ...base, adminEmail: 'success+2@simulator.amazonses.com' }),
+      createDeploymentRequestHash({ ...base, adminEmail: 'success+2@simulator.amazonses.com' }),
     ).not.toBe(hash);
-    expect(createTenantRequestHash({ ...base, description: 'x' })).not.toBe(hash);
-    expect(createTenantRequestHash({ ...base, accountId: '111111111111' })).not.toBe(hash);
+    expect(createDeploymentRequestHash({ ...base, accountId: '111111111111' })).not.toBe(hash);
   });
 
   test('two target accounts with otherwise identical parameters hash differently', () => {
-    expect(createTenantRequestHash({ ...base, accountId: '111111111111' })).not.toBe(
-      createTenantRequestHash({ ...base, accountId: '222222222222' }),
+    expect(createDeploymentRequestHash({ ...base, accountId: '111111111111' })).not.toBe(
+      createDeploymentRequestHash({ ...base, accountId: '222222222222' }),
     );
   });
 
-  test('an absent description hashes differently from an empty string', () => {
-    expect(createTenantRequestHash(base)).not.toBe(
-      createTenantRequestHash({ ...base, description: '' }),
+  test('an absent accountId hashes differently from an empty string', () => {
+    expect(createDeploymentRequestHash(base)).not.toBe(
+      createDeploymentRequestHash({ ...base, accountId: '' }),
+    );
+  });
+
+  test('positional form: shifting a value between fields changes the hash', () => {
+    expect(createDeploymentRequestHash({ ...base, tenantId: 'a', applicationId: 'b' })).not.toBe(
+      createDeploymentRequestHash({ ...base, tenantId: 'b', applicationId: 'a' }),
     );
   });
 });
@@ -49,17 +59,19 @@ describe('IdempotencyDataModel', () => {
   const record: IdempotencyRecord = {
     clientToken: 'tok-1',
     tenantId: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+    applicationId: 'app-x',
     requestHash: 'abc123',
     createdAt: new Date('2026-09-07T12:00:00.000Z'),
     expiresAt: 1757203200,
   };
 
-  test('toItem produces the keyed item with an epoch-seconds TTL attribute', () => {
+  test('toItem produces the keyed item with an epoch-seconds TTL attribute and no index keys', () => {
     expect(model.toItem(record)).toEqual({
       PK: 'IDEMPOTENCY#tok-1',
       SK: 'META',
       clientToken: 'tok-1',
       tenantId: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+      applicationId: 'app-x',
       requestHash: 'abc123',
       createdAt: '2026-09-07T12:00:00.000Z',
       expiresAt: 1757203200,

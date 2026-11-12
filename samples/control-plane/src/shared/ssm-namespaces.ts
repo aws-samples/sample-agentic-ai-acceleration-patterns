@@ -13,12 +13,15 @@ import { acknowledgeGranularFinding, nagFindingResource } from './nag';
  * these helpers build the grants for that account's roles (ADR-025).
  */
 
-/** Read-only grant on `/application-plane/shared/*` (both roles). */
+/** Read-only grant on both shared namespaces — the account-wide `/application-plane/shared/*` and every application's `/application-plane/applications/*` (both roles, ADR-034, ADR-038). */
 export function readSharedResourcesStatement(scope: Construct): iam.PolicyStatement {
   return new iam.PolicyStatement({
     sid: 'ReadSharedResources',
     actions: ['ssm:GetParameter', 'ssm:GetParameters', 'ssm:GetParametersByPath'],
-    resources: [ssmParameterArn(scope, '/application-plane/shared/*')],
+    resources: [
+      ssmParameterArn(scope, '/application-plane/shared/*'),
+      ssmParameterArn(scope, '/application-plane/applications/*'),
+    ],
   });
 }
 

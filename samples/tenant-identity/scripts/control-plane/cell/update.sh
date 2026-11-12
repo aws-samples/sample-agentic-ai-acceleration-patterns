@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: MIT-0
 #
 # control-plane cell UPDATE script for tenant-identity (ADR-0028, mounting
-# spec §7.4). Runs in the control-plane cell CodeBuild project with CELL_ID,
-# OPERATION, OPERATOR_ID, AWS_REGION.
+# spec §7.4). Runs in the control-plane cell CodeBuild project with
+# APPLICATION_ID, CELL_ID, OPERATION, OPERATOR_ID, AWS_REGION (spec §6.1);
+# APPLICATION_ID is not used: the identity deployment is account-wide.
 #
 # Same check as create.sh: the account's identity deployment is published and
 # not tiered. UpdateCell is also the recovery path after deploying

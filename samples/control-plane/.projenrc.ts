@@ -66,37 +66,22 @@ project.gitignore.exclude('test/*.snapshot/');
 project.preCompileTask.exec('smithy build');
 
 // ---------------------------------------------------------------------------
-// Build-only placeholder deployment context (S3). src/main.ts fails fast when
-// the vendor IdP / cellDefinition context is missing, so `npx projen build`
-// (which runs `cdk synth` without deploy context) supplies explicit, clearly
-// labelled placeholders. These NEVER reach a deployment: `npx cdk deploy`
-// runs its own synth with the real `--context` values (see README "Deploy").
+// Build-only placeholder stack inputs (S3). src/main.ts fails fast when the
+// vendor IdP context is missing, so `npx projen build` (which runs
+// `cdk synth` without deploy context) supplies explicit, clearly labelled
+// placeholders. These NEVER reach a deployment: `npx cdk deploy` runs its own
+// synth with the real `--context` values (see README "Deploy").
 // ---------------------------------------------------------------------------
 const buildOnlyPlaceholderContext = [
   '--context vendorIdpIssuerUrl=https://build-placeholder.invalid',
   '--context vendorIdpAudience=build-placeholder',
-  // Minimal shape that passes the stack's synth-time validation (§10)
-  "--context cellDefinition='" + JSON.stringify({
-    source: { type: 'GITHUB', location: 'https://github.com/build-placeholder/build-placeholder.git' },
-    cellScripts: {
-      create: 'scripts/sample-cell/create.sh',
-      update: 'scripts/sample-cell/update.sh',
-      delete: 'scripts/sample-cell/delete.sh',
-    },
-    tenantScripts: {
-      create: 'scripts/sample-tenant/create.sh',
-      update: 'scripts/sample-tenant/update.sh',
-      delete: 'scripts/sample-tenant/delete.sh',
-    },
-    maxTenants: 10,
-  }) + "'",
 ].join(' ');
 project.tasks.tryFind('synth:silent')?.reset(`cdk synth -q ${buildOnlyPlaceholderContext}`);
 project.tasks.tryFind('synth')?.reset(`cdk synth ${buildOnlyPlaceholderContext}`);
 
 // End-to-end integration test (test/integ.tenant.ts) - deploys real
 // infrastructure in TWO accounts (the current one and CP_INTEG_ACCOUNT_B,
-// spec §10) and drives the API through the full lifecycle (~35 min).
+// spec §10) and drives the API through the full lifecycle (~45 min).
 // Must run in EXACTLY ONE explicitly selected Region (integration-test.md):
 // the guard fails fast when AWS_REGION is unset so integ-runner's
 // multi-Region defaults can never apply to this test, and when the second

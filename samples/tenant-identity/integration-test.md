@@ -155,26 +155,32 @@ It stands up `TenantIdentity-shared-pool`, a `TenantIdentityCpSetup` stack (a
 throwaway vendor IdP minting `role: operator` and an S3 bucket holding
 `scripts/control-plane/`), and control-plane itself, then runs the scenario in
 [`test/e2e/control-plane/mount.cp-e2e.test.ts`](./test/e2e/control-plane/mount.cp-e2e.test.ts).
-The scenario first registers the home account with control-plane
-(`PutAccount`, vendor-owned; control-plane ADR-024: cells live in registered
-accounts) and deregisters it once the cell is gone. The teardown destroys all
-three stacks: control-plane first, then setup and identity.
+The script hands the setup stack's `ScriptSourceLocation` output to the
+scenario in `E2E_CP_SCRIPT_SOURCE`. The scenario first registers the mount as
+the control-plane application `identity-mount` (`PutApplication` with that
+S3 source, the six scripts and `maxTenants: 2`; control-plane ADR-032), then
+the home account (`PutAccount`, vendor-owned and shared; control-plane
+ADR-024: cells live in registered accounts), and removes the tenant, cell,
+account and application again once the deployment is gone. The teardown
+destroys all three stacks: control-plane first, then setup and identity.
 
 ### Steps
 
 | # | Step | Expected |
 |---|---|---|
-| 1–2 | control-plane `CreateTenant {name, adminEmail=success+…@simulator.amazonses.com}` | 202, cell and tenant poll to `ACTIVE`; `cell/create.sh` found the identity parameters |
+| 0 | control-plane `PutApplication identity-mount`, then `PutAccount` (home account) | 200, 200 |
+| 1–2 | control-plane `CreateTenant {name}`, then `CreateDeployment {applicationId: identity-mount, adminEmail=success+…@simulator.amazonses.com}` | 200 with `tenantId`, then 202 with `cellId`; `GetDeployment` polls to `ACTIVE`; the cell is `ACTIVE` with `applicationId: identity-mount`; `cell/create.sh` found the identity parameters |
 | 3 | tenant-identity `GetTenant(T)` via the test's own SigV4 | 200 `ACTIVE`, same `name` |
 | 4 | tenant-identity `ListUsers(T)` | exactly one user, `admin: true`; `GetTenant` leaks no `firstAdminEmail` |
 | 5 | the parked parameter | `SecureString`, `KeyId` = `adminPasswordKeyArn`; value never printed |
 | 5b | IAM policy simulator, tenant provisioning role, `kms:Decrypt` on the key | `implicitDeny` |
 | 6 | `IssueToken` for the admin with the parked password | 200; access token's `tenant_id` is `T` |
-| 7 | control-plane `UpdateResource(T)` (re-runs `tenant/update.sh`) | `ACTIVE`; still one admin; parked parameter version unchanged |
-| 8 | run `tenant/create.sh` a second time with the build's env | exit 0, `already has its first admin`; still one user and one parameter version |
+| 7 | control-plane `UpdateDeployment(T, identity-mount)` (re-runs `tenant/update.sh`) | 202, polls to `ACTIVE`; still one admin; parked parameter version unchanged |
+| 8 | run `tenant/create.sh` a second time with the build's env (`APPLICATION_ID` included) | exit 0, `already has its first admin`; still one user and one parameter version |
 | 9 | tenant-identity `CreateTenant` with the existing `tenantId` | 409, nothing changed |
 | 9b | `CreateUser {firstAdmin: true}` (taken slot) then `CreateUser {admin: true}` | 409, then 201 — a second *first* admin is refused, a second admin is allowed |
-| 10–11 | control-plane `DeleteTenant(T)` | completes; `GetTenant(T)` 404; parked parameter gone |
+| 10–11 | control-plane `DeleteDeployment(T, identity-mount)` | 202, `GetDeployment` polls to 404; tenant-identity `GetTenant(T)` 404; parked parameter gone |
+| 11b | control-plane `DeleteTenant(T)`, `DeleteCell`, `DeleteAccount`, `DeleteApplication` | `deploymentCount` 0, then 200, 202 (polls to 404), 200, 200 |
 | 12 | teardown from an exit trap: control-plane, setup, identity | no stack, parameter, user pool, REST API or log group of the run remains; a leftover parked parameter or orphan REST API is deleted and still fails the run |
 
 Every AWS call in the teardown trap is guarded, so the trap always reaches its
@@ -198,7 +204,7 @@ If the control-plane destroy fails, the script prints the command to rerun in
 context); if the tenant-identity destroy fails, it prints
 `AWS_REGION=<region> npx cdk --app cdk.integ-cp.out destroy --all --force
 --concurrency 2`. Look for a leftover parked parameter under
-`/application-plane/tenants/`, user pools, REST APIs and log groups of the
+`/application-plane/tenants/` (`<T>/identity-mount/admin-temporary-password`), user pools, REST APIs and log groups of the
 run. The `AdminPasswordKey` stays `PendingDeletion` for 7 days after teardown
 (ADR-0033); that is expected, not a leftover.
 

@@ -9,7 +9,7 @@ Template for new records: [`docs/sample-standard.md` §2.2](../../../docs/sample
 
 | # | Title | Status | Date |
 |---|---|---|---|
-| [ADR-0001](0001-no-placement-entity.md) | No placement entity — the 1:1 link needs no join | Accepted | — |
+| [ADR-0001](0001-no-placement-entity.md) | No placement entity — the 1:1 link needs no join | Superseded by ADR-0037 | — |
 | [ADR-0002](0002-one-shared-codebuild-project.md) | One shared CodeBuild project with per-execution StartBuild overrides | Accepted | — |
 | [ADR-0003](0003-forward-caller-jwt-cross-service.md) | Cross-service calls forward the caller's vendor JWT | Superseded by ADR-009 | — |
 | [ADR-0004](0004-vendor-idp-only.md) | The control plane knows only the vendor IdP; customer identity is an application plane decision | Accepted | — |
@@ -40,3 +40,10 @@ Template for new records: [`docs/sample-standard.md` §2.2](../../../docs/sample
 | [ADR-0029](0029-require-an-external-id-for-tenant-owned-accounts.md) | Require an external id for tenant-owned accounts (amends ADR-025) | Accepted | 2026-11-09 |
 | [ADR-0030](0030-prove-the-pair-enforces-the-external-id.md) | Prove the pair enforces the external id with a negative probe (amends ADR-0027, ADR-0029) | Accepted | 2026-11-10 |
 | [ADR-0031](0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md) | Lost placement races on a full fleet are a retryable conflict (amends ADR-0026) | Accepted | 2026-11-10 |
+| [ADR-0032](0032-register-applications-at-run-time-and-stamp-their-definition-onto-cells.md) | Register applications at run time and stamp their definition onto cells (amends ADR-0012, ADR-0013) | Accepted | 2026-11-10 |
+| [ADR-0033](0033-account-admission-is-an-application-allowlist-on-the-account.md) | Account admission is an application allowlist on the account (amends ADR-0024) | Accepted | 2026-11-10 |
+| [ADR-0034](0034-the-shared-parameter-namespace-is-per-application.md) | The shared parameter namespace is per application (amends ADR-0010) | Accepted | 2026-11-10 |
+| [ADR-0035](0035-new-cells-go-to-dedicated-accounts-before-shared-ones.md) | New cells go to dedicated accounts before shared ones (amends ADR-0024) | Accepted | 2026-11-10 |
+| [ADR-0036](0036-the-application-chooses-fill-or-round-robin-across-accounts.md) | The application chooses fill or round robin across accounts (amends ADR-0035) | Accepted | 2026-11-11 |
+| [ADR-0037](0037-a-deployment-is-one-tenant-in-one-application.md) | A deployment is one tenant in one application (supersedes ADR-0001; amends ADR-0009, ADR-0012, ADR-0013, ADR-0017, ADR-0023, ADR-0032) | Accepted | 2026-11-11 |
+| [ADR-0038](0038-an-account-wide-shared-namespace-beside-the-per-application-one.md) | An account-wide shared namespace beside the per-application one (amends ADR-0034, ADR-0010) | Accepted | 2026-11-11 |

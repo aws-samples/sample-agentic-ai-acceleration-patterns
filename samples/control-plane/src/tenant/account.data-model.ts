@@ -10,13 +10,15 @@ import { AccountOwner } from '../smithy/source/typescript-ssdk-codegen/src';
 export const ACCOUNT_KEY_PREFIX = 'ACCOUNT';
 /** Fixed sort key — one record per account. */
 export const ACCOUNT_SORT_KEY = 'META';
-/** GSI-1 static partition value shared by all account items (§4.5). */
+/** GSI-1 static partition value shared by all account items (§4.7). */
 export const ACCOUNT_GSI1_PARTITION = 'ACCOUNT';
 
 /**
  * The account domain record (ADR-024): an AWS account the control plane may
  * provision cells into. `owner` decides whether untargeted placement may
- * choose it and is immutable; `maxCells` is operator policy and replaceable;
+ * choose it and is immutable; `applicationIds` names the applications the
+ * account admits — absent, the account is shared and admits every
+ * application (ADR-033); `maxCells` is operator policy and replaceable;
  * `cellCount` is the authoritative cell counter — claimed in the new-cell
  * placement transaction and released in the cell-delete transaction, never
  * written by `PutAccount` (spec R-24). `externalId` is presented on every
@@ -26,6 +28,8 @@ export const ACCOUNT_GSI1_PARTITION = 'ACCOUNT';
 export interface AccountRecord {
   readonly accountId: string;
   readonly owner: AccountOwner;
+  /** Admitted applications; `undefined` = shared (admits all). Never empty. */
+  readonly applicationIds?: readonly string[];
   readonly maxCells: number;
   readonly cellCount: number;
   readonly externalId?: string;
@@ -43,6 +47,7 @@ export interface AccountItem extends DynamoDBItem {
   readonly GSI1SK: string;
   readonly accountId: string;
   readonly owner: AccountOwner;
+  readonly applicationIds?: readonly string[];
   readonly maxCells: number;
   readonly cellCount: number;
   readonly externalId?: string;
@@ -56,7 +61,7 @@ export function accountKey(accountId: string): ItemKey {
 }
 
 /**
- * GSI-1 query serving `ListAccounts` and the placement account scan (§4.5).
+ * GSI-1 query serving `ListAccounts` and the placement account scan (§4.7).
  * Eventually consistent — the account claim's condition on the base record
  * is the guard (§7).
  */
@@ -68,11 +73,12 @@ export function listAccountsQuery(): GsiQuery {
 }
 
 /**
- * The `PutAccount` create-or-replace write (spec §5.3, R-24) as ONE
+ * The `PutAccount` create-or-replace write (spec §5.4, R-24) as ONE
  * conditional `UpdateItem`:
  *
- * - policy fields the operator owns are set (`maxCells`, `externalId`,
- *   `updatedAt`);
+ * - policy fields the operator owns are set (`maxCells`, `applicationIds`,
+ *   `externalId`, `updatedAt`); an absent `applicationIds` is REMOVEd (the
+ *   account becomes shared), as is an absent `externalId`;
  * - `owner`, `createdAt`, and `cellCount` are initialised with
  *   `if_not_exists` so a replace never resets the counter or the owner;
  * - the condition `attribute_not_exists(PK) OR owner = :owner` makes an
@@ -85,6 +91,7 @@ export function putAccountUpdate(input: {
   readonly accountId: string;
   readonly owner: AccountOwner;
   readonly maxCells: number;
+  readonly applicationIds?: readonly string[];
   readonly externalId?: string;
   readonly now: string;
 }): ItemUpdate {
@@ -93,6 +100,7 @@ export function putAccountUpdate(input: {
     '#maxCells': 'maxCells',
     '#cellCount': 'cellCount',
     '#externalId': 'externalId',
+    '#applicationIds': 'applicationIds',
     '#accountId': 'accountId',
     '#createdAt': 'createdAt',
     '#updatedAt': 'updatedAt',
@@ -118,13 +126,21 @@ export function putAccountUpdate(input: {
     '#maxCells = :maxCells',
     '#updatedAt = :now',
   ];
-  let updateExpression: string;
+  const removes: string[] = [];
   if (input.externalId === undefined) {
-    updateExpression = `SET ${sets.join(', ')} REMOVE #externalId`;
+    removes.push('#externalId');
   } else {
     values[':externalId'] = input.externalId;
-    updateExpression = `SET ${[...sets, '#externalId = :externalId'].join(', ')}`;
+    sets.push('#externalId = :externalId');
   }
+  if (input.applicationIds === undefined) {
+    removes.push('#applicationIds');
+  } else {
+    values[':applicationIds'] = [...input.applicationIds];
+    sets.push('#applicationIds = :applicationIds');
+  }
+  const updateExpression =
+    `SET ${sets.join(', ')}` + (removes.length > 0 ? ` REMOVE ${removes.join(', ')}` : '');
   return {
     updateExpression,
     conditionExpression: 'attribute_not_exists(PK) OR #owner = :owner',
@@ -155,6 +171,7 @@ export class AccountDataModel implements DataModel<AccountRecord, AccountItem> {
       GSI1SK: KeyBuilder.build(ACCOUNT_KEY_PREFIX, record.accountId),
       accountId: record.accountId,
       owner: record.owner,
+      applicationIds: record.applicationIds === undefined ? undefined : [...record.applicationIds],
       maxCells: record.maxCells,
       cellCount: record.cellCount,
       externalId: record.externalId,
@@ -167,6 +184,7 @@ export class AccountDataModel implements DataModel<AccountRecord, AccountItem> {
     return {
       accountId: item.accountId,
       owner: item.owner,
+      applicationIds: item.applicationIds === undefined ? undefined : [...item.applicationIds],
       maxCells: item.maxCells,
       cellCount: item.cellCount,
       externalId: item.externalId,

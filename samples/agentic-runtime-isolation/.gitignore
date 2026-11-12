@@ -49,8 +49,6 @@ src/smithy/
 TODO.md
 .kiro/
 cdk.integ.out/
-cdk.stress.out/
-cdk.context.json
 test/*.snapshot/
 .holmes/
 .ash/ash_output/

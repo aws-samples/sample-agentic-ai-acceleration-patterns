@@ -13,32 +13,54 @@ import {
 } from './account.data-model';
 import { HandshakeProbe, HandshakeRefusal, HandshakeUnavailableError } from './account.handshake';
 import {
+  APPLICATION_EMPTY_CONDITION,
+  ApplicationItem,
+  ApplicationRecord,
+  applicationKey,
+  DEFAULT_PLACEMENT_STRATEGY,
+  listApplicationsQuery,
+  putApplicationUpdate,
+} from './application.data-model';
+import {
   CellItem,
   CellRecord,
   cellKey,
   deleteCellTransition,
   listCellsByAccountQuery,
+  listCellsByApplicationQuery,
   listCellsQuery,
 } from './cell.data-model';
+import {
+  DeploymentItem,
+  DeploymentRecord,
+  deploymentKey,
+  listDeploymentsByApplicationQuery,
+  listDeploymentsByCellQuery,
+  listDeploymentsByTenantQuery,
+  listDeploymentsQuery,
+} from './deployment.data-model';
 import {
   IDEMPOTENCY_TTL_SECONDS,
   IdempotencyDataModel,
   IdempotencyItem,
   IdempotencyRecord,
-  createTenantRequestHash,
+  createDeploymentRequestHash,
   idempotencyKey,
 } from './idempotency.data-model';
 import {
+  TENANT_EMPTY_CONDITION,
+  TENANT_NOT_EXISTS_CONDITION,
   TenantItem,
   TenantRecord,
-  listTenantsByCellQuery,
   listTenantsQuery,
   tenantKey,
 } from './tenant.data-model';
 import { provisioningRoleArn, sessionNameFor } from '../shared/fleet';
 import {
   AccountFullError,
+  ApplicationGoneError,
   ConditionFailedError,
+  DeploymentExistsError,
   DuplicateTokenError,
   DynamoDBRepository,
   GsiQuery,
@@ -46,27 +68,38 @@ import {
   PlacementTransactions,
   RecordGoneError,
   StaleTransitionError,
+  TenantGoneError,
 } from '../shared/repository';
-import { CallerContext, ServiceConfig } from '../shared/service-config';
+import { CallerContext, ServiceConfig, sourcePinningWarning } from '../shared/service-config';
 import {
   AccountOwner,
   AccountSummary,
+  ApplicationSummary,
   CellSummary,
   ConflictError,
+  CreateDeploymentServerInput,
+  CreateDeploymentServerOutput,
   CreateTenantServerInput,
   CreateTenantServerOutput,
   DeleteAccountServerInput,
   DeleteAccountServerOutput,
+  DeleteApplicationServerInput,
+  DeleteApplicationServerOutput,
   DeleteCellServerInput,
   DeleteCellServerOutput,
+  DeleteDeploymentServerInput,
+  DeleteDeploymentServerOutput,
   DeleteTenantServerInput,
   DeleteTenantServerOutput,
+  DeploymentSummary,
   GetAccountServerInput,
   GetAccountServerOutput,
+  GetApplicationServerInput,
+  GetApplicationServerOutput,
   GetCellServerInput,
   GetCellServerOutput,
-  GetResourceServerInput,
-  GetResourceServerOutput,
+  GetDeploymentServerInput,
+  GetDeploymentServerOutput,
   GetTenantServerInput,
   GetTenantServerOutput,
   InsufficientCapacityError,
@@ -74,24 +107,29 @@ import {
   LifecycleStatus,
   ListAccountsServerInput,
   ListAccountsServerOutput,
+  ListApplicationsServerInput,
+  ListApplicationsServerOutput,
   ListCellsServerInput,
   ListCellsServerOutput,
+  ListDeploymentsServerInput,
+  ListDeploymentsServerOutput,
   ListTenantsServerInput,
   ListTenantsServerOutput,
+  PlacementStrategy,
   PutAccountServerInput,
   PutAccountServerOutput,
+  PutApplicationServerInput,
+  PutApplicationServerOutput,
   ResourceNotFoundError,
-  ValidationException,
-  ScriptLocations,
-  SourceDefinition,
   TenantServiceService,
   TenantSummary,
   UpdateCellServerInput,
   UpdateCellServerOutput,
-  UpdateResourceServerInput,
-  UpdateResourceServerOutput,
+  UpdateDeploymentServerInput,
+  UpdateDeploymentServerOutput,
   UpdateTenantServerInput,
   UpdateTenantServerOutput,
+  ValidationException,
 } from '../smithy/source/typescript-ssdk-codegen/src';
 
 /** Provisioning workflow operations (mirrors the lifecycle scripts). */
@@ -100,7 +138,7 @@ export type ProvisioningOperation = 'create' | 'update' | 'delete';
 type FailedLifecycleStatus = 'CREATE_FAILED' | 'UPDATE_FAILED' | 'DELETE_FAILED';
 type InFlightLifecycleStatus = 'CREATING' | 'UPDATING' | 'DELETING';
 
-/** One optional build phase of the workflow input (§7). */
+/** One optional build phase of the workflow input (§8). */
 interface BuildPhaseInput {
   readonly operation: ProvisioningOperation;
   readonly scriptPath: string;
@@ -118,14 +156,16 @@ interface TenantBuildPhaseInput extends BuildPhaseInput {
 }
 
 /**
- * Resolved Step Functions execution input (ADR-011): the service
- * resolves sources, script paths, and failure statuses; the workflow rereads
- * no mutable records. `cellBuild`/`tenantBuild` are each optional — the
- * combination encodes the trigger (§7).
+ * Resolved Step Functions execution input (ADR-011, spec R-20): the service
+ * resolves sources, script paths, failure statuses and every id; the
+ * workflow rereads no mutable records. `cellBuild`/`tenantBuild` are each
+ * optional — the combination encodes the trigger (§8).
  */
 interface ProvisioningWorkflowInput {
   readonly sourceType: string;
   readonly sourceLocation: string;
+  /** The application the cell serves (ADR-032) — the cell-delete transaction releases its count. */
+  readonly applicationId: string;
   /** The account the cell lives in (ADR-024) — the cell-delete transaction releases its slot. */
   readonly accountId: string;
   /** The account's external id, or '' when none; presented on AssumeRole (ADR-025). */
@@ -149,75 +189,27 @@ interface ProvisioningWorkflowInput {
   readonly operatorId: string;
   readonly cellId: string;
   readonly cellBuild?: BuildPhaseInput;
+  /** The deployment's tenant — with `applicationId` it keys the deployment record (ADR-037). */
   readonly tenantId?: string;
   readonly tenantBuild?: TenantBuildPhaseInput;
-}
-
-/**
- * The stamped provisioning source: the Smithy-modelled shape plus the
- * optional supply-chain pin (T5/M10). `sourceVersion` is deployment
- * configuration, never an API input — the Smithy contract is unchanged; the
- * pin rides along in the CellDefinition env JSON and the stamped cell
- * record, and maps to the CodeBuild StartBuild `sourceVersion` parameter.
- */
-export type StampedSourceDefinition = SourceDefinition & {
-  readonly sourceVersion?: string;
-};
-
-/**
- * The deployment-configured CellDefinition (§10, ADR-012), stamped onto each
- * new cell record at creation. Supplied to the Lambda as the
- * `CELL_DEFINITION` env JSON (validated at synth time) and parsed once at
- * cold start.
- */
-export interface CellDefinition {
-  readonly source: StampedSourceDefinition;
-  readonly cellScripts: ScriptLocations;
-  readonly tenantScripts: ScriptLocations;
-  readonly maxTenants: number;
-}
-
-/**
- * Parses (and fail-fast validates) the `CELL_DEFINITION` env JSON at cold
- * start. Synthesis already validates the deployment input (§10) — a failure
- * here indicates deployment drift, never a client error.
- */
-export function parseCellDefinition(json: string): CellDefinition {
-  const parsed = JSON.parse(json) as CellDefinition;
-  const missing: string[] = [];
-  if (!parsed?.source?.type || !parsed?.source?.location) {
-    missing.push('source');
-  }
-  for (const scriptSet of ['cellScripts', 'tenantScripts'] as const) {
-    for (const operation of ['create', 'update', 'delete'] as const) {
-      if (!parsed?.[scriptSet]?.[operation]) {
-        missing.push(`${scriptSet}.${operation}`);
-      }
-    }
-  }
-  if (!Number.isInteger(parsed?.maxTenants) || parsed.maxTenants < 1) {
-    missing.push('maxTenants');
-  }
-  if (missing.length > 0) {
-    throw new Error(`Invalid CELL_DEFINITION environment variable — missing/invalid: ${missing.join(', ')}`);
-  }
-  return parsed;
 }
 
 /** Static configuration for the tenant service — built once at cold start. */
 export interface TenantServiceConfig extends ServiceConfig {
   /** Repository over tenant items in the control plane table. */
   readonly tenantRepository: DynamoDBRepository<TenantRecord, TenantItem>;
+  /** Repository over deployment items in the same table (ADR-037). */
+  readonly deploymentRepository: DynamoDBRepository<DeploymentRecord, DeploymentItem>;
   /** Repository over cell items in the same table. */
   readonly cellRepository: DynamoDBRepository<CellRecord, CellItem>;
-  /** Repository over CreateTenant idempotency records (ADR-017). */
+  /** Repository over CreateDeployment idempotency records (ADR-017). */
   readonly idempotencyRepository: DynamoDBRepository<IdempotencyRecord, IdempotencyItem>;
-  /** The placement/compensation transaction shapes (workstream B, §6). */
-  readonly placement: PlacementTransactions<CellRecord, CellItem, TenantRecord, TenantItem>;
+  /** The placement/compensation transaction shapes (§7). */
+  readonly placement: PlacementTransactions<CellRecord, CellItem, DeploymentRecord, DeploymentItem>;
   /** Repository over account items in the same table (ADR-024). */
   readonly accountRepository: DynamoDBRepository<AccountRecord, AccountItem>;
-  /** The deployment-configured CellDefinition, parsed once at cold start (§10). */
-  readonly cellDefinition: CellDefinition;
+  /** Repository over application items in the same table (ADR-032). */
+  readonly applicationRepository: DynamoDBRepository<ApplicationRecord, ApplicationItem>;
   /** Names the provisioning role pair in every account (§3.3, ADR-025). */
   readonly fleetName: string;
   /** The deployment's partition, for role ARNs. */
@@ -228,17 +220,22 @@ export interface TenantServiceConfig extends ServiceConfig {
   readonly stateMachineArn: string;
   /** Step Functions client (shared across invocations). */
   readonly sfnClient: SFNClient;
+  /**
+   * Where the PutApplication supply-chain warning goes (ADR-020, ADR-032);
+   * defaults to `console.warn`. Injectable for tests.
+   */
+  readonly warn?: (message: string) => void;
 }
 
 /** Statuses during which no lifecycle mutation may start. */
 const IN_FLIGHT: LifecycleStatus[] = ['CREATING', 'UPDATING', 'DELETING'];
 
 /**
- * Tenant statuses from which DeleteTenant may transition to DELETING (§5):
- * ACTIVE and every *_FAILED state — regardless of cell status, because the
- * delete script is the cleanup path.
+ * Deployment statuses from which DeleteDeployment may transition to DELETING
+ * (§5.2): ACTIVE and every *_FAILED state — regardless of cell status,
+ * because the delete script is the cleanup path.
  */
-const TENANT_DELETABLE_STATUSES: readonly LifecycleStatus[] = [
+const DEPLOYMENT_DELETABLE_STATUSES: readonly LifecycleStatus[] = [
   'ACTIVE',
   'CREATE_FAILED',
   'UPDATE_FAILED',
@@ -249,33 +246,34 @@ const TENANT_DELETABLE_STATUSES: readonly LifecycleStatus[] = [
 const UPDATABLE_STATUSES: readonly LifecycleStatus[] = ['ACTIVE', 'UPDATE_FAILED'];
 
 /**
- * The placement candidate budget (§6): at most this many claim attempts
- * before falling through to new-cell creation. Keeps CreateTenant inside the
- * synchronous API Gateway window; its miss case over-provisions, never fails
- * an onboard.
+ * The placement candidate budget (§7, R-18): at most this many claim
+ * attempts before falling through to new-cell creation. Keeps
+ * CreateDeployment inside the synchronous API Gateway window; its miss case
+ * over-provisions, never fails a placement.
  */
 const MAX_CLAIM_ATTEMPTS = 5;
 
-/** A best-effort compensation write for a rejected StartExecution (ADR-011, §6). */
+/** A best-effort compensation write for a rejected StartExecution (ADR-011, §7.4). */
 type Compensation = (reason: string) => Promise<unknown>;
 
 /**
- * §7 step 0 — the resolved placement target: the eligible accounts in
- * placement order, the same accounts by id (the eligibility filter for
- * candidate cells), the candidate-cell query, and whether the request named
- * an account (shapes the capacity error).
+ * §7 step 0 — the resolved placement target: the application being
+ * deployed, the eligible accounts in placement order, the same accounts by
+ * id (the eligibility filter for candidate cells), the candidate-cell query,
+ * and whether the request named an account (shapes the capacity error).
  */
 interface PlacementTarget {
+  readonly application: ApplicationRecord;
   readonly accounts: readonly AccountRecord[];
   readonly accountsById: ReadonlyMap<string, AccountRecord>;
   readonly candidateQuery: GsiQuery;
   readonly targeted: boolean;
 }
 
-/** A tenant placed into an existing cell, with the account that hosts it. */
+/** A deployment placed into an existing cell, with the account that hosts it. */
 interface PlacementResult {
   readonly cell: CellRecord;
-  readonly tenant: TenantRecord;
+  readonly deployment: DeploymentRecord;
   readonly account: AccountRecord;
 }
 
@@ -303,9 +301,9 @@ function ownerImmutableError(accountId: string): ConflictError {
 const idempotencyDataModel = new IdempotencyDataModel();
 
 /**
- * The cell-based control plane tenant service. Implements the
- * Smithy-generated `TenantServiceService` interface (all fifteen operations).
- * Receives static config in the constructor (cold start) and an immutable
+ * The cell-based control plane service. Implements the Smithy-generated
+ * `TenantServiceService` interface (all twenty-two operations). Receives
+ * static config in the constructor (cold start) and an immutable
  * `CallerContext` per operation — it never sees the raw event or a JWT
  * (context separation).
  */
@@ -313,143 +311,33 @@ export class TenantService implements TenantServiceService<CallerContext> {
   constructor(private readonly config: TenantServiceConfig) {}
 
   // -------------------------------------------------------------------
-  // Tenant operations
+  // Tenant operations (§5.1) — all synchronous; a tenant is the customer
   // -------------------------------------------------------------------
 
   CreateTenant = async (
     input: CreateTenantServerInput,
-    context: CallerContext,
+    _context: CallerContext,
   ): Promise<CreateTenantServerOutput> => {
-    const name = requireField(input.name, 'name');
-    // adminEmail is pass-through: workflow input only, never persisted (ADR-004).
-    const adminEmail = requireField(input.adminEmail, 'adminEmail');
     const now = new Date();
-    const tenantId = ulid();
-
-    // Optional idempotency (ADR-017): the item joins the placement
-    // transaction, conditional on attribute_not_exists(PK). Its cancelled
-    // condition marks the request as a replay of an earlier CreateTenant.
-    const clientToken = input.clientToken;
-    const requestHash =
-      clientToken === undefined
-        ? undefined
-        : createTenantRequestHash({ name, description: input.description, adminEmail, accountId: input.accountId });
-    const idempotencyItem =
-      clientToken === undefined || requestHash === undefined
-        ? undefined
-        : idempotencyDataModel.toItem({
-          clientToken,
-          tenantId,
-          requestHash,
-          createdAt: now,
-          expiresAt: Math.floor(now.getTime() / 1000) + IDEMPOTENCY_TTL_SECONDS,
-        });
-
-    const makeTenant = (cellId: string): TenantRecord => ({
-      tenantId,
-      name,
+    const tenant: TenantRecord = {
+      tenantId: ulid(),
+      name: requireField(input.name, 'name'),
       description: input.description,
-      cellId,
-      status: 'CREATING',
+      deploymentCount: 0,
       createdAt: now,
       updatedAt: now,
-    });
-
-    // §7 step 0 — TARGET: which accounts may host a new cell and which
-    // existing cells are candidates. A named account is the only eligible
-    // one (any owner; 404 if unregistered); otherwise vendor-owned accounts,
-    // oldest registered first — tenant-owned accounts are never eligible
-    // without a target (ADR-024).
-    const target = await this.resolvePlacementTarget(input.accountId);
-
-    // §7 steps 1–2: candidate scan + bounded claim loop against existing cells.
-    let placed: PlacementResult | PlacementMiss;
+    };
     try {
-      placed = await this.placeIntoExistingCell(target, makeTenant, now.toISOString(), idempotencyItem);
+      await this.config.tenantRepository.put(tenant, TENANT_NOT_EXISTS_CONDITION);
     } catch (error) {
-      return this.replayOrRethrow(error, clientToken, requestHash);
-    }
-
-    let tenant: TenantRecord;
-    let workflowInput: ProvisioningWorkflowInput;
-    let compensate: Compensation;
-
-    if ('cell' in placed) {
-      // Existing cell: tenant create build only. Compensation is a single
-      // CAS moving the tenant CREATING → CREATE_FAILED (§7.4).
-      tenant = placed.tenant;
-      workflowInput = {
-        ...this.workflowSource(placed.cell),
-        ...this.workflowAccount(placed.account, context),
-        cellId: placed.cell.cellId,
-        tenantId,
-        tenantBuild: {
-          operation: 'create',
-          scriptPath: requireField(placed.cell.tenantScripts.create, 'cell.tenantScripts.create'),
-          failedStatus: 'CREATE_FAILED',
-          tenantName: tenant.name,
-          adminEmail,
-        },
-      };
-      compensate = this.tenantCompensation(tenantId, 'CREATING', 'CREATE_FAILED');
-    } else {
-      // §7 step 3 — no candidate claimed (none found or budget exhausted):
-      // for each eligible account in order, one transaction claims a cell
-      // slot on the account and creates the cell (CREATING, tenant slot
-      // pre-claimed, accountId set, definition stamped) together with the
-      // tenant. Every account refusing → InsufficientCapacityError (R-28),
-      // unless the claim budget was spent on candidate cells: the fleet was
-      // changing under the request, so the failure is a retryable
-      // ConflictError, not the terminal "raise maxCells" (ADR-031).
-      let created;
-      try {
-        created = await this.createCellInEligibleAccount(target, makeTenant, now, idempotencyItem);
-      } catch (error) {
-        const failure =
-          placed.budgetExhausted && error instanceof InsufficientCapacityError
-            ? new ConflictError({
-              message:
-                  `Tenant placement lost ${MAX_CLAIM_ATTEMPTS} claim races on candidate cells and no eligible account`
-                  + ' has a free cell slot; nothing was written. Retry the request (spec R-18, ADR-031).',
-            })
-            : error;
-        return this.replayOrRethrow(failure, clientToken, requestHash);
+      if (error instanceof ConditionFailedError) {
+        // A fresh ULID collided — negligible, and the client retry mints
+        // another. Never a client error.
+        throw new InternalServerError({ message: `Tenant id ${tenant.tenantId} already exists; retry` });
       }
-      const { cell, account } = created;
-      tenant = created.tenant;
-      workflowInput = {
-        ...this.workflowSource(cell),
-        ...this.workflowAccount(account, context),
-        cellId: cell.cellId,
-        cellBuild: {
-          operation: 'create',
-          scriptPath: requireField(cell.cellScripts.create, 'cellDefinition.cellScripts.create'),
-          failedStatus: 'CREATE_FAILED',
-        },
-        tenantId,
-        tenantBuild: {
-          operation: 'create',
-          scriptPath: requireField(cell.tenantScripts.create, 'cellDefinition.tenantScripts.create'),
-          failedStatus: 'CREATE_FAILED',
-          tenantName: tenant.name,
-          adminEmail,
-        },
-      };
-      // New-cell compensation is the paired transaction: BOTH records move
-      // CREATING → CREATE_FAILED so compensation cannot leave only one
-      // record recoverable (§7.4). The account's cell slot stays held by the
-      // CREATE_FAILED cell until DeleteCell releases it.
-      compensate = (reason) =>
-        this.config.placement.failCreatingCellAndTenant({
-          cellKey: cellKey(cell.cellId),
-          tenantKey: tenantKey(tenantId),
-          statusReason: reason,
-          updatedAt: new Date().toISOString(),
-        });
+      throw error;
     }
-
-    await this.startWorkflow(`${tenantId}-create-${Date.now()}`, workflowInput, compensate);
-    return { tenant: toSummary(tenant) };
+    return { tenant: toTenantSummary(tenant) };
   };
 
   GetTenant = async (
@@ -457,7 +345,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
     _context: CallerContext,
   ): Promise<GetTenantServerOutput> => {
     const tenant = await this.getTenantOrThrow(requireField(input.tenantId, 'tenantId'));
-    return { tenant: toSummary(tenant) };
+    return { tenant: toTenantSummary(tenant) };
   };
 
   UpdateTenant = async (
@@ -466,8 +354,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
   ): Promise<UpdateTenantServerOutput> => {
     const tenantId = requireField(input.tenantId, 'tenantId');
 
-    // Metadata only (field-ownership write, ADR-011): the update cannot
-    // touch workflow-owned lifecycle fields. No state guard (§5).
+    // Metadata only (field-ownership write, ADR-011, R-21): the update never
+    // touches `deploymentCount`, which the two counter paths own.
     const setExpressions = ['#updatedAt = :updatedAt'];
     const expressionAttributeNames: Record<string, string> = {
       '#updatedAt': 'updatedAt',
@@ -492,11 +380,11 @@ export class TenantService implements TenantServiceService<CallerContext> {
         expressionAttributeNames,
         expressionAttributeValues,
       });
-      return { tenant: toSummary(updated) };
+      return { tenant: toTenantSummary(updated) };
     } catch (error) {
       if (error instanceof RecordGoneError) {
         // The metadata write lost a race with a concurrent delete — 404, not
-        // an unmodelled 500 (§7).
+        // an unmodelled 500 (R-14).
         throw new ResourceNotFoundError({ message: `Tenant ${tenantId} not found` });
       }
       throw error;
@@ -505,134 +393,370 @@ export class TenantService implements TenantServiceService<CallerContext> {
 
   DeleteTenant = async (
     input: DeleteTenantServerInput,
-    context: CallerContext,
+    _context: CallerContext,
   ): Promise<DeleteTenantServerOutput> => {
     const tenantId = requireField(input.tenantId, 'tenantId');
     const existing = await this.getTenantOrThrow(tenantId);
 
-    if (IN_FLIGHT.includes(existing.status)) {
-      throw new ConflictError({
-        message: `Tenant ${tenantId} is ${existing.status}; wait for the operation to finish`,
-      });
+    // Empty tenants only (P-10): ONE conditional delete on
+    // deploymentCount = 0 — the counterpart of the deployment claim
+    // (ADR-037). A read-then-delete would let a concurrent CreateDeployment
+    // claim the count in between; the condition rejects that as the 409.
+    try {
+      await this.config.tenantRepository.delete(tenantKey(tenantId), TENANT_EMPTY_CONDITION);
+    } catch (error) {
+      if (error instanceof ConditionFailedError) {
+        throw new ConflictError({
+          message: `Tenant ${tenantId} cannot be deleted — it still has deployments (delete them first with DeleteDeployment) or was modified concurrently`,
+        });
+      }
+      throw error;
     }
-
-    // Delete is allowed regardless of cell status (§5) — the cell and
-    // account records are read only to resolve the stamped source, the
-    // tenant delete script, and the provisioning role to assume.
-    const cell = await this.getCellForTenant(existing);
-    const account = await this.getAccountForCell(cell);
-
-    const deleting = await this.transitionTenant(tenantId, TENANT_DELETABLE_STATUSES, 'DELETING');
-    await this.startWorkflow(
-      `${tenantId}-delete-${Date.now()}`,
-      {
-        ...this.workflowSource(cell),
-        ...this.workflowAccount(account, context),
-        cellId: existing.cellId,
-        tenantId,
-        tenantBuild: {
-          operation: 'delete',
-          scriptPath: requireField(cell.tenantScripts.delete, 'cell.tenantScripts.delete'),
-          failedStatus: 'DELETE_FAILED',
-          tenantName: existing.name,
-          adminEmail: '',
-        },
-      },
-      this.tenantCompensation(tenantId, 'DELETING', 'DELETE_FAILED'),
-    );
-    return { tenant: toSummary(deleting) };
+    return { tenant: toTenantSummary(existing) };
   };
 
   ListTenants = async (
     input: ListTenantsServerInput,
     _context: CallerContext,
   ): Promise<ListTenantsServerOutput> => {
-    // Unfiltered listing uses GSI-2's static partition; the ?cellId= filter
-    // uses the tenant items' GSI-1 partition. An unknown cellId naturally
-    // yields an empty page — the filter is a query predicate, not a
-    // resource lookup (§5).
-    const query =
-      input.cellId === undefined ? listTenantsQuery() : listTenantsByCellQuery(input.cellId);
     const page = await this.config.tenantRepository.queryIndex(
-      query,
+      listTenantsQuery(),
       input.maxResults,
       input.nextToken,
     );
     return {
-      tenants: page.items.map(toSummary),
+      tenants: page.items.map(toTenantSummary),
       nextToken: page.nextToken,
     };
   };
 
-  GetResource = async (
-    input: GetResourceServerInput,
+  // -------------------------------------------------------------------
+  // Deployment operations (§5.2, ADR-037)
+  // -------------------------------------------------------------------
+
+  CreateDeployment = async (
+    input: CreateDeploymentServerInput,
+    context: CallerContext,
+  ): Promise<CreateDeploymentServerOutput> => {
+    const tenantId = requireField(input.tenantId, 'tenantId');
+    const applicationId = requireField(input.applicationId, 'applicationId');
+    // adminEmail is pass-through: workflow input only, never persisted (ADR-004).
+    const adminEmail = requireField(input.adminEmail, 'adminEmail');
+    const now = new Date();
+
+    const clientToken = input.clientToken;
+    const requestHash =
+      clientToken === undefined
+        ? undefined
+        : createDeploymentRequestHash({ tenantId, applicationId, adminEmail, accountId: input.accountId });
+
+    // A replay is recognised before anything else (§7.3): a token already
+    // on record returns the original outcome even when the fleet has
+    // changed since — an account narrowed or filled in between must not
+    // turn the retry into a 400 or a capacity error. The read only
+    // nominates; a token that lands between this read and the transaction
+    // still cancels the transaction and is classified there (P-5).
+    if (clientToken !== undefined && requestHash !== undefined) {
+      const seen = await this.config.idempotencyRepository.get(idempotencyKey(clientToken));
+      if (seen !== undefined) {
+        return this.replayOrRethrow(
+          new DuplicateTokenError('clientToken was already used by an earlier CreateDeployment'),
+          clientToken,
+          requestHash,
+          tenantId,
+          applicationId,
+          seen,
+        );
+      }
+    }
+
+    // §7 step 0 — the tenant and the application must exist (404 otherwise).
+    // The application record read here is the stamp for a new cell; the
+    // tenant's name is forwarded to the build (ADR-023). Both existence
+    // checks are repeated inside the transaction as conditions, so a delete
+    // in between is still a 404 and never a phantom count.
+    const tenant = await this.getTenantOrThrow(tenantId);
+    const application = await this.getApplicationOrThrow(applicationId);
+
+    // Optional idempotency (ADR-017): the item joins the placement
+    // transaction, conditional on attribute_not_exists(PK). Its cancelled
+    // condition marks the request as a replay of an earlier CreateDeployment.
+    const idempotencyItem =
+      clientToken === undefined || requestHash === undefined
+        ? undefined
+        : idempotencyDataModel.toItem({
+          clientToken,
+          tenantId,
+          applicationId,
+          requestHash,
+          createdAt: now,
+          expiresAt: Math.floor(now.getTime() / 1000) + IDEMPOTENCY_TTL_SECONDS,
+        });
+
+    const makeDeployment = (cellId: string): DeploymentRecord => ({
+      tenantId,
+      applicationId,
+      cellId,
+      status: 'CREATING',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // §7 step 0 — TARGET: which accounts may host a new cell and which
+    // existing cells are candidates. A named account is the only eligible
+    // one (any owner; 404 if unregistered; 400 if it does not admit the
+    // application); otherwise the vendor-owned accounts that admit the
+    // application, dedicated before shared, ordered by the application's
+    // placement strategy inside each group (ADR-033, ADR-035, ADR-036).
+    const target = await this.resolvePlacementTarget(application, input.accountId);
+
+    // §7 steps 1–2: candidate scan + bounded claim loop against existing cells.
+    let placed: PlacementResult | PlacementMiss;
+    try {
+      placed = await this.placeIntoExistingCell(target, makeDeployment, now.toISOString(), idempotencyItem);
+    } catch (error) {
+      return this.replayOrRethrow(error, clientToken, requestHash, tenantId, applicationId);
+    }
+
+    let deployment: DeploymentRecord;
+    let workflowInput: ProvisioningWorkflowInput;
+    let compensate: Compensation;
+
+    if ('cell' in placed) {
+      // Existing cell: tenant create build only. Compensation is a single
+      // CAS moving the deployment CREATING → CREATE_FAILED (§7.4).
+      deployment = placed.deployment;
+      workflowInput = {
+        ...this.workflowCell(placed.cell),
+        ...this.workflowAccount(placed.account, context),
+        tenantId,
+        tenantBuild: {
+          operation: 'create',
+          scriptPath: requireField(placed.cell.tenantScripts.create, 'cell.tenantScripts.create'),
+          failedStatus: 'CREATE_FAILED',
+          tenantName: tenant.name,
+          adminEmail,
+        },
+      };
+      compensate = this.deploymentCompensation(tenantId, applicationId, 'CREATING', 'CREATE_FAILED');
+    } else {
+      // §7 step 3 — no candidate claimed (none found or budget exhausted):
+      // for each eligible account in order, one transaction claims a cell
+      // slot on the account, counts the cell on the application, creates
+      // the cell (CREATING, deployment slot pre-claimed, definition stamped
+      // from the application record), counts the deployment on the tenant
+      // and creates the deployment. Every account refusing →
+      // InsufficientCapacityError (R-28), unless the claim budget was spent
+      // on candidate cells: the fleet was changing under the request, so
+      // the failure is a retryable ConflictError, not the terminal "raise
+      // maxCells" (ADR-031).
+      let created;
+      try {
+        created = await this.createCellInEligibleAccount(target, makeDeployment, now, idempotencyItem);
+      } catch (error) {
+        const failure =
+          placed.budgetExhausted && error instanceof InsufficientCapacityError
+            ? new ConflictError({
+              message:
+                  `Placement lost ${MAX_CLAIM_ATTEMPTS} claim races on candidate cells and no eligible account`
+                  + ' has a free cell slot; nothing was written. Retry the request (spec R-18, ADR-031).',
+            })
+            : error;
+        return this.replayOrRethrow(failure, clientToken, requestHash, tenantId, applicationId);
+      }
+      const { cell, account } = created;
+      deployment = created.deployment;
+      workflowInput = {
+        ...this.workflowCell(cell),
+        ...this.workflowAccount(account, context),
+        cellBuild: {
+          operation: 'create',
+          scriptPath: requireField(cell.cellScripts.create, 'application.cellScripts.create'),
+          failedStatus: 'CREATE_FAILED',
+        },
+        tenantId,
+        tenantBuild: {
+          operation: 'create',
+          scriptPath: requireField(cell.tenantScripts.create, 'application.tenantScripts.create'),
+          failedStatus: 'CREATE_FAILED',
+          tenantName: tenant.name,
+          adminEmail,
+        },
+      };
+      // New-cell compensation is the paired transaction: BOTH records move
+      // CREATING → CREATE_FAILED so compensation cannot leave only one
+      // record recoverable (§7.4). Every counter stays held by the
+      // CREATE_FAILED records until the remediation path releases it.
+      compensate = (reason) =>
+        this.config.placement.failCreatingCellAndDeployment({
+          cellKey: cellKey(cell.cellId),
+          deploymentKey: deploymentKey(tenantId, applicationId),
+          statusReason: reason,
+          updatedAt: new Date().toISOString(),
+        });
+    }
+
+    // One execution per deployment + operation attempt; the timestamp keeps
+    // retries unique. The verb is one letter so the name stays under Step
+    // Functions' 80-character cap at a 32-character applicationId
+    // (26 + 1 + 32 + 3 + 13 = 75).
+    await this.startWorkflow(`${tenantId}-${applicationId}-c-${Date.now()}`, workflowInput, compensate);
+    return { deployment: toDeploymentSummary(deployment) };
+  };
+
+  GetDeployment = async (
+    input: GetDeploymentServerInput,
     _context: CallerContext,
-  ): Promise<GetResourceServerOutput> => {
-    const tenant = await this.getTenantOrThrow(requireField(input.tenantId, 'tenantId'));
-    // The tenant deployment's effective definition is the cell's stamped
-    // definition (ADR-012) — resolved here, never stored on the tenant.
-    const cell = await this.getCellForTenant(tenant);
+  ): Promise<GetDeploymentServerOutput> => {
+    const deployment = await this.getDeploymentOrThrow(
+      requireField(input.tenantId, 'tenantId'),
+      requireField(input.applicationId, 'applicationId'),
+    );
+    // The deployment's effective definition is the cell's stamped
+    // definition (P-4) — resolved here, never stored on the deployment.
+    const cell = await this.getCellForDeployment(deployment);
     return {
+      deployment: toDeploymentSummary(deployment),
       source: cell.source,
       scripts: cell.tenantScripts,
-      status: tenant.status,
-      statusReason: tenant.statusReason,
-      lastBuildId: tenant.lastBuildId,
-      cellId: tenant.cellId,
       accountId: cell.accountId,
     };
   };
 
-  UpdateResource = async (
-    input: UpdateResourceServerInput,
+  UpdateDeployment = async (
+    input: UpdateDeploymentServerInput,
     context: CallerContext,
-  ): Promise<UpdateResourceServerOutput> => {
+  ): Promise<UpdateDeploymentServerOutput> => {
     const tenantId = requireField(input.tenantId, 'tenantId');
-    const existing = await this.getTenantOrThrow(tenantId);
+    const applicationId = requireField(input.applicationId, 'applicationId');
+    const existing = await this.getDeploymentOrThrow(tenantId, applicationId);
 
     // Allowed from ACTIVE and UPDATE_FAILED only. From CREATE_FAILED the
     // remediation is delete + recreate — the create script never completed.
     if (!UPDATABLE_STATUSES.includes(existing.status)) {
       throw new ConflictError({
-        message: `Tenant ${tenantId} is ${existing.status}; the deployment can be re-applied from ACTIVE or UPDATE_FAILED`,
+        message: `Deployment ${tenantId}/${applicationId} is ${existing.status}; it can be re-applied from ACTIVE or UPDATE_FAILED`,
       });
     }
 
-    // Cross-entity guard (§5): no tenant builds against a shared deployment
-    // that is mid-change. This read-then-act check is the documented
-    // tolerated one-directional guard — an overlap can fail a build but
-    // never corrupts control plane state.
-    const cell = await this.getCellForTenant(existing);
+    // Cross-entity guard (R-13): no tenant builds against a shared
+    // deployment that is mid-change. This read-then-act check is the
+    // documented tolerated one-directional guard — an overlap can fail a
+    // build but never corrupts control plane state.
+    const cell = await this.getCellForDeployment(existing);
     if (cell.status !== 'ACTIVE') {
       throw new ConflictError({
-        message: `Cell ${cell.cellId} is ${cell.status}; the tenant deployment can be re-applied only while its cell is ACTIVE`,
+        message: `Cell ${cell.cellId} is ${cell.status}; the deployment can be re-applied only while its cell is ACTIVE`,
       });
     }
 
     const account = await this.getAccountForCell(cell);
-    const updating = await this.transitionTenant(tenantId, UPDATABLE_STATUSES, 'UPDATING');
+    const tenant = await this.getTenantForDeployment(existing);
+    const updating = await this.transitionDeployment(tenantId, applicationId, UPDATABLE_STATUSES, 'UPDATING');
     await this.startWorkflow(
-      `${tenantId}-update-${Date.now()}`,
+      `${tenantId}-${applicationId}-u-${Date.now()}`,
       {
-        ...this.workflowSource(cell),
+        ...this.workflowCell(cell),
         ...this.workflowAccount(account, context),
-        cellId: existing.cellId,
         tenantId,
         tenantBuild: {
           operation: 'update',
           scriptPath: requireField(cell.tenantScripts.update, 'cell.tenantScripts.update'),
           failedStatus: 'UPDATE_FAILED',
-          tenantName: existing.name,
+          tenantName: tenant.name,
           adminEmail: '',
         },
       },
-      this.tenantCompensation(tenantId, 'UPDATING', 'UPDATE_FAILED'),
+      this.deploymentCompensation(tenantId, applicationId, 'UPDATING', 'UPDATE_FAILED'),
     );
-    return { tenant: toSummary(updating) };
+    return { deployment: toDeploymentSummary(updating) };
+  };
+
+  DeleteDeployment = async (
+    input: DeleteDeploymentServerInput,
+    context: CallerContext,
+  ): Promise<DeleteDeploymentServerOutput> => {
+    const tenantId = requireField(input.tenantId, 'tenantId');
+    const applicationId = requireField(input.applicationId, 'applicationId');
+    const existing = await this.getDeploymentOrThrow(tenantId, applicationId);
+
+    if (IN_FLIGHT.includes(existing.status)) {
+      throw new ConflictError({
+        message: `Deployment ${tenantId}/${applicationId} is ${existing.status}; wait for the operation to finish`,
+      });
+    }
+
+    // Delete is allowed regardless of cell status (P-9) — the cell, account
+    // and tenant records are read only to resolve the stamped source, the
+    // tenant delete script, the provisioning role to assume and the tenant
+    // name the script receives.
+    const cell = await this.getCellForDeployment(existing);
+    const account = await this.getAccountForCell(cell);
+    const tenant = await this.getTenantForDeployment(existing);
+
+    const deleting = await this.transitionDeployment(
+      tenantId,
+      applicationId,
+      DEPLOYMENT_DELETABLE_STATUSES,
+      'DELETING',
+    );
+    await this.startWorkflow(
+      `${tenantId}-${applicationId}-d-${Date.now()}`,
+      {
+        ...this.workflowCell(cell),
+        ...this.workflowAccount(account, context),
+        tenantId,
+        tenantBuild: {
+          operation: 'delete',
+          scriptPath: requireField(cell.tenantScripts.delete, 'cell.tenantScripts.delete'),
+          failedStatus: 'DELETE_FAILED',
+          tenantName: tenant.name,
+          adminEmail: '',
+        },
+      },
+      this.deploymentCompensation(tenantId, applicationId, 'DELETING', 'DELETE_FAILED'),
+    );
+    return { deployment: toDeploymentSummary(deleting) };
+  };
+
+  ListDeployments = async (
+    input: ListDeploymentsServerInput,
+    _context: CallerContext,
+  ): Promise<ListDeploymentsServerOutput> => {
+    // At most one filter (§5.2); each is a partition-pinned query (R-10). An
+    // unknown id naturally yields an empty page — the filter is a query
+    // predicate, not a resource lookup.
+    requireAtMostOneFilter({
+      tenantId: input.tenantId,
+      cellId: input.cellId,
+      applicationId: input.applicationId,
+    });
+    const repository = this.config.deploymentRepository;
+    let page;
+    if (input.tenantId !== undefined) {
+      // A tenant's deployments share its base-table partition (§4.7).
+      page = await repository.queryPartition(
+        listDeploymentsByTenantQuery(input.tenantId),
+        input.maxResults,
+        input.nextToken,
+      );
+    } else {
+      const query =
+        input.cellId !== undefined
+          ? listDeploymentsByCellQuery(input.cellId)
+          : input.applicationId !== undefined
+            ? listDeploymentsByApplicationQuery(input.applicationId)
+            : listDeploymentsQuery();
+      page = await repository.queryIndex(query, input.maxResults, input.nextToken);
+    }
+    return {
+      deployments: page.items.map(toDeploymentSummary),
+      nextToken: page.nextToken,
+    };
   };
 
   // -------------------------------------------------------------------
-  // Cell operations
+  // Cell operations (§5.3)
   // -------------------------------------------------------------------
 
   GetCell = async (
@@ -647,11 +771,16 @@ export class TenantService implements TenantServiceService<CallerContext> {
     input: ListCellsServerInput,
     _context: CallerContext,
   ): Promise<ListCellsServerOutput> => {
-    // Unfiltered listing uses GSI-1's static CELL partition; the ?accountId=
-    // filter uses the cell items' GSI-2 ACCOUNT#<id> partition. An unknown
-    // accountId yields an empty page — a query predicate, not a lookup (§5).
+    // Unfiltered listing uses GSI-1's static CELL partition; ?accountId=
+    // uses the cells' GSI-2 ACCOUNT#<id> partition and ?applicationId= their
+    // GSI-3 APPLICATION#<id> partition (§4.7). At most one filter (§5.3).
+    requireAtMostOneFilter({ accountId: input.accountId, applicationId: input.applicationId });
     const query =
-      input.accountId === undefined ? listCellsQuery() : listCellsByAccountQuery(input.accountId);
+      input.accountId !== undefined
+        ? listCellsByAccountQuery(input.accountId)
+        : input.applicationId !== undefined
+          ? listCellsByApplicationQuery(input.applicationId)
+          : listCellsQuery();
     const page = await this.config.cellRepository.queryIndex(
       query,
       input.maxResults,
@@ -672,8 +801,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
 
     // Allowed from ACTIVE/UPDATE_FAILED; 409 if in-flight or CREATE_FAILED —
     // re-running the update script against a half-created shared deployment
-    // would break the create/update script contract (§5). Remediation for a
-    // failed cell create is tenant delete + cell delete.
+    // would break the create/update script contract (§5.3). Remediation for
+    // a failed cell create is deployment delete + cell delete.
     if (!UPDATABLE_STATUSES.includes(existing.status)) {
       throw new ConflictError({
         message: `Cell ${cellId} is ${existing.status}; the shared deployment can be re-applied from ACTIVE or UPDATE_FAILED`,
@@ -685,9 +814,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
     await this.startWorkflow(
       `${cellId}-cell-update-${Date.now()}`,
       {
-        ...this.workflowSource(existing),
+        ...this.workflowCell(existing),
         ...this.workflowAccount(account, context),
-        cellId,
         cellBuild: {
           operation: 'update',
           scriptPath: requireField(existing.cellScripts.update, 'cell.cellScripts.update'),
@@ -729,9 +857,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
     await this.startWorkflow(
       `${cellId}-cell-delete-${Date.now()}`,
       {
-        ...this.workflowSource(existing),
+        ...this.workflowCell(existing),
         ...this.workflowAccount(account, context),
-        cellId,
         cellBuild: {
           operation: 'delete',
           scriptPath: requireField(existing.cellScripts.delete, 'cell.cellScripts.delete'),
@@ -744,7 +871,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
   };
 
   // -------------------------------------------------------------------
-  // Account operations (§5.3, ADR-024, ADR-027)
+  // Account operations (§5.4, ADR-024, ADR-027, ADR-033)
   // -------------------------------------------------------------------
 
   PutAccount = async (
@@ -767,6 +894,21 @@ export class TenantService implements TenantServiceService<CallerContext> {
           `Account ${accountId}: externalId is required when owner is TENANT. Install the ${this.config.fleetName} role pair`
           + ' in that account with an externalId and pass the same value here (spec §6.4, ADR-029).',
       });
+    }
+
+    // ADR-033: an allowlist names registered applications only (404
+    // otherwise). An empty list would admit nothing — omit the field to
+    // make the account shared.
+    const applicationIds = input.applicationIds;
+    if (applicationIds !== undefined) {
+      if (applicationIds.length === 0) {
+        throw new ValidationException({
+          message: `Account ${accountId}: applicationIds must name at least one application, or be omitted to admit every application (ADR-033)`,
+        });
+      }
+      for (const applicationId of applicationIds) {
+        await this.getApplicationOrThrow(applicationId);
+      }
     }
 
     // Owner is immutable (R-24). A re-registration with another owner is
@@ -820,6 +962,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           accountId,
           owner,
           maxCells,
+          applicationIds,
           externalId: input.externalId,
           now: new Date().toISOString(),
         }),
@@ -881,19 +1024,126 @@ export class TenantService implements TenantServiceService<CallerContext> {
   };
 
   // -------------------------------------------------------------------
+  // Application operations (§5.5, ADR-032, ADR-036)
+  // -------------------------------------------------------------------
+
+  PutApplication = async (
+    input: PutApplicationServerInput,
+    _context: CallerContext,
+  ): Promise<PutApplicationServerOutput> => {
+    const applicationId = requireField(input.applicationId, 'applicationId');
+    const source = requireField(input.source, 'source');
+    const cellScripts = requireField(input.cellScripts, 'cellScripts');
+    const tenantScripts = requireField(input.tenantScripts, 'tenantScripts');
+    const maxTenants = requireField(input.maxTenants, 'maxTenants');
+    // The generated validators have already enforced the definition's shape
+    // (every script path non-empty, maxTenants >= 1, the id's charset) —
+    // what remains is the supply-chain check, warn-and-allow (ADR-020): the
+    // source is fetched fresh on every build, so an unpinned ref is logged
+    // at registration, when the operator is present.
+    const pinningWarning = sourcePinningWarning(source);
+    if (pinningWarning !== undefined) {
+      (this.config.warn ?? console.warn)(`PutApplication ${applicationId}: ${pinningWarning}`);
+    }
+
+    // One create-or-replace write (R-29): the definition and the strategy
+    // are replaced, cellCount is never touched. Cells already stamped keep
+    // their definition (P-4).
+    const application = await this.config.applicationRepository.update(
+      applicationKey(applicationId),
+      putApplicationUpdate({
+        applicationId,
+        source: {
+          type: requireField(source.type, 'source.type'),
+          location: requireField(source.location, 'source.location'),
+          sourceVersion: source.sourceVersion,
+        },
+        cellScripts: {
+          create: requireField(cellScripts.create, 'cellScripts.create'),
+          update: requireField(cellScripts.update, 'cellScripts.update'),
+          delete: requireField(cellScripts.delete, 'cellScripts.delete'),
+        },
+        tenantScripts: {
+          create: requireField(tenantScripts.create, 'tenantScripts.create'),
+          update: requireField(tenantScripts.update, 'tenantScripts.update'),
+          delete: requireField(tenantScripts.delete, 'tenantScripts.delete'),
+        },
+        maxTenants,
+        placementStrategy: input.placementStrategy ?? DEFAULT_PLACEMENT_STRATEGY,
+        now: new Date().toISOString(),
+      }),
+    );
+    return { application: toApplicationSummary(application) };
+  };
+
+  GetApplication = async (
+    input: GetApplicationServerInput,
+    _context: CallerContext,
+  ): Promise<GetApplicationServerOutput> => {
+    const application = await this.getApplicationOrThrow(requireField(input.applicationId, 'applicationId'));
+    return { application: toApplicationSummary(application) };
+  };
+
+  ListApplications = async (
+    input: ListApplicationsServerInput,
+    _context: CallerContext,
+  ): Promise<ListApplicationsServerOutput> => {
+    const page = await this.config.applicationRepository.queryIndex(
+      listApplicationsQuery(),
+      input.maxResults,
+      input.nextToken,
+    );
+    return {
+      applications: page.items.map(toApplicationSummary),
+      nextToken: page.nextToken,
+    };
+  };
+
+  DeleteApplication = async (
+    input: DeleteApplicationServerInput,
+    _context: CallerContext,
+  ): Promise<DeleteApplicationServerOutput> => {
+    const applicationId = requireField(input.applicationId, 'applicationId');
+    const existing = await this.getApplicationOrThrow(applicationId);
+
+    // Empty applications only (P-10): ONE conditional delete on
+    // cellCount = 0 — the counterpart of the application's cell-count claim
+    // (ADR-032). Accounts naming the application in their allowlist are left
+    // alone: the id is inert once nothing can be placed for it (ADR-033).
+    try {
+      await this.config.applicationRepository.delete(applicationKey(applicationId), APPLICATION_EMPTY_CONDITION);
+    } catch (error) {
+      if (error instanceof ConditionFailedError) {
+        throw new ConflictError({
+          message: `Application ${applicationId} cannot be deregistered — it still has cells (delete them first) or was modified concurrently`,
+        });
+      }
+      throw error;
+    }
+    return { application: toApplicationSummary(existing) };
+  };
+
+  // -------------------------------------------------------------------
   // Placement (§7)
   // -------------------------------------------------------------------
 
   /**
    * §7 step 0 — TARGET. With an `accountId`: that one registered account
-   * (404 otherwise), any owner, and its cells as candidates. Without: every
-   * vendor-owned account, oldest registered first, and all cells in those
-   * accounts as candidates. The account records are read once here and
+   * (404 otherwise), any owner, which MUST admit the application (400
+   * otherwise, ADR-033), and its cells as candidates. Without: every
+   * vendor-owned account that admits the application — dedicated accounts
+   * before shared ones (ADR-035), ordered inside each group by the
+   * application's placement strategy (ADR-036) — and the application's
+   * cells as candidates. The account records are read once here and
    * carried through: the workflow input needs the account's external id,
-   * and the account map is what excludes tenant-owned cells from an
-   * untargeted scan.
+   * and the account map is what excludes ineligible accounts' cells from a
+   * scan.
    */
-  private async resolvePlacementTarget(accountId: string | undefined): Promise<PlacementTarget> {
+  private async resolvePlacementTarget(
+    application: ApplicationRecord,
+    accountId: string | undefined,
+  ): Promise<PlacementTarget> {
+    const applicationId = application.applicationId;
     if (accountId !== undefined) {
       const account = await this.config.accountRepository.get(accountKey(accountId));
       if (account === undefined) {
@@ -901,25 +1151,38 @@ export class TenantService implements TenantServiceService<CallerContext> {
           message: `Account ${accountId} is not registered; register it with PutAccount first`,
         });
       }
+      if (!admits(account, applicationId)) {
+        // The request names a wrong account, not a full one — a 400, not a
+        // capacity error (ADR-033).
+        throw new ValidationException({
+          message:
+            `Account ${accountId} does not admit application ${applicationId} (applicationIds = [${(account.applicationIds ?? []).join(', ')}]);`
+            + ' name an account that admits it, or re-register the account with PutAccount',
+        });
+      }
       return {
+        application,
         accounts: [account],
         accountsById: new Map([[accountId, account]]),
         candidateQuery: listCellsByAccountQuery(accountId),
         targeted: true,
       };
     }
-    const vendorAccounts: AccountRecord[] = [];
+    const eligible: AccountRecord[] = [];
     let nextToken: string | undefined;
     do {
       const page = await this.config.accountRepository.queryIndex(listAccountsQuery(), undefined, nextToken);
       nextToken = page.nextToken;
-      vendorAccounts.push(...page.items.filter((account) => account.owner === AccountOwner.VENDOR));
+      eligible.push(
+        ...page.items.filter((account) => account.owner === AccountOwner.VENDOR && admits(account, applicationId)),
+      );
     } while (nextToken !== undefined);
-    vendorAccounts.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    eligible.sort(accountOrder(application.placementStrategy));
     return {
-      accounts: vendorAccounts,
-      accountsById: new Map(vendorAccounts.map((account) => [account.accountId, account])),
-      candidateQuery: listCellsQuery(),
+      application,
+      accounts: eligible,
+      accountsById: new Map(eligible.map((account) => [account.accountId, account])),
+      candidateQuery: listCellsByApplicationQuery(applicationId),
       targeted: false,
     };
   }
@@ -927,18 +1190,19 @@ export class TenantService implements TenantServiceService<CallerContext> {
   /**
    * §7 steps 1–2: nominate candidates from the index (eventually consistent
    * — never a guard; the conditional claim on the base table decides),
-   * filter client-side for ACTIVE with free capacity in an eligible
-   * account, and attempt at most {@link MAX_CLAIM_ATTEMPTS} claims, oldest
-   * first. A lost race moves to the next candidate; an ambiguous outcome
-   * fails the request — the same tenant is never retargeted. Returns a
-   * {@link PlacementMiss} when no candidate was claimed (fall through to
-   * new-cell creation), saying whether the miss was "no candidate" or
-   * "budget spent on cells that still have room" — the caller needs the
-   * difference to report a full fleet correctly (ADR-031).
+   * filter client-side for the application's ACTIVE cells with free
+   * capacity in an eligible account, and attempt at most
+   * {@link MAX_CLAIM_ATTEMPTS} claims, oldest first. A lost race moves to
+   * the next candidate; an ambiguous outcome fails the request — the same
+   * deployment is never retargeted. Returns a {@link PlacementMiss} when no
+   * candidate was claimed (fall through to new-cell creation), saying
+   * whether the miss was "no candidate" or "budget spent on cells that
+   * still have room" — the caller needs the difference to report a full
+   * fleet correctly (ADR-031).
    */
   private async placeIntoExistingCell(
     target: PlacementTarget,
-    makeTenant: (cellId: string) => TenantRecord,
+    makeDeployment: (cellId: string) => DeploymentRecord,
     updatedAt: string,
     idempotencyItem?: IdempotencyItem,
   ): Promise<PlacementResult | PlacementMiss> {
@@ -952,45 +1216,56 @@ export class TenantService implements TenantServiceService<CallerContext> {
       );
       nextToken = page.nextToken;
       for (const cell of page.items) {
-        // Client-side filter (§7 step 1): placement requires the cell ACTIVE
-        // with free capacity — the same condition the claim re-checks — in
-        // an eligible account (a tenant-owned account's cells are skipped by
-        // an untargeted scan).
+        // Client-side filter (§7 step 1): placement requires a cell of THIS
+        // application (a targeted scan sees every application's cells in
+        // the account), ACTIVE with free capacity — the same condition the
+        // claim re-checks — in an eligible account.
         const account = target.accountsById.get(cell.accountId);
-        if (account === undefined || cell.status !== 'ACTIVE' || cell.tenantCount >= cell.maxTenants) {
+        if (
+          account === undefined ||
+          cell.applicationId !== target.application.applicationId ||
+          cell.status !== 'ACTIVE' ||
+          cell.tenantCount >= cell.maxTenants
+        ) {
           continue;
         }
-        const tenant = makeTenant(cell.cellId);
+        const deployment = makeDeployment(cell.cellId);
         attempts += 1;
         try {
-          await this.config.placement.placeTenantInCell({
+          await this.config.placement.placeDeploymentInCell({
             cellKey: cellKey(cell.cellId),
-            tenant,
+            tenantKey: tenantKey(deployment.tenantId),
+            deployment,
             updatedAt,
             clientRequestToken: ulid(),
             idempotencyItem,
           });
-          return { cell, tenant, account };
+          return { cell, deployment, account };
         } catch (error) {
           if (error instanceof PlacementRaceLostError) {
             if (attempts >= MAX_CLAIM_ATTEMPTS) {
-              // Candidate budget exhausted while capacity exists: fall
-              // through to new-cell creation — over-provisioning rather
-              // than a failed onboard (R-18). The caller learns that the
-              // miss was the budget, not an empty fleet.
+              // Candidate budget exhausted on cells that read as ACTIVE
+              // with room: fall through to new-cell creation —
+              // over-provisioning rather than a failed placement (R-18).
+              // The caller learns that the miss was the budget, not an
+              // empty fleet.
               return { budgetExhausted: true };
             }
             continue;
           }
-          if (error instanceof DuplicateTokenError) {
-            // Replay of an earlier CreateTenant — handled by the caller
-            // (ADR-017), never converted to a 500.
+          // Classified cancellations (ADR-017, ADR-037) propagate for the
+          // caller to map; never converted to a 500.
+          if (
+            error instanceof DuplicateTokenError ||
+            error instanceof DeploymentExistsError ||
+            error instanceof TenantGoneError
+          ) {
             throw error;
           }
           // AmbiguousTransactionError (or anything else): the outcome is
-          // unknown — fail the request; NEVER retarget this tenant (§6).
+          // unknown — fail the request; NEVER retarget this deployment (§7).
           throw new InternalServerError({
-            message: `Tenant placement failed ambiguously: ${errorMessage(error)}`,
+            message: `Deployment placement failed ambiguously: ${errorMessage(error)}`,
           });
         }
       }
@@ -1000,78 +1275,105 @@ export class TenantService implements TenantServiceService<CallerContext> {
 
   /**
    * §7 step 3: for each eligible account in order, one transaction claims a
-   * cell slot on the account (`cellCount < maxCells`) and creates the cell
-   * and the tenant. A refused account condition means the account is full
-   * (or gone): try the next. When every eligible account refuses — or there
-   * is none — the request fails with `InsufficientCapacityError` and
-   * nothing was written (R-28, ADR-026). A duplicate idempotency token
-   * propagates for the caller to replay; anything else is ambiguous.
+   * cell slot on the account (`cellCount < maxCells`), counts the cell on
+   * the application, and creates the cell (stamped from the application
+   * record) and the deployment while counting it on the tenant. A refused
+   * account condition means the account is full (or gone): try the next.
+   * When every eligible account refuses — or there is none — the request
+   * fails with `InsufficientCapacityError` and nothing was written (R-28,
+   * ADR-026). Classified cancellations propagate for the caller; anything
+   * else is ambiguous.
    */
   private async createCellInEligibleAccount(
     target: PlacementTarget,
-    makeTenant: (cellId: string) => TenantRecord,
+    makeDeployment: (cellId: string) => DeploymentRecord,
     now: Date,
     idempotencyItem?: IdempotencyItem,
-  ): Promise<{ cell: CellRecord; tenant: TenantRecord; account: AccountRecord }> {
-    const definition = this.config.cellDefinition;
+  ): Promise<{ cell: CellRecord; deployment: DeploymentRecord; account: AccountRecord }> {
+    const { application } = target;
     for (const account of target.accounts) {
       const cell: CellRecord = {
         cellId: ulid(),
+        applicationId: application.applicationId,
         accountId: account.accountId,
         status: 'CREATING',
-        maxTenants: definition.maxTenants,
+        maxTenants: application.maxTenants,
         tenantCount: 1,
-        source: definition.source,
-        cellScripts: definition.cellScripts,
-        tenantScripts: definition.tenantScripts,
+        source: application.source,
+        cellScripts: application.cellScripts,
+        tenantScripts: application.tenantScripts,
         createdAt: now,
         updatedAt: now,
       };
-      const tenant = makeTenant(cell.cellId);
+      const deployment = makeDeployment(cell.cellId);
       try {
-        await this.config.placement.createCellWithTenant({
+        await this.config.placement.createCellWithDeployment({
           accountKey: accountKey(account.accountId),
+          applicationKey: applicationKey(application.applicationId),
           cell,
-          tenant,
+          tenantKey: tenantKey(deployment.tenantId),
+          deployment,
           updatedAt: now.toISOString(),
           clientRequestToken: ulid(),
           idempotencyItem,
         });
-        return { cell, tenant, account };
+        return { cell, deployment, account };
       } catch (error) {
         if (error instanceof AccountFullError) {
           continue;
         }
-        if (error instanceof DuplicateTokenError) {
+        if (
+          error instanceof DuplicateTokenError ||
+          error instanceof DeploymentExistsError ||
+          error instanceof TenantGoneError ||
+          error instanceof ApplicationGoneError
+        ) {
           throw error;
         }
         // Any other new-cell transaction failure is ambiguous: fail the
-        // request, never retarget the same tenant (§7).
+        // request, never retarget the same deployment (§7).
         throw new InternalServerError({
-          message: `Tenant placement failed ambiguously: ${errorMessage(error)}`,
+          message: `Deployment placement failed ambiguously: ${errorMessage(error)}`,
         });
       }
     }
+    const applicationId = application.applicationId;
     throw new InsufficientCapacityError({
       message: target.targeted
         ? `Account ${target.accounts[0].accountId} has no free cell slot (cellCount = maxCells); raise maxCells with PutAccount or free a cell`
         : target.accounts.length === 0
-          ? 'No vendor-owned account is registered; register one with PutAccount, or name a tenant-owned account in CreateTenant'
-          : `Every vendor-owned account is full (${target.accounts.map((a) => `${a.accountId} ${a.cellCount}/${a.maxCells}`).join(', ')}); raise maxCells or register another account`,
+          ? `No vendor-owned account admits application ${applicationId}; register one with PutAccount (or add ${applicationId} to an account's applicationIds), or name a tenant-owned account in CreateDeployment`
+          : `Every vendor-owned account admitting application ${applicationId} is full (${target.accounts.map((a) => `${a.accountId} ${a.cellCount}/${a.maxCells}`).join(', ')}); raise maxCells or register another account`,
     });
   }
 
   /**
-   * ADR-017: replays the original CreateTenant outcome for a duplicate
-   * `clientToken`, or rethrows when the error is not a replay. The
-   * idempotency record is authoritative regardless of its `expiresAt` —
-   * DynamoDB TTL is garbage collection, not semantics.
+   * Maps the classified placement cancellations (§7.1 outcomes): a duplicate
+   * `clientToken` replays the original CreateDeployment outcome (ADR-017),
+   * an existing deployment is the 409, a vanished tenant or application the
+   * 404; anything else is rethrown. The idempotency record is authoritative
+   * regardless of its `expiresAt` — DynamoDB TTL is garbage collection, not
+   * semantics.
    */
   private async replayOrRethrow(
     error: unknown,
     clientToken: string | undefined,
     requestHash: string | undefined,
-  ): Promise<CreateTenantServerOutput> {
+    tenantId: string,
+    applicationId: string,
+    seen?: IdempotencyRecord,
+  ): Promise<CreateDeploymentServerOutput> {
+    if (error instanceof DeploymentExistsError) {
+      throw new ConflictError({
+        message: `Tenant ${tenantId} already has a deployment of application ${applicationId}; re-apply it with UpdateDeployment or delete it first`,
+      });
+    }
+    if (error instanceof TenantGoneError) {
+      throw new ResourceNotFoundError({ message: `Tenant ${tenantId} not found` });
+    }
+    if (error instanceof ApplicationGoneError) {
+      throw new ResourceNotFoundError({ message: `Application ${applicationId} is not registered` });
+    }
     if (
       !(error instanceof DuplicateTokenError) ||
       clientToken === undefined ||
@@ -1079,13 +1381,15 @@ export class TenantService implements TenantServiceService<CallerContext> {
     ) {
       throw error;
     }
-    const record = await this.config.idempotencyRepository.get(idempotencyKey(clientToken));
+    // The record read before placement is reused; a transaction-time
+    // duplicate reads it now.
+    const record = seen ?? (await this.config.idempotencyRepository.get(idempotencyKey(clientToken)));
     if (record === undefined) {
       // The transaction saw the record but the read did not: TTL garbage
-      // collection raced the replay. A retry (same or new token) onboards
-      // a new tenant — surface the conflict rather than guessing.
+      // collection raced the replay. Surface the conflict rather than
+      // guessing.
       throw new ConflictError({
-        message: 'clientToken was already used, but its idempotency record has expired — verify via ListTenants before retrying',
+        message: 'clientToken was already used, but its idempotency record has expired — verify via ListDeployments before retrying',
       });
     }
     if (record.requestHash !== requestHash) {
@@ -1093,16 +1397,18 @@ export class TenantService implements TenantServiceService<CallerContext> {
         message: 'clientToken was already used with different request parameters',
       });
     }
-    const tenant = await this.config.tenantRepository.get(tenantKey(record.tenantId));
-    if (tenant === undefined) {
+    const deployment = await this.config.deploymentRepository.get(
+      deploymentKey(record.tenantId, record.applicationId),
+    );
+    if (deployment === undefined) {
       throw new ConflictError({
-        message: `clientToken was already used to onboard tenant ${record.tenantId}, which no longer exists — retry with a new token`,
+        message: `clientToken was already used to create deployment ${record.tenantId}/${record.applicationId}, which no longer exists — retry with a new token`,
       });
     }
     // The original outcome, whatever its current lifecycle status — a
-    // CREATING tenant is polled as normal, a CREATE_FAILED one surfaces
+    // CREATING deployment is polled as normal, a CREATE_FAILED one surfaces
     // the original failure.
-    return { tenant: toSummary(tenant) };
+    return { deployment: toDeploymentSummary(deployment) };
   }
 
   // -------------------------------------------------------------------
@@ -1116,6 +1422,17 @@ export class TenantService implements TenantServiceService<CallerContext> {
       throw new ResourceNotFoundError({ message: `Tenant ${tenantId} not found` });
     }
     return tenant;
+  }
+
+  /** Reads a deployment or throws the modelled 404. */
+  private async getDeploymentOrThrow(tenantId: string, applicationId: string): Promise<DeploymentRecord> {
+    const deployment = await this.config.deploymentRepository.get(deploymentKey(tenantId, applicationId));
+    if (deployment === undefined) {
+      throw new ResourceNotFoundError({
+        message: `Tenant ${tenantId} has no deployment of application ${applicationId}`,
+      });
+    }
+    return deployment;
   }
 
   /** Reads a cell or throws the modelled 404. */
@@ -1136,6 +1453,17 @@ export class TenantService implements TenantServiceService<CallerContext> {
     return account;
   }
 
+  /** Reads an application or throws the modelled 404. */
+  private async getApplicationOrThrow(applicationId: string): Promise<ApplicationRecord> {
+    const application = await this.config.applicationRepository.get(applicationKey(applicationId));
+    if (application === undefined) {
+      throw new ResourceNotFoundError({
+        message: `Application ${applicationId} is not registered; register it with PutApplication first`,
+      });
+    }
+    return application;
+  }
+
   /**
    * Resolves the account a cell lives in. Cell slot lifetime = cell record
    * lifetime and `DeleteAccount` refuses while `cellCount > 0` (ADR-024), so
@@ -1153,32 +1481,48 @@ export class TenantService implements TenantServiceService<CallerContext> {
   }
 
   /**
-   * Resolves the cell a tenant is placed in. Slot lifetime = tenant record
-   * lifetime (ADR-013), so a tenant referencing a missing cell is an
-   * invariant violation — an internal error, never a client 404.
+   * Resolves the cell a deployment is placed in. Slot lifetime = deployment
+   * record lifetime (ADR-013), so a deployment referencing a missing cell is
+   * an invariant violation — an internal error, never a client 404.
    */
-  private async getCellForTenant(tenant: TenantRecord): Promise<CellRecord> {
-    const cell = await this.config.cellRepository.get(cellKey(tenant.cellId));
+  private async getCellForDeployment(deployment: DeploymentRecord): Promise<CellRecord> {
+    const cell = await this.config.cellRepository.get(cellKey(deployment.cellId));
     if (cell === undefined) {
       throw new InternalServerError({
-        message: `Tenant ${tenant.tenantId} references missing cell ${tenant.cellId}`,
+        message: `Deployment ${deployment.tenantId}/${deployment.applicationId} references missing cell ${deployment.cellId}`,
       });
     }
     return cell;
   }
 
   /**
-   * Compare-and-set tenant lifecycle transition on the operation's accepted
-   * status set (§5). A stale transition (record concurrently mutated or
-   * gone) maps to the 409.
+   * Resolves a deployment's tenant. `DeleteTenant` refuses while
+   * `deploymentCount > 0` (ADR-037), so a deployment whose tenant is missing
+   * is an invariant violation — an internal error, never a client 404.
    */
-  private async transitionTenant(
+  private async getTenantForDeployment(deployment: DeploymentRecord): Promise<TenantRecord> {
+    const tenant = await this.config.tenantRepository.get(tenantKey(deployment.tenantId));
+    if (tenant === undefined) {
+      throw new InternalServerError({
+        message: `Deployment ${deployment.tenantId}/${deployment.applicationId} references missing tenant ${deployment.tenantId}`,
+      });
+    }
+    return tenant;
+  }
+
+  /**
+   * Compare-and-set deployment lifecycle transition on the operation's
+   * accepted status set (R-12). A stale transition (record concurrently
+   * mutated or gone) maps to the 409.
+   */
+  private async transitionDeployment(
     tenantId: string,
+    applicationId: string,
     fromAnyOf: readonly LifecycleStatus[],
     to: InFlightLifecycleStatus,
-  ): Promise<TenantRecord> {
+  ): Promise<DeploymentRecord> {
     try {
-      return await this.config.tenantRepository.transitionStatus(tenantKey(tenantId), {
+      return await this.config.deploymentRepository.transitionStatus(deploymentKey(tenantId, applicationId), {
         fromAnyOf,
         to,
         updatedAt: new Date().toISOString(),
@@ -1187,14 +1531,14 @@ export class TenantService implements TenantServiceService<CallerContext> {
     } catch (error) {
       if (error instanceof StaleTransitionError) {
         throw new ConflictError({
-          message: `Tenant ${tenantId} was modified concurrently; re-read and retry`,
+          message: `Deployment ${tenantId}/${applicationId} was modified concurrently; re-read and retry`,
         });
       }
       throw error;
     }
   }
 
-  /** Compare-and-set cell lifecycle transition — same discipline as the tenant's. */
+  /** Compare-and-set cell lifecycle transition — same discipline as the deployment's. */
   private async transitionCell(
     cellId: string,
     fromAnyOf: readonly LifecycleStatus[],
@@ -1217,14 +1561,15 @@ export class TenantService implements TenantServiceService<CallerContext> {
     }
   }
 
-  /** Single-CAS tenant compensation: in-flight status → the matching *_FAILED (§6). */
-  private tenantCompensation(
+  /** Single-CAS deployment compensation: in-flight status → the matching *_FAILED (§7.4). */
+  private deploymentCompensation(
     tenantId: string,
+    applicationId: string,
     inFlight: InFlightLifecycleStatus,
     failed: FailedLifecycleStatus,
   ): Compensation {
     return (reason) =>
-      this.config.tenantRepository.transitionStatus(tenantKey(tenantId), {
+      this.config.deploymentRepository.transitionStatus(deploymentKey(tenantId, applicationId), {
         fromAnyOf: [inFlight],
         to: failed,
         updatedAt: new Date().toISOString(),
@@ -1232,7 +1577,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
       });
   }
 
-  /** Single-CAS cell compensation: in-flight status → the matching *_FAILED (§6). */
+  /** Single-CAS cell compensation: in-flight status → the matching *_FAILED (§7.4). */
   private cellCompensation(
     cellId: string,
     inFlight: InFlightLifecycleStatus,
@@ -1248,19 +1593,22 @@ export class TenantService implements TenantServiceService<CallerContext> {
   }
 
   /**
-   * Resolves the workflow's source fields from a cell's stamped definition.
-   * `sourceVersion` is the stamped supply-chain pin (T5/M10) — the empty
-   * string means unpinned, and the workflow's source-pin Choice then skips
-   * the CodeBuild `SourceVersion` override (input contract, §7).
+   * Resolves the workflow's cell-derived fields (R-20): the source from the
+   * cell's stamped definition — never from the application record — plus
+   * the cell and application ids. `sourceVersion` is the stamped
+   * supply-chain pin (T5/M10) — the empty string means unpinned, and the
+   * workflow's source-pin Choice then skips the CodeBuild `SourceVersion`
+   * override (input contract, §8).
    */
-  private workflowSource(
+  private workflowCell(
     cell: CellRecord,
-  ): { sourceType: string; sourceLocation: string; sourceVersion: string } {
-    const source: StampedSourceDefinition = cell.source;
+  ): Pick<ProvisioningWorkflowInput, 'sourceType' | 'sourceLocation' | 'sourceVersion' | 'cellId' | 'applicationId'> {
     return {
-      sourceType: requireField(source.type, 'cell.source.type'),
-      sourceLocation: requireField(source.location, 'cell.source.location'),
-      sourceVersion: source.sourceVersion ?? '',
+      sourceType: requireField(cell.source.type, 'cell.source.type'),
+      sourceLocation: requireField(cell.source.location, 'cell.source.location'),
+      sourceVersion: cell.source.sourceVersion ?? '',
+      cellId: cell.cellId,
+      applicationId: cell.applicationId,
     };
   }
 
@@ -1291,8 +1639,9 @@ export class TenantService implements TenantServiceService<CallerContext> {
 
   /**
    * Starts provisioning; a rejected start is compensated exactly for the
-   * in-flight state the operation created (§6). Compensation is best-effort
-   * (ADR-011) — its own failure must not mask the original start failure.
+   * in-flight state the operation created (§7.4). Compensation is
+   * best-effort (ADR-011) — its own failure must not mask the original
+   * start failure.
    */
   private async startWorkflow(
     name: string,
@@ -1320,12 +1669,61 @@ export class TenantService implements TenantServiceService<CallerContext> {
   }
 }
 
-/** Projects the tenant domain record to the API summary (including its placement). */
-function toSummary(record: TenantRecord): TenantSummary {
+/** Whether an account admits an application: shared (no allowlist) or named in it (ADR-033). */
+function admits(account: AccountRecord, applicationId: string): boolean {
+  return account.applicationIds === undefined || account.applicationIds.includes(applicationId);
+}
+
+/**
+ * The §7.1 step-3 account order: dedicated accounts (an allowlist is
+ * present) before shared ones (ADR-035); inside each group `FILL` takes the
+ * oldest registered first and `ROUND_ROBIN` the one with the fewest cells
+ * first, ties oldest first (ADR-036). Both read `cellCount` as nominated —
+ * the account's conditional claim is the guard.
+ */
+function accountOrder(strategy: PlacementStrategy): (a: AccountRecord, b: AccountRecord) => number {
+  return (a, b) => {
+    const groupA = a.applicationIds === undefined ? 1 : 0;
+    const groupB = b.applicationIds === undefined ? 1 : 0;
+    if (groupA !== groupB) {
+      return groupA - groupB;
+    }
+    if (strategy === PlacementStrategy.ROUND_ROBIN && a.cellCount !== b.cellCount) {
+      return a.cellCount - b.cellCount;
+    }
+    return a.createdAt.getTime() - b.createdAt.getTime();
+  };
+}
+
+/** The list-filter rule (§5.2, §5.3): a filter is a partition; two filters are a 400. */
+function requireAtMostOneFilter(filters: Record<string, string | undefined>): void {
+  const given = Object.entries(filters)
+    .filter(([, value]) => value !== undefined)
+    .map(([name]) => name);
+  if (given.length > 1) {
+    throw new ValidationException({
+      message: `At most one filter per request; got ${given.join(' and ')}`,
+    });
+  }
+}
+
+/** Projects the tenant domain record to the API summary. */
+function toTenantSummary(record: TenantRecord): TenantSummary {
   return {
     tenantId: record.tenantId,
     name: record.name,
     description: record.description,
+    deploymentCount: record.deploymentCount,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+/** Projects the deployment domain record to the API summary (including its placement). */
+function toDeploymentSummary(record: DeploymentRecord): DeploymentSummary {
+  return {
+    tenantId: record.tenantId,
+    applicationId: record.applicationId,
     cellId: record.cellId,
     status: record.status,
     statusReason: record.statusReason,
@@ -1343,9 +1741,25 @@ function toAccountSummary(record: AccountRecord): AccountSummary {
   return {
     accountId: record.accountId,
     owner: record.owner,
+    applicationIds: record.applicationIds === undefined ? undefined : [...record.applicationIds],
     maxCells: record.maxCells,
     cellCount: record.cellCount,
     externalIdConfigured: record.externalId !== undefined,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+/** Projects the application record to the API summary. */
+function toApplicationSummary(record: ApplicationRecord): ApplicationSummary {
+  return {
+    applicationId: record.applicationId,
+    source: record.source,
+    cellScripts: record.cellScripts,
+    tenantScripts: record.tenantScripts,
+    maxTenants: record.maxTenants,
+    placementStrategy: record.placementStrategy,
+    cellCount: record.cellCount,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
@@ -1355,6 +1769,7 @@ function toAccountSummary(record: AccountRecord): AccountSummary {
 function toCellSummary(record: CellRecord): CellSummary {
   return {
     cellId: record.cellId,
+    applicationId: record.applicationId,
     accountId: record.accountId,
     status: record.status,
     maxTenants: record.maxTenants,

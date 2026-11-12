@@ -4,9 +4,9 @@
 #
 # control-plane tenant UPDATE script for tenant-identity (ADR-0028, mounting
 # spec §7.2). Runs in the control-plane tenant CodeBuild project with
-# TENANT_ID, TENANT_NAME, CELL_ID, OPERATION, OPERATOR_ID, AWS_REGION and the
-# optional SCOPES, a space-separated list of the scopes the tenant is
-# entitled to (ADR-0035).
+# TENANT_ID, TENANT_NAME, APPLICATION_ID, CELL_ID, OPERATION, OPERATOR_ID,
+# AWS_REGION and the optional SCOPES, a space-separated list of the scopes the
+# tenant is entitled to (ADR-0035).
 #
 # Reconcile only: the tenant's identity must be ACTIVE. It never creates, so a
 # tenant whose identity was lost fails loudly instead of being silently
@@ -17,6 +17,7 @@ set -euo pipefail
 
 : "${TENANT_ID:?TENANT_ID env var is required}"
 : "${TENANT_NAME:?TENANT_NAME env var is required}"
+: "${APPLICATION_ID:?APPLICATION_ID env var is required}"
 : "${CELL_ID:?CELL_ID env var is required}"
 : "${OPERATION:?OPERATION env var is required}"
 : "${OPERATOR_ID:?OPERATOR_ID env var is required}"
@@ -26,7 +27,7 @@ set -euo pipefail
 # shellcheck source=../lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
-echo "Reconciling identity for tenant ${TENANT_ID} in cell ${CELL_ID} (${OPERATION}, operator ${OPERATOR_ID})"
+echo "Reconciling identity for tenant ${TENANT_ID} in application ${APPLICATION_ID}, cell ${CELL_ID} (${OPERATION}, operator ${OPERATOR_ID})"
 
 read_identity_param apiUrl API_URL
 

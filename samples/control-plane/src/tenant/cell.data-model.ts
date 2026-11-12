@@ -1,7 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { DataModel, DynamoDBItem, GSI1_INDEX_NAME, GSI2_INDEX_NAME } from '../shared/data-model';
+import { APPLICATION_KEY_PREFIX } from './application.data-model';
+import { DataModel, DynamoDBItem, GSI1_INDEX_NAME, GSI2_INDEX_NAME, GSI3_INDEX_NAME } from '../shared/data-model';
 import { KeyBuilder } from '../shared/key-builder';
 import { GsiQuery, ItemKey, StatusTransition, WriteCondition } from '../shared/repository';
 import {
@@ -16,7 +17,7 @@ export const CELL_KEY_PREFIX = 'CELL';
 export const CELL_SORT_KEY = 'META';
 /** GSI-1 static partition value shared by all cell items (§4). */
 export const CELL_GSI1_PARTITION = 'CELL';
-/** Prefix of the GSI-2 partition that groups a cell under its account (§4.5). */
+/** Prefix of the GSI-2 partition that groups a cell under its account (§4.7). */
 export const ACCOUNT_GSI2_PREFIX = 'ACCOUNT';
 
 /**
@@ -31,16 +32,19 @@ export const DELETABLE_CELL_STATUSES: readonly LifecycleStatus[] = [
 ];
 
 /**
- * The cell domain record — a deployment unit holding one shared application
- * deployment plus up to `maxTenants` tenants (ADR-012). The definition
- * (`source`, `cellScripts`, `tenantScripts`, `maxTenants`) is stamped from
- * deployment configuration at creation and immutable for the cell's
- * lifetime. `tenantCount` is the atomic slot counter — the capacity and
- * occupancy guard (ADR-013); only the placement transaction increments it
- * and only the delete workflow's terminal transaction decrements it.
+ * The cell domain record — a deployment unit of one application holding one
+ * shared application deployment plus up to `maxTenants` per-tenant
+ * deployments (ADR-012, ADR-032). The definition (`source`, `cellScripts`,
+ * `tenantScripts`, `maxTenants`) is stamped from the application record at
+ * creation and immutable for the cell's lifetime. `tenantCount` is the
+ * atomic slot counter — the capacity and occupancy guard (ADR-013); only the
+ * placement transaction increments it and only the delete workflow's
+ * terminal transaction decrements it.
  */
 export interface CellRecord {
   readonly cellId: string;
+  /** The application the cell serves — assigned at creation, immutable (ADR-032). */
+  readonly applicationId: string;
   /** The account the cell is provisioned in — assigned at creation, immutable (ADR-024). */
   readonly accountId: string;
   readonly status: LifecycleStatus;
@@ -61,18 +65,22 @@ export interface CellRecord {
 }
 
 /**
- * DynamoDB item representation of a {@link CellRecord}. Cell items carry
- * both GSI key sets (§4.5): GSI-1's static `CELL` partition serves
- * `ListCells` and the placement candidate scan; GSI-2 partitions them by
- * account (`ACCOUNT#<accountId>`) for `ListCells?accountId=` and the
- * targeted candidate scan.
+ * DynamoDB item representation of a {@link CellRecord}. Cell items carry all
+ * three GSI key sets (§4.7): GSI-1's static `CELL` partition serves
+ * `ListCells`; GSI-2 partitions them by account (`ACCOUNT#<accountId>`) for
+ * `ListCells?accountId=` and the targeted candidate scan; GSI-3 partitions
+ * them by application (`APPLICATION#<applicationId>`) for
+ * `ListCells?applicationId=` and the untargeted candidate scan.
  */
 export interface CellItem extends DynamoDBItem {
   readonly GSI1PK: string;
   readonly GSI1SK: string;
   readonly GSI2PK: string;
   readonly GSI2SK: string;
+  readonly GSI3PK: string;
+  readonly GSI3SK: string;
   readonly cellId: string;
+  readonly applicationId: string;
   readonly accountId: string;
   readonly status: LifecycleStatus;
   readonly maxTenants: number;
@@ -91,11 +99,7 @@ export function cellKey(cellId: string): ItemKey {
   return { PK: KeyBuilder.build(CELL_KEY_PREFIX, cellId), SK: CELL_SORT_KEY };
 }
 
-/**
- * GSI-1 query serving `ListCells` and the placement candidate scan (§4).
- * Eventually consistent — candidates are nominations only; the conditional
- * claim on the base table is the guard (§6).
- */
+/** GSI-1 query serving the unfiltered `ListCells` (§4.7). */
 export function listCellsQuery(): GsiQuery {
   return {
     indexName: GSI1_INDEX_NAME,
@@ -105,12 +109,28 @@ export function listCellsQuery(): GsiQuery {
 
 /**
  * GSI-2 query serving `ListCells?accountId=` and the targeted placement
- * candidate scan (§4.5). An unknown account yields an empty page.
+ * candidate scan (§4.7). An unknown account yields an empty page.
+ * Eventually consistent — candidates are nominations only; the conditional
+ * claim on the base table is the guard (§7).
  */
 export function listCellsByAccountQuery(accountId: string): GsiQuery {
   return {
     indexName: GSI2_INDEX_NAME,
     partitionKey: { name: 'GSI2PK', value: KeyBuilder.build(ACCOUNT_GSI2_PREFIX, accountId) },
+  };
+}
+
+/**
+ * GSI-3 query serving `ListCells?applicationId=` and the untargeted
+ * placement candidate scan (§4.7). The partition is shared with the
+ * application's deployments, so the `CELL#` sort-key prefix selects the
+ * cells. An unknown application yields an empty page.
+ */
+export function listCellsByApplicationQuery(applicationId: string): GsiQuery {
+  return {
+    indexName: GSI3_INDEX_NAME,
+    partitionKey: { name: 'GSI3PK', value: KeyBuilder.build(APPLICATION_KEY_PREFIX, applicationId) },
+    sortKeyPrefix: `${CELL_KEY_PREFIX}#`,
   };
 }
 
@@ -148,7 +168,10 @@ export class CellDataModel implements DataModel<CellRecord, CellItem> {
       GSI1SK: KeyBuilder.build(CELL_KEY_PREFIX, record.cellId),
       GSI2PK: KeyBuilder.build(ACCOUNT_GSI2_PREFIX, record.accountId),
       GSI2SK: KeyBuilder.build(CELL_KEY_PREFIX, record.cellId),
+      GSI3PK: KeyBuilder.build(APPLICATION_KEY_PREFIX, record.applicationId),
+      GSI3SK: KeyBuilder.build(CELL_KEY_PREFIX, record.cellId),
       cellId: record.cellId,
+      applicationId: record.applicationId,
       accountId: record.accountId,
       status: record.status,
       maxTenants: record.maxTenants,
@@ -166,6 +189,7 @@ export class CellDataModel implements DataModel<CellRecord, CellItem> {
   fromItem(item: CellItem): CellRecord {
     return {
       cellId: item.cellId,
+      applicationId: item.applicationId,
       accountId: item.accountId,
       status: item.status,
       maxTenants: item.maxTenants,

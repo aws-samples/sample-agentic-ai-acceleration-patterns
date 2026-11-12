@@ -40,7 +40,7 @@ const BUILD_TIMEOUT = Duration.hours(1);
 const EXECUTION_TIMEOUT = Duration.hours(3);
 
 /**
- * M17 (threat T16): each CreateTenant/UpdateResource/UpdateCell/DeleteCell
+ * M17 (threat T16): each CreateDeployment/UpdateDeployment/UpdateCell/DeleteCell
  * fans out to CodeBuild, so a leaked operator token or a runaway client is
  * a cost/concurrency amplification vector. Capping concurrent builds per
  * project bounds the parallel spend; excess StartBuild requests queue
@@ -108,7 +108,7 @@ const INLINE_BUILDSPEC = [
  *   "accountId": "<12 digits>", "externalId": "<account external id or ''>",
  *   "cellRoleArn": "arn:...:role/<fleet>-cell-provisioning",
  *   "tenantRoleArn": "arn:...:role/<fleet>-tenant-provisioning",
- *   "cellId": "...",
+ *   "applicationId": "...", "cellId": "...",
  *   "cellBuild":   { "operation": "create|update|delete",
  *                    "scriptPath": "...", "failedStatus": "..." },   // optional
  *   "tenantId": "...",                                               // when tenantBuild present
@@ -119,10 +119,11 @@ const INLINE_BUILDSPEC = [
  * ```
  *
  * `cellBuild` and `tenantBuild` are each optional; the combination encodes
- * the trigger (§7): CreateTenant into an existing cell (tenant create only),
- * CreateTenant requiring a new cell (cell create + tenant create),
- * UpdateResource (tenant update), DeleteTenant (tenant delete),
- * UpdateCell (cell update), DeleteCell (cell delete).
+ * the trigger (§8): CreateDeployment into an existing cell (tenant create
+ * only), CreateDeployment requiring a new cell (cell create + tenant
+ * create), UpdateDeployment (tenant update), DeleteDeployment (tenant
+ * delete), UpdateCell (cell update), DeleteCell (cell delete). The
+ * deployment record is keyed by `tenantId` and `applicationId` (ADR-037).
  *
  * Input contract: `tenantBuild.tenantName`, `tenantBuild.adminEmail`,
  * `sourceVersion`, and `operatorId` are always present — the service
@@ -143,10 +144,11 @@ const INLINE_BUILDSPEC = [
  * `cellRoleArn` / `tenantRoleArn`, `externalId` in the input), and the
  * buildspec does so before the script runs. Every lifecycle transition is
  * compare-and-set on the exact expected status; failure writes are
- * conditional on attribute_exists(PK); the tenant-delete and cell-delete
- * terminal writes are TransactWriteItems (record removal + slot release on
- * the cell, resp. the account — §8.2) with a stable ClientRequestToken
- * derived from the execution id. No unconditional writes.
+ * conditional on attribute_exists(PK); the deployment-delete and cell-delete
+ * terminal writes are TransactWriteItems (record removal + slot and count
+ * release on the cell and tenant, resp. the account and application — §8.2)
+ * with a stable ClientRequestToken derived from the execution id. No
+ * unconditional writes.
  *
  * CustomState raw ASL is required because the typed CodeBuildStartBuild task
  * does not expose Source*Override parameters, and there is no typed
@@ -223,7 +225,7 @@ export class ProvisioningWorkflow extends Construct {
     // Failure write: build failure, task timeout, or terminal-write retry
     // exhaustion → tenant to the resolved failedStatus. attribute_exists(PK)
     // so it cannot recreate a concurrently deleted record as a ghost.
-    const failTenant = this.updateItemTask('FailTenant', tenantKey(), {
+    const failTenant = this.updateItemTask('FailTenant', deploymentKey(), {
       updateExpression: 'SET #status = :failed, statusReason = :reason, updatedAt = :now',
       conditionExpression: 'attribute_exists(PK)',
       expressionAttributeValues: {
@@ -237,7 +239,7 @@ export class ProvisioningWorkflow extends Construct {
     // normalized `$.failure.{buildArn,buildStatus}` fields go into
     // statusReason and lastBuildId. Extracting only these two short fields
     // (never the raw Cause string) keeps statusReason bounded.
-    const failTenantWithBuild = this.updateItemTask('FailTenantWithBuild', tenantKey(), {
+    const failTenantWithBuild = this.updateItemTask('FailTenantWithBuild', deploymentKey(), {
       updateExpression:
         'SET #status = :failed, statusReason = :reason, lastBuildId = :buildArn, updatedAt = :now',
       conditionExpression: 'attribute_exists(PK)',
@@ -261,7 +263,7 @@ export class ProvisioningWorkflow extends Construct {
 
     // Tenant-delete transaction cancellation / retry exhaustion outcome:
     // read the tenant — absence proves the prior delete committed (§7).
-    const failTenantDelete = this.updateItemTask('FailTenantDelete', tenantKey(), {
+    const failTenantDelete = this.updateItemTask('FailTenantDelete', deploymentKey(), {
       updateExpression: 'SET #status = :failed, statusReason = :reason, updatedAt = :now',
       conditionExpression: 'attribute_exists(PK) AND #status = :deleting',
       expressionAttributeValues: {
@@ -274,7 +276,7 @@ export class ProvisioningWorkflow extends Construct {
 
     const getTenantRecord = new tasks.DynamoGetItem(this, 'GetTenantRecord', {
       table: this.table,
-      key: tenantKey(),
+      key: deploymentKey(),
       consistentRead: true,
       resultPath: '$.tenantRecord',
     });
@@ -286,13 +288,16 @@ export class ProvisioningWorkflow extends Construct {
       .otherwise(done);
     getTenantRecord.next(tenantDeleteOutcome);
 
-    // §6 transaction-shape contract (owned by workstream B — do not alter):
-    // DeleteItem tenant CONDITION attribute_exists(PK) AND status = DELETING
-    // + UpdateItem cell tenantCount - 1 CONDITION attribute_exists(PK) AND
-    // tenantCount > 0, stable ClientRequestToken. Record removal and slot
-    // release cannot diverge; the item-state conditions make replays safe
-    // beyond DynamoDB's finite token window (ADR-013).
-    const deleteTenantTransact = new sfn.CustomState(this, 'DeleteTenantRecord', {
+    // §8.2 transaction-shape contract: DeleteItem deployment CONDITION
+    // attribute_exists(PK) AND status = DELETING + UpdateItem cell
+    // tenantCount - 1 CONDITION attribute_exists(PK) AND tenantCount > 0 +
+    // UpdateItem tenant deploymentCount - 1 CONDITION attribute_exists(PK)
+    // AND deploymentCount > 0, stable ClientRequestToken. Record removal,
+    // slot release and count release cannot diverge; the item-state
+    // conditions make replays safe beyond DynamoDB's finite token window
+    // (ADR-013, ADR-037). The tenant record always exists here: DeleteTenant
+    // refuses while deploymentCount > 0.
+    const deleteTenantTransact = new sfn.CustomState(this, 'DeleteDeploymentRecord', {
       stateJson: {
         Type: 'Task',
         Resource: 'arn:aws:states:::aws-sdk:dynamodb:transactWriteItems',
@@ -301,7 +306,7 @@ export class ProvisioningWorkflow extends Construct {
             {
               Delete: {
                 TableName: this.table.tableName,
-                Key: rawTenantKey(),
+                Key: rawDeploymentKey(),
                 ConditionExpression: 'attribute_exists(PK) AND #status = :deleting',
                 ExpressionAttributeNames: { '#status': 'status' },
                 ExpressionAttributeValues: { ':deleting': { S: 'DELETING' } },
@@ -320,10 +325,23 @@ export class ProvisioningWorkflow extends Construct {
                 },
               },
             },
+            {
+              Update: {
+                TableName: this.table.tableName,
+                Key: rawTenantKey(),
+                UpdateExpression: 'SET deploymentCount = deploymentCount - :one, updatedAt = :now',
+                ConditionExpression: 'attribute_exists(PK) AND deploymentCount > :zero',
+                ExpressionAttributeValues: {
+                  ':one': { N: '1' },
+                  ':zero': { N: '0' },
+                  ':now': { 'S.$': '$$.State.EnteredTime' },
+                },
+              },
+            },
           ],
           // Stable per execution: short-window duplicate suppression for
           // identical automatic retries (§7). Hashed to fit the 36-char cap.
-          'ClientRequestToken.$': "States.Hash(States.Format('tenant-delete:{}', $$.Execution.Id), 'MD5')",
+          'ClientRequestToken.$': "States.Hash(States.Format('deployment-delete:{}', $$.Execution.Id), 'MD5')",
         },
         ResultPath: null,
       },
@@ -334,9 +352,9 @@ export class ProvisioningWorkflow extends Construct {
 
     // Terminal success for tenant create/update: CAS to ACTIVE + lastBuildId.
     const setTenantActiveAfterCreate = this.setActiveTask(
-      'SetTenantActiveAfterCreate', tenantKey(), 'CREATING', '$.tenantBuildResult.Build.Arn');
+      'SetTenantActiveAfterCreate', deploymentKey(), 'CREATING', '$.tenantBuildResult.Build.Arn');
     const setTenantActiveAfterUpdate = this.setActiveTask(
-      'SetTenantActiveAfterUpdate', tenantKey(), 'UPDATING', '$.tenantBuildResult.Build.Arn');
+      'SetTenantActiveAfterUpdate', deploymentKey(), 'UPDATING', '$.tenantBuildResult.Build.Arn');
     // Retry exhaustion routes through the same conditional *_FAILED
     // transition as a build failure (§7 point 3).
     setTenantActiveAfterCreate.addCatch(failTenant, { resultPath: '$.error' });
@@ -353,6 +371,7 @@ export class ProvisioningWorkflow extends Construct {
       // ADR-023: the tenant's name as stored on the control-plane record, on
       // every operation - onboarding input, not configuration (ADR-004).
       envVar('TENANT_NAME', '$.tenantBuild.tenantName'),
+      envVar('APPLICATION_ID', '$.applicationId'),
       envVar('CELL_ID', '$.cellId'),
       envVar('OPERATION', '$.tenantBuild.operation'),
       // Create only; the service supplies an empty string otherwise (§7).
@@ -403,7 +422,7 @@ export class ProvisioningWorkflow extends Construct {
             {
               Update: {
                 TableName: this.table.tableName,
-                Key: rawTenantKey(),
+                Key: rawDeploymentKey(),
                 UpdateExpression: 'SET #status = :failed, statusReason = :reason, updatedAt = :now',
                 ConditionExpression: 'attribute_exists(PK) AND #status = :creating',
                 ExpressionAttributeNames: { '#status': 'status' },
@@ -472,7 +491,7 @@ export class ProvisioningWorkflow extends Construct {
             {
               Update: {
                 TableName: this.table.tableName,
-                Key: rawTenantKey(),
+                Key: rawDeploymentKey(),
                 UpdateExpression: 'SET #status = :failed, statusReason = :reason, updatedAt = :now',
                 ConditionExpression: 'attribute_exists(PK) AND #status = :creating',
                 ExpressionAttributeNames: { '#status': 'status' },
@@ -537,16 +556,18 @@ export class ProvisioningWorkflow extends Construct {
       .otherwise(done);
     getCellRecord.next(cellDeleteOutcome);
 
-    // Terminal cell delete (§8.2, ADR-024): ONE transaction removes the cell
-    // and releases its slot on the account — the mirror of the tenant delete
-    // one level up. DeleteItem cell CONDITION attribute_exists(PK) AND
-    // status = DELETING AND tenantCount = 0 (emptiness as defence in depth —
-    // the atomic DELETING transition already excluded occupancy) + UpdateItem
-    // account cellCount - 1 CONDITION attribute_exists(PK) AND cellCount > 0.
-    // Item-state conditions make replays safe beyond the token window: after
-    // a committed delete the replay cancels on the cell condition before
-    // touching the counter, and the Catch reads the cell — absence proves
-    // the prior transaction committed.
+    // Terminal cell delete (§8.2, ADR-024, ADR-032): ONE transaction removes
+    // the cell, releases its slot on the account and its count on the
+    // application — the mirror of the deployment delete one level up.
+    // DeleteItem cell CONDITION attribute_exists(PK) AND status = DELETING
+    // AND tenantCount = 0 (emptiness as defence in depth — the atomic
+    // DELETING transition already excluded occupancy) + UpdateItem account
+    // cellCount - 1 CONDITION attribute_exists(PK) AND cellCount > 0 +
+    // UpdateItem application cellCount - 1, same condition. Item-state
+    // conditions make replays safe beyond the token window: after a
+    // committed delete the replay cancels on the cell condition before
+    // touching a counter, and the Catch reads the cell — absence proves the
+    // prior transaction committed.
     const deleteCellRecord = new sfn.CustomState(this, 'RemoveCellRecord', {
       stateJson: {
         Type: 'Task',
@@ -566,6 +587,19 @@ export class ProvisioningWorkflow extends Construct {
               Update: {
                 TableName: this.table.tableName,
                 Key: rawAccountKey(),
+                UpdateExpression: 'SET cellCount = cellCount - :one, updatedAt = :now',
+                ConditionExpression: 'attribute_exists(PK) AND cellCount > :zero',
+                ExpressionAttributeValues: {
+                  ':one': { N: '1' },
+                  ':zero': { N: '0' },
+                  ':now': { 'S.$': '$$.State.EnteredTime' },
+                },
+              },
+            },
+            {
+              Update: {
+                TableName: this.table.tableName,
+                Key: rawApplicationKey(),
                 UpdateExpression: 'SET cellCount = cellCount - :one, updatedAt = :now',
                 ConditionExpression: 'attribute_exists(PK) AND cellCount > :zero',
                 ExpressionAttributeValues: {
@@ -605,6 +639,7 @@ export class ProvisioningWorkflow extends Construct {
 
     const runCellBuild = this.buildTask('RunCellBuild', this.cellProject, '$.cellBuildResult', [
       envVar('SCRIPT_PATH', '$.cellBuild.scriptPath'),
+      envVar('APPLICATION_ID', '$.applicationId'),
       envVar('CELL_ID', '$.cellId'),
       envVar('OPERATION', '$.cellBuild.operation'),
       // M12 (T10) — see the tenant build.
@@ -879,13 +914,15 @@ export class ProvisioningWorkflow extends Construct {
 
 type DynamoKey = Record<string, tasks.DynamoAttributeValue>;
 
-/** Typed-task key for the tenant record. */
-function tenantKey(): DynamoKey {
+/** Typed-task key for the deployment record (ADR-037): the tenant's partition, the application's sort key. */
+function deploymentKey(): DynamoKey {
   return {
     PK: tasks.DynamoAttributeValue.fromString(
       sfn.JsonPath.format('TENANT#{}', sfn.JsonPath.stringAt('$.tenantId')),
     ),
-    SK: tasks.DynamoAttributeValue.fromString('META'),
+    SK: tasks.DynamoAttributeValue.fromString(
+      sfn.JsonPath.format('DEPLOYMENT#{}', sfn.JsonPath.stringAt('$.applicationId')),
+    ),
   };
 }
 
@@ -899,7 +936,15 @@ function cellKey(): DynamoKey {
   };
 }
 
-/** Raw ASL key for the tenant record (aws-sdk transactWriteItems parameters). */
+/** Raw ASL key for the deployment record (aws-sdk transactWriteItems parameters). */
+function rawDeploymentKey(): object {
+  return {
+    PK: { 'S.$': "States.Format('TENANT#{}', $.tenantId)" },
+    SK: { 'S.$': "States.Format('DEPLOYMENT#{}', $.applicationId)" },
+  };
+}
+
+/** Raw ASL key for the tenant record (the deployment-delete count release, ADR-037). */
 function rawTenantKey(): object {
   return {
     PK: { 'S.$': "States.Format('TENANT#{}', $.tenantId)" },
@@ -919,6 +964,14 @@ function rawCellKey(): object {
 function rawAccountKey(): object {
   return {
     PK: { 'S.$': "States.Format('ACCOUNT#{}', $.accountId)" },
+    SK: { S: 'META' },
+  };
+}
+
+/** Raw ASL key for the application record (the cell-delete count release, ADR-032). */
+function rawApplicationKey(): object {
+  return {
+    PK: { 'S.$': "States.Format('APPLICATION#{}', $.applicationId)" },
     SK: { S: 'META' },
   };
 }

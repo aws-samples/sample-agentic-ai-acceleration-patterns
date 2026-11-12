@@ -1,12 +1,11 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { Annotations, App, Aspects, Validations } from 'aws-cdk-lib';
+import { App, Aspects, Validations } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { CellAccountStack } from './cell-account/cell-account.cdk';
 import { DEFAULT_FLEET_NAME, validateFleetName } from './shared/fleet';
-import { sourcePinningWarning } from './shared/service-config';
-import { CellDefinition, TenantStack } from './tenant/tenant.cdk';
+import { TenantStack } from './tenant/tenant.cdk';
 
 const app = new App();
 
@@ -22,16 +21,15 @@ Validations.of(app).addPlugins(
   new AwsSolutionsChecks(app, { verbose: true, writeSuppressionsToCloudFormation: true }),
 );
 
-// Deployment inputs (architecture.md §10), supplied via CDK context
-// (cdk.json or --context). ALL THREE are required — synthesis fails fast
-// with the full list rather than deploying a stack whose every request
-// 500s against a placeholder issuer (S3):
-// - the vendor IdP - public OIDC discovery values consumed by the Lambda
-//   Authorizer. Customer identity is an application plane decision (ADR-004).
-// - the CellDefinition - one source + two script sets + maxTenants, stamped
-//   onto each cell record at creation (ADR-012). Validated at synth time.
-// Optional inputs: tenantBuildManagedPolicyArns (ADR-022) and fleetName
-// (ADR-025, default `control-plane`).
+// Stack inputs (spec §3.3), supplied via CDK context (cdk.json or
+// --context). The vendor IdP values are required — synthesis fails fast
+// rather than deploying a stack whose every request 500s against a
+// placeholder issuer (S3). Customer identity is an application plane
+// decision (ADR-004). Applications and accounts are NOT stack inputs: they
+// are registered through the API at run time (ADR-024, ADR-032).
+// Optional inputs: tenantBuildManagedPolicyArns (ADR-022), fleetName
+// (ADR-025, default `control-plane`) and demoApplicationIds (the sample
+// scripts' shared parameter, ADR-034).
 //
 // A second mode (ADR-025): `--context cellAccount='{...}'` synthesizes ONLY
 // the account role pair stack, for deployment into another account by its
@@ -56,38 +54,30 @@ if (cellAccount !== undefined) {
     fleetName,
     externalId: cellAccount.externalId,
     tenantBuildManagedPolicyArns: cellAccount.tenantBuildManagedPolicyArns,
-    demoSharedParameters: cellAccount.demoSharedParameters,
+    demoApplicationIds: cellAccount.demoApplicationIds,
     env,
   });
 } else {
   const vendorIdpIssuerUrl = requireContext('vendorIdpIssuerUrl');
   const vendorIdpAudience = requireContext('vendorIdpAudience');
-  const cellDefinition = parseCellDefinitionContext(requireContext('cellDefinition'));
   // Optional (ADR-022): customer-managed policy ARNs attached to the tenant
   // provisioning role in the control plane's own account, e.g. a
   // least-privilege policy an application-plane sample publishes for its
   // API. Validated in the stack (fails synth on an ARN outside this
   // partition/account). Default: none.
   const tenantBuildManagedPolicyArns = parseJsonContext<string[]>('tenantBuildManagedPolicyArns');
+  // Optional, DEMO ONLY: the applications the sample scripts will be
+  // registered under, so their shared parameter exists in the home account.
+  const demoApplicationIds = parseJsonContext<string[]>('demoApplicationIds');
 
-  const stack = new TenantStack(app, 'control-plane-dev', {
+  new TenantStack(app, 'control-plane-dev', {
     vendorIdpIssuerUrl: String(vendorIdpIssuerUrl),
     vendorIdpAudience: String(vendorIdpAudience),
-    cellDefinition,
     fleetName,
     tenantBuildManagedPolicyArns,
+    demoApplicationIds,
     env,
   });
-
-  // Supply-chain pinning check (threat model T5, mitigation M10): the
-  // CellDefinition source is fetched fresh by CodeBuild on every lifecycle
-  // build. Warn — do not fail — when source.sourceVersion is absent or a
-  // mutable ref instead of a full commit SHA. Structural validation of the
-  // rest of the definition happens in the stack (fails synth, §10).
-  const pinningWarning = sourcePinningWarning(cellDefinition.source);
-  if (pinningWarning !== undefined) {
-    Annotations.of(stack).addWarningV2('control-plane:mutable-source-ref', pinningWarning);
-  }
 }
 
 app.synth();
@@ -97,44 +87,27 @@ interface CellAccountContext {
   readonly controlPlaneAccountId?: string;
   readonly externalId?: string;
   readonly tenantBuildManagedPolicyArns?: string[];
-  readonly demoSharedParameters?: boolean;
+  readonly demoApplicationIds?: string[];
 }
 
-/** Fails synthesis with the complete required-context recipe when a deployment input is missing. */
+/** Fails synthesis with the complete required-context recipe when a stack input is missing. */
 function requireContext(key: string): unknown {
   const value = app.node.tryGetContext(key);
   if (value === undefined || value === '') {
     throw new Error(
       [
-        `Missing required CDK context '${key}'. This app needs all three deployment inputs (architecture.md §10)`
+        `Missing required CDK context '${key}'. This app needs both vendor IdP inputs (spec §3.3)`
         + ' - or `--context cellAccount=\'{"controlPlaneAccountId":"..."}\'` to synthesize only the account role pair stack:',
         '',
         '  npx cdk deploy \\',
         '    --context vendorIdpIssuerUrl=https://YOUR_ISSUER \\',
-        '    --context vendorIdpAudience=YOUR_AUDIENCE \\',
-        '    --context cellDefinition=\'{"source":{...},"cellScripts":{...},"tenantScripts":{...},"maxTenants":N}\'',
+        '    --context vendorIdpAudience=YOUR_AUDIENCE',
         '',
-        'See the README "Deploy" section for a complete cellDefinition example.',
+        'Applications are registered after deployment with PutApplication; see the README "Deploy" section.',
       ].join('\n'),
     );
   }
   return value;
-}
-
-/**
- * Accepts the cellDefinition context as an object (cdk.json) or a JSON
- * string (`--context cellDefinition='{...}'`). Structural validation
- * happens in the stack (fails synth, §10).
- */
-function parseCellDefinitionContext(context: unknown): CellDefinition {
-  if (typeof context === 'string') {
-    try {
-      return JSON.parse(context) as CellDefinition;
-    } catch (error) {
-      throw new Error(`The cellDefinition context value is not valid JSON: ${(error as Error).message}`);
-    }
-  }
-  return context as CellDefinition;
 }
 
 /**

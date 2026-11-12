@@ -15,3 +15,7 @@ than carrying speculative generality in a silo-only sample.
 
 **Consequences:** Fewer entities and operations. ADR-009 later took the same
 reasoning one step further and removed the separate resource entity too.
+
+---
+
+2026-11-11: Superseded by ADR-0037. The link became 1:N when a tenant could belong to several applications; the join returned as the `Deployment` entity.

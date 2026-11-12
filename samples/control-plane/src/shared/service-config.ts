@@ -57,15 +57,16 @@ export function isFullCommitSha(ref: unknown): boolean {
 }
 
 /**
- * Synth-time supply-chain check on the CellDefinition provisioning source
- * (threat model T5, mitigation M10): CodeBuild fetches the source fresh on
- * every lifecycle build, so anything other than a full commit SHA lets a
- * poisoned commit on a mutable ref execute under the fleet roles.
+ * Supply-chain check on an application's provisioning source, run by
+ * `PutApplication` (threat model T5, mitigation M10, ADR-020, ADR-032):
+ * CodeBuild fetches the source fresh on every lifecycle build, so anything
+ * other than a full commit SHA lets a poisoned commit on a mutable ref
+ * execute under the fleet roles.
  *
  * Returns a warning message when the source is not pinned to a full commit
  * SHA, and `undefined` when it is. Warn-and-allow by design — this is a
  * sample, and mutable refs are legitimate during development. Kept CDK-free
- * so this module remains safe to bundle into the Lambda handlers.
+ * because it runs inside the Lambda handler.
  */
 export function sourcePinningWarning(source: PinnableSource | undefined): string | undefined {
   const ref = source?.sourceVersion;
@@ -76,7 +77,7 @@ export function sourcePinningWarning(source: PinnableSource | undefined): string
     ? `'${ref}' is a mutable ref (branch or tag)`
     : 'source.sourceVersion is not set, so builds fetch the default branch HEAD';
   return (
-    `The cellDefinition provisioning source is not pinned to an immutable ref: ${got}. `
+    `The application's provisioning source is not pinned to an immutable ref: ${got}. `
     + 'CodeBuild fetches the source fresh on every lifecycle build, so a poisoned commit '
     + 'executes under the fleet roles (threat model T5). Pin source.sourceVersion to a full '
     + '40-character commit SHA (mitigation M10).'
