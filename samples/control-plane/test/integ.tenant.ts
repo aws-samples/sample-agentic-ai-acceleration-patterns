@@ -34,28 +34,38 @@ import { TenantStack } from '../src/tenant/tenant.cdk';
  * generation trigger); the sample cell + tenant scripts are hosted in an S3
  * bucket used as the applications' CodeBuild ProjectSource; and a probe
  * Lambda that assumes a read-only role in B to count SSM parameters there
- * (the assertion provider itself runs in A only). Applications X and Y share
- * that source and differ in id; maxTenants = 1: every cell is a silo, so
- * cells — not deployments — are what the accounts count.
+ * (the assertion provider itself runs in A only); and a build probe that
+ * reads the PARAM_ variables of a CodeBuild project's latest build, which
+ * is what the script of that build received. Applications X and Y share
+ * that source and differ in id and in their parameter declarations (X
+ * declares ALLOWED_EMAIL_DOMAIN, required, and LOG_LEVEL, default info, and
+ * the cell parameter CELL_SIZE, default small; Y declares none);
+ * maxTenants = 1: every cell is a silo, so cells — not deployments — are
+ * what the accounts count.
  *
  * Flow (every API operation is exercised; the numbers are spec §10's steps,
  * with the operator minted in step 1):
  *   1. unauthenticated request → 401; mint an operator: adminCreateUser →
  *      adminSetUserPassword → adminInitiateAuth → ID token
- *   2. PutApplication with a missing script → 400, bad id → 400; X and Y →
- *      200; ListApplications; PutAccount naming an unknown application → 404
+ *   2. PutApplication with a missing script → 400, bad id → 400, bad
+ *      parameter declarations → 400; X (with declarations) and Y → 200;
+ *      ListApplications; PutAccount naming an unknown application → 404
  *   3. PutAccount handshake refusals (no pair, pair not enforcing the id, no
  *      external id, wrong external id) → 400; PutAccount A (VENDOR, 2,
  *      shared) and B (TENANT, 1, external id, Y only) → 200; ListAccounts
  *   4. CreateTenant T1, T2, T3 → 200, no cell; DeleteTenant T3 → 200;
  *      CreateDeployment for T3 or an unknown application → 404
- *   5. CreateDeployment T1/X (clientToken) → cell 1 in A → poll ACTIVE;
- *      GetDeployment resolves the stamp; A 1/2, X 1, T1 1; parameters in A
+ *   5. CreateDeployment T1/X without the required parameter or with an
+ *      undeclared one → 400; with ALLOWED_EMAIL_DOMAIN (clientToken) → cell
+ *      1 in A → poll ACTIVE; GetDeployment resolves the stamp and returns
+ *      the stored values; A 1/2, X 1, T1 1; parameters in A; the tenant
+ *      build got the value and the LOG_LEVEL default, the cell build the
+ *      CELL_SIZE default
  *   6. CreateDeployment T1/Y → cell 2 in A; A 2/2, Y 1, T1 2; filters;
  *      each cell read ITS application's shared namespace; T1/X again → 409;
  *      DeleteTenant T1 → 409 (occupied)
  *   7. replay T1/X with the same token → the same deployment (ADR-017);
- *      the token with another application → 409
+ *      the token with another application or another parameter value → 409
  *   8. CreateDeployment T2/X untargeted → 409 InsufficientCapacity (A full,
  *      B tenant-owned)
  *   9. T2/X at B → 400 (B admits Y only, ADR-033)
@@ -66,11 +76,19 @@ import { TenantStack } from '../src/tenant/tenant.cdk';
  *  12. reads: ListCells with filters, two filters → 400; ListDeployments
  *      with filters; UpdateTenant; PutApplication Y replaced, cells 2 and 3
  *      keep their stamp (P-4)
- *  13. UpdateDeployment T1/X (in A) and UpdateCell cell 3 (in B) → ACTIVE
- *  14. DeleteCell occupied → 409; DeleteDeployment T1/X → 404; cell 1 stays
+ *  13. UpdateDeployment T1/X (in A) and UpdateCell cell 3 (in B) → ACTIVE;
+ *      T1/X merges LOG_LEVEL; removing a required parameter, one name in
+ *      both lists, a cell parameter name or a control character → 400;
+ *      UpdateCell cell 1 sets and removes CELL_SIZE; a tenant parameter or
+ *      an undeclared name on UpdateCell → 400
+ *  14. PutApplication X without lists keeps them; new defaults reach T1/X
+ *      and cell 1; a newly required TIER makes UpdateDeployment T1/X a 400
+ *  15. DeleteCell occupied → 409; DeleteDeployment T1/X → 404 (it ran
+ *      without TIER, with the stale value and the default); cell 1 stays
  *      0/1, A 2/2, X 1, T1 1; CreateDeployment T2/X reuses cell 1
- *  15. delete every deployment, cell, tenant, account and application; every
- *      counter back at 0; namespaces empty in both accounts
+ *  16. delete every deployment, cell, tenant, account and application; every
+ *      counter back at 0; namespaces empty in both accounts; the delete
+ *      builds got the values §10 names
  *
  * Run with the single-Region, two-account command documented in
  * integration-test.md (deploys real infrastructure in both accounts).
@@ -199,6 +217,41 @@ ssmProbe.addToRolePolicy(new iam.PolicyStatement({
   resources: [probeRoleArn],
 }));
 
+// The scripts' PARAM_ variables are checked at the source: this probe reads
+// the latest build of a CodeBuild project (the projects live in A whichever
+// account a build provisions in) and returns its PARAM_ variables as a
+// name-sorted object. A build's environment is what its script receives,
+// and it outlives the namespaces the delete scripts empty (spec §10 steps
+// 13-16). The test runs one build at a time, so the latest build is the one
+// the preceding step started. `check` only makes each call distinct.
+const buildProbe = new lambda.Function(setup, 'BuildParameterProbe', {
+  runtime: lambda.Runtime.NODEJS_24_X,
+  handler: 'index.handler',
+  timeout: Duration.seconds(30),
+  code: lambda.Code.fromInline(`
+    const { CodeBuildClient, ListBuildsForProjectCommand, BatchGetBuildsCommand } = require('@aws-sdk/client-codebuild');
+    exports.handler = async (event) => {
+      const codebuild = new CodeBuildClient({});
+      const listed = await codebuild.send(new ListBuildsForProjectCommand({ projectName: event.projectName, sortOrder: 'DESCENDING' }));
+      const id = (listed.ids || [])[0];
+      if (!id) {
+        throw new Error('No build of ' + event.projectName);
+      }
+      const got = await codebuild.send(new BatchGetBuildsCommand({ ids: [id] }));
+      const variables = ((got.builds || [])[0]?.environment?.environmentVariables || [])
+        .filter((v) => v.name.startsWith('PARAM_'))
+        .sort((a, b) => (a.name < b.name ? -1 : 1));
+      return Object.fromEntries(variables.map((v) => [v.name, v.value]));
+    };
+  `),
+});
+buildProbe.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['codebuild:ListBuildsForProject', 'codebuild:BatchGetBuilds'],
+  // The projects belong to the stack under test, which deploys after this
+  // one; any project in this account and Region, for a test-only probe.
+  resources: [setup.formatArn({ service: 'codebuild', resource: 'project', resourceName: '*' })],
+}));
+
 // --- Account B stack: the role pair a customer installs + the test probe role
 // Deployed into B with A's credentials (B is bootstrapped to trust A). The
 // pair trusts A's build roles by ARN with the external id; nothing in A has
@@ -242,6 +295,18 @@ const definition = {
   },
   maxTenants: 1,
 };
+// X declares parameters (spec §10 step 2); Y is registered with the plain
+// definition and declares none.
+const declarationsX = {
+  parameters: [
+    { name: 'ALLOWED_EMAIL_DOMAIN', required: true, description: 'Domain the first admin may sign in from' },
+    { name: 'LOG_LEVEL', default: 'info' },
+  ],
+  cellParameters: [{ name: 'CELL_SIZE', default: 'small' }],
+};
+const definitionX = { ...definition, ...declarationsX };
+/** The values every CreateDeployment of X supplies until step 14 says otherwise. */
+const parametersX = { ALLOWED_EMAIL_DOMAIN: 'example.com' };
 
 const stack = new TenantStack(app, 'control-plane-integ', {
   vendorIdpIssuerUrl: vendorIdp.userPoolProviderUrl,
@@ -340,6 +405,18 @@ const ssmReadPolicy = {
   Action: ['ssm:GetParameter', 'ssm:GetParameters', 'ssm:GetParametersByPath'],
   Resource: [`arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter/application-plane/*`],
 };
+
+/**
+ * The PARAM_ variables of the latest build of the cell or tenant project,
+ * as the JSON object the probe returns (keys name-sorted).
+ */
+function expectBuildParameters(check: string, project: 'cell' | 'tenant', parameters: Record<string, string>) {
+  const projectName = (project === 'cell' ? stack.provisioning.cellProject : stack.provisioning.tenantProject).projectName;
+  const sorted = Object.fromEntries(Object.entries(parameters).sort(([a], [b]) => (a < b ? -1 : 1)));
+  return integ.assertions
+    .invokeFunction({ functionName: buildProbe.functionName, payload: JSON.stringify({ projectName, check }) })
+    .expect(ExpectedResult.objectLike({ Payload: JSON.stringify(sorted) }));
+}
 
 /** Counts SSM parameters in account B through the probe (path and/or names). */
 function probeB(id: string, query: { path?: string; names?: string[] }) {
@@ -440,16 +517,43 @@ const putApplicationBadId = integ.assertions
   })
   .expect(ExpectedResult.objectLike({ status: 400 }));
 
+// Parameter declarations are validated with the definition (§4.1): a
+// lower-case name, a duplicate, a required parameter with a default, a cell
+// parameter without one, and one name in both lists are each a 400.
+const badDeclarations = [
+  { parameters: [{ name: 'log_level' }] },
+  { parameters: [{ name: 'LOG_LEVEL' }, { name: 'LOG_LEVEL' }] },
+  { parameters: [{ name: 'ALLOWED_EMAIL_DOMAIN', required: true, default: 'example.com' }] },
+  { cellParameters: [{ name: 'CELL_SIZE' }] },
+  { parameters: [{ name: 'CELL_SIZE' }], cellParameters: [{ name: 'CELL_SIZE', default: 'small' }] },
+].map((lists) =>
+  integ.assertions
+    .httpApiCall(`${apiUrl}applications/${APP_X}`, {
+      method: 'PUT',
+      headers: authHeaders,
+      body: JSON.stringify({ ...definition, ...lists }),
+    })
+    .expect(ExpectedResult.objectLike({ status: 400 })),
+);
+
+/** X's declarations as GetApplication returns them (spec §10 step 2). */
+const declaredX = {
+  parameters: [
+    { name: 'ALLOWED_EMAIL_DOMAIN', required: true },
+    { name: 'LOG_LEVEL', required: false, default: 'info' },
+  ],
+  cellParameters: [{ name: 'CELL_SIZE', default: 'small' }],
+};
 const putApplicationX = integ.assertions
   .httpApiCall(`${apiUrl}applications/${APP_X}`, {
     method: 'PUT',
     headers: authHeaders,
-    body: JSON.stringify(definition),
+    body: JSON.stringify(definitionX),
   })
   .expect(
     ExpectedResult.objectLike({
       status: 200,
-      body: { application: { applicationId: APP_X, maxTenants: 1, placementStrategy: 'FILL', cellCount: 0 } },
+      body: { application: { applicationId: APP_X, maxTenants: 1, placementStrategy: 'FILL', cellCount: 0, ...declaredX } },
     }),
   );
 const putApplicationY = integ.assertions
@@ -458,7 +562,12 @@ const putApplicationY = integ.assertions
     headers: authHeaders,
     body: JSON.stringify(definition),
   })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { application: { applicationId: APP_Y, cellCount: 0 } } }));
+  .expect(
+    ExpectedResult.objectLike({
+      status: 200,
+      body: { application: { applicationId: APP_Y, cellCount: 0, parameters: [], cellParameters: [] } },
+    }),
+  );
 
 // ListApplications sorts by id (the GSI-1 sort key). Exact-length match.
 const listApplicationsTwo = integ.assertions
@@ -668,10 +777,32 @@ const deployUnregisteredApplication = integ.assertions
 //    that admit X (A, shared), creates cell 1 in A implicitly and returns the
 //    deployment CREATING with its cellId. Carries a clientToken for the
 //    replay below.
+//    Parameters are checked first (R-33): without the required one, or with
+//    an undeclared one, the request is a 400 and nothing is written.
+const createT1XMissingRequired = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments`, {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify({ applicationId: APP_X, adminEmail: 'success+integ-t1-x@simulator.amazonses.com' }),
+  })
+  .expect(ExpectedResult.objectLike({ status: 400, body: { message: Match.stringLikeRegexp('ALLOWED_EMAIL_DOMAIN') } }));
+const createT1XUndeclared = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments`, {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify({
+      applicationId: APP_X,
+      adminEmail: 'success+integ-t1-x@simulator.amazonses.com',
+      parameters: { ...parametersX, NOT_DECLARED: 'x' },
+    }),
+  })
+  .expect(ExpectedResult.objectLike({ status: 400, body: { message: Match.stringLikeRegexp('NOT_DECLARED') } }));
+
 const clientToken1 = 'integ-retry-token-t1-x';
 const createT1XBody = JSON.stringify({
   applicationId: APP_X,
   adminEmail: 'success+integ-t1-x@simulator.amazonses.com',
+  parameters: parametersX,
   clientToken: clientToken1,
 });
 const createT1X = integ.assertions.httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments`, {
@@ -700,6 +831,8 @@ const getT1X = integ.assertions
         accountId: accountA,
         source: definition.source,
         scripts: definition.tenantScripts,
+        // The supplied value only; the LOG_LEVEL default is not merged in.
+        parameters: parametersX,
       },
     }),
   );
@@ -722,6 +855,9 @@ const getCell1 = integ.assertions
           cellScripts: definition.cellScripts,
           tenantScripts: definition.tenantScripts,
         },
+        // A new cell starts with no values of its own. (objectLike cannot
+        // assert an empty map; the cell build check below shows the default.)
+        parameters: {},
       },
     }),
   );
@@ -753,6 +889,15 @@ const checkT1XParam = integ.assertions.awsApiCall('SSM', 'getParameter', {
 checkT1XParam.provider.addToRolePolicy(ssmReadPolicy);
 checkT1XParam.expect(ExpectedResult.objectLike({ Parameter: { Type: 'String' } }));
 
+// The tenant create build received the supplied value and the LOG_LEVEL
+// default; the cell create build the CELL_SIZE default and no tenant
+// parameter (R-32, R-34, §6.1).
+const t1XCreateParameters = expectBuildParameters('t1x-create', 'tenant', {
+  PARAM_ALLOWED_EMAIL_DOMAIN: 'example.com',
+  PARAM_LOG_LEVEL: 'info',
+});
+const cell1CreateParameters = expectBuildParameters('cell1-create', 'cell', { PARAM_CELL_SIZE: 'small' });
+
 // 6. One tenant, two applications: deploy Y for T1 without a target. Cell 1
 //    belongs to X and is never a candidate for Y; B is tenant-owned and never
 //    chosen untargeted; so cell 2 is created in A — A's second and last slot.
@@ -767,6 +912,9 @@ const waitForT1YActive = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments/${APP_Y}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { deployment: { status: 'ACTIVE', cellId: cellId2 } } }))
   .waitForAssertions(newCellPoll);
+// Y declares nothing: neither of its builds got a PARAM_ variable.
+const t1YCreateParameters = expectBuildParameters('t1y-create', 'tenant', {});
+const cell2CreateParameters = expectBuildParameters('cell2-create', 'cell', {});
 
 // A is full (2/2); Y has one cell; T1 has two deployments.
 const getAccountAFull = integ.assertions
@@ -842,7 +990,7 @@ const createT1XAgain = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments`, {
     method: 'POST',
     headers: authHeaders,
-    body: JSON.stringify({ applicationId: APP_X, adminEmail: 'success+integ-t1-x@simulator.amazonses.com' }),
+    body: JSON.stringify({ applicationId: APP_X, adminEmail: 'success+integ-t1-x@simulator.amazonses.com', parameters: parametersX }),
   })
   .expect(ExpectedResult.objectLike({ status: 409, headers: { 'x-amzn-errortype': ['ConflictError'] } }));
 const deleteTenant1Occupied = integ.assertions
@@ -853,7 +1001,8 @@ const deleteTenant1Occupied = integ.assertions
 //    original deployment comes back — same cell, and already ACTIVE, which a
 //    fresh create could never be (it would start CREATING). No new
 //    deployment, no new cell, no slot (ADR-017). The token with a different
-//    applicationId is a request-hash mismatch → 409.
+//    applicationId, or a different parameter value, is a request-hash
+//    mismatch → 409.
 const replayT1X = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments`, {
     method: 'POST',
@@ -877,6 +1026,18 @@ const reuseTokenMismatch = integ.assertions
     }),
   })
   .expect(ExpectedResult.objectLike({ status: 409 }));
+const reuseTokenOtherValue = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments`, {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify({
+      applicationId: APP_X,
+      adminEmail: 'success+integ-t1-x@simulator.amazonses.com',
+      parameters: { ALLOWED_EMAIL_DOMAIN: 'example.org' },
+      clientToken: clientToken1,
+    }),
+  })
+  .expect(ExpectedResult.objectLike({ status: 409 }));
 const getAccountAStillTwo = integ.assertions
   .httpApiCall(`${apiUrl}accounts/${accountA}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { account: { cellCount: 2 } } }));
@@ -891,7 +1052,7 @@ const createT2XUntargeted = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments`, {
     method: 'POST',
     headers: authHeaders,
-    body: JSON.stringify({ applicationId: APP_X, adminEmail: 'success+integ-t2-x@simulator.amazonses.com' }),
+    body: JSON.stringify({ applicationId: APP_X, adminEmail: 'success+integ-t2-x@simulator.amazonses.com', parameters: parametersX }),
   })
   // The error TYPE tells it apart from a ConflictError 409 (ADR-026).
   .expect(ExpectedResult.objectLike({ status: 409, headers: { 'x-amzn-errortype': ['InsufficientCapacityError'] } }));
@@ -902,7 +1063,12 @@ const createT2XAtB = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments`, {
     method: 'POST',
     headers: authHeaders,
-    body: JSON.stringify({ applicationId: APP_X, adminEmail: 'success+integ-t2-x@simulator.amazonses.com', accountId: accountB }),
+    body: JSON.stringify({
+      applicationId: APP_X,
+      adminEmail: 'success+integ-t2-x@simulator.amazonses.com',
+      accountId: accountB,
+      parameters: parametersX,
+    }),
   })
   .expect(ExpectedResult.objectLike({ status: 400, body: { message: Match.stringLikeRegexp('does not admit application') } }));
 
@@ -933,6 +1099,8 @@ const waitForT2YActive = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments/${APP_Y}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { deployment: { status: 'ACTIVE' } } }))
   .waitForAssertions(newCellPoll);
+const t2YCreateParameters = expectBuildParameters('t2y-create', 'tenant', {});
+const cell3CreateParameters = expectBuildParameters('cell3-create', 'cell', {});
 
 const getCell3 = integ.assertions
   .httpApiCall(`${apiUrl}cells/${cellId3}`, { method: 'GET', headers: authHeaders })
@@ -1096,6 +1264,68 @@ const waitForT1XUpdated = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments/${APP_X}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { deployment: { status: 'ACTIVE' } } }))
   .waitForAssertions(singleBuildPoll);
+const t1XUpdateParameters = expectBuildParameters('t1x-update', 'tenant', {
+  PARAM_ALLOWED_EMAIL_DOMAIN: 'example.com',
+  PARAM_LOG_LEVEL: 'info',
+});
+
+/** One UpdateDeployment of T1/X with a body. */
+function updateT1XWith(body: Record<string, unknown>) {
+  return integ.assertions.httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments/${APP_X}`, {
+    method: 'PUT',
+    headers: authHeaders,
+    body: JSON.stringify(body),
+  });
+}
+/** Polls T1/X back to ACTIVE after an update. */
+function waitForT1XActiveAgain() {
+  return integ.assertions
+    .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments/${APP_X}`, { method: 'GET', headers: authHeaders })
+    .expect(ExpectedResult.objectLike({ status: 200, body: { deployment: { status: 'ACTIVE' } } }))
+    .waitForAssertions(singleBuildPoll);
+}
+/** One UpdateCell of cell 1 with a body. */
+function updateCell1With(body: Record<string, unknown>) {
+  return integ.assertions.httpApiCall(`${apiUrl}cells/${cellId1}`, {
+    method: 'PUT',
+    headers: authHeaders,
+    body: JSON.stringify(body),
+  });
+}
+/** Polls cell 1 back to ACTIVE after an update. */
+function waitForCell1ActiveAgain() {
+  return integ.assertions
+    .httpApiCall(`${apiUrl}cells/${cellId1}`, { method: 'GET', headers: authHeaders })
+    .expect(ExpectedResult.objectLike({ status: 200, body: { cell: { status: 'ACTIVE' } } }))
+    .waitForAssertions(singleBuildPoll);
+}
+
+// The merge (R-33): setting LOG_LEVEL keeps ALLOWED_EMAIL_DOMAIN, and the
+// update build gets both.
+const updateT1XLogLevel = updateT1XWith({ parameters: { LOG_LEVEL: 'debug' } })
+  .expect(ExpectedResult.objectLike({ status: 202, body: { deployment: { status: 'UPDATING' } } }));
+const waitForT1XLogLevel = waitForT1XActiveAgain();
+const t1XDebugParameters = expectBuildParameters('t1x-update-debug', 'tenant', {
+  PARAM_ALLOWED_EMAIL_DOMAIN: 'example.com',
+  PARAM_LOG_LEVEL: 'debug',
+});
+// Refused before anything is written: removing a required parameter, one
+// name in both lists, a cell parameter name, a control character.
+const updateT1XRefusals = [
+  { removeParameters: ['ALLOWED_EMAIL_DOMAIN'] },
+  { parameters: { LOG_LEVEL: 'warn' }, removeParameters: ['LOG_LEVEL'] },
+  { parameters: { CELL_SIZE: 'large' } },
+  // JSON.stringify sends the U+0001 as the escape \u0001.
+  { parameters: { LOG_LEVEL: 'de\u0001bug' } },
+].map((body) => updateT1XWith(body).expect(ExpectedResult.objectLike({ status: 400 })));
+const getT1XAfterRefusals = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments/${APP_X}`, { method: 'GET', headers: authHeaders })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 200,
+      body: { deployment: { status: 'ACTIVE' }, parameters: { ALLOWED_EMAIL_DOMAIN: 'example.com', LOG_LEVEL: 'debug' } },
+    }),
+  );
 
 const updateCell3 = integ.assertions
   .httpApiCall(`${apiUrl}cells/${cellId3}`, { method: 'PUT', headers: authHeaders })
@@ -1104,9 +1334,87 @@ const waitForCell3Updated = integ.assertions
   .httpApiCall(`${apiUrl}cells/${cellId3}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { cell: { status: 'ACTIVE' } } }))
   .waitForAssertions(singleBuildPoll);
+const cell3UpdateParameters = expectBuildParameters('cell3-update', 'cell', {});
 
-// 14. Occupancy guard: deleting a cell that still holds a deployment → 409
-//     (ADR-014). Then delete T1/X: the record disappears when the tenant
+// Cell parameters (R-34): set CELL_SIZE on cell 1, then remove it; the
+// cell update build gets the value, then the default again.
+const updateCell1Large = updateCell1With({ parameters: { CELL_SIZE: 'large' } })
+  .expect(ExpectedResult.objectLike({ status: 202, body: { cell: { status: 'UPDATING' } } }));
+const waitForCell1Large = waitForCell1ActiveAgain();
+const cell1LargeParameters = expectBuildParameters('cell1-update-large', 'cell', { PARAM_CELL_SIZE: 'large' });
+const getCell1Large = integ.assertions
+  .httpApiCall(`${apiUrl}cells/${cellId1}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { parameters: { CELL_SIZE: 'large' } } }));
+// A tenant parameter or an undeclared name on UpdateCell → 400.
+const updateCell1Refusals = [{ parameters: { LOG_LEVEL: 'debug' } }, { parameters: { NOT_DECLARED: 'x' } }].map((body) =>
+  updateCell1With(body).expect(ExpectedResult.objectLike({ status: 400 })),
+);
+const updateCell1Remove = updateCell1With({ removeParameters: ['CELL_SIZE'] })
+  .expect(ExpectedResult.objectLike({ status: 202, body: { cell: { status: 'UPDATING' } } }));
+const waitForCell1Removed = waitForCell1ActiveAgain();
+const cell1RemovedParameters = expectBuildParameters('cell1-update-removed', 'cell', { PARAM_CELL_SIZE: 'small' });
+
+// 14. Declarations change under live records (ADR-039, ADR-040). A put
+//     without the lists keeps them; changed defaults reach the existing
+//     deployment and cell on their next build; a newly required parameter
+//     makes the next UpdateDeployment of a deployment lacking it a 400.
+const putApplicationXKeepsLists = integ.assertions
+  .httpApiCall(`${apiUrl}applications/${APP_X}`, { method: 'PUT', headers: authHeaders, body: JSON.stringify(definition) })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { application: declaredX } }));
+const getApplicationXKept = integ.assertions
+  .httpApiCall(`${apiUrl}applications/${APP_X}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { application: declaredX } }));
+const putApplicationXWarn = integ.assertions
+  .httpApiCall(`${apiUrl}applications/${APP_X}`, {
+    method: 'PUT',
+    headers: authHeaders,
+    body: JSON.stringify({
+      ...definition,
+      parameters: [{ name: 'ALLOWED_EMAIL_DOMAIN', required: true }, { name: 'LOG_LEVEL', default: 'warn' }],
+      cellParameters: [{ name: 'CELL_SIZE', default: 'medium' }],
+    }),
+  })
+  .expect(ExpectedResult.objectLike({ status: 200 }));
+const updateT1XDropLogLevel = updateT1XWith({ removeParameters: ['LOG_LEVEL'] })
+  .expect(ExpectedResult.objectLike({ status: 202 }));
+const waitForT1XDropLogLevel = waitForT1XActiveAgain();
+const t1XWarnParameters = expectBuildParameters('t1x-update-warn', 'tenant', {
+  PARAM_ALLOWED_EMAIL_DOMAIN: 'example.com',
+  PARAM_LOG_LEVEL: 'warn',
+});
+const updateCell1Medium = updateCell1With({}).expect(ExpectedResult.objectLike({ status: 202 }));
+const waitForCell1Medium = waitForCell1ActiveAgain();
+const cell1MediumParameters = expectBuildParameters('cell1-update-medium', 'cell', { PARAM_CELL_SIZE: 'medium' });
+const putApplicationXTier = integ.assertions
+  .httpApiCall(`${apiUrl}applications/${APP_X}`, {
+    method: 'PUT',
+    headers: authHeaders,
+    body: JSON.stringify({
+      ...definition,
+      parameters: [{ name: 'LOG_LEVEL', default: 'warn' }, { name: 'TIER', required: true }],
+    }),
+  })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 200,
+      body: {
+        application: {
+          parameters: [{ name: 'LOG_LEVEL', default: 'warn' }, { name: 'TIER', required: true }],
+          // Not sent, so kept.
+          cellParameters: [{ name: 'CELL_SIZE', default: 'medium' }],
+        },
+      },
+    }),
+  );
+const updateT1XMissingTier = updateT1XWith({})
+  .expect(ExpectedResult.objectLike({ status: 400, body: { message: Match.stringLikeRegexp('TIER') } }));
+const getT1XStillActive = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments/${APP_X}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { deployment: { status: 'ACTIVE' } } }));
+
+// 15. Occupancy guard: deleting a cell that still holds a deployment → 409
+//     (ADR-014). Then delete T1/X (it lacks the now-required TIER, which
+//     never blocks a delete): the record disappears when the tenant
 //     delete script has run and the terminal transaction freed the CELL slot
 //     and the TENANT count — not the account's: cell 1 stays (explicit
 //     scale-in, ADR-014), A stays 2/2 and X stays at one cell.
@@ -1121,6 +1429,12 @@ const waitForT1XGone = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments/${APP_X}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 404 }))
   .waitForAssertions(singleBuildPoll);
+// The delete build got the stale ALLOWED_EMAIL_DOMAIN (no longer declared,
+// still passed), the LOG_LEVEL default, and no TIER (R-32).
+const t1XDeleteParameters = expectBuildParameters('t1x-delete', 'tenant', {
+  PARAM_ALLOWED_EMAIL_DOMAIN: 'example.com',
+  PARAM_LOG_LEVEL: 'warn',
+});
 
 const getCell1SlotFreed = integ.assertions
   .httpApiCall(`${apiUrl}cells/${cellId1}`, { method: 'GET', headers: authHeaders })
@@ -1142,18 +1456,19 @@ checkT1XParamGone.provider.addToRolePolicy(ssmReadPolicy);
 
 // Reuse before create (§7 steps 1–2): deploying X for T2 without a target
 // now finds the empty cell 1 and places into it — no new cell, no 409, one
-// build only.
+// build only. X now requires TIER instead of ALLOWED_EMAIL_DOMAIN.
 const createT2X = integ.assertions.httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments`, {
   method: 'POST',
   headers: authHeaders,
-  body: JSON.stringify({ applicationId: APP_X, adminEmail: 'success+integ-t2-x@simulator.amazonses.com' }),
+  body: JSON.stringify({ applicationId: APP_X, adminEmail: 'success+integ-t2-x@simulator.amazonses.com', parameters: { TIER: 'gold' } }),
 });
 const waitForT2XActive = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments/${APP_X}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { deployment: { status: 'ACTIVE', cellId: cellId1 } } }))
   .waitForAssertions(singleBuildPoll);
+const t2XCreateParameters = expectBuildParameters('t2x-create', 'tenant', { PARAM_LOG_LEVEL: 'warn', PARAM_TIER: 'gold' });
 
-// 15. Teardown. Delete the remaining deployments T2/X, T1/Y, T2/Y …
+// 16. Teardown. Delete the remaining deployments T2/X, T1/Y, T2/Y …
 const deleteT2X = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments/${APP_X}`, { method: 'DELETE', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 202, body: { deployment: { status: 'DELETING' } } }));
@@ -1161,6 +1476,7 @@ const waitForT2XGone = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments/${APP_X}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 404 }))
   .waitForAssertions(singleBuildPoll);
+const t2XDeleteParameters = expectBuildParameters('t2x-delete', 'tenant', { PARAM_LOG_LEVEL: 'warn', PARAM_TIER: 'gold' });
 
 const deleteT1Y = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments/${APP_Y}`, { method: 'DELETE', headers: authHeaders })
@@ -1169,6 +1485,7 @@ const waitForT1YGone = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments/${APP_Y}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 404 }))
   .waitForAssertions(singleBuildPoll);
+const t1YDeleteParameters = expectBuildParameters('t1y-delete', 'tenant', {});
 
 const deleteT2Y = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments/${APP_Y}`, { method: 'DELETE', headers: authHeaders })
@@ -1177,6 +1494,7 @@ const waitForT2YGone = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments/${APP_Y}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 404 }))
   .waitForAssertions(singleBuildPoll);
+const t2YDeleteParameters = expectBuildParameters('t2y-delete', 'tenant', {});
 
 // … every tenant's count is back at 0 and no per-deployment parameter
 // remains, in either account …
@@ -1203,6 +1521,7 @@ const waitForCell1Gone = integ.assertions
   .httpApiCall(`${apiUrl}cells/${cellId1}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 404 }))
   .waitForAssertions(singleBuildPoll);
+const cell1DeleteParameters = expectBuildParameters('cell1-delete', 'cell', { PARAM_CELL_SIZE: 'medium' });
 
 const deleteCell2 = integ.assertions
   .httpApiCall(`${apiUrl}cells/${cellId2}`, { method: 'DELETE', headers: authHeaders })
@@ -1211,6 +1530,7 @@ const waitForCell2Gone = integ.assertions
   .httpApiCall(`${apiUrl}cells/${cellId2}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 404 }))
   .waitForAssertions(singleBuildPoll);
+const cell2DeleteParameters = expectBuildParameters('cell2-delete', 'cell', {});
 
 const deleteCell3 = integ.assertions
   .httpApiCall(`${apiUrl}cells/${cellId3}`, { method: 'DELETE', headers: authHeaders })
@@ -1219,6 +1539,7 @@ const waitForCell3Gone = integ.assertions
   .httpApiCall(`${apiUrl}cells/${cellId3}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 404 }))
   .waitForAssertions(singleBuildPoll);
+const cell3DeleteParameters = expectBuildParameters('cell3-delete', 'cell', {});
 
 // … both accounts and both applications are empty again, the fleet has no
 // cells, and the cell delete scripts cleaned their namespaces in both
@@ -1287,6 +1608,11 @@ createUser
   // applications (§10 step 2)
   .next(putApplicationMissingScript)
   .next(putApplicationBadId)
+  .next(badDeclarations[0])
+  .next(badDeclarations[1])
+  .next(badDeclarations[2])
+  .next(badDeclarations[3])
+  .next(badDeclarations[4])
   .next(putApplicationX)
   .next(putApplicationY)
   .next(listApplicationsTwo)
@@ -1311,6 +1637,8 @@ createUser
   .next(deployForDeletedTenant)
   .next(deployUnregisteredApplication)
   // T1/X → cell 1 in A (step 5)
+  .next(createT1XMissingRequired)
+  .next(createT1XUndeclared)
   .next(createT1X)
   .next(waitForT1XActive)
   .next(getT1X)
@@ -1320,9 +1648,13 @@ createUser
   .next(getTenant1One)
   .next(checkCellParam)
   .next(checkT1XParam)
+  .next(t1XCreateParameters)
+  .next(cell1CreateParameters)
   // T1/Y → cell 2 in A; one tenant, two applications (step 6)
   .next(createT1Y)
   .next(waitForT1YActive)
+  .next(t1YCreateParameters)
+  .next(cell2CreateParameters)
   .next(getAccountAFull)
   .next(getApplicationYOne)
   .next(getTenant1Two)
@@ -1338,6 +1670,7 @@ createUser
   // replay + mismatch (step 7, ADR-017)
   .next(replayT1X)
   .next(reuseTokenMismatch)
+  .next(reuseTokenOtherValue)
   .next(getAccountAStillTwo)
   .next(getTenant1StillTwo)
   // fleet full for X (step 8), admission (step 9)
@@ -1349,6 +1682,8 @@ createUser
   .next(createT2Y)
   .next(deleteWhileCreating)
   .next(waitForT2YActive)
+  .next(t2YCreateParameters)
+  .next(cell3CreateParameters)
   .next(getCell3)
   .next(probeCell3InB)
   .next(probeT2YInB)
@@ -1375,15 +1710,48 @@ createUser
   .next(putApplicationYReplaced)
   .next(getCell3StillStamped)
   .next(getCell2StillStamped)
-  // re-apply in A and in B (step 13)
+  // re-apply in A and in B, parameter merges (step 13)
   .next(updateT1X)
   .next(waitForT1XUpdated)
+  .next(t1XUpdateParameters)
+  .next(updateT1XLogLevel)
+  .next(waitForT1XLogLevel)
+  .next(t1XDebugParameters)
+  .next(updateT1XRefusals[0])
+  .next(updateT1XRefusals[1])
+  .next(updateT1XRefusals[2])
+  .next(updateT1XRefusals[3])
+  .next(getT1XAfterRefusals)
   .next(updateCell3)
   .next(waitForCell3Updated)
-  // guards, delete T1/X, reuse cell 1 for T2/X (step 14)
+  .next(cell3UpdateParameters)
+  .next(updateCell1Large)
+  .next(waitForCell1Large)
+  .next(cell1LargeParameters)
+  .next(getCell1Large)
+  .next(updateCell1Refusals[0])
+  .next(updateCell1Refusals[1])
+  .next(updateCell1Remove)
+  .next(waitForCell1Removed)
+  .next(cell1RemovedParameters)
+  // declarations change under live records (step 14)
+  .next(putApplicationXKeepsLists)
+  .next(getApplicationXKept)
+  .next(putApplicationXWarn)
+  .next(updateT1XDropLogLevel)
+  .next(waitForT1XDropLogLevel)
+  .next(t1XWarnParameters)
+  .next(updateCell1Medium)
+  .next(waitForCell1Medium)
+  .next(cell1MediumParameters)
+  .next(putApplicationXTier)
+  .next(updateT1XMissingTier)
+  .next(getT1XStillActive)
+  // guards, delete T1/X, reuse cell 1 for T2/X (step 15)
   .next(deleteCellOccupied)
   .next(deleteT1X)
   .next(waitForT1XGone)
+  .next(t1XDeleteParameters)
   .next(getCell1SlotFreed)
   .next(getAccountAStillFull)
   .next(getApplicationXStillOne)
@@ -1391,23 +1759,30 @@ createUser
   .next(checkT1XParamGone)
   .next(createT2X)
   .next(waitForT2XActive)
-  // teardown (step 15)
+  .next(t2XCreateParameters)
+  // teardown (step 16)
   .next(deleteT2X)
   .next(waitForT2XGone)
+  .next(t2XDeleteParameters)
   .next(deleteT1Y)
   .next(waitForT1YGone)
+  .next(t1YDeleteParameters)
   .next(deleteT2Y)
   .next(waitForT2YGone)
+  .next(t2YDeleteParameters)
   .next(getTenant1Zero)
   .next(getTenant2Zero)
   .next(checkTenantNamespaceEmptyA)
   .next(probeTenantNamespaceEmptyB)
   .next(deleteCell1)
   .next(waitForCell1Gone)
+  .next(cell1DeleteParameters)
   .next(deleteCell2)
   .next(waitForCell2Gone)
+  .next(cell2DeleteParameters)
   .next(deleteCell3)
   .next(waitForCell3Gone)
+  .next(cell3DeleteParameters)
   .next(getAccountAEmpty)
   .next(getAccountBEmpty)
   .next(listApplicationsEmptyCounts)
