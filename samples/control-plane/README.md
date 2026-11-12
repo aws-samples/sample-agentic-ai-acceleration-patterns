@@ -36,8 +36,10 @@ that trust policy is the only thing the builds can act through.
 What a cell runs comes from its **application**, registered with
 `PutApplication`: a CodeBuild source (`type`, `location`, optional
 `sourceVersion`), two script sets, `cellScripts` and `tenantScripts`, each
-with `create`, `update` and `delete`, `maxTenants`, and a
-`placementStrategy` (`FILL` or `ROUND_ROBIN`). Lifecycle operations run the
+with `create`, `update` and `delete`, `maxTenants`, a
+`placementStrategy` (`FILL` or `ROUND_ROBIN`), and optionally the
+parameters its scripts take: `parameters` for tenant scripts and
+`cellParameters` for cell scripts (ADR-039, ADR-040). Lifecycle operations run the
 matching script: `CreateDeployment` runs cell create (new cell only) then
 tenant create, `UpdateCell` and `UpdateDeployment` run the update scripts,
 `DeleteCell` and `DeleteDeployment` the delete scripts. A full commit SHA in
@@ -75,6 +77,23 @@ GetDeployment        ◄─ poll until ACTIVE / CREATE_FAILED
 plus the authoritative count of those cells. Neither the definition nor the
 application list is a deployment input: a new application needs no
 redeploy. An application with cells cannot be deleted (409).
+
+**Parameters.** An application declares the values its scripts take per
+deployment or per cell. A tenant parameter is `{name, required, default?,
+description?}`; a cell parameter is `{name, default, description?}` and
+always has a default, because placement creates cells with no operator
+present. Names are upper case (`[A-Z][A-Z0-9_]{0,63}`), at most 20 per list,
+and a name appears in one list only. `CreateDeployment` and
+`UpdateDeployment` take `parameters` for the deployment, `UpdateCell` for
+the cell; the values are checked against the declarations (an undeclared
+name, a missing required value, a value over 1,024 bytes or holding a
+control character is a 400) and stored on the record. Every build of that
+record gets each stored value, plus the default of each declared name
+without one, as `PARAM_<NAME>`. Defaults are resolved per build and never
+stored, so a changed default reaches existing deployments and cells on
+their next build. Values are plain text, readable in the table, the
+workflow history and the build's environment: never put a secret there;
+pass a secret's name and let the script read it (spec N-11).
 
 **Tenants and deployments.** A tenant (`CreateTenant`) is a customer record:
 a name, a description, and the count of its deployments. Its operations are
@@ -132,7 +151,10 @@ overrides, under the cell account's provisioning role. Cell scripts receive
 application the tenant uses), `TENANT_NAME` (the tenant's stored name, on
 every operation — ADR-023), `APPLICATION_ID`, `CELL_ID`, `CELL_ACCOUNT_ID`,
 `OPERATION`, `OPERATOR_ID`, and (on create) `ADMIN_EMAIL` for
-application-plane user bootstrap. All four SSM namespaces live in the cell's
+application-plane user bootstrap. Each script also gets `PARAM_<NAME>` for
+its own set only: cell scripts the cell's parameters, tenant scripts the
+deployment's; a declared name with neither a value nor a default is unset,
+not empty. All four SSM namespaces live in the cell's
 account: both script sets read the account-wide `/application-plane/shared/*`
 (infrastructure every application in the account may use, such as an
 identity platform) and their application's
@@ -340,7 +362,7 @@ export CP_INTEG_ACCOUNT_B=<ACCOUNT_B_ID>
 npx projen integ
 ```
 
-A run takes about 45 minutes across two non-production accounts and two
+A run takes about 55 minutes across two non-production accounts and two
 applications and costs well under a dollar in throwaway resources; see
 [integration-test.md](./integration-test.md) for the second account's
 bootstrap, what the run stands up in each account, its steps and its knobs.
@@ -502,8 +524,8 @@ curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}applications/de
 
 | Operation | HTTP | Returns |
 |---|---|---|
-| PutApplication | `PUT /applications/{applicationId}` | 200 — register or replace the definition (`source`, `cellScripts`, `tenantScripts`, `maxTenants`) and `placementStrategy`; 400 on an invalid definition; existing cells keep their stamp |
-| GetApplication | `GET /applications/{applicationId}` | 200 — the definition, `placementStrategy`, `cellCount` |
+| PutApplication | `PUT /applications/{applicationId}` | 200 — register or replace the definition (`source`, `cellScripts`, `tenantScripts`, `maxTenants`), `placementStrategy` and the declarations `parameters` and `cellParameters`; an absent list keeps the current one, `[]` clears it; 400 on an invalid definition or declaration; 409 when a kept list changed during the call (retry); existing cells keep their stamp |
+| GetApplication | `GET /applications/{applicationId}` | 200 — the definition, `placementStrategy`, `parameters`, `cellParameters`, `cellCount` |
 | ListApplications | `GET /applications` | 200 — paginated: `maxTenants`, `placementStrategy`, `cellCount` per application |
 | DeleteApplication | `DELETE /applications/{applicationId}` | 200 — empty applications only (409 while it has cells) |
 | CreateTenant | `POST /tenants` | 200 — a customer record (`name`, `description`), nothing provisioned |
@@ -511,14 +533,14 @@ curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}applications/de
 | UpdateTenant | `PUT /tenants/{tenantId}` | 200 — metadata only, no build |
 | DeleteTenant | `DELETE /tenants/{tenantId}` | 200 — empty tenants only (409 while it has deployments) |
 | ListTenants | `GET /tenants` | 200 — paginated |
-| CreateDeployment | `POST /tenants/{tenantId}/deployments` | 202 — placement into a cell of `applicationId` + tenant create build (cell create build first if a new cell is needed); optional `accountId` pins the account (400 if it does not admit the application); optional `clientToken`; 409 when the tenant already has a deployment of the application; 409 `InsufficientCapacityError` when no eligible account has room |
-| GetDeployment | `GET /tenants/{tenantId}/deployments/{applicationId}` | 200 — the polling endpoint: status, `cellId`, the account, and the effective definition (from the cell) |
-| UpdateDeployment | `PUT /tenants/{tenantId}/deployments/{applicationId}` | 202 — runs the tenant update script |
-| DeleteDeployment | `DELETE /tenants/{tenantId}/deployments/{applicationId}` | 202 — runs the tenant delete script, frees the slot and the tenant's count |
+| CreateDeployment | `POST /tenants/{tenantId}/deployments` | 202 — placement into a cell of `applicationId` + tenant create build (cell create build first if a new cell is needed); optional `parameters` (400 on an undeclared name, a bad value or a missing required one, before placement); optional `accountId` pins the account (400 if it does not admit the application); optional `clientToken`; 409 when the tenant already has a deployment of the application; 409 `InsufficientCapacityError` when no eligible account has room |
+| GetDeployment | `GET /tenants/{tenantId}/deployments/{applicationId}` | 200 — the polling endpoint: status, `cellId`, the account, the effective definition (from the cell) and the stored `parameters` (no defaults) |
+| UpdateDeployment | `PUT /tenants/{tenantId}/deployments/{applicationId}` | 202 — optional body `{parameters?, removeParameters?}` merged into the stored values, then runs the tenant update script; 400 on a validation failure, nothing written; 409 when the deployment or its cell is not in a state to re-apply, or the stored values changed during the call (retry) |
+| DeleteDeployment | `DELETE /tenants/{tenantId}/deployments/{applicationId}` | 202 — runs the tenant delete script with the stored values (never validated), frees the slot and the tenant's count |
 | ListDeployments | `GET /deployments[?tenantId=\|?cellId=\|?applicationId=]` | 200 — paginated, at most one filter (400 for two) |
 | ListCells | `GET /cells[?accountId=\|?applicationId=]` | 200 — fleet topology: `applicationId`, `accountId`, status, `tenantCount`/`maxTenants`; at most one filter (400 for two) |
-| GetCell | `GET /cells/{cellId}` | 200 — full record including the application, the account and the stamped definition |
-| UpdateCell | `PUT /cells/{cellId}` | 202 — runs the cell update script |
+| GetCell | `GET /cells/{cellId}` | 200 — full record including the application, the account, the stamped definition and the stored cell `parameters` (no defaults; empty for a new cell) |
+| UpdateCell | `PUT /cells/{cellId}` | 202 — optional body `{parameters?, removeParameters?}` merged into the cell's stored values (removing one returns the cell to the default), then runs the cell update script; 400 on a validation failure, nothing written |
 | DeleteCell | `DELETE /cells/{cellId}` | 202 — empty cells only (409 while occupied); frees the account's cell slot and the application's count |
 | PutAccount | `PUT /accounts/{accountId}` | 200 — register or replace `maxCells`, `applicationIds` (absent: shared), `externalId` (required for `TENANT`); `owner` is set on first write and immutable (409 on change); 404 for an unregistered application id; verifies the role pair first (400 if not assumable) |
 | GetAccount | `GET /accounts/{accountId}` | 200 — `owner`, `applicationIds`, `cellCount`/`maxCells`, whether an external id is set |
@@ -530,8 +552,10 @@ created implicitly by placement — and no implicit account registration. A
 list filter with an unknown id returns an empty page, not a 404.
 `CreateDeployment` accepts an optional `clientToken` for retry safety:
 resending the same token returns the originally created deployment instead of
-a 409 (reuse with different parameters, another application included, is
-rejected with a 409). The API contract is the Smithy model in
+a 409 (reuse with different parameters, another application or other
+parameter values included, is rejected with a 409). A 409 whose message
+says "retry the request" can succeed on a retry; any other 409 needs an
+operator act first, such as a delete or more capacity. The API contract is the Smithy model in
 [`model/`](./model/) — the OpenAPI spec and TypeScript server SDK are
 generated from it (`smithy build`).
 

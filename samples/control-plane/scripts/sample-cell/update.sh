@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: MIT-0
 # Sample cell UPDATE script.
 #
-# Runs in AWS CodeBuild with: APPLICATION_ID, CELL_ID, OPERATION. Re-applies
+# Runs in AWS CodeBuild with: APPLICATION_ID, CELL_ID, OPERATION, PARAM_<NAME>
+# (one per cell parameter the application declares, ADR-040). Re-applies
 # the shared cell deployment - a real script would re-run its IaC deployment
 # here. Idempotent by design.
 set -euo pipefail

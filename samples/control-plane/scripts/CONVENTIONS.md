@@ -51,6 +51,19 @@ log group into an unintended secrets store.
   identifier. The control plane delivers them as structured CodeBuild
   environment variables, so the first script that expands one unquoted is
   the first place an injection becomes possible.
+- **`PARAM_<NAME>` values are operator-supplied free text too** (ADR-039,
+  ADR-040): the control plane checks a value against its declaration (at
+  most 1,024 bytes, no control characters) but never interprets it. Treat
+  them like `TENANT_NAME`: quote them, never `eval` them, and log the
+  variable name, never its value. A declared parameter with neither a
+  value nor a default is unset, not empty, so test with `${PARAM_X+set}`
+  when "not set" and "set to empty" differ. Values are plain text: a
+  secret comes as the *name* of a Secrets Manager secret or SSM
+  `SecureString` the script reads under its own role (spec N-11).
+- A delete script finds what its create made through its namespace, never
+  by recomputing names or sizes from `PARAM_` values: defaults are resolved
+  per build, so a delete can see a different default from its create
+  (spec R-35).
 - `TENANT_ID` and `CELL_ID` are control-plane-generated ULIDs,
   `APPLICATION_ID` is operator-chosen but constrained to `[a-z0-9-]{1,32}`
   by the API, and `OPERATION` is a fixed verb, so the samples use them in
