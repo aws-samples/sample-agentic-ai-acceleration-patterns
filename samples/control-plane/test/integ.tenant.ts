@@ -1799,6 +1799,39 @@ createUser
   .next(listAccountsEmpty)
   .next(listApplicationsEmpty);
 
+// The assertion provider adds one statement to its role's inline policy for
+// every assertion call, duplicates included, and the scenario now has
+// enough calls to pass IAM's 10,240-byte inline policy limit (the first
+// parameter-step run failed with ServiceLimitExceeded on that role).
+// Dropping exact duplicates keeps every grant; a statement's JSON with its
+// tokens unresolved is the same string only when it names the same
+// resources, so nothing is merged that differs.
+dedupeAssertionProviderPolicies(app);
+
+/**
+ * Removes exact duplicate statements from every integ-tests assertion
+ * provider's role policy (test-only; the provider's own construct keeps its
+ * statements in a `policies` array it renders lazily at synth).
+ */
+function dedupeAssertionProviderPolicies(root: IConstruct): void {
+  for (const construct of root.node.findAll()) {
+    const policies = (construct as unknown as { policies?: unknown }).policies;
+    if (!construct.node.id.startsWith('SingletonFunction') || !Array.isArray(policies)) {
+      continue;
+    }
+    const seen = new Set<string>();
+    const unique = policies.filter((statement) => {
+      const key = JSON.stringify(statement);
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+    policies.splice(0, policies.length, ...unique);
+  }
+}
+
 /** Reads a required environment variable or fails synth with the reason it is needed. */
 function requireEnv(name: string, purpose: string): string {
   const value = process.env[name];
