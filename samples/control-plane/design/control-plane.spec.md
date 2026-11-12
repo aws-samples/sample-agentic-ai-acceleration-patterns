@@ -951,7 +951,11 @@ before the write (R-13) and a cell not `ACTIVE` is a 409 without a hint
 from that read; the cell MUST NOT be added to the merge write as a
 transaction `ConditionCheck`, because placements and deployment deletes
 write the cell in their own transactions and would cancel the merge with
-no item to classify.
+no item to classify. A list-keeping `PutApplication` is the exception to
+the item-based rules: an application has no status, so its failed
+condition is always a 409 with a retry hint, also when the application
+was deleted in between, because the retry is a create-or-replace that
+succeeds (§5.5).
 
 ---
 

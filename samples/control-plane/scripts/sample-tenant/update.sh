@@ -6,7 +6,8 @@
 # Runs in AWS CodeBuild with: TENANT_ID, TENANT_NAME, APPLICATION_ID,
 # CELL_ID, OPERATION, OPERATOR_ID, PARAM_<NAME> (one per
 # deployment parameter the application declares and the deployment has a
-# value or default for, ADR-039). Re-applies the per-tenant deployment - a
+# value or default for, plus any stored value whose name is no longer
+# declared, ADR-039). Re-applies the per-tenant deployment - a
 # real script would re-run its IaC deployment here. Idempotent by design.
 # TENANT_NAME is operator-supplied free text: expand it quoted only, never
 # eval or use as an identifier (see scripts/CONVENTIONS.md).

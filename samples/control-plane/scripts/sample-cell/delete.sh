@@ -4,7 +4,8 @@
 # Sample cell DELETE script.
 #
 # Runs in AWS CodeBuild with: APPLICATION_ID, CELL_ID, OPERATION, PARAM_<NAME>
-# (one per cell parameter the application declares, ADR-040). Deprovisions the shared
+# (one per cell parameter the application declares, plus any stored value
+# whose name is no longer declared, ADR-040). Deprovisions the shared
 # cell deployment and cleans up EVERYTHING the cell published under
 # /application-plane/cells/<cellId>/. Must tolerate partial provisioning -
 # it is also the remediation path for CREATE_FAILED cells, so an empty

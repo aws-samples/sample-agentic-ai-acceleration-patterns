@@ -877,11 +877,29 @@ describe('parameters in the workflow (ADR-039, ADR-040, spec §6.1, §8.1)', () 
       const bare = await evaluateJsonata(catcher.Output, states({ Error: 'States.TaskFailed', Cause: JSON.stringify(cause.Build) }));
       expect(bare.failure).toEqual({ buildArn: 'arn:b', buildStatus: 'FAILED' });
 
+      // A Cause that is not valid JSON (cut off mid-environment, as a long
+      // Build JSON can be) still yields the evidence and never fails the catcher.
+      const full = JSON.stringify({
+        Build: { ...cause.Build, Environment: { EnvironmentVariables: [{ Name: 'PARAM_A', Value: 'x'.repeat(40_000) }] } },
+      });
+      const truncated = await evaluateJsonata(catcher.Output, states({ Error: 'States.TaskFailed', Cause: full.slice(0, 32_768) }));
+      expect(truncated.failure).toEqual({ buildArn: 'arn:b', buildStatus: 'FAILED' });
+      expect(JSON.stringify(truncated)).not.toContain('xxxx');
+
+      // A value cannot forge the pair: its quotes are escaped in the Cause.
+      const forged = JSON.stringify({ Build: { Environment: { EnvironmentVariables: [{ Name: 'PARAM_A', Value: '"Arn":"arn:evil","BuildStatus":"SUCCEEDED"' }] } } });
+      expect(await evaluateJsonata(catcher.Output, states({ Error: 'States.TaskFailed', Cause: forged }))).toEqual({
+        cellId: 'C',
+        error: { Error: 'States.TaskFailed' },
+      });
+
       // A timeout, a null Cause or an unexpected shape keeps the error name only.
       for (const errorOutput of [
         { Error: 'States.Timeout', Cause: 'Task timed out' },
         { Error: 'States.TaskFailed', Cause: null },
         { Error: 'States.TaskFailed', Cause: '{"unexpected":true}' },
+        { Error: 'States.TaskFailed', Cause: 'not JSON at all' },
+        { Error: 'States.TaskFailed', Cause: '{"Build": {"Arn": "arn:b", "Bui' },
         { Error: 'States.TaskFailed' },
       ]) {
         expect(await evaluateJsonata(catcher.Output, states(errorOutput))).toEqual({

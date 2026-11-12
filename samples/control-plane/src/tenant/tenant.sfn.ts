@@ -1109,18 +1109,27 @@ export function buildResultOutput(resultField: string): string {
  * Cause and the parsed Build never enter state: they echo the build's
  * environment, every parameter value included, and could pass the 256 KiB
  * limit, which fails the execution with `States.DataLimitExceeded` before
- * any `*_FAILED` write runs. `$parse` runs only on a string Cause of a
- * `States.TaskFailed`, the same guard the JSONPath chain had; a timeout or
- * any other shape keeps only `error.Error`, for the generic failure write.
+ * any `*_FAILED` write runs.
+ *
+ * The two fields are read with regular expressions on the raw Cause, never
+ * with `$parse`: JSONata has no try/catch, so a Cause that is not valid
+ * JSON (a truncated one, for instance, once large parameter sets make the
+ * Build JSON long) would make this catcher itself fail, and then no
+ * `*_FAILED` write would run (P-9). `Arn` and `BuildStatus` come before
+ * `Environment` in the Build, so they survive truncation, and the first
+ * match is the build's own: a quote inside an environment value is escaped
+ * in the Cause, so a value cannot forge a `"Arn":"..."` pair. A timeout, a
+ * non-string Cause or a Cause without both fields keeps only
+ * `error.Error`, for the generic failure write.
  */
 export const BUILD_FAILURE_OUTPUT = jsonata([
   '(',
   '$e := $states.errorOutput;',
-  "$cause := ($e.Error = 'States.TaskFailed' and $type($e.Cause) = 'string') ? $parse($e.Cause);",
-  "$build := ($type($cause.Build.Arn) = 'string' and $type($cause.Build.BuildStatus) = 'string') ? $cause.Build",
-  "  : (($type($cause.Arn) = 'string' and $type($cause.BuildStatus) = 'string') ? $cause);",
+  "$text := ($e.Error = 'States.TaskFailed' and $type($e.Cause) = 'string') ? $e.Cause;",
+  String.raw`$arn := $exists($text) ? $match($text, /"Arn"\s*:\s*"([^"]+)"/, 1).groups[0];`,
+  String.raw`$status := $exists($text) ? $match($text, /"BuildStatus"\s*:\s*"([A-Z_]+)"/, 1).groups[0];`,
   '$merge([$states.input, {"error": {"Error": $e.Error}},',
-  '  $exists($build) ? {"failure": {"buildArn": $build.Arn, "buildStatus": $build.BuildStatus}} : {}])',
+  '  ($exists($arn) and $exists($status)) ? {"failure": {"buildArn": $arn, "buildStatus": $status}} : {}])',
   ')',
 ].join(' '));
 

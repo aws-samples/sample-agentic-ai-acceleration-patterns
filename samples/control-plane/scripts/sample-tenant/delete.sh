@@ -6,7 +6,8 @@
 # Runs in AWS CodeBuild with: TENANT_ID, TENANT_NAME, APPLICATION_ID,
 # CELL_ID, OPERATION, OPERATOR_ID, PARAM_<NAME> (one per
 # deployment parameter the application declares and the deployment has a
-# value or default for, ADR-039). Deprovisions the per-tenant deployment.
+# value or default for, plus any stored value whose name is no longer
+# declared, ADR-039). Deprovisions the per-tenant deployment.
 # Must tolerate partial provisioning - it is also the cleanup path for
 # CREATE_FAILED deployments (including deployments whose cell itself failed
 # to create), so a missing resource is success, not an error.

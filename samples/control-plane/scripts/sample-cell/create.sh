@@ -4,7 +4,8 @@
 # Sample cell CREATE script.
 #
 # Runs in AWS CodeBuild with: APPLICATION_ID, CELL_ID, OPERATION, PARAM_<NAME>
-# (one per cell parameter the application declares, ADR-040).
+# (one per cell parameter the application declares, plus any stored value
+# whose name is no longer declared, ADR-040).
 # Provisions the cell's SHARED application deployment and publishes its
 # resource identifiers to the cell namespace so tenant scripts can read them
 # at deploy time - the cell -> tenant contract (spec section 6.2):

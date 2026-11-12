@@ -4,7 +4,8 @@
 # Sample cell UPDATE script.
 #
 # Runs in AWS CodeBuild with: APPLICATION_ID, CELL_ID, OPERATION, PARAM_<NAME>
-# (one per cell parameter the application declares, ADR-040). Re-applies
+# (one per cell parameter the application declares, plus any stored value
+# whose name is no longer declared, ADR-040). Re-applies
 # the shared cell deployment - a real script would re-run its IaC deployment
 # here. Idempotent by design.
 set -euo pipefail
