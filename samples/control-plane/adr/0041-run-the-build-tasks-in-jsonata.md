@@ -1,6 +1,6 @@
 # ADR-0041: Run the build tasks in JSONata
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-12
 - Deciders: Dave Roberts (SA)
 
