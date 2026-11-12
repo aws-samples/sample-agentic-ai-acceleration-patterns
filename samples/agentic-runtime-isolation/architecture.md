@@ -4,12 +4,9 @@ SPDX-License-Identifier: MIT-0
 -->
 # Agentic Runtime Isolation: Architecture
 
-> **Status: implemented and verified.** Last green integration run: run 19,
-> 2026-11-11 14:06 to 14:51 UTC, eu-central-1, 60/60 steps (59 PASS, 1 SKIP),
-> deploy 705 s at `INTEG_DEPLOY_CONCURRENCY=2`, key rotation 172 s, sweep of
-> 147 log groups clean, teardown clean (commit 4fec24a on PR 38; the first
-> attempt at the default concurrency 6 failed on an API Gateway control-plane
-> 429 at `CreateModel`, the second at 2 went through). The
+> **Status: implemented and verified.** Last green integration run: run 18,
+> 2026-11-09 15:44 to 16:55 UTC, us-east-1, 58/58 steps, teardown clean,
+> sweep 0 hits (commit 7e0f793 on PR 27, `INTEG_DEPLOY_CONCURRENCY=2`). The
 > run used a sandbox account and `scripts/integ.sh` (the CDK CLI driver,
 > ADR-0044) with six stacks (`api-gateway`, `agentcore-gateway`,
 > `session-off`, `session-user`, `limits`, `multi-tenant`). Both all-on
@@ -186,8 +183,7 @@ The TSDoc in
 | `tvm` | always on: model-only `TenantModelRole`, `TenantId` tag, 900 s, 1,000 cached sets | `role`, `includeUserIdTag`, `claimTags`, `durationSeconds` (900 to 3,600), `cacheMaxEntries` |
 | `tenantLimits` | `{ requestsPerMinute: 60 }` | `outputTokensPerMinute` on `api-gateway` only; `false` turns limits off |
 | `stageThrottle` | `{ rateLimit: 50, burstLimit: 25 }` | `api-gateway` only, one bucket for every tenant; synth warns when unset |
-| `ingressReservedConcurrency` | unset (account pool) | Reserved concurrency of the `api-gateway` streaming Lambda, a positive integer; about rps x average stream seconds. Set `authorizerReservedConcurrency` with it: the reserve is taken from the pool the authoriser draws on (ADR-0049) |
-| `authorizerReservedConcurrency` | unset (account pool) | Reserved concurrency of the `api-gateway` REQUEST authoriser, a positive integer: the live access tokens that may refresh in one second, which is the whole live set when they were issued together, since the burst lands on cold instances at about 900 ms a call (ADR-0049). Synth warns when `ingressReservedConcurrency` is set without it, and when `stageThrottle.rateLimit` is above either reserve |
+| `ingressReservedConcurrency` | unset (account pool) | Reserved concurrency of the `api-gateway` streaming Lambda, a positive integer; about rps x average stream seconds |
 | `toolContextKey.algorithm` | `'RS256'` | `'RS256'` or `'ES256'`; `ES256` moves tool-context signing onto the KMS ECC request quota |
 | `perTenantMetrics` | `false` | EMF metrics per tenant (ADR-0021) |
 | `registryPrefix` | `/application-plane/shared/agent-runtime/` | Where the registry and the published document live |
@@ -504,9 +500,6 @@ agents is two sessions.
 
 ## Scale limits
 
-What to do about each limit, with the stress test's measured figures, is in
-[`design/agentic-runtime-isolation.scaling.md`](./design/agentic-runtime-isolation.scaling.md).
-
 The design targets 10,000s of tenants, 100,000s of tenant users, 100s of
 agents and 1,000s of tools; none of those counts grows a policy, a Gateway,
 a role or a token per tenant or per user (P-16, spec §3.6). Values are
@@ -536,8 +529,7 @@ Shared pools every tenant draws on, in the order they give out:
 | Pool | Default | Gives out at | Size it with |
 |---|---|---|---|
 | `api-gateway` stage throttle | 50 rps, burst 25, one bucket for every tenant and every refusal; the tenant limit runs behind it | 50 tenants at the default 60 a minute; one tenant at 50 rps starves the rest | `stageThrottle.rateLimit` >= tenants x `tenantLimits.requestsPerMinute` / 60 (synth warns when unset); WAF rate rules for an edge limit per tenant |
-| Lambda concurrency, integration Lambda | account pool (1,000); held for the whole stream | rps x average stream seconds (50 rps at 20 s, 8 rps at 120 s); measured 2026-11-10: 338 concurrent at 500 rps of 130 ms probes, 251 at 1,000 rps | `ingressReservedConcurrency`; raise the account quota; `agentcore-gateway` for long streams |
-| Lambda concurrency, authoriser | the same pool, less every reserve in the account; the authoriser is short when warm (about 20 ms) but about 900 ms on a cold instance, and misses its 60 s cache once per live token per refresh | the token-refresh burst: the whole live set when the tokens were issued together (a deploy, a recovery, a driver that issued its tokens in one pass), since the burst lands on cold instances; measured 2026-11-10: 4,000 live tokens against 194 unreserved made 520 throttles at 30 concurrent, 577 at 1,000 rps. A throttled authoriser is a bare 500 from API Gateway, no tenant and no reason (ADR-0049) | `authorizerReservedConcurrency` at the live tokens that may refresh together (a reserve too small is a cap: 34 for 1,000 tokens threw 369 throttles on 2026-11-11); `stageThrottle.rateLimit` under both reserves, so the refusal that lands is a 429 with a tenant and a reason; the account's Lambda quota raised to hold both reserves |
+| Lambda concurrency | account pool (1,000); the integration Lambda is held for the whole stream | rps x average stream seconds (50 rps at 20 s, 8 rps at 120 s) | `ingressReservedConcurrency`; raise the account quota; `agentcore-gateway` for long streams |
 | KMS `Sign` | 1,000 RSA requests per second per account per Region, shared by the mint, one `Sign` per admitted `tools/call` and every other RSA key | about active (tenant, user, agent) triples / 120 s + tool calls per second | `toolContextKey.algorithm: 'ES256'` (the ECC quota); `transactionToken.algorithm: 'ES256'`; a quota increase |
 | STS `AssumeRole` | 600 rps per account per Region; the ingress TVM, every tool's TVM and the tenant-admin TVM share it | cold-start fan-out: new instances x tenants each; steady state is instances x tag sets / 780 s | reserved concurrency to bound fan-out; `tvm.includeUserIdTag` off |
 | SSM `GetParameter` | 40 TPS; a throttled cold registry read is cached as `registry_unavailable` for one TTL on that instance | 40 cold reads in one second (a deploy, a burst) | Parameter Store higher throughput; raise `registryTtl` |

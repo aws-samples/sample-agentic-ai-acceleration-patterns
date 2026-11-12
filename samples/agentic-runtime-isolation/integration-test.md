@@ -44,9 +44,7 @@ Optional knobs:
 It reuses tenant-identity `shared-pool` (and `shared-pool-multi-tenant`), or
 deploys them through their own deploy path, and registers the vendor scopes
 `app/use` and `entitlements/admin` (step 1). It then deploys six stacks at
-once (`--concurrency 6`; `INTEG_DEPLOY_CONCURRENCY=2` when the Region's API
-Gateway control-plane quota is at its default, where six REST APIs at once
-have thrown a `CreateModel` 429 in us-east-1 and eu-central-1):
+once (`--concurrency 6`):
 
 | Stack suffix | Ingress | Modules |
 |---|---|---|

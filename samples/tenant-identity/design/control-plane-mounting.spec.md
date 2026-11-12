@@ -1,46 +1,16 @@
 # Specification: Mounting Tenant Identity under the Control Plane
 
-> **Status:** Accepted, 2026-10-26. Implemented 2026-10-27. This is an addendum to
+> **Status:** Accepted. This is an addendum to
 > [`tenant-identity.spec.md`](tenant-identity.spec.md): it specifies how the
 > `control-plane` sample onboards and offboards tenant identity through its
 > provisioning scripts, filling the "Control-plane mounting" seam of
 > tenant-identity §11. It changes both samples; each change is recorded as an
 > Accepted ADR in the sample it touches (tenant-identity ADR-0028 to
-> ADR-0033, control-plane ADR-0022 and ADR-0023). The implemented state is
-> documented in the README "Mounting under the control plane" section and
-> `architecture.md` §3.7 and §6.7.
->
-> Revised 2026-10-26 after a blind review: `tenantId` is typed `TenantId`
-> (§5.1), the first admin is a conditional write (§5.3, ADR-0032), the parked
-> password is encrypted with a key the build role cannot decrypt (§6.5,
-> ADR-0033), the park happens before any other work (M-R-10), and §10 names
-> the test-aid dependency.
->
-> **Amended 2026-10-27** after the implementation review (ADR-0032 amendment
-> note; `src/platform/platform.ts`, `src/shared/registry.ts`,
-> `scripts/control-plane/`): the slot attribute is `firstAdminEmail` and holds
-> the e-mail, not the Cognito username (§3.1, §4, M-R-8); the claim is
-> re-asserted after the Cognito create, `CreateTenant` claims inside its
-> activation write, `DeleteMembership` releases as `DeleteUser` does, a stale
-> slot is released by the holder's e-mail only, and a vanished row is 404
-> (M-R-8, M-R-9, §8); `tenant/create.sh` verifies both 409s, parks through
-> `file://` with three attempts, and warns when the parked password is
-> missing (§6.3, §7.1, §8, §9); the teardown check deletes recreated
-> control-plane log groups with a warning and also looks for pools and REST
-> APIs (§10 step 12); control-plane's re-apply is `UpdateResource` (§7.2,
-> §10 step 7). M-R-5 was never assigned: the numbering runs M-R-4, M-R-6.
->
-> **Amended 2026-10-29 (ADR-0034, ADR-0035, ADR-0036):** the spec as first
-> written had a four-route `PlatformInvokePolicy` (`POST /platform/tenants`,
-> `GET`/`DELETE /platform/tenants/*`, `POST /platform/tenants/*/users`) and
-> no scope input. Now §6.1 adds the optional `SCOPES` environment variable,
-> §6.3 is the nine-route policy (`PATCH /platform/tenants/*` for
-> `UpdateTenant`, and the four `/platform/scopes` routes a backend's
-> registration uses, tenant-identity ADR-0034), §7.1 passes `SCOPES` as the
-> `scopes` of `CreateTenant` (ADR-0035) and §7.2 `tenant/update.sh` replaces
-> the entitlement with `PATCH /platform/tenants/{T}`. §6.1, §6.3, §7.1 and
-> §7.2 are rewritten; M-R-4 records the wider over-grant (tenant-identity
-> T-34).
+> ADR-0033 and ADR-0038, control-plane ADR-0022 and ADR-0023). The mount
+> follows the control plane's application and deployment model
+> (control-plane ADR-032, ADR-037, ADR-038; tenant-identity ADR-0038). The
+> implemented state is documented in the README "Mounting under the control
+> plane" section and `architecture.md` §3.7 and §6.7.
 >
 > Written against `main` at `c4023d8`. The composition rule and repository
 > `ARCHITECTURE.md` on the unmerged `sample/runtime-isolation` branch
@@ -52,7 +22,7 @@
 
 The keywords MUST, MUST NOT, SHOULD, and MAY are to be interpreted as in
 RFC 2119. Requirements are numbered `M-R-n` so they do not collide with the
-parent specs' `R-n`.
+parent specs' `R-n`. M-R-5 is not assigned: the numbering runs M-R-4, M-R-6.
 
 ---
 
@@ -63,13 +33,13 @@ tenant by running a vendor-supplied tenant script in CodeBuild; it
 deliberately owns no tenant identity (control-plane ADR-004).
 `tenant-identity` onboards a tenant's identity through its IAM-authorised
 platform API (`POST /platform/tenants`) and publishes its API URL under
-`/application-plane/shared/identity/*`. Today a vendor running both must
-call each one by hand and keep two tenant ids in step.
+`/application-plane/shared/identity/*`. Without the mount, a vendor running
+both must call each one by hand and keep two tenant ids in step.
 
-This addendum makes **one** onboarding call do both: control-plane
-`CreateTenant` runs a tenant script, shipped by tenant-identity, that calls
-tenant-identity `CreateTenant` with the same tenant id. `DeleteTenant`
-mirrors it.
+This addendum makes **one** onboarding call do both: the control-plane
+`CreateDeployment` of the mount's application for a tenant runs a tenant
+script, shipped by tenant-identity, that calls tenant-identity `CreateTenant`
+with the same tenant id. `DeleteDeployment` mirrors it.
 
 ### 1.1 The deployment model
 
@@ -81,6 +51,20 @@ mirrors it.
 - Every control-plane cell therefore reaches the **same** identity
   deployment. Cell scripts do nothing for identity except check that it
   exists.
+- The mount is **one control-plane application**, `identity-mount`
+  (control-plane ADR-032): a source holding `scripts/control-plane/`, its
+  cell and tenant scripts, and `maxTenants`, registered through the
+  control-plane API after both stacks are deployed (§3.4). A tenant's
+  identity is its **deployment** of that application (control-plane
+  ADR-037). The control-plane tenant itself is a customer record that runs
+  no build; its id is the id every one of its deployments carries, so the
+  tenant's other applications reach its identity under the same id (M-P-1).
+- The identity parameters live in the control plane's **account-wide shared
+  namespace**, `/application-plane/shared/identity/*`, which both halves of
+  the role pair read beside the per-application one (control-plane ADR-034,
+  ADR-038): the identity deployment serves every application in the account,
+  so it publishes once and needs no application list. Only what one
+  deployment owns, the parked password, is keyed by the application (§6.2).
 - The tenant-identity topology is whatever the deployer chose
   (`pool-per-tenant`, `shared-pool`, `shared-pool-multi-tenant`). `tiered` is
   refused (§1.2).
@@ -111,7 +95,9 @@ mirrors it.
 
 The control-plane tenant id is the tenant-identity tenant id. Both are ULIDs
 with the same pattern (`^[0-9A-HJKMNP-TV-Z]{26}$`), so the control plane's id
-is passed through, not mapped. A mapping table would be a second record of
+is passed through, not mapped. The control plane gives a tenant one id across
+all of its deployments (control-plane ADR-037), so the id is also the same in
+every application the tenant uses. A mapping table would be a second record of
 the same fact, with a window where it is missing. This rules in an optional,
 caller-supplied `tenantId` on tenant-identity `CreateTenant` (ADR-0029) and
 rules out storing a cross-reference parameter.
@@ -161,23 +147,27 @@ bodies.
 | `AdminPasswordKey` KMS key + its SSM parameter | tenant-identity | new (ADR-0033) |
 | `tenantBuildManagedPolicyArns` deployment input | control-plane | new (ADR-0022) |
 | `TENANT_NAME` in the tenant script environment | control-plane | new (ADR-0023) |
+| `APPLICATION_ID` in the cell and tenant script environment; applications, tenants and deployments as API entities | control-plane | control-plane ADR-032, ADR-037 |
+| the `identity-mount` application registration (`PutApplication`, §3.4) | tenant-identity (README, §10 scenario) | ADR-0038 |
 | `test/integ.control-plane.ts` + `scripts/integ-control-plane.sh` | tenant-identity | new (§10) |
 
 ### 3.2 Data path
 
 ```
-vendor ──JWT──▶ control-plane CreateTenant (202, tenantId=T)
-                 └─▶ Step Functions ─▶ CodeBuild tenant project
-                       └─▶ tenant/create.sh
+vendor ──JWT──▶ control-plane CreateTenant {name} (200, tenantId=T)
+vendor ──JWT──▶ control-plane CreateDeployment T {applicationId: A, adminEmail} (202, cellId)
+                 └─▶ Step Functions ─▶ CodeBuild tenant project (after the cell build, for a new cell)
+                       └─▶ tenant/create.sh   (TENANT_ID=T, APPLICATION_ID=A)
                              ├─ read /application-plane/shared/identity/{apiUrl,topology,adminPasswordKeyArn}
                              ├─ SigV4 POST {apiUrl}/platform/tenants {tenantId:T, name, adminEmail}
-                             └─ put /application-plane/tenants/T/identity/admin-temporary-password
+                             └─ put /application-plane/tenants/T/A/admin-temporary-password
                                 (SecureString, key = AdminPasswordKey)
-                 ◀── build SUCCEEDED ── tenant ACTIVE in control-plane
+                 ◀── build SUCCEEDED ── deployment (T, A) ACTIVE in control-plane
 ```
 
-`DeleteTenant` is the same path with `tenant/delete.sh` calling
-`DELETE {apiUrl}/platform/tenants/T`.
+`A` is `identity-mount`. `DeleteDeployment` is the same path with
+`tenant/delete.sh` calling `DELETE {apiUrl}/platform/tenants/T`; the empty
+tenant record is then removed with a synchronous `DeleteTenant`.
 
 ### 3.3 Callers and identity
 
@@ -199,18 +189,51 @@ vendor ──JWT──▶ control-plane CreateTenant (202, tenantId=T)
 
 ### 3.4 Deployment inputs
 
+Stack inputs:
+
 | Sample | Input | Value |
 |---|---|---|
 | tenant-identity | `topology` | unchanged; not `tiered` when mounted |
-| control-plane | `cellDefinition.source` | a source holding tenant-identity's `scripts/control-plane/` |
-| control-plane | `cellDefinition.cellScripts` | `scripts/control-plane/cell/{create,update,delete}.sh` |
-| control-plane | `cellDefinition.tenantScripts` | `scripts/control-plane/tenant/{create,update,delete}.sh` |
-| control-plane | `tenantBuildManagedPolicyArns` (new, ADR-0022) | the value of `/application-plane/shared/identity/platformInvokePolicyArn` |
+| control-plane | `vendorIdpIssuerUrl`, `vendorIdpAudience` | the vendor IdP; nothing identity-shaped |
+| control-plane | `tenantBuildManagedPolicyArns` (ADR-0022) | the value of `/application-plane/shared/identity/platformInvokePolicyArn` |
 
-Deploy order: tenant-identity first (it publishes the policy ARN), then
-control-plane. control-plane MUST fail at synth if an entry of
+control-plane MUST fail at synth if an entry of
 `tenantBuildManagedPolicyArns` is not an IAM managed-policy ARN in its own
 partition and account.
+
+The application is a run-time registration, not a stack input
+(control-plane ADR-032): `PUT /applications/identity-mount` with a source
+holding tenant-identity's `scripts/control-plane/` and the six script paths
+relative to it. The application id MUST match `^[a-z0-9-]{1,32}$`; it becomes
+a segment of the parked password's name (§6.2).
+
+```json
+{
+  "source": { "type": "S3", "location": "<bucket>/scripts/" },
+  "cellScripts": {
+    "create": "control-plane/cell/create.sh",
+    "update": "control-plane/cell/update.sh",
+    "delete": "control-plane/cell/delete.sh"
+  },
+  "tenantScripts": {
+    "create": "control-plane/tenant/create.sh",
+    "update": "control-plane/tenant/update.sh",
+    "delete": "control-plane/tenant/delete.sh"
+  },
+  "maxTenants": 10
+}
+```
+
+A repository source (`GITHUB` and the others) works the same way with its
+clone URL as `location` and, optionally, a full commit SHA as
+`sourceVersion` (control-plane ADR-020).
+
+Deploy order: tenant-identity first (it publishes the policy ARN), then
+control-plane, then `PutApplication`, then `PutAccount` for every account
+that hosts cells. An account registered without `applicationIds` is shared
+and admits the mount; one registered with `applicationIds` MUST name
+`identity-mount`, which `PutAccount` accepts only once the application is
+registered (control-plane ADR-033).
 
 ---
 
@@ -220,9 +243,10 @@ No new tables. State lives in existing stores:
 
 | Fact | Where | Owner |
 |---|---|---|
-| tenant lifecycle (control) | control-plane `Tenant` record | control-plane |
+| the customer (control) | control-plane `Tenant` record | control-plane |
+| the tenant's identity deployment lifecycle (control) | control-plane `Deployment` record `(T, identity-mount)` | control-plane |
 | tenant identity (registry row, pool or groups) | tenant-identity `TenantRegistry`, key `TENANT#<T>` | tenant-identity |
-| first admin's temporary password, until collected | SSM SecureString `/application-plane/tenants/<T>/identity/admin-temporary-password`, encrypted with `AdminPasswordKey` | the tenant scripts (ADR-0031, ADR-0033) |
+| first admin's temporary password, until collected | SSM SecureString `/application-plane/tenants/<T>/<A>/admin-temporary-password`, encrypted with `AdminPasswordKey` | the tenant scripts (ADR-0031, ADR-0033, ADR-0038) |
 | which user is the first admin | tenant-identity registry row, `firstAdminEmail` | tenant-identity (ADR-0032) |
 
 **M-R-1:** The script MUST NOT write any other identity fact to SSM. Pool
@@ -264,15 +288,19 @@ id with 400 before any write. A new string shape would not carry the pattern.
 
 Neither the tenant API nor the token contract changes.
 
-### 5.2 control-plane script environment gains `TENANT_NAME` (ADR-0023)
+### 5.2 control-plane script environment: `TENANT_NAME` (ADR-0023) and `APPLICATION_ID`
 
 | Variable | Cell scripts | Tenant scripts |
 |---|---|---|
 | `TENANT_NAME` | — | ✓ every operation; the tenant's `name` as stored on the control-plane record |
+| `APPLICATION_ID` | ✓ | ✓ every operation; the application the cell serves (control-plane ADR-032) |
 
-Same boundary test as `ADMIN_EMAIL` (control-plane ADR-004): onboarding
-input, not application-plane configuration. Unlike `ADMIN_EMAIL` it is
-already persisted on the record, so it is passed on every operation.
+`TENANT_NAME` passes the same boundary test as `ADMIN_EMAIL` (control-plane
+ADR-004): onboarding input, not application-plane configuration. Unlike
+`ADMIN_EMAIL` it is already persisted on the record, so it is passed on every
+operation. `APPLICATION_ID` names the deployment's own parameter namespace
+(§6.2); the cell scripts receive it and do not use it, because the identity
+deployment is account-wide (§1.1).
 
 ### 5.3 tenant-identity `CreateUser` takes an optional `firstAdmin` (ADR-0032)
 
@@ -342,14 +370,32 @@ read-then-write (control-plane P-5). Two racing `firstAdmin` creates get one
 `CreateUser {admin: true}` is unchanged: a tenant may have more admins; it has
 one *first* admin.
 
+### 5.4 control-plane operations the mount is driven by
+
+The mount adds no control-plane operation; it is driven by the control
+plane's own API (control-plane spec §5):
+
+| Vendor intent | control-plane calls | Script run |
+|---|---|---|
+| register the mount | `PUT /applications/identity-mount` (200), then `PUT /accounts/{accountId}` (200) | none |
+| onboard a tenant | `POST /tenants {name, description?}` (200, `tenantId`), then `POST /tenants/{T}/deployments {applicationId: "identity-mount", adminEmail, accountId?, clientToken?}` (202, `cellId`); poll `GET /tenants/{T}/deployments/identity-mount` to `ACTIVE` | `cell/create.sh` when placement creates a cell, then `tenant/create.sh` |
+| re-apply | `PUT /tenants/{T}/deployments/identity-mount`, no body (202); poll to `ACTIVE` | `tenant/update.sh` |
+| offboard a tenant | `DELETE /tenants/{T}/deployments/identity-mount` (202); poll until 404; then `DELETE /tenants/{T}` (200, requires `deploymentCount = 0`) | `tenant/delete.sh` |
+| retire the mount | `DELETE /cells/{cellId}` (202, empty cells only) for each of its cells, `DELETE /accounts/{accountId}` (200), `DELETE /applications/identity-mount` (200) | `cell/delete.sh` |
+
+`UpdateTenant` edits the customer's metadata and runs no script; the name
+tenant-identity holds is the one `tenant/create.sh` sent, and
+`tenant/update.sh` does not push a later one (§7.2).
+
 ---
 
 ## 6. Contracts
 
 ### 6.1 Script environment the mount relies on
 
-`TENANT_ID`, `TENANT_NAME`, `CELL_ID`, `OPERATION`, `ADMIN_EMAIL` (create),
-`OPERATOR_ID`, `AWS_REGION` (CodeBuild default), and the optional `SCOPES`
+`TENANT_ID`, `TENANT_NAME`, `APPLICATION_ID`, `CELL_ID`, `OPERATION`,
+`ADMIN_EMAIL` (create), `OPERATOR_ID`, `AWS_REGION` (CodeBuild default), and
+the optional `SCOPES`
 (create and update): a space-separated list of the scopes the tenant is
 entitled to (tenant-identity ADR-0035). The control plane passes it as an
 opaque onboarding input, as it does `TENANT_NAME`; it knows nothing about
@@ -363,10 +409,24 @@ what a scope is.
 | `/application-plane/shared/identity/topology` | tenant-identity stack (existing) | `tenant/create.sh`, `cell/create.sh` |
 | `/application-plane/shared/identity/platformInvokePolicyArn` | tenant-identity stack (new, ADR-0030) | the deployer, once, as control-plane context |
 | `/application-plane/shared/identity/adminPasswordKeyArn` | tenant-identity stack (new, ADR-0033) | `tenant/create.sh` |
-| `/application-plane/tenants/<T>/identity/admin-temporary-password` | `tenant/create.sh` | the vendor, out of band; deleted by `tenant/delete.sh` |
+| `/application-plane/tenants/<T>/<A>/admin-temporary-password` | `tenant/create.sh` | the vendor, out of band; deleted by `tenant/delete.sh` |
+
+`<A>` is `APPLICATION_ID`. The identity parameters sit in the account-wide
+shared namespace `/application-plane/shared/*`, which both halves of the
+control plane's role pair read, beside the per-application
+`/application-plane/applications/<applicationId>/shared/*` (control-plane
+ADR-034, ADR-038): the identity deployment is infrastructure every
+application in the account may use, so it is published once, before any
+application is registered, and the mount reads it without an application
+segment. The parked password belongs to one deployment, so it sits under the
+deployment's own namespace `/application-plane/tenants/<tenantId>/<applicationId>/*`
+(control-plane ADR-037), where a second application of the same tenant in
+the same account never shares a path with it.
 
 All reads and writes stay inside the namespaces control-plane already grants
-its tenant build role (control-plane spec §6.2). No grant changes there.
+its tenant provisioning role (control-plane spec §6.2: read on both shared
+namespaces, read and write/delete on `/application-plane/tenants/*`). No
+grant changes there.
 
 ### 6.3 `PlatformInvokePolicy` (ADR-0030)
 
@@ -420,20 +480,21 @@ ARNs cannot tell a tenant path from a user path under it.
 
 ### 6.4 What the mount promises
 
-- After control-plane `CreateTenant` reaches `ACTIVE`, tenant-identity
+- After the control-plane deployment `(T, identity-mount)` reaches `ACTIVE`, tenant-identity
   `GetTenant(T)` returns `ACTIVE`, with the same `name`, and the tenant has
   exactly one first admin, `ADMIN_EMAIL`, held by the conditional slot of
   M-R-8. No replay, race or retry can make a second one.
 - The parked password can be read only by a principal holding
   `kms:Decrypt` on `AdminPasswordKey`. The control-plane tenant build role
   holds none (§6.5).
-- After control-plane `DeleteTenant` completes, tenant-identity `GetTenant(T)`
-  returns 404 and no `/application-plane/tenants/<T>/identity/*` parameter
-  remains.
-- A failure inside tenant-identity surfaces as control-plane
-  `CREATE_FAILED`/`DELETE_FAILED` with the operation and HTTP status in the
-  build log (never the body), and re-running the control-plane operation
-  finishes the job (M-P-3).
+- After control-plane `DeleteDeployment` of `(T, identity-mount)` completes
+  (`GetDeployment` 404), tenant-identity `GetTenant(T)` returns 404 and the
+  parked parameter under `/application-plane/tenants/<T>/identity-mount/`
+  is gone.
+- A failure inside tenant-identity surfaces as `CREATE_FAILED`,
+  `UPDATE_FAILED` or `DELETE_FAILED` on the control-plane deployment, with the
+  operation and HTTP status in the build log (never the body), and re-running
+  the control-plane operation finishes the job (M-P-3).
 
 ### 6.5 `AdminPasswordKey` (ADR-0033)
 
@@ -459,10 +520,17 @@ the write). Deleting the parameter needs no KMS permission.
 
 ## 7. Script Behaviour (normative)
 
-Common to all: `set -euo pipefail`; `: "${VAR:?}"` guards; every platform
-call through one `platform_call METHOD PATH [BODY]` function in `lib.sh` that
-prints only `"<METHOD> <path-template> -> HTTP <code>"` and returns the
-status and body to the caller in variables.
+Common to all: `set -euo pipefail`; `: "${VAR:?}"` guards (the tenant
+scripts MUST require `APPLICATION_ID`; every script header lists it among the
+variables it runs with); every platform call through one
+`platform_call METHOD PATH [BODY]` function in `lib.sh` that prints only
+`"<METHOD> <path-template> -> HTTP <code>"` and returns the status and body
+to the caller in variables.
+
+**M-R-12:** `lib.sh` MUST refuse, before any call, a `TENANT_ID` that is not
+a ULID and an `APPLICATION_ID` outside `^[a-z0-9-]{1,32}$`, because both are
+spliced unencoded into URL paths and parameter names. The message names the
+variable, never the value.
 
 ### 7.1 `tenant/create.sh`
 
@@ -510,7 +578,7 @@ status and body to the caller in variables.
 6. Park: write the password to the mode-0600 scratch file `lib.sh` creates
    and `unset` the variable, then `aws ssm put-parameter --type SecureString
    --key-id "$KEY_ARN" --overwrite --name
-   /application-plane/tenants/{T}/identity/admin-temporary-password
+   /application-plane/tenants/{T}/{A}/admin-temporary-password
    --value "file://$PLATFORM_REQUEST_FILE" > /dev/null`. The password never
    goes on argv (M-P-5: another local user can read `/proc/<pid>/cmdline`).
    A failing CLI call gets three attempts with a 1 s then 2 s backoff, each
@@ -524,8 +592,8 @@ status and body to the caller in variables.
 
 Reconcile only. `GET /platform/tenants/{T}`: `ACTIVE` → continue; anything
 else → exit 1 naming the status. It never creates (control-plane
-`UpdateResource` on a tenant whose identity was lost should fail loudly, not
-silently re-onboard with no `ADMIN_EMAIL`). Then, only when `SCOPES` is set
+`UpdateDeployment` on a deployment whose identity was lost should fail
+loudly, not silently re-onboard with no `ADMIN_EMAIL`). Then, only when `SCOPES` is set
 (an empty value counts and means "no scope"),
 `PATCH /platform/tenants/{T} {scopes}` replaces the entitlement
 (tenant-identity ADR-0035): 200 → success, printing the list; 400 → exit 1
@@ -535,7 +603,7 @@ with the API's message; anything else → exit 1 naming the status. With
 ### 7.3 `tenant/delete.sh`
 
 1. `DELETE /platform/tenants/{T}`: 204 or 404 → success (404 covers
-   `CREATE_FAILED` tenants that never reached tenant-identity). Other → exit 1.
+   `CREATE_FAILED` deployments that never reached tenant-identity). Other → exit 1.
    tenant-identity's own `DeleteTenant` is idempotent against `DELETING`
    (tenant-identity R-11), so a re-run finishes a half-done offboarding.
 2. `aws ssm delete-parameter` on the parked password; `ParameterNotFound` is
@@ -555,13 +623,14 @@ no-op (control-plane P-9).
 | Failure | control-plane result | Recovery |
 |---|---|---|
 | identity stack not deployed | cell `CREATE_FAILED` | deploy tenant-identity, `UpdateCell` |
-| `tiered` topology | cell or tenant `CREATE_FAILED` | redeploy identity with a single topology |
-| policy not attached | tenant `CREATE_FAILED`, `HTTP 403` in log | redeploy control-plane with the context, then `DeleteTenant` and `CreateTenant` again |
-| build killed after 201, before park; or the park failed three times | `CREATE_FAILED` | re-run: step 3 sees `ACTIVE`, step 5 gets 409, finds the admin and does not re-park; it prints `WARNING ... no parked password` pointing here. The password is lost; the vendor recovers with `DeleteUser` naming the holder's e-mail (releases the slot, M-R-9) then `CreateUser {firstAdmin: true}` by hand, or control-plane `DeleteTenant` + `CreateTenant` (residual gap, §9) |
+| `tiered` topology | cell or deployment `CREATE_FAILED` | redeploy identity with a single topology |
+| policy not attached | deployment `CREATE_FAILED`, `HTTP 403` in log | redeploy control-plane with the context, then `DeleteDeployment` and `CreateDeployment` again |
+| build killed after 201, before park; or the park failed three times | `CREATE_FAILED` | re-run: step 3 sees `ACTIVE`, step 5 gets 409, finds the admin and does not re-park; it prints `WARNING ... no parked password` pointing here. The password is lost; the vendor recovers with `DeleteUser` naming the holder's e-mail (releases the slot, M-R-9) then `CreateUser {firstAdmin: true}` by hand, or control-plane `DeleteDeployment` + `CreateDeployment` (residual gap, §9) |
 | `adminEmail` already in use in the shared pool | `CREATE_FAILED`, `ADMIN_EMAIL is probably already in use in the shared pool` in the log | onboard with another e-mail, or free the address (`DeleteUser` in the tenant that holds it) and re-run |
 | a `SCOPES` entry is not in the catalogue | `CREATE_FAILED` or `UPDATE_FAILED`, the API's `invalid_scope` message in the log | register the scope (the owning backend's deploy does) or drop it from `SCOPES`, re-run |
-| identity row stuck `PROVISIONING` | `CREATE_FAILED` | vendor `DeleteTenant` on tenant-identity, then control-plane `DeleteTenant` |
-| identity `DeleteTenant` fails | `DELETE_FAILED` | control-plane `DeleteTenant` retry re-runs the script |
+| identity row stuck `PROVISIONING` | `CREATE_FAILED` | vendor `DeleteTenant` on tenant-identity, then control-plane `DeleteDeployment` |
+| identity `DeleteTenant` fails | `DELETE_FAILED` | control-plane `DeleteDeployment` retry re-runs the script |
+| `APPLICATION_ID` outside `[a-z0-9-]{1,32}` (M-R-12) | cell or deployment `CREATE_FAILED` before any call | cannot happen through the control plane, whose application id has that pattern; a local run sets a valid id |
 
 ---
 
@@ -604,31 +673,37 @@ Setup, deployed together with `--concurrency`:
 - `TenantIdentityCpSetup` from `test/integ.control-plane.ts`: a throwaway
   vendor IdP (Cognito pool + pre-token trigger minting `role: operator`, as
   control-plane's own integ does) and an S3 bucket holding
-  `scripts/control-plane/` as the script source.
+  `scripts/control-plane/` as the script source, published as the
+  `ScriptSourceLocation` output.
 
 Then control-plane through its own deploy path (`cd ../control-plane && npx
-cdk deploy` with the §3.4 context), never by importing its `src/`.
+cdk deploy` with the §3.4 stack inputs), never by importing its `src/`. The
+script hands `ScriptSourceLocation` to the scenario in
+`E2E_CP_SCRIPT_SOURCE`; the scenario registers the application from it
+(step 0).
 
 | # | Step | Expected |
 |---|---|---|
-| 1 | control-plane `CreateTenant` for the first tenant creates its cell (implicit, control-plane ADR-013) | cell `ACTIVE`; `cell/create.sh` found the identity parameters |
-| 2 | control-plane `CreateTenant {name, adminEmail=success+admin@simulator.amazonses.com}` | 202, polls to `ACTIVE` |
+| 0 | control-plane `PutApplication identity-mount {source: {type: S3, location: E2E_CP_SCRIPT_SOURCE}, cellScripts, tenantScripts, maxTenants: 2}`, then `PutAccount` for the home account `{owner: VENDOR, maxCells: 1}` (shared) | 200, 200 |
+| 1 | the first deployment of `identity-mount` creates its cell (implicit, control-plane ADR-013) | cell `ACTIVE`, `applicationId` = `identity-mount`; `cell/create.sh` found the identity parameters |
+| 2 | control-plane `CreateTenant {name}`, then `CreateDeployment T {applicationId: identity-mount, adminEmail=success+admin@simulator.amazonses.com}` | 200 with `tenantId`, then 202 with `cellId`; `GetDeployment` polls to `ACTIVE` with the same `cellId` |
 | 3 | tenant-identity `GetTenant(T)` with the test's own SigV4 | 200 `ACTIVE`, same `name` |
 | 4 | tenant-identity `ListUsers(T)` | exactly one user, `admin: true`; `GetTenant(T)` is unchanged (no registry field leaks into the API) |
 | 5 | parked parameter exists, type `SecureString`, `KeyId` = `adminPasswordKeyArn` | true; value never printed |
 | 5b | `iam simulate-principal-policy` for the control-plane tenant build role, action `kms:Decrypt`, resource `adminPasswordKeyArn` | `implicitDeny` |
 | 6 | `IssueToken` for the admin with the parked password | access token whose `tenant_id` claim is `T`. **Needs the test-aid routes deployed** (`IssueToken` is a test aid, tenant-identity ADR-0006, removed by README hardening item 1); the test asserts they exist and fails with a clear message if not |
-| 7 | control-plane `UpdateResource(T)` (the re-apply that re-runs `tenant/update.sh`; `UpdateTenant` edits metadata and runs no script) | `ACTIVE`; still one admin; parameter not re-written (version unchanged) |
-| 8 | run `tenant/create.sh` locally a second time with the build's env | exit 0; still one registry row, one admin |
+| 7 | control-plane `UpdateDeployment(T, identity-mount)` (the re-apply that re-runs `tenant/update.sh`; `UpdateTenant` edits metadata and runs no script) | 202, polls to `ACTIVE`; still one admin; parameter not re-written (version unchanged) |
+| 8 | run `tenant/create.sh` locally a second time with the build's env, `APPLICATION_ID` included | exit 0; still one registry row, one admin |
 | 9 | tenant-identity `CreateTenant` with an existing `tenantId` | 409, nothing changed |
 | 9b | tenant-identity `CreateUser(T) {email: other@example.com, firstAdmin: true}` | 409, no user created; then `CreateUser {admin: true}` for the same email → 201 (a second admin is allowed, a second *first* admin is not); delete it |
-| 10 | control-plane `DeleteTenant(T)` | completes |
+| 10 | control-plane `DeleteDeployment(T, identity-mount)` | 202; `GetDeployment` polls to 404 |
 | 11 | tenant-identity `GetTenant(T)` | 404; parked parameter gone |
+| 11b | control-plane `GetTenant(T)`, `DeleteTenant(T)`, `DeleteCell`, `DeleteAccount`, `DeleteApplication identity-mount` | `deploymentCount` 0; 200; 202, `GetCell` polls to 404; 200; 200 |
 | 12 | teardown from an exit trap: control-plane, setup, identity | no stack, parameter, user pool, REST API or log group of the run remains. A leftover parked parameter or orphan REST API is deleted and still fails the run. A tenant-identity log group recreated during teardown fails the run (ADR-0024); a control-plane log group recreated during teardown is deleted with a warning and does not (control-plane has no log drain; its known issue, not the mount's) |
 
 Unit tests (jest, no AWS): each mount script run with `aws` and `curl`
 replaced by stubs on `PATH`, covering every branch of §7 including `tiered`
-refusal, `PROVISIONING`, 409 race, and 404-on-delete; plus a check that no
+refusal, `PROVISIONING`, 409 race, 404-on-delete and the M-R-12 checks; plus a check that no
 stub ever receives the password or e-mail on its command line.
 
 Estimated run: 25-35 minutes, under $1.
@@ -642,7 +717,7 @@ Estimated run: 25-35 minutes, under $1.
 | `tiered` | control-plane opaque `parameters` map → `TENANT_TIER` env → `tier` on `CreateTenant` (the same seam `SCOPES` uses today) |
 | Per-cell identity | `cell/create.sh` deploys a `TenantIdentity-<topology>` stack per cell with `publishSharedParameters: false` and writes its `apiUrl` to `/application-plane/cells/<cellId>/identity/apiUrl`; tenant scripts read the cell value first |
 | Real invite delivery | tenant-identity `CreateTenant` option to let Cognito send the invitation (no `SUPPRESS`), with an SES-backed sender; the script then parks nothing |
-| Async onboarding | tenant-identity §11 "Async onboarding" is now this mount |
+| Async onboarding | tenant-identity §11 "Async onboarding" is this mount |
 
 ---
 
@@ -656,6 +731,8 @@ Estimated run: 25-35 minutes, under $1.
 | tenant-identity: `PlatformInvokePolicy` + parameter + `threat-model.md` entry, one PR (ADR-0030) | yes | ADR-0033 (key ARN) |
 | control-plane: `tenantBuildManagedPolicyArns` (ADR-0022) | yes | — |
 | control-plane: `TENANT_NAME` env (ADR-0023) | yes | — |
+| control-plane: applications, tenants and deployments, `APPLICATION_ID` env, account-wide shared namespace (control-plane ADR-032, ADR-037, ADR-038) | yes | — |
+| tenant-identity: mount on the deployment model, `APPLICATION_ID` guard and check (M-R-12), parked password under the deployment namespace (ADR-0038) + stub unit tests | yes | control-plane ADR-032, ADR-037, ADR-038 contracts |
 | tenant-identity: mount scripts + stub unit tests | yes | contracts in §5-§7 only |
 | integ test (§10) | no | all of the above |
 | README, architecture.md, threat model, diagrams in both samples | no | integ green |

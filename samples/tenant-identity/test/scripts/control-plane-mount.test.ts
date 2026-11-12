@@ -98,7 +98,7 @@ describe('scripts/control-plane layout', () => {
 
 describe('tenant/create.sh', () => {
   it('fails before any call when a required variable is missing', () => {
-    for (const missing of ['TENANT_ID', 'TENANT_NAME', 'CELL_ID', 'OPERATION', 'ADMIN_EMAIL', 'OPERATOR_ID', 'AWS_REGION']) {
+    for (const missing of ['TENANT_ID', 'TENANT_NAME', 'APPLICATION_ID', 'CELL_ID', 'OPERATION', 'ADMIN_EMAIL', 'OPERATOR_ID', 'AWS_REGION']) {
       const r = run('tenant/create.sh', { env: tenantEnv({ [missing]: undefined }), params: allParams() });
       expect(r.status).toBe(1);
       expect(r.stderr).toContain(missing);
@@ -140,6 +140,16 @@ describe('tenant/create.sh', () => {
       const r = run('tenant/create.sh', { env: tenantEnv({ TENANT_ID: bad }), params: allParams() });
       expect(r.status).toBe(1);
       expect(r.stderr).toContain('TENANT_ID is not a ULID');
+      expect(r.stderr).not.toContain(bad);
+      expect(r.calls).toHaveLength(0);
+    }
+  });
+
+  it('§6.2: an APPLICATION_ID outside [a-z0-9-]{1,32} exits 1 before any call', () => {
+    for (const bad of ['Identity', 'identity/mount', 'identity_mount', 'a'.repeat(33), '../x']) {
+      const r = run('tenant/create.sh', { env: tenantEnv({ APPLICATION_ID: bad }), params: allParams() });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('APPLICATION_ID is not a valid application id');
       expect(r.stderr).not.toContain(bad);
       expect(r.calls).toHaveLength(0);
     }
@@ -623,6 +633,17 @@ describe('tenant/delete.sh (§7.3)', () => {
     expect(r.calls).toHaveLength(0);
   });
 
+  it.each(['tenant/delete.sh', 'tenant/update.sh'])('%s needs APPLICATION_ID and refuses a malformed one before any call', (script) => {
+    const missing = run(script, { env: tenantEnv({ OPERATION: 'x', ADMIN_EMAIL: undefined, APPLICATION_ID: undefined }), params: allParams() });
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain('APPLICATION_ID');
+    expect(missing.calls).toHaveLength(0);
+    const bad = run(script, { env: tenantEnv({ OPERATION: 'x', ADMIN_EMAIL: undefined, APPLICATION_ID: 'a/b' }), params: allParams() });
+    expect(bad.status).toBe(1);
+    expect(bad.stderr).toContain('APPLICATION_ID is not a valid application id');
+    expect(bad.calls).toHaveLength(0);
+  });
+
   it('needs apiUrl', () => {
     const r = run('tenant/delete.sh', { env, params: {} });
     expect(r.status).toBe(1);
@@ -666,6 +687,13 @@ describe('cell scripts (§7.4)', () => {
       expect(r.stderr).toContain(missing);
       expect(r.calls).toHaveLength(0);
     }
+  });
+
+  it.each(['cell/create.sh', 'cell/update.sh'])('%s refuses a malformed APPLICATION_ID before any call', (script) => {
+    const r = run(script, { env: cellEnv({ APPLICATION_ID: 'Identity_Mount' }), params: allParams() });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('APPLICATION_ID is not a valid application id');
+    expect(r.calls).toHaveLength(0);
   });
 
   it('cell/delete.sh is an explicit no-op: exit 0, no aws or curl call', () => {

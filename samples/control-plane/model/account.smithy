@@ -14,13 +14,14 @@ use aws.apigateway#authorizer
 /// An AWS account the control plane may provision cells into (ADR-024).
 /// Operators register accounts at run time: a vendor-owned account joins the
 /// fleet and is filled by placement; a tenant-owned account belongs to a
-/// customer and receives only tenants whose CreateTenant names it. Each
-/// account installs the provisioning role pair (ADR-025) before it can be
-/// registered - PutAccount verifies that handshake (ADR-027). The account
-/// record carries the authoritative cell counter: the new-cell placement
-/// transaction claims a slot (cellCount < maxCells) and the cell delete
-/// transaction releases it. There is no status - account operations are
-/// synchronous and run no build.
+/// customer and receives only deployments whose CreateDeployment names it.
+/// An account admits every application (shared) or only the applications
+/// named in applicationIds (dedicated) (ADR-033). Each account installs the
+/// provisioning role pair (ADR-025) before it can be registered - PutAccount
+/// verifies that handshake (ADR-027). The account record carries the
+/// authoritative cell counter: the new-cell placement transaction claims a
+/// slot (cellCount < maxCells) and the cell delete transaction releases it.
+/// There is no status - account operations are synchronous and run no build.
 resource Account {
     identifiers: {
         accountId: AccountId
@@ -44,7 +45,7 @@ string AccountId
 enum AccountOwner {
     /// The vendor's own account: part of the fleet, filled by placement.
     VENDOR
-    /// A customer's account: receives only tenants that name it explicitly.
+    /// A customer's account: receives only deployments that name it explicitly.
     TENANT
 }
 
@@ -66,8 +67,9 @@ integer CellCount
 @pattern("^[\\w+=,.@:/-]+$")
 string ExternalId
 
-/// An account as returned by the API: owner, capacity/occupancy, and whether
-/// an external id is configured (never its value).
+/// An account as returned by the API: owner, admitted applications,
+/// capacity/occupancy, and whether an external id is configured (never its
+/// value).
 structure AccountSummary {
     /// The AWS account id.
     @required
@@ -76,6 +78,10 @@ structure AccountSummary {
     /// Who owns the account.
     @required
     owner: AccountOwner
+
+    /// The applications this account admits. Absent: the account is shared
+    /// and admits every application (ADR-033).
+    applicationIds: ApplicationIdList
 
     /// Maximum number of cells this account may hold.
     @required
@@ -108,11 +114,14 @@ list AccountList {
 // ---------------------------------------------------------------------------
 
 /// Registers an account or replaces its policy fields (create-or-replace).
-/// Before writing, the control plane verifies the handshake by assuming both
-/// provisioning roles of the account with the given external id (ADR-027);
-/// a role that cannot be assumed is a ValidationException naming it. On an
-/// existing account the owner must match (ConflictError otherwise); maxCells
-/// and externalId are replaced; cellCount is never touched. Synchronous.
+/// Every applicationIds entry must name a registered application
+/// (ResourceNotFoundError otherwise). Before writing, the control plane
+/// verifies the handshake by assuming both provisioning roles of the account
+/// with the given external id (ADR-027); a role that cannot be assumed is a
+/// ValidationException naming it. On an existing account the owner must
+/// match (ConflictError otherwise); maxCells, applicationIds and externalId
+/// are replaced (an absent applicationIds makes the account shared);
+/// cellCount is never touched. Synchronous.
 @authorizer("vendor-authorizer")
 @idempotent
 @http(method: "PUT", uri: "/accounts/{accountId}", code: 200)
@@ -131,6 +140,10 @@ operation PutAccount {
         @required
         maxCells: MaxCells
 
+        /// The applications this account admits (dedicated). Absent: the
+        /// account is shared and admits every application.
+        applicationIds: ApplicationIdList
+
         /// External id configured on the account's provisioning roles.
         /// Required when owner is TENANT (ValidationException without it);
         /// optional for VENDOR, omitted when the roles were installed
@@ -145,6 +158,7 @@ operation PutAccount {
     }
 
     errors: [
+        ResourceNotFoundError
         ConflictError
     ]
 }
@@ -153,8 +167,8 @@ operation PutAccount {
 // GetAccount - GET /accounts/{accountId} -> 200
 // ---------------------------------------------------------------------------
 
-/// Returns a registered account: owner, cellCount/maxCells, and whether an
-/// external id is configured.
+/// Returns a registered account: owner, admitted applications,
+/// cellCount/maxCells, and whether an external id is configured.
 @authorizer("vendor-authorizer")
 @readonly
 @http(method: "GET", uri: "/accounts/{accountId}", code: 200)
@@ -213,7 +227,8 @@ operation DeleteAccount {
 // ---------------------------------------------------------------------------
 
 /// Lists registered accounts with pagination - the operator's capacity view
-/// one level above ListCells: owner and cellCount/maxCells per account.
+/// one level above ListCells: owner, admitted applications and
+/// cellCount/maxCells per account.
 @authorizer("vendor-authorizer")
 @readonly
 @paginated(inputToken: "nextToken", outputToken: "nextToken", pageSize: "maxResults", items: "accounts")

@@ -19,17 +19,19 @@ export const IDEMPOTENCY_SORT_KEY = 'META';
 export const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60;
 
 /**
- * The CreateTenant idempotency record (ADR-017): written in the same
+ * The CreateDeployment idempotency record (ADR-017): written in the same
  * `TransactWriteItems` as the placement, conditional on
  * `attribute_not_exists(PK)`. A cancelled write on this item marks the
- * request as a replay of an earlier CreateTenant with the same
+ * request as a replay of an earlier CreateDeployment with the same
  * `clientToken`.
  */
 export interface IdempotencyRecord {
   /** The client-supplied token — the item's identity. */
   readonly clientToken: string;
-  /** The tenant the original request onboarded. */
+  /** The deployment the original request created: its tenant ... */
   readonly tenantId: string;
+  /** ... and its application. */
+  readonly applicationId: string;
   /**
    * SHA-256 over the original request parameters. A replay whose hash
    * differs is a token reuse with different input — rejected with the 409.
@@ -44,6 +46,7 @@ export interface IdempotencyRecord {
 export interface IdempotencyItem extends DynamoDBItem {
   readonly clientToken: string;
   readonly tenantId: string;
+  readonly applicationId: string;
   readonly requestHash: string;
   readonly createdAt: string;
   readonly expiresAt: number;
@@ -55,21 +58,22 @@ export function idempotencyKey(clientToken: string): ItemKey {
 }
 
 /**
- * Canonical hash over the CreateTenant parameters that define the request's
- * identity. Positional array form — key order cannot vary; an absent
- * description or accountId hashes as null, distinct from an empty string.
- * accountId is part of the identity: the same token with a different target
- * account is a different request and must be refused (409), not replayed.
+ * Canonical hash over the CreateDeployment parameters that define the
+ * request's identity (spec §7.3). Positional array form — key order cannot
+ * vary; an absent accountId hashes as null, distinct from an empty string.
+ * tenantId, applicationId and accountId are all part of the identity: the
+ * same token with a different tenant, application or target account is a
+ * different request and must be refused (409), not replayed.
  */
-export function createTenantRequestHash(params: {
-  readonly name: string;
-  readonly description?: string;
+export function createDeploymentRequestHash(params: {
+  readonly tenantId: string;
+  readonly applicationId: string;
   readonly adminEmail: string;
   readonly accountId?: string;
 }): string {
   return createHash('sha256')
     .update(
-      JSON.stringify([params.name, params.description ?? null, params.adminEmail, params.accountId ?? null]),
+      JSON.stringify([params.tenantId, params.applicationId, params.adminEmail, params.accountId ?? null]),
       'utf8',
     )
     .digest('hex');
@@ -82,6 +86,7 @@ export class IdempotencyDataModel implements DataModel<IdempotencyRecord, Idempo
       ...idempotencyKey(record.clientToken),
       clientToken: record.clientToken,
       tenantId: record.tenantId,
+      applicationId: record.applicationId,
       requestHash: record.requestHash,
       createdAt: record.createdAt.toISOString(),
       expiresAt: record.expiresAt,
@@ -92,6 +97,7 @@ export class IdempotencyDataModel implements DataModel<IdempotencyRecord, Idempo
     return {
       clientToken: item.clientToken,
       tenantId: item.tenantId,
+      applicationId: item.applicationId,
       requestHash: item.requestHash,
       createdAt: new Date(item.createdAt),
       expiresAt: item.expiresAt,

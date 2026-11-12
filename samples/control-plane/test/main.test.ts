@@ -6,26 +6,10 @@ import { Match, Template } from 'aws-cdk-lib/assertions';
 import { CellAccountStack, CellAccountStackProps } from '../src/cell-account/cell-account.cdk';
 import { isFullCommitSha, sourcePinningWarning } from '../src/shared/service-config';
 import {
-  CellDefinition,
   TenantStack,
   TenantStackProps,
   validateTenantBuildManagedPolicyArns,
 } from '../src/tenant/tenant.cdk';
-
-const cellDefinition: CellDefinition = {
-  source: { type: 'GITHUB', location: 'https://github.com/acme/provisioning.git' },
-  cellScripts: {
-    create: 'scripts/sample-cell/create.sh',
-    update: 'scripts/sample-cell/update.sh',
-    delete: 'scripts/sample-cell/delete.sh',
-  },
-  tenantScripts: {
-    create: 'scripts/sample-tenant/create.sh',
-    update: 'scripts/sample-tenant/update.sh',
-    delete: 'scripts/sample-tenant/delete.sh',
-  },
-  maxTenants: 10,
-};
 
 // Skip NodejsFunction esbuild bundling in unit tests - assertions target
 // infrastructure shape, not bundle contents.
@@ -34,7 +18,6 @@ function synth(extraProps: Partial<TenantStackProps> = {}, env?: Environment): T
   const stack = new TenantStack(app, 'test', {
     vendorIdpIssuerUrl: 'https://idp.example.com',
     vendorIdpAudience: 'control-plane',
-    cellDefinition,
     env,
     ...extraProps,
   });
@@ -44,7 +27,7 @@ function synth(extraProps: Partial<TenantStackProps> = {}, env?: Environment): T
 describe('TenantStack', () => {
   const template = synth();
 
-  test('control plane table has PITR enabled and both GSIs', () => {
+  test('control plane table has PITR enabled and three GSIs (§4.7)', () => {
     template.hasResourceProperties('AWS::DynamoDB::GlobalTable', {
       Replicas: Match.arrayWith([
         Match.objectLike({
@@ -54,8 +37,17 @@ describe('TenantStack', () => {
       GlobalSecondaryIndexes: Match.arrayWith([
         Match.objectLike({ IndexName: 'GSI1' }),
         Match.objectLike({ IndexName: 'GSI2' }),
+        Match.objectLike({
+          IndexName: 'GSI3',
+          KeySchema: [
+            { AttributeName: 'GSI3PK', KeyType: 'HASH' },
+            { AttributeName: 'GSI3SK', KeyType: 'RANGE' },
+          ],
+        }),
       ]),
     });
+    const table = Object.values(template.findResources('AWS::DynamoDB::GlobalTable'))[0] as any;
+    expect(table.Properties.GlobalSecondaryIndexes).toHaveLength(3);
   });
 
   test('provisioning state machine and the two shared CodeBuild projects exist', () => {
@@ -86,28 +78,39 @@ describe('TenantStack', () => {
     const authorizer =
       body.components.securitySchemes['vendor-authorizer']['x-amazon-apigateway-authorizer'];
     expect(authorizer.type).toBe('token');
-    // All fifteen operations across seven paths exist
+    // All twenty-two operations (§5) across eleven paths exist
     expect(Object.keys(body.paths).sort()).toEqual([
       '/accounts',
       '/accounts/{accountId}',
+      '/applications',
+      '/applications/{applicationId}',
       '/cells',
       '/cells/{cellId}',
+      '/deployments',
       '/tenants',
       '/tenants/{tenantId}',
-      '/tenants/{tenantId}/resource',
+      '/tenants/{tenantId}/deployments',
+      '/tenants/{tenantId}/deployments/{applicationId}',
     ]);
+    const operations = Object.values(body.paths).flatMap((path: any) =>
+      Object.keys(path).filter((method) => method !== 'parameters'));
+    expect(operations).toHaveLength(22);
   });
 
-  test('API handler receives the cellDefinition and workflow wiring', () => {
+  test('API handler receives the three index names and no CELL_DEFINITION (ADR-032)', () => {
     template.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
-          CELL_DEFINITION: JSON.stringify(cellDefinition),
           GSI1_NAME: 'GSI1',
           GSI2_NAME: 'GSI2',
+          GSI3_NAME: 'GSI3',
         }),
       },
     });
+    const fns = Object.values(template.findResources('AWS::Lambda::Function')) as any[];
+    for (const fn of fns) {
+      expect(fn.Properties.Environment?.Variables?.CELL_DEFINITION).toBeUndefined();
+    }
   });
 
   test('authorizer receives the vendor IdP configuration and the role allowlist (M13)', () => {
@@ -122,16 +125,17 @@ describe('TenantStack', () => {
     });
   });
 
-  test('synth fails on an invalid cellDefinition (§10)', () => {
-    const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
-    expect(
-      () =>
-        new TenantStack(app, 'invalid', {
-          vendorIdpIssuerUrl: 'https://idp.example.com',
-          vendorIdpAudience: 'control-plane',
-          cellDefinition: { ...cellDefinition, maxTenants: 0 },
-        }),
-    ).toThrow(/maxTenants/);
+  test('no demo shared parameter by default; one per demoApplicationIds entry (ADR-034)', () => {
+    const names = (t: Template) =>
+      (Object.values(t.findResources('AWS::SSM::Parameter')) as any[])
+        .map((p) => p.Properties.Name)
+        .filter((name) => name !== '/control-plane/tenant-api-url')
+        .sort();
+    expect(names(template)).toEqual([]);
+    expect(names(synth({ demoApplicationIds: ['app-x', 'app-y'] }))).toEqual([
+      '/application-plane/applications/app-x/shared/base-domain',
+      '/application-plane/applications/app-y/shared/base-domain',
+    ]);
   });
 
   test('API url is published to SSM for discovery', () => {
@@ -208,28 +212,6 @@ describe('TenantStack', () => {
     // the pinned/unpinned split means the empty string is never sent.
     expect(definition).toContain('SourceVersion');
     expect(definition).toContain('$.sourceVersion');
-  });
-
-  test('an extra source.sourceVersion is carried through to the CELL_DEFINITION env var', () => {
-    // The pinned ref is part of the stamped definition: it must survive the
-    // context -> stack -> Lambda env pass-through untouched (T5 / M10).
-    const pinned = {
-      ...cellDefinition,
-      source: { ...cellDefinition.source, sourceVersion: 'a'.repeat(40) },
-    } as CellDefinition;
-    const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
-    const stack = new TenantStack(app, 'pinned', {
-      vendorIdpIssuerUrl: 'https://idp.example.com',
-      vendorIdpAudience: 'control-plane',
-      cellDefinition: pinned,
-    });
-    Template.fromStack(stack).hasResourceProperties('AWS::Lambda::Function', {
-      Environment: {
-        Variables: Match.objectLike({
-          CELL_DEFINITION: JSON.stringify(pinned),
-        }),
-      },
-    });
   });
 });
 
@@ -439,6 +421,8 @@ describe('TENANT_NAME in the tenant script environment (ADR-023)', () => {
       const environment = envOf(tasks[name]);
       expect(environment.TENANT_NAME).toBe('$.tenantBuild.tenantName');
       expect(environment.TENANT_ID).toBe('$.tenantId');
+      // ADR-032/037: the deployment's application rides every tenant build.
+      expect(environment.APPLICATION_ID).toBe('$.applicationId');
       expect(environment.ADMIN_EMAIL).toBe('$.tenantBuild.adminEmail');
       expect(environment.OPERATOR_ID).toBe('$.operatorId');
       // One shared task serves create, update and delete: the operation is
@@ -466,7 +450,10 @@ describe('TENANT_NAME in the tenant script environment (ADR-023)', () => {
       expect(environment.TENANT_NAME).toBeUndefined();
       expect(environment.TENANT_ID).toBeUndefined();
       expect(environment.ADMIN_EMAIL).toBeUndefined();
+      // ADR-032: the cell's application rides every cell build.
+      expect(environment.APPLICATION_ID).toBe('$.applicationId');
       expect(Object.keys(environment).sort()).toEqual([
+        'APPLICATION_ID',
         'CELL_ACCOUNT_ID',
         'CELL_ID',
         'OPERATION',
@@ -542,12 +529,22 @@ describe('build roles and the home account role pair (ADR-025)', () => {
   });
 
   test('the home pair carries the §6.2 asymmetry: cell role owns cells/*, tenant role reads it and owns tenants/*', () => {
-    const sids = (kind: string) =>
-      (policyFor(logicalIdOf(`control-plane-${kind}-provisioning`)).Properties.PolicyDocument.Statement as any[])
-        .map((s) => s.Sid)
-        .sort();
+    const statements = (kind: string) =>
+      policyFor(logicalIdOf(`control-plane-${kind}-provisioning`)).Properties.PolicyDocument.Statement as any[];
+    const sids = (kind: string) => statements(kind).map((s) => s.Sid).sort();
     expect(sids('cell')).toEqual(['ManageCellNamespace', 'ReadSharedResources']);
     expect(sids('tenant')).toEqual(['ManageTenantNamespace', 'ReadCellNamespace', 'ReadSharedResources']);
+  });
+
+  test('both halves read both shared namespaces, /application-plane/shared/* and /application-plane/applications/* (§6.2, ADR-034, ADR-038)', () => {
+    for (const kind of ['cell', 'tenant']) {
+      const shared = (policyFor(logicalIdOf(`control-plane-${kind}-provisioning`)).Properties.PolicyDocument.Statement as any[])
+        .find((s) => s.Sid === 'ReadSharedResources');
+      const resources = JSON.stringify(shared.Resource);
+      expect(resources).toContain('parameter/application-plane/shared/*');
+      expect(resources).toContain('parameter/application-plane/applications/*');
+      expect(resources).not.toContain('parameter/application-plane/cells');
+    }
   });
 
   test('a custom fleetName renames all five roles; an invalid one fails synth', () => {
@@ -568,7 +565,7 @@ describe('build roles and the home account role pair (ADR-025)', () => {
 
   test('the API function may assume the pair for the PutAccount probe and receives FLEET_NAME (ADR-027)', () => {
     const fns = Object.values(template.findResources('AWS::Lambda::Function')) as any[];
-    const apiFn = fns.find((fn) => fn.Properties.Environment?.Variables?.CELL_DEFINITION !== undefined);
+    const apiFn = fns.find((fn) => fn.Properties.Environment?.Variables?.GSI3_NAME !== undefined);
     expect(apiFn.Properties.Environment.Variables.FLEET_NAME).toBe('control-plane');
     const [roleLogicalId] = apiFn.Properties.Role['Fn::GetAtt'];
     expect(template.findResources('AWS::IAM::Role')[roleLogicalId].Properties.RoleName).toBe('control-plane-api');
@@ -642,27 +639,57 @@ describe('the workflow assumes the account role before every script and releases
     }
   });
 
-  test('the terminal cell delete is one transaction: cell DeleteItem + account cellCount decrement (ADR-024)', () => {
+  test('the terminal cell delete is one transaction: cell DeleteItem + account and application cellCount decrements (§8.2, ADR-024, ADR-032)', () => {
     const remove = definition.States.RemoveCellRecord;
     expect(remove.Resource).toBe('arn:aws:states:::aws-sdk:dynamodb:transactWriteItems');
-    const [del, upd] = remove.Parameters.TransactItems;
+    expect(remove.Parameters.TransactItems).toHaveLength(3);
+    const [del, account, application] = remove.Parameters.TransactItems;
     expect(del.Delete.Key.PK['S.$']).toBe("States.Format('CELL#{}', $.cellId)");
     expect(del.Delete.ConditionExpression).toBe('attribute_exists(PK) AND #status = :deleting AND tenantCount = :zero');
-    expect(upd.Update.Key.PK['S.$']).toBe("States.Format('ACCOUNT#{}', $.accountId)");
-    expect(upd.Update.UpdateExpression).toBe('SET cellCount = cellCount - :one, updatedAt = :now');
-    expect(upd.Update.ConditionExpression).toBe('attribute_exists(PK) AND cellCount > :zero');
+    expect(account.Update.Key.PK['S.$']).toBe("States.Format('ACCOUNT#{}', $.accountId)");
+    expect(application.Update.Key.PK['S.$']).toBe("States.Format('APPLICATION#{}', $.applicationId)");
+    for (const upd of [account, application]) {
+      expect(upd.Update.Key.SK).toEqual({ S: 'META' });
+      expect(upd.Update.UpdateExpression).toBe('SET cellCount = cellCount - :one, updatedAt = :now');
+      expect(upd.Update.ConditionExpression).toBe('attribute_exists(PK) AND cellCount > :zero');
+    }
     expect(remove.Parameters['ClientRequestToken.$']).toContain('cell-delete');
-    // Absence-is-success read on cancellation, as for the tenant delete.
+    // Absence-is-success read on cancellation, as for the deployment delete.
     expect(remove.Catch[0].Next).toBe('GetCellRecord');
   });
 
-  test('exactly two transactional writers touch a counter: tenant delete (tenantCount) and cell delete (cellCount)', () => {
+  test('the terminal deployment delete is one transaction: deployment DeleteItem + cell tenantCount + tenant deploymentCount decrements (§8.2, ADR-037)', () => {
+    const remove = definition.States.DeleteDeploymentRecord;
+    expect(remove.Resource).toBe('arn:aws:states:::aws-sdk:dynamodb:transactWriteItems');
+    expect(remove.Parameters.TransactItems).toHaveLength(3);
+    const [del, cell, tenant] = remove.Parameters.TransactItems;
+    expect(del.Delete.Key).toEqual({
+      PK: { 'S.$': "States.Format('TENANT#{}', $.tenantId)" },
+      SK: { 'S.$': "States.Format('DEPLOYMENT#{}', $.applicationId)" },
+    });
+    expect(del.Delete.ConditionExpression).toBe('attribute_exists(PK) AND #status = :deleting');
+    expect(cell.Update.Key.PK['S.$']).toBe("States.Format('CELL#{}', $.cellId)");
+    expect(cell.Update.UpdateExpression).toBe('SET tenantCount = tenantCount - :one, updatedAt = :now');
+    expect(cell.Update.ConditionExpression).toBe('attribute_exists(PK) AND tenantCount > :zero');
+    expect(tenant.Update.Key).toEqual({
+      PK: { 'S.$': "States.Format('TENANT#{}', $.tenantId)" },
+      SK: { S: 'META' },
+    });
+    expect(tenant.Update.UpdateExpression).toBe('SET deploymentCount = deploymentCount - :one, updatedAt = :now');
+    expect(tenant.Update.ConditionExpression).toBe('attribute_exists(PK) AND deploymentCount > :zero');
+    expect(remove.Parameters['ClientRequestToken.$']).toContain('deployment-delete');
+    expect(definition.States.DeleteTenantRecord).toBeUndefined();
+  });
+
+  test('exactly two transactional writers decrement a counter: deployment delete and cell delete (P-6)', () => {
     const transactions = Object.entries(definition.States).filter(
       ([, state]: [string, any]) => String(state.Resource).endsWith('transactWriteItems'),
     );
     const decrements = transactions.filter(([, state]: [string, any]) =>
       JSON.stringify(state.Parameters).includes('Count - :one'));
-    expect(decrements.map(([name]) => name).sort()).toEqual(['DeleteTenantRecord', 'RemoveCellRecord']);
+    expect(decrements.map(([name]) => name).sort()).toEqual(['DeleteDeploymentRecord', 'RemoveCellRecord']);
+    // Nothing in the workflow increments a counter: placement owns the claims (§7.1).
+    expect(JSON.stringify(definition)).not.toContain('Count + :one');
   });
 });
 
@@ -738,10 +765,16 @@ describe('CellAccountStack (spec R-25, ADR-025)', () => {
     expect(() => synthAccountStack({ controlPlaneAccountId: '12' })).toThrow(/Invalid controlPlaneAccountId/);
   });
 
-  test('installs only the two roles by default; the demo shared parameter is opt-in', () => {
+  test('installs only the two roles by default; the demo shared parameter is opt-in, one per application (ADR-034)', () => {
     expect(Object.keys(synthAccountStack().findResources('AWS::SSM::Parameter'))).toHaveLength(0);
-    synthAccountStack({ demoSharedParameters: true }).hasResourceProperties('AWS::SSM::Parameter', {
-      Name: '/application-plane/shared/base-domain',
-    });
+    const names = (Object.values(
+      synthAccountStack({ demoApplicationIds: ['app-x', 'app-y'] }).findResources('AWS::SSM::Parameter'),
+    ) as any[])
+      .map((p) => p.Properties.Name)
+      .sort();
+    expect(names).toEqual([
+      '/application-plane/applications/app-x/shared/base-domain',
+      '/application-plane/applications/app-y/shared/base-domain',
+    ]);
   });
 });

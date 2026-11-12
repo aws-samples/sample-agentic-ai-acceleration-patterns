@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: MIT-0
 #
 # control-plane cell DELETE script for tenant-identity (ADR-0028, mounting
-# spec §7.4). Runs in the control-plane cell CodeBuild project with CELL_ID,
-# OPERATION, OPERATOR_ID, AWS_REGION.
+# spec §7.4). Runs in the control-plane cell CodeBuild project with
+# APPLICATION_ID, CELL_ID, OPERATION, OPERATOR_ID, AWS_REGION (spec §6.1);
+# APPLICATION_ID is not used: the identity deployment is account-wide.
 #
 # An explicit no-op (control-plane P-9): the identity deployment is shared by
 # every cell in the account and owned by the tenant-identity stack, so

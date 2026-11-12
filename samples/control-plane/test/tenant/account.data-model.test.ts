@@ -38,13 +38,22 @@ describe('AccountDataModel', () => {
     expect(item.GSI1SK).toBe('ACCOUNT#111111111111');
   });
 
-  test('carries no GSI-2 attributes — accounts never appear in the cell/tenant index', () => {
+  test('carries no GSI-2 or GSI-3 attributes — accounts appear only in GSI-1', () => {
     expect(item).not.toHaveProperty('GSI2PK');
     expect(item).not.toHaveProperty('GSI2SK');
+    expect(item).not.toHaveProperty('GSI3PK');
   });
 
-  test('round-trips through fromItem', () => {
+  test('round-trips a shared account (no applicationIds) through fromItem', () => {
+    expect(item.applicationIds).toBeUndefined();
     expect(dataModel.fromItem(item)).toEqual(record);
+  });
+
+  test('round-trips a dedicated account with its applicationIds (ADR-033)', () => {
+    const dedicated: AccountRecord = { ...record, applicationIds: ['app-x', 'app-y'] };
+    const dedicatedItem = dataModel.toItem(dedicated);
+    expect(dedicatedItem.applicationIds).toEqual(['app-x', 'app-y']);
+    expect(dataModel.fromItem(dedicatedItem)).toEqual(dedicated);
   });
 
   test('listAccountsQuery targets the GSI-1 ACCOUNT partition', () => {
@@ -97,8 +106,31 @@ describe('putAccountUpdate (R-24: create-or-replace that never touches cellCount
       maxCells: 3,
       now: '2026-11-09T00:00:00.000Z',
     });
-    expect(noExternalId.updateExpression).toMatch(/ REMOVE #externalId$/);
+    expect(noExternalId.updateExpression).toMatch(/ REMOVE #externalId, #applicationIds$/);
     expect(noExternalId.expressionAttributeValues).not.toHaveProperty(':externalId');
+  });
+
+  test('omitting applicationIds removes the allowlist — the account becomes shared (ADR-033)', () => {
+    expect(update.updateExpression).toMatch(/ REMOVE #applicationIds$/);
+    expect(update.updateExpression).not.toContain('#applicationIds = :applicationIds');
+    expect(update.expressionAttributeValues).not.toHaveProperty(':applicationIds');
+  });
+
+  test('a given applicationIds is SET as a list copy — the account becomes dedicated (ADR-033)', () => {
+    const ids = ['app-x'];
+    const dedicated = putAccountUpdate({
+      accountId: '111111111111',
+      owner: 'VENDOR',
+      maxCells: 2,
+      applicationIds: ids,
+      externalId: 'fleet-handshake-7f3a',
+      now: '2026-11-09T00:00:00.000Z',
+    });
+    expect(dedicated.updateExpression).toContain('#applicationIds = :applicationIds');
+    expect(dedicated.updateExpression).not.toContain('REMOVE');
+    expect(dedicated.expressionAttributeNames).toMatchObject({ '#applicationIds': 'applicationIds' });
+    expect(dedicated.expressionAttributeValues[':applicationIds']).toEqual(['app-x']);
+    expect(dedicated.expressionAttributeValues[':applicationIds']).not.toBe(ids);
   });
 });
 

@@ -438,25 +438,26 @@ on a large registry), the stack stays `DELETE_FAILED`; run `cdk destroy` again.
 ## Mounting under the control plane
 
 This sample mounts under the [`control-plane`](../control-plane/) sample so
-one vendor onboarding call provisions a tenant's identity too. Control-plane
-`CreateTenant` runs `scripts/control-plane/tenant/create.sh`, shipped here,
-which calls this sample's `CreateTenant` with the **same** tenant id
-(ADR-0029); `DeleteTenant` mirrors it through `tenant/delete.sh`. The control
-plane learns nothing about identity: it only attaches a managed policy and
-passes a tenant's name and, optionally, the scopes the tenant is entitled to
-(`SCOPES`, space-separated; mounting spec M-P-2, M-P-4, ADR-0035). This sample is
-account-level shared infrastructure (ADR-0017), so every control-plane cell
-reaches the same identity deployment and the cell scripts only check that one
-exists.
+one vendor onboarding call provisions a tenant's identity too. The mount is
+one control-plane application, `identity-mount`, whose scripts are
+`scripts/control-plane/`, shipped here. Control-plane `CreateTenant` records
+the customer; `CreateDeployment` of `identity-mount` for that tenant runs
+`scripts/control-plane/tenant/create.sh`, which calls this sample's
+`CreateTenant` with the **same** tenant id (ADR-0029); `DeleteDeployment`
+mirrors it through `tenant/delete.sh`. The control plane learns nothing
+about identity: it only attaches a managed policy and passes a tenant's name,
+its application id and, optionally, the scopes the tenant is entitled to
+(`SCOPES`, space-separated; mounting spec M-P-2, M-P-4, ADR-0035). This sample
+is account-level shared infrastructure (ADR-0017), so every cell of the
+mount's application reaches the same identity deployment and the cell
+scripts only check that one exists (ADR-0038).
 
 **Deploy order.** tenant-identity first (it publishes the policy ARN), then
 control-plane. Both samples need `npx projen build` once before their first
 `cdk deploy` (it runs `smithy build`, which generates the `src/smithy/` the
 CDK app imports). Deploy this sample in a single, non-`tiered` topology, then
-deploy control-plane with its cell definition pointing at `scripts/control-plane/`
-and the tenant provisioning role of its own account granted the published
-`platformInvokePolicyArn`; then register that account with control-plane
-(its ADR-024: cells live in registered accounts):
+deploy control-plane with the tenant provisioning role of its own account
+granted the published `platformInvokePolicyArn`:
 
 ```bash
 export AWS_REGION=eu-central-1
@@ -472,8 +473,19 @@ npx projen build
 npx cdk deploy control-plane-dev \
   --context vendorIdpIssuerUrl=https://YOUR_ISSUER \
   --context vendorIdpAudience=YOUR_AUDIENCE \
-  --context tenantBuildManagedPolicyArns="[\"$POLICY_ARN\"]" \
-  --context cellDefinition='{
+  --context tenantBuildManagedPolicyArns="[\"$POLICY_ARN\"]"
+```
+
+Then register the mount as an application (control-plane ADR-032) and the
+account as a shared vendor-owned account that admits it (its ADR-024: cells
+live in registered accounts):
+
+```bash
+API_URL=$(aws ssm get-parameter --name /control-plane/tenant-api-url --query Parameter.Value --output text)
+TOKEN="<operator JWT>"
+curl -s -X PUT "${API_URL}applications/identity-mount" \
+  -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+  -d '{
     "source": { "type": "S3", "location": "YOUR_BUCKET/scripts/" },
     "cellScripts": {
       "create": "control-plane/cell/create.sh",
@@ -488,23 +500,44 @@ npx cdk deploy control-plane-dev \
     "maxTenants": 10
   }'
 
-API_URL=$(aws ssm get-parameter --name /control-plane/tenant-api-url --query Parameter.Value --output text)
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 curl -s -X PUT "${API_URL}accounts/${ACCOUNT_ID}" \
-  -H "Authorization: Bearer <operator JWT>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
   -d '{ "owner": "VENDOR", "maxCells": 10 }'
 ```
 
-The exact context is what
+Onboarding a tenant is two calls: `CreateTenant` returns the tenant id at
+once, and `CreateDeployment` places the tenant in a cell of `identity-mount`
+and runs the builds; poll `GetDeployment` until `ACTIVE`:
+
+```bash
+TENANT_ID=$(curl -s -X POST "${API_URL}tenants" \
+  -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+  -d '{ "name": "Acme" }' | jq -r .tenant.tenantId)
+curl -s -X POST "${API_URL}tenants/${TENANT_ID}/deployments" \
+  -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+  -d '{ "applicationId": "identity-mount", "adminEmail": "admin@example.com" }'
+curl -s "${API_URL}tenants/${TENANT_ID}/deployments/identity-mount" \
+  -H "Authorization: Bearer ${TOKEN}" | jq -r .deployment.status
+```
+
+`UpdateDeployment` (`PUT .../deployments/identity-mount`, no body) re-runs
+`tenant/update.sh`; `DeleteDeployment` (`DELETE .../deployments/identity-mount`)
+runs `tenant/delete.sh` and offboards the identity, after which
+`DeleteTenant` removes the empty customer record.
+
+The stack context is what
 [`scripts/integ-control-plane.sh`](./scripts/integ-control-plane.sh)
 `control_plane_context()` assembles: `vendorIdpIssuerUrl` and
 `vendorIdpAudience` name control-plane's own vendor IdP (two context keys of
-their own), `tenantBuildManagedPolicyArns` is the JSON array
-`["<platformInvokePolicyArn>"]`, and `cellDefinition` names a `source`
-holding this sample's `scripts/` folder (so `control-plane/...` resolves),
-the three `cellScripts`, and the three `tenantScripts`. control-plane fails at
-synth if an entry of `tenantBuildManagedPolicyArns` is not a managed-policy
-ARN in its own partition and account (ADR-0022).
+their own) and `tenantBuildManagedPolicyArns` is the JSON array
+`["<platformInvokePolicyArn>"]`. control-plane fails at synth if an entry of
+`tenantBuildManagedPolicyArns` is not a managed-policy ARN in its own
+partition and account (ADR-0022). The application body is what the
+integration scenario sends to `PutApplication`: a `source` holding this
+sample's `scripts/` folder (so `control-plane/...` resolves), the three
+`cellScripts` and the three `tenantScripts`. The application id is
+`[a-z0-9-]{1,32}` and becomes a segment of the parked password's name.
 
 `YOUR_BUCKET` is yours to create and fill (`aws s3 sync scripts/
 s3://YOUR_BUCKET/scripts/`). control-plane's cell and tenant CodeBuild
@@ -523,17 +556,22 @@ publishes under `/application-plane/shared/identity/`: `apiUrl` and
 `topology` (existing), and the two the mount adds — `platformInvokePolicyArn`
 (ADR-0030) and `adminPasswordKeyArn` (ADR-0033). The stack publishes others
 too (`userPoolId` and `appClientId` in `shared-pool`); the mount does not use
-them. For each tenant, `tenant/create.sh` parks
-the first admin's temporary password at
-`/application-plane/tenants/<T>/identity/admin-temporary-password`, a
-`SecureString` encrypted with `AdminPasswordKey` (ADR-0031).
+them. These parameters live in the control plane's account-wide shared
+namespace, `/application-plane/shared/*`, which both halves of its role pair
+read (control-plane ADR-038), so the identity stack publishes them once for
+every application in the account. For each deployment, `tenant/create.sh`
+parks the first admin's temporary password under the deployment's own
+namespace, at
+`/application-plane/tenants/<T>/<A>/admin-temporary-password` (`<A>` is the
+application id, `identity-mount`), a `SecureString` encrypted with
+`AdminPasswordKey` (ADR-0031, ADR-0038).
 
 **Collecting the admin password.** The vendor reads the parked password out of
 band:
 
 ```bash
 aws ssm get-parameter --with-decryption \
-  --name /application-plane/tenants/<T>/identity/admin-temporary-password \
+  --name /application-plane/tenants/<T>/identity-mount/admin-temporary-password \
   --query Parameter.Value --output text
 ```
 
@@ -560,13 +598,13 @@ cell) is a documented seam, not built (mounting spec §11).
 | Failure | Control-plane result | Recovery |
 |---|---|---|
 | identity stack not deployed | cell `CREATE_FAILED` | deploy tenant-identity, `UpdateCell` |
-| `tiered` topology | cell or tenant `CREATE_FAILED` | redeploy identity with a single topology |
-| policy not attached | tenant `CREATE_FAILED`, `HTTP 403` in the build log | redeploy control-plane with the context, then `DeleteTenant` + `CreateTenant` |
-| build killed after the 201, before the park; or the park failed three times | `CREATE_FAILED` | re-run: the replay sees `ACTIVE` and the slot held (409), checks that an admin exists and re-parks nothing, printing `WARNING ... no parked password`; the password is lost, recover with `DeleteUser` naming the holder's e-mail (releases the slot) then `CreateUser {firstAdmin: true}`, or control-plane `DeleteTenant` + `CreateTenant` |
+| `tiered` topology | cell or deployment `CREATE_FAILED` | redeploy identity with a single topology |
+| policy not attached | deployment `CREATE_FAILED`, `HTTP 403` in the build log | redeploy control-plane with the context, then `DeleteDeployment` + `CreateDeployment` |
+| build killed after the 201, before the park; or the park failed three times | `CREATE_FAILED` | re-run: the replay sees `ACTIVE` and the slot held (409), checks that an admin exists and re-parks nothing, printing `WARNING ... no parked password`; the password is lost, recover with `DeleteUser` naming the holder's e-mail (releases the slot) then `CreateUser {firstAdmin: true}`, or control-plane `DeleteDeployment` + `CreateDeployment` |
 | `ADMIN_EMAIL` already in use in the shared pool | `CREATE_FAILED`, `ADMIN_EMAIL is probably already in use in the shared pool` in the build log | onboard with another e-mail, or free the address (`DeleteUser` in the tenant that holds it) and re-run |
 | a `SCOPES` entry is not in the catalogue | `CREATE_FAILED` or `UPDATE_FAILED`, `invalid_scope` in the build log | register the scope (the backend's deploy does) or drop it from `SCOPES`, then re-run |
-| identity row stuck `PROVISIONING` | `CREATE_FAILED` | `DeleteTenant` on tenant-identity, then control-plane `DeleteTenant` |
-| identity `DeleteTenant` fails | `DELETE_FAILED` | control-plane `DeleteTenant` retry re-runs the script |
+| identity row stuck `PROVISIONING` | `CREATE_FAILED` | `DeleteTenant` on tenant-identity, then control-plane `DeleteDeployment` |
+| identity `DeleteTenant` fails | `DELETE_FAILED` | control-plane `DeleteDeployment` retry re-runs the script |
 
 **Cost.** One customer-managed KMS key per account and Region (about
 $1/month), plus a few encrypt calls per tenant.
@@ -578,7 +616,8 @@ ADRs [0028](./adr/0028-ship-the-control-plane-mount-in-this-sample.md),
 [0030](./adr/0030-publish-a-least-privilege-platform-invoke-policy.md),
 [0031](./adr/0031-park-the-first-admin-password-in-a-securestring.md),
 [0032](./adr/0032-make-the-first-admin-a-conditional-write.md),
-[0033](./adr/0033-encrypt-the-parked-password-with-a-customer-key.md);
+[0033](./adr/0033-encrypt-the-parked-password-with-a-customer-key.md),
+[0038](./adr/0038-the-mount-follows-the-control-planes-deployment-model.md);
 for the scope inputs, [0034](./adr/0034-backends-register-their-scopes-in-a-catalogue.md)
 and [0035](./adr/0035-entitle-scopes-per-tenant-on-the-registry-row.md).
 

@@ -41,6 +41,14 @@ if [[ -n "${TENANT_ID:-}" ]]; then
   [[ "$TENANT_ID" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]] || fail "TENANT_ID is not a ULID"
 fi
 
+# APPLICATION_ID is spliced into the parked parameter's name
+# (/application-plane/tenants/<tenantId>/<applicationId>/*, mounting spec
+# §6.2), so it must have the control plane's application id charset
+# (control-plane ADR-032: [a-z0-9-]{1,32}). The message carries no value.
+if [[ -n "${APPLICATION_ID:-}" ]]; then
+  [[ "$APPLICATION_ID" =~ ^[a-z0-9-]{1,32}$ ]] || fail "APPLICATION_ID is not a valid application id"
+fi
+
 # Private scratch directory (mode 0700), removed on every exit. Holds the
 # request body file and the CLI's stderr; nothing in it outlives the script.
 PLATFORM_SCRATCH="$(mktemp -d)"

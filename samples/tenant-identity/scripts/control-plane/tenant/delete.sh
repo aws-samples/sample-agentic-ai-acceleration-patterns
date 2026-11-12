@@ -4,10 +4,11 @@
 #
 # control-plane tenant DELETE script for tenant-identity (ADR-0028, mounting
 # spec §7.3). Runs in the control-plane tenant CodeBuild project with
-# TENANT_ID, TENANT_NAME, CELL_ID, OPERATION, OPERATOR_ID, AWS_REGION.
+# TENANT_ID, TENANT_NAME, APPLICATION_ID, CELL_ID, OPERATION, OPERATOR_ID,
+# AWS_REGION.
 #
 # Offboards the tenant's identity and removes the parked password. It is also
-# the clean-up path for CREATE_FAILED tenants, so "already gone" is success:
+# the clean-up path for CREATE_FAILED deployments, so "already gone" is success:
 # 404 from DeleteTenant and ParameterNotFound from delete-parameter both pass.
 # tenant-identity's DeleteTenant is idempotent against DELETING (its R-11), so
 # a re-run finishes a half-done offboarding.
@@ -15,6 +16,7 @@ set -euo pipefail
 
 : "${TENANT_ID:?TENANT_ID env var is required}"
 : "${TENANT_NAME:?TENANT_NAME env var is required}"
+: "${APPLICATION_ID:?APPLICATION_ID env var is required}"
 : "${CELL_ID:?CELL_ID env var is required}"
 : "${OPERATION:?OPERATION env var is required}"
 : "${OPERATOR_ID:?OPERATOR_ID env var is required}"
@@ -24,9 +26,9 @@ set -euo pipefail
 # shellcheck source=../lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
-echo "Offboarding identity for tenant ${TENANT_ID} in cell ${CELL_ID} (${OPERATION}, operator ${OPERATOR_ID})"
+echo "Offboarding identity for tenant ${TENANT_ID} in application ${APPLICATION_ID}, cell ${CELL_ID} (${OPERATION}, operator ${OPERATOR_ID})"
 
-PARKED_PARAM="/application-plane/tenants/${TENANT_ID}/identity/admin-temporary-password"
+PARKED_PARAM="/application-plane/tenants/${TENANT_ID}/${APPLICATION_ID}/admin-temporary-password"
 
 # Step 1: DeleteTenant; 204 and 404 are both success.
 read_identity_param apiUrl API_URL

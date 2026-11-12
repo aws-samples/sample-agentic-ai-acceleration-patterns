@@ -235,7 +235,7 @@
       "description": "Synthesizes your cdk app into cdk.out",
       "steps": [
         {
-          "exec": "cdk synth --context vendorIdpIssuerUrl=https://build-placeholder.invalid --context vendorIdpAudience=build-placeholder --context cellDefinition='{\"source\":{\"type\":\"GITHUB\",\"location\":\"https://github.com/build-placeholder/build-placeholder.git\"},\"cellScripts\":{\"create\":\"scripts/sample-cell/create.sh\",\"update\":\"scripts/sample-cell/update.sh\",\"delete\":\"scripts/sample-cell/delete.sh\"},\"tenantScripts\":{\"create\":\"scripts/sample-tenant/create.sh\",\"update\":\"scripts/sample-tenant/update.sh\",\"delete\":\"scripts/sample-tenant/delete.sh\"},\"maxTenants\":10}'"
+          "exec": "cdk synth --context vendorIdpIssuerUrl=https://build-placeholder.invalid --context vendorIdpAudience=build-placeholder"
         }
       ]
     },
@@ -244,7 +244,7 @@
       "description": "Synthesizes your cdk app into cdk.out and suppresses the template in stdout (part of \"yarn build\")",
       "steps": [
         {
-          "exec": "cdk synth -q --context vendorIdpIssuerUrl=https://build-placeholder.invalid --context vendorIdpAudience=build-placeholder --context cellDefinition='{\"source\":{\"type\":\"GITHUB\",\"location\":\"https://github.com/build-placeholder/build-placeholder.git\"},\"cellScripts\":{\"create\":\"scripts/sample-cell/create.sh\",\"update\":\"scripts/sample-cell/update.sh\",\"delete\":\"scripts/sample-cell/delete.sh\"},\"tenantScripts\":{\"create\":\"scripts/sample-tenant/create.sh\",\"update\":\"scripts/sample-tenant/update.sh\",\"delete\":\"scripts/sample-tenant/delete.sh\"},\"maxTenants\":10}'"
+          "exec": "cdk synth -q --context vendorIdpIssuerUrl=https://build-placeholder.invalid --context vendorIdpAudience=build-placeholder"
         }
       ]
     },

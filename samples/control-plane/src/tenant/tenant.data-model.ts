@@ -1,57 +1,46 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { CELL_KEY_PREFIX } from './cell.data-model';
-import { DataModel, DynamoDBItem, GSI1_INDEX_NAME, GSI2_INDEX_NAME } from '../shared/data-model';
+import { DataModel, DynamoDBItem, GSI2_INDEX_NAME } from '../shared/data-model';
 import { KeyBuilder } from '../shared/key-builder';
-import { GsiQuery, ItemKey } from '../shared/repository';
-import { LifecycleStatus } from '../smithy/source/typescript-ssdk-codegen/src';
+import { GsiQuery, ItemKey, WriteCondition } from '../shared/repository';
 
-/** Composite key prefix for tenant items. */
+/** Composite key prefix for tenant items (and the partition of their deployments). */
 export const TENANT_KEY_PREFIX = 'TENANT';
 /** Fixed sort key — one record per tenant. */
 export const TENANT_SORT_KEY = 'META';
-/** GSI-2 static partition value shared by all tenant items (§4). */
+/** GSI-2 static partition value shared by all tenant items (§4.7). */
 export const TENANT_GSI2_PARTITION = 'TENANT';
 
 /**
- * The tenant domain record. The tenant carries no source and no scripts —
- * its deployment is defined by its cell's stamped `CellDefinition`
- * (ADR-012); `cellId` is the N:1 placement join, assigned at onboarding and
- * never changed. `adminEmail` is deliberately absent — it is pass-through
- * onboarding input, never persisted (ADR-004).
+ * The tenant domain record (ADR-037): the customer. It carries metadata and
+ * `deploymentCount` — the authoritative count of the tenant's deployments,
+ * claimed in the placement transaction and released in the deployment-delete
+ * transaction, never written by `CreateTenant` or `UpdateTenant`. Everything
+ * provisioned for a tenant lives on its deployments; the tenant has no cell,
+ * no status and no build state (spec R-7).
  */
 export interface TenantRecord {
   readonly tenantId: string;
   readonly name: string;
   readonly description?: string;
-  /** The cell this tenant is placed in — assigned at onboarding, immutable. */
-  readonly cellId: string;
-  readonly status: LifecycleStatus;
-  readonly statusReason?: string;
-  readonly lastBuildId?: string;
+  /** Atomic counter — authoritative number of deployments (never an index count). */
+  readonly deploymentCount: number;
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }
 
 /**
  * DynamoDB item representation of a {@link TenantRecord}. Tenant items carry
- * both GSI key sets (§4): GSI-1 partitions them by cell for the
- * `ListTenants?cellId=` filter, GSI-2's static partition serves the
- * unfiltered `ListTenants`.
+ * GSI-2 attributes only: the static `TENANT` partition serves `ListTenants`.
  */
 export interface TenantItem extends DynamoDBItem {
-  readonly GSI1PK: string;
-  readonly GSI1SK: string;
   readonly GSI2PK: string;
   readonly GSI2SK: string;
   readonly tenantId: string;
   readonly name: string;
   readonly description?: string;
-  readonly cellId: string;
-  readonly status: LifecycleStatus;
-  readonly statusReason?: string;
-  readonly lastBuildId?: string;
+  readonly deploymentCount: number;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -61,7 +50,7 @@ export function tenantKey(tenantId: string): ItemKey {
   return { PK: KeyBuilder.build(TENANT_KEY_PREFIX, tenantId), SK: TENANT_SORT_KEY };
 }
 
-/** GSI-2 query serving the unfiltered `ListTenants` (§4). */
+/** GSI-2 query serving `ListTenants` (§4.7). */
 export function listTenantsQuery(): GsiQuery {
   return {
     indexName: GSI2_INDEX_NAME,
@@ -69,31 +58,34 @@ export function listTenantsQuery(): GsiQuery {
   };
 }
 
-/** GSI-1 query serving the `ListTenants?cellId=` filter (§4). */
-export function listTenantsByCellQuery(cellId: string): GsiQuery {
-  return {
-    indexName: GSI1_INDEX_NAME,
-    partitionKey: { name: 'GSI1PK', value: KeyBuilder.build(CELL_KEY_PREFIX, cellId) },
-  };
-}
+/** The `CreateTenant` insert guard — no write in the design is unconditional (P-5). */
+export const TENANT_NOT_EXISTS_CONDITION: WriteCondition = {
+  conditionExpression: 'attribute_not_exists(PK)',
+};
+
+/**
+ * The `DeleteTenant` emptiness guard — `attribute_exists(PK) AND
+ * deploymentCount = 0` — the counterpart of the deployment claim (ADR-037).
+ * The service reads first for the 404 and treats a condition failure as the
+ * 409.
+ */
+export const TENANT_EMPTY_CONDITION: WriteCondition = {
+  conditionExpression: 'attribute_exists(PK) AND #deploymentCount = :zero',
+  expressionAttributeNames: { '#deploymentCount': 'deploymentCount' },
+  expressionAttributeValues: { ':zero': 0 },
+};
 
 /** Converts between {@link TenantRecord} and its DynamoDB item. */
 export class TenantDataModel implements DataModel<TenantRecord, TenantItem> {
   toItem(record: TenantRecord): TenantItem {
-    const tenantSortValue = KeyBuilder.build(TENANT_KEY_PREFIX, record.tenantId);
     return {
       ...tenantKey(record.tenantId),
-      GSI1PK: KeyBuilder.build(CELL_KEY_PREFIX, record.cellId),
-      GSI1SK: tenantSortValue,
       GSI2PK: TENANT_GSI2_PARTITION,
-      GSI2SK: tenantSortValue,
+      GSI2SK: KeyBuilder.build(TENANT_KEY_PREFIX, record.tenantId),
       tenantId: record.tenantId,
       name: record.name,
       description: record.description,
-      cellId: record.cellId,
-      status: record.status,
-      statusReason: record.statusReason,
-      lastBuildId: record.lastBuildId,
+      deploymentCount: record.deploymentCount,
       createdAt: record.createdAt.toISOString(),
       updatedAt: record.updatedAt.toISOString(),
     };
@@ -104,10 +96,7 @@ export class TenantDataModel implements DataModel<TenantRecord, TenantItem> {
       tenantId: item.tenantId,
       name: item.name,
       description: item.description,
-      cellId: item.cellId,
-      status: item.status,
-      statusReason: item.statusReason,
-      lastBuildId: item.lastBuildId,
+      deploymentCount: item.deploymentCount,
       createdAt: new Date(item.createdAt),
       updatedAt: new Date(item.updatedAt),
     };

@@ -16,11 +16,13 @@
  *     to fake. A throwaway vendor IdP (Cognito pool + pre token generation
  *     trigger minting `role: operator`, as control-plane's own integ does)
  *     and an S3 bucket holding `scripts/control-plane/` as the source the
- *     control-plane CodeBuild projects fetch.
+ *     control-plane CodeBuild projects fetch. Its `ScriptSourceLocation`
+ *     output is the `source.location` of the mount's application, which the
+ *     scenario registers with control-plane PutApplication (§3.4).
  *
  * control-plane itself is NOT in this app. The script deploys it through its
  * own deploy path (`cd ../control-plane && npx cdk deploy`) with the §3.4
- * context, so this test never imports control-plane code.
+ * stack context, so this test never imports control-plane code.
  */
 
 import * as path from 'path';

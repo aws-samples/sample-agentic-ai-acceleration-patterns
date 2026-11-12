@@ -105,6 +105,7 @@ export class CellAccountRoles extends Construct {
     this.cellRole.addToPolicy(readSharedResourcesStatement(this));
     this.cellRole.addToPolicy(manageCellNamespaceStatement(this));
     acknowledgeSsmNamespaceGrant(this.cellRole, '/application-plane/shared/*');
+    acknowledgeSsmNamespaceGrant(this.cellRole, '/application-plane/applications/*');
     acknowledgeSsmNamespaceGrant(this.cellRole, '/application-plane/cells/*');
 
     this.tenantRole = new iam.Role(this, 'TenantProvisioningRole', {
@@ -116,6 +117,7 @@ export class CellAccountRoles extends Construct {
     this.tenantRole.addToPolicy(readCellNamespaceStatement(this));
     this.tenantRole.addToPolicy(manageTenantNamespaceStatement(this));
     acknowledgeSsmNamespaceGrant(this.tenantRole, '/application-plane/shared/*');
+    acknowledgeSsmNamespaceGrant(this.tenantRole, '/application-plane/applications/*');
     acknowledgeSsmNamespaceGrant(this.tenantRole, '/application-plane/cells/*');
     acknowledgeSsmNamespaceGrant(this.tenantRole, '/application-plane/tenants/*');
     // ADR-022/025: the account owner widens their own tenant role by
@@ -141,13 +143,14 @@ export class CellAccountRoles extends Construct {
 
 export interface CellAccountStackProps extends StackProps, Omit<CellAccountRolesProps, 'identity'> {
   /**
-   * DEMO ONLY: publish `/application-plane/shared/base-domain` in this
-   * account so the sample cell script has a shared resource to read. A real
-   * deployment's application plane publishes its own (ADR-010). Default: off,
-   * so a customer's account receives the two roles and nothing else unless
-   * they ask for the demo parameter.
+   * DEMO ONLY: application ids for which this stack publishes
+   * `/application-plane/applications/<id>/shared/base-domain` in this
+   * account so the sample cell script has a shared resource to read
+   * (ADR-034). A real deployment's application plane publishes its own
+   * (ADR-010). Default: none, so a customer's account receives the two
+   * roles and nothing else unless they ask for the demo parameters.
    */
-  readonly demoSharedParameters?: boolean;
+  readonly demoApplicationIds?: string[];
 }
 
 /**
@@ -174,12 +177,13 @@ export class CellAccountStack extends Stack {
       identity: stackIdentity(this),
     });
 
-    if (props.demoSharedParameters ?? false) {
+    for (const applicationId of props.demoApplicationIds ?? []) {
       // DEMO ONLY: stands in for application-plane shared infrastructure in
-      // this account (ADR-010). Each account's application plane is its own.
-      new ssm.StringParameter(this, 'DemoSharedBaseDomain', {
-        parameterName: '/application-plane/shared/base-domain',
-        stringValue: 'cells.example.com',
+      // this account, one namespace per application (ADR-010, ADR-034).
+      // Each account's application plane is its own.
+      new ssm.StringParameter(this, `DemoSharedBaseDomain-${applicationId}`, {
+        parameterName: `/application-plane/applications/${applicationId}/shared/base-domain`,
+        stringValue: `${applicationId}.cells.example.com`,
       });
     }
 

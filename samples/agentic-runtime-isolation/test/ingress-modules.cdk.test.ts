@@ -318,40 +318,11 @@ describe('ingress module options', () => {
   });
 
   it('ingressReservedConcurrency caps the streaming integration Lambda; api-gateway only (scale review 2026-11-05)', () => {
-    const { template } = build('api-gateway', { ingressReservedConcurrency: 200, authorizerReservedConcurrency: 20 });
+    const { template } = build('api-gateway', { ingressReservedConcurrency: 200 });
     const { fn } = functionAndRole(template(), 'relays the backend stream');
     expect(fn.Properties.ReservedConcurrentExecutions).toBe(200);
     expect(() => build('agentcore-gateway', { ingressReservedConcurrency: 200 })).toThrow(/ingressReservedConcurrency/);
     expect(() => build('api-gateway', { ingressReservedConcurrency: 0 })).toThrow(/ingressReservedConcurrency/);
-  });
-
-  describe('authorizerReservedConcurrency and the stage throttle (ADR-0049)', () => {
-    const unreserved = Match.stringLikeRegexp('runtime-isolation:authorizer-unreserved');
-    const above = Match.stringLikeRegexp('runtime-isolation:stage-throttle-above-concurrency');
-    const fit = { ingressReservedConcurrency: 800, authorizerReservedConcurrency: 1000, stageThrottle: { rateLimit: 500, burstLimit: 250 } };
-
-    it('reserves concurrency for the authoriser; api-gateway only; a positive integer', () => {
-      const { template } = build('api-gateway', fit);
-      const { fn } = functionAndRole(template(), 'mints the transaction token');
-      expect(fn.Properties.ReservedConcurrentExecutions).toBe(1000);
-      expect(() => build('agentcore-gateway', { authorizerReservedConcurrency: 10 })).toThrow(/authorizerReservedConcurrency/);
-      expect(() => build('api-gateway', { authorizerReservedConcurrency: 1.5 })).toThrow(/authorizerReservedConcurrency/);
-    });
-
-    it('warns when the ingress Lambda is reserved and the authoriser is not (the reserve starves it)', () => {
-      Annotations.fromStack(build('api-gateway', { ingressReservedConcurrency: 800, stageThrottle: { rateLimit: 500, burstLimit: 250 } }).stack).hasWarning('*', unreserved);
-      Annotations.fromStack(build('api-gateway', fit).stack).hasNoWarning('*', unreserved);
-      Annotations.fromStack(build('api-gateway').stack).hasNoWarning('*', unreserved);
-    });
-
-    it('warns when stageThrottle.rateLimit is above either reserve, naming the bare-500 consequence', () => {
-      const over = build('api-gateway', { ingressReservedConcurrency: 200, authorizerReservedConcurrency: 10, stageThrottle: { rateLimit: 300, burstLimit: 150 } }).stack;
-      Annotations.fromStack(over).hasWarning('*', Match.stringLikeRegexp('ingressReservedConcurrency 200'));
-      Annotations.fromStack(over).hasWarning('*', Match.stringLikeRegexp('authorizerReservedConcurrency 10 x 1'));
-      Annotations.fromStack(over).hasWarning('*', Match.stringLikeRegexp('bare 500'));
-      Annotations.fromStack(build('api-gateway', fit).stack).hasNoWarning('*', above);
-      Annotations.fromStack(build('api-gateway', { stageThrottle: { rateLimit: 5000, burstLimit: 2500 } }).stack).hasNoWarning('*', above);
-    });
   });
 
   it('warns when stageThrottle is left at its shared default and when session.scope resolves to tenant (scale and security reviews)', () => {

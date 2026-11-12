@@ -9,9 +9,11 @@ import { convertEvent, convertVersion1Response } from '@smithy/server-apigateway
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { AccountDataModel, AccountItem, AccountRecord } from './account.data-model';
 import { stsHandshakeProbe } from './account.handshake';
+import { ApplicationDataModel, ApplicationItem, ApplicationRecord } from './application.data-model';
 import { CellDataModel, CellItem, CellRecord } from './cell.data-model';
+import { DeploymentDataModel, DeploymentItem, DeploymentRecord } from './deployment.data-model';
 import { IdempotencyDataModel, IdempotencyItem, IdempotencyRecord } from './idempotency.data-model';
-import { parseCellDefinition, TenantService, TenantServiceConfig } from './tenant';
+import { TenantService, TenantServiceConfig } from './tenant';
 import { TenantDataModel, TenantItem, TenantRecord } from './tenant.data-model';
 import { DynamoDBRepository, PlacementTransactions } from '../shared/repository';
 import { CallerContext, requireEnv } from '../shared/service-config';
@@ -33,8 +35,9 @@ const tableName = requireEnv('TABLE_NAME');
 const fleetName = requireEnv('FLEET_NAME');
 const partition = partitionForRegion(requireEnv('AWS_REGION'));
 const tenantDataModel = new TenantDataModel();
+const deploymentDataModel = new DeploymentDataModel();
 const cellDataModel = new CellDataModel();
-// One document client shared by both repositories and the placement
+// One document client shared by every repository and the placement
 // transactions — same marshalling behaviour everywhere.
 const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
   marshallOptions: { removeUndefinedValues: true },
@@ -44,6 +47,11 @@ const config: TenantServiceConfig = {
   tenantRepository: new DynamoDBRepository<TenantRecord, TenantItem>(
     tableName,
     tenantDataModel,
+    documentClient,
+  ),
+  deploymentRepository: new DynamoDBRepository<DeploymentRecord, DeploymentItem>(
+    tableName,
+    deploymentDataModel,
     documentClient,
   ),
   cellRepository: new DynamoDBRepository<CellRecord, CellItem>(
@@ -61,10 +69,15 @@ const config: TenantServiceConfig = {
     new AccountDataModel(),
     documentClient,
   ),
-  placement: new PlacementTransactions<CellRecord, CellItem, TenantRecord, TenantItem>(
+  applicationRepository: new DynamoDBRepository<ApplicationRecord, ApplicationItem>(
+    tableName,
+    new ApplicationDataModel(),
+    documentClient,
+  ),
+  placement: new PlacementTransactions<CellRecord, CellItem, DeploymentRecord, DeploymentItem>(
     tableName,
     cellDataModel,
-    tenantDataModel,
+    deploymentDataModel,
     documentClient,
   ),
   fleetName,
@@ -72,10 +85,6 @@ const config: TenantServiceConfig = {
   // ADR-027: PutAccount assumes both halves of the pair and discards the
   // credentials — registration fails closed when the account is not ready.
   handshake: stsHandshakeProbe(new STSClient({}), partition, fleetName),
-  // The deployment-configured CellDefinition (§10) — parsed and validated
-  // once at cold start; a failure here is deployment drift, never a client
-  // error.
-  cellDefinition: parseCellDefinition(requireEnv('CELL_DEFINITION')),
   stateMachineArn: requireEnv('STATE_MACHINE_ARN'),
   sfnClient: new SFNClient({}),
 };

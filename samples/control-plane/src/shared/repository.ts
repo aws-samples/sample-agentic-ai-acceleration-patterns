@@ -64,10 +64,26 @@ export interface StatusTransition {
 
 /** A paginated query against a GSI partition. */
 export interface GsiQuery {
-  /** The index to query (see `GSI1_INDEX_NAME` / `GSI2_INDEX_NAME`). */
+  /** The index to query (see `GSI1_INDEX_NAME` / `GSI2_INDEX_NAME` / `GSI3_INDEX_NAME`). */
   readonly indexName: string;
   /** The index partition key attribute name and value to match. */
   readonly partitionKey: { readonly name: string; readonly value: string };
+  /**
+   * Optional `begins_with` on the index sort key, for partitions shared by
+   * two item types (GSI-3's `APPLICATION#<id>` holds cells and deployments).
+   * The sort key attribute is the index name with `SK` in place of `PK`.
+   */
+  readonly sortKeyPrefix?: string;
+}
+
+/**
+ * A paginated query against one base-table partition, selecting items by
+ * sort-key prefix — a tenant's deployments (`PK = TENANT#<id>`,
+ * `SK begins_with DEPLOYMENT#`), spec §4.7.
+ */
+export interface PartitionQuery {
+  readonly partitionKey: string;
+  readonly sortKeyPrefix: string;
 }
 
 /** One page of a paginated read. */
@@ -138,8 +154,8 @@ export class AccountFullError extends ConditionFailedError {
 /**
  * A placement transaction was cancelled because the idempotency item's
  * `attribute_not_exists(PK)` condition failed: the caller's `clientToken`
- * was already used by an earlier CreateTenant (ADR-017). The service
- * replays the original outcome instead of onboarding a duplicate.
+ * was already used by an earlier CreateDeployment (ADR-017). The service
+ * replays the original outcome instead of creating a duplicate.
  */
 export class DuplicateTokenError extends ConditionFailedError {
   constructor(message: string) {
@@ -149,9 +165,47 @@ export class DuplicateTokenError extends ConditionFailedError {
 }
 
 /**
- * A placement transaction failed for any reason other than a clean
- * lost-race cancellation. The outcome is ambiguous — the request must fail;
- * the same tenant must NEVER be retargeted at another cell (§6 step 2).
+ * A placement transaction was cancelled because the deployment `Put`'s
+ * `attribute_not_exists(PK)` condition failed: the tenant already has a
+ * deployment of this application (ADR-037). The service maps it to the 409.
+ */
+export class DeploymentExistsError extends ConditionFailedError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DeploymentExistsError';
+  }
+}
+
+/**
+ * A placement transaction was cancelled because the tenant's
+ * `deploymentCount` claim found no tenant record: the tenant was deleted
+ * between the step-0 read and the transaction. The service maps it to the
+ * 404.
+ */
+export class TenantGoneError extends ConditionFailedError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TenantGoneError';
+  }
+}
+
+/**
+ * A new-cell placement transaction was cancelled because the application's
+ * `cellCount` claim found no application record: the application was
+ * deleted between the step-0 read and the transaction. The service maps it
+ * to the 404.
+ */
+export class ApplicationGoneError extends ConditionFailedError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ApplicationGoneError';
+  }
+}
+
+/**
+ * A placement transaction failed for any reason other than a classified
+ * cancellation. The outcome is ambiguous — the request must fail; the same
+ * deployment must NEVER be retargeted at another cell (§7 step 2).
  */
 export class AmbiguousTransactionError extends Error {
   constructor(
@@ -229,7 +283,7 @@ function cancellationCodes(error: unknown): string[] | undefined {
 }
 
 /**
- * The optional CreateTenant idempotency transact item (ADR-017): a `Put`
+ * The optional CreateDeployment idempotency transact item (ADR-017): a `Put`
  * conditional on `attribute_not_exists(PK)`, always appended LAST so its
  * cancellation code has a fixed position for classification.
  */
@@ -259,8 +313,65 @@ function throwIfDuplicateToken(codes: string[] | undefined, item: DynamoDBItem |
     codes !== undefined &&
     codes[codes.length - 1] === 'ConditionalCheckFailed'
   ) {
-    throw new DuplicateTokenError('clientToken was already used by an earlier CreateTenant');
+    throw new DuplicateTokenError('clientToken was already used by an earlier CreateDeployment');
   }
+}
+
+/**
+ * Classifies a cancelled placement transaction by the POSITION of its failed
+ * conditions (spec §7.1). Precedence: a failed deployment insert (the tenant
+ * already has this application) wins over a missing tenant, which wins over
+ * a missing application, which wins over the capacity claim at index 0 —
+ * the capacity claim is a lost race (or a full account) ONLY when it is the
+ * sole failed check. Anything else is ambiguous.
+ */
+function classifyPlacementCancellation(
+  codes: string[],
+  indexes: {
+    readonly deployment: number;
+    readonly tenant: number;
+    readonly application?: number;
+  },
+  capacityFailure: () => ConditionFailedError,
+): ConditionFailedError | undefined {
+  const failed = (index: number | undefined) =>
+    index !== undefined && codes[index] === 'ConditionalCheckFailed';
+  if (failed(indexes.deployment)) {
+    return new DeploymentExistsError('The tenant already has a deployment of this application');
+  }
+  if (failed(indexes.tenant)) {
+    return new TenantGoneError('The tenant no longer exists');
+  }
+  if (failed(indexes.application)) {
+    return new ApplicationGoneError('The application no longer exists');
+  }
+  if (
+    codes[0] === 'ConditionalCheckFailed' &&
+    codes.slice(1).every((code) => code !== 'ConditionalCheckFailed')
+  ) {
+    return capacityFailure();
+  }
+  return undefined;
+}
+
+/** The tenant `deploymentCount` claim, shared by both placement transactions (P-6). */
+function tenantClaimUpdate(tableName: string, tenantKey: ItemKey, updatedAt: string) {
+  return {
+    Update: {
+      TableName: tableName,
+      Key: tenantKey,
+      UpdateExpression: 'SET #deploymentCount = #deploymentCount + :one, #updatedAt = :updatedAt',
+      ConditionExpression: 'attribute_exists(PK)',
+      ExpressionAttributeNames: {
+        '#deploymentCount': 'deploymentCount',
+        '#updatedAt': 'updatedAt',
+      },
+      ExpressionAttributeValues: {
+        ':one': 1,
+        ':updatedAt': updatedAt,
+      },
+    },
+  };
 }
 
 /**
@@ -418,23 +529,71 @@ export class DynamoDBRepository<TSchema, TItem extends DynamoDBItem> {
   }
 
   /**
-   * Reads one page of a GSI partition (§4): `ListCells` and the placement
-   * candidate scan use GSI-1's static `CELL` partition, `ListTenants` uses
-   * GSI-2's static `TENANT` partition, and `ListTenants?cellId=` uses the
-   * tenant items' `CELL#<cellId>` GSI-1 partition. ULID sort keys give
-   * creation order. The GSIs are eventually consistent and never
-   * authoritative — every claim is a conditional write on the base table.
+   * Reads one page of a GSI partition (spec §4.7). Every list operation and
+   * both placement candidate scans are partition-pinned index queries; ULID
+   * sort keys give creation order. The GSIs are eventually consistent and
+   * never authoritative — every claim is a conditional write on the base
+   * table (P-5).
    */
   async queryIndex(query: GsiQuery, maxResults?: number, nextToken?: string): Promise<Page<TSchema>> {
+    const names: Record<string, string> = { '#pk': query.partitionKey.name };
+    const values: Record<string, unknown> = { ':pk': query.partitionKey.value };
+    let keyCondition = '#pk = :pk';
+    if (query.sortKeyPrefix !== undefined) {
+      names['#sk'] = query.partitionKey.name.replace(/PK$/, 'SK');
+      values[':skPrefix'] = query.sortKeyPrefix;
+      keyCondition += ' AND begins_with(#sk, :skPrefix)';
+    }
+    return this.queryPage(
+      {
+        IndexName: query.indexName,
+        KeyConditionExpression: keyCondition,
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+      },
+      maxResults,
+      nextToken,
+    );
+  }
+
+  /**
+   * Reads one page of a base-table partition by sort-key prefix (spec §4.7):
+   * a tenant's deployments live under the tenant's own partition, so
+   * `ListDeployments?tenantId=` needs no index. Strongly consistent, like
+   * every base-table read.
+   */
+  async queryPartition(
+    query: PartitionQuery,
+    maxResults?: number,
+    nextToken?: string,
+  ): Promise<Page<TSchema>> {
+    return this.queryPage(
+      {
+        KeyConditionExpression: '#pk = :pk AND begins_with(#sk, :skPrefix)',
+        ExpressionAttributeNames: { '#pk': 'PK', '#sk': 'SK' },
+        ExpressionAttributeValues: { ':pk': query.partitionKey, ':skPrefix': query.sortKeyPrefix },
+      },
+      maxResults,
+      nextToken,
+    );
+  }
+
+  private async queryPage(
+    query: {
+      readonly IndexName?: string;
+      readonly KeyConditionExpression: string;
+      readonly ExpressionAttributeNames: Record<string, string>;
+      readonly ExpressionAttributeValues: Record<string, unknown>;
+    },
+    maxResults?: number,
+    nextToken?: string,
+  ): Promise<Page<TSchema>> {
     let result;
     try {
       result = await this.client.send(
         new QueryCommand({
           TableName: this.tableName,
-          IndexName: query.indexName,
-          KeyConditionExpression: '#pk = :pk',
-          ExpressionAttributeNames: { '#pk': query.partitionKey.name },
-          ExpressionAttributeValues: { ':pk': query.partitionKey.value },
+          ...query,
           Limit: maxResults,
           ExclusiveStartKey: decodePageToken(nextToken) as Record<string, never> | undefined,
         }),
@@ -484,62 +643,69 @@ export class DynamoDBRepository<TSchema, TItem extends DynamoDBItem> {
 }
 
 /**
- * The placement/compensation `TransactWriteItems` shapes (§6, ADR-013).
- * This class owns the service-side transaction shapes; the workflow-side
- * terminal writes (tenant delete + slot release, cell terminal writes) run
- * inside Step Functions against the same shape contract and are implemented
- * in the workflow definition, not here.
+ * The placement/compensation `TransactWriteItems` shapes (spec §7, ADR-013,
+ * ADR-024, ADR-032, ADR-037). This class owns the service-side transaction
+ * shapes; the workflow-side terminal writes (deployment delete + slot and
+ * count release, cell delete + slot and count release) run inside Step
+ * Functions against the same shape contract and are implemented in the
+ * workflow definition, not here.
  *
  * @typeParam TCellSchema / TCellItem — the cell record and its item shape
- * @typeParam TTenantSchema / TTenantItem — the tenant record and its item shape
+ * @typeParam TDeploymentSchema / TDeploymentItem — the deployment record and its item shape
  */
 export class PlacementTransactions<
   TCellSchema,
   TCellItem extends DynamoDBItem,
-  TTenantSchema,
-  TTenantItem extends DynamoDBItem,
+  TDeploymentSchema,
+  TDeploymentItem extends DynamoDBItem,
 > {
   private readonly client: DynamoDBDocumentClient;
 
   constructor(
     private readonly tableName: string,
     private readonly cellDataModel: DataModel<TCellSchema, TCellItem>,
-    private readonly tenantDataModel: DataModel<TTenantSchema, TTenantItem>,
+    private readonly deploymentDataModel: DataModel<TDeploymentSchema, TDeploymentItem>,
     client?: DynamoDBDocumentClient,
   ) {
     this.client = client ?? defaultDocumentClient();
   }
 
   /**
-   * §6 step 2 — claim a slot in an existing `ACTIVE` cell and persist the
-   * tenant, atomically:
+   * §7 step 2 — claim a slot in an existing `ACTIVE` cell of the application
+   * and persist the deployment, atomically:
    *
    * - `Update` cell: `SET tenantCount = tenantCount + 1`, condition
-   *   `status = ACTIVE AND tenantCount < maxTenants`
-   * - `Put` tenant (status `CREATING`, `cellId` set), condition
-   *   `attribute_not_exists(PK)`
+   *   `status = ACTIVE AND tenantCount < maxTenants` — the FIRST item
+   * - `Update` tenant: `SET deploymentCount = deploymentCount + 1`,
+   *   condition `attribute_exists(PK)` (a deleted tenant is the 404)
+   * - `Put` deployment (status `CREATING`, `cellId` set), condition
+   *   `attribute_not_exists(PK)` — one deployment per tenant per
+   *   application; a second is the 409
    *
    * The stable `clientRequestToken` gives short-window replay protection for
-   * identical automatic retries. When the caller supplied a CreateTenant
-   * `clientToken`, the idempotency item joins the transaction as a third
-   * `Put` conditional on `attribute_not_exists(PK)` (ADR-017) — a failed
-   * idempotency condition throws {@link DuplicateTokenError} (replay the
-   * original outcome). Throws {@link PlacementRaceLostError} ONLY when the
-   * cancellation reasons identify the cell status/capacity check as the sole
-   * failed condition (safe to try the next candidate); every other failure
-   * is an {@link AmbiguousTransactionError} — never retarget the same tenant
+   * identical automatic retries. When the caller supplied a `clientToken`,
+   * the idempotency item joins the transaction LAST, conditional on
+   * `attribute_not_exists(PK)` (ADR-017) — a failed idempotency condition
+   * throws {@link DuplicateTokenError} and wins over every other
+   * classification. Throws {@link PlacementRaceLostError} ONLY when the
+   * cell's status/capacity check is the sole failed condition (safe to try
+   * the next candidate); {@link DeploymentExistsError} and
+   * {@link TenantGoneError} by position; every other failure is an
+   * {@link AmbiguousTransactionError} — never retarget the same deployment
    * after an ambiguous outcome.
    */
-  async placeTenantInCell(params: {
+  async placeDeploymentInCell(params: {
     /** Base-table key of the candidate cell. */
     readonly cellKey: ItemKey;
-    /** The fully-formed tenant record (status CREATING, cellId = candidate). */
-    readonly tenant: TTenantSchema;
-    /** ISO-8601 timestamp stamped onto the cell's `updatedAt`. */
+    /** Base-table key of the tenant whose count is claimed. */
+    readonly tenantKey: ItemKey;
+    /** The fully-formed deployment record (status CREATING, cellId = candidate). */
+    readonly deployment: TDeploymentSchema;
+    /** ISO-8601 timestamp stamped onto the cell's and tenant's `updatedAt`. */
     readonly updatedAt: string;
     /** Stable idempotency token — same value on identical retries. */
     readonly clientRequestToken: string;
-    /** CreateTenant idempotency item (ADR-017); absent when no clientToken. */
+    /** CreateDeployment idempotency item (ADR-017); absent when no clientToken. */
     readonly idempotencyItem?: DynamoDBItem;
   }): Promise<void> {
     try {
@@ -566,10 +732,11 @@ export class PlacementTransactions<
                 },
               },
             },
+            tenantClaimUpdate(this.tableName, params.tenantKey, params.updatedAt),
             {
               Put: {
                 TableName: this.tableName,
-                Item: this.tenantDataModel.toItem(params.tenant),
+                Item: this.deploymentDataModel.toItem(params.deployment),
                 ConditionExpression: 'attribute_not_exists(PK)',
               },
             },
@@ -580,21 +747,17 @@ export class PlacementTransactions<
       );
     } catch (error) {
       const codes = cancellationCodes(error);
-      // A failed idempotency condition (the LAST item, when present) is a
-      // replay of an earlier CreateTenant — it wins over every other
-      // classification, because replaying the original outcome is correct
-      // regardless of what else the cancellation reports (ADR-017).
       throwIfDuplicateToken(codes, params.idempotencyItem);
-      // Lost race iff the cell's status/capacity condition is the ONLY
-      // failed check. A failed tenant Put (or any other reason) is ambiguous.
-      // Accepted: a ULID collision on the tenant Put lands here as a 500 —
-      // the client retry mints a fresh ULID; the probability is negligible.
-      if (
-        codes !== undefined &&
-        codes[0] === 'ConditionalCheckFailed' &&
-        codes.slice(1).every((code) => code !== 'ConditionalCheckFailed')
-      ) {
-        throw new PlacementRaceLostError('Lost the placement race for the candidate cell');
+      const classified =
+        codes === undefined
+          ? undefined
+          : classifyPlacementCancellation(
+            codes,
+            { tenant: 1, deployment: 2 },
+            () => new PlacementRaceLostError('Lost the placement race for the candidate cell'),
+          );
+      if (classified !== undefined) {
+        throw classified;
       }
       throw new AmbiguousTransactionError('Placement transaction failed ambiguously', error);
     }
@@ -602,59 +765,70 @@ export class PlacementTransactions<
 
   /**
    * §7 step 3 — no candidate claimed: claim a cell slot on the hosting
-   * account and create the new cell record (status `CREATING`,
-   * `tenantCount = 1` pre-claimed, `accountId` set, definition stamped)
-   * together with the tenant, atomically (ADR-013, ADR-024):
+   * account, count the cell on the application, create the new cell record
+   * (status `CREATING`, `tenantCount = 1` pre-claimed, `accountId` and
+   * `applicationId` set, definition stamped), count the deployment on the
+   * tenant and create the deployment, atomically (ADR-013, ADR-024,
+   * ADR-032, ADR-037):
    *
    * - `Update` account: `SET cellCount = cellCount + 1`, condition
-   *   `attribute_exists(PK) AND cellCount < maxCells` — the FIRST item, so
-   *   its cancellation code has a fixed position
+   *   `attribute_exists(PK) AND cellCount < maxCells` — the FIRST item
+   * - `Update` application: `SET cellCount = cellCount + 1`, condition
+   *   `attribute_exists(PK)` (no limit; a deleted application is the 404)
    * - `Put` cell, condition `attribute_not_exists(PK)`
-   * - `Put` tenant, condition `attribute_not_exists(PK)`
+   * - `Update` tenant: `SET deploymentCount = deploymentCount + 1`,
+   *   condition `attribute_exists(PK)`
+   * - `Put` deployment, condition `attribute_not_exists(PK)`
    *
-   * Fresh ULIDs make a `Put` collision negligible, but no write in this
-   * design is unconditional. When the caller supplied a CreateTenant
-   * `clientToken`, the idempotency item joins LAST (ADR-017) — a failed
-   * idempotency condition throws {@link DuplicateTokenError} and wins over
-   * every other classification. A failed account condition alone throws
-   * {@link AccountFullError} (try the next eligible account). Any other
-   * failure is ambiguous: fail the request, never retarget.
+   * Fresh ULIDs make a cell `Put` collision negligible, but no write in this
+   * design is unconditional. The idempotency item joins LAST when supplied
+   * (ADR-017). A failed account condition alone throws
+   * {@link AccountFullError} (try the next eligible account);
+   * {@link DeploymentExistsError}, {@link TenantGoneError} and
+   * {@link ApplicationGoneError} by position; anything else is ambiguous:
+   * fail the request, never retarget.
    */
-  async createCellWithTenant(params: {
+  async createCellWithDeployment(params: {
     /** Base-table key of the account the cell is created in. */
     readonly accountKey: ItemKey;
+    /** Base-table key of the application the cell is counted on. */
+    readonly applicationKey: ItemKey;
     /** The new cell record — status CREATING, tenantCount 1, stamped definition. */
     readonly cell: TCellSchema;
-    /** The tenant record — status CREATING, cellId = the new cell. */
-    readonly tenant: TTenantSchema;
-    /** ISO-8601 timestamp stamped onto the account's `updatedAt`. */
+    /** Base-table key of the tenant whose count is claimed. */
+    readonly tenantKey: ItemKey;
+    /** The deployment record — status CREATING, cellId = the new cell. */
+    readonly deployment: TDeploymentSchema;
+    /** ISO-8601 timestamp stamped onto the account's, application's and tenant's `updatedAt`. */
     readonly updatedAt: string;
     /** Stable idempotency token — same value on identical retries. */
     readonly clientRequestToken: string;
-    /** CreateTenant idempotency item (ADR-017); absent when no clientToken. */
+    /** CreateDeployment idempotency item (ADR-017); absent when no clientToken. */
     readonly idempotencyItem?: DynamoDBItem;
   }): Promise<void> {
+    const countCells = (key: ItemKey, condition: string) => ({
+      Update: {
+        TableName: this.tableName,
+        Key: key,
+        UpdateExpression: 'SET #cellCount = #cellCount + :one, #updatedAt = :updatedAt',
+        ConditionExpression: condition,
+        ExpressionAttributeNames: {
+          '#cellCount': 'cellCount',
+          ...(condition.includes('#maxCells') ? { '#maxCells': 'maxCells' } : {}),
+          '#updatedAt': 'updatedAt',
+        },
+        ExpressionAttributeValues: {
+          ':one': 1,
+          ':updatedAt': params.updatedAt,
+        },
+      },
+    });
     try {
       await this.client.send(
         new TransactWriteCommand({
           TransactItems: [
-            {
-              Update: {
-                TableName: this.tableName,
-                Key: params.accountKey,
-                UpdateExpression: 'SET #cellCount = #cellCount + :one, #updatedAt = :updatedAt',
-                ConditionExpression: 'attribute_exists(PK) AND #cellCount < #maxCells',
-                ExpressionAttributeNames: {
-                  '#cellCount': 'cellCount',
-                  '#maxCells': 'maxCells',
-                  '#updatedAt': 'updatedAt',
-                },
-                ExpressionAttributeValues: {
-                  ':one': 1,
-                  ':updatedAt': params.updatedAt,
-                },
-              },
-            },
+            countCells(params.accountKey, 'attribute_exists(PK) AND #cellCount < #maxCells'),
+            countCells(params.applicationKey, 'attribute_exists(PK)'),
             {
               Put: {
                 TableName: this.tableName,
@@ -662,10 +836,11 @@ export class PlacementTransactions<
                 ConditionExpression: 'attribute_not_exists(PK)',
               },
             },
+            tenantClaimUpdate(this.tableName, params.tenantKey, params.updatedAt),
             {
               Put: {
                 TableName: this.tableName,
-                Item: this.tenantDataModel.toItem(params.tenant),
+                Item: this.deploymentDataModel.toItem(params.deployment),
                 ConditionExpression: 'attribute_not_exists(PK)',
               },
             },
@@ -677,29 +852,36 @@ export class PlacementTransactions<
     } catch (error) {
       const codes = cancellationCodes(error);
       throwIfDuplicateToken(codes, params.idempotencyItem);
-      if (
-        codes !== undefined &&
-        codes[0] === 'ConditionalCheckFailed' &&
-        codes.slice(1).every((code) => code !== 'ConditionalCheckFailed')
-      ) {
-        throw new AccountFullError('The account has no free cell slot');
+      const classified =
+        codes === undefined
+          ? undefined
+          : classifyPlacementCancellation(
+            codes,
+            { application: 1, tenant: 3, deployment: 4 },
+            () => new AccountFullError('The account has no free cell slot'),
+          );
+      if (classified !== undefined) {
+        throw classified;
       }
       throw new AmbiguousTransactionError('New-cell placement transaction failed', error);
     }
   }
 
   /**
-   * §6 compensation for a new-cell placement whose `StartExecution` was
-   * rejected: one `TransactWriteItems` moves BOTH the tenant and the cell
-   * from `CREATING` to `CREATE_FAILED`, so compensation cannot leave only
-   * one record recoverable. Each update is conditional on the exact
+   * §7.4 compensation for a new-cell placement whose `StartExecution` was
+   * rejected: one `TransactWriteItems` moves BOTH the deployment and the
+   * cell from `CREATING` to `CREATE_FAILED`, so compensation cannot leave
+   * only one record recoverable. Each update is conditional on the exact
    * in-flight status (`status = CREATING`), which is also the existence
-   * check. (Compensation for placement into an EXISTING cell is a single
-   * tenant transition — use `DynamoDBRepository.transitionStatus`.)
+   * check. Counters are never touched: the account's cell slot, the
+   * application's count and the tenant's count stay held by the
+   * `CREATE_FAILED` records until the remediation path releases them.
+   * (Compensation for placement into an EXISTING cell is a single deployment
+   * transition — use `DynamoDBRepository.transitionStatus`.)
    */
-  async failCreatingCellAndTenant(params: {
+  async failCreatingCellAndDeployment(params: {
     readonly cellKey: ItemKey;
-    readonly tenantKey: ItemKey;
+    readonly deploymentKey: ItemKey;
     /** Failure detail written to both records' `statusReason`. */
     readonly statusReason: string;
     /** ISO-8601 timestamp written to both records' `updatedAt`. */
@@ -728,7 +910,7 @@ export class PlacementTransactions<
     try {
       await this.client.send(
         new TransactWriteCommand({
-          TransactItems: [compensate(params.cellKey), compensate(params.tenantKey)],
+          TransactItems: [compensate(params.cellKey), compensate(params.deploymentKey)],
         }),
       );
     } catch (error) {

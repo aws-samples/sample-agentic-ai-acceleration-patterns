@@ -25,6 +25,7 @@ export const SCRIPTS_DIR = join(__dirname, '..', '..', 'scripts', 'control-plane
 export const FIXTURE = {
   tenantId: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
   tenantName: 'Acme Example Ltd',
+  applicationId: 'identity-mount',
   cellId: 'cell-01',
   adminEmail: 'success+admin@simulator.amazonses.com',
   operatorId: 'operator-sub-0001',
@@ -38,7 +39,7 @@ export const FIXTURE = {
   replayPassword: 'Temp-Pass-Replay-7q2z!',
 };
 
-export const PARKED_PARAM = `/application-plane/tenants/${FIXTURE.tenantId}/identity/admin-temporary-password`;
+export const PARKED_PARAM = `/application-plane/tenants/${FIXTURE.tenantId}/${FIXTURE.applicationId}/admin-temporary-password`;
 export const IDENTITY_NS = '/application-plane/shared/identity';
 export const TIERED_REFUSAL = 'tiered identity needs a per-tenant tier; not supported when mounted';
 
@@ -101,6 +102,7 @@ export function tenantEnv(overrides: Record<string, string | undefined> = {}): R
   return {
     TENANT_ID: FIXTURE.tenantId,
     TENANT_NAME: FIXTURE.tenantName,
+    APPLICATION_ID: FIXTURE.applicationId,
     CELL_ID: FIXTURE.cellId,
     OPERATION: 'create',
     ADMIN_EMAIL: FIXTURE.adminEmail,
@@ -113,6 +115,7 @@ export function tenantEnv(overrides: Record<string, string | undefined> = {}): R
 /** Full env for a cell script. */
 export function cellEnv(overrides: Record<string, string | undefined> = {}): Record<string, string | undefined> {
   return {
+    APPLICATION_ID: FIXTURE.applicationId,
     CELL_ID: FIXTURE.cellId,
     OPERATION: 'create',
     OPERATOR_ID: FIXTURE.operatorId,

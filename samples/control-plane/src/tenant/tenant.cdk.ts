@@ -14,7 +14,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { ProvisioningWorkflow } from './tenant.sfn';
-import { CellDefinition, stackIdentity, validateCellDefinition, validateTenantBuildManagedPolicyArns } from './validation';
+import { stackIdentity, validateTenantBuildManagedPolicyArns } from './validation';
 import { CellAccountRoles } from '../cell-account/cell-account.cdk';
 import { apiRoleName, DEFAULT_FLEET_NAME, provisioningRoleArn, validateFleetName } from '../shared/fleet';
 import { nagFindingResource, acknowledgeGranularFinding, suppressTemplateScanners } from '../shared/nag';
@@ -25,11 +25,13 @@ export interface TenantStackProps extends StackProps {
   /** Vendor IdP audience expected in control plane JWTs. */
   readonly vendorIdpAudience: string;
   /**
-   * The deployment-configured CellDefinition (architecture.md §10,
-   * ADR-012) - stamped onto each cell record at creation. Supplied via CDK
-   * context and validated at synth time.
+   * DEMO ONLY: application ids for which this stack publishes
+   * `/application-plane/applications/<id>/shared/base-domain` in its own
+   * account, so the sample cell script has a shared resource to read
+   * (ADR-010, ADR-034). A real deployment's application plane publishes its
+   * own. Default: none.
    */
-  readonly cellDefinition: CellDefinition;
+  readonly demoApplicationIds?: string[];
   /**
    * Names the five physical roles of the fleet (spec §3.3, ADR-025/028):
    * the pair every account installs, `<fleetName>-cell-provisioning` and
@@ -54,26 +56,24 @@ export interface TenantStackProps extends StackProps {
   readonly tenantBuildManagedPolicyArns?: string[];
 }
 
-/** GSI-1: cell + account listing, per-cell tenant lookup (architecture.md §4). */
+/** GSI-1: cell, account and application listing, per-cell deployment lookup (spec §4.7). */
 export const GSI1_NAME = 'GSI1';
-/** GSI-2: unfiltered tenant listing and per-account cell lookup (§4). */
+/** GSI-2: unfiltered tenant and deployment listing, per-account cell lookup (§4.7). */
 export const GSI2_NAME = 'GSI2';
+/** GSI-3: per-application cell and deployment lookup (§4.7). */
+export const GSI3_NAME = 'GSI3';
 
-// Re-exported so existing imports of the input shapes and validators keep working.
+// Re-exported so existing imports of the input validators keep working.
 export {
-  CellDefinition,
-  ScriptLocations,
-  SourceDefinition,
   StackIdentity,
   stackIdentity,
-  validateCellDefinition,
   validateTenantBuildManagedPolicyArns,
 } from './validation';
 
 /**
  * The cell-based control plane - one stack: API Gateway (generated from the
  * Smithy OpenAPI output), Lambda Authorizer (vendor IdP), API handler, the
- * cells + tenants table (GSI-1/GSI-2), and the provisioning workflow
+ * single table (GSI-1/2/3), and the provisioning workflow
  * (architecture.md §3).
  */
 export class TenantStack extends Stack {
@@ -93,23 +93,24 @@ export class TenantStack extends Stack {
   constructor(scope: Construct, id: string, props: TenantStackProps) {
     super(scope, id, props);
 
-    // Fail synth on an invalid cellDefinition (§10).
-    validateCellDefinition(props.cellDefinition);
     this.fleetName = validateFleetName(props.fleetName ?? DEFAULT_FLEET_NAME);
     // Fail synth on a policy ARN outside this partition/account (ADR-022).
     const identity = stackIdentity(this);
     validateTenantBuildManagedPolicyArns(props.tenantBuildManagedPolicyArns, identity);
 
-    // --- Control plane table (accounts + cells + tenants, single table) ---
-    // PK=ACCOUNT#<id>|CELL#<id>|TENANT#<id>, SK=META. GSI-1 (static ACCOUNT
-    // and CELL partitions, CELL#<id> for a cell's tenants) and GSI-2 (static
-    // TENANT partition, ACCOUNT#<id> for an account's cells) serve the
-    // listing patterns and the two placement scans (§4); both project ALL
-    // attributes - the candidate scan needs status/tenantCount/maxTenants,
-    // and the listings return full summaries. Account items are absent from
-    // GSI-2. The GSIs are eventually consistent and never authoritative -
-    // tenantCount on the cell and cellCount on the account are the
-    // occupancy guards (§6).
+    // --- Control plane table (applications + accounts + cells + tenants +
+    // deployments, single table, spec §4) ---
+    // PK=APPLICATION#<id>|ACCOUNT#<id>|CELL#<id>|TENANT#<id>, SK=META; a
+    // tenant's deployments share its partition under SK=DEPLOYMENT#<appId>.
+    // GSI-1 (static APPLICATION, ACCOUNT and CELL partitions, CELL#<id> for a
+    // cell's deployments), GSI-2 (static TENANT and DEPLOYMENT partitions,
+    // ACCOUNT#<id> for an account's cells) and GSI-3 (APPLICATION#<id> for an
+    // application's cells and deployments) serve the listing patterns and
+    // the two placement scans (§4.7); all project ALL attributes - the
+    // candidate scan needs status/tenantCount/maxTenants, and the listings
+    // return full summaries. The GSIs are eventually consistent and never
+    // authoritative - the four counters on the base records are the
+    // occupancy guards (P-5, P-6).
     const table = new dynamodb.TableV2(this, 'TenantTable', {
       partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'SK', type: dynamodb.AttributeType.STRING },
@@ -126,9 +127,15 @@ export class TenantStack extends Stack {
           sortKey: { name: 'GSI2SK', type: dynamodb.AttributeType.STRING },
           projectionType: dynamodb.ProjectionType.ALL,
         },
+        {
+          indexName: GSI3_NAME,
+          partitionKey: { name: 'GSI3PK', type: dynamodb.AttributeType.STRING },
+          sortKey: { name: 'GSI3SK', type: dynamodb.AttributeType.STRING },
+          projectionType: dynamodb.ProjectionType.ALL,
+        },
       ],
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      // Garbage-collects CreateTenant idempotency records (ADR-017). TTL
+      // Garbage-collects CreateDeployment idempotency records (ADR-017). TTL
       // deletion is lazy, so tokens are honoured for AT LEAST 24h — replay
       // handling never reads expiresAt.
       timeToLiveAttribute: 'expiresAt',
@@ -223,10 +230,8 @@ export class TenantStack extends Stack {
         TABLE_NAME: table.tableName,
         GSI1_NAME: GSI1_NAME,
         GSI2_NAME: GSI2_NAME,
+        GSI3_NAME: GSI3_NAME,
         STATE_MACHINE_ARN: workflow.stateMachine.stateMachineArn,
-        // The deployment-configured CellDefinition (§10) - stamped onto new
-        // cell records by the placement path; validated at synth time.
-        CELL_DEFINITION: JSON.stringify(props.cellDefinition),
         CELL_PROJECT_NAME: workflow.cellProject.projectName,
         TENANT_PROJECT_NAME: workflow.tenantProject.projectName,
         // ADR-025: the service derives each cell's provisioning role ARNs
@@ -306,7 +311,7 @@ export class TenantStack extends Stack {
         // X-Ray tracing (CKV_AWS_73) - completes the trace path that the
         // provisioning state machine already participates in.
         tracingEnabled: true,
-        // Explicit stage throttling: CreateTenant/UpdateResource start
+        // Explicit stage throttling: CreateDeployment/UpdateDeployment start
         // CodeBuild builds, so a leaked token is a cost-amplification
         // vector. Modest sample-appropriate limits; tune for real fleets.
         throttlingRateLimit: 20,
@@ -384,13 +389,16 @@ export class TenantStack extends Stack {
     });
 
     // DEMO ONLY: stands in for application-plane shared infrastructure in
-    // the home account (ADR-010). In a real deployment the application plane
-    // publishes its own shared resource identifiers - the control plane is
-    // not involved. Every other account gets its own from the CellAccountStack.
-    new ssm.StringParameter(this, 'DemoSharedBaseDomain', {
-      parameterName: '/application-plane/shared/base-domain',
-      stringValue: 'cells.example.com',
-    });
+    // the home account, one namespace per application (ADR-010, ADR-034). In
+    // a real deployment the application plane publishes its own shared
+    // resource identifiers - the control plane is not involved. Every other
+    // account gets its own from the CellAccountStack.
+    for (const applicationId of props.demoApplicationIds ?? []) {
+      new ssm.StringParameter(this, `DemoSharedBaseDomain-${applicationId}`, {
+        parameterName: `/application-plane/applications/${applicationId}/shared/base-domain`,
+        stringValue: `${applicationId}.cells.example.com`,
+      });
+    }
 
     new CfnOutput(this, 'ApiUrl', { value: api.url });
     new CfnOutput(this, 'StateMachineArn', { value: workflow.stateMachine.stateMachineArn });

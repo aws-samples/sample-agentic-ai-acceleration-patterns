@@ -38,7 +38,7 @@ log group into an unintended secrets store.
   log automatically — plaintext env vars and inline `get-parameter` values
   are not masked.
 - Never pass secrets as plaintext environment variables or command-line
-  arguments defined in the CellDefinition.
+  arguments defined in an application's definition.
 
 ## Untrusted inputs
 
@@ -51,11 +51,12 @@ log group into an unintended secrets store.
   identifier. The control plane delivers them as structured CodeBuild
   environment variables, so the first script that expands one unquoted is
   the first place an injection becomes possible.
-- `TENANT_ID` and `CELL_ID` are control-plane-generated ULIDs and
-  `OPERATION` is a fixed verb, so the samples use them in parameter names
-  and paths as-is. `OPERATOR_ID` is the verified `sub` claim of the
-  operator's vendor-IdP token (ADR-019): fine to log or tag with, but quote
-  it and treat it like free text anywhere else.
+- `TENANT_ID` and `CELL_ID` are control-plane-generated ULIDs,
+  `APPLICATION_ID` is operator-chosen but constrained to `[a-z0-9-]{1,32}`
+  by the API, and `OPERATION` is a fixed verb, so the samples use them in
+  parameter names and paths as-is. `OPERATOR_ID` is the verified `sub`
+  claim of the operator's vendor-IdP token (ADR-019): fine to log or tag
+  with, but quote it and treat it like free text anywhere else.
 
 ## Failure behaviour
 
@@ -69,7 +70,7 @@ log group into an unintended secrets store.
 
 ## Scope
 
-These conventions apply to every script referenced by a CellDefinition
-(`cellScripts` and `tenantScripts`). The samples in `sample-cell/`,
+These conventions apply to every script referenced by an application's
+definition (`cellScripts` and `tenantScripts`). The samples in `sample-cell/`,
 `sample-tenant/`, and `sample-noop/` follow them and are the reference
 implementations.

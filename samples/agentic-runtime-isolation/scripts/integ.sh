@@ -66,10 +66,9 @@ CDK=(npx cdk --app "$OUT")
 INTEG_APP="npx ts-node -P tsconfig.json --prefer-ts-exts test/integ.runtime.ts"
 # INTEG_DEPLOY_CONCURRENCY (default 6) is the `cdk deploy --all` concurrency. Six
 # stacks each creating a REST API at once trip the API Gateway control-plane
-# throttle in a Region at its default quota (us-east-1, 2026-11-09, and
-# eu-central-1, 2026-11-11: CreateModel 429 after five SDK attempts,
-# `RuntimeIsolationInteg-session-user` rolled back); set it to 2 (deploy 705 s
-# instead of about 270 s).
+# throttle in a Region at its default quota (us-east-1, 2026-11-09: CreateModel
+# 429 after five SDK attempts, `RuntimeIsolationInteg-session-user` rolled back);
+# set it to 2 there.
 # INTEG_PREFIX deploys under another stack prefix, beside an earlier run's
 # DELETE_FAILED stacks (CloudFormation refuses updates to them); the leftover
 # check below is scoped to this prefix.

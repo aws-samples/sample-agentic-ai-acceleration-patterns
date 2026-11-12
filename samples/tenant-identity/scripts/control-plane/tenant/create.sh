@@ -4,12 +4,14 @@
 #
 # control-plane tenant CREATE script for tenant-identity (ADR-0028, mounting
 # spec §7.1). Runs in the control-plane tenant CodeBuild project with
-# TENANT_ID, TENANT_NAME, CELL_ID, OPERATION, ADMIN_EMAIL, OPERATOR_ID,
-# AWS_REGION (spec §6.1) and the optional SCOPES, a space-separated list of
+# TENANT_ID, TENANT_NAME, APPLICATION_ID, CELL_ID, OPERATION, ADMIN_EMAIL,
+# OPERATOR_ID, AWS_REGION (spec §6.1) and the optional SCOPES, a space-separated list of
 # the scopes the tenant is entitled to (ADR-0035); unset or empty creates a
 # tenant that holds no scope. Onboards the tenant's identity under the SAME
 # tenant id (M-P-1) and parks the first admin's temporary password in an SSM
-# SecureString encrypted with AdminPasswordKey (ADR-0031, ADR-0033).
+# SecureString encrypted with AdminPasswordKey (ADR-0031, ADR-0033), under
+# the deployment's own namespace /application-plane/tenants/<T>/<A>/*
+# (ADR-0038).
 #
 # Safe to re-run (M-P-3): every step reads state first and only writes what
 # is missing. A replay after a build that was killed before the park claims
@@ -18,6 +20,7 @@ set -euo pipefail
 
 : "${TENANT_ID:?TENANT_ID env var is required}"
 : "${TENANT_NAME:?TENANT_NAME env var is required}"
+: "${APPLICATION_ID:?APPLICATION_ID env var is required}"
 : "${CELL_ID:?CELL_ID env var is required}"
 : "${OPERATION:?OPERATION env var is required}"
 : "${ADMIN_EMAIL:?ADMIN_EMAIL env var is required}"
@@ -30,9 +33,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
 # §3.3 audit: the operator beside the tenant id, so an identity access-log
 # line (which shows only the build role) joins to the operator here.
-echo "Onboarding identity for tenant ${TENANT_ID} in cell ${CELL_ID} (${OPERATION}, operator ${OPERATOR_ID})"
+echo "Onboarding identity for tenant ${TENANT_ID} in application ${APPLICATION_ID}, cell ${CELL_ID} (${OPERATION}, operator ${OPERATOR_ID})"
 
-PARKED_PARAM="/application-plane/tenants/${TENANT_ID}/identity/admin-temporary-password"
+PARKED_PARAM="/application-plane/tenants/${TENANT_ID}/${APPLICATION_ID}/admin-temporary-password"
 EMAIL_IN_USE="ADMIN_EMAIL is probably already in use in the shared pool"
 
 # Step 6: park PW as a SecureString under AdminPasswordKey (M-R-11), output to
@@ -123,7 +126,7 @@ check_parked_password() {
   class="$(aws_error_class "$PLATFORM_ERR_FILE")"
   : >"$PLATFORM_ERR_FILE"
   if [[ "$class" == ParameterNotFound ]]; then
-    echo "WARNING: tenant ${TENANT_ID} has its first admin but no parked password at ${PARKED_PARAM}; the vendor has no credential. Recover per mounting spec §8 (DeleteUser releases the slot, then CreateUser {firstAdmin: true}, or control-plane DeleteTenant + CreateTenant)" >&2
+    echo "WARNING: tenant ${TENANT_ID} has its first admin but no parked password at ${PARKED_PARAM}; the vendor has no credential. Recover per mounting spec §8 (DeleteUser releases the slot, then CreateUser {firstAdmin: true}, or control-plane DeleteDeployment + CreateDeployment)" >&2
   else
     echo "WARNING: could not verify the parked password at ${PARKED_PARAM} (${class})" >&2
   fi
