@@ -6,6 +6,7 @@ $version: "2.0"
 namespace controlplane
 
 use aws.apigateway#authorizer
+use aws.apigateway#requestValidator
 
 // ---------------------------------------------------------------------------
 // Cell resource
@@ -170,9 +171,12 @@ operation GetCell {
 /// would break the create/update script contract, so remediation for a
 /// failed cell create is deployment delete + cell delete. ConflictError
 /// also when the stored values changed between the read and the write
-/// (retry).
+/// (retry). The body is optional, and an empty PUT re-applies with the
+/// stored values, so API Gateway checks only the path here and the service
+/// validates the body.
 @authorizer("vendor-authorizer")
 @idempotent
+@requestValidator("params-only")
 @http(method: "PUT", uri: "/cells/{cellId}", code: 202)
 operation UpdateCell {
     input := {

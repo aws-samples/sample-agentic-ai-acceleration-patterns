@@ -6,6 +6,7 @@ $version: "2.0"
 namespace controlplane
 
 use aws.apigateway#authorizer
+use aws.apigateway#requestValidator
 
 // ---------------------------------------------------------------------------
 // Deployment resource
@@ -239,9 +240,12 @@ operation GetDeployment {
 /// with ConflictError otherwise - from CREATE_FAILED the remediation is
 /// delete + recreate, and no tenant build runs against a shared deployment
 /// that is mid-change. ConflictError also when the stored values changed
-/// between the read and the write (retry).
+/// between the read and the write (retry). The body is optional, and an
+/// empty PUT re-applies with the stored values, so API Gateway checks only
+/// the path here and the service validates the body.
 @authorizer("vendor-authorizer")
 @idempotent
+@requestValidator("params-only")
 @http(method: "PUT", uri: "/tenants/{tenantId}/deployments/{applicationId}", code: 202)
 operation UpdateDeployment {
     input := {
