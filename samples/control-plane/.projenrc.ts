@@ -97,6 +97,25 @@ integ.exec(
 integ.exec(
   'sh -c \'[ -n "$CP_INTEG_ACCOUNT_B" ] || { echo "Set CP_INTEG_ACCOUNT_B to the second (tenant-owned) test account id; it must be CDK-bootstrapped to trust this account (integration-test.md)"; exit 1; }\'',
 );
+// One run at a time: a second run updates the same stacks under the first and
+// deletes its assertion stack mid-scenario. Refuse to start while any of the
+// test's stacks in account A is in an *_IN_PROGRESS state (account B's single
+// stack is only ever touched together with A's, so A is enough to see a run).
+const inProgressStatuses = [
+  'CREATE_IN_PROGRESS',
+  'DELETE_IN_PROGRESS',
+  'REVIEW_IN_PROGRESS',
+  'ROLLBACK_IN_PROGRESS',
+  'UPDATE_IN_PROGRESS',
+  'UPDATE_COMPLETE_CLEANUP_IN_PROGRESS',
+  'UPDATE_ROLLBACK_IN_PROGRESS',
+  'UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS',
+  'IMPORT_IN_PROGRESS',
+  'IMPORT_ROLLBACK_IN_PROGRESS',
+].join(' ');
+integ.exec(
+  `sh -c 'out=$(aws cloudformation list-stacks --region "$AWS_REGION" --stack-status-filter ${inProgressStatuses} --query "StackSummaries[].StackName" --output text) || { echo "Could not list CloudFormation stacks in $AWS_REGION to check for a run in progress"; exit 1; }; busy=$(printf "%s\\n" $out | grep -E "^(control-plane-integ|ControlPlaneInteg)"); [ -z "$busy" ] || { echo "Another integration run is in progress in $AWS_REGION; these stacks are still changing:"; echo "$busy"; echo "Wait for them to settle (integration-test.md, After an interruption)"; exit 1; }'`,
+);
 // integ-runner synthesizes the app directly (no CDK CLI), so CDK_DEFAULT_ACCOUNT
 // is not set for it; the test needs the current account id at synth time (it
 // is account A of the two-account scenario), so resolve it here once.

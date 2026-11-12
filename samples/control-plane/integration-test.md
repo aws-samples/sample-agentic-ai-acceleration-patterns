@@ -41,8 +41,10 @@ shortcuts so one runner can deploy into both accounts (see Test-only
 shortcuts below).
 
 Run the test in one explicitly selected Region. The `integ` task pins
-integ-runner to `$AWS_REGION` (overriding its multi-Region defaults) and
-fails fast when either variable is unset:
+integ-runner to `$AWS_REGION` (overriding its multi-Region defaults). It
+fails fast when either variable is unset, and when a stack of the test in
+account A is still changing (any `*_IN_PROGRESS` state): a second run would
+update the first run's stacks and delete its assertion stack mid-scenario.
 
 ```bash
 export AWS_REGION=eu-central-1
@@ -127,6 +129,13 @@ removing test resources. The demo parameters under
 with them. Delete the stacks with the account each lives in:
 `control-plane-integ-account-b` with credentials for B (or through A's
 credentials and B's bootstrap trust), the others in A.
+
+The run lasts about 45 minutes, so start it from a shell that outlives it
+(for example `nohup`, `tmux` or `screen`) with credentials that last as long.
+If the runner process ends early, CloudFormation keeps creating the
+assertion stack, and the stacks stay in A and B because the runner never
+reached its destroy step. The `integ` task refuses to start until those
+stacks have settled.
 
 After a complete run the test harness still leaves default Lambda log
 groups in A (`/aws/lambda/control-plane-integ-setup-*` from the setup stack's
