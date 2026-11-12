@@ -136,8 +136,8 @@ with them. Delete the stacks with the account each lives in:
 credentials and B's bootstrap trust), the others in A.
 
 If the runner process ends early, CloudFormation finishes whichever stack it
-was deploying, and every stack stays in A and B because the runner never
-reached its destroy step. The `integ` task refuses to start until they are
+was deploying, and every stack it had deployed stays in A and B because the
+runner never finished its destroy step. The `integ` task refuses to start until they are
 gone.
 
 After a complete run the test harness still leaves default Lambda log
