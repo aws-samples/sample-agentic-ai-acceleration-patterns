@@ -47,3 +47,4 @@ Template for new records: [`docs/sample-standard.md` §2.2](../../../docs/sample
 | [ADR-0036](0036-the-application-chooses-fill-or-round-robin-across-accounts.md) | The application chooses fill or round robin across accounts (amends ADR-0035) | Accepted | 2026-11-11 |
 | [ADR-0037](0037-a-deployment-is-one-tenant-in-one-application.md) | A deployment is one tenant in one application (supersedes ADR-0001; amends ADR-0009, ADR-0012, ADR-0013, ADR-0017, ADR-0023, ADR-0032) | Accepted | 2026-11-11 |
 | [ADR-0038](0038-an-account-wide-shared-namespace-beside-the-per-application-one.md) | An account-wide shared namespace beside the per-application one (amends ADR-0034, ADR-0010) | Accepted | 2026-11-11 |
+| [ADR-0039](0039-applications-declare-deployment-parameters.md) | Applications declare deployment parameters (amends ADR-0004, ADR-0017, ADR-0032) | Accepted | 2026-11-12 |

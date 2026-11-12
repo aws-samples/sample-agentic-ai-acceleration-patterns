@@ -31,3 +31,5 @@ control plane to carry opaque per-tenant configuration to scripts, the
 extension point is a generic `parameters: map<string, string>` field on the
 tenant's resource definition, passed through as build environment variables —
 deliberately generic, not IdP-shaped.
+
+**Amended by ADR-0039 (2026-11-12):** the `parameters` extension point is built, in a different shape: the application declares parameter names, each deployment stores its values, and every tenant script receives them as `PARAM_<NAME>`. The values are opaque to the control plane and never secrets. `adminEmail` stays create-only and unpersisted.
