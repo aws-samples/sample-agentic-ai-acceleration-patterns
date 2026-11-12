@@ -208,6 +208,91 @@ structure ScriptLocations {
 }
 
 // ---------------------------------------------------------------------------
+// Parameters (ADR-039, ADR-040). An application declares the parameters its
+// tenant scripts take and the cell parameters its cell scripts take; values
+// are stored on the deployment or the cell and reach the scripts as
+// PARAM_<NAME> environment variables. Values are plain text and must not be
+// secrets (spec N-11).
+// ---------------------------------------------------------------------------
+
+/// A parameter name: an upper-case letter, then up to 63 upper-case letters,
+/// digits or underscores. The script receives it as PARAM_<NAME>.
+@pattern("^[A-Z][A-Z0-9_]{0,63}$")
+string ParameterName
+
+/// A parameter value or default: at most 1,024 bytes of UTF-8 with no
+/// control characters (U+0000 to U+001F, U+007F). The service checks the
+/// byte length and the characters; the model bounds the length.
+@length(max: 1024)
+string ParameterValue
+
+/// Operator-facing text describing a parameter.
+@length(max: 256)
+string ParameterDescription
+
+/// One parameter the application's tenant scripts take (ADR-039). A
+/// required parameter has no default; an optional one may have a default,
+/// which a deployment without its own value receives.
+structure ParameterDeclaration {
+    /// The parameter name, unique across both of the application's lists.
+    @required
+    name: ParameterName
+
+    /// Whether every deployment must have a value. Default false.
+    required: Boolean
+
+    /// The value a deployment without its own value receives. Not allowed on
+    /// a required parameter.
+    default: ParameterValue
+
+    /// What the parameter is for.
+    description: ParameterDescription
+}
+
+/// One parameter the application's cell scripts take (ADR-040). Every cell
+/// parameter has a default: a cell is created by placement, when no operator
+/// is present to supply a value.
+structure CellParameterDeclaration {
+    /// The parameter name, unique across both of the application's lists.
+    @required
+    name: ParameterName
+
+    /// The value a cell without its own value receives.
+    @required
+    default: ParameterValue
+
+    /// What the parameter is for.
+    description: ParameterDescription
+}
+
+/// The parameters an application's tenant scripts take, at most 20.
+@length(max: 20)
+list ParameterDeclarationList {
+    member: ParameterDeclaration
+}
+
+/// The parameters an application's cell scripts take, at most 20.
+@length(max: 20)
+list CellParameterDeclarationList {
+    member: CellParameterDeclaration
+}
+
+/// Parameter values by name, at most 20 entries. Defaults are never stored:
+/// a map holds the values an operator supplied.
+@length(max: 20)
+map ParameterMap {
+    key: ParameterName
+    value: ParameterValue
+}
+
+/// Names of stored parameter values to remove, at most 40. A name that is
+/// not stored is a no-op.
+@length(max: 40)
+list ParameterNameList {
+    member: ParameterName
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
@@ -231,9 +316,12 @@ structure ResourceNotFoundError {
 /// deployments, deleting a cell that still holds deployments, deleting an
 /// account or application that still holds cells, changing a registered
 /// account's owner, a CreateDeployment clientToken reused with different
-/// parameters, or a CreateDeployment that lost every bounded placement
-/// claim on candidate cells while no account had a free cell
-/// slot (nothing was written; retry - ADR-031).
+/// parameters, a parameter merge (UpdateDeployment, UpdateCell) or a
+/// PutApplication that keeps a declaration list whose read went stale
+/// (retry - spec R-14), or a CreateDeployment that lost every bounded
+/// placement claim on candidate cells while no account had a free cell
+/// slot (nothing was written; retry - ADR-031). The message says when a
+/// retry can succeed.
 @error("client")
 @httpError(409)
 structure ConflictError {

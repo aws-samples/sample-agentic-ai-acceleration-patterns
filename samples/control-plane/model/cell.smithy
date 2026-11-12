@@ -117,8 +117,9 @@ list CellList {
 // ---------------------------------------------------------------------------
 
 /// Returns a cell: the full record including the stamped deployment
-/// definition, lifecycle status, and capacity/occupancy. This is the polling
-/// endpoint for asynchronous cell lifecycle operations.
+/// definition, lifecycle status, capacity/occupancy, and the cell parameter
+/// values stored on the cell (defaults are not merged in). This is the
+/// polling endpoint for asynchronous cell lifecycle operations.
 @authorizer("vendor-authorizer")
 @readonly
 @http(method: "GET", uri: "/cells/{cellId}", code: 200)
@@ -134,6 +135,12 @@ operation GetCell {
         /// The requested cell.
         @required
         cell: CellSummary
+
+        /// The cell parameter values stored on the cell: the values an
+        /// operator set through UpdateCell, without defaults. Empty when
+        /// none - a new cell starts empty (ADR-040).
+        @required
+        parameters: ParameterMap
     }
 
     errors: [
@@ -145,14 +152,25 @@ operation GetCell {
 // UpdateCell - PUT /cells/{cellId} -> 202
 // ---------------------------------------------------------------------------
 
-/// Re-applies the shared cell deployment: no body - sets UPDATING status and
-/// starts the provisioning workflow, which runs the cell's stamped update
-/// script in AWS CodeBuild. Asynchronous: returns 202 immediately; poll
-/// GetCell for the terminal status. Allowed from ACTIVE and UPDATE_FAILED;
-/// rejected with ConflictError while the cell is in-flight or CREATE_FAILED -
+/// Re-applies the shared cell deployment, optionally changing cell
+/// parameter values first: names in parameters are set, names in
+/// removeParameters are removed (the cell returns to the default), every
+/// other stored value is kept; an empty body re-applies with the stored
+/// values. Sets UPDATING status (writing the merged values in the same
+/// conditional update) and starts the provisioning workflow, which runs the
+/// cell's stamped update script in AWS CodeBuild. Asynchronous: returns 202
+/// immediately; poll GetCell for the terminal status. The body is validated
+/// against the application's current cellParameters first (ADR-040): a name
+/// that is not a declared cell parameter (a tenant parameter name
+/// included), an over-long value or one holding a control character, a name
+/// in both lists, or more than 20 stored values is a ValidationException
+/// and nothing is written. Allowed from ACTIVE and UPDATE_FAILED; rejected
+/// with ConflictError while the cell is in-flight or CREATE_FAILED -
 /// re-running the update script against a half-created shared deployment
 /// would break the create/update script contract, so remediation for a
-/// failed cell create is deployment delete + cell delete.
+/// failed cell create is deployment delete + cell delete. ConflictError
+/// also when the stored values changed between the read and the write
+/// (retry).
 @authorizer("vendor-authorizer")
 @idempotent
 @http(method: "PUT", uri: "/cells/{cellId}", code: 202)
@@ -162,6 +180,13 @@ operation UpdateCell {
         @required
         @httpLabel
         cellId: CellId
+
+        /// Cell parameter values to set, by name.
+        parameters: ParameterMap
+
+        /// Names of stored cell parameter values to remove. A name that is
+        /// not stored is a no-op.
+        removeParameters: ParameterNameList
     }
 
     output := {
@@ -182,7 +207,7 @@ operation UpdateCell {
 
 /// Deprovisions an empty cell. Sets DELETING status and starts the
 /// provisioning workflow, which runs the cell's stamped delete script in AWS
-/// CodeBuild and, on success, removes the cell record and releases its slot
+/// CodeBuild with the stored cell parameter values (never validated) and, on success, removes the cell record and releases its slot
 /// on the account and its count on the application. Asynchronous: returns
 /// 202 immediately; poll GetCell until it returns 404 (deleted) or
 /// DELETE_FAILED. Empty cells only: rejected with ConflictError if

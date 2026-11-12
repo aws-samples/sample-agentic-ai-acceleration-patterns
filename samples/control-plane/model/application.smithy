@@ -64,7 +64,7 @@ enum PlacementStrategy {
 integer ApplicationCellCount
 
 /// An application as returned by the API: its definition, placement
-/// strategy and cell count.
+/// strategy, parameter declarations and cell count.
 structure ApplicationSummary {
     /// The application id.
     @required
@@ -90,6 +90,14 @@ structure ApplicationSummary {
     /// How new cells pick among eligible accounts.
     @required
     placementStrategy: PlacementStrategy
+
+    /// The parameters the tenant scripts take (ADR-039); empty when none.
+    @required
+    parameters: ParameterDeclarationList
+
+    /// The parameters the cell scripts take (ADR-040); empty when none.
+    @required
+    cellParameters: CellParameterDeclarationList
 
     /// Current number of this application's cells.
     @required
@@ -117,9 +125,17 @@ list ApplicationList {
 /// The definition is validated as a whole: every script path present, a
 /// non-empty source, maxTenants at least one (ValidationException otherwise).
 /// A source not pinned to a full commit SHA is accepted and logged
-/// (ADR-020). On an existing application the definition and placement
-/// strategy are replaced and cellCount is never touched; cells already
-/// created keep their stamp. Synchronous.
+/// (ADR-020). The parameter declarations are validated with it: names
+/// unique within and across both lists, no default on a required
+/// parameter, a default on every cell parameter, defaults of at most 1,024
+/// bytes with no control characters (ValidationException otherwise). On an
+/// existing application the definition and placement strategy are replaced
+/// and cellCount is never touched; cells already created keep their stamp.
+/// Each declaration list is replaced only when sent: an absent list keeps
+/// the current one, an empty list clears it (ADR-039, ADR-040). A put that
+/// keeps a list is conditioned on that list being unchanged since the
+/// service read it; ConflictError when it changed in between (retry).
+/// Synchronous.
 @authorizer("vendor-authorizer")
 @idempotent
 @http(method: "PUT", uri: "/applications/{applicationId}", code: 200)
@@ -148,6 +164,14 @@ operation PutApplication {
 
         /// How new cells pick among eligible accounts. Default FILL.
         placementStrategy: PlacementStrategy
+
+        /// The parameters the tenant scripts take. Absent keeps the current
+        /// list (none on a new application); an empty list clears it.
+        parameters: ParameterDeclarationList
+
+        /// The parameters the cell scripts take. Absent keeps the current
+        /// list (none on a new application); an empty list clears it.
+        cellParameters: CellParameterDeclarationList
     }
 
     output := {
@@ -155,14 +179,18 @@ operation PutApplication {
         @required
         application: ApplicationSummary
     }
+
+    errors: [
+        ConflictError
+    ]
 }
 
 // ---------------------------------------------------------------------------
 // GetApplication - GET /applications/{applicationId} -> 200
 // ---------------------------------------------------------------------------
 
-/// Returns a registered application: its definition, placement strategy and
-/// cell count.
+/// Returns a registered application: its definition, placement strategy,
+/// both sets of parameter declarations and cell count.
 @authorizer("vendor-authorizer")
 @readonly
 @http(method: "GET", uri: "/applications/{applicationId}", code: 200)

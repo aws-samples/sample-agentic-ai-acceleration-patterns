@@ -64,19 +64,26 @@ export function idempotencyKey(clientToken: string): ItemKey {
  * tenantId, applicationId and accountId are all part of the identity: the
  * same token with a different tenant, application or target account is a
  * different request and must be refused (409), not replayed.
+ *
+ * The parameter values (ADR-039) are part of it too, as name-sorted
+ * `[name, value]` pairs appended to the array — but only when there is at
+ * least one: an absent map and `{}` are the same request and hash exactly
+ * as a request did before parameters existed, so a token issued before the
+ * upgrade still replays inside its window (§7.3).
  */
 export function createDeploymentRequestHash(params: {
   readonly tenantId: string;
   readonly applicationId: string;
   readonly adminEmail: string;
   readonly accountId?: string;
+  readonly parameters?: Readonly<Record<string, string>>;
 }): string {
-  return createHash('sha256')
-    .update(
-      JSON.stringify([params.tenantId, params.applicationId, params.adminEmail, params.accountId ?? null]),
-      'utf8',
-    )
-    .digest('hex');
+  const identity: unknown[] = [params.tenantId, params.applicationId, params.adminEmail, params.accountId ?? null];
+  const parameters = Object.entries(params.parameters ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  if (parameters.length > 0) {
+    identity.push(parameters);
+  }
+  return createHash('sha256').update(JSON.stringify(identity), 'utf8').digest('hex');
 }
 
 /** Converts between {@link IdempotencyRecord} and its DynamoDB item. */

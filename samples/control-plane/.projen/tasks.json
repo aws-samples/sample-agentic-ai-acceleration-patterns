@@ -191,7 +191,7 @@
     },
     "integ": {
       "name": "integ",
-      "description": "Run the deployment integration test in $AWS_REGION across the current AWS account and $CP_INTEG_ACCOUNT_B (~45 min)",
+      "description": "Run the deployment integration test in $AWS_REGION across the current AWS account and $CP_INTEG_ACCOUNT_B (~55 min)",
       "steps": [
         {
           "exec": "sh -c '[ -n \"$AWS_REGION\" ] || { echo \"Set AWS_REGION to the single Region to test in (e.g. export AWS_REGION=eu-central-1)\"; exit 1; }'"
@@ -322,6 +322,7 @@
             "eslint",
             "jest",
             "jest-junit",
+            "jsonata",
             "projen",
             "ts-jest",
             "ts-node",
@@ -331,6 +332,7 @@
             "@aws-sdk/client-sts",
             "@aws-sdk/core",
             "@aws-sdk/lib-dynamodb",
+            "@aws-sdk/util-dynamodb",
             "@smithy/core",
             "@smithy/fetch-http-handler",
             "@smithy/node-http-handler",

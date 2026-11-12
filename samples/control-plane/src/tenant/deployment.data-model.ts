@@ -3,6 +3,7 @@
 
 import { APPLICATION_KEY_PREFIX } from './application.data-model';
 import { CELL_KEY_PREFIX } from './cell.data-model';
+import { ParameterValues } from './parameters';
 import { TENANT_KEY_PREFIX } from './tenant.data-model';
 import {
   DataModel,
@@ -27,7 +28,11 @@ export const DEPLOYMENT_GSI2_PARTITION = 'DEPLOYMENT';
  * changed), the lifecycle status and the build bookkeeping. Carries no
  * source and no scripts — its deployment is defined by its cell's stamped
  * definition (P-4). `adminEmail` is deliberately absent — it is pass-through
- * onboarding input, never persisted (ADR-004).
+ * onboarding input, never persisted (ADR-004). `parameters` holds the
+ * values an operator supplied (ADR-039), never a default; it is kept
+ * exactly as read — `undefined` when the attribute is absent (a record
+ * written before parameters existed), which is a different read from `{}`
+ * for the merge guard (R-33).
  */
 export interface DeploymentRecord {
   readonly tenantId: string;
@@ -35,6 +40,7 @@ export interface DeploymentRecord {
   /** The cell this deployment is placed in — assigned at creation, immutable. */
   readonly cellId: string;
   readonly status: LifecycleStatus;
+  readonly parameters?: ParameterValues;
   readonly statusReason?: string;
   readonly lastBuildId?: string;
   readonly createdAt: Date;
@@ -60,6 +66,7 @@ export interface DeploymentItem extends DynamoDBItem {
   readonly applicationId: string;
   readonly cellId: string;
   readonly status: LifecycleStatus;
+  readonly parameters?: ParameterValues;
   readonly statusReason?: string;
   readonly lastBuildId?: string;
   readonly createdAt: string;
@@ -127,6 +134,7 @@ export class DeploymentDataModel implements DataModel<DeploymentRecord, Deployme
       applicationId: record.applicationId,
       cellId: record.cellId,
       status: record.status,
+      parameters: record.parameters,
       statusReason: record.statusReason,
       lastBuildId: record.lastBuildId,
       createdAt: record.createdAt.toISOString(),
@@ -140,6 +148,7 @@ export class DeploymentDataModel implements DataModel<DeploymentRecord, Deployme
       applicationId: item.applicationId,
       cellId: item.cellId,
       status: item.status,
+      parameters: item.parameters,
       statusReason: item.statusReason,
       lastBuildId: item.lastBuildId,
       createdAt: new Date(item.createdAt),

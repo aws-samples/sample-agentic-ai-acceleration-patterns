@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { createHash } from 'node:crypto';
 import {
   IdempotencyDataModel,
   IdempotencyRecord,
@@ -33,6 +34,23 @@ describe('createDeploymentRequestHash (ADR-017, §7.3)', () => {
       createDeploymentRequestHash({ ...base, adminEmail: 'success+2@simulator.amazonses.com' }),
     ).not.toBe(hash);
     expect(createDeploymentRequestHash({ ...base, accountId: '111111111111' })).not.toBe(hash);
+  });
+
+  test('an absent and an empty parameter map hash exactly as a request did before parameters existed (§7.3)', () => {
+    // The pre-change hash: SHA-256 of the four-element positional array.
+    const preChange = createHash('sha256')
+      .update(JSON.stringify([base.tenantId, base.applicationId, base.adminEmail, null]), 'utf8')
+      .digest('hex');
+    expect(createDeploymentRequestHash(base)).toBe(preChange);
+    expect(createDeploymentRequestHash({ ...base, parameters: {} })).toBe(preChange);
+  });
+
+  test('parameter values are part of the identity, name-sorted so key order does not matter (ADR-039)', () => {
+    const hash = createDeploymentRequestHash({ ...base, parameters: { A: '1', B: '2' } });
+    expect(createDeploymentRequestHash({ ...base, parameters: { B: '2', A: '1' } })).toBe(hash);
+    expect(createDeploymentRequestHash({ ...base, parameters: { A: '1', B: '3' } })).not.toBe(hash);
+    expect(createDeploymentRequestHash({ ...base, parameters: { A: '1' } })).not.toBe(hash);
+    expect(createDeploymentRequestHash(base)).not.toBe(hash);
   });
 
   test('two target accounts with otherwise identical parameters hash differently', () => {

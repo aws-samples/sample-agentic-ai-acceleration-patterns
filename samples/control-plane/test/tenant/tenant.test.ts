@@ -445,6 +445,7 @@ describe('CreateDeployment placement into an existing cell (§7.1 steps 0-2)', (
         operation: 'create',
         scriptPath: 'stamped/tenant/create.sh',
         failedStatus: 'CREATE_FAILED',
+        parameters: {},
         tenantName: 'acme', // from the tenant record (ADR-023)
         adminEmail: ADMIN_EMAIL,
       },
@@ -585,12 +586,14 @@ describe('CreateDeployment into a new cell (§7.1 step 3, ADR-032)', () => {
         operation: 'create',
         scriptPath: 'app/cell/create.sh',
         failedStatus: 'CREATE_FAILED',
+        parameters: {},
       },
       tenantId: TENANT_ID,
       tenantBuild: {
         operation: 'create',
         scriptPath: 'app/tenant/create.sh',
         failedStatus: 'CREATE_FAILED',
+        parameters: {},
         tenantName: 'acme',
         adminEmail: ADMIN_EMAIL,
       },
@@ -1505,6 +1508,7 @@ describe('UpdateDeployment', () => {
           operation: 'update',
           scriptPath: 'stamped/tenant/update.sh',
           failedStatus: 'UPDATE_FAILED',
+          parameters: {},
           tenantName: 'acme', // from the tenant record (ADR-023)
           adminEmail: '',
         },
@@ -1586,6 +1590,7 @@ describe('DeleteDeployment', () => {
           operation: 'delete',
           scriptPath: 'stamped/tenant/delete.sh',
           failedStatus: 'DELETE_FAILED',
+          parameters: {},
           tenantName: 'acme', // from the tenant record (ADR-023)
           adminEmail: '',
         },
@@ -1842,6 +1847,7 @@ describe('UpdateCell', () => {
           operation: 'update',
           scriptPath: 'stamped/cell/update.sh',
           failedStatus: 'UPDATE_FAILED',
+          parameters: {},
         },
       });
     },
@@ -1908,6 +1914,7 @@ describe('DeleteCell', () => {
         operation: 'delete',
         scriptPath: 'stamped/cell/delete.sh',
         failedStatus: 'DELETE_FAILED',
+        parameters: {},
       },
     });
   });
@@ -2376,5 +2383,539 @@ describe('GetApplication / ListApplications / DeleteApplication (§5.5)', () => 
       ResourceNotFoundError,
     );
     expect(del).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Declared deployment parameters (ADR-039) and cell parameters (ADR-040)
+// ---------------------------------------------------------------------------
+
+/** X of spec §10: one required, one defaulted tenant parameter; one cell parameter. */
+const declaredApplication = applicationRecord({
+  parameters: [
+    { name: 'ALLOWED_EMAIL_DOMAIN', required: true },
+    { name: 'LOG_LEVEL', required: false, default: 'info' },
+  ],
+  cellParameters: [{ name: 'CELL_SIZE', default: 'small' }],
+});
+
+/** Builds the error a merge transition throws when its condition fails, with the ALL_OLD item. */
+function staleWith(current: unknown): StaleTransitionError {
+  return new StaleTransitionError('condition failed', current);
+}
+
+describe('PutApplication parameter declarations (§5.5, R-29, ADR-039, ADR-040)', () => {
+  const putInput = {
+    applicationId: APP_ID,
+    source: applicationSource,
+    cellScripts: applicationCellScripts,
+    tenantScripts: applicationTenantScripts,
+    maxTenants: 4,
+  };
+
+  test('both lists sent: no read, both written normalised, no condition', async () => {
+    const get = jest.fn();
+    const update = jest.fn().mockResolvedValue(declaredApplication);
+    const service = makeService({ applicationRepo: { get, update } });
+
+    const output = await service.PutApplication(
+      {
+        ...putInput,
+        parameters: [{ name: 'ALLOWED_EMAIL_DOMAIN', required: true }, { name: 'LOG_LEVEL', default: 'info' }],
+        cellParameters: [{ name: 'CELL_SIZE', default: 'small' }],
+      },
+      context,
+    );
+
+    expect(get).not.toHaveBeenCalled();
+    const write = update.mock.calls[0][1];
+    expect(write.expressionAttributeValues[':parameters']).toEqual([
+      { name: 'ALLOWED_EMAIL_DOMAIN', required: true },
+      { name: 'LOG_LEVEL', required: false, default: 'info' },
+    ]);
+    expect(write.expressionAttributeValues[':cellParameters']).toEqual([{ name: 'CELL_SIZE', default: 'small' }]);
+    expect(write.conditionExpression).toBeUndefined();
+    // GetApplication/PutApplication return both lists (§5.5).
+    expect(output.application?.parameters).toEqual([
+      { name: 'ALLOWED_EMAIL_DOMAIN', required: true, default: undefined, description: undefined },
+      { name: 'LOG_LEVEL', required: false, default: 'info', description: undefined },
+    ]);
+    expect(output.application?.cellParameters).toEqual([{ name: 'CELL_SIZE', default: 'small', description: undefined }]);
+  });
+
+  test('absent lists on an existing application are kept: not written, and the write is conditioned on them as read', async () => {
+    const get = jest.fn().mockResolvedValue(declaredApplication);
+    const update = jest.fn().mockResolvedValue(declaredApplication);
+    const service = makeService({ applicationRepo: { get, update } });
+
+    await service.PutApplication({ ...putInput, maxTenants: 9 }, context);
+
+    expect(get).toHaveBeenCalledWith({ PK: `APPLICATION#${APP_ID}`, SK: 'META' });
+    const write = update.mock.calls[0][1];
+    expect(write.updateExpression).not.toMatch(/#parameters =|#cellParameters =/);
+    expect(write.conditionExpression).toBe('#parameters = :read_parameters AND #cellParameters = :read_cellParameters');
+    expect(write.expressionAttributeValues[':read_parameters']).toBe(declaredApplication.parameters);
+    expect(write.expressionAttributeValues[':read_cellParameters']).toBe(declaredApplication.cellParameters);
+    expect(write.updateExpression).not.toContain('cellCount = :');
+  });
+
+  test('[] clears a list; a kept list read as absent conditions on attribute_not_exists (a new application declares none)', async () => {
+    const update = jest.fn().mockResolvedValue(applicationRecord());
+    const service = makeService({ applicationRepo: { get: jest.fn().mockResolvedValue(undefined), update } });
+
+    await service.PutApplication({ ...putInput, parameters: [] }, context);
+
+    const write = update.mock.calls[0][1];
+    expect(write.expressionAttributeValues[':parameters']).toEqual([]);
+    expect(write.updateExpression).not.toContain('#cellParameters =');
+    expect(write.conditionExpression).toBe('attribute_not_exists(#cellParameters)');
+  });
+
+  test('a kept list read as [] is a different read from absent', async () => {
+    const update = jest.fn().mockResolvedValue(applicationRecord());
+    const service = makeService({
+      applicationRepo: { get: jest.fn().mockResolvedValue(applicationRecord({ parameters: [] })), update },
+    });
+    await service.PutApplication({ ...putInput, cellParameters: [] }, context);
+    const write = update.mock.calls[0][1];
+    expect(write.conditionExpression).toBe('#parameters = :read_parameters');
+    expect(write.expressionAttributeValues[':read_parameters']).toEqual([]);
+  });
+
+  test('a name in a sent list that is already in the kept list is a 400 before any write', async () => {
+    const update = jest.fn();
+    const service = makeService({ applicationRepo: { get: jest.fn().mockResolvedValue(declaredApplication), update } });
+    await expect(
+      service.PutApplication({ ...putInput, cellParameters: [{ name: 'LOG_LEVEL', default: 'x' }] }, context),
+    ).rejects.toBeInstanceOf(ValidationException);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a required parameter with a default', { parameters: [{ name: 'A', required: true, default: 'x' }], cellParameters: [] }],
+    ['a duplicate name', { parameters: [{ name: 'A' }, { name: 'A' }], cellParameters: [] }],
+    ['a cell parameter without a default', { parameters: [], cellParameters: [{ name: 'A' }] }],
+    ['one name in both lists', { parameters: [{ name: 'A' }], cellParameters: [{ name: 'A', default: 'x' }] }],
+  ])('%s is a 400 and nothing is written', async (_, lists) => {
+    const update = jest.fn();
+    const service = makeService({ applicationRepo: { update } });
+    await expect(service.PutApplication({ ...putInput, ...(lists as any) }, context)).rejects.toBeInstanceOf(
+      ValidationException,
+    );
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('a kept list that changed between the read and the write is a 409 with the retry hint', async () => {
+    const service = makeService({
+      applicationRepo: {
+        get: jest.fn().mockResolvedValue(declaredApplication),
+        update: jest.fn().mockRejectedValue(new ConditionFailedError('condition failed')),
+      },
+    });
+    const failure = await service.PutApplication(putInput, context).catch((e) => e);
+    expect(failure).toBeInstanceOf(ConflictError);
+    expect(failure.message).toContain('retry the request');
+  });
+
+  test('the generated SSDK validation rejects a lower-case name and a cell parameter without a default', () => {
+    const failures = (input: Partial<PutApplicationInput>) =>
+      PutApplicationInput.validate({ ...putInput, ...input } as PutApplicationInput).map((f) => f.path);
+    expect(failures({ parameters: [{ name: 'log_level' }] })).toEqual(['/parameters/0/name']);
+    expect(failures({ cellParameters: [{ name: 'CELL_SIZE', default: undefined }] })).toEqual(['/cellParameters/0/default']);
+    expect(failures({ parameters: Array.from({ length: 21 }, (_, i) => ({ name: `P${i}` })) })).toEqual(['/parameters']);
+  });
+});
+
+describe('CreateDeployment parameters (R-33, §7.3)', () => {
+  const withValues = { ...createInput, parameters: { ALLOWED_EMAIL_DOMAIN: 'example.com' } };
+
+  test('stores the supplied values on the deployment and resolves defaults into the tenant build (existing cell)', async () => {
+    const placeDeploymentInCell = jest.fn().mockResolvedValue(undefined);
+    const service = makeService({
+      applicationRepo: { get: jest.fn().mockResolvedValue(declaredApplication) },
+      cellRepo: { queryIndex: cellPage(cellRecord()) },
+      placement: { placeDeploymentInCell },
+    });
+
+    await service.CreateDeployment(withValues, context);
+
+    // The supplied value only — never a default (§4.4).
+    expect(placeDeploymentInCell.mock.calls[0][0].deployment.parameters).toEqual({ ALLOWED_EMAIL_DOMAIN: 'example.com' });
+    const input = startedWorkflowInput();
+    expect(input.tenantBuild.parameters).toEqual({ ALLOWED_EMAIL_DOMAIN: 'example.com', LOG_LEVEL: 'info' });
+    // No cell build, so no cell set (R-20).
+    expect(input.cellBuild).toBeUndefined();
+  });
+
+  test('a new cell is inserted with an empty map; the cell build gets the cell defaults and no tenant parameter', async () => {
+    const createCellWithDeployment = jest.fn().mockResolvedValue(undefined);
+    const service = makeService({
+      applicationRepo: { get: jest.fn().mockResolvedValue(declaredApplication) },
+      cellRepo: { queryIndex: cellPage() },
+      placement: { createCellWithDeployment },
+    });
+
+    await service.CreateDeployment(withValues, context);
+
+    const params = createCellWithDeployment.mock.calls[0][0];
+    expect(params.cell.parameters).toEqual({});
+    expect(params.deployment.parameters).toEqual({ ALLOWED_EMAIL_DOMAIN: 'example.com' });
+    const input = startedWorkflowInput();
+    expect(input.cellBuild.parameters).toEqual({ CELL_SIZE: 'small' });
+    expect(input.tenantBuild.parameters).toEqual({ ALLOWED_EMAIL_DOMAIN: 'example.com', LOG_LEVEL: 'info' });
+  });
+
+  test('without declarations or values the deployment stores {} and the builds get {}', async () => {
+    const placeDeploymentInCell = jest.fn().mockResolvedValue(undefined);
+    const service = makeService({ cellRepo: { queryIndex: cellPage(cellRecord()) }, placement: { placeDeploymentInCell } });
+    await service.CreateDeployment(createInput, context);
+    expect(placeDeploymentInCell.mock.calls[0][0].deployment.parameters).toEqual({});
+    expect(startedWorkflowInput().tenantBuild.parameters).toEqual({});
+  });
+
+  test.each([
+    ['a missing required parameter', {}],
+    ['an undeclared name', { ALLOWED_EMAIL_DOMAIN: 'example.com', NOPE: 'x' }],
+    ['a cell parameter name', { ALLOWED_EMAIL_DOMAIN: 'example.com', CELL_SIZE: 'large' }],
+    ['a control character', { ALLOWED_EMAIL_DOMAIN: 'exa\u0000mple.com' }],
+    ['a value over 1,024 bytes', { ALLOWED_EMAIL_DOMAIN: 'x'.repeat(1025) }],
+  ])('%s is a 400 before placement; nothing is written or started', async (_, parameters) => {
+    const queryIndex = cellPage(cellRecord());
+    const placeDeploymentInCell = jest.fn();
+    const service = makeService({
+      applicationRepo: { get: jest.fn().mockResolvedValue(declaredApplication) },
+      cellRepo: { queryIndex },
+      placement: { placeDeploymentInCell },
+    });
+    await expect(service.CreateDeployment({ ...createInput, parameters }, context)).rejects.toBeInstanceOf(
+      ValidationException,
+    );
+    expect(queryIndex).not.toHaveBeenCalled();
+    expect(placeDeploymentInCell).not.toHaveBeenCalled();
+    expect(sfnMock.commandCalls(StartExecutionCommand)).toHaveLength(0);
+  });
+
+  test('the replay read runs before validation: a token issued before a parameter became required still replays (§7.3)', async () => {
+    const CLIENT_TOKEN = 'pre-upgrade-token';
+    // The original request supplied no parameters; its hash is the pre-change form.
+    const requestHash = createDeploymentRequestHash({ tenantId: TENANT_ID, applicationId: APP_ID, adminEmail: ADMIN_EMAIL });
+    const placeDeploymentInCell = jest.fn();
+    const service = makeService({
+      applicationRepo: { get: jest.fn().mockResolvedValue(declaredApplication) },
+      idempotencyRepo: {
+        get: jest.fn().mockResolvedValue({
+          clientToken: CLIENT_TOKEN,
+          tenantId: TENANT_ID,
+          applicationId: APP_ID,
+          requestHash,
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+          expiresAt: 1757203200,
+        }),
+      },
+      deploymentRepo: { get: jest.fn().mockResolvedValue(deploymentRecord()) },
+      placement: { placeDeploymentInCell },
+    });
+
+    // {} and absent hash alike, so the replay matches either way.
+    for (const parameters of [undefined, {}]) {
+      const output = await service.CreateDeployment({ ...createInput, clientToken: CLIENT_TOKEN, parameters }, context);
+      expect(output.deployment).toMatchObject({ tenantId: TENANT_ID, applicationId: APP_ID, status: 'ACTIVE' });
+    }
+    expect(placeDeploymentInCell).not.toHaveBeenCalled();
+  });
+
+  test('the same token with other parameter values is a 409, not a replay', async () => {
+    const CLIENT_TOKEN = 'token-2';
+    const requestHash = createDeploymentRequestHash({
+      tenantId: TENANT_ID,
+      applicationId: APP_ID,
+      adminEmail: ADMIN_EMAIL,
+      parameters: { ALLOWED_EMAIL_DOMAIN: 'example.com' },
+    });
+    const service = makeService({
+      applicationRepo: { get: jest.fn().mockResolvedValue(declaredApplication) },
+      idempotencyRepo: {
+        get: jest.fn().mockResolvedValue({
+          clientToken: CLIENT_TOKEN,
+          tenantId: TENANT_ID,
+          applicationId: APP_ID,
+          requestHash,
+          createdAt: new Date(),
+          expiresAt: 1757203200,
+        }),
+      },
+    });
+    await expect(
+      service.CreateDeployment(
+        { ...createInput, clientToken: CLIENT_TOKEN, parameters: { ALLOWED_EMAIL_DOMAIN: 'example.org' } },
+        context,
+      ),
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
+});
+
+describe('UpdateDeployment parameter merge (R-33, R-14)', () => {
+  const key = { tenantId: TENANT_ID, applicationId: APP_ID };
+  const stored = { ALLOWED_EMAIL_DOMAIN: 'example.com', STALE: 'old' };
+
+  function service(overrides: { deployment?: Partial<DeploymentRecord>; transitionStatus?: jest.Mock } = {}) {
+    const transitionStatus =
+      overrides.transitionStatus ?? jest.fn().mockResolvedValue(deploymentRecord({ status: 'UPDATING' }));
+    return {
+      transitionStatus,
+      service: makeService({
+        applicationRepo: { get: jest.fn().mockResolvedValue(declaredApplication) },
+        deploymentRepo: {
+          get: jest.fn().mockResolvedValue(deploymentRecord({ parameters: stored, ...overrides.deployment })),
+          transitionStatus,
+        },
+        cellRepo: { get: jest.fn().mockResolvedValue(cellRecord()) },
+      }),
+    };
+  }
+
+  test('writes the WHOLE merged map in the UPDATING transition, guarded by the status and the map as read', async () => {
+    const { service: svc, transitionStatus } = service();
+    await svc.UpdateDeployment({ ...key, parameters: { LOG_LEVEL: 'debug' }, removeParameters: ['STALE'] }, context);
+
+    const transition = transitionStatus.mock.calls[0][1];
+    expect(transition).toMatchObject({
+      fromAnyOf: ['ACTIVE', 'UPDATE_FAILED'],
+      to: 'UPDATING',
+      setFields: { parameters: { ALLOWED_EMAIL_DOMAIN: 'example.com', LOG_LEVEL: 'debug' } },
+      removeFields: ['statusReason'],
+      returnCurrentOnFailure: true,
+      extraCondition: {
+        conditionExpression: '#parameters = :readParameters',
+        expressionAttributeValues: { ':readParameters': stored },
+      },
+    });
+    // The update build gets the merged set; no default is stored.
+    expect(startedWorkflowInput().tenantBuild.parameters).toEqual({ ALLOWED_EMAIL_DOMAIN: 'example.com', LOG_LEVEL: 'debug' });
+  });
+
+  test('an empty body re-applies with the stored values plus defaults; stale values are still passed', async () => {
+    const { service: svc, transitionStatus } = service();
+    await svc.UpdateDeployment(key, context);
+    expect(transitionStatus.mock.calls[0][1].setFields).toEqual({ parameters: stored });
+    expect(startedWorkflowInput().tenantBuild.parameters).toEqual({
+      ALLOWED_EMAIL_DOMAIN: 'example.com',
+      LOG_LEVEL: 'info',
+      STALE: 'old',
+    });
+  });
+
+  test('a record written before parameters existed conditions on attribute_not_exists, never on {}', async () => {
+    const { service: svc, transitionStatus } = service({ deployment: { parameters: undefined } });
+    await svc.UpdateDeployment({ ...key, parameters: { ALLOWED_EMAIL_DOMAIN: 'example.com' } }, context);
+    const transition = transitionStatus.mock.calls[0][1];
+    expect(transition.extraCondition).toEqual({
+      conditionExpression: 'attribute_not_exists(#parameters)',
+      expressionAttributeNames: { '#parameters': 'parameters' },
+    });
+    expect(transition.setFields).toEqual({ parameters: { ALLOWED_EMAIL_DOMAIN: 'example.com' } });
+  });
+
+  test('a stored {} conditions on equality with {}', async () => {
+    const declarationsOptional = applicationRecord({ parameters: [{ name: 'LOG_LEVEL', required: false, default: 'info' }] });
+    const transitionStatus = jest.fn().mockResolvedValue(deploymentRecord({ status: 'UPDATING' }));
+    const svc = makeService({
+      applicationRepo: { get: jest.fn().mockResolvedValue(declarationsOptional) },
+      deploymentRepo: { get: jest.fn().mockResolvedValue(deploymentRecord({ parameters: {} })), transitionStatus },
+      cellRepo: { get: jest.fn().mockResolvedValue(cellRecord()) },
+    });
+    await svc.UpdateDeployment(key, context);
+    expect(transitionStatus.mock.calls[0][1].extraCondition).toMatchObject({
+      conditionExpression: '#parameters = :readParameters',
+      expressionAttributeValues: { ':readParameters': {} },
+    });
+  });
+
+  test.each([
+    ['removing a required parameter', { removeParameters: ['ALLOWED_EMAIL_DOMAIN'] }],
+    ['a name in both lists', { parameters: { LOG_LEVEL: 'x' }, removeParameters: ['LOG_LEVEL'] }],
+    ['a cell parameter name', { parameters: { CELL_SIZE: 'large' } }],
+    ['a control character', { parameters: { LOG_LEVEL: 'de\u0001bug' } }],
+  ])('%s is a 400 with nothing written', async (_, body) => {
+    const { service: svc, transitionStatus } = service();
+    await expect(svc.UpdateDeployment({ ...key, ...body }, context)).rejects.toBeInstanceOf(ValidationException);
+    expect(transitionStatus).not.toHaveBeenCalled();
+  });
+
+  test('a required parameter declared since and not stored makes an empty body a 400 naming it', async () => {
+    const svc = makeService({
+      applicationRepo: {
+        get: jest.fn().mockResolvedValue(
+          applicationRecord({ parameters: [{ name: 'LOG_LEVEL', required: false, default: 'warn' }, { name: 'TIER', required: true }] }),
+        ),
+      },
+      deploymentRepo: { get: jest.fn().mockResolvedValue(deploymentRecord({ parameters: stored })), transitionStatus: jest.fn() },
+    });
+    await expect(svc.UpdateDeployment(key, context)).rejects.toThrow(/TIER/);
+  });
+
+  test('validation runs before the status check: invalid AND in flight is a 400, not a 409', async () => {
+    const { service: svc } = service({ deployment: { status: 'UPDATING' } });
+    await expect(svc.UpdateDeployment({ ...key, parameters: { NOPE: 'x' } }, context)).rejects.toBeInstanceOf(
+      ValidationException,
+    );
+  });
+
+  test('a read-time refusal carries the retry hint only while in flight', async () => {
+    for (const [status, hint] of [['UPDATING', true], ['CREATING', true], ['DELETING', false], ['CREATE_FAILED', false], ['DELETE_FAILED', false]] as const) {
+      const { service: svc } = service({ deployment: { status } });
+      const failure = await svc.UpdateDeployment(key, context).catch((e) => e);
+      expect(failure).toBeInstanceOf(ConflictError);
+      expect(failure.message.includes('retry the request')).toBe(hint);
+    }
+  });
+
+  test.each([
+    ['the map changed under an admitted status (ACTIVE)', { status: 'ACTIVE' }, true],
+    ['the map changed under an admitted status (UPDATE_FAILED)', { status: 'UPDATE_FAILED' }, true],
+    ['in flight (UPDATING)', { status: 'UPDATING' }, true],
+    ['in flight (CREATING)', { status: 'CREATING' }, true],
+    ['DELETING', { status: 'DELETING' }, false],
+    ['CREATE_FAILED', { status: 'CREATE_FAILED' }, false],
+    ['DELETE_FAILED', { status: 'DELETE_FAILED' }, false],
+  ])('a failed merge write classified from ALL_OLD: %s → 409', async (_, current, hint) => {
+    const { service: svc } = service({ transitionStatus: jest.fn().mockRejectedValue(staleWith(deploymentRecord(current as any))) });
+    const failure = await svc.UpdateDeployment(key, context).catch((e) => e);
+    expect(failure).toBeInstanceOf(ConflictError);
+    expect(failure.message.includes('retry the request')).toBe(hint);
+    expect(sfnMock.commandCalls(StartExecutionCommand)).toHaveLength(0);
+  });
+
+  test('a failed merge write with no ALL_OLD item means the deployment was deleted: 404', async () => {
+    const { service: svc } = service({ transitionStatus: jest.fn().mockRejectedValue(staleWith(undefined)) });
+    await expect(svc.UpdateDeployment(key, context)).rejects.toBeInstanceOf(ResourceNotFoundError);
+  });
+
+  test('the cell guard stays a read before the write; the cell is never part of the merge write (R-13)', async () => {
+    const transitionStatus = jest.fn();
+    const svc = makeService({
+      applicationRepo: { get: jest.fn().mockResolvedValue(declaredApplication) },
+      deploymentRepo: { get: jest.fn().mockResolvedValue(deploymentRecord({ parameters: stored })), transitionStatus },
+      cellRepo: { get: jest.fn().mockResolvedValue(cellRecord({ status: 'UPDATING' })), transitionStatus: jest.fn() },
+    });
+    const failure = await svc.UpdateDeployment(key, context).catch((e) => e);
+    expect(failure).toBeInstanceOf(ConflictError);
+    expect(failure.message).not.toContain('retry the request');
+    expect(transitionStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe('DeleteDeployment parameters (R-32, P-9)', () => {
+  test('never validates: a deployment lacking a now-required parameter still deletes with stored values plus defaults', async () => {
+    const transitionStatus = jest.fn().mockResolvedValue(deploymentRecord({ status: 'DELETING' }));
+    const svc = makeService({
+      applicationRepo: {
+        get: jest.fn().mockResolvedValue(
+          applicationRecord({ parameters: [{ name: 'LOG_LEVEL', required: false, default: 'warn' }, { name: 'TIER', required: true }] }),
+        ),
+      },
+      deploymentRepo: {
+        get: jest.fn().mockResolvedValue(deploymentRecord({ parameters: { ALLOWED_EMAIL_DOMAIN: 'example.com' } })),
+        transitionStatus,
+      },
+      cellRepo: { get: jest.fn().mockResolvedValue(cellRecord()) },
+    });
+    await svc.DeleteDeployment({ tenantId: TENANT_ID, applicationId: APP_ID }, context);
+    // The stale value is passed, the default resolved, TIER absent (§10 step 15).
+    expect(startedWorkflowInput().tenantBuild.parameters).toEqual({ ALLOWED_EMAIL_DOMAIN: 'example.com', LOG_LEVEL: 'warn' });
+    expect(transitionStatus.mock.calls[0][1].setFields).toBeUndefined();
+  });
+});
+
+describe('GetDeployment / GetCell return the stored values only (§5.2, §5.3)', () => {
+  test('GetDeployment returns the supplied values without defaults; a pre-parameters record returns {}', async () => {
+    for (const [parameters, expected] of [[{ ALLOWED_EMAIL_DOMAIN: 'example.com' }, { ALLOWED_EMAIL_DOMAIN: 'example.com' }], [undefined, {}]] as const) {
+      const svc = makeService({
+        applicationRepo: { get: jest.fn().mockResolvedValue(declaredApplication) },
+        deploymentRepo: { get: jest.fn().mockResolvedValue(deploymentRecord({ parameters })) },
+        cellRepo: { get: jest.fn().mockResolvedValue(cellRecord()) },
+      });
+      const output = await svc.GetDeployment({ tenantId: TENANT_ID, applicationId: APP_ID }, context);
+      expect(output.parameters).toEqual(expected);
+    }
+  });
+
+  test('GetCell returns the operator-set values, {} for a new cell', async () => {
+    const svc = makeService({ cellRepo: { get: jest.fn().mockResolvedValue(cellRecord({ parameters: { CELL_SIZE: 'large' } })) } });
+    expect((await svc.GetCell({ cellId: CELL_ID }, context)).parameters).toEqual({ CELL_SIZE: 'large' });
+    const empty = makeService({ cellRepo: { get: jest.fn().mockResolvedValue(cellRecord({ parameters: {} })) } });
+    expect((await empty.GetCell({ cellId: CELL_ID }, context)).parameters).toEqual({});
+  });
+});
+
+describe('UpdateCell / DeleteCell cell parameters (R-34)', () => {
+  function service(cell: Partial<CellRecord> = {}, transitionStatus = jest.fn().mockResolvedValue(cellRecord({ status: 'UPDATING' }))) {
+    return {
+      transitionStatus,
+      service: makeService({
+        applicationRepo: { get: jest.fn().mockResolvedValue(declaredApplication) },
+        cellRepo: { get: jest.fn().mockResolvedValue(cellRecord({ parameters: {}, ...cell })), transitionStatus },
+      }),
+    };
+  }
+
+  test('sets a cell value in the UPDATING transition, guarded by the map as read; the cell build gets it', async () => {
+    const { service: svc, transitionStatus } = service();
+    await svc.UpdateCell({ cellId: CELL_ID, parameters: { CELL_SIZE: 'large' } }, context);
+    expect(transitionStatus.mock.calls[0][0]).toEqual({ PK: `CELL#${CELL_ID}`, SK: 'META' });
+    expect(transitionStatus.mock.calls[0][1]).toMatchObject({
+      fromAnyOf: ['ACTIVE', 'UPDATE_FAILED'],
+      to: 'UPDATING',
+      setFields: { parameters: { CELL_SIZE: 'large' } },
+      returnCurrentOnFailure: true,
+      extraCondition: { conditionExpression: '#parameters = :readParameters', expressionAttributeValues: { ':readParameters': {} } },
+    });
+    const input = startedWorkflowInput();
+    expect(input.cellBuild.parameters).toEqual({ CELL_SIZE: 'large' });
+    expect(input.tenantBuild).toBeUndefined();
+  });
+
+  test('removing the stored value empties the map and the same build gets the default again', async () => {
+    const { service: svc, transitionStatus } = service({ parameters: { CELL_SIZE: 'large' } });
+    await svc.UpdateCell({ cellId: CELL_ID, removeParameters: ['CELL_SIZE'] }, context);
+    expect(transitionStatus.mock.calls[0][1].setFields).toEqual({ parameters: {} });
+    expect(startedWorkflowInput().cellBuild.parameters).toEqual({ CELL_SIZE: 'small' });
+  });
+
+  test('a cell created before parameters existed conditions on attribute_not_exists', async () => {
+    const { service: svc, transitionStatus } = service({ parameters: undefined });
+    await svc.UpdateCell({ cellId: CELL_ID }, context);
+    expect(transitionStatus.mock.calls[0][1].extraCondition.conditionExpression).toBe('attribute_not_exists(#parameters)');
+  });
+
+  test.each([
+    ['a tenant parameter name', { parameters: { LOG_LEVEL: 'debug' } }],
+    ['an undeclared name', { parameters: { NOPE: 'x' } }],
+    ['a name in both lists', { parameters: { CELL_SIZE: 'x' }, removeParameters: ['CELL_SIZE'] }],
+  ])('%s is a 400 with nothing written, even when the cell is in flight', async (_, body) => {
+    const { service: svc, transitionStatus } = service({ status: 'UPDATING' });
+    await expect(svc.UpdateCell({ cellId: CELL_ID, ...body }, context)).rejects.toBeInstanceOf(ValidationException);
+    expect(transitionStatus).not.toHaveBeenCalled();
+  });
+
+  test('a failed merge write is classified from ALL_OLD: changed map → retry, DELETING → no hint, gone → 404', async () => {
+    const changed = service({}, jest.fn().mockRejectedValue(staleWith(cellRecord({ status: 'ACTIVE', parameters: { CELL_SIZE: 'x' } }))));
+    expect((await changed.service.UpdateCell({ cellId: CELL_ID }, context).catch((e) => e)).message).toContain('retry the request');
+    const deleting = service({}, jest.fn().mockRejectedValue(staleWith(cellRecord({ status: 'DELETING' }))));
+    const refusal = await deleting.service.UpdateCell({ cellId: CELL_ID }, context).catch((e) => e);
+    expect(refusal).toBeInstanceOf(ConflictError);
+    expect(refusal.message).not.toContain('retry the request');
+    const gone = service({}, jest.fn().mockRejectedValue(staleWith(undefined)));
+    await expect(gone.service.UpdateCell({ cellId: CELL_ID }, context)).rejects.toBeInstanceOf(ResourceNotFoundError);
+  });
+
+  test('DeleteCell never validates and resolves stored values plus defaults, stale ones included', async () => {
+    const transitionStatus = jest.fn().mockResolvedValue(cellRecord({ status: 'DELETING' }));
+    const svc = makeService({
+      applicationRepo: { get: jest.fn().mockResolvedValue(declaredApplication) },
+      cellRepo: { get: jest.fn().mockResolvedValue(cellRecord({ parameters: { OLD_NAME: 'v' } })), transitionStatus },
+    });
+    await svc.DeleteCell({ cellId: CELL_ID }, context);
+    expect(startedWorkflowInput().cellBuild.parameters).toEqual({ CELL_SIZE: 'small', OLD_NAME: 'v' });
   });
 });
