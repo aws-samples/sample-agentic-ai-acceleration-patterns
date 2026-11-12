@@ -42,7 +42,7 @@
     "eslint-plugin-import": "^2.32.0",
     "jest": "^30.5.1",
     "jest-junit": "^17",
-    "jsonata": "2.0.6",
+    "jsonata": "2.2.2",
     "projen": "^0.103.16",
     "ts-jest": "^29.4.12",
     "ts-node": "^10.9.2",

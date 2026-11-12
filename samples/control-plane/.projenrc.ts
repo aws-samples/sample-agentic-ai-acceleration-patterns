@@ -43,7 +43,7 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     'aws-sdk-client-mock@4.1.0',
     // Evaluates the workflow's JSONata expressions (build environment, the
     // build tasks' Output and Catch Output) in the synth tests
-    'jsonata@2.0.6',
+    'jsonata@2.2.2',
     // Integ test framework - alpha pinned to the aws-cdk-lib version
     '@aws-cdk/integ-tests-alpha@2.274.0-alpha.0',
     '@aws-cdk/integ-runner@2.205.8',
