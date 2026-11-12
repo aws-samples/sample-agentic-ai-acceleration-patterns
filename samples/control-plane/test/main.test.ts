@@ -3,6 +3,7 @@
 
 import { App, Environment } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import { buildEnvironment, evaluateJsonata } from './workflow-jsonata';
 import { CellAccountStack, CellAccountStackProps } from '../src/cell-account/cell-account.cdk';
 import { isFullCommitSha, sourcePinningWarning } from '../src/shared/service-config';
 import {
@@ -207,11 +208,11 @@ describe('TenantStack', () => {
     );
     // M12 (T10): OPERATOR_ID rides every build's environment overrides.
     expect(definition).toContain('OPERATOR_ID');
-    expect(definition).toContain('$.operatorId');
+    expect(definition).toContain('$states.input.operatorId');
     // M10 (T5): a non-empty stamped pin becomes the SourceVersion override;
     // the pinned/unpinned split means the empty string is never sent.
     expect(definition).toContain('SourceVersion');
-    expect(definition).toContain('$.sourceVersion');
+    expect(definition).toContain('$states.input.sourceVersion');
   });
 });
 
@@ -411,14 +412,11 @@ describe('TENANT_NAME in the tenant script environment (ADR-023)', () => {
   const template = synth();
   const definition = stateMachineDefinition(template);
   const tasks = startBuildTasks(definition);
-  const envOf = (task: any): Record<string, string> =>
-    Object.fromEntries(
-      task.Parameters.EnvironmentVariablesOverride.map((v: any) => [v.Name, v['Value.$']]),
-    );
+  const envOf = (task: any) => buildEnvironment(task);
 
-  test('both tenant build variants carry TENANT_NAME from the stored record, beside TENANT_ID and OPERATION', () => {
+  test('both tenant build variants carry TENANT_NAME from the stored record, beside TENANT_ID and OPERATION', async () => {
     for (const name of ['RunTenantBuild', 'RunTenantBuildPinned']) {
-      const environment = envOf(tasks[name]);
+      const environment = await envOf(tasks[name]);
       expect(environment.TENANT_NAME).toBe('$.tenantBuild.tenantName');
       expect(environment.TENANT_ID).toBe('$.tenantId');
       // ADR-032/037: the deployment's application rides every tenant build.
@@ -444,9 +442,9 @@ describe('TENANT_NAME in the tenant script environment (ADR-023)', () => {
     expect(tenantTasks.sort()).toEqual(['RunTenantBuild', 'RunTenantBuildPinned']);
   });
 
-  test('cell builds do not receive TENANT_NAME (or any tenant variable)', () => {
+  test('cell builds do not receive TENANT_NAME (or any tenant variable)', async () => {
     for (const name of ['RunCellBuild', 'RunCellBuildPinned']) {
-      const environment = envOf(tasks[name]);
+      const environment = await envOf(tasks[name]);
       expect(environment.TENANT_NAME).toBeUndefined();
       expect(environment.TENANT_ID).toBeUndefined();
       expect(environment.ADMIN_EMAIL).toBeUndefined();
@@ -581,14 +579,11 @@ describe('the workflow assumes the account role before every script and releases
   const template = synth();
   const definition = stateMachineDefinition(template);
   const tasks = startBuildTasks(definition);
-  const envOf = (task: any): Record<string, string> =>
-    Object.fromEntries(
-      (task.Parameters.EnvironmentVariablesOverride as any[]).map((v) => [v.Name, v['Value.$']]),
-    );
+  const envOf = (task: any) => buildEnvironment(task);
 
   test('the inline buildspec assumes PROVISIONING_ROLE_ARN with the external id and operator session, then runs the script (M21)', () => {
     for (const task of Object.values(tasks)) {
-      const buildspec: string = task.Parameters.BuildspecOverride;
+      const buildspec: string = task.Arguments.BuildspecOverride;
       expect(buildspec).toContain('shell: bash');
       expect(buildspec).toContain('aws sts assume-role --role-arn "$PROVISIONING_ROLE_ARN"');
       expect(buildspec).toContain('--role-session-name "$OPERATOR_SESSION_NAME"');
@@ -605,7 +600,7 @@ describe('the workflow assumes the account role before every script and releases
 
   test('the buildspec fails closed on empty credentials and hides the BUILD role credential source from the script (T29, M24)', () => {
     for (const task of Object.values(tasks)) {
-      const buildspec: string = task.Parameters.BuildspecOverride;
+      const buildspec: string = task.Arguments.BuildspecOverride;
       const lines = buildspec.split('\n').map((l) => l.trim());
       const check = lines.indexOf('if [ -z "$AWS_SESSION_TOKEN" ]; then');
       const exportLine = lines.indexOf('export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN');
@@ -622,9 +617,9 @@ describe('the workflow assumes the account role before every script and releases
     }
   });
 
-  test('cell builds assume the cell role; tenant builds the tenant role; both get the account id', () => {
+  test('cell builds assume the cell role; tenant builds the tenant role; both get the account id', async () => {
     for (const name of ['RunCellBuild', 'RunCellBuildPinned']) {
-      expect(envOf(tasks[name])).toMatchObject({
+      expect(await envOf(tasks[name])).toMatchObject({
         CELL_ACCOUNT_ID: '$.accountId',
         PROVISIONING_ROLE_ARN: '$.cellRoleArn',
         PROVISIONING_EXTERNAL_ID: '$.externalId',
@@ -632,7 +627,7 @@ describe('the workflow assumes the account role before every script and releases
       });
     }
     for (const name of ['RunTenantBuild', 'RunTenantBuildPinned']) {
-      expect(envOf(tasks[name])).toMatchObject({
+      expect(await envOf(tasks[name])).toMatchObject({
         CELL_ACCOUNT_ID: '$.accountId',
         PROVISIONING_ROLE_ARN: '$.tenantRoleArn',
       });
@@ -776,5 +771,146 @@ describe('CellAccountStack (spec R-25, ADR-025)', () => {
       '/application-plane/applications/app-x/shared/base-domain',
       '/application-plane/applications/app-y/shared/base-domain',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-039 / ADR-040: PARAM_<NAME> in the build environment, and the payload
+// budget of §8.1 on the success and failure paths of every build task.
+// ---------------------------------------------------------------------------
+describe('parameters in the workflow (ADR-039, ADR-040, spec §6.1, §8.1)', () => {
+  const template = synth();
+  const definition = stateMachineDefinition(template);
+  const tasks = startBuildTasks(definition);
+  const tenantTasks = ['RunTenantBuild', 'RunTenantBuildPinned'];
+  const cellTasks = ['RunCellBuild', 'RunCellBuildPinned'];
+
+  test('a tenant build gets one PARAM_<NAME> per entry of the deployment set, after the fixed variables', async () => {
+    for (const name of tenantTasks) {
+      const environment = await buildEnvironment(tasks[name], {
+        path: '$.tenantBuild.parameters',
+        values: { ALLOWED_EMAIL_DOMAIN: 'example.com', LOG_LEVEL: 'info' },
+      });
+      expect(environment.PARAM_ALLOWED_EMAIL_DOMAIN).toBe('example.com');
+      expect(environment.PARAM_LOG_LEVEL).toBe('info');
+      // The prefix keeps a declared name off the contract's own variables.
+      expect(environment.TENANT_ID).toBe('$.tenantId');
+    }
+  });
+
+  test('a cell build gets the cell set only; a tenant build the deployment set only (§6.1)', async () => {
+    for (const name of cellTasks) {
+      const field: string = tasks[name].Arguments.EnvironmentVariablesOverride;
+      expect(field).toContain('$each($states.input.cellBuild.parameters');
+      expect(field).not.toContain('tenantBuild.parameters');
+      const environment = await buildEnvironment(tasks[name], {
+        path: '$.cellBuild.parameters',
+        values: { CELL_SIZE: 'small' },
+      });
+      expect(Object.keys(environment).filter((k) => k.startsWith('PARAM_'))).toEqual(['PARAM_CELL_SIZE']);
+    }
+    for (const name of tenantTasks) {
+      const field: string = tasks[name].Arguments.EnvironmentVariablesOverride;
+      expect(field).toContain('$each($states.input.tenantBuild.parameters');
+      expect(field).not.toContain('cellBuild.parameters');
+    }
+  });
+
+  test('an empty set adds no variable: a name with no value and no default is absent, never empty (R-32)', async () => {
+    for (const name of [...tenantTasks, ...cellTasks]) {
+      const environment = await buildEnvironment(tasks[name]);
+      expect(Object.keys(environment).filter((k) => k.startsWith('PARAM_'))).toEqual([]);
+    }
+  });
+
+  test('build tasks are JSONata states whose Output keeps the input plus only the build ARN and status (ResultSelector role)', async () => {
+    const results: Record<string, string> = {
+      RunTenantBuild: 'tenantBuildResult',
+      RunTenantBuildPinned: 'tenantBuildResult',
+      RunCellBuild: 'cellBuildResult',
+      RunCellBuildPinned: 'cellBuildResult',
+    };
+    for (const [name, field] of Object.entries(results)) {
+      const task = tasks[name];
+      expect(task.QueryLanguage).toBe('JSONata');
+      expect(task.ResultPath).toBeUndefined();
+      expect(task.ResultSelector).toBeUndefined();
+      const output = await evaluateJsonata(task.Output, {
+        input: { tenantId: 'T', tenantBuild: { parameters: { A: 'x' } } },
+        result: {
+          Build: {
+            Arn: 'arn:aws:codebuild:eu-central-1:111111111111:build/p:1',
+            BuildStatus: 'SUCCEEDED',
+            Environment: { EnvironmentVariables: [{ Name: 'PARAM_A', Value: 'x' }] },
+          },
+        },
+      });
+      expect(output).toEqual({
+        tenantId: 'T',
+        tenantBuild: { parameters: { A: 'x' } },
+        [field]: { Build: { Arn: 'arn:aws:codebuild:eu-central-1:111111111111:build/p:1', BuildStatus: 'SUCCEEDED' } },
+      });
+    }
+    // The terminal writes still read the ARN where they always did.
+    expect(JSON.stringify(definition.States.SetTenantActiveAfterCreate)).toContain('$.tenantBuildResult.Build.Arn');
+    expect(JSON.stringify(definition.States.SetCellActiveAfterCreate)).toContain('$.cellBuildResult.Build.Arn');
+  });
+
+  test('a build task\'s Catch keeps only the error name and the build ARN and status, never the raw Cause', async () => {
+    const cause = { Build: { Arn: 'arn:b', BuildStatus: 'FAILED', Environment: { EnvironmentVariables: [{ Name: 'PARAM_A', Value: 'secret-shaped' }] } } };
+    for (const name of [...tenantTasks, ...cellTasks]) {
+      const [catcher] = tasks[name].Catch;
+      expect(tasks[name].Catch).toHaveLength(1);
+      expect(catcher.ErrorEquals).toEqual(['States.ALL']);
+      expect(catcher.ResultPath).toBeUndefined();
+      expect(catcher.Next).toBe(name.startsWith('RunTenant') ? 'TenantBuildFailureShape' : 'CellBuildFailureShape');
+      const states = (errorOutput: unknown) => ({ input: { cellId: 'C' }, errorOutput });
+
+      // Wrapped and bare Build layouts both yield the evidence.
+      const wrapped = await evaluateJsonata(catcher.Output, states({ Error: 'States.TaskFailed', Cause: JSON.stringify(cause) }));
+      expect(wrapped).toEqual({
+        cellId: 'C',
+        error: { Error: 'States.TaskFailed' },
+        failure: { buildArn: 'arn:b', buildStatus: 'FAILED' },
+      });
+      expect(JSON.stringify(wrapped)).not.toContain('secret-shaped');
+      const bare = await evaluateJsonata(catcher.Output, states({ Error: 'States.TaskFailed', Cause: JSON.stringify(cause.Build) }));
+      expect(bare.failure).toEqual({ buildArn: 'arn:b', buildStatus: 'FAILED' });
+
+      // A timeout, a null Cause or an unexpected shape keeps the error name only.
+      for (const errorOutput of [
+        { Error: 'States.Timeout', Cause: 'Task timed out' },
+        { Error: 'States.TaskFailed', Cause: null },
+        { Error: 'States.TaskFailed', Cause: '{"unexpected":true}' },
+        { Error: 'States.TaskFailed' },
+      ]) {
+        expect(await evaluateJsonata(catcher.Output, states(errorOutput))).toEqual({
+          cellId: 'C',
+          error: { Error: errorOutput.Error },
+        });
+      }
+    }
+  });
+
+  test('the failure Choice routes on the reduced evidence: with it the write names the build, without it the generic write runs', () => {
+    const tenant = definition.States.TenantBuildFailureShape;
+    expect(tenant.Type).toBe('Choice');
+    expect(JSON.stringify(tenant.Choices)).toContain('$.failure.buildArn');
+    expect(tenant.Choices[0].Next).toBe('FailTenantWithBuild');
+    expect(tenant.Default).toBe('FailTenant');
+    const cell = definition.States.CellBuildFailureShape;
+    expect(cell.Choices[0].Next).toBe('CellFailureHasTenantWithBuild');
+    expect(cell.Default).toBe('CellFailureHasTenant');
+    // The parse-in-state chain is gone: nothing re-materialises the Cause.
+    expect(JSON.stringify(definition)).not.toContain('StringToJson');
+    expect(JSON.stringify(definition)).not.toContain('$.error.Cause');
+  });
+
+  test('no terminal write touches the parameters map (R-21)', () => {
+    expect(JSON.stringify(definition)).not.toMatch(/#parameters|SET parameters|parameters =/);
+  });
+
+  test('the definition holds no ${ sequence, which CloudFormation would read as Fn::Sub', () => {
+    expect(JSON.stringify(definition)).not.toContain('${');
   });
 });

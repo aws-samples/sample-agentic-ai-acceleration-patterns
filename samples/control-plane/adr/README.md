@@ -49,3 +49,4 @@ Template for new records: [`docs/sample-standard.md` §2.2](../../../docs/sample
 | [ADR-0038](0038-an-account-wide-shared-namespace-beside-the-per-application-one.md) | An account-wide shared namespace beside the per-application one (amends ADR-0034, ADR-0010) | Accepted | 2026-11-11 |
 | [ADR-0039](0039-applications-declare-deployment-parameters.md) | Applications declare deployment parameters (amends ADR-0004, ADR-0017, ADR-0032) | Accepted | 2026-11-12 |
 | [ADR-0040](0040-applications-declare-cell-parameters-with-defaults.md) | Applications declare cell parameters with defaults (amends ADR-0039) | Accepted | 2026-11-12 |
+| [ADR-0041](0041-run-the-build-tasks-in-jsonata.md) | Run the build tasks in JSONata | Proposed | 2026-11-12 |
