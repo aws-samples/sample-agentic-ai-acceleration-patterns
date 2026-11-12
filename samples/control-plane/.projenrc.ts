@@ -97,6 +97,17 @@ integ.exec(
 integ.exec(
   'sh -c \'[ -n "$CP_INTEG_ACCOUNT_B" ] || { echo "Set CP_INTEG_ACCOUNT_B to the second (tenant-owned) test account id; it must be CDK-bootstrapped to trust this account (integration-test.md)"; exit 1; }\'',
 );
+// One run at a time, from a clean account: refuse to start while any of the
+// test's stacks exists in account A. integ-runner destroys every stack of the
+// test when it finishes, pass or fail, so a stack that exists means either a
+// run in progress (a second run would update its stacks and delete its
+// assertion stack mid-scenario) or an interrupted run's leftovers (the
+// scenario expects empty state). control-plane-integ-setup exists in A from
+// the first deploy to the end of destroy, which covers the account B deploy
+// too, so A's credentials are enough.
+integ.exec(
+  'sh -c \'out=$(aws cloudformation describe-stacks --region "$AWS_REGION" --query "Stacks[].StackName" --output text) || { echo "Could not list CloudFormation stacks in $AWS_REGION to check for an earlier run"; exit 1; }; found=$(printf "%s\\n" $out | grep -E "^(control-plane-integ|ControlPlaneInteg)"); [ -z "$found" ] || { echo "A run is in progress in $AWS_REGION, or an interrupted run left these stacks behind:"; echo "$found"; echo "Wait for the run to finish, or clean up as described in integration-test.md, After an interruption"; exit 1; }\'',
+);
 // integ-runner synthesizes the app directly (no CDK CLI), so CDK_DEFAULT_ACCOUNT
 // is not set for it; the test needs the current account id at synth time (it
 // is account A of the two-account scenario), so resolve it here once.

@@ -200,6 +200,9 @@
           "exec": "sh -c '[ -n \"$CP_INTEG_ACCOUNT_B\" ] || { echo \"Set CP_INTEG_ACCOUNT_B to the second (tenant-owned) test account id; it must be CDK-bootstrapped to trust this account (integration-test.md)\"; exit 1; }'"
         },
         {
+          "exec": "sh -c 'out=$(aws cloudformation describe-stacks --region \"$AWS_REGION\" --query \"Stacks[].StackName\" --output text) || { echo \"Could not list CloudFormation stacks in $AWS_REGION to check for an earlier run\"; exit 1; }; found=$(printf \"%s\\n\" $out | grep -E \"^(control-plane-integ|ControlPlaneInteg)\"); [ -z \"$found\" ] || { echo \"A run is in progress in $AWS_REGION, or an interrupted run left these stacks behind:\"; echo \"$found\"; echo \"Wait for the run to finish, or clean up as described in integration-test.md, After an interruption\"; exit 1; }'"
+        },
+        {
           "exec": "sh -c 'export CDK_DEFAULT_ACCOUNT=\"${CDK_DEFAULT_ACCOUNT:-$(aws sts get-caller-identity --query Account --output text)}\"; AWS_DEFAULT_REGION=\"$AWS_REGION\" exec integ-runner --language typescript --parallel-regions \"$AWS_REGION\" --update-on-failed --force integ.tenant.ts'"
         }
       ]
