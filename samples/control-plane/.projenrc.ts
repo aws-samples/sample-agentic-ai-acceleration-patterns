@@ -29,6 +29,9 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     'jose@6.2.10', // vendor IdP JWT validation (JWKS) in the Lambda Authorizer
     '@aws-sdk/client-dynamodb@3.1125.0',
     '@aws-sdk/lib-dynamodb@3.1125.0',
+    // unmarshall() for the item a failed condition returns (ALL_OLD, spec
+    // R-14) - the document client leaves it in attribute-value form
+    '@aws-sdk/util-dynamodb@3.996.9',
     '@aws-sdk/client-sfn@3.1125.0',
     '@aws-sdk/client-sts@3.1125.0',
     'ulid@3.0.2', // tenant id generation
@@ -38,6 +41,9 @@ const project = new awscdk.AwsCdkTypeScriptApp({
   devDeps: [
     '@types/aws-lambda@8.10.163',
     'aws-sdk-client-mock@4.1.0',
+    // Evaluates the workflow's JSONata expressions (build environment, the
+    // build tasks' Output and Catch Output) in the synth tests
+    'jsonata@2.2.2',
     // Integ test framework - alpha pinned to the aws-cdk-lib version
     '@aws-cdk/integ-tests-alpha@2.274.0-alpha.0',
     '@aws-cdk/integ-runner@2.205.8',
@@ -81,7 +87,7 @@ project.tasks.tryFind('synth')?.reset(`cdk synth ${buildOnlyPlaceholderContext}`
 
 // End-to-end integration test (test/integ.tenant.ts) - deploys real
 // infrastructure in TWO accounts (the current one and CP_INTEG_ACCOUNT_B,
-// spec §10) and drives the API through the full lifecycle (~45 min).
+// spec §10) and drives the API through the full lifecycle (~55 min).
 // Must run in EXACTLY ONE explicitly selected Region (integration-test.md):
 // the guard fails fast when AWS_REGION is unset so integ-runner's
 // multi-Region defaults can never apply to this test, and when the second
@@ -89,7 +95,7 @@ project.tasks.tryFind('synth')?.reset(`cdk synth ${buildOnlyPlaceholderContext}`
 // in the runner.
 const integ = project.addTask('integ', {
   description:
-    'Run the deployment integration test in $AWS_REGION across the current AWS account and $CP_INTEG_ACCOUNT_B (~45 min)',
+    'Run the deployment integration test in $AWS_REGION across the current AWS account and $CP_INTEG_ACCOUNT_B (~55 min)',
 });
 integ.exec(
   'sh -c \'[ -n "$AWS_REGION" ] || { echo "Set AWS_REGION to the single Region to test in (e.g. export AWS_REGION=eu-central-1)"; exit 1; }\'',

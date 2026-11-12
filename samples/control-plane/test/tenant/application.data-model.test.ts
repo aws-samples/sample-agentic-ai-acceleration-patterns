@@ -85,6 +85,8 @@ describe('putApplicationUpdate (R-29: create-or-replace that never touches cellC
     tenantScripts: record.tenantScripts,
     maxTenants: 3,
     placementStrategy: PlacementStrategy.FILL,
+    parameters: [],
+    cellParameters: [],
     now: '2026-11-10T00:00:00.000Z',
   });
 
@@ -116,6 +118,59 @@ describe('putApplicationUpdate (R-29: create-or-replace that never touches cellC
       ':placementStrategy': 'FILL',
       ':source': record.source,
     });
+  });
+});
+
+describe('putApplicationUpdate declaration lists (§5.5, ADR-039, ADR-040)', () => {
+  const base = {
+    applicationId: 'app-x',
+    source: record.source,
+    cellScripts: record.cellScripts,
+    tenantScripts: record.tenantScripts,
+    maxTenants: 3,
+    placementStrategy: PlacementStrategy.FILL,
+    now: '2026-11-12T00:00:00.000Z',
+  };
+  const tenantList = [{ name: 'LOG_LEVEL', required: false, default: 'info' }];
+  const cellList = [{ name: 'CELL_SIZE', default: 'small' }];
+
+  test('both lists sent: both SET, and the write carries no condition (P-5)', () => {
+    const update = putApplicationUpdate({ ...base, parameters: tenantList, cellParameters: [] });
+    expect(update.updateExpression).toContain('#parameters = :parameters');
+    expect(update.updateExpression).toContain('#cellParameters = :cellParameters');
+    expect(update.expressionAttributeValues).toMatchObject({ ':parameters': tenantList, ':cellParameters': [] });
+    expect(update.conditionExpression).toBeUndefined();
+  });
+
+  test('a kept list is not written; an absent read conditions on attribute_not_exists', () => {
+    const update = putApplicationUpdate({ ...base, parameters: tenantList, cellParameters: { read: undefined } });
+    expect(update.updateExpression).not.toContain('#cellParameters =');
+    expect(update.conditionExpression).toBe('attribute_not_exists(#cellParameters)');
+    expect(update.expressionAttributeNames).toMatchObject({ '#cellParameters': 'cellParameters' });
+  });
+
+  test('a kept list read as [] conditions on equality with [], not on absence', () => {
+    const update = putApplicationUpdate({ ...base, parameters: { read: [] }, cellParameters: cellList });
+    expect(update.conditionExpression).toBe('#parameters = :read_parameters');
+    expect(update.expressionAttributeValues[':read_parameters']).toEqual([]);
+  });
+
+  test('two kept lists condition on both, each exactly as read; never on updatedAt', () => {
+    const update = putApplicationUpdate({ ...base, parameters: { read: tenantList }, cellParameters: { read: undefined } });
+    expect(update.conditionExpression).toBe('#parameters = :read_parameters AND attribute_not_exists(#cellParameters)');
+    expect(update.expressionAttributeValues[':read_parameters']).toBe(tenantList);
+    expect(update.conditionExpression).not.toContain('updatedAt');
+    expect(update.updateExpression).not.toMatch(/#parameters =|#cellParameters =/);
+  });
+});
+
+describe('ApplicationDataModel keeps the declaration lists exactly as read', () => {
+  test('absent stays absent and [] stays [] (they are different reads)', () => {
+    const absent = dataModel.fromItem(dataModel.toItem(record));
+    expect(absent.parameters).toBeUndefined();
+    const empty = dataModel.fromItem({ ...dataModel.toItem(record), parameters: [], cellParameters: [] });
+    expect(empty.parameters).toEqual([]);
+    expect(empty.cellParameters).toEqual([]);
   });
 });
 

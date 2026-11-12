@@ -11,6 +11,7 @@ import {
   TransactWriteCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { unmarshall } from '@aws-sdk/util-dynamodb';
 import { DataModel, DynamoDBItem } from './data-model';
 import { LifecycleStatus, ValidationException } from '../smithy/source/typescript-ssdk-codegen/src';
 
@@ -60,6 +61,14 @@ export interface StatusTransition {
    * transition's `tenantCount = 0` emptiness guard (ADR-014).
    */
   readonly extraCondition?: WriteCondition;
+  /**
+   * Ask DynamoDB for the item as it was when the condition failed
+   * (`ReturnValuesOnConditionCheckFailure: ALL_OLD`) and carry it on the
+   * {@link StaleTransitionError} as `current` (`undefined` when there was
+   * no item), so the service classifies the failure from the state that
+   * actually failed it, never from a second read (spec R-14).
+   */
+  readonly returnCurrentOnFailure?: boolean;
 }
 
 /** A paginated query against a GSI partition. */
@@ -104,10 +113,15 @@ export class ConditionFailedError extends Error {
 /**
  * A compare-and-set lifecycle transition found the record in a different
  * status than expected (or missing). The record was concurrently mutated —
- * the service maps this to a 409 `ConflictError` (§7).
+ * the service maps this to a 409 `ConflictError` (§7). When the transition
+ * asked for it (`returnCurrentOnFailure`), `current` is the record as it
+ * was when the condition failed, `undefined` when it no longer existed.
  */
 export class StaleTransitionError extends ConditionFailedError {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly current?: unknown,
+  ) {
     super(message);
     this.name = 'StaleTransitionError';
   }
@@ -501,10 +515,12 @@ export class DynamoDBRepository<TSchema, TItem extends DynamoDBItem> {
         expressionAttributeNames: names,
         expressionAttributeValues: values,
       },
-      () =>
+      (current) =>
         new StaleTransitionError(
           `Status transition to ${transition.to} failed — record missing or not in ${transition.fromAnyOf.join('/')}`,
+          current,
         ),
+      transition.returnCurrentOnFailure === true,
     );
   }
 
@@ -611,7 +627,8 @@ export class DynamoDBRepository<TSchema, TItem extends DynamoDBItem> {
   private async sendUpdate(
     key: ItemKey,
     update: ItemUpdate,
-    onConditionFailed: () => ConditionFailedError,
+    onConditionFailed: (current?: TSchema) => ConditionFailedError,
+    returnCurrentOnFailure = false,
   ): Promise<TSchema> {
     try {
       const result = await this.client.send(
@@ -623,6 +640,7 @@ export class DynamoDBRepository<TSchema, TItem extends DynamoDBItem> {
           ExpressionAttributeNames: update.expressionAttributeNames,
           ExpressionAttributeValues: update.expressionAttributeValues as Record<string, never>,
           ReturnValues: 'ALL_NEW',
+          ...(returnCurrentOnFailure ? { ReturnValuesOnConditionCheckFailure: 'ALL_OLD' as const } : {}),
         }),
       );
       if (result.Attributes === undefined) {
@@ -630,7 +648,14 @@ export class DynamoDBRepository<TSchema, TItem extends DynamoDBItem> {
       }
       return this.dataModel.fromItem(result.Attributes as TItem);
     } catch (error) {
-      this.throwIfConditionFailed(error, onConditionFailed);
+      // The document client does not unmarshall the item a failed condition
+      // returns; it arrives in the low-level attribute-value form.
+      const failedItem = (error as { Item?: Parameters<typeof unmarshall>[0] } | undefined)?.Item;
+      this.throwIfConditionFailed(error, () =>
+        onConditionFailed(
+          failedItem === undefined ? undefined : this.dataModel.fromItem(unmarshall(failedItem) as TItem),
+        ),
+      );
       throw error;
     }
   }

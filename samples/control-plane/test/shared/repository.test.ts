@@ -345,6 +345,53 @@ describe('DynamoDBRepository.transitionStatus', () => {
   });
 });
 
+describe('DynamoDBRepository.transitionStatus returnCurrentOnFailure (spec R-14, ALL_OLD)', () => {
+  const transition = {
+    fromAnyOf: ['ACTIVE', 'UPDATE_FAILED'],
+    to: 'UPDATING',
+    updatedAt: '2026-11-12T00:00:00.000Z',
+    setFields: { parameters: { LOG_LEVEL: 'debug' } },
+    extraCondition: {
+      conditionExpression: '#parameters = :readParameters',
+      expressionAttributeNames: { '#parameters': 'parameters' },
+      expressionAttributeValues: { ':readParameters': {} },
+    },
+    returnCurrentOnFailure: true,
+  };
+
+  test('asks for ALL_OLD and writes the whole map in one SET, with the map guard ANDed', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { PK: 'TEST#1', SK: 'META', id: '1', name: 'a' } });
+    await repo.transitionStatus({ PK: 'TEST#1', SK: 'META' }, transition);
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ReturnValuesOnConditionCheckFailure).toBe('ALL_OLD');
+    expect(input.UpdateExpression).toBe('SET #status = :to, #updatedAt = :updatedAt, #parameters = :parameters');
+    expect(input.ConditionExpression).toBe('#status IN (:from0, :from1) AND (#parameters = :readParameters)');
+    expect(input.ExpressionAttributeValues).toMatchObject({ ':parameters': { LOG_LEVEL: 'debug' }, ':readParameters': {} });
+  });
+
+  test('a failed condition carries the item as it was, unmarshalled through the data model', async () => {
+    const error = conditionalCheckFailed();
+    (error as any).Item = { PK: { S: 'TEST#1' }, SK: { S: 'META' }, id: { S: '1' }, name: { S: 'old' } };
+    ddbMock.on(UpdateCommand).rejects(error);
+    const failure = await repo.transitionStatus({ PK: 'TEST#1', SK: 'META' }, transition).catch((e) => e);
+    expect(failure).toBeInstanceOf(StaleTransitionError);
+    expect(failure.current).toEqual({ id: '1', name: 'old' });
+  });
+
+  test('no item with the failure means the record is gone: current is undefined', async () => {
+    ddbMock.on(UpdateCommand).rejects(conditionalCheckFailed());
+    const failure = await repo.transitionStatus({ PK: 'TEST#1', SK: 'META' }, transition).catch((e) => e);
+    expect(failure).toBeInstanceOf(StaleTransitionError);
+    expect(failure.current).toBeUndefined();
+  });
+
+  test('without the flag no return value is requested', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { PK: 'TEST#1', SK: 'META', id: '1', name: 'a' } });
+    await repo.transitionStatus({ PK: 'TEST#1', SK: 'META' }, { ...transition, returnCurrentOnFailure: undefined });
+    expect(ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ReturnValuesOnConditionCheckFailure).toBeUndefined();
+  });
+});
+
 describe('DynamoDBRepository.queryIndex sortKeyPrefix (§4.7: one GSI-3 partition, two item types)', () => {
   test('adds begins_with on the index sort key named after the partition key', async () => {
     ddbMock.on(QueryCommand).resolves({ Items: [] });

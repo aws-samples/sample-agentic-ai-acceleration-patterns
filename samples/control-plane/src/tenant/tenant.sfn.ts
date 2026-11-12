@@ -110,10 +110,12 @@ const INLINE_BUILDSPEC = [
  *   "tenantRoleArn": "arn:...:role/<fleet>-tenant-provisioning",
  *   "applicationId": "...", "cellId": "...",
  *   "cellBuild":   { "operation": "create|update|delete",
- *                    "scriptPath": "...", "failedStatus": "..." },   // optional
+ *                    "scriptPath": "...", "failedStatus": "...",
+ *                    "parameters": { "<NAME>": "<value>" } },         // optional
  *   "tenantId": "...",                                               // when tenantBuild present
  *   "tenantBuild": { "operation": "create|update|delete",
  *                    "scriptPath": "...", "failedStatus": "...",
+ *                    "parameters": { "<NAME>": "<value>" },
  *                    "tenantName": "...", "adminEmail": "..." }        // optional
  * }
  * ```
@@ -124,6 +126,12 @@ const INLINE_BUILDSPEC = [
  * create), UpdateDeployment (tenant update), DeleteDeployment (tenant
  * delete), UpdateCell (cell update), DeleteCell (cell delete). The
  * deployment record is keyed by `tenantId` and `applicationId` (ADR-037).
+ *
+ * Each phase's `parameters` is its resolved parameter set (spec R-32 for
+ * the tenant build, R-34 for the cell build), always present, `{}` when
+ * empty; each entry reaches that phase's build as `PARAM_<NAME>` and no
+ * other phase's (ADR-039, ADR-040). The workflow never writes it back
+ * (R-21).
  *
  * Input contract: `tenantBuild.tenantName`, `tenantBuild.adminEmail`,
  * `sourceVersion`, and `operatorId` are always present — the service
@@ -365,7 +373,7 @@ export class ProvisioningWorkflow extends Construct {
       .when(sfn.Condition.stringEquals('$.tenantBuild.operation', 'update'), setTenantActiveAfterUpdate)
       .otherwise(setTenantActiveAfterCreate);
 
-    const runTenantBuild = this.buildTask('RunTenantBuild', this.tenantProject, '$.tenantBuildResult', [
+    const runTenantBuild = this.buildTask('RunTenantBuild', this.tenantProject, 'tenantBuildResult', '$.tenantBuild.parameters', [
       envVar('SCRIPT_PATH', '$.tenantBuild.scriptPath'),
       envVar('TENANT_ID', '$.tenantId'),
       // ADR-023: the tenant's name as stored on the control-plane record, on
@@ -383,9 +391,11 @@ export class ProvisioningWorkflow extends Construct {
       // ADR-025: the account the cell lives in and the role the buildspec
       // assumes there before the script runs (§6.1 "Credentials").
       ...accountEnvVars('$.tenantRoleArn'),
+      // Then PARAM_<NAME> for each entry of the deployment's resolved set
+      // (R-32, §6.1) - tenant builds never see the cell's set.
     ]);
     for (const variant of runTenantBuild.variants) {
-      variant.addCatch(tenantBuildFailure, { resultPath: '$.error' });
+      variant.addCatch(tenantBuildFailure, { outputs: BUILD_FAILURE_OUTPUT });
       variant.next(tenantSuccessRouter);
     }
 
@@ -637,7 +647,7 @@ export class ProvisioningWorkflow extends Construct {
       .when(sfn.Condition.stringEquals('$.cellBuild.operation', 'update'), setCellActiveAfterUpdate)
       .otherwise(setCellActiveAfterCreate);
 
-    const runCellBuild = this.buildTask('RunCellBuild', this.cellProject, '$.cellBuildResult', [
+    const runCellBuild = this.buildTask('RunCellBuild', this.cellProject, 'cellBuildResult', '$.cellBuild.parameters', [
       envVar('SCRIPT_PATH', '$.cellBuild.scriptPath'),
       envVar('APPLICATION_ID', '$.applicationId'),
       envVar('CELL_ID', '$.cellId'),
@@ -646,9 +656,11 @@ export class ProvisioningWorkflow extends Construct {
       envVar('OPERATOR_ID', '$.operatorId'),
       // ADR-025 — see the tenant build.
       ...accountEnvVars('$.cellRoleArn'),
+      // Then PARAM_<NAME> for each entry of the cell's resolved set (R-34,
+      // §6.1) - cell builds never see a deployment's set.
     ]);
     for (const variant of runCellBuild.variants) {
-      variant.addCatch(cellBuildFailure, { resultPath: '$.error' });
+      variant.addCatch(cellBuildFailure, { outputs: BUILD_FAILURE_OUTPUT });
       variant.next(cellSuccessRouter);
     }
 
@@ -752,71 +764,28 @@ export class ProvisioningWorkflow extends Construct {
   }
 
   /**
-   * Extracts build evidence from a caught build-task error (§7, README
-   * contract). The `.sync` StartBuild task's `States.TaskFailed` Cause is
-   * the JSON-serialized Build detail; a task timeout (`States.Timeout`) or
-   * any unexpected shape carries no build JSON. Every access is
-   * Choice-guarded so the failure path can never itself die on a missing
-   * field: unmatched shapes fall through to `fallback` (the generic write
-   * keyed off `$.error.Error`), and `States.StringToJson` only runs on a
-   * present, non-null `States.TaskFailed` Cause. Matching shapes normalize
-   * to `$.failure.{buildArn, buildStatus}` for `withBuild`.
+   * Routes a caught build-task error (§7, README contract). The build
+   * task's Catch ({@link BUILD_FAILURE_OUTPUT}) has already reduced the
+   * error to `$.error.Error` plus, when the `.sync` task's
+   * `States.TaskFailed` Cause carried the Build, `$.failure.{buildArn,
+   * buildStatus}` - never the raw Cause or a parsed copy of the Build,
+   * which echo the build's environment and so every parameter value
+   * (§8.1 payload budget). With the evidence the failure write names the
+   * build (`withBuild`); without it (task timeout, an unexpected shape) the
+   * generic write keyed off `$.error.Error` runs (`fallback`).
    */
   private buildFailureEvidenceChain(
     prefix: string,
     withBuild: sfn.IChainable,
     fallback: sfn.IChainable,
   ): { entry: sfn.Choice } {
-    // Both observed Cause layouts: `{ "Build": {...} }` and the Build
-    // object at the top level — normalize either to the same two fields.
-    const fromWrappedBuild = new sfn.Pass(this, `${prefix}FailureFromWrappedBuild`, {
-      parameters: {
-        buildArn: sfn.JsonPath.stringAt('$.failure.cause.Build.Arn'),
-        buildStatus: sfn.JsonPath.stringAt('$.failure.cause.Build.BuildStatus'),
-      },
-      resultPath: '$.failure',
-    }).next(withBuild);
-    const fromBuild = new sfn.Pass(this, `${prefix}FailureFromBuild`, {
-      parameters: {
-        buildArn: sfn.JsonPath.stringAt('$.failure.cause.Arn'),
-        buildStatus: sfn.JsonPath.stringAt('$.failure.cause.BuildStatus'),
-      },
-      resultPath: '$.failure',
-    }).next(withBuild);
-
-    const causeShape = new sfn.Choice(this, `${prefix}FailureCauseShape`)
-      .when(
-        sfn.Condition.and(
-          sfn.Condition.isPresent('$.failure.cause.Build.Arn'),
-          sfn.Condition.isPresent('$.failure.cause.Build.BuildStatus'),
-        ),
-        fromWrappedBuild,
-      )
-      .when(
-        sfn.Condition.and(
-          sfn.Condition.isPresent('$.failure.cause.Arn'),
-          sfn.Condition.isPresent('$.failure.cause.BuildStatus'),
-        ),
-        fromBuild,
-      )
-      .otherwise(fallback);
-
-    const parseCause = new sfn.Pass(this, `Parse${prefix}FailureCause`, {
-      parameters: {
-        cause: sfn.JsonPath.stringToJson(sfn.JsonPath.stringAt('$.error.Cause')),
-      },
-      resultPath: '$.failure',
-    });
-    parseCause.next(causeShape);
-
     const entry = new sfn.Choice(this, `${prefix}BuildFailureShape`)
       .when(
         sfn.Condition.and(
-          sfn.Condition.stringEquals('$.error.Error', 'States.TaskFailed'),
-          sfn.Condition.isPresent('$.error.Cause'),
-          sfn.Condition.isNotNull('$.error.Cause'),
+          sfn.Condition.isPresent('$.failure.buildArn'),
+          sfn.Condition.isPresent('$.failure.buildStatus'),
         ),
-        parseCause,
+        withBuild,
       )
       .otherwise(fallback);
     return { entry };
@@ -828,32 +797,43 @@ export class ProvisioningWorkflow extends Construct {
    * Two task variants behind a Choice on the stamped supply-chain pin
    * (T5/M10): a non-empty `$.sourceVersion` adds the CodeBuild
    * `SourceVersion` override so the build fetches exactly the pinned
-   * commit; the empty string (unpinned) omits the parameter entirely —
+   * commit; the empty string (unpinned) omits the parameter entirely -
    * CodeBuild's behaviour for an empty-string override is undefined, so it
    * is never sent. Callers wire Catch/Next on BOTH variants and route into
-   * `entry`.
+   * `entry`; the Catch takes {@link BUILD_FAILURE_OUTPUT}.
+   *
+   * The task states use JSONata, the rest of the machine JSONPath. Only
+   * JSONata can append one `PARAM_<NAME>` variable per entry of the phase's
+   * resolved parameter set (`parametersPath`, a name to value map) to the
+   * fixed variables, and only a JSONata Catch can drop the raw error Cause
+   * before it enters state. The task `Output` plays the part of a
+   * `ResultSelector`: the state keeps its input plus `<resultField>.Build`
+   * with the build ARN and status only, because the CodeBuild result echoes
+   * the build's environment, values included, and a second copy of each
+   * parameter set would pass the 256 KiB state limit (§8.1).
    */
   private buildTask(
     id: string,
     project: codebuild.Project,
-    resultPath: string,
-    environment: Array<Record<string, string>>,
+    resultField: 'tenantBuildResult' | 'cellBuildResult',
+    parametersPath: string,
+    environment: EnvVar[],
   ): { entry: sfn.Choice; variants: sfn.CustomState[] } {
     const makeVariant = (taskId: string, withPin: boolean) =>
-      new sfn.CustomState(this, taskId, {
+      new JsonataCustomState(this, taskId, {
         stateJson: {
           Type: 'Task',
           Resource: 'arn:aws:states:::codebuild:startBuild.sync',
           TimeoutSeconds: BUILD_TIMEOUT.toSeconds(),
-          Parameters: {
-            'ProjectName': project.projectName,
-            'SourceTypeOverride.$': '$.sourceType',
-            'SourceLocationOverride.$': '$.sourceLocation',
-            ...(withPin ? { 'SourceVersion.$': '$.sourceVersion' } : {}),
-            'BuildspecOverride': INLINE_BUILDSPEC,
-            'EnvironmentVariablesOverride': environment,
+          Arguments: {
+            ProjectName: project.projectName,
+            SourceTypeOverride: jsonata(inputRef('$.sourceType')),
+            SourceLocationOverride: jsonata(inputRef('$.sourceLocation')),
+            ...(withPin ? { SourceVersion: jsonata(inputRef('$.sourceVersion')) } : {}),
+            BuildspecOverride: INLINE_BUILDSPEC,
+            EnvironmentVariablesOverride: environmentOverride(environment, parametersPath),
           },
-          ResultPath: resultPath,
+          Output: buildResultOutput(resultField),
         },
       });
     const unpinned = makeVariant(id, false);
@@ -910,6 +890,17 @@ export class ProvisioningWorkflow extends Construct {
     addTerminalWriteRetries(state);
     return state;
   }
+}
+
+/**
+ * A raw-ASL state in JSONata. `CustomStateProps` has no `queryLanguage`, and
+ * without one CDK renders the state's Catch in JSONPath form, dropping its
+ * `Output`; overriding the field makes CDK emit `QueryLanguage: JSONata`
+ * and render each Catch with `Output`.
+ */
+// see adr/0041-run-the-build-tasks-in-jsonata.md
+class JsonataCustomState extends sfn.CustomState {
+  protected override readonly queryLanguage = sfn.QueryLanguage.JSONATA;
 }
 
 type DynamoKey = Record<string, tasks.DynamoAttributeValue>;
@@ -982,7 +973,7 @@ function rawApplicationKey(): object {
  * half), the account's external id (empty string when none — the buildspec
  * then omits `--external-id`), and the STS-safe operator session name (M23).
  */
-function accountEnvVars(roleArnPath: string): Array<Record<string, string>> {
+function accountEnvVars(roleArnPath: string): EnvVar[] {
   return [
     envVar('CELL_ACCOUNT_ID', '$.accountId'),
     envVar('PROVISIONING_ROLE_ARN', roleArnPath),
@@ -1061,10 +1052,86 @@ function attrBuildFailureReason(prefix: string): tasks.DynamoAttributeValue {
   );
 }
 
-/** One PLAINTEXT env var resolved from the execution input. */
-function envVar(name: string, valuePath: string): Record<string, string> {
-  return { 'Name': name, 'Type': 'PLAINTEXT', 'Value.$': valuePath };
+/** One fixed PLAINTEXT build variable: its name and the JSONPath of its value in the execution input. */
+export type EnvVar = readonly [name: string, valuePath: string];
+
+/** One fixed PLAINTEXT env var resolved from the execution input. */
+function envVar(name: string, valuePath: string): EnvVar {
+  return [name, valuePath];
 }
+
+/** Wraps a JSONata expression for a JSONata state field. */
+function jsonata(expression: string): string {
+  return `{% ${expression} %}`;
+}
+
+/** The JSONata reference to a field of the state input, from its JSONPath (`$.a.b` → `$states.input.a.b`). */
+function inputRef(valuePath: string): string {
+  if (!/^\$(\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(valuePath)) {
+    throw new Error(`Not a plain JSONPath field reference: ${valuePath}`);
+  }
+  return `$states.input${valuePath.slice(1)}`;
+}
+
+/**
+ * The `EnvironmentVariablesOverride` of a build task (spec §6.1): the fixed
+ * variables, then one `PARAM_<NAME>` per entry of the resolved parameter
+ * map at `parametersPath`. The fixed prefix keeps a declared name off the
+ * contract's own variables and the build's (`TENANT_ID`, `PATH`). A name
+ * with neither a value nor a default is not in the map, so it is absent
+ * from the build, never an empty string (R-32).
+ */
+export function environmentOverride(environment: readonly EnvVar[], parametersPath: string): string {
+  const fixed = environment
+    .map(([name, path]) => `{"Name": ${JSON.stringify(name)}, "Type": "PLAINTEXT", "Value": ${inputRef(path)}}`)
+    .join(', ');
+  const parameters =
+    `$each(${inputRef(parametersPath)}, function($v, $k) {{"Name": "PARAM_" & $k, "Type": "PLAINTEXT", "Value": $v}})`;
+  return jsonata(`$append([${fixed}], ${parameters})`);
+}
+
+/**
+ * A build task's `Output` (§8.1): the state input plus the build ARN and
+ * status under `<resultField>.Build` - what the terminal writes read
+ * (`lastBuildId`) and nothing else from the CodeBuild result.
+ */
+export function buildResultOutput(resultField: string): string {
+  return jsonata(
+    `$merge([$states.input, {"${resultField}": {"Build": {"Arn": $states.result.Build.Arn, "BuildStatus": $states.result.Build.BuildStatus}}}])`,
+  );
+}
+
+/**
+ * A build task's Catch `Output` (§8.1): the state input plus `error.Error`
+ * and, when the `.sync` task's `States.TaskFailed` Cause is the Build JSON
+ * (wrapped as `{"Build": {...}}` or bare, both layouts are seen), the
+ * build's ARN and status as `failure.{buildArn, buildStatus}`. The raw
+ * Cause and the parsed Build never enter state: they echo the build's
+ * environment, every parameter value included, and could pass the 256 KiB
+ * limit, which fails the execution with `States.DataLimitExceeded` before
+ * any `*_FAILED` write runs.
+ *
+ * The two fields are read with regular expressions on the raw Cause, never
+ * with `$parse`: JSONata has no try/catch, so a Cause that is not valid
+ * JSON (a truncated one, for instance, once large parameter sets make the
+ * Build JSON long) would make this catcher itself fail, and then no
+ * `*_FAILED` write would run (P-9). `Arn` and `BuildStatus` come before
+ * `Environment` in the Build, so they survive truncation, and the first
+ * match is the build's own: a quote inside an environment value is escaped
+ * in the Cause, so a value cannot forge a `"Arn":"..."` pair. A timeout, a
+ * non-string Cause or a Cause without both fields keeps only
+ * `error.Error`, for the generic failure write.
+ */
+export const BUILD_FAILURE_OUTPUT = jsonata([
+  '(',
+  '$e := $states.errorOutput;',
+  "$text := ($e.Error = 'States.TaskFailed' and $type($e.Cause) = 'string') ? $e.Cause;",
+  String.raw`$arn := $exists($text) ? $match($text, /"Arn"\s*:\s*"([^"]+)"/, 1).groups[0];`,
+  String.raw`$status := $exists($text) ? $match($text, /"BuildStatus"\s*:\s*"([A-Z_]+)"/, 1).groups[0];`,
+  '$merge([$states.input, {"error": {"Error": $e.Error}},',
+  '  ($exists($arn) and $exists($status)) ? {"failure": {"buildArn": $arn, "buildStatus": $status}} : {}])',
+  ')',
+].join(' '));
 
 /**
  * Terminal-write retry policy (§7 point 3): retry transient failures, but

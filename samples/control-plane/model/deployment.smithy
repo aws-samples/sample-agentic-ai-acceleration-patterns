@@ -6,6 +6,7 @@ $version: "2.0"
 namespace controlplane
 
 use aws.apigateway#authorizer
+use aws.apigateway#requestValidator
 
 // ---------------------------------------------------------------------------
 // Deployment resource
@@ -98,7 +99,12 @@ list DeploymentList {
 /// the application; with accountId, only that registered account (the only
 /// way into a tenant-owned account), which must admit the application
 /// (ValidationException otherwise). Carries no resource definition - the
-/// cell's stamped definition applies (P-4). Asynchronous: returns 202
+/// cell's stamped definition applies (P-4). Parameter values are checked
+/// against the application's declarations after the idempotency replay
+/// read and before placement: an undeclared name, a value over 1,024 bytes
+/// or holding a control character, or a required parameter without a value
+/// is a ValidationException and nothing is written (ADR-039). Asynchronous:
+/// returns 202
 /// immediately; poll GetDeployment for the terminal status (ACTIVE or
 /// CREATE_FAILED). ResourceNotFoundError for an unknown tenant, application
 /// or accountId; ConflictError when the tenant already has a deployment of
@@ -128,6 +134,12 @@ operation CreateDeployment {
         /// Absent, placement chooses among vendor-owned accounts that admit
         /// the application.
         accountId: AccountId
+
+        /// Values for the parameters the application declares, by name.
+        /// Stored on the deployment and passed to every tenant build as
+        /// PARAM_<NAME>, with the declared defaults for names without a
+        /// value. Plain text: never a secret (spec N-11).
+        parameters: ParameterMap
 
         /// Optional idempotency token. Retrying CreateDeployment with the
         /// same token returns the previously created deployment instead of
@@ -160,7 +172,8 @@ operation CreateDeployment {
 /// lifecycle operations: status, statusReason, lastBuildId and cellId reflect
 /// placement and provisioning progress. Also returns the deployment's
 /// effective definition - source and scripts resolved from the cell's
-/// stamped definition - and the account the cell lives in.
+/// stamped definition - the account the cell lives in, and the parameter
+/// values stored on the deployment (defaults are not merged in).
 @authorizer("vendor-authorizer")
 @readonly
 @http(method: "GET", uri: "/tenants/{tenantId}/deployments/{applicationId}", code: 200)
@@ -195,6 +208,11 @@ operation GetDeployment {
         /// The account the cell - and so this deployment - lives in.
         @required
         accountId: AccountId
+
+        /// The parameter values stored on the deployment: the values an
+        /// operator supplied, without defaults. Empty when none.
+        @required
+        parameters: ParameterMap
     }
 
     errors: [
@@ -206,16 +224,28 @@ operation GetDeployment {
 // UpdateDeployment - PUT /tenants/{tenantId}/deployments/{applicationId} -> 202
 // ---------------------------------------------------------------------------
 
-/// Re-applies the deployment: no body - sets UPDATING status and starts the
-/// provisioning workflow, which runs the cell's stamped tenant update script
-/// in AWS CodeBuild. Asynchronous: returns 202 immediately; poll
-/// GetDeployment for the terminal status. Allowed when the deployment is
-/// ACTIVE or UPDATE_FAILED and the cell is ACTIVE; rejected with
-/// ConflictError otherwise - from CREATE_FAILED the remediation is delete +
-/// recreate, and no tenant build runs against a shared deployment that is
-/// mid-change.
+/// Re-applies the deployment, optionally changing parameter values first:
+/// names in parameters are set, names in removeParameters are removed, every
+/// other stored value is kept; an empty body re-applies with the stored
+/// values. Sets UPDATING status (writing the merged values in the same
+/// conditional update) and starts the provisioning workflow, which runs the
+/// cell's stamped tenant update script in AWS CodeBuild. Asynchronous:
+/// returns 202 immediately; poll GetDeployment for the terminal status. The
+/// body is validated against the application's current declarations first
+/// (ADR-039): an undeclared name, an over-long value or one holding a
+/// control character, a name in both lists, removing a required parameter,
+/// a required parameter left without a value, or more than 20 stored values
+/// is a ValidationException and nothing is written. Allowed when the
+/// deployment is ACTIVE or UPDATE_FAILED and the cell is ACTIVE; rejected
+/// with ConflictError otherwise - from CREATE_FAILED the remediation is
+/// delete + recreate, and no tenant build runs against a shared deployment
+/// that is mid-change. ConflictError also when the stored values changed
+/// between the read and the write (retry). The body is optional, and an
+/// empty PUT re-applies with the stored values, so API Gateway checks only
+/// the path here and the service validates the body.
 @authorizer("vendor-authorizer")
 @idempotent
+@requestValidator("params-only")
 @http(method: "PUT", uri: "/tenants/{tenantId}/deployments/{applicationId}", code: 202)
 operation UpdateDeployment {
     input := {
@@ -228,6 +258,14 @@ operation UpdateDeployment {
         @required
         @httpLabel
         applicationId: ApplicationId
+
+        /// Parameter values to set, by name.
+        parameters: ParameterMap
+
+        /// Names of stored parameter values to remove. A name that is not
+        /// stored is a no-op; a stale value whose name is no longer
+        /// declared can be removed.
+        removeParameters: ParameterNameList
     }
 
     output := {
@@ -248,7 +286,8 @@ operation UpdateDeployment {
 
 /// Deprovisions a deployment. Sets DELETING status and starts the
 /// provisioning workflow, which runs the cell's stamped tenant delete script
-/// in AWS CodeBuild, then transactionally removes the deployment record,
+/// in AWS CodeBuild with the stored parameter values (never validated
+/// against the current declarations), then transactionally removes the deployment record,
 /// frees its slot in the cell and releases its count on the tenant.
 /// Asynchronous: returns 202 immediately; poll GetDeployment until it returns
 /// 404 (deleted) or DELETE_FAILED. Rejected with ConflictError while the

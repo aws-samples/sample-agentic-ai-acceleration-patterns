@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 import { APPLICATION_KEY_PREFIX } from './application.data-model';
+import { ParameterValues } from './parameters';
 import { DataModel, DynamoDBItem, GSI1_INDEX_NAME, GSI2_INDEX_NAME, GSI3_INDEX_NAME } from '../shared/data-model';
 import { KeyBuilder } from '../shared/key-builder';
 import { GsiQuery, ItemKey, StatusTransition, WriteCondition } from '../shared/repository';
@@ -39,7 +40,10 @@ export const DELETABLE_CELL_STATUSES: readonly LifecycleStatus[] = [
  * creation and immutable for the cell's lifetime. `tenantCount` is the
  * atomic slot counter — the capacity and occupancy guard (ADR-013); only the
  * placement transaction increments it and only the delete workflow's
- * terminal transaction decrements it.
+ * terminal transaction decrements it. `parameters` holds the cell
+ * parameter values an operator set through `UpdateCell` (ADR-040), empty
+ * at birth and never a default; kept exactly as read (`undefined` when the
+ * attribute is absent, a different read from `{}`, R-34).
  */
 export interface CellRecord {
   readonly cellId: string;
@@ -58,6 +62,7 @@ export interface CellRecord {
   readonly cellScripts: ScriptLocations;
   /** Stamped lifecycle scripts for per-tenant deployments in this cell. */
   readonly tenantScripts: ScriptLocations;
+  readonly parameters?: ParameterValues;
   readonly lastBuildId?: string;
   readonly statusReason?: string;
   readonly createdAt: Date;
@@ -88,6 +93,7 @@ export interface CellItem extends DynamoDBItem {
   readonly source: SourceDefinition;
   readonly cellScripts: ScriptLocations;
   readonly tenantScripts: ScriptLocations;
+  readonly parameters?: ParameterValues;
   readonly lastBuildId?: string;
   readonly statusReason?: string;
   readonly createdAt: string;
@@ -179,6 +185,7 @@ export class CellDataModel implements DataModel<CellRecord, CellItem> {
       source: record.source,
       cellScripts: record.cellScripts,
       tenantScripts: record.tenantScripts,
+      parameters: record.parameters,
       lastBuildId: record.lastBuildId,
       statusReason: record.statusReason,
       createdAt: record.createdAt.toISOString(),
@@ -197,6 +204,7 @@ export class CellDataModel implements DataModel<CellRecord, CellItem> {
       source: item.source,
       cellScripts: item.cellScripts,
       tenantScripts: item.tenantScripts,
+      parameters: item.parameters,
       lastBuildId: item.lastBuildId,
       statusReason: item.statusReason,
       createdAt: new Date(item.createdAt),

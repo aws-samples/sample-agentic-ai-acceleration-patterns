@@ -138,7 +138,9 @@ design:
 
 - What a deployment contains — infrastructure, code, configuration and
   data are the provisioning scripts' business; the control plane records
-  that a deployment exists and whether its last build succeeded
+  that a deployment exists and whether its last build succeeded. It
+  carries the deployment's declared parameter values to the scripts
+  (§6.1) without knowing what they mean
 - Serving tenant traffic, or routing tenants to their cells
 - **Customer identity.** Which IdP a tenant's users authenticate against
   is a property of the deployed application, owned by the provisioning
@@ -207,7 +209,7 @@ hand-edits generated output; the model is fixed and regeneration follows.
 This makes the contract the single point of change and keeps implementation
 drift structurally impossible.
 
-### P-3. Strict plane separation: the control plane carries no application plane configuration
+### P-3. Strict plane separation: the control plane never interprets application plane configuration
 
 The control plane knows *that* a deployment exists and *whether* its
 build succeeded. It does not know *what* the deployment is. Consequences:
@@ -220,11 +222,28 @@ build succeeded. It does not know *what* the deployment is. Consequences:
   time*. The control plane is not involved in that exchange and never reads
   the namespace.
 - Customer identity is an application plane decision.
+- Per-deployment values the scripts need (an allowed email domain, a
+  feature switch) are **declared parameters**: the application names
+  them, the operator supplies values on the deployment, and the control
+  plane validates names and presence, stores the values and hands them to
+  every tenant script as environment variables (§6.1,
+  [ADR-039](../adr/0039-applications-declare-deployment-parameters.md)).
+  Per-cell values the cell scripts need (an instance size, a shard count)
+  are **declared cell parameters**: the application names them with a
+  default, a new cell starts on the defaults, and the operator changes a
+  cell's values through `UpdateCell`
+  ([ADR-040](../adr/0040-applications-declare-cell-parameters-with-defaults.md)).
+  The values are opaque strings: the control plane never reads their
+  meaning, never derives a decision from them, and never shapes the
+  contract around a specific concern.
 
 The boundary test is *configuration vs. onboarding input*: `adminEmail`
 (the first application-plane admin user of a deployment) crosses the
 boundary exactly once, as an environment variable to the create script,
-and is **never persisted** by the control plane.
+and is **never persisted** by the control plane. Declared parameters are
+the configuration side of that test, made explicit: the application owns
+the set, the deployment owns the values, and every lifecycle script of
+the deployment — create, update and delete — receives them.
 
 ### P-4. Cells are homogeneous by construction, per application
 
@@ -239,10 +258,19 @@ its application with free capacity. Per-tenant provisioning definitions
 would break that fungibility. So tenants and deployments carry **no source
 and no scripts** — a deployment is defined by its cell's stamped
 definition, and it is only ever placed into a cell of its own application.
+A deployment's parameter values do not break that fungibility: they are
+input to the same scripts in every cell, never a different definition,
+and placement never reads them. Cell parameter values (R-34) do not break
+it either: they tune one cell (its size, its shard count) without
+changing what it can host, every deployment of the application MUST work
+in a cell whatever its values, and placement never reads them.
 
 Stamping makes configuration changes forward-only: a replaced application
 definition affects only cells created afterwards; existing cells keep the
-definition they were built with. New provisioning *code* still reaches
+definition they were built with. Parameter declarations are the one
+application change that reaches existing cells and deployments: they are
+never stamped, so a changed default or a new declaration applies to each
+record's next build (R-32, R-34). New provisioning *code* still reaches
 existing cells because git sources are fetched fresh on every build — the
 definition pins *where the scripts live*, not their content.
 
@@ -520,6 +548,8 @@ shown as the reference implementation's convention; the requirement is the
 | `tenantScripts` | `{create, update, delete}` — all three paths required, non-empty (P-9) |
 | `maxTenants` | integer ≥ 1; replaceable. A new value applies to cells created afterwards (P-4) |
 | `placementStrategy` | `FILL \| ROUND_ROBIN`; default `FILL`; replaceable, takes effect on the next placement ([ADR-036](../adr/0036-the-application-chooses-fill-or-round-robin-across-accounts.md)). How a new cell picks among eligible accounts with free capacity (§7.1): `FILL` takes the oldest registered account until it is full; `ROUND_ROBIN` takes the account with the fewest cells, so cells rotate over the open accounts |
+| `parameters` | optional list of **parameter declarations**, at most 20, default none; replaced when sent (absent on an existing application keeps it, `[]` clears it), takes effect on the next deployment request ([ADR-039](../adr/0039-applications-declare-deployment-parameters.md)). Each is `{name, required, default?, description?}`: `name` matches `[A-Z][A-Z0-9_]{0,63}` and is unique in the list; `required` is a boolean, default `false`; `default` is a string of at most 1,024 bytes (UTF-8) with no control characters (as for values, R-33) and MUST NOT be set on a required parameter; `description` is at most 256 characters of operator-facing text |
+| `cellParameters` | optional list of **cell parameter declarations**, at most 20, default none; replaced when sent (absent on an existing application keeps it, `[]` clears it), takes effect on the next cell build ([ADR-040](../adr/0040-applications-declare-cell-parameters-with-defaults.md)). Each is `{name, default, description?}`: `name` as for `parameters`, unique in the list and MUST NOT also appear in `parameters` (one name, one meaning); `default` is **required**, a string of at most 1,024 bytes (UTF-8) with no control characters, because a cell is created by placement and no operator is present to supply a value; `description` as for `parameters`. There is no `required` flag |
 | `cellCount` | **the authoritative count of this application's cells** — claimed in the cell-creating transaction, released in the cell-deleting one (P-6); never written by `PutApplication` |
 | `createdAt`, `updatedAt` | timestamps |
 
@@ -527,15 +557,22 @@ Key: `PK=APPLICATION#<applicationId>`, `SK=META`.
 
 `source`, `cellScripts`, `tenantScripts` and `maxTenants` together are the
 application's **definition**: the bundle a new cell is stamped from.
-`placementStrategy` is not part of the definition — it steers where the
-next cell goes and is never stamped. An
+`placementStrategy`, `parameters` and `cellParameters` are not part of
+the definition and are never stamped. The strategy steers where the next
+cell goes; the declarations validate requests and supply defaults when a
+build's input is resolved (R-32, R-34), so every deployment and every
+cell of the application is checked against one current set. A script
+stamped onto an older cell receives any parameter added since as one more
+environment variable, which it ignores. An
 application has **no status**: its operations are synchronous and run no
 build. Its lifecycle is register (`PutApplication`) → in use → delete
 (empty only).
 
 **R-29 (field ownership on applications):** `PutApplication` MUST write
-only the definition fields, `placementStrategy` and `updatedAt`, and MUST
-NOT touch `cellCount`;
+only the definition fields, `placementStrategy`, `updatedAt`, and each of
+`parameters` and `cellParameters` **only when the request sent it** (on
+an existing application an absent list is kept, `[]` clears it, §5.5),
+and MUST NOT touch `cellCount`;
 the two counter paths MUST NOT touch the definition. A definition replaced
 while a cell is being created does not change that cell: the cell was
 stamped inside the placement transaction, from the definition read before
@@ -552,11 +589,39 @@ it (§7.1 step 0).
 | `maxTenants` | stamped from the application's definition at creation; immutable |
 | `tenantCount` | **the authoritative occupancy counter**: the number of deployments in the cell, which in a cell of one application is the number of distinct tenants — see R-16..R-18 |
 | `source`, `cellScripts`, `tenantScripts` | stamped from the application's definition; immutable for the cell's lifetime |
+| `parameters` | map of cell parameter name → value, the values an operator set on this cell through `UpdateCell`; at most 20 entries, each value at most 1,024 bytes (UTF-8); **empty at birth**. Never holds a default the operator did not supply, so a changed default reaches the cell on its next build |
 | `lastBuildId` | most recent successful cell-scoped build id (nullable) |
 | `statusReason` | populated on failure (nullable) |
 | `createdAt`, `updatedAt` | timestamps |
 
 Key: `PK=CELL#<cellId>`, `SK=META`.
+
+**R-34 (cell parameters,
+[ADR-040](../adr/0040-applications-declare-cell-parameters-with-defaults.md)):**
+when a cell build's input is resolved (create, update and delete alike,
+§8.1), the service MUST build the cell's parameter set as every stored
+value on the cell plus the declared `default` of each cell parameter
+without one; stored values for names no longer declared are still passed,
+so a script sees every value an operator set (R-35 says what a delete
+script may rely on). `UpdateCell` MUST validate a supplied body against
+the application's current `cellParameters` and refuse with 400 an
+undeclared name in `parameters` (a tenant parameter name included), a
+value over 1,024 bytes (UTF-8), more than 20 stored entries after the
+merge, or a name in both `parameters` and `removeParameters`. The merge
+and its precedence follow R-33 exactly: the whole merged map written in
+the conditional update that moves the cell to `UPDATING`, conditioned on
+the status guard **and** on the cell's `parameters` attribute being
+exactly as the request read it; the same `removeParameters` rules, character rule and
+error classification; validation before the status check. The map
+condition matters most here: placements and deployment deletes write the
+cell's counter and `updatedAt` while it is `ACTIVE`, and they must not
+fail an `UpdateCell` that has nothing to do with them.
+`removeParameters` naming a stored entry returns the cell to the default.
+`DeleteCell` MUST NOT validate. A new cell is inserted with an empty map (§7.1 step 3): no
+request supplies cell values at birth. The cell's set reaches **cell
+scripts only**; tenant scripts that need a cell value read what the cell
+create script published under `/application-plane/cells/<cellId>/*`
+(§6.2).
 
 ### 4.3 Tenant
 
@@ -591,6 +656,7 @@ The tenant in one application
 | `tenantId`, `applicationId` | the item's identity — one deployment per tenant per application; a second create is a 409 |
 | `cellId` | the placement — assigned at creation, **never changes** (migration is out of scope); always a cell of `applicationId` |
 | `status` | same enum as cell |
+| `parameters` | map of parameter name → value, the values the operator supplied for this deployment; at most 20 entries, each value at most 1,024 bytes (UTF-8); empty when none were supplied. Written by `CreateDeployment`, merged by `UpdateDeployment` (R-33); never holds a default the operator did not supply, so a changed default reaches the deployment on its next build |
 | `lastBuildId`, `statusReason`, timestamps | as for cell |
 
 Key: `PK=TENANT#<tenantId>`, `SK=DEPLOYMENT#<applicationId>`. A tenant's
@@ -598,6 +664,55 @@ deployments are therefore one base-table query and need no index.
 
 **R-31:** The deployment record MUST NOT carry provisioning source or
 scripts (P-4). Its effective definition is resolved from its cell.
+
+**R-32 (parameter resolution):** when a deployment build's input is
+resolved (create, update and delete alike, §8.1), the service MUST build
+the parameter set as: every stored value on the deployment, plus the
+declared `default` of each parameter the application declares that has no
+stored value. A declared parameter with neither is **absent** from the
+build environment, never an empty string, so a script can tell "not set"
+from "set to empty". Stored values for names the application no longer
+declares are still passed, so a script sees every value an operator set.
+Defaults are resolved per build and never recorded, so a delete build can
+see a different default from its create build, or none once the
+declaration is dropped; R-35 is the rule that makes this safe. The
+resolved set goes into the execution
+input; the workflow never re-reads the application or the deployment for
+it (R-20).
+
+**R-33 (parameter validation and merge):** `CreateDeployment` and
+`UpdateDeployment` MUST validate supplied parameters against the
+application's current declarations and refuse with 400 a name the
+application does not declare, a value over 1,024 bytes (UTF-8), more than 20
+stored entries after the merge, or a required parameter with no value
+after the merge (the error names the parameter). `UpdateDeployment` MUST
+merge, not replace: names in `parameters` are set, names in
+`removeParameters` are removed, every other stored value is kept. A name
+in both lists is a 400; removing a required parameter is a 400.
+`removeParameters` holds at most 40 names, each matching the name pattern
+(400 otherwise); it may name any stored entry, declared or not, so stale
+values can be cleared, and a name that is not stored is a no-op. The merge
+MUST be written in the same conditional update that moves the deployment
+to `UPDATING`, as one `SET #parameters = :merged` of the whole merged map
+the request validated, never per-name `SET` (a nested path is invalid
+on a record with no `parameters` attribute, which includes every record
+written before parameters existed). The write is conditioned on the
+status guard **and** on the `parameters` attribute being exactly as the
+request read it: `attribute_not_exists(#parameters)` when the attribute
+was absent, `#parameters = :read` when it was present, an empty `{}`
+included. An implementation MUST NOT treat absent and `{}` as the same
+read, or the condition can never pass. The status
+condition stops two updates from interleaving; the map condition stops a
+request from writing a merge it validated against a map that a whole
+update cycle has since replaced. The map is the guard, not `updatedAt`,
+because only these requests write the map (R-21) while other writers
+move `updatedAt`. Failures are classified (R-14). Validation runs on the read record before the conditional
+write, so a request that is both invalid and in flight is a 400, with
+nothing written. A value MUST NOT contain a control character (U+0000 to
+U+001F, U+007F): 400. A build environment cannot carry NUL, and the rule
+bounds a value's JSON-encoded size at twice its raw size (§8.1).
+`DeleteDeployment` MUST NOT validate parameters: cleanup runs with what is
+stored, whatever the declarations now say (P-9).
 
 ### 4.5 Account
 
@@ -715,10 +830,10 @@ to a provisioned tenant applies here.
 
 | Op | HTTP | Code | Contract |
 |---|---|---|---|
-| `CreateDeployment` | `POST /tenants/{tenantId}/deployments` | **202** | Input `{applicationId, adminEmail, accountId?, clientToken?}` — **no resource definition** (P-4). 404 for an unknown tenant or an unregistered `applicationId`. `accountId` pins the deployment to one registered account (the only way into a tenant-owned account); the account MUST admit the application (400 otherwise, §4.5); absent, placement chooses among vendor-owned accounts that admit it. Runs placement (§7), starts the workflow, returns the deployment including `cellId`. 404 for an unregistered `accountId`; 409 `ConflictError` when the tenant already has a deployment of that application; 409 `InsufficientCapacityError` when no eligible account has capacity. |
-| `GetDeployment` | `GET /tenants/{tenantId}/deployments/{applicationId}` | 200 | The polling endpoint: `status`, `statusReason`, `lastBuildId`, `cellId`, plus the deployment's *effective* definition (resolved from the cell's stamped definition) and the cell's `accountId`. 404 if missing. |
-| `UpdateDeployment` | `PUT /tenants/{tenantId}/deployments/{applicationId}` | **202** | Re-apply the deployment: **no body** — runs the stamped tenant update script. Requires deployment `ACTIVE`/`UPDATE_FAILED` **and** cell `ACTIVE`; 409 otherwise. |
-| `DeleteDeployment` | `DELETE /tenants/{tenantId}/deployments/{applicationId}` | **202** | 409 if in-flight. Allowed from `ACTIVE` and all `*_FAILED` states **regardless of cell status** — cleanup must always be reachable (P-9). Runs the tenant delete script; on success the workflow removes the record and releases the cell slot and the tenant's count in one transaction (§8.2). |
+| `CreateDeployment` | `POST /tenants/{tenantId}/deployments` | **202** | Input `{applicationId, adminEmail, accountId?, parameters?, clientToken?}` — **no resource definition** (P-4). `parameters` is a name → value map validated against the application's declarations (R-33); 400 on an undeclared name, an over-long value or a missing required parameter, after the replay read (§7.3) and before placement runs. 404 for an unknown tenant or an unregistered `applicationId`. `accountId` pins the deployment to one registered account (the only way into a tenant-owned account); the account MUST admit the application (400 otherwise, §4.5); absent, placement chooses among vendor-owned accounts that admit it. Runs placement (§7), starts the workflow, returns the deployment including `cellId`. 404 for an unregistered `accountId`; 409 `ConflictError` when the tenant already has a deployment of that application; 409 `InsufficientCapacityError` when no eligible account has capacity. |
+| `GetDeployment` | `GET /tenants/{tenantId}/deployments/{applicationId}` | 200 | The polling endpoint: `status`, `statusReason`, `lastBuildId`, `cellId`, plus the deployment's *effective* definition (resolved from the cell's stamped definition), the cell's `accountId` and the stored `parameters` (the supplied values only; defaults are not merged in). 404 if missing. |
+| `UpdateDeployment` | `PUT /tenants/{tenantId}/deployments/{applicationId}` | **202** | Re-apply the deployment, optionally changing parameter values first. Input `{parameters?, removeParameters?}`, both optional: an empty body re-applies with the stored values. Names in `parameters` are set and names in `removeParameters` removed; every other stored value is kept (R-33). Runs the stamped tenant update script with the merged set resolved per R-32. Requires deployment `ACTIVE`/`UPDATE_FAILED` **and** cell `ACTIVE`; 409 otherwise. 400 on a validation failure of R-33, with nothing written. |
+| `DeleteDeployment` | `DELETE /tenants/{tenantId}/deployments/{applicationId}` | **202** | 409 if in-flight. Allowed from `ACTIVE` and all `*_FAILED` states **regardless of cell status** — cleanup must always be reachable (P-9). Runs the tenant delete script with the stored parameters resolved per R-32, never validated against the current declarations; on success the workflow removes the record and releases the cell slot and the tenant's count in one transaction (§8.2). |
 | `ListDeployments` | `GET /deployments[?tenantId=\|?cellId=\|?applicationId=]` | 200 | Paginated. At most one filter per request (400 for two). An unknown `tenantId`, `cellId` or `applicationId` filter yields an **empty page, not a 404** — a filter is a query predicate, not a resource lookup. |
 
 ### 5.3 Cell operations
@@ -726,9 +841,9 @@ to a provisioned tenant applies here.
 | Op | HTTP | Code | Contract |
 |---|---|---|---|
 | `ListCells` | `GET /cells[?accountId=\|?applicationId=]` | 200 | Fleet topology: `applicationId`, `accountId`, `status`, `tenantCount`/`maxTenants` per cell — the operator's capacity view. Paginated. At most one filter per request (400 for two). An unknown `accountId` or `applicationId` filter yields an **empty page, not a 404** (same rule as `ListDeployments?cellId=`). |
-| `GetCell` | `GET /cells/{cellId}` | 200 | Full record including `applicationId`, `accountId` and the stamped definition. |
-| `UpdateCell` | `PUT /cells/{cellId}` | **202** | Re-apply the shared deployment: no body, runs the stamped cell update script. Allowed from `ACTIVE`/`UPDATE_FAILED`. **409 from `CREATE_FAILED`** — running the *update* script against a half-created deployment breaks the create/update script contract; remediation for a failed cell create is deployment delete + cell delete. |
-| `DeleteCell` | `DELETE /cells/{cellId}` | **202** | **Empty cells only** (P-10): the `DELETING` transition MUST be a single conditional write (`status ∈ {ACTIVE, *_FAILED} AND tenantCount = 0`) — the emptiness check and the transition are one atomic write, the counterpart of the placement claim. A read-then-write would let a concurrent placement claim a slot before `DELETING` lands. Condition failure → 409. On success the workflow removes the record and releases the account's and the application's cell slots in one transaction (§8.2). |
+| `GetCell` | `GET /cells/{cellId}` | 200 | Full record including `applicationId`, `accountId`, the stamped definition and the stored cell `parameters` (the operator-set values only; defaults are not merged in). |
+| `UpdateCell` | `PUT /cells/{cellId}` | **202** | Re-apply the shared deployment, optionally changing cell parameter values first. Input `{parameters?, removeParameters?}`, both optional: an empty body re-applies with the stored values. Names in `parameters` are set and names in `removeParameters` removed; every other stored value is kept (R-34). Runs the stamped cell update script with the merged set resolved per R-34. 400 on a validation failure of R-34, with nothing written. Allowed from `ACTIVE`/`UPDATE_FAILED`. **409 from `CREATE_FAILED`** — running the *update* script against a half-created deployment breaks the create/update script contract; remediation for a failed cell create is deployment delete + cell delete. |
+| `DeleteCell` | `DELETE /cells/{cellId}` | **202** | **Empty cells only** (P-10): the `DELETING` transition MUST be a single conditional write (`status ∈ {ACTIVE, *_FAILED} AND tenantCount = 0`) — the emptiness check and the transition are one atomic write, the counterpart of the placement claim. A read-then-write would let a concurrent placement claim a slot before `DELETING` lands. Condition failure → 409. Runs the cell delete script with the stored cell parameters resolved per R-34, never validated. On success the workflow removes the record and releases the account's and the application's cell slots in one transaction (§8.2). |
 
 **R-11:** There MUST be no `POST /cells`. Cell creation is exclusively a
 placement outcome (§7). An operator API for pre-provisioning capacity is a
@@ -762,8 +877,8 @@ All synchronous: no application operation runs a build
 
 | Op | HTTP | Code | Contract |
 |---|---|---|---|
-| `PutApplication` | `PUT /applications/{applicationId}` | 200 | Create-or-replace. Input `{source, cellScripts, tenantScripts, maxTenants, placementStrategy?}` — the definition of §4.1 plus the strategy, validated as a whole (400 on a missing script path, a malformed source, `maxTenants < 1`, an unknown strategy, or an id outside `[a-z0-9-]{1,32}`). On an existing application the definition fields and the strategy are replaced and `cellCount` is untouched (R-29). One write, with `cellCount` and `createdAt` set through `if_not_exists`, so a replace never resets them; an application has no immutable field, so unlike `PutAccount` the write carries no condition — it is correct in every prior state (P-5). Cells already created keep their stamp (P-4). |
-| `GetApplication` | `GET /applications/{applicationId}` | 200 | The record: the definition, `placementStrategy` and `cellCount`. 404 if unregistered. |
+| `PutApplication` | `PUT /applications/{applicationId}` | 200 | Create-or-replace. Input `{source, cellScripts, tenantScripts, maxTenants, placementStrategy?, parameters?, cellParameters?}` — the definition of §4.1 plus the strategy and both sets of parameter declarations, validated as a whole (400 on a missing script path, a malformed source, `maxTenants < 1`, an unknown strategy, an id outside `[a-z0-9-]{1,32}`, a parameter name outside `[A-Z][A-Z0-9_]{0,63}`, a duplicate name within or across the two lists, more than 20 declarations in either list, a `default` on a required parameter, or a cell parameter without a `default`). On an existing application the definition fields and the strategy are replaced. The two declaration lists are replaced only when sent: an absent `parameters` or `cellParameters` **keeps** the current list, and an empty list `[]` clears it, so a `PutApplication` that only changes `maxTenants` cannot silently drop every required check and default. On a new application an absent list declares none. Existing cells and deployments keep their stored values. A cell parameter added since reaches each cell's next build as its default. A newly required parameter makes the next `UpdateDeployment` of every deployment lacking it a 400 until the operator supplies the value; it never blocks a `DeleteDeployment`. `cellCount` is untouched (R-29). The "one name in one list" check runs against the lists the request sent plus any list it keeps. One write, with `cellCount` and `createdAt` set through `if_not_exists`, so a replace never resets them. When both lists are sent the write carries no condition — an application has no immutable field, so it is correct in every prior state (P-5). When a list is kept, the write is conditioned on that list being exactly as the request read it (`attribute_not_exists` when the attribute was absent, equality when present, an empty `[]` included; absent and `[]` are different reads), so two concurrent puts that each send one list cannot store one name in both; a failed condition → 409, retryable. The condition is never on `updatedAt`, which cell creates and deletes also write. Cells already created keep their stamp (P-4). |
+| `GetApplication` | `GET /applications/{applicationId}` | 200 | The record: the definition, `placementStrategy`, both sets of parameter declarations and `cellCount`. 404 if unregistered. |
 | `ListApplications` | `GET /applications` | 200 | Paginated: `applicationId`, `maxTenants`, `placementStrategy`, `cellCount` per application. |
 | `DeleteApplication` | `DELETE /applications/{applicationId}` | 200 | **Empty applications only** (P-10): a single conditional delete (`attribute_exists AND cellCount = 0`), the counterpart of the cell-slot claim; condition failure → 409. Accounts that name the application in `applicationIds` are not touched (§4.5). |
 
@@ -810,17 +925,37 @@ compare-and-set maps to 409.
 
 | Error | HTTP | Triggers |
 |---|---|---|
-| `ValidationException` | 400 | malformed input, malformed pagination token, two list filters at once; an invalid application definition on `PutApplication`; a targeted `CreateDeployment` into an account that does not admit the application; `PutAccount` handshake refusal (R-26: a half could not be assumed, or admits the call without the supplied external id) |
+| `ValidationException` | 400 | malformed input, malformed pagination token, two list filters at once; an invalid application definition or parameter declaration on `PutApplication`; a deployment parameter that fails R-33 on `CreateDeployment` or `UpdateDeployment`; a cell parameter that fails R-34 on `UpdateCell`; a targeted `CreateDeployment` into an account that does not admit the application; `PutAccount` handshake refusal (R-26: a half could not be assumed, or admits the call without the supplied external id) |
 | `UnauthorizedError` | 401/403 | missing/invalid JWT |
 | `ResourceNotFoundError` | 404 | unknown tenant, deployment, cell, account or application (including an unregistered `CreateDeployment.accountId` or `applicationId`, and an unregistered id in `PutAccount.applicationIds`) |
-| `ConflictError` | 409 | in-flight mutation; a second deployment of the same application for one tenant; occupied-tenant delete; occupied-cell delete; occupied-account delete; occupied-application delete; `owner` change on `PutAccount`; cell-not-ACTIVE guard; `clientToken` reuse with different parameters; `CreateDeployment` lost every bounded claim on candidate cells and no account had a free cell slot — retry ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)) |
+| `ConflictError` | 409 | in-flight mutation; a second deployment of the same application for one tenant; occupied-tenant delete; occupied-cell delete; occupied-account delete; occupied-application delete; `owner` change on `PutAccount`; cell-not-ACTIVE guard; `clientToken` reuse with different parameters; a parameter merge or a list-keeping `PutApplication` whose read went stale — retry (R-14); `CreateDeployment` lost every bounded claim on candidate cells and no account had a free cell slot — retry ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)) |
 | `InsufficientCapacityError` | 409 | `CreateDeployment` found no eligible cell and no eligible account with cell capacity: every vendor-owned account admitting the application is full (untargeted), or the named account is full (targeted). Nothing was written. The remedy is an operator act — raise `maxCells`, register an account, or admit the application in one — so the error is distinct from `ConflictError`, which a client may simply retry later ([ADR-026](../adr/0026-fleet-full-is-a-modelled-error.md)) |
 | `InternalServerError` | 500 | everything else, including a `PutAccount` whose handshake probe STS could not answer (throttling, network): the handshake is unknown, not refused, and the operator retries |
 
 **R-14:** Repository condition failures MUST be classified, not blanket-500d:
 a stale lifecycle transition → 409; a metadata write that loses a
 concurrent delete → 404; an insert that finds the deployment already there
-→ 409.
+→ 409. A failed parameter merge (R-33, R-34) or list-keeping
+`PutApplication` (§5.5) is a 409, with a **retry hint only** when the
+item that failed shows a changed `parameters` (or kept list) under a
+status the operation admits, or the status `CREATING` or `UPDATING`
+(in flight, and it ends in a state the update admits). Every other status (`CREATE_FAILED`, `DELETE_FAILED`,
+`DELETING`) is a 409 without a hint: a retry cannot succeed, and the
+remedy is a delete. The merge is a single conditional `UpdateItem` on
+the record being updated; the service classifies from the item returned
+by `ReturnValuesOnConditionCheckFailure: ALL_OLD`, never from a second
+read, so the label describes the state that actually failed the
+condition. When `ALL_OLD` returns no item the record was deleted → 404.
+Under `UpdateDeployment` the cell-`ACTIVE` guard is checked on the read
+before the write (R-13) and a cell not `ACTIVE` is a 409 without a hint
+from that read; the cell MUST NOT be added to the merge write as a
+transaction `ConditionCheck`, because placements and deployment deletes
+write the cell in their own transactions and would cancel the merge with
+no item to classify. A list-keeping `PutApplication` is the exception to
+the item-based rules: an application has no status, so its failed
+condition is always a 409 with a retry hint, also when the application
+was deleted in between, because the retry is a create-or-replace that
+succeeds (§5.5).
 
 ---
 
@@ -842,13 +977,26 @@ control plane's entire contract with them:
 | `OPERATION` | `create\|update\|delete` | `create\|update\|delete` |
 | `ADMIN_EMAIL` | — | create only (empty string otherwise); the `adminEmail` of the `CreateDeployment` request |
 | `OPERATOR_ID` | ✓ | ✓ (the verified operator identity, [ADR-019](../adr/0019-operator-identity-end-to-end.md)) |
+| `PARAM_<NAME>` | ✓ every operation; one variable per cell parameter in the cell's resolved set (R-34): the stored value, else the declared default | ✓ every operation; one variable per parameter in the deployment's resolved set (R-32): the stored value, else the declared default; absent when neither exists |
 
-That's it. No application plane configuration is injected (P-3). `TENANT_NAME`
-passes the same boundary test as `ADMIN_EMAIL` (ADR-004): onboarding input the
-control plane already holds, not application-plane configuration. If a
-future variant wants opaque per-tenant configuration, the extension point
-is a generic `parameters: map<string,string>` passed through as environment
-variables — deliberately generic, never shaped like any specific concern.
+That's it. `TENANT_NAME` passes the same boundary test as `ADMIN_EMAIL`
+(ADR-004): onboarding input the control plane already holds. The
+`PARAM_` variables are the only application-plane configuration that
+reaches a script through the control plane, and only in the shape the
+application declared (P-3,
+[ADR-039](../adr/0039-applications-declare-deployment-parameters.md)).
+The fixed prefix keeps a declared name from overriding a variable of this
+contract or of the build environment (`TENANT_ID`, `AWS_REGION`, `PATH`).
+Each script sees one set only: a cell script gets the cell's
+`cellParameters`, a tenant script the deployment's `parameters`. The two
+lists never share a name at any one time (§4.1), so a declared name has
+one meaning across the application. A stored value whose name is no
+longer declared keeps the meaning it had when it was stored, even if the
+name has since been declared in the other list; an operator moving a name
+between lists clears the old values with `removeParameters`. A tenant script that needs a cell value reads
+it from the cell's namespace, where the cell create script published it
+(§6.2,
+[ADR-040](../adr/0040-applications-declare-cell-parameters-with-defaults.md)).
 
 **Credentials.** A script's environment never carries the build project's
 own role: before the script starts, the build runner assumes the hosting
@@ -889,8 +1037,9 @@ tenant via `TENANT_ID` and their cell via `CELL_ID`, and resolve shared
 resources from those namespaces **at
 deploy time**. Deploy-time resolution means
 shared resource changes take effect on the next build with no control plane
-change and no record mutation. A missing required parameter fails the
-script fast → `*_FAILED` with the parameter named in `statusReason`.
+change and no record mutation. A missing SSM parameter the script needs,
+or a missing `PARAM_` variable it cannot do without, fails the script
+fast → `*_FAILED` with the name in `statusReason`.
 
 ### 6.3 Script requirements
 
@@ -898,6 +1047,20 @@ script fast → `*_FAILED` with the parameter named in `statusReason`.
 completion — the workflow's retry paths (`UpdateCell` after
 `UPDATE_FAILED`, `DeleteDeployment` retry after `DELETE_FAILED`) re-execute
 them. Empty deployments are explicit no-op scripts (P-9).
+
+**R-35 (delete finds, never recomputes):** a delete script MUST locate
+what its create and update scripts made through its own namespace
+(`/application-plane/cells/<cellId>/*` for a cell,
+`/application-plane/tenants/<tenantId>/<applicationId>/*` for a
+deployment, §6.2), never by recomputing names or sizes from `PARAM_`
+values. Defaults are resolved per build (R-32, R-34), so the `PARAM_` set
+a delete script receives can differ from the one its create used. A
+create script that makes a resource MUST either name it only from the
+contract's ids (`APPLICATION_ID`, `CELL_ID`, `TENANT_ID`), or record its
+identifier in its namespace **before** creating it. A create that fails
+partway goes to `CREATE_FAILED`, whose remedy is delete, not a create
+retry, so the delete must find the resource from what was recorded or
+from the ids alone.
 
 The scripts are trusted vendor code; the provisioning role policies (§6.2,
 §6.4, P-12) are the documented hardening point that bounds what they can do
@@ -1155,6 +1318,15 @@ or place into an ineligible account. Capacity is an operator decision
   `cellCount` and pick the same account; both land there if it has two
   free slots, leaving the spread one cell uneven until the next placement
   corrects it. Nomination, not a guard (P-5).
+- `PutApplication` replaces the parameter declarations while a
+  `CreateDeployment` or `UpdateDeployment` is between its read of the
+  application and its write. The request is validated against the
+  declarations it read, and the build gets the values that passed. A
+  parameter made required in between is missing from that build only;
+  the script fails fast (§6.2) or ignores it, and the next
+  `UpdateDeployment` is checked against the new set. The same holds for
+  `cellParameters` and an `UpdateCell` in that window. Nomination, not a
+  guard (P-5).
 - A cell stuck `UPDATE_FAILED` removes its remaining capacity from the
   fleet until an operator re-runs `UpdateCell`; placements meanwhile fill
   other cells or create new ones. Visible in `ListCells`.
@@ -1168,8 +1340,10 @@ record and, when one exists, replay from it before placement runs. The
 read only nominates: a token written between the read and the transaction
 still cancels the transaction and is classified there (P-5). Replaying
 first means a retry gets the original outcome even when the fleet changed
-in between — an account narrowed or filled since the first call must not
-turn the retry into a 400 or a capacity error.
+in between — an account narrowed or filled since the first call, or a
+parameter made required since, must not turn the retry into a 400 or a
+capacity error. The replay read therefore runs before parameter
+validation (R-33) as well as before placement.
 
 On a cancelled idempotency condition, or on a record found by that read:
 
@@ -1179,9 +1353,14 @@ On a cancelled idempotency condition, or on a record found by that read:
 - hash differs, or the deployment was since deleted, or the record vanished
   in the TTL race between transaction and read → **409**.
 
-The request hash covers every placement input, `tenantId`, `applicationId`
-and `accountId` included: the same token reused for another application is
-a different request, hence a 409.
+The request hash covers every request input, `tenantId`, `applicationId`,
+`accountId` and the `parameters` map (in a canonical, name-sorted form)
+included: the same token reused for another application or with other
+parameter values is a different request, hence a 409. An absent map and
+an empty map `{}` are the same request, and both hash exactly as a request
+did before parameters existed (the map is left out of the hash input when
+empty), so a token issued before the upgrade still replays inside its
+window.
 
 ### 7.4 Compensation and the residual gap
 
@@ -1224,9 +1403,10 @@ operation shape:
 **R-20:** the service MUST resolve everything the workflow needs — source,
 script paths (from the cell's stamp, never from the application record),
 failure statuses, ids including the `tenantId` and `applicationId`, the
-tenant's `name`, the cell's
-`accountId`, the two provisioning role ARNs derived from it, and the
-account's `externalId` — into the execution input. The workflow MUST NOT re-read mutable records to
+tenant's `name`, the deployment's resolved parameter set (R-32), the
+cell's resolved parameter set (R-34) when the execution has a cell build, the
+cell's `accountId`, the two provisioning role ARNs derived from it, and
+the account's `externalId` — into the execution input. The workflow MUST NOT re-read mutable records to
 decide what to do. Why: a
 mid-workflow read of a record that a concurrent operation is mutating
 reintroduces exactly the races the conditional writes eliminated, and each
@@ -1239,7 +1419,31 @@ operator-visible control plane data.)
 workflow MUST update records with expressions touching only the fields each
 operation owns — never whole-item overwrites. Metadata edits cannot revert
 status or erase `lastBuildId`; lifecycle transitions cannot restore stale
-metadata.
+metadata. The `parameters` map on a deployment or cell is owned by its
+create and update requests (R-33, R-34); workflow terminal writes MUST
+NOT touch it.
+
+**Payload budget:** each resolved parameter set holds at most 40 entries
+(20 stored, stale ones included, plus up to 20 defaults) of at most 1,088
+bytes (a 64-byte name and a 1,024-byte value), about 43 KiB raw. The
+execution input is JSON. With control characters refused (R-33), only
+`"` and `\` need escaping, so a value grows at most twofold: about 87 KiB
+per set. A new-cell create carries a cell set and a tenant set, about
+174 KiB, inside the 256 KiB Step Functions limit with the rest of the
+R-20 input. That limit applies to every state's payload, not only the
+input, and a CodeBuild `Build` result echoes the build's environment
+variables, values included. So each build task MUST keep only what the
+terminal writes read (a `ResultSelector` holding the build ARN and
+status); a full result kept in state would add a second copy of each
+parameter set and pass the limit. The same holds on the failure path,
+which `ResultSelector` does not reach: a build task's `Catch` MUST keep
+only the build ARN and status from the error before it enters state,
+never the raw `Cause` string or a parsed copy of the `Build`. A payload
+over the limit fails the execution with `States.DataLimitExceeded`,
+which `States.ALL` does not catch, so no `*_FAILED` write would run.
+Keeping state small does not keep values out of the task history events
+(they record the raw service result); N-11 already accepts values in
+execution history.
 
 ### 8.2 Terminal writes
 
@@ -1305,6 +1509,7 @@ bypasses the Catch and strands records).
 | N-8 | The build roles' AssumeRole resource is the provisioning role **by fixed name in any account**; the control plane never maps account ids into IAM policy. | Accounts are registered at run time (P-10); the target role's trust policy — written by the account owner — is the gate, and `externalId` closes the confused deputy. Enumerating accounts in IAM would make registration a deployment, defeating on-demand customer accounts. |
 | N-9 | `PutAccount` probes both roles before writing (R-26); the probe makes no call under the assumed credentials. | Fail at registration, when the operator is present, not at the first build; and never touch the account during a check. |
 | N-10 | `externalId` is never returned by the API and never logged by the sample. It reaches the build as a plaintext CodeBuild environment-variable override carried in the Step Functions execution input, readable by principals with `states:DescribeExecution` or `codebuild:BatchGetBuilds` in the control plane account (the operator role, the account's administrators). | Not a secret by AWS's definition; the guard's value is that outsiders do not hold it, and nobody outside the control plane account can read those APIs. |
+| N-11 | Deployment and cell parameter values MUST NOT be secrets. They are stored in plain text on the deployment or cell record, returned by `GetDeployment` or `GetCell`, and reach the build as CodeBuild environment-variable overrides carried in the Step Functions execution input. The service logs parameter names, never values. A script that needs a secret receives its *name* as a parameter (a Secrets Manager secret or an SSM `SecureString` under the deployment's tenant namespace or the application's shared namespace, §6.2) and reads it under its own role. | Everyone who can read the table, the execution history or `codebuild:BatchGetBuilds` in the control plane account can read the values; secret-shaped storage would need a KMS key, extra IAM and a second read path for a concern the application plane already solves. |
 
 ---
 
@@ -1315,16 +1520,23 @@ scenario against real infrastructure in **two accounts** with **two
 applications** and **two tenants** (this mirrors the reference integration
 test). Account A is the control plane's own account; account B is a second
 account with the role pair installed under an `externalId`. Applications X
-and Y share the same source and scripts and differ in id; both have
+and Y share the same source and scripts and differ in id and in their parameter declarations; both have
 `maxTenants = 1` (every cell is a silo, so cells — not deployments — are
-what the accounts count). Tenants T1 and T2 are plain records.
+what the accounts count). Tenants T1 and T2 are plain records. X declares
+parameters (step 2); every `CreateDeployment` of X supplies
+`ALLOWED_EMAIL_DOMAIN = example.com` unless a step says otherwise.
 
 1. **Auth:** an operation without a JWT is rejected; with a valid vendor
    IdP JWT it succeeds.
 2. **Applications:** `PutApplication` with a missing script path → 400;
    with an id outside the charset → 400; `PutApplication` X and Y → 200;
    `ListApplications` shows both with `cellCount = 0`; `PutAccount` naming
-   an unregistered application in `applicationIds` → 404.
+   an unregistered application in `applicationIds` → 404. X declares two
+   parameters, `ALLOWED_EMAIL_DOMAIN` (required) and `LOG_LEVEL` (default
+   `info`), and one cell parameter, `CELL_SIZE` (default `small`); a
+   declaration named in lower case, a duplicate name, a required
+   parameter with a default, a cell parameter without a default, or one
+   name in both lists → 400.
 3. **Handshake:** `PutAccount` for an account with no role pair → 400;
    `PutAccount` B as `TENANT` without `externalId` → 400; with the wrong
    `externalId` → 400 naming the role; `PutAccount` A (`VENDOR`,
@@ -1338,11 +1550,18 @@ what the accounts count). Tenants T1 and T2 are plain records.
    `DeleteTenant` T3 → 200 (empty); `CreateDeployment` for T3 → 404;
    `CreateDeployment` for an unregistered application → 404.
 5. **Implicit creation in the home account:** `CreateDeployment` T1/X
-   with an empty fleet creates cell 1 in A (`CREATING → ACTIVE`), then the
-   deployment; `GetDeployment` T1/X reports `cellId` and the stamped
-   definition, `GetCell` reports `accountId = A` and `applicationId = X`;
+   without `ALLOWED_EMAIL_DOMAIN`, or with an undeclared parameter → 400,
+   nothing written. `CreateDeployment` T1/X with
+   `ALLOWED_EMAIL_DOMAIN = example.com` and an empty fleet creates cell 1
+   in A (`CREATING → ACTIVE`), then the
+   deployment; `GetDeployment` T1/X reports `cellId`, the stamped
+   definition and `parameters = {ALLOWED_EMAIL_DOMAIN: example.com}`,
+   `GetCell` reports `accountId = A` and `applicationId = X`;
    the cell namespace and `/application-plane/tenants/T1/X/*` exist
-   **in A**. Account A is 1/2; X has `cellCount = 1`; T1 has
+   **in A**, and the tenant create script recorded there that it received
+   `PARAM_ALLOWED_EMAIL_DOMAIN = example.com` and `PARAM_LOG_LEVEL = info`;
+   the cell create script recorded `PARAM_CELL_SIZE = small` and no
+   tenant parameter, and `GetCell` reports empty `parameters`. Account A is 1/2; X has `cellCount = 1`; T1 has
    `deploymentCount = 1`.
 6. **One tenant, two applications:** `CreateDeployment` T1/Y without a
    target creates cell 2 in A (B is tenant-owned and never chosen
@@ -1358,7 +1577,7 @@ what the accounts count). Tenants T1 and T2 are plain records.
 7. **Idempotent replay:** re-sending T1/X's request with the same
    `clientToken` returns the original deployment (no second deployment, no
    new cell, A still 2/2, T1 still 2); the same token with a different
-   `applicationId` is a 409.
+   `applicationId`, or with a different `ALLOWED_EMAIL_DOMAIN`, is a 409.
 8. **Fleet full for one application:** `CreateDeployment` T2/X without a
    target → 409 `InsufficientCapacityError` (A is full, B is tenant-owned);
    no deployment, cell, tenant count, account or application changed.
@@ -1387,18 +1606,55 @@ what the accounts count). Tenants T1 and T2 are plain records.
     `UpdateCell` on cell 3 (in B) run the update scripts under the
     respective account's provisioning role, with `APPLICATION_ID`,
     `TENANT_ID` and `TENANT_NAME` set, and return to `ACTIVE`.
-14. **Reuse before create:** `DeleteDeployment` T1/X frees its slot
+    `UpdateDeployment` T1/X with `parameters = {LOG_LEVEL: debug}` keeps
+    `ALLOWED_EMAIL_DOMAIN`, and the update script records both values;
+    `removeParameters = [ALLOWED_EMAIL_DOMAIN]` → 400 (required), and the
+    same name in both lists → 400, with the stored values unchanged.
+    `UpdateCell` on cell 1 with `parameters = {CELL_SIZE: large}` stores
+    the value and the cell update script records `PARAM_CELL_SIZE = large`
+    and no tenant parameter; `UpdateCell` with `LOG_LEVEL` (a tenant
+    parameter) or an undeclared name → 400, and `UpdateDeployment` T1/X
+    with `CELL_SIZE` → 400, nothing written; `UpdateCell` with
+    `removeParameters = [CELL_SIZE]` empties the map and the update build
+    of that same call gets `small` again. A value holding a control
+    character → 400. Cells 2 and 3 and the tenant scripts of T1/Y and
+    T2/Y (application Y) recorded no `PARAM_` variable in any build.
+14. **Declarations change under live records:** `PutApplication` X
+    re-sent with its definition and no parameter lists keeps both
+    lists (`GetApplication` shows them unchanged). `PutApplication` X
+    then sends `parameters = [ALLOWED_EMAIL_DOMAIN (required), LOG_LEVEL
+    (default warn)]` and `cellParameters = [CELL_SIZE (default medium)]`.
+    `UpdateDeployment` T1/X with `removeParameters = [LOG_LEVEL]` → 202,
+    and the update script records `PARAM_LOG_LEVEL = warn` (an existing
+    deployment falls back to the changed default). `UpdateCell` on cell 1
+    with an empty body records `PARAM_CELL_SIZE = medium` (the new
+    default reaches an existing cell). `PutApplication` X then sends
+    `parameters = [LOG_LEVEL (default warn), TIER (required)]` and no
+    `cellParameters`, dropping `ALLOWED_EMAIL_DOMAIN` and keeping
+    `CELL_SIZE`. `UpdateDeployment` T1/X with an empty body → 400 naming
+    `TIER`, nothing written. No `TIER` is supplied to T1/X. From here on
+    every `CreateDeployment` of X supplies `TIER = gold` instead of
+    `ALLOWED_EMAIL_DOMAIN`.
+15. **Reuse before create:** `DeleteDeployment` T1/X frees its slot
     (transactionally); cell 1 stays, empty, account A stays 2/2, X stays at
     `cellCount = 1` (the cell slot is held by the cell, not the
     deployment), T1 drops to `deploymentCount = 1`. `CreateDeployment`
     T2/X without a target places it into cell 1 — no new cell, no 409.
-15. **Teardown:** deleting all deployments frees their slots and every
+    T1/X's delete ran although T1/X lacks the now-required `TIER` (a
+    newly required parameter never blocks a delete). Its tenant delete
+    script recorded the stale `PARAM_ALLOWED_EMAIL_DOMAIN = example.com`
+    (no longer declared, still passed), `PARAM_LOG_LEVEL = warn` (the
+    default) and no `PARAM_TIER`.
+16. **Teardown:** deleting all deployments frees their slots and every
     tenant's `deploymentCount` returns to 0; deleting the now-empty cells
     removes them **and releases the account and application slots**
     (A → 0/2, B → 0/1, X and Y → `cellCount = 0`); `DeleteTenant` T1 and
     T2 → 200; `DeleteAccount` A and B → 200; `DeleteApplication` X and Y →
     200; `ListTenants`, `ListAccounts` and `ListApplications` are empty;
-    the parameter namespaces in **both** accounts end empty. Every
+    the parameter namespaces in **both** accounts end empty. Cell 1's
+    delete script recorded `PARAM_CELL_SIZE = medium`; T2/X's tenant
+    delete script recorded `PARAM_TIER = gold` and `PARAM_LOG_LEVEL =
+    warn` (a default) and no `PARAM_ALLOWED_EMAIL_DOMAIN`. Every
     operation has run at least once.
 
 Plus unit-level assertions that no state-dependent write path is
@@ -1422,12 +1678,13 @@ Per P-1, deferred generality is recorded as seams, not code:
 | Extension | Seam |
 |---|---|
 | Standalone resource service (pooled/hybrid re-split) | extract at the deployment collection (`/tenants/{tenantId}/deployments`); the deployment is already the tenant↔cell join; propagate terminal status back via event push or M2M-authenticated polling |
-| Definition-replacing `UpdateCell` body | noted extension; today the stamped definition is immutable and a replaced application definition reaches only new cells |
+| Definition-replacing field on the `UpdateCell` body | noted extension; the body carries cell parameter values only (R-34); today the stamped definition is immutable and a replaced application definition reaches only new cells |
 | Per-application cell cap inside a shared account | a join record per (account, application) with its own counter and cap, layered under the account's `maxCells` ([ADR-033](../adr/0033-account-admission-is-an-application-allowlist-on-the-account.md), option 3); today an account admits applications but does not meter them separately |
 | A role pair per application | would make the application a deployment unit again and give each one its own trust boundary in every account; today one pair per account serves every application it admits, and the scripts of one application can read another's cell namespace in the same account (trusted vendor code, §6.3) |
 | Explicit capacity pre-provisioning (`POST /cells`) | deliberately absent; placement is the only creator |
 | Per-operation authorization matrix | authorizer already forwards `role`; caller context already carries it |
-| Opaque per-tenant script parameters | generic `parameters: map<string,string>` → build env vars |
+| Secret deployment parameters | a `secret` flag on the declaration, with the value stored as a reference to a control-plane-owned secret and resolved only inside the build; today a script receives a secret's name as a plain parameter and reads it under its own role (N-11) |
+| Cell parameter values at birth | a body on the pre-provisioning seam (`POST /cells`) or a per-account override map; today a new cell always starts on the declared defaults and differs only after `UpdateCell` (R-34). Values that differ per account belong in the application's shared namespace in that account (§6.2) |
 | Stuck-execution sweep for aged transitional records | covers the two documented stranding gaps (§7.4, R-22) |
 | Auto-scale-in (delete after N days empty) | business plane policy layered on the explicit `DeleteCell` and `DeleteAccount` APIs |
 | A Region per account | an `accountId`-plus-`region` target on the account record; the build runner's AssumeRole already yields credentials usable in any Region, so the seam is the account record and the scripts' Region input, not the trust model |

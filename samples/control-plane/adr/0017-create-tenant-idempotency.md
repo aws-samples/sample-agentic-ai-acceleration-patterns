@@ -45,3 +45,5 @@ control-plane-owned bookkeeping — it is never listed, never returned, and
 carries no GSI keys. `DeleteTenant` deliberately does not clean up the
 record: a replayed create after a delete is a 409 pointing at the deleted
 tenant, not a silent re-onboard — the safer semantics for an operator API.
+
+**Amended by ADR-0039 (2026-11-12):** the request hash also covers the `parameters` map of `CreateDeployment`, in a canonical name-sorted form.

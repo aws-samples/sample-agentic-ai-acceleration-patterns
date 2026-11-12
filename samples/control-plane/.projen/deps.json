@@ -75,6 +75,11 @@
       "type": "build"
     },
     {
+      "name": "jsonata",
+      "version": "2.2.2",
+      "type": "build"
+    },
+    {
       "name": "projen",
       "type": "build"
     },
@@ -113,6 +118,11 @@
     {
       "name": "@aws-sdk/lib-dynamodb",
       "version": "3.1125.0",
+      "type": "runtime"
+    },
+    {
+      "name": "@aws-sdk/util-dynamodb",
+      "version": "3.996.9",
       "type": "runtime"
     },
     {

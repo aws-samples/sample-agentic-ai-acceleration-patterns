@@ -48,6 +48,15 @@ import {
   idempotencyKey,
 } from './idempotency.data-model';
 import {
+  mergeCellParameters,
+  mergeDeploymentParameters,
+  ParameterValues,
+  parametersAsReadCondition,
+  resolveParameters,
+  validateCreateParameters,
+  validateDeclarations,
+} from './parameters';
+import {
   TENANT_EMPTY_CONDITION,
   TENANT_NOT_EXISTS_CONDITION,
   TenantItem,
@@ -64,6 +73,7 @@ import {
   DuplicateTokenError,
   DynamoDBRepository,
   GsiQuery,
+  ItemKey,
   PlacementRaceLostError,
   PlacementTransactions,
   RecordGoneError,
@@ -138,11 +148,18 @@ export type ProvisioningOperation = 'create' | 'update' | 'delete';
 type FailedLifecycleStatus = 'CREATE_FAILED' | 'UPDATE_FAILED' | 'DELETE_FAILED';
 type InFlightLifecycleStatus = 'CREATING' | 'UPDATING' | 'DELETING';
 
-/** One optional build phase of the workflow input (§8). */
+/**
+ * One optional build phase of the workflow input (§8). `parameters` is the
+ * phase's resolved parameter set (R-32 for a tenant build, R-34 for a cell
+ * build): the stored values plus the defaults of declared names without
+ * one. The workflow passes each entry as `PARAM_<NAME>` and never re-reads
+ * a record for it (R-20). Always present; `{}` when there is none.
+ */
 interface BuildPhaseInput {
   readonly operation: ProvisioningOperation;
   readonly scriptPath: string;
   readonly failedStatus: FailedLifecycleStatus;
+  readonly parameters: ParameterValues;
 }
 
 /**
@@ -448,12 +465,19 @@ export class TenantService implements TenantServiceService<CallerContext> {
     const requestHash =
       clientToken === undefined
         ? undefined
-        : createDeploymentRequestHash({ tenantId, applicationId, adminEmail, accountId: input.accountId });
+        : createDeploymentRequestHash({
+          tenantId,
+          applicationId,
+          adminEmail,
+          accountId: input.accountId,
+          parameters: input.parameters,
+        });
 
     // A replay is recognised before anything else (§7.3): a token already
     // on record returns the original outcome even when the fleet has
-    // changed since — an account narrowed or filled in between must not
-    // turn the retry into a 400 or a capacity error. The read only
+    // changed since — an account narrowed or filled in between, or a
+    // parameter made required, must not turn the retry into a 400 or a
+    // capacity error. The read only
     // nominates; a token that lands between this read and the transaction
     // still cancels the transaction and is classified there (P-5).
     if (clientToken !== undefined && requestHash !== undefined) {
@@ -478,6 +502,11 @@ export class TenantService implements TenantServiceService<CallerContext> {
     const tenant = await this.getTenantOrThrow(tenantId);
     const application = await this.getApplicationOrThrow(applicationId);
 
+    // R-33: the values are checked against the declarations just read -
+    // after the replay read, before placement - and stored as supplied
+    // (never a default). A 400 here writes nothing.
+    const parameters = validateCreateParameters(input.parameters, application.parameters, application.cellParameters);
+
     // Optional idempotency (ADR-017): the item joins the placement
     // transaction, conditional on attribute_not_exists(PK). Its cancelled
     // condition marks the request as a replay of an earlier CreateDeployment.
@@ -498,9 +527,14 @@ export class TenantService implements TenantServiceService<CallerContext> {
       applicationId,
       cellId,
       status: 'CREATING',
+      parameters,
       createdAt: now,
       updatedAt: now,
     });
+    // R-32: the tenant build's set is resolved at accept time from the
+    // values just validated and the declarations they were validated
+    // against.
+    const tenantParameters = resolveParameters(parameters, application.parameters);
 
     // §7 step 0 — TARGET: which accounts may host a new cell and which
     // existing cells are candidates. A named account is the only eligible
@@ -534,6 +568,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           operation: 'create',
           scriptPath: requireField(placed.cell.tenantScripts.create, 'cell.tenantScripts.create'),
           failedStatus: 'CREATE_FAILED',
+          parameters: tenantParameters,
           tenantName: tenant.name,
           adminEmail,
         },
@@ -573,12 +608,15 @@ export class TenantService implements TenantServiceService<CallerContext> {
           operation: 'create',
           scriptPath: requireField(cell.cellScripts.create, 'application.cellScripts.create'),
           failedStatus: 'CREATE_FAILED',
+          // R-34: a new cell has no values of its own - the defaults.
+          parameters: resolveParameters(cell.parameters, application.cellParameters),
         },
         tenantId,
         tenantBuild: {
           operation: 'create',
           scriptPath: requireField(cell.tenantScripts.create, 'application.tenantScripts.create'),
           failedStatus: 'CREATE_FAILED',
+          parameters: tenantParameters,
           tenantName: tenant.name,
           adminEmail,
         },
@@ -620,6 +658,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
       source: cell.source,
       scripts: cell.tenantScripts,
       accountId: cell.accountId,
+      // The supplied values only; defaults are not merged in (§5.2).
+      parameters: { ...(deployment.parameters ?? {}) },
     };
   };
 
@@ -629,14 +669,26 @@ export class TenantService implements TenantServiceService<CallerContext> {
   ): Promise<UpdateDeploymentServerOutput> => {
     const tenantId = requireField(input.tenantId, 'tenantId');
     const applicationId = requireField(input.applicationId, 'applicationId');
+    const what = `Deployment ${tenantId}/${applicationId}`;
     const existing = await this.getDeploymentOrThrow(tenantId, applicationId);
+
+    // R-33: the body is validated against the application's current
+    // declarations, on the record just read and before the status check,
+    // so a request that is both invalid and in flight is a 400 with
+    // nothing written. The merge keeps every stored value it does not name.
+    const application = await this.getApplicationForRecord(applicationId, what);
+    const merged = mergeDeploymentParameters({
+      stored: existing.parameters,
+      set: input.parameters,
+      remove: input.removeParameters,
+      declarations: application.parameters,
+      cellDeclarations: application.cellParameters,
+    });
 
     // Allowed from ACTIVE and UPDATE_FAILED only. From CREATE_FAILED the
     // remediation is delete + recreate — the create script never completed.
     if (!UPDATABLE_STATUSES.includes(existing.status)) {
-      throw new ConflictError({
-        message: `Deployment ${tenantId}/${applicationId} is ${existing.status}; it can be re-applied from ACTIVE or UPDATE_FAILED`,
-      });
+      throw updateConflict(what, existing.status);
     }
 
     // Cross-entity guard (R-13): no tenant builds against a shared
@@ -652,7 +704,13 @@ export class TenantService implements TenantServiceService<CallerContext> {
 
     const account = await this.getAccountForCell(cell);
     const tenant = await this.getTenantForDeployment(existing);
-    const updating = await this.transitionDeployment(tenantId, applicationId, UPDATABLE_STATUSES, 'UPDATING');
+    const updating = (await this.mergeTransition(
+      this.config.deploymentRepository,
+      deploymentKey(tenantId, applicationId),
+      what,
+      existing.parameters,
+      merged,
+    )) as DeploymentRecord;
     await this.startWorkflow(
       `${tenantId}-${applicationId}-u-${Date.now()}`,
       {
@@ -663,6 +721,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           operation: 'update',
           scriptPath: requireField(cell.tenantScripts.update, 'cell.tenantScripts.update'),
           failedStatus: 'UPDATE_FAILED',
+          parameters: resolveParameters(merged, application.parameters),
           tenantName: tenant.name,
           adminEmail: '',
         },
@@ -693,6 +752,9 @@ export class TenantService implements TenantServiceService<CallerContext> {
     const cell = await this.getCellForDeployment(existing);
     const account = await this.getAccountForCell(cell);
     const tenant = await this.getTenantForDeployment(existing);
+    // R-32, P-9: cleanup runs with what is stored, never validated against
+    // the current declarations; the application supplies defaults only.
+    const declarations = (await this.config.applicationRepository.get(applicationKey(applicationId)))?.parameters;
 
     const deleting = await this.transitionDeployment(
       tenantId,
@@ -710,6 +772,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           operation: 'delete',
           scriptPath: requireField(cell.tenantScripts.delete, 'cell.tenantScripts.delete'),
           failedStatus: 'DELETE_FAILED',
+          parameters: resolveParameters(existing.parameters, declarations),
           tenantName: tenant.name,
           adminEmail: '',
         },
@@ -764,7 +827,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
     _context: CallerContext,
   ): Promise<GetCellServerOutput> => {
     const cell = await this.getCellOrThrow(requireField(input.cellId, 'cellId'));
-    return { cell: toCellSummary(cell) };
+    // The operator-set values only; defaults are not merged in (§5.3).
+    return { cell: toCellSummary(cell), parameters: { ...(cell.parameters ?? {}) } };
   };
 
   ListCells = async (
@@ -797,20 +861,40 @@ export class TenantService implements TenantServiceService<CallerContext> {
     context: CallerContext,
   ): Promise<UpdateCellServerOutput> => {
     const cellId = requireField(input.cellId, 'cellId');
+    const what = `Cell ${cellId}`;
     const existing = await this.getCellOrThrow(cellId);
+
+    // R-34: validated against the application's current cellParameters
+    // before the status check, then merged exactly as R-33 merges a
+    // deployment's values.
+    const application = await this.getApplicationForRecord(existing.applicationId, what);
+    const merged = mergeCellParameters({
+      stored: existing.parameters,
+      set: input.parameters,
+      remove: input.removeParameters,
+      cellDeclarations: application.cellParameters,
+      declarations: application.parameters,
+    });
 
     // Allowed from ACTIVE/UPDATE_FAILED; 409 if in-flight or CREATE_FAILED —
     // re-running the update script against a half-created shared deployment
     // would break the create/update script contract (§5.3). Remediation for
     // a failed cell create is deployment delete + cell delete.
     if (!UPDATABLE_STATUSES.includes(existing.status)) {
-      throw new ConflictError({
-        message: `Cell ${cellId} is ${existing.status}; the shared deployment can be re-applied from ACTIVE or UPDATE_FAILED`,
-      });
+      throw updateConflict(what, existing.status);
     }
 
     const account = await this.getAccountForCell(existing);
-    const updating = await this.transitionCell(cellId, UPDATABLE_STATUSES, 'UPDATING');
+    // The map, not updatedAt, guards the write: placements and deployment
+    // deletes write the cell's counter and updatedAt while it is ACTIVE and
+    // must not fail an UpdateCell that has nothing to do with them (R-34).
+    const updating = (await this.mergeTransition(
+      this.config.cellRepository,
+      cellKey(cellId),
+      what,
+      existing.parameters,
+      merged,
+    )) as CellRecord;
     await this.startWorkflow(
       `${cellId}-cell-update-${Date.now()}`,
       {
@@ -820,6 +904,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           operation: 'update',
           scriptPath: requireField(existing.cellScripts.update, 'cell.cellScripts.update'),
           failedStatus: 'UPDATE_FAILED',
+          parameters: resolveParameters(merged, application.cellParameters),
         },
       },
       this.cellCompensation(cellId, 'UPDATING', 'UPDATE_FAILED'),
@@ -834,6 +919,9 @@ export class TenantService implements TenantServiceService<CallerContext> {
     const cellId = requireField(input.cellId, 'cellId');
     const existing = await this.getCellOrThrow(cellId);
     const account = await this.getAccountForCell(existing);
+    // R-34: never validated; the application supplies defaults only.
+    const cellDeclarations = (await this.config.applicationRepository.get(applicationKey(existing.applicationId)))
+      ?.cellParameters;
 
     // ADR-014: the emptiness check and the DELETING transition are ONE
     // atomic conditional UpdateItem (status IN {ACTIVE, *_FAILED} AND
@@ -863,6 +951,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           operation: 'delete',
           scriptPath: requireField(existing.cellScripts.delete, 'cell.cellScripts.delete'),
           failedStatus: 'DELETE_FAILED',
+          parameters: resolveParameters(existing.parameters, cellDeclarations),
         },
       },
       this.cellCompensation(cellId, 'DELETING', 'DELETE_FAILED'),
@@ -1036,6 +1125,22 @@ export class TenantService implements TenantServiceService<CallerContext> {
     const cellScripts = requireField(input.cellScripts, 'cellScripts');
     const tenantScripts = requireField(input.tenantScripts, 'tenantScripts');
     const maxTenants = requireField(input.maxTenants, 'maxTenants');
+
+    // A list the request does not send is kept (R-29, §5.5), so the current
+    // record is read whenever one is missing: the "one name in one list"
+    // check runs against the kept list, and the write is conditioned on it
+    // being unchanged. On a new application an absent list declares none.
+    const current =
+      input.parameters === undefined || input.cellParameters === undefined
+        ? await this.config.applicationRepository.get(applicationKey(applicationId))
+        : undefined;
+    const declarations = validateDeclarations({
+      parameters: input.parameters,
+      cellParameters: input.cellParameters,
+      keptParameters: current?.parameters,
+      keptCellParameters: current?.cellParameters,
+    });
+
     // The generated validators have already enforced the definition's shape
     // (every script path non-empty, maxTenants >= 1, the id's charset) —
     // what remains is the supply-chain check, warn-and-allow (ADR-020): the
@@ -1047,32 +1152,46 @@ export class TenantService implements TenantServiceService<CallerContext> {
     }
 
     // One create-or-replace write (R-29): the definition and the strategy
-    // are replaced, cellCount is never touched. Cells already stamped keep
-    // their definition (P-4).
-    const application = await this.config.applicationRepository.update(
-      applicationKey(applicationId),
-      putApplicationUpdate({
-        applicationId,
-        source: {
-          type: requireField(source.type, 'source.type'),
-          location: requireField(source.location, 'source.location'),
-          sourceVersion: source.sourceVersion,
-        },
-        cellScripts: {
-          create: requireField(cellScripts.create, 'cellScripts.create'),
-          update: requireField(cellScripts.update, 'cellScripts.update'),
-          delete: requireField(cellScripts.delete, 'cellScripts.delete'),
-        },
-        tenantScripts: {
-          create: requireField(tenantScripts.create, 'tenantScripts.create'),
-          update: requireField(tenantScripts.update, 'tenantScripts.update'),
-          delete: requireField(tenantScripts.delete, 'tenantScripts.delete'),
-        },
-        maxTenants,
-        placementStrategy: input.placementStrategy ?? DEFAULT_PLACEMENT_STRATEGY,
-        now: new Date().toISOString(),
-      }),
-    );
+    // are replaced, a declaration list only when sent, cellCount is never
+    // touched. Cells already stamped keep their definition (P-4).
+    let application: ApplicationRecord;
+    try {
+      application = await this.config.applicationRepository.update(
+        applicationKey(applicationId),
+        putApplicationUpdate({
+          applicationId,
+          source: {
+            type: requireField(source.type, 'source.type'),
+            location: requireField(source.location, 'source.location'),
+            sourceVersion: source.sourceVersion,
+          },
+          cellScripts: {
+            create: requireField(cellScripts.create, 'cellScripts.create'),
+            update: requireField(cellScripts.update, 'cellScripts.update'),
+            delete: requireField(cellScripts.delete, 'cellScripts.delete'),
+          },
+          tenantScripts: {
+            create: requireField(tenantScripts.create, 'tenantScripts.create'),
+            update: requireField(tenantScripts.update, 'tenantScripts.update'),
+            delete: requireField(tenantScripts.delete, 'tenantScripts.delete'),
+          },
+          maxTenants,
+          placementStrategy: input.placementStrategy ?? DEFAULT_PLACEMENT_STRATEGY,
+          parameters: declarations.parameters ?? { read: current?.parameters },
+          cellParameters: declarations.cellParameters ?? { read: current?.cellParameters },
+          now: new Date().toISOString(),
+        }),
+      );
+    } catch (error) {
+      if (error instanceof ConditionFailedError) {
+        // A kept list changed between the read and the write (R-14): the
+        // checks ran against a list that is no longer there.
+        throw new ConflictError({
+          message: `Application ${applicationId}: a parameter declaration list this request keeps changed after it was read; re-read and ${RETRY_HINT}`,
+        });
+      }
+      throw error;
+    }
     return { application: toApplicationSummary(application) };
   };
 
@@ -1302,6 +1421,9 @@ export class TenantService implements TenantServiceService<CallerContext> {
         source: application.source,
         cellScripts: application.cellScripts,
         tenantScripts: application.tenantScripts,
+        // R-34, §7.1 step 3: no request supplies cell values at birth; the
+        // cell starts on the defaults, resolved per build.
+        parameters: {},
         createdAt: now,
         updatedAt: now,
       };
@@ -1538,27 +1660,53 @@ export class TenantService implements TenantServiceService<CallerContext> {
     }
   }
 
-  /** Compare-and-set cell lifecycle transition — same discipline as the deployment's. */
-  private async transitionCell(
-    cellId: string,
-    fromAnyOf: readonly LifecycleStatus[],
-    to: InFlightLifecycleStatus,
-  ): Promise<CellRecord> {
+  /**
+   * The `UPDATING` transition of `UpdateDeployment` and `UpdateCell` that
+   * carries the parameter merge (R-33, R-34): ONE conditional `UpdateItem`
+   * writing the whole merged map (`SET #parameters = :parameters`, never a
+   * per-name path, which is invalid on a record with no map yet), guarded
+   * by the status AND by the map being exactly as read. A failure is
+   * classified from the item DynamoDB returns with it (`ALL_OLD`, R-14).
+   * The cell-`ACTIVE` guard of `UpdateDeployment` stays a read before this
+   * write (R-13); the cell is never a member of it.
+   */
+  private async mergeTransition<TRecord extends { readonly status: LifecycleStatus }>(
+    repository: DynamoDBRepository<TRecord, DeploymentItem> | DynamoDBRepository<TRecord, CellItem>,
+    key: ItemKey,
+    what: string,
+    read: ParameterValues | undefined,
+    merged: ParameterValues,
+  ): Promise<TRecord> {
     try {
-      return await this.config.cellRepository.transitionStatus(cellKey(cellId), {
-        fromAnyOf,
-        to,
+      return await repository.transitionStatus(key, {
+        fromAnyOf: UPDATABLE_STATUSES,
+        to: 'UPDATING',
         updatedAt: new Date().toISOString(),
+        setFields: { parameters: merged },
         removeFields: ['statusReason'],
+        extraCondition: parametersAsReadCondition(read),
+        returnCurrentOnFailure: true,
       });
     } catch (error) {
       if (error instanceof StaleTransitionError) {
-        throw new ConflictError({
-          message: `Cell ${cellId} was modified concurrently; re-read and retry`,
-        });
+        throw mergeFailure(what, error.current as { readonly status: LifecycleStatus } | undefined);
       }
       throw error;
     }
+  }
+
+  /**
+   * Reads the application a deployment or cell belongs to, for its
+   * declarations. Both hold a count on the application (`DeleteApplication`
+   * refuses while `cellCount > 0`), so a missing application is an
+   * invariant violation — an internal error, never a client 404.
+   */
+  private async getApplicationForRecord(applicationId: string, what: string): Promise<ApplicationRecord> {
+    const application = await this.config.applicationRepository.get(applicationKey(applicationId));
+    if (application === undefined) {
+      throw new InternalServerError({ message: `${what} references unregistered application ${applicationId}` });
+    }
+    return application;
   }
 
   /** Single-CAS deployment compensation: in-flight status → the matching *_FAILED (§7.4). */
@@ -1759,6 +1907,17 @@ function toApplicationSummary(record: ApplicationRecord): ApplicationSummary {
     tenantScripts: record.tenantScripts,
     maxTenants: record.maxTenants,
     placementStrategy: record.placementStrategy,
+    parameters: (record.parameters ?? []).map((declaration) => ({
+      name: declaration.name,
+      required: declaration.required,
+      default: declaration.default,
+      description: declaration.description,
+    })),
+    cellParameters: (record.cellParameters ?? []).map((declaration) => ({
+      name: declaration.name,
+      default: declaration.default,
+      description: declaration.description,
+    })),
     cellCount: record.cellCount,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -1782,6 +1941,47 @@ function toCellSummary(record: CellRecord): CellSummary {
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
+}
+
+/**
+ * The retry hint of a 409 (R-14). The ConflictError shape carries only a
+ * message, so the hint is this phrase in it: present when a retry can
+ * succeed, absent when the remedy is a delete.
+ */
+const RETRY_HINT = 'retry the request';
+
+/**
+ * The 409 for an update (re-apply) refused by the record's status. In
+ * flight (`CREATING`, `UPDATING`) it ends in a state the update admits, so
+ * the message carries the retry hint; from `CREATE_FAILED`,
+ * `DELETE_FAILED` or `DELETING` a retry cannot succeed and the remedy is a
+ * delete (R-14).
+ */
+function updateConflict(what: string, status: LifecycleStatus): ConflictError {
+  if (status === 'CREATING' || status === 'UPDATING') {
+    return new ConflictError({ message: `${what} is ${status}; ${RETRY_HINT} once it has finished` });
+  }
+  return new ConflictError({
+    message: `${what} is ${status}; it can be re-applied from ACTIVE or UPDATE_FAILED only, so a retry cannot succeed and the remedy is a delete`,
+  });
+}
+
+/**
+ * Classifies a failed parameter-merge write from the item that failed it
+ * (`ALL_OLD`, R-14): no item means the record was deleted (404); a status
+ * the update admits means the stored map changed since the read (409,
+ * retry); any other status is {@link updateConflict}.
+ */
+function mergeFailure(what: string, current: { readonly status: LifecycleStatus } | undefined): Error {
+  if (current === undefined) {
+    return new ResourceNotFoundError({ message: `${what} no longer exists` });
+  }
+  if (UPDATABLE_STATUSES.includes(current.status)) {
+    return new ConflictError({
+      message: `${what}: its parameter values changed after this request read them; re-read and ${RETRY_HINT}`,
+    });
+  }
+  return updateConflict(what, current.status);
 }
 
 function errorMessage(error: unknown): string {

@@ -23,3 +23,5 @@ Option 1. An **application** is the fourth entity on the table (`APPLICATION#<ap
 
 ## Consequences
 The spec gains §4.1 (Application), §5.4 (application operations) and a fourth counter under P-6 (two code paths, both transactional). `ListCells` and `ListTenants` accept an `applicationId` filter, served by one more partition shape. The `CELL_DEFINITION` environment variable and `validateCellDefinition` at synth go; the same checks run in `PutApplication`. The acceptance test registers two applications and shows two of their cells in one account. The role pair, the build projects and the workflow are unchanged: source and scripts already arrive per execution (ADR-002). Revisit if applications ever need their own trust boundary (a role pair per application), which would make the application a deployment unit again.
+
+**Amended by ADR-0039 (2026-11-12):** the application also holds parameter declarations. They sit outside the definition and are never stamped: requests are validated against the application's current declarations, whichever cell a deployment lives in.
