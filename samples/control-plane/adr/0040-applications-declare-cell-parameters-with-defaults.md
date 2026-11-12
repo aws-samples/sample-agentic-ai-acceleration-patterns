@@ -28,10 +28,10 @@ Each cell keeps the declarations it was created with. Pros: a cell script only s
 Option 1, with a separate list and no stamp. Specifically:
 
 - **Declarations.** `PutApplication` takes up to 20 `cellParameters`. Names follow the tenant parameter rules and MUST NOT appear in both lists, so `PARAM_X` means one thing wherever it is set. Every cell parameter has a default; there is no `required` flag.
-- **Values.** The cell record holds the values an operator set, empty at birth. `UpdateCell` merges a body of `parameters` and `removeParameters` in the conditional write that moves the cell to `UPDATING`; a name in both, an undeclared name or a tenant parameter name is a 400. `DeleteCell` never validates.
+- **Values.** The cell record holds the values an operator set, empty at birth. `UpdateCell` merges a body of `parameters` and `removeParameters` in the conditional write that moves the cell to `UPDATING`, conditioned on the status and on the cell's map as read; a name in both, an undeclared name or a tenant parameter name is a 400. The map, not `updatedAt`, is the guard: placements and deployment deletes write a cell's `updatedAt` while it is `ACTIVE`, and must not fail an unrelated `UpdateCell`. `DeleteCell` never validates.
 - **Resolution.** At accept time the stored values plus the defaults of unset declarations go into the execution input. Stored values for names no longer declared are still passed.
 - **Who sees what.** Cell scripts get the cell set on every operation; tenant scripts do not. A tenant script that needs a cell value reads what the cell create script published under `/application-plane/cells/<cellId>/*`.
-- **Delete scripts.** A cell delete script finds what the cell made through `/application-plane/cells/<cellId>/*`, never by recomputing from `PARAM_` values, because the default it receives can differ from the one its create used (R-35).
+- **Delete scripts.** A cell delete script finds what the cell made through `/application-plane/cells/<cellId>/*`, never by recomputing from `PARAM_` values, because the default it receives can differ from the one its create used. A create script names a resource from the contract's ids only, or records its identifier before creating it, so a create that fails partway can still be cleaned up (R-35).
 - **No secrets.** Same rule as ADR-0039 (N-11).
 
 ## Consequences
