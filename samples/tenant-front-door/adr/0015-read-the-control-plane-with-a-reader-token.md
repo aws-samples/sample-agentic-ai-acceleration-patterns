@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0015: Read the control plane with a reader token
 
-- Status: Proposed (spike S-9)
+- Status: Proposed (control-plane `client_id` input)
 - Date: 2026-11-13
 - Deciders: Dave Roberts (PSA)
 
@@ -62,17 +62,19 @@ control plane, never writing unchecked.
 - A stolen reader token discloses fleet topology, non-secret parameter
   values and application source locations (control-plane T36). It cannot
   change the fleet.
-- Spike: the control plane authorizer verifies one `audience` and
-  requires `sub` and `role`. S-9 checks that a client-credentials token
-  from the registrar's own vendor IdP client passes it: `GetCell` returns
-  200, the token's `role` is the reader value, and a write returns 403.
-  A Cognito client-credentials token has no `aud` and no custom `role`. If
-  S-9 fails, the fallback names a source for each. The vendor IdP adds
-  `role` to machine tokens with a pre-token-generation trigger (V3 event,
-  which needs the Essentials or Plus feature plan). The control plane
-  accepts the registrar's `client_id` in place of `aud` through a new
-  input. That is a control-plane change with its own control-plane ADR;
-  this sample does not work around it.
+- Spike S-9 (2026-11-13) failed as specified and proved the fallback. A
+  Cognito client-credentials token carries `client_id`, `scope`, `sub`
+  (equal to `client_id`) and no `aud`, so the control plane authorizer's
+  audience check denies it. A pre-token-generation trigger (V3 event, on
+  the Essentials plan) added `role: control-plane:reader`, but Cognito
+  ignored its `aud` override. With a check that accepts a listed
+  `client_id` when `aud` is absent, the same token was allowed with the
+  reader grant. Deploy 36 s per phase, destroy 61 s.
+- So the vendor IdP needs the V3 trigger for `role`, and the control plane
+  needs a new input: a list of client ids accepted in place of `aud` when
+  a token has none. That is a control-plane change with its own
+  control-plane ADR; this sample does not work around it. This record is
+  accepted once that ADR is.
 - Follow-up: rotate the client secret, and log token fetch failures apart
   from placement refusals.
 - Revisit when the control plane offers a grant narrower than all reads

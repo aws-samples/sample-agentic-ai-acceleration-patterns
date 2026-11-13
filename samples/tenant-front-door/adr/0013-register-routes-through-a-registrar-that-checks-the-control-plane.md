@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0013: Register routes through a registrar that checks the control plane
 
-- Status: Proposed (spike S-8)
+- Status: Accepted
 - Date: 2026-11-13
 - Deciders: Dave Roberts (PSA)
 
@@ -46,10 +46,12 @@ applications on the same control plane do not use.
 
 ## Decision
 
-Option 1, if spike S-8 passes. The registrar is the only writer of the
-route table. Its resource policy admits `<fleet>-cell-provisioning` and
-`<fleet>-tenant-provisioning` roles in any account, plus the edge
-operator role; admission grants no route. Every write checks the caller's
+Option 1; spike S-8 passed on 2026-11-13. The registrar is the only
+writer of the route table. Its resource policy admits
+`<fleet>-cell-provisioning` and `<fleet>-tenant-provisioning` roles in any
+account, plus the edge operator role, and denies every other principal
+with an explicit `Deny` and `ArnNotLike` on `aws:PrincipalArn`. Admission
+grants no route. Every write checks the caller's
 account against `GetCell` or `GetDeployment`, and a tenant route also needs
 its cell's route written by the same account. Deletes check the account
 recorded on the route, so cleanup works after the control plane has
@@ -63,12 +65,14 @@ removed the record.
   route writes, never routing, which reads only the store.
 - The `ac` field in each value records the verified account for deletes;
   the router never reads it.
-- Spike S-8 must show a provisioning role in a second account admitted
-  through `aws:PrincipalArn`, a role of another name refused, and the
-  caller's account present in the request context.
-- If S-8 fails on admission, the resource policy admits any signed caller
-  and the role-name check moves into the function; the placement check
-  stays the wall. If the request context does not give the account, this
-  record is reopened.
+- Spike S-8 (2026-11-13): a provisioning role in a second account got 200,
+  with `identity.accountId` and `userArn` in the request context; a role of
+  another name in that account got 403. The edge account's own admin also
+  got 200 although the policy names only the provisioning roles: for a
+  same-account caller, an identity policy that allows `execute-api:Invoke`
+  is enough. The explicit `Deny` closes that gap. Deploy 75 s, destroy
+  33 s.
+- The integration test checks the `Deny`: an edge-account principal that
+  is not the operator role gets 403.
 - Revisit when the control plane offers a route hook of its own, or a
   cell origin type needs more than a domain.

@@ -3,7 +3,8 @@
 # Tenant front door for agentic applications: specification
 
 Status: Proposed. §8 lists the decisions of the first ADR batch; the
-records marked Proposed wait on the §9 spikes they name.
+records marked Proposed wait on the §9 spikes they name, and ADR-0015 on
+a control-plane change.
 
 ## 1. Problem statement
 
@@ -202,8 +203,12 @@ The registrar is a regional API in the edge account with `AWS_IAM`
 authorisation. Its resource policy admits callers whose
 `aws:PrincipalArn` is a `<fleet>-cell-provisioning` or
 `<fleet>-tenant-provisioning` role in any account, plus the edge account's
-own operator role. Admission only gets a caller to the checks below; it
-grants no route.
+own operator role. The policy also carries an explicit `Deny` with
+`ArnNotLike` on `aws:PrincipalArn` for every other principal: without it,
+any principal in the edge account whose identity policy allows
+`execute-api:Invoke` gets in, because a same-account call needs only one
+of the two policies to allow it (spike S-8). Admission only gets a caller
+to the checks below; it grants no route.
 
 On every write:
 
@@ -392,12 +397,13 @@ All with a small static HTML or JSON body and `no-store`:
   and `applicationId`, with a reader role enabled (control-plane R-36), and
   a vendor IdP app client whose client-credentials tokens carry that role
   and pass the control plane authorizer (spike S-9, ADR-0015). A Cognito
-  client-credentials token has no `aud` and no custom `role`. If S-9 fails,
-  both need a source. The vendor IdP adds `role` to machine tokens with a
-  pre-token-generation trigger (V3 event, which needs the Essentials or
-  Plus feature plan). The control plane accepts the registrar's `client_id`
-  in place of `aud` through a new input, a control-plane change with its
-  own control-plane ADR.
+  client-credentials token has no `aud` and no custom `role`, so today's
+  authorizer refuses it (S-9). Two changes are needed. The vendor IdP adds
+  `role` to machine tokens with a pre-token-generation trigger (V3 event,
+  which needs the Essentials or Plus feature plan). The trigger cannot add
+  `aud`: Cognito ignores an `aud` override on access tokens. So the control
+  plane must accept a listed `client_id` in place of `aud` when a token has
+  none, a control-plane change with its own control-plane ADR.
 - In every account that hosts cells, the control plane's role pair; the
   registrar admits only those roles.
 - A cell API that verifies the token in `x-tenant-token`, refuses a
@@ -431,7 +437,7 @@ All with a small static HTML or JSON body and `no-store`:
 
 | Sample | How | Needed for |
 |---|---|---|
-| `control-plane` | its API (`GetCell`, `GetDeployment`) with the reader grant (R-36) and a client-credentials reader token (spike S-9; its fallback adds a `role` trigger on the vendor IdP and a `client_id` input on the control plane), its role pair in each cell account, and its scripts calling `route.sh` | placement checks, registration, the integration test |
+| `control-plane` | its API (`GetCell`, `GetDeployment`) with the reader grant (R-36) and a client-credentials reader token (spike S-9 showed both are needed: a `role` trigger on the vendor IdP and a `client_id` input on the control plane), its role pair in each cell account, and its scripts calling `route.sh` | placement checks, registration, the integration test |
 | `tenant-identity` `shared-pool` | its published parameters | the demo issuer and the integration test |
 | `agentic-runtime-isolation` | its `/application-plane/shared/agent-runtime/ingress` parameter | `/agents/*`, optional |
 
@@ -541,8 +547,8 @@ Each spike reports its deploy and destroy time.
 | S-5 | Does streaming pass through `/agents/*` to the agent ingress without buffering? | first byte at the client within 1 s of first byte from the ingress; the ingress receives the bearer token on `GET` and `POST`; the `Managed-AllViewerExceptHostHeader` policy deploys with the pinned CDK version |
 | S-6 | Does a WAF rate rule keyed on the `Host` header count each tenant on its own? | tenant A over its limit on `/api/*` gets the custom 429 while tenant B is served; A's SPA loads (`/`, `/assets/*`) are not counted |
 | S-7 | Can the router decode a `tenant-identity` access token's payload within the CloudFront Functions limits? | `tenant_id` read from a real token; compute utilisation under 50 %; 401 on a malformed token. **Passed 2026-11-13**: 13-14 % compute, 401 at 9-10 % (ADR-0005) |
-| S-8 | Can an API Gateway resource policy admit a role name in any account through `aws:PrincipalArn`, and does the request context give the caller's account? | a provisioning role in the second account reaches the registrar; a role of another name is refused |
-| S-9 | Does a client-credentials token from the registrar's own vendor IdP client pass the control plane authorizer (single `audience`, required `sub` and `role`)? | `GetCell` returns 200 with that token, the token's `role` is the reader value, and a write returns 403 |
+| S-8 | Can an API Gateway resource policy admit a role name in any account through `aws:PrincipalArn`, and does the request context give the caller's account? | a provisioning role in the second account reaches the registrar; a role of another name is refused. **Passed 2026-11-13** with one design fix: the second account's provisioning role got 200 with `identity.accountId` and `userArn` in the request context; another role name got 403. The edge account's own admin also got 200 through its identity policy, so the resource policy adds an explicit `Deny` with `ArnNotLike` (§3.4, ADR-0013). Deploy 75 s, destroy 33 s |
+| S-9 | Does a client-credentials token from the registrar's own vendor IdP client pass the control plane authorizer (single `audience`, required `sub` and `role`)? | `GetCell` returns 200 with that token, the token's `role` is the reader value, and a write returns 403. **Failed 2026-11-13; fallback proven**: the token has no `aud` (`sub` equals `client_id`), and the audience check denies it. A V3 trigger on the Essentials plan adds `role: control-plane:reader` but its `aud` override is ignored. With a `client_id` allow-list in place of the audience check, the same token is allowed with the reader grant (ADR-0015, §6.1). Deploy 36 s per phase, destroy 61 s |
 
 ## 10. Integration test outline
 
@@ -576,6 +582,9 @@ the default mode; `test/integ.host.ts` repeats the steps marked (host) with
 11. The second account's tenant provisioning role calls `PutTenantRoute`
     for `a`: 403, and `a` is still routed to cell A.
 12. The second account's cell role calls `DeleteCellRoute` for cell A: 403.
+    An edge-account principal that is not the operator role, with
+    `execute-api:Invoke` in its identity policy, calls the registrar: 403
+    (the explicit `Deny`, §3.4).
 13. Suspend `b`: `b`'s token returns 503, `a` is still served.
 14. Per-tenant log fields name `a` and `b`, and the registrar log names the
     second account on steps 11 and 12.
