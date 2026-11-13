@@ -196,8 +196,10 @@ On every write:
 
 1. Take the caller's account id and role from the signed request context.
    Ignore any account id in the body.
-2. Read the placement from the control plane API, as the registrar's own
-   vendor identity (open question Q-5):
+2. Read the placement from the control plane API with a reader token
+   (control-plane R-36): the registrar's own app client on the vendor IdP,
+   whose `role` is one of the control plane's `readerRoles`, so the
+   registrar can read placement and change nothing:
    - cell route: `GetCell(cellId)`;
    - tenant route: `GetDeployment(tenantId, applicationId)`, where
      `applicationId` is the front door's own.
@@ -251,7 +253,7 @@ only the edge account's operator role may make them.
 | `hostedZone` | yes | | Public Route 53 zone for `appDomain`, in the edge account |
 | `addressing` | no | `single` | `single`: one URL, tenant from the token. `host`: one host per tenant |
 | `applicationId` | yes | | The control-plane application this front door serves |
-| `controlPlane` | yes | | Control plane API URL, and the vendor client the registrar uses to read it (Q-5) |
+| `controlPlane` | yes | | Control plane API URL, and the vendor IdP token URL and client (secret in Secrets Manager) the registrar uses to get a reader token |
 | `fleet` | yes | | The control plane's fleet name, which names the provisioning roles the registrar admits |
 | `issuer` | yes | | Discovery URL and client id the SPA uses |
 | `tenantClaim` | no | `tenant_id` | Claim the router and the origin read |
@@ -350,7 +352,8 @@ All with a small static HTML or JSON body and `no-store`:
 - An issuer that meets `ARCHITECTURE.md` §2.1 and accepts the app's
   callback URLs.
 - A control plane whose `GetCell` and `GetDeployment` return `accountId`
-  and `applicationId`, and a vendor client the registrar may read them with.
+  and `applicationId`, with a reader role enabled (control-plane R-36), and
+  a vendor IdP app client whose tokens carry that role.
 - In every account that hosts cells, the control plane's role pair; the
   registrar admits only those roles.
 - A cell API that verifies tokens, refuses a `tenant_id` that differs from
@@ -381,7 +384,7 @@ All with a small static HTML or JSON body and `no-store`:
 
 | Sample | How | Needed for |
 |---|---|---|
-| `control-plane` | its API (`GetCell`, `GetDeployment`), its role pair in each cell account, and its scripts calling `route.sh` | placement checks, registration, the integration test |
+| `control-plane` | its API (`GetCell`, `GetDeployment`) with the reader grant (R-36), its role pair in each cell account, and its scripts calling `route.sh` | placement checks, registration, the integration test |
 | `tenant-identity` `shared-pool` | its published parameters | the demo issuer and the integration test |
 | `agentic-runtime-isolation` | its `/application-plane/shared/agent-runtime/ingress` parameter | `/agents/*`, optional |
 
@@ -470,6 +473,7 @@ The sample documents that step and does not do it.
 | 12 | Route table size ceiling and sharding | one store and a ceiling; shard by distribution |
 | 13 | Register routes through a registrar that checks the control plane | registrar with a placement check; a cross-account role that writes the store directly; the control plane writes routes |
 | 14 | One front door per control-plane application | one per application; one shared front door keyed by application |
+| 15 | Read the control plane with a reader token | reader role (control-plane ADR-0042); operator app client; an IAM-authorised read stage |
 
 ## 9. Spikes before code
 
@@ -535,4 +539,3 @@ the default mode; `test/integ.host.ts` repeats the steps marked (host) with
 | Q-2 | Does the integration test deploy its own control plane, or reuse one when found and skip otherwise? | integration test |
 | Q-3 | Does the dedicated tenant (custom domain) path belong in this sample or in a follow-up? | scope |
 | Q-4 | Should the integration test also compose `agentic-runtime-isolation` for `/agents/*`, or reuse a deployment only when one is found? | integration test |
-| Q-5 | Which vendor identity does the registrar use to read the control plane: a client-credentials app client on the vendor IdP with the operator role, or a narrower read-only role the control plane would need to add? | decision 13 |
