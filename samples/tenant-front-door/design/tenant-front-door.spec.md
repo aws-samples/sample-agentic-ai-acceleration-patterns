@@ -9,12 +9,17 @@ batch records, and §9 the spikes that must pass before code.
 
 A multi-tenant agentic application serves one web client to every tenant,
 and each tenant request must land on the cell that hosts the tenant. The
-sample puts one Amazon CloudFront multi-tenant distribution in front of a
-shared single-page application (SPA) and the cells' APIs. A CloudFront
-Function, the **tenant router**, finds the request's tenant, looks it up in a
-CloudFront KeyValueStore (the **route table**) and sends the request to the
-tenant's cell. Each tenant stack, or the control plane's tenant create
-script, registers its own route at deploy time.
+control plane places those cells across many AWS accounts: vendor-owned
+accounts that fill and overflow, and tenant-owned accounts a customer
+registers for its own deployments. The sample puts one Amazon CloudFront
+multi-tenant distribution, in one **edge account**, in front of a shared
+single-page application (SPA) and every cell's API, wherever the cell lives.
+A CloudFront Function, the **tenant router**, finds the request's tenant,
+looks it up in a CloudFront KeyValueStore (the **route table**) and sends the
+request to the tenant's cell. Cell and tenant scripts, running in the cell's
+own account, register their routes through a **route registrar** in the
+edge account, which accepts a route only when the control plane says that
+cell or deployment lives in the calling account.
 
 The router finds the tenant in one of two ways, chosen at deploy time
 (`addressing`):
@@ -27,15 +32,18 @@ The router finds the tenant in one of two ways, chosen at deploy time
 Both modes send the same route hint to the origin, and the origin checks it
 against the verified token the same way (P-4).
 
-Deployment model: the SPA and the edge are pooled. Cells behind the edge are
-whatever the control plane placed (pool, or `maxTenants: 1` for a dedicated
-cell). A tenant with its own domain gets a dedicated distribution tenant on
-the same distribution, in either mode.
+Deployment model: the SPA and the edge are pooled, one front door per
+control-plane application. Cells behind the edge are whatever the control
+plane placed (pool, or `maxTenants: 1` for a dedicated cell), in whichever
+registered account it placed them. A tenant with its own domain gets a
+dedicated distribution tenant on the same distribution, in either mode.
 
 ### 1.1 What the sample shows
 
 - Edge routing to a cell origin chosen per request, from the token's tenant
-  or from the host.
+  or from the host, across vendor-owned and tenant-owned accounts.
+- Cross-account route registration that an account can only use for its own
+  cells and deployments, checked against the control plane.
 - A route table at the edge: unknown tenants are refused and suspended
   tenants get 503 there. Neither reaches an origin.
 - Reading a token at the edge without trusting it: the router decodes the
@@ -51,12 +59,12 @@ the same distribution, in either mode.
 
 ### 1.2 What the sample does not do yet
 
-- Routes written from accounts other than the front door's account.
 - Several Regions per tenant, failover between cells, or moving a tenant
   between cells with no downtime.
 - Server-side rendering, or a backend-for-frontend that holds the tokens.
 - Per-tenant SPA versions (version pinning) and staged SPA rollouts.
 - A collector for browser security reports (only the endpoint is wired).
+- Origins other than Lambda function URLs and S3 (§6.1).
 
 ### 1.3 What the sample is NOT
 
@@ -65,8 +73,9 @@ the same distribution, in either mode.
 - Not the authoriser. The edge routes; the cell's API verifies the token.
 - Not the application. The demo cell API and the demo SPA exist only to
   prove the routing and the browser baseline.
-- Not tenant onboarding. The control plane creates tenants; this sample
-  gives it a route to write.
+- Not tenant onboarding or placement. The control plane creates tenants and
+  places them in cells; this sample gives its scripts a route to register
+  and reads the placement back to check it.
 
 ## 2. Guiding principles
 
@@ -79,41 +88,53 @@ the same distribution, in either mode.
    No header, query parameter or path segment names the tenant. In `single`
    mode the token's claim decides; in `host` mode the host decides and the
    token must agree.
-3. **P-3: The route table is vendor data.** Only vendor deploy code writes
+3. **P-3: The route table is vendor data.** Only the route registrar writes
    routes. Nothing in a request can add, change or pick a route, and every
    client `x-tenant-*` header is removed before routing.
 4. **P-4: The verified token and the cell must agree.** The router forwards
    the tenant it routed on as a route hint. The origin verifies the token,
    refuses a `tenant_id` that differs from the hint, and refuses a tenant its
    cell does not host.
-5. **P-5: Stop bad traffic at the edge.** Requests with no tenant, unknown
+5. **P-5: An account routes traffic only to itself.** The registrar takes
+   the calling account from the signed request, never from its body, and
+   accepts a route only when the control plane places that cell or
+   deployment in that account. A tenant-owned account controls its own
+   credentials, so this is the wall that stops it pointing another tenant's
+   traffic at its own cell.
+6. **P-6: Placement has one source of truth.** The control plane owns where
+   each cell and deployment lives. The registrar reads it back on every
+   write and keeps no placement data of its own.
+7. **P-7: Stop bad traffic at the edge.** Requests with no tenant, unknown
    or suspended tenants and cross-site API calls are refused before any
    origin is reached, so they cost no origin capacity.
-6. **P-6: One baseline, every tenant.** Security headers come from one
+8. **P-8: One baseline, every tenant.** Security headers come from one
    response headers policy. A tenant cannot weaken them, and an origin cannot
    drop them.
-7. **P-7: Register a tenant with one write.** Onboarding a pooled tenant is
-   one route write. In `host` mode the wildcard certificate and DNS record
-   already cover its host. Removing it is one delete. No distribution update
-   and no cache invalidation.
+9. **P-9: Register a tenant with one call.** Onboarding a pooled tenant is
+   one registrar call from its tenant create script. In `host` mode the
+   wildcard certificate and DNS record already cover its host. Removing it
+   is one call from the delete script. No distribution update and no cache
+   invalidation.
 
 ## 3. System shape
 
 ### 3.1 Components
 
-| Component | Runs on | Job |
-|---|---|---|
-| Edge stack | ACM and AWS WAF in `us-east-1` | Certificate for `<appDomain>` (and `*.<appDomain>` in `host` mode), web ACL |
-| Multi-tenant distribution | CloudFront (`ConnectionMode: tenant-only`) | Shared behaviours, policies and origins |
-| Pooled distribution tenant | CloudFront distribution tenant | Serves `<appDomain>` (`single`) or `*.<appDomain>` (`host`) for every pooled tenant |
-| Dedicated distribution tenant | CloudFront distribution tenant | Serves one tenant's own domain, with its own certificate and optional web ACL override |
-| Tenant router | CloudFront Function (viewer request, JS 2.0) | Finds the tenant, refuses or routes |
-| Route table | CloudFront KeyValueStore | `tenant`, `host` and `cell` entries (§4) |
-| SPA origin | S3 bucket with origin access control | One build for every tenant |
-| Cell API origin | The cell's API (demo: Lambda function URL with origin access control) | Verifies the token, checks the route hint and the cell's tenants |
-| Agent route | `/agents/*` behaviour | Streams to the agent ingress of `agentic-runtime-isolation`, when configured |
-| `TenantRoute` construct | Custom resource | Writes and deletes one tenant's route |
-| Telemetry | CloudFront standard logs to CloudWatch Logs | Per-tenant requests, errors, bytes, latency |
+| Component | Account | Runs on | Job |
+|---|---|---|---|
+| Edge stack | edge, `us-east-1` | ACM and AWS WAF | Certificate for `<appDomain>` (and `*.<appDomain>` in `host` mode), web ACL |
+| Multi-tenant distribution | edge | CloudFront (`ConnectionMode: tenant-only`) | Shared behaviours, policies and origins |
+| Pooled distribution tenant | edge | CloudFront distribution tenant | Serves `<appDomain>` (`single`) or `*.<appDomain>` (`host`) for every pooled tenant |
+| Dedicated distribution tenant | edge | CloudFront distribution tenant | Serves one tenant's own domain, with its own certificate and optional web ACL override |
+| Tenant router | edge | CloudFront Function (viewer request, JS 2.0) | Finds the tenant, refuses or routes |
+| Route table | edge | CloudFront KeyValueStore | `tenant`, `host` and `cell` entries (§4) |
+| Route registrar | edge | API Gateway (IAM auth) and Lambda | The only writer of the route table; checks each write against the control plane (§3.4) |
+| SPA origin | edge | S3 bucket with origin access control | One build for every tenant |
+| Cell API origin | the cell's | The cell's API (demo: Lambda function URL with origin access control) | Verifies the token, checks the route hint and the cell's tenants |
+| `CellRouteAccess` construct | the cell's | Lambda permission | Lets only the edge distribution invoke the cell's function URL |
+| Agent route | edge | `/agents/*` behaviour | Streams to the agent ingress of `agentic-runtime-isolation`, when configured |
+| `route.sh` | the cell's | the control plane's cell and tenant scripts | Calls the registrar with the script's own credentials |
+| Telemetry | edge | CloudFront standard logs to CloudWatch Logs | Per-tenant requests, errors, bytes, latency |
 
 ### 3.2 Request paths
 
@@ -122,7 +143,7 @@ the same distribution, in either mode.
 | `/assets/*` | static | SPA bucket | one year, immutable, shared by all tenants | no |
 | `/`, other SPA routes | static, rewritten to `/index.html` | SPA bucket | `no-cache`, revalidated | no |
 | `/config.json` | generated at the edge | none | `no-store` | `host` mode only |
-| `/api/*` | dynamic | the tenant's cell API | disabled | yes |
+| `/api/*` | dynamic | the tenant's cell API, in the cell's account | disabled | yes |
 | `/agents/*` | dynamic, streaming | the agent ingress | disabled | yes |
 | `/logout` | generated at the edge | none | `no-store` | no |
 
@@ -162,12 +183,46 @@ On every viewer request:
 The router reads at most three keys per request. It holds no secrets,
 checks no signatures and writes nothing.
 
-### 3.4 Identity model
+### 3.4 Route registrar, step by step
+
+The registrar is a regional API in the edge account with `AWS_IAM`
+authorisation. Its resource policy admits callers whose
+`aws:PrincipalArn` is a `<fleet>-cell-provisioning` or
+`<fleet>-tenant-provisioning` role in any account, plus the edge account's
+own operator role. Admission only gets a caller to the checks below; it
+grants no route.
+
+On every write:
+
+1. Take the caller's account id and role from the signed request context.
+   Ignore any account id in the body.
+2. Read the placement from the control plane API, as the registrar's own
+   vendor identity (open question Q-5):
+   - cell route: `GetCell(cellId)`;
+   - tenant route: `GetDeployment(tenantId, applicationId)`, where
+     `applicationId` is the front door's own.
+3. Refuse with 403 when the record is missing, belongs to another
+   application, or its `accountId` differs from the caller's account. A
+   cell route needs a cell provisioning role; a tenant route needs a tenant
+   provisioning role.
+4. A tenant route also needs its cell's route to exist, written by the same
+   account: 409 otherwise.
+5. Write the route table with the store's ETag (`IfMatch`), retrying on a
+   conflict, and record the caller's account in the value.
+6. Log the caller account, role, key and outcome, never the body.
+
+Deletes run steps 1 and 6 and need the caller's account to match the
+account recorded on the route, so cleanup works after the control plane has
+already removed the record (P-9 of the control plane: cleanup is always
+reachable). Status changes (`suspended`, `active`) are vendor operations:
+only the edge account's operator role may make them.
+
+### 3.5 Identity model
 
 - Tenant users sign in in the SPA with authorization code flow and PKCE.
   In `single` mode there is one callback URL, `https://<appDomain>/`. In
   `host` mode each tenant origin is a callback URL; Cognito allows no
-  wildcards there, so spike S-4 picks between `TenantRoute` adding the
+  wildcards there, so spike S-4 picks between the tenant script adding the
   callback URL and one shared sign-in host with a signed `state`.
 - A user in several tenants (`shared-pool-multi-tenant`) holds a token with
   a `tenants` list. The SPA either sends `X-Tenant-Id` for the tenant the
@@ -178,17 +233,26 @@ checks no signatures and writes nothing.
 - The cell API verifies the token (`ARCHITECTURE.md` §2.1), then refuses
   the request with 403 when `tenant_id` differs from `x-tenant-route` or the
   tenant is not one its cell hosts. A refusal is logged with both tenant ids.
+  The cell knows its tenants from its own namespace in its own account
+  (`/application-plane/tenants/<tenantId>/<applicationId>/*`), so the check
+  needs nothing from the edge account.
 - The agent ingress already verifies the token and selects the tenant from
   it, so it reaches the same tenant the router routed on. The router's role
   on `/agents/*` is to refuse unknown and suspended tenants at the edge.
+- Scripts call the registrar with the provisioning role credentials the
+  control plane's build already holds in the cell's account; no new
+  credential is handed to a script.
 
-### 3.5 Deployment inputs
+### 3.6 Deployment inputs
 
 | Input | Required | Default | Meaning |
 |---|---|---|---|
 | `appDomain` | yes | | Domain the app is served at, for example `app.example.com` |
-| `hostedZone` | yes | | Public Route 53 zone for `appDomain`, for the DNS records and certificate validation |
+| `hostedZone` | yes | | Public Route 53 zone for `appDomain`, in the edge account |
 | `addressing` | no | `single` | `single`: one URL, tenant from the token. `host`: one host per tenant |
+| `applicationId` | yes | | The control-plane application this front door serves |
+| `controlPlane` | yes | | Control plane API URL, and the vendor client the registrar uses to read it (Q-5) |
+| `fleet` | yes | | The control plane's fleet name, which names the provisioning roles the registrar admits |
 | `issuer` | yes | | Discovery URL and client id the SPA uses |
 | `tenantClaim` | no | `tenant_id` | Claim the router and the origin read |
 | `spaSource` | no | the demo SPA | Path of the built SPA |
@@ -202,9 +266,9 @@ checks no signatures and writes nothing.
 
 | Key | Value (JSON, 1 KB max) | Written by |
 |---|---|---|
-| `tenant#<tenantId>` | `{"v":1,"c":"<cellId>","s":"active"\|"suspended","n":"<display name>"}` | `TenantRoute` |
-| `host#<host>` | `{"v":1,"t":"<tenantId>"}` | `TenantRoute`, in `host` mode and for a dedicated tenant's domain |
-| `cell#<cellId>` | `{"v":1,"o":"<api domain>","a":"<agent domain>"}` | `CellRoute` |
+| `tenant#<tenantId>` | `{"v":1,"c":"<cellId>","ac":"<accountId>","s":"active"\|"suspended","n":"<display name>"}` | registrar, from the tenant create script |
+| `host#<host>` | `{"v":1,"t":"<tenantId>"}` | registrar, in `host` mode and for a dedicated tenant's domain |
+| `cell#<cellId>` | `{"v":1,"ac":"<accountId>","o":"<api domain>","a":"<agent domain>"}` | registrar, from the cell create script |
 | `app` | `{"v":1,"iss":"<issuer>","cid":"<client id>","sc":"<scopes>"}` | the front door stack |
 
 Rules:
@@ -216,39 +280,59 @@ Rules:
   another `host#` key.
 - Reserved labels (`www`, `api`, `admin`, `auth`, `static`, `status`) are
   refused at registration.
-- A tenant needs about 100 bytes in `single` mode and 150 in `host` mode,
-  so one store (5 MB) holds about 30,000 to 50,000 tenants. The ceiling and
+- `ac` is the account the registrar verified at write time. The router
+  never reads it; the registrar uses it to authorise deletes.
+- A tenant needs about 130 bytes in `single` mode and 180 in `host` mode,
+  so one store (5 MB) holds about 25,000 to 40,000 tenants. The ceiling and
   the shard plan go in an ADR.
-- Writes use the store's ETag (`IfMatch`) and retry on conflict, because
-  parallel tenant stacks write the same store.
 
 ### 4.2 Route status
 
 | Status | Edge answer | Set by |
 |---|---|---|
 | (no entry) | 403 (`single`) or 404 (`host`) | tenant removal, or never registered |
-| `active` | routed | `TenantRoute` create |
-| `suspended` | 503, `Retry-After: 300` | `TenantRoute` update, for the vendor's suspend |
+| `active` | routed | tenant create script |
+| `suspended` | 503, `Retry-After: 300` | vendor operator in the edge account |
 
 A route goes live everywhere within the store's propagation time (spike S-2
 measures it). Removal is a delete, not a status.
 
 ## 5. API surface
 
-The sample has no API of its own. Its interfaces are:
+### 5.1 Route registrar
 
-- **`TenantRoute` construct**, used in a tenant stack: props `routeTable`,
-  `tenantId`, `cellId`, `displayName`, `status`, optional `customDomain`.
-  On create it writes the `tenant#` key and, in `host` mode, the `host#`
-  key; with `customDomain` it also creates a dedicated distribution tenant
-  with a CloudFront-managed certificate. On delete it removes them.
-- **`CellRoute` construct**, used in a cell stack: props `routeTable`,
-  `cellId`, `apiDomain`, optional `agentDomain`.
-- **Script form** for the control plane: `scripts/route.sh put|delete`,
-  driven by the same environment variables as the control plane's tenant
-  create script, so a `CellDefinition` can register routes without CDK.
+Modelled in Smithy; all operations `AWS_IAM`, all idempotent.
 
-Edge errors, all with a small static HTML or JSON body and `no-store`:
+| Op | HTTP | Caller | Contract |
+|---|---|---|---|
+| `PutCellRoute` | `PUT /cells/{cellId}` | cell provisioning role | Body `{apiDomain, agentDomain?}`. Checks §3.4. 200 |
+| `DeleteCellRoute` | `DELETE /cells/{cellId}` | cell provisioning role | 409 while a tenant route names the cell. 200, also when absent |
+| `PutTenantRoute` | `PUT /tenants/{tenantId}` | tenant provisioning role | Body `{displayName, customDomain?}`. Cell taken from the control plane, never the body. Checks §3.4. 200 |
+| `DeleteTenantRoute` | `DELETE /tenants/{tenantId}` | tenant provisioning role | Removes the `tenant#` and `host#` keys and any dedicated distribution tenant. 200, also when absent |
+| `UpdateTenantRouteStatus` | `PUT /tenants/{tenantId}/status` | edge operator role | Body `{status}` |
+
+Errors: 400 for a malformed id or domain; 403 when the caller's account or
+role does not match the placement (the message names neither the real
+account nor the real cell); 409 for a missing cell route or a cell still in
+use; 503 when the control plane cannot be read (the write is refused, never
+made unchecked).
+
+### 5.2 Script and construct forms
+
+- **`scripts/route.sh put-cell|delete-cell|put-tenant|delete-tenant`**,
+  driven by the control plane's script variables (`CELL_ID`, `TENANT_ID`,
+  `TENANT_NAME`) and the registrar URL from the edge's published parameter.
+  It signs with the credentials the script already holds.
+- **`PARAM_FRONT_DOOR_CUSTOM_DOMAIN`**, an optional declared deployment
+  parameter (control-plane ADR-039), carries a tenant's own domain to
+  `put-tenant`.
+- **`CellRouteAccess` construct**, used in a cell stack: grants the edge
+  distribution `lambda:InvokeFunctionUrl` on the cell's function URL,
+  conditioned on the distribution ARN.
+
+### 5.3 Edge errors
+
+All with a small static HTML or JSON body and `no-store`:
 
 | Status | When |
 |---|---|
@@ -262,27 +346,33 @@ Edge errors, all with a small static HTML or JSON body and `no-store`:
 
 ### 6.1 What the deployer supplies
 
-- A public hosted zone for `appDomain` in the front door's account.
+- A public hosted zone for `appDomain` in the edge account.
 - An issuer that meets `ARCHITECTURE.md` §2.1 and accepts the app's
   callback URLs.
+- A control plane whose `GetCell` and `GetDeployment` return `accountId`
+  and `applicationId`, and a vendor client the registrar may read them with.
+- In every account that hosts cells, the control plane's role pair; the
+  registrar admits only those roles.
 - A cell API that verifies tokens, refuses a `tenant_id` that differs from
   `x-tenant-route`, and refuses tenants its cell does not host. The demo
   cell API is the reference.
 - CloudFront origin access control support on the cell origin (Lambda
-  function URL, or S3). Other origin types need their own origin check
-  (§1.2).
+  function URL, or S3), with the cell stack granting the edge distribution
+  through `CellRouteAccess`.
 
 ### 6.2 What the sample promises
 
 - A request with no tenant, or with an unknown or suspended tenant, never
   reaches an origin.
 - A request reaches only the cell its route names.
+- An account can register routes only for cells and deployments the control
+  plane places in it.
 - A forged or foreign token cannot be served: the cell it routes to
   refuses it.
 - In `host` mode, a token for one tenant is refused on another tenant's
   host.
 - Every response carries the §7 header set.
-- Each pooled tenant is registered and removed with one route write, with
+- Each pooled tenant is registered and removed with one registrar call, with
   no distribution change.
 - Per-tenant requests, errors, bytes and refusals are visible.
 - `cdk destroy` leaves nothing behind.
@@ -291,21 +381,24 @@ Edge errors, all with a small static HTML or JSON body and `no-store`:
 
 | Sample | How | Needed for |
 |---|---|---|
+| `control-plane` | its API (`GetCell`, `GetDeployment`), its role pair in each cell account, and its scripts calling `route.sh` | placement checks, registration, the integration test |
 | `tenant-identity` `shared-pool` | its published parameters | the demo issuer and the integration test |
 | `agentic-runtime-isolation` | its `/application-plane/shared/agent-runtime/ingress` parameter | `/agents/*`, optional |
-| `control-plane` | its `CellDefinition` scripts call `scripts/route.sh` | onboarding, documented, not in the integration test |
 
 ### 6.4 Published interface
 
-- **Constructs** `TenantFrontDoor`, `TenantRoute`, `CellRoute`
-  (`src/index.ts`). `TenantFrontDoor` exposes `distributionId`,
-  `distributionArn`, `routeTableArn`, `appDomain`, `addressing`,
-  `pooledTenantId` (the distribution tenant) and `routeWriterPolicy` (a
-  managed policy that may write the route table and create distribution
-  tenants).
-- **Published parameter** `/application-plane/shared/front-door/edge`, one
-  JSON document: `version`, `appDomain`, `addressing`, `distributionId`,
-  `routeTableArn`, `routeWriterPolicyArn`, `tenantClaim`, `reservedLabels`.
+- **Constructs** `TenantFrontDoor` and `CellRouteAccess` (`src/index.ts`).
+  `TenantFrontDoor` exposes `distributionId`, `distributionArn`,
+  `routeTableArn`, `registrarUrl`, `appDomain`, `addressing` and
+  `pooledTenantId` (the distribution tenant).
+- **Published parameter** `/application-plane/shared/front-door/edge` in
+  the edge account, one JSON document: `version`, `appDomain`,
+  `addressing`, `applicationId`, `distributionArn`, `registrarUrl`,
+  `tenantClaim`, `reservedLabels`. A cell script in another account cannot
+  read it, so the application's shared stack in each cell account copies
+  `registrarUrl` and `distributionArn` to
+  `/application-plane/applications/<applicationId>/shared/front-door`
+  (control-plane §6.2).
 
 ## 7. Web platform baseline
 
@@ -327,6 +420,9 @@ the policy.
 | `Cross-Origin-Resource-Policy` | `same-origin` |
 | `Permissions-Policy` | `camera=(), microphone=(), geolocation=(), payment=(), usb=()` |
 | `Clear-Site-Data` | `"cookies", "storage", "cache"`, on `/logout` only |
+
+The response headers policy overrides origin headers, so a cell in a
+tenant-owned account cannot weaken the baseline (P-8).
 
 ### 7.2 SPA rules
 
@@ -370,8 +466,10 @@ The sample documents that step and does not do it.
 | 8 | Hash-based CSP with Trusted Types | hashes; nonces through Lambda@Edge; allowlist |
 | 9 | Per-tenant rate limit: AWS WAF on the host in `host` mode, the origin in `single` mode | WAF custom key; origin limit; none |
 | 10 | Split the edge stack into `us-east-1` | edge stack plus main stack with cross-Region references; everything in `us-east-1` |
-| 11 | Protect cell origins with origin access control | OAC on function URLs; secret header; IP allowlist |
+| 11 | Protect cell origins with origin access control, across accounts | OAC with a cross-account Lambda permission; secret header; IP allowlist |
 | 12 | Route table size ceiling and sharding | one store and a ceiling; shard by distribution |
+| 13 | Register routes through a registrar that checks the control plane | registrar with a placement check; a cross-account role that writes the store directly; the control plane writes routes |
+| 14 | One front door per control-plane application | one per application; one shared front door keyed by application |
 
 ## 9. Spikes before code
 
@@ -381,46 +479,60 @@ Each spike reports its deploy and destroy time.
 |---|---|---|
 | S-1 | Does a multi-tenant distribution take a viewer-request function with an associated KeyValueStore, on both an apex and a wildcard pooled distribution tenant? | a request runs the function and reads the store in both |
 | S-2 | How long does a KeyValueStore write take to apply at the edge? | median and p99 from write to first routed request |
-| S-3 | Does `cf.updateRequestOrigin()` set origin access control for a Lambda function URL? | a signed request reaches a URL with `AWS_IAM` auth; an unsigned one is 403 |
+| S-3 | Does `cf.updateRequestOrigin()` set origin access control for a Lambda function URL **in another account**? | a signed request reaches a URL with `AWS_IAM` auth in the second account; an unsigned one is 403 |
 | S-4 | `host` mode: how does the issuer take one callback URL per tenant at 1,000s of tenants? | a working option for Cognito app clients (limit and update rate measured), or a single sign-in host with a signed `state` |
 | S-5 | Does streaming pass through `/agents/*` to the agent ingress without buffering? | first byte at the client within 1 s of first byte from the ingress |
 | S-6 | Does a WAF rate rule keyed on the `Host` header count each tenant on its own? | tenant A over its limit gets 429 while tenant B is served |
 | S-7 | Can the router decode a `tenant-identity` access token's payload within the CloudFront Functions limits? | `tenant_id` read from a real token; compute utilisation under 50 %; 401 on a malformed token |
+| S-8 | Can an API Gateway resource policy admit a role name in any account through `aws:PrincipalArn`, and does the request context give the caller's account? | a provisioning role in the second account reaches the registrar; a role of another name is refused |
 
 ## 10. Integration test outline
 
-Runs in `eu-central-1`, with the edge stack in `us-east-1` (decision 10).
-It reuses the `tenant-identity` shared pool. It needs a public hosted zone
-for a test domain (open question Q-1). `test/integ.single.ts` covers the
-default mode; `test/integ.host.ts` repeats the steps marked (host) with
+Runs in `eu-central-1`, with the edge stack in `us-east-1` (decision 10),
+in two accounts: the edge account, which also hosts the control plane and
+cell A, and a second account registered tenant-owned, hosting cell B. It
+reuses the `tenant-identity` shared pool, and reuses a `control-plane`
+deployment when one is found, deploying one otherwise (Q-2). It needs a
+public hosted zone for a test domain (Q-1). `test/integ.single.ts` covers
+the default mode; `test/integ.host.ts` repeats the steps marked (host) with
 `addressing: 'host'`.
 
-1. Deploy the front door, one demo cell and its `CellRoute`.
-2. Register tenants `a` and `b` with `TenantRoute`.
+1. Deploy the front door and register the demo application with the control
+   plane, its scripts calling `route.sh`.
+2. Create tenant `a` (placed in the edge account) and tenant `b` (pinned to
+   the second account). Their cell and tenant scripts register the routes.
 3. `/` serves the SPA with every §7.1 header.
-4. `/api/whoami` with a token for `a` returns `a`; with a token for `b`
-   returns `b`.
+4. `/api/whoami` with a token for `a` returns `a` from cell A; with a token
+   for `b` returns `b` from cell B in the second account.
 5. `/api/whoami` with no token returns 401 from the edge (no origin log
    line).
 6. A token for an unregistered tenant returns 403 from the edge.
 7. A token whose payload is edited to name `b`, with `a`'s signature,
-   reaches `b`'s cell and is refused there with 403.
+   reaches cell B and is refused there with 403.
 8. A client `x-tenant-route: b` header with `a`'s token is ignored.
 9. `Sec-Fetch-Site: same-site` on `/api/*` returns 403.
-10. A direct call to the cell's function URL, without CloudFront, returns
-    403.
-11. Suspend `a`: `a`'s token returns 503, `b` is still served.
-12. Per-tenant log fields name `a` and `b`.
-13. Delete `a`'s route: `a`'s token returns 403.
-14. (host) `a.<appDomain>/config.json` names `a`; an unregistered host
+10. A direct call to either cell's function URL, without CloudFront,
+    returns 403.
+11. The second account's tenant provisioning role calls `PutTenantRoute`
+    for `a`: 403, and `a` is still routed to cell A.
+12. The second account's cell role calls `DeleteCellRoute` for cell A: 403.
+13. Suspend `b`: `b`'s token returns 503, `a` is still served.
+14. Per-tenant log fields name `a` and `b`, and the registrar log names the
+    second account on steps 11 and 12.
+15. Delete `b`'s deployment: its script removes the route, and `b`'s token
+    returns 403.
+16. (host) `a.<appDomain>/config.json` names `a`; an unregistered host
     returns 404; a token for `a` on `b.<appDomain>/api/whoami` returns 403;
     `a` over its rate gets 429 while `b` is served.
-15. Destroy everything except the shared identity pool.
+17. Destroy everything the test deployed, in both accounts, except the
+    shared identity pool.
 
 ## 11. Open questions
 
 | # | Question | Needed by |
 |---|---|---|
 | Q-1 | Which public hosted zone can the test account use for `appDomain`? | spike S-1 |
-| Q-2 | Should the integration test also compose `agentic-runtime-isolation` for `/agents/*`, or reuse a deployment only when one is found? | integration test |
+| Q-2 | Does the integration test deploy its own control plane, or reuse one when found and skip otherwise? | integration test |
 | Q-3 | Does the dedicated tenant (custom domain) path belong in this sample or in a follow-up? | scope |
+| Q-4 | Should the integration test also compose `agentic-runtime-isolation` for `/agents/*`, or reuse a deployment only when one is found? | integration test |
+| Q-5 | Which vendor identity does the registrar use to read the control plane: a client-credentials app client on the vendor IdP with the operator role, or a narrower read-only role the control plane would need to add? | decision 13 |
