@@ -500,8 +500,8 @@ grants the processor `lambda:InvokeFunction` and `fn` nothing; `name` is
 
 - a GET presigned by the `tenantProcessRole` session with `If-Match`
   signed, valid `validatorObjectUrlTtlSeconds` (default the larger of 300
-  and the longest declared timeout plus 60 s; synth fails on an explicit
-  value below that bound, ADR-0026);
+  and the longest declared timeout; synth fails on an explicit value
+  shorter than a declared timeout, ADR-0026);
 - one synchronous invoke under `processorRole`: `{version, tenantId,
   deliveryId, fileName, contentType, sizeBytes, sha256, objectUrl, etag,
   objectUrlExpiresAt, previous}`;
