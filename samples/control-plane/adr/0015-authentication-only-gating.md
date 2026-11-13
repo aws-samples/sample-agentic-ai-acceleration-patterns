@@ -1,6 +1,6 @@
 # ADR-0015: Authentication-only gating under the dedicated operator-issuer assumption
 
-**Status:** Accepted (2026-09-07) — amended by ADR-018 (the `role` claim is now enforced as a coarse membership gate; the no-per-operation-matrix decision stands)
+**Status:** Accepted (2026-09-07) — amended by ADR-018 (the `role` claim is now enforced as a coarse membership gate) and ADR-042 (a reader grant beside the operator); the no-per-operation-matrix decision stands for operators
 
 **Context:** Every operation requires a vendor IdP JWT, but no operation
 checks a role or scope — any authenticated caller can perform any operation.

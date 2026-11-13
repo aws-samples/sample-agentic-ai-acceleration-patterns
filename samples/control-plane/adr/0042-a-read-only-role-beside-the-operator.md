@@ -54,8 +54,9 @@ credential the vendor holds.
 Option 1. Two grants, operator and reader, chosen by the verified `role`
 claim through `allowedRoles` and `readerRoles`; the reader grant is the ten
 `GET` operations; the authorizer's policy depends on the grant alone, and
-the service requires the operator grant on the twelve other operations,
-treating a missing grant as an ingress fault. `readerRoles` defaults to
+the service lets a reader run only the ten operations it lists by name, so
+a new `GET` stays refused to readers there until it is listed, and treats
+a missing grant as an ingress fault. `readerRoles` defaults to
 none, so an existing deployment admits no new caller, and a value in both
 lists fails synth and cold start, so no claim maps to two grants. A reader
 can change nothing. It can read a great deal: fleet topology, parameter

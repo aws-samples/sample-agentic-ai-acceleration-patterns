@@ -51,7 +51,8 @@ import { TenantStack } from '../src/tenant/tenant.cdk';
  *      the same way (R-36); after step 4's tenants exist, the reader's first
  *      call is a POST (403), then its GETs pass and its PUT and DELETE are
  *      403, the unlisted role is 403 on a GET and a POST, and nothing was
- *      written; after step 5 the reader's other seven GETs pass too, so all
+ *      written; once step 5's deployment and cell exist, the reader's other
+ *      seven GETs pass too, so all
  *      ten reader operations are proven
  *   2. PutApplication with a missing script → 400, bad id → 400, bad
  *      parameter declarations → 400; X (with declarations) and Y → 200;
@@ -987,7 +988,6 @@ const getCell1 = integ.assertions
     }),
   );
 
-// The three counters moved together (P-6): A 1/2, X 1 cell, T1 1 deployment.
 // 1 (reader, continued, R-36): with a deployment, a cell and both accounts in
 // place, the reader's other seven GET operations return 200 as well, so all
 // ten reader operations are proven live.
@@ -1003,6 +1003,7 @@ const readerReads = [
   .httpApiCall(url, { method: 'GET', headers: readerHeaders })
   .expect(ExpectedResult.objectLike({ status: 200 })));
 
+// The three counters moved together (P-6): A 1/2, X 1 cell, T1 1 deployment.
 const getAccountAOne = integ.assertions
   .httpApiCall(`${apiUrl}accounts/${accountA}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { account: { cellCount: 1, maxCells: 2 } } }));
