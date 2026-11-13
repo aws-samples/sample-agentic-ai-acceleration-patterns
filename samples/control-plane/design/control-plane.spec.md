@@ -390,7 +390,7 @@ hours; synchronous API gateways cap at ~29 seconds. Therefore:
   account stays implicit. The same asymmetry applies on the way out: an
   empty account persists until an operator deletes it.
 - The trust model is stated, not implied: the issuer is declared a
-  dedicated control-plane trust boundary, and it mints exactly two kinds of
+  dedicated control-plane trust boundary, and it mints at most two kinds of
   caller. An **operator** holds every operation. A **reader** holds the
   read operations and nothing else, so a system that only needs to look
   placement up (a route registrar, a dashboard) never holds a credential
@@ -533,7 +533,7 @@ closed like a bad stack input does.
 start no execution or build, and return no secret. The reader grant is
 defined by method, so a new `GET` widens it; this rule is what keeps that
 safe, and a `GET` that cannot meet it is a different method and a new
-matrix row. Today's reads return no `adminEmail` (never stored, P-3) and
+matrix row. Today's reads return no `adminEmail` (never stored, R-8) and
 no `externalId` (never returned, N-10). They do return parameter values,
 which are not secrets by contract only (N-11, T35), and every
 application's source location and version, which name the repository a
@@ -1572,6 +1572,9 @@ and Y share the same source and scripts and differ in id and in their parameter 
 what the accounts count). Tenants T1 and T2 are plain records. X declares
 parameters (step 2); every `CreateDeployment` of X supplies
 `ALLOWED_EMAIL_DOMAIN = example.com` unless a step says otherwise.
+The test's own vendor IdP (a throwaway user pool) mints `role: operator`
+for the operator user and `role: control-plane:reader` for a second,
+reader user; the stack sets `readerRoles = ["control-plane:reader"]`.
 
 1. **Auth:** an operation without a JWT is rejected; with a valid vendor
    IdP JWT it succeeds. A reader token (R-36) succeeds on every `GET`
