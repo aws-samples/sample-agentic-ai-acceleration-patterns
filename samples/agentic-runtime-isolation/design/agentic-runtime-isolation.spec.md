@@ -4,8 +4,8 @@ SPDX-License-Identifier: MIT-0
 -->
 # Specification: Agentic Runtime Isolation
 
-> **Status (2026-11-09):** implemented; verified by integration run 18
-> (58/58, us-east-1, commit 7e0f793). `architecture.md` describes the
+> **Status (2026-11-11):** implemented; verified by integration run 19
+> (60/60, eu-central-1, commit 4fec24a). `architecture.md` describes the
 > implemented state. Decisions are cited inline as `(ADR-00NN)`; the index
 > is `adr/README.md`.
 
@@ -470,6 +470,7 @@ fails with the prop name.
 | `tenantLimits` | `{ requestsPerMinute?, outputTokensPerMinute? } \| false` | `requestsPerMinute: 60` | ADR-0020; keyed on the selected tenant |
 | `stageThrottle` | `{ rateLimit?, burstLimit? }` | 50 rps, burst 25 | `api-gateway` only; synth warns when unset: one bucket for every tenant, the per-tenant limit behind it (T-105) |
 | `ingressReservedConcurrency` | positive integer | unset | `api-gateway` only: reserved concurrency on the streaming integration function (T-105) |
+| `authorizerReservedConcurrency` | positive integer | unset | `api-gateway` only (ADR-0049): reserved concurrency on the REQUEST authoriser, sized at the live tokens that may refresh in one second (the whole live set when they were issued together). Synth warns when `ingressReservedConcurrency` is set without it, and when `stageThrottle.rateLimit` is above either reserve |
 | `toolContextKey` | `{ algorithm?: 'RS256' \| 'ES256' }` | `RS256` | `ES256` moves tool-context `kms:Sign` to the KMS ECC quota, off the RSA quota the mint shares (T-105) |
 | `perTenantMetrics` | boolean | `false` | ADR-0021. When on, 9 × (1 + agents) custom metrics per tenant per ingress: nine on `[TenantId, Ingress]` and the same nine on `[TenantId, Ingress, Backend]` for each agent |
 | `registryPrefix` | string | `/application-plane/shared/agent-runtime/` | ADR-0024 |

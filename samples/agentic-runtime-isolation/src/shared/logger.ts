@@ -40,3 +40,27 @@ export const log = {
 export function errorName(error: unknown): string {
   return error instanceof Error ? error.name : typeof error;
 }
+
+/** `$metadata.attempts` of an SDK response or SDK error; undefined when absent. */
+export function sdkAttempts(responseOrError: unknown): number | undefined {
+  if (typeof responseOrError !== 'object' || responseOrError === null) {
+    return undefined;
+  }
+  const attempts = (responseOrError as { $metadata?: { attempts?: unknown } }).$metadata?.attempts;
+  return typeof attempts === 'number' ? attempts : undefined;
+}
+
+/**
+ * One WARN line, `sdk retried`, for an SDK call the client retried: a
+ * throttle or a timeout the retry absorbed, which no metric and no other log
+ * line shows (STS and KMS have no throttle metric). Fields are the service,
+ * the operation, the attempt count and, when the call still failed, the
+ * error's name. Nothing from the request or the response.
+ */
+export function logRetries(service: string, operation: string, responseOrError: unknown, error?: unknown): void {
+  const attempts = sdkAttempts(responseOrError);
+  if (attempts === undefined || attempts <= 1) {
+    return;
+  }
+  log.warn('sdk retried', { service, operation, attempts, error: error === undefined ? undefined : errorName(error) });
+}
