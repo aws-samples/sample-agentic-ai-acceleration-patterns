@@ -48,9 +48,11 @@ import { TenantStack } from '../src/tenant/tenant.cdk';
  *   1. unauthenticated request → 401; mint an operator: adminCreateUser →
  *      adminSetUserPassword → adminInitiateAuth → ID token; mint a reader
  *      (role control-plane:reader) and a user whose role is in neither list
- *      the same way (R-36); after step 4's tenants exist, the reader's GETs
- *      pass and its POST, PUT and DELETE are 403 with nothing written, and
- *      the unlisted role is 403 on a GET
+ *      the same way (R-36); after step 4's tenants exist, the reader's first
+ *      call is a POST (403), then its GETs pass and its PUT and DELETE are
+ *      403, the unlisted role is 403 on a GET and a POST, and nothing was
+ *      written; after step 5 the reader's other seven GETs pass too, so all
+ *      ten reader operations are proven
  *   2. PutApplication with a missing script → 400, bad id → 400, bad
  *      parameter declarations → 400; X (with declarations) and Y → 200;
  *      ListApplications; PutAccount naming an unknown application → 404
@@ -841,7 +843,15 @@ const readerPutApplication = integ.assertions
 const unlistedListTenants = integ.assertions
   .httpApiCall(`${apiUrl}tenants`, { method: 'GET', headers: unlistedIdentity.headers })
   .expect(ExpectedResult.objectLike({ status: 403 }));
-// Nothing the reader tried was written: still three tenants, T1 unchanged.
+const unlistedCreateTenant = integ.assertions
+  .httpApiCall(`${apiUrl}tenants`, {
+    method: 'POST',
+    headers: unlistedIdentity.headers,
+    body: JSON.stringify({ name: 'integ-unlisted-must-not-create' }),
+  })
+  .expect(ExpectedResult.objectLike({ status: 403 }));
+// Nothing the reader or the unlisted role tried was written: still three
+// tenants, T1 unchanged.
 const listTenantsAfterReader = integ.assertions
   .httpApiCall(`${apiUrl}tenants`, { method: 'GET', headers: authHeaders })
   .expect(
@@ -978,6 +988,21 @@ const getCell1 = integ.assertions
   );
 
 // The three counters moved together (P-6): A 1/2, X 1 cell, T1 1 deployment.
+// 1 (reader, continued, R-36): with a deployment, a cell and both accounts in
+// place, the reader's other seven GET operations return 200 as well, so all
+// ten reader operations are proven live.
+const readerReads = [
+  `${apiUrl}deployments?tenantId=${tenantId1}`,
+  `${apiUrl}tenants/${tenantId1}/deployments/${APP_X}`,
+  `${apiUrl}cells`,
+  `${apiUrl}cells/${cellId1}`,
+  `${apiUrl}accounts`,
+  `${apiUrl}accounts/${accountA}`,
+  `${apiUrl}applications`,
+].map((url) => integ.assertions
+  .httpApiCall(url, { method: 'GET', headers: readerHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200 })));
+
 const getAccountAOne = integ.assertions
   .httpApiCall(`${apiUrl}accounts/${accountA}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { account: { cellCount: 1, maxCells: 2 } } }));
@@ -1754,14 +1779,17 @@ createUser
   .next(listTenantsThree)
   .next(listCellsNone)
   // reader grant (step 1, R-36), with step 4's tenants in place
+  // the reader's first call is a write, so its cached policy is filled by
+  // a POST: its reads must still pass (R-36, grant-only policy)
+  .next(readerCreateTenant)
   .next(readerListTenants)
   .next(readerGetTenant1)
   .next(readerGetApplication)
-  .next(readerCreateTenant)
   .next(readerUpdateTenant1)
   .next(readerDeleteTenant2)
   .next(readerPutApplication)
   .next(unlistedListTenants)
+  .next(unlistedCreateTenant)
   .next(listTenantsAfterReader)
   .next(getTenant1AfterReader)
   .next(updateTenant3)
@@ -1776,6 +1804,13 @@ createUser
   .next(getT1X)
   .next(getCell1)
   .next(getAccountAOne)
+  .next(readerReads[0])
+  .next(readerReads[1])
+  .next(readerReads[2])
+  .next(readerReads[3])
+  .next(readerReads[4])
+  .next(readerReads[5])
+  .next(readerReads[6])
   .next(getApplicationXOne)
   .next(getTenant1One)
   .next(checkCellParam)

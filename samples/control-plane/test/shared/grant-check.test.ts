@@ -1,6 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { isPermitted, READER_OPERATIONS, withGrantCheck } from '../../src/shared/grant-check';
 import type { CallerContext } from '../../src/shared/service-config';
 import { UnauthorizedError } from '../../src/smithy/source/typescript-ssdk-codegen/src';
@@ -74,4 +76,19 @@ test('an unknown grant value is refused every write', () => {
   for (const op of WRITE_OPERATIONS) {
     expect(isPermitted(op, odd)).toBe(false);
   }
+});
+
+test('READER_OPERATIONS is exactly the GET operations of the generated model (R-36, R-37)', () => {
+  // Read the OpenAPI document `smithy build` generates from the model, so a
+  // new GET, a rename or a misspelt list entry fails the build.
+  const openapi = JSON.parse(fs.readFileSync(
+    path.join(__dirname, '../../src/smithy/source/openapi/TenantService.openapi.json'), 'utf8'));
+  const ops: { id: string; method: string }[] = [];
+  for (const item of Object.values(openapi.paths) as Record<string, { operationId: string }>[]) {
+    for (const [method, op] of Object.entries(item)) {
+      ops.push({ id: op.operationId, method });
+    }
+  }
+  expect(new Set(ops.map((o) => o.id))).toEqual(new Set(ALL_OPERATIONS));
+  expect(new Set(ops.filter((o) => o.method === 'get').map((o) => o.id))).toEqual(READER_OPERATIONS);
 });

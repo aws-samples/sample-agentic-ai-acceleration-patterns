@@ -1,6 +1,6 @@
 # ADR-0042: A read-only role beside the operator
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-13
 - Amends: ADR-0015, ADR-0018
 - Deciders: Dave Roberts (SA)
@@ -75,8 +75,8 @@ would target. That disclosure is the price, recorded as T36.
 - Spec changes: P-10, §1.2, §3.2 (R-36, R-37), §3.3 (`allowedRoles`,
   `readerRoles`), the §5 error table, N-11, §10 step 1, §11. Threat model:
   T2, T20, T27, T34, T35, new T36 and M26.
-- On acceptance, ADR-0015 and ADR-0018 get dated "Amended by ADR-0042"
-  trailing notes; until then they describe the code as it is.
+- ADR-0015 and ADR-0018 carry dated "Amended by ADR-0042" trailing
+  notes.
 - Finer operator roles (an application registrar apart from an onboarder,
   account scoping) remain a seam (spec §11); they would close T34 and T27,
   which this record does not.

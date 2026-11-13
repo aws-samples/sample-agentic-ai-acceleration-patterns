@@ -514,8 +514,9 @@ policy allows `execute-api:Invoke` on `<api>/<stage>/*`, a reader's on
 cache. A reader whose first call is a write therefore caches its read
 grant, not a `Deny` that would block its reads for the cache window, and
 API Gateway refuses the write with 403 before any code runs. The service
-MUST check again, by operation name: the twelve non-`GET` operations
-require the `operator` grant and refuse any other with 403
+MUST check again, by operation name: a reader may run only the ten read
+operations listed above, and every other operation requires the
+`operator` grant and refuses any other with 403
 (`UnauthorizedError`); a caller context with no grant is an ingress fault,
 500, as a missing `operatorId` is. A service unit test covers that wall,
 because the integration test can only reach the first. The caller context
@@ -531,8 +532,10 @@ closed like a bad stack input does.
 
 **R-37 (reads are reads):** every `GET` operation MUST write nothing,
 start no execution or build, and return no secret. The reader grant is
-defined by method, so a new `GET` widens it; this rule is what keeps that
-safe, and a `GET` that cannot meet it is a different method and a new
+defined by method in the authorizer policy, so a new `GET` widens the
+first wall; the service lists the reader operations by name, so a new
+`GET` reaches readers only once it is added to that list too. This rule
+is what keeps the widening safe, and a `GET` that cannot meet it is a different method and a new
 matrix row. Today's reads return no `adminEmail` (never stored, R-8) and
 no `externalId` (never returned, N-10). They do return parameter values,
 which are not secrets by contract only (N-11, T35), and every

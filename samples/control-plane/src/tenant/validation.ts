@@ -3,6 +3,7 @@
 
 import { Stack, Token } from 'aws-cdk-lib';
 import { RegionInfo } from 'aws-cdk-lib/region-info';
+import { ROLE_VALUE_PATTERN } from '../shared/authorizer-policy';
 
 /**
  * Synth-time validation of the stack inputs (spec §3.3). Shared by the
@@ -106,8 +107,6 @@ export interface RoleLists {
   readonly readerRoles: readonly string[];
 }
 
-/** A role value either list may hold (spec §3.3); mirrors `ROLE_VALUE_PATTERN`. */
-const ROLE_VALUE = /^[A-Za-z0-9:._-]{1,64}$/;
 
 /**
  * Validates `allowedRoles` and `readerRoles` at synth (spec §3.3, R-36): the
@@ -128,8 +127,8 @@ export function validateRoleLists(
       continue;
     }
     list.forEach((role, index) => {
-      if (typeof role !== 'string' || !ROLE_VALUE.test(role)) {
-        problems.push(`${name}[${index}] ${JSON.stringify(role)} does not match ${ROLE_VALUE.source}`);
+      if (typeof role !== 'string' || !ROLE_VALUE_PATTERN.test(role)) {
+        problems.push(`${name}[${index}] ${JSON.stringify(role)} does not match ${ROLE_VALUE_PATTERN.source}`);
       }
     });
   }
