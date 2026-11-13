@@ -448,6 +448,46 @@ describe('validators (M-20)', () => {
   });
 });
 
+describe('validator URL lifetime (M-20, ADR-0026)', () => {
+  const urlTtlOf = (t: Template) => {
+    const values = Object.values(t.findResources('AWS::Lambda::Function'))
+      .map((f) => f.Properties.Environment?.Variables?.TEI_VALIDATOR_OBJECT_URL_TTL_SECONDS)
+      .filter((v) => v !== undefined);
+    expect(values).toHaveLength(1);
+    return Number(values[0]);
+  };
+  const signatureAgeOf = (t: Template) => {
+    const statements = Object.values(t.findResources('AWS::S3::BucketPolicy')).flatMap(
+      (p) => p.Properties.PolicyDocument.Statement as Record<string, any>[],
+    );
+    return statements.find((x) => x.Sid === 'DenyOldSignatures')!.Condition.NumericGreaterThan['s3:signatureAge'];
+  };
+
+  it('defaults to 300 s when every validator is shorter', () => {
+    expect(urlTtlOf(synthConstruct((stack) => ({ validators: [validatorFor(stack, 'quick', 60)] })).template)).toBe(300);
+  });
+
+  it('defaults to the longest validator timeout when that is longer than 300 s', () => {
+    const t = synthConstruct((stack) => ({
+      uploadUrlTtlSeconds: 120,
+      validators: [validatorFor(stack, 'quick', 60), validatorFor(stack, 'slow', 600)],
+    })).template;
+    expect(urlTtlOf(t)).toBe(600);
+    expect(signatureAgeOf(t)).toBe(600_000);
+  });
+
+  it('accepts an explicit lifetime equal to the longest validator timeout', () => {
+    const t = synthConstruct((stack) => ({ validatorObjectUrlTtlSeconds: 450, validators: [validatorFor(stack, 'slow', 450)] })).template;
+    expect(urlTtlOf(t)).toBe(450);
+  });
+
+  it('fails synth when an explicit lifetime is shorter than a validator timeout', () => {
+    expect(() => synthConstruct((stack) => ({ validatorObjectUrlTtlSeconds: 300, validators: [validatorFor(stack, 'slow', 301)] }))).toThrow(
+      /validatorObjectUrlTtlSeconds \(300\) must be at least the longest validator timeout \(301 s\)/,
+    );
+  });
+});
+
 describe('alarms (M-24, M-25)', () => {
   it('the PutKeyPolicy rule matches the CloudTrail event, and both alarms exist', () => {
     template.hasResourceProperties('AWS::Events::Rule', { EventPattern: Match.objectLike({ 'detail-type': PUT_KEY_POLICY_PATTERN.detailType }) });
