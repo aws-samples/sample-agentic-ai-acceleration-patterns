@@ -7,6 +7,7 @@ SPDX-License-Identifier: MIT-0
 - Status: Accepted
 - Date: 2026-11-13
 - Amends: ADR-0008
+- Amended by: ADR-0027
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -75,3 +76,7 @@ leaked URL (N-6) stays usable for longer; a deployer who wants short URLs
 keeps validator timeouts short. Revisit if validators move to a carrier
 that fetches on the validator's behalf (spec §11), or if the processor signs
 one URL per validator sized to that validator's own timeout.
+
+Amended 2026-11-13 (ADR-0027): the bound is the longest validator `timeout`
+plus a 60 s signing-to-start margin, so the default is
+`max(300, longest timeout + 60)` and a 600 s validator gives a 660 s URL.
