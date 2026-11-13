@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-05
-- Amended by: ADR-0018
+- Amended by: ADR-0018, ADR-0026
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -74,3 +74,7 @@ at its declared timeout. A validator function's own Lambda timeout is a
 validator error as decided above; a validator that outlives the
 processor's timeout T leaves the delivery to the lease, ending as
 `structural:PROCESSING_ABANDONED` through the sweep.
+
+Amended 2026-11-13 (ADR-0026): `validatorObjectUrlTtlSeconds` defaults to
+the larger of 300 and the longest validator `timeout`, and synth fails on
+an explicit value shorter than any declared timeout.

@@ -17,8 +17,11 @@ SPDX-License-Identifier: MIT-0
 > second account's three test keys scheduled for deletion. The runs of
 > 2026-11-06 were green too; their stack events gave the CloudFormation
 > timings: create 1 min 10 s (test aid) and 2 min 17 s (demo stack), delete
-> 3 min 9 s and 1 min 35 s (N-4: each under 5 minutes). Unit tests: 315 on
-> 2026-11-09.
+> 3 min 9 s and 1 min 35 s (N-4: each under 5 minutes). A run of
+> 2026-11-13 in eu-central-1 (vendor test account only, so tenant B was a
+> second `vendor-key` tenant) passed steps 0 to 11 with the validator URL
+> lifetime of ADR-0026, 52 minutes end to end, and left no stack. Unit
+> tests: 319 on 2026-11-13.
 > **Not exercised:** the bring-your-own issuer path (`aud`, the header
 > `typ: at+jwt`, `identityApi: 'none'`) is covered by unit tests only; the
 > integration run used Cognito tokens from tenant-identity (ADR-0019). The
@@ -496,7 +499,9 @@ grants the processor `lambda:InvokeFunction` and `fn` nothing; `name` is
 (ADR-0008). Per validator, in order (`src/processor/validators.ts`):
 
 - a GET presigned by the `tenantProcessRole` session with `If-Match`
-  signed, valid `validatorObjectUrlTtlSeconds` (default 300);
+  signed, valid `validatorObjectUrlTtlSeconds` (default the larger of 300
+  and the longest declared timeout plus 60 s; synth fails on an explicit
+  value below that bound, ADR-0026);
 - one synchronous invoke under `processorRole`: `{version, tenantId,
   deliveryId, fileName, contentType, sizeBytes, sha256, objectUrl, etag,
   objectUrlExpiresAt, previous}`;

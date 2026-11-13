@@ -313,7 +313,7 @@ voting over the bus (a silent voter blocks every delivery).
 | `tenantThrottle` | `{ rateLimit > 0, burstLimit >= 1 }` | off | per-tenant usage plan (N-8) |
 | `dropRetentionDays` | 1..7 | `1` | expiry of current drop objects |
 | `validators` | `IDeliveryValidator[]` | `[]` | custom validators, in order; names unique and not `structural` (§3.5) |
-| `validatorObjectUrlTtlSeconds` | 60..900 | `300` | validator `GET` lifetime |
+| `validatorObjectUrlTtlSeconds` | 60..900, at least the longest validator `timeout` | larger of `300` and the longest validator `timeout` | validator `GET` lifetime (ADR-0026) |
 | `maxReceiveCount` | 1..10 | `3` | receives before the DLQ (§8) |
 | `visibilityTimeoutFactor` | 2..12 | `6` | visibility timeout in processor timeouts |
 | `abandonGraceSeconds` | 60..86400 | `3600` | grace before the sweep abandons or expires |
@@ -378,6 +378,10 @@ and `fn` nothing. Request, one per validator per delivery:
 
 `objectUrl` is a `GET` signed by the `tenantProcessRole` session with
 `If-Match` signed: this object, these bytes, until `objectUrlExpiresAt`.
+It is signed just before the invoke and lives at least the validator's
+declared `timeout` (ADR-0026), so a `GET` started while the validator runs
+within its declaration starts in time; S3 checks expiry when the `GET`
+starts, so a validator SHOULD fetch first and check afterwards.
 It is never logged, nor is a validator error's body; a validator MUST NOT
 persist it. Verdict:
 

@@ -94,7 +94,10 @@ export interface TenantEncryptedIngestionProps {
   readonly dropRetentionDays?: number;
   /** Custom validators, in order. Default none. */
   readonly validators?: IDeliveryValidator[];
-  /** 60..900. Default 300. */
+  /**
+   * 60..900, and at least the longest validator `timeout`. Default: the
+   * larger of 300 and the longest validator `timeout` (ADR-0026).
+   */
   readonly validatorObjectUrlTtlSeconds?: number;
   /** 1..10. Default 3. */
   readonly maxReceiveCount?: number;
@@ -177,6 +180,21 @@ export function resolveProps(props: TenantEncryptedIngestionProps) {
       throw new Error(`TenantEncryptedIngestion: validators: ${v.name} timeout must be at most 10 minutes`);
     }
   }
+  // A validator's URL must outlive the validator (ADR-0026): the processor
+  // signs it just before the invoke, so a GET started any time inside the
+  // declared timeout starts inside the URL's lifetime.
+  const longestValidatorSeconds = validators.reduce((max, v) => Math.max(max, v.timeout.toSeconds()), 0);
+  const validatorObjectUrlTtlSeconds = intInRange(
+    'validatorObjectUrlTtlSeconds',
+    props.validatorObjectUrlTtlSeconds ?? Math.max(DEFAULTS.validatorObjectUrlTtlSeconds, longestValidatorSeconds),
+    60,
+    900,
+  );
+  if (validatorObjectUrlTtlSeconds < longestValidatorSeconds) {
+    throw new Error(
+      `TenantEncryptedIngestion: validatorObjectUrlTtlSeconds (${validatorObjectUrlTtlSeconds}) must be at least the longest validator timeout (${longestValidatorSeconds} s) (ADR-0026)`,
+    );
+  }
   if (props.tenantThrottle !== undefined) {
     const { rateLimit, burstLimit } = props.tenantThrottle;
     if (!(rateLimit > 0) || !Number.isInteger(burstLimit) || burstLimit < 1) {
@@ -197,12 +215,7 @@ export function resolveProps(props: TenantEncryptedIngestionProps) {
     tenantThrottle: props.tenantThrottle,
     dropRetentionDays: intInRange('dropRetentionDays', props.dropRetentionDays ?? DEFAULTS.dropRetentionDays, 1, 7),
     validators,
-    validatorObjectUrlTtlSeconds: intInRange(
-      'validatorObjectUrlTtlSeconds',
-      props.validatorObjectUrlTtlSeconds ?? DEFAULTS.validatorObjectUrlTtlSeconds,
-      60,
-      900,
-    ),
+    validatorObjectUrlTtlSeconds,
     maxReceiveCount: intInRange('maxReceiveCount', props.maxReceiveCount ?? DEFAULTS.maxReceiveCount, 1, 10),
     visibilityTimeoutFactor: intInRange('visibilityTimeoutFactor', props.visibilityTimeoutFactor ?? DEFAULTS.visibilityTimeoutFactor, 2, 12),
     abandonGraceSeconds: intInRange('abandonGraceSeconds', props.abandonGraceSeconds ?? DEFAULTS.abandonGraceSeconds, 60, 86400),
