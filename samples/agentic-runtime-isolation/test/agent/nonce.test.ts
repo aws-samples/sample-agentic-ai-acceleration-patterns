@@ -8,10 +8,26 @@
  */
 describe('nonce', () => {
   /** Loads a fresh copy of the agent module with `openSync` recorded. */
-  function loadApp(): { app: typeof import('../../src/agent/app'); opened: string[] } {
+  function loadApp(): { app: typeof import('../../src/agent/app'); opened: string[]; drawn: string[] } {
     const opened: string[] = [];
+    const drawn: string[] = [];
     let app!: typeof import('../../src/agent/app');
     jest.isolateModules(() => {
+      jest.doMock('node:crypto', () => {
+        const actual = jest.requireActual<typeof import('node:crypto')>('node:crypto');
+        const record =
+          <A extends unknown[], R>(name: string, fn: (...args: A) => R) =>
+            (...args: A): R => {
+              drawn.push(name);
+              return fn(...args);
+            };
+        return {
+          ...actual,
+          randomUUID: record('randomUUID', actual.randomUUID),
+          randomBytes: record('randomBytes', actual.randomBytes as (size: number) => Buffer),
+          getRandomValues: record('getRandomValues', actual.getRandomValues),
+        };
+      });
       jest.doMock('node:fs', () => {
         const actual = jest.requireActual<typeof import('node:fs')>('node:fs');
         return {
@@ -26,14 +42,24 @@ describe('nonce', () => {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       app = require('../../src/agent/app');
     });
-    return { app, opened };
+    return { app, opened, drawn };
   }
 
-  afterEach(() => jest.dontMock('node:fs'));
+  afterEach(() => {
+    jest.dontMock('node:fs');
+    jest.dontMock('node:crypto');
+  });
 
-  it('reads no random bytes at import', () => {
-    const { opened } = loadApp();
+  it('reads no random bytes at import, from /dev/urandom or node:crypto', () => {
+    const { opened, drawn } = loadApp();
     expect(opened).not.toContain('/dev/urandom');
+    expect(drawn).toEqual([]);
+  });
+
+  it('draws the nonce without node:crypto, which can repeat across V2 snapshot restores', () => {
+    const { app, drawn } = loadApp();
+    app.nonce();
+    expect(drawn).toEqual([]);
   });
 
   it('draws 16 bytes once, on the first call, and keeps them for the process', () => {

@@ -235,6 +235,11 @@ one `kms:Sign` on a mint cache miss (a cost, not an isolation effect; ADR-0043).
   section](../tenant-identity/README.md#deploy) describes.
 - **Bedrock model access** to Amazon Nova Lite through the Region's
   cross-Region inference profile (ADR-0028), or `--context modelId=<id>`.
+- **AgentCore Runtime platform version V2** in the Region. Each Runtime is
+  created on V2 (`agent.platformVersion`, default `V2`; ADR-0050). A Runtime
+  that runs on V1 moves to V2 in place on its next deploy, and that deploy
+  builds the V2 snapshot, which takes minutes. Set
+  `agent.platformVersion: 'V1'` to keep V1.
 - **tenant-identity, topology `shared-pool`, deployed and published** in the
   same account and Region, at a version with the scope catalogue
   (`GET|PUT|DELETE /platform/scopes/{scope}`, tenant-identity

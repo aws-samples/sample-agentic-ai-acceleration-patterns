@@ -4,12 +4,14 @@ SPDX-License-Identifier: MIT-0
 -->
 # Agentic Runtime Isolation: Architecture
 
-> **Status: implemented and verified.** Last green integration run: run 19,
-> 2026-11-11 14:06 to 14:51 UTC, eu-central-1, 60/60 steps (59 PASS, 1 SKIP),
-> deploy 705 s at `INTEG_DEPLOY_CONCURRENCY=2`, key rotation 172 s, sweep of
-> 147 log groups clean, teardown clean (commit 4fec24a on PR 38; the first
-> attempt at the default concurrency 6 failed on an API Gateway control-plane
-> 429 at `CreateModel`, the second at 2 went through). The
+> **Status: implemented and verified.** Last green integration run: run 20,
+> 2026-11-13 10:33 to 11:14 UTC, eu-central-1, every Runtime on platform
+> version V2 (ADR-0050), 60/60 steps (59 PASS, 1 SKIP), deploy 454 s at the
+> default concurrency 6 (each V2 Runtime about 3.5 min from create to
+> ready, for its snapshot), steps 1,629 s, key rotation 159 s, sweep of 147
+> log groups clean, teardown clean (commit b4cf4f1). The per-VM nonce told
+> the microVMs apart on V2: B1 got its own unit and microVM, A1 resumed c1
+> on the same one, and session off gave two microVMs for two requests. The
 > run used a sandbox account and `scripts/integ.sh` (the CDK CLI driver,
 > ADR-0044) with six stacks (`api-gateway`, `agentcore-gateway`,
 > `session-off`, `session-user`, `limits`, `multi-tenant`). Both all-on
