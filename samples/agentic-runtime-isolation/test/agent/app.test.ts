@@ -20,7 +20,7 @@ import {
   parseGatewayUrls,
   isProbe,
   MAX_PROMPT_CHARS,
-  NONCE,
+  nonce,
   promptOf,
   respond,
   type AgentClients,
@@ -182,7 +182,7 @@ describe('buildReport', () => {
   it('reports the unit id, its prefix, the per-VM nonce, and no token or credentials when none arrived', async () => {
     const report = await buildReport({ [RUNTIME_HEADERS.SESSION_ID.toLowerCase()]: 's-abcdefghijklmnopqrstuvwxyz-conversationA1x0001' }, 'report', undefined);
     expect(report).toEqual({
-      nonce: NONCE,
+      nonce: nonce(),
       unitId: 's-abcdefghijklmnopqrstuvwxyz-conversationA1x0001',
       sessionPrefix: 'abcdefghijklmnopqrstuvwxyz',
       transactionToken: false,
@@ -202,7 +202,7 @@ describe('buildReport', () => {
       jwtHeaders: [],
       credentials: false,
     });
-    expect(NONCE).toMatch(/^[0-9a-f-]{36}$/);
+    expect(nonce()).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it('reports the transaction token by its claims, never the token itself (C-2)', async () => {
@@ -305,7 +305,7 @@ describe('respond', () => {
     const evs = events(c.body);
     expect(evs).toHaveLength(2);
     const report = JSON.parse(evs[0].data);
-    expect(report.nonce).toBe(NONCE);
+    expect(report.nonce).toBe(nonce());
     expect(report.sessionPrefix).toBe('abcdefghijklmnopqrstuvwxyz');
     expect(evs[1]).toEqual({ event: 'usage', data: '{"inputTokens":0,"outputTokens":0}' });
     expect(parseUsageEvent(c.body)).toEqual({ inputTokens: 0, outputTokens: 0 });
@@ -319,7 +319,7 @@ describe('respond', () => {
     expect(bedrockMock).not.toHaveReceivedCommand(ConverseStreamCommand);
     const evs = events(c.body);
     expect(evs).toHaveLength(3);
-    expect(JSON.parse(evs[0].data)).toMatchObject({ t: 0, report: { nonce: NONCE } });
+    expect(JSON.parse(evs[0].data)).toMatchObject({ t: 0, report: { nonce: nonce() } });
     expect(evs[1].event).toBeUndefined();
     expect(JSON.parse(evs[1].data)).toEqual({ t: 0.005 });
     expect(evs[2]).toEqual({ event: 'usage', data: '{"inputTokens":0,"outputTokens":0}' });

@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0050: Run the agent on Runtime platform version V2, set explicitly, with the nonce drawn on the first request
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-13
 - Amends: ADR-0011 (the `agentcore-runtime` backend)
 - Deciders: Dave Roberts (PSA)

@@ -55,4 +55,4 @@ SPDX-License-Identifier: MIT-0
 | [0047](./0047-mask-header-values-in-the-runtime-log-group.md) | Mask header values in the Runtime log group with a data protection policy, set from a custom resource | Accepted | Amends ADR-0019 | 2026-11-06 |
 | [0048](./0048-delegate-between-agents-through-the-ingress.md) | Delegate between agents through the ingress, with a replacement transaction token | Accepted | Amends ADR-0031, ADR-0032 | 2026-11-09 |
 | [0049](./0049-reserve-concurrency-for-the-authoriser-too-and-size-the-stage-throttle-under-it.md) | Reserve concurrency for the authoriser as well as the integration Lambda, and size the stage throttle under it | Accepted | Amends ADR-0023, ADR-0029, ADR-0043 | 2026-11-11 |
-| [0050](./0050-run-the-agent-on-runtime-platform-version-v2.md) | Run the agent on Runtime platform version V2, set explicitly, with the nonce drawn on the first request | Proposed | Amends ADR-0011 | 2026-11-13 |
+| [0050](./0050-run-the-agent-on-runtime-platform-version-v2.md) | Run the agent on Runtime platform version V2, set explicitly, with the nonce drawn on the first request | Accepted | Amends ADR-0011 | 2026-11-13 |

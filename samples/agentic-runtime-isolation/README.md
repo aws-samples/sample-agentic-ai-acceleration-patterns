@@ -543,6 +543,11 @@ The agent must:
 - Delegate, if at all, only through `POST ${RI_DELEGATION_URL}/<agent>/delegations`
   with its transaction token as bearer (ADR-0048); the demo agent does so
   for the prompt `delegate <agent> <prompt>`.
+- Compute nothing per microVM at import: no secret, nonce or id. The
+  Runtime runs on platform version V2 (`agent.platformVersion`, default
+  `V2`), which restores every session's microVM from one snapshot, and
+  `node:crypto` can repeat values across restored microVMs. Draw such a
+  value on the first request, from `/dev/urandom` (ADR-0050).
 - Never log or echo a header value.
 
 #### Tool contract

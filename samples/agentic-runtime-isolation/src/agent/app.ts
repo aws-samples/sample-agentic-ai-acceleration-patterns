@@ -45,7 +45,8 @@
  * bounded length (Runtime input validation best practice).
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { closeSync, openSync, readSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
 import { BedrockRuntimeClient, ConverseStreamCommand } from '@aws-sdk/client-bedrock-runtime';
@@ -59,8 +60,36 @@ import { DEFAULT_TOOLS_GATEWAY, toolsGatewaysOf } from '../shared/mint';
 import { prefixOf } from '../shared/session';
 import type { VendedCredentials } from '../shared/tvm';
 
-/** One per process, and the Runtime runs one process per microVM. */
-export const NONCE = randomUUID();
+/**
+ * Reads `size` bytes from the kernel. Runtime platform V2 restores every
+ * microVM from one snapshot, and `node:crypto` can repeat its values across
+ * restored instances, so the nonce comes from `/dev/urandom` (ADR-0050).
+ */
+export function urandom(size: number): Buffer {
+  const fd = openSync('/dev/urandom', 'r');
+  try {
+    const bytes = Buffer.alloc(size);
+    let read = 0;
+    while (read < size) {
+      read += readSync(fd, bytes, read, size - read, null);
+    }
+    return bytes;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+let processNonce: string | undefined;
+
+/**
+ * One per process, and the Runtime runs one process per microVM. Drawn on
+ * the first request, never at import: a value computed at import is in the
+ * V2 snapshot and so the same in every microVM (ADR-0050).
+ */
+export function nonce(read: (size: number) => Buffer = urandom): string {
+  processNonce ??= read(16).toString('hex');
+  return processNonce;
+}
 
 const PORT = 8080;
 const MAX_STREAM_SECONDS = 120;
@@ -262,7 +291,7 @@ export async function buildReport(
   const credentialHeader = headerValue(headers, RUNTIME_HEADERS.TENANT_CREDENTIALS);
   const claims = transactionToken === undefined ? null : unverifiedClaims(transactionToken);
   const report: { -readonly [K in keyof AgentReport]: AgentReport[K] } = {
-    nonce: NONCE,
+    nonce: nonce(),
     unitId,
     sessionPrefix: unitId === null ? null : prefixOf(unitId),
     transactionToken: transactionToken !== undefined,

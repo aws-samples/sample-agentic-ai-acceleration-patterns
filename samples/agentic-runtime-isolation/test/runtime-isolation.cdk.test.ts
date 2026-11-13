@@ -266,6 +266,13 @@ describe('resolveOptions', () => {
     expect(() => synth({ ingress: 'api-gateway', agent: { codePath: FIXTURE_AGENT, modelId: '' } })).toThrow(/agent\.modelId/);
     expect(() => synth({ ingress: 'api-gateway', backendName: 'Agent' })).toThrow(/must match/);
   });
+
+  it('sets the Runtime platform version in the template: V2 by default, V1 on request (ADR-0050)', () => {
+    const versionOf = (t: Template) => (Object.values(t.findResources('AWS::BedrockAgentCore::Runtime'))[0] as any).Properties.PlatformVersion;
+    expect(versionOf(synth({ ingress: 'api-gateway' }).template)).toBe('V2');
+    expect(versionOf(synth({ ingress: 'api-gateway', agent: { codePath: FIXTURE_AGENT, modelId: 'm', platformVersion: 'V1' } }).template)).toBe('V1');
+    expect(() => synth({ ingress: 'api-gateway', agent: { codePath: FIXTURE_AGENT, modelId: 'm', platformVersion: 'V3' as any } })).toThrow(/agent\.platformVersion/);
+  });
 });
 
 // ---------------------------------------------------------------------------
