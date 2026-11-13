@@ -65,10 +65,14 @@ control plane, never writing unchecked.
 - Spike: the control plane authorizer verifies one `audience` and
   requires `sub` and `role`. S-9 checks that a client-credentials token
   from the registrar's own vendor IdP client passes it: `GetCell` returns
-  200 and a write returns 403. If S-9 fails, the control plane gains an
-  input to accept a list of audiences or client ids. That is a
-  control-plane change with its own control-plane ADR; this sample does not
-  work around it.
+  200, the token's `role` is the reader value, and a write returns 403.
+  A Cognito client-credentials token has no `aud` and no custom `role`. If
+  S-9 fails, the fallback names a source for each. The vendor IdP adds
+  `role` to machine tokens with a pre-token-generation trigger (V3 event,
+  which needs the Essentials or Plus feature plan). The control plane
+  accepts the registrar's `client_id` in place of `aud` through a new
+  input. That is a control-plane change with its own control-plane ADR;
+  this sample does not work around it.
 - Follow-up: rotate the client secret, and log token fetch failures apart
   from placement refusals.
 - Revisit when the control plane offers a grant narrower than all reads

@@ -76,9 +76,11 @@ URL, with `CellRouteAccess` granting the edge distribution
 distribution ARN in the cell's account, is the only option that binds the
 origin to this one distribution without a secret a tenant-owned account
 could read. The bearer token reaches the cell in `x-tenant-token`, a
-router-owned header no client can set. `/agents/*` goes to the agent
-ingress, an API Gateway origin without origin access control, so
-`Authorization` passes through there unchanged.
+router-owned header no client can set. `/agents/*` goes to the single
+`agentIngress` input, an origin without origin access control (the API
+Gateway or AgentCore Gateway ingress of `agentic-runtime-isolation`). Its
+origin request policy, `Managed-AllViewerExceptHostHeader`, forwards
+`Authorization` on `GET` and `POST` and does not forward `Host`.
 
 ## Consequences
 
@@ -104,8 +106,14 @@ ingress, an API Gateway origin without origin access control, so
   value. The router adds it on requests to that cell, and the cell refuses
   requests without it. A tenant-owned account learns only its own cell's
   secret, so it can reach only its own cell. The cost: the route table holds
-  secrets, which breaks "the router holds no secrets" (§3.3), and each
-  secret needs rotation. A new record supersedes this one. The IP allowlist
+  secrets. Any principal with KeyValueStore read (`GetKey`, `ListKeys`,
+  `DescribeKeyValueStore`) or console access in the edge account reads
+  every cell's secret, so that read permission becomes part of the
+  boundary. The secret travels in the `PutCellRoute` body, so the §5.1
+  schema gains a `secret` field and "never log the body" (§3.4 step 6)
+  becomes a security control. Rotation goes through `PutCellRoute`. A new
+  record supersedes this one. It also changes the "no secrets" statements in
+  §3.3, ADR-0003 and ADR-0005 Option 1. The IP allowlist
   (Option 3) is no fallback, and neither is a declared origin per cell,
   which needs a distribution update per cell and breaks P-9.
 - Revisit when CloudFront offers origin access control for another origin

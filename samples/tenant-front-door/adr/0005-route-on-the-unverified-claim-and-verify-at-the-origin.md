@@ -26,16 +26,18 @@ reads `tenant_id`, routes, and adds `x-tenant-route: <tenantId>` after
 removing every client `x-tenant-*` header (§3.3 steps 1, 5, 7). For
 `/api/*` it also copies the token into `x-tenant-token`, because origin
 access control overwrites `Authorization` (ADR-0011). The origin verifies
-the token, refuses a `tenant_id` that differs from the hint, and
-refuses a tenant its cell does not host (§3.5).
+the token, refuses a `tenant_id` that differs from the hint (compared
+case-insensitively, since the router sends the lower-case id), and refuses
+a tenant its cell does not host (§3.5).
 
 Pros: the router stays a CloudFront Function with no secrets, no key
-fetch and no network call (P-1). A forged claim only sends the request to
-a cell that refuses it (P-1, §10 step 7). In `host` mode the hint carries
-the host's tenant, so a token for `a` on `b`'s host is refused even when
-both tenants share one cell (P-4). In `single` mode the hint comes from the
-same token the cell verifies, so it always agrees; there the cell's check
-that the tenant is one it hosts is what stops a forged claim. Cons: a forged token
+fetch and no network call (P-1). Signature verification at the cell stops
+a forged claim (P-1, §10 step 7). The hosts check catches a validly signed
+token routed to the wrong cell, for example through a stale or wrong
+`cell#` route. The route hint guards `host` mode: the hint carries the
+host's tenant, so a token for `a` on `b`'s host is refused even when both
+tenants share one cell (P-4). In `single` mode the hint comes from the
+same token the cell verifies, so it always agrees. Cons: a forged token
 costs one origin request before it is refused. Every cell API must
 implement the hint and host checks (§6.1).
 

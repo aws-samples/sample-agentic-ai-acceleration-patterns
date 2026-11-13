@@ -16,13 +16,15 @@ the distribution, so one front door has one store.
 A pooled tenant takes one `tenant#` entry, plus one `host#` entry in `host`
 mode (§4.1). `cell#` entries and the one `app` entry are few and small.
 Values carry a version field (`"v":1`), so their shape can change without a
-key change. Display name `n` is the only free-text field, so §4.1 caps it at
-64 UTF-8 bytes as stored, and the registrar refuses a longer one with 400.
+key change. Display name `n` is the only free-text field. The registrar
+stores it for display only, truncated to at most 64 UTF-8 bytes with no
+character that needs JSON escaping (§4.1), so it never refuses a long name.
 
 Worst-case sizes, from the §4.1 shapes with a 63-character tenant id, a
 26-character ULID cell id, a 12-digit account, status `suspended`, a
 64-byte `n`, and a host of a 63-character label, a dot and an `appDomain`
-of up to 64 characters:
+of up to 64 characters (§3.6). A control-plane tenant id is 26 characters;
+63, the most a DNS label holds, is a safe upper bound:
 
 | Entry | Key | Value | Total |
 |---|---|---|---|

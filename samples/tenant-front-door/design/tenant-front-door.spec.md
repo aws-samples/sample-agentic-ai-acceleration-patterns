@@ -123,7 +123,7 @@ dedicated distribution tenant on the same distribution, in either mode.
 | Component | Account | Runs on | Job |
 |---|---|---|---|
 | Edge stack | edge, `us-east-1` | ACM and AWS WAF | Certificate for `<appDomain>` (and `*.<appDomain>` in `host` mode), web ACL |
-| Edge logging stack | edge, `us-east-1` | CloudWatch Logs delivery | Standard logging v2 delivery source and delivery for the distribution, deployed after the main stack (ADR-0010) |
+| Edge logging stack | edge, `us-east-1` | CloudWatch Logs delivery | Standard logging v2 for the distribution: the delivery source, the delivery destination (pointing at the `eu-central-1` log group) and the delivery, all in `us-east-1`, deployed after the main stack (ADR-0010) |
 | Multi-tenant distribution | edge | CloudFront (`ConnectionMode: tenant-only`) | Shared behaviours, policies and origins |
 | Pooled distribution tenant | edge | CloudFront distribution tenant | Serves `<appDomain>` (`single`) or `*.<appDomain>` (`host`) for every pooled tenant |
 | Dedicated distribution tenant | edge | CloudFront distribution tenant | Serves one tenant's own domain, with its own certificate and optional web ACL override |
@@ -133,9 +133,9 @@ dedicated distribution tenant on the same distribution, in either mode.
 | SPA origin | edge | S3 bucket with origin access control | One build for every tenant |
 | Cell API origin | the cell's | The cell's API (demo: Lambda function URL with origin access control) | Verifies the token, checks the route hint and the cell's tenants |
 | `CellRouteAccess` construct | the cell's | Lambda permission | Grants `cloudfront.amazonaws.com` `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`, conditioned on the edge distribution's ARN |
-| Agent route | edge | `/agents/*` behaviour | Streams to the agent ingress of `agentic-runtime-isolation`, when configured |
+| Agent route | edge | `/agents/*` behaviour | Streams to the agent ingress of `agentic-runtime-isolation`, when configured, with the `Managed-AllViewerExceptHostHeader` origin request policy |
 | `route.sh` | the cell's | the control plane's cell and tenant scripts | Calls the registrar with the script's own credentials |
-| Telemetry | edge | CloudFront standard logging v2: delivery source and delivery in `us-east-1`, log group in `eu-central-1` (ADR-0010) | Per-tenant requests, errors, bytes, latency |
+| Telemetry | edge | CloudFront standard logging v2: delivery source, delivery destination and delivery in `us-east-1`, log group in `eu-central-1` (ADR-0010) | Per-tenant requests, errors, bytes, latency |
 
 ### 3.2 Request paths
 
@@ -147,6 +147,10 @@ dedicated distribution tenant on the same distribution, in either mode.
 | `/api/*` | dynamic | the tenant's cell API, in the cell's account | disabled | yes |
 | `/agents/*` | dynamic, streaming | the agent ingress | disabled | yes |
 | `/logout` | generated at the edge | none | `no-store` | no |
+
+`/agents/*` uses the managed origin request policy
+`Managed-AllViewerExceptHostHeader`. It forwards `Authorization` on `GET`
+and `POST`, and it does not forward `Host`.
 
 `/config.json` gives the SPA its public settings: issuer URL, client id and
 scopes, plus the tenant id and display name in `host` mode. It holds nothing
@@ -167,8 +171,8 @@ On every viewer request:
    `same-origin`, `none`, or no header; refuse the rest with 403 (§7.3).
 5. Find the tenant:
    - `single` mode: take the `Authorization: Bearer` token, base64url-decode
-     its payload without checking the signature, and read `tenant_id`. No
-     token, an undecodable token, or no single `tenant_id` (a token with a
+     its payload without checking the signature, read `tenant_id`, and
+     lower-case it. No token, an undecodable token, or no single `tenant_id` (a token with a
      `tenants` list included): 401 with `WWW-Authenticate: Bearer`. The SPA
      narrows a `tenants` token first (§3.5).
    - `host` mode: the tenant from step 2.
@@ -178,10 +182,13 @@ On every viewer request:
    cell's API domain with origin access control. No cell entry: 503.
    Origin access control signs the request and overwrites `Authorization`,
    so copy the bearer token into `x-tenant-token` (ADR-0011). Add
-   `x-tenant-route: <tenantId>` for `/api/*` and `/agents/*`. The `/api/*`
-   origin request policy forwards `x-tenant-token` and `x-tenant-route`.
-   `/agents/*` goes to the agent ingress, an API Gateway origin without
-   origin access control, so `Authorization` reaches it unchanged.
+   `x-tenant-route: <tenantId>`, with the lower-case id, for `/api/*` and
+   `/agents/*`. The `/api/*` origin request policy forwards `x-tenant-token`
+   and `x-tenant-route`. `/agents/*` goes to the single `agentIngress`
+   input, an origin without origin access control (the API Gateway or
+   AgentCore Gateway ingress of `agentic-runtime-isolation`). Its origin
+   request policy, `Managed-AllViewerExceptHostHeader`, forwards
+   `Authorization` on `GET` and `POST` and does not forward `Host`.
 8. Serve `/config.json` and `/logout` directly. Rewrite SPA routes with no
    file extension to `/index.html`.
 
@@ -240,8 +247,14 @@ only the edge account's operator role may make them.
   `localStorage`, `sessionStorage` or cookies.
 - The cell API verifies the token it receives in `x-tenant-token`
   (`ARCHITECTURE.md` §2.1, ADR-0011), then refuses
-  the request with 403 when `tenant_id` differs from `x-tenant-route` or the
-  tenant is not one its cell hosts. A refusal is logged with both tenant ids.
+  the request with 403 when `tenant_id` differs from `x-tenant-route`,
+  compared case-insensitively, or the tenant is not one its cell hosts. A
+  refusal is logged with both tenant ids.
+- Each check stops a different request. Signature verification stops a
+  forged claim (§10 step 7). The hosts check catches a validly signed token
+  routed to the wrong cell, for example through a stale or wrong `cell#`
+  route. The route hint guards `host` mode, where the host picks the tenant
+  and the token must agree.
   The cell knows its tenants from its own namespace in its own account
   (`/application-plane/tenants/<tenantId>/<applicationId>/*`), so the check
   needs nothing from the edge account.
@@ -256,7 +269,7 @@ only the edge account's operator role may make them.
 
 | Input | Required | Default | Meaning |
 |---|---|---|---|
-| `appDomain` | yes | | Domain the app is served at, for example `app.example.com` |
+| `appDomain` | yes | | Domain the app is served at, for example `app.example.com`. At most 64 characters, ACM's limit on a certificate's primary name; validated at synth |
 | `hostedZone` | yes | | Public Route 53 zone for `appDomain`, in the edge account |
 | `addressing` | no | `single` | `single`: one URL, tenant from the token. `host`: one host per tenant |
 | `applicationId` | yes | | The control-plane application this front door serves |
@@ -277,13 +290,17 @@ only the edge account's operator role may make them.
 |---|---|---|
 | `tenant#<tenantId>` | `{"v":1,"c":"<cellId>","ac":"<accountId>","s":"active"\|"suspended","n":"<display name>"}` | registrar, from the tenant create script |
 | `host#<host>` | `{"v":1,"t":"<tenantId>"}` | registrar, in `host` mode and for a dedicated tenant's domain |
-| `cell#<cellId>` | `{"v":1,"ac":"<accountId>","o":"<api domain>","a":"<agent domain>"}` | registrar, from the cell create script |
+| `cell#<cellId>` | `{"v":1,"ac":"<accountId>","o":"<api domain>"}` | registrar, from the cell create script |
 | `app` | `{"v":1,"iss":"<issuer>","cid":"<client id>","sc":"<scopes>"}` | the front door stack |
 
 Rules:
 
-- Tenant ids match `[a-z0-9-]{1,63}` and cannot start or end with `-`, so
-  every tenant id is a valid DNS label in either mode.
+- The registrar and the router lower-case tenant ids, and every key uses
+  the lower-case id. Stored ids match `[a-z0-9-]{1,63}` and cannot start or
+  end with `-`, so every tenant id is a valid DNS label in either mode. A
+  control-plane `TenantId` is a 26-character upper-case Crockford ULID, so
+  it fits once lower-cased. The registrar reads the control plane with the
+  id in the control plane's own upper-case form.
 - `<host>` is the full lower-case host name. In `host` mode pooled tenants
   use `<tenantId>.<appDomain>`; a dedicated tenant adds its own domain as
   another `host#` key.
@@ -291,8 +308,12 @@ Rules:
   refused at registration.
 - `ac` is the account the registrar verified at write time. The router
   never reads it; the registrar uses it to authorise deletes.
-- Display name `n` is at most 64 UTF-8 bytes as stored; a longer
-  `displayName` gets 400.
+- Display name `n` is for display only, and the registrar never refuses
+  a long one. A control-plane `TenantName` runs to 128 characters. The
+  registrar replaces `"` with `'` and `\` with `/`, then truncates the raw
+  string to at most 64 UTF-8 bytes on a code-point boundary. Names with
+  control characters are refused (§5.1), so no stored character needs JSON
+  escaping and the stored field is at most 64 bytes.
 - Worst case, a tenant needs 217 bytes in `single` mode and 427 in `host`
   mode, keys included. The stated ceilings are 18,433 tenants in `single`
   mode and 9,367 in `host` mode, 80 % of the 5 MB store (ADR-0012). The
@@ -318,14 +339,14 @@ Modelled in Smithy; all operations `AWS_IAM`, all idempotent.
 
 | Op | HTTP | Caller | Contract |
 |---|---|---|---|
-| `PutCellRoute` | `PUT /cells/{cellId}` | cell provisioning role | Body `{apiDomain, agentDomain?}`. Checks §3.4. 200 |
+| `PutCellRoute` | `PUT /cells/{cellId}` | cell provisioning role | Body `{apiDomain}`. Checks §3.4. 200 |
 | `DeleteCellRoute` | `DELETE /cells/{cellId}` | cell provisioning role | 409 while a tenant route names the cell. 200, also when absent |
-| `PutTenantRoute` | `PUT /tenants/{tenantId}` | tenant provisioning role | Body `{displayName, customDomain?}`. Cell taken from the control plane, never the body. Checks §3.4. 200 |
+| `PutTenantRoute` | `PUT /tenants/{tenantId}` | tenant provisioning role | Body `{displayName, customDomain?}`. `displayName` is stored as §4.1 says. Cell taken from the control plane, never the body. Checks §3.4. 200 |
 | `DeleteTenantRoute` | `DELETE /tenants/{tenantId}` | tenant provisioning role | Removes the `tenant#` and `host#` keys and any dedicated distribution tenant. 200, also when absent |
 | `UpdateTenantRouteStatus` | `PUT /tenants/{tenantId}/status` | edge operator role | Body `{status}` |
 
-Errors: 400 for a malformed id or domain, or a display name over 64
-bytes; 403 when the caller's account or
+Errors: 400 for a malformed id or domain, or a display name that is
+empty or has control characters; 403 when the caller's account or
 role does not match the placement (the message names neither the real
 account nor the real cell); 409 for a missing cell route or a cell still in
 use; 507 when a write would exceed the route table's 5 MB (ADR-0012); 503 when the control plane cannot be read (the write is refused, never
@@ -367,13 +388,18 @@ All with a small static HTML or JSON body and `no-store`:
 - A control plane whose `GetCell` and `GetDeployment` return `accountId`
   and `applicationId`, with a reader role enabled (control-plane R-36), and
   a vendor IdP app client whose client-credentials tokens carry that role
-  and pass the control plane authorizer (spike S-9, ADR-0015). If they do
-  not, the control plane needs an input that accepts a list of audiences or
-  client ids, a control-plane change with its own control-plane ADR.
+  and pass the control plane authorizer (spike S-9, ADR-0015). A Cognito
+  client-credentials token has no `aud` and no custom `role`. If S-9 fails,
+  both need a source. The vendor IdP adds `role` to machine tokens with a
+  pre-token-generation trigger (V3 event, which needs the Essentials or
+  Plus feature plan). The control plane accepts the registrar's `client_id`
+  in place of `aud` through a new input, a control-plane change with its
+  own control-plane ADR.
 - In every account that hosts cells, the control plane's role pair; the
   registrar admits only those roles.
-- A cell API that verifies the token in `x-tenant-token`, refuses a `tenant_id` that differs from
-  `x-tenant-route`, refuses tenants its cell does not host, and in `single`
+- A cell API that verifies the token in `x-tenant-token`, refuses a
+  `tenant_id` that differs from `x-tenant-route` (compared
+  case-insensitively), refuses tenants its cell does not host, and in `single`
   mode limits each verified tenant to `tenantRequestsPer5Min` (ADR-0009). The demo
   cell API is the reference.
 - CloudFront origin access control support on the cell origin (Lambda
@@ -387,8 +413,9 @@ All with a small static HTML or JSON body and `no-store`:
 - A request reaches only the cell its route names.
 - An account can register routes only for cells and deployments the control
   plane places in it.
-- A forged or foreign token cannot be served: the cell it routes to
-  refuses it.
+- A forged token cannot be served: the cell's signature check refuses
+  it. A validly signed token routed to the wrong cell is refused by that
+  cell's hosts check.
 - In `host` mode, a token for one tenant is refused on another tenant's
   host.
 - Every response carries the §7 header set.
@@ -401,7 +428,7 @@ All with a small static HTML or JSON body and `no-store`:
 
 | Sample | How | Needed for |
 |---|---|---|
-| `control-plane` | its API (`GetCell`, `GetDeployment`) with the reader grant (R-36) and a client-credentials reader token (spike S-9), its role pair in each cell account, and its scripts calling `route.sh` | placement checks, registration, the integration test |
+| `control-plane` | its API (`GetCell`, `GetDeployment`) with the reader grant (R-36) and a client-credentials reader token (spike S-9; its fallback adds a `role` trigger on the vendor IdP and a `client_id` input on the control plane), its role pair in each cell account, and its scripts calling `route.sh` | placement checks, registration, the integration test |
 | `tenant-identity` `shared-pool` | its published parameters | the demo issuer and the integration test |
 | `agentic-runtime-isolation` | its `/application-plane/shared/agent-runtime/ingress` parameter | `/agents/*`, optional |
 
@@ -504,15 +531,15 @@ Each spike reports its deploy and destroy time.
 
 | # | Question | Pass when |
 |---|---|---|
-| S-1 | Does a multi-tenant distribution take a viewer-request function with an associated KeyValueStore, on both an apex and a wildcard pooled distribution tenant? | a request runs the function and reads the store in both; standard logging v2 set up in `us-east-1` delivers to a log group in `eu-central-1` |
+| S-1 | Does a multi-tenant distribution take a viewer-request function with an associated KeyValueStore, on both an apex and a wildcard pooled distribution tenant? | a request runs the function and reads the store in both; standard logging v2 set up in `us-east-1` (delivery source, delivery destination and delivery) delivers to a log group in `eu-central-1` |
 | S-2 | How long does a KeyValueStore write take to apply at the edge? | median and p99 from write to first routed request |
 | S-3 | Does `cf.updateRequestOrigin()` set origin access control for a Lambda function URL **in another account**? | through the multi-tenant distribution, with its ARN as the permission's `SourceArn`: a signed request reaches a URL with `AWS_IAM` auth in the second account; an unsigned one is 403; a `POST` with a body and `x-amz-content-sha256` is served; the cell receives the viewer's token in `x-tenant-token`; the permission set is confirmed |
 | S-4 | `host` mode: how does the issuer take one callback URL per tenant at 1,000s of tenants? | a working option for Cognito app clients (limit and update rate measured), or a single sign-in host with a signed `state` |
-| S-5 | Does streaming pass through `/agents/*` to the agent ingress without buffering? | first byte at the client within 1 s of first byte from the ingress |
+| S-5 | Does streaming pass through `/agents/*` to the agent ingress without buffering? | first byte at the client within 1 s of first byte from the ingress; the ingress receives the bearer token on `GET` and `POST`; the `Managed-AllViewerExceptHostHeader` policy deploys with the pinned CDK version |
 | S-6 | Does a WAF rate rule keyed on the `Host` header count each tenant on its own? | tenant A over its limit on `/api/*` gets the custom 429 while tenant B is served; A's SPA loads (`/`, `/assets/*`) are not counted |
 | S-7 | Can the router decode a `tenant-identity` access token's payload within the CloudFront Functions limits? | `tenant_id` read from a real token; compute utilisation under 50 %; 401 on a malformed token |
 | S-8 | Can an API Gateway resource policy admit a role name in any account through `aws:PrincipalArn`, and does the request context give the caller's account? | a provisioning role in the second account reaches the registrar; a role of another name is refused |
-| S-9 | Does a client-credentials token from the registrar's own vendor IdP client pass the control plane authorizer (single `audience`, required `sub` and `role`)? | `GetCell` returns 200 with that token, and a write returns 403 |
+| S-9 | Does a client-credentials token from the registrar's own vendor IdP client pass the control plane authorizer (single `audience`, required `sub` and `role`)? | `GetCell` returns 200 with that token, the token's `role` is the reader value, and a write returns 403 |
 
 ## 10. Integration test outline
 

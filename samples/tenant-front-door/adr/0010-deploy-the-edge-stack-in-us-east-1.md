@@ -14,8 +14,8 @@ be issued in `us-east-1`. A web ACL with CloudFront scope must also be
 created in `us-east-1`. That web ACL carries the per-tenant rate rule in
 `host` mode (ADR-0009). CloudFront standard logging v2 is configured through
 the CloudWatch Logs API in `us-east-1`, even for cross-Region delivery: the
-delivery source (the distribution) and the delivery that links it to a
-destination are created there.
+delivery source (the distribution), the delivery destination (the log
+group) and the delivery that links them are created there.
 
 The rest of the sample has no such constraint. The route registrar, the SPA
 bucket, the CloudWatch Logs group the standard logs land in, and the
@@ -32,10 +32,11 @@ A small edge stack in `us-east-1` holds the certificate and the web ACL.
 The main stack, in `eu-central-1`, holds the distribution, the router, the
 route table, the registrar, the SPA bucket and the log group, and reads the
 certificate and web ACL ARNs through CDK cross-Region references. The
-logging delivery source and delivery also sit in `us-east-1`. The delivery
-source names the distribution, so they go in an edge logging stack that
-deploys after the main stack and delivers across Regions to the log group
-in `eu-central-1`.
+logging delivery source, delivery destination and delivery also sit in
+`us-east-1`. The delivery source names the distribution, so all three go in
+an edge logging stack that deploys after the main stack. The delivery
+destination points at the log group in `eu-central-1`, so the delivery
+crosses Regions.
 
 Pros: only the Region-bound resources leave the deployment Region. The
 registrar, its logs, the CloudFront logs and the published parameter stay
@@ -56,7 +57,8 @@ Region for `/application-plane/shared/front-door/edge`.
 
 Option 1. The edge stack in `us-east-1` holds the ACM certificate and the
 CloudFront-scope web ACL (spec §3.1). The edge logging stack in `us-east-1`
-holds the standard logging delivery source and delivery. Everything else,
+holds the standard logging delivery source, the delivery destination
+(pointing at the `eu-central-1` log group) and the delivery. Everything else,
 the destination log group included, runs in `eu-central-1` and takes the
 ARNs it needs through cross-Region references. The Region constraint is
 CloudFront's, so the split keeps it to the resources it applies to, and
