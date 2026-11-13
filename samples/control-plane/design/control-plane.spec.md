@@ -128,7 +128,8 @@ Control plane concerns this version leaves out. Each has a recorded seam
   registered, and whoever owns it installs the role pair
 - A Region per account — cells are provisioned in the control plane's
   Region
-- Per-operation authorization and a sweep for stranded in-flight records
+- Finer operator roles (an application registrar apart from an onboarder,
+  operators scoped to accounts) and a sweep for stranded in-flight records
 
 ### 1.3 What this control plane is NOT
 
@@ -394,7 +395,7 @@ hours; synchronous API gateways cap at ~29 seconds. Therefore:
   read operations and nothing else, so a system that only needs to look
   placement up (a route registrar, a dashboard) never holds a credential
   that can change the fleet. The matrix is complete for those two roles;
-  finer operator roles are a recorded seam (§11), not a half-built one.
+  finer operator roles are a recorded seam (§11).
 
 ### P-11. Retry safety where retries actually happen
 
@@ -506,17 +507,37 @@ authorizer MUST map the verified `role` claim to one of two grants:
 | `allowedRoles` (default `operator`) | operator | all twenty-two |
 | `readerRoles` (default none) | reader | the ten `GET` operations: `GetTenant`, `ListTenants`, `GetDeployment`, `ListDeployments`, `GetCell`, `ListCells`, `GetAccount`, `ListAccounts`, `GetApplication`, `ListApplications` |
 
-The grant is the authorizer's IAM policy: an operator's policy allows
-`execute-api:Invoke` on `<api>/<stage>/*`, a reader's on
-`<api>/<stage>/GET/*` only, so a cached result never widens to a method
-the role lacks and a reader's write is refused by API Gateway with 403
-before any code runs. The service MUST check again: every non-`GET`
-operation refuses a caller context whose grant is `reader` with 403
-(`UnauthorizedError`), so a policy mistake is not the only wall. The
-caller context carries the grant beside `operatorId` and `role`, and the
-access log records it. No read operation returns a secret: `adminEmail` is
-never stored (P-3), `externalId` is never returned (N-10), and parameter
-values are never secrets (ADR-039).
+The grant is the authorizer's IAM policy, and the policy is a function of
+the grant alone, never of the method the request named: an operator's
+policy allows `execute-api:Invoke` on `<api>/<stage>/*`, a reader's on
+`<api>/<stage>/GET/*`, whichever operation filled the token-keyed result
+cache. A reader whose first call is a write therefore caches its read
+grant, not a `Deny` that would block its reads for the cache window, and
+API Gateway refuses the write with 403 before any code runs. The service
+MUST check again, by operation name: the twelve non-`GET` operations
+require the `operator` grant and refuse any other with 403
+(`UnauthorizedError`); a caller context with no grant is an ingress fault,
+500, as a missing `operatorId` is. A service unit test covers that wall,
+because the integration test can only reach the first. The caller context
+carries the grant beside `operatorId` and `role`, and the access log
+records it.
+
+The role lists reach the authorizer as `ALLOWED_ROLES` and
+`READER_ROLES`, comma-separated. `ALLOWED_ROLES` unset or empty means
+`operator`; `READER_ROLES` unset or empty means no reader. Either set but
+yielding no names (`",,"`) throws at cold start, and so does a value in
+both lists, so an edit to the function's environment after deploy fails
+closed like a bad stack input does.
+
+**R-37 (reads are reads):** every `GET` operation MUST write nothing,
+start no execution or build, and return no secret. The reader grant is
+defined by method, so a new `GET` widens it; this rule is what keeps that
+safe, and a `GET` that cannot meet it is a different method and a new
+matrix row. Today's reads return no `adminEmail` (never stored, P-3) and
+no `externalId` (never returned, N-10). They do return parameter values,
+which are not secrets by contract only (N-11, T35), and every
+application's source location and version, which name the repository a
+supply-chain attacker would target (T34).
 
 ### 3.3 Stack inputs
 
@@ -528,8 +549,8 @@ Supplied at deployment time, validated at synthesis/deploy.
 |---|---|
 | `vendorIdp.issuerUrl`, `vendorIdp.audience` | non-empty; OIDC discovery must work against the issuer |
 | `fleetName` | names the role pair every account installs (`<fleetName>-cell-provisioning`, `<fleetName>-tenant-provisioning`) and the control plane's three roles the pair trusts (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-api`); `[a-z0-9-]{1,32}`. Default `control-plane`. Two control planes in one account MUST use different fleet names |
-| `allowedRoles` (optional, R-36) | role claim values that get the operator grant; non-empty. Default `["operator"]` |
-| `readerRoles` (optional, R-36, [ADR-042](../adr/0042-a-read-only-role-beside-the-operator.md)) | role claim values that get the reader grant. Default: none, so no reader is admitted until the deployer names one. A value in both lists MUST fail synth |
+| `allowedRoles` (optional, R-36) | role claim values that get the operator grant; non-empty. Default `["operator"]`. Every role value in either list matches `[A-Za-z0-9:._-]{1,64}`, so it survives the comma-separated environment variable |
+| `readerRoles` (optional, R-36, [ADR-042](../adr/0042-a-read-only-role-beside-the-operator.md)) | role claim values that get the reader grant. Default: none, so no reader is admitted until the deployer names one. A value in both lists MUST fail synth. Use a namespaced value (`control-plane:reader`), not a word a broader issuer may already mint (`reader`, `viewer`) (T2, T20) |
 | `tenantBuildManagedPolicyArns` (optional, [ADR-022](../adr/0022-attach-deployer-supplied-managed-policies-to-the-tenant-build-role.md)) | array of customer-managed IAM policy ARNs (`arn:<partition>:iam::<account>:policy/...`), each in the stack's own partition and account; synth MUST fail otherwise. Attached to the tenant provisioning role the stack installs in its own account. Default: none |
 
 Neither applications nor accounts are stack inputs: both are
@@ -1535,7 +1556,7 @@ bypasses the Catch and strands records).
 | N-8 | The build roles' AssumeRole resource is the provisioning role **by fixed name in any account**; the control plane never maps account ids into IAM policy. | Accounts are registered at run time (P-10); the target role's trust policy — written by the account owner — is the gate, and `externalId` closes the confused deputy. Enumerating accounts in IAM would make registration a deployment, defeating on-demand customer accounts. |
 | N-9 | `PutAccount` probes both roles before writing (R-26); the probe makes no call under the assumed credentials. | Fail at registration, when the operator is present, not at the first build; and never touch the account during a check. |
 | N-10 | `externalId` is never returned by the API and never logged by the sample. It reaches the build as a plaintext CodeBuild environment-variable override carried in the Step Functions execution input, readable by principals with `states:DescribeExecution` or `codebuild:BatchGetBuilds` in the control plane account (the operator role, the account's administrators). | Not a secret by AWS's definition; the guard's value is that outsiders do not hold it, and nobody outside the control plane account can read those APIs. |
-| N-11 | Deployment and cell parameter values MUST NOT be secrets. They are stored in plain text on the deployment or cell record, returned by `GetDeployment` or `GetCell`, and reach the build as CodeBuild environment-variable overrides carried in the Step Functions execution input. The service logs parameter names, never values. A script that needs a secret receives its *name* as a parameter (a Secrets Manager secret or an SSM `SecureString` under the deployment's tenant namespace or the application's shared namespace, §6.2) and reads it under its own role. | Everyone who can read the table, the execution history or `codebuild:BatchGetBuilds` in the control plane account can read the values; secret-shaped storage would need a KMS key, extra IAM and a second read path for a concern the application plane already solves. |
+| N-11 | Deployment and cell parameter values MUST NOT be secrets. They are stored in plain text on the deployment or cell record, returned by `GetDeployment` or `GetCell` to operators and readers alike (R-36), and reach the build as CodeBuild environment-variable overrides carried in the Step Functions execution input. The service logs parameter names, never values. A script that needs a secret receives its *name* as a parameter (a Secrets Manager secret or an SSM `SecureString` under the deployment's tenant namespace or the application's shared namespace, §6.2) and reads it under its own role. | Every operator and reader, and everyone who can read the table, the execution history or `codebuild:BatchGetBuilds` in the control plane account, can read the values; secret-shaped storage would need a KMS key, extra IAM and a second read path for a concern the application plane already solves. |
 
 ---
 

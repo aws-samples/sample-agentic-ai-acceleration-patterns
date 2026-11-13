@@ -24,13 +24,14 @@ how to add it without widening anything for existing deployments.
 A second stack input, `readerRoles` (default none), lists role values that
 get the reader grant. The authorizer returns a policy on
 `<api>/<stage>/GET/*` for a reader and on `<api>/<stage>/*` for an
-operator; the service refuses a reader on any non-`GET` operation. Pros:
-off by default, so nothing changes until a deployer opts in; the cached
-authorizer result stays valid for every call the role may make and never
-for one it may not; two walls, so a policy shape error is caught by the
-service and a service bug by API Gateway. Cons: the read set is defined by
-HTTP method, so a future read operation that is not a `GET` needs a matrix
-row, not a convention.
+operator, computed from the grant alone; the service requires the operator
+grant on every non-`GET` operation. Pros: off by default, so nothing
+changes until a deployer opts in; the cached authorizer result stays valid
+for every call the role may make and never for one it may not; two walls,
+defined independently (by method in the policy, by operation name in the
+service), so one mistake does not open both. Cons: the read set is defined
+by HTTP method, so every future `GET` joins it (spec R-37 keeps that safe)
+and a read that is not a `GET` needs a matrix row.
 
 ### Option 2: A per-operation matrix configured by the deployer
 A map of role to operation names. Pros: any shape. Cons: a configuration
@@ -52,24 +53,32 @@ credential the vendor holds.
 ## Decision
 Option 1. Two grants, operator and reader, chosen by the verified `role`
 claim through `allowedRoles` and `readerRoles`; the reader grant is the ten
-`GET` operations; the authorizer expresses it as the method-scoped IAM
-policy and the service checks it again. `readerRoles` defaults to none, so
-an existing deployment admits no new caller, and a value in both lists
-fails synth so no claim maps to two grants. The read operations return no
-secret (`adminEmail` is never stored, `externalId` is never returned,
-parameter values are never secrets), so a reader learns fleet topology and
-nothing it could use to act.
+`GET` operations; the authorizer's policy depends on the grant alone, and
+the service requires the operator grant on the twelve other operations,
+treating a missing grant as an ingress fault. `readerRoles` defaults to
+none, so an existing deployment admits no new caller, and a value in both
+lists fails synth and cold start, so no claim maps to two grants. A reader
+can change nothing. It can read a great deal: fleet topology, parameter
+values that are not secrets by contract only (N-11, T35), and every
+application's source location, which names the repository a T34 attacker
+would target. That disclosure is the price, recorded as T36.
 
 ## Consequences
 - The route registrar, dashboards and audit jobs read with a credential
-  that cannot change the fleet. A stolen reader token discloses topology:
-  tenant names, account ids, cell placement (T36).
+  that cannot change the fleet. A stolen reader token discloses what T36
+  lists.
 - The caller context carries the grant; the access log records it, so a
   reader's calls are told apart from an operator's.
 - The integration test adds a reader token: every `GET` passes, every other
-  method is 403 with nothing written.
+  method is 403 with nothing written. A service unit test covers the
+  second wall, which the integration test cannot reach.
+- Spec changes: P-10, §1.2, §3.2 (R-36, R-37), §3.3 (`allowedRoles`,
+  `readerRoles`), the §5 error table, N-11, §10 step 1, §11. Threat model:
+  T2, T20, T27, T34, T35, new T36 and M26.
+- On acceptance, ADR-0015 and ADR-0018 get dated "Amended by ADR-0042"
+  trailing notes; until then they describe the code as it is.
 - Finer operator roles (an application registrar apart from an onboarder,
   account scoping) remain a seam (spec §11); they would close T34 and T27,
   which this record does not.
 - Revisit when a read operation needs a method other than `GET`, or a
-  reader needs a subset of the reads.
+  reader needs a subset of the reads (the registrar uses two of the ten).
