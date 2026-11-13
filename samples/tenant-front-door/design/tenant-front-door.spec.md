@@ -153,7 +153,8 @@ dedicated distribution tenant on the same distribution, in either mode.
 and `POST`, and it does not forward `Host`.
 
 `/config.json` gives the SPA its public settings: issuer URL, client id and
-scopes, plus the tenant id and display name in `host` mode. It holds nothing
+scopes, plus the tenant id (upper-cased back to its control-plane form,
+which the token exchange expects) and display name in `host` mode. It holds nothing
 secret. Serving it from the edge keeps the SPA bundle the same file for
 every tenant. In `single` mode the SPA learns the tenant after sign-in, from
 its own token.
@@ -257,7 +258,9 @@ only the edge account's operator role may make them.
   and the token must agree.
   The cell knows its tenants from its own namespace in its own account
   (`/application-plane/tenants/<tenantId>/<applicationId>/*`), so the check
-  needs nothing from the edge account.
+  needs nothing from the edge account. It builds that path from the
+  verified `tenant_id` claim in its control-plane form (upper case), never
+  from the lower-case `x-tenant-route` hint: SSM names are case-sensitive.
 - The agent ingress already verifies the token and selects the tenant from
   it, so it reaches the same tenant the router routed on. The router's role
   on `/agents/*` is to refuse unknown and suspended tenants at the edge.
@@ -309,11 +312,12 @@ Rules:
 - `ac` is the account the registrar verified at write time. The router
   never reads it; the registrar uses it to authorise deletes.
 - Display name `n` is for display only, and the registrar never refuses
-  a long one. A control-plane `TenantName` runs to 128 characters. The
-  registrar replaces `"` with `'` and `\` with `/`, then truncates the raw
-  string to at most 64 UTF-8 bytes on a code-point boundary. Names with
-  control characters are refused (§5.1), so no stored character needs JSON
-  escaping and the stored field is at most 64 bytes.
+  any name the control plane accepts. A control-plane `TenantName` runs to
+  128 characters with no character rule. The registrar replaces each
+  control character (U+0000 to U+001F, U+007F) with a space, `"` with `'`
+  and `\` with `/`, then truncates the raw string to at most 64 UTF-8 bytes
+  on a code-point boundary. No stored character then needs JSON escaping,
+  so the stored field is at most 64 bytes.
 - Worst case, a tenant needs 217 bytes in `single` mode and 427 in `host`
   mode, keys included. The stated ceilings are 18,433 tenants in `single`
   mode and 9,367 in `host` mode, 80 % of the 5 MB store (ADR-0012). The
@@ -345,8 +349,7 @@ Modelled in Smithy; all operations `AWS_IAM`, all idempotent.
 | `DeleteTenantRoute` | `DELETE /tenants/{tenantId}` | tenant provisioning role | Removes the `tenant#` and `host#` keys and any dedicated distribution tenant. 200, also when absent |
 | `UpdateTenantRouteStatus` | `PUT /tenants/{tenantId}/status` | edge operator role | Body `{status}` |
 
-Errors: 400 for a malformed id or domain, or a display name that is
-empty or has control characters; 403 when the caller's account or
+Errors: 400 for a malformed id or domain, or an empty display name; 403 when the caller's account or
 role does not match the placement (the message names neither the real
 account nor the real cell); 409 for a missing cell route or a cell still in
 use; 507 when a write would exceed the route table's 5 MB (ADR-0012); 503 when the control plane cannot be read (the write is refused, never

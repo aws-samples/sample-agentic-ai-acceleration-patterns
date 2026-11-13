@@ -106,9 +106,10 @@ origin request policy, `Managed-AllViewerExceptHostHeader`, forwards
   value. The router adds it on requests to that cell, and the cell refuses
   requests without it. A tenant-owned account learns only its own cell's
   secret, so it can reach only its own cell. The cost: the route table holds
-  secrets. Any principal with KeyValueStore read (`GetKey`, `ListKeys`,
-  `DescribeKeyValueStore`) or console access in the edge account reads
-  every cell's secret, so that read permission becomes part of the
+  secrets. Any principal in the edge account with KeyValueStore read
+  (`cloudfront-keyvaluestore:GetKey`, `ListKeys`), or with
+  `cloudfront:UpdateFunction` and `TestFunction` on a function associated
+  with the store, reads every cell's secret, so that read permission becomes part of the
   boundary. The secret travels in the `PutCellRoute` body, so the §5.1
   schema gains a `secret` field and "never log the body" (§3.4 step 6)
   becomes a security control. Rotation goes through `PutCellRoute`. A new
