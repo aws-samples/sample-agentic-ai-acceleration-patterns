@@ -388,10 +388,13 @@ hours; synchronous API gateways cap at ~29 seconds. Therefore:
   its owner and capacity (`PutAccount`); cell creation *inside* a registered
   account stays implicit. The same asymmetry applies on the way out: an
   empty account persists until an operator deletes it.
-- The trust model is stated, not implied: the design gates on
-  authentication alone *because* the issuer is declared a dedicated
-  operator-only trust boundary. A half-built role matrix that
-  protects nothing is worse than an honest, documented assumption.
+- The trust model is stated, not implied: the issuer is declared a
+  dedicated control-plane trust boundary, and it mints exactly two kinds of
+  caller. An **operator** holds every operation. A **reader** holds the
+  read operations and nothing else, so a system that only needs to look
+  placement up (a route registrar, a dashboard) never holds a credential
+  that can change the fleet. The matrix is complete for those two roles;
+  finer operator roles are a recorded seam (§11), not a half-built one.
 
 ### P-11. Retry safety where retries actually happen
 
@@ -487,12 +490,33 @@ and its cell limit do not know which application a cell serves.
   never sees the raw request event. Static configuration (table names,
   ARNs) is initialised once at cold start, separate from per-request
   context.
-- Authorization is authentication-only, under an explicit assumption that
+- Authorization is by the `role` claim, under an explicit assumption that
   MUST be documented: the configured issuer is a dedicated control-plane
-  trust boundary issuing tokens exclusively to fully privileged operators.
-  The `role` claim is carried for audit and as the extension point — never
-  fabricated, never currently enforced. Connecting any broader issuer
-  REQUIRES adding an explicit per-operation role matrix first (P-10).
+  trust boundary that mints `role` only for the two populations of P-10.
+  The claim is never fabricated: a token without it, or with a role in
+  neither set, is denied. Connecting any broader issuer REQUIRES finer
+  roles first (§11).
+
+**R-36 (role matrix,
+[ADR-042](../adr/0042-a-read-only-role-beside-the-operator.md)):** the
+authorizer MUST map the verified `role` claim to one of two grants:
+
+| Role set (stack input) | Grant | Operations |
+|---|---|---|
+| `allowedRoles` (default `operator`) | operator | all twenty-two |
+| `readerRoles` (default none) | reader | the ten `GET` operations: `GetTenant`, `ListTenants`, `GetDeployment`, `ListDeployments`, `GetCell`, `ListCells`, `GetAccount`, `ListAccounts`, `GetApplication`, `ListApplications` |
+
+The grant is the authorizer's IAM policy: an operator's policy allows
+`execute-api:Invoke` on `<api>/<stage>/*`, a reader's on
+`<api>/<stage>/GET/*` only, so a cached result never widens to a method
+the role lacks and a reader's write is refused by API Gateway with 403
+before any code runs. The service MUST check again: every non-`GET`
+operation refuses a caller context whose grant is `reader` with 403
+(`UnauthorizedError`), so a policy mistake is not the only wall. The
+caller context carries the grant beside `operatorId` and `role`, and the
+access log records it. No read operation returns a secret: `adminEmail` is
+never stored (P-3), `externalId` is never returned (N-10), and parameter
+values are never secrets (ADR-039).
 
 ### 3.3 Stack inputs
 
@@ -504,6 +528,8 @@ Supplied at deployment time, validated at synthesis/deploy.
 |---|---|
 | `vendorIdp.issuerUrl`, `vendorIdp.audience` | non-empty; OIDC discovery must work against the issuer |
 | `fleetName` | names the role pair every account installs (`<fleetName>-cell-provisioning`, `<fleetName>-tenant-provisioning`) and the control plane's three roles the pair trusts (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-api`); `[a-z0-9-]{1,32}`. Default `control-plane`. Two control planes in one account MUST use different fleet names |
+| `allowedRoles` (optional, R-36) | role claim values that get the operator grant; non-empty. Default `["operator"]` |
+| `readerRoles` (optional, R-36, [ADR-042](../adr/0042-a-read-only-role-beside-the-operator.md)) | role claim values that get the reader grant. Default: none, so no reader is admitted until the deployer names one. A value in both lists MUST fail synth |
 | `tenantBuildManagedPolicyArns` (optional, [ADR-022](../adr/0022-attach-deployer-supplied-managed-policies-to-the-tenant-build-role.md)) | array of customer-managed IAM policy ARNs (`arn:<partition>:iam::<account>:policy/...`), each in the stack's own partition and account; synth MUST fail otherwise. Attached to the tenant provisioning role the stack installs in its own account. Default: none |
 
 Neither applications nor accounts are stack inputs: both are
@@ -926,7 +952,7 @@ compare-and-set maps to 409.
 | Error | HTTP | Triggers |
 |---|---|---|
 | `ValidationException` | 400 | malformed input, malformed pagination token, two list filters at once; an invalid application definition or parameter declaration on `PutApplication`; a deployment parameter that fails R-33 on `CreateDeployment` or `UpdateDeployment`; a cell parameter that fails R-34 on `UpdateCell`; a targeted `CreateDeployment` into an account that does not admit the application; `PutAccount` handshake refusal (R-26: a half could not be assumed, or admits the call without the supplied external id) |
-| `UnauthorizedError` | 401/403 | missing/invalid JWT |
+| `UnauthorizedError` | 401/403 | missing/invalid JWT; a role in neither set; a reader calling a non-`GET` operation (R-36) |
 | `ResourceNotFoundError` | 404 | unknown tenant, deployment, cell, account or application (including an unregistered `CreateDeployment.accountId` or `applicationId`, and an unregistered id in `PutAccount.applicationIds`) |
 | `ConflictError` | 409 | in-flight mutation; a second deployment of the same application for one tenant; occupied-tenant delete; occupied-cell delete; occupied-account delete; occupied-application delete; `owner` change on `PutAccount`; cell-not-ACTIVE guard; `clientToken` reuse with different parameters; a parameter merge or a list-keeping `PutApplication` whose read went stale — retry (R-14); `CreateDeployment` lost every bounded claim on candidate cells and no account had a free cell slot — retry ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)) |
 | `InsufficientCapacityError` | 409 | `CreateDeployment` found no eligible cell and no eligible account with cell capacity: every vendor-owned account admitting the application is full (untargeted), or the named account is full (targeted). Nothing was written. The remedy is an operator act — raise `maxCells`, register an account, or admit the application in one — so the error is distinct from `ConflictError`, which a client may simply retry later ([ADR-026](../adr/0026-fleet-full-is-a-modelled-error.md)) |
@@ -1527,7 +1553,10 @@ parameters (step 2); every `CreateDeployment` of X supplies
 `ALLOWED_EMAIL_DOMAIN = example.com` unless a step says otherwise.
 
 1. **Auth:** an operation without a JWT is rejected; with a valid vendor
-   IdP JWT it succeeds.
+   IdP JWT it succeeds. A reader token (R-36) succeeds on every `GET`
+   operation and is refused with 403 on `POST`, `PUT` and `DELETE` alike,
+   nothing written; a token whose role is in neither set is refused on
+   every operation.
 2. **Applications:** `PutApplication` with a missing script path → 400;
    with an id outside the charset → 400; `PutApplication` X and Y → 200;
    `ListApplications` shows both with `cellCount = 0`; `PutAccount` naming
@@ -1682,7 +1711,7 @@ Per P-1, deferred generality is recorded as seams, not code:
 | Per-application cell cap inside a shared account | a join record per (account, application) with its own counter and cap, layered under the account's `maxCells` ([ADR-033](../adr/0033-account-admission-is-an-application-allowlist-on-the-account.md), option 3); today an account admits applications but does not meter them separately |
 | A role pair per application | would make the application a deployment unit again and give each one its own trust boundary in every account; today one pair per account serves every application it admits, and the scripts of one application can read another's cell namespace in the same account (trusted vendor code, §6.3) |
 | Explicit capacity pre-provisioning (`POST /cells`) | deliberately absent; placement is the only creator |
-| Per-operation authorization matrix | authorizer already forwards `role`; caller context already carries it |
+| Finer operator roles (an application registrar apart from an onboarder, operators scoped to accounts) | the authorizer already maps `role` to a grant (R-36) and the caller context carries it; a new grant is a new row in the matrix and a new policy shape. T34 and T27 are the threats it would close |
 | Secret deployment parameters | a `secret` flag on the declaration, with the value stored as a reference to a control-plane-owned secret and resolved only inside the build; today a script receives a secret's name as a plain parameter and reads it under its own role (N-11) |
 | Cell parameter values at birth | a body on the pre-provisioning seam (`POST /cells`) or a per-account override map; today a new cell always starts on the declared defaults and differs only after `UpdateCell` (R-34). Values that differ per account belong in the application's shared namespace in that account (§6.2) |
 | Stuck-execution sweep for aged transitional records | covers the two documented stranding gaps (§7.4, R-22) |
