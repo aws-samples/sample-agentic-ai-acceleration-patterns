@@ -128,7 +128,8 @@ Control plane concerns this version leaves out. Each has a recorded seam
   registered, and whoever owns it installs the role pair
 - A Region per account — cells are provisioned in the control plane's
   Region
-- Per-operation authorization and a sweep for stranded in-flight records
+- Finer operator roles (an application registrar apart from an onboarder,
+  operators scoped to accounts) and a sweep for stranded in-flight records
 
 ### 1.3 What this control plane is NOT
 
@@ -388,10 +389,13 @@ hours; synchronous API gateways cap at ~29 seconds. Therefore:
   its owner and capacity (`PutAccount`); cell creation *inside* a registered
   account stays implicit. The same asymmetry applies on the way out: an
   empty account persists until an operator deletes it.
-- The trust model is stated, not implied: the design gates on
-  authentication alone *because* the issuer is declared a dedicated
-  operator-only trust boundary. A half-built role matrix that
-  protects nothing is worse than an honest, documented assumption.
+- The trust model is stated, not implied: the issuer is declared a
+  dedicated control-plane trust boundary, and it mints at most two kinds of
+  caller. An **operator** holds every operation. A **reader** holds the
+  read operations and nothing else, so a system that only needs to look
+  placement up (a route registrar, a dashboard) never holds a credential
+  that can change the fleet. The matrix is complete for those two roles;
+  finer operator roles are a recorded seam (§11).
 
 ### P-11. Retry safety where retries actually happen
 
@@ -487,12 +491,56 @@ and its cell limit do not know which application a cell serves.
   never sees the raw request event. Static configuration (table names,
   ARNs) is initialised once at cold start, separate from per-request
   context.
-- Authorization is authentication-only, under an explicit assumption that
+- Authorization is by the `role` claim, under an explicit assumption that
   MUST be documented: the configured issuer is a dedicated control-plane
-  trust boundary issuing tokens exclusively to fully privileged operators.
-  The `role` claim is carried for audit and as the extension point — never
-  fabricated, never currently enforced. Connecting any broader issuer
-  REQUIRES adding an explicit per-operation role matrix first (P-10).
+  trust boundary that mints `role` only for the two populations of P-10.
+  The claim is never fabricated: a token without it, or with a role in
+  neither set, is denied. Connecting any broader issuer REQUIRES finer
+  roles first (§11).
+
+**R-36 (role matrix,
+[ADR-042](../adr/0042-a-read-only-role-beside-the-operator.md)):** the
+authorizer MUST map the verified `role` claim to one of two grants:
+
+| Role set (stack input) | Grant | Operations |
+|---|---|---|
+| `allowedRoles` (default `operator`) | operator | all twenty-two |
+| `readerRoles` (default none) | reader | the ten `GET` operations: `GetTenant`, `ListTenants`, `GetDeployment`, `ListDeployments`, `GetCell`, `ListCells`, `GetAccount`, `ListAccounts`, `GetApplication`, `ListApplications` |
+
+The grant is the authorizer's IAM policy, and the policy is a function of
+the grant alone, never of the method the request named: an operator's
+policy allows `execute-api:Invoke` on `<api>/<stage>/*`, a reader's on
+`<api>/<stage>/GET/*`, whichever operation filled the token-keyed result
+cache. A reader whose first call is a write therefore caches its read
+grant, not a `Deny` that would block its reads for the cache window, and
+API Gateway refuses the write with 403 before any code runs. The service
+MUST check again, by operation name: a reader may run only the ten read
+operations listed above, and every other operation requires the
+`operator` grant and refuses any other with 403
+(`UnauthorizedError`); a caller context with no grant is an ingress fault,
+500, as a missing `operatorId` is. A service unit test covers that wall,
+because the integration test can only reach the first. The caller context
+carries the grant beside `operatorId` and `role`, and the access log
+records it.
+
+The role lists reach the authorizer as `ALLOWED_ROLES` and
+`READER_ROLES`, comma-separated. `ALLOWED_ROLES` unset or empty means
+`operator`; `READER_ROLES` unset or empty means no reader. Either set but
+yielding no names (`",,"`) throws at cold start, and so does a value in
+both lists, so an edit to the function's environment after deploy fails
+closed like a bad stack input does.
+
+**R-37 (reads are reads):** every `GET` operation MUST write nothing,
+start no execution or build, and return no secret. The reader grant is
+defined by method in the authorizer policy, so a new `GET` widens the
+first wall; the service lists the reader operations by name, so a new
+`GET` reaches readers only once it is added to that list too. This rule
+is what keeps the widening safe, and a `GET` that cannot meet it is a different method and a new
+matrix row. Today's reads return no `adminEmail` (never stored, R-8) and
+no `externalId` (never returned, N-10). They do return parameter values,
+which are not secrets by contract only (N-11, T35), and every
+application's source location and version, which name the repository a
+supply-chain attacker would target (T34).
 
 ### 3.3 Stack inputs
 
@@ -504,6 +552,8 @@ Supplied at deployment time, validated at synthesis/deploy.
 |---|---|
 | `vendorIdp.issuerUrl`, `vendorIdp.audience` | non-empty; OIDC discovery must work against the issuer |
 | `fleetName` | names the role pair every account installs (`<fleetName>-cell-provisioning`, `<fleetName>-tenant-provisioning`) and the control plane's three roles the pair trusts (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-api`); `[a-z0-9-]{1,32}`. Default `control-plane`. Two control planes in one account MUST use different fleet names |
+| `allowedRoles` (optional, R-36) | role claim values that get the operator grant; non-empty. Default `["operator"]`. Every role value in either list matches `[A-Za-z0-9:._-]{1,64}`, so it survives the comma-separated environment variable |
+| `readerRoles` (optional, R-36, [ADR-042](../adr/0042-a-read-only-role-beside-the-operator.md)) | role claim values that get the reader grant. Default: none, so no reader is admitted until the deployer names one. A value in both lists MUST fail synth. Use a namespaced value (`control-plane:reader`), not a word a broader issuer may already mint (`reader`, `viewer`) (T2, T20) |
 | `tenantBuildManagedPolicyArns` (optional, [ADR-022](../adr/0022-attach-deployer-supplied-managed-policies-to-the-tenant-build-role.md)) | array of customer-managed IAM policy ARNs (`arn:<partition>:iam::<account>:policy/...`), each in the stack's own partition and account; synth MUST fail otherwise. Attached to the tenant provisioning role the stack installs in its own account. Default: none |
 
 Neither applications nor accounts are stack inputs: both are
@@ -926,7 +976,7 @@ compare-and-set maps to 409.
 | Error | HTTP | Triggers |
 |---|---|---|
 | `ValidationException` | 400 | malformed input, malformed pagination token, two list filters at once; an invalid application definition or parameter declaration on `PutApplication`; a deployment parameter that fails R-33 on `CreateDeployment` or `UpdateDeployment`; a cell parameter that fails R-34 on `UpdateCell`; a targeted `CreateDeployment` into an account that does not admit the application; `PutAccount` handshake refusal (R-26: a half could not be assumed, or admits the call without the supplied external id) |
-| `UnauthorizedError` | 401/403 | missing/invalid JWT |
+| `UnauthorizedError` | 401/403 | missing/invalid JWT; a role in neither set; a reader calling a non-`GET` operation (R-36) |
 | `ResourceNotFoundError` | 404 | unknown tenant, deployment, cell, account or application (including an unregistered `CreateDeployment.accountId` or `applicationId`, and an unregistered id in `PutAccount.applicationIds`) |
 | `ConflictError` | 409 | in-flight mutation; a second deployment of the same application for one tenant; occupied-tenant delete; occupied-cell delete; occupied-account delete; occupied-application delete; `owner` change on `PutAccount`; cell-not-ACTIVE guard; `clientToken` reuse with different parameters; a parameter merge or a list-keeping `PutApplication` whose read went stale — retry (R-14); `CreateDeployment` lost every bounded claim on candidate cells and no account had a free cell slot — retry ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)) |
 | `InsufficientCapacityError` | 409 | `CreateDeployment` found no eligible cell and no eligible account with cell capacity: every vendor-owned account admitting the application is full (untargeted), or the named account is full (targeted). Nothing was written. The remedy is an operator act — raise `maxCells`, register an account, or admit the application in one — so the error is distinct from `ConflictError`, which a client may simply retry later ([ADR-026](../adr/0026-fleet-full-is-a-modelled-error.md)) |
@@ -1509,7 +1559,7 @@ bypasses the Catch and strands records).
 | N-8 | The build roles' AssumeRole resource is the provisioning role **by fixed name in any account**; the control plane never maps account ids into IAM policy. | Accounts are registered at run time (P-10); the target role's trust policy — written by the account owner — is the gate, and `externalId` closes the confused deputy. Enumerating accounts in IAM would make registration a deployment, defeating on-demand customer accounts. |
 | N-9 | `PutAccount` probes both roles before writing (R-26); the probe makes no call under the assumed credentials. | Fail at registration, when the operator is present, not at the first build; and never touch the account during a check. |
 | N-10 | `externalId` is never returned by the API and never logged by the sample. It reaches the build as a plaintext CodeBuild environment-variable override carried in the Step Functions execution input, readable by principals with `states:DescribeExecution` or `codebuild:BatchGetBuilds` in the control plane account (the operator role, the account's administrators). | Not a secret by AWS's definition; the guard's value is that outsiders do not hold it, and nobody outside the control plane account can read those APIs. |
-| N-11 | Deployment and cell parameter values MUST NOT be secrets. They are stored in plain text on the deployment or cell record, returned by `GetDeployment` or `GetCell`, and reach the build as CodeBuild environment-variable overrides carried in the Step Functions execution input. The service logs parameter names, never values. A script that needs a secret receives its *name* as a parameter (a Secrets Manager secret or an SSM `SecureString` under the deployment's tenant namespace or the application's shared namespace, §6.2) and reads it under its own role. | Everyone who can read the table, the execution history or `codebuild:BatchGetBuilds` in the control plane account can read the values; secret-shaped storage would need a KMS key, extra IAM and a second read path for a concern the application plane already solves. |
+| N-11 | Deployment and cell parameter values MUST NOT be secrets. They are stored in plain text on the deployment or cell record, returned by `GetDeployment` or `GetCell` to operators and readers alike (R-36), and reach the build as CodeBuild environment-variable overrides carried in the Step Functions execution input. The service logs parameter names, never values. A script that needs a secret receives its *name* as a parameter (a Secrets Manager secret or an SSM `SecureString` under the deployment's tenant namespace or the application's shared namespace, §6.2) and reads it under its own role. | Every operator and reader, and everyone who can read the table, the execution history or `codebuild:BatchGetBuilds` in the control plane account, can read the values; secret-shaped storage would need a KMS key, extra IAM and a second read path for a concern the application plane already solves. |
 
 ---
 
@@ -1525,9 +1575,15 @@ and Y share the same source and scripts and differ in id and in their parameter 
 what the accounts count). Tenants T1 and T2 are plain records. X declares
 parameters (step 2); every `CreateDeployment` of X supplies
 `ALLOWED_EMAIL_DOMAIN = example.com` unless a step says otherwise.
+The test's own vendor IdP (a throwaway user pool) mints `role: operator`
+for the operator user and `role: control-plane:reader` for a second,
+reader user; the stack sets `readerRoles = ["control-plane:reader"]`.
 
 1. **Auth:** an operation without a JWT is rejected; with a valid vendor
-   IdP JWT it succeeds.
+   IdP JWT it succeeds. A reader token (R-36) succeeds on every `GET`
+   operation and is refused with 403 on `POST`, `PUT` and `DELETE` alike,
+   nothing written; a token whose role is in neither set is refused on
+   every operation.
 2. **Applications:** `PutApplication` with a missing script path → 400;
    with an id outside the charset → 400; `PutApplication` X and Y → 200;
    `ListApplications` shows both with `cellCount = 0`; `PutAccount` naming
@@ -1682,7 +1738,7 @@ Per P-1, deferred generality is recorded as seams, not code:
 | Per-application cell cap inside a shared account | a join record per (account, application) with its own counter and cap, layered under the account's `maxCells` ([ADR-033](../adr/0033-account-admission-is-an-application-allowlist-on-the-account.md), option 3); today an account admits applications but does not meter them separately |
 | A role pair per application | would make the application a deployment unit again and give each one its own trust boundary in every account; today one pair per account serves every application it admits, and the scripts of one application can read another's cell namespace in the same account (trusted vendor code, §6.3) |
 | Explicit capacity pre-provisioning (`POST /cells`) | deliberately absent; placement is the only creator |
-| Per-operation authorization matrix | authorizer already forwards `role`; caller context already carries it |
+| Finer operator roles (an application registrar apart from an onboarder, operators scoped to accounts) | the authorizer already maps `role` to a grant (R-36) and the caller context carries it; a new grant is a new row in the matrix and a new policy shape. T34 and T27 are the threats it would close |
 | Secret deployment parameters | a `secret` flag on the declaration, with the value stored as a reference to a control-plane-owned secret and resolved only inside the build; today a script receives a secret's name as a plain parameter and reads it under its own role (N-11) |
 | Cell parameter values at birth | a body on the pre-provisioning seam (`POST /cells`) or a per-account override map; today a new cell always starts on the declared defaults and differs only after `UpdateCell` (R-34). Values that differ per account belong in the application's shared namespace in that account (§6.2) |
 | Stuck-execution sweep for aged transitional records | covers the two documented stranding gaps (§7.4, R-22) |

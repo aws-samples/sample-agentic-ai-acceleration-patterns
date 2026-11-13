@@ -95,6 +95,8 @@ beforeAll(() => {
   // Exercise the default allowed set ('operator'); the module caches config
   // on first invocation, so this must hold before any handler call.
   delete process.env.ALLOWED_ROLES;
+  // M26: one reader value; set before the first call, like the rest.
+  process.env.READER_ROLES = 'control-plane:reader';
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
 
@@ -105,7 +107,9 @@ describe('authorizer handler hardening', () => {
 
     expect(result.policyDocument.Statement[0].Effect).toBe('Allow');
     expect(result.principalId).toBe('op-1');
-    expect(result.context).toEqual({ operatorId: 'op-1', role: 'operator' });
+    expect(result.context).toEqual({ operatorId: 'op-1', role: 'operator', grant: 'operator' });
+    expect((result.policyDocument.Statement[0] as { Resource: string }).Resource)
+      .toBe('arn:aws:execute-api:eu-central-1:123456789012:api123/prod/*');
 
     // Item 2: hardening options actually reach jwtVerify.
     const options = mockJwtVerify.mock.calls[0][2];
@@ -170,5 +174,22 @@ describe('authorizer handler hardening', () => {
   test('denies a non-string role claim (M13)', async () => {
     const result = await handler(event(makeToken({ ...validClaims(), role: ['operator'] })));
     expect(result.policyDocument.Statement[0].Effect).toBe('Deny');
+  });
+});
+
+describe('authorizer reader grant (R-36, M26)', () => {
+  test('a reader role gets the GET-only policy, even when its first call is a POST', async () => {
+    // METHOD_ARN is POST /tenants: the policy must not depend on it.
+    const result = await handler(event(makeToken({ ...validClaims(), sub: 'reader-1', role: 'control-plane:reader' })));
+    expect(result.policyDocument.Statement[0].Effect).toBe('Allow');
+    expect((result.policyDocument.Statement[0] as { Resource: string }).Resource)
+      .toBe('arn:aws:execute-api:eu-central-1:123456789012:api123/prod/GET/*');
+    expect(result.context).toEqual({ operatorId: 'reader-1', role: 'control-plane:reader', grant: 'reader' });
+  });
+
+  test('a role in neither list is denied', async () => {
+    const result = await handler(event(makeToken({ ...validClaims(), role: 'reader' })));
+    expect(result.policyDocument.Statement[0].Effect).toBe('Deny');
+    expect(result.context).toBeUndefined();
   });
 });

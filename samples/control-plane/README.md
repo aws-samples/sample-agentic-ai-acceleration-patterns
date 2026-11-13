@@ -165,10 +165,12 @@ write their own state under
 `/application-plane/tenants/<tenantId>/<applicationId>/*` (ADR-037).
 
 Every API operation requires a JWT from your **vendor IdP**, validated by a
-Lambda Authorizer. The token must carry a `role` claim in the allowed set
-(`operator` by default; configurable via the authorizer's `ALLOWED_ROLES`
-environment variable) — a token without an allowed role is denied (403), so
-configure your IdP to mint `role: "operator"` on operator tokens (ADR-018).
+Lambda Authorizer. The token's `role` claim decides what the caller may do
+(spec R-36): a value in `allowedRoles` (`operator` by default) holds every
+operation, and a value in `readerRoles` (none by default) holds the ten
+`GET` operations only. A token whose role is in neither list is denied
+(403), so configure your IdP to mint `role: "operator"` on operator tokens
+(ADR-018) and your reader value on reader tokens (ADR-042).
 Customer identity is an application plane decision made by
 your provisioning scripts, not the control plane.
 
@@ -337,6 +339,21 @@ npx cdk deploy \
   --context vendorIdpAudience=YOUR_AUDIENCE \
   --context demoApplicationIds='["demo"]' \
   --context tenantBuildManagedPolicyArns='["arn:aws:iam::123456789012:policy/PlatformInvokePolicy"]'
+```
+
+Two optional context inputs choose which `role` claim values the authorizer
+admits and what each may do (spec R-36, ADR-042). `allowedRoles` (default
+`["operator"]`) gets every operation. `readerRoles` (default none) gets the
+ten `GET` operations and nothing else, for a system that only looks
+placement up, such as a route registrar or a dashboard. Use a namespaced
+reader value, not a word a broader issuer may already mint. A value in both
+lists, or outside `[A-Za-z0-9:._-]{1,64}`, fails synth:
+
+```bash
+npx cdk deploy \
+  --context vendorIdpIssuerUrl=https://YOUR_ISSUER \
+  --context vendorIdpAudience=YOUR_AUDIENCE \
+  --context readerRoles='["control-plane:reader"]'
 ```
 
 ### Example: mounting tenant-identity
@@ -601,11 +618,13 @@ generated from it (`smithy build`).
 
 ## Production hardening checklist
 
-The sample authenticates every operation but deliberately has no
-per-operation authorization: any valid token from the configured issuer is
-full admin (see the identity model in
-[`architecture.md`](./architecture.md) and ADR-015 in
-[`adr/0015-authentication-only-gating.md`](./adr/0015-authentication-only-gating.md)). That makes the issuer
+The sample authenticates every operation and has two grants: an operator
+is full admin, and an optional reader can call the `GET` operations only
+(see the identity model in [`architecture.md`](./architecture.md), ADR-015
+in [`adr/0015-authentication-only-gating.md`](./adr/0015-authentication-only-gating.md)
+and ADR-042 in
+[`adr/0042-a-read-only-role-beside-the-operator.md`](./adr/0042-a-read-only-role-beside-the-operator.md)).
+That makes the issuer
 configuration and the API edge the two controls a deployer must get right.
 These items are operational — IdP-side, repository-side, and edge — and map
 to threats T1 (stolen
@@ -625,8 +644,13 @@ T22, T23, T26, T27, and mitigations M9, M10, M11, M19, M20 in
 ### Identity (M9)
 
 - [ ] Use a **dedicated control-plane issuer**. It must issue tokens
-      exclusively to fully privileged vendor operators — verify that no
-      other application reuses its clients or its audience value.
+      exclusively to vendor operators and, when `readerRoles` is set, to the
+      reader systems you name — verify that no other application reuses its
+      clients or its audience value.
+- [ ] Give readers a **namespaced role value** (`control-plane:reader`) and
+      their own app client. A stolen reader token changes nothing but reads
+      the whole fleet: tenant names, account ids, application sources and
+      parameter values (T36).
 - [ ] Verify at deployment time that `vendorIdpIssuerUrl` and
       `vendorIdpAudience` point at that dedicated issuer, not a general
       workforce or customer issuer. This is the T2 failure mode: pointing
@@ -696,9 +720,9 @@ application's cells (threat T5, the highest-consequence open item).
       has one fully privileged operator population, and a tenant-owned
       account is not bound to the tenant it belongs to. `applicationIds`
       narrows which applications may land in an account, not which tenants.
-      Before a broader population connects, add per-operation authorization
-      with account scoping so a deployment of customer A's tenant cannot be
-      placed into customer B's account.
+      Before a broader population connects, add finer operator roles with
+      account scoping (spec §11) so a deployment of customer A's tenant
+      cannot be placed into customer B's account.
 - [ ] If an owner removes the pair while cells exist there, builds in that
       account fail into `*_FAILED` and the records cannot be cleaned up
       through the API until the pair is restored (T26, accepted by design).

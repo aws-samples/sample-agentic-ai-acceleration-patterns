@@ -3,6 +3,7 @@
 
 import { Stack, Token } from 'aws-cdk-lib';
 import { RegionInfo } from 'aws-cdk-lib/region-info';
+import { ROLE_VALUE_PATTERN } from '../shared/authorizer-policy';
 
 /**
  * Synth-time validation of the stack inputs (spec §3.3). Shared by the
@@ -98,4 +99,49 @@ export function validateTenantBuildManagedPolicyArns(
       + '\nEach entry must be a managed-policy ARN in this stack\'s partition and account, e.g. --context tenantBuildManagedPolicyArns=\'["arn:aws:iam::123456789012:policy/MyPolicy"]\'',
     );
   }
+}
+
+/** The validated role lists the authorizer maps to grants (spec R-36). */
+export interface RoleLists {
+  readonly allowedRoles: readonly string[];
+  readonly readerRoles: readonly string[];
+}
+
+
+/**
+ * Validates `allowedRoles` and `readerRoles` at synth (spec §3.3, R-36): the
+ * operator list is non-empty (default `['operator']`), the reader list
+ * defaults to empty, every value matches the role pattern, and no value is
+ * in both lists. Fails synth with every problem named.
+ */
+export function validateRoleLists(
+  allowedRoles: string[] | undefined,
+  readerRoles: string[] | undefined,
+): RoleLists {
+  const allowed = allowedRoles ?? ['operator'];
+  const readers = readerRoles ?? [];
+  const problems: string[] = [];
+  for (const [name, list] of [['allowedRoles', allowed], ['readerRoles', readers]] as const) {
+    if (!Array.isArray(list)) {
+      problems.push(`${name} must be an array of strings (got: ${JSON.stringify(list)})`);
+      continue;
+    }
+    list.forEach((role, index) => {
+      if (typeof role !== 'string' || !ROLE_VALUE_PATTERN.test(role)) {
+        problems.push(`${name}[${index}] ${JSON.stringify(role)} does not match ${ROLE_VALUE_PATTERN.source}`);
+      }
+    });
+  }
+  if (Array.isArray(allowed) && allowed.length === 0) {
+    problems.push('allowedRoles must name at least one role (omit it for the default, operator)');
+  }
+  if (Array.isArray(allowed) && Array.isArray(readers)) {
+    for (const role of readers.filter((value) => allowed.includes(value))) {
+      problems.push(`${JSON.stringify(role)} is in both allowedRoles and readerRoles; a role value maps to one grant`);
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(`Invalid role lists (spec R-36):\n  - ${problems.join('\n  - ')}`);
+  }
+  return { allowedRoles: allowed, readerRoles: readers };
 }

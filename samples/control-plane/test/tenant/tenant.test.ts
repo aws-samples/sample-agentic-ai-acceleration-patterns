@@ -41,7 +41,7 @@ import { TenantService } from '../../src/tenant/tenant';
 import { TenantItem, TenantRecord } from '../../src/tenant/tenant.data-model';
 
 const sfnMock = mockClient(SFNClient);
-const context: CallerContext = { operatorId: 'op-1', role: 'operator' };
+const context: CallerContext = { operatorId: 'op-1', role: 'operator', grant: 'operator' };
 
 const TENANT_ID = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
 const CELL_ID = '01BX5ZZKBKACTAV9WEVGEMMVRZ';
@@ -1187,7 +1187,7 @@ describe('CreateDeployment across accounts', () => {
       cellRepo: { queryIndex: cellPage(cellRecord()) },
       placement: { placeDeploymentInCell: jest.fn().mockResolvedValue(undefined) },
     });
-    await service.CreateDeployment(createInput, { operatorId: 'auth0|user 42', role: 'operator' });
+    await service.CreateDeployment(createInput, { operatorId: 'auth0|user 42', role: 'operator', grant: 'operator' });
     expect(startedWorkflowInput()).toMatchObject({ operatorId: 'auth0|user 42', sessionName: 'auth0-user-42' });
   });
 });
@@ -1991,7 +1991,7 @@ describe('operator propagation and source pinning (M12 / M10)', () => {
       },
     });
 
-    await service.UpdateCell({ cellId: CELL_ID }, { operatorId: 'op-2', role: 'operator' });
+    await service.UpdateCell({ cellId: CELL_ID }, { operatorId: 'op-2', role: 'operator', grant: 'operator' });
 
     expect(startedWorkflowInput().sourceVersion).toBe(sha);
     expect(startedWorkflowInput().operatorId).toBe('op-2');

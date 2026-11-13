@@ -27,3 +27,5 @@ scope creep (T20) now requires both a token AND the claim. The IdP must
 issue `role: "operator"` on operator tokens (deployment contract, README
 checklist). The extension point for a real matrix is unchanged: the claim
 is validated at the boundary and carried in `CallerContext`.
+
+**Amended by ADR-0042 (2026-11-13):** the gate now maps the `role` claim to one of two grants. `ALLOWED_ROLES` (default `operator`) gives every operation; `READER_ROLES` (default none) gives the `GET` operations only. A value in both lists, or outside `[A-Za-z0-9:._-]{1,64}`, throws at cold start.

@@ -46,7 +46,14 @@ import { TenantStack } from '../src/tenant/tenant.cdk';
  * Flow (every API operation is exercised; the numbers are spec §10's steps,
  * with the operator minted in step 1):
  *   1. unauthenticated request → 401; mint an operator: adminCreateUser →
- *      adminSetUserPassword → adminInitiateAuth → ID token
+ *      adminSetUserPassword → adminInitiateAuth → ID token; mint a reader
+ *      (role control-plane:reader) and a user whose role is in neither list
+ *      the same way (R-36); after step 4's tenants exist, the reader's first
+ *      call is a POST (403), then its GETs pass and its PUT and DELETE are
+ *      403, the unlisted role is 403 on a GET and a POST, and nothing was
+ *      written; once step 5's deployment and cell exist, the reader's other
+ *      seven GETs pass too, so all
+ *      ten reader operations are proven
  *   2. PutApplication with a missing script → 400, bad id → 400, bad
  *      parameter declarations → 400; X (with declarations) and Y → 200;
  *      ListApplications; PutAccount naming an unknown application → 404
@@ -124,7 +131,9 @@ const vendorIdp = new cognito.UserPool(setup, 'VendorIdp', {
 // on operator tokens - the authorizer fails closed on a missing role. A
 // plain Cognito ID token carries no such claim, so this pre token
 // generation trigger (V1_0 event, ID token only) adds it, exactly as a real
-// vendor IdP would be configured to.
+// vendor IdP would be configured to. Two more test users get other roles
+// (R-36): the reader value the stack lists in readerRoles, and a value in
+// neither list.
 const mintOperatorRole = new lambda.Function(setup, 'MintOperatorRole', {
   runtime: lambda.Runtime.NODEJS_24_X,
   handler: 'index.handler',
@@ -132,7 +141,11 @@ const mintOperatorRole = new lambda.Function(setup, 'MintOperatorRole', {
     exports.handler = async (event) => {
       event.response = {
         claimsOverrideDetails: {
-          claimsToAddOrOverride: { role: 'operator' },
+          claimsToAddOrOverride: {
+            role: event.userName.includes('integ-reader') ? 'control-plane:reader'
+              : event.userName.includes('integ-norole') ? 'integ-unlisted'
+              : 'operator',
+          },
         },
       };
       return event;
@@ -314,6 +327,8 @@ const stack = new TenantStack(app, 'control-plane-integ', {
   // The sample cell script reads each application's shared parameter in the
   // account it runs in (ADR-034); A hosts cells of both applications.
   demoApplicationIds: [APP_X, APP_Y],
+  // R-36: the reader user's role gets the GET-only grant (step 1).
+  readerRoles: ['control-plane:reader'],
 });
 // Both shared CodeBuild projects pull the stamped source from the test
 // bucket (the source fetch runs under the build role, before the buildspec
@@ -499,6 +514,46 @@ const authHeaders = {
   'Authorization': `Bearer ${token}`,
   'Content-Type': 'application/json',
 };
+
+// 1 (continued, R-36). Two more identities in the same pool: a reader and a
+// role in neither list. Same throwaway password, own usernames.
+function mintToken(username: string) {
+  const create = integ.assertions.awsApiCall('cognito-identity-provider', 'adminCreateUser', {
+    UserPoolId: vendorIdp.userPoolId,
+    Username: username,
+    MessageAction: 'SUPPRESS',
+  });
+  create.provider.addToRolePolicy(cognitoPolicy);
+  const setPw = integ.assertions.awsApiCall('cognito-identity-provider', 'adminSetUserPassword', {
+    UserPoolId: vendorIdp.userPoolId,
+    Username: username,
+    Password: password,
+    Permanent: true,
+  });
+  setPw.provider.addToRolePolicy(cognitoPolicy);
+  const auth = integ.assertions.awsApiCall(
+    'cognito-identity-provider',
+    'adminInitiateAuth',
+    {
+      UserPoolId: vendorIdp.userPoolId,
+      ClientId: idpClient.userPoolClientId,
+      AuthFlow: 'ADMIN_USER_PASSWORD_AUTH',
+      AuthParameters: { USERNAME: username, PASSWORD: password },
+    },
+    ['AuthenticationResult.IdToken'],
+  );
+  auth.provider.addToRolePolicy(cognitoPolicy);
+  return {
+    calls: [create, setPw, auth],
+    headers: {
+      'Authorization': `Bearer ${auth.getAttString('AuthenticationResult.IdToken')}`,
+      'Content-Type': 'application/json',
+    },
+  };
+}
+const readerIdentity = mintToken('success+integ-reader@simulator.amazonses.com');
+const unlistedIdentity = mintToken('success+integ-norole@simulator.amazonses.com');
+const readerHeaders = readerIdentity.headers;
 
 // 2. Applications (ADR-032). The generated validators reject an incomplete
 //    definition and an id outside the charset before the handler runs.
@@ -744,6 +799,77 @@ const listCellsNone = integ.assertions
   .httpApiCall(`${apiUrl}cells`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { cells: [] } }));
 
+// 1 (reader checks, R-36). The tenants above exist, so a reader's reads have
+// something to return and its writes have something to change. API Gateway
+// refuses every write against the reader's GET-only policy (403); the
+// operator's read afterwards proves nothing was written.
+const readerListTenants = integ.assertions
+  .httpApiCall(`${apiUrl}tenants`, { method: 'GET', headers: readerHeaders })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 200,
+      body: { tenants: [{ tenantId: tenantId1 }, { tenantId: tenantId2 }, { tenantId: tenantId3 }] },
+    }),
+  );
+const readerGetTenant1 = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId1}`, { method: 'GET', headers: readerHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { tenant: { tenantId: tenantId1 } } }));
+const readerGetApplication = integ.assertions
+  .httpApiCall(`${apiUrl}applications/${APP_X}`, { method: 'GET', headers: readerHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200 }));
+const readerCreateTenant = integ.assertions
+  .httpApiCall(`${apiUrl}tenants`, {
+    method: 'POST',
+    headers: readerHeaders,
+    body: JSON.stringify({ name: 'integ-reader-must-not-create' }),
+  })
+  .expect(ExpectedResult.objectLike({ status: 403 }));
+const readerUpdateTenant1 = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId1}`, {
+    method: 'PUT',
+    headers: readerHeaders,
+    body: JSON.stringify({ description: 'written by a reader' }),
+  })
+  .expect(ExpectedResult.objectLike({ status: 403 }));
+const readerDeleteTenant2 = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId2}`, { method: 'DELETE', headers: readerHeaders })
+  .expect(ExpectedResult.objectLike({ status: 403 }));
+const readerPutApplication = integ.assertions
+  .httpApiCall(`${apiUrl}applications/${APP_X}`, {
+    method: 'PUT',
+    headers: readerHeaders,
+    body: JSON.stringify(definition),
+  })
+  .expect(ExpectedResult.objectLike({ status: 403 }));
+const unlistedListTenants = integ.assertions
+  .httpApiCall(`${apiUrl}tenants`, { method: 'GET', headers: unlistedIdentity.headers })
+  .expect(ExpectedResult.objectLike({ status: 403 }));
+const unlistedCreateTenant = integ.assertions
+  .httpApiCall(`${apiUrl}tenants`, {
+    method: 'POST',
+    headers: unlistedIdentity.headers,
+    body: JSON.stringify({ name: 'integ-unlisted-must-not-create' }),
+  })
+  .expect(ExpectedResult.objectLike({ status: 403 }));
+// Nothing the reader or the unlisted role tried was written: still three
+// tenants, T1 unchanged.
+const listTenantsAfterReader = integ.assertions
+  .httpApiCall(`${apiUrl}tenants`, { method: 'GET', headers: authHeaders })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 200,
+      body: { tenants: [{ tenantId: tenantId1 }, { tenantId: tenantId2 }, { tenantId: tenantId3 }] },
+    }),
+  );
+const getTenant1AfterReader = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId1}`, { method: 'GET', headers: authHeaders })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 200,
+      body: { tenant: { tenantId: tenantId1, name: 'integ-tenant-1', description: 'created by the integ test' } },
+    }),
+  );
+
 const updateTenant3 = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId3}`, {
     method: 'PUT',
@@ -861,6 +987,21 @@ const getCell1 = integ.assertions
       },
     }),
   );
+
+// 1 (reader, continued, R-36): with a deployment, a cell and both accounts in
+// place, the reader's other seven GET operations return 200 as well, so all
+// ten reader operations are proven live.
+const readerReads = [
+  `${apiUrl}deployments?tenantId=${tenantId1}`,
+  `${apiUrl}tenants/${tenantId1}/deployments/${APP_X}`,
+  `${apiUrl}cells`,
+  `${apiUrl}cells/${cellId1}`,
+  `${apiUrl}accounts`,
+  `${apiUrl}accounts/${accountA}`,
+  `${apiUrl}applications`,
+].map((url) => integ.assertions
+  .httpApiCall(url, { method: 'GET', headers: readerHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200 })));
 
 // The three counters moved together (P-6): A 1/2, X 1 cell, T1 1 deployment.
 const getAccountAOne = integ.assertions
@@ -1605,6 +1746,12 @@ createUser
   .next(randomPassword)
   .next(setPassword)
   .next(authenticate)
+  .next(readerIdentity.calls[0])
+  .next(readerIdentity.calls[1])
+  .next(readerIdentity.calls[2])
+  .next(unlistedIdentity.calls[0])
+  .next(unlistedIdentity.calls[1])
+  .next(unlistedIdentity.calls[2])
   // applications (§10 step 2)
   .next(putApplicationMissingScript)
   .next(putApplicationBadId)
@@ -1632,6 +1779,20 @@ createUser
   .next(getTenant1Empty)
   .next(listTenantsThree)
   .next(listCellsNone)
+  // reader grant (step 1, R-36), with step 4's tenants in place
+  // the reader's first call is a write, so its cached policy is filled by
+  // a POST: its reads must still pass (R-36, grant-only policy)
+  .next(readerCreateTenant)
+  .next(readerListTenants)
+  .next(readerGetTenant1)
+  .next(readerGetApplication)
+  .next(readerUpdateTenant1)
+  .next(readerDeleteTenant2)
+  .next(readerPutApplication)
+  .next(unlistedListTenants)
+  .next(unlistedCreateTenant)
+  .next(listTenantsAfterReader)
+  .next(getTenant1AfterReader)
   .next(updateTenant3)
   .next(deleteTenant3Empty)
   .next(deployForDeletedTenant)
@@ -1644,6 +1805,13 @@ createUser
   .next(getT1X)
   .next(getCell1)
   .next(getAccountAOne)
+  .next(readerReads[0])
+  .next(readerReads[1])
+  .next(readerReads[2])
+  .next(readerReads[3])
+  .next(readerReads[4])
+  .next(readerReads[5])
+  .next(readerReads[6])
   .next(getApplicationXOne)
   .next(getTenant1One)
   .next(checkCellParam)

@@ -1,6 +1,6 @@
 # ADR-0015: Authentication-only gating under the dedicated operator-issuer assumption
 
-**Status:** Accepted (2026-09-07) — amended by ADR-018 (the `role` claim is now enforced as a coarse membership gate; the no-per-operation-matrix decision stands)
+**Status:** Accepted (2026-09-07) — amended by ADR-018 (the `role` claim is now enforced as a coarse membership gate) and ADR-042 (a reader grant beside the operator); the no-per-operation-matrix decision stands for operators
 
 **Context:** Every operation requires a vendor IdP JWT, but no operation
 checks a role or scope — any authenticated caller can perform any operation.
@@ -28,3 +28,5 @@ extension point is mechanical: the authorizer already forwards `role`, and
 `CallerContext` already carries it to every operation. This is a documented
 boundary of the sample, not a TODO — there is no half-built gating to
 maintain, and no false impression that a partial matrix protects anything.
+
+**Amended by ADR-0042 (2026-11-13):** a second grant, reader, sits beside the operator: role values in `readerRoles` reach the ten `GET` operations only, enforced in the authorizer policy and again in the service (spec R-36). Every operator still holds all twenty-two operations, so the no-matrix decision stands for operators.

@@ -16,6 +16,8 @@
  * (see adr/0006-control-plane-data-not-tenant-scoped.md, ADR-006).
  */
 
+import type { Grant } from './authorizer-policy';
+
 /** Static service configuration — initialised once per Lambda cold start. */
 export interface ServiceConfig {}
 
@@ -27,11 +29,17 @@ export interface CallerContext {
   /** The vendor operator's identity (`sub` claim of the vendor IdP JWT). */
   readonly operatorId: string;
   /**
-   * The operator's role claim, present only when the vendor IdP issued one.
-   * Audit-only today (ADR-006); a missing claim is never defaulted to a
-   * named role — future role restrictions must fail closed on absence.
+   * The caller's role claim as the vendor IdP issued it, for audit. The
+   * authorizer admits no token without one, but the handler never defaults
+   * it either.
    */
   readonly role?: string;
+  /**
+   * The grant the authorizer mapped the role to (spec R-36): `operator` holds
+   * every operation, `reader` the `GET` operations only. The service checks
+   * it again on every non-`GET` operation (`src/shared/grant-check.ts`).
+   */
+  readonly grant: Grant;
 }
 
 /**
