@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0005: Route on the unverified claim and verify at the origin
 
-- Status: Proposed (spike S-7)
+- Status: Accepted
 - Date: 2026-11-13
 - Deciders: Dave Roberts (PSA)
 
@@ -90,3 +90,5 @@ verification at higher cost; Option 3 loses the agreement check.
   request, so it would reopen ADR-0003 and ADR-0004.
 - Revisit when the origin cannot verify tokens, or when forged-token load
   on origins becomes a cost problem.
+
+Spike S-7 passed 2026-11-13 (eu-central-1): a cloudfront-js-2.0 function decoded a real `tenant-identity` shared-pool access token (1,184 bytes) with `TestFunction` at 13 % compute utilisation, 14 % with a forged client `x-tenant-route` header, which it replaced with the lower-cased claim. A malformed token, no token and a token with its signature segment removed each got 401 at 9-10 %. The decode code is 1.9 KB of the 10 KB function limit. The measurement covers the decode and header handling only; the three KeyValueStore reads are measured in S-1. Create took 1 s and teardown, function and throwaway tenant, finished 32 s after the start.
