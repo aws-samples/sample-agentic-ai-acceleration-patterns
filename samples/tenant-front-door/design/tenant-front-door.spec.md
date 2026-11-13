@@ -2,8 +2,8 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Tenant front door for agentic applications: specification
 
-Status: Proposed. No ADRs accepted yet; §8 lists the decisions the first ADR
-batch records, and §9 the spikes that must pass before code.
+Status: Proposed. §8 lists the decisions of the first ADR batch; the
+records marked Proposed wait on the §9 spikes they name.
 
 ## 1. Problem statement
 
@@ -316,7 +316,7 @@ Modelled in Smithy; all operations `AWS_IAM`, all idempotent.
 Errors: 400 for a malformed id or domain; 403 when the caller's account or
 role does not match the placement (the message names neither the real
 account nor the real cell); 409 for a missing cell route or a cell still in
-use; 503 when the control plane cannot be read (the write is refused, never
+use; 507 when a write would exceed the route table's 5 MB (ADR-0012); 503 when the control plane cannot be read (the write is refused, never
 made unchecked).
 
 ### 5.2 Script and construct forms
@@ -357,7 +357,8 @@ All with a small static HTML or JSON body and `no-store`:
 - In every account that hosts cells, the control plane's role pair; the
   registrar admits only those roles.
 - A cell API that verifies tokens, refuses a `tenant_id` that differs from
-  `x-tenant-route`, and refuses tenants its cell does not host. The demo
+  `x-tenant-route`, refuses tenants its cell does not host, and in `single`
+  mode limits each verified tenant to `tenantRequestsPer5Min` (ADR-0009). The demo
   cell API is the reference.
 - CloudFront origin access control support on the cell origin (Lambda
   function URL, or S3), with the cell stack granting the edge distribution
@@ -433,6 +434,9 @@ tenant-owned account cannot weaken the baseline (P-8).
   `setHTML()` with a fallback sanitiser. Agent output is text, never HTML.
 - Trusted Types enforced, with no pass-through policy.
 - Same-origin API and agent calls, so no CORS is needed anywhere.
+- `PUT` and `POST` calls to `/api/*` send the body's SHA-256 in
+  `x-amz-content-sha256`, which origin access control needs to sign a
+  request with a body to a Lambda function URL (ADR-0011).
 - Content-hashed asset names, so `/assets/*` can be immutable.
 - Streaming agent replies render with `fetch` and a `ReadableStream`, not
   `EventSource`, so the bearer token goes in a header.
@@ -455,25 +459,25 @@ can set one for another; and the production hardening checklist adds
 `appDomain` to the Public Suffix List, so each tenant becomes its own site.
 The sample documents that step and does not do it.
 
-## 8. Decisions for the first ADR batch
+## 8. Decisions
 
-| # | Decision | Options to weigh |
+| Record | Decision | Options weighed |
 |---|---|---|
-| 1 | Default to one URL with the tenant from the token; offer one host per tenant | token claim; host name; client header; path prefix |
-| 2 | Use a CloudFront multi-tenant distribution | multi-tenant distribution with tenants; one standard distribution with a wildcard; one distribution per tenant |
-| 3 | Keep the route table in CloudFront KeyValueStore | KeyValueStore; Lambda@Edge plus DynamoDB; routes in function code |
-| 4 | Route to cells with CloudFront Functions origin modification | origin modification; one origin and cache behaviour per cell; Lambda@Edge |
-| 5 | Route on the unverified claim, verify at the origin with a route hint | decode at the edge and verify at the origin; verify at the edge with Lambda@Edge; no hint |
-| 6 | Generate `/config.json` at the edge | edge-generated; per-tenant file in S3; build per tenant |
-| 7 | Keep tokens in SPA memory | memory with PKCE; backend-for-frontend with `__Host-` cookie |
-| 8 | Hash-based CSP with Trusted Types | hashes; nonces through Lambda@Edge; allowlist |
-| 9 | Per-tenant rate limit: AWS WAF on the host in `host` mode, the origin in `single` mode | WAF custom key; origin limit; none |
-| 10 | Split the edge stack into `us-east-1` | edge stack plus main stack with cross-Region references; everything in `us-east-1` |
-| 11 | Protect cell origins with origin access control, across accounts | OAC with a cross-account Lambda permission; secret header; IP allowlist |
-| 12 | Route table size ceiling and sharding | one store and a ceiling; shard by distribution |
-| 13 | Register routes through a registrar that checks the control plane | registrar with a placement check; a cross-account role that writes the store directly; the control plane writes routes |
-| 14 | One front door per control-plane application | one per application; one shared front door keyed by application |
-| 15 | Read the control plane with a reader token | reader role (control-plane ADR-0042); operator app client; an IAM-authorised read stage |
+| [ADR-0001](../adr/0001-default-to-one-url-with-the-tenant-from-the-token.md) | Default to one URL with the tenant from the token; offer one host per tenant | token claim; host name; client header; path prefix |
+| [ADR-0002](../adr/0002-use-a-cloudfront-multi-tenant-distribution.md) | Use a CloudFront multi-tenant distribution | multi-tenant distribution with tenants; one standard distribution with a wildcard; one distribution per tenant |
+| [ADR-0003](../adr/0003-keep-the-route-table-in-cloudfront-keyvaluestore.md) | Keep the route table in CloudFront KeyValueStore | KeyValueStore; Lambda@Edge plus DynamoDB; routes in function code |
+| [ADR-0004](../adr/0004-route-to-cells-with-cloudfront-functions-origin-modification.md) | Route to cells with CloudFront Functions origin modification | origin modification; one origin and cache behaviour per cell; Lambda@Edge |
+| [ADR-0005](../adr/0005-route-on-the-unverified-claim-and-verify-at-the-origin.md) | Route on the unverified claim, verify at the origin with a route hint | decode at the edge and verify at the origin; verify at the edge with Lambda@Edge; no hint |
+| [ADR-0006](../adr/0006-generate-config-json-at-the-edge.md) | Generate `/config.json` at the edge | edge-generated; per-tenant file in S3; build per tenant |
+| [ADR-0007](../adr/0007-keep-tokens-in-spa-memory.md) | Keep tokens in SPA memory | memory with PKCE; backend-for-frontend with `__Host-` cookie |
+| [ADR-0008](../adr/0008-use-a-hash-based-csp-with-trusted-types.md) | Hash-based CSP with Trusted Types | hashes; nonces through Lambda@Edge; allowlist |
+| [ADR-0009](../adr/0009-rate-limit-each-tenant-with-waf-on-the-host-or-at-the-origin.md) | Per-tenant rate limit: AWS WAF on the host in `host` mode, the origin in `single` mode | WAF custom key; origin limit; none |
+| [ADR-0010](../adr/0010-deploy-the-edge-stack-in-us-east-1.md) | Split the edge stack into `us-east-1` | edge stack plus main stack with cross-Region references; everything in `us-east-1` |
+| [ADR-0011](../adr/0011-protect-cell-origins-with-origin-access-control-across-accounts.md) | Protect cell origins with origin access control, across accounts | OAC with a cross-account Lambda permission; secret header; IP allowlist |
+| [ADR-0012](../adr/0012-cap-the-route-table-and-shard-by-distribution.md) | Route table size ceiling and sharding | one store and a ceiling; shard by distribution |
+| [ADR-0013](../adr/0013-register-routes-through-a-registrar-that-checks-the-control-plane.md) | Register routes through a registrar that checks the control plane | registrar with a placement check; a cross-account role that writes the store directly; the control plane writes routes |
+| [ADR-0014](../adr/0014-run-one-front-door-per-control-plane-application.md) | One front door per control-plane application | one per application; one shared front door keyed by application |
+| [ADR-0015](../adr/0015-read-the-control-plane-with-a-reader-token.md) | Read the control plane with a reader token | reader role (control-plane ADR-0042); operator app client; an IAM-authorised read stage |
 
 ## 9. Spikes before code
 
