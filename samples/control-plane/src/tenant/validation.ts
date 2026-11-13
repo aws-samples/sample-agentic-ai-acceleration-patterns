@@ -99,3 +99,50 @@ export function validateTenantBuildManagedPolicyArns(
     );
   }
 }
+
+/** The validated role lists the authorizer maps to grants (spec R-36). */
+export interface RoleLists {
+  readonly allowedRoles: readonly string[];
+  readonly readerRoles: readonly string[];
+}
+
+/** A role value either list may hold (spec §3.3); mirrors `ROLE_VALUE_PATTERN`. */
+const ROLE_VALUE = /^[A-Za-z0-9:._-]{1,64}$/;
+
+/**
+ * Validates `allowedRoles` and `readerRoles` at synth (spec §3.3, R-36): the
+ * operator list is non-empty (default `['operator']`), the reader list
+ * defaults to empty, every value matches the role pattern, and no value is
+ * in both lists. Fails synth with every problem named.
+ */
+export function validateRoleLists(
+  allowedRoles: string[] | undefined,
+  readerRoles: string[] | undefined,
+): RoleLists {
+  const allowed = allowedRoles ?? ['operator'];
+  const readers = readerRoles ?? [];
+  const problems: string[] = [];
+  for (const [name, list] of [['allowedRoles', allowed], ['readerRoles', readers]] as const) {
+    if (!Array.isArray(list)) {
+      problems.push(`${name} must be an array of strings (got: ${JSON.stringify(list)})`);
+      continue;
+    }
+    list.forEach((role, index) => {
+      if (typeof role !== 'string' || !ROLE_VALUE.test(role)) {
+        problems.push(`${name}[${index}] ${JSON.stringify(role)} does not match ${ROLE_VALUE.source}`);
+      }
+    });
+  }
+  if (Array.isArray(allowed) && allowed.length === 0) {
+    problems.push('allowedRoles must name at least one role (omit it for the default, operator)');
+  }
+  if (Array.isArray(allowed) && Array.isArray(readers)) {
+    for (const role of readers.filter((value) => allowed.includes(value))) {
+      problems.push(`${JSON.stringify(role)} is in both allowedRoles and readerRoles; a role value maps to one grant`);
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(`Invalid role lists (spec R-36):\n  - ${problems.join('\n  - ')}`);
+  }
+  return { allowedRoles: allowed, readerRoles: readers };
+}

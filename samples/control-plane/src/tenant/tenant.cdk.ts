@@ -14,7 +14,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { ProvisioningWorkflow } from './tenant.sfn';
-import { stackIdentity, validateTenantBuildManagedPolicyArns } from './validation';
+import { stackIdentity, validateRoleLists, validateTenantBuildManagedPolicyArns } from './validation';
 import { CellAccountRoles } from '../cell-account/cell-account.cdk';
 import { apiRoleName, DEFAULT_FLEET_NAME, provisioningRoleArn, validateFleetName } from '../shared/fleet';
 import { nagFindingResource, acknowledgeGranularFinding, suppressTemplateScanners } from '../shared/nag';
@@ -54,6 +54,20 @@ export interface TenantStackProps extends StackProps {
    * their own through the `CellAccountStack`. Default: none.
    */
   readonly tenantBuildManagedPolicyArns?: string[];
+  /**
+   * Role claim values that get the operator grant, every operation (spec
+   * R-36, M13). Non-empty; each value matches `[A-Za-z0-9:._-]{1,64}`.
+   * Default `['operator']`.
+   */
+  readonly allowedRoles?: string[];
+  /**
+   * Role claim values that get the reader grant, the ten `GET` operations
+   * only (spec R-36, ADR-042, M26). Default none: no reader is admitted
+   * until the deployer names one. Use a namespaced value such as
+   * `control-plane:reader`, not a word a broader issuer may already mint
+   * (T2, T20). A value in both lists fails synth.
+   */
+  readonly readerRoles?: string[];
 }
 
 /** GSI-1: cell, account and application listing, per-cell deployment lookup (spec §4.7). */
@@ -97,6 +111,9 @@ export class TenantStack extends Stack {
     // Fail synth on a policy ARN outside this partition/account (ADR-022).
     const identity = stackIdentity(this);
     validateTenantBuildManagedPolicyArns(props.tenantBuildManagedPolicyArns, identity);
+    // R-36: the two role lists the authorizer maps to grants; fail synth on
+    // an empty operator list, a bad value or a value in both lists.
+    const roles = validateRoleLists(props.allowedRoles, props.readerRoles);
 
     // --- Control plane table (applications + accounts + cells + tenants +
     // deployments, single table, spec §4) ---
@@ -182,11 +199,14 @@ export class TenantStack extends Stack {
       environment: {
         VENDOR_IDP_ISSUER_URL: props.vendorIdpIssuerUrl,
         VENDOR_IDP_AUDIENCE: props.vendorIdpAudience,
-        // M13 (T2/T20): the role allowlist the authorizer enforces on the
-        // JWT `role` claim. 'operator' is also the code's default when
-        // unset — wiring it here makes the enforcement configuration
-        // visible at the deployment surface.
-        ALLOWED_ROLES: 'operator',
+        // M13 (T2/T20): the role values that get the operator grant.
+        // 'operator' is also the code's default when unset — wiring it here
+        // makes the enforcement configuration visible at the deployment
+        // surface.
+        ALLOWED_ROLES: roles.allowedRoles.join(','),
+        // M26 (T36): the role values that get the reader grant (GET only).
+        // Empty means no reader; the authorizer reads that as none.
+        READER_ROLES: roles.readerRoles.join(','),
       },
     });
     acknowledgeLambdaBasicExecutionRole(authorizerFn);
@@ -305,6 +325,9 @@ export class TenantStack extends Stack {
           // The operator identity: the authorizer's principalId (JWT sub),
           // present on Allow AND Deny — the audit chain's first link.
           operatorId: apigateway.AccessLogField.contextAuthorizerPrincipalId(),
+          // M26: which grant the caller held (operator or reader); empty on
+          // a denied request, which carries no authorizer context.
+          grant: apigateway.AccessLogField.contextAuthorizer('grant'),
         })),
         // Execution logging for every method (AwsSolutions-APIG6).
         loggingLevel: apigateway.MethodLoggingLevel.INFO,

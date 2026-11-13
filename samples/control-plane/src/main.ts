@@ -28,8 +28,9 @@ Validations.of(app).addPlugins(
 // decision (ADR-004). Applications and accounts are NOT stack inputs: they
 // are registered through the API at run time (ADR-024, ADR-032).
 // Optional inputs: tenantBuildManagedPolicyArns (ADR-022), fleetName
-// (ADR-025, default `control-plane`) and demoApplicationIds (the sample
-// scripts' shared parameter, ADR-034).
+// (ADR-025, default `control-plane`), demoApplicationIds (the sample
+// scripts' shared parameter, ADR-034), and the role lists allowedRoles
+// (default ["operator"]) and readerRoles (default none) (spec R-36, ADR-042).
 //
 // A second mode (ADR-025): `--context cellAccount='{...}'` synthesizes ONLY
 // the account role pair stack, for deployment into another account by its
@@ -69,6 +70,9 @@ if (cellAccount !== undefined) {
   // Optional, DEMO ONLY: the applications the sample scripts will be
   // registered under, so their shared parameter exists in the home account.
   const demoApplicationIds = parseJsonContext<string[]>('demoApplicationIds');
+  // Optional (R-36): role claim values for the operator and reader grants.
+  const allowedRoles = parseJsonContext<string[]>('allowedRoles');
+  const readerRoles = parseJsonContext<string[]>('readerRoles');
 
   new TenantStack(app, 'control-plane-dev', {
     vendorIdpIssuerUrl: String(vendorIdpIssuerUrl),
@@ -76,6 +80,8 @@ if (cellAccount !== undefined) {
     fleetName,
     tenantBuildManagedPolicyArns,
     demoApplicationIds,
+    allowedRoles,
+    readerRoles,
     env,
   });
 }

@@ -160,23 +160,32 @@ validation) on every operation. There are no unauthenticated operations.
 
 ### Caller context
 
-The authorizer writes `sub`, `role` (ADR-006); the handler is a
-pass-through building an immutable `CallerContext { operatorId, role }`; the
+The authorizer writes `sub`, `role` (ADR-006) and `grant` (ADR-042); the
+handler is a pass-through building an immutable
+`CallerContext { operatorId, role, grant }`, and answers 500 when the grant
+is missing or unknown; the
 service receives `CallerContext` per operation and a static `ServiceConfig`
 at cold start. Callers act across tenants, applications and cells — control
 plane data is not tenant-scoped by caller.
 
 The configured issuer is a dedicated control-plane trust boundary: it issues
-tokens exclusively to fully privileged vendor operators. The authorizer
-enforces the `role` claim as a coarse membership gate (ADR-018): a token
-whose `role` is missing or outside the allowed set (`ALLOWED_ROLES` env var,
-default `operator`) is denied, never defaulted. This backstops issuer
-misconfiguration and issuer scope creep — a broader population's tokens do
-not carry the operator role. There is no per-operation role matrix
-(ADR-015): every allowed role holds all twenty-two operations. Connecting a
-general workforce or customer issuer requires adding explicit per-operation
-authorization before deployment; the membership gate alone is not sufficient
-for a trust population with mixed privileges.
+tokens to vendor operators and to the reader systems the deployer names.
+The authorizer maps the `role` claim to one of two grants (ADR-018,
+ADR-042): a value in `ALLOWED_ROLES` (default `operator`) gets the operator
+grant, a value in `READER_ROLES` (default none) the reader grant, and a
+token whose `role` is missing or in neither list is denied, never
+defaulted. A value in both lists fails synth and cold start. The grant is
+the authorizer's policy: the whole stage for an operator, `GET/*` for a
+reader, computed from the grant alone so the token-keyed cache never holds
+a Deny for a reader's reads (`src/shared/authorizer-policy.ts`). The service
+checks again by operation name (`src/shared/grant-check.ts`): the ten read
+operations are open to both grants, every other operation requires the
+operator grant and refuses a reader with `UnauthorizedError` (403). This
+backstops issuer misconfiguration and issuer scope creep — a broader
+population's tokens do not carry either role value. Every operator holds all
+twenty-two operations (ADR-015); finer operator roles are the recorded seam
+(spec §11), and connecting a general workforce or customer issuer needs them
+first.
 
 ## 3. Components
 

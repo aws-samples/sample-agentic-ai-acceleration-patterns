@@ -6,6 +6,8 @@ import {
   DEFAULT_ALLOWED_ROLES,
   extractBearerToken,
   parseAllowedRoles,
+  parseReaderRoles,
+  resolveRoleGrants,
 } from '../../src/shared/authorizer-policy';
 
 describe('parseAllowedRoles', () => {
@@ -36,6 +38,45 @@ describe('parseAllowedRoles', () => {
   test('throws when set but containing no role names (fail closed, loudly)', () => {
     expect(() => parseAllowedRoles(',,')).toThrow(/no role names/);
     expect(() => parseAllowedRoles(' , , ')).toThrow(/no role names/);
+  });
+});
+
+describe('parseAllowedRoles value pattern', () => {
+  test('throws on a value outside the role pattern', () => {
+    expect(() => parseAllowedRoles('operator,has space')).toThrow(/outside/);
+  });
+});
+
+describe('parseReaderRoles (M26)', () => {
+  test('unset or empty means no reader, never the operator default', () => {
+    expect(parseReaderRoles(undefined).size).toBe(0);
+    expect(parseReaderRoles('').size).toBe(0);
+    expect(parseReaderRoles('  ').size).toBe(0);
+  });
+
+  test('parses a comma-separated list', () => {
+    expect([...parseReaderRoles(' control-plane:reader , audit.job ')]).toEqual(['control-plane:reader', 'audit.job']);
+  });
+
+  test('throws when set but containing no role names', () => {
+    expect(() => parseReaderRoles(',,')).toThrow(/READER_ROLES is set but contains no role names/);
+  });
+});
+
+describe('resolveRoleGrants (R-36)', () => {
+  test('maps operator and reader values to their grants', () => {
+    const grants = resolveRoleGrants('operator', 'control-plane:reader');
+    expect(grants.get('operator')).toBe('operator');
+    expect(grants.get('control-plane:reader')).toBe('reader');
+    expect(grants.get('auditor')).toBeUndefined();
+  });
+
+  test('defaults: operator only, no reader', () => {
+    expect([...resolveRoleGrants(undefined, undefined)]).toEqual([['operator', 'operator']]);
+  });
+
+  test('throws on a value in both lists', () => {
+    expect(() => resolveRoleGrants('operator', 'operator')).toThrow(/in both ALLOWED_ROLES and READER_ROLES/);
   });
 });
 
@@ -75,6 +116,21 @@ describe('buildPolicy', () => {
       role: 'operator',
     });
     expect(policy.context).toEqual({ operatorId: 'operator-1', role: 'operator' });
+  });
+
+  test('a reader gets every GET of the stage, whatever method it called (R-36)', () => {
+    const policy = buildPolicy(methodArn, 'Allow', 'reader-1', { grant: 'reader' }, 'reader');
+    expect(policy.policyDocument.Statement[0]).toEqual({
+      Action: 'execute-api:Invoke',
+      Effect: 'Allow',
+      Resource: 'arn:aws:execute-api:eu-central-1:123456789012:api123/prod/GET/*',
+    });
+  });
+
+  test('a Deny covers the whole stage whatever the grant', () => {
+    const policy = buildPolicy(methodArn, 'Deny', 'unknown', undefined, 'reader');
+    expect((policy.policyDocument.Statement[0] as { Resource: string }).Resource)
+      .toBe('arn:aws:execute-api:eu-central-1:123456789012:api123/prod/*');
   });
 
   test('builds a Deny policy without context', () => {

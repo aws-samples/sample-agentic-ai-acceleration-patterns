@@ -121,9 +121,31 @@ describe('TenantStack', () => {
           VENDOR_IDP_ISSUER_URL: 'https://idp.example.com',
           VENDOR_IDP_AUDIENCE: 'control-plane',
           ALLOWED_ROLES: 'operator',
+          READER_ROLES: '',
         },
       },
     });
+  });
+
+  test('role lists reach the authorizer as comma-separated values (R-36)', () => {
+    const t = synth({ allowedRoles: ['operator', 'cp:admin'], readerRoles: ['control-plane:reader'] });
+    t.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          ALLOWED_ROLES: 'operator,cp:admin',
+          READER_ROLES: 'control-plane:reader',
+        }),
+      },
+    });
+  });
+
+  test.each([
+    [{ allowedRoles: [] }, /allowedRoles must name at least one role/],
+    [{ readerRoles: ['operator'] }, /"operator" is in both allowedRoles and readerRoles/],
+    [{ readerRoles: ['a,b'] }, /readerRoles\[0\] "a,b" does not match/],
+    [{ allowedRoles: ['has space'] }, /allowedRoles\[0\] "has space" does not match/],
+  ])('invalid role lists fail synth (R-36): %j', (props, message) => {
+    expect(() => synth(props as Partial<TenantStackProps>)).toThrow(message);
   });
 
   test('no demo shared parameter by default; one per demoApplicationIds entry (ADR-034)', () => {
@@ -154,6 +176,8 @@ describe('TenantStack', () => {
     // The operator identity — the verified JWT sub — is the audit chain's
     // first link, present on Allow AND Deny.
     expect(format.operatorId).toBe('$context.authorizer.principalId');
+    // M26: the grant the caller held, so a reader's calls are told apart.
+    expect(format.grant).toBe('$context.authorizer.grant');
     // The minimum attribution fields.
     expect(format.requestId).toBe('$context.requestId');
     expect(format.ip).toBe('$context.identity.sourceIp');

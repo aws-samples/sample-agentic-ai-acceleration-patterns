@@ -15,13 +15,16 @@ import { DeploymentDataModel, DeploymentItem, DeploymentRecord } from './deploym
 import { IdempotencyDataModel, IdempotencyItem, IdempotencyRecord } from './idempotency.data-model';
 import { TenantService, TenantServiceConfig } from './tenant';
 import { TenantDataModel, TenantItem, TenantRecord } from './tenant.data-model';
+import { GRANTS, Grant } from '../shared/authorizer-policy';
+import { withGrantCheck } from '../shared/grant-check';
 import { DynamoDBRepository, PlacementTransactions } from '../shared/repository';
 import { CallerContext, requireEnv } from '../shared/service-config';
 import { getTenantServiceServiceHandler } from '../smithy/source/typescript-ssdk-codegen/src';
 
 /**
  * API handler — a dumb pass-through (context separation):
- * 1. reads the authorizer output and builds the immutable `CallerContext`
+ * 1. reads the authorizer output and builds the immutable `CallerContext`,
+ *    grant included (spec R-36)
  * 2. converts the API Gateway event to an HttpRequest
  * 3. dispatches to the Smithy-generated service handler
  *
@@ -89,14 +92,17 @@ const config: TenantServiceConfig = {
   sfnClient: new SFNClient({}),
 };
 
-const service = new TenantService(config);
+// R-36 second wall: every operation checks the caller's grant by name
+// before it runs (src/shared/grant-check.ts).
+const service = withGrantCheck(new TenantService(config));
 const serviceHandler = getTenantServiceServiceHandler<CallerContext>(service);
 
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const authorizer = event.requestContext.authorizer;
   const operatorId = authorizer?.operatorId;
   const role = authorizer?.role;
-  if (typeof operatorId !== 'string') {
+  const grant = authorizer?.grant;
+  if (typeof operatorId !== 'string' || !isGrant(grant)) {
     // The authorizer guarantees this - absence is an ingress wiring bug.
     return {
       statusCode: 500,
@@ -106,13 +112,18 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
   // Immutability is enforced at the type level (readonly fields). The object
   // itself must stay extensible: the generated SSDK handler attaches
   // bookkeeping (e.g. metricsRecorder) to the context at dispatch time.
-  // `role` is optional: the authorizer omits the key when the IdP issued no
-  // role claim - it is never defaulted here either.
+  // A missing or unknown grant is an ingress fault (500 above), never a
+  // default. `role` is carried for audit and never defaulted either.
   const context: CallerContext =
-    typeof role === 'string' ? { operatorId, role } : { operatorId };
+    typeof role === 'string' ? { operatorId, role, grant } : { operatorId, grant };
 
   const httpResponse = await serviceHandler.handle(convertEvent(event), context);
   return convertVersion1Response(httpResponse);
+}
+
+/** Whether the authorizer handed on a known grant (R-36). */
+function isGrant(value: unknown): value is Grant {
+  return typeof value === 'string' && (GRANTS as readonly string[]).includes(value);
 }
 
 /**
