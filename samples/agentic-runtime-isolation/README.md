@@ -235,6 +235,11 @@ one `kms:Sign` on a mint cache miss (a cost, not an isolation effect; ADR-0043).
   section](../tenant-identity/README.md#deploy) describes.
 - **Bedrock model access** to Amazon Nova Lite through the Region's
   cross-Region inference profile (ADR-0028), or `--context modelId=<id>`.
+- **AgentCore Runtime platform version V2** in the Region. Each Runtime is
+  created on V2 (`agent.platformVersion`, default `V2`; ADR-0050). A Runtime
+  that runs on V1 moves to V2 in place on its next deploy, and that deploy
+  builds the V2 snapshot, which takes minutes. Set
+  `agent.platformVersion: 'V1'` to keep V1.
 - **tenant-identity, topology `shared-pool`, deployed and published** in the
   same account and Region, at a version with the scope catalogue
   (`GET|PUT|DELETE /platform/scopes/{scope}`, tenant-identity
@@ -543,6 +548,11 @@ The agent must:
 - Delegate, if at all, only through `POST ${RI_DELEGATION_URL}/<agent>/delegations`
   with its transaction token as bearer (ADR-0048); the demo agent does so
   for the prompt `delegate <agent> <prompt>`.
+- Compute nothing per microVM at import: no secret, nonce or id. The
+  Runtime runs on platform version V2 (`agent.platformVersion`, default
+  `V2`), which restores every session's microVM from one snapshot, and
+  `node:crypto` can repeat values across restored microVMs. Draw such a
+  value on the first request, from `/dev/urandom` (ADR-0050).
 - Never log or echo a header value.
 
 #### Tool contract

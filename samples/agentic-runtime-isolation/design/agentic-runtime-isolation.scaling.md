@@ -100,6 +100,13 @@ new conversations is a session-creation test: 300 a second against 25 gave
 167 `502 backend_failed` at `medium` (F-2), each with the tenant and the
 reason. The peak scenario ran at the 1,000 TPS data-plane quota on purpose.
 
+The stress tiers ran on Runtime platform version V1. The sample now runs on
+V2 (ADR-0050), which restores each session from a snapshot (AWS states a
+start under 2 s whatever the image size), scales an idle session's memory
+down, and holds up to 250 connections a session. The cold-start figures
+below are V1 figures, and an idle microVM costs less on V2. A stress rerun
+on V2 replaces them.
+
 | Option | Effect | Cost | Blast radius |
 |---|---|---|---|
 | Quota increases (all three are adjustable) | the only way past 2,500 concurrent conversations or 1,000 rps | Service Quotas request; Runtime seconds are billed per active microVM, so 10,000 sessions is 10,000 microVMs of CPU and memory | account-wide |

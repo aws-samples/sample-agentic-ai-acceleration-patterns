@@ -85,7 +85,19 @@ export interface AgentCoreRuntimeBackendProps {
    * grant (ADR-0024).
    */
   readonly tags?: Record<string, string>;
+  /**
+   * The Runtime platform version, written to the template so a deployment
+   * does not depend on the service default of the day it was created
+   * (ADR-0050). Default `V2`.
+   */
+  readonly platformVersion?: RuntimePlatformVersion;
 }
+
+/** Runtime platform versions the backend accepts (ADR-0050). */
+export type RuntimePlatformVersion = 'V1' | 'V2';
+
+/** The platform version a Runtime gets when none is given (ADR-0050). */
+export const DEFAULT_PLATFORM_VERSION: RuntimePlatformVersion = 'V2';
 
 /** The endpoint the Runtime logs under; the only one this sample creates. */
 const RUNTIME_ENDPOINT = 'DEFAULT';
@@ -279,6 +291,7 @@ export class AgentCoreRuntimeBackend extends Construct implements IBackend {
         },
       },
       networkConfiguration: { networkMode: 'PUBLIC' },
+      platformVersion: props.platformVersion ?? DEFAULT_PLATFORM_VERSION,
       protocolConfiguration: 'HTTP',
       requestHeaderConfiguration: allowlist.length > 0 ? { requestHeaderAllowlist: allowlist } : undefined,
       environmentVariables: { [AGENT_ENV.MODEL_ID]: props.modelId, ...props.environment },

@@ -24,7 +24,7 @@ import { createHash } from 'node:crypto';
 import { Annotations, Aspects, Duration, Names, Stack, Token } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
-import { AgentCoreRuntimeBackend } from './backend/agentcore-runtime.cdk';
+import { AgentCoreRuntimeBackend, type RuntimePlatformVersion } from './backend/agentcore-runtime.cdk';
 import { AGENT_ENV } from './shared/config';
 import { nameKey } from './shared/entitlements';
 import { LogDrain } from './shared/log-drain';
@@ -50,6 +50,12 @@ export interface AgentProps {
   readonly modelId: string;
   /** Environment variables for the agent process. Configuration only; never a secret. */
   readonly environment?: Record<string, string>;
+  /**
+   * The Runtime platform version, `V1` or `V2` (default `V2`, ADR-0050). On
+   * V2 every session's microVM is restored from one snapshot, so the agent
+   * must not compute a secret, a nonce or an id at import.
+   */
+  readonly platformVersion?: RuntimePlatformVersion;
 }
 
 export interface AgentBackendProps {
@@ -139,6 +145,10 @@ export class AgentBackend extends Construct {
     }
     if (props.agent.modelId.length === 0) {
       fail('agent.modelId', 'must be a Bedrock model id');
+    }
+    // A JavaScript caller is not held to the type (ADR-0050).
+    if (props.agent.platformVersion !== undefined && !['V1', 'V2'].includes(props.agent.platformVersion)) {
+      fail('agent.platformVersion', "must be 'V1' or 'V2'");
     }
     // `?? []` covers a JavaScript caller that omits the required prop: the message names it.
     const needsProblem = backendNeedsProblem(props.name, props.needs ?? []);
@@ -264,6 +274,7 @@ export class AgentBackend extends Construct {
       codePath: props.agent.codePath,
       modelId: props.agent.modelId,
       environment,
+      platformVersion: props.agent.platformVersion,
       transports: { transactionToken: true, tenantCredentials: true },
       tags: { [INGRESS_TAG_KEY]: ref.ingressId },
     });

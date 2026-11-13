@@ -491,3 +491,15 @@ No finding is in code the branch added or changed for delegation.
 | Holmes (Semgrep, ACAT, gitleaks) | 9 high, 21 low on the same probe fixtures, the `TXN_TOKEN` stand-in, the data-protection regex test literal, `getKey: JWTVerifyGetKey` type names and the documentation account id | `scripts/integ.sh`, `test/helpers.ts`, `test/runtime-isolation.cdk.test.ts`, `src/shared/verifier.ts`, `src/tools/*.ts`, `test/shared/*.test.ts` | False positive: marked so in Holmes with reasons |
 | Holmes (CSR rubric, medium) | KMS `Sign` latency stated without a source | `adr/0036` | Fixed: a dated note attributes the figure to spike V-12 (p50 8.2 ms, p95 11.1 ms) |
 
+
+### Runtime platform V2 review, 2026-11-13
+
+Run on branch `runtime-isolation/agentcore-runtime-v2` (ADR-0050) after
+`npx projen build` (44 suites, 868 tests). ProtoShield v0.18.0 with every
+plugin. No finding is in code the branch added or changed.
+
+| Scanner | Finding | File | Outcome |
+|---|---|---|---|
+| ProtoShield (Semgrep, CDK NAG, Checkov, Secrets, License headers) | 0 | - | - |
+| ProtoShield (IAM least privilege) | 5 high, 3 medium, 2 low: `resources: ['*']` in the KMS key policies (`RenderJwks`, `SignTransactionTokens`, `SignToolContexts`); X-Ray and `PutMetricData`; the stress driver's `execute-api`, SSM and S3 prefixes | `src/shared/token-signer.cdk.ts`, `src/tools-gateway.cdk.ts`, `src/backend/agentcore-runtime.cdk.ts`, `test/stress/stress-driver.cdk.ts` | As in the 2026-11-04 review: a KMS key policy applies to its own key and `*` is the only resource it accepts; X-Ray and `PutMetricData` accepted (ADR-0014); the stress driver is a test stack |
+| ProtoShield (CVE) | minimatch, glob, deepmerge | `package-lock.json` | Accepted in the 2026-11-04 review (transitive dev-time dependencies) |

@@ -38,6 +38,7 @@ export type {
 } from './shared-ingress.cdk';
 export { ROUTE } from './shared/registry';
 export type { AgentProps } from './agent-backend.cdk';
+export type { RuntimePlatformVersion } from './backend/agentcore-runtime.cdk';
 export {
   SharedIngress,
   DEFAULT_REGISTRY_PREFIX,

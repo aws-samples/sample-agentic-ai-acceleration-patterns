@@ -4,12 +4,14 @@ SPDX-License-Identifier: MIT-0
 -->
 # Agentic Runtime Isolation: Architecture
 
-> **Status: implemented and verified.** Last green integration run: run 19,
-> 2026-11-11 14:06 to 14:51 UTC, eu-central-1, 60/60 steps (59 PASS, 1 SKIP),
-> deploy 705 s at `INTEG_DEPLOY_CONCURRENCY=2`, key rotation 172 s, sweep of
-> 147 log groups clean, teardown clean (commit 4fec24a on PR 38; the first
-> attempt at the default concurrency 6 failed on an API Gateway control-plane
-> 429 at `CreateModel`, the second at 2 went through). The
+> **Status: implemented and verified.** Last green integration run: run 20,
+> 2026-11-13 10:33 to 11:14 UTC, eu-central-1, every Runtime on platform
+> version V2 (ADR-0050), 60/60 steps (59 PASS, 1 SKIP), deploy 454 s at the
+> default concurrency 6 (each V2 Runtime about 3.5 min from create to
+> ready, for its snapshot), steps 1,629 s, key rotation 159 s, sweep of 147
+> log groups clean, teardown clean (commit b4cf4f1). The per-VM nonce told
+> the microVMs apart on V2: B1 got its own unit and microVM, A1 resumed c1
+> on the same one, and session off gave two microVMs for two requests. The
 > run used a sandbox account and `scripts/integ.sh` (the CDK CLI driver,
 > ADR-0044) with six stacks (`api-gateway`, `agentcore-gateway`,
 > `session-off`, `session-user`, `limits`, `multi-tenant`). Both all-on
@@ -209,7 +211,8 @@ The TSDoc in
 
 `AgentBackend` takes `name` (`[a-z0-9-]{1,32}`), `ingress` (a
 `SharedIngress` or `SharedIngressRef`), `agent` (`{ codePath, modelId,
-environment? }`), `needs` (required, `<name>/<action>`, always granted with
+environment?, platformVersion? }`, the Runtime platform `V1` or `V2`,
+default `V2`, ADR-0050), `needs` (required, `<name>/<action>`, always granted with
 the agent), `tools` (default `[]`, `<target>/<tool>` or `<target>/*`, at most
 64) and `owner` (default `<StackId>#<LogicalResourceId>`). `TokenSigner`
 takes `algorithm`, `keyGeneration` and `signer`; `EntitlementStore` takes
@@ -236,8 +239,8 @@ takes `algorithm`, `keyGeneration` and `signer`; `EntitlementStore` takes
 | Registry cache | Stale-while-refresh, back-off, maximum stale age, account check | `src/shared/registry.ts` |
 | TVM | Always on: `AssumeRole` plus `TagSession` with `TenantId` from the verified claim; bounded LRU cache, single flight, refresh ahead (ADR-0012, ADR-0018, ADR-0022) | `src/shared/tvm.ts` |
 | Tenant limits | DynamoDB fixed-window counter per tenant per minute, shared by every agent; 429 before the TVM and the backend; fail-open after a bounded wait (ADR-0020) | `src/shared/limits.ts` |
-| Backend | One Runtime per agent: resource policy names the ingress role on the Runtime ARN, denies the other entry points; `ri:ingress` tag on `CfnRuntime.tags` (ADR-0001, ADR-0011) | `src/backend/agentcore-runtime.cdk.ts`, `src/backend/agentcore-runtime.transport.ts` |
-| Agent | Demo code in the microVM: model prompts through Nova Lite on the geography inference profile, signed by the vended credentials (ADR-0028); probes `report`, `read`, `stream`, `tools`, `tool`; one MCP client per tools gateway its token's `aud` names; ends each stream with `event: usage` | `src/agent/app.ts` |
+| Backend | One Runtime per agent on platform version V2, set in the template (ADR-0050): resource policy names the ingress role on the Runtime ARN, denies the other entry points; `ri:ingress` tag on `CfnRuntime.tags` (ADR-0001, ADR-0011) | `src/backend/agentcore-runtime.cdk.ts`, `src/backend/agentcore-runtime.transport.ts` |
+| Agent | Demo code in the microVM, restored from the Runtime's snapshot, so it computes nothing per microVM at import; its nonce is drawn from `/dev/urandom` on the first request (ADR-0050): model prompts through Nova Lite on the geography inference profile, signed by the vended credentials (ADR-0028); probes `report`, `read`, `stream`, `tools`, `tool`; one MCP client per tools gateway its token's `aud` names; ends each stream with `event: usage` | `src/agent/app.ts` |
 | Tools gateways | Next sections | `src/tools-gateway.cdk.ts`, `src/tools/*` |
 | Logs, metrics, teardown | JSON log lines (`src/shared/logger.ts`), EMF only with `perTenantMetrics` (`src/shared/metrics.ts`), one log drain per stack so teardown leaves no log group (ADR-0019, `src/shared/log-drain.ts`) | |
 | Runtime log group | The service creates `/aws/bedrock-agentcore/runtimes/<id>-DEFAULT` at `CreateAgentRuntime`; a custom resource after the Runtime puts a 30-day retention and a data protection policy on it that masks a whole JWT, the whole credential header and the decoded credential's secret fields at ingest (T-18, M-12, ADR-0047; `logs:Unmask` reads the original), and deletes it on destroy (`src/backend/agentcore-runtime.cdk.ts`, `src/backend/runtime-log-group.function.ts`) | |

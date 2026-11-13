@@ -16,7 +16,7 @@ SPDX-License-Identifier: MIT-0
 | [0008](./0008-give-the-agent-a-role-with-no-tenant-data.md) | Give the agent an execution role with no tenant-scoped permission | Accepted | Amended by ADR-0018, ADR-0026 | 2026-10-26 |
 | [0009](./0009-choose-the-default-ingress-by-measurement.md) | Choose the recommended ingress by measurement, after security parity | Accepted | Amended by ADR-0029 | 2026-10-26 |
 | [0010](./0010-declare-the-runtime-gateway-target-with-a-raw-override.md) | Declare the Gateway's Runtime target with a typed raw override | Accepted | - | 2026-10-26 |
-| [0011](./0011-model-the-compute-service-as-a-backend-agentcore-first.md) | Model the compute service as a backend, with AgentCore Runtime first | Accepted | Amended by ADR-0024, ADR-0032 | 2026-10-26 |
+| [0011](./0011-model-the-compute-service-as-a-backend-agentcore-first.md) | Model the compute service as a backend, with AgentCore Runtime first | Accepted | Amended by ADR-0024, ADR-0032, ADR-0050 | 2026-10-26 |
 | [0012](./0012-vend-tenant-scoped-credentials-at-ingress-and-forward-them.md) | Vend tenant-scoped credentials at the ingress and forward them to the backend | Accepted | Amended by ADR-0018 | 2026-10-26 |
 | [0013](./0013-make-session-mapping-an-optional-module.md) | Make session mapping an optional module; a fresh unit per request by default | Accepted | Amended by ADR-0024, ADR-0039 | 2026-10-26 |
 | [0014](./0014-accept-the-production-hardening-cdk-nag-findings.md) | Accept the production-hardening cdk-nag findings in the sample | Accepted | - | 2026-10-26 |
@@ -55,3 +55,4 @@ SPDX-License-Identifier: MIT-0
 | [0047](./0047-mask-header-values-in-the-runtime-log-group.md) | Mask header values in the Runtime log group with a data protection policy, set from a custom resource | Accepted | Amends ADR-0019 | 2026-11-06 |
 | [0048](./0048-delegate-between-agents-through-the-ingress.md) | Delegate between agents through the ingress, with a replacement transaction token | Accepted | Amends ADR-0031, ADR-0032 | 2026-11-09 |
 | [0049](./0049-reserve-concurrency-for-the-authoriser-too-and-size-the-stage-throttle-under-it.md) | Reserve concurrency for the authoriser as well as the integration Lambda, and size the stage throttle under it | Accepted | Amends ADR-0023, ADR-0029, ADR-0043 | 2026-11-11 |
+| [0050](./0050-run-the-agent-on-runtime-platform-version-v2.md) | Run the agent on Runtime platform version V2, set explicitly, with the nonce drawn on the first request | Accepted | Amends ADR-0011 | 2026-11-13 |
