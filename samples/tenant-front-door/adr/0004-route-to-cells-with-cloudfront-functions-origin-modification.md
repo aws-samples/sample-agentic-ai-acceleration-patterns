@@ -22,7 +22,8 @@ by the `CellRouteAccess` construct in the cell's account (§3.1, §5.2).
 
 The router reads `cell#<cellId>` and calls `cf.updateRequestOrigin()` to
 set the request's origin to the cell's API domain with origin access
-control (§3.3 step 7).
+control (§3.3 step 7). Origin access control overwrites `Authorization`, so
+the same step copies the bearer token into `x-tenant-token` (ADR-0011).
 
 Pros: one `/api/*` behaviour serves every cell. A new cell is a route table
 entry, not a distribution change (P-9). The same router step finds the
@@ -72,10 +73,8 @@ caps the cell count; Option 3 adds latency and a second lookup path.
 - Harder: only Lambda function URL and S3 origins are covered (§1.2).
 - Spike: S-3 must show that `cf.updateRequestOrigin()` sets origin access
   control for a Lambda function URL with `AWS_IAM` auth in a second
-  account: the signed request reaches it, an unsigned one gets 403. It
-  reports deploy and destroy time.
-- If S-3 fails: cross-account cells cannot use origin access control. A
-  new ADR picks another origin protection from §8 decision 11 (secret
-  header or IP allowlist) and records its weaker guarantee in the threat
-  model.
+  account, with the pass criteria in ADR-0011. It reports deploy and destroy
+  time.
+- If S-3 fails: this record keeps origin modification, and cell origins
+  move to the fallback protection ADR-0011 names.
 - Revisit when origins other than function URLs and S3 are needed.

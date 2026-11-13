@@ -51,7 +51,7 @@ concern. It is out of scope for this sample (spec §1.2).
 ## Decision
 
 Option 1. Access tokens stay in SPA memory, obtained with authorization code
-flow and PKCE, and travel only in the `Authorization` header. The router can
+flow and PKCE, and the SPA sends them only in the `Authorization` header. The router can
 read the tenant from the token at the edge without trusting it (P-1), the
 cell verifies the same token (P-4), and the shared origin in `single` mode
 holds no tenant state. The risk of script in the page using the token is

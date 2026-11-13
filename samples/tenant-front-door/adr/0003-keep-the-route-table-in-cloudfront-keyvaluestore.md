@@ -28,8 +28,7 @@ Pros: reads run inside CloudFront Functions at the edge, with no network
 call and no origin. A write applies without a function publish or a
 distribution change (P-9). The store has one writer, the registrar, so
 P-3 holds through IAM. Cons: one store holds 5 MB and each value 1 KB, so
-about 25,000 to 40,000 tenants fit (§4.1); the ceiling and shard plan go in
-a later ADR (§8 decision 12). A write takes time to reach every edge
+the tenant count has a ceiling (§4.1, ADR-0012). A write takes time to reach every edge
 location (S-2). Writes are serialised through the ETag.
 
 ### Option 2: Lambda@Edge plus DynamoDB
@@ -65,8 +64,8 @@ request; Option 3 breaks P-9.
 
 - Easier: suspend and resume are one key write (§4.2); removal is a delete.
 - Easier: the router stays a pure lookup with no secrets and no writes.
-- Harder: the tenant count is bounded by the store size until the shard
-  plan is decided (§8 decision 12).
+- Harder: the tenant count per front door is bounded by the store size
+  (ADR-0012).
 - Harder: a route is not live everywhere at once. Scripts and the
   integration test must allow for the propagation time S-2 measures.
 - Harder: values keep a version field (`v`) and stay small; the router

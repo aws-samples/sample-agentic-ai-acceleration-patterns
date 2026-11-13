@@ -71,6 +71,12 @@ part of this decision: without them Trusted Types would block the app.
   `reportingEndpoint` is set, sends a report to `fd` (spec §7.1).
 - Harder: a new SPA build ships with a stack update, because the hashes live
   in the response headers policy.
+- Release order: the policy deploys over minutes, while `index.html` is
+  revalidated on every load. So for one release the policy carries both
+  the previous and the new script hashes. The policy deploys first, then
+  the SPA files are uploaded, and the next release drops the old hash. Two
+  sets of hashes fit within the 1,783-character limit on a CSP value in a
+  response headers policy.
 - Harder: inline styles are refused (`style-src 'self'`), and any third-party
   script must be loaded by the hashed entry script.
 - Follow-up: the build fails when a script in `index.html` has no hash in the

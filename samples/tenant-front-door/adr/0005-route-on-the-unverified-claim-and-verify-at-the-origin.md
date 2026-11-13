@@ -23,14 +23,19 @@ even when a forged token reaches it.
 
 The router base64url-decodes the payload without checking the signature,
 reads `tenant_id`, routes, and adds `x-tenant-route: <tenantId>` after
-removing every client `x-tenant-*` header (§3.3 steps 1, 5, 7). The origin
-verifies the token, refuses a `tenant_id` that differs from the hint, and
+removing every client `x-tenant-*` header (§3.3 steps 1, 5, 7). For
+`/api/*` it also copies the token into `x-tenant-token`, because origin
+access control overwrites `Authorization` (ADR-0011). The origin verifies
+the token, refuses a `tenant_id` that differs from the hint, and
 refuses a tenant its cell does not host (§3.5).
 
 Pros: the router stays a CloudFront Function with no secrets, no key
 fetch and no network call (P-1). A forged claim only sends the request to
-a cell that refuses it (P-1, §10 step 7). The hint makes routing and
-verification agree, in both addressing modes (P-4). Cons: a forged token
+a cell that refuses it (P-1, §10 step 7). In `host` mode the hint carries
+the host's tenant, so a token for `a` on `b`'s host is refused even when
+both tenants share one cell (P-4). In `single` mode the hint comes from the
+same token the cell verifies, so it always agrees; there the cell's check
+that the tenant is one it hosts is what stops a forged claim. Cons: a forged token
 costs one origin request before it is refused. Every cell API must
 implement the hint and host checks (§6.1).
 
@@ -48,10 +53,10 @@ edge did, so the work runs twice.
 
 As Option 1, without `x-tenant-route`.
 
-Pros: one header fewer. Cons: the origin cannot tell that the edge routed
-on a different tenant from the one the token names. A cell would serve any
-validly signed token for a tenant it hosts, even when it arrived by a
-route meant for another tenant, which P-4 rules out.
+Pros: one header fewer. Cons: in `host` mode the origin cannot tell that
+the edge routed on a different tenant from the one the token names. A cell
+hosting both `a` and `b` would serve a token for `a` sent to `b`'s host,
+which P-4 rules out.
 
 ## Decision
 
@@ -76,8 +81,10 @@ verification at higher cost; Option 3 loses the agreement check.
 - Spike: S-7 must read `tenant_id` from a real `tenant-identity` access
   token in a CloudFront Function, with compute utilisation under 50 %, and
   return 401 on a malformed token. It reports deploy and destroy time.
-- If S-7 fails: decoding at the edge does not fit CloudFront Functions. A
-  new ADR weighs moving the decode to Lambda@Edge or making `host` the
-  default mode (ADR-0001), which needs no decode.
+- If S-7 fails: `host` becomes the default addressing mode, which needs no
+  decode, and a new record supersedes ADR-0001. Moving the decode to
+  Lambda@Edge is no fallback: KeyValueStore is readable only from
+  CloudFront Functions, and one behaviour cannot run both on viewer
+  request, so it would reopen ADR-0003 and ADR-0004.
 - Revisit when the origin cannot verify tokens, or when forged-token load
   on origins becomes a cost problem.

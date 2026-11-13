@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0001: Default to one URL with the tenant from the token
 
-- Status: Accepted
+- Status: Proposed (spike S-7)
 - Date: 2026-11-13
 - Deciders: Dave Roberts (PSA)
 
@@ -22,8 +22,9 @@ must accept (§3.5), and how much onboarding work a pooled tenant costs
 ### Option 1: Token claim (`single` mode)
 
 The router base64url-decodes the bearer token's payload and reads
-`tenant_id` (§3.3 step 5). A token with a `tenants` list names one tenant
-with `X-Tenant-Id`, accepted only when it is in that list.
+`tenant_id` (§3.3 step 5). A token with a `tenants` list and no single
+`tenant_id` gets 401 at the edge; the SPA narrows it to one tenant first
+(`ARCHITECTURE.md` §2.1).
 
 Pros: one URL, one certificate, one callback URL. Onboarding is one
 registrar call and touches no DNS (P-9). The tenant comes from the same
@@ -31,7 +32,7 @@ token the origin verifies, so the route hint and the verified claim agree
 by construction (P-4). Cons: every tenant shares one browser origin, so the
 SPA must keep no tenant data in persistent storage (§7.2). The edge cannot
 tell the tenant of a request with no token, so a per-tenant rate limit
-moves to the origin (§8 decision 9). Signed-out pages carry no tenant
+moves to the origin (ADR-0009). Signed-out pages carry no tenant
 branding.
 
 ### Option 2: Host name (`host` mode)
@@ -79,9 +80,12 @@ same way (P-4, ADR-0005). Options 3 and 4 fail P-2.
 - Harder: the SPA must clear in-memory state on tenant switch and sign-out
   and store nothing per tenant (§7.2).
 - Harder: the per-tenant rate limit runs at the origin in `single` mode
-  (§8 decision 9).
+  (ADR-0009).
 - Harder: the router must decode a token within CloudFront Functions
   limits (S-7, ADR-0005).
+- Proposed until S-7 passes: the default rests on that decode. If S-7
+  fails, `host` becomes the default addressing mode and a new record
+  supersedes this one (ADR-0005).
 - Follow-up: `host` mode needs spike S-4 (callback URLs) and S-6 (WAF rate
   key) before it ships, and its own integration test, `test/integ.host.ts`.
 - Revisit when tenants need per-tenant browser isolation by default, or

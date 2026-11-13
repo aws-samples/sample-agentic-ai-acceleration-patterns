@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0015: Read the control plane with a reader token
 
-- Status: Accepted
+- Status: Proposed (spike S-9)
 - Date: 2026-11-13
 - Deciders: Dave Roberts (PSA)
 
@@ -62,6 +62,13 @@ control plane, never writing unchecked.
 - A stolen reader token discloses fleet topology, non-secret parameter
   values and application source locations (control-plane T36). It cannot
   change the fleet.
+- Spike: the control plane authorizer verifies one `audience` and
+  requires `sub` and `role`. S-9 checks that a client-credentials token
+  from the registrar's own vendor IdP client passes it: `GetCell` returns
+  200 and a write returns 403. If S-9 fails, the control plane gains an
+  input to accept a list of audiences or client ids. That is a
+  control-plane change with its own control-plane ADR; this sample does not
+  work around it.
 - Follow-up: rotate the client secret, and log token fetch failures apart
   from placement refusals.
 - Revisit when the control plane offers a grant narrower than all reads
