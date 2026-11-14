@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: MIT-0
 
 import {
+  audienceAccepted,
   buildPolicy,
   DEFAULT_ALLOWED_ROLES,
   extractBearerToken,
   parseAllowedRoles,
+  parseClientIds,
   parseReaderRoles,
   resolveRoleGrants,
 } from '../../src/shared/authorizer-policy';
@@ -137,5 +139,54 @@ describe('buildPolicy', () => {
     const policy = buildPolicy(methodArn, 'Deny', 'unknown');
     expect(policy.policyDocument.Statement[0].Effect).toBe('Deny');
     expect(policy.context).toBeUndefined();
+  });
+});
+
+describe('parseClientIds (R-38, M27)', () => {
+  test('unset or empty means none', () => {
+    expect(parseClientIds(undefined).size).toBe(0);
+    expect(parseClientIds('').size).toBe(0);
+    expect(parseClientIds('  ').size).toBe(0);
+  });
+
+  test('parses a comma-separated list, trimming entries', () => {
+    expect([...parseClientIds(' abc123 , ci+bot ')]).toEqual(['abc123', 'ci+bot']);
+  });
+
+  test.each([
+    [',,', /contains no client ids/],
+    ['has space', /outside/],
+    ['a,a', /lists client id 'a' twice/],
+  ])('throws on %j', (raw, message) => {
+    expect(() => parseClientIds(raw)).toThrow(message);
+  });
+});
+
+describe('audienceAccepted (R-38)', () => {
+  const AUD = 'control-plane';
+  const listed = new Set(['machine-1']);
+
+  test.each([
+    ['matching string aud', { aud: AUD, sub: 'u' }, true],
+    ['array aud containing the audience', { aud: [AUD, 'other'], sub: 'u' }, true],
+    ['other string aud', { aud: 'other', sub: 'u' }, false],
+    ['array aud without the audience', { aud: ['other'], sub: 'u' }, false],
+    ['empty array aud', { aud: [], sub: 'u' }, false],
+    ['empty string aud', { aud: '', sub: 'u' }, false],
+    ['null aud', { aud: null, sub: 'u' }, false],
+    ['failing aud with a listed client_id never falls back', { aud: 'other', client_id: 'machine-1', sub: 'machine-1' }, false],
+    ['null aud with a listed client_id never falls back', { aud: null, client_id: 'machine-1', sub: 'machine-1' }, false],
+    ['no aud, listed client acting as itself', { client_id: 'machine-1', sub: 'machine-1' }, true],
+    ['no aud, unlisted client', { client_id: 'machine-2', sub: 'machine-2' }, false],
+    ['no aud, a person through a listed client', { client_id: 'machine-1', sub: 'person-uuid', username: 'p' }, false],
+    ['no aud, no client_id', { sub: 'machine-1' }, false],
+    ['no aud, non-string client_id', { client_id: ['machine-1'], sub: 'machine-1' }, false],
+    ['no aud, empty sub', { client_id: 'machine-1', sub: '' }, false],
+  ])('%s', (_name, payload, expected) => {
+    expect(audienceAccepted(payload, AUD, listed)).toBe(expected);
+  });
+
+  test('no aud and no listed client ids admits nothing', () => {
+    expect(audienceAccepted({ client_id: 'machine-1', sub: 'machine-1' }, AUD, new Set())).toBe(false);
   });
 });

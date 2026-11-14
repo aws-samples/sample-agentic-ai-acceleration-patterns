@@ -14,7 +14,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { ProvisioningWorkflow } from './tenant.sfn';
-import { stackIdentity, validateRoleLists, validateTenantBuildManagedPolicyArns } from './validation';
+import { stackIdentity, validateClientIds, validateRoleLists, validateTenantBuildManagedPolicyArns } from './validation';
 import { CellAccountRoles } from '../cell-account/cell-account.cdk';
 import { apiRoleName, DEFAULT_FLEET_NAME, provisioningRoleArn, validateFleetName } from '../shared/fleet';
 import { nagFindingResource, acknowledgeGranularFinding, suppressTemplateScanners } from '../shared/nag';
@@ -24,6 +24,15 @@ export interface TenantStackProps extends StackProps {
   readonly vendorIdpIssuerUrl: string;
   /** Vendor IdP audience expected in control plane JWTs. */
   readonly vendorIdpAudience: string;
+  /**
+   * Client ids accepted on a token that has no `aud`, such as a Cognito
+   * client-credentials access token, when the token's `sub` equals its
+   * `client_id` (spec R-38, ADR-043, M27). Each matches
+   * `[A-Za-z0-9+._:-]{1,128}`, none twice. Default none: the audience
+   * check alone, as before. List only the vendor's own machine clients on
+   * the dedicated issuer (T37).
+   */
+  readonly vendorIdpClientIds?: string[];
   /**
    * DEMO ONLY: application ids for which this stack publishes
    * `/application-plane/applications/<id>/shared/base-domain` in its own
@@ -114,6 +123,8 @@ export class TenantStack extends Stack {
     // R-36: the two role lists the authorizer maps to grants; fail synth on
     // an empty operator list, a bad value or a value in both lists.
     const roles = validateRoleLists(props.allowedRoles, props.readerRoles);
+    // R-38: client ids for tokens without `aud`; fail synth on a bad value.
+    const clientIds = validateClientIds(props.vendorIdpClientIds);
 
     // --- Control plane table (applications + accounts + cells + tenants +
     // deployments, single table, spec §4) ---
@@ -199,6 +210,9 @@ export class TenantStack extends Stack {
       environment: {
         VENDOR_IDP_ISSUER_URL: props.vendorIdpIssuerUrl,
         VENDOR_IDP_AUDIENCE: props.vendorIdpAudience,
+        // M27 (T37): client ids accepted on a token without `aud`. Empty
+        // means none; the authorizer reads that as the audience check alone.
+        VENDOR_IDP_CLIENT_IDS: clientIds.join(','),
         // M13 (T2/T20): the role values that get the operator grant.
         // 'operator' is also the code's default when unset — wiring it here
         // makes the enforcement configuration visible at the deployment

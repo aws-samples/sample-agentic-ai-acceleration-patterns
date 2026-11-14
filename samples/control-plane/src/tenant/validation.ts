@@ -3,7 +3,7 @@
 
 import { Stack, Token } from 'aws-cdk-lib';
 import { RegionInfo } from 'aws-cdk-lib/region-info';
-import { ROLE_VALUE_PATTERN } from '../shared/authorizer-policy';
+import { CLIENT_ID_PATTERN, ROLE_VALUE_PATTERN } from '../shared/authorizer-policy';
 
 /**
  * Synth-time validation of the stack inputs (spec §3.3). Shared by the
@@ -144,4 +144,37 @@ export function validateRoleLists(
     throw new Error(`Invalid role lists (spec R-36):\n  - ${problems.join('\n  - ')}`);
   }
   return { allowedRoles: allowed, readerRoles: readers };
+}
+
+/**
+ * Validates `vendorIdp.clientIds` at synth (spec §3.3, R-38): optional,
+ * default none; an array of strings, each matching the client id pattern,
+ * none twice. Fails synth with every problem named.
+ */
+export function validateClientIds(clientIds: string[] | undefined): readonly string[] {
+  const ids = clientIds ?? [];
+  const problems: string[] = [];
+  if (!Array.isArray(ids)) {
+    problems.push(`vendorIdpClientIds must be an array of strings (got: ${JSON.stringify(ids)})`);
+  } else {
+    const seen = new Set<string>();
+    ids.forEach((id, index) => {
+      // A client created in the same app is a token until deploy; the
+      // authorizer checks the resolved value at cold start (M27).
+      if (typeof id === 'string' && Token.isUnresolved(id)) {
+        return;
+      }
+      if (typeof id !== 'string' || !CLIENT_ID_PATTERN.test(id)) {
+        problems.push(`vendorIdpClientIds[${index}] ${JSON.stringify(id)} does not match ${CLIENT_ID_PATTERN.source}`);
+      } else if (seen.has(id)) {
+        problems.push(`vendorIdpClientIds lists ${JSON.stringify(id)} twice`);
+      } else {
+        seen.add(id);
+      }
+    });
+  }
+  if (problems.length > 0) {
+    throw new Error(`Invalid vendorIdpClientIds (spec R-38):\n  - ${problems.join('\n  - ')}`);
+  }
+  return ids;
 }

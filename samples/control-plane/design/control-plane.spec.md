@@ -1622,7 +1622,7 @@ flow. It has a resource server with one custom scope
 without a scope, and the authorizer ignores scope) and two machine
 clients with a secret and that scope: a reader client the stack lists in
 `clientIds`, and an unlisted client. The trigger runs on the V3 event:
-it branches on `triggerSource` and `callerContext.clientId`, putting the
+it branches on `triggerSource`, putting the
 users' roles under `idTokenGeneration` and `role: control-plane:reader`
 under `accessTokenGeneration` for both machine clients. A setup-stack
 function reads each client's secret, calls the token endpoint and returns

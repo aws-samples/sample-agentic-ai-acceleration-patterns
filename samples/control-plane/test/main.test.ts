@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { App, Environment } from 'aws-cdk-lib';
+import { App, Environment, Token } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { buildEnvironment, evaluateJsonata } from './workflow-jsonata';
 import { CellAccountStack, CellAccountStackProps } from '../src/cell-account/cell-account.cdk';
@@ -122,6 +122,7 @@ describe('TenantStack', () => {
           VENDOR_IDP_AUDIENCE: 'control-plane',
           ALLOWED_ROLES: 'operator',
           READER_ROLES: '',
+          VENDOR_IDP_CLIENT_IDS: '',
         },
       },
     });
@@ -146,6 +147,25 @@ describe('TenantStack', () => {
     [{ allowedRoles: ['has space'] }, /allowedRoles\[0\] "has space" does not match/],
   ])('invalid role lists fail synth (R-36): %j', (props, message) => {
     expect(() => synth(props as Partial<TenantStackProps>)).toThrow(message);
+  });
+
+  test('client ids reach the authorizer as a comma-separated value (R-38, M27)', () => {
+    const t = synth({ vendorIdpClientIds: ['abc123client', 'ci+bot'] });
+    t.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({ VENDOR_IDP_CLIENT_IDS: 'abc123client,ci+bot' }),
+      },
+    });
+  });
+
+  test.each([
+    [{ vendorIdpClientIds: ['a,b'] }, /vendorIdpClientIds\[0\] "a,b" does not match/],
+    [{ vendorIdpClientIds: [''] }, /vendorIdpClientIds\[0\] "" does not match/],
+    [{ vendorIdpClientIds: ['dup', 'dup'] }, /vendorIdpClientIds lists "dup" twice/],
+    [{ vendorIdpClientIds: 'abc' }, /vendorIdpClientIds must be an array of strings/],
+    [{ vendorIdpClientIds: [Token.asString({ Ref: 'Client' }), 'a b'] }, /vendorIdpClientIds\[1\] "a b" does not match/],
+  ])('invalid client ids fail synth (R-38): %j', (props, message) => {
+    expect(() => synth(props as unknown as Partial<TenantStackProps>)).toThrow(message);
   });
 
   test('no demo shared parameter by default; one per demoApplicationIds entry (ADR-034)', () => {

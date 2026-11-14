@@ -97,6 +97,8 @@ beforeAll(() => {
   delete process.env.ALLOWED_ROLES;
   // M26: one reader value; set before the first call, like the rest.
   process.env.READER_ROLES = 'control-plane:reader';
+  // M27: one listed machine client.
+  process.env.VENDOR_IDP_CLIENT_IDS = 'machine-1';
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
 
@@ -115,6 +117,9 @@ describe('authorizer handler hardening', () => {
     const options = mockJwtVerify.mock.calls[0][2];
     expect(options.algorithms).toEqual(['RS256']);
     expect(options.requiredClaims).toEqual(expect.arrayContaining(['exp', 'sub']));
+    // R-38: the audience step runs on the payload, not inside jwtVerify.
+    expect(options.audience).toBeUndefined();
+    expect(options.issuer).toBe(ISSUER);
 
     // Item 4: discovery fetch is bounded by an abort signal, and the JWKS
     // fetch carries an explicit timeout.
@@ -191,5 +196,60 @@ describe('authorizer reader grant (R-36, M26)', () => {
     const result = await handler(event(makeToken({ ...validClaims(), role: 'reader' })));
     expect(result.policyDocument.Statement[0].Effect).toBe('Deny');
     expect(result.context).toBeUndefined();
+  });
+});
+
+describe('authorizer client id path (R-38, M27)', () => {
+  /** A client-credentials access token: no `aud`, `sub` equal to `client_id`. */
+  function machineClaims(clientId: string): Record<string, unknown> {
+    const claims: Record<string, unknown> = { ...validClaims(), sub: clientId, client_id: clientId, scope: 'control-plane/read' };
+    delete claims.aud;
+    return claims;
+  }
+
+  test('a listed client acting as itself gets its role grant', async () => {
+    const result = await handler(event(makeToken({ ...machineClaims('machine-1'), role: 'control-plane:reader' })));
+    expect(result.policyDocument.Statement[0].Effect).toBe('Allow');
+    expect((result.policyDocument.Statement[0] as { Resource: string }).Resource)
+      .toBe('arn:aws:execute-api:eu-central-1:123456789012:api123/prod/GET/*');
+    expect(result.context).toEqual({ operatorId: 'machine-1', role: 'control-plane:reader', grant: 'reader' });
+  });
+
+  test('a listed client still needs a role in a list', async () => {
+    const result = await handler(event(makeToken(machineClaims('machine-1'))));
+    expect(result.policyDocument.Statement[0].Effect).toBe('Deny');
+  });
+
+  test('an unlisted client is denied', async () => {
+    const result = await handler(event(makeToken({ ...machineClaims('machine-2'), role: 'control-plane:reader' })));
+    expect(result.policyDocument.Statement[0].Effect).toBe('Deny');
+    expect(result.context).toBeUndefined();
+  });
+
+  test('a person\'s access token through a listed client is denied', async () => {
+    const claims = { ...machineClaims('machine-1'), sub: 'person-uuid', username: 'person', role: 'operator' };
+    const result = await handler(event(makeToken(claims)));
+    expect(result.policyDocument.Statement[0].Effect).toBe('Deny');
+  });
+
+  test.each([
+    ['another audience', 'other'],
+    ['an empty array', []],
+    ['an empty string', ''],
+    ['null', null],
+  ])('an aud of %s with a listed client_id never falls back', async (_name, aud) => {
+    const claims = { ...machineClaims('machine-1'), aud, role: 'operator' };
+    const result = await handler(event(makeToken(claims)));
+    expect(result.policyDocument.Statement[0].Effect).toBe('Deny');
+  });
+
+  test('an array aud that contains the audience passes', async () => {
+    const result = await handler(event(makeToken({ ...validClaims(), aud: ['other', AUDIENCE], role: 'operator' })));
+    expect(result.policyDocument.Statement[0].Effect).toBe('Allow');
+  });
+
+  test('an ID token with the wrong audience is denied', async () => {
+    const result = await handler(event(makeToken({ ...validClaims(), aud: 'other', role: 'operator' })));
+    expect(result.policyDocument.Statement[0].Effect).toBe('Deny');
   });
 });

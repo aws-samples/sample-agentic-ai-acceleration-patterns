@@ -1,6 +1,6 @@
 # ADR-0043: Accept listed client ids when a token has no audience
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-14
 - Amends: ADR-0004
 - Deciders: Dave Roberts (SA)

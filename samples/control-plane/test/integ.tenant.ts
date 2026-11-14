@@ -53,7 +53,9 @@ import { TenantStack } from '../src/tenant/tenant.cdk';
  *      403, the unlisted role is 403 on a GET and a POST, and nothing was
  *      written; once step 5's deployment and cell exist, the reader's other
  *      seven GETs pass too, so all
- *      ten reader operations are proven
+ *      ten reader operations are proven; a listed machine client's
+ *      client-credentials token (no `aud`, R-38) reads and is 403 on a POST,
+ *      and an unlisted machine client is 403 on a GET
  *   2. PutApplication with a missing script → 400, bad id → 400, bad
  *      parameter declarations → 400; X (with declarations) and Y → 200;
  *      ListApplications; PutAccount naming an unknown application → 404
@@ -126,37 +128,123 @@ const setup = new Stack(app, 'control-plane-integ-setup');
 const vendorIdp = new cognito.UserPool(setup, 'VendorIdp', {
   selfSignUpEnabled: false,
   removalPolicy: RemovalPolicy.DESTROY,
+  // R-38: a V3 trigger is the only way to add `role` to a client-credentials
+  // access token, and it needs the Essentials (or Plus) feature plan.
+  featurePlan: cognito.FeaturePlan.ESSENTIALS,
 });
 // ADR-018 deployment contract: the vendor IdP must mint `role: "operator"`
 // on operator tokens - the authorizer fails closed on a missing role. A
-// plain Cognito ID token carries no such claim, so this pre token
-// generation trigger (V1_0 event, ID token only) adds it, exactly as a real
-// vendor IdP would be configured to. Two more test users get other roles
-// (R-36): the reader value the stack lists in readerRoles, and a value in
-// neither list.
+// plain Cognito token carries no such claim, so this pre token generation
+// trigger (V3_0 event) adds it, exactly as a real vendor IdP would be
+// configured to. Two more test users get other roles (R-36): the reader
+// value the stack lists in readerRoles, and a value in neither list. Users'
+// roles go on the ID token. A client-credentials token (R-38) names no user,
+// so the trigger branches on triggerSource and puts the reader value on the
+// access token of both machine clients; only the listed one may pass.
 const mintOperatorRole = new lambda.Function(setup, 'MintOperatorRole', {
   runtime: lambda.Runtime.NODEJS_24_X,
   handler: 'index.handler',
   code: lambda.Code.fromInline(`
     exports.handler = async (event) => {
-      event.response = {
-        claimsOverrideDetails: {
-          claimsToAddOrOverride: {
-            role: event.userName.includes('integ-reader') ? 'control-plane:reader'
-              : event.userName.includes('integ-norole') ? 'integ-unlisted'
-              : 'operator',
+      if (event.triggerSource === 'TokenGeneration_ClientCredentials') {
+        event.response = {
+          claimsAndScopeOverrideDetails: {
+            accessTokenGeneration: { claimsToAddOrOverride: { role: 'control-plane:reader' } },
           },
+        };
+        return event;
+      }
+      const role = event.userName.includes('integ-reader') ? 'control-plane:reader'
+        : event.userName.includes('integ-norole') ? 'integ-unlisted'
+        : 'operator';
+      event.response = {
+        claimsAndScopeOverrideDetails: {
+          idTokenGeneration: { claimsToAddOrOverride: { role } },
         },
       };
       return event;
     };
   `),
 });
-vendorIdp.addTrigger(cognito.UserPoolOperation.PRE_TOKEN_GENERATION, mintOperatorRole);
+vendorIdp.addTrigger(cognito.UserPoolOperation.PRE_TOKEN_GENERATION_CONFIG, mintOperatorRole, cognito.LambdaVersion.V3_0);
 const idpClient = vendorIdp.addClient('IntegOperatorClient', {
   authFlows: { adminUserPassword: true },
   generateSecret: false,
 });
+
+// R-38: two machine clients on the client credentials flow. Cognito runs
+// that flow only at the domain's /oauth2/token endpoint and refuses a
+// client-credentials client without a custom scope; the authorizer ignores
+// scope. The stack lists the first client in vendorIdpClientIds; the second
+// gets the same role and must still be refused.
+const idpDomain = vendorIdp.addDomain('VendorIdpDomain', {
+  cognitoDomain: { domainPrefix: `cp-integ-${accountA}` },
+});
+const readScope = new cognito.ResourceServerScope({ scopeName: 'read', scopeDescription: 'Integ test machine reads' });
+const controlPlaneResource = vendorIdp.addResourceServer('ControlPlaneResource', {
+  identifier: 'control-plane',
+  scopes: [readScope],
+});
+const machineClientProps: cognito.UserPoolClientOptions = {
+  generateSecret: true,
+  authFlows: {},
+  oAuth: {
+    flows: { clientCredentials: true },
+    scopes: [cognito.OAuthScope.resourceServer(controlPlaneResource, readScope)],
+  },
+};
+const listedMachineClient = vendorIdp.addClient('IntegListedMachineClient', machineClientProps);
+const unlistedMachineClient = vendorIdp.addClient('IntegUnlistedMachineClient', machineClientProps);
+
+// Calls the API as a machine client: reads the client's secret, gets a
+// client-credentials token from the domain and makes one request. Returns
+// the status and the facts R-38 depends on, never the secret or the token,
+// so neither reaches a template, an output or the assertion results.
+const machineProbe = new lambda.Function(setup, 'MachineClientProbe', {
+  runtime: lambda.Runtime.NODEJS_24_X,
+  handler: 'index.handler',
+  timeout: Duration.seconds(30),
+  environment: {
+    USER_POOL_ID: vendorIdp.userPoolId,
+    TOKEN_URL: `${idpDomain.baseUrl()}/oauth2/token`,
+    SCOPE: 'control-plane/read',
+  },
+  code: lambda.Code.fromInline(`
+    const { CognitoIdentityProviderClient, DescribeUserPoolClientCommand } = require('@aws-sdk/client-cognito-identity-provider');
+    exports.handler = async (event) => {
+      const idp = new CognitoIdentityProviderClient({});
+      const { UserPoolClient: c } = await idp.send(new DescribeUserPoolClientCommand({
+        UserPoolId: process.env.USER_POOL_ID, ClientId: event.clientId,
+      }));
+      const basic = Buffer.from(c.ClientId + ':' + c.ClientSecret).toString('base64');
+      const got = await fetch(process.env.TOKEN_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', authorization: 'Basic ' + basic },
+        body: 'grant_type=client_credentials&scope=' + encodeURIComponent(process.env.SCOPE),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!got.ok) throw new Error('token endpoint returned ' + got.status);
+      const token = (await got.json()).access_token;
+      const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+      const res = await fetch(event.url, {
+        method: event.method,
+        headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
+        body: event.body,
+        signal: AbortSignal.timeout(10000),
+      });
+      return {
+        status: res.status,
+        hasAud: claims.aud !== undefined,
+        subIsClient: claims.sub === claims.client_id,
+        role: claims.role === undefined ? null : claims.role,
+      };
+    };
+  `),
+});
+machineProbe.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['cognito-idp:DescribeUserPoolClient'],
+  resources: [vendorIdp.userPoolArn],
+}));
 
 const scriptsBucket = new s3.Bucket(setup, 'LifecycleScripts', {
   blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -329,6 +417,8 @@ const stack = new TenantStack(app, 'control-plane-integ', {
   demoApplicationIds: [APP_X, APP_Y],
   // R-36: the reader user's role gets the GET-only grant (step 1).
   readerRoles: ['control-plane:reader'],
+  // R-38: the listed machine client's token has no `aud` (step 1).
+  vendorIdpClientIds: [listedMachineClient.userPoolClientId],
 });
 // Both shared CodeBuild projects pull the stamped source from the test
 // bucket (the source fetch runs under the build role, before the buildspec
@@ -851,8 +941,25 @@ const unlistedCreateTenant = integ.assertions
     body: JSON.stringify({ name: 'integ-unlisted-must-not-create' }),
   })
   .expect(ExpectedResult.objectLike({ status: 403 }));
-// Nothing the reader or the unlisted role tried was written: still three
-// tenants, T1 unchanged.
+// 1 (machine clients, R-38). A client-credentials token has no `aud` and a
+// `sub` equal to its client id. The listed client reads and is refused on a
+// write; the unlisted client, with the same role, is refused on a read.
+const machineExpect = (status: number) => ExpectedResult.objectLike({
+  Payload: JSON.stringify({ status, hasAud: false, subIsClient: true, role: 'control-plane:reader' }),
+});
+const machineCall = (clientId: string, method: string, pathPart: string, body?: object) =>
+  integ.assertions.invokeFunction({
+    functionName: machineProbe.functionName,
+    payload: JSON.stringify({ clientId, method, url: `${apiUrl}${pathPart}`, body: body === undefined ? undefined : JSON.stringify(body) }),
+  });
+const machineListTenants = machineCall(listedMachineClient.userPoolClientId, 'GET', 'tenants').expect(machineExpect(200));
+const machineGetTenant1 = machineCall(listedMachineClient.userPoolClientId, 'GET', `tenants/${tenantId1}`).expect(machineExpect(200));
+const machineCreateTenant = machineCall(listedMachineClient.userPoolClientId, 'POST', 'tenants', { name: 'integ-machine-must-not-create' })
+  .expect(machineExpect(403));
+const unlistedMachineListTenants = machineCall(unlistedMachineClient.userPoolClientId, 'GET', 'tenants').expect(machineExpect(403));
+
+// Nothing the reader, the unlisted role or the machine clients tried was
+// written: still three tenants, T1 unchanged.
 const listTenantsAfterReader = integ.assertions
   .httpApiCall(`${apiUrl}tenants`, { method: 'GET', headers: authHeaders })
   .expect(
@@ -1791,6 +1898,10 @@ createUser
   .next(readerPutApplication)
   .next(unlistedListTenants)
   .next(unlistedCreateTenant)
+  .next(machineListTenants)
+  .next(machineGetTenant1)
+  .next(machineCreateTenant)
+  .next(unlistedMachineListTenants)
   .next(listTenantsAfterReader)
   .next(getTenant1AfterReader)
   .next(updateTenant3)
