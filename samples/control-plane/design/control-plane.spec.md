@@ -449,7 +449,7 @@ withdraw it. These roles are THE hardening point of the whole design.
 | # | Component | Requirement |
 |---|---|---|
 | R-1 | **API layer** | One HTTP API, generated from the interface model (P-2), fronting one service. REST semantics, JSON protocol. |
-| R-2 | **Authorizer** | Every operation MUST require a JWT from the vendor IdP (OIDC issuer URL + audience are deployment-time inputs), validated via the issuer's JWKS. There are no unauthenticated operations. |
+| R-2 | **Authorizer** | Every operation MUST require a JWT from the vendor IdP (OIDC issuer URL + audience are deployment-time inputs, plus the client ids accepted on a token without an audience, R-38), validated via the issuer's JWKS. There are no unauthenticated operations. |
 | R-3 | **Service** | One stateless compute function implementing all operations, including synchronous placement, the tenant registry, the application registry and the account registry. |
 | R-4 | **Store** | One database table holding all five entity types (application + account + cell + tenant + deployment) plus the idempotency record type, with support for multi-item ACID transactions and conditional writes. (The reference uses DynamoDB single-table design; any store with equivalent transactional conditional-write semantics qualifies.) |
 | R-5 | **Workflow** | One durable state machine executing provisioning builds and writing terminal state directly to the table. |
@@ -542,6 +542,30 @@ which are not secrets by contract only (N-11, T35), and every
 application's source location and version, which name the repository a
 supply-chain attacker would target (T34).
 
+**R-38 (machine clients,
+[ADR-043](../adr/0043-accept-listed-client-ids-when-a-token-has-no-audience.md)):**
+the authorizer MUST take one of two paths per token, chosen by whether the
+verified payload has an `aud` claim:
+
+| Token | Check | Example |
+|---|---|---|
+| has `aud` | `aud` names `audience`; no fallback | a person's Cognito ID token |
+| no `aud` | `client_id` is a string in `clientIds` | a Cognito client-credentials access token |
+
+Signature, issuer, `RS256`, `exp`, `sub` and `role` are checked on both
+paths, and the grant comes from `role` alone (R-36). A token that has
+`aud` but fails it is denied, even when its `client_id` is listed. An
+empty or unset `clientIds` means the second path admits nothing, so a
+deployment that does not set it behaves exactly as before. On a
+client-credentials token `sub` is the client id, so the caller context,
+the access log and every build's `OPERATOR_ID` name the client (M12). The
+issuer must mint `role` for the machine client; Cognito does it with a
+pre-token-generation trigger on the V3 event, which needs the Essentials
+or Plus feature plan, and ignores any `aud` that trigger sets on an
+access token. The list reaches the authorizer as `VENDOR_IDP_CLIENT_IDS`,
+comma-separated; a value that yields no names (`",,"`) throws at cold
+start.
+
 ### 3.3 Stack inputs
 
 Supplied at deployment time, validated at synthesis/deploy.
@@ -551,6 +575,7 @@ Supplied at deployment time, validated at synthesis/deploy.
 | Input | Constraint |
 |---|---|
 | `vendorIdp.issuerUrl`, `vendorIdp.audience` | non-empty; OIDC discovery must work against the issuer |
+| `vendorIdp.clientIds` (optional, R-38, [ADR-043](../adr/0043-accept-listed-client-ids-when-a-token-has-no-audience.md)) | client ids accepted on a token that has no `aud`. Default: none. Each matches `[A-Za-z0-9._:-]{1,128}`, so it survives the comma-separated environment variable; a duplicate MUST fail synth. List only the vendor's own machine clients on the dedicated issuer (T37) |
 | `fleetName` | names the role pair every account installs (`<fleetName>-cell-provisioning`, `<fleetName>-tenant-provisioning`) and the control plane's three roles the pair trusts (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-api`); `[a-z0-9-]{1,32}`. Default `control-plane`. Two control planes in one account MUST use different fleet names |
 | `allowedRoles` (optional, R-36) | role claim values that get the operator grant; non-empty. Default `["operator"]`. Every role value in either list matches `[A-Za-z0-9:._-]{1,64}`, so it survives the comma-separated environment variable |
 | `readerRoles` (optional, R-36, [ADR-042](../adr/0042-a-read-only-role-beside-the-operator.md)) | role claim values that get the reader grant. Default: none, so no reader is admitted until the deployer names one. A value in both lists MUST fail synth. Use a namespaced value (`control-plane:reader`), not a word a broader issuer may already mint (`reader`, `viewer`) (T2, T20) |
@@ -1578,12 +1603,19 @@ parameters (step 2); every `CreateDeployment` of X supplies
 The test's own vendor IdP (a throwaway user pool) mints `role: operator`
 for the operator user and `role: control-plane:reader` for a second,
 reader user; the stack sets `readerRoles = ["control-plane:reader"]`.
+The pool is on the Essentials plan with a V3 pre-token-generation
+trigger, and has a resource server and two machine clients that use the
+client credentials flow: a reader client, which the trigger gives
+`role: control-plane:reader` and the stack lists in `clientIds`, and an
+unlisted client with the same role.
 
 1. **Auth:** an operation without a JWT is rejected; with a valid vendor
    IdP JWT it succeeds. A reader token (R-36) succeeds on every `GET`
    operation and is refused with 403 on `POST`, `PUT` and `DELETE` alike,
    nothing written; a token whose role is in neither set is refused on
-   every operation.
+   every operation. The listed machine client's access token, which has
+   no `aud` (R-38), succeeds on a `GET` and is refused with 403 on a
+   `POST`; the unlisted client's token is refused on a `GET`.
 2. **Applications:** `PutApplication` with a missing script path → 400;
    with an id outside the charset → 400; `PutApplication` X and Y → 200;
    `ListApplications` shows both with `cellCount = 0`; `PutAccount` naming
