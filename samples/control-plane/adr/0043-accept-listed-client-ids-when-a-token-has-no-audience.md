@@ -29,11 +29,14 @@ accept something in its place.
 A new optional stack input, `vendorIdp.clientIds` (default none). A token
 that carries `aud` is checked against `audience`, exactly as today. A token
 without `aud` passes that step only when its `client_id` claim is in the
-list. Signature, issuer, `exp`, `sub` and `role` are checked as before in
-both cases. Pros: off by default, so an existing deployment admits no new
-caller; names exactly the clients the deployer trusts, the same thing an
-audience does for ID tokens; `client_id` is the standard claim for this
-case (RFC 9068 §2.2); one path per token, never two tries. Cons: a second
+list and equals `sub`, so the client acts as itself and a person's access
+token issued through that client is refused. Signature, issuer, `exp`,
+`sub` and `role` are checked as before in both cases. Pros: off by
+default, so an existing deployment admits no new caller; names exactly
+the clients the deployer trusts, the same thing an audience does for ID
+tokens; `client_id` is the claim RFC 9068 §2.2 defines for the client
+(the same section requires `aud`, which Cognito leaves out, hence the
+need); one path per token, never two tries. Cons: a second
 list to review beside the issuer's client registrations; a deployer can
 list a client that serves a broader population.
 
@@ -61,9 +64,11 @@ already decide the grant (R-36).
 
 ## Decision
 Option 1. `vendorIdp.clientIds` lists the client ids accepted when a token
-has no `aud`. It defaults to none, so nothing changes until a deployer
-names one. The audience path is unchanged, and a token that carries `aud`
-never falls back to the client id path. The grant still comes from `role`
+has no `aud`, and the token's `sub` must equal its `client_id`. It
+defaults to none, so nothing changes until a deployer names one. The
+token is verified once without an audience, then one path is taken on the
+payload: any `aud` key, even `[]`, `""` or `null`, takes the audience
+path, unchanged from today, and never falls back to the client id path. The grant still comes from `role`
 alone. The issuer must still mint `role` for the machine client; on
 Cognito that is a V3 pre-token-generation trigger, which needs the
 Essentials or Plus feature plan. That is the vendor IdP's configuration,
@@ -78,14 +83,24 @@ not this stack's.
 - A listed client that serves a broader population widens access the way
   a shared audience does (T20). The list is reviewed with the issuer's
   client registrations (M9).
-- The integration test's vendor IdP moves to the Essentials plan and a V3
-  trigger, adds a resource server and a machine client, and lists that
-  client in `clientIds`. Step 1 proves the client-credentials reader token
-  reads and is refused on writes, and that an unlisted client's token is
-  refused.
-- Spec changes: R-2, §3.2 (new R-38), §3.3 (`vendorIdp.clientIds`), §10
-  step 1. Threat model: T20 and M9 widened, new T37 and M27.
-- ADR-0004 gets a dated "Amended by ADR-0043" trailing note when this
-  record is accepted.
+- A machine client's secret lasts until rotated and has no second
+  factor, so a leak is bounded by rotation, not by token lifetime (T38).
+  Machine clients get the reader role unless they must operate.
+- The integration test's vendor IdP moves to the Essentials plan, a user
+  pool domain and a V3 trigger, and adds a resource server with one scope
+  and two machine clients with secrets, one listed in `clientIds`. Step 1
+  proves the listed client's token reads and is refused on writes, and
+  that the unlisted client's token gets 403. A unit test covers what
+  Cognito cannot mint: a failing `aud` with a listed `client_id`,
+  malformed `aud` values, and a person's access token from a listed
+  client.
+- Spec changes: R-2, §3.2 (new R-38), §3.3 (`vendorIdp.clientIds`), the §5
+  error table, §10 and step 1. Threat model: T20, M9, M12 and M13
+  widened, new T37, T38 and M27.
+- This record lands in one PR with the code. That PR also sets it to
+  Accepted, adds a dated "Amended by ADR-0043" note to ADR-0004, and
+  updates the README (context input, example, Identity checklist),
+  `integration-test.md`, and `architecture.md`, which describes only what
+  is built.
 - Revisit if the vendor IdP can set `aud` on access tokens, or a deployer
   needs a client admitted with a narrower grant than its role names.

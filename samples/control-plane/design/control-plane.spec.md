@@ -544,27 +544,39 @@ supply-chain attacker would target (T34).
 
 **R-38 (machine clients,
 [ADR-043](../adr/0043-accept-listed-client-ids-when-a-token-has-no-audience.md)):**
-the authorizer MUST take one of two paths per token, chosen by whether the
-verified payload has an `aud` claim:
+the authorizer MUST verify the signature (`RS256`), issuer, `exp` and
+`sub` once, without an audience, and then MUST take exactly one of two
+paths on the verified payload, chosen by whether the `aud` key is
+present (`payload.aud !== undefined`):
 
 | Token | Check | Example |
 |---|---|---|
-| has `aud` | `aud` names `audience`; no fallback | a person's Cognito ID token |
-| no `aud` | `client_id` is a string in `clientIds` | a Cognito client-credentials access token |
+| `aud` present, any value | `aud` equals `audience`, or is an array that contains it; no fallback | a person's Cognito ID token |
+| `aud` absent | `client_id` is a string in `clientIds` and equals `sub` | a Cognito client-credentials access token |
 
-Signature, issuer, `RS256`, `exp`, `sub` and `role` are checked on both
-paths, and the grant comes from `role` alone (R-36). A token that has
-`aud` but fails it is denied, even when its `client_id` is listed. An
-empty or unset `clientIds` means the second path admits nothing, so a
-deployment that does not set it behaves exactly as before. On a
-client-credentials token `sub` is the client id, so the caller context,
-the access log and every build's `OPERATOR_ID` name the client (M12). The
-issuer must mint `role` for the machine client; Cognito does it with a
-pre-token-generation trigger on the V3 event, which needs the Essentials
-or Plus feature plan, and ignores any `aud` that trigger sets on an
-access token. The list reaches the authorizer as `VENDOR_IDP_CLIENT_IDS`,
-comma-separated; a value that yields no names (`",,"`) throws at cold
-start.
+An `aud` of `[]`, `""` or `null` is present and fails the first path. A
+token whose `aud` fails is denied, even when its `client_id` is listed.
+The `sub` check admits a listed client acting as itself and refuses a
+person's access token issued through that client, which also has no
+`aud` and carries `client_id`, but whose `sub` names the person. The
+grant comes from `role` alone on both paths (R-36). Trying the audience
+check and retrying without it on failure is not this rule: each token is
+checked once. On a client-credentials token `sub` is the client id, so
+the caller context, the access log and every build's `OPERATOR_ID` name
+the client (M12).
+
+The issuer MUST mint `role` for each listed machine client. Cognito does
+it with a pre-token-generation trigger on the V3 event, which needs the
+Essentials or Plus feature plan; it ignores any `aud` the trigger sets on
+an access token.
+
+The list reaches the authorizer as `VENDOR_IDP_CLIENT_IDS`,
+comma-separated. Unset or empty means none, so the second path admits
+nothing and a deployment that does not set `clientIds` behaves exactly as
+before. Set but yielding no names (`",,"`) throws at cold start, and so
+does a duplicate. A unit test covers the cases the integration test
+cannot mint: an `aud` that fails with a listed `client_id`, the malformed
+`aud` values above, and a person's access token from a listed client.
 
 ### 3.3 Stack inputs
 
@@ -575,7 +587,7 @@ Supplied at deployment time, validated at synthesis/deploy.
 | Input | Constraint |
 |---|---|
 | `vendorIdp.issuerUrl`, `vendorIdp.audience` | non-empty; OIDC discovery must work against the issuer |
-| `vendorIdp.clientIds` (optional, R-38, [ADR-043](../adr/0043-accept-listed-client-ids-when-a-token-has-no-audience.md)) | client ids accepted on a token that has no `aud`. Default: none. Each matches `[A-Za-z0-9._:-]{1,128}`, so it survives the comma-separated environment variable; a duplicate MUST fail synth. List only the vendor's own machine clients on the dedicated issuer (T37) |
+| `vendorIdp.clientIds` (optional, R-38, [ADR-043](../adr/0043-accept-listed-client-ids-when-a-token-has-no-audience.md)) | client ids accepted on a token that has no `aud`. Default: none. Each matches `[A-Za-z0-9+._:-]{1,128}` (Cognito ids are `[\w+]+`), so it survives the comma-separated environment variable; a duplicate MUST fail synth. List only the vendor's own machine clients on the dedicated issuer (T37) |
 | `fleetName` | names the role pair every account installs (`<fleetName>-cell-provisioning`, `<fleetName>-tenant-provisioning`) and the control plane's three roles the pair trusts (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-api`); `[a-z0-9-]{1,32}`. Default `control-plane`. Two control planes in one account MUST use different fleet names |
 | `allowedRoles` (optional, R-36) | role claim values that get the operator grant; non-empty. Default `["operator"]`. Every role value in either list matches `[A-Za-z0-9:._-]{1,64}`, so it survives the comma-separated environment variable |
 | `readerRoles` (optional, R-36, [ADR-042](../adr/0042-a-read-only-role-beside-the-operator.md)) | role claim values that get the reader grant. Default: none, so no reader is admitted until the deployer names one. A value in both lists MUST fail synth. Use a namespaced value (`control-plane:reader`), not a word a broader issuer may already mint (`reader`, `viewer`) (T2, T20) |
@@ -1001,7 +1013,7 @@ compare-and-set maps to 409.
 | Error | HTTP | Triggers |
 |---|---|---|
 | `ValidationException` | 400 | malformed input, malformed pagination token, two list filters at once; an invalid application definition or parameter declaration on `PutApplication`; a deployment parameter that fails R-33 on `CreateDeployment` or `UpdateDeployment`; a cell parameter that fails R-34 on `UpdateCell`; a targeted `CreateDeployment` into an account that does not admit the application; `PutAccount` handshake refusal (R-26: a half could not be assumed, or admits the call without the supplied external id) |
-| `UnauthorizedError` | 401/403 | missing/invalid JWT; a role in neither set; a reader calling a non-`GET` operation (R-36) |
+| `UnauthorizedError` | 401/403 | missing/invalid JWT; a role in neither set; a reader calling a non-`GET` operation (R-36); a token without `aud` whose `client_id` is not listed or does not equal `sub` (R-38) |
 | `ResourceNotFoundError` | 404 | unknown tenant, deployment, cell, account or application (including an unregistered `CreateDeployment.accountId` or `applicationId`, and an unregistered id in `PutAccount.applicationIds`) |
 | `ConflictError` | 409 | in-flight mutation; a second deployment of the same application for one tenant; occupied-tenant delete; occupied-cell delete; occupied-account delete; occupied-application delete; `owner` change on `PutAccount`; cell-not-ACTIVE guard; `clientToken` reuse with different parameters; a parameter merge or a list-keeping `PutApplication` whose read went stale — retry (R-14); `CreateDeployment` lost every bounded claim on candidate cells and no account had a free cell slot — retry ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)) |
 | `InsufficientCapacityError` | 409 | `CreateDeployment` found no eligible cell and no eligible account with cell capacity: every vendor-owned account admitting the application is full (untargeted), or the named account is full (targeted). Nothing was written. The remedy is an operator act — raise `maxCells`, register an account, or admit the application in one — so the error is distinct from `ConflictError`, which a client may simply retry later ([ADR-026](../adr/0026-fleet-full-is-a-modelled-error.md)) |
@@ -1603,19 +1615,27 @@ parameters (step 2); every `CreateDeployment` of X supplies
 The test's own vendor IdP (a throwaway user pool) mints `role: operator`
 for the operator user and `role: control-plane:reader` for a second,
 reader user; the stack sets `readerRoles = ["control-plane:reader"]`.
-The pool is on the Essentials plan with a V3 pre-token-generation
-trigger, and has a resource server and two machine clients that use the
-client credentials flow: a reader client, which the trigger gives
-`role: control-plane:reader` and the stack lists in `clientIds`, and an
-unlisted client with the same role.
+The pool is on the Essentials plan with a user pool domain, whose
+`/oauth2/token` endpoint is the only way to run the client credentials
+flow. It has a resource server with one custom scope
+(`control-plane/read`; Cognito refuses a client-credentials client
+without a scope, and the authorizer ignores scope) and two machine
+clients with a secret and that scope: a reader client the stack lists in
+`clientIds`, and an unlisted client. The trigger runs on the V3 event:
+it branches on `triggerSource` and `callerContext.clientId`, putting the
+users' roles under `idTokenGeneration` and `role: control-plane:reader`
+under `accessTokenGeneration` for both machine clients. A setup-stack
+function reads each client's secret, calls the token endpoint and returns
+only the access token, so no secret reaches a template or an output.
 
 1. **Auth:** an operation without a JWT is rejected; with a valid vendor
    IdP JWT it succeeds. A reader token (R-36) succeeds on every `GET`
    operation and is refused with 403 on `POST`, `PUT` and `DELETE` alike,
    nothing written; a token whose role is in neither set is refused on
    every operation. The listed machine client's access token, which has
-   no `aud` (R-38), succeeds on a `GET` and is refused with 403 on a
-   `POST`; the unlisted client's token is refused on a `GET`.
+   no `aud` (R-38), succeeds on `ListTenants` and `GetTenant` and is
+   refused with 403 on `CreateTenant`, nothing written; the unlisted
+   client's token is refused with 403 on `ListTenants`.
 2. **Applications:** `PutApplication` with a missing script path → 400;
    with an id outside the charset → 400; `PutApplication` X and Y → 200;
    `ListApplications` shows both with `cellCount = 0`; `PutAccount` naming
