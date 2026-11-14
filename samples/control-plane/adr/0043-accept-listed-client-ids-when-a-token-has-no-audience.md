@@ -36,9 +36,9 @@ default, so an existing deployment admits no new caller; names exactly
 the clients the deployer trusts, the same thing an audience does for ID
 tokens; `client_id` is the claim RFC 9068 §2.2 defines for the client
 (the same section requires `aud`, which Cognito leaves out, hence the
-need); one path per token, never two tries. Cons: a second
-list to review beside the issuer's client registrations; a deployer can
-list a client that serves a broader population.
+need); one path per token, never two tries. Cons: a second list to
+review beside the issuer's client registrations; a deployer can list a
+client that serves a broader population.
 
 ### Option 2: Require a custom scope instead of an audience
 The deployer names a resource-server scope (`control-plane/read`) that a
@@ -68,11 +68,11 @@ has no `aud`, and the token's `sub` must equal its `client_id`. It
 defaults to none, so nothing changes until a deployer names one. The
 token is verified once without an audience, then one path is taken on the
 payload: any `aud` key, even `[]`, `""` or `null`, takes the audience
-path, unchanged from today, and never falls back to the client id path. The grant still comes from `role`
-alone. The issuer must still mint `role` for the machine client; on
-Cognito that is a V3 pre-token-generation trigger, which needs the
-Essentials or Plus feature plan. That is the vendor IdP's configuration,
-not this stack's.
+path, unchanged from today, and never falls back to the client id path.
+The grant still comes from `role` alone. The issuer must still mint
+`role` for the machine client; on Cognito that is a V3
+pre-token-generation trigger, which needs the Essentials or Plus feature
+plan. That is the vendor IdP's configuration, not this stack's.
 
 ## Consequences
 - A machine client with a listed id and a role in `readerRoles` reads the
@@ -98,7 +98,9 @@ not this stack's.
   error table, §10 and step 1. Threat model: T20, M9, M12 and M13
   widened, new T37, T38 and M27.
 - This record lands in one PR with the code. That PR also sets it to
-  Accepted, adds a dated "Amended by ADR-0043" note to ADR-0004, and
+  Accepted, appends "amended by ADR-043 (client ids accepted on a token
+  without `aud`)" to ADR-0004's Status line, adds a dated "Amended by
+  ADR-0043" trailing note to it, as ADR-0015 does, and
   updates the README (context input, example, Identity checklist),
   `integration-test.md`, and `architecture.md`, which describes only what
   is built.
