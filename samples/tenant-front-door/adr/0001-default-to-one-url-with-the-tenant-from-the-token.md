@@ -86,8 +86,9 @@ same way (P-4, ADR-0005). Options 3 and 4 fail P-2.
 - Proposed until S-7 passes: the default rests on that decode. If S-7
   fails, `host` becomes the default addressing mode and a new record
   supersedes this one (ADR-0005).
-- Follow-up: `host` mode needs spike S-4 (callback URLs) and S-6 (WAF rate
-  key) before it ships, and its own integration test, `test/integ.host.ts`.
+- Follow-up: `host` mode signs in through one shared host (ADR-0016,
+  spike S-4) and limits each tenant with WAF on the `Host` (ADR-0009,
+  spike S-6). It has its own integration test, `test/integ.host.ts`.
 - Revisit when tenants need per-tenant browser isolation by default, or
   when the issuer cannot put one tenant claim in each token.
 

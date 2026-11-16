@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0009: Rate limit each tenant with WAF on the host, or at the origin
 
-- Status: Proposed (spike S-6)
+- Status: Accepted
 - Date: 2026-11-13
 - Deciders: Dave Roberts (PSA)
 
@@ -60,10 +60,10 @@ web ACL carries a rate-based rule keyed on the `Host` header, scoped down to
 Each tenant host is counted alone and refused at the edge. In `single` mode
 WAF cannot read the token's tenant, so the limit moves to the origin, which
 counts on the verified `tenant_id`. The same `tenantRequestsPer5Min` value
-drives both. This record stays Proposed until spike S-6 passes: tenant A
-over its limit gets 429 while tenant B is served, and A's SPA loads are not
-counted. If S-6 fails, `host` mode also limits at the origin, the 429 row in
-spec §5.3 goes, and a new record supersedes this one.
+drives both. Spike S-6 (2026-11-16) passed: with a limit of 10 per 60 s
+keyed on the lower-cased `Host` and scoped down to `/api/`, tenant A got
+the custom 429 21 s into its burst while tenant B was served, and 400
+requests to A's SPA paths during the block were all 200.
 
 ## Consequences
 
@@ -78,5 +78,6 @@ spec §5.3 goes, and a new record supersedes this one.
 - Follow-up: add the per-tenant limit to the cell API contract (spec §6.1)
   and to the demo cell API. The agent ingress of `agentic-runtime-isolation`
   already limits each tenant (its ADR-0020).
-- Revisit when S-6 reports, or when WAF can key on a value derived from the
-  token payload.
+- Harder: the rule's managed-keys call supports only IP keys, so the
+  per-host counts are seen through metrics and sampled requests.
+- Revisit when WAF can key on a value derived from the token payload.
