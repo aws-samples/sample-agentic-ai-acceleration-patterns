@@ -32,5 +32,6 @@ SPDX-License-Identifier: MIT-0
 | [0024](./0024-ship-re2-wasm-with-every-function-bundle.md) | Ship re2.wasm with every function bundle | Accepted | 2026-11-09 |
 | [0025](./0025-retry-api-gateway-control-plane-throttles-in-createtenantkey.md) | Retry API Gateway control-plane throttles in CreateTenantKey | Accepted | 2026-11-09 |
 | [0026](./0026-size-the-validator-url-lifetime-to-cover-every-declared-validator-timeout.md) | Size the validator URL lifetime to cover every declared validator timeout | Accepted | 2026-11-13 |
+| [0027](./0027-add-a-signing-to-start-margin-to-the-validator-url-lifetime.md) | Add a 60 s signing-to-start margin to the validator URL lifetime (amends 0026) | Accepted | 2026-11-13 |
 
 Renumbered 2026-11-05 before implementation; earlier drafts were never merged.

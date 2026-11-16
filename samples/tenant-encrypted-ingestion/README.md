@@ -482,9 +482,10 @@ presigned URL only. Validator names match `[a-z0-9-]{1,32}` and are unique;
 each declared timeout is at most 10 minutes and adds to the processor's
 timeout T, which must stay within 900 s or synth fails. The URL lives
 `validatorObjectUrlTtlSeconds`, which defaults to the larger of 300 s and
-the longest declared timeout; an explicit value shorter than a declared
-timeout fails synth
-([ADR-0026](./adr/0026-size-the-validator-url-lifetime-to-cover-every-declared-validator-timeout.md)).
+the longest declared timeout plus 60 s; an explicit value below that bound
+fails synth
+([ADR-0026](./adr/0026-size-the-validator-url-lifetime-to-cover-every-declared-validator-timeout.md),
+[ADR-0027](./adr/0027-add-a-signing-to-start-margin-to-the-validator-url-lifetime.md)).
 A slow validator should fetch the document first and then run its check:
 S3 checks the expiry when the `GET` starts, so a download that starts in
 time finishes. The other props

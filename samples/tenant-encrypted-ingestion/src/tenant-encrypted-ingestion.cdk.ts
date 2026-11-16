@@ -95,8 +95,9 @@ export interface TenantEncryptedIngestionProps {
   /** Custom validators, in order. Default none. */
   readonly validators?: IDeliveryValidator[];
   /**
-   * 60..900, and at least the longest validator `timeout`. Default: the
-   * larger of 300 and the longest validator `timeout` (ADR-0026).
+   * 60..900, and at least the longest validator `timeout` plus 60 s of
+   * signing-to-start margin. Default: the larger of 300 and that bound
+   * (ADR-0026, ADR-0027). No bound without validators.
    */
   readonly validatorObjectUrlTtlSeconds?: number;
   /** 1..10. Default 3. */
@@ -142,6 +143,13 @@ function intInRange(name: string, value: number, min: number, max: number): numb
   return value;
 }
 
+/**
+ * Seconds a validator URL must outlive the longest validator timeout: the
+ * URL is signed before the invoke, and invoke latency plus a cold start's
+ * init phase are not part of the validator's timeout (ADR-0027).
+ */
+export const VALIDATOR_URL_MARGIN_SECONDS = 60;
+
 /** The validated props with defaults applied. Exported for tests. */
 export function resolveProps(props: TenantEncryptedIngestionProps) {
   if (props.identity === undefined || typeof props.identity.discoveryUrl !== 'string' || props.identity.discoveryUrl.length === 0) {
@@ -180,19 +188,21 @@ export function resolveProps(props: TenantEncryptedIngestionProps) {
       throw new Error(`TenantEncryptedIngestion: validators: ${v.name} timeout must be at most 10 minutes`);
     }
   }
-  // A validator's URL must outlive the validator (ADR-0026): the processor
-  // signs it just before the invoke, so a GET started any time inside the
-  // declared timeout starts inside the URL's lifetime.
+  // A validator's URL must outlive the validator (ADR-0026, ADR-0027). Its clock
+  // starts at signing, just before the invoke; invoke latency and a cold
+  // start's init phase come before the validator's own timeout starts, so
+  // the bound adds VALIDATOR_URL_MARGIN_SECONDS to the longest timeout.
   const longestValidatorSeconds = validators.reduce((max, v) => Math.max(max, v.timeout.toSeconds()), 0);
+  const minimumUrlTtlSeconds = validators.length > 0 ? longestValidatorSeconds + VALIDATOR_URL_MARGIN_SECONDS : 0;
   const validatorObjectUrlTtlSeconds = intInRange(
     'validatorObjectUrlTtlSeconds',
-    props.validatorObjectUrlTtlSeconds ?? Math.max(DEFAULTS.validatorObjectUrlTtlSeconds, longestValidatorSeconds),
+    props.validatorObjectUrlTtlSeconds ?? Math.max(DEFAULTS.validatorObjectUrlTtlSeconds, minimumUrlTtlSeconds),
     60,
     900,
   );
-  if (validatorObjectUrlTtlSeconds < longestValidatorSeconds) {
+  if (validatorObjectUrlTtlSeconds < minimumUrlTtlSeconds) {
     throw new Error(
-      `TenantEncryptedIngestion: validatorObjectUrlTtlSeconds (${validatorObjectUrlTtlSeconds}) must be at least the longest validator timeout (${longestValidatorSeconds} s) (ADR-0026)`,
+      `TenantEncryptedIngestion: validatorObjectUrlTtlSeconds (${validatorObjectUrlTtlSeconds}) must be at least the longest validator timeout (${longestValidatorSeconds} s) plus ${VALIDATOR_URL_MARGIN_SECONDS} s (ADR-0027)`,
     );
   }
   if (props.tenantThrottle !== undefined) {

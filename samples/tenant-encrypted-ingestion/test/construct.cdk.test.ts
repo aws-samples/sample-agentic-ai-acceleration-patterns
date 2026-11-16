@@ -467,23 +467,30 @@ describe('validator URL lifetime (M-20, ADR-0026)', () => {
     expect(urlTtlOf(synthConstruct((stack) => ({ validators: [validatorFor(stack, 'quick', 60)] })).template)).toBe(300);
   });
 
-  it('defaults to the longest validator timeout when that is longer than 300 s', () => {
+  it('defaults to the longest validator timeout plus 60 s when that is longer than 300 s', () => {
+    // uploadUrlTtlSeconds 120 keeps the upload TTL below the validator TTL,
+    // so the signature-age ceiling shows it follows the validator TTL.
     const t = synthConstruct((stack) => ({
       uploadUrlTtlSeconds: 120,
       validators: [validatorFor(stack, 'quick', 60), validatorFor(stack, 'slow', 600)],
     })).template;
-    expect(urlTtlOf(t)).toBe(600);
-    expect(signatureAgeOf(t)).toBe(600_000);
+    expect(urlTtlOf(t)).toBe(660);
+    expect(signatureAgeOf(t)).toBe(660_000);
   });
 
-  it('accepts an explicit lifetime equal to the longest validator timeout', () => {
-    const t = synthConstruct((stack) => ({ validatorObjectUrlTtlSeconds: 450, validators: [validatorFor(stack, 'slow', 450)] })).template;
-    expect(urlTtlOf(t)).toBe(450);
+  it('accepts an explicit lifetime equal to the longest validator timeout plus 60 s', () => {
+    const t = synthConstruct((stack) => ({ validatorObjectUrlTtlSeconds: 510, validators: [validatorFor(stack, 'slow', 450)] })).template;
+    expect(urlTtlOf(t)).toBe(510);
   });
 
-  it('fails synth when an explicit lifetime is shorter than a validator timeout', () => {
-    expect(() => synthConstruct((stack) => ({ validatorObjectUrlTtlSeconds: 300, validators: [validatorFor(stack, 'slow', 301)] }))).toThrow(
-      /validatorObjectUrlTtlSeconds \(300\) must be at least the longest validator timeout \(301 s\)/,
+  it('accepts an explicit lifetime below 300 s that meets the bound: the 300 s floor is the default only', () => {
+    const t = synthConstruct((stack) => ({ validatorObjectUrlTtlSeconds: 120, validators: [validatorFor(stack, 'quick', 60)] })).template;
+    expect(urlTtlOf(t)).toBe(120);
+  });
+
+  it('fails synth when an explicit lifetime leaves less than 60 s past a validator timeout', () => {
+    expect(() => synthConstruct((stack) => ({ validatorObjectUrlTtlSeconds: 500, validators: [validatorFor(stack, 'slow', 450)] }))).toThrow(
+      /validatorObjectUrlTtlSeconds \(500\) must be at least the longest validator timeout \(450 s\) plus 60 s/,
     );
   });
 });
