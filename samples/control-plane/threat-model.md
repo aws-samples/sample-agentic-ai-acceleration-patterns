@@ -100,14 +100,14 @@ ProtoShield v0.18.0 (Semgrep, Bandit, CDK NAG, cfn-nag, CVE, Checkov,
 Secrets, IAM least privilege, license headers) and ASH v3.1.2 (bandit,
 cdk-nag, checkov, detect-secrets, npm-audit, semgrep; cfn-nag, grype,
 opengrep and syft were not installed in local mode on this run) ran on
-the synthesised tree after the last code change (the client id path,
-ADR-0043), and checkov on the synthesised integration templates (0
+the synthesised tree at the client id change (ADR-0043; the later
+synth-time duplicate check adds no resource, permission or dependency), and checkov on the synthesised integration templates (0
 unsuppressed). Nothing new against the 2026-11-11 scan; the licence-header
 count is now 54 of 54, all compliant under MIT-0.
 ProtoShield: 0 critical, 0 high (the 54 licence-header findings below are
 the scanner's default and clear with `license_text=MIT-0`), 2 medium and 1
 low (CVEs below); the IAM least-privilege plugin reports the wildcard-account
-AssumeRole below as documented by design. ASH: 41 findings, all in the
+AssumeRole below as documented by design. ASH: 40 findings, all in the
 categories below (11 of them bandit hits on `aws-cdk-lib`'s own Python
 custom-resource handlers under `node_modules/`, third-party code).
 Dispositions:

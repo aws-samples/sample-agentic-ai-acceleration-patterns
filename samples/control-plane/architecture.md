@@ -12,6 +12,7 @@ This sample has been verified as working via automated integration tests and end
 **Integration test coverage:**
 - Two-account, two-application deployment scenario
 - Operator and reader grants: all ten reader reads, every reader write refused (its first call included), a role in neither list refused, nothing written
+- Client id path (R-38): a listed machine client's token without `aud` reads and is refused on a write; an unlisted client is refused
 - Account handshake validation (external ID verification)
 - Cell lifecycle: creation, tenant placement, reuse after evacuation
 - Cross-account cell and tenant provisioning
