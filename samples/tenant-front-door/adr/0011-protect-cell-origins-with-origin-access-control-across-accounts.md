@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0011: Protect cell origins with origin access control across accounts
 
-- Status: Proposed (spike S-3)
+- Status: Accepted
 - Date: 2026-11-13
 - Deciders: Dave Roberts (PSA)
 
@@ -70,7 +70,7 @@ so any distribution passes; a function URL takes no security group.
 
 ## Decision
 
-Option 1, if spike S-3 passes. Origin access control on the Lambda function
+Option 1; spike S-3 passed on 2026-11-16. Origin access control on the Lambda function
 URL, with `CellRouteAccess` granting the edge distribution
 `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction` conditioned on the
 distribution ARN in the cell's account, is the only option that binds the
@@ -94,28 +94,16 @@ origin request policy, `Managed-AllViewerExceptHostHeader`, forwards
   `/api/*`. The demo SPA does it; a vendor SPA must too.
 - Origins are Lambda function URLs and S3 only (§1.2). Another origin type
   needs its own record.
-- Spike S-3 must show, through the multi-tenant distribution with its ARN
-  as the permission's `SourceArn`: a signed request reaching a function URL
-  with `AWS_IAM` auth in a second account; an unsigned one refused with
-  403; a `POST` with a body and `x-amz-content-sha256` served; the cell
-  receiving the viewer's token in `x-tenant-token`. It confirms the
-  permission set and reports deploy and destroy time.
-- If S-3 fails, the fallback is a per-cell secret header, and ADR-0004
-  keeps origin modification. The cell create script generates the secret
-  in the cell's account. The registrar stores it in that cell's `cell#`
-  value. The router adds it on requests to that cell, and the cell refuses
-  requests without it. A tenant-owned account learns only its own cell's
-  secret, so it can reach only its own cell. The cost: the route table holds
-  secrets. Any principal in the edge account with KeyValueStore read
-  (`cloudfront-keyvaluestore:GetKey`, `ListKeys`), or with
-  `cloudfront:UpdateFunction` and `TestFunction` on a function associated
-  with the store, reads every cell's secret, so that read permission becomes part of the
-  boundary. The secret travels in the `PutCellRoute` body, so the §5.1
-  schema gains a `secret` field and "never log the body" (§3.4 step 6)
-  becomes a security control. Rotation goes through `PutCellRoute`. A new
-  record supersedes this one. It also changes the "no secrets" statements in
-  §3.3, ADR-0003 and ADR-0005 Option 1. The IP allowlist
-  (Option 3) is no fallback, and neither is a declared origin per cell,
-  which needs a distribution update per cell and breaks P-9.
+- Spike S-3 (2026-11-16) passed through the multi-tenant distribution:
+  a signed `GET`, and a `POST` with a body and `x-amz-content-sha256`,
+  reached a function URL with `AWS_IAM` auth in a second account, and the
+  cell received the viewer's token in `x-tenant-token`. The distribution
+  ARN works as the permission's `SourceArn` for a tenant's request; the
+  tenant ARN is not needed. Refused with 403: an unsigned direct call, a
+  call before the permission existed, a `POST` without
+  `x-amz-content-sha256`, and a call with `lambda:InvokeFunctionUrl` but
+  not `lambda:InvokeFunction`. So `CellRouteAccess` grants both actions,
+  and the SPA sends `x-amz-content-sha256` on every `POST` and `PUT`.
+- The secret-header fallback was not needed and is not built.
 - Revisit when CloudFront offers origin access control for another origin
   type a cell uses, or a cell moves off function URLs.

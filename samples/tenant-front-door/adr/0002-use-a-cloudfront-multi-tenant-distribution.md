@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0002: Use a CloudFront multi-tenant distribution
 
-- Status: Proposed (spike S-1)
+- Status: Accepted
 - Date: 2026-11-13
 - Deciders: Dave Roberts (PSA)
 
@@ -54,7 +54,7 @@ are bounded by a quota, so the tenant count is capped by it.
 
 ## Decision
 
-Option 1, pending S-1. A multi-tenant distribution keeps one shared
+Option 1; spike S-1 passed on 2026-11-16. A multi-tenant distribution keeps one shared
 configuration, so the security baseline is set once (P-8), and it gives a
 dedicated domain its own distribution tenant without touching the pooled
 path. Pooled tenants add no CloudFront resource, which keeps onboarding to
@@ -72,13 +72,12 @@ shared configuration; Option 3 breaks P-8 and P-9.
 - Harder: the dedicated path adds certificate validation per tenant
   domain; Q-3 decides whether it ships in this sample.
 - Follow-up: ADR-0003 and ADR-0004 assume this distribution type.
-- Spike: S-1 must show a viewer-request function with an associated
-  KeyValueStore runs and reads the store on both an apex and a wildcard
-  pooled distribution tenant. S-1 needs a public hosted zone (Q-1). It
-  reports deploy and destroy time.
-- If S-1 fails: fall back to Option 2 for the pooled path, keep the router
-  and route table unchanged, and record the change in a new ADR that
-  supersedes this one. The dedicated domain path then moves to a follow-up.
+- Spike S-1 (2026-11-16): a viewer-request function with an associated
+  KeyValueStore ran and read the store on an apex and a wildcard pooled
+  distribution tenant of one `tenant-only` distribution, each named in a
+  CNAME to the connection group's routing endpoint. The certificate for the
+  apex and the wildcard takes one DNS validation entry, because both names
+  share one validation record. Deploy 481 s, destroy 312 s.
 - Revisit when distribution tenants cannot carry a feature the front door
   needs, or when the tenant count passes what one distribution tenant
   serves.

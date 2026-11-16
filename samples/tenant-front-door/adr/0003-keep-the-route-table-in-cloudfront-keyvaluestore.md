@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0003: Keep the route table in CloudFront KeyValueStore
 
-- Status: Proposed (spikes S-1 and S-2)
+- Status: Accepted
 - Date: 2026-11-13
 - Deciders: Dave Roberts (PSA)
 
@@ -53,7 +53,7 @@ than in data the registrar owns (P-3).
 
 ## Decision
 
-Option 1, pending S-1 and S-2. KeyValueStore is read inside the router at
+Option 1; spikes S-1 and S-2 ran on 2026-11-16. KeyValueStore is read inside the router at
 the edge with no network call, so refusals for unknown and suspended
 tenants cost no origin capacity (P-7). It changes without a publish or a
 distribution update, so onboarding stays one registrar call (P-9), and the
@@ -70,12 +70,13 @@ request; Option 3 breaks P-9.
   integration test must allow for the propagation time S-2 measures.
 - Harder: values keep a version field (`v`) and stay small; the router
   never reads `ac` (§4.1).
-- Spikes: S-1 must show the store is readable from a viewer-request
-  function on a multi-tenant distribution (ADR-0002). S-2 must report the
-  median and p99 time from write to first routed request. Both report
-  deploy and destroy time.
-- If S-1 fails: the store is still used, on the Option 2 distribution of
-  ADR-0002. If S-2 shows propagation too slow for onboarding, `route.sh`
-  waits until the route answers, and a new ADR records the wait.
+- Spike S-1: the store is readable from a viewer-request function on a
+  multi-tenant distribution (ADR-0002).
+- Spike S-2 (100 rounds, one edge location): a write takes a median of
+  28.4 s and a p99 of 29.4 s from `put-key` to the first routed request,
+  for inserts and updates alike, with no timeouts. That is fine for
+  onboarding but not instant, so `route.sh` waits until the route answers
+  before it reports success, and the integration test allows 60 s per
+  route change.
 - Revisit when the tenant count nears the store ceiling, or when the
   router needs more than three reads per request.

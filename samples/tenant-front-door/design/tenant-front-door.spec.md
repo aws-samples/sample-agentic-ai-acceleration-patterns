@@ -124,7 +124,7 @@ dedicated distribution tenant on the same distribution, in either mode.
 | Component | Account | Runs on | Job |
 |---|---|---|---|
 | Edge stack | edge, `us-east-1` | ACM and AWS WAF | Certificate for `<appDomain>` (and `*.<appDomain>` in `host` mode), web ACL |
-| Edge logging stack | edge, `us-east-1` | CloudWatch Logs delivery | Standard logging v2 for the distribution: the delivery source, the delivery destination (pointing at the `eu-central-1` log group) and the delivery, all in `us-east-1`, deployed after the main stack (ADR-0010) |
+| Edge logging stack | edge, `us-east-1` | CloudWatch Logs delivery | Standard logging v2 for the distribution: the delivery source, the delivery destination and the log group it points at (a CloudWatch Logs delivery cannot cross Regions, spike S-1) and the delivery, all in `us-east-1`, deployed after the main stack (ADR-0010) |
 | Multi-tenant distribution | edge | CloudFront (`ConnectionMode: tenant-only`) | Shared behaviours, policies and origins |
 | Pooled distribution tenant | edge | CloudFront distribution tenant | Serves `<appDomain>` (`single`) or `*.<appDomain>` (`host`) for every pooled tenant |
 | Dedicated distribution tenant | edge | CloudFront distribution tenant | Serves one tenant's own domain, with its own certificate and optional web ACL override |
@@ -136,7 +136,7 @@ dedicated distribution tenant on the same distribution, in either mode.
 | `CellRouteAccess` construct | the cell's | Lambda permission | Grants `cloudfront.amazonaws.com` `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`, conditioned on the edge distribution's ARN |
 | Agent route | edge | `/agents/*` behaviour | Streams to the agent ingress of `agentic-runtime-isolation`, when configured, with the `Managed-AllViewerExceptHostHeader` origin request policy |
 | `route.sh` | the cell's | the control plane's cell and tenant scripts | Calls the registrar with the script's own credentials |
-| Telemetry | edge | CloudFront standard logging v2: delivery source, delivery destination and delivery in `us-east-1`, log group in `eu-central-1` (ADR-0010) | Per-tenant requests, errors, bytes, latency |
+| Telemetry | edge | CloudFront standard logging v2: delivery source, delivery destination, delivery and log group in `us-east-1` (ADR-0010, amended after spike S-1) | Per-tenant requests, errors, bytes, latency |
 
 ### 3.2 Request paths
 
@@ -337,8 +337,9 @@ Rules:
 | `active` | routed | tenant create script |
 | `suspended` | 503, `Retry-After: 300` | vendor operator in the edge account |
 
-A route goes live everywhere within the store's propagation time (spike S-2
-measures it). Removal is a delete, not a status.
+A route goes live everywhere within the store's propagation time: about
+30 s at one edge location (spike S-2: median 28.4 s, p99 29.4 s). `route.sh`
+waits until the route answers before it reports success. Removal is a delete, not a status.
 
 ## 5. API surface
 
@@ -540,9 +541,9 @@ Each spike reports its deploy and destroy time.
 
 | # | Question | Pass when |
 |---|---|---|
-| S-1 | Does a multi-tenant distribution take a viewer-request function with an associated KeyValueStore, on both an apex and a wildcard pooled distribution tenant? | a request runs the function and reads the store in both; standard logging v2 set up in `us-east-1` (delivery source, delivery destination and delivery) delivers to a log group in `eu-central-1` |
-| S-2 | How long does a KeyValueStore write take to apply at the edge? | median and p99 from write to first routed request |
-| S-3 | Does `cf.updateRequestOrigin()` set origin access control for a Lambda function URL **in another account**? | through the multi-tenant distribution, with its ARN as the permission's `SourceArn`: a signed request reaches a URL with `AWS_IAM` auth in the second account; an unsigned one is 403; a `POST` with a body and `x-amz-content-sha256` is served; the cell receives the viewer's token in `x-tenant-token`; the permission set is confirmed |
+| S-1 | Does a multi-tenant distribution take a viewer-request function with an associated KeyValueStore, on both an apex and a wildcard pooled distribution tenant? | a request runs the function and reads the store in both; standard logging v2 set up in `us-east-1` (delivery source, delivery destination and delivery) delivers to a log group in `eu-central-1`. **Passed 2026-11-16, with a logging change**: the function read the store on both tenants (apex and `a.` under the wildcard), 200 within 46 s of deploy. A CloudWatch Logs delivery to another Region is refused (`Cross-region Delivery Destination is not supported`), and a delivery destination must be in its log group's Region. With the log group in `us-east-1` logs arrived in 33 s; with an S3 bucket in `eu-central-1` (destination and delivery in `us-east-1`) in 312 s. The log group moves to `us-east-1` (ADR-0010 amendment). Deploy 481 s, destroy 312 s |
+| S-2 | How long does a KeyValueStore write take to apply at the edge? | median and p99 from write to first routed request. **Measured 2026-11-16** over 100 rounds (one POP, 250 ms polling): median 28.4 s, p90 29.2 s, p99 29.4 s, max 29.5 s from the start of `put-key` to the first routed request; 29.6 s median until four pollers all saw it; no timeouts; inserts and updates alike. `put-key` itself takes about 0.6 s. Deploy 340 s |
+| S-3 | Does `cf.updateRequestOrigin()` set origin access control for a Lambda function URL **in another account**? | through the multi-tenant distribution, with its ARN as the permission's `SourceArn`: a signed request reaches a URL with `AWS_IAM` auth in the second account; an unsigned one is 403; a `POST` with a body and `x-amz-content-sha256` is served; the cell receives the viewer's token in `x-tenant-token`; the permission set is confirmed. **Passed 2026-11-16**: a signed `GET` and a `POST` with `x-amz-content-sha256` reached the function URL in the second account through the multi-tenant distribution, with the distribution ARN (not the tenant ARN) as `SourceArn`; the cell saw the viewer's token in `x-tenant-token`, and a client's own `x-tenant-token` was replaced. Refused with 403: a direct unsigned call, a call before the permission existed, a `POST` without `x-amz-content-sha256` (signature mismatch), and a call with `lambda:InvokeFunctionUrl` but no `lambda:InvokeFunction`. Lambda removes the signed `Authorization` header from the event. Deploy 506 s, destroy 185 s |
 | S-4 | `host` mode: how does the issuer take one callback URL per tenant at 1,000s of tenants? | a working option for Cognito app clients (limit and update rate measured), or a single sign-in host with a signed `state` |
 | S-5 | Does streaming pass through `/agents/*` to the agent ingress without buffering? | first byte at the client within 1 s of first byte from the ingress; the ingress receives the bearer token on `GET` and `POST`; the `Managed-AllViewerExceptHostHeader` policy deploys with the pinned CDK version |
 | S-6 | Does a WAF rate rule keyed on the `Host` header count each tenant on its own? | tenant A over its limit on `/api/*` gets the custom 429 while tenant B is served; A's SPA loads (`/`, `/assets/*`) are not counted |

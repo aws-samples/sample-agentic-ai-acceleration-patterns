@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0010: Deploy the edge stack in us-east-1
 
-- Status: Accepted
+- Status: Accepted (amended 2026-11-16 after spike S-1)
 - Date: 2026-11-13
 - Deciders: Dave Roberts (PSA)
 
@@ -84,3 +84,16 @@ plane and the cells it serves.
 - Revisit when CloudFront accepts certificates, web ACLs or log
   configuration from other Regions. A deployer whose Region is `us-east-1`
   gets every stack in one Region with no change to this design.
+
+**Amended 2026-11-16 (spike S-1):** a CloudWatch Logs delivery cannot cross
+Regions. With the destination in `us-east-1` and the log group in
+`eu-central-1`, CloudWatch Logs refused it ("Region from identity does not
+match the Destination Resource ARN"); with the destination in
+`eu-central-1`, it refused the delivery ("Cross-region Delivery
+Destination is not supported"). The fallback this record named applies: the
+log group moves into the edge logging stack in `us-east-1`, and per-tenant
+log queries run there. Logs arrived in 33 s. An S3 bucket in `eu-central-1`
+also works as a destination, with the destination and delivery in
+`us-east-1` and a bucket policy for `delivery.logs.amazonaws.com`, but logs
+took 312 s and are queried with Athena, so it is not the default. Everything
+else in this record stands.

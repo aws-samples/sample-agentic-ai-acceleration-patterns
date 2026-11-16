@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0004: Route to cells with CloudFront Functions origin modification
 
-- Status: Proposed (spike S-3)
+- Status: Accepted
 - Date: 2026-11-13
 - Deciders: Dave Roberts (PSA)
 
@@ -54,7 +54,7 @@ to the request path.
 
 ## Decision
 
-Option 1, pending S-3. Origin modification lets one behaviour reach every
+Option 1; spike S-3 passed on 2026-11-16. Origin modification lets one behaviour reach every
 cell in every account, so a cell or tenant joins with a route table write
 and no distribution change (P-9). It reuses the router's own lookup in the
 KeyValueStore (ADR-0003), with no second function. Option 2 breaks P-9 and
@@ -71,10 +71,9 @@ caps the cell count; Option 3 adds latency and a second lookup path.
 - Harder: each cell stack must include `CellRouteAccess`, conditioned on
   the distribution ARN, or the edge cannot invoke it (§6.1).
 - Harder: only Lambda function URL and S3 origins are covered (§1.2).
-- Spike: S-3 must show that `cf.updateRequestOrigin()` sets origin access
-  control for a Lambda function URL with `AWS_IAM` auth in a second
-  account, with the pass criteria in ADR-0011. It reports deploy and destroy
-  time.
-- If S-3 fails: this record keeps origin modification, and cell origins
-  move to the fallback protection ADR-0011 names.
+- Spike S-3 (2026-11-16): `cf.updateRequestOrigin()` with an inline
+  `originAccessControlConfig` (`originType: 'lambda'`, `signingBehavior:
+  'always'`) signed requests to a function URL in a second account, even
+  though the distribution's default origin had no origin access control.
+  Results are in ADR-0011. Deploy 506 s, destroy 185 s.
 - Revisit when origins other than function URLs and S3 are needed.
