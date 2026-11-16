@@ -356,6 +356,27 @@ npx cdk deploy \
   --context readerRoles='["control-plane:reader"]'
 ```
 
+A machine client, such as a route registrar on the client credentials
+flow, gets a Cognito access token with no `aud`. List its client id in
+`vendorIdpClientIds` (default none, spec R-38, ADR-043). A token without
+`aud` passes only when its `client_id` is listed and equals its `sub`; a
+token with `aud` is checked against the audience. Set
+`vendorIdpRequiredScope` to this API's resource-server scope as well, so
+the client's tokens for another API on the issuer are refused here. The
+path expects the RFC 9068 claims (`client_id`, and `sub` equal to it),
+which Cognito mints. The issuer must still add `role` to that token: on
+Cognito, a pre token generation trigger on the V3 event, which needs the
+Essentials or Plus feature plan:
+
+```bash
+npx cdk deploy \
+  --context vendorIdpIssuerUrl=https://YOUR_ISSUER \
+  --context vendorIdpAudience=YOUR_AUDIENCE \
+  --context readerRoles='["control-plane:reader"]' \
+  --context vendorIdpClientIds='["YOUR_MACHINE_CLIENT_ID"]' \
+  --context vendorIdpRequiredScope=YOUR_RESOURCE_SERVER/read
+```
+
 ### Example: mounting tenant-identity
 
 The [`tenant-identity`](../tenant-identity/) sample is the worked consumer of
@@ -646,7 +667,9 @@ T22, T23, T26, T27, and mitigations M9, M10, M11, M19, M20 in
 - [ ] Use a **dedicated control-plane issuer**. It must issue tokens
       exclusively to vendor operators and, when `readerRoles` is set, to the
       reader systems you name — verify that no other application reuses its
-      clients or its audience value.
+      clients, its audience value, or a client listed in
+      `vendorIdpClientIds` (T37). If a listed client also calls another
+      API on the issuer, set `vendorIdpRequiredScope`.
 - [ ] Give readers a **namespaced role value** (`control-plane:reader`) and
       their own app client. A stolen reader token changes nothing but reads
       the whole fleet: tenant names, account ids, application sources and
@@ -660,9 +683,14 @@ T22, T23, T26, T27, and mitigations M9, M10, M11, M19, M20 in
       plus the 60-second authorizer cache bounds how long a stolen token
       keeps access.
 - [ ] Require **MFA for all operators** on the issuer.
+- [ ] Keep each **machine client secret** in a secrets store, rotate it,
+      and give the client the reader role unless it must operate. A
+      secret mints tokens until it is rotated or the client deleted, with
+      no second factor (T38).
 - [ ] **Periodically review the issuer's client registrations** — every
       registered client is an operator-grade credential; remove clients
-      that are no longer needed.
+      that are no longer needed, and remove their ids from
+      `vendorIdpClientIds`.
 
 ### Supply-chain hardening (M10)
 

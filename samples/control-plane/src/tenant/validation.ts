@@ -3,7 +3,7 @@
 
 import { Stack, Token } from 'aws-cdk-lib';
 import { RegionInfo } from 'aws-cdk-lib/region-info';
-import { ROLE_VALUE_PATTERN } from '../shared/authorizer-policy';
+import { CLIENT_ID_PATTERN, ROLE_VALUE_PATTERN, SCOPE_PATTERN } from '../shared/authorizer-policy';
 
 /**
  * Synth-time validation of the stack inputs (spec §3.3). Shared by the
@@ -144,4 +144,71 @@ export function validateRoleLists(
     throw new Error(`Invalid role lists (spec R-36):\n  - ${problems.join('\n  - ')}`);
   }
   return { allowedRoles: allowed, readerRoles: readers };
+}
+
+/**
+ * Validates `vendorIdp.clientIds` at synth (spec §3.3, R-38): optional,
+ * default none; an array of strings, each matching the client id pattern,
+ * none twice. Fails synth with every problem named.
+ */
+export function validateClientIds(clientIds: string[] | undefined): readonly string[] {
+  const ids = clientIds ?? [];
+  const problems: string[] = [];
+  if (!Array.isArray(ids)) {
+    problems.push(`vendorIdpClientIds must be an array of strings (got: ${JSON.stringify(ids)})`);
+  } else {
+    const seen = new Set<string>();
+    ids.forEach((id, index) => {
+      // A token for one client renders the same string each time, so a
+      // duplicate is caught before the pattern check skips it.
+      if (typeof id === 'string' && seen.has(id)) {
+        problems.push(`vendorIdpClientIds lists ${JSON.stringify(id)} twice`);
+        return;
+      }
+      // A client created in the same app is a token until deploy; the
+      // authorizer checks the resolved value at cold start (M27).
+      if (typeof id === 'string' && Token.isUnresolved(id)) {
+        seen.add(id);
+        return;
+      }
+      if (typeof id !== 'string' || !CLIENT_ID_PATTERN.test(id)) {
+        problems.push(`vendorIdpClientIds[${index}] ${JSON.stringify(id)} does not match ${CLIENT_ID_PATTERN.source}`);
+      } else {
+        seen.add(id);
+      }
+    });
+  }
+  if (problems.length > 0) {
+    throw new Error(`Invalid vendorIdpClientIds (spec R-38):\n  - ${problems.join('\n  - ')}`);
+  }
+  return ids;
+}
+
+/**
+ * Validates `vendorIdp.requiredScope` at synth (spec §3.3, R-38): optional,
+ * default none; one literal scope token, and only beside at least one
+ * client id, since it applies to the no-`aud` path alone. Fails synth
+ * otherwise. A CDK token is refused: one that resolved to `""` would reach
+ * the authorizer as no scope and drop the binding without an error.
+ */
+export function validateRequiredScope(
+  scope: string | undefined,
+  clientIds: readonly string[],
+): string | undefined {
+  if (scope === undefined) {
+    return undefined;
+  }
+  const problems: string[] = [];
+  if (typeof scope === 'string' && Token.isUnresolved(scope)) {
+    problems.push('vendorIdpRequiredScope must be a literal string, not a CDK token');
+  } else if (typeof scope !== 'string' || !SCOPE_PATTERN.test(scope)) {
+    problems.push(`vendorIdpRequiredScope ${JSON.stringify(scope)} does not match ${SCOPE_PATTERN.source}`);
+  }
+  if (clientIds.length === 0) {
+    problems.push('vendorIdpRequiredScope needs at least one vendorIdpClientIds entry');
+  }
+  if (problems.length > 0) {
+    throw new Error(`Invalid vendorIdpRequiredScope (spec R-38):\n  - ${problems.join('\n  - ')}`);
+  }
+  return scope;
 }

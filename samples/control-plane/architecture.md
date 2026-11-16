@@ -6,11 +6,14 @@ This sample has been verified as working via automated integration tests and end
 
 | Date | Commit | Test accounts | Region | Verified by | Notes |
 |------|--------|---------------|--------|-------------|-------|
+| 2026-11-16 | aa1221a | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 3071s`: every step of spec §10 passed, with the required scope (R-38) in step 1: the listed machine client's `control-plane/read` token read and was refused on a write, its `control-plane/other` token was refused, and the unlisted client was refused. Deploy about 4 min, assertions 23 min, teardown about 24 min; nothing left in either account |
+| 2026-11-16 | d6f0fcb | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 2890s`: every step of spec §10 passed, with the client id path (R-38) in step 1: the listed machine client's token (no `aud`, `sub` equal to its client id) read and was refused on a write, and the unlisted client was refused. Nothing left in either account |
 | 2026-11-13 | 219c26d | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 3005s`: every step of spec §10 passed, with the reader grant (R-36) in step 1. Deploy about 4 min, assertions 22 min, teardown about 34 min; nothing left in either account |
 
 **Integration test coverage:**
 - Two-account, two-application deployment scenario
 - Operator and reader grants: all ten reader reads, every reader write refused (its first call included), a role in neither list refused, nothing written
+- Client id path (R-38): a listed machine client's token without `aud` reads and is refused on a write; its token without the required scope is refused; an unlisted client is refused
 - Account handshake validation (external ID verification)
 - Cell lifecycle: creation, tenant placement, reuse after evacuation
 - Cross-account cell and tenant provisioning
@@ -171,6 +174,13 @@ plane data is not tenant-scoped by caller.
 
 The configured issuer is a dedicated control-plane trust boundary: it issues
 tokens to vendor operators and to the reader systems the deployer names.
+Before the role is read, the audience step takes one path per token
+(ADR-043): a token with an `aud` key must name the audience; a token
+without one, such as a Cognito client-credentials access token, passes only
+when its `client_id` is in `VENDOR_IDP_CLIENT_IDS` (default none) and
+equals `sub`, so a listed machine client acts as itself and a person's
+access token through it is refused. When `VENDOR_IDP_REQUIRED_SCOPE` is
+set, that token's `scope` must also hold it, which binds it to this API.
 The authorizer maps the `role` claim to one of two grants (ADR-018,
 ADR-042): a value in `ALLOWED_ROLES` (default `operator`) gets the operator
 grant, a value in `READER_ROLES` (default none) the reader grant, and a
@@ -1129,6 +1139,8 @@ tooling/demo convenience.
 | Input | Used by |
 |---|---|
 | `vendorIdp.issuerUrl`, `vendorIdp.audience` | Lambda Authorizer |
+| `vendorIdp.clientIds` (optional, default none) | Lambda Authorizer: client ids accepted on a token without `aud`, when `client_id` equals `sub` (ADR-043) |
+| `vendorIdp.requiredScope` (optional, default none) | Lambda Authorizer: the scope a token without `aud` must also carry (ADR-043) |
 | `fleetName` (optional, default `control-plane`) | names the five fleet roles: `<fleet>-api`, `<fleet>-cell-build`, `<fleet>-tenant-build` in the control plane account and `<fleet>-cell-provisioning`, `<fleet>-tenant-provisioning` in every account that hosts cells (ADR-025, ADR-028); `[a-z0-9-]{1,32}` |
 | `tenantBuildManagedPolicyArns` (optional) | customer-managed IAM policy ARNs attached to the tenant provisioning role of the stack's own account, in addition to its §7 SSM grants (ADR-022, ADR-025) |
 | `demoApplicationIds` (optional, default none) | publishes `/application-plane/applications/<applicationId>/shared/base-domain` in the stack's own account for each listed id, the demo shared resource the sample cell script reads (ADR-034); a real application plane publishes its own |

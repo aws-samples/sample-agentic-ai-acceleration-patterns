@@ -14,7 +14,13 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { ProvisioningWorkflow } from './tenant.sfn';
-import { stackIdentity, validateRoleLists, validateTenantBuildManagedPolicyArns } from './validation';
+import {
+  stackIdentity,
+  validateClientIds,
+  validateRequiredScope,
+  validateRoleLists,
+  validateTenantBuildManagedPolicyArns,
+} from './validation';
 import { CellAccountRoles } from '../cell-account/cell-account.cdk';
 import { apiRoleName, DEFAULT_FLEET_NAME, provisioningRoleArn, validateFleetName } from '../shared/fleet';
 import { nagFindingResource, acknowledgeGranularFinding, suppressTemplateScanners } from '../shared/nag';
@@ -24,6 +30,24 @@ export interface TenantStackProps extends StackProps {
   readonly vendorIdpIssuerUrl: string;
   /** Vendor IdP audience expected in control plane JWTs. */
   readonly vendorIdpAudience: string;
+  /**
+   * Client ids accepted on a token that has no `aud`, such as a Cognito
+   * client-credentials access token, when the token's `sub` equals its
+   * `client_id` (spec R-38, ADR-043, M27). Each matches
+   * `[A-Za-z0-9+._:-]{1,128}`, none twice. Default none: the audience
+   * check alone, as before. List only the vendor's own machine clients on
+   * the dedicated issuer (T37).
+   */
+  readonly vendorIdpClientIds?: string[];
+  /**
+   * A scope a token without `aud` must also carry in its space-separated
+   * `scope` claim (spec R-38, ADR-043, M27), such as the resource-server
+   * scope of this API (`control-plane/read`). Binds a listed client's token
+   * to this API, so its tokens for another API on the issuer do not pass
+   * (T37). One literal RFC 6749 scope token, not a CDK token; needs
+   * `vendorIdpClientIds`. Default none: the client id alone.
+   */
+  readonly vendorIdpRequiredScope?: string;
   /**
    * DEMO ONLY: application ids for which this stack publishes
    * `/application-plane/applications/<id>/shared/base-domain` in its own
@@ -114,6 +138,9 @@ export class TenantStack extends Stack {
     // R-36: the two role lists the authorizer maps to grants; fail synth on
     // an empty operator list, a bad value or a value in both lists.
     const roles = validateRoleLists(props.allowedRoles, props.readerRoles);
+    // R-38: client ids for tokens without `aud`; fail synth on a bad value.
+    const clientIds = validateClientIds(props.vendorIdpClientIds);
+    const requiredScope = validateRequiredScope(props.vendorIdpRequiredScope, clientIds);
 
     // --- Control plane table (applications + accounts + cells + tenants +
     // deployments, single table, spec §4) ---
@@ -199,6 +226,12 @@ export class TenantStack extends Stack {
       environment: {
         VENDOR_IDP_ISSUER_URL: props.vendorIdpIssuerUrl,
         VENDOR_IDP_AUDIENCE: props.vendorIdpAudience,
+        // M27 (T37): client ids accepted on a token without `aud`. Empty
+        // means none; the authorizer reads that as the audience check alone.
+        VENDOR_IDP_CLIENT_IDS: clientIds.join(','),
+        // M27 (T37): the scope a token without `aud` must carry. Empty
+        // means none.
+        VENDOR_IDP_REQUIRED_SCOPE: requiredScope ?? '',
         // M13 (T2/T20): the role values that get the operator grant.
         // 'operator' is also the code's default when unset — wiring it here
         // makes the enforcement configuration visible at the deployment

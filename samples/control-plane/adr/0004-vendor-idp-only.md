@@ -1,6 +1,6 @@
 # ADR-0004: The control plane knows only the vendor IdP; customer identity is an application plane decision
 
-**Status:** Accepted (revised — customer IdP removed from the control plane)
+**Status:** Accepted (revised — customer IdP removed from the control plane; amended by ADR-0043 (client ids accepted on a token without `aud`))
 
 **Context:** Earlier drafts took two identity providers as deployment inputs:
 the vendor IdP protecting the control plane, and a customer IdP injected as
@@ -33,3 +33,5 @@ tenant's resource definition, passed through as build environment variables —
 deliberately generic, not IdP-shaped.
 
 **Amended by ADR-0039 (2026-11-12):** the `parameters` extension point is built, in a different shape: the application declares parameter names, each deployment stores its values, and every tenant script receives them as `PARAM_<NAME>`. The values are opaque to the control plane and never secrets. `adminEmail` stays create-only and unpersisted.
+
+**Amended by ADR-0043 (2026-11-14):** the vendor IdP input gains an optional list of client ids, `vendorIdp.clientIds`. A token without `aud`, such as a Cognito client-credentials access token, passes the audience step only when its `client_id` is listed and equals `sub`. A token with `aud` is checked against the audience as before.
