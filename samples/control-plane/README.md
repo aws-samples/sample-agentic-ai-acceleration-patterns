@@ -360,7 +360,7 @@ A machine client, such as a route registrar on the client credentials
 flow, gets a Cognito access token with no `aud`. List its client id in
 `vendorIdpClientIds` (default none, spec R-38, ADR-043). A token without
 `aud` passes only when its `client_id` is listed and equals its `sub`; a
-token with `aud` is checked against the audience as before. Set
+token with `aud` is checked against the audience. Set
 `vendorIdpRequiredScope` to this API's resource-server scope as well, so
 the client's tokens for another API on the issuer are refused here. The
 path expects the RFC 9068 claims (`client_id`, and `sub` equal to it),

@@ -44,8 +44,8 @@ export interface TenantStackProps extends StackProps {
    * `scope` claim (spec R-38, ADR-043, M27), such as the resource-server
    * scope of this API (`control-plane/read`). Binds a listed client's token
    * to this API, so its tokens for another API on the issuer do not pass
-   * (T37). One RFC 6749 scope token; needs `vendorIdpClientIds`. Default
-   * none: the client id alone.
+   * (T37). One literal RFC 6749 scope token, not a CDK token; needs
+   * `vendorIdpClientIds`. Default none: the client id alone.
    */
   readonly vendorIdpRequiredScope?: string;
   /**

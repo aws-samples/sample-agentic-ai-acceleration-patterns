@@ -182,6 +182,7 @@ describe('TenantStack', () => {
     [{ vendorIdpRequiredScope: 'control-plane/read' }, /needs at least one vendorIdpClientIds entry/],
     [{ vendorIdpClientIds: ['abc'], vendorIdpRequiredScope: 'a b' }, /vendorIdpRequiredScope "a b" does not match/],
     [{ vendorIdpClientIds: ['abc'], vendorIdpRequiredScope: '' }, /vendorIdpRequiredScope "" does not match/],
+    [{ vendorIdpClientIds: ['abc'], vendorIdpRequiredScope: Token.asString({ Ref: 'Scope' }) }, /must be a literal string, not a CDK token/],
   ])('an invalid required scope fails synth (R-38): %j', (props, message) => {
     expect(() => synth(props as Partial<TenantStackProps>)).toThrow(message);
   });

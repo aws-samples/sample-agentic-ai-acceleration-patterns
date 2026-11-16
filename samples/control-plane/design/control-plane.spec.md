@@ -577,10 +577,11 @@ an access token.
 
 The list reaches the authorizer as `VENDOR_IDP_CLIENT_IDS`,
 comma-separated. Unset or empty means none, so the second path admits
-nothing and a deployment that does not set `clientIds` behaves exactly as
-before. Set but yielding no names (`",,"`) throws at cold start, and so
+nothing and a deployment that does not set `clientIds` checks the
+audience alone. Set but yielding no names (`",,"`) throws at cold start, and so
 does a duplicate. The scope reaches it as `VENDOR_IDP_REQUIRED_SCOPE`;
-unset or empty means none, and a value with no client ids throws. A unit
+unset or empty means none, and a value outside the scope-token pattern
+or with no client ids throws. A unit
 test covers the cases the integration test cannot mint: an `aud` that
 fails with a listed `client_id`, the malformed `aud` values above, a
 person's access token from a listed client, and a scope that only shares
@@ -596,7 +597,7 @@ Supplied at deployment time, validated at synthesis/deploy.
 |---|---|
 | `vendorIdp.issuerUrl`, `vendorIdp.audience` | non-empty; OIDC discovery must work against the issuer |
 | `vendorIdp.clientIds` (optional, R-38, [ADR-043](../adr/0043-accept-listed-client-ids-when-a-token-has-no-audience.md)) | client ids accepted on a token that has no `aud`. Default: none. Each matches `[A-Za-z0-9+._:-]{1,128}` (Cognito ids are `[\w+]+`), so it survives the comma-separated environment variable; a duplicate MUST fail synth. List only the vendor's own machine clients on the dedicated issuer (T37) |
-| `vendorIdp.requiredScope` (optional, R-38) | one RFC 6749 scope token (`[\x21\x23-\x5B\x5D-\x7E]{1,256}`) a token without `aud` must also carry, such as this API's resource-server scope (`control-plane/read`). Default: none. Set without `clientIds` it MUST fail synth. Set it whenever a listed client may call another API on the issuer (T37) |
+| `vendorIdp.requiredScope` (optional, R-38) | a scope a token without `aud` must also carry, such as this API's resource-server scope (`control-plane/read`): one RFC 6749 scope token (`[\x21\x23-\x5B\x5D-\x7E]{1,256}`), given as a literal, since a CDK token is refused at synth. Default: none. Set without `clientIds` it MUST fail synth. Set it whenever a listed client may call another API on the issuer (T37) |
 | `fleetName` | names the role pair every account installs (`<fleetName>-cell-provisioning`, `<fleetName>-tenant-provisioning`) and the control plane's three roles the pair trusts (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-api`); `[a-z0-9-]{1,32}`. Default `control-plane`. Two control planes in one account MUST use different fleet names |
 | `allowedRoles` (optional, R-36) | role claim values that get the operator grant; non-empty. Default `["operator"]`. Every role value in either list matches `[A-Za-z0-9:._-]{1,64}`, so it survives the comma-separated environment variable |
 | `readerRoles` (optional, R-36, [ADR-042](../adr/0042-a-read-only-role-beside-the-operator.md)) | role claim values that get the reader grant. Default: none, so no reader is admitted until the deployer names one. A value in both lists MUST fail synth. Use a namespaced value (`control-plane:reader`), not a word a broader issuer may already mint (`reader`, `viewer`) (T2, T20) |

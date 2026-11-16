@@ -186,8 +186,10 @@ export function validateClientIds(clientIds: string[] | undefined): readonly str
 
 /**
  * Validates `vendorIdp.requiredScope` at synth (spec §3.3, R-38): optional,
- * default none; one scope token, and only beside at least one client id,
- * since it applies to the no-`aud` path alone. Fails synth otherwise.
+ * default none; one literal scope token, and only beside at least one
+ * client id, since it applies to the no-`aud` path alone. Fails synth
+ * otherwise. A CDK token is refused: one that resolved to `""` would reach
+ * the authorizer as no scope and drop the binding without an error.
  */
 export function validateRequiredScope(
   scope: string | undefined,
@@ -197,7 +199,9 @@ export function validateRequiredScope(
     return undefined;
   }
   const problems: string[] = [];
-  if (typeof scope !== 'string' || (!Token.isUnresolved(scope) && !SCOPE_PATTERN.test(scope))) {
+  if (typeof scope === 'string' && Token.isUnresolved(scope)) {
+    problems.push('vendorIdpRequiredScope must be a literal string, not a CDK token');
+  } else if (typeof scope !== 'string' || !SCOPE_PATTERN.test(scope)) {
     problems.push(`vendorIdpRequiredScope ${JSON.stringify(scope)} does not match ${SCOPE_PATTERN.source}`);
   }
   if (clientIds.length === 0) {
