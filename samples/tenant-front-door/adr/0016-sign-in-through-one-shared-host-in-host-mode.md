@@ -17,9 +17,12 @@ The front door must serve thousands of tenants per distribution
 Spike S-4 (2026-11-16) measured Cognito: one app client takes 100 callback
 URLs and refuses the 101st; a pool takes 1,000 app clients by default,
 10,000 at most; `UpdateUserPoolClient` gives about 15 updates per second
-and then `TooManyRequestsException`. Cognito saved a wildcard callback URL
-(`https://*.<appDomain>/callback`), but the spike did not show that sign-in
-accepts a tenant host through it.
+and then `TooManyRequestsException`. Cognito saves a wildcard callback URL
+(`https://*.<appDomain>/callback`), but treats the `*` as a literal
+character: a follow-up run (2026-11-16) refused `https://t7.<appDomain>/callback`
+with `redirect_mismatch`, as it did a two-label host, the apex, a suffix
+trick, another path, `http` and a port. Only the literal string itself,
+`https://*.<appDomain>/callback`, reached the sign-in page and got a code.
 
 ## Options considered
 
@@ -49,8 +52,9 @@ and PKCE verifier; the key needs rotation.
 
 ### Option 3: A wildcard callback URL
 
-Pros: no extra hop and no per-tenant change. Cons: unproven at sign-in, and
-an issuer that matches it loosely sends codes to any host under the domain.
+Pros: no extra hop and no per-tenant change. Cons: Cognito does not match
+it; a tenant host gets `redirect_mismatch` (S-4 follow-up). Another issuer
+that did match it loosely would send codes to any host under the domain.
 
 ## Decision
 
@@ -58,7 +62,7 @@ Option 2. `host` mode signs in through one shared host with a signed
 `state`. The sign-in host is a reserved label (spec §4.1). The SPA checks
 the nonce and keeps the PKCE verifier in memory, so a replayed `state`
 yields no token. Option 1 stays possible for a deployer with few tenants.
-Option 3 is not used until a spike shows the issuer matching it strictly.
+Option 3 does not work on Cognito.
 
 ## Consequences
 
@@ -67,5 +71,5 @@ Option 3 is not used until a spike shows the issuer matching it strictly.
   integration test for `host` mode signs in through it.
 - Follow-up: rotate the HMAC key with two live keys in the store; log
   `state` refusals apart from other 400s.
-- Revisit when the issuer accepts a strictly matched wildcard callback, or a
+- Revisit when the issuer matches wildcard callback URLs strictly, or a
   per-tenant issuer replaces the shared one.
