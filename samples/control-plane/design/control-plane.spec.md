@@ -1622,11 +1622,13 @@ flow. It has a resource server with one custom scope
 without a scope, and the authorizer ignores scope) and two machine
 clients with a secret and that scope: a reader client the stack lists in
 `clientIds`, and an unlisted client. The trigger runs on the V3 event:
-it branches on `triggerSource`, putting the
-users' roles under `idTokenGeneration` and `role: control-plane:reader`
-under `accessTokenGeneration` for both machine clients. A setup-stack
-function reads each client's secret, calls the token endpoint and returns
-only the access token, so no secret reaches a template or an output.
+it branches on `triggerSource`, putting the users' roles under
+`idTokenGeneration` and `role: control-plane:reader` under
+`accessTokenGeneration` for both machine clients. A setup-stack function
+reads a client's secret, gets its token from the token endpoint and makes
+one API call. It returns the status and whether the token has `aud`,
+whether `sub` equals `client_id` and its `role`, never the secret or the
+token, so neither reaches a template, an output or the assertion results.
 
 1. **Auth:** an operation without a JWT is rejected; with a valid vendor
    IdP JWT it succeeds. A reader token (R-36) succeeds on every `GET`

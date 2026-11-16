@@ -94,13 +94,17 @@ cdk-nag, cfn_nag, and checkov suppressions in `src/tenant/tenant.cdk.ts` and
 - Lambda reserved concurrency is not partitioned; API Gateway stage
   throttling bounds the invoke rate (cfn_nag W92, checkov CKV_AWS_115).
 
-### Security scan (2026-11-11)
+### Security scan (2026-11-16)
 
 ProtoShield v0.18.0 (Semgrep, Bandit, CDK NAG, cfn-nag, CVE, Checkov,
-Secrets, IAM least privilege, license headers) and ASH v3.2.0 (bandit,
-cdk-nag, cfn-nag, checkov, detect-secrets, grype, npm-audit, opengrep,
-semgrep, syft) ran on the synthesised tree after the last code change.
-ProtoShield: 0 critical, 0 high (the 48 licence-header findings below are
+Secrets, IAM least privilege, license headers) and ASH v3.1.2 (bandit,
+cdk-nag, checkov, detect-secrets, npm-audit, semgrep; cfn-nag, grype,
+opengrep and syft were not installed in local mode on this run) ran on
+the synthesised tree after the last code change (the client id path,
+ADR-0043), and checkov on the synthesised integration templates (0
+unsuppressed). Nothing new against the 2026-11-11 scan; the licence-header
+count is now 54 of 54, all compliant under MIT-0.
+ProtoShield: 0 critical, 0 high (the 54 licence-header findings below are
 the scanner's default and clear with `license_text=MIT-0`), 2 medium and 1
 low (CVEs below); the IAM least-privilege plugin reports the wildcard-account
 AssumeRole below as documented by design. ASH: 41 findings, all in the
@@ -110,7 +114,7 @@ Dispositions:
 
 | Finding | Tool | Disposition |
 |---|---|---|
-| 48 files "wrong license (MIT instead of Apache 2.0)" | ProtoShield license headers | False positive from the scanner's default; the repository standard is MIT-0. Re-run with `license_text=MIT-0`: 48 of 48 compliant. |
+| 54 files "wrong license (MIT instead of Apache 2.0)" | ProtoShield license headers | False positive from the scanner's default; the repository standard is MIT-0. Re-run with `license_text=MIT-0`: 54 of 54 compliant. |
 | API function and build roles may `sts:AssumeRole` on `<fleet>-cell-provisioning` / `<fleet>-tenant-provisioning` in any account | ProtoShield IAM | By design: T23, T30, M20, spec N-8, ADR-027/028. The target trust policy is the gate; the probe's credentials carry a deny-all session policy (M24 row T30); an `aws:ResourceOrgID` condition is the operational tightening for vendor-only fleets. |
 | Integ assertion provider: SSM `Resource: *`, Cognito `Resource: *` | ProtoShield IAM | Scoped to `/application-plane/*` in the test account and to the throwaway user pool ARN; the remaining finding is the service-level action below. |
 | Integ assertion provider: `secretsmanager:GetRandomPassword` on `*` | ProtoShield IAM | Accepted: a service-level action with no resource ARN; `*` is the only valid resource. |

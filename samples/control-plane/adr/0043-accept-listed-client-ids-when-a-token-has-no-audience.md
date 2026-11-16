@@ -98,7 +98,7 @@ plan. That is the vendor IdP's configuration, not this stack's.
   error table, §10 and step 1. Threat model: T20, M9, M12 and M13
   widened, new T37, T38 and M27.
 - This record lands in one PR with the code. That PR also sets it to
-  Accepted, appends "amended by ADR-043 (client ids accepted on a token
+  Accepted, appends "amended by ADR-0043 (client ids accepted on a token
   without `aud`)" to ADR-0004's Status line, adds a dated "Amended by
   ADR-0043" trailing note to it, as ADR-0015 does, and
   updates the README (context input, example, Identity checklist),

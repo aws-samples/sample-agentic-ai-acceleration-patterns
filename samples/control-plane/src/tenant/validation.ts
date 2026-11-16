@@ -159,9 +159,16 @@ export function validateClientIds(clientIds: string[] | undefined): readonly str
   } else {
     const seen = new Set<string>();
     ids.forEach((id, index) => {
+      // A token for one client renders the same string each time, so a
+      // duplicate is caught before the pattern check skips it.
+      if (typeof id === 'string' && seen.has(id)) {
+        problems.push(`vendorIdpClientIds lists ${JSON.stringify(id)} twice`);
+        return;
+      }
       // A client created in the same app is a token until deploy; the
       // authorizer checks the resolved value at cold start (M27).
       if (typeof id === 'string' && Token.isUnresolved(id)) {
+        seen.add(id);
         return;
       }
       if (typeof id !== 'string' || !CLIENT_ID_PATTERN.test(id)) {

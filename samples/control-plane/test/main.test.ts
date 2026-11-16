@@ -168,6 +168,12 @@ describe('TenantStack', () => {
     expect(() => synth(props as unknown as Partial<TenantStackProps>)).toThrow(message);
   });
 
+  test('one client id token listed twice fails synth (R-38)', () => {
+    // A construct attribute returns the same token string on every read.
+    const clientId = Token.asString({ Ref: 'Client' });
+    expect(() => synth({ vendorIdpClientIds: [clientId, clientId] })).toThrow(/vendorIdpClientIds lists .* twice/);
+  });
+
   test('no demo shared parameter by default; one per demoApplicationIds entry (ADR-034)', () => {
     const names = (t: Template) =>
       (Object.values(t.findResources('AWS::SSM::Parameter')) as any[])

@@ -1,6 +1,6 @@
 # ADR-0004: The control plane knows only the vendor IdP; customer identity is an application plane decision
 
-**Status:** Accepted (revised — customer IdP removed from the control plane; amended by ADR-043 (client ids accepted on a token without `aud`))
+**Status:** Accepted (revised — customer IdP removed from the control plane; amended by ADR-0043 (client ids accepted on a token without `aud`))
 
 **Context:** Earlier drafts took two identity providers as deployment inputs:
 the vendor IdP protecting the control plane, and a customer IdP injected as
