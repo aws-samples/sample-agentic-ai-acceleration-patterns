@@ -30,23 +30,31 @@ A new optional stack input, `vendorIdp.clientIds` (default none). A token
 that carries `aud` is checked against `audience`, exactly as today. A token
 without `aud` passes that step only when its `client_id` claim is in the
 list and equals `sub`, so the client acts as itself and a person's access
-token issued through that client is refused. Signature, issuer, `exp`,
-`sub` and `role` are checked as before in both cases. Pros: off by
+token issued through that client is refused. A second optional input,
+`vendorIdp.requiredScope` (default none), names a scope the token's
+space-separated `scope` claim must also hold, such as this API's
+resource-server scope. It binds the token to this API: without it, a
+listed client that also calls another API on the same issuer could replay
+its token for that API here. Signature, issuer, `exp`, `sub` and `role`
+are checked as before in both cases. Pros: off by
 default, so an existing deployment admits no new caller; names exactly
 the clients the deployer trusts, the same thing an audience does for ID
 tokens; `client_id` is the claim RFC 9068 §2.2 defines for the client
 (the same section requires `aud`, which Cognito leaves out, hence the
-need); one path per token, never two tries. Cons: a second list to
-review beside the issuer's client registrations; a deployer can list a
-client that serves a broader population.
+need); the scope adds what `aud` would have said, "this token is for
+this API", on top of the client; one path per token, never two tries.
+Cons: a second list to review beside the issuer's client registrations;
+a deployer can list a client that serves a broader population; an issuer
+that names the client in another claim (Okta `cid`, Entra `appid`) or
+sets `sub` to something else never passes this path.
 
-### Option 2: Require a custom scope instead of an audience
+### Option 2: Require a custom scope instead of a client id
 The deployer names a resource-server scope (`control-plane/read`) that a
 token without `aud` must carry. Pros: the OAuth way to say "this token is
 for this API". Cons: any client on the issuer can be granted the scope by
-configuration, so the scope does not name a client; it is a second
-authorization claim beside `role`, which already chooses the grant; a
-person's access token rarely carries custom scopes.
+configuration, so the scope alone does not name a client; a person's
+access token rarely carries custom scopes. Option 1 takes the scope as
+an optional extra check beside the client id, not in its place.
 
 ### Option 3: Treat `client_id` as an audience
 Pass `audience` and the client ids to the JWT library as one list and copy
@@ -64,8 +72,11 @@ already decide the grant (R-36).
 
 ## Decision
 Option 1. `vendorIdp.clientIds` lists the client ids accepted when a token
-has no `aud`, and the token's `sub` must equal its `client_id`. It
-defaults to none, so nothing changes until a deployer names one. The
+has no `aud`, and the token's `sub` must equal its `client_id`. When
+`vendorIdp.requiredScope` is set, the token's `scope` claim must also hold
+it as a whole token. Both default to none, so nothing changes until a
+deployer names a client, and a scope without a client fails synth. The
+scope chooses no grant; `role` does. The
 token is verified once without an audience, then one path is taken on the
 payload: any `aud` key, even `[]`, `""` or `null`, takes the audience
 path, unchanged from today, and never falls back to the client id path.
@@ -81,22 +92,25 @@ plan. That is the vendor IdP's configuration, not this stack's.
 - The caller's `sub` is the client id, so the access log and every build's
   `OPERATOR_ID` name the client, not a person (M12 still holds).
 - A listed client that serves a broader population widens access the way
-  a shared audience does (T20). The list is reviewed with the issuer's
-  client registrations (M9).
+  a shared audience does (T20). A listed client that also calls another
+  API on the issuer can replay that token here unless `requiredScope` is
+  set (T37); the README checklist asks for it. The list is reviewed with
+  the issuer's client registrations (M9).
 - A machine client's secret lasts until rotated and has no second
   factor, so a leak is bounded by rotation, not by token lifetime (T38).
   Machine clients get the reader role unless they must operate.
 - The integration test's vendor IdP moves to the Essentials plan, a user
-  pool domain and a V3 trigger, and adds a resource server with one scope
-  and two machine clients with secrets, one listed in `clientIds`. Step 1
-  proves the listed client's token reads and is refused on writes, and
-  that the unlisted client's token gets 403. A unit test covers what
-  Cognito cannot mint: a failing `aud` with a listed `client_id`,
-  malformed `aud` values, and a person's access token from a listed
-  client.
-- Spec changes: R-2, §3.2 (new R-38), §3.3 (`vendorIdp.clientIds`), the §5
-  error table, §10 and step 1. Threat model: T20, M9, M12 and M13
-  widened, new T37, T38 and M27.
+  pool domain and a V3 trigger, and adds a resource server with two
+  scopes and two machine clients with secrets, one listed in `clientIds`;
+  the stack requires `control-plane/read`. Step 1 proves the listed
+  client's token reads and is refused on writes, that its token for the
+  other scope gets 403, and that the unlisted client's token gets 403.
+  A unit test covers what Cognito cannot mint: a failing `aud` with a
+  listed `client_id`, malformed `aud` values, a person's access token
+  from a listed client, and a scope that only shares a prefix.
+- Spec changes: R-2, §3.2 (new R-38), §3.3 (`vendorIdp.clientIds`,
+  `vendorIdp.requiredScope`), the §5 error table, §10 and step 1.
+  Threat model: T20, M9, M12 and M13 widened, new T37, T38 and M27.
 - This record lands in one PR with the code. That PR also sets it to
   Accepted, appends "amended by ADR-0043 (client ids accepted on a token
   without `aud`)" to ADR-0004's Status line, adds a dated "Amended by

@@ -31,8 +31,9 @@ Validations.of(app).addPlugins(
 // (ADR-025, default `control-plane`), demoApplicationIds (the sample
 // scripts' shared parameter, ADR-034), and the role lists allowedRoles
 // (default ["operator"]) and readerRoles (default none) (spec R-36, ADR-042),
-// and vendorIdpClientIds (default none), the client ids accepted on a token
-// without `aud` (spec R-38, ADR-043).
+// vendorIdpClientIds (default none), the client ids accepted on a token
+// without `aud`, and vendorIdpRequiredScope (default none), the scope such a
+// token must also carry (spec R-38, ADR-043).
 //
 // A second mode (ADR-025): `--context cellAccount='{...}'` synthesizes ONLY
 // the account role pair stack, for deployment into another account by its
@@ -77,11 +78,13 @@ if (cellAccount !== undefined) {
   const readerRoles = parseJsonContext<string[]>('readerRoles');
   // Optional (R-38): client ids accepted on a token without `aud`.
   const vendorIdpClientIds = parseJsonContext<string[]>('vendorIdpClientIds');
+  const vendorIdpRequiredScope = app.node.tryGetContext('vendorIdpRequiredScope') as string | undefined;
 
   new TenantStack(app, 'control-plane-dev', {
     vendorIdpIssuerUrl: String(vendorIdpIssuerUrl),
     vendorIdpAudience: String(vendorIdpAudience),
     vendorIdpClientIds,
+    vendorIdpRequiredScope,
     fleetName,
     tenantBuildManagedPolicyArns,
     demoApplicationIds,

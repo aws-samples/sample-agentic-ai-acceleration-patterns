@@ -9,6 +9,7 @@ import {
   parseAllowedRoles,
   parseClientIds,
   parseReaderRoles,
+  parseRequiredScope,
   resolveRoleGrants,
 } from '../../src/shared/authorizer-policy';
 
@@ -188,5 +189,50 @@ describe('audienceAccepted (R-38)', () => {
 
   test('no aud and no listed client ids admits nothing', () => {
     expect(audienceAccepted({ client_id: 'machine-1', sub: 'machine-1' }, AUD, new Set())).toBe(false);
+  });
+});
+
+describe('parseRequiredScope (R-38, M27)', () => {
+  const listed = new Set(['machine-1']);
+
+  test('unset or empty means none', () => {
+    expect(parseRequiredScope(undefined, listed)).toBeUndefined();
+    expect(parseRequiredScope(' ', listed)).toBeUndefined();
+    expect(parseRequiredScope(undefined, new Set())).toBeUndefined();
+  });
+
+  test('returns the trimmed scope', () => {
+    expect(parseRequiredScope(' control-plane/read ', listed)).toBe('control-plane/read');
+  });
+
+  test.each([
+    ['a b', /not a single scope token/],
+    ['a"b', /not a single scope token/],
+  ])('throws on %j', (raw, message) => {
+    expect(() => parseRequiredScope(raw, listed)).toThrow(message);
+  });
+
+  test('throws when no client ids are listed', () => {
+    expect(() => parseRequiredScope('control-plane/read', new Set())).toThrow(/lists no client ids/);
+  });
+});
+
+describe('audienceAccepted with a required scope (R-38)', () => {
+  const AUD = 'control-plane';
+  const listed = new Set(['machine-1']);
+  const SCOPE = 'control-plane/read';
+  const machine = { client_id: 'machine-1', sub: 'machine-1' };
+
+  test.each([
+    ['the scope alone', { ...machine, scope: SCOPE }, true],
+    ['the scope among others', { ...machine, scope: `a/b ${SCOPE}` }, true],
+    ['no scope claim', machine, false],
+    ['another scope', { ...machine, scope: 'other/read' }, false],
+    ['a scope with the same prefix', { ...machine, scope: `${SCOPE}write` }, false],
+    ['a non-string scope', { ...machine, scope: [SCOPE] }, false],
+    ['the scope on an unlisted client', { client_id: 'machine-2', sub: 'machine-2', scope: SCOPE }, false],
+    ['the audience without a scope', { aud: AUD, sub: 'u' }, true],
+  ])('%s', (_name, payload, expected) => {
+    expect(audienceAccepted(payload, AUD, listed, SCOPE)).toBe(expected);
   });
 });

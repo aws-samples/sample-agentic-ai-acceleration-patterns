@@ -174,30 +174,36 @@ const idpClient = vendorIdp.addClient('IntegOperatorClient', {
 
 // R-38: two machine clients on the client credentials flow. Cognito runs
 // that flow only at the domain's /oauth2/token endpoint and refuses a
-// client-credentials client without a custom scope; the authorizer ignores
-// scope. The stack lists the first client in vendorIdpClientIds; the second
-// gets the same role and must still be refused.
+// client-credentials client without a custom scope. The stack lists the
+// first client in vendorIdpClientIds and requires `control-plane/read`; the
+// second gets the same role and must still be refused. Both may also ask
+// for `control-plane/other`, which stands in for another API's scope.
 const idpDomain = vendorIdp.addDomain('VendorIdpDomain', {
   cognitoDomain: { domainPrefix: `cp-integ-${accountA}` },
 });
 const readScope = new cognito.ResourceServerScope({ scopeName: 'read', scopeDescription: 'Integ test machine reads' });
+const otherScope = new cognito.ResourceServerScope({ scopeName: 'other', scopeDescription: 'Integ test stand-in for another API' });
 const controlPlaneResource = vendorIdp.addResourceServer('ControlPlaneResource', {
   identifier: 'control-plane',
-  scopes: [readScope],
+  scopes: [readScope, otherScope],
 });
 const machineClientProps: cognito.UserPoolClientOptions = {
   generateSecret: true,
   authFlows: {},
   oAuth: {
     flows: { clientCredentials: true },
-    scopes: [cognito.OAuthScope.resourceServer(controlPlaneResource, readScope)],
+    scopes: [
+      cognito.OAuthScope.resourceServer(controlPlaneResource, readScope),
+      cognito.OAuthScope.resourceServer(controlPlaneResource, otherScope),
+    ],
   },
 };
 const listedMachineClient = vendorIdp.addClient('IntegListedMachineClient', machineClientProps);
 const unlistedMachineClient = vendorIdp.addClient('IntegUnlistedMachineClient', machineClientProps);
 
 // Calls the API as a machine client: reads the client's secret, gets a
-// client-credentials token from the domain and makes one request. Returns
+// client-credentials token for the event's scope (default
+// `control-plane/read`) from the domain and makes one request. Returns
 // the status and the facts R-38 depends on, never the secret or the token,
 // so neither reaches a template, an output or the assertion results.
 const machineProbe = new lambda.Function(setup, 'MachineClientProbe', {
@@ -207,7 +213,7 @@ const machineProbe = new lambda.Function(setup, 'MachineClientProbe', {
   environment: {
     USER_POOL_ID: vendorIdp.userPoolId,
     TOKEN_URL: `${idpDomain.baseUrl()}/oauth2/token`,
-    SCOPE: 'control-plane/read',
+    DEFAULT_SCOPE: 'control-plane/read',
   },
   code: lambda.Code.fromInline(`
     const { CognitoIdentityProviderClient, DescribeUserPoolClientCommand } = require('@aws-sdk/client-cognito-identity-provider');
@@ -220,7 +226,7 @@ const machineProbe = new lambda.Function(setup, 'MachineClientProbe', {
       const got = await fetch(process.env.TOKEN_URL, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded', authorization: 'Basic ' + basic },
-        body: 'grant_type=client_credentials&scope=' + encodeURIComponent(process.env.SCOPE),
+        body: 'grant_type=client_credentials&scope=' + encodeURIComponent(event.scope || process.env.DEFAULT_SCOPE),
         signal: AbortSignal.timeout(10000),
       });
       if (!got.ok) throw new Error('token endpoint returned ' + got.status);
@@ -237,6 +243,7 @@ const machineProbe = new lambda.Function(setup, 'MachineClientProbe', {
         hasAud: claims.aud !== undefined,
         subIsClient: claims.sub === claims.client_id,
         role: claims.role === undefined ? null : claims.role,
+        scope: claims.scope === undefined ? null : claims.scope,
       };
     };
   `),
@@ -419,6 +426,7 @@ const stack = new TenantStack(app, 'control-plane-integ', {
   readerRoles: ['control-plane:reader'],
   // R-38: the listed machine client's token has no `aud` (step 1).
   vendorIdpClientIds: [listedMachineClient.userPoolClientId],
+  vendorIdpRequiredScope: 'control-plane/read',
 });
 // Both shared CodeBuild projects pull the stamped source from the test
 // bucket (the source fetch runs under the build role, before the buildspec
@@ -943,20 +951,24 @@ const unlistedCreateTenant = integ.assertions
   .expect(ExpectedResult.objectLike({ status: 403 }));
 // 1 (machine clients, R-38). A client-credentials token has no `aud` and a
 // `sub` equal to its client id. The listed client reads and is refused on a
-// write; the unlisted client, with the same role, is refused on a read.
-const machineExpect = (status: number) => ExpectedResult.objectLike({
-  Payload: JSON.stringify({ status, hasAud: false, subIsClient: true, role: 'control-plane:reader' }),
+// write; the unlisted client, with the same role, is refused on a read; the
+// listed client's token for another scope is refused on a read.
+const machineExpect = (status: number, scope = 'control-plane/read') => ExpectedResult.objectLike({
+  Payload: JSON.stringify({ status, hasAud: false, subIsClient: true, role: 'control-plane:reader', scope }),
 });
-const machineCall = (clientId: string, method: string, pathPart: string, body?: object) =>
+const machineCall = (clientId: string, method: string, pathPart: string, body?: object, scope?: string) =>
   integ.assertions.invokeFunction({
     functionName: machineProbe.functionName,
-    payload: JSON.stringify({ clientId, method, url: `${apiUrl}${pathPart}`, body: body === undefined ? undefined : JSON.stringify(body) }),
+    payload: JSON.stringify({ clientId, method, scope, url: `${apiUrl}${pathPart}`, body: body === undefined ? undefined : JSON.stringify(body) }),
   });
 const machineListTenants = machineCall(listedMachineClient.userPoolClientId, 'GET', 'tenants').expect(machineExpect(200));
 const machineGetTenant1 = machineCall(listedMachineClient.userPoolClientId, 'GET', `tenants/${tenantId1}`).expect(machineExpect(200));
 const machineCreateTenant = machineCall(listedMachineClient.userPoolClientId, 'POST', 'tenants', { name: 'integ-machine-must-not-create' })
   .expect(machineExpect(403));
 const unlistedMachineListTenants = machineCall(unlistedMachineClient.userPoolClientId, 'GET', 'tenants').expect(machineExpect(403));
+const machineOtherScopeListTenants = machineCall(
+  listedMachineClient.userPoolClientId, 'GET', 'tenants', undefined, 'control-plane/other',
+).expect(machineExpect(403, 'control-plane/other'));
 
 // Nothing the reader, the unlisted role or the machine clients tried was
 // written: still three tenants, T1 unchanged.
@@ -1902,6 +1914,7 @@ createUser
   .next(machineGetTenant1)
   .next(machineCreateTenant)
   .next(unlistedMachineListTenants)
+  .next(machineOtherScopeListTenants)
   .next(listTenantsAfterReader)
   .next(getTenant1AfterReader)
   .next(updateTenant3)

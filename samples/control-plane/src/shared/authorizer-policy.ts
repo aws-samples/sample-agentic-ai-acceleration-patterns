@@ -141,6 +141,34 @@ export function parseClientIds(raw: string | undefined): ReadonlySet<string> {
 }
 
 /**
+ * A `requiredScope` value (spec §3.3, R-38): one RFC 6749 §3.3 scope
+ * token, so no space, `"` or `\`, at most 256 characters.
+ */
+export const SCOPE_PATTERN = /^[\x21\x23-\x5B\x5D-\x7E]{1,256}$/;
+
+/**
+ * Parses `VENDOR_IDP_REQUIRED_SCOPE` (M27): the scope a token without `aud`
+ * must carry. Unset or empty means none. A value outside the pattern, or a
+ * scope with no client ids to apply it to, throws at cold start.
+ */
+export function parseRequiredScope(
+  raw: string | undefined,
+  clientIds: ReadonlySet<string>,
+): string | undefined {
+  if (raw === undefined || raw.trim() === '') {
+    return undefined;
+  }
+  const scope = raw.trim();
+  if (!SCOPE_PATTERN.test(scope)) {
+    throw new Error('VENDOR_IDP_REQUIRED_SCOPE is not a single scope token');
+  }
+  if (clientIds.size === 0) {
+    throw new Error('VENDOR_IDP_REQUIRED_SCOPE is set but VENDOR_IDP_CLIENT_IDS lists no client ids');
+  }
+  return scope;
+}
+
+/**
  * The audience step of spec R-38, on a payload whose signature, issuer,
  * `exp` and non-empty string `sub` are already verified. Exactly one path
  * per token, chosen by whether the `aud` key is present:
@@ -150,12 +178,15 @@ export function parseClientIds(raw: string | undefined): ReadonlySet<string> {
  * - `aud` absent: `client_id` must be a string in `clientIds` and equal
  *   `sub`, so only a listed client acting as itself passes, and a person's
  *   access token issued through that client (no `aud`, `sub` names the
- *   person) does not.
+ *   person) does not. When `requiredScope` is set, the space-separated
+ *   `scope` claim must also hold it, so a listed client's token minted for
+ *   another API on the same issuer does not pass here.
  */
 export function audienceAccepted(
   payload: Readonly<Record<string, unknown>>,
   audience: string,
   clientIds: ReadonlySet<string>,
+  requiredScope?: string,
 ): boolean {
   if (payload.aud !== undefined) {
     const aud = payload.aud;
@@ -165,11 +196,16 @@ export function audienceAccepted(
     return Array.isArray(aud) && aud.includes(audience);
   }
   const clientId = payload.client_id;
-  return typeof clientId === 'string'
+  const clientAccepted = typeof clientId === 'string'
     && clientIds.has(clientId)
     && typeof payload.sub === 'string'
     && payload.sub !== ''
     && clientId === payload.sub;
+  if (!clientAccepted || requiredScope === undefined) {
+    return clientAccepted;
+  }
+  return typeof payload.scope === 'string'
+    && payload.scope.split(' ').includes(requiredScope);
 }
 
 /** Extracts the raw JWT from an `Authorization: Bearer <token>` value. */

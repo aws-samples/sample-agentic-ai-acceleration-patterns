@@ -99,6 +99,8 @@ beforeAll(() => {
   process.env.READER_ROLES = 'control-plane:reader';
   // M27: one listed machine client.
   process.env.VENDOR_IDP_CLIENT_IDS = 'machine-1';
+  // M27: the scope a token without `aud` must carry.
+  process.env.VENDOR_IDP_REQUIRED_SCOPE = 'control-plane/read';
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
 
@@ -245,6 +247,28 @@ describe('authorizer client id path (R-38, M27)', () => {
 
   test('an array aud that contains the audience passes', async () => {
     const result = await handler(event(makeToken({ ...validClaims(), aud: ['other', AUDIENCE], role: 'operator' })));
+    expect(result.policyDocument.Statement[0].Effect).toBe('Allow');
+  });
+
+  test.each([
+    ['no scope claim', undefined],
+    ['another API\'s scope', 'other-api/read'],
+    ['a longer scope with the same prefix', 'control-plane/readwrite'],
+  ])('a listed client with %s is denied', async (_name, scope) => {
+    const claims: Record<string, unknown> = { ...machineClaims('machine-1'), scope, role: 'control-plane:reader' };
+    if (scope === undefined) delete claims.scope;
+    const result = await handler(event(makeToken(claims)));
+    expect(result.policyDocument.Statement[0].Effect).toBe('Deny');
+  });
+
+  test('a listed client whose scopes include the required one passes', async () => {
+    const claims = { ...machineClaims('machine-1'), scope: 'other-api/read control-plane/read', role: 'control-plane:reader' };
+    const result = await handler(event(makeToken(claims)));
+    expect(result.policyDocument.Statement[0].Effect).toBe('Allow');
+  });
+
+  test('a token with the audience needs no scope', async () => {
+    const result = await handler(event(makeToken({ ...validClaims(), role: 'operator' })));
     expect(result.policyDocument.Statement[0].Effect).toBe('Allow');
   });
 

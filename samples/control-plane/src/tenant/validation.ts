@@ -3,7 +3,7 @@
 
 import { Stack, Token } from 'aws-cdk-lib';
 import { RegionInfo } from 'aws-cdk-lib/region-info';
-import { CLIENT_ID_PATTERN, ROLE_VALUE_PATTERN } from '../shared/authorizer-policy';
+import { CLIENT_ID_PATTERN, ROLE_VALUE_PATTERN, SCOPE_PATTERN } from '../shared/authorizer-policy';
 
 /**
  * Synth-time validation of the stack inputs (spec §3.3). Shared by the
@@ -173,8 +173,6 @@ export function validateClientIds(clientIds: string[] | undefined): readonly str
       }
       if (typeof id !== 'string' || !CLIENT_ID_PATTERN.test(id)) {
         problems.push(`vendorIdpClientIds[${index}] ${JSON.stringify(id)} does not match ${CLIENT_ID_PATTERN.source}`);
-      } else if (seen.has(id)) {
-        problems.push(`vendorIdpClientIds lists ${JSON.stringify(id)} twice`);
       } else {
         seen.add(id);
       }
@@ -184,4 +182,29 @@ export function validateClientIds(clientIds: string[] | undefined): readonly str
     throw new Error(`Invalid vendorIdpClientIds (spec R-38):\n  - ${problems.join('\n  - ')}`);
   }
   return ids;
+}
+
+/**
+ * Validates `vendorIdp.requiredScope` at synth (spec §3.3, R-38): optional,
+ * default none; one scope token, and only beside at least one client id,
+ * since it applies to the no-`aud` path alone. Fails synth otherwise.
+ */
+export function validateRequiredScope(
+  scope: string | undefined,
+  clientIds: readonly string[],
+): string | undefined {
+  if (scope === undefined) {
+    return undefined;
+  }
+  const problems: string[] = [];
+  if (typeof scope !== 'string' || (!Token.isUnresolved(scope) && !SCOPE_PATTERN.test(scope))) {
+    problems.push(`vendorIdpRequiredScope ${JSON.stringify(scope)} does not match ${SCOPE_PATTERN.source}`);
+  }
+  if (clientIds.length === 0) {
+    problems.push('vendorIdpRequiredScope needs at least one vendorIdpClientIds entry');
+  }
+  if (problems.length > 0) {
+    throw new Error(`Invalid vendorIdpRequiredScope (spec R-38):\n  - ${problems.join('\n  - ')}`);
+  }
+  return scope;
 }

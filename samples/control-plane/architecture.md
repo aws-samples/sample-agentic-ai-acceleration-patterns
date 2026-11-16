@@ -178,7 +178,8 @@ Before the role is read, the audience step takes one path per token
 without one, such as a Cognito client-credentials access token, passes only
 when its `client_id` is in `VENDOR_IDP_CLIENT_IDS` (default none) and
 equals `sub`, so a listed machine client acts as itself and a person's
-access token through it is refused.
+access token through it is refused. When `VENDOR_IDP_REQUIRED_SCOPE` is
+set, that token's `scope` must also hold it, which binds it to this API.
 The authorizer maps the `role` claim to one of two grants (ADR-018,
 ADR-042): a value in `ALLOWED_ROLES` (default `operator`) gets the operator
 grant, a value in `READER_ROLES` (default none) the reader grant, and a
@@ -1138,6 +1139,7 @@ tooling/demo convenience.
 |---|---|
 | `vendorIdp.issuerUrl`, `vendorIdp.audience` | Lambda Authorizer |
 | `vendorIdp.clientIds` (optional, default none) | Lambda Authorizer: client ids accepted on a token without `aud`, when `client_id` equals `sub` (ADR-043) |
+| `vendorIdp.requiredScope` (optional, default none) | Lambda Authorizer: the scope a token without `aud` must also carry (ADR-043) |
 | `fleetName` (optional, default `control-plane`) | names the five fleet roles: `<fleet>-api`, `<fleet>-cell-build`, `<fleet>-tenant-build` in the control plane account and `<fleet>-cell-provisioning`, `<fleet>-tenant-provisioning` in every account that hosts cells (ADR-025, ADR-028); `[a-z0-9-]{1,32}` |
 | `tenantBuildManagedPolicyArns` (optional) | customer-managed IAM policy ARNs attached to the tenant provisioning role of the stack's own account, in addition to its §7 SSM grants (ADR-022, ADR-025) |
 | `demoApplicationIds` (optional, default none) | publishes `/application-plane/applications/<applicationId>/shared/base-domain` in the stack's own account for each listed id, the demo shared resource the sample cell script reads (ADR-034); a real application plane publishes its own |

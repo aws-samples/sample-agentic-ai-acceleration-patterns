@@ -123,6 +123,7 @@ describe('TenantStack', () => {
           ALLOWED_ROLES: 'operator',
           READER_ROLES: '',
           VENDOR_IDP_CLIENT_IDS: '',
+          VENDOR_IDP_REQUIRED_SCOPE: '',
         },
       },
     });
@@ -166,6 +167,23 @@ describe('TenantStack', () => {
     [{ vendorIdpClientIds: [Token.asString({ Ref: 'Client' }), 'a b'] }, /vendorIdpClientIds\[1\] "a b" does not match/],
   ])('invalid client ids fail synth (R-38): %j', (props, message) => {
     expect(() => synth(props as unknown as Partial<TenantStackProps>)).toThrow(message);
+  });
+
+  test('a required scope reaches the authorizer (R-38, M27)', () => {
+    const t = synth({ vendorIdpClientIds: ['abc123client'], vendorIdpRequiredScope: 'control-plane/read' });
+    t.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({ VENDOR_IDP_REQUIRED_SCOPE: 'control-plane/read' }),
+      },
+    });
+  });
+
+  test.each([
+    [{ vendorIdpRequiredScope: 'control-plane/read' }, /needs at least one vendorIdpClientIds entry/],
+    [{ vendorIdpClientIds: ['abc'], vendorIdpRequiredScope: 'a b' }, /vendorIdpRequiredScope "a b" does not match/],
+    [{ vendorIdpClientIds: ['abc'], vendorIdpRequiredScope: '' }, /vendorIdpRequiredScope "" does not match/],
+  ])('an invalid required scope fails synth (R-38): %j', (props, message) => {
+    expect(() => synth(props as Partial<TenantStackProps>)).toThrow(message);
   });
 
   test('one client id token listed twice fails synth (R-38)', () => {
