@@ -600,7 +600,7 @@ the default mode; `test/integ.host.ts` repeats the steps marked (host) with
 
 | # | Question | Needed by |
 |---|---|---|
-| Q-1 | Which public hosted zone can the test account use for `appDomain`? | spike S-1 |
+| Q-1 | Which public hosted zone can the test account use for `appDomain`? **Answered 2026-11-16**: a public zone for a delegated test subdomain in the edge account, with its own SPF, DKIM and DMARC records. The spikes and the integration test take its name and zone id as inputs (`TFD_APP_DOMAIN`, `TFD_HOSTED_ZONE_ID`); neither is committed | spike S-1 |
 | Q-2 | Does the integration test deploy its own control plane, or reuse one when found and skip otherwise? | integration test |
 | Q-3 | Does the dedicated tenant (custom domain) path belong in this sample or in a follow-up? | scope |
 | Q-4 | Should the integration test also compose `agentic-runtime-isolation` for `/agents/*`, or reuse a deployment only when one is found? | integration test |
