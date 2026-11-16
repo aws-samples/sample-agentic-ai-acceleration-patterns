@@ -6,6 +6,7 @@ This sample has been verified as working via automated integration tests and end
 
 | Date | Commit | Test accounts | Region | Verified by | Notes |
 |------|--------|---------------|--------|-------------|-------|
+| 2026-11-16 | d6f0fcb | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 2890s`: every step of spec §10 passed, with the client id path (R-38) in step 1: the listed machine client's token (no `aud`, `sub` equal to its client id) read and was refused on a write, and the unlisted client was refused. Nothing left in either account |
 | 2026-11-13 | 219c26d | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 3005s`: every step of spec §10 passed, with the reader grant (R-36) in step 1. Deploy about 4 min, assertions 22 min, teardown about 34 min; nothing left in either account |
 
 **Integration test coverage:**
