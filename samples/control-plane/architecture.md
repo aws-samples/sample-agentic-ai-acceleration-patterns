@@ -6,13 +6,14 @@ This sample has been verified as working via automated integration tests and end
 
 | Date | Commit | Test accounts | Region | Verified by | Notes |
 |------|--------|---------------|--------|-------------|-------|
+| 2026-11-16 | aa1221a | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 3071s`: every step of spec §10 passed, with the required scope (R-38) in step 1: the listed machine client's `control-plane/read` token read and was refused on a write, its `control-plane/other` token was refused, and the unlisted client was refused. Deploy about 4 min, assertions 23 min, teardown about 24 min; nothing left in either account |
 | 2026-11-16 | d6f0fcb | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 2890s`: every step of spec §10 passed, with the client id path (R-38) in step 1: the listed machine client's token (no `aud`, `sub` equal to its client id) read and was refused on a write, and the unlisted client was refused. Nothing left in either account |
 | 2026-11-13 | 219c26d | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 3005s`: every step of spec §10 passed, with the reader grant (R-36) in step 1. Deploy about 4 min, assertions 22 min, teardown about 34 min; nothing left in either account |
 
 **Integration test coverage:**
 - Two-account, two-application deployment scenario
 - Operator and reader grants: all ten reader reads, every reader write refused (its first call included), a role in neither list refused, nothing written
-- Client id path (R-38): a listed machine client's token without `aud` reads and is refused on a write; an unlisted client is refused
+- Client id path (R-38): a listed machine client's token without `aud` reads and is refused on a write; its token without the required scope is refused; an unlisted client is refused
 - Account handshake validation (external ID verification)
 - Cell lifecycle: creation, tenant placement, reuse after evacuation
 - Cross-account cell and tenant provisioning
