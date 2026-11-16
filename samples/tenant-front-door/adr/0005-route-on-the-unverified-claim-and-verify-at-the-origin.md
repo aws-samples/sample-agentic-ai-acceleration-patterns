@@ -30,11 +30,12 @@ the token, refuses a `tenant_id` that differs from the hint (compared
 case-insensitively, since the router sends the lower-case id), and refuses
 a tenant its cell does not host (§3.5).
 
-Pros: the router stays a CloudFront Function with no secrets, no key
-fetch and no network call (P-1). Signature verification at the cell stops
-a forged claim (P-1, §10 step 7). The hosts check catches a validly signed
-token routed to the wrong cell, for example through a stale or wrong
-`cell#` route. The route hint guards `host` mode: the hint carries the
+Pros: the router stays a CloudFront Function with no token-verification
+key, no key fetch and no network call (P-1). It holds no secrets in
+`single` mode and only the sign-in HMAC key in `host` mode (ADR-0016).
+Signature verification at the cell stops a forged claim (P-1, §10 step
+7). The hosts check catches a validly signed token routed to the wrong
+cell, for example through a stale or wrong `cell#` route. The route hint guards `host` mode: the hint carries the
 host's tenant, so a token for `a` on `b`'s host is refused even when both
 tenants share one cell (P-4). In `single` mode the hint comes from the
 same token the cell verifies, so it always agrees. Cons: a forged token
@@ -71,8 +72,9 @@ verification at higher cost; Option 3 loses the agreement check.
 
 ## Consequences
 
-- Easier: the router holds no keys and needs no issuer access; the same
-  hint and check work in `host` mode, where the host decides the tenant.
+- Easier: the router holds no token-verification keys and needs no issuer
+  access; the same hint and check work in `host` mode, where the host
+  decides the tenant.
 - Easier: refusals at the origin are logged with both tenant ids (§3.5).
 - Harder: every cell API must verify the token, compare `tenant_id` with
   `x-tenant-route`, and check its own tenant namespace; the demo cell API

@@ -16,8 +16,8 @@ sets the web baseline on every response (P-8). A cell origin that answers
 callers who bypass the distribution skips both. The demo cell API is a
 Lambda function URL (§6.1). The tenant router picks the origin per request
 with origin modification (ADR-0004), so the protection must work on an
-origin chosen at run time, in another account, with no secret in the
-function (§3.3).
+origin chosen at run time, in another account, with no per-cell secret in
+the function (§3.3).
 
 The cell also needs the viewer's bearer token, because it is the authoriser
 (ADR-0005). Origin access control on a function URL signs with
@@ -55,10 +55,11 @@ sample defines, so every cell API reads `x-tenant-token`, not
 ### Option 2: Secret header
 
 The distribution adds a header the cell checks. Pros: works with any
-origin type. Cons: the router holds no secrets (§3.3), so the header comes
-from the origin configuration, one value for every cell; a tenant-owned
-account sees the value in its own cell and can then call any other cell
-directly. Rotation touches every cell account. A value per cell avoids the
+origin type. Cons: the router holds no per-cell secret (it holds none in
+`single` mode and only the sign-in HMAC key in `host` mode, ADR-0016), so
+the header comes from the origin configuration, one value for every cell; a
+tenant-owned account sees the value in its own cell and can then call any
+other cell directly. Rotation touches every cell account. A value per cell avoids the
 shared secret, at the cost of secrets in the route table; it is the
 fallback below.
 
@@ -91,7 +92,9 @@ origin request policy, `Managed-AllViewerExceptHostHeader`, forwards
 - A cell stack needs the distribution ARN at deploy time, so the shared
   stack in each cell account copies it from the edge (§6.4).
 - The SPA sends `x-amz-content-sha256` on every `PUT` and `POST` to
-  `/api/*`. The demo SPA does it; a vendor SPA must too.
+  `/api/*`. The demo SPA does it; a vendor SPA must too, and so must any
+  other client that calls `/api/*` through the front door. `/agents/*`
+  needs no hash, because it has no origin access control.
 - Origins are Lambda function URLs and S3 only (§1.2). Another origin type
   needs its own record.
 - Spike S-3 (2026-11-16) passed through the multi-tenant distribution:
@@ -103,7 +106,8 @@ origin request policy, `Managed-AllViewerExceptHostHeader`, forwards
   call before the permission existed, a `POST` without
   `x-amz-content-sha256`, and a call with `lambda:InvokeFunctionUrl` but
   not `lambda:InvokeFunction`. So `CellRouteAccess` grants both actions,
-  and the SPA sends `x-amz-content-sha256` on every `POST` and `PUT`.
+  and the SPA sends `x-amz-content-sha256` on every `POST` and `PUT` to
+  `/api/*`.
 - The secret-header fallback was not needed and is not built.
 - Revisit when CloudFront offers origin access control for another origin
   type a cell uses, or a cell moves off function URLs.

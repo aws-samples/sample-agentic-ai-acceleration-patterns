@@ -63,7 +63,9 @@ request; Option 3 breaks P-9.
 ## Consequences
 
 - Easier: suspend and resume are one key write (§4.2); removal is a delete.
-- Easier: the router stays a pure lookup with no secrets and no writes.
+- Easier: the router stays a pure lookup with no writes. It holds no secrets
+  in `single` mode; in `host` mode it holds one, the sign-in HMAC key, in
+  the `signin` entry (ADR-0016).
 - Harder: the tenant count per front door is bounded by the store size
   (ADR-0012).
 - Harder: a route is not live everywhere at once. Scripts and the
@@ -75,8 +77,18 @@ request; Option 3 breaks P-9.
 - Spike S-2 (100 rounds, one edge location): a write takes a median of
   28.4 s and a p99 of 29.4 s from `put-key` to the first routed request,
   for inserts and updates alike, with no timeouts. That is fine for
-  onboarding but not instant, so `route.sh` waits until the route answers
-  before it reports success, and the integration test allows 60 s per
+  onboarding but not instant. `route.sh` waits a fixed 45 s after the
+  registrar returns (S-2 max 29.5 s at one edge location, plus margin). That
+  is a bound, not a check: a route in `single` mode cannot be observed
+  without a tenant token, and a `cell#` route cannot be observed from
+  outside at all. In `host` mode it also polls
+  `https://<tenant>.<appDomain>/config.json` until it answers 200, within
+  that bound. There is no unauthenticated probe path, because one would
+  reveal whether a tenant id exists. The integration test allows 60 s per
   route change.
+- Harder: `suspended` and a delete take effect after the same window. A
+  suspended or removed tenant is still routed until the change reaches the
+  edge location, and the cell's hosts check is the only refusal in
+  between.
 - Revisit when the tenant count nears the store ceiling, or when the
   router needs more than three reads per request.

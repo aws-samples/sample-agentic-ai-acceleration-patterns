@@ -26,8 +26,13 @@ backend-for-frontend (spec §1.2).
 
 ### Option 1: Tokens in memory, PKCE, bearer header
 
-The SPA holds the access token in a JavaScript variable. Nothing is written
-to `localStorage`, `sessionStorage` or cookies.
+The SPA holds the access token in a JavaScript variable. No token is
+written to `localStorage`, `sessionStorage` or cookies. Sign-in is a
+full-page redirect to the issuer, which discards page memory, so the PKCE
+verifier and the sign-in nonce are the exception: the origin that starts
+the flow keeps them in `sessionStorage`, from the authorize redirect until
+`/callback` reads and deletes them. They are single-use values, not
+credentials, and `sessionStorage` is per tab and per origin.
 
 Pros: no server-side session component. The router and the cell API read
 the same bearer token, in both addressing modes. A browser never attaches
@@ -51,7 +56,9 @@ concern. It is out of scope for this sample (spec §1.2).
 ## Decision
 
 Option 1. Access tokens stay in SPA memory, obtained with authorization code
-flow and PKCE, and the SPA sends them only in the `Authorization` header. The router can
+flow and PKCE, and the SPA sends them only in the `Authorization` header.
+The PKCE verifier and the nonce live in `sessionStorage` on the origin that
+starts sign-in until `/callback` deletes them. The router can
 read the tenant from the token at the edge without trusting it (P-1), the
 cell verifies the same token (P-4), and the shared origin in `single` mode
 holds no tenant state. The risk of script in the page using the token is
@@ -68,7 +75,11 @@ handled by the browser baseline: a hash-based CSP with Trusted Types
   tenant or signs out (spec §7.2), and its tests cover that.
 - Harder: a reload or a new tab needs a fresh sign-in redirect. The
   issuer's own session decides whether the user sees a prompt.
+- Harder: `/callback` must delete the verifier and the nonce on every
+  outcome, success or failure, so a stale value never serves a later
+  sign-in.
 - Follow-up: the demo SPA has no code path that writes a token to storage,
-  and a unit test checks that storage stays empty after sign-in.
+  and a unit test checks that storage holds no token and no verifier after
+  sign-in.
 - Revisit when the sample adds server-side rendering or a backend-for-frontend
   (spec §1.2), or when a tenant needs tokens kept out of page script.

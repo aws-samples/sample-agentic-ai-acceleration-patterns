@@ -2,9 +2,9 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Tenant front door for agentic applications: specification
 
-Status: Proposed. §8 lists the decisions of the first ADR batch; the
-records marked Proposed wait on the §9 spikes they name, and ADR-0015 on
-a control-plane change.
+Status: Proposed. §8 lists the decisions, all Accepted. One spike is
+still open, S-5 (`/agents/*` streaming, §9); if it fails it reopens the
+`/agents/*` origin request policy in ADR-0011.
 
 ## 1. Problem statement
 
@@ -128,15 +128,15 @@ dedicated distribution tenant on the same distribution, in either mode.
 | Multi-tenant distribution | edge | CloudFront (`ConnectionMode: tenant-only`) | Shared behaviours, policies and origins |
 | Pooled distribution tenant | edge | CloudFront distribution tenant | Serves `<appDomain>` (`single`) or `*.<appDomain>` (`host`) for every pooled tenant |
 | Dedicated distribution tenant | edge | CloudFront distribution tenant | Serves one tenant's own domain, with its own certificate and optional web ACL override |
-| Tenant router | edge | CloudFront Function (viewer request, JS 2.0) | Finds the tenant, refuses or routes |
-| Route table | edge | CloudFront KeyValueStore | `tenant`, `host` and `cell` entries (§4) |
+| Tenant router | edge | CloudFront Function (viewer request, JS 2.0) | Finds the tenant, refuses or routes. In `host` mode it also mints and checks the signed `state` of sign-in and sign-out (§3.5, ADR-0016) |
+| Route table | edge | CloudFront KeyValueStore | `tenant`, `host` and `cell` entries, the `app` settings and, in `host` mode, the `signin` key (§4) |
 | Route registrar | edge | API Gateway (IAM auth) and Lambda | The only writer of the route table; checks each write against the control plane (§3.4) |
 | SPA origin | edge | S3 bucket with origin access control | One build for every tenant |
 | Cell API origin | the cell's | The cell's API (demo: Lambda function URL with origin access control) | Verifies the token, checks the route hint and the cell's tenants |
 | `CellRouteAccess` construct | the cell's | Lambda permission | Grants `cloudfront.amazonaws.com` `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`, conditioned on the edge distribution's ARN |
 | Agent route | edge | `/agents/*` behaviour | Streams to the agent ingress of `agentic-runtime-isolation`, when configured, with the `Managed-AllViewerExceptHostHeader` origin request policy |
 | `route.sh` | the cell's | the control plane's cell and tenant scripts | Calls the registrar with the script's own credentials |
-| Telemetry | edge | CloudFront standard logging v2: delivery source, delivery destination, delivery and log group in `us-east-1` (ADR-0010, amended after spike S-1) | Per-tenant requests, errors, bytes, latency |
+| Telemetry | edge | CloudFront standard logging v2: delivery source, delivery destination, delivery and log group in `us-east-1` (ADR-0010) | Per-tenant requests, errors, bytes, latency |
 
 ### 3.2 Request paths
 
@@ -147,7 +147,9 @@ dedicated distribution tenant on the same distribution, in either mode.
 | `/config.json` | generated at the edge | none | `no-store` | `host` mode only |
 | `/api/*` | dynamic | the tenant's cell API, in the cell's account | disabled | yes |
 | `/agents/*` | dynamic, streaming | the agent ingress | disabled | yes |
-| `/logout` | generated at the edge | none | `no-store` | no |
+| `/logout` | generated at the edge | none | `no-store` | no (`host` mode: a registered host) |
+| `/signin-state` | generated at the edge, `host` mode only | none | `no-store` | a registered host |
+| `login.<appDomain>/callback`, `/logout` | the sign-in host, `host` mode only: 302 or 400 | none | `no-store` | no (§3.3 step 2) |
 
 `/agents/*` uses the managed origin request policy
 `Managed-AllViewerExceptHostHeader`. It forwards `Authorization` on `GET`
@@ -155,7 +157,8 @@ and `POST`, and it does not forward `Host`.
 
 `/config.json` gives the SPA its public settings: issuer URL, client id and
 scopes, plus the tenant id (upper-cased back to its control-plane form,
-which the token exchange expects) and display name in `host` mode. It holds nothing
+which the token exchange expects), display name and `redirectUri`
+(`https://login.<appDomain>/callback`) in `host` mode. It holds nothing
 secret. Serving it from the edge keeps the SPA bundle the same file for
 every tenant. In `single` mode the SPA learns the tenant after sign-in, from
 its own token.
@@ -165,9 +168,17 @@ its own token.
 On every viewer request:
 
 1. Remove every client `x-tenant-*` header (P-3).
-2. In `host` mode, or for a dedicated tenant's domain, lower-case the
-   `Host` header and look up `host#<host>`. No entry: 404 with a static
-   page.
+2. In `host` mode, when `Host` is `login.<appDomain>`, answer as the
+   sign-in host and stop (§3.5, ADR-0016), before any `host#` lookup,
+   because `host#login.<appDomain>` does not exist. `/callback?code&state`:
+   read the `signin` key; verify the `state`'s `kid`, HMAC, purpose `in` and
+   `exp`; check that `host#<h>` exists and its tenant is `active`; then
+   answer 302 to `https://<h>/callback` with the same query.
+   `/logout?state`: the same checks with purpose `out`; 302 to
+   `https://<h>/`. Anything else, or any failed check: 400 with a static
+   body. Otherwise, in `host` mode or for a dedicated tenant's domain,
+   lower-case the `Host` header and look up `host#<host>`. No entry: 404
+   with a static page.
 3. Paths that need no tenant (§3.2) skip to step 8.
 4. For `/api/*` and `/agents/*`, check `Sec-Fetch-Site`. Allow only
    `same-origin`, `none`, or no header; refuse the rest with 403 (§7.3).
@@ -191,11 +202,14 @@ On every viewer request:
    AgentCore Gateway ingress of `agentic-runtime-isolation`). Its origin
    request policy, `Managed-AllViewerExceptHostHeader`, forwards
    `Authorization` on `GET` and `POST` and does not forward `Host`.
-8. Serve `/config.json` and `/logout` directly. Rewrite SPA routes with no
-   file extension to `/index.html`.
+8. Serve `/config.json` and `/logout` directly. In `host` mode also serve
+   `/signin-state` (§3.5); in `single` mode it is 404. Rewrite SPA routes
+   with no file extension to `/index.html`.
 
-The router reads at most three keys per request. It holds no secrets,
-checks no signatures and writes nothing.
+The router reads at most three keys per request. It checks no token
+signatures and writes nothing. In `single` mode it holds no secrets. In
+`host` mode it holds one, the sign-in HMAC key in the `signin` entry
+(§3.5, ADR-0016).
 
 ### 3.4 Route registrar, step by step
 
@@ -241,20 +255,47 @@ only the edge account's operator role may make them.
 
 - Tenant users sign in in the SPA with authorization code flow and PKCE.
   In `single` mode there is one callback URL, `https://<appDomain>/`. In
-  `host` mode the one callback URL is a shared sign-in host,
-  `https://login.<appDomain>/callback`. The tenant origin starts sign-in
-  with a `state` signed with HMAC-SHA256 (tenant host, the SPA's nonce, an
-  expiry); a viewer-request function on the sign-in host checks it and
-  answers 302 to `https://<tenant>/callback`. The HMAC key is in the
-  KeyValueStore. A per-tenant callback URL would cap a pool at 100 URLs per
-  client and 15 client updates per second (spike S-4, ADR-0016).
+  `host` mode the one callback URL and the one sign-out URL are a shared
+  sign-in host, `https://login.<appDomain>/callback` and
+  `https://login.<appDomain>/logout`. A per-tenant URL would cap a pool at
+  100 URLs per client and 15 client updates per second (spike S-4,
+  ADR-0016). The `host` mode flow:
+  1. The SPA on `<tenant>.<appDomain>` makes a nonce and a PKCE verifier,
+     saves both in `sessionStorage`, and calls
+     `GET /signin-state?nonce=<base64url>` on its own host. The router
+     answers (only with `Sec-Fetch-Site: same-origin`, `no-store`)
+     `{"state":"<payload>.<hmac>"}`. The payload is
+     `{"v":1,"kid":...,"p":"in","h":<host>,"n":<nonce>,"exp":...}`, the
+     HMAC is HMAC-SHA256 with the `signin` key, and `exp` is 10 minutes out.
+  2. The SPA navigates to the issuer's authorize endpoint with
+     `redirect_uri=https://login.<appDomain>/callback`, the `state` and the
+     code challenge. It learns the `redirect_uri` from `/config.json`.
+  3. The issuer redirects to the sign-in host, which §3.3 step 2 checks
+     and redirects to `https://<h>/callback` with the code and `state`.
+  4. On `/callback` the SPA checks that the `state`'s `n` equals its saved
+     nonce, exchanges the code with the saved verifier and the same
+     `redirect_uri`, and deletes both saved values.
+  5. Sign-out: `/logout` on the tenant host answers 302 to the issuer's
+     logout endpoint with `logout_uri=https://login.<appDomain>/logout` and
+     a router-minted `state` with purpose `out`, plus `Clear-Site-Data`.
+     The sign-in host verifies it and answers 302 to `https://<h>/`.
+  A replayed `state` yields no token, because the replayer lacks the PKCE
+  verifier. The key is 32 random bytes, generated by a custom resource that
+  writes it to the store, so it is never in the template, an output or a
+  log. Whoever can read the store (`cloudfront-keyvaluestore:GetKey` or
+  `ListKeys`) or update or test the router (`cloudfront:UpdateFunction`,
+  `cloudfront:TestFunction`) can read it, so the stack grants those to the
+  deployer only. Rotation takes three stack updates (§4.1).
 - A user in several tenants (`shared-pool-multi-tenant`) holds a token with
   a `tenants` list. The SPA narrows it to the tenant the user picked with
   an RFC 8693 token exchange before calling `/api/*` or `/agents/*`
   (`ARCHITECTURE.md` §2.1). The router refuses a token with no single
   `tenant_id` with 401 (§3.3 step 5).
-- Access tokens stay in memory in the SPA. Nothing is written to
-  `localStorage`, `sessionStorage` or cookies.
+- Access tokens stay in memory in the SPA. No token is written to
+  `localStorage`, `sessionStorage` or cookies. Sign-in is a full-page
+  redirect, which discards memory, so the PKCE verifier and the nonce are
+  kept in `sessionStorage` on the origin that starts the flow, from the
+  authorize redirect until `/callback` reads and deletes them (ADR-0007).
 - The cell API verifies the token it receives in `x-tenant-token`
   (`ARCHITECTURE.md` §2.1, ADR-0011), then refuses
   the request with 403 when `tenant_id` differs from `x-tenant-route`,
@@ -285,7 +326,7 @@ only the edge account's operator role may make them.
 | `hostedZone` | yes | | Public Route 53 zone for `appDomain`, in the edge account |
 | `addressing` | no | `single` | `single`: one URL, tenant from the token. `host`: one host per tenant |
 | `applicationId` | yes | | The control-plane application this front door serves |
-| `controlPlane` | yes | | Control plane API URL, and the vendor IdP token URL and client (secret in Secrets Manager) the registrar uses to get a reader token |
+| `controlPlane` | yes | | Control plane API URL, and the vendor IdP token URL and client (secret in Secrets Manager) the registrar uses to get a reader token. The deployer lists that client id in the control plane's `vendorIdp.clientIds` (§6.1) |
 | `fleet` | yes | | The control plane's fleet name, which names the provisioning roles the registrar admits |
 | `issuer` | yes | | Discovery URL and client id the SPA uses |
 | `tenantClaim` | no | `tenant_id` | Claim the router and the origin read |
@@ -303,7 +344,8 @@ only the edge account's operator role may make them.
 | `tenant#<tenantId>` | `{"v":1,"c":"<cellId>","ac":"<accountId>","s":"active"\|"suspended","n":"<display name>"}` | registrar, from the tenant create script |
 | `host#<host>` | `{"v":1,"t":"<tenantId>"}` | registrar, in `host` mode and for a dedicated tenant's domain |
 | `cell#<cellId>` | `{"v":1,"ac":"<accountId>","o":"<api domain>"}` | registrar, from the cell create script |
-| `app` | `{"v":1,"iss":"<issuer>","cid":"<client id>","sc":"<scopes>"}` | the front door stack |
+| `app` | `{"v":1,"iss":"<issuer>","cid":"<client id>","sc":"<scopes>","lo":"<logout endpoint>"}` (`lo` in `host` mode only) | the front door stack |
+| `signin` | `{"v":1,"cur":"<kid>","k":{"<kid>":"<base64 key>"}}`, `host` mode only | custom resource of the front door stack (ADR-0016) |
 
 Rules:
 
@@ -318,6 +360,14 @@ Rules:
   another `host#` key.
 - Reserved labels (`www`, `api`, `admin`, `auth`, `login`, `static`, `status`) are
   refused at registration.
+- The `signin` key holds one or two keys, each 32 random bytes, so it is
+  about 150 bytes and sits in the 20 % the ceilings below leave for
+  non-tenant entries. Rotation is three stack updates of the custom
+  resource, which generates a key for a `kid` it has not stored and
+  deletes any `kid` not listed: (1) list the new `kid` beside the old, with
+  `cur` still the old; wait past propagation (60 s, S-2); (2) switch `cur`
+  to the new `kid`; (3) after the 10-minute `state` lifetime, remove the old
+  `kid`.
 - `ac` is the account the registrar verified at write time. The router
   never reads it; the registrar uses it to authorise deletes.
 - Display name `n` is for display only, and the registrar never refuses
@@ -341,9 +391,18 @@ Rules:
 | `active` | routed | tenant create script |
 | `suspended` | 503, `Retry-After: 300` | vendor operator in the edge account |
 
-A route goes live everywhere within the store's propagation time: about
-30 s at one edge location (spike S-2: median 28.4 s, p99 29.4 s). `route.sh`
-waits until the route answers before it reports success. Removal is a delete, not a status.
+A change reaches an edge location within the store's propagation time:
+about 30 s (spike S-2, measured at one location: median 28.4 s, p99 29.4 s,
+max 29.5 s). `route.sh` waits a fixed 45 s after the registrar returns, a
+bound and not a check: in `single` mode a route cannot be observed without
+a tenant token, and a `cell#` route cannot be observed from outside. In
+`host` mode it also polls `https://<tenant>.<appDomain>/config.json` until
+it answers 200, within that bound. No unauthenticated probe path exists,
+because it would reveal whether a tenant id exists.
+
+`suspended` and a delete take effect after the same window. Until then the
+tenant is still routed, and the cell's hosts check is the only refusal
+(§3.5). Removal is a delete, not a status.
 
 ## 5. API surface
 
@@ -389,6 +448,7 @@ All with a small static HTML or JSON body and `no-store`:
 | 403 | unknown tenant (`single`), or a cross-site call to `/api/*` or `/agents/*` |
 | 404 | unknown host (`host` mode, or an unknown dedicated domain) |
 | 429 | tenant over its rate on `/api/*` or `/agents/*` (`host` mode, at the edge): the WAF rate rule's Block action returns a custom 429, and a scope-down keeps SPA loads out of the count (ADR-0009) |
+| 400 | `login.<appDomain>`: a missing, changed or expired `state`, another host, an unregistered or suspended tenant host, or any other path |
 | 503 | tenant suspended, or its cell has no route |
 
 ## 6. Contracts
@@ -397,18 +457,22 @@ All with a small static HTML or JSON body and `no-store`:
 
 - A public hosted zone for `appDomain` in the edge account.
 - An issuer that meets `ARCHITECTURE.md` §2.1 and accepts the app's
-  callback URLs.
+  callback and sign-out URLs: `https://<appDomain>/` in `single` mode, the
+  two `login.<appDomain>` URLs in `host` mode (ADR-0016).
 - A control plane whose `GetCell` and `GetDeployment` return `accountId`
   and `applicationId`, with a reader role enabled (control-plane R-36), and
   a vendor IdP app client whose client-credentials tokens carry that role
   and pass the control plane authorizer (spike S-9, ADR-0015). A Cognito
-  client-credentials token has no `aud` and no custom `role`, so today's
-  authorizer refuses it (S-9). Two changes are needed. The vendor IdP adds
-  `role` to machine tokens with a pre-token-generation trigger (V3 event,
-  which needs the Essentials or Plus feature plan). The trigger cannot add
-  `aud`: Cognito ignores an `aud` override on access tokens. So the control
-  plane must accept a listed `client_id` in place of `aud` when a token has
-  none, a control-plane change with its own control-plane ADR.
+  client-credentials token has no `aud` and no custom `role`. Two things
+  make it pass. The vendor IdP adds `role` to machine tokens with a
+  pre-token-generation trigger (V3 event, which needs the Essentials or
+  Plus feature plan); the trigger cannot add `aud`, because Cognito ignores
+  an `aud` override on access tokens. And the deployer lists the
+  registrar's client id in the control plane's `vendorIdp.clientIds`
+  (control-plane R-38, ADR-0043), which accepts a listed `client_id` in
+  place of `aud` when a token has none. The deployer also sets
+  `vendorIdp.requiredScope` when that client can call another API on the
+  issuer.
 - In every account that hosts cells, the control plane's role pair; the
   registrar admits only those roles.
 - A cell API that verifies the token in `x-tenant-token`, refuses a
@@ -419,11 +483,14 @@ All with a small static HTML or JSON body and `no-store`:
 - CloudFront origin access control support on the cell origin (Lambda
   function URL, or S3), with the cell stack granting the edge distribution
   through `CellRouteAccess`.
+- Any client of `/api/*` through the front door, not only the SPA, sends
+  the SHA-256 of a `PUT` or `POST` body in `x-amz-content-sha256` (§7.2,
+  ADR-0011).
 
 ### 6.2 What the sample promises
 
 - A request with no tenant, or with an unknown or suspended tenant, never
-  reaches an origin.
+  reaches an origin, once the route change has propagated (§4.2).
 - A request reaches only the cell its route names.
 - An account can register routes only for cells and deployments the control
   plane places in it.
@@ -442,7 +509,7 @@ All with a small static HTML or JSON body and `no-store`:
 
 | Sample | How | Needed for |
 |---|---|---|
-| `control-plane` | its API (`GetCell`, `GetDeployment`) with the reader grant (R-36) and a client-credentials reader token (spike S-9 showed both are needed: a `role` trigger on the vendor IdP and a `client_id` input on the control plane), its role pair in each cell account, and its scripts calling `route.sh` | placement checks, registration, the integration test |
+| `control-plane` | its API (`GetCell`, `GetDeployment`) with the reader grant (R-36) and a client-credentials reader token (spike S-9 showed both are needed: a `role` trigger on the vendor IdP and the `vendorIdp.clientIds` input of R-38, ADR-0043), its role pair in each cell account, and its scripts calling `route.sh` | placement checks, registration, the integration test |
 | `tenant-identity` `shared-pool` | its published parameters | the demo issuer and the integration test |
 | `agentic-runtime-isolation` | its `/application-plane/shared/agent-runtime/ingress` parameter | `/agents/*`, optional |
 
@@ -475,7 +542,7 @@ and the next release drops the old hash. Two sets of hashes fit within the
 | Header | Value |
 |---|---|
 | `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` (no `preload` in the sample) |
-| `Content-Security-Policy` | `default-src 'self'; script-src 'sha384-…' 'strict-dynamic' 'report-sample'; connect-src 'self' <issuer origin>; img-src 'self' data:; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self' <issuer origin>; frame-ancestors 'none'; worker-src 'self'; require-trusted-types-for 'script'; report-to fd` |
+| `Content-Security-Policy` | `default-src 'self'; script-src 'sha384-…' 'strict-dynamic' 'report-sample'; connect-src 'self' <token origin>; img-src 'self' data:; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self' <authorize origin>; frame-ancestors 'none'; worker-src 'self'; require-trusted-types-for 'script'; report-to fd` |
 | `Reporting-Endpoints` | `fd="<reportingEndpoint>"`, only when set |
 | `X-Frame-Options` | `DENY` |
 | `X-Content-Type-Options` | `nosniff` |
@@ -484,6 +551,13 @@ and the next release drops the old hash. Two sets of hashes fit within the
 | `Cross-Origin-Resource-Policy` | `same-origin` |
 | `Permissions-Policy` | `camera=(), microphone=(), geolocation=(), payment=(), usb=()` |
 | `Clear-Site-Data` | `"cookies", "storage", "cache"`, on `/logout` only |
+
+`<token origin>` and `<authorize origin>` are the origins of the discovery
+document's `token_endpoint` and `authorization_endpoint`, resolved at
+synth, not the issuer URL: for Cognito they are the user pool domain, while
+the issuer is on `cognito-idp.<region>.amazonaws.com`. A `connect-src` that
+names only the issuer blocks the code exchange. In `host` mode `form-action`
+also allows `https://login.<appDomain>`.
 
 The response headers policy overrides origin headers, so a cell in a
 tenant-owned account cannot weaken the baseline (P-8).
@@ -529,16 +603,16 @@ The sample documents that step and does not do it.
 | [ADR-0004](../adr/0004-route-to-cells-with-cloudfront-functions-origin-modification.md) | Route to cells with CloudFront Functions origin modification | origin modification; one origin and cache behaviour per cell; Lambda@Edge |
 | [ADR-0005](../adr/0005-route-on-the-unverified-claim-and-verify-at-the-origin.md) | Route on the unverified claim, verify at the origin with a route hint | decode at the edge and verify at the origin; verify at the edge with Lambda@Edge; no hint |
 | [ADR-0006](../adr/0006-generate-config-json-at-the-edge.md) | Generate `/config.json` at the edge | edge-generated; per-tenant file in S3; build per tenant |
-| [ADR-0007](../adr/0007-keep-tokens-in-spa-memory.md) | Keep tokens in SPA memory | memory with PKCE; backend-for-frontend with `__Host-` cookie |
+| [ADR-0007](../adr/0007-keep-tokens-in-spa-memory.md) | Keep tokens in SPA memory; the PKCE verifier and nonce in `sessionStorage` until `/callback` | memory with PKCE; backend-for-frontend with `__Host-` cookie |
 | [ADR-0008](../adr/0008-use-a-hash-based-csp-with-trusted-types.md) | Hash-based CSP with Trusted Types | hashes; nonces through Lambda@Edge; allowlist |
 | [ADR-0009](../adr/0009-rate-limit-each-tenant-with-waf-on-the-host-or-at-the-origin.md) | Per-tenant rate limit: AWS WAF on the host in `host` mode, the origin in `single` mode | WAF custom key; origin limit; none |
-| [ADR-0010](../adr/0010-deploy-the-edge-stack-in-us-east-1.md) | Split the edge stack into `us-east-1` | edge stack plus main stack with cross-Region references; everything in `us-east-1` |
+| [ADR-0010](../adr/0010-deploy-the-edge-stack-in-us-east-1.md) | Split the edge stack into `us-east-1`, logs included | edge stacks plus main stack with cross-Region references and CloudWatch Logs; the same with logs in S3; everything in `us-east-1` |
 | [ADR-0011](../adr/0011-protect-cell-origins-with-origin-access-control-across-accounts.md) | Protect cell origins with origin access control, across accounts | OAC with a cross-account Lambda permission; secret header; IP allowlist |
 | [ADR-0012](../adr/0012-cap-the-route-table-and-shard-by-distribution.md) | Route table size ceiling and sharding | one store and a ceiling; shard by distribution |
 | [ADR-0013](../adr/0013-register-routes-through-a-registrar-that-checks-the-control-plane.md) | Register routes through a registrar that checks the control plane | registrar with a placement check; a cross-account role that writes the store directly; the control plane writes routes |
 | [ADR-0014](../adr/0014-run-one-front-door-per-control-plane-application.md) | One front door per control-plane application | one per application; one shared front door keyed by application |
 | [ADR-0015](../adr/0015-read-the-control-plane-with-a-reader-token.md) | Read the control plane with a reader token | reader role (control-plane ADR-0042); operator app client; an IAM-authorised read stage |
-| [ADR-0016](../adr/0016-sign-in-through-one-shared-host-in-host-mode.md) | Sign in through one shared host in `host` mode | shared sign-in host with a signed `state`; a callback URL per tenant; a wildcard callback URL |
+| [ADR-0016](../adr/0016-sign-in-through-one-shared-host-in-host-mode.md) | Sign in and out through one shared host in `host` mode | shared sign-in host with a signed `state`; a callback URL per tenant; a wildcard callback URL |
 
 ## 9. Spikes before code
 
@@ -546,7 +620,7 @@ Each spike reports its deploy and destroy time.
 
 | # | Question | Pass when |
 |---|---|---|
-| S-1 | Does a multi-tenant distribution take a viewer-request function with an associated KeyValueStore, on both an apex and a wildcard pooled distribution tenant? | a request runs the function and reads the store in both; standard logging v2 set up in `us-east-1` (delivery source, delivery destination and delivery) delivers to a log group in `eu-central-1`. **Passed 2026-11-16, with a logging change**: the function read the store on both tenants (apex and `a.` under the wildcard), 200 within 46 s of deploy. A CloudWatch Logs delivery to another Region is refused (`Cross-region Delivery Destination is not supported`), and a delivery destination must be in its log group's Region. With the log group in `us-east-1` logs arrived in 33 s; with an S3 bucket in `eu-central-1` (destination and delivery in `us-east-1`) in 312 s. The log group moves to `us-east-1` (ADR-0010 amendment). Deploy 481 s, destroy 312 s |
+| S-1 | Does a multi-tenant distribution take a viewer-request function with an associated KeyValueStore, on both an apex and a wildcard pooled distribution tenant? | a request runs the function and reads the store in both; standard logging v2 set up in `us-east-1` (delivery source, delivery destination and delivery) delivers to a log group in `eu-central-1`. **Passed 2026-11-16, with a logging change**: the function read the store on both tenants (apex and `a.` under the wildcard), 200 within 46 s of deploy. A CloudWatch Logs delivery to another Region is refused (`Cross-region Delivery Destination is not supported`), and a delivery destination must be in its log group's Region. With the log group in `us-east-1` logs arrived in 33 s; with an S3 bucket in `eu-central-1` (destination and delivery in `us-east-1`) in 312 s. The log group is in `us-east-1` (ADR-0010). Deploy 481 s, destroy 312 s |
 | S-2 | How long does a KeyValueStore write take to apply at the edge? | median and p99 from write to first routed request. **Measured 2026-11-16** over 100 rounds (one POP, 250 ms polling): median 28.4 s, p90 29.2 s, p99 29.4 s, max 29.5 s from the start of `put-key` to the first routed request; 29.6 s median until four pollers all saw it; no timeouts; inserts and updates alike. `put-key` itself takes about 0.6 s. Deploy 340 s |
 | S-3 | Does `cf.updateRequestOrigin()` set origin access control for a Lambda function URL **in another account**? | through the multi-tenant distribution, with its ARN as the permission's `SourceArn`: a signed request reaches a URL with `AWS_IAM` auth in the second account; an unsigned one is 403; a `POST` with a body and `x-amz-content-sha256` is served; the cell receives the viewer's token in `x-tenant-token`; the permission set is confirmed. **Passed 2026-11-16**: a signed `GET` and a `POST` with `x-amz-content-sha256` reached the function URL in the second account through the multi-tenant distribution, with the distribution ARN (not the tenant ARN) as `SourceArn`; the cell saw the viewer's token in `x-tenant-token`, and a client's own `x-tenant-token` was replaced. Refused with 403: a direct unsigned call, a call before the permission existed, a `POST` without `x-amz-content-sha256` (signature mismatch), and a call with `lambda:InvokeFunctionUrl` but no `lambda:InvokeFunction`. Lambda removes the signed `Authorization` header from the event. Deploy 506 s, destroy 185 s |
 | S-4 | `host` mode: how does the issuer take one callback URL per tenant at 1,000s of tenants? | a working option for Cognito app clients (limit and update rate measured), or a single sign-in host with a signed `state`. **Passed 2026-11-16 with the shared sign-in host**: one Cognito app client takes 100 callback URLs (the 101st is refused), a pool 1,000 clients by default, and `UpdateUserPoolClient` about 15 per second before `TooManyRequestsException`. One sign-in host with a signed `state` completed a real hosted sign-in and sent the code to the tenant host; a missing, changed or expired `state`, or a host outside `appDomain`, got 400. A wildcard callback URL is saved but matched as a literal string: a tenant host gets `redirect_mismatch` (ADR-0016). Deploy 446 s, destroy 220 s |
@@ -566,6 +640,12 @@ deployment when one is found, deploying one otherwise (Q-2). It needs a
 public hosted zone for a test domain (Q-1). `test/integ.single.ts` covers
 the default mode; `test/integ.host.ts` repeats the steps marked (host) with
 `addressing: 'host'`.
+
+Expected time, from S-1: deploying the edge stacks and the distribution
+takes about 481 s and destroying them about 312 s, before the control plane
+and the cells the test also deploys. Every route change (steps 2, 13 and 15)
+is followed by 60 s for propagation (ADR-0003, spike S-2) before the next
+call.
 
 1. Deploy the front door and register the demo application with the control
    plane, its scripts calling `route.sh`.
@@ -591,15 +671,29 @@ the default mode; `test/integ.host.ts` repeats the steps marked (host) with
     An edge-account principal that is not the operator role, with
     `execute-api:Invoke` in its identity policy, calls the registrar: 403
     (the explicit `Deny`, §3.4).
-13. Suspend `b`: `b`'s token returns 503, `a` is still served.
-14. Per-tenant log fields name `a` and `b`, and the registrar log names the
-    second account on steps 11 and 12.
-15. Delete `b`'s deployment: its script removes the route, and `b`'s token
-    returns 403.
+13. Suspend `b`: after 60 s, `b`'s token returns 503, `a` is still served.
+14. Wait 60 s for log delivery (33 s in S-1). Per-tenant log fields name
+    `a` and `b`, queried in `us-east-1` where the log group is (ADR-0010),
+    and the registrar log, in `eu-central-1`, names the second account on
+    steps 11 and 12.
+15. Delete `b`'s deployment: its script removes the route, and after 60 s
+    `b`'s token returns 403.
 16. (host) `a.<appDomain>/config.json` names `a`; an unregistered host
     returns 404; a token for `a` on `b.<appDomain>/api/whoami` returns 403;
     `a` over its rate gets 429 while `b` is served.
-17. Destroy everything the test deployed, in both accounts, except the
+17. (host) Sign-in host (ADR-0016). `/signin-state` on `a`'s host with
+    `Sec-Fetch-Site: same-origin` returns a `state`; cross-site it is
+    refused, and in `single` mode it is 404. A real sign-in through the issuer
+    reaches the sign-in host and gets a 302 to `a`'s `/callback` with the
+    code and `state`; the SPA's exchange with the same `redirect_uri`
+    returns a token. A missing, changed or expired `state`, a `state` for
+    another host, a host that is not a registered tenant, and a suspended
+    tenant's host each get 400 on `login.<appDomain>`. `/logout` on `a`'s
+    host redirects to the issuer logout with `logout_uri` on the sign-in
+    host, which redirects back to `a`'s host. After the rotation steps of
+    §4.1, a `state` minted before the switch still verifies until the old
+    key is removed.
+18. Destroy everything the test deployed, in both accounts, except the
     shared identity pool.
 
 ## 11. Open questions

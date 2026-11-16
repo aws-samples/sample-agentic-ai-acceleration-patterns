@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0015: Read the control plane with a reader token
 
-- Status: Proposed (control-plane `client_id` input)
+- Status: Accepted
 - Date: 2026-11-13
 - Deciders: Dave Roberts (PSA)
 
@@ -55,8 +55,9 @@ control plane, never writing unchecked.
 
 ## Consequences
 
-- The deployer adds the role value to `readerRoles` and creates the app
-  client; the control plane admits no reader until then (§6.1).
+- The deployer adds the role value to `readerRoles`, creates the app
+  client and lists its client id in `vendorIdp.clientIds`; the control
+  plane admits no reader until then (§6.1).
 - A namespaced value keeps a broader issuer's `reader` or `viewer` from
   mapping to the grant (control-plane R-36).
 - A stolen reader token discloses fleet topology, non-secret parameter
@@ -71,10 +72,14 @@ control plane, never writing unchecked.
   `client_id` when `aud` is absent, the same token was allowed with the
   reader grant. Deploy 36 s per phase, destroy 61 s.
 - So the vendor IdP needs the V3 trigger for `role`, and the control plane
-  needs a new input: a list of client ids accepted in place of `aud` when
-  a token has none. That is a control-plane change with its own
-  control-plane ADR; this sample does not work around it. This record is
-  accepted once that ADR is.
+  needs an input that accepts a client id in place of `aud` when a token
+  has none. Control-plane R-38 and control-plane ADR-0043 add it:
+  `vendorIdp.clientIds`, a list of client ids, default none. A token with
+  no `aud` passes only when its `client_id` is listed and equals `sub`.
+  The deployer lists the registrar's client id there. The optional
+  `vendorIdp.requiredScope` (R-38) binds such a token to the control
+  plane's API; the deployer sets it when the registrar's client can also
+  call another API on the issuer.
 - Follow-up: rotate the client secret, and log token fetch failures apart
   from placement refusals.
 - Revisit when the control plane offers a grant narrower than all reads

@@ -43,9 +43,9 @@ Each tenant gets `<tenant>.<appDomain>`; the router looks up
 Pros: the browser separates storage and service workers per tenant (§7.3).
 The tenant is known before sign-in, so `/config.json` can name it and AWS
 WAF can rate-limit per host. Cons: a wildcard certificate and DNS record,
-reserved labels (§4.1), one issuer callback URL per tenant (spike S-4),
-and `same-site` neighbours that need `__Host-` cookies and a Public Suffix
-List entry to keep apart (§7.3).
+reserved labels (§4.1), a shared sign-in host (ADR-0016), and `same-site`
+neighbours that need `__Host-` cookies and a Public Suffix List entry to
+keep apart (§7.3).
 
 ### Option 3: Client header
 
@@ -82,10 +82,9 @@ same way (P-4, ADR-0005). Options 3 and 4 fail P-2.
 - Harder: the per-tenant rate limit runs at the origin in `single` mode
   (ADR-0009).
 - Harder: the router must decode a token within CloudFront Functions
-  limits (S-7, ADR-0005).
-- Proposed until S-7 passes: the default rests on that decode. If S-7
-  fails, `host` becomes the default addressing mode and a new record
-  supersedes this one (ADR-0005).
+  limits (S-7, ADR-0005). The default rests on that decode. If it stops
+  holding, `host` becomes the default addressing mode and a new record
+  supersedes this one.
 - Follow-up: `host` mode signs in through one shared host (ADR-0016,
   spike S-4) and limits each tenant with WAF on the `Host` (ADR-0009,
   spike S-6). It has its own integration test, `test/integ.host.ts`.
