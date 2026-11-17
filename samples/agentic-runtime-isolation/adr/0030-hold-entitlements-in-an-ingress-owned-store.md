@@ -8,6 +8,7 @@ SPDX-License-Identifier: MIT-0
 - Date: 2026-11-02
 - Amends: ADR-0005
 - Supersedes: ADR-0025
+- Amended by: ADR-0051
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -28,3 +29,5 @@ Option 2, as the `EntitlementStore` construct created by `SharedIngress`. The ta
 
 ## Consequences
 Easier: a new tool or agent needs no write to the identity provider; a user's entitlement has no size cap. Harder: tenant-identity no longer holds tool entitlements, so `/platform/scopes` is no longer called and `ScopeRegistration` (C-8) is removed, with its IAM and ownership code; the integration test drops its catalogue cleanup check. The table has point-in-time recovery on. Every write to a `TENANT#` row or a cut row bumps the tenant row's `version`, which feeds the token cache key (ADR-0036). Follow-up: the vendor and tenant-admin APIs on the store (ADR-0033), the transaction token that carries the grant (ADR-0031), and a threat-model entry for the table as an entitlement authority. Revisit if entitlement needs conditions a set intersection cannot express (then option 3), or if a consumer's identity provider can mint narrow tokens itself.
+
+**2026-11-17.** Amended by ADR-0051: Cognito offers token exchange (RFC 8693, `GetDerivedToken`). It keeps only scopes the token already holds, so the scope limits above still apply and entitlement stays in the store.
