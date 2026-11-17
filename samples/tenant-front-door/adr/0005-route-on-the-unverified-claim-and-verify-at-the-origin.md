@@ -39,9 +39,10 @@ key, no key fetch and no network call (P-1). It holds no secrets in
 Signature verification at the cell stops a forged claim (P-1, §10 step
 7). The hosts check catches a validly signed token routed to the wrong
 cell, for example through a stale or wrong `cell#` route. In `host` mode
-the router also decodes the claim on `/api/*` and `/agents/*` and
-refuses with 403 at the edge a missing token, a token with no single
-`tenant_id`, or one that names a tenant other than the host's (§3.3
+the router also decodes the claim on `/api/*` and `/agents/*`. It
+refuses a missing or undecodable token, or one with no single
+`tenant_id`, with 401 and `WWW-Authenticate: Bearer`, as in `single`
+mode, and one that names a tenant other than the host's with 403 (§3.3
 step 5), so a token for `a` never reaches `b`'s cell. The hint carries
 the host's tenant, and the origin repeats that check on the verified
 claim (P-4). In `single` mode the hint comes from the same token the

@@ -149,9 +149,8 @@ rotation are in spec §3.3 step 2, §3.5 and §4.1.
   principal that can write the store, the test role included: it holds
   `PutKey` and `DeleteKey` for its fixture, scoped to the test run
   (spec §6.1). It also lists every reader of the CloudFront log group
-  in `us-east-1`, which sees each request to the sign-in host, and of
-  the router's function log group, which names a tenant per request in
-  `single` mode.
+  in `us-east-1`, which sees each request to the sign-in host and names
+  the tenant of every routed request.
 - Follow-up: count `state` refusals apart from other 400s: every 400 on
   `login.<appDomain>` in the access log is a refusal.
 - Revisit when the issuer matches wildcard callback URLs strictly, returns

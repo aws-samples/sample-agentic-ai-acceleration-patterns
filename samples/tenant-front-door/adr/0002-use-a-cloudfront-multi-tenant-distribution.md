@@ -54,19 +54,22 @@ are bounded by a quota, so the tenant count is capped by it.
 
 ## Decision
 
-Option 1; spike S-1 passed on 2026-11-16. A multi-tenant distribution keeps one shared
-configuration, so the security baseline is set once (P-8), and it gives a
-dedicated domain its own distribution tenant without touching the pooled
-path. Pooled tenants add no CloudFront resource, which keeps onboarding to
-one registrar call (P-9). Option 2 makes every dedicated domain an edit to
-shared configuration; Option 3 breaks P-8 and P-9.
+Option 1; spike S-1 passed on 2026-11-16. A multi-tenant distribution keeps
+one shared configuration, so the security baseline is set once (P-8), and
+it gives a dedicated domain its own distribution tenant without touching
+the pooled path. Pooled tenants add no CloudFront resource, which keeps
+onboarding to one registrar call (P-9). Option 2 makes every dedicated
+domain an edit to shared configuration; Option 3 breaks P-8 and P-9.
 
 ## Consequences
 
 - Easier: one response headers policy and one set of origins for every
-  tenant; a dedicated domain is one distribution tenant, created when
-  the edge operator role sets `customDomain` with `PutTenantRoute` and
-  removed when it drops the domain or by `DeleteTenantRoute` (§5.1).
+  tenant. A dedicated domain is one distribution tenant with its own
+  certificate. The registrar creates both when the edge operator role
+  sets `customDomain` with `PutTenantRoute`, writes the domain's
+  `host#` key only once the certificate has validated, and removes all
+  three when the domain is dropped or changed, or by
+  `DeleteTenantRoute` or `DeleteHostRoute` (spec §3.4 step 5, §5.1).
 - Harder: only the vendor sets a dedicated domain. A tenant
   provisioning role that sends `customDomain` gets 403, so a tenant
   cannot claim a domain it does not own. The vendor sets it after it
@@ -74,7 +77,9 @@ shared configuration; Option 3 breaks P-8 and P-9.
 - Harder: the stack depends on multi-tenant distribution support in the
   CDK and CloudFormation version it pins.
 - Harder: the dedicated path adds certificate validation per tenant
-  domain; Q-3 decides whether it ships in this sample.
+  domain, an ACM DNS record the tenant publishes in its own DNS, so the
+  operator's `PutTenantRoute` answers 202 until it validates. Q-3
+  decides whether the path ships in this sample.
 - Follow-up: ADR-0003 and ADR-0004 assume this distribution type.
 - Spike S-1 (2026-11-16): a viewer-request function with an associated
   KeyValueStore ran and read the store on an apex and a wildcard pooled

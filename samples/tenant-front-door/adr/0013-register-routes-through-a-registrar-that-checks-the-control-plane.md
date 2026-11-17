@@ -53,7 +53,11 @@ account, plus the edge operator role, and denies every other principal
 with an explicit `Deny` and `ArnNotLike` on `aws:PrincipalArn`. Admission
 grants no route. Every write checks the caller's
 account against `GetCell` or `GetDeployment`, and a tenant route also needs
-its cell's route written by the same account. A `customDomain` that
+its cell's route written by the same account. The edge operator role's
+domain change is checked against the account recorded on the tenant
+route, not its own. A new tenant route is `active`; a later write from
+either role keeps the stored status, and only `UpdateTenantRouteStatus`
+changes it. A `customDomain` that
 equals `appDomain` or ends in `.<appDomain>` is refused with 400, one
 whose `host#` entry names another tenant with 409, and only the edge
 operator role may set or change it: a tenant provisioning role that
@@ -63,7 +67,8 @@ cleanup works after the control plane has removed the record.
 ## Consequences
 
 - A tenant-owned account cannot register, change or delete another
-  account's route (integration steps 11 and 12).
+  account's route (integration steps 11 and 12), and cannot lift its own
+  tenant's suspension by writing its route again (integration step 13).
 - A tenant route claims no pooled host, no other tenant's dedicated
   domain, and no domain the vendor has not set (integration step 11).
 - The registrar is on the onboarding path: a control plane outage blocks
