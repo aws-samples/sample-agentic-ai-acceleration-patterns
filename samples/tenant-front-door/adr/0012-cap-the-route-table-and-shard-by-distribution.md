@@ -3,7 +3,7 @@
 # ADR-0012: Cap the route table and shard by distribution
 
 - Status: Accepted
-- Date: 2026-11-13
+- Date: 2026-11-17
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -29,11 +29,13 @@ of up to 64 characters (§3.6). A control-plane tenant id is 26 characters;
 | Entry | Key | Value | Total |
 |---|---|---|---|
 | `tenant#` | `tenant#` + 63 = 70 B | `{"v":1,"c":"…26…","ac":"…12…","s":"suspended","n":"…64…"}` = 147 B | 217 B |
-| `host#` | `host#` + 63 + `.` + 64 = 133 B | `{"v":1,"t":"…63…"}` = 77 B | 210 B |
+| `host#` | `host#` + 63 + `.` + 64 = 133 B | `{"v":1,"t":"…63…","ac":"…12…"}` = 97 B | 230 B |
 
-So a tenant needs at most 217 bytes in `single` mode and 427 bytes in `host`
-mode. The vendor needs to know where the limit sits and what happens past
-it, before a tenant create script hits a full store.
+So a tenant needs at most 217 bytes in `single` mode and 447 bytes in `host`
+mode, 217 + 230. The `host#` value records its owner in `ac`, which the
+registrar checks before another tenant's write and on a delete. The
+vendor needs to know where the limit sits and what happens past it,
+before a tenant create script hits a full store.
 
 ## Options considered
 
@@ -61,7 +63,7 @@ worst-case bytes per tenant, which leaves 20 % for `cell#` entries, the
 and matches the alarm:
 
 - `single` mode: floor(5,000,000 × 0.8 / 217) = 18,433 tenants;
-- `host` mode: floor(5,000,000 × 0.8 / 427) = 9,367 tenants.
+- `host` mode: floor(5,000,000 × 0.8 / 447) = 8,948 tenants.
 
 The registrar enforces the store size in bytes: it refuses with 507 a write
 that would take the store past 5 MB. Past the ceiling the plan is another
@@ -86,5 +88,5 @@ need their own record.
 - Follow-up: the registrar writes the store through the KeyValueStore data
   plane API, which signs with SigV4A.
 - Revisit when an application expects more than about 18,000 tenants in
-  `single` mode or 9,000 in `host` mode, or when CloudFront raises the
+  `single` mode or 8,900 in `host` mode, or when CloudFront raises the
   store size or allows more than one store per function.

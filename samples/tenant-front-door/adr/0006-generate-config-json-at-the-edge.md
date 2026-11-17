@@ -13,8 +13,10 @@ issuer's authorize and token endpoints, the client id and the scopes; it
 does not fetch the issuer's discovery document (spec §7.1). In `host`
 mode it also needs the tenant id and display name for the host it was
 loaded from (ADR-0001), and the shared sign-in `redirectUri`,
-`https://login.<appDomain>/callback` (ADR-0016). None of these values is
-secret.
+`https://login.<appDomain>/callback` (ADR-0016). On a dedicated domain
+it needs `pooledHost`, where its users sign in (ADR-0016):
+`<tenant>.<appDomain>` in `host` mode, `<appDomain>` in `single` mode.
+None of these values is secret.
 
 The SPA is one build for every tenant, served from one S3 bucket, with
 content-hashed assets cached for a year (spec §3.2, §7.2). Onboarding a
@@ -22,7 +24,8 @@ pooled tenant must be one registrar call, with no distribution update and no
 cache invalidation (P-9). The route table already holds the shared settings
 in its `app` key and each tenant's display name in its `tenant#` key
 (spec §4.1, ADR-0003). In `single` mode the SPA learns the tenant after
-sign-in, from its own token, so the file holds only the shared settings.
+sign-in, from its own token, so on `<appDomain>` the file holds only the
+shared settings.
 
 ## Options considered
 
@@ -30,7 +33,10 @@ sign-in, from its own token, so the file holds only the shared settings.
 
 The router answers `/config.json` itself (spec §3.3 step 8). It builds the
 body from the `app` key, and in `host` mode from the `host#` and `tenant#`
-keys it already read to route. The response is `no-store`.
+keys it already read to route. On a dedicated domain it derives
+`pooledHost` with no extra read: from the tenant id the `host#` entry
+gave it in `host` mode, from the compiled `appDomain` in `single` mode.
+The response is `no-store`.
 
 Pros: one SPA bundle for every tenant. A new tenant's settings exist the
 moment its route is written, so P-9 holds. No origin request and no extra

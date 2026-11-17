@@ -3,7 +3,7 @@
 # ADR-0010: Deploy the edge stack in us-east-1
 
 - Status: Accepted
-- Date: 2026-11-16
+- Date: 2026-11-17
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -79,11 +79,17 @@ CloudFront's and CloudWatch Logs', so the split keeps it to the resources it
 applies to, and every other part of the front door sits in the same Region
 as the control plane and the cells it serves. Logs go to CloudWatch Logs
 because it is nine times faster to the first record than S3 and needs no
-query setup. The delivery names its record fields explicitly and leaves
-out `cs-uri-query`: in `host` mode the sign-in host's query carries
-authorization codes (ADR-0016), and the per-tenant fields the
-telemetry reads, such as `x-host-header`, `cs-uri-stem`, `sc-status`,
-`sc-bytes` and `time-taken`, stay in the list.
+query setup. The delivery names its record fields explicitly:
+`timestamp(ms)`, `x-edge-location`, `x-host-header`,
+`distribution-tenant-id`, `cs-method`, `cs-uri-stem`, `sc-status`,
+`sc-bytes`, `time-taken`, `x-edge-result-type`, `x-edge-request-id`,
+`cs-protocol` and `ssl-protocol`, every field the per-tenant telemetry
+reads (spec §3.1). It leaves out every other field, among them
+`cs-uri-query`, `cs(Referer)` and `cs(Cookie)`: in `host` mode the
+sign-in host's query carries authorization codes (ADR-0016), the
+referrer of a `/callback` page carries the code and `state` on each
+asset request the page makes, and a cookie the application adds would
+land in the log.
 
 ## Consequences
 
@@ -93,8 +99,8 @@ telemetry reads, such as `x-host-header`, `cs-uri-stem`, `sc-status`,
   stack only.
 - Harder: per-tenant log queries (integration step 14) run in `us-east-1`.
   An operator looks for the CloudFront log group there.
-- Harder: the logs hold no query strings, and a field a new query needs
-  is a change to the delivery's field list.
+- Harder: the logs hold no query strings, referrers or cookies, and a
+  field a new query needs is a change to the delivery's field list.
 - Harder: deploy runs the edge stack, then the main stack, then the edge
   logging stack; destroy runs them in reverse. The certificate cannot be
   removed while the distribution still uses it.

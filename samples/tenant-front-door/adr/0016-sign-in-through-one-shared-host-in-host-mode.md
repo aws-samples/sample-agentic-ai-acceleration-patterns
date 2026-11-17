@@ -53,7 +53,7 @@ per second, raced by concurrent onboarding; tenants in different client
 groups have different client ids, so `/config.json` and the token carry
 one per tenant group and the cell and the control plane must accept all of
 them; one more place a tenant script must clean up. The client count is not
-the limit: ADR-0012 caps `host` mode at 9,367 tenants, which is 94 clients,
+the limit: ADR-0012 caps `host` mode at 8,948 tenants, which is 90 clients,
 inside the default quota of 1,000.
 
 ### Option 2: One shared sign-in host with a signed `state`
@@ -87,9 +87,13 @@ verifier make a replayed `state` useless. The router mints a `state`
 only on a pooled host, one label under `appDomain` that the vendor's
 wildcard DNS record and certificate cover, and the sign-in host
 forwards only to one, so a dedicated domain signs in on its pooled
-host `<tenant>.<appDomain>`. Sign-out uses Cognito's `redirect_uri` form
-of `/logout` with a fresh `state` for the tenant host, because S-4o
-showed that the `logout_uri` form drops `state`: the user
+host `<tenant>.<appDomain>`. The registrar refuses a `customDomain`
+that equals `appDomain` or ends in `.<appDomain>` (spec §3.4 step 4),
+so a pooled host's only `host#` entry is its own tenant's. That rule is
+what makes a pooled host always the vendor's SPA for its own tenant.
+Sign-out uses Cognito's `redirect_uri` form of `/logout` with a fresh
+`state` for the tenant host, because S-4o showed that the `logout_uri`
+form drops `state`: the user
 signs out, signs in again and returns to their own tenant host. This
 needs no issuer change per tenant and has no ceiling, where Option 1
 needs a client update per tenant at 15 per second and Option 3 does not
@@ -118,9 +122,14 @@ rotation are in spec §3.3 step 2, §3.5 and §4.1.
   with its own nonce and PKCE verifier, send the link to any signed-in
   user of the shared pool and redeem the code for that user's token.
   Its users sign in on the pooled host `<tenant>.<appDomain>` and stay
-  there for the session. A dedicated domain with its own callback URL
+  there for the session; in `single` mode they sign in on `<appDomain>`
+  the same way (spec §3.5). A dedicated domain with its own callback URL
   (Option 1 for that one client) is out of scope until spec Q-3 is
   answered.
+- Harder: the pooled-host rule holds only while the registrar keeps
+  `customDomain` outside `appDomain` and refuses a write over another
+  tenant's `host#` entry. The `host#` value records its owner (`ac`),
+  20 bytes more per tenant (ADR-0012).
 - Harder: the sign-in host and its function are part of the edge, and the
   integration test for `host` mode signs in and out through it (spec §10).
 - Harder: the router is no longer secret-free in `host` mode. The route
@@ -130,8 +139,10 @@ rotation are in spec §3.3 step 2, §3.5 and §4.1.
 - Harder: the SPA needs `sessionStorage` for two single-use values
   (ADR-0007).
 - Follow-up: the sample's threat model lists every principal that can read
-  the `signin` key, and every reader of the CloudFront log group in
-  `us-east-1`, which sees each request to the sign-in host.
+  the `signin` key, the integration test role that calls `TestFunction`
+  and signs a test `state` among them (spec §10 step 17), and every
+  reader of the CloudFront log group in `us-east-1`, which sees each
+  request to the sign-in host.
 - Follow-up: count `state` refusals apart from other 400s: every 400 on
   `login.<appDomain>` in the access log is a refusal.
 - Revisit when the issuer matches wildcard callback URLs strictly, returns
