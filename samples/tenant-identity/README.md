@@ -123,7 +123,10 @@ own `/tenant/*` authoriser, which is identity work). It is not a login UI —
 managed login, hosted UI, federation, passwordless, and MFA are out of scope;
 tokens are obtained with a server-side password flow for the demonstration. It
 builds one role, tenant admin, and no others. It narrows tenant and scopes
-only, not RFC 8693 delegation (`act`) or audience. It does not answer the
+only, not RFC 8693 delegation (`act`) or audience. Cognito's own token
+exchange (`GetDerivedToken`) does delegation and audience, but its request
+has no field the trigger can read to pick a tenant, and its flows are not enabled on this sample's app clients
+(ADR-0039). It does not answer the
 vendor's own identity (that is the [`control-plane`](../control-plane/)
 sample), route a request to the right tenant deployment (a front-door sample),
 persist users of its own (Cognito is the only user store), or migrate tenants

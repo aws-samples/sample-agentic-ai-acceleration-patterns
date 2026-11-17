@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-21
+- Amended by: [ADR-0039](0039-keep-the-own-exchange-endpoint-over-cognito-token-exchange.md)
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -55,3 +56,5 @@ that feeds it un-narrowed tokens. Direct callers of
 `GetTokensFromRefreshToken` do not get this check; for them the trigger is
 the only guard, which is the behaviour the integration test proves (§10
 step 7). Revisit if Cognito adds a native token-exchange grant.
+
+**2026-11-17.** Amended by ADR-0039: Cognito offers token exchange, and the endpoint and this check stay. ADR-0039 has the reasons.

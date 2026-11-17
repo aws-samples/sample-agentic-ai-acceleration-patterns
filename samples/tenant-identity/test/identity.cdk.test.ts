@@ -765,6 +765,9 @@ describe('TenantIdentityStack - shared user pool (R-4, R-5, N-1, N-8, §7.2)', (
       expect(client.Properties.GenerateSecret ?? false).toBe(false);
       expect(client.Properties.AllowedOAuthFlows ?? []).toEqual([]);
       expect(client.Properties.ExplicitAuthFlows).toContain('ALLOW_ADMIN_USER_PASSWORD_AUTH');
+      // M-12 / ADR-0039: Cognito token exchange must stay off on a public client.
+      expect(client.Properties.ExplicitAuthFlows).not.toContain('ALLOW_TOKEN_EXCHANGE_IMPERSONATION');
+      expect(client.Properties.ExplicitAuthFlows).not.toContain('ALLOW_TOKEN_EXCHANGE_DELEGATION');
       expect(client.Properties.EnableTokenRevocation).toBe(true);
       expect(client.Properties.PreventUserExistenceErrors).toBe('ENABLED');
     },
