@@ -193,8 +193,10 @@ roles of its own account an explicit deny on:
 - `lambda:UpdateFunctionCode`, `UpdateFunctionConfiguration`,
   `PublishVersion`, `CreateAlias`, `UpdateAlias` and `DeleteAlias` on
   the API and authorizer functions;
-- `lambda:InvokeFunction`, `AddPermission` and `RemovePermission` on
-  the API function;
+- `lambda:InvokeFunction`, `InvokeAsync`, `AddPermission` and
+  `RemovePermission` on the API function, `InvokeAsync` because the
+  deprecated asynchronous invoke still runs and is documented with an
+  action of its own;
 - `apigateway:PUT`, `PATCH`, `POST` and `DELETE` on the REST API,
   `arn:<partition>:apigateway:<region>::/restapis/<api-id>` and
   `/restapis/<api-id>/*`;
@@ -367,12 +369,28 @@ as a consumer of a global post hook.
   (`DeleteStateMachine`) terminates each of its running executions at
   its next state transition, which strands its record in `CREATING`,
   `UPDATING` or `DELETING`, as `StopExecution` does (spec §7.2). The
-  upgrade is therefore deployed only after a drain (spec R-41): no
-  mutating operation is accepted until the deploy completes, and the
-  deploy starts only when `ListExecutions` with status `RUNNING` is
-  empty. The drain covers accepted operations too, because one the
-  old API function accepted just before its environment changed
-  starts on the old state machine.
+  upgrade is therefore deployed only after a drain (spec R-41), as
+  three deploys. (a) Redeploy the current version with `allowedRoles`
+  set to a value no token carries, so the authorizer refuses every
+  mutating call while readers keep their `GET`s. (b) When
+  `ListExecutions` with status `RUNNING` on the old workflow is empty,
+  deploy the upgrade with that `allowedRoles` kept. (c) Redeploy with
+  `allowedRoles` restored. Deploy (b) must not restore the roles:
+  CloudFormation may update the authorizer before the API function
+  points at the new workflow, and it deletes the old state machine
+  only at cleanup, so an operation accepted in between would start on
+  the old workflow and be stranded. Machine clients only get the
+  reader role (R-38), so the gate does not affect them. The README
+  gains this upgrade step when the change is built.
+- `fleetName` narrows from `[a-z0-9-]{1,32}` to
+  `[a-z0-9][a-z0-9-]{0,31}` (spec §3.3), because it now names
+  CodeBuild projects, whose names start with a letter or digit. A
+  fleet whose name starts with a hyphen fails synth after the upgrade.
+  Renaming it replaces every fleet role, so the role pair must be
+  reinstalled under the new name in every registered account.
+  `architecture.md`, the README and `src/shared/fleet.ts` keep the
+  built pattern until this change is built, and then take the new
+  one.
 - Every build role, every hook role and the two pair roles of the
   control plane's own account carry the deny, one standalone policy
   that nothing depends on, so a deployer can no longer grant them,
