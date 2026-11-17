@@ -2,8 +2,8 @@
 
 - Status: Proposed
 - Date: 2026-11-17
-- Amends: ADR-0002, ADR-0011, ADR-0012, ADR-0021, ADR-0022, ADR-0032,
-  ADR-0042
+- Amends: ADR-0002, ADR-0011, ADR-0012, ADR-0021, ADR-0022, ADR-0025,
+  ADR-0032, ADR-0042
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -158,56 +158,94 @@ every account's pair trusts, and the separation between code that holds
 a pair and code that must never hold one would rest on a per-build
 override instead of on the project.
 
-No pair trusts a hook role, but three grants still lead from a role to
-the provisioning build roles and through them to every pair: starting
-an execution of the workflow, starting a build in a provisioning
-project, and writing to the table, whose hook records declare hooks.
-The stack therefore adds to each build role, each hook role and the two
-pair roles of its own account an inline explicit deny on
-`states:StartExecution` on the workflow, on starting builds in all four
-projects, and on writes to the table. An explicit deny holds whatever a
-deployer attaches, and the stack still never reads an attached policy
-(P-3). It also closes the same path for the policies of
-`tenantBuildManagedPolicyArns` (ADR-0022), which attach to the tenant
-provisioning role of the stack's own account. The workflow and API
-roles carry no such deny, because those actions are their own grants. A
-principal outside the denied roles that the deployer grants one of
-these actions in the control plane account stays the deployer's choice
-(T41).
+No pair trusts a hook role, but grants of three kinds still lead from a
+role to the provisioning build roles and through them to every pair.
+The direct ones start an execution of the workflow, start a build in a
+provisioning project, or write to the table, whose hook records declare
+hooks. The second kind runs new code as a role that holds a pair or one
+of those grants: `iam:PassRole` on it with a create on CodeBuild, Step
+Functions or Lambda. The third rewrites what a pair holder runs next,
+or removes the deny itself: an IAM write on one of the stack's roles,
+or an update to a project, the workflow or the API function. The stack
+therefore adds to each build role, each hook role and the two pair
+roles of its own account an inline explicit deny on:
+
+- `iam:PassRole` on the two build roles, the workflow role, the API
+  role and the two hook roles;
+- `iam:PutRolePolicy`, `DeleteRolePolicy`, `AttachRolePolicy`,
+  `DetachRolePolicy`, `UpdateAssumeRolePolicy`,
+  `PutRolePermissionsBoundary` and `DeleteRolePermissionsBoundary` on
+  every role the stack creates;
+- `codebuild:StartBuild`, `StartBuildBatch`, `RetryBuild`,
+  `UpdateProject`, `CreateWebhook` and `UpdateWebhook` on the four
+  projects;
+- `states:StartExecution`, `UpdateStateMachine` and `RedriveExecution`
+  on the workflow;
+- `lambda:UpdateFunctionCode`, `UpdateFunctionConfiguration`,
+  `PublishVersion`, `CreateAlias`, `UpdateAlias` and `DeleteAlias` on
+  the API and authorizer functions;
+- `dynamodb:PutItem`, `UpdateItem`, `DeleteItem`, `BatchWriteItem`,
+  `PartiQLInsert`, `PartiQLUpdate` and `PartiQLDelete` on the table,
+  through which `TransactWriteItems` and `ExecuteTransaction` are
+  authorised per item.
+
+Each build role also trusts CodeBuild only on its own project's
+`aws:SourceArn`, as each hook role does, so no new project runs as it.
+That changes the build roles' trust, which ADR-0025 left as CodeBuild
+with no condition. The stack still never reads an attached policy
+(P-3), and the list names only its own resources. The deny also limits
+the policies of `tenantBuildManagedPolicyArns` (ADR-0022), which attach
+to the tenant provisioning role of the stack's own account. The
+workflow and API roles carry no deny, because the direct actions are
+their own grants. The deny leaves a residual, which is stated, not
+closed: an attached grant of `sts:AssumeRole` on another role in the
+control plane account (an admin role or a CDK bootstrap role), or of
+CloudFormation writes through a privileged execution role, still
+reaches the pair, and so does a principal outside the denied roles
+that the deployer grants a denied action. Both stay the deployer's
+choice (T41).
 
 A hook build starts with a request-response `startBuild`, so its id is
 known from the first call, and a loop polls that one build with
 `batchGetBuilds` every 60 seconds, keeping only its id, status, phase
-timing and resolved commit. A hook's `timeoutMinutes` (5 to 30) is
-CodeBuild's run timeout. A refused `StartBuild` (throttling, a
-concurrency quota, the project at its cap) is tried again every 30
-seconds for at most 5 minutes, and each try sends a queued timeout of
-10 minutes less the minutes refused so far, never below CodeBuild's
-minimum of 5, so refusals and the queue take at most 10 minutes
-together. Every try carries an idempotency token derived from the
-execution, the event, the phase, the hook, the attempt and the try's
-queued timeout, and a transient server error is repeated under it, so
-a call that created a build before it failed returns that build again
-instead of leaving one with no id to stop. The attempt's deadline is
-data: the run timeout, the 10 minutes and five minutes of margin from
-the first start try, and on delete never later than 2 minutes before
-the end of the hook's budget. At the deadline the loop calls
-`StopBuild`, with the same refusal retry, and polls the build until it
-is final, within the 2 minutes the bound allows, so a queue wait is
-never read as a hook timeout and no build outlives its attempt. The
-only retries are on `StartBuild` and `StopBuild` refusals, plus the
-repeats of a start try under its token. A delete hook's three attempts
-are a loop through the failure handling, each starting its own build
-only after the last one is final. An attempt refused for its whole
-window started no build and does not count, and the next try follows
-the 60-second backoff. A budget of three attempts' time, 144 minutes at
-the cap, bounds the hook; when it runs out the loop stops the build and
-logs the skip as "budget ran out". A `.sync` task was the first draft.
-It was dropped because finding the build after a task timeout meant
-reading the project's recent builds, whose results each echo up to
-about 100 KiB of environment and could pass the state limit, and
-because a task `Retry` on delete would skip stopping the earlier
-builds.
+timing and resolved commit. A hook's `timeoutMinutes` (T, 5 to 30) is
+CodeBuild's run timeout. The start is an explicit loop that holds two
+variables, computed once per try: the try index `TRY`, and that try's
+queued timeout q, 10 minutes less the minutes refused so far and never
+below CodeBuild's minimum of 5. A refused `StartBuild` (throttling, a
+concurrency quota, the project at its cap) goes through a `Catch`, a
+30-second `Wait` and a `Choice` that increments `TRY`, for at most 5
+minutes, so refusals and the queue take at most 10 minutes together. A
+transient error is a task `Retry` (`TimeoutSeconds` 15, at most three
+repeats 10 seconds apart), which re-sends the same variables. The
+idempotency token is the JSONata `$hash` of the execution, the event,
+the phase, the hook, the attempt and `TRY`. It has a fixed length,
+differs on every try and stays the same on every repeat, so a call that
+created a build before it failed returns that build again instead of
+leaving one with no id to stop. A try whose repeats all fail ends the
+attempt as "start outcome unknown", never a new try under another
+token. The attempt's deadline is data: the run timeout, the 10 minutes
+and five minutes of margin from the first start try, and on delete
+never later than 2 minutes before the end of the hook's budget. At the
+deadline the loop calls `StopBuild`, in the same loop shape, and polls
+the build until it is final, within the 2 minutes the bound allows. So
+a queue wait is never read as a hook timeout, and no hook build
+outlives its attempt, except a build hidden behind a start whose
+repeats all failed, which CodeBuild stops within q + T.
+
+A delete hook's three attempts are a loop through the failure handling,
+each starting its own build only after the last one is final. An
+attempt refused for its whole window started no build and does not
+count, and the next try follows the 60-second backoff. An attempt that
+ended "start outcome unknown" counts, and the next attempt waits until
+q + T have passed, so it never runs beside the hidden build. A budget
+of three attempts' time, 144 minutes at the cap, bounds the hook; when
+it runs out the loop stops the build and logs the skip as "budget ran
+out". A `.sync` task was the first draft. It was dropped because
+finding the build after a task timeout meant reading the project's
+recent builds, whose results each echo up to about 100 KiB of
+environment and could pass the state limit, and because a task `Retry`
+on delete would skip stopping the earlier builds.
 
 Only a control plane operation starts a hook; no API runs one, and
 nothing a tenant controls can declare, skip, change or start one: an
@@ -218,15 +256,16 @@ as a consumer of a global post hook.
 ## Consequences
 - Spec changes: P-1, P-3, P-4, P-6, P-9, P-12, §1.2, §1.3, §3.1 (R-4,
   R-6, the system diagram), §3.2 (R-36, R-37), §3.3 (`fleetName`, two
-  new inputs), §4.1 (R-29, source and script charsets), §4.2, §4.4
-  (R-31), §4.7 (R-10), new §4.8 (R-39, R-40), §5.2, §5.3, §5.5
-  (`PutHook`, `GetHook`, `ListHooks`, `DeleteHook`; `PutApplication`
-  `hooks` and charsets), §5.7, §6.1 (`OUTPUTS_FILE`), §6.4, new §6.5
-  (R-41 to R-44), §7.1 step 0, §7.2, §7.4, §8 (R-20, R-22, R-23, §8.2,
-  new §8.3 with R-45 and R-46), N-12, new §9.1 (H-1 to H-10), §10
-  steps 2, 16 and 17 and the unit assertions, §11, §12. Threat model:
-  T5, T16, T30, T34, T36, T43, M10, M12, M15, M17, M18, M24, M26
-  widened; new T39 to T44 and M28 to M32.
+  new inputs, the home pair's deny), §4.1 (R-29, source and script
+  charsets), §4.2, §4.4 (R-31), §4.7 (R-10), new §4.8 (R-39, R-40),
+  §5.2, §5.3, §5.5 (`PutHook`, `GetHook`, `ListHooks`, `DeleteHook`;
+  `PutApplication` `hooks` and charsets), §5.7, §6.1 (`OUTPUTS_FILE`),
+  §6.3 (the note after R-35), §6.4, new §6.5 (R-41 to R-44), §7.1
+  step 0, §7.2, §7.4, §8 (R-20, R-22, R-23, §8.2, new §8.3 with R-45
+  and R-46), N-12, new §9.1 (H-1 to H-10), §10 setup, steps 2, 16 and
+  17 and the unit assertions, §11, §12. Threat model: T5, T16, T30,
+  T34, T36, T43, M10, M12, M15, M17, M18, M24, M26 widened; new T39 to
+  T44 and M28 to M32.
 - The reader grant grows from ten to twelve `GET` operations (`GetHook`,
   `ListHooks`), as ADR-0042 anticipated for a new `GET`; R-37 holds, and
   a hook's source location is disclosed like a script's (T34, T36).
@@ -258,16 +297,23 @@ as a consumer of a global post hook.
 - The build runners go from two projects to four (ADR-0002, ADR-0012):
   two provisioning projects whose roles assume the pair, two hook
   projects whose roles never do. The pair's trust policy is unchanged
-  and names neither hook role.
+  and names neither hook role. Each build role's trust gains an
+  `aws:SourceArn` condition on its own project (ADR-0025), so a project
+  the stack did not create cannot run as a build role.
 - Every build role, every hook role and the two pair roles of the
   control plane's own account carry the inline deny, so a deployer can
-  no longer grant them `states:StartExecution` on the workflow, a build
-  start in any of the four projects, or a write to the table, through
-  `tenantBuildManagedPolicyArns` (ADR-0022) or otherwise. A policy that
-  grants one of these for an application plane need is now refused at
-  the deny; the producer policy in this repository, tenant-identity's
-  `PlatformInvokePolicy` (`execute-api:Invoke`, KMS encrypt), grants
-  none of them.
+  no longer grant them, through `tenantBuildManagedPolicyArns`
+  (ADR-0022) or otherwise, any action on its list: passing one of the
+  stack's roles, writing a role's policies, starting a build in or
+  updating one of the four projects, starting, updating or redriving
+  the workflow, changing the API or authorizer function, or writing to
+  the table. A policy that grants one of these for an application plane
+  need is now refused at the deny; the producer policy in this
+  repository, tenant-identity's `PlatformInvokePolicy`
+  (`execute-api:Invoke`, KMS encrypt), grants none of them. A grant of
+  `sts:AssumeRole` on another role of the control plane account, or of
+  CloudFormation writes through a privileged execution role, still
+  reaches the pair; that residual is the deployer's (T41).
 - The concurrency cap and log retention of ADR-0021 cover all four
   projects. All global hook builds of the fleet share one project
   capped at five, and CodeBuild documents builds over the cap as
@@ -275,10 +321,19 @@ as a consumer of a global post hook.
   minutes; then a create or update ends in a named `*_FAILED` ("cannot
   start") rather than a silent wait, and a delete hook spends its
   budget and is skipped (T42, T43).
+- A start whose repeats all failed ends "start outcome unknown" and may
+  hide a build that runs until CodeBuild stops it, within q + T. On
+  create, a post hook hidden this way can still write state, a route
+  included, beside the record's `CREATE_FAILED` (T40). On delete the
+  next attempt waits it out, but a skip at the budget's end can leave it
+  running beside the delete script (T42).
 - Polling costs three state transitions per hook minute, about $0.002
-  for a 30-minute hook, and at the caps about 13,000 of a Standard
-  execution's 25,000 history events; a 30-second interval would pass
-  that quota.
+  for a 30-minute hook. History grows at the larger of two rates:
+  polling writes nine events a minute, and the refusal loop about 15.7.
+  At the caps a delete writes about 13,000 of a Standard execution's
+  25,000 history events while polling, and about 22,600 when every hook
+  is refused for its whole budget. The refusal interval stays 30
+  seconds; a 30-second poll would pass the quota.
 - The execution-level timeout grows from 3 hours to 26 hours. At the
   caps (ten hooks per event, 30-minute runs, three attempts per delete
   hook) a delete can run 25 hours and a new-cell create about 18. The
@@ -312,13 +367,15 @@ as a consumer of a global post hook.
   - H-2: a `batchGetBuilds` result carries `resolvedSourceVersion`.
   - H-5: CodeBuild accepts a hook build's environment override (about
     fifteen fixed variables, 40 `PARAM_` variables, 4 KB of outputs).
-  - H-7: a hook role's trust policy conditioned on `aws:SourceArn`
-    admits its own project's builds only.
+  - H-7: a CodeBuild role's trust policy conditioned on `aws:SourceArn`
+    admits its own project's builds only, for each hook role and each
+    provisioning build role.
   - H-8: a refused `StartBuild` or `StopBuild` fails with a service
     error name no started build produces, and a refused try creates no
     build; the idempotency token passes through the Step Functions
     integration, and a repeat within its 5-minute validity returns the
-    same build id.
+    same build id; a task `Retry` re-sends the evaluated `Arguments`
+    unchanged, and a refused request does not bind its token.
   - H-9: what `StartBuild` returns at the project's
     `concurrentBuildLimit`; the design assumes a refusal.
   - H-10: a 4,096-byte outputs value of worst-case escapes round-trips
@@ -328,13 +385,15 @@ as a consumer of a global post hook.
 - Seams (spec §11): hooks on tenant record events and on account events;
   outputs from a pre hook into the script; a hook role per application
   or per global hook; publishing to an event bus as a built-in.
-- ADR-0002, ADR-0011, ADR-0012, ADR-0021, ADR-0022, ADR-0032 and
-  ADR-0042 get "Amended by ADR-0044" lines and dated trailing notes when
-  this record is accepted.
+- ADR-0002, ADR-0011, ADR-0012, ADR-0021, ADR-0022, ADR-0025, ADR-0032
+  and ADR-0042 get "Amended by ADR-0044" lines and dated trailing notes
+  when this record is accepted.
 - Revisit if a downstream system needs to veto a delete (today a delete
   cannot be gated), if per-application or per-hook permissions are
   needed, if hook latency on every operation becomes the larger cost, if
-  H-9 finds that the project cap queues builds rather than refusing
-  them, if H-8 finds that the token does not return the same build, or
-  if H-10 finds that the export counts escapes past its limit or that
-  Step Functions' JSONata engine cannot run the guard.
+  H-7 finds that the `aws:SourceArn` condition refuses a project's own
+  builds, if H-9 finds that the project cap queues builds rather than
+  refusing them, if H-8 finds that the token does not return the same
+  build or that a `Retry` re-evaluates its `Arguments`, or if H-10 finds
+  that the export counts escapes past its limit or that Step Functions'
+  JSONata engine cannot run the guard.
