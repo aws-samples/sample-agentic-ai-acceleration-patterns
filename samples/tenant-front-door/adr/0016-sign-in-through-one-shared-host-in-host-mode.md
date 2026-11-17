@@ -3,7 +3,7 @@
 # ADR-0016: Sign in through one shared host in host mode
 
 - Status: Accepted
-- Date: 2026-11-16
+- Date: 2026-11-17
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -37,7 +37,10 @@ tenant host, was refused with a redirect to Cognito's own `/login` page.
 With `client_id`, `response_type=code`, `scope`, a registered
 `redirect_uri` and a `state`, Cognito redirected to its sign-in page with
 the `state` kept, and after sign-in sent the code and the same `state` to
-the `redirect_uri`.
+the `redirect_uri`. A rerun on 2026-11-17 showed that this form also
+signs the user out: a live session gave a code without the sign-in
+form, both `/logout` forms ended it, and the next authorize showed the
+form again.
 
 ## Options considered
 
@@ -80,9 +83,13 @@ router function as every other host. The router mints a `state` signed
 with an HMAC key from the route table that binds the tenant host, the
 SPA's nonce and a 10-minute expiry; the sign-in host forwards the code
 only to an active, registered tenant host, and the SPA's nonce and PKCE
-verifier make a replayed `state` useless. Sign-out uses Cognito's
-`redirect_uri` form of `/logout` with a fresh `state` for the tenant host,
-because S-4o showed that the `logout_uri` form drops `state`: the user
+verifier make a replayed `state` useless. The router mints a `state`
+only on a pooled host, one label under `appDomain` that the vendor's
+wildcard DNS record and certificate cover, and the sign-in host
+forwards only to one, so a dedicated domain signs in on its pooled
+host `<tenant>.<appDomain>`. Sign-out uses Cognito's `redirect_uri` form
+of `/logout` with a fresh `state` for the tenant host, because S-4o
+showed that the `logout_uri` form drops `state`: the user
 signs out, signs in again and returns to their own tenant host. This
 needs no issuer change per tenant and has no ceiling, where Option 1
 needs a client update per tenant at 15 per second and Option 3 does not
@@ -98,10 +105,22 @@ rotation are in spec §3.3 step 2, §3.5 and §4.1.
   host from the store alone, with at most three reads per request.
 - Harder: sign-out depends on Cognito's `redirect_uri` form of `/logout`.
   Another issuer needs its own mapping from the tenant host's `/logout`.
-- Harder: the code Cognito issues after a sign-out has no PKCE challenge.
-  Its `state` carries no nonce, so the sign-in host sends the user to the
-  tenant host's `/` without it, and the SPA starts a fresh sign-in that
-  the issuer's new session answers without the sign-in form (spec §3.5).
+- Harder: the code Cognito issues after a sign-out has no PKCE challenge,
+  so `client_id` and the `redirect_uri` redeem it. Its `state` carries no
+  nonce, so the sign-in host sends the user to the tenant host's `/`
+  without it, and the SPA starts a fresh sign-in that the issuer's new
+  session answers without the sign-in form (spec §3.5). The code
+  reaches only `login.<appDomain>` and is not logged: the access log
+  delivery leaves out `cs-uri-query` (ADR-0010).
+- Harder: a dedicated domain in `host` mode is never a sign-in target.
+  Its DNS belongs to the tenant, so a code forwarded there would reach a
+  server the tenant runs. That tenant could start an authorize request
+  with its own nonce and PKCE verifier, send the link to any signed-in
+  user of the shared pool and redeem the code for that user's token.
+  Its users sign in on the pooled host `<tenant>.<appDomain>` and stay
+  there for the session. A dedicated domain with its own callback URL
+  (Option 1 for that one client) is out of scope until spec Q-3 is
+  answered.
 - Harder: the sign-in host and its function are part of the edge, and the
   integration test for `host` mode signs in and out through it (spec §10).
 - Harder: the router is no longer secret-free in `host` mode. The route
@@ -111,7 +130,8 @@ rotation are in spec §3.3 step 2, §3.5 and §4.1.
 - Harder: the SPA needs `sessionStorage` for two single-use values
   (ADR-0007).
 - Follow-up: the sample's threat model lists every principal that can read
-  the `signin` key.
+  the `signin` key, and every reader of the CloudFront log group in
+  `us-east-1`, which sees each request to the sign-in host.
 - Follow-up: count `state` refusals apart from other 400s: every 400 on
   `login.<appDomain>` in the access log is a refusal.
 - Revisit when the issuer matches wildcard callback URLs strictly, returns

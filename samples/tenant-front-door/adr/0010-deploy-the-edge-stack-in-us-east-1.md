@@ -79,7 +79,11 @@ CloudFront's and CloudWatch Logs', so the split keeps it to the resources it
 applies to, and every other part of the front door sits in the same Region
 as the control plane and the cells it serves. Logs go to CloudWatch Logs
 because it is nine times faster to the first record than S3 and needs no
-query setup.
+query setup. The delivery names its record fields explicitly and leaves
+out `cs-uri-query`: in `host` mode the sign-in host's query carries
+authorization codes (ADR-0016), and the per-tenant fields the
+telemetry reads, such as `x-host-header`, `cs-uri-stem`, `sc-status`,
+`sc-bytes` and `time-taken`, stay in the list.
 
 ## Consequences
 
@@ -89,6 +93,8 @@ query setup.
   stack only.
 - Harder: per-tenant log queries (integration step 14) run in `us-east-1`.
   An operator looks for the CloudFront log group there.
+- Harder: the logs hold no query strings, and a field a new query needs
+  is a change to the delivery's field list.
 - Harder: deploy runs the edge stack, then the main stack, then the edge
   logging stack; destroy runs them in reverse. The certificate cannot be
   removed while the distribution still uses it.
