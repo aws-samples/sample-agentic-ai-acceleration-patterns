@@ -14,7 +14,7 @@ does not fetch the issuer's discovery document (spec §7.1). In `host`
 mode it also needs the tenant id and display name for the host it was
 loaded from (ADR-0001), and the shared sign-in `redirectUri`,
 `https://login.<appDomain>/callback` (ADR-0016). On a dedicated domain
-it needs `pooledHost`, where its users sign in (ADR-0016):
+it needs `signInHost`, the host where its users sign in (ADR-0016):
 `<tenant>.<appDomain>` in `host` mode, `<appDomain>` in `single` mode.
 None of these values is secret.
 
@@ -34,7 +34,7 @@ shared settings.
 The router answers `/config.json` itself (spec §3.3 step 8). It builds the
 body from the `app` key, and in `host` mode from the `host#` and `tenant#`
 keys it already read to route. On a dedicated domain it derives
-`pooledHost` with no extra read: from the tenant id the `host#` entry
+`signInHost` with no extra read: from the tenant id the `host#` entry
 gave it in `host` mode, from the compiled `appDomain` in `single` mode.
 The response is `no-store`.
 

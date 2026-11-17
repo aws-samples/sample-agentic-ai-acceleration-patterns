@@ -32,9 +32,11 @@ of up to 64 characters (§3.6). A control-plane tenant id is 26 characters;
 | `host#` | `host#` + 63 + `.` + 64 = 133 B | `{"v":1,"t":"…63…","ac":"…12…"}` = 97 B | 230 B |
 
 So a tenant needs at most 217 bytes in `single` mode and 447 bytes in `host`
-mode, 217 + 230. The `host#` value records its owner in `ac`, which the
-registrar checks before another tenant's write and on a delete. The
-vendor needs to know where the limit sits and what happens past it,
+mode, 217 + 230. The `host#` value names its tenant (`t`), which the
+registrar checks before another tenant's write, and records the
+account (`ac`), which deletes check. A pooled tenant's `tenant#` value
+has no `d`: only a tenant with a dedicated domain carries it (§4.1).
+The vendor needs to know where the limit sits and what happens past it,
 before a tenant create script hits a full store.
 
 ## Options considered
@@ -77,8 +79,9 @@ need their own record.
   shard lookup.
 - The ceiling is a real number because `n` has a byte limit; typical
   tenants are smaller, so a store usually holds more.
-- A dedicated tenant's own domain adds one more `host#` entry, which the
-  20 % headroom and the 507 cover.
+- A dedicated tenant's own domain adds one more `host#` entry and a `d`
+  field on its `tenant#` entry, both counted against the 20 % headroom
+  and covered by the 507.
 - The registrar returns a clear error when the store is full, and the
   README states the ceiling per mode.
 - One front door per application (ADR-0014) means the ceiling is per

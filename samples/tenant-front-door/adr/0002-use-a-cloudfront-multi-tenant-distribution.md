@@ -64,9 +64,13 @@ shared configuration; Option 3 breaks P-8 and P-9.
 ## Consequences
 
 - Easier: one response headers policy and one set of origins for every
-  tenant; a dedicated domain is one distribution tenant, created by
-  `PutTenantRoute` with `customDomain` and removed by `DeleteTenantRoute`
-  (§5.1).
+  tenant; a dedicated domain is one distribution tenant, created when
+  the edge operator role sets `customDomain` with `PutTenantRoute` and
+  removed when it drops the domain or by `DeleteTenantRoute` (§5.1).
+- Harder: only the vendor sets a dedicated domain. A tenant
+  provisioning role that sends `customDomain` gets 403, so a tenant
+  cannot claim a domain it does not own. The vendor sets it after it
+  has confirmed that the tenant controls the domain; Q-3 decides how.
 - Harder: the stack depends on multi-tenant distribution support in the
   CDK and CloudFormation version it pins.
 - Harder: the dedicated path adds certificate validation per tenant

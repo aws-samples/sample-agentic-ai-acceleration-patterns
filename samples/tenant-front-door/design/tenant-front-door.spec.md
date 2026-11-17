@@ -31,7 +31,8 @@ The router finds the tenant in one of two ways, chosen at deploy time
 | `host` | one host each, `https://<tenant>.<appDomain>` | the host name |
 
 Both modes send the same route hint to the origin, and the origin checks it
-against the verified token the same way (P-4).
+against the verified token the same way (P-4). In `host` mode the router
+also compares the token's claim with the host's tenant at the edge.
 
 Deployment model: the SPA and the edge are pooled, one front door per
 control-plane application. Cells behind the edge are whatever the control
@@ -52,8 +53,10 @@ dedicated distribution tenant on the same distribution, in either mode.
 - A route hint the origin checks against the verified token and the tenants
   its cell hosts, so a request can only be served by its own tenant's cell.
 - One web security baseline for every tenant (§7), set once at the edge.
-- Per-tenant telemetry and cost attribution at the edge; a per-tenant rate
-  limit at the edge in `host` mode and at the origin in `single` mode
+- Per-tenant telemetry and cost attribution at the edge in both modes:
+  from the access log's host in `host` mode, and in `single` mode from a
+  router log line that names the tenant (§3.1). A per-tenant rate limit
+  at the edge in `host` mode and at the origin in `single` mode
   (ADR-0009).
 - Agent traffic (`/agents/*`) on the same origin, streamed through to the
   agent ingress.
@@ -88,22 +91,28 @@ dedicated distribution tenant on the same distribution, in either mode.
 2. **P-2: The tenant comes from the token or the host, never the client.**
    No header, query parameter or path segment names the tenant. In `single`
    mode the token's claim decides; in `host` mode the host decides and the
-   token must agree.
+   token must agree. The router checks that agreement at the edge on the
+   decoded claim, and the cell checks it again at the origin on the
+   verified one (P-4).
 3. **P-3: The route table is vendor data.** Only the route registrar writes
    routes. Nothing in a request can add, change or pick a route, and every
    client `x-tenant-*` header is removed before routing.
 4. **P-4: The verified token and the cell must agree.** The router forwards
-   the tenant it routed on as a route hint. The origin verifies the token,
-   refuses a `tenant_id` that differs from the hint, and refuses a tenant its
-   cell does not host.
+   the tenant it routed on as a route hint. In `host` mode it first
+   refuses, at the edge, a token whose decoded `tenant_id` is not the
+   host's tenant (§3.3 step 5). The origin verifies the token, refuses a
+   `tenant_id` that differs from the hint, and refuses a tenant its cell
+   does not host.
 5. **P-5: An account routes traffic only to itself.** The registrar takes
    the calling account from the signed request, never from its body, and
    accepts a route only when the control plane places that cell or
-   deployment in that account. A tenant route claims only its own hosts:
-   its pooled host, and a `customDomain` outside `appDomain` that no
-   other tenant holds (§3.4 step 4). A tenant-owned account controls its
-   own credentials, so this is the wall that stops it pointing another
-   tenant's traffic at its own cell.
+   deployment in that account. A tenant route claims only its own pooled
+   host. A dedicated domain (`customDomain`) is set only by the vendor's
+   edge operator role, once the vendor has confirmed that the tenant
+   controls the domain, and only outside `appDomain` and when no other
+   tenant holds it (§3.4 steps 3 and 4). A tenant-owned account controls
+   its own credentials, so this is the wall that stops it pointing
+   another tenant's traffic at its own cell.
 6. **P-6: Placement has one source of truth.** The control plane owns where
    each cell and deployment lives. The registrar reads it back on every
    write and keeps no placement data of its own.
@@ -130,7 +139,7 @@ dedicated distribution tenant on the same distribution, in either mode.
 | Multi-tenant distribution | edge | CloudFront (`ConnectionMode: tenant-only`) | Shared behaviours, policies and origins |
 | Pooled distribution tenant | edge | CloudFront distribution tenant | Serves `<appDomain>` (`single`) or `*.<appDomain>` (`host`) for every pooled tenant |
 | Dedicated distribution tenant | edge | CloudFront distribution tenant | Serves one tenant's own domain, with its own certificate and optional web ACL override |
-| Tenant router | edge | CloudFront Function (viewer request, JS 2.0) | Finds the tenant, refuses or routes. In `host` mode it also mints and checks the signed sign-in `state` and starts sign-out (§3.5, ADR-0016) |
+| Tenant router | edge | CloudFront Function (viewer request, JS 2.0) | Finds the tenant, refuses or routes. In `single` mode it writes one log line per request that names the tenant (Telemetry, below). In `host` mode it also mints and checks the signed sign-in `state` and starts sign-out (§3.5, ADR-0016) |
 | Route table | edge | CloudFront KeyValueStore | `tenant`, `host` and `cell` entries, the `app` settings and, in `host` mode, the `signin` key (§4) |
 | Route registrar | edge | API Gateway (IAM auth) and Lambda | The only writer of the route table; checks each write against the control plane (§3.4) |
 | SPA origin | edge | S3 bucket with origin access control | One build for every tenant |
@@ -138,7 +147,7 @@ dedicated distribution tenant on the same distribution, in either mode.
 | `CellRouteAccess` construct | the cell's | Lambda permission | Grants `cloudfront.amazonaws.com` `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`, conditioned on the edge distribution's ARN |
 | Agent route | edge | `/agents/*` behaviour | Streams to the agent ingress of `agentic-runtime-isolation`, when configured, with the `Managed-AllViewerExceptHostHeader` origin request policy |
 | `route.sh` | the cell's | the control plane's cell and tenant scripts | Calls the registrar with the script's own credentials |
-| Telemetry | edge | CloudFront standard logging v2: delivery source, delivery destination, delivery and log group in `us-east-1` (ADR-0010) | Per-tenant requests, errors, bytes, latency, from the record fields ADR-0010 lists, never `cs-uri-query`, `cs(Referer)` or `cs(Cookie)` |
+| Telemetry | edge | CloudFront standard logging v2: delivery source, delivery destination, delivery and log group in `us-east-1` (ADR-0010); in `single` mode also the router's function log | Per-tenant requests, errors, bytes, latency, from the record fields ADR-0010 lists, never `cs-uri-query`, `cs(Referer)` or `cs(Cookie)`. In `host` mode `x-host-header` names the tenant. In `single` mode every pooled tenant shares one host and one distribution tenant, so no access-log field does: the router writes one line per request with `console.log`, the lower-case tenant id (`-` when the request has none) and the CloudFront request id, never the token or any header value. CloudFront Functions sends `console.log` output to CloudWatch Logs in `us-east-1`, log group `/aws/cloudfront/function/<function name>`, whichever edge location ran the function, on a best-effort basis. Per-tenant counts join that line to the access log on `x-edge-request-id`. With the `START` and `END` lines CloudFront adds, each prefixed with the request id, a request writes about 300 bytes: about $0.15 per million requests at the `us-east-1` ingestion price of $0.50 per GB, plus storage. The edge stack creates that log group, with the router's fixed name and a retention, before the function exists, so `cdk destroy` removes it (§6.2). Its readers are listed apart from the access log's (§6.1) |
 
 ### 3.2 Request paths
 
@@ -163,10 +172,11 @@ and token endpoints, client id and scopes, plus the tenant id
 expects), display name and `redirectUri`
 (`https://login.<appDomain>/callback`) in `host` mode. It holds nothing
 secret. The SPA does not fetch the issuer's discovery document (§7.1).
-On a dedicated domain it also names `pooledHost`, where the SPA sends
-the user to sign in (§3.5): `<tenant>.<appDomain>` in `host` mode, from
-the tenant id the `host#` entry gave the router, and `<appDomain>` in
-`single` mode. Neither needs an extra read.
+On a dedicated domain it also names `signInHost`, the host where
+sign-in happens, to which the SPA sends the user (§3.5):
+`<tenant>.<appDomain>` in `host` mode, from the tenant id the `host#`
+entry gave the router, and `<appDomain>` in `single` mode. Neither
+needs an extra read.
 Serving the file from the edge keeps the SPA bundle the same file for
 every tenant. In `single` mode the SPA learns the tenant after sign-in, from
 its own token.
@@ -209,7 +219,15 @@ On every viewer request:
      narrows a `tenants` token first (§3.5).
    - `host` mode: the tenant from step 2. `/signin-state` therefore gets
      404 for an unknown host and 503 for a suspended tenant (step 6), so
-     a `state` is minted only for an active tenant.
+     a `state` is minted only for an active tenant. On `/api/*` and
+     `/agents/*` the router also decodes the bearer token's `tenant_id`
+     as in `single` mode, without checking the signature, and refuses
+     with 403 when there is no token, the token has no single
+     `tenant_id`, or the lower-cased claim names a tenant other than the
+     host's. A token for one tenant therefore never leaves the edge
+     towards another tenant's cell, which may run in an account that
+     tenant owns. A claim forged to match the host gains nothing: the
+     forged token fails at every verifier (P-1).
 6. Look up `tenant#<tenantId>`. No entry: 403. Status `suspended`: 503 with
    `Retry-After`.
 7. For `/api/*`, look up `cell#<cellId>` and set the request's origin to the
@@ -230,9 +248,14 @@ On every viewer request:
    host (step 2); on a dedicated domain both answer 400. Rewrite SPA
    routes with no file extension to `/index.html`.
 
-The router reads at most three keys per request. It checks no token
-signatures and writes nothing. In `single` mode it holds no secrets. In
-`host` mode it holds one, the sign-in HMAC key in the `signin` entry
+The router reads at most three keys per request. `/api/*` on a host it
+looks up (`host` mode, or a dedicated domain) reads all three: `host#`,
+`tenant#` and `cell#`. The token decode reads no key, so the `host` mode
+agreement check of step 5 adds no read, and its compute is the decode
+S-7 measured (13-14 %). It checks no token signatures and writes
+nothing to the store; in `single` mode its only output besides the
+request is the log line of §3.1. In `single` mode it holds no secrets.
+In `host` mode it holds one, the sign-in HMAC key in the `signin` entry
 (§3.5, ADR-0016).
 
 ### 3.4 Route registrar, step by step
@@ -262,24 +285,41 @@ On every write:
 3. Refuse with 403 when the record is missing, belongs to another
    application, or its `accountId` differs from the caller's account. A
    cell route needs a cell provisioning role; a tenant route needs a tenant
-   provisioning role.
+   provisioning role. A tenant provisioning role that sends a
+   `customDomain` is refused with 403 too: only the edge operator role
+   sets, changes or drops a tenant's dedicated domain, after the vendor
+   has confirmed that the tenant controls it (Q-3 decides how). The
+   operator's `PutTenantRoute` changes only the domain of an existing
+   tenant route: the `tenant#` entry must exist (409 otherwise), the
+   deployment record is checked against that entry's `ac` in place of
+   the caller's account, and the entry keeps its `c` and `ac`. A tenant
+   provisioning role's call keeps the stored domain.
 4. A tenant route also needs its cell's route to exist, written by the same
-   account: 409 otherwise. A `customDomain` that equals `appDomain` or
-   ends in `.<appDomain>` is refused with 400, so no tenant can claim a
-   pooled host or a reserved label. When `host#<customDomain>` exists
-   and its `t` names another tenant, the write is refused with 409, so
-   no tenant can take another's dedicated domain.
-5. Write the route table with the store's ETag (`IfMatch`), retrying on a
-   conflict, and record the caller's account in the value (`ac`, on
-   `tenant#`, `host#` and `cell#` entries alike).
+   account (for the operator's call, the tenant route's): 409
+   otherwise. A `customDomain` that equals `appDomain` or ends in
+   `.<appDomain>` is refused with 400, so no tenant route can
+   hold a pooled host or a reserved label. When `host#<customDomain>`
+   exists and its `t` names another tenant, the write is refused with
+   409, so no tenant route can take another tenant's dedicated domain.
+5. Write the route table with the store's ETag (`IfMatch`), and record
+   the caller's account in the value (`ac`, on `tenant#`, `host#` and
+   `cell#` entries alike); the operator's domain change keeps the
+   tenant route's account. A dedicated domain is also kept in the
+   `tenant#` entry as `d` (§4.1): when `customDomain` changes or is
+   dropped, the same write removes the old `host#<d>`. On an ETag
+   conflict, re-read the keys the write touches and repeat step 4 and
+   the 507 size check (§4.1) before the next attempt, so two writers
+   that race for one domain cannot both pass.
 6. Log the caller account, role, key and outcome, never the body.
 
 Deletes run steps 1 and 6 and need the caller's account to match the
 account recorded on every key they remove, `host#` keys included, so
 cleanup works after the control plane has already removed the record
-(P-9 of the control plane: cleanup is always reachable). Status changes
-(`suspended`, `active`) are vendor operations: only the edge account's
-operator role may make them.
+(P-9 of the control plane: cleanup is always reachable). A delete finds
+the tenant's dedicated `host#<d>` key from the `d` of its `tenant#`
+entry. Status changes (`suspended`, `active`), dedicated domains and
+`DeleteHostRoute`, which clears a `host#` key left behind (§5.1), are
+vendor operations: only the edge account's operator role may make them.
 
 ### 3.5 Identity model
 
@@ -307,7 +347,14 @@ operator role may make them.
      equals its saved nonce, exchanges the code with the saved verifier
      and the same `redirect_uri`, and deletes both saved values on every
      outcome. A callback with `error` gets a fixed message; the SPA
-     never renders `error_description` as HTML (§7.2).
+     never renders `error_description` as HTML (§7.2). After the
+     exchange the SPA compares the token's `tenant_id`,
+     case-insensitively, with `/config.json`'s tenant id; a `tenants`
+     token is narrowed to that tenant first (below). A token that names
+     another tenant, or a `tenants` token that does not list the
+     host's, is discarded, and the SPA signs the user out through
+     `/logout` (step 5) before any `/api/*` or `/agents/*` call. The
+     router would refuse such a call with 403 anyway (§3.3 step 5).
   5. Sign-out: `/logout` on the tenant host answers 302 to the issuer's
      logout endpoint with `client_id=<cid>`, `response_type=code`,
      `scope=openid`, `redirect_uri=https://login.<appDomain>/callback`
@@ -341,7 +388,7 @@ operator role may make them.
   dedicated domain's DNS belongs to the tenant: a code forwarded there
   would reach a server the tenant runs, holding a nonce and a PKCE
   verifier of its own choosing. So a dedicated domain receives no code
-  in either mode. Its SPA redirects to `pooledHost` (§3.2) for sign-in,
+  in either mode. Its SPA redirects to `signInHost` (§3.2) for sign-in,
   and the session continues on that host: `<tenant>.<appDomain>` in
   `host` mode, and in `single` mode `<appDomain>`, which signs in
   through its one callback URL, `https://<appDomain>/`. A dedicated
@@ -351,17 +398,19 @@ operator role may make them.
   `kid` (§4.1). A custom resource of the front door stack generates them
   with a cryptographic random source for the ids in `signinKeys` (§3.6)
   and writes them to the store. It writes with the store's ETag
-  (`IfMatch`) and retries on a conflict, as the registrar does (§3.4
-  step 5), because both write the same store. The key is never in the
-  template, a stack output, the custom resource's response `Data` or a
-  log. KeyValueStore actions name the store, not a key, and a function
-  has one store (ADR-0012). So the registrar role, the custom resource
-  and any edge-account principal with `cloudfront-keyvaluestore:GetKey`
+  (`IfMatch`) and re-reads and retries on a conflict, as the registrar
+  does (§3.4 step 5), because both write the same store. The key is
+  never in the template, a stack output, the custom resource's response
+  `Data` or a log. KeyValueStore actions name the store, not a key, and
+  a function has one store (ADR-0012). So the registrar role, the
+  custom resource and any edge-account principal with
+  `cloudfront-keyvaluestore:GetKey`
   or `ListKeys` on the store can read the key, and so can any principal
   that can update or test the router (`cloudfront:UpdateFunction`,
   `cloudfront:TestFunction`), the integration test role among them
-  (§10). The registrar code never reads `signin` or `app`, and the
-  deployer keeps those actions off every other role in the edge
+  (§10), which also writes the store for one fixture (§6.1). The
+  registrar code never reads `signin` or `app`, and the deployer keeps
+  those actions off every other role in the edge
   account (§6.1). A leaked key mints a `state` for any registered
   tenant host while it is live, and the nonce and PKCE binding still
   stops it from yielding a token. Rotation is in §4.1.
@@ -386,8 +435,12 @@ operator role may make them.
 - Each check stops a different request. Signature verification stops a
   forged claim (§10 step 7). The hosts check catches a validly signed token
   routed to the wrong cell, for example through a stale or wrong `cell#`
-  route. The route hint guards `host` mode, where the host picks the tenant
-  and the token must agree.
+  route. In `host` mode, where the host picks the tenant and the token
+  must agree, the router compares the decoded claim with the host's
+  tenant and refuses a mismatch at the edge (§3.3 step 5), so a token
+  for one tenant never reaches another tenant's cell, which may run in
+  an account that tenant owns. The route hint repeats that check at the
+  origin on the verified claim.
   The cell knows its tenants from its own namespace in its own account
   (`/application-plane/tenants/<tenantId>/<applicationId>/*`), so the check
   needs nothing from the edge account. It builds that path from the
@@ -424,7 +477,7 @@ operator role may make them.
 
 | Key | Value (JSON, 1 KB max) | Written by |
 |---|---|---|
-| `tenant#<tenantId>` | `{"v":1,"c":"<cellId>","ac":"<accountId>","s":"active"\|"suspended","n":"<display name>"}` | registrar, from the tenant create script |
+| `tenant#<tenantId>` | `{"v":1,"c":"<cellId>","ac":"<accountId>","s":"active"\|"suspended","n":"<display name>","d":"<dedicated domain>"}`, `d` only for a tenant with a dedicated domain | registrar, from the tenant create script; `d` from the edge operator role (§3.4 step 3) |
 | `host#<host>` | `{"v":1,"t":"<tenantId>","ac":"<accountId>"}` | registrar, in `host` mode and for a dedicated tenant's domain; only a pooled host's entry is a sign-in target (§3.3 step 2) |
 | `cell#<cellId>` | `{"v":1,"ac":"<accountId>","o":"<api domain>"}` | registrar, from the cell create script |
 | `app` | `{"v":1,"az":"<authorize endpoint>","tk":"<token endpoint>","cid":"<client id>","sc":"<scopes>","lo":"<logout endpoint>"}` | the front door stack |
@@ -441,7 +494,7 @@ Rules:
 - `<host>` is the full lower-case host name. In `host` mode pooled tenants
   use `<tenantId>.<appDomain>`; a dedicated tenant adds its own domain as
   another `host#` key, outside `appDomain` and held by no other tenant
-  (§3.4 step 4).
+  (§3.4 step 4), and names it in its `tenant#` entry's `d`.
 - Reserved labels (`www`, `api`, `admin`, `auth`, `login`, `static`, `status`) are
   refused at registration.
 - The `signin` key holds one or two keys, each 32 random bytes and
@@ -460,6 +513,10 @@ Rules:
   key may have been read.
 - `ac` is the account the registrar verified at write time. The router
   never reads it; the registrar uses it to authorise deletes.
+- `d` is the tenant's dedicated domain, present only when the edge
+  operator role has set one. The router never reads it; the registrar
+  uses it to find the `host#<d>` key, which it removes when the domain
+  changes or is dropped and when the tenant route is deleted.
 - Display name `n` is for display only, and the registrar never refuses
   any name the control plane accepts. A control-plane `TenantName` runs to
   128 characters with no character rule. The registrar replaces each
@@ -472,8 +529,11 @@ Rules:
   bytes (a 133-byte key and a 97-byte value with `ac`), so 447. The
   stated ceilings are 80 % of the 5 MB store over those sizes
   (ADR-0012): floor(4,000,000 / 217) = 18,433 tenants in `single` mode
-  and floor(4,000,000 / 447) = 8,948 in `host` mode. The registrar
-  refuses a write past 5 MB with 507, and an alarm fires at 80 %.
+  and floor(4,000,000 / 447) = 8,948 in `host` mode. Pooled tenants
+  carry no `d`, so these sizes and ceilings hold; a dedicated tenant's
+  `d`, like its dedicated `host#` entry, counts against the 20 %
+  headroom (ADR-0012). The registrar refuses a write past 5 MB with
+  507, and an alarm fires at 80 %.
 
 ### 4.2 Route status
 
@@ -510,16 +570,19 @@ Modelled in Smithy; all operations `AWS_IAM`, all idempotent.
 |---|---|---|---|
 | `PutCellRoute` | `PUT /cells/{cellId}` | cell provisioning role | Body `{apiDomain}`. Checks §3.4. 200 |
 | `DeleteCellRoute` | `DELETE /cells/{cellId}` | cell provisioning role | 409 while a tenant route names the cell. 200, also when absent |
-| `PutTenantRoute` | `PUT /tenants/{tenantId}` | tenant provisioning role | Body `{displayName, customDomain?}`. `displayName` is stored as §4.1 says. A `customDomain` gets a `host#` key that routes requests and records its owner (`t`, `ac`); it must lie outside `appDomain` and be held by no other tenant (§3.4 step 4). It is never a sign-in target: its users sign in on `pooledHost` (§3.5). Cell taken from the control plane, never the body. Checks §3.4. 200 |
-| `DeleteTenantRoute` | `DELETE /tenants/{tenantId}` | tenant provisioning role | Removes the `tenant#` and `host#` keys, each only when its `ac` is the caller's account (§3.4), and any dedicated distribution tenant. 200, also when absent |
+| `PutTenantRoute` | `PUT /tenants/{tenantId}` | tenant provisioning role; edge operator role to set `customDomain` | Body `{displayName, customDomain?}`. `displayName` is stored as §4.1 says. Only the edge operator role may send `customDomain`, after the vendor has confirmed that the tenant controls the domain (Q-3); a tenant provisioning role that sends it gets 403, and its call without it keeps the stored domain. The operator's call sets the domain, or drops it when `customDomain` is absent. The domain gets a `host#` key that routes requests and records its owner (`t`, `ac`), and is kept as `d` on `tenant#`; it must lie outside `appDomain` and be held by no other tenant. A changed or dropped domain removes the old `host#<d>` (§3.4 steps 3 to 5). It is never a sign-in target: its users sign in on `signInHost` (§3.5). Cell taken from the control plane, never the body. Checks §3.4. 200 |
+| `DeleteTenantRoute` | `DELETE /tenants/{tenantId}` | tenant provisioning role | Removes the `tenant#` key, the pooled host's `host#` key and the `host#<d>` key its `d` names, each only when its `ac` is the caller's account (§3.4), and any dedicated distribution tenant. 200, also when absent |
+| `DeleteHostRoute` | `DELETE /hosts/{host}` | edge operator role | Removes one `host#` key whatever its `t` and `ac`, and the `d` of the tenant it names when `d` is that host, to clear a key left behind. 200, also when absent |
 | `UpdateTenantRouteStatus` | `PUT /tenants/{tenantId}/status` | edge operator role | Body `{status}` |
 
 Errors: 400 for a malformed id or domain, an empty display name, or a
 `customDomain` that equals `appDomain` or ends in `.<appDomain>`; 403
 when the caller's account or role does not match the placement (the
-message names neither the real account nor the real cell); 409 for a
-missing cell route, a cell still in use, or a `customDomain` whose
-`host#` entry names another tenant (the message names no tenant); 507
+message names neither the real account nor the real cell), or a role
+other than the edge operator role sends `customDomain`; 409 for a
+missing cell route, a cell still in use, an operator domain change
+with no tenant route, or a `customDomain` whose `host#` entry names
+another tenant (the message names no tenant); 507
 when a write would exceed the route table's 5 MB (ADR-0012); 503 when
 the control plane cannot be read (the write is refused, never made
 unchecked).
@@ -531,8 +594,11 @@ unchecked).
   `TENANT_NAME`) and the registrar URL from the edge's published parameter.
   It signs with the credentials the script already holds.
 - **`PARAM_FRONT_DOOR_CUSTOM_DOMAIN`**, an optional declared deployment
-  parameter (control-plane ADR-0039), carries a tenant's own domain to
-  `put-tenant`.
+  parameter (control-plane ADR-0039), carries the domain a tenant asks
+  for. `put-tenant` does not send it, because a tenant provisioning
+  role's `customDomain` gets 403. The vendor reads it and, once it has
+  confirmed that the tenant controls the domain (Q-3), sets it with the
+  edge operator role (§3.4 step 3).
 - **`CellRouteAccess` construct**, used in a cell stack: grants
   `cloudfront.amazonaws.com` `lambda:InvokeFunctionUrl` and
   `lambda:InvokeFunction` on the cell's function, conditioned on the edge
@@ -545,7 +611,7 @@ All with a small static HTML or JSON body and `no-store`:
 | Status | When |
 |---|---|
 | 401 | `single` mode: no token, an undecodable token, or no single `tenant_id` (a `tenants` list included) |
-| 403 | unknown tenant (`single`), or a cross-site call to `/api/*`, `/agents/*` or `/signin-state` |
+| 403 | unknown tenant (`single`); in `host` mode, `/api/*` or `/agents/*` with no token, no single `tenant_id`, or a `tenant_id` other than the host's tenant (§3.3 step 5); or a cross-site call to `/api/*`, `/agents/*` or `/signin-state` |
 | 404 | unknown host (`host` mode, or an unknown dedicated domain), or `/signin-state` in `single` mode |
 | 429 | tenant over its rate on `/api/*` or `/agents/*` (`host` mode, at the edge): the WAF rate rule's Block action returns a custom 429, and a scope-down keeps SPA loads out of the count (ADR-0009) |
 | 400 | `/signin-state` with a missing or malformed nonce; `/signin-state` or `/logout` on a dedicated domain (`host` mode); on `login.<appDomain>`: a missing or changed `state`, an unknown `kid`, an `h` that is not a pooled host, an unregistered or suspended tenant host, or any other path. An authentic expired `state` gets 302 to `https://<h>/` instead (§3.3 step 2) |
@@ -561,7 +627,7 @@ All with a small static HTML or JSON body and `no-store`:
   mode. In `host` mode, `https://login.<appDomain>/callback` as the
   callback URL, which tenant-host sign-out also uses (§3.5), and no
   sign-out URL (ADR-0016). A dedicated domain adds no URL in either
-  mode: its users sign in on `pooledHost`, which in `single` mode is
+  mode: its users sign in on `signInHost`, which in `single` mode is
   `<appDomain>` (§3.5).
 - A control plane whose `GetCell` and `GetDeployment` return `accountId`
   and `applicationId`, with a reader role enabled (control-plane R-36), and
@@ -585,10 +651,19 @@ All with a small static HTML or JSON body and `no-store`:
   table, or `cloudfront:UpdateFunction` or `cloudfront:TestFunction` on
   the router, can read the key. The integration test role is one: it
   calls `TestFunction` and signs a test `state` with the live key (§10
-  step 17). The registrar code never reads `signin` or `app`. The
-  deployer keeps those actions off every other role in the edge
-  account: KeyValueStore has no resource policy, so the stack cannot
-  (§3.5).
+  step 17). It is also a writer of the store: it holds
+  `cloudfront-keyvaluestore:PutKey` and `DeleteKey` to write and remove
+  the step 2 fixture, which would let it replace the `signin` key or
+  any route. The deployer scopes that role to the test run, creating it
+  for the run and removing it after. The registrar code never reads
+  `signin` or `app`. The deployer keeps those actions off every other
+  role in the edge account: KeyValueStore has no resource policy, so
+  the stack cannot (§3.5).
+- In `single` mode, the reader list of the router's function log group,
+  `/aws/cloudfront/function/<function name>` in `us-east-1` (§3.1). It
+  holds tenant ids and CloudFront request ids, never a token or a
+  header value, and has its own readers, apart from the access log's.
+  The threat model lists both.
 - A cell API that verifies the token in `x-tenant-token`, refuses a
   `tenant_id` that differs from `x-tenant-route` (compared
   case-insensitively), refuses tenants its cell does not host, and in `single`
@@ -608,17 +683,20 @@ All with a small static HTML or JSON body and `no-store`:
 - A request reaches only the cell its route names.
 - An account can register routes only for cells and deployments the control
   plane places in it.
-- No tenant route can claim another tenant's host: a `customDomain` under
-  `appDomain` gets 400, and one another tenant holds gets 409.
+- No tenant route can claim another tenant's host: only the edge
+  operator role sets a `customDomain`, one under `appDomain` gets 400,
+  and one another tenant holds gets 409.
 - A forged token cannot be served: the cell's signature check refuses
   it. A validly signed token routed to the wrong cell is refused by that
   cell's hosts check.
-- In `host` mode, a token for one tenant is refused on another tenant's
-  host.
+- In `host` mode, a token for one tenant is refused at the edge on
+  another tenant's host, so it never reaches that tenant's cell.
 - Every response carries the §7 header set.
 - Each pooled tenant is registered and removed with one registrar call, with
   no distribution change.
-- Per-tenant requests, errors, bytes and refusals are visible.
+- Per-tenant requests, errors, bytes and refusals are visible in both
+  modes: in `host` mode from the access log, in `single` mode from the
+  access log joined to the router's function log (§3.1).
 - `cdk destroy` leaves nothing behind.
 
 ### 6.3 Samples consumed
@@ -688,6 +766,9 @@ tenant-owned account cannot weaken the baseline (P-8).
 - A callback with `error` shows a fixed message. Anyone holding a
   `state` can choose the `error_description` text, so the SPA never
   renders it as HTML, at most as `textContent`.
+- In `host` mode, after the code exchange, a token whose `tenant_id` is
+  not `/config.json`'s tenant is discarded and the user signed out
+  before any `/api/*` or `/agents/*` call (§3.5).
 - Trusted Types enforced, with no pass-through policy.
 - Same-origin API and agent calls, so no CORS is needed anywhere.
 - `PUT` and `POST` calls to `/api/*` send the body's SHA-256 in
@@ -772,13 +853,14 @@ the default mode; `test/integ.host.ts` repeats the steps marked (host) with
 Expected time, from S-1: deploying the edge stacks and the distribution
 takes about 481 s and destroying them about 312 s, before the control plane
 and the cells the test also deploys. The route changes of steps 2 and 15
-go through `route.sh`, which already waits its 45 s bound (§4.2). Step 13
-is a status change the test makes as the operator, without `route.sh`,
-so the test waits 60 s for propagation (ADR-0003, spike S-2) before its
-next call. The rotation check after the list is a separate run with its
-own time. The dedicated-domain checks (steps 3, 11 and 17) use a fixture
-`host#` entry and `cloudfront:TestFunction`, so they deploy no
-distribution tenant and no certificate.
+go through `route.sh`, which already waits its 45 s bound (§4.2). The
+step 2 fixture and the step 13 status change are writes the test makes
+without `route.sh`, so after each the test waits 60 s for propagation
+(ADR-0003, spike S-2) before its next call. The rotation check after
+the list is a separate run with its own time. The dedicated-domain
+checks (steps 3, 11 and 17) use a fixture `host#` entry and
+`cloudfront:TestFunction`, so they deploy no distribution tenant and no
+certificate.
 
 1. Deploy the front door and register the demo application with the control
    plane, its scripts calling `route.sh`.
@@ -788,13 +870,15 @@ distribution tenant and no certificate.
    the only write that bypasses the registrar (P-3):
    `host#dedicated-a.example.com` naming `a`, with the edge account as
    `ac`, a dedicated domain with no DNS, certificate or distribution
-   tenant. It writes with the store's ETag, as every other writer does.
+   tenant. It writes with the store's ETag, as every other writer does,
+   then waits 60 s, or polls `cloudfront:TestFunction` until
+   `/config.json` for that host answers 200, before step 3.
 3. `/` serves the SPA with every §7.1 header. In `single` mode
    `/signin-state` returns 404, and `/logout` returns 302 to the
    issuer's logout endpoint with `client_id` and
    `logout_uri=https://<appDomain>/`, with `Clear-Site-Data:
    "storage", "cache"` (§7.1). Through `cloudfront:TestFunction` with
-   `Host: dedicated-a.example.com`, `/config.json` names `pooledHost`
+   `Host: dedicated-a.example.com`, `/config.json` names `signInHost`
    `<appDomain>`.
 4. `/api/whoami` with a token for `a` returns `a` from cell A; with a token
    for `b` returns `b` from cell B in the second account. Each cell read
@@ -810,7 +894,9 @@ distribution tenant and no certificate.
 10. A direct call to either cell's function URL, without CloudFront,
     returns 403.
 11. The second account's tenant provisioning role calls `PutTenantRoute`
-    for `a`: 403, and `a` is still routed to cell A. It calls
+    for `a`: 403, and `a` is still routed to cell A. Its call for `b`
+    with `customDomain` `dedicated-b.example.com` gets 403 too, and no
+    `host#` key is written. The edge operator role calls
     `PutTenantRoute` for `b` with `customDomain` `a.<appDomain>`: 400,
     and in `host` mode `a.<appDomain>` still routes to cell A. With
     `customDomain` `dedicated-a.example.com`, `a`'s dedicated domain
@@ -820,14 +906,18 @@ distribution tenant and no certificate.
     `execute-api:Invoke` in its identity policy, calls the registrar: 403
     (the explicit `Deny`, §3.4).
 13. Suspend `b`: after 60 s, `b`'s token returns 503, `a` is still served.
-14. Wait 60 s for log delivery (33 s in S-1). Per-tenant log fields name
-    `a` and `b`, queried in `us-east-1` where the log group is (ADR-0010),
-    and the registrar log, in `eu-central-1`, names the second account on
-    steps 11 and 12.
+14. Wait 60 s for log delivery (33 s in S-1). Per-tenant counts name
+    `a` and `b`, queried in `us-east-1` where the log groups are
+    (ADR-0010): in `host` mode from `x-host-header`, in `single` mode
+    from the router's function log joined to the access log on
+    `x-edge-request-id` (§3.1). The test records the function log's
+    delivery time, which no spike has measured. The registrar log, in
+    `eu-central-1`, names the second account on steps 11 and 12.
 15. Delete `b`'s deployment: its script removes the route through
     `route.sh`, and once the script returns `b`'s token returns 403.
 16. (host) `a.<appDomain>/config.json` names `a`; an unregistered host
-    returns 404; a token for `a` on `b.<appDomain>/api/whoami` returns 403;
+    returns 404; a token for `a` on `b.<appDomain>/api/whoami` returns 403
+    from the edge, with no origin log line in cell B;
     `a` over its rate gets 429 while `b` is served.
 17. (host) Sign-in host (ADR-0016). `/signin-state` on `a`'s host with
     `Sec-Fetch-Site: same-origin` returns a `state`; cross-site it gets
@@ -840,7 +930,7 @@ distribution tenant and no certificate.
     dedicated-domain checks run through `cloudfront:TestFunction` on
     the router with `Host: dedicated-a.example.com` (step 2), which has
     no DNS or certificate and so costs no deploy: `/config.json` names
-    `pooledHost` `a.<appDomain>`, and `/signin-state` and `/logout` get
+    `signInHost` `a.<appDomain>`, and `/signin-state` and `/logout` get
     400. A `state` for that domain, which the test signs with the live
     `signin` key, gets 400 on `login.<appDomain>`. `/logout` on `a`'s host
     returns 302 to the issuer's logout endpoint with `client_id`,
@@ -866,5 +956,5 @@ it gets 400 once the old id is removed. It adds three stack updates, the
 |---|---|---|
 | Q-1 | Which public hosted zone can the test account use for `appDomain`? **Answered 2026-11-16**: a public zone for a delegated test subdomain in the edge account, with its own SPF, DKIM and DMARC records. The spikes and the integration test take its name and zone id as inputs (`TFD_APP_DOMAIN`, `TFD_HOSTED_ZONE_ID`); neither is committed | spike S-1 |
 | Q-2 | Does the integration test deploy its own control plane, or reuse one when found and skip otherwise? | integration test |
-| Q-3 | Does the dedicated tenant (custom domain) path belong in this sample or in a follow-up? | scope |
+| Q-3 | Does the dedicated tenant (custom domain) path belong in this sample or in a follow-up? If it does, how does the vendor confirm that a tenant controls a domain before the edge operator role sets its `customDomain` (for example a validated certificate for the domain, or a DNS record the tenant publishes)? | scope |
 | Q-4 | Should the integration test also compose `agentic-runtime-isolation` for `/agents/*`, or reuse a deployment only when one is found? | integration test |

@@ -3,7 +3,7 @@
 # ADR-0013: Register routes through a registrar that checks the control plane
 
 - Status: Accepted
-- Date: 2026-11-13
+- Date: 2026-11-17
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -53,14 +53,19 @@ account, plus the edge operator role, and denies every other principal
 with an explicit `Deny` and `ArnNotLike` on `aws:PrincipalArn`. Admission
 grants no route. Every write checks the caller's
 account against `GetCell` or `GetDeployment`, and a tenant route also needs
-its cell's route written by the same account. Deletes check the account
-recorded on the route, so cleanup works after the control plane has
-removed the record.
+its cell's route written by the same account. A `customDomain` that
+equals `appDomain` or ends in `.<appDomain>` is refused with 400, one
+whose `host#` entry names another tenant with 409, and only the edge
+operator role may set or change it: a tenant provisioning role that
+sends one gets 403. Deletes check the account recorded on the route, so
+cleanup works after the control plane has removed the record.
 
 ## Consequences
 
 - A tenant-owned account cannot register, change or delete another
   account's route (integration steps 11 and 12).
+- A tenant route claims no pooled host, no other tenant's dedicated
+  domain, and no domain the vendor has not set (integration step 11).
 - The registrar is on the onboarding path: a control plane outage blocks
   route writes, never routing, which reads only the store.
 - The `ac` field in each value records the verified account for deletes;

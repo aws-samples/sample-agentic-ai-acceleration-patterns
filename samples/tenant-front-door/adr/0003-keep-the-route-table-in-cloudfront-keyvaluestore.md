@@ -21,8 +21,8 @@ and no cache invalidation (P-9).
 ### Option 1: CloudFront KeyValueStore
 
 A KeyValueStore associated with the viewer-request function. The registrar
-writes it with the store's ETag (`IfMatch`) and retries on a conflict
-(§3.4 step 5).
+writes it with the store's ETag (`IfMatch`) and, on a conflict,
+re-reads, re-checks and retries (§3.4 step 5).
 
 Pros: reads run inside CloudFront Functions at the edge, with no network
 call and no origin. A write applies without a function publish or a

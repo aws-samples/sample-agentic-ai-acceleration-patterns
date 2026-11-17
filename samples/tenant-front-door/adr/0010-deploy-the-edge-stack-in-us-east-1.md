@@ -21,7 +21,10 @@ Region, CloudWatch Logs refused it ("Region from identity does not match
 the Destination Resource ARN"). With the destination in the log group's
 Region, it refused the delivery ("Cross-region Delivery Destination is not
 supported"). So the log group the logs land in is the fourth part: it must
-be in `us-east-1` too.
+be in `us-east-1` too. CloudFront Functions also sends a function's
+`console.log` output to CloudWatch Logs in `us-east-1`, log group
+`/aws/cloudfront/function/<function name>`, whichever edge location ran
+the function.
 
 The rest of the sample has no such constraint. The route registrar, the SPA
 bucket and the published parameter
@@ -83,8 +86,16 @@ query setup. The delivery names its record fields explicitly:
 `timestamp(ms)`, `x-edge-location`, `x-host-header`,
 `distribution-tenant-id`, `cs-method`, `cs-uri-stem`, `sc-status`,
 `sc-bytes`, `time-taken`, `x-edge-result-type`, `x-edge-request-id`,
-`cs-protocol` and `ssl-protocol`, every field the per-tenant telemetry
-reads (spec §3.1). It leaves out every other field, among them
+`cs-protocol` and `ssl-protocol`, the fields the per-tenant telemetry
+reads (spec §3.1), and the list stays closed. In `host` mode
+`x-host-header` names the tenant. In `single` mode no listed field
+does, because every pooled tenant shares one host and one distribution
+tenant, so the router writes one line per request to its function log
+in `us-east-1`: the lower-case tenant id, or `-`, and the CloudFront
+request id, never the token or a header value. Per-tenant counts join
+the two logs on `x-edge-request-id`. The edge stack creates the
+function log group, with a retention. The delivery leaves out every
+other field, among them
 `cs-uri-query`, `cs(Referer)` and `cs(Cookie)`: in `host` mode the
 sign-in host's query carries authorization codes (ADR-0016), the
 referrer of a `/callback` page carries the code and `state` on each
@@ -98,7 +109,11 @@ land in the log.
 - Easier: the edge stacks change rarely, so most updates touch the main
   stack only.
 - Harder: per-tenant log queries (integration step 14) run in `us-east-1`.
-  An operator looks for the CloudFront log group there.
+  An operator looks for the CloudFront log groups there.
+- Harder: `single` mode per-tenant numbers need the function log joined
+  to the access log. The function log costs about $0.15 per million
+  requests at the `us-east-1` ingestion price, is delivered on a
+  best-effort basis, and has its own reader list (spec §6.1).
 - Harder: the logs hold no query strings, referrers or cookies, and a
   field a new query needs is a change to the delivery's field list.
 - Harder: deploy runs the edge stack, then the main stack, then the edge
