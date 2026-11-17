@@ -52,3 +52,4 @@ Template for new records: [`docs/sample-standard.md` §2.2](../../../docs/sample
 | [ADR-0041](0041-run-the-build-tasks-in-jsonata.md) | Run the build tasks in JSONata | Accepted | 2026-11-12 |
 | [ADR-0042](0042-a-read-only-role-beside-the-operator.md) | A read-only role beside the operator (amends ADR-0015, ADR-0018) | Accepted | 2026-11-13 |
 | [ADR-0043](0043-accept-listed-client-ids-when-a-token-has-no-audience.md) | Accept listed client ids when a token has no audience (amends ADR-0004) | Accepted | 2026-11-14 |
+| [ADR-0044](0044-run-vendor-hooks-around-cell-and-deployment-scripts.md) | Run vendor hooks around cell and deployment scripts (amends ADR-0002, ADR-0032, ADR-0042) | Proposed | 2026-11-17 |
