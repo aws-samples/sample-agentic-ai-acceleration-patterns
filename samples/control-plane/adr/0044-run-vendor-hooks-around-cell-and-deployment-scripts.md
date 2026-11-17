@@ -104,20 +104,27 @@ revision current at that read. The cell or deployment records which
 global hooks ran, with the commit each build resolved, not only the ref
 it named. Hook fields are limited to characters JSON never escapes
 (URL characters without `@` for a location, so it carries no userinfo;
-git ref characters for a version; path characters for a script), which
-keeps the execution input inside its 256 KiB budget with about 31 KiB
-to spare.
+git ref characters for a version; path characters for a script), and
+the application's own source and script paths get the same charsets, a
+change to `PutApplication`'s validation (ADR-0032). With outputs held to
+printable ASCII, the execution input then stays inside its 256 KiB
+budget with about 39 KiB to spare, of which the application's source
+and paths take at most 4.3 KiB.
 
 A script hands its post hooks a small JSON object through a file at
-`OUTPUTS_FILE`, a path outside the source tree. The provisioning
-buildspec checks it (at most 4,096 bytes as compact UTF-8) and exports
-it as `SCRIPT_OUTPUTS`, always, `{}` when there is none, and exports
-nothing else, so the build stays under the limit spike H-1 found. That
-check runs in the container the script ran in, so it is a format check,
-not a trust boundary. The workflow checks the value again in the script
-task's `Output`: an empty, over-long or malformed value fails a create
-or update and becomes `{}` on a delete. The control plane never reads
-the outputs, and hooks treat them as untrusted data.
+`OUTPUTS_FILE`, a path outside the source tree. Its values are
+printable ASCII, so a byte is a character in every component that
+counts it, and only `"` and `\` are escaped. The provisioning buildspec
+checks it (at most 4,096 bytes in compact form) and exports it as
+`SCRIPT_OUTPUTS`, always, `{}` when there is none, and exports nothing
+else, so the build stays under the limit spike H-1 found. That check
+runs in the container the script ran in, so it is a format check, not
+a trust boundary. The workflow checks the value again, by the same
+rule, in the script task's `Output`, with a linear regular expression
+and never `$parse`, whose error would reach the task's failure write:
+an empty, over-long or malformed value fails a create or update and
+becomes `{}` on a delete. The control plane never reads the outputs,
+and hooks treat them as untrusted data.
 
 Hooks run in two hook build projects in the control plane account, one
 per scope, each with its own role (`<fleet>-global-hook`,
@@ -131,7 +138,12 @@ project must accept source and buildspec overrides, so starting a build
 in it is running code as its role. Only the workflow role may start
 hook builds, and it holds no `iam:PassRole` on either hook role, so a
 role override fails at the API; the provisioning build roles and the
-API role hold neither. Every global hook shares one role, and the hooks
+API role hold neither. Starting an execution of the workflow is the
+same grant, because the workflow runs whatever hook source its input
+names: only the API role holds `states:StartExecution`, no build role
+or hook role does, and a compromised API function therefore reaches
+both hook roles (threat model T30). Every global hook shares one role,
+and the hooks
 of all applications share the other. The hook buildspec passes every
 value to the hook script as an environment variable and never
 interpolates one into a command. Reusing the two provisioning projects
@@ -140,13 +152,26 @@ account's pair trusts, and the separation between code that holds a
 pair and code that must never hold one would rest on a per-build
 override instead of on the project.
 
-A hook's `timeoutMinutes` (5 to 30) is CodeBuild's run timeout. A fixed
-10-minute queued timeout bounds the wait behind the project's
-concurrency cap, and the task timeout is both plus five minutes, so a
-queue wait is never read as a hook timeout. A transient `StartBuild`
-refusal is retried like a terminal write. On a task timeout the Catch
-stops the build, since whether a timed-out `.sync` task stops it is
-unverified.
+A hook build starts with a request-response `startBuild`, so its id is
+known from the first call, and a loop polls that one build with
+`batchGetBuilds` every 60 seconds, keeping only its id, status, phase
+timing and resolved commit. A hook's `timeoutMinutes` (5 to 30) is
+CodeBuild's run timeout, and a fixed 10-minute queued timeout bounds
+the wait in the queue. The attempt's deadline is data: both plus five
+minutes from the first start try. At the deadline the loop stops the
+build itself and counts a timeout, so a queue wait is never read as a
+hook timeout and no build outlives its attempt. A refused `StartBuild`
+(throttling, a concurrency quota, the project at its cap) is retried
+every 30 seconds within those 10 minutes; it is the only task `Retry`
+a hook step has. A delete hook's three attempts are a loop through the
+failure handling, each with its own build. An attempt refused for its
+whole 10 minutes started no build and does not count, and a budget of
+three attempts' time bounds the hook. A `.sync` task was the first
+draft. It was dropped because finding the build after a task timeout
+meant reading the project's recent builds, whose results each echo up
+to about 100 KiB of environment and could pass the state limit, and
+because a task `Retry` on delete would skip stopping the earlier
+builds.
 
 Only a control plane operation starts a hook; no API runs one, and
 nothing a tenant controls can declare, skip, change or start one. An
@@ -155,14 +180,15 @@ event bus (option 3) stays possible as a consumer of a global post hook.
 ## Consequences
 - Spec changes: P-1, P-3, P-4, P-6, P-9, P-12, §1.2, §1.3, §3.1 (R-4,
   R-6, the system diagram), §3.2 (R-36, R-37), §3.3 (`fleetName`, two
-  new inputs), §4.1 (R-29), §4.2, §4.4 (R-31), §4.7 (R-10), new §4.8
-  (R-39, R-40), §5.2, §5.3, §5.5 (`PutHook`, `GetHook`, `ListHooks`,
-  `DeleteHook`; `PutApplication` `hooks`), §5.7, §6.1 (`OUTPUTS_FILE`),
+  new inputs), §4.1 (R-29, source and script charsets), §4.2, §4.4
+  (R-31), §4.7 (R-10), new §4.8 (R-39, R-40), §5.2, §5.3, §5.5
+  (`PutHook`, `GetHook`, `ListHooks`, `DeleteHook`; `PutApplication`
+  `hooks` and charsets), §5.7, §6.1 (`OUTPUTS_FILE`),
   §6.4, new §6.5 (R-41 to R-44), §7.1 step 0, §7.2, §7.4, §8 (R-20,
   R-22, R-23, §8.2, new §8.3 with R-45 and R-46), N-12, new §9.1 (H-1 to
-  H-8), §10 steps 16 and 17, §11, §12. Threat model: T5, T16, T34, T36,
-  T43, M10, M12, M15, M17, M18, M24, M26 widened; new T39 to T44 and M28
-  to M32.
+  H-10), §10 steps 2, 16 and 17 and the unit assertions, §11, §12.
+  Threat model: T5, T16, T30, T34, T36, T43, M10, M12, M15, M17, M18,
+  M24, M26 widened; new T39 to T44 and M28 to M32.
 - The reader grant grows from ten to twelve `GET` operations (`GetHook`,
   `ListHooks`), as ADR-0042 anticipated for a new `GET`; R-37 holds, and a
   hook's source location is disclosed like a script's (T34, T36).
@@ -172,6 +198,11 @@ event bus (option 3) stays possible as a consumer of a global post hook.
   cannot silently drop a hook. A kept `hooks` list adds no write
   condition, because hooks share no invariant with another list.
   Existing cells keep the hooks they were stamped with.
+- `PutApplication` also refuses an application source or script path
+  outside the hook charsets (ADR-0032), where it admitted any value
+  starting with a non-blank character. A re-put of an application
+  registered with such a value is a 400 until it is corrected; cells
+  stamped before keep their stamp.
 - A stamped application hook that always fails has no cheap exit: fix
   forward on an unpinned ref, or, for a hook pinned to a commit, delete
   the cell's deployments and then the cell (spec §8.3, P-9). Gates and
@@ -187,9 +218,15 @@ event bus (option 3) stays possible as a consumer of a global post hook.
   neither hook role.
 - The concurrency cap and log retention of ADR-0021 cover all four
   projects. All global hook builds of the fleet share one project capped
-  at five, so a busy fleet queues them; the queued timeout turns a long
-  queue into a named `*_FAILED` on create and update rather than a
-  silent wait.
+  at five, and CodeBuild documents builds over the cap as refused, not
+  queued (H-9). A refused start is retried for up to 10 minutes; then a
+  create or update ends in a named `*_FAILED` ("cannot start") rather
+  than a silent wait, and a delete hook spends its budget and is
+  skipped (T42, T43).
+- Polling costs three state transitions per hook minute, about $0.002
+  for a 30-minute hook, and at the caps about 13,000 of a Standard
+  execution's 25,000 history events; a 30-second interval would pass
+  that quota.
 - The execution-level timeout grows from 3 hours to 26 hours. At the
   caps (ten hooks per event, 30-minute runs, three attempts per delete
   hook) a delete can run 25 hours and a new-cell create about 18. The
@@ -218,19 +255,19 @@ event bus (option 3) stays possible as a consumer of a global post hook.
   (T42). The skip is logged and alarmed; reconciling it is the external
   system's job.
 - Assumptions to verify before the hooks are built (spec §9.1, with H-1
-  verified):
-  - H-2: the `.sync` result carries `Build.ResolvedSourceVersion`.
-  - H-3: whether a timed-out `.sync` task stops its build; the Catch
-    calls `StopBuild` either way.
-  - H-4: whether a timed-out `.sync` task's error carries the build id;
-    otherwise the Catch finds the build by its occurrence.
+  verified; H-3, H-4 and H-6 asked how a `.sync` hook task behaves and
+  are not needed with the poll loop):
+  - H-2: a `batchGetBuilds` result carries `resolvedSourceVersion`.
   - H-5: CodeBuild accepts a hook build's environment override (about
     fifteen fixed variables, 40 `PARAM_` variables, 4 KB of outputs).
-  - H-6: a JSONata `TimeoutSeconds` expression sets a timeout per hook.
   - H-7: a hook role's trust policy conditioned on `aws:SourceArn`
     admits its own project's builds only.
-  - H-8: a refused `StartBuild` fails with an error name distinct from a
-    failed build, so its retry never re-runs a build that ran.
+  - H-8: a refused `StartBuild` fails with a service error name no
+    started build produces, so its retry never starts a second build.
+  - H-9: what `StartBuild` returns at the project's
+    `concurrentBuildLimit`; the design assumes a refusal.
+  - H-10: a 4,096-byte outputs value of worst-case escapes round-trips
+    through the build export and Step Functions.
 - Seams (spec §11): hooks on tenant record events and on account events;
   outputs from a pre hook into the script; a hook role per application
   or per global hook; publishing to an event bus as a built-in.
@@ -239,5 +276,6 @@ event bus (option 3) stays possible as a consumer of a global post hook.
   is accepted.
 - Revisit if a downstream system needs to veto a delete (today a delete
   cannot be gated), if per-application or per-hook permissions are
-  needed, if hook latency on every operation becomes the larger cost, or
-  if H-3 or H-4 comes back other than R-46 assumes.
+  needed, if hook latency on every operation becomes the larger cost, if
+  H-9 finds that the project cap queues builds rather than refusing
+  them, or if H-10 finds that the export counts escapes past its limit.

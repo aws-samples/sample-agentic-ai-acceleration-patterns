@@ -688,9 +688,9 @@ shown as the reference implementation's convention; the requirement is the
 | Field | Requirement |
 |---|---|
 | `applicationId` | operator-chosen, `[a-z0-9-]{1,32}` — the item's identity; never generated. The charset keeps it usable as a parameter path segment (§6.2) and readable in listings |
-| `source` | `{type, location, sourceVersion?}` — a build-service source reference (e.g. GitHub repo, S3 bucket) and an optional git ref forwarded to the build as its source version; non-empty type and location. A source whose ref is not a full commit SHA is accepted with a logged warning ([ADR-020](../adr/0020-supply-chain-pinning-warn-and-allow.md)) |
-| `cellScripts` | `{create, update, delete}` — all three paths required, non-empty (P-9) |
-| `tenantScripts` | `{create, update, delete}` — all three paths required, non-empty (P-9) |
+| `source` | `{type, location, sourceVersion?}` — a build-service source reference (e.g. GitHub repo, S3 bucket) and an optional git ref forwarded to the build as its source version; non-empty type and location. `location` (at most 2,048 bytes) and `sourceVersion` (at most 256) use the charsets of a hook source (R-39): URL characters without `@`, so a location carries no userinfo, and the characters of a git ref or object version. Neither admits a control character or a character JSON escapes (§8.1). A source whose ref is not a full commit SHA is accepted with a logged warning ([ADR-020](../adr/0020-supply-chain-pinning-warn-and-allow.md)) |
+| `cellScripts` | `{create, update, delete}` — all three paths required, non-empty (P-9), each at most 1,024 bytes in the charset of a hook `script`, `[A-Za-z0-9._/-]` (R-39) |
+| `tenantScripts` | `{create, update, delete}` — all three paths required, non-empty (P-9), each at most 1,024 bytes in the charset of a hook `script`, `[A-Za-z0-9._/-]` (R-39) |
 | `maxTenants` | integer ≥ 1; replaceable. A new value applies to cells created afterwards (P-4) |
 | `placementStrategy` | `FILL \| ROUND_ROBIN`; default `FILL`; replaceable, takes effect on the next placement ([ADR-036](../adr/0036-the-application-chooses-fill-or-round-robin-across-accounts.md)). How a new cell picks among eligible accounts with free capacity (§7.1): `FILL` takes the oldest registered account until it is full; `ROUND_ROBIN` takes the account with the fewest cells, so cells rotate over the open accounts |
 | `parameters` | optional list of **parameter declarations**, at most 20, default none; replaced when sent (absent on an existing application keeps it, `[]` clears it), takes effect on the next deployment request ([ADR-039](../adr/0039-applications-declare-deployment-parameters.md)). Each is `{name, required, default?, description?}`: `name` matches `[A-Z][A-Z0-9_]{0,63}` and is unique in the list; `required` is a boolean, default `false`; `default` is a string of at most 1,024 bytes (UTF-8) with no control characters (as for values, R-33) and MUST NOT be set on a required parameter; `description` is at most 256 characters of operator-facing text |
@@ -715,6 +715,15 @@ application has **no status**: its operations are synchronous and run no
 build. Its lifecycle is register (`PutApplication`) → in use → delete
 (empty only).
 
+The source and script charsets change `PutApplication`'s validation,
+which admitted any value that starts with a non-blank character,
+control characters included
+([ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md)
+amends ADR-032). A re-put of an application registered with a value
+outside them is a 400 until the value is corrected. A cell stamped before the change keeps
+its stamp, so the §8.1 bound for the application's source and paths
+holds for cells stamped afterwards.
+
 **R-29 (field ownership on applications):** `PutApplication` MUST write
 the definition fields except `hooks`, plus `placementStrategy` and
 `updatedAt`, and each of `hooks`, `parameters` and `cellParameters`
@@ -738,7 +747,7 @@ it (§7.1 step 0).
 | `source`, `cellScripts`, `tenantScripts`, `hooks` | stamped from the application's definition; immutable for the cell's lifetime. `hooks` is the application's hook list when the cell was created; it runs on the cell's events and on the events of every deployment in it (R-40) |
 | `parameters` | map of cell parameter name → value, the values an operator set on this cell through `UpdateCell`; at most 20 entries, each value at most 1,024 bytes (UTF-8); **empty at birth**. Never holds a default the operator did not supply, so a changed default reaches the cell on its next build |
 | `lastBuildId` | most recent successful cell-scoped build id (nullable) |
-| `lastGlobalHooks` | the global hooks that ran in the cell's last execution, in run order, each `{hookId, phase, revision, sourceVersion, resolvedSourceVersion}`: the ref the hook names and the commit its build ran, absent for a source that has none such as S3 (R-40); written by the workflow's terminal writes only; empty when none ran |
+| `lastGlobalHooks` | the global hooks that ran in the cell's last cell event, in run order, each `{hookId, phase, revision, sourceVersion, resolvedSourceVersion}`: the ref the hook names and the commit its build ran, absent for a source that has none such as S3 (R-40); written by the workflow's terminal writes only; empty when none ran |
 | `statusReason` | populated on failure (nullable) |
 | `createdAt`, `updatedAt` | timestamps |
 
@@ -1106,7 +1115,7 @@ All synchronous: no application or hook operation runs a build
 
 | Op | HTTP | Code | Contract |
 |---|---|---|---|
-| `PutApplication` | `PUT /applications/{applicationId}` | 200 | Create-or-replace. Input `{source, cellScripts, tenantScripts, maxTenants, hooks?, placementStrategy?, parameters?, cellParameters?}` — the definition of §4.1 plus the strategy and both sets of parameter declarations, validated as a whole (400 on a missing script path, a malformed source, `maxTenants < 1`, an unknown strategy, an id outside `[a-z0-9-]{1,32}`, a parameter name outside `[A-Z][A-Z0-9_]{0,63}`, a duplicate name within or across the two lists, more than 20 declarations in either list, a `default` on a required parameter, a cell parameter without a `default`, or a hook definition that fails R-39). A hook source whose ref is not a full commit SHA is logged with a warning naming the application and the hook, as the application's own source is. On an existing application the definition fields other than `hooks`, and the strategy, are replaced. The two declaration lists are replaced only when sent: an absent `parameters` or `cellParameters` **keeps** the current list, and an empty list `[]` clears it, so a `PutApplication` that only changes `maxTenants` cannot silently drop every required check and default. On a new application an absent list declares none. `hooks` follows the same rule: absent keeps the current list, `[]` clears it, and a changed list reaches only cells created afterwards (P-4). Existing cells and deployments keep their stored values. A cell parameter added since reaches each cell's next build as its default. A newly required parameter makes the next `UpdateDeployment` of every deployment lacking it a 400 until the operator supplies the value; it never blocks a `DeleteDeployment`. `cellCount` is untouched (R-29). The "one name in one list" check runs against the lists the request sent plus any list it keeps. One write, with `cellCount` and `createdAt` set through `if_not_exists`, so a replace never resets them. When both declaration lists are sent the write carries no condition — an application has no immutable field, so it is correct in every prior state (P-5). When a declaration list is kept, the write is conditioned on that list being exactly as the request read it (`attribute_not_exists` when the attribute was absent, equality when present, an empty `[]` included; absent and `[]` are different reads), so two concurrent puts that each send one list cannot store one name in both; a failed condition → 409, retryable. A kept `hooks` list adds no condition: a put that keeps it writes no hook attribute, and hooks share no invariant with another list. The condition is never on `updatedAt`, which cell creates and deletes also write. Cells already created keep their stamp (P-4). |
+| `PutApplication` | `PUT /applications/{applicationId}` | 200 | Create-or-replace. Input `{source, cellScripts, tenantScripts, maxTenants, hooks?, placementStrategy?, parameters?, cellParameters?}` — the definition of §4.1 plus the strategy and both sets of parameter declarations, validated as a whole (400 on a missing script path, a source field or script path outside its charset (§4.1), a malformed source, `maxTenants < 1`, an unknown strategy, an id outside `[a-z0-9-]{1,32}`, a parameter name outside `[A-Z][A-Z0-9_]{0,63}`, a duplicate name within or across the two lists, more than 20 declarations in either list, a `default` on a required parameter, a cell parameter without a `default`, or a hook definition that fails R-39). A hook source whose ref is not a full commit SHA is logged with a warning naming the application and the hook, as the application's own source is. On an existing application the definition fields other than `hooks`, and the strategy, are replaced. The two declaration lists are replaced only when sent: an absent `parameters` or `cellParameters` **keeps** the current list, and an empty list `[]` clears it, so a `PutApplication` that only changes `maxTenants` cannot silently drop every required check and default. On a new application an absent list declares none. `hooks` follows the same rule: absent keeps the current list, `[]` clears it, and a changed list reaches only cells created afterwards (P-4). Existing cells and deployments keep their stored values. A cell parameter added since reaches each cell's next build as its default. A newly required parameter makes the next `UpdateDeployment` of every deployment lacking it a 400 until the operator supplies the value; it never blocks a `DeleteDeployment`. `cellCount` is untouched (R-29). The "one name in one list" check runs against the lists the request sent plus any list it keeps. One write, with `cellCount` and `createdAt` set through `if_not_exists`, so a replace never resets them. When both declaration lists are sent the write carries no condition — an application has no immutable field, so it is correct in every prior state (P-5). When a declaration list is kept, the write is conditioned on that list being exactly as the request read it (`attribute_not_exists` when the attribute was absent, equality when present, an empty `[]` included; absent and `[]` are different reads), so two concurrent puts that each send one list cannot store one name in both; a failed condition → 409, retryable. A kept `hooks` list adds no condition: a put that keeps it writes no hook attribute, and hooks share no invariant with another list. The condition is never on `updatedAt`, which cell creates and deletes also write. Cells already created keep their stamp (P-4). |
 | `GetApplication` | `GET /applications/{applicationId}` | 200 | The record: the definition, `placementStrategy`, both sets of parameter declarations and `cellCount`. 404 if unregistered. |
 | `ListApplications` | `GET /applications` | 200 | Paginated: `applicationId`, `maxTenants`, `placementStrategy`, `cellCount` per application. |
 | `DeleteApplication` | `DELETE /applications/{applicationId}` | 200 | **Empty applications only** (P-10): a single conditional delete (`attribute_exists AND cellCount = 0`), the counterpart of the cell-slot claim; condition failure → 409. Accounts that name the application in `applicationIds` are not touched (§4.5). |
@@ -1409,14 +1418,27 @@ holds. A role per global hook or per application is a seam (§11).
 A hook project accepts source and buildspec overrides, because every
 hook has its own, so whoever can start a build in it runs any code as
 its role. Only the workflow role MAY hold `codebuild:StartBuild` on the
-hook projects (with `StopBuild`, `BatchGetBuilds` and
-`ListBuildsForProject` for R-46). The workflow role MUST NOT hold
-`iam:PassRole` on either hook role, so a role override fails at the
-CodeBuild API whatever a definition sends. The provisioning build roles
-and the API role MUST hold neither permission on the hook projects: a
-script that reaches its build role (T29) must not reach a hook role. A
-principal the deployer grants either permission in the control plane
-account holds that hook role (T41).
+hook projects (with `StopBuild` and `BatchGetBuilds`, R-46). The
+workflow role MUST NOT hold `iam:PassRole` on either hook role, so a
+role override fails at the CodeBuild API whatever a definition sends.
+The provisioning build roles and the API role MUST hold neither
+permission on the hook projects: a script that reaches its build role
+(T29) must not reach a hook role. A principal the deployer grants
+either permission in the control plane account holds that hook role
+(T41).
+
+The workflow starts whatever hook source, script and scope its
+execution input names, as it runs the source and scripts the input
+names (R-20). So `states:StartExecution` on the workflow is equivalent
+to `codebuild:StartBuild` on the hook projects and on the provisioning
+projects: a principal that starts an execution with an input of its
+choice runs any code as either hook role and as either provisioning
+build role. The API role MUST be the only role the stack grants
+`states:StartExecution` on the workflow, and a build role or a hook
+role MUST NOT hold it, so a script or a hook cannot start an execution
+of its own. A compromise of the API function therefore reaches both
+hook roles (T30), and a principal the deployer grants
+`states:StartExecution` holds them too (T41).
 
 The hook buildspec MUST hand every variable of R-42 to the hook script
 as an environment variable only and run it as `bash "$HOOK_SCRIPT"`,
@@ -1440,7 +1462,7 @@ and no other control plane state:
 | `TENANT_ID`, `TENANT_NAME` | — | ✓ |
 | `OPERATOR_ID` | ✓ (the verified operator identity, M12) | ✓ |
 | `EXECUTION_ID` | the execution's name, one per accepted operation | as for cells |
-| `ATTEMPT` | `1`; `2` or `3` on a delete hook's retries (R-46) | as for cells |
+| `ATTEMPT` | `1`; `2` or `3` on a delete hook's later attempts, counting attempts that started a build (R-46) | as for cells |
 | `HOOK_SCRIPT` | the hook's `script` path (R-41) | as for cells |
 | `PARAM_<NAME>` | the cell's resolved set (R-34), as the cell script receives it | the deployment's resolved set (R-32), as the tenant script receives it |
 | `SCRIPT_OUTPUTS` | `POST` only: the script's outputs (R-43), `{}` when it wrote none | as for cells |
@@ -1461,49 +1483,70 @@ audit export, a meter) keys on it and treats a repeat as done.
 MUST create a fresh temporary directory outside the source tree and
 pass the script `OUTPUTS_FILE`, a path in it that does not yet exist,
 so nothing committed to the source can stand in for output. A cell or
-tenant script MAY write a JSON object to that path: at most 4,096 bytes
-as compact UTF-8, keys matching `[A-Za-z][A-Za-z0-9_]{0,63}`, values
-strings with no control characters. The script runs as a child process
+tenant script MAY write a JSON object to that path: keys matching
+`[A-Za-z][A-Za-z0-9_]{0,63}`, values strings of printable ASCII (0x20
+to 0x7E), at most 4,096 bytes in its compact form. Values MUST be
+printable ASCII so that a byte is a character to the buildspec, to
+CodeBuild, to JSONata and to Step Functions, and so that the compact
+form escapes only `"` and `\`. The script runs as a child process
 (`bash "$SCRIPT_PATH"`). After the script succeeds the buildspec MUST
-check the file against these rules, measuring the compact UTF-8 form it
-exports (a serialiser that escapes non-ASCII text can triple the size),
-and MUST export it as `SCRIPT_OUTPUTS`, always: `{}` when the script
-wrote no file. On create and update a file that fails the check fails
-the build, so the operation ends `*_FAILED` with the broken rule in
-`statusReason`. On delete the buildspec logs the drop and exports `{}`,
-so a bad file never blocks cleanup (P-9). `SCRIPT_OUTPUTS` MUST be the
-build's only exported variable. CodeBuild limits the total of a build's
-exported variables to between 8 and 16 KiB and, past it, returns every
-exported value as an empty string while the build and the execution
-succeed (spike H-1, §9.1). A 4,096-byte value with nothing else
-exported stays under 8 KiB.
+check the file against these rules, measuring the compact form it
+exports, and MUST export it as `SCRIPT_OUTPUTS`, always: `{}` when the
+script wrote no file. On create and update a file that fails the check
+fails the build, so the operation ends `*_FAILED` with the broken rule
+in `statusReason`. On delete the buildspec logs the drop and exports
+`{}`, so a bad file never blocks cleanup (P-9). `SCRIPT_OUTPUTS` MUST
+be the build's only exported variable. CodeBuild limits the total of a
+build's exported variables to between 8 and 16 KiB and, past it,
+returns every exported value as an empty string while the build and
+the execution succeed (spike H-1, §9.1). A 4,096-byte value with
+nothing else exported is half the 8,192 bytes H-1 saw kept. A value
+made of `"` and `\` escapes doubles when serialised again, so H-10
+checks that such a value round-trips too.
 
 The buildspec check is a format check, not a trust boundary: it runs in
 the container the script just ran in, with tools the script could have
 replaced, and in a tenant-owned account the script reads what the
 tenant controls (T40, T44). The workflow MUST therefore check the value
-again in the script task's JSONata `Output`, which keeps it beside the
-build ARN and status (§8.1). It rejects a value that is absent or empty
-(the H-1 overflow, or a build that did not export), longer than 4,096
-characters, or not a compact JSON object of string values. The last
-test is a regular expression over that grammar, never `$parse`, which
-throws on bad input and has no catch. On create and update a rejected
-value takes the failure path (§8.2) with `statusReason` "script outputs
-rejected", the script's changes staying in place as after a post hook
-failure; on delete the workflow goes on with `{}`. `$length` counts
-characters, so the guard admits at most 16 KiB of UTF-8, which §8.1
-budgets. The control plane MUST NOT read, interpret or store the
-outputs beyond the execution: they exist only in the execution history
-and the build records. Outputs are untrusted data, and a hook MUST
-validate every value it uses. Outputs MUST NOT be secrets (N-12).
-Nothing a pre hook produces reaches the script (§11).
+again, by the same rule, in the script task's JSONata `Output`, which
+keeps it beside the build ARN and status (§8.1). It rejects a value
+that is absent or empty (the H-1 overflow, or a build that did not
+export), longer than 4,096 characters, or not a compact JSON object of
+printable ASCII string values. With printable ASCII, 4,096 characters
+are 4,096 bytes, so the guard and the buildspec enforce one rule. The
+last test is a regular expression over that grammar, and the pattern
+MUST be linear: no quantifier may hold another unbounded quantifier,
+and its branches MUST start with different characters, so a near miss
+is rejected in one pass over at most 4,096 characters. A pattern of
+that shape, with `K` standing for the key pattern above:
+
+```
+^\{(?:"K":"(?:[ !#-\[\]-~]|\\["\\]|","K":")*")?\}$
+```
+
+The guard MUST NOT use `$parse`. On bad input `$parse` raises
+`States.QueryEvaluationError`, which goes to the task's Catch, and the
+Catch path is a failure write, which is wrong on delete. Any evaluation
+error the guard still raises is a defect, and on delete it MUST still
+yield `{}`: the delete script task catches `States.QueryEvaluationError`
+apart from build failures and goes on with `{}`. On create and update a
+rejected value, or an evaluation error, takes the failure path (§8.2)
+with `statusReason` "script outputs rejected", the script's changes
+staying in place as after a post hook failure; on delete the workflow
+goes on with `{}`. Once escaped in state an admitted value is at most
+8 KiB, which §8.1 budgets. The control plane MUST NOT read, interpret
+or store the outputs beyond the execution: they exist only in the
+execution history and the build records. Outputs are untrusted data,
+and a hook MUST validate every value it uses. Outputs MUST NOT be
+secrets (N-12). Nothing a pre hook produces reaches the script (§11).
 
 **R-44 (only operations start hooks):** a hook MUST run only as a step of
 an execution that a control plane operation started (§8.3). There MUST
 be no operation that runs a hook on demand. Nothing a script, a cell
 account or a tenant controls can declare, select, skip, change or start
 a hook: an execution's hooks are fixed when the operation is accepted
-(R-40), from records only operators write.
+(R-40), through the API, the only caller that can start an execution
+(R-41).
 
 ---
 
@@ -1827,29 +1870,37 @@ admits no character JSON escapes in a hook field, so a definition is as
 large in the input as raw: under 1,600 bytes as compact JSON (id,
 source, script, timeout, revision), about 1.5 KiB, 31 KiB in all.
 One script's outputs (R-43) are in state while its post hooks run: at
-most 8 KiB once escaped for a value the buildspec checked, and at most
-16 KiB for any value the workflow guard admits. The cell event's
-outputs leave state when its post hooks finish, before the deployment
-event starts, so a new-cell create never holds two. The global hook
-results kept for `lastGlobalHooks` (R-40) add at most ten entries of
-about 0.4 KiB, 4 KiB; an application hook's result leaves state once
-the hook succeeded. That is about 225 KiB, which leaves about 31 KiB of
-the 256 KiB Step Functions limit for the rest of the R-20 input (ids,
-the two role ARNs, the external id of at most 1,224 bytes, the tenant
-name, the application's source and script paths, the failure
-statuses), which needs a few KiB. That limit applies to every state's
-payload, not only the input, and a CodeBuild `Build` result echoes the
-build's environment variables, values included. So each build task's
-JSONata `Output` MUST keep only what later states read: the build ARN
-and status, plus the guarded outputs for a script build (R-43), and the
-hook id, build ARN, status and `ResolvedSourceVersion` for a hook build
-(R-40). A full result kept in state would add a second copy of each
-parameter set and pass the limit. The same holds on the failure path:
+most 4,096 printable ASCII characters, of which only `"` and `\`
+escape, so at most 8 KiB, for a value the buildspec checked and for any
+value the workflow guard admits alike. The cell event's outputs leave
+state when its post hooks finish, before the deployment event starts,
+so a new-cell create never holds two. The global hook results kept for
+`lastGlobalHooks` (R-40) add at most ten entries of about 0.4 KiB,
+4 KiB; an application hook's result leaves state once the hook
+succeeded. That is about 217 KiB, which leaves about 39 KiB of the
+256 KiB Step Functions limit for the rest of the R-20 input. The
+application's source and the two script paths of a new-cell create
+take at most 4.3 KiB of it (2,048 + 256 + 2 × 1,024 bytes), because
+their charsets admit no character JSON escapes (§4.1). The ids, the two
+role ARNs, the external id of at most 1,224 bytes, the tenant name and
+the failure statuses need a few KiB more. That limit applies to every
+state's payload, not only the input, and a CodeBuild `Build` result
+echoes the build's environment variables, values included. So each
+build task's JSONata `Output` MUST keep only what later states read:
+the build ARN and status, plus the guarded outputs for a script build
+(R-43), and for a hook build's `startBuild` and each of its
+`batchGetBuilds` polls the build id, status, phase timing and
+`resolvedSourceVersion`, never the environment (R-40, R-46). A full
+result kept in state would add a second copy of each parameter set and
+pass the limit. The limit also holds for a task's raw result before
+`Output` runs, so a poll MUST name one build id per call: one hook
+build's result, environment included, is under 100 KiB at the caps,
+and three would pass the limit. The same holds on the failure path:
 a build task's `Catch` MUST keep only the build ARN and status from the
 error before it enters state, never the raw `Cause` string or a parsed
-copy of the `Build`. A payload
-over the limit fails the execution with `States.DataLimitExceeded`,
-which `States.ALL` does not catch, so no `*_FAILED` write would run.
+copy of the `Build`. A payload over the limit fails the execution with
+`States.DataLimitExceeded`, which `States.ALL` does not catch, so no
+`*_FAILED` write would run.
 Keeping state small does not keep values out of the task history events
 (they record the raw service result); N-11 already accepts values in
 execution history.
@@ -1894,25 +1945,27 @@ execution history.
   reason: "cell provisioning failed").
 
 **R-22:** every terminal write retries transient failures (reference: a
-2-second interval, backoff rate 2, six attempts, about two minutes);
-retry exhaustion is caught and routed through the same conditional
-`*_FAILED` transition when
+2-second interval, backoff rate 2, `MaxAttempts` 6 (six retries after
+the first try), 126 s of waits); retry exhaustion is caught and routed
+through the same conditional `*_FAILED` transition when
 the record still exists. This shrinks — but does not eliminate — the
 stranding window, because the failure write is itself a write that can
 exhaust retries (documented residual, §7.4).
 
-**R-23 (timeouts):** each build task MUST have a catchable task-level
-timeout routed to the failure path. A hook build's timeouts are set on
-both sides (R-46): CodeBuild stops the run at `timeoutMinutes` and a
-queued build at a fixed 10 minutes, and the task timeout is both plus
-five minutes, so the task timeout is a backstop and a wait in the queue
-never reads as a hook timeout. The execution-level timeout MUST exceed
-the sum of every build budget the execution can run at the caps, queue
-time included, plus terminal-write margin. It is a final safety net,
-never the normal timeout path: a tripped execution timeout bypasses the
-Catch and strands records. At the caps (ten hooks per event, R-39) one
-hook attempt takes at most 47 minutes (30 run, 10 queued, 5 margin, 2
-of `StartBuild` retries) and a script build at most 60:
+**R-23 (timeouts):** each script build task MUST have a catchable
+task-level timeout routed to the failure path. A hook attempt is bounded
+on both sides instead (R-46): CodeBuild stops the run at
+`timeoutMinutes` and a queued build at a fixed 10 minutes, and the
+attempt's deadline is both plus five minutes, at which the workflow
+stops the build itself, so the deadline is a backstop and a wait in the
+queue never reads as a hook timeout. The execution-level timeout MUST
+exceed the sum of every build budget the execution can run at the caps,
+queue time included, plus terminal-write margin. It is a final safety
+net, never the normal timeout path: a tripped execution timeout
+bypasses the Catch and strands records. At the caps (ten hooks per
+event, R-39) one hook attempt takes at most 47 minutes (its deadline of
+30 run, 10 queued or refused and 5 margin, plus 2 for the last poll
+and `StopBuild`) and a script build at most 60:
 
 | Execution | Worst case at the caps |
 |---|---|
@@ -1924,7 +1977,9 @@ With hooks, the execution timeout is therefore 26 hours. The worst case
 needs every hook at the 30-minute cap and every attempt to run it out.
 Standard workflows are billed per state transition, not by duration,
 so the longer net costs nothing; it bounds how long a hung execution
-holds its record.
+holds its record. At the 60-second poll of R-46, the hook steps of the
+longest execution, a delete at the caps, write about 13,000 history
+events, inside the 25,000-event quota of a Standard execution.
 
 ### 8.3 Hook steps
 
@@ -1954,30 +2009,64 @@ while the cell or deployment still exists: a hook that removes a route
 removes it before the delete script tears down what the route points at.
 
 **R-46 (hook failure):** a hook fails when its build does not succeed,
-times out (CodeBuild's run timeout, its queued timeout, or the task
-timeout), or cannot start. The workflow MUST start each hook build with
-`timeoutInMinutesOverride` set to the hook's `timeoutMinutes` and
-`queuedTimeoutInMinutesOverride` set to 10, and MUST set the task's
-`TimeoutSeconds` to both plus five minutes, a JSONata expression per
-hook (H-6). It MUST retry a `StartBuild` the service refused for a
-transient reason (throttling, the account's concurrent build quota) as
-the terminal writes retry (R-22) before the hook counts as failed, and
-MUST NOT retry a build that ran (H-8). When the task times out, the
-Catch MUST call `StopBuild` on the hook's build before it goes on.
-Whether a timed-out `.sync` task stops its build is unverified (H-3),
-and a post hook still running after its record went `CREATE_FAILED`
-could write a route nobody removes. The Catch takes the build id from
-the error when the error carries one (H-4), and otherwise finds the
-build among the hook project's recent builds by its `EXECUTION_ID`,
-`EVENT`, `PHASE`, `HOOK_ID` and `ATTEMPT`. `statusReason` MUST tell a
-queued timeout from a run timeout, so a hook that never ran is not
-taken for a slow one. Then:
+times out (CodeBuild's run timeout, its queued timeout, or the
+attempt's deadline), or cannot start. Each hook attempt MUST start its
+build with a request-response `codebuild:startBuild`, never `.sync`,
+so the build id is known from the first call, and MUST then poll that
+one id with `codebuild:batchGetBuilds` every 60 seconds. The build
+starts with `timeoutInMinutesOverride` set to the hook's
+`timeoutMinutes` and `queuedTimeoutInMinutesOverride` set to 10. The
+attempt's deadline MUST be data, computed from the definition when the
+attempt starts: its first `StartBuild` try plus the run timeout, the
+10 minutes of queue or refusals, and five minutes of margin. Each
+poll's `Output` keeps the id, the status, the phase timing and
+`resolvedSourceVersion`, never the environment (§8.1). The loop ends
+when the build reaches a final status. At the deadline the loop MUST
+call `StopBuild` on that id and treat the attempt as a timeout, so no
+hook build outlives its attempt, whatever CodeBuild did with its own
+timeouts. A failed poll call starts nothing, so the loop polls again
+at the next interval until the deadline. `statusReason` MUST tell a
+queued timeout from a run timeout by the phase timing, so a hook that
+never ran is not taken for a slow one.
+
+A `StartBuild` the service refuses (throttling, the account's
+concurrent build quota, the project at its `concurrentBuildLimit`; H-8,
+H-9) MUST be retried every 30 seconds, without backoff, for at most
+10 minutes from the first try. Those 10 minutes are the attempt's
+queue budget, so a refusal never lengthens an attempt past its
+deadline. That `Retry` on the start call is the only task `Retry` a
+hook step uses, and it MUST name only refusal errors, so it never
+starts a second build for one that ran (H-8). A start still refused
+after 10 minutes is a hook that cannot start, and `statusReason` says
+so.
+
+The poll costs three state transitions (a `Wait`, the task and a
+`Choice`) per minute a hook runs: at the Standard workflow price of
+$0.025 per 1,000 transitions, about $0.002 for a 30-minute hook. Each
+poll writes nine history events; at the caps a delete polls at most
+1,440 times (R-23), about 13,000 events, inside the 25,000-event
+history quota of a Standard execution. A 30-second interval would pass
+that quota at the caps.
+
+On delete each attempt MUST be one pass of an explicit loop through the
+failure handling: an attempt that times out has its build stopped, the
+loop increments `ATTEMPT` and waits out the backoff, and the next
+attempt starts its own build. A task `Retry` MUST NOT run a delete
+attempt again, because a retried task never enters the failure handling
+and would leave the earlier build running. `ATTEMPT` counts started
+builds: an attempt whose start was refused for its whole 10 minutes
+started none, does not count against the three attempts, and leaves
+`ATTEMPT` unchanged. The hook's attempts share one budget, computed as
+data from the definition: three attempts at their bound plus the
+backoff, 3 × (`timeoutMinutes` + 17) + 3 minutes, 144 at the cap. A
+hook that congestion keeps from starting is skipped when that budget
+is spent. Then:
 
 | Event | Phase | Effect |
 |---|---|---|
 | create, update | `PRE` | The event MUST stop before the script runs. The record MUST land in `CREATE_FAILED` or `UPDATE_FAILED` with `statusReason` naming the scope, the hook id, the build and the kind of failure; later hooks and the script MUST NOT run, so the script has changed nothing. A failed cell create with a pending deployment create moves both records (§8.2). A global pre hook can therefore act as a gate on every application |
 | create, update | `POST` | The record MUST land in `CREATE_FAILED` or `UPDATE_FAILED` as if the script had failed, `statusReason` naming the hook. The script's changes stay in place, and later hooks MUST NOT run |
-| delete | `PRE`, `POST` | The workflow MUST retry the hook, three attempts in all, 60 seconds after the first failure and 120 seconds after the second (interval 60 s, backoff rate 2). When every attempt fails it MUST log the skip (scope, hook id, event, record, build ids), count it (below) and go on with the next hook, the script and the terminal write, so cleanup stays reachable (P-9). A delete hook cannot stop a delete and cannot be a gate |
+| delete | `PRE`, `POST` | The workflow MUST retry the hook, three attempts in all, 60 seconds after the first failure and 120 seconds after the second (interval 60 s, backoff rate 2), each attempt a pass of the loop above. When every attempt fails, or the hook's budget is spent, it MUST log the skip (scope, hook id, event, record, build ids, and whether the budget ran out), count it (below) and go on with the next hook, the script and the terminal write, so cleanup stays reachable (P-9). A delete hook cannot stop a delete and cannot be a gate |
 
 The remediation paths are those of P-9. `UPDATE_FAILED` is retried with
 `UpdateDeployment` or `UpdateCell`, which runs the pre hooks, the script
@@ -2036,18 +2125,22 @@ definition-replacing `UpdateCell` that would replace a stamp is a seam
 
 Spike results and the assumptions still to verify. Each row to verify
 is a spike before hooks are built; a result that differs changes the
-requirement the row names.
+requirement the row names. H-3, H-4 and H-6 asked how a `.sync` hook
+task behaves; the poll loop of R-46 relies on none of them, and the
+rows stay so that their ids stay stable.
 
 | # | Behaviour | Status | Relied on by |
 |---|---|---|---|
 | H-1 | Through Step Functions `codebuild:startBuild.sync`, `Build.ExportedEnvironmentVariables` keeps a single value of 1,024, 4,096 or 8,192 bytes. A single value of 16,384 bytes, 32 KiB or 64 KiB, and four values of 4,096 bytes (16 KiB in all), come back with every exported value an empty string, while the build and the execution report `SUCCEEDED`. A declared exported variable the build never set comes back as `""`. The limit is on the total of a build's exported variables, between 8 and 16 KiB, and overflow is silent | Verified: spike H-1, 2026-11-17, eu-central-1 | R-43, §8.1 |
-| H-2 | The `.sync` task result carries `Build.ResolvedSourceVersion` for a git source; CodeBuild documents none for S3 | To verify | R-40, §8.1 |
-| H-3 | Whether a `.sync` task that times out stops its CodeBuild build | To verify; R-46 calls `StopBuild` either way | R-46 |
-| H-4 | Whether the error of a timed-out `.sync` task carries the build id | To verify; R-46 finds the build by its occurrence otherwise | R-46 |
+| H-2 | A `batchGetBuilds` result carries `resolvedSourceVersion` for a git source; CodeBuild documents none for S3 | To verify | R-40, R-46, §8.1 |
+| H-3 | Whether a `.sync` task that times out stops its CodeBuild build | Not needed: poll loop (R-46 stops the build at its deadline) | — |
+| H-4 | Whether the error of a timed-out `.sync` task carries the build id | Not needed: poll loop (`startBuild` returns the id) | — |
 | H-5 | CodeBuild accepts a hook build's `environmentVariablesOverride`: about fifteen fixed variables, up to 40 `PARAM_` variables of up to 1,024 bytes, and a `SCRIPT_OUTPUTS` of up to 4,096 bytes | To verify | R-42 |
-| H-6 | A JSONata expression in a task's `TimeoutSeconds` sets a timeout per hook state; today's build tasks use a constant | To verify | R-46 |
+| H-6 | A JSONata expression in a task's `TimeoutSeconds` sets a timeout per hook state; today's build tasks use a constant | Not needed: poll loop (the deadline is data) | — |
 | H-7 | A CodeBuild service role trust policy conditioned on `aws:SourceArn` equal to the project ARN admits that project's builds and no other | To verify (documented for confused-deputy prevention; one synth-and-run check) | R-41 |
-| H-8 | A `StartBuild` refused inside a `.sync` task (throttling, the concurrent build quota) fails with a service error name distinct from a failed build's `States.TaskFailed`, so a retry on those names never re-runs a build that ran | To verify | R-46 |
+| H-8 | A `StartBuild` refused through a request-response `codebuild:startBuild` task (throttling, the account's concurrent build quota) fails with a `CodeBuild.` service error name that no started build produces, so a `Retry` on those names never starts a second build for one that ran | To verify | R-46 |
+| H-9 | What a request-response `codebuild:startBuild` returns when the project is at its `concurrentBuildLimit`: a refusal, and its error name, or a build queued behind the cap. The CodeBuild user guide says builds over the limit are "throttled and are not run" | To verify; R-46 is designed for a refusal, and a queued build is bounded by the queued timeout and the deadline | R-46 |
+| H-10 | A 4,096-byte compact outputs file whose values are all `\"` and `\\` escapes, the worst case for escaping, exported alone as `SCRIPT_OUTPUTS`, comes back byte for byte in the `startBuild.sync` result, through a JSONata `Output` into state, and into a hook build's environment override | To verify | R-43, §8.1 |
 
 ---
 
@@ -2095,8 +2188,10 @@ step 16's hooks record what they saw there.
    refused with 403 on `CreateTenant`, nothing written; its token for
    `control-plane/other` alone and the unlisted client's token are
    refused with 403 on `ListTenants`.
-2. **Applications:** `PutApplication` with a missing script path → 400;
-   with an id outside the charset → 400; `PutApplication` X and Y → 200;
+2. **Applications:** `PutApplication` with a missing script path, a
+   script path holding a control character or a source location with
+   userinfo → 400; with an id outside the charset → 400;
+   `PutApplication` X and Y → 200;
    `ListApplications` shows both with `cellCount = 0`; `PutAccount` naming
    an unregistered application in `applicationIds` → 404. X declares two
    parameters, `ALLOWED_EMAIL_DOMAIN` (required) and `LOG_LEVEL` (default
@@ -2289,18 +2384,28 @@ pair or granted its AssumeRole, that a global hook starts only in the
 global hook project and an application hook only in the other, that
 only the workflow role holds `codebuild:StartBuild` on the hook projects
 and it holds no `iam:PassRole` on either hook role, while the build and
-API roles hold neither, that the hook buildspec assumes no role, passes
+API roles hold neither, that only the API role holds
+`states:StartExecution` on the workflow and no build role and no hook
+role holds it, that the hook buildspec assumes no role, passes
 no external id, interpolates no variable and runs `bash "$HOOK_SCRIPT"`
 (R-41), that the resolved hook lists follow R-40 and R-45 and are read
-before the operation's first write, that an invalid `OUTPUTS_FILE` fails
-a create and is dropped on a delete, that the provisioning buildspec
-exports `SCRIPT_OUTPUTS` alone and `{}` when no file was written, and
-that the script task's `Output` rejects an empty, over-long or
-malformed value on create and update and substitutes `{}` on delete
-(R-43), that a hook task sets the run and queued timeouts and a task
-timeout of both plus five minutes, retries a refused `StartBuild` and
-calls `StopBuild` on a task timeout, and that a failing delete hook is
-retried three times, 60 and 120 seconds apart, and skipped (R-46), that
+before the operation's first write, that an invalid `OUTPUTS_FILE`, one
+with a value outside printable ASCII included, fails a create and is
+dropped on a delete, that the provisioning buildspec exports
+`SCRIPT_OUTPUTS` alone and `{}` when no file was written, that the
+script task's `Output` rejects an empty, over-long or malformed value
+on create and update and substitutes `{}` on delete, that the guard
+rejects a 4,096-character near miss (a valid object of `\"` escapes
+with its closing `}` missing) within 100 ms, and that an `Output`
+evaluation error on a delete still yields `{}` (R-43), that a hook
+attempt starts its build request-response with the run and queued
+timeouts, polls that one id with `batchGetBuilds` every 60 seconds,
+keeping only its id, status, phase timing and `resolvedSourceVersion`,
+and calls `StopBuild` at its deadline, that only the start call has a
+task `Retry`, every 30 seconds for at most 10 minutes on refusal errors
+alone, and that a failing delete hook runs as a loop of three started
+builds, 60 and 120 seconds apart, a refusal-only attempt not counted,
+and is then skipped (R-46), that
 untargeted placement into a fleet with a
 shared vendor account registered before a dedicated one creates the new
 cell in the dedicated account
