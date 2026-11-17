@@ -371,17 +371,23 @@ as a consumer of a global post hook.
   `UPDATING` or `DELETING`, as `StopExecution` does (spec §7.2). The
   upgrade is therefore deployed only after a drain (spec R-41), as
   three deploys. (a) Redeploy the current version with `allowedRoles`
-  set to a value no token carries, so the authorizer refuses every
-  mutating call while readers keep their `GET`s. (b) When
-  `ListExecutions` with status `RUNNING` on the old workflow is empty,
-  deploy the upgrade with that `allowedRoles` kept. (c) Redeploy with
-  `allowedRoles` restored. Deploy (b) must not restore the roles:
-  CloudFormation may update the authorizer before the API function
-  points at the new workflow, and it deletes the old state machine
-  only at cleanup, so an operation accepted in between would start on
-  the old workflow and be stranded. Machine clients only get the
-  reader role (R-38), so the gate does not affect them. The README
-  gains this upgrade step when the change is built.
+  set to `control-plane:closed`, a role the issuer never mints and
+  that is not in `readerRoles`. The authorizer then refuses every
+  mutating call while readers keep their `GET`s, but only once its
+  cached policies expire: within the authorizer TTL plus the API's
+  integration timeout (90 s with the reference values). (b) Wait those
+  90 s after (a) completes. Then, when `ListExecutions` with status
+  `RUNNING` on the old workflow is empty, deploy the upgrade with that
+  `allowedRoles` kept. (c) Redeploy with `allowedRoles` restored; a
+  refusal cached during the drain can last one TTL after this.
+  Deploy (b) must not restore the roles: CloudFormation may update
+  the authorizer before the API function points at the new workflow,
+  and it deletes the old state machine only at cleanup, so an
+  operation accepted in between would start on the old workflow and be
+  stranded. The gate treats people and machine clients alike (R-38):
+  a machine client with an operator role gets 403 until (c), so
+  automation that operates must hold off or retry. The README gains
+  this upgrade step when the change is built.
 - `fleetName` narrows from `[a-z0-9-]{1,32}` to
   `[a-z0-9][a-z0-9-]{0,31}` (spec §3.3), because it now names
   CodeBuild projects, whose names start with a letter or digit. A

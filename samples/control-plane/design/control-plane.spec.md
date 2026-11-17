@@ -1582,14 +1582,26 @@ mode; `allowedRoles` (R-36) is the switch, and the upgrade MUST be
 three deploys:
 
 1. **Close.** Redeploy the current version with `allowedRoles` set to
-   a value no token carries. The authorizer then refuses every
-   mutating call with 403, while readers keep their `GET`s. This
-   deploy changes only the authorizer's environment and replaces
-   nothing.
-2. **Upgrade.** When `ListExecutions` with status `RUNNING` on the old
-   workflow is empty, deploy the upgrade with that `allowedRoles`
-   kept.
-3. **Open.** Redeploy the upgrade with `allowedRoles` restored.
+   the single value `control-plane:closed`. The issuer MUST mint no
+   token with that role, and the value MUST NOT be in `readerRoles`,
+   so no token carries it. This deploy changes only the authorizer's
+   environment and replaces nothing. The refusal does not take effect
+   when the deploy completes: the authorizer caches each token's
+   policy and context for its TTL (N-1, 60 s), and the service reads
+   the grant from that cached context (R-36). Within the TTL plus the
+   API's integration timeout (about 29 s), every mutating call is
+   refused with 403, while readers keep their `GET`s.
+2. **Upgrade.** Wait at least the authorizer TTL plus the integration
+   timeout (90 s with the reference values) after the Close deploy
+   completes. Only then check that `ListExecutions` with status
+   `RUNNING` on the old workflow is empty, and deploy the upgrade with
+   `allowedRoles` still `control-plane:closed`. A call accepted from a
+   cached grant just before the wait ends can take until the
+   integration timeout to start its execution, so a check made
+   earlier can see an empty list and miss it.
+3. **Open.** Redeploy the upgrade with `allowedRoles` restored. An
+   operator refused during the drain may stay refused for up to one
+   TTL after Open, because that refusal is cached too.
 
 Deploy 2 MUST NOT restore the roles. Within one stack update,
 CloudFormation may update the authorizer before the API function's
@@ -1597,9 +1609,13 @@ environment points at the new workflow, and it deletes the old state
 machine only at cleanup. An operation accepted in that window would
 start on the old workflow, be terminated at cleanup and strand its
 record, the case the drain exists to prevent. Deploy 3 replaces
-nothing. Machine clients only ever get the reader role (`clientIds`,
-R-38), so the closed gate does not affect them. The build MUST add
-these three deploys to the README as an upgrade step, beside the
+nothing. The grant comes from `role` alone on both token paths (R-38),
+so the gate treats people and machine clients alike. Readers keep
+their `GET`s. A machine client whose role is in `allowedRoles` is
+refused with 403 until Open, so automation that calls mutating
+operations MUST hold off, or retry after Open. The build MUST add
+these three deploys to the README as an upgrade step, with the
+`control-plane:closed` value and the 90 s wait, beside the
 `fleetName` pattern change of §3.3.
 
 An explicit deny wins over any allow, and the stack never reads an
