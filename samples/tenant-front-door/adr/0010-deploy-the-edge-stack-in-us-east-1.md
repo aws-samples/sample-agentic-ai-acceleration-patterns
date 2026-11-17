@@ -3,7 +3,7 @@
 # ADR-0010: Deploy the edge stack in us-east-1
 
 - Status: Accepted
-- Date: 2026-11-13
+- Date: 2026-11-16
 - Deciders: Dave Roberts (PSA)
 
 ## Context

@@ -57,7 +57,8 @@ outside the control plane (P-6).
 Option 1, with Option 2 as the plan past the ceiling. One front door uses
 one store. The stated ceiling is 80 % of the store divided by the
 worst-case bytes per tenant, which leaves 20 % for `cell#` entries, the
-`app` entry and dedicated domains, and matches the alarm:
+`app` entry, the `signin` entry in `host` mode and dedicated domains,
+and matches the alarm:
 
 - `single` mode: floor(5,000,000 × 0.8 / 217) = 18,433 tenants;
 - `host` mode: floor(5,000,000 × 0.8 / 427) = 9,367 tenants.

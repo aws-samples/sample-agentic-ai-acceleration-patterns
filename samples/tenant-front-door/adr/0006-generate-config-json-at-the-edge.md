@@ -9,10 +9,12 @@
 ## Context
 
 The SPA needs its public settings before it can sign a tenant user in: the
-issuer URL, the client id and the scopes. In `host` mode it also needs the
-tenant id and display name for the host it was loaded from (ADR-0001), and
-the shared sign-in `redirectUri`, `https://login.<appDomain>/callback`
-(ADR-0016). None of these values is secret.
+issuer's authorize and token endpoints, the client id and the scopes; it
+does not fetch the issuer's discovery document (spec §7.1). In `host`
+mode it also needs the tenant id and display name for the host it was
+loaded from (ADR-0001), and the shared sign-in `redirectUri`,
+`https://login.<appDomain>/callback` (ADR-0016). None of these values is
+secret.
 
 The SPA is one build for every tenant, served from one S3 bucket, with
 content-hashed assets cached for a year (spec §3.2, §7.2). Onboarding a

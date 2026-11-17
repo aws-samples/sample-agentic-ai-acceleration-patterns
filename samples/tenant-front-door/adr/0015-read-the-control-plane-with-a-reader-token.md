@@ -3,7 +3,7 @@
 # ADR-0015: Read the control plane with a reader token
 
 - Status: Accepted
-- Date: 2026-11-13
+- Date: 2026-11-16
 - Deciders: Dave Roberts (PSA)
 
 ## Context

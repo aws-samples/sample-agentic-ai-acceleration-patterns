@@ -11,9 +11,9 @@
 In `host` mode each tenant has its own origin, `<tenant>.<appDomain>`
 (ADR-0001). The issuer must send the authorization code back to an origin
 it trusts, and a Cognito app client lists those origins as callback URLs.
-Sign-out has the same shape: Cognito's `/logout` needs `logout_uri` to be
-a sign-out URL registered on the app client, and that list has the same
-100-URL limit. The front door must serve thousands of tenants per
+Sign-out has the same shape: Cognito's `/logout` with `logout_uri` needs
+that URL registered as a sign-out URL on the app client, a list with the
+same 100-URL limit. The front door must serve thousands of tenants per
 distribution (ADR-0012) and add a tenant without a release.
 
 Spike S-4 (2026-11-16) measured Cognito: one app client takes 100 callback
@@ -25,6 +25,19 @@ character: it refused `https://t7.<appDomain>/callback` with
 `redirect_mismatch`, as it did a two-label host, the apex, a suffix trick,
 another path, `http` and a port. Only the literal string itself,
 `https://*.<appDomain>/callback`, reached the sign-in page and got a code.
+
+Spike S-4o (2026-11-16) measured Cognito's `/logout`. Its parameters are
+Cognito's own, `logout_uri` and `redirect_uri`, not the
+`post_logout_redirect_uri` of OpenID Connect RP-initiated logout. With
+`client_id`, a registered `logout_uri` on the shared host and a `state`,
+Cognito ended the session and redirected to the `logout_uri` with the
+`state` dropped, so a shared sign-out URL cannot learn which tenant host
+to return to. An unregistered `logout_uri`, on another domain or on a
+tenant host, was refused with a redirect to Cognito's own `/login` page.
+With `client_id`, `response_type=code`, `scope`, a registered
+`redirect_uri` and a `state`, Cognito redirected to its sign-in page with
+the `state` kept, and after sign-in sent the code and the same `state` to
+the `redirect_uri`.
 
 ## Options considered
 
@@ -42,14 +55,16 @@ inside the default quota of 1,000.
 
 ### Option 2: One shared sign-in host with a signed `state`
 
-One host, `login.<appDomain>`, is the only callback URL and the only
-sign-out URL. The tenant origin starts sign-in and sign-out with a `state`
-the edge signs. Pros: no issuer change per tenant; no ceiling; tested end
-to end in S-4 (hosted sign-in, a real code, the redirect to the tenant
-host), which refused a missing, changed or expired `state` and any host
-outside `appDomain` with 400. Cons: one more hop; a `state` can be
-replayed until it expires, so the SPA must bind its nonce and PKCE
-verifier; the router holds an HMAC key that needs rotation.
+One host, `login.<appDomain>`, is the only callback URL. The tenant origin
+starts sign-in with a `state` the edge signs, and starts sign-out with
+Cognito's `redirect_uri` form of `/logout`, which comes back through the
+same callback URL with a fresh `state` (S-4o). Pros: no issuer change per
+tenant; no ceiling; tested end to end in S-4 (hosted sign-in, a real code,
+the redirect to the tenant host), whose sign-in host refused a missing or
+changed `state` and any host outside `appDomain` with 400. Cons: one more
+hop; a sign-out ends on the issuer's sign-in page rather than a signed-out
+page; a `state` can be replayed until it expires, so the SPA must bind its
+nonce and PKCE verifier; the router holds an HMAC key that needs rotation.
 
 ### Option 3: A wildcard callback URL
 
@@ -59,94 +74,46 @@ matched it loosely would send codes to any host under the domain.
 
 ## Decision
 
-Option 2. `host` mode signs in and out through one shared host with a
-signed `state`. The sign-in host, `login.<appDomain>`, is a reserved label
-(spec §4.1) served by the same router function as every other host. Option
-1 stays possible for a deployer with few tenants. Option 3 does not work
-on Cognito.
-
-**The state.** `state` is `base64url(payload) + "." + base64url(HMAC)`,
-where the HMAC is HMAC-SHA256 over the encoded payload. The payload is
-`{"v":1,"kid":"<key id>","p":"in"|"out","h":"<tenant host>","n":"<nonce>",
-"exp":<unix seconds>}`. The purpose `p` stops a sign-out state from being
-used at `/callback` and the reverse. Lifetime is 10 minutes.
-
-**Minting.** Only the edge holds the key, so the tenant origin asks for a
-`state`. The router answers `GET /signin-state?nonce=<base64url>` on a
-tenant host, in `host` mode only (§3.3 step 2 has already found
-`host#<host>`). It requires `Sec-Fetch-Site: same-origin`, a nonce of 16 to
-64 base64url characters, and answers `{"state":"..."}` with `no-store`. `h`
-is the request's lower-cased `Host`, so a tenant cannot mint a `state` for
-another host. The sign-out state has no SPA nonce: `/logout` on a tenant
-host answers 302 to the issuer's logout endpoint with `logout_uri` set to
-`https://login.<appDomain>/logout` and a `state` the router mints with
-`p: "out"` and a random `n`, and carries `Clear-Site-Data`.
-
-**The sign-in host.** A router step runs before the `host#` lookup (§3.3
-step 2) when `Host` is `login.<appDomain>`. It handles two paths and
-answers 400 for anything else:
-
-- `/callback?code&state`: verify the `kid`, the HMAC with the key for that
-  `kid`, `p: "in"`, and `exp`; then check that `host#<h>` exists and that
-  its tenant is `active`. All hold: 302 to `https://<h>/callback` with the
-  same `code` and `state` (and `error` and `error_description` when the
-  issuer reports a failure). Otherwise 400.
-- `/logout?state`: the same checks with `p: "out"`; 302 to `https://<h>/`.
-
-**The SPA.** On the tenant host it makes a random nonce and the PKCE
-verifier, saves both in `sessionStorage` (ADR-0007), fetches
-`/signin-state?nonce=...`, and navigates to the issuer's authorize endpoint
-with `redirect_uri=https://login.<appDomain>/callback`, the `state` and the
-code challenge. It learns the `redirect_uri` from `/config.json`
-(`redirectUri`, host mode). On `/callback` it reads `n` from the `state`,
-refuses the callback unless `n` equals the saved nonce, exchanges the code
-with the saved verifier and the same `redirect_uri`, and deletes both
-saved values. A replayed `state` yields no token: the replayer lacks the
-verifier. The router cannot see the exchange.
-
-**The key.** The route table holds one `signin` key (spec §4.1):
-`{"v":1,"cur":"<kid>","k":{"<kid>":"<base64 key>"}}`, 32 random bytes per
-key. It is about 150 bytes with two keys, inside the 20 % the registrar
-leaves for non-tenant entries (ADR-0012). A custom resource generates it
-with a cryptographic random source and writes it to the store, so the key
-never appears in the template, the stack outputs or a log. In `host` mode
-the router therefore holds one secret; in `single` mode it holds none.
-Who can read it: any principal with `cloudfront-keyvaluestore:GetKey` or
-`ListKeys` on the store, and any principal that can update the router
-(`cloudfront:UpdateFunction`) or run `cloudfront:TestFunction` on it,
-because a function with the store attached reads it. The stack grants
-those only to the deployer and the custom resource. A leaked key lets its
-holder mint a `state` for any registered tenant host for as long as the
-key is live, and the PKCE and nonce binding still stops it from yielding a
-token.
-
-**Rotation.** Two keys can be live, named by `kid`. Rotation is three
-stack updates of the custom resource, which generates a key for a `kid` it
-has not stored, keeps the others and deletes any `kid` not listed:
-
-1. List the new `kid` beside the old, with `cur` still the old. Wait past
-   propagation (spike S-2: about 30 s, so 60 s), so every edge location
-   can verify the new key before anything signs with it.
-2. Switch `cur` to the new `kid`. States now sign with the new key and
-   states already issued still verify with the old one.
-3. After the state lifetime (10 minutes) remove the old `kid`.
-
-An operator runs the three updates and the waits between them. Rotate
-on a schedule and whenever the key may have been read.
+Option 2. In `host` mode the one callback URL is the shared sign-in host,
+`login.<appDomain>`, a reserved label (spec §4.1) served by the same
+router function as every other host. The router mints a `state` signed
+with an HMAC key from the route table that binds the tenant host, the
+SPA's nonce and a 10-minute expiry; the sign-in host forwards the code
+only to an active, registered tenant host, and the SPA's nonce and PKCE
+verifier make a replayed `state` useless. Sign-out uses Cognito's
+`redirect_uri` form of `/logout` with a fresh `state` for the tenant host,
+because S-4o showed that the `logout_uri` form drops `state`: the user
+signs out, signs in again and returns to their own tenant host. This
+needs no issuer change per tenant and has no ceiling, where Option 1
+needs a client update per tenant at 15 per second and Option 3 does not
+work on Cognito; Option 1 stays possible for a deployer with few tenants.
+The `state` format, the mint, the sign-in host's checks, the key and its
+rotation are in spec §3.3 step 2, §3.5 and §4.1.
 
 ## Consequences
 
 - Easier: onboarding a tenant in `host` mode touches no issuer setting, and
-  neither does sign-out.
-- Easier: the router answers `/signin-state` and the sign-in host from the
-  store alone, with at most three reads per request.
+  neither does sign-out, which reuses the one callback URL.
+- Easier: the router answers `/signin-state`, `/logout` and the sign-in
+  host from the store alone, with at most three reads per request.
+- Harder: sign-out depends on Cognito's `redirect_uri` form of `/logout`.
+  Another issuer needs its own mapping from the tenant host's `/logout`.
+- Harder: the code Cognito issues after a sign-out has no PKCE challenge.
+  Its `state` carries no nonce, so the sign-in host sends the user to the
+  tenant host's `/` without it, and the SPA starts a fresh sign-in that
+  the issuer's new session answers without the sign-in form (spec §3.5).
 - Harder: the sign-in host and its function are part of the edge, and the
   integration test for `host` mode signs in and out through it (spec §10).
-- Harder: the router is no longer secret-free in `host` mode, and the
-  store's read permissions are part of the security boundary.
+- Harder: the router is no longer secret-free in `host` mode. The route
+  table is one permission unit, so the registrar role and any
+  edge-account principal with read actions on the store can read the key;
+  the deployer keeps those actions off every other role (spec §6.1).
 - Harder: the SPA needs `sessionStorage` for two single-use values
   (ADR-0007).
+- Follow-up: the sample's threat model lists every principal that can read
+  the `signin` key.
 - Follow-up: count `state` refusals apart from other 400s: every 400 on
   `login.<appDomain>` in the access log is a refusal.
-- Revisit when the issuer matches wildcard callback URLs strictly, or a
-  per-tenant issuer replaces the shared one.
+- Revisit when the issuer matches wildcard callback URLs strictly, returns
+  `state` on a `logout_uri` redirect, or a per-tenant issuer replaces the
+  shared one.

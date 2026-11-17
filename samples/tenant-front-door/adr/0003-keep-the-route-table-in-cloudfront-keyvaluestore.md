@@ -77,15 +77,18 @@ request; Option 3 breaks P-9.
 - Spike S-2 (100 rounds, one edge location): a write takes a median of
   28.4 s and a p99 of 29.4 s from `put-key` to the first routed request,
   for inserts and updates alike, with no timeouts. That is fine for
-  onboarding but not instant. `route.sh` waits a fixed 45 s after the
-  registrar returns (S-2 max 29.5 s at one edge location, plus margin). That
-  is a bound, not a check: a route in `single` mode cannot be observed
+  onboarding but not instant. `route.sh` bounds its wait at 45 s after
+  the registrar returns (S-2 max 29.5 s at one edge location, plus
+  margin). For cell routes and in `single` mode it waits the full 45 s,
+  a bound and not a check: a route in `single` mode cannot be observed
   without a tenant token, and a `cell#` route cannot be observed from
-  outside at all. In `host` mode it also polls
-  `https://<tenant>.<appDomain>/config.json` until it answers 200, within
-  that bound. There is no unauthenticated probe path, because one would
-  reveal whether a tenant id exists. The integration test allows 60 s per
-  route change.
+  outside at all. In `host` mode `put-tenant` polls
+  `https://<tenant>.<appDomain>/config.json` and returns on the first
+  200, and `delete-tenant` on the first 404; past 45 s it warns and
+  exits 0, because the write has succeeded (spec §4.2). There is no
+  unauthenticated probe path, because one would reveal whether a tenant
+  id exists. The integration test waits 60 s only after a change it
+  makes without `route.sh` (spec §10).
 - Harder: `suspended` and a delete take effect after the same window. A
   suspended or removed tenant is still routed until the change reaches the
   edge location, and the cell's hosts check is the only refusal in

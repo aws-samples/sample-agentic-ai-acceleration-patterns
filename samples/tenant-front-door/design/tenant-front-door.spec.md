@@ -128,7 +128,7 @@ dedicated distribution tenant on the same distribution, in either mode.
 | Multi-tenant distribution | edge | CloudFront (`ConnectionMode: tenant-only`) | Shared behaviours, policies and origins |
 | Pooled distribution tenant | edge | CloudFront distribution tenant | Serves `<appDomain>` (`single`) or `*.<appDomain>` (`host`) for every pooled tenant |
 | Dedicated distribution tenant | edge | CloudFront distribution tenant | Serves one tenant's own domain, with its own certificate and optional web ACL override |
-| Tenant router | edge | CloudFront Function (viewer request, JS 2.0) | Finds the tenant, refuses or routes. In `host` mode it also mints and checks the signed `state` of sign-in and sign-out (§3.5, ADR-0016) |
+| Tenant router | edge | CloudFront Function (viewer request, JS 2.0) | Finds the tenant, refuses or routes. In `host` mode it also mints and checks the signed sign-in `state` and starts sign-out (§3.5, ADR-0016) |
 | Route table | edge | CloudFront KeyValueStore | `tenant`, `host` and `cell` entries, the `app` settings and, in `host` mode, the `signin` key (§4) |
 | Route registrar | edge | API Gateway (IAM auth) and Lambda | The only writer of the route table; checks each write against the control plane (§3.4) |
 | SPA origin | edge | S3 bucket with origin access control | One build for every tenant |
@@ -147,19 +147,21 @@ dedicated distribution tenant on the same distribution, in either mode.
 | `/config.json` | generated at the edge | none | `no-store` | `host` mode only |
 | `/api/*` | dynamic | the tenant's cell API, in the cell's account | disabled | yes |
 | `/agents/*` | dynamic, streaming | the agent ingress | disabled | yes |
-| `/logout` | generated at the edge | none | `no-store` | no (`host` mode: a registered host) |
-| `/signin-state` | generated at the edge, `host` mode only | none | `no-store` | a registered host |
-| `login.<appDomain>/callback`, `/logout` | the sign-in host, `host` mode only: 302 or 400 | none | `no-store` | no (§3.3 step 2) |
+| `/logout` | generated at the edge: 302 to the issuer's logout endpoint (§3.5) | none | `no-store` | no (`host` mode: a registered host) |
+| `/signin-state` | generated at the edge, `host` mode only | none | `no-store` | yes |
+| `login.<appDomain>/callback`, `/logout` | the sign-in host, `host` mode only: 302, a static signed-out page, or 400 | none | `no-store` | no (§3.3 step 2) |
 
 `/agents/*` uses the managed origin request policy
 `Managed-AllViewerExceptHostHeader`. It forwards `Authorization` on `GET`
 and `POST`, and it does not forward `Host`.
 
-`/config.json` gives the SPA its public settings: issuer URL, client id and
-scopes, plus the tenant id (upper-cased back to its control-plane form,
-which the token exchange expects), display name and `redirectUri`
+`/config.json` gives the SPA its public settings: the issuer's authorize
+and token endpoints, client id and scopes, plus the tenant id
+(upper-cased back to its control-plane form, which the token exchange
+expects), display name and `redirectUri`
 (`https://login.<appDomain>/callback`) in `host` mode. It holds nothing
-secret. Serving it from the edge keeps the SPA bundle the same file for
+secret. The SPA does not fetch the issuer's discovery document (§7.1).
+Serving the file from the edge keeps the SPA bundle the same file for
 every tenant. In `single` mode the SPA learns the tenant after sign-in, from
 its own token.
 
@@ -168,27 +170,35 @@ its own token.
 On every viewer request:
 
 1. Remove every client `x-tenant-*` header (P-3).
-2. In `host` mode, when `Host` is `login.<appDomain>`, answer as the
-   sign-in host and stop (§3.5, ADR-0016), before any `host#` lookup,
-   because `host#login.<appDomain>` does not exist. `/callback?code&state`:
-   read the `signin` key; verify the `state`'s `kid`, HMAC, purpose `in` and
-   `exp`; check that `host#<h>` exists and its tenant is `active`; then
-   answer 302 to `https://<h>/callback` with the same query.
-   `/logout?state`: the same checks with purpose `out`; 302 to
-   `https://<h>/`. Anything else, or any failed check: 400 with a static
-   body. Otherwise, in `host` mode or for a dedicated tenant's domain,
-   lower-case the `Host` header and look up `host#<host>`. No entry: 404
-   with a static page.
-3. Paths that need no tenant (§3.2) skip to step 8.
-4. For `/api/*` and `/agents/*`, check `Sec-Fetch-Site`. Allow only
-   `same-origin`, `none`, or no header; refuse the rest with 403 (§7.3).
+2. Lower-case the `Host` header. In `host` mode, when it is
+   `login.<appDomain>`, answer as the sign-in host and stop (§3.5,
+   ADR-0016), before any `host#` lookup, because `host#login.<appDomain>`
+   does not exist. `appDomain` is a constant compiled into the function;
+   no key holds it. `/callback` with a `state` and either `code` or
+   `error`: read the `signin` key; verify the `state`'s `kid` and HMAC;
+   check that `host#<h>` exists and its tenant is `active`. When the
+   `state` is unexpired and carries a nonce `n`, answer 302 to
+   `https://<h>/callback` with the same `state` and `code`, or `error`
+   and `error_description`. When it has expired or has no `n`, answer
+   302 to `https://<h>/` without the code, so the SPA starts sign-in
+   again. `/logout`: 200 with a static "signed out" page that names no
+   tenant. Anything else, or any failed check: 400 with a static body.
+   Otherwise, in `host` mode or for a dedicated tenant's domain, look up
+   `host#<host>`. No entry: 404 with a static page.
+3. Paths that need no tenant (§3.2) skip to step 8, and so does
+   `/signin-state` in `single` mode.
+4. For `/api/*`, `/agents/*` and `/signin-state`, check `Sec-Fetch-Site`.
+   Allow only `same-origin`, `none`, or no header; refuse the rest with
+   403 (§7.3).
 5. Find the tenant:
    - `single` mode: take the `Authorization: Bearer` token, base64url-decode
      its payload without checking the signature, read `tenant_id`, and
      lower-case it. No token, an undecodable token, or no single `tenant_id` (a token with a
      `tenants` list included): 401 with `WWW-Authenticate: Bearer`. The SPA
      narrows a `tenants` token first (§3.5).
-   - `host` mode: the tenant from step 2.
+   - `host` mode: the tenant from step 2. `/signin-state` therefore gets
+     404 for an unknown host and 503 for a suspended tenant (step 6), so
+     a `state` is minted only for an active tenant.
 6. Look up `tenant#<tenantId>`. No entry: 403. Status `suspended`: 503 with
    `Retry-After`.
 7. For `/api/*`, look up `cell#<cellId>` and set the request's origin to the
@@ -202,9 +212,10 @@ On every viewer request:
    AgentCore Gateway ingress of `agentic-runtime-isolation`). Its origin
    request policy, `Managed-AllViewerExceptHostHeader`, forwards
    `Authorization` on `GET` and `POST` and does not forward `Host`.
-8. Serve `/config.json` and `/logout` directly. In `host` mode also serve
-   `/signin-state` (§3.5); in `single` mode it is 404. Rewrite SPA routes
-   with no file extension to `/index.html`.
+8. Serve `/config.json` and `/logout` directly (§3.5). In `host` mode
+   also serve `/signin-state` (§3.5), which answers 400 unless `nonce` is
+   16 to 64 base64url characters; in `single` mode it is 404. Rewrite
+   SPA routes with no file extension to `/index.html`.
 
 The router reads at most three keys per request. It checks no token
 signatures and writes nothing. In `single` mode it holds no secrets. In
@@ -255,37 +266,64 @@ only the edge account's operator role may make them.
 
 - Tenant users sign in in the SPA with authorization code flow and PKCE.
   In `single` mode there is one callback URL, `https://<appDomain>/`. In
-  `host` mode the one callback URL and the one sign-out URL are a shared
-  sign-in host, `https://login.<appDomain>/callback` and
-  `https://login.<appDomain>/logout`. A per-tenant URL would cap a pool at
-  100 URLs per client and 15 client updates per second (spike S-4,
-  ADR-0016). The `host` mode flow:
+  `host` mode the one callback URL is a shared sign-in host,
+  `https://login.<appDomain>/callback`. A per-tenant URL would cap a
+  pool at 100 URLs per client and 15 client updates per second (spike
+  S-4, ADR-0016). The `host` mode flow:
   1. The SPA on `<tenant>.<appDomain>` makes a nonce and a PKCE verifier,
      saves both in `sessionStorage`, and calls
      `GET /signin-state?nonce=<base64url>` on its own host. The router
-     answers (only with `Sec-Fetch-Site: same-origin`, `no-store`)
-     `{"state":"<payload>.<hmac>"}`. The payload is
-     `{"v":1,"kid":...,"p":"in","h":<host>,"n":<nonce>,"exp":...}`, the
-     HMAC is HMAC-SHA256 with the `signin` key, and `exp` is 10 minutes out.
-  2. The SPA navigates to the issuer's authorize endpoint with
-     `redirect_uri=https://login.<appDomain>/callback`, the `state` and the
-     code challenge. It learns the `redirect_uri` from `/config.json`.
+     (§3.3 steps 4 to 8) answers `{"state":"..."}` with `no-store`.
+  2. The SPA navigates to the authorize endpoint from `/config.json` with
+     `redirect_uri=https://login.<appDomain>/callback` (`redirectUri`),
+     the `state` and the code challenge.
   3. The issuer redirects to the sign-in host, which §3.3 step 2 checks
      and redirects to `https://<h>/callback` with the code and `state`.
-  4. On `/callback` the SPA checks that the `state`'s `n` equals its saved
-     nonce, exchanges the code with the saved verifier and the same
-     `redirect_uri`, and deletes both saved values.
+  4. On `/callback` the SPA refuses the callback unless the `state`'s `n`
+     equals its saved nonce, exchanges the code with the saved verifier
+     and the same `redirect_uri`, and deletes both saved values on every
+     outcome.
   5. Sign-out: `/logout` on the tenant host answers 302 to the issuer's
-     logout endpoint with `logout_uri=https://login.<appDomain>/logout` and
-     a router-minted `state` with purpose `out`, plus `Clear-Site-Data`.
-     The sign-in host verifies it and answers 302 to `https://<h>/`.
-  A replayed `state` yields no token, because the replayer lacks the PKCE
-  verifier. The key is 32 random bytes, generated by a custom resource that
-  writes it to the store, so it is never in the template, an output or a
-  log. Whoever can read the store (`cloudfront-keyvaluestore:GetKey` or
-  `ListKeys`) or update or test the router (`cloudfront:UpdateFunction`,
-  `cloudfront:TestFunction`) can read it, so the stack grants those to the
-  deployer only. Rotation takes three stack updates (§4.1).
+     logout endpoint with `client_id=<cid>`, `response_type=code`,
+     `scope=openid`, `redirect_uri=https://login.<appDomain>/callback`
+     and a `state` the router mints for that host with no `n`, plus
+     `Clear-Site-Data: "storage", "cache"` (§7.1). Cognito signs the
+     user out and shows its sign-in page, keeping the `state` (spike
+     S-4o). After sign-in the sign-in host gets the code with that
+     `state`, which has no `n`, so it answers 302 to `https://<h>/`
+     without the code. The SPA then starts sign-in at step 1, and the
+     issuer's new session answers without the sign-in form. That code
+     was issued without a PKCE challenge, so it never reaches the
+     tenant origin.
+- The `state` is `base64url(payload) + "." + base64url(HMAC)`, where the
+  HMAC is HMAC-SHA256 over the encoded payload with the `signin` key
+  named by `cur`. The payload is
+  `{"v":1,"kid":"<key id>","h":"<tenant host>","n":"<nonce>","exp":<unix seconds>}`,
+  with `exp` 10 minutes out. `h` is the request's lower-cased `Host`, so
+  a tenant host cannot mint a `state` for another host. `/signin-state`
+  copies the SPA's nonce into `n`; the `state` that `/logout` mints has
+  no `n`. A replayed `state` yields no token, because the replayer lacks
+  the PKCE verifier. The router cannot see the code exchange.
+- The `signin` key holds one or two keys of 32 random bytes, named by
+  `kid` (§4.1). A custom resource of the front door stack generates them
+  with a cryptographic random source for the ids in `signinKeys` (§3.6)
+  and writes them to the store. It writes with the store's ETag
+  (`IfMatch`) and retries on a conflict, as the registrar does (§3.4
+  step 5), because both write the same store. The key is never in the
+  template, a stack output, the custom resource's response `Data` or a
+  log. KeyValueStore actions name the store, not a key, and a function
+  has one store (ADR-0012). So the registrar role, the custom resource
+  and any edge-account principal with `cloudfront-keyvaluestore:GetKey`
+  or `ListKeys` on the store can read the key, and so can any principal
+  that can update or test the router (`cloudfront:UpdateFunction`,
+  `cloudfront:TestFunction`). The registrar code never reads `signin` or
+  `app`, and the deployer keeps those actions off every other role in
+  the edge account (§6.1). A leaked key mints a `state` for any
+  registered tenant host while it is live, and the nonce and PKCE
+  binding still stops it from yielding a token. Rotation is in §4.1.
+- `single` mode sign-out: `/logout` answers 302 to the issuer's logout
+  endpoint with `client_id=<cid>` and `logout_uri=https://<appDomain>/`,
+  plus `Clear-Site-Data: "cookies", "storage", "cache"` (§7.1).
 - A user in several tenants (`shared-pool-multi-tenant`) holds a token with
   a `tenants` list. The SPA narrows it to the tenant the user picked with
   an RFC 8693 token exchange before calling `/api/*` or `/agents/*`
@@ -328,7 +366,8 @@ only the edge account's operator role may make them.
 | `applicationId` | yes | | The control-plane application this front door serves |
 | `controlPlane` | yes | | Control plane API URL, and the vendor IdP token URL and client (secret in Secrets Manager) the registrar uses to get a reader token. The deployer lists that client id in the control plane's `vendorIdp.clientIds` (§6.1) |
 | `fleet` | yes | | The control plane's fleet name, which names the provisioning roles the registrar admits |
-| `issuer` | yes | | Discovery URL and client id the SPA uses |
+| `issuer` | yes | | The SPA's client id and scopes, and the issuer's authorize, token and logout endpoints as `https` URLs, or a Cognito user-pool domain they are derived from (`/oauth2/authorize`, `/oauth2/token`, `/logout`). Validated at synth, with no network call (§7.1) |
+| `signinKeys` | no | `{ids: ["k1"], current: "k1"}` | `host` mode only: `{ids: string[], current: string}`, the one or two `kid`s the `signin` key holds and the one that signs. `current` must be in `ids`; validated at synth (§4.1) |
 | `tenantClaim` | no | `tenant_id` | Claim the router and the origin read |
 | `spaSource` | no | the demo SPA | Path of the built SPA |
 | `agentIngress` | no | off | Agent ingress endpoint; omit to leave `/agents/*` off |
@@ -344,7 +383,7 @@ only the edge account's operator role may make them.
 | `tenant#<tenantId>` | `{"v":1,"c":"<cellId>","ac":"<accountId>","s":"active"\|"suspended","n":"<display name>"}` | registrar, from the tenant create script |
 | `host#<host>` | `{"v":1,"t":"<tenantId>"}` | registrar, in `host` mode and for a dedicated tenant's domain |
 | `cell#<cellId>` | `{"v":1,"ac":"<accountId>","o":"<api domain>"}` | registrar, from the cell create script |
-| `app` | `{"v":1,"iss":"<issuer>","cid":"<client id>","sc":"<scopes>","lo":"<logout endpoint>"}` (`lo` in `host` mode only) | the front door stack |
+| `app` | `{"v":1,"az":"<authorize endpoint>","tk":"<token endpoint>","cid":"<client id>","sc":"<scopes>","lo":"<logout endpoint>"}` | the front door stack |
 | `signin` | `{"v":1,"cur":"<kid>","k":{"<kid>":"<base64 key>"}}`, `host` mode only | custom resource of the front door stack (ADR-0016) |
 
 Rules:
@@ -362,12 +401,16 @@ Rules:
   refused at registration.
 - The `signin` key holds one or two keys, each 32 random bytes, so it is
   about 150 bytes and sits in the 20 % the ceilings below leave for
-  non-tenant entries. Rotation is three stack updates of the custom
-  resource, which generates a key for a `kid` it has not stored and
-  deletes any `kid` not listed: (1) list the new `kid` beside the old, with
-  `cur` still the old; wait past propagation (60 s, S-2); (2) switch `cur`
-  to the new `kid`; (3) after the 10-minute `state` lifetime, remove the old
-  `kid`.
+  non-tenant entries (ADR-0012). On each stack update the custom
+  resource (§3.5) generates a key for an id in `signinKeys.ids` it has
+  not stored, keeps the others, deletes any `kid` not listed, and sets
+  `cur` to `signinKeys.current`. Rotation is three stack updates: (1)
+  add the new id to `ids`, with `current` still the old; wait past
+  propagation (60 s, S-2), so every edge location can verify the new key
+  before anything signs with it; (2) set `current` to the new id; (3)
+  after the 10-minute `state` lifetime, remove the old id. An operator
+  runs the updates and the waits. Rotate on a schedule and whenever the
+  key may have been read.
 - `ac` is the account the registrar verified at write time. The router
   never reads it; the registrar uses it to authorise deletes.
 - Display name `n` is for display only, and the registrar never refuses
@@ -393,12 +436,16 @@ Rules:
 
 A change reaches an edge location within the store's propagation time:
 about 30 s (spike S-2, measured at one location: median 28.4 s, p99 29.4 s,
-max 29.5 s). `route.sh` waits a fixed 45 s after the registrar returns, a
-bound and not a check: in `single` mode a route cannot be observed without
-a tenant token, and a `cell#` route cannot be observed from outside. In
-`host` mode it also polls `https://<tenant>.<appDomain>/config.json` until
-it answers 200, within that bound. No unauthenticated probe path exists,
-because it would reveal whether a tenant id exists.
+max 29.5 s). `route.sh` bounds its wait at 45 s after the registrar
+returns. For `put-cell`, `delete-cell` and every call in `single` mode it
+waits the full 45 s, a bound and not a check: in `single` mode a route
+cannot be observed without a tenant token, and a `cell#` route cannot be
+observed from outside. In `host` mode `put-tenant` polls
+`https://<tenant>.<appDomain>/config.json` and returns on the first 200,
+and `delete-tenant` returns on the first 404. When none arrives within
+45 s, it prints a warning and exits 0: the write succeeded and only
+propagation is late. No unauthenticated probe path exists, because it
+would reveal whether a tenant id exists.
 
 `suspended` and a delete take effect after the same window. Until then the
 tenant is still routed, and the cell's hosts check is the only refusal
@@ -445,10 +492,10 @@ All with a small static HTML or JSON body and `no-store`:
 | Status | When |
 |---|---|
 | 401 | `single` mode: no token, an undecodable token, or no single `tenant_id` (a `tenants` list included) |
-| 403 | unknown tenant (`single`), or a cross-site call to `/api/*` or `/agents/*` |
-| 404 | unknown host (`host` mode, or an unknown dedicated domain) |
+| 403 | unknown tenant (`single`), or a cross-site call to `/api/*`, `/agents/*` or `/signin-state` |
+| 404 | unknown host (`host` mode, or an unknown dedicated domain), or `/signin-state` in `single` mode |
 | 429 | tenant over its rate on `/api/*` or `/agents/*` (`host` mode, at the edge): the WAF rate rule's Block action returns a custom 429, and a scope-down keeps SPA loads out of the count (ADR-0009) |
-| 400 | `login.<appDomain>`: a missing, changed or expired `state`, another host, an unregistered or suspended tenant host, or any other path |
+| 400 | `/signin-state` with a missing or malformed nonce; on `login.<appDomain>`: a missing or changed `state`, an unknown `kid`, an unregistered or suspended tenant host, or any other path. An authentic expired `state` gets 302 to `https://<h>/` instead (§3.3 step 2) |
 | 503 | tenant suspended, or its cell has no route |
 
 ## 6. Contracts
@@ -457,8 +504,12 @@ All with a small static HTML or JSON body and `no-store`:
 
 - A public hosted zone for `appDomain` in the edge account.
 - An issuer that meets `ARCHITECTURE.md` §2.1 and accepts the app's
-  callback and sign-out URLs: `https://<appDomain>/` in `single` mode, the
-  two `login.<appDomain>` URLs in `host` mode (ADR-0016).
+  callback and sign-out URLs: `https://<appDomain>/` as both in `single`
+  mode. In `host` mode, `https://login.<appDomain>/callback` as the
+  callback URL, which tenant-host sign-out also uses (§3.5), and
+  `https://login.<appDomain>/logout` as the sign-out URL, which lands a
+  sign-out started with `logout_uri` outside the SPA on the static
+  signed-out page (ADR-0016).
 - A control plane whose `GetCell` and `GetDeployment` return `accountId`
   and `applicationId`, with a reader role enabled (control-plane R-36), and
   a vendor IdP app client whose client-credentials tokens carry that role
@@ -475,6 +526,14 @@ All with a small static HTML or JSON body and `no-store`:
   issuer.
 - In every account that hosts cells, the control plane's role pair; the
   registrar admits only those roles.
+- In `host` mode, the edge account's read boundary for the `signin` key.
+  The registrar role, the custom resource and any edge-account principal
+  with `cloudfront-keyvaluestore:GetKey` or `ListKeys` on the route
+  table, or `cloudfront:UpdateFunction` or `cloudfront:TestFunction` on
+  the router, can read the key. The registrar code never reads `signin`
+  or `app`. The deployer keeps those actions off every other role in the
+  edge account: KeyValueStore has no resource policy, so the stack
+  cannot (§3.5).
 - A cell API that verifies the token in `x-tenant-token`, refuses a
   `tenant_id` that differs from `x-tenant-route` (compared
   case-insensitively), refuses tenants its cell does not host, and in `single`
@@ -550,14 +609,17 @@ and the next release drops the old hash. Two sets of hashes fit within the
 | `Cross-Origin-Opener-Policy` | `same-origin` (sign-in is a full redirect, no popup) |
 | `Cross-Origin-Resource-Policy` | `same-origin` |
 | `Permissions-Policy` | `camera=(), microphone=(), geolocation=(), payment=(), usb=()` |
-| `Clear-Site-Data` | `"cookies", "storage", "cache"`, on `/logout` only |
+| `Clear-Site-Data` | on `/logout` only: `"cookies", "storage", "cache"` in `single` mode, `"storage", "cache"` in `host` mode (§7.3) |
 
-`<token origin>` and `<authorize origin>` are the origins of the discovery
-document's `token_endpoint` and `authorization_endpoint`, resolved at
-synth, not the issuer URL: for Cognito they are the user pool domain, while
-the issuer is on `cognito-idp.<region>.amazonaws.com`. A `connect-src` that
-names only the issuer blocks the code exchange. In `host` mode `form-action`
-also allows `https://login.<appDomain>`.
+`<token origin>` and `<authorize origin>` are the origins of the token and
+authorize endpoints in the `issuer` input (§3.6), not the issuer URL: for
+Cognito they are the user pool domain, while the issuer is on
+`cognito-idp.<region>.amazonaws.com`. A `connect-src` that names only the
+issuer blocks the code exchange. The stack takes them from its inputs at
+synth, with no network call. The SPA reads the same endpoints from
+`/config.json` and never fetches the discovery document, which
+`connect-src` would block. In `host` mode `form-action` also allows
+`https://login.<appDomain>`.
 
 The response headers policy overrides origin headers, so a cell in a
 tenant-owned account cannot weaken the baseline (P-8).
@@ -589,7 +651,10 @@ tenant-owned account cannot weaken the baseline (P-8).
 Fetch Metadata allows `same-origin` and `none` only, in both modes. In
 `host` mode every other tenant is `same-site`, so `same-site` is refused;
 any cookie the application adds uses the `__Host-` prefix so no tenant host
-can set one for another; and the production hardening checklist adds
+can set one for another; `/logout` sends no `"cookies"` directive, because
+the browser clears cookies for the whole registrable domain, so one
+tenant's sign-out would clear every other tenant's cookies; and the
+production hardening checklist adds
 `appDomain` to the Public Suffix List, so each tenant becomes its own site.
 The sample documents that step and does not do it.
 
@@ -624,6 +689,7 @@ Each spike reports its deploy and destroy time.
 | S-2 | How long does a KeyValueStore write take to apply at the edge? | median and p99 from write to first routed request. **Measured 2026-11-16** over 100 rounds (one POP, 250 ms polling): median 28.4 s, p90 29.2 s, p99 29.4 s, max 29.5 s from the start of `put-key` to the first routed request; 29.6 s median until four pollers all saw it; no timeouts; inserts and updates alike. `put-key` itself takes about 0.6 s. Deploy 340 s |
 | S-3 | Does `cf.updateRequestOrigin()` set origin access control for a Lambda function URL **in another account**? | through the multi-tenant distribution, with its ARN as the permission's `SourceArn`: a signed request reaches a URL with `AWS_IAM` auth in the second account; an unsigned one is 403; a `POST` with a body and `x-amz-content-sha256` is served; the cell receives the viewer's token in `x-tenant-token`; the permission set is confirmed. **Passed 2026-11-16**: a signed `GET` and a `POST` with `x-amz-content-sha256` reached the function URL in the second account through the multi-tenant distribution, with the distribution ARN (not the tenant ARN) as `SourceArn`; the cell saw the viewer's token in `x-tenant-token`, and a client's own `x-tenant-token` was replaced. Refused with 403: a direct unsigned call, a call before the permission existed, a `POST` without `x-amz-content-sha256` (signature mismatch), and a call with `lambda:InvokeFunctionUrl` but no `lambda:InvokeFunction`. Lambda removes the signed `Authorization` header from the event. Deploy 506 s, destroy 185 s |
 | S-4 | `host` mode: how does the issuer take one callback URL per tenant at 1,000s of tenants? | a working option for Cognito app clients (limit and update rate measured), or a single sign-in host with a signed `state`. **Passed 2026-11-16 with the shared sign-in host**: one Cognito app client takes 100 callback URLs (the 101st is refused), a pool 1,000 clients by default, and `UpdateUserPoolClient` about 15 per second before `TooManyRequestsException`. One sign-in host with a signed `state` completed a real hosted sign-in and sent the code to the tenant host; a missing, changed or expired `state`, or a host outside `appDomain`, got 400. A wildcard callback URL is saved but matched as a literal string: a tenant host gets `redirect_mismatch` (ADR-0016). Deploy 446 s, destroy 220 s |
+| S-4o | `host` mode: does Cognito's `/logout` return `state` on its `logout_uri` redirect, and which `/logout` form brings a user back to a tenant host? | the observed redirect for the `logout_uri` form and the `redirect_uri` form, and for an unregistered `logout_uri`. **Measured 2026-11-16**: `/logout` with `client_id`, a registered `logout_uri` of `https://login.<appDomain>/logout` and `state` answered 302 to the `logout_uri` with `state` dropped, and ended the session (the next authorize showed the sign-in form). An unregistered `logout_uri`, on another domain or a tenant host, was refused with a redirect to Cognito's own `/login` page. `/logout` with `client_id`, `response_type=code`, `scope=openid`, a registered `redirect_uri` of `https://login.<appDomain>/callback` and `state` answered 302 to Cognito's `/login` with `state` kept; after sign-in the code reached the callback with the same `state`. A live session gave a code without the sign-in form, and both `/logout` forms ended it: the next authorize showed the form again (rerun 2026-11-17). The design uses the `redirect_uri` form (ADR-0016). Deploy 39 s, destroy 31 s |
 | S-5 | Does streaming pass through `/agents/*` to the agent ingress without buffering? | first byte at the client within 1 s of first byte from the ingress; the ingress receives the bearer token on `GET` and `POST`; the `Managed-AllViewerExceptHostHeader` policy deploys with the pinned CDK version |
 | S-6 | Does a WAF rate rule keyed on the `Host` header count each tenant on its own? | tenant A over its limit on `/api/*` gets the custom 429 while tenant B is served; A's SPA loads (`/`, `/assets/*`) are not counted. **Passed 2026-11-16**: limit 10 per 60 s keyed on the lower-cased `Host`, scoped down to `/api/`. Tenant A got the custom 429 (JSON body, `retry-after: 60`) 21 s into its burst while B's `/api/x` stayed 200; 300 requests to A's `/` and 100 to `/assets/app.js` during the block were all 200. The rule's managed-keys call does not support a `Host` key. Deploy 443 s, destroy 250 s |
 | S-7 | Can the router decode a `tenant-identity` access token's payload within the CloudFront Functions limits? | `tenant_id` read from a real token; compute utilisation under 50 %; 401 on a malformed token. **Passed 2026-11-13**: 13-14 % compute, 401 at 9-10 % (ADR-0005) |
@@ -643,15 +709,19 @@ the default mode; `test/integ.host.ts` repeats the steps marked (host) with
 
 Expected time, from S-1: deploying the edge stacks and the distribution
 takes about 481 s and destroying them about 312 s, before the control plane
-and the cells the test also deploys. Every route change (steps 2, 13 and 15)
-is followed by 60 s for propagation (ADR-0003, spike S-2) before the next
-call.
+and the cells the test also deploys. The route changes of steps 2 and 15
+go through `route.sh`, which already waits its 45 s bound (§4.2). Step 13
+is a status change the test makes as the operator, without `route.sh`,
+so the test waits 60 s for propagation (ADR-0003, spike S-2) before its
+next call. The rotation check after the list is a separate run with its
+own time.
 
 1. Deploy the front door and register the demo application with the control
    plane, its scripts calling `route.sh`.
 2. Create tenant `a` (placed in the edge account) and tenant `b` (pinned to
    the second account). Their cell and tenant scripts register the routes.
-3. `/` serves the SPA with every §7.1 header.
+3. `/` serves the SPA with every §7.1 header. In `single` mode
+   `/signin-state` returns 404.
 4. `/api/whoami` with a token for `a` returns `a` from cell A; with a token
    for `b` returns `b` from cell B in the second account. Each cell read
    the token from `x-tenant-token`.
@@ -676,25 +746,33 @@ call.
     `a` and `b`, queried in `us-east-1` where the log group is (ADR-0010),
     and the registrar log, in `eu-central-1`, names the second account on
     steps 11 and 12.
-15. Delete `b`'s deployment: its script removes the route, and after 60 s
-    `b`'s token returns 403.
+15. Delete `b`'s deployment: its script removes the route through
+    `route.sh`, and once the script returns `b`'s token returns 403.
 16. (host) `a.<appDomain>/config.json` names `a`; an unregistered host
     returns 404; a token for `a` on `b.<appDomain>/api/whoami` returns 403;
     `a` over its rate gets 429 while `b` is served.
 17. (host) Sign-in host (ADR-0016). `/signin-state` on `a`'s host with
-    `Sec-Fetch-Site: same-origin` returns a `state`; cross-site it is
-    refused, and in `single` mode it is 404. A real sign-in through the issuer
+    `Sec-Fetch-Site: same-origin` returns a `state`; cross-site it gets
+    403, and with a malformed nonce 400. A real sign-in through the issuer
     reaches the sign-in host and gets a 302 to `a`'s `/callback` with the
     code and `state`; the SPA's exchange with the same `redirect_uri`
-    returns a token. A missing, changed or expired `state`, a `state` for
-    another host, a host that is not a registered tenant, and a suspended
-    tenant's host each get 400 on `login.<appDomain>`. `/logout` on `a`'s
-    host redirects to the issuer logout with `logout_uri` on the sign-in
-    host, which redirects back to `a`'s host. After the rotation steps of
-    §4.1, a `state` minted before the switch still verifies until the old
-    key is removed.
+    returns a token. A missing or changed `state`, a host that is not a
+    registered tenant, and a suspended tenant's host each get 400 on
+    `login.<appDomain>`; an expired `state` gets 302 to `a`'s `/`.
+    `/logout` on `a`'s host returns 302 to the issuer's logout endpoint
+    with `client_id`, `response_type=code`, the sign-in host's
+    `redirect_uri` and a `state` for `a`'s host, with `Clear-Site-Data:
+    "storage", "cache"`; after signing in again the user lands on `a`'s
+    `/`. `login.<appDomain>/logout` returns the static signed-out page.
 18. Destroy everything the test deployed, in both accounts, except the
     shared identity pool.
+
+Rotation check, optional and run on its own against a `host` mode front
+door: run the three rotation updates of §4.1 and check that a `state`
+minted before the switch to the new `current` still verifies, and that
+it gets 400 once the old id is removed. It adds three stack updates, the
+60 s propagation wait and the 10-minute `state` lifetime, so at least
+11 minutes plus the updates.
 
 ## 11. Open questions
 
