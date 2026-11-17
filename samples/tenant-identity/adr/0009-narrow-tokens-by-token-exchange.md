@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-20
+- Amended by: [ADR-0039](0039-keep-the-own-exchange-endpoint-over-cognito-token-exchange.md)
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -70,3 +71,5 @@ Exchange traffic counts against Cognito's request-rate quotas. Revisit if
 Cognito adds a native token-exchange grant, or if a delegation use case needs
 the `act` claim. Either one leads back to Option 2 or to a managed exchange
 service.
+
+**2026-11-17.** Amended by ADR-0039: Cognito offers token exchange (RFC 8693, `GetDerivedToken`), so the revisit condition is met. The decision stands, because the exchange request has no field that names a tenant.
