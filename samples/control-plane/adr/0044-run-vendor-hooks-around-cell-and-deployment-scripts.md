@@ -372,11 +372,14 @@ as a consumer of a global post hook.
   upgrade is therefore deployed only after a drain (spec R-41), as
   three deploys. (a) Redeploy the current version with `allowedRoles`
   set to `control-plane:closed`, a role the issuer never mints and
-  that is not in `readerRoles`. The authorizer then refuses every
-  mutating call while readers keep their `GET`s, but only once its
-  cached policies expire: within the authorizer TTL plus the API's
-  integration timeout (90 s with the reference values). (b) Wait those
-  90 s after (a) completes. Then, when `ListExecutions` with status
+  that is not in `readerRoles`. Once its cached policies expire, the
+  authorizer refuses every call from a token whose role is not in
+  `readerRoles`, reads included; only reader tokens keep their `GET`s.
+  (b) Wait the authorizer TTL plus the longer of the integration
+  timeout and the API function's own timeout after (a) completes
+  (90 s with the reference values; the API function's timeout stays at
+  or below the 29 s integration timeout, because the function keeps
+  running after API Gateway stops waiting). Then, when `ListExecutions` with status
   `RUNNING` on the old workflow is empty, deploy the upgrade with that
   `allowedRoles` kept. (c) Redeploy with `allowedRoles` restored; a
   refusal cached during the drain can last one TTL after this.
@@ -385,8 +388,9 @@ as a consumer of a global post hook.
   and it deletes the old state machine only at cleanup, so an
   operation accepted in between would start on the old workflow and be
   stranded. The gate treats people and machine clients alike (R-38):
-  a machine client with an operator role gets 403 until (c), so
-  automation that operates must hold off or retry. The README gains
+  a machine client with an operator role gets 403 on every route until
+  (c), so automation that uses an operator role, status polling
+  included, must hold off or retry. The README gains
   this upgrade step when the change is built.
 - `fleetName` narrows from `[a-z0-9-]{1,32}` to
   `[a-z0-9][a-z0-9-]{0,31}` (spec §3.3), because it now names

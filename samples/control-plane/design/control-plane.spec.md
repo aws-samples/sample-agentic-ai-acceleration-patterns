@@ -641,7 +641,7 @@ Supplied at deployment time, validated at synthesis/deploy.
 | `vendorIdp.issuerUrl`, `vendorIdp.audience` | non-empty; OIDC discovery must work against the issuer |
 | `vendorIdp.clientIds` (optional, R-38, [ADR-043](../adr/0043-accept-listed-client-ids-when-a-token-has-no-audience.md)) | client ids accepted on a token that has no `aud`. Default: none. Each matches `[A-Za-z0-9+._:-]{1,128}` (Cognito ids are `[\w+]+`), so it survives the comma-separated environment variable; a duplicate MUST fail synth. List only the vendor's own machine clients on the dedicated issuer (T37) |
 | `vendorIdp.requiredScope` (optional, R-38) | a scope a token without `aud` must also carry, such as this API's resource-server scope (`control-plane/read`): one RFC 6749 scope token (`[\x21\x23-\x5B\x5D-\x7E]{1,256}`), given as a literal, since a CDK token is refused at synth. Default: none. Set without `clientIds` it MUST fail synth. Set it whenever a listed client may call another API on the issuer (T37) |
-| `fleetName` | names the role pair every account installs (`<fleetName>-cell-provisioning`, `<fleetName>-tenant-provisioning`) and the control plane's three roles the pair trusts (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-api`), plus its two hook roles, which no pair trusts (`<fleetName>-global-hook`, `<fleetName>-app-hook`, R-41). It also names the four build projects (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-global-hook`, `<fleetName>-app-hook`) and the workflow (`<fleetName>-workflow`), so their ARNs can be computed before they exist (R-41); `[a-z0-9][a-z0-9-]{0,31}`, checked at synth, so a name starts with a letter or digit as a CodeBuild project name must. Default `control-plane`. Role names are account-wide and project and state machine names are per Region, so the fleet name already separates two control planes in one account, and the named projects and workflow add no new clash. Two control planes in one account MUST use different fleet names, in every Region. The upgrade that first gives the projects and the workflow these names replaces them and is deployed only after the drain of R-41, as its three deploys (close with `allowedRoles` set to a value no token carries, upgrade with the gate kept, open) |
+| `fleetName` | names the role pair every account installs (`<fleetName>-cell-provisioning`, `<fleetName>-tenant-provisioning`) and the control plane's three roles the pair trusts (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-api`), plus its two hook roles, which no pair trusts (`<fleetName>-global-hook`, `<fleetName>-app-hook`, R-41). It also names the four build projects (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-global-hook`, `<fleetName>-app-hook`) and the workflow (`<fleetName>-workflow`), so their ARNs can be computed before they exist (R-41); `[a-z0-9][a-z0-9-]{0,31}`, checked at synth, so a name starts with a letter or digit as a CodeBuild project name must. Default `control-plane`. Role names are account-wide and project and state machine names are per Region, so the fleet name already separates two control planes in one account, and the named projects and workflow add no new clash. Two control planes in one account MUST use different fleet names, in every Region. The upgrade that first gives the projects and the workflow these names replaces them and is deployed only after the drain of R-41, as its three deploys (close with `allowedRoles` set to `control-plane:closed`, wait the authorizer TTL plus the timeout of R-41 (90 s), upgrade with the gate kept, open) |
 | `allowedRoles` (optional, R-36) | role claim values that get the operator grant; non-empty. Default `["operator"]`. Every role value in either list matches `[A-Za-z0-9:._-]{1,64}`, so it survives the comma-separated environment variable |
 | `readerRoles` (optional, R-36, [ADR-042](../adr/0042-a-read-only-role-beside-the-operator.md)) | role claim values that get the reader grant. Default: none, so no reader is admitted until the deployer names one. A value in both lists MUST fail synth. Use a namespaced value (`control-plane:reader`), not a word a broader issuer may already mint (`reader`, `viewer`) (T2, T20) |
 | `tenantBuildManagedPolicyArns` (optional, [ADR-022](../adr/0022-attach-deployer-supplied-managed-policies-to-the-tenant-build-role.md)) | array of customer-managed IAM policy ARNs (`arn:<partition>:iam::<account>:policy/...`), each in the stack's own partition and account; synth MUST fail otherwise. Attached to the tenant provisioning role the stack installs in its own account. Default: none |
@@ -1588,17 +1588,25 @@ three deploys:
    environment and replaces nothing. The refusal does not take effect
    when the deploy completes: the authorizer caches each token's
    policy and context for its TTL (N-1, 60 s), and the service reads
-   the grant from that cached context (R-36). Within the TTL plus the
-   API's integration timeout (about 29 s), every mutating call is
-   refused with 403, while readers keep their `GET`s.
-2. **Upgrade.** Wait at least the authorizer TTL plus the integration
-   timeout (90 s with the reference values) after the Close deploy
-   completes. Only then check that `ListExecutions` with status
-   `RUNNING` on the old workflow is empty, and deploy the upgrade with
-   `allowedRoles` still `control-plane:closed`. A call accepted from a
-   cached grant just before the wait ends can take until the
-   integration timeout to start its execution, so a check made
-   earlier can see an empty list and miss it.
+   the grant from that cached context (R-36). Once the TTL has passed,
+   an operator's role is in neither list, so the authorizer returns a
+   `Deny` for the whole stage: every call from a token whose role is
+   not in `readerRoles` is refused with 403, reads included. Only
+   reader tokens keep their `GET`s, so a deployer who watches the
+   drain through the API uses a reader token.
+2. **Upgrade.** Wait at least the authorizer TTL plus the longer of
+   the API's integration timeout (29 s) and the API function's own
+   timeout after the Close deploy completes (90 s with the reference
+   values: a 60 s TTL and an API function timeout at or below 29 s).
+   Only then check that `ListExecutions` with status `RUNNING` on the
+   old workflow is empty, and deploy the upgrade with `allowedRoles`
+   still `control-plane:closed`. A call accepted from a cached grant
+   just before the TTL ends runs until the API function returns or
+   times out; API Gateway stops waiting at 29 s, but the function
+   keeps running and can still call `StartExecution`. A check made
+   earlier can see an empty list and miss that execution. The API
+   function's timeout MUST stay at or below the integration timeout,
+   or the wait grows with it.
 3. **Open.** Redeploy the upgrade with `allowedRoles` restored. An
    operator refused during the drain may stay refused for up to one
    TTL after Open, because that refusal is cached too.
@@ -1610,10 +1618,11 @@ machine only at cleanup. An operation accepted in that window would
 start on the old workflow, be terminated at cleanup and strand its
 record, the case the drain exists to prevent. Deploy 3 replaces
 nothing. The grant comes from `role` alone on both token paths (R-38),
-so the gate treats people and machine clients alike. Readers keep
-their `GET`s. A machine client whose role is in `allowedRoles` is
-refused with 403 until Open, so automation that calls mutating
-operations MUST hold off, or retry after Open. The build MUST add
+so the gate treats people and machine clients alike. Reader tokens
+keep their `GET`s. A machine client whose role is in `allowedRoles`
+is refused with 403 on every route until Open, so automation that
+uses an operator role, status polling included, MUST hold off, or
+retry after Open. The build MUST add
 these three deploys to the README as an upgrade step, with the
 `control-plane:closed` value and the 90 s wait, beside the
 `fleetName` pattern change of §3.3.
