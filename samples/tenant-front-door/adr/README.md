@@ -4,8 +4,11 @@
 
 One file per decision, in the template of
 [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md).
-Every record is Accepted. One spike is still open, S-5 (does `/agents/*`
-stream without buffering, [spec §9](../design/tenant-front-door.spec.md)).
+Every record is Accepted except ADR-0013, which ADR-0017 supersedes.
+ADR-0017 depends on the control plane's global hooks (control-plane
+ADR-0044), still Proposed (spec Q-5). One spike is still open, S-5 (does
+`/agents/*` stream without buffering,
+[spec §9](../design/tenant-front-door.spec.md)).
 If it fails, it reopens the `/agents/*` origin request policy in ADR-0011.
 
 | Number | Title | Status | Date |
@@ -22,7 +25,8 @@ If it fails, it reopens the `/agents/*` origin request policy in ADR-0011.
 | [0010](./0010-deploy-the-edge-stack-in-us-east-1.md) | Deploy the edge stack in us-east-1 | Accepted | 2026-11-17 |
 | [0011](./0011-protect-cell-origins-with-origin-access-control-across-accounts.md) | Protect cell origins with origin access control across accounts | Accepted | 2026-11-13 |
 | [0012](./0012-cap-the-route-table-and-shard-by-distribution.md) | Cap the route table and shard by distribution | Accepted | 2026-11-17 |
-| [0013](./0013-register-routes-through-a-registrar-that-checks-the-control-plane.md) | Register routes through a registrar that checks the control plane | Accepted | 2026-11-17 |
+| [0013](./0013-register-routes-through-a-registrar-that-checks-the-control-plane.md) | Register routes through a registrar that checks the control plane | Superseded by ADR-0017 | 2026-11-17 |
 | [0014](./0014-run-one-front-door-per-control-plane-application.md) | Run one front door per control-plane application | Accepted | 2026-11-13 |
 | [0015](./0015-read-the-control-plane-with-a-reader-token.md) | Read the control plane with a reader token | Accepted | 2026-11-16 |
 | [0016](./0016-sign-in-through-one-shared-host-in-host-mode.md) | Sign in through one shared host in host mode | Accepted | 2026-11-17 |
+| [0017](./0017-register-routes-from-a-control-plane-global-hook.md) | Register routes from a control-plane global hook | Accepted | 2026-11-17 |

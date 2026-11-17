@@ -4,6 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-13
+- Amended by: ADR-0017
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -95,3 +96,10 @@ request; Option 3 breaks P-9.
   between.
 - Revisit when the tenant count nears the store ceiling, or when the
   router needs more than three reads per request.
+
+Amended 2026-11-17 by ADR-0017: `route.sh` is gone. The route hook,
+which the control plane runs on cell and deployment events, waits the
+same 45 s bound, polls the same way in `host` mode, and warns and exits
+0 past it, so a cell or deployment reaches `ACTIVE` once its route is
+live. The integration test waits 60 s only after a change it makes
+without the hook.

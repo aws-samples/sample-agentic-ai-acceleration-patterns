@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0013: Register routes through a registrar that checks the control plane
 
-- Status: Accepted
+- Status: Superseded by ADR-0017
 - Date: 2026-11-17
 - Deciders: Dave Roberts (PSA)
 

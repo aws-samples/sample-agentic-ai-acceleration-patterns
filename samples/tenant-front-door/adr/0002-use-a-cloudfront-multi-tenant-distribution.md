@@ -4,6 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-13
+- Amended by: ADR-0017
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -90,3 +91,10 @@ domain an edit to shared configuration; Option 3 breaks P-8 and P-9.
 - Revisit when distribution tenants cannot carry a feature the front door
   needs, or when the tenant count passes what one distribution tenant
   serves.
+
+Amended 2026-11-17 by ADR-0017: no role of a cell account reaches the
+registrar any more, provisioning roles included. The registrar's
+callers are the control plane's global hook role, under which the
+route hook runs, and the edge operator role. The global hook role that
+sends `customDomain` gets 403, so only the edge operator role sets a
+dedicated domain, as before.

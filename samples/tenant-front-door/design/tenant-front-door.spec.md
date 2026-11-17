@@ -2,9 +2,11 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Tenant front door for agentic applications: specification
 
-Status: Proposed. §8 lists the decisions, all Accepted. One spike is
-still open, S-5 (`/agents/*` streaming, §9); if it fails it reopens the
-`/agents/*` origin request policy in ADR-0011.
+Status: Proposed. §8 lists the decisions, all Accepted except ADR-0013,
+which ADR-0017 supersedes. One spike is still open, S-5 (`/agents/*`
+streaming, §9); if it fails it reopens the `/agents/*` origin request
+policy in ADR-0011. Route registration depends on the control plane's
+global hooks (control-plane ADR-0044), which are still Proposed (Q-5).
 
 ## 1. Problem statement
 
@@ -17,10 +19,12 @@ multi-tenant distribution, in one **edge account**, in front of a shared
 single-page application (SPA) and every cell's API, wherever the cell lives.
 A CloudFront Function, the **tenant router**, finds the request's tenant,
 looks it up in a CloudFront KeyValueStore (the **route table**) and sends the
-request to the tenant's cell. Cell and tenant scripts, running in the cell's
-own account, register their routes through a **route registrar** in the
-edge account, which accepts a route only when the control plane says that
-cell or deployment lives in the calling account.
+request to the tenant's cell. Routes are registered by the control plane's
+own operations: a vendor **route hook**, which the control plane runs in
+its own account on cell and deployment events, calls a **route
+registrar** in the edge account. The registrar admits no role a cell
+account holds, and writes a route only to the cell and account the
+control plane placed it in (ADR-0017).
 
 The router finds the tenant in one of two ways, chosen at deploy time
 (`addressing`):
@@ -44,8 +48,10 @@ dedicated distribution tenant on the same distribution, in either mode.
 
 - Edge routing to a cell origin chosen per request, from the token's tenant
   or from the host, across vendor-owned and tenant-owned accounts.
-- Cross-account route registration that an account can only use for its own
-  cells and deployments, checked against the control plane.
+- Route registration that only the vendor can make: a control-plane
+  global hook writes each route from the cell or deployment operation,
+  checked against the control plane, and no cell account, tenant-owned
+  or not, holds a credential the registrar admits.
 - A route table at the edge: unknown tenants are refused and suspended
   tenants get 503 there. Neither reaches an origin.
 - Reading a token at the edge without trusting it: the router decodes the
@@ -77,8 +83,8 @@ dedicated distribution tenant on the same distribution, in either mode.
 - Not the application. The demo cell API and the demo SPA exist only to
   prove the routing and the browser baseline.
 - Not tenant onboarding or placement. The control plane creates tenants and
-  places them in cells; this sample gives its scripts a route to register
-  and reads the placement back to check it.
+  places them in cells; this sample gives the control plane a hook that
+  registers each route, and reads the placement back to check it.
 
 ## 2. Guiding principles
 
@@ -102,18 +108,21 @@ dedicated distribution tenant on the same distribution, in either mode.
    host's tenant (§3.3 step 5). The origin verifies the token, refuses a
    `tenant_id` that differs from the hint, and refuses a tenant its cell
    does not host.
-5. **P-5: An account routes traffic only to itself.** The registrar takes
-   the calling account from the signed request, never from its body, and
-   accepts a route only when the control plane places that cell or
-   deployment in that account. A tenant route claims only its own pooled
-   host. A dedicated domain (`customDomain`) is set only by the vendor's
-   edge operator role, once the vendor has confirmed that the tenant
+5. **P-5: Only the vendor writes routes, and only to the placement.** The
+   registrar admits two principals: the control plane's global hook
+   role, under which the route hook runs, and the vendor's edge operator
+   role. No role a cell account holds reaches it. A tenant-owned account
+   controls its own credentials, so this is the wall that stops it
+   writing, deleting or re-creating any route, its own included. The
+   registrar takes a route's cell and account from the control plane's
+   record, never from the body, and accepts a hook's write only while
+   that record is in the status of the operation that runs the hook
+   (§3.4 step 3). A tenant route claims only its own pooled host. A
+   dedicated domain (`customDomain`) is set only by the vendor's edge
+   operator role, once the vendor has confirmed that the tenant
    controls the domain, and only outside `appDomain` and when no other
    tenant holds it (§3.4 steps 3 and 4). The edge operator role's domain
-   change is checked against the account recorded on the tenant route,
-   not its own. A tenant-owned account controls its own credentials, so
-   the placement check is the wall that stops it pointing another
-   tenant's traffic at its own cell.
+   change is checked against the account recorded on the tenant route.
 6. **P-6: Placement has one source of truth.** The control plane owns where
    each cell and deployment lives. The registrar reads it back on every
    write and keeps no placement data of its own.
@@ -124,9 +133,11 @@ dedicated distribution tenant on the same distribution, in either mode.
    response headers policy. A tenant cannot weaken them, and an origin cannot
    drop them.
 9. **P-9: Register a tenant with one call.** Onboarding a pooled tenant is
-   one registrar call from its tenant create script. In `host` mode the
-   wildcard certificate and DNS record already cover its host. Removing it
-   is one call from the delete script. No distribution update and no cache
+   one registrar call, which the route hook makes after the control
+   plane's deployment create script has run. In `host` mode the wildcard
+   certificate and DNS record already cover its host. Removing it is one
+   call from the route hook before the delete script runs. No script
+   calls the registrar. No distribution update and no cache
    invalidation.
 
 ## 3. System shape
@@ -142,12 +153,14 @@ dedicated distribution tenant on the same distribution, in either mode.
 | Dedicated distribution tenant | edge | CloudFront distribution tenant | Serves one tenant's own domain, with its own certificate and optional web ACL override. The registrar creates both on the edge operator role's `PutTenantRoute` and removes both with the domain (§3.4 step 5) |
 | Tenant router | edge | CloudFront Function (viewer request, JS 2.0) | Finds the tenant, refuses or routes. It names the tenant it routed on in the access log with `cf.logCustomData` (Telemetry, below). In `host` mode it also mints and checks the signed sign-in `state` and starts sign-out (§3.5, ADR-0016) |
 | Route table | edge | CloudFront KeyValueStore | `tenant`, `host` and `cell` entries, the `app` settings and, in `host` mode, the `signin` key (§4) |
-| Route registrar | edge | API Gateway (IAM auth) and Lambda | The only writer of the route table, and the only creator of dedicated distribution tenants; checks each write against the control plane (§3.4) |
+| Route registrar | edge | API Gateway (IAM auth) and Lambda | The only writer of the route table, and the only creator of dedicated distribution tenants. Admits only the control plane's global hook role and the edge operator role, and checks each write against the control plane (§3.4) |
 | SPA origin | edge | S3 bucket with origin access control | One build for every tenant |
 | Cell API origin | the cell's | The cell's API (demo: Lambda function URL with origin access control) | Verifies the token, checks the route hint and the cell's tenants |
 | `CellRouteAccess` construct | the cell's | Lambda permission | Grants `cloudfront.amazonaws.com` `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`, conditioned on the edge distribution's ARN |
 | Agent route | edge | `/agents/*` behaviour | Streams to the agent ingress of `agentic-runtime-isolation`, when configured, with the `Managed-AllViewerExceptHostHeader` origin request policy |
-| `route.sh` | the cell's | the control plane's cell and tenant scripts | Calls the registrar with the script's own credentials |
+| Route hook | the control plane's | CodeBuild, the control plane's global hook project, under `<fleet>-global-hook` (control-plane R-41) | `hooks/route-hook.sh`, registered as two global hooks. `front-door-post` (`POST` on `CELL_CREATE`, `CELL_UPDATE`, `DEPLOYMENT_CREATE`, `DEPLOYMENT_UPDATE`) puts the cell or tenant route; `front-door-pre` (`PRE` on `CELL_DELETE`, `DEPLOYMENT_DELETE`) deletes it (§3.2, §3.4). It acts only for an application that has a front door parameter in the control plane's account, and exits 0 for every other (ADR-0014) |
+| `RouteHookAccess` stack | the control plane's | IAM and SSM Parameter Store | The parameter `/application-plane/applications/<applicationId>/shared/front-door` with `registrarUrl`, and a customer-managed policy, listed in the control plane's `globalHookManagedPolicyArns`, that lets `<fleet>-global-hook` invoke this registrar and read any front door parameter under `/application-plane/applications/*/shared/front-door` |
+| `register-hooks.sh` | the operator's shell | the control plane API, with an operator token | Puts both global hooks with `PutHook`, from this sample's source at a pinned commit; idempotent. `--delete` removes them (§5.2) |
 | Telemetry | edge | CloudFront standard logging v2: delivery source, delivery destination, delivery and log group in `us-east-1` (ADR-0010) | Per-tenant requests, errors, bytes, latency, from the record fields ADR-0010 lists, never `cs-uri-query`, `cs(Referer)` or `cs(Cookie)`. The tenant is in `viewer-request-log-data`, in both modes. In `single` mode every pooled tenant shares one host and one distribution tenant, so no other field names it. In `host` mode `x-host-header` names a pooled host's tenant but not a dedicated domain's, so the router fills the field there too, and one query serves both modes. After §3.3 step 5 the router calls `cf.logCustomData` once with the lower-case tenant id, or `-` when step 5 found none or the id does not match the §4.1 id pattern. It never passes the token, a header, the path or the query. CloudFront writes the value into the request's own access-log record, URL-encoded, at most 800 bytes; an id of the §4.1 form needs no encoding. Requests that skip step 5, the sign-in host's among them, leave the field empty |
 
 ### 3.2 Request paths
@@ -166,6 +179,22 @@ dedicated distribution tenant on the same distribution, in either mode.
 `/agents/*` uses the managed origin request policy
 `Managed-AllViewerExceptHostHeader`. It forwards `Authorization` on `GET`
 and `POST`, and it does not forward `Host`.
+
+Routes reach the route table on a path of their own, from the control
+plane's workflow, never from a request or a cell account (ADR-0017):
+
+| Control-plane event | Hook, phase | Registrar call | Values from |
+|---|---|---|---|
+| `CELL_CREATE`, `CELL_UPDATE` | `front-door-post`, `POST` | `PutCellRoute` | `CELL_ID`; the API domain from the cell script's `frontDoorApiDomain` output (`SCRIPT_OUTPUTS`, control-plane R-43) |
+| `DEPLOYMENT_CREATE`, `DEPLOYMENT_UPDATE` | `front-door-post`, `POST` | `PutTenantRoute` | `TENANT_ID`, `TENANT_NAME` |
+| `DEPLOYMENT_DELETE` | `front-door-pre`, `PRE` | `DeleteTenantRoute` | `TENANT_ID` |
+| `CELL_DELETE` | `front-door-pre`, `PRE` | `DeleteCellRoute` | `CELL_ID` |
+
+The control plane runs a new cell's event, post hooks included, before
+the deployment's (control-plane R-45), so a cell route exists before the
+first tenant route that names it. The registrar takes each route's cell
+and account from the control plane (§3.4 step 2), never from these
+values.
 
 `/config.json` gives the SPA its public settings: the issuer's authorize
 and token endpoints, client id and scopes, plus the tenant id
@@ -270,20 +299,35 @@ sign-in HMAC key in the `signin` entry (§3.5, ADR-0016).
 ### 3.4 Route registrar, step by step
 
 The registrar is a regional API in the edge account with `AWS_IAM`
-authorisation. Its resource policy admits callers whose
-`aws:PrincipalArn` is a `<fleet>-cell-provisioning` or
-`<fleet>-tenant-provisioning` role in any account, plus the edge account's
-own operator role. The policy also carries an explicit `Deny` with
+authorisation. Its resource policy admits two principals by
+`aws:PrincipalArn`: the control plane's global hook role,
+`arn:<partition>:iam::<control plane account>:role/<fleet>-global-hook`
+(§3.6), under which the route hook runs, and the edge account's own
+operator role. The policy also carries an explicit `Deny` with
 `ArnNotLike` on `aws:PrincipalArn` for every other principal: without it,
 any principal in the edge account whose identity policy allows
 `execute-api:Invoke` gets in, because a same-account call needs only one
-of the two policies to allow it (spike S-8). Admission only gets a caller
-to the checks below; it grants no route.
+of the two policies to allow it (spike S-8). When the control plane runs
+in another account, the hook role also needs `execute-api:Invoke` on the
+registrar in its identity policy, which the `RouteHookAccess` policy
+gives it (§3.1). No role of a cell account is admitted, its provisioning
+role pair included, so a tenant-owned account reaches the registrar with
+no credential it holds (ADR-0017). Admission only gets a caller to the
+checks below; it grants no route.
+
+Every global hook on the control plane runs under the same
+`<fleet>-global-hook` role (control-plane R-41). Admission therefore
+proves that a vendor global hook is calling, not that the route hook is
+calling for the record it names. So the registrar still reads the
+control plane on every write, takes the placement from it, and admits a
+hook's write only during the operation that runs the hook (ADR-0015,
+ADR-0017).
 
 On every write:
 
-1. Take the caller's account id and role from the signed request context.
-   Ignore any account id in the body.
+1. Take the caller's role from the signed request context: the global
+   hook role or the edge operator role. Ignore any account or cell id in
+   the body.
 2. Read the placement from the control plane API with a reader token
    (control-plane R-36): the registrar's own app client on the vendor IdP,
    whose `role` is one of the control plane's `readerRoles`, so the
@@ -291,34 +335,34 @@ On every write:
    - cell route: `GetCell(cellId)`;
    - tenant route: `GetDeployment(tenantId, applicationId)`, where
      `applicationId` is the front door's own.
-3. Refuse with 403 when the record is missing, belongs to another
-   application, or its `accountId` differs from the caller's account. A
-   cell route needs a cell provisioning role; a tenant route needs a tenant
-   provisioning role. A tenant provisioning role that sends a
-   `customDomain` is refused with 403 too: only the edge operator role
-   sets, changes or drops a tenant's dedicated domain, after the vendor
-   has confirmed that the tenant controls it (Q-3 decides how). The
-   operator's `PutTenantRoute` changes only the domain of an existing
-   tenant route: the `tenant#` entry must exist (409 otherwise), the
-   deployment record is checked against that entry's `ac` in place of
-   the caller's account, and the entry keeps its `c` and `ac`. A tenant
-   provisioning role's call keeps the stored domain.
-4. A tenant route also needs its cell's route to exist, written by the same
-   account (for the operator's call, the tenant route's): 409
-   otherwise. A `customDomain` that equals `appDomain` or ends in
-   `.<appDomain>` is refused with 400, so no tenant route can
+3. Refuse with 403 when the record is missing or belongs to another
+   application. A put from the global hook role also needs the record in
+   `CREATING` or `UPDATING`, the statuses in which the control plane runs
+   a `POST` hook on create and update (control-plane R-45): 409
+   otherwise. The route's cell and account are the record's `cellId` and
+   `accountId`. The global hook role that sends a `customDomain` is
+   refused with 403: only the edge operator role sets, changes or drops
+   a tenant's dedicated domain, after the vendor has confirmed that the
+   tenant controls it (Q-3 decides how). The operator's `PutTenantRoute`
+   changes only the domain of an existing tenant route: the `tenant#`
+   entry must exist (409 otherwise), the deployment record's `accountId`
+   must be that entry's `ac`, and the entry keeps its `c` and `ac`. A
+   hook's call keeps the stored domain.
+4. A tenant route also needs its cell's route to exist, with the
+   deployment's account as its `ac` (for the operator's call, the tenant
+   route's): 409 otherwise. A `customDomain` that equals `appDomain` or
+   ends in `.<appDomain>` is refused with 400, so no tenant route can
    hold a pooled host or a reserved label. When `host#<customDomain>`
    exists and its `t` names another tenant, the write is refused with
    409, so no tenant route can take another tenant's dedicated domain.
 5. Write the route table with the store's ETag (`IfMatch`), and record
-   the caller's account in the value (`ac`, on `tenant#`, `host#` and
-   `cell#` entries alike); the operator's domain change keeps the
-   tenant route's account. A new `tenant#` entry gets `s: active`. Any
-   write to an existing entry keeps its `s`, whether the tenant
-   provisioning role or the edge operator role makes it: only
-   `UpdateTenantRouteStatus` changes it, so a tenant-owned account
-   cannot lift its own suspension. A dedicated domain is kept in the
-   `tenant#` entry as `d` (§4.1). The operator's `PutTenantRoute` with
+   the account the control plane placed the cell or deployment in
+   (`ac`, on `tenant#`, `host#` and `cell#` entries alike); the
+   operator's domain change keeps the tenant route's account. A new
+   `tenant#` entry gets `s: active`. Any write to an existing entry
+   keeps its `s`, whether the global hook role or the edge operator
+   role makes it: only `UpdateTenantRouteStatus` changes it (§4.2). A
+   dedicated domain is kept in the `tenant#` entry as `d` (§4.1). The operator's `PutTenantRoute` with
    a new `customDomain` creates the domain's dedicated distribution
    tenant and its certificate, which ACM validates by DNS once the
    tenant publishes the validation record in the domain's DNS. While
@@ -336,16 +380,72 @@ On every write:
    checks, step 4 and the 507 size check (§4.1) before the next
    attempt. Two writers that race for one domain therefore cannot both
    pass, and an operator write that loses to a delete gets 409.
-6. Log the caller account, role, key and outcome, never the body.
+6. Log the caller role, key and outcome, never the body.
 
-Deletes run steps 1 and 6 and need the caller's account to match the
-account recorded on every key they remove, `host#` keys included, so
-cleanup works after the control plane has already removed the record
-(P-9 of the control plane: cleanup is always reachable). A delete finds
-the tenant's dedicated `host#<d>` key from the `d` of its `tenant#`
-entry. Status changes (`suspended`, `active`), dedicated domains and
-`DeleteHostRoute`, which clears a `host#` key left behind (§5.1), are
-vendor operations: only the edge account's operator role may make them.
+Deletes run steps 1, 2 and 6. A delete from the global hook role needs
+the record missing or in `DELETING`, the status in which the control
+plane runs a `PRE` hook on delete: 409 otherwise, so no global hook can
+remove the route of a live cell or deployment. A missing record is
+accepted so that cleanup works after the control plane has already
+removed it (P-9 of the control plane: cleanup is always reachable). A
+delete removes a `host#` key only when its `t` names the tenant, and
+finds the tenant's dedicated `host#<d>` key from the `d` of its
+`tenant#` entry. The edge operator role's deletes skip step 2: it may
+remove any tenant or cell route, to clear one that a skipped delete
+hook left behind (below). Status changes (`suspended`, `active`),
+dedicated domains and `DeleteHostRoute`, which clears a `host#` key left
+behind (§5.1), are vendor operations: only the edge account's operator
+role may make them.
+
+The route hook (`hooks/route-hook.sh`) runs on the events of §3.2 with
+the control plane's hook environment (control-plane R-42):
+
+1. Read `/application-plane/applications/<APPLICATION_ID>/shared/front-door`
+   in the control plane's account. No such parameter: exit 0, because
+   the application has no front door (ADR-0014). Any other read error
+   fails the hook.
+2. Take the ids from `CELL_ID`, `TENANT_ID` and `TENANT_NAME`, never
+   from `SCRIPT_OUTPUTS`. On a cell `POST`, read `frontDoorApiDomain`
+   from `SCRIPT_OUTPUTS`. The outputs are untrusted data, written by a
+   script that in a tenant-owned account the tenant controls
+   (control-plane R-43), so an object with a repeated key, or no such
+   value, fails the hook. The registrar checks the domain's form again
+   (400).
+3. Call the registrar, signed with the hook role's credentials, and wait
+   for propagation as §4.2 says.
+4. Act on the answer. 200 or 202: exit 0. 503, 429, another 5xx, or no
+   answer: retry inside the build, five attempts with backoff over
+   about two minutes, then fail; the control plane does not retry a
+   create or update hook, so a hook that wants retries makes them
+   itself (control-plane R-46). 400, 403, 409 or 507: fail at once,
+   printing the status and the registrar's message. The cause is in the
+   input or the route table (a cell script that wrote no valid API
+   domain, a tenant route whose cell has no route, a record in the
+   wrong status, a full store, a misconfigured role), and a retry would
+   not change it.
+
+A failing `POST` hook fails the operation (control-plane R-46): the cell
+or deployment lands in `CREATE_FAILED` or `UPDATE_FAILED` with the hook
+named in `statusReason`, the script's changes stay in place, and the
+route table holds whatever the registrar last accepted. The operator
+fixes the cause and retries with `UpdateCell` or `UpdateDeployment`,
+whose `POST` hook puts the route again, or deletes the failed record. So
+a cell or deployment of a front-door application reaches `ACTIVE` only
+with its route written.
+
+The delete hook runs `PRE`, before the delete script, so the route goes
+while the cell or deployment still exists and no request is routed to a
+tenant whose resources the script is tearing down. It also goes when the
+delete script then fails, because the control plane runs `POST` hooks
+only after a script succeeded (control-plane R-45): a `POST` delete hook
+would leave a `DELETE_FAILED` deployment routed. A failing delete hook
+cannot stop the delete. The control plane makes three attempts, 60 and
+120 seconds apart, then logs and counts the skip and goes on
+(control-plane R-46). A 409 from `DeleteCellRoute` (a tenant route still
+names the cell after a skipped deployment delete hook) and a 503 that
+outlasts the retries end that way. The control plane's skip alarm tells
+the operator, who removes the leftover route with the edge operator
+role's `DeleteTenantRoute` or `DeleteCellRoute`.
 
 ### 3.5 Identity model
 
@@ -475,9 +575,10 @@ vendor operations: only the edge account's operator role may make them.
 - The agent ingress already verifies the token and selects the tenant from
   it, so it reaches the same tenant the router routed on. The router's role
   on `/agents/*` is to refuse unknown and suspended tenants at the edge.
-- Scripts call the registrar with the provisioning role credentials the
-  control plane's build already holds in the cell's account; no new
-  credential is handed to a script.
+- No script calls the registrar, and no credential for it is handed to
+  a cell account. The route hook calls it under the control plane's
+  global hook role, in the control plane's account; a cell script only
+  writes its API domain to `OUTPUTS_FILE` (§3.2, ADR-0017).
 
 ### 3.6 Deployment inputs
 
@@ -487,8 +588,8 @@ vendor operations: only the edge account's operator role may make them.
 | `hostedZone` | yes | | Public Route 53 zone for `appDomain`, in the edge account |
 | `addressing` | no | `single` | `single`: one URL, tenant from the token. `host`: one host per tenant |
 | `applicationId` | yes | | The control-plane application this front door serves |
-| `controlPlane` | yes | | Control plane API URL, and the vendor IdP token URL and client (secret in Secrets Manager) the registrar uses to get a reader token. The deployer lists that client id in the control plane's `vendorIdp.clientIds` (§6.1) |
-| `fleet` | yes | | The control plane's fleet name, which names the provisioning roles the registrar admits |
+| `controlPlane` | yes | | Control plane API URL and account id, and the vendor IdP token URL and client (secret in Secrets Manager) the registrar uses to get a reader token. The deployer lists that client id in the control plane's `vendorIdp.clientIds` (§6.1). The account id names the global hook role the registrar admits (§3.4) |
+| `fleet` | yes | | The control plane's fleet name, which names its global hook role, `<fleet>-global-hook`, the one control-plane role the registrar admits |
 | `issuer` | yes | | The SPA's client id and scopes, and the issuer's authorize, token and logout endpoints as `https` URLs, or a Cognito user-pool domain they are derived from (`/oauth2/authorize`, `/oauth2/token`, `/logout`). Validated at synth, with no network call (§7.1) |
 | `signinKeys` | no | `{ids: ["k1"], current: "k1"}` | `host` mode only: `{ids: string[], current: string}`, the `kid`s the `signin` key holds and the one that signs. Synth checks that `ids` holds one or two unique ids, each matching `[a-z0-9]{1,8}`, and that `current` is one of them (§4.1) |
 | `tenantClaim` | no | `tenant_id` | Claim the router and the origin read |
@@ -503,9 +604,9 @@ vendor operations: only the edge account's operator role may make them.
 
 | Key | Value (JSON, 1 KB max) | Written by |
 |---|---|---|
-| `tenant#<tenantId>` | `{"v":1,"c":"<cellId>","ac":"<accountId>","s":"active"\|"suspended","n":"<display name>","d":"<dedicated domain>"}`, `d` only for a tenant with a dedicated domain | registrar, from the tenant create script; `d` from the edge operator role (§3.4 step 3) |
+| `tenant#<tenantId>` | `{"v":1,"c":"<cellId>","ac":"<accountId>","s":"active"\|"suspended","n":"<display name>","d":"<dedicated domain>"}`, `d` only for a tenant with a dedicated domain | registrar, from the route hook on deployment create and update; `d` from the edge operator role (§3.4 step 3) |
 | `host#<host>` | `{"v":1,"t":"<tenantId>","ac":"<accountId>"}` | registrar, in `host` mode and for a dedicated tenant's domain; only a pooled host's entry is a sign-in target (§3.3 step 2) |
-| `cell#<cellId>` | `{"v":1,"ac":"<accountId>","o":"<api domain>"}` | registrar, from the cell create script |
+| `cell#<cellId>` | `{"v":1,"ac":"<accountId>","o":"<api domain>"}` | registrar, from the route hook on cell create and update |
 | `app` | `{"v":1,"az":"<authorize endpoint>","tk":"<token endpoint>","cid":"<client id>","sc":"<scopes>","lo":"<logout endpoint>"}` | the front door stack |
 | `signin` | `{"v":1,"cur":"<kid>","k":{"<kid>":"<base64 key>"}}`, `host` mode only | custom resource of the front door stack (ADR-0016) |
 
@@ -537,8 +638,10 @@ Rules:
   after the 10-minute `state` lifetime, remove the old id. An operator
   runs the updates and the waits. Rotate on a schedule and whenever the
   key may have been read.
-- `ac` is the account the registrar verified at write time. The router
-  never reads it; the registrar uses it to authorise deletes.
+- `ac` is the account the control plane placed the cell or deployment
+  in, as the registrar read it at write time. The router never reads
+  it; the registrar uses it to tie a tenant route to its cell's route
+  and to check the operator's domain change (§3.4 steps 3 and 4).
 - `d` is the tenant's dedicated domain, present only when the edge
   operator role has set one. It is written on the operator's first
   call for the domain, before the certificate validates, so a delete
@@ -569,18 +672,19 @@ Rules:
 | Status | Edge answer | Set by |
 |---|---|---|
 | (no entry) | 403 (`single`) or 404 (`host`) | tenant removal, or never registered |
-| `active` | routed | tenant create script, first write only; afterwards only `UpdateTenantRouteStatus` (§3.4 step 5) |
+| `active` | routed | the route hook's first write for the tenant; afterwards only `UpdateTenantRouteStatus` (§3.4 step 5) |
 | `suspended` | 503, `Retry-After: 300` | vendor operator in the edge account |
 
 A change reaches an edge location within the store's propagation time:
 about 30 s (spike S-2, measured at one location: median 28.4 s, p99 29.4 s,
-max 29.5 s). `route.sh` bounds its wait at 45 s after the registrar
-returns. For `put-cell`, `delete-cell` and every call in `single` mode it
-waits the full 45 s, a bound and not a check: in `single` mode a route
-cannot be observed without a tenant token, and a `cell#` route cannot be
-observed from outside. In `host` mode `put-tenant` polls
+max 29.5 s). The route hook bounds its wait at 45 s after the registrar
+returns, so the operation does not end before its route is live. For
+cell routes and every call in `single` mode it waits the full 45 s, a
+bound and not a check: in `single` mode a route cannot be observed
+without a tenant token, and a `cell#` route cannot be observed from
+outside. In `host` mode a tenant route put polls
 `https://<tenant>.<appDomain>/config.json` and returns on the first 200,
-and `delete-tenant` returns on the first 404. When none arrives within
+and a tenant route delete returns on the first 404. When none arrives within
 45 s, it prints a warning and exits 0: the write succeeded and only
 propagation is late. No unauthenticated probe path exists, because it
 would reveal whether a tenant id exists.
@@ -591,6 +695,14 @@ tenant is still routed, and the cell's hosts check is the only refusal
 either role, keeps the stored status. A later `PutTenantRoute`, from
 either role, keeps the stored status.
 
+A tenant cannot lift its own suspension. The registrar admits no role a
+cell account holds (§3.4), so a tenant-owned account can neither write
+nor delete its route. Only the route hook writes it, on an operation
+the vendor started. A hook's put to an existing entry keeps `suspended`,
+and a hook's delete is accepted only while the control plane is
+deleting the deployment (§3.4). The route starts `active` again only
+when the vendor deletes the deployment and creates a new one.
+
 ## 5. API surface
 
 ### 5.1 Route registrar
@@ -599,19 +711,21 @@ Modelled in Smithy; all operations `AWS_IAM`, all idempotent.
 
 | Op | HTTP | Caller | Contract |
 |---|---|---|---|
-| `PutCellRoute` | `PUT /cells/{cellId}` | cell provisioning role | Body `{apiDomain}`. Checks §3.4. 200 |
-| `DeleteCellRoute` | `DELETE /cells/{cellId}` | cell provisioning role | 409 while a tenant route names the cell. 200, also when absent |
-| `PutTenantRoute` | `PUT /tenants/{tenantId}` | tenant provisioning role; edge operator role to set `customDomain` | Body `{displayName, customDomain?}`. `displayName` is stored as §4.1 says. A new `tenant#` entry gets `s: active`; a write to an existing entry keeps its `s`, from either role, and only `UpdateTenantRouteStatus` changes it. Only the edge operator role may send `customDomain`, after the vendor has confirmed that the tenant controls the domain (Q-3); a tenant provisioning role that sends it gets 403, and its call without it keeps the stored domain. The operator's call sets the domain, or drops it when `customDomain` is absent. A new domain must lie outside `appDomain` and be held by no other tenant; it is kept as `d` on `tenant#`, and the call creates its dedicated distribution tenant and certificate, which ACM validates by DNS once the tenant publishes the validation record in its own DNS. Until then the call answers 202 with that record and the operator repeats it. Once the certificate has validated it writes the domain's `host#` key, which routes requests and records its owner (`t`, `ac`). A changed or dropped domain removes the old `host#<d>`, its distribution tenant and its certificate (§3.4 steps 3 to 5). The domain is never a sign-in target: its users sign in on `signInHost` (§3.5). Cell taken from the control plane, never the body. Checks §3.4. 200, or 202 while the certificate is pending |
-| `DeleteTenantRoute` | `DELETE /tenants/{tenantId}` | tenant provisioning role | Removes the `tenant#` key, the pooled host's `host#` key and the `host#<d>` key its `d` names, each only when its `ac` is the caller's account (§3.4), and the distribution tenant and certificate of that `d`. 200, also when absent |
+| `PutCellRoute` | `PUT /cells/{cellId}` | global hook role (route hook, cell create and update) | Body `{apiDomain}`, from the cell script's `frontDoorApiDomain` output. Account taken from the control plane, never the body. Checks §3.4. 200 |
+| `DeleteCellRoute` | `DELETE /cells/{cellId}` | global hook role (route hook, cell delete); edge operator role, to clear a route a skipped hook left | 409 while a tenant route names the cell, and for the global hook role while the cell is neither missing nor `DELETING` (§3.4). 200, also when absent |
+| `PutTenantRoute` | `PUT /tenants/{tenantId}` | global hook role (route hook, deployment create and update); edge operator role to set `customDomain` | Body `{displayName, customDomain?}`. `displayName` is stored as §4.1 says. A new `tenant#` entry gets `s: active`; a write to an existing entry keeps its `s`, from either role, and only `UpdateTenantRouteStatus` changes it. Only the edge operator role may send `customDomain`, after the vendor has confirmed that the tenant controls the domain (Q-3); the global hook role that sends it gets 403, and its call without it keeps the stored domain. The operator's call sets the domain, or drops it when `customDomain` is absent. A new domain must lie outside `appDomain` and be held by no other tenant; it is kept as `d` on `tenant#`, and the call creates its dedicated distribution tenant and certificate, which ACM validates by DNS once the tenant publishes the validation record in its own DNS. Until then the call answers 202 with that record and the operator repeats it. Once the certificate has validated it writes the domain's `host#` key, which routes requests and records its owner (`t`, `ac`). A changed or dropped domain removes the old `host#<d>`, its distribution tenant and its certificate (§3.4 steps 3 to 5). The domain is never a sign-in target: its users sign in on `signInHost` (§3.5). Cell taken from the control plane, never the body. Checks §3.4. 200, or 202 while the certificate is pending |
+| `DeleteTenantRoute` | `DELETE /tenants/{tenantId}` | global hook role (route hook, deployment delete); edge operator role, to clear a route a skipped hook left | Removes the `tenant#` key, the pooled host's `host#` key and the `host#<d>` key its `d` names, each `host#` key only when its `t` names the tenant (§3.4), and the distribution tenant and certificate of that `d`. For the global hook role, 409 while the deployment is neither missing nor `DELETING`. 200, also when absent |
 | `DeleteHostRoute` | `DELETE /hosts/{host}` | edge operator role | Removes one `host#` key whatever its `t` and `ac`, and the `d` of the tenant it names when `d` is that host, with that domain's distribution tenant and certificate, to clear a key left behind. 200, also when absent |
 | `UpdateTenantRouteStatus` | `PUT /tenants/{tenantId}/status` | edge operator role | Body `{status}` |
 
 Errors: 400 for a malformed id or domain, an empty display name, or a
 `customDomain` that equals `appDomain` or ends in `.<appDomain>`; 403
-when the caller's account or role does not match the placement (the
-message names neither the real account nor the real cell), or a role
-other than the edge operator role sends `customDomain`; 409 for a
-missing cell route, a cell still in use, an operator domain change
+from API Gateway for any principal the resource policy does not admit,
+and from the registrar when the placement record is missing or belongs
+to another application (the message names neither the real account nor
+the real cell), or a role other than the edge operator role sends
+`customDomain`; 409 for a global hook role write whose record is not in
+the status of its operation (§3.4), a missing cell route, a cell still in use, an operator domain change
 with no tenant route, a `customDomain` whose `host#` entry names
 another tenant, or one CloudFront already serves (`CNAMEAlreadyExists`;
 the message names no tenant); 507
@@ -621,14 +735,30 @@ unchecked).
 
 ### 5.2 Script and construct forms
 
-- **`scripts/route.sh put-cell|delete-cell|put-tenant|delete-tenant`**,
-  driven by the control plane's script variables (`CELL_ID`, `TENANT_ID`,
-  `TENANT_NAME`) and the registrar URL from the edge's published parameter.
-  It signs with the credentials the script already holds.
+- **`hooks/route-hook.sh`**, the route hook (§3.4), driven by the control
+  plane's hook variables (`APPLICATION_ID`, `EVENT`, `PHASE`, `CELL_ID`,
+  `TENANT_ID`, `TENANT_NAME`, `SCRIPT_OUTPUTS`; control-plane R-42) and
+  the registrar URL from the front door parameter in the control plane's
+  account. It signs with the global hook role's credentials.
+- **`scripts/register-hooks.sh [--delete]`**, run by an operator with an
+  operator token: puts `front-door-post` and `front-door-pre` with
+  `PutHook` (control-plane R-39), each with this sample's repository as
+  `source`, pinned to a full commit SHA, and
+  `samples/tenant-front-door/hooks/route-hook.sh` as `script`. The two
+  hooks serve every front door on the control plane, and take two of
+  its five global hook slots. `--delete` removes them with `DeleteHook`.
+  Run it first when the last front door on a control plane is removed:
+  once no `RouteHookAccess` policy is attached, the hook can no longer
+  read the front door parameters, so it fails, and with it every cell
+  and deployment create and update on the control plane.
+- **`frontDoorApiDomain`**, the output a cell create or update script of
+  a front-door application writes to `OUTPUTS_FILE` (control-plane R-43):
+  the host name of the cell's API origin. A cell event without it fails
+  the route hook, and so the operation.
 - **`PARAM_FRONT_DOOR_CUSTOM_DOMAIN`**, an optional declared deployment
   parameter (control-plane ADR-0039), carries the domain a tenant asks
-  for. `put-tenant` does not send it, because a tenant provisioning
-  role's `customDomain` gets 403. The vendor reads it and, once it has
+  for. The route hook does not send it, because the global hook role's
+  `customDomain` gets 403. The vendor reads it and, once it has
   confirmed that the tenant controls the domain (Q-3), sets it with the
   edge operator role (§3.4 step 3).
 - **`CellRouteAccess` construct**, used in a cell stack: grants
@@ -661,8 +791,8 @@ All with a small static HTML or JSON body and `no-store`:
   sign-out URL (ADR-0016). A dedicated domain adds no URL in either
   mode: its users sign in on `signInHost`, which in `single` mode is
   `<appDomain>` (§3.5).
-- A control plane whose `GetCell` and `GetDeployment` return `accountId`
-  and `applicationId`, with a reader role enabled (control-plane R-36), and
+- A control plane whose `GetCell` and `GetDeployment` return `accountId`,
+  `applicationId` and `status`, with a reader role enabled (control-plane R-36), and
   a vendor IdP app client whose client-credentials tokens carry that role
   and pass the control plane authorizer (spike S-9, ADR-0015). A Cognito
   client-credentials token has no `aud` and no custom `role`. Two things
@@ -675,8 +805,15 @@ All with a small static HTML or JSON body and `no-store`:
   place of `aud` when a token has none. The deployer also sets
   `vendorIdp.requiredScope` when that client can call another API on the
   issuer.
-- In every account that hosts cells, the control plane's role pair; the
-  registrar admits only those roles.
+- A control plane with global hooks (control-plane R-39 to R-46,
+  control-plane ADR-0044) and two global hook slots free, on which an
+  operator runs `register-hooks.sh` (§5.2). In the control plane's
+  account, this front door's `RouteHookAccess` stack, with its policy
+  listed in the control plane's `globalHookManagedPolicyArns`, which
+  takes only customer-managed policies in the control plane's own
+  account. The registrar admits no role in a cell account (§3.4).
+- Cell scripts of the application that write `frontDoorApiDomain` to
+  `OUTPUTS_FILE` on create and update (§5.2).
 - In `host` mode, the edge account's read boundary for the `signin` key.
   The registrar role, the custom resource and any edge-account principal
   with `cloudfront-keyvaluestore:GetKey` or `ListKeys` on the route
@@ -708,8 +845,10 @@ All with a small static HTML or JSON body and `no-store`:
 - A request with no tenant, or with an unknown or suspended tenant, never
   reaches an origin, once the route change has propagated (§4.2).
 - A request reaches only the cell its route names.
-- An account can register routes only for cells and deployments the control
-  plane places in it.
+- No role a cell account holds can write or delete a route. The route
+  hook writes routes on the vendor's operations, each naming the cell and
+  account the control plane placed it in.
+- A tenant cannot lift its own suspension (§4.2).
 - No tenant route can claim another tenant's host: only the edge
   operator role sets a `customDomain`, one under `appDomain` gets 400,
   and one another tenant holds gets 409.
@@ -729,24 +868,27 @@ All with a small static HTML or JSON body and `no-store`:
 
 | Sample | How | Needed for |
 |---|---|---|
-| `control-plane` | its API (`GetCell`, `GetDeployment`) with the reader grant (R-36) and a client-credentials reader token (spike S-9 showed both are needed: a `role` trigger on the vendor IdP and the `vendorIdp.clientIds` input of R-38, ADR-0043), its role pair in each cell account, and its scripts calling `route.sh` | placement checks, registration, the integration test |
+| `control-plane` | its API (`GetCell`, `GetDeployment`) with the reader grant (R-36) and a client-credentials reader token (spike S-9 showed both are needed: a `role` trigger on the vendor IdP and the `vendorIdp.clientIds` input of R-38, ADR-0043), its global hooks (R-39 to R-46, control-plane ADR-0044): `PutHook`, the `<fleet>-global-hook` role and `globalHookManagedPolicyArns`, the hook environment and `SCRIPT_OUTPUTS`. A prerequisite: without hooks the front door registers no route, and ADR-0044 is still Proposed (Q-5) | placement checks, route registration, the integration test |
 | `tenant-identity` `shared-pool` | its published parameters | the demo issuer and the integration test |
 | `agentic-runtime-isolation` | its `/application-plane/shared/agent-runtime/ingress` parameter | `/agents/*`, optional |
 
 ### 6.4 Published interface
 
-- **Constructs** `TenantFrontDoor` and `CellRouteAccess` (`src/index.ts`).
+- **Constructs** `TenantFrontDoor`, `CellRouteAccess` and `RouteHookAccess`
+  (`src/index.ts`).
   `TenantFrontDoor` exposes `distributionId`, `distributionArn`,
   `routeTableArn`, `registrarUrl`, `appDomain`, `addressing` and
   `pooledTenantId` (the distribution tenant).
 - **Published parameter** `/application-plane/shared/front-door/edge` in
   the edge account, one JSON document: `version`, `appDomain`,
   `addressing`, `applicationId`, `distributionArn`, `registrarUrl`,
-  `tenantClaim`, `reservedLabels`. A cell script in another account cannot
+  `tenantClaim`, `reservedLabels`. A cell stack in another account cannot
   read it, so the application's shared stack in each cell account copies
-  `registrarUrl` and `distributionArn` to
+  `distributionArn`, which `CellRouteAccess` needs, to
   `/application-plane/applications/<applicationId>/shared/front-door`
-  (control-plane §6.2).
+  (control-plane §6.2). The `RouteHookAccess` stack writes the same name
+  in the control plane's account, with `registrarUrl`, for the route hook
+  (§3.1).
 
 ## 7. Web platform baseline
 
@@ -843,10 +985,11 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0010](../adr/0010-deploy-the-edge-stack-in-us-east-1.md) | Split the edge stack into `us-east-1`, logs included | edge stacks plus main stack with cross-Region references and CloudWatch Logs; the same with logs in S3; everything in `us-east-1` |
 | [ADR-0011](../adr/0011-protect-cell-origins-with-origin-access-control-across-accounts.md) | Protect cell origins with origin access control, across accounts | OAC with a cross-account Lambda permission; secret header; IP allowlist |
 | [ADR-0012](../adr/0012-cap-the-route-table-and-shard-by-distribution.md) | Route table size ceiling and sharding | one store and a ceiling; shard by distribution |
-| [ADR-0013](../adr/0013-register-routes-through-a-registrar-that-checks-the-control-plane.md) | Register routes through a registrar that checks the control plane | registrar with a placement check; a cross-account role that writes the store directly; the control plane writes routes |
+| [ADR-0013](../adr/0013-register-routes-through-a-registrar-that-checks-the-control-plane.md) | Superseded by ADR-0017. Register routes through a registrar that checks the control plane, called from the cell's account | registrar with a placement check; a cross-account role that writes the store directly; the control plane writes routes |
 | [ADR-0014](../adr/0014-run-one-front-door-per-control-plane-application.md) | One front door per control-plane application | one per application; one shared front door keyed by application |
 | [ADR-0015](../adr/0015-read-the-control-plane-with-a-reader-token.md) | Read the control plane with a reader token | reader role (control-plane ADR-0042); operator app client; an IAM-authorised read stage |
 | [ADR-0016](../adr/0016-sign-in-through-one-shared-host-in-host-mode.md) | Sign in and out through one shared host in `host` mode | shared sign-in host with a signed `state`; a callback URL per tenant; a wildcard callback URL |
+| [ADR-0017](../adr/0017-register-routes-from-a-control-plane-global-hook.md) | Register routes from a control-plane global hook; the registrar admits no cell account role and still checks the control plane | provisioning role in the cell account calls the registrar; tombstones and operator-only rules; the control plane writes the store directly; a global hook calls the registrar |
 
 ## 9. Spikes before code
 
@@ -862,7 +1005,7 @@ Each spike reports its deploy and destroy time.
 | S-5 | Does streaming pass through `/agents/*` to the agent ingress without buffering? | first byte at the client within 1 s of first byte from the ingress; the ingress receives the bearer token on `GET` and `POST`; the `Managed-AllViewerExceptHostHeader` policy deploys with the pinned CDK version |
 | S-6 | Does a WAF rate rule keyed on the `Host` header count each tenant on its own? | tenant A over its limit on `/api/*` gets the custom 429 while tenant B is served; A's SPA loads (`/`, `/assets/*`) are not counted. **Passed 2026-11-16**: limit 10 per 60 s keyed on the lower-cased `Host`, scoped down to `/api/`. Tenant A got the custom 429 (JSON body, `retry-after: 60`) 21 s into its burst while B's `/api/x` stayed 200; 300 requests to A's `/` and 100 to `/assets/app.js` during the block were all 200. The rule's managed-keys call does not support a `Host` key. Deploy 443 s, destroy 250 s |
 | S-7 | Can the router decode a `tenant-identity` access token's payload within the CloudFront Functions limits? | `tenant_id` read from a real token; compute utilisation under 50 %; 401 on a malformed token. **Passed 2026-11-13**: 13-14 % compute, 401 at 9-10 % (ADR-0005) |
-| S-8 | Can an API Gateway resource policy admit a role name in any account through `aws:PrincipalArn`, and does the request context give the caller's account? | a provisioning role in the second account reaches the registrar; a role of another name is refused. **Passed 2026-11-13** with one design fix: the second account's provisioning role got 200 with `identity.accountId` and `userArn` in the request context; another role name got 403. The edge account's own admin also got 200 through its identity policy, so the resource policy adds an explicit `Deny` with `ArnNotLike` (§3.4, ADR-0013). Deploy 75 s, destroy 33 s |
+| S-8 | Can an API Gateway resource policy admit a role name in any account through `aws:PrincipalArn`, and does the request context give the caller's account? | a provisioning role in the second account reaches the registrar; a role of another name is refused. **Passed 2026-11-13** with one design fix: the second account's provisioning role got 200 with `identity.accountId` and `userArn` in the request context; another role name got 403. The edge account's own admin also got 200 through its identity policy, so the resource policy adds an explicit `Deny` with `ArnNotLike` (§3.4, ADR-0013). Deploy 75 s, destroy 33 s. The result holds for the principal ADR-0017 admits instead, the control plane's `<fleet>-global-hook` role: one role ARN, matched by the same cross-account `aws:PrincipalArn` condition and guarded by the same `Deny` |
 | S-9 | Does a client-credentials token from the registrar's own vendor IdP client pass the control plane authorizer (single `audience`, required `sub` and `role`)? | `GetCell` returns 200 with that token, the token's `role` is the reader value, and a write returns 403. **Failed 2026-11-13; fallback proven**: the token has no `aud` (`sub` equals `client_id`), and the audience check denies it. A V3 trigger on the Essentials plan adds `role: control-plane:reader` but its `aud` override is ignored. With a `client_id` allow-list in place of the audience check, the same token is allowed with the reader grant (ADR-0015, §6.1). Deploy 36 s per phase, destroy 61 s |
 
 ## 10. Integration test outline
@@ -878,20 +1021,29 @@ the default mode; `test/integ.host.ts` repeats the steps marked (host) with
 
 Expected time, from S-1: deploying the edge stacks and the distribution
 takes about 481 s and destroying them about 312 s, before the control plane
-and the cells the test also deploys. The route changes of steps 2 and 15
-go through `route.sh`, which already waits its 45 s bound (§4.2). The
-step 2 fixture and the step 13 writes are writes the test makes
-without `route.sh`, so after each the test waits 60 s for propagation
-(ADR-0003, spike S-2) before its next call. The rotation check after
+and the cells the test also deploys, and each cell or deployment event
+runs one route hook build. The route changes of steps 2, 13 and 15 go
+through the route hook, which waits its 45 s bound (§4.2) before the
+operation ends. The step 2 fixture and the step 13 suspension are
+writes the test makes without the hook, so after each the test waits
+60 s for propagation (ADR-0003, spike S-2) before its next call. The rotation check after
 the list is a separate run with its own time. The dedicated-domain
 checks (steps 3, 11 and 17) use a fixture `host#` entry and
 `cloudfront:TestFunction`, so they deploy no distribution tenant and no
-certificate.
+certificate. The control plane shares the edge account here, so the
+route hook's call is a same-account call; spike S-8 covered the
+cross-account form of the same `aws:PrincipalArn` match.
 
-1. Deploy the front door and register the demo application with the control
-   plane, its scripts calling `route.sh`.
+1. Deploy the front door. In the control plane's account deploy its
+   `RouteHookAccess` stack, add the stack's policy to the control plane's
+   `globalHookManagedPolicyArns` and update the control plane, then run
+   `register-hooks.sh`: `ListHooks` names `front-door-post` and
+   `front-door-pre`. Register the demo application, whose cell scripts
+   write `frontDoorApiDomain` to `OUTPUTS_FILE`.
 2. Create tenant `a` (placed in the edge account) and tenant `b` (pinned to
-   the second account). Their cell and tenant scripts register the routes.
+   the second account). The route hook registers each cell and tenant
+   route after its script, and every cell and deployment reaches
+   `ACTIVE` with `front-door-post` in its `lastGlobalHooks`.
    The test role then writes one fixture straight to the route table,
    the only write that bypasses the registrar (P-3):
    `host#dedicated-a.example.com` naming `a`, with the edge account as
@@ -920,29 +1072,37 @@ certificate.
 10. A direct call to either cell's function URL, without CloudFront,
     returns 403.
 11. The second account's tenant provisioning role calls `PutTenantRoute`
-    for `a`: 403, and `a` is still routed to cell A. Its call for `b`
-    with `customDomain` `dedicated-b.example.com` gets 403 too, and no
-    `host#` key is written. The edge operator role calls
+    for `b`, its own tenant, and for `a`: 403 for both, from the resource
+    policy, and `a` is still routed to cell A. Its call for `b` with
+    `customDomain` `dedicated-b.example.com` gets 403 too, and no `host#`
+    key is written. The edge operator role calls
     `PutTenantRoute` for `b` with `customDomain` `a.<appDomain>`: 400,
     and in `host` mode `a.<appDomain>` still routes to cell A. With
     `customDomain` `dedicated-a.example.com`, `a`'s dedicated domain
     from step 2: 409, and the fixture still names `a`.
-12. The second account's cell role calls `DeleteCellRoute` for cell A: 403.
+12. The second account's cell provisioning role calls `DeleteCellRoute`
+    for cell B, its own cell, and for cell A: 403 for both.
     An edge-account principal that is not the operator role, with
     `execute-api:Invoke` in its identity policy, calls the registrar: 403
     (the explicit `Deny`, §3.4).
 13. Suspend `b`: after 60 s, `b`'s token returns 503, `a` is still served.
     The second account's tenant provisioning role then calls
-    `PutTenantRoute` for `b`, which succeeds, and after 60 s `b`'s token
-    still returns 503.
+    `DeleteTenantRoute` and `PutTenantRoute` for `b`: 403 for both, and
+    `b`'s entry is unchanged. `UpdateDeployment` for `b` through the
+    control plane runs `front-door-post`, which puts `b`'s route again;
+    the deployment reaches `ACTIVE`, and after 60 s `b`'s token still
+    returns 503.
 14. Wait 60 s for log delivery (33 s in S-1). Per-tenant counts name
     `a` and `b`, queried in `us-east-1` where the log group is
     (ADR-0010), from `viewer-request-log-data` in both modes (§3.1); in
     `host` mode `x-host-header` agrees with it. Requests to
-    `login.<appDomain>` leave the field empty. The registrar log, in
-    `eu-central-1`, names the second account on steps 11 and 12.
-15. Delete `b`'s deployment: its script removes the route through
-    `route.sh`, and once the script returns `b`'s token returns 403.
+    `login.<appDomain>` leave the field empty. The registrar's API access
+    log, in `eu-central-1`, names the second account on the refused
+    calls of steps 11 to 13, and the registrar log names the global hook
+    role on the writes of steps 2, 13 and 15.
+15. Delete `b`'s deployment: `front-door-pre` removes `b`'s route before
+    the delete script runs, and once the deployment is gone `b`'s token
+    returns 403, because its entry is gone.
 16. (host) `a.<appDomain>/config.json` names `a`; an unregistered host
     returns 404; `a.<appDomain>/api/whoami` with no token returns 401
     with `WWW-Authenticate: Bearer`; a token for `a` on
@@ -970,8 +1130,13 @@ certificate.
     ended. After a fresh sign-in the sign-in host's `Location` is
     `https://a.<appDomain>/` with no `code` and no `state`.
     `login.<appDomain>/logout` returns the static signed-out page.
-18. Remove the step 2 fixture key, then destroy everything the test
-    deployed, in both accounts, except the shared identity pool.
+18. Remove the step 2 fixture key. Delete the deployments and cells
+    through the control plane, whose `front-door-pre` hook removes their
+    routes. Run `register-hooks.sh --delete` when no other front door
+    uses the control plane, take the `RouteHookAccess` policy out of
+    `globalHookManagedPolicyArns` and update the control plane. Then
+    destroy everything the test deployed, in both accounts, except the
+    shared identity pool.
 
 Rotation check, optional and run on its own against a `host` mode front
 door: run the three rotation updates of §4.1 and check that a `state`
@@ -988,3 +1153,5 @@ it gets 400 once the old id is removed. It adds three stack updates, the
 | Q-2 | Does the integration test deploy its own control plane, or reuse one when found and skip otherwise? | integration test |
 | Q-3 | Does the dedicated tenant (custom domain) path belong in this sample or in a follow-up? If it does, how does the vendor confirm that a tenant controls a domain before the edge operator role sets its `customDomain` (for example a validated certificate for the domain, or a DNS record the tenant publishes)? One candidate is already on the path: the dedicated distribution tenant's certificate validates only once the tenant publishes ACM's validation record in the domain's DNS, and `host#<d>` is written only after it validates (§3.4 step 5) | scope |
 | Q-4 | Should the integration test also compose `agentic-runtime-isolation` for `/agents/*`, or reuse a deployment only when one is found? | integration test |
+| Q-5 | Route registration depends on the control plane's global hooks (control-plane R-39 to R-46, ADR-0044), which are Proposed and not yet merged. Does their final shape keep what ADR-0017 uses: `POST` hooks only after a successful script, `PRE` delete hooks with three attempts that cannot stop a delete, one `<fleet>-global-hook` role, `SCRIPT_OUTPUTS` and `globalHookManagedPolicyArns`? If not, ADR-0017 is revisited | build start |
+| Q-6 | With hooks, an integration test that reuses a control plane (Q-2) also changes it: it attaches a policy to `<fleet>-global-hook` and registers two global hooks, which then run on every application's operations. Is that acceptable on a shared control plane, or does the test always deploy its own? | integration test |

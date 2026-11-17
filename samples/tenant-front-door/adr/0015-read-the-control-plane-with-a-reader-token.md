@@ -4,6 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-16
+- Amended by: ADR-0017
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -84,3 +85,11 @@ control plane, never writing unchecked.
   from placement refusals.
 - Revisit when the control plane offers a grant narrower than all reads
   (the registrar uses two of ten), or reads scoped to one application.
+
+Amended 2026-11-17 by ADR-0017: the registrar no longer faces cell
+accounts. It admits only the control plane's global hook role and the
+edge operator role. It still reads the control plane with the reader
+token on every hook write: every global hook shares the one role, so
+the read supplies the route's cell and account and confirms the record
+is in the status of the operation that runs the hook. A delete from the
+global hook role now reads the record too (`DELETING` or missing).
