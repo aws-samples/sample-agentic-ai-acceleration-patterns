@@ -158,7 +158,7 @@ every account's pair trusts, and the separation between code that holds
 a pair and code that must never hold one would rest on a per-build
 override instead of on the project.
 
-No pair trusts a hook role, but grants of three kinds still lead from a
+No pair trusts a hook role, but grants of four kinds still lead from a
 role to the provisioning build roles and through them to every pair.
 The direct ones start an execution of the workflow, start a build in a
 provisioning project, or write to the table, whose hook records declare
@@ -166,9 +166,15 @@ hooks. The second kind runs new code as a role that holds a pair or one
 of those grants: `iam:PassRole` on it with a create on CodeBuild, Step
 Functions or Lambda. The third rewrites what a pair holder runs next,
 or removes the deny itself: an IAM write on one of the stack's roles,
-or an update to a project, the workflow or the API function. The stack
-therefore adds to each build role, each hook role and the two pair
-roles of its own account an inline explicit deny on:
+or an update to a project, the workflow or the API function. The
+fourth makes the caller the operator, who reaches every pair through
+`PutApplication` or `PutHook`. The API function runs every operation on
+the word of `requestContext.authorizer`, so a direct invoke with a
+context of the caller's choosing skips the authorizer, a permission
+added to the function opens that invoke to anyone, and an API Gateway
+write on the REST API can take the authorizer off a method. The stack
+therefore attaches to each build role, each hook role and the two pair
+roles of its own account an explicit deny on:
 
 - `iam:PassRole` on the two build roles, the workflow role, the API
   role and the two hook roles;
@@ -184,26 +190,64 @@ roles of its own account an inline explicit deny on:
 - `lambda:UpdateFunctionCode`, `UpdateFunctionConfiguration`,
   `PublishVersion`, `CreateAlias`, `UpdateAlias` and `DeleteAlias` on
   the API and authorizer functions;
+- `lambda:InvokeFunction`, `AddPermission` and `RemovePermission` on
+  the API function;
+- `apigateway:PUT`, `PATCH`, `POST` and `DELETE` on the REST API,
+  `arn:<partition>:apigateway:<region>::/restapis/<api-id>` and
+  `/restapis/<api-id>/*`;
 - `dynamodb:PutItem`, `UpdateItem`, `DeleteItem`, `BatchWriteItem`,
   `PartiQLInsert`, `PartiQLUpdate` and `PartiQLDelete` on the table,
   through which `TransactWriteItems` and `ExecuteTransaction` are
   authorised per item.
 
+The deny is one standalone `AWS::IAM::Policy` resource, outside every
+role construct and attached through its `Roles` list, so nothing in
+the stack depends on it. In a role's default policy it would close a
+CloudFormation cycle, because the home pair depends on every child of
+the build role constructs and the deny names the home pair; as a
+managed policy it would make every role depend on it while it names
+the projects, which depend on their roles. A role, project or workflow
+with a physical name is named in it by an ARN computed from the name.
+The stack has eight roles today, three with CDK-generated names (the
+workflow role, the authorizer function role and the API Gateway
+CloudWatch role), and ten with the hook roles. The deny goes on six:
+`<fleet>-cell-build`, `<fleet>-tenant-build`,
+`<fleet>-cell-provisioning`, `<fleet>-tenant-provisioning`,
+`<fleet>-global-hook` and `<fleet>-app-hook`. The workflow role and
+`<fleet>-api` carry none, because the direct actions are their own
+grants, and the authorizer and API Gateway CloudWatch roles hold only
+logs.
+
 Each build role also trusts CodeBuild only on its own project's
 `aws:SourceArn`, as each hook role does, so no new project runs as it.
 That changes the build roles' trust, which ADR-0025 left as CodeBuild
-with no condition. The stack still never reads an attached policy
-(P-3), and the list names only its own resources. The deny also limits
-the policies of `tenantBuildManagedPolicyArns` (ADR-0022), which attach
-to the tenant provisioning role of the stack's own account. The
-workflow and API roles carry no deny, because the direct actions are
-their own grants. The deny leaves a residual, which is stated, not
-closed: an attached grant of `sts:AssumeRole` on another role in the
-control plane account (an admin role or a CDK bootstrap role), or of
-CloudFormation writes through a privileged execution role, still
-reaches the pair, and so does a principal outside the denied roles
-that the deployer grants a denied action. Both stay the deployer's
-choice (T41).
+with no condition. A project names its role as `ServiceRole`, so a
+condition that referenced the project would close a cycle. The four
+projects therefore get physical names from the fleet name
+(`<fleet>-cell-build`, `<fleet>-tenant-build`, `<fleet>-global-hook`,
+`<fleet>-app-hook`), and each trust condition carries the ARN computed
+from that name, never one taken from the project. The workflow gets
+the name `<fleet>-workflow` for the same reason. The fleet name already
+separates two control planes in one account, because role names are
+account-wide and project and state machine names are per Region, so
+the new names add no clash; two control planes in one account use
+different fleet names in every Region.
+
+The stack still never reads an attached policy (P-3), and the list
+names only its own resources. The deny also limits the policies of
+`tenantBuildManagedPolicyArns` (ADR-0022), which attach to the tenant
+provisioning role of the stack's own account. The deny leaves a
+residual, which is stated, not closed. An attached grant of
+`sts:AssumeRole` on another role in the control plane account (an
+admin role or a CDK bootstrap role), or of CloudFormation writes
+through a privileged execution role, still reaches the pair. So do
+admin writes on the vendor IdP, which can create a user or a client
+that carries the operator role, and writes to the location of a
+registered script or hook source, which change what the next build
+runs. So does a principal outside the denied roles that the deployer
+grants a denied action. All of these stay the deployer's choice: grant
+no hook role write access to the vendor IdP or to any script or hook
+source (T41).
 
 A hook build starts with a request-response `startBuild`, so its id is
 known from the first call, and a loop polls that one build with
@@ -216,11 +260,15 @@ below CodeBuild's minimum of 5. A refused `StartBuild` (throttling, a
 concurrency quota, the project at its cap) goes through a `Catch`, a
 30-second `Wait` and a `Choice` that increments `TRY`, for at most 5
 minutes, so refusals and the queue take at most 10 minutes together. A
-transient error is a task `Retry` (`TimeoutSeconds` 15, at most three
-repeats 10 seconds apart), which re-sends the same variables. The
-idempotency token is the JSONata `$hash` of the execution, the event,
-the phase, the hook, the attempt and `TRY`. It has a fixed length,
-differs on every try and stays the same on every repeat, so a call that
+transient error is a task `Retry` (`TimeoutSeconds` 15,
+`IntervalSeconds` 10, `BackoffRate` 1, `MaxAttempts` 3, no jitter),
+which re-sends the same variables, so a try and its repeats end within
+90 seconds; the ASL default `BackoffRate` of 2 would wait 10, 20 and
+40 seconds. The idempotency token is
+`$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK_ID, $string(ATTEMPT),
+$string(TRY)], '|'), 'SHA-256')`, 64 hexadecimal characters. It has a
+fixed length, differs on every try and stays the same on every repeat,
+so a call that
 created a build before it failed returns that build again instead of
 leaving one with no id to stop. A try whose repeats all fail ends the
 attempt as "start outcome unknown", never a new try under another
@@ -255,15 +303,18 @@ as a consumer of a global post hook.
 
 ## Consequences
 - Spec changes: P-1, P-3, P-4, P-6, P-9, P-12, §1.2, §1.3, §3.1 (R-4,
-  R-6, the system diagram), §3.2 (R-36, R-37), §3.3 (`fleetName`, two
-  new inputs, the home pair's deny), §4.1 (R-29, source and script
+  R-6, the system diagram), §3.2 (R-36, R-37), §3.3 (`fleetName`, which
+  now also names the four projects and the workflow, two new inputs,
+  the home pair's deny), §4.1 (R-29, source and script
   charsets), §4.2, §4.4 (R-31), §4.7 (R-10), new §4.8 (R-39, R-40),
   §5.2, §5.3, §5.5 (`PutHook`, `GetHook`, `ListHooks`, `DeleteHook`;
   `PutApplication` `hooks` and charsets), §5.7, §6.1 (`OUTPUTS_FILE`),
   §6.3 (the note after R-35), §6.4, new §6.5 (R-41 to R-44), §7.1
   step 0, §7.2, §7.4, §8 (R-20, R-22, R-23, §8.2, new §8.3 with R-45
-  and R-46), N-12, new §9.1 (H-1 to H-10), §10 setup, steps 2, 16 and
-  17 and the unit assertions, §11, §12. Threat model: T5, T16, T30,
+  and R-46), N-12, new §9.1 (H-1 to H-10), §10 setup (with a per-run
+  fleet name, so two integration runs can share an account and a
+  Region; also in `integration-test.md`), steps 2, 16 and 17 and the
+  unit assertions, §11, §12. Threat model: T5, T16, T30,
   T34, T36, T43, M10, M12, M15, M17, M18, M24, M26 widened; new T39 to
   T44 and M28 to M32.
 - The reader grant grows from ten to twelve `GET` operations (`GetHook`,
@@ -300,20 +351,31 @@ as a consumer of a global post hook.
   and names neither hook role. Each build role's trust gains an
   `aws:SourceArn` condition on its own project (ADR-0025), so a project
   the stack did not create cannot run as a build role.
+- The four projects and the workflow get physical names from the fleet
+  name, so the trust conditions and the deny can carry computed ARNs.
+  Naming the two existing provisioning projects and the workflow
+  replaces them on upgrade. A Standard execution in flight keeps its
+  old definition and calls the deleted project, so the upgrade is
+  deployed with no execution running.
 - Every build role, every hook role and the two pair roles of the
-  control plane's own account carry the inline deny, so a deployer can
-  no longer grant them, through `tenantBuildManagedPolicyArns`
-  (ADR-0022) or otherwise, any action on its list: passing one of the
-  stack's roles, writing a role's policies, starting a build in or
-  updating one of the four projects, starting, updating or redriving
-  the workflow, changing the API or authorizer function, or writing to
-  the table. A policy that grants one of these for an application plane
-  need is now refused at the deny; the producer policy in this
-  repository, tenant-identity's `PlatformInvokePolicy`
-  (`execute-api:Invoke`, KMS encrypt), grants none of them. A grant of
-  `sts:AssumeRole` on another role of the control plane account, or of
-  CloudFormation writes through a privileged execution role, still
-  reaches the pair; that residual is the deployer's (T41).
+  control plane's own account carry the deny, one standalone policy
+  that nothing depends on, so a deployer can no longer grant them,
+  through `tenantBuildManagedPolicyArns` (ADR-0022) or otherwise, any
+  action on its list: passing one of the stack's roles, writing a
+  role's policies, starting a build in or updating one of the four
+  projects, starting, updating or redriving the workflow, changing the
+  API or authorizer function, invoking the API function or changing
+  its permissions, writing to the REST API, or writing to the table. A
+  policy that grants one of these for an application plane need is now
+  refused at the deny; the producer policy in this repository,
+  tenant-identity's `PlatformInvokePolicy` (`execute-api:Invoke`, KMS
+  encrypt), grants none of them. A grant of `sts:AssumeRole` on
+  another role of the control plane account, of CloudFormation writes
+  through a privileged execution role, of admin writes on the vendor
+  IdP, or of writes to the location of a registered script or hook
+  source still reaches the pair; that residual is the deployer's, who
+  grants no hook role write access to the vendor IdP or to any script
+  or hook source (T41).
 - The concurrency cap and log retention of ADR-0021 cover all four
   projects. All global hook builds of the fleet share one project
   capped at five, and CodeBuild documents builds over the cap as
@@ -322,9 +384,10 @@ as a consumer of a global post hook.
   start") rather than a silent wait, and a delete hook spends its
   budget and is skipped (T42, T43).
 - A start whose repeats all failed ends "start outcome unknown" and may
-  hide a build that runs until CodeBuild stops it, within q + T. On
-  create, a post hook hidden this way can still write state, a route
-  included, beside the record's `CREATE_FAILED` (T40). On delete the
+  hide a build that runs until CodeBuild stops it, within q + T. A
+  hook on create or update, pre or post, hidden this way can still
+  write state, a route included, beside the record's `CREATE_FAILED`
+  or `UPDATE_FAILED` (T40). On delete the
   next attempt waits it out, but a skip at the budget's end can leave it
   running beside the delete script (T42).
 - Polling costs three state transitions per hook minute, about $0.002
@@ -367,15 +430,17 @@ as a consumer of a global post hook.
   - H-2: a `batchGetBuilds` result carries `resolvedSourceVersion`.
   - H-5: CodeBuild accepts a hook build's environment override (about
     fifteen fixed variables, 40 `PARAM_` variables, 4 KB of outputs).
-  - H-7: a CodeBuild role's trust policy conditioned on `aws:SourceArn`
-    admits its own project's builds only, for each hook role and each
-    provisioning build role.
+  - H-7: a CodeBuild role's trust policy conditioned on `aws:SourceArn`,
+    an ARN computed from the project's physical name, admits its own
+    project's builds only, for each hook role and each provisioning
+    build role.
   - H-8: a refused `StartBuild` or `StopBuild` fails with a service
     error name no started build produces, and a refused try creates no
     build; the idempotency token passes through the Step Functions
     integration, and a repeat within its 5-minute validity returns the
     same build id; a task `Retry` re-sends the evaluated `Arguments`
-    unchanged, and a refused request does not bind its token.
+    unchanged, and a refused request does not bind its token; CodeBuild
+    accepts the 64-character token.
   - H-9: what `StartBuild` returns at the project's
     `concurrentBuildLimit`; the design assumes a refusal.
   - H-10: a 4,096-byte outputs value of worst-case escapes round-trips

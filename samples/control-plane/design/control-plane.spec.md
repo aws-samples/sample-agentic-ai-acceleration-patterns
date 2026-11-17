@@ -491,7 +491,7 @@ start one (R-41).
 | R-3 | **Service** | One stateless compute function implementing all operations, including synchronous placement, the tenant registry, the application registry and the account registry. |
 | R-4 | **Store** | One database table holding all six entity types (application + account + cell + tenant + deployment + global hook) plus the idempotency record type and the hook counter, with support for multi-item ACID transactions and conditional writes. (The reference uses DynamoDB single-table design; any store with equivalent transactional conditional-write semantics qualifies.) |
 | R-5 | **Workflow** | One durable state machine executing provisioning builds and writing terminal state directly to the table. |
-| R-6 | **Build runners** | **Four** shared build projects: two provisioning projects (cell builds, tenant builds) and two hook projects (global hooks, application hooks, R-41). Per-execution overrides select the source and script; the projects themselves are never mutated per deployment, cell, account or hook. Before the script runs, each provisioning build assumes its half of the hosting account's provisioning role pair (R-25), so the script executes with that account's permissions. The provisioning projects' own roles may only assume those roles, read the source, and write their logs. The hook projects' roles never assume a pair (R-41). |
+| R-6 | **Build runners** | **Four** shared build projects: two provisioning projects (cell builds, tenant builds) and two hook projects (global hooks, application hooks, R-41). Per-execution overrides select the source and script; the projects themselves are never mutated per deployment, cell, account or hook. Before the script runs, each provisioning build assumes its half of the hosting account's provisioning role pair (R-25), so the script executes with that account's permissions. The provisioning projects' own roles may only assume those roles, read the source, and write their logs; each build role trusts CodeBuild only on its own project's `aws:SourceArn` and carries the R-41 deny. The hook projects' roles never assume a pair (R-41). |
 | R-25 | **Account role pair** | One deployable unit (reference: a CDK stack) that installs `<fleet>-cell-provisioning` and `<fleet>-tenant-provisioning` in an account with the asymmetric permissions of §6.2, trusting the control plane's two build roles and its API role (the registration probe, R-26) — and an optional external id. The account owner deploys it; the control plane stack installs the same pair in its own account so the home account needs no extra step (P-4). |
 
 ```
@@ -641,7 +641,7 @@ Supplied at deployment time, validated at synthesis/deploy.
 | `vendorIdp.issuerUrl`, `vendorIdp.audience` | non-empty; OIDC discovery must work against the issuer |
 | `vendorIdp.clientIds` (optional, R-38, [ADR-043](../adr/0043-accept-listed-client-ids-when-a-token-has-no-audience.md)) | client ids accepted on a token that has no `aud`. Default: none. Each matches `[A-Za-z0-9+._:-]{1,128}` (Cognito ids are `[\w+]+`), so it survives the comma-separated environment variable; a duplicate MUST fail synth. List only the vendor's own machine clients on the dedicated issuer (T37) |
 | `vendorIdp.requiredScope` (optional, R-38) | a scope a token without `aud` must also carry, such as this API's resource-server scope (`control-plane/read`): one RFC 6749 scope token (`[\x21\x23-\x5B\x5D-\x7E]{1,256}`), given as a literal, since a CDK token is refused at synth. Default: none. Set without `clientIds` it MUST fail synth. Set it whenever a listed client may call another API on the issuer (T37) |
-| `fleetName` | names the role pair every account installs (`<fleetName>-cell-provisioning`, `<fleetName>-tenant-provisioning`) and the control plane's three roles the pair trusts (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-api`), plus its two hook roles, which no pair trusts (`<fleetName>-global-hook`, `<fleetName>-app-hook`, R-41); `[a-z0-9-]{1,32}`. Default `control-plane`. Two control planes in one account MUST use different fleet names |
+| `fleetName` | names the role pair every account installs (`<fleetName>-cell-provisioning`, `<fleetName>-tenant-provisioning`) and the control plane's three roles the pair trusts (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-api`), plus its two hook roles, which no pair trusts (`<fleetName>-global-hook`, `<fleetName>-app-hook`, R-41). It also names the four build projects (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-global-hook`, `<fleetName>-app-hook`) and the workflow (`<fleetName>-workflow`), so their ARNs can be computed before they exist (R-41); `[a-z0-9-]{1,32}`. Default `control-plane`. Role names are account-wide and project and state machine names are per Region, so the fleet name already separates two control planes in one account, and the named projects and workflow add no new clash. Two control planes in one account MUST use different fleet names, in every Region |
 | `allowedRoles` (optional, R-36) | role claim values that get the operator grant; non-empty. Default `["operator"]`. Every role value in either list matches `[A-Za-z0-9:._-]{1,64}`, so it survives the comma-separated environment variable |
 | `readerRoles` (optional, R-36, [ADR-042](../adr/0042-a-read-only-role-beside-the-operator.md)) | role claim values that get the reader grant. Default: none, so no reader is admitted until the deployer names one. A value in both lists MUST fail synth. Use a namespaced value (`control-plane:reader`), not a word a broader issuer may already mint (`reader`, `viewer`) (T2, T20) |
 | `tenantBuildManagedPolicyArns` (optional, [ADR-022](../adr/0022-attach-deployer-supplied-managed-policies-to-the-tenant-build-role.md)) | array of customer-managed IAM policy ARNs (`arn:<partition>:iam::<account>:policy/...`), each in the stack's own partition and account; synth MUST fail otherwise. Attached to the tenant provisioning role the stack installs in its own account. Default: none |
@@ -1448,7 +1448,7 @@ role MUST NOT hold it, so a script or a hook cannot start an execution
 of its own. A compromise of the API function therefore reaches both
 hook roles (T30).
 
-Grants of three kinds lead from a role to the provisioning build
+Grants of four kinds lead from a role to the provisioning build
 roles, and through them to the pair of every registered account. The
 direct ones are `states:StartExecution` on the workflow,
 `codebuild:StartBuild` on a provisioning project, and a write to the
@@ -1458,10 +1458,17 @@ kind runs new code as a role that holds a pair or one of these grants:
 hook role, with a create on CodeBuild, Step Functions or Lambda. The
 third rewrites what a pair holder runs next, or removes the deny
 itself: an IAM write on one of the stack's roles, or an update to a
-build project, the workflow or the API function. The stack MUST
-therefore add to each build role, each hook role and the two pair
-roles it installs in its own account an inline policy that explicitly
-denies:
+build project, the workflow or the API function. The fourth makes the
+caller the operator, who reaches every pair through `PutApplication`
+or `PutHook`. The API function runs every operation on the word of
+`requestContext.authorizer`, which the authorizer sets only for calls
+through API Gateway. A direct `lambda:InvokeFunction` on the function,
+with an authorizer context of the caller's choosing, skips the
+authorizer; `lambda:AddPermission` opens that invoke to any principal;
+and an API Gateway write on the REST API can take the authorizer off
+a method and deploy the change. The stack MUST therefore attach to
+each build role, each hook role and the two pair roles it installs in
+its own account a policy that explicitly denies:
 
 - `iam:PassRole` on `<fleet>-cell-build`, `<fleet>-tenant-build`, the
   workflow role, `<fleet>-api`, `<fleet>-global-hook` and
@@ -1469,8 +1476,8 @@ denies:
 - `iam:PutRolePolicy`, `iam:DeleteRolePolicy`, `iam:AttachRolePolicy`,
   `iam:DetachRolePolicy`, `iam:UpdateAssumeRolePolicy`,
   `iam:PutRolePermissionsBoundary` and
-  `iam:DeleteRolePermissionsBoundary` on every role the stack creates,
-  the denied roles included;
+  `iam:DeleteRolePermissionsBoundary` on every role the stack creates
+  (the table below), the denied roles included;
 - `codebuild:StartBuild`, `codebuild:StartBuildBatch`,
   `codebuild:RetryBuild`, `codebuild:UpdateProject`,
   `codebuild:CreateWebhook` and `codebuild:UpdateWebhook` on all four
@@ -1481,28 +1488,83 @@ denies:
   `lambda:PublishVersion`, `lambda:CreateAlias`, `lambda:UpdateAlias`
   and `lambda:DeleteAlias` on the API function and the authorizer
   function;
+- `lambda:InvokeFunction`, `lambda:AddPermission` and
+  `lambda:RemovePermission` on the API function;
+- `apigateway:PUT`, `apigateway:PATCH`, `apigateway:POST` and
+  `apigateway:DELETE` on the control plane's REST API,
+  `arn:<partition>:apigateway:<region>::/restapis/<api-id>` and
+  `arn:<partition>:apigateway:<region>::/restapis/<api-id>/*`;
 - `dynamodb:PutItem`, `dynamodb:UpdateItem`, `dynamodb:DeleteItem`,
   `dynamodb:BatchWriteItem`, `dynamodb:PartiQLInsert`,
   `dynamodb:PartiQLUpdate` and `dynamodb:PartiQLDelete` on the table.
   `TransactWriteItems` and `ExecuteTransaction` are authorised per
   item through these actions, so they need no entry of their own.
 
+API Gateway invokes the API function through the function's resource
+policy, as its service principal, so the invoke deny on the denied
+roles does not touch the API's own path.
+
+The deny MUST be one standalone `AWS::IAM::Policy` resource, created
+outside every role construct and attached to the denied roles through
+its `Roles` list, so that nothing in the stack depends on it. In a
+role's default policy it would close a CloudFormation cycle: the home
+pair depends on every child of the build role constructs, and the deny
+names the home pair roles. As a managed policy it would make every
+role depend on it while it names the projects, which depend on their
+roles. A role, a project or the workflow that has a physical name MUST
+be named in the deny by an ARN computed from that name
+(`Stack.formatArn`), never by a reference to its resource. The roles
+with CDK-generated names, the table, the two functions and the REST
+API are named by their attributes, which the standalone policy may
+reference because nothing references it. The stack creates eight roles
+today, three of them with CDK-generated names, and ten with the two
+hook roles:
+
+| Role | Name | Carries the deny |
+|---|---|---|
+| Cell build role | `<fleet>-cell-build` | yes |
+| Tenant build role | `<fleet>-tenant-build` | yes |
+| Home cell provisioning role | `<fleet>-cell-provisioning` | yes |
+| Home tenant provisioning role | `<fleet>-tenant-provisioning` | yes |
+| Global hook role (new) | `<fleet>-global-hook` | yes |
+| Application hook role (new) | `<fleet>-app-hook` | yes |
+| API role | `<fleet>-api` | no: its grants are among the direct actions |
+| Workflow role | CDK-generated | no: its grants are among the direct actions |
+| Authorizer function role | CDK-generated | no: it holds its logs only |
+| API Gateway CloudWatch role | CDK-generated | no: it holds API Gateway's logs only |
+
 Each build role MUST also trust `codebuild.amazonaws.com` only on its
 own project's `aws:SourceArn`, as each hook role does (H-7), so no new
 project can run as it; until now the build roles trusted CodeBuild
-with no condition. An explicit deny wins over any allow, and the stack
-never reads an attached policy to keep it (P-3). The list names only
-the stack's own resources and fits one inline policy. It also closes
-the older path of `tenantBuildManagedPolicyArns`, whose policies
-attach to the tenant provisioning role in the stack's own account
-(§3.3). The workflow role and the API role take no such deny, because
-their own grants are among the direct actions; no denied role needs a
-denied action. The deny does not close every path. An attached grant
-of `sts:AssumeRole` on another role in the control plane account (an
-admin role or a CDK bootstrap role), or of CloudFormation writes
-through a privileged execution role, still reaches the pair, and so
-does a principal outside the denied roles that the deployer grants a
-denied action. Both stay the deployer's choice (T41, M30).
+with no condition. The project names its role as `ServiceRole`, so a
+trust condition that referenced the project would close a cycle. Each
+of the four projects therefore MUST have a physical name built from
+the fleet name (`<fleet>-cell-build`, `<fleet>-tenant-build`,
+`<fleet>-global-hook`, `<fleet>-app-hook`), and each role's trust
+condition MUST carry the ARN computed from that name
+(`Stack.formatArn`), never one taken from the project resource. The
+workflow MUST likewise have the physical name `<fleet>-workflow`, so
+the deny and the test policy of §10 can name it by a computed ARN. The
+fleet name already separates two control planes in one account (§3.3),
+so these names add no new clash.
+
+An explicit deny wins over any allow, and the stack never reads an
+attached policy to keep it (P-3). The list names only the stack's own
+resources and fits one policy. It also closes the older path of
+`tenantBuildManagedPolicyArns`, whose policies attach to the tenant
+provisioning role in the stack's own account (§3.3). No denied role
+needs a denied action. The deny does not close every path. An attached
+grant of `sts:AssumeRole` on another role in the control plane account
+(an admin role or a CDK bootstrap role), or of CloudFormation writes
+through a privileged execution role, still reaches the pair. So do
+admin writes on the vendor IdP, which can create a user or a client
+that carries the operator role, and writes to the location of a
+registered script or hook source (an S3 bucket or a repository), which
+change what the next provisioning build runs with the pair or what a
+hook runs with its role. So does a principal outside the denied roles
+that the deployer grants a denied action. These stay the deployer's
+choice: grant no hook role write access to the vendor IdP or to any
+script or hook source (T41, M30).
 
 The hook buildspec MUST hand every variable of R-42 to the hook script
 as an environment variable only and run it as `bash "$HOOK_SCRIPT"`,
@@ -2141,10 +2203,17 @@ The start of an attempt MUST be an explicit loop, never one task
 `Retry`, because a refusal needs a new try and a transient error needs
 the same one. When a try begins, the loop computes once, in variables,
 `TRY`, the try index (1 for the attempt's first try), and that try's
-q. The try's `idempotencyToken` MUST be the JSONata `$hash` of
-`EXECUTION_ID`, `EVENT`, `PHASE`, `HOOK_ID`, `ATTEMPT` and `TRY`, so
-it has a fixed length and differs on every try by construction; q is
-not part of it. A `StartBuild` the service refuses (throttling, the
+q. The try's `idempotencyToken` MUST be the SHA-256 of the six
+values joined by `|`, as this JSONata expression:
+
+```
+$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK_ID,
+  $string(ATTEMPT), $string(TRY)], '|'), 'SHA-256')
+```
+
+It is 64 hexadecimal characters (H-8), so it has a fixed length, and
+it differs on every try by construction; q is not part of it. A
+`StartBuild` the service refuses (throttling, the
 account's concurrent build quota, the project at its
 `concurrentBuildLimit`; H-8, H-9) MUST go through a `Catch` to a
 30-second `Wait`, without backoff, and then a `Choice`. The `Choice`
@@ -2157,8 +2226,11 @@ deadline.
 
 A transient server error (a 5xx, or the task's own timeout) can follow
 a call that created a build. It MUST be handled by a task `Retry` on
-the start task, which has `TimeoutSeconds` 15, with at most three
-repeats 10 seconds apart. A `Retry` re-sends the task's evaluated
+the start task, which has `TimeoutSeconds` 15. The `Retry` MUST set
+`IntervalSeconds` 10, `BackoffRate` 1 and `MaxAttempts` 3, with no
+jitter (`JitterStrategy` `NONE`), so each of the three repeats waits
+10 seconds; the ASL default `BackoffRate` of 2 would wait 10, 20 and
+40 seconds. A `Retry` re-sends the task's evaluated
 `Arguments` unchanged (H-8), so every repeat carries the same `TRY`, q
 and token. CodeBuild documents a token as valid for 5 minutes, within
 which a repeat returns the build the first call created (to verify,
@@ -2292,8 +2364,8 @@ rows stay so that their ids stay stable.
 | H-4 | Whether the error of a timed-out `.sync` task carries the build id | Not needed: poll loop (`startBuild` returns the id) | — |
 | H-5 | CodeBuild accepts a hook build's `environmentVariablesOverride`: about fifteen fixed variables, up to 40 `PARAM_` variables of up to 1,024 bytes, and a `SCRIPT_OUTPUTS` of up to 4,096 bytes | To verify | R-42 |
 | H-6 | A JSONata expression in a task's `TimeoutSeconds` sets a timeout per hook state; today's build tasks use a constant | Not needed: poll loop (the deadline is data) | — |
-| H-7 | A CodeBuild service role trust policy conditioned on `aws:SourceArn` equal to the project ARN admits that project's builds and no other, for each hook role and each provisioning build role | To verify (documented for confused-deputy prevention; one synth-and-run check) | R-41 |
-| H-8 | A `StartBuild` refused through a request-response `codebuild:startBuild` task (throttling, the account's concurrent build quota) fails with a `CodeBuild.` service error name that no started build produces, a refused try creates no build, and a refused `StopBuild` fails with the same names. An `idempotencyToken` passes through the Step Functions integration unchanged, and a repeat of the same request with the same token within its documented 5-minute validity returns the same build id, also after a transient error. A task `Retry` re-sends the evaluated `Arguments` unchanged, so a repeat carries its try's token, and a refused request does not bind its token. So the refusal `Catch` on those names, and a repeat under the token, never starts a second build for one that ran | To verify | R-46 |
+| H-7 | A CodeBuild service role trust policy conditioned on `aws:SourceArn` equal to the project ARN, computed from the project's physical name before the project exists, admits that project's builds and no other, for each hook role and each provisioning build role | To verify (documented for confused-deputy prevention; one synth-and-run check) | R-41 |
+| H-8 | A `StartBuild` refused through a request-response `codebuild:startBuild` task (throttling, the account's concurrent build quota) fails with a `CodeBuild.` service error name that no started build produces, a refused try creates no build, and a refused `StopBuild` fails with the same names. An `idempotencyToken` passes through the Step Functions integration unchanged, and a repeat of the same request with the same token within its documented 5-minute validity returns the same build id, also after a transient error. A task `Retry` re-sends the evaluated `Arguments` unchanged, so a repeat carries its try's token, and a refused request does not bind its token. So the refusal `Catch` on those names, and a repeat under the token, never starts a second build for one that ran. CodeBuild accepts a 64-character token, the SHA-256 hex of R-46; the API reference documents no length limit | To verify | R-46 |
 | H-9 | What a request-response `codebuild:startBuild` returns when the project is at its `concurrentBuildLimit`: a refusal, and its error name, or a build queued behind the cap. The CodeBuild user guide says builds over the limit are "throttled and are not run" | To verify; R-46 is designed for a refusal, and a queued build is bounded by the queued timeout and the deadline | R-46 |
 | H-10 | A 4,096-byte compact outputs file whose values are all `\"` and `\\` escapes, the worst case for escaping, exported alone as `SCRIPT_OUTPUTS`, comes back byte for byte in the `startBuild.sync` result, through a JSONata `Output` into state, and into a hook build's environment override. The R-43 guard, run in a real Step Functions JSONata `Output`, accepts the largest valid value and rejects the 4,096-character near miss of §10, so the engine takes the regex literal and neither fails nor stalls over 4,096 loop iterations; the time of each run is recorded | To verify | R-43, §8.1 |
 
@@ -2334,7 +2406,28 @@ the assertion results. The stack sets `globalHookManagedPolicyArns` and
 role write SSM parameters under its own test path in A and nowhere else;
 step 16's hooks record what they saw there. The application hook test
 policy also allows `states:StartExecution` on the workflow, an allow
-the R-41 deny must override.
+the R-41 deny must override. The policy must exist before the stack,
+because the stack validates `appHookManagedPolicyArns` at synth, so it
+names the workflow by its computed ARN,
+`arn:<partition>:states:<region>:<account>:stateMachine:<fleet>-workflow`
+(R-41).
+
+Each run of the test takes its own fleet name, for example
+`cp-integ-<run id>`, within the `fleetName` charset and length (§3.3),
+so the run id has at most 23 characters of `[a-z0-9-]`. The run uses
+it in every stack name, as the `fleetName` of the stack under test and
+of the role pair the account B stack installs, and in every other name
+the test creates that must be unique in an account or a Region: the
+test's application ids, the probe role in B, the hook test paths and
+policies, and the user pool domain prefix. Two runs can then share
+both accounts and a Region. The test's leftover check looks for that
+run's stacks only, and a check that a parameter namespace ends empty
+looks at that run's applications, cells and tenants only. Runs in one
+account and Region still share its quotas, and those limit how many
+fit at once: CodeBuild's concurrent builds per account and Region,
+which every run's builds and hook builds draw on, and the API Gateway
+control plane request rate, which a deploy of several REST APIs at
+once can exceed.
 
 1. **Auth:** an operation without a JWT is rejected; with a valid vendor
    IdP JWT it succeeds. A reader token (R-36) succeeds on every `GET`
@@ -2548,15 +2641,20 @@ only the workflow role holds `codebuild:StartBuild` on the hook projects
 and it holds no `iam:PassRole` on either hook role, while the build and
 API roles hold neither, that only the API role holds
 `states:StartExecution` on the workflow and no build role and no hook
-role holds it, that each build role, each hook role and the two pair
-roles of the stack's own account carry the inline explicit deny of
-R-41 with every action and resource of its list (`iam:PassRole` on
-the six roles, the seven IAM role writes on the stack's roles, the six
-CodeBuild actions on the four projects, the three Step Functions
-actions on the workflow, the six Lambda writes on the API and
-authorizer functions and the seven table writes), while the workflow
-and API roles carry none, that each build role and each hook role
-trusts CodeBuild only on its own project's `aws:SourceArn`, that the
+role holds it, that one standalone `AWS::IAM::Policy`, on which no
+resource depends, carries the explicit deny of R-41 with every action
+and resource of its list (`iam:PassRole` on the six roles, the seven
+IAM role writes on the stack's ten roles, the six CodeBuild actions on
+the four projects, the three Step Functions actions on the workflow,
+the six Lambda writes on the API and authorizer functions, the three
+Lambda invoke and permission actions on the API function, the four API
+Gateway writes on the REST API and its sub-resources, and the seven
+table writes), that its `Roles` name each of the six denied role
+resources of the template and no other role, so the workflow, API,
+authorizer and API Gateway CloudWatch roles carry none, that the four
+projects and the workflow have their fleet-derived physical names, that
+each build role and each hook role trusts CodeBuild only on the
+`aws:SourceArn` computed from its own project's name, that the
 hook buildspec assumes no role, passes
 no external id, interpolates no variable and runs `bash "$HOOK_SCRIPT"`
 (R-41), that the resolved hook lists follow R-40 and R-45 and are read
@@ -2573,15 +2671,17 @@ with its closing `}` missing) within 100 ms, and that an `Output`
 evaluation error on a delete still yields `{}` (R-43), that a hook
 attempt starts its build request-response with the run timeout, a
 queued timeout of 10 less the minutes refused and an idempotency token
-that is the `$hash` of the execution, event, phase, hook, attempt and
-try index, the try index and queued timeout held in variables per try,
+that is the SHA-256 `$hash` of the execution, event, phase, hook,
+attempt and try index joined by `|`, the try index and queued timeout
+held in variables per try,
 polls that one id with `batchGetBuilds` every 60 seconds, keeping only
 its id, status, phase timing and `resolvedSourceVersion`, and at its
 deadline calls `StopBuild` and polls the build to a final status, that
 a `StartBuild` or `StopBuild` refusal loops through a `Catch`, a
 30-second `Wait` and a `Choice` that advances the try index, for at
 most 5 minutes on a start, and the only task `Retry` is the transient
-repeat (`TimeoutSeconds` 15, three repeats 10 seconds apart), and that
+repeat (`TimeoutSeconds` 15, `IntervalSeconds` 10, `BackoffRate` 1,
+`MaxAttempts` 3, no jitter), and that
 a failing delete hook runs as a loop of three started builds, 60 and
 120 seconds apart, each started only after the last is final, a
 refusal-only attempt not counted and followed by the 60-second

@@ -74,6 +74,38 @@ sample. Because the task always runs with `--force`, no workflow depends on a
 committed snapshot; your local snapshot is kept (gitignored) to speed up
 repeated runs.
 
+### Parallel runs (specified, not built)
+
+[Spec §10](./design/control-plane.spec.md#10-acceptance-criteria)
+specifies a per-run fleet name, so that two runs can share accounts A
+and B and one Region. Until it is built, the stack names below are
+fixed and the `integ` task refuses to start while any of them exists.
+Once built:
+
+- Each run takes its own fleet name, for example `cp-integ-<run id>`,
+  within the `fleetName` charset and length (`[a-z0-9-]{1,32}`, so the
+  run id has at most 23 characters).
+- The run uses it in every stack name, the assertion stack's test
+  name included, as the `fleetName` of the stack under test and of the
+  role pair the account B stack installs, and in every other name the
+  test creates that must be unique in an account or a Region: the
+  application ids, the probe role in B, the hook test paths and
+  policies, and the user pool domain prefix. The stack under test
+  names its build projects and workflow after the fleet (spec R-41),
+  so those differ per run as well.
+- The leftover check looks for that run's stacks only, so a run in
+  progress no longer blocks another. A check that a parameter
+  namespace ends empty looks at that run's applications, cells and
+  tenants only.
+- integ-runner writes its snapshot and `cdk.out` beside the test, so
+  each run starts from its own working copy.
+
+Runs in one account and Region share its quotas, and those limit how
+many fit at once: CodeBuild's concurrent builds per account and
+Region, which every run's builds draw on, and the API Gateway control
+plane request rate, which a deploy of several REST APIs at once can
+exceed.
+
 ## What it stands up
 
 | Stack | Account | Contents |
@@ -134,7 +166,9 @@ accounts (tenant parameters are
 removing test resources. The demo parameters under
 `/application-plane/applications/integ-x/shared/` and
 `/application-plane/applications/integ-y/shared/` belong to the stacks and go
-with them. Delete the stacks with the account each lives in:
+with them. Once runs take a per-run fleet name (Parallel runs, above),
+inspect and delete only the stacks that carry that run's fleet name.
+Delete the stacks with the account each lives in:
 `control-plane-integ-account-b` with credentials for B (or through A's
 credentials and B's bootstrap trust), the others in A.
 
