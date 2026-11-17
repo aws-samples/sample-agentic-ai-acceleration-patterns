@@ -68,8 +68,9 @@ enough when all of these hold:
 Scopes stop when the token has to carry a product catalogue per tenant and
 per user, and then be handed to an agent. At 10,000 tenants and 1,000 tools
 the identity provider's quotas give out first: 50 scopes per app client,
-scope names global to the pool, an app client per tenant, a token that
-changes only at the next token, and no token exchange. The quota table, with
+scope names global to the pool, an app client per tenant, and a token that
+changes only at the next token. Cognito's token exchange (RFC 8693) only narrows: it
+cannot add a tool the token does not already carry. The quota table, with
 Amazon Cognito's numbers, is in
 [`architecture.md`](./architecture.md#where-scopes-stop). Two costs have no
 quota number: a new tool means a write per tenant (or per user) at the

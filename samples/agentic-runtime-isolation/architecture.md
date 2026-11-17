@@ -602,7 +602,7 @@ other providers have different numbers and the same shape.
 | API Gateway, all request headers combined | 20,480 bytes | the bearer travels in a header, with everything else |
 | AgentCore Runtime custom header | 10,240 bytes enforced (4 KB documented) | anything forwarded to the agent fits here |
 | Access token lifetime | 5 minutes to 1 day | a sold or removed tool reaches the user at the next token, not the next request |
-| Token exchange (RFC 8693) | not offered | nothing downstream can trade a fat token for a narrow one |
+| Token exchange (RFC 8693, [`GetDerivedToken`](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-token-exchange.html)) | Essentials or Plus plan; issued scopes are the intersection of the requested scopes, the subject token's scopes and the app client's scopes; the pre token generation trigger cannot add scopes (as of 2026-11-17) | an exchange can narrow a fat token for one audience, but the tools must already be scopes in the token, so every limit above still applies (ADR-0051) |
 
 Each limit moves as follows:
 
@@ -613,7 +613,7 @@ Each limit moves as follows:
 | an app client per tenant | one app client; the tenant comes from the token's `tenant_id`, or from `tenants` plus an `X-Tenant-Id` header the token must list (ADR-0038) |
 | a write per tenant for a new tool | a tenant subscribed to `crm/*` holds a new `crm` tool at once; a plan change is one write (ADR-0030) |
 | next token, up to a day | every write bumps the tenant's `version`, which is in the mint cache key: the next request that misses the 60 s authoriser cache (ADR-0036, ADR-0043); a token in flight lives `transactionToken.ttl` (300 s by default) |
-| no token exchange | the ingress does not exchange, it narrows: it mints a new token as an OIDC issuer with JWKS and discovery, signing with a KMS key only it can use (ADR-0031, ADR-0037); there is no RFC 8693 endpoint |
+| exchange narrows only the scopes the token carries | the ingress narrows from the entitlement store, not from the token's scopes: it mints a new token as an OIDC issuer with JWKS and discovery, signing with a KMS key only it can use (ADR-0031, ADR-0037); the sample runs no RFC 8693 endpoint |
 | the identity provider holds the catalogue | the identity provider holds users and tenants; the Entitlements API holds products, plans, subscriptions and cuts (ADR-0030) |
 
 ## Known limitations
