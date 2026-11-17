@@ -185,8 +185,11 @@ roles of its own account an explicit deny on:
 - `codebuild:StartBuild`, `StartBuildBatch`, `RetryBuild`,
   `UpdateProject`, `CreateWebhook` and `UpdateWebhook` on the four
   projects;
-- `states:StartExecution`, `UpdateStateMachine` and `RedriveExecution`
-  on the workflow;
+- `states:StartExecution` and `UpdateStateMachine` on the workflow,
+  `stateMachine:<fleet>-workflow`;
+- `states:RedriveExecution` on the workflow's executions,
+  `execution:<fleet>-workflow:*`, the resource Step Functions
+  authorises a redrive on;
 - `lambda:UpdateFunctionCode`, `UpdateFunctionConfiguration`,
   `PublishVersion`, `CreateAlias`, `UpdateAlias` and `DeleteAlias` on
   the API and authorizer functions;
@@ -199,6 +202,12 @@ roles of its own account an explicit deny on:
   `PartiQLInsert`, `PartiQLUpdate` and `PartiQLDelete` on the table,
   through which `TransactWriteItems` and `ExecuteTransaction` are
   authorised per item.
+
+Every Lambda entry names both `function:<name>` and
+`function:<name>:*`. Lambda matches a request with a qualifier
+(`$LATEST`, a version or an alias) only against a qualified ARN, so a
+deny on the unqualified ARN alone would leave `Invoke` with
+`Qualifier=$LATEST` open to an allow on `*`.
 
 The deny is one standalone `AWS::IAM::Policy` resource, outside every
 role construct and attached through its `Roles` list, so nothing in
@@ -354,9 +363,16 @@ as a consumer of a global post hook.
 - The four projects and the workflow get physical names from the fleet
   name, so the trust conditions and the deny can carry computed ARNs.
   Naming the two existing provisioning projects and the workflow
-  replaces them on upgrade. A Standard execution in flight keeps its
-  old definition and calls the deleted project, so the upgrade is
-  deployed with no execution running.
+  replaces them on upgrade. Deleting the old state machine
+  (`DeleteStateMachine`) terminates each of its running executions at
+  its next state transition, which strands its record in `CREATING`,
+  `UPDATING` or `DELETING`, as `StopExecution` does (spec §7.2). The
+  upgrade is therefore deployed only after a drain (spec R-41): no
+  mutating operation is accepted until the deploy completes, and the
+  deploy starts only when `ListExecutions` with status `RUNNING` is
+  empty. The drain covers accepted operations too, because one the
+  old API function accepted just before its environment changed
+  starts on the old state machine.
 - Every build role, every hook role and the two pair roles of the
   control plane's own account carry the deny, one standalone policy
   that nothing depends on, so a deployer can no longer grant them,

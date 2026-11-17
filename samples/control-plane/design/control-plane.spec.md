@@ -641,7 +641,7 @@ Supplied at deployment time, validated at synthesis/deploy.
 | `vendorIdp.issuerUrl`, `vendorIdp.audience` | non-empty; OIDC discovery must work against the issuer |
 | `vendorIdp.clientIds` (optional, R-38, [ADR-043](../adr/0043-accept-listed-client-ids-when-a-token-has-no-audience.md)) | client ids accepted on a token that has no `aud`. Default: none. Each matches `[A-Za-z0-9+._:-]{1,128}` (Cognito ids are `[\w+]+`), so it survives the comma-separated environment variable; a duplicate MUST fail synth. List only the vendor's own machine clients on the dedicated issuer (T37) |
 | `vendorIdp.requiredScope` (optional, R-38) | a scope a token without `aud` must also carry, such as this API's resource-server scope (`control-plane/read`): one RFC 6749 scope token (`[\x21\x23-\x5B\x5D-\x7E]{1,256}`), given as a literal, since a CDK token is refused at synth. Default: none. Set without `clientIds` it MUST fail synth. Set it whenever a listed client may call another API on the issuer (T37) |
-| `fleetName` | names the role pair every account installs (`<fleetName>-cell-provisioning`, `<fleetName>-tenant-provisioning`) and the control plane's three roles the pair trusts (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-api`), plus its two hook roles, which no pair trusts (`<fleetName>-global-hook`, `<fleetName>-app-hook`, R-41). It also names the four build projects (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-global-hook`, `<fleetName>-app-hook`) and the workflow (`<fleetName>-workflow`), so their ARNs can be computed before they exist (R-41); `[a-z0-9-]{1,32}`. Default `control-plane`. Role names are account-wide and project and state machine names are per Region, so the fleet name already separates two control planes in one account, and the named projects and workflow add no new clash. Two control planes in one account MUST use different fleet names, in every Region |
+| `fleetName` | names the role pair every account installs (`<fleetName>-cell-provisioning`, `<fleetName>-tenant-provisioning`) and the control plane's three roles the pair trusts (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-api`), plus its two hook roles, which no pair trusts (`<fleetName>-global-hook`, `<fleetName>-app-hook`, R-41). It also names the four build projects (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-global-hook`, `<fleetName>-app-hook`) and the workflow (`<fleetName>-workflow`), so their ARNs can be computed before they exist (R-41); `[a-z0-9][a-z0-9-]{0,31}`, checked at synth, so a name starts with a letter or digit as a CodeBuild project name must. Default `control-plane`. Role names are account-wide and project and state machine names are per Region, so the fleet name already separates two control planes in one account, and the named projects and workflow add no new clash. Two control planes in one account MUST use different fleet names, in every Region. The upgrade that first gives the projects and the workflow these names replaces them and is deployed only after the drain of R-41 |
 | `allowedRoles` (optional, R-36) | role claim values that get the operator grant; non-empty. Default `["operator"]`. Every role value in either list matches `[A-Za-z0-9:._-]{1,64}`, so it survives the comma-separated environment variable |
 | `readerRoles` (optional, R-36, [ADR-042](../adr/0042-a-read-only-role-beside-the-operator.md)) | role claim values that get the reader grant. Default: none, so no reader is admitted until the deployer names one. A value in both lists MUST fail synth. Use a namespaced value (`control-plane:reader`), not a word a broader issuer may already mint (`reader`, `viewer`) (T2, T20) |
 | `tenantBuildManagedPolicyArns` (optional, [ADR-022](../adr/0022-attach-deployer-supplied-managed-policies-to-the-tenant-build-role.md)) | array of customer-managed IAM policy ARNs (`arn:<partition>:iam::<account>:policy/...`), each in the stack's own partition and account; synth MUST fail otherwise. Attached to the tenant provisioning role the stack installs in its own account. Default: none |
@@ -1482,14 +1482,26 @@ its own account a policy that explicitly denies:
   `codebuild:RetryBuild`, `codebuild:UpdateProject`,
   `codebuild:CreateWebhook` and `codebuild:UpdateWebhook` on all four
   projects;
-- `states:StartExecution`, `states:UpdateStateMachine` and
-  `states:RedriveExecution` on the workflow;
+- `states:StartExecution` and `states:UpdateStateMachine` on the
+  workflow,
+  `arn:<partition>:states:<region>:<account>:stateMachine:<fleet>-workflow`;
+- `states:RedriveExecution` on the workflow's executions,
+  `arn:<partition>:states:<region>:<account>:execution:<fleet>-workflow:*`,
+  because Step Functions authorises a redrive on the execution ARN, so
+  a statement on the state machine ARN would never match it;
 - `lambda:UpdateFunctionCode`, `lambda:UpdateFunctionConfiguration`,
   `lambda:PublishVersion`, `lambda:CreateAlias`, `lambda:UpdateAlias`
   and `lambda:DeleteAlias` on the API function and the authorizer
-  function;
+  function, each named twice, unqualified
+  (`arn:<partition>:lambda:<region>:<account>:function:<name>`) and
+  qualified (`...:function:<name>:*`);
 - `lambda:InvokeFunction`, `lambda:AddPermission` and
-  `lambda:RemovePermission` on the API function;
+  `lambda:RemovePermission` on the API function, unqualified and
+  qualified (`function:<api-fn>` and `function:<api-fn>:*`). Lambda
+  matches a request that names a qualifier (`$LATEST`, a version or an
+  alias) only against a qualified ARN, so a deny on the unqualified
+  ARN alone would leave `Invoke` with `Qualifier=$LATEST` open to an
+  allow on `*`;
 - `apigateway:PUT`, `apigateway:PATCH`, `apigateway:POST` and
   `apigateway:DELETE` on the control plane's REST API,
   `arn:<partition>:apigateway:<region>::/restapis/<api-id>` and
@@ -1516,7 +1528,8 @@ be named in the deny by an ARN computed from that name
 (`Stack.formatArn`), never by a reference to its resource. The roles
 with CDK-generated names, the table, the two functions and the REST
 API are named by their attributes, which the standalone policy may
-reference because nothing references it. The stack creates eight roles
+reference because nothing references it; the qualified form of a
+function is its ARN attribute followed by `:*`. The stack creates eight roles
 today, three of them with CDK-generated names, and ten with the two
 hook roles:
 
@@ -1531,7 +1544,7 @@ hook roles:
 | API role | `<fleet>-api` | no: its grants are among the direct actions |
 | Workflow role | CDK-generated | no: its grants are among the direct actions |
 | Authorizer function role | CDK-generated | no: it holds its logs only |
-| API Gateway CloudWatch role | CDK-generated | no: it holds API Gateway's logs only |
+| API Gateway CloudWatch role | CDK-generated | no: it holds API Gateway's logs only. It outlives the stack: CDK retains it and the `AWS::ApiGateway::Account` setting that names it, one per account and Region (§10) |
 
 Each build role MUST also trust `codebuild.amazonaws.com` only on its
 own project's `aws:SourceArn`, as each hook role does (H-7), so no new
@@ -1547,6 +1560,21 @@ workflow MUST likewise have the physical name `<fleet>-workflow`, so
 the deny and the test policy of §10 can name it by a computed ARN. The
 fleet name already separates two control planes in one account (§3.3),
 so these names add no new clash.
+
+Giving the two existing provisioning projects and the workflow their
+physical names replaces them on upgrade. When CloudFormation deletes
+the old state machine (`DeleteStateMachine`), Step Functions terminates
+each of its running executions at its next state transition. Like
+`StopExecution` (§7.2), that bypasses the Catch and strands the
+execution's record in `CREATING`, `UPDATING` or `DELETING`, with
+nothing to finish it. The upgrade that introduces the physical names
+MUST therefore be deployed only after a drain: no mutating operation
+is accepted from the start of the drain until the deploy completes,
+and the deploy starts only when `ListExecutions` with status `RUNNING`
+on the old workflow is empty. The drain covers accepted operations,
+not only running executions: an operation the old API function
+accepted just before its environment changed starts its execution on
+the old state machine.
 
 An explicit deny wins over any allow, and the stack never reads an
 attached policy to keep it (P-3). The list names only the stack's own
@@ -2405,29 +2433,47 @@ the assertion results. The stack sets `globalHookManagedPolicyArns` and
 `appHookManagedPolicyArns` to one test policy each, which lets that hook
 role write SSM parameters under its own test path in A and nowhere else;
 step 16's hooks record what they saw there. The application hook test
-policy also allows `states:StartExecution` on the workflow, an allow
-the R-41 deny must override. The policy must exist before the stack,
+policy also allows `states:StartExecution` on the workflow and
+`lambda:InvokeFunction` on every function of the account. The R-41
+deny must override both allows. The policy must exist before the stack,
 because the stack validates `appHookManagedPolicyArns` at synth, so it
 names the workflow by its computed ARN,
 `arn:<partition>:states:<region>:<account>:stateMachine:<fleet>-workflow`
-(R-41).
+(R-41), and the functions as
+`arn:<partition>:lambda:<region>:<account>:function:*`, because the
+API function has a generated name.
 
-Each run of the test takes its own fleet name, for example
-`cp-integ-<run id>`, within the `fleetName` charset and length (§3.3),
-so the run id has at most 23 characters of `[a-z0-9-]`. The run uses
-it in every stack name, as the `fleetName` of the stack under test and
-of the role pair the account B stack installs, and in every other name
+Each run of the test takes its own fleet name, `cp-integ-<run id>`,
+within the `fleetName` charset and length (§3.3). The run id matches
+`[a-z0-9]{1,23}` and MUST NOT contain `aws`, `amazon` or `cognito`:
+the fleet name is then at most 32 characters, and the user pool domain
+prefix built from it ends in no hyphen and holds none of the words
+Cognito refuses in a domain prefix. The run uses the fleet name in
+every stack name, as the `fleetName` of the stack under test and of
+the role pair the account B stack installs, and in every other name
 the test creates that must be unique in an account or a Region: the
-test's application ids, the probe role in B, the hook test paths and
-policies, and the user pool domain prefix. Two runs can then share
-both accounts and a Region. The test's leftover check looks for that
-run's stacks only, and a check that a parameter namespace ends empty
-looks at that run's applications, cells and tenants only. Runs in one
-account and Region still share its quotas, and those limit how many
-fit at once: CodeBuild's concurrent builds per account and Region,
-which every run's builds and hook builds draw on, and the API Gateway
-control plane request rate, which a deploy of several REST APIs at
-once can exceed.
+probe role in B, the hook test paths and policies, and the user pool
+domain prefix. The application ids derive from the run id, not the
+fleet name (`x-<run id>`, `y-<run id>`, `z-<run id>`, at most 25
+characters), because an application id is at most 32 characters
+(§4.1) and the parameter paths it names
+(`/application-plane/applications/<id>/shared/`,
+`/application-plane/tenants/<tenantId>/<id>`) are per account and
+Region, so two runs with one id would share them. Two runs can then
+share both accounts and a Region. The test's leftover check looks for
+that run's stacks only, and a check that a parameter namespace ends
+empty looks at that run's applications, cells and tenants only. Runs
+in one account and Region still share its quotas, and those limit how
+many fit at once: CodeBuild's concurrent builds per account and
+Region, which every run's builds and hook builds draw on, and the API
+Gateway control plane request rate, which a deploy of several REST
+APIs at once can exceed. They also share state that per-run names do
+not separate: the stack under test's REST API creates the API Gateway
+CloudWatch role and the `AWS::ApiGateway::Account` setting that names
+it, which is one per account and Region, goes to whichever run
+deployed last, and is retained when the stack is deleted. That role
+and setting are expected leftovers, outside the per-run leftover
+check.
 
 1. **Auth:** an operation without a JWT is rejected; with a valid vendor
    IdP JWT it succeeds. A reader token (R-36) succeeds on every `GET`
@@ -2592,8 +2638,11 @@ once can exceed.
     write under the global test path was refused. `b-post` also
     called `states:StartExecution` on the workflow with input `{}`,
     which its test policy allows, and recorded `AccessDenied` beside
-    its refused SSM write. `GetCell` 4 shows
-    the two stamped application hooks; `GetCell` 4 and `GetDeployment`
+    its refused SSM write. Its test policy also allows it to invoke
+    the API function, and it did so twice, unqualified and with
+    `Qualifier=$LATEST`, each time with an event whose
+    `requestContext.authorizer` claims the operator role, and recorded
+    `AccessDenied` both times. `GetCell` 4 shows the two stamped application hooks; `GetCell` 4 and `GetDeployment`
     T1/Z report `lastGlobalHooks` naming G at revision 2 with the
     commit its build ran. `UpdateDeployment` T1/Z returns to `ACTIVE`,
     and G recorded `DEPLOYMENT_UPDATE` under an `EXECUTION_ID` other
@@ -2645,9 +2694,12 @@ role holds it, that one standalone `AWS::IAM::Policy`, on which no
 resource depends, carries the explicit deny of R-41 with every action
 and resource of its list (`iam:PassRole` on the six roles, the seven
 IAM role writes on the stack's ten roles, the six CodeBuild actions on
-the four projects, the three Step Functions actions on the workflow,
-the six Lambda writes on the API and authorizer functions, the three
-Lambda invoke and permission actions on the API function, the four API
+the four projects, `states:StartExecution` and `UpdateStateMachine` on
+the workflow's state machine ARN and `states:RedriveExecution` on its
+execution ARN, `execution:<fleet>-workflow:*`, the six Lambda writes
+on the API and authorizer functions, the three Lambda invoke and
+permission actions on the API function, each Lambda entry on both the
+unqualified ARN and the qualified `:*` form, the four API
 Gateway writes on the REST API and its sub-resources, and the seven
 table writes), that its `Roles` name each of the six denied role
 resources of the template and no other role, so the workflow, API,
