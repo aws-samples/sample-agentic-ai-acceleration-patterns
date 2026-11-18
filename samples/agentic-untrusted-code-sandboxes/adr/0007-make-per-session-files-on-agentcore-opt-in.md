@@ -32,8 +32,10 @@ Pros: simplest. Cons: drops the one feature only V2 offers here.
 
 Option 1. With `sessionFiles`, the runtime role gets `s3:GetObject` and
 `s3:PutObject` on `sessions/${aws:AgentCoreRuntimeSourceSid}/*` and a
-matching `s3:ListBucket` with an `s3:prefix` condition. SDK clients are
-built inside the handler, after the V2 snapshot (spike S-10).
+matching `s3:ListBucket` with an `s3:prefix` condition, and the sandbox
+subnets' S3 gateway endpoint policy also admits the input bucket's
+`sessions/` prefix (ADR-0012). SDK clients are built inside the handler,
+after the V2 snapshot (spike S-10).
 
 ## Consequences
 

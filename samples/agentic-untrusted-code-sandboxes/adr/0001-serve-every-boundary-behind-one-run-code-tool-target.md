@@ -17,10 +17,11 @@ ADR-0034, ADR-0035).
 
 ## Options considered
 
-### Option 1: A `ToolTarget` on the existing tools gateway
+### Option 1: A `ToolTarget` on the existing tools gateway, optional
 Pros: the tenant arrives signed; the grant decides who may call it; the
-tool TVM gives enforced access to inputs; no new ingress. Cons: the sample
-depends on `agentic-runtime-isolation` and its deploy.
+tool TVM gives enforced access to inputs; no new ingress. With the ingress
+optional, a vendor with their own tool layer can still use the backends.
+Cons: two wiring paths to document and test.
 
 ### Option 2: Its own API with its own token check
 Pros: stands alone. Cons: re-implements token verification and the TVM;
@@ -32,14 +33,18 @@ agent needs sandbox permissions.
 
 ## Decision
 
-Option 1. The tool is a Lambda `ToolTarget` with its own tenant role, so the
-tenant is chosen once from the signed context (P-2) and the input is read
-with enforced credentials (P-6). The dependency is the composition the
-repository asks for (standard §1.1).
+Option 1. With `ingress` set, the construct deploys a Lambda `ToolTarget`
+with its own tenant role, so the tenant is chosen once from the signed
+context (P-2) and the input is read with enforced credentials (P-6).
+Without it, the construct deploys the same function and roles but no
+target, and exports `runCode` for the vendor's own tool, which must pass a
+tenant id it verified itself. The construct stays producer-agnostic
+(standard §1.1).
 
 ## Consequences
 
-The integration test reuses or deploys an ingress with a tools gateway.
-The tool inherits the gateway's limits (tool Lambda timeout, spike S-11).
-A vendor without that ingress can still use the backends by calling the
-construct's run function from their own tool, which the README shows.
+The integration test reuses or deploys an ingress with a tools gateway and
+drives the `ToolTarget` path; unit tests cover the no-ingress path. The tool
+inherits the gateway's limits (tool Lambda timeout, spike S-11). Without
+the ingress, choosing the tenant correctly is the vendor's responsibility;
+the README says so.
