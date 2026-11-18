@@ -5,6 +5,7 @@
 - Status: Accepted
 - Date: 2026-11-18
 - Amends: ADR-0018
+- Amended by: ADR-0022
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -138,18 +139,8 @@ the page size and the removal paths of ADR-0018 stay as decided.
   switch being turned off, or when a dropped and re-set domain must not
   keep its earlier streaks.
 
-Note 2026-11-18 (full review, round 2): four refinements, none of
-which changes the option chosen. (1) The sweeper's role also holds
-`dynamodb:BatchWriteItem` on the table, a separate IAM action from
-`DeleteItem`, for the lister's batch delete. (2) The lister passes its
-UTC date to each page, and a page whose date is not the current UTC
-date logs a stale-page line and exits as a no-op. The date is not a
-caller-chosen input, because it must equal today; a page redriven from
-the on-failure queue on a later day is dropped and shows as a missing
-page for its own day. This replaces "the sweeper takes no day from its
-caller". (3) A page re-reads the route table with one `ListKeys` scan,
-which the role already holds: at most 430 calls of 50 keys, each
-abandoned after 0.3 s, 129 s, so the page bound is 129 + 740 + 2 = 871 s,
-inside the 900 s timeout. (4) The three-miss count is emitted only when
-this write's outcome is a miss; an error day or a pass emits none.
-Spec §3.4 holds the current text.
+Note 2026-11-18: ADR-0022 amends this record. The lister passes its
+UTC date to each page, which must match today and is then today for
+every read and write; the three-miss count is emitted only on a miss;
+each page re-reads the route table under a 120 s scan deadline; and the
+sweeper's role also holds `dynamodb:BatchWriteItem`.

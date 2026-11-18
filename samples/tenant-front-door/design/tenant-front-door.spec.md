@@ -177,7 +177,7 @@ has passed the registrar's domain challenge (ADR-0018).
 | Tenant router | edge | CloudFront Function (viewer request, JS 2.0) | Finds the tenant, refuses or routes. It names the tenant it routed on in the access log with `cf.logCustomData` (Telemetry, below). In `host` mode it also mints and checks the signed sign-in `state` and starts sign-out (§3.5, ADR-0016) |
 | Route table | edge | CloudFront KeyValueStore | `tenant`, `host` and `cell` entries, the `app` settings and, in `host` mode, the `signin` key (§4) |
 | Route registrar | edge | API Gateway (IAM auth) and Lambda | The only writer of the route table, and the only creator of dedicated distribution tenants, which the sweeper deletes once disabled. Admits only the control plane's global hook role and the edge operator role, and checks each write against the control plane (§3.4) |
-| Sweeper | edge | A Lambda function of its own, with a 15-minute timeout, its own execution role and its own log group, run by EventBridge Scheduler. Only when `dedicatedDomains` is on (§3.6) | Every 15 minutes it deletes the dedicated distribution tenants and certificates that no tenant's `d` names any more. Daily it re-checks the challenge record of every passed challenge, routed or not (§3.4 step 5), and keeps the state of that re-check in a DynamoDB table of its own (ADR-0020). Its log group holds no registrar request log |
+| Sweeper | edge | A Lambda function of its own, with a 15-minute timeout, its own execution role and its own log group, run by EventBridge Scheduler. Only when `dedicatedDomains` is on (§3.6) | Every 15 minutes it deletes the dedicated distribution tenants and certificates that no tenant's `d` names any more. Daily it re-checks the challenge record of every passed challenge, routed or not (§3.4 step 5), and keeps the state of that re-check in a DynamoDB table of its own (ADR-0020, ADR-0022). Its log group holds no registrar request log |
 | SPA origin | edge | S3 bucket with origin access control | One build for every tenant |
 | Cell API origin | the cell's | The cell's API (demo: Lambda function URL with origin access control) | Verifies the token, checks the route hint and the cell's tenants |
 | `CellRouteAccess` construct | the cell's | Lambda permission | Grants `cloudfront.amazonaws.com` `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`, conditioned on the edge distribution's ARN |
@@ -702,13 +702,18 @@ On every write:
    date to each page it starts. A page compares that date with the
    current UTC date when it starts and, when they differ, logs a
    stale-page line naming the date and the page number and exits as a
-   no-op, writing no item. The date is therefore not an input a caller
-   can choose: a page acts only on today, and the Scheduler's input
-   names no date. A page that the on-failure queue redrives on a later
-   day is dropped this way, so it never files outcomes or a page number
-   under a day its lister did not start, and it shows as a missing page
-   for its own day (below). The integration test reaches other days by
-   editing items (§10 step 14).
+   no-op, writing no item. Otherwise the page uses the passed date as
+   today for every read and write: the `lastCheckedDay` it compares and
+   writes, the day rule's condition (below) and the run item whose
+   `pagesFinished` it adds to. A page that starts before midnight and
+   ends after it files all of its outcomes and its page number under its
+   own day. The date is therefore not an input a caller can choose: a
+   page acts only on the day it starts, and the Scheduler's input names
+   no date (ADR-0022). A page that the on-failure queue redrives on a
+   later day is dropped this way, so it never files outcomes or a page
+   number under a day its lister did not start, and it shows as a
+   missing page for its own day (below). The integration test reaches
+   other days by editing items (§10 step 14).
 
    The lister (1) lists the entries with a passed challenge; (2) reads
    the previous day's run item and emits the missing-pages count
@@ -728,13 +733,13 @@ On every write:
    never rests on a CNAME. An entry ends in a pass, a miss (`missing` or
    `mismatch`) or an error (`unresolved`).
 
-   Each entry's outcome is recorded once for each UTC day. The page
-   reads the entry's item (a consistent read) and takes the counts
-   before today from it: `missStreak` and `errorStreak` when
-   `lastCheckedDay` is earlier than today, `missBefore` and
-   `errorBefore` when it is today, zero without an item. A pass sets
-   both counts to 0. A miss adds 1 to `missStreak` and sets
-   `errorStreak` to 0. An error adds 1 to `errorStreak` and leaves
+   Each entry's outcome is recorded once for each UTC day. Today is the
+   page's date throughout. The page reads the entry's item (a consistent
+   read) and takes the counts before today from it: `missStreak` and
+   `errorStreak` when `lastCheckedDay` is earlier than today,
+   `missBefore` and `errorBefore` when it is today, zero without an
+   item. A pass sets both counts to 0. A miss adds 1 to `missStreak` and
+   sets `errorStreak` to 0. An error adds 1 to `errorStreak` and leaves
    `missStreak` as it was, so an error day neither resets nor extends
    the miss streak and a resolver outage never looks like a lost proof.
    One `UpdateItem` writes the item, on the condition that the item does
@@ -744,40 +749,46 @@ On every write:
    extra run on the same day therefore changes nothing; a miss after a
    pass the same day replaces it, because a miss only counts toward
    three; a failed condition is a no-op, not an error. A day on which a
-   page failed leaves the item as it was, so a streak counts
-   consecutive checks, not calendar days: a failed page delays an alarm
-   and never cancels one.
+   page failed leaves the item as it was, so a streak counts consecutive
+   checks, not calendar days: a failed page delays an alarm and never
+   cancels one.
 
    When this write's outcome is a miss and it leaves `missStreak` at 3
-   or more, the page logs a three-miss line naming the tenant and the domain, never the token,
-   and emits one count, as an embedded metric format log line, to the
-   metric the three-miss alarm watches. A domain that stays broken
-   counts again on every later miss; an error day or a pass emits no
-   three-miss count. When a write leaves `errorStreak`
-   at 3 or more, the page logs an `unverifiable` line and counts to a
-   metric and alarm of its own, so whoever controls a domain's DNS
-   cannot hold it out of detection by breaking only
+   or more, the page logs a three-miss line naming the tenant and the
+   domain, never the token, and emits one count, as an embedded metric
+   format log line, to the metric the three-miss alarm watches. A domain
+   that stays broken counts again on every later miss; an error day or a
+   pass emits no three-miss count (ADR-0022). When a write leaves
+   `errorStreak` at 3 or more, the page logs an `unverifiable` line and
+   counts to a metric and alarm of its own, so whoever controls a
+   domain's DNS cannot hold it out of detection by breaking only
    `_tfd-challenge.<d>`; a resolver outage does not last three days. A
    write that did nothing emits nothing. Shortcut: an item's identity is
    the tenant and the domain, so a domain dropped and set again between
-   two daily runs keeps its earlier streaks and can alarm early;
-   upgrade to a key that includes a hash of `dk` when that matters. A
-   lost table restarts every streak at zero.
+   two daily runs keeps its earlier streaks and can alarm early; upgrade
+   to a key that includes a hash of `dk` when that matters. A lost table
+   restarts every streak at zero.
 
    When a page has recorded its last entry it adds its page number to
    `pagesFinished` (an `ADD` to a set, so a retried page adds nothing).
    A page that fails before that, after Lambda's two retries, is kept in
    the sweeper function's on-failure destination, an SQS queue. Each of
    a page's DynamoDB calls is made once, with a 2 s limit, and a failed
-   call fails the page. Its `ListKeys` scan reads a full store of about
-   21,000 keys (§4.1: 17,166 in `host` mode at the ceiling, up to 3,472
-   dedicated `host#<d>` keys in the headroom, and the cell routes) in at
-   most 430 calls of 50 keys, the API's page limit, each made once and
-   abandoned after 0.3 s, so at most 129 s. A page takes at most 129 s
-   for the scan, plus 500 ÷ 10 × (2 queries × 5.4 s + 2 calls × 2 s) =
-   740 s, plus 2 s to finish, 871 s, inside the sweeper function's
-   15-minute timeout (900 s). The route table holds
-   at most 3,472 dedicated tenants (§4.1), so a run is at most 7 pages.
+   call fails the page. Its `ListKeys` scan reads the store in calls of
+   50 keys, the API's page limit, each with a 2 s limit and the SDK's
+   standard retries, and the page fails once the scan has run for 120 s.
+   The scan has a deadline rather than a per-call product because the
+   store is capped by bytes (5 MB), not keys, so the number of calls
+   depends on the entry sizes; a store too large to scan in 120 s fails
+   every page, which the missing-pages alarm reports (below). Both
+   limits are chosen, not measured: no spike measured `ListKeys` latency
+   from the deployment Region to the store's global endpoint, so the
+   page logs the scan's duration and the integration run records it (§10
+   step 14). A page takes at most 120 s for the scan, plus 500 ÷ 10 × (2
+   queries × 5.4 s + 2 calls × 2 s) = 740 s, plus 2 s to finish, 862 s,
+   inside the sweeper function's 15-minute timeout of 900 s (ADR-0022).
+   The route table holds at most 3,472 dedicated tenants (§4.1), so a
+   run is at most 7 pages.
 
    A run records only on the UTC day it starts, because a page that
    starts on a later day exits as above. A run by hand late in the day
@@ -964,7 +975,7 @@ the store), the CloudFront actions `ListDistributionTenants`,
 tag. For the daily re-check it also holds `dynamodb:GetItem`,
 `Query`, `UpdateItem`, `DeleteItem` and `BatchWriteItem` on the
 sweeper's table (`BatchWriteItem` for the lister's batch delete, an
-IAM action of its own), `sqs:SendMessage` on
+IAM action of its own, ADR-0022), `sqs:SendMessage` on
 the on-failure queue and, for the lister's fan-out of one asynchronous
 invocation per page, `lambda:InvokeFunction` on the sweeper function.
 No other role in the stack has access to the table. The starter holds
@@ -1885,6 +1896,7 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0019](../adr/0019-strip-agents-before-the-agent-ingress.md) | The router strips `/agents` from `/agents/<backend>/invocations` before the agent ingress, and answers 404 for any other `/agents` path | router `uri` rewrite; an `/agents` base path on the ingress side; no prefix |
 | [ADR-0020](../adr/0020-keep-the-re-check-state-in-a-sweeper-owned-dynamodb-table.md) | Keep the dedicated-domain re-check state in a sweeper-owned DynamoDB table: one item for each tenant and domain, one for each daily run | the log as the record (Logs Insights); a sweeper-owned DynamoDB table; fields in the route table |
 | [ADR-0021](../adr/0021-add-a-per-ip-rate-rule-ahead-of-the-per-host-rule.md) | In `host` mode, a rate rule aggregated on `Host` and client IP, `ipRequestsPer5Min` (500, chosen, not measured), ahead of the per-host rule; amends ADR-0009 | no per-IP rule; an IP-only rule; a `Host`-and-IP aggregate |
+| [ADR-0022](../adr/0022-pin-each-sweeper-page-to-the-listers-date-and-re-read-the-route-table.md) | Pin each sweeper page to the lister's date, which it must match to today and then uses for every read and write; count three misses only on a miss; re-read the route table with a `ListKeys` scan under a 120 s deadline (page bound 862 s); grant `BatchWriteItem`; amends ADR-0020 | no date passed; a date the page trusts; a date the page must match to today |
 
 ## 9. Spikes
 
@@ -1929,7 +1941,9 @@ be a name below the zone's apex; `TFD_HOSTED_ZONE_ID`, the zone's id; and
 `TFD_DEDICATED_DOMAIN`, a second name in the zone, outside `appDomain`,
 for step 14. The test role holds `route53:ChangeResourceRecordSets` on
 that zone only, to write step 14's TXT records, and `route53:GetChange`
-to wait for each change.
+to wait for each change. In `test/integ.host.ts` it also holds
+`wafv2:GetWebACL` on the edge stack's web ACL only, to wait out step
+17's rule changes.
 
 Test-only shortcuts, all by the test role and none by the sample's own
 code: the step 2 fixture, one `host#` key written straight to the route
@@ -2087,7 +2101,10 @@ destroy time, which the test reports with the rest.
     day, because a page that starts after midnight exits as a no-op
     (§3.4). It invokes the sweeper function with the Scheduler's input
     and waits until the item shows today and the
-    day's run item shows `pagesStarted` 1 and `pagesFinished` `{1}`. The
+    day's run item shows `pagesStarted` 1 and `pagesFinished` `{1}`.
+    The test reports the page's `ListKeys` scan time from the page's
+    log, for each hand run, because the 2 s call limit and the 120 s
+    scan deadline (§3.4) are chosen, not measured. The
     check is a pass: the item holds `lastOutcome` `pass`, `missStreak` 0
     and `errorStreak` 0, and no three-miss line was logged. The test
     then removes `tfd-verify=<Tb>`, waits past the TTL, writes the item
@@ -2129,7 +2146,11 @@ destroy time, which the test reports with the rest.
     in `us-east-1` before the step and sets it back with a second one
     after; each changes only the web ACL's rule and is expected to take
     about 2 minutes (an estimate, not measured; the test reports the
-    measured time). Through `cloudfront:TestFunction` with
+    measured time). After each update the test waits for the rule change
+    to take effect before it sends: it polls `wafv2:GetWebACL` until the
+    web ACL's `LockToken` differs from the one read before the update,
+    then waits about 60 s more, the time WAF takes to apply a rule
+    change at the edge. Through `cloudfront:TestFunction` with
     `Host: <appDomain>`, the router answers 404.
 18. (host) Sign-in host (ADR-0016). `/signin-state` on `a`'s host with
     `Sec-Fetch-Site: same-origin` returns a `state`; cross-site it gets
