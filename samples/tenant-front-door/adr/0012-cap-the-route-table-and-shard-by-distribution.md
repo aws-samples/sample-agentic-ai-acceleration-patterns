@@ -4,7 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-17
-- Amended by: ADR-0017, ADR-0018
+- Amended by: ADR-0017 (Proposed, takes effect on acceptance), ADR-0018
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -95,7 +95,8 @@ need their own record.
   `single` mode or 8,900 in `host` mode, or when CloudFront raises the
   store size or allows more than one store per function.
 
-Amended 2026-11-17 by ADR-0017: each `tenant#` value also carries
+Note 2026-11-18, effective when ADR-0017 (Proposed) is accepted: each
+`tenant#` value also carries
 `dt`, the deployment's `createdAt` as Unix milliseconds
 (`"dt":<13 digits>,`, 19 bytes), so a hook can tell a new deployment
 from a leftover entry. The worst-case `tenant#` value is 166 bytes and
@@ -111,3 +112,11 @@ dedicated tenant adds at most 288 bytes to the 20 % headroom (`d` 71,
 `dk` 51, its `host#<d>` entry 166), so the headroom holds
 floor(1,000,000 / 288) = 3,472 dedicated tenants, less what `app` and
 `signin` take. The pooled ceilings do not change.
+
+Note 2026-11-18 (full design review): the dedicated ceiling above is the
+store's. ACM binds first: each dedicated domain needs one certificate in
+the edge account's `us-east-1`, against ACM's default quota of 2,500
+certificates for each account and Region (and 5,000 requests in any 365
+days), shared with that account's other certificates. The deployer raises
+the ACM quota before routing more than about 2,500 dedicated domains;
+spec §4.1 gives the sources.

@@ -5,18 +5,12 @@
 One file per decision, in the template of
 [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md).
 Every record is Accepted except ADR-0017, which is Proposed. ADR-0017
-depends on the control plane's global hooks (control-plane ADR-0044),
-also Proposed (spec Q-5). ADR-0017 will supersede ADR-0013 once
-ADR-0044 is accepted; until then ADR-0013 stays Accepted and ADR-0017
-Proposed. The `Amended by: ADR-0017` notes on ADR-0002, 0003, 0012, 0014
-and 0015 take effect when ADR-0017 is accepted. No spike is open
-([spec §9](../design/tenant-front-door.spec.md)). S-5 (`/agents/*`
-streaming) passed on 2026-11-18 on a standard distribution, which settles
-the `/agents/*` origin request policy in ADR-0011; the integration test
-([spec §10](../design/tenant-front-door.spec.md) step 23) verifies
-`/agents/*` on the `tenant-only` distribution. S-10 (what the
-registrar's Lambda function sees from its default resolver) passed on
-2026-11-18 and settles the resolver choice in ADR-0018.
+depends on the control plane's global hooks (control-plane ADR-0044, on
+`main` and also Proposed; spec Q-5). When ADR-0017 is accepted it
+supersedes ADR-0013. Until then ADR-0013 stays Accepted and ADR-0017
+Proposed, and the notes on ADR-0002, 0003, 0012, 0014 and 0015 that name
+ADR-0017 take effect only on its acceptance. The spike results are in
+[spikes](../design/spikes.md).
 
 | Number | Title | Status | Date |
 |---|---|---|---|

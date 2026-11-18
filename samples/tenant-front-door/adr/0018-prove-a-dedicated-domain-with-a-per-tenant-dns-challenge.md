@@ -336,5 +336,7 @@ design. The sweeper's role holds DynamoDB actions on that table in place
 of the Logs Insights actions. The challenge, the daily check, the
 three-miss and `unverifiable` rules, the on-failure queue, the
 missing-pages and no-lister alarms, the starter, the in-call lookups,
-the guard and the removal paths stand as decided. Spec §3.4 step 5
-describes the current re-check.
+the guard and the removal paths stand as decided. Treat the passages
+named above as superseded: spec §3.4 step 5 and ADR-0020 hold the
+current description of the re-check, and this record no longer repeats
+it.

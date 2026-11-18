@@ -4,7 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-18
-- Amended by: ADR-0017, ADR-0018
+- Amended by: ADR-0017 (Proposed, takes effect on acceptance), ADR-0018
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -111,12 +111,12 @@ domain an edit to shared configuration; Option 3 breaks P-8 and P-9.
   needs, or when the tenant count passes what one distribution tenant
   serves.
 
-Amended 2026-11-17 by ADR-0017: no role of a cell account reaches the
-registrar any more, provisioning roles included. The registrar's
-callers are the control plane's global hook role, under which the
-route hook runs, and the edge operator role. The global hook role that
-sends `customDomain` gets 403, so only the edge operator role sets a
-dedicated domain, as before.
+Note 2026-11-18, effective when ADR-0017 (Proposed) is accepted: no
+role of a cell account will reach the registrar, provisioning roles
+included. The registrar's callers will be the control plane's global
+hook role, under which the route hook runs, and the edge operator role.
+The global hook role that sends `customDomain` gets 403, so only the
+edge operator role sets a dedicated domain, as before.
 
 Amended 2026-11-18 by ADR-0018, which answers spec Q-3: the
 dedicated-domain path stays in this sample, off unless the deployer

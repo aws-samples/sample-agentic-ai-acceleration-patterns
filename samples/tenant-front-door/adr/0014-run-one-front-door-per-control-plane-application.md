@@ -4,7 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-13
-- Amended by: ADR-0017
+- Amended by: ADR-0017 (Proposed, takes effect on acceptance)
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -62,14 +62,14 @@ application keeps its own route table, ceiling and baseline.
   cost outweighs the isolation, or when one web client must reach several
   applications.
 
-Amended 2026-11-17 by ADR-0017: cell scripts no longer call the
-registrar, so the copy in each cell account holds only
-`distributionArn`, for `CellRouteAccess`. Each front door's
-`RouteHookAccess` stack writes
+Note 2026-11-18, effective when ADR-0017 (Proposed) is accepted: cell
+scripts will no longer call the registrar, so the copy in each cell
+account will hold only `distributionArn`, for `CellRouteAccess`. Each
+front door's `RouteHookAccess` stack will write
 `/application-plane/applications/<applicationId>/shared/front-door-hook`,
 with `registrarUrl`, in the control plane's account, a name of its own
 so that it never collides with the cell-account copy in a control-plane
 account that also hosts cells. The route hook,
 one pair of global hooks for every front door on the control plane,
-acts only for an application that has that parameter and exits 0 for
-every other, so one front door per application still holds.
+will act only for an application that has that parameter and exits 0 for
+every other, so one front door per application will still hold.

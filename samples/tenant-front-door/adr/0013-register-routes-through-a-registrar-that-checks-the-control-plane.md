@@ -100,3 +100,8 @@ Note 2026-11-18: the clause "the control-plane hooks branch merges
 first" in the note above stands for a dependency, which this note
 states instead: ADR-0017 stays Proposed until control-plane ADR-0044 is
 accepted, and this record stays Accepted until then.
+
+Note 2026-11-18: control-plane ADR-0044 is now on `main` and still
+Proposed. When ADR-0017 is accepted it supersedes this record; until
+then this record stays Accepted and the specification describes the
+ADR-0017 design.

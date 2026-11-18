@@ -83,3 +83,11 @@ handled by the browser baseline: a hash-based CSP with Trusted Types
   sign-in.
 - Revisit when the sample adds server-side rendering or a backend-for-frontend
   (spec §1.2), or when a tenant needs tokens kept out of page script.
+
+Note 2026-11-18 (full design review): the rule covers the refresh token
+too. The multi-tenant narrowing step (spec §3.5) needs the user's refresh
+token as the exchange's subject, so the SPA keeps it in memory like the
+access token, never in storage, and sends it only to the issuer's token
+endpoint and to the exchange endpoint. The "no CORS" consequence above
+has one exception: an exchange API on another origin must send CORS
+headers (spec §7.2).

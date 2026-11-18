@@ -23,7 +23,7 @@ lifted. The placement check proves which account is calling. It cannot
 prove that the vendor's script is the caller.
 
 The control plane's global hooks (control-plane R-39 to R-46,
-control-plane ADR-0044, Proposed) run vendor code on cell and deployment
+control-plane ADR-0044, on `main` and Proposed) run vendor code on cell and deployment
 events: `PRE` before the script, `POST` after it succeeded, global hooks
 wrapping application hooks. They run in CodeBuild in the control plane's
 account under `<fleet>-global-hook`, a role no cell account holds or
@@ -117,8 +117,9 @@ door on the control plane (ADR-0014). The name differs from the copy
 that each cell account holds, so a control-plane account that also
 hosts cells holds both. The registrar's resource policy
 admits one control-plane role ARN, `<fleet>-global-hook` in the
-control plane's account, plus the edge operator role, and denies
-everything else with the explicit `Deny` spike S-8 proved. The registrar
+control plane's account, plus the edge operator role (an input of
+the stack, `edgeOperatorRoleArn`, which the deployer brings; spec §3.6),
+and denies everything else with the explicit `Deny` spike S-8 proved. The registrar
 still reads the control plane on every hook write (ADR-0015): every
 global hook runs under the same role, so admission proves only that
 some vendor global hook is calling. It takes the cell and account from
@@ -133,10 +134,13 @@ another origin gets 409, and only the edge operator role changes it,
 also for cells that predate the hooks (backfill). A `tenant#` entry
 records the deployment's `createdAt` as `dt`, so a hook put for a new
 deployment replaces an entry that a skipped delete hook left, while
-retries and updates of one deployment keep it. Trusting the hook and
-dropping the read was rejected: one faulty or hostile global hook could
+retries and updates of one deployment keep it. The display name comes from the control plane's `GetTenant` and not from
+the hook's `TENANT_NAME`, so no global hook can set it. Trusting the hook
+and dropping the read was rejected: one faulty or hostile global hook could
 then route or unroute any tenant. The hook retries a 5xx, 429 or missing answer inside its
-build for about two minutes and fails at once on 400, 403, 409 or 507,
+build for about two minutes, and a throttled read of the front door hook
+parameter for about a minute, so another application's burst of creates
+does not fail this one's. It fails at once on 400, 403, 409 or 507,
 printing the registrar's message.
 
 ## Consequences
@@ -145,7 +149,8 @@ printing the registrar's message.
   registrar, a hook's put keeps the stored status, and a hook's delete
   is refused while the deployment is live. Only the vendor's
   `DeleteDeployment` and a new `CreateDeployment` start a route
-  `active` again (spec §4.2, integration step 13).
+  `active` again (spec §4.2, the suspension step of the integration
+  test).
 - No global hook can remove a live tenant's route, or re-create one
   during its delete, through the shared role: the status check admits a
   hook's put only while the record is `CREATING` or `UPDATING` and its
@@ -183,7 +188,11 @@ printing the registrar's message.
 - A delete hook that fails three times is skipped, and the control
   plane's skip alarm fires (control-plane T42). The route it left is
   removed by the edge operator role, which may now call
-  `DeleteTenantRoute` and `DeleteCellRoute` for any route. A later
+  `DeleteTenantRoute` and `DeleteCellRoute` for any route.
+  `DeleteCellRoute` does not scan for tenant routes that name the cell:
+  the control plane refuses `DeleteCell` while the cell holds a
+  deployment, and a leftover tenant route answers 503 once its cell
+  route is gone. A later
   `CreateDeployment` for the tenant does not inherit a leftover entry:
   its `createdAt` differs from the entry's `dt`, so the hook's put
   replaces it and the route starts `active`.
@@ -212,11 +221,11 @@ printing the registrar's message.
 - Spike S-8 still covers the admission: it proved a cross-account
   `aws:PrincipalArn` match on a role ARN and the need for the explicit
   `Deny`; only the admitted principal changes. The integration test
-  checks that the second account's provisioning roles get 403 (spec §10
-  steps 11 to 13).
+  checks that the second account's provisioning roles get 403 (spec §10,
+  the steps that call the registrar from the second account).
 - This record stays Proposed, and ADR-0013 Accepted, until
-  control-plane ADR-0044 is accepted. On acceptance this record
-  supersedes ADR-0013.
+  control-plane ADR-0044 (on `main`, Proposed) is accepted. On
+  acceptance this record supersedes ADR-0013.
 - Revisit when control-plane ADR-0044 changes before it is accepted
   (spec Q-5), or when the control plane offers a role per global hook
   (its §11 seam), which would let the registrar admit the route hook
