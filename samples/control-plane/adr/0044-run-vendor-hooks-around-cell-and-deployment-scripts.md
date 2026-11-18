@@ -270,13 +270,17 @@ poll the first poll did not carry it yet, and at 60 seconds it may,
 but only the final poll is read. An S3 source reports none, so the
 record keeps the requested `sourceVersion` (H-2). A hook's
 `timeoutMinutes` (T, 5 to 30) is CodeBuild's run timeout. The start is
-an explicit loop that holds three variables, set by one `Assign` when
-a try begins: the try index `TRY`, that try's queued timeout q, 10
-minutes less the minutes refused so far and never below CodeBuild's
-minimum of 5, and the idempotency token. A `StartBuild` refused under
+an explicit loop over three variables: the try index `TRY`, that try's
+queued timeout q, 10 minutes less the minutes refused so far and never
+below CodeBuild's minimum of 5, and the idempotency token. The state
+that enters the attempt sets `TRY` to 1, the refusal `Choice` rule
+sets it to `$TRY + 1`, and a state that begins each try assigns q and
+the token from it, because an `Assign` reads every variable as it was
+when its state was entered (Step Functions Developer Guide, workflow
+variables). A `StartBuild` refused under
 a known refusal name (a concurrency quota, the project at its cap, and
 throttling once its name is verified) goes through a `Catch`, a
-30-second `Wait` and a `Choice` that increments `TRY`, for at most 5
+30-second `Wait` and a `Choice` that advances `TRY`, for at most 5
 minutes, so refusals and the queue take at most 10 minutes together.
 A transient error is a task `Retry` (`TimeoutSeconds` 15,
 `IntervalSeconds` 10, `BackoffRate` 1, `MaxAttempts` 3, no jitter),
@@ -290,7 +294,7 @@ token could leave a second build. The token is
 `$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK_ID, $string(ATTEMPT),
 $string(TRY)], '|'), 'SHA-256')`, 64 hexadecimal characters. Every
 field of the start task's `Arguments`, the token included, reads only
-variables and state fixed for the try, never `$uuid()`, `$now()`,
+variables fixed for the try, never `$uuid()`, `$now()`,
 `$millis()` or another changing value, because a `Retry` evaluates
 them again and CodeBuild refuses a repeat whose arguments differ with
 `CodeBuild.InvalidInputException`. The token has a fixed length,
@@ -298,7 +302,8 @@ differs on every try and stays the same on every repeat, so a call
 that created a build before it failed returns that build again instead
 of leaving one with no id to stop. A try whose repeats all fail, or a
 repeat refused with `CodeBuild.InvalidInputException`, ends the
-attempt as "start outcome unknown", never a new try under another
+attempt as "start outcome unknown", with the last error named so a
+wiring fault is told from a lost start, never a new try under another
 token. The attempt's deadline is data: the run timeout, the 10 minutes
 and five minutes of margin from the first start try, and on delete
 never later than 2 minutes before the end of the hook's budget. At the
