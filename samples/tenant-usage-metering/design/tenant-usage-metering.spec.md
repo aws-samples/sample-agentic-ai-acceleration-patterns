@@ -455,8 +455,9 @@ registration or any of its `intervals`) and the meter version at its
 time, and writes the ones
 that pass, with their original `receivedAt`, to `readmitted/hour=.../`,
 which the recount reads with `raw/`. It writes S3 directly, so it may
-re-admit into any hour that is not `CLOSED`. An event whose hour is
-`CLOSED` stays refused, `TOO_LATE`.
+re-admit into any hour that is not `CLOSED` and not within 5 minutes of
+its close; other events stay refused, `TOO_LATE` (the close guard,
+§4.5).
 
 ### 4.7 Usage record
 
@@ -510,14 +511,19 @@ application, then makes one conditional write:
 | has none | this sink `BLOCKED` (`NO_BILLING_ACCOUNT`) | `attribute_not_exists(billingAccount)` |
 
 On a failed condition the dispatcher re-reads the record, which now
-holds `billingAccount`, and sends with it. So a sink is `BLOCKED` on a
+holds `billingAccount`, and sends with it. After a successful "has none"
+write it reads the binding again, strongly consistent: if the binding
+now has an account, it makes the "has an account" write; if it still has
+none, any later `PutTenantBinding` starts a job that sees this sink
+`BLOCKED`. So a sink is `BLOCKED` on a
 revision-2 record only for the moment between that write and its
 publish.
 
 A `PutTenantBinding` that sets a billing account starts a
 `RESEND_BLOCKED` job for that tenant and application and returns;
-`StartResendBlocked` lets an operator start the same job. For each
-record with a `BLOCKED` sink, the job writes the value as revision 2 with
+`StartResendBlocked` lets an operator start the same job. The job reads
+the tenant and application's records with a strongly consistent query on
+the base table. For each record with a `BLOCKED` sink, the job writes the value as revision 2 with
 `publishPending` (condition `revision = 1`), or, on a record already at
 revision 2, queues its `BLOCKED` sinks directly. An alarm fires when a
 delivery has been `BLOCKED` for 24 hours.
