@@ -16,8 +16,10 @@ ADR-0017 is accepted. One spike is still open
 ([spec §9](../design/tenant-front-door.spec.md)): S-10 (what the
 registrar's Lambda function sees from its default resolver), which if
 it fails reopens the resolver choice in ADR-0018. S-5 (`/agents/*`
-streaming) passed on 2026-11-18, which settles the `/agents/*` origin
-request policy in ADR-0011.
+streaming) passed on 2026-11-18 on a standard distribution, which settles
+the `/agents/*` origin request policy in ADR-0011; the integration test
+([spec §10](../design/tenant-front-door.spec.md) step 23) verifies
+`/agents/*` on the `tenant-only` distribution.
 
 | Number | Title | Status | Date |
 |---|---|---|---|

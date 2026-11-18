@@ -121,10 +121,11 @@ router therefore strips the leading `/agents` from
 `<stage>/<backend>/invocations`, and answers 404 at the edge for any
 other `/agents` path, `/agents` and `/agents/` included. The
 `/agents/*` origin, its origin request policy and the absence of
-origin access control do not change.
-
-Spike S-5 (2026-11-18) passed: through the `/agents/*` behaviour with
+origin access control do not change. Spike S-5 passed the same day, on
+a standard distribution: through the `/agents/*` behaviour with
 `Managed-AllViewerExceptHostHeader` and no origin access control, the
 ingress received the viewer's bearer on `GET` and `POST`, and streams
 arrived unbuffered (first byte within 14 ms of the ingress's write, one
-event per read). The `/agents/*` origin request policy stands.
+event per read). S-5 did not cover the `tenant-only` distribution; spec
+§10 step 23 verifies the rewrite, every 404 case and a streamed `POST`
+on it.

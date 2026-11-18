@@ -10,10 +10,10 @@
 ## Context
 
 The SPA calls an agent at `/agents/<backend>/invocations` on the app's
-own origin (§3.2). The `/agents/*` behaviour sends it to the single
+own origin (spec §3.2). The `/agents/*` behaviour sends it to the single
 `agentIngress` origin, whose origin path is the ingress's stage
 (`/prod`, the path of the `baseUrl` that `agentic-runtime-isolation`
-publishes, §6.3). CloudFront appends the request path to the origin
+publishes, spec §6.3). CloudFront appends the request path to the origin
 path as it is, so without a change the ingress receives
 `/prod/agents/<backend>/invocations`. The `api-gateway` ingress routes
 `POST /{backend}/invocations` under its stage, with no `/agents`
@@ -83,16 +83,19 @@ other `/agents` path get 404 at the edge.
   issuer, entitlement or delegation routes behind the same API.
 - `/agents` without a slash falls under the default (SPA) behaviour, so
   the router checks it before it rewrites SPA routes to `/index.html`
-  (§3.3 step 3). The default behaviour allows only `GET` and `HEAD`, so a
+  (spec §3.3 step 3). The default behaviour allows only `GET` and `HEAD`, so a
   `POST /agents` gets CloudFront's own 403 before the router runs; either
   answer keeps it from the ingress (S-5).
 - The real ingress serves `POST` only. A `GET` to an agent route passes
   the edge and gets the ingress's own 403. S-5's `GET` check therefore
   proves that the origin request policy forwards `Authorization` on
   `GET`, not a route.
-- Spike S-5 passed on 2026-11-18: the ingress saw
-  `<stage>/<backend>/invocations` with no `/agents`, streams arrived
-  unbuffered, and `/agents/` got the router's 404 (§9).
+- Spike S-5 passed on 2026-11-18, on a standard distribution: the
+  ingress saw `<stage>/<backend>/invocations` with no `/agents`,
+  streams arrived unbuffered, and `/agents/` got the router's 404
+  (spec §9). The `tenant-only` distribution the front door deploys is
+  verified by spec §10 step 23, with the rewrite, every 404 case and
+  one streamed `POST` to a stand-in ingress.
 - Harder: a new ingress route the SPA must call (a bare default-backend
   route, say) needs a router change and a spec line.
 - Revisit when `agentic-runtime-isolation` changes its route shape or

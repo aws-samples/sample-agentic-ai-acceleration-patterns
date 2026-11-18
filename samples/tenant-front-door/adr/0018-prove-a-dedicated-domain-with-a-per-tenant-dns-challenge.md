@@ -34,9 +34,9 @@ another tenant's proof nor a stale one passes. It must work before the
 domain points at the front door, because CloudFront serves a domain only
 once its distribution tenant and certificate exist. The route table is a
 KeyValueStore with a 5 MB ceiling, of which 20 % is headroom for
-non-pooled data (ADR-0012), and the registrar keeps no store of its own
-(spec P-6). Dedicated domains are an add-on: the pooled path must not
-need them, and a deployer who does not use them should not carry the
+non-pooled data (ADR-0012), and the sweeper keeps no miss history of its
+own: its log is the record. Dedicated domains are an add-on: the pooled
+path must not need them, and a deployer who does not use them should not carry the
 CloudFront and ACM permissions they need (spec §3.4).
 
 ## Options considered
@@ -127,7 +127,7 @@ before it writes the domain's `host#` key.
 - Easier: a dedicated domain is routed only after the tenant has shown
   control of its DNS with a token issued for it, so a former holder's
   validation record, which still validates ACM certificates, no longer
-  routes a domain to the wrong tenant (spec §10 step 14).
+  routes a domain to the wrong tenant (spec §3.4 step 5).
 - Easier: no new store. A dedicated tenant carries `dk` (51 bytes) and,
   while its challenge is open, `dx` (16 bytes) on its `tenant#` entry,
   beside `d` (71) and its `host#<d>` entry (166). At worst 288 bytes per
@@ -160,19 +160,26 @@ before it writes the domain's `host#` key.
   until the operator drops it. The daily re-check covers every passed
   challenge, routed or not, because a pending certificate request rests
   on the same proof; its alarm means the tenant does not show control
-  of a domain it claimed. The lister gives each run a run id and passes
-  it to every page of 500 entries. Each page looks its records up 10 at
-  a time with a 5 s timeout, querying CNAME only when the TXT answer is
-  empty or holds the token, and logs each miss with the run id, tenant
-  and domain, never the token. At its start, the page runs one Logs
-  Insights query that finds the two most recent run ids before its own
-  and returns every tenant and domain that missed in both; it compares
-  its misses with that list in memory, logs a three-miss line with the
-  tenant and domain, and emits one count, as an embedded metric format
-  log line, to the metric the alarm watches. A page takes at most 500 s
-  of lookups plus a 60 s poll limit on its one query; a failed query
-  logs an error and emits no three-miss line. One query per page in
-  flight keeps a run inside the Logs Insights quota of 30 concurrent
+  of a domain it claimed. The lister gives each run a run id, logs it
+  on a `run-start` line with the page count, and passes it to every page
+  of 500 entries. Each page looks its records up 10 at a time with a 5 s
+  timeout, querying CNAME only when the TXT answer is empty or holds the
+  token, and logs one line per entry with the run id, the outcome
+  (`pass`, `miss` or `error`), the tenant and the domain, never the
+  token, then a `page-end` line. At its start, the page runs one Logs
+  Insights query that returns the `run-start` lines of the last 7 days
+  and the entry lines of its tenant range under them, and walks each
+  missed entry's earlier runs in memory. Only a logged `pass` breaks the
+  streak; a run with an error or with no line for the entry, because its
+  page failed, is unknown and is skipped. Two earlier misses before any
+  pass make a three-miss line with the tenant and domain, and one count,
+  as an embedded metric format log line, to the metric the alarm
+  watches. A page takes at most 500 s of lookups plus a 60 s poll limit
+  on its one query; a query that fails fails the page, which Lambda
+  retries twice and then keeps in an on-failure queue. Alarms on that
+  queue and on pages started minus pages that logged their end line
+  say that detection was down. One query per page in flight keeps a run
+  inside the Logs Insights quota of 30 concurrent
   queries. The sweeper keeps no store of its own: its log is the
   record. A resolver error is logged apart and never counted as a
   miss, so an outage cannot look like a lost proof. A removed record can still pass for as long as the resolver

@@ -11,7 +11,9 @@ ADR-0013 once ADR-0044 is accepted; until then ADR-0013 stays Accepted,
 and the control-plane hooks branch merges before this one. One spike is
 still open: S-10 (DNS answers to the registrar's Lambda function, §9),
 which if it fails reopens the resolver choice in ADR-0018. S-5
-(`/agents/*` streaming) passed on 2026-11-18.
+(`/agents/*` streaming) passed on 2026-11-18 on a standard distribution;
+§10 step 23 verifies `/agents/*` on the `tenant-only` distribution, and
+S-5 does not.
 
 ## 1. Problem statement
 
@@ -265,7 +267,11 @@ On every viewer request:
    without a slash falls under the default behaviour, so this check
    comes before step 8 rewrites it to `/index.html`. Paths that need
    no tenant (§3.2) skip to step 8, and so does `/signin-state` in
-   `single` mode.
+   `single` mode. With `agentIngress` off there is no `/agents/*`
+   behaviour and no rewrite, and the router answers 404 for every
+   `/agents` path that reaches it, a well-formed
+   `/agents/<backend>/invocations` included (a `POST`, which the
+   default behaviour refuses, gets CloudFront's own 403).
 4. For `/api/*`, `/agents/*` and `/signin-state`, check `Sec-Fetch-Site`.
    Allow only `same-origin`, `none`, or no header; refuse the rest with
    403 (§7.3).
@@ -506,11 +512,11 @@ On every write:
    5. Certificate issued: resolve `_tfd-challenge.<d>` again as in
       sub-step 2, because up to 72 hours may have passed since the
       challenge did. Unless the record still holds `tfd-verify=<dk>`,
-      answer 202 with `stage: "domain-challenge"`, the record and its
-      `challenge` value (`"missing"` when the record is gone) and write
-      no `host#<d>`; the challenge
-      stays passed, and the operator repeats the call once the record
-      is back. Otherwise create the distribution tenant with the
+      answer 202 with `stage: "challenge-recheck"`, the record and its
+      `challenge` value (`"missing"`, `"mismatch"` or `"unresolved"`, as
+      in sub-step 2) and write no `host#<d>`; the certificate stays, the
+      challenge stays passed, and the operator repeats the call once the
+      record is back. Otherwise create the distribution tenant with the
       certificate, on this distribution and with the same tags, unless
       it exists; write `host#<d>`; answer 200. No request is routed on
       the domain before then. Once `host#<d>` exists, a repeat looks
@@ -542,34 +548,59 @@ On every write:
    passed challenge (`dk` without `dx`), routed or not, because a
    certificate request still pending rests on the same proof as a
    routed domain. The daily run's lister assigns the run a run id, its
-   own invocation id, lists those entries and starts one asynchronous
-   run of the sweeper per page of 500 entries, passing the run id to
-   every page. Each page resolves its records as sub-step 2 does, 10 lookups
-   at a time with a 5 s timeout each. It queries CNAME at the name only
-   when the TXT answer is empty or holds the token, so a pass never
-   rests on a CNAME and a TXT answer without the token is a miss after
-   one query. A lookup ends in a pass, a miss (`missing` or
-   `mismatch`) or an error (`unresolved`). The sweeper
-   logs each miss and each error with the run id, the tenant and the
-   domain, never the token. An error is logged apart from a miss and
-   never counted as one, so a resolver outage never looks like a lost
-   proof; a metric filter counts errors on their own. At its start, each
-   page runs one Logs Insights query over its own log: it finds the two
-   most recent run ids before this one and returns every tenant and
-   domain that logged a miss in both. The page compares its own misses
-   with that list in memory and runs no query per miss. For a tenant
-   and domain on the list that misses again, it logs a three-miss line
-   naming the tenant and the domain, never the token, and emits one
-   count to the re-check metric as an embedded metric format log line,
-   which the alarm watches. The page polls the query's results for at
-   most 60 s; when the query fails or does not finish, the page logs an
-   error and emits no three-miss line in that run. A page therefore
-   takes at most 500 records × 2 queries ÷ 10 × 5 s = 500 s of lookups
-   plus 60 s for the Logs Insights query, inside the 15-minute Lambda
-   limit. Each page has at most one query in flight, and the route
-   table holds at most 3,472 dedicated tenants (§4.1), so a run of at
-   most 7 pages stays below the Logs Insights quota of 30 concurrent
-   queries per account and Region. The sweeper keeps no store of its own: its
+   own invocation id, lists those entries, logs a `run-start` line with
+   the run id and the number of pages, and starts one asynchronous run
+   of the sweeper per page of 500 entries, passing every page the run
+   id and the page's range of tenant ids. Each page resolves its
+   records as sub-step 2 does, 10 lookups at a time with a 5 s timeout
+   each. It queries CNAME at the name only when the TXT answer is empty
+   or holds the token, so a pass never rests on a CNAME and a TXT
+   answer without the token is a miss after one query. A lookup ends in
+   a pass, a miss (`missing` or `mismatch`) or an error (`unresolved`).
+   The page logs one line per entry with the run id, the tenant, the
+   domain and the outcome, never the token, and, once every entry has
+   its line, a `page-end` line with the run id and its page number. An
+   error is logged apart from a miss and never counted as one, so a
+   resolver outage never looks like a lost proof; a metric filter
+   counts errors on their own.
+
+   The runs before this one are the `run-start` lines of the last 7
+   days, newest first, and a run's lines are those that carry its run
+   id. At its start each page runs one Logs Insights query over its own
+   log that returns those `run-start` lines and the entry lines of its
+   tenant range under them: at most 500 entries for each of 7 runs,
+   inside the query's 10,000-row limit, and no query per miss. Once its
+   lookups are done the page reads the results, waiting at most 60 s,
+   and walks each missed entry's earlier runs, newest first. A `pass`
+   line ends the walk and the streak with it, and only a logged pass
+   does. A run with an `error` line for the entry, or with no line for
+   it because its page never ran or never finished, is unknown: it
+   neither breaks the streak nor counts as a miss, and the walk goes
+   on. A run is read once however many times its page ran. When the
+   walk finds two earlier misses before any pass, the entry has missed
+   three checks in a row: the page logs a three-miss line naming the
+   tenant and the domain, never the token, and emits one count to the
+   re-check metric as an embedded metric format log line, which the
+   alarm watches. A failed page therefore delays a three-miss line and
+   never cancels one. Shortcut: the walk looks back 7 days, so a streak
+   with more than five unknown runs among the last seven is not found;
+   the alarms below tell the operator that detection was down. A query
+   that fails or does not finish in 60 s fails the page, after its
+   entry lines are logged and before its `page-end` line. A page
+   therefore takes at most 500 records × 2 queries ÷ 10 × 5 s = 500 s
+   of lookups plus 60 s for the Logs Insights query, inside the
+   15-minute Lambda limit. Each page has at most one query in flight,
+   and the route table holds at most 3,472 dedicated tenants (§4.1), so
+   a run of at most 7 pages stays below the Logs Insights quota of 30
+   concurrent queries per account and Region. The sweeper function's
+   asynchronous invocations have an on-failure destination, an SQS
+   queue, so a page that fails after Lambda's two retries is kept and
+   not dropped. Two alarms watch the re-check itself, besides the
+   three-miss alarm: the queue's depth, and the pages the run started
+   (the count on its `run-start` line) minus the pages that logged a
+   `page-end` line, over one day, with a missing started count treated
+   as breaching so that a run that never started also alerts. The
+   sweeper keeps no store of its own: its
    log is the record. A domain that stays broken emits a count on every
    later run, and each three-miss line names its domain, so a second
    broken domain shows in the log while the alarm is already firing.
@@ -612,10 +643,14 @@ On every write:
    the domain's distribution tenant. A sweeper in the registrar, run
    every 15 minutes by EventBridge Scheduler, lists this distribution's
    dedicated distribution tenants and the registrar's certificates.
-   One whose domain is no longer the `d` of the tenant it is tagged with
-   is disabled if it is still enabled, deleted once it is disabled and
-   deployed, and its certificate deleted after it. The sweeper finds
-   what a crashed call left the same way. A changed domain is offline
+   A distribution tenant whose domain is no longer the `d` of the
+   tenant it is tagged with is disabled if it is still enabled, deleted
+   once it is disabled and deployed, and its certificate deleted after
+   it. A registrar certificate that never had a distribution tenant
+   (the domain was dropped or changed while the certificate was
+   pending), and whose domain is no longer the `d` of the tenant it is
+   tagged with, is deleted on its own. The sweeper finds what a crashed
+   call left the same way. A changed domain is offline
    from the write until the new one validates. Before it touches a
    distribution tenant or a certificate, the registrar checks that its
    tags name this tenant and this distribution (409 otherwise), so a
@@ -705,19 +740,27 @@ stack update that turns `dedicatedDomains` off fails while any
 dedicated distribution tenant or certificate for the sweeper to delete:
 a custom resource reads the route table and those lists and refuses the
 update. That check resource runs before the registrar's switch and
-role change in the same stack update: the registrar function and its
-role declare a dependency on it, so no operator call between the check
-and the switch can add a `d` the update then strands. The operator
+role change in the same stack update: the registrar function, its role
+and both schedules declare a dependency on it, so no operator call
+between the check and the switch can add a `d` the update then
+strands, and a refusal rolls the update back before the role's policy
+or a schedule changes. The operator
 drops every dedicated domain first and waits for the sweeper, so no
 domain stays routed with no role able to remove it and no daily
 re-check. The challenge lookup itself needs no IAM action: it is a DNS
-lookup. The daily re-check needs `logs:StartQuery` and
-`logs:GetQueryResults` on the sweeper's own log group, and emits its
-three-miss count as an embedded metric format log line, so it needs no
-`cloudwatch:PutMetricData`. The check custom resource needs the route
-table read, `cloudfront-keyvaluestore:DescribeKeyValueStore` and
-`ListKeys` on the store, `cloudfront:ListDistributionTenants` and, in
-`us-east-1`, `acm:ListCertificates`.
+lookup. The daily re-check holds these actions, only while
+`dedicatedDomains` is on: `logs:StartQuery` on the sweeper's log group
+and `logs:GetQueryResults`, which IAM does not scope to a log group,
+for its Logs Insights queries; `sqs:SendMessage` on the on-failure
+queue; and, for the lister's fan-out of one asynchronous invocation
+per page, `lambda:InvokeFunction` on the sweeper function. Its counts,
+the three-miss count and the pages started and finished, are embedded
+metric format log lines, so no role needs `cloudwatch:PutMetricData`.
+The log group keeps its lines for 14 days, which covers the 7-day
+look-back. The check custom resource needs the route table read,
+`cloudfront-keyvaluestore:DescribeKeyValueStore` and `ListKeys` on the
+store, `cloudfront:ListDistributionTenants` and, in `us-east-1`,
+`acm:ListCertificates` and `acm:ListTagsForCertificate`.
 
 The route hook (`hooks/route-hook.sh`) runs on the events of §3.2 with
 the control plane's hook environment (control-plane R-42):
@@ -942,7 +985,7 @@ hook's put replaces the entry, `s: active` and routed to the new cell
 | `signinKeys` | no | `{ids: ["k1"], current: "k1"}` | `host` mode only: `{ids: string[], current: string}`, the `kid`s the `signin` key holds and the one that signs. Synth checks that `ids` holds one or two unique ids, each matching `[a-z0-9]{1,8}`, and that `current` is one of them (§4.1) |
 | `tenantClaim` | no | `tenant_id` | Claim the router and the origin read |
 | `spaSource` | no | the demo SPA | Path of the built SPA |
-| `agentIngress` | no | off | Agent ingress endpoint; omit to leave `/agents/*` off |
+| `agentIngress` | no | off | Agent ingress endpoint; omit to leave `/agents/*` off, and the router then answers 404 for every `/agents` path (§3.3 step 3) |
 | `dedicatedDomains` | no | off | Lets the edge operator role set a tenant's `customDomain` (§3.4 step 5, ADR-0018). Off: any `customDomain` gets 400, and the registrar role holds no ACM or distribution-tenant action and runs no sweeper. A stack update that turns it off fails while any `tenant#` entry holds a `d` or the sweeper has a distribution tenant or certificate left to delete; the operator drops every dedicated domain first (§3.4) |
 | `tenantRequestsPer5Min` | no | 2,000 | Per-tenant rate (ADR-0009) |
 | `reportingEndpoint` | no | off | URL for CSP and other browser reports |
@@ -1085,7 +1128,7 @@ Modelled in Smithy; all operations `AWS_IAM`, all idempotent.
 |---|---|---|---|
 | `PutCellRoute` | `PUT /cells/{cellId}` | global hook role (route hook, cell create and update); edge operator role, for backfill and origin changes (§3.4) | Body `{apiDomain}`, from the cell script's `frontDoorApiDomain` output, or from the operator. A Lambda function URL host in the control plane's Region (400 otherwise). Account taken from the control plane, never the body. For the global hook role, 409 while the cell is neither `CREATING` nor `UPDATING`, and 409 when `cell#` holds another origin: the origin is write-once for it. Checks §3.4. 200 |
 | `DeleteCellRoute` | `DELETE /cells/{cellId}` | global hook role (route hook, cell delete); edge operator role, to clear a route a skipped hook left | 409 while a tenant route names the cell, and for the global hook role while the cell is neither missing nor `DELETING` (§3.4). 200, also when absent |
-| `PutTenantRoute` | `PUT /tenants/{tenantId}` | global hook role (route hook, deployment create and update); edge operator role to set `customDomain` | Body `{displayName, customDomain?}`. `displayName` is stored as §4.1 says. The entry records the deployment's `createdAt` as `dt`. A new `tenant#` entry gets `s: active`; a write to an existing entry keeps its `s`, from either role, and only `UpdateTenantRouteStatus` changes it. A hook put whose deployment `createdAt` differs from the stored `dt` replaces the entry as a new one (§3.4 step 5). Only the edge operator role may send `customDomain`, and only while `dedicatedDomains` is on (400 otherwise); the global hook role that sends it gets 403, and its call without it keeps the stored domain. The operator's call sets the domain, or drops it when `customDomain` is absent. A new domain is one host name of at most 64 characters with no wildcard, outside `appDomain` and held by no other tenant. The call writes it as `d` on `tenant#` first, with a domain challenge for this tenant and domain, and answers 202 with `stage: "domain-challenge"` and the TXT record to publish, `_tfd-challenge.<d>` `tfd-verify=<token>`, valid for 7 days. A repeat resolves that record: until it holds this tenant's token the call answers 202 again, with `challenge: "missing"`, `"mismatch"` or `"unresolved"` (a resolver error, never a pass), and an expired challenge gets a new token. Once it passes, the call requests the domain's ACM certificate in `us-east-1`, which validates by DNS once the tenant publishes ACM's validation record, and answers 202 with `stage: "certificate"` and that record until then; a repeat finds the certificate and creates nothing twice (ADR-0018). Once the certificate has validated and the record still holds the token, the call creates the dedicated distribution tenant and writes the domain's `host#` key, which routes requests and records its owner (`t`, `ac`), and answers 200; otherwise 202 with `stage: "domain-challenge"`, the record and its `challenge` value. A failed or timed-out validation gets 422. A changed or dropped domain removes the old `host#<d>` at once and its distribution tenant and certificate in two phases (§3.4 steps 3 to 5). The domain is never a sign-in target: its users sign in on `signInHost` (§3.5). Cell taken from the control plane, never the body. Checks §3.4. 200, or 202 while the challenge or the certificate is pending, or when the record does not hold the token after the certificate issued |
+| `PutTenantRoute` | `PUT /tenants/{tenantId}` | global hook role (route hook, deployment create and update); edge operator role to set `customDomain` | Body `{displayName, customDomain?}`. `displayName` is stored as §4.1 says. The entry records the deployment's `createdAt` as `dt`. A new `tenant#` entry gets `s: active`; a write to an existing entry keeps its `s`, from either role, and only `UpdateTenantRouteStatus` changes it. A hook put whose deployment `createdAt` differs from the stored `dt` replaces the entry as a new one (§3.4 step 5). Only the edge operator role may send `customDomain`, and only while `dedicatedDomains` is on (400 otherwise); the global hook role that sends it gets 403, and its call without it keeps the stored domain. The operator's call sets the domain, or drops it when `customDomain` is absent. A new domain is one host name of at most 64 characters with no wildcard, outside `appDomain` and held by no other tenant. The call writes it as `d` on `tenant#` first, with a domain challenge for this tenant and domain, and answers 202 with `stage: "domain-challenge"` and the TXT record to publish, `_tfd-challenge.<d>` `tfd-verify=<token>`, valid for 7 days. A repeat resolves that record: until it holds this tenant's token the call answers 202 again, with `challenge: "missing"`, `"mismatch"` or `"unresolved"` (a resolver error, never a pass), and an expired challenge gets a new token. Once it passes, the call requests the domain's ACM certificate in `us-east-1`, which validates by DNS once the tenant publishes ACM's validation record, and answers 202 with `stage: "certificate"` and that record until then; a repeat finds the certificate and creates nothing twice (ADR-0018). Once the certificate has validated, the call resolves the record again. Unless it still holds the token, the call answers 202 with `stage: "challenge-recheck"`, the record and its `challenge` value, and writes no `host#` key. Otherwise it creates the dedicated distribution tenant and writes the domain's `host#` key, which routes requests and records its owner (`t`, `ac`), and answers 200. A failed or timed-out validation gets 422. A changed or dropped domain removes the old `host#<d>` at once and its distribution tenant and certificate in two phases (§3.4 steps 3 to 5). The domain is never a sign-in target: its users sign in on `signInHost` (§3.5). Cell taken from the control plane, never the body. Checks §3.4. 200, or 202 while the challenge is open (`domain-challenge`), the certificate is pending (`certificate`) or the record is gone after the certificate issued (`challenge-recheck`) |
 | `DeleteTenantRoute` | `DELETE /tenants/{tenantId}` | global hook role (route hook, deployment delete); edge operator role, to clear a route a skipped hook left | Removes the `tenant#` key, the pooled host's `host#` key and the `host#<d>` key its `d` names, each `host#` key only when its `t` names the tenant (§3.4). It disables the distribution tenant of that `d`, and the sweeper deletes it and its certificate, each only when its tags name this tenant (§3.4 step 5). For the global hook role, 409 while the deployment is neither missing nor `DELETING`. 200, also when absent |
 | `DeleteHostRoute` | `DELETE /hosts/{host}` | edge operator role | Removes one `host#` key whatever its `t` and `ac`, and the `d` of the tenant it names when `d` is that host, to clear a key left behind. That domain's distribution tenant and certificate then go in two phases (§3.4 step 5). 200, also when absent |
 | `UpdateTenantRouteStatus` | `PUT /tenants/{tenantId}/status` | edge operator role | Body `{status}` |
@@ -1441,7 +1484,7 @@ Each spike reports its deploy and destroy time.
 | S-3 | Does `cf.updateRequestOrigin()` set origin access control for a Lambda function URL **in another account**? | through the multi-tenant distribution, with its ARN as the permission's `SourceArn`: a signed request reaches a URL with `AWS_IAM` auth in the second account; an unsigned one is 403; a `POST` with a body and `x-amz-content-sha256` is served; the cell receives the viewer's token in `x-tenant-token`; the permission set is confirmed. **Passed 2026-11-16**: a signed `GET` and a `POST` with `x-amz-content-sha256` reached the function URL in the second account through the multi-tenant distribution, with the distribution ARN (not the tenant ARN) as `SourceArn`; the cell saw the viewer's token in `x-tenant-token`, and a client's own `x-tenant-token` was replaced. Refused with 403: a direct unsigned call, a call before the permission existed, a `POST` without `x-amz-content-sha256` (signature mismatch), and a call with `lambda:InvokeFunctionUrl` but no `lambda:InvokeFunction`. Lambda removes the signed `Authorization` header from the event. Deploy 506 s, destroy 185 s |
 | S-4 | `host` mode: how does the issuer take one callback URL per tenant at 1,000s of tenants? | a working option for Cognito app clients (limit and update rate measured), or a single sign-in host with a signed `state`. **Passed 2026-11-16 with the shared sign-in host**: one Cognito app client takes 100 callback URLs (the 101st is refused), a pool 1,000 clients by default, and `UpdateUserPoolClient` about 15 per second before `TooManyRequestsException`. One sign-in host with a signed `state` completed a real hosted sign-in and sent the code to the tenant host; a missing, changed or expired `state`, or a host outside `appDomain`, got 400. A wildcard callback URL is saved but matched as a literal string: a tenant host gets `redirect_mismatch` (ADR-0016). Deploy 446 s, destroy 220 s |
 | S-4o | `host` mode: does Cognito's `/logout` return `state` on its `logout_uri` redirect, and which `/logout` form brings a user back to a tenant host? | the observed redirect for the `logout_uri` form and the `redirect_uri` form, and for an unregistered `logout_uri`. **Measured 2026-11-16**: `/logout` with `client_id`, a registered `logout_uri` of `https://login.<appDomain>/logout` and `state` answered 302 to the `logout_uri` with `state` dropped, and ended the session (the next authorize showed the sign-in form). An unregistered `logout_uri`, on another domain or a tenant host, was refused with a redirect to Cognito's own `/login` page. `/logout` with `client_id`, `response_type=code`, `scope=openid`, a registered `redirect_uri` of `https://login.<appDomain>/callback` and `state` answered 302 to Cognito's `/login` with `state` kept; after sign-in the code reached the callback with the same `state`. A live session gave a code without the sign-in form, and both `/logout` forms ended it: the next authorize showed the form again (rerun 2026-11-17). The design uses the `redirect_uri` form (ADR-0016). Deploy 39 s, destroy 31 s |
-| S-5 | Does streaming pass through `/agents/*` to the agent ingress without buffering? | first byte at the client within 1 s of first byte from the ingress; the ingress receives the bearer token on `GET` and `POST` (the real ingress serves only `POST`, so the `GET` check proves that the origin request policy forwards the token on `GET`, not a route); the ingress sees the path without `/agents`, as `<stage>/<backend>/invocations` (ADR-0019); the `Managed-AllViewerExceptHostHeader` policy deploys with the pinned CDK version. Recorded as negatives: `/agents` and `/agents/` get 404 at the edge. **Passed 2026-11-18**, eu-central-1 ingress stand-in (REST API, REQUEST authoriser, streaming Lambda proxy) behind a standard distribution in us-east-1, 20 rounds each of `GET` and `POST`: every stream 200 and complete; first byte p50 13 ms and max 14 ms after the ingress wrote it (direct baseline p50 16 ms, so CloudFront added none); one event per read and client gaps of 480 to 500 ms for 500 ms writes, so nothing was buffered; the bearer reached the ingress on both methods; the ingress saw `/s5/invocations` (`/prod/s5/invocations` with the stage), no `/agents`; `aws-cdk-lib` 2.274.0 synthesized and deployed policy `b689b0a8-…`, named `Managed-AllViewerExceptHostHeader`. Negatives: `/agents/` got the router's 404; `POST /agents` got CloudFront's own 403, because the default (SPA) behaviour allows only `GET` and `HEAD`, so the router never ran; neither reached the ingress. Not covered: a `tenant-only` distribution. Deploy 67 s ingress and 221 s edge; destroy 33 s and 186 s |
+| S-5 | Does streaming pass through `/agents/*` to the agent ingress without buffering? | first byte at the client within 1 s of first byte from the ingress; the ingress receives the bearer token on `GET` and `POST` (the real ingress serves only `POST`, so the `GET` check proves that the origin request policy forwards the token on `GET`, not a route); the ingress sees the path without `/agents`, as `<stage>/<backend>/invocations` (ADR-0019); the `Managed-AllViewerExceptHostHeader` policy deploys with the pinned CDK version. Recorded as negatives: `/agents` and `/agents/` get 404 at the edge. **Passed 2026-11-18**, eu-central-1 ingress stand-in (REST API, REQUEST authoriser, streaming Lambda proxy) behind a standard distribution in us-east-1, 20 rounds each of `GET` and `POST`: every stream 200 and complete; first byte p50 13 ms and max 14 ms after the ingress wrote it (direct baseline p50 16 ms, so CloudFront added none); one event per read and client gaps of 480 to 500 ms for 500 ms writes, so nothing was buffered; the bearer reached the ingress on both methods; the ingress saw `/s5/invocations` (`/prod/s5/invocations` with the stage), no `/agents`; `aws-cdk-lib` 2.274.0 synthesized and deployed policy `b689b0a8-…`, named `Managed-AllViewerExceptHostHeader`. Negatives: `/agents/` got the router's 404; `POST /agents` got CloudFront's own 403, because the default (SPA) behaviour allows only `GET` and `HEAD`, so the router never ran; neither reached the ingress. A `tenant-only` distribution is not covered by S-5; §10 step 23 verifies it. Deploy 67 s ingress and 221 s edge; destroy 33 s and 186 s |
 | S-6 | Does a WAF rate rule keyed on the `Host` header count each tenant on its own? | tenant A over its limit on `/api/*` gets the custom 429 while tenant B is served; A's SPA loads (`/`, `/assets/*`) are not counted. **Passed 2026-11-16**: limit 10 per 60 s keyed on the lower-cased `Host`, scoped down to `/api/`. Tenant A got the custom 429 (JSON body, `retry-after: 60`) 21 s into its burst while B's `/api/x` stayed 200; 300 requests to A's `/` and 100 to `/assets/app.js` during the block were all 200. The rule's managed-keys call does not support a `Host` key. Deploy 443 s, destroy 250 s |
 | S-7 | Can the router decode a `tenant-identity` access token's payload within the CloudFront Functions limits? | `tenant_id` read from a real token; compute utilisation under 50 %; 401 on a malformed token. **Passed 2026-11-13**: 13-14 % compute, 401 at 9-10 % (ADR-0005) |
 | S-8 | Can an API Gateway resource policy admit a role name in any account through `aws:PrincipalArn`, and does the request context give the caller's account? | a provisioning role in the second account reaches the registrar; a role of another name is refused. **Passed 2026-11-13** with one design fix: the second account's provisioning role got 200 with `identity.accountId` and `userArn` in the request context; another role name got 403. The edge account's own admin also got 200 through its identity policy, so the resource policy adds an explicit `Deny` with `ArnNotLike` (§3.4, ADR-0013). Deploy 75 s, destroy 33 s. The result holds for the principal ADR-0017 admits instead, the control plane's `<fleet>-global-hook` role: one role ARN, matched by the same cross-account `aws:PrincipalArn` condition and guarded by the same `Deny` |
@@ -1469,7 +1512,7 @@ Expected time, from S-1: deploying the edge stacks and the distribution
 takes about 481 s and destroying them about 312 s, before the control plane
 and the cells the test also deploys, and each cell or deployment event
 runs one route hook build. The route changes of steps 2, 13, 16 and 20
-to 22, and the deletes of step 23, go through the route hook, which
+to 22, and the deletes of step 24, go through the route hook, which
 waits its 45 s bound (§4.2) before the operation ends. Step 20 adds one
 probe build per event, and step 22 waits through two skipped delete
 hooks, each three attempts 60 s and 120 s apart, about 4 minutes each.
@@ -1482,15 +1525,22 @@ checks (steps 3, 11 and 18) use a fixture `host#` entry and
 certificate. Step 14 runs the domain challenge against the real
 `TFD_DEDICATED_DOMAIN`: it requests one certificate, creates no
 distribution tenant, and adds three waits of a little over 60 s for the
-TXT record's TTL, three daily sweeper runs started by hand, two stack
+TXT record's TTL, three daily sweeper runs started by hand, each
+followed by a wait for its pages and 60 s for log delivery, two stack
 updates of the edge stack and a wait of up to 15 minutes for the
-sweeper to delete the certificate. The control plane shares the edge account here, so the
+sweeper to delete the certificate. Step 23 adds the stand-in's deploy
+and destroy (67 s and 33 s in S-5) and a streamed call of a few
+seconds. The control plane shares the edge account here, so the
 route hook's call is a same-account call; spike S-8 covered the
 cross-account form of the same `aws:PrincipalArn` match. The
 identity-side grant that `RouteHookAccess` gives the hook role, which
 only a cross-account call needs, is not exercised here.
 
-1. Deploy the front door, with `dedicatedDomains` on (§3.6). In the
+1. Deploy the agent ingress stand-in (S-5's: a REST API with a
+   REQUEST authoriser and a streaming Lambda proxy that records the
+   path and headers it receives), then the front door, with
+   `dedicatedDomains` on (§3.6) and the stand-in's endpoint as
+   `agentIngress`. In the
    control plane's account deploy its
    `RouteHookAccess` stack, add the stack's policy to the control plane's
    `globalHookManagedPolicyArns` and update the control plane, then run
@@ -1575,10 +1625,10 @@ only a cross-account call needs, is not exercised here.
     challenge has passed, so the daily re-check covers it: the test
     removes `tfd-verify=<Tb>`, waits past the TTL and starts the
     sweeper's daily run three times in a row. Between two runs it waits
-    until every page of the run has finished, then 60 s for Logs
-    Insights to index the run's lines, so each run's query sees the
-    runs before it. Each run logs a miss for
-    `b` and `<dd>` with no token in the line, and the third also logs
+    until the run's `page-end` lines match the page count on its
+    `run-start` line, then 60 s for Logs Insights to index the run's
+    lines, so each run's query sees the runs before it. Each run logs a
+    miss for `b` and `<dd>` with no token in the line, and the third also logs
     the three-miss line and adds one count to the re-check metric. With
     `b` still holding `<dd>`, a stack update that turns
     `dedicatedDomains` off fails on the custom resource check and rolls
@@ -1586,7 +1636,7 @@ only a cross-account call needs, is not exercised here.
     `b`, deletes the TXT records and waits until the sweeper has
     deleted the certificate (one 15-minute run at most). The same stack
     update then succeeds, and the edge operator role's `PutTenantRoute`
-    for `a` with `customDomain` `<dd>` gets 400. Step 23's leftover
+    for `a` with `customDomain` `<dd>` gets 400. Step 24's leftover
     check confirms the certificate is gone. A former holder whose
     challenge had passed differs only by a certificate the sweeper
     deletes before the domain is free, so the test does not build one.
@@ -1675,7 +1725,34 @@ only a cross-account call needs, is not exercised here.
     deployment, which skips the hook again; the edge operator role's
     `DeleteTenantRoute` for `c` answers 200, and after 60 s `c`'s token
     gets 403. The test restores the parameter.
-23. Remove the step 2 fixture key. Tear down in the §6.2 order: delete
+23. `/agents/*` on the `tenant-only` distribution (ADR-0019), in
+    `test/integ.single.ts` and, for the rewrite and the 404 cases,
+    again in `test/integ.host.ts`. S-5 ran on a standard distribution,
+    so this step is what verifies the path on the distribution the
+    front door deploys. Through `cloudfront:TestFunction` on the
+    deployed router, with `Host: <appDomain>` (`a.<appDomain>` in
+    `host` mode) and a token for `a`: `POST
+    /agents/support-bot/invocations` with the query string `x=1`
+    comes out with `uri` `/support-bot/invocations`, the query string
+    unchanged and `x-tenant-route: a`. Each of `/agents`, `/agents/`,
+    `/agents/support-bot`, `/agents/support-bot/invocations/`,
+    `/agents/Support-Bot/invocations`, an `invocations` path with a
+    33-character backend, `/agents/support-bot/delegations`,
+    `/agents//invocations`, `/agents/%73upport-bot/invocations` and
+    `/agents/..%2fentitlements/invocations` gets 404 with the static
+    body and no rewrite. With no token the agent route gets 401, with
+    a token for an unregistered tenant 403, and with `Sec-Fetch-Site:
+    same-site` 403. Then one streamed `POST
+    https://<appDomain>/agents/support-bot/invocations` with `a`'s
+    token goes through the real distribution to the stand-in, which
+    writes ten events 500 ms apart: 200, the first byte at the client
+    within 1 s of the stand-in's first write, one event per read with
+    client gaps near 500 ms, so nothing was buffered. The stand-in saw
+    `<stage>/support-bot/invocations` with no `/agents`, the viewer's
+    bearer in `Authorization` and `x-tenant-route: a`. `POST /agents`
+    gets CloudFront's own 403, `/agents/` the router's 404, and the
+    stand-in logs no request for either.
+24. Remove the step 2 fixture key. Tear down in the §6.2 order: delete
     the deployments and cells of both applications through the control
     plane, whose `front-door-pre` hook removes their routes; run
     `register-hooks.sh --delete` when no other front door uses the
@@ -1683,7 +1760,8 @@ only a cross-account call needs, is not exercised here.
     `globalHookManagedPolicyArns` and update the control plane; destroy
     `RouteHookAccess`; then destroy everything else the test deployed,
     in both accounts, except the shared identity pool. The leftover
-    check also finds no registrar certificate for `<dd>` (step 14).
+    check also finds no registrar certificate for `<dd>` (step 14) and
+    no stand-in stack (step 1).
 
 Rotation check, optional and run on its own against a `host` mode front
 door: run the three rotation updates of §4.1 and check that a `state`
@@ -1700,8 +1778,12 @@ line in the daily re-check (in the public test zone only a lame
 delegation makes the resolver fail, and that would leave a dangling
 delegation); a CNAME at the challenge name; the lookup before the
 `host#<d>` write (the test issues no certificate); and the restart
-after an ETag conflict on a challenge write. The alarm's notification
-is not checked; step 14 checks the metric count it watches.
+after an ETag conflict on a challenge write; a daily-run page that
+fails, so that its lines are missing and the three-miss walk skips the
+run, and the on-failure queue and the page-count alarms; the router's
+answer to every `/agents` path when `agentIngress` is off (step 23's
+front door always sets it). The alarms' notifications are not checked;
+step 14 checks the metric count the re-check alarm watches.
 
 ## 11. Open questions
 
@@ -1710,6 +1792,6 @@ is not checked; step 14 checks the metric count it watches.
 | Q-1 | Which public hosted zone can the test account use for `appDomain`? **Answered 2026-11-16**: a public zone for a delegated test subdomain in the edge account, with its own SPF, DKIM and DMARC records. The spikes and the integration test take its name and zone id as inputs (`TFD_APP_DOMAIN`, `TFD_HOSTED_ZONE_ID`), and the integration test also takes `TFD_DEDICATED_DOMAIN`, with `appDomain` below the zone's apex and the test role's `route53:ChangeResourceRecordSets` scoped to the zone (§10); none is committed | spike S-1 |
 | Q-2 | Does the integration test deploy its own control plane, or reuse one when found and skip otherwise? | integration test |
 | Q-3 | Does the dedicated tenant (custom domain) path belong in this sample or in a follow-up, and how does the vendor confirm that a tenant controls a domain before the edge operator role sets its `customDomain`? A validated certificate is not enough: ACM reuses one validation record per domain name per account, so it proves the edge account's record is in DNS, not which tenant published it, and a former holder's record keeps validating. **Answered 2026-11-18** (ADR-0018, Proposed until this branch merges): the path stays in this sample, off unless the deployer turns on `dedicatedDomains` (§3.6). The registrar issues a 32-byte random token bound to the tenant and the domain, kept as `dk` with a 7-day expiry `dx` on the `tenant#` entry (§4.1), and answers 202 with `_tfd-challenge.<domain>` TXT `tfd-verify=<token>`. A repeat resolves the record with the Lambda function's default resolver and requests the certificate only when it holds this tenant's token (§3.4 step 5). The sweeper re-checks every passed challenge daily, routed or not, and alarms when one tenant and domain misses three daily runs in a row, meaning the tenant does not show control of a domain it claimed; the operator drops the domain. Spike S-10 measures the resolver | scope |
-| Q-4 | Should the integration test also compose `agentic-runtime-isolation` for `/agents/*`, or reuse a deployment only when one is found? | integration test |
+| Q-4 | Should the integration test also compose `agentic-runtime-isolation` for `/agents/*`, or reuse a deployment only when one is found? Until then step 23 runs against a stand-in. | integration test |
 | Q-5 | Route registration depends on the control plane's global hooks (control-plane R-39 to R-46, ADR-0044), which are Proposed and not yet merged. Does their final shape keep what ADR-0017 uses: `POST` hooks only after a successful script, `PRE` delete hooks with three attempts that cannot stop a delete, one `<fleet>-global-hook` role, `SCRIPT_OUTPUTS` and `globalHookManagedPolicyArns`? If not, ADR-0017 is revisited. ADR-0017 stays Proposed and ADR-0013 Accepted until ADR-0044 is accepted, and the control-plane hooks branch merges before this one | build start |
 | Q-6 | With hooks, an integration test that reuses a control plane (Q-2) also changes it: it attaches a policy to `<fleet>-global-hook` and registers two global hooks, which then run on every application's operations, and a third, `tfd-probe`, while step 20 runs. The test therefore needs three of the five global hook slots free. Is that acceptable on a shared control plane, or does the test always deploy its own? | integration test |
