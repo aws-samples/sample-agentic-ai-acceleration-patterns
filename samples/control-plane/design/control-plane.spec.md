@@ -1681,12 +1681,14 @@ and no other control plane state (H-5):
 
 CodeBuild delivers this list intact at its caps: beside the fixed
 variables, 40 `PARAM_` values of 1,024 bytes of printable ASCII and a
-4,096-byte `SCRIPT_OUTPUTS` arrive byte for byte (H-5). It also
-accepts a 41st `PARAM_` variable and a 4,097-byte value, so the caps
-are the control plane's own and hold before `StartBuild` because the
-API enforces the parameter caps when values are written (R-33, R-34)
-and the workflow guard the outputs cap (R-43). Multibyte UTF-8
-parameter values, which R-33 admits, stay to verify (H-5).
+4,096-byte `SCRIPT_OUTPUTS` arrive byte for byte (H-5), and so do 40
+`PARAM_` values of exactly 1,024 bytes of 2-, 3- and 4-byte UTF-8,
+which R-33 admits (H-11). It also accepts a 41st `PARAM_` variable, a
+4,097-byte value (H-5) and a `PARAM_` value of 1,024 characters that
+is 2,560 bytes (H-11), so the caps are the control plane's own and
+hold before `StartBuild` because the API enforces the parameter caps
+when values are written (R-33, R-34) and the workflow guard the
+outputs cap (R-43).
 
 There is no `ADMIN_EMAIL`: onboarding input crosses the boundary once, to
 the create script (P-3). There is no `externalId` and no pair
@@ -2338,11 +2340,17 @@ the attempt's first try), that try's q and the try's
 transition. A `Pass` state that enters the attempt assigns `TRY` 1
 and computes `FIRST_TRY_AT`, the time of the attempt's first try, and
 the attempt's deadline from the same instant,
-`$states.context.State.EnteredTime`, which is fixed for the state and
-read by no `Arguments`. The deadline never reads `$FIRST_TRY_AT`,
-which in that state is unset or the previous attempt's. The 5-minute
-refusal window counts from `FIRST_TRY_AT`. A
-`Pass` state that begins each try follows it and assigns q and the
+`$states.context.State.EnteredTime`, an ISO 8601 string with
+millisecond resolution, which is fixed for the state and read by no
+`Arguments`. `$toMillis` of that field gives the deadline in the same
+instant as `FIRST_TRY_AT` (H-11). The deadline never reads
+`$FIRST_TRY_AT`, which in that state is unset or the previous
+attempt's: an `Assign` field that reads a variable assigned earlier
+gets that earlier value, and one that reads a variable never assigned
+fails with `States.QueryEvaluationError` (H-11). Two adjacent states
+can have the same `EnteredTime` to the millisecond (H-11). The
+5-minute refusal window counts from `FIRST_TRY_AT`. A `Pass` state
+that begins each try follows it and assigns q and the
 token from `$TRY`, and the start task comes next. The refusal path's
 `Choice` rule assigns `TRY` `$TRY + 1` and goes back to the begin-try
 state. An `Assign` reads every variable as it was when its state was
@@ -2379,9 +2387,9 @@ because a `Retry` evaluates `Arguments` again on
 every repeat (H-8) and CodeBuild refuses a repeat whose arguments
 differ from the first call's under the same token. A `StartBuild` the
 service refuses under a known refusal name (the project at its
-`concurrentBuildLimit` or the account's concurrent build quota, H-9;
-throttling once its name is verified, H-8) MUST go through a `Catch`
-to a 30-second `Wait`, without backoff, and then a `Choice`. That
+`concurrentBuildLimit` or the account's concurrent build quota, H-9)
+MUST go through a `Catch` to a 30-second `Wait`, without backoff, and
+then a `Choice`. That
 `Catch` `Assign`s `LAST_REFUSAL`, the error name and the first 256
 characters of the cause, from `$states.errorOutput`, and its `Output`
 stays `{% $states.input %}`, so the state input is untouched. The
@@ -2401,14 +2409,22 @@ account's concurrent build quota turns out to use: the spike provoked
 only the project cap, and the quota's name stays to verify (H-9). The
 cause text ("This build project has a limit of ..."), kept in
 `LAST_REFUSAL`, tells a project cap refusal apart in that
-`statusReason`. The error name of a start refused by
-throttling was not observed and stays to verify (H-8). Until it is, a
-`CodeBuild.*` name the start task does not recognise MUST go to the
-transient `Retry` under the same token, and when the `Retry` is spent it
-ends the attempt as "start outcome unknown". It MUST never go to the
-refusal `Catch`, which starts a new try under a new token and so could
-leave a second build. Repeating a refusal is safe because a refused
-request does not bind its token (H-8).
+`statusReason`. A start throttled by CodeBuild's request rate fails
+with the generic name `CodeBuild.AWSCodeBuildException`, and only its
+cause says "Rate exceeded: StartBuild (... Error Code:
+ThrottlingException ...)" (H-11). Because the name is generic, it may
+also carry other service errors. It MUST go to the transient `Retry`
+under the same token, as MUST any other `CodeBuild.*` name the start
+task does not recognise, and when the `Retry` is spent it ends the
+attempt as "start outcome unknown", whose `statusReason` keeps the
+cause. These names MUST never go to the refusal `Catch`, which starts
+a new try under a new token and so could leave a second build.
+Repeating a refusal is safe because a refused request does not bind
+its token (H-8). A repeat after a throttle sends the same token, so it
+returns the build the first call created, if there is one, and
+otherwise starts it. Whether a throttled call binds its token was not
+tested, and no burst call created a build, which the project's cap
+alone also explains (H-11).
 
 A transient server error (a 5xx, or the task's own timeout) can follow
 a call that created a build. It MUST be handled by a task `Retry` on
@@ -2431,53 +2447,59 @@ other arguments fails with `CodeBuild.InvalidInputException`
 neither transient nor a refusal: after a repeat it means the first
 call's outcome is unknown, so its own `Catch` ends the attempt as
 "start outcome unknown". H-8 saw repeats after a refusal; a `Retry`
-after a 5xx or a task timeout follows the same rule and stays to
-verify. A try and its repeats end within 90 seconds
-(15 + 3 × (10 + 15)), inside the token's validity. A build a late
-repeat starts keeps its try's q, so it waits at most 1.5 minutes past
-the 10, inside the five minutes of margin. A try whose repeats all
-fail ends the attempt as a hook that cannot start, with `statusReason`
-"start outcome unknown", never a new try under another token, because
-its first call may have created a build that no id names. CodeBuild
-stops such a build within q + T of the try's last call, by its own
-queued and run timeouts.
+after a throttle, a 5xx or a task timeout follows the same rule, and
+the 5xx and the task timeout stay to verify (a start with
+`TimeoutSeconds` 1 returned inside a second in 10 of 10 runs, so no
+task timeout could be provoked, H-11). A try and its repeats end
+within 90 seconds (15 + 3 × (10 + 15)), inside the token's validity. A
+build a late repeat starts keeps its try's q, so it waits at most 1.5
+minutes past the 10, inside the five minutes of margin. A try whose
+repeats all fail ends the attempt as a hook that cannot start, with
+`statusReason` "start outcome unknown", never a new try under another
+token, because its first call may have created a build that no id names.
+CodeBuild stops such a build within q + T of the try's last call, by its
+own queued and run timeouts.
 `StopBuild` MUST use the same shape: a refusal goes through the
 `Catch`, a 30-second `Wait` and the `Choice` within the 2 minutes of a
 stop, and a transient error is the same task `Retry`. `StopBuild` on a
 build that already finished succeeds (H-8), so a stop that races the
-build's own end needs no case of its own; a `StopBuild` refused under
-throttling was not provoked and stays to verify. That repeat is the
-only task `Retry` in a hook attempt. The refusal `Catch` MUST name
-only the refusal names, and every other error except
-`CodeBuild.InvalidInputException`, transient or not recognised, MUST
-go to the `Retry`, so no error moves to a new token after a call that
-may have created a build. That rests on a second H-8 result: a repeat
-under a token whose build held the project's only slot returned that
-build, not a refusal. A refusal on a repeat therefore means the first
-call created nothing; for the account's concurrent build quota this
-stays to verify with the quota's name (H-9).
+build's own end needs no case of its own. A `StopBuild` throttled by
+the request rate fails with the same generic name, with the cause
+"Rate exceeded: StopBuild (... Error Code: ThrottlingException ...)"
+(H-11), and goes to the stop's `Retry`. That repeat is the only task
+`Retry` in a hook attempt. The refusal `Catch` MUST name only the
+refusal names, and every other error except
+`CodeBuild.InvalidInputException`, transient, throttled or not
+recognised, MUST go to the `Retry`, so no error moves to a new token
+after a call that may have created a build. That rests on a second
+H-8 result: a repeat under a token whose build held the project's only
+slot returned that build, not a refusal. A refusal on a repeat
+therefore means the first call created nothing; for the account's
+concurrent build quota this stays to verify with the quota's name (H-9).
 
 The start task's error handling in ASL is two retriers and a `Catch`
 list. The first retrier names the refusal names and
 `CodeBuild.InvalidInputException` with `MaxAttempts` 0, which hands
-them to the `Catch` list at once. The second names `States.ALL` alone
-and carries the values above: `IntervalSeconds` 10, `BackoffRate` 1,
-`MaxAttempts` 3 and `JitterStrategy` `NONE`. The `Catch` list names
-the refusal names first, then `CodeBuild.InvalidInputException`, then
-`States.ALL` last, which ends a spent `Retry` as "start outcome
-unknown". `StopBuild` has its own retriers and `Catch` list in the
-same shape, but its last `Catch` ends the hook with the build named as
-not confirmed stopped (above): a stop sends no token and has no start
-outcome. Every "start outcome unknown" ending MUST name the last error
-the start task saw, its name and the start of its cause (§8.1), in
-`statusReason`, or on delete in the skip log. The routing does not
-depend on the error, and the name tells an operator a wiring fault
-from a lost start:
+them to the `Catch` list at once. The second names `States.ALL`
+alone, so it takes a throttle's `CodeBuild.AWSCodeBuildException`
+(H-11), and carries the values above: `IntervalSeconds` 10,
+`BackoffRate` 1, `MaxAttempts` 3 and `JitterStrategy` `NONE`. The
+`Catch` list names the refusal names first, then
+`CodeBuild.InvalidInputException`, then `States.ALL` last, which ends a
+spent `Retry` as "start outcome unknown". `StopBuild` has its own
+retriers and `Catch` list in the same shape, but its last `Catch` ends
+the hook with the build named as not confirmed stopped (above): a stop
+sends no token and has no start outcome. Every "start outcome unknown"
+ending MUST name the last error the start task saw, its name and the
+start of its cause (§8.1), in `statusReason`, or on delete in the skip
+log. The routing does not depend on the error, and the name tells an
+operator a wiring fault from a lost start:
 `CodeBuild.InvalidInputException` on a try's first call,
 `CodeBuild.ResourceNotFoundException` for a missing project, a denied
 `codebuild:StartBuild` or a `States.QueryEvaluationError` from the
-`Arguments` started nothing, while a `Retry` spent on 5xx errors or
-task timeouts may have left a build.
+`Arguments` started nothing, while a `Retry` spent on 5xx errors or task
+timeouts may have left a build. A cause that starts "Rate exceeded"
+under `CodeBuild.AWSCodeBuildException` is a throttle (H-11).
 
 The poll costs three state transitions (a `Wait`, the task and a
 `Choice`) per minute a hook runs: at the Standard workflow price of
@@ -2582,13 +2604,12 @@ definition-replacing `UpdateCell` that would replace a stamp is a seam
 
 Spike results the hook design relies on. Every row is verified or not
 needed; a later result that differs changes the requirement the row
-names. Five cases stay to verify, each in its row: the three H-8 left
-unprovoked; one in H-9, where the account quota's error name, and that
-a repeat under a bound token returns its build at that quota, stay to
-verify; and multibyte UTF-8 parameter values (H-5). H-3, H-4
-and H-6 asked how a `.sync` hook task behaves; the poll loop of R-46
-relies on none of them, and the rows stay so that their ids stay
-stable.
+names. Two cases stay to verify, each in its row: in H-8, a `Retry`
+after a 5xx or a task timeout; and in H-9, one case, the account
+quota's error name together with whether a repeat under a bound token
+returns its build at that quota. H-3, H-4 and H-6 asked how a `.sync`
+hook task behaves; the poll loop of R-46 relies on none of them, and
+the rows stay so that their ids stay stable.
 
 | # | Behaviour | Status | Relied on by |
 |---|---|---|---|
@@ -2596,12 +2617,13 @@ stable.
 | H-2 | For a git source, `ResolvedSourceVersion` in an `aws-sdk:codebuild:batchGetBuilds` result is the full commit SHA the build ran, both when `sourceVersion` is a full SHA and when it is a branch (the branch's tip). It is absent in the `startBuild` result and, at the spike's 5-second poll, on the first poll, present from the second, and the `startBuild.sync` result carries it. For an S3 source it is never set, also when `sourceVersion` is an object version id, and `CODEBUILD_RESOLVED_SOURCE_VERSION` is unset in the build. Step Functions has no optimized integration for `batchGetBuilds`; the SDK integration's result has PascalCase keys (`Builds`, `BuildsNotFound`) | Verified: spike H-2, 2026-11-17, eu-central-1 | R-40, R-46, §8.1 |
 | H-3 | Whether a `.sync` task that times out stops its CodeBuild build | Not needed: poll loop (R-46 stops the build at its deadline) | — |
 | H-4 | Whether the error of a timed-out `.sync` task carries the build id | Not needed: poll loop (`startBuild` returns the id) | — |
-| H-5 | CodeBuild accepts a hook build's `environmentVariablesOverride` built by a JSONata state: R-42's 13 fixed variables plus a test label, 40 `PARAM_` variables of 1,024 bytes of printable ASCII and a `SCRIPT_OUTPUTS` of 4,096 bytes, 55 in all, arrive with the length and SHA-256 sent for each. It also accepts 41 `PARAM_` variables and a 4,097-byte `SCRIPT_OUTPUTS`, so the caps are the control plane's own, enforced before `StartBuild` | Verified: spike H-5, 2026-11-17, eu-central-1; multibyte UTF-8 parameter values stay to verify | R-42 |
+| H-5 | CodeBuild accepts a hook build's `environmentVariablesOverride` built by a JSONata state: R-42's 13 fixed variables plus a test label, 40 `PARAM_` variables of 1,024 bytes of printable ASCII and a `SCRIPT_OUTPUTS` of 4,096 bytes, 55 in all, arrive with the length and SHA-256 sent for each. It also accepts 41 `PARAM_` variables and a 4,097-byte `SCRIPT_OUTPUTS`, so the caps are the control plane's own, enforced before `StartBuild` | Verified: spike H-5, 2026-11-17, and for multibyte UTF-8 parameter values spike H-11, 2026-11-18, eu-central-1 | R-42 |
 | H-6 | A JSONata expression in a task's `TimeoutSeconds` sets a timeout per hook state; today's build tasks use a constant | Not needed: poll loop (the deadline is data) | — |
 | H-7 | A CodeBuild service role trust policy conditioned on `aws:SourceArn` equal to the project ARN, computed with `!Sub` from the project's fixed physical name before the project exists, deploys with no cycle and admits that project's builds, which run as the role (two role and project pairs, standing for the four). CodeBuild refuses `CreateProject` for a project of another name that names the role, and `UpdateProject` that switches an existing project to it, with `InvalidInputException` ("CodeBuild is not authorized to perform: sts:AssumeRole on service role"), so a mis-wired project fails at deploy, never at its first build. Adding `aws:SourceAccount` changes neither outcome; a role with no condition admits a project of any name | Verified: spike H-7, 2026-11-17, eu-central-1 | R-41 |
-| H-8 | Through a request-response `codebuild:startBuild` task: `$hash(..., 'SHA-256')` returns 64 lowercase hexadecimal characters equal to `sha256sum`, which CodeBuild accepts as `idempotencyToken`. A repeat with the same token and arguments within the token's validity returns the same build id; the same token with other arguments fails with `CodeBuild.InvalidInputException` ("Request parameter mismatch for idempotency token") and starts nothing. A start refused at the cap fails with `CodeBuild.AccountLimitExceededException` and creates no build; repeated under its token while capped it is refused again, and after the cap clears the token starts a build that a further repeat returns, so a refused request does not bind its token. A repeat under a token whose build was `IN_PROGRESS` in the only slot of a project capped at 1 returned that build, not a refusal. `StopBuild` on an unknown id fails with `CodeBuild.ResourceNotFoundException` and on a completed build succeeds. No execution returned both a build id and an error. A task `Retry` evaluates `Arguments` again on every repeat: a `$uuid()` in them differed on all four tries, 10 seconds apart, while a token computed from inputs fixed for the try stayed the same. Not provoked: a `Retry` after a 5xx or a task timeout, a `StopBuild` refused under throttling, and a start refused by account-wide throttling | Verified: spike H-8, 2026-11-17, eu-central-1; the three unprovoked cases stay to verify | R-46 |
-| H-9 | A request-response `codebuild:startBuild` on a project at its `concurrentBuildLimit` is refused, not queued: it fails with `CodeBuild.AccountLimitExceededException`, cause "Concurrent build limit exceeded. This build project has a limit of 1 concurrent build(s)...", and creates no build. CodeBuild documents the same name for any limit exceeded for the calling account, which would cover the account's concurrent build quota, but the spike provoked only the project cap | Verified: spike H-9, 2026-11-17, eu-central-1; the account quota's error name, and that a repeat under a bound token returns its build at that quota, stay to verify | R-46 |
+| H-8 | Through a request-response `codebuild:startBuild` task: `$hash(..., 'SHA-256')` returns 64 lowercase hexadecimal characters equal to `sha256sum`, which CodeBuild accepts as `idempotencyToken`. A repeat with the same token and arguments within the token's validity returns the same build id; the same token with other arguments fails with `CodeBuild.InvalidInputException` ("Request parameter mismatch for idempotency token") and starts nothing. A start refused at the cap fails with `CodeBuild.AccountLimitExceededException` and creates no build; repeated under its token while capped it is refused again, and after the cap clears the token starts a build that a further repeat returns, so a refused request does not bind its token. A repeat under a token whose build was `IN_PROGRESS` in the only slot of a project capped at 1 returned that build, not a refusal. `StopBuild` on an unknown id fails with `CodeBuild.ResourceNotFoundException` and on a completed build succeeds. No execution returned both a build id and an error. A task `Retry` evaluates `Arguments` again on every repeat: a `$uuid()` in them differed on all four tries, 10 seconds apart, while a token computed from inputs fixed for the try stayed the same. Not provoked: a `Retry` after a 5xx or a task timeout; throttled calls are in H-11 | Verified: spike H-8, 2026-11-17, and for throttling spike H-11, 2026-11-18, eu-central-1; the one unprovoked case, a `Retry` after a 5xx or a task timeout, stays to verify | R-46 |
+| H-9 | A request-response `codebuild:startBuild` on a project at its `concurrentBuildLimit` is refused, not queued: it fails with `CodeBuild.AccountLimitExceededException`, cause "Concurrent build limit exceeded. This build project has a limit of 1 concurrent build(s)...", and creates no build. CodeBuild documents the same name for any limit exceeded for the calling account, which would cover the account's concurrent build quota, but the spike provoked only the project cap | Verified: spike H-9, 2026-11-17, eu-central-1; the account quota's error name, and that a repeat under a bound token returns its build at that quota (one case), stay to verify | R-46 |
 | H-10 | A 4,096-byte compact outputs value of only `\"` and `\\` escapes, written by `jq -c .` and exported alone as `SCRIPT_OUTPUTS`, comes back byte for byte (equal SHA-256 in the origin log, the execution output, a `$hash` in state and the hook build's environment) through `startBuild.sync`, a JSONata `Output` into state and a hook build's override. JSON-encoded in state it is 8,190 characters; the execution output is 8,758 bytes, and the script task's `Output` took 23 ms. The R-43 guard in a Step Functions JSONata `Pass` state gives the expected verdict in 18 cases (the largest valid value, the largest valid value of `\"` only, the §10 near miss, a mixed near miss, 4,095 and 4,098 characters, empty and absent, a tab, DEL and non-ASCII, `{}`, two keys, a repeated key admitted, a space after `:`, a `\u` escape, keys of 64 and 65 characters), each in under 1 ms, with no evaluation error | Verified: spike H-10, 2026-11-17, eu-central-1 | R-43, §8.1 |
+| H-11 | In an inline Map (`MaxConcurrency` 40, no `Retry`), one burst of 200 request-response calls at about 42 calls a second per call type. `codebuild:startBuild` on a project at its cap returned 98 `CodeBuild.AccountLimitExceededException` and 102 throttled calls; `codebuild:stopBuild` on unknown build ids of the project returned 37 `CodeBuild.ResourceNotFoundException` and 163 throttled calls. A throttled call fails with the generic name `CodeBuild.AWSCodeBuildException`, and only its cause says "Rate exceeded: StartBuild ... Error Code: ThrottlingException" (or `StopBuild`). No burst call created a build, which the cap alone also explains (the 98 refusals were calls that passed the throttle), so whether a throttled call binds its token was not tested. 10 runs of `startBuild` with `TimeoutSeconds` 1 and the R-46 `Retry` fired no `States.Timeout`: each returned within a second, one build per seed. 40 `PARAM_` values of exactly 1,024 bytes of 2-, 3- and 4-byte UTF-8, with R-42's 13 fixed variables and a test label, 54 in all, arrive with the byte length and SHA-256 sent for each through a JSONata `EnvironmentVariablesOverride` and `startBuild.sync`. A value of 1,024 characters and 2,560 bytes arrives intact too, so CodeBuild enforces no byte cap there and the 1,024-byte cap is the control plane's (R-33). `$states.context.State.EnteredTime` is an ISO 8601 string with millisecond resolution. In one `Assign`, a `FIRST_TRY_AT` from it and a deadline from `$toMillis` of it share one instant; the next `Pass` state had the same `EnteredTime` to the millisecond, and a state after a 1-second `Wait` was 1,040 ms later. A second `Assign` field that reads `$FIRST_TRY_AT` reads its earlier value when one was assigned, and fails with `States.QueryEvaluationError` ("returned nothing (undefined)") when none was. Not provoked: the account's concurrent build quota, a task timeout | Verified: spike H-11, 2026-11-18, eu-central-1; the task timeout and the account quota stay to verify (H-8, H-9) | R-33, R-42, R-46 |
 
 ---
 

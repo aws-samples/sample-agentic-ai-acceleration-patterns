@@ -278,8 +278,8 @@ sets it to `$TRY + 1`, and a state that begins each try assigns q and
 the token from it, because an `Assign` reads every variable as it was
 when its state was entered (Step Functions Developer Guide, workflow
 variables). A `StartBuild` refused under
-a known refusal name (a concurrency quota, the project at its cap, and
-throttling once its name is verified) goes through a `Catch`, a
+a known refusal name (a concurrency quota or the project at its cap)
+goes through a `Catch`, a
 30-second `Wait` and a `Choice` that advances `TRY`, for at most 5
 minutes, so refusals and the queue take at most 10 minutes together,
 overrun only by the milliseconds between that `Choice` and the next
@@ -289,7 +289,8 @@ A transient error is a task `Retry` (`TimeoutSeconds` 15,
 which evaluates the `Arguments` again on each repeat (H-8). A try and
 its repeats end within 90 seconds; the ASL default `BackoffRate` of 2
 would wait 10, 20 and 40 seconds. A `CodeBuild.*` error the start task
-does not recognise, such as the unobserved throttling name, goes to
+does not recognise, such as a throttle's generic
+`CodeBuild.AWSCodeBuildException` (H-11), goes to
 that `Retry` under the same token, never to the refusal `Catch`,
 because a refused request does not bind its token (H-8) and a new
 token could leave a second build. The token is
@@ -353,7 +354,7 @@ as a consumer of a global post hook.
   `PutApplication` `hooks` and charsets), §5.7, §6.1 (`OUTPUTS_FILE`),
   §6.3 (the note after R-35), §6.4, new §6.5 (R-41 to R-44), §7.1
   step 0, §7.2, §7.4, §8 (R-20, R-22, R-23, §8.2, new §8.3 with R-45
-  and R-46), N-12, new §9.1 (H-1 to H-10), §10 setup (with a per-run
+  and R-46), N-12, new §9.1 (H-1 to H-11), §10 setup (with a per-run
   fleet name, so two integration runs can share an account and a
   Region; also in `integration-test.md`), steps 2, 16 and 17 and the
   unit assertions, §11, §12. Threat model: T5, T16, T30,
@@ -504,7 +505,8 @@ as a consumer of a global post hook.
   its budget runs out, so an external system can keep state for a cell
   or deployment that is gone (T42). The skip is logged and alarmed;
   reconciling it is the external system's job.
-- Spike results (spec §9.1, each 2026-11-17, eu-central-1; H-3, H-4
+- Spike results (spec §9.1, each in eu-central-1, H-1 to H-10 on
+  2026-11-17 and H-11 on 2026-11-18; H-3, H-4
   and H-6 asked how a `.sync` hook task behaves and are not needed with
   the poll loop):
   - H-1: see Context.
@@ -518,8 +520,9 @@ as a consumer of a global post hook.
     label, 40 `PARAM_` variables of 1,024 bytes of printable ASCII and
     a 4,096-byte `SCRIPT_OUTPUTS`, 55 in all, byte for byte. It accepts
     41 variables and 4,097 bytes too, so the caps are the control
-    plane's own, enforced before `StartBuild`. Multibyte UTF-8
-    parameter values stay to verify.
+    plane's own, enforced before `StartBuild`. 40 `PARAM_` values of
+    exactly 1,024 bytes of 2-, 3- and 4-byte UTF-8 arrive intact too
+    (H-11).
   - H-7: a trust policy on an `aws:SourceArn` computed from the
     project's fixed name deploys with no cycle and admits that project.
     CodeBuild refuses a `CreateProject` or `UpdateProject` that gives
@@ -532,9 +535,8 @@ as a consumer of a global post hook.
     `Arguments` again on every repeat, so a repeat sends the same
     request only because no field of the `Arguments` reads anything
     that changes between repeats.
-    A `Retry` after a 5xx or a task timeout, a `StopBuild` refused
-    under throttling and a start refused by account-wide throttling
-    were not provoked and stay to verify.
+    A `Retry` after a 5xx or a task timeout was not provoked and
+    stays to verify; throttling is H-11.
   - H-9: at the project's `concurrentBuildLimit`, `StartBuild` is
     refused with `CodeBuild.AccountLimitExceededException` and creates
     no build. The account quota was not provoked: its error name, and
@@ -545,6 +547,24 @@ as a consumer of a global post hook.
     override, at 8,190 characters in state. The guard, run in a Step
     Functions JSONata state, gives the expected verdict in 18 cases,
     the §10 near miss included, each in under 1 ms.
+  - H-11: a request-response `startBuild` or `stopBuild` throttled by
+    CodeBuild's request rate (one burst of 200 calls per call type, at
+    about 42 calls a second, no `Retry`) fails with the generic
+    `CodeBuild.AWSCodeBuildException`, and only the cause names the
+    `ThrottlingException`. That name goes to the `Retry` under the
+    same token, never to the refusal `Catch`. No burst call created a
+    build, which the project's cap alone also explains, so whether a
+    throttled call binds its token was not tested. A start with
+    `TimeoutSeconds` 1 returned in time in 10 of 10 runs, so no task
+    timeout was provoked. 40 `PARAM_` values of 1,024 bytes of
+    multibyte UTF-8 arrive intact, and so does a value of 1,024
+    characters (2,560 bytes), so the byte cap is the control plane's.
+    `State.EnteredTime` is an ISO 8601 string in milliseconds; a
+    `FIRST_TRY_AT` and a deadline read from it in one `Assign` share
+    one instant, and a field of that `Assign` reading `FIRST_TRY_AT`
+    gets its earlier value, or fails with `States.QueryEvaluationError`
+    when none was assigned. The account's concurrent build quota was
+    not provoked.
 - Seams (spec §11): hooks on tenant record events and on account events;
   outputs from a pre hook into the script; a hook role per application
   or per global hook; publishing to an event bus as a built-in.
@@ -554,11 +574,12 @@ as a consumer of a global post hook.
 - Revisit if a downstream system needs to veto a delete (today a delete
   cannot be gated), if per-application or per-hook permissions are
   needed, if hook latency on every operation becomes the larger cost, if
-  a later run of H-2 to H-10 stops matching spec §9.1 (a project cap
+  a later run of H-2 to H-11 stops matching spec §9.1 (a project cap
   that queues builds, a token that does not return the same build, a
   `Retry` whose evaluation of `Arguments` is not deterministic, an
-  export that drops an escaped value), or if one of the five cases
-  still to verify behaves otherwise: the three H-8 left unprovoked;
-  one in H-9, where the account quota's error name, and that a repeat
-  under a bound token returns its build at that quota, stay to verify;
-  and multibyte UTF-8 parameter values (H-5).
+  export that drops an escaped value, a throttle that surfaces under
+  another name than `CodeBuild.AWSCodeBuildException`), or if one of
+  the two cases still to verify behaves otherwise: in H-8, a `Retry`
+  after a 5xx or a task timeout; and in H-9, one case, the account
+  quota's error name together with whether a repeat under a bound
+  token returns its build at that quota.
