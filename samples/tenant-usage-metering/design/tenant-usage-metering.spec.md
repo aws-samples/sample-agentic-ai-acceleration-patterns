@@ -145,10 +145,10 @@ All in the metering account, one stack.
 | Ingest redrive | A function an operator starts with `StartIngestRedrive`: moves messages from the ingest dead-letter queue into Firehose, each as the envelope the bus would have delivered, unchanged. An alarm fires on any object under Firehose's `firehose-error/` prefix, which the recount does not read |
 | Table | One DynamoDB table, PITR on: registry, meters, sinks, hours, recounts, usage records (§4) |
 | Admin API | Same REST API: meters, sinks, registrations, usage reads, recounts, re-admission, redrives |
-| Object tracker | S3 event notification on `raw/` and `readmitted/`: for every new object, creates the hour item if absent and increments its `generation` (§4.5) |
+| Object tracker | S3 event notification on `raw/` and `readmitted/`: for every new object, creates the hour item if absent and increments its `generation` (§4.5); failed invocations go to an SQS on-failure destination the scheduler replays |
 | Recounter | Step Functions, one execution per hour: reads the hour's raw objects, dedupes, sums per meter rule, writes usage records (§4.9) |
-| Scheduler | EventBridge Scheduler, every 5 minutes: starts a recount for each hour that is due, `DIRTY`, `COUNT_FAILED` past its backoff, or `COUNTING` with an expired lease |
-| Record publisher | DynamoDB Streams on usage-record inserts: publishes `UsageRecorded` to the usage bus and queues one delivery per sink; failed batches go to an SQS failure destination with an alarm, and are retried from it |
+| Scheduler | EventBridge Scheduler, every 5 minutes: batch-gets the hour items of the recount window and starts a recount for each hour that is due, `DIRTY`, `COUNT_FAILED` past its backoff, or `COUNTING` with an expired lease; replays the object tracker's failures; sweeps `publishPending` records |
+| Record publisher | DynamoDB Streams on usage-record writes: publishes `UsageRecorded` to the usage bus, queues one delivery per sink, and clears the record's `publishPending` marker; the scheduler sweeps records whose marker is older than 15 minutes (§4.7), and an alarm fires on failed stream batches |
 | Usage bus | EventBridge Custom Event Bus, `usageBusRetentionDays` retention; one `UsageRecorded` event per usage record (§4.8), `DeduplicationId = recordId`, `EventGroupId = tenantId`. Always on |
 | Sink dispatcher | Sends each queued delivery to its sink, retries for 24 h, then marks it `FAILED` and alarms |
 | Sinks | `HTTP` (any billing API, field mapping by configuration), `S3_EXPORT` (JSON lines into the sample's export bucket) |
@@ -206,7 +206,7 @@ subscriber.
 | `operatorPrincipalArns` | roles that may manage meters, sinks, recounts and redrives | required |
 | `readerPrincipalArns` | roles that may read usage | `[]` |
 | `lateGraceMinutes` | how long after an hour ends it is first counted; synth fails below the Firehose buffer (1 minute) plus 5 minutes | `15` |
-| `recountWindowHours` | how long after an hour ends it may still be recounted; synth fails below 72. Ingest admits an event only while its hour ended less than `recountWindowHours` − 48 hours ago, so an accepted event has 48 hours (the subscriber's 24 h maximum event age plus 24 h to redrive its dead-letter queue) to reach S3 before the hour closes | `96` |
+| `recountWindowHours` | how long after an hour ends it may still be recounted; synth fails below 72. Ingest admits an event only while its hour ended less than `recountWindowHours` − 49 hours ago, so an accepted event has 48 hours (the subscriber's 24 h maximum event age plus 24 h to redrive its dead-letter queue) to reach S3, and one more hour for the Firehose buffer and the scheduler, before the hour closes | `96` |
 | `closeGraceMinutes` | how long a closing emitter or binding is still admitted, for buffered events | `60` |
 | `rawRetentionDays` | raw, re-admitted and error object lifetime | `400` |
 | `ingestPath` | `BUS` (ingest bus, ADR-0002) or `DIRECT` (Firehose, events packed per hour) | `BUS` |
@@ -268,9 +268,9 @@ Consequences of the wiring:
 The emitter role name is fixed, `<fleet>-ue-<cellId>` with path `/`, so
 the hook never takes it from `SCRIPT_OUTPUTS` (control-plane R-42:
 identity comes from the variables). The cell create script creates that
-role and grants it the ingest statement (§6.1); the cell and tenant delete
-scripts stop the emitters and wait for their buffers to flush, and the
-cell delete script then removes the role.
+role and grants it the ingest statement (§6.1); the tenant delete script stops
+serving the tenant and flushes its usage; the cell delete script stops
+the emitters, waits for their buffers to flush, then removes the role.
 
 `BILLING_ACCOUNT` is a deployment parameter the application declares
 (control-plane R-32). It is the tenant's account id in the billing
@@ -321,17 +321,20 @@ hourly ones; a billing system that needs them reads the raw store or the
 | `status` | `ACTIVE`, `CLOSING` |
 | `activeFrom` | set by `PutCellEmitter` when it creates the item or returns it to `ACTIVE`: now |
 | `closedAt`, `closesAt` | set by `DeleteCellEmitter`: now, and now plus `closeGraceMinutes` |
-| `expiresAt` | `closesAt` plus `recountWindowHours`, for audit |
+| `intervals` | earlier `{activeFrom, closedAt}` pairs, kept while the end of `closedAt`'s hour is inside `recountWindowHours` |
+| `expiresAt` | the end of `closedAt`'s hour plus `recountWindowHours`, for audit |
 
 Transitions: none → `ACTIVE` (`PutCellEmitter`) → `CLOSING`
 (`DeleteCellEmitter`) → removed by TTL. An emitter admits events whose
 `time` is at or after `activeFrom`, and, once `CLOSING`, at or before
 `closedAt`, until `closesAt`. Other events are refused
 `REGISTRATION_CLOSED`. Past `closesAt` the emitter is refused like an
-unregistered one. `PutCellEmitter` on a `CLOSING` item returns it to
-`ACTIVE` with a new `activeFrom` (a delete that failed and a create that
-followed). Ingest and `READMIT` check the same fields, so an event is
-judged by the registration as it stood at the event's time.
+unregistered one. `PutCellEmitter` on a `CLOSING` item (a cell or
+deployment created again on the same key) moves the current
+`{activeFrom, closedAt}` into `intervals`, removes `closedAt`, `closesAt`
+and `expiresAt`, and sets a new `activeFrom`. `READMIT` admits an event
+whose `time` falls in the current interval or in any of `intervals`, so
+an event is judged by the registration as it stood at the event's time.
 
 ### 4.3 Tenant binding
 
@@ -342,10 +345,11 @@ judged by the registration as it stood at the event's time.
 |---|---|
 | `tenantId`, `applicationId`, `cellId` | from the hook |
 | `billingAccount` | from `PARAM_BILLING_ACCOUNT`, optional |
-| `status`, `activeFrom`, `closedAt`, `closesAt`, `expiresAt` | as for emitters, with `TENANT_NOT_IN_CELL` for a missing binding and `REGISTRATION_CLOSED` outside its times |
+| `status`, `activeFrom`, `closedAt`, `closesAt`, `intervals`, `expiresAt` | as for emitters, with `TENANT_NOT_IN_CELL` for a missing binding and `REGISTRATION_CLOSED` outside its intervals |
 
-Transitions as for emitters. A deployment deleted and created again lands
-in a new item when it is placed in another cell; the old one stays
+Transitions as for emitters. A deployment deleted and created again in
+the same cell returns the item to `ACTIVE` and keeps the earlier interval;
+placed in another cell, it lands in a new item, and the old one stays
 `CLOSING` until its TTL.
 
 ### 4.4 Sink
@@ -374,11 +378,21 @@ in a new item when it is placed in another cell; the old one stays
 | `attempts` | failed counts since the last success |
 
 The object tracker creates the item, `OPEN`, on the hour's first object,
-and increments `generation` on every object whatever the state. A
-recount takes the hour with a conditional write (`OPEN` past
-`lateGraceMinutes`, `DIRTY`, `COUNT_FAILED` past its backoff, or
-`COUNTING` past `leaseExpiresAt`) → `COUNTING`, reads `generation`, then
-lists and counts. It finishes with a conditional write:
+and increments `generation` on every object whatever the state. Its
+invocations are asynchronous, with an SQS on-failure destination that
+keeps the S3 event; the scheduler replays that queue, and an alarm fires
+on its depth.
+
+Every 5 minutes the scheduler batch-gets the hour items of the recount
+window (one key per hour, at most `recountWindowHours` + 1) and starts a
+recount for each one that is due. A recount takes the hour with a
+conditional write (`OPEN` past `lateGraceMinutes`, `DIRTY`,
+`COUNT_FAILED` past its backoff, or `COUNTING` past `leaseExpiresAt`) →
+`COUNTING` with `lease` set to its execution id, reads `generation`, then
+lists and counts. Every usage record it writes, and its final status
+write, carry the condition `lease = <own execution id>`, so an execution
+whose lease was taken over writes nothing more. The execution's timeout
+is 25 minutes, below the lease. It finishes with
 `COUNTED` if `generation` is unchanged, else `DIRTY`, so an object that
 landed during the count is counted next. A `COUNTED` hour whose
 `generation` moves past `countedGeneration` is `DIRTY`. A failed count →
@@ -397,12 +411,13 @@ raises an alarm.
 
 | Field | Meaning |
 |---|---|
-| `kind` | `RECOUNT` (an hour range), `READMIT` (error objects of an hour range, optionally one reason), `INGEST_REDRIVE` (the ingest dead-letter queue), `SINK_REDRIVE` (`FAILED` deliveries of one sink) |
+| `kind` | `RECOUNT` (an hour range), `READMIT` (error objects of an hour range, optionally one reason), `INGEST_REDRIVE` (the ingest dead-letter queue), `SINK_REDRIVE` (`FAILED` deliveries of one sink, or every record of an hour range for one sink), `RESEND_BLOCKED` (one tenant and application's `BLOCKED` deliveries) |
 | `status` | `RUNNING`, `SUCCEEDED`, `FAILED` |
 | `counts` | items processed, admitted, refused, redriven |
 
-`RECOUNT` marks each hour in range `DIRTY`; a `CLOSED` hour in range is
-refused. `READMIT` runs every event of the chosen error objects through
+`RECOUNT` increments `generation` of each hour in range, the same path a
+new object takes, so a `COUNTED` hour becomes `DIRTY` and a `COUNTING`
+one ends `DIRTY`; a `CLOSED` hour in range is refused. `READMIT` runs every event of the chosen error objects through
 the ingest checks again, judging each by the registrations' `activeFrom`
 and `closedAt` and the meter version at its time, and writes the ones
 that pass, with their original `receivedAt`, to `readmitted/hour=.../`,
@@ -423,15 +438,23 @@ zero-padded from `0000`.
 | `meterVersion`, `eventCount` | for audit |
 | `billingAccount` | set once: from the tenant's `ACTIVE` binding for the application when the record is written (else its latest `CLOSING` one), or, if that has none, on the first resend from `BLOCKED` |
 | `recordId` | `sha256(tenantId, applicationId, meterId, hour, seq)`; sinks use it as their idempotency key |
+| `revision` | `1` when written; `2` once a late `billingAccount` is written onto it |
+| `publishPending` | present until the record, at its current `revision`, is on the usage bus and queued for its sinks; a sparse index lists the records that hold it |
 | `sinks` | per sink: `PENDING`, `RETRYING`, `SENT`, `BLOCKED` (reason), `FAILED` (reason) |
 
-A record is written with a condition that its `seq` does not exist yet.
-`HOURLY` is written for each `(tenant, application, meter)` with at least
-one event in the hour; a first event that arrives late writes `HOURLY`.
-No record is written when a recount changes nothing. The record publisher
-(§3.1) reads each insert from the table's stream, so a record written is
-published and queued for its sinks even when the recount that wrote it
-fails afterwards.
+A record is written with a condition that its `seq` does not exist yet
+and that the recount still holds the hour's lease (§4.5). `HOURLY` is
+written for each `(tenant, application, meter)` with at least one event
+in the hour; a first event that arrives late writes `HOURLY`. No record
+is written when a recount changes nothing.
+
+The table is the outbox. Each record is written with `publishPending`.
+The record publisher (§3.1) handles each insert from the table's stream,
+publishes `UsageRecorded` (`DeduplicationId = <recordId>#<revision>`),
+queues the sink deliveries, and removes `publishPending`. The scheduler
+also reads the `publishPending` index every 5 minutes and publishes any
+record that has held it for more than 15 minutes, so a failed stream
+batch is caught after the stream's 24-hour retention as well.
 
 Sink delivery: a record goes to the sinks enabled when it is written that
 take its meter. `PENDING` → `SENT`, or `RETRYING` with backoff for 24 h →
@@ -440,9 +463,11 @@ again, or, given an hour range, every record of that range, which is how
 a sink enabled later is backfilled. An `HTTP` sink whose mapping needs
 `billingAccount` on a record without one marks it `BLOCKED`
 (`NO_BILLING_ACCOUNT`), and an alarm fires when a delivery has been
-`BLOCKED` for 24 hours; the next `PutTenantBinding` that sets a billing
-account sends that tenant and application's `BLOCKED` records again,
-writing the value onto each.
+`BLOCKED` for 24 hours. A `PutTenantBinding` that sets a billing account
+starts a `RESEND_BLOCKED` job for that tenant and application and
+returns; the job writes the value onto each `BLOCKED` record with
+`revision` 2 and `publishPending`, so the record publisher sends it to the
+blocked sinks and publishes it again on the usage bus.
 
 ### 4.8 Usage event and raw objects (the wire contract)
 
@@ -454,7 +479,7 @@ Smithy structure `UsageEvent`:
 | `tenantId` | yes | must be bound to the caller's cell |
 | `meterId` | yes | a meter in effect at the event's hour |
 | `value` | yes | non-negative decimal string, at most 12 digits before the point and 6 after; `COUNT` ignores it, `UNIQUE_COUNT` treats it as a string |
-| `time` | yes | ISO 8601 UTC; at most 5 minutes in the future, and in an hour that ended less than `recountWindowHours` − 48 hours ago (§3.3); older is `TOO_LATE` |
+| `time` | yes | ISO 8601 UTC; at most 5 minutes in the future, and in an hour that ended less than `recountWindowHours` − 49 hours ago (§3.3); older is `TOO_LATE` |
 | `dimensions` | no | up to 10 string pairs, passed to sinks, not summed on |
 
 The ingest function adds `applicationId`, `cellId`, `emitterAccountId`,
@@ -471,7 +496,7 @@ Raw objects:
 | `error/` | one JSON document per batch: the caller, `receivedAt`, and each refused event with its reason | the function writes the key |
 
 `UsageRecorded` on the usage bus: `source` `metering.usage`,
-`detail-type` `UsageRecorded`, `detail` with `recordId`, `kind`,
+`detail-type` `UsageRecorded`, `detail` with `recordId`, `revision`, `kind`,
 `tenantId`, `applicationId`, `meterId`, `meterVersion`, `unit`, `hour`,
 `seq`, `quantity`, `total`, `eventCount`, `billingAccount` (may be
 absent). The `raw` stream carries the enriched `UsageEvent` as `detail`.
@@ -529,8 +554,9 @@ Errors:
 | 400 `ValidationException` | malformed request, a field outside its charset, a `BILLING_ACCOUNT` out of format, a backdated `effectiveFrom` beyond the window |
 | 403 `AccessDeniedException` | caller not permitted for the route; for `PutUsageEvents`, not an assumed role or not a registered emitter |
 | 404 `ResourceNotFoundException` | unknown meter, sink, hour, job (never for `Delete*` of a registration) |
-| 409 `ConflictException` | `PutCellEmitter` in a subscriber account; `CreateMeter` on an existing meter; `StartRecount` over a `CLOSED` hour; a lost conditional write, retryable |
+| 409 `ConflictException` | `PutCellEmitter` in a subscriber account or the metering account; `CreateMeter` on an existing meter; `StartRecount` over a `CLOSED` hour; a lost conditional write, retryable |
 | 429 `ThrottlingException` | API Gateway stage throttle |
+| 500, 502, 503, 504 | the function failed, was throttled or timed out; nothing in the batch is known to be stored |
 
 ### 5.1 Limits
 
@@ -561,7 +587,9 @@ Errors:
   `BILLING_ACCOUNT` (deployment parameter) and `METERING_API_URL` (cell
   parameter).
 - Emitters that send `UsageEvent`s with stable ULID or UUID `eventId`s,
-  resend an event unchanged, and resend `RETRY` results.
+  resend an event unchanged, and resend `RETRY` results. A 429, a 5xx or
+  a timeout resends the whole batch unchanged, with backoff; a 403 or a
+  400 is not resent.
 - For an `HTTP` sink: the endpoint and a secret in Secrets Manager.
 
 ### 6.2 What the sample promises

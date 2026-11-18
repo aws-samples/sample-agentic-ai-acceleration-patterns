@@ -35,8 +35,9 @@ means a savepoint or a second job.
 Firehose partitions raw objects by event hour. After `lateGraceMinutes`
 a Step Functions execution reads the hour's objects, keeps one event per
 `(applicationId, tenantId, eventId)`, and sums each meter by its rule. An
-S3 notification marks a counted hour dirty when a late object lands, and
-the hour is counted again while it is inside `recountWindowHours`. Pros:
+S3 notification increments the hour's generation for every object, and a
+count that ends with a moved generation leaves the hour dirty, so it is
+counted again while it is inside `recountWindowHours`. Pros:
 the total is a pure function of the stored events (P-4); a recount is the
 same execution; no per-event writes. Cons: records land at least
 `lateGraceMinutes` after the hour; a very large hour needs a distributed
@@ -48,8 +49,9 @@ bill needs, and a recount from the raw store is the one design where
 retry, redrive and audit give the same answer by construction. The key
 includes the application the emitter is registered for (P-2), so one
 application's emitter cannot suppress another's events. When two copies
-differ, the earliest `receivedAt` wins, then the lowest bytes, so the
-winner never depends on read order. Every recount writes only the
+differ, the earliest `receivedAt` wins, then the lowest canonical JSON
+(RFC 8785) of the enriched event, so the winner never depends on read
+order or object format. Every recount writes only the
 difference from the records already written, as an `ADJUSTMENT` (P-7).
 
 ## Consequences
@@ -57,7 +59,10 @@ difference from the records already written, as an `ADJUSTMENT` (P-7).
   on-time events routinely become `ADJUSTMENT`s; synth enforces at least
   6 minutes (spec §3.3).
 - The hour, recount jobs and their states are records of their own
-  (spec §4.5, §4.6); one execution holds an hour at a time.
+  (spec §4.5, §4.6). One execution holds an hour at a time: a lease,
+  and a condition on it in every write the execution makes.
+- Dedupe runs within one hour, so an emitter must resend an event
+  unchanged; a resend with a new `time` in another hour counts twice.
 - A live limiter must keep its own short-window counter; the sample's
   records come too late for it (spec §1.1).
 - The recount is bounded by how many objects an hour holds; the

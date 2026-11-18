@@ -95,7 +95,7 @@ new bus is not available, and the construct takes an `ingestPath` prop
   subscriber's failed deliveries is part of the stack. An event in the
   queue was `ACCEPTED` to its emitter, so `StartIngestRedrive` moves it
   into Firehose. Ingest admits an event only while its hour has at least
-  48 hours of the recount window left, so a redriven event still counts
+  49 hours of the recount window left, so a redriven event still counts
   (spec §3.3).
 - Entries the bus still throttles after the function's retries return
   `RETRY`, and the emitter resends them with the same ids (spec §5).
