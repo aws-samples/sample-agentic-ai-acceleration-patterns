@@ -37,7 +37,7 @@ script" case on all three backends and checks what each one refuses.
 | Decision | Which boundary a vendor should run tenant or agent-written code in |
 | Options | Lambda MicroVM, Nitro Sandbox on ECS, a second AgentCore Runtime, or the agent's own session |
 | Evidence that settles it | The same hostile script, run on each backend, with what it reached; cold and warm run latency; idle cost; deploy and destroy time |
-| Success criteria | 1/ Tenant B's data and sandbox are unreachable from tenant A's code on every backend. 2/ No backend lets the code reach the internet, and no backend lets it reach an AWS API beyond the per-backend limits in C-2. 3/ A runaway script is stopped within its cap. 4/ One `run_code` contract, the backend a deploy-time choice |
+| Success criteria | 1/ Tenant B's data and sandbox are unreachable from tenant A's code on every backend. 2/ No backend lets the code open a connection to the internet (DNS lookups are the stated exception, C-3), and no backend lets it reach an AWS API beyond the per-backend limits in C-2. 3/ A runaway script is stopped within its cap. 4/ One `run_code` contract, the backend a deploy-time choice |
 | Risks | Lambda MicroVMs launched in 2026-06 and reached eu-central-1 in 2026-08 ([What's New, 2026-08](https://aws.amazon.com/about-aws/whats-new/2026/08/lambda-microvms-5-additional-regions/)); Nitro Sandboxes launched in 2026-11 ([What's New, 2026-11](https://aws.amazon.com/about-aws/whats-new/2026/11/nitro-sandboxes-eks-ecs-ec2/)). CDK has only L1 support for both, and some behaviour is documented in one line or not at all (§7). ECS Managed Instances bill for idle instances. A NAT gateway and interface endpoints bill per hour. |
 | The unasked question | Does the code need a second machine at all? Short snippets that may hold what the agent holds can run in the agent's own session with `InvokeAgentRuntimeCommand`. The sample says when that is enough (§1.2) and does not build it. |
 
@@ -73,8 +73,9 @@ instances are per-tenant.
   that must reach one host is a later option (ADR-0003).
 - DNS filtering. The resolver answers public names from every sandbox, so
   data can leave in DNS lookups. A Route 53 Resolver DNS Firewall on the
-  VPC is the fix for `nitro` and `microvm`; whether it covers the
-  AgentCore runtime's resolver is unverified.
+  VPC is the candidate fix; whether it covers the MicroVM connector's
+  lookups, the `nitro` tasks' lookups and the AgentCore runtime's resolver
+  is unverified on all three.
 - Confidential mode and attestation (`CONFIDENTIAL_SANDBOX`, KMS key release
   on image measurement). The `nitro` backend runs `ISOLATED_SANDBOX` only.
 - EKS. Nitro Sandboxes on EKS need a 1.36 cluster (a sandbox node group, or
@@ -119,9 +120,10 @@ No argument the caller passes selects a tenant, a prefix or a session. The
 `backend` argument picks which of the tenant's own sandboxes runs the code,
 never whose. The sandbox knows its tenant only as a label for logs.
 
-**P-3. Code in a sandbox can reach nothing but its reply.** No internet, no
-other sandbox, no instance or task metadata, and no AWS API beyond what the
-backend itself requires (C-2). Where a backend cannot prove one of these,
+**P-3. Code in a sandbox can reach nothing but its reply.** No connection
+to the internet or another sandbox, no credentials and no metadata beyond
+§3.4 "Code holds", and no AWS API beyond what the backend itself requires
+(C-2). DNS lookups are the stated exception (C-3). Where a backend cannot prove one of these,
 the sample measures it in §7 and says so in the threat model; it never
 assumes.
 
@@ -218,8 +220,8 @@ path is the same (ADR-0001).
 | `inputBucket` | `s3.IBucket` | created | the bucket with `inputs/<tenant>/` |
 | `microvm.memoryMiB` | `number` | 1024 | MicroVM image minimum memory |
 | `nitro.cpu`, `nitro.memoryMiB` | `number` | 512, 1024 | task size |
-| `nitro.instanceTypes` | `string[]` | `['m7i.xlarge']` | capacity provider instance requirements; each type must report `NitroEnclavesSupport: supported` (Intel types need 4 vCPU or more, so `m7i.large` is refused at synth) and match the runner image architecture |
-| `nitro.minInstances` | `number` | 0 | 0 keeps idle cost at zero; the first call after scale-in waits about 30 s and returns `sandbox_starting` |
+| `nitro.instanceTypes` | `string[]` | `['m7i.xlarge']` | capacity provider instance requirements, and the architecture of the `nitro` runner image. The default is the one type run end to end; `m7g.large` (Graviton, 2 vCPU) reports Nitro Enclaves support and is likely cheaper, but has not been run on ECS. Synth checks each type against a static table of types with Nitro Enclaves support (Intel types need 4 vCPU or more, so `m7i.large` is refused) |
+| `nitro.minInstances` | `number` | 0 | 0 keeps idle cost at zero; after scale-in a new sandbox takes about 30 s, and calls return `sandbox_starting` until it is ready. Warm starts of 11 to 18 s also often exceed `startWait` |
 | `agentcore.sessionFiles` | `boolean` | `false` | grant the runtime role `sessions/${aws:AgentCoreRuntimeSourceSid}/*` on the input bucket (ADR-0007) |
 
 Timing budget: the tool Lambda timeout is set to
@@ -228,9 +230,9 @@ overrun), at most 90 s with `ingress` set and 120 s without. Through
 `agentic-runtime-isolation`'s `api-gateway` ingress, the agent's whole
 turn shares that ingress's fixed 120 s integration timeout, so a tool
 budget above 90 s leaves the agent no time (S-11). The `+ 10 s` margin
-is what makes the tool return `timedOut` itself: a Lambda that times out
-reaches the agent only as the gateway's generic `isError` result, with
-no code. Validation at synth fails on: an unknown backend,
+is what makes the tool return `timedOut` itself: per the AgentCore
+Gateway documentation, a Lambda error reaches the agent only as a generic
+`isError` result, with no code. Validation at synth fails on: an unknown backend,
 empty `backends`, `defaultBackend` not enabled, `runTimeout` outside 1 s to
 60 s, a budget above the cap, `sandboxMaxLife` above 8 h, `sandboxIdle`
 below 1 min or at or above `sandboxMaxLife`, `toolName` or `gateway` set
@@ -267,7 +269,7 @@ The tool, not the backend, decides reuse from the registry row (§4.1).
 | Identity check | runner returns `HMAC(nonce, runId)` with the result; the tool checks it | over TLS on 8443 (ADR-0010): the tool sends `POST /hello` with a challenge; the runner answers `HMAC(nonce, challenge ‖ certFingerprint)`; the tool checks it against the connection's certificate and sends the job on the same connection | runner returns `HMAC(nonce, runId)`; a runner with no nonce adopts the job's, so a restart is detected by `bootId`, not by the nonce |
 | Run | `POST /run` with `X-aws-proxy-auth`, HTTPS | `POST /run` on the checked TLS connection | `InvokeAgentRuntime`, HTTPS, payload is the job |
 | Stop | idle policy suspends, then the platform ends it after 30 suspended minutes or at `sandboxMaxLife`; `TerminateMicrovm` on drain, offboard or overrun | reaper `StopTask` after `sandboxIdle` idle, or when the task's own `startedAt` is older than `sandboxMaxLife`; `StopTask` on drain, offboard or overrun | runtime `lifecycleConfiguration` `idleRuntimeSessionTimeout` = `sandboxIdle`, `maxLifetime` = `sandboxMaxLife`; `StopRuntimeSession` on drain, offboard or overrun |
-| Start cap | 20 s (measured P90 2.8 s) | 2 min (measured 31–34 s from zero instances, 11–18 s warm) | 30 s (measured 2–2.5 s for a new session) |
+| Start cap | 20 s (measured P90 2.8 s) | 5 min (measured 31–34 s from zero instances in two runs that may have used a pre-prepared instance, 11–18 s warm; the cap leaves room for a full instance launch) | 30 s (measured 2–2.5 s for a new session) |
 | Start and stop: enforced or filtered | filtered: the tool role may run, call and stop any MicroVM of the image (MicroVM actions authorize against the image only; a per-tenant tag condition would need an image per tenant) | enforced: `RunTask` requires `aws:RequestTag/TenantId` = `${aws:PrincipalTag/TenantId}`, `StopTask` requires `aws:ResourceTag/TenantId` = `${aws:PrincipalTag/TenantId}` (ADR-0014) | filtered: one runtime; the session id is derived by code (the actions support no session-id condition) |
 | Call: enforced or filtered | filtered by address; the nonce check rejects a wrong MicroVM | filtered by address; the nonce check rejects a wrong task before any job bytes are sent | filtered by session id; `bootId` detects a restarted session |
 | Code holds | no credentials; the link-local metadata service answers with the Region, the AZ id and a per-MicroVM key, and holds no credentials without an execution role | no credentials: no task role; the execution role is used by the ECS agent outside the sandbox; the task metadata endpoint gives the task ARN, cluster, image and log group; IMDS does not answer | the runtime role's credentials from IMDSv2 (§6.2 C-2) |
@@ -279,22 +281,42 @@ step 2), never retried on the same address.
 
 ### 3.5 The runner (ADR-0010)
 
-One Python program, packaged as: a MicroVM image code artifact (a
-Dockerfile on the AL2023 base image, ARM_64), and a container image for
-`nitro` (the architecture of `nitro.instanceTypes`) and `agentcore`
-(arm64). The AgentCore backend uses a container, not direct code
-deployment: a direct-code runtime runs as an unprivileged uid that cannot
-drop code to another user, needs S3 reads beyond the §3.7 endpoint policy,
-and takes about 9 minutes to create (ADR-0015). A pure-Python runner
-builds as arm64 without emulation from a `COPY`-only Dockerfile. The runner process runs as root inside the VM; it never runs
-tenant code as root. At boot it reads the nonce (from the `/run` hook
-payload, the `RUNNER_NONCE` variable, or the first AgentCore job), removes
-it from the environment it hands to code, and makes a `bootId`. On `nitro`
-it also makes a key pair and a self-signed certificate held only in
-memory. It reads `SANDBOX_MEMORY_MIB` (1024 on `microvm` and `nitro`,
-8192 on `agentcore`, the default session allocation) for its limits. It
-listens on 8080 (HTTP: MicroVM proxy, AgentCore contract) or 8443 (TLS:
-`nitro`) and serves:
+One Python program, packaged as a MicroVM image code artifact (a
+Dockerfile on the AL2023 base image, ARM_64) and as container images: one
+for `nitro`, in the architecture of `nitro.instanceTypes`, and an arm64
+one for `agentcore`. Both container images come from one `COPY`-only
+Dockerfile, which builds either architecture without emulation. The
+AgentCore backend is a container runtime (ADR-0015). The runner process
+runs as root inside the VM; it never runs tenant code as root.
+
+Build-time egress. `AWS::Lambda::MicrovmImage` requires an egress
+connector for the image build, and the build runs with the Lambda-managed
+`INTERNET_EGRESS`: it pulls the base layer and any packages the
+Dockerfile installs. This is a supply-chain surface of the build, owned by
+the vendor's Dockerfile, separate from runtime egress, which never reaches
+the internet. The Dockerfile pins its base image and installs nothing at
+build time beyond the pinned base.
+
+Per-sandbox values. `microvm` and `agentcore` start sandboxes from a
+snapshot, so anything the runner makes at process start is shared by
+every sandbox restored from that snapshot. The runner therefore makes its
+`bootId` and adopts its nonce when the sandbox first becomes one tenant's:
+in the `/run` lifecycle hook on `microvm`, at process start on `nitro`
+(each task is a fresh container), and at the session's first job on
+`agentcore`. Every random value comes from `os.urandom` or `secrets`,
+never from a generator a snapshot could restore with its state. On
+`nitro` it also makes a key pair and a self-signed certificate at process
+start, held only in memory. The nonce comes from the `/run` hook payload,
+the `RUNNER_NONCE` variable, or the first AgentCore job, and the runner
+removes it from the environment it hands to code.
+
+It reads `SANDBOX_MEMORY_MIB` (1024 on `microvm` and `nitro`, 8192 on
+`agentcore`, the default session allocation) for its limits. It listens on
+8080 (HTTP: MicroVM proxy, AgentCore contract) or 8443 (TLS: `nitro`), and
+on `microvm` also on 9000 for the lifecycle hooks. The 9000 listener
+accepts the `/run` hook's nonce once and ignores every later `/run` hook,
+answers `/suspend` and `/resume`, and serves no jobs; the tool's auth
+tokens allow port 8080 only, so a caller cannot reach 9000. It serves:
 
 - `GET /ping`: `{"status":"Healthy","bootId":…}` (AgentCore contract).
 - `POST /hello` (`nitro`): returns `bootId`, the certificate fingerprint
@@ -332,10 +354,12 @@ to its own stdout through the runner.
 | Tool role (function) | assume the tool tenant role with a `TenantId` tag; `lambda:RunMicrovm`, `GetMicrovm`, `TerminateMicrovm`, `CreateMicrovmAuthToken` on the sample's image (every MicroVM action authorizes against the image ARN; there is no MicroVM ARN), `lambda:PassNetworkConnector` on `HTTP_INGRESS` and the sample's connector only, so a start without the connector, which would get `INTERNET_EGRESS`, is refused; `bedrock-agentcore:InvokeAgentRuntime`, `StopRuntimeSession` on the sample's runtime; `ecs:DescribeTasks` on the cluster; `kms:GetPublicKey` on the context key | read the bucket or the registry directly; `ecs:RunTask` or `StopTask` |
 | Tool tenant role | `s3:GetObject` on `inputs/${TenantId}/*`, `s3:PutObject` on `outputs/${TenantId}/*`, registry items with `dynamodb:LeadingKeys` = `TENANT#${TenantId}`, `ecs:RunTask` on the pinned task definition revision ARN only, with the request tag condition and `ecs:cluster` = the sample's cluster; `ecs:TagResource` on `task/<cluster>/*` with the request tag condition and `ecs:CreateAction` = `RunTask` (the action has no `ecs:cluster` key, and this stops the role retagging existing tasks); `ecs:StopTask` with the resource tag condition and `ecs:cluster`; `iam:PassRole` on the task execution role | anything without its own tag; any other task definition or cluster |
 | Task execution role | `ecr:GetAuthorizationToken` on `*` (the action takes no resource), `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, Logs write on the task log group | everything else; never reachable by code (S-5) |
-| AgentCore runtime role | `ecr:GetAuthorizationToken` on `*`, `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents`, `DescribeLogStreams` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` (the name is known at synth, and runtime names cannot contain `-`, so the prefix matches only this runtime; `DescribeLogGroups` is left out, because it is refused at that scope and the runtime logged without it; code can create extra groups under the prefix, which the cleanup resource removes); with `sessionFiles`, `s3:GetObject`, `s3:PutObject` on `sessions/${aws:AgentCoreRuntimeSourceSid}/*` and `s3:ListBucket` with an `s3:prefix` condition | everything else |
+| AgentCore runtime role | `ecr:GetAuthorizationToken` on `*`, `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents`, `DescribeLogStreams` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` (the name is known at synth, and runtime names cannot contain `-`, so the prefix matches only this runtime; code can create extra groups under the prefix, which the cleanup resource removes); with `sessionFiles`, `s3:GetObject`, `s3:PutObject` on `sessions/${aws:AgentCoreRuntimeSourceSid}/*` and `s3:ListBucket` with an `s3:prefix` condition | everything else |
 | Reaper role | read, update and delete every registry row; `ecs:ListTasks`, `DescribeTasks`, `StopTask` on the cluster; `lambda:ListMicrovms` on `*` (it takes no resource; the call filters by image), `GetMicrovm`, `TerminateMicrovm` on the image; `StopRuntimeSession` on the runtime | the input bucket |
 | Drain role | the reaper role | the input bucket |
-| Log cleanup role (the runtime log cleanup resource and the task log drain) | `logs:DescribeLogGroups`; `logs:DeleteLogGroup` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` and on the task log group | every other log group; everything else |
+| MicroVM image build role | trust `lambda.amazonaws.com`; `s3:GetObject` on the runner code artifact; `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents` on `/aws/lambda-microvms/<imageName>` | everything else |
+| MicroVM connector operator role | trust `lambda.amazonaws.com`; `ec2:CreateNetworkInterface` on network interfaces, the sandbox subnets and the connector security group; `ec2:CreateTags` on network interfaces with `ec2:ManagedResourceOperator` = `network-connectors.lambda.amazonaws.com` | everything else |
+| Log cleanup role (the log cleanup resource and the task log drain) | `logs:DescribeLogGroups`; `logs:DeleteLogGroup` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*`, on `/aws/lambda-microvms/<imageName>` and on the task log group | every other log group; everything else |
 
 The runtime and execution roles reach no tenant data.
 
@@ -355,14 +379,14 @@ endpoints. Their security groups therefore admit the sandbox groups and
 the instance group; the tool, reaper and drain call neither ECR nor Logs
 APIs directly (their own logs go through the Lambda service). The policies
 name only the sample's repository and log groups. The instances pull the
-runner image from that repository, through these endpoints or the NAT
-(the spike could not tell which), so the policies cover them either way.
+runner image from that repository, through these endpoints or the NAT,
+and the policies admit that pull on either path.
 
 | Endpoint | Policy allows | Present when |
 |---|---|---|
 | S3 gateway (sandbox route table only) | `s3:GetObject` on the ECR layer bucket `prod-<region>-starport-layer-bucket/*`; with `sessionFiles`, `s3:GetObject`, `s3:PutObject`, `s3:ListBucket` on the input bucket's `sessions/` prefix (the endpoint admits every `sessions/*` key; the role policy separates sessions) | `agentcore` |
 | ECR `api` and `dkr` | `ecr:GetAuthorizationToken` on `*` (account-wide by design, useless without a pull grant); `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer` on the runner repository | `agentcore` |
-| CloudWatch Logs | `logs:CreateLogStream`, `logs:PutLogEvents` on the task log group; the five runtime role log actions on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` | `nitro`, `agentcore` |
+| CloudWatch Logs | `logs:CreateLogStream`, `logs:PutLogEvents` on the task log group; `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents`, `DescribeLogStreams` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` | `nitro`, `agentcore` |
 
 Security groups:
 
@@ -415,8 +439,7 @@ monotonic condition, `lastUsedAt < :end`, and adds nothing. The stop adds
 the final gap up to `terminatedAt` (or the stop time on other backends).
 `runningSeconds` is the difference, clamped at 0. The line carries `estimated` = true,
 because the API reports no per-state times and the counter assumes the
-MicroVM suspends exactly at `sandboxIdle`, which the spikes did not
-measure.
+MicroVM suspends exactly at `sandboxIdle`.
 Two Contributor Insights rules rank tenants by runs and by
 `sandboxSeconds`. With `perTenantMetrics`, the
 tool also emits EMF metrics `Runs`, `Errors`, `RunDuration`,
@@ -611,10 +634,10 @@ runtime and the image are deleted, and the order matters. It stops every
 handle in the registry, then every task and MicroVM the orphan sweep
 finds, and waits until `ListTasks` shows every task `STOPPED` and
 `ListMicrovms` shows every MicroVM of the image `TERMINATED` (at most 10
-minutes). A MicroVM image cannot be deleted while a MicroVM of it runs or
-is suspended, and a capacity provider cannot be deleted while a task is
-still stopping; in both cases CloudFormation fails the delete, the second
-after a 20-minute stall. A `StopTask` takes 45 to 78 s, so the runner
+minutes). A MicroVM image cannot be deleted while MicroVMs of it are live
+(running or suspended), and a capacity provider cannot be deleted while a
+task is still stopping; in both cases CloudFormation fails the delete, the
+second after a 20-minute stall. A `StopTask` takes 45 to 78 s, so the runner
 exits at once on `SIGTERM`. AgentCore sessions in rows are stopped with
 `StopRuntimeSession`; sessions with no row end within about 20 s of the
 runtime's delete, which takes about 200 s.
@@ -631,7 +654,10 @@ cost are delivered (`AWS::Logs::DeliverySource`, `DeliveryDestination`,
 `Delivery`) to a log group the construct owns. AgentCore names its groups
 `/aws/bedrock-agentcore/runtimes/<runtimeName>-<10-character id>-DEFAULT`,
 and code with the runtime role can add more under the same prefix; the
-cleanup resource deletes them all.
+cleanup resource deletes them all. The MicroVM image build writes to
+`/aws/lambda-microvms/<imageName>`, which the service creates; the same
+cleanup resource takes that name as a second property (known at synth),
+is ordered after the image, and deletes it once the image is gone.
 
 Names. Every resource with an explicit name gets it from the construct
 path through one sanitiser per service, which keeps the service's charset,
@@ -665,8 +691,11 @@ matches its charset when two instances share a stack.
   subnets (no default route), tagged `run-code:tier` = `tool` or `sandbox`.
 - For `microvm`: a quota increase on "maximum allocated MicroVM memory"
   (2048 MiB per Region by default, running and suspended MicroVMs both
-  count), which fits only two 1024 MiB sandboxes. `RunMicrovm` is limited
-  to 5 calls per second per account.
+  count), which fits only two 1024 MiB sandboxes. A tenant holds
+  `microvm.memoryMiB` of quota from its first call until 30 suspended
+  minutes after `sandboxIdle`, so size the quota as `memoryMiB` × the
+  tenants active within `sandboxIdle` + 30 minutes. `RunMicrovm` is
+  limited to 5 calls per second per account.
 - For `nitro`: nothing beyond the stack; the instance role is named
   `ecsInstanceRole*`, because the managed infrastructure policy passes only
   roles with that name.
@@ -743,23 +772,26 @@ deploy and destroy time, and cleans up on exit.
 S-1 to S-10 ran against throwaway stacks on one shared VPC laid out as
 §3.7. S-11 and S-12 were answered from the AgentCore documentation and
 `agentic-runtime-isolation`'s code, because no ingress was deployed.
-Every stack was removed; only service-created log groups were left, which
-is the §5.3 cleanup case. The decisions are recorded in ADR-0015.
+Every stack was removed; only service-created log groups were left (the
+AgentCore runtime groups and the MicroVM image build group), which the
+sample's log cleanup resource deletes (§5.3). The decisions are recorded
+in ADR-0015. The last column names what each spike did not test; the §8
+step that covers a gap is in brackets.
 
-| Id | Result | Changed |
-|---|---|---|
-| S-1 | `AWS::Lambda::MicrovmImage` and `AWS::Lambda::NetworkConnector` deploy from a zip. Stack create 308 s (image 120 s, connector 254 s, in parallel); a code update 157 s. The image delete fails at once while a MicroVM of it runs or is suspended; the connector delete succeeds even with MicroVMs on it. After the MicroVMs were terminated, the delete took 92 s. Names: `[a-zA-Z0-9_-]`, 64; the connector ARN uses a generated id. A security group with no egress needs a placeholder rule in CloudFormation | §5.3 drain order, §5.3 names |
-| S-2 | With only the VPC connector, code reached no internet host, no peer MicroVM and no interface endpoint. With no egress connector the MicroVM got `INTERNET_EGRESS` and reached the internet. Still open with the connector: DNS to the VPC resolver (public names resolve), and the link-local metadata service (Region, AZ id, a per-MicroVM key; no credentials without an execution role). The hook port 9000 answers only to a token that allows it | §3.4 Code holds, Egress, DNS; C-3; §1.2 |
-| S-3 | `RunMicrovm` and `CreateMicrovmAuthToken` take no tags and no request-tag condition. Every MicroVM action authorizes against the image ARN; there is no MicroVM ARN, and the only key is the image's `aws:ResourceTag`. `lambda:PassNetworkConnector` is needed for every connector passed, including `HTTP_INGRESS`, and for `INTERNET_EGRESS` when the egress connector is omitted | §3.4 start filtered; §3.6 tool role; §3.8 no MicroVM tag |
-| S-4 | Cold start to first `/run` P50 2.50 s, P90 2.82 s (n = 20, the connector adds nothing measurable). Resume P50 0.56 s, auto-resume by request 0.62 s (n = 5). The runner is PID 1 as root; a child drops to uid 1001 and cannot regain root or signal the runner. `bootId` survives suspend and resume. `runHookPayload` reaches the `/run` hook, capped at 4096 characters. `GetMicrovm` reports `startedAt`, `terminatedAt`, `stateReason`, no suspend times and no tags. Default memory quota 2048 MiB per Region | §3.4 start cap and Start; §6.1 quota |
-| S-5 | In an `ISOLATED_SANDBOX` task with no task role: no credential variables, the credentials endpoint returns 404, IMDS v1 and v2 do not answer (timeout), the task metadata endpoint returns only task, cluster, image and log fields. The container starts as root; a child drops to uid 1001 | C-2 holds |
-| S-6 | The instance pulls the image: a task with no security group egress at all pulled a new digest and started. `awslogs` leaves through the task ENI (logs were held 48 s until 443 to the Logs endpoint was allowed). Code reached only the endpoint addresses; no internet, no other task | §3.4 Egress; §3.7 `nitro` group and endpoints |
-| S-7 | `RunTask` to `RUNNING`: 31 to 34 s from zero instances, 11 to 18 s warm (median 13.4 s). Scale-in 131 s after the last task with `ScaleInAfter` 120. `m7i.large` does not support Nitro Sandboxes; `m7i.xlarge` does, at $0.27 per instance-hour including the management fee. `StopTask` 45 to 78 s. Twelve tasks got twelve distinct IPs (reuse not seen, not ruled out). The same `clientToken` returned the same task. A capacity provider delete fails while a task is still stopping, after a 20-minute stall | §3.3 `nitro.instanceTypes`; §3.4 start cap; §5.3 drain order |
-| S-8 | `InvokeAgentRuntime` and `StopRuntimeSession` support only `aws:ResourceTag`; a session-id condition never matched. No API lists a runtime's sessions | §3.4 call filtered (ADR-0009) |
-| S-9 | A V2 container runtime in the §3.7 network reached `READY` in 201 to 204 s; an update took 200 s. Direct code deployment failed under the §3.7 S3 endpoint policy and needed about 9 minutes when it worked. HTTPS out failed; a presigned PUT to a bucket outside the endpoint policy returned 403. Public DNS names resolve. A new session answers in 2.0 to 2.5 s, a warm one in 0.5 to 0.7 s. Deleting the runtime takes about 200 s; a live session stops 17 to 21 s after the call. Log groups `/aws/bedrock-agentcore/runtimes/<name>-<id>-DEFAULT` stay after the delete | §3.5 container only; C-3; §5.3 |
-| S-10 | Credentials come from IMDSv2. The runtime role reached only its own repository, its log prefix and, with `sessionFiles`, its own session prefix; session X was refused `sessions/Y/`. `logs:DescribeLogGroups` at the prefix is refused and not needed. A container starts as root and drops a child to uid 1001; a direct-code runtime runs as uid 991 and cannot. Sessions of one runtime version report the same process start state | §3.4 Ready; §3.5; §3.6 runtime role |
-| S-11 | The gateway allows a 15-minute invocation; a tool Lambda timeout reaches the caller as a generic `isError` result. `agentic-runtime-isolation`'s `api-gateway` ingress cuts every turn at a fixed 120 s | §3.3 timing budget |
-| S-12 | A direct `tools/call` works with a token minted by a test-only Lambda that the producer's own test grants `kms:Sign`. A consumer cannot sign for an ingress it does not own | §8 driver |
+| Id | Result | Changed | Not tested |
+|---|---|---|---|
+| S-1 | `AWS::Lambda::MicrovmImage` and `AWS::Lambda::NetworkConnector` deploy from a zip. Stack create 308 s (image 120 s, connector 254 s, in parallel); a code update 157 s. The image delete fails at once while a MicroVM of it runs or is suspended; the connector delete succeeds even with MicroVMs on it. After the MicroVMs were terminated, the delete took 92 s. Names: `[a-zA-Z0-9_-]`, 64; the connector ARN uses a generated id. A security group with no egress needs a placeholder rule in CloudFormation | §5.3 drain order, §5.3 names | which of a RUNNING or a SUSPENDED MicroVM blocks the image delete (the drain waits for both to end); what a running MicroVM's network does after its connector is deleted |
+| S-2 | With only the VPC connector, code reached no internet host, no peer MicroVM and no interface endpoint. With no egress connector the MicroVM got `INTERNET_EGRESS` and reached the internet. Still open with the connector: DNS to the VPC resolver (public names resolve), and the link-local metadata service (Region, AZ id, a per-MicroVM key; no credentials without an execution role). The hook port 9000 answers only to a token that allows it | §3.4 Code holds, Egress, DNS; C-3; §1.2 | an actual DNS-tunnel exfiltration; only resolution and TCP 53 reach were checked |
+| S-3 | `RunMicrovm` and `CreateMicrovmAuthToken` take no tags and no request-tag condition. Every MicroVM action authorizes against the image ARN; there is no MicroVM ARN, and the only key is the image's `aws:ResourceTag`. `lambda:PassNetworkConnector` is needed for every connector passed, including `HTTP_INGRESS`, and for `INTERNET_EGRESS` when the egress connector is omitted | §3.4 start filtered; §3.6 tool role; §3.8 no MicroVM tag | `TerminateMicrovm` was checked only in the allowed case |
+| S-4 | Cold start to first `/run` P50 2.50 s, P90 2.82 s (n = 20, the connector adds nothing measurable). Resume P50 0.56 s, auto-resume by request 0.62 s (n = 5). The runner is PID 1 as root; a child drops to uid 1001 and cannot regain root or signal the runner. `bootId` survives suspend and resume. `runHookPayload` reaches the `/run` hook, capped at 4096 characters. `GetMicrovm` reports `startedAt`, `terminatedAt`, `stateReason`, no suspend times and no tags. Default memory quota 2048 MiB per Region | §3.4 start cap and Start; §6.1 quota | idle auto-suspend after `maxIdleDurationSeconds` and expiry at `maximumDurationInSeconds` [`microvm-stop`, `max-life`]; the execution-role path |
+| S-5 | In an `ISOLATED_SANDBOX` task with no task role: no credential variables, the credentials endpoint returns 404, IMDS v1 and v2 do not answer (timeout), the task metadata endpoint returns only task, cluster, image and log fields. The container starts as root; a child drops to uid 1001 | C-2 holds | the `ECS_AGENT_URI` address; vsock and other host channels; `CONFIDENTIAL_SANDBOX` |
+| S-6 | The instance pulls the image: a task with no security group egress at all pulled a new digest and started. `awslogs` leaves through the task ENI (logs were held 48 s until 443 to the Logs endpoint was allowed). Code reached only the endpoint addresses; no internet, no other task | §3.4 Egress; §3.7 `nitro` group and endpoints | the scoped §3.7 endpoint policies (the shared network's policies were used) [`no-egress`]; which path the instance used for ECR |
+| S-7 | `RunTask` to `RUNNING`: 31 to 34 s from zero instances, 11 to 18 s warm (median 13.4 s). Scale-in 131 s after the last task with `ScaleInAfter` 120. `m7i.large` does not support Nitro Sandboxes; `m7i.xlarge` does, at $0.27 per instance-hour including the management fee. `StopTask` 45 to 78 s. Twelve tasks got twelve distinct IPs (reuse not seen, not ruled out). The same `clientToken` returned the same task. A capacity provider delete fails while a task is still stopping, after a 20-minute stall | §3.3 `nitro.instanceTypes`; §3.4 start cap; §5.3 drain order | `m7g.large` on ECS (EC2 reports it supported, but the probe image was amd64); cold starts under load or in another Region, since the two cold starts may have used a pre-prepared instance; `clientToken` reuse after the task stopped |
+| S-8 | `InvokeAgentRuntime` and `StopRuntimeSession` support only `aws:ResourceTag`; a session-id condition never matched. No API lists a runtime's sessions | §3.4 call filtered (ADR-0009) | an `aws:ResourceTag` condition on invoke and stop |
+| S-9 | A V2 container runtime in the §3.7 network reached `READY` in 201 to 204 s; an update took 200 s. Direct code deployment failed under the §3.7 S3 endpoint policy and needed about 9 minutes when it worked. HTTPS out failed; a presigned PUT to a bucket outside the endpoint policy returned 403. Public DNS names resolve. A new session answers in 2.0 to 2.5 s, a warm one in 0.5 to 0.7 s. Deleting the runtime takes about 200 s; a live session stops 17 to 21 s after the call. Log groups `/aws/bedrock-agentcore/runtimes/<name>-<id>-DEFAULT` stay after the delete | §3.5 container only; C-3; §5.3 | CloudFormation deployment of the runtime (the CLI was used); runtime logging with the Logs endpoint removed (log delivery did not use the customer ENI); which AWS bucket direct code deployment reads |
+| S-10 | Credentials come from IMDSv2. The runtime role reached only its own repository, its log prefix and, with `sessionFiles`, its own session prefix; session X was refused `sessions/Y/`. `logs:DescribeLogGroups` at the prefix is refused and not needed. A container starts as root and drops a child to uid 1001; a direct-code runtime runs as uid 991 and cannot. Sessions of one runtime version report the same process start state | §3.4 Ready; §3.5; §3.6 runtime role | P50 and P90 over 20 runs (5 samples each); IMDS `tags/` |
+| S-11 | The gateway allows a 15-minute invocation; a tool Lambda timeout reaches the caller as a generic `isError` result. `agentic-runtime-isolation`'s `api-gateway` ingress cuts every turn at a fixed 120 s | §3.3 timing budget | a tool Lambda that times out (the error shape is from the documentation's access-denied example) [`runaway`] |
+| S-12 | A direct `tools/call` works with a token minted by a test-only Lambda that the producer's own test grants `kms:Sign`. A consumer cannot sign for an ingress it does not own | §8 driver | whether a minted token naming an agent that is not deployed is accepted |
 
 ## 8. Integration test outline
 
@@ -789,7 +821,7 @@ touched.
 | prefix | the tool refuses `input` = `../B/invoice.csv` and any name outside A's prefix |
 | iam-wall | `iam:SimulatePrincipalPolicy` on the tool tenant role with `aws:PrincipalTag/TenantId` = `A` denies `inputs/B/*`, the `TENANT#B` row, and `StopTask` on B's task |
 | limits | a 6 MiB input returns `input_too_large`; a 1 MiB print returns `truncated` = true |
-| no-credentials | A's script tries IMDS, the ECS and AgentCore metadata endpoints, and `boto3` default credentials, then `GetObject` on B's invoice. `microvm` and `nitro`: every attempt fails. `agentcore`: credentials load, and every call outside C-2 is denied |
+| no-credentials | A's script tries IMDS, the ECS and AgentCore metadata endpoints, and `boto3` default credentials, then `GetObject` on B's invoice. `microvm` and `nitro`: no credentials are returned (the MicroVM metadata service answers but its `iam/security-credentials/` path gives 404; the ECS credentials path gives 404; IMDS on `nitro` gives no answer within the script's own 3 s timeout), and the `GetObject` fails. `agentcore`: credentials load, and every call outside C-2 is denied |
 | no-egress | A's script tries HTTPS to `example.com`, TCP to B's sandbox address, and a presigned PUT to a test bucket outside the endpoint policy; all fail within 5 s |
 | runaway | a loop, a `setsid` child that sleeps past the job, a kill of PID 1 and of the runner, and a disk fill: each returns `timedOut` or a non-zero exit, nothing of the job survives into A's next call, and A's next call works |
 | dead-handle | stop A's sandbox out of band; A's next call returns `sandbox` = `started` |
@@ -804,7 +836,12 @@ touched.
 | telemetry | Logs Insights finds one tool line per call with the §3.8 fields and the right `tenantId` |
 | forged | a direct Lambda invoke with a tampered tenant context returns `context_invalid` and starts nothing (test-only shortcut: only the gateway role may invoke the function in a real deployment) |
 | offboard | after `C`'s grant is removed, `offboardTenant` for `C` stops its sandboxes and deletes its rows; a second call returns the same result with nothing stopped |
-| teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left (the task and usage-log groups, and every `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` group), and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
+| teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left (the task and usage-log groups, `/aws/lambda-microvms/<imageName>`, and every `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` group), and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
 
-Every behaviour step runs once per backend unless it names one. The run
+Preconditions, checked by the driver before it deploys: the account's
+"maximum allocated MicroVM memory" quota (Service Quotas) is at least
+5 × `microvm.memoryMiB` (tenants A, B, C and E, plus a restart), and the
+driver fails early naming the quota if not. Every behaviour step runs
+once per backend unless it names one. `cold-from-zero` records the
+`nitro` start time and fails if it comes within half of the start cap. The run
 records cold and warm latency per backend and the deploy and destroy time.

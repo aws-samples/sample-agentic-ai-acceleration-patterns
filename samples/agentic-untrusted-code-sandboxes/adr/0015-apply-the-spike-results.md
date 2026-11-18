@@ -4,7 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
-- Amends: ADR-0003, ADR-0004, ADR-0008, ADR-0010, ADR-0012, ADR-0013
+- Amends: ADR-0003, ADR-0004, ADR-0008, ADR-0010, ADR-0011, ADR-0012, ADR-0013
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -36,22 +36,33 @@ Pros: fewer moving parts. Cons: the sample exists to compare all three.
 
 Option 1. The changes, by spec section:
 
-- §3.3: `nitro.instanceTypes` defaults to `m7i.xlarge`, and synth refuses a
-  type without Nitro Enclaves support. The tool budget cap is 90 s with an
+- §3.3: `nitro.instanceTypes` defaults to `m7i.xlarge`, the only type run
+  end to end; `m7g.large` reports Nitro Enclaves support and is likely
+  cheaper, but was not run on ECS. Synth refuses a type missing from a
+  static table of supported types. The tool budget cap is 90 s with an
   ingress and 120 s without.
-- §3.4: start caps 20 s (`microvm`), 2 min (`nitro`), 30 s (`agentcore`).
-  `microvm` start and stop stay filtered: only the image is scoped. The
-  AgentCore runner makes its `bootId` at a session's first job.
-- §3.5: the AgentCore backend is a container image, not direct code.
+- §3.4: start caps 20 s (`microvm`), 5 min (`nitro`, room for a full
+  instance launch, since the two measured cold starts may have used a
+  pre-prepared instance), 30 s (`agentcore`). `microvm` start and stop stay
+  filtered: only the image is scoped.
+- §3.5: the AgentCore backend is a container image: a direct-code runtime
+  runs as an unprivileged uid that cannot drop code to a second user,
+  needs S3 reads beyond the endpoint policy, and takes about 9 minutes to
+  create. On `microvm` and `agentcore` the runner makes its per-sandbox
+  values when the sandbox first serves a tenant, because sandboxes start
+  from a shared snapshot. The MicroVM image build has internet access.
 - §3.6: the tool role passes only `HTTP_INGRESS` and the sample's
   connector, so a start without the connector is refused. The runtime role
-  drops `logs:DescribeLogGroups`.
+  drops `logs:DescribeLogGroups`, which is refused at its scope and not
+  needed. The MicroVM build role and connector operator role are listed.
 - §3.7: the `nitro` task group reaches only the Logs endpoint; the ECR and
   S3 endpoints serve `agentcore` only.
 - §3.8: MicroVM cost comes from the registry, because MicroVMs take no tags.
 - §5.3: drain waits for every task `STOPPED` and every MicroVM
-  `TERMINATED` before the stack's resources go.
-- §6.1: the deployer raises the MicroVM memory quota.
+  `TERMINATED` before the stack's resources go, and the log cleanup
+  resource also deletes the MicroVM image build log group.
+- §6.1: the deployer raises the MicroVM memory quota, sized by tenants
+  active within `sandboxIdle` + 30 minutes; §8 checks it before deploying.
 - C-3 and §1.2: DNS is named as an open channel, with DNS Firewall as the
   next option.
 - §8: the integration test owns its ingress and mints test tokens.
@@ -59,9 +70,10 @@ Option 1. The changes, by spec section:
 ## Consequences
 
 ADR-0003's "no internet" claim stands for connections, and DNS is its
-stated exception. ADR-0004's `nitro` backend runs on 4-vCPU Intel or
-Graviton types, which raises the idle cost per instance to about $0.27 per
-hour. ADR-0008's driver deploys an ingress on every run. ADR-0010's runner
+stated exception. ADR-0004's `nitro` backend runs on `m7i.xlarge` by default, about
+$0.27 per instance-hour while an instance is up; a Graviton type such as
+`m7g.large` is the cheaper option to test next. ADR-0011's drain waits
+for sandboxes to end before the resources they block. ADR-0008's driver deploys an ingress on every run. ADR-0010's runner
 model holds on `microvm`, `nitro` and the AgentCore container backend.
 ADR-0012's endpoint set shrinks for `nitro`. ADR-0013 attributes MicroVM
 seconds from the registry only. Revisit when AWS adds MicroVM tags, an

@@ -49,4 +49,4 @@ cost section shows them. The integration test tries a presigned PUT to an
 outside bucket through the S3 endpoint. A vendor who supplies `vpc` must
 tag both tiers.
 
-Note 2026-11-18: amended by ADR-0015, which applies the spike results (spec §7.1) to this decision.
+Note 2026-11-18: amended by ADR-0015. ECR and S3 endpoints in the sandbox subnets serve `agentcore` only; the `nitro` task needs only the Logs endpoint, because the instance pulls the image.

@@ -63,4 +63,4 @@ expects the refusal, and its runaway step tries forks, a kill of the runner
 and a disk fill. If S-4 shows the MicroVM base image cannot drop to a
 second user, the threat model records the gap for `microvm`.
 
-Note 2026-11-18: amended by ADR-0015, which applies the spike results (spec §7.1) to this decision.
+Note 2026-11-18: amended by ADR-0015. On `microvm` and `agentcore` the runner makes `bootId` and adopts the nonce when the sandbox first serves a tenant (the `/run` hook, the session's first job), because sandboxes start from a shared snapshot. The AgentCore backend is a container, because a direct-code runtime cannot drop code to a second user.

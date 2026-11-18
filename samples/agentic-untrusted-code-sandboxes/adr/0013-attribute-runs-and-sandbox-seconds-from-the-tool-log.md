@@ -46,4 +46,4 @@ The README Costs section gives the formula per backend and names what stays
 unattributed (idle capacity, NAT, endpoints, image builds) and how to
 apportion it. The integration test checks the tool line's fields.
 
-Note 2026-11-18: amended by ADR-0015, which applies the spike results (spec §7.1) to this decision.
+Note 2026-11-18: amended by ADR-0015. MicroVMs take no tags, so `microvm` cost is attributed from the registry's stop lines only.

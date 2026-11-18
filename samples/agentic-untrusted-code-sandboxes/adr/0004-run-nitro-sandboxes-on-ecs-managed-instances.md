@@ -50,4 +50,4 @@ task's identity (ADR-0010). EKS readers get a
 README note mapping the same settings to the pod spec. Confidential mode
 stays out of scope (spec §1.2).
 
-Note 2026-11-18: amended by ADR-0015, which applies the spike results (spec §7.1) to this decision.
+Note 2026-11-18: amended by ADR-0015. The default instance type is `m7i.xlarge`, the only type run end to end (`m7i.large` has no Nitro Enclaves support; `m7g.large` reports support but was not run on ECS). The instance role is named `ecsInstanceRole*`. The drain waits for every task to stop before the capacity provider goes.

@@ -4,6 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
+- Amended by: ADR-0015
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -55,3 +56,5 @@ listed, so it gets no line, and its cost comes from AgentCore's usage
 logs. The registry's TTL runs an hour after expiry, so the reaper sees an
 expired row first. Offboarding does not delete
 tenant objects (spec §1.2).
+
+Note 2026-11-18: amended by ADR-0015. The drain waits until every task is `STOPPED` and every MicroVM of the image is `TERMINATED` before the stack's resources are deleted, and the log cleanup resource also deletes the MicroVM image build log group.

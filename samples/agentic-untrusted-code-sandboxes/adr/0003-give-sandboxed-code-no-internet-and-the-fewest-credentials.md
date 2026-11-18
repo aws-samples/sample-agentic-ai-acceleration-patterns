@@ -61,4 +61,4 @@ because the MicroVM logs nothing. If a spike shows a path a backend cannot
 close, the threat model records it against that backend and the README says
 so in the backend table.
 
-Note 2026-11-18: amended by ADR-0015, which applies the spike results (spec §7.1) to this decision.
+Note 2026-11-18: amended by ADR-0015. "No internet" holds for connections; DNS lookups resolve public names on every backend and are the stated exception. The `nitro` task group reaches only the Logs endpoint; ECR and S3 endpoints serve `agentcore` only. The MicroVM metadata service answers, without credentials.
