@@ -122,3 +122,9 @@ router therefore strips the leading `/agents` from
 other `/agents` path, `/agents` and `/agents/` included. The
 `/agents/*` origin, its origin request policy and the absence of
 origin access control do not change.
+
+Spike S-5 (2026-11-18) passed: through the `/agents/*` behaviour with
+`Managed-AllViewerExceptHostHeader` and no origin access control, the
+ingress received the viewer's bearer on `GET` and `POST`, and streams
+arrived unbuffered (first byte within 14 ms of the ingress's write, one
+event per read). The `/agents/*` origin request policy stands.

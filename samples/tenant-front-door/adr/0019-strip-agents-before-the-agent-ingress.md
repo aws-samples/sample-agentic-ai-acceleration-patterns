@@ -83,13 +83,16 @@ other `/agents` path get 404 at the edge.
   issuer, entitlement or delegation routes behind the same API.
 - `/agents` without a slash falls under the default (SPA) behaviour, so
   the router checks it before it rewrites SPA routes to `/index.html`
-  (§3.3 step 3).
+  (§3.3 step 3). The default behaviour allows only `GET` and `HEAD`, so a
+  `POST /agents` gets CloudFront's own 403 before the router runs; either
+  answer keeps it from the ingress (S-5).
 - The real ingress serves `POST` only. A `GET` to an agent route passes
   the edge and gets the ingress's own 403. S-5's `GET` check therefore
   proves that the origin request policy forwards `Authorization` on
   `GET`, not a route.
-- Spike S-5 checks that the ingress sees `<stage>/<backend>/invocations`
-  with no `/agents` (§9).
+- Spike S-5 passed on 2026-11-18: the ingress saw
+  `<stage>/<backend>/invocations` with no `/agents`, streams arrived
+  unbuffered, and `/agents/` got the router's 404 (§9).
 - Harder: a new ingress route the SPA must call (a bare default-backend
   route, say) needs a router change and a spec line.
 - Revisit when `agentic-runtime-isolation` changes its route shape or

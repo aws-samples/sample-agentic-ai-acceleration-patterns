@@ -10,12 +10,12 @@ also Proposed (spec Q-5). ADR-0017 will supersede ADR-0013 once
 ADR-0044 is accepted; until then ADR-0013 stays Accepted. Merge order:
 the control-plane hooks branch first, then this one. The `Amended by:
 ADR-0017` notes on ADR-0002, 0003, 0012, 0014 and 0015 take effect when
-ADR-0017 is accepted. Two spikes are still open
-([spec §9](../design/tenant-front-door.spec.md)): S-5 (does
-`/agents/*` stream without buffering), which if it fails reopens the
-`/agents/*` origin request policy in ADR-0011, and S-10 (what the
+ADR-0017 is accepted. One spike is still open
+([spec §9](../design/tenant-front-door.spec.md)): S-10 (what the
 registrar's Lambda function sees from its default resolver), which if
-it fails reopens the resolver choice in ADR-0018.
+it fails reopens the resolver choice in ADR-0018. S-5 (`/agents/*`
+streaming) passed on 2026-11-18, which settles the `/agents/*` origin
+request policy in ADR-0011.
 
 | Number | Title | Status | Date |
 |---|---|---|---|
