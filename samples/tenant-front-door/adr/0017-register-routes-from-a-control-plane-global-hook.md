@@ -215,8 +215,8 @@ printing the registrar's message.
   checks that the second account's provisioning roles get 403 (spec §10
   steps 11 to 13).
 - This record stays Proposed, and ADR-0013 Accepted, until
-  control-plane ADR-0044 is accepted; the control-plane hooks branch
-  merges first. On acceptance this record supersedes ADR-0013.
+  control-plane ADR-0044 is accepted. On acceptance this record
+  supersedes ADR-0013.
 - Revisit when control-plane ADR-0044 changes before it is accepted
   (spec Q-5), or when the control plane offers a role per global hook
   (its §11 seam), which would let the registrar admit the route hook

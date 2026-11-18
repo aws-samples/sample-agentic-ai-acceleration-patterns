@@ -161,21 +161,31 @@ before it writes the domain's `host#` key.
   until the operator drops it. The daily re-check covers every passed
   challenge, routed or not, because a pending certificate request rests
   on the same proof; its alarm means the tenant does not show control
-  of a domain it claimed. The lister gives each run a run id and a
-  UTC `runDay`, logs both on a `run-start` line with the page count (zero
-  included), and passes the run id to every page of 500 entries. Each
-  page looks its records up 10 at a time with a 5 s timeout, querying
-  CNAME only when the TXT answer is empty or holds the token, and logs
-  one line per entry with the run id, the outcome (`pass`, `miss` or
-  `error`), the tenant and the domain, never the token, then a
-  `page-end` line, unless the page's own query already showed one. At
-  its start, the page runs one Logs Insights query, `limit 10000` set,
-  that aggregates with `stats` by run id, tenant and domain, so a retried
+  of a domain it claimed. Every sweeper log line has a `type`
+  (`run-start`, `entry` or `page-end` for the re-check's record). The
+  lister gives each run a run id and a UTC `runDay`, logs both on a
+  `run-start` line with the page count (zero included), and passes the
+  run id and a page number to every page of 500 entries. Only the
+  integration test supplies a `runDay`, never the Scheduler; the lister
+  accepts one only within the last 7 days and not after today, and logs
+  that it was supplied. Each page looks its records up 10 at a time with
+  a 5 s timeout, querying CNAME only when the TXT answer is empty or
+  holds the token, and logs one `entry` line per entry with the run id,
+  the page, the tenant, the domain and numeric `pass`, `miss` and
+  `error` fields, one of them 1, never the token, then a `page-end`
+  line, unless the page's own query already showed one. At its start,
+  the page runs one Logs Insights query, `limit 10000` set, that
+  aggregates with `stats sum(pass), sum(miss), sum(error),
+  latest(runDay) by type, runId, page, tenant, domain`, so a retried
   page or an extra run still gives one row for each run and entry, and
-  walks each missed entry's earlier days in memory, one run for each UTC
-  day, the newest. Within one run a `miss` wins over a `pass`, because a
-  miss only counts toward three; only a logged `pass` on a later day
-  breaks the streak. A day with an error or with no line for the entry,
+  the `run-start` and `page-end` rows stay apart. The page joins entry
+  rows to their run's `run-start` row on the run id in memory and walks
+  each missed entry's earlier days, one run for each UTC day, the
+  newest. Within one run `sum(miss) > 0` makes a miss even when a pass
+  was also logged, because a miss only counts toward three; only a
+  logged `pass` on a later day breaks the streak. A run adds at most
+  502 rows (500 entries, its `run-start` row and one `page-end` row),
+  so 19 runs in the 7 days fit the 10,000-row limit. A day with an error or with no line for the entry,
   because its page failed, is unknown and is skipped. Two earlier missed
   days before any pass make a three-miss line with the tenant and
   domain, and one count, as an embedded metric format log line, to the
@@ -188,11 +198,16 @@ before it writes the domain's `host#` key.
   most 500 s of lookups plus a 60 s poll limit on its one query; a query
   that fails, does not finish, or returns 10,000 rows fails the page
   (the page calls `logs:StopQuery` on a query it gives up on), which
-  Lambda retries twice and then keeps in an on-failure queue. Alarms on
-  that queue and on pages started minus pages finished, with
-  `FILL(finished, 0)` and a period one run never straddles, say that
-  detection was down. One query per page in flight keeps a run inside
-  the Logs Insights quota of 30 concurrent queries. The sweeper keeps
+  Lambda retries twice and then keeps in an on-failure queue. The daily
+  schedule's retry policy (2 retries, 1 hour maximum event age) and the
+  sweeper's asynchronous maximum event age (3 hours) end every run by
+  09:30 UTC on the day it starts. The next run's lister reads the
+  previous run's `run-start` page count and its `page-end` lines and
+  emits a missing-pages count, a previous day with no `run-start` line
+  counting as one; alarms on that count and on the queue say that
+  detection was down, and they judge only finished runs. One query per
+  page in flight keeps a run inside the Logs Insights quota of 30
+  concurrent queries. The sweeper keeps
   no store of its own: its log is the record. A removed record can still
   pass for as long as the resolver caches it, up to its TTL cap (S-10),
   which delays the alarm by that much. The sweeper does not drop the
@@ -204,7 +219,12 @@ before it writes the domain's `host#` key.
   record itself.
 - Harder: `dedicatedDomains` is a deploy-time switch. Off, the
   registrar answers any `customDomain` with 400 and holds no ACM or
-  distribution-tenant action. The teardown custom resource holds them
+  distribution-tenant action, and the sweeper, its role and its
+  schedules are not deployed. The sweeper runs as an execution role of
+  its own, with the route table read (`DescribeKeyValueStore`,
+  `ListKeys`), the distribution-tenant and certificate deletes and the
+  re-check's Logs, SQS and Lambda actions; the registrar's role keeps
+  only what a domain call needs and deletes nothing. The teardown custom resource holds them
   in both cases, so a front door that once served a dedicated domain
   still tears down. A stack update that turns it off fails, on a custom
   resource, the guard, while any `tenant#` entry holds a `d` or the
@@ -213,8 +233,11 @@ before it writes the domain's `host#` key.
   re-check. The guard exists in both states and takes `dedicatedDomains`
   as a property, so it gets an Update when the switch flips and refuses
   only on-to-off. The registrar function is updated first, so new
-  `customDomain` writes get 400; then the guard runs; then the role is
-  narrowed and the schedules are removed, which depend on the guard; a
+  `customDomain` writes get 400; then the guard waits the registrar
+  function's 30 s timeout, so no call that started before the update
+  is still running, and reads the table; then both roles are narrowed,
+  the sweeper's as it goes with the sweeper, and the schedules are
+  removed, which depend on the guard; a
   refusal rolls all of it back together. The operator drops every
   dedicated domain first (spec §3.4, the IAM paragraph, and §3.6); spec §10
   step 14 tests the refusal.
@@ -222,8 +245,9 @@ before it writes the domain's `host#` key.
   with a stubbed resolver or clock instead: challenge expiry and
   reissue, a resolver error (`unresolved`), a CNAME at the challenge
   name, the lookup before the `host#` write, the restart after an ETag
-  conflict, a daily-run page that fails, the on-failure queue and the
-  page-count alarms, the `unverifiable` line and its alarm for an entry
+  conflict, a daily-run page that fails, the on-failure queue, the
+  missing-pages count and its alarm, a supplied `runDay` outside its
+  range, the guard's 30 s wait, the `unverifiable` line and its alarm for an entry
   that errors three days in a row, and a query that reaches its row
   limit and fails the page (spec §10). The alarms' notifications are not
   checked; the integration test checks the metric the re-check alarm

@@ -9,8 +9,8 @@ Proposed. ADR-0017 depends on the control plane's global hooks
 (control-plane ADR-0044), also Proposed (spec Q-5). ADR-0018 stays
 Proposed until spike S-10 passes, and its `Amended by: ADR-0018` notes
 on ADR-0002, 0012 and 0016 take effect when it is accepted. ADR-0017 will supersede
-ADR-0013 once ADR-0044 is accepted; until then ADR-0013 stays Accepted. Merge order:
-the control-plane hooks branch first, then this one. The `Amended by:
+ADR-0013 once ADR-0044 is accepted; until then ADR-0013 stays Accepted
+and ADR-0017 Proposed. The `Amended by:
 ADR-0017` notes on ADR-0002, 0003, 0012, 0014 and 0015 take effect when
 ADR-0017 is accepted. One spike is still open
 ([spec §9](../design/tenant-front-door.spec.md)): S-10 (what the

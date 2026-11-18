@@ -8,8 +8,8 @@ S-10 (§9) shows what the registrar's Lambda function sees from its
 default resolver. This specification describes route registration as
 ADR-0017 decides it, from the control plane's global hooks
 (control-plane ADR-0044, also Proposed, Q-5). ADR-0017 will supersede
-ADR-0013 once ADR-0044 is accepted; until then ADR-0013 stays Accepted,
-and the control-plane hooks branch merges before this one. One spike is
+ADR-0013 once ADR-0044 is accepted; until then ADR-0013 stays Accepted
+and ADR-0017 Proposed. One spike is
 still open: S-10 (DNS answers to the registrar's Lambda function, §9),
 which if it fails reopens the resolver choice in ADR-0018. S-5
 (`/agents/*` streaming) passed on 2026-11-18 on a standard distribution;
@@ -173,7 +173,7 @@ has passed the registrar's domain challenge (ADR-0018).
 | Tenant router | edge | CloudFront Function (viewer request, JS 2.0) | Finds the tenant, refuses or routes. It names the tenant it routed on in the access log with `cf.logCustomData` (Telemetry, below). In `host` mode it also mints and checks the signed sign-in `state` and starts sign-out (§3.5, ADR-0016) |
 | Route table | edge | CloudFront KeyValueStore | `tenant`, `host` and `cell` entries, the `app` settings and, in `host` mode, the `signin` key (§4) |
 | Route registrar | edge | API Gateway (IAM auth) and Lambda | The only writer of the route table, and the only creator of dedicated distribution tenants, which the sweeper deletes once disabled. Admits only the control plane's global hook role and the edge operator role, and checks each write against the control plane (§3.4) |
-| Sweeper | edge | A Lambda function of its own, with its own log group, run by EventBridge Scheduler. Only when `dedicatedDomains` is on (§3.6) | Every 15 minutes it deletes the dedicated distribution tenants and certificates that no tenant's `d` names any more. Daily it re-checks the challenge record of every passed challenge, routed or not (§3.4 step 5), and its log is the record of that re-check. Its log group holds no registrar request log |
+| Sweeper | edge | A Lambda function of its own, with its own execution role and its own log group, run by EventBridge Scheduler. Only when `dedicatedDomains` is on (§3.6) | Every 15 minutes it deletes the dedicated distribution tenants and certificates that no tenant's `d` names any more. Daily it re-checks the challenge record of every passed challenge, routed or not (§3.4 step 5), and its log is the record of that re-check. Its log group holds no registrar request log |
 | SPA origin | edge | S3 bucket with origin access control | One build for every tenant |
 | Cell API origin | the cell's | The cell's API (demo: Lambda function URL with origin access control) | Verifies the token, checks the route hint and the cell's tenants |
 | `CellRouteAccess` construct | the cell's | Lambda permission | Grants `cloudfront.amazonaws.com` `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`, conditioned on the edge distribution's ARN |
@@ -551,22 +551,31 @@ On every write:
    schedule runs the sweeper daily over every `tenant#` entry with a
    passed challenge (`dk` without `dx`), routed or not, because a
    certificate request still pending rests on the same proof as a
-   routed domain. The daily run's lister assigns the run a run id, its
-   own invocation id, and a `runDay`, the UTC date it starts on unless
-   the invoker passes one (step 14 does). It lists those entries, always
-   logs a `run-start` line with the run id, the `runDay` and the number
-   of pages, zero included, emits that page count as the pages-started
-   count, and starts one asynchronous run of the sweeper per page of 500
-   entries, passing every page the run id and the page's range of tenant
-   ids. Each page resolves its
+   routed domain. Every line the sweeper logs carries a `type` field,
+   and the re-check keeps its record in three types: `run-start`,
+   `entry` and `page-end`. The daily run's lister assigns the run a run
+   id, its own invocation id, and a `runDay`, the UTC date it starts
+   on. The Scheduler's input never carries a `runDay`; only the
+   integration test passes one (§10 step 14). The lister accepts a
+   supplied `runDay` only when it is a UTC date within the last 7 days
+   and not after today, refuses the run and starts no page otherwise,
+   and logs on the `run-start` line that the day was supplied. It lists
+   those entries, always logs a `run-start` line with the run id, the
+   `runDay` and the number of pages, zero included, and starts one
+   asynchronous run of the sweeper per page of 500 entries, passing
+   every page the run id, its page number and the page's range of
+   tenant ids. Each page resolves its
    records as sub-step 2 does, 10 lookups at a time with a 5 s timeout
    each. It queries CNAME at the name only when the TXT answer is empty
    or holds the token, so a pass never rests on a CNAME and a TXT
    answer without the token is a miss after one query. A lookup ends in
    a pass, a miss (`missing` or `mismatch`) or an error (`unresolved`).
-   The page logs one line per entry with the run id, the tenant, the
-   domain and the outcome, never the token, and, once every entry has
-   its line, a `page-end` line with the run id and its page number. An
+   The page logs one `entry` line per entry with the run id, the page,
+   the tenant, the domain and the outcome as three numeric fields,
+   `pass`, `miss` and `error`, one of them 1 and the others 0, never
+   the token, and, once every entry has its line, a `page-end` line
+   with the run id and its page number. `run-start` and `page-end`
+   lines carry an empty tenant and domain. An
    error is logged apart from a miss and never counted as one, so a
    resolver outage never looks like a lost proof; a metric filter
    counts errors on their own, and an entry that only ever errors is
@@ -578,19 +587,25 @@ On every write:
    run on a day, from a Scheduler retry, a lister retry or a hand run,
    adds no day. At its start each page runs one Logs Insights query
    over the sweeper's own log group, with `limit 10000` set explicitly,
-   that aggregates with `stats` by run id, tenant and domain: one row,
-   with a count for each outcome, for each run and each entry of the
-   page's tenant range, however many times a page ran; one row for each
-   `run-start` line, with no tenant or domain; and one row for each
-   `page-end` line of this page. When one run's row holds both a `miss`
-   and a `pass` for an entry, two attempts of a page that disagreed, the
-   `miss` wins. That is the safe direction, because a miss only counts
-   toward three, and a logged `pass` in a later day's run still ends the
-   streak. A row with only `error` is an error run. At most 500 entries
-   for each run keep the query inside 10,000 rows for as many as 20 runs
-   in the 7 days; a result that reaches the limit fails the page,
-   because rows may have been cut off, and a cut result must never read
-   as unknown runs. Once its lookups are done the page reads the
+   that keeps the `entry` lines of the page's tenant range, every
+   `run-start` line and the `page-end` lines of this page, and
+   aggregates them with `stats sum(pass), sum(miss), sum(error),
+   latest(runDay) by type, runId, page, tenant, domain`. That gives one
+   `entry` row for each run and entry, however many times a page ran;
+   one `run-start` row for each run, carrying its `runDay`; and one
+   `page-end` row for each run that ended this page. The walk joins
+   each `entry` row to its run's `run-start` row on the run id in
+   memory, which gives the row its day. A run whose `entry` row has
+   `sum(miss) > 0` is a miss for that entry, even when it also has
+   `sum(pass) > 0` from two attempts of a page that disagreed. That is
+   the safe direction, because a miss only counts toward three, and a
+   logged `pass` in a later day's run still ends the streak. A row whose
+   `sum(pass)` and `sum(miss)` are both 0 is an error run. Each run
+   adds at most 502 rows to the result: 500 `entry` rows, its
+   `run-start` row and one `page-end` row. So 19 runs in the 7 days fit
+   inside 10,000 rows (9,538), and a 20th would not (10,040); a result
+   that reaches the limit fails the page, because rows may have been
+   cut off, and a cut result must never read as unknown runs. Once its lookups are done the page reads the
    results, waiting at most 60 s, and walks each missed entry's earlier
    days, newest first. A day with a `pass` ends the walk and the streak
    with it, and only a logged pass does. A day whose run has only
@@ -613,7 +628,7 @@ On every write:
    `error` counts, a day with no line is skipped, and a day with a
    `pass` or a `miss` ends the walk. Two earlier error days before
    either make three in a row, one for each UTC day, with only `error`
-   since the entry's last pass: the page logs an `unverifiable` line
+   since its last pass or miss: the page logs an `unverifiable` line
    naming the tenant and the domain, never the token, and emits one
    count to a metric of its own, which a separate alarm watches. A
    resolver outage does not last three days; a name that fails every day
@@ -624,32 +639,51 @@ On every write:
    `page-end` line, and the page calls `logs:StopQuery` on a query it
    gives up on, so that an abandoned query holds no concurrency slot
    while the page's retries start new ones. The page logs its
-   `page-end` line, and emits its finished count, only when the query
-   showed no `page-end` row for its run id and page, so a retry of a
-   page that had already ended adds none and each (run id, page) pair
-   counts once. A page therefore takes at most 500 records × 2 queries
+   `page-end` line only when the query showed no `page-end` row for its
+   run id and page, so a retry of a page that had already ended adds
+   none. A page therefore takes at most 500 records × 2 queries
    ÷ 10 × 5 s = 500 s of lookups plus 60 s for the Logs Insights query,
    inside the 15-minute Lambda limit. Each page has at most one query in
    flight, and the route table holds at most 3,472 dedicated tenants
-   (§4.1), so a run of at most 7 pages stays below the Logs Insights
-   quota of 30 concurrent queries per account and Region. The sweeper
-   function's asynchronous invocations have an on-failure destination,
-   an SQS queue, so a page that fails after Lambda's two retries is kept
-   and not dropped. Three alarms watch the re-check itself, besides the
-   three-miss alarm: the queue's depth; the `unverifiable` count; and
-   the pages started minus the pages finished, over one UTC day, as
-   metric math with `FILL(finished, 0)`, so that a run with no page,
-   which logs its `run-start` line with zero pages, reads as zero
-   against zero and a run whose pages never finished reads as missing
-   pages. A missing started count is treated as breaching, so that a run
-   that never started also alerts. The daily schedule fires at 02:00
-   UTC, and a run takes at most 560 s of its pages, so one run never
-   straddles two periods. The sweeper keeps no store of its own: its
+   (§4.1), so a run of at most 7 pages, with the lister's own query,
+   stays below the Logs Insights quota of 30 concurrent queries per
+   account and Region. The sweeper function's asynchronous invocations
+   have an on-failure destination, an SQS queue, so a page that fails
+   after Lambda's two retries is kept and not dropped.
+
+   A run ends on the UTC day it starts. The daily schedule fires at
+   02:00 UTC with a retry policy of at most 2 retries and a maximum
+   event age of 1 hour, and the sweeper function's asynchronous
+   invocation configuration keeps an event for at most 3 hours, with
+   two retries. The lister's last attempt therefore starts by 06:00
+   UTC and ends by 06:15, and the last attempt of its last page starts
+   by 09:15 and ends by 09:30 UTC. Before it lists the day's entries,
+   the lister checks the run before it: one Logs Insights query over
+   the same log group reads the `run-start` line of the newest run
+   whose `runDay` is the day before its own, and that run's `page-end`
+   lines, and the lister emits a missing-pages count, as an embedded
+   metric format log line: the page count on that `run-start` line
+   minus the number of distinct pages with a `page-end` line, zero
+   included. A previous day with no `run-start` line counts as one
+   missing page, so a run that never started also alerts, and so does
+   a query that fails or does not finish in 60 s, because the lister
+   cannot then show that the run finished. A run with a supplied
+   `runDay` emits no missing-pages count. The run it judges ended by
+   09:30 UTC the day before, so the count is always about a finished
+   run. Three alarms watch the re-check itself, besides the three-miss
+   alarm: the queue's depth; the `unverifiable` count; and the
+   missing-pages count, above zero in a one-day period, with missing
+   data not breaching, because the count is emitted once a day and the
+   hours before 02:00 UTC hold none. Shortcut: a daily schedule that
+   stops firing altogether emits no count and no queue message, so no
+   alarm fires; upgrade to an alarm that treats two days of missing
+   data as breaching when a vendor needs that covered. The sweeper
+   keeps no store of its own: its
    log is the record. A domain that stays broken emits a count on every
    later run, and each three-miss line names its domain, so a second
    broken domain shows in the log while the alarm is already firing.
    The resolver can keep a passing answer for the record's TTL, up to
-   its own cap (spike S-10), so the alarm fires on the third daily run
+   its own cap (spike S-10), so the alarm fires on the third UTC day
    after that cached answer expires. The alarm means that the tenant
    does not show control of a domain it claimed: for a routed domain,
    the domain may have changed owner; for a pending one, the
@@ -762,51 +796,66 @@ existing origin. It serves two cases:
   The operator confirms the new host, sets it with `PutCellRoute`, and
   retries `UpdateCell`, whose put now matches.
 
-Besides the store, the registrar's role holds the CloudFront actions on
-distribution tenants (`CreateDistributionTenant`,
-`GetDistributionTenant`, `GetDistributionTenantByDomain`,
-`ListDistributionTenants`, `UpdateDistributionTenant`,
-`DeleteDistributionTenant`, with tagging on create) and, in `us-east-1`,
-the ACM actions `RequestCertificate`, `DescribeCertificate`,
-`ListCertificates`, `ListTagsForCertificate`, `AddTagsToCertificate` and
-`DeleteCertificate`, the ACM writes conditioned on the registrar's tag.
-Where IAM cannot narrow a CloudFront action to this distribution's
-tenants, the registrar checks a distribution tenant's distribution and
-tags before it changes it. It uses these actions only on the edge
-operator role's domain calls, on deletes and replacements of an entry
-that has a `d`, and in the sweeper. The stack's teardown custom resource
-holds the same set (§6.2). While `dedicatedDomains` is off the registrar
-role holds none of them and the sweeper and its schedules are not
-deployed. The teardown custom resource holds them in both cases, so a
-front door that once served a dedicated domain still tears down. A
-stack update that turns `dedicatedDomains` off fails while any
-`tenant#` entry holds a `d`, or while the registrar still holds a
-dedicated distribution tenant or certificate for the sweeper to delete:
-a custom resource, the guard, reads the route table and those lists and
-refuses the update. The guard exists in both states and takes
-`dedicatedDomains` as a property, so CloudFormation sends it an Update
-when the switch flips; it refuses only on that on-to-off Update and
-lets a Create, a Delete and an off-to-on Update succeed. The update
-runs in this order: the registrar function first, so that new
-`customDomain` writes get 400; then the guard, which depends on the
-function; then the registrar role's narrowing and the removal of both
-schedules, which depend on the guard. No operator call can add a `d`
-after the guard has read the table, and when the guard refuses, the
-whole update rolls back together, the function's switch included. The
-operator drops every dedicated domain first and waits for the sweeper, so no
-domain stays routed with no role able to remove it and no daily
-re-check. The challenge lookup itself needs no IAM action: it is a DNS
-lookup. The daily re-check holds these actions, only while
-`dedicatedDomains` is on: `logs:StartQuery` on the sweeper's log group,
-and `logs:GetQueryResults` and `logs:StopQuery`, which IAM does not
-scope to a log group, for its Logs Insights queries; `sqs:SendMessage` on the on-failure
-queue; and, for the lister's fan-out of one asynchronous invocation
-per page, `lambda:InvokeFunction` on the sweeper function. Its counts,
-the three-miss and `unverifiable` counts and the pages started and
-finished, are embedded
+Besides the store, the registrar's role holds the CloudFront actions
+a domain call needs (`CreateDistributionTenant`, with tagging on
+create, `GetDistributionTenant`, `GetDistributionTenantByDomain` and
+`UpdateDistributionTenant`) and, in `us-east-1`, the ACM actions
+`RequestCertificate`, `DescribeCertificate`, `ListCertificates`,
+`ListTagsForCertificate` and `AddTagsToCertificate`, the ACM writes
+conditioned on the registrar's tag. It uses them only on the edge
+operator role's domain calls and on deletes and replacements of an
+entry that has a `d`, and never deletes a distribution tenant or a
+certificate. The sweeper runs as an execution role of its own. It
+holds the route table read it needs to list `tenant#` entries
+(`cloudfront-keyvaluestore:DescribeKeyValueStore` and `ListKeys` on
+the store), the CloudFront actions `ListDistributionTenants`,
+`GetDistributionTenant`, `UpdateDistributionTenant` and
+`DeleteDistributionTenant` and, in `us-east-1`, `ListCertificates`,
+`ListTagsForCertificate`, `DescribeCertificate` and
+`DeleteCertificate`, the ACM delete conditioned on the registrar's
+tag. For the daily re-check it also holds `logs:StartQuery` on the
+sweeper's log group, and `logs:GetQueryResults` and `logs:StopQuery`,
+which IAM does not scope to a log group, for its Logs Insights
+queries; `sqs:SendMessage` on the on-failure queue; and, for the
+lister's fan-out of one asynchronous invocation per page,
+`lambda:InvokeFunction` on the sweeper function. The challenge lookup
+itself needs no IAM action: it is a DNS lookup. The re-check's counts,
+the three-miss, `unverifiable` and missing-pages counts, are embedded
 metric format log lines, so no role needs `cloudwatch:PutMetricData`.
 The log group keeps its lines for 14 days, which covers the 7-day
-look-back. The guard needs the route table read,
+look-back. Where IAM cannot narrow a CloudFront action to this
+distribution's tenants, the registrar and the sweeper check a
+distribution tenant's distribution and tags before they change it. The
+stack's teardown custom resource holds both roles' CloudFront and ACM
+actions (§6.2).
+
+While `dedicatedDomains` is off the registrar role holds none of its
+CloudFront or ACM actions, and the sweeper, its role and its schedules
+are not deployed. The teardown custom resource holds its actions in
+both cases, so a front door that once served a dedicated domain still
+tears down. A stack update that turns `dedicatedDomains` off fails
+while any `tenant#` entry holds a `d`, or while the registrar still
+holds a dedicated distribution tenant or certificate for the sweeper
+to delete: a custom resource, the guard, reads the route table and
+those lists and refuses the update. The guard exists in both states
+and takes `dedicatedDomains` as a property, so CloudFormation sends it
+an Update when the switch flips; it refuses only on that on-to-off
+Update and lets a Create, a Delete and an off-to-on Update succeed. The
+update runs in this order: the registrar function first, so that new
+`customDomain` writes get 400; then the guard, which depends on the
+function; then the narrowing of both roles, the registrar role losing
+its CloudFront and ACM actions and the sweeper's role losing all of
+its actions as it goes with the sweeper, and the removal of both
+schedules, which depend on the guard. The registrar function's timeout
+is 30 s, one second above API Gateway's 29 s integration limit, and
+the guard waits 30 s after the function update before it reads the
+table, so every registrar call that started on the old configuration
+has ended and no operator call can add a `d` after the guard has read
+the table. When the guard refuses, the whole update rolls back
+together, the function's switch included. The operator drops every
+dedicated domain first and waits for the sweeper, so no domain stays
+routed with no role able to remove it and no daily re-check. The guard
+needs the route table read,
 `cloudfront-keyvaluestore:DescribeKeyValueStore` and `ListKeys` on the
 store, `cloudfront:ListDistributionTenants` and, in `us-east-1`,
 `acm:ListCertificates` and `acm:ListTagsForCertificate`.
@@ -969,7 +1018,7 @@ hook's put replaces the entry, `s: active` and routed to the new cell
   never in the template, a stack output, the custom resource's response
   `Data` or a log. KeyValueStore actions name the store, not a key, and
   a function has one store (ADR-0012). So the registrar role, the
-  custom resource and any edge-account principal with
+  sweeper's role, the custom resource and any edge-account principal with
   `cloudfront-keyvaluestore:GetKey`
   or `ListKeys` on the store can read the key, and so can any principal
   that can update or test the router (`cloudfront:UpdateFunction`,
@@ -1035,7 +1084,7 @@ hook's put replaces the entry, `s: active` and routed to the new cell
 | `tenantClaim` | no | `tenant_id` | Claim the router and the origin read |
 | `spaSource` | no | the demo SPA | Path of the built SPA |
 | `agentIngress` | no | off | Agent ingress endpoint; omit to leave `/agents/*` off, and the router then answers 404 for every `/agents` path (§3.3 step 3) |
-| `dedicatedDomains` | no | off | Lets the edge operator role set a tenant's `customDomain` (§3.4 step 5, ADR-0018). Off: any `customDomain` gets 400, and the registrar role holds no ACM or distribution-tenant action and runs no sweeper. A stack update that turns it off fails while any `tenant#` entry holds a `d` or the sweeper has a distribution tenant or certificate left to delete; the operator drops every dedicated domain first (§3.4) |
+| `dedicatedDomains` | no | off | Lets the edge operator role set a tenant's `customDomain` (§3.4 step 5, ADR-0018). Off: any `customDomain` gets 400, the registrar role holds no ACM or distribution-tenant action, and the sweeper, its role and its schedules are not deployed. A stack update that turns it off fails while any `tenant#` entry holds a `d` or the sweeper has a distribution tenant or certificate left to delete; the operator drops every dedicated domain first (§3.4) |
 | `tenantRequestsPer5Min` | no | 2,000 | Per-tenant rate (ADR-0009) |
 | `reportingEndpoint` | no | off | URL for CSP and other browser reports |
 
@@ -1302,7 +1351,7 @@ All with a small static HTML or JSON body and `no-store`:
   the front door's hooks get their routes by the operator's backfill
   (§3.4).
 - In `host` mode, the edge account's read boundary for the `signin` key.
-  The registrar role, the custom resource and any edge-account principal
+  The registrar role, the sweeper's role, the custom resource and any edge-account principal
   with `cloudfront-keyvaluestore:GetKey` or `ListKeys` on the route
   table, or `cloudfront:UpdateFunction` or `cloudfront:TestFunction` on
   the router, can read the key. The integration test role is one: it
@@ -1831,7 +1880,9 @@ delegation); a CNAME at the challenge name; the lookup before the
 `host#<d>` write (the test issues no certificate); and the restart
 after an ETag conflict on a challenge write; a daily-run page that
 fails, so that its lines are missing and the three-miss walk skips the
-run, and the on-failure queue and the page-count alarms; an entry that
+run, the on-failure queue, the missing-pages count and its alarm (a
+previous day with no `run-start` line included); a supplied `runDay`
+outside the last 7 days or after today; the guard's 30 s wait; an entry that
 errors for three days, the `unverifiable` line and its count; a query
 result that reaches the 10,000-row limit, which fails the page, and the
 `logs:StopQuery` call on a query the page gives up on; a run with zero
@@ -1846,7 +1897,7 @@ step 14 checks the metric count the re-check alarm watches.
 |---|---|---|
 | Q-1 | Which public hosted zone can the test account use for `appDomain`? **Answered 2026-11-16**: a public zone for a delegated test subdomain in the edge account, with its own SPF, DKIM and DMARC records. The spikes and the integration test take its name and zone id as inputs (`TFD_APP_DOMAIN`, `TFD_HOSTED_ZONE_ID`), and the integration test also takes `TFD_DEDICATED_DOMAIN`, with `appDomain` below the zone's apex and the test role's `route53:ChangeResourceRecordSets` scoped to the zone (§10); none is committed | spike S-1 |
 | Q-2 | Does the integration test deploy its own control plane, or reuse one when found and skip otherwise? | integration test |
-| Q-3 | Does the dedicated tenant (custom domain) path belong in this sample or in a follow-up, and how does the vendor confirm that a tenant controls a domain before the edge operator role sets its `customDomain`? A validated certificate is not enough: ACM reuses one validation record per domain name per account, so it proves the edge account's record is in DNS, not which tenant published it, and a former holder's record keeps validating. **Answered 2026-11-18** (ADR-0018, Proposed until spike S-10 passes): the path stays in this sample, off unless the deployer turns on `dedicatedDomains` (§3.6). The registrar issues a 32-byte random token bound to the tenant and the domain, kept as `dk` with a 7-day expiry `dx` on the `tenant#` entry (§4.1), and answers 202 with `_tfd-challenge.<domain>` TXT `tfd-verify=<token>`. A repeat resolves the record with the Lambda function's default resolver and requests the certificate only when it holds this tenant's token (§3.4 step 5). The sweeper re-checks every passed challenge daily, routed or not, and alarms when one tenant and domain misses three daily runs in a row, meaning the tenant does not show control of a domain it claimed; the operator drops the domain. Spike S-10 measures the resolver | scope |
+| Q-3 | Does the dedicated tenant (custom domain) path belong in this sample or in a follow-up, and how does the vendor confirm that a tenant controls a domain before the edge operator role sets its `customDomain`? A validated certificate is not enough: ACM reuses one validation record per domain name per account, so it proves the edge account's record is in DNS, not which tenant published it, and a former holder's record keeps validating. **Answered 2026-11-18** (ADR-0018, Proposed until spike S-10 passes): the path stays in this sample, off unless the deployer turns on `dedicatedDomains` (§3.6). The registrar issues a 32-byte random token bound to the tenant and the domain, kept as `dk` with a 7-day expiry `dx` on the `tenant#` entry (§4.1), and answers 202 with `_tfd-challenge.<domain>` TXT `tfd-verify=<token>`. A repeat resolves the record with the Lambda function's default resolver and requests the certificate only when it holds this tenant's token (§3.4 step 5). The sweeper re-checks every passed challenge daily, routed or not, and alarms when one tenant and domain misses the challenge on three UTC days in a row, meaning the tenant does not show control of a domain it claimed; the operator drops the domain. Spike S-10 measures the resolver | scope |
 | Q-4 | Should the integration test also compose `agentic-runtime-isolation` for `/agents/*`, or reuse a deployment only when one is found? Until then step 23 runs against a stand-in. | integration test |
-| Q-5 | Route registration depends on the control plane's global hooks (control-plane R-39 to R-46, ADR-0044), which are Proposed and not yet merged. Does their final shape keep what ADR-0017 uses: `POST` hooks only after a successful script, `PRE` delete hooks with three attempts that cannot stop a delete, one `<fleet>-global-hook` role, `SCRIPT_OUTPUTS` and `globalHookManagedPolicyArns`? If not, ADR-0017 is revisited. ADR-0017 stays Proposed and ADR-0013 Accepted until ADR-0044 is accepted, and the control-plane hooks branch merges before this one | build start |
+| Q-5 | Route registration depends on the control plane's global hooks (control-plane R-39 to R-46, ADR-0044), which are Proposed and not yet merged. Does their final shape keep what ADR-0017 uses: `POST` hooks only after a successful script, `PRE` delete hooks with three attempts that cannot stop a delete, one `<fleet>-global-hook` role, `SCRIPT_OUTPUTS` and `globalHookManagedPolicyArns`? If not, ADR-0017 is revisited. ADR-0017 stays Proposed and ADR-0013 Accepted until ADR-0044 is accepted | build start |
 | Q-6 | With hooks, an integration test that reuses a control plane (Q-2) also changes it: it attaches a policy to `<fleet>-global-hook` and registers two global hooks, which then run on every application's operations, and a third, `tfd-probe`, while step 20 runs. The test therefore needs three of the five global hook slots free. Is that acceptable on a shared control plane, or does the test always deploy its own? | integration test |
