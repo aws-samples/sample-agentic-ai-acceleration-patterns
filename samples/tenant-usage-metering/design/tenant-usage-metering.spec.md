@@ -407,8 +407,10 @@ over writes nothing more. The execution's timeout
 is 25 minutes, below the lease. It finishes with a transaction: a `ConditionCheck` that the `GEN`
 item's `generation` is the value it read, and `COUNTED` on `META`; if
 the check fails, `DIRTY`, so an object that
-landed during the count is counted next. A `COUNTED` hour whose
-`generation` moves past `countedGeneration` is `DIRTY`. A failed count →
+landed during the count is counted next. The scheduler reads the `GEN` item of each
+hour it finds, and a `COUNTED` hour whose `generation` has moved past
+`countedGeneration` is due, as `DIRTY` is; it writes `DIRTY` with a
+condition on `COUNTED`. A failed count →
 `COUNT_FAILED`, retried with backoff; an alarm fires on the third
 failure.
 
