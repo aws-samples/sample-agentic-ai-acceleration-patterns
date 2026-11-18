@@ -706,7 +706,7 @@ touched.
 | telemetry | Logs Insights finds one tool line per call with the §3.8 fields and the right `tenantId` |
 | forged | a direct Lambda invoke with a tampered tenant context returns `context_invalid` and starts nothing (test-only shortcut: only the gateway role may invoke the function in a real deployment) |
 | offboard | after `C`'s grant is removed, `offboardTenant` for `C` stops its sandboxes and deletes its rows; a second call returns the same result with nothing stopped |
-| teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left (the task and usage-log groups, and every `/aws/bedrock-agentcore/runtimes/<runtimeId>-*` group), and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
+| teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left (the task and usage-log groups, and every `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` group), and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
 
 Every behaviour step runs once per backend unless it names one. The run
 records cold and warm latency per backend and the deploy and destroy time.
