@@ -203,6 +203,20 @@ describe('hook roles (spec R-41, H-7)', () => {
       expect(holders.filter(({ roles }) => roles.includes(id))).toEqual([]);
     }
   });
+
+  test('only the API role holds states:DescribeExecution, and only on the workflow\'s own executions (spec R-51, N-10)', () => {
+    const holders = allowStatements(template).filter(({ statement }) => grants(statement, 'states:DescribeExecution'));
+    expect(holders.length).toBeGreaterThan(0);
+    const apiId = roleByName(template, `${FLEET}-api`)[0];
+    for (const { statement, roles } of holders) {
+      expect(roles).toEqual([apiId]);
+      const resources = ([] as unknown[]).concat(statement.Resource);
+      for (const resource of resources) {
+        const text = JSON.stringify(resource);
+        expect(text).toContain(`:execution:${FLEET}-workflow:*`);
+      }
+    }
+  });
 });
 
 describe('build roles trust CodeBuild only on their own project (spec R-41, H-7)', () => {

@@ -600,7 +600,7 @@ export CP_INTEG_ACCOUNT_B=<ACCOUNT_B_ID>
 npx projen integ
 ```
 
-A run takes about one hour 45 minutes (an estimate from its build count)
+A run takes about two hours (an estimate from its build count)
 across two non-production accounts and three applications, with global and
 application hooks, and costs under a dollar in throwaway resources; each run
 takes its own fleet name, so two runs can share the accounts and the Region.

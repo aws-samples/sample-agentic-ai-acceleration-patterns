@@ -1477,6 +1477,13 @@ a write whose condition fails on another operation ─► RecordSuperseded
   replaced: the record holds another `operationId`, no longer holds the
   in-flight status, or is gone outside a delete's replay. The execution
   ends at `RecordSuperseded` with no further write and no further hook.
+  A delete is the exception (`RecordFailWriteLost`): when its failure
+  write loses its condition, the delete landed or another operation took
+  the record over, so the post hooks still run and cleanup stays
+  reachable.
+- **Allowlist errors.** A commit that names a field outside the commit
+  fields raises `States.QueryEvaluationError`, which is never retried:
+  the update goes straight to `UPDATE_FAILED` (`COMMIT_ALLOWLIST_REASON`).
 
 **Starting a record event (the API).** Each of the seven operations makes
 its one conditional write, storing the new `operationId`, and then calls
@@ -1490,11 +1497,13 @@ the execution under the `operationId` and classifies the outcome:
   `ExecutionAlreadyExists`. The name and input are the operation's own, so
   only its earlier attempt can have created that execution. The request
   answers 202.
-- **Refused**: the first SDK attempt failed with an error Step Functions
-  raises before it creates an execution (validation, throttling, limit,
-  access, missing state machine, KMS and credential errors;
-  `START_REFUSALS`). The same error after a retried attempt proves nothing
-  about the earlier one.
+- **Refused**: the start call failed with an error Step Functions raises
+  before it creates an execution (validation, throttling, limit, access,
+  missing state machine, KMS and credential errors; `START_REFUSALS`).
+  Starts go through their own client with SDK retries off
+  (`recordStartClient`, `maxAttempts: 1`), so that error belongs to the
+  one attempt that was made. The same error on a later same-name start
+  proves nothing about the first.
 - **Unknown**: everything else, a `DescribeExecution` miss included:
   `DescribeExecution` is eventually consistent, so only a found execution
   counts.
@@ -1523,9 +1532,6 @@ execution ran, and the request answers 202 with the record as read (the
 the record in flight, the residual of §6 (threat T47). A stray execution
 that started despite an unknown outcome cannot finish a later request's
 record: its writes fail on the `operationId` and it ends superseded.
-shortcut: a call throttled on every SDK attempt reads as unknown, so a
-fresh insert goes to `CREATE_FAILED` instead of being deleted; reading the
-per-attempt errors from the SDK's retry middleware would refine that.
 
 **Grants.** The workflow role needs nothing new: its base-table
 `GetItem`/`UpdateItem`/`DeleteItem` statement covers the commits, the
