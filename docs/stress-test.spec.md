@@ -381,23 +381,27 @@ correlation id.
 | 4 | Cells split agents (four cells of 25 at `large`) | keeps the Runtime count flat while testing routing across cells |
 | 5 | The `large` fleet is a fixture, seeded once | onboarding 4,000 tenants takes hours even at 50 builds |
 | 6 | A correlation header, logged at every hop | the runtime-isolation ingress and the front door each log it; a change to both samples |
-| 7 | The cell script deploys runtime-isolation with the CDK from a pinned commit, through the account's role pair | see below |
+| 7 | The cell script deploys runtime-isolation with the CDK from a pinned commit, through the account's role pair and a scoped cell bootstrap | the cell build would otherwise act as an account administrator; see below |
 
-Decision 7 needs a change to `control-plane`. The cell provisioning role
-holds only its SSM namespace grants, and unlike the tenant role it has no
-prop for extra managed policies. A `cdk deploy` from the cell build needs
-`sts:AssumeRole` on the cell account's bootstrap roles (deploy,
-file-publishing, image-publishing, lookup). Those roles trust their own
-account, so that one grant is enough. The deploy role then passes the
-CloudFormation execution role, which is `AdministratorAccess` in both test
-accounts. The grant therefore makes the cell build an administrator of the
-cell account. The ADR chooses between:
+Decision 7, the cell bootstrap. A `cdk deploy` needs `sts:AssumeRole` on
+the account's CDK bootstrap roles, and the default bootstrap's
+CloudFormation execution role holds `AdministratorAccess`. Each cell
+account therefore carries a second bootstrap, for cells only, beside the
+default one, which stays as it is for every other deployment in the
+account:
 
-| Option | Effect | Against |
-|---|---|---|
-| A `cellBuildManagedPolicyArns` prop, as the tenant role has, plus the default bootstrap | smallest change | the cell build is an account administrator |
-| The same prop, plus a cell-account bootstrap with a scoped `--cloudformation-execution-policies` | the cell build can create only what a cell needs | the account owner maintains that policy as the cell grows |
-| The cell script calls CloudFormation with a scoped service role, no CDK bootstrap | no bootstrap dependency | the script synthesises and publishes assets itself |
+| Part | Value |
+|---|---|
+| Bootstrap | `cdk bootstrap --qualifier cell --toolkit-stack-name CDKToolkit-cell --cloudformation-execution-policies <cell execution policy ARN>`, run once by the account owner |
+| Cell execution policy | a managed policy shipped in `stress/application/`: the services a runtime-isolation cell creates (Lambda, API Gateway, DynamoDB, KMS, SSM under the cell's namespace, CloudWatch Logs, AgentCore, S3 assets of the cell bootstrap), and IAM role writes only with the cell permissions boundary attached |
+| Cell permissions boundary | a managed policy that caps every role the cell creates at the same services; the policy denies removing or changing the boundary |
+| Cell synth | `--context @aws-cdk/core:bootstrapQualifier=cell` and `--context @aws-cdk/core:permissionsBoundary={"name":"<boundary name>"}`, so every role in the cell stacks carries the boundary |
+| Role pair | `control-plane` gains `cellBuildManagedPolicyArns`, as the tenant role has `tenantBuildManagedPolicyArns`; the stress account owner attaches one policy that allows `sts:AssumeRole` on the four `cdk-cell-*` bootstrap roles of its own account and Region, and nothing else |
+
+The boundary is what makes the scope hold: without it, an execution policy
+that may create IAM roles may create an administrator role. A cell build
+compromised through its pinned source can still change any cell in that
+account, which is the role pair's scope today.
 | 8 | The runtime-isolation `StressDriver` and k6 library move to `stress/` | they become the shared driver; its slice keeps only its own scenarios |
 
 ## 9. Work items and parallel readiness
@@ -408,7 +412,8 @@ cell account. The ADR chooses between:
 | W-2 driver and k6 library moved to `stress/` | W-1 schema | yes, once W-1's schema is fixed |
 | W-3 runtime-isolation slice on the contract | W-1, W-2 | yes, after W-1 |
 | W-4 control-plane build-limit prop | decision 2 | yes, now |
-| W-5 control-plane slice and the stress application | W-1, W-4, decision 7 | after W-1 and W-4 |
+| W-5 control-plane slice and the stress application | W-1, W-4, W-10 | after W-1, W-4 and W-10 |
+| W-10 `cellBuildManagedPolicyArns` prop; cell execution policy, permissions boundary and the cell bootstrap | decision 7 | yes, now |
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | yes, after W-1 |
 | W-7 front-door slice | the front door merged; its spikes S-2, S-3, S-5, S-7 passed; W-1 | no: blocked on the front door |
 | W-8 correlation header in the ingress and the front door | decision 6 | ingress part yes; front-door part after its merge |
@@ -422,3 +427,4 @@ cell account. The ADR chooses between:
 | Q-2 | Does the front door's integration test compose runtime-isolation for `/agents/*` (its Q-4)? The platform run assumes it can | W-7 |
 | Q-3 | Does the platform run keep the `large` fleet in both accounts between runs, and what does it cost idle? | decision 5 |
 | Q-4 | Which hosted zone does the stress front door use? | W-7 |
+| Q-5 | Does every runtime-isolation stack deploy under the cell permissions boundary, custom-resource and log-drain roles included, and which actions does the execution policy then need? Proven by one cell deploy with the boundary | W-10 |
