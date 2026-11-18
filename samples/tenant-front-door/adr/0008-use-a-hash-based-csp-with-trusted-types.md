@@ -88,4 +88,6 @@ part of this decision: without them Trusted Types would block the app.
 Note 2026-11-18: ADR-0023 amends this record. `'strict-dynamic'` trusts
 everything the hashed entry script imports, so the build also writes an
 import map with an `integrity` entry for every chunk, and the policy
-carries the import map's hash besides the entry's (spec §7.1).
+carries the import map's hash besides the entry's (spec §7.1). The
+inline callback script that drops the code from the address before
+anything loads adds a third hash per release (spec §7.1 Reports).

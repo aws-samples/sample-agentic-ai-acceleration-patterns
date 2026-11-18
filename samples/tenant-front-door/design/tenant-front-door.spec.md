@@ -183,7 +183,7 @@ has passed the registrar's domain challenge (ADR-0018).
 | `CellRouteAccess` construct | the cell's | Lambda permission | Grants `cloudfront.amazonaws.com` `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`, conditioned on the edge distribution's ARN |
 | Agent route | edge | `/agents/*` behaviour | Streams to the agent ingress of `agentic-runtime-isolation`, when configured, with the `Managed-AllViewerExceptHostHeader` origin request policy. The router forwards only `/agents/<backend>/invocations` and strips the leading `/agents`, so the ingress receives `<stage>/<backend>/invocations` (§3.3 step 7, ADR-0019) |
 | Route hook | the control plane's | CodeBuild, the control plane's global hook project, under `<fleet>-global-hook` (control-plane R-41) | `hooks/route-hook.sh`, registered as two global hooks. `front-door-post` (`POST` on `CELL_CREATE`, `CELL_UPDATE`, `DEPLOYMENT_CREATE`, `DEPLOYMENT_UPDATE`) puts the cell or tenant route; `front-door-pre` (`PRE` on `CELL_DELETE`, `DEPLOYMENT_DELETE`) deletes it (§3.2, §3.4). It acts only for an application that has a front door hook parameter (`RouteHookAccess`, below) in the control plane's account, and exits 0 for every other (ADR-0014) |
-| `RouteHookAccess` stack | the control plane's | IAM and SSM Parameter Store | The front door hook parameter `/application-plane/applications/<applicationId>/shared/front-door-hook` with `registrarUrl`, a name of its own so that it cannot collide with the cell-account copy (§6.4) when the control plane's account also hosts cells. The parameter has `DeletionPolicy` and `UpdateReplacePolicy` `Retain`, so deleting or replacing the stack keeps it (§3.4 route hook step 1, §6.2). The stack also holds a customer-managed policy, listed in the control plane's `globalHookManagedPolicyArns`, that lets `<fleet>-global-hook` invoke this registrar and read any front door hook parameter, `/application-plane/applications/*/shared/front-door-hook` |
+| `RouteHookAccess` stack | the control plane's | IAM and SSM Parameter Store | The front door hook parameter `/application-plane/applications/<applicationId>/shared/front-door-hook` with `registrarUrl`, a name of its own so that it cannot collide with the cell-account copy (§6.4) when the control plane's account also hosts cells. The parameter has `DeletionPolicy` and `UpdateReplacePolicy` `Retain`, so deleting or replacing the stack keeps it (§3.4 route hook step 1, §6.2). The name is fixed, so a retained parameter has to be deleted, or imported into the new stack, before `RouteHookAccess` is deployed again after a stack delete or after a first create that rolled back (CloudFormation keeps `Retain` resources on a create rollback too); otherwise the create fails because the parameter exists. When `applicationId` changes, the operator deletes the old application's parameter: while it stays, the hook calls the registrar for that application, the registrar refuses with 403 (§3.4 step 3) and that application's creates and updates fail (§6.2 limits). The stack also holds a customer-managed policy, listed in the control plane's `globalHookManagedPolicyArns`, that lets `<fleet>-global-hook` invoke this registrar and read any front door hook parameter, `/application-plane/applications/*/shared/front-door-hook` |
 | `register-hooks.sh` | the operator's shell | the control plane API, with an operator token | Puts both global hooks with `PutHook`, from this sample's source at a pinned commit; idempotent. `--delete` removes them (§5.2) |
 | Telemetry | edge | CloudFront standard logging v2: delivery source, delivery destination, delivery and log group in `us-east-1` (ADR-0010) | Per-tenant requests, errors, bytes and latency from the record fields ADR-0010 lists, and the tenant in `viewer-request-log-data` (Telemetry, below) |
 
@@ -225,7 +225,7 @@ billing-grade count comes from the cell's own log of verified requests.
 | Stack | Account | Region | Holds |
 |---|---|---|---|
 | Edge stack | edge | `us-east-1` | The ACM certificate for `<appDomain>` (and `*.<appDomain>` in `host` mode) and the CloudFront-scope web ACL with its rate rules (ADR-0009, ADR-0021) |
-| Main stack | edge | The deployment Region, the control plane's (`eu-central-1` in the integration test) | The multi-tenant distribution and the pooled distribution tenant, the router, the KeyValueStore, the response headers policy and its variant for `/callback` (§7.1) and the SPA bucket; the registrar (API, function, resource policy); the custom resources for the `signin` key and the teardown; the published parameter. With `dedicatedDomains` on: the sweeper, its table, queue, schedules, log group and alarms, the guard and the starter. The `dedicatedDomains` switch is an update of this stack |
+| Main stack | edge | The deployment Region, the control plane's (`eu-central-1` in the integration test) | The multi-tenant distribution and the pooled distribution tenant, the router, the KeyValueStore, the response headers policy (§7.1) and the SPA bucket; the registrar (API, function, resource policy); the custom resources for the `signin` key and the teardown; the published parameter. With `dedicatedDomains` on: the sweeper, its table, queue, schedules, log group and alarms, the guard and the starter. The `dedicatedDomains` switch is an update of this stack |
 | Edge logging stack | edge | `us-east-1` | The log group, delivery source, delivery destination and delivery, after the main stack |
 | `RouteHookAccess` stack | the control plane's | The control plane's | The hook parameter and the hook policy (§3.1) |
 
@@ -240,7 +240,6 @@ resource removes them (§6.2).
 |---|---|---|---|---|
 | `/assets/*` | static | SPA bucket | one year, immutable, shared by all tenants | no |
 | `/`, other SPA routes | static, rewritten to `/index.html` | SPA bucket | `no-cache`, revalidated | no |
-| `/callback` | static, rewritten to `/index.html`, with the response headers policy that sends no reports (§7.1) | SPA bucket | `no-cache`, revalidated | no |
 | `/config.json` | generated at the edge | none | `no-store` | `host` mode only |
 | `/api/*` | dynamic | the tenant's cell API, in the cell's account | disabled | yes |
 | `/agents/*` | dynamic, streaming | the agent ingress | disabled | yes |
@@ -923,8 +922,9 @@ On every write:
    minutes). These bounds are chosen. The rates that follow are
    estimated, not measured: a cycle from the ETag read to the write
    takes about 0.3 s, so the store takes about three writes a second
-   at most and about half that under conflicts. A registrar kept at
-   about one write a second leaves room for the retries. A burst of
+   at most and about half that under conflicts. The load assumed is
+   about one write a second; nothing throttles the registrar to it, and
+   at that load the store has room for the retries. A burst of
    100 simultaneous creates clears in about 70 s, inside the hook's
    two minutes. A larger burst leaves creates in `CREATE_FAILED`,
    which the operator deletes and creates again (route hook, after
@@ -1067,6 +1067,9 @@ the control plane's hook environment (control-plane R-42):
    and its deletes leave an `active` `tenant#` entry. `RouteHookAccess`
    keeps the parameter against that (§3.1), so only a deliberate
    deletion in the control plane's account removes it (§6.2 limits).
+   The kept parameter has a fixed name, so it has to be deleted or
+   imported before `RouteHookAccess` is deployed again, and a changed
+   `applicationId` leaves the old one behind (§3.1, §6.2 limits).
    The hook runs for every
    application on the control plane, so a throttled read
    (`ThrottlingException`, `TooManyRequestsException`) is retried inside
@@ -1162,12 +1165,16 @@ hook's put replaces the entry, `s: active` and routed to the new cell
      the `state` and the code challenge.
   3. The issuer redirects to the sign-in host, which §3.3 step 2 checks
      and redirects to `https://<h>/callback` with the code and `state`.
-  4. On `/callback` the SPA first reads the query into memory and calls
-     `history.replaceState` to drop it from the address, before any
-     other fetch, `/config.json` included, so no later request carries
-     the code or `state` in `Referer`. The assets the page itself loads
-     still do, which is why the access log leaves out `cs(Referer)`
-     (§3.1). The SPA then refuses the callback unless the `state`'s `n`
+  4. On `/callback` the first script of `index.html`, a hashed inline
+     classic script at the top of `<head>`, ahead of the import map and
+     the entry (§7.1), copies the query into a variable and calls
+     `history.replaceState` to drop it from the address. It runs before
+     the document loads anything, so no request carries the code or
+     `state` in `Referer` and no violation report carries them in its
+     URL (§7.1 Reports). `single` mode handles its callback,
+     `https://<appDomain>/`, with the same script. The access log still
+     leaves out `cs(Referer)` (§3.1), in case a browser fetches ahead
+     of the parser. The SPA then refuses the callback unless the `state`'s `n`
      equals its saved nonce, exchanges the code with the saved verifier
      and the same `redirect_uri`, and deletes both saved values on every
      outcome. A callback with `error` gets a fixed message; the SPA
@@ -1331,8 +1338,8 @@ hook's put replaces the entry, `s: active` and routed to the new cell
 | `dedicatedDomains` | no | off | Lets the edge operator role set a tenant's `customDomain` (§3.4 step 5, ADR-0018). Off: any `customDomain` gets 400, the registrar role holds no ACM or distribution-tenant action, and the sweeper, its role, its table, its schedules and the starter are not deployed. A stack update that turns it off fails while any `tenant#` entry holds a `d` or the sweeper has a distribution tenant or certificate left to delete; the operator drops every dedicated domain first (§3.4) |
 | `tenantRequestsPer5Min` | no | 2,000 | Per-tenant rate: at the edge per host in `host` mode, at the origin per verified tenant in `single` mode (ADR-0009) |
 | `ipRequestsPer5Min` | no | 500 | `host` mode only: the most requests one client IP may send to one tenant host's `/api/*` and `/agents/*` in 5 minutes before the edge answers 429, counted ahead of the per-host count (ADR-0021). One value for every tenant host; there is no per-tenant setting. A chosen value, not a measured one. Keep it below `tenantRequestsPer5Min`. A tenant whose users all reach the edge through one office NAT address shares one count: at 500 its whole user base gets about 1.7 requests per second before `tenantRequestsPer5Min` applies. Raising it raises it for every host |
-| `reportingEndpoint` | no | off | URL for CSP and other browser reports. The `/callback` behaviour sends none (§7.1) |
-| `alarmTopicArn` | no | none | ARN of an SNS topic in the main stack's account and Region. The construct adds it as the ALARM action of every alarm this specification defines: the three-miss, `unverifiable`, queue-depth, missing-pages and no-lister alarms of the sweeper (§3.4 step 5) and the 80 % route table alarm (§4.1). The deployer owns the topic, its policy (it must allow CloudWatch to publish) and its subscribers. With no topic the alarms exist and notify no one |
+| `reportingEndpoint` | no | off | URL for CSP and other browser reports, on for the whole session in both modes. No report carries the callback's code, because the first inline script removes it from the URL before anything loads (§7.1 Reports) |
+| `alarmTopicArn` | no | none | ARN of an SNS topic in the main stack's account and Region. The construct adds it as the ALARM action of every alarm this specification defines: the three-miss, `unverifiable`, queue-depth, missing-pages and no-lister alarms of the sweeper (§3.4 step 5) and the 80 % route table alarm on the registrar's `RouteTableBytes` metric (§4.1). Every one of these alarms is in the main stack's Region, so one topic serves them all. The deployer owns the topic, its policy (it must allow CloudWatch to publish) and its subscribers. With no topic the alarms exist and notify no one |
 
 ## 4. Data model
 
@@ -1429,7 +1436,15 @@ Rules:
   inside the 1 KB limit. The headroom, 1,000,000 bytes, holds
   floor(1,000,000 / 288) = 3,472 dedicated tenants at worst, less what
   `app` and `signin` take. The registrar refuses a write past 5 MB with
-  507, and an alarm fires at 80 %.
+  507, and an alarm fires at 80 %. CloudFront publishes no store-size
+  metric, so the registrar publishes its own: after each write it
+  reads `TotalSizeInBytes` from `DescribeKeyValueStore`, the call that
+  gives it the ETag (§3.4 step 5), and writes it as the custom metric
+  `RouteTableBytes` (namespace `TenantFrontDoor`, an embedded metric
+  format line in its log). The alarm (maximum at or above 4,000,000
+  bytes) lives in the main stack's Region beside the registrar, so the
+  main-Region `alarmTopicArn` is its action (§3.6) and no `us-east-1`
+  topic is needed.
 - ACM binds before that headroom does. A dedicated domain needs one ACM
   certificate in the edge account's `us-east-1`, and ACM's default quota
   is 2,500 certificates for each account and Region, expired and revoked
@@ -1807,6 +1822,16 @@ Limits of these promises:
   application silently (§3.4 route hook step 1). The hardening path,
   not built here, is a sweeper reconcile of the `tenant#` entries
   against `GetDeployment` that alarms on a mismatch.
+- The parameter `RouteHookAccess` keeps has a fixed name. After a
+  stack delete outside the ordered teardown, or after a first create
+  that rolled back (CloudFormation keeps `Retain` resources then too),
+  the next deploy of `RouteHookAccess` fails because the parameter
+  exists: delete it, or import it into the new stack, first. A changed
+  `applicationId` replaces the parameter under a new name and keeps the
+  old one; while the old one stays, the hook calls the registrar for the
+  old application, the registrar answers 403 (§3.4 step 3) and that
+  application's creates and updates fail. The operator deletes the old
+  application's parameter in the same change (§3.1).
 - Route writes share one store ETag, so sustained writes above about
   one a second, or a burst above about 100, fail creates (§3.4
   step 5). Those figures are estimates.
@@ -1869,7 +1894,7 @@ ingress behind `/agents/*` needs its URL form checked first.
 
 ## 7. Web platform baseline
 
-One response headers policy on every behaviour. The SPA is static, so CSP
+One response headers policy on every behaviour, the same in both modes. The SPA is static, so CSP
 uses script hashes, not nonces. The build step computes the hashes and writes
 the policy. For one release the policy carries the previous and the new
 script hashes: the policy deploys first, then the SPA files are uploaded,
@@ -1881,7 +1906,7 @@ and the next release drops the old hash. Two sets of hashes fit within the
 | Header | Value |
 |---|---|
 | `Strict-Transport-Security` | `max-age=31536000`, with no `includeSubDomains` and no `preload` (§7.3) |
-| `Content-Security-Policy` | `default-src 'self'; script-src 'sha384-…' 'strict-dynamic' 'report-sample'; connect-src 'self' <token origin> <exchange origin>; img-src 'self' data:; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self' <authorize origin>; frame-ancestors 'none'; worker-src 'self'; require-trusted-types-for 'script'; report-to fd`, where `<exchange origin>` is present only when `exchangeEndpoint` is set and `report-to fd` only when `reportingEndpoint` is set |
+| `Content-Security-Policy` | `default-src 'self'; script-src 'sha384-…' 'strict-dynamic' 'report-sample'; connect-src 'self' <token origin> <exchange origin>; img-src 'self' data:; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self' <authorize origin>; frame-ancestors 'none'; worker-src 'none'; require-trusted-types-for 'script'; report-to fd`, where `<exchange origin>` is present only when `exchangeEndpoint` is set and `report-to fd` only when `reportingEndpoint` is set |
 | `Reporting-Endpoints` | `fd="<reportingEndpoint>"`, only when set |
 | `X-Frame-Options` | `DENY` |
 | `X-Content-Type-Options` | `nosniff` |
@@ -1890,6 +1915,11 @@ and the next release drops the old hash. Two sets of hashes fit within the
 | `Cross-Origin-Resource-Policy` | `same-origin` |
 | `Permissions-Policy` | `camera=(), microphone=(), geolocation=(), payment=(), usb=()` |
 | `Clear-Site-Data` | on `/logout` only: `"storage", "cache"` (§7.3) |
+
+`worker-src 'none'`: the SPA starts no worker, and an import map does
+not cover a worker's top-level script. A SPA that needs a worker pins
+its script (a hash source or `integrity` on the worker's own fetch) and
+changes this directive in the same release (ADR-0023).
 
 `<token origin>` and `<authorize origin>` are the origins of the token and
 authorize endpoints in the `issuer` input (§3.6), and `<exchange origin>`
@@ -1906,18 +1936,23 @@ The response headers policy overrides origin headers, so a cell in a
 tenant-owned account cannot weaken the baseline (P-8).
 
 **Reports.** A CSP or Reporting API report carries the document's URL
-with its query string, and the authorization code and `state` sit in
-the query of the callback page until `history.replaceState` runs
-(§3.5 step 4). In `host` mode that page is `/callback`, a behaviour of
-its own with a second response headers policy: the same headers, but
-the CSP has no `report-to fd` and there is no `Reporting-Endpoints`,
-so a violation on that page sends no report. In `single` mode the
-callback is `https://<appDomain>/`, which no behaviour can single out,
-so with `reportingEndpoint` set a violation that fires before
-`replaceState` reports the query. The code is bound to the PKCE
-verifier the SPA holds (§3.5), so a reported code alone redeems
-nothing. The deployer sets `reportingEndpoint` only to an endpoint
-that may hold an authorization code and a `state`.
+at the time of the violation, query string included, and the
+authorization code and `state` sit in the query of the callback page
+until `history.replaceState` runs. So `replaceState` runs first: the
+first element of `<head>` after `<meta charset>` is a hashed inline
+classic script that copies `location.search` into a variable the entry
+reads and calls `history.replaceState(null, "", location.pathname)`.
+It runs before the parser reaches the import map and the entry, so no
+load, and no violation those loads could cause, happens while the URL
+holds the code. Both modes handle the callback this way: `/callback`
+in `host` mode and `https://<appDomain>/` in `single` mode need no
+behaviour or policy of their own, and with `reportingEndpoint` set
+reporting stays on for the whole session. The one window left is a
+violation before that script runs: the script failing its own hash (a
+broken release, which §10 step 3 catches) or a script that something
+else, such as a browser extension, injects at document start (T-36,
+AR-32). The code is bound to the PKCE verifier the SPA holds (§3.5),
+so a reported code alone redeems nothing.
 
 **Imported chunks.** `'strict-dynamic'` trusts every script the hashed
 entry loads, so a chunk that someone could write to the SPA bucket
@@ -1931,14 +1966,18 @@ headers policy, which is not in the bucket. The build fails when an
 emitted chunk has no `integrity` entry, as it does for a script with
 no hash. A browser that ignores `integrity` in an import map loads
 chunks unchecked, and the bucket's write controls (§3.1) are the
-control there (ADR-0023). A release adds two hashes to the policy, the
-entry's and the import map's, so the two releases it carries hold four,
-about 300 characters of the 1,783.
+control there (ADR-0023). A release adds three hashes to the policy,
+the callback script's, the import map's and the entry's, so the two
+releases it carries hold six, about 450 characters. With four origins
+of 60 characters each the whole policy is about 1,000 characters of
+the 1,783.
 
 ### 7.2 SPA rules
 
 - No HTML strings into the DOM: `textContent`, `createElement`, or
   `setHTML()` with a fallback sanitiser. Agent output is text, never HTML.
+- The first script in `<head>` is the inline callback script (§7.1
+  Reports); nothing else in the document loads before it.
 - A callback with `error` shows a fixed message. Anyone holding a
   `state` can choose the `error_description` text, so the SPA never
   renders it as HTML, at most as `textContent`.
@@ -2138,9 +2177,12 @@ destroy time, which the test reports with the rest.
 3. `/` serves the SPA with every §7.1 header, and so does every answer
    the router generates itself: the 302 of `/logout`, `/config.json`,
    and the 401, 403, 404 and 503 answers of steps 5, 6, 9, 13 and 17.
-   A template test of the two response headers policies (§7.1) checks
-   that they differ only in the CSP's `report-to fd` and in
-   `Reporting-Endpoints`.
+   A build test checks that the first script of `index.html` is the
+   inline callback script, ahead of the import map and the entry, and
+   that the policy's `script-src` carries its hash (§7.1 Reports). In a
+   browser, `/callback?code=x&state=y` in `host` mode and
+   `/?code=x&state=y` in `single` mode load with no CSP violation and
+   end with no query in the address.
    In `single` mode
    `/signin-state` returns 404, and `/logout` returns 302 to the
    issuer's logout endpoint with `client_id` and
