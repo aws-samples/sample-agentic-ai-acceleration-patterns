@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0018: Prove a dedicated domain with a per-tenant DNS challenge
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Amends: ADR-0002, ADR-0012, ADR-0016
 - Deciders: Dave Roberts (PSA)
@@ -105,10 +105,13 @@ registrar resolves the record with the default resolver of a Lambda
 function outside a VPC: AWS's recursive resolver, with no third party,
 no egress rule and no resolver code. A DNS-over-HTTPS resolver would
 send every tenant domain to a third party and caches the same way;
-querying the authoritative servers directly would skip the cache but
-needs an iterative resolver in the function and UDP from Lambda, which
-nothing has proven. Caching can delay a pass, never cause one, because
-no cached answer can predate the token. A resolver error is
+querying the authoritative servers directly would skip the cache, and a
+function outside a VPC does reach a zone's name servers over UDP port 53
+(spike S-10), but it needs code to find a domain's name servers and to
+handle truncation, which the sample does not carry. Caching can delay a
+pass, never cause one, because no cached answer can predate the token.
+The resolver caps an answer's TTL at 300 s and keeps a negative answer
+for the zone's negative-caching TTL (S-10). A resolver error is
 `unresolved`, never a pass, and a CNAME at the challenge name is
 refused, so a CNAME left pointing into a zone someone else can register
 never passes. The 7 days cover a tenant's
@@ -148,10 +151,15 @@ before it writes the domain's `host#` key.
   challenge record and then ACM's validation record, and two kinds of
   202 (`stage` `domain-challenge` and `certificate`).
 - Harder: a repeat call made before the tenant published the record can
-  make the resolver cache a negative answer for the zone's
-  negative-caching TTL, which delays the pass by that much. Spike S-10
-  measures what the function sees; if the delay is more than an
-  operator can live with, the resolver choice is reopened.
+  leave a negative answer in the resolver for the zone's
+  negative-caching TTL, 15 minutes for a zone whose SOA TTL is 900 s. In
+  spike S-10 about one lookup in ten still got it after the record was
+  in the zone, the last one 882 s after the negative lookup, and an
+  environment that got it tended to get it again on its next call, so an
+  immediate repeat does not help. The operator's call is repeat-safe and
+  answers `missing`, and a tenant that publishes the record before the
+  first repeat meets no delay. A larger SOA minimum in the tenant's zone
+  lengthens the worst case.
 - Harder: the check trusts one DNS answer from one Region without
   DNSSEC, as ACM's own DNS validation does. Shortcut: one vantage point;
   upgrade to a second Region's answer, or DNSSEC validation, when a
@@ -233,8 +241,9 @@ before it writes the domain's `host#` key.
   page in flight keeps a run inside the Logs Insights quota of 30
   concurrent queries. The sweeper keeps
   no store of its own: its log is the record. A removed record can still
-  pass for as long as the resolver caches it, up to its TTL cap (S-10),
-  which delays the alarm by that much. The sweeper does not drop the
+  pass for about 11 minutes after its removal, whatever its TTL (S-10),
+  so a run that starts within that time of the removal can pass, which
+  delays the alarm by at most one day. The sweeper does not drop the
   domain: a DNS fault or a tenant's mistake would then take a routed
   domain offline with no person deciding. The re-check does not follow
   ACM renewals, which depend on ACM's own validation record.
@@ -280,11 +289,13 @@ before it writes the domain's `host#` key.
   that errors three days in a row, and a query that reaches its row
   limit and fails the page (spec §10). The alarms' notifications are not
   checked; the integration test checks the metric the re-check alarm
-  watches.
+  watches. The resolver's caching was measured once, in `eu-central-1`
+  against one zone (S-10), and the integration test does not repeat it.
 - Not changed: a dedicated domain still never receives an authorization
   code (ADR-0016). The challenge confirms that the tenant controls the
   domain's DNS and can point it at a server of its own, so a code sent
   there could leave the vendor's edge.
-- Revisit when S-10 shows a resolver delay operators cannot accept,
-  when CloudFront or ACM offer a per-tenant domain proof of their own,
-  or when a vendor needs the multi-perspective check.
+- Revisit when operators cannot accept the negative-answer delay (up to
+  the tenant zone's negative-caching TTL, S-10), when CloudFront or ACM
+  offer a per-tenant domain proof of their own, or when a vendor needs
+  the multi-perspective check.
