@@ -34,11 +34,15 @@ Option 1. `CellAccountRolesProps` and `CellAccountStackProps` take
 `cellBuildManagedPolicyArns?: string[]`, validated like
 `tenantBuildManagedPolicyArns` (this stack's partition and account), and
 attached to the cell provisioning role. The README shows the one policy the
-stress application uses: `sts:AssumeRole` on
-`arn:${Partition}:iam::<account>:role/cdk-cell-*-role-<account>-<region>`,
-and states where it is safe: in a cell account that holds only cells, with
-a cell bootstrap whose execution role and every cell role carry a
-permissions boundary and sit on a `/cell/` role path (stress ADR-0006).
+stress application uses: `sts:AssumeRole` on the four `cdk-cell-*`
+bootstrap roles a deploy uses (deploy, file publishing, image publishing,
+lookup), named one by one as
+`arn:${Partition}:iam::<account>:role/cdk-cell-<name>-role-<account>-<region>`.
+It states where that policy is safe: in a cell account that holds only
+cells, with a cell bootstrap whose execution role and every cell role carry
+a permissions boundary and sit on a `/cell/` role path (stress ADR-0006).
+The control plane's own account never qualifies, because it holds the
+control plane.
 
 ## Consequences
 Easier: an application can deploy its cell with any tool the account owner

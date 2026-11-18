@@ -95,7 +95,8 @@ export interface TenantStackProps extends StackProps {
    * 1 to 100, applied to every project the control plane creates. Above 20
    * the synth warns: the cost guard of T16 is the deployer's value, and the
    * account's CodeBuild quota for `BUILD_GENERAL1_SMALL` must hold the value
-   * times the number of projects. Default 5.
+   * times the number of CodeBuild projects the stack creates (the synth
+   * warning prints the figure). Default 5.
    */
   readonly concurrentBuildLimit?: number;
   /**

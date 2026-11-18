@@ -791,8 +791,10 @@ application's cells (threat T5, the highest-consequence open item).
 - [ ] **Review every policy in `cellBuildManagedPolicyArns`.** The cell
       provisioning role runs every cell script in its account, and the
       control plane's API role can assume it too. Never attach a policy that
-      reaches an administrator role or the default CDK bootstrap (T21, M18,
-      ADR-0047).
+      reaches an administrator role or the default CDK bootstrap. On the
+      control plane stack, attach only policies scoped to the cell's own
+      resources; a policy that assumes CDK bootstrap roles belongs only in
+      an account that holds nothing but cells (T21, M18, ADR-0047).
 - [ ] **Size `concurrentBuildLimit` to the onboarding you expect**, not to
       the largest you can imagine. It is the cost cap of T16; keep it at 5
       or close to it outside an onboarding wave (M17, ADR-0046).
