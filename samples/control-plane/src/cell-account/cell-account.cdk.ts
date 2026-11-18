@@ -52,7 +52,8 @@ export interface CellAccountRolesProps {
  * and `<fleet>-tenant-provisioning`, installed in every account that hosts
  * cells — the control plane's own account included (P-4). Each role trusts
  * its control-plane build role and the control-plane API role (for the
- * registration probe, ADR-027/028), by ARN, and carries the asymmetric
+ * registration probe, ADR-027/028), by ARN, and never a hook role (spec
+ * R-41: a hook never acts in a cell account). It carries the asymmetric
  * §6.2 namespace grants: the cell role owns `/application-plane/cells/*`,
  * the tenant role reads it and owns `/application-plane/tenants/*`. These
  * roles — not the build roles — are THE hardening point (P-12): the account

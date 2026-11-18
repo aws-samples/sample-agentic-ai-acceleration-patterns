@@ -616,7 +616,7 @@ describe('build roles and the home account role pair (ADR-025)', () => {
     }
   });
 
-  test('a custom fleetName renames all five roles; an invalid one fails synth', () => {
+  test('a custom fleetName renames all seven roles (hook roles included, R-41); an invalid one fails synth', () => {
     const custom = synth({ fleetName: 'fleet-b' });
     const names = (Object.values(custom.findResources('AWS::IAM::Role')) as any[])
       .map((role) => role.Properties.RoleName)
@@ -624,8 +624,10 @@ describe('build roles and the home account role pair (ADR-025)', () => {
       .sort();
     expect(names).toEqual([
       'fleet-b-api',
+      'fleet-b-app-hook',
       'fleet-b-cell-build',
       'fleet-b-cell-provisioning',
+      'fleet-b-global-hook',
       'fleet-b-tenant-build',
       'fleet-b-tenant-provisioning',
     ]);
