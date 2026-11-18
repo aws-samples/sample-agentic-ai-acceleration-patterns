@@ -31,7 +31,6 @@ import {
   hookRoleName,
   HookRoleKind,
   provisioningRoleArn,
-  ProvisioningRoleKind,
   validateFleetName,
 } from '../shared/fleet';
 import { nagFindingResource, acknowledgeGranularFinding, suppressTemplateScanners } from '../shared/nag';
@@ -126,7 +125,7 @@ export interface TenantStackProps extends StackProps {
    */
   readonly allowedRoles?: string[];
   /**
-   * Role claim values that get the reader grant, the ten `GET` operations
+   * Role claim values that get the reader grant, the twelve `GET` operations
    * only (spec R-36, ADR-042, M26). Default none: no reader is admitted
    * until the deployer names one. Use a namespaced value such as
    * `control-plane:reader`, not a word a broader issuer may already mint
@@ -255,9 +254,6 @@ export class TenantStack extends Stack {
       appHookRole,
     });
     this.provisioning = workflow;
-    // R-41 / H-7: each build role trusts CodeBuild only on its own project.
-    restrictBuildRoleTrust(this, workflow.cellBuildRole, this.fleetName, 'cell');
-    restrictBuildRoleTrust(this, workflow.tenantBuildRole, this.fleetName, 'tenant');
 
     // --- The home account's role pair (R-25, ADR-025) ----------------------
     // The control plane's own account is just another registered account:
@@ -604,25 +600,6 @@ function hookRole(
     cfnNag: [{ id: 'W28', reason: 'The physical name is the contract of the hook role: the stack\'s deny and the integration test name it, and no account role pair trusts it (spec R-41).' }],
   });
   return role;
-}
-
-/**
- * Narrows a build role's trust to its own project (spec R-41, H-7): CodeBuild
- * only, and only when the calling project's ARN equals the one computed from
- * the project's fleet-derived name, so no other project can run as the role.
- * The factory in `tenant.sfn.ts` creates the role with the plain CodeBuild
- * trust of ADR-025; this replaces that statement's condition on the
- * synthesized role, so the result is the same whether or not the factory
- * already sets it.
- * shortcut: a raw property override on the role's L1, until the factory builds
- * the trust itself; then delete this and its two calls.
- */
-function restrictBuildRoleTrust(stack: Stack, role: iam.Role, fleetName: string, kind: ProvisioningRoleKind): void {
-  (role.node.defaultChild as iam.CfnRole).addPropertyOverride('AssumeRolePolicyDocument.Statement.0.Condition', {
-    ArnEquals: {
-      'aws:SourceArn': buildProjectArn(stack.partition, stack.region, stack.account, fleetName, kind === 'cell' ? 'cell-build' : 'tenant-build'),
-    },
-  });
 }
 
 /**

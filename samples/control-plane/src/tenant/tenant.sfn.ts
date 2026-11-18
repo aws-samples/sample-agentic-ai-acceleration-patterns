@@ -35,21 +35,15 @@ export interface ProvisioningWorkflowProps {
    * role of the global hook project `<fleet>-global-hook` and never passes it
    * as a role override, nor holds `iam:PassRole` on it. Supplied together
    * with `appHookRole`.
-   *
-   * shortcut: optional only so this workflow builds before the stack passes
-   * the roles; absent, the workflow creates the role itself (CodeBuild trust
-   * on the project's `aws:SourceArn`, no policies, no deny). Make both props
-   * required and delete `fallbackHookRole` once `tenant.cdk.ts` supplies
-   * them, which it does from the infrastructure change.
    */
-  readonly globalHookRole?: iam.IRole;
+  readonly globalHookRole: iam.IRole;
   /**
    * The role every application hook runs under, `<fleet>-app-hook` (spec
    * R-41), supplied and used as `globalHookRole` is, for the application
    * hook project `<fleet>-app-hook`. Never the same role as `globalHookRole`:
    * an application hook cannot use what a global hook holds.
    */
-  readonly appHookRole?: iam.IRole;
+  readonly appHookRole: iam.IRole;
 }
 
 /**
@@ -313,8 +307,8 @@ export class ProvisioningWorkflow extends Construct {
     // whoever can start a build in one runs code as its role: only the
     // workflow role may, and it holds no iam:PassRole on either hook role.
     // ------------------------------------------------------------------
-    const globalHookRole = props.globalHookRole ?? fallbackHookRole(this, 'GlobalHookRole', props.fleetName, 'global-hook');
-    const appHookRole = props.appHookRole ?? fallbackHookRole(this, 'AppHookRole', props.fleetName, 'app-hook');
+    const globalHookRole = props.globalHookRole;
+    const appHookRole = props.appHookRole;
     this.globalHookProject = hookProject(this, 'GlobalHookProject', props.fleetName, 'global-hook', globalHookRole,
       'Global hooks - source and buildspec are overridden per StartBuild');
     this.appHookProject = hookProject(this, 'AppHookProject', props.fleetName, 'app-hook', appHookRole,
@@ -1240,25 +1234,6 @@ function hookProject(
   });
   acknowledgeCodeBuildDefaults(project, logGroup);
   return project;
-}
-
-/**
- * The hook role when the stack passes none (see `ProvisioningWorkflowProps`).
- * shortcut: CodeBuild trust on the project's `aws:SourceArn`, no policy, no
- * deny; delete with the optional props.
- */
-function fallbackHookRole(scope: Construct, id: string, fleetName: string, kind: 'global-hook' | 'app-hook'): iam.Role {
-  const stack = Stack.of(scope);
-  const role = new iam.Role(scope, id, {
-    roleName: hookRoleName(fleetName, kind),
-    assumedBy: new iam.PrincipalWithConditions(new iam.ServicePrincipal('codebuild.amazonaws.com'), {
-      ArnEquals: { 'aws:SourceArn': buildProjectArn(stack.partition, stack.region, stack.account, fleetName, kind) },
-    }),
-  });
-  suppressTemplateScanners(role, {
-    cfnNag: [{ id: 'W28', reason: 'The physical name is the contract of the hook role (spec R-41).' }],
-  });
-  return role;
 }
 
 function attr(value: string): tasks.DynamoAttributeValue {

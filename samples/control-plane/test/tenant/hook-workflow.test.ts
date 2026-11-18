@@ -6,12 +6,16 @@ import { createHash } from 'crypto';
 import { mkdtempSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { unmarshall } from '@aws-sdk/util-dynamodb';
 import { Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import { HookExecutionInput, ResolvedHook, SCRIPT_OUTPUT_GUARD_PATTERN } from '../../src/tenant/hook.types';
+import { CellDataModel, CellItem } from '../../src/tenant/cell.data-model';
+import { readLastGlobalHooks } from '../../src/tenant/hook.data-model';
+import { GlobalHookRecord, HookDefinition, HookExecutionInput, ResolvedHook, SCRIPT_OUTPUT_GUARD_PATTERN } from '../../src/tenant/hook.types';
 import { HOOK_BUILDSPEC } from '../../src/tenant/hook.workflow';
+import { resolveHooks } from '../../src/tenant/hooks';
 import { INLINE_BUILDSPEC, ProvisioningWorkflow } from '../../src/tenant/tenant.sfn';
 import { simulate, SimulationResult, TaskCall } from '../asl-simulator';
 import { evaluateJsonata } from '../workflow-jsonata';
@@ -904,5 +908,77 @@ describe('the hook sub-graph (R-45, R-46)', () => {
     const { handler } = service({ startErrors: () => ({ Error: 'CodeBuild.AccountLimitExceededException', Cause: 'cap' }) });
     const result = await run('CellPreHooks', payload(hooks('CELL_CREATE', [hook('gate', 'GLOBAL')], [])), handler);
     expect(result.output.lastGlobalHooks).toEqual([]);
+  });
+
+  describe('the contract with the API (ADR-0044): resolveHooks in, lastGlobalHooks out', () => {
+    const hookDef = (hookId: string, over: Partial<HookDefinition> = {}): HookDefinition => ({
+      hookId,
+      events: ['CELL_CREATE'],
+      phase: 'PRE',
+      source: { type: 'GITHUB', location: 'https://github.com/o/r', sourceVersion: 'main' },
+      script: `hooks/${hookId}.sh`,
+      timeoutMinutes: 10,
+      ...over,
+    });
+    const record = (hookId: string, revision: number, over: Partial<HookDefinition> = {}): GlobalHookRecord => ({
+      ...hookDef(hookId, over),
+      revision,
+      createdAt: new Date('2026-01-01T00:00:00Z'),
+      updatedAt: new Date('2026-01-02T00:00:00Z'),
+    });
+
+    test('the input the API builds is the input the workflow runs; what it writes, the API reads back', async () => {
+      // A global hook with a ref, a global S3 hook with none (no commit either), an application hook.
+      const input = resolveHooks(
+        'CELL_CREATE',
+        [hookDef('route')],
+        [record('audit', 3), record('nover', 7, { source: { type: 'S3', location: 'bucket/key' } })],
+      );
+      expect(input.pre.map((h) => [h.hookId, h.scope, h.revision, h.sourceVersion])).toEqual([
+        ['audit', 'GLOBAL', 3, 'main'],
+        ['nover', 'GLOBAL', 7, ''],
+        ['route', 'APPLICATION', 0, 'main'],
+      ]);
+      const { handler, log } = service();
+      const noCommit = (call: TaskCall) => {
+        const out = handler(call);
+        if (call.resource.endsWith(':batchGetBuilds') && call.args.Ids[0] === 'build-2') {
+          delete out.Builds[0].ResolvedSourceVersion;
+        }
+        return out;
+      };
+      const result = await run('CellPreHooks', payload(input), noCommit);
+      expect(result.stoppedAt).toBe('RunCellBuildSourcePin');
+      // The workflow ran the list as given, each hook in the project of its scope.
+      expect(log.starts.map((c) => [c.args.ProjectName, envOf(c).HOOK_ID, envOf(c).EVENT, envOf(c).PHASE]))
+        .toEqual([[`${FLEET}-global-hook`, 'audit', 'CELL_CREATE', 'PRE'], [`${FLEET}-global-hook`, 'nover', 'CELL_CREATE', 'PRE'], [`${FLEET}-app-hook`, 'route', 'CELL_CREATE', 'PRE']]);
+
+      // What the terminal write sends (`L` of the payload) is what DynamoDB stores; the document client unmarshalls it.
+      const stored = unmarshall({ lastGlobalHooks: { L: result.output.lastGlobalHooks } }).lastGlobalHooks;
+      expect(stored).toEqual([
+        { hookId: 'audit', phase: 'PRE', revision: 3, sourceVersion: 'main', resolvedSourceVersion: SHA },
+        { hookId: 'nover', phase: 'PRE', revision: 7 },
+      ]);
+      const expected = [
+        { hookId: 'audit', phase: 'PRE', revision: 3, sourceVersion: 'main', resolvedSourceVersion: SHA },
+        { hookId: 'nover', phase: 'PRE', revision: 7 },
+      ];
+      expect(readLastGlobalHooks(stored)).toEqual(expected);
+      // And through the data model of the cell record, as GetCell reads it.
+      const item = {
+        cellId: 'cell-1',
+        applicationId: 'app-1',
+        accountId: '111111111111',
+        status: 'ACTIVE',
+        lastGlobalHooks: stored,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      } as unknown as CellItem;
+      expect(new CellDataModel().fromItem(item).lastGlobalHooks).toEqual(expected);
+    });
+
+    test('the empty list the workflow writes reads back as none', () => {
+      expect(readLastGlobalHooks(unmarshall({ lastGlobalHooks: { L: [] } }).lastGlobalHooks)).toEqual([]);
+    });
   });
 });
