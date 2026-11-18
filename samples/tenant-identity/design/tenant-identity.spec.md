@@ -704,8 +704,10 @@ answer only if it names the page's origin.
 
 **The list.** `allowedOrigins` (§3.3) lists the origins whose pages may read
 the answer. As a context value it is one string, entries separated by `,`
-with no whitespace; as a stack prop it is `allowedOrigins?: string[]`. Each
-entry is one of:
+with no whitespace; as a stack prop it is `allowedOrigins?: string[]`. A
+missing context value, an empty string and the prop `[]` all mean no list,
+so `--context allowedOrigins=` clears it on a redeploy. Each entry is one
+of:
 
 | Form | Matches | Example |
 |---|---|---|
@@ -1248,7 +1250,7 @@ rather than falling back.
 | Federation to a tenant's own IdP | Topology 1: an IdP per pool, the natural fit. Topologies 2 and 3: an IdP per tenant in the shared pool with attribute/group mapping, bounded by the 300-IdP quota. |
 | Narrowing at sign-in | Pass the §8.2 keys to `InitiateAuth` to narrow the session's first token. Not built: exchange (§5.4) narrows per call with no new sign-in (ADR-0009, Option 4). |
 | Delegation (`act`, RFC 8693 §4.1) and audience narrowing | A service exchanging a token it received, to act for the user downstream, needs an access-token subject and a signer of its own. Out of scope by ADR-0009. Cognito token exchange (`GetDerivedToken`) takes an access-token subject, signs with the pool and adds `act` and one audience, but cannot carry the tenant and needs a trigger change first (ADR-0039); AgentCore Identity on-behalf-of is the other managed fit. |
-| Preflighted browser calls | A page that adds a non-safelisted header to the exchange (a tracing header included), or calls `/tenant/*` from another origin, makes the browser send an `OPTIONS` preflight. Add an `OPTIONS` route per path, proxied to a function that answers from the same `allowedOrigins` matcher with `Access-Control-Allow-Methods` and `Access-Control-Allow-Headers` for exactly what the page sends; `/tenant/*` also needs `Authorization` allowed. The API's resource policy lets any principal call only `POST/oauth2/token` and `*/tenant/*`, so the seam also adds `OPTIONS/oauth2/token` there, or the preflight is refused with 403. Not built: the exchange is a simple request (§5.4.1, ADR-0040). |
+| Preflighted browser calls | A page that adds a non-safelisted header to the exchange (a tracing header included), or calls `/tenant/*` from another origin, makes the browser send an `OPTIONS` preflight. Add an `OPTIONS` route per path, proxied to a function that answers from the same `allowedOrigins` matcher with `Access-Control-Allow-Methods` and `Access-Control-Allow-Headers` for exactly what the page sends; `/tenant/*` also needs `Authorization` allowed. A preflight carries no bearer token and no API key, so `OPTIONS` methods have no authoriser and require no key (`requireApiKey` skips them), and each gets its route family's throttle. The API's resource policy lets any principal call only `POST/oauth2/token` and `*/tenant/*`, so the seam also adds `OPTIONS/oauth2/token` there, or the preflight is refused with 403. Not built: the exchange is a simple request (§5.4.1, ADR-0040). |
 | Hosted UI / managed login | Add a domain and OAuth flows to the app client; nothing in the trigger changes. |
 | Async onboarding | Wrap `CreateTenant` in the control-plane sample's workflow when onboarding grows beyond Cognito calls (e.g. also provisioning tenant storage). |
 | Control-plane mounting | A `scripts/control-plane/` lifecycle set that calls `CreateTenant`/`DeleteTenant` so this sample runs as a cell's identity component. |
