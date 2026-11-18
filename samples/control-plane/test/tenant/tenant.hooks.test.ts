@@ -70,13 +70,14 @@ function applicationRecord(overrides: Partial<ApplicationRecord> = {}): Applicat
     placementStrategy: 'FILL',
     hooks: applicationHooks,
     cellCount: 1,
+    status: 'ACTIVE',
     createdAt: T0,
     updatedAt: T0,
     ...overrides,
   };
 }
 function accountRecord(): AccountRecord {
-  return { accountId: ACCOUNT_ID, owner: 'VENDOR', maxCells: 2, cellCount: 1, createdAt: T0, updatedAt: T0 };
+  return { accountId: ACCOUNT_ID, owner: 'VENDOR', maxCells: 2, cellCount: 1, status: 'ACTIVE', createdAt: T0, updatedAt: T0 };
 }
 function cellRecord(overrides: Partial<CellRecord> = {}): CellRecord {
   return {
@@ -96,7 +97,7 @@ function cellRecord(overrides: Partial<CellRecord> = {}): CellRecord {
   };
 }
 function tenantRecord(): TenantRecord {
-  return { tenantId: TENANT_ID, name: 'acme', deploymentCount: 1, createdAt: T0, updatedAt: T0 };
+  return { tenantId: TENANT_ID, name: 'acme', deploymentCount: 1, status: 'ACTIVE', createdAt: T0, updatedAt: T0 };
 }
 function deploymentRecord(overrides: Partial<DeploymentRecord> = {}): DeploymentRecord {
   return { tenantId: TENANT_ID, applicationId: APP_ID, cellId: CELL_ID, status: 'ACTIVE', createdAt: T0, updatedAt: T0, ...overrides };
@@ -348,7 +349,7 @@ describe('the generated validation rejects hook input before the handler (400)',
     expect(failures({ hookId: 'Bad' })).toEqual(['/hookId']);
     expect(failures({ events: [] })).toEqual(['/events']);
     expect(failures({ events: ['CELL_CREATE', 'CELL_CREATE'] })).toEqual(['/events']);
-    expect(failures({ events: ['TENANT_CREATE'] })).toEqual(['/events/0']);
+    expect(failures({ events: ['TENANT_RENAME'] })).toEqual(['/events/0']);
     expect(failures({ phase: 'DURING' })).toEqual(['/phase']);
     expect(failures({ timeoutMinutes: 4 })).toEqual(['/timeoutMinutes']);
     expect(failures({ timeoutMinutes: 31 })).toEqual(['/timeoutMinutes']);

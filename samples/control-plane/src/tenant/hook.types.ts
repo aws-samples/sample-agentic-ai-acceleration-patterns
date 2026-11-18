@@ -3,7 +3,8 @@
 
 /**
  * The shared contract of vendor lifecycle hooks (spec §4.8, §5.5, §6.5, §8.3,
- * R-39 to R-46, ADR-044). Types and constants only: the API (validation,
+ * R-39 to R-46, ADR-044; record events §8.4, ADR-045, whose execution input
+ * is in `record-event.types.ts`). Types and constants only: the API (validation,
  * stamping, resolution), the infrastructure (roles, projects' trust) and the
  * workflow (buildspecs, the start/poll/stop loop) each build against this
  * file and never against one another.
@@ -19,7 +20,12 @@ import type { HookRoleKind } from '../shared/fleet';
 // Vocabulary
 // ---------------------------------------------------------------------------
 
-/** The events a hook can run around (§4.8): three per build, `CELL_*` for the cell build, `DEPLOYMENT_*` for the tenant build (§8.3). */
+/**
+ * The events a hook can run around (§4.8): three per build, `CELL_*` for the
+ * cell build and `DEPLOYMENT_*` for the tenant build (§8.3), and three per
+ * record type, `APPLICATION_*`, `TENANT_*` and `ACCOUNT_*`, around the record
+ * commit of an application, tenant or account operation (§8.4, ADR-045).
+ */
 export const HOOK_EVENTS = [
   'CELL_CREATE',
   'CELL_UPDATE',
@@ -27,6 +33,15 @@ export const HOOK_EVENTS = [
   'DEPLOYMENT_CREATE',
   'DEPLOYMENT_UPDATE',
   'DEPLOYMENT_DELETE',
+  'APPLICATION_CREATE',
+  'APPLICATION_UPDATE',
+  'APPLICATION_DELETE',
+  'TENANT_CREATE',
+  'TENANT_UPDATE',
+  'TENANT_DELETE',
+  'ACCOUNT_CREATE',
+  'ACCOUNT_UPDATE',
+  'ACCOUNT_DELETE',
 ] as const;
 export type HookEvent = typeof HOOK_EVENTS[number];
 
@@ -34,8 +49,21 @@ export type HookEvent = typeof HOOK_EVENTS[number];
 export const CELL_HOOK_EVENTS: readonly HookEvent[] = ['CELL_CREATE', 'CELL_UPDATE', 'CELL_DELETE'];
 /** The events of the tenant build. */
 export const DEPLOYMENT_HOOK_EVENTS: readonly HookEvent[] = ['DEPLOYMENT_CREATE', 'DEPLOYMENT_UPDATE', 'DEPLOYMENT_DELETE'];
+/** The events of an application record (§8.4): global and application hooks. */
+export const APPLICATION_HOOK_EVENTS: readonly HookEvent[] = ['APPLICATION_CREATE', 'APPLICATION_UPDATE', 'APPLICATION_DELETE'];
+/** The events of a tenant record (§8.4): global hooks only. */
+export const TENANT_HOOK_EVENTS: readonly HookEvent[] = ['TENANT_CREATE', 'TENANT_UPDATE', 'TENANT_DELETE'];
+/** The events of an account record (§8.4): global hooks only. */
+export const ACCOUNT_HOOK_EVENTS: readonly HookEvent[] = ['ACCOUNT_CREATE', 'ACCOUNT_UPDATE', 'ACCOUNT_DELETE'];
+/**
+ * The events an application hook MUST NOT name (R-39): a tenant spans
+ * several applications and an account holds cells of several, so neither
+ * event belongs to one application's definition. A global hook may name any
+ * of {@link HOOK_EVENTS}.
+ */
+export const GLOBAL_ONLY_HOOK_EVENTS: readonly HookEvent[] = [...TENANT_HOOK_EVENTS, ...ACCOUNT_HOOK_EVENTS];
 
-/** `PRE`: before the script. `POST`: after the script succeeded (§4.8, R-45). */
+/** `PRE`: before the script (or the record commit, §8.4). `POST`: after it succeeded (§4.8, R-45). */
 export const HOOK_PHASES = ['PRE', 'POST'] as const;
 export type HookPhase = typeof HOOK_PHASES[number];
 
@@ -271,7 +299,7 @@ export interface ResolvedHook {
  * the parameter sets are the input fields the build phases already carry.
  */
 export interface HookExecutionInput {
-  /** The event this build serves: a `CELL_*` event on `cellBuild`, a `DEPLOYMENT_*` event on `tenantBuild` (R-42 `EVENT`). */
+  /** The event this build serves: a `CELL_*` event on `cellBuild`, a `DEPLOYMENT_*` event on `tenantBuild` (R-42 `EVENT`); a record event on `RecordEventInput.hooks`. */
   readonly event: HookEvent;
   readonly pre: readonly ResolvedHook[];
   readonly post: readonly ResolvedHook[];
@@ -299,6 +327,9 @@ export const HOOK_ENV_VARS = [
   'CELL_ACCOUNT_ID',
   'TENANT_ID',
   'TENANT_NAME',
+  'ACCOUNT_ID',
+  'ACCOUNT_OWNER',
+  'ACCOUNT_APPLICATION_IDS',
   'OPERATOR_ID',
   'EXECUTION_ID',
   'ATTEMPT',
@@ -307,9 +338,11 @@ export const HOOK_ENV_VARS = [
 ] as const;
 export type HookEnvVar = typeof HOOK_ENV_VARS[number];
 
-/** Present on deployment events only. */
+/** Of the build events, present on deployment events only; tenant record events carry them too (§8.4). */
 export const HOOK_DEPLOYMENT_ONLY_ENV_VARS: readonly HookEnvVar[] = ['TENANT_ID', 'TENANT_NAME'];
-/** Present on `POST` hooks only: the script's outputs, `{}` when it wrote none (R-43). */
+/** Present on account record events only (§8.4): the values being written on create and update, the stored ones on delete. */
+export const HOOK_ACCOUNT_ONLY_ENV_VARS: readonly HookEnvVar[] = ['ACCOUNT_ID', 'ACCOUNT_OWNER', 'ACCOUNT_APPLICATION_IDS'];
+/** Present on `POST` hooks only: the script's outputs, `{}` when it wrote none (R-43), always `{}` on a record event (R-50). */
 export const HOOK_POST_ONLY_ENV_VARS: readonly HookEnvVar[] = ['SCRIPT_OUTPUTS'];
 /** The prefix of a parameter variable, as for scripts (§6.1). */
 export const HOOK_PARAM_ENV_PREFIX = 'PARAM_';

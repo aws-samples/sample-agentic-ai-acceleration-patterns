@@ -12,7 +12,8 @@ use aws.apigateway#authorizer
 // ---------------------------------------------------------------------------
 
 /// A global hook (ADR-044): vendor code the workflow runs before or after a
-/// cell or deployment script, for every application. Registered through the
+/// cell or deployment script, or the record commit of an application, tenant
+/// or account event (ADR-045), for every application. Registered through the
 /// API by an operator, never by a tenant or an application; an application's
 /// own hooks are part of its definition (PutApplication) and are stamped onto
 /// its cells. The control plane keeps the authoritative count of global
@@ -42,7 +43,12 @@ resource Hook {
 string HookId
 
 /// An event a hook can run around: three per build, CELL_* for the cell
-/// build and DEPLOYMENT_* for the tenant build.
+/// build and DEPLOYMENT_* for the tenant build (ADR-044), and three per
+/// record type, APPLICATION_*, TENANT_* and ACCOUNT_*, around the record
+/// commit of an application, tenant or account operation (ADR-045). An
+/// application hook may not name a TENANT_* or ACCOUNT_* event
+/// (ValidationException): a tenant spans several applications and an account
+/// holds cells of several.
 enum HookEvent {
     /// Around the cell create build, when placement creates a cell.
     CELL_CREATE
@@ -56,18 +62,43 @@ enum HookEvent {
     DEPLOYMENT_UPDATE
     /// Around the tenant delete build (DeleteDeployment).
     DEPLOYMENT_DELETE
+    /// Around the commit of a new application (PutApplication with no record,
+    /// or on CREATE_FAILED).
+    APPLICATION_CREATE
+    /// Around the commit of a replaced application (PutApplication on a live
+    /// record).
+    APPLICATION_UPDATE
+    /// Around the delete of an application record (DeleteApplication).
+    APPLICATION_DELETE
+    /// Around the commit of a new tenant (CreateTenant). Global hooks only.
+    TENANT_CREATE
+    /// Around the commit of a tenant's staged metadata (UpdateTenant). Global
+    /// hooks only.
+    TENANT_UPDATE
+    /// Around the delete of a tenant record (DeleteTenant). Global hooks only.
+    TENANT_DELETE
+    /// Around the commit of a new account (PutAccount with no record, or on
+    /// CREATE_FAILED). Global hooks only.
+    ACCOUNT_CREATE
+    /// Around the commit of an account's staged maxCells and applicationIds
+    /// (PutAccount on a live record). Global hooks only.
+    ACCOUNT_UPDATE
+    /// Around the delete of an account record (DeleteAccount). Global hooks
+    /// only.
+    ACCOUNT_DELETE
 }
 
-/// When a hook runs relative to the script of its event.
+/// When a hook runs relative to the script of its event, or to the record
+/// commit of an application, tenant or account event (ADR-045).
 enum HookPhase {
-    /// Before the script.
+    /// Before the script (or the commit).
     PRE
-    /// After the script succeeded.
+    /// After the script (or the commit) succeeded.
     POST
 }
 
 /// The events a hook runs on: at least one, each at most once.
-@length(min: 1, max: 6)
+@length(min: 1, max: 15)
 @uniqueItems
 list HookEventList {
     member: HookEvent
@@ -204,8 +235,8 @@ list HookList {
 @length(min: 1, max: 256)
 string ResolvedSourceVersion
 
-/// A global hook that ran for a cell's or a deployment's last event
-/// (spec R-40): which hook, in which phase, at which revision, and the ref it
+/// A global hook that ran for a record's last event: a cell's, a
+/// deployment's, an application's, a tenant's or an account's (spec R-40): which hook, in which phase, at which revision, and the ref it
 /// named and the commit its build ran, so an operator can tell which commit
 /// of a gate or audit hook an ACTIVE record passed.
 @references([{resource: Hook}])

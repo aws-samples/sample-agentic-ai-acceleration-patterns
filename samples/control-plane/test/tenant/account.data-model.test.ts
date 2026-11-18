@@ -4,6 +4,7 @@
 import {
   ACCOUNT_EMPTY_CONDITION,
   AccountDataModel,
+  AccountItem,
   AccountRecord,
   accountKey,
   listAccountsQuery,
@@ -18,6 +19,7 @@ const record: AccountRecord = {
   maxCells: 2,
   cellCount: 1,
   externalId: 'fleet-handshake-7f3a',
+  status: 'ACTIVE',
   createdAt: new Date('2026-11-09T00:00:00.000Z'),
   updatedAt: new Date('2026-11-09T01:00:00.000Z'),
 };
@@ -138,5 +140,39 @@ describe('ACCOUNT_EMPTY_CONDITION (DeleteAccount, ADR-024)', () => {
   test('requires the record to exist with cellCount = 0', () => {
     expect(ACCOUNT_EMPTY_CONDITION.conditionExpression).toBe('attribute_exists(PK) AND #cellCount = :zero');
     expect(ACCOUNT_EMPTY_CONDITION.expressionAttributeValues).toEqual({ ':zero': 0 });
+  });
+});
+
+describe('account record status and staged replace (R-47, R-48, ADR-045)', () => {
+  const stored = dataModel.toItem(record);
+
+  test('an item stored before ADR-045 has no status and reads as ACTIVE', () => {
+    const legacy: AccountItem = { ...stored, status: undefined };
+    expect(dataModel.fromItem(legacy).status).toBe('ACTIVE');
+  });
+
+  test('round-trips pending: dedicated, and shared once committed', () => {
+    for (const pending of [{ maxCells: 4, applicationIds: ['app-x'] }, { maxCells: 4 }]) {
+      const updating: AccountRecord = {
+        ...record,
+        status: 'UPDATING',
+        operationId: '111111111111-account-update-1763460000000-0a1b2c3d',
+        pending,
+      };
+      const item = dataModel.toItem(updating);
+      expect(item.pending).toEqual(pending);
+      expect(dataModel.fromItem(item)).toEqual(updating);
+    }
+  });
+
+  test('never writes or reads an externalId in pending (R-48)', () => {
+    const smuggled = { maxCells: 4, applicationIds: ['app-x'], externalId: 'leaked-id' };
+    const item = dataModel.toItem({ ...record, status: 'UPDATING', pending: smuggled });
+    expect(item.pending).toEqual({ maxCells: 4, applicationIds: ['app-x'] });
+    expect(item.pending).not.toHaveProperty('externalId');
+    const read = dataModel.fromItem({ ...stored, pending: smuggled } as AccountItem);
+    expect(read.pending).toEqual({ maxCells: 4, applicationIds: ['app-x'] });
+    expect(read.pending).not.toHaveProperty('externalId');
+    expect(read.externalId).toBe('fleet-handshake-7f3a');
   });
 });

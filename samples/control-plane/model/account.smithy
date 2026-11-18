@@ -21,7 +21,9 @@ use aws.apigateway#authorizer
 /// verifies that handshake (ADR-027). The account record carries the
 /// authoritative cell counter: the new-cell placement transaction claims a
 /// slot (cellCount < maxCells) and the cell delete transaction releases it.
-/// There is no status - account operations are synchronous and run no build.
+/// Account operations run no build, but PutAccount and DeleteAccount are
+/// asynchronous (202 + status + polling) so that global hooks on account
+/// events can gate them (ADR-045).
 resource Account {
     identifiers: {
         accountId: AccountId
@@ -95,6 +97,31 @@ structure AccountSummary {
     @required
     externalIdConfigured: Boolean
 
+    /// Lifecycle status (ADR-045). The record is live (its values in force)
+    /// when ACTIVE, UPDATING or UPDATE_FAILED. A record stored before records
+    /// of this type had a status reads as ACTIVE.
+    @required
+    status: LifecycleStatus
+
+    /// Failure detail, populated when status is a *_FAILED value.
+    statusReason: String
+
+    /// The global hooks that ran in the record's last account event, in run
+    /// order; empty when none ran.
+    @required
+    lastGlobalHooks: LastGlobalHookList
+
+    /// The name of the workflow execution the record's last accepted
+    /// operation started; hook builds receive it as EXECUTION_ID. Absent on
+    /// a record stored before ADR-045.
+    operationId: OperationId
+
+    /// The maxCells and applicationIds a replacing PutAccount staged,
+    /// present only while the account is UPDATING. Placement uses the live
+    /// values until the workflow commits them. Never holds the external id,
+    /// which a replace writes into the record at once.
+    pending: AccountPending
+
     /// When the account was registered.
     @required
     createdAt: IsoTimestamp
@@ -104,13 +131,25 @@ structure AccountSummary {
     updatedAt: IsoTimestamp
 }
 
+/// The values a replacing PutAccount staged (ADR-045): the maxCells and
+/// applicationIds the commit makes live. An absent applicationIds makes the
+/// account shared once committed. The external id is never staged.
+structure AccountPending {
+    /// The staged cell capacity.
+    @required
+    maxCells: MaxCells
+
+    /// The staged admitted applications. Absent: shared once committed.
+    applicationIds: ApplicationIdList
+}
+
 /// A page of accounts.
 list AccountList {
     member: AccountSummary
 }
 
 // ---------------------------------------------------------------------------
-// PutAccount - PUT /accounts/{accountId} -> 200
+// PutAccount - PUT /accounts/{accountId} -> 202
 // ---------------------------------------------------------------------------
 
 /// Registers an account or replaces its policy fields (create-or-replace).
@@ -119,12 +158,18 @@ list AccountList {
 /// verifies the handshake by assuming both provisioning roles of the account
 /// with the given external id (ADR-027); a role that cannot be assumed is a
 /// ValidationException naming it. On an existing account the owner must
-/// match (ConflictError otherwise); maxCells, applicationIds and externalId
-/// are replaced (an absent applicationIds makes the account shared);
-/// cellCount is never touched. Synchronous.
+/// match (ConflictError otherwise); cellCount is never touched. A new
+/// account is inserted CREATING and runs ACCOUNT_CREATE. On a live account
+/// the external id is written at once and maxCells and applicationIds are
+/// staged in pending (an absent applicationIds makes the account shared once
+/// committed) while ACCOUNT_UPDATE runs. On an UPDATING account whose other
+/// values equal the change in flight only the external id is written and no
+/// workflow starts. ConflictError when the account is CREATING, DELETING or
+/// DELETE_FAILED. At most 100 applicationIds (ValidationException).
+/// Asynchronous (ADR-045).
 @authorizer("vendor-authorizer")
 @idempotent
-@http(method: "PUT", uri: "/accounts/{accountId}", code: 200)
+@http(method: "PUT", uri: "/accounts/{accountId}", code: 202)
 operation PutAccount {
     input := {
         /// The AWS account to register.
@@ -152,7 +197,7 @@ operation PutAccount {
     }
 
     output := {
-        /// The registered account.
+        /// The account, CREATING or UPDATING (or as the rotation left it).
         @required
         account: AccountSummary
     }
@@ -168,7 +213,8 @@ operation PutAccount {
 // ---------------------------------------------------------------------------
 
 /// Returns a registered account: owner, admitted applications,
-/// cellCount/maxCells, and whether an external id is configured.
+/// cellCount/maxCells, whether an external id is configured, status and any
+/// staged replace - the polling endpoint of the account operations.
 @authorizer("vendor-authorizer")
 @readonly
 @http(method: "GET", uri: "/accounts/{accountId}", code: 200)
@@ -192,16 +238,18 @@ operation GetAccount {
 }
 
 // ---------------------------------------------------------------------------
-// DeleteAccount - DELETE /accounts/{accountId} -> 200
+// DeleteAccount - DELETE /accounts/{accountId} -> 202
 // ---------------------------------------------------------------------------
 
-/// Deregisters an empty account. A single conditional delete on
-/// cellCount = 0 - the counterpart of the cell-slot claim; an occupied
-/// account is rejected with ConflictError. The account's provisioning roles
-/// stay installed: removing them is the owner's act. Synchronous.
+/// Deregisters an empty account. One conditional write on cellCount = 0
+/// moves it to DELETING - the counterpart of the cell-slot claim; an
+/// occupied account is rejected with ConflictError. The ACCOUNT_DELETE
+/// workflow then deletes the record; no hook can stop it. The account's
+/// provisioning roles stay installed: removing them is the owner's act.
+/// Asynchronous (ADR-045).
 @authorizer("vendor-authorizer")
 @idempotent
-@http(method: "DELETE", uri: "/accounts/{accountId}", code: 200)
+@http(method: "DELETE", uri: "/accounts/{accountId}", code: 202)
 operation DeleteAccount {
     input := {
         /// The account to deregister.
@@ -211,7 +259,7 @@ operation DeleteAccount {
     }
 
     output := {
-        /// The account as it was before deletion.
+        /// The account, DELETING.
         @required
         account: AccountSummary
     }
@@ -227,8 +275,8 @@ operation DeleteAccount {
 // ---------------------------------------------------------------------------
 
 /// Lists registered accounts with pagination - the operator's capacity view
-/// one level above ListCells: owner, admitted applications and
-/// cellCount/maxCells per account.
+/// one level above ListCells: owner, admitted applications,
+/// cellCount/maxCells and status per account.
 @authorizer("vendor-authorizer")
 @readonly
 @paginated(inputToken: "nextToken", outputToken: "nextToken", pageSize: "maxResults", items: "accounts")

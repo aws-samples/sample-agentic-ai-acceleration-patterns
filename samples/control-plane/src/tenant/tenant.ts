@@ -68,6 +68,8 @@ import {
   ParameterValues,
   parametersAsReadCondition,
   resolveParameters,
+  StoredCellParameterDeclaration,
+  StoredParameterDeclaration,
   validateCreateParameters,
   validateDeclarations,
 } from './parameters';
@@ -379,6 +381,10 @@ export class TenantService implements TenantServiceService<CallerContext> {
       name: requireField(input.name, 'name'),
       description: input.description,
       deploymentCount: 0,
+      // shortcut: still synchronous (the record is usable at once), so it is
+      // written ACTIVE, which an absent status also reads as (R-47); the
+      // ADR-045 API change inserts it CREATING and starts TENANT_CREATE.
+      status: LifecycleStatus.ACTIVE,
       createdAt: now,
       updatedAt: now,
     };
@@ -2069,13 +2075,20 @@ function requireAtMostOneFilter(filters: Record<string, string | undefined>): vo
   }
 }
 
-/** Projects the tenant domain record to the API summary. */
+/** Projects the tenant domain record to the API summary, its status and any staged update included (§5.1). */
 function toTenantSummary(record: TenantRecord): TenantSummary {
   return {
     tenantId: record.tenantId,
     name: record.name,
     description: record.description,
     deploymentCount: record.deploymentCount,
+    status: record.status,
+    statusReason: record.statusReason,
+    lastGlobalHooks: (record.lastGlobalHooks ?? []).map(toLastGlobalHook),
+    operationId: record.operationId,
+    pending: record.pending === undefined
+      ? undefined
+      : { name: record.pending.name, description: record.pending.description },
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
@@ -2098,7 +2111,8 @@ function toDeploymentSummary(record: DeploymentRecord): DeploymentSummary {
 
 /**
  * Projects the account record to the API summary. The external id is never
- * returned (N-10) — only whether one is configured.
+ * returned (N-10) — only whether one is configured; `pending` holds
+ * `maxCells` and `applicationIds` only (§5.4).
  */
 function toAccountSummary(record: AccountRecord): AccountSummary {
   return {
@@ -2108,13 +2122,24 @@ function toAccountSummary(record: AccountRecord): AccountSummary {
     maxCells: record.maxCells,
     cellCount: record.cellCount,
     externalIdConfigured: record.externalId !== undefined,
+    status: record.status,
+    statusReason: record.statusReason,
+    lastGlobalHooks: (record.lastGlobalHooks ?? []).map(toLastGlobalHook),
+    operationId: record.operationId,
+    pending: record.pending === undefined
+      ? undefined
+      : {
+        maxCells: record.pending.maxCells,
+        applicationIds: record.pending.applicationIds === undefined ? undefined : [...record.pending.applicationIds],
+      },
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
 }
 
-/** Projects the application record to the API summary. */
+/** Projects the application record to the API summary, its status and any staged replace included (§5.5). */
 function toApplicationSummary(record: ApplicationRecord): ApplicationSummary {
+  const { pending } = record;
   return {
     applicationId: record.applicationId,
     source: record.source,
@@ -2122,22 +2147,46 @@ function toApplicationSummary(record: ApplicationRecord): ApplicationSummary {
     tenantScripts: record.tenantScripts,
     maxTenants: record.maxTenants,
     placementStrategy: record.placementStrategy,
-    parameters: (record.parameters ?? []).map((declaration) => ({
-      name: declaration.name,
-      required: declaration.required,
-      default: declaration.default,
-      description: declaration.description,
-    })),
-    cellParameters: (record.cellParameters ?? []).map((declaration) => ({
-      name: declaration.name,
-      default: declaration.default,
-      description: declaration.description,
-    })),
+    parameters: toApiParameterDeclarations(record.parameters ?? []),
+    cellParameters: toApiCellParameterDeclarations(record.cellParameters ?? []),
     hooks: (record.hooks ?? []).map(toApiHookDefinition),
     cellCount: record.cellCount,
+    status: record.status,
+    statusReason: record.statusReason,
+    lastGlobalHooks: (record.lastGlobalHooks ?? []).map(toLastGlobalHook),
+    operationId: record.operationId,
+    pending: pending === undefined
+      ? undefined
+      : {
+        source: pending.source,
+        cellScripts: pending.cellScripts,
+        tenantScripts: pending.tenantScripts,
+        maxTenants: pending.maxTenants,
+        placementStrategy: pending.placementStrategy,
+        parameters: pending.parameters === undefined ? undefined : toApiParameterDeclarations(pending.parameters),
+        cellParameters: pending.cellParameters === undefined ? undefined : toApiCellParameterDeclarations(pending.cellParameters),
+        hooks: pending.hooks?.map(toApiHookDefinition),
+      },
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
+}
+
+function toApiParameterDeclarations(declarations: readonly StoredParameterDeclaration[]) {
+  return declarations.map((declaration) => ({
+    name: declaration.name,
+    required: declaration.required,
+    default: declaration.default,
+    description: declaration.description,
+  }));
+}
+
+function toApiCellParameterDeclarations(declarations: readonly StoredCellParameterDeclaration[]) {
+  return declarations.map((declaration) => ({
+    name: declaration.name,
+    default: declaration.default,
+    description: declaration.description,
+  }));
 }
 
 /** Projects the cell domain record to the API summary (stamped definition included). */

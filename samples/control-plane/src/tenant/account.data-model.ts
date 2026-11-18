@@ -1,10 +1,13 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { StoredLastGlobalHook, readLastGlobalHooks } from './hook.data-model';
+import { LastGlobalHookEntry } from './hook.types';
+import { readRecordStatus } from './record-event.types';
 import { DataModel, DynamoDBItem, GSI1_INDEX_NAME } from '../shared/data-model';
 import { KeyBuilder } from '../shared/key-builder';
 import { GsiQuery, ItemKey, ItemUpdate, WriteCondition } from '../shared/repository';
-import { AccountOwner } from '../smithy/source/typescript-ssdk-codegen/src';
+import { AccountOwner, LifecycleStatus } from '../smithy/source/typescript-ssdk-codegen/src';
 
 /** Composite key prefix for account items. */
 export const ACCOUNT_KEY_PREFIX = 'ACCOUNT';
@@ -23,7 +26,12 @@ export const ACCOUNT_GSI1_PARTITION = 'ACCOUNT';
  * placement transaction and released in the cell-delete transaction, never
  * written by `PutAccount` (spec R-24). `externalId` is presented on every
  * AssumeRole into the account (ADR-025) and never returned by the API.
- * There is no status: account operations are synchronous and run no build.
+ * Account mutations are asynchronous so that global hooks on account events
+ * can gate them (ADR-045): `status` (absent on an item stored before
+ * ADR-045, read as `ACTIVE`, R-47), `statusReason`, `lastGlobalHooks`
+ * (terminal writes only, R-40), `pending` (the `maxCells` and
+ * `applicationIds` a replace staged while `UPDATING`, never `externalId`,
+ * R-48) and `operationId` (R-51).
  */
 export interface AccountRecord {
   readonly accountId: string;
@@ -33,8 +41,25 @@ export interface AccountRecord {
   readonly maxCells: number;
   readonly cellCount: number;
   readonly externalId?: string;
+  readonly status: LifecycleStatus;
+  readonly statusReason?: string;
+  readonly lastGlobalHooks?: readonly LastGlobalHookEntry[];
+  readonly pending?: AccountPending;
+  readonly operationId?: string;
   readonly createdAt: Date;
   readonly updatedAt: Date;
+}
+
+/**
+ * The values a replacing `PutAccount` staged (R-48): the `maxCells` and
+ * `applicationIds` the commit makes live; an absent `applicationIds` makes
+ * the account shared once committed (R-50). Never holds `externalId`, which
+ * the replace writes into the record at once. Present only while
+ * `UPDATING`.
+ */
+export interface AccountPending {
+  readonly maxCells: number;
+  readonly applicationIds?: readonly string[];
 }
 
 /**
@@ -51,8 +76,30 @@ export interface AccountItem extends DynamoDBItem {
   readonly maxCells: number;
   readonly cellCount: number;
   readonly externalId?: string;
+  /** Absent on an item stored before ADR-045; read as `ACTIVE` (R-47). */
+  readonly status?: LifecycleStatus;
+  readonly statusReason?: string;
+  /** Written by the workflow's terminal writes: a list of maps, see `readLastGlobalHooks`. */
+  readonly lastGlobalHooks?: readonly StoredLastGlobalHook[];
+  readonly pending?: AccountPending;
+  readonly operationId?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+/**
+ * Copies only `maxCells` and `applicationIds`, so an `externalId` (or
+ * anything else) found in `pending` never reaches the domain or the API
+ * (R-48, T46).
+ */
+function readAccountPending(pending: AccountPending | undefined): AccountPending | undefined {
+  if (pending === undefined) {
+    return undefined;
+  }
+  return {
+    maxCells: pending.maxCells,
+    ...(pending.applicationIds === undefined ? {} : { applicationIds: [...pending.applicationIds] }),
+  };
 }
 
 /** Builds the composite base-table key for an account. */
@@ -175,6 +222,11 @@ export class AccountDataModel implements DataModel<AccountRecord, AccountItem> {
       maxCells: record.maxCells,
       cellCount: record.cellCount,
       externalId: record.externalId,
+      status: record.status,
+      statusReason: record.statusReason,
+      lastGlobalHooks: record.lastGlobalHooks,
+      pending: readAccountPending(record.pending),
+      operationId: record.operationId,
       createdAt: record.createdAt.toISOString(),
       updatedAt: record.updatedAt.toISOString(),
     };
@@ -188,6 +240,11 @@ export class AccountDataModel implements DataModel<AccountRecord, AccountItem> {
       maxCells: item.maxCells,
       cellCount: item.cellCount,
       externalId: item.externalId,
+      status: readRecordStatus(item.status),
+      statusReason: item.statusReason,
+      lastGlobalHooks: item.lastGlobalHooks === undefined ? undefined : readLastGlobalHooks(item.lastGlobalHooks),
+      pending: readAccountPending(item.pending),
+      operationId: item.operationId,
       createdAt: new Date(item.createdAt),
       updatedAt: new Date(item.updatedAt),
     };

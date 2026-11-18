@@ -88,9 +88,13 @@ string EmailAddress
 @timestampFormat("date-time")
 timestamp IsoTimestamp
 
-/// Lifecycle status of a cell or a deployment. Transitional statuses
-/// (CREATING, UPDATING, DELETING) act as an optimistic concurrency guard:
-/// mutations on an in-flight record are rejected with ConflictError.
+/// Lifecycle status of a cell, a deployment, an application, a tenant or an
+/// account. Transitional statuses (CREATING, UPDATING, DELETING) act as an
+/// optimistic concurrency guard: mutations on an in-flight record are
+/// rejected with ConflictError. For an application, a tenant or an account
+/// the record commit takes the script's place (ADR-045), and a record is live
+/// (its values in force) when ACTIVE, UPDATING or UPDATE_FAILED. A record
+/// stored before these records had a status reads as ACTIVE.
 enum LifecycleStatus {
     /// The create script is running; the deployment is being provisioned.
     CREATING
@@ -107,6 +111,13 @@ enum LifecycleStatus {
     /// The delete script failed; delete may be retried.
     DELETE_FAILED
 }
+
+/// The name of the workflow execution a record's last accepted operation
+/// started (ADR-045): `<recordId>-<record type>-<operation>-<ms>-<8 hex>`, at
+/// most 74 characters. Hook builds receive it as EXECUTION_ID.
+@length(min: 1, max: 74)
+@pattern("^[A-Za-z0-9-]+$")
+string OperationId
 
 /// Opaque pagination token.
 @length(min: 1, max: 4096)

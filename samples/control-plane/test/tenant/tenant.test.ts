@@ -98,6 +98,7 @@ function applicationRecord(overrides: Partial<ApplicationRecord> = {}): Applicat
     maxTenants: 4,
     placementStrategy: 'FILL',
     cellCount: 1,
+    status: 'ACTIVE',
     createdAt: new Date('2026-01-01T00:00:00Z'),
     updatedAt: new Date('2026-01-01T00:00:00Z'),
     ...overrides,
@@ -110,6 +111,7 @@ function accountRecord(overrides: Partial<AccountRecord> = {}): AccountRecord {
     owner: 'VENDOR',
     maxCells: 2,
     cellCount: 1,
+    status: 'ACTIVE',
     createdAt: new Date('2026-01-01T00:00:00Z'),
     updatedAt: new Date('2026-01-01T00:00:00Z'),
     ...overrides,
@@ -138,6 +140,7 @@ function tenantRecord(overrides: Partial<TenantRecord> = {}): TenantRecord {
     tenantId: TENANT_ID,
     name: 'acme',
     deploymentCount: 1,
+    status: 'ACTIVE',
     createdAt: new Date('2026-01-01T00:00:00Z'),
     updatedAt: new Date('2026-01-01T00:00:00Z'),
     ...overrides,
@@ -273,8 +276,9 @@ describe('CreateTenant (§5.1)', () => {
     expect(record.tenantId).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/); // ULID
     expect(condition).toEqual({ conditionExpression: 'attribute_not_exists(PK)' });
     expect(output.tenant).toMatchObject({ tenantId: record.tenantId, name: 'acme', deploymentCount: 0 });
-    // A tenant has no status and runs no build (§4.3).
-    expect(output.tenant).not.toHaveProperty('status');
+    // Still synchronous until the ADR-045 API change, which inserts it
+    // CREATING and starts TENANT_CREATE (§5.1); runs no build either way.
+    expect(output.tenant?.status).toBe('ACTIVE');
     expect(sfnMock.commandCalls(StartExecutionCommand)).toHaveLength(0);
   });
 

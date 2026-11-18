@@ -1,12 +1,15 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { HookDefinition } from './hook.types';
+import { StoredLastGlobalHook, readLastGlobalHooks } from './hook.data-model';
+import { HookDefinition, LastGlobalHookEntry } from './hook.types';
 import { StoredCellParameterDeclaration, StoredParameterDeclaration } from './parameters';
+import { readRecordStatus } from './record-event.types';
 import { DataModel, DynamoDBItem, GSI1_INDEX_NAME } from '../shared/data-model';
 import { KeyBuilder } from '../shared/key-builder';
 import { GsiQuery, ItemKey, ItemUpdate, WriteCondition } from '../shared/repository';
 import {
+  LifecycleStatus,
   PlacementStrategy,
   ScriptLocations,
   SourceDefinition,
@@ -34,8 +37,13 @@ export const DEFAULT_PLACEMENT_STRATEGY: PlacementStrategy = PlacementStrategy.F
  * kept exactly as read — `undefined` when the attribute is absent, which is
  * a different read from an empty list (§5.5). `hooks` are the application
  * hooks (ADR-044), part of the definition and stamped onto each new cell;
- * replaced only when a request sends them. There is no status:
- * application operations are synchronous and run no build.
+ * replaced only when a request sends them. Application mutations are
+ * asynchronous so that hooks on application events can gate them
+ * (ADR-045): `status` (absent on an item stored before ADR-045, read as
+ * `ACTIVE`, R-47), `statusReason`, `lastGlobalHooks` (terminal writes only,
+ * R-40), `pending` (the values a replace staged while `UPDATING`, R-48) and
+ * `operationId` (R-51). Placement, parameter validation and stamping read
+ * the live fields, never `pending` (R-47).
  */
 export interface ApplicationRecord {
   readonly applicationId: string;
@@ -48,8 +56,31 @@ export interface ApplicationRecord {
   readonly cellParameters?: readonly StoredCellParameterDeclaration[];
   readonly hooks?: readonly HookDefinition[];
   readonly cellCount: number;
+  readonly status: LifecycleStatus;
+  readonly statusReason?: string;
+  readonly lastGlobalHooks?: readonly LastGlobalHookEntry[];
+  readonly pending?: ApplicationPending;
+  readonly operationId?: string;
   readonly createdAt: Date;
   readonly updatedAt: Date;
+}
+
+/**
+ * The values a replacing `PutApplication` staged (R-29, R-48): the
+ * definition fields other than `hooks` and the strategy, always; each of
+ * `parameters`, `cellParameters` and `hooks` only when the request sent it.
+ * The commit copies each field present and keeps an absent list (R-50).
+ * Present only while `UPDATING`.
+ */
+export interface ApplicationPending {
+  readonly source: SourceDefinition;
+  readonly cellScripts: ScriptLocations;
+  readonly tenantScripts: ScriptLocations;
+  readonly maxTenants: number;
+  readonly placementStrategy: PlacementStrategy;
+  readonly parameters?: readonly StoredParameterDeclaration[];
+  readonly cellParameters?: readonly StoredCellParameterDeclaration[];
+  readonly hooks?: readonly HookDefinition[];
 }
 
 /**
@@ -70,8 +101,32 @@ export interface ApplicationItem extends DynamoDBItem {
   readonly cellParameters?: readonly StoredCellParameterDeclaration[];
   readonly hooks?: readonly HookDefinition[];
   readonly cellCount: number;
+  /** Absent on an item stored before ADR-045; read as `ACTIVE` (R-47). */
+  readonly status?: LifecycleStatus;
+  readonly statusReason?: string;
+  /** Written by the workflow's terminal writes: a list of maps, see `readLastGlobalHooks`. */
+  readonly lastGlobalHooks?: readonly StoredLastGlobalHook[];
+  readonly pending?: ApplicationPending;
+  readonly operationId?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+/** Copies only the fields an application stages, keeping an absent list absent (kept, not cleared). */
+function readApplicationPending(pending: ApplicationPending | undefined): ApplicationPending | undefined {
+  if (pending === undefined) {
+    return undefined;
+  }
+  return {
+    source: pending.source,
+    cellScripts: pending.cellScripts,
+    tenantScripts: pending.tenantScripts,
+    maxTenants: pending.maxTenants,
+    placementStrategy: pending.placementStrategy,
+    ...(pending.parameters === undefined ? {} : { parameters: pending.parameters }),
+    ...(pending.cellParameters === undefined ? {} : { cellParameters: pending.cellParameters }),
+    ...(pending.hooks === undefined ? {} : { hooks: pending.hooks }),
+  };
 }
 
 /** Builds the composite base-table key for an application. */
@@ -234,6 +289,11 @@ export class ApplicationDataModel implements DataModel<ApplicationRecord, Applic
       cellParameters: record.cellParameters,
       hooks: record.hooks,
       cellCount: record.cellCount,
+      status: record.status,
+      statusReason: record.statusReason,
+      lastGlobalHooks: record.lastGlobalHooks,
+      pending: readApplicationPending(record.pending),
+      operationId: record.operationId,
       createdAt: record.createdAt.toISOString(),
       updatedAt: record.updatedAt.toISOString(),
     };
@@ -253,6 +313,11 @@ export class ApplicationDataModel implements DataModel<ApplicationRecord, Applic
       cellParameters: item.cellParameters,
       hooks: item.hooks,
       cellCount: item.cellCount,
+      status: readRecordStatus(item.status),
+      statusReason: item.statusReason,
+      lastGlobalHooks: item.lastGlobalHooks === undefined ? undefined : readLastGlobalHooks(item.lastGlobalHooks),
+      pending: readApplicationPending(item.pending),
+      operationId: item.operationId,
       createdAt: new Date(item.createdAt),
       updatedAt: new Date(item.updatedAt),
     };

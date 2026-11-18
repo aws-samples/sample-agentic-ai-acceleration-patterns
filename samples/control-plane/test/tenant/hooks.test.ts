@@ -63,7 +63,7 @@ describe('validateHookDefinition (R-39)', () => {
   test.each([
     ['a malformed id', { hookId: 'Bad_Id' }],
     ['an empty event list', { events: [] }],
-    ['an unknown event', { events: ['TENANT_CREATE'] }],
+    ['an unknown event', { events: ['TENANT_RENAME'] }],
     ['a repeated event', { events: ['CELL_CREATE', 'CELL_CREATE'] }],
     ['an unknown phase', { phase: 'DURING' }],
     ['an unknown source type', { source: { type: 'CODEPIPELINE', location: 'x' } }],
@@ -117,6 +117,20 @@ describe('validateApplicationHooks (R-39)', () => {
     const { timeoutMinutes: _omitted, ...bare } = hook();
     expect(validateApplicationHooks([bare], 'app')).toEqual([hook()]);
     expect(() => validateApplicationHooks([hook({ phase: 'NEVER' as never })], 'app')).toThrow(ValidationException);
+  });
+
+  test('refuses an application hook on a TENANT_* or ACCOUNT_* event; application events are allowed (R-39, ADR-045)', () => {
+    for (const event of ['TENANT_CREATE', 'TENANT_UPDATE', 'TENANT_DELETE', 'ACCOUNT_CREATE', 'ACCOUNT_UPDATE', 'ACCOUNT_DELETE'] as const) {
+      expect(() => validateApplicationHooks([hook({ events: ['CELL_CREATE', event] })], 'app'))
+        .toThrow(new RegExp(`Application app, hook a-hook: an application hook may not name ${event}`));
+    }
+    const appEvents = hook({ events: ['APPLICATION_CREATE', 'APPLICATION_UPDATE', 'APPLICATION_DELETE'] });
+    expect(validateApplicationHooks([appEvents], 'app')).toEqual([appEvents]);
+  });
+
+  test('a global hook may name any of the fifteen events (R-39)', () => {
+    expect(HOOK_EVENTS).toHaveLength(15);
+    expect(validateHookDefinition(hook({ events: [...HOOK_EVENTS] }), 'Hook a-hook').events).toEqual(HOOK_EVENTS);
   });
 });
 

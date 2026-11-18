@@ -6,6 +6,7 @@ import {
   APPLICATION_SOURCE_LOCATION_PATTERN,
   APPLICATION_SOURCE_VERSION_PATTERN,
   DEFAULT_HOOK_TIMEOUT_MINUTES,
+  GLOBAL_ONLY_HOOK_EVENTS,
   GlobalHookRecord,
   HOOK_EVENTS,
   HOOK_ID_PATTERN,
@@ -112,8 +113,10 @@ export function validateHookDefinition(input: HookDefinitionInput, where: string
 
 /**
  * Validates an application's `hooks` list (R-39): at most
- * {@link MAX_APPLICATION_HOOKS}, each a valid definition, no `hookId` twice.
- * `undefined` (not sent) stays `undefined`: the list is kept (§5.5).
+ * {@link MAX_APPLICATION_HOOKS}, each a valid definition naming no
+ * `TENANT_*` or `ACCOUNT_*` event ({@link GLOBAL_ONLY_HOOK_EVENTS}), no
+ * `hookId` twice. `undefined` (not sent) stays `undefined`: the list is kept
+ * (§5.5).
  */
 export function validateApplicationHooks(
   hooks: readonly HookDefinitionInput[] | undefined,
@@ -128,6 +131,13 @@ export function validateApplicationHooks(
   const seen = new Set<string>();
   return hooks.map((hook) => {
     const definition = validateHookDefinition(hook, `Application ${applicationId}, hook ${describeId(hook.hookId)}`);
+    const globalOnly = definition.events.find((event) => GLOBAL_ONLY_HOOK_EVENTS.includes(event));
+    if (globalOnly !== undefined) {
+      throw invalid(
+        `Application ${applicationId}, hook ${definition.hookId}: an application hook may not name ${globalOnly}; `
+        + 'tenant and account events run global hooks only (register it with PutHook)',
+      );
+    }
     if (seen.has(definition.hookId)) {
       throw invalid(`Application ${applicationId}: hookId ${definition.hookId} appears more than once in hooks`);
     }

@@ -5,6 +5,7 @@ import { PlacementStrategy, SourceType } from '../../src/smithy/source/typescrip
 import {
   APPLICATION_EMPTY_CONDITION,
   ApplicationDataModel,
+  ApplicationItem,
   applicationKey,
   ApplicationRecord,
   DEFAULT_PLACEMENT_STRATEGY,
@@ -22,6 +23,7 @@ const record: ApplicationRecord = {
   maxTenants: 3,
   placementStrategy: PlacementStrategy.ROUND_ROBIN,
   cellCount: 2,
+  status: 'ACTIVE',
   createdAt: new Date('2026-11-10T00:00:00.000Z'),
   updatedAt: new Date('2026-11-10T01:00:00.000Z'),
 };
@@ -57,8 +59,8 @@ describe('ApplicationDataModel', () => {
     expect(item.createdAt).toBe('2026-11-10T00:00:00.000Z');
   });
 
-  test('has no status (§4.1)', () => {
-    expect(item).not.toHaveProperty('status');
+  test('persists its status (§4.1, ADR-045)', () => {
+    expect(item.status).toBe('ACTIVE');
   });
 
   test('round-trips through fromItem', () => {
@@ -181,5 +183,39 @@ describe('APPLICATION_EMPTY_CONDITION (DeleteApplication, ADR-032)', () => {
       expressionAttributeNames: { '#cellCount': 'cellCount' },
       expressionAttributeValues: { ':zero': 0 },
     });
+  });
+});
+
+describe('application record status and staged replace (R-47, R-48, ADR-045)', () => {
+  const stored = dataModel.toItem(record);
+  const staged = {
+    source: { type: SourceType.GITHUB, location: 'https://example/v2.git', sourceVersion: 'a'.repeat(40) },
+    cellScripts: { create: 'c2/create.sh', update: 'c2/update.sh', delete: 'c2/delete.sh' },
+    tenantScripts: { create: 't2/create.sh', update: 't2/update.sh', delete: 't2/delete.sh' },
+    maxTenants: 5,
+    placementStrategy: PlacementStrategy.FILL,
+  };
+
+  test('an item stored before ADR-045 has no status and reads as ACTIVE', () => {
+    const legacy: ApplicationItem = { ...stored, status: undefined };
+    expect(dataModel.fromItem(legacy).status).toBe('ACTIVE');
+  });
+
+  test('round-trips pending with every list sent, and with every list kept (absent)', () => {
+    const withLists = { ...staged, parameters: [], cellParameters: [{ name: 'SIZE', default: 'S' }], hooks: [] };
+    for (const pending of [withLists, staged]) {
+      const updating: ApplicationRecord = { ...record, status: 'UPDATING', pending };
+      const item = dataModel.toItem(updating);
+      expect(item.pending).toEqual(pending);
+      expect(dataModel.fromItem(item)).toEqual(updating);
+    }
+    // A kept list stays absent: it is not cleared by the commit (§5.5).
+    expect(dataModel.fromItem(dataModel.toItem({ ...record, status: 'UPDATING', pending: staged })).pending)
+      .not.toHaveProperty('parameters');
+  });
+
+  test('copies only the staged fields out of a stored pending', () => {
+    const item = { ...stored, pending: { ...staged, cellCount: 7 } } as unknown as ApplicationItem;
+    expect(dataModel.fromItem(item).pending).toEqual(staged);
   });
 });

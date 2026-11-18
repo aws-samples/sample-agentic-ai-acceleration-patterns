@@ -6,6 +6,7 @@ import {
   TENANT_EMPTY_CONDITION,
   TENANT_NOT_EXISTS_CONDITION,
   TenantDataModel,
+  TenantItem,
   tenantKey,
   TenantRecord,
 } from '../../src/tenant/tenant.data-model';
@@ -17,6 +18,7 @@ const record: TenantRecord = {
   name: 'acme',
   description: 'a tenant',
   deploymentCount: 2,
+  status: 'ACTIVE',
   createdAt: new Date('2026-09-07T00:00:00.000Z'),
   updatedAt: new Date('2026-09-07T00:00:00.000Z'),
 };
@@ -48,11 +50,9 @@ describe('TenantDataModel.toItem', () => {
     expect(item.updatedAt).toBe('2026-09-07T00:00:00.000Z');
   });
 
-  test('carries no cell, status, build state, source or scripts (R-7, ADR-037)', () => {
+  test('carries no cell, build state, source or scripts (R-7, ADR-037)', () => {
     for (const field of [
       'cellId',
-      'status',
-      'statusReason',
       'lastBuildId',
       'source',
       'cellScripts',
@@ -95,5 +95,42 @@ describe('tenant write conditions (P-5, §5.1)', () => {
       expressionAttributeNames: { '#deploymentCount': 'deploymentCount' },
       expressionAttributeValues: { ':zero': 0 },
     });
+  });
+});
+
+describe('tenant record status and staged update (R-47, R-48, ADR-045)', () => {
+  const stored = dataModel.toItem(record);
+
+  test('an item stored before ADR-045 has no status and reads as ACTIVE', () => {
+    const legacy: TenantItem = { ...stored, status: undefined };
+    expect(dataModel.fromItem(legacy).status).toBe('ACTIVE');
+  });
+
+  test('persists the status, reason, operation id and last global hooks', () => {
+    const failed: TenantRecord = {
+      ...record,
+      status: 'UPDATE_FAILED',
+      statusReason: 'PRE hook gate failed',
+      operationId: '01TENANT-tenant-update-1763460000000-0a1b2c3d',
+      lastGlobalHooks: [{ hookId: 'gate', phase: 'PRE', revision: 2, sourceVersion: 'main', resolvedSourceVersion: 'a'.repeat(40) }],
+    };
+    const item = dataModel.toItem(failed);
+    expect(item.status).toBe('UPDATE_FAILED');
+    expect(item.operationId).toBe('01TENANT-tenant-update-1763460000000-0a1b2c3d');
+    expect(dataModel.fromItem(item)).toEqual(failed);
+  });
+
+  test('round-trips pending, with and without a description', () => {
+    for (const pending of [{ name: 'acme-renamed', description: 'new' }, { name: 'acme-renamed' }]) {
+      const updating: TenantRecord = { ...record, status: 'UPDATING', pending };
+      const item = dataModel.toItem(updating);
+      expect(item.pending).toEqual(pending);
+      expect(dataModel.fromItem(item).pending).toEqual(pending);
+    }
+  });
+
+  test('copies only name and description out of a stored pending', () => {
+    const item = { ...stored, pending: { name: 'x', description: 'y', deploymentCount: 9 } } as unknown as TenantItem;
+    expect(dataModel.fromItem(item).pending).toEqual({ name: 'x', description: 'y' });
   });
 });
