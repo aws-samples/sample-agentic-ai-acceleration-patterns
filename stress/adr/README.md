@@ -22,5 +22,5 @@ In `samples/control-plane/adr/`:
 
 | Number | Title | Status | Date |
 |---|---|---|---|
-| [0046](../../samples/control-plane/adr/0046-make-the-concurrent-build-limit-a-prop.md) | Make the concurrent build limit a prop | Accepted | 2026-11-18 |
-| [0047](../../samples/control-plane/adr/0047-let-the-cell-account-owner-attach-policies-to-the-cell-role.md) | Let the cell account owner attach policies to the cell role | Accepted | 2026-11-18 |
+| [0046](../../samples/control-plane/adr/0046-make-the-concurrent-build-limit-a-prop.md) | Make the concurrent build limit a prop | Proposed | 2026-11-18 |
+| [0047](../../samples/control-plane/adr/0047-let-the-cell-account-owner-attach-policies-to-the-cell-role.md) | Let the cell account owner attach policies to the cell role | Proposed | 2026-11-18 |

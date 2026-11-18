@@ -129,6 +129,7 @@ root folder, `stress/` (stress ADR-0001), and nowhere else:
 
 ```
 stress/
+├── .protoshield/   # scan config for stress/ (§6)
 ├── adr/            # the stress test's ADRs and index (§2.2)
 ├── application/    # the control-plane application whose scripts deploy cells and onboard tenants
 ├── driver/         # the driver host
@@ -136,7 +137,7 @@ stress/
 ├── results/        # one committed summary per run, no account or tenant ids
 ├── spikes/<name>/  # one folder per spike: README with question, steps, results, teardown
 ├── run.sh          # the runner
-├── tiers.ts        # the tiers
+├── *.ts            # the contract: tiers (tiers.ts), result schema, quota budget
 └── LICENSE         # MIT-0
 ```
 
