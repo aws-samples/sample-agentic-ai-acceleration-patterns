@@ -1741,7 +1741,8 @@ Limits of these promises:
   unauthenticated read that confirms the tenant exists, and its `rev`
   adds when the tenant's current deployment was created and whether it
   was created again. The sample accepts this low-value disclosure; it is
-  a threat-model residual, with the other limits in this list.
+  a [threat-model](../threat-model.md) residual (T-51, AR-11), with the
+  other limits in this list.
 
 ### 6.3 Samples consumed
 

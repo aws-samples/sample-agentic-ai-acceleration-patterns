@@ -144,7 +144,8 @@ rotation are in spec §3.3 step 2, §3.5 and §4.1.
   the deployer keeps those actions off every other role (spec §6.1).
 - Harder: the SPA needs `sessionStorage` for two single-use values
   (ADR-0007).
-- Follow-up: the sample's threat model lists every principal that can read
+- Follow-up: the sample's [threat model](../threat-model.md#who-can-read-and-write-what)
+  lists every principal that can read
   the `signin` key, the integration test role that calls `TestFunction`
   and signs a test `state` among them (spec §10 step 18), and every
   principal that can write the store, the test role included: it holds

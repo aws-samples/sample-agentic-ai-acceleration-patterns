@@ -168,8 +168,8 @@ printing the registrar's message.
   claims only `ACTIVE` cells, and the cell stays out of `ACTIVE` until
   the edge operator role replaces the origin. The second
   gains nothing, because the record supplies cell and account and a put
-  keeps `s`. The sample has no threat model yet; this residual goes into
-  it when it is written.
+  keeps `s`. The [threat model](../threat-model.md) records this residual
+  (T-20, AR-1).
 - A failing `POST` hook leaves the cell or deployment in
   `CREATE_FAILED` or `UPDATE_FAILED` with the hook named. From
   `UPDATE_FAILED` the operator fixes the cause and retries with
