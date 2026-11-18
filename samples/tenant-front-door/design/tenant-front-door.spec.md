@@ -689,7 +689,8 @@ On every write:
    breaches it, and yesterday's 02:00 UTC count keeps today's period,
    empty until its own count arrives, from tripping it; when two days
    pass with no lister, because the daily schedule stops firing, it
-   alarms. So that the no-lister alarm has a datapoint from deployment,
+   alarms. So that the no-lister alarm has a datapoint within minutes
+   of deployment, not at the next 02:00 UTC run,
    a custom resource, the starter, deployed with the sweeper and after
    it, starts one lister run on its Create, which happens when the stack
    is created with `dedicatedDomains` on and on the update that turns
@@ -697,8 +698,9 @@ On every write:
    the Scheduler's input, so the run is Scheduler-shaped, with no
    supplied `runDay`. No `tenant#` entry holds a `d` then, so the run
    logs a `run-start` line with zero pages and emits 0, and the next
-   daily run judges that finished zero-page run. The starter does not
-   wait for the run, so a deploy-time run that fails does not fail the
+   daily run judges that finished zero-page run. The alarm exists
+   before that 0 arrives, so it can read ALARM for the few minutes the
+   starter's run takes. The starter does not wait for the run, so a deploy-time run that fails does not fail the
    deployment: the no-lister alarm then reads ALARM until the first
    daily run, whose lister finds no earlier Scheduler `run-start` line
    and emits 0 under the first-run rule above. On an Update or a
@@ -1113,7 +1115,7 @@ hook's put replaces the entry, `s: active` and routed to the new cell
 | `tenantClaim` | no | `tenant_id` | Claim the router and the origin read |
 | `spaSource` | no | the demo SPA | Path of the built SPA |
 | `agentIngress` | no | off | Agent ingress endpoint; omit to leave `/agents/*` off, and the router then answers 404 for every `/agents` path (§3.3 step 3) |
-| `dedicatedDomains` | no | off | Lets the edge operator role set a tenant's `customDomain` (§3.4 step 5, ADR-0018). Off: any `customDomain` gets 400, the registrar role holds no ACM or distribution-tenant action, and the sweeper, its role and its schedules are not deployed. A stack update that turns it off fails while any `tenant#` entry holds a `d` or the sweeper has a distribution tenant or certificate left to delete; the operator drops every dedicated domain first (§3.4) |
+| `dedicatedDomains` | no | off | Lets the edge operator role set a tenant's `customDomain` (§3.4 step 5, ADR-0018). Off: any `customDomain` gets 400, the registrar role holds no ACM or distribution-tenant action, and the sweeper, its role, its schedules and the starter are not deployed. A stack update that turns it off fails while any `tenant#` entry holds a `d` or the sweeper has a distribution tenant or certificate left to delete; the operator drops every dedicated domain first (§3.4) |
 | `tenantRequestsPer5Min` | no | 2,000 | Per-tenant rate (ADR-0009) |
 | `reportingEndpoint` | no | off | URL for CSP and other browser reports |
 

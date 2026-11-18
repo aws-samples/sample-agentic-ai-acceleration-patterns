@@ -225,7 +225,8 @@ before it writes the domain's `host#` key.
   `runDay`) on its Create, when the stack is created with
   `dedicatedDomains` on and on the off-to-on update; no entry holds a
   `d` then, so it is a zero-page run that emits 0 and gives the
-  no-lister alarm a datapoint from deployment. The starter does not
+  no-lister alarm a datapoint once that run emits, a few minutes after
+  deployment; until then the alarm can read ALARM. The starter does not
   wait for it: if that run fails, the no-lister alarm reads ALARM
   until the first daily run, which emits 0 under the first-run rule.
   One query per
@@ -242,8 +243,8 @@ before it writes the domain's `host#` key.
   record itself.
 - Harder: `dedicatedDomains` is a deploy-time switch. Off, the
   registrar answers any `customDomain` with 400 and holds no ACM or
-  distribution-tenant action, and the sweeper, its role and its
-  schedules are not deployed. The sweeper runs as an execution role of
+  distribution-tenant action, and the sweeper, its role, its
+  schedules and the starter are not deployed. The sweeper runs as an execution role of
   its own, with the route table read (`DescribeKeyValueStore`,
   `ListKeys`), the distribution-tenant and certificate deletes and the
   re-check's Logs, SQS and Lambda actions; the registrar's role keeps
