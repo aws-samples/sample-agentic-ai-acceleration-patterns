@@ -27,3 +27,5 @@ SecureString/Secrets Manager environment integration (masked by CodeBuild),
 per the conventions doc. None of this prevents a determined
 value-echoing script — the convention is a contract with script authors,
 the retention bound is the backstop.
+
+**Amended by ADR-0046 (2026-11-18):** the concurrent build cap of M17 is the construct prop `concurrentBuildLimit`, an integer from 1 to 100, default 5, applied to every CodeBuild project the control plane creates; above 20 the synth warns.
