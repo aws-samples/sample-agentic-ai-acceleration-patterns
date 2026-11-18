@@ -1,6 +1,6 @@
 # ADR-0011: Resolve workflow inputs before execution and update records by field ownership
 
-**Status:** Accepted
+**Status:** Accepted — amended by ADR-0044 (the resolved input carries the hooks of each event)
 
 **Context:** The service already reads or creates the tenant record before a
 lifecycle transition, but the workflow rereads that mutable record to resolve
@@ -26,3 +26,5 @@ operator-visible control-plane data. The service must keep workflow input
 construction and lifecycle status mapping together, and compensation itself
 remains a best-effort DynamoDB write whose failure is surfaced with the
 original start failure.
+
+**Amended by ADR-0044 (2026-11-17):** the resolved input also carries the hooks of each event the execution runs, already in run order: the application hooks from the cell's stamp and the global hooks from one strongly consistent query that runs before the operation's first write. The workflow never re-reads a hook. The terminal writes also own `lastGlobalHooks` on the cell or deployment.

@@ -1,6 +1,6 @@
 # ADR-0021: Bounded blast radius for amplification and log exposure (threat model M15/M17)
 
-**Status:** Accepted (2026-09-15)
+**Status:** Accepted (2026-09-15) — amended by ADR-0044 (the caps and retention cover the hook projects)
 
 **Context:** Each CreateTenant can create a cell and run up to two
 hour-long CodeBuild builds — a leaked token or runaway client is a
@@ -27,3 +27,5 @@ SecureString/Secrets Manager environment integration (masked by CodeBuild),
 per the conventions doc. None of this prevents a determined
 value-echoing script — the convention is a contract with script authors,
 the retention bound is the backstop.
+
+**Amended by ADR-0044 (2026-11-17):** the `concurrentBuildLimit` of 5 and the one-month log retention cover the two hook projects as well. A hook start refused at the cap is tried again for at most 5 minutes; a delete hook skipped after its retries is counted in a metric with an alarm (no actions).
