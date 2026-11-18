@@ -50,10 +50,10 @@ Option 3.
 
 | Wall | Holds |
 |---|---|
-| Standalone cell account | only `CDKToolkit-cell`, the role pair (plain CloudFormation by the account owner, on `/`, no cell boundary) and cells; no default CDK bootstrap; the `control-plane` slice refuses an account with any other stack, a stack with a service role other than the cell execution role, a `cdk-hnb659fds-*` role, or a role pair on `/cell/` before the first cell build |
+| Standalone cell account | only `CDKToolkit-cell`, the role pair (plain CloudFormation by the account owner, on `/`, no cell boundary) and cells; no default CDK bootstrap; the `control-plane` slice refuses an account with any other stack, a stack with a service role other than the cell execution role, a `cdk-hnb659fds-*` role, a role pair on `/cell/` or under the cell boundary, or a `/cell/` role trusted from outside, before every run |
 | Cell bootstrap | `cdk bootstrap --qualifier cell --toolkit-stack-name CDKToolkit-cell --cloudformation-execution-policies <cell execution policy> --custom-permissions-boundary cell-permissions-boundary` |
-| `/cell/` path | every role a cell creates is on `/cell/`, set by a CDK aspect in the stress cell app that matches every `AWS::IAM::Role` resource; IAM role writes, `iam:PassRole` and `sts:AssumeRole` are allowed on `role/cell/*` only; `iam:CreateServiceLinkedRole` only for the cell's services |
-| Boundary | on the execution role and every cell role: the cell's services, and denies on `iam:CreateRole` without the boundary or outside `/cell/`, any IAM write or `iam:PassRole` on a role outside `/cell/`, boundary removal, users, access keys and policy writes |
+| `/cell/` path | every role a cell creates is on `/cell/`, set by a CDK aspect in the stress cell app that matches every `AWS::IAM::Role` resource; IAM role writes, `iam:PassRole` and `sts:AssumeRole` are allowed on `role/cell/*` only; `iam:CreateServiceLinkedRole` only for `replication.dynamodb.amazonaws.com` and `dynamodb.application-autoscaling.amazonaws.com` |
+| Boundary | on the execution role and every cell role: the cell's services and the same service-linked-role allow, and denies on `iam:CreateRole` without the boundary or outside `/cell/`, any other IAM write or `iam:PassRole` on a role outside `/cell/` (`NotResource` `role/aws-service-role/*`), `iam:CreateServiceLinkedRole` for any other service, boundary removal, users, access keys and policy writes |
 
 The cell synth sets `@aws-cdk/core:bootstrapQualifier` and
 `@aws-cdk/core:permissionsBoundary` as object context (a CLI `--context`
@@ -72,14 +72,17 @@ bounded. Still to prove before this record is accepted (spec Q-5, Q-6), in
 a standalone cell account with the `/cell/` path: deny probes for
 `iam:UpdateAssumeRolePolicy` on the role pair, `iam:PutRolePolicy` on a
 `cdk-cell-*` role, `iam:PassRole` of a role outside `/cell/` and
-`sts:AssumeRole` of the account's administrator role, and the integration
-test passing with every role on `/cell/`.
+`sts:AssumeRole` of the account's administrator role, the two
+service-linked roles created in a fresh account, and the integration test
+passing with every role on `/cell/`.
 
 Easier: a cell build cannot create, change, pass or assume a role outside
-the cell, and the account holds nothing else for its service grants to
-reach. Harder: each stress run needs cell accounts that hold only cells;
-a compromised cell build can give a cell role a trust to another account,
-which the boundary still caps, until the cell is redeployed;
+the cell, apart from the two service-linked roles above, whose trust IAM
+fixes to their service; and the account holds nothing else for its service
+grants to reach. Harder: each stress run needs cell accounts that hold
+only cells; a compromised cell build can give a cell role a trust to
+another account, which the boundary still caps and a redeploy does not
+undo, so the pre-run check refuses a `/cell/` role trusted from outside;
 a new service in a cell needs both policies updated before its first
 deploy, and an integration run under the boundary is the check. Unchanged:
 a compromised cell build can change any cell in its account, which is the

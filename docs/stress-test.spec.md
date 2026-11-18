@@ -254,15 +254,18 @@ build's IAM writes to cell roles; the account boundary scopes everything
 else. A compromised cell build can change any cell in its account, and
 nothing else in it. It can still give a cell role a trust to another
 account (`iam:UpdateAssumeRolePolicy` on `role/cell/*`); that role stays
-under the boundary, but it is a way in from outside until the cell is
-redeployed.
+under the boundary, but it is a way in from outside, and a redeploy that
+does not change the role leaves it. The check below reads each `/cell/`
+role's trust policy and refuses one that names a principal outside the
+account and the AWS services the cell uses.
 
 The `control-plane` slice's `deploy` enforces it before the first cell
 build: it lists the account's CloudFormation stacks in every Region the run
 uses and refuses an account with any stack but the three kinds above, a
 stack whose service role is set and is not the cell execution role, a
-`cdk-hnb659fds-*` role, or a role pair on `/cell/` or under the cell
-boundary. The stack list and `iam:GetRole` give all of it.
+`cdk-hnb659fds-*` role, a role pair on `/cell/` or under the cell
+boundary, or a `/cell/` role trusted from outside (above). The stack list
+and `iam:GetRole` give all of it.
 
 ## 4. Data model
 
@@ -424,8 +427,8 @@ permissions boundary:
 |---|---|
 | Bootstrap | `cdk bootstrap --qualifier cell --toolkit-stack-name CDKToolkit-cell --cloudformation-execution-policies <cell execution policy ARN> --custom-permissions-boundary cell-permissions-boundary`, run once by the account owner |
 | Cell roles | every role a cell creates is on the IAM path `/cell/`; the stress application's cell app sets it with a CDK aspect that matches every `CfnResource` of type `AWS::IAM::Role` (custom resource provider roles are not `CfnRole`) and sets `Path` with a property override |
-| Cell execution policy | a managed policy shipped in `stress/application/`: API Gateway, Application Auto Scaling (a DynamoDB global table deregisters its scalable targets on delete), AgentCore, CloudWatch, DynamoDB, KMS, Lambda, CloudWatch Logs, SSM, read of `cdk-cell-assets-*`, IAM role writes and `iam:PassRole` on `role/cell/*` only, and `iam:CreateServiceLinkedRole` on `role/aws-service-role/*` for the cell's services only (`iam:AWSServiceName`: DynamoDB replication and Application Auto Scaling), whose trust IAM fixes to the service |
-| Cell permissions boundary | a managed policy on the execution role and on every cell role: the same services plus what cell roles call at run time (`execute-api`, the Bedrock model calls, `sts:TagSession`, X-Ray), and `sts:AssumeRole` on `role/cell/*` only; it denies `iam:CreateRole` without itself or outside `/cell/`, any IAM write or `iam:PassRole` on a role outside `/cell/`, removing a boundary, users, access keys and policy writes |
+| Cell execution policy | a managed policy shipped in `stress/application/`: API Gateway, Application Auto Scaling (a DynamoDB global table deregisters its scalable targets on delete), AgentCore, CloudWatch, DynamoDB, KMS, Lambda, CloudWatch Logs, SSM, read of `cdk-cell-assets-*`, IAM role writes and `iam:PassRole` on `role/cell/*` only, and `iam:CreateServiceLinkedRole` on `role/aws-service-role/*` only when `iam:AWSServiceName` is `replication.dynamodb.amazonaws.com` and `dynamodb.application-autoscaling.amazonaws.com`, whose trust IAM fixes to the service |
+| Cell permissions boundary | a managed policy on the execution role and on every cell role: the same services plus what cell roles call at run time (`execute-api`, the Bedrock model calls, `sts:TagSession`, X-Ray), `sts:AssumeRole` on `role/cell/*` only, and the same `iam:CreateServiceLinkedRole` allow as the execution policy; it denies `iam:CreateRole` without itself or outside `/cell/`, any other IAM write or `iam:PassRole` on a role outside `/cell/` (the deny's `NotResource` is `role/aws-service-role/*`), `iam:CreateServiceLinkedRole` for any other service, removing a boundary, users, access keys and policy writes |
 | Cell synth | `@aws-cdk/core:bootstrapQualifier` `cell` and `@aws-cdk/core:permissionsBoundary` `{"name":"cell-permissions-boundary"}` as object context (`cdk.json` or `CDK_CONTEXT_JSON`); a CLI `--context` passes the boundary as a string, which the CDK ignores |
 | Role pair | `control-plane`'s `cellBuildManagedPolicyArns` (ADR-0047); the cell account owner attaches one policy that allows `sts:AssumeRole` on the deploy, file-publishing and image-publishing `cdk-cell-*` roles of its own account and Region, and nothing else (not the lookup role, which holds `ReadOnlyAccess` without the boundary) |
 
