@@ -47,6 +47,9 @@ changes a sample, work through its definition of done (section 9): layout, desig
 threat model, architecture), diagram, code and tests, security review, sample README, and root README changes.
 Please open an issue describing the pattern before you start, so the scope can be agreed and duplicate work avoided.
 
+Code shared by the platform stress test lives in the root `stress/` folder, not in a sample. Its rules are in
+[section 1.2 of the Sample Standard](docs/sample-standard.md#12-shared-stress-assets-stress).
+
 
 ## Finding contributions to work on
 Looking at the existing issues is a great way to find something to contribute on. As our projects, by default, use the default GitHub issue labels (enhancement/bug/duplicate/help wanted/invalid/question/wontfix), looking at any 'help wanted' issues is a great place to start.
