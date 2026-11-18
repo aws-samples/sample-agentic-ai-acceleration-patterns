@@ -5,6 +5,7 @@
 - Status: Accepted
 - Date: 2026-11-18
 - Amends: ADR-0002, ADR-0012, ADR-0016
+- Amended by: ADR-0020
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -321,3 +322,19 @@ before it writes the domain's `host#` key.
   the tenant zone's negative-caching TTL, S-10), when CloudFront or ACM
   offer a per-tenant domain proof of their own, or when a vendor needs
   the multi-perspective check.
+
+Amended 2026-11-18 by ADR-0020: the daily re-check keeps its state in a
+DynamoDB table the sweeper owns, not in the sweeper's log. The Context
+line "the sweeper keeps no miss history of its own: its log is the
+record", the Consequences paragraph that describes the re-check through
+`run-start`, `entry` and `page-end` lines, a run id, a `runDay` that only
+the integration test supplies, a Logs Insights query with a 10,000-row
+limit and a first-run rule read from the log, and the Known limitations
+that name those pieces (the row limit, the supplied `runDay`, the
+`logs:StopQuery` call, the `run-start` line) no longer describe the
+design. The sweeper's role holds DynamoDB actions on that table in place
+of the Logs Insights actions. The challenge, the daily check, the
+three-miss and `unverifiable` rules, the on-failure queue, the
+missing-pages and no-lister alarms, the starter, the in-call lookups,
+the guard and the removal paths stand as decided. Spec §3.4 step 5
+describes the current re-check.
