@@ -198,7 +198,8 @@ as a residual.
 
 **Per-emitter limits.** A registered emitter is admitted at most
 `maxEventsPerEmitterPerMinute` events a minute, counted in a DynamoDB item
-per emitter and minute; events over it return `RETRY`. At most
+per emitter and minute over every event of each batch, before the checks,
+refused ones included; events over it return `RETRY`. At most
 `maxRefusedPerEmitterPerHour` refusals that can never count (`BAD_SHAPE`,
 `BAD_TIME`, `TOO_LATE`) are stored per emitter and hour; the rest are
 counted in a metric with an alarm, not stored. Refusals that could still
@@ -312,10 +313,11 @@ URL as its default (control-plane R-34).
 
 | Control | Rule |
 |---|---|
-| Raw bucket (`raw/`, `readmitted/`, `error/`, `firehose-error/`) | The bucket policy is written as explicit denies with `aws:PrincipalArn` conditions, so an identity-policy allow in the metering account does not get around it: `s3:PutObject` is denied under `raw/` and `firehose-error/` to all but the Firehose role, under `readmitted/` to all but the re-admission function, and under `error/` to all but the ingest, re-admission and redrive functions; `s3:DeleteObject` and `s3:DeleteObjectVersion` are denied to every principal; `s3:PutLifecycleConfiguration`, `s3:PutBucketVersioning` and `s3:PutBucketPolicy` are denied to all but the deployment role. Versioning is on, so an overwrite keeps the earlier version for audit. Lifecycle expires current versions after `rawRetentionDays` (`raw/`, `readmitted/`, `firehose-error/`) or `errorRetentionDays` (`error/`), expires noncurrent versions 7 days later, and removes expired delete markers. Object Lock is a production option |
-| Export bucket | A separate bucket. Its policy denies `s3:PutObject` to all but the dispatcher and the same configuration changes as the raw bucket; lifecycle expires objects after `rawRetentionDays`. An `S3_EXPORT` sink names only a key prefix inside it |
+| Raw bucket (`raw/`, `readmitted/`, `error/`, `firehose-error/`) | The bucket policy is written as explicit denies with `aws:PrincipalArn` conditions, so an identity-policy allow in the metering account does not get around it: `s3:PutObject` is denied under `raw/` and `firehose-error/` to all but the Firehose role, under `readmitted/` to all but the re-admission function, and under `error/` to all but the ingest, re-admission and redrive functions; `s3:DeleteObject` and `s3:DeleteObjectVersion` are denied to all but the stack's auto-delete-objects provider role, which acts only when the stack is deleted; `s3:PutLifecycleConfiguration`, `s3:PutBucketVersioning`, `s3:PutBucketPolicy`, `s3:DeleteBucketPolicy` and `s3:PutBucketNotification` are denied to all but the deployment role and the auto-delete-objects and bucket-notifications provider roles. Versioning is on, so an overwrite keeps the earlier version for audit. Lifecycle expires current versions after `rawRetentionDays` (`raw/`, `readmitted/`, `firehose-error/`) or `errorRetentionDays` (`error/`), expires noncurrent versions 7 days later, and removes expired delete markers. Object Lock is a production option |
+| Export bucket | A separate bucket. Its policy denies `s3:PutObject` to all but the dispatcher, and deletes and configuration changes as on the raw bucket; lifecycle expires objects after `rawRetentionDays`. An `S3_EXPORT` sink names only a key prefix inside it |
 | Ingest bus | The bus resource policy denies `events:PutEvents` to all but the ingest function role |
-| Table | A DynamoDB resource-based policy denies item writes to all but the stack's function and state machine roles, so no other principal can write a registration, meter, sink or record |
+| Usage bus | The bus resource policy denies `events:PutEvents` to all but the record publisher role, which also runs the scheduler's `publishPending` sweep, so no other principal can publish a `UsageRecorded` that readers would bill from |
+| Table | A DynamoDB resource-based policy denies `dynamodb:PutItem`, `UpdateItem`, `DeleteItem`, `BatchWriteItem`, `PartiQLInsert`, `PartiQLUpdate`, `PartiQLDelete` and `TransactWriteItems` on the table to all but the stack's function and state machine roles, so no other principal can write a registration, meter, sink or record |
 | Ingest dead-letter queue | The queue policy denies `sqs:SendMessage` to all but `events.amazonaws.com` with `aws:SourceArn` = the ingest subscriber |
 | Firehose stream | Firehose has no resource policy, so any principal in the metering account granted `firehose:PutRecord*` on the stream can write raw usage. The stack grants it only to the ingest and redrive functions and the subscriber role; an SCP or permissions boundary that denies it to everyone else is the production control |
 | Service-principal trust | Every service-principal trust policy and resource policy (the Lambda permission for S3 notifications, SQS queue policies, Scheduler, Firehose and bus subscriber role trust) is conditioned on `aws:SourceArn` and `aws:SourceAccount`. A DynamoDB Streams trigger is polled with the function's own role and needs none |
@@ -323,8 +325,16 @@ URL as its default (control-plane R-34).
 | Logs | No event payload, sink request or response body, or credential is logged; recounter execution state holds keys and counts only |
 | Heartbeat | An alarm that does not depend on the scheduler fires when the scheduler's target has not run for 15 minutes, or no hour has reached `COUNTED` for 2 hours while the `pending` index holds hours past their grace |
 
-An administrator of the metering account can change these policies and is
-trusted.
+"The deployment role" is the CloudFormation execution role the stack is
+deployed with (the CDK bootstrap `cfn-exec` role, or the `--role-arn` the
+deployer passes), read from the synth-time bootstrap qualifier; the
+integration test runs a stack update that changes `rawRetentionDays` to
+prove the exemption. The changes to the queue, bus and table policies
+(`sqs:SetQueueAttributes`, `events:PutPermission`, `events:RemovePermission`,
+`dynamodb:PutResourcePolicy`, `dynamodb:DeleteResourcePolicy`) are not
+denied. Any principal allowed them, or allowed to run the deployment or
+provider roles or to delete the stack, can undo these controls and is
+trusted, as is an administrator of the metering account.
 
 ## 4. Data model
 
@@ -654,7 +664,7 @@ Smithy, `aws.protocols#restJson1`, every operation IAM-authorised.
 |---|---|---|
 | `ACCEPTED` | stored, or already stored under the same key | none |
 | `RETRY` | the ingest bus or Firehose throttled it after the function's retries, or the emitter is over `maxEventsPerEmitterPerMinute` | send again with the same `eventId` |
-| `REFUSED` + reason | `TENANT_NOT_IN_CELL`, `REGISTRATION_CLOSED`, `UNKNOWN_METER`, `METER_NOT_ALLOWED`, `BAD_TIME`, `TOO_LATE`, `BAD_SHAPE`; written to the error store | fix the cause; an operator may re-admit |
+| `REFUSED` + reason | `TENANT_NOT_IN_CELL`, `REGISTRATION_CLOSED`, `UNKNOWN_METER`, `METER_NOT_ALLOWED`: always written to the error store, and an operator may re-admit them. `BAD_SHAPE`, `BAD_TIME`, `TOO_LATE`: written up to the per-emitter cap, never re-admitted | fix the cause |
 
 Errors:
 
