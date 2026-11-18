@@ -194,7 +194,7 @@ a declaration, `scripts/stress/slice.json`.
 | `deploy` | deploys the slice's stacks, or reuses them | publish what the next slice needs through the sample's published parameters (P-2); the runner times it (P-6) |
 | `seed` | creates the slice's data for the tier, or reuses the manifest | be safe to rerun; never write a token or a password to disk |
 | `run <scenario>` | runs one scenario | write one result record per scenario (§4.3); exit non-zero on a pass-criterion failure |
-| `collect` | reads logs and metrics for the run window | wait for late log delivery (runtime-isolation finding F-6); write the late fields (`refusals`, `cost`) into its own slice's records |
+| `collect` | reads logs and metrics for the run window | wait for late log delivery (runtime-isolation finding F-6); write the late fields (`refusals`, `cost`) into its own slice's records, only those nobody else changed since `run`; any other change after `run` fails the run |
 | `teardown` | removes what the slice deployed | keep fixtures unless `--fixtures` is passed; verify nothing it owned is left; the runner times it (P-6) |
 
 `slice.json` names the slice, the slices it needs (by published interface),
@@ -233,7 +233,8 @@ is stopped when it exits.
 3. Runs `deploy` and `seed` in dependency order, then the scenarios in the
    order of §5, then `collect`, then `teardown` in reverse order. Teardown
    runs on failure and after SIGINT, SIGTERM or SIGHUP too.
-4. Writes the run's result file (§4.3).
+4. Writes the run's result file (§4.3). Runner lines and all verb output
+   go to `run.log` in the run folder, which only the runner's user can read.
 
 With one slice named, the runner is that sample's stress test. With all of
 them, it is the platform run.

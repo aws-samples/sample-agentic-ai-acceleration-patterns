@@ -63,6 +63,7 @@ export function parseDeclaration(text: string, file: string): SliceDeclaration {
     throw new Error(`${file}: a slice cannot need itself`);
   }
   const scenarios = strings(doc.scenarios, 'scenarios', file, SCENARIO);
+  if (scenarios.includes('lifecycle')) throw new Error(`${file}: "lifecycle" is the runner's own record, not a scenario`);
   const quotas = strings(doc.quotas ?? [], 'quotas', file, /.*/);
   const bad = quotas.filter((q) => !isQuotaId(q));
   if (bad.length > 0) {

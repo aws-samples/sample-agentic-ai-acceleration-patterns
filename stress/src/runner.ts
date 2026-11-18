@@ -276,7 +276,7 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   };
   function appendLog(text: string): void {
     try {
-      fs.appendFileSync(runLog, text);
+      fs.appendFileSync(runLog, text, { mode: 0o600 });
     } catch {
       // The run folder is gone; the terminal copy is all there is.
     }
@@ -317,7 +317,8 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   for (const sig of SIGNALS) signals.on(sig, onSignal);
   process.stderr.on('error', ignore);
   try {
-    fs.mkdirSync(resultsDir, { recursive: true });
+    // Verb output lands in run.log: keep the run folder to its owner.
+    fs.mkdirSync(resultsDir, { recursive: true, mode: 0o700 });
 
     // Budget first: nothing is deployed when a sum is over a limit.
     const draws: Draw[] = [];
@@ -368,7 +369,10 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     // only records nobody else changed since its run wrote them.
     for (const s of slices) {
       const mine = [...ran.keys()].filter((k) => k.startsWith(`${s.name}.`)).map((k) => k.slice(s.name.length + 1));
-      const intact = mine.filter((sc) => owned.get(`${s.name}.${sc}.json`) === hashOf(path.join(resultsDir, `${s.name}.${sc}.json`)));
+      const intact = mine.filter((sc) => {
+        const h = owned.get(`${s.name}.${sc}.json`);
+        return h !== undefined && h === hashOf(path.join(resultsDir, `${s.name}.${sc}.json`));
+      });
       await verb(s, 'collect');
       for (const sc of intact) own(s, sc);
       stopIfAborted();

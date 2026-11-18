@@ -60,7 +60,9 @@ change its records after `run`, and only records nobody else changed.
 Each verb runs in its own session and process group with no stdin, so
 `slice.sh` must not prompt (`cdk deploy --require-approval never`). Its
 stdout and stderr go through the runner to the terminal and to
-`$STRESS_HOME/$STRESS_PREFIX/<run id>/run.log`. When `slice.sh` exits,
+`$STRESS_HOME/$STRESS_PREFIX/<run id>/run.log` (folder 0700, file 0600), so
+a verb never prints a token, a password or a key, and never runs `set -x`
+around one. When `slice.sh` exits,
 anything it left running in its group gets SIGTERM, then SIGKILL after
 30 seconds.
 
@@ -114,6 +116,11 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   draws on them (W-7 for the front door).
 - A SIGKILL to the runner leaves the current verb's process group
   running, and the run lock in place.
+- A process a verb starts with `setsid` leaves the group, so the runner
+  cannot stop it, and while it holds the verb's stdout or stderr the verb
+  does not end. Redirect the output of anything started that way.
+- `run.log` keeps stdout and stderr as two pipes, so their lines can
+  interleave out of the script's order.
 - Off Linux, the runner cannot tell a zombie from a running process, so
   where pid 1 does not reap orphans, a verb that left a child behind
   waits the full 30 seconds plus 5 before it counts as done.

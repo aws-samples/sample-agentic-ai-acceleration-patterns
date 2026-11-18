@@ -252,6 +252,21 @@ describe('runner (spec §3.5)', () => {
     expect(summary.failures).toEqual(['tenant-identity.PS-1.json: does not belong to this run (changed by another verb)']);
   });
 
+  it('refuses a record collect wrote for a run that wrote none', async () => {
+    const { root, home } = fixture({ 'tenant-identity': { scenarios: ['PS-1'] } });
+    const { exec } = stub({ silent: ['tenant-identity'] });
+    const late: Exec = async (script, args, env, capture, onStart) => {
+      const r = await exec(script, args, env, capture, onStart);
+      if (args[0] === 'collect') {
+        fs.writeFileSync(path.join(env.STRESS_RESULTS!, 'tenant-identity.PS-1.json'), JSON.stringify(record({ slice: 'tenant-identity', scenario: 'PS-1', runId: env.STRESS_RUN_ID!, mode: 'slice' })));
+      }
+      return r;
+    };
+    const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], exec: late });
+    expect(summary.failures).toEqual(['tenant-identity.PS-1.json: does not belong to this run (changed by another verb)']);
+    expect((fs.statSync(path.join(home, 'stress', base.runId)).mode % 0o1000).toString(8)).toBe('700');
+  });
+
   it('lets collect fill in its own records, and runs a repeated scenario once', async () => {
     const { root, home } = fixture({ 'tenant-identity': { scenarios: ['PS-1'] } });
     const { calls, exec } = stub();

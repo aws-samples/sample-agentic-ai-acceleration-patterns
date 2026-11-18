@@ -21,6 +21,7 @@ describe('slice declaration (spec §3.4)', () => {
     ['duplicate scenario', { name: 'a', scenarios: ['S1', 'S1'] }, /duplicates/],
     ['missing scenarios', { name: 'a' }, /"scenarios"/],
     ['unknown quota', { name: 'a', scenarios: [], quotas: ['sqs'] }, /unknown quotas sqs/],
+    ['reserved scenario', { name: 'a', scenarios: ['lifecycle'] }, /runner's own record/],
   ])('refuses %s', (_n, doc, pattern) => {
     expect(() => parseDeclaration(JSON.stringify(doc), 'f')).toThrow(pattern);
   });
