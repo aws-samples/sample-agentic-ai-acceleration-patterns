@@ -148,7 +148,7 @@ All in the metering account, one stack.
 | Object tracker | S3 event notification on `raw/` and `readmitted/`: for every new object, creates the hour item if absent and increments its `generation` (§4.5); failed invocations go to an SQS on-failure destination the scheduler replays |
 | Recounter | Step Functions, one execution per hour: reads the hour's raw objects, dedupes, sums per meter rule, writes usage records (§4.9) |
 | Scheduler | EventBridge Scheduler, every 5 minutes: queries the sparse index of hours that are not `CLOSED` and starts a recount for each hour that is due, `DIRTY`, `COUNT_FAILED` past its backoff, or `COUNTING` with an expired lease; replays the object tracker's failures; sweeps `publishPending` records |
-| Record publisher | DynamoDB Streams on usage-record writes whose new image holds `publishPending`: publishes `UsageRecorded` to the usage bus, queues one delivery per sink, and clears the record's `publishPending` marker; the scheduler sweeps records whose marker is older than 15 minutes (§4.7), and an alarm fires on failed stream batches |
+| Record publisher | DynamoDB Streams on usage-record writes that set `publishPending` (§4.7): publishes `UsageRecorded` to the usage bus, queues one delivery per sink, and clears the record's `publishPending` marker; the scheduler sweeps records whose marker is older than 15 minutes (§4.7), and an alarm fires on failed stream batches |
 | Usage bus | EventBridge Custom Event Bus, `usageBusRetentionDays` retention; one `UsageRecorded` event per usage record revision (§4.8), `DeduplicationId = <recordId>#<revision>`, `EventGroupId = tenantId`. Always on |
 | Sink dispatcher | Sends each queued delivery to its sink, retries for 24 h, then marks it `FAILED` and alarms |
 | Sinks | `HTTP` (any billing API, field mapping by configuration), `S3_EXPORT` (JSON lines into the sample's export bucket) |
@@ -367,22 +367,27 @@ placed in another cell, it lands in a new item, and the old one stays
 
 ### 4.5 Hour
 
-`PK=HOUR#<YYYY-MM-DDTHH>`, `SK=META`.
+`PK=HOUR#<YYYY-MM-DDTHH>`, `SK=META`, and a counter item
+`PK=HOUR#<YYYY-MM-DDTHH>`, `SK=GEN` that holds only `generation`, so the
+object tracker never writes the item the recount's fence checks.
 
 | Field | Meaning |
 |---|---|
 | `status` | `OPEN`, `COUNTING`, `COUNTED`, `DIRTY`, `COUNT_FAILED`, `CLOSED` |
-| `generation` | incremented by the object tracker for every object of the hour |
+| `generation` | on the `GEN` item: incremented by the object tracker for every object of the hour |
 | `countedGeneration`, `countedAt` | the generation and time of the last finished count |
 | `lease`, `leaseExpiresAt` | the recount execution holding `COUNTING`, and when its hold lapses (30 minutes) |
 | `attempts` | failed counts since the last success, a lease taken over after it lapsed included |
 | `pending` | present until the hour is `CLOSED`; a sparse index on it is how the scheduler finds hours |
 
-The object tracker creates the item, `OPEN`, on the hour's first object,
-and increments `generation` on every object whatever the state. Its
+The object tracker creates the `META` item, `OPEN`, on the hour's first
+object, and increments `generation` on the `GEN` item for every object
+whatever the state. Every writer of these items retries a
+`TransactionConflict` or a lost condition with jittered backoff before
+it counts as a failure. Its
 invocations are asynchronous, with an SQS on-failure destination that
 keeps the S3 event; the scheduler replays that queue, and an alarm fires
-on its depth.
+when its depth stays above zero for 15 minutes.
 
 Every 5 minutes the scheduler queries the `pending` index, which holds
 every hour that is not `CLOSED`, past its close time or not, and starts
@@ -399,8 +404,9 @@ the hour item's `lease` is its own execution id, each record also
 conditioned on `attribute_not_exists(SK)`, and its final status write is
 conditioned on the same lease, so an execution whose lease was taken
 over writes nothing more. The execution's timeout
-is 25 minutes, below the lease. It finishes with
-`COUNTED` if `generation` is unchanged, else `DIRTY`, so an object that
+is 25 minutes, below the lease. It finishes with a transaction: a `ConditionCheck` that the `GEN`
+item's `generation` is the value it read, and `COUNTED` on `META`; if
+the check fails, `DIRTY`, so an object that
 landed during the count is counted next. A `COUNTED` hour whose
 `generation` moves past `countedGeneration` is `DIRTY`. A failed count →
 `COUNT_FAILED`, retried with backoff; an alarm fires on the third
@@ -426,8 +432,9 @@ raises an alarm.
 `RECOUNT` increments `generation` of each hour in range, the same path a
 new object takes, so a `COUNTED` hour becomes `DIRTY` and a `COUNTING`
 one ends `DIRTY`; a `CLOSED` hour in range is refused. `READMIT` runs every event of the chosen error objects through
-the ingest checks again, judging each by the registrations' `activeFrom`
-and `closedAt` and the meter version at its time, and writes the ones
+the ingest checks again, judging each by the §4.2 check (the current
+registration or any of its `intervals`) and the meter version at its
+time, and writes the ones
 that pass, with their original `receivedAt`, to `readmitted/hour=.../`,
 which the recount reads with `raw/`. It writes S3 directly, so it may
 re-admit into any hour that is not `CLOSED`. An event whose hour is
@@ -447,7 +454,7 @@ zero-padded from `0000`.
 | `billingAccount` | set once: from the tenant's `ACTIVE` binding for the application when the record is written (else its latest `CLOSING` one), or, if that has none, on the first resend from `BLOCKED` |
 | `recordId` | `sha256(tenantId, applicationId, meterId, hour, seq)`; sinks use it as their idempotency key |
 | `revision` | `1` when written; `2` once a late `billingAccount` is written onto it |
-| `publishPending` | present until the record, at its current `revision`, is on the usage bus and queued for its sinks; a sparse index lists the records that hold it |
+| `publishPending` | the time the marker was set; present until the record, at its current `revision`, is on the usage bus and queued for its sinks. A sparse index with sort key `publishPending` lists the records that hold it |
 | `sinks` | per sink: `PENDING`, `RETRYING`, `SENT`, `BLOCKED` (reason), `FAILED` (reason) |
 
 A record is written with a condition that its `seq` does not exist yet
@@ -457,13 +464,16 @@ in the hour; a first event that arrives late writes `HOURLY`. No record
 is written when a recount changes nothing.
 
 The table is the outbox. Each record is written with `publishPending`.
-The record publisher (§3.1) handles every stream record whose new image
-holds `publishPending`, inserts and modifies alike, publishes
-`UsageRecorded` (`DeduplicationId = <recordId>#<revision>`), queues the
-sink deliveries, and removes `publishPending` with a condition on the
-`revision` it published, so a later revision's marker stays. The scheduler
-also reads the `publishPending` index every 5 minutes and publishes any
-record that has held it for more than 15 minutes, so a failed stream
+The record publisher (§3.1) handles a stream record when the marker
+arrives: the new image holds `publishPending` and the old image does not,
+or holds an earlier one. The dispatcher's own sink-state writes leave the
+marker unchanged and so never trigger it. It publishes `UsageRecorded`
+(`DeduplicationId = <recordId>#<revision>`), queues the deliveries
+(revision 1: every sink of the record; revision 2: only the sinks that
+are `BLOCKED`), and removes `publishPending` with a condition on the
+`revision` it published, so a later revision's marker stays. The
+scheduler also queries the index every 5 minutes for markers older than
+15 minutes and publishes those records the same way, so a failed stream
 batch is caught after the stream's 24-hour retention as well.
 
 Sink delivery: a record goes to the sinks enabled when it is written that
@@ -472,8 +482,12 @@ take its meter. `PENDING` → `SENT`, or `RETRYING` with backoff for 24 h →
 again, or, given an hour range, every record of that range, which is how
 a sink enabled later is backfilled. An `HTTP` sink whose mapping needs
 `billingAccount` on a record without one marks it `BLOCKED`
-(`NO_BILLING_ACCOUNT`), and an alarm fires when a delivery has been
-`BLOCKED` for 24 hours. A `PutTenantBinding` that sets a billing account
+(`NO_BILLING_ACCOUNT`), after it has read the tenant's binding for the
+application: if the binding now has an account, the dispatcher writes it
+onto the record as revision 2 instead, the same write the job below
+makes. An alarm fires when a delivery has been `BLOCKED` for 24 hours,
+and `StartResendBlocked` (a tenant and an application) lets an operator
+run the job. A `PutTenantBinding` that sets a billing account
 starts a `RESEND_BLOCKED` job for that tenant and application and
 returns; the job writes the value onto each `BLOCKED` record with
 `revision` 2 and `publishPending`, so the record publisher sends it to the
@@ -547,7 +561,7 @@ Smithy, `aws.protocols#restJson1`, every operation IAM-authorised.
 | Tenant binding | `PutTenantBinding`, `GetTenantBinding`, `DeleteTenantBinding`, `ListTenantBindings` |
 | Usage | `GetUsage` (one tenant, application and meter, an hour range), `ListUsage` (one tenant, all meters) |
 | Hour | `GetHour`, `ListHours` |
-| Jobs | `StartRecount`, `StartReadmission`, `StartIngestRedrive`, `StartSinkRedrive`, `GetJob`, `ListJobs` |
+| Jobs | `StartRecount`, `StartReadmission`, `StartIngestRedrive`, `StartSinkRedrive`, `StartResendBlocked`, `GetJob`, `ListJobs` |
 
 `PutUsageEvents` returns 200 with one result per event:
 
