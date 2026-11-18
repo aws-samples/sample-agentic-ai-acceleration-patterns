@@ -46,7 +46,9 @@ Lambda.
 
 ## Consequences
 
-The reaper (ADR-0011) stops idle `nitro` tasks, removes expired rows and
-stops orphans with no row. Offboarding deletes a tenant's rows after
+The reaper (ADR-0011) stops idle `nitro` tasks and tasks past
+`sandboxMaxLife`, records MicroVMs the platform ended, removes expired rows
+and stops orphans with no row. A failed start backs off for 30 s before a
+retry, and starts pass an idempotency token. Offboarding deletes a tenant's rows after
 stopping its sandboxes. A row outliving its sandbox costs one failed call,
 then a restart.

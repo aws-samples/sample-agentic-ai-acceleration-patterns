@@ -22,7 +22,8 @@ but a session can restart under the same id and lose its files.
 ### Option 1: Root runner, code as uid 1001 in its own process group; a per-start nonce the sandbox must prove
 Pros: code cannot signal the runner or read its memory; killing the group
 and then every uid 1001 process stops forks; the tool sends nothing to a
-`nitro` task until it answers a challenge with `HMAC(nonce, challenge)`,
+`nitro` task until it answers a challenge with
+`HMAC(nonce, challenge ‖ certFingerprint)` over TLS,
 so a reassigned IP gets nothing; the boot id shows a restarted session.
 Cons: the nonce sits in the row and in the sandbox's environment; one extra
 round trip per `nitro` call.

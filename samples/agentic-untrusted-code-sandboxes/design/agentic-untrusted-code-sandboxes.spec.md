@@ -315,9 +315,9 @@ to its own stdout through the runner.
 |---|---|---|
 | Tool role (function) | assume the tool tenant role with a `TenantId` tag; `lambda:RunMicrovm`, `GetMicrovm`, `TerminateMicrovm`, `CreateMicrovmAuthToken` on the sample's image; `bedrock-agentcore:InvokeAgentRuntime`, `StopRuntimeSession` on the sample's runtime; `ecs:DescribeTasks` on the cluster; `kms:GetPublicKey` on the context key | read the bucket or the registry directly; `ecs:RunTask` or `StopTask` |
 | Tool tenant role | `s3:GetObject` on `inputs/${TenantId}/*`, `s3:PutObject` on `outputs/${TenantId}/*`, registry items with `dynamodb:LeadingKeys` = `TENANT#${TenantId}`, `ecs:RunTask` and `ecs:TagResource` with the request tag condition, `ecs:StopTask` with the resource tag condition, `iam:PassRole` on the task execution role | anything without its own tag |
-| Task execution role | ECR pull on the runner repository, Logs write on the task log group | everything else; never reachable by code (S-5) |
-| AgentCore runtime role | ECR pull on the runner repository, Logs write on the runtime's own log group; with `sessionFiles`, `s3:GetObject`, `s3:PutObject` on `sessions/${aws:AgentCoreRuntimeSourceSid}/*` and `s3:ListBucket` with an `s3:prefix` condition | everything else |
-| Reaper role | read, update and delete every registry row; `ecs:ListTasks`, `DescribeTasks`, `StopTask` on the cluster; `lambda:ListMicrovms`, `TerminateMicrovm` on the image; `StopRuntimeSession` on the runtime | the input bucket |
+| Task execution role | `ecr:GetAuthorizationToken` on `*` (the action takes no resource), `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, Logs write on the task log group | everything else; never reachable by code (S-5) |
+| AgentCore runtime role | `ecr:GetAuthorizationToken` on `*`, `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, Logs write on `/aws/bedrock-agentcore/runtimes/<runtimeId>-*` (the id from the runtime's `GetAtt` at deploy); with `sessionFiles`, `s3:GetObject`, `s3:PutObject` on `sessions/${aws:AgentCoreRuntimeSourceSid}/*` and `s3:ListBucket` with an `s3:prefix` condition | everything else |
+| Reaper role | read, update and delete every registry row; `ecs:ListTasks`, `DescribeTasks`, `StopTask` on the cluster; `lambda:ListMicrovms`, `GetMicrovm`, `TerminateMicrovm` on the image; `StopRuntimeSession` on the runtime | the input bucket |
 | Drain role | the reaper role | the input bucket |
 
 The runtime and execution roles reach no tenant data.
@@ -343,8 +343,8 @@ instances use too (S-6 checks this).
 | Endpoint | Policy allows | Present when |
 |---|---|---|
 | S3 gateway (sandbox route table only) | `s3:GetObject` on the ECR layer bucket `prod-<region>-starport-layer-bucket/*`; with `sessionFiles`, `s3:GetObject`, `s3:PutObject`, `s3:ListBucket` on the input bucket's `sessions/` prefix | `agentcore`, or `nitro` when S-6 shows the task ENI pulls |
-| ECR `api` and `dkr` | `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer` on the runner repository | same as above |
-| CloudWatch Logs | `logs:CreateLogStream`, `logs:PutLogEvents` on the sample's task and runtime log groups | `nitro`, `agentcore` |
+| ECR `api` and `dkr` | `ecr:GetAuthorizationToken` on `*` (account-wide by design, useless without a pull grant); `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer` on the runner repository | same as above |
+| CloudWatch Logs | `logs:CreateLogStream`, `logs:PutLogEvents` on the task log group and on `/aws/bedrock-agentcore/runtimes/<runtimeId>-*` | `nitro`, `agentcore` |
 
 Security groups:
 
@@ -369,10 +369,17 @@ The tool writes one structured line per call with `process.stdout.write`
 them): `tenantId`, `backend`, `handle` (MicroVM id, task ARN or
 `runtimeSessionId`), `runId`, `sandbox` (`started` or `reused`),
 `outcome` (tool error code or `ok`), `exitCode`, `timedOut`, `durationMs`,
-`startMs`, `inputBytes`, `outputBytes`. The reaper, the drain and the tool
-write one line per stopped sandbox with `tenantId`, `backend` and
-`sandboxSeconds` (`stoppedAt - createdAt`). Two Contributor Insights rules
-rank tenants by runs and by `sandboxSeconds`. With `perTenantMetrics`, the
+`startMs`, `inputBytes`, `outputBytes`, and on a failed start
+`stoppedReason`. Whoever finds a sandbox gone writes one stop line per
+sandbox with `tenantId`, `backend`, `handle` and `sandboxSeconds`
+(`stoppedAt - createdAt`): the tool when it stops one or finds a handle
+dead, the reaper when it stops one or finds a MicroVM the platform ended,
+and the drain and offboard function. On `microvm` the line also carries
+`runningSeconds` and `suspendedSeconds`, from `GetMicrovm` state times when
+the API reports them (S-4), otherwise estimated as running until
+`lastUsedAt + sandboxIdle` and suspended after it, with `estimated` = true.
+Two Contributor Insights rules rank tenants by runs and by
+`sandboxSeconds`. With `perTenantMetrics`, the
 tool also emits EMF metrics `Runs`, `Errors`, `RunDuration`,
 `SandboxSeconds` with dimensions `TenantId` and `Backend`; it is off by
 default because the custom metric count grows with tenants.
@@ -399,7 +406,8 @@ One DynamoDB table, PITR on, `DESTROY`.
 | `address` | MicroVM endpoint, task private IP, or runtime ARN |
 | `nonce` | 32 random bytes, base64url, made by the tool at start |
 | `bootId` | the runner's boot id, from the first successful ready check or result (§3.4 Ready) |
-| `state` | `STARTING` \| `READY` \| `STOPPING` |
+| `state` | `STARTING` \| `READY` \| `STOPPING` \| `FAILED` |
+| `retryAt` | epoch ms; while `FAILED`, no takeover before it (now + 30 s) |
 | `createdAt`, `lastUsedAt`, `leaseUntil` | epoch ms; `leaseUntil` = start + the backend's start cap (§3.4) while `STARTING` |
 | `expiresAt` | `createdAt + sandboxMaxLife`; TTL attribute |
 | `version` | number, incremented on every write |
@@ -442,9 +450,14 @@ Reuse rule, per call (the tool):
 The reaper, every 5 minutes, sets `STOPPING` with `version = :seen` before
 any stop, so a call that updated the row meanwhile wins. It:
 
-- stops `nitro` sandboxes with `lastUsedAt` older than `sandboxIdle`;
+- stops `nitro` sandboxes in `READY` rows with `lastUsedAt` older than
+  `sandboxIdle`; a `STARTING` row is reaped only when the tool's own rule
+  (step 1) would treat its lease as passed;
 - stops every task tagged by the sample whose own `startedAt` is older than
   `sandboxMaxLife`, with or without a row (the third cap on `nitro`);
+- checks each `microvm` row with `GetMicrovm`; when the MicroVM is gone or
+  terminated (the platform ended it), writes the stop line and deletes the
+  row;
 - deletes rows past `expiresAt` after stopping their handle;
 - sweeps orphans with no matching row: tasks tagged by the sample and
   MicroVMs of the image. AgentCore has no API that lists a runtime's
@@ -455,7 +468,18 @@ any stop, so a call that updated the row meanwhile wins. It:
 DynamoDB TTL may delete an expired row before the reaper sees it; the
 sweep then stops the task or MicroVM as an orphan.
 
-A row with no `state` (a partial write) is treated as missing.
+A row with no `state` (a partial write) is treated as missing. A
+`STARTING` row with no `handle` older than `startWait` plus the tool
+timeout is treated as having a passed lease, because its start died
+before recording what it started; the orphan sweep stops whatever it was.
+
+Failed starts. When `ready` sees the sandbox end before it served (a
+`nitro` task `STOPPED` before `RUNNING`, a MicroVM `FAILED`), the tool sets
+the row `FAILED` with `retryAt` and returns `sandbox_failed`, logging
+`stoppedReason`. A `FAILED` row is taken over like an expired one, but not
+before `retryAt`; until then calls return `sandbox_failed` at once. Starts
+pass the row's nonce as the idempotency token (`RunTask` `clientToken`,
+`RunMicrovm` `clientToken`), so a retried start call launches nothing new.
 
 ### 4.2 Input and output objects
 
@@ -498,7 +522,7 @@ Errors (tool error `code`, no stack, no tenant data):
 | `backend_disabled` | no | `backend` names one not deployed |
 | `sandbox_starting` | yes, after `retryAfterSeconds` | the tenant's sandbox is starting (§4.1) |
 | `sandbox_busy` | yes | the tenant's sandbox is running another job |
-| `sandbox_failed` | yes | the sandbox did not become ready within its lease, or died mid-run |
+| `sandbox_failed` | yes, after `retryAfterSeconds` | the sandbox ended before it served, or died mid-run (§4.1 failed starts) |
 | `tool_failed` | no | any other fault (from `toolHandler`) |
 
 A script that exits non-zero, times out or is killed is not a tool error: it
@@ -521,11 +545,34 @@ runtime and the image are deleted. It stops every handle in the registry,
 then every task and MicroVM the orphan sweep finds, and waits until
 `ListTasks` and `ListMicrovms` return none (at most 10 minutes). AgentCore
 sessions in rows are stopped with `StopRuntimeSession`; sessions with no
-row end with the runtime's delete (S-9). The construct names the runtime,
-the repository and the task and runtime log groups from its construct path,
-so two instances in one stack do not collide; it owns the log groups, and a
-log drain waits 90 s on delete before they go, as agentic-runtime-isolation
-ADR-0019 does.
+row end with the runtime's delete (S-9).
+
+Log groups. The construct owns the task log group and a log drain waits
+90 s on delete before it goes, as agentic-runtime-isolation ADR-0019 does.
+AgentCore creates the runtime's groups itself, as
+`/aws/bedrock-agentcore/runtimes/<runtimeId>-*`, after deploy, so the
+construct cannot own them. Instead a cleanup custom resource, on which the
+runtime depends, is deleted after the runtime and deletes every group
+under that prefix. The session usage logs that §3.8 uses for `agentcore`
+cost are delivered (`AWS::Logs::DeliverySource`, `DeliveryDestination`,
+`Delivery`) to a log group the construct owns. S-9 confirms the group
+names.
+
+Names. Every resource with an explicit name gets it from the construct
+path through one sanitiser per service, which keeps the service's charset,
+truncates, and appends 8 hex characters of a hash of the path:
+
+| Resource | Charset and length |
+|---|---|
+| AgentCore runtime | `[a-zA-Z][a-zA-Z0-9_]{0,47}` |
+| ECR repository (`emptyOnDelete` on) | lowercase, `[a-z0-9._/-]`, 256 |
+| ECS cluster and capacity provider | `[a-zA-Z0-9_-]`, 255 |
+| MicroVM image and network connector | per the Lambda MicroVMs API, checked in S-1 |
+| Task log group, usage-log group | `[\w./#-]`, 512 |
+| Two Contributor Insights rules | `RuleName`, 128 |
+
+The `synth` unit test asserts that every one of these names is unique and
+matches its charset when two instances share a stack.
 
 ## 6. Contracts
 
@@ -633,13 +680,15 @@ touched.
 | recycled-address | `nitro`: point A's row at B's live task address (test-only shortcut standing in for an IP that ECS reassigned), then call A: the identity check fails, nothing is sent to B's task, and A gets a fresh task |
 | idle | after `sandboxIdle` (2 min) idle the driver invokes the reaper; A's `nitro` task is stopped, and the stop line carries `sandboxSeconds` |
 | cold-from-zero | `nitro`: with no instance running, a new tenant `D`'s first call returns `sandbox_starting`; retries reuse the same task until it is `READY`, and no second task starts |
-| max-life | `nitro`: the driver invokes the reaper with a test-only `maxLifeSeconds` of 60 while A's task runs a long job; the task is stopped and A's next call gets a fresh one |
+| max-life | `nitro`: the driver invokes the reaper with `maxLifeSeconds` of 60 while A's task runs a long job; the task is stopped and A's next call gets a fresh one. Test-only shortcut: the reaper honours `maxLifeSeconds` only when its environment has `RC_INTEG_OVERRIDES=1`, which the integration stack sets through a CDK escape hatch and no prop exposes |
+| failed-start | `nitro`: the driver registers a task definition revision with a missing image for tenant `E` (test-only shortcut); `E`'s call returns `sandbox_failed`, a call within 30 s returns it again without a new `RunTask`, and the tool line carries `stoppedReason` |
+| microvm-stop | after A's MicroVM is ended by its idle policy (the integration stack sets `sandboxIdle` = 2 min and the driver waits for `GetMicrovm` to report it ended), the driver invokes the reaper; a stop line for A's MicroVM carries `sandboxSeconds`, `runningSeconds` and `suspendedSeconds` |
 | synth | a unit test synthesises two construct instances in one stack without a name collision |
 | session-files | `run-code-files`: A's session writes and reads its own `sessions/<sid>/`; a `GetObject` on B's session prefix is denied |
 | telemetry | Logs Insights finds one tool line per call with the §3.8 fields and the right `tenantId` |
 | forged | a direct Lambda invoke with a tampered tenant context returns `context_invalid` and starts nothing (test-only shortcut: only the gateway role may invoke the function in a real deployment) |
 | offboard | after `C`'s grant is removed, `offboardTenant` for `C` stops its sandboxes and deletes its rows; a second call returns the same result with nothing stopped |
-| teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left, and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
+| teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left (the task and usage-log groups, and every `/aws/bedrock-agentcore/runtimes/<runtimeId>-*` group), and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
 
 Every behaviour step runs once per backend unless it names one. The run
 records cold and warm latency per backend and the deploy and destroy time.
