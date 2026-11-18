@@ -75,6 +75,11 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     'aws-sdk-client-mock@4.1.0',
     'aws-sdk-client-mock-jest@4.1.0',
     'esbuild@0.28.2', // local NodejsFunction bundling, no Docker needed
+    // The integration test (test/integ.metering.ts): signs API calls as the stand-in callers
+    '@aws-sdk/credential-providers@3.1154.0',
+    '@aws-crypto/sha256-js@5.2.0',
+    '@smithy/protocol-http@5.6.2',
+    '@smithy/signature-v4@5.7.5',
   ],
   jestOptions: {
     jestConfig: {
@@ -102,6 +107,13 @@ project.gitignore.exclude('.ash/ash_output/');
 
 // Regenerate the SSDK + OpenAPI document from the model before every compile
 project.preCompileTask.exec('smithy build');
+
+// The integration test (integration-test.md): deploy, run, destroy.
+project.addTask('integ', {
+  description: 'Deploy the demo stack, run test/integ.metering.ts, destroy the stack (needs AWS_REGION)',
+  exec: 'bash scripts/integ.sh',
+  receiveArgs: true,
+});
 
 // ts-jest transpiles per file and reports no type errors, so the tests are
 // type-checked here.

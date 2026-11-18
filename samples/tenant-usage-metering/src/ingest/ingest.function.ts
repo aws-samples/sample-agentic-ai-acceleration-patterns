@@ -15,7 +15,7 @@ import { convertEvent, convertVersion1Response } from '@smithy/server-apigateway
 import type { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
 import { type AdmittedEmitter, Ingest, MAX_BODY_BYTES } from './ingest';
 import { busPublisher, directPublisher } from './publish';
-import { bodyBytes, errorResponse } from '../api/http';
+import { bodyBytes, errorResponse, lowercaseHeaders } from '../api/http';
 import { documentClient } from '../shared/db';
 import { ENV, requireEnv, requireIntEnv } from '../shared/env';
 import { errorName, log } from '../shared/logger';
@@ -51,7 +51,7 @@ export function createIngestHandler(ingest: Ingest) {
       if (admitted === undefined) {
         return errorResponse(403, 'AccessDeniedException', 'caller is not a registered emitter');
       }
-      const response = convertVersion1Response(await operation.handle(convertEvent(event), { admitted, requestId, metrics }));
+      const response = convertVersion1Response(await operation.handle(convertEvent(lowercaseHeaders(event)), { admitted, requestId, metrics }));
       if (response.statusCode >= 500) {
         log.error('ingest request failed', { requestId, httpStatus: response.statusCode });
       }

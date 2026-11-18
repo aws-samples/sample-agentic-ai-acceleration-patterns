@@ -66,7 +66,7 @@ export class TenantUsageMetering extends Construct {
       ingestBusName: `${unique}-ingest`,
       usageBusName: `${unique}-usage`,
       ingestSubscriberName: `${unique}-ingest-to-firehose`,
-      scheduleNamePrefix: `${unique}-`,
+      scheduleGroupName: unique,
     };
     const namespace = `${DEFAULT_NAMESPACE}/${unique}`;
 
@@ -88,7 +88,7 @@ export class TenantUsageMetering extends Construct {
       exportBucket: this.exportBucket,
       pipeline: this.pipeline,
       firehoseStreamName: names.firehoseStreamName,
-      scheduleNamePrefix: names.scheduleNamePrefix,
+      scheduleGroupName: names.scheduleGroupName,
       metricNamespace: namespace,
     });
     denyConfigurationChanges(this, storage);

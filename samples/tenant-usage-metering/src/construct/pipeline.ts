@@ -25,6 +25,8 @@ import { FIREHOSE_ERROR_PREFIX, RAW_PREFIX } from './storage';
 
 /** The subscriber retries for the longest event age the bus allows (ADR-0002). */
 export const SUBSCRIBER_MAX_EVENT_AGE = Duration.hours(24);
+/** The most attempts a subscriber's retry policy takes (AWS::EventsV2::Subscriber). */
+export const SUBSCRIBER_MAX_RETRY_ATTEMPTS = 185;
 
 export interface Pipeline {
   readonly ingestBus?: eventsv2.CfnEventBus;
@@ -169,7 +171,9 @@ export function createPipeline(scope: Construct, props: ResolvedProps, roles: Se
     description: 'tenant-usage-metering: ingest bus to Firehose (ADR-0002)',
     type: 'UNORDERED',
     batchConfiguration: { maxBatchSize: 500, maxBatchWindowInSeconds: 5 },
-    retryPolicy: { maxEventAgeInSeconds: SUBSCRIBER_MAX_EVENT_AGE.toSeconds() },
+    // The age bounds the retries: the attempt count is set to its maximum,
+    // because its default (5) would end them long before 24 hours.
+    retryPolicy: { maxEventAgeInSeconds: SUBSCRIBER_MAX_EVENT_AGE.toSeconds(), maxRetryAttempts: SUBSCRIBER_MAX_RETRY_ATTEMPTS },
     onFailureConfiguration: { arn: ingestDeadLetterQueue.queueArn },
   });
   // aws-cdk-lib 2.274.0's L1 lacks `InvokeConfiguration`, which the resource

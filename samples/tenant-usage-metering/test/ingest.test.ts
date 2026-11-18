@@ -224,6 +224,20 @@ describe('admin function (spec §3.2)', () => {
     expect(ddb.calls()).toHaveLength(0);
   });
 
+  test('a delete takes the control-plane ids from headers in any case', async () => {
+    ddb.reset();
+    const binding = { PK: `CELL#${CELL}`, SK: 'TENANT#tenant-b', cellId: CELL, tenantId: 'tenant-b', applicationId: 'demo-app', status: 'ACTIVE', activeFrom: '2026-11-18T00:00:00Z', createdBy: 'x', createdAt: '2026-11-18T00:00:00Z' };
+    ddb.on(GetCommand).resolves({ Item: binding });
+    const handler = createAdminHandler(
+      createAdminService({ db, config: { tableName: 't', fleetName: 'demo', recountWindowHours: 96, closeGraceMinutes: 60, blockedAccountIds: [], ingestPath: 'BUS' }, startJob: async () => {} }, lists),
+    );
+    const event = adminRequest('DELETE', `/cells/${CELL}/tenants/tenant-b`, '/cells/{cellId}/tenants/{tenantId}', 'arn:aws:sts::111122223333:assumed-role/registrar/session-1');
+    const withHeaders = { ...event, headers: { 'X-Control-Plane-Execution-Id': 'exec-9' }, multiValueHeaders: { 'X-Control-Plane-Execution-Id': ['exec-9'] } } as APIGatewayProxyEvent;
+    const out = await handler(withHeaders);
+    expect(out.statusCode).toBe(200);
+    expect(JSON.parse(out.body).binding).toMatchObject({ status: 'CLOSING', closedByExecutionId: 'exec-9' });
+  });
+
   test('a cell in a blocked account is refused ACCOUNT_NOT_ALLOWED', async () => {
     ddb.reset();
     const handler = createAdminHandler(

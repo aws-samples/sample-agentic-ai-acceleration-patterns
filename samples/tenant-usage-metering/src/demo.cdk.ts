@@ -33,6 +33,7 @@ export interface DemoContext {
   readonly fleetName: string;
   readonly ingestPath: IngestPath;
   readonly rawRetentionDays?: number;
+  readonly lateGraceMinutes?: number;
   readonly integLocalCell: boolean;
 }
 
@@ -40,10 +41,12 @@ export function parseDemoContext(get: (key: string) => unknown): DemoContext {
   const fleetName = (get('fleetName') as string | undefined) ?? 'demo';
   const ingestPath = ((get('ingestPath') as string | undefined) ?? 'BUS') as IngestPath;
   const retention = get('rawRetentionDays') as string | number | undefined;
+  const grace = get('lateGraceMinutes') as string | number | undefined;
   return {
     fleetName,
     ingestPath,
     ...(retention !== undefined ? { rawRetentionDays: Number(retention) } : {}),
+    ...(grace !== undefined ? { lateGraceMinutes: Number(grace) } : {}),
     integLocalCell: String(get('integLocalCell') ?? 'false') === 'true',
   };
 }
@@ -70,6 +73,7 @@ export class TenantUsageMeteringDemoStack extends Stack {
       operatorPrincipalArns: [operator.roleArn],
       readerPrincipalArns: [reader.roleArn],
       ...(props.context.rawRetentionDays !== undefined ? { rawRetentionDays: props.context.rawRetentionDays } : {}),
+      ...(props.context.lateGraceMinutes !== undefined ? { lateGraceMinutes: props.context.lateGraceMinutes } : {}),
       testOnlyAllowCellsInMeteringAccount: props.context.integLocalCell,
     });
 

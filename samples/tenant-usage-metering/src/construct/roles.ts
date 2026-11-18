@@ -65,8 +65,12 @@ export function tableWriters(roles: ServiceRoles): iam.Role[] {
 export interface RoleNames {
   readonly firehoseStreamName: string;
   readonly ingestSubscriberName: string;
-  /** Every EventBridge Scheduler schedule of the stack starts with this. */
-  readonly scheduleNamePrefix: string;
+  /**
+   * The stack's own EventBridge Scheduler schedule group. Scheduler sets
+   * `aws:SourceArn` to the schedule group, not the schedule, when it assumes
+   * its role (verified in pg 2026-11-18: a schedule ARN is refused).
+   */
+  readonly scheduleGroupName: string;
 }
 
 export function createServiceRoles(scope: Construct, names: RoleNames): ServiceRoles {
@@ -94,7 +98,7 @@ export function createServiceRoles(scope: Construct, names: RoleNames): ServiceR
       assumedBy: new iam.ServicePrincipal('scheduler.amazonaws.com', {
         conditions: {
           ...sourceAccount,
-          ArnLike: { 'aws:SourceArn': stack.formatArn({ service: 'scheduler', resource: 'schedule', resourceName: `default/${names.scheduleNamePrefix}*` }) },
+          ArnEquals: { 'aws:SourceArn': stack.formatArn({ service: 'scheduler', resource: 'schedule-group', resourceName: names.scheduleGroupName }) },
         },
       }),
       description: 'tenant-usage-metering EventBridge Scheduler (spec §3.1)',

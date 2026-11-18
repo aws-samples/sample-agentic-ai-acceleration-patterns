@@ -15,7 +15,7 @@ import { convertEvent, convertVersion1Response } from '@smithy/server-apigateway
 import type { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
 import type { AdminConfig, AdminContext, AdminDeps } from './deps';
 import { apiError, isModelledError } from './errors';
-import { errorResponse } from './http';
+import { errorResponse, lowercaseHeaders } from './http';
 import { getJob, jobOut, listJobs, startIngestRedrive, startReadmission, startRecount, startResendBlocked, startSinkRedrive } from './jobs';
 import { createMeter, deleteMeter, getMeter, listMeters, meterOut, updateMeter } from './meters';
 import { getHour, listHours, readUsage, recordOut } from './reads';
@@ -267,7 +267,7 @@ export function createAdminHandler(service: TenantUsageMeteringServiceService<Ad
       return errorResponse(403, 'AccessDeniedException', 'caller is not permitted for this route');
     }
     try {
-      const response = convertVersion1Response(await serviceHandler.handle(convertEvent(event), { caller, requestId }));
+      const response = convertVersion1Response(await serviceHandler.handle(convertEvent(lowercaseHeaders(event)), { caller, requestId }));
       if (response.statusCode >= 500) {
         log.error('admin request failed', { requestId, httpStatus: response.statusCode });
       }

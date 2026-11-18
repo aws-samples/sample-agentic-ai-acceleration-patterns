@@ -1,10 +1,12 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { App, Stack } from 'aws-cdk-lib';
+import { App, Duration, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { hourQuery } from '../src/construct/pipeline';
 import { resolveProps, type TenantUsageMeteringProps } from '../src/construct/props';
+import { subscriberFilters, UsageSubscriber, type UsageSubscriberProps } from '../src/subscriber/usage-subscriber';
 import { TenantUsageMetering } from '../src/tenant-usage-metering';
 
 const ACCOUNT = '111122223333';
@@ -244,5 +246,44 @@ describe('functions, recounter and alarms (spec §3.1)', () => {
     expect(denies).toHaveLength(1);
     const allowed = (denies[0].Condition as { ArnNotEquals: Record<string, unknown[]> }).ArnNotEquals['aws:PrincipalArn'];
     expect(JSON.stringify(allowed)).toContain('BucketNotificationsHandler');
+  });
+});
+
+describe('UsageSubscriber (spec §6.3, ADR-0006)', () => {
+  const BUS = 'arn:aws:events:eu-central-1:111122223333:event-busv2/demo-usage/abcdefghijklmnopqrstuvwxy';
+  const subscribe = (props: Partial<UsageSubscriberProps> = {}) => {
+    const app = new App();
+    const stack = new Stack(app, 'Reader', { env: { account: ACCOUNT, region: 'eu-central-1' } });
+    const role = new iam.Role(stack, 'DeliveryRole', { assumedBy: new iam.AccountRootPrincipal() });
+    const reader = new UsageSubscriber(stack, 'Reader', { busArn: BUS, targetArn: 'arn:aws:sqs:eu-central-1:111122223333:billing', role, ...props });
+    return { template: Template.fromStack(stack), reader };
+  };
+
+  test('always a dead-letter queue, 24 h of retries and two alarms', () => {
+    const { template, reader } = subscribe();
+    template.hasResourceProperties('AWS::EventsV2::Subscriber', {
+      EventBusArn: BUS,
+      Type: 'UNORDERED',
+      StartingPosition: 'LATEST',
+      RetryPolicy: { MaxEventAgeInSeconds: 86400, MaxRetryAttempts: 185 },
+      OnFailureConfiguration: { Arn: Match.anyValue() },
+      InvokeConfiguration: { TargetArn: 'arn:aws:sqs:eu-central-1:111122223333:billing', RoleArn: Match.anyValue() },
+    });
+    template.hasResourceProperties('AWS::SQS::Queue', { MessageRetentionPeriod: 1209600, SqsManagedSseEnabled: true });
+    expect(reader.alarms).toHaveLength(2);
+    expect(template.findResources('AWS::EventsV2::Subscriber')[Object.keys(template.findResources('AWS::EventsV2::Subscriber'))[0]].Properties.FilterConfiguration).toBeUndefined();
+  });
+
+  test('meter and tenant filters go on the payload; a bad value fails synth', () => {
+    expect(subscriberFilters(['agent.tokens'], ['tenant-a'])).toEqual([{ scope: 'DATA', pattern: '{"meterId":["agent.tokens"],"tenantId":["tenant-a"]}' }]);
+    const { template } = subscribe({ meters: ['agent.tokens'], type: 'FIFO', startingPosition: new Date('2026-11-18T00:00:00Z') });
+    template.hasResourceProperties('AWS::EventsV2::Subscriber', {
+      Type: 'FIFO',
+      StartingPosition: 'POINT_IN_TIME',
+      PointInTimeConfiguration: { PointType: 'TIMESTAMP', StartingPoint: 1794960000 },
+      FilterConfiguration: { Filters: [{ Scope: 'DATA', Pattern: '{"meterId":["agent.tokens"]}' }] },
+    });
+    expect(() => subscribe({ tenants: ['bad tenant'] })).toThrow(/charset/);
+    expect(() => subscribe({ maxEventAge: Duration.hours(25) })).toThrow(/24 hours/);
   });
 });

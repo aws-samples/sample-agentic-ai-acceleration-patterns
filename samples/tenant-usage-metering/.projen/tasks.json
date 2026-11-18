@@ -189,6 +189,16 @@
         }
       ]
     },
+    "integ": {
+      "name": "integ",
+      "description": "Deploy the demo stack, run test/integ.metering.ts, destroy the stack (needs AWS_REGION)",
+      "steps": [
+        {
+          "exec": "bash scripts/integ.sh",
+          "receiveArgs": true
+        }
+      ]
+    },
     "package": {
       "name": "package",
       "description": "Creates the distribution package"
@@ -286,6 +296,10 @@
           "execArgs": [
             "npm",
             "update",
+            "@aws-crypto/sha256-js",
+            "@aws-sdk/credential-providers",
+            "@smithy/protocol-http",
+            "@smithy/signature-v4",
             "@stylistic/eslint-plugin",
             "@types/aws-lambda",
             "@types/jest",

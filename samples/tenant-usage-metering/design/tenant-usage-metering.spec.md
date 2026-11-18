@@ -3,7 +3,7 @@
 
 # Specification: Tenant usage metering for agentic applications
 
-Status: draft for review. No code yet.
+Status: accepted; implemented in src/ (integration test: test/integ.metering.ts).
 
 ## 1. Problem statement
 
@@ -143,14 +143,14 @@ All in the metering account, one stack.
 |---|---|
 | Ingest door | REST API, IAM auth (SigV4), resource policy of §3.2. `PutUsageEvents`, batches of up to 100 |
 | Ingest function | Verifies the caller is a registered emitter, checks each event against the cell's bindings and the meter catalog, validates the shape, publishes accepted events to the ingest bus (or Firehose, with `ingestPath: DIRECT`) and writes refused ones to the error store (ADR-0001, ADR-0002) |
-| Ingest bus | EventBridge Custom Event Bus, `ingestBusRetentionDays` retention; `DeduplicationId = <applicationId>#<tenantId>#<eventId>`, `EventGroupId = tenantId`; a Firehose subscriber with a retry policy of 24 h maximum event age and an SQS dead-letter queue (ADR-0002) |
+| Ingest bus | EventBridge Custom Event Bus, `ingestBusRetentionDays` retention; `DeduplicationId` = SHA-256 (hex) of `<applicationId>#<tenantId>#<eventId>` (the bus caps the id at 128 characters and the key can reach 134), `EventGroupId = tenantId`; a Firehose subscriber with a retry policy of 24 h maximum event age and 185 attempts (the default of 5 would end retries early) and an SQS dead-letter queue (ADR-0002) |
 | Raw stream | Amazon Data Firehose to S3, 60 s buffer, dynamic partitioning by event hour into `raw/hour=YYYY-MM-DDTHH/` (§4.8) |
 | Ingest redrive | A function an operator starts with `StartIngestRedrive`: moves messages from the ingest dead-letter queue into Firehose, each as the envelope the bus would have delivered, unchanged. An alarm fires on any object under Firehose's `firehose-error/` prefix, which the recount does not read |
 | Table | One DynamoDB table, PITR on: registry, meters, sinks, hours, recounts, usage records (§4) |
 | Admin API | Same REST API: meters, sinks, registrations, usage reads, recounts, re-admission, redrives |
 | Object tracker | S3 event notification on `raw/` and `readmitted/`: for every new object, creates the hour item if absent and increments its `generation` (§4.5); failed invocations go to an SQS on-failure destination the scheduler replays |
-| Recounter | Step Functions, one execution per hour: reads the hour's raw objects, dedupes, sums per meter rule, writes usage records (§4.9) |
-| Scheduler | EventBridge Scheduler, every 5 minutes: queries the sparse index of hours that are not `CLOSED` and starts a recount for each hour that is due, `DIRTY`, `COUNT_FAILED` past its backoff, or `COUNTING` with an expired lease; replays the object tracker's failures; sweeps `publishPending` records |
+| Recounter | Step Functions, one execution per hour, under a role that only invokes its task function; the task function, under the recounter role, reads the hour's raw objects, dedupes, sums per meter rule, writes usage records (§4.9) |
+| Scheduler | EventBridge Scheduler, in the stack's own schedule group, every 5 minutes: queries the sparse index of hours that are not `CLOSED` and starts a recount for each hour that is due, `DIRTY`, `COUNT_FAILED` past its backoff, or `COUNTING` with an expired lease; replays the object tracker's failures. A second 5-minute schedule runs the record publisher's sweep of `publishPending` records |
 | Record publisher | DynamoDB Streams on usage-record writes that set `publishPending` (§4.7): publishes `UsageRecorded` to the usage bus, queues one delivery per sink, and clears the record's `publishPending` marker; the scheduler sweeps records whose marker is older than 15 minutes (§4.7), and an alarm fires on failed stream batches |
 | Usage bus | EventBridge Custom Event Bus, `usageBusRetentionDays` retention; one `UsageRecorded` event per usage record revision (§4.8), `DeduplicationId = <recordId>#<revision>`, `EventGroupId = tenantId`. Always on |
 | Sink dispatcher | Sends each queued delivery to its sink, retries for 24 h, then marks it `FAILED` and alarms |
@@ -241,6 +241,7 @@ subscriber.
 | `usageSubscriberAccountIds` | vendor accounts the usage bus is shared with | `[]` |
 | `deploymentRoleArn` | the role CloudFormation runs as, exempt from the bucket configuration denies (§3.5) | the bootstrap `cfn-exec` role |
 | `alarmTopicArn` | optional SNS topic for every alarm of the stack | none |
+| `testOnlyAllowCellsInMeteringAccount` | test only: lets `PutCellEmitter` register a cell in the metering account, so a one-account integration test can run an emitter; never set in a deployment | `false` |
 
 ### 3.4 Lifecycle wiring with the control plane
 
@@ -324,7 +325,7 @@ URL as its default (control-plane R-34).
 | Table | A DynamoDB resource-based policy denies `dynamodb:PutItem`, `UpdateItem`, `DeleteItem`, `BatchWriteItem`, `PartiQLInsert`, `PartiQLUpdate`, `PartiQLDelete` and `ConditionCheckItem` on the table to all but the stack's function and state machine roles, so no other principal can write a registration, meter, sink or record |
 | Ingest dead-letter queue | The queue policy denies `sqs:SendMessage` to all but `events.amazonaws.com` with `aws:SourceArn` = the ingest subscriber |
 | Firehose stream | Firehose has no resource policy, so any principal in the metering account granted `firehose:PutRecord*` on the stream can write raw usage. The stack grants it only to the ingest and redrive functions and the subscriber role; an SCP or permissions boundary that denies it to everyone else is the production control |
-| Service-principal trust | Every service-principal trust policy and resource policy (the Lambda permission for S3 notifications, SQS queue policies, Scheduler, Firehose and bus subscriber role trust) is conditioned on `aws:SourceArn` and `aws:SourceAccount`. A DynamoDB Streams trigger is polled with the function's own role and needs none |
+| Service-principal trust | Every service-principal trust policy and resource policy (the Lambda permission for S3 notifications, SQS queue policies, Scheduler, Firehose and bus subscriber role trust) is conditioned on `aws:SourceArn` and `aws:SourceAccount`; Scheduler's `aws:SourceArn` is its schedule group, so the stack has a group of its own. A DynamoDB Streams trigger is polled with the function's own role and needs none |
 | Audit | API Gateway access logs on every route with `$context.identity.userArn`, `$context.requestId` and the route, kept for `rawRetentionDays`; every item written through the API carries `createdBy` (the caller ARN) and `createdAt` (§4) |
 | Logs | No event payload, sink request or response body, or credential is logged; recounter execution state holds keys and counts only |
 | Heartbeat | An alarm that does not depend on the scheduler fires when the scheduler's target has not run for 15 minutes, or no hour has reached `COUNTED` for 2 hours while the `pending` index holds hours past their grace |
@@ -350,6 +351,9 @@ One DynamoDB table, `PK`/`SK`, PITR on, TTL on `expiresAt`. Every item
 written through the API (meter versions, sinks, registrations, jobs) also
 carries `createdBy`, the caller ARN, and `createdAt`; registrations also
 carry `controlPlaneExecutionId` and `controlPlaneOperatorId` (§3.4).
+A third sparse index, `list-by-type` (partition `listType`, sort
+`listSort`), lists meters (their `CURRENT` item), sinks, emitters and
+jobs for the `List*` operations.
 
 ### 4.1 Meter
 
@@ -443,7 +447,7 @@ placed in another cell, it lands in a new item, and the old one stays
 | `enabled` | boolean |
 | `endpoint` | `HTTP`: HTTPS URL. `S3_EXPORT`: a key prefix in the sample's export bucket |
 | `secretName` | `HTTP` only: Secrets Manager name of the credential, under `<fleet>/metering/sinks/`; `CreateSink` and `UpdateSink` refuse any other name, and the dispatcher's role may read only that prefix |
-| `mapping` | `HTTP` only: target field name → source (record field, meter field, or constant) |
+| `mapping` | `HTTP` only: target field name → source (record field, meter field, or constant); without one, the body is the `UsageRecorded` detail |
 | `meters` | meter ids this sink takes; empty is all |
 
 ### 4.5 Hour
@@ -530,14 +534,21 @@ raises an alarm.
 | inputs | `from`, `to` (inclusive, at most 744 hours apart), `reason`, `sinkId`, `tenantId`, `applicationId`, as the kind needs |
 | `statusReason`, `updatedAt` | why a job `FAILED`, and its last change |
 
+A job runs in one invocation of its worker and stops 13 minutes in; a job
+that ran out of time is `FAILED` with that reason and is started again,
+because every kind is safe to repeat. `SINK_REDRIVE` scans the usage
+records (the table has no index by hour or by sink state), so it is an
+operator job, run rarely.
+
 `RECOUNT` increments `generation` of each hour in range, the same path a
 new object takes, so a `COUNTED` hour becomes `DIRTY` and a `COUNTING`
 one ends `DIRTY`; a `CLOSED` hour in range is refused. `READMIT` runs every event of the chosen error objects through
-the ingest checks again, judging each by the §4.2 check (the current
-registration or any of its `intervals`) and the meter version at its
-time, and writes the ones
+the ingest checks again, with the event's `receivedAt` as their clock,
+judging each by the §4.2 check (the current registration or any of its
+`intervals`) and the meter version at its time, and writes the ones
 that pass, with their original `receivedAt`, to `readmitted/hour=.../`,
-which the recount reads with `raw/`. It writes S3 directly, so it may
+which the recount reads with `raw/`. The error objects of an hour range
+are those received in it (their key is the receipt hour). It writes S3 directly, so it may
 re-admit into any hour that is not `CLOSED` and not within 5 minutes of
 its close; other events stay refused, `TOO_LATE` (the close guard,
 §4.5).
@@ -579,7 +590,12 @@ scheduler also queries the index every 5 minutes for markers older than
 batch is caught after the stream's 24-hour retention as well.
 
 Sink delivery: a record goes to the sinks enabled when it is written that
-take its meter. `PENDING` → `SENT`, or `RETRYING` with backoff for 24 h →
+take its meter. An `S3_EXPORT` delivery is one JSON line, the
+`UsageRecorded` detail, at `<prefix>hour=<hour>/<recordId>-r<revision>.jsonl`.
+An `HTTP` delivery is a POST with `Idempotency-Key: <recordId>` and the
+secret as a header: a JSON secret `{"header": ..., "value": ...}`, or a
+bare string sent as `Authorization: Bearer`. Redirects are not followed; a
+3xx, or a 4xx other than 408 and 429, is `FAILED` at once. `PENDING` → `SENT`, or `RETRYING` with backoff for 24 h →
 `FAILED` and an alarm; `SINK_REDRIVE` sends a sink's `FAILED` deliveries
 again, or, given an hour range, every record of that range, which is how
 a sink enabled later is backfilled.
@@ -609,7 +625,8 @@ the tenant and application's records with a strongly consistent query on
 the base table. For each record with a `BLOCKED` sink, the job writes the value as revision 2 with
 `publishPending` (condition `revision = 1`), or, on a record already at
 revision 2, queues its `BLOCKED` sinks directly. An alarm fires when a
-delivery has been `BLOCKED` for 24 hours.
+delivery becomes `BLOCKED`; an alarm on 24 hours `BLOCKED` would need an
+index of blocked deliveries, a seam.
 
 ### 4.8 Usage event and raw objects (the wire contract)
 

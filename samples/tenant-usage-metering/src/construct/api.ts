@@ -49,7 +49,9 @@ export interface MeteringApi {
 
 /** The nearest CloudWatch Logs retention at or above `days`. */
 export function retentionAtLeast(days: number): logs.RetentionDays {
-  const values = Object.values(logs.RetentionDays).filter((value): value is number => typeof value === 'number' && value > 0).sort((a, b) => a - b);
+  const values = Object.values(logs.RetentionDays)
+    .filter((value): value is number => typeof value === 'number' && value > 0)
+    .sort((a, b) => a - b);
   return (values.find((value) => value >= days) ?? logs.RetentionDays.INFINITE) as logs.RetentionDays;
 }
 
@@ -84,7 +86,11 @@ function routePolicy(props: ApiProps): iam.PolicyDocument {
   for (const [key, routes] of groups) {
     const principals = key.split(',').flatMap((cls) => props.callers[cls as CallerClass]);
     const resources = routes.map(routeResource);
-    const sid = key.replace(/[^a-z]/g, ' ').split(' ').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join('');
+    const sid = key
+      .replace(/[^a-z]/g, ' ')
+      .split(' ')
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join('');
     if (principals.length > 0) {
       statements.push(
         new iam.PolicyStatement({
@@ -105,7 +111,13 @@ function routePolicy(props: ApiProps): iam.PolicyDocument {
       );
     } else {
       statements.push(
-        new iam.PolicyStatement({ sid: `Deny${sid}Routes`, effect: iam.Effect.DENY, principals: [new iam.AnyPrincipal()], actions: ['execute-api:Invoke'], resources }),
+        new iam.PolicyStatement({
+          sid: `Deny${sid}Routes`,
+          effect: iam.Effect.DENY,
+          principals: [new iam.AnyPrincipal()],
+          actions: ['execute-api:Invoke'],
+          resources,
+        }),
       );
     }
   }
@@ -161,23 +173,33 @@ export function createApi(scope: Construct, props: ApiProps): MeteringApi {
     }
     return current;
   };
-  resourceFor(INGEST_ROUTE.path).addMethod(INGEST_ROUTE.method, new apigateway.LambdaIntegration(props.ingestFn), iamMethod);
-  const admin = new apigateway.LambdaIntegration(props.adminFn);
+  resourceFor(INGEST_ROUTE.path).addMethod(
+    INGEST_ROUTE.method,
+    new apigateway.LambdaIntegration(props.ingestFn, { allowTestInvoke: false }),
+    iamMethod,
+  );
+  // One permission for the whole API: a permission per method (29, and as
+  // many test permissions) overflows the function's 20 KB resource policy
+  // (pg, 2026-11-18). The function checks the route itself (src/api/handler.ts).
+  const admin = new apigateway.LambdaIntegration(props.adminFn, { allowTestInvoke: false, scopePermissionToMethod: false });
   for (const route of ADMIN_ROUTES) {
     resourceFor(route.path).addMethod(route.method, admin, iamMethod);
   }
 
   Validations.of(api).acknowledge({
     id: 'AwsSolutions-APIG2',
-    reason: 'Request validation is the Smithy SSDK in each function (model patterns, ranges, required members); the ingest function checks each event alone (spec §4.8).',
+    reason:
+      'Request validation is the Smithy SSDK in each function (model patterns, ranges, required members); the ingest function checks each event alone (spec §4.8).',
   });
   Validations.of(api).acknowledge({
     id: 'AwsSolutions-APIG3',
-    reason: 'WAFv2 is production hardening (README checklist): every method is AWS_IAM behind a resource policy with explicit denies, and the routes have method throttles (spec §3.2).',
+    reason:
+      'WAFv2 is production hardening (README checklist): every method is AWS_IAM behind a resource policy with explicit denies, and the routes have method throttles (spec §3.2).',
   });
   Validations.of(api).acknowledge({
     id: 'AwsSolutions-APIG6',
-    reason: 'Execution logging needs the account-level API Gateway CloudWatch role, an account setting the sample does not own; access logs with the caller ARN are on (spec §3.5).',
+    reason:
+      'Execution logging needs the account-level API Gateway CloudWatch role, an account setting the sample does not own; access logs with the caller ARN are on (spec §3.5).',
   });
   Validations.of(api).acknowledge({
     id: 'AwsSolutions-COG4',

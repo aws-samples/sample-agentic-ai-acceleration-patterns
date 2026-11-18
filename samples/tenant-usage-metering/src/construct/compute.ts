@@ -44,7 +44,7 @@ export interface ComputeProps {
   readonly exportBucket: s3.Bucket;
   readonly pipeline: Pipeline;
   readonly firehoseStreamName: string;
-  readonly scheduleNamePrefix: string;
+  readonly scheduleGroupName: string;
   readonly metricNamespace: string;
 }
 
@@ -253,12 +253,13 @@ export function createCompute(scope: Construct, props: ComputeProps): Compute {
     [ENV.trackerFailureQueueUrl]: trackerFailureQueue.queueUrl,
     [ENV.lateGraceMinutes]: String(config.lateGraceMinutes),
   });
+  const scheduleGroup = new scheduler.CfnScheduleGroup(scope, 'ScheduleGroup', { name: props.scheduleGroupName });
   for (const [id, target, input] of [
     ['Scheduler', schedulerFn, '{}'],
     ['OutboxSweep', publisherFn, '{"sweep":true}'],
   ] as const) {
-    new scheduler.CfnSchedule(scope, `${id}Schedule`, {
-      name: `${props.scheduleNamePrefix}${id.toLowerCase()}`,
+    const schedule = new scheduler.CfnSchedule(scope, `${id}Schedule`, {
+      groupName: props.scheduleGroupName,
       scheduleExpression: 'rate(5 minutes)',
       flexibleTimeWindow: { mode: 'OFF' },
       target: {
@@ -268,6 +269,7 @@ export function createCompute(scope: Construct, props: ComputeProps): Compute {
         retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 300 },
       },
     });
+    schedule.addDependency(scheduleGroup);
     target.grantInvoke(roles.schedule);
   }
 
