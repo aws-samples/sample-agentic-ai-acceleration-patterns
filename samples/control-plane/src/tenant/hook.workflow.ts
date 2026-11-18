@@ -6,13 +6,14 @@
  * R-45 and R-46, ADR-044): the JSONata of every hook state, the hook
  * buildspec, and the sub-graph that runs one list of hooks.
  *
- * ONE copy of the sub-graph serves all four lists of an execution (cell
- * `PRE`, cell `POST`, deployment `PRE`, deployment `POST`). A caller enters
- * through one of four `*Hooks` Pass states, which assign the list and the
+ * ONE copy of the sub-graph serves the four lists of an execution (cell
+ * `PRE`, cell `POST`, deployment `PRE`, deployment `POST`), and the two of a
+ * record event (`PRE`, `POST`, §8.4 R-50, ADR-045). A caller enters
+ * through one of six `*Hooks` Pass states, which assign the list and the
  * way back; the sub-graph runs the hooks one at a time and leaves through
  * {@link HookRunner.listDone} (the list ran) or {@link HookRunner.failureTarget}
- * (a create or update hook failed). The workflow wires the four ways back and
- * the two failure writes after it has built its own states.
+ * (a create or update hook failed). The workflow wires the six ways back and
+ * the three failure writes after it has built its own states.
  *
  * The loop holds its state in workflow variables, never in the state payload
  * (§8.1): the payload carries only what the terminal writes read
@@ -134,13 +135,33 @@ const START_TRY_BOUND_MS = (HOOK_TASK_TIMEOUT_SECONDS + HOOK_RETRY_MAX_ATTEMPTS 
 /** Per attempt of a delete hook: the 17 minutes beyond the run timeout (10 refused or queued, 5 margin, 2 stop). */
 const ATTEMPT_OVERHEAD_MINUTES = REFUSAL_AND_QUEUE_MINUTES + DEADLINE_MARGIN_MINUTES + HOOK_STOP_BUDGET_MINUTES;
 
-/** One of the four lists a caller enters the sub-graph with. */
-export type HookListKind = 'cellPre' | 'cellPost' | 'tenantPre' | 'tenantPost';
+/** One of the six lists a caller enters the sub-graph with. */
+export type HookListKind = 'cellPre' | 'cellPost' | 'tenantPre' | 'tenantPost' | 'recordPre' | 'recordPost';
+
+/** The record event of the execution input (`RecordEventWorkflowInput`, §8.4). */
+const RECORD_EVENT = '$states.input.recordEvent';
 
 /** The list's own variables: which build, which phase, which hooks, the way back. */
 export function listBeginAssign(kind: HookListKind): Record<string, string | boolean | number | unknown[]> {
   const cell = kind.startsWith('cell');
   const pre = kind.endsWith('Pre');
+  if (kind.startsWith('record')) {
+    const list = `${RECORD_EVENT}.hooks.${pre ? 'pre' : 'post'}`;
+    return {
+      HMODE: 'record',
+      HRET: kind,
+      PHASE: pre ? 'PRE' : 'POST',
+      // The verb of `<RECORD_TYPE>_<VERB>` tells create and update (first failure ends) from delete (skip, R-46).
+      HOP: expr(`$lowercase($substringAfter(${RECORD_EVENT}.event, '_'))`),
+      EVENT: expr(`${RECORD_EVENT}.event`),
+      // R-50: a tenant or account event runs no application hook, whatever the input holds.
+      HOOKS: expr(`$append([], ${RECORD_EVENT}.recordType = 'APPLICATION' ? ${list} : ${list}[scope = 'GLOBAL'])`),
+      HI: 0,
+      HFAILED: false,
+      EXECUTION_ID: expr('$states.context.Execution.Name'),
+      ...(pre ? { RUNS: [] } : {}),
+    };
+  }
   const build = cell ? '$states.input.cellBuild' : '$states.input.tenantBuild';
   const event = cell ? `"CELL_" & $uppercase(${build}.operation)` : `"DEPLOYMENT_" & $uppercase(${build}.operation)`;
   return {
@@ -204,6 +225,22 @@ export const BEGIN_TRY_ASSIGN: Record<string, string> = {
   TOKEN: expr("$hash($join([$EXECUTION_ID, $EVENT, $PHASE, $HOOK_ID, $string($ATTEMPT), $string($TRY)], '|'), 'SHA-256')"),
 };
 
+/**
+ * A record event's hook environment (R-42, R-50), as `recordHookEnvironment`
+ * in `record-event.types.ts` builds it: the input's event-level variables,
+ * then `PHASE`, `HOOK_ID`, `HOOK_SCOPE`, `HOOK_SCRIPT`, `ATTEMPT` and, on
+ * `POST`, `SCRIPT_OUTPUTS` `{}` (a commit writes no outputs), each overriding
+ * an input variable of the same name. No `PARAM_`, `CELL_ID` or external id:
+ * the input holds none (§8.1). Evaluated only when `$HMODE` is `record`.
+ */
+export const RECORD_HOOK_ENVIRONMENT = [
+  '$HMODE = \'record\' ? $append([], $each($merge([',
+  `  ${RECORD_EVENT}.environment,`,
+  '  {"PHASE": $PHASE, "HOOK_ID": $HOOK_ID, "HOOK_SCOPE": $HOOK.scope, "HOOK_SCRIPT": $HOOK.script, "ATTEMPT": $string($ATTEMPT)},',
+  "  $PHASE = 'POST' ? {\"SCRIPT_OUTPUTS\": \"{}\"} : {}",
+  ']), function($v, $k) {{"Name": $k, "Type": "PLAINTEXT", "Value": $v}})) : []',
+].join('\n');
+
 /** One fixed PLAINTEXT hook variable (R-42). */
 function hookVar(name: string, value: string): string {
   return `{"Name": "${name}", "Type": "PLAINTEXT", "Value": ${value}}`;
@@ -242,12 +279,13 @@ export function hookStartArguments(fleetName: string): string {
     `$deployment := $HMODE = 'tenant' ? [${deployment}] : [];`,
     `$outputs := $PHASE = 'POST' ? [${hookVar('SCRIPT_OUTPUTS', `${input}.scriptOutputs`)}] : [];`,
     '$params := $each($build.parameters, function($v, $k) {{"Name": "PARAM_" & $k, "Type": "PLAINTEXT", "Value": $v}});',
+    `$record := ${RECORD_HOOK_ENVIRONMENT};`,
     '$merge([{',
     `  "ProjectName": $HOOK.scope = 'GLOBAL' ? "${buildProjectName(fleetName, 'global-hook')}" : "${buildProjectName(fleetName, 'app-hook')}",`,
     '  "SourceTypeOverride": $HOOK.sourceType,',
     '  "SourceLocationOverride": $HOOK.sourceLocation,',
     `  "BuildspecOverride": ${JSON.stringify(HOOK_BUILDSPEC)},`,
-    '  "EnvironmentVariablesOverride": $append($append($append($fixed, $deployment), $outputs), $params),',
+    "  \"EnvironmentVariablesOverride\": $HMODE = 'record' ? $record : $append($append($append($fixed, $deployment), $outputs), $params),",
     '  "TimeoutInMinutesOverride": $HOOK.timeoutMinutes,',
     '  "QueuedTimeoutInMinutesOverride": $Q,',
     '  "IdempotencyToken": $TOKEN',
@@ -371,7 +409,8 @@ export const SKIP_LOG_ASSIGN: Record<string, string> = {
     '"skippedHook": {',
     '  "scope": $HOOK.scope, "hookId": $HOOK_ID, "event": $EVENT, "phase": $PHASE,',
     '  "executionId": $EXECUTION_ID,',
-    '  "record": {"applicationId": $states.input.applicationId, "cellId": $states.input.cellId, "tenantId": $states.input.tenantId},',
+    '  "record": $HMODE = \'record\' ? {"recordType": $states.input.recordEvent.recordType, "recordId": $states.input.recordEvent.recordId}',
+    '    : {"applicationId": $states.input.applicationId, "cellId": $states.input.cellId, "tenantId": $states.input.tenantId},',
     '  "buildIds": $BUILD_IDS, "attempt": $ATTEMPT, "budgetRanOut": $BUDGET_RAN_OUT,',
     '  "reason": ' + HOOK_FAILURE_REASON,
     '}}',
@@ -429,24 +468,30 @@ export interface HookRunnerProps {
   readonly metricNamespace: string;
 }
 
-/** The ways back of the four lists (R-45), wired once the workflow has built its own states. */
+/** The ways back of the six lists (R-45), wired once the workflow has built its own states. */
 export interface HookRunnerExits {
   /** The state a list leads to when it ran: the script (`PRE`) or the success router (`POST`). */
   readonly cellPre: sfn.IChainable;
   readonly cellPost: sfn.IChainable;
   readonly tenantPre: sfn.IChainable;
   readonly tenantPost: sfn.IChainable;
-  /** The failure write of a failed create or update hook, by build: the cell's or the deployment's. */
+  /** A record event's lists (R-50): the commit takes the script's place (`PRE`), then the success router (`POST`). */
+  readonly recordPre: sfn.IChainable;
+  readonly recordPost: sfn.IChainable;
+  /** The failure write of a failed create or update hook, by build: the cell's, the deployment's or the record's. */
   readonly cellFailure: sfn.IChainable;
   readonly tenantFailure: sfn.IChainable;
+  readonly recordFailure: sfn.IChainable;
 }
 
 export class HookRunner extends Construct {
-  /** The four entry states, one per list (R-45). */
+  /** The six entry states, one per list (R-45). */
   readonly cellPre: sfn.Pass;
   readonly cellPost: sfn.Pass;
   readonly tenantPre: sfn.Pass;
   readonly tenantPost: sfn.Pass;
+  readonly recordPre: sfn.Pass;
+  readonly recordPost: sfn.Pass;
 
   private readonly listContinue: sfn.Choice;
   private readonly failureTarget: sfn.Choice;
@@ -464,6 +509,8 @@ export class HookRunner extends Construct {
     this.cellPost = entry('CellPostHooks', 'cellPost');
     this.tenantPre = entry('TenantPreHooks', 'tenantPre');
     this.tenantPost = entry('TenantPostHooks', 'tenantPost');
+    this.recordPre = entry('RecordPreHooks', 'recordPre');
+    this.recordPost = entry('RecordPostHooks', 'recordPost');
 
     // --- the list loop ------------------------------------------------
     const nextHook = choice('NextHook');
@@ -525,7 +572,7 @@ export class HookRunner extends Construct {
     const skipFinished = jsonata('HookSkipFinished', { assign: SKIP_FINISHED_ASSIGN });
 
     // ===== wiring =======================================================
-    for (const begin of [this.cellPre, this.cellPost, this.tenantPre, this.tenantPost]) {
+    for (const begin of [this.cellPre, this.cellPost, this.tenantPre, this.tenantPost, this.recordPre, this.recordPost]) {
       begin.next(nextHook);
     }
     nextHook.when(sfn.Condition.jsonata(expr('$HI >= $count($HOOKS)')), storeRuns).otherwise(beginHook);
@@ -588,15 +635,18 @@ export class HookRunner extends Construct {
     failureExit.next(this.failureTarget);
   }
 
-  /** Wires the four ways back and the two failure writes (R-45, §8.2). */
+  /** Wires the six ways back and the three failure writes (R-45, §8.2, R-50). */
   connect(exits: HookRunnerExits): void {
     this.listContinue
       .when(sfn.Condition.jsonata(expr("$HRET = 'cellPre'")), exits.cellPre)
       .when(sfn.Condition.jsonata(expr("$HRET = 'cellPost'")), exits.cellPost)
       .when(sfn.Condition.jsonata(expr("$HRET = 'tenantPre'")), exits.tenantPre)
+      .when(sfn.Condition.jsonata(expr("$HRET = 'recordPre'")), exits.recordPre)
+      .when(sfn.Condition.jsonata(expr("$HRET = 'recordPost'")), exits.recordPost)
       .otherwise(exits.tenantPost);
     this.failureTarget
       .when(sfn.Condition.jsonata(expr("$HMODE = 'cell'")), exits.cellFailure)
+      .when(sfn.Condition.jsonata(expr("$HMODE = 'record'")), exits.recordFailure)
       .otherwise(exits.tenantFailure);
   }
 
