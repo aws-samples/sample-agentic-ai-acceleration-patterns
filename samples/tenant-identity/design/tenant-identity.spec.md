@@ -426,7 +426,7 @@ recover a tenant that has locked itself out.
 |---|---|---|---|
 | `topology` | yes | `pool-per-tenant` \| `shared-pool` \| `shared-pool-multi-tenant` \| `tiered` | selects the provisioner (P-7); `tiered` deploys `shared-pool` and `pool-per-tenant` side by side and each tenant's `tier` at `CreateTenant` selects between them (ADR-0027) |
 | `publishSharedParameters` | no | `true` \| `false`; default `true` | whether the stack publishes the R-6 parameters; one stack per account and Region may own them (ADR-0017) |
-| `allowedOrigins` | no | comma-separated origins, each `https://<host>` or `https://*.<domain>`; default none | the browser origins that may read the token exchange's answer (§5.4.1, ADR-0040) |
+| `allowedOrigins` | no | origins separated by `,`, each `https://<host>[:<port>]` or `https://*.<domain>`; stack prop `allowedOrigins?: string[]`; default none | the browser origins that may read the token exchange's answer (§5.4.1, ADR-0040); when set, the stack outputs `AllowedOrigins` |
 
 Synthesis MUST fail on an unknown `topology` with the accepted values in the
 message. The stack name MUST embed the topology
@@ -687,48 +687,86 @@ message or the token.
 #### 5.4.1 Browser callers (CORS)
 
 A single-page app on another origin posts the exchange from the browser
-(ADR-0040). The request is a CORS simple request: a form-encoded `POST`
-with no cookie and no custom header, so the browser sends no preflight and
-the API has no `OPTIONS` route. The browser lets the page read the answer
-only if it names the page's origin.
+(ADR-0040). The API has no `OPTIONS` route, so the request MUST be a CORS
+simple request, which the browser sends without a preflight:
 
-`allowedOrigins` (§3.3) lists the origins whose pages may read it. Each
+- method `POST`;
+- `Content-Type: application/x-www-form-urlencoded`, with or without
+  parameters (`;charset=UTF-8`, which a `URLSearchParams` body adds), and no
+  other request header the page sets;
+- `credentials` not `include` (the exchange uses no cookie, and no answer
+  carries `Access-Control-Allow-Credentials`).
+
+A preflight, caused for example by a tracing header that browser
+instrumentation adds to every `fetch`, reaches no route and gets API
+Gateway's 403 with no CORS header. The browser lets the page read the
+answer only if it names the page's origin.
+
+**The list.** `allowedOrigins` (§3.3) lists the origins whose pages may read
+the answer. As a context value it is one string, entries separated by `,`
+with no whitespace; as a stack prop it is `allowedOrigins?: string[]`. Each
 entry is one of:
 
 | Form | Matches | Example |
 |---|---|---|
 | `https://<host>` or `https://<host>:<port>` | that origin only | `https://app.example.com` |
-| `https://*.<domain>` | `https://<label>.<domain>`, exactly one DNS label, no port | `https://*.app.example.com` matches `https://acme.app.example.com`, not `https://app.example.com` or `https://a.b.app.example.com` |
+| `https://*.<domain>` | `https://<label>.<domain>`: exactly one label, no port | `https://*.app.example.com` matches `https://acme.app.example.com`, not `https://app.example.com` or `https://a.b.app.example.com` |
 
-Synthesis refuses: a scheme other than `https`; a path, query, fragment or
-trailing `/`; upper case; a `*` anywhere but as the whole first label; a
-pattern whose `<domain>` has fewer than two labels (`https://*.com`); `*`
-or `null` alone; more than 20 entries.
+A `<label>` is 1 to 63 of `a-z`, `0-9` and `-`, not starting or ending with
+`-`. A `<host>` and a `<domain>` are two or more labels joined by `.`, at
+most 253 characters, with no trailing `.`; a non-ASCII name is given in its
+`xn--` form, as browsers send it. A `<port>` is 1 to 65535 with no leading
+zero, and not `443`, which browsers leave out of `Origin`.
 
-The exchange function compares the request's `Origin` header with the list:
+Synthesis refuses, naming the entry: any entry outside those forms (another
+scheme, a path, query, fragment or trailing `/`, upper case, an IP literal,
+`*` anywhere but as the whole first label, a port on a pattern, `*` or
+`null` alone, an empty entry); a pattern whose `<domain>` is on the Public
+Suffix List, private section included (`https://*.co.uk`,
+`https://*.cloudfront.net`, `https://*.amazonaws.com`); a repeated entry;
+more than 20 entries; more than 1,024 characters in total, so the list fits
+the function's environment beside its other variables.
 
-- An `Origin` equal to an exact entry, or of the form `https://<label>.<domain>`
-  for a pattern entry, where `<label>` is 1 to 63 of `a-z`, `0-9` and `-`,
-  not starting or ending with `-`, matches. The comparison is exact on the
-  string the browser sent; nothing is lower-cased or trimmed.
-- On a match, every answer the function returns, 200 and every §5.4 error,
-  carries `Access-Control-Allow-Origin: <the request's Origin>`.
-- No match, no `Origin`, `Origin: null`, or more than one `Origin` value:
-  no `Access-Control-Allow-Origin`.
+A pattern trusts every host one label under its domain, whoever serves it: a
+marketing site, a status page on another vendor's service, a CNAME left
+pointing at a deleted resource. Use a pattern only under a domain that
+serves the app's tenant hosts and nothing else (`tenant-front-door`'s
+`appDomain`).
+
+**The match.** The exchange function's entry reads `Origin` from the event's
+`multiValueHeaders`, matching the header name case-insensitively:
+
+- One `Origin` value equal to an exact entry, or equal to
+  `https://<label>.<domain>` for a pattern entry, matches. The comparison is
+  on the string the browser sent; nothing is lower-cased or trimmed.
+- On a match, every answer the function returns carries
+  `Access-Control-Allow-Origin: <the request's Origin>`: the 200, every
+  §5.4 error, and every error the request framework makes before the service
+  runs (unsupported media type, a malformed body). The entry adds the header
+  after the handler has built the answer, outside the model.
+- No `Origin`, `Origin: null`, more than one `Origin` value, or no match: no
+  `Access-Control-Allow-Origin`.
 - When the list is not empty, every answer carries `Vary: Origin`, matched
-  or not.
+  or not. An empty list sends no CORS header on any answer.
 - No answer carries `Access-Control-Allow-Credentials`,
   `Access-Control-Allow-Methods` or `Access-Control-Allow-Headers`. The page
   reads the JSON body and `Cache-Control`, which the browser exposes without
   `Access-Control-Expose-Headers`.
-- An empty list sends no CORS header on any answer.
 
-The header is never a reason to refuse: an unmatched `Origin` still gets
-the exchange, because CORS controls what a page may read, not who may call.
-Answers API Gateway makes itself (throttle 429, a resource-policy refusal,
-an integration timeout) carry no CORS header, so the page sees a network
-error; it treats that as retryable and keeps its refresh token, as for
-`server_error`. `/platform/*` and `/tenant/*` send no CORS header.
+Before dispatch the entry also drops any parameters from `Content-Type`
+(`application/x-www-form-urlencoded;charset=UTF-8` becomes
+`application/x-www-form-urlencoded`), because the generated deserializer
+accepts only the bare type. The body is still parsed as UTF-8.
+
+An unmatched `Origin` is never a reason to refuse: it still gets the
+exchange, because CORS controls what a page may read, not who may call.
+
+**Answers the page cannot read.** API Gateway's own answers (throttle 429, a
+resource-policy refusal, an integration failure or timeout, 502 when the
+function fails to start) carry no CORS header, so the page sees a network
+error and no status. The page keeps its refresh token, retries at most
+twice with backoff (reference: 1 s, then 3 s), and then shows a fixed
+"try again later" error. `/platform/*` and `/tenant/*` send no CORS header.
 
 ---
 
@@ -1037,14 +1075,18 @@ step 12.
      `invalid_scope` (ADR-0035).
    - no `resource` in topology 3: `invalid_target`.
    - `subject_token_type` = access token: `invalid_request`.
-   CORS (§5.4.1; every integration stack deploys with
-   `allowedOrigins=https://app.example.com,https://*.tenants.example.com`):
-   the narrowing above sent with `Origin: https://app.example.com`, and the
-   `invalid_target` refusal sent with `Origin: https://acme.tenants.example.com`,
+   CORS (§5.4.1). The integration app gives every stack the prop
+   `allowedOrigins: ['https://app.example.com', 'https://*.tenants.example.com']`,
+   and the stack outputs `AllowedOrigins`. Against a stack with that output:
+   the narrowing above sent with `Origin: https://app.example.com` and
+   `Content-Type: application/x-www-form-urlencoded;charset=UTF-8`, and u2's
+   `resource=A` refusal sent with `Origin: https://acme.tenants.example.com`,
    each answer `Access-Control-Allow-Origin` equal to that origin and
    `Vary: Origin`; the same narrowing with `Origin: https://evil.example.com`,
    `Origin: https://a.b.tenants.example.com` or no `Origin` succeeds with no
-   `Access-Control-Allow-Origin` and with `Vary: Origin`.
+   `Access-Control-Allow-Origin` and with `Vary: Origin`. A stack without
+   the output (deployed without a list) skips these checks and the suite
+   logs the skip.
    Bypass the endpoint: call `GetTokensFromRefreshToken` directly with u2's
    refresh token and the §8.2 keys naming A. Cognito fails the request, which
    proves the trigger enforces the rule, not the endpoint. A plain
@@ -1155,11 +1197,14 @@ token, and puts it on a narrowed one only for a member of `admin-<T>`
 (ADR-0015); the tenant-user role holds no pool or group lifecycle action
 (R-8); the form parser rejects every
 RFC 8693 parameter not listed in §5.4; synthesis refuses every
-`allowedOrigins` form §5.4.1 refuses, and the origin matcher accepts and
-refuses the §5.4.1 cases (exact, port, one label, two labels, the bare
-domain, upper case, `http`, `null`, a repeated `Origin`); the exchange
-function adds the CORS headers to a 200, an OAuth error and a
-`server_error` alike, and none when the list is empty (ADR-0040); the binding rule holds for every
+`allowedOrigins` form §5.4.1 refuses (a public-suffix pattern, `:443`, a
+port on a pattern, an empty or repeated entry, the count and length caps
+among them), and the origin matcher accepts and refuses the §5.4.1 cases
+(exact, port, one label, two labels, the bare domain, upper case, `http`,
+`null`, two `Origin` values, the header name in either case); the exchange
+entry adds the CORS headers to a 200, an OAuth error, a `server_error` and a
+framework error alike, none when the list is empty, and dispatches a
+`Content-Type` with `;charset=UTF-8` as the bare type (ADR-0040); the binding rule holds for every
 (row topology, arrival) pair and the trigger's sources and the authoriser
 refuse `pool_mismatch` on each mismatch (`test/topology/binding.test.ts`,
 `test/topology/tenant-source.test.ts`, `test/tenant-api/tenant-authorizer.test.ts`,
@@ -1180,7 +1225,7 @@ rather than falling back.
 | Federation to a tenant's own IdP | Topology 1: an IdP per pool, the natural fit. Topologies 2 and 3: an IdP per tenant in the shared pool with attribute/group mapping, bounded by the 300-IdP quota. |
 | Narrowing at sign-in | Pass the §8.2 keys to `InitiateAuth` to narrow the session's first token. Not built: exchange (§5.4) narrows per call with no new sign-in (ADR-0009, Option 4). |
 | Delegation (`act`, RFC 8693 §4.1) and audience narrowing | A service exchanging a token it received, to act for the user downstream, needs an access-token subject and a signer of its own. Out of scope by ADR-0009. Cognito token exchange (`GetDerivedToken`) takes an access-token subject, signs with the pool and adds `act` and one audience, but cannot carry the tenant and needs a trigger change first (ADR-0039); AgentCore Identity on-behalf-of is the other managed fit. |
-| Preflighted browser calls | A page that adds a custom header to the exchange, or calls `/tenant/*` from another origin, makes the browser send an `OPTIONS` preflight. Add an `OPTIONS` route per path, proxied to a function that answers from the same `allowedOrigins` matcher with `Access-Control-Allow-Methods` and `Access-Control-Allow-Headers` for exactly what the page sends; `/tenant/*` also needs `Authorization` allowed. Not built: the exchange is a simple request (§5.4.1, ADR-0040). |
+| Preflighted browser calls | A page that adds a non-safelisted header to the exchange (a tracing header included), or calls `/tenant/*` from another origin, makes the browser send an `OPTIONS` preflight. Add an `OPTIONS` route per path, proxied to a function that answers from the same `allowedOrigins` matcher with `Access-Control-Allow-Methods` and `Access-Control-Allow-Headers` for exactly what the page sends; `/tenant/*` also needs `Authorization` allowed. Not built: the exchange is a simple request (§5.4.1, ADR-0040). |
 | Hosted UI / managed login | Add a domain and OAuth flows to the app client; nothing in the trigger changes. |
 | Async onboarding | Wrap `CreateTenant` in the control-plane sample's workflow when onboarding grows beyond Cognito calls (e.g. also provisioning tenant storage). |
 | Control-plane mounting | A `scripts/control-plane/` lifecycle set that calls `CreateTenant`/`DeleteTenant` so this sample runs as a cell's identity component. |
