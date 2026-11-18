@@ -251,7 +251,8 @@ structure ConflictException {
     reason: ConflictReason
 }
 
-/// A `PutUsageEvents` body over 1 MB (spec §5.1). Not resent: split it.
+/// A `PutUsageEvents` body over 1,048,576 bytes of UTF-8, measured in bytes
+/// (spec §5.1). Not resent: split it.
 @error("client")
 @httpError(413)
 structure PayloadTooLargeException {
