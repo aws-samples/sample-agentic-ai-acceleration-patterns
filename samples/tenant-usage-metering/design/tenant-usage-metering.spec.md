@@ -124,10 +124,13 @@ hour was counted is kept, and the hour is recounted while it is inside
 the recount window. The difference goes out as an `ADJUSTMENT` record; a
 sink never receives a silently changed total.
 
-**P-8. Every refusal of a registered emitter's event is kept.** An event
-from a registered emitter that the ingest door refuses is written to the
-error store with the reason, and can be re-admitted while its hour is
-inside the recount window. Calls from unregistered callers are counted,
+**P-8. Every refusal of a registered emitter's event that could still
+count is kept.** An event from a registered emitter that the ingest door
+refuses for a cause that can be fixed (`TENANT_NOT_IN_CELL`,
+`REGISTRATION_CLOSED`, `UNKNOWN_METER`, `METER_NOT_ALLOWED`) is written to
+the error store with the reason, and can be re-admitted while its hour is
+inside the recount window. Refusals that can never count (`BAD_SHAPE`,
+`BAD_TIME`, `TOO_LATE`) are kept up to a per-emitter cap. Calls from unregistered callers are counted,
 not stored.
 
 ## 3. System shape
@@ -151,7 +154,7 @@ All in the metering account, one stack.
 | Record publisher | DynamoDB Streams on usage-record writes that set `publishPending` (§4.7): publishes `UsageRecorded` to the usage bus, queues one delivery per sink, and clears the record's `publishPending` marker; the scheduler sweeps records whose marker is older than 15 minutes (§4.7), and an alarm fires on failed stream batches |
 | Usage bus | EventBridge Custom Event Bus, `usageBusRetentionDays` retention; one `UsageRecorded` event per usage record revision (§4.8), `DeduplicationId = <recordId>#<revision>`, `EventGroupId = tenantId`. Always on |
 | Sink dispatcher | Sends each queued delivery to its sink, retries for 24 h, then marks it `FAILED` and alarms |
-| Sinks | `HTTP` (any billing API, field mapping by configuration), `S3_EXPORT` (JSON lines into the sample's export bucket) |
+| Sinks | `HTTP` (any billing API, field mapping by configuration), `S3_EXPORT` (JSON lines into the sample's separate export bucket, §3.5) |
 | Error store | S3 `error/hour=YYYY-MM-DDTHH/`, one object per batch with refused events, each with its reason |
 | `UsageSubscriber` | Published construct that attaches a reader to the ingest bus (`raw`) or the usage bus (`usage`) with a dead-letter queue, a retry policy and alarms built in (ADR-0006) |
 
@@ -196,8 +199,13 @@ as a residual.
 **Per-emitter limits.** A registered emitter is admitted at most
 `maxEventsPerEmitterPerMinute` events a minute, counted in a DynamoDB item
 per emitter and minute; events over it return `RETRY`. At most
-`maxRefusedPerEmitterPerHour` refused events per emitter and hour are
-written to the error store; the rest are counted in a metric, not stored.
+`maxRefusedPerEmitterPerHour` refusals that can never count (`BAD_SHAPE`,
+`BAD_TIME`, `TOO_LATE`) are stored per emitter and hour; the rest are
+counted in a metric with an alarm, not stored. Refusals that could still
+count are always stored (P-8), bounded by the admission limit. With the
+defaults, sustained ingest of about 1,000 events a second (§5.1) is
+shared by at least 20 emitters at their limit; more emitters at their
+limit can still fill the account, and the others get `RETRY`.
 The hour is a fleet-wide unit, so one emitter that fills an hour slows
 every tenant's count of it; a distributed map in the recount is a seam
 (ADR-0003).
@@ -222,9 +230,9 @@ subscriber.
 | `recountWindowHours` | how long after an hour ends it may still be recounted; synth fails below 72. Ingest admits an event only while its hour ended less than `recountWindowHours` − 49 hours ago, so an accepted event has 48 hours (the subscriber's 24 h maximum event age plus 24 h to redrive its dead-letter queue) to reach S3, and one more hour for the Firehose buffer and the scheduler, before the hour closes | `96` |
 | `closeGraceMinutes` | how long a closing emitter or binding is still admitted, for buffered events | `60` |
 | `rawRetentionDays` | raw and re-admitted object lifetime | `400` |
-| `errorRetentionDays` | error object lifetime; synth fails below `recountWindowHours` plus 7 days | `30` |
-| `maxEventsPerEmitterPerMinute` | per-emitter admission limit (§3.2) | `30000` |
-| `maxRefusedPerEmitterPerHour` | refused events stored per emitter and hour (§3.2) | `10000` |
+| `errorRetentionDays` | error object lifetime; synth fails below ceil(`recountWindowHours` / 24) + 7 | `30` |
+| `maxEventsPerEmitterPerMinute` | per-emitter admission limit (§3.2) | `3000` |
+| `maxRefusedPerEmitterPerHour` | refusals that can never count stored per emitter and hour (§3.2) | `10000` |
 | `ingestPath` | `BUS` (ingest bus, ADR-0002) or `DIRECT` (Firehose, events packed per hour) | `BUS` |
 | `ingestBusRetentionDays` | ingest bus retention | `1` |
 | `usageBusRetentionDays` | usage bus retention | `7` |
@@ -304,10 +312,14 @@ URL as its default (control-plane R-34).
 
 | Control | Rule |
 |---|---|
-| Raw and error stores | The bucket policy allows `s3:PutObject` under `raw/` only to the Firehose role, under `readmitted/` only to the re-admission function, under `error/` only to the ingest and redrive functions, and under the export prefix only to the dispatcher; it denies `s3:DeleteObject` and `s3:DeleteObjectVersion` to every principal, so objects leave only by lifecycle. Versioning is on, so an overwrite by one of those writers keeps the earlier version for audit; Object Lock is a production option |
-| Ingest dead-letter queue | The queue policy allows `sqs:SendMessage` only to `events.amazonaws.com` with `aws:SourceArn` = the ingest subscriber |
-| Service-principal trust | Every service-principal trust policy and resource policy (Lambda permissions for S3 and Streams, SQS queue policies, Scheduler and Firehose role trust, the bus subscriber roles) is conditioned on `aws:SourceArn` and `aws:SourceAccount` |
-| Audit | API Gateway access logs on every route with `$context.identity.userArn`, `$context.requestId` and the route; meter versions, sinks, registrations and jobs carry `createdBy` (the caller ARN) and `createdAt` |
+| Raw bucket (`raw/`, `readmitted/`, `error/`, `firehose-error/`) | The bucket policy is written as explicit denies with `aws:PrincipalArn` conditions, so an identity-policy allow in the metering account does not get around it: `s3:PutObject` is denied under `raw/` and `firehose-error/` to all but the Firehose role, under `readmitted/` to all but the re-admission function, and under `error/` to all but the ingest, re-admission and redrive functions; `s3:DeleteObject` and `s3:DeleteObjectVersion` are denied to every principal; `s3:PutLifecycleConfiguration`, `s3:PutBucketVersioning` and `s3:PutBucketPolicy` are denied to all but the deployment role. Versioning is on, so an overwrite keeps the earlier version for audit. Lifecycle expires current versions after `rawRetentionDays` (`raw/`, `readmitted/`, `firehose-error/`) or `errorRetentionDays` (`error/`), expires noncurrent versions 7 days later, and removes expired delete markers. Object Lock is a production option |
+| Export bucket | A separate bucket. Its policy denies `s3:PutObject` to all but the dispatcher and the same configuration changes as the raw bucket; lifecycle expires objects after `rawRetentionDays`. An `S3_EXPORT` sink names only a key prefix inside it |
+| Ingest bus | The bus resource policy denies `events:PutEvents` to all but the ingest function role |
+| Table | A DynamoDB resource-based policy denies item writes to all but the stack's function and state machine roles, so no other principal can write a registration, meter, sink or record |
+| Ingest dead-letter queue | The queue policy denies `sqs:SendMessage` to all but `events.amazonaws.com` with `aws:SourceArn` = the ingest subscriber |
+| Firehose stream | Firehose has no resource policy, so any principal in the metering account granted `firehose:PutRecord*` on the stream can write raw usage. The stack grants it only to the ingest and redrive functions and the subscriber role; an SCP or permissions boundary that denies it to everyone else is the production control |
+| Service-principal trust | Every service-principal trust policy and resource policy (the Lambda permission for S3 notifications, SQS queue policies, Scheduler, Firehose and bus subscriber role trust) is conditioned on `aws:SourceArn` and `aws:SourceAccount`. A DynamoDB Streams trigger is polled with the function's own role and needs none |
+| Audit | API Gateway access logs on every route with `$context.identity.userArn`, `$context.requestId` and the route, kept for `rawRetentionDays`; every item written through the API carries `createdBy` (the caller ARN) and `createdAt` (§4) |
 | Logs | No event payload, sink request or response body, or credential is logged; recounter execution state holds keys and counts only |
 | Heartbeat | An alarm that does not depend on the scheduler fires when the scheduler's target has not run for 15 minutes, or no hour has reached `COUNTED` for 2 hours while the `pending` index holds hours past their grace |
 
@@ -316,7 +328,10 @@ trusted.
 
 ## 4. Data model
 
-One DynamoDB table, `PK`/`SK`, PITR on, TTL on `expiresAt`.
+One DynamoDB table, `PK`/`SK`, PITR on, TTL on `expiresAt`. Every item
+written through the API (meter versions, sinks, registrations, jobs) also
+carries `createdBy`, the caller ARN, and `createdAt`; registrations also
+carry `controlPlaneExecutionId` and `controlPlaneOperatorId` (§3.4).
 
 ### 4.1 Meter
 
@@ -638,7 +653,7 @@ Smithy, `aws.protocols#restJson1`, every operation IAM-authorised.
 | Result | Meaning | Emitter action |
 |---|---|---|
 | `ACCEPTED` | stored, or already stored under the same key | none |
-| `RETRY` | the ingest bus or Firehose throttled it after the function's retries | send again with the same `eventId` |
+| `RETRY` | the ingest bus or Firehose throttled it after the function's retries, or the emitter is over `maxEventsPerEmitterPerMinute` | send again with the same `eventId` |
 | `REFUSED` + reason | `TENANT_NOT_IN_CELL`, `REGISTRATION_CLOSED`, `UNKNOWN_METER`, `METER_NOT_ALLOWED`, `BAD_TIME`, `TOO_LATE`, `BAD_SHAPE`; written to the error store | fix the cause; an operator may re-admit |
 
 Errors:
@@ -649,7 +664,7 @@ Errors:
 | 403 `AccessDeniedException` | caller not permitted for the route; for `PutUsageEvents`, not an assumed role or not a registered emitter |
 | 404 `ResourceNotFoundException` | unknown meter, sink, hour, job (never for `Delete*` of a registration) |
 | 409 `ConflictException` | `PutCellEmitter` in a subscriber account or the metering account; `CreateMeter` on an existing meter; `StartRecount` whose whole range is `CLOSED` or within 5 minutes of its close; a lost conditional write, retryable |
-| 429 `ThrottlingException` | API Gateway stage throttle |
+| 429 `ThrottlingException` | API Gateway stage or method throttle |
 | 500, 502, 503, 504 | the function failed, was throttled or timed out; nothing in the batch is known to be stored |
 
 ### 5.1 Limits
