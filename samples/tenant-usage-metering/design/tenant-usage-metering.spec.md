@@ -147,9 +147,9 @@ All in the metering account, one stack.
 | Admin API | Same REST API: meters, sinks, registrations, usage reads, recounts, re-admission, redrives |
 | Object tracker | S3 event notification on `raw/` and `readmitted/`: for every new object, creates the hour item if absent and increments its `generation` (§4.5); failed invocations go to an SQS on-failure destination the scheduler replays |
 | Recounter | Step Functions, one execution per hour: reads the hour's raw objects, dedupes, sums per meter rule, writes usage records (§4.9) |
-| Scheduler | EventBridge Scheduler, every 5 minutes: batch-gets the hour items of the recount window and starts a recount for each hour that is due, `DIRTY`, `COUNT_FAILED` past its backoff, or `COUNTING` with an expired lease; replays the object tracker's failures; sweeps `publishPending` records |
-| Record publisher | DynamoDB Streams on usage-record writes: publishes `UsageRecorded` to the usage bus, queues one delivery per sink, and clears the record's `publishPending` marker; the scheduler sweeps records whose marker is older than 15 minutes (§4.7), and an alarm fires on failed stream batches |
-| Usage bus | EventBridge Custom Event Bus, `usageBusRetentionDays` retention; one `UsageRecorded` event per usage record (§4.8), `DeduplicationId = recordId`, `EventGroupId = tenantId`. Always on |
+| Scheduler | EventBridge Scheduler, every 5 minutes: queries the sparse index of hours that are not `CLOSED` and starts a recount for each hour that is due, `DIRTY`, `COUNT_FAILED` past its backoff, or `COUNTING` with an expired lease; replays the object tracker's failures; sweeps `publishPending` records |
+| Record publisher | DynamoDB Streams on usage-record writes whose new image holds `publishPending`: publishes `UsageRecorded` to the usage bus, queues one delivery per sink, and clears the record's `publishPending` marker; the scheduler sweeps records whose marker is older than 15 minutes (§4.7), and an alarm fires on failed stream batches |
+| Usage bus | EventBridge Custom Event Bus, `usageBusRetentionDays` retention; one `UsageRecorded` event per usage record revision (§4.8), `DeduplicationId = <recordId>#<revision>`, `EventGroupId = tenantId`. Always on |
 | Sink dispatcher | Sends each queued delivery to its sink, retries for 24 h, then marks it `FAILED` and alarms |
 | Sinks | `HTTP` (any billing API, field mapping by configuration), `S3_EXPORT` (JSON lines into the sample's export bucket) |
 | Error store | S3 `error/hour=YYYY-MM-DDTHH/`, one object per batch with refused events, each with its reason |
@@ -327,14 +327,14 @@ hourly ones; a billing system that needs them reads the raw store or the
 Transitions: none → `ACTIVE` (`PutCellEmitter`) → `CLOSING`
 (`DeleteCellEmitter`) → removed by TTL. An emitter admits events whose
 `time` is at or after `activeFrom`, and, once `CLOSING`, at or before
-`closedAt`, until `closesAt`. Other events are refused
-`REGISTRATION_CLOSED`. Past `closesAt` the emitter is refused like an
+`closedAt`, until `closesAt`, or whose `time` falls in one of its
+`intervals`. Other events are refused `REGISTRATION_CLOSED`. Past `closesAt` the emitter is refused like an
 unregistered one. `PutCellEmitter` on a `CLOSING` item (a cell or
 deployment created again on the same key) moves the current
 `{activeFrom, closedAt}` into `intervals`, removes `closedAt`, `closesAt`
-and `expiresAt`, and sets a new `activeFrom`. `READMIT` admits an event
-whose `time` falls in the current interval or in any of `intervals`, so
-an event is judged by the registration as it stood at the event's time.
+and `expiresAt`, and sets a new `activeFrom`. Ingest and `READMIT` apply
+the same check, so an event is judged by the registration as it stood
+at the event's time.
 
 ### 4.3 Tenant binding
 
@@ -375,7 +375,8 @@ placed in another cell, it lands in a new item, and the old one stays
 | `generation` | incremented by the object tracker for every object of the hour |
 | `countedGeneration`, `countedAt` | the generation and time of the last finished count |
 | `lease`, `leaseExpiresAt` | the recount execution holding `COUNTING`, and when its hold lapses (30 minutes) |
-| `attempts` | failed counts since the last success |
+| `attempts` | failed counts since the last success, a lease taken over after it lapsed included |
+| `pending` | present until the hour is `CLOSED`; a sparse index on it is how the scheduler finds hours |
 
 The object tracker creates the item, `OPEN`, on the hour's first object,
 and increments `generation` on every object whatever the state. Its
@@ -383,15 +384,21 @@ invocations are asynchronous, with an SQS on-failure destination that
 keeps the S3 event; the scheduler replays that queue, and an alarm fires
 on its depth.
 
-Every 5 minutes the scheduler batch-gets the hour items of the recount
-window (one key per hour, at most `recountWindowHours` + 1) and starts a
-recount for each one that is due. A recount takes the hour with a
+Every 5 minutes the scheduler queries the `pending` index, which holds
+every hour that is not `CLOSED`, past its close time or not, and starts
+a recount for each one that is due. A recount takes the hour with a
 conditional write (`OPEN` past `lateGraceMinutes`, `DIRTY`,
 `COUNT_FAILED` past its backoff, or `COUNTING` past `leaseExpiresAt`) →
 `COUNTING` with `lease` set to its execution id, reads `generation`, then
-lists and counts. Every usage record it writes, and its final status
-write, carry the condition `lease = <own execution id>`, so an execution
-whose lease was taken over writes nothing more. The execution's timeout
+lists and counts. Taking over a lapsed lease increments `attempts`, as a
+failure does, because the execution that held it timed out or died
+without writing; an alarm also fires on the state machine's
+`ExecutionsTimedOut` metric. Its writes are fenced on the lease: usage records go in
+`TransactWriteItems` of up to 99 records plus a `ConditionCheck` that
+the hour item's `lease` is its own execution id, each record also
+conditioned on `attribute_not_exists(SK)`, and its final status write is
+conditioned on the same lease, so an execution whose lease was taken
+over writes nothing more. The execution's timeout
 is 25 minutes, below the lease. It finishes with
 `COUNTED` if `generation` is unchanged, else `DIRTY`, so an object that
 landed during the count is counted next. A `COUNTED` hour whose
@@ -400,8 +407,9 @@ landed during the count is counted next. A `COUNTED` hour whose
 failure.
 
 At hour end plus `recountWindowHours`, the scheduler moves a `COUNTED`
-hour to `CLOSED`. An hour in any other state at that time gets a final
-count first and raises an alarm; it closes only from `COUNTED`. A
+hour to `CLOSED` and removes `pending`. An hour in any other state at
+that time raises an alarm and stays in the index, retried like any other
+until a count succeeds; it closes only from `COUNTED`. A
 `CLOSED` hour is never counted again, and an object that lands in it
 raises an alarm.
 
@@ -449,9 +457,11 @@ in the hour; a first event that arrives late writes `HOURLY`. No record
 is written when a recount changes nothing.
 
 The table is the outbox. Each record is written with `publishPending`.
-The record publisher (§3.1) handles each insert from the table's stream,
-publishes `UsageRecorded` (`DeduplicationId = <recordId>#<revision>`),
-queues the sink deliveries, and removes `publishPending`. The scheduler
+The record publisher (§3.1) handles every stream record whose new image
+holds `publishPending`, inserts and modifies alike, publishes
+`UsageRecorded` (`DeduplicationId = <recordId>#<revision>`), queues the
+sink deliveries, and removes `publishPending` with a condition on the
+`revision` it published, so a later revision's marker stays. The scheduler
 also reads the `publishPending` index every 5 minutes and publishes any
 record that has held it for more than 15 minutes, so a failed stream
 batch is caught after the stream's 24-hour retention as well.
@@ -647,7 +657,9 @@ Errors:
   deployer. `ARCHITECTURE.md` §5.1 lists the sub-path.
 - The hook script `scripts/control-plane/metering-hook.sh` and the
   emitter snippet `scripts/emit-usage.ts` (buffers, batches of 100,
-  ULID `eventId`s, resends `RETRY` results with the same ids).
+  ULID `eventId`s, stores each event once; resends `RETRY` results, and
+  the whole batch after a 429, a 5xx or a timeout, with the same bytes
+  and backoff).
 
 ### 6.4 Samples consumed
 
