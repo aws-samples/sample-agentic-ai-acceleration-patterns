@@ -724,11 +724,18 @@ On every write:
    included; and (5) starts one asynchronous run of the sweeper per page
    of 500 entries, passing the page number and the page's list of
    tenant ids. Ids are at most 63 characters, so 500 of them are about
-   33 KB of payload, inside the 256 KB limit of an asynchronous
-   invocation. A page checks only the ids it was passed. It reads each
-   one's `tenant#<id>` entry again with `GetKey`, 10 at a time, and
-   skips one whose `d` is gone or whose challenge is open; it does not
-   scan the route table (ADR-0022). It resolves the others
+   33 KB of payload, inside the 1 MB limit of an asynchronous
+   invocation ([Lambda quotas](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html),
+   "Invocation payload", checked 2026-11-18). A page checks only the ids
+   it was passed. It reads each one's `tenant#<id>` entry again with
+   `GetKey`, 10 at a time, and skips one whose `d` is gone or whose
+   challenge is open; it does not scan the route table (ADR-0022). A
+   `GetKey` that returns `ResourceNotFoundException` means the entry is
+   gone (the tenant route was deleted after the lister ran): the page
+   skips that id, logs one line naming the tenant id, writes no item
+   for it (the next lister deletes its items) and goes on. The lister
+   has just read the store, so a 404 here is a missing key, not a
+   missing store. It resolves the others
    as sub-step 2 does, 10 queries at a time, each with up to five
    lookups of one try abandoned after 1 s. It queries CNAME at the name
    only when the TXT answer is empty or holds the token, so a pass
@@ -777,7 +784,8 @@ On every write:
    the sweeper function's on-failure destination, an SQS queue. Each of
    a page's DynamoDB calls is made once, with a 2 s limit, and a failed
    call fails the page. Each `GetKey` read is likewise made once, with a
-   2 s limit, and a failed read fails the page. The limit is chosen, not
+   2 s limit, and a read that fails with any error other than
+   `ResourceNotFoundException` (above) fails the page. The limit is chosen, not
    measured: no spike measured `GetKey` latency from the deployment
    Region to the store's global endpoint, so the page logs the time its
    reads took and the integration run records it (§10 step 14). The
@@ -1570,7 +1578,7 @@ All with a small static HTML or JSON body and `no-store`:
 | 401 | no token, an undecodable token, or no single `tenant_id` (a `tenants` list included): in `single` mode on every path that needs a tenant, in `host` mode on `/api/*` and `/agents/*` (§3.3 step 5). With `WWW-Authenticate: Bearer` |
 | 403 | unknown tenant (`single`), or in `host` mode a `host#` entry with no `tenant#` entry; in `host` mode, `/api/*` or `/agents/*` with a `tenant_id` other than the host's tenant (§3.3 step 5); or a cross-site call to `/api/*`, `/agents/*` or `/signin-state` |
 | 404 | unknown host (`host` mode, the apex `<appDomain>` included, or an unknown dedicated domain), `/signin-state` in `single` mode, or `/agents` and any `/agents/` path other than `/agents/<backend>/invocations`, `/agents/` included (§3.3 step 3, ADR-0019) |
-| 429 | tenant over its rate on `/api/*` or `/agents/*`, or one client IP over its rate on one host (`host` mode, at the edge): the WAF rate rules' Block action returns a custom 429, and a scope-down keeps SPA loads out of the count (ADR-0009, ADR-0021) |
+| 429 | tenant over its rate on `/api/*` or `/agents/*`, or one client IP over its rate on one host (`host` mode, at the edge): the WAF rate rules' Block action returns a custom 429, and a scope-down keeps SPA loads out of the count. Each rule's `CustomResponse` sets its own response header, `x-tfd-rate-rule: ip` on the per-IP rule and `x-tfd-rate-rule: host` on the per-host rule, so a client and the integration test can tell which rule answered. The header names a rule, not a tenant, so it discloses nothing about who else uses the host (ADR-0009, ADR-0021) |
 | 400 | `/signin-state` with a missing or malformed nonce; `/signin-state` or `/logout` on a dedicated domain (`host` mode); on `login.<appDomain>`: a missing or changed `state`, an unknown `kid`, an `h` that is not a pooled host, an unregistered or suspended tenant host, or any other path. An authentic expired `state` gets 302 to `https://<h>/` instead (§3.3 step 2) |
 | 503 | tenant suspended, or its cell has no route |
 
@@ -2146,11 +2154,13 @@ destroy time, which the test reports with the rest.
     measured time). After each update the test waits about 60 s for the
     rule change to reach the edge (an estimate, not measured), and the
     check tolerates a longer wait. It sends `a` over its rate until the
-    first 429, for at most 5 minutes, and fails when none comes; it then
-    asserts `b` is served. When
-    `b` gets a 429, the old per-IP value still applies at the edge: the
-    test waits 30 s and repeats the check, at most 5 times, and reports
-    the time from the stack update to the first passing check. Through
+    first 429, for at most 5 minutes, and fails when none comes. That
+    first 429 must carry `x-tfd-rate-rule: host`. When it carries
+    `x-tfd-rate-rule: ip`, the old per-IP value still applies at the
+    edge: the test waits out the 5-minute rate window and repeats the
+    check, at most 3 times, and fails after the third. It reports the
+    time from the stack update to the passing check. It then asserts
+    `b` is served. Through
     `cloudfront:TestFunction` with
     `Host: <appDomain>`, the router answers 404.
 18. (host) Sign-in host (ADR-0016). `/signin-state` on `a`'s host with
@@ -2286,7 +2296,10 @@ rules of the daily re-check (a repeated page or lister on the same day
 changing nothing, a miss replacing a pass and a pass replacing an error
 on the same day, an error day leaving the miss streak as it was and
 emitting no three-miss count, a page whose date is not the current UTC
-date exiting as a no-op with its stale-page line, a day
+date exiting as a no-op with its stale-page line, a page whose
+`GetKey` for a passed id returns `ResourceNotFoundException` skipping
+that id with one line naming the tenant id, writing no item for it and
+finishing, a `GetKey` failing with another error failing the page, a day
 with no check leaving a streak as it was, and an entry that errors three
 days in a row with its `unverifiable` line and count); a daily-run page
 that fails, so that it adds no page number to `pagesFinished`, the
@@ -2317,8 +2330,8 @@ a missing `cell#` and the 507 answers; a `host#` entry with no `tenant#`
 entry (a router test on a stubbed store); the SPA's token exchange to
 `exchangeEndpoint`, CORS headers included (a browser test against a stub
 endpoint; a run against `tenant-identity`'s exchange API waits on Q-8); and the per-IP rate rule's block (the web ACL template test
-checks its priority and its Host-and-IP key, and the test has one source
-address). The alarms' notifications are not checked;
+checks its priority, its Host-and-IP key and each rule's
+`x-tfd-rate-rule` header, and the test has one source address). The alarms' notifications are not checked;
 step 14 checks the metric count the re-check alarm watches.
 
 ## 11. Open questions

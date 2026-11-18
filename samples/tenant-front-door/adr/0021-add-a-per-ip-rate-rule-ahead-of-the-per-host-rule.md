@@ -66,8 +66,13 @@ per-host rule. The default is 500 requests in 5 minutes. It is a chosen
 value, not a measured one: a quarter of the default
 `tenantRequestsPer5Min`, so four addresses are needed to use up a
 tenant's budget, and well above what one interactive user sends.
-Option 1 leaves the lock-out open; Option 2 charges a multi-tenant
-client once for all tenants. `single` mode gets no edge rule, because
+Each rule's `CustomResponse` sets its own response header,
+`x-tfd-rate-rule: ip` on this rule and `x-tfd-rate-rule: host` on the
+per-host rule, so a 429 shows which rule answered and the integration
+test can prove the per-host rule bound (spec §10 step 17). The header
+names a rule, not a tenant, so it leaks nothing about other tenants or
+their counts. Option 1 leaves the lock-out open; Option 2 charges a
+multi-tenant client once for all tenants. `single` mode gets no edge rule, because
 its origin limit already counts verified requests only.
 
 ## Consequences
@@ -86,8 +91,9 @@ its origin limit already counts verified requests only.
 - Known limitations: the rule's block is not driven end to end. The
   integration test sends from one address, so it raises
   `ipRequestsPer5Min` above `tenantRequestsPer5Min` with a stack update
-  for the per-host step and checks the rule's priority and key in the
-  web ACL template test (spec §10).
+  for the per-host step, requires `x-tfd-rate-rule: host` on that
+  step's first 429, and checks the rule's priority, key and header in
+  the web ACL template test (spec §10).
 - Revisit when a measured traffic profile gives a better default, or
   when WAF can key on a value derived from the token, which would let
   the per-host rule count only verified requests.

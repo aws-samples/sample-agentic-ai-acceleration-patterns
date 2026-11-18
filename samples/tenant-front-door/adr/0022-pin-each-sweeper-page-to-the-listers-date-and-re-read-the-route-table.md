@@ -39,7 +39,11 @@ by keys: the registrar refuses a write only past 5 MB, so the number of
 keys, and the number of `ListKeys` calls of 50 keys a full scan needs,
 depends on the entry sizes. No spike measured `ListKeys` or `GetKey`
 latency from the deployment Region to the store's global endpoint. An
-asynchronous Lambda invocation carries at most 256 KB of payload.
+asynchronous Lambda invocation carries at most 1 MB of payload
+([Lambda quotas](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html),
+"Invocation payload", checked 2026-11-18). `GetKey` on a key that is
+not in the store returns `ResourceNotFoundException`, the same error as
+for a store that does not exist.
 
 ## Options considered
 
@@ -90,7 +94,7 @@ also grow between the lister and a retry, so a page can hold more than
 ### Option 5: A `GetKey` per passed tenant id
 
 The lister passes each page its list of tenant ids (at most 500 ids of
-at most 63 characters, about 33 KB, inside the 256 KB async limit). The
+at most 63 characters, about 33 KB, inside the 1 MB async limit). The
 page reads each `tenant#<id>` entry with `GetKey`, 10 at a time, and
 checks only those ids. Pros: the read cost is tied to the page size,
 not the store, so a large store changes nothing; the page never checks
@@ -110,7 +114,14 @@ alarm, which is better than outcomes filed under a day nobody started
 each page its list of tenant ids, and the page reads each one's
 `tenant#<id>` entry with `GetKey`, 10 at a time, each read made once
 with a 2 s limit, and skips one whose domain is gone or whose challenge
-is open; it does no `ListKeys` scan (the lister still lists). This
+is open; it does no `ListKeys` scan (the lister still lists). A
+`GetKey` that returns `ResourceNotFoundException` means the entry is
+gone, deleted after the lister ran: the page skips that id, logs one
+line naming the tenant id, writes no item for it (the next lister
+deletes its items) and finishes the rest. The lister has just read the
+store, so a 404 here is a missing key, not a missing store. Only another
+error on a `GetKey` fails the page, so one tenant's offboarding never
+costs the other domains on its page a day of checks. This
 bounds the page by its own size, where a scan (Option 4) is bounded by
 the store's. With it: the three-miss count is emitted only when this
 write's outcome is a miss and leaves `missStreak` at 3 or more, so an
@@ -136,8 +147,9 @@ error day or a pass emits none; the sweeper's role holds
   their own day.
 - Known limitations: not tested end to end, and covered by unit tests
   with a stubbed clock instead: a page whose date is not today exiting
-  with its stale-page line, and an error day emitting no three-miss
-  count (spec §10).
+  with its stale-page line, an error day emitting no three-miss
+  count, and a `GetKey` that returns `ResourceNotFoundException`
+  skipping its id while the page finishes (spec §10).
 - Revisit when a measured `GetKey` time from the deployment Region
   comes close to 2 s, or when a vendor needs a redriven page's work kept
   rather than reported.
