@@ -75,9 +75,16 @@ application hook that names one of them. Validation and the account
 handshake probe stay in the request, so an operator still gets a 400 or
 a 404 at once. Live values never change before the commit: placement,
 parameter validation and build inputs read only them. A pre hook
-failure on update drops `pending` and keeps the old values live. A
-delete is never gated (P-9). Hook operations stay synchronous and fire
-no hooks.
+failure on update drops `pending` and keeps the old values live. The
+one exception is an account's `externalId`: `PutAccount` writes it in
+the request's conditional write, after the handshake probe proved it,
+and stages only `maxCells` and `applicationIds`. An owner rotates a
+leaked id by redeploying the pair to refuse the old one, so a staged id
+would fail every build into the account while hooks run, and for good
+when a pre hook refused it. A security rotation must not wait on a
+gate, so an `ACCOUNT_UPDATE` pre hook cannot refuse an external id
+change. A delete is never gated (P-9). Hook operations stay synchronous
+and fire no hooks.
 
 ## Consequences
 - Spec changes: §1.2, P-1, P-5, P-8, P-9, §4.1 (status fields, R-29,
@@ -88,9 +95,10 @@ no hooks.
   R-45), §7.1 (live-status conditions), §7.2, §7.4, §8 (§8.1 budget,
   §8.2, R-23, R-46, new §8.4 with R-50 and R-51), §9 (N-13), §10 (202
   and polling for every record call, spelled out in steps 2, 3, 4, 11
-  and 18, new step 17, teardown becomes step 18, unit assertions), §11. Threat model: T16, T43
-  widened; new T45 to T47 and M33, M34. `integration-test.md` gains the
-  changes the built test will need.
+  and 18, new step 17, teardown becomes step 18, unit assertions,
+  untested paths), §11. Threat model: T16, T28, T43 widened; new T45
+  to T47 and M33, M34. `integration-test.md` gains the changes the
+  built test will need.
 - Breaking change for API clients: the seven operations answer 202
   with the record and its `status` instead of 200, and a record is
   usable only once it is `ACTIVE` (or `UPDATING` or `UPDATE_FAILED`
@@ -128,6 +136,16 @@ no hooks.
   That condition is what keeps a record's count at 0 from the moment
   its delete is accepted. `DeleteDeployment` and `DeleteCell` stay
   exempt (P-9).
+- An `ACCOUNT_UPDATE` pre hook gates `maxCells` and `applicationIds`
+  only. A new `externalId` is in force from the request, before any
+  hook runs, and stays when a pre hook refuses the rest (spec R-48,
+  T28). That is the one exception to "nothing changes before the gate",
+  and a hook that must vet external ids has no place to do it.
+- A failed workflow start deletes a record the request inserted, since
+  no hook ran and nothing can claim it; a re-put, an update and a
+  delete go to their `*_FAILED` status instead (spec R-51). A
+  `CreateTenant` that answers 500 therefore leaves no tenant whose id
+  the caller never got, and a retry makes one tenant.
 - `PutApplication`'s write, which needed no condition when both
   declaration lists were sent, is now always conditional on the status
   it read; a failed condition is classified from the item, as R-14
@@ -152,7 +170,7 @@ no hooks.
 - ADR-0005, ADR-0024, ADR-0032 and ADR-0037 get "Amended by ADR-0045"
   lines and dated trailing notes when this record is accepted. ADR-0044
   carries a dated note now, because it is still Proposed and its seam
-  is the one this record closes.
+  is the one this record closes; it gets the `Amended by` line too.
 - Revisit if a client cannot poll (a synchronous `CreateTenant` would
   then need option 2 beside this one), if the execution per operation
   becomes a cost that matters at the fleet's request rate, or if a hook

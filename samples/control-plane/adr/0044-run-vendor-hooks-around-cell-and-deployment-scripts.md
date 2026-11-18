@@ -4,6 +4,7 @@
 - Date: 2026-11-17
 - Amends: ADR-0002, ADR-0011, ADR-0012, ADR-0021, ADR-0022, ADR-0025,
   ADR-0032, ADR-0042
+- Amended by: ADR-0045
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -587,7 +588,7 @@ as a consumer of a global post hook.
   quota's error name together with whether a repeat under a bound
   token returns its build at that quota.
 
-**Extended by ADR-0045 (2026-11-18):** hooks also run on application,
+**Amended by ADR-0045 (2026-11-18):** hooks also run on application,
 tenant and account events, and the seven operations that change those
 records become asynchronous. It closes the seam this record lists as
 "hooks on tenant record events and on account events"; hooks on hook

@@ -195,14 +195,20 @@ written. Once built:
   to `ACTIVE`, and an update renaming it `blocked` polls to
   `UPDATE_FAILED` with the old name kept and no `pending`. The step
   adds an application post hook `c-post` on `APPLICATION_UPDATE` to
-  application Z of spec §10 step 16; the put polls through `UPDATING` to `ACTIVE`, a second
-  put while `UPDATING` is a 409, and `c-post` sees
+  application Z of spec §10 step 16; the put polls through `UPDATING`
+  to `ACTIVE`, a second put while `UPDATING` is a 409, and `c-post` sees
   `EVENT = APPLICATION_UPDATE`, `SCRIPT_OUTPUTS = {}` and no cell. An
   application hook on a tenant or account event is a 400.
 - Teardown (spec §10 step 18) registers B again after its delete, so N
   runs on `ACCOUNT_CREATE` and records B's id, `TENANT` as owner and
   Y's id as the admitted list, and no variable holding the external id;
   B is then deleted again.
+- Not tested, by choice of four new steps only: a hook on an
+  `APPLICATION_DELETE`, `TENANT_DELETE` or `ACCOUNT_DELETE` event (the
+  retry-and-skip path that keeps cleanup reachable), any hook on
+  `ACCOUNT_UPDATE`, and `DELETE_FAILED` on an application, a tenant or
+  an account. Spec §10 lists them; unit assertions cover the record
+  delete's two writes and the commit replay.
 
 ## Runtime and cost
 
