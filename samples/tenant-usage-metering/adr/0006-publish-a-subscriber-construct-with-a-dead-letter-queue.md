@@ -50,8 +50,9 @@ that must act inside the hour. Each bus is shared only with the vendor
 accounts on its list, `rawSubscriberAccountIds` or
 `usageSubscriberAccountIds`. Cells are registered at run time, so the
 check sits in the registry: `PutCellEmitter`, which runs in the
-`CELL_CREATE` `PRE` hook, refuses a cell whose account is on either list,
-so the cell create fails before its script runs; and a deploy that adds
+`CELL_CREATE` `PRE` hook, refuses a cell whose account is on either list
+or is the metering account, which owns both buses, so the cell create
+fails before its script runs; and a deploy that adds
 an account already holding a registered cell fails. The check refuses
 vendor-owned cell accounts too, on purpose: an account that holds cells
 runs application code, and that code must not see other cells' tenants.

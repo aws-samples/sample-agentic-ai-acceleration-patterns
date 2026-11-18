@@ -28,7 +28,7 @@ Pros: the cell's own role signs each call (ADR-0001); retries reuse the
 
 ## Decision
 Option 2 (P-1). The sample ships a TypeScript emitter snippet that
-buffers, batches up to 500, signs with the default credential chain and
+buffers, batches up to 100, signs with the default credential chain and
 retries with the same `eventId`s.
 
 ## Consequences

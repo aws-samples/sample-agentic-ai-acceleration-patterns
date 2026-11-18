@@ -46,9 +46,13 @@ Option 3. It is the only one where neither the emitter's identity nor its
 tenant list is held or written by the emitter. The function admits only
 assumed-role callers, and looks the role up by `<accountId>#<roleName>`,
 so a role of the same name in an account the control plane never
-registered is refused. The registrations are written in `PRE` hooks, so
-a cell or deployment is known before its script runs and is `CLOSING`
-before its delete script removes anything.
+registered is refused. Creates and updates are registered in `PRE`
+hooks, so a cell or deployment is known before its script runs. Deletes
+close the registration in `POST` hooks, after the delete script has
+flushed the emitters, so usage until the teardown is still admitted.
+Each registration admits only events stamped inside its own
+`activeFrom`..`closedAt`, so a cell cannot report a tenant's usage for
+hours before it held that tenant.
 
 ## Consequences
 - A pooled cell may still report for any tenant it holds. That is stated
