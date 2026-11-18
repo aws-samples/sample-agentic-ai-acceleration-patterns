@@ -86,4 +86,5 @@ requests to A's SPA paths during the block were all 200.
 Note 2026-11-18: ADR-0021 amends this record. In `host` mode the web
 ACL also carries a rate rule aggregated on `Host` and client IP,
 `ipRequestsPer5Min`, ahead of the per-host rule, so one address cannot
-use up a tenant's budget.
+use up a tenant's budget. Each rule's custom 429 also names the rule
+that answered in an `x-tfd-rate-rule` response header (`ip` or `host`).

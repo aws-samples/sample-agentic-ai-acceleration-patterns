@@ -2158,8 +2158,10 @@ destroy time, which the test reports with the rest.
     first 429 must carry `x-tfd-rate-rule: host`. When it carries
     `x-tfd-rate-rule: ip`, the old per-IP value still applies at the
     edge: the test waits out the 5-minute rate window and repeats the
-    check, at most 3 times, and fails after the third. It reports the
-    time from the stack update to the passing check. It then asserts
+    check, with at most 3 retries (4 checks in total), and fails after
+    the last. Each check allows up to 5 minutes of sending plus the
+    5-minute wait, so the step can take about 40 minutes at worst. It
+    reports the time from the stack update to the passing check. It then asserts
     `b` is served. Through
     `cloudfront:TestFunction` with
     `Host: <appDomain>`, the router answers 404.
