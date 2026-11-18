@@ -178,12 +178,12 @@ has passed the registrar's domain challenge (ADR-0018).
 | Route table | edge | CloudFront KeyValueStore | `tenant`, `host` and `cell` entries, the `app` settings and, in `host` mode, the `signin` key (§4) |
 | Route registrar | edge | API Gateway (IAM auth) and Lambda | The only writer of the route table, and the only creator of dedicated distribution tenants, which the sweeper deletes once disabled. Admits only the control plane's global hook role and the edge operator role, and checks each write against the control plane (§3.4) |
 | Sweeper | edge | A Lambda function of its own, with a 15-minute timeout, its own execution role and its own log group, run by EventBridge Scheduler. Only when `dedicatedDomains` is on (§3.6) | Every 15 minutes it deletes the dedicated distribution tenants and certificates that no tenant's `d` names any more. Daily it re-checks the challenge record of every passed challenge, routed or not (§3.4 step 5), and keeps the state of that re-check in a DynamoDB table of its own (ADR-0020, ADR-0022). Its log group holds no registrar request log |
-| SPA origin | edge | S3 bucket with origin access control | One build for every tenant |
+| SPA origin | edge | S3 bucket with origin access control | One build for every tenant. Block Public Access on, `BucketOwnerEnforced`, versioning on. The bucket policy lets only the distribution read (origin access control) and denies object writes and deletes (`s3:PutObject`, `DeleteObject`, `DeleteObjectVersion`) to every principal except the stack's two deployment roles, the one that uploads the build and the one that empties the bucket at teardown. A script served from `/assets/*` is then the one the build made, and the import map pins it (§7.1, ADR-0023) |
 | Cell API origin | the cell's | The cell's API (demo: Lambda function URL with origin access control) | Verifies the token, checks the route hint and the cell's tenants |
 | `CellRouteAccess` construct | the cell's | Lambda permission | Grants `cloudfront.amazonaws.com` `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`, conditioned on the edge distribution's ARN |
 | Agent route | edge | `/agents/*` behaviour | Streams to the agent ingress of `agentic-runtime-isolation`, when configured, with the `Managed-AllViewerExceptHostHeader` origin request policy. The router forwards only `/agents/<backend>/invocations` and strips the leading `/agents`, so the ingress receives `<stage>/<backend>/invocations` (§3.3 step 7, ADR-0019) |
 | Route hook | the control plane's | CodeBuild, the control plane's global hook project, under `<fleet>-global-hook` (control-plane R-41) | `hooks/route-hook.sh`, registered as two global hooks. `front-door-post` (`POST` on `CELL_CREATE`, `CELL_UPDATE`, `DEPLOYMENT_CREATE`, `DEPLOYMENT_UPDATE`) puts the cell or tenant route; `front-door-pre` (`PRE` on `CELL_DELETE`, `DEPLOYMENT_DELETE`) deletes it (§3.2, §3.4). It acts only for an application that has a front door hook parameter (`RouteHookAccess`, below) in the control plane's account, and exits 0 for every other (ADR-0014) |
-| `RouteHookAccess` stack | the control plane's | IAM and SSM Parameter Store | The front door hook parameter `/application-plane/applications/<applicationId>/shared/front-door-hook` with `registrarUrl`, a name of its own so that it cannot collide with the cell-account copy (§6.4) when the control plane's account also hosts cells, and a customer-managed policy, listed in the control plane's `globalHookManagedPolicyArns`, that lets `<fleet>-global-hook` invoke this registrar and read any front door hook parameter, `/application-plane/applications/*/shared/front-door-hook` |
+| `RouteHookAccess` stack | the control plane's | IAM and SSM Parameter Store | The front door hook parameter `/application-plane/applications/<applicationId>/shared/front-door-hook` with `registrarUrl`, a name of its own so that it cannot collide with the cell-account copy (§6.4) when the control plane's account also hosts cells. The parameter has `DeletionPolicy` and `UpdateReplacePolicy` `Retain`, so deleting or replacing the stack keeps it (§3.4 route hook step 1, §6.2). The stack also holds a customer-managed policy, listed in the control plane's `globalHookManagedPolicyArns`, that lets `<fleet>-global-hook` invoke this registrar and read any front door hook parameter, `/application-plane/applications/*/shared/front-door-hook` |
 | `register-hooks.sh` | the operator's shell | the control plane API, with an operator token | Puts both global hooks with `PutHook`, from this sample's source at a pinned commit; idempotent. `--delete` removes them (§5.2) |
 | Telemetry | edge | CloudFront standard logging v2: delivery source, delivery destination, delivery and log group in `us-east-1` (ADR-0010) | Per-tenant requests, errors, bytes and latency from the record fields ADR-0010 lists, and the tenant in `viewer-request-log-data` (Telemetry, below) |
 
@@ -225,7 +225,7 @@ billing-grade count comes from the cell's own log of verified requests.
 | Stack | Account | Region | Holds |
 |---|---|---|---|
 | Edge stack | edge | `us-east-1` | The ACM certificate for `<appDomain>` (and `*.<appDomain>` in `host` mode) and the CloudFront-scope web ACL with its rate rules (ADR-0009, ADR-0021) |
-| Main stack | edge | The deployment Region, the control plane's (`eu-central-1` in the integration test) | The multi-tenant distribution and the pooled distribution tenant, the router, the KeyValueStore, the response headers policy and the SPA bucket; the registrar (API, function, resource policy); the custom resources for the `signin` key and the teardown; the published parameter. With `dedicatedDomains` on: the sweeper, its table, queue, schedules, log group and alarms, the guard and the starter. The `dedicatedDomains` switch is an update of this stack |
+| Main stack | edge | The deployment Region, the control plane's (`eu-central-1` in the integration test) | The multi-tenant distribution and the pooled distribution tenant, the router, the KeyValueStore, the response headers policy and its variant for `/callback` (§7.1) and the SPA bucket; the registrar (API, function, resource policy); the custom resources for the `signin` key and the teardown; the published parameter. With `dedicatedDomains` on: the sweeper, its table, queue, schedules, log group and alarms, the guard and the starter. The `dedicatedDomains` switch is an update of this stack |
 | Edge logging stack | edge | `us-east-1` | The log group, delivery source, delivery destination and delivery, after the main stack |
 | `RouteHookAccess` stack | the control plane's | The control plane's | The hook parameter and the hook policy (§3.1) |
 
@@ -240,6 +240,7 @@ resource removes them (§6.2).
 |---|---|---|---|---|
 | `/assets/*` | static | SPA bucket | one year, immutable, shared by all tenants | no |
 | `/`, other SPA routes | static, rewritten to `/index.html` | SPA bucket | `no-cache`, revalidated | no |
+| `/callback` | static, rewritten to `/index.html`, with the response headers policy that sends no reports (§7.1) | SPA bucket | `no-cache`, revalidated | no |
 | `/config.json` | generated at the edge | none | `no-store` | `host` mode only |
 | `/api/*` | dynamic | the tenant's cell API, in the cell's account | disabled | yes |
 | `/agents/*` | dynamic, streaming | the agent ingress | disabled | yes |
@@ -345,7 +346,12 @@ On every viewer request:
 4. For `/api/*`, `/agents/*` and `/signin-state`, check `Sec-Fetch-Site`.
    Allow only `same-origin`, `none`, or no header; refuse the rest with
    403 (§7.3).
-5. Find the tenant:
+5. Find the tenant. An `Authorization` header longer than 8,192 bytes
+   gets 401 with `WWW-Authenticate: Bearer`, in both modes and before
+   any decode. The limit is chosen, not measured: it is about seven
+   times the 1,184-byte token of spike S-7 and below CloudFront's own
+   limit on the size of a request's headers, so no legitimate token is
+   refused and the decode never runs on an unbounded input.
    - `single` mode: take the `Authorization: Bearer` token,
      base64url-decode its payload without checking the signature, read
      `tenant_id`, and lower-case it. No token, an undecodable token, or
@@ -908,6 +914,23 @@ On every write:
    re-read entry, at sub-step 1 when `d` changed and with a new lookup
    when `dk` is new, so no write marks a token passed that no answer
    held.
+
+   Every writer shares the store's one ETag (ADR-0003), so writes
+   serialise and a conflict costs a re-read. The registrar attempts a
+   write at most five times, with a jittered backoff of 50 to 500 ms
+   between attempts, and then answers 503, which the route hook
+   retries (route hook step 4: five attempts over about two
+   minutes). These bounds are chosen. The rates that follow are
+   estimated, not measured: a cycle from the ETag read to the write
+   takes about 0.3 s, so the store takes about three writes a second
+   at most and about half that under conflicts. A registrar kept at
+   about one write a second leaves room for the retries. A burst of
+   100 simultaneous creates clears in about 70 s, inside the hook's
+   two minutes. A larger burst leaves creates in `CREATE_FAILED`,
+   which the operator deletes and creates again (route hook, after
+   step 4). Sharding by distribution, each shard with its own store
+   and ETag (ADR-0012), is the way past the ceiling. The build
+   measures the cycle and replaces the estimates.
 6. Log the caller role, key and outcome, never the body.
 
 Deletes run steps 1 and 2, the write of step 5 with its ETag and its
@@ -1035,7 +1058,16 @@ the control plane's hook environment (control-plane R-42):
 
 1. Read `/application-plane/applications/<APPLICATION_ID>/shared/front-door-hook`
    in the control plane's account. No such parameter: exit 0, because
-   the application has no front door (ADR-0014). The hook runs for every
+   the application has no front door (ADR-0014). That is a silent skip
+   by design: only `ParameterNotFound` is skipped, and an
+   `AccessDenied` is another read error that fails the hook. Nothing
+   counts a skip, and on a delete the hook exits 0, so the control
+   plane's skip alarm stays quiet. An application with a front door
+   whose parameter is gone therefore reaches `ACTIVE` with no route,
+   and its deletes leave an `active` `tenant#` entry. `RouteHookAccess`
+   keeps the parameter against that (§3.1), so only a deliberate
+   deletion in the control plane's account removes it (§6.2 limits).
+   The hook runs for every
    application on the control plane, so a throttled read
    (`ThrottlingException`, `TooManyRequestsException`) is retried inside
    the build, five attempts with jittered backoff over about a minute,
@@ -1299,7 +1331,8 @@ hook's put replaces the entry, `s: active` and routed to the new cell
 | `dedicatedDomains` | no | off | Lets the edge operator role set a tenant's `customDomain` (§3.4 step 5, ADR-0018). Off: any `customDomain` gets 400, the registrar role holds no ACM or distribution-tenant action, and the sweeper, its role, its table, its schedules and the starter are not deployed. A stack update that turns it off fails while any `tenant#` entry holds a `d` or the sweeper has a distribution tenant or certificate left to delete; the operator drops every dedicated domain first (§3.4) |
 | `tenantRequestsPer5Min` | no | 2,000 | Per-tenant rate: at the edge per host in `host` mode, at the origin per verified tenant in `single` mode (ADR-0009) |
 | `ipRequestsPer5Min` | no | 500 | `host` mode only: the most requests one client IP may send to one tenant host's `/api/*` and `/agents/*` in 5 minutes before the edge answers 429, counted ahead of the per-host count (ADR-0021). One value for every tenant host; there is no per-tenant setting. A chosen value, not a measured one. Keep it below `tenantRequestsPer5Min`. A tenant whose users all reach the edge through one office NAT address shares one count: at 500 its whole user base gets about 1.7 requests per second before `tenantRequestsPer5Min` applies. Raising it raises it for every host |
-| `reportingEndpoint` | no | off | URL for CSP and other browser reports |
+| `reportingEndpoint` | no | off | URL for CSP and other browser reports. The `/callback` behaviour sends none (§7.1) |
+| `alarmTopicArn` | no | none | ARN of an SNS topic in the main stack's account and Region. The construct adds it as the ALARM action of every alarm this specification defines: the three-miss, `unverifiable`, queue-depth, missing-pages and no-lister alarms of the sweeper (§3.4 step 5) and the 80 % route table alarm (§4.1). The deployer owns the topic, its policy (it must allow CloudWatch to publish) and its subscribers. With no topic the alarms exist and notify no one |
 
 ## 4. Data model
 
@@ -1439,22 +1472,31 @@ returns on the first 404. When none arrives within
 propagation is late. In `host` mode `/config.json` on a tenant's own host
 is the one unauthenticated read that names a tenant, and an unknown host
 gets 404, so the host already shows whether the tenant exists. In
-`single` mode no unauthenticated path reveals whether a tenant id
-exists, so there is nothing to probe and the hook waits the full bound.
+`single` mode no unauthenticated read names a tenant, and the hook holds
+no token for one. A request with a forged, unsigned token shows a route
+that is not live (403), but a live route sends it on to the cell, so the
+hook does not probe and waits the full bound. A caller who already holds
+a tenant id can sort it the same way (§6.2 limits).
 
 `suspended` and a delete take effect after the same window. Until then the
 tenant is still routed, and the cell's hosts check is the only refusal
 (§3.5). Removal is a delete, not a status. A later `PutTenantRoute`, from
 either role, keeps the stored status.
 
-A tenant cannot lift its own suspension. The registrar admits no role a
-cell account holds (§3.4), so a tenant-owned account can neither write
-nor delete its route. Only the route hook writes it, on an operation
-the vendor started. A hook's put to an existing entry keeps `suspended`,
-and a hook's delete is accepted only while the control plane is
-deleting the deployment (§3.4). The route starts `active` again only
-when the vendor deletes the deployment and creates a new one, whose
-`dt` differs, also when the delete hook was skipped (§3.4 step 5).
+A tenant cannot lift its own suspension at the edge. The registrar
+admits no role a cell account holds (§3.4), so a tenant-owned account
+can neither write nor delete its route. Only the route hook writes it,
+on an operation the vendor started. A hook's put to an existing entry
+keeps `suspended`, and a hook's delete is accepted only while the
+control plane is deleting the deployment (§3.4). The route starts
+`active` again only when the vendor deletes the deployment and creates a
+new one, whose `dt` differs, also when the delete hook was skipped (§3.4
+step 5). The suspension follows the deployment, not the tenant. A vendor
+role that deletes a deployment and creates a new one, for a tenant move
+or a repair, therefore lifts a suspension the edge operator set, and
+nothing tells the edge operator, who suspends the new deployment again.
+A suspension also does not reach a cell the tenant owns or the agent
+ingress (§6.2 limits).
 
 ## 5. API surface
 
@@ -1523,7 +1565,8 @@ expires and is issued again); 507
 when a write would exceed the route table's 5 MB (ADR-0012) or ACM
 refuses a certificate request for its quota (§4.1); 503 when
 the control plane cannot be read (the write is refused, never made
-unchecked).
+unchecked), or when the store's ETag still conflicts after five
+attempts (§3.4 step 5).
 
 ### 5.2 Script and construct forms
 
@@ -1672,7 +1715,9 @@ All with a small static HTML or JSON body and `no-store`:
 - No role a cell account holds can write or delete a route. The route
   hook writes routes on the vendor's operations, each naming the cell and
   account the control plane placed it in.
-- A tenant cannot lift its own suspension (§4.2).
+- A tenant cannot lift its own suspension at the edge (§4.2): no role
+  it holds writes its route. Where a suspension does not hold, the
+  limits below say so.
 - No tenant route can claim another tenant's host: only the edge
   operator role sets a `customDomain`, one under `appDomain` gets 400,
   and one another tenant holds gets 409.
@@ -1694,28 +1739,30 @@ All with a small static HTML or JSON body and `no-store`:
   `single` mode for every request that reaches the token decode. A
   request that reaches the decode names the tenant it is routed on. The
   field names the claimed tenant (§3.1).
-- An ordered teardown leaves nothing behind. Two pieces live outside
-  CloudFormation in the control plane's account (the two global hooks
-  and the `globalHookManagedPolicyArns` entry), so `cdk destroy` alone
-  is not the teardown. In order: (1) delete the application's
-  deployments, then its cells, through the control plane, whose
-  `front-door-pre` hooks remove their routes; (2) run
-  `register-hooks.sh --delete` when this is the last front door on the
-  control plane; (3) take the `RouteHookAccess` policy out of
-  `globalHookManagedPolicyArns` and update the control plane; (4)
-  destroy `RouteHookAccess`; (5) destroy the front door stacks. Out of
+- An ordered teardown leaves nothing behind. Three pieces live outside
+  CloudFormation, or outlive it, in the control plane's account (the two
+  global hooks, the `globalHookManagedPolicyArns` entry and the hook
+  parameter, which the stack keeps), so `cdk destroy` alone is not the
+  teardown. In order: (1) delete the application's deployments, then its
+  cells, through the control plane, whose `front-door-pre` hooks remove
+  their routes; (2) run `register-hooks.sh --delete` when this is the
+  last front door on the control plane; (3) take the `RouteHookAccess`
+  policy out of `globalHookManagedPolicyArns` and update the control
+  plane; (4) destroy `RouteHookAccess`, which keeps its parameter; (5)
+  delete that parameter; (6) destroy the front door stacks. Out of
   order, every create and update of the application fails after the
   hook's retries, every delete waits through three hook attempts and
   raises the skip alarm, and `RouteHookAccess` cannot be deleted while
-  its policy is attached (IAM `DeleteConflict`). In step 5 a custom
-  resource on the distribution, run before the distribution's delete,
-  disables and deletes every dedicated distribution tenant on it, then
-  deletes every certificate the registrar tagged with this
-  distribution, one still pending validation included, which has no
-  distribution tenant and would outlive the stack, polling until each
-  disable has deployed (the CDK provider framework's `isComplete`),
-  because CloudFront cannot delete a distribution that still has
-  distribution tenants. The README
+  its policy is attached (IAM `DeleteConflict`). A parameter left
+  behind names a registrar that step 6 removes, so the application's next
+  create or update fails. In step 6 a custom resource on the
+  distribution, run before the distribution's delete, disables and
+  deletes every dedicated distribution tenant on it, then deletes every
+  certificate the registrar tagged with this distribution, one still
+  pending validation included, which has no distribution tenant and
+  would outlive the stack, polling until each disable has deployed (the
+  CDK provider framework's `isComplete`), because CloudFront cannot
+  delete a distribution that still has distribution tenants. The README
   states the same order.
 
 Limits of these promises:
@@ -1728,6 +1775,41 @@ Limits of these promises:
   unknown. The hardening path, not built here, is an ingress that admits
   only the distribution, through a secret origin header that a WAF rule on
   the ingress checks, or one that reads the suspension.
+- A suspension holds at the edge only. A cell in a tenant-owned account
+  can serve its own users while the tenant is suspended: the tenant
+  controls the function URL's resource policy and can call its cell
+  directly (§3.4). A token the issuer has already issued stays valid
+  until it expires, so a direct call to such a cell or to the agent
+  ingress keeps working for at least one token lifetime. The hardening
+  path, not built here, sits at the issuer: it refuses to mint or
+  exchange a token for a suspended tenant, so direct access ends
+  within one token lifetime. The front door does not tell the issuer.
+- A vendor role that deletes a deployment and creates a new one resets
+  its suspension to `active` (§4.2), and nothing tells the edge
+  operator. The suspension follows the deployment, not the tenant. The
+  edge operator suspends the new deployment again.
+- A caller who holds a tenant id can sort it in `single` mode with a
+  forged, unsigned token: 403 for an unregistered id, 503 for a
+  suspended one, the cell's refusal for a live one (§3.3 steps 5 and
+  6). In `host` mode `/config.json` on a tenant's host answers 503 for
+  a suspended tenant, 200 for an active one and 404 for an unknown
+  host. Tenant ids are ULIDs, so they cannot be enumerated.
+- The edge's own configuration is the deployer's. A principal that can
+  update the router (`cloudfront:UpdateFunction`, `PublishFunction`),
+  the distribution, the response headers policy or the web ACL
+  (`wafv2:UpdateWebACL`) removes the checks each one carries, for every
+  tenant at once, and the stack cannot narrow those actions to what it
+  owns. The edge account's administrators are the deployer, and
+  CloudTrail names each call.
+- The front door hook parameter is the switch for routing an
+  application's tenants. Deleting it, which only an administrator of
+  the control plane's account can do, makes the hook skip the
+  application silently (§3.4 route hook step 1). The hardening path,
+  not built here, is a sweeper reconcile of the `tenant#` entries
+  against `GetDeployment` that alarms on a mismatch.
+- Route writes share one store ETag, so sustained writes above about
+  one a second, or a burst above about 100, fail creates (§3.4
+  step 5). Those figures are estimates.
 - `single` mode has no edge rate rule. The origin's per-tenant limit
   counts verified requests only (ADR-0009).
 - In `host` mode the edge rate rules count a request before the router
@@ -1823,6 +1905,36 @@ synth, with no network call. The SPA reads the same endpoints from
 The response headers policy overrides origin headers, so a cell in a
 tenant-owned account cannot weaken the baseline (P-8).
 
+**Reports.** A CSP or Reporting API report carries the document's URL
+with its query string, and the authorization code and `state` sit in
+the query of the callback page until `history.replaceState` runs
+(§3.5 step 4). In `host` mode that page is `/callback`, a behaviour of
+its own with a second response headers policy: the same headers, but
+the CSP has no `report-to fd` and there is no `Reporting-Endpoints`,
+so a violation on that page sends no report. In `single` mode the
+callback is `https://<appDomain>/`, which no behaviour can single out,
+so with `reportingEndpoint` set a violation that fires before
+`replaceState` reports the query. The code is bound to the PKCE
+verifier the SPA holds (§3.5), so a reported code alone redeems
+nothing. The deployer sets `reportingEndpoint` only to an endpoint
+that may hold an authorization code and a `state`.
+
+**Imported chunks.** `'strict-dynamic'` trusts every script the hashed
+entry loads, so a chunk that someone could write to the SPA bucket
+would run in every tenant's origin. The build therefore writes an
+import map into `index.html` with an `integrity` entry (`sha384`) for
+every chunk the entry can import, statically or with `import()`, and
+the entry's own `<script>` carries `integrity`. The import map is an
+inline script, so its hash is in `script-src` like the entry's. The
+chain from the policy to every chunk is anchored in the response
+headers policy, which is not in the bucket. The build fails when an
+emitted chunk has no `integrity` entry, as it does for a script with
+no hash. A browser that ignores `integrity` in an import map loads
+chunks unchecked, and the bucket's write controls (§3.1) are the
+control there (ADR-0023). A release adds two hashes to the policy, the
+entry's and the import map's, so the two releases it carries hold four,
+about 300 characters of the 1,783.
+
 ### 7.2 SPA rules
 
 - No HTML strings into the DOM: `textContent`, `createElement`, or
@@ -1846,6 +1958,8 @@ tenant-owned account cannot weaken the baseline (P-8).
   `x-amz-content-sha256`, which origin access control needs to sign a
   request with a body to a Lambda function URL (ADR-0011).
 - Content-hashed asset names, so `/assets/*` can be immutable.
+- Every module the entry can import is named in the import map with
+  its `integrity` (§7.1). The SPA loads no script from another origin.
 - Streaming agent replies render with `fetch` and a `ReadableStream`, not
   `EventSource`, so the bearer token goes in a header.
 - In `single` mode every tenant shares one browser origin, so the SPA keeps
@@ -2024,6 +2138,9 @@ destroy time, which the test reports with the rest.
 3. `/` serves the SPA with every §7.1 header, and so does every answer
    the router generates itself: the 302 of `/logout`, `/config.json`,
    and the 401, 403, 404 and 503 answers of steps 5, 6, 9, 13 and 17.
+   A template test of the two response headers policies (§7.1) checks
+   that they differ only in the CSP's `report-to fd` and in
+   `Reporting-Endpoints`.
    In `single` mode
    `/signin-state` returns 404, and `/logout` returns 302 to the
    issuer's logout endpoint with `client_id` and
@@ -2036,7 +2153,10 @@ destroy time, which the test reports with the rest.
    the token from `x-tenant-token`.
 5. `/api/whoami` with no token, or with a token that carries a `tenants`
    list and no `tenant_id` (from the `shared-pool-multi-tenant`
-   topology), returns 401 from the edge (no origin log line).
+   topology), returns 401 from the edge (no origin log line). So does a
+   request whose `Authorization` header is one byte over 8,192 (§3.3
+   step 5), and `cloudfront:TestFunction` with a header of exactly
+   8,192 bytes answers without a compute-limit error.
 6. A token for an unregistered tenant returns 403 from the edge.
 7. A token whose payload is edited to name `b`, with `a`'s signature,
    reaches cell B and is refused there with 403.
@@ -2044,7 +2164,11 @@ destroy time, which the test reports with the rest.
    token is ignored.
 9. `Sec-Fetch-Site: same-site` on `/api/*` returns 403.
 10. A direct call to either cell's function URL, without CloudFront,
-    returns 403.
+    returns 403. Template tests check that the SPA bucket's policy denies
+    `s3:PutObject`, `DeleteObject` and `DeleteObjectVersion` to every
+    principal except the two deployment roles, and that versioning and
+    Block Public Access are on (§3.1), and the SPA build test checks that
+    a chunk with no `integrity` entry fails the build (§7.1).
 11. The edge account's tenant provisioning role, the tenant-owned role
     that ran `b`'s script, calls `PutTenantRoute` for `b`, its own
     tenant, and for `a`: 403 for both, from the resource policy's
@@ -2266,11 +2390,12 @@ destroy time, which the test reports with the rest.
     `register-hooks.sh --delete` when no other front door uses the
     control plane; take the `RouteHookAccess` policy out of
     `globalHookManagedPolicyArns` and update the control plane; destroy
-    `RouteHookAccess`; then destroy everything else the test deployed,
+    `RouteHookAccess`, which keeps its hook parameter; delete that
+    parameter; then destroy everything else the test deployed,
     in both accounts, the control plane and the operator role included,
     except the shared identity pool. The leftover
-    check also finds no registrar certificate for `<dd>` (step 14) and
-    no stand-in stack (step 1).
+    check also finds no registrar certificate for `<dd>` (step 14), no
+    hook parameter and no stand-in stack (step 1).
 
 Rotation check, optional and run on its own against a `host` mode front
 door: run the three rotation updates of §4.1 and check that a `state`
@@ -2334,7 +2459,8 @@ entry (a router test on a stubbed store); the SPA's token exchange to
 `exchangeEndpoint`, CORS headers included (a browser test against a stub
 endpoint; a run against `tenant-identity`'s exchange API waits on Q-8); and the per-IP rate rule's block (the web ACL template test
 checks its priority, its Host-and-IP key and each rule's
-`x-tfd-rate-rule` header, and the test has one source address). The alarms' notifications are not checked;
+`x-tfd-rate-rule` header, and the test has one source address). The alarms' notifications are not checked; a template test checks that
+every alarm names `alarmTopicArn` when it is set, and
 step 14 checks the metric count the re-check alarm watches.
 
 ## 11. Open questions

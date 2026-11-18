@@ -36,3 +36,4 @@ ADR-0017 take effect only on its acceptance. The spike results are in
 | [0020](./0020-keep-the-re-check-state-in-a-sweeper-owned-dynamodb-table.md) | Keep the re-check state in a sweeper-owned DynamoDB table | Accepted | 2026-11-18 |
 | [0021](./0021-add-a-per-ip-rate-rule-ahead-of-the-per-host-rule.md) | Add a per-IP rate rule ahead of the per-host rule | Accepted | 2026-11-18 |
 | [0022](./0022-pin-each-sweeper-page-to-the-listers-date-and-re-read-the-route-table.md) | Pin each sweeper page to the lister's date and re-read the route table | Accepted | 2026-11-18 |
+| [0023](./0023-pin-imported-spa-chunks-with-an-import-map-integrity.md) | Pin imported SPA chunks with an import map integrity | Accepted | 2026-11-18 |

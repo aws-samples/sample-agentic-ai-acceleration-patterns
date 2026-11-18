@@ -232,3 +232,9 @@ printing the registrar's message.
   (spec Q-5), or when the control plane offers a role per global hook
   (its §11 seam), which would let the registrar admit the route hook
   alone and close the residual above.
+
+Note 2026-11-18: `RouteHookAccess` keeps the front door hook parameter when
+the stack is deleted or its resource replaced (`Retain`), so a missing
+parameter, which the hook skips silently, follows only from a deliberate
+deletion in the control plane's account. The teardown gains a step after
+`RouteHookAccess` that deletes the parameter (spec §3.1, §6.2).
