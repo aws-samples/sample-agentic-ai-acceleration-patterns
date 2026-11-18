@@ -1219,7 +1219,9 @@ token, and puts it on a narrowed one only for a member of `admin-<T>`
 RFC 8693 parameter not listed in §5.4; synthesis refuses every
 `allowedOrigins` form §5.4.1 refuses (a public-suffix pattern, `:443`, a
 port on a pattern, an empty or repeated entry, the count and length caps
-among them), and the origin matcher accepts and refuses the §5.4.1 cases
+among them), while a missing or empty `allowedOrigins` context value and the
+prop `[]` synthesise with no list, no `ALLOWED_ORIGINS` and no
+`AllowedOrigins` output, and the origin matcher accepts and refuses the §5.4.1 cases
 (exact, port, one label, two labels, the bare domain, upper case, `http`,
 `null`, two `Origin` values, the header name in either case, no `Origin`,
 and the look-alikes `https://app.example.com.evil.test`,
