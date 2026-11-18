@@ -10,10 +10,12 @@ also Proposed (spec Q-5). ADR-0017 will supersede ADR-0013 once
 ADR-0044 is accepted; until then ADR-0013 stays Accepted. Merge order:
 the control-plane hooks branch first, then this one. The `Amended by:
 ADR-0017` notes on ADR-0002, 0003, 0012, 0014 and 0015 take effect when
-ADR-0017 is accepted. One spike is still open, S-5 (does
-`/agents/*` stream without buffering,
-[spec §9](../design/tenant-front-door.spec.md)).
-If it fails, it reopens the `/agents/*` origin request policy in ADR-0011.
+ADR-0017 is accepted. Two spikes are still open
+([spec §9](../design/tenant-front-door.spec.md)): S-5 (does
+`/agents/*` stream without buffering), which if it fails reopens the
+`/agents/*` origin request policy in ADR-0011, and S-10 (what the
+registrar's Lambda function sees from its default resolver), which if
+it fails reopens the resolver choice in ADR-0018.
 
 | Number | Title | Status | Date |
 |---|---|---|---|
@@ -34,3 +36,4 @@ If it fails, it reopens the `/agents/*` origin request policy in ADR-0011.
 | [0015](./0015-read-the-control-plane-with-a-reader-token.md) | Read the control plane with a reader token | Accepted | 2026-11-16 |
 | [0016](./0016-sign-in-through-one-shared-host-in-host-mode.md) | Sign in through one shared host in host mode | Accepted | 2026-11-17 |
 | [0017](./0017-register-routes-from-a-control-plane-global-hook.md) | Register routes from a control-plane global hook | Proposed | 2026-11-18 |
+| [0018](./0018-prove-a-dedicated-domain-with-a-per-tenant-dns-challenge.md) | Prove a dedicated domain with a per-tenant DNS challenge | Accepted | 2026-11-18 |

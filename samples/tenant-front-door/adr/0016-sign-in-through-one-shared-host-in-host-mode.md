@@ -4,6 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-17
+- Amended by: ADR-0018
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -145,7 +146,7 @@ rotation are in spec §3.3 step 2, §3.5 and §4.1.
   (ADR-0007).
 - Follow-up: the sample's threat model lists every principal that can read
   the `signin` key, the integration test role that calls `TestFunction`
-  and signs a test `state` among them (spec §10 step 17), and every
+  and signs a test `state` among them (spec §10 step 18), and every
   principal that can write the store, the test role included: it holds
   `PutKey` and `DeleteKey` for its fixture, scoped to the test run
   (spec §6.1). It also lists every reader of the CloudFront log group
@@ -156,3 +157,10 @@ rotation are in spec §3.3 step 2, §3.5 and §4.1.
 - Revisit when the issuer matches wildcard callback URLs strictly, returns
   `state` on a `logout_uri` redirect, or a per-tenant issuer replaces the
   shared one.
+
+Amended 2026-11-18 by ADR-0018, which answers spec Q-3: a tenant proves
+control of a dedicated domain's DNS with a registrar-issued token before
+the domain is routed. That proof is the reason a dedicated domain stays
+out of the sign-in path, not a way into it: a code sent there reaches a
+server the tenant runs. A dedicated domain with its own callback URL
+therefore stays out of scope.

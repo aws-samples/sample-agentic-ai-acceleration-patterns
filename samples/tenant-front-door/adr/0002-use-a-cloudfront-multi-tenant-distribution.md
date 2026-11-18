@@ -4,7 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-18
-- Amended by: ADR-0017
+- Amended by: ADR-0017, ADR-0018
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -117,3 +117,15 @@ callers are the control plane's global hook role, under which the
 route hook runs, and the edge operator role. The global hook role that
 sends `customDomain` gets 403, so only the edge operator role sets a
 dedicated domain, as before.
+
+Amended 2026-11-18 by ADR-0018, which answers spec Q-3: the
+dedicated-domain path stays in this sample, off unless the deployer
+turns on `dedicatedDomains`. Before the registrar requests a
+certificate, the tenant publishes a TXT record,
+`_tfd-challenge.<domain>` `tfd-verify=<token>`, carrying a token the
+registrar issued for that tenant and that domain and stored next to
+`d`. The operator's first call answers 202 with that record, and only a
+repeat that finds this tenant's token goes on to the certificate step
+above. A former holder's validation record therefore no longer routes
+a domain, and the consequences above that say "Q-3 decides" now point
+to ADR-0018.

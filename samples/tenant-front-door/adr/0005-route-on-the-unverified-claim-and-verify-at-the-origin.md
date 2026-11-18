@@ -96,7 +96,7 @@ Option 3 loses the agreement check.
   `/agents/*` too: the decode S-7 measured, with no extra key read.
 - Follow-up: the threat model records the forged-claim path, the client
   `x-tenant-route` path and the path of a token on another tenant's host
-  (§10 steps 7, 8 and 16).
+  (§10 steps 7, 8 and 17).
 - Spike: S-7 must read `tenant_id` from a real `tenant-identity` access
   token in a CloudFront Function, with compute utilisation under 50 %, and
   return 401 on a malformed token. It reports deploy and destroy time.

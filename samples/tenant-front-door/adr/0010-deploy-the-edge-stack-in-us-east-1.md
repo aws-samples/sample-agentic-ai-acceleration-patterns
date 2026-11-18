@@ -119,7 +119,7 @@ land in the log.
   mode. Traffic with a forged claim counts against the tenant it names,
   so a billing-grade count comes from the cell's log of verified
   requests.
-- Harder: per-tenant log queries (integration step 14) run in `us-east-1`.
+- Harder: per-tenant log queries (integration step 15) run in `us-east-1`.
   An operator looks for the CloudFront log group there.
 - Harder: the logs hold no query strings, referrers or cookies, and a
   field a new query needs is a change to the delivery's field list.

@@ -4,7 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-17
-- Amended by: ADR-0017
+- Amended by: ADR-0017, ADR-0018
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -103,3 +103,11 @@ the entry 236, so a tenant needs at most 236 bytes in `single` mode and
 466 in `host` mode. The ceilings become floor(5,000,000 × 0.8 / 236) =
 16,949 tenants in `single` mode and floor(5,000,000 × 0.8 / 466) = 8,583
 in `host` mode, and the revisit points about 16,900 and 8,500.
+
+Amended 2026-11-18 by ADR-0018: a dedicated tenant's `tenant#` value
+also carries its domain challenge, `dk` (51 bytes) and, while the
+challenge is open, `dx` (16 bytes). With a 64-character domain a routed
+dedicated tenant adds at most 288 bytes to the 20 % headroom (`d` 71,
+`dk` 51, its `host#<d>` entry 166), so the headroom holds
+floor(1,000,000 / 288) = 3,472 dedicated tenants, less what `app` and
+`signin` take. The pooled ceilings do not change.
