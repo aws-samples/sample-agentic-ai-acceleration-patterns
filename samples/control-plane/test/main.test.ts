@@ -79,7 +79,7 @@ describe('TenantStack', () => {
     const authorizer =
       body.components.securitySchemes['vendor-authorizer']['x-amazon-apigateway-authorizer'];
     expect(authorizer.type).toBe('token');
-    // All twenty-two operations (§5) across eleven paths exist
+    // All twenty-six operations (§5) across thirteen paths exist
     expect(Object.keys(body.paths).sort()).toEqual([
       '/accounts',
       '/accounts/{accountId}',
@@ -88,6 +88,8 @@ describe('TenantStack', () => {
       '/cells',
       '/cells/{cellId}',
       '/deployments',
+      '/hooks',
+      '/hooks/{hookId}',
       '/tenants',
       '/tenants/{tenantId}',
       '/tenants/{tenantId}/deployments',
@@ -95,7 +97,7 @@ describe('TenantStack', () => {
     ]);
     const operations = Object.values(body.paths).flatMap((path: any) =>
       Object.keys(path).filter((method) => method !== 'parameters'));
-    expect(operations).toHaveLength(22);
+    expect(operations).toHaveLength(26);
   });
 
   test('API handler receives the three index names and no CELL_DEFINITION (ADR-032)', () => {

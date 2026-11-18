@@ -12,11 +12,14 @@ import { stsHandshakeProbe } from './account.handshake';
 import { ApplicationDataModel, ApplicationItem, ApplicationRecord } from './application.data-model';
 import { CellDataModel, CellItem, CellRecord } from './cell.data-model';
 import { DeploymentDataModel, DeploymentItem, DeploymentRecord } from './deployment.data-model';
+import { HookDataModel, HookItem } from './hook.data-model';
+import { GlobalHookRecord } from './hook.types';
 import { IdempotencyDataModel, IdempotencyItem, IdempotencyRecord } from './idempotency.data-model';
 import { TenantService, TenantServiceConfig } from './tenant';
 import { TenantDataModel, TenantItem, TenantRecord } from './tenant.data-model';
 import { GRANTS, Grant } from '../shared/authorizer-policy';
 import { withGrantCheck } from '../shared/grant-check';
+import { HookTransactions } from '../shared/hook-transactions';
 import { DynamoDBRepository, PlacementTransactions } from '../shared/repository';
 import { CallerContext, requireEnv } from '../shared/service-config';
 import { getTenantServiceServiceHandler } from '../smithy/source/typescript-ssdk-codegen/src';
@@ -40,6 +43,7 @@ const partition = partitionForRegion(requireEnv('AWS_REGION'));
 const tenantDataModel = new TenantDataModel();
 const deploymentDataModel = new DeploymentDataModel();
 const cellDataModel = new CellDataModel();
+const hookDataModel = new HookDataModel();
 // One document client shared by every repository and the placement
 // transactions — same marshalling behaviour everywhere.
 const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
@@ -75,6 +79,16 @@ const config: TenantServiceConfig = {
   applicationRepository: new DynamoDBRepository<ApplicationRecord, ApplicationItem>(
     tableName,
     new ApplicationDataModel(),
+    documentClient,
+  ),
+  hookRepository: new DynamoDBRepository<GlobalHookRecord, HookItem>(
+    tableName,
+    hookDataModel,
+    documentClient,
+  ),
+  hookTransactions: new HookTransactions<GlobalHookRecord, HookItem>(
+    tableName,
+    hookDataModel,
     documentClient,
   ),
   placement: new PlacementTransactions<CellRecord, CellItem, DeploymentRecord, DeploymentItem>(

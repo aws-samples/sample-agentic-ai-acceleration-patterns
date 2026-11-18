@@ -3,6 +3,8 @@
 
 import { APPLICATION_KEY_PREFIX } from './application.data-model';
 import { CELL_KEY_PREFIX } from './cell.data-model';
+import { StoredLastGlobalHook, readLastGlobalHooks } from './hook.data-model';
+import { LastGlobalHookEntry } from './hook.types';
 import { ParameterValues } from './parameters';
 import { TENANT_KEY_PREFIX } from './tenant.data-model';
 import {
@@ -32,7 +34,8 @@ export const DEPLOYMENT_GSI2_PARTITION = 'DEPLOYMENT';
  * values an operator supplied (ADR-039), never a default; it is kept
  * exactly as read — `undefined` when the attribute is absent (a record
  * written before parameters existed), which is a different read from `{}`
- * for the merge guard (R-33).
+ * for the merge guard (R-33). `lastGlobalHooks` is written by the workflow's
+ * terminal writes only (R-40); the record carries no hook definition (R-31).
  */
 export interface DeploymentRecord {
   readonly tenantId: string;
@@ -43,6 +46,7 @@ export interface DeploymentRecord {
   readonly parameters?: ParameterValues;
   readonly statusReason?: string;
   readonly lastBuildId?: string;
+  readonly lastGlobalHooks?: readonly LastGlobalHookEntry[];
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }
@@ -69,6 +73,8 @@ export interface DeploymentItem extends DynamoDBItem {
   readonly parameters?: ParameterValues;
   readonly statusReason?: string;
   readonly lastBuildId?: string;
+  /** Written by the workflow's terminal writes: a list of maps, see `readLastGlobalHooks`. */
+  readonly lastGlobalHooks?: readonly StoredLastGlobalHook[];
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -137,6 +143,7 @@ export class DeploymentDataModel implements DataModel<DeploymentRecord, Deployme
       parameters: record.parameters,
       statusReason: record.statusReason,
       lastBuildId: record.lastBuildId,
+      lastGlobalHooks: record.lastGlobalHooks,
       createdAt: record.createdAt.toISOString(),
       updatedAt: record.updatedAt.toISOString(),
     };
@@ -151,6 +158,7 @@ export class DeploymentDataModel implements DataModel<DeploymentRecord, Deployme
       parameters: item.parameters,
       statusReason: item.statusReason,
       lastBuildId: item.lastBuildId,
+      lastGlobalHooks: item.lastGlobalHooks === undefined ? undefined : readLastGlobalHooks(item.lastGlobalHooks),
       createdAt: new Date(item.createdAt),
       updatedAt: new Date(item.updatedAt),
     };

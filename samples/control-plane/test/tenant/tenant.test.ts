@@ -3,6 +3,7 @@
 
 import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
 import { mockClient } from 'aws-sdk-client-mock';
+import { HookTransactions } from '../../src/shared/hook-transactions';
 import {
   AccountFullError,
   AmbiguousTransactionError,
@@ -32,6 +33,8 @@ import { HandshakeProbe, HandshakeUnavailableError } from '../../src/tenant/acco
 import { ApplicationItem, ApplicationRecord } from '../../src/tenant/application.data-model';
 import { CellItem, CellRecord } from '../../src/tenant/cell.data-model';
 import { DeploymentItem, DeploymentRecord } from '../../src/tenant/deployment.data-model';
+import { HookItem } from '../../src/tenant/hook.data-model';
+import { GlobalHookRecord, HookEvent } from '../../src/tenant/hook.types';
 import {
   IdempotencyItem,
   IdempotencyRecord,
@@ -160,6 +163,13 @@ type IdempotencyRepo = DynamoDBRepository<IdempotencyRecord, IdempotencyItem>;
 type AccountRepo = DynamoDBRepository<AccountRecord, AccountItem>;
 type ApplicationRepo = DynamoDBRepository<ApplicationRecord, ApplicationItem>;
 type Placement = PlacementTransactions<CellRecord, CellItem, DeploymentRecord, DeploymentItem>;
+type HookRepo = DynamoDBRepository<GlobalHookRecord, HookItem>;
+type HookTx = HookTransactions<GlobalHookRecord, HookItem>;
+
+/** The hooks of an event no hook applies to (R-40): both lists empty. */
+function noHooks(event: HookEvent) {
+  return { event, pre: [], post: [] };
+}
 
 interface Mocks {
   /** Merged over a default `get` returning {@link tenantRecord}. */
@@ -173,6 +183,9 @@ interface Mocks {
   /** Merged over a default `get` returning {@link applicationRecord}. */
   applicationRepo?: Partial<ApplicationRepo>;
   placement?: Partial<Placement>;
+  /** Merged over a default `queryPartition` returning no global hook and a `get` returning none. */
+  hookRepo?: Partial<HookRepo>;
+  hookTx?: Partial<HookTx>;
   /** Defaults to a passing handshake. */
   handshake?: HandshakeProbe;
   warn?: (message: string) => void;
@@ -204,6 +217,12 @@ function makeService(mocks: Mocks = {}) {
       ...mocks.applicationRepo,
     } as ApplicationRepo,
     placement: (mocks.placement ?? {}) as Placement,
+    hookRepository: {
+      get: jest.fn().mockResolvedValue(undefined),
+      queryPartition: page(),
+      ...mocks.hookRepo,
+    } as HookRepo,
+    hookTransactions: (mocks.hookTx ?? {}) as HookTx,
     fleetName: FLEET,
     partition: 'aws',
     handshake: mocks.handshake ?? jest.fn().mockResolvedValue([]),
@@ -445,6 +464,7 @@ describe('CreateDeployment placement into an existing cell (§7.1 steps 0-2)', (
         operation: 'create',
         scriptPath: 'stamped/tenant/create.sh',
         failedStatus: 'CREATE_FAILED',
+        hooks: noHooks('DEPLOYMENT_CREATE'),
         parameters: {},
         tenantName: 'acme', // from the tenant record (ADR-023)
         adminEmail: ADMIN_EMAIL,
@@ -586,6 +606,7 @@ describe('CreateDeployment into a new cell (§7.1 step 3, ADR-032)', () => {
         operation: 'create',
         scriptPath: 'app/cell/create.sh',
         failedStatus: 'CREATE_FAILED',
+        hooks: noHooks('CELL_CREATE'),
         parameters: {},
       },
       tenantId: TENANT_ID,
@@ -593,6 +614,7 @@ describe('CreateDeployment into a new cell (§7.1 step 3, ADR-032)', () => {
         operation: 'create',
         scriptPath: 'app/tenant/create.sh',
         failedStatus: 'CREATE_FAILED',
+        hooks: noHooks('DEPLOYMENT_CREATE'),
         parameters: {},
         tenantName: 'acme',
         adminEmail: ADMIN_EMAIL,
@@ -1508,6 +1530,7 @@ describe('UpdateDeployment', () => {
           operation: 'update',
           scriptPath: 'stamped/tenant/update.sh',
           failedStatus: 'UPDATE_FAILED',
+          hooks: noHooks('DEPLOYMENT_UPDATE'),
           parameters: {},
           tenantName: 'acme', // from the tenant record (ADR-023)
           adminEmail: '',
@@ -1590,6 +1613,7 @@ describe('DeleteDeployment', () => {
           operation: 'delete',
           scriptPath: 'stamped/tenant/delete.sh',
           failedStatus: 'DELETE_FAILED',
+          hooks: noHooks('DEPLOYMENT_DELETE'),
           parameters: {},
           tenantName: 'acme', // from the tenant record (ADR-023)
           adminEmail: '',
@@ -1847,6 +1871,7 @@ describe('UpdateCell', () => {
           operation: 'update',
           scriptPath: 'stamped/cell/update.sh',
           failedStatus: 'UPDATE_FAILED',
+          hooks: noHooks('CELL_UPDATE'),
           parameters: {},
         },
       });
@@ -1914,6 +1939,7 @@ describe('DeleteCell', () => {
         operation: 'delete',
         scriptPath: 'stamped/cell/delete.sh',
         failedStatus: 'DELETE_FAILED',
+        hooks: noHooks('CELL_DELETE'),
         parameters: {},
       },
     });

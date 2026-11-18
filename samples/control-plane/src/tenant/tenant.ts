@@ -39,6 +39,21 @@ import {
   listDeploymentsByTenantQuery,
   listDeploymentsQuery,
 } from './deployment.data-model';
+import { HookItem, hookCounterKey, hookKey, listHooksQuery, replaceHookUpdate } from './hook.data-model';
+import {
+  GlobalHookRecord,
+  HookDefinition,
+  HookExecutionInput,
+  LastGlobalHookEntry,
+  MAX_GLOBAL_HOOKS,
+} from './hook.types';
+import {
+  hookPinningWarning,
+  resolveHooks,
+  validateApplicationDefinition,
+  validateApplicationHooks,
+  validateHookDefinition,
+} from './hooks';
 import {
   IDEMPOTENCY_TTL_SECONDS,
   IdempotencyDataModel,
@@ -65,8 +80,10 @@ import {
   tenantKey,
 } from './tenant.data-model';
 import { provisioningRoleArn, sessionNameFor } from '../shared/fleet';
+import { HookExistsError, HookGoneError, HookLimitError, HookTransactions } from '../shared/hook-transactions';
 import {
   AccountFullError,
+  AmbiguousTransactionError,
   ApplicationGoneError,
   ConditionFailedError,
   DeploymentExistsError,
@@ -99,6 +116,8 @@ import {
   DeleteCellServerOutput,
   DeleteDeploymentServerInput,
   DeleteDeploymentServerOutput,
+  DeleteHookServerInput,
+  DeleteHookServerOutput,
   DeleteTenantServerInput,
   DeleteTenantServerOutput,
   DeploymentSummary,
@@ -110,6 +129,10 @@ import {
   GetCellServerOutput,
   GetDeploymentServerInput,
   GetDeploymentServerOutput,
+  GetHookServerInput,
+  GetHookServerOutput,
+  HookDefinition as ApiHookDefinition,
+  HookSummary,
   GetTenantServerInput,
   GetTenantServerOutput,
   InsufficientCapacityError,
@@ -123,6 +146,9 @@ import {
   ListCellsServerOutput,
   ListDeploymentsServerInput,
   ListDeploymentsServerOutput,
+  ListHooksServerInput,
+  ListHooksServerOutput,
+  LastGlobalHook,
   ListTenantsServerInput,
   ListTenantsServerOutput,
   PlacementStrategy,
@@ -130,6 +156,8 @@ import {
   PutAccountServerOutput,
   PutApplicationServerInput,
   PutApplicationServerOutput,
+  PutHookServerInput,
+  PutHookServerOutput,
   ResourceNotFoundError,
   TenantServiceService,
   TenantSummary,
@@ -160,6 +188,12 @@ interface BuildPhaseInput {
   readonly scriptPath: string;
   readonly failedStatus: FailedLifecycleStatus;
   readonly parameters: ParameterValues;
+  /**
+   * The hooks of this build's event (spec R-40, R-45), resolved before the
+   * operation's first write and already in run order. Always present, with
+   * empty lists when no hook applies; the workflow runs it as given.
+   */
+  readonly hooks: HookExecutionInput;
 }
 
 /**
@@ -227,6 +261,10 @@ export interface TenantServiceConfig extends ServiceConfig {
   readonly accountRepository: DynamoDBRepository<AccountRecord, AccountItem>;
   /** Repository over application items in the same table (ADR-032). */
   readonly applicationRepository: DynamoDBRepository<ApplicationRecord, ApplicationItem>;
+  /** Repository over global hook items in the same table (ADR-044). */
+  readonly hookRepository: DynamoDBRepository<GlobalHookRecord, HookItem>;
+  /** The two transactions that touch the hook counter (P-6, R-39). */
+  readonly hookTransactions: HookTransactions<GlobalHookRecord, HookItem>;
   /** Names the provisioning role pair in every account (§3.3, ADR-025). */
   readonly fleetName: string;
   /** The deployment's partition, for role ARNs. */
@@ -238,7 +276,7 @@ export interface TenantServiceConfig extends ServiceConfig {
   /** Step Functions client (shared across invocations). */
   readonly sfnClient: SFNClient;
   /**
-   * Where the PutApplication supply-chain warning goes (ADR-020, ADR-032);
+   * Where the PutApplication and PutHook supply-chain warnings go (ADR-020, ADR-032, ADR-044);
    * defaults to `console.warn`. Injectable for tests.
    */
   readonly warn?: (message: string) => void;
@@ -319,7 +357,7 @@ const idempotencyDataModel = new IdempotencyDataModel();
 
 /**
  * The cell-based control plane service. Implements the Smithy-generated
- * `TenantServiceService` interface (all twenty-two operations). Receives
+ * `TenantServiceService` interface (all twenty-six operations). Receives
  * static config in the constructor (cold start) and an immutable
  * `CallerContext` per operation — it never sees the raw event or a JWT
  * (context separation).
@@ -507,6 +545,12 @@ export class TenantService implements TenantServiceService<CallerContext> {
     // (never a default). A 400 here writes nothing.
     const parameters = validateCreateParameters(input.parameters, application.parameters, application.cellParameters);
 
+    // R-40, §7.1 step 0: the global hooks are read before the first write,
+    // so a failed read is a 500 with nothing written. The application hooks
+    // need no read: a new cell is stamped from the application record read
+    // above, an existing one holds its own stamp.
+    const globalHooks = await this.readGlobalHooks();
+
     // Optional idempotency (ADR-017): the item joins the placement
     // transaction, conditional on attribute_not_exists(PK). Its cancelled
     // condition marks the request as a replay of an earlier CreateDeployment.
@@ -569,6 +613,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           scriptPath: requireField(placed.cell.tenantScripts.create, 'cell.tenantScripts.create'),
           failedStatus: 'CREATE_FAILED',
           parameters: tenantParameters,
+          hooks: resolveHooks('DEPLOYMENT_CREATE', placed.cell.hooks, globalHooks),
           tenantName: tenant.name,
           adminEmail,
         },
@@ -610,6 +655,9 @@ export class TenantService implements TenantServiceService<CallerContext> {
           failedStatus: 'CREATE_FAILED',
           // R-34: a new cell has no values of its own - the defaults.
           parameters: resolveParameters(cell.parameters, application.cellParameters),
+          // R-45: the cell event runs first, post hooks included, before the
+          // deployment event's pre hooks start.
+          hooks: resolveHooks('CELL_CREATE', cell.hooks, globalHooks),
         },
         tenantId,
         tenantBuild: {
@@ -617,6 +665,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           scriptPath: requireField(cell.tenantScripts.create, 'application.tenantScripts.create'),
           failedStatus: 'CREATE_FAILED',
           parameters: tenantParameters,
+          hooks: resolveHooks('DEPLOYMENT_CREATE', cell.hooks, globalHooks),
           tenantName: tenant.name,
           adminEmail,
         },
@@ -657,6 +706,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
       deployment: toDeploymentSummary(deployment),
       source: cell.source,
       scripts: cell.tenantScripts,
+      // The application hooks stamped on the cell (R-31, §5.2).
+      hooks: (cell.hooks ?? []).map(toApiHookDefinition),
       accountId: cell.accountId,
       // The supplied values only; defaults are not merged in (§5.2).
       parameters: { ...(deployment.parameters ?? {}) },
@@ -704,6 +755,9 @@ export class TenantService implements TenantServiceService<CallerContext> {
 
     const account = await this.getAccountForCell(cell);
     const tenant = await this.getTenantForDeployment(existing);
+    // R-40: read before the transitional write, so a failed read leaves
+    // the record in its current status.
+    const globalHooks = await this.readGlobalHooks();
     const updating = (await this.mergeTransition(
       this.config.deploymentRepository,
       deploymentKey(tenantId, applicationId),
@@ -722,6 +776,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           scriptPath: requireField(cell.tenantScripts.update, 'cell.tenantScripts.update'),
           failedStatus: 'UPDATE_FAILED',
           parameters: resolveParameters(merged, application.parameters),
+          hooks: resolveHooks('DEPLOYMENT_UPDATE', cell.hooks, globalHooks),
           tenantName: tenant.name,
           adminEmail: '',
         },
@@ -755,6 +810,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
     // R-32, P-9: cleanup runs with what is stored, never validated against
     // the current declarations; the application supplies defaults only.
     const declarations = (await this.config.applicationRepository.get(applicationKey(applicationId)))?.parameters;
+    // R-40: read before the transitional write.
+    const globalHooks = await this.readGlobalHooks();
 
     const deleting = await this.transitionDeployment(
       tenantId,
@@ -773,6 +830,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           scriptPath: requireField(cell.tenantScripts.delete, 'cell.tenantScripts.delete'),
           failedStatus: 'DELETE_FAILED',
           parameters: resolveParameters(existing.parameters, declarations),
+          hooks: resolveHooks('DEPLOYMENT_DELETE', cell.hooks, globalHooks),
           tenantName: tenant.name,
           adminEmail: '',
         },
@@ -885,6 +943,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
     }
 
     const account = await this.getAccountForCell(existing);
+    // R-40: read before the transitional write.
+    const globalHooks = await this.readGlobalHooks();
     // The map, not updatedAt, guards the write: placements and deployment
     // deletes write the cell's counter and updatedAt while it is ACTIVE and
     // must not fail an UpdateCell that has nothing to do with them (R-34).
@@ -905,6 +965,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           scriptPath: requireField(existing.cellScripts.update, 'cell.cellScripts.update'),
           failedStatus: 'UPDATE_FAILED',
           parameters: resolveParameters(merged, application.cellParameters),
+          hooks: resolveHooks('CELL_UPDATE', existing.hooks, globalHooks),
         },
       },
       this.cellCompensation(cellId, 'UPDATING', 'UPDATE_FAILED'),
@@ -922,6 +983,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
     // R-34: never validated; the application supplies defaults only.
     const cellDeclarations = (await this.config.applicationRepository.get(applicationKey(existing.applicationId)))
       ?.cellParameters;
+    // R-40: read before the transitional write.
+    const globalHooks = await this.readGlobalHooks();
 
     // ADR-014: the emptiness check and the DELETING transition are ONE
     // atomic conditional UpdateItem (status IN {ACTIVE, *_FAILED} AND
@@ -952,6 +1015,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           scriptPath: requireField(existing.cellScripts.delete, 'cell.cellScripts.delete'),
           failedStatus: 'DELETE_FAILED',
           parameters: resolveParameters(existing.parameters, cellDeclarations),
+          hooks: resolveHooks('CELL_DELETE', existing.hooks, globalHooks),
         },
       },
       this.cellCompensation(cellId, 'DELETING', 'DELETE_FAILED'),
@@ -1125,6 +1189,30 @@ export class TenantService implements TenantServiceService<CallerContext> {
     const cellScripts = requireField(input.cellScripts, 'cellScripts');
     const tenantScripts = requireField(input.tenantScripts, 'tenantScripts');
     const maxTenants = requireField(input.maxTenants, 'maxTenants');
+    const sourceDefinition = {
+      type: requireField(source.type, 'source.type'),
+      location: requireField(source.location, 'source.location'),
+      sourceVersion: source.sourceVersion,
+    };
+    const cellScriptPaths = {
+      create: requireField(cellScripts.create, 'cellScripts.create'),
+      update: requireField(cellScripts.update, 'cellScripts.update'),
+      delete: requireField(cellScripts.delete, 'cellScripts.delete'),
+    };
+    const tenantScriptPaths = {
+      create: requireField(tenantScripts.create, 'tenantScripts.create'),
+      update: requireField(tenantScripts.update, 'tenantScripts.update'),
+      delete: requireField(tenantScripts.delete, 'tenantScripts.delete'),
+    };
+
+    // §4.1, R-39 (ADR-044): the source and every script path are held to the
+    // hook charsets, and each hook definition to R-39, before any read. A
+    // list that is not sent stays undefined: it is kept (R-29).
+    validateApplicationDefinition(applicationId, sourceDefinition, {
+      cellScripts: cellScriptPaths,
+      tenantScripts: tenantScriptPaths,
+    });
+    const hooks = validateApplicationHooks(input.hooks, applicationId);
 
     // A list the request does not send is kept (R-29, §5.5), so the current
     // record is read whenever one is missing: the "one name in one list"
@@ -1150,6 +1238,12 @@ export class TenantService implements TenantServiceService<CallerContext> {
     if (pinningWarning !== undefined) {
       (this.config.warn ?? console.warn)(`PutApplication ${applicationId}: ${pinningWarning}`);
     }
+    for (const hook of hooks ?? []) {
+      const hookWarning = hookPinningWarning(hook);
+      if (hookWarning !== undefined) {
+        (this.config.warn ?? console.warn)(`PutApplication ${applicationId}: ${hookWarning}`);
+      }
+    }
 
     // One create-or-replace write (R-29): the definition and the strategy
     // are replaced, a declaration list only when sent, cellCount is never
@@ -1160,25 +1254,14 @@ export class TenantService implements TenantServiceService<CallerContext> {
         applicationKey(applicationId),
         putApplicationUpdate({
           applicationId,
-          source: {
-            type: requireField(source.type, 'source.type'),
-            location: requireField(source.location, 'source.location'),
-            sourceVersion: source.sourceVersion,
-          },
-          cellScripts: {
-            create: requireField(cellScripts.create, 'cellScripts.create'),
-            update: requireField(cellScripts.update, 'cellScripts.update'),
-            delete: requireField(cellScripts.delete, 'cellScripts.delete'),
-          },
-          tenantScripts: {
-            create: requireField(tenantScripts.create, 'tenantScripts.create'),
-            update: requireField(tenantScripts.update, 'tenantScripts.update'),
-            delete: requireField(tenantScripts.delete, 'tenantScripts.delete'),
-          },
+          source: sourceDefinition,
+          cellScripts: cellScriptPaths,
+          tenantScripts: tenantScriptPaths,
           maxTenants,
           placementStrategy: input.placementStrategy ?? DEFAULT_PLACEMENT_STRATEGY,
           parameters: declarations.parameters ?? { read: current?.parameters },
           cellParameters: declarations.cellParameters ?? { read: current?.cellParameters },
+          hooks,
           now: new Date().toISOString(),
         }),
       );
@@ -1240,6 +1323,101 @@ export class TenantService implements TenantServiceService<CallerContext> {
       throw error;
     }
     return { application: toApplicationSummary(existing) };
+  };
+
+  // -------------------------------------------------------------------
+  // Hook operations (§5.5, §4.8, ADR-044) - global hooks, operator-only writes
+  // -------------------------------------------------------------------
+
+  PutHook = async (
+    input: PutHookServerInput,
+    _context: CallerContext,
+  ): Promise<PutHookServerOutput> => {
+    const hookId = requireField(input.hookId, 'hookId');
+    // R-39: the whole definition is validated before anything is read or
+    // written (400). The timeout is stored resolved.
+    const definition = validateHookDefinition({ ...input, hookId }, `Hook ${hookId}`);
+    const pinningWarning = hookPinningWarning(definition);
+    if (pinningWarning !== undefined) {
+      (this.config.warn ?? console.warn)(`PutHook ${hookId}: ${pinningWarning}`);
+    }
+
+    // R-39: the path - create or replace - is chosen from a strongly
+    // consistent read; the writes below decide (P-5).
+    const key = hookKey(hookId);
+    const existing = await this.config.hookRepository.get(key, { consistentRead: true });
+    const now = new Date();
+    if (existing === undefined) {
+      const hook: GlobalHookRecord = { ...definition, revision: 1, createdAt: now, updatedAt: now };
+      try {
+        // ONE transaction: the hook inserted and hookCount claimed (P-6).
+        await this.config.hookTransactions.createHook({
+          hook,
+          counterKey: hookCounterKey(),
+          maxHooks: MAX_GLOBAL_HOOKS,
+          updatedAt: now.toISOString(),
+        });
+      } catch (error) {
+        throw mapHookWriteError(hookId, error);
+      }
+      return { hook: toHookSummary(hook) };
+    }
+    try {
+      // ONE update conditioned on the hook's existence: revision + 1. The
+      // counter is untouched.
+      const replaced = await this.config.hookRepository.updateExisting(key, replaceHookUpdate(definition, now.toISOString()));
+      return { hook: toHookSummary(replaced) };
+    } catch (error) {
+      throw mapHookWriteError(hookId, error);
+    }
+  };
+
+  GetHook = async (
+    input: GetHookServerInput,
+    _context: CallerContext,
+  ): Promise<GetHookServerOutput> => {
+    return { hook: toHookSummary(await this.getHookOrThrow(requireField(input.hookId, 'hookId'))) };
+  };
+
+  ListHooks = async (
+    input: ListHooksServerInput,
+    _context: CallerContext,
+  ): Promise<ListHooksServerOutput> => {
+    // Pinned to the static HOOK partition (R-10); hookId order is the order
+    // global hooks run in (R-45).
+    const page = await this.config.hookRepository.queryPartition(
+      listHooksQuery(),
+      input.maxResults,
+      input.nextToken,
+    );
+    return { hooks: page.items.map(toHookSummary), nextToken: page.nextToken };
+  };
+
+  DeleteHook = async (
+    input: DeleteHookServerInput,
+    _context: CallerContext,
+  ): Promise<DeleteHookServerOutput> => {
+    const hookId = requireField(input.hookId, 'hookId');
+    const existing = await this.getHookOrThrow(hookId);
+    try {
+      // ONE transaction: the hook deleted (it must exist) and hookCount
+      // released (it must be above zero) (P-6, R-39). No guard on
+      // executions in flight: each runs the snapshot it was accepted with.
+      await this.config.hookTransactions.deleteHook({
+        hookKey: hookKey(hookId),
+        counterKey: hookCounterKey(),
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      if (error instanceof HookGoneError) {
+        throw new ResourceNotFoundError({ message: `Hook ${hookId} is not registered` });
+      }
+      if (error instanceof AmbiguousTransactionError) {
+        throw new InternalServerError({ message: `Hook ${hookId}: the delete could not be confirmed (${errorMessage(error)})` });
+      }
+      throw error;
+    }
+    return { hook: toHookSummary(existing) };
   };
 
   // -------------------------------------------------------------------
@@ -1421,6 +1599,9 @@ export class TenantService implements TenantServiceService<CallerContext> {
         source: application.source,
         cellScripts: application.cellScripts,
         tenantScripts: application.tenantScripts,
+        // R-40, P-4: the application's hook list at this moment, immutable
+        // for the cell's lifetime.
+        hooks: application.hooks ?? [],
         // R-34, §7.1 step 3: no request supplies cell values at birth; the
         // cell starts on the defaults, resolved per build.
         parameters: {},
@@ -1573,6 +1754,39 @@ export class TenantService implements TenantServiceService<CallerContext> {
       throw new ResourceNotFoundError({ message: `Account ${accountId} is not registered` });
     }
     return account;
+  }
+
+  /** Reads a global hook (strongly consistent) or throws the modelled 404. */
+  private async getHookOrThrow(hookId: string): Promise<GlobalHookRecord> {
+    const hook = await this.config.hookRepository.get(hookKey(hookId), { consistentRead: true });
+    if (hook === undefined) {
+      throw new ResourceNotFoundError({ message: `Hook ${hookId} is not registered` });
+    }
+    return hook;
+  }
+
+  /**
+   * Reads every global hook in one strongly consistent query of the `HOOK`
+   * partition (R-40, §4.7), in `hookId` order. Runs before the operation's
+   * first write: a failed read is a 500 with nothing written, never a
+   * record left in flight with no execution. At most five hooks exist, so
+   * one page holds them; the loop is a guard, not a scan.
+   */
+  private async readGlobalHooks(): Promise<GlobalHookRecord[]> {
+    const hooks: GlobalHookRecord[] = [];
+    try {
+      let nextToken: string | undefined;
+      do {
+        const page = await this.config.hookRepository.queryPartition(listHooksQuery(), undefined, nextToken);
+        hooks.push(...page.items);
+        nextToken = page.nextToken;
+      } while (nextToken !== undefined);
+    } catch (error) {
+      throw new InternalServerError({
+        message: `The global hooks could not be read, so the operation was not started and nothing was written; ${RETRY_HINT} (${errorMessage(error)})`,
+      });
+    }
+    return hooks;
   }
 
   /** Reads an application or throws the modelled 404. */
@@ -1876,6 +2090,7 @@ function toDeploymentSummary(record: DeploymentRecord): DeploymentSummary {
     status: record.status,
     statusReason: record.statusReason,
     lastBuildId: record.lastBuildId,
+    lastGlobalHooks: (record.lastGlobalHooks ?? []).map(toLastGlobalHook),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
@@ -1918,6 +2133,7 @@ function toApplicationSummary(record: ApplicationRecord): ApplicationSummary {
       default: declaration.default,
       description: declaration.description,
     })),
+    hooks: (record.hooks ?? []).map(toApiHookDefinition),
     cellCount: record.cellCount,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -1936,11 +2152,83 @@ function toCellSummary(record: CellRecord): CellSummary {
     source: record.source,
     cellScripts: record.cellScripts,
     tenantScripts: record.tenantScripts,
+    hooks: (record.hooks ?? []).map(toApiHookDefinition),
     lastBuildId: record.lastBuildId,
+    lastGlobalHooks: (record.lastGlobalHooks ?? []).map(toLastGlobalHook),
     statusReason: record.statusReason,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
+}
+
+/** Projects a stored hook definition (global or stamped) to the API shape; the timeout is always resolved. */
+function toApiHookDefinition(hook: HookDefinition): ApiHookDefinition {
+  return {
+    hookId: hook.hookId,
+    events: [...hook.events],
+    phase: hook.phase,
+    source: {
+      type: hook.source.type,
+      location: hook.source.location,
+      sourceVersion: hook.source.sourceVersion,
+    },
+    script: hook.script,
+    timeoutMinutes: hook.timeoutMinutes,
+  };
+}
+
+/** Projects the global hook record to the API summary. */
+function toHookSummary(record: GlobalHookRecord): HookSummary {
+  return {
+    hookId: record.hookId,
+    events: [...record.events],
+    phase: record.phase,
+    source: toApiHookDefinition(record).source,
+    script: record.script,
+    timeoutMinutes: record.timeoutMinutes,
+    revision: record.revision,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+/** Projects one `lastGlobalHooks` entry (R-40); the two ref fields only when set. */
+function toLastGlobalHook(entry: LastGlobalHookEntry): LastGlobalHook {
+  return {
+    hookId: entry.hookId,
+    phase: entry.phase,
+    revision: entry.revision,
+    sourceVersion: entry.sourceVersion,
+    resolvedSourceVersion: entry.resolvedSourceVersion,
+  };
+}
+
+/**
+ * Maps a failed `PutHook` write to its 409 (R-39, R-14): a create that met a
+ * new hook, or a replace that met a delete, lost a race with the same hook
+ * and a retry succeeds; a create the counter refuses has the remedy
+ * `DeleteHook`, so its message carries no retry hint.
+ */
+function mapHookWriteError(hookId: string, error: unknown): unknown {
+  if (error instanceof HookExistsError) {
+    return new ConflictError({
+      message: `Hook ${hookId} was created by a concurrent request; ${RETRY_HINT} to replace it`,
+    });
+  }
+  if (error instanceof RecordGoneError) {
+    return new ConflictError({
+      message: `Hook ${hookId} was deleted by a concurrent request; ${RETRY_HINT} to create it again`,
+    });
+  }
+  if (error instanceof HookLimitError) {
+    return new ConflictError({
+      message: `${MAX_GLOBAL_HOOKS} global hooks are registered, the maximum; delete one with DeleteHook before registering another`,
+    });
+  }
+  if (error instanceof AmbiguousTransactionError) {
+    return new InternalServerError({ message: `Hook ${hookId}: the write could not be confirmed (${errorMessage(error)})` });
+  }
+  return error;
 }
 
 /**

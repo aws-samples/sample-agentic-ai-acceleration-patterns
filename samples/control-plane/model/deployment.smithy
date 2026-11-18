@@ -70,6 +70,11 @@ structure DeploymentSummary {
     /// ARN of the most recent successful tenant-scoped CodeBuild build.
     lastBuildId: String
 
+    /// The global hooks that ran in the deployment's last event, in run
+    /// order; empty when none ran.
+    @required
+    lastGlobalHooks: LastGlobalHookList
+
     /// When the deployment was created.
     @required
     createdAt: IsoTimestamp
@@ -172,8 +177,10 @@ operation CreateDeployment {
 /// lifecycle operations: status, statusReason, lastBuildId and cellId reflect
 /// placement and provisioning progress. Also returns the deployment's
 /// effective definition - source and scripts resolved from the cell's
-/// stamped definition - the account the cell lives in, and the parameter
-/// values stored on the deployment (defaults are not merged in).
+/// stamped definition (the application hooks included) - the account the
+/// cell lives in, and the parameter values stored on the deployment
+/// (defaults are not merged in). lastGlobalHooks names the global hooks that
+/// ran in its last event.
 @authorizer("vendor-authorizer")
 @readonly
 @http(method: "GET", uri: "/tenants/{tenantId}/deployments/{applicationId}", code: 200)
@@ -204,6 +211,11 @@ operation GetDeployment {
         /// cell's stamped definition (the cell's tenantScripts).
         @required
         scripts: ScriptLocations
+
+        /// The application hooks, resolved from the cell's stamped
+        /// definition (ADR-044). Empty when none.
+        @required
+        hooks: HookDefinitionList
 
         /// The account the cell - and so this deployment - lives in.
         @required

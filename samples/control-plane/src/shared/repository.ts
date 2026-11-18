@@ -93,6 +93,12 @@ export interface GsiQuery {
 export interface PartitionQuery {
   readonly partitionKey: string;
   readonly sortKeyPrefix: string;
+  /**
+   * Ask DynamoDB for a strongly consistent read. The hook queries set it:
+   * hook resolution at accept time reads the global hooks this way (spec
+   * 4.7, R-40), so a hook put a moment ago is seen.
+   */
+  readonly consistentRead?: boolean;
 }
 
 /** One page of a paginated read. */
@@ -281,14 +287,14 @@ function throwIfInvalidStartKey(error: unknown): void {
 }
 
 /** Creates the default document client shared by the repository classes. */
-function defaultDocumentClient(): DynamoDBDocumentClient {
+export function defaultDocumentClient(): DynamoDBDocumentClient {
   return DynamoDBDocumentClient.from(new DynamoDBClient({}), {
     marshallOptions: { removeUndefinedValues: true },
   });
 }
 
 /** Per-transaction-item cancellation codes, when the error carries them. */
-function cancellationCodes(error: unknown): string[] | undefined {
+export function cancellationCodes(error: unknown): string[] | undefined {
   if (error instanceof Error && error.name === 'TransactionCanceledException') {
     const reasons = (error as { CancellationReasons?: { Code?: string }[] }).CancellationReasons;
     return reasons?.map((reason) => reason?.Code ?? 'None');
@@ -404,10 +410,17 @@ export class DynamoDBRepository<TSchema, TItem extends DynamoDBItem> {
     this.client = client ?? defaultDocumentClient();
   }
 
-  /** Reads one item; `undefined` when it does not exist. */
-  async get(key: ItemKey): Promise<TSchema | undefined> {
+  /**
+   * Reads one item; `undefined` when it does not exist. `consistentRead`
+   * asks for a strongly consistent read (the hook paths use it, R-39).
+   */
+  async get(key: ItemKey, options?: { readonly consistentRead?: boolean }): Promise<TSchema | undefined> {
     const result = await this.client.send(
-      new GetCommand({ TableName: this.tableName, Key: key }),
+      new GetCommand({
+        TableName: this.tableName,
+        Key: key,
+        ...(options?.consistentRead === true ? { ConsistentRead: true } : {}),
+      }),
     );
     return result.Item === undefined ? undefined : this.dataModel.fromItem(result.Item as TItem);
   }
@@ -588,6 +601,7 @@ export class DynamoDBRepository<TSchema, TItem extends DynamoDBItem> {
         KeyConditionExpression: '#pk = :pk AND begins_with(#sk, :skPrefix)',
         ExpressionAttributeNames: { '#pk': 'PK', '#sk': 'SK' },
         ExpressionAttributeValues: { ':pk': query.partitionKey, ':skPrefix': query.sortKeyPrefix },
+        ...(query.consistentRead === true ? { ConsistentRead: true } : {}),
       },
       maxResults,
       nextToken,
@@ -597,6 +611,7 @@ export class DynamoDBRepository<TSchema, TItem extends DynamoDBItem> {
   private async queryPage(
     query: {
       readonly IndexName?: string;
+      readonly ConsistentRead?: boolean;
       readonly KeyConditionExpression: string;
       readonly ExpressionAttributeNames: Record<string, string>;
       readonly ExpressionAttributeValues: Record<string, unknown>;

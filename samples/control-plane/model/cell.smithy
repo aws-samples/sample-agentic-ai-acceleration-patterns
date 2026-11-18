@@ -93,8 +93,19 @@ structure CellSummary {
     @required
     tenantScripts: ScriptLocations
 
+    /// The stamped application hooks: the application's list when the cell
+    /// was created, immutable. They run on the cell's events and on the
+    /// events of every deployment in it (ADR-044). Empty when none.
+    @required
+    hooks: HookDefinitionList
+
     /// ARN of the most recent successful cell-scoped CodeBuild build.
     lastBuildId: String
+
+    /// The global hooks that ran in the cell's last cell event, in run
+    /// order; empty when none ran.
+    @required
+    lastGlobalHooks: LastGlobalHookList
 
     /// Failure detail, populated when status is a *_FAILED value.
     statusReason: String
