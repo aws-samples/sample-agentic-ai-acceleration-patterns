@@ -239,6 +239,7 @@ subscriber.
 | `usageBusRetentionDays` | usage bus retention | `7` |
 | `rawSubscriberAccountIds` | vendor accounts the ingest bus is shared with | `[]` |
 | `usageSubscriberAccountIds` | vendor accounts the usage bus is shared with | `[]` |
+| `deploymentRoleArn` | the role CloudFormation runs as, exempt from the bucket configuration denies (§3.5) | the bootstrap `cfn-exec` role |
 | `alarmTopicArn` | optional SNS topic for every alarm of the stack | none |
 
 ### 3.4 Lifecycle wiring with the control plane
@@ -317,7 +318,7 @@ URL as its default (control-plane R-34).
 | Export bucket | A separate bucket. Its policy denies `s3:PutObject` to all but the dispatcher, and deletes and configuration changes as on the raw bucket; lifecycle expires objects after `rawRetentionDays`. An `S3_EXPORT` sink names only a key prefix inside it |
 | Ingest bus | The bus resource policy denies `events:PutEvents` to all but the ingest function role |
 | Usage bus | The bus resource policy denies `events:PutEvents` to all but the record publisher role, which also runs the scheduler's `publishPending` sweep, so no other principal can publish a `UsageRecorded` that readers would bill from |
-| Table | A DynamoDB resource-based policy denies `dynamodb:PutItem`, `UpdateItem`, `DeleteItem`, `BatchWriteItem`, `PartiQLInsert`, `PartiQLUpdate`, `PartiQLDelete` and `TransactWriteItems` on the table to all but the stack's function and state machine roles, so no other principal can write a registration, meter, sink or record |
+| Table | A DynamoDB resource-based policy denies `dynamodb:PutItem`, `UpdateItem`, `DeleteItem`, `BatchWriteItem`, `PartiQLInsert`, `PartiQLUpdate`, `PartiQLDelete` and `ConditionCheckItem` on the table to all but the stack's function and state machine roles, so no other principal can write a registration, meter, sink or record |
 | Ingest dead-letter queue | The queue policy denies `sqs:SendMessage` to all but `events.amazonaws.com` with `aws:SourceArn` = the ingest subscriber |
 | Firehose stream | Firehose has no resource policy, so any principal in the metering account granted `firehose:PutRecord*` on the stream can write raw usage. The stack grants it only to the ingest and redrive functions and the subscriber role; an SCP or permissions boundary that denies it to everyone else is the production control |
 | Service-principal trust | Every service-principal trust policy and resource policy (the Lambda permission for S3 notifications, SQS queue policies, Scheduler, Firehose and bus subscriber role trust) is conditioned on `aws:SourceArn` and `aws:SourceAccount`. A DynamoDB Streams trigger is polled with the function's own role and needs none |
@@ -325,15 +326,18 @@ URL as its default (control-plane R-34).
 | Logs | No event payload, sink request or response body, or credential is logged; recounter execution state holds keys and counts only |
 | Heartbeat | An alarm that does not depend on the scheduler fires when the scheduler's target has not run for 15 minutes, or no hour has reached `COUNTED` for 2 hours while the `pending` index holds hours past their grace |
 
-"The deployment role" is the CloudFormation execution role the stack is
-deployed with (the CDK bootstrap `cfn-exec` role, or the `--role-arn` the
-deployer passes), read from the synth-time bootstrap qualifier; the
+"The deployment role" is `deploymentRoleArn` (§3.3): by default the CDK
+bootstrap `cfn-exec` role built from the synth-time bootstrap qualifier; a
+deployer who passes `--role-arn` to the CLI must set the input to that
+same role; the
 integration test runs a stack update that changes `rawRetentionDays` to
 prove the exemption. The changes to the queue, bus and table policies
 (`sqs:SetQueueAttributes`, `events:PutPermission`, `events:RemovePermission`,
 `dynamodb:PutResourcePolicy`, `dynamodb:DeleteResourcePolicy`) are not
-denied. Any principal allowed them, or allowed to run the deployment or
-provider roles or to delete the stack, can undo these controls and is
+denied. Any principal allowed them, allowed to run the deployment or provider
+roles, allowed `lambda:InvokeFunction` on the auto-delete-objects or
+bucket-notifications provider functions (a crafted event wipes the raw
+store or removes its notifications), or allowed to delete the stack, can undo these controls and is
 trusted, as is an administrator of the metering account.
 
 ## 4. Data model
