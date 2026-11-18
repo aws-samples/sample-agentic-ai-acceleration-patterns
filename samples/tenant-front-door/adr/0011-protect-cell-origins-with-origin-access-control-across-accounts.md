@@ -4,6 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-13
+- Amended by: ADR-0019
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -111,3 +112,13 @@ origin request policy, `Managed-AllViewerExceptHostHeader`, forwards
 - The secret-header fallback was not needed and is not built.
 - Revisit when CloudFront offers origin access control for another origin
   type a cell uses, or a cell moves off function URLs.
+
+Amended 2026-11-18 by ADR-0019: CloudFront appends the viewer path to
+`agentIngress`'s origin path (the stage) as it is, and the ingress
+routes `POST /{backend}/invocations` with no `/agents` prefix. The
+router therefore strips the leading `/agents` from
+`/agents/<backend>/invocations`, so the ingress receives
+`<stage>/<backend>/invocations`, and answers 404 at the edge for any
+other `/agents` path, `/agents` and `/agents/` included. The
+`/agents/*` origin, its origin request policy and the absence of
+origin access control do not change.

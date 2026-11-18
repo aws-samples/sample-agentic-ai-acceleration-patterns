@@ -37,3 +37,4 @@ it fails reopens the resolver choice in ADR-0018.
 | [0016](./0016-sign-in-through-one-shared-host-in-host-mode.md) | Sign in through one shared host in host mode | Accepted | 2026-11-17 |
 | [0017](./0017-register-routes-from-a-control-plane-global-hook.md) | Register routes from a control-plane global hook | Proposed | 2026-11-18 |
 | [0018](./0018-prove-a-dedicated-domain-with-a-per-tenant-dns-challenge.md) | Prove a dedicated domain with a per-tenant DNS challenge | Accepted | 2026-11-18 |
+| [0019](./0019-strip-agents-before-the-agent-ingress.md) | Strip `/agents` before the agent ingress | Accepted | 2026-11-18 |

@@ -173,7 +173,7 @@ has passed the registrar's domain challenge (ADR-0018).
 | SPA origin | edge | S3 bucket with origin access control | One build for every tenant |
 | Cell API origin | the cell's | The cell's API (demo: Lambda function URL with origin access control) | Verifies the token, checks the route hint and the cell's tenants |
 | `CellRouteAccess` construct | the cell's | Lambda permission | Grants `cloudfront.amazonaws.com` `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`, conditioned on the edge distribution's ARN |
-| Agent route | edge | `/agents/*` behaviour | Streams to the agent ingress of `agentic-runtime-isolation`, when configured, with the `Managed-AllViewerExceptHostHeader` origin request policy |
+| Agent route | edge | `/agents/*` behaviour | Streams to the agent ingress of `agentic-runtime-isolation`, when configured, with the `Managed-AllViewerExceptHostHeader` origin request policy. The router forwards only `/agents/<backend>/invocations` and strips the leading `/agents`, so the ingress receives `<stage>/<backend>/invocations` (§3.3 step 7, ADR-0019) |
 | Route hook | the control plane's | CodeBuild, the control plane's global hook project, under `<fleet>-global-hook` (control-plane R-41) | `hooks/route-hook.sh`, registered as two global hooks. `front-door-post` (`POST` on `CELL_CREATE`, `CELL_UPDATE`, `DEPLOYMENT_CREATE`, `DEPLOYMENT_UPDATE`) puts the cell or tenant route; `front-door-pre` (`PRE` on `CELL_DELETE`, `DEPLOYMENT_DELETE`) deletes it (§3.2, §3.4). It acts only for an application that has a front door hook parameter (`RouteHookAccess`, below) in the control plane's account, and exits 0 for every other (ADR-0014) |
 | `RouteHookAccess` stack | the control plane's | IAM and SSM Parameter Store | The front door hook parameter `/application-plane/applications/<applicationId>/shared/front-door-hook` with `registrarUrl`, a name of its own so that it cannot collide with the cell-account copy (§6.4) when the control plane's account also hosts cells, and a customer-managed policy, listed in the control plane's `globalHookManagedPolicyArns`, that lets `<fleet>-global-hook` invoke this registrar and read any front door hook parameter, `/application-plane/applications/*/shared/front-door-hook` |
 | `register-hooks.sh` | the operator's shell | the control plane API, with an operator token | Puts both global hooks with `PutHook`, from this sample's source at a pinned commit; idempotent. `--delete` removes them (§5.2) |
@@ -194,7 +194,9 @@ has passed the registrar's domain challenge (ADR-0018).
 
 `/agents/*` uses the managed origin request policy
 `Managed-AllViewerExceptHostHeader`. It forwards `Authorization` on `GET`
-and `POST`, and it does not forward `Host`.
+and `POST`, and it does not forward `Host`. The router strips `/agents`
+from the path before the request leaves the edge (§3.3 step 7,
+ADR-0019).
 
 Routes reach the route table on a path of their own, from the control
 plane's workflow, never from a request or a cell account (ADR-0017):
@@ -257,8 +259,13 @@ On every viewer request:
    `cf.logCustomData` with its `t` (§3.1), so every later answer on the
    host, SPA loads and step 4 refusals included, names the tenant; in
    `single` mode step 5 replaces it with the decoded claim.
-3. Paths that need no tenant (§3.2) skip to step 8, and so does
-   `/signin-state` in `single` mode.
+3. `/agents`, and any path under `/agents/` that does not match
+   `^/agents/[a-z0-9-]{1,32}/invocations$` (`/agents/` itself
+   included), get 404 with a static body (ADR-0019). `/agents`
+   without a slash falls under the default behaviour, so this check
+   comes before step 8 rewrites it to `/index.html`. Paths that need
+   no tenant (§3.2) skip to step 8, and so does `/signin-state` in
+   `single` mode.
 4. For `/api/*`, `/agents/*` and `/signin-state`, check `Sec-Fetch-Site`.
    Allow only `same-origin`, `none`, or no header; refuse the rest with
    403 (§7.3).
@@ -301,8 +308,21 @@ On every viewer request:
    and `x-tenant-route`. `/agents/*` goes to the single `agentIngress`
    input, an origin without origin access control (the API Gateway or
    AgentCore Gateway ingress of `agentic-runtime-isolation`). Its origin
-   request policy, `Managed-AllViewerExceptHostHeader`, forwards
-   `Authorization` on `GET` and `POST` and does not forward `Host`.
+   path is the ingress's stage, for example `/prod` (§6.3). The ingress
+   routes `POST /{backend}/invocations` with no `/agents` prefix, and
+   CloudFront appends the request path to the origin path as it is, so
+   the router drops the leading `/agents` from `request.uri`:
+   `/agents/<backend>/invocations` reaches the ingress as
+   `<originPath>/<backend>/invocations` (ADR-0019). Step 3 has already
+   refused every other `/agents` path. The rewrite changes only `uri`,
+   which holds no query string, so the query string goes on unchanged.
+   CloudFront chose the `/agents/*` cache behaviour, and with it the
+   origin, from the viewer's path before the function ran, and a changed
+   `uri` changes neither (CloudFront Functions event structure, `uri`),
+   so the rewritten request keeps this behaviour's origin and policies.
+   Its origin request policy, `Managed-AllViewerExceptHostHeader`,
+   forwards `Authorization` on `GET` and `POST` and does not forward
+   `Host`.
 8. Serve `/config.json` and `/logout` directly (§3.5). In `host` mode
    also serve `/signin-state` (§3.5), which answers 400 unless `nonce` is
    16 to 64 base64url characters; in `single` mode it is 404. In `host`
@@ -1072,7 +1092,7 @@ All with a small static HTML or JSON body and `no-store`:
 |---|---|
 | 401 | no token, an undecodable token, or no single `tenant_id` (a `tenants` list included): in `single` mode on every path that needs a tenant, in `host` mode on `/api/*` and `/agents/*` (§3.3 step 5). With `WWW-Authenticate: Bearer` |
 | 403 | unknown tenant (`single`); in `host` mode, `/api/*` or `/agents/*` with a `tenant_id` other than the host's tenant (§3.3 step 5); or a cross-site call to `/api/*`, `/agents/*` or `/signin-state` |
-| 404 | unknown host (`host` mode, or an unknown dedicated domain), or `/signin-state` in `single` mode |
+| 404 | unknown host (`host` mode, or an unknown dedicated domain), `/signin-state` in `single` mode, or `/agents` and any `/agents/` path other than `/agents/<backend>/invocations`, `/agents/` included (§3.3 step 3, ADR-0019) |
 | 429 | tenant over its rate on `/api/*` or `/agents/*` (`host` mode, at the edge): the WAF rate rule's Block action returns a custom 429, and a scope-down keeps SPA loads out of the count (ADR-0009) |
 | 400 | `/signin-state` with a missing or malformed nonce; `/signin-state` or `/logout` on a dedicated domain (`host` mode); on `login.<appDomain>`: a missing or changed `state`, an unknown `kid`, an `h` that is not a pooled host, an unregistered or suspended tenant host, or any other path. An authentic expired `state` gets 302 to `https://<h>/` instead (§3.3 step 2) |
 | 503 | tenant suspended, or its cell has no route |
@@ -1197,7 +1217,20 @@ All with a small static HTML or JSON body and `no-store`:
 |---|---|---|
 | `control-plane` | its API (`GetCell`, `GetDeployment`) with the reader grant (R-36) and a client-credentials reader token (spike S-9 showed both are needed: a `role` trigger on the vendor IdP and the `vendorIdp.clientIds` input of R-38, ADR-0043), its global hooks (R-39 to R-46, control-plane ADR-0044): `PutHook`, the `<fleet>-global-hook` role and `globalHookManagedPolicyArns`, the hook environment and `SCRIPT_OUTPUTS`. A prerequisite: without hooks the front door registers no route, and ADR-0044 is still Proposed (Q-5) | placement checks, route registration, the integration test |
 | `tenant-identity` `shared-pool` | its published parameters | the demo issuer and the integration test |
-| `agentic-runtime-isolation` | its `/application-plane/shared/agent-runtime/ingress` parameter | `/agents/*`, optional |
+| `agentic-runtime-isolation` | its `/application-plane/shared/agent-runtime/ingress` parameter: `baseUrl` gives the `agentIngress` origin's domain and origin path | `/agents/*`, optional |
+
+What the front door assumes of the agent ingress's paths (ADR-0019):
+the origin path is the path of the published `baseUrl`, the stage
+(`/prod`); the ingress serves an agent at `<baseUrl>/<backend>/invocations`
+with `<backend>` matching `[a-z0-9-]{1,32}`, as its `urlFor` and
+published interface state; and it routes with no `/agents` prefix. The
+router forwards only that route, as `<originPath>/<backend>/invocations`.
+It does not forward the ingress's other routes: the bare `/invocations`
+default-backend route, `/<backend>/delegations`, `/.well-known/*` and
+`/entitlements/*`. The ingress serves `POST` only; a `GET` passes the
+edge and gets the ingress's own 403. These assumptions hold for the
+`api-gateway` ingress, which S-5 stands in for; an `agentcore-gateway`
+ingress behind `/agents/*` needs its URL form checked first.
 
 ### 6.4 Published interface
 
@@ -1320,6 +1353,7 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0016](../adr/0016-sign-in-through-one-shared-host-in-host-mode.md) | Sign in and out through one shared host in `host` mode | shared sign-in host with a signed `state`; a callback URL per tenant; a wildcard callback URL |
 | [ADR-0017](../adr/0017-register-routes-from-a-control-plane-global-hook.md) | Proposed. Register routes from a control-plane global hook; the registrar admits no cell account role, still checks the control plane, and takes a cell's origin once | provisioning role in the cell account calls the registrar; tombstones and operator-only rules; the control plane writes the store directly; a global hook calls the registrar |
 | [ADR-0018](../adr/0018-prove-a-dedicated-domain-with-a-per-tenant-dns-challenge.md) | Keep dedicated domains in the sample, off unless `dedicatedDomains` is on; route one only after a TXT record holds a token the registrar issued for the tenant and domain, resolved by the function's default resolver and re-checked daily | validated ACM certificate only; TXT record with a registrar-issued per-tenant token; HTTP file challenge on the domain; operator attestation only |
+| [ADR-0019](../adr/0019-strip-agents-before-the-agent-ingress.md) | The router strips `/agents` from `/agents/<backend>/invocations` before the agent ingress, and answers 404 for any other `/agents` path | router `uri` rewrite; an `/agents` base path on the ingress side; no prefix |
 
 ## 9. Spikes before code
 
@@ -1332,7 +1366,7 @@ Each spike reports its deploy and destroy time.
 | S-3 | Does `cf.updateRequestOrigin()` set origin access control for a Lambda function URL **in another account**? | through the multi-tenant distribution, with its ARN as the permission's `SourceArn`: a signed request reaches a URL with `AWS_IAM` auth in the second account; an unsigned one is 403; a `POST` with a body and `x-amz-content-sha256` is served; the cell receives the viewer's token in `x-tenant-token`; the permission set is confirmed. **Passed 2026-11-16**: a signed `GET` and a `POST` with `x-amz-content-sha256` reached the function URL in the second account through the multi-tenant distribution, with the distribution ARN (not the tenant ARN) as `SourceArn`; the cell saw the viewer's token in `x-tenant-token`, and a client's own `x-tenant-token` was replaced. Refused with 403: a direct unsigned call, a call before the permission existed, a `POST` without `x-amz-content-sha256` (signature mismatch), and a call with `lambda:InvokeFunctionUrl` but no `lambda:InvokeFunction`. Lambda removes the signed `Authorization` header from the event. Deploy 506 s, destroy 185 s |
 | S-4 | `host` mode: how does the issuer take one callback URL per tenant at 1,000s of tenants? | a working option for Cognito app clients (limit and update rate measured), or a single sign-in host with a signed `state`. **Passed 2026-11-16 with the shared sign-in host**: one Cognito app client takes 100 callback URLs (the 101st is refused), a pool 1,000 clients by default, and `UpdateUserPoolClient` about 15 per second before `TooManyRequestsException`. One sign-in host with a signed `state` completed a real hosted sign-in and sent the code to the tenant host; a missing, changed or expired `state`, or a host outside `appDomain`, got 400. A wildcard callback URL is saved but matched as a literal string: a tenant host gets `redirect_mismatch` (ADR-0016). Deploy 446 s, destroy 220 s |
 | S-4o | `host` mode: does Cognito's `/logout` return `state` on its `logout_uri` redirect, and which `/logout` form brings a user back to a tenant host? | the observed redirect for the `logout_uri` form and the `redirect_uri` form, and for an unregistered `logout_uri`. **Measured 2026-11-16**: `/logout` with `client_id`, a registered `logout_uri` of `https://login.<appDomain>/logout` and `state` answered 302 to the `logout_uri` with `state` dropped, and ended the session (the next authorize showed the sign-in form). An unregistered `logout_uri`, on another domain or a tenant host, was refused with a redirect to Cognito's own `/login` page. `/logout` with `client_id`, `response_type=code`, `scope=openid`, a registered `redirect_uri` of `https://login.<appDomain>/callback` and `state` answered 302 to Cognito's `/login` with `state` kept; after sign-in the code reached the callback with the same `state`. A live session gave a code without the sign-in form, and both `/logout` forms ended it: the next authorize showed the form again (rerun 2026-11-17). The design uses the `redirect_uri` form (ADR-0016). Deploy 39 s, destroy 31 s |
-| S-5 | Does streaming pass through `/agents/*` to the agent ingress without buffering? | first byte at the client within 1 s of first byte from the ingress; the ingress receives the bearer token on `GET` and `POST`; the `Managed-AllViewerExceptHostHeader` policy deploys with the pinned CDK version |
+| S-5 | Does streaming pass through `/agents/*` to the agent ingress without buffering? | first byte at the client within 1 s of first byte from the ingress; the ingress receives the bearer token on `GET` and `POST` (the real ingress serves only `POST`, so the `GET` check proves that the origin request policy forwards the token on `GET`, not a route); the ingress sees the path without `/agents`, as `<stage>/<backend>/invocations` (ADR-0019); the `Managed-AllViewerExceptHostHeader` policy deploys with the pinned CDK version. Recorded as negatives: `/agents` and `/agents/` get 404 at the edge |
 | S-6 | Does a WAF rate rule keyed on the `Host` header count each tenant on its own? | tenant A over its limit on `/api/*` gets the custom 429 while tenant B is served; A's SPA loads (`/`, `/assets/*`) are not counted. **Passed 2026-11-16**: limit 10 per 60 s keyed on the lower-cased `Host`, scoped down to `/api/`. Tenant A got the custom 429 (JSON body, `retry-after: 60`) 21 s into its burst while B's `/api/x` stayed 200; 300 requests to A's `/` and 100 to `/assets/app.js` during the block were all 200. The rule's managed-keys call does not support a `Host` key. Deploy 443 s, destroy 250 s |
 | S-7 | Can the router decode a `tenant-identity` access token's payload within the CloudFront Functions limits? | `tenant_id` read from a real token; compute utilisation under 50 %; 401 on a malformed token. **Passed 2026-11-13**: 13-14 % compute, 401 at 9-10 % (ADR-0005) |
 | S-8 | Can an API Gateway resource policy admit a role name in any account through `aws:PrincipalArn`, and does the request context give the caller's account? | a provisioning role in the second account reaches the registrar; a role of another name is refused. **Passed 2026-11-13** with one design fix: the second account's provisioning role got 200 with `identity.accountId` and `userArn` in the request context; another role name got 403. The edge account's own admin also got 200 through its identity policy, so the resource policy adds an explicit `Deny` with `ArnNotLike` (§3.4, ADR-0013). Deploy 75 s, destroy 33 s. The result holds for the principal ADR-0017 admits instead, the control plane's `<fleet>-global-hook` role: one role ARN, matched by the same cross-account `aws:PrincipalArn` condition and guarded by the same `Deny` |
