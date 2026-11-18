@@ -2388,8 +2388,9 @@ stays `{% $states.input %}`, so the state input is untouched. The
 `Choice` ends the start when 5 minutes have passed since
 `FIRST_TRY_AT` or the next try would pass the deadline; otherwise its
 rule assigns `TRY` `$TRY + 1` and goes to the begin-try state. A
-start still refused when its window ends is a hook that cannot start,
-and `statusReason` says so and names `$LAST_REFUSAL`. Each try
+start still refused when its window ends is a hook that cannot start;
+its `statusReason` says the start was still refused and names
+`$LAST_REFUSAL`, which no other ending reads. Each try
 computes its own q, so a refusal
 never lengthens an attempt past its deadline. A project at its cap
 refuses, never queues, with `CodeBuild.AccountLimitExceededException`
@@ -2961,7 +2962,8 @@ a `Choice` that advances the try index, for at most 5 minutes, and a
 minutes of a stop, and the only task `Retry` is the transient
 repeat (`TimeoutSeconds` 15, `IntervalSeconds` 10, `BackoffRate` 1,
 `MaxAttempts` 3, no jitter), a "start outcome unknown" ending naming
-the last error and a "cannot start" ending naming `LAST_REFUSAL`, and
+the last error and a start still refused when its window ends naming
+`LAST_REFUSAL`, and
 that
 a failing delete hook runs as a loop of three started builds, 60 and
 120 seconds apart, each started only after the last is final, a
