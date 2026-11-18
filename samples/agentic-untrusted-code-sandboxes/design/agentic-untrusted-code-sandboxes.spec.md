@@ -299,7 +299,10 @@ Dockerfile installs. This is a supply-chain surface of the build, owned by
 the vendor's Dockerfile, separate from runtime egress, which never reaches
 the internet. The Dockerfile pins its base image by digest and installs
 only `python3` at an exact package version, which the AL2023 minimal base
-lacks.
+lacks. The construct also pins the platform base image of
+`AWS::Lambda::MicrovmImage` (`BaseImageArn` `al2023-1`) to a fixed
+`BaseImageVersion`, the one the integration test last passed on, so a
+redeploy never picks up a new VM base without a code change.
 
 Per-sandbox values. `microvm` and `agentcore` start sandboxes from a
 snapshot, so anything the runner makes at process start is shared by
@@ -320,11 +323,13 @@ It reads `SANDBOX_MEMORY_MIB` (1024 on `microvm` and `nitro`, 8192 on
 on `microvm` also on 9000 for the lifecycle hooks. The 9000 listener
 accepts the `/run` hook's nonce once and ignores every later `/run` hook,
 answers `/suspend` and `/resume`, and serves no jobs; the tool's auth
-tokens allow port 8080 only, so a caller cannot reach 9000. Until the
-`/run` hook has delivered the nonce, `/ping` reports no `bootId` and the
-8080 job route refuses every job, and the tool treats a `/ping` without
-`bootId` as not ready. No tenant code runs before the nonce is set, so
-code can never post its own `/run` hook first. It serves:
+tokens allow port 8080 only, so a caller cannot reach 9000. On
+`microvm`, until the `/run` hook has delivered the nonce, `/ping` reports
+no `bootId` and the 8080 job route refuses every job, and the tool treats
+a `/ping` without `bootId` as not ready; no tenant code runs before the
+nonce is set, so code can never post its own `/run` hook first. On
+`agentcore` there is no hook: the first job delivers the nonce and is
+accepted. On `nitro` the nonce is set at process start. It serves:
 
 - `GET /ping`: `{"status":"Healthy","bootId":…}` (AgentCore contract).
 - `POST /hello` (`nitro`): returns `bootId`, the certificate fingerprint
@@ -789,7 +794,7 @@ step that covers a gap is in brackets.
 
 | Id | Result | Changed | Not tested |
 |---|---|---|---|
-| S-1 | `AWS::Lambda::MicrovmImage` and `AWS::Lambda::NetworkConnector` deploy from a zip. Stack create 308 s (image 120 s, connector 254 s, in parallel); a code update 157 s. The image delete fails at once while a MicroVM of it runs or is suspended; the connector delete succeeds even with MicroVMs on it. After the MicroVMs were terminated, the delete took 92 s. Names: `[a-zA-Z0-9_-]`, 64; the connector ARN uses a generated id. A security group with no egress needs a placeholder rule in CloudFormation | §5.3 drain order, §5.3 names | which of a RUNNING or a SUSPENDED MicroVM blocks the image delete (the drain waits for both to end); what a running MicroVM's network does after its connector is deleted |
+| S-1 | `AWS::Lambda::MicrovmImage` and `AWS::Lambda::NetworkConnector` deploy from a zip. Stack create 308 s (image 120 s, connector 254 s, in parallel); a code update 157 s. The image delete fails at once while a MicroVM of it runs or is suspended; the connector delete succeeds even with MicroVMs on it. After the MicroVMs were terminated, the delete took 92 s. Names: `[a-zA-Z0-9_-]`, 64; the connector ARN uses a generated id. A security group with no egress needs a placeholder rule in CloudFormation | §5.3 drain order, §5.3 names | which of a RUNNING or a SUSPENDED MicroVM blocks the image delete (the drain waits for both to end); what a running MicroVM's network does after its connector is deleted; a digest-pinned `FROM` in the MicroVM build (the spike used a tag) |
 | S-2 | With only the VPC connector, code reached no internet host, no peer MicroVM and no interface endpoint. With no egress connector the MicroVM got `INTERNET_EGRESS` and reached the internet. Still open with the connector: DNS to the VPC resolver (public names resolve), and the link-local metadata service (Region, AZ id, a per-MicroVM key; no credentials without an execution role). The hook port 9000 answers only to a token that allows it | §3.4 Code holds, Egress, DNS; C-3; §1.2 | an actual DNS-tunnel exfiltration; only resolution and TCP 53 reach were checked |
 | S-3 | `RunMicrovm` and `CreateMicrovmAuthToken` take no tags and no request-tag condition. Every MicroVM action authorizes against the image ARN; there is no MicroVM ARN, and the only key is the image's `aws:ResourceTag`. `lambda:PassNetworkConnector` is needed for every connector passed, including `HTTP_INGRESS`, and for `INTERNET_EGRESS` when the egress connector is omitted | §3.4 start filtered; §3.6 tool role; §3.8 no MicroVM tag | `TerminateMicrovm` was checked only in the allowed case |
 | S-4 | Cold start to first `/run` P50 2.50 s, P90 2.82 s (n = 20, the connector adds nothing measurable). Resume P50 0.56 s, auto-resume by request 0.62 s (n = 5). The runner is PID 1 as root; a child drops to uid 1001 and cannot regain root or signal the runner. `bootId` survives suspend and resume. `runHookPayload` reaches the `/run` hook, capped at 4096 characters. `GetMicrovm` reports `startedAt`, `terminatedAt`, `stateReason`, no suspend times and no tags. Default memory quota 2048 MiB per Region | §3.4 start cap and Start; §6.1 quota | idle auto-suspend after `maxIdleDurationSeconds` and expiry at `maximumDurationInSeconds` [`microvm-stop`, `max-life`]; the execution-role path |
