@@ -15,13 +15,18 @@
  * `/application-plane/shared/metering/service` (spec §6.3).
  */
 
-import { CfnOutput, Stack, type StackProps } from 'aws-cdk-lib';
+import { CfnOutput, Stack, type StackProps, Validations } from 'aws-cdk-lib';
+import { Duration } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
+import { ADMIN_ROUTES } from './api/routes';
+import { STAGE_NAME } from './construct/api';
 import type { IngestPath } from './construct/props';
 import { emitterRoleName } from './shared/identity';
 import { acknowledgeWildcards } from './shared/nag';
+import { UsageSubscriber } from './subscriber/usage-subscriber';
 import { TenantUsageMetering } from './tenant-usage-metering';
 
 /** The cell id of the test emitter (a fixed ULID). */
@@ -79,8 +84,19 @@ export class TenantUsageMeteringDemoStack extends Stack {
 
     // The callers' own side of the grant (spec §6.1): an identity policy for each.
     registrar.addToPolicy(this.metering.registrarStatement);
-    for (const caller of [operator, reader]) {
-      caller.addToPolicy(new iam.PolicyStatement({ actions: ['execute-api:Invoke'], resources: [this.metering.api.arnForExecuteApi('*', '/*', '*')] }));
+    for (const [caller, cls] of [
+      [operator, 'operator'],
+      [reader, 'reader'],
+    ] as const) {
+      const routes = ADMIN_ROUTES.filter((route) => route.callers.includes(cls));
+      caller.addToPolicy(
+        new iam.PolicyStatement({
+          actions: ['execute-api:Invoke'],
+          resources: routes.map((route) =>
+            this.metering.api.arnForExecuteApi(route.method, route.path.replace(/\{[^}]+\}/g, '*'), STAGE_NAME),
+          ),
+        }),
+      );
     }
 
     if (props.context.integLocalCell) {
@@ -93,6 +109,31 @@ export class TenantUsageMeteringDemoStack extends Stack {
       new CfnOutput(this, 'EmitterRoleArn', { value: emitter.roleArn });
       new CfnOutput(this, 'CellId', { value: DEMO_CELL_ID });
     }
+
+    // A reader of the usage bus (ADR-0006): UsageRecorded records of one
+    // meter into a queue, the way a billing system would subscribe.
+    const usageQueue = new sqs.Queue(this, 'DemoUsageQueue', {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      retentionPeriod: Duration.days(4),
+    });
+    Validations.of(usageQueue).acknowledge({
+      id: 'AwsSolutions-SQS3',
+      reason: 'The demo reader queue is the target of a UsageSubscriber, whose own dead-letter queue catches failed deliveries (ADR-0006).',
+    });
+    const deliveryRole = new iam.Role(this, 'DemoUsageReaderRole', {
+      assumedBy: new iam.ServicePrincipal('events.amazonaws.com'),
+      description: 'Delivers UsageRecorded to the demo reader queue',
+    });
+    usageQueue.grantSendMessages(deliveryRole);
+    new UsageSubscriber(this, 'DemoUsageReader', {
+      busArn: this.metering.usageBusArn,
+      stream: 'usage',
+      targetArn: usageQueue.queueArn,
+      role: deliveryRole,
+      meters: ['agent.tokens'],
+    });
+    new CfnOutput(this, 'UsageQueueUrl', { value: usageQueue.queueUrl });
 
     acknowledgeWildcards(this, (path) =>
       /\/Demo[A-Za-z]+\/DefaultPolicy\//.test(path)

@@ -51,7 +51,21 @@ accounts that subscribe to the buses, and any other AWS account.
 
 ## Security review
 
-Not yet run: there is no code. When the sample is built, the review runs on
-the synthesised tree (`npx projen build` under the deployment profile), with
-ProtoShield or ASH, and cdk-nag `AwsSolutionsChecks` in the build. Every
-finding is dispositioned in a table here.
+Run on 2026-11-18 on the synthesised tree (`npx cdk synth` with the test
+account and Region): ProtoShield v0.18 (MIT-0 license-header config in
+`.protoshield/config.yaml`) and ASH in local mode. cdk-nag
+`AwsSolutionsChecks` runs in every synth and passes; every suppression
+carries a reason in code. No critical finding.
+
+| Finding | Scanner | Disposition |
+|---|---|---|
+| Demo operator and reader roles allowed `execute-api:Invoke` on every route | ProtoShield, high | Fixed: each stand-in role is granted only its routes from `src/api/routes.ts`; the API resource policy denies the rest anyway |
+| Dispatcher may read every secret under `<fleet>/metering/sinks/` | ProtoShield, high | Accepted: sinks are run-time configuration (ADR-0004), so their secrets are not known at deploy time; the prefix is the boundary, and `CreateSink`/`UpdateSink` refuse a name outside it (spec §4.4) |
+| `grantReadWriteData` on the admin and jobs roles | ProtoShield, medium | Accepted: the admin API writes every item kind (meters, sinks, registrations, jobs) and `SINK_REDRIVE` scans; the table policy still limits writers to the stack's roles |
+| Firehose bucket-level `ListBucket`, `GetBucketLocation` | ProtoShield, medium | Accepted: Firehose's S3 destination needs them on the bucket (the delivery role's documented permissions) |
+| `minimatch`, `glob` CVEs (denial of service) | ProtoShield, medium | Accepted: development dependencies of jest and eslint, on `main` across the repository; nothing in a bundled function uses them |
+| Test fixtures `user:pw@billing.example.com`, `secretName` values | ASH detect-secrets | False positive: the strings are refusal cases in `test/pure.test.ts` and `test/integ.metering.ts` |
+| Log groups not KMS-encrypted; SQS queues with SQS-managed SSE, not KMS | ASH checkov | Accepted: logs carry no payload or credential (spec §3.5); SSE-SQS encrypts at rest; a customer key is a production option |
+| Lambda: no DLQ, not in a VPC, no reserved concurrency, environment not KMS-encrypted | ASH checkov | Accepted: async invocations have on-failure destinations where they matter (tracker, jobs are re-runnable); the functions reach only AWS APIs and the configured sinks; only the ingest function needs reserved concurrency (spec §3.2); the environment holds names, no secret |
+| Access-log bucket without its own logging and versioning; API without caching or X-Ray | ASH checkov | Accepted: logging the log bucket to itself would loop; caching would serve stale usage; tracing is production hardening |
+| Findings under `cdk.out/`, `node_modules/` and `src/smithy/` | ASH | Not the sample's source: generated output, gitignored |

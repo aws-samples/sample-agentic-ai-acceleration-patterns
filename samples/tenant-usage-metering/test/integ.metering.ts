@@ -14,6 +14,7 @@
 import * as fs from 'node:fs';
 import { Sha256 } from '@aws-crypto/sha256-js';
 import { GetObjectCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
+import { ReceiveMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import { fromNodeProviderChain, fromTemporaryCredentials } from '@aws-sdk/credential-providers';
 import { HttpRequest } from '@smithy/protocol-http';
 import { SignatureV4 } from '@smithy/signature-v4';
@@ -242,6 +243,20 @@ async function main(): Promise<void> {
   });
   check('the record shows the export delivery SENT', delivered !== undefined);
 
+  // A reader on the usage bus (UsageSubscriber, meters: agent.tokens) ----------------------
+  const sqsClient = new SQSClient({ region: REGION });
+  const seen = new Map<string, { tenantId: string; meterId: string; total: string }>();
+  await waitFor('UsageRecorded on the reader queue', 5 * 60_000, async () => {
+    const out = await sqsClient.send(new ReceiveMessageCommand({ QueueUrl: outputs.UsageQueueUrl, MaxNumberOfMessages: 10, WaitTimeSeconds: 5 }));
+    for (const message of out.Messages ?? []) {
+      const detail = JSON.parse(message.Body ?? '{}').detail ?? JSON.parse(message.Body ?? '{}');
+      seen.set(`${detail.recordId}#${detail.revision}`, detail);
+    }
+    return seen.size >= 2 ? true : undefined;
+  });
+  const records = [...seen.values()];
+  check('the usage-bus reader receives both UsageRecorded records', records.some((r) => r.tenantId === 'tenant-a' && r.total === '15.5') && records.some((r) => r.tenantId === 'tenant-b'), records);
+
   // A late event gives an ADJUSTMENT -----------------------------------------------------
   const late = await call(emitter, 'POST', '/usage-events', { events: [ev('tenant-a', 'agent.tokens', '2', 50)] });
   check('a late event inside the window is ACCEPTED', late.body.results?.[0]?.result === 'ACCEPTED', late);
@@ -275,6 +290,9 @@ async function main(): Promise<void> {
     return out.body.records?.length > 0 ? out.body.records : undefined;
   });
   check('the re-admitted event is counted', callRecords?.[0]?.total === '1', callRecords);
+  const later = await sqsClient.send(new ReceiveMessageCommand({ QueueUrl: outputs.UsageQueueUrl, MaxNumberOfMessages: 10, WaitTimeSeconds: 10 }));
+  const meters = (later.Messages ?? []).map((message) => (JSON.parse(message.Body ?? '{}').detail ?? JSON.parse(message.Body ?? '{}')).meterId);
+  check('the reader filter keeps agent.calls off the queue', !meters.includes('agent.calls'), meters);
 
   // Readers and offboarding -----------------------------------------------------------------
   const readerUsage = await call(reader, 'GET', usagePath('tenant-a', 'agent.tokens'));
