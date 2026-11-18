@@ -42,7 +42,9 @@ namespace tenantusagemetering
 // Identifiers (spec §4)
 // ---------------------------------------------------------------------------
 
-/// A tenant id as the control plane writes it.
+/// A tenant id. The control plane's are ULIDs; another registrar may use
+/// any id in this charset. Ids are case-sensitive: the binding key is the
+/// exact string (spec §4.3).
 @pattern("^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 @length(min: 1, max: 64)
 string TenantId
@@ -88,7 +90,8 @@ string Hour
 string DecimalValue
 
 /// A quantity in a usage record; an ADJUSTMENT may be negative (spec §4.7).
-@pattern("^-?[0-9]{1,15}(\\.[0-9]{1,6})?$")
+/// Up to 24 integer digits: a SUM of 12-digit values over an hour.
+@pattern("^-?[0-9]{1,24}(\\.[0-9]{1,6})?$")
 string Quantity
 
 /// The tenant's account id in the billing system (spec §3.4).
@@ -176,6 +179,35 @@ enum EventResult {
     REFUSED
 }
 
+/// The refusals that could still count, which `StartReadmission` may
+/// select (spec P-8).
+enum ReadmittableReason {
+    TENANT_NOT_IN_CELL
+    REGISTRATION_CLOSED
+    UNKNOWN_METER
+    METER_NOT_ALLOWED
+}
+
+/// Why a 409 was returned. Only `CONCURRENT_WRITE` is worth retrying.
+enum ConflictReason {
+    /// `PutCellEmitter` in a subscriber account or the metering account.
+    ACCOUNT_NOT_ALLOWED
+
+    /// `CreateMeter` or `CreateSink` on an existing id.
+    ALREADY_EXISTS
+
+    /// A known cell with another account or application, or a binding for
+    /// a cell with no emitter or of another application (spec §4.2, §4.3).
+    PLACEMENT_MISMATCH
+
+    /// `StartRecount` whose whole range is closed or within 5 minutes of
+    /// its close.
+    RANGE_CLOSED
+
+    /// A lost conditional write: retry.
+    CONCURRENT_WRITE
+}
+
 /// Why an event was refused (spec §5). The first four can be re-admitted.
 enum RefusalReason {
     TENANT_NOT_IN_CELL
@@ -214,13 +246,16 @@ structure ResourceNotFoundException {
     message: String
 }
 
-/// A refused account, an existing meter, a closed range, or a lost
-/// conditional write; the last is retryable.
+/// A refused account, an existing id, a placement mismatch, a closed range,
+/// or a lost conditional write; only the last is retryable (`reason`).
 @error("client")
 @httpError(409)
 structure ConflictException {
     @required
     message: String
+
+    @required
+    reason: ConflictReason
 }
 
 @error("client")

@@ -268,9 +268,12 @@ from a `PARAM_` value, which deployment events carry from the
 deployment's set, not the cell's (control-plane R-32, R-42). It builds
 every request body with `jq --arg`, so a tenant-shaped value such as
 `PARAM_BILLING_ACCOUNT` never reaches a command line (control-plane §6.5).
-Every registration body also carries `EXECUTION_ID` and `OPERATOR_ID`
-from the hook environment, stored on the item as
-`controlPlaneExecutionId` and `controlPlaneOperatorId`, so a registration
+Every registration call also carries `EXECUTION_ID` and `OPERATOR_ID`
+from the hook environment, in the body of a `Put*` and in
+`X-Control-Plane-Execution-Id` and `X-Control-Plane-Operator-Id` headers
+of a `Delete*`, stored on the item as `controlPlaneExecutionId` and
+`controlPlaneOperatorId` (create) and `closedByExecutionId` and
+`closedByOperatorId` (delete), so a registration
 can be traced to the control-plane operation that made it.
 
 Hooks run again on updates, on delete retries, and on the delete that
@@ -389,6 +392,9 @@ hourly ones; a billing system that needs them reads the raw store or the
 | `intervals` | earlier `{activeFrom, closedAt}` pairs, kept while the end of `closedAt`'s hour is inside `recountWindowHours` |
 | `expiresAt` | the end of `closedAt`'s hour plus `recountWindowHours`, for audit |
 
+`PutCellEmitter` for a known cell with another account or application is a
+409 (`PLACEMENT_MISMATCH`): a cell never moves.
+
 Transitions: none → `ACTIVE` (`PutCellEmitter`) → `CLOSING`
 (`DeleteCellEmitter`) → removed by TTL. An emitter admits events whose
 `time` is at or after `activeFrom`, and, once `CLOSING`, at or before
@@ -411,6 +417,12 @@ at the event's time.
 | `tenantId`, `applicationId`, `cellId` | from the hook |
 | `billingAccount` | from `PARAM_BILLING_ACCOUNT`, optional |
 | `status`, `activeFrom`, `closedAt`, `closesAt`, `intervals`, `expiresAt` | as for emitters, with `TENANT_NOT_IN_CELL` for a missing binding and `REGISTRATION_CLOSED` outside its intervals |
+
+Tenant ids are the registrar's: the control plane's are ULIDs, and any
+id in `[A-Za-z0-9][A-Za-z0-9_-]{0,63}` is accepted; ids are
+case-sensitive. `PutTenantBinding` for a cell with no emitter, or of
+another application, is a 409 (`PLACEMENT_MISMATCH`); an absent
+`billingAccount` keeps the stored one.
 
 Transitions as for emitters. A deployment deleted and created again in
 the same cell returns the item to `ACTIVE` and keeps the earlier interval;
@@ -511,6 +523,8 @@ raises an alarm.
 | `kind` | `RECOUNT` (an hour range), `READMIT` (error objects of an hour range, optionally one reason), `INGEST_REDRIVE` (the ingest dead-letter queue), `SINK_REDRIVE` (`FAILED` deliveries of one sink, or every record of an hour range for one sink), `RESEND_BLOCKED` (one tenant and application's `BLOCKED` deliveries) |
 | `status` | `RUNNING`, `SUCCEEDED`, `FAILED` |
 | `counts` | items processed, admitted, refused, redriven |
+| inputs | `from`, `to` (inclusive, at most 744 hours apart), `reason`, `sinkId`, `tenantId`, `applicationId`, as the kind needs |
+| `statusReason`, `updatedAt` | why a job `FAILED`, and its last change |
 
 `RECOUNT` increments `generation` of each hour in range, the same path a
 new object takes, so a `COUNTED` hour becomes `DIRTY` and a `COUNTING`
@@ -678,7 +692,7 @@ Errors:
 | 400 `ValidationException` | malformed request, a field outside its charset, a `BILLING_ACCOUNT` out of format, a backdated `effectiveFrom` beyond the window |
 | 403 `AccessDeniedException` | caller not permitted for the route; for `PutUsageEvents`, not an assumed role or not a registered emitter |
 | 404 `ResourceNotFoundException` | unknown meter, sink, hour, job (never for `Delete*` of a registration) |
-| 409 `ConflictException` | `PutCellEmitter` in a subscriber account or the metering account; `CreateMeter` on an existing meter; `StartRecount` whose whole range is `CLOSED` or within 5 minutes of its close; a lost conditional write, retryable |
+| 409 `ConflictException` | with a `reason`: `ACCOUNT_NOT_ALLOWED` (`PutCellEmitter` in a subscriber account or the metering account), `ALREADY_EXISTS` (`CreateMeter` or `CreateSink` on an existing id), `PLACEMENT_MISMATCH` (§4.2, §4.3), `RANGE_CLOSED` (`StartRecount` whose whole range is `CLOSED` or within 5 minutes of its close), `CONCURRENT_WRITE` (a lost conditional write; the only one worth retrying) |
 | 429 `ThrottlingException` | API Gateway stage or method throttle |
 | 500, 502, 503, 504 | the function failed, was throttled or timed out; nothing in the batch is known to be stored |
 

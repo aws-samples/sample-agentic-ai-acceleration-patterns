@@ -37,6 +37,7 @@ service TenantUsageMeteringService {
     errors: [
         ValidationException
         ValidationError
+        ConflictException
         AccessDeniedException
         ThrottlingException
         InternalServerError
@@ -47,39 +48,38 @@ service TenantUsageMeteringService {
 // Usage events (spec §4.8, §5)
 // ---------------------------------------------------------------------------
 
-/// One usage event. The service adds the emitter's identity; a body field
-/// never names it (spec P-2).
+/// One usage event (spec §4.8). The members are deliberately unconstrained
+/// here: the function checks each event and refuses a bad one alone, as
+/// `BAD_SHAPE` or `BAD_TIME` (spec P-8), so one bad event never fails its
+/// batch. The rules it applies:
+/// - `eventId`: a ULID or a lowercase UUID, reused on every resend;
+/// - `tenantId`: a tenant bound to the caller's cell;
+/// - `meterId`: `[a-z0-9_.-]{1,64}`, a meter in effect at the event's hour;
+/// - `value`: a non-negative decimal, at most 12 integer and 6 fractional
+///   digits; `COUNT` ignores it, `UNIQUE_COUNT` treats it as a string;
+/// - `time`: ISO 8601 UTC with `Z`, kept as the emitter sent it;
+/// - `dimensions`: at most 10 keys `[A-Za-z0-9_.-]{1,64}`, values up to 256
+///   characters, no personal data (spec §6.1).
+/// The service adds the emitter's identity; a body field never names it
+/// (spec P-2).
 structure UsageEvent {
-    @required
-    eventId: EventId
+    eventId: String
 
-    @required
-    tenantId: TenantId
+    tenantId: String
 
-    @required
-    meterId: MeterId
+    meterId: String
 
-    /// `COUNT` ignores it; `UNIQUE_COUNT` treats it as a string.
-    @required
-    value: DecimalValue
+    value: String
 
-    @required
-    time: IsoTimestamp
+    time: String
 
     dimensions: Dimensions
 }
 
-@length(max: 10)
 map Dimensions {
-    key: DimensionKey
-    value: DimensionValue
+    key: String
+    value: String
 }
-
-@pattern("^[A-Za-z0-9_.-]{1,64}$")
-string DimensionKey
-
-@length(min: 0, max: 256)
-string DimensionValue
 
 @length(min: 1, max: 100)
 list UsageEventList {
@@ -172,13 +172,12 @@ list MeterVersionList {
 }
 
 /// Creates a meter. `effectiveFrom` defaults to the next whole hour and may
-/// name an earlier one inside the recount window (spec §4.1).
-@idempotent
-@http(method: "PUT", uri: "/meters/{meterId}", code: 201)
+/// name an earlier one inside the recount window (spec §4.1). Not
+/// idempotent: a repeat is a 409 `ALREADY_EXISTS`.
+@http(method: "POST", uri: "/meters", code: 201)
 operation CreateMeter {
     input := {
         @required
-        @httpLabel
         meterId: MeterId
 
         @required
@@ -200,7 +199,7 @@ operation CreateMeter {
     ]
 }
 
-/// The current version, or every version with `versions=all`.
+/// The current version; with `versions=ALL`, every version too.
 @readonly
 @http(method: "GET", uri: "/meters/{meterId}")
 operation GetMeter {
@@ -208,12 +207,14 @@ operation GetMeter {
         @required
         @httpLabel
         meterId: MeterId
+
+        @httpQuery("versions")
+        versions: MeterVersionsView
     }
     output := {
         @required
         meter: MeterVersion
 
-        @required
         versions: MeterVersionList
     }
     errors: [
@@ -221,7 +222,13 @@ operation GetMeter {
     ]
 }
 
+enum MeterVersionsView {
+    CURRENT
+    ALL
+}
+
 /// Writes a new version that counts from the next whole hour (spec P-6).
+/// An absent member keeps its value; `allowedApplications: []` means all.
 @http(method: "PATCH", uri: "/meters/{meterId}", code: 200)
 operation UpdateMeter {
     input := {
@@ -365,12 +372,13 @@ list SinkSummaryList {
     member: SinkSummary
 }
 
-@idempotent
-@http(method: "PUT", uri: "/sinks/{sinkId}", code: 201)
+/// Not idempotent: a repeat is a 409 `ALREADY_EXISTS`. `CreateSink` and
+/// `UpdateSink` refuse a `secretName` outside `<fleet>/metering/sinks/`
+/// with a `ValidationError` (spec §4.4).
+@http(method: "POST", uri: "/sinks", code: 201)
 operation CreateSink {
     input := {
         @required
-        @httpLabel
         sinkId: SinkId
 
         @required
@@ -414,6 +422,8 @@ operation GetSink {
     ]
 }
 
+/// An absent member keeps its value; `meters: []` means all, and
+/// `mapping: {}` clears the mapping.
 @http(method: "PATCH", uri: "/sinks/{sinkId}", code: 200)
 operation UpdateSink {
     input := {
@@ -544,6 +554,11 @@ structure CellEmitterSummary with [ControlPlaneTrace] {
 
     closesAt: IsoTimestamp
 
+    /// The control plane's ids for the delete that closed it.
+    closedByExecutionId: String
+
+    closedByOperatorId: String
+
     intervals: IntervalList
 
     @required
@@ -557,8 +572,10 @@ list CellEmitterSummaryList {
     member: CellEmitterSummary
 }
 
-/// Registers a cell's emitter role `<fleet>-ue-<cellId>`. 409 in a
-/// subscriber account or the metering account (ADR-0006).
+/// Registers a cell's emitter role `<fleet>-ue-<cellId>`. 409
+/// `ACCOUNT_NOT_ALLOWED` in a subscriber account or the metering account
+/// (ADR-0006); 409 `PLACEMENT_MISMATCH` for a known cell with another
+/// account or application.
 @idempotent
 @http(method: "PUT", uri: "/cells/{cellId}/emitter", code: 200)
 operation PutCellEmitter {
@@ -665,6 +682,11 @@ structure TenantBindingSummary with [ControlPlaneTrace] {
 
     closesAt: IsoTimestamp
 
+    /// The control plane's ids for the delete that closed it.
+    closedByExecutionId: String
+
+    closedByOperatorId: String
+
     intervals: IntervalList
 
     @required
@@ -678,8 +700,11 @@ list TenantBindingSummaryList {
     member: TenantBindingSummary
 }
 
-/// Binds a tenant to a cell. A new billing account starts a
-/// `RESEND_BLOCKED` job for the tenant and application (spec §4.7).
+/// Binds a tenant to a cell. 409 `PLACEMENT_MISMATCH` when the cell has no
+/// emitter or is of another application. An absent `billingAccount` keeps
+/// the stored one. A newly set billing account starts a `RESEND_BLOCKED`
+/// job for the tenant and application (spec §4.7), returned as
+/// `resendJobId`.
 @idempotent
 @http(method: "PUT", uri: "/cells/{cellId}/tenants/{tenantId}", code: 200)
 operation PutTenantBinding {
@@ -700,6 +725,8 @@ operation PutTenantBinding {
     output := {
         @required
         binding: TenantBindingSummary
+
+        resendJobId: JobId
     }
 }
 
@@ -803,10 +830,25 @@ structure UsageRecord {
     @required
     total: Quantity
 
+    /// Below 2^53 (JavaScript safe integers).
     @required
     eventCount: Long
 
     billingAccount: BillingAccount
+
+    sinks: SinkDeliveries
+}
+
+structure SinkDelivery {
+    @required
+    status: DeliveryStatus
+
+    reason: String
+}
+
+map SinkDeliveries {
+    key: SinkId
+    value: SinkDelivery
 }
 
 list UsageRecordList {
@@ -906,6 +948,7 @@ structure HourSummary {
     @required
     status: HourStatus
 
+    /// Below 2^53 (JavaScript safe integers).
     @required
     generation: Long
 
@@ -970,6 +1013,7 @@ resource Job {
     list: ListJobs
 }
 
+/// Counts stay below 2^53 (JavaScript safe integers).
 structure JobCounts {
     @required
     processed: Long
@@ -997,17 +1041,37 @@ structure JobSummary {
     @required
     counts: JobCounts
 
+    /// The job's inputs (spec §4.6).
+    from: Hour
+
+    to: Hour
+
+    reason: ReadmittableReason
+
+    sinkId: SinkId
+
+    tenantId: TenantId
+
+    applicationId: ApplicationId
+
+    /// Why the job `FAILED`.
+    statusReason: String
+
     @required
     createdBy: String
 
     @required
     createdAt: IsoTimestamp
+
+    @required
+    updatedAt: IsoTimestamp
 }
 
 list JobSummaryList {
     member: JobSummary
 }
 
+/// Both bounds inclusive; at most 744 hours (31 days) apart.
 @mixin
 structure HourRange {
     @required
@@ -1034,7 +1098,7 @@ operation StartRecount {
 @http(method: "POST", uri: "/jobs/readmission", code: 202)
 operation StartReadmission {
     input := with [HourRange] {
-        reason: RefusalReason
+        reason: ReadmittableReason
     }
     output := {
         @required
