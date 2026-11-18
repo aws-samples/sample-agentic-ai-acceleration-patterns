@@ -52,7 +52,15 @@ set to a sample's `node_modules` for `app.js`.
 | Q5-2 | Every role in the cell carries the boundary when the context is an object | the boundary pattern holds for the whole sample, no construct change needed |
 | Q5-3 | `AWS::DynamoDB::GlobalTable` calls `application-autoscaling:DeregisterScalableTarget` on delete; the create did not need it | `application-autoscaling` is in the execution policy and the boundary |
 | Q5-4 | The deny probe proves an execution role bounded this way cannot create an unbounded role, even one asking for `AdministratorAccess` | the scope holds |
-| Q5-5 | No traffic ran: the bounded roles on the request path (authoriser, TVM `sts:AssumeRole`, the tenant role's model call, the Runtime's execution role) are unproven | run the sample's integration test under the boundary |
+| Q5-5 | The request path works under the boundary: the sample's integration test, run with the boundary and the `cell` qualifier in `cdk.context.json` (139 of 139 roles bounded across six stacks), passed 60 of 60 steps (59 PASS, 1 SKIP by design): TVM tenant credentials (8a), the model call (8b), tools, delegation, the log sweep, the mask and a clean teardown | the boundary's service list is enough for the whole sample |
+
+## Integration run under the boundary
+
+2026-11-18 11:41 to about 12:27 UTC, `eu-central-1`. `scripts/integ.sh`
+with `samples/agentic-runtime-isolation/cdk.context.json` holding
+`{"@aws-cdk/core:bootstrapQualifier": "cell", "@aws-cdk/core:permissionsBoundary": {"name": "cell-permissions-boundary"}}`
+(gitignored, removed after the run). Deploy of six stacks 475 s at
+concurrency 6, steps 1,672 s, 60 of 60 steps, step 10 found nothing left.
 
 ## Left in the account
 

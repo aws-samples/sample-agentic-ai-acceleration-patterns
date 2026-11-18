@@ -407,7 +407,9 @@ Spike Q-5 (`stress/spikes/q5-cell-boundary/`, 2026-11-18) deployed one
 runtime-isolation cell this way: 27 of 27 roles carried the boundary, every
 custom resource ran, the cell deployed in 402 s and destroyed cleanly once
 the execution policy held Application Auto Scaling. A role without the
-boundary was refused at `iam:CreateRole`.
+boundary was refused at `iam:CreateRole`. The sample's integration test,
+run through the same bootstrap and boundary (139 of 139 roles bounded),
+passed 60 of 60 steps, so the request path holds under the boundary too.
 | 8 | The runtime-isolation `StressDriver` and k6 library move to `stress/` | they become the shared driver; its slice keeps only its own scenarios |
 
 ## 9. Work items and parallel readiness
@@ -433,4 +435,3 @@ boundary was refused at `iam:CreateRole`.
 | Q-2 | Does the front door's integration test compose runtime-isolation for `/agents/*` (its Q-4)? The platform run assumes it can | W-7 |
 | Q-3 | Does the platform run keep the `large` fleet in both accounts between runs, and what does it cost idle? | decision 5 |
 | Q-4 | Which hosted zone does the stress front door use? | W-7 |
-| Q-5 | Does the request path work under the cell permissions boundary (authoriser, TVM `sts:AssumeRole`, the tenant role's model call, the Runtime execution role)? Proven by the sample's integration test run under the boundary | W-10 |
