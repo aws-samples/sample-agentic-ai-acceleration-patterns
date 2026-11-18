@@ -161,7 +161,7 @@ All in the metering account, one stack.
 |---|---|---|
 | Emitter | SigV4 as an assumed role named `<fleet>-ue-<cellId>`, registered for a cell | `PutUsageEvents` |
 | Lifecycle hook | SigV4 as a role in `registrarPrincipalArns` (the control plane's `<fleet>-global-hook`) | `PutCellEmitter`, `DeleteCellEmitter`, `PutTenantBinding`, `DeleteTenantBinding` |
-| Metering operator | SigV4 as a role in `operatorPrincipalArns` | meters, sinks, usage reads, recounts, re-admission, redrives, reads of registrations |
+| Metering operator | SigV4 as a role in `operatorPrincipalArns` | meters, sinks, usage reads, recounts, re-admission, redrives, resends of `BLOCKED` deliveries, reads of registrations |
 | Usage reader | SigV4 as a role in `readerPrincipalArns` | `GetUsage`, `ListUsage` |
 | Bus subscriber | Its account: the metering account, or one a bus is shared with through AWS RAM (subscribe only) | create its own subscribers on that bus, through `UsageSubscriber` |
 
@@ -203,7 +203,7 @@ subscriber.
 |---|---|---|
 | `fleetName` | the control plane's fleet name, `[a-z0-9][a-z0-9-]{0,31}` as there, checked at synth (`<fleet>-ue-<cellId>` is then at most 62 characters) | required |
 | `registrarPrincipalArns` | roles that may register cells and tenants | required |
-| `operatorPrincipalArns` | roles that may manage meters, sinks, recounts and redrives | required |
+| `operatorPrincipalArns` | roles that may manage meters, sinks, recounts, re-admission, redrives and resends of `BLOCKED` deliveries | required |
 | `readerPrincipalArns` | roles that may read usage | `[]` |
 | `lateGraceMinutes` | how long after an hour ends it is first counted; synth fails below the Firehose buffer (1 minute) plus 5 minutes | `15` |
 | `recountWindowHours` | how long after an hour ends it may still be recounted; synth fails below 72. Ingest admits an event only while its hour ended less than `recountWindowHours` − 49 hours ago, so an accepted event has 48 hours (the subscriber's 24 h maximum event age plus 24 h to redrive its dead-letter queue) to reach S3, and one more hour for the Firehose buffer and the scheduler, before the hour closes | `96` |
@@ -378,13 +378,16 @@ object tracker never writes the item the recount's fence checks.
 | `countedGeneration`, `countedAt` | the generation and time of the last finished count |
 | `lease`, `leaseExpiresAt` | the recount execution holding `COUNTING`, and when its hold lapses (30 minutes) |
 | `attempts` | failed counts since the last success, a lease taken over after it lapsed included |
-| `pending` | present until the hour is `CLOSED`; a sparse index on it is how the scheduler finds hours |
+| `pending` | the constant `1`, present until the hour is `CLOSED`; a sparse index with partition key `pending` and sort key `PK` (the hour) is how the scheduler finds hours |
 
 The object tracker creates the `META` item, `OPEN`, on the hour's first
 object, and increments `generation` on the `GEN` item for every object
 whatever the state. Every writer of these items retries a
-`TransactionConflict` or a lost condition with jittered backoff before
-it counts as a failure. Its
+`TransactionConflict` or throttling with jittered backoff before it
+counts as a failure. A failed condition is a result, not retried: a
+recount that lost its lease stops without writing, a moved `generation`
+makes the hour `DIRTY`, and a lost take means another execution holds
+the hour. Its
 invocations are asynchronous, with an SQS on-failure destination that
 keeps the S3 event; the scheduler replays that queue, and an alarm fires
 when its depth stays above zero for 15 minutes.
@@ -414,8 +417,12 @@ condition on `COUNTED`. A failed count →
 `COUNT_FAILED`, retried with backoff; an alarm fires on the third
 failure.
 
-At hour end plus `recountWindowHours`, the scheduler moves a `COUNTED`
-hour to `CLOSED` and removes `pending`. An hour in any other state at
+At hour end plus `recountWindowHours`, the scheduler closes a `COUNTED`
+hour in a transaction: a `ConditionCheck` that the `GEN` item's
+`generation` equals `countedGeneration`, and `CLOSED` on `META`
+(conditioned on `COUNTED`, removing `pending`); if the check fails, the
+hour becomes `DIRTY`. `READMIT`, `RECOUNT` and `StartIngestRedrive`
+refuse an hour within 5 minutes of its close, as `TOO_LATE`. An hour in any other state at
 that time raises an alarm and stays in the index, retried like any other
 until a count succeeds; it closes only from `COUNTED`. A
 `CLOSED` hour is never counted again, and an object that lands in it
@@ -456,7 +463,7 @@ zero-padded from `0000`.
 | `billingAccount` | set once: from the tenant's `ACTIVE` binding for the application when the record is written (else its latest `CLOSING` one), or, if that has none, on the first resend from `BLOCKED` |
 | `recordId` | `sha256(tenantId, applicationId, meterId, hour, seq)`; sinks use it as their idempotency key |
 | `revision` | `1` when written; `2` once a late `billingAccount` is written onto it |
-| `publishPending` | the time the marker was set; present until the record, at its current `revision`, is on the usage bus and queued for its sinks. A sparse index with sort key `publishPending` lists the records that hold it |
+| `publishPending` | the time the marker was set; present until the record, at its current `revision`, is on the usage bus and queued for its sinks. It is set and removed together with `publishShard` (`0` to `3`, from `recordId`); a sparse index with partition key `publishShard` and sort key `publishPending` lists the records that hold it, and the sweep queries the four shards |
 | `sinks` | per sink: `PENDING`, `RETRYING`, `SENT`, `BLOCKED` (reason), `FAILED` (reason) |
 
 A record is written with a condition that its `seq` does not exist yet
@@ -486,8 +493,10 @@ a sink enabled later is backfilled. An `HTTP` sink whose mapping needs
 `billingAccount` on a record without one marks it `BLOCKED`
 (`NO_BILLING_ACCOUNT`), after it has read the tenant's binding for the
 application: if the binding now has an account, the dispatcher writes it
-onto the record as revision 2 instead, the same write the job below
-makes. An alarm fires when a delivery has been `BLOCKED` for 24 hours,
+onto the record as revision 2, and in the same write marks its sink
+`BLOCKED`, so the revision-2 publish queues it, the same write the job
+below makes. Every revision-2 write is conditioned on `revision = 1`, so
+the job and the dispatcher cannot both make it. An alarm fires when a delivery has been `BLOCKED` for 24 hours,
 and `StartResendBlocked` (a tenant and an application) lets an operator
 run the job. A `PutTenantBinding` that sets a billing account
 starts a `RESEND_BLOCKED` job for that tenant and application and
