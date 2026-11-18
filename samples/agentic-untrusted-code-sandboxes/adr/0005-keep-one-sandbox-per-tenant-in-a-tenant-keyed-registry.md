@@ -39,7 +39,9 @@ cannot persist across turns.
 Option 1, with the reuse rule in spec §4.1: read the row with its version;
 reuse it when `READY`; probe it when `STARTING` within its lease; otherwise
 take it over with `attribute_not_exists(PK) OR version = :seen`, stop the
-handle being replaced, and start. A failed identity check, "not found" or
+handle being replaced, and start. A start that ends before it serves, or
+does not become ready within its start cap, sets `FAILED` and backs off
+30 s before the next takeover, whoever notices it. A failed identity check, "not found" or
 a refused connection marks the row dead. A start that is not ready within
 `startWait` returns the retryable `sandbox_starting` instead of holding the
 Lambda.

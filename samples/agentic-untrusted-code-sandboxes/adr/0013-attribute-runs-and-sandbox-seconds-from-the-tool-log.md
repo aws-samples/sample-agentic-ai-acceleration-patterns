@@ -35,7 +35,9 @@ line carries the sandbox `handle`, so other usage sources join to the
 tenant: `nitro` tags tasks with `TenantId` for ECS split cost allocation
 data, `microvm` tags MicroVMs if S-3 allows, and `agentcore` cost comes
 from AgentCore's session-level usage logs keyed by `runtimeSessionId`
-(consumption billing, no configured baseline).
+(consumption billing, no configured baseline). On `microvm` the stop line
+splits running and suspended seconds from a per-row suspended counter;
+the API reports no per-state times, so the split is marked estimated.
 
 ## Consequences
 

@@ -37,7 +37,10 @@ life limit, the reaper also stops any tagged task whose own `startedAt` is
 older than `sandboxMaxLife`, with or without a row. AgentCore has no API
 that lists a runtime's sessions, so the sweep covers tasks and MicroVMs
 only; an orphan session ends on its idle or life timeout or with the
-runtime's delete. The drain waits up to 10 minutes for tasks and MicroVMs
+runtime's delete. The reaper checks each `microvm` row with `GetMicrovm`
+and writes the stop line for a MicroVM the platform ended. For `STARTING`
+rows it applies the tool's own rule, and it leaves `FAILED` rows to the
+tool. The drain waits up to 10 minutes for tasks and MicroVMs
 and fails the delete loudly if any is left.
 
 ## Consequences
