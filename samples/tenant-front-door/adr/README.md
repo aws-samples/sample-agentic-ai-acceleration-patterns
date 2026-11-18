@@ -4,10 +4,12 @@
 
 One file per decision, in the template of
 [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md).
-Every record is Accepted except ADR-0017, which is Proposed: it
-depends on the control plane's global hooks (control-plane ADR-0044),
-also Proposed (spec Q-5). ADR-0017 will supersede ADR-0013 once
-ADR-0044 is accepted; until then ADR-0013 stays Accepted. Merge order:
+Every record is Accepted except ADR-0017 and ADR-0018, which are
+Proposed. ADR-0017 depends on the control plane's global hooks
+(control-plane ADR-0044), also Proposed (spec Q-5). ADR-0018 is
+accepted when this branch merges, and its `Amended by: ADR-0018` notes
+on ADR-0002, 0012 and 0016 take effect then. ADR-0017 will supersede
+ADR-0013 once ADR-0044 is accepted; until then ADR-0013 stays Accepted. Merge order:
 the control-plane hooks branch first, then this one. The `Amended by:
 ADR-0017` notes on ADR-0002, 0003, 0012, 0014 and 0015 take effect when
 ADR-0017 is accepted. One spike is still open
@@ -36,5 +38,5 @@ request policy in ADR-0011.
 | [0015](./0015-read-the-control-plane-with-a-reader-token.md) | Read the control plane with a reader token | Accepted | 2026-11-16 |
 | [0016](./0016-sign-in-through-one-shared-host-in-host-mode.md) | Sign in through one shared host in host mode | Accepted | 2026-11-17 |
 | [0017](./0017-register-routes-from-a-control-plane-global-hook.md) | Register routes from a control-plane global hook | Proposed | 2026-11-18 |
-| [0018](./0018-prove-a-dedicated-domain-with-a-per-tenant-dns-challenge.md) | Prove a dedicated domain with a per-tenant DNS challenge | Accepted | 2026-11-18 |
+| [0018](./0018-prove-a-dedicated-domain-with-a-per-tenant-dns-challenge.md) | Prove a dedicated domain with a per-tenant DNS challenge | Proposed | 2026-11-18 |
 | [0019](./0019-strip-agents-before-the-agent-ingress.md) | Strip `/agents` before the agent ingress | Accepted | 2026-11-18 |

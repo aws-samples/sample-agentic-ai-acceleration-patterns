@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0018: Prove a dedicated domain with a per-tenant DNS challenge
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-11-18
 - Amends: ADR-0002, ADR-0012, ADR-0016
 - Deciders: Dave Roberts (PSA)
@@ -115,10 +115,11 @@ never passes. The 7 days cover a tenant's
 DNS change process; ACM's own 72-hour validation window starts only
 after the challenge passes. The challenge keeps the vendor's decision
 with the operator: it is necessary before routing, not a substitute for
-the operator's call. The tenant keeps the record while the domain is
-routed, and the sweeper re-checks it daily and raises an alarm when
-three daily runs in a row miss it for one tenant and domain; it never
-drops a domain itself. The registrar resolves the record once more
+the operator's call. The tenant keeps the record for as long as it
+holds the domain, and the sweeper re-checks every passed challenge
+daily, routed or not, and raises an alarm when three daily runs in a
+row miss it for one tenant and domain; it never drops a domain
+itself. The registrar resolves the record once more
 before it writes the domain's `host#` key.
 
 ## Consequences
@@ -156,14 +157,25 @@ before it writes the domain's `host#` key.
   vendor needs the multi-perspective check public certificate
   authorities make.
 - Harder: a domain that changes owner stays routed to the old tenant
-  until the operator drops it. The daily re-check logs each miss with
-  the tenant and domain, never the token. The sweeper decides from its
-  own log, with a Logs Insights query over its previous two daily runs,
-  when one tenant and domain has missed three runs in a row, logs that
-  with the tenant and domain, and emits one count to the metric the
-  alarm watches; it keeps no store. A resolver error is logged apart
-  and never counted as a miss, so an outage cannot look like a change
-  of owner. A removed record can still pass for as long as the resolver
+  until the operator drops it. The daily re-check covers every passed
+  challenge, routed or not, because a pending certificate request rests
+  on the same proof; its alarm means the tenant does not show control
+  of a domain it claimed. The lister gives each run a run id and passes
+  it to every page of 500 entries. Each page looks its records up 10 at
+  a time with a 5 s timeout, querying CNAME only when the TXT answer is
+  empty or holds the token, and logs each miss with the run id, tenant
+  and domain, never the token. At its start, the page runs one Logs
+  Insights query that finds the two most recent run ids before its own
+  and returns every tenant and domain that missed in both; it compares
+  its misses with that list in memory, logs a three-miss line with the
+  tenant and domain, and emits one count, as an embedded metric format
+  log line, to the metric the alarm watches. A page takes at most 500 s
+  of lookups plus a 60 s poll limit on its one query; a failed query
+  logs an error and emits no three-miss line. One query per page in
+  flight keeps a run inside the Logs Insights quota of 30 concurrent
+  queries. The sweeper keeps no store of its own: its log is the
+  record. A resolver error is logged apart and never counted as a
+  miss, so an outage cannot look like a lost proof. A removed record can still pass for as long as the resolver
   caches it, up to its TTL cap (S-10), which delays the alarm by that
   much. The sweeper does not drop the domain: a DNS fault or a
   tenant's mistake would then take a routed domain offline with no
@@ -180,7 +192,10 @@ before it writes the domain's `host#` key.
   resource check, while any `tenant#` entry holds a `d` or the sweeper
   still has a distribution tenant or certificate to delete, so no
   domain stays routed with no role able to remove it and no re-check.
-  The operator drops every dedicated domain first (spec §10 step 14).
+  The check resource runs before the registrar's switch and role
+  change, which depend on it. The operator drops every dedicated
+  domain first (spec §3.4, the IAM paragraph, and §3.6); spec §10
+  step 14 tests the refusal.
 - Known limitations: not tested end to end, and covered by unit tests
   with a stubbed resolver or clock instead: challenge expiry and
   reissue, a resolver error (`unresolved`), a CNAME at the challenge
