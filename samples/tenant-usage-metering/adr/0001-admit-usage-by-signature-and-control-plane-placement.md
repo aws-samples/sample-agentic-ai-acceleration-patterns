@@ -28,26 +28,35 @@ a tenant-owned account is held by the tenant; revoking it needs a deny
 list; a tenant moved or removed keeps a valid token until it expires.
 
 ### Option 3: SigV4 caller plus a registry the control plane writes
-The ingest door is IAM-authorised. The caller's role ARN, which API
-Gateway verifies, identifies the cell. Which tenants the cell holds is
-written by the control plane's global hooks under `<fleet>-global-hook`,
-a role no cell account holds or trusts (control-plane R-41). Pros: the
-fact comes from AWS, the list comes from the vendor; deleting a tenant
-or a cell revokes at once; no secret is issued into any cell. Cons: one
-registry read per batch (cached for a minute); the emitter role name is a
-convention the cell script must follow.
+The ingest door is IAM-authorised. The caller's assumed-role ARN, which
+API Gateway verifies, names the account and the role; the role is
+`<fleet>-ue-<cellId>`. Which cells exist, and which tenants each holds,
+is written by the control plane's global hooks under
+`<fleet>-global-hook`, a role no cell account holds or trusts
+(control-plane R-41). Pros: the caller's identity comes from AWS, the
+list comes from the vendor; deleting a tenant or a cell revokes within
+the registry cache (60 seconds); no secret is issued into any cell.
+Cons: one registry read per batch, cached; the emitter role name is a
+convention the cell script must follow; the API resource policy can only
+match the role-name pattern, since cell accounts are registered at run
+time.
 
 ## Decision
 Option 3. It is the only one where neither the emitter's identity nor its
-tenant list is held or written by the emitter. The registry is keyed on
-`<accountId>#<roleName>`, and the account in the caller's ARN must match
-the account the hook recorded, so a role of the same name in another
-account is refused.
+tenant list is held or written by the emitter. The function admits only
+assumed-role callers, and looks the role up by `<accountId>#<roleName>`,
+so a role of the same name in an account the control plane never
+registered is refused. The registrations are written in `PRE` hooks, so
+a cell or deployment is known before its script runs and is `CLOSING`
+before its delete script removes anything.
 
 ## Consequences
-- A pooled cell may still report for any tenant it holds. That is a
-  residual (spec §7, question 3): the cell is vendor code, and a per-tenant
-  emitter role is a seam.
+- A pooled cell may still report for any tenant it holds. That is stated
+  as out of scope (spec §1.2); a role per deployment is a seam.
+- Every global hook shares `<fleet>-global-hook`, so any global hook the
+  vendor registers can also register emitters (spec §3.4).
+- A delete hook the control plane skips after its retries leaves a
+  registration `ACTIVE` (spec §3.4); reconciliation is a seam.
 - Without the control plane, any principal in `registrarPrincipalArns`
   plays its part; the guarantee is then only as strong as that principal.
 - The quantity is still the emitter's word (spec §1.2, T-3).

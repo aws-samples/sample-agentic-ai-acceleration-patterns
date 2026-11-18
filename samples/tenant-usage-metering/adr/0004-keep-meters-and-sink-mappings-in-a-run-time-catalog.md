@@ -17,7 +17,8 @@ Pros: reviewed with the code. Cons: every change is a deploy.
 
 ### Option 2: A catalog behind the admin API, versioned by hour
 Meters and sinks are records. A meter change writes a new version that
-counts from the next whole hour. A sink mapping is read at dispatch.
+counts from a named whole hour: the next one for a change, up to the
+recount window back for a new meter. A sink mapping is read at dispatch.
 Pros: no deploy; an hour is always counted under one rule; history is
 kept. Cons: a bad change takes effect without review; the admin API is a
 sensitive surface.
@@ -30,7 +31,12 @@ so a bad change is reverted with another write. Sum rules (`COUNT`,
 are computed and must be tested.
 
 ## Consequences
-- Emitters send any meter id; an unknown one goes to the error store and
-  is replayable once the meter exists (P-8).
+- Emitters send any meter id; an unknown one goes to the error store
+  (P-8). `CreateMeter` may set `effectiveFrom` back to a whole hour
+  inside the recount window, so those events can be re-admitted and
+  counted; changes to an existing meter still start at the next hour.
+- Ingest and the recount check an event against the meter version in
+  effect at its hour, so a meter retired later still counts its earlier
+  hours.
 - Infrastructure-as-code users can still seed meters from a script that
   calls the admin API.

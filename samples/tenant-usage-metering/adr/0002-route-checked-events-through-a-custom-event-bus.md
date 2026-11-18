@@ -60,11 +60,11 @@ accounts to subscribe.
 
 ### Option 3: Function → Custom Event Bus → Firehose subscriber → S3
 The function publishes each checked batch with `PutEvents` (up to 100
-entries), `DeduplicationId` set to `<tenantId>#<eventId>` and
-`EventGroupId` set to the tenant id. A subscriber
-delivers to Firehose in batches of up to 500, with a retry policy set to
-the bus's maximum event age and an SQS dead-letter queue. Pros: no
-throttle; about $0.25 per million at one event per Firehose record;
+entries), `DeduplicationId` set to
+`<applicationId>#<tenantId>#<eventId>` and `EventGroupId` set to the
+tenant id. A subscriber delivers to Firehose in batches of up to 500,
+with a retry policy of 24 hours maximum event age and an SQS dead-letter
+queue. Pros: no Firehose throttle; about $0.25 per million at one event per Firehose record;
 retention gives a replay buffer in front of S3; other teams and accounts
 attach readers through AWS RAM without a change to this sample; matches
 the bus-first shape control-plane toolkits use. Cons: a service two
@@ -83,16 +83,21 @@ point where other systems want to join, without the throttle and the
 per-event price that ruled the classic bus out, and the bus's retention
 gives a second replay source while S3 stays the store the hourly recount
 reads (ADR-0003). The five-minute deduplication is a first filter only;
-counting once still rests on the recount's `(tenantId, eventId)` dedupe
-(P-5), because a retry after five minutes, or a Firehose retry, is not
-caught by the bus. Option 2 with packed records is the fallback where the
+counting once still rests on the recount's
+`(applicationId, tenantId, eventId)` dedupe (P-5), because a retry after
+five minutes, or a Firehose retry, is not caught by the bus. Option 2 with packed records is the fallback where the
 new bus is not available, and the construct takes an `ingestPath` prop
 (`BUS` or `DIRECT`) so a deployer can choose.
 
 ## Consequences
 - The subscriber MUST have an SQS dead-letter queue and a retry policy
-  that holds events for the bus's maximum event age; an alarm on the DLQ
-  depth and on the subscriber's failed deliveries is part of the stack.
+  of 24 hours maximum event age; an alarm on the DLQ depth and on the
+  subscriber's failed deliveries is part of the stack. An event in the
+  queue was `ACCEPTED` to its emitter, so `StartIngestRedrive` moves it
+  into Firehose, and the recount window is at least 48 hours so it still
+  counts (spec §3.3).
+- Entries the bus still throttles after the function's retries return
+  `RETRY`, and the emitter resends them with the same ids (spec §5).
   Readers outside the sample get the same through the published
   `UsageSubscriber` construct (ADR-0006).
 - Firehose sees one record per event, so the Firehose cost is the

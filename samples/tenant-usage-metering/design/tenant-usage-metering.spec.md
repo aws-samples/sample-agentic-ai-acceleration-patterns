@@ -32,11 +32,12 @@ This sample demonstrates one metering service that the vendor owns:
   control plane registered, and only for a tenant the control plane placed
   in that emitter's cell;
 - a durable, replayable **raw store**;
-- an hourly **aggregation** driven by a run-time **meter catalog**, whose
-  totals are a pure function of the raw store, so a replay of any hour
+- an hourly **recount** driven by a run-time **meter catalog**, whose
+  totals are a pure function of the raw store, so a recount of any hour
   gives the same records;
-- **sinks** set by configuration, which hand each hourly usage record to
-  a billing system, an export file, or an event bus;
+- **sinks** set by configuration, which hand each usage record to a
+  billing system or an export file, and a **usage bus** on which every
+  record is also published;
 - **lifecycle wiring**: the control plane's vendor hooks
   (control-plane ADR-044) register cells and tenants with the metering
   service, so onboarding and offboarding drive metering with no manual
@@ -45,7 +46,9 @@ This sample demonstrates one metering service that the vendor owns:
 Deployment model: any. The sample assumes cells (pool, silo or bridge
 inside a cell) placed by a control plane, and works without one: the
 registration operations can be called by any principal the deployer
-names.
+names. The usual topology has three accounts: the control plane's, the
+metering service's, and the accounts that hold cells, vendor-owned or
+tenant-owned.
 
 ### 1.1 What this sample does not do yet
 
@@ -55,11 +58,15 @@ names.
   more.
 - Hooks on application and tenant record events (`PutApplication`,
   `DeleteApplication`, `CreateTenant`, `DeleteTenant`): the control plane
-  runs hooks on cell and deployment events only (control-plane §11). The
-  sample registers what those events give it (§3.4).
+  runs hooks only on the six events of its `EVENT` enum, cell and
+  deployment create, update and delete (control-plane R-42). The sample
+  registers what those events give it (§3.4).
 - Usage that the cell cannot see: AWS cost per tenant from CUR 2.0 is
   cost attribution, a separate concern (`ARCHITECTURE.md` §3.3, point 4).
 - Multiple Regions: one metering service per Region.
+- A reconciliation that compares the registry with the control plane's
+  deployments and repairs a binding a skipped delete hook left behind
+  (§3.4); the sample lists the registry so an operator can compare.
 
 ### 1.2 What this sample is NOT
 
@@ -70,7 +77,11 @@ names.
 - **Not proof of honest emitters.** The sample proves *who* sent a usage
   event and *which tenants* it may speak for. It cannot prove the quantity
   is true. Code that runs in a tenant-owned account is controlled by the
-  tenant, and that tenant can under-report its own usage (T-3).
+  tenant, and that tenant can under-report its own usage (T-3, in
+  `threat-model.md`).
+- **Not tenant isolation inside a pooled cell.** An emitter speaks for
+  every tenant its cell holds; the cell is vendor code. A role per
+  deployment would narrow it and is a seam.
 - **Not a billing system.** The sink contract is the boundary.
 
 ## 2. Guiding principles
@@ -80,132 +91,183 @@ pipe with metrics or logs. The path is built for no loss and exactly-once
 counting, which telemetry pipes do not promise.
 
 **P-2. Identity comes from the signature, never from the body.** The
-emitter, its cell and its account are taken from the verified caller of
-the ingest door. A body field that names an emitter, a cell or an account
-is ignored; a body `tenantId` is admitted only when the caller's cell
-holds that tenant.
+emitter, its cell, its application and its account are taken from the
+verified caller of the ingest door. A body field that names an emitter, a
+cell, an application or an account is ignored; a body `tenantId` is
+admitted only when the caller's cell holds that tenant.
 
 **P-3. The control plane is the source of truth for placement; metering
 copies it.** Which cell holds which tenant is written into the metering
-service by the control plane's vendor hooks, under a role no cell can
-assume. Metering never reads placement from an emitter.
+service by the control plane's vendor hooks, under a role no cell account
+holds or trusts. Metering never reads placement from an emitter.
 
 **P-4. Totals are a function of the raw store.** Every count is
-recomputed from the raw events of its hour. A replay, a re-run after a
-failure, or an audit gives the same record. Nothing is counted in flight.
+recomputed from the raw events of its hour by a fixed rule. A recount, a
+re-run after a failure, or an audit gives the same record. Nothing is
+counted in flight.
 
 **P-5. Duplicates are removed by identity, not by luck.** Every usage
-event carries an `eventId` the emitter chooses once and reuses on every
-retry. The aggregation counts one event per `(tenantId, eventId)`, so an
-emitter's retry, a Firehose retry and a replay never double a total.
+event carries an `eventId` the emitter chooses once, as a ULID or UUID,
+and reuses on every retry. The recount keeps one event per
+`(applicationId, tenantId, eventId)`, with `applicationId` taken from the
+verified emitter, so an emitter's retry, a bus or Firehose retry, a
+redrive and a recount never double a total, and one application's
+emitter cannot suppress another's events.
 
 **P-6. A meter is data, a sum rule is code.** Adding or changing a meter,
 or changing how a sink maps a record, is a write through the admin API and
-needs no deploy. A new way of summing is a code change. A meter change
-takes effect from the next whole hour, so an hour is always counted under
-one rule.
+needs no deploy. A new way of summing is a code change. An hour is always
+counted under one meter version.
 
 **P-7. Late is modelled, not dropped.** An event that arrives after its
-hour was counted is kept, and the hour is recounted. The difference goes
-out as an `ADJUSTMENT` record; a sink never receives a silently changed
-total.
+hour was counted is kept, and the hour is recounted while it is inside
+the recount window. The difference goes out as an `ADJUSTMENT` record; a
+sink never receives a silently changed total.
 
-**P-8. Every refusal is kept.** An event the ingest door refuses, or that
-names an unknown meter, is written to the error store with the reason.
-It can be replayed once the cause is fixed.
+**P-8. Every refusal of a registered emitter's event is kept.** An event
+from a registered emitter that the ingest door refuses is written to the
+error store with the reason, and can be re-admitted while its hour is
+inside the recount window. Calls from unregistered callers are counted,
+not stored.
 
 ## 3. System shape
 
 ### 3.1 Components
 
+All in the metering account, one stack.
+
 | Component | Job |
 |---|---|
-| Ingest door | REST API, IAM auth (SigV4). `PutUsageEvents`, batches of up to 500 |
-| Ingest function | Verifies the caller is a registered emitter, checks each event's tenant against the caller's cell, validates the shape, publishes accepted events to the ingest bus and writes refused ones to the error store (ADR-0002) |
-| Ingest bus | EventBridge Custom Event Bus, 1-day retention, `DeduplicationId = <tenantId>#<eventId>`; a Firehose subscriber with a dead-letter queue (ADR-0002). With `ingestPath: DIRECT` the function writes to Firehose itself |
-| Raw stream | Amazon Data Firehose to S3, partitioned by event hour (`raw/hour=YYYY-MM-DDTHH/`) |
-| Registry | DynamoDB: emitters (one per cell), tenant bindings, meters, sinks |
-| Admin API | Same REST API, IAM auth: meters, sinks, registrations, usage reads, replay |
-| Aggregator | Step Functions per hour: reads the hour's raw objects, dedupes, sums per meter rule, writes usage records |
-| Usage records | DynamoDB, one item per `(tenant, meter, hour, version)` |
-| Usage bus | EventBridge Custom Event Bus, 7-day retention; one `UsageRecorded` event per new usage record, `DeduplicationId = recordId`, `EventGroupId = tenantId`. Always on |
-| Sink dispatcher | Sends each new usage record to every enabled sink, at least once, idempotent per record |
-| Sinks | `HTTP` (any billing API, field mapping by configuration), `S3_EXPORT` (JSON lines) |
+| Ingest door | REST API, IAM auth (SigV4), resource policy of §3.2. `PutUsageEvents`, batches of up to 100 |
+| Ingest function | Verifies the caller is a registered emitter, checks each event against the cell's bindings and the meter catalog, validates the shape, publishes accepted events to the ingest bus (or Firehose, with `ingestPath: DIRECT`) and writes refused ones to the error store (ADR-0001, ADR-0002) |
+| Ingest bus | EventBridge Custom Event Bus, `ingestBusRetentionDays` retention; `DeduplicationId = <applicationId>#<tenantId>#<eventId>`, `EventGroupId = tenantId`; a Firehose subscriber with a retry policy of 24 h maximum event age and an SQS dead-letter queue (ADR-0002) |
+| Raw stream | Amazon Data Firehose to S3, 60 s buffer, dynamic partitioning by event hour into `raw/hour=YYYY-MM-DDTHH/` (§4.8) |
+| Ingest redrive | A function an operator starts with `StartIngestRedrive`: moves messages from the ingest dead-letter queue into Firehose |
+| Table | One DynamoDB table, PITR on: registry, meters, sinks, hours, recounts, usage records (§4) |
+| Admin API | Same REST API: meters, sinks, registrations, usage reads, recounts, re-admission, redrives |
+| Late detector | S3 event notification on `raw/` and `readmitted/`: an object in an hour that is already `COUNTED` marks it `DIRTY` |
+| Recounter | Step Functions, one execution per hour: reads the hour's raw objects, dedupes, sums per meter rule, writes usage records |
+| Scheduler | EventBridge Scheduler, every 5 minutes: starts a recount for each hour that is due (`OPEN` past its grace) or `DIRTY` |
+| Usage bus | EventBridge Custom Event Bus, `usageBusRetentionDays` retention; one `UsageRecorded` event per usage record, `DeduplicationId = recordId`, `EventGroupId = tenantId`. Always on |
+| Sink dispatcher | Sends each usage record to every enabled sink that takes its meter, retries for 24 h, then marks it `FAILED` and alarms |
+| Sinks | `HTTP` (any billing API, field mapping by configuration), `S3_EXPORT` (JSON lines into the sample's export bucket) |
+| Error store | S3 `error/hour=YYYY-MM-DDTHH/`, one object per batch with refused events, each with its reason |
 | `UsageSubscriber` | Published construct that attaches a reader to the ingest bus (`raw`) or the usage bus (`usage`) with a dead-letter queue, a retry policy and alarms built in (ADR-0006) |
-| Error store | S3 `error/` prefix, one object per refused batch, with reasons |
 
 ### 3.2 Callers and identity
 
 | Caller | Proves itself by | May call |
 |---|---|---|
-| Emitter | SigV4 as a role registered for a cell | `PutUsageEvents` |
+| Emitter | SigV4 as an assumed role named `<fleet>-ue-<cellId>`, registered for a cell | `PutUsageEvents` |
 | Lifecycle hook | SigV4 as a role in `registrarPrincipalArns` (the control plane's `<fleet>-global-hook`) | `PutCellEmitter`, `DeleteCellEmitter`, `PutTenantBinding`, `DeleteTenantBinding` |
-| Metering operator | SigV4 as a role in `operatorPrincipalArns` | meters, sinks, `GetUsage`, `ListUsage`, `StartReplay`, reads of registrations |
+| Metering operator | SigV4 as a role in `operatorPrincipalArns` | meters, sinks, usage reads, recounts, re-admission, redrives, reads of registrations |
 | Usage reader | SigV4 as a role in `readerPrincipalArns` | `GetUsage`, `ListUsage` |
-| Bus subscriber | Its account: the metering account, or one the bus is shared with through AWS RAM (subscribe only) | create its own subscribers on the bus it was shared, through `UsageSubscriber` |
+| Bus subscriber | Its account: the metering account, or one a bus is shared with through AWS RAM (subscribe only) | create its own subscribers on that bus, through `UsageSubscriber` |
 
-The ingest bus carries every tenant's checked events, so it is shared
-only with `rawSubscriberAccountIds`, and `PutCellEmitter` refuses a cell
-in one of those accounts (ADR-0006). The usage bus carries
-counted records and is shared with `usageSubscriberAccountIds`.
+**Ingest door resource policy.** `POST /usage-events` admits any account's
+principal whose `aws:PrincipalArn` matches
+`arn:aws:iam::*:role/<fleet>-ue-*`; every other route admits only the
+principals listed for it. The policy cannot name cell accounts, because
+cells are registered at run time; the registry is the gate. The function
+admits a caller only when `requestContext.identity.userArn` is an
+assumed-role ARN; it reduces it to
+`arn:aws:iam::<account>:role/<name>` and looks up
+`EMITTER#<account>#<name>`. Any other caller, or a role with no
+registration, gets a 403 for the whole batch; the function records one
+metric data point and at most one log line per caller ARN per minute, and
+stores nothing (P-8).
 
-An emitter role is registered by account and name. The ingest function
-takes the caller's role ARN from the API Gateway identity
-(`requestContext.identity.userArn`, an assumed-role ARN), reduces it to
-`arn:aws:iam::<account>:role/<name>`, and looks it up. The account in the
-ARN must equal the cell account the registration recorded (P-2).
+Registry reads are cached in the function for 60 seconds. A deleted or
+closed registration therefore stops admitting within 60 seconds.
+
+**Bus sharing.** The ingest bus carries every tenant's checked events, and
+the usage bus every tenant's counted records, so both are shared only with
+vendor accounts: `rawSubscriberAccountIds` and `usageSubscriberAccountIds`.
+`PutCellEmitter` refuses a cell in any account on either list, vendor-owned
+or not (ADR-0006). `UsageSubscriber`'s `meters` and `tenants` filters are a
+convenience; an account a bus is shared with can create an unfiltered
+subscriber.
 
 ### 3.3 Deployment inputs
 
 | Input | Meaning | Default |
 |---|---|---|
+| `fleetName` | the control plane's fleet name; at most 32 characters, as there (`<fleet>-ue-<cellId>` is then at most 62) | required |
 | `registrarPrincipalArns` | roles that may register cells and tenants | required |
-| `operatorPrincipalArns` | roles that may manage meters and sinks | required |
+| `operatorPrincipalArns` | roles that may manage meters, sinks, recounts and redrives | required |
 | `readerPrincipalArns` | roles that may read usage | `[]` |
-| `emitterOrganizationId` | optional `aws:PrincipalOrgID` the API resource policy requires of emitters | none |
-| `lateGraceMinutes` | how long after an hour ends it is first counted | `15` |
-| `recountWindowHours` | how long an hour may still be recounted for late events | `72` |
-| `rawRetentionDays` | raw and error object lifetime | `400` |
-| `ingestPath` | `BUS` (ingest bus, ADR-0002) or `DIRECT` (Firehose, packed records) | `BUS` |
-| `rawSubscriberAccountIds` | accounts the ingest bus is shared with; vendor accounts only | `[]` |
-| `usageSubscriberAccountIds` | accounts the usage bus is shared with | `[]` |
+| `lateGraceMinutes` | how long after an hour ends it is first counted; synth fails below the Firehose buffer (1 minute) plus 5 minutes | `15` |
+| `recountWindowHours` | how long after an hour ends it may still be recounted; synth fails below 48 (the subscriber's 24 h maximum event age plus 24 h to handle its dead-letter queue) | `72` |
+| `closeGraceMinutes` | how long a closing emitter or binding is still admitted, for buffered events | `60` |
+| `rawRetentionDays` | raw, re-admitted and error object lifetime | `400` |
+| `ingestPath` | `BUS` (ingest bus, ADR-0002) or `DIRECT` (Firehose, events packed per hour) | `BUS` |
+| `ingestBusRetentionDays` | ingest bus retention | `1` |
+| `usageBusRetentionDays` | usage bus retention | `7` |
+| `rawSubscriberAccountIds` | vendor accounts the ingest bus is shared with | `[]` |
+| `usageSubscriberAccountIds` | vendor accounts the usage bus is shared with | `[]` |
+| `alarmTopicArn` | optional SNS topic for every alarm of the stack | none |
 
 ### 3.4 Lifecycle wiring with the control plane
 
 The control plane runs a global vendor hook on each event below
 (control-plane §6.5, R-42). The hook script calls the metering admin API
-under `<fleet>-global-hook`, so only the control plane can register what
-a cell may report. The sample ships the hook script
-(`scripts/control-plane/metering-hook.sh`) and the policy the deployer
-attaches through the control plane's `globalHookManagedPolicyArns`.
+under `<fleet>-global-hook`, so only the control plane registers what a
+cell may report. All five run in the `PRE` phase: a create is refused
+before its script builds anything, and a delete marks the registration
+`CLOSING` before its script removes the emitter role (control-plane R-45).
 
 | Event | Phase | Metering call | Takes from the hook environment |
 |---|---|---|---|
-| `CELL_CREATE` | `POST` | `PutCellEmitter` | `CELL_ID`, `CELL_ACCOUNT_ID`, `APPLICATION_ID` |
-| `CELL_DELETE` | `POST` | `DeleteCellEmitter` (closing, §4.2) | `CELL_ID` |
-| `DEPLOYMENT_CREATE` | `POST` | `PutTenantBinding` | `TENANT_ID`, `CELL_ID`, `APPLICATION_ID`, `PARAM_BILLING_ACCOUNT` |
-| `DEPLOYMENT_UPDATE` | `POST` | `PutTenantBinding` (billing account may change) | as create |
-| `DEPLOYMENT_DELETE` | `POST` | `DeleteTenantBinding` (closing, §4.3) | `TENANT_ID`, `APPLICATION_ID` |
+| `CELL_CREATE` | `PRE` | `PutCellEmitter` (refused in a subscriber account, §3.2) | `CELL_ID`, `CELL_ACCOUNT_ID`, `APPLICATION_ID` |
+| `CELL_DELETE` | `PRE` | `DeleteCellEmitter` (to `CLOSING`) | `CELL_ID` |
+| `DEPLOYMENT_CREATE` | `PRE` | `PutTenantBinding` | `TENANT_ID`, `CELL_ID`, `APPLICATION_ID`, `PARAM_BILLING_ACCOUNT` |
+| `DEPLOYMENT_UPDATE` | `PRE` | `PutTenantBinding` (billing account may change) | as create |
+| `DEPLOYMENT_DELETE` | `PRE` | `DeleteTenantBinding` (to `CLOSING`) | `TENANT_ID`, `CELL_ID`, `APPLICATION_ID` |
 
-The emitter role name is fixed by convention,
-`<fleet>-usage-emitter-<cellId>`, so the hook never takes it from
-`SCRIPT_OUTPUTS` (control-plane R-42: identity comes from the variables).
-The cell create script creates that role; the hook only names it.
+Hooks run again on updates, on delete retries, and on the delete that
+cleans up a failed create (control-plane R-42), so every registration
+operation is idempotent: `Put*` is an upsert that reaches the same item
+whatever its prior state, and `Delete*` succeeds on a missing or already
+`CLOSING` item.
+
+Consequences of the wiring:
+
+- **Onboarding depends on metering.** A refused or failing
+  `PutCellEmitter` or `PutTenantBinding` fails the cell or deployment
+  create, before its script runs.
+- **A skipped delete hook leaves a registration `ACTIVE`.** A delete hook
+  is retried three times and then skipped (control-plane R-46). The
+  binding then stays `ACTIVE` and the cell can keep reporting for that
+  tenant. `ListTenantBindings` and `ListCellEmitters` let an operator
+  compare with the control plane; an automatic reconciliation is a seam
+  (§1.1).
+- **Every global hook can register.** All global hooks share
+  `<fleet>-global-hook` (control-plane R-41), so any global hook the
+  vendor registers holds the registrar grant. A role per global hook is a
+  control-plane seam (its §11).
+
+The emitter role name is fixed, `<fleet>-ue-<cellId>`, so the hook never
+takes it from `SCRIPT_OUTPUTS` (control-plane R-42: identity comes from
+the variables). The cell create script creates that role and grants it
+the ingest statement (§6.1); the cell delete script stops the cell's
+emitters, waits for their buffers to flush, then removes the role.
 
 `BILLING_ACCOUNT` is a deployment parameter the application declares
-(control-plane R-32). It is the tenant's account id in the billing system,
-and sinks map it into their records. A tenant without one is metered and
-exported, and the `HTTP` sink refuses its records to the error store
-until it has one.
+(control-plane R-32). It is the tenant's account id in the billing
+system. The hook passes it as is; `PutTenantBinding` refuses a value
+outside `[A-Za-z0-9._:-]{1,128}` (control-plane §6.5 calls `PARAM_`
+values tenant-shaped). The metering API URL reaches cells as a cell
+parameter `METERING_API_URL` the application declares with the URL as
+its default (control-plane R-34).
 
 ## 4. Data model
 
-One table, `PK`/`SK`, PITR on.
+One DynamoDB table, `PK`/`SK`, PITR on, TTL on `expiresAt`.
 
 ### 4.1 Meter
 
 `PK=METER#<meterId>`, `SK=V#<version>` (zero-padded), plus
-`SK=CURRENT` pointing at the latest.
+`SK=CURRENT` holding the latest version number.
 
 | Field | Meaning |
 |---|---|
@@ -216,9 +278,17 @@ One table, `PK`/`SK`, PITR on.
 | `effectiveFrom` | the first whole hour this version counts |
 | `status` | `ACTIVE`, `RETIRED` |
 
-An update writes a new version with `effectiveFrom` = the next whole
-hour (P-6). An hour is counted with the version whose `effectiveFrom` is
-the latest one at or before it.
+`CreateMeter` sets `effectiveFrom` to the next whole hour, or to an
+earlier whole hour the caller names, at most `recountWindowHours` back,
+so events refused as `UNKNOWN_METER` can be re-admitted and counted.
+`UpdateMeter` and `DeleteMeter` (which retires) write a new version with
+`effectiveFrom` = the next whole hour (P-6). An event, at ingest and in
+the recount, is checked against the version in effect at its hour: the
+latest `effectiveFrom` at or before it.
+
+`UNIQUE_COUNT` is per hour. Unique counts over a month are not the sum of
+hourly ones; a billing system that needs them reads the raw store or the
+`raw` stream.
 
 ### 4.2 Cell emitter
 
@@ -227,23 +297,32 @@ the latest one at or before it.
 
 | Field | Meaning |
 |---|---|
-| `cellId`, `applicationId`, `accountId`, `roleName` | from the hook |
+| `cellId`, `applicationId`, `accountId` | from the hook |
+| `roleName` | `<fleet>-ue-<cellId>` |
 | `status` | `ACTIVE`, `CLOSING` |
-| `closesAt` | set by `DeleteCellEmitter` to the end of the current hour plus `lateGraceMinutes` |
+| `closedAt`, `closesAt` | set by `DeleteCellEmitter`: now, and now plus `closeGraceMinutes` |
+| `expiresAt` | `closesAt` plus `recountWindowHours`, for audit |
 
-A `CLOSING` emitter is admitted until `closesAt` for events whose hour
-is before the deletion, then the item is removed.
+Transitions: none → `ACTIVE` (`PutCellEmitter`) → `CLOSING`
+(`DeleteCellEmitter`) → removed by TTL. A `CLOSING` emitter is admitted
+until `closesAt`, only for events whose `time` is at or before
+`closedAt`. `PutCellEmitter` on a `CLOSING` item returns it to `ACTIVE`
+(a delete that failed and a create that followed).
 
 ### 4.3 Tenant binding
 
-`PK=CELL#<cellId>`, `SK=TENANT#<tenantId>`, and
-`PK=TENANT#<tenantId>`, `SK=APP#<applicationId>`.
+`PK=CELL#<cellId>`, `SK=TENANT#<tenantId>`, and a lookup item
+`PK=TENANT#<tenantId>`, `SK=APP#<applicationId>#CELL#<cellId>`.
 
 | Field | Meaning |
 |---|---|
 | `tenantId`, `applicationId`, `cellId` | from the hook |
 | `billingAccount` | from `PARAM_BILLING_ACCOUNT`, optional |
-| `status`, `closesAt` | as for emitters |
+| `status`, `closedAt`, `closesAt`, `expiresAt` | as for emitters |
+
+Transitions as for emitters. A deployment deleted and created again lands
+in a new item when it is placed in another cell; the old one stays
+`CLOSING` until its TTL.
 
 ### 4.4 Sink
 
@@ -253,39 +332,115 @@ is before the deletion, then the item is removed.
 |---|---|
 | `type` | `HTTP`, `S3_EXPORT` |
 | `enabled` | boolean |
-| `endpoint` | `HTTP`: HTTPS URL. `S3_EXPORT`: prefix |
+| `endpoint` | `HTTP`: HTTPS URL. `S3_EXPORT`: a key prefix in the sample's export bucket |
 | `secretName` | `HTTP` only: Secrets Manager name of the credential, read inside the dispatcher |
-| `mapping` | `HTTP` only: target field name → source (record field, binding field, meter field, or constant) |
+| `mapping` | `HTTP` only: target field name → source (record field, meter field, or constant) |
 | `meters` | meter ids this sink takes; empty is all |
 
-### 4.5 Usage record
+### 4.5 Hour
 
-`PK=USAGE#<tenantId>#<applicationId>`, `SK=<hour>#<meterId>#<seq>`.
+`PK=HOUR#<YYYY-MM-DDTHH>`, `SK=META`.
 
 | Field | Meaning |
 |---|---|
-| `kind` | `HOURLY` for the first count, `ADJUSTMENT` for a recount difference |
-| `quantity` | the hour's total, or the difference for an adjustment |
-| `meterVersion`, `eventCount` | for audit |
-| `recordId` | `sha256(tenantId, applicationId, meterId, hour, seq)`; sinks use it as their idempotency key |
-| `sinks` | per sink: `PENDING`, `SENT`, `FAILED` with reason |
+| `status` | `OPEN`, `COUNTING`, `COUNTED`, `DIRTY`, `COUNT_FAILED`, `CLOSED` |
+| `countedAt`, `objectCount` | the last finished count and the raw objects it read |
+| `lease` | the recount execution holding `COUNTING`, set by a conditional write |
+| `attempts` | failed counts since the last success |
 
-### 4.6 Usage event (the wire contract)
+Transitions: `OPEN` → `COUNTING` when the scheduler finds the hour past
+`lateGraceMinutes` → `COUNTED`. A new object in a `COUNTED` hour →
+`DIRTY` (late detector) → `COUNTING` → `COUNTED`. A failed count →
+`COUNT_FAILED`, retried by the scheduler with backoff; an alarm fires on
+the third failure. Any state → `CLOSED` at hour end plus
+`recountWindowHours`; a `CLOSED` hour is never counted again. Only one
+execution holds an hour: `COUNTING` is taken with a condition on the
+prior state.
+
+### 4.6 Recount and re-admission jobs
+
+`PK=JOB#<jobId>`, `SK=META`.
+
+| Field | Meaning |
+|---|---|
+| `kind` | `RECOUNT` (an hour range), `READMIT` (error objects of an hour range, optionally one reason), `INGEST_REDRIVE` (the ingest dead-letter queue), `SINK_REDRIVE` (`FAILED` deliveries of one sink) |
+| `status` | `RUNNING`, `SUCCEEDED`, `FAILED` |
+| `counts` | items processed, admitted, refused, redriven |
+
+`RECOUNT` marks each hour in range `DIRTY`; a `CLOSED` hour in range is
+refused. `READMIT` runs every event of the chosen error objects through
+the ingest checks again, with the registrations and meters in effect for
+its hour, and writes the ones that pass to `readmitted/hour=.../`, which
+the recount reads with `raw/`. An event whose hour is `CLOSED` stays
+refused, `TOO_LATE`.
+
+### 4.7 Usage record
+
+`PK=USAGE#<tenantId>#<applicationId>`, `SK=<hour>#<meterId>#<seq>`, `seq`
+zero-padded from `0000`.
+
+| Field | Meaning |
+|---|---|
+| `kind` | `HOURLY` for `seq` 0, `ADJUSTMENT` after |
+| `quantity` | the hour's total for `HOURLY`; the difference from the sum of earlier `seq`s for `ADJUSTMENT` (negative only when a re-admitted copy of an event wins over a stored one with a higher value, §4.9) |
+| `meterVersion`, `eventCount` | for audit |
+| `billingAccount` | the binding's value when the record is written; never changed |
+| `recordId` | `sha256(tenantId, applicationId, meterId, hour, seq)`; sinks use it as their idempotency key |
+| `sinks` | per sink: `PENDING`, `RETRYING`, `SENT`, `BLOCKED` (reason), `FAILED` (reason) |
+
+A record is written with a condition that its `seq` does not exist yet.
+`HOURLY` is written for each `(tenant, application, meter)` with at least
+one event in the hour; a first event that arrives late writes `HOURLY`.
+No record is written when a recount changes nothing.
+
+Sink delivery: `PENDING` → `SENT`, or `RETRYING` with backoff for 24 h →
+`FAILED` and an alarm; `SINK_REDRIVE` sends `FAILED` deliveries again. An
+`HTTP` sink whose mapping needs `billingAccount` on a record without one
+marks it `BLOCKED` (`NO_BILLING_ACCOUNT`); the next `PutTenantBinding`
+that sets one sends that tenant's `BLOCKED` records again with the new
+value written onto them.
+
+### 4.8 Usage event and raw objects (the wire contract)
 
 Smithy structure `UsageEvent`:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `eventId` | yes | `[A-Za-z0-9_-]{1,64}`, unique per tenant, reused on retry (P-5) |
+| `eventId` | yes | a ULID or UUID, reused on retry (P-5) |
 | `tenantId` | yes | must be bound to the caller's cell |
-| `meterId` | yes | must be an `ACTIVE` meter |
-| `value` | yes | decimal string; `COUNT` ignores it |
-| `time` | yes | ISO 8601 UTC; at most 5 minutes in the future and `recountWindowHours` in the past |
+| `meterId` | yes | a meter in effect at the event's hour |
+| `value` | yes | non-negative decimal string, at most 12 digits before the point and 6 after; `COUNT` ignores it, `UNIQUE_COUNT` treats it as a string |
+| `time` | yes | ISO 8601 UTC; at most 5 minutes in the future, and in an hour that is not `CLOSED` |
 | `dimensions` | no | up to 10 string pairs, passed to sinks, not summed on |
 
-The ingest function adds `emitterAccountId`, `emitterRole`, `cellId`,
-`applicationId` and `receivedAt` before writing. None of these come from
+The ingest function adds `applicationId`, `cellId`, `emitterAccountId`,
+`emitterRole` and `receivedAt` before writing. None of these come from
 the body (P-2).
+
+Raw objects:
+
+| Path | Object content | Firehose partition key |
+|---|---|---|
+| `ingestPath: BUS` | concatenated EventBridge envelopes, no delimiter, each with the enriched event as `detail` | `detail.time`, cut to the hour |
+| `ingestPath: DIRECT` | concatenated records `{"hour": ..., "events": [...]}`, each holding the enriched events of one batch that share an hour | `hour` |
+| `readmitted/` | newline-delimited enriched events, written by `READMIT` | the job writes the key |
+| `error/` | one JSON document per batch: the caller, `receivedAt`, and each refused event with its reason | the function writes the key |
+
+### 4.9 The recount rule
+
+For one hour, the recount reads every object under `raw/hour=H/` and
+`readmitted/hour=H/`, and:
+
+1. keeps one event per `(applicationId, tenantId, eventId)`: the earliest
+   `receivedAt`, ties broken by the lowest bytes of the serialised event;
+2. groups by `(tenantId, applicationId, meterId)` and applies the meter
+   version in effect at `H`, in decimal arithmetic at 6 fractional
+   digits, rounding half to even only for `SUM`'s final total;
+3. compares each group's total with the sum of its existing records, and
+   writes `HOURLY` or `ADJUSTMENT` for the difference.
+
+The same objects give the same records, so a recount of a `COUNTED` hour
+with no new object writes nothing.
 
 ## 5. API surface
 
@@ -298,55 +453,86 @@ Smithy, `aws.protocols#restJson1`, every operation IAM-authorised.
 | Sink | `CreateSink`, `GetSink`, `UpdateSink`, `DeleteSink`, `ListSinks` |
 | Cell emitter | `PutCellEmitter`, `GetCellEmitter`, `DeleteCellEmitter`, `ListCellEmitters` |
 | Tenant binding | `PutTenantBinding`, `GetTenantBinding`, `DeleteTenantBinding`, `ListTenantBindings` |
-| Usage | `GetUsage` (one tenant, one meter, an hour range), `ListUsage` (one tenant, all meters) |
-| Replay | `StartReplay` (an hour range), `GetReplay`, `ListReplays` |
+| Usage | `GetUsage` (one tenant, application and meter, an hour range), `ListUsage` (one tenant, all meters) |
+| Hour | `GetHour`, `ListHours` |
+| Jobs | `StartRecount`, `StartReadmission`, `StartIngestRedrive`, `StartSinkRedrive`, `GetJob`, `ListJobs` |
 
-`PutUsageEvents` returns 200 with per-event results: `ACCEPTED`, or
-`REFUSED` with a reason (`UNKNOWN_EMITTER`, `TENANT_NOT_IN_CELL`,
-`UNKNOWN_METER`, `METER_NOT_ALLOWED`, `BAD_TIME`, `BAD_SHAPE`). A whole
-batch from an unregistered caller is a 403 and is still written to the
-error store (P-8). A retry of an accepted event is accepted again and
-counted once (P-5).
+`PutUsageEvents` returns 200 with one result per event:
 
-Hour states: `OPEN` → `COUNTED` (after `lateGraceMinutes`) →
-`RECOUNTED` (each late arrival inside `recountWindowHours`) → `CLOSED`.
+| Result | Meaning | Emitter action |
+|---|---|---|
+| `ACCEPTED` | stored, or already stored under the same key | none |
+| `RETRY` | the ingest bus or Firehose throttled it after the function's retries | send again with the same `eventId` |
+| `REFUSED` + reason | `TENANT_NOT_IN_CELL`, `UNKNOWN_METER`, `METER_NOT_ALLOWED`, `BAD_TIME`, `TOO_LATE`, `BAD_SHAPE`; written to the error store | fix the cause; an operator may re-admit |
+
+Errors:
+
+| Code | When |
+|---|---|
+| 400 `ValidationException` | malformed request, a field outside its charset, a `BILLING_ACCOUNT` out of format, a backdated `effectiveFrom` beyond the window |
+| 403 `AccessDeniedException` | caller not permitted for the route; for `PutUsageEvents`, not an assumed role or not a registered emitter |
+| 404 `ResourceNotFoundException` | unknown meter, sink, hour, job (never for `Delete*` of a registration) |
+| 409 `ConflictException` | `PutCellEmitter` in a subscriber account; `CreateMeter` on an existing meter; `StartRecount` over a `CLOSED` hour; a lost conditional write, retryable |
+| 429 `ThrottlingException` | API Gateway stage throttle |
+
+### 5.1 Limits
+
+| Limit | Value |
+|---|---|
+| Events per `PutUsageEvents` | 100 |
+| Sustained ingest per metering account, `ingestPath: BUS` | about 1,000 events per second; the bus throttled entries above about 1,400 per second in a spike, a limit the quota pages do not name (ADR-0002) |
+| Registry cache | 60 seconds |
 
 ## 6. Contracts
 
 ### 6.1 What the deployer supplies
 
-- The principals of §3.3.
-- Emitters that sign with their cell's emitter role and send
-  `UsageEvent`s with stable `eventId`s.
-- For the control plane wiring: the metering hook registered as a global
-  hook on the five events of §3.4, the hook policy attached to
-  `<fleet>-global-hook`, and the emitter role created by the cell create
-  script.
+- The inputs of §3.3.
+- **In each cell account**, from the cell create script: the role
+  `<fleet>-ue-<cellId>`, trusted by the cell's emitter workloads, with an
+  inline policy built from the published `ingestStatement` (allow
+  `execute-api:Invoke` on `POST /usage-events` of the metering API).
+  The cell delete script flushes the emitters and removes the role.
+- **In the control plane account**: a customer-managed policy built from
+  the published `registrarStatement`, attached to `<fleet>-global-hook`
+  through `globalHookManagedPolicyArns` (control-plane §3.3); the hook
+  script registered as a `PRE` global hook on the five events of §3.4;
+  the application's declarations of `BILLING_ACCOUNT` (deployment
+  parameter) and `METERING_API_URL` (cell parameter).
+- Emitters that send `UsageEvent`s with stable ULID or UUID `eventId`s
+  and resend `RETRY` results.
 - For an `HTTP` sink: the endpoint and a secret in Secrets Manager.
 
 ### 6.2 What the sample promises
 
-1. An event from a role that is not a registered emitter is refused.
+1. An event from a role that is not a registered, admitted emitter is
+   refused.
 2. An event for a tenant not bound to the caller's cell is refused, also
    when the tenant exists in another cell.
-3. Each `(tenantId, eventId)` is counted once, through retries and
-   replays.
-4. A replay of an hour gives the records already sent; a late event gives
-   an `ADJUSTMENT`, never a changed `HOURLY` record.
+3. Each `(applicationId, tenantId, eventId)` is counted once, through
+   retries, redrives, re-admission and recounts.
+4. A recount of an hour gives the records already written; a late event
+   inside the recount window gives an `ADJUSTMENT`, never a changed
+   record.
 5. A new meter, a changed meter rule, and a changed sink mapping take
-   effect without a deploy, from the next whole hour (meters) or the next
-   dispatch (sinks).
-6. Every sink receives each record at least once, with a stable
-   `recordId` to dedupe on.
+   effect without a deploy: meters from the hour their version names,
+   sinks from the next dispatch.
+6. Every enabled sink receives each record at least once, with a stable
+   `recordId` to dedupe on, or the record is `BLOCKED` or `FAILED` with
+   an alarm and can be sent again.
 7. A reader attached through `UsageSubscriber` gets every matching event
    at least once, or finds it in its dead-letter queue; an alarm fires
    on the first event that reaches the queue.
+8. An event the ingest function `ACCEPTED` reaches S3, or the ingest
+   dead-letter queue with an alarm, from which `StartIngestRedrive`
+   moves it to S3.
 
 ### 6.3 Published interface
 
 - Construct `TenantUsageMetering` (`src/index.ts`): the props of §3.3;
-  exposes `apiUrl`, `ingestPolicy` (a managed policy an emitter role
-  needs), `registrarPolicy`, `ingestBusArn`, `usageBusArn`.
+  exposes `apiUrl`, `ingestStatement` and `registrarStatement` (IAM
+  policy statements a deployer places in other accounts),
+  `ingestBusArn`, `usageBusArn`, `emitterRoleNamePattern`.
 - Construct `UsageSubscriber` (`src/index.ts`, ADR-0006):
 
   | Prop | Meaning | Default |
@@ -357,35 +543,36 @@ Hour states: `OPEN` → `COUNTED` (after `lateGraceMinutes`) →
   | `meters`, `tenants` | optional filters on `meterId` and `tenantId` | all |
   | `type` | `UNORDERED`, or `FIFO` per tenant | `UNORDERED` |
   | `startingPosition` | `LATEST`, or a point in time inside the bus's retention | `LATEST` |
-  | `maxEventAge` | how long a failing event is retried before it goes to the DLQ | the bus's maximum |
+  | `maxEventAge` | how long a failing event is retried before it goes to the DLQ | 24 hours |
   | `alarmTopic` | optional SNS topic for the alarms | none |
 
   It always creates an SQS dead-letter queue (SSE, 14-day retention) and
   alarms on queue depth above zero and on failed deliveries, and exposes
   `deadLetterQueue`. There is no prop to turn either off.
-- Parameter `/application-plane/shared/metering/service`, one JSON
-  document: `version`, `apiUrl`, `region`, `ingestBusArn`, `usageBusArn`,
-  `emitterRoleNamePattern`.
+- Parameter `/application-plane/shared/metering/service` in the metering
+  account, written by the demo stack: one JSON document with `version`,
+  `apiUrl`, `region`, `ingestBusArn`, `usageBusArn`,
+  `emitterRoleNamePattern`. Other accounts receive these values as
+  inputs: cells through `METERING_API_URL`, subscriber accounts from the
+  deployer. `ARCHITECTURE.md` §5.1 lists the sub-path.
 - The hook script `scripts/control-plane/metering-hook.sh` and the
-  emitter snippet `scripts/emit-usage.ts`.
+  emitter snippet `scripts/emit-usage.ts` (buffers, batches of 100,
+  ULID `eventId`s, resends `RETRY` results with the same ids).
 
 ### 6.4 Samples consumed
 
 - `control-plane`, for the lifecycle wiring of §3.4 only, through its
-  hook contract (§6.5, R-42) and its published `/control-plane/*`
-  parameters. The construct does not name it: any registrar principal
-  works. Its hooks are specified (ADR-044) and not yet released; until
-  they are, the integration test calls the registration operations as a
-  stand-in registrar.
+  hook contract (§6.5, R-41, R-42, R-45, R-46) and its parameter
+  declarations (R-32, R-34). The construct does not name it: any
+  registrar principal works. Its hooks are specified (ADR-044) and not
+  yet released; until they are, the integration test calls the
+  registration operations as a stand-in registrar.
 
 ## 7. Open questions
 
-1. Ingest after the check: through the new EventBridge Custom Event Bus,
-   pending a spike (ADR-0002, Proposed); direct to Firehose with packed
-   records is the fallback.
+1. The `PutEvents` throttle near 1,400 events a second (§5.1): which
+   quota it is, and whether it can be raised, needs an answer from the
+   EventBridge team.
 2. Application lifecycle events: does metering need `PutApplication` and
    `DeleteApplication` hooks (a new control-plane event), or do cell
    events cover it?
-3. Within one pooled cell, one tenant's code can report usage for the
-   cell's other tenants. Accept it (the cell is vendor code), or bind
-   emitters per tenant (a role per deployment)?

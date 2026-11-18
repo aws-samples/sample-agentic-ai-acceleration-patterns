@@ -19,7 +19,7 @@ the system.
 ### Option 1: Usage as OpenTelemetry logs through a shared collector
 Pros: one agent per host; emitters reuse an SDK they have. Cons: the
 collector batches, samples and drops by design; the path ends in a log
-store (ADR-0002, option 3); the collector's identity, not the cell's,
+store (ADR-0002, option 4); the collector's identity, not the cell's,
 signs the call unless each cell runs its own.
 
 ### Option 2: A small emitter client that calls `PutUsageEvents`
