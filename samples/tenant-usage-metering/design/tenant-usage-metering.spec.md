@@ -431,8 +431,8 @@ its close, or `CLOSED`, is refused for that item. `READMIT` and
 its dead-letter message where there is one, and count it in the job's
 `refused`; `RECOUNT` counts the hour in `refused`.
 
-An hour in any other state than `COUNTED` at
-that time raises an alarm and stays in the index, retried like any other
+An hour in any other state than `COUNTED` at hour end plus
+`recountWindowHours` raises an alarm and stays in the index, retried like any other
 until a count succeeds; it closes only from `COUNTED`. A
 `CLOSED` hour is never counted again, and an object that lands in it
 raises an alarm.
