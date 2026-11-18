@@ -153,6 +153,9 @@ describe('ingest pipeline (ADR-0002, spec §3.1)', () => {
     for (const policy of policies) {
       expect(policy.Properties.PolicyDocument.Statement[0]).toMatchObject({ Effect: 'Deny', Action: ['events:PutEvents', 'events:PutRawEvents'] });
     }
+    // The deny exempts the writer but grants nothing: each writer needs its own allow.
+    const allows = statementsOf(template, 'AWS::IAM::Policy', () => true).filter((s) => s.Effect === 'Allow' && s.Action === 'events:PutEvents');
+    expect(allows).toHaveLength(2);
   });
 
   test('the dead-letter queue denies sends from anyone but the ingest subscriber', () => {

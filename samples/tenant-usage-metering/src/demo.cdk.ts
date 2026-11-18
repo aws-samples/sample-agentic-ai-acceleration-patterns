@@ -17,12 +17,25 @@ import { TenantUsageMetering } from './tenant-usage-metering';
 export interface DemoContext {
   readonly fleetName: string;
   readonly ingestPath: IngestPath;
+  readonly rawRetentionDays?: number;
+  /**
+   * Test-only shortcut (standard §5.3): lets principals of this account
+   * assume the ingest role, so the integration test can publish to the
+   * ingest bus as its one writer before the ingest function exists.
+   */
+  readonly integIngestRoleTrust: boolean;
 }
 
 export function parseDemoContext(get: (key: string) => unknown): DemoContext {
   const fleetName = (get('fleetName') as string | undefined) ?? 'demo';
   const ingestPath = ((get('ingestPath') as string | undefined) ?? 'BUS') as IngestPath;
-  return { fleetName, ingestPath };
+  const retention = get('rawRetentionDays') as string | number | undefined;
+  return {
+    fleetName,
+    ingestPath,
+    ...(retention !== undefined ? { rawRetentionDays: Number(retention) } : {}),
+    integIngestRoleTrust: String(get('integIngestRoleTrust') ?? 'false') === 'true',
+  };
 }
 
 export interface DemoStackProps extends StackProps {
@@ -49,7 +62,15 @@ export class TenantUsageMeteringDemoStack extends Stack {
       ingestPath: props.context.ingestPath,
       registrarPrincipalArns: [registrar.roleArn],
       operatorPrincipalArns: [operator.roleArn],
+      ...(props.context.rawRetentionDays !== undefined ? { rawRetentionDays: props.context.rawRetentionDays } : {}),
     });
+
+    if (props.context.integIngestRoleTrust) {
+      this.metering.roles.ingest.assumeRolePolicy?.addStatements(
+        new iam.PolicyStatement({ actions: ['sts:AssumeRole'], principals: [account] }),
+      );
+      new CfnOutput(this, 'IngestRoleArn', { value: this.metering.roles.ingest.roleArn });
+    }
 
     new CfnOutput(this, 'UsageBusArn', { value: this.metering.usageBusArn });
     if (this.metering.ingestBusArn !== undefined) {

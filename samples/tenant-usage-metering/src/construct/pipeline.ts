@@ -48,7 +48,10 @@ export function hourQuery(path: IngestPath): string {
   return path === 'BUS' ? '{hour: .detail.time[0:13]}' : '{hour: .hour}';
 }
 
-function publishOnlyBy(scope: Construct, id: string, bus: eventsv2.CfnEventBus, writer: iam.IRole): void {
+function publishOnlyBy(scope: Construct, id: string, bus: eventsv2.CfnEventBus, writer: iam.Role): void {
+  // The deny only removes every other principal; the writer still needs an
+  // identity allow (pg, 2026-11-18: without it the writer was refused too).
+  writer.addToPolicy(new iam.PolicyStatement({ actions: ['events:PutEvents'], resources: [bus.attrEventBusArn] }));
   new eventsv2.CfnResourcePolicy(scope, id, {
     eventBusArn: bus.attrEventBusArn,
     policyDocument: {
