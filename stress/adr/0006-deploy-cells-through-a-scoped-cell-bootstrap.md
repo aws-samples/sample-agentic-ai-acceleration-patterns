@@ -52,7 +52,7 @@ Option 3.
 |---|---|
 | Standalone cell account | only `CDKToolkit-cell`, the role pair (plain CloudFormation by the account owner, on `/`, no cell boundary) and cells; no default CDK bootstrap; the `control-plane` slice refuses an account with any other stack, a stack with a service role other than the cell execution role, a `cdk-hnb659fds-*` role, a role pair on `/cell/` or under the cell boundary, or a `/cell/` role trusted from outside, before every run |
 | Cell bootstrap | `cdk bootstrap --qualifier cell --toolkit-stack-name CDKToolkit-cell --cloudformation-execution-policies <cell execution policy> --custom-permissions-boundary cell-permissions-boundary` |
-| `/cell/` path | every role a cell creates is on `/cell/`, set by a CDK aspect in the stress cell app that matches every `AWS::IAM::Role` resource; IAM role writes, `iam:PassRole` and `sts:AssumeRole` are allowed on `role/cell/*` only; `iam:CreateServiceLinkedRole` only for `replication.dynamodb.amazonaws.com` and `dynamodb.application-autoscaling.amazonaws.com` |
+| `/cell/` path | every role a cell creates is on `/cell/`, set by a CDK aspect in the stress cell app that matches every `AWS::IAM::Role` resource; IAM role writes, `iam:PassRole` and `sts:AssumeRole` are allowed on `role/cell/*` only; `iam:CreateServiceLinkedRole` only for `ops.apigateway.amazonaws.com` and `runtime-identity.bedrock-agentcore.amazonaws.com` |
 | Boundary | on the execution role and every cell role: the cell's services and the same service-linked-role allow, and denies on `iam:CreateRole` without the boundary or outside `/cell/`, any other IAM write or `iam:PassRole` on a role outside `/cell/` (`NotResource` `role/aws-service-role/*`), `iam:CreateServiceLinkedRole` for any other service, boundary removal, users, access keys and policy writes |
 
 The cell synth sets `@aws-cdk/core:bootstrapQualifier` and
@@ -68,13 +68,17 @@ deployed in 402 s with 27 of 27 roles bounded; a role without the boundary
 was refused at `iam:CreateRole`; the destroy needed Application Auto
 Scaling for the DynamoDB global tables; the sample's integration test
 passed 60 of 60 steps through the same bootstrap, 139 of 139 roles
-bounded. Still to prove before this record is accepted (spec Q-5, Q-6), in
-a standalone cell account with the `/cell/` path: deny probes for
-`iam:UpdateAssumeRolePolicy` on the role pair, `iam:PutRolePolicy` on a
-`cdk-cell-*` role, `iam:PassRole` of a role outside `/cell/` and
-`sts:AssumeRole` of the account's administrator role, the two
-service-linked roles created in a fresh account, and the integration test
-passing with every role on `/cell/`.
+bounded. The path spike (`stress/spikes/cell-path/`, 2026-11-18), in two
+standalone cell accounts with the `/cell/` path, proved the path half: a
+bounded `/cell/` role whose own policy allows `iam:*` and `sts:AssumeRole`
+on `*` was refused 11 escalations by the boundary (rewriting, attaching
+to, assuming or passing the role pair and the bootstrap roles, a role on
+`/`, a role without the boundary, another service-linked role, removing
+its boundary) while a write to another `/cell/` role worked; a
+runtime-isolation cell deployed in 424 s with 27 of 27 roles on `/cell/`
+and bounded, creating its two service-linked roles on the way. Still to
+prove before this record is accepted (spec Q-5): the request path in a
+cell account.
 
 Easier: a cell build cannot create, change, pass or assume a role outside
 the cell, apart from the two service-linked roles above, whose trust IAM
