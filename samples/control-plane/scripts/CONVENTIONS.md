@@ -1,10 +1,10 @@
-# Provisioning Script Conventions
+# Provisioning and Hook Script Conventions
 
-Conventions for authoring cell and tenant provisioning scripts run by AWS
-CodeBuild. Everything a script prints lands in the build's CloudWatch log
-group, readable by anyone with log-group access. Treat build logs as an
-audience, not a scratchpad — a script that echoes fetched values turns the
-log group into an unintended secrets store.
+Conventions for authoring cell and tenant provisioning scripts and hook
+scripts run by AWS CodeBuild. Everything a script prints lands in the
+build's CloudWatch log group, readable by anyone with log-group access.
+Treat build logs as an audience, not a scratchpad — a script that echoes
+fetched values turns the log group into an unintended secrets store.
 
 ## Log hygiene
 
@@ -84,6 +84,30 @@ log group into an unintended secrets store.
 ## Scope
 
 These conventions apply to every script referenced by an application's
-definition (`cellScripts` and `tenantScripts`). The samples in `sample-cell/`,
-`sample-tenant/`, and `sample-noop/` follow them and are the reference
+definition (`cellScripts` and `tenantScripts`) and to every hook script
+(ADR-044, ADR-045). The samples in `sample-cell/`, `sample-tenant/`,
+`sample-noop/` and `sample-hook/` follow them and are the reference
 implementations.
+
+## Hook scripts
+
+- A hook runs in the control plane account under its scope's hook role,
+  never in a cell account. It has no role to assume and never sees the
+  external id. It can call only what you attach to that role.
+- **`SCRIPT_OUTPUTS` is untrusted.** It comes from the cell's account,
+  which a tenant may own. Parse it with `jq`, check each value you use,
+  and take the record you act on from `APPLICATION_ID`, `CELL_ID`,
+  `CELL_ACCOUNT_ID`, `TENANT_ID` or `ACCOUNT_ID`, never from an output.
+- **Make it idempotent.** A delete hook is retried, and a build can repeat.
+  Key any write on `EXECUTION_ID`, `EVENT`, `PHASE` and `HOOK_ID`, which
+  together name one hook run (spec R-42), so a second try changes nothing.
+  `EXECUTION_ID` alone is not enough: one `CreateDeployment` that makes a
+  new cell runs both `CELL_CREATE` and `DEPLOYMENT_CREATE`.
+- **A non-zero exit refuses or fails the operation.** A failing `PRE` hook
+  on a create or update stops it, and a failing `POST` hook marks it
+  failed. On delete a failure is retried and then skipped, so a delete hook
+  cannot block a delete.
+- Check `EVENT` and `PHASE` first and exit non-zero on one the hook does
+  not expect, so a wrong registration fails loudly (`name-gate.sh`).
+- The same log rules apply: log ids, never `TENANT_NAME`, `PARAM_` values
+  or output values (`audit.sh` logs output names only).

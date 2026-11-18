@@ -197,6 +197,39 @@ workflow cannot be started the call answers 500 and leaves the record
 `*_FAILED`, except a first create that Step Functions refused, which leaves
 no record. `PutHook` and `DeleteHook` stay synchronous and run no hook.
 
+**Extending the control plane with hooks.** Hooks are how a vendor adds
+its own steps to the control plane without changing it: a `PRE` hook can
+check or prepare before a change and refuse it, and a `POST` hook can act on
+what the change made. Each entity the control plane manages has its own
+events, so a hook can attach where its job belongs:
+
+| Entity | Events | Example `PRE` use | Example `POST` use | Scopes |
+|---|---|---|---|---|
+| Application | `APPLICATION_CREATE`, `_UPDATE`, `_DELETE` | check the application id against an approved list (a record hook gets ids, never the source or scripts) | publish the application to a catalogue | global, application |
+| Tenant | `TENANT_CREATE`, `_UPDATE`, `_DELETE` | refuse a name or a customer that fails a check (CRM, sanctions list) | open a billing or CRM record; on delete, close it | global |
+| Account | `ACCOUNT_CREATE`, `_UPDATE`, `_DELETE` | check an account against an approved list before it takes cells | add the account to an inventory or CMDB | global |
+| Cell | `CELL_CREATE`, `_UPDATE`, `_DELETE` | check capacity or a change window | register the cell's endpoints (from `SCRIPT_OUTPUTS`) in DNS or monitoring | global, application |
+| Deployment | `DEPLOYMENT_CREATE`, `_UPDATE`, `_DELETE` | check the tenant's entitlement to the application | register the tenant's route at a front door; start metering | global, application |
+
+Use a global hook for a concern of the whole fleet (audit, metering,
+inventory, policy) and an application hook for one application's own needs
+(its route, its catalogue entry). On delete, `PRE` hooks run while the
+record and what it made still exist, so a hook that removes a route or a
+DNS record removes it before the script tears down what it points at. A
+delete hook cannot refuse: it is retried and then skipped. On a cell or
+deployment delete, put cleanup that must happen in the script and use the
+hook for the outside world. An application, tenant or account delete runs
+no script, so cleanup outside the control plane can only live in a hook,
+and a skipped one leaves that state behind; the `HookSkipped` metric and
+its alarm show it.
+Two hooks to start from are in [`scripts/sample-hook/`](./scripts/sample-hook/):
+`audit.sh`, a `POST` hook that logs one JSON line per event, and
+`name-gate.sh`, a `PRE` hook on tenant events that refuses names outside a
+house rule. The End-to-end demo registers both. A hook gets only the
+permissions you attach to its scope's role (Deploy). Every hook of a scope
+shares that one role, so a policy you attach for one global hook reaches
+every global hook; give each scope the least its hooks need.
+
 **Tenants and deployments.** A tenant (`CreateTenant`) is a customer record:
 a name, a description, and the count of its deployments. Its operations
 run no build and answer 202 (see Hooks on applications, tenants and
@@ -686,7 +719,9 @@ shared parameter, then publish and clean up the cell's SSM namespace, and the
 tenant scripts in [`scripts/sample-tenant/`](./scripts/sample-tenant/) read it
 and write one parameter per deployment.
 [`scripts/sample-noop/`](./scripts/sample-noop/) is an explicit no-op set for
-sides of the model that provision nothing. Host the scripts in a repo or S3
+sides of the model that provision nothing, and
+[`scripts/sample-hook/`](./scripts/sample-hook/) holds two global hooks. Host
+the scripts in a repo or S3
 bucket CodeBuild can reach and deploy with `demoApplicationIds` naming the
 application id used below (`demo`), as in Deploy.
 
@@ -696,6 +731,40 @@ Set the API URL, an operator token and the home account id:
 API_URL=$(aws ssm get-parameter --name /control-plane/tenant-api-url --query Parameter.Value --output text)
 TOKEN="<a JWT from your vendor IdP>"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+```
+
+Register two global hooks first, so every later step runs them. `audit`
+is a `POST` hook on all fifteen events and logs one JSON line per event to
+its build log; `name-gate` is a `PRE` hook on tenant creates and updates
+and refuses names outside a house rule. Both answer 200 at once. They need
+no permission beyond their logs when the source is a GitHub repository
+CodeBuild can already read; for an S3 or private source, grant
+`<fleet>-global-hook` read on it through `globalHookManagedPolicyArns`
+(Deploy). With `audit` on every event, each later step also runs a hook
+build, so each takes a minute or two longer:
+
+```bash
+curl -s -X PUT "${API_URL}hooks/audit" \
+  -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+  -d '{
+    "events": ["APPLICATION_CREATE", "APPLICATION_UPDATE", "APPLICATION_DELETE",
+               "TENANT_CREATE", "TENANT_UPDATE", "TENANT_DELETE",
+               "ACCOUNT_CREATE", "ACCOUNT_UPDATE", "ACCOUNT_DELETE",
+               "CELL_CREATE", "CELL_UPDATE", "CELL_DELETE",
+               "DEPLOYMENT_CREATE", "DEPLOYMENT_UPDATE", "DEPLOYMENT_DELETE"],
+    "phase": "POST",
+    "source": { "type": "GITHUB", "location": "https://github.com/YOUR_ORG/YOUR_REPO.git" },
+    "script": "samples/control-plane/scripts/sample-hook/audit.sh"
+  }'
+curl -s -X PUT "${API_URL}hooks/name-gate" \
+  -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+  -d '{
+    "events": ["TENANT_CREATE", "TENANT_UPDATE"],
+    "phase": "PRE",
+    "source": { "type": "GITHUB", "location": "https://github.com/YOUR_ORG/YOUR_REPO.git" },
+    "script": "samples/control-plane/scripts/sample-hook/name-gate.sh"
+  }'
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}hooks"
 ```
 
 Register the application. Its definition is the only place the source and
@@ -752,6 +821,30 @@ echo "${TENANT_ID}"
 curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${TENANT_ID}"
 ```
 
+Once it is `ACTIVE`, `lastGlobalHooks` on the tenant lists the hooks that
+ran for its create, in run order: `name-gate` (`PRE`) and `audit` (`POST`),
+each with its revision and the commit it ran. Now try a name the gate
+refuses. The create answers 202 as before, and the tenant stays `CREATING`
+while the `name-gate` build runs. The `PRE` hook fails, so the tenant ends
+`CREATE_FAILED` and its `statusReason` names `name-gate`; it never becomes
+`ACTIVE`, and nothing can be placed against it. Repeat the `GetTenant` call
+until `status` is `CREATE_FAILED`:
+
+```bash
+BAD_ID=$(curl -s -X POST "${API_URL}tenants" \
+  -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+  -d '{ "name": "acme; drop" }' | jq -r .tenant.tenantId)
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${BAD_ID}" | jq '.tenant | {status, statusReason}'
+```
+
+Then delete the failed record. The delete answers 202 and runs `audit` on
+`TENANT_DELETE`; repeat the `GetTenant` call until it answers 404:
+
+```bash
+curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${BAD_ID}"
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${BAD_ID}"
+```
+
 Create the tenant's deployment of `demo`. The 202 response carries no
 resource definition; placement picks or creates a cell of `demo` in a
 vendor-owned account that admits it and returns its `cellId`. Adding
@@ -772,8 +865,9 @@ echo "${CELL_ID}"
 ```
 
 Poll the deployment until `status` is `ACTIVE`, or `CREATE_FAILED`, in which
-case `statusReason` and `lastBuildId` say why. A new cell runs two builds, so
-expect a few minutes:
+case `statusReason` and `lastBuildId` say why. A new cell runs four builds,
+one after another (the cell script, `audit`, the tenant script, `audit`), so
+expect several minutes:
 
 ```bash
 curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${TENANT_ID}/deployments/demo"
@@ -781,7 +875,9 @@ curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${TENANT_ID}/depl
 
 Inspect the result: the tenant's deployment count, its deployments, the
 implicitly created cell with its application, account and stamped
-definition, the fleet, and the counters on the account and the application:
+definition, the fleet, and the counters on the account and the application.
+On the cell and the deployment, `lastGlobalHooks` shows that `audit` ran
+after the cell script and after the tenant script:
 
 ```bash
 curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${TENANT_ID}"
@@ -844,6 +940,15 @@ curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}applications/de
 curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${TENANT_ID}"
 curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}accounts/${ACCOUNT_ID}"
 curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}applications/demo"
+```
+
+Last, remove the two global hooks. Each delete answers 200 at once and
+changes only operations accepted after it:
+
+```bash
+curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}hooks/name-gate"
+curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}hooks/audit"
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}hooks"
 ```
 
 ## API
