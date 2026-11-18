@@ -348,7 +348,9 @@ account owner allows, such as a CDK bootstrap kept for cells. The cell role
 also trusts the control plane's API role, for the `PutAccount` handshake
 (ADR-0028), so the API role can use every policy attached here too. The
 platform stress test attaches one policy, which lets the cell build assume
-the four roles of a cell-only CDK bootstrap with the qualifier `cell`:
+the four roles a `cdk deploy` uses in a cell-only CDK bootstrap with the
+qualifier `cell`. Replace `<PARTITION>` (`aws` in most Regions),
+`<ACCOUNT_ID>` and `<REGION>`:
 
 ```json
 {
@@ -356,7 +358,12 @@ the four roles of a cell-only CDK bootstrap with the qualifier `cell`:
   "Statement": [{
     "Effect": "Allow",
     "Action": "sts:AssumeRole",
-    "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/cdk-cell-*-role-<ACCOUNT_ID>-<REGION>"
+    "Resource": [
+      "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-deploy-role-<ACCOUNT_ID>-<REGION>",
+      "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-file-publishing-role-<ACCOUNT_ID>-<REGION>",
+      "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-image-publishing-role-<ACCOUNT_ID>-<REGION>",
+      "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-lookup-role-<ACCOUNT_ID>-<REGION>"
+    ]
   }]
 }
 ```
@@ -365,9 +372,11 @@ That policy is safe only in an account that holds nothing but cells, with a
 cell bootstrap whose execution role and every cell role carry a permissions
 boundary and sit on a `/cell/` role path
 ([stress ADR-0006](../../stress/adr/0006-deploy-cells-through-a-scoped-cell-bootstrap.md)).
-A policy that reaches the default CDK bootstrap (`cdk-hnb659fds-*`), or any
-role outside such a path, makes the cell build and the API role
-administrators of the account.
+The control plane's own account never qualifies, because it holds the
+control plane: on the control plane stack, attach only policies scoped to
+the cell's own resources. A policy that reaches the default CDK bootstrap
+(`cdk-hnb659fds-*`), or any role outside such a path, makes the cell build
+and the API role administrators of the account.
 
 `concurrentBuildLimit` (default 5, ADR-0046) caps concurrent builds on every
 CodeBuild project the control plane creates. It bounds what a leaked
@@ -376,7 +385,9 @@ one to two minutes, so at 5 the control plane onboards about three tenants a
 minute. Raise it for a large onboarding wave. The value must be an integer
 from 1 to 100, or synth fails; above 20 the synth warns. Raise the account's
 CodeBuild quota for concurrent `BUILD_GENERAL1_SMALL` builds first, to at
-least the value times the number of projects; the service default is 1. The
+least the value times the number of CodeBuild projects the stack creates
+(two: the cell and the tenant project); the service default is 1. The
+synth warning prints the figure. The
 execution surge alarm (more than 20 executions in five minutes, no actions)
 fires during any large onboarding:
 

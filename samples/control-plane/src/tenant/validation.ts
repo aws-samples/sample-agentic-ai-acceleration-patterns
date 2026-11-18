@@ -139,15 +139,18 @@ export function validateConcurrentBuildLimit(value: unknown): number {
   if (value === undefined) {
     return DEFAULT_CONCURRENT_BUILD_LIMIT;
   }
+  if (Token.isUnresolved(value)) {
+    throw new Error('Invalid concurrentBuildLimit (ADR-0046): it must be a literal number at synth, not a CDK token');
+  }
   if (
     typeof value !== 'number'
-    || Token.isUnresolved(value)
     || !Number.isInteger(value)
     || value < 1
     || value > MAX_CONCURRENT_BUILD_LIMIT
   ) {
+    const shown = typeof value === 'number' ? String(value) : JSON.stringify(value);
     throw new Error(
-      `Invalid concurrentBuildLimit ${JSON.stringify(value)} (ADR-0046): expected an integer from 1 to ${MAX_CONCURRENT_BUILD_LIMIT}`
+      `Invalid concurrentBuildLimit ${shown} (ADR-0046): expected an integer from 1 to ${MAX_CONCURRENT_BUILD_LIMIT}`
       + `, default ${DEFAULT_CONCURRENT_BUILD_LIMIT}`,
     );
   }

@@ -560,7 +560,8 @@ describe('concurrentBuildLimit (ADR-0046)', () => {
     const above = warnings(synthStack(21));
     expect(above).toHaveLength(1);
     expect(JSON.stringify(above[0].entry.data)).toMatch(/T16/);
-    expect(JSON.stringify(above[0].entry.data)).toMatch(/BUILD_GENERAL1_SMALL/);
+    expect(JSON.stringify(above[0].entry.data)).toMatch(/BUILD_GENERAL1_SMALL builds must be at least 42/);
+    expect(JSON.stringify(above[0].entry.data)).toMatch(/each of the 2 CodeBuild projects/);
     expect(warnings(synthStack(20))).toHaveLength(0);
     expect(warnings(synthStack())).toHaveLength(0);
   });
@@ -570,7 +571,8 @@ describe('concurrentBuildLimit (ADR-0046)', () => {
       expect(() => synthStack(bad)).toThrow(/Invalid concurrentBuildLimit .* \(ADR-0046\): expected an integer from 1 to 100/);
     }
     expect(() => validateConcurrentBuildLimit('50')).toThrow(/Invalid concurrentBuildLimit "50"/);
-    expect(() => validateConcurrentBuildLimit(Token.asNumber({ resolve: () => 10 }))).toThrow(/Invalid concurrentBuildLimit/);
+    expect(() => validateConcurrentBuildLimit(Token.asNumber({ resolve: () => 10 }))).toThrow(/not a CDK token/);
+    expect(() => synthStack(Number.POSITIVE_INFINITY)).toThrow(/Invalid concurrentBuildLimit Infinity/);
     expect(validateConcurrentBuildLimit(undefined)).toBe(5);
   });
 });

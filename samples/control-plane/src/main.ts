@@ -4,6 +4,7 @@
 import { App, Aspects, Validations } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { CellAccountStack } from './cell-account/cell-account.cdk';
+import { readJsonContext } from './shared/context';
 import { DEFAULT_FLEET_NAME, validateFleetName } from './shared/fleet';
 import { TenantStack } from './tenant/tenant.cdk';
 
@@ -137,22 +138,7 @@ function requireContext(key: string): unknown {
   return value;
 }
 
-/**
- * Reads an OPTIONAL context value given as a structured value (cdk.json) or
- * a JSON string (`--context key='[...]'`). Absent or empty means undefined;
- * structural validation happens in the stack.
- */
+/** Reads an OPTIONAL JSON context value (see `readJsonContext`). */
 function parseJsonContext<T>(key: string): T | undefined {
-  const value = app.node.tryGetContext(key);
-  if (value === undefined || value === '') {
-    return undefined;
-  }
-  if (typeof value === 'string') {
-    try {
-      return JSON.parse(value) as T;
-    } catch (error) {
-      throw new Error(`The ${key} context value is not valid JSON: ${(error as Error).message}`);
-    }
-  }
-  return value as T;
+  return readJsonContext<T>(app.node, key);
 }

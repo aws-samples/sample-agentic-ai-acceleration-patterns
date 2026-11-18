@@ -6,6 +6,7 @@ import * as path from 'path';
 import { Annotations, CfnOutput, Duration, RemovalPolicy, Stack, StackProps, Validations } from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as codebuild from 'aws-cdk-lib/aws-codebuild';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
@@ -158,14 +159,6 @@ export class TenantStack extends Stack {
     validateCellBuildManagedPolicyArns(props.cellBuildManagedPolicyArns, identity);
     // M17 (ADR-0046): one build cap for every project; fail synth outside 1-100.
     const concurrentBuildLimit = validateConcurrentBuildLimit(props.concurrentBuildLimit);
-    if (concurrentBuildLimit > CONCURRENT_BUILD_LIMIT_WARNING) {
-      Annotations.of(this).addWarningV2(
-        'control-plane:concurrentBuildLimit',
-        `concurrentBuildLimit is ${concurrentBuildLimit}, above ${CONCURRENT_BUILD_LIMIT_WARNING} (ADR-0046): `
-        + 'the cost guard of threat T16 (M17) is now this value per CodeBuild project. The account\'s CodeBuild '
-        + 'quota for BUILD_GENERAL1_SMALL concurrent builds must hold this value times the number of projects.',
-      );
-    }
     // R-36: the two role lists the authorizer maps to grants; fail synth on
     // an empty operator list, a bad value or a value in both lists.
     const roles = validateRoleLists(props.allowedRoles, props.readerRoles);
@@ -227,6 +220,18 @@ export class TenantStack extends Stack {
       concurrentBuildLimit,
     });
     this.provisioning = workflow;
+    if (concurrentBuildLimit > CONCURRENT_BUILD_LIMIT_WARNING) {
+      // ADR-0046: name the quota the account needs, from the projects the
+      // workflow actually created.
+      const projectCount = workflow.node.findAll().filter((c) => c instanceof codebuild.Project).length;
+      Annotations.of(this).addWarningV2(
+        'control-plane:concurrentBuildLimit',
+        `concurrentBuildLimit is ${concurrentBuildLimit}, above ${CONCURRENT_BUILD_LIMIT_WARNING} (ADR-0046): `
+        + `the cost guard of threat T16 (M17) is this value on each of the ${projectCount} CodeBuild projects. `
+        + 'The account\'s CodeBuild quota for concurrent BUILD_GENERAL1_SMALL builds must be at least '
+        + `${concurrentBuildLimit * projectCount}.`,
+      );
+    }
 
     // --- The home account's role pair (R-25, ADR-025) ----------------------
     // The control plane's own account is just another registered account:
