@@ -68,7 +68,9 @@ export class Metrics {
           CloudWatchMetrics: [
             {
               Namespace: this.namespace,
-              Dimensions: [Object.keys(dimensions)],
+              // Always the empty set too: the alarms read each metric without
+              // dimensions, and CloudWatch does not add dimensioned series up.
+              Dimensions: Object.keys(dimensions).length > 0 ? [[], Object.keys(dimensions)] : [[]],
               Metrics: Object.keys(values).map((name) => ({ Name: name, Unit: 'Count' })),
             },
           ],

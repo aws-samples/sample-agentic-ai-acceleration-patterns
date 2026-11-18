@@ -57,6 +57,7 @@ registrations and usage in it, and the destroy removes all of them.
 | Late event | a late event in the counted hour gives an `ADJUSTMENT` of 2, total 17.5, seq 0 unchanged |
 | Re-admission | a meter backdated over the refused event; `StartReadmission` re-admits it; it is counted; the reader filter keeps that meter off the queue |
 | Readers and offboarding | a reader reads usage and not meters; `DeleteTenantBinding` closes with the control-plane ids from its headers; a second delete and a delete of a missing binding succeed |
+| Deployment-role exemption | `scripts/integ.sh` updates the stack with `rawRetentionDays=401`; the lifecycle change passes the raw bucket's configuration deny (spec §3.5) |
 
 ## Runtime and cost
 

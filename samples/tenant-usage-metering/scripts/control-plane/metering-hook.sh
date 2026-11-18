@@ -14,8 +14,8 @@
 # It runs as <fleet>-global-hook, which needs the published registrarStatement
 # (spec §6.1). It reads the metering API URL from metering-hook.env beside it,
 # never from a PARAM_ value. Every value from the hook environment is checked
-# against its charset and reaches the request only through jq --arg, never a
-# command line. Every call is idempotent, so a re-run is safe (control-plane
+# against its charset first, and reaches the request only as an argument of
+# jq --arg and curl, never inside a string the shell evaluates. Every call is idempotent, so a re-run is safe (control-plane
 # R-42).
 
 set -euo pipefail
@@ -46,10 +46,13 @@ operator_id="${OPERATOR_ID:-}"
 [[ "$execution_id" =~ ^[A-Za-z0-9._:-]{1,128}$ ]] || execution_id=""
 [[ ${#operator_id} -le 256 && "$operator_id" =~ ^[[:print:]]*$ ]] || operator_id=""
 
-creds="$(aws configure export-credentials --format process)"
-access_key="$(jq -r .AccessKeyId <<<"$creds")"
-secret_key="$(jq -r .SecretAccessKey <<<"$creds")"
-session_token="$(jq -r '.SessionToken // empty' <<<"$creds")"
+# The signing key and the session token go to curl in a mode-600 config
+# file, never on a command line.
+umask 077
+curl_conf="$(mktemp)"
+trap 'rm -f "$curl_conf"' EXIT
+aws configure export-credentials --format process |
+  jq -r '"user = \"\(.AccessKeyId):\(.SecretAccessKey)\"", (if .SessionToken then "header = \"x-amz-security-token: \(.SessionToken)\"" else empty end)' >"$curl_conf"
 
 # call METHOD PATH [BODY]: signed with SigV4; retries 429, 5xx and a lost
 # conditional write (409 CONCURRENT_WRITE) with backoff; fails on anything
@@ -58,10 +61,8 @@ call() {
   local method="$1" path="$2" body="${3:-}" attempt status out
   out="$(mktemp)"
   for attempt in 1 2 3 4 5; do
-    local args=(--silent --show-error --output "$out" --write-out '%{http_code}' --request "$method"
-      --aws-sigv4 "aws:amz:${region}:execute-api" --user "${access_key}:${secret_key}"
-      --header 'content-type: application/json')
-    [[ -n "$session_token" ]] && args+=(--header "x-amz-security-token: ${session_token}")
+    local args=(--silent --show-error --config "$curl_conf" --output "$out" --write-out '%{http_code}' --request "$method"
+      --aws-sigv4 "aws:amz:${region}:execute-api" --header 'content-type: application/json')
     if [[ "$method" == DELETE ]]; then
       [[ -n "$execution_id" ]] && args+=(--header "X-Control-Plane-Execution-Id: ${execution_id}")
       [[ -n "$operator_id" ]] && args+=(--header "X-Control-Plane-Operator-Id: ${operator_id}")

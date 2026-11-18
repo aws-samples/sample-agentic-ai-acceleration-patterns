@@ -80,6 +80,8 @@ export interface BindingItem extends Audit, ControlPlaneIds, Registration {
   readonly tenantId: string;
   readonly applicationId: string;
   readonly billingAccount?: string;
+  /** Set with a new billing account until its `RESEND_BLOCKED` job has started. */
+  readonly resendPending?: boolean;
   readonly intervals?: IntervalItem[];
   readonly expiresAt?: number;
 }
@@ -97,6 +99,8 @@ export interface SinkItem extends Audit {
   readonly secretName?: string;
   readonly mapping?: Record<string, MappingSource>;
   readonly meters?: string[];
+  /** Moves on every write; `UpdateSink` is conditioned on it. */
+  readonly version?: number;
 }
 
 export type HourStatus = 'OPEN' | 'COUNTING' | 'COUNTED' | 'DIRTY' | 'COUNT_FAILED' | 'CLOSED';

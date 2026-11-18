@@ -158,7 +158,7 @@ export async function createSink(
     await deps.db.send(
       new PutCommand({
         TableName: deps.config.tableName,
-        Item: { ...item, listType: 'SINK', listSort: item.sinkId },
+        Item: { ...item, version: 1, listType: 'SINK', listSort: item.sinkId },
         ConditionExpression: 'attribute_not_exists(PK)',
       }),
     );
@@ -206,10 +206,10 @@ export async function updateSink(
     await deps.db.send(
       new PutCommand({
         TableName: deps.config.tableName,
-        Item: { ...item, listType: 'SINK', listSort: item.sinkId },
-        // The stored item is the one validated against: a write in between is a conflict.
-        ConditionExpression: 'attribute_exists(PK) AND endpoint = :endpoint AND enabled = :enabled',
-        ExpressionAttributeValues: { ':endpoint': stored.endpoint, ':enabled': stored.enabled },
+        Item: { ...item, version: (stored.version ?? 0) + 1, listType: 'SINK', listSort: item.sinkId },
+        // The stored item is the one validated against: any write in between moves its version.
+        ConditionExpression: stored.version === undefined ? 'attribute_exists(PK) AND attribute_not_exists(version)' : 'version = :v',
+        ...(stored.version === undefined ? {} : { ExpressionAttributeValues: { ':v': stored.version } }),
       }),
     );
   } catch (error) {

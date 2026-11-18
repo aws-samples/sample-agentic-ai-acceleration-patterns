@@ -6,7 +6,7 @@
  * dead-letter messages into Firehose, each as the envelope the bus would
  * have delivered, unchanged, so the recount reads it like any other.
  * Before each put the close guard runs on the event's hour: an event whose
- * hour is closed or within 5 minutes of its close goes to `error/` as
+ * hour is closed or within 60 minutes of its close goes to `error/` as
  * `TOO_LATE` and its message is deleted (spec §4.5).
  */
 

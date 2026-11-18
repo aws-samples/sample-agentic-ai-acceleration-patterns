@@ -182,9 +182,10 @@ export function createCompute(scope: Construct, props: ComputeProps): Compute {
   });
 
   const trackerFn = fn('TrackerFunction', 'tracker/tracker.function.ts', roles.tracker, Duration.seconds(30), {});
+  // 30 minutes of event age, well inside the jobs' 60-minute close guard (spec §4.5).
   trackerFn.configureAsyncInvoke({
     retryAttempts: 2,
-    maxEventAge: Duration.hours(6),
+    maxEventAge: Duration.minutes(30),
     onFailure: new destinations.SqsDestination(trackerFailureQueue),
   });
 
@@ -269,7 +270,7 @@ export function createCompute(scope: Construct, props: ComputeProps): Compute {
         retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 300 },
       },
     });
-    schedule.addDependency(scheduleGroup);
+    schedule.addResourceDependency(scheduleGroup);
     target.grantInvoke(roles.schedule);
   }
 

@@ -17,7 +17,7 @@ import { UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamod
 import type { EventPublisher } from './publish';
 import { TtlCache } from '../shared/cache';
 import { getItem, meterVersions } from '../shared/db';
-import { emitterFromCallerArn, type EmitterCaller } from '../shared/identity';
+import { emitterFromCallerArn, type EmitterCaller, roleFromCallerArn } from '../shared/identity';
 import { type BindingItem, type EmitterItem, versionAt, type MeterVersionItem } from '../shared/items';
 import { keys } from '../shared/keys';
 import { log } from '../shared/logger';
@@ -97,7 +97,8 @@ export class Ingest {
     const closed = emitter !== undefined && emitter.status === 'CLOSING' && emitter.closesAt !== undefined && nowMs > Date.parse(emitter.closesAt);
     if (caller === undefined || emitter === undefined || closed || emitter.cellId !== caller.cellId) {
       metrics.add(METRIC.unregisteredCaller);
-      const key = userArn ?? '-';
+      // One line a minute per role, whatever the session name.
+      const key = roleFromCallerArn(userArn)?.roleArn ?? 'not-an-assumed-role';
       const last = this.logged.get(key) ?? 0;
       if (nowMs - last >= MINUTE_MS) {
         if (this.logged.size > 1000) {
@@ -111,14 +112,16 @@ export class Ingest {
     return { caller, emitter };
   }
 
-  private emitter(caller: EmitterCaller): Promise<EmitterItem | undefined> {
+  private emitter(caller: EmitterCaller, fresh = false): Promise<EmitterItem | undefined> {
     const key = keys.emitter(caller.accountId, caller.roleName);
-    return this.emitters.get(key.PK, () => getItem<EmitterItem>(this.deps.db, this.deps.config.tableName, key));
+    const load = () => getItem<EmitterItem>(this.deps.db, this.deps.config.tableName, key, fresh);
+    return fresh ? this.emitters.refresh(key.PK, load) : this.emitters.get(key.PK, load);
   }
 
-  private binding(cellId: string, tenantId: string): Promise<BindingItem | undefined> {
+  private binding(cellId: string, tenantId: string, fresh = false): Promise<BindingItem | undefined> {
     const key = keys.binding(cellId, tenantId);
-    return this.bindings.get(`${key.PK}|${key.SK}`, () => getItem<BindingItem>(this.deps.db, this.deps.config.tableName, key));
+    const load = () => getItem<BindingItem>(this.deps.db, this.deps.config.tableName, key, fresh);
+    return fresh ? this.bindings.refresh(`${key.PK}|${key.SK}`, load) : this.bindings.get(`${key.PK}|${key.SK}`, load);
   }
 
   private meterVersions(meterId: string): Promise<MeterVersionItem[]> {
@@ -183,20 +186,39 @@ export class Ingest {
       ...[...meterIds].map(async (meterId) => versionsByMeter.set(meterId, await this.meterVersions(meterId))),
     ]);
 
-    const accepted: Array<{ index: number; event: EnrichedUsageEvent }> = [];
-    const refused: Array<{ index: number; reason: RefusalReason }> = [];
-    checked.forEach((event, index) => {
-      const reason = checkEvent(event, {
+    let current = emitter;
+    const judge = (event: unknown) =>
+      checkEvent(event, {
         nowMs,
         recountWindowHours: config.recountWindowHours,
-        applicationId: emitter.applicationId,
-        emitter,
+        applicationId: current.applicationId,
+        emitter: current,
         binding: (tenantId) => {
           const binding = bindingByTenant.get(tenantId);
-          return binding !== undefined && binding.applicationId === emitter.applicationId ? binding : undefined;
+          return binding !== undefined && binding.applicationId === current.applicationId ? binding : undefined;
         },
         meterAt: (meterId, hour) => versionAt(versionsByMeter.get(meterId) ?? [], hour),
       });
+    const reasons = checked.map((event) => judge(event));
+
+    // A placement refusal may come from a cached miss or a cached CLOSING
+    // item that a hook has just changed: re-read those registrations
+    // uncached once, so a fresh (re)activation counts at once (review v1 #10).
+    const placement = new Set<RefusalReason>(['TENANT_NOT_IN_CELL', 'REGISTRATION_CLOSED']);
+    const stale = reasons.flatMap((reason, index) => (reason !== undefined && placement.has(reason) ? [index] : []));
+    if (stale.length > 0) {
+      current = (await this.emitter(caller, true)) ?? current;
+      const refreshed = new Set(stale.map((index) => (checked[index] as UsageEvent).tenantId));
+      await Promise.all([...refreshed].map(async (tenantId) => bindingByTenant.set(tenantId, await this.binding(caller.cellId, tenantId, true))));
+      for (const index of stale) {
+        reasons[index] = judge(checked[index]);
+      }
+    }
+
+    const accepted: Array<{ index: number; event: EnrichedUsageEvent }> = [];
+    const refused: Array<{ index: number; reason: RefusalReason }> = [];
+    checked.forEach((event, index) => {
+      const reason = reasons[index];
       if (reason === undefined) {
         const body = event as UsageEvent;
         accepted.push({
@@ -208,8 +230,8 @@ export class Ingest {
             value: body.value,
             time: body.time,
             ...(body.dimensions !== undefined ? { dimensions: body.dimensions } : {}),
-            applicationId: emitter.applicationId,
-            cellId: emitter.cellId,
+            applicationId: current.applicationId,
+            cellId: current.cellId,
             emitterAccountId: caller.accountId,
             emitterRole: caller.roleName,
             receivedAt,

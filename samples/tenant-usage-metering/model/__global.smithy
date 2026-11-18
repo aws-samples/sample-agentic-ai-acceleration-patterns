@@ -193,7 +193,7 @@ enum ConflictReason {
     /// a cell with no emitter or of another application (spec §4.2, §4.3).
     PLACEMENT_MISMATCH
 
-    /// `StartRecount` whose whole range is closed or within 5 minutes of
+    /// `StartRecount` whose whole range is closed or within 60 minutes of
     /// its close.
     RANGE_CLOSED
 

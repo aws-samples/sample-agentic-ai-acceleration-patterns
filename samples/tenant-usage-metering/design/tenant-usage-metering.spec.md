@@ -182,7 +182,12 @@ metric data point and at most one log line per caller ARN per minute, and
 stores nothing (P-8).
 
 Registry reads are cached in the function for 60 seconds. A deleted or
-closed registration therefore stops admitting within 60 seconds.
+closed registration therefore stops admitting within 60 seconds. Before
+it refuses an event `TENANT_NOT_IN_CELL` or `REGISTRATION_CLOSED`, the
+function reads the emitter and that binding once more, past the cache, so
+a registration a hook has just made or re-activated admits at once. A
+cached miss of an unregistered role is not re-read: that is the flood
+path.
 
 The role-name pattern is not a secret, so any AWS account can create a
 matching role and call the ingest door. Its calls are refused, but they
@@ -267,8 +272,11 @@ The hook script reads the metering admin API URL from a file in its own
 source, `metering-hook.env`, which the deployer sets; it never takes it
 from a `PARAM_` value, which deployment events carry from the
 deployment's set, not the cell's (control-plane R-32, R-42). It builds
-every request body with `jq --arg`, so a tenant-shaped value such as
-`PARAM_BILLING_ACCOUNT` never reaches a command line (control-plane §6.5).
+every request body with `jq --arg` after checking each value's charset,
+so a tenant-shaped value such as `PARAM_BILLING_ACCOUNT` never reaches a
+string the shell evaluates (control-plane §6.5), and it hands curl the
+signing key and session token in a mode-600 config file, never on a
+command line.
 Every registration call also carries `EXECUTION_ID` and `OPERATOR_ID`
 from the hook environment, in the body of a `Put*` and in
 `X-Control-Plane-Execution-Id` and `X-Control-Plane-Operator-Id` headers
@@ -510,8 +518,12 @@ hour becomes `DIRTY`.
 
 `READMIT`, `RECOUNT` and `INGEST_REDRIVE` check a close guard at each
 write, not once per job: before each `readmitted/` object, each
-`generation` increment and each Firehose put, an hour within 5 minutes of
-its close, or `CLOSED`, is refused for that item. `READMIT` and
+`generation` increment and each Firehose put, an hour within 60 minutes of
+its close, or `CLOSED`, is refused for that item. The 60 minutes cover
+the object tracker's asynchronous retries (30 minutes of event age) and the
+scheduler's replay of its failures, and the scheduler closes no hour while
+the tracker's failure queue holds messages, so a job-written object is
+tracked before its hour can close. `READMIT` and
 `INGEST_REDRIVE` write such an event to `error/` as `TOO_LATE`, delete
 its dead-letter message where there is one, and count it in the job's
 `refused`; `RECOUNT` counts the hour in `refused`.
@@ -549,7 +561,7 @@ judging each by the §4.2 check (the current registration or any of its
 that pass, with their original `receivedAt`, to `readmitted/hour=.../`,
 which the recount reads with `raw/`. The error objects of an hour range
 are those received in it (their key is the receipt hour). It writes S3 directly, so it may
-re-admit into any hour that is not `CLOSED` and not within 5 minutes of
+re-admit into any hour that is not `CLOSED` and not within 60 minutes of
 its close; other events stay refused, `TOO_LATE` (the close guard,
 §4.5).
 
@@ -717,7 +729,7 @@ Errors:
 | 400 `ValidationException` | malformed request, a field outside its charset (on routes other than `PutUsageEvents`, whose events are checked one by one), a `BILLING_ACCOUNT` out of format, a backdated `effectiveFrom` beyond the window |
 | 403 `AccessDeniedException` | caller not permitted for the route; for `PutUsageEvents`, not an assumed role or not a registered emitter |
 | 404 `ResourceNotFoundException` | unknown meter, sink, hour, job (never for `Delete*` of a registration) |
-| 409 `ConflictException` | with a `reason`: `ACCOUNT_NOT_ALLOWED` (`PutCellEmitter` in a subscriber account or the metering account), `ALREADY_EXISTS` (`CreateMeter` or `CreateSink` on an existing id), `PLACEMENT_MISMATCH` (§4.2, §4.3), `RANGE_CLOSED` (`StartRecount` whose whole range is `CLOSED` or within 5 minutes of its close), `CONCURRENT_WRITE` (a lost conditional write; the only one worth retrying) |
+| 409 `ConflictException` | with a `reason`: `ACCOUNT_NOT_ALLOWED` (`PutCellEmitter` in a subscriber account or the metering account), `ALREADY_EXISTS` (`CreateMeter` or `CreateSink` on an existing id), `PLACEMENT_MISMATCH` (§4.2, §4.3), `RANGE_CLOSED` (`StartRecount` whose whole range is `CLOSED` or within 60 minutes of its close), `CONCURRENT_WRITE` (a lost conditional write; the only one worth retrying) |
 | 413 `PayloadTooLargeException` | a `PutUsageEvents` body over 1,048,576 UTF-8 bytes; not resent |
 | 429 `ThrottlingException` | API Gateway stage or method throttle |
 | 500, 502, 503, 504 | the function failed, was throttled or timed out; nothing in the batch is known to be stored |

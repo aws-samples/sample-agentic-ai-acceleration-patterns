@@ -118,12 +118,58 @@ function update(
 // Cell emitters (spec §4.2)
 // ---------------------------------------------------------------------------
 
-async function readEmitter(deps: AdminDeps, cellId: string): Promise<{ cell?: CellItem; emitter?: EmitterItem }> {
-  const cell = await getItem<CellItem>(deps.db, deps.config.tableName, keys.cell(cellId), true);
+/**
+ * A registration item that TTL has not removed yet but whose `expiresAt` has
+ * passed counts as absent. DynamoDB deletes expired items late, and deletes
+ * the two items of a pair separately, so every read treats them alike and
+ * every write repairs the other item of the pair (review v1 #2).
+ */
+function live<T extends { expiresAt?: number }>(item: T | undefined, nowMs: number): T | undefined {
+  return item !== undefined && (item.expiresAt === undefined || item.expiresAt * 1000 > nowMs) ? item : undefined;
+}
+
+/** A stored item with a set/remove pair applied. */
+function applied<T>(stored: T, set: Record<string, unknown>, remove: ReadonlyArray<string>): T {
+  const out = { ...stored, ...set } as Record<string, unknown>;
+  for (const name of remove) {
+    delete out[name];
+  }
+  return out as T;
+}
+
+const nowSeconds = (nowMs: number) => Math.floor(nowMs / 1000);
+
+/** The cell item may be written only where it is absent, expired, or already this account's and application's. */
+function cellPut(tableName: string, item: CellItem, nowMs: number): TransactItem {
+  return {
+    Put: {
+      TableName: tableName,
+      Item: item,
+      ConditionExpression: 'attribute_not_exists(PK) OR expiresAt <= :now OR (accountId = :a AND applicationId = :app)',
+      ExpressionAttributeValues: { ':now': nowSeconds(nowMs), ':a': item.accountId, ':app': item.applicationId },
+    },
+  };
+}
+
+function cellItemOf(emitter: EmitterItem): CellItem {
+  return {
+    ...keys.cell(emitter.cellId),
+    SK: 'META',
+    cellId: emitter.cellId,
+    accountId: emitter.accountId,
+    roleName: emitter.roleName,
+    applicationId: emitter.applicationId,
+    ...(emitter.expiresAt !== undefined ? { expiresAt: emitter.expiresAt } : {}),
+  };
+}
+
+/** The live cell item and the live emitter it names. */
+async function readEmitter(deps: AdminDeps, cellId: string, nowMs: number): Promise<{ cell?: CellItem; emitter?: EmitterItem }> {
+  const cell = live(await getItem<CellItem>(deps.db, deps.config.tableName, keys.cell(cellId), true), nowMs);
   if (cell === undefined) {
     return {};
   }
-  const emitter = await getItem<EmitterItem>(deps.db, deps.config.tableName, keys.emitter(cell.accountId, cell.roleName), true);
+  const emitter = live(await getItem<EmitterItem>(deps.db, deps.config.tableName, keys.emitter(cell.accountId, cell.roleName), true), nowMs);
   return { cell, emitter };
 }
 
@@ -138,52 +184,52 @@ export async function putCellEmitter(
   }
   const roleName = emitterRoleName(fleetName, input.cellId);
   const nowMs = nowOf(deps);
-  const { cell, emitter } = await readEmitter(deps, input.cellId);
+  const emitterKey = keys.emitter(input.accountId, roleName);
+  const cell = live(await getItem<CellItem>(deps.db, tableName, keys.cell(input.cellId), true), nowMs);
   if (cell !== undefined && (cell.accountId !== input.accountId || cell.applicationId !== input.applicationId)) {
     throw apiError.conflict('PLACEMENT_MISMATCH', 'the cell is registered with another account or application');
   }
-  const emitterKey = keys.emitter(input.accountId, roleName);
-  const cellKey = keys.cell(input.cellId);
+  // Read by the requested key, so an emitter whose cell item TTL already removed is still found.
+  const emitter = live(await getItem<EmitterItem>(deps.db, tableName, emitterKey, true), nowMs);
 
   if (emitter === undefined) {
-    const item: EmitterItem = {
+    const item = {
       ...emitterKey,
-      SK: 'META',
+      SK: 'META' as const,
       cellId: input.cellId,
       applicationId: input.applicationId,
       accountId: input.accountId,
       roleName,
-      status: 'ACTIVE',
+      status: 'ACTIVE' as const,
       activeFrom: iso(nowMs),
       controlPlaneExecutionId: input.trace.executionId,
       controlPlaneOperatorId: input.trace.operatorId,
       createdBy: ctx.caller.roleArn,
       createdAt: iso(nowMs),
-    };
-    const cellItem: CellItem = {
-      ...cellKey,
-      SK: 'META',
-      cellId: input.cellId,
-      accountId: input.accountId,
-      roleName,
-      applicationId: input.applicationId,
-    };
+      listType: 'EMITTER',
+      listSort: input.cellId,
+    } satisfies EmitterItem & { listType: string; listSort: string };
     await transact(deps, [
-      { Put: { TableName: tableName, Item: cellItem } },
+      cellPut(tableName, cellItemOf(item), nowMs),
       {
         Put: {
           TableName: tableName,
-          Item: { ...item, listType: 'EMITTER', listSort: input.cellId },
-          ConditionExpression: 'attribute_not_exists(PK)',
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(PK) OR expiresAt <= :now',
+          ExpressionAttributeValues: { ':now': nowSeconds(nowMs) },
         },
       },
     ]);
     return item;
   }
   if (emitter.status === 'ACTIVE') {
+    if (cell === undefined) {
+      await transact(deps, [cellPut(tableName, cellItemOf(emitter), nowMs)]);
+    }
     return emitter;
   }
   const { set, remove } = reactivation(emitter, nowMs, recountWindowHours, input.trace);
+  const next = applied(emitter, set, remove);
   await transact(deps, [
     update(
       tableName,
@@ -194,17 +240,13 @@ export async function putCellEmitter(
       { '#cs': 'status' },
       { ':closing': 'CLOSING', ':seen': emitter.closedAt },
     ),
-    update(tableName, cellKey, {}, ['expiresAt'], 'attribute_exists(PK)', {}, {}),
+    cellPut(tableName, cellItemOf(next), nowMs),
   ]);
-  const out = { ...emitter, ...set } as Record<string, unknown>;
-  for (const name of remove) {
-    delete out[name];
-  }
-  return out as unknown as EmitterItem;
+  return next;
 }
 
 export async function getCellEmitter(deps: AdminDeps, cellId: string): Promise<EmitterItem> {
-  const { emitter } = await readEmitter(deps, cellId);
+  const { emitter } = await readEmitter(deps, cellId, nowOf(deps));
   if (emitter === undefined) {
     throw apiError.notFound('no emitter is registered for this cell');
   }
@@ -213,11 +255,13 @@ export async function getCellEmitter(deps: AdminDeps, cellId: string): Promise<E
 
 export async function deleteCellEmitter(deps: AdminDeps, cellId: string, trace: Trace): Promise<EmitterItem | undefined> {
   const { tableName, closeGraceMinutes, recountWindowHours } = deps.config;
-  const { cell, emitter } = await readEmitter(deps, cellId);
+  const nowMs = nowOf(deps);
+  const { cell, emitter } = await readEmitter(deps, cellId, nowMs);
   if (cell === undefined || emitter === undefined || emitter.status === 'CLOSING') {
     return emitter;
   }
-  const close = closeAttributes(nowOf(deps), closeGraceMinutes, recountWindowHours, trace);
+  const close = closeAttributes(nowMs, closeGraceMinutes, recountWindowHours, trace);
+  const next = applied(emitter, close, []);
   await transact(deps, [
     update(
       tableName,
@@ -228,9 +272,9 @@ export async function deleteCellEmitter(deps: AdminDeps, cellId: string, trace: 
       { '#cs': 'status' },
       { ':active': 'ACTIVE' },
     ),
-    update(tableName, keys.cell(cellId), { expiresAt: close.expiresAt }, [], 'attribute_exists(PK)', {}, {}),
+    cellPut(tableName, cellItemOf(next), nowMs),
   ]);
-  return { ...emitter, ...close } as EmitterItem;
+  return next;
 }
 
 export async function listCellEmitters(
@@ -259,19 +303,29 @@ export async function listCellEmitters(
 // Tenant bindings (spec §4.3)
 // ---------------------------------------------------------------------------
 
-/** The same update on both copies of a binding. */
-function bindingUpdates(
+/**
+ * Writes a binding: the cell copy (what ingest reads) under `condition`,
+ * and the tenant copy as a full put, so a copy TTL removed early is
+ * rewritten rather than failing the call (review v1 #2).
+ */
+function bindingWrites(
   tableName: string,
-  binding: BindingItem,
-  set: Record<string, unknown>,
-  remove: string[],
+  next: BindingItem,
   condition: string,
   names: Record<string, string>,
   values: Record<string, unknown>,
 ): TransactItem[] {
   return [
-    update(tableName, keys.binding(binding.cellId, binding.tenantId), set, remove, condition, names, values),
-    update(tableName, keys.bindingLookup(binding.tenantId, binding.applicationId, binding.cellId), set, remove, condition, names, values),
+    {
+      Put: {
+        TableName: tableName,
+        Item: { ...next, ...keys.binding(next.cellId, next.tenantId) },
+        ConditionExpression: condition,
+        ...(Object.keys(names).length > 0 ? { ExpressionAttributeNames: names } : {}),
+        ...(Object.keys(values).length > 0 ? { ExpressionAttributeValues: values } : {}),
+      },
+    },
+    { Put: { TableName: tableName, Item: { ...next, ...keys.bindingLookup(next.tenantId, next.applicationId, next.cellId) } } },
   ];
 }
 
@@ -282,15 +336,18 @@ export async function putTenantBinding(
 ): Promise<{ binding: BindingItem; resendJobId?: string }> {
   const { tableName, recountWindowHours } = deps.config;
   const nowMs = nowOf(deps);
-  const { cell, emitter } = await readEmitter(deps, input.cellId);
+  const { cell, emitter } = await readEmitter(deps, input.cellId, nowMs);
   if (cell === undefined || emitter === undefined || emitter.status !== 'ACTIVE' || cell.applicationId !== input.applicationId) {
     throw apiError.conflict('PLACEMENT_MISMATCH', 'the cell has no ACTIVE emitter of this application');
   }
-  const stored = await getItem<BindingItem>(deps.db, tableName, keys.binding(input.cellId, input.tenantId), true);
+  const stored = live(await getItem<BindingItem>(deps.db, tableName, keys.binding(input.cellId, input.tenantId), true), nowMs);
   if (stored !== undefined && stored.applicationId !== input.applicationId) {
     throw apiError.conflict('PLACEMENT_MISMATCH', 'the tenant is bound to this cell for another application');
   }
   const billingChanged = input.billingAccount !== undefined && input.billingAccount !== stored?.billingAccount;
+  // A resend that could not be started last time is started now (review v1 #5).
+  const resend = billingChanged || stored?.resendPending === true;
+  const billing = billingChanged ? { billingAccount: input.billingAccount, resendPending: true } : {};
 
   let binding: BindingItem;
   if (stored === undefined) {
@@ -299,76 +356,50 @@ export async function putTenantBinding(
       cellId: input.cellId,
       tenantId: input.tenantId,
       applicationId: input.applicationId,
-      billingAccount: input.billingAccount,
       status: 'ACTIVE',
       activeFrom: iso(nowMs),
       controlPlaneExecutionId: input.trace.executionId,
       controlPlaneOperatorId: input.trace.operatorId,
       createdBy: ctx.caller.roleArn,
       createdAt: iso(nowMs),
+      ...billing,
     };
-    await transact(deps, [
-      { Put: { TableName: tableName, Item: binding, ConditionExpression: 'attribute_not_exists(PK)' } },
-      {
-        Put: {
-          TableName: tableName,
-          Item: { ...binding, ...keys.bindingLookup(input.tenantId, input.applicationId, input.cellId) },
-          ConditionExpression: 'attribute_not_exists(PK)',
-        },
-      },
-    ]);
+    await transact(deps, bindingWrites(tableName, binding, 'attribute_not_exists(PK) OR expiresAt <= :now', {}, { ':now': nowSeconds(nowMs) }));
   } else if (stored.status === 'ACTIVE') {
-    binding = stored;
+    binding = applied(stored, billing, []);
     if (billingChanged) {
       await transact(
         deps,
-        bindingUpdates(
+        bindingWrites(
           tableName,
-          stored,
-          { billingAccount: input.billingAccount },
-          [],
-          stored.billingAccount === undefined
-            ? '#cs = :active AND attribute_not_exists(billingAccount)'
-            : '#cs = :active AND billingAccount = :old',
+          binding,
+          stored.billingAccount === undefined ? '#cs = :active AND attribute_not_exists(billingAccount)' : '#cs = :active AND billingAccount = :old',
           { '#cs': 'status' },
           stored.billingAccount === undefined ? { ':active': 'ACTIVE' } : { ':active': 'ACTIVE', ':old': stored.billingAccount },
         ),
       );
-      binding = { ...stored, billingAccount: input.billingAccount };
     }
   } else {
     const { set, remove } = reactivation(stored, nowMs, recountWindowHours, input.trace);
-    if (input.billingAccount !== undefined) {
-      set.billingAccount = input.billingAccount;
-    }
+    binding = applied(stored, { ...set, ...billing }, remove);
     await transact(
       deps,
-      bindingUpdates(
-        tableName,
-        stored,
-        set,
-        remove,
-        '#cs = :closing AND closedAt = :seen',
-        { '#cs': 'status' },
-        { ':closing': 'CLOSING', ':seen': stored.closedAt },
-      ),
+      bindingWrites(tableName, binding, '#cs = :closing AND closedAt = :seen', { '#cs': 'status' }, { ':closing': 'CLOSING', ':seen': stored.closedAt }),
     );
-    const out = { ...stored, ...set } as Record<string, unknown>;
-    for (const name of remove) {
-      delete out[name];
-    }
-    binding = out as unknown as BindingItem;
   }
 
+  if (!resend) {
+    return { binding };
+  }
   // A billing account just set unblocks the tenant's BLOCKED deliveries (spec §4.7).
-  const resendJobId = billingChanged
-    ? (await startJob(deps, ctx, 'RESEND_BLOCKED', { tenantId: input.tenantId, applicationId: input.applicationId })).jobId
-    : undefined;
-  return { binding, resendJobId };
+  const job = await startJob(deps, ctx, 'RESEND_BLOCKED', { tenantId: input.tenantId, applicationId: input.applicationId });
+  binding = applied(binding, {}, ['resendPending']);
+  await transact(deps, bindingWrites(tableName, binding, 'attribute_exists(PK)', {}, {}));
+  return { binding, resendJobId: job.jobId };
 }
 
 export async function getTenantBinding(deps: AdminDeps, cellId: string, tenantId: string): Promise<BindingItem> {
-  const item = await getItem<BindingItem>(deps.db, deps.config.tableName, keys.binding(cellId, tenantId), true);
+  const item = live(await getItem<BindingItem>(deps.db, deps.config.tableName, keys.binding(cellId, tenantId), true), nowOf(deps));
   if (item === undefined) {
     throw apiError.notFound('no such binding');
   }
@@ -382,13 +413,14 @@ export async function deleteTenantBinding(
   trace: Trace,
 ): Promise<BindingItem | undefined> {
   const { tableName, closeGraceMinutes, recountWindowHours } = deps.config;
-  const stored = await getItem<BindingItem>(deps.db, tableName, keys.binding(cellId, tenantId), true);
+  const nowMs = nowOf(deps);
+  const stored = live(await getItem<BindingItem>(deps.db, tableName, keys.binding(cellId, tenantId), true), nowMs);
   if (stored === undefined || stored.status === 'CLOSING') {
     return stored;
   }
-  const close = closeAttributes(nowOf(deps), closeGraceMinutes, recountWindowHours, trace);
-  await transact(deps, bindingUpdates(tableName, stored, close, [], '#cs = :active', { '#cs': 'status' }, { ':active': 'ACTIVE' }));
-  return { ...stored, ...close } as BindingItem;
+  const next = applied(stored, closeAttributes(nowMs, closeGraceMinutes, recountWindowHours, trace), []);
+  await transact(deps, bindingWrites(tableName, next, '#cs = :active', { '#cs': 'status' }, { ':active': 'ACTIVE' }));
+  return next;
 }
 
 export async function listTenantBindings(

@@ -168,11 +168,11 @@ describe('hours (spec §4.5)', () => {
     expect(decide(hour({ status: 'COUNTED', countedGeneration: 3 }), 3, closeAt, 15, 96)).toBe('CLOSE');
     expect(decide(hour({ status: 'DIRTY' }), 3, NOW, 15, 96)).toBe('START');
   });
-  test('backoff doubles per attempt, at most an hour; the close guard is 5 minutes', () => {
+  test('backoff doubles per attempt, at most an hour; the job close guard is 60 minutes', () => {
     expect(retryBackoffMs(1)).toBe(2 * 60_000);
     expect(retryBackoffMs(10)).toBe(60 * 60_000);
-    expect(pastCloseGuard(HOUR, closeTimeMs(HOUR, 96) - 6 * 60_000, 96)).toBe(false);
-    expect(pastCloseGuard(HOUR, closeTimeMs(HOUR, 96) - 4 * 60_000, 96)).toBe(true);
+    expect(pastCloseGuard(HOUR, closeTimeMs(HOUR, 96) - 61 * 60_000, 96)).toBe(false);
+    expect(pastCloseGuard(HOUR, closeTimeMs(HOUR, 96) - 59 * 60_000, 96)).toBe(true);
     expect(nextWholeHour(NOW)).toBe('2026-11-18T13');
     expect(hoursBetween('2026-11-18T22', '2026-11-19T01')).toEqual(['2026-11-18T22', '2026-11-18T23', '2026-11-19T00', '2026-11-19T01']);
     expect(() => checkRange('2026-11-19T01', '2026-11-18T22')).toThrow();

@@ -12,7 +12,7 @@
  * and meter versions as they stand now (the current interval or one of the
  * earlier `intervals`, and the meter version in effect at the event's hour).
  * The close guard then runs on the real clock before each object: an event
- * whose hour is closed or within 5 minutes of its close goes back to
+ * whose hour is closed or within 60 minutes of its close goes back to
  * `error/` as `TOO_LATE`.
  */
 

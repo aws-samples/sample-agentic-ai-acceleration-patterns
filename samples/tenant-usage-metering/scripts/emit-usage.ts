@@ -11,6 +11,8 @@
  * - `RETRY` results are sent again; a 429, a 5xx or a timeout sends the
  *   whole batch again, unchanged, with backoff. A 400, 403 or 413 is not
  *   resent: the batch is reported and dropped.
+ * - Events still unsent when `flush()` runs out of attempts stay pending,
+ *   with the same bytes, for the next `flush()`; nothing retryable is dropped.
  *
  * The buffer is in memory, so events recorded but not yet sent are lost
  * if the process dies; a workload that must not lose them persists the
@@ -115,8 +117,8 @@ export class UsageEmitter {
     return { status: response.status, body: await response.text() };
   }
 
-  /** Sends every pending event; resolves when each is accepted, refused, or dropped after its retries. */
-  async flush(): Promise<{ accepted: number; refused: Array<{ eventId?: string; reason?: string }>; dropped: number }> {
+  /** Sends the pending events; what is still retryable after `maxAttempts` stays pending for the next call. */
+  async flush(): Promise<{ accepted: number; refused: Array<{ eventId?: string; reason?: string }>; dropped: number; pending: number }> {
     const maxAttempts = this.options.maxAttempts ?? 6;
     let accepted = 0;
     let dropped = 0;
@@ -156,8 +158,7 @@ export class UsageEmitter {
       }
       this.pending = retry;
     }
-    dropped += this.pending.length;
-    this.pending = [];
-    return { accepted, refused, dropped };
+    // Whatever is still retryable waits for the next flush, unchanged.
+    return { accepted, refused, dropped, pending: this.pending.length };
   }
 }

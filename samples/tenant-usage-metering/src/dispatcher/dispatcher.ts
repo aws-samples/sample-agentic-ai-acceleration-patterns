@@ -102,7 +102,13 @@ export class Dispatcher {
     this.now = deps.now ?? Date.now;
   }
 
+  /**
+   * Writes one sink's state. A delivery that is `SENT` stays `SENT`: a
+   * duplicate message (a stream retry plus the sweep, a redrive) whose own
+   * attempt fails must not overwrite it.
+   */
   private async setState(record: UsageRecordItem, sinkId: string, state: DeliveryState, condition = 'attribute_exists(sinks)'): Promise<boolean> {
+    const notSent = state.status === 'SENT' ? '' : ' AND (attribute_not_exists(sinks.#sink) OR sinks.#sink.#st <> :sent)';
     try {
       await withRetry(() =>
         this.deps.db.send(
@@ -110,9 +116,9 @@ export class Dispatcher {
             TableName: this.deps.tableName,
             Key: { PK: record.PK, SK: record.SK },
             UpdateExpression: 'SET sinks.#sink = :state',
-            ConditionExpression: condition,
-            ExpressionAttributeNames: { '#sink': sinkId },
-            ExpressionAttributeValues: { ':state': state },
+            ConditionExpression: `${condition}${notSent}`,
+            ExpressionAttributeNames: { '#sink': sinkId, ...(notSent ? { '#st': 'status' } : {}) },
+            ExpressionAttributeValues: { ':state': state, ...(notSent ? { ':sent': 'SENT' } : {}) },
           }),
         ),
       );

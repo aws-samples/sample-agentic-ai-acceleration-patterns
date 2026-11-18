@@ -30,6 +30,13 @@ export class TtlCache<V> {
     return value;
   }
 
+  /** Loads a value past the cache and stores it. */
+  async refresh(key: string, load: () => Promise<V>): Promise<V> {
+    const value = await load();
+    this.entries.set(key, { value, expiresAt: this.now() + this.ttlMs });
+    return value;
+  }
+
   clear(): void {
     this.entries.clear();
   }

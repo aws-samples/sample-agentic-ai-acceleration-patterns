@@ -18,7 +18,7 @@
  */
 
 import { type SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
-import { DeleteMessageCommand, ReceiveMessageCommand, type SQSClient } from '@aws-sdk/client-sqs';
+import { DeleteMessageCommand, GetQueueAttributesCommand, ReceiveMessageCommand, type SQSClient } from '@aws-sdk/client-sqs';
 import { BatchGetCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { S3Event } from 'aws-lambda';
 import { ulid } from 'ulid';
@@ -79,6 +79,10 @@ export class Scheduler {
 
   async run(): Promise<{ started: number; closed: number; replayed: number }> {
     const { db, tableName, metrics, lateGraceMinutes, recountWindowHours } = this.deps;
+    // Replay first, and close nothing while a tracked object may still be
+    // missing from its hour's generation (spec §4.5).
+    const replayed = await this.replayTrackerFailures();
+    const mayClose = await this.trackerQueueEmpty();
     const nowMs = this.now();
     const hours = await queryAll<HourItem>(db, {
       TableName: tableName,
@@ -101,6 +105,9 @@ export class Scheduler {
         log.warn('hour past its close is not counted', { hour: item.hour, status: item.status });
       }
       let decision = decide(item, generation, nowMs, lateGraceMinutes, recountWindowHours);
+      if (decision === 'CLOSE' && !mayClose) {
+        continue;
+      }
       if (decision === 'CLOSE') {
         if (await this.close(item)) {
           closed++;
@@ -120,7 +127,6 @@ export class Scheduler {
       }
     }
     metrics.add(METRIC.hoursPastGrace, pastGrace, {}, true);
-    const replayed = await this.replayTrackerFailures();
     log.info('scheduler ran', { count: hours.length, step: `started=${started} closed=${closed} replayed=${replayed}` });
     return { started, closed, replayed };
   }
@@ -217,6 +223,16 @@ export class Scheduler {
     } catch (error) {
       log.error('recount not started', { hour, errorType: errorName(error) });
     }
+  }
+
+  private async trackerQueueEmpty(): Promise<boolean> {
+    const out = await this.deps.sqs.send(
+      new GetQueueAttributesCommand({
+        QueueUrl: this.deps.trackerFailureQueueUrl,
+        AttributeNames: ['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible'],
+      }),
+    );
+    return Number(out.Attributes?.ApproximateNumberOfMessages ?? 0) + Number(out.Attributes?.ApproximateNumberOfMessagesNotVisible ?? 0) === 0;
   }
 
   /** Replays the S3 events of failed tracker invocations (spec §4.5). */

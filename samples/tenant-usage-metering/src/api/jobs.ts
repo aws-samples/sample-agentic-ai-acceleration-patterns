@@ -104,7 +104,7 @@ export async function startRecount(deps: AdminDeps, ctx: AdminContext, from: str
   checkRange(from, to);
   // An hour closes in order, so the whole range is closed when its last hour is.
   if (pastCloseGuard(to, nowOf(deps), deps.config.recountWindowHours)) {
-    throw apiError.conflict('RANGE_CLOSED', 'every hour in the range is closed or within 5 minutes of its close');
+    throw apiError.conflict('RANGE_CLOSED', 'every hour in the range is closed or within 60 minutes of its close');
   }
   return startJob(deps, ctx, 'RECOUNT', { from, to });
 }

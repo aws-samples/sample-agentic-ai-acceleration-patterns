@@ -1079,7 +1079,7 @@ structure HourRange {
 }
 
 /// Recounts each hour in range; 409 when the whole range is `CLOSED` or
-/// within 5 minutes of its close.
+/// within 60 minutes of its close.
 @http(method: "POST", uri: "/jobs/recount", code: 202)
 operation StartRecount {
     input := with [HourRange] {}

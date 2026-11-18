@@ -46,3 +46,15 @@ npx cdk deploy "$stack" --require-approval never "${context[@]}" --output "$out/
 echo "deploy: $(( $(date +%s) - t0 )) s"
 
 LATE_GRACE_MINUTES="$grace" npx ts-node --transpile-only test/integ.metering.ts "$out/outputs.json"
+test_rc=$?
+
+# The deployment-role exemption of the bucket configuration denies (spec
+# §3.5): a stack update that changes the raw bucket's lifecycle must pass.
+t0=$(date +%s)
+if npx cdk deploy "$stack" --require-approval never "${context[@]}" -c rawRetentionDays=401 --output "$out/assembly"; then
+  echo "PASS a stack update changes the raw bucket lifecycle through the configuration deny ($(( $(date +%s) - t0 )) s)"
+else
+  echo "FAIL a stack update changes the raw bucket lifecycle through the configuration deny"
+  test_rc=1
+fi
+exit "$test_rc"

@@ -10,7 +10,12 @@ import { hourEndMs, hourOf } from './usage-event';
 export const MINUTE_MS = 60 * 1000;
 export const HOUR_MS = 60 * MINUTE_MS;
 /** A job refuses an hour this close to its close (spec §4.5). */
-export const CLOSE_GUARD_MS = 5 * MINUTE_MS;
+/**
+ * Jobs refuse an hour this close to its close (spec §4.5): long enough for
+ * the object tracker's retries (30 minutes of event age) and the scheduler's
+ * replay of its failures to land before the hour can close.
+ */
+export const CLOSE_GUARD_MS = 60 * MINUTE_MS;
 /** Ranges of jobs and usage reads span at most this many hours (spec §4.6). */
 export const MAX_RANGE_HOURS = 744;
 
@@ -52,7 +57,7 @@ export function closeTimeMs(hour: string, recountWindowHours: number): number {
   return hourEndMs(hour) + recountWindowHours * HOUR_MS;
 }
 
-/** Whether a job must refuse an hour: closed, or within 5 minutes of its close (spec §4.5). */
+/** Whether a job must refuse an hour: closed, or within 60 minutes of its close (spec §4.5). */
 export function pastCloseGuard(hour: string, nowMs: number, recountWindowHours: number): boolean {
   return nowMs >= closeTimeMs(hour, recountWindowHours) - CLOSE_GUARD_MS;
 }
