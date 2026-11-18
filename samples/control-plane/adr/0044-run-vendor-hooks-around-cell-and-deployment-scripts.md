@@ -294,7 +294,11 @@ token could leave a second build. The token is
 `$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK_ID, $string(ATTEMPT),
 $string(TRY)], '|'), 'SHA-256')`, 64 hexadecimal characters. Every
 field of the start task's `Arguments`, the token included, reads only
-variables fixed for the try, never `$uuid()`, `$now()`,
+variables and the start task's state input, both fixed for the try.
+Every state of the start loop passes its input through unchanged: the
+refusal `Catch` sets `Output` to `{% $states.input %}`, and no
+`$states.context` field that changes on a repeat (such as
+`State.RetryCount`) is read. No field reads `$uuid()`, `$now()`,
 `$millis()` or another changing value, because a `Retry` evaluates
 them again and CodeBuild refuses a repeat whose arguments differ with
 `CodeBuild.InvalidInputException`. The token has a fixed length,
@@ -447,7 +451,8 @@ as a consumer of a global post hook.
   queueing them, with `CodeBuild.AccountLimitExceededException` (H-9).
   CodeBuild documents that name for any limit exceeded for the calling
   account, so the `Catch` names it; the spike provoked only the project
-  cap, and the account-wide quota's error name stays to verify. A
+  cap, and the account quota's error name, and that a repeat under a
+  bound token returns its build at that quota, stay to verify. A
   refused start is tried again for up to 5
   minutes; then a create or update ends in a named `*_FAILED` ("cannot
   start") rather than a silent wait, and a delete hook spends its
@@ -526,8 +531,9 @@ as a consumer of a global post hook.
     were not provoked and stay to verify.
   - H-9: at the project's `concurrentBuildLimit`, `StartBuild` is
     refused with `CodeBuild.AccountLimitExceededException` and creates
-    no build. The account-wide quota was not provoked, and its error
-    name stays to verify.
+    no build. The account quota was not provoked: its error name, and
+    that a repeat under a bound token returns its build at that quota,
+    stay to verify.
   - H-10: a 4,096-byte value of worst-case escapes round-trips byte for
     byte through the export, the task `Output` and a hook build's
     override, at 8,190 characters in state. The guard, run in a Step
@@ -546,6 +552,7 @@ as a consumer of a global post hook.
   that queues builds, a token that does not return the same build, a
   `Retry` whose evaluation of `Arguments` is not deterministic, an
   export that drops an escaped value), or if one of the five cases
-  still to verify behaves otherwise: the three H-8 left unprovoked, the
-  account-wide quota's error name (H-9) and multibyte UTF-8 parameter
-  values (H-5).
+  still to verify behaves otherwise: the three H-8 left unprovoked;
+  one in H-9, where the account quota's error name, and that a repeat
+  under a bound token returns its build at that quota, stay to verify;
+  and multibyte UTF-8 parameter values (H-5).
