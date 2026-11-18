@@ -346,7 +346,7 @@ Every request through the edge checks four things (P-1):
 ## 6. Observability
 
 Latency is measured per hop with one correlation id per request: the driver
-sends `x-stress-request-id`, and each hop logs it.
+sends `x-correlation-id`, and each hop logs it (stress ADR-0005).
 
 | Hop | Source |
 |---|---|
@@ -373,15 +373,16 @@ correlation id.
 
 ## 8. Decisions for the first ADR batch
 
-| # | Decision | Why it needs an ADR |
-|---|---|---|
-| 1 | The shared contract lives in `stress/` at the repository root, with its ADRs in `stress/adr/` | the sample standard has no root folder for code shared across samples |
-| 2 | `control-plane` exposes the concurrent build limit as a prop (default 5) | a cost guard today (threat model T16, M17); the stress deployment raises it |
-| 3 | The stress test has its own `tenant-identity` deployment | one pool caps at 5,000 tenants (runtime-isolation finding F-11) and is shared by every integration run |
-| 4 | Cells split agents (four cells of 25 at `large`) | keeps the Runtime count flat while testing routing across cells |
-| 5 | The `large` fleet is a fixture, seeded once | onboarding 4,000 tenants takes hours even at 50 builds |
-| 6 | A correlation header, logged at every hop | the runtime-isolation ingress and the front door each log it; a change to both samples |
-| 7 | The cell script deploys runtime-isolation with the CDK from a pinned commit, through the account's role pair and a scoped cell bootstrap | the cell build would otherwise act as an account administrator; see below |
+| # | Decision | Why it needs an ADR | ADR |
+|---|---|---|---|
+| 1 | The shared contract lives in `stress/` at the repository root, with its ADRs in `stress/adr/` | the sample standard has no root folder for code shared across samples | stress ADR-0001 |
+| 2 | `control-plane` exposes the concurrent build limit as a prop (default 5) | a cost guard today (threat model T16, M17); the stress deployment raises it | control-plane ADR-0046 |
+| 3 | The stress test has its own `tenant-identity` deployment | one pool caps at 5,000 tenants (runtime-isolation finding F-11) and is shared by every integration run | stress ADR-0002 |
+| 4 | Cells split agents (four cells of 25 at `large`) | keeps the Runtime count flat while testing routing across cells | stress ADR-0003 |
+| 5 | The `large` fleet is a fixture, seeded once | onboarding 4,000 tenants takes hours even at 50 builds | stress ADR-0004 |
+| 6 | A correlation header, logged at every hop | the runtime-isolation ingress and the front door each log it; a change to both samples | stress ADR-0005 |
+| 7 | The cell script deploys runtime-isolation with the CDK from a pinned commit, through the account's role pair and a scoped cell bootstrap | the cell build would otherwise act as an account administrator; see below | stress ADR-0006, control-plane ADR-0047 |
+| 8 | The runtime-isolation `StressDriver` and k6 library move to `stress/` | they become the shared driver; its slice keeps only its own scenarios | stress ADR-0007 |
 
 Decision 7, the cell bootstrap. A `cdk deploy` needs `sts:AssumeRole` on
 the account's CDK bootstrap roles, and the default bootstrap's
@@ -410,7 +411,6 @@ the execution policy held Application Auto Scaling. A role without the
 boundary was refused at `iam:CreateRole`. The sample's integration test,
 run through the same bootstrap and boundary (139 of 139 roles bounded),
 passed 60 of 60 steps, so the request path holds under the boundary too.
-| 8 | The runtime-isolation `StressDriver` and k6 library move to `stress/` | they become the shared driver; its slice keeps only its own scenarios |
 
 ## 9. Work items and parallel readiness
 

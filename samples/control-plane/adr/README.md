@@ -53,3 +53,5 @@ Template for new records: [`docs/sample-standard.md` §2.2](../../../docs/sample
 | [ADR-0042](0042-a-read-only-role-beside-the-operator.md) | A read-only role beside the operator (amends ADR-0015, ADR-0018) | Accepted | 2026-11-13 |
 | [ADR-0043](0043-accept-listed-client-ids-when-a-token-has-no-audience.md) | Accept listed client ids when a token has no audience (amends ADR-0004) | Accepted | 2026-11-14 |
 | [ADR-0044](0044-run-vendor-hooks-around-cell-and-deployment-scripts.md) | Run vendor hooks around cell and deployment scripts (amends ADR-0002, ADR-0011, ADR-0012, ADR-0021, ADR-0022, ADR-0025, ADR-0032, ADR-0042) | Proposed | 2026-11-17 |
+| [ADR-0046](0046-make-the-concurrent-build-limit-a-prop.md) | Make the concurrent build limit a prop (amends ADR-021) | Proposed | 2026-11-18 |
+| [ADR-0047](0047-let-the-cell-account-owner-attach-policies-to-the-cell-role.md) | Let the cell account owner attach policies to the cell role (amends ADR-025) | Proposed | 2026-11-18 |
