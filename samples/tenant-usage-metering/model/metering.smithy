@@ -48,46 +48,29 @@ service TenantUsageMeteringService {
 // Usage events (spec §4.8, §5)
 // ---------------------------------------------------------------------------
 
-/// One usage event (spec §4.8). The members are deliberately unconstrained
-/// here: the function checks each event and refuses a bad one alone, as
-/// `BAD_SHAPE` or `BAD_TIME` (spec P-8), so one bad event never fails its
-/// batch. The rules it applies:
+/// The events of one batch, 1 to 100. Each member is free JSON, so the
+/// deserialiser never fails a batch for one event: the function checks each
+/// event and refuses a bad one alone, as `BAD_SHAPE` or `BAD_TIME` (spec
+/// P-8). An event is an object with these string members (spec §4.8):
 /// - `eventId`: a ULID or a lowercase UUID, reused on every resend;
 /// - `tenantId`: a tenant bound to the caller's cell;
 /// - `meterId`: `[a-z0-9_.-]{1,64}`, a meter in effect at the event's hour;
 /// - `value`: a non-negative decimal, at most 12 integer and 6 fractional
 ///   digits; `COUNT` ignores it, `UNIQUE_COUNT` treats it as a string;
 /// - `time`: ISO 8601 UTC with `Z`, kept as the emitter sent it;
-/// - `dimensions`: at most 10 keys `[A-Za-z0-9_.-]{1,64}`, values up to 256
-///   characters, no personal data (spec §6.1).
-/// The service adds the emitter's identity; a body field never names it
-/// (spec P-2).
-structure UsageEvent {
-    eventId: String
-
-    tenantId: String
-
-    meterId: String
-
-    value: String
-
-    time: String
-
-    dimensions: Dimensions
-}
-
-map Dimensions {
-    key: String
-    value: String
-}
-
+/// - `dimensions` (optional): an object of at most 10 keys
+///   `[A-Za-z0-9_.-]{1,64}` with string values up to 256 characters, and no
+///   personal data (spec §6.1).
+/// A member of another JSON type, or an unknown member, is `BAD_SHAPE`. The
+/// service adds the emitter's identity; a body field never names it (P-2).
 @length(min: 1, max: 100)
 list UsageEventList {
-    member: UsageEvent
+    member: Document
 }
 
+/// One result per event, in request order. `eventId` echoes the event's
+/// id when it was a string; match on position, not on the id.
 structure UsageEventResult {
-    @required
     eventId: String
 
     @required
@@ -101,7 +84,8 @@ list UsageEventResultList {
 }
 
 /// Sends up to 100 usage events from a registered emitter. 200 with one
-/// result per event; a caller that is not a registered emitter gets 403.
+/// result per event, in request order; a caller that is not a registered
+/// emitter gets 403.
 @http(method: "POST", uri: "/usage-events", code: 200)
 operation PutUsageEvents {
     input := {
@@ -423,7 +407,8 @@ operation GetSink {
 }
 
 /// An absent member keeps its value; `meters: []` means all, and
-/// `mapping: {}` clears the mapping.
+/// `mapping: {}` clears the mapping. `secretName` cannot be cleared: an
+/// `HTTP` sink always has one.
 @http(method: "PATCH", uri: "/sinks/{sinkId}", code: 200)
 operation UpdateSink {
     input := {
@@ -515,6 +500,10 @@ structure Interval {
 
     @required
     closedAt: IsoTimestamp
+
+    closedByExecutionId: String
+
+    closedByOperatorId: String
 }
 
 list IntervalList {
@@ -701,7 +690,8 @@ list TenantBindingSummaryList {
 }
 
 /// Binds a tenant to a cell. 409 `PLACEMENT_MISMATCH` when the cell has no
-/// emitter or is of another application. An absent `billingAccount` keeps
+/// `ACTIVE` emitter (none, or one that is `CLOSING`) or is of another
+/// application. An absent `billingAccount` keeps
 /// the stored one. A newly set billing account starts a `RESEND_BLOCKED`
 /// job for the tenant and application (spec §4.7), returned as
 /// `resendJobId`.
@@ -855,6 +845,7 @@ list UsageRecordList {
     member: UsageRecord
 }
 
+/// `from` and `to` inclusive, at most 744 hours apart (400 otherwise).
 @readonly
 @paginated(inputToken: "nextToken", outputToken: "nextToken", pageSize: "maxResults", items: "records")
 @http(method: "GET", uri: "/tenants/{tenantId}/applications/{applicationId}/meters/{meterId}/usage")
@@ -894,6 +885,7 @@ operation GetUsage {
     }
 }
 
+/// `from` and `to` inclusive, at most 744 hours apart (400 otherwise).
 @readonly
 @paginated(inputToken: "nextToken", outputToken: "nextToken", pageSize: "maxResults", items: "records")
 @http(method: "GET", uri: "/tenants/{tenantId}/applications/{applicationId}/usage")
@@ -1116,7 +1108,8 @@ operation StartIngestRedrive {
 }
 
 /// Sends a sink's `FAILED` deliveries again, or with an hour range every
-/// record of the range (a backfill).
+/// record of the range (a backfill). `from` and `to` come together or not
+/// at all (400 otherwise), inclusive, at most 744 hours apart.
 @http(method: "POST", uri: "/jobs/sink-redrive", code: 202)
 operation StartSinkRedrive {
     input := {

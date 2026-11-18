@@ -393,7 +393,11 @@ hourly ones; a billing system that needs them reads the raw store or the
 | `expiresAt` | the end of `closedAt`'s hour plus `recountWindowHours`, for audit |
 
 `PutCellEmitter` for a known cell with another account or application is a
-409 (`PLACEMENT_MISMATCH`): a cell never moves.
+409 (`PLACEMENT_MISMATCH`): a cell never moves. Every registration also
+holds `controlPlaneExecutionId` and `controlPlaneOperatorId` (the call that
+made or last re-activated it) and, once `CLOSING`, `closedByExecutionId`
+and `closedByOperatorId` (the delete). Re-activation moves the `closedBy*`
+pair into the interval it closes and overwrites `controlPlane*`.
 
 Transitions: none → `ACTIVE` (`PutCellEmitter`) → `CLOSING`
 (`DeleteCellEmitter`) → removed by TTL. An emitter admits events whose
@@ -420,8 +424,8 @@ at the event's time.
 
 Tenant ids are the registrar's: the control plane's are ULIDs, and any
 id in `[A-Za-z0-9][A-Za-z0-9_-]{0,63}` is accepted; ids are
-case-sensitive. `PutTenantBinding` for a cell with no emitter, or of
-another application, is a 409 (`PLACEMENT_MISMATCH`); an absent
+case-sensitive. `PutTenantBinding` for a cell with no `ACTIVE` emitter
+(none, or one that is `CLOSING`), or of another application, is a 409 (`PLACEMENT_MISMATCH`); an absent
 `billingAccount` keeps the stored one.
 
 Transitions as for emitters. A deployment deleted and created again in
@@ -609,7 +613,9 @@ delivery has been `BLOCKED` for 24 hours.
 
 ### 4.8 Usage event and raw objects (the wire contract)
 
-Smithy structure `UsageEvent`:
+The event, one free JSON member of the `PutUsageEvents` batch in the model;
+the function, not the model, enforces the "Required" column and every rule
+below, and refuses a bad event alone as `BAD_SHAPE` (P-8):
 
 | Field | Required | Meaning |
 |---|---|---|
@@ -677,7 +683,7 @@ Smithy, `aws.protocols#restJson1`, every operation IAM-authorised.
 | Hour | `GetHour`, `ListHours` |
 | Jobs | `StartRecount`, `StartReadmission`, `StartIngestRedrive`, `StartSinkRedrive`, `StartResendBlocked`, `GetJob`, `ListJobs` |
 
-`PutUsageEvents` returns 200 with one result per event:
+`PutUsageEvents` returns 200 with one result per event, in request order (match on position; `eventId` is echoed when it was a string):
 
 | Result | Meaning | Emitter action |
 |---|---|---|
@@ -689,7 +695,7 @@ Errors:
 
 | Code | When |
 |---|---|
-| 400 `ValidationException` | malformed request, a field outside its charset, a `BILLING_ACCOUNT` out of format, a backdated `effectiveFrom` beyond the window |
+| 400 `ValidationException` | malformed request, a field outside its charset (on routes other than `PutUsageEvents`, whose events are checked one by one), a `BILLING_ACCOUNT` out of format, a backdated `effectiveFrom` beyond the window |
 | 403 `AccessDeniedException` | caller not permitted for the route; for `PutUsageEvents`, not an assumed role or not a registered emitter |
 | 404 `ResourceNotFoundException` | unknown meter, sink, hour, job (never for `Delete*` of a registration) |
 | 409 `ConflictException` | with a `reason`: `ACCOUNT_NOT_ALLOWED` (`PutCellEmitter` in a subscriber account or the metering account), `ALREADY_EXISTS` (`CreateMeter` or `CreateSink` on an existing id), `PLACEMENT_MISMATCH` (§4.2, §4.3), `RANGE_CLOSED` (`StartRecount` whose whole range is `CLOSED` or within 5 minutes of its close), `CONCURRENT_WRITE` (a lost conditional write; the only one worth retrying) |

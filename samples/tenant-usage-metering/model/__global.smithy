@@ -72,9 +72,6 @@ string MeterId
 @length(min: 1, max: 32)
 string SinkId
 
-/// An event id: a ULID or a UUID, reused on every resend (spec P-5).
-@pattern("^([0-9A-HJKMNP-TV-Z]{26}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
-string EventId
 
 /// A job id: a ULID.
 @pattern("^[0-9A-HJKMNP-TV-Z]{26}$")
@@ -84,10 +81,6 @@ string JobId
 @pattern("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}$")
 string Hour
 
-/// A non-negative decimal: at most 12 digits before the point and 6 after
-/// (spec §4.8).
-@pattern("^[0-9]{1,12}(\\.[0-9]{1,6})?$")
-string DecimalValue
 
 /// A quantity in a usage record; an ADJUSTMENT may be negative (spec §4.7).
 /// Up to 24 integer digits: a SUM of 12-digit values over an hour.
