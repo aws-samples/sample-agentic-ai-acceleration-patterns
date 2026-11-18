@@ -2,13 +2,13 @@
 
 - Status: Accepted
 - Date: 2026-11-18
-- Amends: ADR-025 (the account role pair)
-- Deciders: Dave Roberts (PSA)
+- Amends: ADR-0025 (the account role pair)
+- Deciders: Dave Roberts (SA)
 
 ## Context
-The account role pair (ADR-025) gives the cell provisioning role its SSM
+The account role pair (ADR-0025) gives the cell provisioning role its SSM
 namespace grants only. The tenant role already takes the account owner's
-managed policies through `tenantBuildManagedPolicyArns` (ADR-022), so a
+managed policies through `tenantBuildManagedPolicyArns` (ADR-0022), so a
 tenant script can reach what its application needs. A cell script has no
 such path. An application whose cell is a CDK deployment, such as the
 platform stress test's (stress ADR-0006), needs the cell role to assume the
@@ -44,7 +44,7 @@ permissions boundary and sit on a `/cell/` role path (stress ADR-0006).
 Easier: an application can deploy its cell with any tool the account owner
 allows. Harder: an owner-attached policy widens two principals, not one.
 The cell role trusts the control-plane API role as well as the cell build
-(the `PutAccount` handshake, ADR-028), so the API Lambda can use every
+(the `PutAccount` handshake, ADR-0028), so the API Lambda can use every
 attached policy too; with the stress policy it can assume the cell
 bootstrap roles. The threat model's cell-role row gains that residual. A
 policy that reaches a default CDK bootstrap, or any role outside a scoped

@@ -117,7 +117,7 @@ it first shows.
 
 | Component | Where | What it is |
 |---|---|---|
-| Contract | `stress/` at the repository root | `tiers.ts`, the k6 library, the result schema, the quota budget, the runner |
+| Contract | `stress/` at the repository root | `tiers.ts`, the k6 library (`stress/k6/`), the result schema, the quota budget, the runner |
 | Driver host | `stress/driver/` (the runtime-isolation `StressDriver`, moved) | one EC2 instance, no inbound rule, no public IP, SSM Session Manager, k6 and the AWS CLI |
 | Stress application | `stress/application/` | a control-plane application whose cell scripts deploy one runtime-isolation cell and whose tenant scripts onboard one tenant (§3.3) |
 | Slice: `control-plane` | `samples/control-plane/scripts/stress/` | deploy the control plane, register accounts and the stress application, onboarding and churn scenarios |
@@ -266,7 +266,7 @@ with a `cdk-hnb659fds-*` role.
 | | `small` | `medium` | `large` |
 |---|---|---|---|
 | Cell accounts (plus the platform account) | 1 | 2 | 2 |
-| Cells (`maxTenants`) | 1 (20) | 2 (100) | 4 (1,000) |
+| Cells (`maxTenants`) | 1 (25) | 2 (110) | 4 (1,025) |
 | Agents per cell | 2 | 5 | 25 |
 | Tools per cell | 2 targets x 10 | 2 targets x 100 | 3 targets x 100 |
 | Tenants seeded | 20 | 200 | 4,000 |
@@ -278,6 +278,10 @@ with a `cdk-hnb659fds-*` role.
 | Peak rate | 40 rps | 300 rps | 1,000 rps |
 | Scenario length | 1 min | 3 min | 10 min |
 | Driver instance | `t3.large` | `c6i.xlarge` | `c6i.4xlarge` |
+
+Each cell's `maxTenants` is its seeded share plus its share of the churn
+count, so a churn create (PS-5) lands in a free slot of an existing cell and
+times a tenant build, not a cell build.
 
 The `large` row splits the runtime-isolation `large` tier over four cells:
 100 agents in total, the same as the runtime-isolation `large` tier, so
@@ -390,7 +394,7 @@ correlation id.
 | Attribution | 0 unattributed refusals (P-7) |
 | Churn | a removed tenant never reaches an origin; time to routable and time to removed reported with p50 and p99 |
 | Edge overhead | reported with p50 and p95; no target until the first `medium` run sets a baseline |
-| Teardown | nothing a slice owned left in either account, apart from fixtures |
+| Teardown | nothing a slice owned left in any account, apart from fixtures |
 | Budget | no budgeted quota exceeded except in PS-8, where it is the result |
 
 ## 8. Decisions
@@ -450,7 +454,7 @@ grants to reach. The evidence is in stress ADR-0006 and
 |---|---|---|
 | Q-1 | How long does one cell take to deploy from a CodeBuild cell script (expected about 8 minutes on Runtime V2), and does `BUILD_GENERAL1_SMALL` (3 GB) hold the synth? | W-5 |
 | Q-2 | Does the front door's integration test compose runtime-isolation for `/agents/*` (its Q-4)? The platform run assumes it can | W-7 |
-| Q-3 | Does the platform run keep the `large` fleet in both accounts between runs, and what does it cost idle? | decision 5 |
+| Q-3 | Does the platform run keep the `large` fleet in every account between runs, and what does it cost idle? | decision 5 |
 | Q-4 | Which hosted zone does the stress front door use? | W-7 |
 | Q-5 | Does the `/cell/` path scope refuse a cell role's `iam:UpdateAssumeRolePolicy` on the role pair, `iam:PutRolePolicy` on a `cdk-cell-*` role, `iam:PassRole` of a role outside `/cell/` and `sts:AssumeRole` of the account's administrator role, while the integration test still passes under it? Proven by deny probes and one integration run in a standalone cell account | W-10 |
 | Q-6 | Does runtime-isolation deploy with every role on `/cell/` (resource policies and conditions that name role ARNs) and does its demo stack export what the stress cell app needs to instantiate it from the sample's package entry? | W-10 |
