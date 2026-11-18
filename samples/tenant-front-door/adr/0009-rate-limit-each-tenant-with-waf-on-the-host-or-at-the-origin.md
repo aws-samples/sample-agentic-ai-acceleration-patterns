@@ -4,6 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-13
+- Amended by: ADR-0021
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -82,21 +83,7 @@ requests to A's SPA paths during the block were all 200.
   per-host counts are seen through metrics and sampled requests.
 - Revisit when WAF can key on a value derived from the token payload.
 
-Note 2026-11-18 (full design review): the per-host rule alone lets an
-anonymous client use up a tenant's budget. WAF counts every request that
-matches the rule's scope-down before the router refuses it, so a flood of
-tokenless requests to `b.<appDomain>/api/*` takes `b`'s count to its
-limit, and `b`'s own users get 429. In `host` mode the web ACL therefore
-carries a second rate-based rule ahead of the per-host rule (a lower
-priority number), aggregated on the `Host` header and the client IP,
-with the same scope-down, the same custom 429 and the limit
-`ipRequestsPer5Min` (500 by default, a chosen value that was not
-measured). A request it blocks ends the evaluation, so it never reaches
-the per-host rule, and one address cannot push a host's count past its
-own limit. Residual: a flood from many addresses still counts against the
-host, and a tenant whose users share one address shares one per-IP
-budget, which the deployer raises. `single` mode has no edge rate rule at
-all: the origin counts verified requests only, so a tokenless or forged
-request cannot use up a tenant's budget, and the router (401) or the cell
-refuses it before any count. This adds a rule to the decision and does not
-replace it, so it is a note here and not a new record.
+Note 2026-11-18: ADR-0021 amends this record. In `host` mode the web
+ACL also carries a rate rule aggregated on `Host` and client IP,
+`ipRequestsPer5Min`, ahead of the per-host rule, so one address cannot
+use up a tenant's budget.

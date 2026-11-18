@@ -221,8 +221,10 @@ printing the registrar's message.
 - Spike S-8 still covers the admission: it proved a cross-account
   `aws:PrincipalArn` match on a role ARN and the need for the explicit
   `Deny`; only the admitted principal changes. The integration test
-  checks that the second account's provisioning roles get 403 (spec §10,
-  the steps that call the registrar from the second account).
+  checks that the provisioning roles of both cell accounts get 403, the
+  tenant-owned edge account's from the explicit `Deny` and the control
+  plane account's from the resource policy (spec §10, the steps that
+  call the registrar from a provisioning role).
 - This record stays Proposed, and ADR-0013 Accepted, until
   control-plane ADR-0044 (on `main`, Proposed) is accepted. On
   acceptance this record supersedes ADR-0013.
