@@ -130,8 +130,8 @@ Control plane concerns this version leaves out. Each has a recorded seam
   Region
 - Finer operator roles (an application registrar apart from an onboarder,
   operators scoped to accounts) and a sweep for stranded in-flight records
-- Hooks on tenant record events and on account events: vendor hooks
-  (§6.5) run on cell and deployment events only
+- Hooks on hook operations: `PutHook` and `DeleteHook` run no hooks
+  (§6.5)
 
 ### 1.3 What this control plane is NOT
 
@@ -183,13 +183,15 @@ here:
   system.
 - The account *is* an entity, by the same test: it holds the authoritative
   cell counter and the trust handshake, which no neighbour stores, and
-  operators register it explicitly (P-10). Its lifecycle is synchronous —
-  no build, no workflow — so it adds four operations on the same table and
+  operators register it explicitly (P-10). It runs no build: its
+  mutations run the one workflow only for their hooks and the commit of
+  the record (§8.4), so it adds four operations on the same table and
   nothing else.
 - The application *is* an entity for the same reason: it holds the
   definition every one of its cells is stamped from and the authoritative
-  count of those cells, and operators register it explicitly. Its
-  lifecycle is synchronous too. Which applications an account admits is a
+  count of those cells, and operators register it explicitly. It runs
+  no build either, and its mutations run the workflow the same way.
+  Which applications an account admits is a
   field on the account, not an entity: it stores nothing its neighbours
   don't ([ADR-033](../adr/0033-account-admission-is-an-application-allowlist-on-the-account.md)).
 
@@ -197,6 +199,8 @@ here:
   definition and its revision, which no neighbour stores, and operators
   register it explicitly. An application hook is not: it is part of its
   application's definition and is stamped with it, like the scripts.
+  Hook operations stay synchronous and fire no hooks: there are no
+  hooks on hooks.
 
 The result: **one service, one API, one table, one workflow, four build
 projects (two that provision, two that run vendor hooks), and one role
@@ -317,9 +321,11 @@ The single most important consistency principle in the design:
 - **No write whose correctness depends on prior state is unconditional** —
   even fresh-ULID inserts are conditional on non-existence, and
   metadata/failure writes are conditional on existence so they cannot
-  resurrect a concurrently deleted record as a ghost. The one write that is
-  correct in every prior state, `PutApplication`'s create-or-replace, sets
-  its counter through `if_not_exists` instead (§5.5).
+  resurrect a concurrently deleted record as a ghost. A create-or-replace
+  (`PutApplication`, `PutAccount`) chooses its path from a strongly
+  consistent read and conditions its write on the status it read
+  (R-48); `PutApplication` sets its counter through `if_not_exists`, so
+  a re-put never resets it (§5.5).
 
 ### P-6. Invariants are protected by atomicity at both ends of their lifetime
 
@@ -375,10 +381,17 @@ hours; synchronous API gateways cap at ~29 seconds. Therefore:
 
 - Every mutation that ends in a provisioning build returns **HTTP 202**
   after persisting a transitional status (`CREATING`/`UPDATING`/`DELETING`).
+  So does every mutation of an application, a tenant or an account
+  (`PutApplication`, `DeleteApplication`, `CreateTenant`, `UpdateTenant`,
+  `DeleteTenant`, `PutAccount`, `DeleteAccount`): it runs no build, but
+  pre hooks gate it and a hook build takes minutes (§8.4,
+  [ADR-045](../adr/0045-run-hooks-on-application-tenant-and-account-events.md)).
+  Hook operations stay synchronous and run no hooks.
 - A durable workflow engine — not a compute function waiting on the build:
   wait billing, invocation time caps, and crash-loss of the terminal
   transition all disqualify that — runs the build and writes terminal state.
-- The read endpoint (`GetDeployment`/`GetCell`) is the polling contract.
+- The read endpoints (`GetDeployment`, `GetCell`, `GetApplication`,
+  `GetTenant`, `GetAccount`) are the polling contract.
 - **Transitional statuses double as the concurrency guard**: any mutation
   against an in-flight record is a 409. One mechanism serves two purposes.
 
@@ -394,6 +407,9 @@ hours; synchronous API gateways cap at ~29 seconds. Therefore:
 - Cleanup MUST always be reachable: deployment deletion is allowed from
   failed states *regardless of cell status*, because the delete script is
   the cleanup path even when the cell itself failed to create.
+- Applications, tenants and accounts follow the same rule: each of their
+  `*_FAILED` statuses has a remedy in §5.6, and their deletes are never
+  gated, so a failing hook cannot keep an empty record alive (R-49).
 - A stamped application hook that fails on every run keeps its cell's
   creates or updates failing, because every retry runs the same stamp.
   Its exits are in §8.3: fix forward on an unpinned ref, or, for a hook
@@ -699,6 +715,11 @@ shown as the reference implementation's convention; the requirement is the
 | `cellParameters` | optional list of **cell parameter declarations**, at most 20, default none; replaced when sent (absent on an existing application keeps it, `[]` clears it), takes effect on the next cell build ([ADR-040](../adr/0040-applications-declare-cell-parameters-with-defaults.md)). Each is `{name, default, description?}`: `name` as for `parameters`, unique in the list and MUST NOT also appear in `parameters` (one name, one meaning); `default` is **required**, a string of at most 1,024 bytes (UTF-8) with no control characters, because a cell is created by placement and no operator is present to supply a value; `description` as for `parameters`. There is no `required` flag |
 | `hooks` | optional list of **application hooks** (§4.8), at most 5, default none; part of the definition, so each new cell is stamped with the list current at its creation (P-4, R-40). Replaced only when sent, the rule the declaration lists follow: absent on an existing application keeps it, `[]` clears it. Each entry is a hook definition (R-39); `hookId` is unique in the list |
 | `cellCount` | **the authoritative count of this application's cells** — claimed in the cell-creating transaction, released in the cell-deleting one (P-6); never written by `PutApplication` |
+| `status` | `CREATING \| ACTIVE \| UPDATING \| DELETING \| CREATE_FAILED \| UPDATE_FAILED \| DELETE_FAILED`, the cell enum; absent on a record written before statuses existed, read as `ACTIVE` (R-47) |
+| `statusReason` | populated on failure (nullable) |
+| `lastGlobalHooks` | as on a cell (§4.2): the global hooks that ran in the application's last application event (R-40) |
+| `pending` | present only while `UPDATING`: the fields a replacing `PutApplication` writes, staged until the workflow commits them (R-48) |
+| `operationId` | the name of the execution the record's last accepted operation started, written by that operation's conditional write (R-48, R-49), never by the workflow. Every workflow write and every compensation on the record is conditioned on it, so only the current operation's execution can change the record (R-50, R-51) |
 | `createdAt`, `updatedAt` | timestamps |
 
 Key: `PK=APPLICATION#<applicationId>`, `SK=META`.
@@ -713,9 +734,17 @@ build's input is resolved (R-32, R-34), so every deployment and every
 cell of the application is checked against one current set. A script
 stamped onto an older cell receives any parameter added since as one more
 environment variable, which it ignores. An
-application has **no status**: its operations are synchronous and run no
-build. Its lifecycle is register (`PutApplication`) → in use → delete
-(empty only).
+application's mutations run no build, but they are asynchronous so
+that pre hooks can gate them (R-47, §8.4). Its lifecycle is register
+(`PutApplication`, `CREATING` → `ACTIVE`) → in use → delete (empty
+only, `DELETING` → gone). A replaced definition is staged in `pending`
+until the workflow commits it (R-48); placement, parameter validation
+and every other read by another operation use the live fields only.
+While a replace is staged the record holds the definition and both
+declaration lists twice: about 100 KiB at the caps (40 declarations of
+at most 2.1 KiB each, five hook definitions, the source and six script
+paths), under 200 KiB with `pending`, inside DynamoDB's 400 KB item
+limit.
 
 The source and script charsets change `PutApplication`'s validation,
 which admitted any value that starts with a non-blank character,
@@ -727,12 +756,16 @@ its stamp, so the §8.1 bound for the application's source and paths
 holds for cells stamped afterwards.
 
 **R-29 (field ownership on applications):** `PutApplication` MUST write
-the definition fields except `hooks`, plus `placementStrategy` and
-`updatedAt`, and each of `hooks`, `parameters` and `cellParameters`
-**only when the request sent it** (on an existing application an absent
-list is kept, `[]` clears it, §5.5), and MUST NOT touch `cellCount`;
-the two counter paths MUST NOT touch the definition. A definition replaced
-while a cell is being created does not change that cell: the cell was
+the definition fields except `hooks`, plus `placementStrategy`, and
+each of `hooks`, `parameters` and `cellParameters` **only when the
+request sent it** (on an existing application an absent list is kept,
+`[]` clears it, §5.5), into the record on a create and into `pending`
+on a replace (R-48), plus `status`, `operationId` and `updatedAt`, and
+MUST NOT touch `cellCount`. The workflow's commit moves `pending` into
+those fields and touches nothing else (R-50). The two counter paths
+MUST NOT write the definition, `pending`, `status` or `operationId`.
+A definition replaced while a cell is being created does not change
+that cell: the cell was
 stamped inside the placement transaction, from the definition read before
 it (§7.1 step 0).
 
@@ -790,13 +823,19 @@ what the cell create script published under
 | `name` | required; NOT unique (uniqueness is deliberately not a tenant-name property) |
 | `description` | optional |
 | `deploymentCount` | **the authoritative count of this tenant's deployments** — claimed in the placement transaction, released in the deployment-deleting one (P-6); never written by `CreateTenant` or `UpdateTenant` |
+| `status`, `statusReason`, `lastGlobalHooks`, `operationId` | as for an application (§4.1, R-47, R-51); the hooks and the execution of the tenant's last tenant event |
+| `pending` | present only while `UPDATING`: the `name` and `description` an `UpdateTenant` writes, staged until the workflow commits them (R-48) |
 | `createdAt`, `updatedAt` | timestamps |
 
 Key: `PK=TENANT#<tenantId>`, `SK=META`.
 
-A tenant has **no status**: its operations are synchronous and run no
-build. Its lifecycle is create → in use → delete (empty only). Everything
-provisioned for a tenant is a deployment.
+A tenant's mutations run no build, but they are asynchronous so that
+pre hooks can gate them (R-47, §8.4). Its lifecycle is create
+(`CREATING` → `ACTIVE`) → in use → delete (empty only, `DELETING` →
+gone). Everything provisioned for a tenant is a deployment. An
+`UpdateTenant` stages `name` and `description` in `pending` until the
+workflow commits them (R-48); deployment builds read the live `name`
+as `TENANT_NAME` (§6.1).
 
 **R-7:** The tenant record MUST NOT carry provisioning source, scripts, a
 cell or a build state (P-4,
@@ -881,22 +920,31 @@ cleanup runs with what is stored, whatever the declarations now say (P-9).
 |---|---|
 | `accountId` | the AWS account id, 12 digits — the item's identity; supplied by the operator, never generated |
 | `owner` | `VENDOR \| TENANT` — set at registration, **immutable**: it decides whether placement may choose the account (§7), and flipping it under live cells would silently change who those cells belong to |
-| `applicationIds` | optional list of application ids, each at most once, never empty (400); replaceable. **Absent: the account is shared** and admits every application. **Present: the account is dedicated** and admits only those ([ADR-033](../adr/0033-account-admission-is-an-application-allowlist-on-the-account.md)). Each id MUST name a registered application when written (404 otherwise); an id whose application is later deleted is inert — nothing can be placed for it. Narrowing the set under live cells is allowed: it stops new cells of the removed applications there and withdraws their existing cells' free slots from untargeted placement (§7.1 step 0 filters candidates by account); the cells themselves stay |
+| `applicationIds` | optional list of at most 100 application ids, each at most once, never empty (400); replaceable. The cap bounds `ACCOUNT_APPLICATION_IDS` (R-42). **Absent: the account is shared** and admits every application. **Present: the account is dedicated** and admits only those ([ADR-033](../adr/0033-account-admission-is-an-application-allowlist-on-the-account.md)). Each id MUST name a registered application when written (404 otherwise); an id whose application is later deleted is inert — nothing can be placed for it. Narrowing the set under live cells is allowed: it stops new cells of the removed applications there and withdraws their existing cells' free slots from untargeted placement (§7.1 step 0 filters candidates by account); the cells themselves stay |
 | `maxCells` | cell capacity; integer ≥ 1; replaceable. Lowering it below `cellCount` is allowed and simply stops new cells there (R-24) |
 | `cellCount` | **the authoritative cell counter** — claimed in the cell-creating transaction, released in the cell-deleting one (P-6); never written by `PutAccount` |
-| `externalId` | required for `TENANT`, optional for `VENDOR` (§6.4); sent on every AssumeRole into this account. Not a secret, but never logged |
+| `externalId` | required for `TENANT`, optional for `VENDOR` (§6.4); sent on every AssumeRole into this account. Not a secret, but never logged. Never staged: a replacing `PutAccount` writes it in the request's conditional write, after the handshake probe proved it (R-26, R-48), also while an `ACCOUNT_UPDATE` is in flight, so a rotation takes effect at once (T28) |
+| `status`, `statusReason`, `lastGlobalHooks`, `operationId` | as for an application (§4.1, R-47, R-51); the hooks and the execution of the account's last account event |
+| `pending` | present only while `UPDATING`: the `maxCells` and `applicationIds` a replacing `PutAccount` writes, staged until the workflow commits them (R-48). Placement uses the live `maxCells` and `applicationIds` until then. Never holds `externalId` |
 | `createdAt`, `updatedAt` | timestamps |
 
 Key: `PK=ACCOUNT#<accountId>`, `SK=META`.
 
-An account has **no status**: its operations are synchronous and run no
-build, so there is nothing transitional to guard. Its lifecycle is register
-(`PutAccount`) → in use → delete (empty only).
+An account's mutations run no build, but they are asynchronous so that
+pre hooks can gate them (R-47, §8.4). Its lifecycle is register
+(`PutAccount`, `CREATING` → `ACTIVE`) → in use → delete (empty only,
+`DELETING` → gone).
 
 **R-24 (field ownership on accounts):** `PutAccount` MUST write only the
 policy fields it owns (`owner` on first write, `applicationIds`,
-`maxCells`, `externalId`, `updatedAt`) and MUST NOT touch `cellCount`; the
-two counter paths MUST NOT touch the policy fields. `updatedAt` is the one
+`maxCells`, `externalId`), into the record on a create; on a replace
+it writes `externalId` into the record and `applicationIds` and
+`maxCells` into `pending` (R-48), plus `status`, `operationId` and
+`updatedAt`; on an `UPDATING` account it writes `externalId` and
+`updatedAt` only (R-48). It MUST NOT touch `cellCount`. The workflow's
+commit moves `pending` into `applicationIds` and `maxCells` and never
+touches `externalId` (R-50). The two counter paths MUST NOT write the
+policy fields, `pending`, `status` or `operationId`. `updatedAt` is the one
 attribute both paths write; it is a timestamp, so last-writer-wins there
 loses nothing. A capacity cut and a concurrent claim then compose without a
 lost update: the claim's condition `cellCount < maxCells` evaluates against
@@ -965,8 +1013,10 @@ included attributes at scale.
 ### 4.8 Hook
 
 A **hook** is vendor code the workflow runs before or after a cell or
-deployment script (§6.5,
-[ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md)).
+deployment script, or the commit of an application, tenant or account
+change (§6.5,
+[ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md),
+[ADR-045](../adr/0045-run-hooks-on-application-tenant-and-account-events.md)).
 A **global hook** applies to every application and is registered through
 the API (§5.5); an **application hook** is part of one application's
 definition (§4.1). Both use one definition shape:
@@ -974,8 +1024,8 @@ definition (§4.1). Both use one definition shape:
 | Field | Requirement |
 |---|---|
 | `hookId` | operator-chosen, `[a-z0-9-]{1,32}`; the item's identity for a global hook, unique within the list for an application hook. It orders hooks within a scope (R-45) |
-| `events` | non-empty list of distinct events: `CELL_CREATE`, `CELL_UPDATE`, `CELL_DELETE`, `DEPLOYMENT_CREATE`, `DEPLOYMENT_UPDATE`, `DEPLOYMENT_DELETE` |
-| `phase` | `PRE \| POST`: before the script, or after it succeeded |
+| `events` | non-empty list of distinct events: `CELL_CREATE`, `CELL_UPDATE`, `CELL_DELETE`, `DEPLOYMENT_CREATE`, `DEPLOYMENT_UPDATE`, `DEPLOYMENT_DELETE`, `APPLICATION_CREATE`, `APPLICATION_UPDATE`, `APPLICATION_DELETE`, `TENANT_CREATE`, `TENANT_UPDATE`, `TENANT_DELETE`, `ACCOUNT_CREATE`, `ACCOUNT_UPDATE`, `ACCOUNT_DELETE`. An application hook MUST NOT name a `TENANT_*` or `ACCOUNT_*` event: a tenant spans several applications and an account holds cells of several, so neither event belongs to one application's definition |
+| `phase` | `PRE \| POST`: before the script, or after it succeeded; for an application, tenant or account event, before or after the record commit (§8.4) |
 | `source` | `{type, location, sourceVersion?}`, the shape of the application's `source` (§4.1) under the same pinning rule: a ref that is not a full 40-character commit SHA is accepted with a logged warning naming the hook ([ADR-020](../adr/0020-supply-chain-pinning-warn-and-allow.md)). `type` is a CodeBuild source type name (`GITHUB`, `CODECOMMIT`, `S3`, ...). `location` matches `[A-Za-z0-9._~:/?#\[\]!$&'()*+,;=%-]{1,1024}`: URL characters without `@`, so it can carry no userinfo (`https://user:token@host/...` is a 400). `sourceVersion` matches `[A-Za-z0-9._/^{}+-]{1,128}`, the characters of a branch, a tag (SemVer build metadata after `+` included), a commit SHA, a `<ref>^{<commit>}` pin or an object version. Neither holds a character JSON escapes: `^`, `{`, `}` and `+` need none |
 | `script` | path of the hook's script in its source, matching `[A-Za-z0-9._/-]{1,256}` |
 | `timeoutMinutes` | integer 5–30, default 10; the hook build's run timeout, sent as CodeBuild's `timeoutInMinutesOverride`, whose minimum is 5. Queue time is bounded apart from it (R-46) |
@@ -986,16 +1036,19 @@ Key: `PK=HOOK`, `SK=HOOK#<hookId>`. One partition holds every global
 hook, so the service reads them all in one strongly consistent query
 (§4.7). Beside them, the **hook counter** (`PK=HOOK`, `SK=META`) holds
 `hookCount`, the authoritative count of global hooks, at most 5 (P-6).
-A global hook has no status: its operations are synchronous and run no
-build. Its lifecycle is register (`PutHook`) → in use → delete.
+A global hook has no status: its operations are synchronous, run no
+build and fire no hooks. Its lifecycle is register (`PutHook`) → in
+use → delete.
 
 **R-39 (hook definitions):** `PutHook` and `PutApplication` MUST
 validate every hook definition against the table above and refuse with
 400 a malformed id, an empty or repeating event list, an unknown event or
 phase, an unknown source type, a source field or script path outside its
 pattern (a control character included), a `location` with userinfo, a
-timeout outside 5–30, a repeated `hookId` in an application's list, or
-more than 5 hooks in that list. The patterns admit no character JSON
+timeout outside 5–30, a repeated `hookId` in an application's list,
+more than 5 hooks in that list, or an application hook naming a
+`TENANT_*` or `ACCOUNT_*` event. A global hook may name any of the
+fifteen events. The patterns admit no character JSON
 escapes, so a definition is as large in the execution input as it is
 raw (§8.1). `PutHook` MUST create a hook in
 one transaction (the hook inserted `IF attribute_not_exists`;
@@ -1013,24 +1066,33 @@ carry a secret: `GetHook`, `ListHooks`, `GetApplication`, `GetCell` and
 `GetDeployment` return it to operators and readers alike (R-37, N-12).
 
 **R-40 (hook resolution):** when an operation is accepted (R-20), the
-service MUST resolve the hooks of each event the execution runs (§8.3):
-the application hooks stamped on the cell, never the application
-record's current list (P-4), and the global hooks read in one strongly
+service MUST resolve the hooks of each event the execution runs (§8.3,
+§8.4): for a cell or deployment event the application hooks stamped on
+the cell, never the application record's current list (P-4); for an
+application event the application hooks of the definition being
+written, which on `PutApplication` are the request's `hooks` when it
+sent them and the stored list otherwise, and on `DeleteApplication` the
+stored list; for a tenant or account event no application hooks; and
+for every event the global hooks read in one strongly
 consistent query (`PK=HOOK`, `SK begins_with HOOK#`), each with the
 `revision` and `source` it had at that read. The query MUST run before
 the operation's first write: in §7.1 step 0 for `CreateDeployment`, and
 with the record read that precedes the transitional conditional write
-for `UpdateDeployment`, `DeleteDeployment`, `UpdateCell` and
-`DeleteCell`. A failed query is then a 500 with nothing written, never
+for `UpdateDeployment`, `DeleteDeployment`, `UpdateCell`, `DeleteCell`
+and the seven operations of §8.4 (for `PutAccount`, after its handshake
+probe, R-48). A failed query is then a 500 with nothing written, never
 a record left `CREATING`, `UPDATING` or `DELETING` with no execution.
 The application hooks need no read of their own: a stamp is immutable,
 so the cell the operation already read, or for a new cell the
-application record read in step 0, holds them. The workflow runs that
-snapshot and never re-reads a hook (R-20). A global hook put or deleted
+application record read in step 0, holds them; an application event
+takes them from the request or the record the operation already read.
+The workflow runs that snapshot and never re-reads a hook (R-20). A
+global hook put or deleted
 after the read does not change an execution already accepted; the next
 operation sees it. Both are tolerated races (§7.2). Every terminal write
-that leaves the record in place (§8.2) MUST record on the cell or the
-deployment the global hooks that ran for its event as
+that leaves the record in place (§8.2, §8.4) MUST record on the cell,
+the deployment, the application, the tenant or the account the global
+hooks that ran for its event as
 `lastGlobalHooks`, each with the `sourceVersion` the hook names and
 the `resolvedSourceVersion` its build's final poll reported, so an
 operator can tell which commit of a gate or an audit hook an `ACTIVE`
@@ -1047,22 +1109,27 @@ Application hooks need no such record: the cell's stamp names them.
 ## 5. API Surface
 
 Twenty-six operations. Conventions: lowercase plural collection paths,
-kebab-case segments, singleton sub-resource singular. Sync operations
-return 200; async (build-triggering) operations return 202 (P-8).
+kebab-case segments, singleton sub-resource singular. Reads and the four
+hook operations are synchronous and return 200; every mutation of a
+cell, a deployment, an application, a tenant or an account is
+asynchronous and returns 202 with the record, `status` included (P-8).
 
 ### 5.1 Tenant operations
 
-All synchronous: no tenant operation runs a build
+No tenant operation runs a build
 ([ADR-037](../adr/0037-a-deployment-is-one-tenant-in-one-application.md)).
+The three mutations are asynchronous all the same, so that hooks on
+tenant events can gate them (§8.4,
+[ADR-045](../adr/0045-run-hooks-on-application-tenant-and-account-events.md)).
 A tenant is the customer; what is provisioned for it is a deployment (§5.2).
 
 | Op | HTTP | Code | Contract |
 |---|---|---|---|
-| `CreateTenant` | `POST /tenants` | 200 | Input `{name, description?}`. Inserts the record with `deploymentCount = 0` (conditional on non-existence, P-5). Nothing is provisioned. |
-| `GetTenant` | `GET /tenants/{tenantId}` | 200 | The record: `name`, `description`, `deploymentCount`. 404 if missing. |
-| `UpdateTenant` | `PUT /tenants/{tenantId}` | 200 | Metadata only (`name`, `description`), conditional on existence; never `deploymentCount` (R-21). 404 if missing. |
-| `DeleteTenant` | `DELETE /tenants/{tenantId}` | 200 | **Empty tenants only** (P-10): a single conditional delete (`attribute_exists AND deploymentCount = 0`), the counterpart of the deployment claim; condition failure → 409. Deployments are deleted first, one by one, through `DeleteDeployment`. |
-| `ListTenants` | `GET /tenants` | 200 | Paginated, unfiltered. Tenants of one cell or application are listed through `ListDeployments`. |
+| `CreateTenant` | `POST /tenants` | **202** | Input `{name, description?}`. Validates, reads the global hooks (R-40), inserts the record `CREATING` with `deploymentCount = 0` (conditional on non-existence, P-5) and starts the workflow for `TENANT_CREATE` (§8.4). Returns the record, `tenantId` and `status` included. Nothing is provisioned. `GetTenant` polls it to `ACTIVE`, or to `CREATE_FAILED` when a hook failed, whose remedy is `DeleteTenant` with the returned id (§5.6). If Step Functions refused the start, the tenant is deleted again and the call answers 500 with nothing left; if the start's outcome is unknown, the tenant goes to `CREATE_FAILED` and the call answers 500, and `ListTenants` finds it, unless the start is shown to have gone through, which answers 202 (R-51). |
+| `GetTenant` | `GET /tenants/{tenantId}` | 200 | The polling endpoint: `name`, `description`, `deploymentCount`, `status`, `statusReason`, `lastGlobalHooks`, and `pending` while an update is staged. 404 if missing. |
+| `UpdateTenant` | `PUT /tenants/{tenantId}` | **202** | Metadata only (`name`, `description`), never `deploymentCount` (R-21). Validates, reads the global hooks (R-40), then one conditional write stages the values in `pending` and moves the tenant to `UPDATING` (status `ACTIVE` or `UPDATE_FAILED`, R-48); the live `name` changes when the workflow commits after the `TENANT_UPDATE` pre hooks (§8.4). 404 if missing; 409 when in flight or from `CREATE_FAILED`, `DELETING` or `DELETE_FAILED`. |
+| `DeleteTenant` | `DELETE /tenants/{tenantId}` | **202** | **Empty tenants only** (P-10): one conditional write moves the tenant to `DELETING` (`attribute_exists AND deploymentCount = 0` and status `ACTIVE` or a `*_FAILED` status, R-49), the counterpart of the deployment claim, which needs a live tenant (§7.1); condition failure → 409. The workflow runs the `TENANT_DELETE` pre hooks, deletes the record, then runs the post hooks. Deployments are deleted first, one by one, through `DeleteDeployment`. |
+| `ListTenants` | `GET /tenants` | 200 | Paginated, unfiltered, with each tenant's `status`. Tenants of one cell or application are listed through `ListDeployments`. |
 
 ### 5.2 Deployment operations
 
@@ -1093,14 +1160,17 @@ noted extension, not part of this spec.
 
 ### 5.4 Account operations
 
-All synchronous: no account operation runs a build (P-1).
+No account operation runs a build (P-1). `PutAccount` and
+`DeleteAccount` are asynchronous so that hooks on account events can gate
+them (§8.4,
+[ADR-045](../adr/0045-run-hooks-on-application-tenant-and-account-events.md)).
 
 | Op | HTTP | Code | Contract |
 |---|---|---|---|
-| `PutAccount` | `PUT /accounts/{accountId}` | 200 | Create-or-replace. Input `{owner, maxCells, applicationIds?, externalId?}`; `externalId` MUST be present when `owner` is `TENANT` (400 otherwise, §6.4); every `applicationIds` entry MUST name a registered application (404 otherwise). Before writing, the service MUST verify the handshake by assuming both roles of the account's pair with the given `externalId` and, when one is given, proving each role refuses the call without it (R-26); failure → 400 naming the role and the reason. On an existing account `owner` MUST match (409 otherwise); `maxCells`, `applicationIds` and `externalId` are replaced (an absent `applicationIds` makes the account shared); `cellCount` is untouched (R-24). The write is conditional (`attribute_not_exists` on create; `owner = :owner` on replace). |
-| `GetAccount` | `GET /accounts/{accountId}` | 200 | The record: `owner`, `applicationIds` (absent when shared), `cellCount`/`maxCells`, whether an `externalId` is set (never its value). 404 if unregistered. |
-| `ListAccounts` | `GET /accounts` | 200 | Paginated capacity view: `owner`, `applicationIds`, `cellCount`/`maxCells` per account. |
-| `DeleteAccount` | `DELETE /accounts/{accountId}` | 200 | **Empty accounts only** (P-10): a single conditional delete (`attribute_exists AND cellCount = 0`), the counterpart of the cell-slot claim; condition failure → 409. A deleted account's roles stay installed — removing them is the owner's act, not the control plane's. |
+| `PutAccount` | `PUT /accounts/{accountId}` | **202** | Create-or-replace, staged (R-48). Input `{owner, maxCells, applicationIds?, externalId?}`; `externalId` MUST be present when `owner` is `TENANT` (400 otherwise, §6.4); `applicationIds` holds at most 100 ids (400 otherwise), each naming a registered application (404 otherwise). Before writing, the service MUST verify the handshake by assuming both roles of the account's pair with the given `externalId` and, when one is given, proving each role refuses the call without it (R-26); failure → 400 naming the role and the reason. Then it reads the global hooks (R-40) and makes one conditional write, its path chosen from a strongly consistent read: no record, a create, which inserts the record `CREATING` (`attribute_not_exists`); `CREATE_FAILED`, a re-put, which writes the values into the record and moves it back to `CREATING` (`status = CREATE_FAILED AND owner = :owner`); a live record (R-47), a replace, which writes `externalId` into the record at once, `maxCells` and `applicationIds` into `pending`, and moves it to `UPDATING` (`owner = :owner` and status `ACTIVE` or `UPDATE_FAILED`); `UPDATING`, a rotation, which writes only `externalId` (`owner = :owner AND status = UPDATING AND operationId = :op`, with the `operationId` the read returned), starts no execution and runs no hook, and whose `maxCells` and `applicationIds` MUST equal the change in flight (409 otherwise); a rotation whose condition fails reads the record once more and takes the path its new status selects, without a second probe (R-48). An absent `applicationIds` makes the account shared once committed. An `ACCOUNT_UPDATE` pre hook therefore cannot refuse an `externalId` change, and a running one cannot delay it (R-48). `owner` MUST match on every path but the create (409 otherwise); `cellCount` is untouched (R-24). 409 when `CREATING`, `DELETING` or `DELETE_FAILED`: no build runs into such an account, so a rotation waits for the event to end. Every path but the rotation then starts `ACCOUNT_CREATE` or `ACCOUNT_UPDATE` (§8.4); `GetAccount` polls it. |
+| `GetAccount` | `GET /accounts/{accountId}` | 200 | The polling endpoint: `owner`, `applicationIds` (absent when shared), `cellCount`/`maxCells`, whether an `externalId` is set (never its value), `status`, `statusReason`, `lastGlobalHooks`, and `pending` while a replace is staged (`maxCells` and `applicationIds` only). 404 if unregistered. |
+| `ListAccounts` | `GET /accounts` | 200 | Paginated capacity view: `owner`, `applicationIds`, `cellCount`/`maxCells` and `status` per account. |
+| `DeleteAccount` | `DELETE /accounts/{accountId}` | **202** | **Empty accounts only** (P-10): one conditional write moves the account to `DELETING` (`attribute_exists AND cellCount = 0` and status `ACTIVE` or a `*_FAILED` status, R-49), the counterpart of the cell-slot claim, which needs a live account (§7.1); condition failure → 409. The workflow runs the `ACCOUNT_DELETE` pre hooks, deletes the record, then runs the post hooks. A deleted account's roles stay installed — removing them is the owner's act, not the control plane's. |
 
 **R-26 (handshake at registration,
 [ADR-027](../adr/0027-verify-the-account-handshake-at-registration.md),
@@ -1116,16 +1186,20 @@ a 500 asking for a retry, not a refusal: the pair may be fine.
 
 ### 5.5 Application and hook operations
 
-All synchronous: no application or hook operation runs a build
+No application or hook operation runs a build
 ([ADR-032](../adr/0032-register-applications-at-run-time-and-stamp-their-definition-onto-cells.md),
 [ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md)).
+`PutApplication` and `DeleteApplication` are asynchronous so that hooks
+on application events can gate them (§8.4,
+[ADR-045](../adr/0045-run-hooks-on-application-tenant-and-account-events.md));
+the hook operations are synchronous and fire no hooks.
 
 | Op | HTTP | Code | Contract |
 |---|---|---|---|
-| `PutApplication` | `PUT /applications/{applicationId}` | 200 | Create-or-replace. Input `{source, cellScripts, tenantScripts, maxTenants, hooks?, placementStrategy?, parameters?, cellParameters?}` — the definition of §4.1 plus the strategy and both sets of parameter declarations, validated as a whole (400 on a missing script path, a source field or script path outside its charset (§4.1), a malformed source, `maxTenants < 1`, an unknown strategy, an id outside `[a-z0-9-]{1,32}`, a parameter name outside `[A-Z][A-Z0-9_]{0,63}`, a duplicate name within or across the two lists, more than 20 declarations in either list, a `default` on a required parameter, a cell parameter without a `default`, or a hook definition that fails R-39). A hook source whose ref is not a full commit SHA is logged with a warning naming the application and the hook, as the application's own source is. On an existing application the definition fields other than `hooks`, and the strategy, are replaced. The two declaration lists are replaced only when sent: an absent `parameters` or `cellParameters` **keeps** the current list, and an empty list `[]` clears it, so a `PutApplication` that only changes `maxTenants` cannot silently drop every required check and default. On a new application an absent list declares none. `hooks` follows the same rule: absent keeps the current list, `[]` clears it, and a changed list reaches only cells created afterwards (P-4). Existing cells and deployments keep their stored values. A cell parameter added since reaches each cell's next build as its default. A newly required parameter makes the next `UpdateDeployment` of every deployment lacking it a 400 until the operator supplies the value; it never blocks a `DeleteDeployment`. `cellCount` is untouched (R-29). The "one name in one list" check runs against the lists the request sent plus any list it keeps. One write, with `cellCount` and `createdAt` set through `if_not_exists`, so a replace never resets them. When both declaration lists are sent the write carries no condition — an application has no immutable field, so it is correct in every prior state (P-5). When a declaration list is kept, the write is conditioned on that list being exactly as the request read it (`attribute_not_exists` when the attribute was absent, equality when present, an empty `[]` included; absent and `[]` are different reads), so two concurrent puts that each send one list cannot store one name in both; a failed condition → 409, retryable. A kept `hooks` list adds no condition: a put that keeps it writes no hook attribute, and hooks share no invariant with another list. The condition is never on `updatedAt`, which cell creates and deletes also write. Cells already created keep their stamp (P-4). |
-| `GetApplication` | `GET /applications/{applicationId}` | 200 | The record: the definition, `placementStrategy`, both sets of parameter declarations and `cellCount`. 404 if unregistered. |
-| `ListApplications` | `GET /applications` | 200 | Paginated: `applicationId`, `maxTenants`, `placementStrategy`, `cellCount` per application. |
-| `DeleteApplication` | `DELETE /applications/{applicationId}` | 200 | **Empty applications only** (P-10): a single conditional delete (`attribute_exists AND cellCount = 0`), the counterpart of the cell-slot claim; condition failure → 409. Accounts that name the application in `applicationIds` are not touched (§4.5). |
+| `PutApplication` | `PUT /applications/{applicationId}` | **202** | Create-or-replace, staged (R-48). Input `{source, cellScripts, tenantScripts, maxTenants, hooks?, placementStrategy?, parameters?, cellParameters?}` — the definition of §4.1 plus the strategy and both sets of parameter declarations, validated as a whole (400 on a missing script path, a source field or script path outside its charset (§4.1), a malformed source, `maxTenants < 1`, an unknown strategy, an id outside `[a-z0-9-]{1,32}`, a parameter name outside `[A-Z][A-Z0-9_]{0,63}`, a duplicate name within or across the two lists, more than 20 declarations in either list, a `default` on a required parameter, a cell parameter without a `default`, or a hook definition that fails R-39, an application hook on a `TENANT_*` or `ACCOUNT_*` event included). A hook source whose ref is not a full commit SHA is logged with a warning naming the application and the hook, as the application's own source is. On an existing application the definition fields other than `hooks`, and the strategy, are replaced. The two declaration lists are replaced only when sent: an absent `parameters` or `cellParameters` **keeps** the current list, and an empty list `[]` clears it, so a `PutApplication` that only changes `maxTenants` cannot silently drop every required check and default. On a new application an absent list declares none. `hooks` follows the same rule: absent keeps the current list, `[]` clears it, and a changed list reaches only cells created afterwards (P-4). Existing cells and deployments keep their stored values. A cell parameter added since reaches each cell's next build as its default. A newly required parameter makes the next `UpdateDeployment` of every deployment lacking it a 400 until the operator supplies the value; it never blocks a `DeleteDeployment`. `cellCount` is untouched (R-29). The "one name in one list" check runs against the lists the request sent plus any list it keeps. The global hooks are read before the write (R-40). The write's path comes from a strongly consistent read: no record, a create, which inserts the record `CREATING` (`attribute_not_exists`); `CREATE_FAILED`, a re-put, which writes the values into the record and moves it back to `CREATING` (`status = CREATE_FAILED`); a live record (R-47), a replace, which writes the values into `pending` and moves it to `UPDATING` (status `ACTIVE` or `UPDATE_FAILED`, or absent), the live definition unchanged until the commit; `CREATING`, `UPDATING`, `DELETING` or `DELETE_FAILED`, a 409. One write on every path, with `cellCount` and `createdAt` set through `if_not_exists`, so a re-put never resets them. When a declaration list is kept, the write is also conditioned on that list being exactly as the request read it (`attribute_not_exists` when the attribute was absent, equality when present, an empty `[]` included; absent and `[]` are different reads), so two concurrent puts that each send one list cannot store one name in both; a failed condition → 409, retryable. A kept `hooks` list adds no condition: a put that keeps it writes no hook attribute, and hooks share no invariant with another list. The condition is never on `updatedAt`, which cell creates and deletes also write. Cells already created keep their stamp (P-4). The workflow then runs `APPLICATION_CREATE` or `APPLICATION_UPDATE` (§8.4), and `GetApplication` polls it. |
+| `GetApplication` | `GET /applications/{applicationId}` | 200 | The polling endpoint: the definition, `placementStrategy`, both sets of parameter declarations, `cellCount`, `status`, `statusReason`, `lastGlobalHooks`, and `pending` while a replace is staged. 404 if unregistered. |
+| `ListApplications` | `GET /applications` | 200 | Paginated: `applicationId`, `maxTenants`, `placementStrategy`, `cellCount`, `status` per application. |
+| `DeleteApplication` | `DELETE /applications/{applicationId}` | **202** | **Empty applications only** (P-10): one conditional write moves the application to `DELETING` (`attribute_exists AND cellCount = 0` and status `ACTIVE` or a `*_FAILED` status, R-49), the counterpart of the cell-slot claim, which needs a live application (§7.1); condition failure → 409. The workflow runs the `APPLICATION_DELETE` pre hooks (global, then the stored application hooks), deletes the record, then runs the post hooks. Accounts that name the application in `applicationIds` are not touched (§4.5). |
 | `PutHook` | `PUT /hooks/{hookId}` | 200 | Create-or-replace a global hook. Input `{events, phase, source, script, timeoutMinutes?}`, validated per R-39 (400). A create claims a `hookCount` slot in the same transaction; a sixth hook → 409. A replace increments `revision`. Takes effect on operations accepted afterwards; executions in flight keep the snapshot they were accepted with (R-40). Logs a warning naming the hook when the source ref is not a full commit SHA. |
 | `GetHook` | `GET /hooks/{hookId}` | 200 | The record: the definition, `revision`, timestamps. 404 if unregistered. |
 | `ListHooks` | `GET /hooks` | 200 | Paginated, in `hookId` order, which is the order global hooks run in (R-45). |
@@ -1138,7 +1212,7 @@ provisioned out of band and published under that application's shared
 namespace (§6.2). There is likewise no operation that runs a hook: hooks
 run only as steps of an execution a lifecycle operation started (R-44).
 
-### 5.6 Status state machine (cells and deployments)
+### 5.6 Status state machine
 
 ```
             create                     update
@@ -1153,6 +1227,131 @@ run only as steps of an execution a lifecycle operation started (R-44).
                                   DELETE_FAILED ──► (delete retry)
 ```
 
+Cells, deployments, applications, tenants and accounts share the
+statuses and the diagram. For an application, a tenant or an account
+the record commit (§8.4) takes the build's place, and the
+"empty only" guard on delete is its count of cells or deployments. On
+create they differ in one way: a `CREATE_FAILED` application or
+account takes a re-put, which runs the create again, because its id is
+the operator's; a `CREATE_FAILED` tenant is deleted, because its id is
+generated and a second `CreateTenant` makes a new tenant.
+
+**R-47 (record status):** applications, tenants and accounts MUST carry
+`status` (the cell enum, §4.2), `statusReason` and `lastGlobalHooks`
+(R-40). A record written before these fields existed has no `status`,
+and every read and every condition MUST treat an absent `status` as
+`ACTIVE` (`attribute_not_exists(#status) OR #status IN (...)`); no
+migration writes it. A record is **live** when its status is `ACTIVE`,
+`UPDATING` or `UPDATE_FAILED`: its live fields are in force. In
+`CREATING`, `CREATE_FAILED`, `DELETING` and `DELETE_FAILED` it is not
+live. Every other operation that reads one of these records
+(placement, parameter validation (R-33, R-34), the input of a build
+(R-20), `TENANT_NAME`) MUST read its live fields and never `pending`.
+
+**R-48 (staged change):** for `PutApplication`, `CreateTenant`,
+`UpdateTenant` and `PutAccount`, validation (400, 404) and, for
+`PutAccount`, the handshake probe (R-26) MUST run in the request before
+anything is written, so the operator gets those errors at once; then
+the global hook read (R-40); then one conditional write, which also
+stores the operation's new `operationId` (R-51); then the workflow
+start (§8.4).
+
+- A create (`CreateTenant`, and `PutApplication` or `PutAccount` for an
+  id with no record) MUST insert the record `CREATING` with its values,
+  conditional on non-existence. A re-put of a `CREATE_FAILED`
+  application or account MUST write the new values into the record and
+  move it back to `CREATING`, conditional on `status = CREATE_FAILED`
+  (and `owner = :owner` for an account). A `CREATING` record is not
+  live, so its values are in force only from the terminal write.
+- An update (`UpdateTenant`, and `PutApplication` or `PutAccount` on a
+  live record) MUST write the request's validated values into a
+  `pending` attribute and move the record to `UPDATING` in one
+  conditional write: the status guard (`ACTIVE` or `UPDATE_FAILED`, or
+  absent) plus the conditions the operation already had (the kept-list
+  conditions of `PutApplication`, §5.5; `owner = :owner` on
+  `PutAccount`, R-24). The live fields MUST NOT change in that write,
+  except an account's `externalId` (below); the workflow commits
+  `pending` after the pre hooks (R-50). A pre hook failure ends
+  `UPDATE_FAILED`, removes `pending` and leaves the old values live. A
+  post hook failure ends `UPDATE_FAILED` with the new values live, as a
+  post hook failure on a cell leaves the script's changes in place.
+- `externalId` is never staged. A replacing `PutAccount` MUST write it
+  into the record in the same conditional write, after the probe of
+  R-26 proved the pair accepts it, and stage only `maxCells` and
+  `applicationIds`. An owner rotates a leaked id by redeploying the
+  pair to refuse the old one (T28); a staged id would leave every build
+  into the account presenting an id the pair refuses while the pre
+  hooks run, and for good when one refuses. A security rotation must
+  not wait on a gate, so an `ACCOUNT_UPDATE` pre hook cannot refuse an
+  `externalId` change: its failure drops the staged `maxCells` and
+  `applicationIds`, and the new `externalId` stays in force. No hook
+  sees the id (R-42), so none could judge it anyway.
+- A rotation MUST NOT wait on a running event either. A `PutAccount`
+  on an `UPDATING` account MUST write only `externalId` and
+  `updatedAt`, after the probe of R-26, in one write conditioned on
+  `owner = :owner AND status = UPDATING AND operationId = :op`, with
+  the `operationId` its read returned. It starts no execution, runs no
+  hook, keeps the record's `operationId` and answers 202 with the
+  record. Its `maxCells` and `applicationIds` MUST equal the change in
+  flight (`pending`, or the live fields once the commit removed it),
+  409 otherwise, so a request never silently drops a change it sent;
+  the `operationId` condition keeps that comparison true at the
+  write. The write cannot race the commit, which never touches
+  `externalId` (R-24), and leaves the running execution's own writes
+  as they were. `CREATING` and `DELETING` accounts admit no such write
+  and need none: no build runs into either (placement claims only a
+  live account, R-13, and a `DELETING` one has no cell, R-49), so the
+  owner puts the new id once the event ends. An account stranded
+  `UPDATING` (T47) can still rotate this way and keeps serving builds
+  with its live values; it cannot commit or drop its staged change,
+  change `maxCells` or `applicationIds`, or be deleted until the
+  record is repaired. When the rotation's write loses its condition
+  (the event ended, or another began, between the read and the write),
+  the service MUST read the record once more and take the path its new
+  status selects, as if the request had read it first, without running
+  the probe again, which has passed: the replace for `ACTIVE` or
+  `UPDATE_FAILED`, this path again for a newer change in flight. A
+  status that admits no put answers the 409 that path gives, and a
+  write that loses its condition a second time answers a 409
+  classified as R-14 classifies a lifecycle conflict.
+- `pending` exists only while the record is `UPDATING` and holds only
+  the fields the request stages. The record's `Get` operation returns
+  it, so an operator can see what is staged.
+- A put, an update or a delete of a record that is `CREATING`,
+  `UPDATING` or `DELETING`, a put or update from `DELETING` or
+  `DELETE_FAILED`, and `UpdateTenant` from `CREATE_FAILED` MUST be a 409,
+  classified as R-14 classifies a lifecycle conflict. The one
+  exception is the account rotation above.
+
+**R-49 (record delete):** `DeleteApplication`, `DeleteTenant` and
+`DeleteAccount` MUST read the global hooks (R-40) and then move the
+record to `DELETING` in one conditional write that stores the
+operation's new `operationId` (R-51) and keeps the existing empty
+check: status `ACTIVE` or a `*_FAILED` status (or absent) AND
+`cellCount = 0` (application, account) or `deploymentCount = 0`
+(tenant); condition failure → 409. Placement claims only a live record
+(§7.1), so no cell or deployment can be counted against a record from
+the moment it is `DELETING`. The workflow runs the pre hooks, each with
+the three attempts and the skip of R-46; then deletes the record,
+conditional on `status = DELETING`, `operationId = :op` and the same
+count still 0; then
+runs the post hooks the same way (R-50). A delete whose condition fails
+while the record is still there ends `DELETE_FAILED`; a missing record
+proves that an earlier identical delete committed (P-11). No hook can
+stop a delete (P-9).
+
+Every failed status of these records has an operator action that leads
+out of it (P-9):
+
+| Status | Application | Tenant | Account |
+|---|---|---|---|
+| `CREATE_FAILED` | `PutApplication` again, which runs the create again (R-48), or `DeleteApplication` | `DeleteTenant` with the id the `CreateTenant` 202 returned. A tenant also reaches `CREATE_FAILED` from a `CreateTenant` that answered 500 because its workflow start had an unknown outcome (R-51), whose caller never got the id. `ListTenants` lists every tenant, so one whose id was lost is found there. A new `CreateTenant` makes a new tenant | `PutAccount` again with the same `owner`, which runs the create again, or `DeleteAccount` |
+| `UPDATE_FAILED` | `PutApplication` again, which stages and runs the update again; the record stays live with the values in force (R-48) | `UpdateTenant` again; live meanwhile | `PutAccount` again; live meanwhile |
+| `DELETE_FAILED` | `DeleteApplication` again | `DeleteTenant` again | `DeleteAccount` again |
+
+A record left `CREATING`, `UPDATING` or `DELETING` with no execution is
+the residual of §7.4.
+
 **R-12:** Every transition into a transitional status (`CREATING`,
 `UPDATING`, `DELETING`) MUST be one conditional write (or transaction
 member) checking the exact expected/accepted status set (P-5). A failed
@@ -1161,9 +1360,22 @@ compare-and-set maps to 409.
 **R-13 — cross-entity guards:**
 - Placement requires the cell `ACTIVE` — the single condition that closes
   the place-into-deleting-cell race.
+- Placement and `CreateDeployment` require the tenant, the application
+  and the chosen account live (R-47): never `CREATING`,
+  `CREATE_FAILED`, `DELETING` or `DELETE_FAILED`. §7.1 step 0 checks the
+  reads (409), and the placement transaction conditions every one of
+  these records it writes on a live status, so a record that leaves a
+  live status between the read and the write cancels the claim.
+  Placement reads live values, never `pending`. A tenant, application
+  or account that counts a deployment or a cell is therefore always
+  live: only a live record can be claimed, and R-49 needs a count of 0
+  before `DELETING`. `UpdateDeployment` and `UpdateCell` need no guard
+  on them.
 - `UpdateDeployment` requires the cell `ACTIVE` — no tenant builds against
   a shared deployment mid-change.
 - `DeleteDeployment` is exempt from cell-status guards (P-9).
+  `DeleteDeployment` and `DeleteCell` are exempt from the status of the
+  tenant, the application and the account too.
 - The build guards are one-directional and this is a **documented tolerated
   race** (P-7): a cell build and tenant build can overlap when their
   accepts race. An overlap can fail a build (surfacing as `*_FAILED` on the
@@ -1178,7 +1390,7 @@ compare-and-set maps to 409.
 | `ValidationException` | 400 | malformed input, malformed pagination token, two list filters at once; an invalid application definition or parameter declaration on `PutApplication`; a deployment parameter that fails R-33 on `CreateDeployment` or `UpdateDeployment`; a cell parameter that fails R-34 on `UpdateCell`; a targeted `CreateDeployment` into an account that does not admit the application; `PutAccount` handshake refusal (R-26: a half could not be assumed, or admits the call without the supplied external id); an invalid hook definition on `PutHook` or `PutApplication` (R-39) |
 | `UnauthorizedError` | 401/403 | missing/invalid JWT; a role in neither set; a reader calling a non-`GET` operation (R-36); a token without `aud` whose `client_id` is not listed or does not equal `sub`, or that lacks the required scope (R-38) |
 | `ResourceNotFoundError` | 404 | unknown tenant, deployment, cell, account, application or global hook (including an unregistered `CreateDeployment.accountId` or `applicationId`, and an unregistered id in `PutAccount.applicationIds`) |
-| `ConflictError` | 409 | in-flight mutation; a second deployment of the same application for one tenant; occupied-tenant delete; occupied-cell delete; occupied-account delete; occupied-application delete; `owner` change on `PutAccount`; cell-not-ACTIVE guard; `clientToken` reuse with different parameters; a parameter merge or a list-keeping `PutApplication` whose read went stale — retry (R-14); `CreateDeployment` lost every bounded claim on candidate cells and no account had a free cell slot — retry ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)); a `PutHook` that raced a create or delete of the same hook — retry; a `PutHook` create with five global hooks registered — no retry hint, delete a hook first (R-39) |
+| `ConflictError` | 409 | in-flight mutation; a second deployment of the same application for one tenant; occupied-tenant delete; occupied-cell delete; occupied-account delete; occupied-application delete; `owner` change on `PutAccount`; cell-not-ACTIVE guard; `clientToken` reuse with different parameters; an application, tenant or account in flight (R-48); an application, tenant or account not live for `CreateDeployment` (R-13), with a retry hint only when it is `CREATING`, none when it is `CREATE_FAILED`, `DELETING` or `DELETE_FAILED`; a parameter merge or a list-keeping `PutApplication` whose read went stale — retry (R-14); `CreateDeployment` lost every bounded claim on candidate cells and no account had a free cell slot — retry ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)); a `PutHook` that raced a create or delete of the same hook — retry; a `PutHook` create with five global hooks registered — no retry hint, delete a hook first (R-39) |
 | `InsufficientCapacityError` | 409 | `CreateDeployment` found no eligible cell and no eligible account with cell capacity: every vendor-owned account admitting the application is full (untargeted), or the named account is full (targeted). Nothing was written. The remedy is an operator act — raise `maxCells`, register an account, or admit the application in one — so the error is distinct from `ConflictError`, which a client may simply retry later ([ADR-026](../adr/0026-fleet-full-is-a-modelled-error.md)) |
 | `InternalServerError` | 500 | everything else, including a `PutAccount` whose handshake probe STS could not answer (throttling, network): the handshake is unknown, not refused, and the operator retries |
 
@@ -1201,11 +1413,16 @@ checked on the read before the write (R-13) and a cell not `ACTIVE` is a
 409 without a hint from that read; the cell MUST NOT be added to the merge
 write as a transaction `ConditionCheck`, because placements and deployment
 deletes write the cell in their own transactions and would cancel the merge
-with no item to classify. A list-keeping `PutApplication` is the exception
-to the item-based rules: an application has no status, so its failed
-condition is always a 409 with a retry hint, also when the application was
-deleted in between, because the retry is a create-or-replace that succeeds
-(§5.5).
+with no item to classify. `PutApplication` and `PutAccount` follow the
+item-based rules with one addition: when `ALL_OLD` returns no item, the
+record was deleted in between, and the failed condition is a 409 with a
+retry hint, because the retry is a create that succeeds (§5.5, §5.4).
+So is a failed condition on a `CREATE_FAILED` record, which a retry
+re-puts, unless the condition that failed is `owner = :owner`: a
+`PutAccount` whose `ALL_OLD` item holds another `owner`, whatever its
+status, is the owner-change 409 of §5.7, without a hint. Only a delete
+and a re-registration under another owner between the read and the
+write reach the condition that way, and a retry meets the same owner.
 
 ---
 
@@ -1389,16 +1606,19 @@ refusal in `statusReason`, and every record stays consistent.
 
 ### 6.5 Vendor hooks
 
-Hooks are how the vendor acts on a cell's or a deployment's lifecycle
-from its own side: register a route, meter a cell, refuse a create,
+Hooks are how the vendor acts on the lifecycle of a cell, a
+deployment, an application, a tenant or an account from its own side:
+register a route, meter a cell, refuse a create, record an account,
 export an audit record
-([ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md)).
+([ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md),
+[ADR-045](../adr/0045-run-hooks-on-application-tenant-and-account-events.md)).
 A script runs with the pair of the account that hosts the cell, and in a
 tenant-owned account the tenant controls that pair, so anything a script
 can call, the tenant can call too, whenever it likes. A hook runs in the
 control plane account under a role that no cell account holds or trusts, so
 a downstream system that admits only a hook role admits only the vendor.
-When each hook runs, and what its failure does to the operation, is §8.3.
+When each hook runs, and what its failure does to the operation, is
+§8.3 and §8.4.
 
 **R-41 (hook isolation):** hooks MUST run in the control plane account,
 in CodeBuild, in two hook build projects beside the two provisioning
@@ -1665,19 +1885,21 @@ credentials on the hook projects, as for the provisioning projects
 **R-42 (hook environment):** a hook build MUST receive these variables
 and no other control plane state (H-5):
 
-| Variable | Cell events | Deployment events |
-|---|---|---|
-| `EVENT` | `CELL_CREATE\|CELL_UPDATE\|CELL_DELETE` | `DEPLOYMENT_CREATE\|DEPLOYMENT_UPDATE\|DEPLOYMENT_DELETE` |
-| `PHASE` | `PRE\|POST` | `PRE\|POST` |
-| `HOOK_ID`, `HOOK_SCOPE` | the hook's id; `GLOBAL\|APPLICATION` | as for cells |
-| `APPLICATION_ID`, `CELL_ID`, `CELL_ACCOUNT_ID` | ✓ | ✓ |
-| `TENANT_ID`, `TENANT_NAME` | — | ✓ |
-| `OPERATOR_ID` | ✓ (the verified operator identity, M12) | ✓ |
-| `EXECUTION_ID` | the execution's name, one per accepted operation | as for cells |
-| `ATTEMPT` | `1`; `2` or `3` on a delete hook's later attempts, counting attempts that started a build (R-46) | as for cells |
-| `HOOK_SCRIPT` | the hook's `script` path (R-41) | as for cells |
-| `PARAM_<NAME>` | the cell's resolved set (R-34), as the cell script receives it | the deployment's resolved set (R-32), as the tenant script receives it |
-| `SCRIPT_OUTPUTS` | `POST` only: the script's outputs (R-43), `{}` when it wrote none | as for cells |
+| Variable | Cell events | Deployment events | Application events | Tenant events | Account events |
+|---|---|---|---|---|---|
+| `EVENT` | `CELL_CREATE\|CELL_UPDATE\|CELL_DELETE` | `DEPLOYMENT_CREATE\|DEPLOYMENT_UPDATE\|DEPLOYMENT_DELETE` | `APPLICATION_CREATE\|APPLICATION_UPDATE\|APPLICATION_DELETE` | `TENANT_CREATE\|TENANT_UPDATE\|TENANT_DELETE` | `ACCOUNT_CREATE\|ACCOUNT_UPDATE\|ACCOUNT_DELETE` |
+| `PHASE` | `PRE\|POST` | `PRE\|POST` | `PRE\|POST` | `PRE\|POST` | `PRE\|POST` |
+| `HOOK_ID`, `HOOK_SCOPE` | the hook's id; `GLOBAL\|APPLICATION` | as for cells | as for cells | the hook's id; `GLOBAL` | the hook's id; `GLOBAL` |
+| `APPLICATION_ID` | ✓ | ✓ | ✓ | — | — |
+| `CELL_ID`, `CELL_ACCOUNT_ID` | ✓ | ✓ | — | — | — |
+| `TENANT_ID`, `TENANT_NAME` | — | ✓ | — | ✓; the `name` being written on create and update, the stored one on delete | — |
+| `ACCOUNT_ID`, `ACCOUNT_OWNER`, `ACCOUNT_APPLICATION_IDS` | — | — | — | — | ✓: the 12-digit id; `VENDOR\|TENANT`; the admitted application ids joined by `,` in stored order, empty when the account is shared. The values being written on create and update, the stored ones on delete |
+| `OPERATOR_ID` | ✓ (the verified operator identity, M12) | ✓ | ✓ | ✓ | ✓ |
+| `EXECUTION_ID` | the execution's name, one per accepted operation | as for cells | the record's `operationId` (R-51) | as for applications | as for applications |
+| `ATTEMPT` | `1`; `2` or `3` on a delete hook's later attempts, counting attempts that started a build (R-46) | as for cells | as for cells | as for cells | as for cells |
+| `HOOK_SCRIPT` | the hook's `script` path (R-41) | as for cells | as for cells | as for cells | as for cells |
+| `PARAM_<NAME>` | the cell's resolved set (R-34), as the cell script receives it | the deployment's resolved set (R-32), as the tenant script receives it | — | — | — |
+| `SCRIPT_OUTPUTS` | `POST` only: the script's outputs (R-43), `{}` when it wrote none | as for cells | `POST` only: `{}`, because a commit writes no outputs (R-50) | as for applications | as for applications |
 
 CodeBuild delivers this list intact at its caps: beside the fixed
 variables, 40 `PARAM_` values of 1,024 bytes of printable ASCII and a
@@ -1688,14 +1910,23 @@ which R-33 admits (H-11). It also accepts a 41st `PARAM_` variable, a
 is 2,560 bytes (H-11), so the caps are the control plane's own and
 hold before `StartBuild` because the API enforces the parameter caps
 when values are written (R-33, R-34) and the workflow guard the
-outputs cap (R-43).
+outputs cap (R-43). An application, tenant or account event sends
+fewer variables, none of them `PARAM_`, and its longest value,
+`ACCOUNT_APPLICATION_IDS` at 3,299 bytes (100 ids of 32 characters and
+99 commas, §4.5), is under the single 4,096-byte value H-5 delivered.
 
 There is no `ADMIN_EMAIL`: onboarding input crosses the boundary once, to
 the create script (P-3). There is no `externalId` and no pair
-credential (R-41). A hook MUST take the identity it acts on
-(`APPLICATION_ID`, `CELL_ID`, `TENANT_ID`, `CELL_ACCOUNT_ID`) from these
-variables, never from `SCRIPT_OUTPUTS`. Hooks MUST be idempotent and safe
-to re-run, as scripts are (R-15): an update runs them again, a delete
+credential (R-41). On application, tenant and account events a hook
+also receives no parameter value or declaration, no source or script
+of the application, and for an account not even whether an
+`externalId` is set: only the variables of the table. An account event
+still tells a hook which accounts exist, who owns them and what they
+admit (T46). A hook MUST take the identity it acts on
+(`APPLICATION_ID`, `CELL_ID`, `TENANT_ID`, `CELL_ACCOUNT_ID`,
+`ACCOUNT_ID`) from these variables, never from `SCRIPT_OUTPUTS`. Hooks
+MUST be idempotent and safe to re-run, as scripts are (R-15): an update
+runs them again, a delete
 retry runs them again, and a failed create is cleaned up by a delete
 whose hooks run even when the create's hooks never did. `EXECUTION_ID`,
 with `EVENT`, `PHASE` and `HOOK_ID`, names one occurrence of a hook
@@ -1807,9 +2038,11 @@ workflow starts. It embodies P-5, P-6, P-7, and P-11 simultaneously.
 ### 7.1 Algorithm
 
 ```
-0. TARGET    — read the tenant record; missing → 404.
-               read the application record; missing → 404. Its
-               definition is the stamp for a new cell (step 3).
+0. TARGET    — read the tenant record; missing → 404; not
+               live (R-47) → 409.
+               read the application record; missing → 404; not
+               live → 409. Its live definition, never `pending`, is
+               the stamp for a new cell (step 3).
                read the global hooks (R-40); failure → 500,
                nothing written.
                An account ADMITS the application when its
@@ -1817,15 +2050,16 @@ workflow starts. It embodies P-5, P-6, P-7, and P-11 simultaneously.
                id (dedicated).
                accountId given:
                  read the account record; missing → 404;
+                 not live → 409;
                  does not admit the application → 400.
                  eligible accounts = [that account] (any owner).
                  candidate cells   = that account's cells (the
                                      ACCOUNT#<id> → CELL# index)
                                      with this applicationId.
                accountId absent:
-                 eligible accounts = registered accounts with
-                                     owner = VENDOR that admit the
-                                     application; dedicated ones
+                 eligible accounts = live registered accounts
+                                     with owner = VENDOR that admit
+                                     the application; dedicated ones
                                      first, then shared; within each
                                      group ordered by the application's
                                      placementStrategy:
@@ -1847,7 +2081,7 @@ workflow starts. It embodies P-5, P-6, P-7, and P-11 simultaneously.
                  • cell:       tenantCount += 1
                                IF status = ACTIVE AND tenantCount < maxTenants
                  • tenant:     deploymentCount += 1
-                               IF exists
+                               IF exists AND live
                  • deployment: insert {status: CREATING, cellId: <candidate>}
                                IF not exists
                  • [idempotency record: insert IF not exists — only when
@@ -1862,7 +2096,8 @@ workflow starts. It embodies P-5, P-6, P-7, and P-11 simultaneously.
                                                  this application → 409;
                                                  stop
                  tenant condition failed       → tenant deleted meanwhile
-                                                 → 404; stop
+                                                 → 404, or no longer
+                                                 live → 409; stop
                  capacity/status cond. failed  → lost a race; next candidate
                  anything else / ambiguous     → FAIL the request; never
                                                  retarget the same
@@ -1872,16 +2107,17 @@ workflow starts. It embodies P-5, P-6, P-7, and P-11 simultaneously.
 3. CREATE    — no candidate claimed (none found, or budget exhausted):
                for each eligible account in order, one transaction:
                  • account:     cellCount += 1
-                                IF exists AND cellCount < maxCells
+                                IF exists AND live
+                                   AND cellCount < maxCells
                  • application: cellCount += 1
-                                IF exists
+                                IF exists AND live
                  • cell:        insert {status: CREATING,
                                 applicationId, accountId: <account>,
                                 tenantCount: 1 (slot PRE-CLAIMED),
                                 definition stamped from the application
                                 record read in step 0} IF not exists
                  • tenant:      deploymentCount += 1
-                                IF exists
+                                IF exists AND live
                  • deployment:  insert {status: CREATING, cellId: <new>}
                                 IF not exists
                  • [idempotency record as above — still the LAST item]
@@ -1890,14 +2126,21 @@ workflow starts. It embodies P-5, P-6, P-7, and P-11 simultaneously.
                  idempotency condition failed   → REPLAY (7.3)
                  deployment condition failed    → already deployed → 409;
                                                   stop
-                 tenant condition failed        → tenant deleted → 404; stop
-                 account condition failed       → account full (or deleted
-                                                  meanwhile); next account
+                 tenant condition failed        → tenant deleted → 404,
+                                                  not live → 409; stop
+                 account condition failed       → account full, not live
+                                                  or deleted meanwhile;
+                                                  next account
                  application condition failed   → application deleted
-                                                  meanwhile → 404; stop
+                                                  meanwhile → 404, not
+                                                  live → 409; stop
                  anything else / ambiguous      → FAIL the request
                every eligible account refused   → 409 InsufficientCapacity
-                                                  (nothing was written)
+                                                  (nothing was written),
+                                                  except a targeted
+                                                  account refused as not
+                                                  live → 409 Conflict
+                                                  (R-14)
 ```
 
 The account claim nominates from the account listing index and decides on
@@ -1908,7 +2151,13 @@ optimisation an implementation MAY add; it is never the guard. The
 application and tenant claims have no capacity condition — neither has a
 limit — but they MUST be conditional on existence, so a cell is never born
 counting toward an application, and a deployment never toward a tenant,
-that was deleted between step 0 and the transaction. The deployment insert
+that was deleted between step 0 and the transaction. They and the account
+claim MUST also be conditional on a live status (R-47, an absent status
+read as `ACTIVE`), so nothing counts toward a record that went
+`DELETING` after step 0; that condition is what lets R-49 trust the count
+it checked. A targeted account refused for its status rather than its
+capacity is a 409 `ConflictError`, never `InsufficientCapacityError`,
+classified from `ALL_OLD` (R-14). The deployment insert
 is the uniqueness guard: one deployment per tenant per application, decided
 by the write, not by the step 0 read.
 
@@ -1998,6 +2247,18 @@ or place into an ineligible account. Capacity is an operator decision
 - A cell stuck `UPDATE_FAILED` removes its remaining capacity from the
   fleet until an operator re-runs `UpdateCell`; placements meanwhile fill
   other cells or create new ones. Visible in `ListCells`.
+- A placement, a parameter validation or a build input reads an
+  application, a tenant or an account while it is `UPDATING`: it gets
+  the live values, the old ones until the commit (R-47). The next
+  operation after the commit sees the new ones. Nomination, not a guard
+  (P-5).
+- A `CreateDeployment` for a tenant, or into an application or an
+  account, that is `CREATING` is a 409 with a retry hint:
+  `CreateTenant` returns before its `TENANT_CREATE` execution ends. A
+  client polls `GetTenant` first or retries. One that is
+  `CREATE_FAILED`, `DELETING` or `DELETE_FAILED` is a 409 with no retry
+  hint: a retry cannot succeed, and the remedy is the record's own
+  (§5.6).
 - `PutHook` or `DeleteHook` lands while an operation is between its
   read of the global hooks and its write (R-40). That one operation
   runs without the new hook, or with the deleted one, and its
@@ -2062,6 +2323,15 @@ consistent (no phantom slot), but recovery is manual. A production control
 plane adds a sweep for aged transitional records; this spec notes it and
 deliberately omits it (P-1).
 
+The record events of §8.4 have the same residual. R-51 compensates a
+failed start, and a crash between the conditional write and the start
+strands an application, a tenant or an account in `CREATING`,
+`UPDATING` or `DELETING`. An `UPDATING` record stays live with its old
+values and a staged `pending`; a `CREATING` one takes no deployment or
+cell; a `DELETING` one takes no claim. Each refuses its own mutations
+with 409 and blocks nothing else; the sweep of §11 would cover them
+(T47).
+
 ---
 
 ## 8. Provisioning Workflow
@@ -2080,6 +2350,8 @@ operation shape:
 | `DeleteCell` | delete | — |
 
 Around each build the workflow runs the hooks of its event (§8.3).
+Mutations of applications, tenants and accounts run neither build: they
+take the record event path of §8.4 through the same state machine.
 
 ### 8.1 Resolved input
 
@@ -2162,10 +2434,24 @@ Keeping state small does not keep values out of the task history events
 (they record the raw service result); N-11 already accepts values in
 execution history.
 
+A record event's execution (§8.4) is smaller than any cell or deployment
+execution, so the budget above holds for it with room. It carries no
+parameter set, no source or script path, no external id and no role
+ARN, and its commit names the fields to copy from `pending`, never
+their values (R-50). Its input holds at most ten hook definitions (five
+global and, for an application event, five application hooks, one
+event), under 16 KiB; the global hook results for `lastGlobalHooks`,
+2 KiB; the ids and the record fields of R-42, of which `TENANT_NAME`
+(at most 128 characters) takes at most 1.5 KiB however it is escaped
+and `ACCOUNT_APPLICATION_IDS` at most 3,299 bytes; and `SCRIPT_OUTPUTS`
+`{}`. That is under 25 KiB, against about 217 KiB for a new-cell
+create.
+
 ### 8.2 Terminal writes
 
 - **create/update success** → compare-and-set in-flight → `ACTIVE` +
-  `lastBuildId` + `lastGlobalHooks` (R-40).
+  `lastBuildId` + `lastGlobalHooks` (R-40). Applications, tenants and
+  accounts have their own commit and terminal writes (R-50).
 - **deployment delete success** → **one transaction**: delete the
   deployment (condition: exists AND status = `DELETING`) + decrement the
   cell counter (condition: exists AND `tenantCount > 0`) + decrement the
@@ -2233,9 +2519,14 @@ the polls until the build is final) and a script build at most 60:
 | create or update, one event | 10 × 47 + 60 = 530 min |
 | `CreateDeployment` with a new cell, two events | 2 × 530 = 1,060 min (17.7 h) |
 | cell or deployment delete, one event | 10 × 144 (each hook's budget, 3 × 47 + 3 of backoff, R-46) + 60 = 1,500 min (25 h) |
+| application, tenant or account create or update (§8.4) | 10 × 47 + the commit's seconds = 470 min |
+| application, tenant or account delete (§8.4) | 10 × 144 + the commit's seconds = 1,440 min (24 h) |
 
-With hooks, the execution timeout is therefore 26 hours. The worst case
-needs every hook at the 30-minute cap and every attempt to run it out.
+With hooks, the execution timeout is therefore 26 hours. A record
+event's delete runs the hook time of a cell delete without its
+60-minute script, so its history stays inside the counts below. The
+worst case needs every hook at the 30-minute cap and every attempt to
+run it out.
 Standard workflows are billed per state transition, not by duration,
 so the longer net costs nothing; it bounds how long a hung execution
 holds its record. The hook steps of the longest execution, a delete at
@@ -2281,6 +2572,9 @@ new-cell create finishes, post hooks included, before the deployment
 event's pre hooks start. Deletes keep the same order, so pre hooks act
 while the cell or deployment still exists: a hook that removes a route
 removes it before the delete script tears down what the route points at.
+For an application, tenant or account event the record commit takes the
+script's place (R-50): global `PRE`, application `PRE`, commit,
+application `POST`, global `POST`.
 
 **R-46 (hook failure):** a hook fails when its build does not succeed,
 times out (CodeBuild's run timeout, its queued timeout, or the
@@ -2552,6 +2846,13 @@ out". Then:
 | create, update | `POST` | The record MUST land in `CREATE_FAILED` or `UPDATE_FAILED` as if the script had failed, `statusReason` naming the hook. The script's changes stay in place, and later hooks MUST NOT run |
 | delete | `PRE`, `POST` | The workflow MUST retry the hook, three attempts in all, 60 seconds after the first failure and 120 seconds after the second (interval 60 s, backoff rate 2), each attempt a pass of the loop above. When every attempt fails, or the hook's budget is spent, it MUST log the skip (scope, hook id, event, record, build ids, and whether the budget ran out), count it (below) and go on with the next hook, the script and the terminal write, so cleanup stays reachable (P-9). A delete hook cannot stop a delete and cannot be a gate |
 
+For an application, tenant or account event the table reads with the
+commit of R-50 in the script's place: a `PRE` failure on update also
+removes `pending`, so the old values stay live (for an account, all
+but the `externalId` the request wrote, R-48), and a `POST` failure on
+update leaves the committed values live. A delete hook on these events
+is retried and skipped as above, so the record is still deleted (R-49).
+
 The remediation paths are those of P-9. `UPDATE_FAILED` is retried with
 `UpdateDeployment` or `UpdateCell`, which runs the pre hooks, the script
 and the post hooks again. `CREATE_FAILED` is deleted (deployment, then
@@ -2584,7 +2885,183 @@ Gates and registrars, which must change after cells exist, SHOULD
 therefore be global hooks, replaced through `PutHook`; an application
 hook SHOULD be one its application can keep for a cell's life. The
 definition-replacing `UpdateCell` that would replace a stamp is a seam
-(§11).
+(§11). An application hook on an application event has the cheap exit
+a stamped one lacks: the `PutApplication` that removes or corrects it
+runs without the old hook, because application events run the hooks
+of the definition being written (R-40).
+
+### 8.4 Record events
+
+`PutApplication`, `DeleteApplication`, `CreateTenant`, `UpdateTenant`,
+`DeleteTenant`, `PutAccount` and `DeleteAccount` each start one
+execution of the workflow, which serves one event and runs no build
+([ADR-045](../adr/0045-run-hooks-on-application-tenant-and-account-events.md)).
+The execution takes this one path whether or not a hook matches (P-1):
+with none it runs the commit and the terminal write and ends in
+seconds.
+
+| Trigger | Event | Commit |
+|---|---|---|
+| `PutApplication` with no record, or on `CREATE_FAILED` | `APPLICATION_CREATE` | none: the values were written with the insert |
+| `PutApplication` on a live record | `APPLICATION_UPDATE` | `pending` → the fields it names |
+| `DeleteApplication` | `APPLICATION_DELETE` | delete the record (R-49) |
+| `CreateTenant` | `TENANT_CREATE` | none |
+| `UpdateTenant` | `TENANT_UPDATE` | `pending` → `name`, `description` |
+| `DeleteTenant` | `TENANT_DELETE` | delete the record |
+| `PutAccount` with no record, or on `CREATE_FAILED` | `ACCOUNT_CREATE` | none |
+| `PutAccount` on a live record | `ACCOUNT_UPDATE` | `pending` → `maxCells`, `applicationIds`; the request already wrote `externalId` (R-48) |
+| `DeleteAccount` | `ACCOUNT_DELETE` | delete the record |
+
+**R-50 (record event steps):** the workflow MUST run, in R-45's order,
+the `PRE` hooks, then the commit in the script's place, then the `POST`
+hooks, then the terminal write. There is no script and no build in a
+cell account: the commit is one conditional write the workflow makes to
+the table, and `POST` hooks get `SCRIPT_OUTPUTS` `{}`. Every event runs
+its global hooks; an application event also runs the application hooks
+of R-40; a tenant or account event runs no application hook.
+
+- Create: there is nothing to commit. The record stays `CREATING`
+  until the terminal write, so nothing is placed into or against it
+  before its `POST` hooks pass.
+- Update: the commit MUST set each field `pending` holds from `pending`
+  and remove `pending`, in one `UpdateItem` conditioned on
+  `status = UPDATING AND operationId = :op AND attribute_exists(pending)`,
+  where `:op` is the execution's own name. The execution
+  input carries the names to set and the names to remove (an account
+  made shared removes `applicationIds`; a tenant whose description was
+  dropped removes `description`), decided when the request was
+  validated, and never the values, so the definition stays out of the
+  input (§8.1). A commit whose condition fails on a record still
+  `UPDATING` with the same `operationId` and without `pending` is the
+  replay of a commit that landed, and succeeds; any other failure
+  takes the failure path.
+- Delete: the commit is the delete of R-49, conditioned on
+  `operationId = :op` as well. A delete has no terminal write once the
+  commit succeeded.
+- Terminal writes: on success `CREATING` or `UPDATING` → `ACTIVE` +
+  `lastGlobalHooks`; on failure the in-flight status → its `*_FAILED`
+  status + `statusReason` + `lastGlobalHooks`, removing `pending` when
+  it is still there. Each is conditional on the in-flight status and
+  on `operationId = :op`, and retries as R-22 says.
+- Superseded: a commit, terminal or failure write whose condition
+  fails because the record holds another `operationId` or no longer
+  the in-flight status (a compensation moved it), or because the
+  record is gone outside a delete's replay, belongs to an execution
+  that R-51's compensation or a later request has replaced. The
+  execution MUST then end without another write and without running
+  another hook.
+
+The workflow MUST NOT re-read the record to decide what to do (R-20):
+the event, the hooks in run order, the hook environment of R-42 and the
+commit's field names are in the input, and `:op` is the execution's
+name. The cost is one Standard
+execution per operation, a few state transitions when no hook matches,
+plus each matching hook's build and polling (R-46, N-13).
+
+**R-51 (operation id and compensation):** every accepted record
+operation MUST generate an `operationId`, store it on the record in
+its conditional write (R-48, R-49) and start its execution under that
+name. The name extends the shape cell and deployment executions use
+(the record's id, the operation and the accept time in milliseconds)
+with 8 random hex characters
+(`<applicationId>-application-update-<ms>-<hex8>`): at most 74
+characters, inside the 80 that Step Functions allows. The conditional
+write orders the operations on one record but does not keep the
+millisecond clocks of two hosts apart; the random suffix does. So a
+stray execution never passes a later operation's `operationId`
+condition, and the hook tokens R-46 derives from `EXECUTION_ID` never
+collide.
+
+If starting the workflow fails after the conditional write, the
+service MUST conditionally compensate the exact in-flight state, as
+R-19 does for placement, every compensating write also conditioned on
+`operationId = :op`, and answer 500, unless the start went through.
+A start was **refused** only when the operation's own `StartExecution`
+call answered with an error Step Functions raises before it creates an
+execution (a validation, throttling, limit, access or missing state
+machine error; never `ExecutionAlreadyExists`). Such an error on a
+retry, after an attempt whose outcome was unknown, proves nothing
+about that attempt. A start **went through** when a retry under the
+same name answers with the execution or with `ExecutionAlreadyExists`,
+or when `DescribeExecution` on the name finds the execution: the name
+and the input are the operation's own, so only its earlier attempt can
+have created that execution. The service then answers 202 and
+compensates nothing. Every other outcome (a timeout, a 5xx, a lost
+connection, a `DescribeExecution` that answers `ExecutionDoesNotExist`
+or fails) is **unknown**: `DescribeExecution` is eventually
+consistent, so only a found execution counts, never a miss. Step
+Functions answers a repeated start with the same name and input with
+the running Standard execution, and with `ExecutionAlreadyExists` once
+that execution has closed, so the service MAY retry the start under
+the same name, or call `DescribeExecution`, before it decides.
+
+- A fresh insert (`CreateTenant`, and `PutApplication` or `PutAccount`
+  for an id that had no record) whose start was refused MUST be
+  deleted again, conditional on `status = CREATING`,
+  `operationId = :op` and its count still 0 (`deploymentCount` for a
+  tenant, `cellCount` for an application or an account). No hook ran
+  and nothing can claim a `CREATING` record (R-13), so the delete
+  undoes the request completely. A retried `CreateTenant` then makes
+  one tenant, not a second one beside a `CREATE_FAILED` tenant whose id
+  the caller never got, and a retried put is a create again.
+- A fresh insert whose start is unknown MUST go to `CREATE_FAILED`,
+  never be deleted: an execution may be running its create hooks, and
+  only the record's delete runs the delete hooks that clean up after
+  them (P-9). A `CreateTenant` that answers 500 this way leaves a
+  tenant that `ListTenants` finds.
+- A re-put of a `CREATE_FAILED` application or account MUST go back to
+  `CREATE_FAILED`, refused or unknown, not be deleted: an earlier
+  execution ran its create hooks, for the same reason.
+- `UPDATING` → `UPDATE_FAILED` with `pending` removed (an `externalId`
+  the replace wrote stays, R-48), conditioned also on
+  `attribute_exists(pending)`, so a compensation never marks failed a
+  change the execution has already committed (R-50);
+  `DELETING` → `DELETE_FAILED`.
+
+A compensating write whose condition fails is evidence in its own
+right. The service MUST then read the record once. When the record
+holds the same `operationId` in a status the execution writes
+(`ACTIVE`, or the `*_FAILED` status of the in-flight one), holds it
+`UPDATING` with no `pending` (the commit landed and the execution is
+still running its `POST` hooks), or is gone after a delete, the
+execution ran: the service MUST answer 202 with the record as read
+(for a deleted record, as the request's `DELETING` write left it),
+never 500. A client that retries a `CreateTenant` therefore never
+makes a second tenant beside one that went `ACTIVE`. Any other result
+of that read answers 500.
+
+An execution that started despite an unknown outcome cannot finish a
+later request's record: once the compensation or a retry has changed
+the status or stored a new `operationId`, its commit and terminal
+writes fail their condition and it ends as superseded (R-50). Its
+hooks may have run; a stray create's hooks ran for a record that
+stays `CREATE_FAILED` until its delete runs the delete hooks.
+
+Cell and deployment executions keep their unstored names and their
+status-only conditions (§8.2, R-22), and this rule differs from them
+on purpose. Their compensation never deletes a record (R-19), so an
+unknown start there leaves a `CREATE_FAILED` record whose delete runs
+the delete hooks. The stray-execution race reaches them only when an
+unknown start of an update or a delete is retried before the stray
+execution ends; closing it there changes built code, and §11 lists
+it.
+
+Each failed status names the failed start in `statusReason` and lands
+on its remedy (§5.6). A compensation that fails in turn, like a crash
+between the write and the start, is the residual of §7.4 (T47); a
+tenant stranded `CREATING` that way is found with `ListTenants`.
+
+These seven operations answered 200 before ADR-045 and answer 202 after
+it, with a record that is usable only once it is live: a breaking
+change for every API client. A client that uses a record straight after
+creating it (a `CreateTenant` followed by a `CreateDeployment`) MUST
+poll the record's `Get` operation to `ACTIVE` first, or retry the 409.
+Records stored before the change have no `status` and read as `ACTIVE`
+(R-47), so the upgrade writes nothing to the table and needs no drain
+of its own. The build MUST add this to the README's upgrade step and
+change every caller with it: the integration test (§10), the README's
+examples, and clients of these operations such as the
+`tenant-front-door` sample's onboarding path.
 
 ---
 
@@ -2604,6 +3081,7 @@ definition-replacing `UpdateCell` that would replace a stamp is a seam
 | N-10 | `externalId` is never returned by the API and never logged by the sample. It reaches the build as a plaintext CodeBuild environment-variable override carried in the Step Functions execution input, readable by principals with `states:DescribeExecution` or `codebuild:BatchGetBuilds` in the control plane account (the operator role, the account's administrators). | Not a secret by AWS's definition; the guard's value is that outsiders do not hold it, and nobody outside the control plane account can read those APIs. |
 | N-11 | Deployment and cell parameter values MUST NOT be secrets. They are stored in plain text on the deployment or cell record, returned by `GetDeployment` or `GetCell` to operators and readers alike (R-36), and reach the build as CodeBuild environment-variable overrides carried in the Step Functions execution input. The service logs parameter names, never values. A script that needs a secret receives its *name* as a parameter (a Secrets Manager secret or an SSM `SecureString` under the deployment's tenant namespace or the application's shared namespace, §6.2) and reads it under its own role. | Every operator and reader, and everyone who can read the table, the execution history or `codebuild:BatchGetBuilds` in the control plane account, can read the values; secret-shaped storage would need a KMS key, extra IAM and a second read path for a concern the application plane already solves. |
 | N-12 | Script outputs (R-43) and hook definitions (R-39) MUST NOT be secrets. Outputs ride the Step Functions execution history, the script build's exported variables and the post hook builds' environment overrides; hook definitions are stored in plain text and returned to operators and readers alike. | The same readers as N-11; a secret-shaped path for either would need the same KMS key and second read path N-11 declines. A hook that needs a secret reads it under its own role. |
+| N-13 | Every mutation of an application, a tenant or an account runs one Standard workflow execution (§8.4), also when no hook matches: a few state transitions and seconds of latency, plus a hook build per matching hook. Its hook builds share the two hook projects' concurrency caps with every cell and deployment hook build (M15, H-9), so a burst of sign-ups or registrations can take the global hook project's five builds and push cell and deployment hooks onto the refusal path of R-46, and the reverse. | One path for every lifecycle operation (P-1), so a gate added later needs no second code path; the hook-free path costs little next to a build, and the shared cap is the bound T16 and T43 rely on. |
 
 ### 9.1 Service behaviour the hook design relies on
 
@@ -2644,8 +3122,14 @@ parameter declarations; both have `maxTenants = 1` (every cell is a silo,
 so cells — not deployments — are what the accounts count). Tenants T1 and
 T2 are plain records. X declares parameters (step 2); every
 `CreateDeployment` of X supplies `ALLOWED_EMAIL_DOMAIN = example.com`
-unless a step says otherwise. The test's own vendor IdP (a throwaway user
-pool) mints `role: operator` for the operator user and `role:
+unless a step says otherwise. Every accepted `PutApplication`,
+`PutAccount`, `CreateTenant` and `UpdateTenant` answers 202 and is
+polled with `GetApplication`, `GetAccount` or `GetTenant` to `ACTIVE`
+before a later call uses the record, and every accepted
+`DeleteApplication`, `DeleteAccount` and `DeleteTenant` answers 202 and
+is polled to 404, unless a step says otherwise. The test's own vendor
+IdP (a throwaway user pool) mints `role: operator` for the operator user
+and `role:
 control-plane:reader` for a second, reader user; the stack sets
 `readerRoles = ["control-plane:reader"]`. The pool is on the Essentials
 plan with a user pool domain, whose `/oauth2/token` endpoint is the only
@@ -2722,7 +3206,8 @@ check.
 2. **Applications:** `PutApplication` with a missing script path, a
    script path holding a control character or a source location with
    userinfo → 400; with an id outside the charset → 400;
-   `PutApplication` X and Y → 200;
+   `PutApplication` X and Y → 202 with `status = CREATING`, and
+   `GetApplication` polls each to `ACTIVE`;
    `ListApplications` shows both with `cellCount = 0`; `PutAccount` naming
    an unregistered application in `applicationIds` → 404. X declares two
    parameters, `ALLOWED_EMAIL_DOMAIN` (required) and `LOG_LEVEL` (default
@@ -2734,13 +3219,17 @@ check.
    `PutAccount` B as `TENANT` without `externalId` → 400; with the wrong
    `externalId` → 400 naming the role; `PutAccount` A (`VENDOR`,
    `maxCells = 2`, shared) and B (`TENANT`, `maxCells = 1`, `externalId`,
-   `applicationIds = [Y]`) → 200; `ListAccounts` shows 0/2 and 0/1 with
+   `applicationIds = [Y]`) → 202, each polled to `ACTIVE`; a
+   `PutAccount` with 101 `applicationIds` → 400; `ListAccounts` shows
+   0/2 and 0/1 with
    `maxCells` and B's `applicationIds`; `GetAccount` B does not return the
    `externalId` value.
-4. **Tenants are synchronous:** `CreateTenant` T1, T2 and T3 → 200 with
-   `deploymentCount = 0`, no cell created, no build started;
-   `ListTenants` shows three; `UpdateTenant` T3 edits metadata;
-   `DeleteTenant` T3 → 200 (empty); `CreateDeployment` for T3 → 404;
+4. **Tenants run no build:** `CreateTenant` T1, T2 and T3 → 202 with
+   `status = CREATING` and `deploymentCount = 0`; `GetTenant` polls each
+   to `ACTIVE`; no cell created, no build started; `ListTenants` shows
+   three; `UpdateTenant` T3 → 202, polled back to `ACTIVE` with the new
+   metadata; `DeleteTenant` T3 → 202 (empty), and `GetTenant` T3 polls
+   to 404; `CreateDeployment` for T3 → 404;
    `CreateDeployment` for an unregistered application → 404.
 5. **Implicit creation in the home account:** `CreateDeployment` T1/X
    without `ALLOWED_EMAIL_DOMAIN`, or with an undeclared parameter → 400,
@@ -2786,7 +3275,8 @@ check.
 11. **Account full:** `CreateTenant` T4, then `CreateDeployment` T4/Y with
     `accountId = B` → 409 `InsufficientCapacityError`; `DeleteAccount` B →
     409 (occupied); `DeleteApplication` Y → 409 (occupied); `PutAccount` B
-    with a different `owner` → 409; `DeleteTenant` T4 → 200.
+    with a different `owner` → 409; `DeleteTenant` T4 → 202, polled to
+    404.
 12. **Reads:** `ListCells` shows three cells with their `accountId` and
     `applicationId`; `ListCells?accountId=A` returns exactly cells 1 and 2
     and an unknown account yields an empty page; `ListDeployments?cellId=`
@@ -2843,7 +3333,8 @@ check.
     a space, a source location with userinfo
     (`https://u:p@host/r.git`) or a source ref holding a control
     character → 400; a reader's `PutHook` → 403, nothing written.
-    `PutHook` G (`POST`, all six events) → 200 with `revision = 1`;
+    `PutHook` G (`POST`, the six cell and deployment events) → 200
+    with `revision = 1`;
     re-sent unchanged → `revision = 2`; `GetHook` G returns the
     definition with `revision = 2`. `PutAccount` A with `maxCells = 3`.
     `PutApplication` Z (Y's source and scripts, `maxTenants = 2`, three
@@ -2904,15 +3395,50 @@ check.
     cell 4 drops to one tenant again. `DeleteDeployment` T1/Z: `a-pre`
     recorded before the tenant delete script, G after it. `ListHooks`
     shows G alone.
-17. **Teardown:** deleting all deployments frees their slots and every
+17. **Hooks on record events:** `PutApplication` Z with an
+    application hook naming `TENANT_CREATE`, or one naming
+    `ACCOUNT_UPDATE` → 400, nothing written. `PutHook` R (`PRE`,
+    `TENANT_CREATE` and `TENANT_UPDATE`), which fails when
+    `TENANT_NAME` is `blocked`, and `PutHook` N (`POST`,
+    `ACCOUNT_CREATE`) → 200. Both record under the global test path
+    as step 16's hooks do, plus `ACCOUNT_ID`, `ACCOUNT_OWNER`,
+    `ACCOUNT_APPLICATION_IDS` and the name of every variable they
+    received. `CreateTenant` named `blocked` → 202 with
+    `status = CREATING`; `GetTenant` polls it to `CREATE_FAILED` with
+    `statusReason` naming `GLOBAL/R`; `CreateDeployment` for it → 409;
+    `DeleteTenant` on it → 202, polled to 404 (R does not run on
+    `TENANT_DELETE`). `CreateTenant` T5 → 202, polled to `ACTIVE`: R
+    recorded `EVENT = TENANT_CREATE`, `PHASE = PRE`,
+    `HOOK_SCOPE = GLOBAL`, T5's `TENANT_ID` and `TENANT_NAME`, and no
+    `APPLICATION_ID`, `CELL_ID` or `PARAM_` variable; `GetTenant` T5
+    reports `lastGlobalHooks` naming R. `UpdateTenant` T5 with the name
+    `blocked` → 202, polled to `UPDATE_FAILED` naming `GLOBAL/R`, and
+    `GetTenant` T5 shows its old name and no `pending`; `UpdateTenant`
+    T5 with another name → 202, polled to `ACTIVE` with that name.
+    `DeleteTenant` T5 → 202, polled to 404. `PutApplication` Z,
+    unchanged except for a third application hook `c-post` (`POST`,
+    `APPLICATION_UPDATE`) → 202 with `status = UPDATING`; a second
+    `PutApplication` Z before it ends → 409; `GetApplication` Z polls to
+    `ACTIVE` and shows `c-post`. `c-post` recorded
+    `EVENT = APPLICATION_UPDATE`, `PHASE = POST`,
+    `HOOK_SCOPE = APPLICATION`, `APPLICATION_ID = Z`,
+    `SCRIPT_OUTPUTS = {}` and no `CELL_ID`; `GetCell` 4 still shows the
+    two hooks it was stamped with (P-4). `DeleteHook` R → 200.
+18. **Teardown:** deleting all deployments frees their slots and every
     tenant's `deploymentCount` returns to 0; deleting the now-empty cells
     removes them **and releases the account and application slots**
     (A → 0/3, B → 0/1, X, Y and Z → `cellCount = 0`); G recorded a
     `CELL_DELETE` for every cell; `DeleteHook` G → 200; `DeleteTenant` T1
-    and T2 → 200; `DeleteAccount` A and B → 200; `DeleteApplication` X, Y
-    and Z → 200; `ListTenants`, `ListAccounts`, `ListApplications` and
-    `ListHooks` are empty; the parameter namespaces in **both** accounts
-    end empty. Cell 1's
+    and T2 → 202; `DeleteAccount` A and B → 202. `PutAccount` B again
+    (`TENANT`, `maxCells = 1`, the `externalId`, `applicationIds = [Y]`)
+    → 202, polled to `ACTIVE`: N recorded `EVENT = ACCOUNT_CREATE`,
+    `PHASE = POST`, `ACCOUNT_ID = B`, `ACCOUNT_OWNER = TENANT`,
+    `ACCOUNT_APPLICATION_IDS` equal to Y's id, `SCRIPT_OUTPUTS = {}`, and
+    no variable holding the external id or naming a pair role.
+    `DeleteAccount` B → 202; `DeleteHook` N → 200. `DeleteApplication`
+    X, Y and Z → 202; `ListTenants`, `ListAccounts`, `ListApplications`
+    and `ListHooks` are empty; the parameter namespaces in **both**
+    accounts end empty. Cell 1's
     delete script recorded `PARAM_CELL_SIZE = medium`; T2/X's tenant
     delete script recorded `PARAM_TIER = gold` and `PARAM_LOG_LEVEL =
     warn` (a default) and no `PARAM_ALLOWED_EMAIL_DOMAIN`. Every
@@ -2998,6 +3524,50 @@ refusal-only attempt not counted and followed by the 60-second
 backoff, a "start outcome unknown" attempt counted and followed by a
 wait of q + T, every deadline cut at the hook's budget, and is then
 skipped (R-46), that
+`PutApplication`, `UpdateTenant` and `PutAccount` stage a replace in
+`pending` together with the move to `UPDATING` in one conditional write
+and leave the live fields untouched, except that a `PutAccount` replace
+writes `externalId` into the record in that write and never into
+`pending` (R-48), that a `PutAccount` on an `UPDATING` account whose
+`maxCells` and `applicationIds` equal the change in flight writes only
+`externalId`, after the probe, conditioned on `owner`, `UPDATING` and
+the `operationId` it read, and starts no execution, while one whose
+values differ is a 409, and one whose write loses its condition to an
+event that ended reads the record once more and takes the replace
+path without a second probe (R-48), that the commit sets only the
+fields `pending` names and removes `pending`, that every placement
+transaction conditions the tenant, and on the new-cell path the account
+and the application, on a live status with an absent status read as
+`ACTIVE` (R-47, R-13), that `PutApplication` refuses an application
+hook on a `TENANT_*` or `ACCOUNT_*` event (R-39), that an application,
+tenant or account event's hook environment carries no `PARAM_`
+variable, no external id and no admin email (R-42), that each of the
+seven record operations starts one execution, named after the
+`operationId` it stored, also when no hook matches, and compensates a
+failed start: a fresh insert whose start was refused by a delete
+conditioned on `CREATING`, its `operationId` and a count of 0, only
+when `StartExecution` itself returned a pre-creation error; a fresh
+insert whose start timed out and whose `DescribeExecution` answered
+`ExecutionDoesNotExist` or failed by `CREATE_FAILED`, never a delete;
+and every other in-flight status by its `*_FAILED` status (R-50,
+R-51), that a retried start answered `ExecutionAlreadyExists`, and a
+compensation whose condition fails on a record holding the same
+`operationId` as `ACTIVE`, the matching `*_FAILED` status or
+`UPDATING` without `pending`, or on a record a delete removed, answer
+202 with no further write (R-51), that
+the names of two operations accepted in the same millisecond differ
+(R-51), that the commit and every terminal
+write of a record event are conditioned on the execution's
+`operationId`, and an execution whose write fails on another
+`operationId` ends without a further write or hook (R-50), that each
+record delete moves the
+record to `DELETING` in one write conditioned on its status and its
+count of 0, and deletes it in one write conditioned on `DELETING` and
+the count still 0 (R-49), that a commit whose condition fails on a
+record still `UPDATING` without `pending` counts as committed and goes
+on to the post hooks (R-50), that a targeted `CreateDeployment` into an
+account that is not live answers `ConflictError`, never
+`InsufficientCapacityError` (§7.1), that
 untargeted placement into a fleet with a
 shared vendor account registered before a dedicated one creates the new
 cell in the dedicated account
@@ -3006,6 +3576,14 @@ and that with two shared accounts at 1/2 and 0/2 a `FILL` application
 creates its next cell in the first and a `ROUND_ROBIN` application in the
 second
 ([ADR-036](../adr/0036-the-application-chooses-fill-or-round-robin-across-accounts.md)).
+
+Not tested by the steps above: a hook on an `APPLICATION_DELETE`,
+`TENANT_DELETE` or `ACCOUNT_DELETE` event (the retry-and-skip path of
+§8.3 that keeps P-9 for these records), any hook on `ACCOUNT_UPDATE`,
+`DELETE_FAILED` on an application, a tenant or an account, a
+`PutAccount` rotation on an `UPDATING` account, and a workflow start
+with an unknown outcome. The unit assertions cover R-49's two writes,
+the R-50 commit replay, the rotation and the unknown start.
 
 ---
 
@@ -3023,14 +3601,15 @@ Per P-1, deferred generality is recorded as seams, not code:
 | Finer operator roles (an application registrar apart from an onboarder, operators scoped to accounts) | the authorizer already maps `role` to a grant (R-36) and the caller context carries it; a new grant is a new row in the matrix and a new policy shape. T34 and T27 are the threats it would close |
 | Secret deployment parameters | a `secret` flag on the declaration, with the value stored as a reference to a control-plane-owned secret and resolved only inside the build; today a script receives a secret's name as a plain parameter and reads it under its own role (N-11) |
 | Cell parameter values at birth | a body on the pre-provisioning seam (`POST /cells`) or a per-account override map; today a new cell always starts on the declared defaults and differs only after `UpdateCell` (R-34). Values that differ per account belong in the application's shared namespace in that account (§6.2) |
-| Stuck-execution sweep for aged transitional records | covers the two documented stranding gaps (§7.4, R-22) |
+| Stuck-execution sweep for aged transitional records | covers the two documented stranding gaps (§7.4, R-22) for every record type, applications, tenants and accounts included (§8.4, R-51, T47) |
+| Operation ids on cell and deployment executions | store the execution name on the cell or deployment and condition its terminal writes on it, as R-51 does for applications, tenants and accounts; today those writes are conditioned on status alone, so an execution that started despite an unknown start outcome could finish a retried update or delete of the same record (R-19, R-22) |
 | Auto-scale-in (delete after N days empty) | business plane policy layered on the explicit `DeleteCell` and `DeleteAccount` APIs |
 | A Region per account | an `accountId`-plus-`region` target on the account record; the build runner's AssumeRole already yields credentials usable in any Region, so the seam is the account record and the scripts' Region input, not the trust model |
 | Account vending | an upstream system creates the account and installs the role pair, then calls `PutAccount`; the control plane's contract starts at registration |
 | Per-account placement policy (drain, prefer, weights) | today: `owner` and `applicationIds` decide eligibility, `maxCells` decides capacity, dedicated accounts are filled before shared ones, and the application's `placementStrategy` orders the rest; a `placement` field on the account record is where a per-account policy would live |
 | Load-aware placement | a strategy that reads what the cells are doing (utilisation, cost, latency) rather than how many there are; the `placementStrategy` enum is where it would be added, the account scan is where the signal would be joined in |
 | Tenant migration between cells or accounts | would need a tenant-level transitional status spanning two cells and two counters; deliberately excluded |
-| Hooks on tenant record and account events | `CreateTenant`, `UpdateTenant`, `DeleteTenant`, `PutAccount` and `DeleteAccount` run no workflow, so a hook on them needs one, or a synchronous hook inside the request. The `EVENT` enum and the hook definition's `events` are where the events would be added; today a tenant change reaches downstream systems through its deployments' events ([ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md)) |
+| Hooks on hook operations | `PutHook` and `DeleteHook` stay synchronous and fire no hooks; a hook on them would need hook events, an asynchronous hook API and a rule that no hook gates its own removal, because `DeleteHook` is the exit from a failing gate (T43, T45). Today a hook change is visible in the access log under the operator's id (M12) |
 | Outputs from a pre hook into the script | a pre hook that allocates something (an address range, a name) writes outputs the script receives as variables; today pre hooks only gate and act, and the script's inputs come from §6.1 alone (R-43) |
 | A hook role per application or per global hook | one hook role per application, or per global hook, so one hook cannot use what another needs; today every application hook runs as `<fleet>-app-hook` and every global hook as `<fleet>-global-hook`, so a metering hook holds what a route registrar holds (R-41, T41) |
 | Lifecycle events on an event bus | a global post hook that publishes each event to Amazon EventBridge gives asynchronous consumers what option 3 of ADR-044 offered, and keeps the ordering and failure rules of §8.3 for the hooks that need them |

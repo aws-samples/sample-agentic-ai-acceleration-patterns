@@ -168,6 +168,51 @@ this order:
 
 Success is reported as one passing integration test.
 
+### Asynchronous records and hooks on record events (specified, not built)
+
+[ADR-045](./adr/0045-run-hooks-on-application-tenant-and-account-events.md)
+makes `PutApplication`, `DeleteApplication`, `CreateTenant`,
+`UpdateTenant`, `DeleteTenant`, `PutAccount` and `DeleteAccount`
+asynchronous and runs hooks on their events
+([spec §8.4](./design/control-plane.spec.md#84-record-events)). The
+vendor hook steps of ADR-044 (spec §10 step 16) are not in the table
+above either; both land with the hook build. Until then the steps are as
+written. Once built:
+
+- Each of the seven calls answers 202 with the record and its `status`.
+  The test polls `GetApplication`, `GetTenant` or `GetAccount` to
+  `ACTIVE` before a later call uses the record, and a delete to 404.
+  That changes steps 2, 3, 4, 11, 12, 14 and 16 above, which assert
+  200 today. A call with no hook takes seconds, so the run grows by the
+  hook builds of the new step, not by the polls.
+- Step 3 also checks that `PutAccount` with 101 `applicationIds` is a
+  400.
+- A new step before teardown (spec §10 step 17) registers two global
+  hooks: R, a pre hook on `TENANT_CREATE` and `TENANT_UPDATE` that
+  fails when `TENANT_NAME` is `blocked`, and N, a post hook on
+  `ACCOUNT_CREATE`. A tenant named `blocked` polls to `CREATE_FAILED`
+  naming R, cannot be deployed (409) and is deleted; a tenant T5 polls
+  to `ACTIVE`, and an update renaming it `blocked` polls to
+  `UPDATE_FAILED` with the old name kept and no `pending`. The step
+  adds an application post hook `c-post` on `APPLICATION_UPDATE` to
+  application Z of spec §10 step 16; the put polls through `UPDATING`
+  to `ACTIVE`, a second put while `UPDATING` is a 409, and `c-post` sees
+  `EVENT = APPLICATION_UPDATE`, `SCRIPT_OUTPUTS = {}` and no cell. An
+  application hook on a tenant or account event is a 400.
+- Teardown (spec §10 step 18) registers B again after its delete, so N
+  runs on `ACCOUNT_CREATE` and records B's id, `TENANT` as owner and
+  Y's id as the admitted list, and no variable holding the external id;
+  B is then deleted again.
+- Not tested, by choice of four new steps only: a hook on an
+  `APPLICATION_DELETE`, `TENANT_DELETE` or `ACCOUNT_DELETE` event (the
+  retry-and-skip path that keeps cleanup reachable), any hook on
+  `ACCOUNT_UPDATE`, `DELETE_FAILED` on an application, a tenant or an
+  account, a `PutAccount` rotation on an `UPDATING` account, and a
+  workflow start with an unknown outcome. Spec §10 lists them; unit
+  assertions cover the record delete's two writes, the commit replay,
+  the rotation, the unknown start and a start that went through after
+  all.
+
 ## Runtime and cost
 
 Expect about one hour 45 minutes per run, an estimate from the scenario's
