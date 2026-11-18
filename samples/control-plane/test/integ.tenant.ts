@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 import * as path from 'path';
-import { ExpectedResult, IntegTest, Match } from '@aws-cdk/integ-tests-alpha';
+import { ExpectedResult, IApiCall, IntegTest, Match } from '@aws-cdk/integ-tests-alpha';
 import { App, Aspects, ArnFormat, Aws, CfnOutput, CfnResource, Duration, IAspect, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -77,14 +77,21 @@ import { TenantStack } from '../src/tenant/tenant.cdk';
  *      machine client's
  *      client-credentials token (no `aud`, R-38) reads and is 403 on a POST,
  *      and an unlisted machine client is 403 on a GET
+ *   The seven record operations (PutApplication, DeleteApplication,
+ *   CreateTenant, UpdateTenant, DeleteTenant, PutAccount, DeleteAccount)
+ *   answer 202 (ADR-045): each accepted one is polled with its Get operation
+ *   to ACTIVE (a delete to 404) before a later call uses the record.
  *   2. PutApplication with a missing script → 400, bad id → 400, bad
- *      parameter declarations → 400; X (with declarations) and Y → 200;
- *      ListApplications; PutAccount naming an unknown application → 404
+ *      parameter declarations → 400; X (with declarations) and Y → 202
+ *      CREATING → ACTIVE; ListApplications; PutAccount naming an unknown
+ *      application → 404
  *   3. PutAccount handshake refusals (no pair, pair not enforcing the id, no
- *      external id, wrong external id) → 400; PutAccount A (VENDOR, 2,
- *      shared) and B (TENANT, 1, external id, Y only) → 200; ListAccounts
- *   4. CreateTenant T1, T2, T3 → 200, no cell; DeleteTenant T3 → 200;
- *      CreateDeployment for T3 or an unknown application → 404
+ *      external id, wrong external id) and 101 applicationIds → 400;
+ *      PutAccount A (VENDOR, 2, shared) and B (TENANT, 1, external id, Y
+ *      only) → 202 → ACTIVE; ListAccounts
+ *   4. CreateTenant T1, T2, T3 → 202 → ACTIVE, no cell; UpdateTenant T3 →
+ *      202 → ACTIVE; DeleteTenant T3 → 202 → 404; CreateDeployment for T3
+ *      or an unknown application → 404
  *   5. CreateDeployment T1/X without the required parameter or with an
  *      undeclared one → 400; with ALLOWED_EMAIL_DOMAIN (clientToken) → cell
  *      1 in A → poll ACTIVE; GetDeployment resolves the stamp and returns
@@ -102,7 +109,7 @@ import { TenantStack } from '../src/tenant/tenant.cdk';
  *  10. CreateDeployment T2/Y at B → cell 3 in B; in-flight delete → 409;
  *      parameters in B and not in A; B 1/1, Y 2
  *  11. T4/Y at B → 409 (full); DeleteAccount B, DeleteApplication Y → 409;
- *      owner change → 409
+ *      owner change → 409; DeleteTenant T4 → 202 → 404
  *  12. reads: ListCells with filters, two filters → 400; ListDeployments
  *      with filters; UpdateTenant; PutApplication Y replaced, cells 2 and 3
  *      keep their stamp (P-4)
@@ -128,10 +135,21 @@ import { TenantStack } from '../src/tenant/tenant.cdk';
  *      three times and skipped; a failing POST hook ends a create
  *      CREATE_FAILED after its script; each delete runs its hooks around its
  *      script
- *  17. delete every deployment, cell (cell 4 included), hook, tenant,
+ *  17. hooks on record events (ADR-045): an application hook on a TENANT_*
+ *      or ACCOUNT_* event → 400; global R (PRE, TENANT_CREATE and
+ *      TENANT_UPDATE) refuses the tenant name `blocked`: that tenant ends
+ *      CREATE_FAILED, a deployment for it → 409 without a retry hint, it is
+ *      deleted; T5 → ACTIVE, renamed `blocked` → UPDATE_FAILED with its old
+ *      name live, renamed again → ACTIVE, deleted; R saw the R-42 tenant
+ *      variables and nothing of a cell or an application; Z gains c-post
+ *      (POST, APPLICATION_UPDATE): UPDATING, a second put → 409, ACTIVE,
+ *      c-post saw SCRIPT_OUTPUTS {} and no cell; cell 4 keeps its stamp;
+ *      global N (POST, ACCOUNT_CREATE) is registered for step 18
+ *  18. delete every deployment, cell (cell 4 included), hook, tenant,
  *      account and application; every counter back at 0; this run's
  *      namespaces empty in both accounts; the delete builds got the values §10
- *      names; G recorded a CELL_DELETE for every cell
+ *      names; G recorded a CELL_DELETE for every cell; B is registered again
+ *      and N recorded its ACCOUNT_CREATE without the external id
  *
  * Run with the single-Region, two-account command documented in
  * integration-test.md (deploys real infrastructure in both accounts).
@@ -726,16 +744,60 @@ function ledger(name: string, check: string, expect: unknown, extra: Record<stri
   return { kind: 'ledger', name, check, expect, ...extra };
 }
 
+// Record operations answer 202 (ADR-045). An event that runs no hook build
+// ends in seconds, so its poll is a probe step: an assertion stack holds 200
+// outputs at most and every waiter is one, and the scenario is near that.
+// The probe asks every RECORD_POLL_INTERVAL_SECONDS, at most
+// RECORD_POLL_SECONDS per step and 100 seconds per invocation, because the
+// assertion provider that calls it times out after two minutes. An event that
+// runs a hook build (steps 17 and 18) takes minutes, so its poll is a waiter
+// at the cell and deployment interval instead (waitForRecord).
+const RECORD_POLL_SECONDS = 60;
+const RECORD_POLL_INTERVAL_SECONDS = 5;
+
+/** A probe step that polls a record's Get operation until it answers `status` with `match` (ADR-045). */
+function pollRecord(name: string, apiPath: string, status: number, match?: unknown): ProbeStep {
+  return { ...api(name, 'GET', apiPath, status, { match }), pollSeconds: RECORD_POLL_SECONDS };
+}
+/** Polls an application, tenant or account (`key` names it in the body) to ACTIVE with `fields`. */
+function pollActive(name: string, apiPath: string, key: 'application' | 'tenant' | 'account', fields: Record<string, unknown> = {}): ProbeStep {
+  return pollRecord(name, apiPath, 200, { [key]: { status: 'ACTIVE', ...fields } });
+}
+/** Polls a deleted application, tenant or account until its Get operation answers 404. */
+function pollGone(name: string, apiPath: string): ProbeStep {
+  return pollRecord(name, apiPath, 404);
+}
+/**
+ * Waits for a record whose event runs a hook build (steps 17 and 18): its Get
+ * operation, polled at the cell and deployment interval within the
+ * single-build budget, until the record matches `fields`.
+ */
+function waitForRecord(apiPath: string, key: 'application' | 'tenant' | 'account', fields: Record<string, unknown>) {
+  return integ.assertions
+    .httpApiCall(`${apiUrl}${apiPath}`, { method: 'GET', headers: authHeaders })
+    .expect(ExpectedResult.objectLike({ status: 200, body: { [key]: fields } }))
+    .waitForAssertions(singleBuildPoll);
+}
+/**
+ * The check of a create whose new id the test reads (an HttpApiCall cannot
+ * carry `.expect()` too): the record it returned is CREATING, which only the
+ * asynchronous operation answers (ADR-045).
+ */
+function acceptedCreating(name: string, call: IApiCall, key: 'tenant'): ProbeStep {
+  return { kind: 'value', name: `${name} CREATING`, actual: call.getAttString(`body.${key}.status`), expect: 'CREATING' };
+}
+
 /**
  * One probe invocation: the steps in order, expected to return "ok". `labelled`
  * lets the steps that read the ledger name tenants, cells and accounts by label
  * (A, T1, T2, cell1..cell4): pass it only once all of those ids exist.
+ * `extraLabels` adds labels for ids that exist only from a later step on.
  */
-function probeBatch(steps: ProbeStep[], labelled = false) {
+function probeBatch(steps: ProbeStep[], labelled = false, extraLabels: [string, string][] = []) {
   const labels = labelled
     ? [[accountA, 'A'], [accountB, 'B'], [tenantId1, 'T1'], [tenantId2, 'T2'],
-      [cellId1, 'cell1'], [cellId2, 'cell2'], [cellId3, 'cell3'], [cellId4, 'cell4']]
-    : [];
+      [cellId1, 'cell1'], [cellId2, 'cell2'], [cellId3, 'cell3'], [cellId4, 'cell4'], ...extraLabels]
+    : extraLabels;
   return integ.assertions
     .invokeFunction({
       functionName: stepProbe.functionName,
@@ -744,6 +806,7 @@ function probeBatch(steps: ProbeStep[], labelled = false) {
         cellProject: stack.provisioning.cellProject.projectName,
         tenantProject: stack.provisioning.tenantProject.projectName,
         labels,
+        pollIntervalSeconds: RECORD_POLL_INTERVAL_SECONDS,
         headers: { operator: authHeaders, reader: readerHeaders, unlisted: unlistedIdentity.headers },
         steps,
       }),
@@ -865,13 +928,27 @@ const readerIdentity = mintToken('success+integ-reader@simulator.amazonses.com')
 const unlistedIdentity = mintToken('success+integ-norole@simulator.amazonses.com');
 const readerHeaders = readerIdentity.headers;
 
+/** X's declarations as GetApplication returns them (spec §10 step 2). */
+const declaredX = {
+  parameters: [
+    { name: 'ALLOWED_EMAIL_DOMAIN', required: true },
+    { name: 'LOG_LEVEL', required: false, default: 'info' },
+  ],
+  cellParameters: [{ name: 'CELL_SIZE', default: 'small' }],
+};
+
 // 2. Applications (ADR-032). The generated validators reject an incomplete
 //    definition and an id outside the charset before the handler runs.
 // Parameter declarations are validated with the definition (§4.1): a
 // lower-case name, a duplicate, a required parameter with a default, a cell
 // parameter without one, and one name in both lists are each a 400. So are a
-// missing script and an id outside the charset. One probe batch.
-const applicationRefusals = probeBatch([
+// missing script and an id outside the charset. Then X and Y are registered:
+// PutApplication answers 202 with the record CREATING (ADR-045), and
+// GetApplication polls each to ACTIVE. ListApplications sorts by id (the
+// GSI-1 sort key; exact-length match). An allowlist may name registered
+// applications only (ADR-033), checked before the handshake, so no AssumeRole
+// is attempted. One probe batch.
+const applications = probeBatch([
   api('PutApplication missing script', 'PUT', `applications/${APP_X}`, 400, {
     body: { ...definition, cellScripts: { create: definition.cellScripts.create, update: definition.cellScripts.update } },
   }),
@@ -883,168 +960,85 @@ const applicationRefusals = probeBatch([
     { cellParameters: [{ name: 'CELL_SIZE' }] },
     { parameters: [{ name: 'CELL_SIZE' }], cellParameters: [{ name: 'CELL_SIZE', default: 'small' }] },
   ].map((lists, i) => api(`PutApplication bad declarations ${i + 1}`, 'PUT', `applications/${APP_X}`, 400, { body: { ...definition, ...lists } })),
+  api('PutApplication X', 'PUT', `applications/${APP_X}`, 202, {
+    body: definitionX,
+    match: { application: { applicationId: APP_X, status: 'CREATING', maxTenants: 1, placementStrategy: 'FILL', cellCount: 0, ...declaredX } },
+  }),
+  api('PutApplication Y', 'PUT', `applications/${APP_Y}`, 202, {
+    body: definition,
+    match: { application: { applicationId: APP_Y, status: 'CREATING', cellCount: 0, parameters: [], cellParameters: [] } },
+  }),
+  pollActive('GetApplication X', `applications/${APP_X}`, 'application', { maxTenants: 1, cellCount: 0, ...declaredX }),
+  pollActive('GetApplication Y', `applications/${APP_Y}`, 'application', { cellCount: 0 }),
+  api('ListApplications two', 'GET', 'applications', 200, {
+    match: { applications: [{ applicationId: APP_X, cellCount: 0 }, { applicationId: APP_Y, cellCount: 0 }] },
+  }),
+  api('PutAccount naming an unregistered application', 'PUT', `accounts/${accountA}`, 404, {
+    body: { owner: 'VENDOR', maxCells: 2, applicationIds: ['integ-nope'] },
+  }),
 ]);
 
-/** X's declarations as GetApplication returns them (spec §10 step 2). */
-const declaredX = {
-  parameters: [
-    { name: 'ALLOWED_EMAIL_DOMAIN', required: true },
-    { name: 'LOG_LEVEL', required: false, default: 'info' },
-  ],
-  cellParameters: [{ name: 'CELL_SIZE', default: 'small' }],
-};
-const putApplicationX = integ.assertions
-  .httpApiCall(`${apiUrl}applications/${APP_X}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify(definitionX),
-  })
-  .expect(
-    ExpectedResult.objectLike({
-      status: 200,
-      body: { application: { applicationId: APP_X, maxTenants: 1, placementStrategy: 'FILL', cellCount: 0, ...declaredX } },
-    }),
-  );
-const putApplicationY = integ.assertions
-  .httpApiCall(`${apiUrl}applications/${APP_Y}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify(definition),
-  })
-  .expect(
-    ExpectedResult.objectLike({
-      status: 200,
-      body: { application: { applicationId: APP_Y, cellCount: 0, parameters: [], cellParameters: [] } },
-    }),
-  );
-
-// ListApplications sorts by id (the GSI-1 sort key). Exact-length match.
-const listApplicationsTwo = integ.assertions
-  .httpApiCall(`${apiUrl}applications`, { method: 'GET', headers: authHeaders })
-  .expect(
-    ExpectedResult.objectLike({
-      status: 200,
-      body: { applications: [{ applicationId: APP_X, cellCount: 0 }, { applicationId: APP_Y, cellCount: 0 }] },
-    }),
-  );
-
-// An allowlist may name registered applications only (ADR-033) — checked
-// before the handshake, so no AssumeRole is attempted.
-const putAccountUnknownApplication = integ.assertions
-  .httpApiCall(`${apiUrl}accounts/${accountA}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify({ owner: 'VENDOR', maxCells: 2, applicationIds: ['integ-nope'] }),
-  })
-  .expect(ExpectedResult.objectLike({ status: 404 }));
-
-// 3. Accounts (ADR-024, ADR-027, ADR-033). The handshake is checked before any write:
-//    an account with no role pair is refused with a 400 naming the role.
-const putUnregisteredAccount = integ.assertions
-  .httpApiCall(`${apiUrl}accounts/${unregisteredAccount}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify({ owner: 'VENDOR', maxCells: 1 }),
-  })
-  .expect(ExpectedResult.objectLike({ status: 400 }));
-
-// A's pair was installed WITHOUT an external id, so it admits an AssumeRole
-// that omits one. Registering A with an external id (as if it were a
-// customer's account) must be refused by the probe's negative call: the
-// pair does not require the id it was given (ADR-030). Comes before A's
-// real registration so the refusal is the handshake, not an owner change.
-const putAccountANotEnforcingExternalId = integ.assertions
-  .httpApiCall(`${apiUrl}accounts/${accountA}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify({ owner: 'TENANT', maxCells: 1, externalId: accountBExternalId }),
-  })
-  .expect(
-    ExpectedResult.objectLike({
-      status: 400,
-      body: { message: Match.stringLikeRegexp(`${fleetName}-cell-provisioning does not require the external id`) },
-    }),
-  );
-
-// Account A: the control plane's own account, vendor-owned, two cells,
-// shared (no applicationIds: it admits every application, ADR-033). The
-// control plane stack installed the pair here (R-25); no external id.
-const putAccountA = integ.assertions
-  .httpApiCall(`${apiUrl}accounts/${accountA}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify({ owner: 'VENDOR', maxCells: 2 }),
-  })
-  .expect(
-    ExpectedResult.objectLike({
-      status: 200,
-      body: { account: { accountId: accountA, owner: 'VENDOR', maxCells: 2, cellCount: 0, externalIdConfigured: false } },
-    }),
-  );
-
-// A tenant-owned account must carry an external id (ADR-029): refused
-// before the probe, so no AssumeRole is attempted.
-const putAccountBNoExternalId = integ.assertions
-  .httpApiCall(`${apiUrl}accounts/${accountB}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify({ owner: 'TENANT', maxCells: 1 }),
-  })
-  .expect(ExpectedResult.objectLike({ status: 400, body: { message: Match.stringLikeRegexp('externalId is required') } }));
-
-// The wrong external id is refused by B's trust policy; the probe reports
-// the role that refused (R-26).
-const putAccountBWrongExternalId = integ.assertions
-  .httpApiCall(`${apiUrl}accounts/${accountB}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify({ owner: 'TENANT', maxCells: 1, externalId: `${accountBExternalId}-wrong` }),
-  })
-  .expect(
-    ExpectedResult.objectLike({
-      status: 400,
-      body: { message: Match.stringLikeRegexp(`${fleetName}-(cell|tenant)-provisioning could not be assumed`) },
-    }),
-  );
-
-// Account B: a customer's account, tenant-owned, one cell, external id,
-// dedicated to Y (ADR-033).
-const putAccountB = integ.assertions
-  .httpApiCall(`${apiUrl}accounts/${accountB}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify({ owner: 'TENANT', maxCells: 1, externalId: accountBExternalId, applicationIds: [APP_Y] }),
-  })
-  .expect(
-    ExpectedResult.objectLike({
-      status: 200,
-      body: { account: { accountId: accountB, owner: 'TENANT', maxCells: 1, cellCount: 0, externalIdConfigured: true, applicationIds: [APP_Y] } },
-    }),
-  );
-
-// ListAccounts sorts by account id (the GSI-1 sort key); both ids are known
-// at synth time, so the expected order is too. Exact-length match.
+// 3. Accounts (ADR-024, ADR-027, ADR-033), one probe batch. The handshake is
+//    checked before any write: an account with no role pair is refused with
+//    a 400 naming the role. A's pair was installed WITHOUT an external id, so
+//    registering A with one (as if it were a customer's account) is refused
+//    by the probe's negative call: the pair does not require the id it was
+//    given (ADR-030); this comes before A's real registration so the refusal
+//    is the handshake, not an owner change. More than 100 applicationIds is
+//    a 400. A is the control plane's own account, vendor-owned, two cells,
+//    shared (no applicationIds: it admits every application, ADR-033); the
+//    stack installed its pair (R-25), no external id. A tenant-owned account
+//    must carry an external id (ADR-029), and the wrong one is refused by B's
+//    trust policy, the probe naming the role (R-26). B is a customer's
+//    account, tenant-owned, one cell, external id, dedicated to Y. Both are
+//    accepted CREATING (ADR-045) and polled to ACTIVE; GetAccount B says an
+//    external id is set and never returns it. ListAccounts sorts by account
+//    id (the GSI-1 sort key; exact-length match).
 const accountsInListOrder = [accountA, accountB].sort();
-const listAccountsTwo = integ.assertions
-  .httpApiCall(`${apiUrl}accounts`, { method: 'GET', headers: authHeaders })
-  .expect(
-    ExpectedResult.objectLike({
-      status: 200,
-      body: {
-        accounts: accountsInListOrder.map((accountId) => ({
-          accountId,
-          cellCount: 0,
-          maxCells: accountId === accountA ? 2 : 1,
-        })),
-      },
-    }),
-  );
+const accounts = probeBatch([
+  api('PutAccount without a role pair', 'PUT', `accounts/${unregisteredAccount}`, 400, { body: { owner: 'VENDOR', maxCells: 1 } }),
+  api('PutAccount A with an external id its pair does not require', 'PUT', `accounts/${accountA}`, 400, {
+    body: { owner: 'TENANT', maxCells: 1, externalId: accountBExternalId },
+    match: { message: `re:${fleetName}-cell-provisioning does not require the external id` },
+  }),
+  api('PutAccount with 101 applicationIds', 'PUT', `accounts/${accountA}`, 400, {
+    body: { owner: 'VENDOR', maxCells: 2, applicationIds: Array.from({ length: 101 }, (_, i) => `integ-app-${i}`) },
+  }),
+  api('PutAccount A', 'PUT', `accounts/${accountA}`, 202, {
+    body: { owner: 'VENDOR', maxCells: 2 },
+    match: { account: { accountId: accountA, status: 'CREATING', owner: 'VENDOR', maxCells: 2, cellCount: 0, externalIdConfigured: false } },
+  }),
+  api('PutAccount B without an external id', 'PUT', `accounts/${accountB}`, 400, {
+    body: { owner: 'TENANT', maxCells: 1 },
+    match: { message: 're:externalId is required' },
+  }),
+  api('PutAccount B with the wrong external id', 'PUT', `accounts/${accountB}`, 400, {
+    body: { owner: 'TENANT', maxCells: 1, externalId: `${accountBExternalId}-wrong` },
+    match: { message: `re:${fleetName}-(cell|tenant)-provisioning could not be assumed` },
+  }),
+  api('PutAccount B', 'PUT', `accounts/${accountB}`, 202, {
+    body: { owner: 'TENANT', maxCells: 1, externalId: accountBExternalId, applicationIds: [APP_Y] },
+    match: {
+      account: { accountId: accountB, status: 'CREATING', owner: 'TENANT', maxCells: 1, cellCount: 0, externalIdConfigured: true, applicationIds: [APP_Y] },
+    },
+  }),
+  pollActive('GetAccount A', `accounts/${accountA}`, 'account', { maxCells: 2, cellCount: 0 }),
+  pollActive('GetAccount B', `accounts/${accountB}`, 'account', {
+    maxCells: 1, cellCount: 0, externalIdConfigured: true, externalId: 'absent:', applicationIds: [APP_Y],
+  }),
+  api('ListAccounts two', 'GET', 'accounts', 200, {
+    match: {
+      accounts: accountsInListOrder.map((accountId) => ({ accountId, status: 'ACTIVE', cellCount: 0, maxCells: accountId === accountA ? 2 : 1 })),
+    },
+  }),
+]);
 
-
-// 4. Tenants are synchronous (§5.1): three records, no cell, no build.
-//    T3 is deleted again straight away (empty-only delete, 200), and a
-//    deployment for it is then a 404 — like one for an unregistered
-//    application.
+// 4. Tenants run no build (§5.1): three records, no cell, no build.
+//    CreateTenant answers 202 with the tenant CREATING (ADR-045); its
+//    TENANT_CREATE event runs no hook here, and GetTenant polls each to
+//    ACTIVE. T3 is updated and deleted again straight away (empty-only
+//    delete, 202, polled to 404), and a deployment for it is then a 404 —
+//    like one for an unregistered application.
 const createTenant1 = integ.assertions.httpApiCall(`${apiUrl}tenants`, {
   method: 'POST',
   headers: authHeaders,
@@ -1070,28 +1064,20 @@ const createTenant3 = integ.assertions.httpApiCall(`${apiUrl}tenants`, {
 });
 const tenantId3 = createTenant3.getAttString('body.tenant.tenantId');
 
-const getTenant1Empty = integ.assertions
-  .httpApiCall(`${apiUrl}tenants/${tenantId1}`, { method: 'GET', headers: authHeaders })
-  .expect(
-    ExpectedResult.objectLike({
-      status: 200,
-      body: { tenant: { tenantId: tenantId1, name: 'integ-tenant-1', deploymentCount: 0 } },
-    }),
-  );
-
 // ListTenants sorts by tenant id (the GSI-2 sort key, a ULID, so creation
 // order). Exact-length match: three tenants, no cell anywhere yet.
-const listTenantsThree = integ.assertions
-  .httpApiCall(`${apiUrl}tenants`, { method: 'GET', headers: authHeaders })
-  .expect(
-    ExpectedResult.objectLike({
-      status: 200,
-      body: { tenants: [{ tenantId: tenantId1 }, { tenantId: tenantId2 }, { tenantId: tenantId3 }] },
-    }),
-  );
-const listCellsNone = integ.assertions
-  .httpApiCall(`${apiUrl}cells`, { method: 'GET', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { cells: [] } }));
+const tenantsCreated = probeBatch([
+  acceptedCreating('CreateTenant T1', createTenant1, 'tenant'),
+  acceptedCreating('CreateTenant T2', createTenant2, 'tenant'),
+  acceptedCreating('CreateTenant T3', createTenant3, 'tenant'),
+  pollActive('GetTenant T1', `tenants/${tenantId1}`, 'tenant', { tenantId: tenantId1, name: 'integ-tenant-1', deploymentCount: 0 }),
+  pollActive('GetTenant T2', `tenants/${tenantId2}`, 'tenant', { deploymentCount: 0 }),
+  pollActive('GetTenant T3', `tenants/${tenantId3}`, 'tenant', { deploymentCount: 0 }),
+  api('ListTenants three', 'GET', 'tenants', 200, {
+    match: { tenants: [{ tenantId: tenantId1 }, { tenantId: tenantId2 }, { tenantId: tenantId3 }] },
+  }),
+  api('ListCells none', 'GET', 'cells', 200, { match: { cells: [] } }),
+]);
 
 // 1 (reader checks, R-36). The tenants above exist, so a reader's reads have
 // something to return and its writes have something to change. API Gateway
@@ -1141,33 +1127,23 @@ const afterReader = probeBatch([
   }),
 ]);
 
-const updateTenant3 = integ.assertions
-  .httpApiCall(`${apiUrl}tenants/${tenantId3}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify({ description: 'about to be deleted' }),
-  })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { tenant: { description: 'about to be deleted', deploymentCount: 0 } } }));
-
-const deleteTenant3Empty = integ.assertions
-  .httpApiCall(`${apiUrl}tenants/${tenantId3}`, { method: 'DELETE', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { tenant: { tenantId: tenantId3 } } }));
-
-const deployForDeletedTenant = integ.assertions
-  .httpApiCall(`${apiUrl}tenants/${tenantId3}/deployments`, {
-    method: 'POST',
-    headers: authHeaders,
-    body: JSON.stringify({ applicationId: APP_X, adminEmail: 'success+integ-t3@simulator.amazonses.com' }),
-  })
-  .expect(ExpectedResult.objectLike({ status: 404 }));
-
-const deployUnregisteredApplication = integ.assertions
-  .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments`, {
-    method: 'POST',
-    headers: authHeaders,
-    body: JSON.stringify({ applicationId: 'integ-nope', adminEmail: 'success+integ-t1@simulator.amazonses.com' }),
-  })
-  .expect(ExpectedResult.objectLike({ status: 404 }));
+// UpdateTenant stages the merged name and description in `pending` and
+// answers 202 UPDATING; the commit makes them live (R-48, R-50).
+const tenant3Lifecycle = probeBatch([
+  api('UpdateTenant T3', 'PUT', `tenants/${tenantId3}`, 202, {
+    body: { description: 'about to be deleted' },
+    match: { tenant: { status: 'UPDATING', deploymentCount: 0, pending: { name: 'integ-tenant-3', description: 'about to be deleted' } } },
+  }),
+  pollActive('GetTenant T3 updated', `tenants/${tenantId3}`, 'tenant', { description: 'about to be deleted', deploymentCount: 0, pending: 'absent:' }),
+  api('DeleteTenant T3', 'DELETE', `tenants/${tenantId3}`, 202, { match: { tenant: { tenantId: tenantId3, status: 'DELETING' } } }),
+  pollGone('GetTenant T3 deleted', `tenants/${tenantId3}`),
+  api('CreateDeployment for the deleted T3', 'POST', `tenants/${tenantId3}/deployments`, 404, {
+    body: { applicationId: APP_X, adminEmail: 'success+integ-t3@simulator.amazonses.com' },
+  }),
+  api('CreateDeployment of an unregistered application', 'POST', `tenants/${tenantId1}/deployments`, 404, {
+    body: { applicationId: 'integ-nope', adminEmail: 'success+integ-t1@simulator.amazonses.com' },
+  }),
+]);
 
 // 5. Deploy X for T1 — CreateDeployment carries no resource definition
 //    (P-4) and no accountId: placement considers the vendor-owned accounts
@@ -1557,7 +1533,9 @@ const getApplicationYTwo = integ.assertions
 
 // 11. Account B is full: a targeted deployment → 409 InsufficientCapacity;
 //     deregistering an occupied account or application → 409; changing B's
-//     owner → 409. T4 is created for the attempt and deleted again.
+//     owner → 409. T4 is created for the attempt (polled to ACTIVE, so
+//     the refusal is the capacity, not a tenant in flight) and deleted
+//     again (202, polled to 404).
 const createTenant4 = integ.assertions.httpApiCall(`${apiUrl}tenants`, {
   method: 'POST',
   headers: authHeaders,
@@ -1565,30 +1543,21 @@ const createTenant4 = integ.assertions.httpApiCall(`${apiUrl}tenants`, {
 });
 const tenantId4 = createTenant4.getAttString('body.tenant.tenantId');
 
-const createT4YAtFullB = integ.assertions
-  .httpApiCall(`${apiUrl}tenants/${tenantId4}/deployments`, {
-    method: 'POST',
-    headers: authHeaders,
-    body: JSON.stringify({ applicationId: APP_Y, adminEmail: 'success+integ-t4-y@simulator.amazonses.com', accountId: accountB }),
-  })
-  .expect(ExpectedResult.objectLike({ status: 409, headers: { 'x-amzn-errortype': ['InsufficientCapacityError'] } }));
-
-const deleteAccountBOccupied = integ.assertions
-  .httpApiCall(`${apiUrl}accounts/${accountB}`, { method: 'DELETE', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 409 }));
-const deleteApplicationYOccupied = integ.assertions
-  .httpApiCall(`${apiUrl}applications/${APP_Y}`, { method: 'DELETE', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 409 }));
-const putAccountBOwnerChange = integ.assertions
-  .httpApiCall(`${apiUrl}accounts/${accountB}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify({ owner: 'VENDOR', maxCells: 1, externalId: accountBExternalId, applicationIds: [APP_Y] }),
-  })
-  .expect(ExpectedResult.objectLike({ status: 409 }));
-const deleteTenant4 = integ.assertions
-  .httpApiCall(`${apiUrl}tenants/${tenantId4}`, { method: 'DELETE', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200 }));
+const accountFull = probeBatch([
+  acceptedCreating('CreateTenant T4', createTenant4, 'tenant'),
+  pollActive('GetTenant T4', `tenants/${tenantId4}`, 'tenant', { deploymentCount: 0 }),
+  api('CreateDeployment T4/Y at the full B', 'POST', `tenants/${tenantId4}/deployments`, 409, {
+    body: { applicationId: APP_Y, adminEmail: 'success+integ-t4-y@simulator.amazonses.com', accountId: accountB },
+    errorType: 'InsufficientCapacityError',
+  }),
+  api('DeleteAccount B occupied', 'DELETE', `accounts/${accountB}`, 409),
+  api('DeleteApplication Y occupied', 'DELETE', `applications/${APP_Y}`, 409),
+  api('PutAccount B with another owner', 'PUT', `accounts/${accountB}`, 409, {
+    body: { owner: 'VENDOR', maxCells: 1, externalId: accountBExternalId, applicationIds: [APP_Y] },
+  }),
+  api('DeleteTenant T4', 'DELETE', `tenants/${tenantId4}`, 202, { match: { tenant: { tenantId: tenantId4, status: 'DELETING' } } }),
+  pollGone('GetTenant T4 deleted', `tenants/${tenantId4}`),
+]);
 
 // 12. Reads. Three cells with their applications and accounts (ULID order);
 //     the filters are query predicates (unknown id → empty page, two filters
@@ -1640,30 +1609,27 @@ const listDeploymentsTwoFilters = integ.assertions
   .httpApiCall(`${apiUrl}deployments?cellId=${cellId1}&applicationId=${APP_X}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 400 }));
 
-// Metadata update (sync 200) never touches the count.
-const updateTenant1 = integ.assertions
-  .httpApiCall(`${apiUrl}tenants/${tenantId1}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify({ description: 'updated by the integ test' }),
-  })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { tenant: { description: 'updated by the integ test', deploymentCount: 2 } } }));
-
-// A replaced definition reaches only cells created afterwards (P-4): Y's
-// maxTenants changes, cells 2 and 3 keep their stamp.
-const putApplicationYReplaced = integ.assertions
-  .httpApiCall(`${apiUrl}applications/${APP_Y}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify({ ...definition, maxTenants: 3, placementStrategy: 'ROUND_ROBIN' }),
-  })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { application: { maxTenants: 3, placementStrategy: 'ROUND_ROBIN', cellCount: 2 } } }));
-const getCell3StillStamped = integ.assertions
-  .httpApiCall(`${apiUrl}cells/${cellId3}`, { method: 'GET', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { cell: { maxTenants: 1 } } }));
-const getCell2StillStamped = integ.assertions
-  .httpApiCall(`${apiUrl}cells/${cellId2}`, { method: 'GET', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { cell: { maxTenants: 1 } } }));
+// A metadata update (202, polled to ACTIVE) never touches the count. A
+// replaced definition reaches only cells created afterwards (P-4): Y's
+// maxTenants changes, cells 2 and 3 keep their stamp. The replace is staged
+// in `pending` (R-48) and committed by APPLICATION_UPDATE, which runs no hook
+// here.
+const tenant1AndYReplaced = probeBatch([
+  api('UpdateTenant T1', 'PUT', `tenants/${tenantId1}`, 202, {
+    body: { description: 'updated by the integ test' },
+    match: { tenant: { status: 'UPDATING', deploymentCount: 2, pending: { description: 'updated by the integ test' } } },
+  }),
+  pollActive('GetTenant T1 updated', `tenants/${tenantId1}`, 'tenant', { description: 'updated by the integ test', deploymentCount: 2 }),
+  api('PutApplication Y replaced', 'PUT', `applications/${APP_Y}`, 202, {
+    body: { ...definition, maxTenants: 3, placementStrategy: 'ROUND_ROBIN' },
+    match: { application: { status: 'UPDATING', cellCount: 2, pending: { maxTenants: 3, placementStrategy: 'ROUND_ROBIN' } } },
+  }),
+  pollActive('GetApplication Y replaced', `applications/${APP_Y}`, 'application', {
+    maxTenants: 3, placementStrategy: 'ROUND_ROBIN', cellCount: 2, pending: 'absent:',
+  }),
+  api('GetCell 3 still stamped', 'GET', `cells/${cellId3}`, 200, { match: { cell: { maxTenants: 1 } } }),
+  api('GetCell 2 still stamped', 'GET', `cells/${cellId2}`, 200, { match: { cell: { maxTenants: 1 } } }),
+]);
 
 // 13. Re-apply across accounts: T1/X in A (202 → ACTIVE) and the shared
 //     cell deployment of cell 3 in B (202 → ACTIVE) — the update scripts run
@@ -1769,23 +1735,23 @@ const cell1RemovedParameters = expectBuildParameters('cell1-update-removed', 'ce
 //     without the lists keeps them; changed defaults reach the existing
 //     deployment and cell on their next build; a newly required parameter
 //     makes the next UpdateDeployment of a deployment lacking it a 400.
-const putApplicationXKeepsLists = integ.assertions
-  .httpApiCall(`${apiUrl}applications/${APP_X}`, { method: 'PUT', headers: authHeaders, body: JSON.stringify(definition) })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { application: declaredX } }));
-const getApplicationXKept = integ.assertions
-  .httpApiCall(`${apiUrl}applications/${APP_X}`, { method: 'GET', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { application: declaredX } }));
-const putApplicationXWarn = integ.assertions
-  .httpApiCall(`${apiUrl}applications/${APP_X}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify({
+// Each PutApplication answers 202 UPDATING and is polled to ACTIVE (ADR-045).
+const declarationsKept = probeBatch([
+  api('PutApplication X without lists', 'PUT', `applications/${APP_X}`, 202, { body: definition, match: { application: { status: 'UPDATING' } } }),
+  pollActive('GetApplication X kept', `applications/${APP_X}`, 'application', declaredX),
+  api('PutApplication X with new defaults', 'PUT', `applications/${APP_X}`, 202, {
+    body: {
       ...definition,
       parameters: [{ name: 'ALLOWED_EMAIL_DOMAIN', required: true }, { name: 'LOG_LEVEL', default: 'warn' }],
       cellParameters: [{ name: 'CELL_SIZE', default: 'medium' }],
-    }),
-  })
-  .expect(ExpectedResult.objectLike({ status: 200 }));
+    },
+    match: { application: { status: 'UPDATING' } },
+  }),
+  pollActive('GetApplication X new defaults', `applications/${APP_X}`, 'application', {
+    parameters: [{ name: 'ALLOWED_EMAIL_DOMAIN', required: true }, { name: 'LOG_LEVEL', default: 'warn' }],
+    cellParameters: [{ name: 'CELL_SIZE', default: 'medium' }],
+  }),
+]);
 const updateT1XDropLogLevel = updateT1XWith({ removeParameters: ['LOG_LEVEL'] })
   .expect(ExpectedResult.objectLike({ status: 202 }));
 const waitForT1XDropLogLevel = waitForT1XActiveAgain();
@@ -1796,32 +1762,19 @@ const t1XWarnParameters = expectBuildParameters('t1x-update-warn', 'tenant', {
 const updateCell1Medium = updateCell1With({}).expect(ExpectedResult.objectLike({ status: 202 }));
 const waitForCell1Medium = waitForCell1ActiveAgain();
 const cell1MediumParameters = expectBuildParameters('cell1-update-medium', 'cell', { PARAM_CELL_SIZE: 'medium' });
-const putApplicationXTier = integ.assertions
-  .httpApiCall(`${apiUrl}applications/${APP_X}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify({
-      ...definition,
-      parameters: [{ name: 'LOG_LEVEL', default: 'warn' }, { name: 'TIER', required: true }],
-    }),
-  })
-  .expect(
-    ExpectedResult.objectLike({
-      status: 200,
-      body: {
-        application: {
-          parameters: [{ name: 'LOG_LEVEL', default: 'warn' }, { name: 'TIER', required: true }],
-          // Not sent, so kept.
-          cellParameters: [{ name: 'CELL_SIZE', default: 'medium' }],
-        },
-      },
-    }),
-  );
-const updateT1XMissingTier = updateT1XWith({})
-  .expect(ExpectedResult.objectLike({ status: 400, body: { message: Match.stringLikeRegexp('TIER') } }));
-const getT1XStillActive = integ.assertions
-  .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments/${APP_X}`, { method: 'GET', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { deployment: { status: 'ACTIVE' } } }));
+const tierRequired = probeBatch([
+  api('PutApplication X with TIER required', 'PUT', `applications/${APP_X}`, 202, {
+    body: { ...definition, parameters: [{ name: 'LOG_LEVEL', default: 'warn' }, { name: 'TIER', required: true }] },
+    match: { application: { status: 'UPDATING' } },
+  }),
+  pollActive('GetApplication X with TIER required', `applications/${APP_X}`, 'application', {
+    parameters: [{ name: 'LOG_LEVEL', default: 'warn' }, { name: 'TIER', required: true }],
+    // Not sent, so kept.
+    cellParameters: [{ name: 'CELL_SIZE', default: 'medium' }],
+  }),
+  api('UpdateDeployment T1/X without TIER', 'PUT', `tenants/${tenantId1}/deployments/${APP_X}`, 400, { body: {}, match: { message: 're:TIER' } }),
+  api('GetDeployment T1/X still ACTIVE', 'GET', `tenants/${tenantId1}/deployments/${APP_X}`, 200, { match: { deployment: { status: 'ACTIVE' } } }),
+]);
 
 // 15. Occupancy guard: deleting a cell that still holds a deployment → 409
 //     (ADR-014). Then delete T1/X (it lacks the now-required TIER, which
@@ -1962,11 +1915,12 @@ const hooksApi = probeBatch([
   ...fillerIds.map((hookId) => api(`DeleteHook ${hookId}`, 'DELETE', `hooks/${hookId}`, 200, { match: { hook: { hookId } } })),
   api('DeleteHook again', 'DELETE', `hooks/${fillerIds[0]}`, 404),
   api('ListHooks G alone', 'GET', 'hooks', 200, { match: { hooks: [{ hookId: HOOK_G }] } }),
-  // Cell 4 needs room: A takes a third cell.
-  api('PutAccount A', 'PUT', `accounts/${accountA}`, 200, {
+  // Cell 4 needs room: A takes a third cell, staged and committed (ADR-045).
+  api('PutAccount A', 'PUT', `accounts/${accountA}`, 202, {
     body: { owner: 'VENDOR', maxCells: 3 },
-    match: { account: { accountId: accountA, maxCells: 3, cellCount: 2 } },
+    match: { account: { accountId: accountA, status: 'UPDATING', maxCells: 2, cellCount: 2, pending: { maxCells: 3 } } },
   }),
+  pollActive('GetAccount A with three cells', `accounts/${accountA}`, 'account', { maxCells: 3, cellCount: 2, pending: 'absent:' }),
   // A repeated hook id, six hooks and an id outside the charset are each a 400.
   api('PutApplication Z repeated hook id', 'PUT', `applications/${APP_Z}`, 400, {
     body: { ...definitionZ, hooks: [appHookDefinitions[0], appHookDefinitions[0]] },
@@ -1977,17 +1931,19 @@ const hooksApi = probeBatch([
   api('PutApplication Z bad hook id', 'PUT', `applications/${APP_Z}`, 400, {
     body: { ...definitionZ, hooks: [{ ...appHookDefinitions[0], hookId: 'A_PRE' }] },
   }),
-  api('PutApplication Z', 'PUT', `applications/${APP_Z}`, 200, {
+  api('PutApplication Z', 'PUT', `applications/${APP_Z}`, 202, {
     body: definitionZ,
     match: {
       application: {
         applicationId: APP_Z,
+        status: 'CREATING',
         maxTenants: 2,
         cellCount: 0,
         hooks: [{ hookId: 'a-pre', phase: 'PRE' }, { hookId: 'b-post', phase: 'POST' }],
       },
     },
   }),
+  pollActive('GetApplication Z', `applications/${APP_Z}`, 'application', { cellCount: 0 }),
 ]);
 
 // T1/Z creates cell 4 in A: the cell create script, then the tenant create
@@ -2266,7 +2222,7 @@ const deletedPassing = probeBatch([
 ], true);
 
 // DeleteDeployment T1/Z: a-pre ran before the tenant delete script and G
-// after it. Cell 4 stays, empty, until step 17. ListHooks shows G alone.
+// after it. Cell 4 stays, empty, until step 18. ListHooks shows G alone.
 const deleteT1Z = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments/${APP_Z}`, { method: 'DELETE', headers: authHeaders });
 const waitForT1ZGone = integ.assertions
@@ -2279,7 +2235,196 @@ const deletedT1Z = probeBatch([
   api('ListHooks G alone', 'GET', 'hooks', 200, { match: { hooks: [{ hookId: HOOK_G }] } }),
 ], true);
 
-// 17. Teardown. Delete the remaining deployments T2/X, T1/Y, T2/Y (G, still
+// 17. Hooks on record events (ADR-045, spec §10 step 17). An application
+//     hook on a TENANT_* or ACCOUNT_* event is refused. R, a global PRE hook
+//     on TENANT_CREATE and TENANT_UPDATE, refuses the tenant name `blocked`
+//     (the test hook script fails on it); N, a global POST hook on
+//     ACCOUNT_CREATE, runs in step 18; c-post, a third application hook of Z,
+//     runs on APPLICATION_UPDATE. These events run one hook build each, so
+//     their polls are waiters at the cell and deployment interval
+//     (waitForRecord). The hooks record what they saw as step 16's do, plus
+//     the record's own variables and the names of the variables they
+//     received (record-event checks of the probe).
+const HOOK_R = 'r-names';
+const HOOK_N = 'n-accounts';
+const definitionZWithHook = (hookId: string, events: string[]) => ({
+  ...definitionZ,
+  hooks: [...appHookDefinitions, { hookId, ...hookDefinition(events, 'POST') }],
+});
+const definitionZWithCPost = definitionZWithHook('c-post', ['APPLICATION_UPDATE']);
+const reasonNamesR = Match.stringLikeRegexp(`(GLOBAL/${HOOK_R}|global hook ${HOOK_R})`);
+/** The R-42 variables of a tenant, an application and an account record event, by name (R-42, spec §8.4). */
+const recordEventCommonVars = ['ATTEMPT', 'EVENT', 'EXECUTION_ID', 'HOOK_ID', 'HOOK_SCOPE', 'HOOK_SCRIPT', 'OPERATOR_ID', 'PHASE'];
+const tenantEventVars = [...recordEventCommonVars, 'TENANT_ID', 'TENANT_NAME'].sort();
+const applicationEventPostVars = [...recordEventCommonVars, 'APPLICATION_ID', 'SCRIPT_OUTPUTS'].sort();
+const accountEventPostVars = [...recordEventCommonVars, 'ACCOUNT_APPLICATION_IDS', 'ACCOUNT_ID', 'ACCOUNT_OWNER', 'SCRIPT_OUTPUTS'].sort();
+/** What a record event's hook recorded, as the probe's record-event check returns it. */
+const recordEventOf = (fields: Record<string, unknown>) => ({
+  ACCOUNT_APPLICATION_IDS: '',
+  ACCOUNT_ID: '',
+  ACCOUNT_OWNER: '',
+  APPLICATION_ID: '',
+  ATTEMPT: '1',
+  HOOK_SCOPE: 'GLOBAL',
+  SCRIPT_OUTPUTS: '',
+  TENANT_ID: '',
+  TENANT_NAME: '',
+  callerRole: `${fleetName}-global-hook`,
+  externalIdSeen: false,
+  hasExecutionId: true,
+  hasOperatorId: true,
+  pairRoleSeen: false,
+  ...fields,
+});
+
+const recordHooksApi = probeBatch([
+  api('PutApplication Z with an application hook on TENANT_CREATE', 'PUT', `applications/${APP_Z}`, 400, {
+    body: definitionZWithHook('c-post', ['TENANT_CREATE']),
+  }),
+  api('PutApplication Z with an application hook on ACCOUNT_UPDATE', 'PUT', `applications/${APP_Z}`, 400, {
+    body: definitionZWithHook('c-post', ['ACCOUNT_UPDATE']),
+  }),
+  api('GetApplication Z unchanged', 'GET', `applications/${APP_Z}`, 200, {
+    match: { application: { status: 'ACTIVE', hooks: [{ hookId: 'a-pre' }, { hookId: 'b-post' }] } },
+  }),
+  api('PutHook R', 'PUT', `hooks/${HOOK_R}`, 200, {
+    body: hookDefinition(['TENANT_CREATE', 'TENANT_UPDATE'], 'PRE'),
+    match: { hook: { hookId: HOOK_R, phase: 'PRE', events: ['TENANT_CREATE', 'TENANT_UPDATE'], revision: 1 } },
+  }),
+  api('PutHook N', 'PUT', `hooks/${HOOK_N}`, 200, {
+    body: hookDefinition(['ACCOUNT_CREATE'], 'POST'),
+    match: { hook: { hookId: HOOK_N, phase: 'POST', events: ['ACCOUNT_CREATE'], revision: 1 } },
+  }),
+]);
+
+// A tenant named `blocked`: accepted CREATING, R refuses it, it ends
+// CREATE_FAILED naming R. Not live, so a deployment for it is a 409 whose
+// message carries no retry hint (R-13, R-14; the API's hint is the phrase
+// "retry the request"). It is deleted with DeleteTenant; R does not run on
+// TENANT_DELETE.
+const createTenantBlocked = integ.assertions.httpApiCall(`${apiUrl}tenants`, {
+  method: 'POST',
+  headers: authHeaders,
+  body: JSON.stringify({ name: 'blocked' }),
+});
+const tenantIdBlocked = createTenantBlocked.getAttString('body.tenant.tenantId');
+const waitForBlockedRefused = waitForRecord(`tenants/${tenantIdBlocked}`, 'tenant', {
+  status: 'CREATE_FAILED',
+  name: 'blocked',
+  statusReason: reasonNamesR,
+});
+const blockedRefused = probeBatch([
+  acceptedCreating('CreateTenant blocked', createTenantBlocked, 'tenant'),
+  api('CreateDeployment for the CREATE_FAILED tenant', 'POST', `tenants/${tenantIdBlocked}/deployments`, 409, {
+    body: { applicationId: APP_Y, adminEmail: 'success+integ-blocked@simulator.amazonses.com' },
+    errorType: 'ConflictError',
+    match: { message: 're:^(?![\\s\\S]*retry the request)' },
+  }),
+  api('DeleteTenant blocked', 'DELETE', `tenants/${tenantIdBlocked}`, 202, { match: { tenant: { tenantId: tenantIdBlocked, status: 'DELETING' } } }),
+  pollGone('GetTenant blocked deleted', `tenants/${tenantIdBlocked}`),
+]);
+
+// T5 passes R and goes ACTIVE, naming R in lastGlobalHooks. Then an update
+// that renames it `blocked` is staged, refused by R and ends UPDATE_FAILED
+// with the old name live and nothing staged; another name goes through.
+const createTenant5 = integ.assertions.httpApiCall(`${apiUrl}tenants`, {
+  method: 'POST',
+  headers: authHeaders,
+  body: JSON.stringify({ name: 'integ-tenant-5' }),
+});
+const tenantId5 = createTenant5.getAttString('body.tenant.tenantId');
+const step17Labels: [string, string][] = [[tenantIdBlocked, 'TB'], [tenantId5, 'T5']];
+const waitForT5Active = waitForRecord(`tenants/${tenantId5}`, 'tenant', {
+  status: 'ACTIVE',
+  name: 'integ-tenant-5',
+  lastGlobalHooks: [{ hookId: HOOK_R, phase: 'PRE', revision: 1 }],
+});
+// R on both creates saw the tenant's R-42 variables (the name being written)
+// and nothing of an application, a cell or a parameter (R-42).
+const t5Created = probeBatch([
+  acceptedCreating('CreateTenant T5', createTenant5, 'tenant'),
+  ledger('R on the blocked create', 'record-event', recordEventOf({
+    EVENT: 'TENANT_CREATE', HOOK_ID: HOOK_R, PHASE: 'PRE', TENANT_ID: 'TB', TENANT_NAME: 'blocked', received: tenantEventVars,
+  }), { hookId: HOOK_R, event: 'TENANT_CREATE', tenant: 'TB' }),
+  ledger('R on the T5 create', 'record-event', recordEventOf({
+    EVENT: 'TENANT_CREATE', HOOK_ID: HOOK_R, PHASE: 'PRE', TENANT_ID: 'T5', TENANT_NAME: 'integ-tenant-5', received: tenantEventVars,
+  }), { hookId: HOOK_R, event: 'TENANT_CREATE', tenant: 'T5' }),
+  api('UpdateTenant T5 to blocked', 'PUT', `tenants/${tenantId5}`, 202, {
+    body: { name: 'blocked' },
+    match: { tenant: { status: 'UPDATING', name: 'integ-tenant-5', pending: { name: 'blocked' } } },
+  }),
+], false, step17Labels);
+const waitForT5UpdateRefused = waitForRecord(`tenants/${tenantId5}`, 'tenant', {
+  status: 'UPDATE_FAILED',
+  name: 'integ-tenant-5',
+  statusReason: reasonNamesR,
+});
+const t5UpdateRefused = probeBatch([
+  api('GetTenant T5 keeps its name', 'GET', `tenants/${tenantId5}`, 200, {
+    match: { tenant: { status: 'UPDATE_FAILED', name: 'integ-tenant-5', pending: 'absent:' } },
+  }),
+  ledger('R on the refused update', 'record-event', recordEventOf({
+    EVENT: 'TENANT_UPDATE', HOOK_ID: HOOK_R, PHASE: 'PRE', TENANT_ID: 'T5', TENANT_NAME: 'blocked', received: tenantEventVars,
+  }), { hookId: HOOK_R, event: 'TENANT_UPDATE', tenant: 'T5' }),
+  api('UpdateTenant T5 renamed', 'PUT', `tenants/${tenantId5}`, 202, {
+    body: { name: 'integ-tenant-5-renamed' },
+    match: { tenant: { status: 'UPDATING', pending: { name: 'integ-tenant-5-renamed' } } },
+  }),
+], false, step17Labels);
+const waitForT5Renamed = waitForRecord(`tenants/${tenantId5}`, 'tenant', { status: 'ACTIVE', name: 'integ-tenant-5-renamed' });
+// T5 is deleted (202, polled to 404). Read after both deletes, R's records
+// show one execution per create and update and none for TENANT_DELETE. Then
+// Z gains c-post: the put answers 202 UPDATING with the hooks staged, and a
+// second put while the event runs is a 409.
+const t5Renamed = probeBatch([
+  api('GetTenant T5 renamed', 'GET', `tenants/${tenantId5}`, 200, {
+    match: { tenant: { status: 'ACTIVE', name: 'integ-tenant-5-renamed', pending: 'absent:' } },
+  }),
+  api('DeleteTenant T5', 'DELETE', `tenants/${tenantId5}`, 202, { match: { tenant: { tenantId: tenantId5, status: 'DELETING' } } }),
+  pollGone('GetTenant T5 deleted', `tenants/${tenantId5}`),
+  ledger('R ran on creates and updates only', 'executions', [
+    'TENANT_CREATE TB e1', 'TENANT_CREATE T5 e2', 'TENANT_UPDATE T5 e3', 'TENANT_UPDATE T5 e4',
+  ], { hookId: HOOK_R }),
+  api('PutApplication Z with c-post', 'PUT', `applications/${APP_Z}`, 202, {
+    body: definitionZWithCPost,
+    match: {
+      application: {
+        status: 'UPDATING',
+        hooks: [{ hookId: 'a-pre' }, { hookId: 'b-post' }],
+        pending: { hooks: [{ hookId: 'a-pre' }, { hookId: 'b-post' }, { hookId: 'c-post' }] },
+      },
+    },
+  }),
+  api('PutApplication Z while UPDATING', 'PUT', `applications/${APP_Z}`, 409, { body: definitionZWithCPost, errorType: 'ConflictError' }),
+], false, step17Labels);
+const waitForZUpdated = waitForRecord(`applications/${APP_Z}`, 'application', {
+  status: 'ACTIVE',
+  hooks: [{ hookId: 'a-pre' }, { hookId: 'b-post' }, { hookId: 'c-post', phase: 'POST', events: ['APPLICATION_UPDATE'] }],
+});
+// c-post ran under the application hook role with the application's R-42
+// variables, SCRIPT_OUTPUTS {} (a commit writes no outputs, R-50), no cell
+// and no parameter. Cell 4 keeps the two hooks it was stamped with (P-4).
+const zUpdated = probeBatch([
+  ledger('c-post record', 'record-event', recordEventOf({
+    APPLICATION_ID: APP_Z,
+    EVENT: 'APPLICATION_UPDATE',
+    HOOK_ID: 'c-post',
+    HOOK_SCOPE: 'APPLICATION',
+    PHASE: 'POST',
+    SCRIPT_OUTPUTS: '{}',
+    callerRole: `${fleetName}-app-hook`,
+    received: applicationEventPostVars,
+  }), { hookId: 'c-post', event: 'APPLICATION_UPDATE' }),
+  ledger('c-post executions', 'executions', ['APPLICATION_UPDATE e1'], { hookId: 'c-post' }),
+  api('GetCell 4 keeps its stamp', 'GET', `cells/${cellId4}`, 200, {
+    match: { cell: { hooks: [{ hookId: 'a-pre' }, { hookId: 'b-post' }] } },
+  }),
+  api('DeleteHook R', 'DELETE', `hooks/${HOOK_R}`, 200, { match: { hook: { hookId: HOOK_R } } }),
+  api('ListHooks G and N', 'GET', 'hooks', 200, { match: { hooks: [{ hookId: HOOK_G }, { hookId: HOOK_N }] } }),
+  ledger('strays', 'strays', []),
+], true);
+
+// 18. Teardown. Delete the remaining deployments T2/X, T1/Y, T2/Y (G, still
 //     registered, records a DEPLOYMENT_DELETE after each delete script) …
 const deleteT2X = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments/${APP_X}`, { method: 'DELETE', headers: authHeaders })
@@ -2347,6 +2492,7 @@ const waitForCell3Gone = integ.assertions
 const cell3DeleteParameters = expectBuildParameters('cell3-delete', 'cell', {});
 
 // Cell 4 (Z, in A): empty since step 16; G records its CELL_DELETE too.
+// (c-post, N and the record events leave no record under a cell.)
 const deleteCell4 = integ.assertions
   .httpApiCall(`${apiUrl}cells/${cellId4}`, { method: 'DELETE', headers: authHeaders });
 const waitForCell4Gone = integ.assertions
@@ -2401,42 +2547,57 @@ const listCellsEmpty = integ.assertions
   .httpApiCall(`${apiUrl}cells`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { cells: [] } }));
 
-// … and tenants, accounts and applications can be deleted (empty-only).
-const deleteTenant1 = integ.assertions
-  .httpApiCall(`${apiUrl}tenants/${tenantId1}`, { method: 'DELETE', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { tenant: { tenantId: tenantId1 } } }));
-const deleteTenant2 = integ.assertions
-  .httpApiCall(`${apiUrl}tenants/${tenantId2}`, { method: 'DELETE', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { tenant: { tenantId: tenantId2 } } }));
-const deleteAccountA = integ.assertions
-  .httpApiCall(`${apiUrl}accounts/${accountA}`, { method: 'DELETE', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { account: { accountId: accountA } } }));
-const deleteAccountB = integ.assertions
-  .httpApiCall(`${apiUrl}accounts/${accountB}`, { method: 'DELETE', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { account: { accountId: accountB } } }));
-const deleteApplicationX = integ.assertions
-  .httpApiCall(`${apiUrl}applications/${APP_X}`, { method: 'DELETE', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { application: { applicationId: APP_X } } }));
-const deleteApplicationY = integ.assertions
-  .httpApiCall(`${apiUrl}applications/${APP_Y}`, { method: 'DELETE', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { application: { applicationId: APP_Y } } }));
-
-const listTenantsEmpty = integ.assertions
-  .httpApiCall(`${apiUrl}tenants`, { method: 'GET', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { tenants: [] } }));
-const listAccountsEmpty = integ.assertions
-  .httpApiCall(`${apiUrl}accounts`, { method: 'GET', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { accounts: [] } }));
-const listApplicationsEmpty = integ.assertions
-  .httpApiCall(`${apiUrl}applications`, { method: 'GET', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { applications: [] } }));
-// G goes once every cell it was to see is gone, then Z; the hooks are empty
-// again; and last, the hook ledger, test state in A that no stack owns, is
-// deleted (the probe reports what is left under this run's path).
-const finalBatch = probeBatch([
+// … G goes once every cell it was to see is gone; the tenants and both
+// accounts are deleted (empty-only, 202, polled to 404). B is then
+// registered again, so N runs on its ACCOUNT_CREATE (a POST hook: the account
+// is ACTIVE only after it ran) …
+const recordsDeleted = probeBatch([
   api('DeleteHook G', 'DELETE', `hooks/${HOOK_G}`, 200, { match: { hook: { hookId: HOOK_G } } }),
-  api('DeleteApplication Z', 'DELETE', `applications/${APP_Z}`, 200, { match: { application: { applicationId: APP_Z } } }),
-  api('ListHooks', 'GET', 'hooks', 200, { match: { hooks: [] } }),
+  api('DeleteTenant T1', 'DELETE', `tenants/${tenantId1}`, 202, { match: { tenant: { tenantId: tenantId1, status: 'DELETING' } } }),
+  api('DeleteTenant T2', 'DELETE', `tenants/${tenantId2}`, 202, { match: { tenant: { tenantId: tenantId2, status: 'DELETING' } } }),
+  api('DeleteAccount A', 'DELETE', `accounts/${accountA}`, 202, { match: { account: { accountId: accountA, status: 'DELETING' } } }),
+  api('DeleteAccount B', 'DELETE', `accounts/${accountB}`, 202, { match: { account: { accountId: accountB, status: 'DELETING' } } }),
+  pollGone('GetTenant T1 deleted', `tenants/${tenantId1}`),
+  pollGone('GetTenant T2 deleted', `tenants/${tenantId2}`),
+  pollGone('GetAccount A deleted', `accounts/${accountA}`),
+  pollGone('GetAccount B deleted', `accounts/${accountB}`),
+  api('PutAccount B again', 'PUT', `accounts/${accountB}`, 202, {
+    body: { owner: 'TENANT', maxCells: 1, externalId: accountBExternalId, applicationIds: [APP_Y] },
+    match: { account: { accountId: accountB, status: 'CREATING', cellCount: 0 } },
+  }),
+]);
+const waitForBRegisteredAgain = waitForRecord(`accounts/${accountB}`, 'account', {
+  status: 'ACTIVE',
+  lastGlobalHooks: [{ hookId: HOOK_N, phase: 'POST', revision: 1 }],
+});
+// … N saw B's id, owner and admitted applications, SCRIPT_OUTPUTS {}, and no
+// variable holding the external id or naming a pair role (R-42). B is
+// deleted again, then N and the applications; the lists are empty; and last,
+// the hook ledger, test state in A that no stack owns, is deleted (the probe
+// reports what is left under this run's path).
+const finalBatch = probeBatch([
+  ledger('N record', 'record-event', recordEventOf({
+    ACCOUNT_APPLICATION_IDS: APP_Y,
+    ACCOUNT_ID: 'B',
+    ACCOUNT_OWNER: 'TENANT',
+    EVENT: 'ACCOUNT_CREATE',
+    HOOK_ID: HOOK_N,
+    PHASE: 'POST',
+    SCRIPT_OUTPUTS: '{}',
+    received: accountEventPostVars,
+  }), { hookId: HOOK_N, event: 'ACCOUNT_CREATE' }),
+  ledger('N ran once', 'executions', ['ACCOUNT_CREATE e1'], { hookId: HOOK_N }),
+  api('DeleteAccount B again', 'DELETE', `accounts/${accountB}`, 202, { match: { account: { accountId: accountB, status: 'DELETING' } } }),
+  pollGone('GetAccount B deleted again', `accounts/${accountB}`),
+  api('DeleteHook N', 'DELETE', `hooks/${HOOK_N}`, 200, { match: { hook: { hookId: HOOK_N } } }),
+  ...[APP_X, APP_Y, APP_Z].map((applicationId) => api(`DeleteApplication ${applicationId}`, 'DELETE', `applications/${applicationId}`, 202, {
+    match: { application: { applicationId, status: 'DELETING' } },
+  })),
+  ...[APP_X, APP_Y, APP_Z].map((applicationId) => pollGone(`GetApplication ${applicationId} deleted`, `applications/${applicationId}`)),
+  api('ListHooks empty', 'GET', 'hooks', 200, { match: { hooks: [] } }),
+  api('ListTenants empty', 'GET', 'tenants', 200, { match: { tenants: [] } }),
+  api('ListAccounts empty', 'GET', 'accounts', 200, { match: { accounts: [] } }),
+  api('ListApplications empty', 'GET', 'applications', 200, { match: { applications: [] } }),
   ledger('strays', 'strays', []),
   ledger('ledger cleanup', 'cleanup', { remaining: 0 }),
 ], true);
@@ -2455,26 +2616,14 @@ createUser
   .next(unlistedIdentity.calls[1])
   .next(unlistedIdentity.calls[2])
   // applications (§10 step 2)
-  .next(applicationRefusals)
-  .next(putApplicationX)
-  .next(putApplicationY)
-  .next(listApplicationsTwo)
-  .next(putAccountUnknownApplication)
+  .next(applications)
   // accounts (step 3)
-  .next(putUnregisteredAccount)
-  .next(putAccountANotEnforcingExternalId)
-  .next(putAccountA)
-  .next(putAccountBNoExternalId)
-  .next(putAccountBWrongExternalId)
-  .next(putAccountB)
-  .next(listAccountsTwo)
-  // tenants are synchronous (step 4)
+  .next(accounts)
+  // tenants run no build (step 4)
   .next(createTenant1)
   .next(createTenant2)
   .next(createTenant3)
-  .next(getTenant1Empty)
-  .next(listTenantsThree)
-  .next(listCellsNone)
+  .next(tenantsCreated)
   // reader grant (step 1, R-36), with step 4's tenants in place
   // the reader's first call is a write, so its cached policy is filled by
   // a POST: its reads must still pass (R-36, grant-only policy)
@@ -2485,10 +2634,7 @@ createUser
   .next(unlistedMachineListTenants)
   .next(machineOtherScopeListTenants)
   .next(afterReader)
-  .next(updateTenant3)
-  .next(deleteTenant3Empty)
-  .next(deployForDeletedTenant)
-  .next(deployUnregisteredApplication)
+  .next(tenant3Lifecycle)
   // T1/X → cell 1 in A (step 5)
   .next(createT1XMissingRequired)
   .next(createT1XUndeclared)
@@ -2546,11 +2692,7 @@ createUser
   .next(getApplicationYTwo)
   // B full (step 11)
   .next(createTenant4)
-  .next(createT4YAtFullB)
-  .next(deleteAccountBOccupied)
-  .next(deleteApplicationYOccupied)
-  .next(putAccountBOwnerChange)
-  .next(deleteTenant4)
+  .next(accountFull)
   // reads (step 12)
   .next(listCellsThree)
   .next(listCellsInA)
@@ -2560,10 +2702,7 @@ createUser
   .next(listDeploymentsOfY)
   .next(listDeploymentsUnknownCell)
   .next(listDeploymentsTwoFilters)
-  .next(updateTenant1)
-  .next(putApplicationYReplaced)
-  .next(getCell3StillStamped)
-  .next(getCell2StillStamped)
+  .next(tenant1AndYReplaced)
   // re-apply in A and in B, parameter merges (step 13)
   .next(updateT1X)
   .next(waitForT1XUpdated)
@@ -2589,18 +2728,14 @@ createUser
   .next(waitForCell1Removed)
   .next(cell1RemovedParameters)
   // declarations change under live records (step 14)
-  .next(putApplicationXKeepsLists)
-  .next(getApplicationXKept)
-  .next(putApplicationXWarn)
+  .next(declarationsKept)
   .next(updateT1XDropLogLevel)
   .next(waitForT1XDropLogLevel)
   .next(t1XWarnParameters)
   .next(updateCell1Medium)
   .next(waitForCell1Medium)
   .next(cell1MediumParameters)
-  .next(putApplicationXTier)
-  .next(updateT1XMissingTier)
-  .next(getT1XStillActive)
+  .next(tierRequired)
   // guards, delete T1/X, reuse cell 1 for T2/X (step 15)
   .next(deleteCellOccupied)
   .next(deleteT1X)
@@ -2640,7 +2775,21 @@ createUser
   .next(deleteT1Z)
   .next(waitForT1ZGone)
   .next(deletedT1Z)
-  // teardown (step 17)
+  // hooks on record events (step 17)
+  .next(recordHooksApi)
+  .next(createTenantBlocked)
+  .next(waitForBlockedRefused)
+  .next(blockedRefused)
+  .next(createTenant5)
+  .next(waitForT5Active)
+  .next(t5Created)
+  .next(waitForT5UpdateRefused)
+  .next(t5UpdateRefused)
+  .next(waitForT5Renamed)
+  .next(t5Renamed)
+  .next(waitForZUpdated)
+  .next(zUpdated)
+  // teardown (step 18)
   .next(deleteT2X)
   .next(waitForT2XGone)
   .next(t2XDeleteParameters)
@@ -2669,16 +2818,9 @@ createUser
   .next(getAccountBEmpty)
   .next(listApplicationsEmptyCounts)
   .next(listCellsEmpty)
-  .next(deleteTenant1)
-  .next(deleteTenant2)
-  .next(deleteAccountA)
-  .next(deleteAccountB)
-  .next(deleteApplicationX)
-  .next(deleteApplicationY)
-  .next(finalBatch)
-  .next(listTenantsEmpty)
-  .next(listAccountsEmpty)
-  .next(listApplicationsEmpty);
+  .next(recordsDeleted)
+  .next(waitForBRegisteredAgain)
+  .next(finalBatch);
 
 // The assertion provider adds one statement to its role's inline policy for
 // every assertion call, duplicates included, and the scenario now has
