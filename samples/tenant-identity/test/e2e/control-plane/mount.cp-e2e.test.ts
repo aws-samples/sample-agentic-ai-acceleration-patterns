@@ -71,7 +71,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Polls `probe` until it returns a value, or fails after `timeoutMs`. */
+/** A terminal failure seen while polling: `poll` rethrows it at once instead of retrying. */
+class PollAbort extends Error {}
+
+/**
+ * Polls `probe` until it returns a value, or fails after `timeoutMs`. A
+ * transient probe error is retried; a `PollAbort` (a terminal `*_FAILED`
+ * status) ends the poll at once.
+ */
 async function poll<T>(what: string, timeoutMs: number, probe: () => Promise<T | undefined>): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   let last: unknown;
@@ -80,6 +87,7 @@ async function poll<T>(what: string, timeoutMs: number, probe: () => Promise<T |
       const v = await probe();
       if (v !== undefined) return v;
     } catch (e) {
+      if (e instanceof PollAbort) throw e;
       last = e;
     }
     await sleep(15_000);
@@ -132,7 +140,7 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
     poll(`deployment ${status}`, timeoutMs, async () => {
       const d = await cp.call('GET', deploymentRoute());
       const s = d.body?.deployment?.status;
-      if (s === failed) throw new Error(`deployment ${failed}; see the tenant CodeBuild log`);
+      if (s === failed) throw new PollAbort(`deployment ${failed}; see the tenant CodeBuild log`);
       return s === status ? d.body.deployment : undefined;
     });
 
@@ -145,7 +153,7 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
     poll(`${route} ACTIVE`, 5 * 60_000, async () => {
       const r = await cp.call('GET', route);
       const s = r.body?.[key]?.status;
-      if (typeof s === 'string' && s.endsWith('_FAILED')) throw new Error(`${route} ${s}: ${r.body[key].statusReason ?? ''}`);
+      if (typeof s === 'string' && s.endsWith('_FAILED')) throw new PollAbort(`${route} ${s}: ${r.body[key].statusReason ?? ''}`);
       return s === 'ACTIVE' ? r.body[key] : undefined;
     });
 
@@ -153,7 +161,7 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
   const recordGone = (route: string, key: 'application' | 'tenant' | 'account') =>
     poll(`${route} gone`, 5 * 60_000, async () => {
       const r = await cp.call('GET', route);
-      if (r.body?.[key]?.status === 'DELETE_FAILED') throw new Error(`${route} DELETE_FAILED: ${r.body[key].statusReason ?? ''}`);
+      if (r.body?.[key]?.status === 'DELETE_FAILED') throw new PollAbort(`${route} DELETE_FAILED: ${r.body[key].statusReason ?? ''}`);
       return r.status === 404 ? true : undefined;
     });
 
@@ -350,7 +358,7 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
     expectStatus(res, 202, 'control-plane DeleteDeployment');
     await poll('control-plane deployment gone', 15 * 60_000, async () => {
       const d = await cp.call('GET', deploymentRoute());
-      if (d.body?.deployment?.status === 'DELETE_FAILED') throw new Error('deployment DELETE_FAILED; see the tenant CodeBuild log');
+      if (d.body?.deployment?.status === 'DELETE_FAILED') throw new PollAbort('deployment DELETE_FAILED; see the tenant CodeBuild log');
       return d.status === 404 ? true : undefined;
     });
     await poll('tenant-identity tenant gone', 10 * 60_000, async () => {

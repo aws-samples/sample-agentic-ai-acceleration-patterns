@@ -3038,8 +3038,11 @@ flight and no execution (T47). The reference values: an API function
 timeout of 25 s, at or below the 29 s the drain of R-41 counts on, and
 a 1 s connection and 2 s answer timeout on every Step Functions call,
 so the start, up to three `DescribeExecution` attempts and the second
-start take at most about 16 s and leave about 9 s for the reads and
-writes around them.
+start take at most about 16 s (about 19 s with throttling backoff on
+`DescribeExecution`) and leave the rest for the reads and writes around
+them. Only the Step Functions calls are bounded this way: a DynamoDB or
+STS call that hangs can still end the invocation with the record in
+flight, the residual of §7.4 (T47).
 
 - A fresh insert (`CreateTenant`, and `PutApplication` or `PutAccount`
   for an id that had no record) whose start was refused MUST be

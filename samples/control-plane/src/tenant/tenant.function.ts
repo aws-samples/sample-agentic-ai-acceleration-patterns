@@ -42,11 +42,13 @@ import { getTenantServiceServiceHandler } from '../smithy/source/typescript-ssdk
  * most five Step Functions attempts: the start (one attempt),
  * `DescribeExecution` (the SDK default of three attempts, with sub-second
  * backoff) and the second start (one attempt). At 1 s to connect plus 2 s
- * for the answer each, that is at most about 16 s, which leaves about 9 s
- * of the 25 s for the reads and the staging write before the start and the
+ * for the answer each, that is at most about 16 s (about 19 s with
+ * throttling backoff on `DescribeExecution`), which leaves the rest of the
+ * 25 s for the reads and the staging write before the start and the
  * compensation write and read after it. Without them the SDK waits on a
  * slow call with no bound, and the invocation can end before R-51
- * classifies and compensates the start.
+ * classifies and compensates the start. Only these calls are bounded: a
+ * DynamoDB or STS call that hangs is the T47 residual (spec R-51, §7.4).
  */
 export const SFN_CONNECTION_TIMEOUT_MS = 1_000;
 export const SFN_REQUEST_TIMEOUT_MS = 2_000;

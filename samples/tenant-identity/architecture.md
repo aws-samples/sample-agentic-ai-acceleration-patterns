@@ -592,7 +592,8 @@ sequenceDiagram
     participant S as tenant/create.sh
     participant SSM as SSM Parameter Store
     participant P as Platform API (SigV4)
-    V->>CP: CreateTenant {name} (200, tenantId=T)
+    V->>CP: CreateTenant {name} (202, tenantId=T, CREATING)
+    V->>CP: GetTenant T (poll until ACTIVE, control-plane ADR-045)
     V->>CP: CreateDeployment T {applicationId: A, adminEmail} (202, cellId)
     CP->>S: run with TENANT_ID=T, TENANT_NAME, APPLICATION_ID=A, CELL_ID, ADMIN_EMAIL, OPERATOR_ID
     S->>SSM: read /application-plane/shared/identity/{apiUrl,topology,adminPasswordKeyArn}
