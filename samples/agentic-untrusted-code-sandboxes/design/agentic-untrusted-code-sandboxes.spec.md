@@ -78,12 +78,14 @@ instances are per-tenant.
   boundary (ADR-0004).
 - Languages other than Python 3.
 - GPU work. Nitro Sandboxes have no GPU passthrough.
-- AgentCore session storage across stop and resume. State lives for the
-  sandbox's life only.
+- AgentCore session storage across stop and resume. Files in `/work` live
+  for the sandbox's life only. With `agentcore.sessionFiles` on, the
+  session's S3 prefix persists across session restarts, because the
+  session id is derived from the tenant (ADR-0009).
 - Per-tenant sandbox sizing or tiers. Every tenant gets the same size.
 - Tenant data deletion on offboarding. Offboarding stops the tenant's
-  sandboxes and deletes its registry rows (§5.2); the tenant's input and
-  output objects are the vendor's to delete.
+  sandboxes and deletes its registry rows (§5.2); the tenant's input,
+  output and session objects are the vendor's to delete.
 - The agent's own session. Running trusted snippets with
   `InvokeAgentRuntimeCommand` in the agent's session is a valid choice when
   the code may hold what the agent holds; the README names it, the sample
@@ -140,9 +142,10 @@ which is which, per backend.
 
 **P-7. Every run has three caps.** The runner kills the job's whole process
 group at the run timeout, the tool stops the sandbox if the runner does not
-answer in time, and the platform ends the sandbox at its maximum life. Code
-runs as a user that cannot touch the runner, so it cannot defeat the first
-cap (ADR-0010).
+answer in time, and the sandbox ends at `sandboxMaxLife`: by the platform
+on `microvm` and `agentcore`, by the reaper on `nitro`, because ECS has no
+task life limit. Code runs as a user that cannot touch the runner, so it
+cannot defeat the first cap (ADR-0010).
 
 **P-8. Measure the boundary, do not describe it.** The integration test runs
 the hostile script on every enabled backend and asserts each refusal. A
@@ -207,6 +210,7 @@ path is the same (ADR-0001).
 | `sandboxMaxLife` | `Duration` | 8 h | hard life cap on every backend |
 | `perTenantMetrics` | `boolean` | `false` | emit CloudWatch metrics with a `TenantId` dimension (ADR-0013) |
 | `vpc` | `ec2.IVpc` | created (§3.7) | must have subnets tagged for the tool and the sandboxes |
+| `createEndpoints` | `boolean` | `true` | create the §3.7 sandbox endpoints; `false` when a supplied `vpc` already has them, which then must meet §3.7 |
 | `inputBucket` | `s3.IBucket` | created | the bucket with `inputs/<tenant>/` |
 | `microvm.memoryMiB` | `number` | 1024 | MicroVM image minimum memory |
 | `nitro.cpu`, `nitro.memoryMiB` | `number` | 512, 1024 | task size |
@@ -248,12 +252,14 @@ The tool, not the backend, decides reuse from the registry row (§4.1).
 | Step | `microvm` | `nitro` | `agentcore` |
 |---|---|---|---|
 | Start | `RunMicrovm` with no `executionRoleArn`, `egressNetworkConnectors` = the sample's VPC connector only, `ingressNetworkConnectors` = `HTTP_INGRESS`, `maximumDurationInSeconds` = `sandboxMaxLife`, idle policy `{autoResumeEnabled: true, maxIdleDurationSeconds: sandboxIdle, suspendedDurationSeconds: 1800}`, `logging: {disabled: {}}`, `runHookPayload` = `{"nonce": …, "tenant": …}` | `RunTask` with the tool tenant role, task definition with no `taskRoleArn`, sandbox subnets, the task security group, tags `TenantId`, container override env `RUNNER_NONCE` | none; the session starts on the first `InvokeAgentRuntime`, whose job carries the nonce; the runner adopts the first nonce it sees |
-| Address | MicroVM endpoint plus a fresh auth token per call, port 8080 only, 5-minute expiry | task ARN and ENI private IP, port 8080 | runtime ARN plus `runtimeSessionId` = `rc-` + hex SHA-256 of the tenant id (67 characters, ADR-0009) |
-| Identity check | runner returns `HMAC(nonce, runId)` with the result; the tool checks it | the tool sends `POST /hello` with a challenge and sends the job only when the runner answers `HMAC(nonce, challenge)` | runner returns `HMAC(nonce, runId)`; a runner with no nonce adopts the job's |
-| Run | `POST /run` with `X-aws-proxy-auth` | `POST /run` over the VPC | `InvokeAgentRuntime`, payload is the job |
-| Stop | idle policy suspends, then the platform ends it after 30 suspended minutes; `TerminateMicrovm` on drain, offboard or overrun | reaper `StopTask` after `sandboxIdle`; `StopTask` on drain, offboard or overrun | runtime `lifecycleConfiguration` `idleRuntimeSessionTimeout` = `sandboxIdle`, `maxLifetime` = `sandboxMaxLife`; `StopRuntimeSession` on drain, offboard or overrun |
+| Address | MicroVM endpoint plus a fresh auth token per call, port 8080 only, 5-minute expiry | task ARN, and the ENI private IP once `ready` reads it, port 8443 | runtime ARN plus `runtimeSessionId` = `rc-` + hex SHA-256 of the tenant id (67 characters, ADR-0009) |
+| Ready | `GetMicrovm` `RUNNING`, then `/ping` answers; `bootId` from `/ping` | `DescribeTasks` `RUNNING` gives the ENI private IP, written to `address` with a version condition; then `/hello` answers; `bootId` from `/hello` | always ready; `bootId` from each result |
+| Identity check | runner returns `HMAC(nonce, runId)` with the result; the tool checks it | over TLS on 8443 (ADR-0010): the tool sends `POST /hello` with a challenge; the runner answers `HMAC(nonce, challenge ‖ certFingerprint)`; the tool checks it against the connection's certificate and sends the job on the same connection | runner returns `HMAC(nonce, runId)`; a runner with no nonce adopts the job's, so a restart is detected by `bootId`, not by the nonce |
+| Run | `POST /run` with `X-aws-proxy-auth`, HTTPS | `POST /run` on the checked TLS connection | `InvokeAgentRuntime`, HTTPS, payload is the job |
+| Stop | idle policy suspends, then the platform ends it after 30 suspended minutes or at `sandboxMaxLife`; `TerminateMicrovm` on drain, offboard or overrun | reaper `StopTask` after `sandboxIdle` idle, or when the task's own `startedAt` is older than `sandboxMaxLife`; `StopTask` on drain, offboard or overrun | runtime `lifecycleConfiguration` `idleRuntimeSessionTimeout` = `sandboxIdle`, `maxLifetime` = `sandboxMaxLife`; `StopRuntimeSession` on drain, offboard or overrun |
+| Start cap | 2 min | 10 min (an instance launch from zero) | 2 min |
 | Start and stop: enforced or filtered | filtered: the tool role may run, call and stop any MicroVM of the image (S-3 checks for a tag condition) | enforced: `RunTask` requires `aws:RequestTag/TenantId` = `${aws:PrincipalTag/TenantId}`, `StopTask` requires `aws:ResourceTag/TenantId` = `${aws:PrincipalTag/TenantId}` (ADR-0014) | filtered: one runtime; the session id is derived by code (S-8 checks for a session condition) |
-| Call: enforced or filtered | filtered by address; the nonce check rejects a wrong MicroVM | filtered by address; the nonce check rejects a wrong task | filtered by session id; the nonce check detects a restarted session |
+| Call: enforced or filtered | filtered by address; the nonce check rejects a wrong MicroVM | filtered by address; the nonce check rejects a wrong task before any job bytes are sent | filtered by session id; `bootId` detects a restarted session |
 | Code holds | no credentials | no credentials: no task role; the execution role is used by the ECS agent outside the sandbox (S-5) | the runtime role's credentials from the metadata endpoint (§6.2 C-2) |
 | Egress | VPC connector into sandbox subnets with no route and a security group with no egress (S-2) | sandbox subnets with no route; task security group egress only to the Logs endpoint, and to ECR and S3 endpoints if S-6 shows the task ENI pulls the image | sandbox subnets; runtime security group egress only to the ECR, S3 and Logs endpoints, each with a scoped endpoint policy (§3.7, S-9) |
 
@@ -265,10 +271,18 @@ step 2), never retried on the same address.
 One Python program, packaged twice: as a MicroVM image code artifact on the
 AL2023 base image, and as an arm64 container image for `nitro` and
 `agentcore`. The runner process runs as root inside the VM; it never runs
-tenant code as root. It listens on 8080 and serves:
+tenant code as root. At boot it reads the nonce (from the `/run` hook
+payload, the `RUNNER_NONCE` variable, or the first AgentCore job), removes
+it from the environment it hands to code, and makes a `bootId`. On `nitro`
+it also makes a key pair and a self-signed certificate held only in
+memory. It reads `SANDBOX_MEMORY_MIB` (1024 on `microvm` and `nitro`,
+8192 on `agentcore`, the default session allocation) for its limits. It
+listens on 8080 (HTTP: MicroVM proxy, AgentCore contract) or 8443 (TLS:
+`nitro`) and serves:
 
 - `GET /ping`: `{"status":"Healthy","bootId":…}` (AgentCore contract).
-- `POST /hello` (`nitro`): returns `HMAC(nonce, challenge)`.
+- `POST /hello` (`nitro`): returns `bootId`, the certificate fingerprint
+  and `HMAC(nonce, challenge ‖ certFingerprint)`.
 - `POST /run` (and `POST /invocations` for AgentCore): runs one job.
 
 A job runs one at a time. A second job while one runs is refused at once
@@ -303,8 +317,8 @@ to its own stdout through the runner.
 | Tool tenant role | `s3:GetObject` on `inputs/${TenantId}/*`, `s3:PutObject` on `outputs/${TenantId}/*`, registry items with `dynamodb:LeadingKeys` = `TENANT#${TenantId}`, `ecs:RunTask` and `ecs:TagResource` with the request tag condition, `ecs:StopTask` with the resource tag condition, `iam:PassRole` on the task execution role | anything without its own tag |
 | Task execution role | ECR pull on the runner repository, Logs write on the task log group | everything else; never reachable by code (S-5) |
 | AgentCore runtime role | ECR pull on the runner repository, Logs write on the runtime's own log group; with `sessionFiles`, `s3:GetObject`, `s3:PutObject` on `sessions/${aws:AgentCoreRuntimeSourceSid}/*` and `s3:ListBucket` with an `s3:prefix` condition | everything else |
-| Reaper role | read and update every registry row; `ecs:ListTasks`, `DescribeTasks`, `StopTask` on the cluster; `lambda:ListMicrovms`, `TerminateMicrovm` on the image; `StopRuntimeSession` on the runtime | the input bucket |
-| Drain role | the reaper role, plus delete registry rows | the input bucket |
+| Reaper role | read, update and delete every registry row; `ecs:ListTasks`, `DescribeTasks`, `StopTask` on the cluster; `lambda:ListMicrovms`, `TerminateMicrovm` on the image; `StopRuntimeSession` on the runtime | the input bucket |
+| Drain role | the reaper role | the input bucket |
 
 The runtime and execution roles reach no tenant data.
 
@@ -317,8 +331,14 @@ One VPC in two AZs, created unless `vpc` is given.
 | Tool | default route to one NAT gateway | the tool Lambda, the reaper, the drain; the ECS Managed Instances' primary ENIs |
 | Sandbox | local only, no default route | `nitro` task ENIs, the `agentcore` runtime ENIs, the `microvm` VPC egress connector |
 
-Endpoints in the sandbox subnets, each with a security group that admits
-only the sandbox security groups, and each with a policy:
+Endpoints in the sandbox subnets, each with a security group and a policy.
+Interface endpoints use private DNS, which applies to the whole VPC, so
+anything in the tool subnets that calls ECR or Logs also reaches these
+endpoints. Their security groups therefore admit the sandbox groups and
+the instance group; the tool, reaper and drain call neither ECR nor Logs
+APIs directly (their own logs go through the Lambda service). The policies
+name only the sample's repository and log groups, which is all the
+instances use too (S-6 checks this).
 
 | Endpoint | Policy allows | Present when |
 |---|---|---|
@@ -331,10 +351,11 @@ Security groups:
 | Group | Ingress | Egress |
 |---|---|---|
 | Tool | none | all (through the NAT) |
-| `nitro` task | 8080 from the tool group | the Logs endpoint group (plus ECR and S3 endpoints and the S3 prefix list if S-6 needs them) |
+| ECS instance | none | 443 to all (through the NAT and the endpoints) |
+| `nitro` task | 8443 from the tool group | the Logs endpoint group (plus ECR and S3 endpoints and the S3 prefix list if S-6 needs them) |
 | `agentcore` runtime | none | the ECR and Logs endpoint groups, and the S3 prefix list on 443 |
 | `microvm` connector | none | none |
-| Endpoints | 443 from the sandbox groups | none |
+| Endpoints | 443 from the sandbox groups and the ECS instance group | none |
 
 Tasks cannot reach each other: no task group admits another. The tool
 reaches MicroVM endpoints, AWS APIs and the AgentCore data plane through
@@ -345,7 +366,8 @@ these policies through the S3 endpoint, and expects a refusal.
 
 The tool writes one structured line per call with `process.stdout.write`
 (top-level fields, so Logs Insights and Contributor Insights can key on
-them): `tenantId`, `backend`, `runId`, `sandbox` (`started` or `reused`),
+them): `tenantId`, `backend`, `handle` (MicroVM id, task ARN or
+`runtimeSessionId`), `runId`, `sandbox` (`started` or `reused`),
 `outcome` (tool error code or `ok`), `exitCode`, `timedOut`, `durationMs`,
 `startMs`, `inputBytes`, `outputBytes`. The reaper, the drain and the tool
 write one line per stopped sandbox with `tenantId`, `backend` and
@@ -361,7 +383,7 @@ Cost attribution per backend:
 |---|---|---|---|
 | `microvm` | `sandboxSeconds` per tenant, and a `TenantId` tag on the MicroVM if S-3 shows `RunMicrovm` takes tags | baseline rate × seconds running + suspended storage rate × seconds suspended | the image build |
 | `nitro` | `TenantId` task tag with ECS split cost allocation data turned on (account setting) | Cost Explorer split of instance cost by task reservation | idle instance capacity, NAT and endpoints, apportioned by `sandboxSeconds` |
-| `agentcore` | `sandboxSeconds` per tenant | per-second vCPU and memory rates × the session's measured usage, approximated by `sandboxSeconds` × the configured size | runtime idle reclaim; apportioned by `sandboxSeconds` |
+| `agentcore` | AgentCore's session-level usage logs, joined to the tenant through `runtimeSessionId` in the tool line | per-second vCPU and memory rates × the session's reported usage (consumption billing, no configured baseline) | none beyond the shared endpoints and NAT |
 
 ## 4. Data model
 
@@ -376,9 +398,9 @@ One DynamoDB table, PITR on, `DESTROY`.
 | `handle` | MicroVM id, task ARN, or session id |
 | `address` | MicroVM endpoint, task private IP, or runtime ARN |
 | `nonce` | 32 random bytes, base64url, made by the tool at start |
-| `bootId` | the runner's boot id, from the first successful `/ping` |
+| `bootId` | the runner's boot id, from the first successful ready check or result (§3.4 Ready) |
 | `state` | `STARTING` \| `READY` \| `STOPPING` |
-| `createdAt`, `lastUsedAt`, `leaseUntil` | epoch ms; `leaseUntil` = start + `startWait` × 4 while `STARTING` |
+| `createdAt`, `lastUsedAt`, `leaseUntil` | epoch ms; `leaseUntil` = start + the backend's start cap (§3.4) while `STARTING` |
 | `expiresAt` | `createdAt + sandboxMaxLife`; TTL attribute |
 | `version` | number, incremented on every write |
 
@@ -389,27 +411,51 @@ Reuse rule, per call (the tool):
 
 1. Get the row (`version` = v).
    - `READY` and not expired: run on it (step 3).
-   - `STARTING` and `leaseUntil` not passed: probe `ready`. When ready,
-     update to `READY` if `version = v`; run. When not ready by `startWait`,
-     return `sandbox_starting` with `retryAfterSeconds`.
+   - `STARTING` and `leaseUntil` not passed: probe `ready` (§3.4 Ready),
+     which may fill in `address` and `bootId` with `version = v`. When
+     ready, update to `READY` with `version = v`; run. When not ready
+     within `startWait`, return `sandbox_starting` with
+     `retryAfterSeconds`.
    - Missing, expired, `STOPPING`, or `STARTING` with the lease passed: step 2.
+   - On `nitro`, a lease is only treated as passed when `DescribeTasks`
+     shows the task `STOPPED` or the start cap has run out; while the task
+     is `PROVISIONING` or `PENDING` it is still starting.
 2. Take over: put a `STARTING` row with a new nonce if the row is missing
    (`attribute_not_exists(PK)`) or `version = v`. On a condition failure,
    another call won: go back to step 1 once. The winner stops the handle it
-   replaced, if any, then starts, records `handle` and `address`, and waits
-   as in step 1.
+   replaced, if any, then starts and records `handle` (and `address` when
+   the start returns it), then probes as in step 1.
 3. Run. A failed identity check, "not found", or a connection refusal marks
-   the row dead: go to step 2 with the version just read. A changed `bootId`
-   on `agentcore` means the session restarted: the tool rewrites the row
-   with the new `bootId` and reports `sandbox` = `started`.
-4. After the run, update `lastUsedAt` (no condition).
-5. If the runner does not answer by `runTimeout` + 5 s, set `STOPPING`,
-   stop the sandbox, and return a result with `timedOut` = true.
+   the row dead: go to step 2 with the version just read. A call that has
+   already waited for a start in this invocation does not wait again after
+   a takeover: it returns `sandbox_starting`. A changed `bootId` means the
+   sandbox restarted (on `agentcore`, the session under the same id): the
+   tool rewrites the row with the new `bootId` and reports
+   `sandbox` = `started`.
+4. After the run, update `lastUsedAt` with
+   `attribute_exists(PK) AND handle = :h`, so a row deleted or replaced
+   meanwhile is not recreated.
+5. If the runner does not answer by `runTimeout` + 5 s, set `STOPPING`
+   with `version = v`, stop the sandbox, and return a result with
+   `timedOut` = true.
 
-The reaper, every 5 minutes: stops sandboxes with `lastUsedAt` older than
-`sandboxIdle` (`nitro`), deletes rows past `expiresAt`, and sweeps orphans:
-tasks tagged by the sample, MicroVMs of the image, and AgentCore sessions
-with no matching row are stopped.
+The reaper, every 5 minutes, sets `STOPPING` with `version = :seen` before
+any stop, so a call that updated the row meanwhile wins. It:
+
+- stops `nitro` sandboxes with `lastUsedAt` older than `sandboxIdle`;
+- stops every task tagged by the sample whose own `startedAt` is older than
+  `sandboxMaxLife`, with or without a row (the third cap on `nitro`);
+- deletes rows past `expiresAt` after stopping their handle;
+- sweeps orphans with no matching row: tasks tagged by the sample and
+  MicroVMs of the image. AgentCore has no API that lists a runtime's
+  sessions, so an orphan session (its row lost) ends at
+  `idleRuntimeSessionTimeout`, at `maxLifetime`, or when the runtime is
+  deleted.
+
+DynamoDB TTL may delete an expired row before the reaper sees it; the
+sweep then stops the task or MicroVM as an orphan.
+
+A row with no `state` (a partial write) is treated as missing.
 
 ### 4.2 Input and output objects
 
@@ -417,7 +463,7 @@ with no matching row are stopped.
 |---|---|---|
 | `inputs/<tenantId>/<name>` | the vendor or the tenant (the demo seeds it) | the tool, with the tool tenant role |
 | `outputs/<tenantId>/<runId>.json` | the tool, when `saveOutput` is set | the tenant |
-| `sessions/<sessionId>/*` | `agentcore` code, only with `sessionFiles` | the same session |
+| `sessions/<sessionId>/*` | `agentcore` code, only with `sessionFiles`; one prefix per tenant, because the session id is derived from the tenant (ADR-0009), and it persists across session restarts and offboarding | the same tenant's session |
 
 ## 5. API surface
 
@@ -461,18 +507,25 @@ returns a result with `exitCode`, `timedOut` and its output.
 ### 5.2 `offboardTenant`
 
 A Lambda function the vendor invokes with IAM (`lambda:InvokeFunction`),
-input `{ "tenantId": … }`. It stops every sandbox in the tenant's rows,
-deletes the rows, and returns the stopped handles. The control plane's
+input `{ "tenantId": … }`. It sets each of the tenant's rows `STOPPING`
+with a version condition, stops the sandbox, deletes the row, and returns
+the stopped handles. It is idempotent: a repeat call stops nothing and
+returns the same shape. The caller removes the tenant's `run_code` grant
+first, so no call can start a new sandbox in between. The control plane's
 tenant delete script is the intended caller.
 
 ### 5.3 Teardown
 
 A delete-time custom resource (the drain) runs before the cluster, the
-runtime and the image are deleted: it stops every handle in the registry,
-then every orphan the reaper sweep would find, and waits until none is left
-(at most 10 minutes). The construct owns the AgentCore runtime's and the
-task's log groups by their fixed names, and a log drain waits 90 s on delete
-before they go, as agentic-runtime-isolation ADR-0019 does.
+runtime and the image are deleted. It stops every handle in the registry,
+then every task and MicroVM the orphan sweep finds, and waits until
+`ListTasks` and `ListMicrovms` return none (at most 10 minutes). AgentCore
+sessions in rows are stopped with `StopRuntimeSession`; sessions with no
+row end with the runtime's delete (S-9). The construct names the runtime,
+the repository and the task and runtime log groups from its construct path,
+so two instances in one stack do not collide; it owns the log groups, and a
+log drain waits 90 s on delete before they go, as agentic-runtime-isolation
+ADR-0019 does.
 
 ## 6. Contracts
 
@@ -523,6 +576,11 @@ Publishes:
 |---|---|
 | `/application-plane/shared/code-sandbox/sandboxes` | one JSON document: `version`, `toolTarget` (or `none`), `backends`, `defaultBackend`, `registryTableName`, `inputBucketName`, `offboardFunctionArn`, and per backend `imageArn`, `clusterArn` or `runtimeArn` |
 
+The demo stack writes the parameter from the construct's read-only
+properties; the construct writes no parameter (standard §4.5), and the
+integration stack publishes nothing (agentic-runtime-isolation ADR-0042), so
+its two construct instances cannot collide on it.
+
 Construct: `UntrustedCodeSandboxes` and its props, plus the exports in §3.3.
 The `ARCHITECTURE.md` namespace row and samples-map row are added in the
 pull request that ships the sample.
@@ -538,12 +596,12 @@ deploy and destroy time, and cleans up on exit.
 | S-2 | With only a VPC egress connector into a dead-end subnet, can code reach the internet, `169.254.169.254`, or another MicroVM's endpoint? Contrast row: no connector at all (expected: internet reachable) | C-3 on `microvm` |
 | S-3 | Do `RunMicrovm` and `CreateMicrovmAuthToken` accept tags or tag conditions, so the tool role can be limited per tenant? | enforced or filtered start (§3.4), cost tag |
 | S-4 | Cold `RunMicrovm` to first `/run`, and resume after suspend: P50 and P90 over 20 runs. Does the runner as root and code as uid 1001 work on the AL2023 base image? | `startWait`, runner model |
-| S-5 | In an `ISOLATED_SANDBOX` task with no task role, can code read the execution role's credentials, the ECS task metadata endpoint, or IMDS? | C-2 on `nitro` |
+| S-5 | In an `ISOLATED_SANDBOX` task with no task role, can code read the execution role's credentials, the ECS task metadata endpoint, or IMDS? Does the container start as root and may the runner drop code to uid 1001? | C-2 on `nitro`, runner model |
 | S-6 | Does the task pull its image through its own ENI or the instance's? With sandbox subnets and a task group open only to the Logs endpoint, can code reach the internet or another task? Do `awslogs` logs arrive? | C-3 on `nitro`, endpoint set |
 | S-7 | `RunTask` to `RUNNING` on a warm instance, and from zero instances; idle instance cost; is a stopped task's private IP reused within an hour? | `nitro.minInstances`, ADR-0010 |
 | S-8 | Does `InvokeAgentRuntime` support a condition on the session id, so the tool role can be limited per tenant? | enforced or filtered call (§3.4) |
-| S-9 | Does a V2 runtime in VPC mode with the §3.7 endpoints and policies start, pull, refresh and log? Can its code reach the internet or PUT to another bucket through the S3 endpoint? | C-3 on `agentcore` |
-| S-10 | With the §3.6 runtime role, what can code do with the metadata endpoint's credentials, and does `aws:AgentCoreRuntimeSourceSid` scope the `sessionFiles` grant to one session? | C-2 on `agentcore`, ADR-0007 |
+| S-9 | Does a V2 runtime in VPC mode with the §3.7 endpoints and policies start, pull, refresh and log? Can its code reach the internet or PUT to another bucket through the S3 endpoint? Does deleting the runtime end its live sessions, and how long does the delete take? | C-3 on `agentcore`, drain |
+| S-10 | With the §3.6 runtime role, what can code do with the metadata endpoint's credentials, and does `aws:AgentCoreRuntimeSourceSid` scope the `sessionFiles` grant to one session? Does the container start as root and may the runner drop code to uid 1001? | C-2 on `agentcore`, ADR-0007, runner model |
 | S-11 | Does the tools gateway allow a tool Lambda timeout of 120 s, and what does the agent see past it? | timing budget |
 | S-12 | Can the integration test call `run_code` through the tools gateway with a transaction token without an agent in between, as a consumer could? | §8 drive path |
 
@@ -573,12 +631,15 @@ touched.
 | runaway | a loop, a `setsid` child that sleeps past the job, a kill of PID 1 and of the runner, and a disk fill: each returns `timedOut` or a non-zero exit, nothing of the job survives into A's next call, and A's next call works |
 | dead-handle | stop A's sandbox out of band; A's next call returns `sandbox` = `started` |
 | recycled-address | `nitro`: point A's row at B's live task address (test-only shortcut standing in for an IP that ECS reassigned), then call A: the identity check fails, nothing is sent to B's task, and A gets a fresh task |
-| idle | after 3 minutes idle, A's `nitro` task is stopped by the reaper, and the stop line carries `sandboxSeconds` |
+| idle | after `sandboxIdle` (2 min) idle the driver invokes the reaper; A's `nitro` task is stopped, and the stop line carries `sandboxSeconds` |
+| cold-from-zero | `nitro`: with no instance running, a new tenant `D`'s first call returns `sandbox_starting`; retries reuse the same task until it is `READY`, and no second task starts |
+| max-life | `nitro`: the driver invokes the reaper with a test-only `maxLifeSeconds` of 60 while A's task runs a long job; the task is stopped and A's next call gets a fresh one |
+| synth | a unit test synthesises two construct instances in one stack without a name collision |
 | session-files | `run-code-files`: A's session writes and reads its own `sessions/<sid>/`; a `GetObject` on B's session prefix is denied |
 | telemetry | Logs Insights finds one tool line per call with the §3.8 fields and the right `tenantId` |
 | forged | a direct Lambda invoke with a tampered tenant context returns `context_invalid` and starts nothing (test-only shortcut: only the gateway role may invoke the function in a real deployment) |
-| offboard | `offboardTenant` for `C` stops its sandboxes and deletes its rows |
-| teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, session, instance or log group of the sample is left |
+| offboard | after `C`'s grant is removed, `offboardTenant` for `C` stops its sandboxes and deletes its rows; a second call returns the same result with nothing stopped |
+| teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left, and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
 
 Every behaviour step runs once per backend unless it names one. The run
 records cold and warm latency per backend and the deploy and destroy time.

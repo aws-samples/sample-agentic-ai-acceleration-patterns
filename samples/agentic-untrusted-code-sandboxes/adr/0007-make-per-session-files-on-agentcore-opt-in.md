@@ -11,19 +11,24 @@
 On platform version V2, credentials a session receives carry
 `aws:AgentCoreRuntimeSourceSid`. One runtime role policy can then give each
 session its own S3 prefix, `sessions/${aws:AgentCoreRuntimeSourceSid}/*`,
-with no role per session. That is a useful pattern to show, but it puts
-credentials in the sandbox, against ADR-0003. The key shows which session
-the credentials were issued to, not that a call came from inside it.
+with no role per session. That is a useful pattern to show. Code in an
+AgentCore session already holds the runtime role (ADR-0003); this grant
+widens that role from infrastructure (ECR pull, own logs) to tenant data.
+The key shows which session the credentials were issued to, not that a
+call came from inside it. Because the session id is derived from the
+tenant (ADR-0009), the prefix is in effect one per tenant and outlives a
+session restart.
 
 ## Options considered
 
 ### Option 1: Off by default, a `sessionFiles` prop turns it on
-Pros: the default keeps C-2; the pattern is still shown and tested.
-Cons: one more option combination to test.
+Pros: the default keeps the runtime role free of tenant data; the pattern
+is still shown and tested. Cons: one more option combination to test.
 
 ### Option 2: Always on
-Pros: files survive a session stop. Cons: code holds credentials that
-reach its prefix, and with any egress could copy them out.
+Pros: files survive a session stop. Cons: every session's code holds
+credentials to tenant data, which a script could misuse within the
+endpoint policy.
 
 ### Option 3: Leave it out
 Pros: simplest. Cons: drops the one feature only V2 offers here.
@@ -39,6 +44,9 @@ after the V2 snapshot (spike S-10).
 
 ## Consequences
 
-The integration test runs the `agentcore` steps twice, once per setting,
-and checks that a session cannot read another session's prefix. The README
-says what the key proves and what it does not.
+The integration test deploys a second construct instance with
+`agentcore` only and `sessionFiles` on, and its `session-files` step checks
+that a session reads and writes its own prefix and is denied another's.
+The prefix persists across restarts and offboarding; deleting it is the
+vendor's (spec §1.2). The README says what the key proves and what it does
+not.

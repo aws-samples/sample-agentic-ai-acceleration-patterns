@@ -30,9 +30,12 @@ MicroVM tagging is unconfirmed (S-3).
 
 ## Decision
 
-Option 1 (spec §3.8), with `perTenantMetrics` off by default. `nitro` also
-tags tasks with `TenantId` for ECS split cost allocation data, and
-`microvm` tags MicroVMs if S-3 allows.
+Option 1 (spec §3.8), with `perTenantMetrics` off by default. The tool
+line carries the sandbox `handle`, so other usage sources join to the
+tenant: `nitro` tags tasks with `TenantId` for ECS split cost allocation
+data, `microvm` tags MicroVMs if S-3 allows, and `agentcore` cost comes
+from AgentCore's session-level usage logs keyed by `runtimeSessionId`
+(consumption billing, no configured baseline).
 
 ## Consequences
 

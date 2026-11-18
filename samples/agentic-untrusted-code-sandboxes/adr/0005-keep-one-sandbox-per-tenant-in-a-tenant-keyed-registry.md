@@ -20,8 +20,10 @@ start that crashed.
 Pros: `dynamodb:LeadingKeys` on `TENANT#${aws:PrincipalTag/TenantId}`
 makes a lookup of another tenant's sandbox an IAM refusal (enforced). A
 `version = :seen` condition lets the caller that saw a dead or expired
-handle take it over, and only one caller wins. A lease on `STARTING` lets a
-later call take over a start whose Lambda died. Cons: one more table, and
+handle take it over, and only one caller wins. A lease on `STARTING`, as
+long as the backend's start cap (10 minutes on `nitro`, for an instance
+launch from zero), lets a later call take over a start whose Lambda died;
+on `nitro` a task still `PROVISIONING` or `PENDING` keeps its lease. Cons: one more table, and
 an orphan sweep for sandboxes a crashed start left behind.
 
 ### Option 2: Find the sandbox by tag on each call (`ListMicrovms`, `ListTasks`)

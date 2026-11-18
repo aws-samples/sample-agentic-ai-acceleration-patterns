@@ -35,7 +35,11 @@ Pros: cheapest. Cons: cannot reach `nitro` task IPs.
 
 Option 1 (spec §3.7). The S3 gateway endpoint is attached to the sandbox
 route table only, so its policy binds only the sandboxes. Interface
-endpoints admit only the sandbox security groups.
+endpoints use private DNS, which applies to the whole VPC, so they admit
+the sandbox security groups and the ECS instance group; their policies
+name only the sample's repository and log groups, which is all either side
+uses. When a supplied `vpc` already has these endpoints, `createEndpoints`
+is set to `false` and the vendor's endpoints must meet the same rules.
 
 ## Consequences
 

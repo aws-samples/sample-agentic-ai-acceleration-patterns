@@ -31,9 +31,14 @@ Pros: no code. Cons: a consumer's `cdk destroy` fails or leaks.
 ## Decision
 
 Option 1 (spec §4.1, §5.2, §5.3). The reaper and the drain use a role that
-reads and updates every registry row and can stop the sample's sandboxes,
-and that cannot read the input bucket. The drain waits up to 10 minutes and
-fails the delete loudly if anything is left.
+reads, updates and deletes every registry row and can stop the sample's
+sandboxes, and that cannot read the input bucket. Because ECS has no task
+life limit, the reaper also stops any tagged task whose own `startedAt` is
+older than `sandboxMaxLife`, with or without a row. AgentCore has no API
+that lists a runtime's sessions, so the sweep covers tasks and MicroVMs
+only; an orphan session ends on its idle or life timeout or with the
+runtime's delete. The drain waits up to 10 minutes for tasks and MicroVMs
+and fails the delete loudly if any is left.
 
 ## Consequences
 

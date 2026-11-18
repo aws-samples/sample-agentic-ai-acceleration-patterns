@@ -38,14 +38,25 @@ Pros: no reuse, no stale address. Cons: rejected in ADR-0005.
 
 Option 1 (spec §3.4, §3.5). The tool makes a 32-byte nonce per start and
 delivers it through the start call (MicroVM `runHookPayload`, ECS container
-override, the first AgentCore job). The runner proves it on every call:
-`/hello` before the job on `nitro`, an HMAC over the run id in every result
-on all three. One job runs at a time; a second gets `sandbox_busy`.
+override, the first AgentCore job). The runner removes it from the
+environment it hands to code. It proves the nonce on every call: an HMAC
+over the run id in every result on all three backends, and on `nitro` a
+`/hello` before the job. The `nitro` hop is TLS: the runner makes a key and
+a self-signed certificate at boot, and binds the certificate fingerprint
+into the `/hello` answer, `HMAC(nonce, challenge ‖ certFingerprint)`. The
+tool checks the answer against the certificate of the connection it holds
+and sends the job on that connection, so the code and the tenant's input
+are encrypted in transit and reach only the task that holds the nonce. One
+job runs at a time; a second gets `sandbox_busy`. `bootId`, not the nonce,
+detects a restart, because a restarted AgentCore runner adopts the next
+job's nonce.
 
 ## Consequences
 
 Code that learns its own nonce gains nothing: it can only prove it is its
-own tenant's sandbox. The integration test points A's row at B's task and
+own tenant's sandbox. Principals with `ecs:DescribeTasks` or
+`lambda:GetMicrovm` may read a nonce; the threat model lists them. S-4,
+S-5 and S-10 check that each backend's runner can drop code to uid 1001. The integration test points A's row at B's task and
 expects the refusal, and its runaway step tries forks, a kill of the runner
 and a disk fill. If S-4 shows the MicroVM base image cannot drop to a
 second user, the threat model records the gap for `microvm`.
