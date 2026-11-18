@@ -1,6 +1,6 @@
 # ADR-0047: Let the cell account owner attach policies to the cell role
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-11-18
 - Amends: ADR-0025 (the account role pair)
 - Deciders: Dave Roberts (SA)

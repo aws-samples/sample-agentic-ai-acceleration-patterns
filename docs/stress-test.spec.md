@@ -235,7 +235,7 @@ them, it is the platform run.
 | platform account | none | one non-production, CDK-bootstrapped account for everything that is not a cell |
 | cell accounts | none | one (`small`) or two (`medium`, `large`) standalone non-production accounts, as §3.7 requires |
 | `appDomain` | none | a test subdomain with a public hosted zone in the platform account, for the front door |
-| `buildLimit` | 50 | concurrent builds per control-plane CodeBuild project for the stress deployment (§8, decision 2). Both projects run in the platform account on `BUILD_GENERAL1_SMALL`, so 50 each draws 100 on that account's Linux/Small quota. The service default for that size is 1, so the platform account raises it before the first run |
+| `buildLimit` | 50 | concurrent builds per control-plane CodeBuild project for the stress deployment (§8, decision 2). The limit applies to every CodeBuild project the control plane creates. The stress application declares no hooks, so there are two, the cell and the tenant project. Both run in the platform account on `BUILD_GENERAL1_SMALL`, so 50 each draws 100 on that account's Linux/Small quota. The service default for that size is 1, so the platform account raises it before the first run |
 | `pinnedCommit` | the run's `main` commit | the commit the cell scripts deploy |
 
 ### 3.7 Cell accounts
@@ -330,7 +330,7 @@ Each slice's `budget` fills its column; the runner sums per account.
 | Quota (per account) | `control-plane` | `tenant-identity` | `tenant-front-door` | `agentic-runtime-isolation` (per cell) |
 |---|---|---|---|---|
 | Lambda concurrency | API and workflow | platform and token functions | registrar | ingress, authoriser, tools |
-| CodeBuild concurrent builds | `buildLimit` x 2 projects | - | - | - |
+| CodeBuild concurrent builds | `buildLimit` x the control plane's projects (2: cell and tenant, no hooks) | - | - | - |
 | STS `AssumeRole` | role pair per build | - | registrar placement check | TVM |
 | KMS `Sign` | - | - | - | mint, tool contexts |
 | API Gateway control plane | deploy | deploy | deploy | deploy, tenant keys |
@@ -437,8 +437,9 @@ under it. The `/cell/` path keeps cell roles and the execution role from
 writing to, passing or assuming any role that is not a cell role: the
 account's own administrator roles, the role pair and the bootstrap roles.
 The standalone account (§3.7) leaves no other stack or data for the service
-grants to reach. Spike Q-5 (`stress/spikes/q5-cell-boundary/`) proved the
-boundary wall; the path and account walls are Q-5 and Q-6.
+grants to reach. The boundary spike (`stress/spikes/cell-boundary/`)
+proved the boundary wall; open questions Q-5 and Q-6 prove the path and
+account walls.
 
 ## 9. Work items and parallel readiness
 

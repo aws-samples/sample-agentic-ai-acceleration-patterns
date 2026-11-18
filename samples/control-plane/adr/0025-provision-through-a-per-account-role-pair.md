@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-11-09
 - Amends: ADR-0002, ADR-0012, ADR-0019, ADR-0022
-- Amended by: ADR-0028, ADR-0029, ADR-0047
+- Amended by: ADR-0028, ADR-0029
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -30,5 +30,3 @@ Single-account deployments gain one step: register the home account (ADR-024); t
 **Amended by ADR-0028 (2026-11-09):** each half of the pair trusts the control plane's API role (`<fleet>-api`) as well as its build role, so the PutAccount handshake probe can assume it. Found on the first integration run.
 
 **Amended by ADR-0029 (2026-11-09):** the external id is required, not recommended, for tenant-owned accounts; `PutAccount` refuses `owner: TENANT` without one. Vendor-owned accounts may still omit it.
-
-**Amended by ADR-0047 (2026-11-18):** the cell provisioning role takes the account owner's managed policies through `cellBuildManagedPolicyArns`, as the tenant role takes `tenantBuildManagedPolicyArns`.

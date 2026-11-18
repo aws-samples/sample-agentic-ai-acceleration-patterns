@@ -1,14 +1,14 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 #
-# Spike Q-5 (docs/stress-test.spec.md §8, decision 7): the cell execution
+# Boundary spike (docs/stress-test.spec.md §8, decision 7): the cell execution
 # policy and the cell permissions boundary. The boundary is set on the cell
 # bootstrap's CloudFormation execution role (cdk bootstrap
 # --custom-permissions-boundary) and on every role a cell stack creates
 # (@aws-cdk/core:permissionsBoundary), so what the execution role can do is
 # the intersection of the two, and no role it creates can exceed the boundary.
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Spike Q-5, cell execution policy and permissions boundary
+Description: Boundary spike, cell execution policy and permissions boundary
 Resources:
   CellPermissionsBoundary:
     Type: AWS::IAM::ManagedPolicy

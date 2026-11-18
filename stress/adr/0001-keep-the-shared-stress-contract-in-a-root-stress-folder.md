@@ -42,7 +42,8 @@ this ADR folder. Each sample's slice is `scripts/stress/slice.sh` and
 
 ## Consequences
 Easier: one contract many branches can build against at once; the platform
-run has one home. Harder: the sample standard gains a section for `stress/`
-(layout, build, what may live there), and `CONTRIBUTING.md` points to it.
+run has one home. Harder: the sample standard carries a section for `stress/`
+(§1.2: layout, what may live there, which rules apply), and
+`CONTRIBUTING.md` points to it.
 Revisit if a second cross-sample asset appears that is not a test: then a
 general root folder for shared code may fit better than `stress/`.

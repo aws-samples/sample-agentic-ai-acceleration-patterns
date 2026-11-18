@@ -1,6 +1,6 @@
 # ADR-0046: Make the concurrent build limit a prop
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-11-18
 - Amends: ADR-0021 (the build caps of M17)
 - Deciders: Dave Roberts (SA)

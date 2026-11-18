@@ -62,7 +62,7 @@ passes the boundary as a string, which the CDK ignores). The role pair gets
 (not the lookup role) through control-plane ADR-0047. The policies ship in `stress/application/`.
 
 ## Consequences
-Proven so far: spike Q-5 (`stress/spikes/q5-cell-boundary/`, 2026-11-18), in a shared
+Proven so far: the boundary spike (`stress/spikes/cell-boundary/`, 2026-11-18), in a shared
 account and without the `/cell/` path, proved the boundary half: one cell
 deployed in 402 s with 27 of 27 roles bounded; a role without the boundary
 was refused at `iam:CreateRole`; the destroy needed Application Auto

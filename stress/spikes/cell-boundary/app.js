@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 //
-// Spike Q-5 (docs/stress-test.spec.md §8, decision 7). Two stacks:
+// Boundary spike (docs/stress-test.spec.md §8, decision 7). Two stacks:
 // - CellBootstrapPolicies-spike: the cell execution policy and the cell
 //   permissions boundary, from cell-policies.yaml (default bootstrap).
 // - CellDenyProbe-spike: one role WITHOUT the boundary and with
