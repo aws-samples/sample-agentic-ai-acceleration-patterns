@@ -1438,8 +1438,9 @@ Rules:
   `app` and `signin` take. The registrar refuses a write past 5 MB with
   507, and an alarm fires at 80 %. CloudFront publishes no store-size
   metric, so the registrar publishes its own: after each write it
-  reads `TotalSizeInBytes` from `DescribeKeyValueStore`, the call that
-  gives it the ETag (§3.4 step 5), and writes it as the custom metric
+  takes `TotalSizeInBytes` from the write's own response (`PutKey`,
+  `DeleteKey` or `UpdateKeys`), which holds the size after the write,
+  and writes it as the custom metric
   `RouteTableBytes` (namespace `TenantFrontDoor`, an embedded metric
   format line in its log). The alarm (maximum at or above 4,000,000
   bytes) lives in the main stack's Region beside the registrar, so the
@@ -1941,7 +1942,9 @@ authorization code and `state` sit in the query of the callback page
 until `history.replaceState` runs. So `replaceState` runs first: the
 first element of `<head>` after `<meta charset>` is a hashed inline
 classic script that copies `location.search` into a variable the entry
-reads and calls `history.replaceState(null, "", location.pathname)`.
+reads and, only when the query holds `code`, `state` or `error`,
+calls `history.replaceState(null, "", location.pathname)`. The SPA
+has no other query or fragment routes, so nothing else is lost.
 It runs before the parser reaches the import map and the entry, so no
 load, and no violation those loads could cause, happens while the URL
 holds the code. Both modes handle the callback this way: `/callback`
