@@ -670,23 +670,39 @@ On every write:
    minus the number of distinct pages with a `page-end` line, zero
    included. A previous day with no `run-start` line counts as one
    missing page only when the 7-day look-back window holds an earlier
-   Scheduler `run-start` line, one without a supplied `runDay`;
-   otherwise the lister emits 0. So the first daily run after the
-   sweeper is deployed, or after `dedicatedDomains` is turned back on,
-   does not alarm, and a run that never started alerts on any later
-   day. A query that fails or does not finish in 60 s also counts as
+   Scheduler `run-start` line, one without a supplied `runDay` and with
+   a `runDay` before that previous day; otherwise the lister emits 0.
+   So the first run after the sweeper is deployed, or after
+   `dedicatedDomains` is turned back on, does not alarm, and a run that
+   never started alerts on any later day. A query that fails or does not finish in 60 s also counts as
    one missing page, because the lister cannot then show that the run
    finished. A run with a supplied
    `runDay` emits no missing-pages count. The run it judges ended by
    09:30 UTC the day before, so the count is always about a finished
-   run. Three alarms watch the re-check itself, besides the three-miss
-   alarm: the queue's depth; the `unverifiable` count; and the
-   missing-pages count above zero, which evaluates two one-day periods
-   with missing data treated as breaching. Yesterday's 02:00 UTC count
-   keeps today's period, empty until its own count arrives, from
-   tripping it, and the first run's 0 gives a new deployment its first
-   datapoint. When two days pass with no lister, because the daily
-   schedule stops firing, it alarms. The sweeper
+   run. Four alarms watch the re-check itself, besides the three-miss
+   alarm: the queue's depth; the `unverifiable` count; and two on the
+   missing-pages count. The missing-pages alarm fires on a `Maximum`
+   above zero over one one-day period, 1 of 1, with missing data not
+   breaching, so one day's count above zero alarms. The no-lister alarm
+   fires on a `SampleCount` below one over two one-day periods, 2 of 2,
+   with missing data treated as breaching. A count, zero included, never
+   breaches it, and yesterday's 02:00 UTC count keeps today's period,
+   empty until its own count arrives, from tripping it; when two days
+   pass with no lister, because the daily schedule stops firing, it
+   alarms. So that the no-lister alarm has a datapoint from deployment,
+   a custom resource, the starter, deployed with the sweeper and after
+   it, starts one lister run on its Create, which happens when the stack
+   is created with `dedicatedDomains` on and on the update that turns
+   it on. The starter invokes the sweeper function asynchronously with
+   the Scheduler's input, so the run is Scheduler-shaped, with no
+   supplied `runDay`. No `tenant#` entry holds a `d` then, so the run
+   logs a `run-start` line with zero pages and emits 0, and the next
+   daily run judges that finished zero-page run. The starter does not
+   wait for the run, so a deploy-time run that fails does not fail the
+   deployment: the no-lister alarm then reads ALARM until the first
+   daily run, whose lister finds no earlier Scheduler `run-start` line
+   and emits 0 under the first-run rule above. On an Update or a
+   Delete the starter does nothing. The sweeper
    keeps no store of its own: its
    log is the record. A domain that stays broken emits a count on every
    later run, and each three-miss line names its domain, so a second
@@ -827,6 +843,7 @@ sweeper's log group, and `logs:GetQueryResults` and `logs:StopQuery`,
 which IAM does not scope to a log group, for its Logs Insights
 queries; `sqs:SendMessage` on the on-failure queue; and, for the
 lister's fan-out of one asynchronous invocation per page,
+`lambda:InvokeFunction` on the sweeper function. The starter holds only
 `lambda:InvokeFunction` on the sweeper function. The challenge lookup
 itself needs no IAM action: it is a DNS lookup. The re-check's counts,
 the three-miss, `unverifiable` and missing-pages counts, are embedded
@@ -839,8 +856,8 @@ stack's teardown custom resource holds both roles' CloudFront and ACM
 actions (§6.2).
 
 While `dedicatedDomains` is off the registrar role holds none of its
-CloudFront or ACM actions, and the sweeper, its role and its schedules
-are not deployed. The teardown custom resource holds its actions in
+CloudFront or ACM actions, and the sweeper, its role, its schedules
+and the starter are not deployed. The teardown custom resource holds its actions in
 both cases, so a front door that once served a dedicated domain still
 tears down. A stack update that turns `dedicatedDomains` off fails
 while any `tenant#` entry holds a `d`, or while the registrar still
@@ -860,7 +877,8 @@ is 30 s, and the guard waits 40 s after the function update before it
 reads the table, the 10 s Lambda init limit plus that timeout, so every
 registrar call that started on the old configuration, cold start
 included, has ended and no operator call can add a `d` after the guard
-has read the table. API Gateway answers 504 at its 29 s integration
+has read the table. The guard function's own timeout is 2 minutes,
+which covers the 40 s wait and its reads. API Gateway answers 504 at its 29 s integration
 limit while the function runs on, so a call can outlive its 504; every
 operator call is repeat-safe, and the operator repeats it. When the guard refuses, the whole update rolls back
 together, the function's switch included. The operator drops every
@@ -1891,9 +1909,10 @@ delegation); a CNAME at the challenge name; the lookup before the
 `host#<d>` write (the test issues no certificate); and the restart
 after an ETag conflict on a challenge write; a daily-run page that
 fails, so that its lines are missing and the three-miss walk skips the
-run, the on-failure queue, the missing-pages count and its alarm (a
-previous day with no `run-start` line, the 0 of a first run and two
-days with no lister included); a supplied `runDay`
+run, the on-failure queue, the missing-pages count, the missing-pages
+alarm and the no-lister alarm (a previous day with no `run-start` line,
+the 0 of a first run and two days with no lister included); the
+starter's deploy-time run and its zero-page `run-start` line; a supplied `runDay`
 outside the last 7 days or after today; the guard's 40 s wait; an entry that
 errors for three days, the `unverifiable` line and its count; a query
 result that reaches the 10,000-row limit, which fails the page, and the

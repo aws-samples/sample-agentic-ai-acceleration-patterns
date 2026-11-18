@@ -210,12 +210,25 @@ before it writes the domain's `host#` key.
   previous run's `run-start` page count and its `page-end` lines and
   emits a missing-pages count. A previous day with no `run-start` line
   counts as one only when the 7-day window holds an earlier Scheduler
-  `run-start` line (no supplied `runDay`); otherwise the lister emits 0,
-  so the first run after the sweeper is deployed does not alarm.
-  Alarms on that count and on the queue say that detection was down,
-  and they judge only finished runs. The missing-pages alarm evaluates
-  two one-day periods with missing data treated as breaching, so it
-  also alarms after two days with no lister. One query per
+  `run-start` line (no supplied `runDay`, and a `runDay` before that
+  day); otherwise the lister emits 0, so the first run after the
+  sweeper is deployed does not alarm. Four alarms watch the re-check
+  besides the three-miss alarm: the queue's depth, the `unverifiable`
+  count, and two on the missing-pages count, which say that detection
+  was down and judge only finished runs. The missing-pages alarm fires
+  on a `Maximum` above zero, one one-day period, 1 of 1, missing data
+  not breaching. The no-lister alarm fires on a `SampleCount` below
+  one, two one-day periods, 2 of 2, missing data breaching, so it
+  alarms only after two days with no lister and stays OK before the
+  day's 02:00 UTC run. A custom resource, the starter, deployed with
+  the sweeper, starts one Scheduler-shaped lister run (no supplied
+  `runDay`) on its Create, when the stack is created with
+  `dedicatedDomains` on and on the off-to-on update; no entry holds a
+  `d` then, so it is a zero-page run that emits 0 and gives the
+  no-lister alarm a datapoint from deployment. The starter does not
+  wait for it: if that run fails, the no-lister alarm reads ALARM
+  until the first daily run, which emits 0 under the first-run rule.
+  One query per
   page in flight keeps a run inside the Logs Insights quota of 30
   concurrent queries. The sweeper keeps
   no store of its own: its log is the record. A removed record can still
@@ -246,7 +259,7 @@ before it writes the domain's `host#` key.
   `customDomain` writes get 400; then the guard waits 40 s, the 10 s
   Lambda init limit plus the registrar function's 30 s timeout, so no
   call that started before the update, cold start included, is still
-  running, and reads the table (a call can outlive API Gateway's 504,
+  running, and reads the table, inside its own 2-minute timeout (a call can outlive API Gateway's 504,
   and the operator repeats it, because every operator call is
   repeat-safe); then both roles are narrowed,
   the sweeper's as it goes with the sweeper, and the schedules are
@@ -259,8 +272,9 @@ before it writes the domain's `host#` key.
   reissue, a resolver error (`unresolved`), a CNAME at the challenge
   name, the lookup before the `host#` write, the restart after an ETag
   conflict, a daily-run page that fails, the on-failure queue, the
-  missing-pages count and its alarm (the 0 of a first run and two days
-  with no lister included), a supplied `runDay` outside its
+  missing-pages count, the missing-pages alarm and the no-lister alarm
+  (the 0 of a first run and two days with no lister included), the
+  starter's deploy-time run, a supplied `runDay` outside its
   range, the guard's 40 s wait, the `unverifiable` line and its alarm for an entry
   that errors three days in a row, and a query that reaches its row
   limit and fails the page (spec §10). The alarms' notifications are not
