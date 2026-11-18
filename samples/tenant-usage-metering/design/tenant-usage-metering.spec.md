@@ -421,8 +421,17 @@ At hour end plus `recountWindowHours`, the scheduler closes a `COUNTED`
 hour in a transaction: a `ConditionCheck` that the `GEN` item's
 `generation` equals `countedGeneration`, and `CLOSED` on `META`
 (conditioned on `COUNTED`, removing `pending`); if the check fails, the
-hour becomes `DIRTY`. `READMIT`, `RECOUNT` and `StartIngestRedrive`
-refuse an hour within 5 minutes of its close, as `TOO_LATE`. An hour in any other state at
+hour becomes `DIRTY`.
+
+`READMIT`, `RECOUNT` and `INGEST_REDRIVE` check a close guard at each
+write, not once per job: before each `readmitted/` object, each
+`generation` increment and each Firehose put, an hour within 5 minutes of
+its close, or `CLOSED`, is refused for that item. `READMIT` and
+`INGEST_REDRIVE` write such an event to `error/` as `TOO_LATE`, delete
+its dead-letter message where there is one, and count it in the job's
+`refused`; `RECOUNT` counts the hour in `refused`.
+
+An hour in any other state than `COUNTED` at
 that time raises an alarm and stays in the index, retried like any other
 until a count succeeds; it closes only from `COUNTED`. A
 `CLOSED` hour is never counted again, and an object that lands in it
@@ -489,20 +498,29 @@ Sink delivery: a record goes to the sinks enabled when it is written that
 take its meter. `PENDING` → `SENT`, or `RETRYING` with backoff for 24 h →
 `FAILED` and an alarm; `SINK_REDRIVE` sends a sink's `FAILED` deliveries
 again, or, given an hour range, every record of that range, which is how
-a sink enabled later is backfilled. An `HTTP` sink whose mapping needs
-`billingAccount` on a record without one marks it `BLOCKED`
-(`NO_BILLING_ACCOUNT`), after it has read the tenant's binding for the
-application: if the binding now has an account, the dispatcher writes it
-onto the record as revision 2, and in the same write marks its sink
-`BLOCKED`, so the revision-2 publish queues it, the same write the job
-below makes. Every revision-2 write is conditioned on `revision = 1`, so
-the job and the dispatcher cannot both make it. An alarm fires when a delivery has been `BLOCKED` for 24 hours,
-and `StartResendBlocked` (a tenant and an application) lets an operator
-run the job. A `PutTenantBinding` that sets a billing account
-starts a `RESEND_BLOCKED` job for that tenant and application and
-returns; the job writes the value onto each `BLOCKED` record with
-`revision` 2 and `publishPending`, so the record publisher sends it to the
-blocked sinks and publishes it again on the usage bus.
+a sink enabled later is backfilled.
+
+An `HTTP` sink whose mapping needs `billingAccount` meets a record
+without one. The dispatcher reads the tenant's binding for the
+application, then makes one conditional write:
+
+| Binding | Write | Condition |
+|---|---|---|
+| has an account | `billingAccount`, `revision` 2, `publishPending`, and this sink `BLOCKED`; the revision-2 publish queues every `BLOCKED` sink | `revision = 1` |
+| has none | this sink `BLOCKED` (`NO_BILLING_ACCOUNT`) | `attribute_not_exists(billingAccount)` |
+
+On a failed condition the dispatcher re-reads the record, which now
+holds `billingAccount`, and sends with it. So a sink is `BLOCKED` on a
+revision-2 record only for the moment between that write and its
+publish.
+
+A `PutTenantBinding` that sets a billing account starts a
+`RESEND_BLOCKED` job for that tenant and application and returns;
+`StartResendBlocked` lets an operator start the same job. For each
+record with a `BLOCKED` sink, the job writes the value as revision 2 with
+`publishPending` (condition `revision = 1`), or, on a record already at
+revision 2, queues its `BLOCKED` sinks directly. An alarm fires when a
+delivery has been `BLOCKED` for 24 hours.
 
 ### 4.8 Usage event and raw objects (the wire contract)
 
@@ -589,7 +607,7 @@ Errors:
 | 400 `ValidationException` | malformed request, a field outside its charset, a `BILLING_ACCOUNT` out of format, a backdated `effectiveFrom` beyond the window |
 | 403 `AccessDeniedException` | caller not permitted for the route; for `PutUsageEvents`, not an assumed role or not a registered emitter |
 | 404 `ResourceNotFoundException` | unknown meter, sink, hour, job (never for `Delete*` of a registration) |
-| 409 `ConflictException` | `PutCellEmitter` in a subscriber account or the metering account; `CreateMeter` on an existing meter; `StartRecount` over a `CLOSED` hour; a lost conditional write, retryable |
+| 409 `ConflictException` | `PutCellEmitter` in a subscriber account or the metering account; `CreateMeter` on an existing meter; `StartRecount` whose whole range is `CLOSED` or within 5 minutes of its close; a lost conditional write, retryable |
 | 429 `ThrottlingException` | API Gateway stage throttle |
 | 500, 502, 503, 504 | the function failed, was throttled or timed out; nothing in the batch is known to be stored |
 
