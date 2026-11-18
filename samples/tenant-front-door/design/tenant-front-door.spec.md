@@ -173,7 +173,7 @@ has passed the registrar's domain challenge (ADR-0018).
 | Tenant router | edge | CloudFront Function (viewer request, JS 2.0) | Finds the tenant, refuses or routes. It names the tenant it routed on in the access log with `cf.logCustomData` (Telemetry, below). In `host` mode it also mints and checks the signed sign-in `state` and starts sign-out (§3.5, ADR-0016) |
 | Route table | edge | CloudFront KeyValueStore | `tenant`, `host` and `cell` entries, the `app` settings and, in `host` mode, the `signin` key (§4) |
 | Route registrar | edge | API Gateway (IAM auth) and Lambda | The only writer of the route table, and the only creator of dedicated distribution tenants, which the sweeper deletes once disabled. Admits only the control plane's global hook role and the edge operator role, and checks each write against the control plane (§3.4) |
-| Sweeper | edge | A Lambda function of its own, with its own execution role and its own log group, run by EventBridge Scheduler. Only when `dedicatedDomains` is on (§3.6) | Every 15 minutes it deletes the dedicated distribution tenants and certificates that no tenant's `d` names any more. Daily it re-checks the challenge record of every passed challenge, routed or not (§3.4 step 5), and its log is the record of that re-check. Its log group holds no registrar request log |
+| Sweeper | edge | A Lambda function of its own, with a 15-minute timeout, its own execution role and its own log group, run by EventBridge Scheduler. Only when `dedicatedDomains` is on (§3.6) | Every 15 minutes it deletes the dedicated distribution tenants and certificates that no tenant's `d` names any more. Daily it re-checks the challenge record of every passed challenge, routed or not (§3.4 step 5), and its log is the record of that re-check. Its log group holds no registrar request log |
 | SPA origin | edge | S3 bucket with origin access control | One build for every tenant |
 | Cell API origin | the cell's | The cell's API (demo: Lambda function URL with origin access control) | Verifies the token, checks the route hint and the cell's tenants |
 | `CellRouteAccess` construct | the cell's | Lambda permission | Grants `cloudfront.amazonaws.com` `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`, conditioned on the edge distribution's ARN |
@@ -600,12 +600,15 @@ On every write:
    `sum(pass) > 0` from two attempts of a page that disagreed. That is
    the safe direction, because a miss only counts toward three, and a
    logged `pass` in a later day's run still ends the streak. A row whose
-   `sum(pass)` and `sum(miss)` are both 0 is an error run. Each run
-   adds at most 502 rows to the result: 500 `entry` rows, its
-   `run-start` row and one `page-end` row. So 19 runs in the 7 days fit
-   inside 10,000 rows (9,538), and a 20th would not (10,040); a result
-   that reaches the limit fails the page, because rows may have been
-   cut off, and a cut result must never read as unknown runs. Once its lookups are done the page reads the
+   `sum(pass)` and `sum(miss)` are both 0 is an error run. A run holds
+   at most 500 entries in the page's range, plus any entries in that
+   range whose domains have since been dropped. It adds one `entry` row
+   for each, its `run-start` row and one `page-end` row: 502 rows when
+   no entry has been dropped since. So 19 such runs in the 7 days fit
+   inside 10,000 rows (9,538), and a 20th would not (10,040). A page
+   whose result reaches the limit fails, because rows may have been cut
+   off and a cut result must never read as unknown runs, and the
+   missing-pages alarm reports it. Once its lookups are done the page reads the
    results, waiting at most 60 s, and walks each missed entry's earlier
    days, newest first. A day with a `pass` ends the walk and the streak
    with it, and only a logged pass does. A day whose run has only
@@ -643,7 +646,7 @@ On every write:
    run id and page, so a retry of a page that had already ended adds
    none. A page therefore takes at most 500 records × 2 queries
    ÷ 10 × 5 s = 500 s of lookups plus 60 s for the Logs Insights query,
-   inside the 15-minute Lambda limit. Each page has at most one query in
+   inside the sweeper function's 15-minute timeout. Each page has at most one query in
    flight, and the route table holds at most 3,472 dedicated tenants
    (§4.1), so a run of at most 7 pages, with the lister's own query,
    stays below the Logs Insights quota of 30 concurrent queries per
@@ -655,8 +658,9 @@ On every write:
    02:00 UTC with a retry policy of at most 2 retries and a maximum
    event age of 1 hour, and the sweeper function's asynchronous
    invocation configuration keeps an event for at most 3 hours, with
-   two retries. The lister's last attempt therefore starts by 06:00
-   UTC and ends by 06:15, and the last attempt of its last page starts
+   two retries. With the sweeper function's 15-minute timeout, the
+   lister's last attempt therefore starts by 06:00 UTC and ends by
+   06:15, and the last attempt of its last page starts
    by 09:15 and ends by 09:30 UTC. Before it lists the day's entries,
    the lister checks the run before it: one Logs Insights query over
    the same log group reads the `run-start` line of the newest run
@@ -665,19 +669,24 @@ On every write:
    metric format log line: the page count on that `run-start` line
    minus the number of distinct pages with a `page-end` line, zero
    included. A previous day with no `run-start` line counts as one
-   missing page, so a run that never started also alerts, and so does
-   a query that fails or does not finish in 60 s, because the lister
-   cannot then show that the run finished. A run with a supplied
+   missing page only when the 7-day look-back window holds an earlier
+   Scheduler `run-start` line, one without a supplied `runDay`;
+   otherwise the lister emits 0. So the first daily run after the
+   sweeper is deployed, or after `dedicatedDomains` is turned back on,
+   does not alarm, and a run that never started alerts on any later
+   day. A query that fails or does not finish in 60 s also counts as
+   one missing page, because the lister cannot then show that the run
+   finished. A run with a supplied
    `runDay` emits no missing-pages count. The run it judges ended by
    09:30 UTC the day before, so the count is always about a finished
    run. Three alarms watch the re-check itself, besides the three-miss
    alarm: the queue's depth; the `unverifiable` count; and the
-   missing-pages count, above zero in a one-day period, with missing
-   data not breaching, because the count is emitted once a day and the
-   hours before 02:00 UTC hold none. Shortcut: a daily schedule that
-   stops firing altogether emits no count and no queue message, so no
-   alarm fires; upgrade to an alarm that treats two days of missing
-   data as breaching when a vendor needs that covered. The sweeper
+   missing-pages count above zero, which evaluates two one-day periods
+   with missing data treated as breaching. Yesterday's 02:00 UTC count
+   keeps today's period, empty until its own count arrives, from
+   tripping it, and the first run's 0 gives a new deployment its first
+   datapoint. When two days pass with no lister, because the daily
+   schedule stops firing, it alarms. The sweeper
    keeps no store of its own: its
    log is the record. A domain that stays broken emits a count on every
    later run, and each three-miss line names its domain, so a second
@@ -847,11 +856,13 @@ function; then the narrowing of both roles, the registrar role losing
 its CloudFront and ACM actions and the sweeper's role losing all of
 its actions as it goes with the sweeper, and the removal of both
 schedules, which depend on the guard. The registrar function's timeout
-is 30 s, one second above API Gateway's 29 s integration limit, and
-the guard waits 30 s after the function update before it reads the
-table, so every registrar call that started on the old configuration
-has ended and no operator call can add a `d` after the guard has read
-the table. When the guard refuses, the whole update rolls back
+is 30 s, and the guard waits 40 s after the function update before it
+reads the table, the 10 s Lambda init limit plus that timeout, so every
+registrar call that started on the old configuration, cold start
+included, has ended and no operator call can add a `d` after the guard
+has read the table. API Gateway answers 504 at its 29 s integration
+limit while the function runs on, so a call can outlive its 504; every
+operator call is repeat-safe, and the operator repeats it. When the guard refuses, the whole update rolls back
 together, the function's switch included. The operator drops every
 dedicated domain first and waits for the sweeper, so no domain stays
 routed with no role able to remove it and no daily re-check. The guard
@@ -1881,8 +1892,9 @@ delegation); a CNAME at the challenge name; the lookup before the
 after an ETag conflict on a challenge write; a daily-run page that
 fails, so that its lines are missing and the three-miss walk skips the
 run, the on-failure queue, the missing-pages count and its alarm (a
-previous day with no `run-start` line included); a supplied `runDay`
-outside the last 7 days or after today; the guard's 30 s wait; an entry that
+previous day with no `run-start` line, the 0 of a first run and two
+days with no lister included); a supplied `runDay`
+outside the last 7 days or after today; the guard's 40 s wait; an entry that
 errors for three days, the `unverifiable` line and its count; a query
 result that reaches the 10,000-row limit, which fails the page, and the
 `logs:StopQuery` call on a query the page gives up on; a run with zero
