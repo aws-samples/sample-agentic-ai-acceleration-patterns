@@ -262,8 +262,12 @@ source (T41).
 
 A hook build starts with a request-response `startBuild`, so its id is
 known from the first call, and a loop polls that one build with
-`batchGetBuilds` every 60 seconds, keeping only its id, status, phase
-timing and resolved commit. A hook's `timeoutMinutes` (T, 5 to 30) is
+`batchGetBuilds` every 60 seconds, through the SDK integration because
+Step Functions has no optimized one for it, keeping only its id,
+status, phase timing and resolved commit. For a git source the commit
+is the full SHA, read from the final poll because the first poll does
+not carry it yet; an S3 source reports none, so the record keeps the
+requested `sourceVersion` (H-2). A hook's `timeoutMinutes` (T, 5 to 30) is
 CodeBuild's run timeout. The start is an explicit loop that holds two
 variables, computed once per try: the try index `TRY`, and that try's
 queued timeout q, 10 minutes less the minutes refused so far and never
@@ -273,12 +277,15 @@ concurrency quota, the project at its cap) goes through a `Catch`, a
 minutes, so refusals and the queue take at most 10 minutes together. A
 transient error is a task `Retry` (`TimeoutSeconds` 15,
 `IntervalSeconds` 10, `BackoffRate` 1, `MaxAttempts` 3, no jitter),
-which re-sends the same variables, so a try and its repeats end within
+which evaluates the `Arguments` again on each repeat from the same
+variables (H-8), so a try and its repeats end within
 90 seconds; the ASL default `BackoffRate` of 2 would wait 10, 20 and
 40 seconds. The idempotency token is
 `$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK_ID, $string(ATTEMPT),
-$string(TRY)], '|'), 'SHA-256')`, 64 hexadecimal characters. It has a
-fixed length, differs on every try and stays the same on every repeat,
+$string(TRY)], '|'), 'SHA-256')`, 64 hexadecimal characters, built
+only from values fixed for the try and never from `$uuid()`, `$now()`
+or `$millis()`, because a `Retry` evaluates it again. It has a fixed
+length, differs on every try and stays the same on every repeat,
 so a call that
 created a build before it failed returns that build again instead of
 leaving one with no id to stop. A try whose repeats all fail ends the
@@ -422,8 +429,10 @@ as a consumer of a global post hook.
   or hook source (T41).
 - The concurrency cap and log retention of ADR-0021 cover all four
   projects. All global hook builds of the fleet share one project
-  capped at five, and CodeBuild documents builds over the cap as
-  refused, not queued (H-9). A refused start is tried again for up to 5
+  capped at five, and CodeBuild refuses builds over the cap rather than
+  queueing them, with `CodeBuild.AccountLimitExceededException`, the
+  name the account-wide concurrent build quota also uses, so one
+  `Catch` covers both (H-9). A refused start is tried again for up to 5
   minutes; then a create or update ends in a named `*_FAILED` ("cannot
   start") rather than a silent wait, and a delete hook spends its
   budget and is skipped (T42, T43).
@@ -468,29 +477,42 @@ as a consumer of a global post hook.
   its budget runs out, so an external system can keep state for a cell
   or deployment that is gone (T42). The skip is logged and alarmed;
   reconciling it is the external system's job.
-- Assumptions to verify before the hooks are built (spec §9.1, with H-1
-  verified; H-3, H-4 and H-6 asked how a `.sync` hook task behaves and
-  are not needed with the poll loop):
-  - H-2: a `batchGetBuilds` result carries `resolvedSourceVersion`.
-  - H-5: CodeBuild accepts a hook build's environment override (about
-    fifteen fixed variables, 40 `PARAM_` variables, 4 KB of outputs).
-  - H-7: a CodeBuild role's trust policy conditioned on `aws:SourceArn`,
-    an ARN computed from the project's physical name, admits its own
-    project's builds only, for each hook role and each provisioning
-    build role.
-  - H-8: a refused `StartBuild` or `StopBuild` fails with a service
-    error name no started build produces, and a refused try creates no
-    build; the idempotency token passes through the Step Functions
-    integration, and a repeat within its 5-minute validity returns the
-    same build id; a task `Retry` re-sends the evaluated `Arguments`
-    unchanged, and a refused request does not bind its token; CodeBuild
-    accepts the 64-character token.
-  - H-9: what `StartBuild` returns at the project's
-    `concurrentBuildLimit`; the design assumes a refusal.
-  - H-10: a 4,096-byte outputs value of worst-case escapes round-trips
-    through the build export and Step Functions, and the guard, run in
-    a real Step Functions `Output`, accepts the largest valid value and
-    rejects the 4,096-character near miss in recorded time.
+- Spike results (spec §9.1, each 2026-11-17, eu-central-1; H-3, H-4
+  and H-6 asked how a `.sync` hook task behaves and are not needed with
+  the poll loop):
+  - H-1: see Context.
+  - H-2: for a git source the final `batchGetBuilds` poll carries the
+    full commit SHA as `ResolvedSourceVersion`, the branch's tip when
+    the hook names a branch; the start result and the first poll do
+    not. An S3 source never reports one, also with an object version
+    as `sourceVersion`. The poll is the SDK integration, whose result
+    keys are PascalCase.
+  - H-5: CodeBuild delivers 14 fixed variables, 40 `PARAM_` variables
+    of 1,024 bytes and a 4,096-byte `SCRIPT_OUTPUTS` byte for byte. It
+    accepts 41 variables and 4,097 bytes too, so the caps are the
+    control plane's own, enforced before `StartBuild`.
+  - H-7: a trust policy on an `aws:SourceArn` computed from the
+    project's fixed name deploys with no cycle and admits that project.
+    CodeBuild refuses a `CreateProject` or `UpdateProject` that gives
+    the role to another project, so a mis-wired project fails at
+    deploy, never at its first build.
+  - H-8: `$hash` gives the 64-character token CodeBuild accepts. A
+    repeat with the same token and arguments returns the same build,
+    other arguments under the token are refused and start nothing, and
+    a refused request does not bind its token. A task `Retry` evaluates
+    `Arguments` again on every repeat, so the token holds across
+    repeats only because it reads nothing that changes between them.
+    A `Retry` after a 5xx or a task timeout, a `StopBuild` refused
+    under throttling and a start refused by account-wide throttling
+    were not provoked and stay to verify.
+  - H-9: at the project's `concurrentBuildLimit`, `StartBuild` is
+    refused with `CodeBuild.AccountLimitExceededException` and creates
+    no build.
+  - H-10: a 4,096-byte value of worst-case escapes round-trips byte for
+    byte through the export, the task `Output` and a hook build's
+    override, at 8,190 characters in state. The guard, run in a Step
+    Functions JSONata state, gives the expected verdict in 18 cases,
+    the §10 near miss included, each in under 1 ms.
 - Seams (spec §11): hooks on tenant record events and on account events;
   outputs from a pre hook into the script; a hook role per application
   or per global hook; publishing to an event bus as a built-in.
@@ -500,9 +522,8 @@ as a consumer of a global post hook.
 - Revisit if a downstream system needs to veto a delete (today a delete
   cannot be gated), if per-application or per-hook permissions are
   needed, if hook latency on every operation becomes the larger cost, if
-  H-7 finds that the `aws:SourceArn` condition refuses a project's own
-  builds, if H-9 finds that the project cap queues builds rather than
-  refusing them, if H-8 finds that the token does not return the same
-  build or that a `Retry` re-evaluates its `Arguments`, or if H-10 finds
-  that the export counts escapes past its limit or that Step Functions'
-  JSONata engine cannot run the guard.
+  a later run of H-2 to H-10 stops matching spec §9.1 (a project cap
+  that queues builds, a token that does not return the same build, a
+  `Retry` whose evaluation of `Arguments` is not deterministic, an
+  export that drops an escaped value), or if one of the three cases H-8
+  left unprovoked behaves otherwise.

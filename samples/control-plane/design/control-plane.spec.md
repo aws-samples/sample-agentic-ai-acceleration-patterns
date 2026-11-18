@@ -749,7 +749,7 @@ it (§7.1 step 0).
 | `source`, `cellScripts`, `tenantScripts`, `hooks` | stamped from the application's definition; immutable for the cell's lifetime. `hooks` is the application's hook list when the cell was created; it runs on the cell's events and on the events of every deployment in it (R-40) |
 | `parameters` | map of cell parameter name → value, the values an operator set on this cell through `UpdateCell`; at most 20 entries, each value at most 1,024 bytes (UTF-8); **empty at birth**. Never holds a default the operator did not supply, so a changed default reaches the cell on its next build |
 | `lastBuildId` | most recent successful cell-scoped build id (nullable) |
-| `lastGlobalHooks` | the global hooks that ran in the cell's last cell event, in run order, each `{hookId, phase, revision, sourceVersion, resolvedSourceVersion}`: the ref the hook names and the commit its build ran, absent for a source that has none such as S3 (R-40); written by the workflow's terminal writes only; empty when none ran |
+| `lastGlobalHooks` | the global hooks that ran in the cell's last cell event, in run order, each `{hookId, phase, revision, sourceVersion, resolvedSourceVersion}`: the ref the hook names and the commit its build ran, absent for an S3 source, whose build reports none (R-40, H-2); written by the workflow's terminal writes only; empty when none ran |
 | `statusReason` | populated on failure (nullable) |
 | `createdAt`, `updatedAt` | timestamps |
 
@@ -1031,10 +1031,14 @@ after the read does not change an execution already accepted; the next
 operation sees it. Both are tolerated races (§7.2). Every terminal write
 that leaves the record in place (§8.2) MUST record on the cell or the
 deployment the global hooks that ran for its event as
-`lastGlobalHooks`, each with the `resolvedSourceVersion` its build
-reported (H-2), so an operator can tell which commit of a gate or an
-audit hook an `ACTIVE` record passed, also when the hook names a
-branch. A hook that a `PRE` failure kept from running is not listed.
+`lastGlobalHooks`, each with the `sourceVersion` the hook names and
+the `resolvedSourceVersion` its build's final poll reported, so an
+operator can tell which commit of a gate or an audit hook an `ACTIVE`
+record passed, also when the hook names a branch. For a git source
+CodeBuild reports the full commit SHA, the branch's tip when the hook
+names a branch (H-2). For an S3 source it reports none, also when
+`sourceVersion` names an object version, so the entry holds the
+requested `sourceVersion` and no `resolvedSourceVersion`. A hook that a `PRE` failure kept from running is not listed.
 Application hooks need no such record: the cell's stamp names them.
 
 ---
@@ -1550,9 +1554,11 @@ hook roles:
 | API Gateway CloudWatch role | CDK-generated | no: it holds API Gateway's logs only. It outlives the stack: CDK retains it and the `AWS::ApiGateway::Account` setting that names it, one per account and Region (§10) |
 
 Each build role MUST also trust `codebuild.amazonaws.com` only on its
-own project's `aws:SourceArn`, as each hook role does (H-7), so no new
-project can run as it; until now the build roles trusted CodeBuild
-with no condition. The project names its role as `ServiceRole`, so a
+own project's `aws:SourceArn`, as each hook role does, so no other
+project can run as it: CodeBuild refuses a `CreateProject` or an
+`UpdateProject` that names the role for another project, so a
+mis-wired project fails at deploy, never at its first build (H-7). The
+project names its role as `ServiceRole`, so a
 trust condition that referenced the project would close a cycle. Each
 of the four projects therefore MUST have a physical name built from
 the fleet name (`<fleet>-cell-build`, `<fleet>-tenant-build`,
@@ -1672,6 +1678,14 @@ and no other control plane state (H-5):
 | `PARAM_<NAME>` | the cell's resolved set (R-34), as the cell script receives it | the deployment's resolved set (R-32), as the tenant script receives it |
 | `SCRIPT_OUTPUTS` | `POST` only: the script's outputs (R-43), `{}` when it wrote none | as for cells |
 
+CodeBuild delivers this list intact at its caps: beside the fixed
+variables, 40 `PARAM_` values of 1,024 bytes and a 4,096-byte
+`SCRIPT_OUTPUTS` arrive byte for byte (H-5). It also accepts a 41st
+`PARAM_` variable and a 4,097-byte value, so the caps are the control
+plane's own and hold before `StartBuild` because the API enforces the
+parameter caps when values are written (R-33, R-34) and the workflow
+guard the outputs cap (R-43).
+
 There is no `ADMIN_EMAIL`: onboarding input crosses the boundary once, to
 the create script (P-3). There is no `externalId` and no pair
 credential (R-41). A hook MUST take the identity it acts on
@@ -1714,8 +1728,9 @@ build's exported variables to between 8 and 16 KiB and, past it,
 returns every exported value as an empty string while the build and
 the execution succeed (spike H-1, §9.1). A 4,096-byte value with
 nothing else exported is half the 8,192 bytes H-1 saw kept. A value
-made of `"` and `\` escapes doubles when serialised again, so H-10
-checks that such a value round-trips too.
+made of `"` and `\` escapes doubles when serialised again; at 4,096
+bytes such a value comes back byte for byte through the export, the
+task's JSONata `Output` and a hook build's override (H-10).
 
 The buildspec check is a format check, not a trust boundary: it runs in
 the container the script just ran in, with tools the script could have
@@ -1744,7 +1759,13 @@ its spelling alone (a space after `:` or `,`, a `\/`, a `\u0041`)
 never came from a buildspec that ran as specified, because the
 buildspec exports its own compact form. The pattern cannot see a
 repeated key: it admits `{"a":"1","a":"2"}`. A hook MUST therefore
-refuse an object with a repeated key, as the buildspec does.
+refuse an object with a repeated key, as the buildspec does. Run in a
+Step Functions JSONata state, the guard gives the verdict this section
+sets for the largest valid value, the near miss of §10, values of 4,095
+and 4,098 characters, an empty and an absent value, a tab, DEL or
+non-ASCII character, `{}`, a repeated key, a space after `:`, a `\u`
+escape and keys of 64 and 65 characters, each in under 1 ms and with
+no evaluation error (H-10).
 
 The guard MUST NOT use `$parse`. On bad input `$parse` raises
 `States.QueryEvaluationError`, which goes to the task's Catch, and the
@@ -1755,8 +1776,8 @@ apart from build failures and goes on with `{}`. On create and update a
 rejected value, or an evaluation error, takes the failure path (§8.2)
 with `statusReason` "script outputs rejected", the script's changes
 staying in place as after a post hook failure; on delete the workflow
-goes on with `{}`. Once escaped in state an admitted value is at most
-8 KiB, which §8.1 budgets. The control plane MUST NOT read, interpret
+goes on with `{}`. Escaped once more in state, an admitted value is at
+most 8,190 characters, two under 8 KiB (H-10), which §8.1 budgets. The control plane MUST NOT read, interpret
 or store the outputs beyond the execution: they exist only in the
 execution history and the build records. Outputs are untrusted data,
 and a hook MUST validate every value it uses. Outputs MUST NOT be
@@ -2093,7 +2114,8 @@ large in the input as raw: under 1,600 bytes as compact JSON (id,
 source, script, timeout, revision), about 1.5 KiB, 31 KiB in all.
 One script's outputs (R-43) are in state while its post hooks run: at
 most 4,096 printable ASCII characters, of which only `"` and `\`
-escape, so at most 8 KiB, for a value the buildspec checked and for any
+escape, so at most 8,190 characters escaped in state (H-10), two under
+8 KiB, for a value the buildspec checked and for any
 value the workflow guard admits alike. The cell event's outputs leave
 state when its post hooks finish, before the deployment event starts,
 so a new-cell create never holds two. The global hook results kept for
@@ -2111,7 +2133,7 @@ echoes the build's environment variables, values included. So each
 build task's JSONata `Output` MUST keep only what later states read:
 the build ARN and status, plus the guarded outputs for a script build
 (R-43), and for a hook build's `startBuild` and each of its
-`batchGetBuilds` polls the build id, status, phase timing and
+`batchGetBuilds` polls (the SDK integration, R-46) the build id, status, phase timing and
 `resolvedSourceVersion`, never the environment (R-40, R-46). A full
 result kept in state would add a second copy of each parameter set and
 pass the limit. The limit also holds for a task's raw result before
@@ -2249,7 +2271,12 @@ times out (CodeBuild's run timeout, its queued timeout, or the
 attempt's deadline), or cannot start. Each hook attempt MUST start its
 build with a request-response `codebuild:startBuild`, never `.sync`,
 so the build id is known from the first call, and MUST then poll that
-one id with `codebuild:batchGetBuilds` every 60 seconds. Each start
+one id with `batchGetBuilds` every 60 seconds. Step Functions has no
+optimized integration for `batchGetBuilds`, so the poll task is the SDK
+integration `arn:aws:states:::aws-sdk:codebuild:batchGetBuilds`, under
+the IAM action `codebuild:BatchGetBuilds`, and its `Output` reads the
+SDK result's PascalCase keys (`Builds`, `BuildsNotFound`,
+`ResolvedSourceVersion`; H-2). Each start
 try sends `timeoutInMinutesOverride` set to the hook's
 `timeoutMinutes` (T) and `queuedTimeoutInMinutesOverride` set to
 q = 10 − ceil(r), where r is the minutes from the attempt's first try to
@@ -2261,8 +2288,12 @@ the definition when the attempt starts: the earlier of its first
 queue, and five minutes of margin, and, on delete, 2 minutes before
 the end of the hook's budget (below), so a stop at the budget's end
 finishes inside it. Each poll's `Output` keeps the id, the status, the
-phase timing and `resolvedSourceVersion` (H-2), never the environment
-(§8.1). The loop ends when the build reaches a final status. At the
+phase timing and `resolvedSourceVersion`, never the environment
+(§8.1). For a git source `resolvedSourceVersion` is absent from the
+`startBuild` result and the first poll and present from the second
+(H-2), so the workflow MUST take it from the poll that saw the final
+status and MUST NOT read an earlier absence as final; for an S3 source
+it stays absent (R-40). The loop ends when the build reaches a final status. At the
 deadline the loop MUST call `StopBuild` on that id, then poll it until
 it reaches a final status, within the 2 minutes R-23 budgets for
 this, and treat the attempt as a timeout, or, when the budget set the
@@ -2290,8 +2321,13 @@ $hash($join([EXECUTION_ID, EVENT, PHASE, HOOK_ID,
   $string(ATTEMPT), $string(TRY)], '|'), 'SHA-256')
 ```
 
-It is 64 hexadecimal characters (H-8), so it has a fixed length, and
-it differs on every try by construction; q is not part of it. A
+It is 64 lowercase hexadecimal characters, equal to `sha256sum` of
+the joined string (H-8), so it has a fixed length, and it differs on
+every try by construction; q is not part of it. The expression MUST
+read only those six values, all fixed for the try, never `$uuid()`,
+`$now()`, `$millis()` or any state that changes between the `Retry`
+repeats below, because a `Retry` evaluates `Arguments` again on every
+repeat (H-8). A
 `StartBuild` the service refuses (throttling, the
 account's concurrent build quota, the project at its
 `concurrentBuildLimit`; H-8, H-9) MUST go through a `Catch` to a
@@ -2301,7 +2337,14 @@ try or the next try would pass the deadline; otherwise it increments
 `TRY` and starts the next try. A start still refused when its window
 ends is a hook that cannot start, and `statusReason` says so. Each try
 computes its own q, so a refusal never lengthens an attempt past its
-deadline.
+deadline. A project at its cap refuses, never queues, with
+`CodeBuild.AccountLimitExceededException` and no build created, the
+name the account's concurrent build quota uses too (H-9), so the
+`Catch` MUST name it for both; only the cause text ("This build
+project has a limit of ...") tells them apart, for a log that must. A
+refused request does not bind its token (H-8). The error name of a
+start refused by throttling was not observed and stays to verify
+(H-8).
 
 A transient server error (a 5xx, or the task's own timeout) can follow
 a call that created a build. It MUST be handled by a task `Retry` on
@@ -2309,11 +2352,16 @@ the start task, which has `TimeoutSeconds` 15. The `Retry` MUST set
 `IntervalSeconds` 10, `BackoffRate` 1 and `MaxAttempts` 3, with no
 jitter (`JitterStrategy` `NONE`), so each of the three repeats waits
 10 seconds; the ASL default `BackoffRate` of 2 would wait 10, 20 and
-40 seconds. A `Retry` re-sends the task's evaluated
-`Arguments` unchanged (H-8), so every repeat carries the same `TRY`, q
-and token. CodeBuild documents a token as valid for 5 minutes, within
-which a repeat returns the build the first call created (to verify,
-H-8). A try and its repeats end within 90 seconds (15 + 3 × (10 + 15)),
+40 seconds. A `Retry` evaluates the task's `Arguments` again on every
+repeat (H-8). Every repeat therefore carries the same `TRY`, q and
+token only because `TRY` and q are variables set once per try and the
+token reads nothing else: the argument rests on that evaluation being
+deterministic. CodeBuild documents a token as valid for 5 minutes,
+within which a repeat with the same arguments returns the build the
+first call created, and the token sent with other arguments fails with
+`CodeBuild.InvalidInputException` and starts nothing (H-8). H-8 saw
+repeats after a refusal; a `Retry` after a 5xx or a task timeout
+follows the same rule and stays to verify. A try and its repeats end within 90 seconds (15 + 3 × (10 + 15)),
 inside the token's validity. A build a late repeat starts keeps its
 try's q, so it waits at most 1.5 minutes past the 10, inside the five
 minutes of margin. A try whose repeats all fail ends the attempt as a
@@ -2323,7 +2371,10 @@ created a build that no id names. CodeBuild stops such a build within
 q + T of the try's last call, by its own queued and run timeouts.
 `StopBuild` MUST use the same shape: a refusal goes through the
 `Catch`, a 30-second `Wait` and the `Choice` within the 2 minutes of a
-stop, and a transient error is the same task `Retry`. That transient
+stop, and a transient error is the same task `Retry`. `StopBuild` on a
+build that already finished succeeds (H-8), so a stop that races the
+build's own end needs no case of its own; a `StopBuild` refused under
+throttling was not provoked and stays to verify. That transient
 repeat is the only task `Retry` in a hook attempt. It MUST name only
 transient errors, and the refusal `Catch` only the refusal names, so
 neither starts a second build for one that ran (H-8).
@@ -2429,24 +2480,26 @@ definition-replacing `UpdateCell` that would replace a stamp is a seam
 
 ### 9.1 Service behaviour the hook design relies on
 
-Spike results and the assumptions still to verify. Each row to verify
-is a spike before hooks are built; a result that differs changes the
-requirement the row names. H-3, H-4 and H-6 asked how a `.sync` hook
+Spike results the hook design relies on. Every row is verified or not
+needed; a later result that differs changes the requirement the row
+names. H-8 left three cases unprovoked, which R-46 handles by the same
+rules and which stay to verify in its row. H-3, H-4 and
+H-6 asked how a `.sync` hook
 task behaves; the poll loop of R-46 relies on none of them, and the
 rows stay so that their ids stay stable.
 
 | # | Behaviour | Status | Relied on by |
 |---|---|---|---|
 | H-1 | Through Step Functions `codebuild:startBuild.sync`, `Build.ExportedEnvironmentVariables` keeps a single value of 1,024, 4,096 or 8,192 bytes. A single value of 16,384 bytes, 32 KiB or 64 KiB, and four values of 4,096 bytes (16 KiB in all), come back with every exported value an empty string, while the build and the execution report `SUCCEEDED`. A declared exported variable the build never set comes back as `""`. The limit is on the total of a build's exported variables, between 8 and 16 KiB, and overflow is silent | Verified: spike H-1, 2026-11-17, eu-central-1 | R-43, §8.1 |
-| H-2 | A `batchGetBuilds` result carries `resolvedSourceVersion` for a git source; CodeBuild documents none for S3 | To verify | R-40, R-46, §8.1 |
+| H-2 | For a git source, `ResolvedSourceVersion` in an `aws-sdk:codebuild:batchGetBuilds` result is the full commit SHA the build ran, both when `sourceVersion` is a full SHA and when it is a branch (the branch's tip). It is absent in the `startBuild` result and on the first poll, present from the second, and the `startBuild.sync` result carries it. For an S3 source it is never set, also when `sourceVersion` is an object version id, and `CODEBUILD_RESOLVED_SOURCE_VERSION` is unset in the build. Step Functions has no optimized integration for `batchGetBuilds`; the SDK integration's result has PascalCase keys (`Builds`, `BuildsNotFound`) | Verified: spike H-2, 2026-11-17, eu-central-1 | R-40, R-46, §8.1 |
 | H-3 | Whether a `.sync` task that times out stops its CodeBuild build | Not needed: poll loop (R-46 stops the build at its deadline) | — |
 | H-4 | Whether the error of a timed-out `.sync` task carries the build id | Not needed: poll loop (`startBuild` returns the id) | — |
-| H-5 | CodeBuild accepts a hook build's `environmentVariablesOverride`: about fifteen fixed variables, up to 40 `PARAM_` variables of up to 1,024 bytes, and a `SCRIPT_OUTPUTS` of up to 4,096 bytes | To verify | R-42 |
+| H-5 | CodeBuild accepts a hook build's `environmentVariablesOverride` built by a JSONata state: 14 fixed variables, 40 `PARAM_` variables of 1,024 bytes of printable ASCII and a `SCRIPT_OUTPUTS` of 4,096 bytes, 55 in all, arrive with the length and SHA-256 sent for each. It also accepts 41 `PARAM_` variables and a 4,097-byte `SCRIPT_OUTPUTS`, so the caps are the control plane's own, enforced before `StartBuild` | Verified: spike H-5, 2026-11-17, eu-central-1 | R-42 |
 | H-6 | A JSONata expression in a task's `TimeoutSeconds` sets a timeout per hook state; today's build tasks use a constant | Not needed: poll loop (the deadline is data) | — |
-| H-7 | A CodeBuild service role trust policy conditioned on `aws:SourceArn` equal to the project ARN, computed from the project's physical name before the project exists, admits that project's builds and no other, for each hook role and each provisioning build role | To verify (documented for confused-deputy prevention; one synth-and-run check) | R-41 |
-| H-8 | A `StartBuild` refused through a request-response `codebuild:startBuild` task (throttling, the account's concurrent build quota) fails with a `CodeBuild.` service error name that no started build produces, a refused try creates no build, and a refused `StopBuild` fails with the same names. An `idempotencyToken` passes through the Step Functions integration unchanged, and a repeat of the same request with the same token within its documented 5-minute validity returns the same build id, also after a transient error. A task `Retry` re-sends the evaluated `Arguments` unchanged, so a repeat carries its try's token, and a refused request does not bind its token. So the refusal `Catch` on those names, and a repeat under the token, never starts a second build for one that ran. CodeBuild accepts a 64-character token, the SHA-256 hex of R-46; the API reference documents no length limit | To verify | R-46 |
-| H-9 | What a request-response `codebuild:startBuild` returns when the project is at its `concurrentBuildLimit`: a refusal, and its error name, or a build queued behind the cap. The CodeBuild user guide says builds over the limit are "throttled and are not run" | To verify; R-46 is designed for a refusal, and a queued build is bounded by the queued timeout and the deadline | R-46 |
-| H-10 | A 4,096-byte compact outputs file whose values are all `\"` and `\\` escapes, the worst case for escaping, exported alone as `SCRIPT_OUTPUTS`, comes back byte for byte in the `startBuild.sync` result, through a JSONata `Output` into state, and into a hook build's environment override. The R-43 guard, run in a real Step Functions JSONata `Output`, accepts the largest valid value and rejects the 4,096-character near miss of §10, so the engine takes the regex literal and neither fails nor stalls over 4,096 loop iterations; the time of each run is recorded | To verify | R-43, §8.1 |
+| H-7 | A CodeBuild service role trust policy conditioned on `aws:SourceArn` equal to the project ARN, computed with `!Sub` from the project's fixed physical name before the project exists, deploys with no cycle and admits that project's builds, which run as the role (two role and project pairs, standing for the four). CodeBuild refuses `CreateProject` for a project of another name that names the role, and `UpdateProject` that switches an existing project to it, with `InvalidInputException` ("CodeBuild is not authorized to perform: sts:AssumeRole on service role"), so a mis-wired project fails at deploy, never at its first build. Adding `aws:SourceAccount` changes neither outcome; a role with no condition admits a project of any name | Verified: spike H-7, 2026-11-17, eu-central-1 | R-41 |
+| H-8 | Through a request-response `codebuild:startBuild` task: `$hash(..., 'SHA-256')` returns 64 lowercase hexadecimal characters equal to `sha256sum`, which CodeBuild accepts as `idempotencyToken`. A repeat with the same token and arguments within the token's validity returns the same build id; the same token with other arguments fails with `CodeBuild.InvalidInputException` ("Request parameter mismatch for idempotency token") and starts nothing. A start refused at the cap fails with `CodeBuild.AccountLimitExceededException` and creates no build; repeated under its token while capped it is refused again, and after the cap clears the token starts a build that a further repeat returns, so a refused request does not bind its token. `StopBuild` on an unknown id fails with `CodeBuild.ResourceNotFoundException` and on a completed build succeeds. No execution returned both a build id and an error. A task `Retry` evaluates `Arguments` again on every repeat: a `$uuid()` in them differed on all four tries, 10 seconds apart, while a token computed from inputs fixed for the try stayed the same. Not provoked: a `Retry` after a 5xx or a task timeout, a `StopBuild` refused under throttling, and a start refused by account-wide throttling | Verified: spike H-8, 2026-11-17, eu-central-1; the three unprovoked cases stay to verify | R-46 |
+| H-9 | A request-response `codebuild:startBuild` on a project at its `concurrentBuildLimit` is refused, not queued: it fails with `CodeBuild.AccountLimitExceededException`, cause "Concurrent build limit exceeded. This build project has a limit of 1 concurrent build(s)...", and creates no build. The account's concurrent build quota uses the same error name, so only the cause text tells the two apart | Verified: spike H-9, 2026-11-17, eu-central-1 | R-46 |
+| H-10 | A 4,096-byte compact outputs value of only `\"` and `\\` escapes, written by `jq -c .` and exported alone as `SCRIPT_OUTPUTS`, comes back byte for byte (equal SHA-256 in the origin log, the execution output, a `$hash` in state and the hook build's environment) through `startBuild.sync`, a JSONata `Output` into state and a hook build's override. JSON-encoded in state it is 8,190 characters; the execution output is 8,758 bytes, and the script task's `Output` took 23 ms. The R-43 guard in a Step Functions JSONata `Pass` state gives the expected verdict in 18 cases (the largest valid value, the §10 near miss, a mixed near miss, 4,095 and 4,098 characters, empty and absent, a tab, DEL and non-ASCII, `{}`, a repeated key admitted, a space after `:`, a `\u` escape, keys of 64 and 65 characters), each in under 1 ms, with no evaluation error | Verified: spike H-10, 2026-11-17, eu-central-1 | R-43, §8.1 |
 
 ---
 
@@ -2783,10 +2836,11 @@ evaluation error on a delete still yields `{}` (R-43), that a hook
 attempt starts its build request-response with the run timeout, a
 queued timeout of 10 less the minutes refused and an idempotency token
 that is the SHA-256 `$hash` of the execution, event, phase, hook,
-attempt and try index joined by `|`, the try index and queued timeout
-held in variables per try,
-polls that one id with `batchGetBuilds` every 60 seconds, keeping only
-its id, status, phase timing and `resolvedSourceVersion`, and at its
+attempt and try index joined by `|` and built from nothing else, the
+try index and queued timeout held in variables per try,
+polls that one id with the `aws-sdk:codebuild:batchGetBuilds`
+integration every 60 seconds, keeping only its id, status, phase timing
+and `resolvedSourceVersion`, taken from the final poll, and at its
 deadline calls `StopBuild` and polls the build to a final status, that
 a `StartBuild` or `StopBuild` refusal loops through a `Catch`, a
 30-second `Wait` and a `Choice` that advances the try index, for at
