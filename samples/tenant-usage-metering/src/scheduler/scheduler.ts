@@ -253,11 +253,18 @@ export class Scheduler {
   /** Replays the S3 events of failed tracker invocations (spec §4.5). */
   private async replayTrackerFailures(): Promise<{ replayed: number; stuckHours: Set<string>; stuckMessages: number }> {
     let replayed = 0;
-    let stuckMessages = 0;
+    const stuck = new Set<string>();
     const stuckHours = new Set<string>();
     while (replayed < MAX_REPLAYS_PER_RUN) {
       const out = await this.deps.sqs.send(
-        new ReceiveMessageCommand({ QueueUrl: this.deps.trackerFailureQueueUrl, MaxNumberOfMessages: 10, WaitTimeSeconds: 0 }),
+        // Hidden for the scheduler's whole run, so a failed replay is not received
+        // again and counted twice (review v3 #2).
+        new ReceiveMessageCommand({
+          QueueUrl: this.deps.trackerFailureQueueUrl,
+          MaxNumberOfMessages: 10,
+          WaitTimeSeconds: 0,
+          VisibilityTimeout: 300,
+        }),
       );
       const messages = out.Messages ?? [];
       if (messages.length === 0) {
@@ -277,7 +284,7 @@ export class Scheduler {
           const hours = hoursOfFailure(message.Body);
           // A failure that names no hour is not counted as known, so it holds back every close.
           if (hours.length > 0) {
-            stuckMessages++;
+            stuck.add(message.MessageId ?? message.ReceiptHandle ?? '');
           }
           for (const hour of hours) {
             stuckHours.add(hour);
@@ -286,6 +293,6 @@ export class Scheduler {
         }
       }
     }
-    return { replayed, stuckHours, stuckMessages };
+    return { replayed, stuckHours, stuckMessages: stuck.size };
   }
 }

@@ -36,6 +36,8 @@ import {
 
 export const MAX_BODY_BYTES = 1_048_576;
 export const REGISTRY_CACHE_MS = 60_000;
+/** An uncached re-read of one key happens at most this often: short enough that a fresh registration admits at once. */
+export const FRESH_READ_MS = 5_000;
 
 export interface IngestConfig {
   readonly fleetName: string;
@@ -79,7 +81,7 @@ export class Ingest {
   private readonly bindings = new TtlCache<BindingItem | undefined>(REGISTRY_CACHE_MS);
   private readonly meters = new TtlCache<MeterVersionItem[]>(REGISTRY_CACHE_MS);
   private readonly logged = new Map<string, number>();
-  /** When each key was last read past the cache: at most once per cache lifetime (review v2 #5). */
+  /** When each key was last read past the cache: at most once per FRESH_READ_MS (review v2 #5, v3 #1). */
   private readonly freshAt = new Map<string, number>();
   private readonly now: () => number;
 
@@ -96,7 +98,8 @@ export class Ingest {
     const caller = emitterFromCallerArn(userArn, this.deps.config.fleetName);
     const emitter = caller === undefined ? undefined : await this.emitter(caller);
     const nowMs = this.now();
-    const closed = emitter !== undefined && emitter.status === 'CLOSING' && emitter.closesAt !== undefined && nowMs > Date.parse(emitter.closesAt);
+    const closed =
+      emitter !== undefined && emitter.status === 'CLOSING' && emitter.closesAt !== undefined && nowMs > Date.parse(emitter.closesAt);
     if (caller === undefined || emitter === undefined || closed || emitter.cellId !== caller.cellId) {
       metrics.add(METRIC.unregisteredCaller);
       // One line a minute per role, whatever the session name.
@@ -129,7 +132,7 @@ export class Ingest {
 
   private mayRefresh(key: string, fresh: boolean): boolean {
     const nowMs = this.now();
-    if (!fresh || nowMs - (this.freshAt.get(key) ?? 0) < REGISTRY_CACHE_MS) {
+    if (!fresh || nowMs - (this.freshAt.get(key) ?? 0) < FRESH_READ_MS) {
       return false;
     }
     if (this.freshAt.size > 10_000) {
@@ -224,7 +227,9 @@ export class Ingest {
     if (stale.length > 0) {
       current = (await this.emitter(caller, true)) ?? current;
       const refreshed = new Set(stale.map((index) => (checked[index] as UsageEvent).tenantId));
-      await Promise.all([...refreshed].map(async (tenantId) => bindingByTenant.set(tenantId, await this.binding(caller.cellId, tenantId, true))));
+      await Promise.all(
+        [...refreshed].map(async (tenantId) => bindingByTenant.set(tenantId, await this.binding(caller.cellId, tenantId, true))),
+      );
       for (const index of stale) {
         reasons[index] = judge(checked[index]);
       }
@@ -286,7 +291,8 @@ export class Ingest {
     for (const item of refused) {
       // A refusal that could still count is promised to the error store; if
       // that write failed, the emitter resends it (spec P-8).
-      outcomes[item.index] = READMITTABLE.has(item.reason) && !errorObjectWritten ? { result: 'RETRY' } : { result: 'REFUSED', reason: item.reason };
+      outcomes[item.index] =
+        READMITTABLE.has(item.reason) && !errorObjectWritten ? { result: 'RETRY' } : { result: 'REFUSED', reason: item.reason };
       metrics.add(METRIC.refused, 1, { reason: item.reason });
     }
 

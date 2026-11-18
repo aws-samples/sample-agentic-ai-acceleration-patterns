@@ -170,7 +170,10 @@ async function readEmitter(deps: AdminDeps, cellId: string, nowMs: number): Prom
   if (cell === undefined) {
     return {};
   }
-  const emitter = live(await getItem<EmitterItem>(deps.db, deps.config.tableName, keys.emitter(cell.accountId, cell.roleName), true), nowMs);
+  const emitter = live(
+    await getItem<EmitterItem>(deps.db, deps.config.tableName, keys.emitter(cell.accountId, cell.roleName), true),
+    nowMs,
+  );
   return { cell, emitter };
 }
 
@@ -366,7 +369,10 @@ export async function putTenantBinding(
       createdAt: iso(nowMs),
       ...billing,
     };
-    await transact(deps, bindingWrites(tableName, binding, 'attribute_not_exists(PK) OR expiresAt <= :now', {}, { ':now': nowSeconds(nowMs) }));
+    await transact(
+      deps,
+      bindingWrites(tableName, binding, 'attribute_not_exists(PK) OR expiresAt <= :now', {}, { ':now': nowSeconds(nowMs) }),
+    );
   } else if (stored.status === 'ACTIVE') {
     binding = applied(stored, billing, []);
     if (billingChanged) {
@@ -375,7 +381,9 @@ export async function putTenantBinding(
         bindingWrites(
           tableName,
           binding,
-          stored.billingAccount === undefined ? '#cs = :active AND attribute_not_exists(billingAccount)' : '#cs = :active AND billingAccount = :old',
+          stored.billingAccount === undefined
+            ? '#cs = :active AND attribute_not_exists(billingAccount)'
+            : '#cs = :active AND billingAccount = :old',
           { '#cs': 'status' },
           stored.billingAccount === undefined ? { ':active': 'ACTIVE' } : { ':active': 'ACTIVE', ':old': stored.billingAccount },
         ),
@@ -386,7 +394,13 @@ export async function putTenantBinding(
     binding = applied(stored, { ...set, ...billing }, remove);
     await transact(
       deps,
-      bindingWrites(tableName, binding, '#cs = :closing AND closedAt = :seen', { '#cs': 'status' }, { ':closing': 'CLOSING', ':seen': stored.closedAt }),
+      bindingWrites(
+        tableName,
+        binding,
+        '#cs = :closing AND closedAt = :seen',
+        { '#cs': 'status' },
+        { ':closing': 'CLOSING', ':seen': stored.closedAt },
+      ),
     );
   }
 
@@ -397,15 +411,19 @@ export async function putTenantBinding(
   const job = await startJob(deps, ctx, 'RESEND_BLOCKED', { tenantId: input.tenantId, applicationId: input.applicationId });
   // Clear the flag alone, on each copy that still holds it, so a delete or
   // a billing change committed in between is left as it is (review v2 #1).
-  for (const key of [keys.binding(binding.cellId, binding.tenantId), keys.bindingLookup(binding.tenantId, binding.applicationId, binding.cellId)]) {
+  for (const key of [
+    keys.binding(binding.cellId, binding.tenantId),
+    keys.bindingLookup(binding.tenantId, binding.applicationId, binding.cellId),
+  ]) {
     try {
       await deps.db.send(
         new UpdateCommand({
           TableName: tableName,
           Key: key,
           UpdateExpression: 'REMOVE resendPending',
-          ConditionExpression: 'resendPending = :true',
-          ExpressionAttributeValues: { ':true': true },
+          // Only this call's flag: a newer billing change keeps its own (review v3 #3).
+          ConditionExpression: 'resendPending = :true AND billingAccount = :b',
+          ExpressionAttributeValues: { ':true': true, ':b': binding.billingAccount },
         }),
       );
     } catch (error) {

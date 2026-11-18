@@ -72,8 +72,8 @@ describe('registrations under TTL (review v1 #2, #3, #5)', () => {
     // The flag is cleared alone, on a condition that it is still set (review v2 #1).
     const clears = ddb.commandCalls(UpdateCommand).map((call) => call.args[0].input);
     expect(clears.map((input) => [input.UpdateExpression, input.ConditionExpression])).toEqual([
-      ['REMOVE resendPending', 'resendPending = :true'],
-      ['REMOVE resendPending', 'resendPending = :true'],
+      ['REMOVE resendPending', 'resendPending = :true AND billingAccount = :b'],
+      ['REMOVE resendPending', 'resendPending = :true AND billingAccount = :b'],
     ]);
     expect(out.binding).not.toHaveProperty('resendPending');
   });
