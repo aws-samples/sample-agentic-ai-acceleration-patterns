@@ -3027,7 +3027,8 @@ still running its `POST` hooks), or is gone after a delete, the
 execution ran: the service MUST answer 202 with the record as read
 (for a deleted record, as the request's `DELETING` write left it),
 never 500. A client that retries a `CreateTenant` therefore never
-makes a second tenant beside one that went `ACTIVE`. Any other result of that read answers 500.
+makes a second tenant beside one that went `ACTIVE`. Any other result
+of that read answers 500.
 
 An execution that started despite an unknown outcome cannot finish a
 later request's record: once the compensation or a retry has changed
