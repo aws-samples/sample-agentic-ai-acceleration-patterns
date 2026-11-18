@@ -1,8 +1,9 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { type ChildProcess, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { type Draw, type Limits, overdraws, parseDraws, sumDraws } from './budget';
 import { parseRecord, recordFailures, renderResults, type ResultRecord } from './result';
@@ -21,37 +22,96 @@ export interface ExecResult {
   readonly stdout: string;
 }
 
+/** Sends a signal to everything a running verb started. */
+export type Stop = (signal: NodeJS.Signals) => void;
+
 /**
  * Runs `slice.sh <args>`. `capture` returns stdout instead of streaming it.
- * `onChild` hands the child to the runner, so a signal can reach it.
+ * `onStart` hands the runner a `Stop` while the verb runs, and `undefined`
+ * once it has ended.
  */
 export type Exec = (
   script: string,
   args: readonly string[],
   env: NodeJS.ProcessEnv,
   capture: boolean,
-  onChild: (child: ChildProcess | undefined) => void,
+  onStart: (stop: Stop | undefined) => void,
 ) => Promise<ExecResult>;
 
-export const spawnExec: Exec = (script, args, env, capture, onChild) =>
-  new Promise((resolve, reject) => {
-    const child = spawn('bash', [script, ...args], {
-      cwd: path.dirname(script),
-      env,
-      stdio: capture ? ['ignore', 'pipe', 'inherit'] : 'inherit',
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+function groupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function signalGroup(pgid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pgid, signal);
+  } catch {
+    // The group is already gone.
+  }
+}
+
+/** Stops what is left of a process group: SIGTERM, then SIGKILL after `graceMs`. */
+async function reapGroup(pgid: number, graceMs: number): Promise<void> {
+  if (!groupAlive(pgid)) return;
+  signalGroup(pgid, 'SIGTERM');
+  const deadline = Date.now() + graceMs;
+  while (groupAlive(pgid) && Date.now() < deadline) await sleep(100);
+  if (!groupAlive(pgid)) return;
+  signalGroup(pgid, 'SIGKILL');
+  const hard = Date.now() + 5000;
+  while (groupAlive(pgid) && Date.now() < hard) await sleep(100);
+}
+
+/**
+ * An `Exec` that runs each verb in its own process group, so a signal
+ * reaches `slice.sh` and everything it started (`cdk`, `aws`, `k6`), and a
+ * terminal Ctrl-C reaches only the runner. When `slice.sh` exits, anything
+ * it left running in its group is stopped before the verb counts as done,
+ * with `graceMs` between SIGTERM and SIGKILL. Verbs get no stdin.
+ */
+export function groupExec(graceMs = 30_000): Exec {
+  return (script, args, env, capture, onStart) =>
+    new Promise((resolve, reject) => {
+      const child = spawn('bash', [script, ...args], {
+        cwd: path.dirname(script),
+        env,
+        detached: true,
+        stdio: ['ignore', capture ? 'pipe' : 'inherit', 'inherit'],
+      });
+      const pgid = child.pid;
+      let stdout = '';
+      child.stdout?.setEncoding('utf8');
+      child.stdout?.on('data', (chunk: string) => {
+        stdout += chunk;
+      });
+      let status: number | null = null;
+      const closed = new Promise<void>((r) => child.on('close', () => r()));
+      child.on('error', (e) => {
+        onStart(undefined);
+        reject(e);
+      });
+      if (pgid === undefined) return;
+      onStart((signal) => signalGroup(pgid, signal));
+      child.on('exit', (code) => {
+        status = code;
+        void reapGroup(pgid, graceMs)
+          .then(() => closed)
+          .then(() => {
+            onStart(undefined);
+            resolve({ status, stdout });
+          });
+      });
     });
-    onChild(child);
-    let stdout = '';
-    child.stdout?.setEncoding('utf8');
-    child.stdout?.on('data', (chunk: string) => {
-      stdout += chunk;
-    });
-    child.on('error', reject);
-    child.on('close', (status) => {
-      onChild(undefined);
-      resolve({ status, stdout });
-    });
-  });
+}
+
+export const spawnExec: Exec = groupExec();
 
 export interface RunOptions {
   readonly repoRoot: string;
@@ -70,6 +130,8 @@ export interface RunOptions {
   readonly exec?: Exec;
   readonly log?: (line: string) => void;
   readonly now?: () => Date;
+  /** Where SIGINT and SIGTERM come from; default `process`. */
+  readonly signals?: Pick<NodeJS.EventEmitter, 'on' | 'off'>;
 }
 
 export interface RunSummary {
@@ -77,6 +139,8 @@ export interface RunSummary {
   readonly mode: 'slice' | 'platform';
   readonly order: readonly string[];
   readonly failures: readonly string[];
+  /** The signal that interrupted the run, if one did. */
+  readonly signal?: NodeJS.Signals;
   /** Undefined when no record could be rendered. */
   readonly resultsFile?: string;
 }
@@ -103,15 +167,24 @@ export function scenarioOrder(slices: readonly Slice[]): string[] {
   return [...platform, ...all.filter((s) => !platform.includes(s))];
 }
 
-/** The environment without AWS credentials or profiles: `budget` runs without them (spec §3.4). */
-function withoutAws(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(env).filter(([k]) => !k.startsWith('AWS_')));
+/**
+ * The environment `budget` runs in (spec §3.4: without credentials): no
+ * `AWS_*` variable from the runner, an empty `HOME` so no shared config or
+ * credentials file is found, and the EC2 instance metadata lookup disabled.
+ */
+function budgetEnv(env: NodeJS.ProcessEnv, home: string): NodeJS.ProcessEnv {
+  return {
+    ...Object.fromEntries(Object.entries(env).filter(([k]) => !k.startsWith('AWS_'))),
+    HOME: home,
+    AWS_EC2_METADATA_DISABLED: 'true',
+  };
 }
 
 export async function runStress(opts: RunOptions): Promise<RunSummary> {
   const exec = opts.exec ?? spawnExec;
   const log = opts.log ?? ((l: string) => process.stderr.write(`${l}\n`));
   const now = opts.now ?? (() => new Date());
+  const signals = opts.signals ?? process;
   if (!ID.test(opts.runId)) throw new Error(`STRESS_RUN_ID must match ${ID}`);
   if (!ID.test(opts.prefix)) throw new Error(`STRESS_PREFIX must match ${ID}`);
   const { tier, slices, mode } = planRun(opts);
@@ -144,16 +217,21 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   };
   const failures: string[] = [];
   const started = new Map<string, { start: string; deploySeconds?: number }>();
-  const expected: { slice: string; scenario: string }[] = [];
-  let aborted = false;
-  let child: ChildProcess | undefined;
-  const onSignal = (signal: NodeJS.Signals): void => {
-    if (!aborted) log(`${signal}: stopping the current step, then tearing down`);
-    aborted = true;
-    child?.kill(signal);
+  const ran: { slice: string; scenario: string; ok: boolean }[] = [];
+  let signal: NodeJS.Signals | undefined;
+  let tearingDown = false;
+  let stop: Stop | undefined;
+  const onSignal = (sig: NodeJS.Signals): void => {
+    if (tearingDown) {
+      log(`${sig}: ignored, teardown is running`);
+      return;
+    }
+    if (signal === undefined) log(`${sig}: stopping the current step, then tearing down`);
+    signal ??= sig;
+    stop?.(sig);
   };
-  const track = (c: ChildProcess | undefined): void => {
-    child = c;
+  const track = (s: Stop | undefined): void => {
+    stop = s;
   };
 
   const verb = async (s: Slice, v: Verb, extra: readonly string[] = []): Promise<boolean> => {
@@ -166,18 +244,24 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     return true;
   };
   const stopIfAborted = (): void => {
-    if (aborted) throw new Error('the run was interrupted');
+    if (signal !== undefined) throw new Error(`the run was interrupted (${signal})`);
   };
 
-  process.on('SIGINT', onSignal);
-  process.on('SIGTERM', onSignal);
+  signals.on('SIGINT', onSignal);
+  signals.on('SIGTERM', onSignal);
   try {
     fs.mkdirSync(resultsDir, { recursive: true });
 
     // Budget first: nothing is deployed when a sum is over a limit.
     const draws: Draw[] = [];
     for (const s of slices) {
-      const r = await exec(s.script, ['budget'], withoutAws(env), true, track);
+      const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'stress-budget-'));
+      let r: ExecResult;
+      try {
+        r = await exec(s.script, ['budget'], budgetEnv(env, emptyHome), true, track);
+      } finally {
+        fs.rmSync(emptyHome, { recursive: true, force: true });
+      }
       if (r.status !== 0) throw new Error(`${s.name} budget exited ${String(r.status)}`);
       const own = parseDraws(s.name, r.stdout, tier.cellAccounts);
       const undeclared = own.filter((d) => !s.quotas.includes(d.quota));
@@ -208,7 +292,7 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     if (unknown.length > 0) throw new Error(`no slice in the run declares ${unknown.join(', ')}`);
     for (const sc of scenarios) {
       for (const s of slices.filter((x) => x.scenarios.includes(sc))) {
-        if (await verb(s, 'run', [sc])) expected.push({ slice: s.name, scenario: sc });
+        ran.push({ slice: s.name, scenario: sc, ok: await verb(s, 'run', [sc]) });
         stopIfAborted();
       }
     }
@@ -219,53 +303,72 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   } catch (e) {
     failures.push((e as Error).message);
   } finally {
-    // Reverse order, every slice that started a deploy, also on failure or a signal.
-    for (const s of [...slices].reverse().filter((x) => started.has(x.name))) {
-      const t0 = Date.now();
-      const ok = await verb(s, 'teardown', opts.removeFixtures ? ['--fixtures'] : []);
-      const info = started.get(s.name)!;
-      const lifecycle: ResultRecord = {
-        runId: opts.runId,
-        tier: tier.name,
-        slice: s.name,
-        scenario: 'lifecycle',
-        mode,
-        commits: { [s.name]: opts.commit },
-        window: { start: info.start, end: now().toISOString() },
-        ...(info.deploySeconds === undefined ? {} : { deploySeconds: info.deploySeconds }),
-        ...(ok ? { destroySeconds: Math.round((Date.now() - t0) / 1000) } : {}),
-        requests: {},
-        latency: {},
-        isolation: { assertions: 0, mismatches: 0 },
-        quotas: {},
-        refusals: { byTenantReason: [], unattributed: 0 },
-      };
-      fs.writeFileSync(path.join(resultsDir, `${s.name}.lifecycle.json`), `${JSON.stringify(lifecycle, null, 2)}\n`);
+    // Reverse order, every slice that started a deploy, also on failure or a
+    // signal. Signals during teardown are logged, not forwarded, and one
+    // slice's teardown error does not skip the others.
+    tearingDown = true;
+    try {
+      for (const s of [...slices].reverse().filter((x) => started.has(x.name))) {
+        try {
+          await teardown(s);
+        } catch (e) {
+          failures.push(`${s.name} teardown: ${(e as Error).message}`);
+        }
+      }
+    } finally {
+      signals.off('SIGINT', onSignal);
+      signals.off('SIGTERM', onSignal);
+      fs.rmSync(lock, { force: true });
     }
-    process.off('SIGINT', onSignal);
-    process.off('SIGTERM', onSignal);
-    fs.rmSync(lock, { force: true });
+  }
+  if (signal !== undefined && !failures.some((f) => f.startsWith('the run was interrupted'))) {
+    failures.push(`the run was interrupted (${signal})`);
   }
 
-  const records = checkRecords(resultsDir, { runId: opts.runId, tier: tier.name, mode }, expected, failures);
+  const records = checkRecords(resultsDir, { runId: opts.runId, tier: tier.name, mode }, slices, ran, failures);
   let resultsFile: string | undefined;
   if (records.length > 0) {
     resultsFile = path.join(runDir, 'results.md');
     fs.writeFileSync(resultsFile, renderResults(records));
   }
-  return { runId: opts.runId, mode, order: slices.map((s) => s.name), failures, resultsFile };
+  return { runId: opts.runId, mode, order: slices.map((s) => s.name), failures, ...(signal === undefined ? {} : { signal }), resultsFile };
+
+  async function teardown(s: Slice): Promise<void> {
+    const t0 = Date.now();
+    const ok = await verb(s, 'teardown', opts.removeFixtures ? ['--fixtures'] : []);
+    const info = started.get(s.name)!;
+    const lifecycle: ResultRecord = {
+      runId: opts.runId,
+      tier: tier.name,
+      slice: s.name,
+      scenario: 'lifecycle',
+      mode,
+      commits: { [s.name]: opts.commit },
+      window: { start: info.start, end: now().toISOString() },
+      ...(info.deploySeconds === undefined ? {} : { deploySeconds: info.deploySeconds }),
+      ...(ok ? { destroySeconds: Math.round((Date.now() - t0) / 1000) } : {}),
+      requests: {},
+      latency: {},
+      isolation: { assertions: 0, mismatches: 0 },
+      quotas: {},
+      refusals: { byTenantReason: [], unattributed: 0 },
+    };
+    fs.writeFileSync(path.join(resultsDir, `${s.name}.lifecycle.json`), `${JSON.stringify(lifecycle, null, 2)}\n`);
+  }
 }
 
 /**
  * Reads the run's records and adds a failure for each problem: a record
- * that does not parse or does not belong to the run, a `run` that exited 0
- * but wrote no record, a scenario record with no isolation assertion (P-1),
- * and the pass criteria of each record (spec §7).
+ * that does not parse, does not belong to the run, or is for a slice or
+ * scenario the run did not run; a `run` that exited 0 but wrote no record;
+ * a scenario record with no isolation assertion (P-1); and the pass
+ * criteria of each record (spec §7).
  */
 function checkRecords(
   dir: string,
   run: Pick<ResultRecord, 'runId' | 'tier' | 'mode'>,
-  expected: readonly { slice: string; scenario: string }[],
+  slices: readonly Slice[],
+  ran: readonly { slice: string; scenario: string; ok: boolean }[],
   failures: string[],
 ): ResultRecord[] {
   const records: ResultRecord[] = [];
@@ -280,6 +383,8 @@ function checkRecords(
     }
     const wrong: string[] = (['runId', 'tier', 'mode'] as const).filter((k) => r[k] !== run[k]);
     if (f !== `${r.slice}.${r.scenario}.json`) wrong.push('file name');
+    if (!slices.some((s) => s.name === r.slice)) wrong.push('slice');
+    else if (r.scenario !== 'lifecycle' && !ran.some((x) => x.slice === r.slice && x.scenario === r.scenario)) wrong.push('scenario not run');
     if (wrong.length > 0) {
       failures.push(`${f}: does not belong to this run (${wrong.join(', ')})`);
       continue;
@@ -290,7 +395,7 @@ function checkRecords(
     failures.push(...recordFailures(r));
     records.push(r);
   }
-  for (const e of expected) {
+  for (const e of ran.filter((x) => x.ok)) {
     if (!records.some((r) => r.slice === e.slice && r.scenario === e.scenario)) {
       failures.push(`${e.slice} run ${e.scenario} exited 0 but wrote no valid ${e.slice}.${e.scenario}.json`);
     }

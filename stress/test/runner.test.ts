@@ -1,11 +1,12 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { record } from './result.test';
-import { type Exec, planRun, runStress, scenarioOrder, spawnExec } from '../src/runner';
+import { type Exec, groupExec, planRun, runStress, scenarioOrder, spawnExec } from '../src/runner';
 import { loadSlice } from '../src/slice';
 
 type Decl = { needs?: string[]; scenarios: string[]; quotas?: string[] };
@@ -123,7 +124,11 @@ describe('runner (spec §3.5)', () => {
       delete process.env.AWS_PROFILE;
     }
     expect(envs[0].AWS_PROFILE).toBeUndefined();
+    expect(envs[0].AWS_EC2_METADATA_DISABLED).toBe('true');
+    expect(envs[0].HOME).not.toBe(process.env.HOME);
+    expect(fs.existsSync(envs[0].HOME!)).toBe(false);
     expect(envs[1].AWS_PROFILE).toBe('unit-test');
+    expect(envs[1].HOME).toBe(process.env.HOME);
   });
 
   it('refuses to deploy when the budget is over a limit, and runs with the account limits', async () => {
@@ -190,7 +195,8 @@ describe('runner (spec §3.5)', () => {
     expect(calls).not.toContain('control-plane run PS-5');
     expect(calls).not.toContain('tenant-identity collect');
     expect(calls.slice(-2)).toEqual(['control-plane teardown', 'tenant-identity teardown']);
-    expect(summary.failures).toContain('the run was interrupted');
+    expect(summary.failures).toContain('the run was interrupted (SIGTERM)');
+    expect(summary.signal).toBe('SIGTERM');
     expect(process.listenerCount('SIGTERM')).toBe(0);
   });
 
@@ -210,21 +216,39 @@ describe('runner (spec §3.5)', () => {
     expect(fs.existsSync(bad.resultsFile!)).toBe(true);
   });
 
-  it('refuses a record of another run or with no assertion', async () => {
+  it('refuses a record of another run, of a slice or scenario not run, or with no assertion', async () => {
     const { root, home } = fixture(slices);
     const exec: Exec = async (_script, args, env) => {
       if (args[0] === 'budget') return { status: 0, stdout: '{"draws":[]}' };
       if (args[0] === 'run') {
-        fs.writeFileSync(path.join(env.STRESS_RESULTS!, 'tenant-identity.PS-1.json'), JSON.stringify(record({ slice: 'tenant-identity', scenario: 'PS-1', runId: 'old', mode: 'slice' })));
-        fs.writeFileSync(path.join(env.STRESS_RESULTS!, 'tenant-identity.extra.json'), JSON.stringify(record({ slice: 'tenant-identity', scenario: 'extra', runId: env.STRESS_RUN_ID!, mode: 'slice', isolation: { assertions: 0, mismatches: 0 } })));
+        const runId = env.STRESS_RUN_ID!;
+        const write = (r: object, f: string): void => fs.writeFileSync(path.join(env.STRESS_RESULTS!, f), JSON.stringify(r));
+        write(record({ slice: 'tenant-identity', scenario: 'PS-2', runId: 'old', mode: 'slice' }), 'tenant-identity.PS-2.json');
+        write(record({ slice: 'control-plane', scenario: 'PS-1', runId, mode: 'slice' }), 'control-plane.PS-1.json');
+        write(record({ slice: 'tenant-identity', scenario: 'PS-1', runId, mode: 'slice', isolation: { assertions: 0, mismatches: 0 } }), 'tenant-identity.PS-1.json');
       }
       return { status: 0, stdout: '' };
     };
     const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], exec });
-    expect(summary.failures).toEqual(expect.arrayContaining([
-      'tenant-identity.PS-1.json: does not belong to this run (runId)',
-      'tenant-identity.extra.json: no isolation assertion (P-1)',
-    ]));
+    expect(summary.failures).toEqual([
+      'control-plane.PS-1.json: does not belong to this run (slice)',
+      'tenant-identity.PS-1.json: no isolation assertion (P-1)',
+      'tenant-identity.PS-2.json: does not belong to this run (runId, scenario not run)',
+    ]);
+  });
+
+  it('keeps the record of a scenario whose run failed', async () => {
+    const { root, home } = fixture({ 'tenant-identity': { scenarios: ['PS-1', 'PS-2'] } });
+    const { exec } = stub({ fail: ['tenant-identity run'] });
+    const writeOnFail: Exec = async (script, args, env, capture, onStart) => {
+      const r = await exec(script, args, env, capture, onStart);
+      if (args[0] === 'run' && args[1] === 'PS-1') {
+        fs.writeFileSync(path.join(env.STRESS_RESULTS!, 'tenant-identity.PS-1.json'), JSON.stringify(record({ slice: 'tenant-identity', scenario: 'PS-1', runId: env.STRESS_RUN_ID!, mode: 'slice' })));
+      }
+      return r;
+    };
+    const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], scenarios: ['PS-1'], exec: writeOnFail });
+    expect(summary.failures).toEqual(['tenant-identity run PS-1 exited 1']);
   });
 
   it('refuses an unknown scenario, a reused run id, a bad id and a second run on the same prefix', async () => {
@@ -239,7 +263,70 @@ describe('runner (spec §3.5)', () => {
   });
 });
 
+/** Waits until `file` exists. */
+async function until(file: string, ms = 10_000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!fs.existsSync(file)) {
+    if (Date.now() > end) throw new Error(`timed out waiting for ${file}`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+describe('runner with real processes', () => {
+  const script = [
+    'case "$1" in',
+    '  budget) echo \'{"draws":[]}\' ;;',
+    '  deploy) ( sleep 3; touch "$STRESS_HOME/orphan-finished" ) & touch "$STRESS_HOME/deploy-started"; wait ;;',
+    '  teardown) touch "$STRESS_HOME/teardown-started"; sleep 1.5; touch "$STRESS_HOME/teardown-done" ;;',
+    'esac',
+    '',
+  ].join('\n');
+
+  it('stops everything the interrupted verb started, and shields teardown from a second signal', async () => {
+    const { root, home } = fixture({ demo: { scenarios: ['S1'] } }, { demo: script });
+    const lines: string[] = [];
+    const signals = new EventEmitter();
+    const running = runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['demo'], exec: groupExec(2000), log: (l) => lines.push(l), signals });
+    await until(path.join(home, 'deploy-started'));
+    signals.emit('SIGTERM', 'SIGTERM');
+    await until(path.join(home, 'teardown-started'));
+    signals.emit('SIGTERM', 'SIGTERM');
+    const summary = await running;
+    expect(fs.existsSync(path.join(home, 'teardown-done'))).toBe(true);
+    expect(summary.signal).toBe('SIGTERM');
+    expect(summary.failures).toEqual(expect.arrayContaining(['demo deploy exited null', 'the run was interrupted (SIGTERM)']));
+    expect(lines).toContain('SIGTERM: ignored, teardown is running');
+    const life = JSON.parse(fs.readFileSync(path.join(home, 'stress', base.runId, 'results', 'demo.lifecycle.json'), 'utf8'));
+    expect(life.destroySeconds).toBeGreaterThanOrEqual(1);
+    await new Promise((r) => setTimeout(r, 3000));
+    expect(fs.existsSync(path.join(home, 'orphan-finished'))).toBe(false);
+    expect(signals.listenerCount('SIGTERM')).toBe(0);
+  }, 30_000);
+
+  it('tears down the others and releases the lock when one teardown throws', async () => {
+    const { root, home } = fixture(slices);
+    const { calls, exec } = stub();
+    const throwing: Exec = async (s, args, env, capture, onStart) => {
+      if (args[0] === 'teardown' && s.includes('control-plane')) throw new Error('spawn bash ENOENT');
+      return exec(s, args, env, capture, onStart);
+    };
+    const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: both, exec: throwing });
+    expect(summary.failures).toContain('control-plane teardown: spawn bash ENOENT');
+    expect(calls).toContain('tenant-identity teardown');
+    expect(fs.existsSync(path.join(home, 'stress', 'run.lock'))).toBe(false);
+    expect(process.listenerCount('SIGINT')).toBe(0);
+  });
+});
+
 describe('spawnExec', () => {
+  it('stops what a verb leaves running, so a captured budget does not hang', async () => {
+    const { root } = fixture({ demo: { scenarios: [] } }, { demo: '( sleep 20 ) &\necho hi\n' });
+    const t0 = Date.now();
+    const r = await groupExec(2000)(path.join(root, 'samples', 'demo', 'scripts', 'stress', 'slice.sh'), ['budget'], process.env, true, () => undefined);
+    expect(r).toEqual({ status: 0, stdout: 'hi\n' });
+    expect(Date.now() - t0).toBeLessThan(5000);
+  }, 15_000);
+
   it('runs slice.sh with bash, captures stdout when asked and hands over the child', async () => {
     const { root } = fixture({ demo: { scenarios: [] } }, { demo: 'echo "$1 $STRESS_X"; exit "${2:-0}"\n' });
     const script = path.join(root, 'samples', 'demo', 'scripts', 'stress', 'slice.sh');

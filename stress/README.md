@@ -34,7 +34,7 @@ and `slice.sh <verb> [args]`, where the verb is one of:
 
 | Verb | Does | Prints or writes |
 |---|---|---|
-| `budget` | its draw on each declared quota at `$STRESS_TIER`; the runner passes it no `AWS_*` variables | stdout: `{"draws": [{"account": "platform" \| "cell-account-<n>", "quota": "<id>", "amount": <n>}]}` |
+| `budget` | its draw on each declared quota at `$STRESS_TIER`, without credentials (no `AWS_*` variables, an empty `HOME`, no instance metadata) | stdout: `{"draws": [{"account": "platform" \| "cell-account-<n>", "quota": "<id>", "amount": <n>}]}` |
 | `deploy` | deploys or reuses its stacks; publishes what the next slice needs through its published parameters | - |
 | `seed` | creates or reuses its data; never writes a token or a password | manifests in `$STRESS_HOME/$STRESS_PREFIX/` |
 | `run <scenario>` | runs one scenario; exits non-zero when a pass criterion fails | `$STRESS_RESULTS/<name>.<scenario>.json` |
@@ -52,7 +52,13 @@ run. The runner times `deploy` and `teardown` itself and writes one
 Scenarios run platform scenarios first (`PS-1`, `PS-2`, ... by number),
 then each slice's own scenarios in slice order. A run fails when a
 scenario's record is missing, does not parse, belongs to another run, or
-makes no isolation assertion.
+makes no isolation assertion, and when a record names a slice or a scenario
+the run did not run.
+
+Each verb runs in its own process group with no stdin, so `slice.sh` must
+not prompt (`cdk deploy --require-approval never`). When `slice.sh` exits,
+anything it left running in its group gets SIGTERM, then SIGKILL after
+30 seconds.
 
 ## Run it
 
@@ -73,8 +79,10 @@ lists the Service Quotas codes to read them from
 (`aws service-quotas get-service-quota --service-code <s> --quota-code <c>`).
 
 The run id defaults to the start time (UTC); the runner refuses a run
-folder that already exists. Ctrl-C or SIGTERM stops the current step and
-then tears down every slice that started.
+folder that already exists. Ctrl-C or SIGTERM stops the current step, with
+everything it started, and then tears down every slice that started.
+Signals during teardown are logged and ignored. An interrupted run exits
+130 (SIGINT) or 143 (SIGTERM); a failed run exits 1.
 
 The run writes `$STRESS_HOME/$STRESS_PREFIX/<run id>/results.md`. To keep a
 run, copy that file to `stress/results/<date>-<tier>.md` and commit it
@@ -89,6 +97,16 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   accounts at a time.
 - Budget limits are what `--limits` says; without it the runner checks
   against service defaults, not the accounts' applied quotas.
+- Scenarios run one after another. Spec §5.1 runs PS-5 (churn) and PS-7
+  (cross-cell probes) during PS-2; until the platform driver (W-2) runs
+  them concurrently, PS-5 and PS-7 run on their own after PS-4, without
+  PS-2's load.
+- The quota catalogue has no ids yet for the API Gateway control plane or
+  for CloudFront Functions compute and KeyValueStore size (spec §4.4), so
+  no slice can declare them. They are added with the first slice that
+  draws on them (W-7 for the front door).
+- A SIGKILL to the runner leaves the current verb's process group
+  running, and the run lock in place.
 
 ## Build
 

@@ -191,11 +191,11 @@ a declaration, `scripts/stress/slice.json`.
 | Verb | Does | Must |
 |---|---|---|
 | `budget` | prints the slice's draw on each account-wide quota at the tier, as JSON | run without credentials |
-| `deploy` | deploys the slice's stacks, or reuses them | report deploy seconds; publish what the next slice needs through the sample's published parameters (P-2) |
+| `deploy` | deploys the slice's stacks, or reuses them | publish what the next slice needs through the sample's published parameters (P-2); the runner times it (P-6) |
 | `seed` | creates the slice's data for the tier, or reuses the manifest | be safe to rerun; never write a token or a password to disk |
 | `run <scenario>` | runs one scenario | write one result record per scenario (§4.3); exit non-zero on a pass-criterion failure |
 | `collect` | reads logs and metrics for the run window | wait for late log delivery (runtime-isolation finding F-6) |
-| `teardown` | removes what the slice deployed | report destroy seconds; keep fixtures unless `--fixtures` is passed; verify nothing it owned is left |
+| `teardown` | removes what the slice deployed | keep fixtures unless `--fixtures` is passed; verify nothing it owned is left; the runner times it (P-6) |
 
 `slice.json` names the slice, the slices it needs (by published interface),
 its scenarios, and the quotas it draws on. The runner orders slices by
@@ -217,8 +217,10 @@ Inputs every verb reads from the environment:
 | `STRESS_REPO` | the repository root |
 | `STRESS_COMMIT` | the commit the run is built from |
 
-`budget` gets no `AWS_*` variables. The runner times `deploy` and
-`teardown` itself, so a slice reports its seconds by exiting.
+`budget` runs without credentials: no `AWS_*` variable from the runner,
+an empty `HOME`, and `AWS_EC2_METADATA_DISABLED=true`. Each verb runs in
+its own process group with no stdin; a signal to the runner reaches the
+whole group, and anything a verb leaves running is stopped when it exits.
 
 ### 3.5 Runner
 
