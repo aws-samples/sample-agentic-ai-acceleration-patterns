@@ -50,5 +50,8 @@ The reaper runs every 5 minutes, so a `nitro` task lives up to
 one `sandboxSeconds` stop line (ADR-0013): from whoever moves its row out
 of `STARTING` or `READY`, or, for an orphan with no row, from the sweep or
 the drain, marked `orphan` and attributed by the sandbox's tag where it
-has one. Offboarding does not delete
+has one. An `agentcore` orphan session is the exception: it cannot be
+listed, so it gets no line, and its cost comes from AgentCore's usage
+logs. The registry's TTL runs an hour after expiry, so the reaper sees an
+expired row first. Offboarding does not delete
 tenant objects (spec §1.2).

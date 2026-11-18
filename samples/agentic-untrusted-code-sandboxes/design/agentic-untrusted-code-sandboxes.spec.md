@@ -377,10 +377,14 @@ written by whoever moves the sandbox's row out of `STARTING` or `READY`
 with a successful conditional write: the tool (dead handle, overrun,
 failed start), the reaper, the drain, or the offboard function. A writer
 that finds the row already `FAILED` or `STOPPING` writes none. A sandbox
-with no row (an orphan the sweep or the drain stops: its row lost to TTL,
-a handle-less takeover, or a crashed start) gets its line from the stopper,
-marked `orphan` = true, with `tenantId` from the sandbox's `TenantId` tag
-(`nitro`, and `microvm` if S-3 allows tags) or `unknown`. On
+with no row (an orphan the sweep or the drain stops: a handle-less
+takeover, a crashed start, or a row TTL removed while the reaper was not
+running) gets its line from the stopper, marked `orphan` = true, with
+`tenantId` from the sandbox's `TenantId` tag (`nitro`, and `microvm` if
+S-3 allows tags) or `unknown`. An `agentcore` orphan session gets no stop
+line, because no API lists it; its cost still reaches the tenant through
+AgentCore's usage logs (table below), so the `sandboxSeconds` ranking is
+not complete for `agentcore`. On
 `microvm` the line also carries `runningSeconds` and `suspendedSeconds`.
 `sandboxSeconds` comes from `GetMicrovm` `terminatedAt - startedAt` when
 the MicroVM is ended. `suspendedSeconds` comes from the row's
@@ -427,7 +431,8 @@ One DynamoDB table, PITR on, `DESTROY`.
 | `retryAt` | epoch ms; while `FAILED`, no takeover before it (now + 30 s) |
 | `createdAt`, `lastUsedAt`, `leaseUntil` | epoch ms; `leaseUntil` = start + the backend's start cap (§3.4) while `STARTING` |
 | `suspendedMs` | `microvm` only; estimated suspended time so far (§3.8) |
-| `expiresAt` | `createdAt + sandboxMaxLife`; TTL attribute |
+| `expiresAt` | `createdAt + sandboxMaxLife`; the expiry the tool and the reaper use |
+| `ttlAt` | `expiresAt` + 1 h, in epoch seconds; the TTL attribute, a backstop for a reaper that stopped running |
 | `version` | number, incremented on every write |
 
 Reads and writes use the tool tenant role, whose policy allows only items
@@ -439,7 +444,8 @@ Reuse rule, per call (the tool):
    - `READY` and not expired: run on it (step 3).
    - `STARTING` and `leaseUntil` not passed: probe `ready` (§3.4 Ready),
      which may fill in `address` and `bootId` with `version = v`. When
-     ready, update to `READY` with `version = v`; run. When not ready
+     ready, update to `READY` with the version returned by the probe
+     write (or `v` when the probe wrote nothing); run. When not ready
      within `startWait`, return `sandbox_starting` with
      `retryAfterSeconds`.
    - `STARTING` whose start failed (below): set `FAILED` with `retryAt`
@@ -506,8 +512,9 @@ otherwise. It:
   `idleRuntimeSessionTimeout`, at `maxLifetime`, or when the runtime is
   deleted.
 
-DynamoDB TTL may delete an expired row before the reaper sees it; the
-sweep then stops the task or MicroVM as an orphan.
+DynamoDB TTL runs on `ttlAt`, an hour after `expiresAt`, so the reaper,
+every 5 minutes, always handles an expired row first and writes its stop
+line.
 
 A row with no `state` (a partial write) is treated as missing. A
 `STARTING` row with no `handle` older than `startWait` plus the tool
