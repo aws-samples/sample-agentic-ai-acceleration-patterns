@@ -327,9 +327,10 @@ URL as its default (control-plane R-34).
 | Heartbeat | An alarm that does not depend on the scheduler fires when the scheduler's target has not run for 15 minutes, or no hour has reached `COUNTED` for 2 hours while the `pending` index holds hours past their grace |
 
 "The deployment role" is `deploymentRoleArn` (§3.3): by default the CDK
-bootstrap `cfn-exec` role built from the synth-time bootstrap qualifier; a
-deployer who passes `--role-arn` to the CLI must set the input to that
-same role; the
+bootstrap `cfn-exec` role built from the synth-time bootstrap qualifier; any
+deployment that does not run as that role (one that passes `--role-arn`,
+or a synthesizer with no execution role) must set the input to the role
+CloudFormation runs as; the
 integration test runs a stack update that changes `rawRetentionDays` to
 prove the exemption. The changes to the queue, bus and table policies
 (`sqs:SetQueueAttributes`, `events:PutPermission`, `events:RemovePermission`,
