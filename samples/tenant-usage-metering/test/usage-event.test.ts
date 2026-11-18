@@ -17,6 +17,7 @@ const ctx = (overrides: Partial<AdmissionContext> = {}): AdmissionContext => ({
   nowMs: NOW,
   recountWindowHours: 96,
   applicationId: 'demo-app',
+  emitter: active,
   binding: (tenantId) => (tenantId === 'tenant-a' ? active : undefined),
   meterAt: (meterId) => (meterId === 'agent.tokens' ? { status: 'ACTIVE' } : undefined),
   ...overrides,

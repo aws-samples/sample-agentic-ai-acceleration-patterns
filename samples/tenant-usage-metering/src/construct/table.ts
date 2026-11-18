@@ -16,13 +16,10 @@ import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
+import { LIST_BY_TYPE_INDEX, PENDING_HOURS_INDEX, PUBLISH_OUTBOX_INDEX, PUBLISH_SHARDS } from '../shared/keys';
 
-/** The sparse index of hours not yet `CLOSED` (spec §4.5). */
-export const PENDING_HOURS_INDEX = 'pending-hours';
-/** The sparse outbox index (spec §4.7). */
-export const PUBLISH_OUTBOX_INDEX = 'publish-outbox';
-/** `publishShard` takes values 0 to this minus one. */
-export const PUBLISH_SHARDS = 4;
+export { LIST_BY_TYPE_INDEX, PENDING_HOURS_INDEX, PUBLISH_OUTBOX_INDEX, PUBLISH_SHARDS };
+
 
 const WRITE_ACTIONS = [
   'dynamodb:PutItem',
@@ -49,6 +46,14 @@ export function createTable(scope: Construct, writers: iam.IRole[]): dynamodb.Ta
         indexName: PENDING_HOURS_INDEX,
         partitionKey: { name: 'pending', type: dynamodb.AttributeType.NUMBER },
         sortKey: { name: 'PK', type: dynamodb.AttributeType.STRING },
+        projectionType: dynamodb.ProjectionType.ALL,
+      },
+      {
+        // Meters (their CURRENT item), sinks, emitters and jobs, for the List
+        // operations; sorted by id (a ULID for jobs, so by creation).
+        indexName: LIST_BY_TYPE_INDEX,
+        partitionKey: { name: 'listType', type: dynamodb.AttributeType.STRING },
+        sortKey: { name: 'listSort', type: dynamodb.AttributeType.STRING },
         projectionType: dynamodb.ProjectionType.ALL,
       },
       {

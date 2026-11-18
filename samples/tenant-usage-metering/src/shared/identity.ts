@@ -82,3 +82,36 @@ export function emitterFromCallerArn(userArn: string | undefined | null, fleet: 
 export function emitterKey(accountId: string, roleName: string): { PK: string; SK: string } {
   return { PK: `EMITTER#${accountId}#${roleName}`, SK: 'META' };
 }
+
+/** An assumed-role caller reduced to its role (any role name). */
+export interface RoleCaller {
+  readonly accountId: string;
+  readonly roleName: string;
+  /** `arn:<partition>:iam::<account>:role/<name>`, without the role's path. */
+  readonly roleArn: string;
+}
+
+/** Reduces a verified caller ARN to its role, or `undefined` for any other kind of caller. */
+export function roleFromCallerArn(userArn: string | undefined | null): RoleCaller | undefined {
+  if (userArn === undefined || userArn === null) {
+    return undefined;
+  }
+  const match = ASSUMED_ROLE.exec(userArn);
+  if (match === null) {
+    return undefined;
+  }
+  const [, partition, accountId, roleName] = match;
+  return { accountId, roleName, roleArn: `arn:${partition}:iam::${accountId}:role/${roleName}` };
+}
+
+/**
+ * Whether a caller is one of the listed role ARNs. An assumed-role ARN
+ * carries no role path, so a listed ARN matches on account and the last
+ * segment of its name.
+ */
+export function callerIsListed(caller: RoleCaller, roleArns: ReadonlyArray<string>): boolean {
+  return roleArns.some((arn) => {
+    const match = /^arn:aws[a-z-]*:iam::([0-9]{12}):role\/(?:.*\/)?([^/]+)$/.exec(arn);
+    return match !== null && match[1] === caller.accountId && match[2] === caller.roleName;
+  });
+}

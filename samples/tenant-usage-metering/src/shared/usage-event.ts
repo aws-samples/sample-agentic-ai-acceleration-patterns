@@ -152,6 +152,8 @@ export interface AdmissionContext {
   readonly recountWindowHours: number;
   /** The caller's application, from its emitter registration. */
   readonly applicationId: string;
+  /** The caller's emitter registration (spec §4.2). */
+  readonly emitter: Registration;
   /** The binding of `tenantId` to the caller's cell, if any. */
   binding(tenantId: string): Registration | undefined;
   /** The meter version in effect at `hour`, if any. */
@@ -169,6 +171,9 @@ export function checkEvent(event: unknown, ctx: AdmissionContext): RefusalReason
   const time = timeCheck(event.time, ctx.nowMs, ctx.recountWindowHours);
   if (time !== undefined) {
     return time;
+  }
+  if (!registrationAdmits(ctx.emitter, event.time, ctx.nowMs)) {
+    return 'REGISTRATION_CLOSED';
   }
   const binding = ctx.binding(event.tenantId);
   if (binding === undefined) {

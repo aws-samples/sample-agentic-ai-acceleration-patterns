@@ -21,6 +21,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 import type { ResolvedProps } from './props';
 import type { ServiceRoles } from './roles';
+import { acknowledgeGranularFinding } from '../shared/nag';
 
 /** Prefixes of the raw bucket (spec §4.8). */
 export const RAW_PREFIX = 'raw/';
@@ -143,7 +144,6 @@ export function createStorage(scope: Construct, props: ResolvedProps, roles: Ser
       notResources: [RAW_PREFIX, READMITTED_PREFIX, ERROR_PREFIX, FIREHOSE_ERROR_PREFIX].map((prefix) => objects(rawBucket, prefix)),
     }),
     deny('DenyDeletesExceptAutoDelete', ['s3:DeleteObject', 's3:DeleteObjectVersion'], [rawBucket.arnForObjects('*')], [autoDelete]),
-    deny('DenyConfigurationChanges', CONFIGURATION_ACTIONS, [rawBucket.bucketArn], [deploymentRoleArn, autoDelete]),
   ]) {
     rawBucket.addToResourcePolicy(statement);
   }
@@ -151,10 +151,40 @@ export function createStorage(scope: Construct, props: ResolvedProps, roles: Ser
   for (const statement of [
     deny('DenyExportWritesExceptDispatcher', ['s3:PutObject'], [exportBucket.arnForObjects('*')], [roles.dispatcher.roleArn]),
     deny('DenyDeletesExceptAutoDelete', ['s3:DeleteObject', 's3:DeleteObjectVersion'], [exportBucket.arnForObjects('*')], [autoDelete]),
-    deny('DenyConfigurationChanges', CONFIGURATION_ACTIONS, [exportBucket.bucketArn], [deploymentRoleArn, autoDelete]),
   ]) {
     exportBucket.addToResourcePolicy(statement);
   }
 
   return { rawBucket, exportBucket, accessLogBucket, deploymentRoleArn };
+}
+
+/** The id of the stack's bucket-notifications provider, a singleton CDK creates on the first notification. */
+const NOTIFICATIONS_HANDLER_ID = 'BucketNotificationsHandler050a0587b7544547bf325f094a3db834';
+
+function notificationsProviderRoleArn(scope: Construct): string | undefined {
+  const handler = Stack.of(scope).node.tryFindChild(NOTIFICATIONS_HANDLER_ID);
+  const role = handler?.node.tryFindChild('Role');
+  if (!(role instanceof iam.Role)) {
+    return undefined;
+  }
+  acknowledgeGranularFinding(
+    role.node.defaultChild!,
+    'AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]',
+    'The bucket-notifications provider is the CDK singleton that sets the tracker notifications; its role takes the Lambda basic execution policy from CDK.',
+  );
+  return role.roleArn;
+}
+
+/**
+ * Denies the bucket configuration actions to all but the deployment role
+ * and the providers CloudFormation runs (spec §3.5). Called once the
+ * bucket notifications exist, so their provider's role can be named.
+ */
+export function denyConfigurationChanges(scope: Construct, storage: Storage): void {
+  const autoDelete = autoDeleteProviderRoleArn(scope);
+  const notifications = notificationsProviderRoleArn(scope);
+  const allowed = [storage.deploymentRoleArn, autoDelete, ...(notifications !== undefined ? [notifications] : [])];
+  for (const bucket of [storage.rawBucket, storage.exportBucket]) {
+    bucket.addToResourcePolicy(deny('DenyConfigurationChanges', CONFIGURATION_ACTIONS, [bucket.bucketArn], allowed));
+  }
 }

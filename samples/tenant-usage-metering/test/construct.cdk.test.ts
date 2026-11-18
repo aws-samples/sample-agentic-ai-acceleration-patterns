@@ -13,7 +13,8 @@ const OPERATOR = `arn:aws:iam::${ACCOUNT}:role/metering-operator`;
 const base: TenantUsageMeteringProps = { fleetName: 'demo', registrarPrincipalArns: [REGISTRAR], operatorPrincipalArns: [OPERATOR] };
 
 function synth(props: Partial<TenantUsageMeteringProps> = {}): Template {
-  const app = new App();
+  // No asset bundling in unit tests: the functions' code is not under test here.
+  const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
   const stack = new Stack(app, 'Test', { env: { account: ACCOUNT, region: 'eu-central-1' } });
   new TenantUsageMetering(stack, 'Metering', { ...base, ...props });
   return Template.fromStack(stack);
@@ -76,7 +77,7 @@ describe('table (spec §4)', () => {
     expect(statement).toMatchObject({ Effect: 'Deny', Principal: { AWS: '*' } });
     expect(statement.Action).toEqual(expect.arrayContaining(['dynamodb:PutItem', 'dynamodb:BatchWriteItem', 'dynamodb:PartiQLInsert', 'dynamodb:PartiQLUpdate', 'dynamodb:PartiQLDelete']));
     const allowed = (statement.Condition as { ArnNotEquals: { 'aws:PrincipalArn': unknown[] } }).ArnNotEquals['aws:PrincipalArn'];
-    expect(allowed).toHaveLength(9);
+    expect(allowed).toHaveLength(10);
   });
 });
 
@@ -169,5 +170,79 @@ describe('ingest pipeline (ADR-0002, spec §3.1)', () => {
     template.resourceCountIs('AWS::EventsV2::Subscriber', 0);
     expect(hourQuery('DIRECT')).toBe('{hour: .hour}');
     expect(hourQuery('BUS')).toBe('{hour: .detail.time[0:13]}');
+  });
+});
+
+describe('API (spec §3.2, §5)', () => {
+  const template = synth({ readerPrincipalArns: [`arn:aws:iam::${ACCOUNT}:role/usage-reader`] });
+
+  test('every method is AWS_IAM', () => {
+    const methods = Object.values(template.findResources('AWS::ApiGateway::Method')) as Array<{ Properties: { AuthorizationType: string; HttpMethod: string } }>;
+    expect(methods.length).toBe(30);
+    expect(methods.every((method) => method.Properties.AuthorizationType === 'AWS_IAM' || method.Properties.HttpMethod === 'OPTIONS')).toBe(true);
+  });
+
+  test('each allow of the resource policy has an explicit deny for everyone else', () => {
+    const api = Object.values(template.findResources('AWS::ApiGateway::RestApi'))[0] as { Properties: { Policy: { Statement: Array<Record<string, unknown>> } } };
+    const statements = api.Properties.Policy.Statement;
+    const allows = statements.filter((s) => s.Effect === 'Allow');
+    const denies = statements.filter((s) => s.Effect === 'Deny');
+    expect(allows.length).toBe(4);
+    expect(denies.length).toBe(4);
+    const ingestDeny = denies.find((s) => s.Sid === 'DenyIngestToOtherPrincipals')!;
+    expect(ingestDeny.Condition).toEqual({ ArnNotLike: { 'aws:PrincipalArn': 'arn:aws:iam::*:role/demo-ue-*' } });
+    const registrarDeny = denies.find((s) => s.Sid === 'DenyRegistrarRoutesToOthers')!;
+    expect(registrarDeny.Resource).toEqual(expect.arrayContaining(['execute-api:/*/PUT/cells/*/emitter', 'execute-api:/*/DELETE/cells/*/tenants/*']));
+    expect(registrarDeny.Condition).toEqual({ ArnNotEquals: { 'aws:PrincipalArn': [REGISTRAR] } });
+  });
+
+  test('the ingest method has its own throttle below the stage limit', () => {
+    template.hasResourceProperties('AWS::ApiGateway::Stage', {
+      MethodSettings: Match.arrayWith([Match.objectLike({ ResourcePath: '/~1usage-events', HttpMethod: 'POST', ThrottlingRateLimit: 600 })]),
+    });
+  });
+});
+
+describe('functions, recounter and alarms (spec §3.1)', () => {
+  const template = synth();
+
+  test('the ingest function has reserved concurrency; every function runs Node 24 on ARM', () => {
+    const functions = Object.values(template.findResources('AWS::Lambda::Function')) as Array<{ Properties: { Runtime?: string; Architectures?: string[]; ReservedConcurrentExecutions?: number; Environment?: { Variables?: Record<string, unknown> } } }>;
+    const ours = functions.filter((fn) => fn.Properties.Environment?.Variables?.METERING_TABLE_NAME !== undefined);
+    expect(ours).toHaveLength(10);
+    expect(ours.every((fn) => fn.Properties.Runtime === 'nodejs24.x' && fn.Properties.Architectures?.[0] === 'arm64')).toBe(true);
+    expect(ours.filter((fn) => fn.Properties.ReservedConcurrentExecutions === 25)).toHaveLength(1);
+  });
+
+  test('the recounter times out before its lease and logs no execution data', () => {
+    template.hasResourceProperties('AWS::StepFunctions::StateMachine', {
+      LoggingConfiguration: Match.objectLike({ IncludeExecutionData: false, Level: 'ALL' }),
+    });
+    const machine = Object.values(template.findResources('AWS::StepFunctions::StateMachine'))[0] as { Properties: { DefinitionString: unknown } };
+    expect(JSON.stringify(machine.Properties.DefinitionString)).toContain('TimeoutSeconds\\":1500');
+  });
+
+  test('two 5-minute schedules: the scheduler and the outbox sweep', () => {
+    template.resourceCountIs('AWS::Scheduler::Schedule', 2);
+    template.hasResourceProperties('AWS::Scheduler::Schedule', { ScheduleExpression: 'rate(5 minutes)', Target: Match.objectLike({ Input: '{"sweep":true}' }) });
+  });
+
+  test('the publisher reads only usage records holding a marker', () => {
+    template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
+      FilterCriteria: { Filters: [{ Pattern: JSON.stringify({ dynamodb: { NewImage: { PK: { S: [{ prefix: 'USAGE#' }] }, publishPending: { S: [{ exists: true }] } } } }) }] },
+      FunctionResponseTypes: ['ReportBatchItemFailures'],
+    });
+  });
+
+  test('the alarms of the specification exist, the heartbeat breaching on missing data', () => {
+    expect(Object.keys(template.findResources('AWS::CloudWatch::Alarm')).length).toBe(16);
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', { MetricName: 'Invocations', TreatMissingData: 'breaching', EvaluationPeriods: 3 });
+  });
+
+  test('the bucket configuration deny exempts the notifications provider', () => {
+    const denies = statementsOf(template, 'AWS::S3::BucketPolicy', (id) => id.includes('RawBucket')).filter((s) => s.Sid === 'DenyConfigurationChanges');
+    expect(denies).toHaveLength(1);
+    const allowed = (denies[0].Condition as { ArnNotEquals: Record<string, unknown[]> }).ArnNotEquals['aws:PrincipalArn'];
+    expect(JSON.stringify(allowed)).toContain('BucketNotificationsHandler');
   });
 });

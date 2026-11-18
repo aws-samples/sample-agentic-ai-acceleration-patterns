@@ -106,7 +106,17 @@
       "type": "runtime"
     },
     {
+      "name": "@aws-sdk/client-eventbridgev2",
+      "version": "3.1154.0",
+      "type": "runtime"
+    },
+    {
       "name": "@aws-sdk/client-firehose",
+      "version": "3.1154.0",
+      "type": "runtime"
+    },
+    {
+      "name": "@aws-sdk/client-lambda",
       "version": "3.1154.0",
       "type": "runtime"
     },
@@ -117,6 +127,11 @@
     },
     {
       "name": "@aws-sdk/client-secrets-manager",
+      "version": "3.1154.0",
+      "type": "runtime"
+    },
+    {
+      "name": "@aws-sdk/client-sfn",
       "version": "3.1154.0",
       "type": "runtime"
     },
@@ -133,6 +148,11 @@
     {
       "name": "@aws-sdk/lib-dynamodb",
       "version": "3.1154.0",
+      "type": "runtime"
+    },
+    {
+      "name": "@aws-sdk/util-dynamodb",
+      "version": "3.996.9",
       "type": "runtime"
     },
     {

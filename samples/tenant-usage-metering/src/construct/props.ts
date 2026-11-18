@@ -51,10 +51,18 @@ export interface TenantUsageMeteringProps {
   readonly deploymentRoleArn?: string;
   /** SNS topic for every alarm. @default none */
   readonly alarmTopicArn?: string;
+  /**
+   * TEST ONLY: let `PutCellEmitter` register a cell in the metering account,
+   * so a one-account integration test can run an emitter. A cell there could
+   * read the raw store's account; never set it in a real deployment
+   * (spec §3.2). @default false
+   */
+  readonly testOnlyAllowCellsInMeteringAccount?: boolean;
 }
 
 /** The props with every default applied. */
-export interface ResolvedProps extends Required<Omit<TenantUsageMeteringProps, 'deploymentRoleArn' | 'alarmTopicArn'>> {
+export interface ResolvedProps extends Required<Omit<TenantUsageMeteringProps, 'deploymentRoleArn' | 'alarmTopicArn' | 'testOnlyAllowCellsInMeteringAccount'>> {
+  readonly testOnlyAllowCellsInMeteringAccount: boolean;
   readonly deploymentRoleArn?: string;
   readonly alarmTopicArn?: string;
 }
@@ -109,6 +117,7 @@ export function resolveProps(props: TenantUsageMeteringProps): ResolvedProps {
     usageSubscriberAccountIds: props.usageSubscriberAccountIds ?? [],
     deploymentRoleArn: props.deploymentRoleArn,
     alarmTopicArn: props.alarmTopicArn,
+    testOnlyAllowCellsInMeteringAccount: props.testOnlyAllowCellsInMeteringAccount ?? false,
   };
 
   if (!FLEET.test(resolved.fleetName)) {

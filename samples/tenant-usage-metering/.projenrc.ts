@@ -56,11 +56,15 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     // Runtime
     '@aws-sdk/client-dynamodb@3.1154.0', // the table (spec §4)
     '@aws-sdk/lib-dynamodb@3.1154.0',
+    '@aws-sdk/util-dynamodb@3.996.9', // stream images (the record publisher)
     '@aws-sdk/client-s3@3.1154.0', // raw, error and export objects (spec §4.8)
     '@aws-sdk/client-firehose@3.1154.0', // ingestPath DIRECT and the ingest redrive (ADR-0002)
     '@aws-sdk/client-sqs@3.1154.0', // dead-letter queues, deliveries
     '@aws-sdk/client-secrets-manager@3.1154.0', // HTTP sink credentials (spec §4.4)
     '@aws-sdk/client-cloudwatch@3.1154.0', // unregistered-caller and dropped-refusal metrics (spec §3.2)
+    '@aws-sdk/client-eventbridgev2@3.1154.0', // ingest and usage buses (Custom Event Bus, ADR-0002)
+    '@aws-sdk/client-sfn@3.1154.0', // the scheduler starts recounts (spec §4.5)
+    '@aws-sdk/client-lambda@3.1154.0', // the admin function starts jobs (spec §4.6)
     'ulid@3.0.2', // job ids, emitter snippet event ids (spec §4.6, §4.8)
     // Security linting - AwsSolutionsChecks aspect applied in src/main.ts
     'cdk-nag@3.0.2',
