@@ -4,6 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
+- Amended by: ADR-0015
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -36,3 +37,5 @@ identity pool when their parameters exist and never destroys the pool.
 `integration-test.md` documents the script, its knobs and its leftovers
 check. The `teardown` step is `cdk destroy` itself, so C-6 is tested on
 the consumer's path, not by a test-only stop.
+
+Note 2026-11-18: amended by ADR-0015, which applies the spike results (spec §7.1) to this decision.

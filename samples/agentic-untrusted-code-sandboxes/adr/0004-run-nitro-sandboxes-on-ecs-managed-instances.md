@@ -4,6 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
+- Amended by: ADR-0015
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -48,3 +49,5 @@ Logs interface endpoint (ADR-0012), and a reaper to stop idle tasks
 task's identity (ADR-0010). EKS readers get a
 README note mapping the same settings to the pod spec. Confidential mode
 stays out of scope (spec §1.2).
+
+Note 2026-11-18: amended by ADR-0015, which applies the spike results (spec §7.1) to this decision.

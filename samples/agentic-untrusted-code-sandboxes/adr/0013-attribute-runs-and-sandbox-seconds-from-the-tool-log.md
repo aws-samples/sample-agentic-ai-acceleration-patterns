@@ -4,6 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
+- Amended by: ADR-0015
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -44,3 +45,5 @@ the API reports no per-state times, so the split is marked estimated.
 The README Costs section gives the formula per backend and names what stays
 unattributed (idle capacity, NAT, endpoints, image builds) and how to
 apportion it. The integration test checks the tool line's fields.
+
+Note 2026-11-18: amended by ADR-0015, which applies the spike results (spec §7.1) to this decision.

@@ -4,6 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
+- Amended by: ADR-0015
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -59,3 +60,5 @@ the other two hold nothing. The tool's log line is the record of every run,
 because the MicroVM logs nothing. If a spike shows a path a backend cannot
 close, the threat model records it against that backend and the README says
 so in the backend table.
+
+Note 2026-11-18: amended by ADR-0015, which applies the spike results (spec §7.1) to this decision.

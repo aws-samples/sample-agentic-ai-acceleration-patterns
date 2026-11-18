@@ -4,6 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
+- Amended by: ADR-0015
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -61,3 +62,5 @@ S-5 and S-10 check that each backend's runner can drop code to uid 1001. The int
 expects the refusal, and its runaway step tries forks, a kill of the runner
 and a disk fill. If S-4 shows the MicroVM base image cannot drop to a
 second user, the threat model records the gap for `microvm`.
+
+Note 2026-11-18: amended by ADR-0015, which applies the spike results (spec §7.1) to this decision.

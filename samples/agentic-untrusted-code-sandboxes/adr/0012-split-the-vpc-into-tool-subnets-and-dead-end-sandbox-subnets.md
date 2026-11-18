@@ -4,6 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
+- Amended by: ADR-0015
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -47,3 +48,5 @@ Deploy time and hourly cost include the NAT and the endpoints; the README
 cost section shows them. The integration test tries a presigned PUT to an
 outside bucket through the S3 endpoint. A vendor who supplies `vpc` must
 tag both tiers.
+
+Note 2026-11-18: amended by ADR-0015, which applies the spike results (spec §7.1) to this decision.
