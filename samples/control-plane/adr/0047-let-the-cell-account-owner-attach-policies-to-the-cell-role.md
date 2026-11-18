@@ -35,11 +35,20 @@ Option 1. `CellAccountRolesProps` and `CellAccountStackProps` take
 `tenantBuildManagedPolicyArns` (this stack's partition and account), and
 attached to the cell provisioning role. The README shows the one policy the
 stress application uses: `sts:AssumeRole` on
-`arn:aws:iam::<account>:role/cdk-cell-*-role-<account>-<region>`.
+`arn:${Partition}:iam::<account>:role/cdk-cell-*-role-<account>-<region>`,
+and states where it is safe: in a cell account that holds only cells, with
+a cell bootstrap whose execution role and every cell role carry a
+permissions boundary and sit on a `/cell/` role path (stress ADR-0006).
 
 ## Consequences
 Easier: an application can deploy its cell with any tool the account owner
-allows. Harder: the threat model's cell-role row gains the residual that an
-owner-attached policy widens the cell build; the safe pattern (a scoped
-bootstrap with a permissions boundary) is in the README. Revisit if cell
+allows. Harder: an owner-attached policy widens two principals, not one.
+The cell role trusts the control-plane API role as well as the cell build
+(the `PutAccount` handshake, ADR-028), so the API Lambda can use every
+attached policy too; with the stress policy it can assume the cell
+bootstrap roles. The threat model's cell-role row gains that residual. A
+policy that reaches a default CDK bootstrap, or any role outside a scoped
+path, makes the cell build and the API role administrators of the account;
+the README says so beside the example. Revisit if the handshake can use a
+role of its own, so the API role leaves the cell role's trust, or if cell
 and tenant roles need the same policy set often enough to merge the props.

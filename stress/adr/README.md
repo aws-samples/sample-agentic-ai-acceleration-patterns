@@ -15,7 +15,7 @@ that change a sample are recorded in that sample's `adr/`.
 | [0003](./0003-split-the-agents-across-cells.md) | Split the agents across cells | Accepted | 2026-11-18 |
 | [0004](./0004-seed-the-large-fleet-once-and-keep-it.md) | Seed the `large` fleet once and keep it | Accepted | 2026-11-18 |
 | [0005](./0005-log-one-correlation-header-at-every-hop.md) | Log one correlation header at every hop | Accepted | 2026-11-18 |
-| [0006](./0006-deploy-cells-through-a-scoped-cell-bootstrap.md) | Deploy cells through a scoped cell bootstrap with a permissions boundary | Accepted | 2026-11-18 |
+| [0006](./0006-deploy-cells-through-a-scoped-cell-bootstrap.md) | Deploy cells in standalone accounts through a scoped cell bootstrap | Proposed | 2026-11-18 |
 | [0007](./0007-move-the-stress-driver-and-k6-library-to-stress.md) | Move the stress driver and the k6 library to `stress/` | Accepted | 2026-11-18 |
 
 In `samples/control-plane/adr/`:
