@@ -377,9 +377,9 @@ The control plane's own account never qualifies, because it holds the
 control plane: on the control plane stack, attach only policies scoped to
 the cell's own resources. A policy that reaches an administrator role, the
 default CDK bootstrap (`cdk-hnb659fds-*`), or any role other than the three
-`cdk-cell-*` roles above makes the cell build and the API role
-administrators of the account; one that reaches a lookup role lets both
-read the whole account. Without the lookup role, `cdk deploy` prints a
+`cdk-cell-*` roles above and the cell lookup role makes the cell build and
+the API role administrators of the account; one that reaches the cell
+lookup role lets both read the whole account. Without the lookup role, `cdk deploy` prints a
 warning that it could not assume it and goes on with the deploy role.
 
 `concurrentBuildLimit` (default 5, ADR-0046) caps concurrent builds on every

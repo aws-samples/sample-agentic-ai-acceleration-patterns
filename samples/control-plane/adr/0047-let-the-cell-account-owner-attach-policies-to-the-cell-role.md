@@ -55,8 +55,9 @@ The cell role trusts the control-plane API role as well as the cell build
 attached policy too; with the stress policy it can assume the cell
 bootstrap roles. The threat model's cell-role row gains that residual. A
 policy that reaches an administrator role, a default CDK bootstrap, or any
-role other than the three `cdk-cell-*` roles of the example, makes the cell build and the API role administrators of the account,
-and one that reaches a lookup role lets both read it all; the README says
-so beside the example. Revisit if the handshake can use a
+role other than the three `cdk-cell-*` roles of the example and the cell
+lookup role makes the cell build and the API role administrators of the
+account, and one that reaches the cell lookup role lets both read it all;
+the README says so beside the example. Revisit if the handshake can use a
 role of its own, so the API role leaves the cell role's trust, or if cell
 and tenant roles need the same policy set often enough to merge the props.
