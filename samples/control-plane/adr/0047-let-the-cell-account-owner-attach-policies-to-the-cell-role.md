@@ -11,7 +11,7 @@ namespace grants only. The tenant role already takes the account owner's
 managed policies through `tenantBuildManagedPolicyArns` (ADR-0022), so a
 tenant script can reach what its application needs. A cell script has no
 such path. An application whose cell is a CDK deployment, such as the
-platform stress test's (stress ADR-0006), needs the cell role to assume the
+platform stress test's, needs the cell role to assume the
 account's cell bootstrap roles, and nothing in the sample lets the account
 owner grant that.
 
@@ -40,7 +40,7 @@ lookup), named one by one as
 `arn:${Partition}:iam::<account>:role/cdk-cell-<name>-role-<account>-<region>`.
 It states where that policy is safe: in a cell account that holds only
 cells, with a cell bootstrap whose execution role and every cell role carry
-a permissions boundary and sit on a `/cell/` role path (stress ADR-0006).
+a permissions boundary and sit on a `/cell/` role path.
 The control plane's own account never qualifies, because it holds the
 control plane.
 

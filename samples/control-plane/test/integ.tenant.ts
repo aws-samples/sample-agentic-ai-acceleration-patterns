@@ -14,6 +14,7 @@ import { RegionInfo } from 'aws-cdk-lib/region-info';
 import { WriteNagSuppressionsToCloudFormationAspect } from 'cdk-nag';
 import { IConstruct } from 'constructs';
 import { CellAccountStack } from '../src/cell-account/cell-account.cdk';
+import { provisioningRoleName } from '../src/shared/fleet';
 import { suppressTemplateScanners } from '../src/shared/nag';
 import { TenantStack } from '../src/tenant/tenant.cdk';
 
@@ -34,7 +35,7 @@ import { TenantStack } from '../src/tenant/tenant.cdk';
  * plus the `role: "operator"` claim ADR-018 requires, added by a pre token
  * generation trigger); the sample cell + tenant scripts are hosted in an S3
  * bucket used as the applications' CodeBuild ProjectSource; and a probe
- * Lambda that assumes a read-only role in B to count SSM parameters there
+ * Lambda that assumes a read-only role in B to count SSM parameters (and list the cell role's managed policies) there
  * (the assertion provider itself runs in A only); and a build probe that
  * reads the PARAM_ variables of a CodeBuild project's latest build, which
  * is what the script of that build received. Applications X and Y share
@@ -404,7 +405,7 @@ const cellExtraPolicy = new iam.ManagedPolicy(accountBStack, 'IntegCellExtraPoli
 accountBStack.roles.cellRole.node.addDependency(cellExtraPolicy);
 const probeRole = new iam.Role(accountBStack, 'IntegProbeRole', {
   roleName: probeRoleName,
-  description: 'control-plane integ test only: lets the probe Lambda in the control plane account count SSM parameters here',
+  description: 'control-plane integ test only: lets the probe Lambda in the control plane account count SSM parameters and list the cell role managed policies here',
   assumedBy: new iam.PrincipalWithConditions(new iam.AccountPrincipal(accountA), {
     ArnLike: { 'aws:PrincipalArn': `arn:${accountBStack.partition}:iam::${accountA}:role/control-plane-integ-setup-SsmProbe*` },
   }),
@@ -597,7 +598,7 @@ integ.assertions
 integ.assertions
   .invokeFunction({
     functionName: ssmProbe.functionName,
-    payload: JSON.stringify({ roleArn: probeRoleArn, region, attachedPoliciesOf: 'control-plane-cell-provisioning' }),
+    payload: JSON.stringify({ roleArn: probeRoleArn, region, attachedPoliciesOf: provisioningRoleName(accountBStack.roles.fleetName, 'cell') }),
   })
   .expect(ExpectedResult.objectLike({ Payload: JSON.stringify(cellExtraPolicyArn) }));
 
