@@ -447,15 +447,15 @@ account walls.
 |---|---|---|
 | W-1 contract: `tiers.ts`, result schema, budget, runner | decision 1 | yes |
 | W-2 driver and k6 library moved to `stress/` | W-1 schema | yes, once W-1's schema is fixed |
-| W-3 runtime-isolation slice on the contract | W-1, W-2 | yes, after W-1 |
+| W-3 runtime-isolation slice on the contract | W-1, W-2 | yes, after W-1 and W-2 |
 | W-4 control-plane build-limit prop | decision 2 | yes, now |
-| W-5 control-plane slice and the stress application | W-1, W-4, W-10 | after W-1, W-4 and W-10 |
+| W-5 control-plane slice and the stress application | W-1, W-4, W-10; W-11 for Q-1 and the account check | after W-1, W-4 and W-10; Q-1 after W-11 |
 | W-10 `cellBuildManagedPolicyArns` prop; cell execution policy, permissions boundary, `/cell/` path aspect and the cell bootstrap | decision 7; W-11 for the Q-5 and Q-6 probes | yes, now; the probes after W-11 |
 | W-11 two standalone cell accounts, bootstrapped with the cell bootstrap and the role pair | §3.7; W-10's policies and prop for the bootstrap and the role pair | accounts yes, now; the bootstrap after W-10's policies |
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | yes, after W-1 |
 | W-7 front-door slice | the front door merged; its spikes S-2, S-3, S-5, S-7 passed; W-1 | no: blocked on the front door |
 | W-8 correlation header in the ingress and the front door | decision 6 | ingress part yes; front-door part after its merge |
-| W-9 first platform run at `small` | W-3, W-5, W-6, W-7, W-11 | no |
+| W-9 first platform run at `small` | W-3, W-5, W-6, W-7, W-8, W-11 | no |
 
 ## 10. Open questions
 
