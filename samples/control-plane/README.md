@@ -15,7 +15,8 @@ on to the next registered one; a customer account receives only the
 deployments that name it. Each account is reached through a role pair
 installed in that account, which the account owner can revoke. **Vendor
 hooks** run the vendor's own code before or after each cell and deployment
-script, in the control plane account under roles no cell account holds, so a
+script, and around each change to an application, a tenant or an account,
+in the control plane account under roles no cell account holds, so a
 downstream system (a route registrar, metering, an audit export, a policy
 gate) can admit the vendor without admitting a tenant. One service, one API
 (26 operations), one DynamoDB table, one Step Functions workflow, four shared
@@ -67,14 +68,18 @@ the code that runs (ADR-020).
 ## How it works
 
 ```
-PutApplication (200)   ─► register an application: source, cell and tenant
+PutApplication (202)   ─► register an application: source, cell and tenant
                           scripts, maxTenants, placementStrategy, hooks
 PutHook (200)          ─► optionally, register a global hook that runs for
                           every application
-PutAccount (200)       ─► register an account: verify its role pair (handshake),
+PutAccount (202)       ─► register an account: verify its role pair (handshake),
                           record owner (VENDOR | TENANT), maxCells and the
                           applications it admits
-CreateTenant (200)     ─► record a customer; nothing is provisioned
+CreateTenant (202)     ─► record a customer; nothing is provisioned
+                       ─► Step Functions ─► per record event: pre hooks, then
+                                            the commit, then post hooks
+GetApplication, GetAccount,
+GetTenant            ◄─ poll each until ACTIVE / CREATE_FAILED
 CreateDeployment (202) ─► placement: claim a slot in an ACTIVE cell of the
                           application with capacity, or claim a cell slot on an
                           eligible account and create a new cell record there,
@@ -93,6 +98,9 @@ GetDeployment        ◄─ poll until ACTIVE / CREATE_FAILED
 plus the authoritative count of those cells. Neither the definition nor the
 application list is a deployment input: a new application needs no
 redeploy. An application with cells cannot be deleted (409).
+`PutApplication` and `DeleteApplication` answer 202 and run the
+application's record event (see Hooks on applications, tenants and
+accounts); a replaced definition takes effect when that event commits it.
 
 **Parameters.** An application declares the values its scripts take per
 deployment or per cell. A tenant parameter is `{name, required, default?,
@@ -148,9 +156,51 @@ above. Hook builds run in the control plane account, global hooks under
 `<fleet>-global-hook` and application hooks under `<fleet>-app-hook`; they
 assume no role and never see the external id or the pair.
 
+**Hooks on applications, tenants and accounts.** Hooks also run on nine
+record events: `APPLICATION_CREATE`, `APPLICATION_UPDATE`,
+`APPLICATION_DELETE`, `TENANT_CREATE`, `TENANT_UPDATE`, `TENANT_DELETE`,
+`ACCOUNT_CREATE`, `ACCOUNT_UPDATE` and `ACCOUNT_DELETE` (ADR-045).
+`PutApplication`, `DeleteApplication`, `CreateTenant`, `UpdateTenant`,
+`DeleteTenant`, `PutAccount` and `DeleteAccount` validate the request
+(`PutAccount` also probes the handshake), make one conditional write and
+answer 202 with the record. The workflow then runs the event's pre hooks,
+commits the change, runs its post hooks and writes the record `ACTIVE` or
+`*_FAILED`. No build runs in a cell account, and post hooks get
+`SCRIPT_OUTPUTS` `{}`. A create inserts the record `CREATING`, and nothing
+is placed into or against it until it is `ACTIVE`. An update stages the new
+values in `pending`, which the `Get` operation returns, and the stored
+values stay in force until the pre hooks pass, so a failing pre hook leaves
+the record `UPDATE_FAILED` with its old values. A delete moves the record to
+`DELETING`, under the same empty check as before, and the workflow deletes
+it; delete hooks are retried and skipped as above, so a delete always
+completes. An account's `externalId` is the one value never staged:
+`PutAccount` writes it in the request, once the probe has passed, so no hook
+can refuse or delay a rotation, and on an `UPDATING` account a put with the
+values in flight writes only the new id and runs no hook.
+
+Application events run the global hooks and the application hooks of the
+definition being written (the stored ones on delete); tenant and account
+events run global hooks only, and `PutApplication` refuses an application
+hook that names one. A record event's hook build gets `EVENT`, `PHASE`,
+`HOOK_ID`, `HOOK_SCOPE`, `HOOK_SCRIPT`, `OPERATOR_ID`, `EXECUTION_ID`,
+`ATTEMPT` and the record's fields: `APPLICATION_ID`; `TENANT_ID` and
+`TENANT_NAME`; or `ACCOUNT_ID`, `ACCOUNT_OWNER` and
+`ACCOUNT_APPLICATION_IDS` (comma-separated, empty for a shared account). It never gets an external id, a parameter, a
+source or a script. `GetApplication`, `GetTenant` and `GetAccount` report
+`status`, `statusReason`, `lastGlobalHooks` and `operationId`, the name of
+the last operation's execution and its hooks' `EXECUTION_ID`.
+
+A `CREATE_FAILED` application or account is put again or deleted, a
+`CREATE_FAILED` tenant is deleted, an `UPDATE_FAILED` record takes another
+update or a delete, and a `DELETE_FAILED` one another delete. When the
+workflow cannot be started the call answers 500 and leaves the record
+`*_FAILED`, except a first create that Step Functions refused, which leaves
+no record. `PutHook` and `DeleteHook` stay synchronous and run no hook.
+
 **Tenants and deployments.** A tenant (`CreateTenant`) is a customer record:
-a name, a description, and the count of its deployments. Its operations are
-synchronous. A **deployment** (`CreateDeployment` on
+a name, a description, and the count of its deployments. Its operations
+run no build and answer 202 (see Hooks on applications, tenants and
+accounts). A **deployment** (`CreateDeployment` on
 `/tenants/{tenantId}/deployments`) is that tenant in one application,
 addressed by tenant and application id; it owns the cell placement and the
 build state (ADR-037). A tenant has at most one deployment per application
@@ -278,6 +328,13 @@ curl -s -X PUT "${API_URL}applications/demo" \
   }'
 ```
 
+The call answers 202 with the application `CREATING`. Repeat this until
+`status` is `ACTIVE`, seconds when no hook matches the event:
+
+```bash
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}applications/demo" | jq -r .application.status
+```
+
 The stack also installs the role pair in its own account, so the next step
 is to register that account (the stack's `ControlPlaneAccountId` output is
 its id). Without `applicationIds` the account is shared and admits every
@@ -288,10 +345,12 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 curl -s -X PUT "${API_URL}accounts/${ACCOUNT_ID}" \
   -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
   -d '{ "owner": "VENDOR", "maxCells": 10 }'
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}accounts/${ACCOUNT_ID}" | jq -r .account.status
 ```
 
-Without a registered vendor-owned account that admits the application, the
-first `CreateDeployment` is a 409 `InsufficientCapacityError` that says so.
+Poll the account the same way until it is `ACTIVE`. Without a registered
+vendor-owned account that is `ACTIVE` and admits the application, the first
+`CreateDeployment` is a 409 `InsufficientCapacityError` that says so.
 
 ### Teardown
 
@@ -306,9 +365,10 @@ control plane can no longer reach.
    in each cell's account and the account's and application's cell slots are
    released.
 2. `DeleteTenant` every tenant, `DeleteAccount` every account
-   (`ListAccounts` shows them all at `0/n`), `DeleteApplication` every
-   application (`ListApplications` shows `cellCount` 0), and `DeleteHook`
-   every global hook (`ListHooks`).
+   (`ListAccounts` shows them all at `0/n`) and `DeleteApplication` every
+   application (`ListApplications` shows `cellCount` 0); each answers 202
+   and is done when its `Get` answers 404. Then `DeleteHook` every global
+   hook (`ListHooks`).
 3. `npx cdk destroy` the control plane stack with the same context inputs
    you deployed with.
 4. In every other account, its owner runs `npx cdk destroy` on the pair
@@ -497,6 +557,26 @@ fails synth and needs a new name. Renaming a fleet replaces every fleet
 role, so the role pair is reinstalled under the new name in every
 registered account.
 
+### Upgrading to asynchronous application, tenant and account operations
+
+`PutApplication`, `DeleteApplication`, `CreateTenant`, `UpdateTenant`,
+`DeleteTenant`, `PutAccount` and `DeleteAccount` answer 202 from this
+version on, where they answered 200 before (ADR-045). This is a breaking
+change for every API client. The response carries the record and its
+`status`, and the record is usable only once it is live: `ACTIVE`, or
+`UPDATING` or `UPDATE_FAILED` after a replace, whose stored values stay in
+force. A client that uses a record straight after creating it, such as a
+sign-up flow that calls `CreateTenant` and then `CreateDeployment`, polls
+the record's `Get` operation until `ACTIVE` first, or retries the 409 the
+deployment gets meanwhile. A client that needs the new values of an update
+polls until the record leaves `UPDATING`, and a client that deletes polls
+until the `Get` answers 404. Change the clients with the upgrade.
+
+Records stored before the upgrade have no `status` and read as `ACTIVE`,
+so the upgrade writes nothing to the table and needs no data migration. It
+needs no drain of its own. The drain in the previous section still applies
+when the version you run has generated project and workflow names.
+
 ### Example: mounting tenant-identity
 
 The [`tenant-identity`](../tenant-identity/) sample is the worked consumer of
@@ -569,25 +649,36 @@ curl -s -X PUT "${API_URL}applications/demo" \
   }'
 ```
 
+The 202 leaves the application `CREATING`; repeat the `GetApplication` call
+until `status` is `ACTIVE`:
+
+```bash
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}applications/demo"
+```
+
 Register this account as vendor-owned, shared fleet capacity. The call
 verifies the role pair the stack installed here and answers 400 if the
-handshake fails:
+handshake fails; otherwise it answers 202, and you repeat the `GetAccount`
+call until `status` is `ACTIVE`:
 
 ```bash
 curl -s -X PUT "${API_URL}accounts/${ACCOUNT_ID}" \
   -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
   -d '{ "owner": "VENDOR", "maxCells": 2 }'
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}accounts/${ACCOUNT_ID}"
 curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}accounts"
 ```
 
-Create the tenant. This is a synchronous 200 that records the customer and
-provisions nothing:
+Create the tenant. The 202 records the customer `CREATING` and provisions
+nothing; repeat the `GetTenant` call until `status` is `ACTIVE` before
+creating a deployment, which is a 409 until then:
 
 ```bash
 TENANT_ID=$(curl -s -X POST "${API_URL}tenants" \
   -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
   -d '{ "name": "acme", "description": "demo tenant" }' | jq -r .tenant.tenantId)
 echo "${TENANT_ID}"
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${TENANT_ID}"
 ```
 
 Create the tenant's deployment of `demo`. The 202 response carries no
@@ -671,32 +762,36 @@ curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}cells/${CELL_ID
 curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}cells/${CELL_ID}"
 ```
 
-Finally the tenant, the account and the application, each a synchronous 200
-that is a 409 while it still has deployments or cells:
+Finally the tenant, the account and the application. Each delete is a 202
+that is a 409 while the record still has deployments or cells; poll each
+until its `Get` answers 404:
 
 ```bash
 curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${TENANT_ID}"
 curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}accounts/${ACCOUNT_ID}"
 curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}applications/demo"
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${TENANT_ID}"
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}accounts/${ACCOUNT_ID}"
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}applications/demo"
 ```
 
 ## API
 
 | Operation | HTTP | Returns |
 |---|---|---|
-| PutApplication | `PUT /applications/{applicationId}` | 200 — register or replace the definition (`source`, `cellScripts`, `tenantScripts`, `maxTenants`, `hooks`), `placementStrategy` and the declarations `parameters` and `cellParameters`; an absent list keeps the current one, `[]` clears it; 400 on an invalid definition, hook or declaration, or a source or script path outside its charset; 409 when a kept declaration list changed during the call (retry); existing cells keep their stamp |
-| GetApplication | `GET /applications/{applicationId}` | 200 — the definition (`hooks` included), `placementStrategy`, `parameters`, `cellParameters`, `cellCount` |
-| ListApplications | `GET /applications` | 200 — paginated: `maxTenants`, `placementStrategy`, `cellCount` per application |
-| DeleteApplication | `DELETE /applications/{applicationId}` | 200 — empty applications only (409 while it has cells) |
+| PutApplication | `PUT /applications/{applicationId}` | 202 — register or replace the definition (`source`, `cellScripts`, `tenantScripts`, `maxTenants`, `hooks`), `placementStrategy` and the declarations `parameters` and `cellParameters`; an absent list keeps the current one, `[]` clears it; a create (or a put of a `CREATE_FAILED` application) answers `CREATING`, a replace `UPDATING` with the new values in `pending`, live once the `APPLICATION_*` pre hooks pass; 400 on an invalid definition, hook or declaration, an application hook on a tenant or account event, or a source or script path outside its charset; 409 while it is in flight, `DELETING` or `DELETE_FAILED`, or when a kept declaration list changed during the call (retry); existing cells keep their stamp |
+| GetApplication | `GET /applications/{applicationId}` | 200 — the polling endpoint: the definition (`hooks` included), `placementStrategy`, `parameters`, `cellParameters`, `cellCount`, `status`, `statusReason`, `lastGlobalHooks`, `operationId`, and `pending` while a replace is staged |
+| ListApplications | `GET /applications` | 200 — paginated: `maxTenants`, `placementStrategy`, `cellCount` and `status` per application |
+| DeleteApplication | `DELETE /applications/{applicationId}` | 202 — empty applications only (409 while it has cells or is in flight); `DELETING` until the workflow has run the `APPLICATION_DELETE` hooks and deleted the record, then 404 |
 | PutHook | `PUT /hooks/{hookId}` | 200 — register or replace a global hook (`events`, `phase`, `source`, `script`, `timeoutMinutes`); a replace increments `revision`; 400 on an invalid definition; 409 for a sixth hook (delete one first) or a race with a create or delete of the same hook (retry); applies to operations accepted afterwards |
 | GetHook | `GET /hooks/{hookId}` | 200 — the definition, `revision`, timestamps |
 | ListHooks | `GET /hooks` | 200 — paginated, in `hookId` order, the order global hooks run in |
 | DeleteHook | `DELETE /hooks/{hookId}` | 200 — deletes the hook and frees its slot; executions already accepted keep the hooks they started with |
-| CreateTenant | `POST /tenants` | 200 — a customer record (`name`, `description`), nothing provisioned |
-| GetTenant | `GET /tenants/{tenantId}` | 200 — `name`, `description`, `deploymentCount` |
-| UpdateTenant | `PUT /tenants/{tenantId}` | 200 — metadata only, no build |
-| DeleteTenant | `DELETE /tenants/{tenantId}` | 200 — empty tenants only (409 while it has deployments) |
-| ListTenants | `GET /tenants` | 200 — paginated |
+| CreateTenant | `POST /tenants` | 202 — a customer record (`name`, `description`), `CREATING` until the `TENANT_CREATE` hooks pass; nothing provisioned |
+| GetTenant | `GET /tenants/{tenantId}` | 200 — the polling endpoint: `name`, `description`, `deploymentCount`, `status`, `statusReason`, `lastGlobalHooks`, `operationId`, and `pending` while an update is staged |
+| UpdateTenant | `PUT /tenants/{tenantId}` | 202 — metadata only, no build: `name` and `description` staged in `pending` (`UPDATING`), live once the `TENANT_UPDATE` pre hooks pass; 409 while it is in flight, `CREATE_FAILED`, `DELETING` or `DELETE_FAILED` |
+| DeleteTenant | `DELETE /tenants/{tenantId}` | 202 — empty tenants only (409 while it has deployments or is in flight); `DELETING` until the `TENANT_DELETE` hooks have run and the record is deleted, then 404 |
+| ListTenants | `GET /tenants` | 200 — paginated, with each tenant's `status` |
 | CreateDeployment | `POST /tenants/{tenantId}/deployments` | 202 — placement into a cell of `applicationId` + tenant create build (cell create build first if a new cell is needed); optional `parameters` (400 on an undeclared name, a bad value or a missing required one, before placement); optional `accountId` pins the account (400 if it does not admit the application); optional `clientToken`; 409 when the tenant already has a deployment of the application; 409 `InsufficientCapacityError` when no eligible account has room |
 | GetDeployment | `GET /tenants/{tenantId}/deployments/{applicationId}` | 200 — the polling endpoint: status, `cellId`, the account, the effective definition (from the cell, its hooks included), `lastGlobalHooks` and the stored `parameters` (no defaults) |
 | UpdateDeployment | `PUT /tenants/{tenantId}/deployments/{applicationId}` | 202 — optional body `{parameters?, removeParameters?}` merged into the stored values, then runs the tenant update script; 400 on a validation failure, nothing written; 409 when the deployment or its cell is not in a state to re-apply, or the stored values changed during the call (retry) |
@@ -706,14 +801,15 @@ curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}applications/de
 | GetCell | `GET /cells/{cellId}` | 200 — full record including the application, the account, the stamped definition (its hooks included), `lastGlobalHooks` and the stored cell `parameters` (no defaults; empty for a new cell) |
 | UpdateCell | `PUT /cells/{cellId}` | 202 — optional body `{parameters?, removeParameters?}` merged into the cell's stored values (removing one returns the cell to the default), then runs the cell update script; 400 on a validation failure, nothing written |
 | DeleteCell | `DELETE /cells/{cellId}` | 202 — empty cells only (409 while occupied); frees the account's cell slot and the application's count |
-| PutAccount | `PUT /accounts/{accountId}` | 200 — register or replace `maxCells`, `applicationIds` (absent: shared), `externalId` (required for `TENANT`); `owner` is set on first write and immutable (409 on change); 404 for an unregistered application id; verifies the role pair first (400 if not assumable) |
-| GetAccount | `GET /accounts/{accountId}` | 200 — `owner`, `applicationIds`, `cellCount`/`maxCells`, whether an external id is set |
-| ListAccounts | `GET /accounts` | 200 — the capacity view above `ListCells` |
-| DeleteAccount | `DELETE /accounts/{accountId}` | 200 — empty accounts only (409 while it holds cells) |
+| PutAccount | `PUT /accounts/{accountId}` | 202 — register or replace `maxCells`, `applicationIds` (absent: shared; at most 100), `externalId` (required for `TENANT`); `owner` is set on first write and immutable (409 on change); 404 for an unregistered application id; verifies the role pair first (400 if not assumable); a create (or a put of a `CREATE_FAILED` account) answers `CREATING`; a replace writes `externalId` at once and stages `maxCells` and `applicationIds` in `pending` (`UPDATING`) until the `ACCOUNT_UPDATE` pre hooks pass; on an `UPDATING` account a put with the values in flight writes only the new `externalId` and runs no hook (409 with other values); 409 while `CREATING`, `DELETING` or `DELETE_FAILED` |
+| GetAccount | `GET /accounts/{accountId}` | 200 — the polling endpoint: `owner`, `applicationIds`, `cellCount`/`maxCells`, whether an external id is set, `status`, `statusReason`, `lastGlobalHooks`, `operationId`, and `pending` while a replace is staged |
+| ListAccounts | `GET /accounts` | 200 — the capacity view above `ListCells`, with each account's `status` |
+| DeleteAccount | `DELETE /accounts/{accountId}` | 202 — empty accounts only (409 while it holds cells or is in flight); `DELETING` until the `ACCOUNT_DELETE` hooks have run and the record is deleted, then 404 |
 
-Twenty-six operations, twelve of them `GET` reads; there is deliberately no
+Twenty-six operations, twelve of them `GET` reads and twelve answering 202
+with a record to poll; there is deliberately no
 `POST /cells` — cells are created implicitly by placement — no implicit
-account registration, and no operation that runs a hook. A
+account registration, and no operation that runs a hook on demand. A
 list filter with an unknown id returns an empty page, not a 404.
 `CreateDeployment` accepts an optional `clientToken` for retry safety:
 resending the same token returns the originally created deployment instead of
@@ -810,7 +906,11 @@ T22, T23, T26, T27, and mitigations M9, M10, M11, M19, M20 in
   application hook that always fails can only be removed by deleting the
   cell's deployments and then the cell; a global hook is replaced with
   `PutHook`. A failing global pre hook stops every create and update, so
-  alert on a rise in `*_FAILED`.
+  alert on a rise in `*_FAILED`. One on `TENANT_CREATE` or `ACCOUNT_CREATE`
+  stops every sign-up or account registration the same way (T45).
+- **Treat hooks on tenant and account events as holding customer data
+  (T46).** They receive every tenant's id and name and every account's id,
+  owner and admitted applications, never an external id.
 
 ### Identity (M9)
 

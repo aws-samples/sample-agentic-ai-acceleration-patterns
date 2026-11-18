@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-11-10
 - Amends: ADR-0012, ADR-0013
-- Amended by: ADR-0044
+- Amended by: ADR-0044, ADR-0045
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -28,3 +28,5 @@ The spec gains §4.1 (Application), §5.4 (application operations) and a fourth 
 **Amended by ADR-0039 (2026-11-12):** the application also holds parameter declarations. They sit outside the definition and are never stamped: requests are validated against the application's current declarations, whichever cell a deployment lives in.
 
 **Amended by ADR-0044 (2026-11-17):** the definition also holds `hooks`, at most five, stamped onto each new cell with the rest. An absent `hooks` on `PutApplication` keeps the current list and `[]` clears it. The application's source and script paths are held to the hook charsets, so a re-put of a value outside them is a 400; cells stamped before keep their stamp.
+
+**Amended by ADR-0045 (2026-11-18):** `PutApplication` and `DeleteApplication` answer 202 and start an `APPLICATION_CREATE`, `APPLICATION_UPDATE` or `APPLICATION_DELETE` event, which runs the global hooks and the application hooks of the definition being written (the stored ones on delete). A replace stages the definition, the strategy and any sent list in `pending`; the live definition, the one new cells are stamped from, changes only when the workflow commits after the pre hooks. `PutApplication`'s write is conditional on every path, on the status it read. `DeleteApplication` is a conditional move to `DELETING` on `cellCount = 0`, and the new-cell claim requires the application to be live. An application hook may not name a `TENANT_*` or `ACCOUNT_*` event (400).

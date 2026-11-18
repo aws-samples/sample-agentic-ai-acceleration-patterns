@@ -1,6 +1,6 @@
 # ADR-0045: Run hooks on application, tenant and account events
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Amends: ADR-0005, ADR-0024, ADR-0032, ADR-0037, ADR-0044
 - Deciders: Dave Roberts (SA)
