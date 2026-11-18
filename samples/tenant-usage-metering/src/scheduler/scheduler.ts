@@ -18,7 +18,7 @@
  */
 
 import { type SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
-import { DeleteMessageCommand, GetQueueAttributesCommand, ReceiveMessageCommand, type SQSClient } from '@aws-sdk/client-sqs';
+import { ChangeMessageVisibilityCommand, DeleteMessageCommand, GetQueueAttributesCommand, ReceiveMessageCommand, type SQSClient } from '@aws-sdk/client-sqs';
 import { BatchGetCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { S3Event } from 'aws-lambda';
 import { ulid } from 'ulid';
@@ -254,6 +254,7 @@ export class Scheduler {
   private async replayTrackerFailures(): Promise<{ replayed: number; stuckHours: Set<string>; stuckMessages: number }> {
     let replayed = 0;
     const stuck = new Set<string>();
+    const receipts: string[] = [];
     const stuckHours = new Set<string>();
     while (replayed < MAX_REPLAYS_PER_RUN) {
       const out = await this.deps.sqs.send(
@@ -285,6 +286,7 @@ export class Scheduler {
           // A failure that names no hour is not counted as known, so it holds back every close.
           if (hours.length > 0) {
             stuck.add(message.MessageId ?? message.ReceiptHandle ?? '');
+            receipts.push(message.ReceiptHandle!);
           }
           for (const hour of hours) {
             stuckHours.add(hour);
@@ -292,6 +294,12 @@ export class Scheduler {
           log.error('tracker failure not replayed', { errorType: errorName(error) });
         }
       }
+    }
+    // Visible again for the next run, which then gates only their hours (review v4 #1).
+    for (const receipt of receipts) {
+      await this.deps.sqs
+        .send(new ChangeMessageVisibilityCommand({ QueueUrl: this.deps.trackerFailureQueueUrl, ReceiptHandle: receipt, VisibilityTimeout: 0 }))
+        .catch(() => undefined);
     }
     return { replayed, stuckHours, stuckMessages: stuck.size };
   }

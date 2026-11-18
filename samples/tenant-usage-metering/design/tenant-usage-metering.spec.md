@@ -184,8 +184,9 @@ stores nothing (P-8).
 Registry reads are cached in the function for 60 seconds. A deleted or
 closed registration therefore stops admitting within 60 seconds. Before
 it refuses an event `TENANT_NOT_IN_CELL` or `REGISTRATION_CLOSED`, the
-function reads the emitter and that binding once more, past the cache, so
-a registration a hook has just made or re-activated admits at once. A
+function reads the emitter and that binding once more, past the cache (at
+most once every 5 seconds per key), so a registration a hook has just made
+or re-activated admits within 5 seconds. A
 cached miss of an unregistered role is not re-read: that is the flood
 path.
 
