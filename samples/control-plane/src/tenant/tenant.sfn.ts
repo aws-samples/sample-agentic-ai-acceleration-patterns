@@ -835,7 +835,10 @@ export class ProvisioningWorkflow extends Construct {
       }),
     );
     // The count of skipped delete hooks (R-46, T42). PutMetricData has no
-    // resource-level permission; the namespace condition scopes it.
+    // resource-level permission, so the resource is `*` (the ProtoShield
+    // iam-least-privilege finding of scan cp-0045-1); the condition limits
+    // it to the one fixed namespace the workflow writes, `<fleet>/hooks`
+    // (hookMetricNamespace), asserted in test/tenant/hook-workflow.test.ts.
     this.stateMachine.addToRolePolicy(
       new iam.PolicyStatement({
         sid: 'CountSkippedHooks',

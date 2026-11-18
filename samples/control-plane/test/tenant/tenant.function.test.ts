@@ -39,7 +39,23 @@ jest.mock('@aws-sdk/client-sfn', () => {
   };
 });
 
-import { handler } from '../../src/tenant/tenant.function';
+// The HTTP handlers the Step Functions clients are built with, by their options.
+const httpHandlerOptions: unknown[] = [];
+jest.mock('@smithy/node-http-handler', () => {
+  const actual = jest.requireActual('@smithy/node-http-handler');
+  return {
+    ...actual,
+    NodeHttpHandler: class extends actual.NodeHttpHandler {
+      constructor(options: unknown) {
+        super(options);
+        httpHandlerOptions.push(options);
+      }
+    },
+  };
+});
+
+import { API_FUNCTION_TIMEOUT_SECONDS } from '../../src/tenant/tenant.cdk';
+import { handler, SFN_CONNECTION_TIMEOUT_MS, SFN_REQUEST_TIMEOUT_MS } from '../../src/tenant/tenant.function';
 
 function event(
   method: string,
@@ -94,5 +110,23 @@ test('a reader read reaches the service', async () => {
 });
 
 test('a record event\'s StartExecution gets its own client with no SDK retry; the other calls keep the default (R-51)', () => {
-  expect(sfnClientOptions).toEqual([{}, { maxAttempts: 1 }]);
+  expect(sfnClientOptions).toEqual([
+    { requestHandler: expect.any(Object) },
+    { maxAttempts: 1, requestHandler: expect.any(Object) },
+  ]);
+});
+
+test('both Step Functions clients bound connect and answer time, so an unknown start is classified and compensated inside the function timeout (R-51)', () => {
+  const options = sfnClientOptions as Array<{ requestHandler: unknown }>;
+  expect(options[0].requestHandler).not.toBe(options[1].requestHandler);
+  // Other SDK clients build their default handler with no options.
+  expect(httpHandlerOptions.filter((handlerOptions) => handlerOptions !== undefined)).toEqual([
+    { connectionTimeout: SFN_CONNECTION_TIMEOUT_MS, requestTimeout: SFN_REQUEST_TIMEOUT_MS },
+    { connectionTimeout: SFN_CONNECTION_TIMEOUT_MS, requestTimeout: SFN_REQUEST_TIMEOUT_MS },
+  ]);
+  // Worst case of an unknown start: the start, three DescribeExecution
+  // attempts and the second start, each at the full timeouts, with at least
+  // a third of the function timeout left for the DynamoDB calls around them.
+  const stepFunctionsMs = 5 * (SFN_CONNECTION_TIMEOUT_MS + SFN_REQUEST_TIMEOUT_MS) + 1_000;
+  expect(stepFunctionsMs).toBeLessThanOrEqual((API_FUNCTION_TIMEOUT_SECONDS * 1_000 * 2) / 3);
 });

@@ -661,7 +661,7 @@ Supplied at deployment time, validated at synthesis/deploy.
 | `allowedRoles` (optional, R-36) | role claim values that get the operator grant; non-empty. Default `["operator"]`. Every role value in either list matches `[A-Za-z0-9:._-]{1,64}`, so it survives the comma-separated environment variable |
 | `readerRoles` (optional, R-36, [ADR-042](../adr/0042-a-read-only-role-beside-the-operator.md)) | role claim values that get the reader grant. Default: none, so no reader is admitted until the deployer names one. A value in both lists MUST fail synth. Use a namespaced value (`control-plane:reader`), not a word a broader issuer may already mint (`reader`, `viewer`) (T2, T20) |
 | `tenantBuildManagedPolicyArns` (optional, [ADR-022](../adr/0022-attach-deployer-supplied-managed-policies-to-the-tenant-build-role.md)) | array of customer-managed IAM policy ARNs (`arn:<partition>:iam::<account>:policy/...`), each in the stack's own partition and account; synth MUST fail otherwise. Attached to the tenant provisioning role the stack installs in its own account. Default: none |
-| `globalHookManagedPolicyArns` (optional, R-41, [ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md)) | array of customer-managed IAM policy ARNs, validated exactly as `tenantBuildManagedPolicyArns` (the stack's own partition and account; synth MUST fail otherwise). Attached to `<fleet>-global-hook`, the role every global hook runs under. Default: none, so a global hook can write its logs, read its source and nothing else |
+| `globalHookManagedPolicyArns` (optional, R-41, [ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md)) | array of customer-managed IAM policy ARNs, validated exactly as `tenantBuildManagedPolicyArns` (the stack's own partition and account; synth MUST fail otherwise). Attached to `<fleet>-global-hook`, the role every global hook runs under. Default: none, so a global hook can write its logs and nothing else. The stack grants no read on a hook source: a source that needs one (an S3 location, a private repository) gets it from the deployer, as the provisioning projects do (N-6), for example through a policy in this list |
 | `appHookManagedPolicyArns` (optional, R-41) | as above; attached to `<fleet>-app-hook`, the role every application hook runs under. An ARN in both lists MUST fail synth, so no policy reaches both scopes by accident (T41) |
 
 Neither applications, accounts nor global hooks are stack inputs: all
@@ -1196,7 +1196,7 @@ the hook operations are synchronous and fire no hooks.
 
 | Op | HTTP | Code | Contract |
 |---|---|---|---|
-| `PutApplication` | `PUT /applications/{applicationId}` | **202** | Create-or-replace, staged (R-48). Input `{source, cellScripts, tenantScripts, maxTenants, hooks?, placementStrategy?, parameters?, cellParameters?}` — the definition of §4.1 plus the strategy and both sets of parameter declarations, validated as a whole (400 on a missing script path, a source field or script path outside its charset (§4.1), a malformed source, `maxTenants < 1`, an unknown strategy, an id outside `[a-z0-9-]{1,32}`, a parameter name outside `[A-Z][A-Z0-9_]{0,63}`, a duplicate name within or across the two lists, more than 20 declarations in either list, a `default` on a required parameter, a cell parameter without a `default`, or a hook definition that fails R-39, an application hook on a `TENANT_*` or `ACCOUNT_*` event included). A hook source whose ref is not a full commit SHA is logged with a warning naming the application and the hook, as the application's own source is. On an existing application the definition fields other than `hooks`, and the strategy, are replaced. The two declaration lists are replaced only when sent: an absent `parameters` or `cellParameters` **keeps** the current list, and an empty list `[]` clears it, so a `PutApplication` that only changes `maxTenants` cannot silently drop every required check and default. On a new application an absent list declares none. `hooks` follows the same rule: absent keeps the current list, `[]` clears it, and a changed list reaches only cells created afterwards (P-4). Existing cells and deployments keep their stored values. A cell parameter added since reaches each cell's next build as its default. A newly required parameter makes the next `UpdateDeployment` of every deployment lacking it a 400 until the operator supplies the value; it never blocks a `DeleteDeployment`. `cellCount` is untouched (R-29). The "one name in one list" check runs against the lists the request sent plus any list it keeps. The global hooks are read before the write (R-40). The write's path comes from a strongly consistent read: no record, a create, which inserts the record `CREATING` (`attribute_not_exists`); `CREATE_FAILED`, a re-put, which writes the values into the record and moves it back to `CREATING` (`status = CREATE_FAILED`); a live record (R-47), a replace, which writes the values into `pending` and moves it to `UPDATING` (status `ACTIVE` or `UPDATE_FAILED`, or absent), the live definition unchanged until the commit; `CREATING`, `UPDATING`, `DELETING` or `DELETE_FAILED`, a 409. One write on every path, with `cellCount` and `createdAt` set through `if_not_exists`, so a re-put never resets them. When a declaration list is kept, the write is also conditioned on that list being exactly as the request read it (`attribute_not_exists` when the attribute was absent, equality when present, an empty `[]` included; absent and `[]` are different reads), so two concurrent puts that each send one list cannot store one name in both; a failed condition → 409, retryable. A kept `hooks` list adds no condition: a put that keeps it writes no hook attribute, and hooks share no invariant with another list. The condition is never on `updatedAt`, which cell creates and deletes also write. Cells already created keep their stamp (P-4). The workflow then runs `APPLICATION_CREATE` or `APPLICATION_UPDATE` (§8.4), and `GetApplication` polls it. |
+| `PutApplication` | `PUT /applications/{applicationId}` | **202** | Create-or-replace, staged (R-48). Input `{source, cellScripts, tenantScripts, maxTenants, hooks?, placementStrategy?, parameters?, cellParameters?}` — the definition of §4.1 plus the strategy and both sets of parameter declarations, validated as a whole (400 on a missing script path, a source field or script path outside its charset (§4.1), a malformed source, `maxTenants < 1`, an unknown strategy, an id outside `[a-z0-9-]{1,32}`, a parameter name outside `[A-Z][A-Z0-9_]{0,63}`, a duplicate name within or across the two lists, more than 20 declarations in either list, a `default` on a required parameter, a cell parameter without a `default`, or a hook definition that fails R-39, an application hook on a `TENANT_*` or `ACCOUNT_*` event included). A hook source whose ref is not a full commit SHA is logged with a warning naming the application and the hook, as the application's own source is. On an existing application the definition fields other than `hooks`, and the strategy, are replaced. The two declaration lists are replaced only when sent: an absent `parameters` or `cellParameters` **keeps** the current list, and an empty list `[]` clears it, so a `PutApplication` that only changes `maxTenants` cannot silently drop every required check and default. On a new application an absent list declares none. `hooks` follows the same rule: absent keeps the current list, `[]` clears it, and a changed list reaches only cells created afterwards (P-4). Existing cells and deployments keep their stored values. A cell parameter added since reaches each cell's next build as its default. A newly required parameter makes the next `UpdateDeployment` of every deployment lacking it a 400 until the operator supplies the value; it never blocks a `DeleteDeployment`. `cellCount` is untouched (R-29). The "one name in one list" check runs against the lists the request sent plus any list it keeps. The global hooks are read before the write (R-40). The write's path comes from a strongly consistent read: no record, a create, which inserts the record `CREATING` (`attribute_not_exists`); `CREATE_FAILED`, a re-put, which writes the values into the record and moves it back to `CREATING` (`status = CREATE_FAILED`); a live record (R-47), a replace, which writes the values into `pending` and moves it to `UPDATING` (status `ACTIVE` or `UPDATE_FAILED`, or absent), the live definition unchanged until the commit; `CREATING`, `UPDATING`, `DELETING` or `DELETE_FAILED`, a 409. One write on every path, with `cellCount` and `createdAt` set through `if_not_exists`, so a re-put never resets them. When a declaration list is kept, the write is also conditioned on that list being exactly as the request read it (`attribute_not_exists` when the attribute was absent, equality when present, an empty `[]` included; absent and `[]` are different reads), so two concurrent puts that each send one list cannot store one name in both; a failed condition → 409, retryable. A kept `hooks` list adds no condition of its own: a put that keeps it writes no hook attribute, and hooks share no invariant with another list. The re-put and the replace are also conditioned on the `operationId` the request read (`attribute_not_exists` when it read none), because the event runs the hooks of the record it read when the request keeps them (R-40): a put accepted since the read would otherwise let this one gate on a list that put replaced; a failed condition → 409, retryable (R-48, R-14). The condition is never on `updatedAt`, which cell creates and deletes also write. Cells already created keep their stamp (P-4). The workflow then runs `APPLICATION_CREATE` or `APPLICATION_UPDATE` (§8.4), and `GetApplication` polls it. |
 | `GetApplication` | `GET /applications/{applicationId}` | 200 | The polling endpoint: the definition, `placementStrategy`, both sets of parameter declarations, `cellCount`, `status`, `statusReason`, `lastGlobalHooks`, and `pending` while a replace is staged. 404 if unregistered. |
 | `ListApplications` | `GET /applications` | 200 | Paginated: `applicationId`, `maxTenants`, `placementStrategy`, `cellCount`, `status` per application. |
 | `DeleteApplication` | `DELETE /applications/{applicationId}` | **202** | **Empty applications only** (P-10): one conditional write moves the application to `DELETING` (`attribute_exists AND cellCount = 0` and status `ACTIVE` or a `*_FAILED` status, R-49), the counterpart of the cell-slot claim, which needs a live application (§7.1); condition failure → 409. The workflow runs the `APPLICATION_DELETE` pre hooks (global, then the stored application hooks), deletes the record, then runs the post hooks. Accounts that name the application in `applicationIds` are not touched (§4.5). |
@@ -1261,7 +1261,8 @@ start (§8.4).
   conditional on non-existence. A re-put of a `CREATE_FAILED`
   application or account MUST write the new values into the record and
   move it back to `CREATING`, conditional on `status = CREATE_FAILED`
-  (and `owner = :owner` for an account). A `CREATING` record is not
+  (and `owner = :owner` for an account, the `operationId` as read for
+  an application, below). A `CREATING` record is not
   live, so its values are in force only from the terminal write.
 - An update (`UpdateTenant`, and `PutApplication` or `PutAccount` on a
   live record) MUST write the request's validated values into a
@@ -1269,7 +1270,14 @@ start (§8.4).
   conditional write: the status guard (`ACTIVE` or `UPDATE_FAILED`, or
   absent) plus the conditions the operation already had (the kept-list
   conditions of `PutApplication`, §5.5; `owner = :owner` on
-  `PutAccount`, R-24). The live fields MUST NOT change in that write,
+  `PutAccount`, R-24) and, on `UpdateTenant` and `PutApplication`, the
+  `operationId` as the request read it (`attribute_not_exists` when it
+  read none). `UpdateTenant` stages a merge of the `name` and
+  `description` it read, and a `PutApplication` that keeps `hooks` runs
+  the hooks of the record it read (R-40), so an operation accepted since
+  the read MUST fail the write rather than stage a stale merge or gate
+  on a replaced hook list; a `PutApplication` re-put carries the same
+  condition. The live fields MUST NOT change in that write,
   except an account's `externalId` (below); the workflow commits
   `pending` after the pre hooks (R-50). A pre hook failure ends
   `UPDATE_FAILED`, removes `pending` and leaves the old values live. A
@@ -1403,7 +1411,11 @@ item that failed shows a changed `parameters` (or kept list) under a
 status the operation admits, or the status `CREATING` or `UPDATING`
 (in flight, and it ends in a state the update admits). Every other status
 (`CREATE_FAILED`, `DELETE_FAILED`, `DELETING`) is a 409 without a hint: a
-retry cannot succeed, and the remedy is a delete. The merge is a single
+retry cannot succeed, and the remedy is a delete. The `operationId`-as-read
+condition of `UpdateTenant` and `PutApplication` (R-48) follows the same
+rule: an item that failed it under a status the operation admits shows
+that another operation was accepted since the read, a 409 with a retry
+hint, as is `CREATING` or `UPDATING`. The merge is a single
 conditional `UpdateItem` on the record being updated; the service
 classifies from the item returned by `ReturnValuesOnConditionCheckFailure:
 ALL_OLD`, never from a second read, so the label describes the state that
@@ -1630,9 +1642,11 @@ application hook only in the application hook project. An application
 hook therefore cannot use what a global hook holds. Each hook role
 trusts only `codebuild.amazonaws.com`, conditioned on its own project
 (`aws:SourceArn`, H-7), and the stack grants it only its project's
-logs, read access to its source, and the customer-managed policies the
-deployer attaches (`globalHookManagedPolicyArns`,
-`appHookManagedPolicyArns`, §3.3). The stack grants neither role
+logs and the customer-managed policies the deployer attaches
+(`globalHookManagedPolicyArns`, `appHookManagedPolicyArns`, §3.3). The
+stack grants no read on a hook source: the deployer grants it, as for
+the provisioning projects (N-6), for example in a policy of one of
+those two inputs. The stack grants neither role
 `sts:AssumeRole` on `<fleet>-cell-provisioning` or
 `<fleet>-tenant-provisioning`, and no pair trusts either role (§6.4),
 so for a direct AssumeRole the trust policy is the gate whatever a
@@ -1862,15 +1876,20 @@ provisioning role in the stack's own account (§3.3). No denied role
 needs a denied action. The deny does not close every path. An attached
 grant of `sts:AssumeRole` on another role in the control plane account
 (an admin role or a CDK bootstrap role), or of CloudFormation writes
-through a privileged execution role, still reaches the pair. So do
-admin writes on the vendor IdP, which can create a user or a client
+through a privileged execution role, still reaches the pair. So does
+an attached grant to create a role: `iam:CreateRole` with a policy
+write on the new role (`iam:PutRolePolicy` or `iam:AttachRolePolicy`)
+and `iam:PassRole` on it mints a role the deny does not name, which
+can hold `states:StartExecution` on the workflow and run through a
+Lambda function or a CodeBuild project the hook role also creates. So
+do admin writes on the vendor IdP, which can create a user or a client
 that carries the operator role, and writes to the location of a
 registered script or hook source (an S3 bucket or a repository), which
 change what the next provisioning build runs with the pair or what a
 hook runs with its role. So does a principal outside the denied roles
 that the deployer grants a denied action. These stay the deployer's
-choice: grant no hook role write access to the vendor IdP or to any
-script or hook source (T41, M30).
+choice: grant no hook role IAM role creation, and no write access to
+the vendor IdP or to any script or hook source (T41, M30).
 
 The hook buildspec MUST hand every variable of R-42 to the hook script
 as an environment variable only and run it as `bash "$HOOK_SCRIPT"`,
@@ -2954,10 +2973,16 @@ of R-40; a tenant or account event runs no application hook.
   write and without running another hook. On a delete, a failure
   write whose condition fails follows a commit and an absence probe
   that both failed, so the delete either landed (the probe ran out of
-  retries) or another operation took the record over; the execution
-  MUST then run the `POST` hooks without another write, so cleanup
-  stays reachable (P-9), which delete hooks tolerate running again
-  (R-46).
+  retries), or another operation took the record over, or an earlier
+  attempt of the same failure write landed and only its response was
+  lost (the record is now `DELETE_FAILED` with this `operationId`, and
+  still there); the execution MUST then run the `POST` hooks without
+  another write, so cleanup stays reachable (P-9). The third case runs
+  the delete hooks for a record that was not deleted. It is tolerated,
+  not told apart by another probe: it needs a commit that ran out of
+  retries and a lost response, and delete hooks tolerate running again
+  (R-46), so a later `DeleteApplication`, `DeleteTenant` or
+  `DeleteAccount` of the `DELETE_FAILED` record runs them once more.
 
 The workflow MUST NOT re-read the record to decide what to do (R-20):
 the event, the hooks in run order, the hook environment of R-42 and the
@@ -3006,6 +3031,15 @@ Functions answers a repeated start with the same name and input with
 the running Standard execution, and with `ExecutionAlreadyExists` once
 that execution has closed, so the service MAY retry the start under
 the same name, or call `DescribeExecution`, before it decides.
+
+The classification and the compensation MUST fit inside the API
+function's own timeout, or the invocation ends with the record in
+flight and no execution (T47). The reference values: an API function
+timeout of 25 s, at or below the 29 s the drain of R-41 counts on, and
+a 1 s connection and 2 s answer timeout on every Step Functions call,
+so the start, up to three `DescribeExecution` attempts and the second
+start take at most about 16 s and leave about 9 s for the reads and
+writes around them.
 
 - A fresh insert (`CreateTenant`, and `PutApplication` or `PutAccount`
   for an id that had no record) whose start was refused MUST be

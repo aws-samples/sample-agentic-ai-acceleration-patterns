@@ -2593,7 +2593,7 @@ describe('PutApplication parameter declarations (§5.5, R-29, ADR-039, ADR-040)'
     expect(write.expressionAttributeValues[':pending']).not.toHaveProperty('parameters');
     expect(write.expressionAttributeValues[':pending']).not.toHaveProperty('cellParameters');
     expect(write.conditionExpression).toBe(
-      '(attribute_not_exists(#status) OR #status IN (:active, :updateFailed))'
+      '(attribute_not_exists(#status) OR #status IN (:active, :updateFailed)) AND attribute_not_exists(#operationId)'
       + ' AND #parameters = :read_parameters AND #cellParameters = :read_cellParameters',
     );
     expect(write.expressionAttributeValues[':read_parameters']).toBe(declaredApplication.parameters);

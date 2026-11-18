@@ -470,12 +470,18 @@ Two more optional inputs give the hook roles what their hooks need:
 hook runs under (spec R-41, ADR-044). Both are validated as
 `tenantBuildManagedPolicyArns` is (the stack's own partition and account),
 and an ARN in both lists fails synth, so no policy reaches both scopes.
-Without them a hook role can write its logs, read its source and nothing
-else. Every hook of a scope shares its role, so a policy attached for one
+Without them a hook role can write its logs and nothing else. The stack
+grants no read on a hook source: when a hook's source needs one (an S3
+location, a private repository), grant it yourself, as for the provisioning
+projects (spec N-6), for example in a policy of one of these two lists.
+Every hook of a scope shares its role, so a policy attached for one
 hook is held by all of them. An explicit deny on both hook roles, both build
 roles and the home account's pair (spec R-41) keeps any attached policy from
-reaching the control plane's own workflow, projects, table, API, functions
-or roles:
+changing or starting the control plane's own workflow, projects, table, API,
+functions or roles. It does not stop reads: table reads and
+`states:DescribeExecution` or `codebuild:BatchGetBuilds` on the control
+plane's executions and builds stay open to an attached policy, and those
+carry an account's `externalId` (spec N-10):
 
 ```bash
 npx cdk deploy \
@@ -861,8 +867,10 @@ generated from it (`smithy build`).
   starting or changing the projects or the workflow, changing or invoking
   the API function, writing the REST API and writing the table (T41, M30).
   It does not cover an attached `sts:AssumeRole` on another role in the
-  account, CloudFormation writes, admin writes on the vendor IdP or writes
-  to a script or hook source; grant none of those to a hook role.
+  account, CloudFormation writes, IAM role creation (`iam:CreateRole` with
+  a policy write and `iam:PassRole` on the new role, which mints a role the
+  deny does not name), admin writes on the vendor IdP or writes to a script
+  or hook source; grant none of those to a hook role.
 - Private source repos need a CodeConnections/credentials setup on the
   CodeBuild projects, hook projects included; the sample assumes a public
   repo or an S3 source.
@@ -985,8 +993,8 @@ application's cells (threat T5, the highest-consequence open item).
       `appHookManagedPolicyArns` the same way (T41, M30).** Every hook of a
       scope holds what any hook of that scope needs, in the vendor's most
       sensitive account. Grant no hook role `sts:AssumeRole` on another
-      role, CloudFormation writes, admin writes on the vendor IdP or write
-      access to any script or hook source.
+      role, CloudFormation writes, IAM role creation, admin writes on the
+      vendor IdP or write access to any script or hook source.
 - [ ] **Give the skipped-hook alarm an action (T42, M31).** A delete hook
       skipped after its retries can leave a route, a meter or an inventory
       entry behind for a record that is gone; the sample's alarm has no

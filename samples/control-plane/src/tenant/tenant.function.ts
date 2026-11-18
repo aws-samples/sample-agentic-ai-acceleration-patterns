@@ -5,6 +5,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { SFNClient } from '@aws-sdk/client-sfn';
 import { STSClient } from '@aws-sdk/client-sts';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { convertEvent, convertVersion1Response } from '@smithy/server-apigateway';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { AccountDataModel, AccountItem, AccountRecord } from './account.data-model';
@@ -34,6 +35,28 @@ import { getTenantServiceServiceHandler } from '../smithy/source/typescript-ssdk
  * No JWT decoding, no env-var conditionals, no business logic. Everything
  * below is initialised once at cold start.
  */
+
+/**
+ * Socket timeouts for both Step Functions clients (R-51). The API function
+ * runs for at most 25 s (`tenant.cdk.ts`). An unknown record start makes at
+ * most five Step Functions attempts: the start (one attempt),
+ * `DescribeExecution` (the SDK default of three attempts, with sub-second
+ * backoff) and the second start (one attempt). At 1 s to connect plus 2 s
+ * for the answer each, that is at most about 16 s, which leaves about 9 s
+ * of the 25 s for the reads and the staging write before the start and the
+ * compensation write and read after it. Without them the SDK waits on a
+ * slow call with no bound, and the invocation can end before R-51
+ * classifies and compensates the start.
+ */
+export const SFN_CONNECTION_TIMEOUT_MS = 1_000;
+export const SFN_REQUEST_TIMEOUT_MS = 2_000;
+
+function sfnRequestHandler(): NodeHttpHandler {
+  return new NodeHttpHandler({
+    connectionTimeout: SFN_CONNECTION_TIMEOUT_MS,
+    requestTimeout: SFN_REQUEST_TIMEOUT_MS,
+  });
+}
 
 const tableName = requireEnv('TABLE_NAME');
 // ADR-025: the fleet name derives every provisioning role ARN; the partition
@@ -103,9 +126,9 @@ const config: TenantServiceConfig = {
   // credentials — registration fails closed when the account is not ready.
   handshake: stsHandshakeProbe(new STSClient({}), partition, fleetName),
   stateMachineArn: requireEnv('STATE_MACHINE_ARN'),
-  sfnClient: new SFNClient({}),
+  sfnClient: new SFNClient({ requestHandler: sfnRequestHandler() }),
   // R-51: one attempt, so a pre-creation error on a record event's start is a definite refusal.
-  recordStartClient: new SFNClient({ maxAttempts: 1 }),
+  recordStartClient: new SFNClient({ maxAttempts: 1, requestHandler: sfnRequestHandler() }),
 };
 
 // R-36 second wall: every operation checks the caller's grant by name

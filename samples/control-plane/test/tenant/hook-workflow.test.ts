@@ -91,6 +91,10 @@ describe('the workflow definition (R-41, R-46, R-23)', () => {
     expect(actions).not.toContain('iam:PassRole');
     const metric = statements.find((s) => s.Sid === 'CountSkippedHooks');
     expect(metric.Condition.StringEquals['cloudwatch:namespace']).toBe(`${FLEET}/hooks`);
+    // Every PutMetricData grant of the stack is held to that one namespace.
+    const putMetric = statements.filter((s) => ([] as string[]).concat(s.Action).includes('cloudwatch:PutMetricData'));
+    expect(putMetric).toHaveLength(1);
+    expect(putMetric[0].Condition).toEqual({ StringEquals: { 'cloudwatch:namespace': `${FLEET}/hooks` } });
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
       Namespace: `${FLEET}/hooks`,
       MetricName: 'HookSkipped',

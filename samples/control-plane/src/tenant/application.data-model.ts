@@ -5,6 +5,7 @@ import { StoredLastGlobalHook, readLastGlobalHooks } from './hook.data-model';
 import { HookDefinition, LastGlobalHookEntry } from './hook.types';
 import { StoredCellParameterDeclaration, StoredParameterDeclaration } from './parameters';
 import { readRecordStatus } from './record-event.types';
+import { operationIdAsRead } from './record-writes';
 import { DataModel, DynamoDBItem, GSI1_INDEX_NAME } from '../shared/data-model';
 import { KeyBuilder } from '../shared/key-builder';
 import { GsiQuery, ItemKey, ItemUpdate } from '../shared/repository';
@@ -169,17 +170,22 @@ export type PutApplicationPath = 'CREATE' | 'RE_PUT' | 'REPLACE';
  * request keeps conditions the write on that list being exactly as `read`
  * — `attribute_not_exists` when the attribute was absent, equality when
  * present, `[]` included — so two concurrent puts that each send one list
- * cannot store one name in both. A kept `hooks` list adds no condition:
- * hooks share no invariant with another list. Never conditioned on
- * `updatedAt`, which cell creates and deletes write too.
+ * cannot store one name in both. A kept `hooks` list adds no condition of
+ * its own: hooks share no invariant with another list. `RE_PUT` and
+ * `REPLACE` are also conditioned on the `operationId` as read
+ * (`operationIdAsRead`, R-48): the event's application hooks come from the
+ * read record when the request keeps them (R-40), so a put another request
+ * accepted since the read must refuse this one rather than let it run a
+ * hook list that put replaced. Never conditioned on `updatedAt`, which cell
+ * creates and deletes write too.
  */
 export function putApplicationUpdate(input: {
   readonly path: PutApplicationPath;
   readonly applicationId: string;
   readonly operationId: string;
   readonly values: ApplicationPending;
-  /** The record the path was chosen from; its lists are the kept lists' read values. */
-  readonly read?: Pick<ApplicationRecord, 'parameters' | 'cellParameters'>;
+  /** The record the path was chosen from; its lists are the kept lists' read values, its `operationId` the one read. */
+  readonly read?: Pick<ApplicationRecord, 'parameters' | 'cellParameters' | 'operationId'>;
   readonly now: string;
 }): ItemUpdate {
   const { path, values } = input;
@@ -249,6 +255,9 @@ export function putApplicationUpdate(input: {
   }
 
   if (path !== 'CREATE') {
+    const sameOperation = operationIdAsRead(input.read?.operationId);
+    conditions.push(sameOperation.conditionExpression);
+    Object.assign(exprValues, sameOperation.expressionAttributeValues);
     for (const attribute of ['parameters', 'cellParameters'] as const) {
       if (values[attribute] !== undefined) {
         continue;

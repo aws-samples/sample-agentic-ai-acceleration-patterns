@@ -21,7 +21,7 @@ import {
   DENIED_LAMBDA_WRITES,
 } from '../../src/tenant/control-plane-deny';
 import { validateHookManagedPolicyArns } from '../../src/tenant/hook.infra-validation';
-import { TenantStack, TenantStackProps } from '../../src/tenant/tenant.cdk';
+import { API_FUNCTION_TIMEOUT_SECONDS, TenantStack, TenantStackProps } from '../../src/tenant/tenant.cdk';
 
 // Infrastructure of vendor hooks (spec R-41, §3.3, §10 unit assertions, ADR-044):
 // the two hook roles, the build roles' trust, the explicit deny.
@@ -216,6 +216,16 @@ describe('hook roles (spec R-41, H-7)', () => {
         expect(text).toContain(`:execution:${FLEET}-workflow:*`);
       }
     }
+  });
+
+  test('the API function runs for 25 s, at or below the 29 s integration timeout the R-41 drain counts on (spec R-51)', () => {
+    const apiId = roleByName(template, `${FLEET}-api`)[0];
+    const functions = Object.values(template.findResources('AWS::Lambda::Function') as Resources)
+      .filter((fn) => fn.Properties.Role?.['Fn::GetAtt']?.[0] === apiId);
+    expect(functions).toHaveLength(1);
+    expect(functions[0].Properties.Timeout).toBe(API_FUNCTION_TIMEOUT_SECONDS);
+    expect(API_FUNCTION_TIMEOUT_SECONDS).toBe(25);
+    expect(API_FUNCTION_TIMEOUT_SECONDS).toBeLessThanOrEqual(29);
   });
 });
 

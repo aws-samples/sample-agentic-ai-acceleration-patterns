@@ -141,6 +141,12 @@ export const GSI1_NAME = 'GSI1';
 export const GSI2_NAME = 'GSI2';
 /** GSI-3: per-application cell and deployment lookup (§4.7). */
 export const GSI3_NAME = 'GSI3';
+/**
+ * The API function's timeout (R-51): room for a record operation's start to
+ * be classified and compensated. At or below 29 s, the API's integration
+ * timeout, which the R-41 upgrade drain counts on.
+ */
+export const API_FUNCTION_TIMEOUT_SECONDS = 25;
 
 // Re-exported so existing imports of the input validators keep working.
 export {
@@ -321,6 +327,16 @@ export class TenantStack extends Stack {
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_24_X,
       role: apiRole,
+      // R-51: a record operation chains a consistent read, the hook query,
+      // the staging write and the start, and on an unknown start
+      // DescribeExecution, a second start, the compensation and a read; the
+      // 3 s Lambda default can end the call before the compensation runs.
+      // 25 s holds that chain with the Step Functions client timeouts of
+      // tenant.function.ts (at most about 16 s of Step Functions calls). It
+      // MUST stay at or below 29 s, the API's integration timeout: the R-41
+      // upgrade drain waits the authorizer TTL plus the longer of the two
+      // (90 s with these values).
+      timeout: Duration.seconds(API_FUNCTION_TIMEOUT_SECONDS),
       // M15 (T13) — see AuthorizerFunction.
       logGroup: functionLogGroup(this, 'ApiFunctionLogs'),
       bundling: {

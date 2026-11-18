@@ -316,9 +316,9 @@ The hook projects run in the control plane account under two roles of
 their own, `<fleet>-global-hook` and `<fleet>-app-hook`
 (`src/tenant/tenant.cdk.ts`, `hookRole`). No pair trusts either role,
 neither is granted `sts:AssumeRole` on a pair, and each holds only its
-project's logs, read access to its source and the customer-managed
-policies the deployer attaches (`globalHookManagedPolicyArns`,
-`appHookManagedPolicyArns`). Both build roles and both hook roles trust
+project's logs and the customer-managed policies the deployer attaches
+(`globalHookManagedPolicyArns`, `appHookManagedPolicyArns`); read on a hook
+source is the deployer's grant, as for the provisioning projects (N-6). Both build roles and both hook roles trust
 CodeBuild only on their own project's `aws:SourceArn`. Those four roles and
 the home account's pair carry one standalone explicit deny (`src/tenant/control-plane-deny.ts`, the
 `ControlPlaneDeny` policy) on every grant that would lead back to the
@@ -1270,8 +1270,8 @@ and both hook inputs included) can grant those roles a denied action. The
 workflow and API roles carry none, because those actions are their own
 grants; the authorizer and API Gateway CloudWatch roles hold only logs.
 What the deny does not close (an attached `sts:AssumeRole` on another role
-in the account, CloudFormation writes through a privileged role, admin
-writes on the vendor IdP, writes to a script or hook source) is the
+in the account, CloudFormation writes through a privileged role, IAM role
+creation, admin writes on the vendor IdP, writes to a script or hook source) is the
 deployer's to withhold (threat model T41).
 
 **Environment.** A hook build gets `EVENT`, `PHASE`, `HOOK_ID`,

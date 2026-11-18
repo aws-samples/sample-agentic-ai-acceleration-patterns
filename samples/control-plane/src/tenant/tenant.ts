@@ -2935,7 +2935,7 @@ function putConflict(what: string, status: LifecycleStatus): ConflictError {
 function putApplicationFailure(what: string, failed: ApplicationRecord | undefined): ConflictError {
   if (failed === undefined || failed.status === 'CREATE_FAILED' || RECORD_UPDATABLE_STATUSES.includes(failed.status)) {
     return new ConflictError({
-      message: `${what} changed after this request read it (a parameter declaration list it keeps, or its status); re-read and ${RETRY_HINT}`,
+      message: `${what} changed after this request read it (a parameter declaration list it keeps, its status, or another accepted put); re-read and ${RETRY_HINT}`,
     });
   }
   return putConflict(what, failed.status);

@@ -510,6 +510,17 @@ new iam.ManagedPolicy(setup, 'AppHookTestPolicy', {
       actions: ['states:StartExecution'],
       resources: [`arn:${partition}:states:${region}:${accountA}:stateMachine:${fleetName}-workflow`],
     }),
+    // Step 16 needs this allow on the API function only, so the R-41 deny is
+    // shown to override it. It stays a pattern, and the ProtoShield
+    // iam-least-privilege finding on `function:*` (scan cp-0045-1) is
+    // accepted for this test-only policy: the policy must exist before the
+    // stack under test (the stack validates appHookManagedPolicyArns at
+    // synth and attaches the policy at deploy), and the API function has no
+    // physical name. CloudFormation generates it from the stack name, the
+    // logical id and a random suffix, truncated to 64 characters by a rule
+    // it does not document, so not even a `function:<fleet>-*` prefix is
+    // certain to match. The policy exists only for the run and goes with the
+    // setup stack.
     new iam.PolicyStatement({
       actions: ['lambda:InvokeFunction'],
       resources: [`arn:${partition}:lambda:${region}:${accountA}:function:*`],

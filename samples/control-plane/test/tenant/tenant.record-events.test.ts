@@ -622,8 +622,22 @@ describe('PutApplication paths (R-48)', () => {
     const update = jest.fn().mockResolvedValue(applicationRecord());
     const get = jest.fn().mockResolvedValue(status === undefined ? undefined : applicationRecord({ status }));
     await makeService({ applicationRepo: { get, update } }).PutApplication({ ...putApplicationInput, parameters: [], cellParameters: [] }, context);
-    expect(update.mock.calls[0][1].conditionExpression).toBe(condition);
+    const write = update.mock.calls[0][1];
+    // RE_PUT and REPLACE also hold the operationId as read (R-48, R-40).
+    expect(write.conditionExpression).toBe(status === undefined ? condition : `${condition} AND #operationId = :readOperationId`);
+    if (status !== undefined) {
+      expect(write.expressionAttributeValues[':readOperationId']).toBe(EARLIER_OP);
+    }
     expect(started().event).toBe(event);
+  });
+
+  test('a replace that keeps hooks runs the hooks of the record it read, and its write holds that record\'s operationId, so a put that commits other hooks in between refuses it (R-40, R-48)', async () => {
+    const readHooks = [hookDef('read')];
+    const update = jest.fn().mockResolvedValue(applicationRecord({ status: 'UPDATING' }));
+    const get = jest.fn().mockResolvedValue(applicationRecord({ hooks: readHooks as never }));
+    await makeService({ applicationRepo: { get, update } }).PutApplication({ ...putApplicationInput, parameters: [], cellParameters: [] }, context);
+    expect(update.mock.calls[0][1].conditionExpression).toContain('#operationId = :readOperationId');
+    expect(update.mock.calls[0][1].expressionAttributeValues[':readOperationId']).toBe(EARLIER_OP);
   });
 
   test('a replace stages every definition field and stores no live value; the commit names what pending holds', async () => {
@@ -673,6 +687,8 @@ describe('PutApplication paths (R-48)', () => {
     ['no item (deleted in between: the retry creates)', undefined, true],
     ['CREATE_FAILED (the retry re-puts)', applicationRecord({ status: 'CREATE_FAILED' }), true],
     ['ACTIVE with a changed kept list', applicationRecord({ parameters: [] }), true],
+    ['ACTIVE after another accepted put (operationId changed)', applicationRecord({ operationId: 'app-x-application-update-1763460000001-00000000' }), true],
+    ['UPDATE_FAILED after another accepted put', applicationRecord({ status: 'UPDATE_FAILED', operationId: 'app-x-application-update-1763460000001-00000000' }), true],
     ['UPDATING', applicationRecord({ status: 'UPDATING' }), true],
     ['DELETING', applicationRecord({ status: 'DELETING' }), false],
   ])('a write that loses its condition with ALL_OLD %s is a 409 classified by R-14', async (_name, current, hint) => {

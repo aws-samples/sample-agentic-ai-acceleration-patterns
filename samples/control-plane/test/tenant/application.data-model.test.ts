@@ -131,7 +131,7 @@ describe('putApplicationUpdate (R-29, R-48: one conditional write per path, neve
       values: { ...values, cellParameters: cellList },
       read: { parameters: tenantList, cellParameters: undefined },
     });
-    expect(update.conditionExpression).toBe('#status = :createFailed AND #parameters = :read_parameters');
+    expect(update.conditionExpression).toBe('#status = :createFailed AND attribute_not_exists(#operationId) AND #parameters = :read_parameters');
     expect(update.updateExpression).toContain('#cellParameters = :cellParameters');
     expect(update.updateExpression).toMatch(/ REMOVE #statusReason$/);
     expect(update.expressionAttributeValues[':status']).toBe('CREATING');
@@ -141,7 +141,7 @@ describe('putApplicationUpdate (R-29, R-48: one conditional write per path, neve
     const staged = { ...values, parameters: tenantList };
     const update = putApplicationUpdate({ ...base, path: 'REPLACE', values: staged, read: { parameters: [], cellParameters: [] } });
     expect(update.conditionExpression).toBe(
-      '(attribute_not_exists(#status) OR #status IN (:active, :updateFailed)) AND #cellParameters = :read_cellParameters',
+      '(attribute_not_exists(#status) OR #status IN (:active, :updateFailed)) AND attribute_not_exists(#operationId) AND #cellParameters = :read_cellParameters',
     );
     expect(update.expressionAttributeValues[':pending']).toBe(staged);
     expect(update.expressionAttributeValues[':read_cellParameters']).toEqual([]);
@@ -157,10 +157,29 @@ describe('putApplicationUpdate (R-29, R-48: one conditional write per path, neve
     expect(empty.expressionAttributeValues[':read_parameters']).toEqual([]);
   });
 
-  test('a kept hooks list adds no condition, and nothing is conditioned on updatedAt', () => {
+  test('a kept hooks list adds no condition of its own, and nothing is conditioned on updatedAt', () => {
     const update = putApplicationUpdate({ ...base, path: 'REPLACE', values: { ...values, parameters: [], cellParameters: [] }, read: {} });
-    expect(update.conditionExpression).toBe('(attribute_not_exists(#status) OR #status IN (:active, :updateFailed))');
+    expect(update.conditionExpression).toBe(
+      '(attribute_not_exists(#status) OR #status IN (:active, :updateFailed)) AND attribute_not_exists(#operationId)',
+    );
     expect(update.conditionExpression).not.toContain('updatedAt');
+  });
+
+  test.each(['RE_PUT', 'REPLACE'] as const)('%s is conditioned on the operationId as read, so a put accepted since the read refuses this one (R-48, R-40)', (path) => {
+    const read = { parameters: [], cellParameters: [], operationId: 'app-x-application-update-1763460000000-ffffffff' };
+    const update = putApplicationUpdate({ ...base, path, values: { ...values, parameters: [], cellParameters: [] }, read });
+    expect(update.conditionExpression).toContain('#operationId = :readOperationId');
+    expect(update.expressionAttributeValues[':readOperationId']).toBe(read.operationId);
+    expect(update.expressionAttributeNames?.['#operationId']).toBe('operationId');
+    expectPlaceholdersMatch(update);
+    // A record from before ADR-045 has none: the write requires it still has none.
+    const legacy = putApplicationUpdate({ ...base, path, values: { ...values, parameters: [], cellParameters: [] }, read: {} });
+    expect(legacy.conditionExpression).toContain('attribute_not_exists(#operationId)');
+    expect(legacy.expressionAttributeValues[':readOperationId']).toBeUndefined();
+  });
+
+  test('CREATE carries no operationId condition: there is no record to read one from', () => {
+    expect(putApplicationUpdate({ ...base, path: 'CREATE' }).conditionExpression).not.toContain('#operationId');
   });
 });
 
