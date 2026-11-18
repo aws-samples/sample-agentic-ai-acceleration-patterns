@@ -265,30 +265,39 @@ known from the first call, and a loop polls that one build with
 `batchGetBuilds` every 60 seconds, through the SDK integration because
 Step Functions has no optimized one for it, keeping only its id,
 status, phase timing and resolved commit. For a git source the commit
-is the full SHA, read from the final poll because the first poll does
-not carry it yet; an S3 source reports none, so the record keeps the
-requested `sourceVersion` (H-2). A hook's `timeoutMinutes` (T, 5 to 30) is
-CodeBuild's run timeout. The start is an explicit loop that holds two
-variables, computed once per try: the try index `TRY`, and that try's
-queued timeout q, 10 minutes less the minutes refused so far and never
-below CodeBuild's minimum of 5. A refused `StartBuild` (throttling, a
-concurrency quota, the project at its cap) goes through a `Catch`, a
+is the full SHA, read from the final poll: at the spike's 5-second
+poll the first poll did not carry it yet, and at 60 seconds it may,
+but only the final poll is read. An S3 source reports none, so the
+record keeps the requested `sourceVersion` (H-2). A hook's
+`timeoutMinutes` (T, 5 to 30) is CodeBuild's run timeout. The start is
+an explicit loop that holds three variables, set by one `Assign` when
+a try begins: the try index `TRY`, that try's queued timeout q, 10
+minutes less the minutes refused so far and never below CodeBuild's
+minimum of 5, and the idempotency token. A `StartBuild` refused under
+a known refusal name (a concurrency quota, the project at its cap, and
+throttling once its name is verified) goes through a `Catch`, a
 30-second `Wait` and a `Choice` that increments `TRY`, for at most 5
-minutes, so refusals and the queue take at most 10 minutes together. A
-transient error is a task `Retry` (`TimeoutSeconds` 15,
+minutes, so refusals and the queue take at most 10 minutes together.
+A transient error is a task `Retry` (`TimeoutSeconds` 15,
 `IntervalSeconds` 10, `BackoffRate` 1, `MaxAttempts` 3, no jitter),
-which evaluates the `Arguments` again on each repeat from the same
-variables (H-8), so a try and its repeats end within
-90 seconds; the ASL default `BackoffRate` of 2 would wait 10, 20 and
-40 seconds. The idempotency token is
+which evaluates the `Arguments` again on each repeat (H-8). A try and
+its repeats end within 90 seconds; the ASL default `BackoffRate` of 2
+would wait 10, 20 and 40 seconds. A `CodeBuild.*` error the start task
+does not recognise, such as the unobserved throttling name, goes to
+that `Retry` under the same token, never to the refusal `Catch`,
+because a refused request does not bind its token (H-8) and a new
+token could leave a second build. The token is
 `$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK_ID, $string(ATTEMPT),
-$string(TRY)], '|'), 'SHA-256')`, 64 hexadecimal characters, built
-only from values fixed for the try and never from `$uuid()`, `$now()`
-or `$millis()`, because a `Retry` evaluates it again. It has a fixed
-length, differs on every try and stays the same on every repeat,
-so a call that
-created a build before it failed returns that build again instead of
-leaving one with no id to stop. A try whose repeats all fail ends the
+$string(TRY)], '|'), 'SHA-256')`, 64 hexadecimal characters. Every
+field of the start task's `Arguments`, the token included, reads only
+variables and state fixed for the try, never `$uuid()`, `$now()`,
+`$millis()` or another changing value, because a `Retry` evaluates
+them again and CodeBuild refuses a repeat whose arguments differ with
+`CodeBuild.InvalidInputException`. The token has a fixed length,
+differs on every try and stays the same on every repeat, so a call
+that created a build before it failed returns that build again instead
+of leaving one with no id to stop. A try whose repeats all fail, or a
+repeat refused with `CodeBuild.InvalidInputException`, ends the
 attempt as "start outcome unknown", never a new try under another
 token. The attempt's deadline is data: the run timeout, the 10 minutes
 and five minutes of margin from the first start try, and on delete
@@ -430,9 +439,11 @@ as a consumer of a global post hook.
 - The concurrency cap and log retention of ADR-0021 cover all four
   projects. All global hook builds of the fleet share one project
   capped at five, and CodeBuild refuses builds over the cap rather than
-  queueing them, with `CodeBuild.AccountLimitExceededException`, the
-  name the account-wide concurrent build quota also uses, so one
-  `Catch` covers both (H-9). A refused start is tried again for up to 5
+  queueing them, with `CodeBuild.AccountLimitExceededException` (H-9).
+  CodeBuild documents that name for any limit exceeded for the calling
+  account, so the `Catch` names it; the spike provoked only the project
+  cap, and the account-wide quota's error name stays to verify. A
+  refused start is tried again for up to 5
   minutes; then a create or update ends in a named `*_FAILED` ("cannot
   start") rather than a silent wait, and a delete hook spends its
   budget and is skipped (T42, T43).
@@ -483,14 +494,16 @@ as a consumer of a global post hook.
   - H-1: see Context.
   - H-2: for a git source the final `batchGetBuilds` poll carries the
     full commit SHA as `ResolvedSourceVersion`, the branch's tip when
-    the hook names a branch; the start result and the first poll do
-    not. An S3 source never reports one, also with an object version
-    as `sourceVersion`. The poll is the SDK integration, whose result
-    keys are PascalCase.
-  - H-5: CodeBuild delivers 14 fixed variables, 40 `PARAM_` variables
-    of 1,024 bytes and a 4,096-byte `SCRIPT_OUTPUTS` byte for byte. It
-    accepts 41 variables and 4,097 bytes too, so the caps are the
-    control plane's own, enforced before `StartBuild`.
+    the hook names a branch; the start result does not, nor did the
+    first poll at the spike's 5-second interval. An S3 source never
+    reports one, also with an object version as `sourceVersion`. The
+    poll is the SDK integration, whose result keys are PascalCase.
+  - H-5: CodeBuild delivers R-42's 13 fixed variables plus a test
+    label, 40 `PARAM_` variables of 1,024 bytes of printable ASCII and
+    a 4,096-byte `SCRIPT_OUTPUTS`, 55 in all, byte for byte. It accepts
+    41 variables and 4,097 bytes too, so the caps are the control
+    plane's own, enforced before `StartBuild`. Multibyte UTF-8
+    parameter values stay to verify.
   - H-7: a trust policy on an `aws:SourceArn` computed from the
     project's fixed name deploys with no cycle and admits that project.
     CodeBuild refuses a `CreateProject` or `UpdateProject` that gives
@@ -500,14 +513,16 @@ as a consumer of a global post hook.
     repeat with the same token and arguments returns the same build,
     other arguments under the token are refused and start nothing, and
     a refused request does not bind its token. A task `Retry` evaluates
-    `Arguments` again on every repeat, so the token holds across
-    repeats only because it reads nothing that changes between them.
+    `Arguments` again on every repeat, so a repeat sends the same
+    request only because no field of the `Arguments` reads anything
+    that changes between repeats.
     A `Retry` after a 5xx or a task timeout, a `StopBuild` refused
     under throttling and a start refused by account-wide throttling
     were not provoked and stay to verify.
   - H-9: at the project's `concurrentBuildLimit`, `StartBuild` is
     refused with `CodeBuild.AccountLimitExceededException` and creates
-    no build.
+    no build. The account-wide quota was not provoked, and its error
+    name stays to verify.
   - H-10: a 4,096-byte value of worst-case escapes round-trips byte for
     byte through the export, the task `Output` and a hook build's
     override, at 8,190 characters in state. The guard, run in a Step
@@ -525,5 +540,7 @@ as a consumer of a global post hook.
   a later run of H-2 to H-10 stops matching spec §9.1 (a project cap
   that queues builds, a token that does not return the same build, a
   `Retry` whose evaluation of `Arguments` is not deterministic, an
-  export that drops an escaped value), or if one of the three cases H-8
-  left unprovoked behaves otherwise.
+  export that drops an escaped value), or if one of the five cases
+  still to verify behaves otherwise: the three H-8 left unprovoked, the
+  account-wide quota's error name (H-9) and multibyte UTF-8 parameter
+  values (H-5).
