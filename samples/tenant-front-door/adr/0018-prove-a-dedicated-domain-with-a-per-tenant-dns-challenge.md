@@ -117,9 +117,10 @@ after the challenge passes. The challenge keeps the vendor's decision
 with the operator: it is necessary before routing, not a substitute for
 the operator's call. The tenant keeps the record for as long as it
 holds the domain, and the sweeper re-checks every passed challenge
-daily, routed or not, and raises an alarm when three daily runs in a
-row miss it for one tenant and domain; it never drops a domain
-itself. The registrar resolves the record once more
+daily, routed or not, and raises an alarm when the record is missing
+on three UTC days in a row for one tenant and domain, and a second
+alarm when its lookup only errors on three days in a row; it never
+drops a domain itself. The registrar resolves the record once more
 before it writes the domain's `host#` key.
 
 ## Consequences
@@ -160,34 +161,44 @@ before it writes the domain's `host#` key.
   until the operator drops it. The daily re-check covers every passed
   challenge, routed or not, because a pending certificate request rests
   on the same proof; its alarm means the tenant does not show control
-  of a domain it claimed. The lister gives each run a run id, logs it
-  on a `run-start` line with the page count, and passes it to every page
-  of 500 entries. Each page looks its records up 10 at a time with a 5 s
-  timeout, querying CNAME only when the TXT answer is empty or holds the
-  token, and logs one line per entry with the run id, the outcome
-  (`pass`, `miss` or `error`), the tenant and the domain, never the
-  token, then a `page-end` line. At its start, the page runs one Logs
-  Insights query that returns the `run-start` lines of the last 7 days
-  and the entry lines of its tenant range under them, and walks each
-  missed entry's earlier runs in memory. Only a logged `pass` breaks the
-  streak; a run with an error or with no line for the entry, because its
-  page failed, is unknown and is skipped. Two earlier misses before any
-  pass make a three-miss line with the tenant and domain, and one count,
-  as an embedded metric format log line, to the metric the alarm
-  watches. A page takes at most 500 s of lookups plus a 60 s poll limit
-  on its one query; a query that fails fails the page, which Lambda
-  retries twice and then keeps in an on-failure queue. Alarms on that
-  queue and on pages started minus pages that logged their end line
-  say that detection was down. One query per page in flight keeps a run
-  inside the Logs Insights quota of 30 concurrent
-  queries. The sweeper keeps no store of its own: its log is the
-  record. A resolver error is logged apart and never counted as a
-  miss, so an outage cannot look like a lost proof. A removed record can still pass for as long as the resolver
-  caches it, up to its TTL cap (S-10), which delays the alarm by that
-  much. The sweeper does not drop the domain: a DNS fault or a
-  tenant's mistake would then take a routed domain offline with no
-  person deciding. The re-check does not follow ACM renewals, which
-  depend on ACM's own validation record.
+  of a domain it claimed. The lister gives each run a run id and a
+  UTC `runDay`, logs both on a `run-start` line with the page count (zero
+  included), and passes the run id to every page of 500 entries. Each
+  page looks its records up 10 at a time with a 5 s timeout, querying
+  CNAME only when the TXT answer is empty or holds the token, and logs
+  one line per entry with the run id, the outcome (`pass`, `miss` or
+  `error`), the tenant and the domain, never the token, then a
+  `page-end` line, unless the page's own query already showed one. At
+  its start, the page runs one Logs Insights query, `limit 10000` set,
+  that aggregates with `stats` by run id, tenant and domain, so a retried
+  page or an extra run still gives one row for each run and entry, and
+  walks each missed entry's earlier days in memory, one run for each UTC
+  day, the newest. Within one run a `miss` wins over a `pass`, because a
+  miss only counts toward three; only a logged `pass` on a later day
+  breaks the streak. A day with an error or with no line for the entry,
+  because its page failed, is unknown and is skipped. Two earlier missed
+  days before any pass make a three-miss line with the tenant and
+  domain, and one count, as an embedded metric format log line, to the
+  metric the alarm watches. Errors keep out of that count, so that an
+  outage cannot look like a lost proof, and have a walk of their own:
+  an entry whose lines are `error` on three days in a row, with no pass
+  or miss between, gets an `unverifiable` line and a count to a second
+  metric and alarm, so whoever controls a domain's DNS cannot hold it
+  out of detection by breaking only the challenge name. A page takes at
+  most 500 s of lookups plus a 60 s poll limit on its one query; a query
+  that fails, does not finish, or returns 10,000 rows fails the page
+  (the page calls `logs:StopQuery` on a query it gives up on), which
+  Lambda retries twice and then keeps in an on-failure queue. Alarms on
+  that queue and on pages started minus pages finished, with
+  `FILL(finished, 0)` and a period one run never straddles, say that
+  detection was down. One query per page in flight keeps a run inside
+  the Logs Insights quota of 30 concurrent queries. The sweeper keeps
+  no store of its own: its log is the record. A removed record can still
+  pass for as long as the resolver caches it, up to its TTL cap (S-10),
+  which delays the alarm by that much. The sweeper does not drop the
+  domain: a DNS fault or a tenant's mistake would then take a routed
+  domain offline with no person deciding. The re-check does not follow
+  ACM renewals, which depend on ACM's own validation record.
 - Harder: a CNAME at `_tfd-challenge.<d>` is refused, so a tenant whose
   DNS provider publishes records through a CNAME must publish the TXT
   record itself.
@@ -196,19 +207,27 @@ before it writes the domain's `host#` key.
   distribution-tenant action. The teardown custom resource holds them
   in both cases, so a front door that once served a dedicated domain
   still tears down. A stack update that turns it off fails, on a custom
-  resource check, while any `tenant#` entry holds a `d` or the sweeper
-  still has a distribution tenant or certificate to delete, so no
-  domain stays routed with no role able to remove it and no re-check.
-  The check resource runs before the registrar's switch and role
-  change, which depend on it. The operator drops every dedicated
-  domain first (spec §3.4, the IAM paragraph, and §3.6); spec §10
+  resource, the guard, while any `tenant#` entry holds a `d` or the
+  sweeper still has a distribution tenant or certificate to delete, so
+  no domain stays routed with no role able to remove it and no
+  re-check. The guard exists in both states and takes `dedicatedDomains`
+  as a property, so it gets an Update when the switch flips and refuses
+  only on-to-off. The registrar function is updated first, so new
+  `customDomain` writes get 400; then the guard runs; then the role is
+  narrowed and the schedules are removed, which depend on the guard; a
+  refusal rolls all of it back together. The operator drops every
+  dedicated domain first (spec §3.4, the IAM paragraph, and §3.6); spec §10
   step 14 tests the refusal.
 - Known limitations: not tested end to end, and covered by unit tests
   with a stubbed resolver or clock instead: challenge expiry and
   reissue, a resolver error (`unresolved`), a CNAME at the challenge
-  name, the lookup before the `host#` write, and the restart after an
-  ETag conflict (spec §10). The alarm's notification is not checked;
-  the integration test checks the metric it watches.
+  name, the lookup before the `host#` write, the restart after an ETag
+  conflict, a daily-run page that fails, the on-failure queue and the
+  page-count alarms, the `unverifiable` line and its alarm for an entry
+  that errors three days in a row, and a query that reaches its row
+  limit and fails the page (spec §10). The alarms' notifications are not
+  checked; the integration test checks the metric the re-check alarm
+  watches.
 - Not changed: a dedicated domain still never receives an authorization
   code (ADR-0016). The challenge confirms that the tenant controls the
   domain's DNS and can point it at a server of its own, so a code sent
