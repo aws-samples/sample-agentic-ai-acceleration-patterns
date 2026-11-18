@@ -37,7 +37,7 @@ life limit, the reaper also stops any tagged task whose own `startedAt` is
 older than `sandboxMaxLife`, with or without a row. AgentCore has no API
 that lists a runtime's sessions, so the sweep covers tasks and MicroVMs
 only; an orphan session ends on its idle or life timeout or with the
-runtime's delete. The reaper checks each `microvm` row with `GetMicrovm`
+runtime's delete. The reaper checks each `READY` `microvm` row with `GetMicrovm`
 and writes the stop line for a MicroVM the platform ended. For `STARTING`
 rows it applies the tool's own rule, and it leaves `FAILED` rows to the
 tool. The drain waits up to 10 minutes for tasks and MicroVMs
@@ -46,6 +46,9 @@ and fails the delete loudly if any is left.
 ## Consequences
 
 The reaper runs every 5 minutes, so a `nitro` task lives up to
-`sandboxIdle` + 5 minutes after its last call. Each stop writes the
-`sandboxSeconds` line used for cost (ADR-0013). Offboarding does not delete
+`sandboxIdle` + 5 minutes after its last call. Each sandbox gets exactly
+one `sandboxSeconds` stop line (ADR-0013): from whoever moves its row out
+of `STARTING` or `READY`, or, for an orphan with no row, from the sweep or
+the drain, marked `orphan` and attributed by the sandbox's tag where it
+has one. Offboarding does not delete
 tenant objects (spec §1.2).

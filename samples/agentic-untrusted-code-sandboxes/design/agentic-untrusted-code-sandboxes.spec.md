@@ -314,7 +314,7 @@ to its own stdout through the runner.
 | Role | May | May not |
 |---|---|---|
 | Tool role (function) | assume the tool tenant role with a `TenantId` tag; `lambda:RunMicrovm`, `GetMicrovm`, `TerminateMicrovm`, `CreateMicrovmAuthToken` on the sample's image; `bedrock-agentcore:InvokeAgentRuntime`, `StopRuntimeSession` on the sample's runtime; `ecs:DescribeTasks` on the cluster; `kms:GetPublicKey` on the context key | read the bucket or the registry directly; `ecs:RunTask` or `StopTask` |
-| Tool tenant role | `s3:GetObject` on `inputs/${TenantId}/*`, `s3:PutObject` on `outputs/${TenantId}/*`, registry items with `dynamodb:LeadingKeys` = `TENANT#${TenantId}`, `ecs:RunTask` on the pinned task definition revision ARN only and `ecs:TagResource`, both with the request tag condition and `ecs:cluster` = the sample's cluster, `ecs:StopTask` with the resource tag condition and the same `ecs:cluster` condition, `iam:PassRole` on the task execution role | anything without its own tag; any other task definition or cluster |
+| Tool tenant role | `s3:GetObject` on `inputs/${TenantId}/*`, `s3:PutObject` on `outputs/${TenantId}/*`, registry items with `dynamodb:LeadingKeys` = `TENANT#${TenantId}`, `ecs:RunTask` on the pinned task definition revision ARN only, with the request tag condition and `ecs:cluster` = the sample's cluster; `ecs:TagResource` on `task/<cluster>/*` with the request tag condition and `ecs:CreateAction` = `RunTask` (the action has no `ecs:cluster` key, and this stops the role retagging existing tasks); `ecs:StopTask` with the resource tag condition and `ecs:cluster`; `iam:PassRole` on the task execution role | anything without its own tag; any other task definition or cluster |
 | Task execution role | `ecr:GetAuthorizationToken` on `*` (the action takes no resource), `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, Logs write on the task log group | everything else; never reachable by code (S-5) |
 | AgentCore runtime role | `ecr:GetAuthorizationToken` on `*`, `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents`, `DescribeLogStreams`, `DescribeLogGroups` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` (the actions agentic-runtime-isolation ADR-0047 verified; the name is known at synth, and runtime names cannot contain `-`, so the prefix matches only this runtime); with `sessionFiles`, `s3:GetObject`, `s3:PutObject` on `sessions/${aws:AgentCoreRuntimeSourceSid}/*` and `s3:ListBucket` with an `s3:prefix` condition | everything else |
 | Reaper role | read, update and delete every registry row; `ecs:ListTasks`, `DescribeTasks`, `StopTask` on the cluster; `lambda:ListMicrovms`, `GetMicrovm`, `TerminateMicrovm` on the image; `StopRuntimeSession` on the runtime | the input bucket |
@@ -376,15 +376,21 @@ them): `tenantId`, `backend`, `handle` (MicroVM id, task ARN or
 written by whoever moves the sandbox's row out of `STARTING` or `READY`
 with a successful conditional write: the tool (dead handle, overrun,
 failed start), the reaper, the drain, or the offboard function. A writer
-that finds the row already `FAILED` or `STOPPING` writes none. On
+that finds the row already `FAILED` or `STOPPING` writes none. A sandbox
+with no row (an orphan the sweep or the drain stops: its row lost to TTL,
+a handle-less takeover, or a crashed start) gets its line from the stopper,
+marked `orphan` = true, with `tenantId` from the sandbox's `TenantId` tag
+(`nitro`, and `microvm` if S-3 allows tags) or `unknown`. On
 `microvm` the line also carries `runningSeconds` and `suspendedSeconds`.
 `sandboxSeconds` comes from `GetMicrovm` `terminatedAt - startedAt` when
 the MicroVM is ended. `suspendedSeconds` comes from the row's
-`suspendedMs` counter: when a call first reaches the sandbox, at time
-`t`, it adds `max(0, t - lastUsedAt - sandboxIdle)` and sets
-`lastUsedAt` = `t` in one write conditioned on `lastUsedAt` = the value
-it read (re-reading once on a condition failure), and step 4 moves
-`lastUsedAt` to the end of the run with the same condition. The stop adds
+`suspendedMs` counter. On every backend, when a call first reaches the
+sandbox at time `t`, its start write sets `lastUsedAt` = `t`, conditioned
+on `attribute_not_exists(lastUsedAt) OR lastUsedAt = :read` (re-reading
+once on a condition failure); on `microvm` the same write adds
+`max(0, t - lastUsedAt - sandboxIdle)` to `suspendedMs`, so each gap is
+added once. Step 4 moves `lastUsedAt` to the end of the run with a
+monotonic condition, `lastUsedAt < :end`, and adds nothing. The stop adds
 the final gap up to `terminatedAt` (or the stop time on other backends).
 `runningSeconds` is the difference, clamped at 0. The line carries `estimated` = true,
 because the API reports no per-state times and the counter assumes the
@@ -464,14 +470,19 @@ Reuse rule, per call (the tool):
    sandbox restarted (on `agentcore`, the session under the same id): the
    tool rewrites the row with the new `bootId` and reports
    `sandbox` = `started`.
-4. After the run, update `lastUsedAt` with
-   `attribute_exists(PK) AND handle = :h AND lastUsedAt = :seen`, so a row
-   deleted or replaced meanwhile is not recreated. `:seen` is the value
-   this call set at its start (§3.8); if another call moved `lastUsedAt`
-   since, the write is dropped, because the newer value already covers
-   this call.
+4. After the run, set `lastUsedAt` to the run's end with
+   `attribute_exists(PK) AND handle = :h AND lastUsedAt < :end`, so a row
+   deleted or replaced meanwhile is not recreated and `lastUsedAt` only
+   moves forward, whichever call wrote last (a `busy` call's start mark
+   included).
+
+   Every conditional write after the first in one call uses the `version`
+   returned by that call's own last successful write, not the step 1
+   read: the start write, the `READY` update, step 4 and step 5 each bump
+   `version`.
 5. If the runner does not answer by `runTimeout` + 5 s, set `STOPPING`
-   with `version = v`, stop the sandbox, and return a result with
+   with the call's current version (re-reading once if another call moved
+   it, and stopping anyway if the handle is unchanged), stop the sandbox, and return a result with
    `timedOut` = true.
 
 The reaper, every 5 minutes, writes the row before any stop with

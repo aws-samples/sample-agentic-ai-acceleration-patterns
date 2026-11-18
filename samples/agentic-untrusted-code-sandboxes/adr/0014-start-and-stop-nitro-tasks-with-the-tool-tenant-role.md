@@ -26,11 +26,16 @@ Pros: one role. Cons: filtered, as above.
 
 ## Decision
 
-Option 1. The condition is `aws:RequestTag/TenantId` =
-`${aws:PrincipalTag/TenantId}` on `RunTask` and `ecs:TagResource`, and
-`aws:ResourceTag/TenantId` = `${aws:PrincipalTag/TenantId}` on `StopTask`.
-`iam:PassRole` is limited to the one execution role with
-`iam:PassedToService` = `ecs-tasks.amazonaws.com`.
+Option 1. `RunTask` is allowed on the pinned task definition revision ARN only, with
+`aws:RequestTag/TenantId` = `${aws:PrincipalTag/TenantId}` and
+`ecs:cluster` = the sample's cluster. `ecs:TagResource`, which ECS checks
+for the tags passed to `RunTask`, is allowed on `task/<cluster>/*` with the
+same request tag condition and `ecs:CreateAction` = `RunTask`; it supports
+no `ecs:cluster` key. `StopTask` requires `aws:ResourceTag/TenantId` =
+`${aws:PrincipalTag/TenantId}` and `ecs:cluster`. `iam:PassRole` is
+limited to the one execution role with `iam:PassedToService` =
+`ecs-tasks.amazonaws.com`. A unit test checks every condition key against
+the keys its action supports.
 
 ## Consequences
 
