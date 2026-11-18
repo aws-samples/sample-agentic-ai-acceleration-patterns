@@ -128,8 +128,10 @@ It can be replayed once the cause is fixed.
 | Admin API | Same REST API, IAM auth: meters, sinks, registrations, usage reads, replay |
 | Aggregator | Step Functions per hour: reads the hour's raw objects, dedupes, sums per meter rule, writes usage records |
 | Usage records | DynamoDB, one item per `(tenant, meter, hour, version)` |
+| Usage bus | EventBridge Custom Event Bus, 7-day retention; one `UsageRecorded` event per new usage record, `DeduplicationId = recordId`, `EventGroupId = tenantId`. Always on |
 | Sink dispatcher | Sends each new usage record to every enabled sink, at least once, idempotent per record |
-| Sinks | `HTTP` (any billing API, field mapping by configuration), `S3_EXPORT` (JSON lines), `EVENT_BUS` (EventBridge `UsageRecorded`) |
+| Sinks | `HTTP` (any billing API, field mapping by configuration), `S3_EXPORT` (JSON lines) |
+| `UsageSubscriber` | Published construct that attaches a reader to the ingest bus (`raw`) or the usage bus (`usage`) with a dead-letter queue, a retry policy and alarms built in (ADR-0006) |
 | Error store | S3 `error/` prefix, one object per refused batch, with reasons |
 
 ### 3.2 Callers and identity
@@ -140,6 +142,12 @@ It can be replayed once the cause is fixed.
 | Lifecycle hook | SigV4 as a role in `registrarPrincipalArns` (the control plane's `<fleet>-global-hook`) | `PutCellEmitter`, `DeleteCellEmitter`, `PutTenantBinding`, `DeleteTenantBinding` |
 | Metering operator | SigV4 as a role in `operatorPrincipalArns` | meters, sinks, `GetUsage`, `ListUsage`, `StartReplay`, reads of registrations |
 | Usage reader | SigV4 as a role in `readerPrincipalArns` | `GetUsage`, `ListUsage` |
+| Bus subscriber | Its account: the metering account, or one the bus is shared with through AWS RAM (subscribe only) | create its own subscribers on the bus it was shared, through `UsageSubscriber` |
+
+The ingest bus carries every tenant's checked events, so it is shared
+only with `rawSubscriberAccountIds`, and `PutCellEmitter` refuses a cell
+in one of those accounts (ADR-0006). The usage bus carries
+counted records and is shared with `usageSubscriberAccountIds`.
 
 An emitter role is registered by account and name. The ingest function
 takes the caller's role ARN from the API Gateway identity
@@ -158,6 +166,9 @@ ARN must equal the cell account the registration recorded (P-2).
 | `lateGraceMinutes` | how long after an hour ends it is first counted | `15` |
 | `recountWindowHours` | how long an hour may still be recounted for late events | `72` |
 | `rawRetentionDays` | raw and error object lifetime | `400` |
+| `ingestPath` | `BUS` (ingest bus, ADR-0002) or `DIRECT` (Firehose, packed records) | `BUS` |
+| `rawSubscriberAccountIds` | accounts the ingest bus is shared with; vendor accounts only | `[]` |
+| `usageSubscriberAccountIds` | accounts the usage bus is shared with | `[]` |
 
 ### 3.4 Lifecycle wiring with the control plane
 
@@ -240,9 +251,9 @@ is before the deletion, then the item is removed.
 
 | Field | Meaning |
 |---|---|
-| `type` | `HTTP`, `S3_EXPORT`, `EVENT_BUS` |
+| `type` | `HTTP`, `S3_EXPORT` |
 | `enabled` | boolean |
-| `endpoint` | `HTTP`: HTTPS URL. `S3_EXPORT`: prefix. `EVENT_BUS`: bus ARN |
+| `endpoint` | `HTTP`: HTTPS URL. `S3_EXPORT`: prefix |
 | `secretName` | `HTTP` only: Secrets Manager name of the credential, read inside the dispatcher |
 | `mapping` | `HTTP` only: target field name → source (record field, binding field, meter field, or constant) |
 | `meters` | meter ids this sink takes; empty is all |
@@ -327,14 +338,33 @@ Hour states: `OPEN` → `COUNTED` (after `lateGraceMinutes`) →
    dispatch (sinks).
 6. Every sink receives each record at least once, with a stable
    `recordId` to dedupe on.
+7. A reader attached through `UsageSubscriber` gets every matching event
+   at least once, or finds it in its dead-letter queue; an alarm fires
+   on the first event that reaches the queue.
 
 ### 6.3 Published interface
 
 - Construct `TenantUsageMetering` (`src/index.ts`): the props of §3.3;
   exposes `apiUrl`, `ingestPolicy` (a managed policy an emitter role
-  needs), `registrarPolicy`, `usageBusArn`.
+  needs), `registrarPolicy`, `ingestBusArn`, `usageBusArn`.
+- Construct `UsageSubscriber` (`src/index.ts`, ADR-0006):
+
+  | Prop | Meaning | Default |
+  |---|---|---|
+  | `busArn` | the ingest or usage bus ARN, from the published parameter | required |
+  | `stream` | `raw` (checked usage events) or `usage` (`UsageRecorded` records); sets the filter scope and the event shape | `usage` |
+  | `targetArn`, `role` | any target the bus supports, and the role it delivers with | required |
+  | `meters`, `tenants` | optional filters on `meterId` and `tenantId` | all |
+  | `type` | `UNORDERED`, or `FIFO` per tenant | `UNORDERED` |
+  | `startingPosition` | `LATEST`, or a point in time inside the bus's retention | `LATEST` |
+  | `maxEventAge` | how long a failing event is retried before it goes to the DLQ | the bus's maximum |
+  | `alarmTopic` | optional SNS topic for the alarms | none |
+
+  It always creates an SQS dead-letter queue (SSE, 14-day retention) and
+  alarms on queue depth above zero and on failed deliveries, and exposes
+  `deadLetterQueue`. There is no prop to turn either off.
 - Parameter `/application-plane/shared/metering/service`, one JSON
-  document: `version`, `apiUrl`, `region`, `usageBusArn`,
+  document: `version`, `apiUrl`, `region`, `ingestBusArn`, `usageBusArn`,
   `emitterRoleNamePattern`.
 - The hook script `scripts/control-plane/metering-hook.sh` and the
   emitter snippet `scripts/emit-usage.ts`.

@@ -87,12 +87,14 @@ counting once still rests on the recount's `(tenantId, eventId)` dedupe
 (P-5), because a retry after five minutes, or a Firehose retry, is not
 caught by the bus. Option 2 with packed records is the fallback where the
 new bus is not available, and the construct takes an `ingestPath` prop
-(`EVENT_BUS` or `DIRECT`) so a deployer can choose.
+(`BUS` or `DIRECT`) so a deployer can choose.
 
 ## Consequences
 - The subscriber MUST have an SQS dead-letter queue and a retry policy
   that holds events for the bus's maximum event age; an alarm on the DLQ
   depth and on the subscriber's failed deliveries is part of the stack.
+  Readers outside the sample get the same through the published
+  `UsageSubscriber` construct (ADR-0006).
 - Firehose sees one record per event, so the Firehose cost is the
   5 KB-step cost; a subscriber transformer that packs events is a seam.
 - The bus retention is set to the shortest useful period (1 day by
