@@ -160,7 +160,8 @@ rotation are in spec §3.3 step 2, §3.5 and §4.1.
 
 Amended 2026-11-18 by ADR-0018, which answers spec Q-3: a tenant proves
 control of a dedicated domain's DNS with a registrar-issued token before
-the domain is routed. That proof is the reason a dedicated domain stays
-out of the sign-in path, not a way into it: a code sent there reaches a
-server the tenant runs. A dedicated domain with its own callback URL
-therefore stays out of scope.
+the domain is routed. The challenge confirms that the tenant controls
+the domain's DNS and can point it at a server of its own, so an
+authorization code sent there could leave the vendor's edge. A
+dedicated domain therefore stays out of the sign-in path, and one with
+its own callback URL stays out of scope.

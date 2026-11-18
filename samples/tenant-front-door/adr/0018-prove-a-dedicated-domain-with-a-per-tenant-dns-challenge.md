@@ -71,12 +71,10 @@ The tenant serves the token at
 `http://<domain>/.well-known/tfd-challenge/<token>`. Pros: familiar from
 ACME `http-01`; no DNS change for a tenant that already runs a web
 server on the domain. Cons: before the distribution tenant exists the
-domain cannot point at the front door, so the tenant has to run a
-server of its own for the check, and a domain that already points at
-the front door, for example a former holder's leftover CNAME, would be
-answered by the vendor's own edge, which makes the check circular. It
-needs plain HTTP on port 80, and it proves control of a web server, not
-of the DNS that routing and the certificate depend on.
+domain cannot point at the front door, so the tenant must run a server
+of its own for the check, and that proves control of a web server, not
+of the DNS that routing and the certificate depend on. It also needs
+plain HTTP on port 80.
 
 ### Option 4: The operator attests by hand
 
@@ -110,13 +108,18 @@ send every tenant domain to a third party and caches the same way;
 querying the authoritative servers directly would skip the cache but
 needs an iterative resolver in the function and UDP from Lambda, which
 nothing has proven. Caching can delay a pass, never cause one, because
-no cached answer can predate the token. The 7 days cover a tenant's
+no cached answer can predate the token. A resolver error is
+`unresolved`, never a pass, and a CNAME at the challenge name is
+refused, so a CNAME left pointing into a zone someone else can register
+never passes. The 7 days cover a tenant's
 DNS change process; ACM's own 72-hour validation window starts only
 after the challenge passes. The challenge keeps the vendor's decision
 with the operator: it is necessary before routing, not a substitute for
 the operator's call. The tenant keeps the record while the domain is
-routed, and the sweeper re-checks it daily and raises an alarm after
-three days of misses; it never drops a domain itself.
+routed, and the sweeper re-checks it daily and raises an alarm when
+three daily runs in a row miss it for one tenant and domain; it never
+drops a domain itself. The registrar resolves the record once more
+before it writes the domain's `host#` key.
 
 ## Consequences
 
@@ -154,19 +157,40 @@ three days of misses; it never drops a domain itself.
   authorities make.
 - Harder: a domain that changes owner stays routed to the old tenant
   until the operator drops it. The daily re-check logs each miss with
-  the tenant and domain, never the token, and an alarm fires after
-  three daily runs in a row with a miss. The sweeper does not drop the
-  domain: a DNS fault or a tenant's mistake would then take a routed
-  domain offline with no person deciding. The re-check does not follow
-  ACM renewals, which depend on ACM's own validation record.
+  the tenant and domain, never the token. The sweeper decides from its
+  own log, with a Logs Insights query over its previous two daily runs,
+  when one tenant and domain has missed three runs in a row, logs that
+  with the tenant and domain, and emits one count to the metric the
+  alarm watches; it keeps no store. A resolver error is logged apart
+  and never counted as a miss, so an outage cannot look like a change
+  of owner. A removed record can still pass for as long as the resolver
+  caches it, up to its TTL cap (S-10), which delays the alarm by that
+  much. The sweeper does not drop the domain: a DNS fault or a
+  tenant's mistake would then take a routed domain offline with no
+  person deciding. The re-check does not follow ACM renewals, which
+  depend on ACM's own validation record.
+- Harder: a CNAME at `_tfd-challenge.<d>` is refused, so a tenant whose
+  DNS provider publishes records through a CNAME must publish the TXT
+  record itself.
 - Harder: `dedicatedDomains` is a deploy-time switch. Off, the
   registrar answers any `customDomain` with 400 and holds no ACM or
   distribution-tenant action. The teardown custom resource holds them
   in both cases, so a front door that once served a dedicated domain
-  still tears down.
+  still tears down. A stack update that turns it off fails, on a custom
+  resource check, while any `tenant#` entry holds a `d` or the sweeper
+  still has a distribution tenant or certificate to delete, so no
+  domain stays routed with no role able to remove it and no re-check.
+  The operator drops every dedicated domain first (spec §10 step 14).
+- Known limitations: not tested end to end, and covered by unit tests
+  with a stubbed resolver or clock instead: challenge expiry and
+  reissue, a resolver error (`unresolved`), a CNAME at the challenge
+  name, the lookup before the `host#` write, and the restart after an
+  ETag conflict (spec §10). The alarm's notification is not checked;
+  the integration test checks the metric it watches.
 - Not changed: a dedicated domain still never receives an authorization
-  code (ADR-0016). Proving that the tenant controls the domain's DNS is
-  the reason: a code sent there reaches a server the tenant runs.
+  code (ADR-0016). The challenge confirms that the tenant controls the
+  domain's DNS and can point it at a server of its own, so a code sent
+  there could leave the vendor's edge.
 - Revisit when S-10 shows a resolver delay operators cannot accept,
   when CloudFront or ACM offer a per-tenant domain proof of their own,
   or when a vendor needs the multi-perspective check.

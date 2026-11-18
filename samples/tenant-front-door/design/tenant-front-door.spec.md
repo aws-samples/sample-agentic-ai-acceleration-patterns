@@ -483,11 +483,17 @@ On every write:
       When one record's strings, joined, equal `tfd-verify=<dk>`, the
       challenge passes: remove `dx` with the ETag, keep `dk`, and go on
       to sub-step 3 in the same call. Other values at the name, a former
-      holder's or another tenant's token among them, are ignored. No
-      match: answer 202 with the same record and `challenge: "missing"`
-      (no TXT record at the name) or `"mismatch"` (records, none with
-      this token). No certificate is requested before the challenge
-      passes.
+      holder's or another tenant's token among them, are ignored. The
+      registrar refuses a CNAME at `_tfd-challenge.<d>`: it also asks
+      for a CNAME at the name, and a CNAME answer is a mismatch whatever
+      its target holds, so a CNAME left pointing into a zone someone
+      else can register never passes. Any other answer gets 202 with
+      the same record and one of three `challenge` values: `"missing"`
+      (the name does not exist, or holds no TXT record), `"mismatch"`
+      (TXT records, none with this token, or a CNAME) or `"unresolved"`
+      (the resolver answered SERVFAIL or REFUSED, or timed out). A
+      resolver error is never a pass. No certificate is requested
+      before the challenge passes.
    3. Challenge passed (`dk` without `dx`): find what exists and create
       only what is missing. The certificate is an ACM certificate in
       `us-east-1`, which CloudFront requires, requested by the registrar across Regions with DNS validation and
@@ -497,10 +503,17 @@ On every write:
    4. Certificate pending: answer 202 with `stage: "certificate"` and
       ACM's validation record. The operator repeats the call once the
       tenant has published the record in the domain's DNS.
-   5. Certificate issued: create the distribution tenant with it, on
-      this distribution and with the same tags, unless it exists; write
-      `host#<d>`; answer 200. No request is routed on the domain before
-      then. A repeat after 200 changes nothing and answers 200.
+   5. Certificate issued: resolve `_tfd-challenge.<d>` again as in
+      sub-step 2, because up to 72 hours may have passed since the
+      challenge did. Unless the record still holds `tfd-verify=<dk>`,
+      answer 202 with the record and its `challenge` value (`"missing"`
+      when the record is gone) and write no `host#<d>`; the challenge
+      stays passed, and the operator repeats the call once the record
+      is back. Otherwise create the distribution tenant with the
+      certificate, on this distribution and with the same tags, unless
+      it exists; write `host#<d>`; answer 200. No request is routed on
+      the domain before then. Once `host#<d>` exists, a repeat looks
+      nothing up, changes nothing and answers 200.
    6. Certificate failed, or validation timed out (ACM stops waiting
       after 72 hours): 422 with ACM's reason. The operator drops the
       domain and sets it again, which also issues a new challenge.
@@ -524,14 +537,31 @@ On every write:
 
    The tenant keeps the `_tfd-challenge` record while the domain is
    routed. A second EventBridge Scheduler schedule runs the sweeper
-   daily, which resolves the record for every `tenant#` entry with a
-   passed challenge and logs each miss (no record, or none with the
-   entry's `dk`) with the tenant and the domain, never the token. A
-   metric filter counts the misses, and an alarm fires when three daily
-   runs in a row find one. The alarm tells the operator, who drops the
-   domain with `PutTenantRoute` or removes the route. The sweeper never
-   drops a domain itself: a DNS fault or a tenant's mistake would then
-   take a routed domain offline with no person deciding. This covers a
+   daily over every `tenant#` entry with a passed challenge. The daily
+   run lists those entries and starts one asynchronous run of the
+   sweeper per page of 500 entries. Each page resolves its records as
+   sub-step 2 does, 10 lookups at a time with a 5 s timeout each, so a
+   page takes at most 250 s, inside the 15-minute Lambda limit. A
+   lookup ends in a pass, a miss (`missing` or `mismatch`) or an error
+   (`unresolved`). The sweeper logs each miss and each error with the
+   run, the tenant and the domain, never the token. An error is logged
+   apart from a miss and never counted as one, so a resolver outage
+   never looks like a change of owner; a metric filter counts errors on
+   their own. For each miss, the sweeper asks its own log, with a Logs
+   Insights query over its previous two daily runs, whether both logged
+   a miss for this tenant and this domain. When they did, it logs a
+   three-miss line naming the tenant and the domain, never the token,
+   and emits one count to the re-check metric, which the alarm watches.
+   It keeps no store of its own (P-6): its log is the record. A domain
+   that stays broken emits a count on every later run, and each
+   three-miss line names its domain, so a second broken domain shows in
+   the log while the alarm is already firing. The resolver can keep a
+   passing answer for the record's TTL, up to its own cap (spike S-10),
+   so the alarm fires on the third daily run after that cached answer
+   expires. The alarm tells the operator, who drops the domain with
+   `PutTenantRoute` or removes the route. The sweeper never drops a
+   domain itself: a DNS fault or a tenant's mistake would then take a
+   routed domain offline with no person deciding. This covers a
    domain that changes owner: the new owner's zone lacks the record,
    the alarm fires, and the old tenant's route stays until the operator
    drops it. An operator call with the same domain after 200 does not
@@ -574,7 +604,13 @@ On every write:
    the step 3 operator checks, step 4 and the 507 size check (§4.1)
    before the next attempt. Two writers that race for one domain
    therefore cannot both pass, and an operator write that loses to a
-   delete gets 409.
+   delete gets 409. A write that rests on a DNS answer, the pass of
+   sub-step 2 and the `host#<d>` write of sub-step 5, is attempted again
+   only when the re-read entry still holds the `d` and `dk` that answer
+   was compared against. Otherwise the sub-steps start again from the
+   re-read entry, at sub-step 1 when `d` changed and with a new lookup
+   when `dk` is new, so no write marks a token passed that no answer
+   held.
 6. Log the caller role, key and outcome, never the body.
 
 Deletes run steps 1, 2 and 6. A delete from the global hook role needs
@@ -642,8 +678,15 @@ that has a `d`, and in the sweeper. The stack's teardown custom resource
 holds the same set (§6.2). While `dedicatedDomains` is off the registrar
 role holds none of them and the sweeper and its schedules are not
 deployed. The teardown custom resource holds them in both cases, so a
-front door that once served a dedicated domain still tears down. The
-domain challenge needs no IAM action: it is a DNS lookup.
+front door that once served a dedicated domain still tears down. A
+stack update that turns `dedicatedDomains` off fails while any
+`tenant#` entry holds a `d`, or while the registrar still holds a
+dedicated distribution tenant or certificate for the sweeper to delete:
+a custom resource reads the route table and those lists and refuses the
+update. The operator drops every dedicated domain first and waits for
+the sweeper, so no domain stays routed with no role able to remove it
+and no daily re-check. The domain challenge needs no IAM action: it is
+a DNS lookup.
 
 The route hook (`hooks/route-hook.sh`) runs on the events of §3.2 with
 the control plane's hook environment (control-plane R-42):
@@ -790,9 +833,10 @@ hook's put replaces the entry, `s: active` and routed to the new cell
   `host` mode, and in `single` mode `<appDomain>`, which signs in
   through its one callback URL, `https://<appDomain>/`. A dedicated
   domain with its own callback URL on the issuer (ADR-0016 Option 1 for
-  that one client) stays out of scope: the domain challenge proves that
-  the tenant controls the domain's DNS, which is why a code must not go
-  there (ADR-0016, amended by ADR-0018).
+  that one client) stays out of scope: the domain challenge confirms
+  that the tenant controls the domain's DNS and can point it at a server
+  of its own, so a code sent there could leave the vendor's edge
+  (ADR-0016, amended by ADR-0018).
 - The `signin` key holds one or two keys of 32 random bytes, named by
   `kid` (§4.1). A custom resource of the front door stack generates them
   with a cryptographic random source for the ids in `signinKeys` (§3.6)
@@ -868,7 +912,7 @@ hook's put replaces the entry, `s: active` and routed to the new cell
 | `tenantClaim` | no | `tenant_id` | Claim the router and the origin read |
 | `spaSource` | no | the demo SPA | Path of the built SPA |
 | `agentIngress` | no | off | Agent ingress endpoint; omit to leave `/agents/*` off |
-| `dedicatedDomains` | no | off | Lets the edge operator role set a tenant's `customDomain` (§3.4 step 5, ADR-0018). Off: any `customDomain` gets 400, and the registrar role holds no ACM or distribution-tenant action and runs no sweeper |
+| `dedicatedDomains` | no | off | Lets the edge operator role set a tenant's `customDomain` (§3.4 step 5, ADR-0018). Off: any `customDomain` gets 400, and the registrar role holds no ACM or distribution-tenant action and runs no sweeper. A stack update that turns it off fails while any `tenant#` entry holds a `d` or the sweeper has a distribution tenant or certificate left to delete; the operator drops every dedicated domain first (§3.4) |
 | `tenantRequestsPer5Min` | no | 2,000 | Per-tenant rate (ADR-0009) |
 | `reportingEndpoint` | no | off | URL for CSP and other browser reports |
 
@@ -1010,7 +1054,7 @@ Modelled in Smithy; all operations `AWS_IAM`, all idempotent.
 |---|---|---|---|
 | `PutCellRoute` | `PUT /cells/{cellId}` | global hook role (route hook, cell create and update); edge operator role, for backfill and origin changes (§3.4) | Body `{apiDomain}`, from the cell script's `frontDoorApiDomain` output, or from the operator. A Lambda function URL host in the control plane's Region (400 otherwise). Account taken from the control plane, never the body. For the global hook role, 409 while the cell is neither `CREATING` nor `UPDATING`, and 409 when `cell#` holds another origin: the origin is write-once for it. Checks §3.4. 200 |
 | `DeleteCellRoute` | `DELETE /cells/{cellId}` | global hook role (route hook, cell delete); edge operator role, to clear a route a skipped hook left | 409 while a tenant route names the cell, and for the global hook role while the cell is neither missing nor `DELETING` (§3.4). 200, also when absent |
-| `PutTenantRoute` | `PUT /tenants/{tenantId}` | global hook role (route hook, deployment create and update); edge operator role to set `customDomain` | Body `{displayName, customDomain?}`. `displayName` is stored as §4.1 says. The entry records the deployment's `createdAt` as `dt`. A new `tenant#` entry gets `s: active`; a write to an existing entry keeps its `s`, from either role, and only `UpdateTenantRouteStatus` changes it. A hook put whose deployment `createdAt` differs from the stored `dt` replaces the entry as a new one (§3.4 step 5). Only the edge operator role may send `customDomain`, and only while `dedicatedDomains` is on (400 otherwise); the global hook role that sends it gets 403, and its call without it keeps the stored domain. The operator's call sets the domain, or drops it when `customDomain` is absent. A new domain is one host name of at most 64 characters with no wildcard, outside `appDomain` and held by no other tenant. The call writes it as `d` on `tenant#` first, with a domain challenge for this tenant and domain, and answers 202 with `stage: "domain-challenge"` and the TXT record to publish, `_tfd-challenge.<d>` `tfd-verify=<token>`, valid for 7 days. A repeat resolves that record: until it holds this tenant's token the call answers 202 again, with `challenge: "missing"` or `"mismatch"`, and an expired challenge gets a new token. Once it passes, the call requests the domain's ACM certificate in `us-east-1`, which validates by DNS once the tenant publishes ACM's validation record, and answers 202 with `stage: "certificate"` and that record until then; a repeat finds the certificate and creates nothing twice (ADR-0018). Once the certificate has validated, the call creates the dedicated distribution tenant and writes the domain's `host#` key, which routes requests and records its owner (`t`, `ac`), and answers 200. A failed or timed-out validation gets 422. A changed or dropped domain removes the old `host#<d>` at once and its distribution tenant and certificate in two phases (§3.4 steps 3 to 5). The domain is never a sign-in target: its users sign in on `signInHost` (§3.5). Cell taken from the control plane, never the body. Checks §3.4. 200, or 202 while the challenge or the certificate is pending |
+| `PutTenantRoute` | `PUT /tenants/{tenantId}` | global hook role (route hook, deployment create and update); edge operator role to set `customDomain` | Body `{displayName, customDomain?}`. `displayName` is stored as §4.1 says. The entry records the deployment's `createdAt` as `dt`. A new `tenant#` entry gets `s: active`; a write to an existing entry keeps its `s`, from either role, and only `UpdateTenantRouteStatus` changes it. A hook put whose deployment `createdAt` differs from the stored `dt` replaces the entry as a new one (§3.4 step 5). Only the edge operator role may send `customDomain`, and only while `dedicatedDomains` is on (400 otherwise); the global hook role that sends it gets 403, and its call without it keeps the stored domain. The operator's call sets the domain, or drops it when `customDomain` is absent. A new domain is one host name of at most 64 characters with no wildcard, outside `appDomain` and held by no other tenant. The call writes it as `d` on `tenant#` first, with a domain challenge for this tenant and domain, and answers 202 with `stage: "domain-challenge"` and the TXT record to publish, `_tfd-challenge.<d>` `tfd-verify=<token>`, valid for 7 days. A repeat resolves that record: until it holds this tenant's token the call answers 202 again, with `challenge: "missing"`, `"mismatch"` or `"unresolved"` (a resolver error, never a pass), and an expired challenge gets a new token. Once it passes, the call requests the domain's ACM certificate in `us-east-1`, which validates by DNS once the tenant publishes ACM's validation record, and answers 202 with `stage: "certificate"` and that record until then; a repeat finds the certificate and creates nothing twice (ADR-0018). Once the certificate has validated and the record still holds the token, the call creates the dedicated distribution tenant and writes the domain's `host#` key, which routes requests and records its owner (`t`, `ac`), and answers 200. A failed or timed-out validation gets 422. A changed or dropped domain removes the old `host#<d>` at once and its distribution tenant and certificate in two phases (§3.4 steps 3 to 5). The domain is never a sign-in target: its users sign in on `signInHost` (§3.5). Cell taken from the control plane, never the body. Checks §3.4. 200, or 202 while the challenge or the certificate is pending |
 | `DeleteTenantRoute` | `DELETE /tenants/{tenantId}` | global hook role (route hook, deployment delete); edge operator role, to clear a route a skipped hook left | Removes the `tenant#` key, the pooled host's `host#` key and the `host#<d>` key its `d` names, each `host#` key only when its `t` names the tenant (§3.4). It disables the distribution tenant of that `d`, and the sweeper deletes it and its certificate, each only when its tags name this tenant (§3.4 step 5). For the global hook role, 409 while the deployment is neither missing nor `DELETING`. 200, also when absent |
 | `DeleteHostRoute` | `DELETE /hosts/{host}` | edge operator role | Removes one `host#` key whatever its `t` and `ac`, and the `d` of the tenant it names when `d` is that host, to clear a key left behind. That domain's distribution tenant and certificate then go in two phases (§3.4 step 5). 200, also when absent |
 | `UpdateTenantRouteStatus` | `PUT /tenants/{tenantId}/status` | edge operator role | Body `{status}` |
@@ -1371,7 +1415,7 @@ Each spike reports its deploy and destroy time.
 | S-7 | Can the router decode a `tenant-identity` access token's payload within the CloudFront Functions limits? | `tenant_id` read from a real token; compute utilisation under 50 %; 401 on a malformed token. **Passed 2026-11-13**: 13-14 % compute, 401 at 9-10 % (ADR-0005) |
 | S-8 | Can an API Gateway resource policy admit a role name in any account through `aws:PrincipalArn`, and does the request context give the caller's account? | a provisioning role in the second account reaches the registrar; a role of another name is refused. **Passed 2026-11-13** with one design fix: the second account's provisioning role got 200 with `identity.accountId` and `userArn` in the request context; another role name got 403. The edge account's own admin also got 200 through its identity policy, so the resource policy adds an explicit `Deny` with `ArnNotLike` (§3.4, ADR-0013). Deploy 75 s, destroy 33 s. The result holds for the principal ADR-0017 admits instead, the control plane's `<fleet>-global-hook` role: one role ARN, matched by the same cross-account `aws:PrincipalArn` condition and guarded by the same `Deny` |
 | S-9 | Does a client-credentials token from the registrar's own vendor IdP client pass the control plane authorizer (single `audience`, required `sub` and `role`)? | `GetCell` returns 200 with that token, the token's `role` is the reader value, and a write returns 403. **Failed 2026-11-13; fallback proven**: the token has no `aud` (`sub` equals `client_id`), and the audience check denies it. A V3 trigger on the Essentials plan adds `role: control-plane:reader` but its `aud` override is ignored. With a `client_id` allow-list in place of the audience check, the same token is allowed with the reader grant (ADR-0015, §6.1). Deploy 36 s per phase, destroy 61 s |
-| S-10 | What does the registrar's Lambda function, outside a VPC, see from its default resolver for a challenge record (ADR-0018)? | the resolver it uses is reported; a TXT record published under a fresh name is seen on the first lookup; after a lookup that found no record, the time until a newly published record is seen is measured against the zone's negative-caching TTL; after a value change, the time until the new value is seen is measured against the record's TTL; a record split into several strings is read whole. Each figure is the delay an operator meets between publishing and a passing repeat (§3.4 step 5) |
+| S-10 | What does the registrar's Lambda function, outside a VPC, see from its default resolver for a challenge record (ADR-0018)? | the resolver it uses is reported; a TXT record published under a fresh name is seen on the first lookup; after a lookup that found no record, the time until a newly published record is seen is measured against the zone's negative-caching TTL; after a value change, the time until the new value is seen is measured against the record's TTL; a record split into several strings is read whole; the longest the resolver keeps a passing answer, against a record whose TTL is above it (its TTL cap). The first figures are the delay an operator meets between publishing and a passing repeat; the TTL cap is how long a removed record still passes, which delays the daily re-check's alarm by that much (§3.4 step 5) |
 
 ## 10. Integration test outline
 
@@ -1380,9 +1424,13 @@ in two accounts: the edge account, which also hosts the control plane and
 cell A, and a second account registered tenant-owned, hosting cell B. It
 reuses the `tenant-identity` shared pool, and reuses a `control-plane`
 deployment when one is found, deploying one otherwise (Q-2). It needs a
-public hosted zone for a test domain (Q-1), with `appDomain` a name
-below the zone's apex, so that a second name in the zone,
-`TFD_DEDICATED_DOMAIN`, lies outside `appDomain` for step 14.
+public hosted zone for a test domain (Q-1). Its test inputs, none of
+them committed, are `TFD_APP_DOMAIN`, the `appDomain`, which must be a
+name below the zone's apex; `TFD_HOSTED_ZONE_ID`, the zone's id; and
+`TFD_DEDICATED_DOMAIN`, a second name in the zone, outside `appDomain`,
+for step 14. The test role holds `route53:ChangeResourceRecordSets` on
+that zone only, to write step 14's TXT records, and `route53:GetChange`
+to wait for each change.
 `test/integ.single.ts` covers the default mode; `test/integ.host.ts` repeats the steps marked (host) with
 `addressing: 'host'`.
 
@@ -1402,8 +1450,10 @@ checks (steps 3, 11 and 18) use a fixture `host#` entry and
 `cloudfront:TestFunction`, so they deploy no distribution tenant and no
 certificate. Step 14 runs the domain challenge against the real
 `TFD_DEDICATED_DOMAIN`: it requests one certificate, creates no
-distribution tenant, and adds two waits of a little over 60 s for the
-TXT record's TTL. The control plane shares the edge account here, so the
+distribution tenant, and adds three waits of a little over 60 s for the
+TXT record's TTL, three daily sweeper runs started by hand, two stack
+updates of the edge stack and a wait of up to 15 minutes for the
+sweeper to delete the certificate. The control plane shares the edge account here, so the
 route hook's call is a same-account call; spike S-8 covered the
 cross-account form of the same `aws:PrincipalArn` match. The
 identity-side grant that `RouteHookAccess` gives the hook role, which
@@ -1490,12 +1540,22 @@ only a cross-account call needs, is not exercised here.
     registrar holds one certificate for `<dd>`, tagged with `b`. `a`'s
     call for `<dd>` now gets 409 (§3.4 step 4), and `a`'s entry gets no
     token. The test publishes no ACM record and makes no further call
-    for `b`, so no distribution tenant is created. It drops `<dd>` from
-    `b` and deletes the TXT records; the sweeper deletes the
-    certificate, which step 23's leftover check confirms. A former
-    holder whose challenge had passed differs only by a certificate
-    the sweeper deletes before the domain is free, so the test does
-    not build one.
+    for `b` with `<dd>`, so no distribution tenant is created. `b`'s
+    challenge has passed, so the daily re-check covers it: the test
+    removes `tfd-verify=<Tb>`, waits past the TTL and starts the
+    sweeper's daily run three times in a row. Each run logs a miss for
+    `b` and `<dd>` with no token in the line, and the third also logs
+    the three-miss line and adds one count to the re-check metric. With
+    `b` still holding `<dd>`, a stack update that turns
+    `dedicatedDomains` off fails on the custom resource check and rolls
+    back, and `b`'s entry still holds `d`. The test drops `<dd>` from
+    `b`, deletes the TXT records and waits until the sweeper has
+    deleted the certificate (one 15-minute run at most). The same stack
+    update then succeeds, and the edge operator role's `PutTenantRoute`
+    for `a` with `customDomain` `<dd>` gets 400. Step 23's leftover
+    check confirms the certificate is gone. A former holder whose
+    challenge had passed differs only by a certificate the sweeper
+    deletes before the domain is free, so the test does not build one.
 15. Wait 60 s for log delivery (33 s in S-1). Per-tenant counts name
     `a` and `b`, queried in `us-east-1` where the log group is
     (ADR-0010), from `viewer-request-log-data` in both modes (§3.1); in
@@ -1598,13 +1658,24 @@ it gets 400 once the old id is removed. It adds three stack updates, the
 60 s propagation wait and the 10-minute `state` lifetime, so at least
 11 minutes plus the updates.
 
+Not tested end to end, and covered by unit tests with a stubbed
+resolver or clock instead: the expiry of an open challenge and the new
+token it gets (the 7-day `dx` has no test-only override); a resolver
+error answered as `unresolved`, on an operator call and as an error
+line in the daily re-check (in the public test zone only a lame
+delegation makes the resolver fail, and that would leave a dangling
+delegation); a CNAME at the challenge name; the lookup before the
+`host#<d>` write (the test issues no certificate); and the restart
+after an ETag conflict on a challenge write. The alarm's notification
+is not checked; step 14 checks the metric count it watches.
+
 ## 11. Open questions
 
 | # | Question | Needed by |
 |---|---|---|
-| Q-1 | Which public hosted zone can the test account use for `appDomain`? **Answered 2026-11-16**: a public zone for a delegated test subdomain in the edge account, with its own SPF, DKIM and DMARC records. The spikes and the integration test take its name and zone id as inputs (`TFD_APP_DOMAIN`, `TFD_HOSTED_ZONE_ID`); neither is committed | spike S-1 |
+| Q-1 | Which public hosted zone can the test account use for `appDomain`? **Answered 2026-11-16**: a public zone for a delegated test subdomain in the edge account, with its own SPF, DKIM and DMARC records. The spikes and the integration test take its name and zone id as inputs (`TFD_APP_DOMAIN`, `TFD_HOSTED_ZONE_ID`), and the integration test also takes `TFD_DEDICATED_DOMAIN`, with `appDomain` below the zone's apex and the test role's `route53:ChangeResourceRecordSets` scoped to the zone (§10); none is committed | spike S-1 |
 | Q-2 | Does the integration test deploy its own control plane, or reuse one when found and skip otherwise? | integration test |
-| Q-3 | Does the dedicated tenant (custom domain) path belong in this sample or in a follow-up, and how does the vendor confirm that a tenant controls a domain before the edge operator role sets its `customDomain`? A validated certificate is not enough: ACM reuses one validation record per domain name per account, so it proves the edge account's record is in DNS, not which tenant published it, and a former holder's record keeps validating. **Answered 2026-11-18** (ADR-0018): the path stays in this sample, off unless the deployer turns on `dedicatedDomains` (§3.6). The registrar issues a 32-byte random token bound to the tenant and the domain, kept as `dk` with a 7-day expiry `dx` on the `tenant#` entry (§4.1), and answers 202 with `_tfd-challenge.<domain>` TXT `tfd-verify=<token>`. A repeat resolves the record with the Lambda function's default resolver and requests the certificate only when it holds this tenant's token (§3.4 step 5). The sweeper re-checks routed domains daily and alarms; the operator drops a domain that changed owner. Spike S-10 measures the resolver | scope |
+| Q-3 | Does the dedicated tenant (custom domain) path belong in this sample or in a follow-up, and how does the vendor confirm that a tenant controls a domain before the edge operator role sets its `customDomain`? A validated certificate is not enough: ACM reuses one validation record per domain name per account, so it proves the edge account's record is in DNS, not which tenant published it, and a former holder's record keeps validating. **Answered 2026-11-18** (ADR-0018): the path stays in this sample, off unless the deployer turns on `dedicatedDomains` (§3.6). The registrar issues a 32-byte random token bound to the tenant and the domain, kept as `dk` with a 7-day expiry `dx` on the `tenant#` entry (§4.1), and answers 202 with `_tfd-challenge.<domain>` TXT `tfd-verify=<token>`. A repeat resolves the record with the Lambda function's default resolver and requests the certificate only when it holds this tenant's token (§3.4 step 5). The sweeper re-checks routed domains daily and alarms when one tenant and domain misses three daily runs in a row; the operator drops a domain that changed owner. Spike S-10 measures the resolver | scope |
 | Q-4 | Should the integration test also compose `agentic-runtime-isolation` for `/agents/*`, or reuse a deployment only when one is found? | integration test |
 | Q-5 | Route registration depends on the control plane's global hooks (control-plane R-39 to R-46, ADR-0044), which are Proposed and not yet merged. Does their final shape keep what ADR-0017 uses: `POST` hooks only after a successful script, `PRE` delete hooks with three attempts that cannot stop a delete, one `<fleet>-global-hook` role, `SCRIPT_OUTPUTS` and `globalHookManagedPolicyArns`? If not, ADR-0017 is revisited. ADR-0017 stays Proposed and ADR-0013 Accepted until ADR-0044 is accepted, and the control-plane hooks branch merges before this one | build start |
 | Q-6 | With hooks, an integration test that reuses a control plane (Q-2) also changes it: it attaches a policy to `<fleet>-global-hook` and registers two global hooks, which then run on every application's operations, and a third, `tfd-probe`, while step 20 runs. The test therefore needs three of the five global hook slots free. Is that acceptable on a shared control plane, or does the test always deploy its own? | integration test |
