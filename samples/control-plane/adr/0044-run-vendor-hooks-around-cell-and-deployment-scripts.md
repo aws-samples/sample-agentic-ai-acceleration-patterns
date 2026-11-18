@@ -463,7 +463,10 @@ as a consumer of a global post hook.
   refused start is tried again for up to 5
   minutes; then a create or update ends in a named `*_FAILED` ("cannot
   start") rather than a silent wait, and a delete hook spends its
-  budget and is skipped (T42, T43).
+  budget and is skipped (T42, T43). A throttle gets only the transient
+  `Retry`, about 30 seconds with no jitter (H-11); one that outlasts
+  it ends the attempt as "start outcome unknown", which fails a create
+  or update and counts against a delete hook's three attempts.
 - A start whose repeats all failed ends "start outcome unknown" and may
   hide a build that runs until CodeBuild stops it, within q + T. A
   hook on create or update, pre or post, hidden this way can still
@@ -549,7 +552,7 @@ as a consumer of a global post hook.
     the §10 near miss included, each in under 1 ms.
   - H-11: a request-response `startBuild` or `stopBuild` throttled by
     CodeBuild's request rate (one burst of 200 calls per call type, at
-    about 42 calls a second, no `Retry`) fails with the generic
+    42 to 45 calls a second, no `Retry`) fails with the generic
     `CodeBuild.AWSCodeBuildException`, and only the cause names the
     `ThrottlingException`. That name goes to the `Retry` under the
     same token, never to the refusal `Catch`. No burst call created a
