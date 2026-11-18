@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-11-09
 - Amends: ADR-0002, ADR-0012, ADR-0019, ADR-0022
-- Amended by: ADR-0028, ADR-0029, ADR-0044
+- Amended by: ADR-0028, ADR-0029, ADR-0044, ADR-0047
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -32,3 +32,5 @@ Single-account deployments gain one step: register the home account (ADR-024); t
 **Amended by ADR-0029 (2026-11-09):** the external id is required, not recommended, for tenant-owned accounts; `PutAccount` refuses `owner: TENANT` without one. Vendor-owned accounts may still omit it.
 
 **Amended by ADR-0044 (2026-11-17):** each build role trusts CodeBuild only on its own project's `aws:SourceArn`, an ARN computed from the project's fleet-derived name, and carries the control plane deny, as do the two pair roles of the stack's own account. The pair's trust policy is unchanged and names neither hook role.
+
+**Amended by ADR-0047 (2026-11-18):** the cell provisioning role takes the account owner's managed policies through `cellBuildManagedPolicyArns`, as the tenant role takes `tenantBuildManagedPolicyArns`. In the stack's own account the control plane deny of ADR-0044 stays on that role and overrides any attached policy that grants a denied action.

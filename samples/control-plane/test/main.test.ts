@@ -2,15 +2,17 @@
 // SPDX-License-Identifier: MIT-0
 
 import { App, Environment, Token } from 'aws-cdk-lib';
-import { Match, Template } from 'aws-cdk-lib/assertions';
+import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import { buildEnvironment, evaluateJsonata } from './workflow-jsonata';
 import { CellAccountStack, CellAccountStackProps } from '../src/cell-account/cell-account.cdk';
 import { isFullCommitSha, sourcePinningWarning } from '../src/shared/service-config';
 import {
   TenantStack,
   TenantStackProps,
+  validateCellBuildManagedPolicyArns,
   validateTenantBuildManagedPolicyArns,
 } from '../src/tenant/tenant.cdk';
+import { validateConcurrentBuildLimit } from '../src/tenant/validation';
 
 // Skip NodejsFunction esbuild bundling in unit tests - assertions target
 // infrastructure shape, not bundle contents.
@@ -235,7 +237,7 @@ describe('TenantStack', () => {
     expect(format.status).toBe('$context.status');
   });
 
-  test('every CodeBuild project caps concurrent builds (T16 / M17)', () => {
+  test('every CodeBuild project caps concurrent builds at 5 by default (T16 / M17)', () => {
     const projects = Object.values(template.findResources('AWS::CodeBuild::Project'));
     expect(projects).toHaveLength(4);
     for (const project of projects as any[]) {
@@ -474,6 +476,107 @@ describe('tenantBuildManagedPolicyArns (ADR-022)', () => {
     // The pure function reports the same problem for a token identity.
     expect(() => validateTenantBuildManagedPolicyArns([policyA], { partition: 'aws', account: '${Token[AWS.AccountId.0]}' }))
       .toThrow(/account must be resolved at synth time/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0047: deployer-supplied managed policies on the cell provisioning role.
+// ---------------------------------------------------------------------------
+describe('cellBuildManagedPolicyArns (ADR-0047)', () => {
+  const account = '123456789012';
+  const env: Environment = { account, region: 'eu-central-1' };
+  const cellPolicy = `arn:aws:iam::${account}:policy/CellBootstrapAssume`;
+  const tenantPolicy = `arn:aws:iam::${account}:policy/PlatformInvokePolicy`;
+
+  test('each list attaches to its own role in the home account, and to nothing else', () => {
+    const template = synth(
+      { cellBuildManagedPolicyArns: [cellPolicy], tenantBuildManagedPolicyArns: [tenantPolicy] },
+      env,
+    );
+    const roles = Object.values(template.findResources('AWS::IAM::Role')) as any[];
+    const byName = (name: string) => roles.find((role) => role.Properties.RoleName === name);
+    expect(byName('control-plane-cell-provisioning').Properties.ManagedPolicyArns).toEqual([cellPolicy]);
+    expect(byName('control-plane-tenant-provisioning').Properties.ManagedPolicyArns).toEqual([tenantPolicy]);
+    const withCellPolicy = roles.filter((role) => JSON.stringify(role.Properties.ManagedPolicyArns ?? []).includes(cellPolicy));
+    expect(withCellPolicy).toHaveLength(1);
+    const { cell, tenant } = buildProjects(template);
+    expect(serviceRole(template, cell).Properties.ManagedPolicyArns).toBeUndefined();
+    expect(serviceRole(template, tenant).Properties.ManagedPolicyArns).toBeUndefined();
+  });
+
+  test('a bad ARN fails synth naming the input and the ADR; an environment-agnostic stack rejects a non-empty list', () => {
+    expect(() => synth({ cellBuildManagedPolicyArns: ['arn:aws:iam::210987654321:policy/P'] }, env))
+      .toThrow(/Invalid cellBuildManagedPolicyArns deployment input \(ADR-0047\)[\s\S]*is in account 210987654321/);
+    expect(() => synth({ cellBuildManagedPolicyArns: ['arn:aws:iam::aws:policy/AdministratorAccess'] }, env))
+      .toThrow(/not a customer-managed IAM policy ARN/);
+    expect(() => synth({ cellBuildManagedPolicyArns: [cellPolicy] }))
+      .toThrow(/must be resolved at synth time/);
+    expect(() => validateCellBuildManagedPolicyArns('x', { partition: 'aws', account }))
+      .toThrow(/must be an array of strings/);
+  });
+
+  test('the account role pair stack attaches the cell list to its cell role in THIS account', () => {
+    const app = new App();
+    const stack = new CellAccountStack(app, 'cell-account', {
+      controlPlaneAccountId: '999999999999',
+      cellBuildManagedPolicyArns: ['arn:aws:iam::222222222222:policy/CellBootstrapAssume'],
+      env: { account: '222222222222', region: 'eu-central-1' },
+    });
+    const roles = Object.values(Template.fromStack(stack).findResources('AWS::IAM::Role')) as any[];
+    const cellRole = roles.find((r) => r.Properties.RoleName === 'control-plane-cell-provisioning');
+    const tenantRole = roles.find((r) => r.Properties.RoleName === 'control-plane-tenant-provisioning');
+    expect(cellRole.Properties.ManagedPolicyArns).toEqual(['arn:aws:iam::222222222222:policy/CellBootstrapAssume']);
+    expect(tenantRole.Properties.ManagedPolicyArns).toBeUndefined();
+    expect(() => new CellAccountStack(new App(), 'cell-account', {
+      controlPlaneAccountId: '999999999999',
+      cellBuildManagedPolicyArns: ['arn:aws:iam::333333333333:policy/Elsewhere'],
+      env: { account: '222222222222', region: 'eu-central-1' },
+    })).toThrow(/cellBuildManagedPolicyArns[\s\S]*is in account 333333333333/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0046: the concurrent build limit is a prop.
+// ---------------------------------------------------------------------------
+describe('concurrentBuildLimit (ADR-0046)', () => {
+  function synthStack(limit?: number): TenantStack {
+    const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+    return new TenantStack(app, 'test', {
+      vendorIdpIssuerUrl: 'https://idp.example.com',
+      vendorIdpAudience: 'control-plane',
+      concurrentBuildLimit: limit,
+    });
+  }
+  const limits = (stack: TenantStack) =>
+    (Object.values(Template.fromStack(stack).findResources('AWS::CodeBuild::Project')) as any[])
+      .map((project) => project.Properties.ConcurrentBuildLimit);
+  const warnings = (stack: TenantStack) =>
+    Annotations.fromStack(stack).findWarning('*', Match.stringLikeRegexp('concurrentBuildLimit'));
+
+  test('the value applies to every CodeBuild project, the two hook projects included', () => {
+    expect(limits(synthStack(50))).toEqual([50, 50, 50, 50]);
+    expect(limits(synthStack(1))).toEqual([1, 1, 1, 1]);
+    expect(limits(synthStack(100))).toEqual([100, 100, 100, 100]);
+  });
+
+  test('above 20 the synth warns, naming T16 and the CodeBuild quota; at 20 or below it does not', () => {
+    const above = warnings(synthStack(21));
+    expect(above).toHaveLength(1);
+    expect(JSON.stringify(above[0].entry.data)).toMatch(/T16/);
+    expect(JSON.stringify(above[0].entry.data)).toMatch(/BUILD_GENERAL1_SMALL builds must be at least 84/);
+    expect(JSON.stringify(above[0].entry.data)).toMatch(/each of the 4 CodeBuild projects/);
+    expect(warnings(synthStack(20))).toHaveLength(0);
+    expect(warnings(synthStack())).toHaveLength(0);
+  });
+
+  test('a value outside 1 to 100, a fraction, a non-number or a token fails synth', () => {
+    for (const bad of [0, -1, 101, 2.5, Number.NaN]) {
+      expect(() => synthStack(bad)).toThrow(/Invalid concurrentBuildLimit .* \(ADR-0046\): expected an integer from 1 to 100/);
+    }
+    expect(() => validateConcurrentBuildLimit('50')).toThrow(/Invalid concurrentBuildLimit "50"/);
+    expect(() => validateConcurrentBuildLimit(Token.asNumber({ resolve: () => 10 }))).toThrow(/not a CDK token/);
+    expect(() => synthStack(Number.POSITIVE_INFINITY)).toThrow(/Invalid concurrentBuildLimit Infinity/);
+    expect(validateConcurrentBuildLimit(undefined)).toBe(5);
   });
 });
 

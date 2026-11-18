@@ -463,6 +463,70 @@ npx cdk deploy \
   --context tenantBuildManagedPolicyArns='["arn:aws:iam::123456789012:policy/PlatformInvokePolicy"]'
 ```
 
+`cellBuildManagedPolicyArns` does for the cell provisioning role what
+`tenantBuildManagedPolicyArns` does for the tenant role (ADR-0047), with the
+same check, on the control plane stack and in the
+`cellAccount` context. Use it when a cell script deploys with a tool the
+account owner allows, such as a CDK bootstrap kept for cells. The cell role
+also trusts the control plane's API role, for the `PutAccount` handshake
+(ADR-0028), so the API role can use every policy attached here too. The
+platform stress test attaches one policy, which lets the cell build assume
+the deploy role and the two asset-publishing roles of a cell-only CDK
+bootstrap with the qualifier `cell`. It leaves out the bootstrap's lookup
+role, which holds `ReadOnlyAccess`: with it, the cell build and the API
+role could read every cell's data in the account. A cell app that needs
+context lookups commits them to `cdk.context.json` instead. Replace
+`<PARTITION>` (`aws` in most Regions), `<ACCOUNT_ID>` and `<REGION>`:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": "sts:AssumeRole",
+    "Resource": [
+      "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-deploy-role-<ACCOUNT_ID>-<REGION>",
+      "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-file-publishing-role-<ACCOUNT_ID>-<REGION>",
+      "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-image-publishing-role-<ACCOUNT_ID>-<REGION>"
+    ]
+  }]
+}
+```
+
+That policy is safe only in an account that holds nothing but cells, with a
+cell bootstrap whose execution role and every cell role carry a permissions
+boundary, and every cell role sits on a `/cell/` role path (ADR-0047).
+The control plane's own account never qualifies, because it holds the
+control plane: on the control plane stack, attach only policies scoped to
+the cell's own resources. There the cell role also carries the control
+plane's explicit deny (spec R-41, below), which overrides any attached
+policy that grants a denied action. A policy that reaches an administrator role, the
+default CDK bootstrap (`cdk-hnb659fds-*`), or any role other than the three
+`cdk-cell-*` roles above and the cell lookup role makes the cell build and
+the API role administrators of the account; one that reaches the cell
+lookup role lets both read the whole account. Without the lookup role, `cdk deploy` prints a
+warning that it could not assume it and goes on with the deploy role.
+
+`concurrentBuildLimit` (default 5, ADR-0046) caps concurrent builds on every
+CodeBuild project the control plane creates. It bounds what a leaked
+operator token or a runaway client can spend (T16, M17). A tenant build takes
+one to two minutes, so at 5 the control plane onboards about three tenants a
+minute. Raise it for a large onboarding wave. The value must be an integer
+from 1 to 100, or synth fails; above 20 the synth warns. Raise the account's
+CodeBuild quota for concurrent `BUILD_GENERAL1_SMALL` builds first, to at
+least the value times the number of CodeBuild projects the stack creates
+(four: the cell and tenant projects and the two hook projects); the service
+default is 1. The synth warning prints the figure. The
+execution surge alarm (more than 20 executions in five minutes, no actions)
+fires during any large onboarding:
+
+```bash
+npx cdk deploy \
+  --context vendorIdpIssuerUrl=https://YOUR_ISSUER \
+  --context vendorIdpAudience=YOUR_AUDIENCE \
+  --context concurrentBuildLimit=50
+```
+
 Two more optional inputs give the hook roles what their hooks need:
 `globalHookManagedPolicyArns` attaches customer-managed policies to
 `<fleet>-global-hook`, the role every global hook runs under, and
@@ -478,7 +542,8 @@ Every hook of a scope shares its role, so a policy attached for one
 hook is held by all of them. An explicit deny on both hook roles, both build
 roles and the home account's pair (spec R-41) keeps any attached policy from
 changing or starting the control plane's own workflow, projects, table, API,
-functions or roles. It does not stop reads: table reads and
+functions or roles; on the home pair that includes the policies of
+`tenantBuildManagedPolicyArns` and `cellBuildManagedPolicyArns`. It does not stop reads: table reads and
 `states:DescribeExecution` or `codebuild:BatchGetBuilds` on the control
 plane's executions and builds stay open to an attached policy, and those
 carry an account's `externalId` (spec N-10):
@@ -989,6 +1054,17 @@ application's cells (threat T5, the highest-consequence open item).
       attached policy widens all of them. Attach only a least-privilege
       policy the producing plane publishes, never a hand-written wildcard
       (T21, M18, ADR-022).
+- [ ] **Review every policy in `cellBuildManagedPolicyArns`.** The cell
+      provisioning role runs every cell script in its account, and the
+      control plane's API role can assume it too. Never attach a policy that
+      reaches an administrator role, the default CDK bootstrap or a CDK
+      lookup role (`ReadOnlyAccess`). On the
+      control plane stack, attach only policies scoped to the cell's own
+      resources; a policy that assumes CDK bootstrap roles belongs only in
+      an account that holds nothing but cells (T21, M18, ADR-0047).
+- [ ] **Size `concurrentBuildLimit` to the onboarding you expect**, not to
+      the largest you can imagine. It is the cost cap of T16; keep it at 5
+      or close to it outside an onboarding wave (M17, ADR-0046).
 - [ ] **Review every policy in `globalHookManagedPolicyArns` and
       `appHookManagedPolicyArns` the same way (T41, M30).** Every hook of a
       scope holds what any hook of that scope needs, in the vendor's most

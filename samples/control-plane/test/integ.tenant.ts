@@ -14,6 +14,7 @@ import { RegionInfo } from 'aws-cdk-lib/region-info';
 import { WriteNagSuppressionsToCloudFormationAspect } from 'cdk-nag';
 import { IConstruct } from 'constructs';
 import { CellAccountStack } from '../src/cell-account/cell-account.cdk';
+import { provisioningRoleName } from '../src/shared/fleet';
 import { suppressTemplateScanners } from '../src/shared/nag';
 import { TenantStack } from '../src/tenant/tenant.cdk';
 
@@ -42,7 +43,7 @@ import { TenantStack } from '../src/tenant/tenant.cdk';
  * plus the `role: "operator"` claim ADR-018 requires, added by a pre token
  * generation trigger); the sample cell + tenant scripts are hosted in an S3
  * bucket used as the applications' CodeBuild ProjectSource; and a probe
- * Lambda that assumes a read-only role in B to count SSM parameters there
+ * Lambda that assumes a read-only role in B to count SSM parameters (and list the cell role's managed policies) there
  * (the assertion provider itself runs in A only); and a build probe that
  * reads the PARAM_ variables of a CodeBuild project's latest build, which
  * is what the script of that build received; and a step probe that runs a
@@ -184,6 +185,11 @@ const partition = RegionInfo.get(region).partition ?? 'aws';
 /** Where the test's hooks record what they saw, in A (one path per hook scope). */
 const hookLedgerRoot = `/cp-integ/${fleetName}/hooks`;
 const hookPolicyName = (scope: 'global' | 'app') => `${fleetName}-${scope}-hook-test`;
+/** ADR-0047: the test policy B's owner attaches to B's cell provisioning role, named per run (`<fleet>-cell-extra`). */
+const cellExtraPolicyName = `${fleetName}-cell-extra`;
+const cellExtraPolicyArn = `arn:${partition}:iam::${accountB}:policy/${cellExtraPolicyName}`;
+/** ADR-0046: the stack under test raises the build cap above the default 5 (and the warning threshold). */
+const INTEG_CONCURRENT_BUILD_LIMIT = 50;
 
 const app = new App();
 
@@ -401,6 +407,16 @@ const ssmProbe = new lambda.Function(setup, 'SsmProbe', {
         region: event.region,
         credentials: { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken },
       });
+      if (event.attachedPoliciesOf) {
+        // ADR-0047: the managed policies on a role in B, as sorted ARNs.
+        const { IAMClient, ListAttachedRolePoliciesCommand } = require('@aws-sdk/client-iam');
+        const iam = new IAMClient({
+          region: event.region,
+          credentials: { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken },
+        });
+        const got = await iam.send(new ListAttachedRolePoliciesCommand({ RoleName: event.attachedPoliciesOf }));
+        return (got.AttachedPolicies || []).map((p) => p.PolicyArn).sort().join(',');
+      }
       let count = 0;
       for (const path of [event.path, ...(event.paths || [])].filter(Boolean)) {
         let token;
@@ -539,8 +555,22 @@ const accountBStack = new CellAccountStack(app, `${fleetName}-account-b`, {
   // The sample cell script reads its application's demo shared parameter
   // (ADR-034); B hosts cells of Y only.
   demoApplicationIds: [APP_Y],
+  // ADR-0047: B's owner attaches one policy to its cell provisioning role.
+  cellBuildManagedPolicyArns: [cellExtraPolicyArn],
   env: { account: accountB, region },
 });
+// The attached policy lives in B's own stack. The role names it by ARN, so
+// the policy is created first. It grants one read the sample scripts never
+// make, so it widens nothing the test depends on.
+const cellExtraPolicy = new iam.ManagedPolicy(accountBStack, 'IntegCellExtraPolicy', {
+  managedPolicyName: cellExtraPolicyName,
+  description: 'control-plane integ test only: proves cellBuildManagedPolicyArns attaches to the cell provisioning role (ADR-0047)',
+  statements: [new iam.PolicyStatement({
+    actions: ['ssm:GetParameter'],
+    resources: [accountBStack.formatArn({ service: 'ssm', resource: 'parameter', resourceName: `${fleetName}/cell-extra` })],
+  })],
+});
+accountBStack.roles.cellRole.node.addDependency(cellExtraPolicy);
 const probeRole = new iam.Role(accountBStack, 'IntegProbeRole', {
   roleName: probeRoleName,
   description: 'control-plane integ test only: lets the probe Lambda in the control plane account count SSM parameters here',
@@ -551,6 +581,11 @@ const probeRole = new iam.Role(accountBStack, 'IntegProbeRole', {
 probeRole.addToPolicy(new iam.PolicyStatement({
   actions: ['ssm:GetParameter', 'ssm:GetParameters', 'ssm:GetParametersByPath'],
   resources: [accountBStack.formatArn({ service: 'ssm', resource: 'parameter', resourceName: 'application-plane/*' })],
+}));
+// ADR-0047: step 1 reads which managed policies B's cell role carries.
+probeRole.addToPolicy(new iam.PolicyStatement({
+  actions: ['iam:ListAttachedRolePolicies'],
+  resources: [accountBStack.roles.cellRole.roleArn],
 }));
 
 // --- Stack under test (account A) ------------------------------------------
@@ -601,6 +636,8 @@ const stack = new TenantStack(app, fleetName, {
   // R-38: the listed machine client's token has no `aud` (step 1).
   vendorIdpClientIds: [listedMachineClient.userPoolClientId],
   vendorIdpRequiredScope: 'control-plane/read',
+  // ADR-0046: every project takes the deployer's cap (step 1 reads it back).
+  concurrentBuildLimit: INTEG_CONCURRENT_BUILD_LIMIT,
 });
 // Both shared CodeBuild projects pull the stamped source from the test
 // bucket (the source fetch runs under the build role, before the buildspec
@@ -829,6 +866,29 @@ function probeBatch(steps: ProbeStep[], labelled = false, extraLabels: [string, 
 integ.assertions
   .httpApiCall(`${apiUrl}tenants`, { method: 'GET' })
   .expect(ExpectedResult.objectLike({ status: 401 }));
+
+// 1 (deployment inputs). ADR-0046: all four projects, the two hook projects
+// included, carry the deployer's cap.
+integ.assertions
+  .awsApiCall('codebuild', 'batchGetProjects', {
+    names: [
+      stack.provisioning.cellProject.projectName,
+      stack.provisioning.tenantProject.projectName,
+      stack.provisioning.globalHookProject.projectName,
+      stack.provisioning.appHookProject.projectName,
+    ],
+  })
+  .expect(ExpectedResult.objectLike({
+    projects: [1, 2, 3, 4].map(() => Match.objectLike({ concurrentBuildLimit: INTEG_CONCURRENT_BUILD_LIMIT })),
+  }));
+// ADR-0047: B's cell role carries the owner's policy; B's tenant role is
+// not asked, the unit tests pin that it gets none.
+integ.assertions
+  .invokeFunction({
+    functionName: ssmProbe.functionName,
+    payload: JSON.stringify({ roleArn: probeRoleArn, region, attachedPoliciesOf: provisioningRoleName(accountBStack.roles.fleetName, 'cell') }),
+  })
+  .expect(ExpectedResult.objectLike({ Payload: JSON.stringify(cellExtraPolicyArn) }));
 
 // 1 (continued). Mint an operator identity in the vendor IdP.
 const cognitoPolicy = {

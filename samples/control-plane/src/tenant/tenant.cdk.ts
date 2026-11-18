@@ -3,9 +3,10 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { CfnOutput, Duration, RemovalPolicy, Stack, StackProps, Validations } from 'aws-cdk-lib';
+import { Annotations, CfnOutput, Duration, RemovalPolicy, Stack, StackProps, Validations } from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as codebuild from 'aws-cdk-lib/aws-codebuild';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
@@ -17,8 +18,11 @@ import { controlPlaneDenyStatements } from './control-plane-deny';
 import { validateHookManagedPolicyArns } from './hook.infra-validation';
 import { ProvisioningWorkflow } from './tenant.sfn';
 import {
+  CONCURRENT_BUILD_LIMIT_WARNING,
   stackIdentity,
+  validateCellBuildManagedPolicyArns,
   validateClientIds,
+  validateConcurrentBuildLimit,
   validateRequiredScope,
   validateRoleLists,
   validateTenantBuildManagedPolicyArns,
@@ -103,6 +107,23 @@ export interface TenantStackProps extends StackProps {
    */
   readonly tenantBuildManagedPolicyArns?: string[];
   /**
+   * Optional deployment input (ADR-0047): customer-managed IAM policy ARNs
+   * attached to the cell provisioning role this stack installs in its OWN
+   * account, validated as `tenantBuildManagedPolicyArns` is. The cell role
+   * also trusts the API role (ADR-0028), so an attached policy widens the
+   * API role too (T21). Default: none.
+   */
+  readonly cellBuildManagedPolicyArns?: string[];
+  /**
+   * Concurrent builds per CodeBuild project (M17, ADR-0046): an integer from
+   * 1 to 100, applied to every project the control plane creates. Above 20
+   * the synth warns: the cost guard of T16 is the deployer's value, and the
+   * account's CodeBuild quota for `BUILD_GENERAL1_SMALL` must hold the value
+   * times the number of CodeBuild projects the stack creates (the synth
+   * warning prints the figure). Default 5.
+   */
+  readonly concurrentBuildLimit?: number;
+  /**
    * Optional (spec R-41, ADR-044, M30): customer-managed IAM policy ARNs
    * attached to `<fleetName>-global-hook`, the role every global hook runs
    * under, validated exactly as `tenantBuildManagedPolicyArns` (this stack's
@@ -152,6 +173,7 @@ export const API_FUNCTION_TIMEOUT_SECONDS = 25;
 export {
   StackIdentity,
   stackIdentity,
+  validateCellBuildManagedPolicyArns,
   validateTenantBuildManagedPolicyArns,
 } from './validation';
 
@@ -182,6 +204,9 @@ export class TenantStack extends Stack {
     // Fail synth on a policy ARN outside this partition/account (ADR-022).
     const identity = stackIdentity(this);
     validateTenantBuildManagedPolicyArns(props.tenantBuildManagedPolicyArns, identity);
+    validateCellBuildManagedPolicyArns(props.cellBuildManagedPolicyArns, identity);
+    // M17 (ADR-0046): one build cap for every project; fail synth outside 1-100.
+    const concurrentBuildLimit = validateConcurrentBuildLimit(props.concurrentBuildLimit);
     // R-41: the two hook roles' policies, validated the same way; an ARN in
     // both lists fails synth (T41).
     const hookPolicies = validateHookManagedPolicyArns(
@@ -259,8 +284,21 @@ export class TenantStack extends Stack {
       fleetName: this.fleetName,
       globalHookRole,
       appHookRole,
+      concurrentBuildLimit,
     });
     this.provisioning = workflow;
+    if (concurrentBuildLimit > CONCURRENT_BUILD_LIMIT_WARNING) {
+      // ADR-0046: name the quota the account needs, from the projects the
+      // workflow actually created.
+      const projectCount = workflow.node.findAll().filter((c) => c instanceof codebuild.Project).length;
+      Annotations.of(this).addWarningV2(
+        'control-plane:concurrentBuildLimit',
+        `concurrentBuildLimit is ${concurrentBuildLimit}, above ${CONCURRENT_BUILD_LIMIT_WARNING} (ADR-0046): `
+        + `the cost guard of threat T16 (M17) is this value on each of the ${projectCount} CodeBuild projects. `
+        + 'The account\'s CodeBuild quota for concurrent BUILD_GENERAL1_SMALL builds must be at least '
+        + `${concurrentBuildLimit * projectCount}.`,
+      );
+    }
 
     // --- The home account's role pair (R-25, ADR-025) ----------------------
     // The control plane's own account is just another registered account:
@@ -271,6 +309,7 @@ export class TenantStack extends Stack {
       controlPlaneAccountId: this.account,
       fleetName: this.fleetName,
       tenantBuildManagedPolicyArns: props.tenantBuildManagedPolicyArns,
+      cellBuildManagedPolicyArns: props.cellBuildManagedPolicyArns,
       identity,
     });
     // Same-stack ordering only: the trust is by account + aws:PrincipalArn

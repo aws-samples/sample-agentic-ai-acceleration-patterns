@@ -21,7 +21,12 @@ import {
   readCellNamespaceStatement,
   readSharedResourcesStatement,
 } from '../shared/ssm-namespaces';
-import { stackIdentity, StackIdentity, validateTenantBuildManagedPolicyArns } from '../tenant/validation';
+import {
+  stackIdentity,
+  StackIdentity,
+  validateCellBuildManagedPolicyArns,
+  validateTenantBuildManagedPolicyArns,
+} from '../tenant/validation';
 
 export interface CellAccountRolesProps {
   /** The account the control plane stack runs in — the only principal the pair trusts. */
@@ -43,6 +48,15 @@ export interface CellAccountRolesProps {
    * control plane). Validated to be in this stack's partition and account.
    */
   readonly tenantBuildManagedPolicyArns?: string[];
+  /**
+   * Customer-managed IAM policy ARNs in THIS account, attached to the cell
+   * provisioning role in addition to its namespace grants (ADR-0047), for a
+   * cell script that deploys with a tool the owner allows, such as a scoped
+   * CDK bootstrap. Validated as `tenantBuildManagedPolicyArns` is. The cell
+   * role also trusts the control-plane API role (ADR-0028), so the API role
+   * can use every policy attached here too.
+   */
+  readonly cellBuildManagedPolicyArns?: string[];
   /** The stack's resolved partition and account, for the managed-policy ARN check. */
   readonly identity: StackIdentity;
 }
@@ -75,6 +89,7 @@ export class CellAccountRoles extends Construct {
     super(scope, id);
     this.fleetName = validateFleetName(props.fleetName ?? DEFAULT_FLEET_NAME);
     validateTenantBuildManagedPolicyArns(props.tenantBuildManagedPolicyArns, props.identity);
+    validateCellBuildManagedPolicyArns(props.cellBuildManagedPolicyArns, props.identity);
     const externalId = props.externalId === undefined ? undefined : validateExternalId(props.externalId);
     const partition = props.identity.partition;
 
@@ -108,6 +123,13 @@ export class CellAccountRoles extends Construct {
     acknowledgeSsmNamespaceGrant(this.cellRole, '/application-plane/shared/*');
     acknowledgeSsmNamespaceGrant(this.cellRole, '/application-plane/applications/*');
     acknowledgeSsmNamespaceGrant(this.cellRole, '/application-plane/cells/*');
+    // ADR-0047: the account owner widens their own cell role by exactly what
+    // they attach, as for the tenant role. Attached by reference, never read (P-3).
+    (props.cellBuildManagedPolicyArns ?? []).forEach((arn, index) => {
+      this.cellRole.addManagedPolicy(
+        iam.ManagedPolicy.fromManagedPolicyArn(this, `CellBuildManagedPolicy${index}`, arn),
+      );
+    });
 
     this.tenantRole = new iam.Role(this, 'TenantProvisioningRole', {
       roleName: provisioningRoleName(this.fleetName, 'tenant'),
@@ -161,7 +183,7 @@ export interface CellAccountStackProps extends StackProps, Omit<CellAccountRoles
  * installs the same pair in its own account, so this stack is for every
  * OTHER account. Inputs: the control plane account, the fleet name, an
  * external id (required for a tenant-owned account, ADR-029), and optional
- * managed policies for the tenant role.
+ * managed policies for the tenant role (ADR-022) and the cell role (ADR-0047).
  */
 export class CellAccountStack extends Stack {
   readonly roles: CellAccountRoles;

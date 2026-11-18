@@ -30,7 +30,7 @@ function synth(): { template: Template; definition: Record<string, any> } {
   const stack = new Stack();
   const table = new dynamodb.Table(stack, 'Table', { partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING } });
   const role = (id: string) => new iam.Role(stack, id, { assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com') });
-  new ProvisioningWorkflow(stack, 'Provisioning', { table, fleetName: FLEET, globalHookRole: role('GlobalHook'), appHookRole: role('AppHook') });
+  new ProvisioningWorkflow(stack, 'Provisioning', { table, fleetName: FLEET, globalHookRole: role('GlobalHook'), appHookRole: role('AppHook'), concurrentBuildLimit: 5 });
   const template = Template.fromStack(stack);
   const machine = Object.values(template.findResources('AWS::StepFunctions::StateMachine'))[0] as any;
   const text = (machine.Properties.DefinitionString['Fn::Join'][1] as unknown[])

@@ -31,6 +31,7 @@ function synth(fleetName = FLEET): { template: Template; definition: Record<stri
     fleetName,
     globalHookRole: role('GlobalHook'),
     appHookRole: role('AppHook'),
+    concurrentBuildLimit: 5,
   });
   const template = Template.fromStack(stack);
   const machine = Object.values(template.findResources('AWS::StepFunctions::StateMachine'))[0] as any;

@@ -1,0 +1,128 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Boundary spike (docs/stress-test.spec.md §8, decision 7): the cell execution
+# policy and the cell permissions boundary. The boundary is set on the cell
+# bootstrap's CloudFormation execution role (cdk bootstrap
+# --custom-permissions-boundary) and on every role a cell stack creates
+# (@aws-cdk/core:permissionsBoundary), so what the execution role can do is
+# the intersection of the two, and no role it creates can exceed the boundary.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Boundary spike, cell execution policy and permissions boundary
+Resources:
+  CellPermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: cell-permissions-boundary
+      Description: Caps the cell bootstrap execution role and every role a cell creates
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CellServices
+            Effect: Allow
+            Action:
+              - apigateway:*
+              - application-autoscaling:*
+              - execute-api:*
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+              - bedrock:Converse
+              - bedrock:ConverseStream
+              - bedrock-agentcore:*
+              - cloudwatch:*
+              - dynamodb:*
+              - kms:*
+              - lambda:*
+              - logs:*
+              - ssm:*
+              - s3:GetObject
+              - s3:GetBucketLocation
+              - s3:ListBucket
+              - sts:AssumeRole
+              - sts:TagSession
+              - sts:GetCallerIdentity
+              - xray:*
+              - iam:GetRole
+              - iam:GetRolePolicy
+              - iam:ListRolePolicies
+              - iam:ListAttachedRolePolicies
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:UpdateAssumeRolePolicy
+              - iam:UpdateRoleDescription
+              - iam:PassRole
+              - iam:CreateServiceLinkedRole
+            Resource: '*'
+          - Sid: DenyRoleWithoutTheBoundary
+            Effect: Deny
+            Action:
+              - iam:CreateRole
+              - iam:PutRolePermissionsBoundary
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                iam:PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/cell-permissions-boundary
+          - Sid: DenyBoundaryRemoval
+            Effect: Deny
+            Action:
+              - iam:DeleteRolePermissionsBoundary
+              - iam:CreateUser
+              - iam:CreateAccessKey
+              - iam:CreatePolicy
+              - iam:CreatePolicyVersion
+              - iam:DeletePolicy
+              - iam:DeletePolicyVersion
+              - iam:SetDefaultPolicyVersion
+            Resource: '*'
+  CellExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: cell-execution-policy
+      Description: What the cell bootstrap's CloudFormation execution role may create (bounded by cell-permissions-boundary)
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CellResources
+            Effect: Allow
+            Action:
+              - apigateway:*
+              # AWS::DynamoDB::GlobalTable deregisters its scalable targets on delete
+              - application-autoscaling:*
+              - bedrock-agentcore:*
+              - cloudwatch:*
+              - dynamodb:*
+              - kms:*
+              - lambda:*
+              - logs:*
+              - ssm:*
+              - s3:GetObject
+              - s3:GetBucketLocation
+              - s3:ListBucket
+              - iam:GetRole
+              - iam:GetRolePolicy
+              - iam:ListRolePolicies
+              - iam:ListAttachedRolePolicies
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:UpdateAssumeRolePolicy
+              - iam:UpdateRoleDescription
+              - iam:PassRole
+              - iam:CreateServiceLinkedRole
+            Resource: '*'
+Outputs:
+  BoundaryArn:
+    Value: !Ref CellPermissionsBoundary
+  ExecutionPolicyArn:
+    Value: !Ref CellExecutionPolicy

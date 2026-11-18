@@ -31,6 +31,7 @@ multi-tenant system, and the label narrows how readers place them.
 
 1. [Layout](#1-layout)
    1. [Composition](#11-composition)
+   2. [Shared stress assets](#12-shared-stress-assets-stress)
 2. [Design trail](#2-design-trail)
 3. [Diagrams](#3-diagrams)
 4. [Code](#4-code)
@@ -119,6 +120,35 @@ Consuming another sample follows these rules:
   path, or reuses an existing deployment it detects, and tears down only what
   it deployed (§5.2). A producer's own integration test never needs a
   consumer.
+
+### 1.2 Shared stress assets (`stress/`)
+
+The platform stress test (`docs/stress-test.spec.md`) composes several
+samples and needs code that belongs to none of them. That code lives in one
+root folder, `stress/` (stress ADR-0001), and nowhere else:
+
+```
+stress/
+├── .protoshield/   # scan config for stress/ (§6)
+├── adr/            # the stress test's ADRs and index (§2.2)
+├── application/    # the control-plane application whose scripts deploy cells and onboard tenants
+├── driver/         # the driver host
+├── k6/             # the shared k6 library
+├── results/        # one committed summary per run, no account or tenant ids
+├── spikes/<name>/  # one folder per spike: README with question, steps, results, teardown
+├── run.sh          # the runner
+├── *.ts            # the contract: tiers (tiers.ts), result schema, quota budget
+└── LICENSE         # MIT-0
+```
+
+- `stress/` holds test assets only: no construct, nothing a reader deploys
+  as a pattern, nothing a sample's `src/` imports.
+- Each sample keeps its own part of the test, its slice, in
+  `samples/<name>/scripts/stress/` (`slice.sh`, `slice.json`). A slice reads
+  `stress/` by path and never reads another sample's files (§1.1).
+- Files in `stress/` carry the MIT-0 header and follow §6 for scans.
+  §7 to §9 do not apply to `stress/`; the specification's pass criteria and
+  ADRs do.
 
 ## 2. Design trail
 
