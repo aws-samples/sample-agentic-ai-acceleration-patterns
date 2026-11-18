@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # Platform stress test: specification
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Scope: four samples composed as one agent platform: `control-plane`,
   `tenant-identity`, `tenant-front-door` (once merged) and
