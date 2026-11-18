@@ -17,13 +17,14 @@ import { UnauthorizedError } from '../../src/smithy/source/typescript-ssdk-codeg
 const operator: CallerContext = { operatorId: 'op-1', role: 'operator', grant: 'operator' };
 const reader: CallerContext = { operatorId: 'reader-1', role: 'control-plane:reader', grant: 'reader' };
 
-// Every operation of the model (spec §5): ten reads, twelve others.
+// Every operation of the model (spec §5): twelve reads, fourteen others.
 const ALL_OPERATIONS = [
   'CreateTenant', 'GetTenant', 'UpdateTenant', 'DeleteTenant', 'ListTenants',
   'CreateDeployment', 'GetDeployment', 'UpdateDeployment', 'DeleteDeployment', 'ListDeployments',
   'ListCells', 'GetCell', 'UpdateCell', 'DeleteCell',
   'PutAccount', 'GetAccount', 'ListAccounts', 'DeleteAccount',
   'PutApplication', 'GetApplication', 'ListApplications', 'DeleteApplication',
+  'PutHook', 'GetHook', 'ListHooks', 'DeleteHook',
 ];
 const WRITE_OPERATIONS = ALL_OPERATIONS.filter((op) => !READER_OPERATIONS.has(op));
 
@@ -39,10 +40,10 @@ function fakeService(): { ran: string[]; service: Record<string, (i: unknown, c:
   return { ran, service };
 }
 
-test('the model has twenty-two operations, ten of them reads (spec §5, R-36)', () => {
-  expect(ALL_OPERATIONS).toHaveLength(22);
-  expect(READER_OPERATIONS.size).toBe(10);
-  expect(WRITE_OPERATIONS).toHaveLength(12);
+test('the model has twenty-six operations, twelve of them reads (spec §5, R-36)', () => {
+  expect(ALL_OPERATIONS).toHaveLength(26);
+  expect(READER_OPERATIONS.size).toBe(12);
+  expect(WRITE_OPERATIONS).toHaveLength(14);
   for (const op of READER_OPERATIONS) {
     expect(ALL_OPERATIONS).toContain(op);
   }

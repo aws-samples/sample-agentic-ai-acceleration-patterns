@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { HookDefinition } from './hook.types';
 import { StoredCellParameterDeclaration, StoredParameterDeclaration } from './parameters';
 import { DataModel, DynamoDBItem, GSI1_INDEX_NAME } from '../shared/data-model';
 import { KeyBuilder } from '../shared/key-builder';
@@ -31,7 +32,9 @@ export const DEFAULT_PLACEMENT_STRATEGY: PlacementStrategy = PlacementStrategy.F
  * and cells are validated against and take defaults from (ADR-039,
  * ADR-040); they are not part of the definition and never stamped. Each is
  * kept exactly as read — `undefined` when the attribute is absent, which is
- * a different read from an empty list (§5.5). There is no status:
+ * a different read from an empty list (§5.5). `hooks` are the application
+ * hooks (ADR-044), part of the definition and stamped onto each new cell;
+ * replaced only when a request sends them. There is no status:
  * application operations are synchronous and run no build.
  */
 export interface ApplicationRecord {
@@ -43,6 +46,7 @@ export interface ApplicationRecord {
   readonly placementStrategy: PlacementStrategy;
   readonly parameters?: readonly StoredParameterDeclaration[];
   readonly cellParameters?: readonly StoredCellParameterDeclaration[];
+  readonly hooks?: readonly HookDefinition[];
   readonly cellCount: number;
   readonly createdAt: Date;
   readonly updatedAt: Date;
@@ -64,6 +68,7 @@ export interface ApplicationItem extends DynamoDBItem {
   readonly placementStrategy: PlacementStrategy;
   readonly parameters?: readonly StoredParameterDeclaration[];
   readonly cellParameters?: readonly StoredCellParameterDeclaration[];
+  readonly hooks?: readonly HookDefinition[];
   readonly cellCount: number;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -105,7 +110,9 @@ export interface KeptDeclarations<T> {
  * the attribute was absent, equality when present, `[]` included — so two
  * concurrent puts that each send one list cannot store one name in both.
  * Never conditioned on `updatedAt`, which cell creates and deletes write
- * too.
+ * too. `hooks` is written only when the request sent it (an empty list
+ * included, which clears it) and a kept list adds no condition, because
+ * hooks share no invariant with another list (R-29, §5.5).
  */
 export function putApplicationUpdate(input: {
   readonly applicationId: string;
@@ -118,6 +125,8 @@ export function putApplicationUpdate(input: {
   readonly parameters: readonly StoredParameterDeclaration[] | KeptDeclarations<StoredParameterDeclaration>;
   /** Sent cell parameter declarations, or the kept list as read. */
   readonly cellParameters: readonly StoredCellParameterDeclaration[] | KeptDeclarations<StoredCellParameterDeclaration>;
+  /** The validated hook list when the request sent one; absent keeps the stored list. */
+  readonly hooks?: readonly HookDefinition[];
   readonly now: string;
 }): ItemUpdate {
   const sets: string[] = [];
@@ -145,6 +154,11 @@ export function putApplicationUpdate(input: {
   };
   declarationList('parameters', input.parameters);
   declarationList('cellParameters', input.cellParameters);
+  if (input.hooks !== undefined) {
+    names['#hooks'] = 'hooks';
+    sets.push('#hooks = :hooks');
+    values[':hooks'] = input.hooks;
+  }
   return {
     updateExpression: [
       'SET #cellCount = if_not_exists(#cellCount, :zero)',
@@ -218,6 +232,7 @@ export class ApplicationDataModel implements DataModel<ApplicationRecord, Applic
       placementStrategy: record.placementStrategy,
       parameters: record.parameters,
       cellParameters: record.cellParameters,
+      hooks: record.hooks,
       cellCount: record.cellCount,
       createdAt: record.createdAt.toISOString(),
       updatedAt: record.updatedAt.toISOString(),
@@ -236,6 +251,7 @@ export class ApplicationDataModel implements DataModel<ApplicationRecord, Applic
       // compares the stored attribute with this value (§5.5).
       parameters: item.parameters,
       cellParameters: item.cellParameters,
+      hooks: item.hooks,
       cellCount: item.cellCount,
       createdAt: new Date(item.createdAt),
       updatedAt: new Date(item.updatedAt),

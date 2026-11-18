@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT-0
 
 import { APPLICATION_KEY_PREFIX } from './application.data-model';
+import { StoredLastGlobalHook, readLastGlobalHooks } from './hook.data-model';
+import { HookDefinition, LastGlobalHookEntry } from './hook.types';
 import { ParameterValues } from './parameters';
 import { DataModel, DynamoDBItem, GSI1_INDEX_NAME, GSI2_INDEX_NAME, GSI3_INDEX_NAME } from '../shared/data-model';
 import { KeyBuilder } from '../shared/key-builder';
@@ -43,7 +45,12 @@ export const DELETABLE_CELL_STATUSES: readonly LifecycleStatus[] = [
  * terminal transaction decrements it. `parameters` holds the cell
  * parameter values an operator set through `UpdateCell` (ADR-040), empty
  * at birth and never a default; kept exactly as read (`undefined` when the
- * attribute is absent, a different read from `{}`, R-34).
+ * attribute is absent, a different read from `{}`, R-34). `hooks` are the
+ * application hooks stamped with the rest of the definition (R-40, P-4):
+ * immutable, and the only source of the application hooks of every event of
+ * the cell and of its deployments; absent on a cell stamped before hooks
+ * existed. `lastGlobalHooks` is written by the workflow's terminal writes
+ * only (R-40).
  */
 export interface CellRecord {
   readonly cellId: string;
@@ -62,8 +69,10 @@ export interface CellRecord {
   readonly cellScripts: ScriptLocations;
   /** Stamped lifecycle scripts for per-tenant deployments in this cell. */
   readonly tenantScripts: ScriptLocations;
+  readonly hooks?: readonly HookDefinition[];
   readonly parameters?: ParameterValues;
   readonly lastBuildId?: string;
+  readonly lastGlobalHooks?: readonly LastGlobalHookEntry[];
   readonly statusReason?: string;
   readonly createdAt: Date;
   readonly updatedAt: Date;
@@ -93,8 +102,11 @@ export interface CellItem extends DynamoDBItem {
   readonly source: SourceDefinition;
   readonly cellScripts: ScriptLocations;
   readonly tenantScripts: ScriptLocations;
+  readonly hooks?: readonly HookDefinition[];
   readonly parameters?: ParameterValues;
   readonly lastBuildId?: string;
+  /** Written by the workflow's terminal writes: a list of maps, see `readLastGlobalHooks`. */
+  readonly lastGlobalHooks?: readonly StoredLastGlobalHook[];
   readonly statusReason?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -185,8 +197,10 @@ export class CellDataModel implements DataModel<CellRecord, CellItem> {
       source: record.source,
       cellScripts: record.cellScripts,
       tenantScripts: record.tenantScripts,
+      hooks: record.hooks,
       parameters: record.parameters,
       lastBuildId: record.lastBuildId,
+      lastGlobalHooks: record.lastGlobalHooks,
       statusReason: record.statusReason,
       createdAt: record.createdAt.toISOString(),
       updatedAt: record.updatedAt.toISOString(),
@@ -204,8 +218,10 @@ export class CellDataModel implements DataModel<CellRecord, CellItem> {
       source: item.source,
       cellScripts: item.cellScripts,
       tenantScripts: item.tenantScripts,
+      hooks: item.hooks,
       parameters: item.parameters,
       lastBuildId: item.lastBuildId,
+      lastGlobalHooks: item.lastGlobalHooks === undefined ? undefined : readLastGlobalHooks(item.lastGlobalHooks),
       statusReason: item.statusReason,
       createdAt: new Date(item.createdAt),
       updatedAt: new Date(item.updatedAt),

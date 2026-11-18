@@ -99,6 +99,12 @@ structure ApplicationSummary {
     @required
     cellParameters: CellParameterDeclarationList
 
+    /// The application hooks (ADR-044), part of the definition: each new
+    /// cell is stamped with the list current at its creation. Empty when
+    /// none.
+    @required
+    hooks: HookDefinitionList
+
     /// Current number of this application's cells.
     @required
     cellCount: ApplicationCellCount
@@ -132,8 +138,12 @@ list ApplicationList {
 /// existing application the definition and placement strategy are replaced
 /// and cellCount is never touched; cells already created keep their stamp.
 /// Each declaration list is replaced only when sent: an absent list keeps
-/// the current one, an empty list clears it (ADR-039, ADR-040). A put that
-/// keeps a list is conditioned on that list being unchanged since the
+/// the current one, an empty list clears it (ADR-039, ADR-040); the hooks
+/// list follows the same rule (ADR-044) without a write condition. A source
+/// or script path outside its charset (letters, digits and a few
+/// punctuation characters, no control character) is a ValidationException,
+/// as is a hook definition that fails the hook rules. A put that
+/// keeps a declaration list is conditioned on that list being unchanged since the
 /// service read it; ConflictError when it changed in between (retry).
 /// Synchronous.
 @authorizer("vendor-authorizer")
@@ -172,6 +182,12 @@ operation PutApplication {
         /// The parameters the cell scripts take. Absent keeps the current
         /// list (none on a new application); an empty list clears it.
         cellParameters: CellParameterDeclarationList
+
+        /// The application's hooks (ADR-044), at most five, each one a hook
+        /// definition with an id unique in the list. Absent keeps the current
+        /// list (none on a new application); an empty list clears it. A
+        /// changed list reaches only cells created afterwards.
+        hooks: HookDefinitionList
     }
 
     output := {
