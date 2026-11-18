@@ -1125,7 +1125,7 @@ A tenant is the customer; what is provisioned for it is a deployment (§5.2).
 
 | Op | HTTP | Code | Contract |
 |---|---|---|---|
-| `CreateTenant` | `POST /tenants` | **202** | Input `{name, description?}`. Validates, reads the global hooks (R-40), inserts the record `CREATING` with `deploymentCount = 0` (conditional on non-existence, P-5) and starts the workflow for `TENANT_CREATE` (§8.4). Returns the record, `tenantId` and `status` included. Nothing is provisioned. `GetTenant` polls it to `ACTIVE`, or to `CREATE_FAILED` when a hook failed, whose remedy is `DeleteTenant` with the returned id (§5.6). If Step Functions refused the start, the tenant is deleted again and the call answers 500 with nothing left; if the start's outcome is unknown, the tenant goes to `CREATE_FAILED` and the call answers 500, and `ListTenants` finds it (R-51). |
+| `CreateTenant` | `POST /tenants` | **202** | Input `{name, description?}`. Validates, reads the global hooks (R-40), inserts the record `CREATING` with `deploymentCount = 0` (conditional on non-existence, P-5) and starts the workflow for `TENANT_CREATE` (§8.4). Returns the record, `tenantId` and `status` included. Nothing is provisioned. `GetTenant` polls it to `ACTIVE`, or to `CREATE_FAILED` when a hook failed, whose remedy is `DeleteTenant` with the returned id (§5.6). If Step Functions refused the start, the tenant is deleted again and the call answers 500 with nothing left; if the start's outcome is unknown, the tenant goes to `CREATE_FAILED` and the call answers 500, and `ListTenants` finds it, unless the start is shown to have gone through, which answers 202 (R-51). |
 | `GetTenant` | `GET /tenants/{tenantId}` | 200 | The polling endpoint: `name`, `description`, `deploymentCount`, `status`, `statusReason`, `lastGlobalHooks`, and `pending` while an update is staged. 404 if missing. |
 | `UpdateTenant` | `PUT /tenants/{tenantId}` | **202** | Metadata only (`name`, `description`), never `deploymentCount` (R-21). Validates, reads the global hooks (R-40), then one conditional write stages the values in `pending` and moves the tenant to `UPDATING` (status `ACTIVE` or `UPDATE_FAILED`, R-48); the live `name` changes when the workflow commits after the `TENANT_UPDATE` pre hooks (§8.4). 404 if missing; 409 when in flight or from `CREATE_FAILED`, `DELETING` or `DELETE_FAILED`. |
 | `DeleteTenant` | `DELETE /tenants/{tenantId}` | **202** | **Empty tenants only** (P-10): one conditional write moves the tenant to `DELETING` (`attribute_exists AND deploymentCount = 0` and status `ACTIVE` or a `*_FAILED` status, R-49), the counterpart of the deployment claim, which needs a live tenant (§7.1); condition failure → 409. The workflow runs the `TENANT_DELETE` pre hooks, deletes the record, then runs the post hooks. Deployments are deleted first, one by one, through `DeleteDeployment`. |
@@ -3013,14 +3013,18 @@ the same name, or call `DescribeExecution`, before it decides.
   `CREATE_FAILED`, refused or unknown, not be deleted: an earlier
   execution ran its create hooks, for the same reason.
 - `UPDATING` → `UPDATE_FAILED` with `pending` removed (an `externalId`
-  the replace wrote stays, R-48); `DELETING` → `DELETE_FAILED`.
+  the replace wrote stays, R-48), conditioned also on
+  `attribute_exists(pending)`, so a compensation never marks failed a
+  change the execution has already committed (R-50);
+  `DELETING` → `DELETE_FAILED`.
 
 A compensating write whose condition fails is evidence in its own
 right. The service MUST then read the record once. When the record
 holds the same `operationId` in a status the execution writes
-(`ACTIVE`, or the `*_FAILED` status of the in-flight one), or is gone
-after a delete, the execution ran and finished first: the service MUST
-answer 202 with the record as read (for a deleted record, as the
+(`ACTIVE`, or the `*_FAILED` status of the in-flight one), holds it
+`UPDATING` with no `pending` (the commit landed and the execution is
+still running its `POST` hooks), or is gone after a delete, the
+execution ran: the service MUST answer 202 with the record as read (for a deleted record, as the
 request's `DELETING` write left it), never 500. A client that retries
 a `CreateTenant` therefore never makes a second tenant beside one that
 went `ACTIVE`. Any other result of that read answers 500.
@@ -3547,8 +3551,9 @@ insert whose start timed out and whose `DescribeExecution` answered
 and every other in-flight status by its `*_FAILED` status (R-50,
 R-51), that a retried start answered `ExecutionAlreadyExists`, and a
 compensation whose condition fails on a record holding the same
-`operationId` as `ACTIVE` or the matching `*_FAILED` status, or on a
-record a delete removed, answer 202 with no further write (R-51), that
+`operationId` as `ACTIVE`, the matching `*_FAILED` status or
+`UPDATING` without `pending`, or on a record a delete removed, answer
+202 with no further write (R-51), that
 the names of two operations accepted in the same millisecond differ
 (R-51), that the commit and every terminal
 write of a record event are conditioned on the execution's
