@@ -121,7 +121,8 @@ It can be replayed once the cause is fixed.
 | Component | Job |
 |---|---|
 | Ingest door | REST API, IAM auth (SigV4). `PutUsageEvents`, batches of up to 500 |
-| Ingest function | Verifies the caller is a registered emitter, checks each event's tenant against the caller's cell, validates the shape, writes accepted events to the raw stream and refused ones to the error store (ADR-0002) |
+| Ingest function | Verifies the caller is a registered emitter, checks each event's tenant against the caller's cell, validates the shape, publishes accepted events to the ingest bus and writes refused ones to the error store (ADR-0002) |
+| Ingest bus | EventBridge Custom Event Bus, 1-day retention, `DeduplicationId = <tenantId>#<eventId>`; a Firehose subscriber with a dead-letter queue (ADR-0002). With `ingestPath: DIRECT` the function writes to Firehose itself |
 | Raw stream | Amazon Data Firehose to S3, partitioned by event hour (`raw/hour=YYYY-MM-DDTHH/`) |
 | Registry | DynamoDB: emitters (one per cell), tenant bindings, meters, sinks |
 | Admin API | Same REST API, IAM auth: meters, sinks, registrations, usage reads, replay |
@@ -349,8 +350,9 @@ Hour states: `OPEN` → `COUNTED` (after `lateGraceMinutes`) →
 
 ## 7. Open questions
 
-1. Ingest after the check: straight to Firehose, or through an
-   EventBridge bus first (ADR-0002, Proposed).
+1. Ingest after the check: through the new EventBridge Custom Event Bus,
+   pending a spike (ADR-0002, Proposed); direct to Firehose with packed
+   records is the fallback.
 2. Application lifecycle events: does metering need `PutApplication` and
    `DeleteApplication` hooks (a new control-plane event), or do cell
    events cover it?
