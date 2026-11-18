@@ -93,7 +93,7 @@ Once built:
   test and of the role pair the account B stack installs, and in every
   other name the test creates that must be unique in an account or a
   Region: the probe role in B, the test policy on B's cell role
-  (`control-plane-integ-cell-extra`), the hook test paths and policies, and
+  (`<fleet>-cell-extra`), the hook test paths and policies, and
   the user pool domain prefix. The stack under test names its build
   projects and workflow after the fleet (spec R-41), so those differ
   per run as well.

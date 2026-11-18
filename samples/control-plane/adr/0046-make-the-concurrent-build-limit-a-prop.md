@@ -12,7 +12,7 @@ constant in `src/tenant/tenant.sfn.ts` (M17, threat T16): a leaked operator toke
 runaway client cannot fan out into unbounded build cost. A tenant build
 takes one to two minutes, so at 5 the control plane onboards about three
 tenants a minute. The platform stress test onboards 200 tenants per
-`medium` run and seeds 4,000 once at `large`: about 20
+`medium` run and seeds 4,000 once at `large` (stress ADR-0004): about 20
 hours at 5. A vendor with a large onboarding wave meets the same ceiling.
 The account's CodeBuild quota for the projects' compute size,
 `BUILD_GENERAL1_SMALL`, defaults to 1 concurrent build and is raised per

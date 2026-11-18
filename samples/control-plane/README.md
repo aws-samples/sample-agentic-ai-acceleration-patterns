@@ -348,9 +348,12 @@ account owner allows, such as a CDK bootstrap kept for cells. The cell role
 also trusts the control plane's API role, for the `PutAccount` handshake
 (ADR-0028), so the API role can use every policy attached here too. The
 platform stress test attaches one policy, which lets the cell build assume
-the four roles a `cdk deploy` uses in a cell-only CDK bootstrap with the
-qualifier `cell`. Replace `<PARTITION>` (`aws` in most Regions),
-`<ACCOUNT_ID>` and `<REGION>`:
+the deploy role and the two asset-publishing roles of a cell-only CDK
+bootstrap with the qualifier `cell`. It leaves out the bootstrap's lookup
+role, which holds `ReadOnlyAccess`: with it, the cell build and the API
+role could read every cell's data in the account. A cell app that needs
+context lookups commits them to `cdk.context.json` instead. Replace
+`<PARTITION>` (`aws` in most Regions), `<ACCOUNT_ID>` and `<REGION>`:
 
 ```json
 {
@@ -361,8 +364,7 @@ qualifier `cell`. Replace `<PARTITION>` (`aws` in most Regions),
     "Resource": [
       "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-deploy-role-<ACCOUNT_ID>-<REGION>",
       "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-file-publishing-role-<ACCOUNT_ID>-<REGION>",
-      "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-image-publishing-role-<ACCOUNT_ID>-<REGION>",
-      "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-lookup-role-<ACCOUNT_ID>-<REGION>"
+      "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-image-publishing-role-<ACCOUNT_ID>-<REGION>"
     ]
   }]
 }
@@ -375,7 +377,8 @@ The control plane's own account never qualifies, because it holds the
 control plane: on the control plane stack, attach only policies scoped to
 the cell's own resources. A policy that reaches the default CDK bootstrap
 (`cdk-hnb659fds-*`), or any role outside such a path, makes the cell build
-and the API role administrators of the account.
+and the API role administrators of the account; one that reaches a lookup
+role lets both read the whole account.
 
 `concurrentBuildLimit` (default 5, ADR-0046) caps concurrent builds on every
 CodeBuild project the control plane creates. It bounds what a leaked

@@ -11,7 +11,7 @@ namespace grants only. The tenant role already takes the account owner's
 managed policies through `tenantBuildManagedPolicyArns` (ADR-0022), so a
 tenant script can reach what its application needs. A cell script has no
 such path. An application whose cell is a CDK deployment, such as the
-platform stress test's, needs the cell role to assume the
+platform stress test's (stress ADR-0006), needs the cell role to assume the
 account's cell bootstrap roles, and nothing in the sample lets the account
 owner grant that.
 
@@ -34,10 +34,13 @@ Option 1. `CellAccountRolesProps` and `CellAccountStackProps` take
 `cellBuildManagedPolicyArns?: string[]`, validated like
 `tenantBuildManagedPolicyArns` (this stack's partition and account), and
 attached to the cell provisioning role. The README shows the one policy the
-stress application uses: `sts:AssumeRole` on the four `cdk-cell-*`
-bootstrap roles a deploy uses (deploy, file publishing, image publishing,
-lookup), named one by one as
+stress application uses (stress ADR-0006): `sts:AssumeRole` on three
+`cdk-cell-*` bootstrap roles (deploy, file publishing, image publishing),
+named one by one as
 `arn:${Partition}:iam::<account>:role/cdk-cell-<name>-role-<account>-<region>`.
+It leaves out the lookup role, which holds `ReadOnlyAccess`, so neither
+the cell build nor the API role can read every cell's data; a cell app
+commits its context lookups to `cdk.context.json` instead.
 It states where that policy is safe: in a cell account that holds only
 cells, with a cell bootstrap whose execution role and every cell role carry
 a permissions boundary and sit on a `/cell/` role path.
@@ -52,7 +55,8 @@ The cell role trusts the control-plane API role as well as the cell build
 attached policy too; with the stress policy it can assume the cell
 bootstrap roles. The threat model's cell-role row gains that residual. A
 policy that reaches a default CDK bootstrap, or any role outside a scoped
-path, makes the cell build and the API role administrators of the account;
-the README says so beside the example. Revisit if the handshake can use a
+path, makes the cell build and the API role administrators of the account,
+and one that reaches a lookup role lets both read it all; the README says
+so beside the example. Revisit if the handshake can use a
 role of its own, so the API role leaves the cell role's trust, or if cell
 and tenant roles need the same policy set often enough to merge the props.
