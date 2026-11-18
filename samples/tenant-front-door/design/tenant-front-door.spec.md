@@ -522,8 +522,10 @@ existing origin. It serves two cases:
   on every `UpdateCell`, leaving the cell in `UPDATE_FAILED`. Such a
   cell stays unable to update under a front door, because a stamp is
   immutable, and once it is in `UPDATE_FAILED` it takes no new
-  deployment and no deployment update; its tenants stay routed, and
-  the vendor moves them to a new cell by delete and create. The
+  deployment and no deployment update. Tenants it already routes stay
+  routed; a tenant without a route, or one that needs an update, moves
+  to a new cell by delete and create. Backfill therefore runs before
+  any `UpdateCell` of such a cell. The
   definition-replacing `UpdateCell` field is a control-plane seam
   (control-plane §11).
 - **Origin change.** When a cell update moves the cell's API to a new
