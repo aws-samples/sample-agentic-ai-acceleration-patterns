@@ -263,23 +263,36 @@ beforeEach(() => {
 // Tenants: synchronous customer records (§5.1, ADR-037)
 // ---------------------------------------------------------------------------
 
-describe('CreateTenant (§5.1)', () => {
-  test('inserts the record with deploymentCount 0 under the not-exists guard; nothing provisioned', async () => {
-    const put = jest.fn().mockResolvedValue(undefined);
-    const service = makeService({ tenantRepo: { put } });
+describe('CreateTenant (§5.1, R-48)', () => {
+  test('reads the global hooks, inserts the record CREATING with deploymentCount 0 and an operationId, starts TENANT_CREATE, answers the record', async () => {
+    const calls: string[] = [];
+    const put = jest.fn().mockImplementation(async () => { calls.push('put'); });
+    const queryPartition = jest.fn().mockImplementation(async () => {
+      calls.push('readHooks');
+      return { items: [], nextToken: undefined };
+    });
+    const service = makeService({ tenantRepo: { put }, hookRepo: { queryPartition } });
 
     const output = await service.CreateTenant({ name: 'acme', description: 'first' }, context);
 
-    expect(put).toHaveBeenCalledTimes(1);
+    // R-40: the global hooks are read before the first write.
+    expect(calls).toEqual(['readHooks', 'put']);
     const [record, condition] = put.mock.calls[0];
-    expect(record).toMatchObject({ name: 'acme', description: 'first', deploymentCount: 0 });
+    expect(record).toMatchObject({ name: 'acme', description: 'first', deploymentCount: 0, status: 'CREATING' });
     expect(record.tenantId).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/); // ULID
+    expect(record.operationId).toMatch(new RegExp(`^${record.tenantId}-tenant-create-\\d{13}-[0-9a-f]{8}$`));
     expect(condition).toEqual({ conditionExpression: 'attribute_not_exists(PK)' });
-    expect(output.tenant).toMatchObject({ tenantId: record.tenantId, name: 'acme', deploymentCount: 0 });
-    // Still synchronous until the ADR-045 API change, which inserts it
-    // CREATING and starts TENANT_CREATE (§5.1); runs no build either way.
-    expect(output.tenant?.status).toBe('ACTIVE');
-    expect(sfnMock.commandCalls(StartExecutionCommand)).toHaveLength(0);
+    expect(output.tenant).toMatchObject({ tenantId: record.tenantId, status: 'CREATING', operationId: record.operationId });
+    // One execution named after the operationId; no build (§8.4).
+    expect(startedExecutionName()).toBe(record.operationId);
+    expect(startedWorkflowInput().recordEvent).toMatchObject({
+      event: 'TENANT_CREATE',
+      recordType: 'TENANT',
+      recordId: record.tenantId,
+      key: { PK: `TENANT#${record.tenantId}`, SK: 'META' },
+      operationId: record.operationId,
+      commit: { action: 'NONE', set: [], remove: [] },
+    });
   });
 
   test('a ULID collision (condition failure) is a 500 asking for a retry', async () => {
@@ -287,16 +300,38 @@ describe('CreateTenant (§5.1)', () => {
       tenantRepo: { put: jest.fn().mockRejectedValue(new ConditionFailedError('exists')) },
     });
     await expect(service.CreateTenant({ name: 'acme' }, context)).rejects.toBeInstanceOf(InternalServerError);
+    expect(sfnMock.commandCalls(StartExecutionCommand)).toHaveLength(0);
+  });
+
+  test('a failed global hook read is a 500 with nothing written (R-40)', async () => {
+    const put = jest.fn();
+    const service = makeService({
+      tenantRepo: { put },
+      hookRepo: { queryPartition: jest.fn().mockRejectedValue(new Error('throttled')) },
+    });
+    await expect(service.CreateTenant({ name: 'acme' }, context)).rejects.toBeInstanceOf(InternalServerError);
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  test('never writes a counter beyond the initial 0 (§4.3)', async () => {
+    const put = jest.fn().mockResolvedValue(undefined);
+    const service = makeService({ tenantRepo: { put } });
+    await service.CreateTenant({ name: 'acme' }, context);
+    expect(put.mock.calls[0][0].deploymentCount).toBe(0);
   });
 });
 
 describe('GetTenant', () => {
-  test('returns the record with its deploymentCount', async () => {
+  test('returns the record with its deploymentCount, status and staged update', async () => {
     const service = makeService({
-      tenantRepo: { get: jest.fn().mockResolvedValue(tenantRecord({ deploymentCount: 2 })) },
+      tenantRepo: {
+        get: jest.fn().mockResolvedValue(tenantRecord({ deploymentCount: 2, status: 'UPDATING', operationId: 'op-x', pending: { name: 'next' } })),
+      },
     });
     const output = await service.GetTenant({ tenantId: TENANT_ID }, context);
-    expect(output.tenant).toMatchObject({ tenantId: TENANT_ID, name: 'acme', deploymentCount: 2 });
+    expect(output.tenant).toMatchObject({
+      tenantId: TENANT_ID, name: 'acme', deploymentCount: 2, status: 'UPDATING', operationId: 'op-x', pending: { name: 'next' },
+    });
   });
 
   test('throws the modelled 404 for a missing tenant', async () => {
@@ -307,91 +342,130 @@ describe('GetTenant', () => {
   });
 });
 
-describe('UpdateTenant', () => {
-  test('updates only metadata via the existence-guarded write — never deploymentCount (R-21), no workflow', async () => {
-    const updateExisting = jest
-      .fn()
-      .mockResolvedValue(tenantRecord({ name: 'renamed', description: 'new' }));
-    const service = makeService({ tenantRepo: { updateExisting } });
+describe('UpdateTenant (§5.1, R-48)', () => {
+  test('stages the merged name and description in pending and moves to UPDATING in one write; live fields and deploymentCount untouched', async () => {
+    const existing = tenantRecord({ description: 'old', operationId: 'earlier-op' });
+    const transitionStatus = jest.fn().mockImplementation(async (_key, t) =>
+      tenantRecord({ ...existing, status: 'UPDATING', pending: t.setFields.pending, operationId: t.setFields.operationId }));
+    const service = makeService({ tenantRepo: { get: jest.fn().mockResolvedValue(existing), transitionStatus } });
 
-    const output = await service.UpdateTenant(
-      { tenantId: TENANT_ID, name: 'renamed', description: 'new' },
-      context,
-    );
+    const output = await service.UpdateTenant({ tenantId: TENANT_ID, name: 'renamed' }, context);
 
-    expect(output.tenant).toMatchObject({ name: 'renamed', description: 'new' });
-    const [key, update] = updateExisting.mock.calls[0];
+    const [key, transition] = transitionStatus.mock.calls[0];
     expect(key).toEqual({ PK: `TENANT#${TENANT_ID}`, SK: 'META' });
-    expect(update.updateExpression).toBe(
-      'SET #updatedAt = :updatedAt, #name = :name, #description = :description',
-    );
-    expect(Object.values(update.expressionAttributeNames).sort()).toEqual([
-      'description',
-      'name',
-      'updatedAt',
-    ]);
-    expect(JSON.stringify(update)).not.toContain('deploymentCount');
-    expect(sfnMock.commandCalls(StartExecutionCommand)).toHaveLength(0);
-  });
-
-  test('omitted fields are left as they are', async () => {
-    const updateExisting = jest.fn().mockResolvedValue(tenantRecord());
-    const service = makeService({ tenantRepo: { updateExisting } });
-    await service.UpdateTenant({ tenantId: TENANT_ID, description: 'only this' }, context);
-    expect(updateExisting.mock.calls[0][1].updateExpression).toBe(
-      'SET #updatedAt = :updatedAt, #description = :description',
-    );
-  });
-
-  test('maps a concurrent-delete condition failure to 404, not 500 (R-14)', async () => {
-    const service = makeService({
-      tenantRepo: { updateExisting: jest.fn().mockRejectedValue(new RecordGoneError('gone')) },
+    expect(transition).toMatchObject({
+      fromAnyOf: ['ACTIVE', 'UPDATE_FAILED'],
+      to: 'UPDATING',
+      absentStatusIsActive: true,
+      removeFields: ['statusReason'],
+      returnCurrentOnFailure: true,
+      extraCondition: { conditionExpression: '#operationId = :readOperationId', expressionAttributeValues: { ':readOperationId': 'earlier-op' } },
     });
-    await expect(
-      service.UpdateTenant({ tenantId: TENANT_ID, name: 'x' }, context),
-    ).rejects.toBeInstanceOf(ResourceNotFoundError);
+    // The omitted description keeps its stored value.
+    expect(transition.setFields.pending).toEqual({ name: 'renamed', description: 'old' });
+    expect(Object.keys(transition.setFields).sort()).toEqual(['operationId', 'pending']);
+    expect(JSON.stringify(transition)).not.toContain('deploymentCount');
+    expect(output.tenant).toMatchObject({ name: 'acme', status: 'UPDATING', pending: { name: 'renamed', description: 'old' } });
+    // TENANT_UPDATE commits name and description; the hooks see the new name.
+    const { recordEvent } = startedWorkflowInput();
+    expect(recordEvent.commit).toEqual({ action: 'UPDATE', set: ['name', 'description'], remove: [] });
+    expect(recordEvent.environment).toMatchObject({ EVENT: 'TENANT_UPDATE', TENANT_ID: TENANT_ID, TENANT_NAME: 'renamed' });
+    expect(startedExecutionName()).toBe(transition.setFields.operationId);
+  });
+
+  test('with no stored description the commit removes none it does not stage', async () => {
+    const transitionStatus = jest.fn().mockResolvedValue(tenantRecord({ status: 'UPDATING' }));
+    const service = makeService({ tenantRepo: { transitionStatus } });
+    await service.UpdateTenant({ tenantId: TENANT_ID, name: 'renamed' }, context);
+    expect(transitionStatus.mock.calls[0][1].setFields.pending).toEqual({ name: 'renamed' });
+    expect(startedWorkflowInput().recordEvent.commit).toEqual({ action: 'UPDATE', set: ['name'], remove: ['description'] });
+  });
+
+  test.each([
+    ['CREATING', true],
+    ['UPDATING', true],
+    ['CREATE_FAILED', false],
+    ['DELETING', false],
+    ['DELETE_FAILED', false],
+  ] as const)('from %s it is a 409 (retry hint: %s) with nothing written', async (status, hint) => {
+    const transitionStatus = jest.fn();
+    const service = makeService({ tenantRepo: { get: jest.fn().mockResolvedValue(tenantRecord({ status })), transitionStatus } });
+    const failure = await service.UpdateTenant({ tenantId: TENANT_ID, name: 'x' }, context).catch((e) => e);
+    expect(failure).toBeInstanceOf(ConflictError);
+    expect(failure.message.includes('retry the request')).toBe(hint);
+    expect(transitionStatus).not.toHaveBeenCalled();
+  });
+
+  test('a write that loses its condition is classified from ALL_OLD: gone → 404, another update accepted → 409 retry, in flight → 409', async () => {
+    const lost = (current: unknown) => makeService({
+      tenantRepo: { transitionStatus: jest.fn().mockRejectedValue(new StaleTransitionError('lost', current)) },
+    }).UpdateTenant({ tenantId: TENANT_ID, name: 'x' }, context).catch((e) => e);
+    expect(await lost(undefined)).toBeInstanceOf(ResourceNotFoundError);
+    const changed = await lost(tenantRecord({ operationId: 'newer-op' }));
+    expect(changed).toBeInstanceOf(ConflictError);
+    expect(changed.message).toContain('retry the request');
+    const deleting = await lost(tenantRecord({ status: 'DELETING' }));
+    expect(deleting).toBeInstanceOf(ConflictError);
+    expect(deleting.message).not.toContain('retry the request');
+  });
+
+  test('a missing tenant is a 404', async () => {
+    const service = makeService({ tenantRepo: { get: jest.fn().mockResolvedValue(undefined) } });
+    await expect(service.UpdateTenant({ tenantId: TENANT_ID, name: 'x' }, context)).rejects.toBeInstanceOf(ResourceNotFoundError);
   });
 });
 
-describe('DeleteTenant (empty tenants only, P-10)', () => {
-  test('is one conditional delete on deploymentCount = 0 and returns the deleted record', async () => {
-    const del = jest.fn().mockResolvedValue(undefined);
-    const service = makeService({
-      tenantRepo: { get: jest.fn().mockResolvedValue(tenantRecord({ deploymentCount: 0 })), delete: del },
-    });
+describe('DeleteTenant (empty tenants only, P-10, R-49)', () => {
+  test('moves the tenant to DELETING in one write on its status and deploymentCount = 0, then starts TENANT_DELETE', async () => {
+    const transitionStatus = jest.fn().mockImplementation(async (_key, t) =>
+      tenantRecord({ deploymentCount: 0, status: 'DELETING', operationId: t.setFields.operationId }));
+    const service = makeService({ tenantRepo: { transitionStatus } });
 
     const output = await service.DeleteTenant({ tenantId: TENANT_ID }, context);
 
-    expect(del).toHaveBeenCalledWith(
-      { PK: `TENANT#${TENANT_ID}`, SK: 'META' },
-      {
-        conditionExpression: 'attribute_exists(PK) AND #deploymentCount = :zero',
-        expressionAttributeNames: { '#deploymentCount': 'deploymentCount' },
-        expressionAttributeValues: { ':zero': 0 },
-      },
-    );
-    expect(output.tenant).toMatchObject({ tenantId: TENANT_ID, deploymentCount: 0 });
+    const transition = transitionStatus.mock.calls[0][1];
+    expect(transition).toMatchObject({
+      fromAnyOf: ['ACTIVE', 'CREATE_FAILED', 'UPDATE_FAILED', 'DELETE_FAILED'],
+      to: 'DELETING',
+      absentStatusIsActive: true,
+      extraCondition: { conditionExpression: '#deploymentCount = :zero' },
+    });
+    expect(transition.setFields.operationId).toMatch(new RegExp(`^${TENANT_ID}-tenant-delete-\\d{13}-[0-9a-f]{8}$`));
+    expect(output.tenant).toMatchObject({ tenantId: TENANT_ID, status: 'DELETING' });
+    const { recordEvent } = startedWorkflowInput();
+    expect(recordEvent).toMatchObject({ event: 'TENANT_DELETE', commit: { action: 'DELETE', set: [], remove: [] } });
+    // On a delete the hooks see the stored name (R-42).
+    expect(recordEvent.environment.TENANT_NAME).toBe('acme');
+  });
+
+  test('an occupied tenant (ALL_OLD with deployments) is a 409 without a retry hint', async () => {
+    const service = makeService({
+      tenantRepo: { transitionStatus: jest.fn().mockRejectedValue(new StaleTransitionError('occupied', tenantRecord({ deploymentCount: 2 }))) },
+    });
+    const failure = await service.DeleteTenant({ tenantId: TENANT_ID }, context).catch((e) => e);
+    expect(failure).toBeInstanceOf(ConflictError);
+    expect(failure.message).toContain('deployments');
+    expect(failure.message).not.toContain('retry the request');
     expect(sfnMock.commandCalls(StartExecutionCommand)).toHaveLength(0);
   });
 
-  test('an occupied tenant (condition failure) is a 409', async () => {
-    const service = makeService({
-      tenantRepo: { delete: jest.fn().mockRejectedValue(new ConditionFailedError('occupied')) },
-    });
-    await expect(service.DeleteTenant({ tenantId: TENANT_ID }, context)).rejects.toBeInstanceOf(
-      ConflictError,
-    );
+  test('an in-flight tenant is a 409 with the retry hint; one already DELETING without', async () => {
+    const lost = (status: 'CREATING' | 'DELETING') => makeService({
+      tenantRepo: { transitionStatus: jest.fn().mockRejectedValue(new StaleTransitionError('lost', tenantRecord({ status }))) },
+    }).DeleteTenant({ tenantId: TENANT_ID }, context).catch((e) => e);
+    expect((await lost('CREATING')).message).toContain('retry the request');
+    expect((await lost('DELETING')).message).not.toContain('retry the request');
   });
 
-  test('a missing tenant is a 404 and nothing is deleted', async () => {
-    const del = jest.fn();
+  test('a missing tenant is a 404 and nothing is written', async () => {
+    const transitionStatus = jest.fn();
     const service = makeService({
-      tenantRepo: { get: jest.fn().mockResolvedValue(undefined), delete: del },
+      tenantRepo: { get: jest.fn().mockResolvedValue(undefined), transitionStatus },
     });
     await expect(service.DeleteTenant({ tenantId: TENANT_ID }, context)).rejects.toBeInstanceOf(
       ResourceNotFoundError,
     );
-    expect(del).not.toHaveBeenCalled();
+    expect(transitionStatus).not.toHaveBeenCalled();
   });
 });
 
@@ -2037,22 +2111,33 @@ describe('PutAccount (§5.4, ADR-027)', () => {
   /** The account is not registered yet, so the owner check reads nothing. */
   const unregistered = () => jest.fn().mockResolvedValue(undefined);
 
-  test('probes both roles with the external id, then writes the create-or-replace update', async () => {
+  test('probes both roles with the external id, then inserts the account CREATING and starts ACCOUNT_CREATE', async () => {
     const handshake = jest.fn().mockResolvedValue([]);
-    const update = jest.fn().mockResolvedValue(accountRecord({ ...putInput, cellCount: 0 }));
-    const service = makeService({ handshake, accountRepo: { get: unregistered(), update } });
+    const update = jest.fn().mockResolvedValue(accountRecord({ ...putInput, cellCount: 0, status: 'CREATING' }));
+    const get = unregistered();
+    const service = makeService({ handshake, accountRepo: { get, update } });
 
     const output = await service.PutAccount(putInput, context);
 
+    expect(get).toHaveBeenCalledWith({ PK: `ACCOUNT#${TENANT_ACCOUNT_ID}`, SK: 'META' }, { consistentRead: true });
     expect(handshake).toHaveBeenCalledWith({ accountId: TENANT_ACCOUNT_ID, externalId: 'ext-1', operatorId: 'op-1' });
-    const [key, write] = update.mock.calls[0];
+    const [key, write, options] = update.mock.calls[0];
     expect(key).toEqual({ PK: `ACCOUNT#${TENANT_ACCOUNT_ID}`, SK: 'META' });
-    expect(write.conditionExpression).toBe('attribute_not_exists(PK) OR #owner = :owner');
+    expect(write.conditionExpression).toBe('attribute_not_exists(PK)');
+    expect(options).toEqual({ returnCurrentOnFailure: true });
     // R-24: the counter is only ever initialised, never written.
     expect(write.updateExpression).toContain('#cellCount = if_not_exists(#cellCount, :zero)');
     expect(write.updateExpression).not.toMatch(/#cellCount = :|#cellCount \+/);
-    // An absent applicationIds makes the account shared.
-    expect(write.updateExpression).toMatch(/REMOVE #applicationIds$/);
+    // An absent applicationIds makes the account shared: nothing written.
+    expect(write.updateExpression).not.toContain('#applicationIds');
+    expect(write.expressionAttributeValues[':status']).toBe('CREATING');
+    expect(startedExecutionName()).toBe(write.expressionAttributeValues[':operationId']);
+    expect(startedWorkflowInput().recordEvent).toMatchObject({
+      event: 'ACCOUNT_CREATE',
+      environment: { ACCOUNT_ID: TENANT_ACCOUNT_ID, ACCOUNT_OWNER: 'TENANT', ACCOUNT_APPLICATION_IDS: '' },
+    });
+    // R-42: no hook sees the external id.
+    expect(sfnMock.commandCalls(StartExecutionCommand)[0].args[0].input.input).not.toContain('ext-1');
     // The external id is never returned (N-10) — only that one is set.
     expect(output.account).toMatchObject({ accountId: TENANT_ACCOUNT_ID, owner: 'TENANT', externalIdConfigured: true });
     expect(output.account).not.toHaveProperty('externalId');
@@ -2072,9 +2157,9 @@ describe('PutAccount (§5.4, ADR-027)', () => {
       { PK: `APPLICATION#${APP_ID}`, SK: 'META' },
       { PK: `APPLICATION#${OTHER_APP_ID}`, SK: 'META' },
     ]);
+    // The default fixture account is ACTIVE: a replace stages the allowlist (R-48).
     const write = update.mock.calls[0][1];
-    expect(write.updateExpression).toContain('#applicationIds = :applicationIds');
-    expect(write.expressionAttributeValues[':applicationIds']).toEqual([APP_ID, OTHER_APP_ID]);
+    expect(write.expressionAttributeValues[':pending']).toEqual({ maxCells: 2, applicationIds: [APP_ID, OTHER_APP_ID] });
     expect(output.account?.applicationIds).toEqual([APP_ID, OTHER_APP_ID]);
   });
 
@@ -2184,14 +2269,18 @@ describe('PutAccount (§5.4, ADR-027)', () => {
     expect(update).not.toHaveBeenCalled();
   });
 
-  test('an owner change that lands between the read and the write is still a 409 (the conditional write)', async () => {
+  test('an owner change that lands between the read and the write is still a 409 without a hint (ALL_OLD owner, R-14)', async () => {
     const service = makeService({
       accountRepo: {
         get: unregistered(),
-        update: jest.fn().mockRejectedValue(new ConditionFailedError('owner')),
+        update: jest.fn().mockRejectedValue(
+          new StaleTransitionError('owner', accountRecord({ accountId: TENANT_ACCOUNT_ID, owner: 'TENANT', status: 'CREATE_FAILED' }))),
       },
     });
-    await expect(service.PutAccount({ ...putInput, owner: 'VENDOR' }, context)).rejects.toBeInstanceOf(ConflictError);
+    const failure = await service.PutAccount({ ...putInput, owner: 'VENDOR', externalId: undefined }, context).catch((e) => e);
+    expect(failure).toBeInstanceOf(ConflictError);
+    expect(failure.message).toContain('owner is immutable');
+    expect(failure.message).not.toContain('retry the request');
   });
 
   test('re-registering with the same owner probes and replaces the policy fields', async () => {
@@ -2241,24 +2330,31 @@ describe('GetAccount / ListAccounts / DeleteAccount (§5.4)', () => {
     expect(output).toMatchObject({ accounts: [{ accountId: ACCOUNT_ID }], nextToken: 'next' });
   });
 
-  test('DeleteAccount is one conditional delete on cellCount = 0; condition failure is a 409', async () => {
-    const del = jest.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new ConditionFailedError('occupied'));
-    const service = makeService({
-      accountRepo: { get: jest.fn().mockResolvedValue(accountRecord({ cellCount: 0 })), delete: del },
-    });
+  test('DeleteAccount moves the account to DELETING in one write on cellCount = 0 and starts ACCOUNT_DELETE; occupied is a 409', async () => {
+    const transitionStatus = jest.fn()
+      .mockResolvedValueOnce(accountRecord({ cellCount: 0, status: 'DELETING', applicationIds: [APP_ID] }))
+      .mockRejectedValueOnce(new StaleTransitionError('occupied', accountRecord({ cellCount: 1 })));
+    const service = makeService({ accountRepo: { transitionStatus } });
     await expect(service.DeleteAccount({ accountId: ACCOUNT_ID }, context)).resolves.toMatchObject({
-      account: { accountId: ACCOUNT_ID },
+      account: { accountId: ACCOUNT_ID, status: 'DELETING' },
     });
-    expect(del).toHaveBeenCalledWith(
-      { PK: `ACCOUNT#${ACCOUNT_ID}`, SK: 'META' },
-      expect.objectContaining({ conditionExpression: 'attribute_exists(PK) AND #cellCount = :zero' }),
-    );
-    await expect(service.DeleteAccount({ accountId: ACCOUNT_ID }, context)).rejects.toBeInstanceOf(ConflictError);
+    const [key, transition] = transitionStatus.mock.calls[0];
+    expect(key).toEqual({ PK: `ACCOUNT#${ACCOUNT_ID}`, SK: 'META' });
+    expect(transition).toMatchObject({ to: 'DELETING', extraCondition: { conditionExpression: '#cellCount = :zero' } });
+    expect(startedWorkflowInput().recordEvent).toMatchObject({
+      event: 'ACCOUNT_DELETE',
+      environment: { ACCOUNT_ID: ACCOUNT_ID, ACCOUNT_OWNER: 'VENDOR', ACCOUNT_APPLICATION_IDS: APP_ID },
+    });
+    const occupied = await service.DeleteAccount({ accountId: ACCOUNT_ID }, context).catch((e) => e);
+    expect(occupied).toBeInstanceOf(ConflictError);
+    expect(occupied.message).toContain('cells');
   });
 
   test('DeleteAccount of an unregistered account is a 404', async () => {
-    const service = makeService({ accountRepo: { get: jest.fn().mockResolvedValue(undefined), delete: jest.fn() } });
+    const transitionStatus = jest.fn();
+    const service = makeService({ accountRepo: { get: jest.fn().mockResolvedValue(undefined), transitionStatus } });
     await expect(service.DeleteAccount({ accountId: '555555555555' }, context)).rejects.toBeInstanceOf(ResourceNotFoundError);
+    expect(transitionStatus).not.toHaveBeenCalled();
   });
 });
 
@@ -2275,9 +2371,12 @@ describe('PutApplication (§5.5, R-29)', () => {
     maxTenants: 4,
   };
 
+  /** No record yet: the create path writes the values into the record (R-48). */
+  const unregistered = () => jest.fn().mockResolvedValue(undefined);
+
   test('writes the definition and the default FILL strategy, never cellCount, and runs no build', async () => {
-    const update = jest.fn().mockResolvedValue(applicationRecord({ cellCount: 0 }));
-    const service = makeService({ applicationRepo: { update } });
+    const update = jest.fn().mockResolvedValue(applicationRecord({ cellCount: 0, status: 'CREATING' }));
+    const service = makeService({ applicationRepo: { get: unregistered(), update } });
 
     const output = await service.PutApplication(putInput, context);
 
@@ -2294,12 +2393,14 @@ describe('PutApplication (§5.5, R-29)', () => {
     expect(write.updateExpression).toContain('#cellCount = if_not_exists(#cellCount, :zero)');
     expect(write.updateExpression).not.toMatch(/#cellCount = :|#cellCount \+/);
     expect(output.application).toMatchObject({ applicationId: APP_ID, placementStrategy: 'FILL', cellCount: 0 });
-    expect(sfnMock.commandCalls(StartExecutionCommand)).toHaveLength(0);
+    // No build: the one execution serves APPLICATION_CREATE (§8.4).
+    expect(sfnMock.commandCalls(StartExecutionCommand)).toHaveLength(1);
+    expect(startedWorkflowInput().recordEvent.event).toBe('APPLICATION_CREATE');
   });
 
   test('an explicit placementStrategy is written as given (ADR-036)', async () => {
     const update = jest.fn().mockResolvedValue(applicationRecord({ placementStrategy: 'ROUND_ROBIN' }));
-    const service = makeService({ applicationRepo: { update } });
+    const service = makeService({ applicationRepo: { get: unregistered(), update } });
     await service.PutApplication({ ...putInput, placementStrategy: 'ROUND_ROBIN' }, context);
     expect(update.mock.calls[0][1].expressionAttributeValues[':placementStrategy']).toBe('ROUND_ROBIN');
   });
@@ -2319,7 +2420,7 @@ describe('PutApplication (§5.5, R-29)', () => {
     const warn = jest.fn();
     const sha = '4f0c9e1b2a3d4c5e6f708192a3b4c5d6e7f80912';
     const update = jest.fn().mockResolvedValue(applicationRecord());
-    const service = makeService({ warn, applicationRepo: { update } });
+    const service = makeService({ warn, applicationRepo: { get: unregistered(), update } });
     await service.PutApplication({ ...putInput, source: { ...applicationSource, sourceVersion: sha } }, context);
     expect(warn).not.toHaveBeenCalled();
     expect(update.mock.calls[0][1].expressionAttributeValues[':source']).toEqual({
@@ -2385,34 +2486,38 @@ describe('GetApplication / ListApplications / DeleteApplication (§5.5)', () => 
     expect(output).toMatchObject({ applications: [{ applicationId: APP_ID }], nextToken: 'next' });
   });
 
-  test('DeleteApplication is one conditional delete on cellCount = 0; condition failure is a 409', async () => {
-    const del = jest.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new ConditionFailedError('occupied'));
-    const service = makeService({
-      applicationRepo: { get: jest.fn().mockResolvedValue(applicationRecord({ cellCount: 0 })), delete: del },
-    });
+  test('DeleteApplication moves the application to DELETING in one write on cellCount = 0 and starts APPLICATION_DELETE; occupied is a 409', async () => {
+    const transitionStatus = jest.fn()
+      .mockResolvedValueOnce(applicationRecord({ cellCount: 0, status: 'DELETING' }))
+      .mockRejectedValueOnce(new StaleTransitionError('occupied', applicationRecord({ cellCount: 1 })));
+    const service = makeService({ applicationRepo: { transitionStatus } });
     await expect(service.DeleteApplication({ applicationId: APP_ID }, context)).resolves.toMatchObject({
-      application: { applicationId: APP_ID },
+      application: { applicationId: APP_ID, status: 'DELETING' },
     });
-    expect(del).toHaveBeenCalledWith(
-      { PK: `APPLICATION#${APP_ID}`, SK: 'META' },
-      {
-        conditionExpression: 'attribute_exists(PK) AND #cellCount = :zero',
-        expressionAttributeNames: { '#cellCount': 'cellCount' },
-        expressionAttributeValues: { ':zero': 0 },
-      },
-    );
-    await expect(service.DeleteApplication({ applicationId: APP_ID }, context)).rejects.toBeInstanceOf(
-      ConflictError,
-    );
+    const [key, transition] = transitionStatus.mock.calls[0];
+    expect(key).toEqual({ PK: `APPLICATION#${APP_ID}`, SK: 'META' });
+    expect(transition).toMatchObject({
+      fromAnyOf: ['ACTIVE', 'CREATE_FAILED', 'UPDATE_FAILED', 'DELETE_FAILED'],
+      to: 'DELETING',
+      extraCondition: { conditionExpression: '#cellCount = :zero' },
+    });
+    expect(startedWorkflowInput().recordEvent).toMatchObject({
+      event: 'APPLICATION_DELETE',
+      environment: { APPLICATION_ID: APP_ID },
+      commit: { action: 'DELETE' },
+    });
+    const occupied = await service.DeleteApplication({ applicationId: APP_ID }, context).catch((e) => e);
+    expect(occupied).toBeInstanceOf(ConflictError);
+    expect(occupied.message).toContain('cells');
   });
 
   test('DeleteApplication of an unregistered application is a 404', async () => {
-    const del = jest.fn();
-    const service = makeService({ applicationRepo: { get: jest.fn().mockResolvedValue(undefined), delete: del } });
+    const transitionStatus = jest.fn();
+    const service = makeService({ applicationRepo: { get: jest.fn().mockResolvedValue(undefined), transitionStatus } });
     await expect(service.DeleteApplication({ applicationId: 'app-missing' }, context)).rejects.toBeInstanceOf(
       ResourceNotFoundError,
     );
-    expect(del).not.toHaveBeenCalled();
+    expect(transitionStatus).not.toHaveBeenCalled();
   });
 });
 
@@ -2443,8 +2548,8 @@ describe('PutApplication parameter declarations (§5.5, R-29, ADR-039, ADR-040)'
     maxTenants: 4,
   };
 
-  test('both lists sent: no read, both written normalised, no condition', async () => {
-    const get = jest.fn();
+  test('both lists sent: both written normalised, conditioned on the path only', async () => {
+    const get = jest.fn().mockResolvedValue(undefined);
     const update = jest.fn().mockResolvedValue(declaredApplication);
     const service = makeService({ applicationRepo: { get, update } });
 
@@ -2457,14 +2562,15 @@ describe('PutApplication parameter declarations (§5.5, R-29, ADR-039, ADR-040)'
       context,
     );
 
-    expect(get).not.toHaveBeenCalled();
+    // The path always comes from a strongly consistent read (R-48).
+    expect(get).toHaveBeenCalledWith({ PK: `APPLICATION#${APP_ID}`, SK: 'META' }, { consistentRead: true });
     const write = update.mock.calls[0][1];
     expect(write.expressionAttributeValues[':parameters']).toEqual([
       { name: 'ALLOWED_EMAIL_DOMAIN', required: true },
       { name: 'LOG_LEVEL', required: false, default: 'info' },
     ]);
     expect(write.expressionAttributeValues[':cellParameters']).toEqual([{ name: 'CELL_SIZE', default: 'small' }]);
-    expect(write.conditionExpression).toBeUndefined();
+    expect(write.conditionExpression).toBe('attribute_not_exists(PK)');
     // GetApplication/PutApplication return both lists (§5.5).
     expect(output.application?.parameters).toEqual([
       { name: 'ALLOWED_EMAIL_DOMAIN', required: true, default: undefined, description: undefined },
@@ -2480,25 +2586,39 @@ describe('PutApplication parameter declarations (§5.5, R-29, ADR-039, ADR-040)'
 
     await service.PutApplication({ ...putInput, maxTenants: 9 }, context);
 
-    expect(get).toHaveBeenCalledWith({ PK: `APPLICATION#${APP_ID}`, SK: 'META' });
+    expect(get).toHaveBeenCalledWith({ PK: `APPLICATION#${APP_ID}`, SK: 'META' }, { consistentRead: true });
     const write = update.mock.calls[0][1];
-    expect(write.updateExpression).not.toMatch(/#parameters =|#cellParameters =/);
-    expect(write.conditionExpression).toBe('#parameters = :read_parameters AND #cellParameters = :read_cellParameters');
+    // A replace stages the values (R-48); the kept lists are not in pending.
+    expect(write.expressionAttributeValues[':pending']).not.toHaveProperty('parameters');
+    expect(write.expressionAttributeValues[':pending']).not.toHaveProperty('cellParameters');
+    expect(write.conditionExpression).toBe(
+      '(attribute_not_exists(#status) OR #status IN (:active, :updateFailed))'
+      + ' AND #parameters = :read_parameters AND #cellParameters = :read_cellParameters',
+    );
     expect(write.expressionAttributeValues[':read_parameters']).toBe(declaredApplication.parameters);
     expect(write.expressionAttributeValues[':read_cellParameters']).toBe(declaredApplication.cellParameters);
     expect(write.updateExpression).not.toContain('cellCount = :');
   });
 
-  test('[] clears a list; a kept list read as absent conditions on attribute_not_exists (a new application declares none)', async () => {
+  test('[] clears a list; a kept list read as absent conditions on attribute_not_exists', async () => {
     const update = jest.fn().mockResolvedValue(applicationRecord());
-    const service = makeService({ applicationRepo: { get: jest.fn().mockResolvedValue(undefined), update } });
+    const service = makeService({ applicationRepo: { get: jest.fn().mockResolvedValue(applicationRecord()), update } });
 
     await service.PutApplication({ ...putInput, parameters: [] }, context);
 
     const write = update.mock.calls[0][1];
-    expect(write.expressionAttributeValues[':parameters']).toEqual([]);
-    expect(write.updateExpression).not.toContain('#cellParameters =');
-    expect(write.conditionExpression).toBe('attribute_not_exists(#cellParameters)');
+    expect(write.expressionAttributeValues[':pending'].parameters).toEqual([]);
+    expect(write.expressionAttributeValues[':pending']).not.toHaveProperty('cellParameters');
+    expect(write.conditionExpression).toContain('attribute_not_exists(#cellParameters)');
+  });
+
+  test('on a new application an absent list declares none: not written, no list condition', async () => {
+    const update = jest.fn().mockResolvedValue(applicationRecord());
+    const service = makeService({ applicationRepo: { get: jest.fn().mockResolvedValue(undefined), update } });
+    await service.PutApplication({ ...putInput, parameters: [] }, context);
+    const write = update.mock.calls[0][1];
+    expect(write.updateExpression).not.toContain('#cellParameters');
+    expect(write.conditionExpression).toBe('attribute_not_exists(PK)');
   });
 
   test('a kept list read as [] is a different read from absent', async () => {
@@ -2508,7 +2628,8 @@ describe('PutApplication parameter declarations (§5.5, R-29, ADR-039, ADR-040)'
     });
     await service.PutApplication({ ...putInput, cellParameters: [] }, context);
     const write = update.mock.calls[0][1];
-    expect(write.conditionExpression).toBe('#parameters = :read_parameters');
+    expect(write.conditionExpression).toContain('#parameters = :read_parameters');
+    expect(write.conditionExpression).not.toContain('attribute_not_exists(#parameters)');
     expect(write.expressionAttributeValues[':read_parameters']).toEqual([]);
   });
 
@@ -2539,7 +2660,8 @@ describe('PutApplication parameter declarations (§5.5, R-29, ADR-039, ADR-040)'
     const service = makeService({
       applicationRepo: {
         get: jest.fn().mockResolvedValue(declaredApplication),
-        update: jest.fn().mockRejectedValue(new ConditionFailedError('condition failed')),
+        // ALL_OLD: still live, so the kept list is what changed (R-14).
+        update: jest.fn().mockRejectedValue(staleWith(declaredApplication)),
       },
     });
     const failure = await service.PutApplication(putInput, context).catch((e) => e);

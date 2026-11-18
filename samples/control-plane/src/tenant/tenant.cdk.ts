@@ -32,6 +32,7 @@ import {
   HookRoleKind,
   provisioningRoleArn,
   validateFleetName,
+  workflowExecutionArnPattern,
 } from '../shared/fleet';
 import { nagFindingResource, acknowledgeGranularFinding, suppressTemplateScanners } from '../shared/nag';
 
@@ -353,6 +354,23 @@ export class TenantStack extends Stack {
     });
     table.grantReadWriteData(apiFn);
     workflow.stateMachine.grantStartExecution(apiFn);
+    // R-51 (ADR-045): a record operation whose start had an unknown outcome
+    // looks its own execution up by name before it compensates. Read-only,
+    // on the workflow's executions only; the explicit deny (R-41) is on
+    // other roles and lists no Describe action.
+    const workflowExecutions = workflowExecutionArnPattern(this.partition, this.region, this.account, this.fleetName);
+    apiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'DescribeOwnRecordEventExecution',
+        actions: ['states:DescribeExecution'],
+        resources: [workflowExecutions],
+      }),
+    );
+    acknowledgeGranularFinding(
+      apiRole,
+      `AwsSolutions-IAM5[Resource::${nagFindingResource(this, workflowExecutions)}]`,
+      'R-51: the API looks up the execution it started under a generated name; the wildcard is the execution-name segment of this stack\'s own workflow.',
+    );
     // ADR-027 (M20): PutAccount probes both halves of the pair in the account
     // being registered. The resource is the role NAME in any account (N-8) -
     // the same bound the build roles carry; the target trust policy is the

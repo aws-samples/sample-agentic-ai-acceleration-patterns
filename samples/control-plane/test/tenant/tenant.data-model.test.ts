@@ -3,7 +3,6 @@
 
 import {
   listTenantsQuery,
-  TENANT_EMPTY_CONDITION,
   TENANT_NOT_EXISTS_CONDITION,
   TenantDataModel,
   TenantItem,
@@ -87,14 +86,6 @@ describe('tenant list query', () => {
 describe('tenant write conditions (P-5, §5.1)', () => {
   test('CreateTenant inserts only when the record does not exist', () => {
     expect(TENANT_NOT_EXISTS_CONDITION).toEqual({ conditionExpression: 'attribute_not_exists(PK)' });
-  });
-
-  test('DeleteTenant deletes only an existing tenant with no deployments', () => {
-    expect(TENANT_EMPTY_CONDITION).toEqual({
-      conditionExpression: 'attribute_exists(PK) AND #deploymentCount = :zero',
-      expressionAttributeNames: { '#deploymentCount': 'deploymentCount' },
-      expressionAttributeValues: { ':zero': 0 },
-    });
   });
 });
 

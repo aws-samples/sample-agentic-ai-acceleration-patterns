@@ -391,12 +391,13 @@ describe('PutApplication hooks', () => {
     cellParameters: [],
   };
 
-  test('absent hooks keep the stored list: no hooks attribute in the write and no condition on it', async () => {
+  test('absent hooks keep the stored list: no hooks attribute in the write or in pending, and no condition on it', async () => {
     const update = jest.fn().mockResolvedValue(applicationRecord());
     await makeService({ applicationRepo: { update } }).PutApplication(putInput, context);
     const [, write] = update.mock.calls[0];
     expect(write.updateExpression).not.toContain('hooks');
-    expect(write.conditionExpression).toBeUndefined();
+    expect(write.expressionAttributeValues[':pending']).not.toHaveProperty('hooks');
+    expect(write.conditionExpression).not.toMatch(/hooks/);
   });
 
   test('a kept hooks list adds no condition even when a declaration list is kept', async () => {
@@ -409,21 +410,25 @@ describe('PutApplication hooks', () => {
     expect(write.conditionExpression).not.toMatch(/hooks/);
   });
 
-  test('an empty list clears the hooks, a sent list replaces them, both as plain SET of the whole list', async () => {
+  test('an empty list clears the hooks, a sent list replaces them: staged whole on a replace, SET whole on a create', async () => {
     const update = jest.fn().mockResolvedValue(applicationRecord());
     const service = makeService({ applicationRepo: { update } });
     await service.PutApplication({ ...putInput, hooks: [] as never }, context);
-    expect(update.mock.calls[0][1].updateExpression).toContain('#hooks = :hooks');
-    expect(update.mock.calls[0][1].expressionAttributeValues[':hooks']).toEqual([]);
+    expect(update.mock.calls[0][1].expressionAttributeValues[':pending'].hooks).toEqual([]);
     await service.PutApplication({ ...putInput, hooks: [hookDef('a')] as never }, context);
-    expect(update.mock.calls[1][1].expressionAttributeValues[':hooks']).toEqual([hookDef('a')]);
+    expect(update.mock.calls[1][1].expressionAttributeValues[':pending'].hooks).toEqual([hookDef('a')]);
+    const create = jest.fn().mockResolvedValue(applicationRecord({ status: 'CREATING' }));
+    await makeService({ applicationRepo: { update: create, get: jest.fn().mockResolvedValue(undefined) } })
+      .PutApplication({ ...putInput, hooks: [hookDef('a')] as never }, context);
+    expect(create.mock.calls[0][1].updateExpression).toContain('#hooks = :hooks');
+    expect(create.mock.calls[0][1].expressionAttributeValues[':hooks']).toEqual([hookDef('a')]);
   });
 
   test('the hook timeout is stored resolved', async () => {
     const update = jest.fn().mockResolvedValue(applicationRecord());
     const { timeoutMinutes: _t, ...bare } = hookDef('a');
     await makeService({ applicationRepo: { update } }).PutApplication({ ...putInput, hooks: [bare] as never }, context);
-    expect(update.mock.calls[0][1].expressionAttributeValues[':hooks'][0].timeoutMinutes).toBe(10);
+    expect(update.mock.calls[0][1].expressionAttributeValues[':pending'].hooks[0].timeoutMinutes).toBe(10);
   });
 
   test('a repeated hookId, more than five hooks and an invalid definition are 400s with nothing read or written', async () => {

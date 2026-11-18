@@ -7,7 +7,7 @@ import { StoredCellParameterDeclaration, StoredParameterDeclaration } from './pa
 import { readRecordStatus } from './record-event.types';
 import { DataModel, DynamoDBItem, GSI1_INDEX_NAME } from '../shared/data-model';
 import { KeyBuilder } from '../shared/key-builder';
-import { GsiQuery, ItemKey, ItemUpdate, WriteCondition } from '../shared/repository';
+import { GsiQuery, ItemKey, ItemUpdate } from '../shared/repository';
 import {
   LifecycleStatus,
   PlacementStrategy,
@@ -143,134 +143,135 @@ export function listApplicationsQuery(): GsiQuery {
 }
 
 /**
- * A declaration list a `PutApplication` did not send: kept on the record,
- * and the write is conditioned on it being exactly as read (§5.5).
- * `read` is `undefined` when the attribute was absent.
+ * The path a `PutApplication` takes, chosen from a strongly consistent
+ * read (R-48, §5.5): `CREATE` for an id with no record, `RE_PUT` for a
+ * `CREATE_FAILED` record, `REPLACE` for a live one.
  */
-export interface KeptDeclarations<T> {
-  readonly read: readonly T[] | undefined;
-}
+export type PutApplicationPath = 'CREATE' | 'RE_PUT' | 'REPLACE';
 
 /**
- * The `PutApplication` create-or-replace write (spec §5.5, R-29) as ONE
- * `UpdateItem`: the definition fields and the strategy are replaced;
- * `createdAt` and `cellCount` are initialised with `if_not_exists` so a
- * replace never resets the counter. Each declaration list is written only
- * when the request sent it (an empty list included, which clears it).
+ * The `PutApplication` write (spec §5.5, R-29, R-48) as ONE conditional
+ * `UpdateItem` on every path. `values` holds the definition fields, the
+ * strategy and each of `parameters`, `cellParameters` and `hooks` only when
+ * the request sent it (an empty list included, which clears it).
  *
- * When both lists are sent the write carries no condition: an application
- * has no immutable field to guard, unlike an account's `owner`, so it is
- * correct in every prior state (P-5). A list that is kept conditions the
- * write on that list being exactly as read — `attribute_not_exists` when
- * the attribute was absent, equality when present, `[]` included — so two
- * concurrent puts that each send one list cannot store one name in both.
- * Never conditioned on `updatedAt`, which cell creates and deletes write
- * too. `hooks` is written only when the request sent it (an empty list
- * included, which clears it) and a kept list adds no condition, because
- * hooks share no invariant with another list (R-29, §5.5).
+ * - `CREATE`: the values into the record, `CREATING`, conditional on
+ *   `attribute_not_exists(PK)`.
+ * - `RE_PUT`: the values into the record and back to `CREATING`,
+ *   conditional on `status = CREATE_FAILED`.
+ * - `REPLACE`: the values into `pending` and the record to `UPDATING`,
+ *   conditional on `ACTIVE`/`UPDATE_FAILED` (or an absent status, R-47);
+ *   the live definition unchanged until the workflow commits (R-50).
+ *
+ * Each stores `operationId` (R-51) and sets `cellCount` and `createdAt`
+ * through `if_not_exists`, so a re-put never resets them, and clears a
+ * stale `statusReason`. On `RE_PUT` and `REPLACE` a declaration list the
+ * request keeps conditions the write on that list being exactly as `read`
+ * — `attribute_not_exists` when the attribute was absent, equality when
+ * present, `[]` included — so two concurrent puts that each send one list
+ * cannot store one name in both. A kept `hooks` list adds no condition:
+ * hooks share no invariant with another list. Never conditioned on
+ * `updatedAt`, which cell creates and deletes write too.
  */
 export function putApplicationUpdate(input: {
+  readonly path: PutApplicationPath;
   readonly applicationId: string;
-  readonly source: SourceDefinition;
-  readonly cellScripts: ScriptLocations;
-  readonly tenantScripts: ScriptLocations;
-  readonly maxTenants: number;
-  readonly placementStrategy: PlacementStrategy;
-  /** Sent tenant parameter declarations, or the kept list as read. */
-  readonly parameters: readonly StoredParameterDeclaration[] | KeptDeclarations<StoredParameterDeclaration>;
-  /** Sent cell parameter declarations, or the kept list as read. */
-  readonly cellParameters: readonly StoredCellParameterDeclaration[] | KeptDeclarations<StoredCellParameterDeclaration>;
-  /** The validated hook list when the request sent one; absent keeps the stored list. */
-  readonly hooks?: readonly HookDefinition[];
+  readonly operationId: string;
+  readonly values: ApplicationPending;
+  /** The record the path was chosen from; its lists are the kept lists' read values. */
+  readonly read?: Pick<ApplicationRecord, 'parameters' | 'cellParameters'>;
   readonly now: string;
 }): ItemUpdate {
-  const sets: string[] = [];
-  const conditions: string[] = [];
-  const names: Record<string, string> = {};
-  const values: Record<string, unknown> = {};
-  const declarationList = (
-    attribute: 'parameters' | 'cellParameters',
-    list: readonly unknown[] | KeptDeclarations<unknown>,
-  ) => {
-    const name = `#${attribute}`;
-    names[name] = attribute;
-    if (Array.isArray(list)) {
-      sets.push(`${name} = :${attribute}`);
-      values[`:${attribute}`] = list;
-      return;
-    }
-    const read = (list as KeptDeclarations<unknown>).read;
-    if (read === undefined) {
-      conditions.push(`attribute_not_exists(${name})`);
-    } else {
-      conditions.push(`${name} = :read_${attribute}`);
-      values[`:read_${attribute}`] = read;
-    }
+  const { path, values } = input;
+  const names: Record<string, string> = {
+    '#cellCount': 'cellCount',
+    '#createdAt': 'createdAt',
+    '#applicationId': 'applicationId',
+    '#gsi1pk': 'GSI1PK',
+    '#gsi1sk': 'GSI1SK',
+    '#status': 'status',
+    '#operationId': 'operationId',
+    '#updatedAt': 'updatedAt',
   };
-  declarationList('parameters', input.parameters);
-  declarationList('cellParameters', input.cellParameters);
-  if (input.hooks !== undefined) {
-    names['#hooks'] = 'hooks';
-    sets.push('#hooks = :hooks');
-    values[':hooks'] = input.hooks;
+  const exprValues: Record<string, unknown> = {
+    ':zero': 0,
+    ':now': input.now,
+    ':applicationId': input.applicationId,
+    ':gsi1pk': APPLICATION_GSI1_PARTITION,
+    ':gsi1sk': KeyBuilder.build(APPLICATION_KEY_PREFIX, input.applicationId),
+    ':operationId': input.operationId,
+  };
+  const sets = [
+    '#cellCount = if_not_exists(#cellCount, :zero)',
+    '#createdAt = if_not_exists(#createdAt, :now)',
+    '#applicationId = :applicationId',
+    '#gsi1pk = :gsi1pk',
+    '#gsi1sk = :gsi1sk',
+    '#status = :status',
+    '#operationId = :operationId',
+    '#updatedAt = :now',
+  ];
+  const conditions: string[] = [];
+
+  if (path === 'REPLACE') {
+    names['#pending'] = 'pending';
+    sets.push('#pending = :pending');
+    exprValues[':pending'] = values;
+    exprValues[':status'] = LifecycleStatus.UPDATING;
+    exprValues[':active'] = LifecycleStatus.ACTIVE;
+    exprValues[':updateFailed'] = LifecycleStatus.UPDATE_FAILED;
+    conditions.push('(attribute_not_exists(#status) OR #status IN (:active, :updateFailed))');
+  } else {
+    exprValues[':status'] = LifecycleStatus.CREATING;
+    const fields: (keyof ApplicationPending)[] = [
+      'source',
+      'cellScripts',
+      'tenantScripts',
+      'maxTenants',
+      'placementStrategy',
+      'parameters',
+      'cellParameters',
+      'hooks',
+    ];
+    for (const field of fields) {
+      if (values[field] !== undefined) {
+        names[`#${field}`] = field;
+        exprValues[`:${field}`] = values[field];
+        sets.push(`#${field} = :${field}`);
+      }
+    }
+    if (path === 'CREATE') {
+      conditions.push('attribute_not_exists(PK)');
+    } else {
+      exprValues[':createFailed'] = LifecycleStatus.CREATE_FAILED;
+      conditions.push('#status = :createFailed');
+    }
   }
+
+  if (path !== 'CREATE') {
+    for (const attribute of ['parameters', 'cellParameters'] as const) {
+      if (values[attribute] !== undefined) {
+        continue;
+      }
+      const name = `#${attribute}`;
+      names[name] = attribute;
+      const read = input.read?.[attribute];
+      if (read === undefined) {
+        conditions.push(`attribute_not_exists(${name})`);
+      } else {
+        conditions.push(`${name} = :read_${attribute}`);
+        exprValues[`:read_${attribute}`] = read;
+      }
+    }
+  }
+
   return {
-    updateExpression: [
-      'SET #cellCount = if_not_exists(#cellCount, :zero)',
-      '#createdAt = if_not_exists(#createdAt, :now)',
-      '#applicationId = :applicationId',
-      '#gsi1pk = :gsi1pk',
-      '#gsi1sk = :gsi1sk',
-      '#source = :source',
-      '#cellScripts = :cellScripts',
-      '#tenantScripts = :tenantScripts',
-      '#maxTenants = :maxTenants',
-      '#placementStrategy = :placementStrategy',
-      '#updatedAt = :now',
-      ...sets,
-    ].join(', '),
-    expressionAttributeNames: {
-      '#cellCount': 'cellCount',
-      '#createdAt': 'createdAt',
-      '#applicationId': 'applicationId',
-      '#gsi1pk': 'GSI1PK',
-      '#gsi1sk': 'GSI1SK',
-      '#source': 'source',
-      '#cellScripts': 'cellScripts',
-      '#tenantScripts': 'tenantScripts',
-      '#maxTenants': 'maxTenants',
-      '#placementStrategy': 'placementStrategy',
-      '#updatedAt': 'updatedAt',
-      ...names,
-    },
-    expressionAttributeValues: {
-      ':zero': 0,
-      ':now': input.now,
-      ':applicationId': input.applicationId,
-      ':gsi1pk': APPLICATION_GSI1_PARTITION,
-      ':gsi1sk': KeyBuilder.build(APPLICATION_KEY_PREFIX, input.applicationId),
-      ':source': input.source,
-      ':cellScripts': input.cellScripts,
-      ':tenantScripts': input.tenantScripts,
-      ':maxTenants': input.maxTenants,
-      ':placementStrategy': input.placementStrategy,
-      ...values,
-    },
-    ...(conditions.length === 0 ? {} : { conditionExpression: conditions.join(' AND ') }),
+    updateExpression: `SET ${sets.join(', ')}` + (path === 'CREATE' ? '' : ' REMOVE #statusReason'),
+    conditionExpression: conditions.join(' AND '),
+    expressionAttributeNames: path === 'CREATE' ? names : { ...names, '#statusReason': 'statusReason' },
+    expressionAttributeValues: exprValues,
   };
 }
-
-/**
- * The `DeleteApplication` emptiness guard — `attribute_exists(PK) AND
- * cellCount = 0` — the counterpart of the application's cell-count claim
- * (ADR-032). The service reads first for the 404 and treats a condition
- * failure as the 409.
- */
-export const APPLICATION_EMPTY_CONDITION: WriteCondition = {
-  conditionExpression: 'attribute_exists(PK) AND #cellCount = :zero',
-  expressionAttributeNames: { '#cellCount': 'cellCount' },
-  expressionAttributeValues: { ':zero': 0 },
-};
 
 /** Converts between {@link ApplicationRecord} and its DynamoDB item. */
 export class ApplicationDataModel implements DataModel<ApplicationRecord, ApplicationItem> {

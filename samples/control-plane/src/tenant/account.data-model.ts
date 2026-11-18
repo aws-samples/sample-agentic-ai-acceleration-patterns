@@ -6,7 +6,7 @@ import { LastGlobalHookEntry } from './hook.types';
 import { readRecordStatus } from './record-event.types';
 import { DataModel, DynamoDBItem, GSI1_INDEX_NAME } from '../shared/data-model';
 import { KeyBuilder } from '../shared/key-builder';
-import { GsiQuery, ItemKey, ItemUpdate, WriteCondition } from '../shared/repository';
+import { GsiQuery, ItemKey, ItemUpdate } from '../shared/repository';
 import { AccountOwner, LifecycleStatus } from '../smithy/source/typescript-ssdk-codegen/src';
 
 /** Composite key prefix for account items. */
@@ -120,94 +120,149 @@ export function listAccountsQuery(): GsiQuery {
 }
 
 /**
- * The `PutAccount` create-or-replace write (spec §5.4, R-24) as ONE
- * conditional `UpdateItem`:
+ * The path a `PutAccount` takes, chosen from a strongly consistent read
+ * (R-48, §5.4): `CREATE` for an id with no record, `RE_PUT` for a
+ * `CREATE_FAILED` record, `REPLACE` for a live one, `ROTATE` for an
+ * `UPDATING` one whose change in flight the request repeats.
+ */
+export type PutAccountPath = 'CREATE' | 'RE_PUT' | 'REPLACE' | 'ROTATE';
+
+/**
+ * The `PutAccount` write (spec §5.4, R-24, R-48) as ONE conditional
+ * `UpdateItem` on every path. `owner` is immutable: every path but the
+ * create is conditioned on `owner = :owner`, and `cellCount` is never
+ * written (a create initialises it through `if_not_exists`).
  *
- * - policy fields the operator owns are set (`maxCells`, `applicationIds`,
- *   `externalId`, `updatedAt`); an absent `applicationIds` is REMOVEd (the
- *   account becomes shared), as is an absent `externalId`;
- * - `owner`, `createdAt`, and `cellCount` are initialised with
- *   `if_not_exists` so a replace never resets the counter or the owner;
- * - the condition `attribute_not_exists(PK) OR owner = :owner` makes an
- *   owner change a condition failure (the service maps it to the 409).
+ * - `CREATE`: the policy fields into the record, `CREATING`, conditional
+ *   on `attribute_not_exists(PK)`.
+ * - `RE_PUT`: the policy fields into the record and back to `CREATING`,
+ *   conditional on `status = CREATE_FAILED`.
+ * - `REPLACE`: `externalId` into the record at once (never staged, the
+ *   probe has proved it), `maxCells` and `applicationIds` into `pending`,
+ *   and the record to `UPDATING`, conditional on `ACTIVE`/`UPDATE_FAILED`
+ *   (or an absent status, R-47).
+ * - `ROTATE`: `externalId` and `updatedAt` only, conditional on
+ *   `status = UPDATING AND operationId = :readOperationId`, the
+ *   `operationId` the request read; status, `pending` and `operationId`
+ *   are kept and no execution starts.
  *
- * Because the write never touches `cellCount` on an existing record, a
- * capacity cut and a concurrent claim compose without a lost update.
+ * An absent `externalId` is REMOVEd on every path but the create; an absent
+ * `applicationIds` is REMOVEd on a re-put (the account is shared) and left
+ * out of `pending` on a replace (the commit removes it). Every path but the
+ * rotation stores the new `operationId` (R-51) and clears `statusReason`.
  */
 export function putAccountUpdate(input: {
+  readonly path: PutAccountPath;
   readonly accountId: string;
   readonly owner: AccountOwner;
   readonly maxCells: number;
   readonly applicationIds?: readonly string[];
   readonly externalId?: string;
+  /** The new operation's id; on `ROTATE`, the `operationId` the request read (its condition). */
+  readonly operationId?: string;
   readonly now: string;
 }): ItemUpdate {
-  const names: Record<string, string> = {
-    '#owner': 'owner',
-    '#maxCells': 'maxCells',
-    '#cellCount': 'cellCount',
-    '#externalId': 'externalId',
-    '#applicationIds': 'applicationIds',
-    '#accountId': 'accountId',
-    '#createdAt': 'createdAt',
-    '#updatedAt': 'updatedAt',
-    '#gsi1pk': 'GSI1PK',
-    '#gsi1sk': 'GSI1SK',
-  };
-  const values: Record<string, unknown> = {
-    ':owner': input.owner,
-    ':maxCells': input.maxCells,
-    ':zero': 0,
-    ':accountId': input.accountId,
-    ':now': input.now,
-    ':gsi1pk': ACCOUNT_GSI1_PARTITION,
-    ':gsi1sk': KeyBuilder.build(ACCOUNT_KEY_PREFIX, input.accountId),
-  };
-  const sets = [
-    '#owner = if_not_exists(#owner, :owner)',
-    '#cellCount = if_not_exists(#cellCount, :zero)',
-    '#createdAt = if_not_exists(#createdAt, :now)',
-    '#accountId = :accountId',
-    '#gsi1pk = :gsi1pk',
-    '#gsi1sk = :gsi1sk',
-    '#maxCells = :maxCells',
-    '#updatedAt = :now',
-  ];
+  const { path } = input;
+  // DynamoDB refuses a name or value an expression does not use, so each is
+  // added with the clause that uses it.
+  const names: Record<string, string> = { '#owner': 'owner', '#updatedAt': 'updatedAt' };
+  const values: Record<string, unknown> = { ':owner': input.owner, ':now': input.now };
+  const sets = ['#updatedAt = :now'];
   const removes: string[] = [];
-  if (input.externalId === undefined) {
-    removes.push('#externalId');
-  } else {
+  const conditions: string[] = [];
+
+  if (input.externalId !== undefined) {
+    names['#externalId'] = 'externalId';
     values[':externalId'] = input.externalId;
     sets.push('#externalId = :externalId');
+  } else if (path !== 'CREATE') {
+    names['#externalId'] = 'externalId';
+    removes.push('#externalId');
   }
-  if (input.applicationIds === undefined) {
-    removes.push('#applicationIds');
+
+  if (path === 'ROTATE') {
+    names['#status'] = 'status';
+    names['#operationId'] = 'operationId';
+    values[':updating'] = LifecycleStatus.UPDATING;
+    conditions.push('#owner = :owner', '#status = :updating');
+    if (input.operationId === undefined) {
+      conditions.push('attribute_not_exists(#operationId)');
+    } else {
+      values[':readOperationId'] = input.operationId;
+      conditions.push('#operationId = :readOperationId');
+    }
   } else {
-    values[':applicationIds'] = [...input.applicationIds];
-    sets.push('#applicationIds = :applicationIds');
+    if (input.operationId === undefined) {
+      throw new Error(`PutAccount ${path}: an operationId is required`);
+    }
+    Object.assign(names, { '#status': 'status', '#operationId': 'operationId' });
+    values[':operationId'] = input.operationId;
+    sets.push('#status = :status', '#operationId = :operationId');
+    if (path === 'REPLACE') {
+      names['#pending'] = 'pending';
+      values[':pending'] = {
+        maxCells: input.maxCells,
+        ...(input.applicationIds === undefined ? {} : { applicationIds: [...input.applicationIds] }),
+      };
+      values[':status'] = LifecycleStatus.UPDATING;
+      values[':active'] = LifecycleStatus.ACTIVE;
+      values[':updateFailed'] = LifecycleStatus.UPDATE_FAILED;
+      sets.push('#pending = :pending');
+      conditions.push('#owner = :owner', '(attribute_not_exists(#status) OR #status IN (:active, :updateFailed))');
+    } else {
+      Object.assign(names, {
+        '#maxCells': 'maxCells',
+        '#cellCount': 'cellCount',
+        '#accountId': 'accountId',
+        '#createdAt': 'createdAt',
+        '#gsi1pk': 'GSI1PK',
+        '#gsi1sk': 'GSI1SK',
+      });
+      Object.assign(values, {
+        ':status': LifecycleStatus.CREATING,
+        ':maxCells': input.maxCells,
+        ':zero': 0,
+        ':accountId': input.accountId,
+        ':gsi1pk': ACCOUNT_GSI1_PARTITION,
+        ':gsi1sk': KeyBuilder.build(ACCOUNT_KEY_PREFIX, input.accountId),
+      });
+      sets.push(
+        '#owner = :owner',
+        '#cellCount = if_not_exists(#cellCount, :zero)',
+        '#createdAt = if_not_exists(#createdAt, :now)',
+        '#accountId = :accountId',
+        '#gsi1pk = :gsi1pk',
+        '#gsi1sk = :gsi1sk',
+        '#maxCells = :maxCells',
+      );
+      if (input.applicationIds !== undefined) {
+        names['#applicationIds'] = 'applicationIds';
+        values[':applicationIds'] = [...input.applicationIds];
+        sets.push('#applicationIds = :applicationIds');
+      } else if (path === 'RE_PUT') {
+        names['#applicationIds'] = 'applicationIds';
+        removes.push('#applicationIds');
+      }
+      if (path === 'CREATE') {
+        conditions.push('attribute_not_exists(PK)');
+      } else {
+        values[':createFailed'] = LifecycleStatus.CREATE_FAILED;
+        conditions.push('#status = :createFailed', '#owner = :owner');
+      }
+    }
+    if (path !== 'CREATE') {
+      names['#statusReason'] = 'statusReason';
+      removes.push('#statusReason');
+    }
   }
-  const updateExpression =
-    `SET ${sets.join(', ')}` + (removes.length > 0 ? ` REMOVE ${removes.join(', ')}` : '');
+
   return {
-    updateExpression,
-    conditionExpression: 'attribute_not_exists(PK) OR #owner = :owner',
+    updateExpression: `SET ${sets.join(', ')}` + (removes.length > 0 ? ` REMOVE ${removes.join(', ')}` : ''),
+    conditionExpression: conditions.join(' AND '),
     expressionAttributeNames: names,
     expressionAttributeValues: values,
   };
 }
-
-/**
- * The `DeleteAccount` emptiness guard — `attribute_exists(PK) AND
- * cellCount = 0` — the counterpart of the cell-slot claim (ADR-024). The
- * existence check distinguishes "occupied" from "unregistered" only after
- * the fact: the service reads first for the 404 and treats a condition
- * failure as the 409.
- */
-export const ACCOUNT_EMPTY_CONDITION: WriteCondition = {
-  conditionExpression: 'attribute_exists(PK) AND #cellCount = :zero',
-  expressionAttributeNames: { '#cellCount': 'cellCount' },
-  expressionAttributeValues: { ':zero': 0 },
-};
 
 /** Converts between {@link AccountRecord} and its DynamoDB item. */
 export class AccountDataModel implements DataModel<AccountRecord, AccountItem> {

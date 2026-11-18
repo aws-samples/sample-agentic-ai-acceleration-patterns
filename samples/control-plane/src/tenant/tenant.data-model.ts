@@ -105,18 +105,6 @@ export const TENANT_NOT_EXISTS_CONDITION: WriteCondition = {
   conditionExpression: 'attribute_not_exists(PK)',
 };
 
-/**
- * The `DeleteTenant` emptiness guard — `attribute_exists(PK) AND
- * deploymentCount = 0` — the counterpart of the deployment claim (ADR-037).
- * The service reads first for the 404 and treats a condition failure as the
- * 409.
- */
-export const TENANT_EMPTY_CONDITION: WriteCondition = {
-  conditionExpression: 'attribute_exists(PK) AND #deploymentCount = :zero',
-  expressionAttributeNames: { '#deploymentCount': 'deploymentCount' },
-  expressionAttributeValues: { ':zero': 0 },
-};
-
 /** Converts between {@link TenantRecord} and its DynamoDB item. */
 export class TenantDataModel implements DataModel<TenantRecord, TenantItem> {
   toItem(record: TenantRecord): TenantItem {
