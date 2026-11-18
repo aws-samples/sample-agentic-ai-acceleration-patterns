@@ -136,6 +136,27 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
       return s === status ? d.body.deployment : undefined;
     });
 
+  /**
+   * Record operations answer 202 and the record is usable only once its Get
+   * shows ACTIVE (control-plane ADR-045, spec §8.4). A record event runs no
+   * build, so it settles in seconds; *_FAILED fails at once.
+   */
+  const recordActive = (route: string, key: 'application' | 'tenant' | 'account') =>
+    poll(`${route} ACTIVE`, 5 * 60_000, async () => {
+      const r = await cp.call('GET', route);
+      const s = r.body?.[key]?.status;
+      if (typeof s === 'string' && s.endsWith('_FAILED')) throw new Error(`${route} ${s}: ${r.body[key].statusReason ?? ''}`);
+      return s === 'ACTIVE' ? r.body[key] : undefined;
+    });
+
+  /** A record delete is done when its Get answers 404 (control-plane ADR-045). */
+  const recordGone = (route: string, key: 'application' | 'tenant' | 'account') =>
+    poll(`${route} gone`, 5 * 60_000, async () => {
+      const r = await cp.call('GET', route);
+      if (r.body?.[key]?.status === 'DELETE_FAILED') throw new Error(`${route} DELETE_FAILED: ${r.body[key].statusReason ?? ''}`);
+      return r.status === 404 ? true : undefined;
+    });
+
   beforeAll(async () => {
     const scriptSource = process.env.E2E_CP_SCRIPT_SOURCE;
     if (!scriptSource) {
@@ -172,7 +193,8 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
       tenantScripts: scripts('tenant'),
       maxTenants: 2,
     });
-    expectStatus(application, 200, 'control-plane PutApplication');
+    expectStatus(application, 202, 'control-plane PutApplication');
+    await recordActive(`applications/${APPLICATION_ID}`, 'application');
 
     // Step 0, control-plane ADR-024: cells live in registered accounts.
     // Register the control plane's own account as a shared vendor-owned
@@ -181,14 +203,17 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
     // control-plane stack installed there (ADR-027).
     homeAccountId = cpOut.ControlPlaneAccountId;
     const account = await cp.call('PUT', `accounts/${homeAccountId}`, { owner: 'VENDOR', maxCells: 1 });
-    expectStatus(account, 200, 'control-plane PutAccount (home account)');
+    expectStatus(account, 202, 'control-plane PutAccount (home account)');
+    await recordActive(`accounts/${homeAccountId}`, 'account');
   });
 
   test('steps 1-2: CreateTenant, then CreateDeployment creates the cell and onboards the identity', async () => {
     // A tenant is a record and runs no build (control-plane ADR-037).
     const tenant = await cp.call('POST', 'tenants', { name: tenantName });
-    expectStatus(tenant, 200, 'control-plane CreateTenant');
+    expectStatus(tenant, 202, 'control-plane CreateTenant');
     tenantId = tenant.body.tenant.tenantId;
+    // CreateDeployment on a CREATING tenant is a 409; wait for ACTIVE.
+    await recordActive(`tenants/${tenantId}`, 'tenant');
 
     // The deployment runs placement and the cell and tenant builds.
     const res = await cp.call('POST', `tenants/${tenantId}/deployments`, { applicationId: APPLICATION_ID, adminEmail });
@@ -341,7 +366,8 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
     const tenant = await cp.call('GET', `tenants/${tenantId}`);
     expectStatus(tenant, 200, 'GetTenant');
     expect(tenant.body.tenant.deploymentCount).toBe(0);
-    expectStatus(await cp.call('DELETE', `tenants/${tenantId}`), 200, 'DeleteTenant');
+    expectStatus(await cp.call('DELETE', `tenants/${tenantId}`), 202, 'DeleteTenant');
+    await recordGone(`tenants/${tenantId}`, 'tenant');
 
     // Leave the fleet empty so teardown has nothing to drain.
     const cell = await cp.call('DELETE', `cells/${cellId}`);
@@ -353,8 +379,10 @@ describe('control-plane mounts tenant-identity (mounting spec §10)', () => {
     // The cell delete released the account's and the application's cell
     // slots; deregister both.
     const account = await cp.call('DELETE', `accounts/${homeAccountId}`);
-    expectStatus(account, 200, 'DeleteAccount (home account)');
+    expectStatus(account, 202, 'DeleteAccount (home account)');
+    await recordGone(`accounts/${homeAccountId}`, 'account');
     const application = await cp.call('DELETE', `applications/${APPLICATION_ID}`);
-    expectStatus(application, 200, 'DeleteApplication');
+    expectStatus(application, 202, 'DeleteApplication');
+    await recordGone(`applications/${APPLICATION_ID}`, 'application');
   });
 });

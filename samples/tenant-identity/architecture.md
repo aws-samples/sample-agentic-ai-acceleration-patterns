@@ -577,8 +577,9 @@ no stack, pool, table, parameter, role, or log group with the sample's prefix.
 ### 6.7 Control-plane mount: the create path (ADR-0028..0033, ADR-0038)
 
 When mounted under the `control-plane` sample, one vendor `CreateDeployment`
-of the `identity-mount` application drives both planes, after a synchronous
-control-plane `CreateTenant` has recorded the customer and returned its id.
+of the `identity-mount` application drives both planes, after control-plane
+`CreateTenant` has recorded the customer, returned its id with a 202, and
+`GetTenant` shows it `ACTIVE` (control-plane ADR-045).
 control-plane runs `scripts/control-plane/tenant/create.sh` in its tenant
 CodeBuild project; the script calls this sample's platform API
 with SigV4 under the **same** tenant id (ADR-0029) and parks the first admin's

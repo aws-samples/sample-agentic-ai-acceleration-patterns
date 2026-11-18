@@ -168,8 +168,8 @@ destroys all three stacks: control-plane first, then setup and identity.
 
 | # | Step | Expected |
 |---|---|---|
-| 0 | control-plane `PutApplication identity-mount`, then `PutAccount` (home account) | 200, 200 |
-| 1–2 | control-plane `CreateTenant {name}`, then `CreateDeployment {applicationId: identity-mount, adminEmail=success+…@simulator.amazonses.com}` | 200 with `tenantId`, then 202 with `cellId`; `GetDeployment` polls to `ACTIVE`; the cell is `ACTIVE` with `applicationId: identity-mount`; `cell/create.sh` found the identity parameters |
+| 0 | control-plane `PutApplication identity-mount`, then `PutAccount` (home account) | 202, 202; each `Get` polls to `ACTIVE` (control-plane ADR-045) |
+| 1–2 | control-plane `CreateTenant {name}`, then `CreateDeployment {applicationId: identity-mount, adminEmail=success+…@simulator.amazonses.com}` | 202 with `tenantId`, `GetTenant` polls to `ACTIVE`, then 202 with `cellId`; `GetDeployment` polls to `ACTIVE`; the cell is `ACTIVE` with `applicationId: identity-mount`; `cell/create.sh` found the identity parameters |
 | 3 | tenant-identity `GetTenant(T)` via the test's own SigV4 | 200 `ACTIVE`, same `name` |
 | 4 | tenant-identity `ListUsers(T)` | exactly one user, `admin: true`; `GetTenant` leaks no `firstAdminEmail` |
 | 5 | the parked parameter | `SecureString`, `KeyId` = `adminPasswordKeyArn`; value never printed |
@@ -180,7 +180,7 @@ destroys all three stacks: control-plane first, then setup and identity.
 | 9 | tenant-identity `CreateTenant` with the existing `tenantId` | 409, nothing changed |
 | 9b | `CreateUser {firstAdmin: true}` (taken slot) then `CreateUser {admin: true}` | 409, then 201 — a second *first* admin is refused, a second admin is allowed |
 | 10–11 | control-plane `DeleteDeployment(T, identity-mount)` | 202, `GetDeployment` polls to 404; tenant-identity `GetTenant(T)` 404; parked parameter gone |
-| 11b | control-plane `DeleteTenant(T)`, `DeleteCell`, `DeleteAccount`, `DeleteApplication` | `deploymentCount` 0, then 200, 202 (polls to 404), 200, 200 |
+| 11b | control-plane `DeleteTenant(T)`, `DeleteCell`, `DeleteAccount`, `DeleteApplication` | `deploymentCount` 0, then 202 each, every `Get` polled to 404 |
 | 12 | teardown from an exit trap: control-plane, setup, identity | no stack, parameter, user pool, REST API or log group of the run remains; a leftover parked parameter or orphan REST API is deleted and still fails the run |
 
 Every AWS call in the teardown trap is guarded, so the trap always reaches its
