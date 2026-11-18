@@ -28,7 +28,7 @@ credential (ADR-0009). CORS decides only which web pages may read an answer
 to a request they sent. A page reaches a token only if it already holds the
 user's refresh token.
 
-The integration is `aws_proxy` (ADR-0011): the function's answer goes to the
+The integration is `aws_proxy` (`model/token.smithy`, `@integration`): the function's answer goes to the
 caller as the function built it. Method response mappings do not apply to
 it, and the gateway can add headers only to the answers it makes itself
 (gateway responses), which apply to the whole API, `/platform/*` and
@@ -75,13 +75,17 @@ today's behaviour: no CORS header on any answer.
 ## Consequences
 - §3.3 gains the `allowedOrigins` input, §5.4.1 the rules, §10 a step and
   §11 a seam for preflighted calls. The threat model gains T-38 and M-37.
-- Synthesis needs a copy of the Public Suffix List to refuse a pattern such
-  as `https://*.cloudfront.net`; it is a build-time dependency of the CDK
-  app and never reaches a function.
-- The stack outputs `AllowedOrigins` when the list is set. The integration
-  stacks deploy with a list, and the e2e suite runs the CORS checks only
-  against a stack that has the output, so a stack deployed without one (an
-  older, hand-deployed fixture) skips them with a log line.
+- Synthesis applies the Public Suffix List rules, wildcard and exception
+  rules and the private section included, to refuse a pattern such as
+  `https://*.cloudfront.net`. The rules come from `tldts`
+  (`allowPrivateDomains: true`), a dev dependency in `.projenrc.ts` that
+  never reaches a function. Its copy of the list is as current as the
+  dependency version.
+- The stack outputs `AllowedOrigins` (the entries joined with `,`) when the
+  list is set. The integration stacks deploy with a fixed test list, and
+  the e2e suite runs the CORS checks only against a stack whose output is
+  that list, so a stack deployed without one, or with a real app's origins,
+  skips them with a log line.
 - A deployer who reuses an existing `shared-pool-multi-tenant` stack for a
   browser app redeploys it with the context value; the README's deploy
   commands show it.

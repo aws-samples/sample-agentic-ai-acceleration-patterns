@@ -721,9 +721,12 @@ zero, and not `443`, which browsers leave out of `Origin`.
 Synthesis refuses, naming the entry: any entry outside those forms (another
 scheme, a path, query, fragment or trailing `/`, upper case, an IP literal,
 `*` anywhere but as the whole first label, a port on a pattern, `*` or
-`null` alone, an empty entry); a pattern whose `<domain>` is on the Public
-Suffix List, private section included (`https://*.co.uk`,
-`https://*.cloudfront.net`, `https://*.amazonaws.com`); a repeated entry;
+`null` alone, an empty entry); a pattern whose `<domain>` is a public suffix
+under the Public Suffix List rules, wildcard and exception rules applied and
+the private section included (`https://*.co.uk`,
+`https://*.cloudfront.net`, `https://*.amazonaws.com`, and
+`https://*.us-east-1.elb.amazonaws.com`, which only a wildcard rule
+catches); a repeated entry;
 more than 20 entries; more than 1,024 characters in total, so the list fits
 the function's environment beside its other variables.
 
@@ -733,8 +736,18 @@ pointing at a deleted resource. Use a pattern only under a domain that
 serves the app's tenant hosts and nothing else (`tenant-front-door`'s
 `appDomain`).
 
+The grammar has no `http` and no single-label host, so `http://localhost:5173`
+cannot be listed. A local dev server reaches the exchange through its own
+same-origin proxy instead.
+
+The stack passes the list to the exchange function as `ALLOWED_ORIGINS` and
+outputs it as `AllowedOrigins`, both the entries joined with `,` in input
+order. With no list there is neither.
+
 **The match.** The exchange function's entry reads `Origin` from the event's
-`multiValueHeaders`, matching the header name case-insensitively:
+`multiValueHeaders`, matching the header name case-insensitively. (The
+event's `headers` map keeps only the last value, and `convertEvent` reads
+`multiValueHeaders` only.)
 
 - One `Origin` value equal to an exact entry, or equal to
   `https://<label>.<domain>` for a pattern entry, matches. The comparison is
@@ -742,8 +755,9 @@ serves the app's tenant hosts and nothing else (`tenant-front-door`'s
 - On a match, every answer the function returns carries
   `Access-Control-Allow-Origin: <the request's Origin>`: the 200, every
   §5.4 error, and every error the request framework makes before the service
-  runs (unsupported media type, a malformed body). The entry adds the header
-  after the handler has built the answer, outside the model.
+  runs (unsupported media type, a malformed body). The entry adds the
+  headers to the `HttpResponse` the service handler returns, before
+  `convertVersion1Response`, outside the model.
 - No `Origin`, `Origin: null`, more than one `Origin` value, or no match: no
   `Access-Control-Allow-Origin`.
 - When the list is not empty, every answer carries `Vary: Origin`, matched
@@ -753,10 +767,11 @@ serves the app's tenant hosts and nothing else (`tenant-front-door`'s
   reads the JSON body and `Cache-Control`, which the browser exposes without
   `Access-Control-Expose-Headers`.
 
-Before dispatch the entry also drops any parameters from `Content-Type`
-(`application/x-www-form-urlencoded;charset=UTF-8` becomes
-`application/x-www-form-urlencoded`), because the generated deserializer
-accepts only the bare type. The body is still parsed as UTF-8.
+Before dispatch the entry also drops any parameters from `Content-Type` on
+the `HttpRequest` that `convertEvent` returns, header name matched
+case-insensitively (`application/x-www-form-urlencoded;charset=UTF-8`
+becomes `application/x-www-form-urlencoded`), because the generated
+deserializer accepts only the bare type. The body is still parsed as UTF-8.
 
 An unmatched `Origin` is never a reason to refuse: it still gets the
 exchange, because CORS controls what a page may read, not who may call.
@@ -1077,16 +1092,19 @@ step 12.
    - `subject_token_type` = access token: `invalid_request`.
    CORS (§5.4.1). The integration app gives every stack the prop
    `allowedOrigins: ['https://app.example.com', 'https://*.tenants.example.com']`,
-   and the stack outputs `AllowedOrigins`. Against a stack with that output:
-   the narrowing above sent with `Origin: https://app.example.com` and
+   and the stack outputs `AllowedOrigins`. Against a stack whose
+   `AllowedOrigins` is exactly
+   `https://app.example.com,https://*.tenants.example.com`:
+   u1's `scope=sample/read` narrowing sent with `Origin: https://app.example.com` and
    `Content-Type: application/x-www-form-urlencoded;charset=UTF-8`, and u2's
    `resource=A` refusal sent with `Origin: https://acme.tenants.example.com`,
    each answer `Access-Control-Allow-Origin` equal to that origin and
    `Vary: Origin`; the same narrowing with `Origin: https://evil.example.com`,
    `Origin: https://a.b.tenants.example.com` or no `Origin` succeeds with no
-   `Access-Control-Allow-Origin` and with `Vary: Origin`. A stack without
-   the output (deployed without a list) skips these checks and the suite
-   logs the skip.
+   `Access-Control-Allow-Origin` and with `Vary: Origin`. Against any other
+   stack (no output, or another list, such as a fixture deployed by hand
+   for a real app) the suite skips these checks and logs the stack name and
+   its list.
    Bypass the endpoint: call `GetTokensFromRefreshToken` directly with u2's
    refresh token and the §8.2 keys naming A. Cognito fails the request, which
    proves the trigger enforces the rule, not the endpoint. A plain
@@ -1201,7 +1219,12 @@ RFC 8693 parameter not listed in §5.4; synthesis refuses every
 port on a pattern, an empty or repeated entry, the count and length caps
 among them), and the origin matcher accepts and refuses the §5.4.1 cases
 (exact, port, one label, two labels, the bare domain, upper case, `http`,
-`null`, two `Origin` values, the header name in either case); the exchange
+`null`, two `Origin` values, the header name in either case, no `Origin`,
+and the look-alikes `https://app.example.com.evil.test`,
+`https://xapp.example.com`, `https://app.example.com:443` and
+`https://app.example.com/` against an exact `https://app.example.com`, none
+of which match), the synth check refuses a pattern under a wildcard rule
+(`https://*.us-east-1.elb.amazonaws.com`); the exchange
 entry adds the CORS headers to a 200, an OAuth error, a `server_error` and a
 framework error alike, none when the list is empty, and dispatches a
 `Content-Type` with `;charset=UTF-8` as the bare type (ADR-0040); the binding rule holds for every
@@ -1225,7 +1248,7 @@ rather than falling back.
 | Federation to a tenant's own IdP | Topology 1: an IdP per pool, the natural fit. Topologies 2 and 3: an IdP per tenant in the shared pool with attribute/group mapping, bounded by the 300-IdP quota. |
 | Narrowing at sign-in | Pass the §8.2 keys to `InitiateAuth` to narrow the session's first token. Not built: exchange (§5.4) narrows per call with no new sign-in (ADR-0009, Option 4). |
 | Delegation (`act`, RFC 8693 §4.1) and audience narrowing | A service exchanging a token it received, to act for the user downstream, needs an access-token subject and a signer of its own. Out of scope by ADR-0009. Cognito token exchange (`GetDerivedToken`) takes an access-token subject, signs with the pool and adds `act` and one audience, but cannot carry the tenant and needs a trigger change first (ADR-0039); AgentCore Identity on-behalf-of is the other managed fit. |
-| Preflighted browser calls | A page that adds a non-safelisted header to the exchange (a tracing header included), or calls `/tenant/*` from another origin, makes the browser send an `OPTIONS` preflight. Add an `OPTIONS` route per path, proxied to a function that answers from the same `allowedOrigins` matcher with `Access-Control-Allow-Methods` and `Access-Control-Allow-Headers` for exactly what the page sends; `/tenant/*` also needs `Authorization` allowed. Not built: the exchange is a simple request (§5.4.1, ADR-0040). |
+| Preflighted browser calls | A page that adds a non-safelisted header to the exchange (a tracing header included), or calls `/tenant/*` from another origin, makes the browser send an `OPTIONS` preflight. Add an `OPTIONS` route per path, proxied to a function that answers from the same `allowedOrigins` matcher with `Access-Control-Allow-Methods` and `Access-Control-Allow-Headers` for exactly what the page sends; `/tenant/*` also needs `Authorization` allowed. The API's resource policy lets any principal call only `POST/oauth2/token` and `*/tenant/*`, so the seam also adds `OPTIONS/oauth2/token` there, or the preflight is refused with 403. Not built: the exchange is a simple request (§5.4.1, ADR-0040). |
 | Hosted UI / managed login | Add a domain and OAuth flows to the app client; nothing in the trigger changes. |
 | Async onboarding | Wrap `CreateTenant` in the control-plane sample's workflow when onboarding grows beyond Cognito calls (e.g. also provisioning tenant storage). |
 | Control-plane mounting | A `scripts/control-plane/` lifecycle set that calls `CreateTenant`/`DeleteTenant` so this sample runs as a cell's identity component. |
