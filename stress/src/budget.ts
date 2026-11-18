@@ -5,8 +5,8 @@
  * The quota budget (spec §4.4, P-4). Each slice's `budget` verb prints what
  * it draws on each account-wide quota at the tier; the runner adds the draws
  * up per account and refuses to start when a sum is over the account's
- * limit. Limits come from Service Quotas where the quota has a code, and
- * from the documented default otherwise.
+ * limit. Limits come from a limits file with the accounts' real values, and
+ * from the service default otherwise.
  */
 
 export interface QuotaInfo {
@@ -14,7 +14,7 @@ export interface QuotaInfo {
   /** Service Quotas service and quota code, when the quota is listed there. */
   readonly serviceCode?: string;
   readonly quotaCode?: string;
-  /** The service default, used when the account's value cannot be read. */
+  /** The service default, used when the limits file has no value. */
   readonly defaultLimit: number;
 }
 
@@ -37,6 +37,12 @@ export const QUOTAS = {
     quotaCode: 'L-2AC98190',
     defaultLimit: 1000,
   },
+  'kms-ecc-rps': {
+    description: 'KMS cryptographic operations (ECC and SM2) per second',
+    serviceCode: 'kms',
+    quotaCode: 'L-DC14942D',
+    defaultLimit: 1000,
+  },
   'sts-assume-role-rps': {
     description: 'STS AssumeRole per second (not in Service Quotas)',
     defaultLimit: 600,
@@ -54,12 +60,18 @@ export const QUOTAS = {
     defaultLimit: 2500,
   },
   'agentcore-runtime-tps': {
-    description: 'AgentCore Runtime invocations per second',
+    description: 'AgentCore Runtime invocations per second (not in Service Quotas)',
     defaultLimit: 1000,
   },
   'cognito-groups': {
     description: 'Cognito groups per user pool (two per tenant), hard',
     defaultLimit: 10000,
+  },
+  'cognito-user-authentication-rps': {
+    description: 'Cognito UserAuthentication requests per second',
+    serviceCode: 'cognito-idp',
+    quotaCode: 'L-026ADBA3',
+    defaultLimit: 120,
   },
 } as const satisfies Record<string, QuotaInfo>;
 
@@ -69,31 +81,45 @@ export function isQuotaId(value: unknown): value is QuotaId {
   return typeof value === 'string' && Object.prototype.hasOwnProperty.call(QUOTAS, value);
 }
 
-/** One line of a slice's `budget` output. `account` is `platform` or `cell-<n>`. */
+/**
+ * One line of a slice's `budget` output. `account` is `platform` or
+ * `cell-account-<n>`, the n-th cell account of the tier (not the n-th cell).
+ */
 export interface Draw {
   readonly account: string;
   readonly quota: QuotaId;
   readonly amount: number;
 }
 
-const ACCOUNT_LABEL = /^(platform|cell-[1-9][0-9]*)$/;
+const CELL_ACCOUNT = /^cell-account-([1-9][0-9]*)$/;
+
+/** True for `platform` and `cell-account-<n>` with n within the tier's cell accounts. */
+export function isAccountLabel(label: string, cellAccounts: number): boolean {
+  if (label === 'platform') return true;
+  const m = CELL_ACCOUNT.exec(label);
+  return m !== null && Number(m[1]) <= cellAccounts;
+}
+
+function accountsText(cellAccounts: number): string {
+  return `"platform" or "cell-account-1".."cell-account-${cellAccounts}"`;
+}
 
 /** Parses one slice's `budget` output: `{"draws": [{account, quota, amount}]}`. */
-export function parseDraws(slice: string, text: string): Draw[] {
+export function parseDraws(slice: string, text: string, cellAccounts: number): Draw[] {
   let doc: unknown;
   try {
     doc = JSON.parse(text);
   } catch {
     throw new Error(`${slice}: budget printed no JSON`);
   }
-  const draws = (doc as { draws?: unknown }).draws;
+  const draws = (doc as { draws?: unknown } | null)?.draws;
   if (!Array.isArray(draws)) {
     throw new Error(`${slice}: budget output has no "draws" array`);
   }
   return draws.map((d, i) => {
     const { account, quota, amount } = (d ?? {}) as Record<string, unknown>;
-    if (typeof account !== 'string' || !ACCOUNT_LABEL.test(account)) {
-      throw new Error(`${slice}: draws[${i}].account must be "platform" or "cell-<n>"`);
+    if (typeof account !== 'string' || !isAccountLabel(account, cellAccounts)) {
+      throw new Error(`${slice}: draws[${i}].account must be ${accountsText(cellAccounts)}`);
     }
     if (!isQuotaId(quota)) {
       throw new Error(`${slice}: draws[${i}].quota ${JSON.stringify(quota)} is not a known quota (${Object.keys(QUOTAS).join(', ')})`);
@@ -120,6 +146,26 @@ export function sumDraws(draws: readonly Draw[]): Sums {
 
 /** account -> quota -> the account's limit; a missing entry uses the default. */
 export type Limits = Readonly<Record<string, Partial<Record<QuotaId, number>>>>;
+
+/** Parses a limits file: `{"platform": {"<quota>": <n>}, "cell-account-1": {...}}`. */
+export function parseLimits(text: string, file: string, cellAccounts: number): Limits {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    throw new Error(`${file}: not JSON`);
+  }
+  if (typeof doc !== 'object' || doc === null || Array.isArray(doc)) throw new Error(`${file}: must be an object of accounts`);
+  for (const [account, quotas] of Object.entries(doc)) {
+    if (!isAccountLabel(account, cellAccounts)) throw new Error(`${file}: account ${account} must be ${accountsText(cellAccounts)}`);
+    if (typeof quotas !== 'object' || quotas === null || Array.isArray(quotas)) throw new Error(`${file}: ${account} must be an object of quotas`);
+    for (const [quota, value] of Object.entries(quotas as Record<string, unknown>)) {
+      if (!isQuotaId(quota)) throw new Error(`${file}: ${account}.${quota} is not a known quota`);
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) throw new Error(`${file}: ${account}.${quota} must be a non-negative number`);
+    }
+  }
+  return doc as Limits;
+}
 
 export interface Overdraw {
   readonly account: string;

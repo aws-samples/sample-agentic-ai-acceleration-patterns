@@ -22,6 +22,7 @@ const project = new typescript.TypeScriptProject({
   sampleCode: false,
   release: false,
   package: false,
+  entrypoint: '',
   devDeps: ['@types/node@24'],
   tsconfigDev: {
     compilerOptions: {

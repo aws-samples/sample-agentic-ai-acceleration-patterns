@@ -130,12 +130,17 @@ function fmt(n: number | undefined, digits = 0): string {
   return n === undefined ? '-' : n.toLocaleString('en-US', { maximumFractionDigits: digits, minimumFractionDigits: digits });
 }
 
-/** The committed results file for one run (`stress/results/<date>-<tier>.md`). */
+/**
+ * The results file of one run. The runner writes it next to the records;
+ * a person checks it and commits it as `stress/results/<date>-<tier>.md`.
+ */
 export function renderResults(records: readonly ResultRecord[]): string {
   if (records.length === 0) throw new Error('no result records to render');
   const first = records[0];
-  const runIds = new Set(records.map((r) => r.runId));
-  if (runIds.size !== 1) throw new Error(`records from ${runIds.size} runs: ${[...runIds].join(', ')}`);
+  for (const k of ['runId', 'tier', 'mode'] as const) {
+    const values = new Set(records.map((r) => r[k]));
+    if (values.size !== 1) throw new Error(`records with ${values.size} values of ${k}: ${[...values].join(', ')}`);
+  }
   const start = records.map((r) => r.window.start).sort()[0];
   const end = records.map((r) => r.window.end).sort().reverse()[0];
   const commits = new Map<string, string>();

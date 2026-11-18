@@ -58,7 +58,8 @@ describe('result records (spec §4.3)', () => {
   });
 
   it('refuses records of two runs in one file', () => {
-    expect(() => renderResults([record(), record({ runId: 'other' })])).toThrow(/2 runs/);
+    expect(() => renderResults([record(), record({ runId: 'other' })])).toThrow(/2 values of runId/);
+    expect(() => renderResults([record(), record({ tier: 'large' })])).toThrow(/2 values of tier/);
     expect(() => renderResults([])).toThrow(/no result records/);
   });
 });

@@ -212,21 +212,32 @@ Inputs every verb reads from the environment:
 | `STRESS_PREFIX` | stack and resource name prefix |
 | `STRESS_HOME` | the manifest folder outside the repository |
 | `STRESS_MODE` | `slice` (alone) or `platform` (composed) |
+| `STRESS_TIER_JSON` | the whole tier from `stress/src/tiers.ts`, as JSON |
+| `STRESS_RESULTS` | the folder `run <scenario>` writes its record to |
+| `STRESS_REPO` | the repository root |
+| `STRESS_COMMIT` | the commit the run is built from |
+
+`budget` gets no `AWS_*` variables. The runner times `deploy` and
+`teardown` itself, so a slice reports its seconds by exiting.
 
 ### 3.5 Runner
 
-`stress/run.sh --tier <tier> [--slices <a,b,...>] [--scenarios <x,y>]`:
+`stress/run.sh run --tier <tier> --slices <a,b,...> [--scenarios <x,y>] [--limits <file>]`:
 
 1. Reads every named `slice.json` and checks the needs are present.
 2. Sums `budget` per account and refuses to start when a sum is over its
-   quota or another run holds the account.
+   quota or another run holds the lock for the prefix.
 3. Runs `deploy` and `seed` in dependency order, then the scenarios in the
    order of §5, then `collect`, then `teardown` in reverse order. Teardown
-   runs from the exit trap, also on failure.
+   runs on failure and after SIGINT or SIGTERM too.
 4. Writes the run's result file (§4.3).
 
 With one slice named, the runner is that sample's stress test. With all of
 them, it is the platform run.
+
+The lock is per prefix on the runner's host. A second run from another host
+against the same accounts is not detected; one run per set of accounts at a
+time is an operating rule (`stress/README.md`, known limitations).
 
 ### 3.6 Deployment inputs
 

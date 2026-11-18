@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { cellAccountOf, TIER_NAMES, TIERS, tierOf, tierProblems } from '../src/tiers';
+import { TIER_NAMES, TIERS, tierOf, tierProblems } from '../src/tiers';
 
 describe('tiers (spec §4.1)', () => {
   it.each(TIER_NAMES)('%s keeps every tier rule', (name) => {
@@ -34,11 +34,5 @@ describe('tiers (spec §4.1)', () => {
     const broken = { ...TIERS.small, maxTenants: 20, cellAccounts: 2, tenantsActive: 7000, peakRps: 1, tenantsSeeded: 6000 };
     const problems = tierProblems(broken);
     expect(problems).toHaveLength(5);
-  });
-
-  it('spreads cells evenly over the cell accounts', () => {
-    expect([1, 2, 3, 4].map((c) => cellAccountOf(TIERS.large, c))).toEqual([1, 1, 2, 2]);
-    expect([1, 2].map((c) => cellAccountOf(TIERS.medium, c))).toEqual([1, 2]);
-    expect(() => cellAccountOf(TIERS.small, 2)).toThrow(/outside 1..1/);
   });
 });

@@ -118,11 +118,3 @@ export function tierProblems(t: Tier): string[] {
   }
   return problems;
 }
-
-/** The cell account (1-based) that holds cell `cell` (1-based) of tier `t`. */
-export function cellAccountOf(t: Tier, cell: number): number {
-  if (!Number.isInteger(cell) || cell < 1 || cell > t.cells) {
-    throw new Error(`${t.name}: cell ${cell} is outside 1..${t.cells}`);
-  }
-  return Math.ceil(cell / (t.cells / t.cellAccounts));
-}
