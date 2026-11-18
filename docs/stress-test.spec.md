@@ -245,19 +245,24 @@ A cell account holds only:
 | Stack | What it is |
 |---|---|
 | `CDKToolkit-cell` | the cell bootstrap (§8, decision 7) |
-| the role pair | `control-plane`'s `CellAccountStack`, deployed as plain CloudFormation or through the cell bootstrap |
+| the role pair | `control-plane`'s `CellAccountStack`, deployed by the account owner as plain CloudFormation without a service role; its roles are on the default path `/` and carry no cell boundary |
 | cells | the stacks the cell script deploys |
 
 It has no default CDK bootstrap, no control plane, no driver host and no
 stacks of other samples. The cell bootstrap and its boundary scope a cell
 build's IAM writes to cell roles; the account boundary scopes everything
 else. A compromised cell build can change any cell in its account, and
-nothing outside it.
+nothing else in it. It can still give a cell role a trust to another
+account (`iam:UpdateAssumeRolePolicy` on `role/cell/*`); that role stays
+under the boundary, but it is a way in from outside until the cell is
+redeployed.
 
 The `control-plane` slice's `deploy` enforces it before the first cell
 build: it lists the account's CloudFormation stacks in every Region the run
-uses and refuses an account with any stack but the three kinds above, or
-with a `cdk-hnb659fds-*` role.
+uses and refuses an account with any stack but the three kinds above, a
+stack whose service role is set and is not the cell execution role, a
+`cdk-hnb659fds-*` role, or a role pair on `/cell/` or under the cell
+boundary. The stack list and `iam:GetRole` give all of it.
 
 ## 4. Data model
 
@@ -338,7 +343,7 @@ Run in this order in `platform` mode. PS-5 and PS-7 run inside PS-2.
 
 | Id | Shape | What it stresses | Watch |
 |---|---|---|---|
-| PS-1 onboarding | the tier's onboarding (or the churn count at `large`) at `buildLimit` | control plane, CodeBuild, tenant scripts, tenant-identity platform throttle, registrar | deployments per minute; time from `CreateDeployment` to the first served request; build failures by cause |
+| PS-1 onboarding | the tier's onboarding at `buildLimit`; at `large`, where the fleet is a fixture, PS-1 is timed on PS-5's creates | control plane, CodeBuild, tenant scripts, tenant-identity platform throttle, registrar | deployments per minute; time from `CreateDeployment` to the first served request; build failures by cause |
 | PS-2 steady through the edge | runtime-isolation S1 shape through CloudFront, across every cell | every hop | latency per hop; edge overhead; router compute utilisation |
 | PS-3 herd through the edge | S2 shape: cold ingress instances in every cell, 0 to the peak rate in 5 s | cold starts in every cell at once, per-account quotas | refusals by tenant and cell; STS and Lambda throttles by account |
 | PS-4 noisy neighbour | S3 shape: one tenant at 10x its limit | the per-tenant limit behind the edge (`single` mode limits at the origin) | that tenant refused; every other tenant on its cell served |
@@ -418,19 +423,19 @@ permissions boundary:
 | Part | Value |
 |---|---|
 | Bootstrap | `cdk bootstrap --qualifier cell --toolkit-stack-name CDKToolkit-cell --cloudformation-execution-policies <cell execution policy ARN> --custom-permissions-boundary cell-permissions-boundary`, run once by the account owner |
-| Cell roles | every role a cell creates is on the IAM path `/cell/`; the stress application's cell app sets it with a CDK aspect on every `AWS::IAM::Role` |
-| Cell execution policy | a managed policy shipped in `stress/application/`: API Gateway, Application Auto Scaling (a DynamoDB global table deregisters its scalable targets on delete), AgentCore, CloudWatch, DynamoDB, KMS, Lambda, CloudWatch Logs, SSM, read of `cdk-cell-assets-*`, and IAM role writes and `iam:PassRole` on `role/cell/*` only |
+| Cell roles | every role a cell creates is on the IAM path `/cell/`; the stress application's cell app sets it with a CDK aspect that matches every `CfnResource` of type `AWS::IAM::Role` (custom resource provider roles are not `CfnRole`) and sets `Path` with a property override |
+| Cell execution policy | a managed policy shipped in `stress/application/`: API Gateway, Application Auto Scaling (a DynamoDB global table deregisters its scalable targets on delete), AgentCore, CloudWatch, DynamoDB, KMS, Lambda, CloudWatch Logs, SSM, read of `cdk-cell-assets-*`, IAM role writes and `iam:PassRole` on `role/cell/*` only, and `iam:CreateServiceLinkedRole` on `role/aws-service-role/*` for the cell's services only (`iam:AWSServiceName`: DynamoDB replication and Application Auto Scaling), whose trust IAM fixes to the service |
 | Cell permissions boundary | a managed policy on the execution role and on every cell role: the same services plus what cell roles call at run time (`execute-api`, the Bedrock model calls, `sts:TagSession`, X-Ray), and `sts:AssumeRole` on `role/cell/*` only; it denies `iam:CreateRole` without itself or outside `/cell/`, any IAM write or `iam:PassRole` on a role outside `/cell/`, removing a boundary, users, access keys and policy writes |
 | Cell synth | `@aws-cdk/core:bootstrapQualifier` `cell` and `@aws-cdk/core:permissionsBoundary` `{"name":"cell-permissions-boundary"}` as object context (`cdk.json` or `CDK_CONTEXT_JSON`); a CLI `--context` passes the boundary as a string, which the CDK ignores |
-| Role pair | `control-plane`'s `cellBuildManagedPolicyArns` (ADR-0047); the cell account owner attaches one policy that allows `sts:AssumeRole` on the four `cdk-cell-*` bootstrap roles of its own account and Region, and nothing else |
+| Role pair | `control-plane`'s `cellBuildManagedPolicyArns` (ADR-0047); the cell account owner attaches one policy that allows `sts:AssumeRole` on the deploy, file-publishing and image-publishing `cdk-cell-*` roles of its own account and Region, and nothing else (not the lookup role, which holds `ReadOnlyAccess` without the boundary) |
 
 Three walls hold the scope together. The boundary keeps every cell role
 under it. The `/cell/` path keeps cell roles and the execution role from
 writing to, passing or assuming any role that is not a cell role: the
 account's own administrator roles, the role pair and the bootstrap roles.
 The standalone account (§3.7) leaves no other stack or data for the service
-grants to reach. The evidence is in stress ADR-0006 and
-`stress/spikes/q5-cell-boundary/`.
+grants to reach. Spike Q-5 (`stress/spikes/q5-cell-boundary/`) proved the
+boundary wall; the path and account walls are Q-5 and Q-6.
 
 ## 9. Work items and parallel readiness
 
@@ -456,5 +461,5 @@ grants to reach. The evidence is in stress ADR-0006 and
 | Q-2 | Does the front door's integration test compose runtime-isolation for `/agents/*` (its Q-4)? The platform run assumes it can | W-7 |
 | Q-3 | Does the platform run keep the `large` fleet in every account between runs, and what does it cost idle? | decision 5 |
 | Q-4 | Which hosted zone does the stress front door use? | W-7 |
-| Q-5 | Does the `/cell/` path scope refuse a cell role's `iam:UpdateAssumeRolePolicy` on the role pair, `iam:PutRolePolicy` on a `cdk-cell-*` role, `iam:PassRole` of a role outside `/cell/` and `sts:AssumeRole` of the account's administrator role, while the integration test still passes under it? Proven by deny probes and one integration run in a standalone cell account | W-10 |
+| Q-5 | Does the `/cell/` path scope refuse a cell role's `iam:UpdateAssumeRolePolicy` on the role pair, `iam:PutRolePolicy` on a `cdk-cell-*` role, `iam:PassRole` of a role outside `/cell/` and `sts:AssumeRole` of the account's administrator role, while `iam:CreateServiceLinkedRole` for the cell's services succeeds in a fresh account and the integration test still passes under it? Proven by deny probes and one integration run in a standalone cell account | W-10 |
 | Q-6 | Does runtime-isolation deploy with every role on `/cell/` (resource policies and conditions that name role ARNs) and does its demo stack export what the stress cell app needs to instantiate it from the sample's package entry? | W-10 |

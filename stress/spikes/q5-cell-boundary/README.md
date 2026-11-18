@@ -70,6 +70,20 @@ with `samples/agentic-runtime-isolation/cdk.context.json` holding
 (gitignored, removed after the run). Deploy of six stacks 475 s at
 concurrency 6, steps 1,672 s, 60 of 60 steps, step 10 found nothing left.
 
+## Security scan
+
+ProtoShield v0.18.0 on `stress/` (2026-11-18), with `stress/.protoshield/config.yaml`
+setting the license check to MIT-0. Semgrep, CVE, secrets and license
+headers: 0. IAM least privilege: 5 high, all in `cell-policies.yaml`.
+
+| Finding | Outcome |
+|---|---|
+| Service wildcards (`apigateway:*`, `dynamodb:*`, `kms:*`, `lambda:*`, `logs:*`, `ssm:*`, ...) on `*`, in both policies | Accepted: the file records the policies the spike ran, to keep Q5-1 to Q5-5 reproducible. It is not deployable guidance; the cell policies are spec §8, decision 7, scoped by the standalone cell account |
+| IAM role writes, `iam:PassRole` and `sts:AssumeRole` on `*` | Accepted for the same reason; this is the gap Q5-4 names and the `/cell/` path closes in the cell policies (spec Q-5) |
+
+The policies in `stress/application/` replace these once spec Q-5 has run;
+the spike file then stays as the record of this run only.
+
 ## Teardown
 
 Everything the spike created is gone from the account: the

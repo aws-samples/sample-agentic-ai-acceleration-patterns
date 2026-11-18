@@ -50,19 +50,19 @@ Option 3.
 
 | Wall | Holds |
 |---|---|
-| Standalone cell account | only `CDKToolkit-cell`, the role pair and cells; no default CDK bootstrap; the `control-plane` slice refuses an account with any other stack or a `cdk-hnb659fds-*` role before the first cell build |
+| Standalone cell account | only `CDKToolkit-cell`, the role pair (plain CloudFormation by the account owner, on `/`, no cell boundary) and cells; no default CDK bootstrap; the `control-plane` slice refuses an account with any other stack, a stack with a service role other than the cell execution role, a `cdk-hnb659fds-*` role, or a role pair on `/cell/` before the first cell build |
 | Cell bootstrap | `cdk bootstrap --qualifier cell --toolkit-stack-name CDKToolkit-cell --cloudformation-execution-policies <cell execution policy> --custom-permissions-boundary cell-permissions-boundary` |
-| `/cell/` path | every role a cell creates is on `/cell/`, set by a CDK aspect in the stress cell app; IAM role writes, `iam:PassRole` and `sts:AssumeRole` are allowed on `role/cell/*` only |
+| `/cell/` path | every role a cell creates is on `/cell/`, set by a CDK aspect in the stress cell app that matches every `AWS::IAM::Role` resource; IAM role writes, `iam:PassRole` and `sts:AssumeRole` are allowed on `role/cell/*` only; `iam:CreateServiceLinkedRole` only for the cell's services |
 | Boundary | on the execution role and every cell role: the cell's services, and denies on `iam:CreateRole` without the boundary or outside `/cell/`, any IAM write or `iam:PassRole` on a role outside `/cell/`, boundary removal, users, access keys and policy writes |
 
 The cell synth sets `@aws-cdk/core:bootstrapQualifier` and
 `@aws-cdk/core:permissionsBoundary` as object context (a CLI `--context`
 passes the boundary as a string, which the CDK ignores). The role pair gets
-`sts:AssumeRole` on the four `cdk-cell-*` roles through control-plane
-ADR-0047. The policies ship in `stress/application/`.
+`sts:AssumeRole` on the deploy and asset-publishing `cdk-cell-*` roles
+(not the lookup role) through control-plane ADR-0047. The policies ship in `stress/application/`.
 
-## Evidence
-Spike Q-5 (`stress/spikes/q5-cell-boundary/`, 2026-11-18), in a shared
+## Consequences
+Proven so far: spike Q-5 (`stress/spikes/q5-cell-boundary/`, 2026-11-18), in a shared
 account and without the `/cell/` path, proved the boundary half: one cell
 deployed in 402 s with 27 of 27 roles bounded; a role without the boundary
 was refused at `iam:CreateRole`; the destroy needed Application Auto
@@ -75,10 +75,11 @@ a standalone cell account with the `/cell/` path: deny probes for
 `sts:AssumeRole` of the account's administrator role, and the integration
 test passing with every role on `/cell/`.
 
-## Consequences
 Easier: a cell build cannot create, change, pass or assume a role outside
 the cell, and the account holds nothing else for its service grants to
 reach. Harder: each stress run needs cell accounts that hold only cells;
+a compromised cell build can give a cell role a trust to another account,
+which the boundary still caps, until the cell is redeployed;
 a new service in a cell needs both policies updated before its first
 deploy, and an integration run under the boundary is the check. Unchanged:
 a compromised cell build can change any cell in its account, which is the
