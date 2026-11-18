@@ -38,7 +38,7 @@ and `slice.sh <verb> [args]`, where the verb is one of:
 | `deploy` | deploys or reuses its stacks; publishes what the next slice needs through its published parameters | - |
 | `seed` | creates or reuses its data; never writes a token or a password | manifests in `$STRESS_HOME/$STRESS_PREFIX/` |
 | `run <scenario>` | runs one scenario; exits non-zero when a pass criterion fails | `$STRESS_RESULTS/<name>.<scenario>.json` |
-| `collect` | reads logs and metrics for the run window | - |
+| `collect` | reads logs and metrics for the run window | may fill in its own records' late fields (`refusals`, `cost`) in `$STRESS_RESULTS` |
 | `teardown [--fixtures]` | removes what it deployed; keeps fixtures unless `--fixtures` | - |
 
 Every verb gets `STRESS_TIER`, `STRESS_TIER_JSON` (the whole tier, as
@@ -54,10 +54,13 @@ then each slice's own scenarios in slice order. A run fails when a
 scenario's record is missing, does not parse, belongs to another run, or
 makes no isolation assertion, when a record names a slice or a scenario
 the run did not run, and when a record changed after its own `run`
-returned (another slice rewrote it).
+returned (another slice rewrote it). Only the slice's own `collect` may
+change its records after `run`, and only records nobody else changed.
 
 Each verb runs in its own session and process group with no stdin, so
-`slice.sh` must not prompt (`cdk deploy --require-approval never`). When `slice.sh` exits,
+`slice.sh` must not prompt (`cdk deploy --require-approval never`). Its
+stdout and stderr go through the runner to the terminal and to
+`$STRESS_HOME/$STRESS_PREFIX/<run id>/run.log`. When `slice.sh` exits,
 anything it left running in its group gets SIGTERM, then SIGKILL after
 30 seconds.
 
@@ -84,8 +87,9 @@ folder that already exists. Ctrl-C, SIGTERM or a hangup (SIGHUP) stops the
 current step, with everything it started, and then tears down every slice
 that started. Signals during teardown are logged and ignored. An
 interrupted run exits 129 (SIGHUP), 130 (SIGINT) or 143 (SIGTERM); a failed
-run exits 1. Long runs belong in `tmux`, `screen` or `nohup` with the
-output redirected, so a dropped connection does not interrupt them.
+run exits 1. Long runs belong in `tmux` or `screen`, or
+`setsid ./run.sh run ... > run.out 2>&1 &`, so a dropped connection does not
+interrupt them. `nohup` does not help: Node resets the ignored SIGHUP.
 
 The run writes `$STRESS_HOME/$STRESS_PREFIX/<run id>/results.md`. To keep a
 run, copy that file to `stress/results/<date>-<tier>.md` and commit it

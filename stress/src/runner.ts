@@ -29,7 +29,8 @@ export type Stop = (signal: NodeJS.Signals) => void;
 /**
  * Runs `slice.sh <args>`. `capture` returns stdout instead of streaming it.
  * `onStart` hands the runner a `Stop` while the verb runs, and `undefined`
- * once it has ended.
+ * once it has ended. `output` receives everything the verb prints that is
+ * not captured; the verb never writes to the runner's terminal itself.
  */
 export type Exec = (
   script: string,
@@ -37,6 +38,7 @@ export type Exec = (
   env: NodeJS.ProcessEnv,
   capture: boolean,
   onStart: (stop: Stop | undefined) => void,
+  output?: (chunk: string) => void,
 ) => Promise<ExecResult>;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -47,6 +49,11 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  * them do not count; elsewhere it asks the kernel, which counts them.
  */
 function groupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+  } catch {
+    return false;
+  }
   if (fs.existsSync('/proc/self/stat')) {
     for (const entry of fs.readdirSync('/proc')) {
       if (!/^\d+$/.test(entry)) continue;
@@ -62,12 +69,7 @@ function groupAlive(pgid: number): boolean {
     }
     return false;
   }
-  try {
-    process.kill(-pgid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  return true;
 }
 
 function signalGroup(pgid: number, signal: NodeJS.Signals): void {
@@ -95,23 +97,28 @@ async function reapGroup(pgid: number, graceMs: number): Promise<void> {
  * signal reaches `slice.sh` and everything it started (`cdk`, `aws`, `k6`),
  * and a terminal Ctrl-C or hangup reaches only the runner. When `slice.sh` exits, anything
  * it left running in its group is stopped before the verb counts as done,
- * with `graceMs` between SIGTERM and SIGKILL. Verbs get no stdin.
+ * with `graceMs` between SIGTERM and SIGKILL. Verbs get no stdin, and
+ * their stdout and stderr are pipes to the runner, so a terminal that hung
+ * up cannot fail a verb's writes.
  */
 export function groupExec(graceMs = 30_000): Exec {
-  return (script, args, env, capture, onStart) =>
+  return (script, args, env, capture, onStart, output = logToStderr) =>
     new Promise((resolve, reject) => {
       const child = spawn('bash', [script, ...args], {
         cwd: path.dirname(script),
         env,
         detached: true,
-        stdio: ['ignore', capture ? 'pipe' : 'inherit', 'inherit'],
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
       const pgid = child.pid;
       let stdout = '';
       child.stdout?.setEncoding('utf8');
+      child.stderr?.setEncoding('utf8');
       child.stdout?.on('data', (chunk: string) => {
-        stdout += chunk;
+        if (capture) stdout += chunk;
+        else output(chunk);
       });
+      child.stderr?.on('data', (chunk: string) => output(chunk));
       let status: number | null = null;
       const closed = new Promise<void>((r) => child.on('close', () => r()));
       child.on('error', (e) => {
@@ -171,10 +178,10 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 /** The signals that stop a run and start teardown. */
 const SIGNALS: readonly NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP'];
 
-/** Logs to stderr; a write to a terminal that hung up must not stop teardown. */
-function logToStderr(line: string): void {
+/** Writes to stderr; a write to a terminal that hung up must not stop teardown. */
+function logToStderr(text: string): void {
   try {
-    process.stderr.write(`${line}\n`);
+    process.stderr.write(text);
   } catch {
     // stderr is gone (EIO after a hangup); keep going.
   }
@@ -219,7 +226,7 @@ function budgetEnv(env: NodeJS.ProcessEnv, home: string): NodeJS.ProcessEnv {
 
 export async function runStress(opts: RunOptions): Promise<RunSummary> {
   const exec = opts.exec ?? spawnExec;
-  const log = opts.log ?? logToStderr;
+  const show = opts.log ?? ((l: string) => logToStderr(`${l}\n`));
   const now = opts.now ?? (() => new Date());
   const signals = opts.signals ?? process;
   if (!ID.test(opts.runId)) throw new Error(`STRESS_RUN_ID must match ${ID}`);
@@ -254,7 +261,30 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   };
   const failures: string[] = [];
   const started = new Map<string, { start: string; deploySeconds?: number }>();
-  const ran: Ran[] = [];
+  // What each scenario's run returned (the last run when a scenario repeats),
+  // and the hash of every record file as the runner last saw it from its owner.
+  const ran = new Map<string, boolean>();
+  const owned = new Map<string, string | undefined>();
+  const runLog = path.join(runDir, 'run.log');
+  const log = (l: string): void => {
+    appendLog(`${l}\n`);
+    show(l);
+  };
+  const output = (chunk: string): void => {
+    appendLog(chunk);
+    logToStderr(chunk);
+  };
+  function appendLog(text: string): void {
+    try {
+      fs.appendFileSync(runLog, text);
+    } catch {
+      // The run folder is gone; the terminal copy is all there is.
+    }
+  }
+  const own = (s: Slice, scenario: string): void => {
+    const f = `${s.name}.${scenario}.json`;
+    owned.set(f, hashOf(path.join(resultsDir, f)));
+  };
   let signal: NodeJS.Signals | undefined;
   let tearingDown = false;
   let stop: Stop | undefined;
@@ -273,7 +303,7 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
 
   const verb = async (s: Slice, v: Verb, extra: readonly string[] = []): Promise<boolean> => {
     log(`== ${s.name} ${v}${extra.length > 0 ? ` ${extra.join(' ')}` : ''}`);
-    const r = await exec(s.script, [v, ...extra], env, false, track);
+    const r = await exec(s.script, [v, ...extra], env, false, track, output);
     if (r.status !== 0) {
       failures.push(`${s.name} ${v}${extra.length > 0 ? ` ${extra[0]}` : ''} exited ${String(r.status)}`);
       return false;
@@ -295,17 +325,17 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
       const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'stress-budget-'));
       let r: ExecResult;
       try {
-        r = await exec(s.script, ['budget'], budgetEnv(env, emptyHome), true, track);
+        r = await exec(s.script, ['budget'], budgetEnv(env, emptyHome), true, track, output);
       } finally {
         fs.rmSync(emptyHome, { recursive: true, force: true });
       }
       if (r.status !== 0) throw new Error(`${s.name} budget exited ${String(r.status)}`);
-      const own = parseDraws(s.name, r.stdout, tier.cellAccounts);
-      const undeclared = own.filter((d) => !s.quotas.includes(d.quota));
+      const sliceDraws = parseDraws(s.name, r.stdout, tier.cellAccounts);
+      const undeclared = sliceDraws.filter((d) => !s.quotas.includes(d.quota));
       if (undeclared.length > 0) {
         throw new Error(`${s.name} draws on undeclared quotas: ${[...new Set(undeclared.map((d) => d.quota))].join(', ')}`);
       }
-      draws.push(...own);
+      draws.push(...sliceDraws);
     }
     const over = overdraws(sumDraws(draws), opts.limits);
     if (over.length > 0) {
@@ -324,18 +354,23 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
       if (!(await verb(s, 'seed'))) throw new Error(`${s.name} seed failed`);
       stopIfAborted();
     }
-    const scenarios = opts.scenarios ?? scenarioOrder(slices);
+    const scenarios = [...new Set(opts.scenarios ?? scenarioOrder(slices))];
     const unknown = scenarios.filter((sc) => !slices.some((s) => s.scenarios.includes(sc)));
     if (unknown.length > 0) throw new Error(`no slice in the run declares ${unknown.join(', ')}`);
     for (const sc of scenarios) {
       for (const s of slices.filter((x) => x.scenarios.includes(sc))) {
-        const ok = await verb(s, 'run', [sc]);
-        ran.push({ slice: s.name, scenario: sc, ok, hash: hashOf(path.join(resultsDir, `${s.name}.${sc}.json`)) });
+        ran.set(`${s.name}.${sc}`, await verb(s, 'run', [sc]));
+        own(s, sc);
         stopIfAborted();
       }
     }
+    // collect may fill in its own slice's records (late refusals, cost), but
+    // only records nobody else changed since its run wrote them.
     for (const s of slices) {
+      const mine = [...ran.keys()].filter((k) => k.startsWith(`${s.name}.`)).map((k) => k.slice(s.name.length + 1));
+      const intact = mine.filter((sc) => owned.get(`${s.name}.${sc}.json`) === hashOf(path.join(resultsDir, `${s.name}.${sc}.json`)));
       await verb(s, 'collect');
+      for (const sc of intact) own(s, sc);
       stopIfAborted();
     }
   } catch (e) {
@@ -363,7 +398,7 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     failures.push(`the run was interrupted (${signal})`);
   }
 
-  const records = checkRecords(resultsDir, { runId: opts.runId, tier: tier.name, mode }, slices, ran, failures);
+  const records = checkRecords(resultsDir, { runId: opts.runId, tier: tier.name, mode }, ran, owned, failures);
   let resultsFile: string | undefined;
   if (records.length > 0) {
     resultsFile = path.join(runDir, 'results.md');
@@ -392,29 +427,23 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
       refusals: { byTenantReason: [], unattributed: 0 },
     };
     fs.writeFileSync(path.join(resultsDir, `${s.name}.lifecycle.json`), `${JSON.stringify(lifecycle, null, 2)}\n`);
+    own(s, 'lifecycle');
   }
-}
-
-/** A scenario a slice ran: whether `run` exited 0, and the hash of its record when `run` returned. */
-interface Ran {
-  readonly slice: string;
-  readonly scenario: string;
-  readonly ok: boolean;
-  readonly hash?: string;
 }
 
 /**
  * Reads the run's records and adds a failure for each problem: a record
- * that does not parse, does not belong to the run, or is for a slice or
- * scenario the run did not run; a `run` that exited 0 but wrote no record;
+ * that does not parse, does not belong to the run, is for a slice or
+ * scenario the run did not run, or changed after its own `run` (or
+ * `collect`) last wrote it; a `run` that exited 0 but wrote no record;
  * a scenario record with no isolation assertion (P-1); and the pass
  * criteria of each record (spec §7).
  */
 function checkRecords(
   dir: string,
   run: Pick<ResultRecord, 'runId' | 'tier' | 'mode'>,
-  slices: readonly Slice[],
-  ran: readonly Ran[],
+  ran: ReadonlyMap<string, boolean>,
+  owned: ReadonlyMap<string, string | undefined>,
   failures: string[],
 ): ResultRecord[] {
   const records: ResultRecord[] = [];
@@ -429,11 +458,8 @@ function checkRecords(
     }
     const wrong: string[] = (['runId', 'tier', 'mode'] as const).filter((k) => r[k] !== run[k]);
     if (f !== `${r.slice}.${r.scenario}.json`) wrong.push('file name');
-    if (!slices.some((s) => s.name === r.slice)) {wrong.push('slice');} else if (r.scenario !== 'lifecycle') {
-      const own = ran.find((x) => x.slice === r.slice && x.scenario === r.scenario);
-      if (own === undefined) wrong.push('scenario not run');
-      else if (own.hash !== hashOf(path.join(dir, f))) wrong.push('changed after its run');
-    }
+    if (!owned.has(f)) wrong.push('not run by this run');
+    else if (owned.get(f) !== hashOf(path.join(dir, f))) wrong.push('changed by another verb');
     if (wrong.length > 0) {
       failures.push(`${f}: does not belong to this run (${wrong.join(', ')})`);
       continue;
@@ -444,9 +470,10 @@ function checkRecords(
     failures.push(...recordFailures(r));
     records.push(r);
   }
-  for (const e of ran.filter((x) => x.ok)) {
-    if (!records.some((r) => r.slice === e.slice && r.scenario === e.scenario)) {
-      failures.push(`${e.slice} run ${e.scenario} exited 0 but wrote no valid ${e.slice}.${e.scenario}.json`);
+  for (const [key, ok] of ran) {
+    if (ok && !files.includes(`${key}.json`)) {
+      const [slice, scenario] = [key.slice(0, key.lastIndexOf('.')), key.slice(key.lastIndexOf('.') + 1)];
+      failures.push(`${slice} run ${scenario} exited 0 but wrote no ${key}.json`);
     }
   }
   return records;

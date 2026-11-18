@@ -194,7 +194,7 @@ a declaration, `scripts/stress/slice.json`.
 | `deploy` | deploys the slice's stacks, or reuses them | publish what the next slice needs through the sample's published parameters (P-2); the runner times it (P-6) |
 | `seed` | creates the slice's data for the tier, or reuses the manifest | be safe to rerun; never write a token or a password to disk |
 | `run <scenario>` | runs one scenario | write one result record per scenario (§4.3); exit non-zero on a pass-criterion failure |
-| `collect` | reads logs and metrics for the run window | wait for late log delivery (runtime-isolation finding F-6) |
+| `collect` | reads logs and metrics for the run window | wait for late log delivery (runtime-isolation finding F-6); write the late fields (`refusals`, `cost`) into its own slice's records |
 | `teardown` | removes what the slice deployed | keep fixtures unless `--fixtures` is passed; verify nothing it owned is left; the runner times it (P-6) |
 
 `slice.json` names the slice, the slices it needs (by published interface),

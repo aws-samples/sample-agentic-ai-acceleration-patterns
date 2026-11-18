@@ -208,11 +208,11 @@ describe('runner (spec §3.5)', () => {
     });
     expect(summary.failures).toEqual([
       'control-plane PS-5: 1 isolation mismatches',
-      'tenant-front-door run PS-5 exited 0 but wrote no valid tenant-front-door.PS-5.json',
+      'tenant-front-door run PS-5 exited 0 but wrote no tenant-front-door.PS-5.json',
     ]);
     expect(calls).toContain('control-plane teardown --fixtures');
     const bad = await runStress({ ...base, runId: 'r2', repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], exec: stub({ garbage: ['tenant-identity'] }).exec });
-    expect(bad.failures).toEqual(['tenant-identity.PS-1.json: not JSON', 'tenant-identity run PS-1 exited 0 but wrote no valid tenant-identity.PS-1.json']);
+    expect(bad.failures).toEqual(['tenant-identity.PS-1.json: not JSON']);
     expect(fs.existsSync(bad.resultsFile!)).toBe(true);
   });
 
@@ -231,9 +231,9 @@ describe('runner (spec §3.5)', () => {
     };
     const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], exec });
     expect(summary.failures).toEqual([
-      'control-plane.PS-1.json: does not belong to this run (slice)',
+      'control-plane.PS-1.json: does not belong to this run (not run by this run)',
       'tenant-identity.PS-1.json: no isolation assertion (P-1)',
-      'tenant-identity.PS-2.json: does not belong to this run (runId, scenario not run)',
+      'tenant-identity.PS-2.json: does not belong to this run (runId, not run by this run)',
     ]);
   });
 
@@ -249,7 +249,23 @@ describe('runner (spec §3.5)', () => {
       return r;
     };
     const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: both, exec: rewrite });
-    expect(summary.failures).toEqual(['tenant-identity.PS-1.json: does not belong to this run (changed after its run)', 'tenant-identity run PS-1 exited 0 but wrote no valid tenant-identity.PS-1.json']);
+    expect(summary.failures).toEqual(['tenant-identity.PS-1.json: does not belong to this run (changed by another verb)']);
+  });
+
+  it('lets collect fill in its own records, and runs a repeated scenario once', async () => {
+    const { root, home } = fixture({ 'tenant-identity': { scenarios: ['PS-1'] } });
+    const { calls, exec } = stub();
+    const collecting: Exec = async (script, args, env, capture, onStart) => {
+      const r = await exec(script, args, env, capture, onStart);
+      if (args[0] === 'collect') {
+        const f = path.join(env.STRESS_RESULTS!, 'tenant-identity.PS-1.json');
+        fs.writeFileSync(f, JSON.stringify({ ...JSON.parse(fs.readFileSync(f, 'utf8')), cost: { platform: { lambda: 0.1 } } }));
+      }
+      return r;
+    };
+    const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], scenarios: ['PS-1', 'PS-1'], exec: collecting });
+    expect(summary.failures).toEqual([]);
+    expect(calls.filter((c) => c.includes(' run '))).toEqual(['tenant-identity run PS-1']);
   });
 
   it('keeps the record of a scenario whose run failed', async () => {
@@ -328,6 +344,7 @@ describe('runner with real processes', () => {
     expect(summary.signal).toBe('SIGHUP');
     expect(fs.existsSync(path.join(home, 'teardown-done'))).toBe(true);
     expect(signals.listenerCount('SIGHUP')).toBe(0);
+    expect(fs.readFileSync(path.join(home, 'stress', base.runId, 'run.log'), 'utf8')).toMatch(/SIGHUP: stopping the current step/);
   }, 30_000);
 
   it('tears down the others and releases the lock when one teardown throws', async () => {
@@ -346,6 +363,14 @@ describe('runner with real processes', () => {
 });
 
 describe('spawnExec', () => {
+  it('sends a verb its output through the runner, never to the terminal itself', async () => {
+    const { root } = fixture({ demo: { scenarios: [] } }, { demo: 'echo out; echo err >&2\n' });
+    const chunks: string[] = [];
+    const r = await groupExec(2000)(path.join(root, 'samples', 'demo', 'scripts', 'stress', 'slice.sh'), ['deploy'], process.env, false, () => undefined, (c) => chunks.push(c));
+    expect(r).toEqual({ status: 0, stdout: '' });
+    expect(chunks.join('').split('\n').sort()).toEqual(['', 'err', 'out']);
+  });
+
   it('stops what a verb leaves running, so a captured budget does not hang', async () => {
     const { root } = fixture({ demo: { scenarios: [] } }, { demo: '( sleep 20 ) &\necho hi\n' });
     const t0 = Date.now();

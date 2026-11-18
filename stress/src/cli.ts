@@ -91,7 +91,9 @@ async function main(argv: string[]): Promise<number> {
       process.stdout.write(`run ${summary.runId} (${summary.mode}: ${summary.order.join(' -> ')}): ${summary.failures.length === 0 ? 'PASSED' : 'FAILED'}\n`);
       for (const f of summary.failures) process.stdout.write(`  ${f}\n`);
       process.stdout.write(`results: ${summary.resultsFile ?? 'none (no valid record)'}\n`);
-      // 130 or 143 after SIGINT or SIGTERM, so a caller can tell an interrupted run from a failed one.
+      // 129, 130 or 143 after SIGHUP, SIGINT or SIGTERM, so a caller can tell an interrupted run from a failed one.
+      // After a hangup stdout is a dead terminal: a failed summary write must not change the exit code.
+      process.stdout.on('error', () => undefined);
       if (summary.signal !== undefined) return 128 + os.constants.signals[summary.signal];
       return summary.failures.length === 0 ? 0 : 1;
     }
