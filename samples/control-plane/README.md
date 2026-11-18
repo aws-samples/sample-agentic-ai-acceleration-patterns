@@ -370,8 +370,7 @@ qualifier `cell`. Replace `<PARTITION>` (`aws` in most Regions),
 
 That policy is safe only in an account that holds nothing but cells, with a
 cell bootstrap whose execution role and every cell role carry a permissions
-boundary and sit on a `/cell/` role path
-([stress ADR-0006](../../stress/adr/0006-deploy-cells-through-a-scoped-cell-bootstrap.md)).
+boundary and sit on a `/cell/` role path (ADR-0047).
 The control plane's own account never qualifies, because it holds the
 control plane: on the control plane stack, attach only policies scoped to
 the cell's own resources. A policy that reaches the default CDK bootstrap
