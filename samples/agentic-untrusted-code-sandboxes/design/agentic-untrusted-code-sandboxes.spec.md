@@ -314,11 +314,12 @@ to its own stdout through the runner.
 | Role | May | May not |
 |---|---|---|
 | Tool role (function) | assume the tool tenant role with a `TenantId` tag; `lambda:RunMicrovm`, `GetMicrovm`, `TerminateMicrovm`, `CreateMicrovmAuthToken` on the sample's image; `bedrock-agentcore:InvokeAgentRuntime`, `StopRuntimeSession` on the sample's runtime; `ecs:DescribeTasks` on the cluster; `kms:GetPublicKey` on the context key | read the bucket or the registry directly; `ecs:RunTask` or `StopTask` |
-| Tool tenant role | `s3:GetObject` on `inputs/${TenantId}/*`, `s3:PutObject` on `outputs/${TenantId}/*`, registry items with `dynamodb:LeadingKeys` = `TENANT#${TenantId}`, `ecs:RunTask` and `ecs:TagResource` with the request tag condition, `ecs:StopTask` with the resource tag condition, `iam:PassRole` on the task execution role | anything without its own tag |
+| Tool tenant role | `s3:GetObject` on `inputs/${TenantId}/*`, `s3:PutObject` on `outputs/${TenantId}/*`, registry items with `dynamodb:LeadingKeys` = `TENANT#${TenantId}`, `ecs:RunTask` on the pinned task definition revision ARN only and `ecs:TagResource`, both with the request tag condition and `ecs:cluster` = the sample's cluster, `ecs:StopTask` with the resource tag condition and the same `ecs:cluster` condition, `iam:PassRole` on the task execution role | anything without its own tag; any other task definition or cluster |
 | Task execution role | `ecr:GetAuthorizationToken` on `*` (the action takes no resource), `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, Logs write on the task log group | everything else; never reachable by code (S-5) |
 | AgentCore runtime role | `ecr:GetAuthorizationToken` on `*`, `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents`, `DescribeLogStreams`, `DescribeLogGroups` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` (the actions agentic-runtime-isolation ADR-0047 verified; the name is known at synth, and runtime names cannot contain `-`, so the prefix matches only this runtime); with `sessionFiles`, `s3:GetObject`, `s3:PutObject` on `sessions/${aws:AgentCoreRuntimeSourceSid}/*` and `s3:ListBucket` with an `s3:prefix` condition | everything else |
 | Reaper role | read, update and delete every registry row; `ecs:ListTasks`, `DescribeTasks`, `StopTask` on the cluster; `lambda:ListMicrovms`, `GetMicrovm`, `TerminateMicrovm` on the image; `StopRuntimeSession` on the runtime | the input bucket |
 | Drain role | the reaper role | the input bucket |
+| Log cleanup role (the runtime log cleanup resource and the task log drain) | `logs:DescribeLogGroups`; `logs:DeleteLogGroup` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` and on the task log group | every other log group; everything else |
 
 The runtime and execution roles reach no tenant data.
 
@@ -370,17 +371,22 @@ them): `tenantId`, `backend`, `handle` (MicroVM id, task ARN or
 `runtimeSessionId`), `runId`, `sandbox` (`started` or `reused`),
 `outcome` (tool error code or `ok`), `exitCode`, `timedOut`, `durationMs`,
 `startMs`, `inputBytes`, `outputBytes`, and on a failed start
-`stoppedReason`. Whoever finds a sandbox gone writes one stop line per
-sandbox with `tenantId`, `backend`, `handle` and `sandboxSeconds`
-(`stoppedAt - createdAt`): the tool when it stops one or finds a handle
-dead, the reaper when it stops one or finds a MicroVM the platform ended,
-and the drain and offboard function. On `microvm` the line also carries
-`runningSeconds` and `suspendedSeconds`. `sandboxSeconds` comes from
-`GetMicrovm` `terminatedAt - startedAt` when the MicroVM is ended.
-`suspendedSeconds` comes from the row's `suspendedMs` counter, to which
-each call adds `max(0, now - lastUsedAt - sandboxIdle)` in the same write
-that updates `lastUsedAt`, and the stop adds the final gap the same way.
-`runningSeconds` is the difference. The line carries `estimated` = true,
+`stoppedReason`. Each sandbox gets exactly one stop line, with `tenantId`,
+`backend`, `handle` and `sandboxSeconds` (`stoppedAt - createdAt`). It is
+written by whoever moves the sandbox's row out of `STARTING` or `READY`
+with a successful conditional write: the tool (dead handle, overrun,
+failed start), the reaper, the drain, or the offboard function. A writer
+that finds the row already `FAILED` or `STOPPING` writes none. On
+`microvm` the line also carries `runningSeconds` and `suspendedSeconds`.
+`sandboxSeconds` comes from `GetMicrovm` `terminatedAt - startedAt` when
+the MicroVM is ended. `suspendedSeconds` comes from the row's
+`suspendedMs` counter: when a call first reaches the sandbox, at time
+`t`, it adds `max(0, t - lastUsedAt - sandboxIdle)` and sets
+`lastUsedAt` = `t` in one write conditioned on `lastUsedAt` = the value
+it read (re-reading once on a condition failure), and step 4 moves
+`lastUsedAt` to the end of the run with the same condition. The stop adds
+the final gap up to `terminatedAt` (or the stop time on other backends).
+`runningSeconds` is the difference, clamped at 0. The line carries `estimated` = true,
 because the API reports no per-state times and the counter assumes the
 MicroVM suspends exactly at `sandboxIdle` (S-4 checks this).
 Two Contributor Insights rules rank tenants by runs and by
@@ -459,14 +465,19 @@ Reuse rule, per call (the tool):
    tool rewrites the row with the new `bootId` and reports
    `sandbox` = `started`.
 4. After the run, update `lastUsedAt` with
-   `attribute_exists(PK) AND handle = :h`, so a row deleted or replaced
-   meanwhile is not recreated.
+   `attribute_exists(PK) AND handle = :h AND lastUsedAt = :seen`, so a row
+   deleted or replaced meanwhile is not recreated. `:seen` is the value
+   this call set at its start (§3.8); if another call moved `lastUsedAt`
+   since, the write is dropped, because the newer value already covers
+   this call.
 5. If the runner does not answer by `runTimeout` + 5 s, set `STOPPING`
    with `version = v`, stop the sandbox, and return a result with
    `timedOut` = true.
 
-The reaper, every 5 minutes, sets `STOPPING` with `version = :seen` before
-any stop, so a call that updated the row meanwhile wins. It:
+The reaper, every 5 minutes, writes the row before any stop with
+`version = :seen`, so a call that updated the row meanwhile wins: `FAILED`
+with `retryAt` when the row is a failed start (step 1), `STOPPING`
+otherwise. It:
 
 - stops `nitro` sandboxes in `READY` rows with `lastUsedAt` older than
   `sandboxIdle`; for a `STARTING` row it applies the tool's step 1 rule
@@ -474,9 +485,9 @@ any stop, so a call that updated the row meanwhile wins. It:
   `FAILED` rows to the tool until `expiresAt`;
 - stops every task tagged by the sample whose own `startedAt` is older than
   `sandboxMaxLife`, with or without a row (the third cap on `nitro`);
-- checks each `microvm` row with `GetMicrovm`; when the MicroVM is gone or
-  terminated (the platform ended it), writes the stop line and deletes the
-  row;
+- checks each `READY` `microvm` row with `GetMicrovm`; when the MicroVM is
+  gone or terminated (the platform ended it), writes the stop line and
+  deletes the row (`FAILED` and `STOPPING` rows already have theirs);
 - deletes rows past `expiresAt` after stopping their handle;
 - sweeps orphans with no matching row: tasks tagged by the sample and
   MicroVMs of the image. AgentCore has no API that lists a runtime's
@@ -492,10 +503,13 @@ A row with no `state` (a partial write) is treated as missing. A
 timeout is handle-less: its start died before recording what it started,
 so it is taken over at once and the orphan sweep stops whatever it was.
 This is the only takeover of a `STARTING` row; every other unresolved
-start becomes `FAILED` and backs off. Starts pass the row's nonce as the
-idempotency token (`RunTask` `clientToken`, `RunMicrovm` `clientToken`),
-so a retried start call launches nothing new. The tool runs a pinned task
-definition revision ARN, never the family's latest.
+start becomes `FAILED` and backs off. Starts pass an idempotency token
+derived one way from the nonce, the first 32 hex characters of
+SHA-256(`"start" ‖ nonce`) (`RunTask` `clientToken`, `RunMicrovm`
+`clientToken`), so a retried start call launches nothing new and
+CloudTrail, which records the token, never sees the nonce. The tool runs a
+pinned task definition revision ARN, never the family's latest, and the
+tool tenant role allows `RunTask` on that ARN only (§3.6).
 
 ### 4.2 Input and output objects
 
@@ -699,7 +713,7 @@ touched.
 | idle | after `sandboxIdle` (2 min) idle the driver invokes the reaper; A's `nitro` task is stopped, and the stop line carries `sandboxSeconds` |
 | cold-from-zero | `nitro`: with no instance running, a new tenant `D`'s first call returns `sandbox_starting`; retries reuse the same task until it is `READY`, and no second task starts |
 | max-life | `nitro`: the driver invokes the reaper with `maxLifeSeconds` of 60 while A's task runs a long job; the task is stopped and A's next call gets a fresh one. Test-only shortcut: the reaper honours `maxLifeSeconds` only when its environment has `RC_INTEG_OVERRIDES=1`, which the integration stack sets through a CDK escape hatch and no prop exposes |
-| failed-start | `nitro` and `microvm`: for tenant `E` the tool passes the runner an exit-at-boot flag (test-only shortcut, honoured only with `RC_INTEG_OVERRIDES=1`); `E`'s first call returns `sandbox_starting` or `sandbox_failed`, a retry within 30 s returns `sandbox_failed` without a new start, the reaper run in between leaves the `FAILED` row alone, and the tool line carries the reason |
+| failed-start | `nitro` and `microvm`: for tenant `E` the tool passes the runner an exit-at-boot flag (test-only shortcut, honoured only with `RC_INTEG_OVERRIDES=1`); the driver retries `E`'s call until the first `sandbox_failed`, bounded by the backend's start cap; a reaper run then leaves the `FAILED` row alone and writes no stop line; a call before `retryAt` returns `sandbox_failed` and starts nothing (checked with `ListTasks` or `ListMicrovms`); a call after `retryAt` starts again; the tool line carries the reason, and exactly one stop line exists for the failed sandbox |
 | microvm-stop | A's MicroVM, idle past `sandboxIdle` (2 min in the integration stack), shows `SUSPENDED`; the driver then ends it with `TerminateMicrovm` out of band and invokes the reaper; a stop line for A's MicroVM carries `sandboxSeconds`, `runningSeconds`, `suspendedSeconds` and `estimated` |
 | synth | a unit test synthesises two construct instances in one stack and asserts that every §5.3 name is unique and matches its charset |
 | session-files | `run-code-files`: A's session writes and reads its own `sessions/<sid>/`; a `GetObject` on B's session prefix is denied |
