@@ -60,6 +60,28 @@ export function validateTenantBuildManagedPolicyArns(
   arns: unknown,
   stack: StackIdentity,
 ): void {
+  validateManagedPolicyArns('tenantBuildManagedPolicyArns', 'ADR-022', arns, stack);
+}
+
+/**
+ * Synth-time validation of the `cellBuildManagedPolicyArns` deployment input
+ * (ADR-0047): the same rule as `tenantBuildManagedPolicyArns`, for the
+ * policies the account owner attaches to the cell provisioning role.
+ */
+export function validateCellBuildManagedPolicyArns(
+  arns: unknown,
+  stack: StackIdentity,
+): void {
+  validateManagedPolicyArns('cellBuildManagedPolicyArns', 'ADR-0047', arns, stack);
+}
+
+/** The shared rule behind both managed-policy inputs; `input` and `adr` name them in the error. */
+function validateManagedPolicyArns(
+  input: string,
+  adr: string,
+  arns: unknown,
+  stack: StackIdentity,
+): void {
   if (arns === undefined) {
     return;
   }
@@ -94,11 +116,45 @@ export function validateTenantBuildManagedPolicyArns(
   }
   if (problems.length > 0) {
     throw new Error(
-      'Invalid tenantBuildManagedPolicyArns deployment input (ADR-022):\n'
+      `Invalid ${input} deployment input (${adr}):\n`
       + problems.map((p) => `  - ${p}`).join('\n')
-      + '\nEach entry must be a managed-policy ARN in this stack\'s partition and account, e.g. --context tenantBuildManagedPolicyArns=\'["arn:aws:iam::123456789012:policy/MyPolicy"]\'',
+      + `\nEach entry must be a managed-policy ARN in this stack's partition and account, e.g. --context ${input}='["arn:aws:iam::123456789012:policy/MyPolicy"]'`,
     );
   }
+}
+
+/** The default and the bounds of `concurrentBuildLimit` (ADR-0046, M17). */
+export const DEFAULT_CONCURRENT_BUILD_LIMIT = 5;
+export const MAX_CONCURRENT_BUILD_LIMIT = 100;
+/** Above this value the synth warns that the M17 cost guard is loosened. */
+export const CONCURRENT_BUILD_LIMIT_WARNING = 20;
+
+/**
+ * Validates `concurrentBuildLimit` (ADR-0046): an integer from 1 to 100,
+ * default 5, applied to every CodeBuild project the control plane creates.
+ * A CDK token is refused, because the warning threshold and the bounds are
+ * checked at synth. Throws on any other value.
+ */
+export function validateConcurrentBuildLimit(value: unknown): number {
+  if (value === undefined) {
+    return DEFAULT_CONCURRENT_BUILD_LIMIT;
+  }
+  if (Token.isUnresolved(value)) {
+    throw new Error('Invalid concurrentBuildLimit (ADR-0046): it must be a literal number at synth, not a CDK token');
+  }
+  if (
+    typeof value !== 'number'
+    || !Number.isInteger(value)
+    || value < 1
+    || value > MAX_CONCURRENT_BUILD_LIMIT
+  ) {
+    const shown = typeof value === 'number' ? String(value) : JSON.stringify(value);
+    throw new Error(
+      `Invalid concurrentBuildLimit ${shown} (ADR-0046): expected an integer from 1 to ${MAX_CONCURRENT_BUILD_LIMIT}`
+      + `, default ${DEFAULT_CONCURRENT_BUILD_LIMIT}`,
+    );
+  }
+  return value;
 }
 
 /** The validated role lists the authorizer maps to grants (spec R-36). */

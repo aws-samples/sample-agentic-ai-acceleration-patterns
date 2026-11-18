@@ -23,6 +23,11 @@ export interface ProvisioningWorkflowProps {
    * spec §3.3 / §6.4, ADR-025. Already validated by the stack.
    */
   readonly fleetName: string;
+  /**
+   * Concurrent builds per CodeBuild project (M17, ADR-0046). Already
+   * validated by the stack: an integer from 1 to 100, default 5.
+   */
+  readonly concurrentBuildLimit: number;
 }
 
 /**
@@ -38,15 +43,6 @@ const BUILD_TIMEOUT = Duration.hours(1);
  * normal timeout path — that is the catchable task-level timeout above.
  */
 const EXECUTION_TIMEOUT = Duration.hours(3);
-
-/**
- * M17 (threat T16): each CreateDeployment/UpdateDeployment/UpdateCell/DeleteCell
- * fans out to CodeBuild, so a leaked operator token or a runaway client is
- * a cost/concurrency amplification vector. Capping concurrent builds per
- * project bounds the parallel spend; excess StartBuild requests queue
- * rather than fan out. Sample-appropriate value — tune for real fleets.
- */
-const CONCURRENT_BUILD_LIMIT = 5;
 
 /**
  * The inline buildspec — every execution overrides source and runs its
@@ -200,9 +196,12 @@ export class ProvisioningWorkflow extends Construct {
         phases: { build: { commands: ['echo "This buildspec is always overridden"'] } },
       }),
       environment: { buildImage: codebuild.LinuxBuildImage.STANDARD_7_0 },
-      // M17 (T16): bound the cost/concurrency amplification of a leaked
-      // token or runaway client — excess builds queue, they do not fan out.
-      concurrentBuildLimit: CONCURRENT_BUILD_LIMIT,
+      // M17 (T16): each CreateDeployment, UpdateDeployment, UpdateCell and
+      // DeleteCell fans out to CodeBuild, so a leaked token or a runaway
+      // client is a cost amplification vector. The cap bounds the parallel
+      // spend; excess builds queue, they do not fan out. The deployer sets
+      // it (ADR-0046, default 5).
+      concurrentBuildLimit: props.concurrentBuildLimit,
       logging: { cloudWatch: { logGroup: cellProjectLogs } },
     });
     acknowledgeCodeBuildDefaults(this.cellProject, cellProjectLogs);
@@ -218,7 +217,7 @@ export class ProvisioningWorkflow extends Construct {
       }),
       environment: { buildImage: codebuild.LinuxBuildImage.STANDARD_7_0 },
       // M17 (T16) and M15 (T13) — see CellProject.
-      concurrentBuildLimit: CONCURRENT_BUILD_LIMIT,
+      concurrentBuildLimit: props.concurrentBuildLimit,
       logging: { cloudWatch: { logGroup: tenantProjectLogs } },
     });
     acknowledgeCodeBuildDefaults(this.tenantProject, tenantProjectLogs);

@@ -1,6 +1,6 @@
 # ADR-0047: Let the cell account owner attach policies to the cell role
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Amends: ADR-0025 (the account role pair)
 - Deciders: Dave Roberts (SA)
@@ -34,16 +34,18 @@ Option 1. `CellAccountRolesProps` and `CellAccountStackProps` take
 `cellBuildManagedPolicyArns?: string[]`, validated like
 `tenantBuildManagedPolicyArns` (this stack's partition and account), and
 attached to the cell provisioning role. The README shows the one policy the
-stress application uses: `sts:AssumeRole` on three resources, the cell
-bootstrap's deploy, file-publishing and image-publishing roles
-(`arn:${Partition}:iam::<account>:role/cdk-cell-deploy-role-<account>-<region>`,
-`arn:${Partition}:iam::<account>:role/cdk-cell-file-publishing-role-<account>-<region>`,
-`arn:${Partition}:iam::<account>:role/cdk-cell-image-publishing-role-<account>-<region>`),
-not its lookup role, which holds `ReadOnlyAccess`,
-and states where it is safe: in a cell account that holds only cells, with
-a cell bootstrap whose execution role and every cell role carry a
-permissions boundary, and every cell role sits on a `/cell/` role path
-(stress ADR-0006).
+stress application uses (stress ADR-0006): `sts:AssumeRole` on three
+`cdk-cell-*` bootstrap roles (deploy, file publishing, image publishing),
+named one by one as
+`arn:${Partition}:iam::<account>:role/cdk-cell-<name>-role-<account>-<region>`.
+It leaves out the lookup role, which holds `ReadOnlyAccess`, so neither
+the cell build nor the API role can read every cell's data; a cell app
+commits its context lookups to `cdk.context.json` instead.
+It states where that policy is safe: in a cell account that holds only
+cells, with a cell bootstrap whose execution role and every cell role carry
+a permissions boundary, and every cell role sits on a `/cell/` role path.
+The control plane's own account never qualifies, because it holds the
+control plane.
 
 ## Consequences
 Easier: an application can deploy its cell with any tool the account owner
@@ -52,8 +54,10 @@ The cell role trusts the control-plane API role as well as the cell build
 (the `PutAccount` handshake, ADR-0028), so the API Lambda can use every
 attached policy too; with the stress policy it can assume the cell
 bootstrap roles. The threat model's cell-role row gains that residual. A
-policy that reaches a default CDK bootstrap, or any role outside a scoped
-path, makes the cell build and the API role administrators of the account;
+policy that reaches an administrator role, a default CDK bootstrap, or any
+role other than the three `cdk-cell-*` roles of the example and the cell
+lookup role makes the cell build and the API role administrators of the
+account, and one that reaches the cell lookup role lets both read it all;
 the README says so beside the example. Revisit if the handshake can use a
 role of its own, so the API role leaves the cell role's trust, or if cell
 and tenant roles need the same policy set often enough to merge the props.
