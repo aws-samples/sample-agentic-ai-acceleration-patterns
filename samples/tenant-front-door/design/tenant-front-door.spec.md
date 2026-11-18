@@ -722,11 +722,13 @@ On every write:
    changed or dropped or its tenant route is deleted; (4) sets
    `pagesStarted` on today's run item to the number of pages, zero
    included; and (5) starts one asynchronous run of the sweeper per page
-   of 500 entries, passing the page number and the page's range of
-   tenant ids. Each page reads the route table again with one `ListKeys`
-   scan of every key, which the sweeper's role already holds, keeps the
-   `tenant#` entries in its range, and skips one whose `d` is gone or
-   whose challenge is open. It resolves the others
+   of 500 entries, passing the page number and the page's list of
+   tenant ids. Ids are at most 63 characters, so 500 of them are about
+   33 KB of payload, inside the 256 KB limit of an asynchronous
+   invocation. A page checks only the ids it was passed. It reads each
+   one's `tenant#<id>` entry again with `GetKey`, 10 at a time, and
+   skips one whose `d` is gone or whose challenge is open; it does not
+   scan the route table (ADR-0022). It resolves the others
    as sub-step 2 does, 10 queries at a time, each with up to five
    lookups of one try abandoned after 1 s. It queries CNAME at the name
    only when the TXT answer is empty or holds the token, so a pass
@@ -774,19 +776,15 @@ On every write:
    A page that fails before that, after Lambda's two retries, is kept in
    the sweeper function's on-failure destination, an SQS queue. Each of
    a page's DynamoDB calls is made once, with a 2 s limit, and a failed
-   call fails the page. Its `ListKeys` scan reads the store in calls of
-   50 keys, the API's page limit, each with a 2 s limit and the SDK's
-   standard retries, and the page fails once the scan has run for 120 s.
-   The scan has a deadline rather than a per-call product because the
-   store is capped by bytes (5 MB), not keys, so the number of calls
-   depends on the entry sizes; a store too large to scan in 120 s fails
-   every page, which the missing-pages alarm reports (below). Both
-   limits are chosen, not measured: no spike measured `ListKeys` latency
-   from the deployment Region to the store's global endpoint, so the
-   page logs the scan's duration and the integration run records it (§10
-   step 14). A page takes at most 120 s for the scan, plus 500 ÷ 10 × (2
-   queries × 5.4 s + 2 calls × 2 s) = 740 s, plus 2 s to finish, 862 s,
-   inside the sweeper function's 15-minute timeout of 900 s (ADR-0022).
+   call fails the page. Each `GetKey` read is likewise made once, with a
+   2 s limit, and a failed read fails the page. The limit is chosen, not
+   measured: no spike measured `GetKey` latency from the deployment
+   Region to the store's global endpoint, so the page logs the time its
+   reads took and the integration run records it (§10 step 14). The
+   reads cost the page's size, not the store's: a page takes at most
+   500 ÷ 10 × 2 s = 100 s for the reads, plus 500 ÷ 10 × (2 queries ×
+   5.4 s + 2 calls × 2 s) = 740 s, plus 2 s to finish, 842 s, inside the
+   sweeper function's 15-minute timeout of 900 s (ADR-0022).
    The route table holds at most 3,472 dedicated tenants (§4.1), so a
    run is at most 7 pages.
 
@@ -967,7 +965,8 @@ entry that has a `d`, and never deletes a distribution tenant or a
 certificate. The sweeper runs as an execution role of its own. It
 holds the route table read it needs to list `tenant#` entries
 (`cloudfront-keyvaluestore:DescribeKeyValueStore` and `ListKeys` on
-the store), the CloudFront actions `ListDistributionTenants`,
+the store, for the lister) and `GetKey` on the store, for a page's
+per-entry reads (ADR-0022), the CloudFront actions `ListDistributionTenants`,
 `GetDistributionTenant`, `UpdateDistributionTenant` and
 `DeleteDistributionTenant` and, in `us-east-1`, `ListCertificates`,
 `ListTagsForCertificate`, `DescribeCertificate` and
@@ -1896,7 +1895,7 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0019](../adr/0019-strip-agents-before-the-agent-ingress.md) | The router strips `/agents` from `/agents/<backend>/invocations` before the agent ingress, and answers 404 for any other `/agents` path | router `uri` rewrite; an `/agents` base path on the ingress side; no prefix |
 | [ADR-0020](../adr/0020-keep-the-re-check-state-in-a-sweeper-owned-dynamodb-table.md) | Keep the dedicated-domain re-check state in a sweeper-owned DynamoDB table: one item for each tenant and domain, one for each daily run | the log as the record (Logs Insights); a sweeper-owned DynamoDB table; fields in the route table |
 | [ADR-0021](../adr/0021-add-a-per-ip-rate-rule-ahead-of-the-per-host-rule.md) | In `host` mode, a rate rule aggregated on `Host` and client IP, `ipRequestsPer5Min` (500, chosen, not measured), ahead of the per-host rule; amends ADR-0009 | no per-IP rule; an IP-only rule; a `Host`-and-IP aggregate |
-| [ADR-0022](../adr/0022-pin-each-sweeper-page-to-the-listers-date-and-re-read-the-route-table.md) | Pin each sweeper page to the lister's date, which it must match to today and then uses for every read and write; count three misses only on a miss; re-read the route table with a `ListKeys` scan under a 120 s deadline (page bound 862 s); grant `BatchWriteItem`; amends ADR-0020 | no date passed; a date the page trusts; a date the page must match to today |
+| [ADR-0022](../adr/0022-pin-each-sweeper-page-to-the-listers-date-and-re-read-the-route-table.md) | Pin each sweeper page to the lister's date, which it must match to today and then uses for every read and write; count three misses only on a miss; re-read each passed tenant's entry with `GetKey`, 10 at a time, with no scan (page bound 842 s); grant `BatchWriteItem`; amends ADR-0020 | no date passed; a date the page trusts; a date the page must match to today; a `ListKeys` scan with a deadline; a `GetKey` per passed id |
 
 ## 9. Spikes
 
@@ -1941,9 +1940,7 @@ be a name below the zone's apex; `TFD_HOSTED_ZONE_ID`, the zone's id; and
 `TFD_DEDICATED_DOMAIN`, a second name in the zone, outside `appDomain`,
 for step 14. The test role holds `route53:ChangeResourceRecordSets` on
 that zone only, to write step 14's TXT records, and `route53:GetChange`
-to wait for each change. In `test/integ.host.ts` it also holds
-`wafv2:GetWebACL` on the edge stack's web ACL only, to wait out step
-17's rule changes.
+to wait for each change.
 
 Test-only shortcuts, all by the test role and none by the sample's own
 code: the step 2 fixture, one `host#` key written straight to the route
@@ -2102,9 +2099,9 @@ destroy time, which the test reports with the rest.
     (§3.4). It invokes the sweeper function with the Scheduler's input
     and waits until the item shows today and the
     day's run item shows `pagesStarted` 1 and `pagesFinished` `{1}`.
-    The test reports the page's `ListKeys` scan time from the page's
-    log, for each hand run, because the 2 s call limit and the 120 s
-    scan deadline (§3.4) are chosen, not measured. The
+    The test reports the time the page's `GetKey` reads took, from the
+    page's log, for each hand run, because their 2 s limit (§3.4) is
+    chosen, not measured. The
     check is a pass: the item holds `lastOutcome` `pass`, `missStreak` 0
     and `errorStreak` 0, and no three-miss line was logged. The test
     then removes `tfd-verify=<Tb>`, waits past the TTL, writes the item
@@ -2146,11 +2143,15 @@ destroy time, which the test reports with the rest.
     in `us-east-1` before the step and sets it back with a second one
     after; each changes only the web ACL's rule and is expected to take
     about 2 minutes (an estimate, not measured; the test reports the
-    measured time). After each update the test waits for the rule change
-    to take effect before it sends: it polls `wafv2:GetWebACL` until the
-    web ACL's `LockToken` differs from the one read before the update,
-    then waits about 60 s more, the time WAF takes to apply a rule
-    change at the edge. Through `cloudfront:TestFunction` with
+    measured time). After each update the test waits about 60 s for the
+    rule change to reach the edge (an estimate, not measured), and the
+    check tolerates a longer wait. It sends `a` over its rate until the
+    first 429, for at most 5 minutes, and fails when none comes; it then
+    asserts `b` is served. When
+    `b` gets a 429, the old per-IP value still applies at the edge: the
+    test waits 30 s and repeats the check, at most 5 times, and reports
+    the time from the stack update to the first passing check. Through
+    `cloudfront:TestFunction` with
     `Host: <appDomain>`, the router answers 404.
 18. (host) Sign-in host (ADR-0016). `/signin-state` on `a`'s host with
     `Sec-Fetch-Site: same-origin` returns a `state`; cross-site it gets

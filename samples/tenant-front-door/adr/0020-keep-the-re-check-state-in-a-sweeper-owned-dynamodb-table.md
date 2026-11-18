@@ -142,5 +142,5 @@ the page size and the removal paths of ADR-0018 stay as decided.
 Note 2026-11-18: ADR-0022 amends this record. The lister passes its
 UTC date to each page, which must match today and is then today for
 every read and write; the three-miss count is emitted only on a miss;
-each page re-reads the route table under a 120 s scan deadline; and the
+each page re-reads its passed tenants' entries with `GetKey`; and the
 sweeper's role also holds `dynamodb:BatchWriteItem`.
