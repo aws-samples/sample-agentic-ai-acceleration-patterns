@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0007: Move the stress driver and the k6 library to `stress/`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Deciders: Dave Roberts (PSA)
 

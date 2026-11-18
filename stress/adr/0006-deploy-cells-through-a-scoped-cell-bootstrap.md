@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0006: Deploy cells through a scoped cell bootstrap with a permissions boundary
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Deciders: Dave Roberts (PSA)
 

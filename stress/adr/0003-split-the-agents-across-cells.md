@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0003: Split the agents across cells
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Deciders: Dave Roberts (PSA)
 

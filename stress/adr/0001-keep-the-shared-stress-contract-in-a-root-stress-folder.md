@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0001: Keep the shared stress contract in a root `stress/` folder
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Deciders: Dave Roberts (PSA)
 
