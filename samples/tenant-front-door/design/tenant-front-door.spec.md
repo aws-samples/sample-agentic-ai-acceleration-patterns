@@ -497,9 +497,9 @@ On every write:
       `challenge` values: `"missing"`
       (the name does not exist, or holds no TXT record), `"mismatch"`
       (TXT records, none with this token, or a CNAME) or `"unresolved"`
-      (the resolver answered SERVFAIL or REFUSED, or timed out). A
-      resolver error is never a pass. No certificate is requested
-      before the challenge passes.
+      (the resolver answered SERVFAIL or REFUSED, or timed out, on
+      every lookup, below). A resolver error is never a pass. No
+      certificate is requested before the challenge passes.
    3. Challenge passed (`dk` without `dx`): find what exists and create
       only what is missing. The certificate is an ACM certificate in
       `us-east-1`, which CloudFront requires, requested by the registrar across Regions with DNS validation and
@@ -534,14 +534,31 @@ On every write:
    a VPC, AWS's recursive resolver: no third party, no egress rule and
    no resolver code. It caps the TTL of an answer at 300 s and keeps a
    negative answer for the zone's negative-caching TTL, the lesser of
-   the SOA's TTL and its minimum field. Its caches are not one: four
-   lookups in one invocation can get different answers, and an
-   environment that got a cached negative answer tends to get it again
-   on its next call. So a repeat made before the tenant published the
-   record can still answer `missing`, on about one lookup in ten, for as
-   long as the zone's negative-caching TTL, 15 minutes for a zone whose
-   SOA TTL is 900 s (spike S-10). The operator repeats the call, which
-   is repeat-safe, and a tenant that publishes the record before the
+   the SOA's TTL and its minimum field. Its caches are not one, so
+   lookups in one invocation can get different answers: S-10's data
+   shows that, once the record was in the zone, the first lookup of an
+   invocation still got the cached negative answer in 28 of 318
+   invocations (34 of 315 for a second name), and all five of its
+   lookups did in only 7 (3). Each query, TXT or CNAME, in sub-step 2,
+   in sub-step 5 and in the daily re-check therefore makes up to five
+   lookups about 100 ms apart, each with a 1 s timeout, and stops at
+   the first lookup that finds what it looks for: a record holding
+   `tfd-verify=<dk>`, or a CNAME. A query with no such lookup takes its
+   outcome from the lookups that got an answer: `mismatch` when any of
+   them held TXT records or a CNAME, `missing` otherwise. It is
+   `unresolved` only when every lookup errors. A query takes at most
+   5.4 s, so sub-step 2's two queries fit the registrar function's 30 s
+   timeout. An environment whose first lookup got the cached negative
+   answer got it again on its next invocation's first lookup about half
+   the time (14 of 24 and 16 of 31). So a repeat made before the tenant
+   published the record can still answer `missing` for as long as the
+   zone's negative-caching TTL, 15 minutes for a zone whose SOA TTL is
+   900 s and minimum at least 900 s (spike S-10). The tenant's DNS
+   provider sets that TTL, and it can be an hour or more. The operator
+   repeats the call, which is repeat-safe, only after the tenant
+   confirms the record is published and, if `missing` persists, after
+   that zone's negative-caching TTL; the 7-day `dx` bounds how long the
+   challenge stays open. A tenant that publishes the record before the
    first repeat meets no delay. A changed value is read as the old one
    for at most the record's TTL, and a record whose strings were split
    arrives as an array of strings per record, which the function joins.
@@ -571,11 +588,12 @@ On every write:
    asynchronous run of the sweeper per page of 500 entries, passing
    every page the run id, its page number and the page's range of
    tenant ids. Each page resolves its
-   records as sub-step 2 does, 10 lookups at a time with a 5 s timeout
-   each. It queries CNAME at the name only when the TXT answer is empty
-   or holds the token, so a pass never rests on a CNAME and a TXT
-   answer without the token is a miss after one query. A lookup ends in
-   a pass, a miss (`missing` or `mismatch`) or an error (`unresolved`).
+   records as sub-step 2 does, 10 queries at a time, each with up to
+   five lookups of 1 s. It queries CNAME at the name only when the TXT
+   answer is empty or holds the token, so a pass never rests on a CNAME
+   and a TXT query that finds records but not the token is a miss with
+   no CNAME query. An entry ends in a pass, a miss (`missing` or
+   `mismatch`) or an error (`unresolved`).
    The page logs one `entry` line per entry with the run id, the page,
    the tenant, the domain and the outcome as three numeric fields,
    `pass`, `miss` and `error`, one of them 1 and the others 0, never
@@ -651,8 +669,8 @@ On every write:
    `page-end` line only when the query showed no `page-end` row for its
    run id and page, so a retry of a page that had already ended adds
    none. A page therefore takes at most 500 records × 2 queries
-   ÷ 10 × 5 s = 500 s of lookups plus 60 s for the Logs Insights query,
-   inside the sweeper function's 15-minute timeout. Each page has at most one query in
+   ÷ 10 × 5.4 s = 540 s of lookups plus 60 s for the Logs Insights
+   query, 600 s, inside the sweeper function's 15-minute timeout. Each page has at most one query in
    flight, and the route table holds at most 3,472 dedicated tenants
    (§4.1), so a run of at most 7 pages, with the lister's own query,
    stays below the Logs Insights quota of 30 concurrent queries per
@@ -715,10 +733,13 @@ On every write:
    log is the record. A domain that stays broken emits a count on every
    later run, and each three-miss line names its domain, so a second
    broken domain shows in the log while the alarm is already firing.
-   The resolver can keep a passing answer for about 11 minutes after
-   the record is removed, whatever its TTL (spike S-10), so a run that
-   starts within that time of the removal can still pass, and the alarm
-   then fires one UTC day later than it would otherwise. The alarm means
+   In spike S-10 a deleted record whose TTL (86400) was above the
+   resolver's 300 s cap was still served 661 s after its deletion, in
+   one run; values changed at TTL 60 and 300 were read as the old one
+   for at most their TTL. A run that starts while the resolver still
+   serves a removed record can pass, and while any such stale window is
+   under a day the alarm fires at most one UTC day later than it would
+   otherwise. The alarm means
    that the tenant does not show control of a domain it claimed: for a
    routed domain, the domain may have changed owner; for a pending one,
    the certificate request rests on a proof that is gone. The alarm
@@ -1625,7 +1646,7 @@ Each spike reports its deploy and destroy time.
 | S-7 | Can the router decode a `tenant-identity` access token's payload within the CloudFront Functions limits? | `tenant_id` read from a real token; compute utilisation under 50 %; 401 on a malformed token. **Passed 2026-11-13**: 13-14 % compute, 401 at 9-10 % (ADR-0005) |
 | S-8 | Can an API Gateway resource policy admit a role name in any account through `aws:PrincipalArn`, and does the request context give the caller's account? | a provisioning role in the second account reaches the registrar; a role of another name is refused. **Passed 2026-11-13** with one design fix: the second account's provisioning role got 200 with `identity.accountId` and `userArn` in the request context; another role name got 403. The edge account's own admin also got 200 through its identity policy, so the resource policy adds an explicit `Deny` with `ArnNotLike` (§3.4, ADR-0013). Deploy 75 s, destroy 33 s. The result holds for the principal ADR-0017 admits instead, the control plane's `<fleet>-global-hook` role: one role ARN, matched by the same cross-account `aws:PrincipalArn` condition and guarded by the same `Deny` |
 | S-9 | Does a client-credentials token from the registrar's own vendor IdP client pass the control plane authorizer (single `audience`, required `sub` and `role`)? | `GetCell` returns 200 with that token, the token's `role` is the reader value, and a write returns 403. **Failed 2026-11-13; fallback proven**: the token has no `aud` (`sub` equals `client_id`), and the audience check denies it. A V3 trigger on the Essentials plan adds `role: control-plane:reader` but its `aud` override is ignored. With a `client_id` allow-list in place of the audience check, the same token is allowed with the reader grant (ADR-0015, §6.1). Deploy 36 s per phase, destroy 61 s |
-| S-10 | What does the registrar's Lambda function, outside a VPC, see from its default resolver for a challenge record (ADR-0018)? | the resolver it uses is reported; a TXT record published under a fresh name is seen on the first lookup; after a lookup that found no record, the time until a newly published record is seen is measured against the zone's negative-caching TTL; after a value change, the time until the new value is seen is measured against the record's TTL; a record split into several strings is read whole; the longest the resolver keeps a passing answer, against a record whose TTL is above it (its TTL cap). The first figures are the delay an operator meets between publishing and a passing repeat; the TTL cap is how long a removed record still passes, which delays the daily re-check's alarm by that much (§3.4 step 5). **Passed 2026-11-18**, a Node.js 22 function outside a VPC in `eu-central-1` against a public test zone with an SOA TTL of 900 and a minimum of 86400, so a negative-caching TTL of 900 s. Each probe was three concurrent invocations (four `resolveTxt` lookups and one raw query to the resolver each, and a control query to the zone's name server from one), a new set of invocations every poll, and every 240 s a configuration change that forced new execution environments. The resolver is a link-local address from `/etc/resolv.conf` (`timeout:2 attempts:5`); a lookup takes 2 ms at the median. A fresh name was seen on 15 of 15 first lookups, with the record's TTL. **Negative answers last**: after NXDOMAIN the zone's name server had the record 11 s after the change; all three first lookups saw it after 31 s, yet 145 of 1,590 queries (9 %) still got NXDOMAIN, and the last stale answer came 732 s after the negative lookup. A second name (an empty non-terminal, also answered NXDOMAIN) had 166 of 1,575 queries stale, the last 882 s after, both inside 900 s. An environment that got a stale answer got it again on the next poll 87 % of the time, and queries from cold-start environments were stale as often (10 of 60 and 5 of 55), so the cache is behind the resolver address, not in the environment. **A changed value** was read as the old one for at most its TTL: the last old answer came 61 s after a change at TTL 60 and 211 s after a change at TTL 300. A record of two strings (255 + 255) and one of three (255 + 255 + 43) arrived as an array of strings and joined equal the published value on 24 of 24 lookups. **TTL cap**: a record with TTL 86400 came back with TTL 300, and after its removal the old answer was still given 661 s later (9 of 61 polls) and never in the last 19.5 minutes of the 30-minute cap. A zone name server answered all 364 control queries over UDP from the function. Deploy 67 s plus 7 s for the function code; destroy 32 s for the stack and 35 s for the DNS records |
+| S-10 | What does the registrar's Lambda function, outside a VPC, see from its default resolver for a challenge record (ADR-0018)? | the resolver it uses is reported; a TXT record published under a fresh name is seen on the first lookup; after a lookup that found no record, the time until a newly published record is seen is measured against the zone's negative-caching TTL; after a value change, the time until the new value is seen is measured against the record's TTL; a record split into several strings is read whole; the longest the resolver keeps a passing answer, against a record whose TTL is above it (its TTL cap). The first figures are the delay an operator meets between publishing and a passing repeat; the TTL cap bounds how long a removed record can still pass, which delays the daily re-check's alarm (§3.4 step 5). Passes when no cached answer causes a pass for a value that was never published, and every delay before a published record or a changed value is seen stays within the record's TTL, capped at the resolver's, or the zone's negative-caching TTL. **Passed 2026-11-18**, a Node.js 22 function outside a VPC in `eu-central-1` against a public test zone with an SOA TTL of 900 and a minimum of 86400, so a negative-caching TTL of 900 s. Each probe was three concurrent invocations (four `resolveTxt` lookups and one raw query to the resolver each, and a control query to the zone's name server from one), a new set of invocations every poll, and every 240 s a configuration change that forced new execution environments. The resolver is a link-local address from `/etc/resolv.conf` (`timeout:2 attempts:5`); a lookup takes 2 ms at the median. A fresh name was seen on 15 of 15 first lookups, with the record's TTL. **Negative answers last**: after NXDOMAIN the zone's name server had the record 11 s after the change; all three first lookups saw it after 31 s, yet 145 of 1,590 queries (9 %) still got NXDOMAIN, and the last stale answer came 732 s after the negative lookup. A second name (an empty non-terminal, also answered NXDOMAIN) had 166 of 1,575 queries stale, the last 882 s after, both inside 900 s. S-10's data shows that lookups in one invocation disagree: the first lookup was stale in 28 of 318 invocations (34 of 315 for the second name), all five in only 7 (3). An environment whose first lookup was stale got a stale first lookup on its next invocation about half the time (14 of 24 and 16 of 31), and queries from cold-start environments were stale as often (10 of 60 and 5 of 55), so the cache is behind the resolver address, not in the environment. **A changed value** was read as the old one for at most its TTL: the last old answer came 61 s after a change at TTL 60 and 211 s after a change at TTL 300. A record of two strings (255 + 255) and one of three (255 + 255 + 43) arrived as an array of strings and joined equal the published value on 24 of 24 lookups. **TTL cap**: a record with TTL 86400 came back with TTL 300, and after its removal the old answer was still given 661 s later (9 of 61 polls) and never in the last 19.5 minutes of the 30-minute cap. A zone name server answered every control query over UDP from the function. S-10 met the pass criterion: no answer held a value before it was published, the last cached negative answers came inside the 900 s negative-caching TTL, and the last old values 31 s after `INSYNC` at TTL 60 and 211 s after the change at TTL 300. The deleted record's 661 s is a stale answer for a value that had been published, which the daily re-check's one-day bound covers (§3.4 step 5). Deploy 67 s plus 7 s for the function code; destroy 32 s for the stack and 35 s for the DNS records |
 
 ## 10. Integration test outline
 
@@ -1739,10 +1760,10 @@ only a cross-account call needs, is not exercised here.
     `<dd>` is `TFD_DEDICATED_DOMAIN`, for example
     `dedicated-c.test.example.com` when `appDomain` is
     `app.test.example.com`. The test writes TXT records at
-    `_tfd-challenge.<dd>` with a 60 s TTL, and writes each value before
-    the registrar first looks the name up, so no negative answer is
-    cached, which could hide a record for the zone's negative-caching
-    TTL (spike S-10). After each change it waits for the change to reach
+    `_tfd-challenge.<dd>` with a 60 s TTL, and publishes the first
+    records before the registrar first looks the name up, so no
+    negative answer is cached, which could hide a record for the zone's
+    negative-caching TTL (spike S-10). After each change it waits for the change to reach
     `INSYNC` and then past the TTL; spike S-10 saw no old answer later
     than 31 s after `INSYNC` for a 60 s record. The edge operator role
     calls `PutTenantRoute` for `a` with `customDomain` `<dd>`: 202 with `stage`
@@ -1940,7 +1961,7 @@ step 14 checks the metric count the re-check alarm watches.
 |---|---|---|
 | Q-1 | Which public hosted zone can the test account use for `appDomain`? **Answered 2026-11-16**: a public zone for a delegated test subdomain in the edge account, with its own SPF, DKIM and DMARC records. The spikes and the integration test take its name and zone id as inputs (`TFD_APP_DOMAIN`, `TFD_HOSTED_ZONE_ID`), and the integration test also takes `TFD_DEDICATED_DOMAIN`, with `appDomain` below the zone's apex and the test role's `route53:ChangeResourceRecordSets` scoped to the zone (§10); none is committed | spike S-1 |
 | Q-2 | Does the integration test deploy its own control plane, or reuse one when found and skip otherwise? | integration test |
-| Q-3 | Does the dedicated tenant (custom domain) path belong in this sample or in a follow-up, and how does the vendor confirm that a tenant controls a domain before the edge operator role sets its `customDomain`? A validated certificate is not enough: ACM reuses one validation record per domain name per account, so it proves the edge account's record is in DNS, not which tenant published it, and a former holder's record keeps validating. **Answered 2026-11-18** (ADR-0018): the path stays in this sample, off unless the deployer turns on `dedicatedDomains` (§3.6). The registrar issues a 32-byte random token bound to the tenant and the domain, kept as `dk` with a 7-day expiry `dx` on the `tenant#` entry (§4.1), and answers 202 with `_tfd-challenge.<domain>` TXT `tfd-verify=<token>`. A repeat resolves the record with the Lambda function's default resolver and requests the certificate only when it holds this tenant's token (§3.4 step 5). The sweeper re-checks every passed challenge daily, routed or not, and alarms when one tenant and domain misses the challenge on three UTC days in a row, meaning the tenant does not show control of a domain it claimed; the operator drops the domain. The resolver keeps a negative answer for the zone's negative-caching TTL, so a repeat made before the tenant published the record can answer `missing` for that long (§3.4 step 5, spike S-10) | scope |
+| Q-3 | Does the dedicated tenant (custom domain) path belong in this sample or in a follow-up, and how does the vendor confirm that a tenant controls a domain before the edge operator role sets its `customDomain`? A validated certificate is not enough: ACM reuses one validation record per domain name per account, so it proves the edge account's record is in DNS, not which tenant published it, and a former holder's record keeps validating. **Answered 2026-11-18** (ADR-0018): the path stays in this sample, off unless the deployer turns on `dedicatedDomains` (§3.6). The registrar issues a 32-byte random token bound to the tenant and the domain, kept as `dk` with a 7-day expiry `dx` on the `tenant#` entry (§4.1), and answers 202 with `_tfd-challenge.<domain>` TXT `tfd-verify=<token>`. A repeat resolves the record with the Lambda function's default resolver and requests the certificate only when it holds this tenant's token (§3.4 step 5). The sweeper re-checks every passed challenge daily, routed or not, and alarms when one tenant and domain misses the challenge on three UTC days in a row, meaning the tenant does not show control of a domain it claimed; the operator drops the domain. The resolver keeps a negative answer for the zone's negative-caching TTL, so a repeat made before the tenant published the record can answer `missing` for that long (§3.4 step 5, spike S-10). The tenant's DNS provider sets that TTL, the lesser of the SOA TTL and the SOA minimum, and it can be an hour or more: the operator repeats the call only after the tenant confirms the record is published and, if `missing` persists, after that zone's negative-caching TTL, and the 7-day `dx` bounds how long the challenge stays open | scope |
 | Q-4 | Should the integration test also compose `agentic-runtime-isolation` for `/agents/*`, or reuse a deployment only when one is found? Until then step 23 runs against a stand-in. | integration test |
 | Q-5 | Route registration depends on the control plane's global hooks (control-plane R-39 to R-46, ADR-0044), which are Proposed and not yet merged. Does their final shape keep what ADR-0017 uses: `POST` hooks only after a successful script, `PRE` delete hooks with three attempts that cannot stop a delete, one `<fleet>-global-hook` role, `SCRIPT_OUTPUTS` and `globalHookManagedPolicyArns`? If not, ADR-0017 is revisited. ADR-0017 stays Proposed and ADR-0013 Accepted until ADR-0044 is accepted | build start |
 | Q-6 | With hooks, an integration test that reuses a control plane (Q-2) also changes it: it attaches a policy to `<fleet>-global-hook` and registers two global hooks, which then run on every application's operations, and a third, `tfd-probe`, while step 20 runs. The test therefore needs three of the five global hook slots free. Is that acceptable on a shared control plane, or does the test always deploy its own? | integration test |

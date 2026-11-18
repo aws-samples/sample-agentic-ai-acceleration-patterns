@@ -106,14 +106,17 @@ function outside a VPC: AWS's recursive resolver, with no third party,
 no egress rule and no resolver code. A DNS-over-HTTPS resolver would
 send every tenant domain to a third party and caches the same way;
 querying the authoritative servers directly would skip the cache, and a
-function outside a VPC does reach a zone's name servers over UDP port 53
+function outside a VPC does reach a zone name server over UDP port 53
 (spike S-10), but it needs code to find a domain's name servers and to
 handle truncation, which the sample does not carry. Caching can delay a
 pass, never cause one, because no cached answer can predate the token.
 The resolver caps an answer's TTL at 300 s and keeps a negative answer
-for the zone's negative-caching TTL (S-10). A resolver error is
-`unresolved`, never a pass, and a CNAME at the challenge name is
-refused, so a CNAME left pointing into a zone someone else can register
+for the zone's negative-caching TTL (S-10), and lookups in one
+invocation can disagree, so each query makes up to five lookups about
+100 ms apart and stops at the first match. It answers `missing` or
+`mismatch` only when no lookup matches, and `unresolved` only when
+every lookup errors. A resolver error is never a pass, and a CNAME at
+the challenge name is refused, so a CNAME left pointing into a zone someone else can register
 never passes. The 7 days cover a tenant's
 DNS change process; ACM's own 72-hour validation window starts only
 after the challenge passes. The challenge keeps the vendor's decision
@@ -152,14 +155,22 @@ before it writes the domain's `host#` key.
   202 (`stage` `domain-challenge` and `certificate`).
 - Harder: a repeat call made before the tenant published the record can
   leave a negative answer in the resolver for the zone's
-  negative-caching TTL, 15 minutes for a zone whose SOA TTL is 900 s. In
-  spike S-10 about one lookup in ten still got it after the record was
-  in the zone, the last one 882 s after the negative lookup, and an
-  environment that got it tended to get it again on its next call, so an
-  immediate repeat does not help. The operator's call is repeat-safe and
-  answers `missing`, and a tenant that publishes the record before the
-  first repeat meets no delay. A larger SOA minimum in the tenant's zone
-  lengthens the worst case.
+  negative-caching TTL, 15 minutes for a zone whose SOA TTL is 900 s and
+  minimum at least 900 s. The tenant's DNS provider sets that TTL, and
+  it can be an hour or more. In spike S-10 about one query in ten still
+  got the negative answer after the record was in the zone, the last
+  882 s after the negative lookup. S-10's data shows the first lookup of
+  an invocation stale in 28 of 318 and 34 of 315 invocations, and all
+  five lookups stale in only 7 and 3, which is why a query repeats its
+  lookup within the call. An environment whose first lookup was stale
+  got a stale first lookup on its next invocation about half the time
+  (14 of 24 and 16 of 31). The operator's call is repeat-safe and
+  answers `missing`; the operator repeats it only after the tenant
+  confirms the record is published and, if `missing` persists, after
+  the tenant zone's negative-caching TTL, and the 7-day `dx` bounds how
+  long the challenge stays open. A tenant that publishes the record
+  before the first repeat meets no delay. A longer negative-caching TTL
+  in the tenant's zone lengthens the worst case.
 - Harder: the check trusts one DNS answer from one Region without
   DNSSEC, as ACM's own DNS validation does. Shortcut: one vantage point;
   upgrade to a second Region's answer, or DNSSEC validation, when a
@@ -176,8 +187,9 @@ before it writes the domain's `host#` key.
   run id and a page number to every page of 500 entries. Only the
   integration test supplies a `runDay`, never the Scheduler; the lister
   accepts one only within the last 7 days and not after today, and logs
-  that it was supplied. Each page looks its records up 10 at a time with
-  a 5 s timeout, querying CNAME only when the TXT answer is empty or
+  that it was supplied. Each page looks its records up 10 at a time,
+  each query with up to five lookups of 1 s as the registrar makes
+  them, querying CNAME only when the TXT answer is empty or
   holds the token, and logs one `entry` line per entry with the run id,
   the page, the tenant, the domain and numeric `pass`, `miss` and
   `error` fields, one of them 1, never the token, then a `page-end`
@@ -207,7 +219,7 @@ before it writes the domain's `host#` key.
   or miss between, gets an `unverifiable` line and a count to a second
   metric and alarm, so whoever controls a domain's DNS cannot hold it
   out of detection by breaking only the challenge name. A page takes at
-  most 500 s of lookups plus a 60 s poll limit on its one query; a query
+  most 540 s of lookups plus a 60 s poll limit on its one query; a query
   that fails, does not finish, or returns 10,000 rows fails the page
   (the page calls `logs:StopQuery` on a query it gives up on), which
   Lambda retries twice and then keeps in an on-failure queue. The daily
@@ -240,10 +252,12 @@ before it writes the domain's `host#` key.
   One query per
   page in flight keeps a run inside the Logs Insights quota of 30
   concurrent queries. The sweeper keeps
-  no store of its own: its log is the record. A removed record can still
-  pass for about 11 minutes after its removal, whatever its TTL (S-10),
-  so a run that starts within that time of the removal can pass, which
-  delays the alarm by at most one day. The sweeper does not drop the
+  no store of its own: its log is the record. In S-10 a deleted record
+  whose TTL (86400) was above the resolver's 300 s cap was still served
+  661 s after its deletion, in one run; values changed at TTL 60 and 300
+  cleared within their TTL. A run that starts while a removed record is
+  still served can pass, which delays the alarm by at most one day while
+  any such stale window is under a day. The sweeper does not drop the
   domain: a DNS fault or a tenant's mistake would then take a routed
   domain offline with no person deciding. The re-check does not follow
   ACM renewals, which depend on ACM's own validation record.
