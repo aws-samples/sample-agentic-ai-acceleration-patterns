@@ -117,7 +117,7 @@ it first shows.
 
 | Component | Where | What it is |
 |---|---|---|
-| Contract | `stress/` at the repository root | `tiers.ts`, the k6 library (`stress/k6/`), the result schema, the quota budget, the runner |
+| Contract | `stress/` at the repository root | `src/`: tiers, slice declaration, quota budget, result records, runner (`run.sh`); the k6 library (`stress/k6/`) |
 | Driver host | `stress/driver/` (the runtime-isolation `StressDriver`, moved) | one EC2 instance, no inbound rule, no public IP, SSM Session Manager, k6 and the AWS CLI |
 | Stress application | `stress/application/` | a control-plane application whose cell scripts deploy one runtime-isolation cell and whose tenant scripts onboard one tenant (§3.3) |
 | Slice: `control-plane` | `samples/control-plane/scripts/stress/` | deploy the control plane, register accounts and the stress application, onboarding and churn scenarios |
@@ -269,7 +269,7 @@ and `iam:GetRole` give all of it.
 
 ## 4. Data model
 
-### 4.1 Tiers (`stress/tiers.ts`)
+### 4.1 Tiers (`stress/src/tiers.ts`)
 
 | | `small` | `medium` | `large` |
 |---|---|---|---|
