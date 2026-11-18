@@ -113,7 +113,10 @@ pass, never cause one, because no cached answer can predate the token.
 The resolver caps an answer's TTL at 300 s and keeps a negative answer
 for the zone's negative-caching TTL (S-10), and lookups in one
 invocation can disagree, so each query makes up to five lookups about
-100 ms apart and stops at the first match. It answers `missing` or
+100 ms apart and stops at the first match. Each lookup is one try
+abandoned after 1 s of wall time (for example a Node.js `Resolver` with
+`timeout: 1000, tries: 1`); the 1 s is chosen, not measured, as S-10's
+longest lookup took 64 ms. It answers `missing` or
 `mismatch` only when no lookup matches, and `unresolved` only when
 every lookup errors. A resolver error is never a pass, and a CNAME at
 the challenge name is refused, so a CNAME left pointing into a zone someone else can register
@@ -188,8 +191,8 @@ before it writes the domain's `host#` key.
   integration test supplies a `runDay`, never the Scheduler; the lister
   accepts one only within the last 7 days and not after today, and logs
   that it was supplied. Each page looks its records up 10 at a time,
-  each query with up to five lookups of 1 s as the registrar makes
-  them, querying CNAME only when the TXT answer is empty or
+  each query with up to five lookups of one try abandoned after 1 s,
+  as the registrar makes them, querying CNAME only when the TXT answer is empty or
   holds the token, and logs one `entry` line per entry with the run id,
   the page, the tenant, the domain and numeric `pass`, `miss` and
   `error` fields, one of them 1, never the token, then a `page-end`
@@ -254,8 +257,9 @@ before it writes the domain's `host#` key.
   concurrent queries. The sweeper keeps
   no store of its own: its log is the record. In S-10 a deleted record
   whose TTL (86400) was above the resolver's 300 s cap was still served
-  661 s after its deletion, in one run; values changed at TTL 60 and 300
-  cleared within their TTL. A run that starts while a removed record is
+  661 s after its deletion (631 s after `INSYNC`), in one run, within
+  the daily re-check's one-day bound; values changed at TTL 60 and 300
+  cleared within their TTL, 31 s and 181 s after `INSYNC`. A run that starts while a removed record is
   still served can pass, which delays the alarm by at most one day while
   any such stale window is under a day. The sweeper does not drop the
   domain: a DNS fault or a tenant's mistake would then take a routed
@@ -294,7 +298,11 @@ before it writes the domain's `host#` key.
 - Known limitations: not tested end to end, and covered by unit tests
   with a stubbed resolver or clock instead: challenge expiry and
   reissue, a resolver error (`unresolved`), a CNAME at the challenge
-  name, the lookup before the `host#` write, the restart after an ETag
+  name, the in-call lookups (a pass on a later lookup after earlier
+  misses, `mismatch` winning over `missing` across lookups, `unresolved`
+  only when all five lookups error, a mix of errors and misses being a
+  miss, the stop at the first CNAME, and the 1 s limit on each lookup),
+  the lookup before the `host#` write, the restart after an ETag
   conflict, a daily-run page that fails, the on-failure queue, the
   missing-pages count, the missing-pages alarm and the no-lister alarm
   (the 0 of a first run and two days with no lister included), the
