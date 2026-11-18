@@ -2666,7 +2666,11 @@ reads a client's secret, gets its token for one scope from the token
 endpoint and makes one API call. It returns the status, whether the token
 has `aud`, whether `sub` equals `client_id`, its `role` and its `scope`,
 never the secret or the token, so neither reaches a template, an output or
-the assertion results. The stack sets `globalHookManagedPolicyArns` and
+the assertion results. The stack sets `concurrentBuildLimit = 50`
+(above the default 5 and the warning threshold, ADR-0046), and account B's
+stack attaches one test policy, an SSM read the scripts never make, to B's
+cell provisioning role through `cellBuildManagedPolicyArns` (ADR-0047).
+The stack sets `globalHookManagedPolicyArns` and
 `appHookManagedPolicyArns` to one test policy each, which lets that hook
 role write SSM parameters under its own test path in A and nowhere else;
 step 16's hooks record what they saw there. The application hook test
@@ -2691,8 +2695,9 @@ Cognito refuses in a domain prefix. The run uses the fleet name in
 every stack name, as the `fleetName` of the stack under test and of
 the role pair the account B stack installs, and in every other name
 the test creates that must be unique in an account or a Region: the
-probe role in B, the hook test paths and policies, and the user pool
-domain prefix. The application ids derive from the run id, not the
+probe role in B, the test policy on B's cell role (`<fleet>-cell-extra`),
+the hook test paths and policies, and the user pool domain prefix. The
+application ids derive from the run id, not the
 fleet name (`x-<run id>`, `y-<run id>`, `z-<run id>`, at most 25
 characters), because an application id is at most 32 characters
 (§4.1) and the parameter paths it names
@@ -2714,7 +2719,10 @@ deployed last, and is retained when the stack is deleted. That role
 and setting are expected leftovers, outside the per-run leftover
 check.
 
-1. **Auth:** an operation without a JWT is rejected; with a valid vendor
+1. **Deployment inputs and auth:** both CodeBuild projects report a
+   concurrent build limit of 50, and B's cell provisioning role carries
+   exactly the one test policy (ADR-0046, ADR-0047). An operation
+   without a JWT is rejected; with a valid vendor
    IdP JWT it succeeds. A reader token (R-36) succeeds on every `GET`
    operation and is refused with 403 on `POST`, `PUT` and `DELETE` alike,
    nothing written; a token whose role is in neither set is refused on

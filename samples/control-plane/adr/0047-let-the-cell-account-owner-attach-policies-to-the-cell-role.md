@@ -43,7 +43,7 @@ the cell build nor the API role can read every cell's data; a cell app
 commits its context lookups to `cdk.context.json` instead.
 It states where that policy is safe: in a cell account that holds only
 cells, with a cell bootstrap whose execution role and every cell role carry
-a permissions boundary and sit on a `/cell/` role path.
+a permissions boundary, and every cell role sits on a `/cell/` role path.
 The control plane's own account never qualifies, because it holds the
 control plane.
 
@@ -54,8 +54,8 @@ The cell role trusts the control-plane API role as well as the cell build
 (the `PutAccount` handshake, ADR-0028), so the API Lambda can use every
 attached policy too; with the stress policy it can assume the cell
 bootstrap roles. The threat model's cell-role row gains that residual. A
-policy that reaches a default CDK bootstrap, or any role outside a scoped
-path, makes the cell build and the API role administrators of the account,
+policy that reaches an administrator role, a default CDK bootstrap, or any
+role other than the three `cdk-cell-*` roles of the example, makes the cell build and the API role administrators of the account,
 and one that reaches a lookup role lets both read it all; the README says
 so beside the example. Revisit if the handshake can use a
 role of its own, so the API role leaves the cell role's trust, or if cell

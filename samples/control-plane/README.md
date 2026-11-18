@@ -372,13 +372,15 @@ context lookups commits them to `cdk.context.json` instead. Replace
 
 That policy is safe only in an account that holds nothing but cells, with a
 cell bootstrap whose execution role and every cell role carry a permissions
-boundary and sit on a `/cell/` role path (ADR-0047).
+boundary, and every cell role sits on a `/cell/` role path (ADR-0047).
 The control plane's own account never qualifies, because it holds the
 control plane: on the control plane stack, attach only policies scoped to
-the cell's own resources. A policy that reaches the default CDK bootstrap
-(`cdk-hnb659fds-*`), or any role outside such a path, makes the cell build
-and the API role administrators of the account; one that reaches a lookup
-role lets both read the whole account.
+the cell's own resources. A policy that reaches an administrator role, the
+default CDK bootstrap (`cdk-hnb659fds-*`), or any role other than the three
+`cdk-cell-*` roles above makes the cell build and the API role
+administrators of the account; one that reaches a lookup role lets both
+read the whole account. Without the lookup role, `cdk deploy` prints a
+warning that it could not assume it and goes on with the deploy role.
 
 `concurrentBuildLimit` (default 5, ADR-0046) caps concurrent builds on every
 CodeBuild project the control plane creates. It bounds what a leaked
@@ -793,7 +795,8 @@ application's cells (threat T5, the highest-consequence open item).
 - [ ] **Review every policy in `cellBuildManagedPolicyArns`.** The cell
       provisioning role runs every cell script in its account, and the
       control plane's API role can assume it too. Never attach a policy that
-      reaches an administrator role or the default CDK bootstrap. On the
+      reaches an administrator role, the default CDK bootstrap or a CDK
+      lookup role (`ReadOnlyAccess`). On the
       control plane stack, attach only policies scoped to the cell's own
       resources; a policy that assumes CDK bootstrap roles belongs only in
       an account that holds nothing but cells (T21, M18, ADR-0047).

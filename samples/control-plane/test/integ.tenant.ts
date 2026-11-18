@@ -405,7 +405,7 @@ const cellExtraPolicy = new iam.ManagedPolicy(accountBStack, 'IntegCellExtraPoli
 accountBStack.roles.cellRole.node.addDependency(cellExtraPolicy);
 const probeRole = new iam.Role(accountBStack, 'IntegProbeRole', {
   roleName: probeRoleName,
-  description: 'control-plane integ test only: lets the probe Lambda in the control plane account count SSM parameters and list the cell role managed policies here',
+  description: 'control-plane integ test only: lets the probe Lambda in the control plane account count SSM parameters here',
   assumedBy: new iam.PrincipalWithConditions(new iam.AccountPrincipal(accountA), {
     ArnLike: { 'aws:PrincipalArn': `arn:${accountBStack.partition}:iam::${accountA}:role/control-plane-integ-setup-SsmProbe*` },
   }),
