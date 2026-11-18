@@ -4,7 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
-- Amends: ADR-0003, ADR-0004, ADR-0008, ADR-0010, ADR-0011, ADR-0012, ADR-0013
+- Amends: ADR-0003, ADR-0004, ADR-0005, ADR-0008, ADR-0010, ADR-0011, ADR-0012, ADR-0013
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -25,9 +25,10 @@ line, a packaging choice or a test step. Cons: DNS stays an open channel
 on every backend until a later option closes it.
 
 ### Option 2: Add DNS filtering now
-Pros: closes the DNS channel on `nitro` and `microvm`. Cons: a Route 53
-Resolver DNS Firewall rule group and association add deploy time and cost,
-and whether it covers the AgentCore runtime's resolver is unverified.
+Pros: could close the DNS channel. Cons: a Route 53 Resolver DNS Firewall
+rule group and association add deploy time and cost, and whether it covers
+the MicroVM connector's lookups, the `nitro` tasks' lookups and the
+AgentCore runtime's resolver is unverified on all three.
 
 ### Option 3: Drop the backends whose results disappointed
 Pros: fewer moving parts. Cons: the sample exists to compare all three.

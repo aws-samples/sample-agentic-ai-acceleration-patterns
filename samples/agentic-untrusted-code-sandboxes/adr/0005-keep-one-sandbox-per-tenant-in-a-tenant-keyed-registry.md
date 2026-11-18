@@ -4,6 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
+- Amended by: ADR-0015
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -54,3 +55,5 @@ and stops orphans with no row. A failed start backs off for 30 s before a
 retry, and starts pass an idempotency token. Offboarding deletes a tenant's rows after
 stopping its sandboxes. A row outliving its sandbox costs one failed call,
 then a restart.
+
+Note 2026-11-18: amended by ADR-0015. The `nitro` start cap, and so the start lease, is 5 minutes; the `microvm` cap is 20 s and the `agentcore` cap 30 s.
