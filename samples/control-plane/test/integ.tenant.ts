@@ -366,6 +366,8 @@ new s3deploy.BucketDeployment(setup, 'DeployHookScripts', {
   sources: [
     s3deploy.Source.asset(path.join(__dirname, 'integ-scripts/hook')),
     s3deploy.Source.data('fleet-name.txt', fleetName),
+    // Lets the hook report whether any variable it received held account B's external id (step 18).
+    s3deploy.Source.data('external-id.txt', accountBExternalId),
   ],
 });
 new s3deploy.BucketDeployment(setup, 'DeployZTenantScripts', {
