@@ -1,10 +1,10 @@
 # Provisioning and Hook Script Conventions
 
 Conventions for authoring cell and tenant provisioning scripts and hook
-scripts run by AWS CodeBuild. Everything a script prints lands in the build's CloudWatch log
-group, readable by anyone with log-group access. Treat build logs as an
-audience, not a scratchpad — a script that echoes fetched values turns the
-log group into an unintended secrets store.
+scripts run by AWS CodeBuild. Everything a script prints lands in the
+build's CloudWatch log group, readable by anyone with log-group access.
+Treat build logs as an audience, not a scratchpad — a script that echoes
+fetched values turns the log group into an unintended secrets store.
 
 ## Log hygiene
 
