@@ -689,6 +689,15 @@ idempotency record and the hook counter). All keys
 shown as the reference implementation's convention; the requirement is the
 *shape*, not the literal strings.
 
+Every `createdAt` and `updatedAt` is a UTC instant with millisecond
+precision. The table stores it as an ISO 8601 string with three fraction
+digits, for example `2026-11-18T14:42:01.123Z`. The API returns it as an
+RFC 3339 `date-time` in UTC, which MAY omit a zero fraction: the instant
+`2026-11-18T14:42:01.000Z` can be returned as `2026-11-18T14:42:01Z`. A
+client MUST parse two values before comparing them, because the two forms
+do not sort in time order as strings. The one exception is the internal
+`expiresAt` TTL (§4.6), which is epoch seconds as DynamoDB TTL requires.
+
 ### 4.1 Application
 
 | Field | Requirement |
@@ -1077,7 +1086,7 @@ to a provisioned tenant applies here.
 | Op | HTTP | Code | Contract |
 |---|---|---|---|
 | `CreateDeployment` | `POST /tenants/{tenantId}/deployments` | **202** | Input `{applicationId, adminEmail, accountId?, parameters?, clientToken?}` — **no resource definition** (P-4). `parameters` is a name → value map validated against the application's declarations (R-33); 400 on an undeclared name, an over-long value or a missing required parameter, after the replay read (§7.3) and before placement runs. 404 for an unknown tenant or an unregistered `applicationId`. `accountId` pins the deployment to one registered account (the only way into a tenant-owned account); the account MUST admit the application (400 otherwise, §4.5); absent, placement chooses among vendor-owned accounts that admit it. Runs placement (§7), starts the workflow, returns the deployment including `cellId`. 404 for an unregistered `accountId`; 409 `ConflictError` when the tenant already has a deployment of that application; 409 `InsufficientCapacityError` when no eligible account has capacity. |
-| `GetDeployment` | `GET /tenants/{tenantId}/deployments/{applicationId}` | 200 | The polling endpoint: `status`, `statusReason`, `lastBuildId`, `lastGlobalHooks`, `cellId`, plus the deployment's *effective* definition (resolved from the cell's stamped definition, the application hooks stamped on the cell included), the cell's `accountId` and the stored `parameters` (the supplied values only; defaults are not merged in). 404 if missing. |
+| `GetDeployment` | `GET /tenants/{tenantId}/deployments/{applicationId}` | 200 | The polling endpoint: `status`, `statusReason`, `lastBuildId`, `lastGlobalHooks`, `cellId`, `createdAt`, `updatedAt` (§4), plus the deployment's *effective* definition (resolved from the cell's stamped definition, the application hooks stamped on the cell included), the cell's `accountId` and the stored `parameters` (the supplied values only; defaults are not merged in). 404 if missing. |
 | `UpdateDeployment` | `PUT /tenants/{tenantId}/deployments/{applicationId}` | **202** | Re-apply the deployment, optionally changing parameter values first. Input `{parameters?, removeParameters?}`, both optional: an empty body re-applies with the stored values. Names in `parameters` are set and names in `removeParameters` removed; every other stored value is kept (R-33). Runs the stamped tenant update script with the merged set resolved per R-32. Requires deployment `ACTIVE`/`UPDATE_FAILED` **and** cell `ACTIVE`; 409 otherwise. 400 on a validation failure of R-33, with nothing written. |
 | `DeleteDeployment` | `DELETE /tenants/{tenantId}/deployments/{applicationId}` | **202** | 409 if in-flight. Allowed from `ACTIVE` and all `*_FAILED` states **regardless of cell status** — cleanup must always be reachable (P-9). Runs the tenant delete script with the stored parameters resolved per R-32, never validated against the current declarations; on success the workflow removes the record and releases the cell slot and the tenant's count in one transaction (§8.2). |
 | `ListDeployments` | `GET /deployments[?tenantId=\|?cellId=\|?applicationId=]` | 200 | Paginated. At most one filter per request (400 for two). An unknown `tenantId`, `cellId` or `applicationId` filter yields an **empty page, not a 404** — a filter is a query predicate, not a resource lookup. |
