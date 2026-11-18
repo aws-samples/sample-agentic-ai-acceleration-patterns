@@ -281,7 +281,9 @@ variables). A `StartBuild` refused under
 a known refusal name (a concurrency quota, the project at its cap, and
 throttling once its name is verified) goes through a `Catch`, a
 30-second `Wait` and a `Choice` that advances `TRY`, for at most 5
-minutes, so refusals and the queue take at most 10 minutes together.
+minutes, so refusals and the queue take at most 10 minutes together,
+overrun only by the milliseconds between that `Choice` and the next
+try, which the margin absorbs.
 A transient error is a task `Retry` (`TimeoutSeconds` 15,
 `IntervalSeconds` 10, `BackoffRate` 1, `MaxAttempts` 3, no jitter),
 which evaluates the `Arguments` again on each repeat (H-8). A try and
@@ -295,8 +297,12 @@ token could leave a second build. The token is
 $string(TRY)], '|'), 'SHA-256')`, 64 hexadecimal characters. Every
 field of the start task's `Arguments`, the token included, reads only
 variables and the start task's state input, both fixed for the try.
-Every state of the start loop passes its input through unchanged: the
-refusal `Catch` sets `Output` to `{% $states.input %}`, and no
+Every state on the way back to the start task, the entry and begin-try
+`Pass` states, the refusal `Catch`, the `Wait` and the `Choice`, passes
+its input through unchanged: the refusal `Catch` sets `Output` to
+`{% $states.input %}`. The edges that leave that cycle, the start
+task's success `Output` and the `Catch`es that end the attempt, add
+the fields spec §8.1 requires. No
 `$states.context` field that changes on a repeat (such as
 `State.RetryCount`) is read. No field reads `$uuid()`, `$now()`,
 `$millis()` or another changing value, because a `Retry` evaluates

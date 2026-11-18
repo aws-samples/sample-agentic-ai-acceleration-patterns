@@ -2150,10 +2150,12 @@ build ARN and status from the error before it enters state, never the
 raw `Cause` string or a parsed copy of the `Build`. A `Catch` of the
 hook start task that ends the attempt keeps the error name and the
 first 256 characters of its `Cause`, a service message with no `Build`
-in it; the refusal `Catch` passes its input through (R-46). A payload
-over the limit fails the execution with
-`States.DataLimitExceeded`, which `States.ALL` does not catch, so no
-`*_FAILED` write would run.
+in it. The refusal `Catch` passes its input through and keeps the same
+bounded name and cause in the variable `LAST_REFUSAL` (R-46), outside
+the state payload: under 2 KiB however its characters encode, against
+the 256 KiB a variable may hold ([sfn-vars]). A payload over the
+limit fails the execution with `States.DataLimitExceeded`, which
+`States.ALL` does not catch, so no `*_FAILED` write would run.
 Keeping state small does not keep values out of the task history events
 (they record the raw service result); N-11 already accepts values in
 execution history.
@@ -2210,7 +2212,8 @@ task-level timeout routed to the failure path. A hook attempt is bounded
 on both sides instead (R-46): CodeBuild stops the run at
 `timeoutMinutes`, refused starts end after 5 minutes, and CodeBuild
 stops a queued build at 10 minutes less the minutes its start was
-refused, so refusals and queue together take at most 10. The attempt's
+refused, never below 5, so refusals and queue together take at most
+10, overrun only by the milliseconds R-46 notes. The attempt's
 deadline is the run, those 10 minutes and five minutes of margin, at
 which the workflow stops the build itself, so the deadline is a
 backstop and a wait in the queue never reads as a hook timeout. The
@@ -2242,7 +2245,9 @@ quota of a Standard execution. A 30-second poll would pass it.
 
 Refusals are capped at 5 minutes and the queued timeout is shortened
 by the minutes refused, so refusals and queue together never pass the
-10 minutes the attempt bound counts. That keeps every number above:
+10 minutes the attempt bound counts by more than the milliseconds R-46
+notes, which its five minutes of margin absorb. That keeps every number
+above:
 the attempt bound of 47 minutes, the per-hook budget of 144 and the
 history count. The delete row holds because the loop cuts every
 attempt of a delete hook at the hook's budget (R-46), however many
@@ -2288,11 +2293,15 @@ SDK result's PascalCase keys (`Builds`, `BuildsNotFound`,
 `ResolvedSourceVersion`; H-2). Each start
 try sends `timeoutInMinutesOverride` set to the hook's
 `timeoutMinutes` (T) and `queuedTimeoutInMinutesOverride` set to
-q = 10 − ceil(r), where r is the minutes from the attempt's first try to
-this one, at most 5 (below), and r is taken as 0 when `$TRY` is 1, so
-q is 10 on the first try. The queued timeout is therefore never
-below CodeBuild's minimum of 5, and refusals and queue together take
-at most 10 minutes. The attempt's deadline MUST be data, computed from
+q = max(5, 10 − ceil(r)), where r is the minutes from the attempt's
+first try to this one, and r is taken as 0 when `$TRY` is 1, so q is
+10 on the first try. The refusal `Choice` ends the start once 5
+minutes have passed since the first try (below), but the begin-try
+state reads the clock a moment after it, so r can pass 5 by
+milliseconds and ceil(r) reach 6. The floor keeps q at CodeBuild's
+minimum of 5 then, so refusals and queue together take at most 10
+minutes and those milliseconds, which the five minutes of margin
+absorb. The attempt's deadline MUST be data, computed from
 the definition when the attempt starts: the earlier of its first
 `StartBuild` try plus the run timeout, the 10 minutes of refusals and
 queue, and five minutes of margin, and, on delete, 2 minutes before
@@ -2326,11 +2335,13 @@ The start of an attempt MUST be an explicit loop, never one task
 the same one. The loop holds in variables the try index `TRY` (1 for
 the attempt's first try), that try's q and the try's
 `idempotencyToken`, and exactly one state writes `TRY` on each
-transition. A `Pass` state that enters the attempt assigns `TRY` 1,
-`FIRST_TRY_AT`, the time of the attempt's first try, and the
-attempt's deadline, from the same `$now()` as `FIRST_TRY_AT`, never
-from `$FIRST_TRY_AT`, which in that state is unset or the previous
-attempt's. The 5-minute refusal window counts from `FIRST_TRY_AT`. A
+transition. A `Pass` state that enters the attempt assigns `TRY` 1
+and computes `FIRST_TRY_AT`, the time of the attempt's first try, and
+the attempt's deadline from the same instant,
+`$states.context.State.EnteredTime`, which is fixed for the state and
+read by no `Arguments`. The deadline never reads `$FIRST_TRY_AT`,
+which in that state is unset or the previous attempt's. The 5-minute
+refusal window counts from `FIRST_TRY_AT`. A
 `Pass` state that begins each try follows it and assigns q and the
 token from `$TRY`, and the start task comes next. The refusal path's
 `Choice` rule assigns `TRY` `$TRY + 1` and goes back to the begin-try
@@ -2355,23 +2366,31 @@ read only those six values, all fixed for the try. Every field of the
 start task's `Arguments`, not only the token, MUST read only variables
 and the start task's state input, both fixed for the try: the project
 name, `sourceVersion` (R-40), the token, q, T and the R-42
-environment. Every state of the start loop passes its input through
-unchanged: the refusal `Catch` sets `Output` to `{% $states.input %}`,
-and no `$states.context` field that changes on a repeat (such as
-`State.RetryCount`) is read. No `$uuid()`, `$now()`,
-`$millis()` or other value that changes between evaluations may appear
-anywhere in them, because a `Retry` evaluates `Arguments` again on
+environment. Every state on the way back to the start task, the entry
+and begin-try `Pass` states, the refusal `Catch`, the `Wait` and the
+`Choice`, passes its input through unchanged: the refusal `Catch`
+sets `Output` to `{% $states.input %}`. The edges that leave that
+cycle, the start task's success `Output` and the `Catch`es that end
+the attempt, add the fields §8.1 requires. The `Arguments` read no
+`$states.context` field that changes on a repeat (such as
+`State.RetryCount`), and no `$uuid()`, `$now()`, `$millis()` or other
+value that changes between evaluations may appear anywhere in them,
+because a `Retry` evaluates `Arguments` again on
 every repeat (H-8) and CodeBuild refuses a repeat whose arguments
 differ from the first call's under the same token. A `StartBuild` the
 service refuses under a known refusal name (the project at its
 `concurrentBuildLimit` or the account's concurrent build quota, H-9;
 throttling once its name is verified, H-8) MUST go through a `Catch`
-to a 30-second `Wait`, without backoff, and then a `Choice`. The
+to a 30-second `Wait`, without backoff, and then a `Choice`. That
+`Catch` `Assign`s `LAST_REFUSAL`, the error name and the first 256
+characters of the cause, from `$states.errorOutput`, and its `Output`
+stays `{% $states.input %}`, so the state input is untouched. The
 `Choice` ends the start when 5 minutes have passed since
 `FIRST_TRY_AT` or the next try would pass the deadline; otherwise its
 rule assigns `TRY` `$TRY + 1` and goes to the begin-try state. A
 start still refused when its window ends is a hook that cannot start,
-and `statusReason` says so. Each try computes its own q, so a refusal
+and `statusReason` says so and names `$LAST_REFUSAL`. Each try
+computes its own q, so a refusal
 never lengthens an attempt past its deadline. A project at its cap
 refuses, never queues, with `CodeBuild.AccountLimitExceededException`
 and no build created (H-9).
@@ -2379,8 +2398,9 @@ CodeBuild documents that name for a limit exceeded for the calling
 account, so the `Catch` MUST name it, which is safe whichever name the
 account's concurrent build quota turns out to use: the spike provoked
 only the project cap, and the quota's name stays to verify (H-9). The
-cause text ("This build project has a limit of ...") tells a project cap
-refusal apart, for a log that must. The error name of a start refused by
+cause text ("This build project has a limit of ..."), kept in
+`LAST_REFUSAL`, tells a project cap refusal apart in that
+`statusReason`. The error name of a start refused by
 throttling was not observed and stays to verify (H-8). Until it is, a
 `CodeBuild.*` name the start task does not recognise MUST go to the
 transient `Retry` under the same token, and when the `Retry` is spent it
@@ -2398,8 +2418,10 @@ jitter (`JitterStrategy` `NONE`), so each of the three repeats waits
 40 seconds. A `Retry` evaluates the task's `Arguments` again on every
 repeat (H-8). Every repeat therefore sends the same request only
 because every field reads only variables and the start task's state
-input, both fixed for the try, and every state of the start loop
-passes its input through unchanged (above): the argument rests on
+input, both fixed for the try, and every state on the way back to the
+start task, the entry and begin-try `Pass` states, the refusal
+`Catch`, the `Wait` and the `Choice`, passes its input through
+unchanged (above): the argument rests on
 that evaluation being deterministic. CodeBuild documents a token as
 valid for 5 minutes, within which a repeat with the same arguments
 returns the build the first call created, and the token sent with
@@ -2913,18 +2935,22 @@ rejects a 4,096-character near miss (a valid object of `\"` escapes
 with its closing `}` missing) within 100 ms, and that an `Output`
 evaluation error on a delete still yields `{}` (R-43), that a hook
 attempt starts its build request-response with the run timeout, a
-queued timeout of 10 less the minutes refused, 10 on the first try,
-and an idempotency token
+queued timeout of 10 less the minutes refused, never below 5, 10 on
+the first try, and an idempotency token
 that is the SHA-256 `$hash` of the execution, event, phase, hook,
 attempt and try index joined by `|` and built from nothing else, the
 try index set to 1 by the state that enters the attempt and to the
 next index by the refusal `Choice` rule, the queued timeout and token
 assigned from it by the state that begins the try, and every field of
 the start's `Arguments` read only from variables and the start task's
-state input, both fixed for the try, every state of the start loop
-passing its input through unchanged (the refusal `Catch` setting
-`Output` to `{% $states.input %}`) and no `$states.context` field that
-changes on a repeat read,
+state input, both fixed for the try, every state on the way back to
+the start task, the entry and begin-try `Pass` states, the refusal
+`Catch`, the `Wait` and the `Choice`, passing its input through
+unchanged (the refusal `Catch` setting `Output` to
+`{% $states.input %}` and assigning `LAST_REFUSAL`), while the start
+task's success `Output` and its ending `Catch`es add the fields §8.1
+requires, and no `$states.context` field that changes on a repeat
+read,
 polls that one id with the `aws-sdk:codebuild:batchGetBuilds`
 integration every 60 seconds, keeping only its id, status, phase timing
 and `resolvedSourceVersion`, taken from the final poll, and at its
@@ -2935,7 +2961,8 @@ a `Choice` that advances the try index, for at most 5 minutes, and a
 minutes of a stop, and the only task `Retry` is the transient
 repeat (`TimeoutSeconds` 15, `IntervalSeconds` 10, `BackoffRate` 1,
 `MaxAttempts` 3, no jitter), a "start outcome unknown" ending naming
-the last error, and that
+the last error and a "cannot start" ending naming `LAST_REFUSAL`, and
+that
 a failing delete hook runs as a loop of three started builds, 60 and
 120 seconds apart, each started only after the last is final, a
 refusal-only attempt not counted and followed by the 60-second
