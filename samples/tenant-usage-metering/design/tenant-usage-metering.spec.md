@@ -412,7 +412,9 @@ and `closedByOperatorId` (the delete). Re-activation moves the `closedBy*`
 pair into the interval it closes and overwrites `controlPlane*`.
 
 Transitions: none → `ACTIVE` (`PutCellEmitter`) → `CLOSING`
-(`DeleteCellEmitter`) → removed by TTL. An emitter admits events whose
+(`DeleteCellEmitter`) → removed by TTL. An item past its `expiresAt` counts
+as absent before TTL removes it, and TTL removes the two items of a pair
+separately, so every write rewrites the other item of its pair. An emitter admits events whose
 `time` is at or after `activeFrom`, and, once `CLOSING`, at or before
 `closedAt`, until `closesAt`, or whose `time` falls in one of its
 `intervals`. Other events are refused `REGISTRATION_CLOSED`. Past `closesAt` the emitter is refused like an
@@ -432,6 +434,7 @@ at the event's time.
 |---|---|
 | `tenantId`, `applicationId`, `cellId` | from the hook |
 | `billingAccount` | from `PARAM_BILLING_ACCOUNT`, optional |
+| `resendPending` | set with a new `billingAccount`, removed once its `RESEND_BLOCKED` job has started; a `PutTenantBinding` that finds it set starts the job |
 | `status`, `activeFrom`, `closedAt`, `closesAt`, `intervals`, `expiresAt` | as for emitters, with `TENANT_NOT_IN_CELL` for a missing binding and `REGISTRATION_CLOSED` outside its intervals |
 
 Tenant ids are the registrar's: the control plane's are ULIDs, and any
@@ -454,6 +457,7 @@ placed in another cell, it lands in a new item, and the old one stays
 | `type` | `HTTP`, `S3_EXPORT` |
 | `enabled` | boolean |
 | `endpoint` | `HTTP`: HTTPS URL. `S3_EXPORT`: a key prefix in the sample's export bucket |
+| `version` | moves on every write; `UpdateSink` is conditioned on it |
 | `secretName` | `HTTP` only: Secrets Manager name of the credential, under `<fleet>/metering/sinks/`; `CreateSink` and `UpdateSink` refuse any other name, and the dispatcher's role may read only that prefix |
 | `mapping` | `HTTP` only: target field name → source (record field, meter field, or constant); without one, the body is the `UsageRecorded` detail |
 | `meters` | meter ids this sink takes; empty is all |
@@ -521,9 +525,12 @@ write, not once per job: before each `readmitted/` object, each
 `generation` increment and each Firehose put, an hour within 60 minutes of
 its close, or `CLOSED`, is refused for that item. The 60 minutes cover
 the object tracker's asynchronous retries (30 minutes of event age) and the
-scheduler's replay of its failures, and the scheduler closes no hour while
-the tracker's failure queue holds messages, so a job-written object is
-tracked before its hour can close. `READMIT` and
+scheduler's replay of its failures. The scheduler replays the failures
+before it decides, and closes no hour that a failure it could not replay
+names, nor any hour while failures it could not read are waiting, so a
+job-written object is tracked before its hour can close. A failure that
+keeps failing holds back only its own hours, and the tracker failure alarm
+says so. `READMIT` and
 `INGEST_REDRIVE` write such an event to `error/` as `TOO_LATE`, delete
 its dead-letter message where there is one, and count it in the job's
 `refused`; `RECOUNT` counts the hour in `refused`.
@@ -827,10 +834,11 @@ Errors:
   inputs: cells through `METERING_API_URL`, subscriber accounts from the
   deployer. `ARCHITECTURE.md` §5.1 lists the sub-path.
 - The hook script `scripts/control-plane/metering-hook.sh` and the
-  emitter snippet `scripts/emit-usage.ts` (buffers, batches of 100,
-  ULID `eventId`s, stores each event once; resends `RETRY` results, and
-  the whole batch after a 429, a 5xx or a timeout, with the same bytes
-  and backoff).
+  emitter snippet `scripts/emit-usage.ts` (buffers at most `maxPending`
+  events, batches of 100, ULID `eventId`s, stores each event once;
+  resends `RETRY` results, and the whole batch after a 429, a 5xx or a
+  timeout, with the same bytes and backoff, keeping what is still unsent
+  for the next flush).
 
 ### 6.4 Samples consumed
 

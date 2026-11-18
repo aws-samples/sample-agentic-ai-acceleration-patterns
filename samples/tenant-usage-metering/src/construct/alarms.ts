@@ -75,7 +75,7 @@ export function createAlarms(scope: Construct, props: AlarmProps): cloudwatch.Al
   add(
     'TrackerFailuresAlarm',
     depth(props.compute.trackerFailureQueue),
-    'object tracker failures waited 15 minutes for a replay (spec §4.5)',
+    'object tracker failures waited 15 minutes for a replay; the hours they name do not close until they replay (spec §4.5)',
     { evaluationPeriods: 3 },
   );
   add('PublisherFailuresAlarm', depth(props.compute.publisherFailureQueue), 'a record publisher stream batch failed (spec §3.1)');

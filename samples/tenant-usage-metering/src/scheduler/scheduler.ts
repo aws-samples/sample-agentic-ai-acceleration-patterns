@@ -31,7 +31,7 @@ import { METRIC, type Metrics } from '../shared/metrics';
 import { cancellationCodes, chunk, isConditionFailure, withRetry } from '../shared/retry';
 import { closeTimeMs, MINUTE_MS } from '../shared/time';
 import { hourEndMs } from '../shared/usage-event';
-import { trackS3Event } from '../tracker/track';
+import { decodeS3Key, hourOfObjectKey, trackS3Event } from '../tracker/track';
 
 /** Executions started per run; the rest wait for the next run. */
 export const MAX_STARTS_PER_RUN = 100;
@@ -49,6 +49,18 @@ export interface SchedulerDeps {
   readonly recountWindowHours: number;
   readonly metrics: Metrics;
   readonly now?: () => number;
+}
+
+/** The hours a tracker failure's S3 event names. */
+export function hoursOfFailure(body: string | undefined): string[] {
+  try {
+    const record = JSON.parse(body ?? '{}') as { requestPayload?: S3Event };
+    return (record.requestPayload?.Records ?? [])
+      .map((entry) => hourOfObjectKey(decodeS3Key(entry.s3.object.key)))
+      .filter((hour): hour is string => hour !== undefined);
+  } catch {
+    return [];
+  }
 }
 
 export type HourDecision = 'CLOSE' | 'MARK_DIRTY' | 'START' | 'WAIT';
@@ -81,8 +93,10 @@ export class Scheduler {
     const { db, tableName, metrics, lateGraceMinutes, recountWindowHours } = this.deps;
     // Replay first, and close nothing while a tracked object may still be
     // missing from its hour's generation (spec §4.5).
-    const replayed = await this.replayTrackerFailures();
-    const mayClose = await this.trackerQueueEmpty();
+    const { replayed, stuckHours, stuckMessages } = await this.replayTrackerFailures();
+    // Close nothing while failures this run could not read are waiting
+    // (more than a run replays), and never an hour a stuck failure names.
+    const unknownWaiting = (await this.trackerQueueDepth()) > stuckMessages;
     const nowMs = this.now();
     const hours = await queryAll<HourItem>(db, {
       TableName: tableName,
@@ -105,7 +119,8 @@ export class Scheduler {
         log.warn('hour past its close is not counted', { hour: item.hour, status: item.status });
       }
       let decision = decide(item, generation, nowMs, lateGraceMinutes, recountWindowHours);
-      if (decision === 'CLOSE' && !mayClose) {
+      if (decision === 'CLOSE' && (unknownWaiting || stuckHours.has(item.hour))) {
+        log.warn('close held back by a tracker failure', { hour: item.hour });
         continue;
       }
       if (decision === 'CLOSE') {
@@ -225,19 +240,21 @@ export class Scheduler {
     }
   }
 
-  private async trackerQueueEmpty(): Promise<boolean> {
+  private async trackerQueueDepth(): Promise<number> {
     const out = await this.deps.sqs.send(
       new GetQueueAttributesCommand({
         QueueUrl: this.deps.trackerFailureQueueUrl,
         AttributeNames: ['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible'],
       }),
     );
-    return Number(out.Attributes?.ApproximateNumberOfMessages ?? 0) + Number(out.Attributes?.ApproximateNumberOfMessagesNotVisible ?? 0) === 0;
+    return Number(out.Attributes?.ApproximateNumberOfMessages ?? 0) + Number(out.Attributes?.ApproximateNumberOfMessagesNotVisible ?? 0);
   }
 
   /** Replays the S3 events of failed tracker invocations (spec §4.5). */
-  private async replayTrackerFailures(): Promise<number> {
+  private async replayTrackerFailures(): Promise<{ replayed: number; stuckHours: Set<string>; stuckMessages: number }> {
     let replayed = 0;
+    let stuckMessages = 0;
+    const stuckHours = new Set<string>();
     while (replayed < MAX_REPLAYS_PER_RUN) {
       const out = await this.deps.sqs.send(
         new ReceiveMessageCommand({ QueueUrl: this.deps.trackerFailureQueueUrl, MaxNumberOfMessages: 10, WaitTimeSeconds: 0 }),
@@ -257,10 +274,18 @@ export class Scheduler {
           );
           replayed++;
         } catch (error) {
+          const hours = hoursOfFailure(message.Body);
+          // A failure that names no hour is not counted as known, so it holds back every close.
+          if (hours.length > 0) {
+            stuckMessages++;
+          }
+          for (const hour of hours) {
+            stuckHours.add(hour);
+          }
           log.error('tracker failure not replayed', { errorType: errorName(error) });
         }
       }
     }
-    return replayed;
+    return { replayed, stuckHours, stuckMessages };
   }
 }

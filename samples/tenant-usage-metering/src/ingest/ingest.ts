@@ -79,6 +79,8 @@ export class Ingest {
   private readonly bindings = new TtlCache<BindingItem | undefined>(REGISTRY_CACHE_MS);
   private readonly meters = new TtlCache<MeterVersionItem[]>(REGISTRY_CACHE_MS);
   private readonly logged = new Map<string, number>();
+  /** When each key was last read past the cache: at most once per cache lifetime (review v2 #5). */
+  private readonly freshAt = new Map<string, number>();
   private readonly now: () => number;
 
   constructor(private readonly deps: IngestDeps) {
@@ -115,13 +117,26 @@ export class Ingest {
   private emitter(caller: EmitterCaller, fresh = false): Promise<EmitterItem | undefined> {
     const key = keys.emitter(caller.accountId, caller.roleName);
     const load = () => getItem<EmitterItem>(this.deps.db, this.deps.config.tableName, key, fresh);
-    return fresh ? this.emitters.refresh(key.PK, load) : this.emitters.get(key.PK, load);
+    return this.mayRefresh(key.PK, fresh) ? this.emitters.refresh(key.PK, load) : this.emitters.get(key.PK, load);
   }
 
   private binding(cellId: string, tenantId: string, fresh = false): Promise<BindingItem | undefined> {
     const key = keys.binding(cellId, tenantId);
     const load = () => getItem<BindingItem>(this.deps.db, this.deps.config.tableName, key, fresh);
-    return fresh ? this.bindings.refresh(`${key.PK}|${key.SK}`, load) : this.bindings.get(`${key.PK}|${key.SK}`, load);
+    const cacheKey = `${key.PK}|${key.SK}`;
+    return this.mayRefresh(cacheKey, fresh) ? this.bindings.refresh(cacheKey, load) : this.bindings.get(cacheKey, load);
+  }
+
+  private mayRefresh(key: string, fresh: boolean): boolean {
+    const nowMs = this.now();
+    if (!fresh || nowMs - (this.freshAt.get(key) ?? 0) < REGISTRY_CACHE_MS) {
+      return false;
+    }
+    if (this.freshAt.size > 10_000) {
+      this.freshAt.clear();
+    }
+    this.freshAt.set(key, nowMs);
+    return true;
   }
 
   private meterVersions(meterId: string): Promise<MeterVersionItem[]> {

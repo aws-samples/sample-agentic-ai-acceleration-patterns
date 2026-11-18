@@ -13,7 +13,7 @@ import { busBatches, packByHour } from '../src/ingest/publish';
 import { markerArrived, sinksToQueue, usageRecordedDetail } from '../src/publisher/publisher';
 import { retryBackoffMs, takeable } from '../src/recount/count';
 import { eventsOfObject } from '../src/recount/stored-events';
-import { decide } from '../src/scheduler/scheduler';
+import { decide, hoursOfFailure } from '../src/scheduler/scheduler';
 import { callerIsListed, roleFromCallerArn } from '../src/shared/identity';
 import { billingBinding, type BindingItem, type HourItem, type SinkItem, type UsageRecordItem, versionAt, type MeterVersionItem } from '../src/shared/items';
 import { splitConcatenatedJson } from '../src/shared/json-stream';
@@ -177,6 +177,11 @@ describe('hours (spec §4.5)', () => {
     expect(hoursBetween('2026-11-18T22', '2026-11-19T01')).toEqual(['2026-11-18T22', '2026-11-18T23', '2026-11-19T00', '2026-11-19T01']);
     expect(() => checkRange('2026-11-19T01', '2026-11-18T22')).toThrow();
     expect(() => checkRange('2026-10-01T00', '2026-11-18T22')).toThrow();
+  });
+  test('a stuck tracker failure names the hours it holds back', () => {
+    const body = JSON.stringify({ requestPayload: { Records: [{ s3: { object: { key: 'raw/hour%3D2026-11-18T10/x' } } }, { s3: { object: { key: 'error/x' } } }] } });
+    expect(hoursOfFailure(body)).toEqual([HOUR]);
+    expect(hoursOfFailure('not json')).toEqual([]);
   });
   test('the tracker reads the hour from raw/ and readmitted/ keys only', () => {
     expect(hourOfObjectKey(decodeS3Key('raw/hour%3D2026-11-18T10/file-1'))).toBe(HOUR);

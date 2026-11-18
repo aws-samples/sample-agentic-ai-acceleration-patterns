@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { mockClient } from 'aws-sdk-client-mock';
 import type { AdminDeps } from '../src/api/deps';
 import { putCellEmitter, putTenantBinding } from '../src/api/registry';
@@ -65,11 +65,17 @@ describe('registrations under TTL (review v1 #2, #3, #5)', () => {
     const out = await putTenantBinding(deps, ctx, { cellId: CELL, tenantId: 't1', applicationId: 'demo-app', billingAccount: 'acct-1', trace: {} });
     expect(jobs).toEqual(['RESEND_BLOCKED']);
     expect(out.resendJobId).toBeDefined();
-    const [first, last] = [transactions()[0], transactions()[transactions().length - 1]];
+    const [first] = transactions();
     expect(first[0].Put?.Item).toMatchObject({ PK: `CELL#${CELL}`, billingAccount: 'acct-1', resendPending: true });
     expect(first[1].Put?.Item).toMatchObject({ PK: 'TENANT#t1', SK: `APP#demo-app#CELL#${CELL}`, billingAccount: 'acct-1' });
     expect(first[1].Put?.ConditionExpression).toBeUndefined();
-    expect(last[0].Put?.Item).not.toHaveProperty('resendPending');
+    // The flag is cleared alone, on a condition that it is still set (review v2 #1).
+    const clears = ddb.commandCalls(UpdateCommand).map((call) => call.args[0].input);
+    expect(clears.map((input) => [input.UpdateExpression, input.ConditionExpression])).toEqual([
+      ['REMOVE resendPending', 'resendPending = :true'],
+      ['REMOVE resendPending', 'resendPending = :true'],
+    ]);
+    expect(out.binding).not.toHaveProperty('resendPending');
   });
 
   test('a binding left with resendPending starts its resend on the next Put', async () => {

@@ -140,8 +140,9 @@ export class Dispatcher {
     }
     const sink = await getItem<SinkItem>(db, tableName, keys.sink(message.sinkId), true);
     if (sink === undefined || !sink.enabled) {
-      await this.setState(record, message.sinkId, { status: 'FAILED', reason: sink === undefined ? 'SINK_DELETED' : 'SINK_DISABLED' });
-      metrics.add(METRIC.deliveryFailed, 1, { sinkId: message.sinkId });
+      if (await this.setState(record, message.sinkId, { status: 'FAILED', reason: sink === undefined ? 'SINK_DELETED' : 'SINK_DISABLED' })) {
+        metrics.add(METRIC.deliveryFailed, 1, { sinkId: message.sinkId });
+      }
       return { done: true };
     }
 
@@ -168,8 +169,10 @@ export class Dispatcher {
     // A redirect is not followed, so it can never succeed; nor can a 4xx but 408 and 429.
     const permanent = (status >= 300 && status < 400) || (status >= 400 && status < 500 && status !== 408 && status !== 429);
     if (permanent || this.now() - Date.parse(message.firstQueuedAt) >= DELIVERY_WINDOW_MS) {
-      await this.setState(record, sink.sinkId, { status: 'FAILED', reason: permanent ? `HTTP_${status}` : 'RETRIES_EXHAUSTED' });
-      metrics.add(METRIC.deliveryFailed, 1, { sinkId: sink.sinkId });
+      // Counted only when the write took: a duplicate that already delivered keeps SENT (review v2 #3).
+      if (await this.setState(record, sink.sinkId, { status: 'FAILED', reason: permanent ? `HTTP_${status}` : 'RETRIES_EXHAUSTED' })) {
+        metrics.add(METRIC.deliveryFailed, 1, { sinkId: sink.sinkId });
+      }
       log.warn('delivery failed', { sinkId: sink.sinkId, httpStatus: status });
       return { done: true };
     }

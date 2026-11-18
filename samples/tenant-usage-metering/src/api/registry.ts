@@ -14,7 +14,7 @@
  * are written in one transaction.
  */
 
-import { QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
+import { QueryCommand, TransactWriteCommand, type TransactWriteCommandInput, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { type AdminContext, type AdminDeps, nowOf, toDate } from './deps';
 import { apiError } from './errors';
 import { startJob } from './jobs';
@@ -24,6 +24,7 @@ import { emitterRoleName } from '../shared/identity';
 import type { BindingItem, CellItem, EmitterItem, IntervalItem } from '../shared/items';
 import { keys, LIST_BY_TYPE_INDEX } from '../shared/keys';
 import { closeAttributes, reactivation, type Trace, updateExpression } from '../shared/registration';
+import { isConditionFailure } from '../shared/retry';
 import { iso } from '../shared/time';
 import type { CellEmitterSummary, Interval, TenantBindingSummary } from '../smithy/metering/typescript-ssdk-codegen/src';
 
@@ -294,7 +295,8 @@ export async function listCellEmitters(
     }),
   );
   return {
-    emitters: (page.Items ?? []) as EmitterItem[],
+    // An item past its expiresAt is absent, as Get* treats it (review v2 #6).
+    emitters: ((page.Items ?? []) as EmitterItem[]).filter((item) => live(item, nowOf(deps)) !== undefined),
     nextToken: encodeToken(query, page.LastEvaluatedKey as Record<string, string> | undefined),
   };
 }
@@ -393,9 +395,26 @@ export async function putTenantBinding(
   }
   // A billing account just set unblocks the tenant's BLOCKED deliveries (spec §4.7).
   const job = await startJob(deps, ctx, 'RESEND_BLOCKED', { tenantId: input.tenantId, applicationId: input.applicationId });
-  binding = applied(binding, {}, ['resendPending']);
-  await transact(deps, bindingWrites(tableName, binding, 'attribute_exists(PK)', {}, {}));
-  return { binding, resendJobId: job.jobId };
+  // Clear the flag alone, on each copy that still holds it, so a delete or
+  // a billing change committed in between is left as it is (review v2 #1).
+  for (const key of [keys.binding(binding.cellId, binding.tenantId), keys.bindingLookup(binding.tenantId, binding.applicationId, binding.cellId)]) {
+    try {
+      await deps.db.send(
+        new UpdateCommand({
+          TableName: tableName,
+          Key: key,
+          UpdateExpression: 'REMOVE resendPending',
+          ConditionExpression: 'resendPending = :true',
+          ExpressionAttributeValues: { ':true': true },
+        }),
+      );
+    } catch (error) {
+      if (!isConditionFailure(error)) {
+        throw error;
+      }
+    }
+  }
+  return { binding: applied(binding, {}, ['resendPending']), resendJobId: job.jobId };
 }
 
 export async function getTenantBinding(deps: AdminDeps, cellId: string, tenantId: string): Promise<BindingItem> {
@@ -440,7 +459,7 @@ export async function listTenantBindings(
     }),
   );
   return {
-    bindings: (page.Items ?? []) as BindingItem[],
+    bindings: ((page.Items ?? []) as BindingItem[]).filter((item) => live(item, nowOf(deps)) !== undefined),
     nextToken: encodeToken(query, page.LastEvaluatedKey as Record<string, string> | undefined),
   };
 }
