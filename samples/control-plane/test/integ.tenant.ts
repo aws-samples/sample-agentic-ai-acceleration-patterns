@@ -870,6 +870,8 @@ integ.assertions
 // 1 (deployment inputs). ADR-0046: all four projects, the two hook projects
 // included, carry the deployer's cap.
 integ.assertions
+  // outputPaths keeps only the four limits: four whole project descriptions
+  // exceed the 4 KB custom resource response ("Response object is too long").
   .awsApiCall('codebuild', 'batchGetProjects', {
     names: [
       stack.provisioning.cellProject.projectName,
@@ -877,10 +879,10 @@ integ.assertions
       stack.provisioning.globalHookProject.projectName,
       stack.provisioning.appHookProject.projectName,
     ],
-  })
-  .expect(ExpectedResult.objectLike({
-    projects: [1, 2, 3, 4].map(() => Match.objectLike({ concurrentBuildLimit: INTEG_CONCURRENT_BUILD_LIMIT })),
-  }));
+  }, [0, 1, 2, 3].map((i) => `projects.${i}.concurrentBuildLimit`))
+  .expect(ExpectedResult.objectLike(Object.fromEntries(
+    [0, 1, 2, 3].map((i) => [`projects.${i}.concurrentBuildLimit`, INTEG_CONCURRENT_BUILD_LIMIT]),
+  )));
 // ADR-0047: B's cell role carries the owner's policy; B's tenant role is
 // not asked, the unit tests pin that it gets none.
 integ.assertions
