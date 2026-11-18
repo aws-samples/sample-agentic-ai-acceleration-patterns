@@ -882,9 +882,9 @@ Design points:
   hour, which is also the build task budget (N-7). The credentials are read
   into shell variables inside the buildspec and never written to CodeBuild
   environment variables, the execution input, or the log (M21).
-- **Threat-model hardening (ADR-019/020/021):** both projects cap
-  `concurrentBuildLimit` at 5 so a leaked token's amplification queues
-  instead of fanning out, and log to explicit one-month-retention log
+- **Threat-model hardening (ADR-019/020/021, ADR-0046):** both projects cap
+  `concurrentBuildLimit` at the deployer's value, 5 by default, so a leaked
+  token's amplification queues instead of fanning out, and log to explicit one-month-retention log
   groups. Every build receives `OPERATOR_ID` (the verified JWT `sub`) so
   application-plane changes attribute to the initiating operator, not just
   the shared fleet role. A stamped `sourceVersion` commit SHA pins what the
@@ -970,6 +970,11 @@ Design points:
   role runs every tenant script in that account, so what is attached widens
   the blast radius of all of them; a customer attaches policies in their own
   account through their `CellAccountStack`, the vendor never does.
+- The optional `cellBuildManagedPolicyArns` input (§10, ADR-0047) does the
+  same for the **cell provisioning role**, with the same check, so a cell
+  script can deploy with a tool the account owner allows, such as a CDK
+  bootstrap kept for cells. The cell role also trusts the API role, for the
+  `PutAccount` handshake, so an attached policy widens the API role too.
 
 ## 8. Smithy Model Sketch
 
@@ -1143,6 +1148,8 @@ tooling/demo convenience.
 | `vendorIdp.requiredScope` (optional, default none) | Lambda Authorizer: the scope a token without `aud` must also carry (ADR-043) |
 | `fleetName` (optional, default `control-plane`) | names the five fleet roles: `<fleet>-api`, `<fleet>-cell-build`, `<fleet>-tenant-build` in the control plane account and `<fleet>-cell-provisioning`, `<fleet>-tenant-provisioning` in every account that hosts cells (ADR-025, ADR-028); `[a-z0-9-]{1,32}` |
 | `tenantBuildManagedPolicyArns` (optional) | customer-managed IAM policy ARNs attached to the tenant provisioning role of the stack's own account, in addition to its §7 SSM grants (ADR-022, ADR-025) |
+| `cellBuildManagedPolicyArns` (optional) | the same, for the cell provisioning role of the stack's own account (ADR-0047); the API role can use them too, because the cell role trusts it |
+| `concurrentBuildLimit` (optional, default 5) | the cap on concurrent builds of every CodeBuild project (M17, ADR-0046); 1 to 100, a warning above 20 |
 | `demoApplicationIds` (optional, default none) | publishes `/application-plane/applications/<applicationId>/shared/base-domain` in the stack's own account for each listed id, the demo shared resource the sample cell script reads (ADR-034); a real application plane publishes its own |
 
 Applications and accounts are **not** deployment inputs: they are
@@ -1163,12 +1170,15 @@ their own credentials):
 | `fleetName` | MUST match the control plane's |
 | `cellAccount.externalId` (required for a tenant-owned account, ADR-029) | `sts:ExternalId` condition on both trust policies, validated against the STS pattern at synth; the operator supplies the same value at `PutAccount` |
 | `cellAccount.tenantBuildManagedPolicyArns` (optional) | attached to this account's tenant provisioning role; validated to be in this account |
+| `cellAccount.cellBuildManagedPolicyArns` (optional) | attached to this account's cell provisioning role; validated to be in this account (ADR-0047) |
 | `cellAccount.demoApplicationIds` (optional, default none) | publishes the demo `/application-plane/applications/<applicationId>/shared/base-domain` in this account for each listed id; absent, a customer's account gets the two roles and nothing else |
 
-Supplied via CDK context. When `tenantBuildManagedPolicyArns` is non-empty,
-synthesis fails if any entry is not a managed-policy ARN in the stack's own
-partition and account, or if the stack's account or Region is unresolved
-so that check cannot run (ADR-022). The application definition is
+Supplied via CDK context. When `tenantBuildManagedPolicyArns` or
+`cellBuildManagedPolicyArns` is non-empty, synthesis fails if any entry is
+not a managed-policy ARN in the stack's own partition and account, or if the
+stack's account or Region is unresolved so that check cannot run (ADR-022,
+ADR-0047). A `concurrentBuildLimit` outside 1 to 100 fails synthesis
+(ADR-0046). The application definition is
 validated by `PutApplication` instead: the generated server SDK rejects a
 missing script path, a malformed source, `maxTenants` below one, an
 unknown strategy or an id outside the charset, and the service warns (does

@@ -645,6 +645,8 @@ Supplied at deployment time, validated at synthesis/deploy.
 | `allowedRoles` (optional, R-36) | role claim values that get the operator grant; non-empty. Default `["operator"]`. Every role value in either list matches `[A-Za-z0-9:._-]{1,64}`, so it survives the comma-separated environment variable |
 | `readerRoles` (optional, R-36, [ADR-042](../adr/0042-a-read-only-role-beside-the-operator.md)) | role claim values that get the reader grant. Default: none, so no reader is admitted until the deployer names one. A value in both lists MUST fail synth. Use a namespaced value (`control-plane:reader`), not a word a broader issuer may already mint (`reader`, `viewer`) (T2, T20) |
 | `tenantBuildManagedPolicyArns` (optional, [ADR-022](../adr/0022-attach-deployer-supplied-managed-policies-to-the-tenant-build-role.md)) | array of customer-managed IAM policy ARNs (`arn:<partition>:iam::<account>:policy/...`), each in the stack's own partition and account; synth MUST fail otherwise. Attached to the tenant provisioning role the stack installs in its own account. Default: none |
+| `cellBuildManagedPolicyArns` (optional, [ADR-0047](../adr/0047-let-the-cell-account-owner-attach-policies-to-the-cell-role.md)) | as `tenantBuildManagedPolicyArns`; attached to the cell provisioning role the stack installs in its own account. The cell role also trusts the API role (§6.4), so the API role can use each attached policy too (T21). Default: none |
+| `concurrentBuildLimit` (optional, [ADR-0046](../adr/0046-make-the-concurrent-build-limit-a-prop.md)) | concurrent builds per CodeBuild project, applied to every project the stack creates (M17); an integer from 1 to 100, given as a literal, since a CDK token is refused at synth; synth MUST fail outside that range and MUST warn above 20, naming T16 and the account's CodeBuild quota for concurrent `BUILD_GENERAL1_SMALL` builds, which must hold the value times the number of projects. Default 5 |
 | `globalHookManagedPolicyArns` (optional, R-41, [ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md)) | array of customer-managed IAM policy ARNs, validated exactly as `tenantBuildManagedPolicyArns` (the stack's own partition and account; synth MUST fail otherwise). Attached to `<fleet>-global-hook`, the role every global hook runs under. Default: none, so a global hook can write its logs, read its source and nothing else |
 | `appHookManagedPolicyArns` (optional, R-41) | as above; attached to `<fleet>-app-hook`, the role every application hook runs under. An ARN in both lists MUST fail synth, so no policy reaches both scopes by accident (T41) |
 
@@ -666,9 +668,11 @@ script path and no tenant limit.
 | `fleetName` | MUST equal the control plane's `fleetName` |
 | `externalId` | `[\w+=,.@:/-]{2,1224}`, checked at synth; when set, the roles' trust policies require it and the operator supplies the same value at `PutAccount`. MUST be set for a tenant-owned account (`PutAccount` refuses `owner: TENANT` without one, §6.4); optional for a vendor-owned one |
 | `tenantBuildManagedPolicyArns` (optional) | as above, in *this* account; attached to this account's tenant provisioning role |
+| `cellBuildManagedPolicyArns` (optional) | as above, in *this* account; attached to this account's cell provisioning role |
 
 `tenantBuildManagedPolicyArns` attaches each policy to a tenant provisioning
-role in addition to the §6.2 grants. The control plane learns an ARN list,
+role in addition to the §6.2 grants, and `cellBuildManagedPolicyArns` to a
+cell provisioning role. The control plane learns an ARN list,
 never what the policies are for (P-3); the application plane that needs the
 permission publishes the policy. The two hook inputs work the same way in
 the control plane's own account: the control plane learns which policies

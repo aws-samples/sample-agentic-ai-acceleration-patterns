@@ -27,7 +27,9 @@ Validations.of(app).addPlugins(
 // placeholder issuer (S3). Customer identity is an application plane
 // decision (ADR-004). Applications and accounts are NOT stack inputs: they
 // are registered through the API at run time (ADR-024, ADR-032).
-// Optional inputs: tenantBuildManagedPolicyArns (ADR-022), fleetName
+// Optional inputs: tenantBuildManagedPolicyArns (ADR-022),
+// cellBuildManagedPolicyArns (ADR-0047), concurrentBuildLimit (ADR-0046,
+// default 5), fleetName
 // (ADR-025, default `control-plane`), demoApplicationIds (the sample
 // scripts' shared parameter, ADR-034), and the role lists allowedRoles
 // (default ["operator"]) and readerRoles (default none) (spec R-36, ADR-042),
@@ -50,7 +52,8 @@ if (cellAccount !== undefined) {
   // The account role pair (spec R-25, §6.4): deployed by the owner of the
   // account that will host cells, with the control plane's account id and
   // fleet name, an optional external id, and optional managed policies for
-  // the tenant provisioning role (attached in THIS account, ADR-022/025).
+  // the tenant and cell provisioning roles (attached in THIS account,
+  // ADR-022/025, ADR-0047).
   // The stack name carries the fleet name so two fleets' pairs can be
   // installed in one account without a CloudFormation stack collision (T31).
   new CellAccountStack(app, `${validateFleetName(fleetName ?? DEFAULT_FLEET_NAME)}-cell-account`, {
@@ -58,6 +61,7 @@ if (cellAccount !== undefined) {
     fleetName,
     externalId: cellAccount.externalId,
     tenantBuildManagedPolicyArns: cellAccount.tenantBuildManagedPolicyArns,
+    cellBuildManagedPolicyArns: cellAccount.cellBuildManagedPolicyArns,
     demoApplicationIds: cellAccount.demoApplicationIds,
     env,
   });
@@ -70,6 +74,12 @@ if (cellAccount !== undefined) {
   // API. Validated in the stack (fails synth on an ARN outside this
   // partition/account). Default: none.
   const tenantBuildManagedPolicyArns = parseJsonContext<string[]>('tenantBuildManagedPolicyArns');
+  // Optional (ADR-0047): the same, for the home account's cell provisioning role.
+  const cellBuildManagedPolicyArns = parseJsonContext<string[]>('cellBuildManagedPolicyArns');
+  // Optional (ADR-0046): concurrent builds per CodeBuild project, 1 to 100.
+  // A JSON number from cdk.json or a string from --context; the stack
+  // validates the range.
+  const concurrentBuildLimit = parseJsonContext<number>('concurrentBuildLimit');
   // Optional, DEMO ONLY: the applications the sample scripts will be
   // registered under, so their shared parameter exists in the home account.
   const demoApplicationIds = parseJsonContext<string[]>('demoApplicationIds');
@@ -87,6 +97,8 @@ if (cellAccount !== undefined) {
     vendorIdpRequiredScope,
     fleetName,
     tenantBuildManagedPolicyArns,
+    cellBuildManagedPolicyArns,
+    concurrentBuildLimit,
     demoApplicationIds,
     allowedRoles,
     readerRoles,
@@ -101,6 +113,7 @@ interface CellAccountContext {
   readonly controlPlaneAccountId?: string;
   readonly externalId?: string;
   readonly tenantBuildManagedPolicyArns?: string[];
+  readonly cellBuildManagedPolicyArns?: string[];
   readonly demoApplicationIds?: string[];
 }
 

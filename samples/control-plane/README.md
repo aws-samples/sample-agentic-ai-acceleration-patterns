@@ -341,6 +341,52 @@ npx cdk deploy \
   --context tenantBuildManagedPolicyArns='["arn:aws:iam::123456789012:policy/PlatformInvokePolicy"]'
 ```
 
+`cellBuildManagedPolicyArns` does the same for the cell provisioning role
+(ADR-0047), with the same check, on the control plane stack and in the
+`cellAccount` context. Use it when a cell script deploys with a tool the
+account owner allows, such as a CDK bootstrap kept for cells. The cell role
+also trusts the control plane's API role, for the `PutAccount` handshake
+(ADR-0028), so the API role can use every policy attached here too. The
+platform stress test attaches one policy, which lets the cell build assume
+the four roles of a cell-only CDK bootstrap with the qualifier `cell`:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": "sts:AssumeRole",
+    "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/cdk-cell-*-role-<ACCOUNT_ID>-<REGION>"
+  }]
+}
+```
+
+That policy is safe only in an account that holds nothing but cells, with a
+cell bootstrap whose execution role and every cell role carry a permissions
+boundary and sit on a `/cell/` role path
+([stress ADR-0006](../../stress/adr/0006-deploy-cells-through-a-scoped-cell-bootstrap.md)).
+A policy that reaches the default CDK bootstrap (`cdk-hnb659fds-*`), or any
+role outside such a path, makes the cell build and the API role
+administrators of the account.
+
+`concurrentBuildLimit` (default 5, ADR-0046) caps concurrent builds on every
+CodeBuild project the control plane creates. It bounds what a leaked
+operator token or a runaway client can spend (T16, M17). A tenant build takes
+one to two minutes, so at 5 the control plane onboards about three tenants a
+minute. Raise it for a large onboarding wave. The value must be an integer
+from 1 to 100, or synth fails; above 20 the synth warns. Raise the account's
+CodeBuild quota for concurrent `BUILD_GENERAL1_SMALL` builds first, to at
+least the value times the number of projects; the service default is 1. The
+execution surge alarm (more than 20 executions in five minutes, no actions)
+fires during any large onboarding:
+
+```bash
+npx cdk deploy \
+  --context vendorIdpIssuerUrl=https://YOUR_ISSUER \
+  --context vendorIdpAudience=YOUR_AUDIENCE \
+  --context concurrentBuildLimit=50
+```
+
 Two optional context inputs choose which `role` claim values the authorizer
 admits and what each may do (spec R-36, ADR-042). `allowedRoles` (default
 `["operator"]`) gets every operation. `readerRoles` (default none) gets the
@@ -731,6 +777,14 @@ application's cells (threat T5, the highest-consequence open item).
       attached policy widens all of them. Attach only a least-privilege
       policy the producing plane publishes, never a hand-written wildcard
       (T21, M18, ADR-022).
+- [ ] **Review every policy in `cellBuildManagedPolicyArns`.** The cell
+      provisioning role runs every cell script in its account, and the
+      control plane's API role can assume it too. Never attach a policy that
+      reaches an administrator role or the default CDK bootstrap (T21, M18,
+      ADR-0047).
+- [ ] **Size `concurrentBuildLimit` to the onboarding you expect**, not to
+      the largest you can imagine. It is the cost cap of T16; keep it at 5
+      or close to it outside an onboarding wave (M17, ADR-0046).
 - [ ] Optionally, add an **API Gateway resource policy** restricting source
       IPs to vendor operator networks, so a stolen token alone is not
       sufficient to reach the API.
