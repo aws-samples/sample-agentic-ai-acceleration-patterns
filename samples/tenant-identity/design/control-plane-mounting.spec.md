@@ -154,7 +154,8 @@ bodies.
 ### 3.2 Data path
 
 ```
-vendor ──JWT──▶ control-plane CreateTenant {name} (200, tenantId=T)
+vendor ──JWT──▶ control-plane CreateTenant {name} (202, tenantId=T, CREATING)
+                 └─ poll GetTenant T until ACTIVE (control-plane ADR-045)
 vendor ──JWT──▶ control-plane CreateDeployment T {applicationId: A, adminEmail} (202, cellId)
                  └─▶ Step Functions ─▶ CodeBuild tenant project (after the cell build, for a new cell)
                        └─▶ tenant/create.sh   (TENANT_ID=T, APPLICATION_ID=A)
@@ -167,7 +168,8 @@ vendor ──JWT──▶ control-plane CreateDeployment T {applicationId: A, ad
 
 `A` is `identity-mount`. `DeleteDeployment` is the same path with
 `tenant/delete.sh` calling `DELETE {apiUrl}/platform/tenants/T`; the empty
-tenant record is then removed with a synchronous `DeleteTenant`.
+tenant record is then removed with `DeleteTenant` (202; done when
+`GetTenant` answers 404, control-plane ADR-045).
 
 ### 3.3 Callers and identity
 
@@ -233,7 +235,9 @@ control-plane, then `PutApplication`, then `PutAccount` for every account
 that hosts cells. An account registered without `applicationIds` is shared
 and admits the mount; one registered with `applicationIds` MUST name
 `identity-mount`, which `PutAccount` accepts only once the application is
-registered (control-plane ADR-033).
+registered (control-plane ADR-033). Both answer 202 and the record is
+usable once its `Get` shows `ACTIVE` (control-plane ADR-045), so each is
+polled before the next step uses it.
 
 ---
 
@@ -377,11 +381,11 @@ plane's own API (control-plane spec §5):
 
 | Vendor intent | control-plane calls | Script run |
 |---|---|---|
-| register the mount | `PUT /applications/identity-mount` (200), then `PUT /accounts/{accountId}` (200) | none |
-| onboard a tenant | `POST /tenants {name, description?}` (200, `tenantId`), then `POST /tenants/{T}/deployments {applicationId: "identity-mount", adminEmail, accountId?, clientToken?}` (202, `cellId`); poll `GET /tenants/{T}/deployments/identity-mount` to `ACTIVE` | `cell/create.sh` when placement creates a cell, then `tenant/create.sh` |
+| register the mount | `PUT /applications/identity-mount` (202), then `PUT /accounts/{accountId}` (202); poll each `GET` to `ACTIVE` | none |
+| onboard a tenant | `POST /tenants {name, description?}` (202, `tenantId`); poll `GET /tenants/{T}` to `ACTIVE` (a deployment on a `CREATING` tenant is a 409); then `POST /tenants/{T}/deployments {applicationId: "identity-mount", adminEmail, accountId?, clientToken?}` (202, `cellId`); poll `GET /tenants/{T}/deployments/identity-mount` to `ACTIVE` | `cell/create.sh` when placement creates a cell, then `tenant/create.sh` |
 | re-apply | `PUT /tenants/{T}/deployments/identity-mount`, no body (202); poll to `ACTIVE` | `tenant/update.sh` |
-| offboard a tenant | `DELETE /tenants/{T}/deployments/identity-mount` (202); poll until 404; then `DELETE /tenants/{T}` (200, requires `deploymentCount = 0`) | `tenant/delete.sh` |
-| retire the mount | `DELETE /cells/{cellId}` (202, empty cells only) for each of its cells, `DELETE /accounts/{accountId}` (200), `DELETE /applications/identity-mount` (200) | `cell/delete.sh` |
+| offboard a tenant | `DELETE /tenants/{T}/deployments/identity-mount` (202); poll until 404; then `DELETE /tenants/{T}` (202, requires `deploymentCount = 0`); poll until 404 | `tenant/delete.sh` |
+| retire the mount | `DELETE /cells/{cellId}` (202, empty cells only) for each of its cells, `DELETE /accounts/{accountId}` (202), `DELETE /applications/identity-mount` (202); poll each until 404 | `cell/delete.sh` |
 
 `UpdateTenant` edits the customer's metadata and runs no script; the name
 tenant-identity holds is the one `tenant/create.sh` sent, and
@@ -684,9 +688,9 @@ script hands `ScriptSourceLocation` to the scenario in
 
 | # | Step | Expected |
 |---|---|---|
-| 0 | control-plane `PutApplication identity-mount {source: {type: S3, location: E2E_CP_SCRIPT_SOURCE}, cellScripts, tenantScripts, maxTenants: 2}`, then `PutAccount` for the home account `{owner: VENDOR, maxCells: 1}` (shared) | 200, 200 |
+| 0 | control-plane `PutApplication identity-mount {source: {type: S3, location: E2E_CP_SCRIPT_SOURCE}, cellScripts, tenantScripts, maxTenants: 2}`, then `PutAccount` for the home account `{owner: VENDOR, maxCells: 1}` (shared) | 202, 202; each `Get` polls to `ACTIVE` |
 | 1 | the first deployment of `identity-mount` creates its cell (implicit, control-plane ADR-013) | cell `ACTIVE`, `applicationId` = `identity-mount`; `cell/create.sh` found the identity parameters |
-| 2 | control-plane `CreateTenant {name}`, then `CreateDeployment T {applicationId: identity-mount, adminEmail=success+admin@simulator.amazonses.com}` | 200 with `tenantId`, then 202 with `cellId`; `GetDeployment` polls to `ACTIVE` with the same `cellId` |
+| 2 | control-plane `CreateTenant {name}`, then `CreateDeployment T {applicationId: identity-mount, adminEmail=success+admin@simulator.amazonses.com}` | 202 with `tenantId`, `GetTenant` polls to `ACTIVE`, then 202 with `cellId`; `GetDeployment` polls to `ACTIVE` with the same `cellId` |
 | 3 | tenant-identity `GetTenant(T)` with the test's own SigV4 | 200 `ACTIVE`, same `name` |
 | 4 | tenant-identity `ListUsers(T)` | exactly one user, `admin: true`; `GetTenant(T)` is unchanged (no registry field leaks into the API) |
 | 5 | parked parameter exists, type `SecureString`, `KeyId` = `adminPasswordKeyArn` | true; value never printed |
@@ -698,7 +702,7 @@ script hands `ScriptSourceLocation` to the scenario in
 | 9b | tenant-identity `CreateUser(T) {email: other@example.com, firstAdmin: true}` | 409, no user created; then `CreateUser {admin: true}` for the same email → 201 (a second admin is allowed, a second *first* admin is not); delete it |
 | 10 | control-plane `DeleteDeployment(T, identity-mount)` | 202; `GetDeployment` polls to 404 |
 | 11 | tenant-identity `GetTenant(T)` | 404; parked parameter gone |
-| 11b | control-plane `GetTenant(T)`, `DeleteTenant(T)`, `DeleteCell`, `DeleteAccount`, `DeleteApplication identity-mount` | `deploymentCount` 0; 200; 202, `GetCell` polls to 404; 200; 200 |
+| 11b | control-plane `GetTenant(T)`, `DeleteTenant(T)`, `DeleteCell`, `DeleteAccount`, `DeleteApplication identity-mount` | `deploymentCount` 0; 202, `GetTenant` polls to 404; 202, `GetCell` polls to 404; 202, `GetAccount` polls to 404; 202, `GetApplication` polls to 404 |
 | 12 | teardown from an exit trap: control-plane, setup, identity | no stack, parameter, user pool, REST API or log group of the run remains. A leftover parked parameter or orphan REST API is deleted and still fails the run. A tenant-identity log group recreated during teardown fails the run (ADR-0024); a control-plane log group recreated during teardown is deleted with a warning and does not (control-plane has no log drain; its known issue, not the mount's) |
 
 Unit tests (jest, no AWS): each mount script run with `aws` and `curl`

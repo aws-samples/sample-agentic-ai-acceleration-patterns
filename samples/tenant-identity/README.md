@@ -509,14 +509,24 @@ curl -s -X PUT "${API_URL}accounts/${ACCOUNT_ID}" \
   -d '{ "owner": "VENDOR", "maxCells": 10 }'
 ```
 
-Onboarding a tenant is two calls: `CreateTenant` returns the tenant id at
-once, and `CreateDeployment` places the tenant in a cell of `identity-mount`
-and runs the builds; poll `GetDeployment` until `ACTIVE`:
+Both calls answer 202 with the record and its `status` (control-plane
+ADR-045). A record is usable only once its `Get` shows `ACTIVE`, which takes
+seconds, so poll `GET applications/identity-mount` and
+`GET accounts/${ACCOUNT_ID}` (`.application.status`, `.account.status`)
+until `ACTIVE` before onboarding the first tenant.
+
+Onboarding a tenant is two calls: `CreateTenant` answers 202 with the tenant
+id and the tenant `CREATING`; poll `GetTenant` until `ACTIVE` (a
+`CreateDeployment` on a `CREATING` tenant is a 409 with a retry hint). Then
+`CreateDeployment` places the tenant in a cell of `identity-mount` and runs
+the builds; poll `GetDeployment` until `ACTIVE`:
 
 ```bash
 TENANT_ID=$(curl -s -X POST "${API_URL}tenants" \
   -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
   -d '{ "name": "Acme" }' | jq -r .tenant.tenantId)
+curl -s "${API_URL}tenants/${TENANT_ID}" \
+  -H "Authorization: Bearer ${TOKEN}" | jq -r .tenant.status
 curl -s -X POST "${API_URL}tenants/${TENANT_ID}/deployments" \
   -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
   -d '{ "applicationId": "identity-mount", "adminEmail": "admin@example.com" }'
@@ -527,7 +537,9 @@ curl -s "${API_URL}tenants/${TENANT_ID}/deployments/identity-mount" \
 `UpdateDeployment` (`PUT .../deployments/identity-mount`, no body) re-runs
 `tenant/update.sh`; `DeleteDeployment` (`DELETE .../deployments/identity-mount`)
 runs `tenant/delete.sh` and offboards the identity, after which
-`DeleteTenant` removes the empty customer record.
+`DeleteTenant` removes the empty customer record. `DeleteTenant`, and
+`DeleteAccount` and `DeleteApplication` when the mount is retired, answer 202;
+each delete is done when its `Get` answers 404.
 
 The stack context is what
 [`scripts/integ-control-plane.sh`](./scripts/integ-control-plane.sh)
