@@ -3,7 +3,7 @@
 # ADR-0002: Use a CloudFront multi-tenant distribution
 
 - Status: Accepted
-- Date: 2026-11-17
+- Date: 2026-11-18
 - Amended by: ADR-0017
 - Deciders: Dave Roberts (PSA)
 
@@ -90,6 +90,10 @@ domain an edit to shared configuration; Option 3 breaks P-8 and P-9.
   provisioning role that sends `customDomain` gets 403, so a tenant
   cannot claim a domain it does not own. The vendor sets it after it
   has confirmed that the tenant controls the domain; Q-3 decides how.
+  The validated certificate alone does not decide it: ACM reuses one
+  validation record per domain name per account, so the record proves
+  the domain's DNS, not the tenant. The registrar refuses a domain for
+  which it holds another tenant's certificate (spec §3.4 step 4).
 - Harder: the stack depends on multi-tenant distribution support in the
   CDK and CloudFormation version it pins.
 - Harder: the dedicated path adds certificate validation per tenant

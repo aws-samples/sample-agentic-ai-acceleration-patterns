@@ -65,8 +65,9 @@ dedicated distribution tenant on the same distribution, in either mode.
 - Per-tenant telemetry and cost attribution at the edge in both modes,
   from one access-log field the router fills with the tenant it routed
   on. That is the claimed tenant, so billing-grade counts come from the
-  cell's log of verified requests (§3.1). A per-tenant rate limit at the edge in `host` mode and at
-  the origin in `single` mode (ADR-0009).
+  cell's log of verified requests (§3.1).
+- A per-tenant rate limit at the edge in `host` mode and at the origin
+  in `single` mode (ADR-0009).
 - Agent traffic (`/agents/*`) on the same origin, streamed through to the
   agent ingress.
 
@@ -167,7 +168,7 @@ dedicated distribution tenant on the same distribution, in either mode.
 | Route hook | the control plane's | CodeBuild, the control plane's global hook project, under `<fleet>-global-hook` (control-plane R-41) | `hooks/route-hook.sh`, registered as two global hooks. `front-door-post` (`POST` on `CELL_CREATE`, `CELL_UPDATE`, `DEPLOYMENT_CREATE`, `DEPLOYMENT_UPDATE`) puts the cell or tenant route; `front-door-pre` (`PRE` on `CELL_DELETE`, `DEPLOYMENT_DELETE`) deletes it (§3.2, §3.4). It acts only for an application that has a front door hook parameter (`RouteHookAccess`, below) in the control plane's account, and exits 0 for every other (ADR-0014) |
 | `RouteHookAccess` stack | the control plane's | IAM and SSM Parameter Store | The front door hook parameter `/application-plane/applications/<applicationId>/shared/front-door-hook` with `registrarUrl`, a name of its own so that it cannot collide with the cell-account copy (§6.4) when the control plane's account also hosts cells, and a customer-managed policy, listed in the control plane's `globalHookManagedPolicyArns`, that lets `<fleet>-global-hook` invoke this registrar and read any front door hook parameter, `/application-plane/applications/*/shared/front-door-hook` |
 | `register-hooks.sh` | the operator's shell | the control plane API, with an operator token | Puts both global hooks with `PutHook`, from this sample's source at a pinned commit; idempotent. `--delete` removes them (§5.2) |
-| Telemetry | edge | CloudFront standard logging v2: delivery source, delivery destination, delivery and log group in `us-east-1` (ADR-0010) | Per-tenant requests, errors, bytes, latency, from the record fields ADR-0010 lists, never `cs-uri-query`, `cs(Referer)` or `cs(Cookie)`. The tenant is in `viewer-request-log-data`, in both modes. In `single` mode every pooled tenant shares one host and one distribution tenant, so no other field names it. In `host` mode `x-host-header` names a pooled host's tenant but not a dedicated domain's, so the router fills the field there too, and one query serves both modes. The router calls `cf.logCustomData` where it first knows the tenant, with the lower-case tenant id, or `-` when the id does not match the §4.1 id pattern: straight after the §3.3 step 2 `host#` lookup, with the entry's `t`, on every host it looks up (`host` mode, and a dedicated domain in either mode); and in §3.3 step 5 on `<appDomain>` in `single` mode, with the decoded claim, or `-` when step 5 found none. It never passes the token, a header, the path or the query. CloudFront writes the value into the request's own access-log record, URL-encoded, at most 800 bytes; an id of the §4.1 form needs no encoding. On a looked-up host every request therefore names the tenant, SPA loads, `/config.json`, `/logout` and step 4 refusals included. On `<appDomain>` in `single` mode the requests answered before step 5 (SPA loads, `/config.json`, `/logout`, step 4 refusals) carry no tenant, because no token is decoded for them. The sign-in host and a 404 for an unknown host leave the field empty. The field names the claimed tenant, which is unverified: the decoded claim in `single` mode, the host the caller chose in `host` mode. Traffic with a forged claim counts against the tenant it names, so the field serves operations and cost estimates, and a billing-grade count comes from the cell's own log of verified requests |
+| Telemetry | edge | CloudFront standard logging v2: delivery source, delivery destination, delivery and log group in `us-east-1` (ADR-0010) | Per-tenant requests, errors, bytes, latency, from the record fields ADR-0010 lists, never `cs-uri-query`, `cs(Referer)` or `cs(Cookie)`. The tenant is in `viewer-request-log-data`, in both modes. In `single` mode every pooled tenant shares one host and one distribution tenant, so no other field names it. In `host` mode `x-host-header` names a pooled host's tenant but not a dedicated domain's, so the router fills the field there too, and one query serves both modes. The router calls `cf.logCustomData` where it first knows the tenant, with the lower-case tenant id, or `-` when the id does not match the §4.1 id pattern: straight after the §3.3 step 2 `host#` lookup, with the entry's `t`, on every host it looks up (`host` mode, and a dedicated domain in either mode); and in §3.3 step 5 in `single` mode, on every host, with the decoded claim, or `-` when step 5 found none. CloudFront keeps only the last value a request logs, so in `single` mode on a dedicated domain the claim, which the router routes on, replaces the host's tenant for every request that reaches step 5. It never passes the token, a header, the path or the query. CloudFront writes the value into the request's own access-log record, URL-encoded, at most 800 bytes; an id of the §4.1 form needs no encoding. On a looked-up host every request therefore names the tenant, SPA loads, `/config.json`, `/logout` and step 4 refusals included. On `<appDomain>` in `single` mode the requests answered before step 5 (SPA loads, `/config.json`, `/logout`, step 4 refusals) carry no tenant, because no token is decoded for them. The sign-in host and a 404 for an unknown host leave the field empty. The field names the claimed tenant, which is unverified: the decoded claim in `single` mode, the host the caller chose in `host` mode. Traffic with a forged claim counts against the tenant it names, so the field serves operations and cost estimates, and a billing-grade count comes from the cell's own log of verified requests |
 
 ### 3.2 Request paths
 
@@ -245,7 +246,8 @@ On every viewer request:
    `host` mode or for a dedicated tenant's domain, look up
    `host#<host>`. No entry: 404 with a static page. An entry: call
    `cf.logCustomData` with its `t` (§3.1), so every later answer on the
-   host, SPA loads and step 4 refusals included, names the tenant.
+   host, SPA loads and step 4 refusals included, names the tenant; in
+   `single` mode step 5 replaces it with the decoded claim.
 3. Paths that need no tenant (§3.2) skip to step 8, and so does
    `/signin-state` in `single` mode.
 4. For `/api/*`, `/agents/*` and `/signin-state`, check `Sec-Fetch-Site`.
@@ -271,12 +273,14 @@ On every viewer request:
      cell, which may run in an account that tenant owns. A claim forged
      to match the host gains nothing: the forged token fails at every
      verifier (P-1).
-   - `single` mode on `<appDomain>`, a host step 2 does not look up,
-     before any answer: call `cf.logCustomData` once with the claim
-     this step decoded, or `-` when it found none (§3.1). On a host
-     step 2 looked up, the tenant is already logged. The value is never
-     request data: an id that does not match the §4.1 pattern is logged
-     as `-`.
+   - `single` mode, on every host, before any answer: call
+     `cf.logCustomData` with the claim this step decoded, or `-` when
+     it found none (§3.1). CloudFront keeps only the last value, so on
+     a dedicated domain the claim the router routes on replaces the
+     host's tenant that step 2 logged. In `host` mode the tenant step 2
+     logged stays, because a claim that differs from it is refused
+     above. The value is never request data: an id that does not match
+     the §4.1 pattern is logged as `-`.
 6. Look up `tenant#<tenantId>`. No entry: 403. Status `suspended`: 503 with
    `Retry-After`.
 7. For `/api/*`, look up `cell#<cellId>` and set the request's origin to the
@@ -345,9 +349,13 @@ fail with 409, so the cell lands in `CREATE_FAILED` and no tenant is
 placed in it (placement claims only `ACTIVE` cells, control-plane
 §7.1); one that tries after it gets 409 itself. The residual, until the
 control plane offers a role per global hook (control-plane §11): any
-global hook can set a new cell's origin during the cell's create, which
-fails that create, and can put a tenant's route during that
-deployment's create or update. In a tenant-owned account the cell
+global hook can set the origin of a cell that has no route yet, during
+the cell's create or, for a cell older than the hooks, during an
+`UpdateCell`. That fails the operation: the cell lands in
+`CREATE_FAILED` or `UPDATE_FAILED`, and cannot return to `ACTIVE`
+while `cell#` holds an origin its own script did not write, until the
+edge operator role replaces it (backfill, below). Any global hook can
+also put a tenant's route during that deployment's create or update. In a tenant-owned account the cell
 script, which the tenant controls, still chooses its own cell's origin
 within the pinned form, as under ADR-0013.
 
@@ -395,6 +403,14 @@ On every write:
    hold a pooled host or a reserved label. When `host#<customDomain>`
    exists and its `t` names another tenant, the write is refused with
    409, so no tenant route can take another tenant's dedicated domain.
+   The same 409 answers a new `customDomain` for which the registrar
+   already holds a certificate tagged with another tenant: that tenant
+   holds the domain pending, and the sweeper deletes the certificate,
+   releasing the claim, only once the domain is no longer that tenant's
+   `d` (step 5). ACM keeps one validation record per domain name per
+   account and reuses it for every later certificate for that name, so
+   without this check a certificate requested for a second tenant would
+   validate from the first tenant's record.
 5. Write the route table with the store's ETag (`IfMatch`), and record
    the account the control plane placed the cell or deployment in
    (`ac`, on `tenant#`, `host#` and `cell#` entries alike); the
@@ -437,9 +453,11 @@ On every write:
    already serves (`CNAMEAlreadyExists`), and a distribution tenant
    found for the domain that is on another distribution or tagged with
    another tenant belongs to someone else: both answer 409, naming no
-   tenant. Two tenants can therefore hold the same pending `d`, but only
-   one gets a distribution tenant; the other's `d` stays pending until
-   the operator drops it.
+   tenant. With the certificate check of step 4 one tenant at a time
+   holds a domain, pending or routed. Two operator calls for one domain
+   and two tenants that run at once can both pass that check; then only
+   one gets the distribution tenant, and the other gets 409 and keeps a
+   pending `d` until the operator drops it.
 
    Removal runs in two phases. CloudFront deletes only a disabled
    distribution tenant, disabling deploys over minutes, longer than an
@@ -490,14 +508,24 @@ existing origin. It serves two cases:
   registered, or whose stamped scripts write no `frontDoorApiDomain`,
   has no cell route, so every deployment placed in it gets 409 from its
   hook and lands in `CREATE_FAILED`. The operator takes each such cell's
-  API domain from the cell stack's outputs, calls `PutCellRoute` for
-  the cell, then `UpdateDeployment` for each deployment in it, whose
-  `front-door-post` writes the tenant route. `UpdateCell` is not the
-  path: it runs the cell's stamped update script (control-plane P-4),
-  and a stamp that writes no `frontDoorApiDomain` fails the hook on
-  every `UpdateCell`. Such a cell stays unable to update under a front
-  door, because a stamp is immutable; the definition-replacing
-  `UpdateCell` field is a control-plane seam (control-plane §11).
+  API domain from the cell stack's outputs and calls `PutCellRoute` for
+  the cell, which also replaces any origin a global hook wrote meanwhile
+  (§3.4, the residual above). The cell must be `ACTIVE`, because the
+  control plane refuses `UpdateDeployment` in a cell that is not
+  (control-plane R-13). The operator then runs `UpdateDeployment` for
+  each `ACTIVE` or `UPDATE_FAILED` deployment in the cell, whose
+  `front-door-post` writes the tenant route, and deletes and creates
+  again each `CREATE_FAILED` one, which `UpdateDeployment` refuses
+  (control-plane §5.2; the failure paragraph below). `UpdateCell` is not
+  the path: it runs the cell's stamped update script (control-plane
+  P-4), and a stamp that writes no `frontDoorApiDomain` fails the hook
+  on every `UpdateCell`, leaving the cell in `UPDATE_FAILED`. Such a
+  cell stays unable to update under a front door, because a stamp is
+  immutable, and once it is in `UPDATE_FAILED` it takes no new
+  deployment and no deployment update; its tenants stay routed, and
+  the vendor moves them to a new cell by delete and create. The
+  definition-replacing `UpdateCell` field is a control-plane seam
+  (control-plane §11).
 - **Origin change.** When a cell update moves the cell's API to a new
   host, the hook's put gets 409 and the cell lands in `UPDATE_FAILED`.
   The operator confirms the new host, sets it with `PutCellRoute`, and
@@ -540,8 +568,12 @@ the control plane's hook environment (control-plane R-42):
    input or splices one into a command line.
 3. Call the registrar with `curl --aws-sigv4`, signed for
    `execute-api` with the hook role's credentials, which the hook reads
-   from the CodeBuild container credential endpoint and never prints,
-   and wait for propagation as §4.2 says.
+   from the CodeBuild container credential endpoint and never prints.
+   They are temporary, so the request also carries the session token
+   in `x-amz-security-token`. The key pair and that header reach curl
+   through a config file (`-K`), mode 600 in a temporary directory,
+   never as command-line arguments, which other processes in the
+   container could read. Then wait for propagation as §4.2 says.
 4. Act on the answer. 200 or 202: exit 0. 503, 429, another 5xx, or no
    answer: retry inside the build, five attempts with backoff over
    about two minutes, then fail; the control plane does not retry a
@@ -878,7 +910,8 @@ the status of its operation (§3.4), a global hook role `PutCellRoute`
 that would change a cell's origin, a missing cell route, a cell still
 in use, an operator domain change with no tenant route or for another
 deployment (`dt`), a `customDomain` whose `host#` entry names another
-tenant, one CloudFront already serves (`CNAMEAlreadyExists`), or a
+tenant, one another tenant holds pending (a registrar certificate for
+it tagged with that tenant), one CloudFront already serves (`CNAMEAlreadyExists`), or a
 distribution tenant or certificate tagged for another tenant (the
 message names no tenant); 422 when the dedicated domain's certificate
 failed validation or timed out; 507
@@ -893,7 +926,9 @@ unchecked).
   `TENANT_ID`, `TENANT_NAME`, `SCRIPT_OUTPUTS`; control-plane R-42) and
   the registrar URL from the front door hook parameter in the control
   plane's account. It signs with the global hook role's credentials
-  through `curl --aws-sigv4`, parses the outputs with `jq --stream` and
+  through `curl --aws-sigv4`, with the session token in
+  `x-amz-security-token` and every credential in a `-K` config file,
+  parses the outputs with `jq --stream` and
   builds bodies with `jq --arg` (§3.4).
 - **`scripts/register-hooks.sh [--delete]`**, run by an operator with an
   operator token: puts `front-door-post` and `front-door-pre` with
@@ -1027,7 +1062,8 @@ All with a small static HTML or JSON body and `no-store`:
 - Per-tenant requests, errors, bytes and refusals are visible in both
   modes, from the access log's `viewer-request-log-data` field: for every
   request on a host the router looks up, and on `<appDomain>` in
-  `single` mode for every request that reaches the token decode. The
+  `single` mode for every request that reaches the token decode. A
+  request that reaches the decode names the tenant it is routed on. The
   field names the claimed tenant (§3.1).
 - An ordered teardown leaves nothing behind. Two pieces live outside
   CloudFormation in the control plane's account (the two global hooks
@@ -1210,7 +1246,7 @@ the default mode; `test/integ.host.ts` repeats the steps marked (host) with
 Expected time, from S-1: deploying the edge stacks and the distribution
 takes about 481 s and destroying them about 312 s, before the control plane
 and the cells the test also deploys, and each cell or deployment event
-runs one route hook build. The route changes of steps 2, 13, 15 and 18
+runs one route hook build. The route changes of steps 2, 13, 15 and 19
 to 21, and the deletes of step 22, go through the route hook, which
 waits its 45 s bound (§4.2) before the operation ends. Step 19 adds one
 probe build per event, and step 21 waits through two skipped delete
@@ -1346,12 +1382,14 @@ only a cross-account call needs, is not exercised here.
     still served by cell A, and the test then removes `tfd-probe` with
     `DeleteHook`.
 20. A cell event without `frontDoorApiDomain`. The demo application
-    declares a cell parameter, `frontDoorOutput` (default `on`); its
-    cell update script writes no `frontDoorApiDomain` when it is `off`.
-    `UpdateCell` for cell A with `frontDoorOutput: off` lands in
-    `UPDATE_FAILED` with `front-door-post` named in `statusReason`, and
-    `a` is still served. `UpdateCell` with `removeParameters:
-    [frontDoorOutput]` brings it back to `ACTIVE` (§3.4). A cell create
+    declares a cell parameter, `FRONT_DOOR_OUTPUT` (default `on`; a
+    control-plane parameter name matches `[A-Z][A-Z0-9_]{0,63}`); its
+    cell update script writes no `frontDoorApiDomain` when
+    `PARAM_FRONT_DOOR_OUTPUT` is `off`. `UpdateCell` for cell A with
+    `parameters: {FRONT_DOOR_OUTPUT: off}` lands in `UPDATE_FAILED`
+    with `front-door-post` named in `statusReason`, and `a` is still
+    served. `UpdateCell` with `removeParameters: [FRONT_DOOR_OUTPUT]`
+    brings it back to `ACTIVE` (§3.4). A cell create
     runs the same hook code; the test builds no failing cell for it,
     because cell parameters are empty at a cell's birth
     (control-plane R-34).
@@ -1390,7 +1428,7 @@ it gets 400 once the old id is removed. It adds three stack updates, the
 |---|---|---|
 | Q-1 | Which public hosted zone can the test account use for `appDomain`? **Answered 2026-11-16**: a public zone for a delegated test subdomain in the edge account, with its own SPF, DKIM and DMARC records. The spikes and the integration test take its name and zone id as inputs (`TFD_APP_DOMAIN`, `TFD_HOSTED_ZONE_ID`); neither is committed | spike S-1 |
 | Q-2 | Does the integration test deploy its own control plane, or reuse one when found and skip otherwise? | integration test |
-| Q-3 | Does the dedicated tenant (custom domain) path belong in this sample or in a follow-up? If it does, how does the vendor confirm that a tenant controls a domain before the edge operator role sets its `customDomain` (for example a validated certificate for the domain, or a DNS record the tenant publishes)? One candidate is already on the path: the dedicated distribution tenant's certificate validates only once the tenant publishes ACM's validation record in the domain's DNS, and `host#<d>` is written only after it validates (§3.4 step 5) | scope |
+| Q-3 | Does the dedicated tenant (custom domain) path belong in this sample or in a follow-up? If it does, how does the vendor confirm that a tenant controls a domain before the edge operator role sets its `customDomain` (for example a validated certificate for the domain, or a DNS record the tenant publishes)? The validated certificate on the path (§3.4 step 5) is not enough on its own: ACM keeps one validation record per domain name per account and reuses it for every later certificate for that name, so it proves that the edge account's record is in the domain's DNS, not which tenant published it, and a record left behind by a former holder keeps validating. The vendor's check must bind the tenant, for example a TXT record carrying a vendor-issued per-tenant token | scope |
 | Q-4 | Should the integration test also compose `agentic-runtime-isolation` for `/agents/*`, or reuse a deployment only when one is found? | integration test |
 | Q-5 | Route registration depends on the control plane's global hooks (control-plane R-39 to R-46, ADR-0044), which are Proposed and not yet merged. Does their final shape keep what ADR-0017 uses: `POST` hooks only after a successful script, `PRE` delete hooks with three attempts that cannot stop a delete, one `<fleet>-global-hook` role, `SCRIPT_OUTPUTS` and `globalHookManagedPolicyArns`? If not, ADR-0017 is revisited. ADR-0017 stays Proposed and ADR-0013 Accepted until ADR-0044 is accepted, and the control-plane hooks branch merges before this one | build start |
 | Q-6 | With hooks, an integration test that reuses a control plane (Q-2) also changes it: it attaches a policy to `<fleet>-global-hook` and registers two global hooks, which then run on every application's operations, and a third, `tfd-probe`, while step 19 runs. The test therefore needs three of the five global hook slots free. Is that acceptable on a shared control plane, or does the test always deploy its own? | integration test |

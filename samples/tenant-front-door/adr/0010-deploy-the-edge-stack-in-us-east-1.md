@@ -3,7 +3,7 @@
 # ADR-0010: Deploy the edge stack in us-east-1
 
 - Status: Accepted
-- Date: 2026-11-17
+- Date: 2026-11-18
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -90,9 +90,11 @@ writes it with `cf.logCustomData`, the lower-case tenant id or `-`,
 never the token, a header, the path or the query. It writes it where it
 first knows the tenant: after the `host#` lookup on a host it looks up
 (`host` mode, and a dedicated domain), so SPA loads and cross-site
-refusals there carry it too, and after the token decode on `<appDomain>`
-in `single` mode, so requests answered before the decode there carry
-none. In `single` mode no
+refusals there carry it too, and after the token decode on every host
+in `single` mode. CloudFront keeps only the last value, so in `single`
+mode the decoded claim, which the router routes on, replaces the host's
+tenant on a dedicated domain, and requests answered before the decode
+on `<appDomain>` carry none. In `single` mode no
 other field names the tenant, because every pooled tenant shares one
 host and one distribution tenant; in `host` mode `x-host-header` names
 a pooled host's tenant only. The delivery leaves out every other

@@ -3,7 +3,7 @@
 # ADR-0017: Register routes from a control-plane global hook
 
 - Status: Proposed
-- Date: 2026-11-17
+- Date: 2026-11-18
 - Amends: ADR-0002, ADR-0003, ADR-0012, ADR-0014, ADR-0015
 - Deciders: Dave Roberts (PSA)
 
@@ -153,11 +153,15 @@ printing the registrar's message.
   the write to the hook that runs: any global hook, in either phase,
   can write while an operation on that record is in flight.
 - Residual, until the control plane offers a role per global hook (its
-  §11 seam): any global hook can set a new cell's origin during the
-  cell's create, and can put a tenant's route during that deployment's
-  create or update. The write-once origin turns the first into a failed
-  create: the route hook's own put then gets 409, the cell lands in
-  `CREATE_FAILED`, and placement claims only `ACTIVE` cells. The second
+  §11 seam): any global hook can set the origin of a cell that has no
+  route yet, during the cell's create or, for a cell older than the
+  hooks, during an `UpdateCell`, and can put a tenant's route during
+  that deployment's create or update. The write-once origin turns the
+  first into a failed operation: the route hook's own put then gets
+  409 (an older cell's hook already fails on its missing output), the
+  cell lands in `CREATE_FAILED` or `UPDATE_FAILED`, placement
+  claims only `ACTIVE` cells, and the cell stays out of `ACTIVE` until
+  the edge operator role replaces the origin. The second
   gains nothing, because the record supplies cell and account and a put
   keeps `s`. The sample has no threat model yet; this residual goes into
   it when it is written.
@@ -172,7 +176,10 @@ printing the registrar's message.
 - A cell whose API moves to a new host fails its `UpdateCell` with 409
   until the edge operator role sets the new origin. Cells created before
   the hooks get their routes from the edge operator role's
-  `PutCellRoute`, then `UpdateDeployment` per deployment (spec §3.4).
+  `PutCellRoute` while the cell is `ACTIVE`, then `UpdateDeployment`
+  for each `ACTIVE` or `UPDATE_FAILED` deployment in it, and delete and
+  create for each `CREATE_FAILED` one, which `UpdateDeployment` refuses
+  (spec §3.4).
 - A delete hook that fails three times is skipped, and the control
   plane's skip alarm fires (control-plane T42). The route it left is
   removed by the edge operator role, which may now call
