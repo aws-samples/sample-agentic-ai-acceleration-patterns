@@ -689,10 +689,13 @@ idempotency record and the hook counter). All keys
 shown as the reference implementation's convention; the requirement is the
 *shape*, not the literal strings.
 
-Every `createdAt` and `updatedAt` is an ISO 8601 date-time in UTC with
-millisecond precision, for example `2026-11-18T14:42:01.123Z`, stored and
-returned in that form. Strings of this one form sort in time order, so a
-client can compare them as they are. The one exception is the internal
+Every `createdAt` and `updatedAt` is a UTC instant with millisecond
+precision. The table stores it as an ISO 8601 string with three fraction
+digits, for example `2026-11-18T14:42:01.123Z`. The API returns it as an
+RFC 3339 `date-time` in UTC, which MAY omit a zero fraction: the instant
+`2026-11-18T14:42:01.000Z` can be returned as `2026-11-18T14:42:01Z`. A
+client MUST parse two values before comparing them, because the two forms
+do not sort in time order as strings. The one exception is the internal
 `expiresAt` TTL (§4.6), which is epoch seconds as DynamoDB TTL requires.
 
 ### 4.1 Application
