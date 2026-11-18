@@ -235,7 +235,7 @@ them, it is the platform run.
 |---|---|---|
 | test account, second account | none | two non-production, CDK-bootstrapped accounts; the second trusts the first's bootstrap |
 | `appDomain` | none | a test subdomain with a public hosted zone in the test account, for the front door |
-| `buildLimit` | 50 | concurrent builds per control-plane CodeBuild project for the stress deployment (§8, decision 2) |
+| `buildLimit` | 50 | concurrent builds per control-plane CodeBuild project for the stress deployment (§8, decision 2). Both projects run in the control-plane account on `BUILD_GENERAL1_SMALL`, so 50 each draws 100 on that account's Linux/Small quota. The test account holds 300 for that size; the service default is 1, so a new control-plane account raises it first |
 | `pinnedCommit` | the run's `main` commit | the commit the cell scripts deploy |
 
 ## 4. Data model
@@ -381,7 +381,23 @@ correlation id.
 | 4 | Cells split agents (four cells of 25 at `large`) | keeps the Runtime count flat while testing routing across cells |
 | 5 | The `large` fleet is a fixture, seeded once | onboarding 4,000 tenants takes hours even at 50 builds |
 | 6 | A correlation header, logged at every hop | the runtime-isolation ingress and the front door each log it; a change to both samples |
-| 7 | The cell script deploys runtime-isolation with the CDK from a pinned commit, through the account's role pair | the role pair's permissions must reach the account's CDK bootstrap roles, and the account owner installs that |
+| 7 | The cell script deploys runtime-isolation with the CDK from a pinned commit, through the account's role pair | see below |
+
+Decision 7 needs a change to `control-plane`. The cell provisioning role
+holds only its SSM namespace grants, and unlike the tenant role it has no
+prop for extra managed policies. A `cdk deploy` from the cell build needs
+`sts:AssumeRole` on the cell account's bootstrap roles (deploy,
+file-publishing, image-publishing, lookup). Those roles trust their own
+account, so that one grant is enough. The deploy role then passes the
+CloudFormation execution role, which is `AdministratorAccess` in both test
+accounts. The grant therefore makes the cell build an administrator of the
+cell account. The ADR chooses between:
+
+| Option | Effect | Against |
+|---|---|---|
+| A `cellBuildManagedPolicyArns` prop, as the tenant role has, plus the default bootstrap | smallest change | the cell build is an account administrator |
+| The same prop, plus a cell-account bootstrap with a scoped `--cloudformation-execution-policies` | the cell build can create only what a cell needs | the account owner maintains that policy as the cell grows |
+| The cell script calls CloudFormation with a scoped service role, no CDK bootstrap | no bootstrap dependency | the script synthesises and publishes assets itself |
 | 8 | The runtime-isolation `StressDriver` and k6 library move to `stress/` | they become the shared driver; its slice keeps only its own scenarios |
 
 ## 9. Work items and parallel readiness
@@ -402,9 +418,7 @@ correlation id.
 
 | # | Question | Needed by |
 |---|---|---|
-| Q-1 | What is the CodeBuild concurrent-build quota in both accounts, and does 50 per project fit? | W-4 |
-| Q-2 | What permissions must the role pair in a cell account hold for the cell script to run `cdk deploy`? | W-5 |
-| Q-3 | How long does one cell take to deploy from a CodeBuild cell script (expected about 8 minutes on Runtime V2)? | W-5 |
-| Q-4 | Does the front door's integration test compose runtime-isolation for `/agents/*` (its Q-4)? The platform run assumes it can | W-7 |
-| Q-5 | Does the platform run keep the `large` fleet in both accounts between runs, and what does it cost idle? | decision 5 |
-| Q-6 | Which hosted zone does the stress front door use? | W-7 |
+| Q-1 | How long does one cell take to deploy from a CodeBuild cell script (expected about 8 minutes on Runtime V2), and does `BUILD_GENERAL1_SMALL` (3 GB) hold the synth? | W-5 |
+| Q-2 | Does the front door's integration test compose runtime-isolation for `/agents/*` (its Q-4)? The platform run assumes it can | W-7 |
+| Q-3 | Does the platform run keep the `large` fleet in both accounts between runs, and what does it cost idle? | decision 5 |
+| Q-4 | Which hosted zone does the stress front door use? | W-7 |
