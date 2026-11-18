@@ -87,7 +87,12 @@ query setup. The delivery names its record fields explicitly:
 the per-tenant telemetry reads (spec §3.1), and the list stays closed.
 `viewer-request-log-data` names the tenant in both modes: the router
 writes it with `cf.logCustomData`, the lower-case tenant id or `-`,
-never the token, a header, the path or the query. In `single` mode no
+never the token, a header, the path or the query. It writes it where it
+first knows the tenant: after the `host#` lookup on a host it looks up
+(`host` mode, and a dedicated domain), so SPA loads and cross-site
+refusals there carry it too, and after the token decode on `<appDomain>`
+in `single` mode, so requests answered before the decode there carry
+none. In `single` mode no
 other field names the tenant, because every pooled tenant shares one
 host and one distribution tenant; in `host` mode `x-host-header` names
 a pooled host's tenant only. The delivery leaves out every other
@@ -101,12 +106,17 @@ land in the log.
 ## Consequences
 
 - Easier: the registrar, its logs and the published parameter are in the
-  Region a cell script and an operator already use.
+  Region the control plane, its route hook and an operator already use.
 - Easier: the edge stacks change rarely, so most updates touch the main
   stack only.
 - Easier: per-tenant numbers in both modes come from one field of the
   access log, with no second log group, no join and no reader list of
   their own.
+- Harder: the field names the claimed tenant, which is unverified: the
+  decoded claim in `single` mode, the host the caller chose in `host`
+  mode. Traffic with a forged claim counts against the tenant it names,
+  so a billing-grade count comes from the cell's log of verified
+  requests.
 - Harder: per-tenant log queries (integration step 14) run in `us-east-1`.
   An operator looks for the CloudFront log group there.
 - Harder: the logs hold no query strings, referrers or cookies, and a

@@ -53,8 +53,8 @@ per second, raced by concurrent onboarding; tenants in different client
 groups have different client ids, so `/config.json` and the token carry
 one per tenant group and the cell and the control plane must accept all of
 them; one more place a tenant script must clean up. The client count is not
-the limit: ADR-0012 caps `host` mode at 8,948 tenants, which is 90 clients,
-inside the default quota of 1,000.
+the limit: ADR-0012, as ADR-0017 amends it, caps `host` mode at 8,583
+tenants, which is 86 clients, inside the default quota of 1,000.
 
 ### Option 2: One shared sign-in host with a signed `state`
 

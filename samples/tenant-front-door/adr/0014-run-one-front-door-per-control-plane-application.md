@@ -66,8 +66,10 @@ Amended 2026-11-17 by ADR-0017: cell scripts no longer call the
 registrar, so the copy in each cell account holds only
 `distributionArn`, for `CellRouteAccess`. Each front door's
 `RouteHookAccess` stack writes
-`/application-plane/applications/<applicationId>/shared/front-door`,
-with `registrarUrl`, in the control plane's account. The route hook,
+`/application-plane/applications/<applicationId>/shared/front-door-hook`,
+with `registrarUrl`, in the control plane's account, a name of its own
+so that it never collides with the cell-account copy in a control-plane
+account that also hosts cells. The route hook,
 one pair of global hooks for every front door on the control plane,
 acts only for an application that has that parameter and exits 0 for
 every other, so one front door per application still holds.

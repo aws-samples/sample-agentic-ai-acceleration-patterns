@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0013: Register routes through a registrar that checks the control plane
 
-- Status: Superseded by ADR-0017
+- Status: Accepted
 - Date: 2026-11-17
 - Deciders: Dave Roberts (PSA)
 
@@ -86,3 +86,12 @@ cleanup works after the control plane has removed the record.
   is not the operator role gets 403.
 - Revisit when the control plane offers a route hook of its own, or a
   cell origin type needs more than a domain.
+
+Note 2026-11-17: ADR-0017 (Proposed) registers routes from a
+control-plane global hook instead, and will supersede this record once
+control-plane ADR-0044 is accepted; the control-plane hooks branch
+merges first. Until then this record stands, with one gap a design
+review found: a tenant-owned account's tenant provisioning role can
+delete its suspended tenant's route and put it again, which writes a new
+entry that starts `active` (ADR-0017, Context). The specification
+already describes the ADR-0017 design.

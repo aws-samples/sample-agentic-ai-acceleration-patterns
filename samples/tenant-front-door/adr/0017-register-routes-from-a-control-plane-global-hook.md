@@ -2,9 +2,9 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0017: Register routes from a control-plane global hook
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-11-17
-- Amends: ADR-0002, ADR-0003, ADR-0014, ADR-0015
+- Amends: ADR-0002, ADR-0003, ADR-0012, ADR-0014, ADR-0015
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -83,10 +83,21 @@ build: its start time plus the 45 s propagation wait. The front door
 takes two of the control plane's five global hook slots. The global
 hook role is shared by every global hook, so the registrar cannot trust
 the role alone. The deployer has setup in the control plane's account.
+A global hook runs for every application on the control plane, not only
+front-door applications: every create and update runs one
+`front-door-post` build (a CodeBuild start and a parameter read) and
+every delete one `front-door-pre` build, even when the hook exits 0. A
+`RouteHookAccess` policy that answers AccessDenied fails the creates and
+updates of every application and delays every delete by three attempts.
+An application whose front door hook parameter is missing reaches
+`ACTIVE` with no route, so "`ACTIVE` means routed" holds only while the
+parameter exists. One `register-hooks.sh` pin serves every front door
+on the control plane, so upgrading the hook for one upgrades it for
+all.
 
 ## Decision
 
-Option 4; it supersedes ADR-0013. `hooks/route-hook.sh` is registered
+Option 4; once accepted, it supersedes ADR-0013. `hooks/route-hook.sh` is registered
 by `register-hooks.sh` with `PutHook` as two global hooks, because a
 hook has one phase: `front-door-post`, `POST` on `CELL_CREATE`,
 `CELL_UPDATE`, `DEPLOYMENT_CREATE` and `DEPLOYMENT_UPDATE`, puts the cell
@@ -98,11 +109,13 @@ tenant-owned account would keep a credential that reaches it. Deletes
 run `PRE`, so the route goes while the record exists, and goes even when
 the delete script then fails; a `POST` delete hook would run only after
 a successful script and leave a `DELETE_FAILED` deployment routed. The
-hook acts only for an application with a front door parameter
-(`/application-plane/applications/<applicationId>/shared/front-door`)
+hook acts only for an application with a front door hook parameter
+(`/application-plane/applications/<applicationId>/shared/front-door-hook`)
 in the control plane's account, which each front door's
 `RouteHookAccess` stack writes, so one pair of hooks serves every front
-door on the control plane (ADR-0014). The registrar's resource policy
+door on the control plane (ADR-0014). The name differs from the copy
+that each cell account holds, so a control-plane account that also
+hosts cells holds both. The registrar's resource policy
 admits one control-plane role ARN, `<fleet>-global-hook` in the
 control plane's account, plus the edge operator role, and denies
 everything else with the explicit `Deny` spike S-8 proved. The registrar
@@ -111,9 +124,18 @@ global hook runs under the same role, so admission proves only that
 some vendor global hook is calling. It takes the cell and account from
 the record, never the body, and admits a hook's put only while the
 record is `CREATING` or `UPDATING` and a hook's delete only while it is
-`DELETING` or gone. Trusting the hook and dropping the read was
-rejected: one faulty or hostile global hook could then route or unroute
-any tenant. The hook retries a 5xx, 429 or missing answer inside its
+`DELETING` or gone. That check binds a write to the record's status,
+not to the hook: any global hook can write while an operation on the
+record runs. So the one value a hook supplies, a cell's origin, is
+pinned to a Lambda function URL host in the control plane's Region and
+is write-once for the global hook role: a put for a `cell#` that holds
+another origin gets 409, and only the edge operator role changes it,
+also for cells that predate the hooks (backfill). A `tenant#` entry
+records the deployment's `createdAt` as `dt`, so a hook put for a new
+deployment replaces an entry that a skipped delete hook left, while
+retries and updates of one deployment keep it. Trusting the hook and
+dropping the read was rejected: one faulty or hostile global hook could
+then route or unroute any tenant. The hook retries a 5xx, 429 or missing answer inside its
 build for about two minutes and fails at once on 400, 403, 409 or 507,
 printing the registrar's message.
 
@@ -124,28 +146,58 @@ printing the registrar's message.
   is refused while the deployment is live. Only the vendor's
   `DeleteDeployment` and a new `CreateDeployment` start a route
   `active` again (spec §4.2, integration step 13).
-- No other global hook can remove a live tenant's route, or re-create
-  one during its delete, through the shared role: the status check
-  admits a hook write only in the operation that runs the hook.
+- No global hook can remove a live tenant's route, or re-create one
+  during its delete, through the shared role: the status check admits a
+  hook's put only while the record is `CREATING` or `UPDATING` and its
+  delete only while the record is `DELETING` or gone. It does not bind
+  the write to the hook that runs: any global hook, in either phase,
+  can write while an operation on that record is in flight.
+- Residual, until the control plane offers a role per global hook (its
+  §11 seam): any global hook can set a new cell's origin during the
+  cell's create, and can put a tenant's route during that deployment's
+  create or update. The write-once origin turns the first into a failed
+  create: the route hook's own put then gets 409, the cell lands in
+  `CREATE_FAILED`, and placement claims only `ACTIVE` cells. The second
+  gains nothing, because the record supplies cell and account and a put
+  keeps `s`. The sample has no threat model yet; this residual goes into
+  it when it is written.
 - A failing `POST` hook leaves the cell or deployment in
-  `CREATE_FAILED` or `UPDATE_FAILED` with the hook named; the operator
-  fixes the cause and retries with `UpdateCell` or `UpdateDeployment`.
-  A cell event whose script wrote no `frontDoorApiDomain` fails the same
-  way.
+  `CREATE_FAILED` or `UPDATE_FAILED` with the hook named. From
+  `UPDATE_FAILED` the operator fixes the cause and retries with
+  `UpdateCell` or `UpdateDeployment`. `CREATE_FAILED` cannot be retried
+  with an update (control-plane §5.2, §5.3): the operator deletes the
+  failed deployment, and a failed cell once empty, whose `front-door-pre`
+  hooks remove any route already written, and creates it again. A cell
+  event whose script wrote no `frontDoorApiDomain` fails the same way.
+- A cell whose API moves to a new host fails its `UpdateCell` with 409
+  until the edge operator role sets the new origin. Cells created before
+  the hooks get their routes from the edge operator role's
+  `PutCellRoute`, then `UpdateDeployment` per deployment (spec §3.4).
 - A delete hook that fails three times is skipped, and the control
   plane's skip alarm fires (control-plane T42). The route it left is
   removed by the edge operator role, which may now call
-  `DeleteTenantRoute` and `DeleteCellRoute` for any route.
+  `DeleteTenantRoute` and `DeleteCellRoute` for any route. A later
+  `CreateDeployment` for the tenant does not inherit a leftover entry:
+  its `createdAt` differs from the entry's `dt`, so the hook's put
+  replaces it and the route starts `active`.
+- `dt` adds 19 bytes to every `tenant#` entry, so the ADR-0012 ceilings
+  fall to 16,949 tenants in `single` mode and 8,583 in `host` mode.
 - A control-plane read outage now also fails hooks: creates and updates
   fail after the hook's retries, and deletes skip the hook. Routing,
   which reads only the store, is unaffected.
 - Deployer setup in the control plane's account: the `RouteHookAccess`
   stack, its policy in `globalHookManagedPolicyArns` and a control-plane
-  update, then `register-hooks.sh`. Removing the last front door runs
-  `register-hooks.sh --delete` first: with the hooks still registered
-  and no `RouteHookAccess` policy left, the hook cannot read the front
-  door parameters and fails every create and update on the control
-  plane.
+  update, then `register-hooks.sh`. These live partly outside
+  CloudFormation, so teardown is ordered (spec §6.2): delete the
+  application's deployments and cells, run `register-hooks.sh --delete`
+  for the last front door, remove the policy ARN and update the control
+  plane, destroy `RouteHookAccess`, then destroy the front door. With
+  the hooks still registered and no `RouteHookAccess` policy left, the
+  hook cannot read the front door hook parameters and fails every create
+  and update on the control plane.
+- The hook-to-registrar API stays backward compatible across sample
+  versions, or every front door on one control plane upgrades together,
+  because one hook pin serves them all.
 - The `controlPlane` input gains the control plane's account id, which
   names the admitted role (spec §3.6). Cell scripts no longer need the
   registrar URL; cell accounts keep only the `distributionArn` copy for
@@ -155,7 +207,10 @@ printing the registrar's message.
   `Deny`; only the admitted principal changes. The integration test
   checks that the second account's provisioning roles get 403 (spec §10
   steps 11 to 13).
+- This record stays Proposed, and ADR-0013 Accepted, until
+  control-plane ADR-0044 is accepted; the control-plane hooks branch
+  merges first. On acceptance this record supersedes ADR-0013.
 - Revisit when control-plane ADR-0044 changes before it is accepted
   (spec Q-5), or when the control plane offers a role per global hook
   (its §11 seam), which would let the registrar admit the route hook
-  alone.
+  alone and close the residual above.

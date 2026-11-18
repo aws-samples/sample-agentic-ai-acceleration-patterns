@@ -4,6 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-17
+- Amended by: ADR-0017
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -93,3 +94,12 @@ need their own record.
 - Revisit when an application expects more than about 18,000 tenants in
   `single` mode or 8,900 in `host` mode, or when CloudFront raises the
   store size or allows more than one store per function.
+
+Amended 2026-11-17 by ADR-0017: each `tenant#` value also carries
+`dt`, the deployment's `createdAt` as Unix milliseconds
+(`"dt":<13 digits>,`, 19 bytes), so a hook can tell a new deployment
+from a leftover entry. The worst-case `tenant#` value is 166 bytes and
+the entry 236, so a tenant needs at most 236 bytes in `single` mode and
+466 in `host` mode. The ceilings become floor(5,000,000 × 0.8 / 236) =
+16,949 tenants in `single` mode and floor(5,000,000 × 0.8 / 466) = 8,583
+in `host` mode, and the revisit points about 16,900 and 8,500.

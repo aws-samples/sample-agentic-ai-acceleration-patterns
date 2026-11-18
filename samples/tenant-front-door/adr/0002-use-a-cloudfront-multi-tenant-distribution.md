@@ -3,7 +3,7 @@
 # ADR-0002: Use a CloudFront multi-tenant distribution
 
 - Status: Accepted
-- Date: 2026-11-13
+- Date: 2026-11-17
 - Amended by: ADR-0017
 - Deciders: Dave Roberts (PSA)
 
@@ -66,11 +66,26 @@ domain an edit to shared configuration; Option 3 breaks P-8 and P-9.
 
 - Easier: one response headers policy and one set of origins for every
   tenant. A dedicated domain is one distribution tenant with its own
-  certificate. The registrar creates both when the edge operator role
-  sets `customDomain` with `PutTenantRoute`, writes the domain's
-  `host#` key only once the certificate has validated, and removes all
-  three when the domain is dropped or changed, or by
-  `DeleteTenantRoute` or `DeleteHostRoute` (spec §3.4 step 5, §5.1).
+  certificate, an ACM certificate in `us-east-1` that the registrar
+  requests across Regions. When the edge operator role sets
+  `customDomain` with `PutTenantRoute`, the registrar writes the domain
+  as `d` first, requests the certificate, and once it has validated
+  creates the distribution tenant and writes the domain's `host#` key. A
+  repeat finds what an earlier call made and creates only what is
+  missing, so a pending call answers 202 again, not 409; a failed
+  validation answers 422 (spec §3.4 step 5, §5.1).
+- Harder: removal is two-phase. CloudFront deletes only a disabled
+  distribution tenant and disabling deploys over minutes, so a dropped
+  or changed domain, `DeleteTenantRoute` or `DeleteHostRoute` removes
+  `host#<d>` and `d` at once and disables the distribution tenant, and
+  the registrar's scheduled sweeper deletes it and then its certificate.
+  A changed domain is offline from the change until the new one
+  validates.
+- Harder: distribution tenants the registrar creates are outside
+  CloudFormation, and a distribution with distribution tenants cannot
+  be deleted. A custom resource on the distribution disables and deletes
+  every dedicated distribution tenant and its certificate before the
+  distribution's delete (spec §6.2).
 - Harder: only the vendor sets a dedicated domain. A tenant
   provisioning role that sends `customDomain` gets 403, so a tenant
   cannot claim a domain it does not own. The vendor sets it after it

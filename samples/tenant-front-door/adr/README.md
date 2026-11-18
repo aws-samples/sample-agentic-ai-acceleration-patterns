@@ -4,9 +4,13 @@
 
 One file per decision, in the template of
 [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md).
-Every record is Accepted except ADR-0013, which ADR-0017 supersedes.
-ADR-0017 depends on the control plane's global hooks (control-plane
-ADR-0044), still Proposed (spec Q-5). One spike is still open, S-5 (does
+Every record is Accepted except ADR-0017, which is Proposed: it
+depends on the control plane's global hooks (control-plane ADR-0044),
+also Proposed (spec Q-5). ADR-0017 will supersede ADR-0013 once
+ADR-0044 is accepted; until then ADR-0013 stays Accepted. Merge order:
+the control-plane hooks branch first, then this one. The `Amended by:
+ADR-0017` notes on ADR-0002, 0003, 0012, 0014 and 0015 take effect when
+ADR-0017 is accepted. One spike is still open, S-5 (does
 `/agents/*` stream without buffering,
 [spec §9](../design/tenant-front-door.spec.md)).
 If it fails, it reopens the `/agents/*` origin request policy in ADR-0011.
@@ -14,7 +18,7 @@ If it fails, it reopens the `/agents/*` origin request policy in ADR-0011.
 | Number | Title | Status | Date |
 |---|---|---|---|
 | [0001](./0001-default-to-one-url-with-the-tenant-from-the-token.md) | Default to one URL with the tenant from the token | Accepted | 2026-11-13 |
-| [0002](./0002-use-a-cloudfront-multi-tenant-distribution.md) | Use a CloudFront multi-tenant distribution | Accepted | 2026-11-13 |
+| [0002](./0002-use-a-cloudfront-multi-tenant-distribution.md) | Use a CloudFront multi-tenant distribution | Accepted | 2026-11-17 |
 | [0003](./0003-keep-the-route-table-in-cloudfront-keyvaluestore.md) | Keep the route table in CloudFront KeyValueStore | Accepted | 2026-11-13 |
 | [0004](./0004-route-to-cells-with-cloudfront-functions-origin-modification.md) | Route to cells with CloudFront Functions origin modification | Accepted | 2026-11-13 |
 | [0005](./0005-route-on-the-unverified-claim-and-verify-at-the-origin.md) | Route on the unverified claim and verify at the origin | Accepted | 2026-11-17 |
@@ -25,8 +29,8 @@ If it fails, it reopens the `/agents/*` origin request policy in ADR-0011.
 | [0010](./0010-deploy-the-edge-stack-in-us-east-1.md) | Deploy the edge stack in us-east-1 | Accepted | 2026-11-17 |
 | [0011](./0011-protect-cell-origins-with-origin-access-control-across-accounts.md) | Protect cell origins with origin access control across accounts | Accepted | 2026-11-13 |
 | [0012](./0012-cap-the-route-table-and-shard-by-distribution.md) | Cap the route table and shard by distribution | Accepted | 2026-11-17 |
-| [0013](./0013-register-routes-through-a-registrar-that-checks-the-control-plane.md) | Register routes through a registrar that checks the control plane | Superseded by ADR-0017 | 2026-11-17 |
+| [0013](./0013-register-routes-through-a-registrar-that-checks-the-control-plane.md) | Register routes through a registrar that checks the control plane | Accepted | 2026-11-17 |
 | [0014](./0014-run-one-front-door-per-control-plane-application.md) | Run one front door per control-plane application | Accepted | 2026-11-13 |
 | [0015](./0015-read-the-control-plane-with-a-reader-token.md) | Read the control plane with a reader token | Accepted | 2026-11-16 |
 | [0016](./0016-sign-in-through-one-shared-host-in-host-mode.md) | Sign in through one shared host in host mode | Accepted | 2026-11-17 |
-| [0017](./0017-register-routes-from-a-control-plane-global-hook.md) | Register routes from a control-plane global hook | Accepted | 2026-11-17 |
+| [0017](./0017-register-routes-from-a-control-plane-global-hook.md) | Register routes from a control-plane global hook | Proposed | 2026-11-17 |
