@@ -216,14 +216,19 @@ inventory, policy) and an application hook for one application's own needs
 (its route, its catalogue entry). On delete, `PRE` hooks run while the
 record and what it made still exist, so a hook that removes a route or a
 DNS record removes it before the script tears down what it points at. A
-delete hook cannot refuse: it is retried and then skipped, so put cleanup
-that must happen in the script, and use the hook for the outside world.
+delete hook cannot refuse: it is retried and then skipped. On a cell or
+deployment delete, put cleanup that must happen in the script and use the
+hook for the outside world. An application, tenant or account delete runs
+no script, so cleanup outside the control plane can only live in a hook,
+and a skipped one leaves that state behind; the `HookSkipped` metric and
+its alarm show it.
 Two hooks to start from are in [`scripts/sample-hook/`](./scripts/sample-hook/):
 `audit.sh`, a `POST` hook that logs one JSON line per event, and
 `name-gate.sh`, a `PRE` hook on tenant events that refuses names outside a
 house rule. The End-to-end demo registers both. A hook gets only the
-permissions you attach to its scope's role (Deploy), so give each scope the
-least it needs.
+permissions you attach to its scope's role (Deploy). Every hook of a scope
+shares that one role, so a policy you attach for one global hook reaches
+every global hook; give each scope the least its hooks need.
 
 **Tenants and deployments.** A tenant (`CreateTenant`) is a customer record:
 a name, a description, and the count of its deployments. Its operations
@@ -666,8 +671,12 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 Register two global hooks first, so every later step runs them. `audit`
 is a `POST` hook on all fifteen events and logs one JSON line per event to
 its build log; `name-gate` is a `PRE` hook on tenant creates and updates
-and refuses names outside a house rule. Both answer 200 at once and need no
-extra permission:
+and refuses names outside a house rule. Both answer 200 at once. They need
+no permission beyond their logs when the source is a GitHub repository
+CodeBuild can already read; for an S3 or private source, grant
+`<fleet>-global-hook` read on it through `globalHookManagedPolicyArns`
+(Deploy). With `audit` on every event, each later step also runs a hook
+build, so each takes a minute or two longer:
 
 ```bash
 curl -s -X PUT "${API_URL}hooks/audit" \
@@ -750,16 +759,25 @@ curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${TENANT_ID}"
 Once it is `ACTIVE`, `lastGlobalHooks` on the tenant lists the hooks that
 ran for its create, in run order: `name-gate` (`PRE`) and `audit` (`POST`),
 each with its revision and the commit it ran. Now try a name the gate
-refuses. The create answers 202 as before, but the `PRE` hook fails, so the
-tenant ends `CREATE_FAILED`, its `statusReason` names `name-gate`, and
-nothing is committed. Delete the failed record:
+refuses. The create answers 202 as before, and the tenant stays `CREATING`
+while the `name-gate` build runs. The `PRE` hook fails, so the tenant ends
+`CREATE_FAILED` and its `statusReason` names `name-gate`; it never becomes
+`ACTIVE`, and nothing can be placed against it. Repeat the `GetTenant` call
+until `status` is `CREATE_FAILED`:
 
 ```bash
 BAD_ID=$(curl -s -X POST "${API_URL}tenants" \
   -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
   -d '{ "name": "acme; drop" }' | jq -r .tenant.tenantId)
 curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${BAD_ID}" | jq '.tenant | {status, statusReason}'
+```
+
+Then delete the failed record. The delete answers 202 and runs `audit` on
+`TENANT_DELETE`; repeat the `GetTenant` call until it answers 404:
+
+```bash
 curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${BAD_ID}"
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${BAD_ID}"
 ```
 
 Create the tenant's deployment of `demo`. The 202 response carries no
@@ -782,8 +800,9 @@ echo "${CELL_ID}"
 ```
 
 Poll the deployment until `status` is `ACTIVE`, or `CREATE_FAILED`, in which
-case `statusReason` and `lastBuildId` say why. A new cell runs two builds, so
-expect a few minutes:
+case `statusReason` and `lastBuildId` say why. A new cell runs four builds,
+one after another (the cell script, `audit`, the tenant script, `audit`), so
+expect several minutes:
 
 ```bash
 curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${TENANT_ID}/deployments/demo"
