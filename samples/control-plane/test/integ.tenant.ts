@@ -3,13 +3,14 @@
 
 import * as path from 'path';
 import { ExpectedResult, IntegTest, Match } from '@aws-cdk/integ-tests-alpha';
-import { App, Aspects, Aws, CfnResource, Duration, IAspect, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { App, Aspects, ArnFormat, Aws, CfnOutput, CfnResource, Duration, IAspect, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { ApplicationLogLevel } from 'aws-cdk-lib/aws-lambda';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
+import { RegionInfo } from 'aws-cdk-lib/region-info';
 import { WriteNagSuppressionsToCloudFormationAspect } from 'cdk-nag';
 import { IConstruct } from 'constructs';
 import { CellAccountStack } from '../src/cell-account/cell-account.cdk';
@@ -28,6 +29,14 @@ import { TenantStack } from '../src/tenant/tenant.cdk';
  * --trust <A>`), because this app deploys the account role pair into B with
  * A's credentials.
  *
+ * Each run takes its own fleet name, `cp-integ-<run id>` (spec section 10),
+ * from `CP_INTEG_RUN_ID` (`[a-z0-9]{1,23}`, the `integ` task generates one),
+ * and uses it in every stack name, as the `fleetName` of the stack under test
+ * and of the account B role pair, and in every other name that must be unique
+ * in an account or a Region. The application ids derive from the run id
+ * (`x-<run id>`, `y-<run id>`, `z-<run id>`). Two runs can then share both
+ * accounts and a Region.
+ *
  * Setup (in A): a throwaway Cognito user pool acts as the vendor IdP (its ID
  * tokens carry iss + aud, which the authorizer validates via OIDC discovery,
  * plus the `role: "operator"` claim ADR-018 requires, added by a pre token
@@ -36,12 +45,23 @@ import { TenantStack } from '../src/tenant/tenant.cdk';
  * Lambda that assumes a read-only role in B to count SSM parameters there
  * (the assertion provider itself runs in A only); and a build probe that
  * reads the PARAM_ variables of a CodeBuild project's latest build, which
- * is what the script of that build received. Applications X and Y share
+ * is what the script of that build received; and a step probe that runs a
+ * list of checks in one invocation (API calls, SSM reads, and what the test's
+ * hooks recorded, in SSM parameters under a test-only path that each hook
+ * role may write through one customer-managed policy per hook role, together
+ * with the start time of every script build, so the test can assert the order
+ * hooks and scripts ran in). The assertion stack is a CloudFormation stack
+ * that holds 200 outputs at most and every assertion is one, so checks that
+ * need no waiting between them are one probe invocation. Applications X and Y share
  * that source and differ in id and in their parameter declarations (X
  * declares ALLOWED_EMAIL_DOMAIN, required, and LOG_LEVEL, default info, and
  * the cell parameter CELL_SIZE, default small; Y declares none);
  * maxTenants = 1: every cell is a silo, so cells — not deployments — are
  * what the accounts count.
+ *
+ * Application Z (step 16) uses Y's source and scripts, except that its tenant
+ * create script writes a script output first; it declares three parameters
+ * and two application hooks, and two global hooks are registered around it.
  *
  * Flow (every API operation is exercised; the numbers are spec §10's steps,
  * with the operator minted in step 1):
@@ -52,8 +72,9 @@ import { TenantStack } from '../src/tenant/tenant.cdk';
  *      call is a POST (403), then its GETs pass and its PUT and DELETE are
  *      403, the unlisted role is 403 on a GET and a POST, and nothing was
  *      written; once step 5's deployment and cell exist, the reader's other
- *      seven GETs pass too, so all
- *      ten reader operations are proven; a listed machine client's
+ *      seven GETs pass too, and once step 16 has registered a hook, GetHook and
+ *      ListHooks pass, so all twelve reader operations are proven; a listed
+ *      machine client's
  *      client-credentials token (no `aud`, R-38) reads and is 403 on a POST,
  *      and an unlisted machine client is 403 on a GET
  *   2. PutApplication with a missing script → 400, bad id → 400, bad
@@ -95,9 +116,22 @@ import { TenantStack } from '../src/tenant/tenant.cdk';
  *  15. DeleteCell occupied → 409; DeleteDeployment T1/X → 404 (it ran
  *      without TIER, with the stale value and the default); cell 1 stays
  *      0/1, A 2/2, X 1, T1 1; CreateDeployment T2/X reuses cell 1
- *  16. delete every deployment, cell, tenant, account and application; every
- *      counter back at 0; namespaces empty in both accounts; the delete
- *      builds got the values §10 names
+ *  16. hooks (ADR-044): ListHooks empty; PutHook refusals → 400, a reader's
+ *      PutHook → 403; PutHook G (POST, all six events) → revision 1, again →
+ *      revision 2; the counter's limit of five → 409 on the sixth; Z (three
+ *      parameters, two application hooks) in cell 4 of A (maxCells 3): the
+ *      scripts and hooks of T1/Z's create ran in R-45 order, with the R-42
+ *      variables, the script output as SCRIPT_OUTPUTS, each hook under its
+ *      own role and the R-41 deny holding; lastGlobalHooks on the cell and the
+ *      deployment; an update; a failing global PRE hook ends T2/Z
+ *      CREATE_FAILED before its script; a failing delete hook is attempted
+ *      three times and skipped; a failing POST hook ends a create
+ *      CREATE_FAILED after its script; each delete runs its hooks around its
+ *      script
+ *  17. delete every deployment, cell (cell 4 included), hook, tenant,
+ *      account and application; every counter back at 0; this run's
+ *      namespaces empty in both accounts; the delete builds got the values §10
+ *      names; G recorded a CELL_DELETE for every cell
  *
  * Run with the single-Region, two-account command documented in
  * integration-test.md (deploys real infrastructure in both accounts).
@@ -109,21 +143,38 @@ const region = process.env.AWS_REGION ?? requireEnv('CDK_DEFAULT_REGION', 'the s
 if (!/^\d{12}$/.test(accountB) || accountB === accountA) {
   throw new Error('CP_INTEG_ACCOUNT_B must be a 12-digit AWS account id different from the account the test runs in');
 }
+/**
+ * This run's id and fleet name (spec section 10). The `integ` task sets
+ * CP_INTEG_RUN_ID; it must not contain `aws`, `amazon` or `cognito`, so the
+ * user pool domain prefix built from the fleet name holds none of the words
+ * Cognito refuses.
+ */
+const runId = requireEnv('CP_INTEG_RUN_ID', 'this run\'s id, 1 to 23 characters of [a-z0-9] without aws, amazon or cognito (the integ task generates one)');
+if (!/^[a-z0-9]{1,23}$/.test(runId) || /aws|amazon|cognito/.test(runId)) {
+  throw new Error('CP_INTEG_RUN_ID must match [a-z0-9]{1,23} and must not contain aws, amazon or cognito');
+}
+const fleetName = `cp-integ-${runId}`;
 /** No account has the pair installed under this id: the handshake must refuse it. */
 const unregisteredAccount = '000000000000';
 /** The external id account B's role pair requires (spec §6.4) — a handshake value, not a secret. */
 const accountBExternalId = 'control-plane-integ-handshake';
-/** The two applications (spec §10): same scripts, different ids. B admits Y only. */
-const APP_X = 'integ-x';
-const APP_Y = 'integ-y';
+/** The applications (spec §10): same scripts, ids from the run id. B admits Y only. Z is step 16's. */
+const APP_X = `x-${runId}`;
+const APP_Y = `y-${runId}`;
+const APP_Z = `z-${runId}`;
+const partition = RegionInfo.get(region).partition ?? 'aws';
+/** Where the test's hooks record what they saw, in A (one path per hook scope). */
+const hookLedgerRoot = `/cp-integ/${fleetName}/hooks`;
+const hookPolicyName = (scope: 'global' | 'app') => `${fleetName}-${scope}-hook-test`;
 
 const app = new App();
 
 // --- Setup stack (account A): vendor IdP + script source + probe ----------
-// The account A stacks stay environment-agnostic (they deploy to the ambient
-// account, as the assertion stack does); only the account B stack names its
-// environment.
-const setup = new Stack(app, 'control-plane-integ-setup');
+// Every stack of account A names its environment, as the account B stack
+// does: the stack under test must (it validates its hook policy ARNs against
+// its own partition and account at synth), and CDK refuses a reference between
+// a stack with an environment and one without.
+const setup = new Stack(app, `${fleetName}-setup`, { env: { account: accountA, region } });
 
 const vendorIdp = new cognito.UserPool(setup, 'VendorIdp', {
   selfSignUpEnabled: false,
@@ -179,7 +230,9 @@ const idpClient = vendorIdp.addClient('IntegOperatorClient', {
 // second gets the same role and must still be refused. Both may also ask
 // for `control-plane/other`, which stands in for another API's scope.
 const idpDomain = vendorIdp.addDomain('VendorIdpDomain', {
-  cognitoDomain: { domainPrefix: `cp-integ-${accountA}` },
+  // A domain prefix is unique per Region across accounts: the fleet name
+  // separates runs, the account id separates accounts.
+  cognitoDomain: { domainPrefix: `${fleetName}-${accountA}` },
 });
 const readScope = new cognito.ResourceServerScope({ scopeName: 'read', scopeDescription: 'Integ test machine reads' });
 const otherScope = new cognito.ResourceServerScope({ scopeName: 'other', scopeDescription: 'Integ test stand-in for another API' });
@@ -280,15 +333,42 @@ new s3deploy.BucketDeployment(setup, 'DeployTenantScripts', {
   sources: [s3deploy.Source.asset(path.join(__dirname, '../scripts/sample-tenant'))],
 });
 
+// Hook scripts and Z's tenant create script (test-only, test/integ-scripts).
+// The hook script reads the fleet name from a file shipped beside it, because
+// the control plane hands a hook no such value (R-42).
+new s3deploy.BucketDeployment(setup, 'DeployHookScripts', {
+  destinationBucket: scriptsBucket,
+  destinationKeyPrefix: 'scripts/integ-hook',
+  sources: [
+    s3deploy.Source.asset(path.join(__dirname, 'integ-scripts/hook')),
+    s3deploy.Source.data('fleet-name.txt', fleetName),
+  ],
+});
+new s3deploy.BucketDeployment(setup, 'DeployZTenantScripts', {
+  destinationBucket: scriptsBucket,
+  destinationKeyPrefix: 'scripts/integ-z',
+  sources: [s3deploy.Source.asset(path.join(__dirname, 'integ-scripts/z-tenant'))],
+});
+
 // The assertion provider runs in account A. To check what the scripts did
 // in account B, this probe assumes a read-only role there (installed by the
 // account B stack below, trusted by this function's role) and counts SSM
 // parameters: by path (recursive) and/or by exact names. Returns the count.
-const probeRoleName = 'control-plane-integ-probe';
+const probeRoleName = `${fleetName}-probe`;
 const probeRoleArn = `arn:${setup.partition}:iam::${accountB}:role/${probeRoleName}`;
+// The probe function's role has a physical name so account B's probe role can
+// trust it by an exact ARN: a generated name is cut at 64 characters, which a
+// fleet name of 32 characters and the stack name's other parts would exceed.
+const ssmProbeRoleName = `${fleetName}-ssm-probe`;
+const ssmProbeRole = new iam.Role(setup, 'SsmProbeRole', {
+  roleName: ssmProbeRoleName,
+  assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+  managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole')],
+});
 const ssmProbe = new lambda.Function(setup, 'SsmProbe', {
   runtime: lambda.Runtime.NODEJS_24_X,
   handler: 'index.handler',
+  role: ssmProbeRole,
   timeout: Duration.seconds(30),
   code: lambda.Code.fromInline(`
     const { STSClient, AssumeRoleCommand } = require('@aws-sdk/client-sts');
@@ -304,10 +384,10 @@ const ssmProbe = new lambda.Function(setup, 'SsmProbe', {
         credentials: { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken },
       });
       let count = 0;
-      if (event.path) {
+      for (const path of [event.path, ...(event.paths || [])].filter(Boolean)) {
         let token;
         do {
-          const page = await ssm.send(new GetParametersByPathCommand({ Path: event.path, Recursive: true, NextToken: token }));
+          const page = await ssm.send(new GetParametersByPathCommand({ Path: path, Recursive: true, NextToken: token }));
           count += (page.Parameters || []).length;
           token = page.NextToken;
         } while (token);
@@ -360,12 +440,72 @@ buildProbe.addToRolePolicy(new iam.PolicyStatement({
   resources: [setup.formatArn({ service: 'codebuild', resource: 'project', resourceName: '*' })],
 }));
 
+// The step probe: runs a list of checks (API calls, SSM reads, and what the
+// test's hooks recorded together with when each script ran) in one invocation
+// and returns "ok" or what failed. An assertion stack holds 200 outputs at
+// most and every assertion is one, so the checks between two waits are one
+// invocation. The code is a plain JavaScript asset (an inline function may not
+// be this long); the Lambda runtime provides the SDK clients it uses.
+const ssmParameterArn = (parameterPath: string) =>
+  setup.formatArn({ service: 'ssm', resource: 'parameter', resourceName: parameterPath, arnFormat: ArnFormat.SLASH_RESOURCE_NAME });
+const stepProbe = new lambda.Function(setup, 'StepProbe', {
+  runtime: lambda.Runtime.NODEJS_24_X,
+  handler: 'index.handler',
+  timeout: Duration.minutes(5),
+  code: lambda.Code.fromAsset(path.join(__dirname, 'integ-scripts/probe')),
+});
+stepProbe.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParametersByPath', 'ssm:DeleteParameters'],
+  resources: [ssmParameterArn(`cp-integ/${fleetName}`), ssmParameterArn(`cp-integ/${fleetName}/*`)],
+}));
+stepProbe.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['ssm:GetParameters', 'ssm:GetParametersByPath'],
+  resources: [ssmParameterArn('application-plane'), ssmParameterArn('application-plane/*')],
+}));
+stepProbe.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['codebuild:ListBuildsForProject', 'codebuild:BatchGetBuilds'],
+  resources: [setup.formatArn({ service: 'codebuild', resource: 'project', resourceName: `${fleetName}-*` })],
+}));
+
+// The two customer-managed policies the stack attaches to its hook roles
+// (R-41, globalHookManagedPolicyArns and appHookManagedPolicyArns). Each lets
+// its hook role write SSM parameters under its own test path in A and nowhere
+// else. The application hook policy also allows what the R-41 deny must
+// override: StartExecution on the workflow, named by its computed ARN, and
+// Invoke on every function of the account (the API function's name is
+// generated; a request with a qualifier matches the same wildcard). The
+// policies exist before the stack because it validates the ARNs at synth.
+const hookPolicyArn = (scope: 'global' | 'app') => `arn:${partition}:iam::${accountA}:policy/${hookPolicyName(scope)}`;
+new iam.ManagedPolicy(setup, 'GlobalHookTestPolicy', {
+  managedPolicyName: hookPolicyName('global'),
+  description: 'control-plane integ test only: the global hook role may record under its own test path',
+  statements: [
+    new iam.PolicyStatement({ actions: ['ssm:PutParameter'], resources: [ssmParameterArn(`${hookLedgerRoot.slice(1)}/global/*`)] }),
+  ],
+});
+new iam.ManagedPolicy(setup, 'AppHookTestPolicy', {
+  managedPolicyName: hookPolicyName('app'),
+  description: 'control-plane integ test only: the application hook role may record under its own test path, and holds two grants the R-41 deny must override',
+  statements: [
+    new iam.PolicyStatement({ actions: ['ssm:PutParameter'], resources: [ssmParameterArn(`${hookLedgerRoot.slice(1)}/app/*`)] }),
+    new iam.PolicyStatement({
+      actions: ['states:StartExecution'],
+      resources: [`arn:${partition}:states:${region}:${accountA}:stateMachine:${fleetName}-workflow`],
+    }),
+    new iam.PolicyStatement({
+      actions: ['lambda:InvokeFunction'],
+      resources: [`arn:${partition}:lambda:${region}:${accountA}:function:*`],
+    }),
+  ],
+});
+
 // --- Account B stack: the role pair a customer installs + the test probe role
 // Deployed into B with A's credentials (B is bootstrapped to trust A). The
 // pair trusts A's build roles by ARN with the external id; nothing in A has
 // to exist first (the trust is account + aws:PrincipalArn, ADR-025).
-const accountBStack = new CellAccountStack(app, 'control-plane-integ-account-b', {
+const accountBStack = new CellAccountStack(app, `${fleetName}-account-b`, {
   controlPlaneAccountId: accountA,
+  fleetName,
   externalId: accountBExternalId,
   // The sample cell script reads its application's demo shared parameter
   // (ADR-034); B hosts cells of Y only.
@@ -376,7 +516,7 @@ const probeRole = new iam.Role(accountBStack, 'IntegProbeRole', {
   roleName: probeRoleName,
   description: 'control-plane integ test only: lets the probe Lambda in the control plane account count SSM parameters here',
   assumedBy: new iam.PrincipalWithConditions(new iam.AccountPrincipal(accountA), {
-    ArnLike: { 'aws:PrincipalArn': `arn:${accountBStack.partition}:iam::${accountA}:role/control-plane-integ-setup-SsmProbe*` },
+    ArnEquals: { 'aws:PrincipalArn': `arn:${accountBStack.partition}:iam::${accountA}:role/${ssmProbeRoleName}` },
   }),
 });
 probeRole.addToPolicy(new iam.PolicyStatement({
@@ -416,12 +556,17 @@ const definitionX = { ...definition, ...declarationsX };
 /** The values every CreateDeployment of X supplies until step 14 says otherwise. */
 const parametersX = { ALLOWED_EMAIL_DOMAIN: 'example.com' };
 
-const stack = new TenantStack(app, 'control-plane-integ', {
+const stack = new TenantStack(app, fleetName, {
+  env: { account: accountA, region },
+  fleetName,
   vendorIdpIssuerUrl: vendorIdp.userPoolProviderUrl,
   vendorIdpAudience: idpClient.userPoolClientId,
   // The sample cell script reads each application's shared parameter in the
   // account it runs in (ADR-034); A hosts cells of both applications.
-  demoApplicationIds: [APP_X, APP_Y],
+  demoApplicationIds: [APP_X, APP_Y, APP_Z],
+  // R-41: one test policy per hook role (above).
+  globalHookManagedPolicyArns: [hookPolicyArn('global')],
+  appHookManagedPolicyArns: [hookPolicyArn('app')],
   // R-36: the reader user's role gets the GET-only grant (step 1).
   readerRoles: ['control-plane:reader'],
   // R-38: the listed machine client's token has no `aud` (step 1).
@@ -433,10 +578,23 @@ const stack = new TenantStack(app, 'control-plane-integ', {
 // assumes the account's provisioning role).
 scriptsBucket.grantRead(stack.provisioning.cellProject);
 scriptsBucket.grantRead(stack.provisioning.tenantProject);
+// The hook projects fetch the hooks' source from the same bucket, under the
+// hook roles (their source read is the deployer's grant, as for the
+// provisioning projects).
+scriptsBucket.grantRead(stack.provisioning.globalHookProject);
+scriptsBucket.grantRead(stack.provisioning.appHookProject);
+// Application Z's two parameters that name the stack's own resources: R-42
+// hands a hook neither, so Z's defaults carry them (step 16).
+const apiFunctionName = (stack.node.findChild('ApiFunctionName') as CfnOutput).value as string;
+const stateMachineArn = (stack.node.findChild('StateMachineArn') as CfnOutput).value as string;
 
 // --- Assertions --------------------------------------------------------------
-const integ = new IntegTest(app, 'ControlPlaneInteg', {
+// The assertion stack is ours, so that it names its environment like the
+// other stacks of A and carries the fleet name.
+const assertionStack = new Stack(app, `${fleetName}-assert`, { env: { account: accountA, region } });
+const integ = new IntegTest(app, `ControlPlaneInteg${runId}`, {
   testCases: [setup, accountBStack, stack],
+  assertionStack,
   // INFO makes the assertion provider log each request/response to
   // CloudWatch - invaluable when an ApiCall attribute fails to resolve.
   providerLogLevel: ApplicationLogLevel.INFO,
@@ -470,6 +628,7 @@ class HarnessScannerSuppressions implements IAspect {
           checkov: [{ id: 'CKV_AWS_158', comment: HARNESS_REASON }],
         });
         break;
+      case 'AWS::IAM::ManagedPolicy':
       case 'AWS::IAM::Policy':
       case 'AWS::IAM::Role':
         suppressTemplateScanners(node, {
@@ -532,11 +691,64 @@ function expectBuildParameters(check: string, project: 'cell' | 'tenant', parame
 }
 
 /** Counts SSM parameters in account B through the probe (path and/or names). */
-function probeB(id: string, query: { path?: string; names?: string[] }) {
+function probeB(id: string, query: { path?: string; paths?: string[]; names?: string[] }) {
   return integ.assertions.invokeFunction({
     functionName: ssmProbe.functionName,
     payload: JSON.stringify({ roleArn: probeRoleArn, region, ...query }),
   });
+}
+
+type ProbeStep = Record<string, unknown>;
+
+/** A probe step that calls the API with the operator's, the reader's or the unlisted user's token. */
+function api(
+  name: string,
+  method: string,
+  apiPath: string,
+  status: number,
+  extra: { as?: 'operator' | 'reader' | 'unlisted'; body?: unknown; match?: unknown; errorType?: string } = {},
+): ProbeStep {
+  return {
+    kind: 'http',
+    name,
+    method,
+    url: `${apiUrl}${apiPath}`,
+    as: extra.as ?? 'operator',
+    status,
+    body: extra.body === undefined ? undefined : JSON.stringify(extra.body),
+    match: extra.match,
+    errorType: extra.errorType,
+  };
+}
+
+/** A probe step that compares what the hooks recorded and when the scripts ran (step 16) with `expect`. */
+function ledger(name: string, check: string, expect: unknown, extra: Record<string, unknown> = {}): ProbeStep {
+  return { kind: 'ledger', name, check, expect, ...extra };
+}
+
+/**
+ * One probe invocation: the steps in order, expected to return "ok". `labelled`
+ * lets the steps that read the ledger name tenants, cells and accounts by label
+ * (A, T1, T2, cell1..cell4): pass it only once all of those ids exist.
+ */
+function probeBatch(steps: ProbeStep[], labelled = false) {
+  const labels = labelled
+    ? [[accountA, 'A'], [accountB, 'B'], [tenantId1, 'T1'], [tenantId2, 'T2'],
+      [cellId1, 'cell1'], [cellId2, 'cell2'], [cellId3, 'cell3'], [cellId4, 'cell4']]
+    : [];
+  return integ.assertions
+    .invokeFunction({
+      functionName: stepProbe.functionName,
+      payload: JSON.stringify({
+        fleetName,
+        cellProject: stack.provisioning.cellProject.projectName,
+        tenantProject: stack.provisioning.tenantProject.projectName,
+        labels,
+        headers: { operator: authHeaders, reader: readerHeaders, unlisted: unlistedIdentity.headers },
+        steps,
+      }),
+    })
+    .expect(ExpectedResult.objectLike({ Payload: '"ok"' }));
 }
 
 // 1. No vendor JWT → API Gateway rejects before any Lambda runs.
@@ -655,39 +867,23 @@ const readerHeaders = readerIdentity.headers;
 
 // 2. Applications (ADR-032). The generated validators reject an incomplete
 //    definition and an id outside the charset before the handler runs.
-const putApplicationMissingScript = integ.assertions
-  .httpApiCall(`${apiUrl}applications/${APP_X}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify({ ...definition, cellScripts: { create: definition.cellScripts.create, update: definition.cellScripts.update } }),
-  })
-  .expect(ExpectedResult.objectLike({ status: 400 }));
-const putApplicationBadId = integ.assertions
-  .httpApiCall(`${apiUrl}applications/Integ_X`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: JSON.stringify(definition),
-  })
-  .expect(ExpectedResult.objectLike({ status: 400 }));
-
 // Parameter declarations are validated with the definition (§4.1): a
 // lower-case name, a duplicate, a required parameter with a default, a cell
-// parameter without one, and one name in both lists are each a 400.
-const badDeclarations = [
-  { parameters: [{ name: 'log_level' }] },
-  { parameters: [{ name: 'LOG_LEVEL' }, { name: 'LOG_LEVEL' }] },
-  { parameters: [{ name: 'ALLOWED_EMAIL_DOMAIN', required: true, default: 'example.com' }] },
-  { cellParameters: [{ name: 'CELL_SIZE' }] },
-  { parameters: [{ name: 'CELL_SIZE' }], cellParameters: [{ name: 'CELL_SIZE', default: 'small' }] },
-].map((lists) =>
-  integ.assertions
-    .httpApiCall(`${apiUrl}applications/${APP_X}`, {
-      method: 'PUT',
-      headers: authHeaders,
-      body: JSON.stringify({ ...definition, ...lists }),
-    })
-    .expect(ExpectedResult.objectLike({ status: 400 })),
-);
+// parameter without one, and one name in both lists are each a 400. So are a
+// missing script and an id outside the charset. One probe batch.
+const applicationRefusals = probeBatch([
+  api('PutApplication missing script', 'PUT', `applications/${APP_X}`, 400, {
+    body: { ...definition, cellScripts: { create: definition.cellScripts.create, update: definition.cellScripts.update } },
+  }),
+  api('PutApplication bad id', 'PUT', 'applications/Integ_X', 400, { body: definition }),
+  ...[
+    { parameters: [{ name: 'log_level' }] },
+    { parameters: [{ name: 'LOG_LEVEL' }, { name: 'LOG_LEVEL' }] },
+    { parameters: [{ name: 'ALLOWED_EMAIL_DOMAIN', required: true, default: 'example.com' }] },
+    { cellParameters: [{ name: 'CELL_SIZE' }] },
+    { parameters: [{ name: 'CELL_SIZE' }], cellParameters: [{ name: 'CELL_SIZE', default: 'small' }] },
+  ].map((lists, i) => api(`PutApplication bad declarations ${i + 1}`, 'PUT', `applications/${APP_X}`, 400, { body: { ...definition, ...lists } })),
+]);
 
 /** X's declarations as GetApplication returns them (spec §10 step 2). */
 const declaredX = {
@@ -766,7 +962,7 @@ const putAccountANotEnforcingExternalId = integ.assertions
   .expect(
     ExpectedResult.objectLike({
       status: 400,
-      body: { message: Match.stringLikeRegexp('control-plane-cell-provisioning does not require the external id') },
+      body: { message: Match.stringLikeRegexp(`${fleetName}-cell-provisioning does not require the external id`) },
     }),
   );
 
@@ -807,7 +1003,7 @@ const putAccountBWrongExternalId = integ.assertions
   .expect(
     ExpectedResult.objectLike({
       status: 400,
-      body: { message: Match.stringLikeRegexp('control-plane-(cell|tenant)-provisioning could not be assumed') },
+      body: { message: Match.stringLikeRegexp(`${fleetName}-(cell|tenant)-provisioning could not be assumed`) },
     }),
   );
 
@@ -901,54 +1097,20 @@ const listCellsNone = integ.assertions
 // something to return and its writes have something to change. API Gateway
 // refuses every write against the reader's GET-only policy (403); the
 // operator's read afterwards proves nothing was written.
-const readerListTenants = integ.assertions
-  .httpApiCall(`${apiUrl}tenants`, { method: 'GET', headers: readerHeaders })
-  .expect(
-    ExpectedResult.objectLike({
-      status: 200,
-      body: { tenants: [{ tenantId: tenantId1 }, { tenantId: tenantId2 }, { tenantId: tenantId3 }] },
-    }),
-  );
-const readerGetTenant1 = integ.assertions
-  .httpApiCall(`${apiUrl}tenants/${tenantId1}`, { method: 'GET', headers: readerHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { tenant: { tenantId: tenantId1 } } }));
-const readerGetApplication = integ.assertions
-  .httpApiCall(`${apiUrl}applications/${APP_X}`, { method: 'GET', headers: readerHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200 }));
-const readerCreateTenant = integ.assertions
-  .httpApiCall(`${apiUrl}tenants`, {
-    method: 'POST',
-    headers: readerHeaders,
-    body: JSON.stringify({ name: 'integ-reader-must-not-create' }),
-  })
-  .expect(ExpectedResult.objectLike({ status: 403 }));
-const readerUpdateTenant1 = integ.assertions
-  .httpApiCall(`${apiUrl}tenants/${tenantId1}`, {
-    method: 'PUT',
-    headers: readerHeaders,
-    body: JSON.stringify({ description: 'written by a reader' }),
-  })
-  .expect(ExpectedResult.objectLike({ status: 403 }));
-const readerDeleteTenant2 = integ.assertions
-  .httpApiCall(`${apiUrl}tenants/${tenantId2}`, { method: 'DELETE', headers: readerHeaders })
-  .expect(ExpectedResult.objectLike({ status: 403 }));
-const readerPutApplication = integ.assertions
-  .httpApiCall(`${apiUrl}applications/${APP_X}`, {
-    method: 'PUT',
-    headers: readerHeaders,
-    body: JSON.stringify(definition),
-  })
-  .expect(ExpectedResult.objectLike({ status: 403 }));
-const unlistedListTenants = integ.assertions
-  .httpApiCall(`${apiUrl}tenants`, { method: 'GET', headers: unlistedIdentity.headers })
-  .expect(ExpectedResult.objectLike({ status: 403 }));
-const unlistedCreateTenant = integ.assertions
-  .httpApiCall(`${apiUrl}tenants`, {
-    method: 'POST',
-    headers: unlistedIdentity.headers,
-    body: JSON.stringify({ name: 'integ-unlisted-must-not-create' }),
-  })
-  .expect(ExpectedResult.objectLike({ status: 403 }));
+const threeTenants = { tenants: [{ tenantId: tenantId1 }, { tenantId: tenantId2 }, { tenantId: tenantId3 }] };
+const readerAndUnlisted = probeBatch([
+  // The reader's first call is a POST, so its cached policy is filled by a
+  // write: its reads must still pass (R-36, grant-only policy).
+  api('reader CreateTenant', 'POST', 'tenants', 403, { as: 'reader', body: { name: 'integ-reader-must-not-create' } }),
+  api('reader ListTenants', 'GET', 'tenants', 200, { as: 'reader', match: threeTenants }),
+  api('reader GetTenant', 'GET', `tenants/${tenantId1}`, 200, { as: 'reader', match: { tenant: { tenantId: tenantId1 } } }),
+  api('reader GetApplication', 'GET', `applications/${APP_X}`, 200, { as: 'reader' }),
+  api('reader UpdateTenant', 'PUT', `tenants/${tenantId1}`, 403, { as: 'reader', body: { description: 'written by a reader' } }),
+  api('reader DeleteTenant', 'DELETE', `tenants/${tenantId2}`, 403, { as: 'reader' }),
+  api('reader PutApplication', 'PUT', `applications/${APP_X}`, 403, { as: 'reader', body: definition }),
+  api('unlisted ListTenants', 'GET', 'tenants', 403, { as: 'unlisted' }),
+  api('unlisted CreateTenant', 'POST', 'tenants', 403, { as: 'unlisted', body: { name: 'integ-unlisted-must-not-create' } }),
+]);
 // 1 (machine clients, R-38). A client-credentials token has no `aud` and a
 // `sub` equal to its client id. The listed client reads and is refused on a
 // write; the unlisted client, with the same role, is refused on a read; the
@@ -972,22 +1134,12 @@ const machineOtherScopeListTenants = machineCall(
 
 // Nothing the reader, the unlisted role or the machine clients tried was
 // written: still three tenants, T1 unchanged.
-const listTenantsAfterReader = integ.assertions
-  .httpApiCall(`${apiUrl}tenants`, { method: 'GET', headers: authHeaders })
-  .expect(
-    ExpectedResult.objectLike({
-      status: 200,
-      body: { tenants: [{ tenantId: tenantId1 }, { tenantId: tenantId2 }, { tenantId: tenantId3 }] },
-    }),
-  );
-const getTenant1AfterReader = integ.assertions
-  .httpApiCall(`${apiUrl}tenants/${tenantId1}`, { method: 'GET', headers: authHeaders })
-  .expect(
-    ExpectedResult.objectLike({
-      status: 200,
-      body: { tenant: { tenantId: tenantId1, name: 'integ-tenant-1', description: 'created by the integ test' } },
-    }),
-  );
+const afterReader = probeBatch([
+  api('ListTenants', 'GET', 'tenants', 200, { match: threeTenants }),
+  api('GetTenant T1', 'GET', `tenants/${tenantId1}`, 200, {
+    match: { tenant: { tenantId: tenantId1, name: 'integ-tenant-1', description: 'created by the integ test' } },
+  }),
+]);
 
 const updateTenant3 = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId3}`, {
@@ -1108,19 +1260,18 @@ const getCell1 = integ.assertions
   );
 
 // 1 (reader, continued, R-36): with a deployment, a cell and both accounts in
-// place, the reader's other seven GET operations return 200 as well, so all
-// ten reader operations are proven live.
-const readerReads = [
-  `${apiUrl}deployments?tenantId=${tenantId1}`,
-  `${apiUrl}tenants/${tenantId1}/deployments/${APP_X}`,
-  `${apiUrl}cells`,
-  `${apiUrl}cells/${cellId1}`,
-  `${apiUrl}accounts`,
-  `${apiUrl}accounts/${accountA}`,
-  `${apiUrl}applications`,
-].map((url) => integ.assertions
-  .httpApiCall(url, { method: 'GET', headers: readerHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200 })));
+// place, the reader's other seven GET operations return 200 as well; GetHook
+// and ListHooks follow in step 16, once a hook is registered, so all twelve
+// reader operations are proven live.
+const readerReads = probeBatch([
+  `deployments?tenantId=${tenantId1}`,
+  `tenants/${tenantId1}/deployments/${APP_X}`,
+  'cells',
+  `cells/${cellId1}`,
+  'accounts',
+  `accounts/${accountA}`,
+  'applications',
+].map((apiPath) => api(`reader GET ${apiPath}`, 'GET', apiPath, 200, { as: 'reader' })));
 
 // The three counters moved together (P-6): A 1/2, X 1 cell, T1 1 deployment.
 const getAccountAOne = integ.assertions
@@ -1728,7 +1879,408 @@ const waitForT2XActive = integ.assertions
   .waitForAssertions(singleBuildPoll);
 const t2XCreateParameters = expectBuildParameters('t2x-create', 'tenant', { PARAM_LOG_LEVEL: 'warn', PARAM_TIER: 'gold' });
 
-// 16. Teardown. Delete the remaining deployments T2/X, T1/Y, T2/Y …
+// 16. Hooks (ADR-044, spec §10 step 16). Global hooks are registered through
+//     the API; application hooks are part of Z's definition and are stamped
+//     onto its cells. Both kinds run the one test hook script, which records
+//     what it saw in the ledger (see the probe above) and fails on demand.
+//     Hook builds poll every 60 seconds (R-46), so every hook adds about two
+//     minutes to the event it wraps. The checks between two waits run as one
+//     probe batch (an assertion stack holds 200 outputs at most).
+const HOOK_G = 'g-audit';
+const HOOK_P = 'p-gate';
+const allHookEvents = ['CELL_CREATE', 'CELL_UPDATE', 'CELL_DELETE', 'DEPLOYMENT_CREATE', 'DEPLOYMENT_UPDATE', 'DEPLOYMENT_DELETE'];
+const hookScript = 'integ-hook/hook.sh';
+/** A hook definition of the test hook script; 5 minutes is the smallest run timeout the spec allows. */
+function hookDefinition(events: string[], phase: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { events, phase, source: definition.source, script: hookScript, timeoutMinutes: 5, ...extra };
+}
+const hookG = { hookId: HOOK_G, phase: 'POST', script: hookScript, timeoutMinutes: 5, source: definition.source };
+
+// Application Z: Y's source and scripts (but for one tenant create script that
+// writes a script output, R-43), two tenants per cell, three parameters and
+// two application hooks. HOOK_FAIL steers the hooks; the other two carry the
+// API function's name and the workflow's ARN, which R-42 hands a hook neither
+// of, from the stack's outputs.
+const appHookDefinitions = [
+  { hookId: 'a-pre', ...hookDefinition(['DEPLOYMENT_DELETE'], 'PRE') },
+  { hookId: 'b-post', ...hookDefinition(['DEPLOYMENT_CREATE'], 'POST') },
+];
+const definitionZ = {
+  ...definition,
+  maxTenants: 2,
+  tenantScripts: { ...definition.tenantScripts, create: 'integ-z/create.sh' },
+  parameters: [
+    { name: 'HOOK_FAIL', default: 'no' },
+    { name: 'API_FUNCTION_NAME', default: apiFunctionName },
+    { name: 'WORKFLOW_ARN', default: stateMachineArn },
+  ],
+  hooks: appHookDefinitions,
+};
+const fillerIds = ['filler-1', 'filler-2', 'filler-3', 'filler-4'];
+
+// The hook API and application Z, in one batch. A definition that breaks R-39
+// in one field each (an unknown event, a phase outside PRE|POST, a timeout of 4
+// and of 31, a script path with a space, a source location with userinfo, a
+// source ref holding a control character, an empty event list, a repeated
+// event) is a 400, and so is a reader's PutHook with a 403, nothing written.
+// G (POST, all six events) registers at revision 1 and re-sent unchanged at 2.
+// The hook counter (P-6): four more hooks make five, the sixth is a 409
+// ConflictError whose remedy is DeleteHook; the four are deleted again, the
+// first one twice, the second delete a 404. With a hook registered, the
+// reader's last two GET operations return 200, so all twelve are proven live
+// (step 1, R-36). None of the hooks registered here runs: no operation is
+// accepted while they exist.
+const hooksApi = probeBatch([
+  api('ListHooks empty', 'GET', 'hooks', 200, { match: { hooks: [] } }),
+  ...[
+    ['unknown event', hookDefinition(['CELL_NOPE'], 'POST')],
+    ['phase outside PRE|POST', hookDefinition(['CELL_CREATE'], 'MID')],
+    ['timeout of 4', hookDefinition(['CELL_CREATE'], 'POST', { timeoutMinutes: 4 })],
+    ['timeout of 31', hookDefinition(['CELL_CREATE'], 'POST', { timeoutMinutes: 31 })],
+    ['script path with a space', hookDefinition(['CELL_CREATE'], 'POST', { script: 'integ hook/hook.sh' })],
+    ['source location with userinfo', hookDefinition(['CELL_CREATE'], 'POST', { source: { type: 'GITHUB', location: 'https://u:p@host/r.git' } })],
+    // JSON.stringify sends the U+0001 as the escape \u0001.
+    ['source ref with a control character', hookDefinition(['CELL_CREATE'], 'POST', { source: { ...definition.source, sourceVersion: 'ma\u0001in' } })],
+    ['empty event list', hookDefinition([], 'POST')],
+    ['repeated event', hookDefinition(['CELL_CREATE', 'CELL_CREATE'], 'POST')],
+  ].map(([name, body]) => api(`PutHook refused: ${name as string}`, 'PUT', 'hooks/refused', 400, { body })),
+  api('reader PutHook', 'PUT', `hooks/${HOOK_G}`, 403, { as: 'reader', body: hookDefinition(allHookEvents, 'POST') }),
+  api('GetHook unregistered', 'GET', `hooks/${HOOK_G}`, 404),
+  api('DeleteHook unregistered', 'DELETE', `hooks/${HOOK_G}`, 404),
+  api('ListHooks still empty', 'GET', 'hooks', 200, { match: { hooks: [] } }),
+  api('PutHook G', 'PUT', `hooks/${HOOK_G}`, 200, { body: hookDefinition(allHookEvents, 'POST'), match: { hook: { ...hookG, revision: 1 } } }),
+  api('PutHook G again', 'PUT', `hooks/${HOOK_G}`, 200, { body: hookDefinition(allHookEvents, 'POST'), match: { hook: { ...hookG, revision: 2 } } }),
+  api('GetHook G', 'GET', `hooks/${HOOK_G}`, 200, { match: { hook: { ...hookG, revision: 2 } } }),
+  api('reader GetHook', 'GET', `hooks/${HOOK_G}`, 200, { as: 'reader', match: { hook: { hookId: HOOK_G } } }),
+  api('reader ListHooks', 'GET', 'hooks', 200, { as: 'reader', match: { hooks: [{ hookId: HOOK_G }] } }),
+  ...fillerIds.map((hookId) => api(`PutHook ${hookId}`, 'PUT', `hooks/${hookId}`, 200, {
+    body: hookDefinition(['CELL_DELETE'], 'POST'),
+    match: { hook: { hookId, revision: 1 } },
+  })),
+  api('PutHook sixth', 'PUT', 'hooks/filler-5', 409, { body: hookDefinition(['CELL_DELETE'], 'POST'), errorType: 'ConflictError' }),
+  api('ListHooks five', 'GET', 'hooks', 200, { match: { hooks: [...fillerIds, HOOK_G].map((hookId) => ({ hookId })) } }),
+  ...fillerIds.map((hookId) => api(`DeleteHook ${hookId}`, 'DELETE', `hooks/${hookId}`, 200, { match: { hook: { hookId } } })),
+  api('DeleteHook again', 'DELETE', `hooks/${fillerIds[0]}`, 404),
+  api('ListHooks G alone', 'GET', 'hooks', 200, { match: { hooks: [{ hookId: HOOK_G }] } }),
+  // Cell 4 needs room: A takes a third cell.
+  api('PutAccount A', 'PUT', `accounts/${accountA}`, 200, {
+    body: { owner: 'VENDOR', maxCells: 3 },
+    match: { account: { accountId: accountA, maxCells: 3, cellCount: 2 } },
+  }),
+  // A repeated hook id, six hooks and an id outside the charset are each a 400.
+  api('PutApplication Z repeated hook id', 'PUT', `applications/${APP_Z}`, 400, {
+    body: { ...definitionZ, hooks: [appHookDefinitions[0], appHookDefinitions[0]] },
+  }),
+  api('PutApplication Z six hooks', 'PUT', `applications/${APP_Z}`, 400, {
+    body: { ...definitionZ, hooks: Array.from({ length: 6 }, (_, i) => ({ ...appHookDefinitions[0], hookId: `hook-${i}` })) },
+  }),
+  api('PutApplication Z bad hook id', 'PUT', `applications/${APP_Z}`, 400, {
+    body: { ...definitionZ, hooks: [{ ...appHookDefinitions[0], hookId: 'A_PRE' }] },
+  }),
+  api('PutApplication Z', 'PUT', `applications/${APP_Z}`, 200, {
+    body: definitionZ,
+    match: {
+      application: {
+        applicationId: APP_Z,
+        maxTenants: 2,
+        cellCount: 0,
+        hooks: [{ hookId: 'a-pre', phase: 'PRE' }, { hookId: 'b-post', phase: 'POST' }],
+      },
+    },
+  }),
+]);
+
+// T1/Z creates cell 4 in A: the cell create script, then the tenant create
+// script, each with its hooks. Z's parameters all have defaults. Three hook
+// builds and two script builds run in this one execution.
+const createT1Z = integ.assertions.httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments`, {
+  method: 'POST',
+  headers: authHeaders,
+  body: JSON.stringify({ applicationId: APP_Z, adminEmail: 'success+integ-t1-z@simulator.amazonses.com' }),
+});
+const cellId4 = createT1Z.getAttString('body.deployment.cellId');
+const waitForT1ZActive = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments/${APP_Z}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { deployment: { status: 'ACTIVE', cellId: cellId4 } } }))
+  .waitForAssertions(newCellPoll);
+
+// The order everything ran in (R-45): the cell create script, G on
+// CELL_CREATE, the tenant create script, the application post hook, then the
+// global post hook, so global hooks wrap the application's. Each story is
+// cumulative, so a hook or a script that ran and should not have shows up.
+const storyCreated = [
+  'script create cell',
+  `hook GLOBAL/${HOOK_G} CELL_CREATE POST a1`,
+  'script create tenant T1',
+  'hook APPLICATION/b-post DEPLOYMENT_CREATE POST T1 a1',
+  `hook GLOBAL/${HOOK_G} DEPLOYMENT_CREATE POST T1 a1`,
+];
+const storyUpdated = [...storyCreated, 'script update tenant T1', `hook GLOBAL/${HOOK_G} DEPLOYMENT_UPDATE POST T1 a1`];
+const storyCellUpdated = [...storyUpdated, 'script update cell', `hook GLOBAL/${HOOK_G} CELL_UPDATE POST a1`];
+const storyGated = [...storyCellUpdated, `hook GLOBAL/${HOOK_P} DEPLOYMENT_CREATE PRE T2 a1`];
+const storyDeleteFailing = [
+  ...storyGated,
+  'hook APPLICATION/a-pre DEPLOYMENT_DELETE PRE T2 a1',
+  'hook APPLICATION/a-pre DEPLOYMENT_DELETE PRE T2 a2',
+  'hook APPLICATION/a-pre DEPLOYMENT_DELETE PRE T2 a3',
+  'script delete tenant T2',
+  `hook GLOBAL/${HOOK_G} DEPLOYMENT_DELETE POST T2 a1`,
+];
+const storyPostFailed = [...storyDeleteFailing, 'script create tenant T2', 'hook APPLICATION/b-post DEPLOYMENT_CREATE POST T2 a1'];
+const storyDeletePassing = [
+  ...storyPostFailed,
+  'hook APPLICATION/a-pre DEPLOYMENT_DELETE PRE T2 a1',
+  'script delete tenant T2',
+  `hook GLOBAL/${HOOK_G} DEPLOYMENT_DELETE POST T2 a1`,
+];
+const storyDeleteT1 = [
+  ...storyDeletePassing,
+  'hook APPLICATION/a-pre DEPLOYMENT_DELETE PRE T1 a1',
+  'script delete tenant T1',
+  `hook GLOBAL/${HOOK_G} DEPLOYMENT_DELETE POST T1 a1`,
+];
+const storyCellDeleted = [...storyDeleteT1, 'script delete cell', `hook GLOBAL/${HOOK_G} CELL_DELETE POST a1`];
+
+// What a hook record holds, as the probe returns it.
+const allowedParams = ['PARAM_API_FUNCTION_NAME', 'PARAM_HOOK_FAIL', 'PARAM_WORKFLOW_ARN'];
+const recordOf = (fields: Record<string, unknown>) => ({
+  ATTEMPT: '1',
+  APPLICATION_ID: APP_Z,
+  CELL_ACCOUNT_ID: 'A',
+  CELL_ID: 'cell4',
+  PHASE: 'POST',
+  PARAM_HOOK_FAIL: 'no',
+  denied: null,
+  hasExecutionId: true,
+  hasOperatorId: true,
+  paramNames: allowedParams,
+  scriptOutputsSet: true,
+  tenantNameSet: true,
+  ...fields,
+});
+// Cell 4 and T1/Z as the API reports them: the stamped application hooks, the
+// global hook that ran in the last event with the revision it ran at (R-40),
+// and the counters. An S3 source names no ref and reports no resolved commit,
+// so those two fields of `lastGlobalHooks` are absent; the test has no git
+// source to resolve (integration-test.md).
+const lastGlobalHooksG = [{ hookId: HOOK_G, phase: 'POST', revision: 2 }];
+const t1ZCreated = probeBatch([
+  api('GetCell 4', 'GET', `cells/${cellId4}`, 200, {
+    match: {
+      cell: {
+        cellId: cellId4,
+        applicationId: APP_Z,
+        accountId: accountA,
+        status: 'ACTIVE',
+        tenantCount: 1,
+        maxTenants: 2,
+        hooks: [
+          { hookId: 'a-pre', phase: 'PRE', events: ['DEPLOYMENT_DELETE'] },
+          { hookId: 'b-post', phase: 'POST', events: ['DEPLOYMENT_CREATE'] },
+        ],
+        lastGlobalHooks: lastGlobalHooksG,
+      },
+    },
+  }),
+  api('GetDeployment T1/Z', 'GET', `tenants/${tenantId1}/deployments/${APP_Z}`, 200, {
+    match: {
+      deployment: { status: 'ACTIVE', cellId: cellId4, lastGlobalHooks: lastGlobalHooksG },
+      hooks: [{ hookId: 'a-pre' }, { hookId: 'b-post' }],
+    },
+  }),
+  api('GetAccount A', 'GET', `accounts/${accountA}`, 200, { match: { account: { cellCount: 3, maxCells: 3 } } }),
+  api('GetApplication Z', 'GET', `applications/${APP_Z}`, 200, { match: { application: { cellCount: 1 } } }),
+  ledger('story after create', 'story', storyCreated, { cell: 'cell4' }),
+  // b-post on T1/Z's create (R-42): the event, the scope, the identities, the
+  // first attempt, the parameter the test drives, the script's output as the
+  // buildspec re-serialised it (compact: the script wrote a space after the
+  // colon), the hook role it ran under and, beside its refused SSM write, the
+  // refusals R-41's deny gives it: StartExecution on the workflow and Invoke
+  // of the API function, unqualified and with $LATEST, each with a forged read
+  // event.
+  ledger('b-post record', 'record', recordOf({
+    EVENT: 'DEPLOYMENT_CREATE',
+    HOOK_ID: 'b-post',
+    HOOK_SCOPE: 'APPLICATION',
+    SCRIPT_OUTPUTS: '{"endpoint":"T1.example.com"}',
+    TENANT_ID: 'T1',
+    callerRole: `${fleetName}-app-hook`,
+    denied: { invoke: 'AccessDenied', invokeLatest: 'AccessDenied', ssmWriteGlobal: 'AccessDenied', startExecution: 'AccessDenied' },
+  }), { hookId: 'b-post', event: 'DEPLOYMENT_CREATE', tenant: 'T1' }),
+  // G on CELL_CREATE: no tenant, no script output ({}), its own hook role.
+  ledger('G cell record', 'record', recordOf({
+    EVENT: 'CELL_CREATE',
+    HOOK_ID: HOOK_G,
+    HOOK_SCOPE: 'GLOBAL',
+    PARAM_HOOK_FAIL: '',
+    SCRIPT_OUTPUTS: '{}',
+    TENANT_ID: '',
+    callerRole: `${fleetName}-global-hook`,
+    paramNames: [],
+    tenantNameSet: false,
+  }), { hookId: HOOK_G, event: 'CELL_CREATE', cell: 'cell4' }),
+  // G on the deployment create gets the same script output as b-post.
+  ledger('G deployment record', 'record', recordOf({
+    EVENT: 'DEPLOYMENT_CREATE',
+    HOOK_ID: HOOK_G,
+    HOOK_SCOPE: 'GLOBAL',
+    SCRIPT_OUTPUTS: '{"endpoint":"T1.example.com"}',
+    TENANT_ID: 'T1',
+    callerRole: `${fleetName}-global-hook`,
+  }), { hookId: HOOK_G, event: 'DEPLOYMENT_CREATE', tenant: 'T1' }),
+  // No stray parameter under the test path (a successful denied write would be one).
+  ledger('strays', 'strays', [], {}),
+], true);
+
+// UpdateDeployment T1/Z runs G on DEPLOYMENT_UPDATE, in an execution of its
+// own; UpdateCell on cell 4 runs G on CELL_UPDATE, the one of G's six events
+// no other step reaches while G is registered.
+const updateT1Z = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments/${APP_Z}`, { method: 'PUT', headers: authHeaders });
+const waitForT1ZUpdated = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments/${APP_Z}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { deployment: { status: 'ACTIVE', lastGlobalHooks: lastGlobalHooksG } } }))
+  .waitForAssertions(singleBuildPoll);
+const updateCell4 = integ.assertions
+  .httpApiCall(`${apiUrl}cells/${cellId4}`, { method: 'PUT', headers: authHeaders });
+const waitForCell4Updated = integ.assertions
+  .httpApiCall(`${apiUrl}cells/${cellId4}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 200, body: { cell: { status: 'ACTIVE', lastGlobalHooks: lastGlobalHooksG } } }))
+  .waitForAssertions(singleBuildPoll);
+
+// P: a global PRE hook on DEPLOYMENT_CREATE that always fails, so it gates
+// every application. G's cell create and deployment create share an
+// execution; its update is another.
+const gateRegistered = probeBatch([
+  ledger('story after updates', 'story', storyCellUpdated, { cell: 'cell4' }),
+  ledger('G executions', 'executions', ['CELL_CREATE e1', 'DEPLOYMENT_CREATE T1 e1', 'DEPLOYMENT_UPDATE T1 e2', 'CELL_UPDATE e3'], {
+    hookId: HOOK_G,
+    cell: 'cell4',
+  }),
+  api('PutHook P', 'PUT', `hooks/${HOOK_P}`, 200, {
+    body: hookDefinition(['DEPLOYMENT_CREATE'], 'PRE'),
+    match: { hook: { hookId: HOOK_P, phase: 'PRE', revision: 1 } },
+  }),
+], true);
+
+// T2/Z's create (HOOK_FAIL = yes, which a-pre reads on the delete below) lands
+// in cell 4 and ends CREATE_FAILED with the hook named, before its script: no
+// tenant create script, no b-post, no G, no parameter.
+const createT2ZGated = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments`, {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify({
+      applicationId: APP_Z,
+      adminEmail: 'success+integ-t2-z@simulator.amazonses.com',
+      parameters: { HOOK_FAIL: 'yes' },
+    }),
+  });
+const t2ZParamName = `/application-plane/tenants/${tenantId2}/${APP_Z}`;
+const waitForT2ZGated = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments/${APP_Z}`, { method: 'GET', headers: authHeaders })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 200,
+      body: {
+        deployment: {
+          status: 'CREATE_FAILED',
+          cellId: cellId4,
+          // The reason names the scope and the hook id (the spec writes GLOBAL/p-gate).
+          statusReason: Match.stringLikeRegexp(`(GLOBAL/${HOOK_P}|global hook ${HOOK_P})`),
+        },
+      },
+    }),
+  )
+  .waitForAssertions(singleBuildPoll);
+const gated = probeBatch([
+  ledger('story after the gate', 'story', storyGated, { cell: 'cell4' }),
+  { kind: 'ssm', name: 'T2/Z parameter absent', names: [t2ZParamName], exists: false },
+  api('DeleteHook P', 'DELETE', `hooks/${HOOK_P}`, 200, { match: { hook: { hookId: HOOK_P } } }),
+  api('GetHook P', 'GET', `hooks/${HOOK_P}`, 404),
+], true);
+
+// DeleteDeployment T2/Z (CREATE_FAILED, HOOK_FAIL = yes): a-pre, a PRE hook,
+// fails three times (attempts 1, 2 and 3 of one execution, 60 and 120 seconds
+// apart, R-46); the skip is logged and counted, and the delete goes on: the
+// tenant delete script runs, G records DEPLOYMENT_DELETE after it, the record
+// goes and cell 4 drops to one tenant. A delete's hooks cannot stop it. The
+// hook's budget is 3 x (5 + 17) + 3 = 69 minutes; the attempts take about ten.
+const hookDeletePoll = {
+  totalTimeout: Duration.minutes(30),
+  interval: Duration.seconds(30),
+};
+const deleteT2ZFailing = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments/${APP_Z}`, { method: 'DELETE', headers: authHeaders });
+const waitForT2ZGoneFailing = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments/${APP_Z}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 404 }))
+  .waitForAssertions(hookDeletePoll);
+const deletedFailing = probeBatch([
+  ledger('story after the failing delete hook', 'story', storyDeleteFailing, { cell: 'cell4' }),
+  // The three attempts are one execution's.
+  ledger('a-pre attempts', 'attempts', [['1', '2', '3']], { hookId: 'a-pre', event: 'DEPLOYMENT_DELETE', tenant: 'T2' }),
+  api('GetCell 4', 'GET', `cells/${cellId4}`, 200, { match: { cell: { tenantCount: 1 } } }),
+], true);
+
+// A failing POST hook: T2/Z with HOOK_FAIL = post lands in cell 4, its tenant
+// create script runs and creates the parameter, b-post fails, and the record
+// ends CREATE_FAILED naming the hook; G does not run (a post hook runs only
+// after the hooks before it succeeded).
+const createT2ZPostFail = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments`, {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify({
+      applicationId: APP_Z,
+      adminEmail: 'success+integ-t2-z@simulator.amazonses.com',
+      parameters: { HOOK_FAIL: 'post' },
+    }),
+  });
+const waitForT2ZPostFailed = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments/${APP_Z}`, { method: 'GET', headers: authHeaders })
+  .expect(
+    ExpectedResult.objectLike({
+      status: 200,
+      body: { deployment: { status: 'CREATE_FAILED', statusReason: Match.stringLikeRegexp('(APPLICATION/b-post|application hook b-post)') } },
+    }),
+  )
+  .waitForAssertions(singleBuildPoll);
+const postFailed = probeBatch([
+  ledger('story after the failing post hook', 'story', storyPostFailed, { cell: 'cell4' }),
+  { kind: 'ssm', name: 'T2/Z parameter present', names: [t2ZParamName], exists: true },
+], true);
+
+// DeleteDeployment T2/Z again: a-pre passes now (HOOK_FAIL = post), the tenant
+// delete script empties the namespace and cell 4 is back to one tenant.
+const deleteT2ZPassing = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments/${APP_Z}`, { method: 'DELETE', headers: authHeaders });
+const waitForT2ZGonePassing = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments/${APP_Z}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 404 }))
+  .waitForAssertions(singleBuildPoll);
+const deletedPassing = probeBatch([
+  ledger('story after the passing delete', 'story', storyDeletePassing, { cell: 'cell4' }),
+  { kind: 'ssm', name: 'T2/Z parameter gone', names: [t2ZParamName], exists: false },
+  api('GetCell 4', 'GET', `cells/${cellId4}`, 200, { match: { cell: { tenantCount: 1 } } }),
+], true);
+
+// DeleteDeployment T1/Z: a-pre ran before the tenant delete script and G
+// after it. Cell 4 stays, empty, until step 17. ListHooks shows G alone.
+const deleteT1Z = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments/${APP_Z}`, { method: 'DELETE', headers: authHeaders });
+const waitForT1ZGone = integ.assertions
+  .httpApiCall(`${apiUrl}tenants/${tenantId1}/deployments/${APP_Z}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 404 }))
+  .waitForAssertions(singleBuildPoll);
+const deletedT1Z = probeBatch([
+  ledger('story after T1/Z is deleted', 'story', storyDeleteT1, { cell: 'cell4' }),
+  api('GetCell 4', 'GET', `cells/${cellId4}`, 200, { match: { cell: { status: 'ACTIVE', tenantCount: 0 } } }),
+  api('ListHooks G alone', 'GET', 'hooks', 200, { match: { hooks: [{ hookId: HOOK_G }] } }),
+], true);
+
+// 17. Teardown. Delete the remaining deployments T2/X, T1/Y, T2/Y (G, still
+//     registered, records a DEPLOYMENT_DELETE after each delete script) …
 const deleteT2X = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId2}/deployments/${APP_X}`, { method: 'DELETE', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 202, body: { deployment: { status: 'DELETING' } } }));
@@ -1764,13 +2316,6 @@ const getTenant1Zero = integ.assertions
 const getTenant2Zero = integ.assertions
   .httpApiCall(`${apiUrl}tenants/${tenantId2}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { tenant: { deploymentCount: 0 } } }));
-const checkTenantNamespaceEmptyA = integ.assertions
-  .awsApiCall('SSM', 'getParametersByPath', { Path: '/application-plane/tenants', Recursive: true })
-  .expect(ExpectedResult.objectLike({ Parameters: [] }));
-checkTenantNamespaceEmptyA.provider.addToRolePolicy(ssmReadPolicy);
-const probeTenantNamespaceEmptyB = probeB('ProbeTenantsEmptyB', { path: '/application-plane/tenants' })
-  .expect(ExpectedResult.objectLike({ Payload: '0' }));
-
 // … deprovision the three (now empty) cells; each record disappears when
 // the cell delete script has run and the terminal transaction released the
 // account's slot and the application's count (ADR-024, ADR-032) …
@@ -1801,12 +2346,44 @@ const waitForCell3Gone = integ.assertions
   .waitForAssertions(singleBuildPoll);
 const cell3DeleteParameters = expectBuildParameters('cell3-delete', 'cell', {});
 
+// Cell 4 (Z, in A): empty since step 16; G records its CELL_DELETE too.
+const deleteCell4 = integ.assertions
+  .httpApiCall(`${apiUrl}cells/${cellId4}`, { method: 'DELETE', headers: authHeaders });
+const waitForCell4Gone = integ.assertions
+  .httpApiCall(`${apiUrl}cells/${cellId4}`, { method: 'GET', headers: authHeaders })
+  .expect(ExpectedResult.objectLike({ status: 404 }))
+  .waitForAssertions(singleBuildPoll);
+// Cell 4's last event is its delete: the script, then G's CELL_DELETE. G
+// recorded a CELL_DELETE for every cell, in the order the cells were deleted.
+// This run's tenant and cell namespaces are empty in A (a check looks at this
+// run's ids only: another run may share the account and Region, spec §10), and
+// in B just below.
+const cellsDeleted = probeBatch([
+  ledger('story after the cell deletes', 'story', storyCellDeleted, { cell: 'cell4' }),
+  ledger(
+    'G cell deletes',
+    'cell-deletes',
+    ['cell1', 'cell2', 'cell3', 'cell4'].map((cell) => `hook GLOBAL/${HOOK_G} CELL_DELETE POST ${cell} a1`),
+  ),
+  {
+    kind: 'ssm',
+    name: 'namespaces empty in A',
+    paths: [tenantId1, tenantId2].map((id) => `/application-plane/tenants/${id}`)
+      .concat([cellId1, cellId2, cellId3, cellId4].map((id) => `/application-plane/cells/${id}`)),
+    count: 0,
+  },
+], true);
+const probeNamespacesEmptyB = probeB('ProbeNamespacesEmptyB', {
+  paths: [tenantId1, tenantId2].map((id) => `/application-plane/tenants/${id}`)
+    .concat([cellId1, cellId2, cellId3, cellId4].map((id) => `/application-plane/cells/${id}`)),
+}).expect(ExpectedResult.objectLike({ Payload: '0' }));
+
 // … both accounts and both applications are empty again, the fleet has no
 // cells, and the cell delete scripts cleaned their namespaces in both
 // accounts …
 const getAccountAEmpty = integ.assertions
   .httpApiCall(`${apiUrl}accounts/${accountA}`, { method: 'GET', headers: authHeaders })
-  .expect(ExpectedResult.objectLike({ status: 200, body: { account: { cellCount: 0, maxCells: 2 } } }));
+  .expect(ExpectedResult.objectLike({ status: 200, body: { account: { cellCount: 0, maxCells: 3 } } }));
 const getAccountBEmpty = integ.assertions
   .httpApiCall(`${apiUrl}accounts/${accountB}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { account: { cellCount: 0, maxCells: 1 } } }));
@@ -1815,18 +2392,14 @@ const listApplicationsEmptyCounts = integ.assertions
   .expect(
     ExpectedResult.objectLike({
       status: 200,
-      body: { applications: [{ applicationId: APP_X, cellCount: 0 }, { applicationId: APP_Y, cellCount: 0 }] },
+      body: {
+        applications: [{ applicationId: APP_X, cellCount: 0 }, { applicationId: APP_Y, cellCount: 0 }, { applicationId: APP_Z, cellCount: 0 }],
+      },
     }),
   );
 const listCellsEmpty = integ.assertions
   .httpApiCall(`${apiUrl}cells`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { cells: [] } }));
-const checkCellNamespacesEmptyA = integ.assertions
-  .awsApiCall('SSM', 'getParametersByPath', { Path: '/application-plane/cells', Recursive: true })
-  .expect(ExpectedResult.objectLike({ Parameters: [] }));
-checkCellNamespacesEmptyA.provider.addToRolePolicy(ssmReadPolicy);
-const probeCellNamespacesEmptyB = probeB('ProbeCellsEmptyB', { path: '/application-plane/cells' })
-  .expect(ExpectedResult.objectLike({ Payload: '0' }));
 
 // … and tenants, accounts and applications can be deleted (empty-only).
 const deleteTenant1 = integ.assertions
@@ -1857,6 +2430,16 @@ const listAccountsEmpty = integ.assertions
 const listApplicationsEmpty = integ.assertions
   .httpApiCall(`${apiUrl}applications`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { applications: [] } }));
+// G goes once every cell it was to see is gone, then Z; the hooks are empty
+// again; and last, the hook ledger, test state in A that no stack owns, is
+// deleted (the probe reports what is left under this run's path).
+const finalBatch = probeBatch([
+  api('DeleteHook G', 'DELETE', `hooks/${HOOK_G}`, 200, { match: { hook: { hookId: HOOK_G } } }),
+  api('DeleteApplication Z', 'DELETE', `applications/${APP_Z}`, 200, { match: { application: { applicationId: APP_Z } } }),
+  api('ListHooks', 'GET', 'hooks', 200, { match: { hooks: [] } }),
+  ledger('strays', 'strays', []),
+  ledger('ledger cleanup', 'cleanup', { remaining: 0 }),
+], true);
 
 // Sequence the lifecycle strictly (references alone order most of it, but
 // the reads/guards must not race the polls, and the in-flight 409 must fire
@@ -1872,13 +2455,7 @@ createUser
   .next(unlistedIdentity.calls[1])
   .next(unlistedIdentity.calls[2])
   // applications (§10 step 2)
-  .next(putApplicationMissingScript)
-  .next(putApplicationBadId)
-  .next(badDeclarations[0])
-  .next(badDeclarations[1])
-  .next(badDeclarations[2])
-  .next(badDeclarations[3])
-  .next(badDeclarations[4])
+  .next(applicationRefusals)
   .next(putApplicationX)
   .next(putApplicationY)
   .next(listApplicationsTwo)
@@ -1901,22 +2478,13 @@ createUser
   // reader grant (step 1, R-36), with step 4's tenants in place
   // the reader's first call is a write, so its cached policy is filled by
   // a POST: its reads must still pass (R-36, grant-only policy)
-  .next(readerCreateTenant)
-  .next(readerListTenants)
-  .next(readerGetTenant1)
-  .next(readerGetApplication)
-  .next(readerUpdateTenant1)
-  .next(readerDeleteTenant2)
-  .next(readerPutApplication)
-  .next(unlistedListTenants)
-  .next(unlistedCreateTenant)
+  .next(readerAndUnlisted)
   .next(machineListTenants)
   .next(machineGetTenant1)
   .next(machineCreateTenant)
   .next(unlistedMachineListTenants)
   .next(machineOtherScopeListTenants)
-  .next(listTenantsAfterReader)
-  .next(getTenant1AfterReader)
+  .next(afterReader)
   .next(updateTenant3)
   .next(deleteTenant3Empty)
   .next(deployForDeletedTenant)
@@ -1929,13 +2497,7 @@ createUser
   .next(getT1X)
   .next(getCell1)
   .next(getAccountAOne)
-  .next(readerReads[0])
-  .next(readerReads[1])
-  .next(readerReads[2])
-  .next(readerReads[3])
-  .next(readerReads[4])
-  .next(readerReads[5])
-  .next(readerReads[6])
+  .next(readerReads)
   .next(getApplicationXOne)
   .next(getTenant1One)
   .next(checkCellParam)
@@ -2052,7 +2614,33 @@ createUser
   .next(createT2X)
   .next(waitForT2XActive)
   .next(t2XCreateParameters)
-  // teardown (step 16)
+  // hooks (step 16): the API, then Z through create, update, a gate, a
+  // failing delete hook, a failing post hook and the deletes
+  .next(hooksApi)
+  .next(createT1Z)
+  .next(waitForT1ZActive)
+  .next(t1ZCreated)
+  .next(updateT1Z)
+  .next(waitForT1ZUpdated)
+  .next(updateCell4)
+  .next(waitForCell4Updated)
+  .next(gateRegistered)
+  .next(createT2ZGated)
+  .next(waitForT2ZGated)
+  .next(gated)
+  .next(deleteT2ZFailing)
+  .next(waitForT2ZGoneFailing)
+  .next(deletedFailing)
+  .next(createT2ZPostFail)
+  .next(waitForT2ZPostFailed)
+  .next(postFailed)
+  .next(deleteT2ZPassing)
+  .next(waitForT2ZGonePassing)
+  .next(deletedPassing)
+  .next(deleteT1Z)
+  .next(waitForT1ZGone)
+  .next(deletedT1Z)
+  // teardown (step 17)
   .next(deleteT2X)
   .next(waitForT2XGone)
   .next(t2XDeleteParameters)
@@ -2064,8 +2652,6 @@ createUser
   .next(t2YDeleteParameters)
   .next(getTenant1Zero)
   .next(getTenant2Zero)
-  .next(checkTenantNamespaceEmptyA)
-  .next(probeTenantNamespaceEmptyB)
   .next(deleteCell1)
   .next(waitForCell1Gone)
   .next(cell1DeleteParameters)
@@ -2075,18 +2661,21 @@ createUser
   .next(deleteCell3)
   .next(waitForCell3Gone)
   .next(cell3DeleteParameters)
+  .next(deleteCell4)
+  .next(waitForCell4Gone)
+  .next(cellsDeleted)
+  .next(probeNamespacesEmptyB)
   .next(getAccountAEmpty)
   .next(getAccountBEmpty)
   .next(listApplicationsEmptyCounts)
   .next(listCellsEmpty)
-  .next(checkCellNamespacesEmptyA)
-  .next(probeCellNamespacesEmptyB)
   .next(deleteTenant1)
   .next(deleteTenant2)
   .next(deleteAccountA)
   .next(deleteAccountB)
   .next(deleteApplicationX)
   .next(deleteApplicationY)
+  .next(finalBatch)
   .next(listTenantsEmpty)
   .next(listAccountsEmpty)
   .next(listApplicationsEmpty);
