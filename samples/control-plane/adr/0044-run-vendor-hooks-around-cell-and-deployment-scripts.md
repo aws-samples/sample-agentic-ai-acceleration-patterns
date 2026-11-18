@@ -586,3 +586,9 @@ as a consumer of a global post hook.
   after a 5xx or a task timeout; and in H-9, one case, the account
   quota's error name together with whether a repeat under a bound
   token returns its build at that quota.
+
+**Extended by ADR-0045 (2026-11-18):** hooks also run on application,
+tenant and account events, and the seven operations that change those
+records become asynchronous. It closes the seam this record lists as
+"hooks on tenant record events and on account events"; hooks on hook
+operations stay out.
