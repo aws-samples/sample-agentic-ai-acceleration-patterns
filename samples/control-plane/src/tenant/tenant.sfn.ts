@@ -11,6 +11,7 @@ import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import { Construct } from 'constructs';
 import { HookRunner, JsonataCustomState, hookMetricNamespace, scriptOutputsFields, HOOK_SKIPPED_METRIC_NAME, SCRIPT_OUTPUTS_REJECTED_REASON } from './hook.workflow';
+import { recordEventStates } from './record-event.workflow';
 import { buildProjectArn, buildProjectName, buildRoleName, hookRoleName, provisioningRoleArn, ProvisioningRoleKind, BuildProjectKind, workflowName } from '../shared/fleet';
 import { nagFindingResource, acknowledgeGranularFinding, suppressTemplateScanners } from '../shared/nag';
 
@@ -187,6 +188,10 @@ export const INLINE_BUILDSPEC = [
  *                    "tenantName": "...", "adminEmail": "..." }        // optional
  * }
  * ```
+ *
+ * An input with a top-level `recordEvent` (`RecordEventWorkflowInput`,
+ * §8.4) is a record event instead: it runs no build, only the record's
+ * hooks, commit and terminal write (`record-event.workflow.ts`, R-50).
  *
  * `cellBuild` and `tenantBuild` are each optional; the combination encodes
  * the trigger (§8): CreateDeployment into an existing cell (tenant create
@@ -733,16 +738,32 @@ export class ProvisioningWorkflow extends Construct {
       .when(sfn.Condition.isPresent('$.cellBuild'), this.hooks.cellPre)
       .otherwise(checkTenantBuild);
 
-    // The four ways out of the hook sub-graph (R-45): a list that ran leads
-    // on to the script (pre) or the success router (post); a failed create
-    // or update hook leads to the failure write of its build (R-46, §8.2).
+    // ---- Record events (§8.4, R-50, ADR-045) ------------------------------
+    // An input with a top-level `recordEvent` runs no build: PRE hooks, the
+    // commit in the script's place, POST hooks, the terminal write.
+    const record = recordEventStates(this, {
+      tableName: this.table.tableName,
+      hooks: this.hooks,
+      addWriteRetries: addTerminalWriteRetries,
+    });
+    const checkRecordEvent = sfn.Choice.jsonata(this, 'RecordEventRequested')
+      .when(sfn.Condition.jsonata('{% $exists($states.input.recordEvent) %}'), this.hooks.recordPre)
+      .otherwise(checkCellBuild);
+
+    // The six ways out of the hook sub-graph (R-45): a list that ran leads
+    // on to the script or the commit (pre) or the success router (post); a
+    // failed create or update hook leads to the failure write of its build
+    // or record (R-46, §8.2, R-50).
     this.hooks.connect({
       cellPre: runCellBuild.entry,
       cellPost: cellSuccessRouter,
       tenantPre: runTenantBuild.entry,
       tenantPost: tenantSuccessRouter,
+      recordPre: record.afterPre,
+      recordPost: record.afterPost,
       cellFailure: cellFailureRouterWithReason,
       tenantFailure: failTenantWithReason,
+      recordFailure: record.failure,
     });
 
     // ------------------------------------------------------------------
@@ -751,9 +772,9 @@ export class ProvisioningWorkflow extends Construct {
     this.stateMachine = new sfn.StateMachine(this, 'StateMachine', {
       // Physical name (R-41): the stack's deny and the API's grant name the workflow by ARN, computed before it exists.
       stateMachineName: workflowName(props.fleetName),
-      definitionBody: sfn.DefinitionBody.fromChainable(checkCellBuild),
+      definitionBody: sfn.DefinitionBody.fromChainable(checkRecordEvent),
       timeout: EXECUTION_TIMEOUT,
-      comment: 'Cell/tenant provisioning: optional cell build, optional tenant build, conditional terminal writes',
+      comment: 'Cell/tenant provisioning: optional cell build, optional tenant build, conditional terminal writes; or one record event (hooks, commit, terminal write)',
       // Full execution history to CloudWatch Logs (AwsSolutions-SF1) and
       // X-Ray tracing (AwsSolutions-SF2) - provisioning is the workflow
       // operators will debug, so every state transition is auditable.
@@ -850,7 +871,9 @@ export class ProvisioningWorkflow extends Construct {
     // Item operations on the base table only — the workflow never queries
     // the GSIs. (The typed Dynamo tasks auto-grant; this statement is the
     // explicit, documented grant that also covers the two CustomState
-    // TransactWriteItems tasks.)
+    // TransactWriteItems tasks and the record event writes of R-50: the
+    // update commit and its probe (UpdateItem), the delete commit and its
+    // probe (DeleteItem), the success and failure writes (UpdateItem).)
     this.stateMachine.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem'],

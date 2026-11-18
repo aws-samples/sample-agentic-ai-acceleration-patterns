@@ -145,12 +145,18 @@ export async function simulate(options: SimulationOptions): Promise<SimulationRe
       }
       case 'Task': {
         events += 5;
-        const args = await evaluate(state.Arguments, base);
+        let args: any;
+        let outcome: { result?: any; error?: ThrownError } | undefined;
+        try {
+          args = await evaluate(state.Arguments, base);
+        } catch (e: any) {
+          // A JSONata error in Arguments (an `$error()` included) fails the state with this name, before any call.
+          outcome = { error: new ThrownError('States.QueryEvaluationError', String(e?.message ?? e)) };
+        }
         let attempt = 0;
         const retriers: any[] = state.Retry ?? [];
         const counters = retriers.map(() => 0);
-        let outcome: { result?: any; error?: ThrownError };
-        for (;;) {
+        for (; outcome === undefined;) {
           const call: TaskCall = { resource: state.Resource, args, at: now, state: name };
           calls.push(call);
           try {
@@ -171,7 +177,7 @@ export async function simulate(options: SimulationOptions): Promise<SimulationRe
             break;
           }
         }
-        if (outcome.error === undefined) {
+        if (outcome!.error === undefined) {
           const states = { ...base, result: outcome.result };
           await assign(state.Assign, states);
           input = state.Output === undefined ? outcome.result : await evaluate(state.Output, states);

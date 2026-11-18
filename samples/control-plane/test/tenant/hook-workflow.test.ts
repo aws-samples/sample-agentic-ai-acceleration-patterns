@@ -182,13 +182,19 @@ describe('the workflow definition (R-41, R-46, R-23)', () => {
     expect(states.TenantBuildRequested.Choices[0].Next).toBe('TenantPreHooks');
     const exits = Object.fromEntries(states.HookListContinue.Choices.map((c: any) => [c.Condition.match(/'(\w+)'/)[1], c.Next]));
     expect({ ...exits, tenantPost: states.HookListContinue.Default }).toEqual({
-      cellPre: 'RunCellBuildSourcePin', cellPost: 'CellBuildSucceeded', tenantPre: 'RunTenantBuildSourcePin', tenantPost: 'TenantBuildSucceeded',
+      cellPre: 'RunCellBuildSourcePin',
+      cellPost: 'CellBuildSucceeded',
+      tenantPre: 'RunTenantBuildSourcePin',
+      tenantPost: 'TenantBuildSucceeded',
+      recordPre: 'RecordCommit',
+      recordPost: 'RecordSucceeded',
     });
     expect(states.RunCellBuild.Next).toBe('CellScriptChecked');
     expect(states.CellScriptChecked.Default).toBe('CellPostHooks');
     expect(states.TenantScriptChecked.Default).toBe('TenantPostHooks');
     // A hook that fails a create or update goes to the failure write of its build; one new-cell create moves both records.
     expect(states.HookFailureTarget.Choices[0].Next).toBe('CellFailureHasTenantWithReason');
+    expect(states.HookFailureTarget.Choices[1].Next).toBe('FailRecord');
     expect(states.HookFailureTarget.Default).toBe('FailTenantWithReason');
     expect(states.CellFailureHasTenantWithReason.Default).toBe('FailCellWithReason');
     expect(states.CellFailureHasTenantWithReason.Choices[0].Next).toBe('FailCellAndTenantWithReason');
