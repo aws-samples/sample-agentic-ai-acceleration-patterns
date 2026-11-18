@@ -42,7 +42,8 @@ bootstrap's deploy, file-publishing and image-publishing roles
 not its lookup role, which holds `ReadOnlyAccess`,
 and states where it is safe: in a cell account that holds only cells, with
 a cell bootstrap whose execution role and every cell role carry a
-permissions boundary and sit on a `/cell/` role path (stress ADR-0006).
+permissions boundary, and every cell role sits on a `/cell/` role path
+(stress ADR-0006).
 
 ## Consequences
 Easier: an application can deploy its cell with any tool the account owner
