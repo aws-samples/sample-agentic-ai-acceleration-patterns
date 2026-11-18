@@ -33,8 +33,8 @@ account-wide quotas (Lambda concurrency, STS, KMS, CodeBuild, the API
 Gateway control plane). The per-sample runs never draw on them together.
 
 Deployment model: pool at the edge and in identity; cells behind the edge,
-across two accounts, each cell a pooled runtime-isolation deployment for up
-to `maxTenants` tenants.
+in cell accounts that hold nothing but cells, each cell a pooled
+runtime-isolation deployment for up to `maxTenants` tenants.
 
 ### 1.1 What the test shows
 
@@ -124,32 +124,31 @@ it first shows.
 | Slice: `tenant-identity` | `samples/tenant-identity/scripts/stress/` | the platform's identity deployment, token issue and refresh scenarios |
 | Slice: `tenant-front-door` | `samples/tenant-front-door/scripts/stress/` | the edge, route writes, edge scenarios |
 | Slice: `agentic-runtime-isolation` | `samples/agentic-runtime-isolation/scripts/stress/` (exists) | the cell's ingress, agents and tools; scenarios S1 to S7 |
-| Fixture: stress identity | the test account | a `tenant-identity` `shared-pool` deployment for the stress test only, so 4,000 stress tenants never crowd the pool every integration run shares |
-| Fixture: fleet | both accounts | at `large`, the seeded tenants, deployments, cells and routes, kept between runs (P-5) |
-| Fixture: second account | a second non-production account | registered tenant-owned with the control plane; holds half of the cells from `medium` up |
+| Fixture: stress identity | the platform account | a `tenant-identity` `shared-pool` deployment for the stress test only, so 4,000 stress tenants never crowd the pool every integration run shares |
+| Fixture: fleet | every account | at `large`, the seeded tenants, deployments, cells and routes, kept between runs (P-5) |
+| Platform account | a non-production account | the control plane, the edge, the route registrar, the stress identity and the driver host; never a cell |
+| Cell accounts | one or two standalone non-production accounts | registered with the control plane; hold only the cell bootstrap, the role pair and cells (§3.7) |
 
 ### 3.2 Topology
 
 ```
-                    ┌──────────── test account (edge) ────────────────────────┐
- driver host ──────►│ CloudFront distribution ─► tenant router (KVS lookup)   │
- (k6)               │        │                                                │
-                    │        ├─► cell A1 origin ─► runtime-isolation ingress  │
-                    │        └─► cell A2 origin ─► runtime-isolation ingress  │
-                    │ control plane ─► CodeBuild ─► cell and tenant scripts   │
-                    │ stress identity (tenant-identity shared pool)           │
-                    │ route registrar                                         │
-                    └────────┬────────────────────────────────────────────────┘
-                             │ cross-account origin, role pair
-                    ┌────────▼──── second account ────────────────────────────┐
-                    │ cell B1 origin ─► runtime-isolation ingress             │
-                    │ cell B2 origin ─► runtime-isolation ingress             │
-                    └─────────────────────────────────────────────────────────┘
+                 ┌────────── platform account ──────────────────────────────┐
+ driver host ───►│ CloudFront distribution ─► tenant router (KVS lookup)    │
+ (k6)            │ control plane ─► CodeBuild ─► cell and tenant scripts    │
+                 │ stress identity (tenant-identity shared pool)            │
+                 │ route registrar                                          │
+                 └──────┬──────────────────────────────────────┬────────────┘
+                        │ cross-account origin, role pair      │
+          ┌─────────────▼── cell account A ──────┐   ┌─────────▼── cell account B ──────┐
+          │ cell A1 ─► runtime-isolation ingress │   │ cell B1 ─► runtime-isolation     │
+          │ cell A2 ─► runtime-isolation ingress │   │ cell B2 ─► runtime-isolation     │
+          └──────────────────────────────────────┘   └──────────────────────────────────┘
 ```
 
 Every cell trusts the same issuer, the stress identity. The front door's
 edge stack is in `us-east-1`, as its specification requires; everything
-else is in `eu-central-1`.
+else is in `eu-central-1`. The driver host sits in the platform account,
+so it never shares an account with a cell build.
 
 ### 3.3 Paths
 
@@ -233,10 +232,32 @@ them, it is the platform run.
 
 | Input | Default | Meaning |
 |---|---|---|
-| test account, second account | none | two non-production, CDK-bootstrapped accounts; the second trusts the first's bootstrap |
-| `appDomain` | none | a test subdomain with a public hosted zone in the test account, for the front door |
-| `buildLimit` | 50 | concurrent builds per control-plane CodeBuild project for the stress deployment (§8, decision 2). Both projects run in the control-plane account on `BUILD_GENERAL1_SMALL`, so 50 each draws 100 on that account's Linux/Small quota. The test account holds 300 for that size; the service default is 1, so a new control-plane account raises it first |
+| platform account | none | one non-production, CDK-bootstrapped account for everything that is not a cell |
+| cell accounts | none | one (`small`) or two (`medium`, `large`) standalone non-production accounts, as §3.7 requires |
+| `appDomain` | none | a test subdomain with a public hosted zone in the platform account, for the front door |
+| `buildLimit` | 50 | concurrent builds per control-plane CodeBuild project for the stress deployment (§8, decision 2). Both projects run in the platform account on `BUILD_GENERAL1_SMALL`, so 50 each draws 100 on that account's Linux/Small quota. The service default for that size is 1, so the platform account raises it before the first run |
 | `pinnedCommit` | the run's `main` commit | the commit the cell scripts deploy |
+
+### 3.7 Cell accounts
+
+A cell account holds only:
+
+| Stack | What it is |
+|---|---|
+| `CDKToolkit-cell` | the cell bootstrap (§8, decision 7) |
+| the role pair | `control-plane`'s `CellAccountStack`, deployed as plain CloudFormation or through the cell bootstrap |
+| cells | the stacks the cell script deploys |
+
+It has no default CDK bootstrap, no control plane, no driver host and no
+stacks of other samples. The cell bootstrap and its boundary scope a cell
+build's IAM writes to cell roles; the account boundary scopes everything
+else. A compromised cell build can change any cell in its account, and
+nothing outside it.
+
+The `control-plane` slice's `deploy` enforces it before the first cell
+build: it lists the account's CloudFormation stacks in every Region the run
+uses and refuses an account with any stack but the three kinds above, or
+with a `cdk-hnb659fds-*` role.
 
 ## 4. Data model
 
@@ -244,7 +265,7 @@ them, it is the platform run.
 
 | | `small` | `medium` | `large` |
 |---|---|---|---|
-| Accounts | 1 | 2 | 2 |
+| Cell accounts (plus the platform account) | 1 | 2 | 2 |
 | Cells (`maxTenants`) | 1 (20) | 2 (100) | 4 (1,000) |
 | Agents per cell | 2 | 5 | 25 |
 | Tools per cell | 2 targets x 10 | 2 targets x 100 | 3 targets x 100 |
@@ -259,7 +280,8 @@ them, it is the platform run.
 | Driver instance | `t3.large` | `c6i.xlarge` | `c6i.4xlarge` |
 
 The `large` row splits the runtime-isolation `large` tier over four cells:
-100 agents in total, as before, so the Runtime count does not grow. Per cell
+100 agents in total, the same as the runtime-isolation `large` tier, so
+the Runtime count does not grow. Per cell
 the load is a quarter, so per-cell results are not compared with the
 single-ingress runs; platform totals are.
 
@@ -371,12 +393,12 @@ correlation id.
 | Teardown | nothing a slice owned left in either account, apart from fixtures |
 | Budget | no budgeted quota exceeded except in PS-8, where it is the result |
 
-## 8. Decisions for the first ADR batch
+## 8. Decisions
 
 | # | Decision | Why it needs an ADR | ADR |
 |---|---|---|---|
 | 1 | The shared contract lives in `stress/` at the repository root, with its ADRs in `stress/adr/` | the sample standard has no root folder for code shared across samples | stress ADR-0001 |
-| 2 | `control-plane` exposes the concurrent build limit as a prop (default 5) | a cost guard today (threat model T16, M17); the stress deployment raises it | control-plane ADR-0046 |
+| 2 | `control-plane` exposes the concurrent build limit as a prop (default 5) | a cost guard (threat model T16, M17); the stress deployment raises it | control-plane ADR-0046 |
 | 3 | The stress test has its own `tenant-identity` deployment | one pool caps at 5,000 tenants (runtime-isolation finding F-11) and is shared by every integration run | stress ADR-0002 |
 | 4 | Cells split agents (four cells of 25 at `large`) | keeps the Runtime count flat while testing routing across cells | stress ADR-0003 |
 | 5 | The `large` fleet is a fixture, seeded once | onboarding 4,000 tenants takes hours even at 50 builds | stress ADR-0004 |
@@ -385,43 +407,38 @@ correlation id.
 | 8 | The runtime-isolation `StressDriver` and k6 library move to `stress/` | they become the shared driver; its slice keeps only its own scenarios | stress ADR-0007 |
 
 Decision 7, the cell bootstrap. A `cdk deploy` needs `sts:AssumeRole` on
-the account's CDK bootstrap roles, and the default bootstrap's
-CloudFormation execution role holds `AdministratorAccess`. Each cell
-account therefore carries a second bootstrap, for cells only, beside the
-default one, which stays as it is for every other deployment in the
-account:
+the account's CDK bootstrap roles. Each cell account carries one bootstrap,
+for cells only, whose execution role and every role a cell creates carry a
+permissions boundary:
 
 | Part | Value |
 |---|---|
-| Bootstrap | `cdk bootstrap --qualifier cell --toolkit-stack-name CDKToolkit-cell --cloudformation-execution-policies <cell execution policy ARN>`, run once by the account owner |
-| Cell execution policy | a managed policy shipped in `stress/application/`: API Gateway, Application Auto Scaling (a DynamoDB global table deregisters its scalable targets on delete), AgentCore, CloudWatch, DynamoDB, KMS, Lambda, CloudWatch Logs, SSM, read of the cell bootstrap's S3 assets, and IAM role writes |
-| Cell permissions boundary | a managed policy on the cell bootstrap's execution role and on every role the cell creates: the same services plus what the cell's roles call at run time (`execute-api`, the Bedrock model calls, `sts:AssumeRole` and `sts:TagSession`, X-Ray); it denies `iam:CreateRole` and `iam:PutRolePermissionsBoundary` without itself, removing a boundary, users, access keys and policy writes |
-| Cell synth | `@aws-cdk/core:bootstrapQualifier` `cell` and `@aws-cdk/core:permissionsBoundary` `{"name":"<boundary name>"}` as object context (`cdk.json` or `CDK_CONTEXT_JSON`); a CLI `--context` passes the boundary as a string, which the CDK ignores |
-| Role pair | `control-plane` gains `cellBuildManagedPolicyArns`, as the tenant role has `tenantBuildManagedPolicyArns`; the stress account owner attaches one policy that allows `sts:AssumeRole` on the four `cdk-cell-*` bootstrap roles of its own account and Region, and nothing else |
+| Bootstrap | `cdk bootstrap --qualifier cell --toolkit-stack-name CDKToolkit-cell --cloudformation-execution-policies <cell execution policy ARN> --custom-permissions-boundary cell-permissions-boundary`, run once by the account owner |
+| Cell roles | every role a cell creates is on the IAM path `/cell/`; the stress application's cell app sets it with a CDK aspect on every `AWS::IAM::Role` |
+| Cell execution policy | a managed policy shipped in `stress/application/`: API Gateway, Application Auto Scaling (a DynamoDB global table deregisters its scalable targets on delete), AgentCore, CloudWatch, DynamoDB, KMS, Lambda, CloudWatch Logs, SSM, read of `cdk-cell-assets-*`, and IAM role writes and `iam:PassRole` on `role/cell/*` only |
+| Cell permissions boundary | a managed policy on the execution role and on every cell role: the same services plus what cell roles call at run time (`execute-api`, the Bedrock model calls, `sts:TagSession`, X-Ray), and `sts:AssumeRole` on `role/cell/*` only; it denies `iam:CreateRole` without itself or outside `/cell/`, any IAM write or `iam:PassRole` on a role outside `/cell/`, removing a boundary, users, access keys and policy writes |
+| Cell synth | `@aws-cdk/core:bootstrapQualifier` `cell` and `@aws-cdk/core:permissionsBoundary` `{"name":"cell-permissions-boundary"}` as object context (`cdk.json` or `CDK_CONTEXT_JSON`); a CLI `--context` passes the boundary as a string, which the CDK ignores |
+| Role pair | `control-plane`'s `cellBuildManagedPolicyArns` (ADR-0047); the cell account owner attaches one policy that allows `sts:AssumeRole` on the four `cdk-cell-*` bootstrap roles of its own account and Region, and nothing else |
 
-The boundary is what makes the scope hold: without it, an execution policy
-that may create IAM roles may create an administrator role. A cell build
-compromised through its pinned source can still change any cell in that
-account, which is the role pair's scope today.
-
-Spike Q-5 (`stress/spikes/q5-cell-boundary/`, 2026-11-18) deployed one
-runtime-isolation cell this way: 27 of 27 roles carried the boundary, every
-custom resource ran, the cell deployed in 402 s and destroyed cleanly once
-the execution policy held Application Auto Scaling. A role without the
-boundary was refused at `iam:CreateRole`. The sample's integration test,
-run through the same bootstrap and boundary (139 of 139 roles bounded),
-passed 60 of 60 steps, so the request path holds under the boundary too.
+Three walls hold the scope together. The boundary keeps every cell role
+under it. The `/cell/` path keeps cell roles and the execution role from
+writing to, passing or assuming any role that is not a cell role: the
+account's own administrator roles, the role pair and the bootstrap roles.
+The standalone account (§3.7) leaves no other stack or data for the service
+grants to reach. The evidence is in stress ADR-0006 and
+`stress/spikes/q5-cell-boundary/`.
 
 ## 9. Work items and parallel readiness
 
 | Work item | Needs | Ready to build in parallel |
 |---|---|---|
-| W-1 contract: `tiers.ts`, result schema, budget, runner | this spec accepted, decision 1 | yes |
+| W-1 contract: `tiers.ts`, result schema, budget, runner | decision 1 | yes |
 | W-2 driver and k6 library moved to `stress/` | W-1 schema | yes, once W-1's schema is fixed |
 | W-3 runtime-isolation slice on the contract | W-1, W-2 | yes, after W-1 |
 | W-4 control-plane build-limit prop | decision 2 | yes, now |
 | W-5 control-plane slice and the stress application | W-1, W-4, W-10 | after W-1, W-4 and W-10 |
-| W-10 `cellBuildManagedPolicyArns` prop; cell execution policy, permissions boundary and the cell bootstrap | decision 7 | yes, now |
+| W-10 `cellBuildManagedPolicyArns` prop; cell execution policy, permissions boundary, `/cell/` path aspect and the cell bootstrap | decision 7 | yes, now |
+| W-11 two standalone cell accounts, bootstrapped with the cell bootstrap and the role pair | §3.7 | yes, now |
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | yes, after W-1 |
 | W-7 front-door slice | the front door merged; its spikes S-2, S-3, S-5, S-7 passed; W-1 | no: blocked on the front door |
 | W-8 correlation header in the ingress and the front door | decision 6 | ingress part yes; front-door part after its merge |
@@ -435,3 +452,5 @@ passed 60 of 60 steps, so the request path holds under the boundary too.
 | Q-2 | Does the front door's integration test compose runtime-isolation for `/agents/*` (its Q-4)? The platform run assumes it can | W-7 |
 | Q-3 | Does the platform run keep the `large` fleet in both accounts between runs, and what does it cost idle? | decision 5 |
 | Q-4 | Which hosted zone does the stress front door use? | W-7 |
+| Q-5 | Does the `/cell/` path scope refuse a cell role's `iam:UpdateAssumeRolePolicy` on the role pair, `iam:PutRolePolicy` on a `cdk-cell-*` role, `iam:PassRole` of a role outside `/cell/` and `sts:AssumeRole` of the account's administrator role, while the integration test still passes under it? Proven by deny probes and one integration run in a standalone cell account | W-10 |
+| Q-6 | Does runtime-isolation deploy with every role on `/cell/` (resource policies and conditions that name role ARNs) and does its demo stack export what the stress cell app needs to instantiate it from the sample's package entry? | W-10 |
