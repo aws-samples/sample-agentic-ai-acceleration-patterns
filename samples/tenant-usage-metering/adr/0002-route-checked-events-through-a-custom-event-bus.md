@@ -60,7 +60,8 @@ accounts to subscribe.
 
 ### Option 3: Function → Custom Event Bus → Firehose subscriber → S3
 The function publishes each checked batch with `PutEvents` (up to 100
-entries), `DeduplicationId` set to `<tenantId>#<eventId>`. A subscriber
+entries), `DeduplicationId` set to `<tenantId>#<eventId>` and
+`EventGroupId` set to the tenant id. A subscriber
 delivers to Firehose in batches of up to 500, with a retry policy set to
 the bus's maximum event age and an SQS dead-letter queue. Pros: no
 throttle; about $0.25 per million at one event per Firehose record;
@@ -77,7 +78,7 @@ cross-account cells need a Logs destination in each account; makes a log
 store the record of billable events (P-1).
 
 ## Decision
-Option 3, subject to the spike in Consequences. It keeps a bus at the
+Option 3, which the spike in Consequences supports. It keeps a bus at the
 point where other systems want to join, without the throttle and the
 per-event price that ruled the classic bus out, and the bus's retention
 gives a second replay source while S3 stays the store the hourly recount
@@ -96,9 +97,33 @@ new bus is not available, and the construct takes an `ingestPath` prop
   5 KB-step cost; a subscriber transformer that packs events is a seam.
 - The bus retention is set to the shortest useful period (1 day by
   default); S3 holds the long-term raw store.
-- Before this is accepted, a spike in a non-production test account MUST
-  show, for 10,000 events: deploy and destroy time, no throttling, every
-  event in S3, duplicates published inside five minutes suppressed, and
-  the DLQ empty. If it fails, option 2 with packed records is chosen.
+- Spike, 2026-11-18, Europe (Frankfurt), a non-production test account,
+  two runs of 10,000 synthetic events each, published in batches of 100
+  from 20 threads:
+
+  | Check | Run 1 (no group) | Run 2 (`EventGroupId` = tenant) |
+  |---|---|---|
+  | Deploy / destroy | 122 s / 122 s | 122 s / 122 s |
+  | Published | 10,000 in 7.4 s | 10,000 in 7.2 s |
+  | Entries throttled at publish, then retried | 12,600 | 12,500 |
+  | In S3, unique | 10,000 after 68 s | 10,000 after 68 s |
+  | 1,000 repeats inside five minutes suppressed | 901 | 1,000 |
+  | Repeats that reached S3 | 99 | 0 |
+  | Firehose throttling, error objects, DLQ | none | none |
+
+  The bus delivered to Firehose without throttling, which settles the
+  classic bus's problem. Two new findings follow from the table:
+  1. `PutEvents` throttles entries above about 1,400 events a second
+     from one account, with or without event groups. The quotas page
+     names no limit that explains it. The ingest function MUST retry
+     entries that return `Throttling` with backoff, and a sustained rate
+     above that needs a quota answer from the service before it is
+     relied on.
+  2. Deduplication suppressed every repeat only when each entry carried an
+     `EventGroupId`. The function sets `EventGroupId` to the tenant id.
+     The recount's dedupe stays the guarantee either way (P-5).
+- Firehose writes the bus envelope with `detail` as an object and no
+  delimiter between records; the recount parses concatenated JSON, or a
+  subscriber transformer appends a newline (a seam).
 - Revisit if the new bus is needed in a Region where it is not available,
   or if the per-GB price changes.
