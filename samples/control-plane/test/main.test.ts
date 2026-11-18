@@ -51,10 +51,11 @@ describe('TenantStack', () => {
     expect(table.Properties.GlobalSecondaryIndexes).toHaveLength(3);
   });
 
-  test('provisioning state machine and the two shared CodeBuild projects exist', () => {
+  test('provisioning state machine and the four shared CodeBuild projects exist', () => {
     template.resourceCountIs('AWS::StepFunctions::StateMachine', 1);
-    // One project for cell builds, one for tenant builds (ADR-002, ADR-012).
-    template.resourceCountIs('AWS::CodeBuild::Project', 2);
+    // One project for cell builds, one for tenant builds (ADR-002, ADR-012),
+    // one for global hooks, one for application hooks (R-41, ADR-044).
+    template.resourceCountIs('AWS::CodeBuild::Project', 4);
   });
 
   test('state machine may start and poll builds on the shared projects only', () => {
@@ -234,16 +235,16 @@ describe('TenantStack', () => {
     expect(format.status).toBe('$context.status');
   });
 
-  test('both CodeBuild projects cap concurrent builds (T16 / M17)', () => {
+  test('every CodeBuild project caps concurrent builds (T16 / M17)', () => {
     const projects = Object.values(template.findResources('AWS::CodeBuild::Project'));
-    expect(projects).toHaveLength(2);
+    expect(projects).toHaveLength(4);
     for (const project of projects as any[]) {
       expect(project.Properties.ConcurrentBuildLimit).toBe(5);
     }
   });
 
-  test('surge and client-error alarms exist without actions (T16 / M17)', () => {
-    template.resourceCountIs('AWS::CloudWatch::Alarm', 2);
+  test('surge, client-error and skipped-hook alarms exist without actions (T16 / M17, T42)', () => {
+    template.resourceCountIs('AWS::CloudWatch::Alarm', 3);
     // State machine execution surge — the CreateTenant amplification signature.
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
       Namespace: 'AWS/States',
@@ -371,7 +372,7 @@ function startBuildTasks(definition: Record<string, any>): Record<string, any> {
   const tasks: Record<string, any> = {};
   const walk = (states: Record<string, any>) => {
     for (const [name, state] of Object.entries(states ?? {})) {
-      if (state.Type === 'Task' && String(state.Resource).includes('codebuild:startBuild')) {
+      if (state.Type === 'Task' && String(state.Resource).endsWith('codebuild:startBuild.sync')) {
         tasks[name] = state;
       }
       for (const branch of state.Branches ?? []) {
@@ -664,7 +665,8 @@ describe('the workflow assumes the account role before every script and releases
       // No `${...}` anywhere: CloudFormation's validator reads it as Fn::Sub.
       expect(buildspec).not.toContain('${');
       expect(buildspec).toContain('export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN');
-      expect(buildspec).toMatch(/bash "\$SCRIPT_PATH"\s*$/);
+      // The script runs as a child process; the outputs check follows it (R-43).
+      expect(buildspec).toContain('bash "$SCRIPT_PATH"\n');
       // Credentials are read into shell variables, never echoed or passed as build env.
       expect(buildspec).not.toMatch(/echo .*AWS_SECRET/);
       expect(buildspec).not.toContain('set -x');
@@ -915,12 +917,14 @@ describe('parameters in the workflow (ADR-039, ADR-040, spec §6.1, §8.1)', () 
             Arn: 'arn:aws:codebuild:eu-central-1:111111111111:build/p:1',
             BuildStatus: 'SUCCEEDED',
             Environment: { EnvironmentVariables: [{ Name: 'PARAM_A', Value: 'x' }] },
+            ExportedEnvironmentVariables: [{ Name: 'SCRIPT_OUTPUTS', Value: '{}' }],
           },
         },
       });
       expect(output).toEqual({
         tenantId: 'T',
         tenantBuild: { parameters: { A: 'x' } },
+        scriptOutputs: '{}',
         [field]: { Build: { Arn: 'arn:aws:codebuild:eu-central-1:111111111111:build/p:1', BuildStatus: 'SUCCEEDED' } },
       });
     }
@@ -932,8 +936,10 @@ describe('parameters in the workflow (ADR-039, ADR-040, spec §6.1, §8.1)', () 
   test('a build task\'s Catch keeps only the error name and the build ARN and status, never the raw Cause', async () => {
     const cause = { Build: { Arn: 'arn:b', BuildStatus: 'FAILED', Environment: { EnvironmentVariables: [{ Name: 'PARAM_A', Value: 'secret-shaped' }] } } };
     for (const name of [...tenantTasks, ...cellTasks]) {
-      const [catcher] = tasks[name].Catch;
-      expect(tasks[name].Catch).toHaveLength(1);
+      // The outputs guard's evaluation error comes first (R-43); the build failure Catch last.
+      expect(tasks[name].Catch).toHaveLength(2);
+      expect(tasks[name].Catch[0].ErrorEquals).toEqual(['States.QueryEvaluationError']);
+      const catcher = tasks[name].Catch[1];
       expect(catcher.ErrorEquals).toEqual(['States.ALL']);
       expect(catcher.ResultPath).toBeUndefined();
       expect(catcher.Next).toBe(name.startsWith('RunTenant') ? 'TenantBuildFailureShape' : 'CellBuildFailureShape');

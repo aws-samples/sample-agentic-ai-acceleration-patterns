@@ -10,7 +10,8 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import { Construct } from 'constructs';
-import { buildRoleName, provisioningRoleArn, ProvisioningRoleKind } from '../shared/fleet';
+import { HookRunner, JsonataCustomState, hookMetricNamespace, scriptOutputsFields, HOOK_SKIPPED_METRIC_NAME, SCRIPT_OUTPUTS_REJECTED_REASON } from './hook.workflow';
+import { buildProjectArn, buildProjectName, buildRoleName, hookRoleName, provisioningRoleArn, ProvisioningRoleKind, BuildProjectKind, workflowName } from '../shared/fleet';
 import { nagFindingResource, acknowledgeGranularFinding, suppressTemplateScanners } from '../shared/nag';
 
 export interface ProvisioningWorkflowProps {
@@ -33,8 +34,13 @@ export interface ProvisioningWorkflowProps {
    * policies and the explicit deny. The workflow names it as the service
    * role of the global hook project `<fleet>-global-hook` and never passes it
    * as a role override, nor holds `iam:PassRole` on it. Supplied together
-   * with `appHookRole`; both absent means the workflow creates no hook
-   * project.
+   * with `appHookRole`.
+   *
+   * shortcut: optional only so this workflow builds before the stack passes
+   * the roles; absent, the workflow creates the role itself (CodeBuild trust
+   * on the project's `aws:SourceArn`, no policies, no deny). Make both props
+   * required and delete `fallbackHookRole` once `tenant.cdk.ts` supplies
+   * them, which it does from the infrastructure change.
    */
   readonly globalHookRole?: iam.IRole;
   /**
@@ -54,11 +60,16 @@ export interface ProvisioningWorkflowProps {
 const BUILD_TIMEOUT = Duration.hours(1);
 
 /**
- * Execution timeout: greater than the sum of both build-task budgets plus
- * terminal-write recovery margin (§7). It is a final safety net, not the
- * normal timeout path — that is the catchable task-level timeout above.
+ * Execution timeout (R-23): greater than every build budget an execution can
+ * run at the caps, queue time and hook backoff included, plus terminal-write
+ * margin. A delete at the caps is the longest: 10 hooks at 144 minutes each
+ * (3 attempts of 47 and 3 of backoff) plus a 60-minute script is 1,500
+ * minutes (25 h); a new-cell create is 1,060 (17.7 h). It is a final safety
+ * net, not the normal timeout path: that is the catchable task-level timeout
+ * above and the hook attempt's own deadline (R-46). A tripped execution
+ * timeout bypasses the Catch and strands records.
  */
-const EXECUTION_TIMEOUT = Duration.hours(3);
+const EXECUTION_TIMEOUT = Duration.hours(26);
 
 /**
  * M17 (threat T16): each CreateDeployment/UpdateDeployment/UpdateCell/DeleteCell
@@ -87,10 +98,14 @@ const CONCURRENT_BUILD_LIMIT = 5;
  * credentials at one hour, equal to BUILD_TIMEOUT (N-7). A refused AssumeRole
  * fails the build like any script failure and lands in `*_FAILED`.
  */
-const INLINE_BUILDSPEC = [
+export const INLINE_BUILDSPEC = [
   'version: 0.2',
   'env:',
   '  shell: bash',
+  // R-43: SCRIPT_OUTPUTS is the build's only exported variable (spike H-1:
+  // the total of exported variables is limited, and overflow is silent).
+  '  exported-variables:',
+  '    - SCRIPT_OUTPUTS',
   'phases:',
   '  build:',
   '    commands:',
@@ -112,7 +127,45 @@ const INLINE_BUILDSPEC = [
   '        unset AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONTAINER_CREDENTIALS_FULL_URI AWS_CONTAINER_AUTHORIZATION_TOKEN',
   '        set --',
   '        echo "Assumed $PROVISIONING_ROLE_ARN in account $CELL_ACCOUNT_ID"',
+  // R-43: a fresh directory outside the source tree, and a path in it that
+  // does not yet exist, so nothing committed to the source stands in for output.
+  '        OUTPUTS_DIR=$(mktemp -d)',
+  '        OUTPUTS_FILE="$OUTPUTS_DIR/outputs.json"',
+  '        export OUTPUTS_FILE',
   '        bash "$SCRIPT_PATH"',
+  // R-43: after the script succeeded, parse the file, refuse a repeated key,
+  // check the rest, and export the compact re-serialisation (never the
+  // file's bytes), always: `{}` when the script wrote none. A file that
+  // fails fails create and update, and is dropped on delete (P-9). This is
+  // a format check in the container the script just ran in, not a trust
+  // boundary; the workflow checks the value again (T40, T44).
+  "        SCRIPT_OUTPUTS='{}'",
+  '        OUTPUTS_ERROR=""',
+  '        if [ -e "$OUTPUTS_FILE" ] || [ -L "$OUTPUTS_FILE" ]; then',
+  '          if [ -L "$OUTPUTS_FILE" ]; then',
+  '            OUTPUTS_ERROR="OUTPUTS_FILE is a symbolic link"',
+  String.raw`          elif ! jq -e 'type == "object" and ([to_entries[] | (.key | test("\\A[A-Za-z][A-Za-z0-9_]{0,63}\\z")) and (.value | type == "string" and test("\\A[ -~]*\\z"))] | all)' "$OUTPUTS_FILE" > /dev/null 2>&1; then`,
+  '            OUTPUTS_ERROR="OUTPUTS_FILE is not a JSON object of valid keys and printable ASCII string values"',
+  "          elif [ \"$(jq -n --stream '[inputs | select(length == 2) | .[0][0]] | (length != (unique | length))' \"$OUTPUTS_FILE\")\" = true ]; then",
+  '            OUTPUTS_ERROR="OUTPUTS_FILE repeats a key"',
+  '          else',
+  '            COMPACT=$(jq -c . "$OUTPUTS_FILE")',
+  '            if [ "$(printf %s "$COMPACT" | wc -c)" -gt 4096 ]; then',
+  '              OUTPUTS_ERROR="OUTPUTS_FILE is longer than 4096 bytes in compact form"',
+  '            else',
+  '              SCRIPT_OUTPUTS="$COMPACT"',
+  '            fi',
+  '          fi',
+  '        fi',
+  '        if [ -n "$OUTPUTS_ERROR" ]; then',
+  '          if [ "$OPERATION" = delete ]; then',
+  '            echo "Dropping the script outputs on delete: $OUTPUTS_ERROR"',
+  '          else',
+  '            echo "Script outputs rejected: $OUTPUTS_ERROR"',
+  '            exit 1',
+  '          fi',
+  '        fi',
+  '        export SCRIPT_OUTPUTS',
 ].join('\n');
 
 /**
@@ -193,6 +246,12 @@ export class ProvisioningWorkflow extends Construct {
   readonly cellBuildRole: iam.Role;
   /** The tenant build role, `<fleet>-tenant-build`. */
   readonly tenantBuildRole: iam.Role;
+  /** Shared project for global hooks, `<fleet>-global-hook`, under the global hook role (R-41). */
+  readonly globalHookProject: codebuild.Project;
+  /** Shared project for application hooks, `<fleet>-app-hook`, under the application hook role (R-41). */
+  readonly appHookProject: codebuild.Project;
+  /** The hook sub-graph (§8.3): one copy, entered once per hook list. */
+  readonly hooks: HookRunner;
 
   private readonly table: dynamodb.ITable;
 
@@ -214,6 +273,7 @@ export class ProvisioningWorkflow extends Construct {
     this.cellBuildRole = buildRole(this, 'CellBuildRole', props.fleetName, 'cell');
     const cellProjectLogs = projectLogGroup(this, 'CellProjectLogs');
     this.cellProject = new codebuild.Project(this, 'CellProject', {
+      projectName: buildProjectName(props.fleetName, 'cell-build'),
       description: 'Cell provisioning (shared cell deployment) - source and buildspec are overridden per StartBuild',
       role: this.cellBuildRole,
       buildSpec: codebuild.BuildSpec.fromObject({
@@ -231,6 +291,7 @@ export class ProvisioningWorkflow extends Construct {
     this.tenantBuildRole = buildRole(this, 'TenantBuildRole', props.fleetName, 'tenant');
     const tenantProjectLogs = projectLogGroup(this, 'TenantProjectLogs');
     this.tenantProject = new codebuild.Project(this, 'TenantProject', {
+      projectName: buildProjectName(props.fleetName, 'tenant-build'),
       description: 'Tenant provisioning (per-tenant deployment) - source and buildspec are overridden per StartBuild',
       role: this.tenantBuildRole,
       buildSpec: codebuild.BuildSpec.fromObject({
@@ -245,6 +306,25 @@ export class ProvisioningWorkflow extends Construct {
     acknowledgeCodeBuildDefaults(this.tenantProject, tenantProjectLogs);
 
     // ------------------------------------------------------------------
+    // Two hook projects, one per scope (R-41, ADR-044). Each runs under its
+    // own role, so an application hook cannot use what a global hook holds;
+    // the workflow never sends a role override. Source and buildspec are
+    // overridden per StartBuild, as for the provisioning projects, so
+    // whoever can start a build in one runs code as its role: only the
+    // workflow role may, and it holds no iam:PassRole on either hook role.
+    // ------------------------------------------------------------------
+    const globalHookRole = props.globalHookRole ?? fallbackHookRole(this, 'GlobalHookRole', props.fleetName, 'global-hook');
+    const appHookRole = props.appHookRole ?? fallbackHookRole(this, 'AppHookRole', props.fleetName, 'app-hook');
+    this.globalHookProject = hookProject(this, 'GlobalHookProject', props.fleetName, 'global-hook', globalHookRole,
+      'Global hooks - source and buildspec are overridden per StartBuild');
+    this.appHookProject = hookProject(this, 'AppHookProject', props.fleetName, 'app-hook', appHookRole,
+      'Application hooks - source and buildspec are overridden per StartBuild');
+    this.hooks = new HookRunner(this, 'Hooks', {
+      fleetName: props.fleetName,
+      metricNamespace: hookMetricNamespace(props.fleetName),
+    });
+
+    // ------------------------------------------------------------------
     // States — defined leaf-first so transitions can reference them.
     // ------------------------------------------------------------------
     const done = new sfn.Succeed(this, 'Done');
@@ -255,11 +335,25 @@ export class ProvisioningWorkflow extends Construct {
     // exhaustion → tenant to the resolved failedStatus. attribute_exists(PK)
     // so it cannot recreate a concurrently deleted record as a ghost.
     const failTenant = this.updateItemTask('FailTenant', deploymentKey(), {
-      updateExpression: 'SET #status = :failed, statusReason = :reason, updatedAt = :now',
+      updateExpression: `SET #status = :failed, statusReason = :reason, ${LAST_GLOBAL_HOOKS_SET}, updatedAt = :now`,
       conditionExpression: 'attribute_exists(PK)',
       expressionAttributeValues: {
         ':failed': attrAt('$.tenantBuild.failedStatus'),
         ':reason': attrReason('Tenant provisioning failed'),
+        ...lastGlobalHooksValue(),
+        ':now': attrAt('$$.State.EnteredTime'),
+      },
+    });
+
+    // A failed hook, or script outputs the workflow rejected (R-43, R-46):
+    // `$.failureReason` is the statusReason, built where the failure was seen.
+    const failTenantWithReason = this.updateItemTask('FailTenantWithReason', deploymentKey(), {
+      updateExpression: `SET #status = :failed, statusReason = :reason, ${LAST_GLOBAL_HOOKS_SET}, updatedAt = :now`,
+      conditionExpression: 'attribute_exists(PK)',
+      expressionAttributeValues: {
+        ':failed': attrAt('$.tenantBuild.failedStatus'),
+        ':reason': attrAt('$.failureReason'),
+        ...lastGlobalHooksValue(),
         ':now': attrAt('$$.State.EnteredTime'),
       },
     });
@@ -270,12 +364,13 @@ export class ProvisioningWorkflow extends Construct {
     // (never the raw Cause string) keeps statusReason bounded.
     const failTenantWithBuild = this.updateItemTask('FailTenantWithBuild', deploymentKey(), {
       updateExpression:
-        'SET #status = :failed, statusReason = :reason, lastBuildId = :buildArn, updatedAt = :now',
+        `SET #status = :failed, statusReason = :reason, lastBuildId = :buildArn, ${LAST_GLOBAL_HOOKS_SET}, updatedAt = :now`,
       conditionExpression: 'attribute_exists(PK)',
       expressionAttributeValues: {
         ':failed': attrAt('$.tenantBuild.failedStatus'),
         ':reason': attrBuildFailureReason('Tenant provisioning failed'),
         ':buildArn': attrAt('$.failure.buildArn'),
+        ...lastGlobalHooksValue(),
         ':now': attrAt('$$.State.EnteredTime'),
       },
     });
@@ -293,12 +388,13 @@ export class ProvisioningWorkflow extends Construct {
     // Tenant-delete transaction cancellation / retry exhaustion outcome:
     // read the tenant — absence proves the prior delete committed (§7).
     const failTenantDelete = this.updateItemTask('FailTenantDelete', deploymentKey(), {
-      updateExpression: 'SET #status = :failed, statusReason = :reason, updatedAt = :now',
+      updateExpression: `SET #status = :failed, statusReason = :reason, ${LAST_GLOBAL_HOOKS_SET}, updatedAt = :now`,
       conditionExpression: 'attribute_exists(PK) AND #status = :deleting',
       expressionAttributeValues: {
         ':failed': attr('DELETE_FAILED'),
         ':deleting': attr('DELETING'),
         ':reason': attrReason('Tenant delete failed'),
+        ...lastGlobalHooksValue(),
         ':now': attrAt('$$.State.EnteredTime'),
       },
     });
@@ -415,13 +511,23 @@ export class ProvisioningWorkflow extends Construct {
       // Then PARAM_<NAME> for each entry of the deployment's resolved set
       // (R-32, §6.1) - tenant builds never see the cell's set.
     ]);
+    // After the script: outputs the guard rejected fail a create or update
+    // (`$.failureReason`, R-43); otherwise the post hooks run (R-45), then
+    // the terminal write.
+    const tenantScriptChecked = new sfn.Choice(this, 'TenantScriptChecked')
+      .when(sfn.Condition.isPresent('$.failureReason'), failTenantWithReason)
+      .otherwise(this.hooks.tenantPost);
     for (const variant of runTenantBuild.variants) {
+      // An evaluation error of the outputs guard is a defect: on delete it
+      // still yields `{}`, on create and update it is a rejection (R-43).
+      variant.addCatch(tenantScriptChecked, { errors: ['States.QueryEvaluationError'], outputs: scriptOutputsErrorOutput('tenantBuild') });
       variant.addCatch(tenantBuildFailure, { outputs: BUILD_FAILURE_OUTPUT });
-      variant.next(tenantSuccessRouter);
+      variant.next(tenantScriptChecked);
     }
 
+    // The deployment event's pre hooks (global, then application) run before its script (R-45).
     const checkTenantBuild = new sfn.Choice(this, 'TenantBuildRequested')
-      .when(sfn.Condition.isPresent('$.tenantBuild'), runTenantBuild.entry)
+      .when(sfn.Condition.isPresent('$.tenantBuild'), this.hooks.tenantPre)
       .otherwise(done);
 
     // ---- Cell phase (phase 1) -------------------------------------------
@@ -429,57 +535,18 @@ export class ProvisioningWorkflow extends Construct {
     // Cell build failure with a pending tenant build (new-cell onboarding):
     // one transaction moves cell AND tenant CREATING→CREATE_FAILED so
     // compensation cannot leave only one record recoverable (§6, ADR-013).
-    const failCellAndTenant = new sfn.CustomState(this, 'FailCellAndTenant', {
-      stateJson: {
-        Type: 'Task',
-        Resource: 'arn:aws:states:::aws-sdk:dynamodb:transactWriteItems',
-        Parameters: {
-          'TransactItems': [
-            {
-              Update: {
-                TableName: this.table.tableName,
-                Key: rawCellKey(),
-                UpdateExpression: 'SET #status = :failed, statusReason = :reason, updatedAt = :now',
-                ConditionExpression: 'attribute_exists(PK) AND #status = :creating',
-                ExpressionAttributeNames: { '#status': 'status' },
-                ExpressionAttributeValues: {
-                  ':failed': { S: 'CREATE_FAILED' },
-                  ':creating': { S: 'CREATING' },
-                  ':reason': { 'S.$': "States.Format('Cell provisioning failed: {}', $.error.Error)" },
-                  ':now': { 'S.$': '$$.State.EnteredTime' },
-                },
-              },
-            },
-            {
-              Update: {
-                TableName: this.table.tableName,
-                Key: rawDeploymentKey(),
-                UpdateExpression: 'SET #status = :failed, statusReason = :reason, updatedAt = :now',
-                ConditionExpression: 'attribute_exists(PK) AND #status = :creating',
-                ExpressionAttributeNames: { '#status': 'status' },
-                ExpressionAttributeValues: {
-                  ':failed': { S: 'CREATE_FAILED' },
-                  ':creating': { S: 'CREATING' },
-                  ':reason': { S: 'cell provisioning failed' },
-                  ':now': { 'S.$': '$$.State.EnteredTime' },
-                },
-              },
-            },
-          ],
-          'ClientRequestToken.$': "States.Hash(States.Format('cell-failure:{}', $$.Execution.Id), 'MD5')",
-        },
-        ResultPath: null,
-      },
+    const failCellAndTenant = this.failCellAndTenantTransaction('FailCellAndTenant', {
+      reason: { 'S.$': "States.Format('Cell provisioning failed: {}', $.error.Error)" },
     });
-    addTerminalWriteRetries(failCellAndTenant);
 
     // Cell-only failure write: cell to the resolved failedStatus.
     const failCell = this.updateItemTask('FailCell', cellKey(), {
-      updateExpression: 'SET #status = :failed, statusReason = :reason, updatedAt = :now',
+      updateExpression: `SET #status = :failed, statusReason = :reason, ${LAST_GLOBAL_HOOKS_SET}, updatedAt = :now`,
       conditionExpression: 'attribute_exists(PK)',
       expressionAttributeValues: {
         ':failed': attrAt('$.cellBuild.failedStatus'),
         ':reason': attrReason('Cell provisioning failed'),
+        ...lastGlobalHooksValue(),
         ':now': attrAt('$$.State.EnteredTime'),
       },
     });
@@ -493,66 +560,44 @@ export class ProvisioningWorkflow extends Construct {
     // paired transaction keeps the exact same keys, conditions, and token —
     // only WHAT is written changes. The tenant half stays generic: its
     // lastBuildId refers to tenant builds, and the failed build is the cell's.
-    const failCellAndTenantWithBuild = new sfn.CustomState(this, 'FailCellAndTenantWithBuild', {
-      stateJson: {
-        Type: 'Task',
-        Resource: 'arn:aws:states:::aws-sdk:dynamodb:transactWriteItems',
-        Parameters: {
-          'TransactItems': [
-            {
-              Update: {
-                TableName: this.table.tableName,
-                Key: rawCellKey(),
-                UpdateExpression:
-                  'SET #status = :failed, statusReason = :reason, lastBuildId = :buildArn, updatedAt = :now',
-                ConditionExpression: 'attribute_exists(PK) AND #status = :creating',
-                ExpressionAttributeNames: { '#status': 'status' },
-                ExpressionAttributeValues: {
-                  ':failed': { S: 'CREATE_FAILED' },
-                  ':creating': { S: 'CREATING' },
-                  ':reason': {
-                    'S.$':
-                      "States.Format('Cell provisioning failed: build {} ended with status {}', $.failure.buildArn, $.failure.buildStatus)",
-                  },
-                  ':buildArn': { 'S.$': '$.failure.buildArn' },
-                  ':now': { 'S.$': '$$.State.EnteredTime' },
-                },
-              },
-            },
-            {
-              Update: {
-                TableName: this.table.tableName,
-                Key: rawDeploymentKey(),
-                UpdateExpression: 'SET #status = :failed, statusReason = :reason, updatedAt = :now',
-                ConditionExpression: 'attribute_exists(PK) AND #status = :creating',
-                ExpressionAttributeNames: { '#status': 'status' },
-                ExpressionAttributeValues: {
-                  ':failed': { S: 'CREATE_FAILED' },
-                  ':creating': { S: 'CREATING' },
-                  ':reason': { S: 'cell provisioning failed' },
-                  ':now': { 'S.$': '$$.State.EnteredTime' },
-                },
-              },
-            },
-          ],
-          'ClientRequestToken.$': "States.Hash(States.Format('cell-failure:{}', $$.Execution.Id), 'MD5')",
-        },
-        ResultPath: null,
+    const failCellAndTenantWithBuild = this.failCellAndTenantTransaction('FailCellAndTenantWithBuild', {
+      reason: {
+        'S.$':
+          "States.Format('Cell provisioning failed: build {} ended with status {}', $.failure.buildArn, $.failure.buildStatus)",
       },
+      buildArn: { 'S.$': '$.failure.buildArn' },
     });
-    addTerminalWriteRetries(failCellAndTenantWithBuild);
+    // A failed hook or rejected script outputs (R-43, R-46): the reason was built where the failure was seen.
+    const failCellAndTenantWithReason = this.failCellAndTenantTransaction('FailCellAndTenantWithReason', {
+      reason: { 'S.$': '$.failureReason' },
+    });
 
     const failCellWithBuild = this.updateItemTask('FailCellWithBuild', cellKey(), {
       updateExpression:
-        'SET #status = :failed, statusReason = :reason, lastBuildId = :buildArn, updatedAt = :now',
+        `SET #status = :failed, statusReason = :reason, lastBuildId = :buildArn, ${LAST_GLOBAL_HOOKS_SET}, updatedAt = :now`,
       conditionExpression: 'attribute_exists(PK)',
       expressionAttributeValues: {
         ':failed': attrAt('$.cellBuild.failedStatus'),
         ':reason': attrBuildFailureReason('Cell provisioning failed'),
         ':buildArn': attrAt('$.failure.buildArn'),
+        ...lastGlobalHooksValue(),
         ':now': attrAt('$$.State.EnteredTime'),
       },
     });
+
+    const failCellWithReason = this.updateItemTask('FailCellWithReason', cellKey(), {
+      updateExpression: `SET #status = :failed, statusReason = :reason, ${LAST_GLOBAL_HOOKS_SET}, updatedAt = :now`,
+      conditionExpression: 'attribute_exists(PK)',
+      expressionAttributeValues: {
+        ':failed': attrAt('$.cellBuild.failedStatus'),
+        ':reason': attrAt('$.failureReason'),
+        ...lastGlobalHooksValue(),
+        ':now': attrAt('$$.State.EnteredTime'),
+      },
+    });
+    const cellFailureRouterWithReason = new sfn.Choice(this, 'CellFailureHasTenantWithReason')
+      .when(sfn.Condition.isPresent('$.tenantBuild'), failCellAndTenantWithReason)
+      .otherwise(failCellWithReason);
 
     const cellFailureRouterWithBuild = new sfn.Choice(this, 'CellFailureHasTenantWithBuild')
       .when(sfn.Condition.isPresent('$.tenantBuild'), failCellAndTenantWithBuild)
@@ -566,11 +611,12 @@ export class ProvisioningWorkflow extends Construct {
     // Cell-delete condition failure / retry exhaustion outcome: read the
     // cell — absence proves the prior delete committed (§7, ADR-014).
     const failCellDelete = this.updateItemTask('FailCellDelete', cellKey(), {
-      updateExpression: 'SET #status = :failed, statusReason = :reason, updatedAt = :now',
+      updateExpression: `SET #status = :failed, statusReason = :reason, ${LAST_GLOBAL_HOOKS_SET}, updatedAt = :now`,
       conditionExpression: 'attribute_exists(PK)',
       expressionAttributeValues: {
         ':failed': attr('DELETE_FAILED'),
         ':reason': attrReason('Cell delete failed'),
+        ...lastGlobalHooksValue(),
         ':now': attrAt('$$.State.EnteredTime'),
       },
     });
@@ -680,19 +726,37 @@ export class ProvisioningWorkflow extends Construct {
       // Then PARAM_<NAME> for each entry of the cell's resolved set (R-34,
       // §6.1) - cell builds never see a deployment's set.
     ]);
+    const cellScriptChecked = new sfn.Choice(this, 'CellScriptChecked')
+      .when(sfn.Condition.isPresent('$.failureReason'), cellFailureRouterWithReason)
+      .otherwise(this.hooks.cellPost);
     for (const variant of runCellBuild.variants) {
+      variant.addCatch(cellScriptChecked, { errors: ['States.QueryEvaluationError'], outputs: scriptOutputsErrorOutput('cellBuild') });
       variant.addCatch(cellBuildFailure, { outputs: BUILD_FAILURE_OUTPUT });
-      variant.next(cellSuccessRouter);
+      variant.next(cellScriptChecked);
     }
 
     const checkCellBuild = new sfn.Choice(this, 'CellBuildRequested')
-      .when(sfn.Condition.isPresent('$.cellBuild'), runCellBuild.entry)
+      .when(sfn.Condition.isPresent('$.cellBuild'), this.hooks.cellPre)
       .otherwise(checkTenantBuild);
+
+    // The four ways out of the hook sub-graph (R-45): a list that ran leads
+    // on to the script (pre) or the success router (post); a failed create
+    // or update hook leads to the failure write of its build (R-46, §8.2).
+    this.hooks.connect({
+      cellPre: runCellBuild.entry,
+      cellPost: cellSuccessRouter,
+      tenantPre: runTenantBuild.entry,
+      tenantPost: tenantSuccessRouter,
+      cellFailure: cellFailureRouterWithReason,
+      tenantFailure: failTenantWithReason,
+    });
 
     // ------------------------------------------------------------------
     // State machine
     // ------------------------------------------------------------------
     this.stateMachine = new sfn.StateMachine(this, 'StateMachine', {
+      // Physical name (R-41): the stack's deny and the API's grant name the workflow by ARN, computed before it exists.
+      stateMachineName: workflowName(props.fleetName),
       definitionBody: sfn.DefinitionBody.fromChainable(checkCellBuild),
       timeout: EXECUTION_TIMEOUT,
       comment: 'Cell/tenant provisioning: optional cell build, optional tenant build, conditional terminal writes',
@@ -745,6 +809,42 @@ export class ProvisioningWorkflow extends Construct {
         resources: [this.cellProject.projectArn, this.tenantProject.projectArn],
       }),
     );
+    // The hook builds (R-41, R-46): start, stop and poll, on the two hook
+    // projects only. No iam:PassRole on either hook role: a role override
+    // fails at the CodeBuild API whatever a definition sends.
+    this.stateMachine.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'RunHookBuilds',
+        actions: ['codebuild:StartBuild', 'codebuild:StopBuild', 'codebuild:BatchGetBuilds'],
+        resources: [this.globalHookProject.projectArn, this.appHookProject.projectArn],
+      }),
+    );
+    // The count of skipped delete hooks (R-46, T42). PutMetricData has no
+    // resource-level permission; the namespace condition scopes it.
+    this.stateMachine.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'CountSkippedHooks',
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: { StringEquals: { 'cloudwatch:namespace': hookMetricNamespace(props.fleetName) } },
+      }),
+    );
+    // A skipped delete hook can leave an external system holding state for a
+    // record that is gone (T42). Alarm only, no actions, as for M17.
+    new cloudwatch.Alarm(this, 'HookSkippedAlarm', {
+      metric: new cloudwatch.Metric({
+        namespace: hookMetricNamespace(props.fleetName),
+        metricName: HOOK_SKIPPED_METRIC_NAME,
+        statistic: 'Sum',
+        period: Duration.minutes(5),
+      }),
+      threshold: 0,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription:
+        'A delete hook was skipped (three failed attempts, or its budget ran out): an external system may hold state for a record that is gone (threat T42, R-46).',
+    });
     this.stateMachine.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['events:PutRule', 'events:PutTargets', 'events:DescribeRule'],
@@ -871,6 +971,68 @@ export class ProvisioningWorkflow extends Construct {
     return { entry, variants: [pinned, unpinned] };
   }
 
+  /**
+   * The paired failure transaction of a new-cell create (§8.2, ADR-013):
+   * cell and deployment CREATING to CREATE_FAILED in one transaction. The
+   * cell half carries the reason, optionally the failed build and the
+   * global hooks that ran (`$.lastGlobalHooks`, R-40); the deployment half
+   * is always "cell provisioning failed" and lists none, because its event
+   * never ran. The keys, conditions and token are the same for all three.
+   */
+  private failCellAndTenantTransaction(
+    id: string,
+    props: { reason: Record<string, string>; buildArn?: Record<string, string> },
+  ): sfn.CustomState {
+    const state = new sfn.CustomState(this, id, {
+      stateJson: {
+        Type: 'Task',
+        Resource: 'arn:aws:states:::aws-sdk:dynamodb:transactWriteItems',
+        Parameters: {
+          'TransactItems': [
+            {
+              Update: {
+                TableName: this.table.tableName,
+                Key: rawCellKey(),
+                UpdateExpression: props.buildArn === undefined
+                  ? `SET #status = :failed, statusReason = :reason, ${LAST_GLOBAL_HOOKS_SET}, updatedAt = :now`
+                  : `SET #status = :failed, statusReason = :reason, lastBuildId = :buildArn, ${LAST_GLOBAL_HOOKS_SET}, updatedAt = :now`,
+                ConditionExpression: 'attribute_exists(PK) AND #status = :creating',
+                ExpressionAttributeNames: { '#status': 'status' },
+                ExpressionAttributeValues: {
+                  ':failed': { S: 'CREATE_FAILED' },
+                  ':creating': { S: 'CREATING' },
+                  ':reason': props.reason,
+                  ...(props.buildArn === undefined ? {} : { ':buildArn': props.buildArn }),
+                  ':lgh': { 'L.$': '$.lastGlobalHooks' },
+                  ':now': { 'S.$': '$$.State.EnteredTime' },
+                },
+              },
+            },
+            {
+              Update: {
+                TableName: this.table.tableName,
+                Key: rawDeploymentKey(),
+                UpdateExpression: 'SET #status = :failed, statusReason = :reason, updatedAt = :now',
+                ConditionExpression: 'attribute_exists(PK) AND #status = :creating',
+                ExpressionAttributeNames: { '#status': 'status' },
+                ExpressionAttributeValues: {
+                  ':failed': { S: 'CREATE_FAILED' },
+                  ':creating': { S: 'CREATING' },
+                  ':reason': { S: 'cell provisioning failed' },
+                  ':now': { 'S.$': '$$.State.EnteredTime' },
+                },
+              },
+            },
+          ],
+          'ClientRequestToken.$': "States.Hash(States.Format('cell-failure:{}', $$.Execution.Id), 'MD5')",
+        },
+        ResultPath: null,
+      },
+    });
+    addTerminalWriteRetries(state);
+    return state;
+  }
+
   /** Compare-and-set to ACTIVE + lastBuildId, conditional on the exact expected in-flight status. */ private setActiveTask(
     id: string,
     key: DynamoKey,
@@ -878,12 +1040,13 @@ export class ProvisioningWorkflow extends Construct {
     buildArnPath: string,
   ): tasks.DynamoUpdateItem {
     return this.updateItemTask(id, key, {
-      updateExpression: 'SET #status = :active, lastBuildId = :buildArn, updatedAt = :now REMOVE statusReason',
+      updateExpression: `SET #status = :active, lastBuildId = :buildArn, ${LAST_GLOBAL_HOOKS_SET}, updatedAt = :now REMOVE statusReason`,
       conditionExpression: 'attribute_exists(PK) AND #status = :expected',
       expressionAttributeValues: {
         ':active': attr('ACTIVE'),
         ':expected': attr(expectedStatus),
         ':buildArn': attrAt(buildArnPath),
+        ...lastGlobalHooksValue(),
         ':now': attrAt('$$.State.EnteredTime'),
       },
     });
@@ -913,16 +1076,6 @@ export class ProvisioningWorkflow extends Construct {
   }
 }
 
-/**
- * A raw-ASL state in JSONata. `CustomStateProps` has no `queryLanguage`, and
- * without one CDK renders the state's Catch in JSONPath form, dropping its
- * `Output`; overriding the field makes CDK emit `QueryLanguage: JSONata`
- * and render each Catch with `Output`.
- */
-// see adr/0041-run-the-build-tasks-in-jsonata.md
-class JsonataCustomState extends sfn.CustomState {
-  protected override readonly queryLanguage = sfn.QueryLanguage.JSONATA;
-}
 
 type DynamoKey = Record<string, tasks.DynamoAttributeValue>;
 
@@ -1016,7 +1169,14 @@ function buildRole(scope: Construct, id: string, fleetName: string, kind: Provis
   const stack = Stack.of(scope);
   const role = new iam.Role(scope, id, {
     roleName: buildRoleName(fleetName, kind),
-    assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com'),
+    // R-41, H-7: CodeBuild only, and only for the project of this name. The ARN
+    // is computed from the project's fixed physical name, never taken from the
+    // project, whose ServiceRole is this role (a reference would close a cycle).
+    assumedBy: new iam.PrincipalWithConditions(new iam.ServicePrincipal('codebuild.amazonaws.com'), {
+      ArnEquals: {
+        'aws:SourceArn': buildProjectArn(stack.partition, stack.region, stack.account, fleetName, `${kind}-build` as BuildProjectKind),
+      },
+    }),
     description: `${fleetName} control plane ${kind} build: may only assume ${fleetName}-${kind}-provisioning in registered accounts (ADR-025)`,
   });
   const target = provisioningRoleArn(stack.partition, '*', fleetName, kind);
@@ -1034,6 +1194,69 @@ function buildRole(scope: Construct, id: string, fleetName: string, kind: Provis
   );
   suppressTemplateScanners(role, {
     cfnNag: [{ id: 'W28', reason: 'The physical name is the cross-account contract: every account role pair trusts this role by ARN (spec §6.4, ADR-025).' }],
+  });
+  return role;
+}
+
+/**
+ * The `lastGlobalHooks` attribute of a cell or deployment record (R-40, §8.2):
+ * every terminal write that leaves the record in place sets it, from
+ * `$.lastGlobalHooks`, the global hooks that ran for the event in run order
+ * as a DynamoDB list of maps (`hookId`, `phase`, `revision`, and
+ * `sourceVersion` and `resolvedSourceVersion` when there are any), empty when
+ * none ran. The workflow's `StoreHookRuns` state builds it.
+ */
+const LAST_GLOBAL_HOOKS_SET = 'lastGlobalHooks = :lgh';
+
+function lastGlobalHooksValue(): Record<string, tasks.DynamoAttributeValue> {
+  return { ':lgh': tasks.DynamoAttributeValue.listFromJsonPath(sfn.JsonPath.stringAt('$.lastGlobalHooks')) };
+}
+
+/**
+ * A hook project (R-41): physical name `<fleet>-<kind>`, the hook role of its
+ * scope, the provisioning projects' concurrency cap and log retention (M15,
+ * M17). Source and buildspec are overridden per StartBuild.
+ */
+function hookProject(
+  scope: Construct,
+  id: string,
+  fleetName: string,
+  kind: 'global-hook' | 'app-hook',
+  role: iam.IRole,
+  description: string,
+): codebuild.Project {
+  const logGroup = projectLogGroup(scope, `${id}Logs`);
+  const project = new codebuild.Project(scope, id, {
+    projectName: buildProjectName(fleetName, kind),
+    description,
+    role,
+    buildSpec: codebuild.BuildSpec.fromObject({
+      version: '0.2',
+      phases: { build: { commands: ['echo "This buildspec is always overridden"'] } },
+    }),
+    environment: { buildImage: codebuild.LinuxBuildImage.STANDARD_7_0 },
+    concurrentBuildLimit: CONCURRENT_BUILD_LIMIT,
+    logging: { cloudWatch: { logGroup } },
+  });
+  acknowledgeCodeBuildDefaults(project, logGroup);
+  return project;
+}
+
+/**
+ * The hook role when the stack passes none (see `ProvisioningWorkflowProps`).
+ * shortcut: CodeBuild trust on the project's `aws:SourceArn`, no policy, no
+ * deny; delete with the optional props.
+ */
+function fallbackHookRole(scope: Construct, id: string, fleetName: string, kind: 'global-hook' | 'app-hook'): iam.Role {
+  const stack = Stack.of(scope);
+  const role = new iam.Role(scope, id, {
+    roleName: hookRoleName(fleetName, kind),
+    assumedBy: new iam.PrincipalWithConditions(new iam.ServicePrincipal('codebuild.amazonaws.com'), {
+      ArnEquals: { 'aws:SourceArn': buildProjectArn(stack.partition, stack.region, stack.account, fleetName, kind) },
+    }),
+  });
+  suppressTemplateScanners(role, {
+    cfnNag: [{ id: 'W28', reason: 'The physical name is the contract of the hook role (spec R-41).' }],
   });
   return role;
 }
@@ -1117,8 +1340,25 @@ export function environmentOverride(environment: readonly EnvVar[], parametersPa
  * (`lastBuildId`) and nothing else from the CodeBuild result.
  */
 export function buildResultOutput(resultField: string): string {
+  const operation = `$states.input.${resultField.replace(/Result$/, '')}.operation`;
   return jsonata(
-    `$merge([$states.input, {"${resultField}": {"Build": {"Arn": $states.result.Build.Arn, "BuildStatus": $states.result.Build.BuildStatus}}}])`,
+    `$merge([$states.input, {"${resultField}": {"Build": {"Arn": $states.result.Build.Arn, "BuildStatus": $states.result.Build.BuildStatus}}}, ${scriptOutputsFields(operation)}])`,
+  );
+}
+
+/**
+ * The Catch `Output` of a script task for `States.QueryEvaluationError`
+ * (R-43): the guard is a format check that should never raise, so an error
+ * is a defect, and on delete it still yields `{}` so cleanup stays
+ * reachable (P-9); on create and update it is a rejection.
+ *
+ * shortcut: the same error name is raised by the task's `Arguments` before
+ * the build starts, and this Catch cannot tell the two apart, so a defect
+ * there on a delete skips the script. The Arguments read plain input fields.
+ */
+export function scriptOutputsErrorOutput(phase: 'cellBuild' | 'tenantBuild'): string {
+  return jsonata(
+    `$merge([$states.input, $states.input.${phase}.operation = 'delete' ? {"scriptOutputs": "{}"} : {"failureReason": "${SCRIPT_OUTPUTS_REJECTED_REASON}"}])`,
   );
 }
 
