@@ -2608,16 +2608,16 @@ const getAccountAEmpty = integ.assertions
 const getAccountBEmpty = integ.assertions
   .httpApiCall(`${apiUrl}accounts/${accountB}`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { account: { cellCount: 0, maxCells: 1 } } }));
-const listApplicationsEmptyCounts = integ.assertions
-  .httpApiCall(`${apiUrl}applications`, { method: 'GET', headers: authHeaders })
-  .expect(
-    ExpectedResult.objectLike({
-      status: 200,
-      body: {
-        applications: [{ applicationId: APP_X, cellCount: 0 }, { applicationId: APP_Y, cellCount: 0 }, { applicationId: APP_Z, cellCount: 0 }],
-      },
-    }),
-  );
+// Through the step probe, which returns only its verdict: three application
+// summaries, with status, lastGlobalHooks and operationId since ADR-045,
+// exceed the 4 KB custom resource response ("Response object is too long").
+const listApplicationsEmptyCounts = probeBatch([
+  api('ListApplications all empty', 'GET', 'applications', 200, {
+    match: {
+      applications: [{ applicationId: APP_X, cellCount: 0 }, { applicationId: APP_Y, cellCount: 0 }, { applicationId: APP_Z, cellCount: 0 }],
+    },
+  }),
+]);
 const listCellsEmpty = integ.assertions
   .httpApiCall(`${apiUrl}cells`, { method: 'GET', headers: authHeaders })
   .expect(ExpectedResult.objectLike({ status: 200, body: { cells: [] } }));
