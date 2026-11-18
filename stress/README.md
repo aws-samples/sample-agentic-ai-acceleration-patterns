@@ -52,11 +52,12 @@ run. The runner times `deploy` and `teardown` itself and writes one
 Scenarios run platform scenarios first (`PS-1`, `PS-2`, ... by number),
 then each slice's own scenarios in slice order. A run fails when a
 scenario's record is missing, does not parse, belongs to another run, or
-makes no isolation assertion, and when a record names a slice or a scenario
-the run did not run.
+makes no isolation assertion, when a record names a slice or a scenario
+the run did not run, and when a record changed after its own `run`
+returned (another slice rewrote it).
 
-Each verb runs in its own process group with no stdin, so `slice.sh` must
-not prompt (`cdk deploy --require-approval never`). When `slice.sh` exits,
+Each verb runs in its own session and process group with no stdin, so
+`slice.sh` must not prompt (`cdk deploy --require-approval never`). When `slice.sh` exits,
 anything it left running in its group gets SIGTERM, then SIGKILL after
 30 seconds.
 
@@ -79,10 +80,12 @@ lists the Service Quotas codes to read them from
 (`aws service-quotas get-service-quota --service-code <s> --quota-code <c>`).
 
 The run id defaults to the start time (UTC); the runner refuses a run
-folder that already exists. Ctrl-C or SIGTERM stops the current step, with
-everything it started, and then tears down every slice that started.
-Signals during teardown are logged and ignored. An interrupted run exits
-130 (SIGINT) or 143 (SIGTERM); a failed run exits 1.
+folder that already exists. Ctrl-C, SIGTERM or a hangup (SIGHUP) stops the
+current step, with everything it started, and then tears down every slice
+that started. Signals during teardown are logged and ignored. An
+interrupted run exits 129 (SIGHUP), 130 (SIGINT) or 143 (SIGTERM); a failed
+run exits 1. Long runs belong in `tmux`, `screen` or `nohup` with the
+output redirected, so a dropped connection does not interrupt them.
 
 The run writes `$STRESS_HOME/$STRESS_PREFIX/<run id>/results.md`. To keep a
 run, copy that file to `stress/results/<date>-<tier>.md` and commit it
@@ -107,6 +110,9 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   draws on them (W-7 for the front door).
 - A SIGKILL to the runner leaves the current verb's process group
   running, and the run lock in place.
+- Off Linux, the runner cannot tell a zombie from a running process, so
+  where pid 1 does not reap orphans, a verb that left a child behind
+  waits the full 30 seconds plus 5 before it counts as done.
 
 ## Build
 

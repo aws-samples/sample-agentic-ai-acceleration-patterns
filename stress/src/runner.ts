@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -14,7 +15,7 @@ import { type Tier, tierOf, tierProblems } from './tiers';
  * The runner (spec §3.5). It checks the tier and the slices, adds up the
  * quota budget, runs each slice's verbs in dependency order, and tears down
  * in reverse order whatever happened in between, also after a failure or a
- * SIGINT or SIGTERM.
+ * SIGINT, SIGTERM or SIGHUP.
  */
 
 export interface ExecResult {
@@ -40,7 +41,27 @@ export type Exec = (
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Whether a process group still has a live member. On Linux it reads
+ * `/proc`, so zombies (state Z) waiting for a pid 1 that does not reap
+ * them do not count; elsewhere it asks the kernel, which counts them.
+ */
 function groupAlive(pgid: number): boolean {
+  if (fs.existsSync('/proc/self/stat')) {
+    for (const entry of fs.readdirSync('/proc')) {
+      if (!/^\d+$/.test(entry)) continue;
+      let stat: string;
+      try {
+        stat = fs.readFileSync(`/proc/${entry}/stat`, 'utf8');
+      } catch {
+        continue;
+      }
+      // pid (comm) state ppid pgrp ...; comm may hold spaces and parentheses.
+      const [state, , pgrp] = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      if (Number(pgrp) === pgid && state !== 'Z') return true;
+    }
+    return false;
+  }
   try {
     process.kill(-pgid, 0);
     return true;
@@ -70,9 +91,9 @@ async function reapGroup(pgid: number, graceMs: number): Promise<void> {
 }
 
 /**
- * An `Exec` that runs each verb in its own process group, so a signal
- * reaches `slice.sh` and everything it started (`cdk`, `aws`, `k6`), and a
- * terminal Ctrl-C reaches only the runner. When `slice.sh` exits, anything
+ * An `Exec` that runs each verb in its own session and process group, so a
+ * signal reaches `slice.sh` and everything it started (`cdk`, `aws`, `k6`),
+ * and a terminal Ctrl-C or hangup reaches only the runner. When `slice.sh` exits, anything
  * it left running in its group is stopped before the verb counts as done,
  * with `graceMs` between SIGTERM and SIGKILL. Verbs get no stdin.
  */
@@ -130,7 +151,7 @@ export interface RunOptions {
   readonly exec?: Exec;
   readonly log?: (line: string) => void;
   readonly now?: () => Date;
-  /** Where SIGINT and SIGTERM come from; default `process`. */
+  /** Where SIGINT, SIGTERM and SIGHUP come from; default `process`. */
   readonly signals?: Pick<NodeJS.EventEmitter, 'on' | 'off'>;
 }
 
@@ -146,6 +167,22 @@ export interface RunSummary {
 }
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
+
+/** The signals that stop a run and start teardown. */
+const SIGNALS: readonly NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+
+/** Logs to stderr; a write to a terminal that hung up must not stop teardown. */
+function logToStderr(line: string): void {
+  try {
+    process.stderr.write(`${line}\n`);
+  } catch {
+    // stderr is gone (EIO after a hangup); keep going.
+  }
+}
+const ignore = (): void => undefined;
+
+const hashOf = (file: string): string | undefined =>
+  fs.existsSync(file) ? createHash('sha256').update(fs.readFileSync(file)).digest('hex') : undefined;
 
 /** Checks a run without running anything: the tier, the slices and their order. */
 export function planRun(opts: Pick<RunOptions, 'repoRoot' | 'tier' | 'slices'>): { tier: Tier; slices: Slice[]; mode: 'slice' | 'platform' } {
@@ -182,7 +219,7 @@ function budgetEnv(env: NodeJS.ProcessEnv, home: string): NodeJS.ProcessEnv {
 
 export async function runStress(opts: RunOptions): Promise<RunSummary> {
   const exec = opts.exec ?? spawnExec;
-  const log = opts.log ?? ((l: string) => process.stderr.write(`${l}\n`));
+  const log = opts.log ?? logToStderr;
   const now = opts.now ?? (() => new Date());
   const signals = opts.signals ?? process;
   if (!ID.test(opts.runId)) throw new Error(`STRESS_RUN_ID must match ${ID}`);
@@ -217,7 +254,7 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   };
   const failures: string[] = [];
   const started = new Map<string, { start: string; deploySeconds?: number }>();
-  const ran: { slice: string; scenario: string; ok: boolean }[] = [];
+  const ran: Ran[] = [];
   let signal: NodeJS.Signals | undefined;
   let tearingDown = false;
   let stop: Stop | undefined;
@@ -247,8 +284,8 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     if (signal !== undefined) throw new Error(`the run was interrupted (${signal})`);
   };
 
-  signals.on('SIGINT', onSignal);
-  signals.on('SIGTERM', onSignal);
+  for (const sig of SIGNALS) signals.on(sig, onSignal);
+  process.stderr.on('error', ignore);
   try {
     fs.mkdirSync(resultsDir, { recursive: true });
 
@@ -292,7 +329,8 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     if (unknown.length > 0) throw new Error(`no slice in the run declares ${unknown.join(', ')}`);
     for (const sc of scenarios) {
       for (const s of slices.filter((x) => x.scenarios.includes(sc))) {
-        ran.push({ slice: s.name, scenario: sc, ok: await verb(s, 'run', [sc]) });
+        const ok = await verb(s, 'run', [sc]);
+        ran.push({ slice: s.name, scenario: sc, ok, hash: hashOf(path.join(resultsDir, `${s.name}.${sc}.json`)) });
         stopIfAborted();
       }
     }
@@ -316,8 +354,8 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
         }
       }
     } finally {
-      signals.off('SIGINT', onSignal);
-      signals.off('SIGTERM', onSignal);
+      for (const sig of SIGNALS) signals.off(sig, onSignal);
+      process.stderr.off('error', ignore);
       fs.rmSync(lock, { force: true });
     }
   }
@@ -357,6 +395,14 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   }
 }
 
+/** A scenario a slice ran: whether `run` exited 0, and the hash of its record when `run` returned. */
+interface Ran {
+  readonly slice: string;
+  readonly scenario: string;
+  readonly ok: boolean;
+  readonly hash?: string;
+}
+
 /**
  * Reads the run's records and adds a failure for each problem: a record
  * that does not parse, does not belong to the run, or is for a slice or
@@ -368,7 +414,7 @@ function checkRecords(
   dir: string,
   run: Pick<ResultRecord, 'runId' | 'tier' | 'mode'>,
   slices: readonly Slice[],
-  ran: readonly { slice: string; scenario: string; ok: boolean }[],
+  ran: readonly Ran[],
   failures: string[],
 ): ResultRecord[] {
   const records: ResultRecord[] = [];
@@ -383,8 +429,11 @@ function checkRecords(
     }
     const wrong: string[] = (['runId', 'tier', 'mode'] as const).filter((k) => r[k] !== run[k]);
     if (f !== `${r.slice}.${r.scenario}.json`) wrong.push('file name');
-    if (!slices.some((s) => s.name === r.slice)) wrong.push('slice');
-    else if (r.scenario !== 'lifecycle' && !ran.some((x) => x.slice === r.slice && x.scenario === r.scenario)) wrong.push('scenario not run');
+    if (!slices.some((s) => s.name === r.slice)) {wrong.push('slice');} else if (r.scenario !== 'lifecycle') {
+      const own = ran.find((x) => x.slice === r.slice && x.scenario === r.scenario);
+      if (own === undefined) wrong.push('scenario not run');
+      else if (own.hash !== hashOf(path.join(dir, f))) wrong.push('changed after its run');
+    }
     if (wrong.length > 0) {
       failures.push(`${f}: does not belong to this run (${wrong.join(', ')})`);
       continue;

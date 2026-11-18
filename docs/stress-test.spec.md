@@ -219,8 +219,9 @@ Inputs every verb reads from the environment:
 
 `budget` runs without credentials: no `AWS_*` variable from the runner,
 an empty `HOME`, and `AWS_EC2_METADATA_DISABLED=true`. Each verb runs in
-its own process group with no stdin; a signal to the runner reaches the
-whole group, and anything a verb leaves running is stopped when it exits.
+its own session and process group with no stdin; SIGINT, SIGTERM or SIGHUP
+to the runner reaches the whole group, and anything a verb leaves running
+is stopped when it exits.
 
 ### 3.5 Runner
 
@@ -231,7 +232,7 @@ whole group, and anything a verb leaves running is stopped when it exits.
    quota or another run holds the lock for the prefix.
 3. Runs `deploy` and `seed` in dependency order, then the scenarios in the
    order of §5, then `collect`, then `teardown` in reverse order. Teardown
-   runs on failure and after SIGINT or SIGTERM too.
+   runs on failure and after SIGINT, SIGTERM or SIGHUP too.
 4. Writes the run's result file (§4.3).
 
 With one slice named, the runner is that sample's stress test. With all of

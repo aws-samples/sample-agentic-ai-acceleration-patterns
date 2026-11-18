@@ -237,6 +237,21 @@ describe('runner (spec §3.5)', () => {
     ]);
   });
 
+  it('refuses a record another slice rewrote after its run', async () => {
+    const { root, home } = fixture({ 'tenant-identity': { scenarios: ['PS-1'] }, 'control-plane': { needs: ['tenant-identity'], scenarios: ['PS-1'] } });
+    const { exec } = stub();
+    const rewrite: Exec = async (script, args, env, capture, onStart) => {
+      const r = await exec(script, args, env, capture, onStart);
+      if (args[0] === 'run' && script.includes('control-plane')) {
+        const f = path.join(env.STRESS_RESULTS!, 'tenant-identity.PS-1.json');
+        fs.writeFileSync(f, JSON.stringify({ ...JSON.parse(fs.readFileSync(f, 'utf8')), requests: { 200: 1 } }));
+      }
+      return r;
+    };
+    const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: both, exec: rewrite });
+    expect(summary.failures).toEqual(['tenant-identity.PS-1.json: does not belong to this run (changed after its run)', 'tenant-identity run PS-1 exited 0 but wrote no valid tenant-identity.PS-1.json']);
+  });
+
   it('keeps the record of a scenario whose run failed', async () => {
     const { root, home } = fixture({ 'tenant-identity': { scenarios: ['PS-1', 'PS-2'] } });
     const { exec } = stub({ fail: ['tenant-identity run'] });
@@ -301,6 +316,18 @@ describe('runner with real processes', () => {
     await new Promise((r) => setTimeout(r, 3000));
     expect(fs.existsSync(path.join(home, 'orphan-finished'))).toBe(false);
     expect(signals.listenerCount('SIGTERM')).toBe(0);
+  }, 30_000);
+
+  it('treats a hangup like SIGTERM', async () => {
+    const { root, home } = fixture({ demo: { scenarios: ['S1'] } }, { demo: script });
+    const signals = new EventEmitter();
+    const running = runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['demo'], exec: groupExec(2000), log: () => undefined, signals });
+    await until(path.join(home, 'deploy-started'));
+    signals.emit('SIGHUP', 'SIGHUP');
+    const summary = await running;
+    expect(summary.signal).toBe('SIGHUP');
+    expect(fs.existsSync(path.join(home, 'teardown-done'))).toBe(true);
+    expect(signals.listenerCount('SIGHUP')).toBe(0);
   }, 30_000);
 
   it('tears down the others and releases the lock when one teardown throws', async () => {
