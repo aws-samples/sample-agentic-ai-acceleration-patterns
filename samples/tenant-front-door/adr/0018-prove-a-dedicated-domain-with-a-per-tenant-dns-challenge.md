@@ -115,8 +115,8 @@ for the zone's negative-caching TTL (S-10), and lookups in one
 invocation can disagree, so each query makes up to five lookups about
 100 ms apart and stops at the first match. Each lookup is one try
 abandoned after 1 s of wall time (for example a Node.js `Resolver` with
-`timeout: 1000, tries: 1`); the 1 s is chosen, not measured, as S-10's
-longest lookup took 64 ms. It answers `missing` or
+`timeout: 1000, tries: 1`). The 1 s is a chosen value, not a measured
+one; S-10's longest lookup took 64 ms. A query answers `missing` or
 `mismatch` only when no lookup matches, and `unresolved` only when
 every lookup errors. A resolver error is never a pass, and a CNAME at
 the challenge name is refused, so a CNAME left pointing into a zone someone else can register
