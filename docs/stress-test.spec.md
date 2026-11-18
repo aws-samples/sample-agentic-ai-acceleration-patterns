@@ -393,15 +393,21 @@ account:
 | Part | Value |
 |---|---|
 | Bootstrap | `cdk bootstrap --qualifier cell --toolkit-stack-name CDKToolkit-cell --cloudformation-execution-policies <cell execution policy ARN>`, run once by the account owner |
-| Cell execution policy | a managed policy shipped in `stress/application/`: the services a runtime-isolation cell creates (Lambda, API Gateway, DynamoDB, KMS, SSM under the cell's namespace, CloudWatch Logs, AgentCore, S3 assets of the cell bootstrap), and IAM role writes only with the cell permissions boundary attached |
-| Cell permissions boundary | a managed policy that caps every role the cell creates at the same services; the policy denies removing or changing the boundary |
-| Cell synth | `--context @aws-cdk/core:bootstrapQualifier=cell` and `--context @aws-cdk/core:permissionsBoundary={"name":"<boundary name>"}`, so every role in the cell stacks carries the boundary |
+| Cell execution policy | a managed policy shipped in `stress/application/`: API Gateway, Application Auto Scaling (a DynamoDB global table deregisters its scalable targets on delete), AgentCore, CloudWatch, DynamoDB, KMS, Lambda, CloudWatch Logs, SSM, read of the cell bootstrap's S3 assets, and IAM role writes |
+| Cell permissions boundary | a managed policy on the cell bootstrap's execution role and on every role the cell creates: the same services plus what the cell's roles call at run time (`execute-api`, the Bedrock model calls, `sts:AssumeRole` and `sts:TagSession`, X-Ray); it denies `iam:CreateRole` and `iam:PutRolePermissionsBoundary` without itself, removing a boundary, users, access keys and policy writes |
+| Cell synth | `@aws-cdk/core:bootstrapQualifier` `cell` and `@aws-cdk/core:permissionsBoundary` `{"name":"<boundary name>"}` as object context (`cdk.json` or `CDK_CONTEXT_JSON`); a CLI `--context` passes the boundary as a string, which the CDK ignores |
 | Role pair | `control-plane` gains `cellBuildManagedPolicyArns`, as the tenant role has `tenantBuildManagedPolicyArns`; the stress account owner attaches one policy that allows `sts:AssumeRole` on the four `cdk-cell-*` bootstrap roles of its own account and Region, and nothing else |
 
 The boundary is what makes the scope hold: without it, an execution policy
 that may create IAM roles may create an administrator role. A cell build
 compromised through its pinned source can still change any cell in that
 account, which is the role pair's scope today.
+
+Spike Q-5 (`stress/spikes/q5-cell-boundary/`, 2026-11-18) deployed one
+runtime-isolation cell this way: 27 of 27 roles carried the boundary, every
+custom resource ran, the cell deployed in 402 s and destroyed cleanly once
+the execution policy held Application Auto Scaling. A role without the
+boundary was refused at `iam:CreateRole`.
 | 8 | The runtime-isolation `StressDriver` and k6 library move to `stress/` | they become the shared driver; its slice keeps only its own scenarios |
 
 ## 9. Work items and parallel readiness
@@ -427,4 +433,4 @@ account, which is the role pair's scope today.
 | Q-2 | Does the front door's integration test compose runtime-isolation for `/agents/*` (its Q-4)? The platform run assumes it can | W-7 |
 | Q-3 | Does the platform run keep the `large` fleet in both accounts between runs, and what does it cost idle? | decision 5 |
 | Q-4 | Which hosted zone does the stress front door use? | W-7 |
-| Q-5 | Does every runtime-isolation stack deploy under the cell permissions boundary, custom-resource and log-drain roles included, and which actions does the execution policy then need? Proven by one cell deploy with the boundary | W-10 |
+| Q-5 | Does the request path work under the cell permissions boundary (authoriser, TVM `sts:AssumeRole`, the tenant role's model call, the Runtime execution role)? Proven by the sample's integration test run under the boundary | W-10 |
