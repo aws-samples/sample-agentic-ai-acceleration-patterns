@@ -183,11 +183,24 @@ closed registration therefore stops admitting within 60 seconds.
 
 The role-name pattern is not a secret, so any AWS account can create a
 matching role and call the ingest door. Its calls are refused, but they
-draw on the stage throttle and the function's concurrency. The function
-has reserved concurrency, so it cannot starve the other functions of the
-stack, and an alarm fires on the unregistered-caller metric; a flood can
-still delay real emitters until the vendor blocks the source, which the
-threat model lists as a residual.
+draw on the ingest route's throttle and the function's concurrency. The
+function has reserved concurrency, so it cannot starve the other functions
+of the stack, and an alarm fires on the unregistered-caller metric. The
+admin routes sit on the same REST API but behind their own method-level
+throttle, and `POST /usage-events` has a method-level throttle below the
+stage limit, so an ingest flood cannot take the admin routes' headroom and
+fail the control plane's `PRE` hooks. A flood can still delay real
+emitters until the vendor blocks the source, which the threat model lists
+as a residual.
+
+**Per-emitter limits.** A registered emitter is admitted at most
+`maxEventsPerEmitterPerMinute` events a minute, counted in a DynamoDB item
+per emitter and minute; events over it return `RETRY`. At most
+`maxRefusedPerEmitterPerHour` refused events per emitter and hour are
+written to the error store; the rest are counted in a metric, not stored.
+The hour is a fleet-wide unit, so one emitter that fills an hour slows
+every tenant's count of it; a distributed map in the recount is a seam
+(ADR-0003).
 
 **Bus sharing.** The ingest bus carries every tenant's checked events, and
 the usage bus every tenant's counted records, so both are shared only with
@@ -202,13 +215,16 @@ subscriber.
 | Input | Meaning | Default |
 |---|---|---|
 | `fleetName` | the control plane's fleet name, `[a-z0-9][a-z0-9-]{0,31}` as there, checked at synth (`<fleet>-ue-<cellId>` is then at most 62 characters) | required |
-| `registrarPrincipalArns` | roles that may register cells and tenants | required |
+| `registrarPrincipalArns` | roles that may register cells and tenants; synth fails if one also appears in `operatorPrincipalArns` or `readerPrincipalArns` | required |
 | `operatorPrincipalArns` | roles that may manage meters, sinks, recounts, re-admission, redrives and resends of `BLOCKED` deliveries | required |
 | `readerPrincipalArns` | roles that may read usage | `[]` |
 | `lateGraceMinutes` | how long after an hour ends it is first counted; synth fails below the Firehose buffer (1 minute) plus 5 minutes | `15` |
 | `recountWindowHours` | how long after an hour ends it may still be recounted; synth fails below 72. Ingest admits an event only while its hour ended less than `recountWindowHours` − 49 hours ago, so an accepted event has 48 hours (the subscriber's 24 h maximum event age plus 24 h to redrive its dead-letter queue) to reach S3, and one more hour for the Firehose buffer and the scheduler, before the hour closes | `96` |
 | `closeGraceMinutes` | how long a closing emitter or binding is still admitted, for buffered events | `60` |
-| `rawRetentionDays` | raw, re-admitted and error object lifetime | `400` |
+| `rawRetentionDays` | raw and re-admitted object lifetime | `400` |
+| `errorRetentionDays` | error object lifetime; synth fails below `recountWindowHours` plus 7 days | `30` |
+| `maxEventsPerEmitterPerMinute` | per-emitter admission limit (§3.2) | `30000` |
+| `maxRefusedPerEmitterPerHour` | refused events stored per emitter and hour (§3.2) | `10000` |
 | `ingestPath` | `BUS` (ingest bus, ADR-0002) or `DIRECT` (Firehose, events packed per hour) | `BUS` |
 | `ingestBusRetentionDays` | ingest bus retention | `1` |
 | `usageBusRetentionDays` | usage bus retention | `7` |
@@ -242,6 +258,10 @@ from a `PARAM_` value, which deployment events carry from the
 deployment's set, not the cell's (control-plane R-32, R-42). It builds
 every request body with `jq --arg`, so a tenant-shaped value such as
 `PARAM_BILLING_ACCOUNT` never reaches a command line (control-plane §6.5).
+Every registration body also carries `EXECUTION_ID` and `OPERATOR_ID`
+from the hook environment, stored on the item as
+`controlPlaneExecutionId` and `controlPlaneOperatorId`, so a registration
+can be traced to the control-plane operation that made it.
 
 Hooks run again on updates, on delete retries, and on the delete that
 cleans up a failed create (control-plane R-42), so every registration
@@ -255,7 +275,8 @@ Consequences of the wiring:
   `PutCellEmitter` or `PutTenantBinding` fails the cell create, or the
   deployment create or update, before its script runs.
 - **A skipped delete hook leaves a registration `ACTIVE`.** A delete hook
-  is retried three times and then skipped (control-plane R-46). The
+  gets three attempts in all and is then skipped (control-plane R-46);
+  the control plane logs and alarms on the skip (its §8.3). The
   binding then stays `ACTIVE` and the cell can keep reporting for that
   tenant. `ListTenantBindings` and `ListCellEmitters` let an operator
   compare with the control plane; an automatic reconciliation is a seam
@@ -278,6 +299,20 @@ system. `PutTenantBinding` refuses a value outside
 `[A-Za-z0-9._:-]{1,128}`. The metering API URL reaches the cells' emitters
 as a cell parameter `METERING_API_URL` the application declares with the
 URL as its default (control-plane R-34).
+
+### 3.5 Protection of the stores and the pipeline
+
+| Control | Rule |
+|---|---|
+| Raw and error stores | The bucket policy allows `s3:PutObject` under `raw/` only to the Firehose role, under `readmitted/` only to the re-admission function, under `error/` only to the ingest and redrive functions, and under the export prefix only to the dispatcher; it denies `s3:DeleteObject` and `s3:DeleteObjectVersion` to every principal, so objects leave only by lifecycle. Versioning is on, so an overwrite by one of those writers keeps the earlier version for audit; Object Lock is a production option |
+| Ingest dead-letter queue | The queue policy allows `sqs:SendMessage` only to `events.amazonaws.com` with `aws:SourceArn` = the ingest subscriber |
+| Service-principal trust | Every service-principal trust policy and resource policy (Lambda permissions for S3 and Streams, SQS queue policies, Scheduler and Firehose role trust, the bus subscriber roles) is conditioned on `aws:SourceArn` and `aws:SourceAccount` |
+| Audit | API Gateway access logs on every route with `$context.identity.userArn`, `$context.requestId` and the route; meter versions, sinks, registrations and jobs carry `createdBy` (the caller ARN) and `createdAt` |
+| Logs | No event payload, sink request or response body, or credential is logged; recounter execution state holds keys and counts only |
+| Heartbeat | An alarm that does not depend on the scheduler fires when the scheduler's target has not run for 15 minutes, or no hour has reached `COUNTED` for 2 hours while the `pending` index holds hours past their grace |
+
+An administrator of the metering account can change these policies and is
+trusted.
 
 ## 4. Data model
 
@@ -361,7 +396,7 @@ placed in another cell, it lands in a new item, and the old one stays
 | `type` | `HTTP`, `S3_EXPORT` |
 | `enabled` | boolean |
 | `endpoint` | `HTTP`: HTTPS URL. `S3_EXPORT`: a key prefix in the sample's export bucket |
-| `secretName` | `HTTP` only: Secrets Manager name of the credential, read inside the dispatcher |
+| `secretName` | `HTTP` only: Secrets Manager name of the credential, under `<fleet>/metering/sinks/`; `CreateSink` and `UpdateSink` refuse any other name, and the dispatcher's role may read only that prefix |
 | `mapping` | `HTTP` only: target field name → source (record field, meter field, or constant) |
 | `meters` | meter ids this sink takes; empty is all |
 
@@ -645,6 +680,8 @@ Errors:
   the metering API URL; the application's declarations of
   `BILLING_ACCOUNT` (deployment parameter) and `METERING_API_URL` (cell
   parameter).
+- Emitters that put no personal data in `dimensions`: they travel to the
+  raw and error stores, both buses' subscriber accounts and every sink.
 - Emitters that send `UsageEvent`s with stable ULID or UUID `eventId`s,
   resend an event unchanged, and resend `RETRY` results. A 429, a 5xx or
   a timeout resends the whole batch unchanged, with backoff; a 403 or a
