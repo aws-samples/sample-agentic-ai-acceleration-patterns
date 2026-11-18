@@ -1167,7 +1167,7 @@ them (§8.4,
 
 | Op | HTTP | Code | Contract |
 |---|---|---|---|
-| `PutAccount` | `PUT /accounts/{accountId}` | **202** | Create-or-replace, staged (R-48). Input `{owner, maxCells, applicationIds?, externalId?}`; `externalId` MUST be present when `owner` is `TENANT` (400 otherwise, §6.4); `applicationIds` holds at most 100 ids (400 otherwise), each naming a registered application (404 otherwise). Before writing, the service MUST verify the handshake by assuming both roles of the account's pair with the given `externalId` and, when one is given, proving each role refuses the call without it (R-26); failure → 400 naming the role and the reason. Then it reads the global hooks (R-40) and makes one conditional write, its path chosen from a strongly consistent read: no record, a create, which inserts the record `CREATING` (`attribute_not_exists`); `CREATE_FAILED`, a re-put, which writes the values into the record and moves it back to `CREATING` (`status = CREATE_FAILED AND owner = :owner`); a live record (R-47), a replace, which writes `externalId` into the record at once, `maxCells` and `applicationIds` into `pending`, and moves it to `UPDATING` (`owner = :owner` and status `ACTIVE` or `UPDATE_FAILED`); `UPDATING`, a rotation, which writes only `externalId` (`owner = :owner AND status = UPDATING AND operationId = :op`, with the `operationId` the read returned), starts no execution and runs no hook, and whose `maxCells` and `applicationIds` MUST equal the change in flight (409 otherwise). An absent `applicationIds` makes the account shared once committed. An `ACCOUNT_UPDATE` pre hook therefore cannot refuse an `externalId` change, and a running one cannot delay it (R-48). `owner` MUST match on every path but the create (409 otherwise); `cellCount` is untouched (R-24). 409 when `CREATING`, `DELETING` or `DELETE_FAILED`: no build runs into such an account, so a rotation waits for the event to end. Every path but the rotation then starts `ACCOUNT_CREATE` or `ACCOUNT_UPDATE` (§8.4); `GetAccount` polls it. |
+| `PutAccount` | `PUT /accounts/{accountId}` | **202** | Create-or-replace, staged (R-48). Input `{owner, maxCells, applicationIds?, externalId?}`; `externalId` MUST be present when `owner` is `TENANT` (400 otherwise, §6.4); `applicationIds` holds at most 100 ids (400 otherwise), each naming a registered application (404 otherwise). Before writing, the service MUST verify the handshake by assuming both roles of the account's pair with the given `externalId` and, when one is given, proving each role refuses the call without it (R-26); failure → 400 naming the role and the reason. Then it reads the global hooks (R-40) and makes one conditional write, its path chosen from a strongly consistent read: no record, a create, which inserts the record `CREATING` (`attribute_not_exists`); `CREATE_FAILED`, a re-put, which writes the values into the record and moves it back to `CREATING` (`status = CREATE_FAILED AND owner = :owner`); a live record (R-47), a replace, which writes `externalId` into the record at once, `maxCells` and `applicationIds` into `pending`, and moves it to `UPDATING` (`owner = :owner` and status `ACTIVE` or `UPDATE_FAILED`); `UPDATING`, a rotation, which writes only `externalId` (`owner = :owner AND status = UPDATING AND operationId = :op`, with the `operationId` the read returned), starts no execution and runs no hook, and whose `maxCells` and `applicationIds` MUST equal the change in flight (409 otherwise); a rotation whose condition fails reads the record once more and takes the path its new status selects, without a second probe (R-48). An absent `applicationIds` makes the account shared once committed. An `ACCOUNT_UPDATE` pre hook therefore cannot refuse an `externalId` change, and a running one cannot delay it (R-48). `owner` MUST match on every path but the create (409 otherwise); `cellCount` is untouched (R-24). 409 when `CREATING`, `DELETING` or `DELETE_FAILED`: no build runs into such an account, so a rotation waits for the event to end. Every path but the rotation then starts `ACCOUNT_CREATE` or `ACCOUNT_UPDATE` (§8.4); `GetAccount` polls it. |
 | `GetAccount` | `GET /accounts/{accountId}` | 200 | The polling endpoint: `owner`, `applicationIds` (absent when shared), `cellCount`/`maxCells`, whether an `externalId` is set (never its value), `status`, `statusReason`, `lastGlobalHooks`, and `pending` while a replace is staged (`maxCells` and `applicationIds` only). 404 if unregistered. |
 | `ListAccounts` | `GET /accounts` | 200 | Paginated capacity view: `owner`, `applicationIds`, `cellCount`/`maxCells` and `status` per account. |
 | `DeleteAccount` | `DELETE /accounts/{accountId}` | **202** | **Empty accounts only** (P-10): one conditional write moves the account to `DELETING` (`attribute_exists AND cellCount = 0` and status `ACTIVE` or a `*_FAILED` status, R-49), the counterpart of the cell-slot claim, which needs a live account (§7.1); condition failure → 409. The workflow runs the `ACCOUNT_DELETE` pre hooks, deletes the record, then runs the post hooks. A deleted account's roles stay installed — removing them is the owner's act, not the control plane's. |
@@ -1305,7 +1305,15 @@ start (§8.4).
   `UPDATING` (T47) can still rotate this way and keeps serving builds
   with its live values; it cannot commit or drop its staged change,
   change `maxCells` or `applicationIds`, or be deleted until the
-  record is repaired.
+  record is repaired. When the rotation's write loses its condition
+  (the event ended, or another began, between the read and the write),
+  the service MUST read the record once more and take the path its new
+  status selects, as if the request had read it first, without running
+  the probe again, which has passed: the replace for `ACTIVE` or
+  `UPDATE_FAILED`, this path again for a newer change in flight. A
+  status that admits no put answers the 409 that path gives, and a
+  write that loses its condition a second time answers a 409
+  classified as R-14 classifies a lifecycle conflict.
 - `pending` exists only while the record is `UPDATING` and holds only
   the fields the request stages. The record's `Get` operation returns
   it, so an operator can see what is staged.
@@ -2953,27 +2961,39 @@ plus each matching hook's build and polling (R-46, N-13).
 **R-51 (operation id and compensation):** every accepted record
 operation MUST generate an `operationId`, store it on the record in
 its conditional write (R-48, R-49) and start its execution under that
-name. The name has the shape cell and deployment executions already
-use: the record's id, the operation and the accept time in
-milliseconds (`<applicationId>-application-update-<ms>`), at most 70
+name. The name extends the shape cell and deployment executions use
+(the record's id, the operation and the accept time in milliseconds)
+with 8 random hex characters
+(`<applicationId>-application-update-<ms>-<hex8>`): at most 74
 characters, inside the 80 that Step Functions allows. The conditional
-write serialises the operations on one record, so no two share a name.
+write orders the operations on one record but does not keep the
+millisecond clocks of two hosts apart; the random suffix does. So a
+stray execution never passes a later operation's `operationId`
+condition, and the hook tokens R-46 derives from `EXECUTION_ID` never
+collide.
 
 If starting the workflow fails after the conditional write, the
 service MUST conditionally compensate the exact in-flight state, as
 R-19 does for placement, every compensating write also conditioned on
-`operationId = :op`, and answer 500. A start was **refused** when Step
-Functions answered with an error it returns before it creates an
+`operationId = :op`, and answer 500, unless the start went through.
+A start was **refused** only when the operation's own `StartExecution`
+call answered with an error Step Functions raises before it creates an
 execution (a validation, throttling, limit, access or missing state
-machine error; never `ExecutionAlreadyExists`), or when
-`DescribeExecution` on the name, called after the start call ended,
-answers `ExecutionDoesNotExist`. When `DescribeExecution` finds the
-execution, the start went through: the service answers 202 and
+machine error; never `ExecutionAlreadyExists`). Such an error on a
+retry, after an attempt whose outcome was unknown, proves nothing
+about that attempt. A start **went through** when a retry under the
+same name answers with the execution or with `ExecutionAlreadyExists`,
+or when `DescribeExecution` on the name finds the execution: the name
+and the input are the operation's own, so only its earlier attempt can
+have created that execution. The service then answers 202 and
 compensates nothing. Every other outcome (a timeout, a 5xx, a lost
-connection, a `DescribeExecution` that fails) is **unknown**. Step
+connection, a `DescribeExecution` that answers `ExecutionDoesNotExist`
+or fails) is **unknown**: `DescribeExecution` is eventually
+consistent, so only a found execution counts, never a miss. Step
 Functions answers a repeated start with the same name and input with
-the running Standard execution, so the service MAY retry the start
-under the same name before it decides.
+the running Standard execution, and with `ExecutionAlreadyExists` once
+that execution has closed, so the service MAY retry the start under
+the same name, or call `DescribeExecution`, before it decides.
 
 - A fresh insert (`CreateTenant`, and `PutApplication` or `PutAccount`
   for an id that had no record) whose start was refused MUST be
@@ -2995,6 +3015,16 @@ under the same name before it decides.
 - `UPDATING` → `UPDATE_FAILED` with `pending` removed (an `externalId`
   the replace wrote stays, R-48); `DELETING` → `DELETE_FAILED`.
 
+A compensating write whose condition fails is evidence in its own
+right. The service MUST then read the record once. When the record
+holds the same `operationId` in a status the execution writes
+(`ACTIVE`, or the `*_FAILED` status of the in-flight one), or is gone
+after a delete, the execution ran and finished first: the service MUST
+answer 202 with the record as read (for a deleted record, as the
+request's `DELETING` write left it), never 500. A client that retries
+a `CreateTenant` therefore never makes a second tenant beside one that
+went `ACTIVE`. Any other result of that read answers 500.
+
 An execution that started despite an unknown outcome cannot finish a
 later request's record: once the compensation or a retry has changed
 the status or stored a new `operationId`, its commit and terminal
@@ -3014,9 +3044,7 @@ it.
 Each failed status names the failed start in `statusReason` and lands
 on its remedy (§5.6). A compensation that fails in turn, like a crash
 between the write and the start, is the residual of §7.4 (T47); a
-tenant stranded `CREATING` that way is found with `ListTenants`. A
-start request still in transit when `DescribeExecution` answered is the
-same residual.
+tenant stranded `CREATING` that way is found with `ListTenants`.
 
 These seven operations answered 200 before ADR-045 and answer 202 after
 it, with a record that is usable only once it is live: a breaking
@@ -3499,7 +3527,9 @@ writes `externalId` into the record in that write and never into
 `maxCells` and `applicationIds` equal the change in flight writes only
 `externalId`, after the probe, conditioned on `owner`, `UPDATING` and
 the `operationId` it read, and starts no execution, while one whose
-values differ is a 409 (R-48), that the commit sets only the
+values differ is a 409, and one whose write loses its condition to an
+event that ended reads the record once more and takes the replace
+path without a second probe (R-48), that the commit sets only the
 fields `pending` names and removes `pending`, that every placement
 transaction conditions the tenant, and on the new-cell path the account
 and the application, on a live status with an absent status read as
@@ -3510,10 +3540,17 @@ variable, no external id and no admin email (R-42), that each of the
 seven record operations starts one execution, named after the
 `operationId` it stored, also when no hook matches, and compensates a
 failed start: a fresh insert whose start was refused by a delete
-conditioned on `CREATING`, its `operationId` and a count of 0; a fresh
-insert whose start timed out and whose `DescribeExecution` failed by
-`CREATE_FAILED`, never a delete; and every other in-flight status by
-its `*_FAILED` status (R-50, R-51), that the commit and every terminal
+conditioned on `CREATING`, its `operationId` and a count of 0, only
+when `StartExecution` itself returned a pre-creation error; a fresh
+insert whose start timed out and whose `DescribeExecution` answered
+`ExecutionDoesNotExist` or failed by `CREATE_FAILED`, never a delete;
+and every other in-flight status by its `*_FAILED` status (R-50,
+R-51), that a retried start answered `ExecutionAlreadyExists`, and a
+compensation whose condition fails on a record holding the same
+`operationId` as `ACTIVE` or the matching `*_FAILED` status, or on a
+record a delete removed, answer 202 with no further write (R-51), that
+the names of two operations accepted in the same millisecond differ
+(R-51), that the commit and every terminal
 write of a record event are conditioned on the execution's
 `operationId`, and an execution whose write fails on another
 `operationId` ends without a further write or hook (R-50), that each

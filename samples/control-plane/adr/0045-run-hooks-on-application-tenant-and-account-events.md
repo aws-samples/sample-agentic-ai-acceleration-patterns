@@ -154,15 +154,23 @@ and fire no hooks.
   therefore see no event for it. `CREATING` and `DELETING` accounts get
   no such path, because no build runs into them. An account stranded
   `UPDATING` (T47) can still rotate, but cannot change `maxCells` or
-  `applicationIds` or be deleted until it is repaired.
+  `applicationIds` or be deleted until it is repaired. A rotation whose
+  write loses its condition because the event ended reads the record
+  once more and takes the replace path, without a second probe.
 - Every record carries the `operationId` of its last operation, the
-  name of the execution it started. A failed workflow start deletes a
-  record the request inserted only when Step Functions refused the
-  start (an error before any execution exists, or
-  `ExecutionDoesNotExist` from `DescribeExecution`); an unknown outcome
-  leaves it `CREATE_FAILED`, so the delete hooks still reach anything
-  a stray execution's create hooks did. A re-put, an update and a
-  delete go to their `*_FAILED` status (spec R-51). A `CreateTenant`
+  name of the execution it started, with 8 random hex characters at
+  the end so no two operations share one. A failed workflow start
+  deletes a record the request inserted only when `StartExecution`
+  itself returned an error Step Functions raises before any execution
+  exists. `DescribeExecution` is eventually consistent, so it proves
+  only that a start went through: a miss, like any other failure, is
+  an unknown outcome and leaves the record `CREATE_FAILED`, so the
+  delete hooks still reach anything a stray execution's create hooks
+  did. A re-put, an update and a delete go to their `*_FAILED` status.
+  A start shown to have gone through (`ExecutionAlreadyExists` on the
+  operation's own name, an execution `DescribeExecution` found, or a
+  compensation that finds the record finished under the same
+  `operationId`) answers 202 (spec R-51). A `CreateTenant`
   refused at the start leaves no tenant, and a retry makes one; one
   with an unknown start leaves a `CREATE_FAILED` tenant that
   `ListTenants` finds. Cell and deployment executions keep their

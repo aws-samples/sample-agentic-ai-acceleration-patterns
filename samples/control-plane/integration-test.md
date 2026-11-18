@@ -210,7 +210,8 @@ written. Once built:
   account, a `PutAccount` rotation on an `UPDATING` account, and a
   workflow start with an unknown outcome. Spec §10 lists them; unit
   assertions cover the record delete's two writes, the commit replay,
-  the rotation and the unknown start.
+  the rotation, the unknown start and a start that went through after
+  all.
 
 ## Runtime and cost
 
