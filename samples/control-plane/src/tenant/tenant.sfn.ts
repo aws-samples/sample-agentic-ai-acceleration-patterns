@@ -20,9 +20,30 @@ export interface ProvisioningWorkflowProps {
    * Names the two build roles (`<fleet>-cell-build`, `<fleet>-tenant-build`)
    * and the provisioning role pair they may assume in any registered
    * account (`<fleet>-cell-provisioning`, `<fleet>-tenant-provisioning`),
-   * spec §3.3 / §6.4, ADR-025. Already validated by the stack.
+   * spec §3.3 / §6.4, ADR-025. Already validated by the stack. It also names
+   * the four build projects and the workflow with physical names
+   * (`src/shared/fleet.ts`, R-41), so their ARNs are computable before they
+   * exist.
    */
   readonly fleetName: string;
+  /**
+   * The role every global hook runs under, `<fleet>-global-hook` (spec R-41,
+   * ADR-044): created by the stack, which owns its trust (CodeBuild only, on
+   * `aws:SourceArn` of the global hook project), its attached managed
+   * policies and the explicit deny. The workflow names it as the service
+   * role of the global hook project `<fleet>-global-hook` and never passes it
+   * as a role override, nor holds `iam:PassRole` on it. Supplied together
+   * with `appHookRole`; both absent means the workflow creates no hook
+   * project.
+   */
+  readonly globalHookRole?: iam.IRole;
+  /**
+   * The role every application hook runs under, `<fleet>-app-hook` (spec
+   * R-41), supplied and used as `globalHookRole` is, for the application
+   * hook project `<fleet>-app-hook`. Never the same role as `globalHookRole`:
+   * an application hook cannot use what a global hook holds.
+   */
+  readonly appHookRole?: iam.IRole;
 }
 
 /**
