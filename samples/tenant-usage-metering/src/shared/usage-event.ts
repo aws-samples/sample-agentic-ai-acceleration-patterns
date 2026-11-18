@@ -50,6 +50,7 @@ const TENANT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const METER_ID = /^[a-z0-9_.-]{1,64}$/;
 const DIMENSION_KEY = /^[A-Za-z0-9_.-]{1,64}$/;
 const ISO_UTC = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?Z$/;
+const MEMBERS: ReadonlySet<string> = new Set(['eventId', 'tenantId', 'meterId', 'value', 'time', 'dimensions']);
 const FUTURE_SKEW_MS = 5 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 /** Hours between the last admitted event's hour and its close (spec §3.3). */
@@ -71,7 +72,13 @@ export function shapeIsValid(event: unknown): event is UsageEvent {
   if (typeof event !== 'object' || event === null) {
     return false;
   }
+  if (Array.isArray(event)) {
+    return false;
+  }
   const e = event as Record<string, unknown>;
+  if (Object.keys(e).some((key) => !MEMBERS.has(key))) {
+    return false;
+  }
   if (typeof e.eventId !== 'string' || !EVENT_ID.test(e.eventId)) return false;
   if (typeof e.tenantId !== 'string' || !TENANT_ID.test(e.tenantId)) return false;
   if (typeof e.meterId !== 'string' || !METER_ID.test(e.meterId)) return false;

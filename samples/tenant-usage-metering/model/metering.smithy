@@ -63,6 +63,8 @@ service TenantUsageMeteringService {
 ///   personal data (spec §6.1).
 /// A member of another JSON type, or an unknown member, is `BAD_SHAPE`. The
 /// service adds the emitter's identity; a body field never names it (P-2).
+/// Sparse, so a `null` entry reaches the function and is `BAD_SHAPE`.
+@sparse
 @length(min: 1, max: 100)
 list UsageEventList {
     member: Document
@@ -96,6 +98,9 @@ operation PutUsageEvents {
         @required
         results: UsageEventResultList
     }
+    errors: [
+        PayloadTooLargeException
+    ]
 }
 
 // ---------------------------------------------------------------------------

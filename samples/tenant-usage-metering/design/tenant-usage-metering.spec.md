@@ -615,7 +615,9 @@ delivery has been `BLOCKED` for 24 hours.
 
 The event, one free JSON member of the `PutUsageEvents` batch in the model;
 the function, not the model, enforces the "Required" column and every rule
-below, and refuses a bad event alone as `BAD_SHAPE` (P-8):
+below, and refuses a bad event alone as `BAD_SHAPE` (P-8). A member not in
+the table, a member of another JSON type, or a `null` entry is also
+`BAD_SHAPE`:
 
 | Field | Required | Meaning |
 |---|---|---|
@@ -699,6 +701,7 @@ Errors:
 | 403 `AccessDeniedException` | caller not permitted for the route; for `PutUsageEvents`, not an assumed role or not a registered emitter |
 | 404 `ResourceNotFoundException` | unknown meter, sink, hour, job (never for `Delete*` of a registration) |
 | 409 `ConflictException` | with a `reason`: `ACCOUNT_NOT_ALLOWED` (`PutCellEmitter` in a subscriber account or the metering account), `ALREADY_EXISTS` (`CreateMeter` or `CreateSink` on an existing id), `PLACEMENT_MISMATCH` (§4.2, §4.3), `RANGE_CLOSED` (`StartRecount` whose whole range is `CLOSED` or within 5 minutes of its close), `CONCURRENT_WRITE` (a lost conditional write; the only one worth retrying) |
+| 413 `PayloadTooLargeException` | a `PutUsageEvents` body over 1 MB; not resent |
 | 429 `ThrottlingException` | API Gateway stage or method throttle |
 | 500, 502, 503, 504 | the function failed, was throttled or timed out; nothing in the batch is known to be stored |
 
@@ -707,6 +710,7 @@ Errors:
 | Limit | Value |
 |---|---|
 | Events per `PutUsageEvents` | 100 |
+| Request body of `PutUsageEvents` | 1 MB; a larger body is a 413 and is not resent (a body over 6 MB fails before the function, as a 5xx) |
 | Sustained ingest per metering account, `ingestPath: BUS` | about 1,000 events per second; the bus throttled entries above about 1,400 per second in a spike, a limit the quota pages do not name (ADR-0002) |
 | Registry cache | 60 seconds |
 
@@ -734,8 +738,9 @@ Errors:
   raw and error stores, both buses' subscriber accounts and every sink.
 - Emitters that send `UsageEvent`s with stable ULID or UUID `eventId`s,
   resend an event unchanged, and resend `RETRY` results. A 429, a 5xx or
-  a timeout resends the whole batch unchanged, with backoff; a 403 or a
-  400 is not resent.
+  a timeout resends the whole batch unchanged, with backoff; a 403, a
+  400 or a 413 is not resent. A batch never exceeds 1 MB; an emitter splits
+  a larger one before it sends.
 - For an `HTTP` sink: the endpoint and a secret in Secrets Manager.
 
 ### 6.2 What the sample promises

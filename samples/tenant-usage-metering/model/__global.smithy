@@ -251,6 +251,14 @@ structure ConflictException {
     reason: ConflictReason
 }
 
+/// A `PutUsageEvents` body over 1 MB (spec §5.1). Not resent: split it.
+@error("client")
+@httpError(413)
+structure PayloadTooLargeException {
+    @required
+    message: String
+}
+
 @error("client")
 @httpError(429)
 structure ThrottlingException {

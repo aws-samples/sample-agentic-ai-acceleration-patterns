@@ -33,6 +33,10 @@ describe('ingest checks (spec §4.8, §5)', () => {
     ['a negative value', { ...event, value: '-1' }],
     ['seven fractional digits', { ...event, value: '1.1234567' }],
     ['a time with an offset', { ...event, time: '2026-11-18T13:10:00+01:00' }],
+    ['null', null],
+    ['an array', [event]],
+    ['an unknown member', { ...event, payload: 'x'.repeat(1000) }],
+    ['a number value', { ...event, value: 5 }],
     ['eleven dimensions', { ...event, dimensions: Object.fromEntries([...Array(11).keys()].map((i) => [`d${i}`, 'x'])) }],
   ])('%s is BAD_SHAPE', (_label, body) => {
     expect(checkEvent(body, ctx())).toBe('BAD_SHAPE');
