@@ -308,6 +308,12 @@ export interface TenantServiceConfig extends ServiceConfig {
   /** Step Functions client (shared across invocations). */
   readonly sfnClient: SFNClient;
   /**
+   * The Step Functions client of a record event's `StartExecution` (R-51), built with
+   * `maxAttempts: 1`: with no SDK retry, a pre-creation error answers the one attempt
+   * there was, so it is a definite refusal. `DescribeExecution` stays on `sfnClient`.
+   */
+  readonly recordStartClient: SFNClient;
+  /**
    * Where the PutApplication and PutHook supply-chain warnings go (ADR-020, ADR-032, ADR-044);
    * defaults to `console.warn`. Injectable for tests.
    */
@@ -2134,8 +2140,9 @@ export class TenantService implements TenantServiceService<CallerContext> {
    * Starts a record event's execution under its `operationId` and says
    * whether the start went through (R-51). `REFUSED` only when this call
    * itself answered with an error Step Functions raises before it creates
-   * an execution, on the SDK's first attempt (an error after a retried
-   * attempt proves nothing about the earlier one). `STARTED` when the call
+   * an execution. The call goes through `recordStartClient`, which makes
+   * one attempt, so the error answers that attempt (an error after an SDK
+   * retry would prove nothing about the earlier one). `STARTED` when the call
    * succeeded, or answered `ExecutionAlreadyExists` (only this operation
    * starts executions under this name and input), or when the outcome was
    * unknown and `DescribeExecution` finds the execution or a retry under
@@ -2144,7 +2151,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
    */
   private async startRecordWorkflow(name: string, input: RecordEventWorkflowInput): Promise<StartOutcome> {
     const start = () =>
-      this.config.sfnClient.send(
+      this.config.recordStartClient.send(
         new StartExecutionCommand({
           stateMachineArn: this.config.stateMachineArn,
           name,
@@ -2836,11 +2843,10 @@ const START_REFUSALS: ReadonlySet<string> = new Set([
 
 /**
  * Whether a failed `StartExecution` was refused before an execution existed
- * (R-51): a pre-creation error on the SDK's first attempt. After a retried
- * attempt the earlier one's outcome is unknown, so the same error proves
- * nothing. shortcut: a call throttled on every SDK attempt reads as unknown
- * and leaves a fresh insert `CREATE_FAILED` instead of deleting it; read
- * the per-attempt errors from the SDK's retry middleware if that matters.
+ * (R-51): a pre-creation error on the call's only attempt. `recordStartClient`
+ * makes one attempt; the attempt count still guards a client that retried,
+ * because after a retried attempt the earlier one's outcome is unknown and
+ * the same error proves nothing.
  */
 function isStartRefusal(error: unknown): boolean {
   if (!(error instanceof Error) || !START_REFUSALS.has(error.name)) {

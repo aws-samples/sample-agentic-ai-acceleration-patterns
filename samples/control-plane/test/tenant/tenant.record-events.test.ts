@@ -42,6 +42,9 @@ import { TenantService } from '../../src/tenant/tenant';
 import { TenantItem, TenantRecord } from '../../src/tenant/tenant.data-model';
 
 const sfnMock = mockClient(SFNClient);
+/** The two clients the service gets: the normal one and the one-attempt start client (R-51). */
+const sfnClient = new SFNClient({});
+const recordStartClient = new SFNClient({ maxAttempts: 1 });
 const context: CallerContext = { operatorId: 'op-1', role: 'operator', grant: 'operator' };
 
 const TENANT_ID = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
@@ -184,7 +187,8 @@ function makeService(mocks: Mocks = {}) {
     partition: 'aws',
     handshake: mocks.handshake ?? jest.fn().mockResolvedValue([]),
     stateMachineArn: STATE_MACHINE,
-    sfnClient: new SFNClient({}),
+    sfnClient,
+    recordStartClient,
     warn: jest.fn(),
   });
 }
@@ -330,6 +334,32 @@ describe('each of the seven record operations starts one execution named after t
 // ---------------------------------------------------------------------------
 // The start's outcome and the compensation (R-51)
 // ---------------------------------------------------------------------------
+
+describe('the start client (R-51)', () => {
+  test('a record event\'s StartExecution goes through the one-attempt client; DescribeExecution through the normal one', async () => {
+    sfnMock.on(StartExecutionCommand).rejects(sfnError('TimeoutError'));
+    sfnMock.on(DescribeExecutionCommand).resolves({ status: 'RUNNING' });
+    await makeService().CreateTenant({ name: 'a' }, context);
+    expect(starts()).toHaveLength(1);
+    expect(starts()[0].thisValue).toBe(recordStartClient);
+    expect(sfnMock.commandCalls(DescribeExecutionCommand)[0].thisValue).toBe(sfnClient);
+    expect(await recordStartClient.config.maxAttempts()).toBe(1);
+  });
+
+  test('a create throttled on its one attempt is a definite refusal: the insert is deleted, no lookup and no second start', async () => {
+    // A one-attempt client reports attempts 1 on its error.
+    sfnMock.on(StartExecutionCommand).rejects(sfnError('ThrottlingException', 1));
+    const del = jest.fn().mockResolvedValue(undefined);
+    const transitionStatus = jest.fn();
+    const failure = await makeService({ tenantRepo: { delete: del, transitionStatus } }).CreateTenant({ name: 'a' }, context).catch((e) => e);
+    expect(failure).toBeInstanceOf(InternalServerError);
+    expect(failure.message).toContain('was refused');
+    expect(del).toHaveBeenCalledTimes(1);
+    expect(transitionStatus).not.toHaveBeenCalled();
+    expect(starts()).toHaveLength(1);
+    expect(sfnMock.commandCalls(DescribeExecutionCommand)).toHaveLength(0);
+  });
+});
 
 describe('a refused start (R-51)', () => {
   test.each(['ValidationException', 'ThrottlingException', 'ExecutionLimitExceeded', 'StateMachineDoesNotExist', 'AccessDeniedException'])(

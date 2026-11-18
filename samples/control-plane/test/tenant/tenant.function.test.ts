@@ -24,6 +24,21 @@ jest.mock('@aws-sdk/lib-dynamodb', () => {
   return { ...actual, DynamoDBDocumentClient: { from: () => ({ send }) } };
 });
 
+// The handler's Step Functions clients, by their constructor options.
+const sfnClientOptions: unknown[] = [];
+jest.mock('@aws-sdk/client-sfn', () => {
+  const actual = jest.requireActual('@aws-sdk/client-sfn');
+  return {
+    ...actual,
+    SFNClient: class extends actual.SFNClient {
+      constructor(options: unknown) {
+        super(options);
+        sfnClientOptions.push(options);
+      }
+    },
+  };
+});
+
 import { handler } from '../../src/tenant/tenant.function';
 
 function event(
@@ -76,4 +91,8 @@ test('a reader read reaches the service', async () => {
   const result = await handler(event('GET', '/tenants', { operatorId: 'reader-1', role: 'control-plane:reader', grant: 'reader' }));
   expect(send).toHaveBeenCalled();
   expect(result.statusCode).toBe(200);
+});
+
+test('a record event\'s StartExecution gets its own client with no SDK retry; the other calls keep the default (R-51)', () => {
+  expect(sfnClientOptions).toEqual([{}, { maxAttempts: 1 }]);
 });

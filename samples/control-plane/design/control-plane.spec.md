@@ -2934,7 +2934,9 @@ of R-40; a tenant or account event runs no application hook.
   input (§8.1). A commit whose condition fails on a record still
   `UPDATING` with the same `operationId` and without `pending` is the
   replay of a commit that landed, and succeeds; any other failure
-  takes the failure path.
+  takes the failure path. A commit that names a field outside the
+  record type's commit fields fails at once, without R-22's retries,
+  to `UPDATE_FAILED` with a reason naming the allowlist.
 - Delete: the commit is the delete of R-49, conditioned on
   `operationId = :op` as well. A delete has no terminal write once the
   commit succeeded.
@@ -2947,14 +2949,24 @@ of R-40; a tenant or account event runs no application hook.
   fails because the record holds another `operationId` or no longer
   the in-flight status (a compensation moved it), or because the
   record is gone outside a delete's replay, belongs to an execution
-  that R-51's compensation or a later request has replaced. The
-  execution MUST then end without another write and without running
-  another hook.
+  that R-51's compensation or a later request has replaced. On a
+  create or an update the execution MUST then end without another
+  write and without running another hook. On a delete, a failure
+  write whose condition fails follows a commit and an absence probe
+  that both failed, so the delete either landed (the probe ran out of
+  retries) or another operation took the record over; the execution
+  MUST then run the `POST` hooks without another write, so cleanup
+  stays reachable (P-9), which delete hooks tolerate running again
+  (R-46).
 
 The workflow MUST NOT re-read the record to decide what to do (R-20):
 the event, the hooks in run order, the hook environment of R-42 and the
 commit's field names are in the input, and `:op` is the execution's
-name. The cost is one Standard
+name. A failed commit is told apart from a replay by a further write
+that changes nothing and succeeds only on the replay state: after an
+update commit, `REMOVE pending` conditioned on `status = UPDATING`,
+`operationId = :op` and `attribute_not_exists(pending)`; after a
+delete, a `DeleteItem` conditioned on `attribute_not_exists(PK)`. The cost is one Standard
 execution per operation, a few state transitions when no hook matches,
 plus each matching hook's build and polling (R-46, N-13).
 
@@ -3559,7 +3571,10 @@ the names of two operations accepted in the same millisecond differ
 (R-51), that the commit and every terminal
 write of a record event are conditioned on the execution's
 `operationId`, and an execution whose write fails on another
-`operationId` ends without a further write or hook (R-50), that each
+`operationId` ends without a further write or hook, except that a
+delete whose failure write fails its condition still runs its `POST`
+hooks (R-50), that a commit naming a field outside the commit fields
+fails to `UPDATE_FAILED` without a retry (R-50), that each
 record delete moves the
 record to `DELETING` in one write conditioned on its status and its
 count of 0, and deletes it in one write conditioned on `DELETING` and

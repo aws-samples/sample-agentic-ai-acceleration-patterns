@@ -170,6 +170,7 @@ function makeService(mocks: Mocks = {}) {
     handshake: jest.fn().mockResolvedValue([]),
     stateMachineArn: 'arn:aws:states:eu-central-1:111111111111:stateMachine:control-plane-workflow',
     sfnClient: new SFNClient({}),
+    recordStartClient: new SFNClient({ maxAttempts: 1 }),
     warn: mocks.warn ?? jest.fn(),
   });
 }

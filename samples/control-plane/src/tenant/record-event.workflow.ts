@@ -18,7 +18,9 @@
  *                RecordPostHooks ─► RecordSucceeded ─┬─ delete ─► RecordEventDone
  *                                                    └─ SetRecordActive ─► RecordEventDone
  * a failed create or update hook, a failed commit, a failed success write ─► FailRecord
- * any write whose condition fails on another operation (superseded) ─► RecordSuperseded
+ * a commit naming a field outside the allowlist ─► FailRecord at once, never retried
+ * any write whose condition fails on another operation (superseded) ─► RecordSuperseded,
+ *   except a delete's FailRecord ─► RecordPostHooks (the delete landed or was taken over, P-9)
  * ```
  *
  * Every write is conditioned on the execution's `operationId` (the input's
@@ -180,6 +182,11 @@ export function failArguments(tableName: string): string {
 
 /** A caught write error, kept by name only (§8.1: never the raw Cause), for the failure write's reason. */
 const KEEP_WRITE_ERROR = (field: string) => expr(`$merge([$states.input, {"${field}": {"Error": $states.errorOutput.Error}}])`);
+/** The error `$error()` raises in a JSONata field: deterministic, so never retried. */
+export const QUERY_EVALUATION_ERROR = 'States.QueryEvaluationError';
+/** The failure reason of a commit refused by the commit-field allowlist (no raw Cause, §8.1). */
+export const COMMIT_ALLOWLIST_REASON = 'Record commit failed: the commit names a field outside the commit-field allowlist of the record type';
+
 /** The probe failed too: the commit's own error is the reason. */
 const REASON_FROM = (prefix: string, field: string) =>
   expr(`$merge([$states.input, {"failureReason": "${prefix}: " & $states.input.${field}.Error}])`);
@@ -205,10 +212,14 @@ export function recordEventStates(scope: Construct, props: RecordEventStatesProp
   const { tableName, hooks } = props;
   const pass = '{% $states.input %}';
   const when = (condition: string) => sfn.Condition.jsonata(expr(condition));
-  const write = (id: string, resource: 'updateItem' | 'deleteItem', args: string) => {
+  const write = (id: string, resource: 'updateItem' | 'deleteItem', args: string, noRetry: readonly string[] = []) => {
     const state = new JsonataCustomState(scope, id, {
       stateJson: { Type: 'Task', Resource: `arn:aws:states:::dynamodb:${resource}`, Arguments: args, Output: pass },
     });
+    if (noRetry.length > 0) {
+      // Ahead of R-22's `States.ALL` retrier, which would otherwise repeat a deterministic error.
+      state.addRetry({ errors: [...noRetry], maxAttempts: 0 });
+    }
     props.addWriteRetries(state);
     return state;
   };
@@ -219,8 +230,15 @@ export function recordEventStates(scope: Construct, props: RecordEventStatesProp
     comment: 'Superseded (R-50): a later request or a compensation replaced this operation; nothing more is written and no hook runs.',
   });
 
+  // A lost failure write is superseded, except on a delete (R-50): its commit and absence probe
+  // failed, so the delete landed (a probe that ran out of retries) or another operation took the
+  // record over; either way the delete hooks' cleanup must stay reachable (P-9), and they tolerate
+  // running again (R-46).
+  const failLost = sfn.Choice.jsonata(scope, 'RecordFailWriteLost')
+    .when(when(`${VERB} = 'DELETE'`), hooks.recordPost)
+    .otherwise(superseded);
   const fail = write('FailRecord', 'updateItem', failArguments(tableName));
-  fail.addCatch(superseded, { errors: [...CONDITION_FAILED_ERRORS], outputs: pass });
+  fail.addCatch(failLost, { errors: [...CONDITION_FAILED_ERRORS], outputs: pass });
   fail.next(done);
 
   const setActive = write('SetRecordActive', 'updateItem', setActiveArguments(tableName));
@@ -237,7 +255,9 @@ export function recordEventStates(scope: Construct, props: RecordEventStatesProp
   const probeCommitted = write('ProbeRecordCommitted', 'updateItem', commitReplayProbeArguments(tableName));
   probeCommitted.addCatch(fail, { errors: ['States.ALL'], outputs: REASON_FROM('Record commit failed', 'commitError') });
   probeCommitted.next(hooks.recordPost);
-  const commitUpdate = write('CommitRecordUpdate', 'updateItem', commitUpdateArguments(tableName));
+  const commitUpdate = write('CommitRecordUpdate', 'updateItem', commitUpdateArguments(tableName), [QUERY_EVALUATION_ERROR]);
+  // The allowlist's `$error()`: nothing was written, so no probe; straight to UPDATE_FAILED.
+  commitUpdate.addCatch(fail, { errors: [QUERY_EVALUATION_ERROR], outputs: expr(`$merge([$states.input, {"failureReason": "${COMMIT_ALLOWLIST_REASON}"}])`) });
   commitUpdate.addCatch(probeCommitted, { errors: ['States.ALL'], outputs: KEEP_WRITE_ERROR('commitError') });
   commitUpdate.next(hooks.recordPost);
 

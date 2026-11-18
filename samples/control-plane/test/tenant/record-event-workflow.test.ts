@@ -277,7 +277,9 @@ describe('the record event branch of the workflow (R-50, ADR-045)', () => {
     }
     for (const name of writes) {
       expect(states[name].Resource).toMatch(/^arn:aws:states:::dynamodb:(updateItem|deleteItem)$/);
-      expect(states[name].Retry).toEqual([
+      // The update commit hands its allowlist error to the Catch list at once, ahead of R-22's retriers.
+      const retry = name === 'CommitRecordUpdate' ? states[name].Retry.slice(1) : states[name].Retry;
+      expect(retry).toEqual([
         { ErrorEquals: ['DynamoDB.ConditionalCheckFailedException', 'DynamoDb.ConditionalCheckFailedException', 'DynamoDb.TransactionCanceledException'], MaxAttempts: 0 },
         { ErrorEquals: ['States.ALL'], IntervalSeconds: 2, BackoffRate: 2, MaxAttempts: 6 },
       ]);
@@ -286,12 +288,18 @@ describe('the record event branch of the workflow (R-50, ADR-045)', () => {
         expect(states[name].Arguments).toContain('$states.input.recordEvent.operationId');
       }
     }
-    for (const name of ['SetRecordActive', 'FailRecord']) {
+    expect(states.CommitRecordUpdate.Retry[0]).toEqual({ ErrorEquals: ['States.QueryEvaluationError'], MaxAttempts: 0 });
+    expect(states.CommitRecordUpdate.Catch[0]).toMatchObject({ ErrorEquals: ['States.QueryEvaluationError'], Next: 'FailRecord' });
+    for (const [name, next] of [['SetRecordActive', 'RecordSuperseded'], ['FailRecord', 'RecordFailWriteLost']]) {
       expect(states[name].Catch[0]).toMatchObject({
         ErrorEquals: ['DynamoDB.ConditionalCheckFailedException', 'DynamoDb.ConditionalCheckFailedException'],
-        Next: 'RecordSuperseded',
+        Next: next,
       });
     }
+    // A lost failure write is superseded on create and update; on a delete the POST hooks still run (P-9).
+    expect(states.RecordFailWriteLost.Choices).toHaveLength(1);
+    expect(states.RecordFailWriteLost.Choices[0].Next).toBe('RecordPostHooks');
+    expect(states.RecordFailWriteLost.Default).toBe('RecordSuperseded');
     // The failure write has no other Catch: exhausting it is the residual of §7.4.
     expect(states.FailRecord.Catch).toHaveLength(1);
     expect(states.SetRecordActive.Catch[1]).toMatchObject({ ErrorEquals: ['States.ALL'], Next: 'FailRecord' });
@@ -475,17 +483,61 @@ describe('record events in the simulator (R-50, R-49, R-22)', () => {
     const input = recordInput('APPLICATION_UPDATE', [], [], APPLICATION_PENDING) as any;
     input.recordEvent.commit = { action: 'UPDATE', set: ['status', 'maxTenants'], remove: [] };
     const result = await run(input, service(table).handler);
-    expect(dynamoCalls(result)).toEqual(['ProbeRecordCommitted', 'FailRecord']);
+    // No commit call, no R-22 retry, no probe: the error goes straight to the failure write.
+    expect(result.trace.filter((s) => s === 'CommitRecordUpdate')).toHaveLength(1);
+    expect(dynamoCalls(result)).toEqual(['FailRecord']);
+    expect(result.elapsedMs).toBeLessThan(2_000);
     expect(table.get(KEYS.APPLICATION)).toMatchObject({
       status: 'UPDATE_FAILED',
       maxTenants: 5,
-      statusReason: 'Record commit failed: States.QueryEvaluationError',
+      statusReason: 'Record commit failed: the commit names a field outside the commit-field allowlist of the record type',
     });
     expect(table.get(KEYS.APPLICATION)!.pending).toBeUndefined();
   });
+
+  test('the simulator retries an Arguments error under a States.ALL retrier, so the test above proves the exclusion', async () => {
+    const result = await simulate({
+      definition: {
+        States: {
+          Raise: {
+            Type: 'Task',
+            Resource: 'arn:aws:states:::dynamodb:updateItem',
+            Arguments: "{% $error('boom') %}",
+            Retry: [{ ErrorEquals: ['States.ALL'], IntervalSeconds: 2, BackoffRate: 2, MaxAttempts: 6 }],
+            Catch: [{ ErrorEquals: ['States.ALL'], Next: 'End' }],
+          },
+        },
+      },
+      start: 'Raise',
+      stopAt: ['End'],
+      input: {},
+      handler: () => {
+        throw new Error('no call');
+      },
+    });
+    expect(result.stoppedAt).toBe('End');
+    expect(result.output.Error).toBe('States.QueryEvaluationError');
+    expect(result.elapsedMs).toBeGreaterThanOrEqual(126_000);
+  });
+
+  test('a delete whose commit landed but whose probe ran out of retries: FailRecord finds no record, the POST hooks still run (P-9)', async () => {
+    const table = new FakeTable();
+    table.put(application({ status: 'DELETING', operationId: OP }));
+    table.failures = [
+      { state: 'CommitRecordDelete', error: { Error: 'DynamoDB.InternalServerErrorException' }, afterApply: true },
+      { state: 'ProbeRecordDeleted', error: { Error: 'DynamoDB.ProvisionedThroughputExceededException' }, times: 7 },
+    ];
+    const { handler, builds } = service(table);
+    const result = await run(recordInput('APPLICATION_DELETE', [], [hook('post', 'GLOBAL')]), handler);
+    expect(result.stoppedAt).toBe('RecordEventDone');
+    expect(dynamoCalls(result)).toEqual(['CommitRecordDelete', 'CommitRecordDelete', ...Array(7).fill('ProbeRecordDeleted'), 'FailRecord']);
+    expect(result.trace).toContain('RecordFailWriteLost');
+    expect(startedHooks(builds)).toEqual(['POST:post']);
+    expect(table.get(KEYS.APPLICATION)).toBeUndefined();
+  });
 });
 
-describe('superseded: a write that loses its condition to another operation ends the execution, no write or hook after it (R-50)', () => {
+describe('superseded: a write that loses its condition to another operation ends the execution, no write or hook after it, except a delete\'s POST hooks (R-50)', () => {
   test('create: the success write finds another operationId', async () => {
     const table = new FakeTable();
     table.put({ PK: KEYS.TENANT, SK: 'META', status: 'CREATING', operationId: OTHER_OP, name: 'Acme' });
@@ -546,15 +598,26 @@ describe('superseded: a write that loses its condition to another operation ends
     expect(table.get(KEYS.APPLICATION)).toMatchObject({ status: 'UPDATING', operationId: OTHER_OP });
   });
 
-  test('delete: the record holds another operation: no delete, no DELETE_FAILED, no POST hook', async () => {
+  test('delete: the record holds another operation: no delete, no DELETE_FAILED, but the POST hooks run (taken over, P-9)', async () => {
     const table = new FakeTable();
     table.put(application({ status: 'DELETING', operationId: OTHER_OP }));
     const { handler, builds } = service(table);
     const result = await run(recordInput('APPLICATION_DELETE', [], [hook('post', 'GLOBAL')]), handler);
-    expect(result.stoppedAt).toBe('RecordSuperseded');
+    expect(result.stoppedAt).toBe('RecordEventDone');
     expect(dynamoCalls(result)).toEqual(['CommitRecordDelete', 'ProbeRecordDeleted', 'FailRecord']);
-    expect(builds.starts).toHaveLength(0);
+    expect(startedHooks(builds)).toEqual(['POST:post']);
     expect(table.get(KEYS.APPLICATION)).toMatchObject({ status: 'DELETING', operationId: OTHER_OP });
+  });
+
+  test('delete: a compensation moved the record to DELETE_FAILED: the POST hooks run, nothing more is written', async () => {
+    const table = new FakeTable();
+    table.put(application({ status: 'DELETE_FAILED', operationId: OP, statusReason: 'start unknown' }));
+    const { handler, builds } = service(table);
+    const result = await run(recordInput('APPLICATION_DELETE', [], [hook('post', 'GLOBAL')]), handler);
+    expect(result.stoppedAt).toBe('RecordEventDone');
+    expect(dynamoCalls(result)).toEqual(['CommitRecordDelete', 'ProbeRecordDeleted', 'FailRecord']);
+    expect(startedHooks(builds)).toEqual(['POST:post']);
+    expect(table.get(KEYS.APPLICATION)).toMatchObject({ status: 'DELETE_FAILED', statusReason: 'start unknown' });
   });
 });
 

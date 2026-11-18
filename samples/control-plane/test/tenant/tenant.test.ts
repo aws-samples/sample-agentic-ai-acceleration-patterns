@@ -231,6 +231,7 @@ function makeService(mocks: Mocks = {}) {
     handshake: mocks.handshake ?? jest.fn().mockResolvedValue([]),
     stateMachineArn: `arn:aws:states:eu-central-1:${ACCOUNT_ID}:stateMachine:provisioning`,
     sfnClient: new SFNClient({}),
+    recordStartClient: new SFNClient({ maxAttempts: 1 }),
     warn: mocks.warn ?? jest.fn(),
   });
 }

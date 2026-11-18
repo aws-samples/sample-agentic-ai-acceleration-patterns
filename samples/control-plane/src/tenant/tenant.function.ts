@@ -104,6 +104,8 @@ const config: TenantServiceConfig = {
   handshake: stsHandshakeProbe(new STSClient({}), partition, fleetName),
   stateMachineArn: requireEnv('STATE_MACHINE_ARN'),
   sfnClient: new SFNClient({}),
+  // R-51: one attempt, so a pre-creation error on a record event's start is a definite refusal.
+  recordStartClient: new SFNClient({ maxAttempts: 1 }),
 };
 
 // R-36 second wall: every operation checks the caller's grant by name
