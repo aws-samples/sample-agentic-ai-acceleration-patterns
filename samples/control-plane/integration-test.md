@@ -74,6 +74,59 @@ sample. Because the task always runs with `--force`, no workflow depends on a
 committed snapshot; your local snapshot is kept (gitignored) to speed up
 repeated runs.
 
+### Parallel runs (specified, not built)
+
+[Spec §10](./design/control-plane.spec.md#10-acceptance-criteria)
+specifies a per-run fleet name, so that two runs can share accounts A
+and B and one Region. Until it is built, the stack names below are
+fixed and the `integ` task refuses to start while any of them exists.
+Once built:
+
+- Each run takes its own fleet name, `cp-integ-<run id>`, within the
+  `fleetName` charset and length (`[a-z0-9][a-z0-9-]{0,31}`, checked
+  at synth). The run id matches `[a-z0-9]{1,23}` and must not contain
+  `aws`, `amazon` or `cognito`, so the user pool domain prefix built
+  from it ends in no hyphen and holds none of the words Cognito
+  refuses in a domain prefix.
+- The run uses the fleet name in every stack name, the assertion
+  stack's test name included, as the `fleetName` of the stack under
+  test and of the role pair the account B stack installs, and in every
+  other name the test creates that must be unique in an account or a
+  Region: the probe role in B, the hook test paths and policies, and
+  the user pool domain prefix. The stack under test names its build
+  projects and workflow after the fleet (spec R-41), so those differ
+  per run as well.
+- The application ids derive from the run id, not the fleet name:
+  `x-<run id>` and `y-<run id>` in place of `integ-x` and `integ-y`,
+  and `z-<run id>` for the third application of spec §10 step 16, at
+  most 25 characters each. An application id is
+  at most 32 characters, too short for the fleet name plus a suffix,
+  and the parameter paths it names
+  (`/application-plane/applications/<id>/shared/` from
+  `demoApplicationIds`, `/application-plane/tenants/<tenantId>/<id>`)
+  are per account and Region, so two runs with one id would share
+  them.
+- The leftover check looks for that run's stacks only, so a run in
+  progress no longer blocks another. A check that a parameter
+  namespace ends empty looks at that run's applications, cells and
+  tenants only.
+- Each run uses its own checkout or worktree, because integ-runner
+  writes its snapshot (`test/integ.tenant.ts.snapshot/`) and `cdk.out`
+  beside the test.
+
+Runs in one account and Region share its quotas, and those limit how
+many fit at once: CodeBuild's concurrent builds per account and
+Region, which every run's builds draw on, and the API Gateway control
+plane request rate, which a deploy of several REST APIs at once can
+exceed.
+
+They also share state that per-run names do not separate. The stack
+under test's REST API creates the API Gateway CloudWatch role and the
+`AWS::ApiGateway::Account` setting that names it. That setting is one
+per account and Region, goes to whichever run deployed last, and CDK
+retains both when the stack is deleted. The role and the setting are
+expected leftovers, outside the per-run leftover check.
+
 ## What it stands up
 
 | Stack | Account | Contents |
@@ -134,7 +187,9 @@ accounts (tenant parameters are
 removing test resources. The demo parameters under
 `/application-plane/applications/integ-x/shared/` and
 `/application-plane/applications/integ-y/shared/` belong to the stacks and go
-with them. Delete the stacks with the account each lives in:
+with them. Once runs take a per-run fleet name (Parallel runs, above),
+inspect and delete only the stacks that carry that run's fleet name.
+Delete the stacks with the account each lives in:
 `control-plane-integ-account-b` with credentials for B (or through A's
 credentials and B's bootstrap trust), the others in A.
 

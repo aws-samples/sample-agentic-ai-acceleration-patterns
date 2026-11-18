@@ -15,11 +15,11 @@ RFC 2119.
 
 ## 1. Problem Statement
 
-Vendors of multi-tenant applications need a **control plane**: the management layer
-that onboards tenants, provisions their deployments, tracks lifecycle
-state, and offboards them. Most published control plane examples are either
-toy CRUD APIs (no real provisioning) or sprawling platforms (dozens of
-services obscuring the core ideas).
+Vendors of multi-tenant applications need a **control plane**: the
+management layer that onboards tenants, provisions their deployments,
+tracks lifecycle state, and offboards them. Most published control plane
+examples are either toy CRUD APIs (no real provisioning) or sprawling
+platforms (dozens of services obscuring the core ideas).
 
 This spec defines a **control plane for cell-based
 deployments** of one or more applications — small enough to read in a
@@ -130,6 +130,8 @@ Control plane concerns this version leaves out. Each has a recorded seam
   Region
 - Finer operator roles (an application registrar apart from an onboarder,
   operators scoped to accounts) and a sweep for stranded in-flight records
+- Hooks on tenant record events and on account events: vendor hooks
+  (§6.5) run on cell and deployment events only
 
 ### 1.3 What this control plane is NOT
 
@@ -142,7 +144,9 @@ design:
   that a deployment exists and whether its last build succeeded. It
   carries the deployment's declared parameter values to the scripts
   (§6.1) without knowing what they mean
-- Serving tenant traffic, or routing tenants to their cells
+- Serving tenant traffic, or routing tenants to their cells. A vendor
+  hook (§6.5) can tell a routing system that a cell or deployment
+  exists; the routing is that system's
 - **Customer identity.** Which IdP a tenant's users authenticate against
   is a property of the deployed application, owned by the provisioning
   scripts
@@ -189,11 +193,17 @@ here:
   field on the account, not an entity: it stores nothing its neighbours
   don't ([ADR-033](../adr/0033-account-admission-is-an-application-allowlist-on-the-account.md)).
 
-The result: **one service, one API, one table, one workflow, two build
-projects, and one role pair per account — for any number of
-applications.** An implementation of this spec MUST NOT introduce
-additional services, tables, or workflows unless a requirement below is
-unimplementable without them.
+- The global hook *is* an entity by the same test: it holds a hook
+  definition and its revision, which no neighbour stores, and operators
+  register it explicitly. An application hook is not: it is part of its
+  application's definition and is stamped with it, like the scripts.
+
+The result: **one service, one API, one table, one workflow, four build
+projects (two that provision, two that run vendor hooks), and one role
+pair per account — for any number of applications.** An
+implementation of this spec MUST NOT introduce additional services,
+tables, or workflows unless a requirement below is unimplementable
+without them.
 
 Corollary: when generality is speculative, leave it out and *record the
 seam* (§11). For example, `GetDeployment` returns the deployment's
@@ -223,6 +233,13 @@ build succeeded. It does not know *what* the deployment is. Consequences:
   time*. The control plane is not involved in that exchange and never reads
   the namespace.
 - Customer identity is an application plane decision.
+- Systems that must act on a cell's or a deployment's lifecycle from the
+  vendor's side are **vendor hooks** (§6.5,
+  [ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md)):
+  vendor code the workflow runs before or after a script, in the control
+  plane account. The control plane decides when a hook runs and what its
+  failure does to the operation. It never reads what the hook does, and it
+  hands a script's outputs to a post hook without reading them.
 - Per-deployment values the scripts need (an allowed email domain, a
   feature switch) are **declared parameters**: the application names
   them, the operator supplies values on the deployment, and the control
@@ -249,9 +266,10 @@ the deployment — create, update and delete — receives them.
 ### P-4. Cells are homogeneous by construction, per application
 
 Every cell of an application is provisioned from that application's
-**definition** — source + cell scripts + tenant scripts + `maxTenants`,
-held on the application record (§4.1) — and the definition is **stamped
-immutably onto each cell record at creation**
+**definition** — source + cell scripts + tenant scripts +
+`maxTenants` + application hooks, held on the application record
+(§4.1) — and the definition is **stamped immutably onto each cell record
+at creation**
 ([ADR-032](../adr/0032-register-applications-at-run-time-and-stamp-their-definition-onto-cells.md)).
 
 Why: placement only works if a deployment is placeable into *any* cell of
@@ -327,8 +345,11 @@ account's `cellCount` — *a claimed cell slot corresponds to exactly one
 live cell record* — is claimed in the transaction that creates the cell
 and released in the transaction that deletes it. The application's
 `cellCount` — *every live cell is counted by exactly one application* — is
-claimed and released in those same two transactions. Four counters, two
-code paths each, all eight transactional.
+claimed and released in those same two transactions. The hook counter's
+`hookCount` — *every registered global hook is counted once* — is claimed
+in the transaction that creates a global hook and released in the one
+that deletes it (§4.8). Five counters, two code paths each, all ten
+transactional.
 
 ### P-7. Tolerate benign races; prevent corruption; document the difference
 
@@ -373,6 +394,12 @@ hours; synchronous API gateways cap at ~29 seconds. Therefore:
 - Cleanup MUST always be reachable: deployment deletion is allowed from
   failed states *regardless of cell status*, because the delete script is
   the cleanup path even when the cell itself failed to create.
+- A stamped application hook that fails on every run keeps its cell's
+  creates or updates failing, because every retry runs the same stamp.
+  Its exits are in §8.3: fix forward on an unpinned ref, or, for a hook
+  pinned to a commit, the destructive exit (delete the cell's
+  deployments, then the cell). Gates and registrars therefore belong in
+  global scope, where `PutHook` replaces them.
 
 ### P-10. Explicit over implicit for operator-facing decisions
 
@@ -440,6 +467,17 @@ each may only assume its half of the pair. So the account owner — not the
 control plane — decides what provisioning may do in their account, and can
 withdraw it. These roles are THE hardening point of the whole design.
 
+Vendor hooks (§6.5) are the second arbitrary-code surface, and they sit
+on the other side of the same line. They run in the control plane
+account, in two hook build projects of their own, under two hook roles
+(`<fleet>-global-hook`, `<fleet>-app-hook`) that hold only what the
+deployer attaches. No pair trusts either role, and neither may assume a
+pair. Code that holds an account's pair and code that must act where
+that account cannot reach never share a role or a project, and an
+application hook never shares a role with a global hook. Whoever can
+start a hook build runs code as its role, so only the workflow may
+start one (R-41).
+
 ---
 
 ## 3. System Shape
@@ -451,9 +489,9 @@ withdraw it. These roles are THE hardening point of the whole design.
 | R-1 | **API layer** | One HTTP API, generated from the interface model (P-2), fronting one service. REST semantics, JSON protocol. |
 | R-2 | **Authorizer** | Every operation MUST require a JWT from the vendor IdP (OIDC issuer URL + audience are deployment-time inputs, plus the client ids accepted on a token without an audience and the scope such a token must carry, R-38), validated via the issuer's JWKS. There are no unauthenticated operations. |
 | R-3 | **Service** | One stateless compute function implementing all operations, including synchronous placement, the tenant registry, the application registry and the account registry. |
-| R-4 | **Store** | One database table holding all five entity types (application + account + cell + tenant + deployment) plus the idempotency record type, with support for multi-item ACID transactions and conditional writes. (The reference uses DynamoDB single-table design; any store with equivalent transactional conditional-write semantics qualifies.) |
+| R-4 | **Store** | One database table holding all six entity types (application + account + cell + tenant + deployment + global hook) plus the idempotency record type and the hook counter, with support for multi-item ACID transactions and conditional writes. (The reference uses DynamoDB single-table design; any store with equivalent transactional conditional-write semantics qualifies.) |
 | R-5 | **Workflow** | One durable state machine executing provisioning builds and writing terminal state directly to the table. |
-| R-6 | **Build runners** | **Two** shared build projects (cell builds, tenant builds). Per-execution overrides select the source and script; the projects themselves are never mutated per deployment, cell, or account. Before the script runs, each build assumes its half of the hosting account's provisioning role pair (R-25), so the script executes with that account's permissions. The projects' own roles may only assume those roles, read the source, and write their logs. |
+| R-6 | **Build runners** | **Four** shared build projects: two provisioning projects (cell builds, tenant builds) and two hook projects (global hooks, application hooks, R-41). Per-execution overrides select the source and script; the projects themselves are never mutated per deployment, cell, account or hook. Before the script runs, each provisioning build assumes its half of the hosting account's provisioning role pair (R-25), so the script executes with that account's permissions. The provisioning projects' own roles may only assume those roles, read the source, and write their logs; each build role trusts CodeBuild only on its own project's `aws:SourceArn` and carries the R-41 deny. The hook projects' roles never assume a pair (R-41). |
 | R-25 | **Account role pair** | One deployable unit (reference: a CDK stack) that installs `<fleet>-cell-provisioning` and `<fleet>-tenant-provisioning` in an account with the asymmetric permissions of §6.2, trusting the control plane's two build roles and its API role (the registration probe, R-26) — and an optional external id. The account owner deploys it; the control plane stack installs the same pair in its own account so the home account needs no extra step (P-4). |
 
 ```
@@ -461,11 +499,11 @@ Vendor operator ──JWT──► API + Authorizer ──► Service (sync ops,
                                                  │        application + account
                                           202 async ops       ▲        registries)
                                                  ▼            │ terminal status
-                                          Workflow ──► cell build │ tenant build
-                                                        (shared projects)
-                                                             │ AssumeRole
-                                     ┌───────────────────────┴──────────────────────┐
-                                     ▼                                              ▼
+  hook builds (shared projects) ◄──────── Workflow ──► cell build │ tenant build
+  in the control plane account                          (shared projects)
+  <fleet>-global-hook                                        │ AssumeRole
+  <fleet>-app-hook                   ┌───────────────────────┴──────────────────────┐
+  no pair trust, no AssumeRole       ▼                                              ▼
                         account A (vendor-owned, shared)            account B (tenant-owned)
                         <fleet>-cell-provisioning                   <fleet>-cell-provisioning
                         <fleet>-tenant-provisioning                 <fleet>-tenant-provisioning
@@ -473,6 +511,10 @@ Vendor operator ──JWT──► API + Authorizer ──► Service (sync ops,
                         cells 1..maxCells                           cells 1..maxCells
                           app X cells, app Y cells                    app Y cells
 ```
+
+The two hook builds run in the control plane account under the hook
+roles. No pair trusts either role and neither assumes a role, so no
+line leaves them for an account (R-41).
 
 Account A may be the control plane's own account. Nothing in the picture
 changes when it is. Cells of different applications in one account differ
@@ -504,8 +546,8 @@ authorizer MUST map the verified `role` claim to one of two grants:
 
 | Role set (stack input) | Grant | Operations |
 |---|---|---|
-| `allowedRoles` (default `operator`) | operator | all twenty-two |
-| `readerRoles` (default none) | reader | the ten `GET` operations: `GetTenant`, `ListTenants`, `GetDeployment`, `ListDeployments`, `GetCell`, `ListCells`, `GetAccount`, `ListAccounts`, `GetApplication`, `ListApplications` |
+| `allowedRoles` (default `operator`) | operator | all twenty-six |
+| `readerRoles` (default none) | reader | the twelve `GET` operations: `GetTenant`, `ListTenants`, `GetDeployment`, `ListDeployments`, `GetCell`, `ListCells`, `GetAccount`, `ListAccounts`, `GetApplication`, `ListApplications`, `GetHook`, `ListHooks` |
 
 The grant is the authorizer's IAM policy, and the policy is a function of
 the grant alone, never of the method the request named: an operator's
@@ -514,7 +556,7 @@ policy allows `execute-api:Invoke` on `<api>/<stage>/*`, a reader's on
 cache. A reader whose first call is a write therefore caches its read
 grant, not a `Deny` that would block its reads for the cache window, and
 API Gateway refuses the write with 403 before any code runs. The service
-MUST check again, by operation name: a reader may run only the ten read
+MUST check again, by operation name: a reader may run only the twelve read
 operations listed above, and every other operation requires the
 `operator` grant and refuses any other with 403
 (`UnauthorizedError`); a caller context with no grant is an ingress fault,
@@ -535,12 +577,13 @@ start no execution or build, and return no secret. The reader grant is
 defined by method in the authorizer policy, so a new `GET` widens the
 first wall; the service lists the reader operations by name, so a new
 `GET` reaches readers only once it is added to that list too. This rule
-is what keeps the widening safe, and a `GET` that cannot meet it is a different method and a new
-matrix row. Today's reads return no `adminEmail` (never stored, R-8) and
-no `externalId` (never returned, N-10). They do return parameter values,
-which are not secrets by contract only (N-11, T35), and every
-application's source location and version, which name the repository a
-supply-chain attacker would target (T34).
+is what keeps the widening safe, and a `GET` that cannot meet it is a
+different method and a new matrix row. Today's reads return no `adminEmail`
+(never stored, R-8) and no `externalId` (never returned, N-10). They do
+return parameter values, which are not secrets by contract only (N-11,
+T35), and the source location and version of every application and every
+hook (§4.8), which name the repository a supply-chain attacker would target
+(T34).
 
 **R-38 (machine clients,
 [ADR-043](../adr/0043-accept-listed-client-ids-when-a-token-has-no-audience.md)):**
@@ -566,9 +609,9 @@ chooses no grant; the grant comes from `role` alone on both paths
 `client_id` and the same value in `sub`. An issuer that names the client
 in another claim (Okta `cid`, Entra `appid`) never passes it. Trying
 the audience check and retrying without it on failure is not this rule:
-each token is checked once. On a client-credentials token `sub` is the client id, so
-the caller context, the access log and every build's `OPERATOR_ID` name
-the client (M12).
+each token is checked once. On a client-credentials token `sub` is the
+client id, so the caller context, the access log and every build's
+`OPERATOR_ID` name the client (M12).
 
 The issuer MUST mint `role` for each listed machine client. Cognito does
 it with a pre-token-generation trigger on the V3 event, which needs the
@@ -598,16 +641,18 @@ Supplied at deployment time, validated at synthesis/deploy.
 | `vendorIdp.issuerUrl`, `vendorIdp.audience` | non-empty; OIDC discovery must work against the issuer |
 | `vendorIdp.clientIds` (optional, R-38, [ADR-043](../adr/0043-accept-listed-client-ids-when-a-token-has-no-audience.md)) | client ids accepted on a token that has no `aud`. Default: none. Each matches `[A-Za-z0-9+._:-]{1,128}` (Cognito ids are `[\w+]+`), so it survives the comma-separated environment variable; a duplicate MUST fail synth. List only the vendor's own machine clients on the dedicated issuer (T37) |
 | `vendorIdp.requiredScope` (optional, R-38) | a scope a token without `aud` must also carry, such as this API's resource-server scope (`control-plane/read`): one RFC 6749 scope token (`[\x21\x23-\x5B\x5D-\x7E]{1,256}`), given as a literal, since a CDK token is refused at synth. Default: none. Set without `clientIds` it MUST fail synth. Set it whenever a listed client may call another API on the issuer (T37) |
-| `fleetName` | names the role pair every account installs (`<fleetName>-cell-provisioning`, `<fleetName>-tenant-provisioning`) and the control plane's three roles the pair trusts (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-api`); `[a-z0-9-]{1,32}`. Default `control-plane`. Two control planes in one account MUST use different fleet names |
+| `fleetName` | names the role pair every account installs (`<fleetName>-cell-provisioning`, `<fleetName>-tenant-provisioning`) and the control plane's three roles the pair trusts (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-api`), plus its two hook roles, which no pair trusts (`<fleetName>-global-hook`, `<fleetName>-app-hook`, R-41). It also names the four build projects (`<fleetName>-cell-build`, `<fleetName>-tenant-build`, `<fleetName>-global-hook`, `<fleetName>-app-hook`) and the workflow (`<fleetName>-workflow`), so their ARNs can be computed before they exist (R-41); `[a-z0-9][a-z0-9-]{0,31}`, checked at synth, so a name starts with a letter or digit as a CodeBuild project name must. Default `control-plane`. Role names are account-wide and project and state machine names are per Region, so the fleet name already separates two control planes in one account, and the named projects and workflow add no new clash. Two control planes in one account MUST use different fleet names, in every Region. The upgrade that first gives the projects and the workflow these names replaces them and is deployed only after the drain of R-41, as its three deploys (close with `allowedRoles` set to `control-plane:closed`, wait the authorizer TTL plus the timeout of R-41 (90 s), upgrade with the gate kept, open) |
 | `allowedRoles` (optional, R-36) | role claim values that get the operator grant; non-empty. Default `["operator"]`. Every role value in either list matches `[A-Za-z0-9:._-]{1,64}`, so it survives the comma-separated environment variable |
 | `readerRoles` (optional, R-36, [ADR-042](../adr/0042-a-read-only-role-beside-the-operator.md)) | role claim values that get the reader grant. Default: none, so no reader is admitted until the deployer names one. A value in both lists MUST fail synth. Use a namespaced value (`control-plane:reader`), not a word a broader issuer may already mint (`reader`, `viewer`) (T2, T20) |
 | `tenantBuildManagedPolicyArns` (optional, [ADR-022](../adr/0022-attach-deployer-supplied-managed-policies-to-the-tenant-build-role.md)) | array of customer-managed IAM policy ARNs (`arn:<partition>:iam::<account>:policy/...`), each in the stack's own partition and account; synth MUST fail otherwise. Attached to the tenant provisioning role the stack installs in its own account. Default: none |
+| `globalHookManagedPolicyArns` (optional, R-41, [ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md)) | array of customer-managed IAM policy ARNs, validated exactly as `tenantBuildManagedPolicyArns` (the stack's own partition and account; synth MUST fail otherwise). Attached to `<fleet>-global-hook`, the role every global hook runs under. Default: none, so a global hook can write its logs, read its source and nothing else |
+| `appHookManagedPolicyArns` (optional, R-41) | as above; attached to `<fleet>-app-hook`, the role every application hook runs under. An ARN in both lists MUST fail synth, so no policy reaches both scopes by accident (T41) |
 
-Neither applications nor accounts are stack inputs: both are
-registered through the API (§5.4, §5.5), because a customer's account
-appears on demand, not at deploy time (P-10,
+Neither applications, accounts nor global hooks are stack inputs: all
+three are registered through the API (§5.4, §5.5), because a
+customer's account appears on demand, not at deploy time (P-10,
 [ADR-024](../adr/0024-register-accounts-at-run-time-and-claim-cell-slots-atomically.md)),
-and a new application MUST NOT need a redeploy of the control plane
+and a new application or hook MUST NOT need a redeploy of the control plane
 ([ADR-032](../adr/0032-register-applications-at-run-time-and-stamp-their-definition-onto-cells.md)).
 The control plane stack therefore carries no provisioning source, no
 script path and no tenant limit.
@@ -625,13 +670,18 @@ script path and no tenant limit.
 `tenantBuildManagedPolicyArns` attaches each policy to a tenant provisioning
 role in addition to the §6.2 grants. The control plane learns an ARN list,
 never what the policies are for (P-3); the application plane that needs the
-permission publishes the policy.
+permission publishes the policy. The two hook inputs work the same way in
+the control plane's own account: the control plane learns which policies
+its hook roles hold, never what the hooks do with them.
+In the control plane's own account both pair roles also carry the R-41
+deny, so an attached policy cannot grant them the denied actions.
 
 ---
 
 ## 4. Data Model
 
-One table, five public entity types plus one internal record type. All keys
+One table, six public entity types plus two internal record types (the
+idempotency record and the hook counter). All keys
 shown as the reference implementation's convention; the requirement is the
 *shape*, not the literal strings.
 
@@ -640,20 +690,22 @@ shown as the reference implementation's convention; the requirement is the
 | Field | Requirement |
 |---|---|
 | `applicationId` | operator-chosen, `[a-z0-9-]{1,32}` — the item's identity; never generated. The charset keeps it usable as a parameter path segment (§6.2) and readable in listings |
-| `source` | `{type, location, sourceVersion?}` — a build-service source reference (e.g. GitHub repo, S3 bucket) and an optional git ref forwarded to the build as its source version; non-empty type and location. A source whose ref is not a full commit SHA is accepted with a logged warning ([ADR-020](../adr/0020-supply-chain-pinning-warn-and-allow.md)) |
-| `cellScripts` | `{create, update, delete}` — all three paths required, non-empty (P-9) |
-| `tenantScripts` | `{create, update, delete}` — all three paths required, non-empty (P-9) |
+| `source` | `{type, location, sourceVersion?}` — a build-service source reference (e.g. GitHub repo, S3 bucket) and an optional git ref forwarded to the build as its source version; non-empty type and location. `location` (at most 2,048 bytes) and `sourceVersion` (at most 256) use the charsets of a hook source (R-39): URL characters without `@`, so a location carries no userinfo, and for `sourceVersion` `[A-Za-z0-9._/^{}+-]`, the characters of a git ref (a `<ref>^{<commit>}` pin and a SemVer `+` included) or object version. Neither admits a control character or a character JSON escapes (§8.1). A source whose ref is not a full commit SHA is accepted with a logged warning ([ADR-020](../adr/0020-supply-chain-pinning-warn-and-allow.md)) |
+| `cellScripts` | `{create, update, delete}` — all three paths required, non-empty (P-9), each at most 1,024 bytes in the charset of a hook `script`, `[A-Za-z0-9._/-]` (R-39) |
+| `tenantScripts` | `{create, update, delete}` — all three paths required, non-empty (P-9), each at most 1,024 bytes in the charset of a hook `script`, `[A-Za-z0-9._/-]` (R-39) |
 | `maxTenants` | integer ≥ 1; replaceable. A new value applies to cells created afterwards (P-4) |
 | `placementStrategy` | `FILL \| ROUND_ROBIN`; default `FILL`; replaceable, takes effect on the next placement ([ADR-036](../adr/0036-the-application-chooses-fill-or-round-robin-across-accounts.md)). How a new cell picks among eligible accounts with free capacity (§7.1): `FILL` takes the oldest registered account until it is full; `ROUND_ROBIN` takes the account with the fewest cells, so cells rotate over the open accounts |
 | `parameters` | optional list of **parameter declarations**, at most 20, default none; replaced when sent (absent on an existing application keeps it, `[]` clears it), takes effect on the next deployment request ([ADR-039](../adr/0039-applications-declare-deployment-parameters.md)). Each is `{name, required, default?, description?}`: `name` matches `[A-Z][A-Z0-9_]{0,63}` and is unique in the list; `required` is a boolean, default `false`; `default` is a string of at most 1,024 bytes (UTF-8) with no control characters (as for values, R-33) and MUST NOT be set on a required parameter; `description` is at most 256 characters of operator-facing text |
 | `cellParameters` | optional list of **cell parameter declarations**, at most 20, default none; replaced when sent (absent on an existing application keeps it, `[]` clears it), takes effect on the next cell build ([ADR-040](../adr/0040-applications-declare-cell-parameters-with-defaults.md)). Each is `{name, default, description?}`: `name` as for `parameters`, unique in the list and MUST NOT also appear in `parameters` (one name, one meaning); `default` is **required**, a string of at most 1,024 bytes (UTF-8) with no control characters, because a cell is created by placement and no operator is present to supply a value; `description` as for `parameters`. There is no `required` flag |
+| `hooks` | optional list of **application hooks** (§4.8), at most 5, default none; part of the definition, so each new cell is stamped with the list current at its creation (P-4, R-40). Replaced only when sent, the rule the declaration lists follow: absent on an existing application keeps it, `[]` clears it. Each entry is a hook definition (R-39); `hookId` is unique in the list |
 | `cellCount` | **the authoritative count of this application's cells** — claimed in the cell-creating transaction, released in the cell-deleting one (P-6); never written by `PutApplication` |
 | `createdAt`, `updatedAt` | timestamps |
 
 Key: `PK=APPLICATION#<applicationId>`, `SK=META`.
 
-`source`, `cellScripts`, `tenantScripts` and `maxTenants` together are the
-application's **definition**: the bundle a new cell is stamped from.
+`source`, `cellScripts`, `tenantScripts`, `maxTenants` and `hooks`
+together are the application's **definition**: the bundle a new cell is
+stamped from.
 `placementStrategy`, `parameters` and `cellParameters` are not part of
 the definition and are never stamped. The strategy steers where the next
 cell goes; the declarations validate requests and supply defaults when a
@@ -665,11 +717,20 @@ application has **no status**: its operations are synchronous and run no
 build. Its lifecycle is register (`PutApplication`) → in use → delete
 (empty only).
 
+The source and script charsets change `PutApplication`'s validation,
+which admitted any value that starts with a non-blank character,
+control characters included
+([ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md)
+amends ADR-032). A re-put of an application registered with a value
+outside them is a 400 until the value is corrected. A cell stamped before the change keeps
+its stamp, so the §8.1 bound for the application's source and paths
+holds for cells stamped afterwards.
+
 **R-29 (field ownership on applications):** `PutApplication` MUST write
-only the definition fields, `placementStrategy`, `updatedAt`, and each of
-`parameters` and `cellParameters` **only when the request sent it** (on
-an existing application an absent list is kept, `[]` clears it, §5.5),
-and MUST NOT touch `cellCount`;
+the definition fields except `hooks`, plus `placementStrategy` and
+`updatedAt`, and each of `hooks`, `parameters` and `cellParameters`
+**only when the request sent it** (on an existing application an absent
+list is kept, `[]` clears it, §5.5), and MUST NOT touch `cellCount`;
 the two counter paths MUST NOT touch the definition. A definition replaced
 while a cell is being created does not change that cell: the cell was
 stamped inside the placement transaction, from the definition read before
@@ -685,9 +746,10 @@ it (§7.1 step 0).
 | `status` | `CREATING \| ACTIVE \| UPDATING \| DELETING \| CREATE_FAILED \| UPDATE_FAILED \| DELETE_FAILED` |
 | `maxTenants` | stamped from the application's definition at creation; immutable |
 | `tenantCount` | **the authoritative occupancy counter**: the number of deployments in the cell, which in a cell of one application is the number of distinct tenants — see R-16..R-18 |
-| `source`, `cellScripts`, `tenantScripts` | stamped from the application's definition; immutable for the cell's lifetime |
+| `source`, `cellScripts`, `tenantScripts`, `hooks` | stamped from the application's definition; immutable for the cell's lifetime. `hooks` is the application's hook list when the cell was created; it runs on the cell's events and on the events of every deployment in it (R-40) |
 | `parameters` | map of cell parameter name → value, the values an operator set on this cell through `UpdateCell`; at most 20 entries, each value at most 1,024 bytes (UTF-8); **empty at birth**. Never holds a default the operator did not supply, so a changed default reaches the cell on its next build |
 | `lastBuildId` | most recent successful cell-scoped build id (nullable) |
+| `lastGlobalHooks` | the global hooks that ran in the cell's last cell event, in run order, each `{hookId, phase, revision, sourceVersion, resolvedSourceVersion}`: the ref the hook names and the commit its build ran, absent for an S3 source, whose build reports none (R-40, H-2); written by the workflow's terminal writes only; empty when none ran |
 | `statusReason` | populated on failure (nullable) |
 | `createdAt`, `updatedAt` | timestamps |
 
@@ -708,17 +770,17 @@ merge, or a name in both `parameters` and `removeParameters`. The merge
 and its precedence follow R-33 exactly: the whole merged map written in
 the conditional update that moves the cell to `UPDATING`, conditioned on
 the status guard **and** on the cell's `parameters` attribute being
-exactly as the request read it; the same `removeParameters` rules, character rule and
-error classification; validation before the status check. The map
-condition matters most here: placements and deployment deletes write the
-cell's counter and `updatedAt` while it is `ACTIVE`, and they must not
-fail an `UpdateCell` that has nothing to do with them.
+exactly as the request read it; the same `removeParameters` rules,
+character rule and error classification; validation before the status
+check. The map condition matters most here: placements and deployment
+deletes write the cell's counter and `updatedAt` while it is `ACTIVE`, and
+they must not fail an `UpdateCell` that has nothing to do with them.
 `removeParameters` naming a stored entry returns the cell to the default.
-`DeleteCell` MUST NOT validate. A new cell is inserted with an empty map (§7.1 step 3): no
-request supplies cell values at birth. The cell's set reaches **cell
-scripts only**; tenant scripts that need a cell value read what the cell
-create script published under `/application-plane/cells/<cellId>/*`
-(§6.2).
+`DeleteCell` MUST NOT validate. A new cell is inserted with an empty map
+(§7.1 step 3): no request supplies cell values at birth. The cell's set
+reaches **cell scripts only**; tenant scripts that need a cell value read
+what the cell create script published under
+`/application-plane/cells/<cellId>/*` (§6.2).
 
 ### 4.3 Tenant
 
@@ -737,7 +799,8 @@ build. Its lifecycle is create → in use → delete (empty only). Everything
 provisioned for a tenant is a deployment.
 
 **R-7:** The tenant record MUST NOT carry provisioning source, scripts, a
-cell or a build state (P-4, [ADR-037](../adr/0037-a-deployment-is-one-tenant-in-one-application.md)):
+cell or a build state (P-4,
+[ADR-037](../adr/0037-a-deployment-is-one-tenant-in-one-application.md)):
 those belong to its deployments, one per application.
 
 **R-8:** `adminEmail` MUST NOT be persisted on any record (P-3). It survives
@@ -754,13 +817,14 @@ The tenant in one application
 | `cellId` | the placement — assigned at creation, **never changes** (migration is out of scope); always a cell of `applicationId` |
 | `status` | same enum as cell |
 | `parameters` | map of parameter name → value, the values the operator supplied for this deployment; at most 20 entries, each value at most 1,024 bytes (UTF-8); empty when none were supplied. Written by `CreateDeployment`, merged by `UpdateDeployment` (R-33); never holds a default the operator did not supply, so a changed default reaches the deployment on its next build |
-| `lastBuildId`, `statusReason`, timestamps | as for cell |
+| `lastBuildId`, `lastGlobalHooks`, `statusReason`, timestamps | as for cell |
 
 Key: `PK=TENANT#<tenantId>`, `SK=DEPLOYMENT#<applicationId>`. A tenant's
 deployments are therefore one base-table query and need no index.
 
-**R-31:** The deployment record MUST NOT carry provisioning source or
-scripts (P-4). Its effective definition is resolved from its cell.
+**R-31:** The deployment record MUST NOT carry provisioning source,
+scripts or hooks (P-4). Its effective definition, application hooks
+included, is resolved from its cell.
 
 **R-32 (parameter resolution):** when a deployment build's input is
 resolved (create, update and delete alike, §8.1), the service MUST build
@@ -803,13 +867,13 @@ condition stops two updates from interleaving; the map condition stops a
 request from writing a merge it validated against a map that a whole
 update cycle has since replaced. The map is the guard, not `updatedAt`,
 because only these requests write the map (R-21) while other writers
-move `updatedAt`. Failures are classified (R-14). Validation runs on the read record before the conditional
-write, so a request that is both invalid and in flight is a 400, with
-nothing written. A value MUST NOT contain a control character (U+0000 to
-U+001F, U+007F): 400. A build environment cannot carry NUL, and the rule
-bounds a value's JSON-encoded size at twice its raw size (§8.1).
-`DeleteDeployment` MUST NOT validate parameters: cleanup runs with what is
-stored, whatever the declarations now say (P-9).
+move `updatedAt`. Failures are classified (R-14). Validation runs on the
+read record before the conditional write, so a request that is both invalid
+and in flight is a 400, with nothing written. A value MUST NOT contain a
+control character (U+0000 to U+001F, U+007F): 400. A build environment
+cannot carry NUL, and the rule bounds a value's JSON-encoded size at twice
+its raw size (§8.1). `DeleteDeployment` MUST NOT validate parameters:
+cleanup runs with what is stored, whatever the declarations now say (P-9).
 
 ### 4.5 Account
 
@@ -831,12 +895,12 @@ build, so there is nothing transitional to guard. Its lifecycle is register
 
 **R-24 (field ownership on accounts):** `PutAccount` MUST write only the
 policy fields it owns (`owner` on first write, `applicationIds`,
-`maxCells`, `externalId`, `updatedAt`) and MUST NOT touch `cellCount`; the two counter paths MUST NOT
-touch the policy fields. `updatedAt` is the one attribute both paths write;
-it is a timestamp, so last-writer-wins there loses nothing. A capacity cut
-and a concurrent claim then compose
-without a lost update: the claim's condition `cellCount < maxCells`
-evaluates against whichever `maxCells` landed first.
+`maxCells`, `externalId`, `updatedAt`) and MUST NOT touch `cellCount`; the
+two counter paths MUST NOT touch the policy fields. `updatedAt` is the one
+attribute both paths write; it is a timestamp, so last-writer-wins there
+loses nothing. A capacity cut and a concurrent claim then compose without a
+lost update: the claim's condition `cellCount < maxCells` evaluates against
+whichever `maxCells` landed first.
 
 ### 4.6 Idempotency record (internal)
 
@@ -858,9 +922,9 @@ safer semantics for an operator API.
 
 ### 4.7 Listing indexes
 
-Ten listing patterns; nine need secondary indexes (reference: three GSIs;
-each item carries at most one partition attribute per index) and one is a
-base-table query:
+Eleven listing patterns; nine need secondary indexes (reference: three
+GSIs; each item carries at most one partition attribute per index) and
+two are base-table queries:
 
 | Pattern | Index shape |
 |---|---|
@@ -874,6 +938,7 @@ base-table query:
 | List cells of one application / untargeted candidate scan | `APPLICATION#<applicationId>` → `CELL#<cellId>` |
 | List deployments of one application | `APPLICATION#<applicationId>` → `DEPLOYMENT#<tenantId>` (same partition as the previous row, separated by sort-key prefix) |
 | List deployments of one tenant | base table: `PK = TENANT#<tenantId>`, `SK begins_with DEPLOYMENT#` — no index |
+| List global hooks / hook resolution at accept time | base table: `PK = HOOK`, `SK begins_with HOOK#` — no index, and strongly consistent (R-40) |
 
 **R-9:** Indexes MUST be treated as eventually consistent and **never
 authoritative** (P-5). `tenantCount` on the cell record, `deploymentCount`
@@ -882,8 +947,8 @@ records — not index counts — are the occupancy guards.
 
 **R-10:** Every list query MUST be pinned to a server-side partition. The
 partition value is either a static constant (`CELL`, `TENANT`,
-`DEPLOYMENT`, `ACCOUNT`, `APPLICATION`) or a validated resource identifier
-the request names explicitly (`tenantId`, `cellId`, `accountId`,
+`DEPLOYMENT`, `ACCOUNT`, `APPLICATION`, `HOOK`) or a validated resource
+identifier the request names explicitly (`tenantId`, `cellId`, `accountId`,
 `applicationId`), prefixed by the
 service; it is never taken from
 the pagination token. This is what makes unsigned pagination tokens safe:
@@ -897,11 +962,91 @@ sizes; a production fleet would shard them. Full-attribute projections
 (single-query listings, no follow-up reads) are the same trade — trim to
 included attributes at scale.
 
+### 4.8 Hook
+
+A **hook** is vendor code the workflow runs before or after a cell or
+deployment script (§6.5,
+[ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md)).
+A **global hook** applies to every application and is registered through
+the API (§5.5); an **application hook** is part of one application's
+definition (§4.1). Both use one definition shape:
+
+| Field | Requirement |
+|---|---|
+| `hookId` | operator-chosen, `[a-z0-9-]{1,32}`; the item's identity for a global hook, unique within the list for an application hook. It orders hooks within a scope (R-45) |
+| `events` | non-empty list of distinct events: `CELL_CREATE`, `CELL_UPDATE`, `CELL_DELETE`, `DEPLOYMENT_CREATE`, `DEPLOYMENT_UPDATE`, `DEPLOYMENT_DELETE` |
+| `phase` | `PRE \| POST`: before the script, or after it succeeded |
+| `source` | `{type, location, sourceVersion?}`, the shape of the application's `source` (§4.1) under the same pinning rule: a ref that is not a full 40-character commit SHA is accepted with a logged warning naming the hook ([ADR-020](../adr/0020-supply-chain-pinning-warn-and-allow.md)). `type` is a CodeBuild source type name (`GITHUB`, `CODECOMMIT`, `S3`, ...). `location` matches `[A-Za-z0-9._~:/?#\[\]!$&'()*+,;=%-]{1,1024}`: URL characters without `@`, so it can carry no userinfo (`https://user:token@host/...` is a 400). `sourceVersion` matches `[A-Za-z0-9._/^{}+-]{1,128}`, the characters of a branch, a tag (SemVer build metadata after `+` included), a commit SHA, a `<ref>^{<commit>}` pin or an object version. Neither holds a character JSON escapes: `^`, `{`, `}` and `+` need none |
+| `script` | path of the hook's script in its source, matching `[A-Za-z0-9._/-]{1,256}` |
+| `timeoutMinutes` | integer 5–30, default 10; the hook build's run timeout, sent as CodeBuild's `timeoutInMinutesOverride`, whose minimum is 5. Queue time is bounded apart from it (R-46) |
+| `revision` | global hooks only: 1 on create, incremented by every replace; never supplied |
+| `createdAt`, `updatedAt` | global hooks only: timestamps |
+
+Key: `PK=HOOK`, `SK=HOOK#<hookId>`. One partition holds every global
+hook, so the service reads them all in one strongly consistent query
+(§4.7). Beside them, the **hook counter** (`PK=HOOK`, `SK=META`) holds
+`hookCount`, the authoritative count of global hooks, at most 5 (P-6).
+A global hook has no status: its operations are synchronous and run no
+build. Its lifecycle is register (`PutHook`) → in use → delete.
+
+**R-39 (hook definitions):** `PutHook` and `PutApplication` MUST
+validate every hook definition against the table above and refuse with
+400 a malformed id, an empty or repeating event list, an unknown event or
+phase, an unknown source type, a source field or script path outside its
+pattern (a control character included), a `location` with userinfo, a
+timeout outside 5–30, a repeated `hookId` in an application's list, or
+more than 5 hooks in that list. The patterns admit no character JSON
+escapes, so a definition is as large in the execution input as it is
+raw (§8.1). `PutHook` MUST create a hook in
+one transaction (the hook inserted `IF attribute_not_exists`;
+`hookCount += 1` `IF attribute_not_exists(hookCount) OR hookCount < 5`)
+and replace one with a single update conditioned on the hook's existence
+that sets `revision = revision + 1`. It chooses the path from a strongly
+consistent read. A condition that fails because a concurrent create or
+delete of the same hook won is a 409, retryable: a create that met a new
+hook becomes a replace on retry, and a replace that met a delete becomes
+a create. A create the counter refuses is a 409 without a retry hint,
+because the remedy is `DeleteHook`. `DeleteHook` MUST delete the hook
+(`IF attribute_exists`) and decrement `hookCount` (`IF hookCount > 0`)
+in one transaction; a missing hook is 404. A hook definition MUST NOT
+carry a secret: `GetHook`, `ListHooks`, `GetApplication`, `GetCell` and
+`GetDeployment` return it to operators and readers alike (R-37, N-12).
+
+**R-40 (hook resolution):** when an operation is accepted (R-20), the
+service MUST resolve the hooks of each event the execution runs (§8.3):
+the application hooks stamped on the cell, never the application
+record's current list (P-4), and the global hooks read in one strongly
+consistent query (`PK=HOOK`, `SK begins_with HOOK#`), each with the
+`revision` and `source` it had at that read. The query MUST run before
+the operation's first write: in §7.1 step 0 for `CreateDeployment`, and
+with the record read that precedes the transitional conditional write
+for `UpdateDeployment`, `DeleteDeployment`, `UpdateCell` and
+`DeleteCell`. A failed query is then a 500 with nothing written, never
+a record left `CREATING`, `UPDATING` or `DELETING` with no execution.
+The application hooks need no read of their own: a stamp is immutable,
+so the cell the operation already read, or for a new cell the
+application record read in step 0, holds them. The workflow runs that
+snapshot and never re-reads a hook (R-20). A global hook put or deleted
+after the read does not change an execution already accepted; the next
+operation sees it. Both are tolerated races (§7.2). Every terminal write
+that leaves the record in place (§8.2) MUST record on the cell or the
+deployment the global hooks that ran for its event as
+`lastGlobalHooks`, each with the `sourceVersion` the hook names and
+the `resolvedSourceVersion` its build's final poll reported, so an
+operator can tell which commit of a gate or an audit hook an `ACTIVE`
+record passed, also when the hook names a branch. For a git source
+CodeBuild reports the full commit SHA, the branch's tip when the hook
+names a branch (H-2). For an S3 source it reports none, also when
+`sourceVersion` names an object version, so the entry holds the
+requested `sourceVersion` and no `resolvedSourceVersion`. A hook that
+a `PRE` failure kept from running is not listed.
+Application hooks need no such record: the cell's stamp names them.
+
 ---
 
 ## 5. API Surface
 
-Twenty-two operations. Conventions: lowercase plural collection paths,
+Twenty-six operations. Conventions: lowercase plural collection paths,
 kebab-case segments, singleton sub-resource singular. Sync operations
 return 200; async (build-triggering) operations return 202 (P-8).
 
@@ -928,7 +1073,7 @@ to a provisioned tenant applies here.
 | Op | HTTP | Code | Contract |
 |---|---|---|---|
 | `CreateDeployment` | `POST /tenants/{tenantId}/deployments` | **202** | Input `{applicationId, adminEmail, accountId?, parameters?, clientToken?}` — **no resource definition** (P-4). `parameters` is a name → value map validated against the application's declarations (R-33); 400 on an undeclared name, an over-long value or a missing required parameter, after the replay read (§7.3) and before placement runs. 404 for an unknown tenant or an unregistered `applicationId`. `accountId` pins the deployment to one registered account (the only way into a tenant-owned account); the account MUST admit the application (400 otherwise, §4.5); absent, placement chooses among vendor-owned accounts that admit it. Runs placement (§7), starts the workflow, returns the deployment including `cellId`. 404 for an unregistered `accountId`; 409 `ConflictError` when the tenant already has a deployment of that application; 409 `InsufficientCapacityError` when no eligible account has capacity. |
-| `GetDeployment` | `GET /tenants/{tenantId}/deployments/{applicationId}` | 200 | The polling endpoint: `status`, `statusReason`, `lastBuildId`, `cellId`, plus the deployment's *effective* definition (resolved from the cell's stamped definition), the cell's `accountId` and the stored `parameters` (the supplied values only; defaults are not merged in). 404 if missing. |
+| `GetDeployment` | `GET /tenants/{tenantId}/deployments/{applicationId}` | 200 | The polling endpoint: `status`, `statusReason`, `lastBuildId`, `lastGlobalHooks`, `cellId`, plus the deployment's *effective* definition (resolved from the cell's stamped definition, the application hooks stamped on the cell included), the cell's `accountId` and the stored `parameters` (the supplied values only; defaults are not merged in). 404 if missing. |
 | `UpdateDeployment` | `PUT /tenants/{tenantId}/deployments/{applicationId}` | **202** | Re-apply the deployment, optionally changing parameter values first. Input `{parameters?, removeParameters?}`, both optional: an empty body re-applies with the stored values. Names in `parameters` are set and names in `removeParameters` removed; every other stored value is kept (R-33). Runs the stamped tenant update script with the merged set resolved per R-32. Requires deployment `ACTIVE`/`UPDATE_FAILED` **and** cell `ACTIVE`; 409 otherwise. 400 on a validation failure of R-33, with nothing written. |
 | `DeleteDeployment` | `DELETE /tenants/{tenantId}/deployments/{applicationId}` | **202** | 409 if in-flight. Allowed from `ACTIVE` and all `*_FAILED` states **regardless of cell status** — cleanup must always be reachable (P-9). Runs the tenant delete script with the stored parameters resolved per R-32, never validated against the current declarations; on success the workflow removes the record and releases the cell slot and the tenant's count in one transaction (§8.2). |
 | `ListDeployments` | `GET /deployments[?tenantId=\|?cellId=\|?applicationId=]` | 200 | Paginated. At most one filter per request (400 for two). An unknown `tenantId`, `cellId` or `applicationId` filter yields an **empty page, not a 404** — a filter is a query predicate, not a resource lookup. |
@@ -938,7 +1083,7 @@ to a provisioned tenant applies here.
 | Op | HTTP | Code | Contract |
 |---|---|---|---|
 | `ListCells` | `GET /cells[?accountId=\|?applicationId=]` | 200 | Fleet topology: `applicationId`, `accountId`, `status`, `tenantCount`/`maxTenants` per cell — the operator's capacity view. Paginated. At most one filter per request (400 for two). An unknown `accountId` or `applicationId` filter yields an **empty page, not a 404** (same rule as `ListDeployments?cellId=`). |
-| `GetCell` | `GET /cells/{cellId}` | 200 | Full record including `applicationId`, `accountId`, the stamped definition and the stored cell `parameters` (the operator-set values only; defaults are not merged in). |
+| `GetCell` | `GET /cells/{cellId}` | 200 | Full record including `applicationId`, `accountId`, the stamped definition (application hooks included), `lastGlobalHooks` and the stored cell `parameters` (the operator-set values only; defaults are not merged in). |
 | `UpdateCell` | `PUT /cells/{cellId}` | **202** | Re-apply the shared deployment, optionally changing cell parameter values first. Input `{parameters?, removeParameters?}`, both optional: an empty body re-applies with the stored values. Names in `parameters` are set and names in `removeParameters` removed; every other stored value is kept (R-34). Runs the stamped cell update script with the merged set resolved per R-34. 400 on a validation failure of R-34, with nothing written. Allowed from `ACTIVE`/`UPDATE_FAILED`. **409 from `CREATE_FAILED`** — running the *update* script against a half-created deployment breaks the create/update script contract; remediation for a failed cell create is deployment delete + cell delete. |
 | `DeleteCell` | `DELETE /cells/{cellId}` | **202** | **Empty cells only** (P-10): the `DELETING` transition MUST be a single conditional write (`status ∈ {ACTIVE, *_FAILED} AND tenantCount = 0`) — the emptiness check and the transition are one atomic write, the counterpart of the placement claim. A read-then-write would let a concurrent placement claim a slot before `DELETING` lands. Condition failure → 409. Runs the cell delete script with the stored cell parameters resolved per R-34, never validated. On success the workflow removes the record and releases the account's and the application's cell slots in one transaction (§8.2). |
 
@@ -957,33 +1102,41 @@ All synchronous: no account operation runs a build (P-1).
 | `ListAccounts` | `GET /accounts` | 200 | Paginated capacity view: `owner`, `applicationIds`, `cellCount`/`maxCells` per account. |
 | `DeleteAccount` | `DELETE /accounts/{accountId}` | 200 | **Empty accounts only** (P-10): a single conditional delete (`attribute_exists AND cellCount = 0`), the counterpart of the cell-slot claim; condition failure → 409. A deleted account's roles stay installed — removing them is the owner's act, not the control plane's. |
 
-**R-26 (handshake at registration, [ADR-027](../adr/0027-verify-the-account-handshake-at-registration.md), [ADR-030](../adr/0030-prove-the-pair-enforces-the-external-id.md)):** `PutAccount` MUST fail closed when
-either role of the pair cannot be assumed with the supplied `externalId`,
-and — when an `externalId` is supplied — when either role CAN be assumed
-without it (the pair does not enforce the id). Registration is the moment
-the operator is present and can act on the error; the first build is not.
-The check is a probe only — no API call is made under the assumed
-credentials, and nothing is written in the account. A probe STS could not
-answer (throttling, a network fault) is a 500 asking for a retry, not a
-refusal: the pair may be fine.
+**R-26 (handshake at registration,
+[ADR-027](../adr/0027-verify-the-account-handshake-at-registration.md),
+[ADR-030](../adr/0030-prove-the-pair-enforces-the-external-id.md)):**
+`PutAccount` MUST fail closed when either role of the pair cannot be
+assumed with the supplied `externalId`, and — when an `externalId` is
+supplied — when either role CAN be assumed without it (the pair does not
+enforce the id). Registration is the moment the operator is present and can
+act on the error; the first build is not. The check is a probe only — no
+API call is made under the assumed credentials, and nothing is written in
+the account. A probe STS could not answer (throttling, a network fault) is
+a 500 asking for a retry, not a refusal: the pair may be fine.
 
-### 5.5 Application operations
+### 5.5 Application and hook operations
 
-All synchronous: no application operation runs a build
-([ADR-032](../adr/0032-register-applications-at-run-time-and-stamp-their-definition-onto-cells.md)).
+All synchronous: no application or hook operation runs a build
+([ADR-032](../adr/0032-register-applications-at-run-time-and-stamp-their-definition-onto-cells.md),
+[ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md)).
 
 | Op | HTTP | Code | Contract |
 |---|---|---|---|
-| `PutApplication` | `PUT /applications/{applicationId}` | 200 | Create-or-replace. Input `{source, cellScripts, tenantScripts, maxTenants, placementStrategy?, parameters?, cellParameters?}` — the definition of §4.1 plus the strategy and both sets of parameter declarations, validated as a whole (400 on a missing script path, a malformed source, `maxTenants < 1`, an unknown strategy, an id outside `[a-z0-9-]{1,32}`, a parameter name outside `[A-Z][A-Z0-9_]{0,63}`, a duplicate name within or across the two lists, more than 20 declarations in either list, a `default` on a required parameter, or a cell parameter without a `default`). On an existing application the definition fields and the strategy are replaced. The two declaration lists are replaced only when sent: an absent `parameters` or `cellParameters` **keeps** the current list, and an empty list `[]` clears it, so a `PutApplication` that only changes `maxTenants` cannot silently drop every required check and default. On a new application an absent list declares none. Existing cells and deployments keep their stored values. A cell parameter added since reaches each cell's next build as its default. A newly required parameter makes the next `UpdateDeployment` of every deployment lacking it a 400 until the operator supplies the value; it never blocks a `DeleteDeployment`. `cellCount` is untouched (R-29). The "one name in one list" check runs against the lists the request sent plus any list it keeps. One write, with `cellCount` and `createdAt` set through `if_not_exists`, so a replace never resets them. When both lists are sent the write carries no condition — an application has no immutable field, so it is correct in every prior state (P-5). When a list is kept, the write is conditioned on that list being exactly as the request read it (`attribute_not_exists` when the attribute was absent, equality when present, an empty `[]` included; absent and `[]` are different reads), so two concurrent puts that each send one list cannot store one name in both; a failed condition → 409, retryable. The condition is never on `updatedAt`, which cell creates and deletes also write. Cells already created keep their stamp (P-4). |
+| `PutApplication` | `PUT /applications/{applicationId}` | 200 | Create-or-replace. Input `{source, cellScripts, tenantScripts, maxTenants, hooks?, placementStrategy?, parameters?, cellParameters?}` — the definition of §4.1 plus the strategy and both sets of parameter declarations, validated as a whole (400 on a missing script path, a source field or script path outside its charset (§4.1), a malformed source, `maxTenants < 1`, an unknown strategy, an id outside `[a-z0-9-]{1,32}`, a parameter name outside `[A-Z][A-Z0-9_]{0,63}`, a duplicate name within or across the two lists, more than 20 declarations in either list, a `default` on a required parameter, a cell parameter without a `default`, or a hook definition that fails R-39). A hook source whose ref is not a full commit SHA is logged with a warning naming the application and the hook, as the application's own source is. On an existing application the definition fields other than `hooks`, and the strategy, are replaced. The two declaration lists are replaced only when sent: an absent `parameters` or `cellParameters` **keeps** the current list, and an empty list `[]` clears it, so a `PutApplication` that only changes `maxTenants` cannot silently drop every required check and default. On a new application an absent list declares none. `hooks` follows the same rule: absent keeps the current list, `[]` clears it, and a changed list reaches only cells created afterwards (P-4). Existing cells and deployments keep their stored values. A cell parameter added since reaches each cell's next build as its default. A newly required parameter makes the next `UpdateDeployment` of every deployment lacking it a 400 until the operator supplies the value; it never blocks a `DeleteDeployment`. `cellCount` is untouched (R-29). The "one name in one list" check runs against the lists the request sent plus any list it keeps. One write, with `cellCount` and `createdAt` set through `if_not_exists`, so a replace never resets them. When both declaration lists are sent the write carries no condition — an application has no immutable field, so it is correct in every prior state (P-5). When a declaration list is kept, the write is conditioned on that list being exactly as the request read it (`attribute_not_exists` when the attribute was absent, equality when present, an empty `[]` included; absent and `[]` are different reads), so two concurrent puts that each send one list cannot store one name in both; a failed condition → 409, retryable. A kept `hooks` list adds no condition: a put that keeps it writes no hook attribute, and hooks share no invariant with another list. The condition is never on `updatedAt`, which cell creates and deletes also write. Cells already created keep their stamp (P-4). |
 | `GetApplication` | `GET /applications/{applicationId}` | 200 | The record: the definition, `placementStrategy`, both sets of parameter declarations and `cellCount`. 404 if unregistered. |
 | `ListApplications` | `GET /applications` | 200 | Paginated: `applicationId`, `maxTenants`, `placementStrategy`, `cellCount` per application. |
 | `DeleteApplication` | `DELETE /applications/{applicationId}` | 200 | **Empty applications only** (P-10): a single conditional delete (`attribute_exists AND cellCount = 0`), the counterpart of the cell-slot claim; condition failure → 409. Accounts that name the application in `applicationIds` are not touched (§4.5). |
+| `PutHook` | `PUT /hooks/{hookId}` | 200 | Create-or-replace a global hook. Input `{events, phase, source, script, timeoutMinutes?}`, validated per R-39 (400). A create claims a `hookCount` slot in the same transaction; a sixth hook → 409. A replace increments `revision`. Takes effect on operations accepted afterwards; executions in flight keep the snapshot they were accepted with (R-40). Logs a warning naming the hook when the source ref is not a full commit SHA. |
+| `GetHook` | `GET /hooks/{hookId}` | 200 | The record: the definition, `revision`, timestamps. 404 if unregistered. |
+| `ListHooks` | `GET /hooks` | 200 | Paginated, in `hookId` order, which is the order global hooks run in (R-45). |
+| `DeleteHook` | `DELETE /hooks/{hookId}` | 200 | Deletes the hook and releases its `hookCount` slot in one transaction (R-39); 404 if unregistered. No guard on executions in flight: each runs the snapshot it holds (R-40), and `StopExecution` is the only stop for them (§7.2). |
 
 **R-30:** There MUST be no application-level provisioning: an application
 owns no deployment of its own, only the definition its cells are built
 from. Shared infrastructure an application needs in an account is
 provisioned out of band and published under that application's shared
-namespace (§6.2).
+namespace (§6.2). There is likewise no operation that runs a hook: hooks
+run only as steps of an execution a lifecycle operation started (R-44).
 
 ### 5.6 Status state machine (cells and deployments)
 
@@ -1022,10 +1175,10 @@ compare-and-set maps to 409.
 
 | Error | HTTP | Triggers |
 |---|---|---|
-| `ValidationException` | 400 | malformed input, malformed pagination token, two list filters at once; an invalid application definition or parameter declaration on `PutApplication`; a deployment parameter that fails R-33 on `CreateDeployment` or `UpdateDeployment`; a cell parameter that fails R-34 on `UpdateCell`; a targeted `CreateDeployment` into an account that does not admit the application; `PutAccount` handshake refusal (R-26: a half could not be assumed, or admits the call without the supplied external id) |
+| `ValidationException` | 400 | malformed input, malformed pagination token, two list filters at once; an invalid application definition or parameter declaration on `PutApplication`; a deployment parameter that fails R-33 on `CreateDeployment` or `UpdateDeployment`; a cell parameter that fails R-34 on `UpdateCell`; a targeted `CreateDeployment` into an account that does not admit the application; `PutAccount` handshake refusal (R-26: a half could not be assumed, or admits the call without the supplied external id); an invalid hook definition on `PutHook` or `PutApplication` (R-39) |
 | `UnauthorizedError` | 401/403 | missing/invalid JWT; a role in neither set; a reader calling a non-`GET` operation (R-36); a token without `aud` whose `client_id` is not listed or does not equal `sub`, or that lacks the required scope (R-38) |
-| `ResourceNotFoundError` | 404 | unknown tenant, deployment, cell, account or application (including an unregistered `CreateDeployment.accountId` or `applicationId`, and an unregistered id in `PutAccount.applicationIds`) |
-| `ConflictError` | 409 | in-flight mutation; a second deployment of the same application for one tenant; occupied-tenant delete; occupied-cell delete; occupied-account delete; occupied-application delete; `owner` change on `PutAccount`; cell-not-ACTIVE guard; `clientToken` reuse with different parameters; a parameter merge or a list-keeping `PutApplication` whose read went stale — retry (R-14); `CreateDeployment` lost every bounded claim on candidate cells and no account had a free cell slot — retry ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)) |
+| `ResourceNotFoundError` | 404 | unknown tenant, deployment, cell, account, application or global hook (including an unregistered `CreateDeployment.accountId` or `applicationId`, and an unregistered id in `PutAccount.applicationIds`) |
+| `ConflictError` | 409 | in-flight mutation; a second deployment of the same application for one tenant; occupied-tenant delete; occupied-cell delete; occupied-account delete; occupied-application delete; `owner` change on `PutAccount`; cell-not-ACTIVE guard; `clientToken` reuse with different parameters; a parameter merge or a list-keeping `PutApplication` whose read went stale — retry (R-14); `CreateDeployment` lost every bounded claim on candidate cells and no account had a free cell slot — retry ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)); a `PutHook` that raced a create or delete of the same hook — retry; a `PutHook` create with five global hooks registered — no retry hint, delete a hook first (R-39) |
 | `InsufficientCapacityError` | 409 | `CreateDeployment` found no eligible cell and no eligible account with cell capacity: every vendor-owned account admitting the application is full (untargeted), or the named account is full (targeted). Nothing was written. The remedy is an operator act — raise `maxCells`, register an account, or admit the application in one — so the error is distinct from `ConflictError`, which a client may simply retry later ([ADR-026](../adr/0026-fleet-full-is-a-modelled-error.md)) |
 | `InternalServerError` | 500 | everything else, including a `PutAccount` whose handshake probe STS could not answer (throttling, network): the handshake is unknown, not refused, and the operator retries |
 
@@ -1036,23 +1189,23 @@ concurrent delete → 404; an insert that finds the deployment already there
 `PutApplication` (§5.5) is a 409, with a **retry hint only** when the
 item that failed shows a changed `parameters` (or kept list) under a
 status the operation admits, or the status `CREATING` or `UPDATING`
-(in flight, and it ends in a state the update admits). Every other status (`CREATE_FAILED`, `DELETE_FAILED`,
-`DELETING`) is a 409 without a hint: a retry cannot succeed, and the
-remedy is a delete. The merge is a single conditional `UpdateItem` on
-the record being updated; the service classifies from the item returned
-by `ReturnValuesOnConditionCheckFailure: ALL_OLD`, never from a second
-read, so the label describes the state that actually failed the
-condition. When `ALL_OLD` returns no item the record was deleted → 404.
-Under `UpdateDeployment` the cell-`ACTIVE` guard is checked on the read
-before the write (R-13) and a cell not `ACTIVE` is a 409 without a hint
-from that read; the cell MUST NOT be added to the merge write as a
-transaction `ConditionCheck`, because placements and deployment deletes
-write the cell in their own transactions and would cancel the merge with
-no item to classify. A list-keeping `PutApplication` is the exception to
-the item-based rules: an application has no status, so its failed
-condition is always a 409 with a retry hint, also when the application
-was deleted in between, because the retry is a create-or-replace that
-succeeds (§5.5).
+(in flight, and it ends in a state the update admits). Every other status
+(`CREATE_FAILED`, `DELETE_FAILED`, `DELETING`) is a 409 without a hint: a
+retry cannot succeed, and the remedy is a delete. The merge is a single
+conditional `UpdateItem` on the record being updated; the service
+classifies from the item returned by `ReturnValuesOnConditionCheckFailure:
+ALL_OLD`, never from a second read, so the label describes the state that
+actually failed the condition. When `ALL_OLD` returns no item the record
+was deleted → 404. Under `UpdateDeployment` the cell-`ACTIVE` guard is
+checked on the read before the write (R-13) and a cell not `ACTIVE` is a
+409 without a hint from that read; the cell MUST NOT be added to the merge
+write as a transaction `ConditionCheck`, because placements and deployment
+deletes write the cell in their own transactions and would cancel the merge
+with no item to classify. A list-keeping `PutApplication` is the exception
+to the item-based rules: an application has no status, so its failed
+condition is always a 409 with a retry hint, also when the application was
+deleted in between, because the retry is a create-or-replace that succeeds
+(§5.5).
 
 ---
 
@@ -1075,6 +1228,7 @@ control plane's entire contract with them:
 | `ADMIN_EMAIL` | — | create only (empty string otherwise); the `adminEmail` of the `CreateDeployment` request |
 | `OPERATOR_ID` | ✓ | ✓ (the verified operator identity, [ADR-019](../adr/0019-operator-identity-end-to-end.md)) |
 | `PARAM_<NAME>` | ✓ every operation; one variable per cell parameter in the cell's resolved set (R-34): the stored value, else the declared default | ✓ every operation; one variable per parameter in the deployment's resolved set (R-32): the stored value, else the declared default; absent when neither exists |
+| `OUTPUTS_FILE` | ✓ every operation; a path, outside the source tree, the script MAY write its outputs to (R-43) | ✓ as for cells |
 
 That's it. `TENANT_NAME` passes the same boundary test as `ADMIN_EMAIL`
 (ADR-004): onboarding input the control plane already holds. The
@@ -1090,9 +1244,9 @@ lists never share a name at any one time (§4.1), so a declared name has
 one meaning across the application. A stored value whose name is no
 longer declared keeps the meaning it had when it was stored, even if the
 name has since been declared in the other list; an operator moving a name
-between lists clears the old values with `removeParameters`. A tenant script that needs a cell value reads
-it from the cell's namespace, where the cell create script published it
-(§6.2,
+between lists clears the old values with `removeParameters`. A tenant
+script that needs a cell value reads it from the cell's namespace, where
+the cell create script published it (§6.2,
 [ADR-040](../adr/0040-applications-declare-cell-parameters-with-defaults.md)).
 
 **Credentials.** A script's environment never carries the build project's
@@ -1164,7 +1318,9 @@ The scripts are trusted vendor code; the provisioning role policies (§6.2,
 in each account. Any `tenantBuildManagedPolicyArns` (§3.3, ADR-022) widen an
 account's tenant provisioning role by exactly what that account's owner
 attaches, so they are part of that bound — and a customer attaches them to
-their own account, the vendor never does.
+their own account, the vendor never does. In the control plane's own
+account both pair roles also carry the R-41 deny, so an attached
+policy cannot grant them the denied actions.
 
 **R-27 (credential budget):** a script's credentials come from role
 chaining (build role → provisioning role), which AWS caps at **one hour**
@@ -1187,7 +1343,10 @@ The unit an account owner installs, once per account
 The trust is expressed as the control plane account plus an
 `aws:PrincipalArn` condition naming those roles, so the pair can be installed
 before the control plane exists and survives the control plane's roles being
-recreated.
+recreated. The two hook roles (§6.5) are deliberately absent from both
+trust policies: a hook never acts in a cell account. In the control
+plane's own account both pair roles also carry the R-41 deny, so an
+attached policy cannot grant them the denied actions.
 
 Both trust policies require `sts:ExternalId` to equal the configured
 `externalId` when one is set. The control plane presents it on every
@@ -1228,6 +1387,416 @@ credential stored, and revocation is one act by the owner (delete the
 pair): the next build in that account fails into `*_FAILED` with the
 refusal in `statusReason`, and every record stays consistent.
 
+### 6.5 Vendor hooks
+
+Hooks are how the vendor acts on a cell's or a deployment's lifecycle
+from its own side: register a route, meter a cell, refuse a create,
+export an audit record
+([ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md)).
+A script runs with the pair of the account that hosts the cell, and in a
+tenant-owned account the tenant controls that pair, so anything a script
+can call, the tenant can call too, whenever it likes. A hook runs in the
+control plane account under a role that no cell account holds or trusts, so
+a downstream system that admits only a hook role admits only the vendor.
+When each hook runs, and what its failure does to the operation, is §8.3.
+
+**R-41 (hook isolation):** hooks MUST run in the control plane account,
+in CodeBuild, in two hook build projects beside the two provisioning
+projects: global hooks in one, under `<fleet>-global-hook`; application
+hooks in the other, under `<fleet>-app-hook`. The workflow MUST NOT pass
+a role override to a hook build, so the project alone decides the role,
+and it MUST start a global hook only in the global hook project and an
+application hook only in the application hook project. An application
+hook therefore cannot use what a global hook holds. Each hook role
+trusts only `codebuild.amazonaws.com`, conditioned on its own project
+(`aws:SourceArn`, H-7), and the stack grants it only its project's
+logs, read access to its source, and the customer-managed policies the
+deployer attaches (`globalHookManagedPolicyArns`,
+`appHookManagedPolicyArns`, §3.3). The stack grants neither role
+`sts:AssumeRole` on `<fleet>-cell-provisioning` or
+`<fleet>-tenant-provisioning`, and no pair trusts either role (§6.4),
+so for a direct AssumeRole the trust policy is the gate whatever a
+deployer attaches. The hook buildspec MUST NOT assume a role, and a
+hook build's environment MUST NOT carry the account's `externalId` or
+the pair's role ARNs. The stack grants neither role anything on the
+control plane's own table, workflow, build projects or API. The
+indirect paths to the pair are closed by an explicit deny, up to a
+stated residual (below); any other attached policy over the control
+plane's own resources is the deployer's choice in the vendor's most
+sensitive account (T41).
+Every global hook shares `<fleet>-global-hook` and the hooks of all
+applications share `<fleet>-app-hook`, so a hook can use what any other
+hook of its scope holds: a metering hook holds what a route registrar
+holds. A role per global hook or per application is a seam (§11).
+
+A hook project accepts source and buildspec overrides, because every
+hook has its own, so whoever can start a build in it runs any code as
+its role. Only the workflow role MAY hold `codebuild:StartBuild` on the
+hook projects (with `StopBuild` and `BatchGetBuilds`, R-46). The
+workflow role MUST NOT hold `iam:PassRole` on either hook role, so a
+role override fails at the CodeBuild API whatever a definition sends.
+The provisioning build roles and the API role MUST hold neither
+permission on the hook projects: a script that reaches its build role
+(T29) must not reach a hook role. A principal the deployer grants
+either permission in the control plane account holds that hook role
+(T41).
+
+The workflow starts whatever hook source, script and scope its
+execution input names, as it runs the source and scripts the input
+names (R-20). So `states:StartExecution` on the workflow is equivalent
+to `codebuild:StartBuild` on the hook projects and on the provisioning
+projects: a principal that starts an execution with an input of its
+choice runs any code as either hook role and as either provisioning
+build role. The API role MUST be the only role the stack grants
+`states:StartExecution` on the workflow, and a build role or a hook
+role MUST NOT hold it, so a script or a hook cannot start an execution
+of its own. A compromise of the API function therefore reaches both
+hook roles (T30).
+
+Grants of four kinds lead from a role to the provisioning build
+roles, and through them to the pair of every registered account. The
+direct ones are `states:StartExecution` on the workflow,
+`codebuild:StartBuild` on a provisioning project, and a write to the
+table, whose `PK=HOOK` partition declares hooks (R-44). The second
+kind runs new code as a role that holds a pair or one of these grants:
+`iam:PassRole` on a build role, the workflow role, `<fleet>-api` or a
+hook role, with a create on CodeBuild, Step Functions or Lambda. The
+third rewrites what a pair holder runs next, or removes the deny
+itself: an IAM write on one of the stack's roles, or an update to a
+build project, the workflow or the API function. The fourth makes the
+caller the operator, who reaches every pair through `PutApplication`
+or `PutHook`. The API function runs every operation on the word of
+`requestContext.authorizer`, which the authorizer sets only for calls
+through API Gateway. A direct `lambda:InvokeFunction` or `lambda:InvokeAsync` on the
+function, with an authorizer context of the caller's choosing, skips the
+authorizer; `lambda:AddPermission` opens that invoke to any principal;
+and an API Gateway write on the REST API can take the authorizer off
+a method and deploy the change. The stack MUST therefore attach to
+each build role, each hook role and the two pair roles it installs in
+its own account a policy that explicitly denies:
+
+- `iam:PassRole` on `<fleet>-cell-build`, `<fleet>-tenant-build`, the
+  workflow role, `<fleet>-api`, `<fleet>-global-hook` and
+  `<fleet>-app-hook`;
+- `iam:PutRolePolicy`, `iam:DeleteRolePolicy`, `iam:AttachRolePolicy`,
+  `iam:DetachRolePolicy`, `iam:UpdateAssumeRolePolicy`,
+  `iam:PutRolePermissionsBoundary` and
+  `iam:DeleteRolePermissionsBoundary` on every role the stack creates
+  (the table below), the denied roles included;
+- `codebuild:StartBuild`, `codebuild:StartBuildBatch`,
+  `codebuild:RetryBuild`, `codebuild:UpdateProject`,
+  `codebuild:CreateWebhook` and `codebuild:UpdateWebhook` on all four
+  projects;
+- `states:StartExecution` and `states:UpdateStateMachine` on the
+  workflow,
+  `arn:<partition>:states:<region>:<account>:stateMachine:<fleet>-workflow`;
+- `states:RedriveExecution` on the workflow's executions,
+  `arn:<partition>:states:<region>:<account>:execution:<fleet>-workflow:*`,
+  because Step Functions authorises a redrive on the execution ARN, so
+  a statement on the state machine ARN would never match it;
+- `lambda:UpdateFunctionCode`, `lambda:UpdateFunctionConfiguration`,
+  `lambda:PublishVersion`, `lambda:CreateAlias`, `lambda:UpdateAlias`
+  and `lambda:DeleteAlias` on the API function and the authorizer
+  function, each named twice, unqualified
+  (`arn:<partition>:lambda:<region>:<account>:function:<name>`) and
+  qualified (`...:function:<name>:*`);
+- `lambda:InvokeFunction`, `lambda:InvokeAsync`,
+  `lambda:AddPermission` and `lambda:RemovePermission` on the API
+  function, unqualified and qualified (`function:<api-fn>` and
+  `function:<api-fn>:*`). Lambda matches a request that names a
+  qualifier (`$LATEST`, a version or an alias) only against a
+  qualified ARN, so a deny on the unqualified ARN alone would leave
+  `Invoke` with `Qualifier=$LATEST` open to an allow on `*`. The
+  deprecated `InvokeAsync` operation still runs and is documented with
+  an action of its own, so a deny of `InvokeFunction` alone could leave
+  an asynchronous call with a forged `requestContext.authorizer` open;
+- `apigateway:PUT`, `apigateway:PATCH`, `apigateway:POST` and
+  `apigateway:DELETE` on the control plane's REST API,
+  `arn:<partition>:apigateway:<region>::/restapis/<api-id>` and
+  `arn:<partition>:apigateway:<region>::/restapis/<api-id>/*`;
+- `dynamodb:PutItem`, `dynamodb:UpdateItem`, `dynamodb:DeleteItem`,
+  `dynamodb:BatchWriteItem`, `dynamodb:PartiQLInsert`,
+  `dynamodb:PartiQLUpdate` and `dynamodb:PartiQLDelete` on the table.
+  `TransactWriteItems` and `ExecuteTransaction` are authorised per
+  item through these actions, so they need no entry of their own.
+
+API Gateway invokes the API function through the function's resource
+policy, as its service principal, so the invoke deny on the denied
+roles does not touch the API's own path.
+
+The deny MUST be one standalone `AWS::IAM::Policy` resource, created
+outside every role construct and attached to the denied roles through
+its `Roles` list, so that nothing in the stack depends on it. In a
+role's default policy it would close a CloudFormation cycle: the home
+pair depends on every child of the build role constructs, and the deny
+names the home pair roles. As a managed policy it would make every
+role depend on it while it names the projects, which depend on their
+roles. A role, a project or the workflow that has a physical name MUST
+be named in the deny by an ARN computed from that name
+(`Stack.formatArn`), never by a reference to its resource. The roles
+with CDK-generated names, the table, the two functions and the REST
+API are named by their attributes, which the standalone policy may
+reference because nothing references it; the qualified form of a
+function is its ARN attribute followed by `:*`. The stack creates eight roles
+today, three of them with CDK-generated names, and ten with the two
+hook roles:
+
+| Role | Name | Carries the deny |
+|---|---|---|
+| Cell build role | `<fleet>-cell-build` | yes |
+| Tenant build role | `<fleet>-tenant-build` | yes |
+| Home cell provisioning role | `<fleet>-cell-provisioning` | yes |
+| Home tenant provisioning role | `<fleet>-tenant-provisioning` | yes |
+| Global hook role (new) | `<fleet>-global-hook` | yes |
+| Application hook role (new) | `<fleet>-app-hook` | yes |
+| API role | `<fleet>-api` | no: its grants are among the direct actions |
+| Workflow role | CDK-generated | no: its grants are among the direct actions |
+| Authorizer function role | CDK-generated | no: it holds its logs only |
+| API Gateway CloudWatch role | CDK-generated | no: it holds API Gateway's logs only. It outlives the stack: CDK retains it and the `AWS::ApiGateway::Account` setting that names it, one per account and Region (§10) |
+
+Each build role MUST also trust `codebuild.amazonaws.com` only on its
+own project's `aws:SourceArn`, as each hook role does, so no other
+project can run as it: CodeBuild refuses a `CreateProject` or an
+`UpdateProject` that names the role for another project, so a
+mis-wired project fails at deploy, never at its first build (H-7). The
+project names its role as `ServiceRole`, so a
+trust condition that referenced the project would close a cycle. Each
+of the four projects therefore MUST have a physical name built from
+the fleet name (`<fleet>-cell-build`, `<fleet>-tenant-build`,
+`<fleet>-global-hook`, `<fleet>-app-hook`), and each role's trust
+condition MUST carry the ARN computed from that name
+(`Stack.formatArn`), never one taken from the project resource. The
+workflow MUST likewise have the physical name `<fleet>-workflow`, so
+the deny and the test policy of §10 can name it by a computed ARN. The
+fleet name already separates two control planes in one account (§3.3),
+so these names add no new clash.
+
+Giving the two existing provisioning projects and the workflow their
+physical names replaces them on upgrade. When CloudFormation deletes
+the old state machine (`DeleteStateMachine`), Step Functions terminates
+each of its running executions at its next state transition. Like
+`StopExecution` (§7.2), that bypasses the Catch and strands the
+execution's record in `CREATING`, `UPDATING` or `DELETING`, with
+nothing to finish it. The upgrade that introduces the physical names
+MUST therefore be deployed only after a drain: no mutating operation
+is accepted from the start of the drain until the upgrade deploy
+completes, and that deploy starts only when `ListExecutions` with
+status `RUNNING` on the old workflow is empty. The drain covers
+accepted operations, not only running executions: an operation the old
+API function accepted just before its environment changed starts its
+execution on the old state machine. The stack has no maintenance
+mode; `allowedRoles` (R-36) is the switch, and the upgrade MUST be
+three deploys:
+
+1. **Close.** Redeploy the current version with `allowedRoles` set to
+   the single value `control-plane:closed`. The issuer MUST mint no
+   token with that role, and the value MUST NOT be in `readerRoles`,
+   so no token carries it. This deploy changes only the authorizer's
+   environment and replaces nothing. The refusal does not take effect
+   when the deploy completes: the authorizer caches each token's
+   policy and context for its TTL (N-1, 60 s), and the service reads
+   the grant from that cached context (R-36). Once the TTL has passed,
+   an operator's role is in neither list, so the authorizer returns a
+   `Deny` for the whole stage: every call from a token whose role is
+   not in `readerRoles` is refused with 403, reads included. Only
+   reader tokens keep their `GET`s, so a deployer who watches the
+   drain through the API uses a reader token.
+2. **Upgrade.** Wait at least the authorizer TTL plus the longer of
+   the API's integration timeout (29 s) and the API function's own
+   timeout after the Close deploy completes (90 s with the reference
+   values: a 60 s TTL and an API function timeout at or below 29 s).
+   Only then check that `ListExecutions` with status `RUNNING` on the
+   old workflow is empty, and deploy the upgrade with `allowedRoles`
+   still `control-plane:closed`. A call accepted from a cached grant
+   just before the TTL ends runs until the API function returns or
+   times out; API Gateway stops waiting at 29 s, but the function
+   keeps running and can still call `StartExecution`. A check made
+   earlier can see an empty list and miss that execution. The API
+   function's timeout MUST stay at or below the integration timeout,
+   or the wait grows with it.
+3. **Open.** Redeploy the upgrade with `allowedRoles` restored. An
+   operator refused during the drain may stay refused for up to one
+   TTL after Open, because that refusal is cached too.
+
+Deploy 2 MUST NOT restore the roles. Within one stack update,
+CloudFormation may update the authorizer before the API function's
+environment points at the new workflow, and it deletes the old state
+machine only at cleanup. An operation accepted in that window would
+start on the old workflow, be terminated at cleanup and strand its
+record, the case the drain exists to prevent. Deploy 3 replaces
+nothing. The grant comes from `role` alone on both token paths (R-38),
+so the gate treats people and machine clients alike. Reader tokens
+keep their `GET`s. A machine client whose role is in `allowedRoles`
+is refused with 403 on every route until Open, so automation that
+uses an operator role, status polling included, MUST hold off, or
+retry after Open. The build MUST add
+these three deploys to the README as an upgrade step, with the
+`control-plane:closed` value and the 90 s wait, beside the
+`fleetName` pattern change of §3.3.
+
+An explicit deny wins over any allow, and the stack never reads an
+attached policy to keep it (P-3). The list names only the stack's own
+resources and fits one policy. It also closes the older path of
+`tenantBuildManagedPolicyArns`, whose policies attach to the tenant
+provisioning role in the stack's own account (§3.3). No denied role
+needs a denied action. The deny does not close every path. An attached
+grant of `sts:AssumeRole` on another role in the control plane account
+(an admin role or a CDK bootstrap role), or of CloudFormation writes
+through a privileged execution role, still reaches the pair. So do
+admin writes on the vendor IdP, which can create a user or a client
+that carries the operator role, and writes to the location of a
+registered script or hook source (an S3 bucket or a repository), which
+change what the next provisioning build runs with the pair or what a
+hook runs with its role. So does a principal outside the denied roles
+that the deployer grants a denied action. These stay the deployer's
+choice: grant no hook role write access to the vendor IdP or to any
+script or hook source (T41, M30).
+
+The hook buildspec MUST hand every variable of R-42 to the hook script
+as an environment variable only and run it as `bash "$HOOK_SCRIPT"`,
+and MUST NOT interpolate any value into the buildspec or a command
+line: `TENANT_NAME`, the `PARAM_` values and `SCRIPT_OUTPUTS` are
+tenant-shaped, and interpolated they would run as code under the hook
+role (T44). Each hook project has the provisioning projects' concurrency
+cap and log retention (M15, M17), and private hook sources need source
+credentials on the hook projects, as for the provisioning projects
+(N-6).
+
+**R-42 (hook environment):** a hook build MUST receive these variables
+and no other control plane state (H-5):
+
+| Variable | Cell events | Deployment events |
+|---|---|---|
+| `EVENT` | `CELL_CREATE\|CELL_UPDATE\|CELL_DELETE` | `DEPLOYMENT_CREATE\|DEPLOYMENT_UPDATE\|DEPLOYMENT_DELETE` |
+| `PHASE` | `PRE\|POST` | `PRE\|POST` |
+| `HOOK_ID`, `HOOK_SCOPE` | the hook's id; `GLOBAL\|APPLICATION` | as for cells |
+| `APPLICATION_ID`, `CELL_ID`, `CELL_ACCOUNT_ID` | ✓ | ✓ |
+| `TENANT_ID`, `TENANT_NAME` | — | ✓ |
+| `OPERATOR_ID` | ✓ (the verified operator identity, M12) | ✓ |
+| `EXECUTION_ID` | the execution's name, one per accepted operation | as for cells |
+| `ATTEMPT` | `1`; `2` or `3` on a delete hook's later attempts, counting attempts that started a build (R-46) | as for cells |
+| `HOOK_SCRIPT` | the hook's `script` path (R-41) | as for cells |
+| `PARAM_<NAME>` | the cell's resolved set (R-34), as the cell script receives it | the deployment's resolved set (R-32), as the tenant script receives it |
+| `SCRIPT_OUTPUTS` | `POST` only: the script's outputs (R-43), `{}` when it wrote none | as for cells |
+
+CodeBuild delivers this list intact at its caps: beside the fixed
+variables, 40 `PARAM_` values of 1,024 bytes of printable ASCII and a
+4,096-byte `SCRIPT_OUTPUTS` arrive byte for byte (H-5), and so do 40
+`PARAM_` values of exactly 1,024 bytes of 2-, 3- and 4-byte UTF-8,
+which R-33 admits (H-11). It also accepts a 41st `PARAM_` variable, a
+4,097-byte value (H-5) and a `PARAM_` value of 1,024 characters that
+is 2,560 bytes (H-11), so the caps are the control plane's own and
+hold before `StartBuild` because the API enforces the parameter caps
+when values are written (R-33, R-34) and the workflow guard the
+outputs cap (R-43).
+
+There is no `ADMIN_EMAIL`: onboarding input crosses the boundary once, to
+the create script (P-3). There is no `externalId` and no pair
+credential (R-41). A hook MUST take the identity it acts on
+(`APPLICATION_ID`, `CELL_ID`, `TENANT_ID`, `CELL_ACCOUNT_ID`) from these
+variables, never from `SCRIPT_OUTPUTS`. Hooks MUST be idempotent and safe
+to re-run, as scripts are (R-15): an update runs them again, a delete
+retry runs them again, and a failed create is cleaned up by a delete
+whose hooks run even when the create's hooks never did. `EXECUTION_ID`,
+with `EVENT`, `PHASE` and `HOOK_ID`, names one occurrence of a hook
+across its attempts, so a hook that must record each event once (an
+audit export, a meter) keys on it and treats a repeat as done.
+
+**R-43 (script outputs):** before each script the provisioning buildspec
+MUST create a fresh temporary directory outside the source tree and
+pass the script `OUTPUTS_FILE`, a path in it that does not yet exist,
+so nothing committed to the source can stand in for output. A cell or
+tenant script MAY write a JSON object to that path: keys matching
+`[A-Za-z][A-Za-z0-9_]{0,63}`, values strings of printable ASCII (0x20
+to 0x7E), at most 4,096 bytes in its compact form. Keys MUST be
+unique: parsers resolve a repeated key differently (first wins or last
+wins), so a value could mean one thing to a hook's validator and
+another to its user. Values MUST be printable ASCII so that a byte is
+a character to the buildspec, to CodeBuild, to JSONata and to Step
+Functions, and so that the compact form escapes only `"` and `\`. The
+script runs as a child process (`bash "$SCRIPT_PATH"`). After the
+script succeeds the buildspec MUST parse the file, refuse it when a key
+repeats, check it against the other rules, and export as
+`SCRIPT_OUTPUTS` its own re-serialisation of the parsed object, never
+the file's bytes, always: `{}` when the script wrote no file. The
+re-serialisation MUST be the compact form, with no insignificant
+whitespace and `"` and `\` the only escapes, which `jq -c .` produces
+for printable ASCII, and the 4,096-byte limit is measured on it. A
+script that writes `{"endpoint": "a"}` therefore exports
+`{"endpoint":"a"}`. On create and update a file that fails the check
+fails the build, so the operation ends `*_FAILED` with the broken rule
+in `statusReason`. On delete the buildspec logs the drop and exports
+`{}`, so a bad file never blocks cleanup (P-9). `SCRIPT_OUTPUTS` MUST
+be the build's only exported variable. CodeBuild limits the total of a
+build's exported variables to between 8 and 16 KiB and, past it,
+returns every exported value as an empty string while the build and
+the execution succeed (spike H-1, §9.1). A 4,096-byte value with
+nothing else exported is half the 8,192 bytes H-1 saw kept. A value
+made of `"` and `\` escapes doubles when serialised again; at 4,096
+bytes such a value comes back byte for byte through the export, the
+task's JSONata `Output` and a hook build's override (H-10).
+
+The buildspec check is a format check, not a trust boundary: it runs in
+the container the script just ran in, with tools the script could have
+replaced, and in a tenant-owned account the script reads what the
+tenant controls (T40, T44). The workflow MUST therefore check the value
+again, by the same rule, in the script task's JSONata `Output`, which
+keeps it beside the build ARN and status (§8.1). It rejects a value
+that is absent or empty (the H-1 overflow, or a build that did not
+export), longer than 4,096 characters, or not a compact JSON object of
+printable ASCII string values. With printable ASCII, 4,096 characters
+are 4,096 bytes, so the guard and the buildspec enforce one rule. The
+last test is a regular expression over that grammar, and the pattern
+MUST be linear: no quantifier may hold another unbounded quantifier
+(the key's bounded `{0,63}` inside the `*` loop is allowed), and every
+choice the pattern makes MUST be decided by the next two characters,
+the loop exit included, so a near miss is rejected in one pass over at
+most 4,096 characters. A pattern of that shape, with `K` standing for
+the key pattern above:
+
+```
+^\{(?:"K":"(?:[ !#-\[\]-~]|\\["\\]|","K":")*")?\}$
+```
+
+The pattern admits only the compact spelling. A value it refuses for
+its spelling alone (a space after `:` or `,`, a `\/`, a `\u0041`)
+never came from a buildspec that ran as specified, because the
+buildspec exports its own compact form. The pattern cannot see a
+repeated key: it admits `{"a":"1","a":"2"}`. A hook MUST therefore
+refuse an object with a repeated key, as the buildspec does. Run in a
+Step Functions JSONata state, the guard gives the verdict this section
+sets for the largest valid value, the largest valid value of `\"`
+only, the near miss of §10, a mixed near miss, values of 4,095 and
+4,098 characters, an empty and an absent value, a tab, DEL or
+non-ASCII character, `{}`, an object of two keys, a repeated key, a
+space after `:`, a `\u` escape and keys of 64 and 65 characters, each
+in under 1 ms and with no evaluation error (H-10).
+
+The guard MUST NOT use `$parse`. On bad input `$parse` raises
+`States.QueryEvaluationError`, which goes to the task's Catch, and the
+Catch path is a failure write, which is wrong on delete. Any evaluation
+error the guard still raises is a defect, and on delete it MUST still
+yield `{}`: the delete script task catches `States.QueryEvaluationError`
+apart from build failures and goes on with `{}`. On create and update a
+rejected value, or an evaluation error, takes the failure path (§8.2)
+with `statusReason` "script outputs rejected", the script's changes
+staying in place as after a post hook failure; on delete the workflow
+goes on with `{}`. Escaped once more in state, an admitted value is at
+most 8,190 characters, two under 8 KiB (H-10), which §8.1 budgets.
+The control plane MUST NOT read, interpret or store the outputs beyond
+the execution: they exist only in the execution history and the build
+records. Outputs are untrusted data, and a hook MUST validate every
+value it uses. Outputs MUST NOT be secrets (N-12). Nothing a pre hook
+produces reaches the script (§11).
+
+**R-44 (only operations start hooks):** a hook MUST run only as a step of
+an execution that a control plane operation started (§8.3). There MUST
+be no operation that runs a hook on demand. Nothing a script, a cell
+account or a tenant controls can declare, select, skip, change or start
+a hook: an execution's hooks are fixed when the operation is accepted
+(R-40), from records that only the API writes, in an execution only
+the API starts (R-41).
+
 ---
 
 ## 7. Placement (the heart of the design)
@@ -1241,6 +1810,8 @@ workflow starts. It embodies P-5, P-6, P-7, and P-11 simultaneously.
 0. TARGET    — read the tenant record; missing → 404.
                read the application record; missing → 404. Its
                definition is the stamp for a new cell (step 3).
+               read the global hooks (R-40); failure → 500,
+               nothing written.
                An account ADMITS the application when its
                applicationIds is absent (shared) or contains the
                id (dedicated).
@@ -1427,6 +1998,17 @@ or place into an ineligible account. Capacity is an operator decision
 - A cell stuck `UPDATE_FAILED` removes its remaining capacity from the
   fleet until an operator re-runs `UpdateCell`; placements meanwhile fill
   other cells or create new ones. Visible in `ListCells`.
+- `PutHook` or `DeleteHook` lands while an operation is between its
+  read of the global hooks and its write (R-40). That one operation
+  runs without the new hook, or with the deleted one, and its
+  `lastGlobalHooks` says which; the next operation sees the change.
+  Nomination, not a guard (P-5).
+- A global hook deleted or replaced, for instance because its source
+  was poisoned (T5), keeps running in every execution accepted before,
+  until each ends: up to the execution timeout (R-23). The only stop is
+  `StopExecution` on each such execution, which bypasses the Catch and
+  strands its record in `CREATING`, `UPDATING` or `DELETING` (§7.4); an
+  operator weighs that against letting the hook run (T5, T43).
 
 All over-provision; none corrupts (P-7).
 
@@ -1469,7 +2051,9 @@ leave only one record recoverable). Both land on the documented remediation
 path. The account's cell slot and the application's count stay claimed by
 the `CREATE_FAILED` cell — exactly as a `CREATE_FAILED` deployment keeps
 its cell slot and its tenant's count — and are released by `DeleteCell` on
-the remediation path. Compensation never touches a counter.
+the remediation path. Compensation never touches a counter. Hook
+resolution adds no window here: the global hooks are read in step 0,
+before the placement transaction (R-40).
 
 **Residual tolerated failure (document it):** a process crash *between* the
 placement transaction and workflow start strands the records in `CREATING`
@@ -1495,6 +2079,8 @@ operation shape:
 | `UpdateCell` | update | — |
 | `DeleteCell` | delete | — |
 
+Around each build the workflow runs the hooks of its event (§8.3).
+
 ### 8.1 Resolved input
 
 **R-20:** the service MUST resolve everything the workflow needs — source,
@@ -1502,9 +2088,10 @@ script paths (from the cell's stamp, never from the application record),
 failure statuses, ids including the `tenantId` and `applicationId`, the
 tenant's `name`, the deployment's resolved parameter set (R-32), the
 cell's resolved parameter set (R-34) when the execution has a cell build, the
-cell's `accountId`, the two provisioning role ARNs derived from it, and
-the account's `externalId` — into the execution input. The workflow MUST NOT re-read mutable records to
-decide what to do. Why: a
+cell's `accountId`, the two provisioning role ARNs derived from it, the
+account's `externalId`, and the hooks of each event the execution runs
+(R-40), already in run order (R-45) — into the execution input. The
+workflow MUST NOT re-read mutable records to decide what to do. Why: a
 mid-workflow read of a record that a concurrent operation is mutating
 reintroduces exactly the races the conditional writes eliminated, and each
 read adds a missing-item failure branch. The execution input is an
@@ -1526,18 +2113,51 @@ bytes (a 64-byte name and a 1,024-byte value), about 43 KiB raw. The
 execution input is JSON. With control characters refused (R-33), only
 `"` and `\` need escaping, so a value grows at most twofold: about 87 KiB
 per set. A new-cell create carries a cell set and a tenant set, about
-174 KiB, inside the 256 KiB Step Functions limit with the rest of the
-R-20 input. That limit applies to every state's payload, not only the
-input, and a CodeBuild `Build` result echoes the build's environment
-variables, values included. So each build task MUST keep only what the
-terminal writes read (a `ResultSelector` holding the build ARN and
-status); a full result kept in state would add a second copy of each
-parameter set and pass the limit. The same holds on the failure path,
-which `ResultSelector` does not reach: a build task's `Catch` MUST keep
-only the build ARN and status from the error before it enters state,
-never the raw `Cause` string or a parsed copy of the `Build`. A payload
-over the limit fails the execution with `States.DataLimitExceeded`,
-which `States.ALL` does not catch, so no `*_FAILED` write would run.
+174 KiB. Hooks add at most 20 resolved definitions to that execution (five
+global and five application hooks for each of its two events). R-39
+admits no character JSON escapes in a hook field, so a definition is as
+large in the input as raw: under 1,600 bytes as compact JSON (id,
+source, script, timeout, revision), about 1.5 KiB, 31 KiB in all.
+One script's outputs (R-43) are in state while its post hooks run: at
+most 4,096 printable ASCII characters, of which only `"` and `\`
+escape, so at most 8,190 characters escaped in state (H-10), two under
+8 KiB, for a value the buildspec checked and for any
+value the workflow guard admits alike. The cell event's outputs leave
+state when its post hooks finish, before the deployment event starts,
+so a new-cell create never holds two. The global hook results kept for
+`lastGlobalHooks` (R-40) add at most ten entries of about 0.4 KiB,
+4 KiB; an application hook's result leaves state once the hook
+succeeded. That is about 217 KiB, which leaves about 39 KiB of the
+256 KiB Step Functions limit for the rest of the R-20 input. The
+application's source and the two script paths of a new-cell create
+take at most 4.3 KiB of it (2,048 + 256 + 2 × 1,024 bytes), because
+their charsets admit no character JSON escapes (§4.1). The ids, the two
+role ARNs, the external id of at most 1,224 bytes, the tenant name and
+the failure statuses need a few KiB more. That limit applies to every
+state's payload, not only the input, and a CodeBuild `Build` result
+echoes the build's environment variables, values included. So each
+build task's JSONata `Output` MUST keep only what later states read:
+the build ARN and status, plus the guarded outputs for a script build
+(R-43), and for a hook build's `startBuild` and each of its
+`batchGetBuilds` polls (the SDK integration, R-46) the build id,
+status, phase timing and `resolvedSourceVersion`, never the
+environment (R-40, R-46). A full
+result kept in state would add a second copy of each parameter set and
+pass the limit. The limit also holds for a task's raw result before
+`Output` runs, so a poll MUST name one build id per call: one hook
+build's result, environment included, is under 100 KiB at the caps,
+and three would pass the limit. The same holds on the failure path:
+the `Catch` of a `.sync` build task or a poll task MUST keep only the
+build ARN and status from the error before it enters state, never the
+raw `Cause` string or a parsed copy of the `Build`. A `Catch` of the
+hook start task that ends the attempt keeps the error name and the
+first 256 characters of its `Cause`, a service message with no `Build`
+in it. The refusal `Catch` passes its input through and keeps the same
+bounded name and cause in the variable `LAST_REFUSAL` (R-46), outside
+the state payload: under 2 KiB however its characters encode, against
+the 256 KiB a variable may hold ([sfn-vars]). A payload over the
+limit fails the execution with `States.DataLimitExceeded`, which
+`States.ALL` does not catch, so no `*_FAILED` write would run.
 Keeping state small does not keep values out of the task history events
 (they record the raw service result); N-11 already accepts values in
 execution history.
@@ -1545,7 +2165,7 @@ execution history.
 ### 8.2 Terminal writes
 
 - **create/update success** → compare-and-set in-flight → `ACTIVE` +
-  `lastBuildId`.
+  `lastBuildId` + `lastGlobalHooks` (R-40).
 - **deployment delete success** → **one transaction**: delete the
   deployment (condition: exists AND status = `DELETING`) + decrement the
   cell counter (condition: exists AND `tenantCount > 0`) + decrement the
@@ -1566,29 +2186,405 @@ execution history.
   prior transaction committed; a present cell becomes `DELETE_FAILED`. The
   account and application records always exist here, because
   `DeleteAccount` and `DeleteApplication` refuse while `cellCount > 0`.
-- **build start** → every build task first assumes the resolved
+- **build start** → every provisioning build task first assumes the resolved
   provisioning role (with the resolved `externalId`, session name =
   `OPERATOR_ID`) and runs the script under those credentials (§6.1). A
   refused AssumeRole is a build failure like any other: it lands in the
   operation's `*_FAILED` status with the refusal in `statusReason` — which
   is what a customer revoking the pair looks like from the control plane.
 - **build failure / task timeout** → compare-and-set from the operation's
-  in-flight status to the resolved `*_FAILED` status + `statusReason`. For
+  in-flight status to the resolved `*_FAILED` status + `statusReason` +
+  `lastGlobalHooks`; a failed create or update hook is a build failure
+  here (R-46), and so are script outputs the workflow rejects (R-43);
+  a hook build assumes nothing (R-41). For
   a failed **cell create with a pending deployment create**, one
   transaction moves *both* records to `CREATE_FAILED` (the deployment's
   reason: "cell provisioning failed").
 
-**R-22:** every terminal write retries transient failures; retry exhaustion
-is caught and routed through the same conditional `*_FAILED` transition when
+**R-22:** every terminal write retries transient failures (reference: a
+2-second interval, backoff rate 2, `MaxAttempts` 6 (six retries after
+the first try), 126 s of waits); retry exhaustion is caught and routed
+through the same conditional `*_FAILED` transition when
 the record still exists. This shrinks — but does not eliminate — the
 stranding window, because the failure write is itself a write that can
 exhaust retries (documented residual, §7.4).
 
-**R-23 (timeouts):** each build task MUST have a catchable task-level
-timeout routed to the failure path. The execution-level timeout MUST exceed
-the sum of both build budgets plus terminal-write margin — it is a final
-safety net, never the normal timeout path (a tripped execution timeout
-bypasses the Catch and strands records).
+**R-23 (timeouts):** each script build task MUST have a catchable
+task-level timeout routed to the failure path. A hook attempt is bounded
+on both sides instead (R-46): CodeBuild stops the run at
+`timeoutMinutes`, refused starts end after 5 minutes, and CodeBuild
+stops a queued build at 10 minutes less the minutes its start was
+refused, never below 5, so refusals and queue together take at most
+10, overrun only by the milliseconds R-46 notes. The attempt's
+deadline is the run, those 10 minutes and five minutes of margin, at
+which the workflow stops the build itself, so the deadline is a
+backstop and a wait in the queue never reads as a hook timeout. The
+execution-level timeout MUST
+exceed the sum of every build budget the execution can run at the caps,
+queue time included, plus terminal-write margin. It is a final safety
+net, never the normal timeout path: a tripped execution timeout
+bypasses the Catch and strands records. At the caps (ten hooks per
+event, R-39) one hook attempt takes at most 47 minutes (its deadline of
+30 run, 10 refused or queued and 5 margin, plus 2 for `StopBuild` and
+the polls until the build is final) and a script build at most 60:
+
+| Execution | Worst case at the caps |
+|---|---|
+| create or update, one event | 10 × 47 + 60 = 530 min |
+| `CreateDeployment` with a new cell, two events | 2 × 530 = 1,060 min (17.7 h) |
+| cell or deployment delete, one event | 10 × 144 (each hook's budget, 3 × 47 + 3 of backoff, R-46) + 60 = 1,500 min (25 h) |
+
+With hooks, the execution timeout is therefore 26 hours. The worst case
+needs every hook at the 30-minute cap and every attempt to run it out.
+Standard workflows are billed per state transition, not by duration,
+so the longer net costs nothing; it bounds how long a hung execution
+holds its record. The hook steps of the longest execution, a delete at
+the caps, write at the larger of the refusal loop's rate of about 15.7
+history events a minute and the 60-second poll's nine (R-46). With
+every hook refused for its whole budget that is about 22,600 events,
+and polling throughout about 13,000, both inside the 25,000-event
+quota of a Standard execution. A 30-second poll would pass it.
+
+Refusals are capped at 5 minutes and the queued timeout is shortened
+by the minutes refused, so refusals and queue together never pass the
+10 minutes the attempt bound counts by more than the milliseconds R-46
+notes, which its five minutes of margin absorb. That keeps every number
+above:
+the attempt bound of 47 minutes, the per-hook budget of 144 and the
+history count. The delete row holds because the loop cuts every
+attempt of a delete hook at the hook's budget (R-46), however many
+refusal-only attempts came first.
+
+### 8.3 Hook steps
+
+Each build of §8 serves one **event**: `CELL_CREATE`, `CELL_UPDATE` or
+`CELL_DELETE` for the cell build, `DEPLOYMENT_CREATE`,
+`DEPLOYMENT_UPDATE` or `DEPLOYMENT_DELETE` for the tenant build. A
+`CreateDeployment` that needs a new cell runs two events, the cell's
+first. Around each build the workflow runs the event's hooks:
+
+```
+PRE hooks (global, then application)
+  → script
+  → POST hooks (application, then global)
+  → terminal write
+```
+
+**R-45 (hook order):** for each event the workflow MUST run the `PRE`
+hooks resolved for it (R-40), global hooks first and then application
+hooks; then the script; then the `POST` hooks, application hooks first
+and then global hooks, so global hooks wrap the application's. Within a
+scope hooks run in ascending `hookId` (byte order), one at a time. Each
+hook runs once per event of an execution, delete retries aside (R-46),
+and post hooks run only after the script succeeded. The cell event of a
+new-cell create finishes, post hooks included, before the deployment
+event's pre hooks start. Deletes keep the same order, so pre hooks act
+while the cell or deployment still exists: a hook that removes a route
+removes it before the delete script tears down what the route points at.
+
+**R-46 (hook failure):** a hook fails when its build does not succeed,
+times out (CodeBuild's run timeout, its queued timeout, or the
+attempt's deadline), or cannot start. Each hook attempt MUST start its
+build with a request-response `codebuild:startBuild`, never `.sync`,
+so the build id is known from the first call, and MUST then poll that
+one id with `batchGetBuilds` every 60 seconds. Step Functions has no
+optimized integration for `batchGetBuilds`, so the poll task is the SDK
+integration `arn:aws:states:::aws-sdk:codebuild:batchGetBuilds`, under
+the IAM action `codebuild:BatchGetBuilds`, and its `Output` reads the
+SDK result's PascalCase keys (`Builds`, `BuildsNotFound`,
+`ResolvedSourceVersion`; H-2). Each start
+try sends `timeoutInMinutesOverride` set to the hook's
+`timeoutMinutes` (T) and `queuedTimeoutInMinutesOverride` set to
+q = max(5, 10 − ceil(r)), where r is the minutes from the attempt's
+first try to this one, and r is taken as 0 when `$TRY` is 1, so q is
+10 on the first try. The refusal `Choice` ends the start once 5
+minutes have passed since the first try (below), but the begin-try
+state reads the clock a moment after it, so r can pass 5 by
+milliseconds and ceil(r) reach 6. The floor keeps q at CodeBuild's
+minimum of 5 then, so refusals and queue together take at most 10
+minutes and those milliseconds, which the five minutes of margin
+absorb. The attempt's deadline MUST be data, computed from
+the definition when the attempt starts: the earlier of its first
+`StartBuild` try plus the run timeout, the 10 minutes of refusals and
+queue, and five minutes of margin, and, on delete, 2 minutes before
+the end of the hook's budget (below), so a stop at the budget's end
+finishes inside it. Each poll's `Output` keeps the id, the status, the
+phase timing and `resolvedSourceVersion`, never the environment
+(§8.1). For a git source `resolvedSourceVersion` is absent from the
+`startBuild` result; at the spike's 5-second poll it was absent from
+the first poll too and present from the second (H-2). At 60 seconds
+the first poll may carry it, but the workflow MUST take it from the
+poll that saw the final status and MUST NOT read an earlier absence
+as final; for an S3 source it stays absent (R-40). The loop ends when
+the build reaches a final status. At the deadline the loop MUST call
+`StopBuild` on that id, then poll it until
+it reaches a final status, within the 2 minutes R-23 budgets for
+this, and treat the attempt as a timeout, or, when the budget set the
+deadline, record the skip with "budget ran out". So no hook build
+outlives its attempt, whatever CodeBuild did with its own timeouts,
+except a build hidden behind a start whose repeats all failed, which
+CodeBuild stops within q + T (below). A build that is still not final
+after those 2 minutes ends the hook: `statusReason`, or on delete the
+skip log, names the build as not confirmed stopped, and no further
+attempt starts beside it. A failed
+poll call starts nothing, so the loop polls again at the next interval
+until the deadline. `statusReason` MUST tell a queued timeout from a
+run timeout by the phase timing, so a hook that never ran is not taken
+for a slow one.
+
+The start of an attempt MUST be an explicit loop, never one task
+`Retry`, because a refusal needs a new try and a transient error needs
+the same one. The loop holds in variables the try index `TRY` (1 for
+the attempt's first try), that try's q and the try's
+`idempotencyToken`, and exactly one state writes `TRY` on each
+transition. A `Pass` state that enters the attempt assigns `TRY` 1
+and computes `FIRST_TRY_AT`, the time of the attempt's first try, and
+the attempt's deadline from the same instant,
+`$states.context.State.EnteredTime`, an ISO 8601 string with
+millisecond resolution, which is fixed for the state and read by no
+`Arguments`. `$toMillis` of that field gives the deadline in the same
+instant as `FIRST_TRY_AT` (H-11). The deadline never reads
+`$FIRST_TRY_AT`, which in that state is unset or the previous
+attempt's: an `Assign` field that reads a variable assigned earlier
+gets that earlier value, and an unguarded read of a variable never
+assigned fails with `States.QueryEvaluationError` (H-11). Two adjacent
+states can have the same `EnteredTime` to the millisecond (H-11). The
+5-minute refusal window counts from `FIRST_TRY_AT`. A `Pass` state
+that begins each try follows it and assigns q and the
+token from `$TRY`, and the start task comes next. The refusal path's
+`Choice` rule assigns `TRY` `$TRY + 1` and goes back to the begin-try
+state. An `Assign` reads every variable as it was when its state was
+entered and its new values are visible from the next state, so q and
+the token are assigned in the state after the one that sets `TRY`
+([Step Functions Developer Guide, workflow variables][sfn-vars]). The
+token MUST be the SHA-256 of the six values joined by `|`, as this
+JSONata expression:
+
+```
+$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK_ID,
+  $string(ATTEMPT), $string(TRY)], '|'), 'SHA-256')
+```
+
+[sfn-vars]: https://docs.aws.amazon.com/step-functions/latest/dg/workflow-variables.html
+
+The token is 64 lowercase hexadecimal characters, equal to `sha256sum`
+of the joined string (H-8), so it has a fixed length, and it differs
+on every try by construction; q is not part of it. The expression MUST
+read only those six values, all fixed for the try. Every field of the
+start task's `Arguments`, not only the token, MUST read only variables
+and the start task's state input, both fixed for the try: the project
+name, `sourceVersion` (R-40), the token, q, T and the R-42
+environment. Every state on the way back to the start task, the entry
+and begin-try `Pass` states, the refusal `Catch`, the `Wait` and the
+`Choice`, passes its input through unchanged: the refusal `Catch`
+sets `Output` to `{% $states.input %}`. The edges that leave that
+cycle, the start task's success `Output` and the `Catch`es that end
+the attempt, add the fields §8.1 requires. The `Arguments` read no
+`$states.context` field that changes on a repeat (such as
+`State.RetryCount`), and no `$uuid()`, `$now()`, `$millis()` or other
+value that changes between evaluations may appear anywhere in them,
+because a `Retry` evaluates `Arguments` again on
+every repeat (H-8) and CodeBuild refuses a repeat whose arguments
+differ from the first call's under the same token. A `StartBuild` the
+service refuses under a known refusal name (the project at its
+`concurrentBuildLimit` or the account's concurrent build quota, H-9)
+MUST go through a `Catch` to a 30-second `Wait`, without backoff, and
+then a `Choice`. That
+`Catch` `Assign`s `LAST_REFUSAL`, the error name and the first 256
+characters of the cause, from `$states.errorOutput`, and its `Output`
+stays `{% $states.input %}`, so the state input is untouched. The
+`Choice` ends the start when 5 minutes have passed since
+`FIRST_TRY_AT` or the next try would pass the deadline; otherwise its
+rule assigns `TRY` `$TRY + 1` and goes to the begin-try state. A
+start still refused when its window ends is a hook that cannot start;
+its `statusReason` says the start was still refused and names
+`$LAST_REFUSAL`, which no other ending reads. Each try
+computes its own q, so a refusal
+never lengthens an attempt past its deadline. A project at its cap
+refuses, never queues, with `CodeBuild.AccountLimitExceededException`
+and no build created (H-9).
+CodeBuild documents that name for a limit exceeded for the calling
+account, so the `Catch` MUST name it, which is safe whichever name the
+account's concurrent build quota turns out to use: the spike provoked
+only the project cap, and the quota's name stays to verify (H-9). The
+cause text ("This build project has a limit of ..."), kept in
+`LAST_REFUSAL`, tells a project cap refusal apart in that
+`statusReason`. A start throttled by CodeBuild's request rate fails
+with the generic name `CodeBuild.AWSCodeBuildException`, and only its
+cause says "Rate exceeded: StartBuild (... Error Code:
+ThrottlingException ...)" (H-11). Because the name is generic, it may
+also carry other service errors. It MUST go to the transient `Retry`
+under the same token, as MUST any other `CodeBuild.*` name the start
+task does not recognise, and when the `Retry` is spent it ends the
+attempt as "start outcome unknown", whose `statusReason` keeps the
+cause. These names MUST never go to the refusal `Catch`, which starts
+a new try under a new token and so could leave a second build.
+Repeating a refusal is safe because a refused request does not bind
+its token (H-8). A repeat after a throttle sends the same token, so it
+returns the build the first call created, if there is one. Whether a
+throttled call binds its token was not tested, and no burst call
+created a build, which the project's cap alone also explains (H-11).
+If a throttled call binds nothing, the repeat starts the build. The
+`Retry` gives a throttle about 30 seconds to clear, and executions
+throttled together repeat together, because the `Retry` has no
+jitter. A throttle that outlasts it ends the attempt as "start outcome
+unknown": a create or update fails, with the P-9 exits, and a delete
+attempt counts against its three.
+
+A transient server error (a 5xx, or the task's own timeout) can follow
+a call that created a build. It MUST be handled by a task `Retry` on
+the start task, which has `TimeoutSeconds` 15. The `Retry` MUST set
+`IntervalSeconds` 10, `BackoffRate` 1 and `MaxAttempts` 3, with no
+jitter (`JitterStrategy` `NONE`), so each of the three repeats waits
+10 seconds; the ASL default `BackoffRate` of 2 would wait 10, 20 and
+40 seconds. A `Retry` evaluates the task's `Arguments` again on every
+repeat (H-8). Every repeat therefore sends the same request only
+because every field reads only variables and the start task's state
+input, both fixed for the try, and every state on the way back to the
+start task, the entry and begin-try `Pass` states, the refusal
+`Catch`, the `Wait` and the `Choice`, passes its input through
+unchanged (above): the argument rests on
+that evaluation being deterministic. CodeBuild documents a token as
+valid for 5 minutes, within which a repeat with the same arguments
+returns the build the first call created, and the token sent with
+other arguments fails with `CodeBuild.InvalidInputException`
+("Request parameter mismatch") and starts nothing (H-8). That error is
+neither transient nor a refusal: after a repeat it means the first
+call's outcome is unknown, so its own `Catch` ends the attempt as
+"start outcome unknown". H-8 saw repeats after a refusal; a `Retry`
+after a throttle, a 5xx or a task timeout follows the same rule, and
+the 5xx and the task timeout stay to verify (a start with
+`TimeoutSeconds` 1 returned inside a second in 10 of 10 runs, so no
+task timeout could be provoked, H-11). A try and its repeats end
+within 90 seconds (15 + 3 × (10 + 15)), inside the token's validity. A
+build a late repeat starts keeps its try's q, so it waits at most 1.5
+minutes past the 10, inside the five minutes of margin. A try whose
+repeats all fail ends the attempt as a hook that cannot start, with
+`statusReason` "start outcome unknown", never a new try under another
+token, because its first call may have created a build that no id names.
+CodeBuild stops such a build within q + T of the try's last call, by its
+own queued and run timeouts.
+`StopBuild` MUST use the same shape: a refusal goes through the
+`Catch`, a 30-second `Wait` and the `Choice` within the 2 minutes of a
+stop, and a transient error is the same task `Retry`. `StopBuild` on a
+build that already finished succeeds (H-8), so a stop that races the
+build's own end needs no case of its own. A `StopBuild` throttled by
+the request rate fails with the same generic name, with the cause
+"Rate exceeded: StopBuild (... Error Code: ThrottlingException ...)"
+(H-11), and goes to the stop's `Retry`. That repeat is the only task
+`Retry` in a hook attempt. The refusal `Catch` MUST name only the
+refusal names, and every other error except
+`CodeBuild.InvalidInputException`, transient, throttled or not
+recognised, MUST go to the `Retry`, so no error moves to a new token
+after a call that may have created a build. That rests on a second
+H-8 result: a repeat under a token whose build held the project's only
+slot returned that build, not a refusal. A refusal on a repeat
+therefore means the first call created nothing; for the account's
+concurrent build quota this stays to verify with the quota's name (H-9).
+
+The start task's error handling in ASL is two retriers and a `Catch`
+list. The first retrier names the refusal names and
+`CodeBuild.InvalidInputException` with `MaxAttempts` 0, which hands
+them to the `Catch` list at once. The second names `States.ALL`
+alone, so it takes a throttle's `CodeBuild.AWSCodeBuildException`
+(H-11), and carries the values above: `IntervalSeconds` 10,
+`BackoffRate` 1, `MaxAttempts` 3 and `JitterStrategy` `NONE`. The
+`Catch` list names the refusal names first, then
+`CodeBuild.InvalidInputException`, then `States.ALL` last, which ends a
+spent `Retry` as "start outcome unknown". `StopBuild` has its own
+retriers and `Catch` list in the same shape, but its last `Catch` ends
+the hook with the build named as not confirmed stopped (above): a stop
+sends no token and has no start outcome. Every "start outcome unknown"
+ending MUST name the last error the start task saw, its name and the
+start of its cause (§8.1), in `statusReason`, or on delete in the skip
+log. The routing does not depend on the error, and the name tells an
+operator a wiring fault from a lost start:
+`CodeBuild.InvalidInputException` on a try's first call,
+`CodeBuild.ResourceNotFoundException` for a missing project, a denied
+`codebuild:StartBuild` or a `States.QueryEvaluationError` from the
+`Arguments` started nothing, while a `Retry` spent on 5xx errors or task
+timeouts may have left a build. A cause that starts "Rate exceeded"
+under `CodeBuild.AWSCodeBuildException` is a throttle (H-11).
+
+The poll costs three state transitions (a `Wait`, the task and a
+`Choice`) per minute a hook runs: at the Standard workflow price of
+$0.025 per 1,000 transitions, about $0.002 for a 30-minute hook. The
+history the hook steps write grows at the larger of two rates. Polling
+writes nine events a minute. The refusal loop writes about nine events
+per 30-second try, which is about 15.7 a minute over 5 minutes of
+refusals and the 60-second backoff that follows them. At the caps a
+delete's hooks run for at most 1,440 minutes in all (R-23). Polling
+throughout writes about 13,000 events, and refused throughout, about
+22,600, both inside the 25,000-event history quota of a Standard
+execution. The refusal interval therefore stays 30 seconds. A
+30-second poll would pass that quota at the caps.
+
+On delete each attempt MUST be one pass of an explicit loop through the
+failure handling: an attempt that times out has its build stopped and
+polled to a final status, the loop increments `ATTEMPT` and waits out
+the backoff, and only then does the next attempt start its own build.
+A task `Retry` MUST NOT run a delete attempt again, because a retried
+task never enters the failure handling and would leave the earlier
+build running. `ATTEMPT` counts started builds: an attempt whose start
+was refused for its whole 5-minute window started none, does not count
+against the three attempts and leaves `ATTEMPT` unchanged, and the
+next start try follows the 60-second backoff. An attempt that ended
+"start outcome unknown" may have started one, so it counts: the loop
+increments `ATTEMPT`, and the next attempt MUST NOT start until q + T
+have passed since that try's last call, so it never runs beside the
+hidden build. That wait ends at most T + 11.5 minutes after the
+attempt began, inside the attempt's share of the budget. When the
+budget ends first, the skip is logged with "start outcome unknown"
+and the hidden build is the residual of T42. The hook's attempts
+share one budget, computed as data from the definition when its first
+attempt starts: three attempts at their bound plus the backoff,
+3 × (`timeoutMinutes` + 17) + 3 minutes, 144 at the cap. Every
+attempt's deadline and refusal window end 2 minutes before the
+budget's end at the latest (above), so a hook never runs past its
+budget, however many refusal-only attempts it had. When the budget
+sets the deadline, the loop calls `StopBuild` on a running build,
+polls it to a final status and records the skip with "budget ran
+out". Then:
+
+| Event | Phase | Effect |
+|---|---|---|
+| create, update | `PRE` | The event MUST stop before the script runs. The record MUST land in `CREATE_FAILED` or `UPDATE_FAILED` with `statusReason` naming the scope, the hook id, the build and the kind of failure; later hooks and the script MUST NOT run, so the script has changed nothing. A failed cell create with a pending deployment create moves both records (§8.2). A global pre hook can therefore act as a gate on every application |
+| create, update | `POST` | The record MUST land in `CREATE_FAILED` or `UPDATE_FAILED` as if the script had failed, `statusReason` naming the hook. The script's changes stay in place, and later hooks MUST NOT run |
+| delete | `PRE`, `POST` | The workflow MUST retry the hook, three attempts in all, 60 seconds after the first failure and 120 seconds after the second (interval 60 s, backoff rate 2), each attempt a pass of the loop above. When every attempt fails, or the hook's budget is spent, it MUST log the skip (scope, hook id, event, record, build ids, and whether the budget ran out), count it (below) and go on with the next hook, the script and the terminal write, so cleanup stays reachable (P-9). A delete hook cannot stop a delete and cannot be a gate |
+
+The remediation paths are those of P-9. `UPDATE_FAILED` is retried with
+`UpdateDeployment` or `UpdateCell`, which runs the pre hooks, the script
+and the post hooks again. `CREATE_FAILED` is deleted (deployment, then
+cell), and the delete runs the delete hooks and the delete script
+against whatever the create left, which after a pre hook failure is
+nothing. Creates and updates are not retried automatically: a hook that
+wants retries makes them inside its own build. The workflow MUST count
+skipped delete hooks in a metric with an alarm (no actions, as for M17),
+because a skip can leave an external system holding state for a record
+that is gone (T42).
+
+A stamped application hook that fails on every run is the one case a
+retry cannot fix: `UpdateCell` and `UpdateDeployment` run the same
+stamped hook again, and a pre hook on `DEPLOYMENT_CREATE` fails every
+placement into that cell. The exits, in order:
+
+1. Fix forward when the stamped `sourceVersion` is a branch or absent:
+   push the fix to that ref, which the next build fetches (P-4), then
+   retry the update or delete the failed create.
+2. Stop new cells inheriting it: `PutApplication` with the hook removed
+   or corrected, and, where the job must keep running, the hook
+   registered as a global hook instead.
+3. For a cell whose stamped hook is pinned to a commit, the destructive
+   exit: delete every deployment in the cell, then the cell (each delete
+   runs the hook, which cannot block it), and re-create the
+   deployments, which placement puts in cells stamped from the new
+   definition.
+
+Gates and registrars, which must change after cells exist, SHOULD
+therefore be global hooks, replaced through `PutHook`; an application
+hook SHOULD be one its application can keep for a cell's life. The
+definition-replacing `UpdateCell` that would replace a stamp is a seam
+(§11).
 
 ---
 
@@ -1607,6 +2603,32 @@ bypasses the Catch and strands records).
 | N-9 | `PutAccount` probes both roles before writing (R-26); the probe makes no call under the assumed credentials. | Fail at registration, when the operator is present, not at the first build; and never touch the account during a check. |
 | N-10 | `externalId` is never returned by the API and never logged by the sample. It reaches the build as a plaintext CodeBuild environment-variable override carried in the Step Functions execution input, readable by principals with `states:DescribeExecution` or `codebuild:BatchGetBuilds` in the control plane account (the operator role, the account's administrators). | Not a secret by AWS's definition; the guard's value is that outsiders do not hold it, and nobody outside the control plane account can read those APIs. |
 | N-11 | Deployment and cell parameter values MUST NOT be secrets. They are stored in plain text on the deployment or cell record, returned by `GetDeployment` or `GetCell` to operators and readers alike (R-36), and reach the build as CodeBuild environment-variable overrides carried in the Step Functions execution input. The service logs parameter names, never values. A script that needs a secret receives its *name* as a parameter (a Secrets Manager secret or an SSM `SecureString` under the deployment's tenant namespace or the application's shared namespace, §6.2) and reads it under its own role. | Every operator and reader, and everyone who can read the table, the execution history or `codebuild:BatchGetBuilds` in the control plane account, can read the values; secret-shaped storage would need a KMS key, extra IAM and a second read path for a concern the application plane already solves. |
+| N-12 | Script outputs (R-43) and hook definitions (R-39) MUST NOT be secrets. Outputs ride the Step Functions execution history, the script build's exported variables and the post hook builds' environment overrides; hook definitions are stored in plain text and returned to operators and readers alike. | The same readers as N-11; a secret-shaped path for either would need the same KMS key and second read path N-11 declines. A hook that needs a secret reads it under its own role. |
+
+### 9.1 Service behaviour the hook design relies on
+
+Spike results the hook design relies on. Every row is verified or not
+needed; a later result that differs changes the requirement the row
+names. Two cases stay to verify, each in its row: in H-8, a `Retry`
+after a 5xx or a task timeout; and in H-9, one case, the account
+quota's error name together with whether a repeat under a bound token
+returns its build at that quota. H-3, H-4 and H-6 asked how a `.sync`
+hook task behaves; the poll loop of R-46 relies on none of them, and
+the rows stay so that their ids stay stable.
+
+| # | Behaviour | Status | Relied on by |
+|---|---|---|---|
+| H-1 | Through Step Functions `codebuild:startBuild.sync`, `Build.ExportedEnvironmentVariables` keeps a single value of 1,024, 4,096 or 8,192 bytes. A single value of 16,384 bytes, 32 KiB or 64 KiB, and four values of 4,096 bytes (16 KiB in all), come back with every exported value an empty string, while the build and the execution report `SUCCEEDED`. A declared exported variable the build never set comes back as `""`. The limit is on the total of a build's exported variables, between 8 and 16 KiB, and overflow is silent | Verified: spike H-1, 2026-11-17, eu-central-1 | R-43, §8.1 |
+| H-2 | For a git source, `ResolvedSourceVersion` in an `aws-sdk:codebuild:batchGetBuilds` result is the full commit SHA the build ran, both when `sourceVersion` is a full SHA and when it is a branch (the branch's tip). It is absent in the `startBuild` result and, at the spike's 5-second poll, on the first poll, present from the second, and the `startBuild.sync` result carries it. For an S3 source it is never set, also when `sourceVersion` is an object version id, and `CODEBUILD_RESOLVED_SOURCE_VERSION` is unset in the build. Step Functions has no optimized integration for `batchGetBuilds`; the SDK integration's result has PascalCase keys (`Builds`, `BuildsNotFound`) | Verified: spike H-2, 2026-11-17, eu-central-1 | R-40, R-46, §8.1 |
+| H-3 | Whether a `.sync` task that times out stops its CodeBuild build | Not needed: poll loop (R-46 stops the build at its deadline) | — |
+| H-4 | Whether the error of a timed-out `.sync` task carries the build id | Not needed: poll loop (`startBuild` returns the id) | — |
+| H-5 | CodeBuild accepts a hook build's `environmentVariablesOverride` built by a JSONata state: R-42's 13 fixed variables plus a test label, 40 `PARAM_` variables of 1,024 bytes of printable ASCII and a `SCRIPT_OUTPUTS` of 4,096 bytes, 55 in all, arrive with the length and SHA-256 sent for each. It also accepts 41 `PARAM_` variables and a 4,097-byte `SCRIPT_OUTPUTS`, so the caps are the control plane's own, enforced before `StartBuild` | Verified: spike H-5, 2026-11-17, and for multibyte UTF-8 parameter values spike H-11, 2026-11-18, eu-central-1 | R-42 |
+| H-6 | A JSONata expression in a task's `TimeoutSeconds` sets a timeout per hook state; today's build tasks use a constant | Not needed: poll loop (the deadline is data) | — |
+| H-7 | A CodeBuild service role trust policy conditioned on `aws:SourceArn` equal to the project ARN, computed with `!Sub` from the project's fixed physical name before the project exists, deploys with no cycle and admits that project's builds, which run as the role (two role and project pairs, standing for the four). CodeBuild refuses `CreateProject` for a project of another name that names the role, and `UpdateProject` that switches an existing project to it, with `InvalidInputException` ("CodeBuild is not authorized to perform: sts:AssumeRole on service role"), so a mis-wired project fails at deploy, never at its first build. Adding `aws:SourceAccount` changes neither outcome; a role with no condition admits a project of any name | Verified: spike H-7, 2026-11-17, eu-central-1 | R-41 |
+| H-8 | Through a request-response `codebuild:startBuild` task: `$hash(..., 'SHA-256')` returns 64 lowercase hexadecimal characters equal to `sha256sum`, which CodeBuild accepts as `idempotencyToken`. A repeat with the same token and arguments within the token's validity returns the same build id; the same token with other arguments fails with `CodeBuild.InvalidInputException` ("Request parameter mismatch for idempotency token") and starts nothing. A start refused at the cap fails with `CodeBuild.AccountLimitExceededException` and creates no build; repeated under its token while capped it is refused again, and after the cap clears the token starts a build that a further repeat returns, so a refused request does not bind its token. A repeat under a token whose build was `IN_PROGRESS` in the only slot of a project capped at 1 returned that build, not a refusal. `StopBuild` on an unknown id fails with `CodeBuild.ResourceNotFoundException` and on a completed build succeeds. No execution returned both a build id and an error. A task `Retry` evaluates `Arguments` again on every repeat: a `$uuid()` in them differed on all four tries, 10 seconds apart, while a token computed from inputs fixed for the try stayed the same. Not provoked: a `Retry` after a 5xx or a task timeout; throttled calls are in H-11 | Verified: spike H-8, 2026-11-17, and for throttling spike H-11, 2026-11-18, eu-central-1; the one unprovoked case, a `Retry` after a 5xx or a task timeout, stays to verify | R-46 |
+| H-9 | A request-response `codebuild:startBuild` on a project at its `concurrentBuildLimit` is refused, not queued: it fails with `CodeBuild.AccountLimitExceededException`, cause "Concurrent build limit exceeded. This build project has a limit of 1 concurrent build(s)...", and creates no build. CodeBuild documents the same name for any limit exceeded for the calling account, which would cover the account's concurrent build quota, but the spike provoked only the project cap | Verified: spike H-9, 2026-11-17, eu-central-1; the account quota's error name, and that a repeat under a bound token returns its build at that quota (one case), stay to verify | R-46 |
+| H-10 | A 4,096-byte compact outputs value of only `\"` and `\\` escapes, written by `jq -c .` and exported alone as `SCRIPT_OUTPUTS`, comes back byte for byte (equal SHA-256 in the origin log, the execution output, a `$hash` in state and the hook build's environment) through `startBuild.sync`, a JSONata `Output` into state and a hook build's override. JSON-encoded in state it is 8,190 characters; the execution output is 8,758 bytes, and the script task's `Output` took 23 ms. The R-43 guard in a Step Functions JSONata `Pass` state gives the expected verdict in 18 cases (the largest valid value, the largest valid value of `\"` only, the §10 near miss, a mixed near miss, 4,095 and 4,098 characters, empty and absent, a tab, DEL and non-ASCII, `{}`, two keys, a repeated key admitted, a space after `:`, a `\u` escape, keys of 64 and 65 characters), each in under 1 ms, with no evaluation error | Verified: spike H-10, 2026-11-17, eu-central-1 | R-43, §8.1 |
+| H-11 | In an inline Map (`MaxConcurrency` 40, no `Retry`), one burst of 200 request-response calls at 42 to 45 calls a second. `codebuild:startBuild` on a project at its cap returned 98 `CodeBuild.AccountLimitExceededException` and 102 throttled calls; `codebuild:stopBuild` on unknown build ids of the project returned 37 `CodeBuild.ResourceNotFoundException` and 163 throttled calls. A throttled call fails with the generic name `CodeBuild.AWSCodeBuildException`, and only its cause says "Rate exceeded: StartBuild ... Error Code: ThrottlingException" (or `StopBuild`). No burst call created a build, which the cap alone also explains (the 98 refusals were calls that passed the throttle), so whether a throttled call binds its token was not tested. 10 runs of `startBuild` with `TimeoutSeconds` 1 and the R-46 `Retry` fired no `States.Timeout`: each returned within a second, one build per seed. 40 `PARAM_` values of exactly 1,024 bytes of 2-, 3- and 4-byte UTF-8, with R-42's 13 fixed variables and a test label, 54 in all, arrive with the byte length and SHA-256 sent for each through a JSONata `EnvironmentVariablesOverride` and `startBuild.sync`. A value of 1,024 characters and 2,560 bytes arrives intact too, so CodeBuild enforces no byte cap there and the 1,024-byte cap is the control plane's (R-33). `$states.context.State.EnteredTime` is an ISO 8601 string with millisecond resolution. In one `Assign`, a `FIRST_TRY_AT` from it and a deadline from `$toMillis` of it share one instant; the next `Pass` state had the same `EnteredTime` to the millisecond, and a state after a 1-second `Wait` was 1,040 ms later. A second `Assign` field that reads `$FIRST_TRY_AT` reads its earlier value when one was assigned, and fails with `States.QueryEvaluationError` ("returned nothing (undefined)") when none was and the read is unguarded. Not provoked: the account's concurrent build quota, a task timeout | Verified: spike H-11, 2026-11-18, eu-central-1; the task timeout and the account quota stay to verify (H-8, H-9) | R-33, R-42, R-46 |
 
 ---
 
@@ -1617,29 +2639,76 @@ scenario against real infrastructure in **two accounts** with **two
 applications** and **two tenants** (this mirrors the reference integration
 test). Account A is the control plane's own account; account B is a second
 account with the role pair installed under an `externalId`. Applications X
-and Y share the same source and scripts and differ in id and in their parameter declarations; both have
-`maxTenants = 1` (every cell is a silo, so cells — not deployments — are
-what the accounts count). Tenants T1 and T2 are plain records. X declares
-parameters (step 2); every `CreateDeployment` of X supplies
-`ALLOWED_EMAIL_DOMAIN = example.com` unless a step says otherwise.
-The test's own vendor IdP (a throwaway user pool) mints `role: operator`
-for the operator user and `role: control-plane:reader` for a second,
-reader user; the stack sets `readerRoles = ["control-plane:reader"]`.
-The pool is on the Essentials plan with a user pool domain, whose
-`/oauth2/token` endpoint is the only way to run the client credentials
-flow. It has a resource server with two custom scopes (Cognito refuses a
-client-credentials client without one): `control-plane/read`, which the
-stack sets as `requiredScope`, and `control-plane/other`, which stands in
-for another API. Two machine clients have a secret and both scopes: a
-reader client the stack lists in `clientIds`, and an unlisted client.
-The trigger runs on the V3 event: it branches on `triggerSource`,
-putting the users' roles under `idTokenGeneration` and
-`role: control-plane:reader` under `accessTokenGeneration` for both
-machine clients. A setup-stack function reads a client's secret, gets
-its token for one scope from the token endpoint and makes one API call.
-It returns the status, whether the token has `aud`, whether `sub` equals
-`client_id`, its `role` and its `scope`, never the secret or the token,
-so neither reaches a template, an output or the assertion results.
+and Y share the same source and scripts and differ in id and in their
+parameter declarations; both have `maxTenants = 1` (every cell is a silo,
+so cells — not deployments — are what the accounts count). Tenants T1 and
+T2 are plain records. X declares parameters (step 2); every
+`CreateDeployment` of X supplies `ALLOWED_EMAIL_DOMAIN = example.com`
+unless a step says otherwise. The test's own vendor IdP (a throwaway user
+pool) mints `role: operator` for the operator user and `role:
+control-plane:reader` for a second, reader user; the stack sets
+`readerRoles = ["control-plane:reader"]`. The pool is on the Essentials
+plan with a user pool domain, whose `/oauth2/token` endpoint is the only
+way to run the client credentials flow. It has a resource server with two
+custom scopes (Cognito refuses a client-credentials client without one):
+`control-plane/read`, which the stack sets as `requiredScope`, and
+`control-plane/other`, which stands in for another API. Two machine clients
+have a secret and both scopes: a reader client the stack lists in
+`clientIds`, and an unlisted client. The trigger runs on the V3 event: it
+branches on `triggerSource`, putting the users' roles under
+`idTokenGeneration` and `role: control-plane:reader` under
+`accessTokenGeneration` for both machine clients. A setup-stack function
+reads a client's secret, gets its token for one scope from the token
+endpoint and makes one API call. It returns the status, whether the token
+has `aud`, whether `sub` equals `client_id`, its `role` and its `scope`,
+never the secret or the token, so neither reaches a template, an output or
+the assertion results. The stack sets `globalHookManagedPolicyArns` and
+`appHookManagedPolicyArns` to one test policy each, which lets that hook
+role write SSM parameters under its own test path in A and nowhere else;
+step 16's hooks record what they saw there. The application hook test
+policy also allows `states:StartExecution` on the workflow and
+`lambda:InvokeFunction` on every function of the account. The R-41
+deny must override both allows. The policy must exist before the stack,
+because the stack validates `appHookManagedPolicyArns` at synth, so it
+names the workflow by its computed ARN,
+`arn:<partition>:states:<region>:<account>:stateMachine:<fleet>-workflow`
+(R-41), and the functions as
+`arn:<partition>:lambda:<region>:<account>:function:*`, because the
+API function has a generated name. The stack under test outputs the
+API function's name (`ApiFunctionName`) and the workflow's ARN
+(`StateMachineArn`), and the test reads both after the deploy.
+
+Each run of the test takes its own fleet name, `cp-integ-<run id>`,
+within the `fleetName` charset and length (§3.3). The run id matches
+`[a-z0-9]{1,23}` and MUST NOT contain `aws`, `amazon` or `cognito`:
+the fleet name is then at most 32 characters, and the user pool domain
+prefix built from it ends in no hyphen and holds none of the words
+Cognito refuses in a domain prefix. The run uses the fleet name in
+every stack name, as the `fleetName` of the stack under test and of
+the role pair the account B stack installs, and in every other name
+the test creates that must be unique in an account or a Region: the
+probe role in B, the hook test paths and policies, and the user pool
+domain prefix. The application ids derive from the run id, not the
+fleet name (`x-<run id>`, `y-<run id>`, `z-<run id>`, at most 25
+characters), because an application id is at most 32 characters
+(§4.1) and the parameter paths it names
+(`/application-plane/applications/<id>/shared/`,
+`/application-plane/tenants/<tenantId>/<id>`) are per account and
+Region, so two runs with one id would share them. Two runs can then
+share both accounts and a Region. The test's leftover check looks for
+that run's stacks only, and a check that a parameter namespace ends
+empty looks at that run's applications, cells and tenants only. Runs
+in one account and Region still share its quotas, and those limit how
+many fit at once: CodeBuild's concurrent builds per account and
+Region, which every run's builds and hook builds draw on, and the API
+Gateway control plane request rate, which a deploy of several REST
+APIs at once can exceed. They also share state that per-run names do
+not separate: the stack under test's REST API creates the API Gateway
+CloudWatch role and the `AWS::ApiGateway::Account` setting that names
+it, which is one per account and Region, goes to whichever run
+deployed last, and is retained when the stack is deleted. That role
+and setting are expected leftovers, outside the per-run leftover
+check.
 
 1. **Auth:** an operation without a JWT is rejected; with a valid vendor
    IdP JWT it succeeds. A reader token (R-36) succeeds on every `GET`
@@ -1650,8 +2719,10 @@ so neither reaches a template, an output or the assertion results.
    refused with 403 on `CreateTenant`, nothing written; its token for
    `control-plane/other` alone and the unlisted client's token are
    refused with 403 on `ListTenants`.
-2. **Applications:** `PutApplication` with a missing script path → 400;
-   with an id outside the charset → 400; `PutApplication` X and Y → 200;
+2. **Applications:** `PutApplication` with a missing script path, a
+   script path holding a control character or a source location with
+   userinfo → 400; with an id outside the charset → 400;
+   `PutApplication` X and Y → 200;
    `ListApplications` shows both with `cellCount = 0`; `PutAccount` naming
    an unregistered application in `applicationIds` → 404. X declares two
    parameters, `ALLOWED_EMAIL_DOMAIN` (required) and `LOG_LEVEL` (default
@@ -1683,8 +2754,8 @@ so neither reaches a template, an output or the assertion results.
    **in A**, and the tenant create script recorded there that it received
    `PARAM_ALLOWED_EMAIL_DOMAIN = example.com` and `PARAM_LOG_LEVEL = info`;
    the cell create script recorded `PARAM_CELL_SIZE = small` and no
-   tenant parameter, and `GetCell` reports empty `parameters`. Account A is 1/2; X has `cellCount = 1`; T1 has
-   `deploymentCount = 1`.
+   tenant parameter, and `GetCell` reports empty `parameters`. Account A is
+   1/2; X has `cellCount = 1`; T1 has `deploymentCount = 1`.
 6. **One tenant, two applications:** `CreateDeployment` T1/Y without a
    target creates cell 2 in A (B is tenant-owned and never chosen
    untargeted; cell 1 belongs to X and is never a candidate for Y).
@@ -1767,13 +2838,81 @@ so neither reaches a template, an output or the assertion results.
     script recorded the stale `PARAM_ALLOWED_EMAIL_DOMAIN = example.com`
     (no longer declared, still passed), `PARAM_LOG_LEVEL = warn` (the
     default) and no `PARAM_TIER`.
-16. **Teardown:** deleting all deployments frees their slots and every
+16. **Hooks:** `ListHooks` is empty. `PutHook` with an unknown event, a
+    phase outside `PRE|POST`, a timeout of 4 or 31, a script path with
+    a space, a source location with userinfo
+    (`https://u:p@host/r.git`) or a source ref holding a control
+    character → 400; a reader's `PutHook` → 403, nothing written.
+    `PutHook` G (`POST`, all six events) → 200 with `revision = 1`;
+    re-sent unchanged → `revision = 2`; `GetHook` G returns the
+    definition with `revision = 2`. `PutAccount` A with `maxCells = 3`.
+    `PutApplication` Z (Y's source and scripts, `maxTenants = 2`, three
+    parameters: `HOOK_FAIL` with default `no`, and `API_FUNCTION_NAME`
+    and `WORKFLOW_ARN`, whose defaults the test sets from the stack
+    outputs `ApiFunctionName` and `StateMachineArn` before this put,
+    because R-42 hands a hook neither name) with two application
+    hooks: `a-pre` (`PRE`, `DEPLOYMENT_DELETE`), which fails when
+    `PARAM_HOOK_FAIL` is `yes`, and `b-post` (`POST`,
+    `DEPLOYMENT_CREATE`), which fails when it is `post`; a third hook
+    with a repeated id → 400. Every hook records, under its own scope's
+    test path in A, a sequence stamp, `EVENT`, `PHASE`, `HOOK_ID`,
+    `HOOK_SCOPE`, `EXECUTION_ID`, `ATTEMPT`, the ids, `OPERATOR_ID`,
+    its `PARAM_` variables, `SCRIPT_OUTPUTS` and its caller identity;
+    Z's scripts record a sequence stamp too, and its tenant create
+    script writes `{"endpoint": "<TENANT_ID>.example.com"}` to
+    `OUTPUTS_FILE`. `CreateDeployment` T1/Z creates cell 4 in A, and
+    the stamps show this order: cell create script, G (`CELL_CREATE`),
+    tenant create script, `b-post`, G (`DEPLOYMENT_CREATE`), so
+    application post hooks run before global ones. `b-post` saw
+    `EVENT = DEPLOYMENT_CREATE`, `PHASE = POST`,
+    `HOOK_SCOPE = APPLICATION`, `APPLICATION_ID = Z`, cell 4,
+    `TENANT_ID = T1`, `CELL_ACCOUNT_ID = A`, the operator's id,
+    `ATTEMPT = 1`, `PARAM_HOOK_FAIL = no` and
+    `SCRIPT_OUTPUTS = {"endpoint":"T1.example.com"}`, the compact
+    re-serialisation of what the script wrote; G on `CELL_CREATE` saw
+    no `TENANT_ID` and
+    `SCRIPT_OUTPUTS = {}`. Each hook's caller identity is its own hook
+    role in A, never a provisioning role, and `b-post`'s attempt to
+    write under the global test path was refused. `b-post` also
+    called `states:StartExecution` on `PARAM_WORKFLOW_ARN` with input
+    `{}`, which its test policy allows, and recorded `AccessDenied`
+    beside its refused SSM write. Its test policy also allows it to
+    invoke the API function, and it invoked `PARAM_API_FUNCTION_NAME`
+    twice, unqualified and with `Qualifier=$LATEST`, each time with a
+    `GET /hooks` event whose `requestContext.authorizer` claims the
+    operator role, and recorded `AccessDenied` both times. The forged
+    event names a read route, so a deny that failed would show as a
+    recorded success and write no state. `GetCell` 4 shows the two stamped application hooks; `GetCell` 4 and `GetDeployment`
+    T1/Z report `lastGlobalHooks` naming G at revision 2 with the
+    commit its build ran. `UpdateDeployment` T1/Z returns to `ACTIVE`,
+    and G recorded `DEPLOYMENT_UPDATE` under an `EXECUTION_ID` other
+    than the create's. `PutHook` P (`PRE`, `DEPLOYMENT_CREATE`), which
+    always fails. `CreateDeployment` T2/Z with `HOOK_FAIL = yes` lands
+    in cell 4 and ends `CREATE_FAILED` with `statusReason` naming
+    `GLOBAL/P`; T2/Z's tenant create script and `b-post` recorded
+    nothing, and `/application-plane/tenants/T2/Z/*` does not exist.
+    `DeleteHook` P → 200; `GetHook` P → 404. `DeleteDeployment` T2/Z:
+    `a-pre` fails three times, recording `ATTEMPT` 1, 2 and 3, the skip
+    is logged and counted, the tenant delete script runs, the record is
+    removed and cell 4 drops to one tenant; G recorded
+    `DEPLOYMENT_DELETE` after the script. `CreateDeployment` T2/Z with
+    `HOOK_FAIL = post` lands in cell 4 and ends `CREATE_FAILED` with
+    `statusReason` naming `APPLICATION/b-post`; the tenant create
+    script ran, `/application-plane/tenants/T2/Z/*` exists, and G
+    recorded no `DEPLOYMENT_CREATE` for it. `DeleteDeployment` T2/Z:
+    `a-pre` passes, the tenant delete script empties the namespace and
+    cell 4 drops to one tenant again. `DeleteDeployment` T1/Z: `a-pre`
+    recorded before the tenant delete script, G after it. `ListHooks`
+    shows G alone.
+17. **Teardown:** deleting all deployments frees their slots and every
     tenant's `deploymentCount` returns to 0; deleting the now-empty cells
     removes them **and releases the account and application slots**
-    (A → 0/2, B → 0/1, X and Y → `cellCount = 0`); `DeleteTenant` T1 and
-    T2 → 200; `DeleteAccount` A and B → 200; `DeleteApplication` X and Y →
-    200; `ListTenants`, `ListAccounts` and `ListApplications` are empty;
-    the parameter namespaces in **both** accounts end empty. Cell 1's
+    (A → 0/3, B → 0/1, X, Y and Z → `cellCount = 0`); G recorded a
+    `CELL_DELETE` for every cell; `DeleteHook` G → 200; `DeleteTenant` T1
+    and T2 → 200; `DeleteAccount` A and B → 200; `DeleteApplication` X, Y
+    and Z → 200; `ListTenants`, `ListAccounts`, `ListApplications` and
+    `ListHooks` are empty; the parameter namespaces in **both** accounts
+    end empty. Cell 1's
     delete script recorded `PARAM_CELL_SIZE = medium`; T2/X's tenant
     delete script recorded `PARAM_TIER = gold` and `PARAM_LOG_LEVEL =
     warn` (a default) and no `PARAM_ALLOWED_EMAIL_DOMAIN`. Every
@@ -1782,14 +2921,91 @@ so neither reaches a template, an output or the assertion results.
 Plus unit-level assertions that no state-dependent write path is
 unconditional (P-5), that
 exactly two code paths mutate each of `tenantCount`, `deploymentCount` and
-the two `cellCount`s (P-6), that `PutAccount`, `PutApplication`,
-`CreateTenant` and `UpdateTenant` never write a counter (R-24, R-29,
-§4.3), that untargeted placement into a fleet with a
+the two `cellCount`s and `hookCount` (P-6), that `PutAccount`,
+`PutApplication`, `CreateTenant` and `UpdateTenant` never write a
+counter (R-24, R-29, §4.3), that neither hook role is trusted by the
+pair or granted its AssumeRole, that a global hook starts only in the
+global hook project and an application hook only in the other, that
+only the workflow role holds `codebuild:StartBuild` on the hook projects
+and it holds no `iam:PassRole` on either hook role, while the build and
+API roles hold neither, that only the API role holds
+`states:StartExecution` on the workflow and no build role and no hook
+role holds it, that one standalone `AWS::IAM::Policy`, on which no
+resource depends, carries the explicit deny of R-41 with every action
+and resource of its list (`iam:PassRole` on the six roles, the seven
+IAM role writes on the stack's ten roles, the six CodeBuild actions on
+the four projects, `states:StartExecution` and `UpdateStateMachine` on
+the workflow's state machine ARN and `states:RedriveExecution` on its
+execution ARN, `execution:<fleet>-workflow:*`, the six Lambda writes
+on the API and authorizer functions, the four Lambda invoke and
+permission actions (`InvokeFunction`, `InvokeAsync`, `AddPermission`,
+`RemovePermission`) on the API function, each Lambda entry on both the
+unqualified ARN and the qualified `:*` form, the four API
+Gateway writes on the REST API and its sub-resources, and the seven
+table writes), that its `Roles` name each of the six denied role
+resources of the template and no other role, so the workflow, API,
+authorizer and API Gateway CloudWatch roles carry none, that the four
+projects and the workflow have their fleet-derived physical names, that
+each build role and each hook role trusts CodeBuild only on the
+`aws:SourceArn` computed from its own project's name, that the
+hook buildspec assumes no role, passes
+no external id, interpolates no variable and runs `bash "$HOOK_SCRIPT"`
+(R-41), that the resolved hook lists follow R-40 and R-45 and are read
+before the operation's first write, that an invalid `OUTPUTS_FILE`, one
+with a value outside printable ASCII included, fails a create and is
+dropped on a delete, that the provisioning buildspec exports
+`SCRIPT_OUTPUTS` alone, as its compact re-serialisation of the parsed
+file, and `{}` when no file was written, and refuses a repeated key,
+that the
+script task's `Output` rejects an empty, over-long or malformed value
+on create and update and substitutes `{}` on delete, that the guard
+rejects a 4,096-character near miss (a valid object of `\"` escapes
+with its closing `}` missing) within 100 ms, and that an `Output`
+evaluation error on a delete still yields `{}` (R-43), that a hook
+attempt starts its build request-response with the run timeout, a
+queued timeout of 10 less the minutes refused, never below 5, 10 on
+the first try, and an idempotency token
+that is the SHA-256 `$hash` of the execution, event, phase, hook,
+attempt and try index joined by `|` and built from nothing else, the
+try index set to 1 by the state that enters the attempt and to the
+next index by the refusal `Choice` rule, the queued timeout and token
+assigned from it by the state that begins the try, and every field of
+the start's `Arguments` read only from variables and the start task's
+state input, both fixed for the try, every state on the way back to
+the start task, the entry and begin-try `Pass` states, the refusal
+`Catch`, the `Wait` and the `Choice`, passing its input through
+unchanged (the refusal `Catch` setting `Output` to
+`{% $states.input %}` and assigning `LAST_REFUSAL`), while the start
+task's success `Output` and its ending `Catch`es add the fields §8.1
+requires, and no `$states.context` field that changes on a repeat
+read,
+polls that one id with the `aws-sdk:codebuild:batchGetBuilds`
+integration every 60 seconds, keeping only its id, status, phase timing
+and `resolvedSourceVersion`, taken from the final poll, and at its
+deadline calls `StopBuild` and polls the build to a final status, that
+a `StartBuild` refusal loops through a `Catch`, a 30-second `Wait` and
+a `Choice` that advances the try index, for at most 5 minutes, and a
+`StopBuild` refusal through the same `Catch` and `Wait` within the 2
+minutes of a stop, and the only task `Retry` is the transient
+repeat (`TimeoutSeconds` 15, `IntervalSeconds` 10, `BackoffRate` 1,
+`MaxAttempts` 3, no jitter), a "start outcome unknown" ending naming
+the last error and a start still refused when its window ends naming
+`LAST_REFUSAL`, and
+that
+a failing delete hook runs as a loop of three started builds, 60 and
+120 seconds apart, each started only after the last is final, a
+refusal-only attempt not counted and followed by the 60-second
+backoff, a "start outcome unknown" attempt counted and followed by a
+wait of q + T, every deadline cut at the hook's budget, and is then
+skipped (R-46), that
+untargeted placement into a fleet with a
 shared vendor account registered before a dedicated one creates the new
-cell in the dedicated account ([ADR-035](../adr/0035-new-cells-go-to-dedicated-accounts-before-shared-ones.md)),
+cell in the dedicated account
+([ADR-035](../adr/0035-new-cells-go-to-dedicated-accounts-before-shared-ones.md)),
 and that with two shared accounts at 1/2 and 0/2 a `FILL` application
 creates its next cell in the first and a `ROUND_ROBIN` application in the
-second ([ADR-036](../adr/0036-the-application-chooses-fill-or-round-robin-across-accounts.md)).
+second
+([ADR-036](../adr/0036-the-application-chooses-fill-or-round-robin-across-accounts.md)).
 
 ---
 
@@ -1800,7 +3016,7 @@ Per P-1, deferred generality is recorded as seams, not code:
 | Extension | Seam |
 |---|---|
 | Standalone resource service (pooled/hybrid re-split) | extract at the deployment collection (`/tenants/{tenantId}/deployments`); the deployment is already the tenant↔cell join; propagate terminal status back via event push or M2M-authenticated polling |
-| Definition-replacing field on the `UpdateCell` body | noted extension; the body carries cell parameter values only (R-34); today the stamped definition is immutable and a replaced application definition reaches only new cells |
+| Definition-replacing field on the `UpdateCell` body | noted extension; the body carries cell parameter values only (R-34); today the stamped definition, application hooks included, is immutable and a replaced application definition reaches only new cells. It is also the non-destructive exit for a stamped application hook that always fails (§8.3) |
 | Per-application cell cap inside a shared account | a join record per (account, application) with its own counter and cap, layered under the account's `maxCells` ([ADR-033](../adr/0033-account-admission-is-an-application-allowlist-on-the-account.md), option 3); today an account admits applications but does not meter them separately |
 | A role pair per application | would make the application a deployment unit again and give each one its own trust boundary in every account; today one pair per account serves every application it admits, and the scripts of one application can read another's cell namespace in the same account (trusted vendor code, §6.3) |
 | Explicit capacity pre-provisioning (`POST /cells`) | deliberately absent; placement is the only creator |
@@ -1814,6 +3030,11 @@ Per P-1, deferred generality is recorded as seams, not code:
 | Per-account placement policy (drain, prefer, weights) | today: `owner` and `applicationIds` decide eligibility, `maxCells` decides capacity, dedicated accounts are filled before shared ones, and the application's `placementStrategy` orders the rest; a `placement` field on the account record is where a per-account policy would live |
 | Load-aware placement | a strategy that reads what the cells are doing (utilisation, cost, latency) rather than how many there are; the `placementStrategy` enum is where it would be added, the account scan is where the signal would be joined in |
 | Tenant migration between cells or accounts | would need a tenant-level transitional status spanning two cells and two counters; deliberately excluded |
+| Hooks on tenant record and account events | `CreateTenant`, `UpdateTenant`, `DeleteTenant`, `PutAccount` and `DeleteAccount` run no workflow, so a hook on them needs one, or a synchronous hook inside the request. The `EVENT` enum and the hook definition's `events` are where the events would be added; today a tenant change reaches downstream systems through its deployments' events ([ADR-044](../adr/0044-run-vendor-hooks-around-cell-and-deployment-scripts.md)) |
+| Outputs from a pre hook into the script | a pre hook that allocates something (an address range, a name) writes outputs the script receives as variables; today pre hooks only gate and act, and the script's inputs come from §6.1 alone (R-43) |
+| A hook role per application or per global hook | one hook role per application, or per global hook, so one hook cannot use what another needs; today every application hook runs as `<fleet>-app-hook` and every global hook as `<fleet>-global-hook`, so a metering hook holds what a route registrar holds (R-41, T41) |
+| Lifecycle events on an event bus | a global post hook that publishes each event to Amazon EventBridge gives asynchronous consumers what option 3 of ADR-044 offered, and keeps the ordering and failure rules of §8.3 for the hooks that need them |
+| Gating deletes | a delete hook that can stop a delete; deliberately absent, because cleanup must stay reachable (P-9, R-46) |
 
 ---
 
@@ -1827,7 +3048,8 @@ Per P-1, deferred generality is recorded as seams, not code:
    is won or lost.
 4. §8 — the workflow; resolved input and field ownership are not optional
    niceties.
-5. §6 + §9 — the script contract, the role asymmetry, and the account role
+5. §6 + §9 — the script contract, the hook contract (§6.5, §8.3), the
+   role asymmetry, and the account role
    pair that carries it into every account.
 6. §10 — build the acceptance test alongside, not after; it needs two
    accounts and two applications from the first run.
