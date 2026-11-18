@@ -206,9 +206,11 @@ written. Once built:
 - Not tested, by choice of four new steps only: a hook on an
   `APPLICATION_DELETE`, `TENANT_DELETE` or `ACCOUNT_DELETE` event (the
   retry-and-skip path that keeps cleanup reachable), any hook on
-  `ACCOUNT_UPDATE`, and `DELETE_FAILED` on an application, a tenant or
-  an account. Spec §10 lists them; unit assertions cover the record
-  delete's two writes and the commit replay.
+  `ACCOUNT_UPDATE`, `DELETE_FAILED` on an application, a tenant or an
+  account, a `PutAccount` rotation on an `UPDATING` account, and a
+  workflow start with an unknown outcome. Spec §10 lists them; unit
+  assertions cover the record delete's two writes, the commit replay,
+  the rotation and the unknown start.
 
 ## Runtime and cost
 

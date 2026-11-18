@@ -83,7 +83,14 @@ leaked id by redeploying the pair to refuse the old one, so a staged id
 would fail every build into the account while hooks run, and for good
 when a pre hook refused it. A security rotation must not wait on a
 gate, so an `ACCOUNT_UPDATE` pre hook cannot refuse an external id
-change. A delete is never gated (P-9). Hook operations stay synchronous
+change, and a running one cannot delay it: a `PutAccount` on an
+`UPDATING` account writes only the new id, after the probe, with no
+execution and no hook, because the commit never touches it. Each
+operation stores its execution's name on the record as `operationId`,
+and every workflow write is conditioned on it, so a start whose
+outcome is unknown is compensated to `CREATE_FAILED` and a stray
+execution cannot finish a later request's record. A delete is never
+gated (P-9). Hook operations stay synchronous
 and fire no hooks.
 
 ## Consequences
@@ -141,11 +148,26 @@ and fire no hooks.
   hook runs, and stays when a pre hook refuses the rest (spec R-48,
   T28). That is the one exception to "nothing changes before the gate",
   and a hook that must vet external ids has no place to do it.
-- A failed workflow start deletes a record the request inserted, since
-  no hook ran and nothing can claim it; a re-put, an update and a
-  delete go to their `*_FAILED` status instead (spec R-51). A
-  `CreateTenant` that answers 500 therefore leaves no tenant whose id
-  the caller never got, and a retry makes one tenant.
+- A rotation on an account whose `ACCOUNT_UPDATE` is running writes
+  only `externalId`, with no execution and no hook, and its other
+  fields must equal the change in flight (409 otherwise). Hooks
+  therefore see no event for it. `CREATING` and `DELETING` accounts get
+  no such path, because no build runs into them. An account stranded
+  `UPDATING` (T47) can still rotate, but cannot change `maxCells` or
+  `applicationIds` or be deleted until it is repaired.
+- Every record carries the `operationId` of its last operation, the
+  name of the execution it started. A failed workflow start deletes a
+  record the request inserted only when Step Functions refused the
+  start (an error before any execution exists, or
+  `ExecutionDoesNotExist` from `DescribeExecution`); an unknown outcome
+  leaves it `CREATE_FAILED`, so the delete hooks still reach anything
+  a stray execution's create hooks did. A re-put, an update and a
+  delete go to their `*_FAILED` status (spec R-51). A `CreateTenant`
+  refused at the start leaves no tenant, and a retry makes one; one
+  with an unknown start leaves a `CREATE_FAILED` tenant that
+  `ListTenants` finds. Cell and deployment executions keep their
+  unstored names and status-only conditions; storing an id there too
+  is a seam (spec §11).
 - `PutApplication`'s write, which needed no condition when both
   declaration lists were sent, is now always conditional on the status
   it read; a failed condition is classified from the item, as R-14
