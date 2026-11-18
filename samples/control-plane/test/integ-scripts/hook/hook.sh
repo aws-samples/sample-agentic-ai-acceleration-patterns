@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
-# Integration-test hook (spec section 10 step 16, ADR-044). TEST ONLY: it is
+# Integration-test hook (spec section 10 steps 16 to 18, ADR-044, ADR-045). TEST ONLY: it is
 # not a sample for vendors; it records what a hook build saw so the test can
 # read it back, and it fails on demand so the test can drive the failure paths.
 #
@@ -17,7 +17,13 @@
 #   a-pre   fails when PARAM_HOOK_FAIL is "yes" (an application PRE hook on delete)
 #   b-post  fails when PARAM_HOOK_FAIL is "post"; also tries four calls its role
 #           must not be able to make (R-41 deny) and records the outcome of each
+#   r-names fails when TENANT_NAME is "blocked" (a global PRE hook on
+#           TENANT_CREATE and TENANT_UPDATE)
 #   others  record and succeed
+#
+# A cell or deployment event names the application, the cell and its account;
+# an application record event names the application only, a tenant record
+# event the tenant, an account record event the account (R-42, spec 8.4).
 set -euo pipefail
 
 : "${EVENT:?EVENT env var is required}"
@@ -26,14 +32,33 @@ set -euo pipefail
 : "${HOOK_SCOPE:?HOOK_SCOPE env var is required}"
 : "${EXECUTION_ID:?EXECUTION_ID env var is required}"
 : "${ATTEMPT:?ATTEMPT env var is required}"
-: "${APPLICATION_ID:?APPLICATION_ID env var is required}"
-: "${CELL_ID:?CELL_ID env var is required}"
-: "${CELL_ACCOUNT_ID:?CELL_ACCOUNT_ID env var is required}"
 : "${OPERATOR_ID:?OPERATOR_ID env var is required}"
+case "$EVENT" in
+  CELL_*|DEPLOYMENT_*)
+    : "${APPLICATION_ID:?APPLICATION_ID env var is required}"
+    : "${CELL_ID:?CELL_ID env var is required}"
+    : "${CELL_ACCOUNT_ID:?CELL_ACCOUNT_ID env var is required}"
+    ;;
+  APPLICATION_*) : "${APPLICATION_ID:?APPLICATION_ID env var is required}" ;;
+  TENANT_*)
+    : "${TENANT_ID:?TENANT_ID env var is required}"
+    : "${TENANT_NAME:?TENANT_NAME env var is required}"
+    ;;
+  ACCOUNT_*)
+    : "${ACCOUNT_ID:?ACCOUNT_ID env var is required}"
+    : "${ACCOUNT_OWNER:?ACCOUNT_OWNER env var is required}"
+    # Empty when the account is shared, but always set.
+    : "${ACCOUNT_APPLICATION_IDS?ACCOUNT_APPLICATION_IDS env var is required}"
+    ;;
+  *) echo "Unknown EVENT"; exit 1 ;;
+esac
 
 # The fleet name is the one value the control plane does not hand a hook
-# (R-42), so the test ships it beside this script.
-FLEET_NAME=$(tr -d '\n' < "$(dirname "${BASH_SOURCE[0]}")/fleet-name.txt")
+# (R-42), so the test ships it beside this script, and the account B external
+# id with it, so the hook can report whether any variable held it.
+HERE="$(dirname "${BASH_SOURCE[0]}")"
+FLEET_NAME=$(tr -d '\n' < "${HERE}/fleet-name.txt")
+EXTERNAL_ID=$(tr -d '\n' < "${HERE}/external-id.txt")
 ROOT="/cp-integ/${FLEET_NAME}/hooks"
 case "$HOOK_SCOPE" in
   GLOBAL) OWN="${ROOT}/global"; OTHER="${ROOT}/app" ;;
@@ -74,6 +99,15 @@ if [ "$HOOK_ID" = "b-post" ]; then
     '{ssmWriteGlobal: $ssmWriteGlobal, startExecution: $startExecution, invoke: $invoke, invokeLatest: $invokeLatest}')
 fi
 
+# The names of the variables the build received (CodeBuild's own CODEBUILD_*
+# left out, to keep the record inside an SSM standard parameter), and whether
+# any value held the external id or named one of the fleet's pair roles. Only
+# these two facts leave the build, never the values.
+ENV_NAMES=$(jq -nc '[env | keys[] | select(startswith("CODEBUILD_") | not)] | sort')
+EXTERNAL_ID_SEEN=$(jq -n --arg x "$EXTERNAL_ID" '[env[] | select(contains($x))] | length > 0')
+PAIR_ROLE_SEEN=$(jq -n --arg c "${FLEET_NAME}-cell-provisioning" --arg t "${FLEET_NAME}-tenant-provisioning" \
+  '[env[] | select(contains($c) or contains($t))] | length > 0')
+
 # The record. Values come from the environment through jq --arg, never
 # interpolated into the program (TENANT_NAME, PARAM_ values and SCRIPT_OUTPUTS
 # are tenant-shaped). Parameter VALUES are not recorded, only the names and the
@@ -85,8 +119,12 @@ jq -nc \
   --arg stamp "$STAMP" --arg event "$EVENT" --arg phase "$PHASE" \
   --arg hookId "$HOOK_ID" --arg hookScope "$HOOK_SCOPE" \
   --arg executionId "$EXECUTION_ID" --arg attempt "$ATTEMPT" \
-  --arg applicationId "$APPLICATION_ID" --arg cellId "$CELL_ID" \
-  --arg cellAccountId "$CELL_ACCOUNT_ID" --arg tenantId "${TENANT_ID-}" \
+  --arg applicationId "${APPLICATION_ID-}" --arg cellId "${CELL_ID-}" \
+  --arg cellAccountId "${CELL_ACCOUNT_ID-}" --arg tenantId "${TENANT_ID-}" \
+  --arg tenantName "${TENANT_NAME-}" --arg accountId "${ACCOUNT_ID-}" \
+  --arg accountOwner "${ACCOUNT_OWNER-}" --arg accountApplicationIds "${ACCOUNT_APPLICATION_IDS-}" \
+  --argjson envNames "$ENV_NAMES" --argjson externalIdSeen "$EXTERNAL_ID_SEEN" \
+  --argjson pairRoleSeen "$PAIR_ROLE_SEEN" \
   --arg operatorId "$OPERATOR_ID" --arg caller "$CALLER" \
   --arg hookFail "${PARAM_HOOK_FAIL-}" --arg scriptOutputs "${SCRIPT_OUTPUTS-}" \
   --argjson tenantNameSet "$([ -n "${TENANT_NAME+set}" ] && echo true || echo false)" \
@@ -97,7 +135,10 @@ jq -nc \
     cellId: $cellId, cellAccountId: $cellAccountId, tenantId: $tenantId,
     operatorId: $operatorId, caller: $caller, hookFail: $hookFail,
     scriptOutputs: $scriptOutputs, scriptOutputsSet: $scriptOutputsSet,
-    tenantNameSet: $tenantNameSet, paramNames: $paramNames, denied: $denied}' \
+    tenantNameSet: $tenantNameSet, paramNames: $paramNames, denied: $denied,
+    tenantName: $tenantName, accountId: $accountId, accountOwner: $accountOwner,
+    accountApplicationIds: $accountApplicationIds, envNames: $envNames,
+    externalIdSeen: $externalIdSeen, pairRoleSeen: $pairRoleSeen}' \
   > "$RECORD_FILE"
 aws ssm put-parameter --name "${OWN}/${STAMP}" --type String --value "file://${RECORD_FILE}" > /dev/null
 echo "Recorded ${OWN}/${STAMP}"
@@ -110,6 +151,12 @@ case "$HOOK_ID" in
   a-pre)
     if [ "${PARAM_HOOK_FAIL-}" = "yes" ]; then
       echo "Hook a-pre fails while PARAM_HOOK_FAIL is yes"
+      exit 1
+    fi
+    ;;
+  r-names)
+    if [ "${TENANT_NAME-}" = "blocked" ]; then
+      echo "Hook r-names refuses the tenant name blocked"
       exit 1
     fi
     ;;

@@ -9,15 +9,26 @@
 // batches the checks that need no waiting between them into one invocation of
 // this function: it runs a list of steps in order and returns "ok", or the
 // failures of the steps that failed (each named), which the test compares
-// against "ok". Three kinds of step:
+// against "ok". Four kinds of step:
 //   http    one call to the control plane API with a token the test passes
 //           (`as` names it), compared by status, error type and a JSON subset
 //           of the body. A string beginning `re:` in the subset is a regular
-//           expression; an array must have the same length.
+//           expression, the string `absent:` a field that must not be there;
+//           an array must have the same length. With `pollSeconds` the call
+//           is repeated every `pollIntervalSeconds` of the event until it
+//           matches or the step's time is up: the test polls GetApplication,
+//           GetTenant and GetAccount this way after a record operation whose
+//           event runs no hook build (ADR-045), which ends in seconds.
+//   value   a value the test read from an earlier call (a token resolved at
+//           deploy time), compared with the expected string
 //   ssm     existence of named parameters, or a count under paths, in this
 //           account (the control plane's)
 //   ledger  what the test's hooks recorded together with when every script ran,
-//           for spec section 10 step 16 (see below)
+//           for spec section 10 steps 16 and 17 (see below)
+//
+// The assertion provider that invokes this function times out after two
+// minutes, so polls stop at BATCH_BUDGET_MS after the invocation started,
+// and the step that was still polling fails with what it last saw.
 //
 // The hook ledger: the SSM parameters the test's hooks wrote (one JSON record
 // per hook attempt, named by its sequence stamp in epoch nanoseconds) under
@@ -36,8 +47,17 @@ const { CodeBuildClient, ListBuildsForProjectCommand, BatchGetBuildsCommand } = 
 const ssm = new SSMClient({});
 const codebuild = new CodeBuildClient({});
 
+/** How long one invocation may poll: inside the assertion provider's two minutes, with room for the steps after the last poll. */
+const BATCH_BUDGET_MS = 100000;
+
 exports.handler = async (event) => {
-  const ctx = { ...event, labels: new Map(event.labels ?? []), ledger: undefined, builds: new Map() };
+  const ctx = {
+    ...event,
+    labels: new Map(event.labels ?? []),
+    ledger: undefined,
+    builds: new Map(),
+    deadline: Date.now() + BATCH_BUDGET_MS,
+  };
   const failures = [];
   for (const step of event.steps) {
     try {
@@ -61,32 +81,23 @@ exports.handler = async (event) => {
 /** Runs one step; returns undefined when it passed, else what was wrong. */
 async function runStep(step, ctx) {
   if (step.kind === 'http') {
-    const res = await fetch(step.url, {
-      method: step.method,
-      headers: ctx.headers[step.as],
-      body: step.body,
-      signal: AbortSignal.timeout(30000),
-    });
-    const text = await res.text();
-    if (res.status !== step.status) {
-      return `status ${res.status}, expected ${step.status}: ${text.slice(0, 300)}`;
+    if (step.pollSeconds === undefined) {
+      return httpOnce(step, ctx);
     }
-    if (step.errorType !== undefined && res.headers.get('x-amzn-errortype') !== step.errorType) {
-      return `error type ${res.headers.get('x-amzn-errortype')}, expected ${step.errorType}`;
-    }
-    if (step.match !== undefined) {
-      let body;
-      try {
-        body = JSON.parse(text);
-      } catch {
-        return `body is not JSON: ${text.slice(0, 200)}`;
+    const until = Math.min(Date.now() + step.pollSeconds * 1000, ctx.deadline);
+    for (let tries = 1; ; tries++) {
+      const problem = await httpOnce(step, ctx);
+      if (problem === undefined) {
+        return undefined;
       }
-      const mismatch = subsetMismatch(body, step.match, 'body');
-      if (mismatch !== undefined) {
-        return mismatch;
+      if (Date.now() + ctx.pollIntervalSeconds * 1000 > until) {
+        return `after ${tries} poll(s): ${problem}`;
       }
+      await new Promise((resolve) => setTimeout(resolve, ctx.pollIntervalSeconds * 1000));
     }
-    return undefined;
+  }
+  if (step.kind === 'value') {
+    return String(step.actual) === String(step.expect) ? undefined : `is ${JSON.stringify(step.actual)}, expected ${JSON.stringify(step.expect)}`;
   }
   if (step.kind === 'ssm') {
     if (step.names !== undefined) {
@@ -109,8 +120,41 @@ async function runStep(step, ctx) {
   throw new Error(`unknown step kind ${step.kind}`);
 }
 
+/** One API call of an http step; undefined when it matched, else what was wrong. */
+async function httpOnce(step, ctx) {
+  const res = await fetch(step.url, {
+    method: step.method,
+    headers: ctx.headers[step.as],
+    body: step.body,
+    signal: AbortSignal.timeout(30000),
+  });
+  const text = await res.text();
+  if (res.status !== step.status) {
+    return `status ${res.status}, expected ${step.status}: ${text.slice(0, 300)}`;
+  }
+  if (step.errorType !== undefined && res.headers.get('x-amzn-errortype') !== step.errorType) {
+    return `error type ${res.headers.get('x-amzn-errortype')}, expected ${step.errorType}`;
+  }
+  if (step.match !== undefined) {
+    let body;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      return `body is not JSON: ${text.slice(0, 200)}`;
+    }
+    const mismatch = subsetMismatch(body, step.match, 'body');
+    if (mismatch !== undefined) {
+      return mismatch;
+    }
+  }
+  return undefined;
+}
+
 /** What is wrong where `actual` does not contain `expected`, or undefined. */
 function subsetMismatch(actual, expected, where) {
+  if (expected === 'absent:') {
+    return actual === undefined ? undefined : `${where} is ${JSON.stringify(actual)?.slice(0, 300)}, expected no such field`;
+  }
   if (typeof expected === 'string' && expected.startsWith('re:')) {
     return typeof actual === 'string' && new RegExp(expected.slice(3)).test(actual)
       ? undefined : `${where} is ${JSON.stringify(actual)}, expected to match ${expected}`;
@@ -223,6 +267,36 @@ async function ledgerCheck(step, ctx) {
       tenantNameSet: r.tenantNameSet,
     };
   }
+  if (step.check === 'record-event') {
+    // A hook of a record event (ADR-045, spec section 10 steps 17 and 18):
+    // the R-42 variables of the event, the names of the R-42, PARAM_ and
+    // forbidden variables the build received, and whether any variable held
+    // the account's external id or named a pair role.
+    const r = found[0];
+    if (r === undefined) {
+      return 'no such record';
+    }
+    return {
+      ACCOUNT_APPLICATION_IDS: r.accountApplicationIds,
+      ACCOUNT_ID: label(r.accountId),
+      ACCOUNT_OWNER: r.accountOwner,
+      APPLICATION_ID: r.applicationId,
+      ATTEMPT: r.attempt,
+      EVENT: r.event,
+      HOOK_ID: r.hookId,
+      HOOK_SCOPE: r.hookScope,
+      PHASE: r.phase,
+      SCRIPT_OUTPUTS: r.scriptOutputs,
+      TENANT_ID: label(r.tenantId),
+      TENANT_NAME: r.tenantName,
+      callerRole: r.caller.split('/')[1] ?? r.caller,
+      externalIdSeen: r.externalIdSeen,
+      hasExecutionId: r.executionId !== '',
+      hasOperatorId: r.operatorId !== '',
+      pairRoleSeen: r.pairRoleSeen,
+      received: (r.envNames ?? []).filter((n) => WATCHED_ENV_VARS.includes(n) || n.startsWith('PARAM_')).sort(),
+    };
+  }
   if (step.check === 'executions') {
     // The hook's records in time order, each with the number of its execution
     // (e1, e2, ... by first appearance), so the test sees which events share an
@@ -245,6 +319,19 @@ async function ledgerCheck(step, ctx) {
   }
   throw new Error(`unknown ledger check ${step.check}`);
 }
+
+/**
+ * The variables a record event's check reports by name when the hook build
+ * received them: the R-42 set (HOOK_ENV_VARS in src/tenant/hook.types.ts) and
+ * those a hook build must not carry (HOOK_FORBIDDEN_ENV_VARS), plus any
+ * PARAM_ variable.
+ */
+const WATCHED_ENV_VARS = [
+  'EVENT', 'PHASE', 'HOOK_ID', 'HOOK_SCOPE', 'APPLICATION_ID', 'CELL_ID', 'CELL_ACCOUNT_ID', 'TENANT_ID',
+  'TENANT_NAME', 'ACCOUNT_ID', 'ACCOUNT_OWNER', 'ACCOUNT_APPLICATION_IDS', 'OPERATOR_ID', 'EXECUTION_ID',
+  'ATTEMPT', 'HOOK_SCRIPT', 'SCRIPT_OUTPUTS',
+  'ADMIN_EMAIL', 'OUTPUTS_FILE', 'SCRIPT_PATH', 'PROVISIONING_ROLE_ARN', 'PROVISIONING_EXTERNAL_ID', 'OPERATOR_SESSION_NAME',
+];
 
 /** Every parameter under a path. */
 async function listPath(path) {
