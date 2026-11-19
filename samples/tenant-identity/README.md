@@ -432,8 +432,10 @@ refuses, naming the entry. The checks do not know every host where other
 parties serve pages, so list a pattern only under a domain you run, and an
 exact entry only for a host that serves only your pages. With no list, the
 API sends no CORS header. Every deploy must pass the value: a deploy without
-it, such as the generic command above, clears the list. To keep it, put
-`allowedOrigins` in the `context` block of `cdk.json`.
+it, such as the generic command above, clears the list. To keep it, add
+`context: { allowedOrigins: '<the list>' }` to the project options in
+`.projenrc.ts` and run `npx projen` (`cdk.json` is generated). The list then
+applies to every topology deployed from this folder.
 
 Teardown:
 

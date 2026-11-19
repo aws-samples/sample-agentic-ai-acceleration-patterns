@@ -36,7 +36,7 @@ export const SHARED_HOSTING_DOMAINS: readonly string[] = ['amazonaws.com', 'amaz
  * origin serves every bucket's path-style pages, so an exact entry for one
  * of them trusts all of those pages (§5.4.1).
  */
-const S3_PATH_STYLE_HOST = /^s3(?:[.-][a-z0-9-]+)*\.amazonaws\.com(?:\.cn)?$/;
+const S3_PATH_STYLE_HOST = /^s3(?:[.-](?!s3[.-])[a-z0-9-]+)*\.amazonaws\.com(?:\.cn)?$/;
 
 /**
  * Turns the context value or stack prop into a list. A missing value, an

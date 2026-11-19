@@ -731,11 +731,12 @@ the private section included (`https://*.co.uk`,
 catches); a pattern whose `<domain>` is or ends in `amazonaws.com` or
 `amazonaws.com.cn`, where other customers' pages sit one label down even
 when the domain is not a public suffix (S3 path-style URLs on
-`https://s3.amazonaws.com` and `https://s3.eu-central-1.amazonaws.com`); a
-vendor's own AWS hostname goes in as an exact entry; an exact entry for an
-S3 path-style host (`s3` followed by `.` or `-` labels under
-`amazonaws.com` or `amazonaws.com.cn`, such as `https://s3.amazonaws.com`),
-which serves every bucket's path-style pages from one origin; a repeated entry;
+`https://s3.amazonaws.com` and `https://s3.eu-central-1.amazonaws.com`),
+so a vendor's own AWS hostname goes in as an exact entry, unless it is an
+S3 path-style host (`s3` followed by `.` or `-` labels with no later `s3`
+label, under `amazonaws.com` or `amazonaws.com.cn`, such as
+`https://s3.amazonaws.com`), which serves every bucket's path-style pages
+from one origin; a repeated entry;
 more than 20 entries; more than 1,024 characters in total, so the list fits
 the function's environment beside its other variables.
 
@@ -744,7 +745,8 @@ marketing site, a status page on another vendor's service, a CNAME left
 pointing at a deleted resource. The suffix rules do not know every domain where other
 parties host pages. Use a pattern only under a domain that
 serves the app's tenant hosts and nothing else (`tenant-front-door`'s
-`appDomain`).
+`appDomain`). An exact entry likewise trusts every page its host serves,
+so list an exact entry only for a host that serves only the app's pages.
 
 The grammar has no `http` and no single-label host, so `http://localhost:5173`
 cannot be listed. A local dev server reaches the exchange through its own

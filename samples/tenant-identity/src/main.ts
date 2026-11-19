@@ -34,8 +34,8 @@ const publishSharedParameters = String(app.node.tryGetContext('publishSharedPara
 
 // Optional: `--context 'allowedOrigins=https://app.example.com,https://*.tenants.example.com'`
 // lists the browser origins whose pages may read the token exchange's
-// answer (spec §5.4.1, ADR-0040). Missing or empty means no list, so
-// `--context allowedOrigins=` clears it on a redeploy.
+// answer (spec §5.4.1, ADR-0040). Missing or empty means no list, so a
+// deploy without the value clears the list.
 const allowedOrigins = readAllowedOrigins(app.node.tryGetContext('allowedOrigins'));
 
 new TenantIdentityStack(app, `TenantIdentity-${topology}`, {
