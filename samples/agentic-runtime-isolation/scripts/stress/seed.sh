@@ -57,7 +57,7 @@ SCALE="${STRESS_SCALE:-small}"
 [[ "$SCALE" =~ ^(small|medium|large)$ ]] || { echo "STRESS_SCALE must be small, medium or large (got '${SCALE}')" >&2; exit 1; }
 PREFIX="${STRESS_PREFIX:-RuntimeIsolationStress}"
 [[ "$PREFIX" =~ ^[A-Za-z][A-Za-z0-9]{0,39}$ ]] || { echo "STRESS_PREFIX must be 1 to 40 letters and digits, starting with a letter" >&2; exit 1; }
-STATE_DIR="${HOME}/.runtime-isolation-stress/${PREFIX}"
+STATE_DIR="${STRESS_STATE_DIR:-${HOME}/.runtime-isolation-stress/${PREFIX}}"
 OUTPUTS="${STATE_DIR}/outputs.json"
 MANIFEST="${STATE_DIR}/manifest.json"
 # Lines of tenants and users created but not yet in the manifest; merged on

@@ -50,7 +50,7 @@ SCALE="${STRESS_SCALE:-small}"
 [[ "$SCALE" =~ ^(small|medium|large)$ ]] || { echo "STRESS_SCALE must be small, medium or large (got '${SCALE}')" >&2; exit 1; }
 PREFIX="${STRESS_PREFIX:-RuntimeIsolationStress}"
 [[ "$PREFIX" =~ ^[A-Za-z][A-Za-z0-9]{0,39}$ ]] || { echo "STRESS_PREFIX must be 1 to 40 letters and digits, starting with a letter" >&2; exit 1; }
-STATE_DIR="${HOME}/.runtime-isolation-stress/${PREFIX}"
+STATE_DIR="${STRESS_STATE_DIR:-${HOME}/.runtime-isolation-stress/${PREFIX}}"
 OUTPUTS="${STATE_DIR}/outputs.json"
 MANIFEST="${STATE_DIR}/manifest.json"
 TIMINGS="${STATE_DIR}/timings.txt"
@@ -209,6 +209,14 @@ if exists "${PREFIX}-ingress"; then
     --query "Stacks[0].Outputs[?OutputKey=='RegistryPrefix'].OutputValue" --output text 2>/dev/null || true)"
   [[ "$REGISTRY_PREFIX" == None ]] && REGISTRY_PREFIX=""
 fi
+# The REST API id names the stage's execution log group (API-Gateway-Execution-Logs_<id>/<stage>),
+# which the stack owns and API Gateway can write to again after the delete.
+REST_API_ID=""
+if exists "${PREFIX}-ingress"; then
+  REST_API_ID="$(aws cloudformation describe-stacks --stack-name "${PREFIX}-ingress" \
+    --query "Stacks[0].Outputs[?OutputKey=='RestApiId'].OutputValue" --output text 2>/dev/null || true)"
+  [[ "$REST_API_ID" == None ]] && REST_API_ID=""
+fi
 
 for s in "${STACKS[@]}"; do
   echo "== destroy ${s}"
@@ -231,6 +239,17 @@ while read -r rt; do
   done
 done <"$RUNTIMES"
 echo "runtime log groups: $(wc -l <"$RUNTIMES") runtimes, ${REMOVED} leftover groups removed"
+# The function and API log groups the stacks own (ADR-0019) can come back with a late line too.
+OWN_LOG_PREFIXES=("/aws/lambda/${PREFIX}-")
+[[ -z "$REST_API_ID" ]] || OWN_LOG_PREFIXES+=("API-Gateway-Execution-Logs_${REST_API_ID}")
+REMOVED=0
+for lp in "${OWN_LOG_PREFIXES[@]}"; do
+  for g in $(aws logs describe-log-groups --log-group-name-prefix "$lp" --query 'logGroups[].logGroupName' --output text 2>/dev/null); do
+    [[ -n "$g" && "$g" != None ]] || continue
+    aws logs delete-log-group --log-group-name "$g" >/dev/null 2>&1 && REMOVED=$((REMOVED + 1))
+  done
+done
+echo "function and API log groups: ${REMOVED} leftover groups removed"
 
 LEFT=""
 left_stacks="$(aws cloudformation list-stacks --output text \
@@ -242,11 +261,21 @@ while read -r rt; do
   left="$(aws logs describe-log-groups --log-group-name-prefix "${RUNTIME_LOG_PREFIX}${rt}" --query 'logGroups[].logGroupName' --output text 2>/dev/null || true)"
   [[ -z "$left" || "$left" == None ]] || LEFT="${LEFT}; runtime log groups ${left}"
 done <"$RUNTIMES"
+for lp in "${OWN_LOG_PREFIXES[@]}"; do
+  left="$(aws logs describe-log-groups --log-group-name-prefix "$lp" --query 'logGroups[].logGroupName' --output text 2>/dev/null || true)"
+  [[ -z "$left" || "$left" == None ]] || LEFT="${LEFT}; log groups ${left}"
+done
+# A Runtime the stack created is gone when GetAgentRuntime says so; any other answer counts as left.
+while read -r rt; do
+  [[ -n "$rt" && "$rt" != None ]] || continue
+  err="$(aws bedrock-agentcore-control get-agent-runtime --agent-runtime-id "$rt" --query agentRuntimeId --output text 2>&1 >/dev/null || true)"
+  [[ -n "$err" && "$err" == *ResourceNotFoundException* ]] || LEFT="${LEFT}; agent runtime ${rt}"
+done <"$RUNTIMES"
 if [[ -n "$REGISTRY_PREFIX" ]]; then
   left_params="$(aws ssm get-parameters-by-path --path "$REGISTRY_PREFIX" --recursive --query 'Parameters[].Name' --output text 2>/dev/null | tr '\t' ' ' || true)"
   [[ -z "$left_params" || "$left_params" == None ]] || LEFT="${LEFT}; parameters ${left_params}"
 fi
 [[ -z "$LEFT" ]] || fail "leftovers after teardown${LEFT}"
-echo "leftovers: none (stacks, runtime log groups, registry parameters)"
+echo "leftovers: none (stacks, log groups, agent runtimes, registry parameters)"
 echo "destroyed $(( ${#STACKS[@]} + $([[ "$DRIVER" == true ]] && echo 1 || echo 0) )) stacks in ${SECONDS}s"
 (( TENANTS_LEFT == 0 )) || fail "${TENANTS_LEFT} tenants were not deleted; they stay in the manifest, rerun with --tenants"
