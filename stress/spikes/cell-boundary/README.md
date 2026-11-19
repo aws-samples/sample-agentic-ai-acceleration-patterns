@@ -15,7 +15,7 @@ without the `/cell/` role path. `cell-policies.yaml` grants IAM role writes,
 `iam:PassRole` and `sts:AssumeRole` on `*`, so it does not stop a cell role
 from acting on roles that already exist; it is a spike artefact, not the
 policy cells use. The `/cell/` path and the standalone cell account are
-spec Q-5 and Q-6.
+tested in the path spike ([`../cell-path/`](../cell-path/README.md)).
 
 Run 2026-11-18, `eu-central-1`, a non-production test account. The cell was
 the demo stack `RuntimeIsolation-api-gateway` with `tvm=true` and
@@ -59,7 +59,7 @@ set to a sample's `node_modules` for `app.js`.
 | B-1 | `--context @aws-cdk/core:permissionsBoundary={"name":...}` on the CLI arrives as a string; the CDK reads `context.name`, so no role got the boundary and the first deploy failed on 66 `iam:CreateRole` denials | the cell script passes the boundary as object context (`cdk.json`, `cdk.context.json` or `CDK_CONTEXT_JSON`), never as a CLI `--context` |
 | B-2 | Every role in the cell carries the boundary when the context is an object | the boundary pattern holds for the whole sample, no construct change needed |
 | B-3 | `AWS::DynamoDB::GlobalTable` calls `application-autoscaling:DeregisterScalableTarget` on delete; the create did not need it | `application-autoscaling` is in the execution policy and the boundary |
-| B-4 | The deny probe proves an execution role bounded this way cannot create an unbounded role, even one asking for `AdministratorAccess`. It does not prove the scope: a bounded role with IAM role writes, `iam:PassRole` and `sts:AssumeRole` on `*` can still act on existing roles (the default bootstrap's, the account's administrator role, the role pair) | the cell policies scope IAM to the `/cell/` path in standalone cell accounts (ADR-0006); deny probes for those paths are spec Q-5 |
+| B-4 | The deny probe proves an execution role bounded this way cannot create an unbounded role, even one asking for `AdministratorAccess`. It does not prove the scope: a bounded role with IAM role writes, `iam:PassRole` and `sts:AssumeRole` on `*` can still act on existing roles (the default bootstrap's, the account's administrator role, the role pair) | the cell policies scope IAM to the `/cell/` path in standalone cell accounts (ADR-0006); the path spike ran the deny probes |
 | B-5 | The request path works under the boundary: the sample's integration test, run with the boundary and the `cell` qualifier in `cdk.context.json` (139 of 139 roles bounded across six stacks), passed 60 of 60 steps (59 PASS, 1 SKIP by design): TVM tenant credentials (8a), the model call (8b), tools, delegation, the log sweep, the mask and a clean teardown | the boundary's service list is enough for the whole sample |
 
 ## Integration run under the boundary
@@ -79,9 +79,9 @@ headers: 0. IAM least privilege: 5 high, all in `cell-policies.yaml`.
 | Finding | Outcome |
 |---|---|
 | Service wildcards (`apigateway:*`, `dynamodb:*`, `kms:*`, `lambda:*`, `logs:*`, `ssm:*`, ...) on `*`, in both policies | Accepted: the file records the policies the spike ran, to keep B-1 to B-5 reproducible. It is not deployable guidance; the cell policies are spec §8, decision 7, scoped by the standalone cell account |
-| IAM role writes, `iam:PassRole` and `sts:AssumeRole` on `*` | Accepted for the same reason; this is the gap B-4 names and the `/cell/` path closes in the cell policies (spec Q-5) |
+| IAM role writes, `iam:PassRole` and `sts:AssumeRole` on `*` | Accepted for the same reason; this is the gap B-4 names and the `/cell/` path closes in the cell policies (path spike) |
 
-The policies in `stress/application/` replace these once spec Q-5 has run;
+The policies in `stress/application/` replace these;
 the spike file then stays as the record of this run only.
 
 ## Teardown

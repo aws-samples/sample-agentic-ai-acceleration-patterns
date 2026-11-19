@@ -120,6 +120,19 @@ Resources:
               - iam:DeletePolicyVersion
               - iam:SetDefaultPolicyVersion
             Resource: '*'
+          - Sid: DenyOwnerParameterWrites
+            Effect: Deny
+            Action:
+              - ssm:PutParameter
+              - ssm:DeleteParameter
+              - ssm:DeleteParameters
+              - ssm:LabelParameterVersion
+              - ssm:UnlabelParameterVersion
+              - ssm:AddTagsToResource
+              - ssm:RemoveTagsFromResource
+            Resource:
+              - !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/application-plane/shared/identity/*
+              - !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/cdk-bootstrap/cell/*
   CellExecutionPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:

@@ -7,7 +7,8 @@
 # refuses each one while a change to a /cell/ role still works.
 # Usage: AWS_PROFILE=<cell account profile> AWS_REGION=eu-central-1 ./probes.sh
 set -uo pipefail
-account="$(aws sts get-caller-identity --query Account --output text)"
+account="$(aws sts get-caller-identity --query Account --output text)" || exit 2
+[[ "$account" =~ ^[0-9]{12}$ ]] || { echo "no caller account" >&2; exit 2; }
 region="${AWS_REGION:?AWS_REGION is required}"
 partition=aws
 standin="arn:${partition}:iam::${account}:role/cell-spike-role-pair-stand-in"
@@ -15,7 +16,16 @@ deploy="cdk-cell-deploy-role-${account}-${region}"
 
 read -r AK SK ST < <(aws sts assume-role --role-arn "arn:${partition}:iam::${account}:role/cell/cell-spike-probe" \
   --role-session-name q5-probe --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text)
-probe() { env -u AWS_PROFILE AWS_ACCESS_KEY_ID="$AK" AWS_SECRET_ACCESS_KEY="$SK" AWS_SESSION_TOKEN="$ST" aws "$@"; }
+[[ -n "${AK:-}" && -n "${SK:-}" && -n "${ST:-}" ]] || { echo "could not assume cell/cell-spike-probe" >&2; exit 2; }
+# No shared config or credentials file and no instance metadata: the probe
+# role's keys are the only ones the CLI can find.
+probe() {
+  env -u AWS_PROFILE -u AWS_DEFAULT_PROFILE AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_CONFIG_FILE=/dev/null AWS_EC2_METADATA_DISABLED=true \
+    AWS_ACCESS_KEY_ID="$AK" AWS_SECRET_ACCESS_KEY="$SK" AWS_SESSION_TOKEN="$ST" AWS_REGION="$region" aws "$@"
+}
+caller="$(probe sts get-caller-identity --query Arn --output text)"
+[[ "$caller" == "arn:${partition}:sts::${account}:assumed-role/cell-spike-probe/q5-probe" ]] \
+  || { echo "probes would run as ${caller}, not the probe role" >&2; exit 2; }
 
 fails=0
 expect_denied() {
@@ -23,8 +33,8 @@ expect_denied() {
   local out
   if out="$(probe "$@" 2>&1)"; then
     echo "FAIL  ${name}: allowed"; fails=$((fails + 1))
-  elif grep -q -e AccessDenied -e 'not authorized' <<<"$out"; then
-    echo "PASS  ${name}: $(grep -oE 'explicit deny in a [a-z -]+|no [a-z -]+ allows|not authorized to perform: [a-zA-Z:]+' <<<"$out" | sort -u | tr '\n' ';')"
+  elif grep -q 'explicit deny in a permissions boundary' <<<"$out"; then
+    echo "PASS  ${name}: explicit deny in the permissions boundary"
   else
     echo "FAIL  ${name}: unexpected error: $(head -c 200 <<<"$out")"; fails=$((fails + 1))
   fi
@@ -55,6 +65,12 @@ expect_denied "CreateRole on / with the boundary" iam create-role --role-name q5
 expect_denied "CreateRole on /cell/ without the boundary" iam create-role --role-name q5-no-boundary --path /cell/ --assume-role-policy-document "$lambda_trust"
 expect_denied "CreateServiceLinkedRole for another service" iam create-service-linked-role --aws-service-name elasticloadbalancing.amazonaws.com
 expect_denied "DeleteRolePermissionsBoundary on itself" iam delete-role-permissions-boundary --role-name cell-spike-probe
+expect_denied "AttachRolePolicy AdministratorAccess on a cdk-cell bootstrap role" iam attach-role-policy --role-name "$deploy" --policy-arn "arn:${partition}:iam::aws:policy/AdministratorAccess"
+expect_denied "PutRolePermissionsBoundary AdministratorAccess on a /cell/ role" iam put-role-permissions-boundary --role-name cell-spike-positive --permissions-boundary "arn:${partition}:iam::aws:policy/AdministratorAccess"
+expect_denied "CreatePolicyVersion on the boundary" iam create-policy-version --policy-arn "$boundary" --policy-document "$admin" --set-as-default
+expect_denied "SetDefaultPolicyVersion on the execution policy" iam set-default-policy-version --policy-arn "arn:${partition}:iam::${account}:policy/cell-execution-policy" --version-id v1
+expect_denied "PutParameter over the identity pool id" ssm put-parameter --name /application-plane/shared/identity/userPoolId --type String --value q5 --overwrite
+expect_denied "PutParameter over the cell bootstrap version" ssm put-parameter --name /cdk-bootstrap/cell/version --type String --value 99 --overwrite
 expect_allowed "UpdateRoleDescription on a /cell/ role (positive control)" iam update-role-description --role-name cell-spike-positive --description "changed by the q5 probe"
 expect_allowed "GetRole on the role pair (read stays open)" iam get-role --role-name cell-spike-role-pair-stand-in --query Role.Path --output text
 

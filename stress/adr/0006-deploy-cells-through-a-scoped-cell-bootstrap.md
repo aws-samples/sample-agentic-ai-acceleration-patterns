@@ -50,10 +50,10 @@ Option 3.
 
 | Wall | Holds |
 |---|---|
-| Standalone cell account | only `CDKToolkit-cell`, the role pair (plain CloudFormation by the account owner, on `/`, no cell boundary) and cells; no default CDK bootstrap; the `control-plane` slice refuses an account with any other stack, a stack with a service role other than the cell execution role, a `cdk-hnb659fds-*` role, a role pair on `/cell/` or under the cell boundary, or a `/cell/` role trusted from outside, before every run |
+| Standalone cell account | only `CDKToolkit-cell`, the role pair and the account base (plain CloudFormation by the account owner with the CDK's legacy synthesizer, on `/`, no cell boundary; the base holds the API Gateway logs role and the identity parameters) and cells; no default CDK bootstrap; the `control-plane` slice refuses an account with any other stack, a stack with a service role other than the cell execution role, a `cdk-hnb659fds-*` role, a role pair on `/cell/` or under the cell boundary, or a `/cell/` role trusted from outside, before every run |
 | Cell bootstrap | `cdk bootstrap --qualifier cell --toolkit-stack-name CDKToolkit-cell --cloudformation-execution-policies <cell execution policy> --custom-permissions-boundary cell-permissions-boundary` |
 | `/cell/` path | every role a cell creates is on `/cell/`, set by a CDK aspect in the stress cell app that matches every `AWS::IAM::Role` resource; IAM role writes, `iam:PassRole` and `sts:AssumeRole` are allowed on `role/cell/*` only; `iam:CreateServiceLinkedRole` only for `ops.apigateway.amazonaws.com` and `runtime-identity.bedrock-agentcore.amazonaws.com` |
-| Boundary | on the execution role and every cell role: the cell's services and the same service-linked-role allow, and denies on `iam:CreateRole` without the boundary or outside `/cell/`, any other IAM write or `iam:PassRole` on a role outside `/cell/` (`NotResource` `role/aws-service-role/*`), `iam:CreateServiceLinkedRole` for any other service, boundary removal, users, access keys and policy writes |
+| Boundary | on the execution role and every cell role: the cell's services and the same service-linked-role allow, and denies on `iam:CreateRole` without the boundary or outside `/cell/`, any other IAM write or `iam:PassRole` on a role outside `/cell/` (`NotResource` `role/cell/*`), `iam:CreateServiceLinkedRole` for any other service, boundary removal, users, access keys, policy writes, and SSM writes to the owner's parameters (`/application-plane/shared/identity/*`, `/cdk-bootstrap/cell/*`) |
 
 The cell synth sets `@aws-cdk/core:bootstrapQualifier` and
 `@aws-cdk/core:permissionsBoundary` as object context (a CLI `--context`
@@ -71,10 +71,12 @@ passed 60 of 60 steps through the same bootstrap, 139 of 139 roles
 bounded. The path spike (`stress/spikes/cell-path/`, 2026-11-18), in two
 standalone cell accounts with the `/cell/` path, proved the path half: a
 bounded `/cell/` role whose own policy allows `iam:*` and `sts:AssumeRole`
-on `*` was refused 11 escalations by the boundary (rewriting, attaching
-to, assuming or passing the role pair and the bootstrap roles, a role on
-`/`, a role without the boundary, another service-linked role, removing
-its boundary) while a write to another `/cell/` role worked; a
+on `*` was refused 17 escalations by an explicit deny in the boundary
+(rewriting, attaching to, assuming or passing the role pair and the
+bootstrap roles, a role on `/`, a role without the boundary, another
+service-linked role, removing or swapping a boundary, new versions of the
+cell policies, and overwriting the owner's identity and bootstrap
+parameters) while a write to another `/cell/` role worked; a
 runtime-isolation cell deployed in 424 s with 27 of 27 roles on `/cell/`
 and bounded, creating its two service-linked roles on the way. Still to
 prove before this record is accepted (spec Q-5): the request path in a

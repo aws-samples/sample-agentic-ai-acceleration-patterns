@@ -63,7 +63,7 @@ const probeRole = new iam.Role(probe, 'ProbeRole', {
   description: 'A compromised cell role: its own policy allows every escalation; the boundary must refuse',
 });
 probeRole.addToPolicy(new iam.PolicyStatement({
-  actions: ['iam:*', 'sts:AssumeRole', 'lambda:CreateFunction', 'lambda:DeleteFunction'],
+  actions: ['iam:*', 'sts:AssumeRole', 'lambda:CreateFunction', 'lambda:DeleteFunction', 'ssm:PutParameter', 'ssm:DeleteParameter'],
   resources: ['*'],
 }));
 new iam.Role(probe, 'PositiveControlRole', {
