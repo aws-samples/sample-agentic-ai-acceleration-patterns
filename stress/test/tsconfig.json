@@ -4,7 +4,8 @@
   "compilerOptions": {
     "noEmit": true,
     "rootDir": "..",
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "allowJs": true
   },
   "include": [
     "**/*.ts"

@@ -16,6 +16,8 @@ in [`adr/`](./adr/README.md). Nothing here is deployed: it is a test asset.
 | Quota budget | [`src/budget.ts`](./src/budget.ts) | the account-wide quotas slices draw on, with their Service Quotas codes and defaults (spec §4.4) |
 | Result records | [`src/result.ts`](./src/result.ts) | one JSON record per slice per scenario, its checks and the results file (spec §4.3) |
 | Runner | [`src/runner.ts`](./src/runner.ts), [`run.sh`](./run.sh) | budget, then `deploy`, `seed`, `run`, `collect` in dependency order, `teardown` in reverse (spec §3.5) |
+| Driver host | [`driver/`](./driver/stress-driver.cdk.ts) | the k6 host every slice runs its load from: one EC2 instance, no inbound rule, no public IP, SSM Session Manager (ADR-0007, ADR-0009) |
+| k6 library | [`k6/`](./k6/README.md) | tokens, pacing, the correlation header and the result record every slice's scenarios share (ADR-0008) |
 
 ## A slice
 
@@ -70,6 +72,30 @@ around one. When `slice.sh` exits,
 anything it left running in its group gets SIGTERM, then SIGKILL after
 30 seconds.
 
+## The driver host and the k6 library
+
+A slice runs its load from one host, `<prefix>-driver`, with k6 and the AWS CLI installed. It
+is its own CDK app, run from `stress/`:
+
+```bash
+export AWS_REGION=eu-central-1 STRESS_PREFIX=StressDriver STRESS_TIER=small
+driver/deploy.sh
+driver/host.sh 'k6 version'
+driver/teardown.sh
+```
+
+`deploy.sh` prints the deploy seconds and the stack outputs (`InstanceId`, `ResultsBucketName`);
+`teardown.sh` prints the destroy seconds and checks nothing is left. `STRESS_PARAMETER_PREFIXES`
+lists the SSM paths the host may read besides tenant-identity's. `host.sh` runs one command on
+the host through Run Command and reads its output from the results bucket.
+
+`driver/k6.sh <script> [NAME=value ...]` runs a k6 script on the host: it mirrors `stress/k6/` and
+the script's folder under `/opt/stress/repo/` at their repository paths, passes the `STRESS_*`
+variables, and brings the result records back to `$STRESS_RESULTS`. A slice's `run` verb calls it
+(the runtime-isolation slice's `run.sh` still copies through S3 until W-3). The library, the
+record it writes and the correlation header are described in [`k6/README.md`](./k6/README.md);
+`k6/smoke.js` is the check that a deployed host runs k6 and writes a record `parseRecord` accepts.
+
 ## Run it
 
 ```bash
@@ -122,6 +148,11 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   for CloudFront Functions compute and KeyValueStore size (spec §4.4), so
   no slice can declare them. They are added with the first slice that
   draws on them (W-7 for the front door).
+- The k6 library has no k6 run in this folder's build: `record.js` is tested, `lib.js` is
+  checked by running `k6/smoke.js` and `K6_COMMAND=inspect` on a deployed host (the live checks
+  of W-2). A change to `lib.js` needs that check again.
+- `refusals` in a record from k6 are all unattributed until the slice's `collect` joins them
+  with the hops' logs (ADR-0008).
 - A SIGKILL to the runner leaves the current verb's process group
   running, and the run lock in place.
 - A process a verb starts with `setsid` leaves the group, so the runner

@@ -7,7 +7,7 @@
 // overrides) for the tier's length (large: 300 s). The first event's report is asserted as
 // in S1; a stream that ends early counts in stream_interrupted.
 
-import { loadTier, loadManifest, plan, tokenMode, setupTokens, setPacing, vusFor, warmupScenario, warmAll, step, pickProbe, buildOptions, summarize, scenarioSeconds } from './lib.js';
+import { loadTier, loadManifest, plan, tokenMode, setupTokens, setPacing, vusFor, warmupScenario, warmAll, step, pickProbe, buildOptions, summarize, scenarioSeconds } from './probe.js';
 
 const tier = loadTier();
 const manifest = loadManifest();
@@ -49,5 +49,5 @@ export function main(data) {
 }
 
 export function handleSummary(data) {
-  return summarize(data);
+  return summarize(data, 'S5');
 }

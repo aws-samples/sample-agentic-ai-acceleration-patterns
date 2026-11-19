@@ -7,8 +7,10 @@
 #
 #   AWS_REGION=eu-central-1 [STRESS_SCALE=small] [STRESS_PREFIX=RuntimeIsolationStress] scripts/stress/run.sh s1|s2|...|s7
 #
-# Uploads scripts/stress/k6/ and the manifest to s3://<ResultsBucketName>/in/,
-# runs k6 on <InstanceId> through `ssm send-command` (AWS-RunShellScript),
+# Uploads this sample's scripts/stress/k6/ and the shared library, stress/k6/
+# (stress ADR-0007), to s3://<ResultsBucketName>/in/repo/ at their repository-relative
+# paths, so the scenarios' imports resolve on the host as in a checkout, and the
+# manifest to in/manifest.json, runs k6 on <InstanceId> through `ssm send-command` (AWS-RunShellScript),
 # polls until it finishes, and downloads s3://<bucket>/out/<run-id>/ to
 # ~/.runtime-isolation-stress/<prefix>/runs/<run-id>/ with the run window
 # (window.json, UTC epoch seconds) for collect.sh. s2 first gives the ingress
@@ -53,6 +55,8 @@ STATE_DIR="${HOME}/.runtime-isolation-stress/${PREFIX}"
 OUTPUTS="${STATE_DIR}/outputs.json"
 MANIFEST="${STATE_DIR}/manifest.json"
 K6_DIR="${SCRIPT_DIR}/k6"
+SHARED_K6_DIR="$(cd "${SAMPLE_DIR}/../../stress/k6" && pwd)"
+K6_REL="samples/agentic-runtime-isolation/scripts/stress/k6"
 
 LIB_TMP="$(mktemp -d)"
 # shellcheck source=../lib.sh
@@ -74,7 +78,8 @@ trap cleanup EXIT
 
 [[ -s "$OUTPUTS" ]] || fail "no ${OUTPUTS}; run scripts/stress/deploy.sh first"
 [[ -s "$MANIFEST" ]] || fail "no ${MANIFEST}; run scripts/stress/seed.sh first"
-[[ -f "${K6_DIR}/${K6_FILE}" && -f "${K6_DIR}/lib.js" ]] || fail "scripts/stress/k6/${K6_FILE} or lib.js is missing"
+[[ -f "${K6_DIR}/${K6_FILE}" && -f "${K6_DIR}/probe.js" && -f "${SHARED_K6_DIR}/lib.js" && -f "${SHARED_K6_DIR}/record.js" ]] \
+  || fail "scripts/stress/k6/${K6_FILE} or probe.js, or stress/k6/lib.js or record.js, is missing"
 output() { jq -r --arg k "$1" '.[$k] // empty' "$OUTPUTS"; }
 need() { local v; v="$(output "$1")"; [[ -n "$v" ]] || fail "output $1 missing from ${OUTPUTS}"; printf '%s' "$v"; }
 BUCKET="$(need ResultsBucketName)"
@@ -147,7 +152,8 @@ if [[ "$SCENARIO" == s2 ]]; then
 fi
 
 # -- inputs to the bucket ----------------------------------------------------
-aws s3 sync "${K6_DIR}/" "s3://${BUCKET}/in/k6/" --delete --only-show-errors || fail "upload k6/"
+aws s3 sync "${K6_DIR}/" "s3://${BUCKET}/in/repo/${K6_REL}/" --delete --only-show-errors || fail "upload k6/"
+aws s3 sync "${SHARED_K6_DIR}/" "s3://${BUCKET}/in/repo/stress/k6/" --delete --only-show-errors || fail "upload stress/k6/"
 aws s3 cp "$MANIFEST" "s3://${BUCKET}/in/manifest.json" --only-show-errors || fail "upload the manifest"
 
 # sq VALUE -> VALUE in single quotes for the host's shell (POSIX; AWS-RunShellScript runs sh).
@@ -157,7 +163,7 @@ cat >"$REMOTE" <<REMOTE_SCRIPT
 set -eu
 mkdir -p /opt/stress
 aws s3 sync $(sq "s3://${BUCKET}/in/") /opt/stress/ --delete --only-show-errors --region $(sq "$REGION")
-export TIER=$(sq "$TIER")
+export STRESS_TIER_JSON=$(sq "$TIER")
 export MANIFEST=/opt/stress/manifest.json
 export ENDPOINT=$(sq "$ENDPOINT")
 export ENTITLEMENTS_API=$(sq "$ENT_API")
@@ -172,7 +178,7 @@ ${CONVERSATION_RUN_ID:+export CONVERSATION_RUN_ID=$(sq "$CONVERSATION_RUN_ID")}
 export AWS_REGION=$(sq "$REGION")
 # k6 signs IssueToken with SigV4 and needs the instance role credentials in its environment (never printed).
 eval "\$(aws configure export-credentials --format env)"
-cd /opt/stress/k6
+cd /opt/stress/repo/${K6_REL}
 rm -f summary.json k6-stdout.txt
 rc=0
 k6 run --summary-export summary.json $(sq "$K6_FILE") >k6-stdout.txt 2>&1 || rc=\$?

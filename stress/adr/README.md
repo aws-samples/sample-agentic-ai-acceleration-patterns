@@ -17,6 +17,8 @@ that change a sample are recorded in that sample's `adr/`.
 | [0005](./0005-log-one-correlation-header-at-every-hop.md) | Log one correlation header at every hop | Accepted | 2026-11-18 |
 | [0006](./0006-deploy-cells-through-a-scoped-cell-bootstrap.md) | Deploy cells in standalone accounts through a scoped cell bootstrap | Proposed | 2026-11-18 |
 | [0007](./0007-move-the-stress-driver-and-k6-library-to-stress.md) | Move the stress driver and the k6 library to `stress/` | Accepted | 2026-11-18 |
+| [0008](./0008-split-the-k6-library-and-write-the-record-from-handlesummary.md) | Split the k6 library, mirror the repository on the host, and write the record from handleSummary | Accepted | 2026-11-19 |
+| [0009](./0009-deploy-the-driver-as-its-own-cdk-app-in-stress.md) | Deploy the driver as its own CDK app in `stress/` | Accepted | 2026-11-19 |
 
 In `samples/control-plane/adr/`:
 

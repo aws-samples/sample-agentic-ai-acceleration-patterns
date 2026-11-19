@@ -5,7 +5,7 @@
 // the §6 probe mix (report / read <A> / read <B>), one warm conversation per tenant opened in
 // an untimed warm-up at WARM_RPS, for the tier's scenario length (large: 600 s).
 
-import { loadTier, loadManifest, plan, tokenMode, setupTokens, setPacing, vusFor, warmupScenario, warmAll, step, pickProbe, buildOptions, summarize, scenarioSeconds } from './lib.js';
+import { loadTier, loadManifest, plan, tokenMode, setupTokens, setPacing, vusFor, warmupScenario, warmAll, step, pickProbe, buildOptions, summarize, scenarioSeconds } from './probe.js';
 
 const tier = loadTier();
 const manifest = loadManifest();
@@ -42,5 +42,5 @@ export function main(data) {
 }
 
 export function handleSummary(data) {
-  return summarize(data);
+  return summarize(data, 'S1');
 }

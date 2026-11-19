@@ -2,14 +2,16 @@
 
 The load half of the stress test in
 [design/agentic-runtime-isolation.stress-test.md](../../../design/agentic-runtime-isolation.stress-test.md)
-(§5 Phase 2, §6, §8.3). `run.sh` copies this folder and the seed manifest to the
-driver host and runs one scenario; the pass table is computed by `collect.sh`,
+(§5 Phase 2, §6, §8.3). `run.sh` copies this folder, the shared library
+[`stress/k6/`](../../../../../stress/k6/README.md) (token pool and refresh, pacing, the
+correlation header, the result record) and the seed manifest to the driver host and runs
+one scenario; the pass table is computed by `collect.sh`,
 not here. Written for k6 v0.5x (ES modules, `k6/execution`); the syntax was
 checked with esbuild, not yet by a k6 run.
 
 | File | Does |
 |---|---|
-| `lib.js` | tokens (`setupTokens`, `refreshIfNeeded`), `invoke`, `probe` with the §6 assertions, `pickProbe` (70/20/10), `recordMismatch`, the counters, the warm-up and pacing helpers, `summarize` |
+| `probe.js` | this sample's part: `invoke` (with the correlation header), `probe` with the §6 assertions, `pickProbe` (70/20/10), the warm-up and `step` helpers; re-exports the shared library's tier, manifest and pacing helpers, and wraps its `setupTokens`, `buildOptions` and `summarize` with this sample's fields |
 | `s1-steady.js` | active tenants x users, steady rate, §6 probe mix, tier length (large 600 s) |
 | `s2-herd.js` | token prime only (ingress idle), then 0 to 1.6 x steady in 5 s, held (large 120 s); no warm-up |
 | `s3-noisy.js` | S1 minus one tenant, plus scenario `noisy`: that tenant at 10 x `tenantLimitRpm` a minute |
@@ -23,19 +25,20 @@ it issues or refreshes the VU's tokens and opens one conversation per owned
 tenant at 20 new conversations a second overall. The timed scenario starts
 after it. Thresholds: `isolation_mismatch` and `positive_control_fail` count 0.
 `handleSummary` writes `summary.json` (without `setup_data`) and the text
-summary to stdout.
+summary to stdout, and, when `STRESS_RESULTS` is set, the scenario's result
+record (`agentic-runtime-isolation.S<n>.json`, stress spec §4.3).
 
 ## Environment
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `TIER` | yes | the tier as JSON: `tenantsActive`, `usersPerActiveTenant`, `steadyRps`, `peakRps` (required), `scale`, `scenarioSeconds`, `agents`, `tenantLimitRpm`, `ingressReservedConcurrency` |
+| `STRESS_TIER_JSON` | yes | the tier as JSON (`test/stress/tiers.ts`, which takes the shared figures from `stress/src/tiers.ts`): `tenantsActive`, `usersPerActiveTenant`, `steadyRps`, `peakRps` (required), `name`, `scenarioSeconds`, and this sample's `agents`, `tenantLimitRpm`, `ingressReservedConcurrency` |
 | `MANIFEST` | yes | absolute path of `manifest.json`: `{ tenants: [{ tenantId, admin, users: [...], active? }] }` |
 | `ENDPOINT` | yes | the ingress `EndpointUrl` output; `/<agent>/invocations` is appended as `lib.sh backend_url` does |
 | `PLATFORM_API` | yes | tenant-identity's API base URL (`.../prod/`): `platform/tenants/{t}/users/{u}/token` (SigV4) and `oauth2/token` (exchange) |
 | `APP_CLIENT_ID` | yes | tenant-identity's app client id (`/application-plane/shared/identity/appClientId`); the exchange form requires it |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` (or `REGION`) | yes | signs IssueToken. On the driver, `run.sh` exports the instance role's credentials from IMDSv2 first; the k6 aws jslib does not read IMDS |
-| `RUN_ID` | no | names the run's conversations (`stress<run><tenant>`); default a timestamp |
+| `STRESS_RUN_ID` (or `RUN_ID`) | no | names the run's conversations (`stress<run><tenant>`) and the correlation ids; default a timestamp |
 | `ISSUER` | no | when set, each report's `tokenIss` is checked against it (a check, not a mismatch) |
 | `ENTITLEMENTS_API` | no | read by the operator scripts; unused here |
 
@@ -68,7 +71,7 @@ From a shell with credentials for the account (the platform API needs
 
 ```bash
 export AWS_REGION=eu-central-1
-export TIER='{"scale":"small","tenantsActive":20,"usersPerActiveTenant":2,"steadyRps":10,"peakRps":40,"scenarioSeconds":60,"agents":2,"ingressReservedConcurrency":50}'
+export STRESS_TIER_JSON='{"name":"small","tenantsActive":20,"usersPerActiveTenant":2,"steadyRps":10,"peakRps":40,"scenarioSeconds":60,"agents":2,"ingressReservedConcurrency":50}'
 export MANIFEST="$HOME/.runtime-isolation-stress/RuntimeIsolationStress/manifest.json"
 export ENDPOINT=<EndpointUrl output>
 export PLATFORM_API="$(aws ssm get-parameter --name /application-plane/shared/identity/apiUrl --query Parameter.Value --output text)"

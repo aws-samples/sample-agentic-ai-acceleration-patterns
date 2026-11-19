@@ -6,7 +6,8 @@
 #
 #   AWS_REGION=eu-central-1 [STRESS_SCALE=small] [STRESS_PREFIX=RuntimeIsolationStress] scripts/stress/teardown.sh [--tenants]
 #
-# Destroys <prefix>-driver, then the <prefix>-agents-* stacks, then
+# Destroys <prefix>-driver (through the shared driver's stress/driver/teardown.sh,
+# stress ADR-0009), then the <prefix>-agents-* stacks, then
 # <prefix>-ingress, one at a time (cdk destroy --force), and prints one
 # `stack=<name> destroy_seconds=<n>` line per stack. Stacks that are not
 # there are skipped, so a rerun after a partial teardown finishes the job.
@@ -146,11 +147,29 @@ mapfile -t LIVE_AGENTS < <(aws cloudformation list-stacks --output text \
   --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE UPDATE_ROLLBACK_COMPLETE ROLLBACK_COMPLETE CREATE_FAILED DELETE_FAILED UPDATE_ROLLBACK_FAILED ROLLBACK_FAILED \
   --query "StackSummaries[?starts_with(StackName, '${PREFIX}-agents-')].StackName" | tr '\t' '\n' | grep -v '^$' | sort -rV || true)
 STACKS=()
-exists "${PREFIX}-driver" && STACKS+=("${PREFIX}-driver")
+DRIVER=false
+exists "${PREFIX}-driver" && DRIVER=true
 STACKS+=("${LIVE_AGENTS[@]}")
 exists "${PREFIX}-ingress" && STACKS+=("${PREFIX}-ingress")
-if (( ${#STACKS[@]} == 0 )); then
+if (( ${#STACKS[@]} == 0 )) && [[ "$DRIVER" == false ]]; then
   echo "stacks: none with prefix ${PREFIX}; nothing to destroy"
+  (( TENANTS_LEFT == 0 )) || fail "${TENANTS_LEFT} tenants were not deleted; they stay in the manifest, rerun with --tenants"
+  exit 0
+fi
+
+# The k6 host first: it is the shared driver's own app, not part of this one.
+if [[ "$DRIVER" == true ]]; then
+  echo "== destroy ${PREFIX}-driver (stress/driver/teardown.sh)"
+  start=$SECONDS
+  STRESS_PREFIX="$PREFIX" STRESS_TIER="$SCALE" "${SAMPLE_DIR}/../../stress/driver/teardown.sh" >"${MAIN_TMP}/driver.log" 2>&1 \
+    || { tail -30 "${MAIN_TMP}/driver.log" >&2; fail "destroy ${PREFIX}-driver"; }
+  secs=$((SECONDS - start))
+  echo "stack=${PREFIX}-driver destroy_seconds=${secs}"
+  echo "$(date -u +%F) scale=${SCALE} stack=${PREFIX}-driver destroy_seconds=${secs}" >>"$TIMINGS"
+fi
+if (( ${#STACKS[@]} == 0 )); then
+  rm -f "$OUTPUTS"
+  echo "destroyed the driver in ${SECONDS}s; no other stack with prefix ${PREFIX}"
   (( TENANTS_LEFT == 0 )) || fail "${TENANTS_LEFT} tenants were not deleted; they stay in the manifest, rerun with --tenants"
   exit 0
 fi
@@ -161,7 +180,7 @@ OUT="cdk.stress.out"
 AGENTS=false
 (( ${#LIVE_AGENTS[@]} > 0 )) && AGENTS=true
 rm -rf "$OUT"
-STRESS_SCALE="$SCALE" STRESS_PREFIX="$PREFIX" STRESS_AGENTS="$AGENTS" STRESS_DRIVER=true \
+STRESS_SCALE="$SCALE" STRESS_PREFIX="$PREFIX" STRESS_AGENTS="$AGENTS" \
   npx cdk synth -q --app "npx ts-node -P tsconfig.json --prefer-ts-exts test/stress.runtime.ts" --output "$OUT" >"${MAIN_TMP}/synth.log" 2>&1 \
   || { tail -30 "${MAIN_TMP}/synth.log" >&2; fail "synth"; }
 for s in "${STACKS[@]}"; do
@@ -227,5 +246,5 @@ if [[ -n "$REGISTRY_PREFIX" ]]; then
 fi
 [[ -z "$LEFT" ]] || fail "leftovers after teardown${LEFT}"
 echo "leftovers: none (stacks, runtime log groups, registry parameters)"
-echo "destroyed ${#STACKS[@]} stacks in ${SECONDS}s"
+echo "destroyed $(( ${#STACKS[@]} + $([[ "$DRIVER" == true ]] && echo 1 || echo 0) )) stacks in ${SECONDS}s"
 (( TENANTS_LEFT == 0 )) || fail "${TENANTS_LEFT} tenants were not deleted; they stay in the manifest, rerun with --tenants"

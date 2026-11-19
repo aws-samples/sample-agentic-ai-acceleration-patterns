@@ -8,7 +8,7 @@
 // warmed: set CONVERSATION_RUN_ID to an S1 run id from the Runtime's idle window to hit warm
 // microVMs behind the cold ingress, or leave it unset to open new sessions in the herd.
 
-import { loadTier, loadManifest, plan, tokenMode, setupTokens, setPacing, vusFor, warmupScenario, warmAll, step, pickProbe, buildOptions, summarize, scenarioSeconds } from './lib.js';
+import { loadTier, loadManifest, plan, tokenMode, setupTokens, setPacing, vusFor, warmupScenario, warmAll, step, pickProbe, buildOptions, summarize, scenarioSeconds } from './probe.js';
 
 const tier = loadTier();
 const manifest = loadManifest();
@@ -49,5 +49,5 @@ export function main(data) {
 }
 
 export function handleSummary(data) {
-  return summarize(data);
+  return summarize(data, 'S2');
 }
