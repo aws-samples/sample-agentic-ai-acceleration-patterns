@@ -164,7 +164,9 @@ claim in the README without a test row behind it is a defect.
 
 | Component | Service | Pattern | Holds |
 |---|---|---|---|
-| `run_code` tool | Lambda, a `ToolTarget` of `agentic-runtime-isolation` | Signed tenant context, tool-side TVM | the tool role (§3.6) |
+| `run_code` tool | Lambda: the core `runCodeFunction`, and with the gateway entry also a `ToolTarget` of `agentic-runtime-isolation` | Signed tenant context, tool-side TVM | the tool role (§3.6) |
+| Gateway tool role (`RunCodeToolTarget` only) | invoked by the tools gateway role only; what `grantRunCode` gives: assume the tool tenant role with a `TenantId` tag, and the tool role's sandbox actions; `kms:GetPublicKey` on the context key | the same as the tool role |
+| `runCodeFunction` invokers | `lambda:InvokeFunction` on `runCodeFunction`, granted only through `sandboxes.grantInvokeRunCode(principal)`; the function has no resource policy, so no other principal may call it | anything else |
 | Tool tenant role | IAM, vended with the `TenantId` session tag | ABAC on `TenantId` | `inputs/<t>/*` read, `outputs/<t>/*` write, registry rows `TENANT#<t>`, `nitro` `RunTask` and `StopTask` on tasks tagged `<t>` |
 | Input bucket | S3 | Tenant prefix | tenant files the code reads |
 | Sandbox registry | DynamoDB | Tenant-keyed registry, optimistic version, start lease | one row per tenant per backend |
@@ -194,20 +196,39 @@ claim in the README without a test row behind it is a defect.
 
 Nothing downstream of step 3 accepts a tenant id from the arguments.
 
-Without an ingress (§3.3 `ingress` unset) the construct deploys no
-`ToolTarget`. The vendor calls the exported `runCode` function from their
-own tool and passes a tenant id they verified themselves; the rest of the
-path is the same (ADR-0001).
+Standalone, with any identity provider (ADR-0017). The core construct,
+`UntrustedCodeSandboxes`, needs no ingress and imports nothing from
+`agentic-runtime-isolation`. It deploys `runCodeFunction`, which the
+vendor's own API or tool invokes with IAM (`lambda:InvokeFunction`),
+passing `tenantId` with the §5.1 fields. The vendor takes that id only
+from a token they verified with their own identity provider; nothing
+else changes. `runCodeFunction` vends the tool tenant role itself, with
+one `sts:AssumeRole` and `sts:TagSession` carrying `TenantId`, so steps
+4 and 5 above are the same on both paths. Steps 1 to 3 are the gateway
+entry's (§3.3).
 
 ### 3.3 Deployment inputs (construct props)
 
-`UntrustedCodeSandboxes` (one construct, the pattern):
+Two entry points (ADR-0017):
+
+| Entry | Import | Depends on `agentic-runtime-isolation` | Holds |
+|---|---|---|---|
+| core | the package root (`src/index.ts`) | no | `UntrustedCodeSandboxes`, the pattern |
+| gateway | the `gateway` subpath (`src/gateway/index.ts`) | yes, as an optional peer dependency | `RunCodeToolTarget`, which puts the core behind the tools gateway |
+
+`RunCodeToolTarget` props: `sandboxes` (the core construct, required),
+`ingress` (`SharedIngress | SharedIngressRef`, required), `gateway`
+(default `default`), `toolName` (default `run-code`). It deploys one more
+Lambda whose handler wraps the same run logic in the producer's
+`toolHandler`, registers it as a Lambda `ToolTarget`, and calls
+`sandboxes.grantRunCode(fn)`, which lets that function assume the tool
+tenant role and start and call sandboxes as the core function can. Its
+read-only property is `toolTarget`.
+
+`UntrustedCodeSandboxes` props:
 
 | Prop | Type | Default | Meaning |
 |---|---|---|---|
-| `ingress` | `SharedIngress \| SharedIngressRef` | unset | the tools gateway the tool joins; unset deploys no `ToolTarget` |
-| `gateway` | `string` | `default` | the tools gateway name |
-| `toolName` | `string` | `run-code` | the `ToolTarget` name |
 | `backends` | `('microvm' \| 'nitro' \| 'agentcore')[]` | `['microvm']` | the boundaries to deploy; at least one |
 | `defaultBackend` | one of `backends` | first entry | used when the call names none |
 | `runTimeout` | `Duration` | 30 s | runner kill time; 1 s to 60 s |
@@ -229,7 +250,7 @@ path is the same (ADR-0001).
 
 Timing budget: the tool Lambda timeout is set to
 `5 s + startWait + runTimeout + 10 s` (fetch, start wait, run, stop on
-overrun), at most 90 s with `ingress` set and 120 s without. Through
+overrun), at most 90 s for the gateway entry and 120 s for the core function. Through
 `agentic-runtime-isolation`'s `api-gateway` ingress, the agent's whole
 turn shares that ingress's fixed 120 s integration timeout, so a tool
 budget above 90 s leaves the agent no time (S-11). The `+ 10 s` margin
@@ -238,17 +259,23 @@ Gateway documentation, a Lambda error reaches the agent only as a generic
 `isError` result, with no code. Validation at synth fails on: an unknown backend,
 empty `backends`, `defaultBackend` not enabled, `runTimeout` outside 1 s to
 60 s, a budget above the cap, `sandboxMaxLife` above 8 h, `sandboxIdle`
-below 1 min or at or above `sandboxMaxLife`, `toolName` or `gateway` set
-without `ingress`, `dnsFirewall` together with a supplied `vpc`.
+below 1 min or at or above `sandboxMaxLife`, `dnsFirewall` together with
+a supplied `vpc`. `RunCodeToolTarget` fails at synth when the core's
+budget is above 90 s.
 
-Read-only properties: `toolTarget` (undefined without `ingress`),
-`runCodeFunction`, `registryTable`, `inputBucket`, `toolRole`,
+Read-only properties: `runCodeFunction`, `registryTable`, `inputBucket`, `toolRole`,
 `toolTenantRole`, `offboardFunction`, `vpc`, and per backend the image ARN,
 cluster ARN or runtime ARN.
 
 Exports from `src/index.ts`: the construct and its props, `runCode`,
 `offboardTenant`, the `SandboxBackend` interface and the three backend
-classes, and the runner's job and result types.
+classes, and the runner's job and result types; nothing that imports
+`agentic-runtime-isolation`. Exports from `src/gateway/index.ts`:
+`RunCodeToolTarget` and its props. In `.projenrc.ts` the producer is a
+dev dependency (for the build and tests) and an optional peer dependency
+(`peerDependenciesMeta.optional`), so a consumer who imports only the
+core does not install it. A lint rule (`no-restricted-imports`) and a
+unit test fail if any file outside `src/gateway/` imports it.
 
 ### 3.4 Backend interface and enforcement per backend
 
@@ -759,7 +786,7 @@ matches its charset when two instances share a stack.
 
 ### 6.1 What the deployer supplies
 
-- Optionally, an `agentic-runtime-isolation` ingress with a tools gateway, in
+- For the gateway entry only: an `agentic-runtime-isolation` ingress with a tools gateway, in
   the same app or through its published `ingress` parameter, and a grant for
   `run_code` in its entitlement store for each tenant that may use it
   (agentic-runtime-isolation spec §4.5).
@@ -815,7 +842,7 @@ Consumes:
 
 | Producer | Interface | Why |
 |---|---|---|
-| `agentic-runtime-isolation` | construct `ToolTarget` and `toolHandler` from its `src/index.ts` (local dependency `file:../agentic-runtime-isolation`), parameter `/application-plane/shared/agent-runtime/ingress` | the tools gateway, the signed tenant context, the tool-side TVM; optional |
+| `agentic-runtime-isolation` | construct `ToolTarget` and `toolHandler` from its `src/index.ts` (local `file:../agentic-runtime-isolation`, dev and optional peer dependency), parameter `/application-plane/shared/agent-runtime/ingress` | the tools gateway, the signed tenant context; used only by the gateway entry |
 | `tenant-identity` `shared-pool` | its parameters, through `agentic-runtime-isolation` only | users and tenants for the integration test |
 
 Publishes:
@@ -829,7 +856,7 @@ properties; the construct writes no parameter (standard §4.5), and the
 integration stack publishes nothing (agentic-runtime-isolation ADR-0042), so
 its two construct instances cannot collide on it.
 
-Construct: `UntrustedCodeSandboxes` and its props, plus the exports in §3.3.
+Constructs: `UntrustedCodeSandboxes` from the package root and `RunCodeToolTarget` from the `gateway` subpath, with their props, plus the exports in §3.3.
 The `ARCHITECTURE.md` namespace row and samples-map row are added in the
 pull request that ships the sample.
 
@@ -938,6 +965,7 @@ touched.
 | dns | `run-code` (firewall on): A's script looks up `example.com`, a unique `<token>.example.com`, a 40-character exfil label and a TXT name, then `logs.<region>.amazonaws.com`; the first four return NXDOMAIN and appear in the query log as `BLOCK`, the last resolves to an endpoint address. `run-code-files` (firewall off): `example.com` resolves to a public address. On `nitro` the `BLOCK` line's `srcaddr` is A's task address |
 | dns-platform | after the run, every `BLOCK` line in `run-code`'s query log is for a name some test script looked up, or `*.amazon.pool.ntp.org` (left blocked on purpose, §3.9); any other blocked name is a platform name missing from the allow list and fails the step |
 | telemetry | Logs Insights finds one tool line per call with the §3.8 fields and the right `tenantId` |
+| standalone | the driver invokes `run-code`'s `runCodeFunction` with IAM, as a vendor's own API would, with `tenantId` = `A`: A's script parses its invoice; with `input` = `../B/invoice.csv` the call is refused; a principal without `lambda:InvokeFunction` on the function is refused |
 | forged | a direct Lambda invoke with a tampered tenant context returns `context_invalid` and starts nothing (test-only shortcut: only the gateway role may invoke the function in a real deployment) |
 | offboard | after `C`'s grant is removed, `offboardTenant` for `C` stops its sandboxes and deletes its rows; a second call returns the same result with nothing stopped |
 | teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left (the task and usage-log groups, `/aws/lambda-microvms/<imageName>`, the query-log group, and every `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` group), no DNS Firewall resource or construct-owned Logs resource policy of the sample, and the `DescribeResourcePolicies` statements that name the query-log group's ARN match their state before deploy (any difference is reported as the §3.9 known leftover), and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |

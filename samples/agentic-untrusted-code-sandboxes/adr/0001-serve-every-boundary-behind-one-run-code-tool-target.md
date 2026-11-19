@@ -4,6 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
+- Amended by: ADR-0017
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -48,3 +49,5 @@ drives the `ToolTarget` path; unit tests cover the no-ingress path. The tool
 inherits the gateway's limits (tool Lambda timeout, spike S-11). Without
 the ingress, choosing the tenant correctly is the vendor's responsibility;
 the README says so.
+
+Note 2026-11-19: amended by ADR-0017. The gateway path moves to its own construct, `RunCodeToolTarget`, under the package's `gateway` subpath. The core construct takes no `ingress` prop and imports nothing from `agentic-runtime-isolation`; standalone callers invoke `runCodeFunction` with IAM.
