@@ -104,8 +104,8 @@ interface FakeCertificate {
   readonly inUseBy?: string[];
   readonly status?: CertificateStatus;
   readonly failureReason?: FailureReason;
-  /** Defaults to two hours before NOW, past ACM's idempotency window. */
-  readonly createdAt?: number;
+  /** Defaults to two hours before NOW, past ACM's idempotency window; `null` leaves `CreatedAt` out. */
+  readonly createdAt?: number | null;
 }
 
 const HOUR = 60 * 60 * 1000;
@@ -120,7 +120,7 @@ function certificates(list: FakeCertificate[]): void {
         InUseBy: c.inUseBy ?? [],
         Status: c.status,
         FailureReason: c.failureReason,
-        CreatedAt: new Date(c.createdAt ?? NOW - 2 * HOUR),
+        CreatedAt: c.createdAt === null ? undefined : new Date(c.createdAt ?? NOW - 2 * HOUR),
       },
     });
   }
@@ -348,6 +348,12 @@ describe('two-phase removal (spec §3.4 step 5, ADR-0018, M-25)', () => {
       status: 'FAILED',
       failureReason: 'CAA_ERROR',
     });
+  });
+
+  it('deletes a terminal certificate of the tenant\'s current d that has no CreatedAt, as past its hour', async () => {
+    certificates([{ arn: cert(1), domain: DOMAIN_A, tags: tags(TENANT_A), status: 'FAILED', failureReason: 'CAA_ERROR', createdAt: null }]);
+    await runRemoval(deps());
+    expect(deletedCertificates()).toEqual([cert(1)]);
   });
 
   it('deletes a FAILED certificate within its hour once its domain is no longer the tenant\'s d, as a pending one', async () => {
