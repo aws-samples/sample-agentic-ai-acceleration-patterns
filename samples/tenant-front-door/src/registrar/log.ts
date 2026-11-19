@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { METRIC_NAMESPACE, METRIC_ROUTE_TABLE_BYTES } from '../shared/route-table';
+import { METRIC_DIMENSION_DISTRIBUTION, METRIC_NAMESPACE, METRIC_ROUTE_TABLE_BYTES } from '../shared/route-table';
 
 /**
  * Structured log lines (spec §3.4 step 6): the caller role, the key and
@@ -28,15 +28,21 @@ export function logLine(level: 'INFO' | 'WARN' | 'ERROR', message: string, field
 
 /**
  * The store-size metric (spec §4.1, ADR-0012): one embedded metric format
- * line with `RouteTableBytes` in namespace `TenantFrontDoor`, no
- * dimensions, unit Bytes. The alarm reads its maximum.
+ * line with `RouteTableBytes` in namespace `TenantFrontDoor`, dimension
+ * `DistributionId`, unit Bytes, so two front doors in one account and
+ * Region keep apart. The alarm reads its maximum.
  */
-export function emitRouteTableBytes(bytes: number, now: number = Date.now()): void {
+export function emitRouteTableBytes(bytes: number, distributionId: string, now: number = Date.now()): void {
   write({
     _aws: {
       Timestamp: now,
-      CloudWatchMetrics: [{ Namespace: METRIC_NAMESPACE, Dimensions: [[]], Metrics: [{ Name: METRIC_ROUTE_TABLE_BYTES, Unit: 'Bytes' }] }],
+      CloudWatchMetrics: [{
+        Namespace: METRIC_NAMESPACE,
+        Dimensions: [[METRIC_DIMENSION_DISTRIBUTION]],
+        Metrics: [{ Name: METRIC_ROUTE_TABLE_BYTES, Unit: 'Bytes' }],
+      }],
     },
+    [METRIC_DIMENSION_DISTRIBUTION]: distributionId,
     [METRIC_ROUTE_TABLE_BYTES]: bytes,
   });
 }

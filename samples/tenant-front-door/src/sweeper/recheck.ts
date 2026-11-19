@@ -82,6 +82,8 @@ export interface RecheckDeps {
   readonly ddb: Pick<DynamoDBDocumentClient, 'send'>;
   readonly lambda: Pick<LambdaClient, 'send'>;
   readonly routeTableArn: string;
+  /** The `DistributionId` dimension of the re-check's counts. */
+  readonly distributionId: string;
   readonly tableName: string;
   /** This function, which the lister invokes once per page. */
   readonly functionName: string;
@@ -158,7 +160,7 @@ export async function runLister(deps: RecheckDeps): Promise<ListerResult> {
 
   // (2) The previous day's missing pages.
   const missingPages = await countMissingPages(deps, dayBefore(runDay));
-  emitCount(SWEEPER_METRICS.missingPages, missingPages, now);
+  emitCount(SWEEPER_METRICS.missingPages, missingPages, deps.distributionId, now);
 
   // (3) The items of tenants and domains no longer listed.
   const current = new Set(entries.map((e) => entrySk(e.tenantId, e.domain)));
@@ -459,11 +461,11 @@ export async function recordOutcome(deps: RecheckDeps, today: string, tenantId: 
 
   if (outcome === 'miss' && missStreak >= ALARM_STREAK) {
     logLine('WARN', SWEEPER_LOG.threeMiss, { tenantId, domain, missStreak });
-    emitCount(SWEEPER_METRICS.threeMiss, 1, deps.now());
+    emitCount(SWEEPER_METRICS.threeMiss, 1, deps.distributionId, deps.now());
   }
   if (errorStreak >= ALARM_STREAK) {
     logLine('WARN', SWEEPER_LOG.unverifiable, { tenantId, domain, errorStreak });
-    emitCount(SWEEPER_METRICS.unverifiable, 1, deps.now());
+    emitCount(SWEEPER_METRICS.unverifiable, 1, deps.distributionId, deps.now());
   }
   return true;
 }

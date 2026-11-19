@@ -287,6 +287,7 @@ describe('main stack: router and route table (spec §3.3, §4.1)', () => {
     const props = {
       Namespace: METRIC_NAMESPACE,
       MetricName: METRIC_ROUTE_TABLE_BYTES,
+      Dimensions: [{ Name: 'DistributionId', Value: { Ref: 'Distribution' } }],
       Statistic: 'Maximum',
       Threshold: STORE_ALARM_BYTES,
       ComparisonOperator: 'GreaterThanOrEqualToThreshold',

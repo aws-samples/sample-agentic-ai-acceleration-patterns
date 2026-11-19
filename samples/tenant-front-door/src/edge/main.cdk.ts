@@ -52,6 +52,7 @@ import {
 import {
   appEntry,
   encodeEntry,
+  METRIC_DIMENSION_DISTRIBUTION,
   METRIC_NAMESPACE,
   METRIC_ROUTE_TABLE_BYTES,
   RESERVED_LABELS,
@@ -381,6 +382,7 @@ export class MainStack extends Stack {
         metricName: METRIC_ROUTE_TABLE_BYTES,
         statistic: cloudwatch.Stats.MAXIMUM,
         period: Duration.minutes(5),
+        dimensionsMap: { [METRIC_DIMENSION_DISTRIBUTION]: distribution.ref },
       }),
       threshold: STORE_ALARM_BYTES,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,

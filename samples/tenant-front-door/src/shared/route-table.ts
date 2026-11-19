@@ -34,6 +34,13 @@ export const STORE_ALARM_BYTES = 4_000_000;
 export const METRIC_NAMESPACE = 'TenantFrontDoor';
 export const METRIC_ROUTE_TABLE_BYTES = 'RouteTableBytes';
 
+/**
+ * The one dimension of every `TenantFrontDoor` metric, the registrar's and
+ * the sweeper's: the multi-tenant distribution's id, so several front doors
+ * in one account and Region (ADR-0014) keep their metrics and alarms apart.
+ */
+export const METRIC_DIMENSION_DISTRIBUTION = 'DistributionId';
+
 /** A `signin` key id (§3.6). */
 export const SIGNIN_KID = /^[a-z0-9]{1,8}$/;
 

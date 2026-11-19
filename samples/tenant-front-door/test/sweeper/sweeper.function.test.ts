@@ -41,7 +41,8 @@ describe('sweeper entry (spec §3.1)', () => {
   });
 
   it('names the missing environment variable', () => {
-    expect(() => depsFromEnv({ ROUTE_TABLE_ARN: recheckDeps().routeTableArn })).toThrow('missing environment variable SWEEPER_TABLE_NAME');
+    expect(() => depsFromEnv({ ROUTE_TABLE_ARN: recheckDeps().routeTableArn })).toThrow('missing environment variable DISTRIBUTION_ID');
+    expect(() => depsFromEnv({ ROUTE_TABLE_ARN: recheckDeps().routeTableArn, DISTRIBUTION_ID: 'E1EXAMPLE0DIST' })).toThrow('missing environment variable SWEEPER_TABLE_NAME');
   });
 
   it('builds its settings from the environment', () => {
@@ -52,7 +53,7 @@ describe('sweeper entry (spec §3.1)', () => {
       AWS_LAMBDA_FUNCTION_NAME: 'tenant-front-door-sweeper',
       AWS_REGION: 'eu-central-1',
     });
-    expect(built.recheck).toMatchObject({ tableName: 'sweeper-table', functionName: 'tenant-front-door-sweeper' });
+    expect(built.recheck).toMatchObject({ tableName: 'sweeper-table', functionName: 'tenant-front-door-sweeper', distributionId: 'E1EXAMPLE0DIST' });
     expect(built.removal.distributionId).toBe('E1EXAMPLE0DIST');
   });
 });

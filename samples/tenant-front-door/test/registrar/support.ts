@@ -58,6 +58,7 @@ export function testConfig(overrides: Partial<RegistrarConfig> = {}): RegistrarC
     fleet: 'fleet1',
     edgeOperatorRoleArn: `arn:aws:iam::${EDGE_ACCOUNT}:role/ops/EdgeOperator`,
     dedicatedDomains: false,
+    distributionId: 'E1EXAMPLE0DIST',
     ...overrides,
   };
 }
@@ -281,6 +282,7 @@ export function harness(config: RegistrarConfig = testConfig(), domains?: Dedica
     store: new KvsRouteStore({
       client: new CloudFrontKeyValueStoreClient({ region: 'us-east-1' }),
       arn: config.routeTableArn,
+      distributionId: config.distributionId,
       sleep: async (ms) => {
         sleeps.push(ms);
       },
