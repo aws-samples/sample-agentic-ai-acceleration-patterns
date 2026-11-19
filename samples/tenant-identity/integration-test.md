@@ -53,6 +53,12 @@ Nothing is reused: every stack the run deploys, it destroys.
 
 ### Steps
 
+Every stack deploys with `allowedOrigins` set to the test list in
+[`test/e2e/cors-origins.ts`](./test/e2e/cors-origins.ts), and step 7 checks
+the CORS answers of the exchange from a listed, a pattern-matched, an
+unlisted, a two-label and a missing `Origin` (ADR-0040). Against a stack
+deployed with another list, or none, those checks are skipped with a log line.
+
 The four stack files run in parallel, one jest worker each. Against each
 topology stack the spec §10 scenario runs steps 1b–9 and 11, plus the R-6
 parameter check. It registers `sample/read` and `sample/write` in the stack's
