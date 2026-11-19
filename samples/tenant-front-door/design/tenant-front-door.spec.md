@@ -624,7 +624,8 @@ given below):
       registrar finds it among its own certificates by domain name and tags,
       taking an issued one first, then a pending one. A certificate in a
       terminal status (`FAILED`, `VALIDATION_TIMED_OUT`, `REVOKED` or
-      `EXPIRED`) counts as absent, so the call requests a new one. The
+      `EXPIRED`) counts as absent, so the call requests a new one, and so
+      does one the sweeper deleted between the list and its read. The
       request's idempotency token is the first 32 hex characters of a
       SHA-256 over the distribution id, the tenant id, the domain and `dk`,
       so a repeat within ACM's hour gets the same certificate and a new
@@ -661,14 +662,30 @@ given below):
       enabled, with this certificate. Then write `host#<d>`; answer 200. No request is routed on
       the domain before then. Once `host#<d>` exists, a repeat looks
       nothing up, changes nothing and answers 200.
-   6. Certificate failed, or validation timed out (ACM stops waiting
-      after 72 hours): 422 whose `message` carries ACM's failure
-      reason. The 422 comes from the request of sub-step 3, which within
-      ACM's hour returns the failed certificate for the same `dk`. The
-      operator drops the domain and sets it again, which issues a new
-      challenge and so, once it passes, a new certificate request. The
-      sweeper deletes a registrar certificate in a terminal status that
-      nothing uses, whatever its tenant's `d`.
+   6. Certificate failed or timed out, within and after ACM's hour:
+      the request of sub-step 3 derives its idempotency token from
+      `dk`, and ACM keeps a token for one hour, so the answer depends on
+      when the repeat comes. A repeat within the hour of a request whose
+      certificate failed gets that certificate back and answers 422
+      whose `message` carries ACM's failure reason. A repeat after the
+      hour requests a new certificate under the same `dk` and answers
+      202 with `stage: "certificate"`, or 422 again when the cause
+      persists (a CAA record that admits no Amazon CA, for example). ACM
+      stops waiting for validation after 72 hours, so a timed-out
+      certificate is always past its hour: a repeat requests a new
+      certificate and answers 202 `certificate`, never 422. Each new
+      request counts once against ACM's yearly certificate requests
+      (§4.1), so repeats over a persistent failure spend one request per
+      hour in which they come; the operator fixes the cause the 422 names
+      before repeating. The sweeper deletes a registrar certificate in a
+      terminal status that nothing uses, whatever its tenant's `d`, in
+      its next run, so a repeat within the hour can get back the ARN of a
+      certificate the sweeper has deleted. The registrar reads a
+      certificate that no longer exists (`ResourceNotFoundException`) as
+      no certificate: it answers 202 `certificate` without `record`, and
+      a repeat after the hour requests a new one. Dropping the domain and
+      setting it again issues a new challenge and so, once it passes, a
+      request under a new token, at any time.
 
    The token binds the challenge to one tenant and one domain: it lives
    in that tenant's `tenant#` entry next to `d`, is compared only for
@@ -1702,8 +1719,12 @@ and writes no `host#` key. Otherwise it creates the dedicated
 distribution tenant and writes the domain's `host#` key, which routes
 requests and records its owner (`t`, `ac`), and answers 200. The tenant
 then points the domain with a CNAME at the main stack's
-`RoutingEndpoint` output (§6.4). A failed or
-timed-out validation gets 422. A changed or dropped domain removes the
+`RoutingEndpoint` output (§6.4). A failed validation gets 422 on a
+repeat within ACM's one-hour idempotency window; a repeat after that
+hour, or over a timed-out validation, requests a new certificate under
+the same challenge and answers 202 `certificate`, and each such request
+counts once against ACM's yearly certificate requests (§3.4 step 5
+sub-step 6). A changed or dropped domain removes the
 old `host#<d>` at once and its distribution tenant and certificate in two
 phases (§3.4 steps 3 to 5). The domain is never a sign-in target: its
 users sign in on `signInHost` (§3.5).
@@ -1726,8 +1747,8 @@ tenant, one another tenant holds pending (a registrar certificate for
 it tagged with that tenant), one CloudFront already serves (`CNAMEAlreadyExists`), or a
 distribution tenant or certificate tagged for another tenant (the
 message names no tenant); 422 when the dedicated domain's certificate
-failed validation or timed out (a domain challenge never fails: it
-expires and is issued again); 507
+failed validation, on a repeat within ACM's hour of its request (a
+domain challenge never fails: it expires and is issued again); 507
 when a write would exceed the route table's 5 MB (ADR-0012); 429 with
 `reason: certificate-quota` when ACM refuses a certificate request for
 its quota (§4.1), which lasts until the deployer raises the quota or
@@ -2342,7 +2363,12 @@ only, because a page acts only on the current UTC day (§3.4). Step 14
 also starts the daily run by hand, with `lambda:InvokeFunction` on the
 sweeper function only, and reads its result with `logs:FilterLogEvents`
 on the sweeper's log group and `cloudwatch:GetMetricData` for the
-three-miss count, which IAM cannot narrow to one metric. The test
+three-miss count, which IAM cannot narrow to one metric. For step
+14's probe of the repeat request, the test role also holds the
+registrar's `RequestCertificate` and `AddTagsToCertificate`
+statements, built by the same code as the registrar's so their
+conditions cannot drift, and `acm:DeleteCertificate` conditioned on
+the registrar's distribution tag. The test
 creates the test role and the edge operator role it passes as
 `edgeOperatorRoleArn` (§3.6) for the run, and removes both after (§6.2).
 
@@ -2532,8 +2558,21 @@ destroy time, which the test reports with the rest.
     challenge had passed differs only by a certificate the sweeper
     deletes before the domain is free, so the test does not build one.
     `b`'s certificate request is the run's check that ACM authorises the
-    tags of a request under the tag grant's `Null` condition (§3.4). The
-    step creates no distribution tenant, so the create in the stack's
+    tags of a request under the tag grant's `Null` condition (§3.4).
+    The repeat of sub-step 6 within ACM's hour sends the same token and
+    tags again for a certificate that already carries the distribution
+    tag, which `b`'s calls never reach, because a pending certificate
+    is found and not requested again. The test makes that repeat as the
+    registrar would (the test-only probe above): it requests a
+    certificate for `probe.<dd>` with the registrar's three tags for
+    `b` and a random idempotency token, then repeats the request at
+    once, before a sweeper run can delete it, with the same token and
+    tags. Both return the same ARN and neither gets
+    `AccessDenied`. It deletes the probe certificate and repeats the
+    request once more with that token: the test reports whether ACM
+    returns the deleted ARN, which the registrar reads as no
+    certificate (sub-step 6), or a new one, which it then deletes too.
+    The step creates no distribution tenant, so the create in the stack's
     connection group, its tags and the `ListTagsForResource` reads are
     not checked here.
 15. Wait 60 s for log delivery (33 s in S-1). Per-tenant counts name
@@ -2691,7 +2730,8 @@ destroy time, which the test reports with the rest.
     parameter; then destroy everything else the test deployed,
     in both accounts, the control plane and the operator role included,
     except the shared identity pool. The leftover
-    check also finds no registrar certificate for `<dd>` (step 14), no
+    check also finds no registrar certificate for `<dd>` or
+    `probe.<dd>` (step 14), no
     hook parameter and no stand-in stack (step 1).
 
 Rotation check, optional and run on its own against a `host` mode front

@@ -10,6 +10,7 @@ import {
   ListCertificatesCommand,
   ListTagsForCertificateCommand,
   RequestCertificateCommand,
+  ResourceNotFoundException,
   type Tag as AcmTag,
 } from '@aws-sdk/client-acm';
 import {
@@ -278,6 +279,10 @@ export class AwsDedicatedDomains implements DedicatedDomains {
       const arn = await this.requestCertificate(request.tenantId, d, dk);
       own.push({ arn });
       certificate = await this.describeWithRecord(arn, d);
+      // The repeat got back, within ACM's hour, a certificate the sweeper
+      // has deleted: no certificate yet, so 202 `certificate` without a
+      // record, and a repeat after the hour requests a new one (sub-step 6).
+      if (certificate === undefined) return { answer: this.pending(request, entry, 'certificate', undefined) };
     }
 
     // Sub-steps 4 and 6.
@@ -426,7 +431,7 @@ export class AwsDedicatedDomains implements DedicatedDomains {
   private async certificate(own: readonly OwnCertificate[]): Promise<CertificateDetail | undefined> {
     const details: CertificateDetail[] = [];
     for (const c of own) {
-      const detail = (await this.options.acm.send(new DescribeCertificateCommand({ CertificateArn: c.arn }))).Certificate;
+      const detail = await this.describe(c.arn);
       if (detail !== undefined) details.push(detail);
     }
     return details.find((x) => x.Status === 'ISSUED')
@@ -461,16 +466,27 @@ export class AwsDedicatedDomains implements DedicatedDomains {
   /**
    * ACM attaches a new certificate's validation record a few seconds
    * after the request; read it until it is there, then answer without it.
+   * Undefined when the certificate no longer exists.
    */
-  private async describeWithRecord(arn: string, domain: string): Promise<CertificateDetail> {
+  private async describeWithRecord(arn: string, domain: string): Promise<CertificateDetail | undefined> {
     let detail: CertificateDetail | undefined;
     for (let i = 0; i < RECORD_READS; i++) {
       if (i > 0) await this.sleep(RECORD_READ_GAP_MS);
-      detail = (await this.options.acm.send(new DescribeCertificateCommand({ CertificateArn: arn }))).Certificate;
-      if (detail?.Status !== 'PENDING_VALIDATION' || this.validationRecord(detail, domain) !== undefined) break;
+      detail = await this.describe(arn);
+      if (detail === undefined) return undefined;
+      if (detail.Status !== 'PENDING_VALIDATION' || this.validationRecord(detail, domain) !== undefined) break;
     }
-    if (detail === undefined) throw refuse.internal('ACM returned no certificate');
     return detail;
+  }
+
+  /** A certificate that no longer exists (the sweeper deleted it) is no certificate (sub-step 6). */
+  private async describe(arn: string): Promise<CertificateDetail | undefined> {
+    try {
+      return (await this.options.acm.send(new DescribeCertificateCommand({ CertificateArn: arn }))).Certificate;
+    } catch (error) {
+      if (error instanceof ResourceNotFoundException) return undefined;
+      throw error;
+    }
   }
 
   // -------------------------------------------------------------------------

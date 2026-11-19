@@ -390,6 +390,31 @@ describe('§3.4 step 5 sub-steps 3, 4 and 6: the certificate', () => {
     expect(h.acm.requests).toBe(1);
   });
 
+  test('a repeat within ACM\'s hour whose certificate the sweeper deleted is 202 certificate without a record, not 500', async () => {
+    const h = rig();
+    passed(h);
+    h.acm.add(certificateArn(1), { domain: D, status: 'FAILED', failureReason: 'CAA_ERROR', tags: ownTags(t), idempotencyToken: idempotency(TOKEN_1) });
+    expect((await put(h)).statusCode).toBe(422);
+    h.acm.delete(certificateArn(1));
+    const res = await put(h);
+    expect(res.statusCode).toBe(202);
+    expect(res.body).toEqual({ tenantId: TENANT, dt: DT, stage: 'certificate' });
+    expect(h.acm.requests).toBe(0);
+    expect(h.kvs.items.has(hostKey(D))).toBe(false);
+    expect(stored(h)).toEqual(expect.objectContaining({ d: D, dk: TOKEN_1 }));
+  });
+
+  test('a certificate deleted between the list and the read counts as absent: a new one is requested', async () => {
+    const h = rig();
+    passed(h);
+    h.acm.add(certificateArn(1), { domain: D, status: 'PENDING_VALIDATION', tags: ownTags(t) });
+    h.acm.goneOnRead.add(certificateArn(1));
+    const res = await put(h);
+    expect(res.statusCode).toBe(202);
+    expect(res.body.stage).toBe('certificate');
+    expect(h.acm.requests).toBe(1);
+  });
+
   test('an issued certificate is used before a failed one for the same domain', async () => {
     const h = rig();
     passed(h);
