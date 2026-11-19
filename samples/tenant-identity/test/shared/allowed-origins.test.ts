@@ -80,6 +80,9 @@ describe('validateAllowedOrigins', () => {
     ['https://*.s3.amazonaws.com', 'pattern under a private suffix'],
     ['https://*.us-east-1.elb.amazonaws.com', 'pattern under a wildcard rule'],
     ['https://*.amazonaws.com', 'pattern under a shared-hosting domain'],
+    ['https://*.eu-central-1.amazonaws.com', 'regional shared-hosting domain'],
+    ['https://*.dualstack.eu-central-1.amazonaws.com', 'regional shared-hosting domain'],
+    ['https://*.cn-north-1.amazonaws.com.cn', 'China shared-hosting domain'],
     ['https://a.0x10', 'hex IPv4 literal'],
   ])('refuses %s (%s), naming the entry', (entry) => {
     expect(() => validateAllowedOrigins([entry])).toThrow(`'${entry}'`);

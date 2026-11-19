@@ -22,11 +22,13 @@ const EXACT = new RegExp(`^https://(${NAME})(?::(${PORT}))?$`);
 const PATTERN = new RegExp(`^https://\\*\\.(${NAME})$`);
 
 /**
- * Domains that are not public suffixes but where other customers' pages sit
- * one label under them (S3 path-style URLs), so a pattern directly under
- * them is refused too (§5.4.1).
+ * Domains where other customers' pages sit one label under the domain or
+ * under one of its subdomains (S3 path-style URLs on `s3.amazonaws.com`,
+ * `s3.eu-central-1.amazonaws.com`), though neither is always a public
+ * suffix. A pattern under them is refused (§5.4.1); a vendor's own AWS
+ * hostname goes in as an exact entry.
  */
-export const SHARED_HOSTING_DOMAINS: readonly string[] = ['amazonaws.com'];
+export const SHARED_HOSTING_DOMAINS: readonly string[] = ['amazonaws.com', 'amazonaws.com.cn'];
 
 /**
  * Turns the context value or stack prop into a list. A missing value, an
@@ -89,7 +91,7 @@ function checkEntry(entry: string): void {
     if (getPublicSuffix(domain, { allowPrivateDomains: true }) === domain) {
       refuse(`'${domain}' is a public suffix, so the pattern would trust hosts other parties run`);
     }
-    if (SHARED_HOSTING_DOMAINS.includes(domain)) {
+    if (SHARED_HOSTING_DOMAINS.some((d) => domain === d || domain.endsWith(`.${d}`))) {
       refuse(`other customers' pages sit one label under '${domain}' (S3 path-style URLs)`);
     }
     return;

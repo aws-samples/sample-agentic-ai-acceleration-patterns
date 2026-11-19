@@ -11,7 +11,7 @@
 > destroy 4), all 8 alarm actions published, and the leftover check found no
 > pool, REST API or log group. The previous green run (2026-11-10, 51/51 in
 > 11.5 minutes) covered the same steps without CORS. The
-> previous green run (2026-10-23, 45/45, with the R-6 parameter check and all
+> run before that (2026-10-23, 45/45, with the R-6 parameter check and all
 > 8 alarm actions published to the SNS topic, M-31) verified teardown leaves
 > no stack, pool, table, parameter, role or log group: the destroy's
 > leftover check reported no tagged pool and no owned log group 90 s after

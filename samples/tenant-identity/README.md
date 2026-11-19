@@ -426,7 +426,7 @@ npx cdk deploy --context topology=shared-pool-multi-tenant --context 'allowedOri
 
 Each entry is an exact `https` origin or `https://*.<domain>`, which matches
 one host label under the domain. Synthesis refuses `http`, a pattern under a
-public suffix such as `*.cloudfront.net` or directly under `amazonaws.com`,
+public suffix such as `*.cloudfront.net` or under `amazonaws.com`,
 and anything else §5.4.1 refuses, naming the entry. The suffix check does not
 know every domain where other parties host pages, so list a pattern only
 under a domain you run. With no list, the API sends no CORS header. Redeploy with
