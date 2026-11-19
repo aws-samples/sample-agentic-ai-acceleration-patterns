@@ -29,7 +29,8 @@ Reusing a found deployment makes the test depend on what the account
 happens to hold.
 ### Option 2: The stand-in of spike S-5
 A REST API with a REQUEST authoriser and a streaming Lambda proxy that
-records what reaches it. Pros: deploys in about a minute (67 s in S-5); asserts exactly what
+records what reaches it. Pros: deploys in about a minute (67 s in
+S-5); asserts exactly what
 the front door owns: the rewritten path `<stage>/<backend>/invocations`,
 the forwarded bearer and `x-tenant-route`, and unbuffered streaming; and
 records that a refused path never reaches it. Cons: the real ingress's
@@ -52,10 +53,10 @@ what covers its resource tree.
 - Threat model T-16 stays mitigated by the path filter, with the residual
   that the real ingress is not driven through the edge in this sample's
   test.
-- Step 23 also sends `/agents/entitlements/invocations`, which passes
-  the router, so the stand-in records that a static-resource name is
-  forwarded, and checks a suspended tenant's 503 on the route (two
-  60 s propagation waits).
+- Step 23 also tests `/agents/entitlements/invocations` on the router,
+  which shows that the router forwards a static-resource name, and
+  checks a suspended tenant's 503 on the route (two 60 s propagation
+  waits).
 - A deployer who puts an `agentcore-gateway` ingress behind `/agents/*`
   runs step 23's assertions against it, after checking its URL form
   (ADR-0019).

@@ -2219,7 +2219,8 @@ followed by a wait for its page (at most 15 s for one entry), two stack
 updates of the main stack and a wait of up to 15 minutes for the
 sweeper to delete the certificate. Step 23 adds the stand-in's deploy
 and destroy (67 s and 33 s in S-5), two 60 s waits around the
-suspended-tenant check, and a streamed call of a few seconds. The control plane the test deploys has its own deploy and
+suspended-tenant check, and a streamed call of a few seconds. The
+control plane the test deploys has its own deploy and
 destroy time, which the test reports with the rest.
 
 1. Deploy the control plane in the control plane's account, which
@@ -2507,8 +2508,9 @@ destroy time, which the test reports with the rest.
     path lands (ADR-0024). With no token the agent route gets 401, with
     a token for an unregistered tenant 403, and with `Sec-Fetch-Site:
     same-site` 403. The edge operator role then suspends `a`, and after
-    60 s `a`'s token on the agent route gets 503 with `Retry-After`;
-    it resumes `a` and waits 60 s before the streamed call below. Then one streamed `POST
+    60 s `a`'s token on the agent route gets 503 with
+    `Retry-After: 300`; it resumes `a` and waits 60 s before the
+    streamed call below. Then one streamed `POST
     https://<appDomain>/agents/support-bot/invocations` with `a`'s
     token goes through the real distribution to the stand-in, which
     writes ten events 500 ms apart: 200, the first byte at the client
