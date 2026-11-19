@@ -36,6 +36,10 @@ describe('registrar configuration (REGISTRAR_ENV)', () => {
     expect(loadConfig(env({ [REGISTRAR_ENV.distributionId]: undefined, [REGISTRAR_ENV.dedicatedDomains]: 'off' })).distributionId).toBeUndefined();
   });
 
+  test('DISTRIBUTION_ID is required while dedicated domains are on', () => {
+    expect(() => loadConfig(env({ [REGISTRAR_ENV.distributionId]: undefined }))).toThrow(REGISTRAR_ENV.distributionId);
+  });
+
   test.each(Object.values(REGISTRAR_ENV).filter((name) => name !== REGISTRAR_ENV.distributionId))('a missing %s fails closed', (name) => {
     expect(() => loadConfig(env({ [name]: undefined }))).toThrow(name);
   });
@@ -50,6 +54,7 @@ describe('registrar configuration (REGISTRAR_ENV)', () => {
     [REGISTRAR_ENV.appDomain, 'App.Example.com'],
     [REGISTRAR_ENV.applicationId, 'Demo App'],
     [REGISTRAR_ENV.edgeOperatorRoleArn, 'arn:aws:iam::123456789012:user/alice'],
+    [REGISTRAR_ENV.edgeOperatorRoleArn, 'arn:aws:iam::123456789012:role/ops/'],
     [REGISTRAR_ENV.routeTableArn, 'kvs-1'],
   ])('a malformed %s fails closed', (name, value) => {
     expect(() => loadConfig(env({ [name]: value }))).toThrow(name);

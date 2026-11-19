@@ -26,7 +26,7 @@ export interface CallerIdentity {
 const ASSUMED_ROLE = /^arn:([a-z-]+):sts::(\d{12}):assumed-role\/([^/]+)\/[^/]+$/;
 
 /** `arn:<partition>:iam::<account>:role/<path/><role name>`. */
-const ROLE = /^arn:([a-z-]+):iam::(\d{12}):role\/(?:.*\/)?([^/]+)$/;
+export const ROLE_ARN = /^arn:([a-z-]+):iam::(\d{12}):role\/(?:.*\/)?([^/]+)$/;
 
 interface RoleId {
   readonly partition: string;
@@ -35,7 +35,7 @@ interface RoleId {
 }
 
 function parseRoleArn(arn: string): RoleId {
-  const m = ROLE.exec(arn);
+  const m = ROLE_ARN.exec(arn);
   if (m === null) throw new Error('not an IAM role ARN');
   return { partition: m[1], account: m[2], name: m[3] };
 }

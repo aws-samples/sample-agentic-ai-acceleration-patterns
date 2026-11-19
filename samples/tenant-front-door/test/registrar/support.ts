@@ -107,7 +107,13 @@ export class MemoryKvs {
   conflicts = 0;
   /** Called after each Describe, to let a test write between the read and the write. */
   afterDescribe?: () => void;
+  /**
+   * Called before each UpdateKeys. It may change the store as another
+   * writer would; when it returns true the call fails with a conflict.
+   */
+  beforeUpdate?: () => boolean;
   writes = 0;
+  gets: string[] = [];
 
   size(): number {
     let n = this.padding;
@@ -136,11 +142,13 @@ export function installKvs(kvs: MemoryKvs): void {
     return out;
   });
   kvsMock.on(GetKeyCommand).callsFake((input: { Key: string }) => {
+    kvs.gets.push(input.Key);
     const value = kvs.items.get(input.Key);
     if (value === undefined) throw new ResourceNotFoundException({ message: 'key not found', $metadata: {} });
     return { Key: input.Key, Value: value, ItemCount: kvs.items.size, TotalSizeInBytes: kvs.size() };
   });
   kvsMock.on(UpdateKeysCommand).callsFake((input: { IfMatch: string; Puts?: { Key: string; Value: string }[]; Deletes?: { Key: string }[] }) => {
+    if (kvs.beforeUpdate?.() === true) throw new ConflictException({ message: 'etag mismatch', $metadata: {} });
     if (kvs.conflicts > 0) {
       kvs.conflicts--;
       kvs.version++;

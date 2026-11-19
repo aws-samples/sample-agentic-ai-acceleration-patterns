@@ -217,16 +217,18 @@ describe('PutCellRoute', () => {
   test('§3.4 step 5: on an ETag conflict the write-once check runs again on the re-read', async () => {
     const h = harness();
     h.cp.cells.set(CELL, { status: 'CREATING' });
-    // Another global hook writes another origin between this call's read and its write.
+    // Another global hook writes another origin after this call's read and wins the ETag.
     let once = true;
-    h.kvs.afterDescribe = () => {
-      if (once) {
-        once = false;
-        h.kvs.set(cellKey(c), encodeEntry(cellEntry({ ac: CELL_ACCOUNT, o: API_DOMAIN_2 })));
-      }
+    h.kvs.beforeUpdate = () => {
+      if (!once) return false;
+      once = false;
+      h.kvs.set(cellKey(c), encodeEntry(cellEntry({ ac: CELL_ACCOUNT, o: API_DOMAIN_2 })));
+      return true;
     };
     const res = await h.handler(restEvent('PUT', `/cells/${CELL}`, 'hook', { apiDomain: API_DOMAIN }));
     expect(res.statusCode).toBe(409);
+    expect(h.kvs.gets.filter((k) => k === cellKey(c))).toHaveLength(2);
+    expect(h.kvs.get(cellKey(c))).toContain(API_DOMAIN_2);
   });
 });
 
@@ -582,6 +584,14 @@ describe('DeleteTenantRoute', () => {
     expect([...h.kvs.items.keys()].sort()).toEqual([hostKey(POOLED), hostKey('portal.example.com')].sort());
   });
 
+  test('§5.1: a damaged tenant# is still removed; a damaged host# is kept as naming no tenant', async () => {
+    const h = harness(testConfig({ addressing: 'host' }));
+    h.kvs.items.set(tenantKey(t), 'not json');
+    h.kvs.items.set(hostKey(POOLED), 'not json');
+    expect((await h.handler(restEvent('DELETE', `/tenants/${TENANT}`, 'operator'))).statusCode).toBe(200);
+    expect([...h.kvs.items.keys()]).toEqual([hostKey(POOLED)]);
+  });
+
   test('§3.4 deletes: the operator skips step 2', async () => {
     const h = ready();
     h.cp.deployment(TENANT, { status: 'ACTIVE' });
@@ -628,6 +638,14 @@ describe('UpdateTenantRouteStatus', () => {
     expect((await h.handler(restEvent('PUT', `/tenants/${TENANT}/status`, 'hook', { status: 'active' }))).statusCode).toBe(403);
   });
 
+  test('reads no control-plane record, so a suspension works while the control plane is down', async () => {
+    const h = harness();
+    seedTenant(h);
+    h.cp.failWith = 500;
+    expect((await h.handler(restEvent('PUT', `/tenants/${TENANT}/status`, 'operator', { status: 'suspended' }))).statusCode).toBe(200);
+    expect(h.cp.fetch).not.toHaveBeenCalled();
+  });
+
   test('§5.1: 409 when the tenant has no route', async () => {
     const h = harness();
     expect((await h.handler(restEvent('PUT', `/tenants/${TENANT}/status`, 'operator', { status: 'suspended' }))).statusCode).toBe(409);
@@ -670,6 +688,18 @@ describe('DeleteHostRoute', () => {
     const h = harness();
     expect((await h.handler(restEvent('DELETE', '/hosts/portal.example.com', 'operator'))).statusCode).toBe(200);
     expect(h.kvs.writes).toBe(0);
+  });
+
+  test.each([
+    ['is not JSON', 'not json'],
+    ['names no valid tenant id', '{"v":1,"t":"Not A Tenant!","ac":"111111111111"}'],
+  ])('§5.1: a host# value that %s is removed whatever it holds, touching no d', async (_why, value) => {
+    const h = harness();
+    seedTenant(h, { d: 'portal.example.com', dk: TOKEN });
+    h.kvs.items.set(hostKey('portal.example.com'), value);
+    expect((await h.handler(restEvent('DELETE', '/hosts/portal.example.com', 'operator'))).statusCode).toBe(200);
+    expect(h.kvs.items.has(hostKey('portal.example.com'))).toBe(false);
+    expect(JSON.parse(h.kvs.get(tenantKey(t))!).d).toBe('portal.example.com');
   });
 
   test('§3.4: the hook role gets 403', async () => {
@@ -721,6 +751,47 @@ describe('route table limits', () => {
     await h.handler(restEvent('PUT', `/cells/${CELL}`, 'hook', { apiDomain: API_DOMAIN }));
     const emf = logSpy.mock.calls.map((call) => String(call[0])).find((l) => l.includes('RouteTableBytes'));
     expect(json(emf!).RouteTableBytes).toBe(h.kvs.size());
+    expect((json(emf!)._aws as { CloudWatchMetrics: unknown[] }).CloudWatchMetrics[0]).toEqual({
+      Namespace: 'TenantFrontDoor',
+      Dimensions: [[]],
+      Metrics: [{ Name: 'RouteTableBytes', Unit: 'Bytes' }],
+    });
+  });
+
+  function readyTenant(): Harness {
+    const h = harness();
+    h.cp.deployment(TENANT, { status: 'CREATING' });
+    h.cp.tenants.set(TENANT, { name: 'Acme Corp' });
+    seedCell(h);
+    return h;
+  }
+
+  test('§3.4 step 5: a conflict re-runs step 4 on the re-read: a cell route deleted meanwhile is 409', async () => {
+    const h = readyTenant();
+    let once = true;
+    h.kvs.beforeUpdate = () => {
+      if (!once) return false;
+      once = false;
+      h.kvs.items.delete(cellKey(c));
+      h.kvs.version++;
+      return true;
+    };
+    expect((await h.handler(restEvent('PUT', `/tenants/${TENANT}`, 'hook'))).statusCode).toBe(409);
+    expect(h.kvs.items.has(tenantKey(t))).toBe(false);
+  });
+
+  test('§3.4 step 5: a conflict re-runs the size check on the re-read: a store that grew meanwhile is 507', async () => {
+    const h = readyTenant();
+    let once = true;
+    h.kvs.beforeUpdate = () => {
+      if (!once) return false;
+      once = false;
+      h.kvs.padding = 5_000_000 - h.kvs.size() - 10;
+      h.kvs.version++;
+      return true;
+    };
+    expect((await h.handler(restEvent('PUT', `/tenants/${TENANT}`, 'hook'))).statusCode).toBe(507);
+    expect(h.kvs.writes).toBe(0);
   });
 });
 

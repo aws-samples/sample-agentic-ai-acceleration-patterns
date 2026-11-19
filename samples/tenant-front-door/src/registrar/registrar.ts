@@ -17,6 +17,7 @@ import {
   hostEntry,
   hostKey,
   isReservedLabel,
+  RouteTableError,
   type RouteStatus,
   sanitiseDisplayName,
   type TenantEntry,
@@ -68,7 +69,11 @@ const PUT_STATUSES: readonly string[] = ['CREATING', 'UPDATING'];
 /** The Region part of a Lambda function URL host; the model pins the rest of the form. */
 const FUNCTION_URL_REGION = /^[a-z0-9]{32}\.lambda-url\.([a-z0-9-]+)\.on\.aws$/;
 
-/** `<tenantId>.<appDomain>` in `host` mode (§4.1), refusing a reserved label with 400. */
+/**
+ * `<tenantId>.<appDomain>` in `host` mode (§4.1), refusing a reserved label
+ * with 400. A guard only: the model's `TenantId` is a 26-character ULID, so
+ * no API call reaches a reserved label today.
+ */
 export function pooledHost(storedTenantId: string, appDomain: string): string {
   if (isReservedLabel(storedTenantId)) throw refuse.badRequest('the tenant id is a reserved host label');
   return `${storedTenantId}.${appDomain}`;
@@ -79,10 +84,33 @@ async function readTenant(read: ReadKey, storedId: string): Promise<TenantEntry 
   return value === undefined ? undefined : decodeTenantEntry(value);
 }
 
-/** True when the `host#` key exists and its `t` names the tenant. */
+/**
+ * The `tenant#` entry for a delete: an entry that does not decode is still
+ * deleted, so the operator can clear a damaged key, and names no domain.
+ */
+async function readTenantForDelete(read: ReadKey, storedId: string): Promise<TenantEntry | undefined> {
+  try {
+    return await readTenant(read, storedId);
+  } catch (error) {
+    if (!(error instanceof RouteTableError)) throw error;
+    return undefined;
+  }
+}
+
+/** The `host#` owner, or undefined for a value that does not decode or names no valid tenant id. */
+function hostOwner(value: string): string | undefined {
+  try {
+    return toStoredId(decodeHostEntry(value).t);
+  } catch (error) {
+    if (!(error instanceof RouteTableError)) throw error;
+    return undefined;
+  }
+}
+
+/** True when the `host#` key exists and its `t` names the tenant; a value that does not decode names no one, so it is kept. */
 async function hostNamesTenant(read: ReadKey, host: string, storedId: string): Promise<boolean> {
   const value = await read(hostKey(host));
-  return value !== undefined && decodeHostEntry(value).t === storedId;
+  return value !== undefined && hostOwner(value) === storedId;
 }
 
 export class RegistrarService implements RegistrarServiceService<RegistrarContext> {
@@ -159,9 +187,13 @@ export class RegistrarService implements RegistrarServiceService<RegistrarContex
   private async hookPutTenantRoute(requestTenantId: string, tenantId: string): Promise<PutTenantRouteServerOutput> {
     const { config, controlPlane, store } = this.deps;
     const host = config.addressing === 'host' ? pooledHost(tenantId, config.appDomain) : undefined;
-    const deployment = await this.deployment(tenantId);
+    // Both reads at once, inside API Gateway's 29 s; the deployment's answer is judged first.
+    const [deploymentRead, tenantRead] = await Promise.allSettled([this.deployment(tenantId), controlPlane.getTenant(tenantId)]);
+    if (deploymentRead.status === 'rejected') throw deploymentRead.reason;
+    const deployment = deploymentRead.value;
     if (!PUT_STATUSES.includes(deployment.status)) throw refuse.conflict('the deployment is neither CREATING nor UPDATING');
-    const tenant = await controlPlane.getTenant(tenantId);
+    if (tenantRead.status === 'rejected') throw tenantRead.reason;
+    const tenant = tenantRead.value;
     if (tenant === undefined) throw refuse.forbidden(NOT_THIS_APPLICATION);
     const cellId = toStoredId(deployment.cellId);
     const n = sanitiseDisplayName(tenant.name);
@@ -261,7 +293,7 @@ export class RegistrarService implements RegistrarServiceService<RegistrarContex
       }
     }
     const release = await store.update(async (read) => {
-      const entry = await readTenant(read, tenantId);
+      const entry = await readTenantForDelete(read, tenantId);
       const deletes = [tenantKey(tenantId)];
       // Each host# key goes only when its t names this tenant (§5.1).
       if (config.addressing === 'host') {
@@ -306,9 +338,10 @@ export class RegistrarService implements RegistrarServiceService<RegistrarContex
     const release = await store.update(async (read) => {
       const value = await read(hostKey(host));
       if (value === undefined) return { result: undefined as { tenantId: string; domain: string } | undefined };
-      const owner = decodeHostEntry(value).t;
-      const entry = await readTenant(read, owner);
-      if (entry?.d !== host) return { deletes: [hostKey(host)], result: undefined };
+      // A key whatever its t and ac (§5.1): one that does not decode is deleted and touches no d.
+      const owner = hostOwner(value);
+      const entry = owner === undefined ? undefined : await readTenantForDelete(read, owner);
+      if (owner === undefined || entry?.d !== host) return { deletes: [hostKey(host)], result: undefined };
       // The host is that tenant's dedicated domain: d goes with it (§5.1).
       const kept = tenantEntry({ c: entry.c, ac: entry.ac, dt: entry.dt, s: entry.s, n: entry.n });
       return { puts: { [tenantKey(owner)]: encodeEntry(kept) }, deletes: [hostKey(host)], result: { tenantId: owner, domain: host } };
