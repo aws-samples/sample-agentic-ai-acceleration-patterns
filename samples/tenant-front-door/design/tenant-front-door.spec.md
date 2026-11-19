@@ -1683,9 +1683,9 @@ All with a small static HTML or JSON body and `no-store`:
   (§7.2), which only the issuer can configure. For `tenant-identity`,
   deploy its `shared-pool-multi-tenant` stack with `allowedOrigins`
   set to `https://<appDomain>` in `single` mode, or `https://*.<appDomain>`
-  in `host` mode (`tenant-identity` §5.4.1 and ADR-0040). Give
-  `appDomain` in lower case in both. Those are the only pages that post the exchange: in `host`
-  mode the SPA holds a session only on `<tenant>.<appDomain>`, the apex
+  in `host` mode (`tenant-identity` §5.4.1 and ADR-0040), with
+  `appDomain` in lower case in both. Pages on those origins are the only
+  ones that post the exchange: in `host` mode the SPA holds a session only on `<tenant>.<appDomain>`, the apex
   answers 404 and `login.<appDomain>` serves no SPA; a dedicated domain
   holds no token in either mode, because its session moves to
   `signInHost` (§3.5). The pattern lets every page one label under
