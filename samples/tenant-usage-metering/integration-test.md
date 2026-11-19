@@ -96,9 +96,10 @@ about 75; the steps after the count take about 20 minutes; deploy and
 destroy take about 7 together (about 4 and 3). Cost is well under one US
 dollar a run.
 
-Last green runs, 2026-11-19, eu-central-1, all 54 checks passed on each
-path: `BUS` (deploy 228 s, test about 40 minutes, delete 183 s) and
-`DIRECT` (deploy 233 s, test 80 minutes, delete 182 s). Coverage and the
+Last green runs, 2026-11-19, eu-central-1: `BUS` passed all 56 checks
+(deploy 224 s, test 60 minutes, lifecycle update 100 s, delete 182 s)
+and `DIRECT` all 54 (deploy 233 s, test 80 minutes, delete 182 s); the
+two raw-stream reader checks run only on `BUS`. Coverage and the
 unit-test count are in the [`architecture.md`](architecture.md) status
 block.
 

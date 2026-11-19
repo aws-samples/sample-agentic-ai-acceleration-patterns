@@ -7,9 +7,10 @@ SPDX-License-Identifier: MIT-0
 > **Status: implemented and verified.** The integration test
 > ([`integration-test.md`](integration-test.md)) last passed in a
 > non-production account in eu-central-1 on 2026-11-19 on both ingest
-> paths, 54 of 54 checks each: `ingestPath: BUS` (deploy 228 s, test about
-> 40 minutes, delete 183 s) and `ingestPath: DIRECT` (deploy 233 s, test
-> 80 minutes, delete 182 s). The runs covered registration and
+> paths: `ingestPath: BUS` with 56 of 56 checks (deploy 224 s, test 60
+> minutes, update 100 s, delete 182 s) and `ingestPath: DIRECT` with 54
+> of 54 (deploy 233 s, test 80 minutes, delete 182 s; the two raw-stream
+> reader checks run only on `BUS`). The runs covered registration and
 > offboarding, admission and per-event refusals, the hourly count, a late
 > event's `ADJUSTMENT`, re-admission, the `S3_EXPORT` sink, the `HTTP` sink
 > (`SENT` to an `AWS_IAM` function URL signed as the dispatcher role,
@@ -20,7 +21,9 @@ SPDX-License-Identifier: MIT-0
 > only before the raw store; the `BUS` run is on the current code. A
 > delete leaves only the CDK provider log groups (§11). Unit tests:
 > 189.
-> **Not exercised live:** `StartIngestRedrive` with messages in the queue,
+> **Not exercised live:** `StartRecount` (it uses the same table actions
+> as `SINK_REDRIVE` and `RESEND_BLOCKED`, which are), `StartIngestRedrive`
+> with messages in the queue,
 > the close of an hour after `recountWindowHours`, a cell or a bus
 > subscriber in a second account (the AWS RAM shares and the share guard
 > of §4.1), and the hook script against a deployed API.
