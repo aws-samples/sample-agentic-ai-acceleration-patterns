@@ -11,7 +11,7 @@ import { BASE_PROPS, CONTROL_PLANE_ACCOUNT, EDGE_ACCOUNT, FIXTURES, FULL_HOST_PR
 import { ACCESS_LOG_FIELDS, FORBIDDEN_LOG_FIELDS } from '../../src/edge/edge-logging.cdk';
 import { RATE_RULE_HEADER } from '../../src/edge/edge.cdk';
 import { MAX_ROUTER_BYTES, REGISTRAR_STAGE, unroutedCellOrigin } from '../../src/edge/main.cdk';
-import { API_FORWARDED_HEADERS, PARAM_EDGE, REGISTRAR_ENV, ROUTER_TOKENS } from '../../src/shared/contracts';
+import { API_FORWARDED_HEADERS, PARAM_EDGE, REGISTRAR_ENV, ROUTER_TOKENS, TAG_DISTRIBUTION_ID } from '../../src/shared/contracts';
 import { appEntry, encodeEntry, METRIC_NAMESPACE, METRIC_ROUTE_TABLE_BYTES, RESERVED_LABELS, STORE_ALARM_BYTES } from '../../src/shared/route-table';
 
 const single = synth(BASE_PROPS);
@@ -207,12 +207,14 @@ describe('main stack: distribution (spec §3.1, §3.2, ADR-0002)', () => {
     expect(agents.OriginAccessControlId).toBeUndefined();
   });
 
-  it('serves appDomain (single) or *.appDomain (host) from one pooled distribution tenant on its own connection group, with a CNAME (spike S-1)', () => {
+  it('serves appDomain (single) or *.appDomain (host) from one pooled distribution tenant on its own connection group, tagged with the distribution, with a CNAME (spike S-1, AR-33)', () => {
     for (const [s, domain] of [[single, 'app.example.com'], [host, '*.app.example.com']] as const) {
       const tenant = only(s.main, 'AWS::CloudFront::DistributionTenant');
       expect(tenant.Domains).toEqual([domain]);
       expect(tenant.Customizations).toBeUndefined();
       expect(tenant.ConnectionGroupId).toEqual({ 'Fn::GetAtt': ['ConnectionGroup', 'Id'] });
+      expect(tenant.DistributionId).toEqual({ Ref: Object.keys(s.main.findResources('AWS::CloudFront::Distribution'))[0] });
+      expect(tenant.Tags).toEqual([{ Key: TAG_DISTRIBUTION_ID, Value: tenant.DistributionId }]);
       s.main.hasResourceProperties('AWS::Route53::RecordSet', {
         Name: `${domain}.`,
         Type: 'CNAME',

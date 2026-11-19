@@ -993,7 +993,8 @@ given below):
    dedicated distribution tenants and the registrar's certificates. It
    skips the pooled distribution tenant by its id, which the stack
    passes it as it does to the guard, before it reads it or its tags, so
-   no tag on the pooled distribution tenant makes it removable.
+   the distribution tag it carries from create (§3.4 IAM paragraphs)
+   does not make it removable.
    A distribution tenant whose domain is no longer the `d` of the
    tenant it is tagged with is disabled if it is still enabled, deleted
    once it is disabled and deployed, and its certificate deleted after
@@ -1134,10 +1135,13 @@ to be this distribution's id and allow no tag keys but the registrar's
 three. The tag grants also require the resource to carry no
 `tenant-front-door:distribution` tag yet (an IAM `Null` condition on
 `aws:ResourceTag`), so the role cannot put the tag on a resource another
-front door tagged; tagging a resource with no such tag remains possible
-(threat model AR-33). `UpdateDistributionTenant` requires
+front door tagged. `UpdateDistributionTenant` requires
 `aws:ResourceTag/tenant-front-door:distribution` to be this
-distribution's id. It uses them only on the edge
+distribution's id. The main stack creates the pooled distribution tenant
+with `tenant-front-door:distribution` set to its distribution's id, so
+another front door's registrar in the same account can neither tag it
+nor disable it; tagging an untagged certificate remains possible
+(threat model AR-33). It uses them only on the edge
 operator role's domain calls and on deletes and replacements of an
 entry that has a `d`, and never deletes a distribution tenant or a
 certificate. The sweeper runs as an execution role of its own. It
