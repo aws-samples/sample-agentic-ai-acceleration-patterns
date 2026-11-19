@@ -1241,14 +1241,3 @@ application's cells (threat T5, the highest-consequence open item).
   (`cp-integ-<run id>`); [integration-test.md](./integration-test.md),
   After an interruption, lists them. Delete them after a run; they hold test
   output only.
-- **A defect in a delete build task's `Arguments` skips the delete
-  script.** The script task catches `States.QueryEvaluationError` so that
-  an evaluation error in the script-outputs guard still lets a delete go on
-  with `{}`. The task's `Arguments` raise the same error name before the
-  build starts, and the Catch cannot tell the two apart. So if the
-  `Arguments` of a cell or tenant delete ever fail to evaluate, the delete
-  script does not run, the record is deleted, and the cell account keeps
-  the infrastructure. The `Arguments` read only plain input fields, so this
-  takes a defect in the workflow definition, not bad input. A `Pass` state
-  cannot hold the guard instead: it has no `Catch`. Spec R-43 records the
-  trade-off.

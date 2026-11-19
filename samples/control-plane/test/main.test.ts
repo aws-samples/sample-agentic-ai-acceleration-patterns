@@ -1027,7 +1027,7 @@ describe('parameters in the workflow (ADR-039, ADR-040, spec §6.1, §8.1)', () 
       expect(output).toEqual({
         tenantId: 'T',
         tenantBuild: { parameters: { A: 'x' } },
-        scriptOutputs: '{}',
+        scriptOutputsRaw: '{}',
         [field]: { Build: { Arn: 'arn:aws:codebuild:eu-central-1:111111111111:build/p:1', BuildStatus: 'SUCCEEDED' } },
       });
     }
@@ -1039,10 +1039,9 @@ describe('parameters in the workflow (ADR-039, ADR-040, spec §6.1, §8.1)', () 
   test('a build task\'s Catch keeps only the error name and the build ARN and status, never the raw Cause', async () => {
     const cause = { Build: { Arn: 'arn:b', BuildStatus: 'FAILED', Environment: { EnvironmentVariables: [{ Name: 'PARAM_A', Value: 'secret-shaped' }] } } };
     for (const name of [...tenantTasks, ...cellTasks]) {
-      // The outputs guard's evaluation error comes first (R-43); the build failure Catch last.
-      expect(tasks[name].Catch).toHaveLength(2);
-      expect(tasks[name].Catch[0].ErrorEquals).toEqual(['States.QueryEvaluationError']);
-      const catcher = tasks[name].Catch[1];
+      // One Catch: the outputs guard runs in the state after the task (R-43).
+      expect(tasks[name].Catch).toHaveLength(1);
+      const catcher = tasks[name].Catch[0];
       expect(catcher.ErrorEquals).toEqual(['States.ALL']);
       expect(catcher.ResultPath).toBeUndefined();
       expect(catcher.Next).toBe(name.startsWith('RunTenant') ? 'TenantBuildFailureShape' : 'CellBuildFailureShape');

@@ -194,7 +194,10 @@ describe('the workflow definition (R-41, R-46, R-23)', () => {
       recordPre: 'RecordCommit',
       recordPost: 'RecordSucceeded',
     });
-    expect(states.RunCellBuild.Next).toBe('CellScriptChecked');
+    expect(states.RunCellBuild.Next).toBe('CellScriptOutputs');
+    expect(states.CellScriptOutputs.Next).toBe('CellScriptChecked');
+    expect(states.RunTenantBuild.Next).toBe('TenantScriptOutputs');
+    expect(states.TenantScriptOutputs.Next).toBe('TenantScriptChecked');
     expect(states.CellScriptChecked.Default).toBe('CellPostHooks');
     expect(states.TenantScriptChecked.Default).toBe('TenantPostHooks');
     // A hook that fails a create or update goes to the failure write of its build; one new-cell create moves both records.
@@ -314,15 +317,23 @@ describe('script outputs (R-43)', () => {
     expect(runCheck(undefined, 'delete', true).outputs).toBe('{}');
   });
 
-  describe('the guard in the script task Output', () => {
-    const guard = async (value: string | undefined, operation = 'create', task = 'RunCellBuild') => {
-      const exported = value === undefined ? [] : [{ Name: 'SCRIPT_OUTPUTS', Value: value }];
-      const output = await evaluateJsonata(states[task].Output, {
+  describe('the guard in the state after the script task', () => {
+    const guardState = (task: string) => {
+      const check = states[task.startsWith('RunCell') ? 'CellScriptOutputs' : 'TenantScriptOutputs'];
+      const branch = check.Branches[0];
+      return branch.States[branch.StartAt];
+    };
+    // The task's Output, then the guard Pass's Output, then the Parallel's Output.
+    const afterBuild = async (task: string, operation: string, exported: unknown[]) => {
+      const taskOutput = await evaluateJsonata(states[task].Output, {
         input: { cellBuild: { operation }, tenantBuild: { operation } },
         result: { Build: { Arn: 'arn:b', BuildStatus: 'SUCCEEDED', ExportedEnvironmentVariables: exported } },
       });
-      return output;
+      const guarded = await evaluateJsonata(guardState(task).Output, { input: taskOutput });
+      return { taskOutput, output: guarded };
     };
+    const guard = async (value: string | undefined, operation = 'create', task = 'RunCellBuild') =>
+      (await afterBuild(task, operation, value === undefined ? [] : [{ Name: 'SCRIPT_OUTPUTS', Value: value }])).output;
     const admitted = async (value: string | undefined) => (await guard(value)).scriptOutputs === value;
 
     test('admits what R-43 admits', async () => {
@@ -369,34 +380,49 @@ describe('script outputs (R-43)', () => {
     });
 
     test('an exported variable other than SCRIPT_OUTPUTS is never read, and a duplicate SCRIPT_OUTPUTS is rejected', async () => {
-      const task = states.RunTenantBuild;
-      const output = await evaluateJsonata(task.Output, {
-        input: { tenantBuild: { operation: 'create' } },
-        result: { Build: { Arn: 'a', BuildStatus: 'SUCCEEDED', ExportedEnvironmentVariables: [{ Name: 'OTHER', Value: '{}' }] } },
-      });
-      expect(output.failureReason).toBe('script outputs rejected');
-      const twice = await evaluateJsonata(task.Output, {
-        input: { tenantBuild: { operation: 'create' } },
-        result: { Build: { Arn: 'a', BuildStatus: 'SUCCEEDED', ExportedEnvironmentVariables: [{ Name: 'SCRIPT_OUTPUTS', Value: '{}' }, { Name: 'SCRIPT_OUTPUTS', Value: '{"a":"1"}' }] } },
-      });
-      expect(twice.failureReason).toBe('script outputs rejected');
+      const other = await afterBuild('RunTenantBuild', 'create', [{ Name: 'OTHER', Value: '{}' }]);
+      expect(other.output.failureReason).toBe('script outputs rejected');
+      const twice = await afterBuild('RunTenantBuild', 'create', [{ Name: 'SCRIPT_OUTPUTS', Value: '{}' }, { Name: 'SCRIPT_OUTPUTS', Value: '{"a":"1"}' }]);
+      expect(twice.output.failureReason).toBe('script outputs rejected');
+    });
+
+    test('the task carries the raw value only when it is one string within the cap, and the guard drops it from state', async () => {
+      const ok = await afterBuild('RunCellBuild', 'create', [{ Name: 'SCRIPT_OUTPUTS', Value: '{"a":"1"}' }]);
+      expect(ok.taskOutput.scriptOutputsRaw).toBe('{"a":"1"}');
+      expect(ok.output).toEqual({ cellBuild: { operation: 'create' }, tenantBuild: { operation: 'create' }, cellBuildResult: { Build: { Arn: 'arn:b', BuildStatus: 'SUCCEEDED' } }, scriptOutputs: '{"a":"1"}' });
+      const long = await afterBuild('RunCellBuild', 'create', [{ Name: 'SCRIPT_OUTPUTS', Value: 'x'.repeat(100_000) }]);
+      expect(long.taskOutput.scriptOutputsRaw).toBe(false);
+      expect(long.output).not.toHaveProperty('scriptOutputsRaw');
     });
 
     test('the guard and the contract pattern are one rule', () => {
-      expect(states.RunCellBuild.Output).toContain(SCRIPT_OUTPUT_GUARD_PATTERN.source);
-      expect(states.RunCellBuild.Output).not.toContain('$parse');
+      for (const task of ['RunCellBuild', 'RunTenantBuild']) {
+        expect(guardState(task).Output).toContain(SCRIPT_OUTPUT_GUARD_PATTERN.source);
+        expect(guardState(task).Output).not.toContain('$parse');
+        expect(states[task].Output).not.toContain(SCRIPT_OUTPUT_GUARD_PATTERN.source);
+      }
     });
 
-    test('an evaluation error of the Output is caught apart from build failures: {} on delete, a rejection otherwise', async () => {
+    test('an evaluation error of the guard is caught on its own state: {} on delete, a rejection otherwise; the task keeps only its build-failure Catch', async () => {
       for (const [task, phase] of [['RunCellBuild', 'cellBuild'], ['RunTenantBuild', 'tenantBuild']]) {
-        const [first, last] = states[task].Catch;
-        expect(first.ErrorEquals).toEqual(['States.QueryEvaluationError']);
-        expect(last.ErrorEquals).toEqual(['States.ALL']);
-        const input = { [phase]: { operation: 'delete' } };
-        expect(await evaluateJsonata(first.Output, { input })).toMatchObject({ scriptOutputs: '{}' });
-        expect(await evaluateJsonata(first.Output, { input: { [phase]: { operation: 'update' } } }))
+        const check = states[phase === 'cellBuild' ? 'CellScriptOutputs' : 'TenantScriptOutputs'];
+        expect(check.Type).toBe('Parallel');
+        expect(check.QueryLanguage).toBe('JSONata');
+        expect(check.Branches).toHaveLength(1);
+        expect(guardState(task).Type).toBe('Pass');
+        expect(await evaluateJsonata(check.Output, { result: [{ a: 1 }] })).toEqual({ a: 1 });
+        const [catcher] = check.Catch;
+        expect(check.Catch).toHaveLength(1);
+        expect(catcher.ErrorEquals).toEqual(['States.ALL']);
+        const input = { [phase]: { operation: 'delete' }, scriptOutputsRaw: 'x' };
+        const onDelete = await evaluateJsonata(catcher.Output, { input });
+        expect(onDelete).toMatchObject({ scriptOutputs: '{}' });
+        expect(onDelete).not.toHaveProperty('scriptOutputsRaw');
+        expect(await evaluateJsonata(catcher.Output, { input: { [phase]: { operation: 'update' } } }))
           .toMatchObject({ failureReason: 'script outputs rejected' });
-        expect(first.Next).toBe(phase === 'cellBuild' ? 'CellScriptChecked' : 'TenantScriptChecked');
+        expect(catcher.Next).toBe(phase === 'cellBuild' ? 'CellScriptChecked' : 'TenantScriptChecked');
+        // An evaluation error of the task's own Arguments is a build failure, never a skipped script.
+        expect(states[task].Catch.map((c: any) => c.ErrorEquals)).toEqual([['States.ALL']]);
       }
     });
   });

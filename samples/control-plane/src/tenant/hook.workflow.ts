@@ -107,14 +107,32 @@ export function scriptOutputsGuard(value: string): string {
 /** The statusReason of a create or update whose script outputs the guard rejected (R-43). */
 export const SCRIPT_OUTPUTS_REJECTED_REASON = 'script outputs rejected';
 
+/** The payload field that carries a script's raw `SCRIPT_OUTPUTS` from its build task to the guard state (R-43). */
+export const SCRIPT_OUTPUTS_RAW_FIELD = 'scriptOutputsRaw';
+
 /**
- * The script task's `Output` fields for the outputs (R-43): the value when
+ * The build task's `Output` field for the raw outputs (R-43): the exported
+ * `SCRIPT_OUTPUTS` when it is one string of at most 4,096 characters,
+ * otherwise `false`, which the guard rejects. Only type and length checks,
+ * so it raises nothing, and an over-long value never enters state (§8.1).
+ */
+export function scriptOutputsRawField(): string {
+  const raw = "$states.result.Build.ExportedEnvironmentVariables[Name = 'SCRIPT_OUTPUTS'].Value";
+  return `{"${SCRIPT_OUTPUTS_RAW_FIELD}": ($r := ${raw}; ($type($r) = 'string' and $length($r) <= ${SCRIPT_OUTPUTS_MAX_BYTES}) ? $r : false)}`;
+}
+
+/** The state input without the raw outputs field. */
+export function withoutScriptOutputsRaw(inputRef: string): string {
+  return `$sift(${inputRef}, function($v, $k) {$k != '${SCRIPT_OUTPUTS_RAW_FIELD}'})`;
+}
+
+/**
+ * The guard state's `Output` fields for the outputs (R-43): the value when
  * the guard admits it; `{}` on delete when it does not; otherwise
  * `failureReason`, which routes the operation to its failure write.
  */
 export function scriptOutputsFields(operationRef: string): string {
-  const raw = "$states.result.Build.ExportedEnvironmentVariables[Name = 'SCRIPT_OUTPUTS'].Value";
-  return `(\n$raw := ${raw};\n${scriptOutputsGuard('$raw')} ? {"scriptOutputs": $raw} : `
+  return `(\n$raw := $states.input.${SCRIPT_OUTPUTS_RAW_FIELD};\n${scriptOutputsGuard('$raw')} ? {"scriptOutputs": $raw} : `
     + `(${operationRef} = 'delete' ? {"scriptOutputs": "{}"} : {"failureReason": "${SCRIPT_OUTPUTS_REJECTED_REASON}"})\n)`;
 }
 

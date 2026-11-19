@@ -10,7 +10,16 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import { Construct } from 'constructs';
-import { HookRunner, JsonataCustomState, hookMetricNamespace, scriptOutputsFields, HOOK_SKIPPED_METRIC_NAME, SCRIPT_OUTPUTS_REJECTED_REASON } from './hook.workflow';
+import {
+  HookRunner,
+  JsonataCustomState,
+  hookMetricNamespace,
+  scriptOutputsFields,
+  scriptOutputsRawField,
+  withoutScriptOutputsRaw,
+  HOOK_SKIPPED_METRIC_NAME,
+  SCRIPT_OUTPUTS_REJECTED_REASON,
+} from './hook.workflow';
 import { recordEventStates } from './record-event.workflow';
 import { buildProjectArn, buildProjectName, buildRoleName, hookRoleName, provisioningRoleArn, ProvisioningRoleKind, BuildProjectKind, workflowName } from '../shared/fleet';
 import { nagFindingResource, acknowledgeGranularFinding, suppressTemplateScanners } from '../shared/nag';
@@ -515,12 +524,10 @@ export class ProvisioningWorkflow extends Construct {
     const tenantScriptChecked = new sfn.Choice(this, 'TenantScriptChecked')
       .when(sfn.Condition.isPresent('$.failureReason'), failTenantWithReason)
       .otherwise(this.hooks.tenantPost);
+    const tenantScriptOutputs = this.scriptOutputsCheck('TenantScriptOutputs', 'tenantBuild', tenantScriptChecked);
     for (const variant of runTenantBuild.variants) {
-      // An evaluation error of the outputs guard is a defect: on delete it
-      // still yields `{}`, on create and update it is a rejection (R-43).
-      variant.addCatch(tenantScriptChecked, { errors: ['States.QueryEvaluationError'], outputs: scriptOutputsErrorOutput('tenantBuild') });
       variant.addCatch(tenantBuildFailure, { outputs: BUILD_FAILURE_OUTPUT });
-      variant.next(tenantScriptChecked);
+      variant.next(tenantScriptOutputs);
     }
 
     // The deployment event's pre hooks (global, then application) run before its script (R-45).
@@ -727,10 +734,10 @@ export class ProvisioningWorkflow extends Construct {
     const cellScriptChecked = new sfn.Choice(this, 'CellScriptChecked')
       .when(sfn.Condition.isPresent('$.failureReason'), cellFailureRouterWithReason)
       .otherwise(this.hooks.cellPost);
+    const cellScriptOutputs = this.scriptOutputsCheck('CellScriptOutputs', 'cellBuild', cellScriptChecked);
     for (const variant of runCellBuild.variants) {
-      variant.addCatch(cellScriptChecked, { errors: ['States.QueryEvaluationError'], outputs: scriptOutputsErrorOutput('cellBuild') });
       variant.addCatch(cellBuildFailure, { outputs: BUILD_FAILURE_OUTPUT });
-      variant.next(cellScriptChecked);
+      variant.next(cellScriptOutputs);
     }
 
     const checkCellBuild = new sfn.Choice(this, 'CellBuildRequested')
@@ -952,6 +959,22 @@ export class ProvisioningWorkflow extends Construct {
    * the build's environment, values included, and a second copy of each
    * parameter set would pass the 256 KiB state limit (§8.1).
    */
+  /**
+   * The outputs guard after a script task (R-43): a one-branch `Parallel`
+   * around a JSONata `Pass` that applies the guard. A `Pass` has no Catch;
+   * the `Parallel` fails with the branch's error name and catches it, so an
+   * evaluation error of the guard is told apart from the task's own errors.
+   * On delete it yields `{}`, on create and update it is a rejection.
+   */
+  private scriptOutputsCheck(id: string, phase: 'cellBuild' | 'tenantBuild', next: sfn.Choice): sfn.Parallel {
+    const guard = sfn.Pass.jsonata(this, `${id}Guard`, { outputs: scriptOutputsGuardOutput(phase) });
+    const check = sfn.Parallel.jsonata(this, id, { outputs: jsonata('$states.result[0]') });
+    check.branch(guard);
+    check.addCatch(next, { outputs: scriptOutputsErrorOutput(phase) });
+    check.next(next);
+    return check;
+  }
+
   private buildTask(
     id: string,
     project: codebuild.Project,
@@ -1338,30 +1361,34 @@ export function environmentOverride(environment: readonly EnvVar[], parametersPa
 /**
  * A build task's `Output` (§8.1): the state input plus the build ARN and
  * status under `<resultField>.Build` - what the terminal writes read
- * (`lastBuildId`) and nothing else from the CodeBuild result.
+ * (`lastBuildId`) - and the raw `SCRIPT_OUTPUTS` for the guard state that
+ * follows (R-43), and nothing else from the CodeBuild result.
  */
 export function buildResultOutput(resultField: string): string {
-  const operation = `$states.input.${resultField.replace(/Result$/, '')}.operation`;
   return jsonata(
-    `$merge([$states.input, {"${resultField}": {"Build": {"Arn": $states.result.Build.Arn, "BuildStatus": $states.result.Build.BuildStatus}}}, ${scriptOutputsFields(operation)}])`,
+    `$merge([$states.input, {"${resultField}": {"Build": {"Arn": $states.result.Build.Arn, "BuildStatus": $states.result.Build.BuildStatus}}}, ${scriptOutputsRawField()}])`,
   );
 }
 
 /**
- * The Catch `Output` of a script task for `States.QueryEvaluationError`
- * (R-43): the guard is a format check that should never raise, so an error
- * is a defect, and on delete it still yields `{}` so cleanup stays
- * reachable (P-9); on create and update it is a rejection.
- *
- * shortcut: the same error name is raised by the task's `Arguments` before
- * the build starts, and this Catch cannot tell the two apart, so a defect
- * there on a delete skips the script. The Arguments read plain input fields.
- * README "Known issues" and spec R-43 list it; a `Pass` state cannot hold
- * the guard instead, because it has no Catch.
+ * The guard state's `Output` (R-43): the state input without the raw
+ * outputs, plus `scriptOutputs` or `failureReason`.
+ */
+export function scriptOutputsGuardOutput(phase: 'cellBuild' | 'tenantBuild'): string {
+  return jsonata(`$merge([${withoutScriptOutputsRaw('$states.input')}, ${scriptOutputsFields(`$states.input.${phase}.operation`)}])`);
+}
+
+/**
+ * The Catch `Output` of the guard's `Parallel` state (R-43): the guard is a
+ * format check that should never raise, so an error is a defect, and on
+ * delete it still yields `{}` so cleanup stays reachable (P-9); on create
+ * and update it is a rejection. The guard runs in a state of its own, after
+ * the build task, so an evaluation error of the task's `Arguments` takes
+ * the task's build-failure Catch instead and never skips a delete script.
  */
 export function scriptOutputsErrorOutput(phase: 'cellBuild' | 'tenantBuild'): string {
   return jsonata(
-    `$merge([$states.input, $states.input.${phase}.operation = 'delete' ? {"scriptOutputs": "{}"} : {"failureReason": "${SCRIPT_OUTPUTS_REJECTED_REASON}"}])`,
+    `$merge([${withoutScriptOutputsRaw('$states.input')}, $states.input.${phase}.operation = 'delete' ? {"scriptOutputs": "{}"} : {"failureReason": "${SCRIPT_OUTPUTS_REJECTED_REASON}"}])`,
   );
 }
 

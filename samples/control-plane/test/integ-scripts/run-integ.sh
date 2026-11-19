@@ -28,10 +28,16 @@ echo "Run id ${CP_INTEG_RUN_ID}, fleet name cp-integ-${CP_INTEG_RUN_ID}"
 # Refuse to start while a stack of THIS run exists (only a reused run id can
 # meet one): it belongs to a run in progress or to an interrupted run, and the
 # scenario expects empty state. Other runs' stacks do not block this one.
-bash test/integ-scripts/leftovers.sh stacks || {
+bash test/integ-scripts/leftovers.sh stacks
+check=$?
+if [ "$check" -eq 2 ]; then
+  echo "Could not check for stacks of this run; fix the AWS call above and start again"
+  exit 1
+fi
+if [ "$check" -ne 0 ]; then
   echo "Wait for that run to finish or clean up as described in integration-test.md, After an interruption, or use another CP_INTEG_RUN_ID"
   exit 1
-}
+fi
 
 # integ-runner synthesizes the app directly (no CDK CLI), so CDK_DEFAULT_ACCOUNT
 # is not set for it; the test needs the current account id at synth time (it is

@@ -2002,8 +2002,15 @@ The buildspec check is a format check, not a trust boundary: it runs in
 the container the script just ran in, with tools the script could have
 replaced, and in a tenant-owned account the script reads what the
 tenant controls (T40, T44). The workflow MUST therefore check the value
-again, by the same rule, in the script task's JSONata `Output`, which
-keeps it beside the build ARN and status (§8.1). It rejects a value
+again, by the same rule, in a JSONata state of its own after the
+script task. The task's `Output` keeps the build ARN and status
+(§8.1) and the raw value, as `scriptOutputsRaw`, only when it is one
+string of at most 4,096 characters, `false` otherwise; it uses type
+and length checks only, which raise nothing. The guard state is a
+`Pass` inside a one-branch `Parallel`, whose `Output` is the branch's
+result: a `Pass` has no `Catch`, but a `Parallel` fails with its
+branch's error name and has one. The guard's `Output` drops
+`scriptOutputsRaw` and keeps an admitted value as `scriptOutputs`. It rejects a value
 that is absent or empty (the H-1 overflow, or a build that did not
 export), longer than 4,096 characters, or not a compact JSON object of
 printable ASCII string values. With printable ASCII, 4,096 characters
@@ -2035,19 +2042,14 @@ space after `:`, a `\u` escape and keys of 64 and 65 characters, each
 in under 1 ms and with no evaluation error (H-10).
 
 The guard MUST NOT use `$parse`. On bad input `$parse` raises
-`States.QueryEvaluationError`, which goes to the task's Catch, and the
-Catch path is a failure write, which is wrong on delete. Any evaluation
-error the guard still raises is a defect, and on delete it MUST still
-yield `{}`: the delete script task catches `States.QueryEvaluationError`
-apart from build failures and goes on with `{}`. The task's
-`Arguments` raise the same error name before the build starts, and the
-Catch cannot tell the two apart, so an evaluation error in the delete
-task's `Arguments` skips the delete script: the record is deleted and
-the cell account keeps the infrastructure. The `Arguments` read only
-plain input fields, so this needs a defect in the workflow, not bad
-input; README "Known issues" lists it. A `Pass` state cannot hold the
-guard instead, because a `Pass` state has no `Catch` and its error would
-fail the execution before any terminal write. On create and update a
+`States.QueryEvaluationError`. Any evaluation error the guard still
+raises is a defect, and on delete it MUST still yield `{}`: the
+`Parallel` catches every error of its branch and goes on with `{}` on
+delete. The guard MUST run in its own state, never in the task's
+`Output`: an evaluation error of the task's `Arguments` has the same
+name, and only a separate state keeps it on the task's build-failure
+Catch, so a defect there fails a delete with `DELETE_FAILED` instead
+of skipping the script. On create and update a
 rejected value, or an evaluation error, takes the failure path (§8.2)
 with `statusReason` "script outputs rejected", the script's changes
 staying in place as after a post hook failure; on delete the workflow
@@ -2573,7 +2575,8 @@ the caps, write at the larger of the refusal loop's rate of about 15.7
 history events a minute and the 60-second poll's nine (R-46). With
 every hook refused for its whole budget that is about 22,600 events,
 and polling throughout about 13,000, both inside the 25,000-event
-quota of a Standard execution. A 30-second poll would pass it.
+quota of a Standard execution; the outputs guard adds six events per
+build (R-43). A 30-second poll would pass it.
 
 Refusals are capped at 5 minutes and the queued timeout is shortened
 by the minutes refused, so refusals and queue together never pass the
@@ -2694,11 +2697,12 @@ token MUST be the SHA-256 of the seven values joined by `|`, as this
 JSONata expression:
 
 ```
-$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK_SCOPE, HOOK_ID,
+$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK.scope, HOOK_ID,
   $string(ATTEMPT), $string(TRY)], '|'), 'SHA-256')
 ```
 
-`HOOK_SCOPE` is `GLOBAL` or `APPLICATION`. A global hook and an
+`HOOK.scope` is the scope of the hook in hand, `GLOBAL` or
+`APPLICATION`. A global hook and an
 application hook may share a `hookId`, and both can run in one list
 of one event; the scope keeps their tokens apart, since each starts
 in a different project.

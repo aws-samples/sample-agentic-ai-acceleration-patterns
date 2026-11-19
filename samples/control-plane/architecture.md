@@ -699,8 +699,9 @@ For an application, a tenant or an account the same diagram holds, with
 three differences (`src/tenant/record-writes.ts`). A put of a
 `CREATE_FAILED` application or account goes back to `CREATING`. The record
 is live in `ACTIVE`, `UPDATING` and `UPDATE_FAILED`, so a staged update
-leaves it usable. A record with no status reads as `ACTIVE`. Updates start from `ACTIVE` or `UPDATE_FAILED`, deletes from
-`ACTIVE` or any `*_FAILED` status.
+leaves it usable. A record with no status reads as `ACTIVE`. Updates
+start from `ACTIVE` or `UPDATE_FAILED`, deletes from `ACTIVE` or any
+`*_FAILED` status.
 
 Transitional statuses remain the concurrency guard (409 on in-flight
 mutations) for every entity type. Every transition into `CREATING`, `UPDATING`,
@@ -1021,8 +1022,9 @@ transaction releases.
             (ADR-019), PARAM_<NAME>, PROVISIONING_ROLE_ARN=cellRoleArn,
             PROVISIONING_EXTERNAL_ID, OPERATOR_SESSION_NAME; the buildspec
             sets OUTPUTS_FILE and exports SCRIPT_OUTPUTS
-     the task Output keeps the build ARN and status and guards
-       SCRIPT_OUTPUTS (rejected → failure write on create/update, {} on
+     the task Output keeps the build ARN and status and the raw
+       SCRIPT_OUTPUTS; the next state (a Pass in a one-branch Parallel)
+       guards it (rejected → failure write on create/update, {} on
        delete)
      cell POST hooks; a failure on create/update goes to the failure write
      success (choice on cellBuild.operation):

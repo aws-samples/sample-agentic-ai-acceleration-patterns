@@ -126,9 +126,11 @@ never the file's bytes. It exports it always, `{}` when there is none,
 and exports nothing else, so the build stays under the limit spike H-1
 found. That check runs in the container the script ran in, so it is a
 format check, not a trust boundary. The workflow checks the value
-again, by the same rule, in the script task's `Output`, with a linear
-regular expression that admits only the compact form, and never
-`$parse`, whose error would reach the task's failure write: an empty,
+again, by the same rule, in a state of its own after the script task
+(a `Pass` in a one-branch `Parallel`, so the guard has a `Catch` apart
+from the task's), with a linear regular expression that admits only
+the compact form, and never `$parse`, whose error would reach the
+failure write: an empty,
 over-long or malformed value fails a create or update and becomes `{}`
 on a delete. The pattern cannot see a repeated key, so a hook refuses
 an object that has one. The control plane never reads the outputs, and
@@ -295,7 +297,7 @@ does not recognise, such as a throttle's generic
 that `Retry` under the same token, never to the refusal `Catch`,
 because a refused request does not bind its token (H-8) and a new
 token could leave a second build. The token is
-`$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK_SCOPE, HOOK_ID,
+`$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK.scope, HOOK_ID,
 $string(ATTEMPT), $string(TRY)], '|'), 'SHA-256')`, 64 hexadecimal
 characters. The scope keeps a global hook and an application hook
 with the same `hookId` on one event apart. Every
