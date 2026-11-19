@@ -29,7 +29,7 @@ import {
   GetDistributionTenantCommand,
   UpdateDistributionTenantCommand,
 } from '@aws-sdk/client-cloudfront';
-import { CERTIFICATE_REGION, errorName, listDistributionTenants, listRegistrarCertificates } from './dedicated-resources';
+import { CERTIFICATE_REGION, distributionTenantTags, errorName, listDistributionTenants, listRegistrarCertificates } from './dedicated-resources';
 import { TAG_DISTRIBUTION_ID } from '../shared/contracts';
 
 /** The teardown's properties. */
@@ -91,16 +91,18 @@ export async function teardownPass(distributionId: string, deps: Deps): Promise<
   let tenants = 0;
   for (const summary of await listDistributionTenants(deps.cloudFront, distributionId)) {
     let got;
+    let tags;
     try {
       got = await deps.cloudFront.send(new GetDistributionTenantCommand({ Identifier: summary.Id }));
+      if (got.DistributionTenant === undefined || got.DistributionTenant.DistributionId !== distributionId) continue;
+      tags = await distributionTenantTags(deps.cloudFront, got.DistributionTenant.Arn);
     } catch (error) {
       if (RETRY_ERRORS.has(errorName(error))) continue;
       throw error;
     }
     const dt = got.DistributionTenant;
-    if (dt === undefined || dt.DistributionId !== distributionId) continue;
     // The pooled distribution tenant has no registrar tag; CloudFormation deletes it.
-    if (dt.Tags?.Items?.some((t) => t.Key === TAG_DISTRIBUTION_ID && t.Value === distributionId) !== true) continue;
+    if (!tags.some((t) => t.Key === TAG_DISTRIBUTION_ID && t.Value === distributionId)) continue;
     tenants++;
     try {
       if (dt.Enabled !== false) {

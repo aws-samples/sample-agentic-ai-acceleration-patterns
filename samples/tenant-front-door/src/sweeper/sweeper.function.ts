@@ -81,7 +81,8 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): SweeperDeps {
       challenge: (domain, token) => checkChallenge(domain, token, { lookup }),
     },
     removal: {
-      cloudFront: new CloudFrontClient({}),
+      // CloudFront's control API is global and signed for us-east-1.
+      cloudFront: new CloudFrontClient({ region: 'us-east-1' }),
       acm: new ACMClient({ region: CERTIFICATE_REGION }),
       kvs,
       routeTableArn,

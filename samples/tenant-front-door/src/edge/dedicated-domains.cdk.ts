@@ -103,7 +103,12 @@ function removalStatements(scope: IConstruct, distributionId: string): iam.Polic
   const a = arns(scope);
   return [
     new iam.PolicyStatement({ sid: 'DistributionTenantList', actions: ['cloudfront:ListDistributionTenants'], resources: ['*'] }),
-    new iam.PolicyStatement({ sid: 'DistributionTenantRead', actions: ['cloudfront:GetDistributionTenant'], resources: [a.distributionTenants] }),
+    // Get and List return no tags; ListTagsForResource does (design/spikes.md, Smoke run).
+    new iam.PolicyStatement({
+      sid: 'DistributionTenantRead',
+      actions: ['cloudfront:GetDistributionTenant', 'cloudfront:ListTagsForResource'],
+      resources: [a.distributionTenants],
+    }),
     new iam.PolicyStatement({
       sid: 'DistributionTenantRemove',
       actions: ['cloudfront:UpdateDistributionTenant', 'cloudfront:DeleteDistributionTenant'],
@@ -215,7 +220,7 @@ export function registrarDedicatedDomainsPolicy(scope: Construct, id: string, ro
       // distribution, or tagged with another tenant, answers 409 (§3.4 step 5).
       new iam.PolicyStatement({
         sid: 'DistributionTenantRead',
-        actions: ['cloudfront:GetDistributionTenant', 'cloudfront:GetDistributionTenantByDomain'],
+        actions: ['cloudfront:GetDistributionTenantByDomain', 'cloudfront:ListTagsForResource'],
         resources: [a.distributionTenants],
       }),
       new iam.PolicyStatement({

@@ -913,6 +913,11 @@ given below):
    distribution tenant or a certificate, the registrar checks that its
    tags name this tenant and this distribution (409 otherwise), so a
    write for one tenant never removes another tenant's domain.
+   CloudFront returns a distribution tenant's tags only from
+   `ListTagsForResource` on its ARN: `GetDistributionTenantByDomain`,
+   `GetDistributionTenant` and `ListDistributionTenants` carry none
+   (design/spikes.md, Smoke run), so the registrar, the sweeper and the
+   teardown read them there.
 
    On an ETag conflict, re-read the keys the write touches and repeat
    the step 3 operator checks, step 4 and the 507 size check (§4.1)
@@ -1003,8 +1008,8 @@ existing origin. It serves two cases:
 
 Besides the store, the registrar's role holds the CloudFront actions
 a domain call needs (`CreateDistributionTenant`, with tagging on
-create, `GetDistributionTenant`, `GetDistributionTenantByDomain` and
-`UpdateDistributionTenant`) and, in `us-east-1`, the ACM actions
+create, `GetDistributionTenantByDomain`, `ListTagsForResource` on
+distribution tenants and `UpdateDistributionTenant`) and, in `us-east-1`, the ACM actions
 `RequestCertificate`, `DescribeCertificate`, `ListCertificates`,
 `ListTagsForCertificate` and `AddTagsToCertificate`, the ACM writes
 conditioned on the registrar's tag. It uses them only on the edge
@@ -1015,8 +1020,8 @@ holds the route table read it needs to list `tenant#` entries
 (`cloudfront-keyvaluestore:DescribeKeyValueStore` and `ListKeys` on
 the store, for the lister) and `GetKey` on the store, for a page's
 per-entry reads (ADR-0022), the CloudFront actions `ListDistributionTenants`,
-`GetDistributionTenant`, `UpdateDistributionTenant` and
-`DeleteDistributionTenant` and, in `us-east-1`, `ListCertificates`,
+`GetDistributionTenant`, `ListTagsForResource` on distribution tenants,
+`UpdateDistributionTenant` and `DeleteDistributionTenant` and, in `us-east-1`, `ListCertificates`,
 `ListTagsForCertificate`, `DescribeCertificate` and
 `DeleteCertificate`, the ACM delete conditioned on the registrar's
 tag. For the daily re-check it also holds `dynamodb:GetItem`,

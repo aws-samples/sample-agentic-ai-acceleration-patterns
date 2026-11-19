@@ -14,6 +14,7 @@ import {
   type DistributionTenant,
   GetDistributionTenantCommand,
   ListDistributionTenantsCommand,
+  ListTagsForResourceCommand,
   UpdateDistributionTenantCommand,
 } from '@aws-sdk/client-cloudfront';
 import { CloudFrontKeyValueStoreClient, GetKeyCommand } from '@aws-sdk/client-cloudfront-keyvaluestore';
@@ -75,17 +76,20 @@ function distributionTenants(list: FakeTenant[]): void {
     })),
   });
   for (const t of list) {
+    const arn = `arn:aws:cloudfront::${EDGE_ACCOUNT}:distribution-tenant/${t.id}`;
+    // CloudFront's Get carries no tags; only ListTagsForResource does.
     const dt: DistributionTenant = {
       Id: t.id,
+      Arn: arn,
       DistributionId: DISTRIBUTION_ID,
       Domains: [{ Domain: t.domain, Status: 'active' }],
-      Tags: t.untagged ? undefined : { Items: tags(t.tenantTag, t.distributionTag) },
       Customizations: t.certificateArn === undefined ? undefined : { Certificate: { Arn: t.certificateArn } },
       ConnectionGroupId: 'cg-1',
       Enabled: t.enabled,
       Status: t.status,
     };
     cloudFront.on(GetDistributionTenantCommand, { Identifier: t.id }).resolves({ DistributionTenant: dt, ETag: `etag-${t.id}` });
+    cloudFront.on(ListTagsForResourceCommand, { Resource: arn }).resolves({ Tags: { Items: t.untagged ? [] : tags(t.tenantTag, t.distributionTag) } });
   }
 }
 
