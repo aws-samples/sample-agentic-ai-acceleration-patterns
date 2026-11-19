@@ -2600,6 +2600,10 @@ destroy time, which the test reports with the rest.
     request once more with that token: the test reports whether ACM
     returns the deleted ARN, which the registrar reads as no
     certificate (sub-step 6), or a new one, which it then deletes too.
+    The probe certificate carries `b`'s tags for a domain that is not
+    `b`'s `d`, so a sweeper run between a request and the test's delete
+    removes it; each of the test's deletes accepts
+    `ResourceNotFoundException`.
     The step creates no distribution tenant, so the create in the stack's
     connection group, its tags and the `ListTagsForResource` reads are
     not checked here.
