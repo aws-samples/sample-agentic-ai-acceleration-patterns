@@ -21,7 +21,7 @@ import {
   TENANT_2,
   testConfig,
 } from './support';
-import { DedicatedDomainsNotBuilt } from '../../src/registrar/dedicated-domains';
+import { type DedicatedDomains, DedicatedDomainsOff } from '../../src/registrar/dedicated-domains';
 import { pooledHost } from '../../src/registrar/registrar';
 import {
   cellEntry,
@@ -477,8 +477,8 @@ describe('PutTenantRoute from the global hook role', () => {
 // ===========================================================================
 
 describe('PutTenantRoute from the edge operator role', () => {
-  function ready(config = testConfig()): Harness {
-    const h = harness(config, new DedicatedDomainsNotBuilt());
+  function ready(config = testConfig(), domains: DedicatedDomains = new DedicatedDomainsOff()): Harness {
+    const h = harness(config, domains);
     h.cp.deployment(TENANT, { status: 'ACTIVE' });
     seedCell(h);
     seedTenant(h);
@@ -492,13 +492,22 @@ describe('PutTenantRoute from the edge operator role', () => {
     expect(h.domains.putTenantDomain).not.toHaveBeenCalled();
   });
 
-  test('wave 1: customDomain while dedicatedDomains is on reaches the seam, which refuses with 500', async () => {
-    const h = ready(testConfig({ dedicatedDomains: true }));
+  test('§3.4 step 5: customDomain while dedicatedDomains is on reaches the seam with the checked entry and the check', async () => {
+    const seam: DedicatedDomains = {
+      putTenantDomain: async (r) => ({ statusCode: 202, tenantId: r.requestTenantId, dt: r.first.entry.dt, stage: 'domain-challenge' }),
+      releaseDomain: async () => undefined,
+    };
+    const h = ready(testConfig({ dedicatedDomains: true }), seam);
     const res = await h.handler(restEvent('PUT', `/tenants/${TENANT}`, 'operator', { customDomain: 'portal.example.com' }));
-    expect(res.statusCode).toBe(500);
-    expect(json(res.body)).toEqual({ message: 'dedicated domains are not built yet' });
-    expect(h.domains.putTenantDomain).toHaveBeenCalledWith(expect.objectContaining({ tenantId: t, customDomain: 'portal.example.com' }));
+    expect(res.statusCode).toBe(202);
+    expect(json(res.body)).toEqual({ tenantId: TENANT, dt: DT, stage: 'domain-challenge' });
+    const request = h.domains.putTenantDomain.mock.calls[0][0];
+    expect(request).toEqual(expect.objectContaining({ tenantId: t, customDomain: 'portal.example.com', first: { entry: expect.objectContaining({ dt: DT }), routed: false } }));
     expect(h.kvs.writes).toBe(0);
+  });
+
+  test('the off seam refuses with 500 if it is ever reached', async () => {
+    await expect(new DedicatedDomainsOff().putTenantDomain()).rejects.toThrow('dedicated domains are off');
   });
 
   test.each(['tenants.example.com', 'acme.tenants.example.com', 'login.tenants.example.com'])(
