@@ -79,8 +79,9 @@ returns the `src/` path when the construct runs from `src/` (in the
 repository) and the `lib/handlers/` path when it runs from `lib/`.
 esbuild compiles those sources at the consumer's synth. Unit tests
 assert that every entry the constructs name exists under `lib/handlers/`
-after compile, and that no shipped `.ts` other than a `.d.ts` shares a
-base name with a `.js` outside `lib/handlers/`. No
+after compile, and that no `.ts` other than a `.d.ts` ships outside
+`lib/handlers/` (shadowing happens only within one directory, so the
+mirrored copies under `lib/handlers/` are safe). No
 sample consumes another through `file:` yet, and the producer has no
 `main` or `exports`. The same pull request therefore changes
 `agentic-runtime-isolation`'s `.projenrc.ts` to set `main` and `types` to
