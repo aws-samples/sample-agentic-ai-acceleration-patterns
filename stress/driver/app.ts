@@ -8,14 +8,14 @@
  * never loads a second copy of the CDK.
  *
  * Environment: `STRESS_TIER` (small, medium, large; picks the instance type from
- * `src/tiers.ts`), `STRESS_PREFIX` (stack name prefix), `STRESS_PARAMETER_PREFIXES` (a
- * comma-separated list of SSM parameter path prefixes the host may read besides
- * tenant-identity's; a slice passes its registry prefix).
+ * `src/tiers.ts`), `STRESS_PREFIX` (stack name prefix; the host reads the stress identity at
+ * `/<STRESS_PREFIX>/identity`), `STRESS_PARAMETER_PREFIXES` (a comma-separated list of further
+ * SSM parameter path prefixes the host may read; a slice passes its registry prefix).
  */
 
 import { App, Validations } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
-import { StressDriverStack } from './stress-driver.cdk';
+import { StressDriverStack, stressIdentityParameter } from './stress-driver.cdk';
 import { tierOf } from '../src/tiers';
 
 const PREFIX = /^[A-Za-z][A-Za-z0-9]{0,39}$/;
@@ -34,6 +34,7 @@ const app = new App();
 Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true, writeSuppressionsToCloudFormation: true }));
 new StressDriverStack(app, `${prefix}-driver`, {
   instanceType: tier.driverInstanceType,
+  identityParameterName: stressIdentityParameter(prefix),
   parameterPrefixes,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });

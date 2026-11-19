@@ -17,9 +17,14 @@
 # A SIGINT or SIGTERM cancels the command on the host, so a k6 run does not keep loading its
 # target. The wait ends early, with the reason, when the command fails or times out, when the
 # host loses its SSM agent for three minutes (a k6 that ran the host out of memory, finding
-# F-14) and when the credentials expire. Reading the output retries an S3 error other than
-# NoSuchKey (a throttle, a network blip) for one minute before it gives up, so one transient
-# error does not cancel a long k6 run. The limits count wall time.
+# F-14). Reading the output retries an S3 error other than NoSuchKey (a throttle, a network
+# blip) for one minute before it gives up, so one transient error does not cancel a long k6
+# run. The limits count wall time.
+#
+# This script polls and cancels with the caller's own credentials, so it refuses to start a
+# command that would outlive them: when they carry an expiration, it must be at least
+# HOST_TIMEOUT + 180 s away (the wait, the read budget and the cancel). Credentials with no
+# expiration (long-lived keys) are not checked.
 
 set -euo pipefail
 
@@ -40,6 +45,17 @@ BUCKET="$(jq -r '.[] | select(.OutputKey == "ResultsBucketName") | .OutputValue'
 
 TIMEOUT="${HOST_TIMEOUT:-600}"
 [[ "$TIMEOUT" =~ ^[0-9]+$ ]] && (( TIMEOUT >= 10 && TIMEOUT <= 14400 )) || { echo "HOST_TIMEOUT must be 10 to 14400 seconds" >&2; exit 2; }
+EXPIRES="$(aws configure export-credentials --format process 2>/dev/null | jq -r '.Expiration // empty')" || EXPIRES=""
+if [[ -n "$EXPIRES" ]]; then
+  expires_at="$(date -d "$EXPIRES" +%s 2>/dev/null)" \
+    || { echo "your credentials carry an expiration this script cannot read (${EXPIRES}); refusing to start" >&2; exit 3; }
+  left=$((expires_at - $(date +%s)))
+  if (( left < TIMEOUT + 180 )); then
+    echo "your credentials expire in ${left} s, sooner than HOST_TIMEOUT + 180 s ($((TIMEOUT + 180)) s): this script could not read the output or cancel the command; refresh them or lower HOST_TIMEOUT" >&2
+    exit 3
+  fi
+fi
+
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 KEY="host/${STAMP}/output.txt"
 TMP="$(mktemp -d)"

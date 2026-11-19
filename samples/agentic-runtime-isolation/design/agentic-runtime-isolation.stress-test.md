@@ -217,7 +217,7 @@ scripts/stress/
   teardown.sh        deletes the seeded tenants at 20 rps, then both stacks; prints both destroy times
 ```
 
-The driver host (`StressDriver` stack, `host.sh`) and the k6 library (`lib.js`) moved to the repository's `stress/` folder (`stress/driver/`, `stress/k6/`): stress ADR-0007, ADR-0008, ADR-0009. Sections 8.1 and 8.3 below describe the stack as it was designed here; its code is `stress/driver/stress-driver.cdk.ts` and its tests are `stress/test/driver.test.ts`.
+The driver host and the shared k6 library are the repository's stress assets, `stress/driver/` and `stress/k6/` (stress ADR-0007, ADR-0008, ADR-0009). This slice deploys the host through `stress/driver/deploy.sh` and keeps only its own calls and assertions, in `k6/probe.js`.
 
 The scripts follow `scripts/CONVENTIONS.md`: statuses and timings on stdout,
 never a token, a credential or a header value; `set -euo pipefail`; cleanup
@@ -225,9 +225,9 @@ on failure. `seed.sh` and `teardown.sh` reuse `scripts/lib.sh`.
 
 ### 8.1 The StressDriver stack
 
-The driver host is infrastructure, so it is a CDK stack, not a
-`run-instances` call in bash. It lives under `test/`, beside the integ
-driver, because it is a test asset and no part of the construct.
+The driver host is the shared stress driver, a CDK stack of its own app,
+`stress/driver/stress-driver.cdk.ts` (stress ADR-0009), with its tests in
+`stress/test/driver.test.ts`. This slice uses it as below.
 
 | Resource | Setting | Why |
 |---|---|---|
@@ -235,13 +235,13 @@ driver, because it is a test asset and no part of the construct.
 | Endpoints | `s3` gateway endpoint only (free); no interface endpoints, in particular no `execute-api` one | an `execute-api` interface endpoint turns on private DNS for every `*.execute-api` name in the VPC and reaches only APIs whose resource policy admits that endpoint; the stress stack's API is a regional endpoint and would need a policy change for the test alone |
 | Instance | the tier's `driverInstanceType` (`t3.large`, `c6i.xlarge`, `c6i.4xlarge`), Amazon Linux 2023, IMDSv2 required, 30 GB gp3 encrypted, no key pair, no public IP | one k6 process holds the tier's tokens and rate; 32 GB at `large` after F-14 |
 | Security group | no inbound rule; outbound 443 only | nothing listens |
-| Instance role | `AmazonSSMManagedInstanceCore`; `execute-api:Invoke` on every API in the account and Region (`*/*/*/*`: the Entitlements API and the platform API have ids the stack does not know at synth, and the platform API's SigV4 routes make this role a tenant-identity platform caller, acceptable in a test account and acknowledged in cdk-nag with that reason); `ssm:GetParameter` on `/application-plane/shared/identity/*` and the stress registry prefix; `s3:GetObject`, `PutObject` and `ListBucket` on the results bucket | nothing else |
+| Instance role | no AWS managed policy; the SSM Agent's own actions (`ssm:UpdateInstanceInformation` on `instance/*`, the `ec2messages:` and `ssmmessages:` channel actions on `*`, which have no resource type); `execute-api:Invoke` on every API in the account and Region (`*/*/*/*`: the Entitlements API and the platform API have ids the stack does not know at synth, and the platform API's SigV4 routes make this role a tenant-identity platform caller, acceptable in a test account and acknowledged in cdk-nag with that reason); `ssm:GetParameter` on the stress identity `/<prefix>/identity`, and on the two prefixes this slice passes: `/application-plane/shared/identity/*` (this slice's tokens come from the long-lived tenant-identity pool) and the stress registry prefix; `s3:GetObject`, `PutObject` and `ListBucket` on the results bucket | nothing else; the managed policy would allow `ssm:GetParameter` on every parameter |
 | User data | installs k6 from its RPM, the AWS CLI v2 and `jq`; creates `/opt/stress` | no interactive step |
 | Results bucket | one bucket, SSE-S3, block public access, 30-day expiry, `autoDeleteObjects` | the k6 summaries leave the host before it is destroyed |
 | Outputs | instance id, bucket name | `run.sh` and `collect.sh` read them; nothing in SSM Parameter Store (the 3 TPS rule) |
 | Selection | not in `test/stress.runtime.ts`: `scripts/stress/deploy.sh` deploys it through `stress/driver/deploy.sh` after the ingress and agents stacks (stress ADR-0009) |
 
-cdk-nag runs on it as on every stack in the sample. Acknowledged with reasons: no VPC flow log (VPC7, a test VPC), no bucket access log (S1), no detailed monitoring and no termination protection on the host (EC28, EC29), the SSM managed policy (IAM4), and the four wildcards above (IAM5).
+cdk-nag runs on the driver app. Acknowledged with reasons: no VPC flow log (VPC7, a test VPC), no bucket access log (S1), no detailed monitoring and no termination protection on the host (EC28, EC29), and the wildcards above (IAM5).
 
 Deploy and destroy time of this stack are reported with the run (expected:
 the NAT gateway dominates, about 3 minutes up and 2 down). The NAT gateway
@@ -299,7 +299,7 @@ The pieces are built in parallel against this contract. Names are exact.
 |---|---|---|
 | `<prefix>-ingress` | `StressIngressStack`, `test/stress/stress-ingress.cdk.ts` | the identity lookup as `RuntimeIsolationDemoStack` does it (tenant-identity's published parameters, or placeholders with `identityParameterPlaceholders`); a demo table and a tenant role as the demo stack's `tvm` branch; `SharedIngress` with `ingress: 'api-gateway'`, `session: { scope: 'tenant' }`, `tvm: { role }`, `tenantLimits` default, `stageThrottle`, `ingressReservedConcurrency` and `authorizerReservedConcurrency` from the tier, `toolsGateways` from the tier (`finance` with `responseFilter: true`), `publish: true`, `registryPrefix: '/application-plane/shared/agent-runtime/<stackName>/'` (a stack-scoped prefix, so the account-wide one stays free; the agents stacks read this prefix); `AgentBackend` `default` with `needs: ['default/chat']` and `tools: ['<target>/*']` for every target; one `ToolTarget` per tier target, `kind: 'lambda'`, one `NodejsFunction` per target over the stress tool (below), `tvm: { role: <tool tenant role> }` on `t01` only, the targets spread over the gateways round-robin; for `small` also `AgentBackend` `a001`. Outputs: `EndpointUrl`, `EntitlementsApiUrl`, `EntitlementsTableName`, `DemoTableName`, `Issuer`, `RegistryPrefix`, `RestApiId`, `StageName`, `IngressLogGroupName`, `AuthorizerFunctionName`, `IngressFunctionName`, `ToolsGatewayUrl<Name>` and `PolicyEngineId<Name>` per gateway, `PolicySecondsToActive<Target>` per target, `InterceptorFunctionNames` (comma-separated) |
 | `<prefix>-agents-<k>` | `StressAgentsStack`, `test/stress/stress-agents.cdk.ts` | `SharedIngress.fromParameters(this, 'Ingress', registryPrefix, 'api-gateway')`; `AgentBackend` `a<NNN>` for its slice, `needs: ['a<NNN>/chat']`, `tools: ['t01/*']`, `owner: 'RuntimeIsolationStress'`. Needs `env: { account, region }`. Exists for `medium` (k = 1) and `large` (k = 1..5). Deployed after the ingress stack, because the lookup reads the published document |
-| `<prefix>-driver` | `StressDriverStack`, `stress/driver/stress-driver.cdk.ts` | §8.1. Outputs `InstanceId`, `ResultsBucketName`. The instance role holds `execute-api:Invoke` on `arn:aws:execute-api:<region>:<account>:*/*/*/*` (the Entitlements API and the platform API have ids the stack does not know), `ssm:GetParameter` on `/application-plane/shared/identity/*` and on the stress registry prefix, `s3:GetObject`/`PutObject`/`ListBucket` on the results bucket; no other grant |
+| `<prefix>-driver` | `StressDriverStack`, `stress/driver/stress-driver.cdk.ts` | §8.1. Outputs `InstanceId`, `ResultsBucketName`. The instance role holds the SSM Agent's own actions and no managed policy, `execute-api:Invoke` on `arn:aws:execute-api:<region>:<account>:*/*/*/*` (the Entitlements API and the platform API have ids the stack does not know), `ssm:GetParameter` on `/<prefix>/identity`, `/application-plane/shared/identity/*` and the stress registry prefix, `s3:GetObject`/`PutObject`/`ListBucket` on the results bucket; no other grant |
 
 The stress tool (`test/stress/stress-tool.function.ts`): `toolHandler` over
 an implementation that returns `{ tool: context.tool, tenantId:

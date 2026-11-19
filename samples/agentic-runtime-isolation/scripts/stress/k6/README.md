@@ -6,8 +6,9 @@ The load half of the stress test in
 [`stress/k6/`](../../../../../stress/k6/README.md) (token pool and refresh, pacing, the
 correlation header, the result record) and the seed manifest to the driver host and runs
 one scenario; the pass table is computed by `collect.sh`,
-not here. Written for k6 v1.x (ES modules, `k6/execution`); `k6 inspect` of S1 to S7 passes on k6 v2.4
-on the driver host (W-2), a full run against an ingress is W-3's.
+not here. Written for k6 v1.x (ES modules, `k6/execution`); `k6 inspect` of S1 to S7 passes on k6
+v2.4 on the driver host. No full run of these scenarios against an ingress has used the shared
+library yet, so a first run is also its check.
 
 | File | Does |
 |---|---|
@@ -32,7 +33,7 @@ record (`agentic-runtime-isolation.S<n>.json`, stress spec §4.3).
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `STRESS_TIER_JSON` | yes | the tier as JSON (`test/stress/tiers.ts`, which takes the shared figures from `stress/src/tiers.ts`): `tenantsActive`, `usersPerActiveTenant`, `steadyRps`, `peakRps` (required), `name`, `scenarioSeconds`, and this sample's `agents`, `tenantLimitRpm`, `ingressReservedConcurrency` |
+| `STRESS_TIER_JSON` | yes | the tier as JSON (`test/stress/tiers.ts`, which takes the shared figures from `stress/src/tiers.ts`): `name`, `tenantsActive`, `usersPerActiveTenant`, `steadyRps`, `peakRps` (required), `scenarioSeconds`, and this sample's `agents`, `tenantLimitRpm`, `ingressReservedConcurrency` |
 | `MANIFEST` | yes | absolute path of `manifest.json`: `{ tenants: [{ tenantId, admin, users: [...], active? }] }` |
 | `ENDPOINT` | yes | the ingress `EndpointUrl` output; `/<agent>/invocations` is appended as `lib.sh backend_url` does |
 | `PLATFORM_API` | yes | tenant-identity's API base URL (`.../prod/`): `platform/tenants/{t}/users/{u}/token` (SigV4) and `oauth2/token` (exchange) |

@@ -136,7 +136,9 @@ DRIVER_STACK="${PREFIX}-driver"
 echo "== deploy ${DRIVER_STACK} (stress/driver/deploy.sh)"
 REGISTRY_PREFIX="$(jq -r '.RegistryPrefix // empty' "$OUTPUTS")"
 [[ -n "$REGISTRY_PREFIX" ]] || fail "the ingress stack has no RegistryPrefix output; the driver could not read the registry parameters"
-STRESS_PREFIX="$PREFIX" STRESS_TIER="$SCALE" STRESS_PARAMETER_PREFIXES="$REGISTRY_PREFIX" \
+# This slice's tokens come from the long-lived tenant-identity pool's parameters, not the
+# stress identity the driver reads by default, so it passes that path as well.
+STRESS_PREFIX="$PREFIX" STRESS_TIER="$SCALE" STRESS_PARAMETER_PREFIXES="/application-plane/shared/identity/,${REGISTRY_PREFIX}" \
   "${SAMPLE_DIR}/../../stress/driver/deploy.sh" >"${LIB_TMP}/driver.log" 2>&1 \
   || { tail -30 "${LIB_TMP}/driver.log" >&2; fail "deploy ${DRIVER_STACK}"; }
 # The script's own figure: the wall time of the call would include a first `npm ci`.

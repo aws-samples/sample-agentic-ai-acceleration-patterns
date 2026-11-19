@@ -7,7 +7,8 @@ SPDX-License-Identifier: MIT-0
 The code every sample's stress slice plugs into, so the samples can be
 stress-tested alone or together as one agent platform. The design is
 [`docs/stress-test.spec.md`](../docs/stress-test.spec.md); the decisions are
-in [`adr/`](./adr/README.md). Nothing here is deployed: it is a test asset.
+in [`adr/`](./adr/README.md). It is a test asset: the only thing it deploys is the driver
+host, for the length of a run.
 
 | Part | File | What it holds |
 |---|---|---|
@@ -85,14 +86,15 @@ driver/teardown.sh
 ```
 
 `deploy.sh` prints the deploy seconds and the stack outputs (`InstanceId`, `ResultsBucketName`);
-`teardown.sh` prints the destroy seconds and checks nothing is left. `STRESS_PARAMETER_PREFIXES`
-lists the SSM paths the host may read besides tenant-identity's. `host.sh` runs one command on
+`teardown.sh` prints the destroy seconds and checks nothing is left. The host reads the stress
+identity, `/<STRESS_PREFIX>/identity` (ADR-0002), and `STRESS_PARAMETER_PREFIXES` lists further
+SSM paths it may read (a slice's registry prefix). Its role holds no AWS managed policy (ADR-0009). `host.sh` runs one command on
 the host through Run Command and reads its output from the results bucket.
 
 `driver/k6.sh <script> [NAME=value ...]` runs a k6 script on the host: it mirrors `stress/k6/` and
 the script's folder under `/opt/stress/repo/` at their repository paths, passes the `STRESS_*`
 variables, and brings the result records back to `$STRESS_RESULTS`. A slice's `run` verb calls it
-(the runtime-isolation slice's `run.sh` still copies through S3 until W-3). The library, the
+(the runtime-isolation `run.sh` copies its files through S3 instead; see Known limitations). The library, the
 record it writes and the correlation header are described in [`k6/README.md`](./k6/README.md);
 `k6/smoke.js` is the check that a deployed host runs k6 and writes a record `parseRecord` accepts.
 
@@ -145,16 +147,15 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
 - Budget limits are what `--limits` says; without it the runner checks
   against service defaults, not the accounts' applied quotas.
 - Scenarios run one after another. Spec §5.1 runs PS-5 (churn) and PS-7
-  (cross-cell probes) during PS-2; until the platform driver (W-2) runs
-  them concurrently, PS-5 and PS-7 run on their own after PS-4, without
-  PS-2's load.
+  (cross-cell probes) during PS-2; the runner runs PS-5 and PS-7 on their
+  own after PS-4, without PS-2's load.
 - The quota catalogue has no ids yet for the API Gateway control plane or
   for CloudFront Functions compute and KeyValueStore size (spec §4.4), so
   no slice can declare them. They are added with the first slice that
   draws on them (W-7 for the front door).
 - The k6 library has no k6 run in this folder's build: `record.js` is tested, `lib.js` is
-  checked by running `k6/smoke.js` and `K6_COMMAND=inspect` on a deployed host (the live checks
-  of W-2). A change to `lib.js` needs that check again.
+  checked by running `k6/smoke.js` and `K6_COMMAND=inspect` on a deployed host. A change to
+  `lib.js` needs that check again.
 - `refusals` in a record from k6 are all unattributed until the slice's `collect` joins them
   with the hops' logs (ADR-0008).
 - A SIGKILL to the runner leaves the current verb's process group

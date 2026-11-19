@@ -118,6 +118,14 @@ export function countStatus(status, tenantId) {
   }
 }
 
+/**
+ * A refusal the HTTP status does not show, such as a tool call refused inside a 200: it counts
+ * under the record's `refusals`, as a 4xx does (P-7, stress ADR-0010).
+ */
+export function countRefusal() {
+  refusalsSeen.add(1);
+}
+
 /** The timings of one timed request, in the `client` and `client-ttfb` hops. */
 export function timed(ttfb, total, tags) {
   ttfbMs.add(ttfb, tags);
@@ -171,7 +179,10 @@ export function loadTier() {
     }
     return t[key];
   };
-  const name = String(t.name || 'small');
+  if (typeof t.name !== 'string' || t.name === '') {
+    throw new Error('STRESS_TIER_JSON needs the tier name in name');
+  }
+  const name = t.name;
   return {
     name,
     scale: name,
@@ -621,7 +632,7 @@ export function summarize(data, rec) {
     const ms = data.state && typeof data.state.testRunDurationMs === 'number' ? data.state.testRunDurationMs : 0;
     const record = buildRecord(data, {
       runId: need('STRESS_RUN_ID'),
-      tier: String(JSON.parse(need('STRESS_TIER_JSON')).name || 'small'),
+      tier: loadTier().name,
       slice: rec.slice,
       scenario: rec.scenario,
       mode: need('STRESS_MODE'),

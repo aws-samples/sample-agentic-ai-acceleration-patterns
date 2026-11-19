@@ -20,15 +20,43 @@ import { acknowledgeGranularFinding, nagFindingResource } from './nag';
 /** Where the host installs the scripts and writes its output. */
 export const STRESS_HOME = '/opt/stress';
 
-/** The parameters tenant-identity publishes: every slice's tokens come from there. */
-export const IDENTITY_PARAMETER_PREFIX = '/application-plane/shared/identity/';
+/** A parameter name or path prefix the host may read: starts with `/`, then letters, digits and `_.-/`. */
+const PARAMETER_PATH = /^\/[A-Za-z0-9_.\-/]+$/;
+
+/** The stress identity's one parameter, `/<STRESS_PREFIX>/identity` (stress ADR-0002, tenant-identity ADR-0042). */
+export function stressIdentityParameter(stressPrefix: string): string {
+  return `/${stressPrefix}/identity`;
+}
+
+/**
+ * The actions the SSM Agent needs for Run Command and Session Manager. They replace the AWS
+ * managed `AmazonSSMManagedInstanceCore`, which also allows `ssm:GetParameter(s)` on every
+ * parameter in the account (stress ADR-0009).
+ */
+export const SSM_AGENT_MESSAGE_ACTIONS = [
+  'ec2messages:AcknowledgeMessage',
+  'ec2messages:DeleteMessage',
+  'ec2messages:FailMessage',
+  'ec2messages:GetEndpoint',
+  'ec2messages:GetMessages',
+  'ec2messages:SendReply',
+  'ssmmessages:CreateControlChannel',
+  'ssmmessages:CreateDataChannel',
+  'ssmmessages:OpenControlChannel',
+  'ssmmessages:OpenDataChannel',
+] as const;
 
 export interface StressDriverStackProps extends StackProps {
   /** An EC2 instance type: the tier's `driverInstanceType` (stress/src/tiers.ts). */
   readonly instanceType: string;
   /**
-   * SSM parameter path prefixes, besides tenant-identity's, the host may read, each starting
-   * with `/` (a slice's registry prefix). The host gets `ssm:GetParameter` on `<prefix>*`.
+   * The stress identity's parameter, read for the tenants' tokens: `stressIdentityParameter(prefix)`.
+   * The host gets `ssm:GetParameter` on this one name.
+   */
+  readonly identityParameterName: string;
+  /**
+   * Further SSM parameter path prefixes the host may read, each starting with `/` (a slice's
+   * registry prefix). The host gets `ssm:GetParameter` on `<prefix>*`.
    */
   readonly parameterPrefixes?: readonly string[];
 }
@@ -80,10 +108,24 @@ export class StressDriverStack extends Stack {
     this.securityGroup.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), 'HTTPS to the public AWS endpoints through the NAT gateway');
 
     this.role = new iam.Role(this, 'HostRole', {
-      description: 'Stress driver host: SSM Session Manager, execute-api:Invoke, the identity and slice registry parameters, the results bucket',
+      description: 'Stress driver host: the SSM Agent, execute-api:Invoke, the identity and slice registry parameters, the results bucket',
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
-      managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore')],
     });
+    const instanceResource = `arn:${this.partition}:ec2:${this.region}:${this.account}:instance/*`;
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'SsmAgentRegister',
+        actions: ['ssm:UpdateInstanceInformation'],
+        resources: [instanceResource],
+      }),
+    );
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'SsmAgentMessages',
+        actions: [...SSM_AGENT_MESSAGE_ACTIONS],
+        resources: ['*'],
+      }),
+    );
     const invokeResource = `arn:${this.partition}:execute-api:${this.region}:${this.account}:*/*/*/*`;
     this.role.addToPolicy(
       new iam.PolicyStatement({
@@ -93,18 +135,21 @@ export class StressDriverStack extends Stack {
       }),
     );
     const parameterArn = (name: string) => `arn:${this.partition}:ssm:${this.region}:${this.account}:parameter${name}`;
-    const parameterPrefixes = [...new Set([IDENTITY_PARAMETER_PREFIX, ...(props.parameterPrefixes ?? [])])];
+    if (!PARAMETER_PATH.test(props.identityParameterName) || props.identityParameterName.endsWith('/')) {
+      throw new Error(`the identity parameter must be a name starting with /, letters, digits and _.-/ only: ${props.identityParameterName}`);
+    }
+    const parameterPrefixes = [...new Set(props.parameterPrefixes ?? [])];
     for (const prefix of parameterPrefixes) {
-      if (!/^\/[A-Za-z0-9_.\-/]+$/.test(prefix)) {
+      if (!PARAMETER_PATH.test(prefix)) {
         throw new Error(`a parameter prefix must start with / and hold letters, digits and _.-/ only: ${prefix}`);
       }
     }
-    const parameters = parameterPrefixes.map((prefix) => parameterArn(`${prefix}*`));
+    const prefixParameters = parameterPrefixes.map((prefix) => parameterArn(`${prefix}*`));
     this.role.addToPolicy(
       new iam.PolicyStatement({
         sid: 'ReadPublishedParameters',
         actions: ['ssm:GetParameter'],
-        resources: parameters,
+        resources: [parameterArn(props.identityParameterName), ...prefixParameters],
       }),
     );
     this.role.addToPolicy(
@@ -167,15 +212,20 @@ export class StressDriverStack extends Stack {
     // Granular IAM findings on the host role (cdk-nag renders them from the policy resources).
     acknowledgeGranularFinding(
       this.role,
-      'AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/AmazonSSMManagedInstanceCore]',
-      'AmazonSSMManagedInstanceCore is the managed policy Session Manager needs; the host has no key pair and no inbound rule (spec §3.1).',
+      `AwsSolutions-IAM5[Resource::${nagFindingResource(this, instanceResource)}]`,
+      'The SSM Agent registers the instance it runs on; the instance id is not known before the role exists (stress ADR-0009).',
+    );
+    acknowledgeGranularFinding(
+      this.role,
+      'AwsSolutions-IAM5[Resource::*]',
+      'The ec2messages and ssmmessages actions the SSM Agent needs have no resource type, so IAM takes only * (stress ADR-0009).',
     );
     acknowledgeGranularFinding(
       this.role,
       `AwsSolutions-IAM5[Resource::${nagFindingResource(this, invokeResource)}]`,
       'The Entitlements API and the platform API have ids this stack does not know (spec §3.3); both also authorise every call themselves.',
     );
-    for (const parameter of parameters) {
+    for (const parameter of prefixParameters) {
       acknowledgeGranularFinding(
         this.role,
         `AwsSolutions-IAM5[Resource::${nagFindingResource(this, parameter)}]`,

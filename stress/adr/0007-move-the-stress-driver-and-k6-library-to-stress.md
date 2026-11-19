@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-18
+- Amended by: ADR-0008, ADR-0009
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -44,3 +45,8 @@ place. Harder: runtime-isolation's stress test depends on `stress/`, which
 ADR-0001 allows for test assets only; its stress plan and README are
 updated in the same change. Revisit if a slice needs a load shape k6 cannot
 produce.
+
+Note 2026-11-19: ADR-0008 splits `lib.js` into a shared core and the sample's
+own `probe.js`, so the file's history does not follow a `git mv`. ADR-0009
+makes the driver its own CDK app in `stress/driver/`, with a host role that
+holds no AWS managed policy.

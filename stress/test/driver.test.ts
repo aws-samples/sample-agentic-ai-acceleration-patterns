@@ -4,15 +4,16 @@
 import { App, Validations } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
-import { IDENTITY_PARAMETER_PREFIX, StressDriverStack } from '../driver/stress-driver.cdk';
+import { SSM_AGENT_MESSAGE_ACTIONS, StressDriverStack, stressIdentityParameter } from '../driver/stress-driver.cdk';
 import { TIERS } from '../src/tiers';
 
 const MAX_RESOURCES = 450;
+const IDENTITY = stressIdentityParameter('StressTest');
 
-function stackOf(props: { instanceType: string; parameterPrefixes?: string[] }): StressDriverStack {
+function stackOf(props: { instanceType: string; identityParameterName?: string; parameterPrefixes?: string[] }): StressDriverStack {
   const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
   Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true }));
-  return new StressDriverStack(app, 'StressTest-driver', props);
+  return new StressDriverStack(app, 'StressTest-driver', { identityParameterName: IDENTITY, ...props });
 }
 
 describe('StressDriverStack at small (spec §3.1)', () => {
@@ -72,22 +73,44 @@ describe('StressDriverStack at small (spec §3.1)', () => {
     ) as any[];
   }
 
-  it('grants the host exactly the stress-test actions', () => {
+  function statement(sid: string): any {
+    return hostPolicies()
+      .flatMap((p) => p.Properties.PolicyDocument.Statement)
+      .find((s: any) => s.Sid === sid);
+  }
+
+  it('grants the host exactly the stress-test and SSM Agent actions, and no managed policy', () => {
     const actions = hostPolicies().flatMap((p) => p.Properties.PolicyDocument.Statement.flatMap((s: any) => [s.Action].flat()));
-    expect(new Set(actions)).toEqual(new Set(['execute-api:Invoke', 'ssm:GetParameter', 's3:GetObject', 's3:PutObject', 's3:ListBucket']));
-    template.hasResourceProperties('AWS::IAM::Role', {
-      ManagedPolicyArns: [{ 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':iam::aws:policy/AmazonSSMManagedInstanceCore']] }],
-    });
+    expect(new Set(actions)).toEqual(
+      new Set([
+        'execute-api:Invoke',
+        'ssm:GetParameter',
+        's3:GetObject',
+        's3:PutObject',
+        's3:ListBucket',
+        'ssm:UpdateInstanceInformation',
+        ...SSM_AGENT_MESSAGE_ACTIONS,
+      ]),
+    );
+    const role = Object.values(template.findResources('AWS::IAM::Role', { Properties: { Description: Match.stringLikeRegexp('Stress driver host') } }))[0] as any;
+    expect(role.Properties.ManagedPolicyArns).toBeUndefined();
   });
 
-  it('reads parameters under tenant-identity and the slice prefixes only', () => {
-    const statement = hostPolicies()
+  it('allows ssm:GetParameter on no resource but its own parameters', () => {
+    const wildcards = hostPolicies()
       .flatMap((p) => p.Properties.PolicyDocument.Statement)
-      .find((s: any) => s.Sid === 'ReadPublishedParameters');
-    const paths = (statement.Resource as unknown[]).map((r) => JSON.stringify(r));
+      .filter((s: any) => [s.Resource].flat().includes('*'));
+    expect(wildcards.map((s: any) => s.Sid)).toEqual(['SsmAgentMessages']);
+    expect([statement('SsmAgentMessages').Action].flat().every((a: string) => a.startsWith('ec2messages:') || a.startsWith('ssmmessages:'))).toBe(true);
+    expect(JSON.stringify(statement('SsmAgentRegister').Resource)).toContain(':instance/*');
+  });
+
+  it('reads the stress identity parameter and the slice prefixes only', () => {
+    const paths = (statement('ReadPublishedParameters').Resource as unknown[]).map((r) => JSON.stringify(r));
     expect(paths).toHaveLength(2);
-    expect(paths.some((p) => p.includes(`parameter${IDENTITY_PARAMETER_PREFIX}*`))).toBe(true);
+    expect(paths.some((p) => p.includes(`parameter${IDENTITY}"`))).toBe(true);
     expect(paths.some((p) => p.includes('parameter/slice/registry/*'))).toBe(true);
+    expect(paths.some((p) => p.includes('/application-plane/'))).toBe(false);
   });
 });
 
@@ -97,13 +120,23 @@ describe('StressDriverStack inputs', () => {
     template.hasResourceProperties('AWS::EC2::Instance', { InstanceType: TIERS.large.driverInstanceType });
   });
 
-  it('reads only tenant-identity parameters without a slice prefix', () => {
+  it('reads only the stress identity parameter without a slice prefix', () => {
     const template = Template.fromStack(stackOf({ instanceType: 't3.large' }));
-    const statement = JSON.stringify(template.toJSON().Resources);
-    expect(statement).toContain(`parameter${IDENTITY_PARAMETER_PREFIX}*`);
+    const resources = JSON.stringify(template.toJSON().Resources);
+    expect(resources).toContain(`parameter${IDENTITY}"`);
+    expect(resources).not.toContain(`parameter${IDENTITY}*`);
+  });
+
+  it('reads the parameters a slice passes, such as the integration identity, only when it passes them', () => {
+    const template = Template.fromStack(stackOf({ instanceType: 't3.large', parameterPrefixes: ['/application-plane/shared/identity/'] }));
+    expect(JSON.stringify(template.toJSON().Resources)).toContain('parameter/application-plane/shared/identity/*');
   });
 
   it.each(['no-slash', '/with space/', '/a;b/', ''])('refuses the parameter prefix %p', (prefix) => {
     expect(() => stackOf({ instanceType: 't3.large', parameterPrefixes: [prefix] })).toThrow(/parameter prefix/);
+  });
+
+  it.each(['identity', '/x/identity/', '/a b', ''])('refuses the identity parameter %p', (name) => {
+    expect(() => stackOf({ instanceType: 't3.large', identityParameterName: name })).toThrow(/identity parameter/);
   });
 });

@@ -100,7 +100,7 @@ fi
   # k6 cannot refresh this copy: refuse to start a run that would outlive it (K6_TIMEOUT + 300 s).
   echo "need=$((TIMEOUT + 300))"
   echo 'exp=0'
-  echo 'if [ -n "${AWS_CREDENTIAL_EXPIRATION:-}" ]; then exp="$(date -d "$AWS_CREDENTIAL_EXPIRATION" +%s 2>/dev/null)" || { echo "the host credentials carry an expiration date cannot read; refusing to start k6" >&2; exit 3; }; fi'
+  echo 'if [ -n "${AWS_CREDENTIAL_EXPIRATION:-}" ]; then exp="$(date -d "$AWS_CREDENTIAL_EXPIRATION" +%s 2>/dev/null)" || { echo "the host credentials carry an expiration date it cannot read; refusing to start k6" >&2; exit 3; }; fi'
   echo 'left=$((exp - $(date +%s)))'
   echo 'if [ "$exp" -eq 0 ]; then echo "warning: the host credentials carry no expiration; k6 cannot refresh them" >&2;'
   echo 'elif [ "$left" -lt "$need" ]; then echo "the instance role credentials on the host expire in ${left} s, sooner than K6_TIMEOUT + 300 s (${need} s): k6 cannot refresh them; retry in a few minutes, when the host has fresh ones, or lower K6_TIMEOUT" >&2; exit 3; fi'

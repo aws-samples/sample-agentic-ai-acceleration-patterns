@@ -26,7 +26,7 @@ them, and fails the scenario without them. What a record holds from k6:
 |---|---|
 | `requests` | `status_<code>` counters (`countStatus`); `other` for a code the library does not list |
 | `latency.client`, `latency['client-ttfb']` | the `client_ms` and `ttfb_ms` trends (`timed`), p50, p95, p99 in seconds; the ingress, router and origin hops come from the slices' logs |
-| `isolation` | `isolation_assertions` and `isolation_mismatch` (`isolationCheck`, one assertion per checked request, P-1). P-1 counts answered probes only: a 200 is one assertion, and a mismatch when the slice cannot parse its answer; a non-200 makes no assertion (it is counted under `requests` and `refusals`), so `assertions` can be lower than `requests` |
+| `isolation` | `isolation_assertions` and `isolation_mismatch` (`isolationCheck`, P-1): one assertion per answered request, and a mismatch when the slice cannot parse its answer; a refusal makes no assertion and is counted under `refusals` instead, whether its status shows it (400 or more, `countStatus`) or only its body does (`countRefusal`, such as a tool refused inside a 200). So `assertions` plus `refusals` accounts for every answered request ([ADR-0010](../adr/0010-count-an-isolation-assertion-per-answered-request.md)) |
 | `refusals` | `unattributed` is the count of 4xx and 5xx the driver saw; `byTenantReason` is empty. The slice's `collect` attributes them from the hops' logs (it may join the `tenant_minute` lines the library prints) and moves attributed refusals across (P-7) |
 | `quotas` | empty; a slice's `collect` fills it from its own measurements |
 | `window` | the end of the test and its duration |
@@ -43,7 +43,7 @@ request (stress ADR-0005). Mismatch lines on stderr carry it, so a mismatch join
 
 | Variable | Meaning |
 |---|---|
-| `STRESS_TIER_JSON` | the tier from `stress/src/tiers.ts`, as `stress/run.sh tier <name>` prints it; `tenantsActive`, `usersPerActiveTenant`, `steadyRps`, `peakRps` required; a slice may add fields (`loadTier().raw`) |
+| `STRESS_TIER_JSON` | the tier from `stress/src/tiers.ts`, as `stress/run.sh tier <name>` prints it; `name`, `tenantsActive`, `usersPerActiveTenant`, `steadyRps`, `peakRps` required; a slice may add fields (`loadTier().raw`) |
 | `STRESS_RUN_ID`, `STRESS_MODE`, `STRESS_COMMIT`, `STRESS_RESULTS` | the runner's (stress/README.md); `STRESS_RESULTS` unset writes no record |
 | `MANIFEST` | absolute path of the seed manifest: `{ tenants: [{ tenantId, admin, users: [...], active? }] }` |
 | `PLATFORM_API`, `APP_CLIENT_ID` | tenant-identity's API base URL and app client id, for `IssueToken` (SigV4) and the token exchange |

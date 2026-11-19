@@ -21,6 +21,7 @@ import {
   adopt as adoptShared,
   buildOptions as buildOptionsShared,
   correlate,
+  countRefusal,
   countStatus,
   ensureToken,
   env,
@@ -353,7 +354,10 @@ function toolAssertions(entry, r) {
   const event = r.report || {};
   const result = event.result;
   if (!result || result.error !== undefined || event.error !== undefined) {
+    // A refusal inside a 200: no tenant answered, so no isolation assertion, but the record
+    // counts it under `refusals` as it does a 4xx (stress ADR-0010).
     toolRefused.add(1, { status: String(result && result.status !== undefined ? result.status : 'error') });
+    countRefusal();
     check(r, { 'tool admitted': () => false });
     return r;
   }
