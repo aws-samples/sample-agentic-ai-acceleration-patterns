@@ -1,6 +1,6 @@
 {
   "_comment": "Golden sign-in state cases (spec §3.5, ADR-0016), signed with the signin entry from route-table.json. The router is tested against these; test/support/signin-state.ts is the reference that checks them.",
-  "signin": "{\"v\":1,\"cur\":\"k2\",\"k\":{\"k1\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"k2\":\"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=\"}}",
+  "signin": "{\"v\":1,\"cur\":\"k2\",\"k\":{\"k1\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"k2\":\"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA=\"}}",
   "nowSeconds": 1795080000,
   "valid": [
     {
@@ -56,6 +56,26 @@
       "name": "MAC from another payload",
       "why": "hmac",
       "state": "eyJ2IjoxLCJraWQiOiJrMiIsImgiOiIwMWh6eDhrOXAwcXJzdDd2d3h5ejFhMmIzYy50ZW5hbnRzLmV4YW1wbGUuY29tIiwibiI6IkFiQ2RFZkdoSWpLbE1uT3BfLTAxMjMiLCJleHAiOjE3OTUwODA2MDB9.E-3DUvue4blBWnXjdTEgBXyExPd-CIa1qFDtq6htqIE"
+    },
+    {
+      "name": "MAC with a non-canonical last character",
+      "why": "hmac",
+      "state": "eyJ2IjoxLCJraWQiOiJrMiIsImgiOiIwMWh6eDhrOXAwcXJzdDd2d3h5ejFhMmIzYy50ZW5hbnRzLmV4YW1wbGUuY29tIiwibiI6IkFiQ2RFZkdoSWpLbE1uT3BfLTAxMjMiLCJleHAiOjE3OTUwODA2MDB9.SNpb7oUDOInbAbXHP2bZbWe-NgNcijGp2HOAvjhGvnl"
+    },
+    {
+      "name": "MAC with a character outside base64url",
+      "why": "hmac",
+      "state": "eyJ2IjoxLCJraWQiOiJrMiIsImgiOiIwMWh6eDhrOXAwcXJzdDd2d3h5ejFhMmIzYy50ZW5hbnRzLmV4YW1wbGUuY29tIiwibiI6IkFiQ2RFZkdoSWpLbE1uT3BfLTAxMjMiLCJleHAiOjE3OTUwODA2MDB9.SNpb7oUDOInbAbXHP2bZbWe-NgNcijGp2HOAvjhGvnk!"
+    },
+    {
+      "name": "payload is JSON null",
+      "why": "shape",
+      "state": "bnVsbA.SNpb7oUDOInbAbXHP2bZbWe-NgNcijGp2HOAvjhGvnk"
+    },
+    {
+      "name": "payload is a JSON array",
+      "why": "shape",
+      "state": "WzFd.SNpb7oUDOInbAbXHP2bZbWe-NgNcijGp2HOAvjhGvnk"
     },
     {
       "name": "no dot",

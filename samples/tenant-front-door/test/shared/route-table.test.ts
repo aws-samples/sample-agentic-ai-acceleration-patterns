@@ -175,8 +175,12 @@ describe('builders fix the field order', () => {
     expect(encodeEntry(signinEntry({ k: { k1: 'x' }, cur: 'k1' } as never))).toBe('{"v":1,"cur":"k1","k":{"k1":"x"}}');
   });
 
-  test('dk and dx need d', () => {
-    expect(() => tenantEntry({ c: 'c', ac: '1', dt: 1, s: 'active', n: '', dk: 'k' })).toThrow(RouteTableError);
+  test.each([
+    ['dk without d', { dk: 'k' }],
+    ['d without dk', { d: 'portal.example.com' }],
+    ['dx without dk', { d: 'portal.example.com', dx: 1 }],
+  ])('refuses %s', (_name, extra) => {
+    expect(() => tenantEntry({ c: 'c', ac: '1', dt: 1, s: 'active', n: '', ...extra })).toThrow(RouteTableError);
   });
 
   test.each([{ k: { K1: 'x' }, cur: 'K1' }, { k: { k1: 'x' }, cur: 'k2' }, { k: { abcdefghi: 'x' }, cur: 'abcdefghi' }])(

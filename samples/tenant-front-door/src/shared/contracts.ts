@@ -90,7 +90,10 @@ export interface ConfigJson {
 /** The `state` lifetime. */
 export const SIGNIN_STATE_TTL_SECONDS = 600;
 
-/** The SPA's nonce for `/signin-state?n=` (§3.3 step 8). */
+/** The query parameter of `GET /signin-state?nonce=<base64url>` (§3.3 step 8, §3.5). The payload field is `n`. */
+export const SIGNIN_STATE_QUERY_NONCE = 'nonce';
+
+/** The SPA's nonce (§3.3 step 8). */
 export const SIGNIN_NONCE = /^[A-Za-z0-9_-]{16,64}$/;
 
 /** `/signin-state`'s answer. */
@@ -186,11 +189,12 @@ export function paramTenantNamespace(verifiedTenantId: string, applicationId: st
 
 /**
  * A CloudFront Function has no environment, so the stack replaces these
- * literal tokens in the router's source before it creates the function.
- * Each token appears in the source as a JavaScript string literal, for
- * example `const APP_DOMAIN = '__TFD_APP_DOMAIN__';`, and is replaced with
- * the JSON-escaped value. The KeyValueStore is the one associated with the
- * function, read with `cf.kvs()`, so no id is compiled in.
+ * tokens in the router's source before it creates the function. The source
+ * writes each token as a double-quoted string literal, for example
+ * `const APP_DOMAIN = "__TFD_APP_DOMAIN__";`, and `substituteRouterTokens`
+ * replaces the whole literal, quotes included, with `JSON.stringify(value)`.
+ * The KeyValueStore is the one associated with the function, read with
+ * `cf.kvs()`, so no id is compiled in.
  */
 export const ROUTER_TOKENS = {
   /** Lower-case `appDomain`. */
@@ -204,6 +208,43 @@ export const ROUTER_TOKENS = {
   /** Comma-separated `RESERVED_LABELS`. */
   reservedLabels: '__TFD_RESERVED_LABELS__',
 } as const;
+
+export type RouterTokenValues = { readonly [K in keyof typeof ROUTER_TOKENS]: string };
+
+/**
+ * Replaces every `"__TFD_X__"` literal in the router source with the
+ * JSON-encoded value. Throws when a token is missing from the source or any
+ * `__TFD_` is left over.
+ */
+export function substituteRouterTokens(source: string, values: RouterTokenValues): string {
+  let out = source;
+  for (const [name, token] of Object.entries(ROUTER_TOKENS) as [keyof typeof ROUTER_TOKENS, string][]) {
+    const literal = `"${token}"`;
+    if (!out.includes(literal)) throw new Error(`router source has no ${literal}`);
+    out = out.split(literal).join(JSON.stringify(values[name]));
+  }
+  if (out.includes('__TFD_')) throw new Error('router source has an unknown __TFD_ token');
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Dedicated domains (§3.4 step 5, §5.1, ADR-0018): S3 writes, S6 and S2 read
+// ---------------------------------------------------------------------------
+
+/** The challenge record's name prefix: `_tfd-challenge.<d>`. */
+export const CHALLENGE_RECORD_PREFIX = '_tfd-challenge.';
+
+/** The challenge record's value prefix: `tfd-verify=<token>`. */
+export const CHALLENGE_VALUE_PREFIX = 'tfd-verify=';
+
+/** How long a challenge token is valid. */
+export const CHALLENGE_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+/** Tag the registrar puts on a dedicated domain's ACM certificate and distribution tenant: the lower-case tenant id. */
+export const TAG_TENANT_ID = 'tenant-front-door:tenant';
+
+/** Tag the registrar puts on the same resources: the multi-tenant distribution's id. */
+export const TAG_DISTRIBUTION_ID = 'tenant-front-door:distribution';
 
 // ---------------------------------------------------------------------------
 // Registrar environment (S2 sets it, S3 reads it)
