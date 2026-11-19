@@ -49,9 +49,10 @@ describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () 
       ((resource.Properties.Policies ?? []) as InlinePolicy[]).flatMap((p) => p.PolicyDocument.Statement.map((s) => ({ id, s }))),
     ),
   ];
-  // Any action that can invoke a function: `*`, a lambda wildcard, or the two invoke actions.
-  const invokes = (s: Statement): boolean => actions(s).some((a) => a === '*' || /^lambda:(.*\*.*|InvokeFunction|InvokeFunctionUrl)$/.test(a));
-  const apiInvokes = (s: Statement): boolean => actions(s).some((a) => /^execute-api:(.*\*.*|Invoke)$/.test(a));
+  // Any action that can invoke a function: `*`, a lambda wildcard (`*` or `?`), or an invoke
+  // action. IAM action names are case-insensitive, so the match is too.
+  const invokes = (s: Statement): boolean => actions(s).some((a) => a === '*' || /^lambda:(.*[*?].*|InvokeFunction|InvokeFunctionUrl|InvokeAsync)$/i.test(a));
+  const apiInvokes = (s: Statement): boolean => actions(s).some((a) => /^execute-api:(.*[*?].*|Invoke)$/i.test(a));
 
   test('only the dispatcher role may invoke the receiver, through its URL', () => {
     const grants = statements().filter(({ s }) => JSON.stringify(s.Resource ?? '').includes(receiverId));
@@ -63,9 +64,21 @@ describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () 
     }
   });
 
-  // A resource that covers more than named functions or APIs: `*`, any function (`function:*`),
-  // any Region or account in a Lambda ARN, or any API. A version qualifier (`<arn>:*`) stays allowed.
-  const BROAD_RESOURCE = /^"\*"$|function:\*|:lambda:\*|:lambda:[^:"]*:\*|execute-api:\*|execute-api:[^:"]*:\*|execute-api:[^:"]*:[^:"]*:\*/;
+  // A resource that covers more than named functions or APIs, matched on its JSON (so `Fn::Join`
+  // pieces count): `*`; a `*` or `?` in a function name (`function:*`, `function:Demo*`), a Region
+  // or an account of a Lambda or execute-api ARN, or an API id; or a join piece that starts with
+  // `:*` and goes on (`':*:function:x'`). A lone version qualifier piece (`':*'`) stays allowed.
+  const BROAD_RESOURCE = new RegExp(
+    [
+      '^"\\*"$',
+      'function:[^:"]*[*?]',
+      ':(lambda|execute-api):[^:"]*[*?]',
+      ':(lambda|execute-api):[^:"]*:[^:"]*[*?]',
+      ':execute-api:[^:"]*:[^:"]*:[^/"]*[*?]',
+      '[*?][^:"]*:function:',
+      '":[*?][^"]+"',
+    ].join('|'),
+  );
   const broad = (s: Statement): boolean => {
     const resources = Array.isArray(s.Resource) ? s.Resource : [s.Resource];
     return resources.some((r) => BROAD_RESOURCE.test(JSON.stringify(r ?? '')));
@@ -86,6 +99,23 @@ describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () 
     expect(broad(allow('lambda:InvokeFunction', 'arn:aws:lambda:*:*:function:x'))).toBe(true);
     expect(apiInvokes(allow('execute-api:Invoke', 'x')) && broad(allow('execute-api:Invoke', 'arn:aws:execute-api:eu-central-1:111122223333:*'))).toBe(true);
     expect(broad(allow('lambda:InvokeFunction', { 'Fn::Join': ['', [{ 'Fn::GetAtt': ['Fn', 'Arn'] }, ':*']] }))).toBe(false);
+  });
+
+  test('the wildcard check catches prefix, partial and case shapes (review v4 #2, #3)', () => {
+    const allow = (Action: string, Resource: unknown): Statement => ({ Effect: 'Allow', Action, Resource });
+    const fn = (resource: unknown) => broad(allow('lambda:InvokeFunction', resource));
+    expect(fn('arn:aws:lambda:eu-central-1:111122223333:function:TenantUsageMetering-*')).toBe(true);
+    expect(fn('arn:aws:lambda:eu-central-1:111122223333:function:Demo*')).toBe(true);
+    expect(fn('arn:aws:lambda:eu-*:111122223333:function:x')).toBe(true);
+    expect(fn('arn:aws:lambda:eu-central-1:1111?2223333:function:x')).toBe(true);
+    expect(fn({ 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':lambda:', { Ref: 'AWS::Region' }, ':*:function:x']] })).toBe(true);
+    expect(broad(allow('execute-api:Invoke', 'arn:aws:execute-api:eu-central-1:111122223333:ab*/prod/POST/usage'))).toBe(true);
+    expect(broad(allow('execute-api:Invoke', 'arn:aws:execute-api:eu-central-1:111122223333:abc123/*'))).toBe(false);
+    expect(fn('arn:aws:lambda:eu-central-1:111122223333:function:billing')).toBe(false);
+    for (const action of ['lambda:invokefunction', 'Lambda:InvokeFunction', 'lambda:InvokeFunction?rl', 'lambda:InvokeAsync']) {
+      expect(invokes(allow(action, 'x'))).toBe(true);
+    }
+    expect(invokes(allow('lambda:GetFunction', 'x'))).toBe(false);
   });
 
   test('without integHttpReceiver there is no function URL at all', () => {
