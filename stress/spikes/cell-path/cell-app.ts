@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 //
-// Spike Q-6: the runtime-isolation demo stack as one cell, with every IAM
+// Path spike: the runtime-isolation demo stack as one cell, with every IAM
 // role on the /cell/ path. The same app as samples/agentic-runtime-isolation/
 // src/main.ts plus one aspect. Run from that sample's folder:
 //   CDK_OUTDIR=<out> CDK_CONTEXT_JSON='{...}' TS_NODE_TRANSPILE_ONLY=1 \

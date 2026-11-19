@@ -246,7 +246,7 @@ A cell account holds only:
 |---|---|
 | `CDKToolkit-cell` | the cell bootstrap (§8, decision 7) |
 | the role pair | `control-plane`'s `CellAccountStack`, deployed by the account owner as plain CloudFormation without a service role; its roles are on the default path `/` and carry no cell boundary |
-| account base | the account owner's stack: the cell execution policy and boundary, the API Gateway account's CloudWatch Logs role, and the identity parameters a cell reads (`/application-plane/shared/identity/*`, naming the platform's issuer) |
+| account base | the account owner's stacks (one or more; the policies deploy first, since the cell bootstrap names the boundary): the cell execution policy and boundary, the API Gateway account's CloudWatch Logs role, and the identity parameters a cell reads (`/application-plane/shared/identity/*`, naming the platform's issuer) |
 | cells | the stacks the cell script deploys |
 
 It has no default CDK bootstrap, no control plane, no driver host and no

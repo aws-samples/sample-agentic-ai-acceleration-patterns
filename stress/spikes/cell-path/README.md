@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # Path spike: the `/cell/` path in standalone cell accounts
 
-Questions ([spec](../../../docs/stress-test.spec.md) §8, decision 7, and §10, Q-5;
+Questions ([spec](../../../docs/stress-test.spec.md) §8, decision 7; §10 Q-5, the request path, stays open (CP-6);
 stress [ADR-0006](../../adr/0006-deploy-cells-through-a-scoped-cell-bootstrap.md)):
 does a cell bootstrap whose execution role and every cell role carry the
 cell boundary, with IAM scoped to the `/cell/` role path, refuse every way
