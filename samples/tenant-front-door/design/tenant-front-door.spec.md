@@ -1403,7 +1403,7 @@ Rules:
   not stored, keeps the others, deletes any `kid` not listed, and sets
   `cur` to `signinKeys.current`. Rotation is three stack updates: (1)
   add the new id to `ids`, with `current` still the old; wait past
-  propagation (60 s, S-2), so every edge location can verify the new key
+  propagation (90 s, §4.2), so every edge location can verify the new key
   before anything signs with it; (2) set `current` to the new id; (3)
   after the 10-minute `state` lifetime, remove the old id. An operator
   runs the updates and the waits. Rotate on a schedule and whenever the
@@ -1504,8 +1504,12 @@ Rules:
 | `suspended` | 503, `Retry-After: 300` | vendor operator in the edge account |
 
 A change reaches an edge location within the store's propagation time:
-about 30 s (spike S-2, measured at one location: median 28.4 s, p99 29.4 s,
-max 29.5 s). The route hook bounds its wait at 45 s after the registrar
+about 30 s at one location (spike S-2: median 28.4 s, p99 29.4 s, max
+29.5 s). It does not reach every server of that location at once: from
+one client the first routed request came 16 to 37 s after the write, and
+requests still missed the change up to about 63 s after it (design/spikes.md,
+Smoke run). A check that needs every request to see a change therefore
+waits 90 s. The route hook bounds its wait at 45 s after the registrar
 returns, so the operation does not end before its route is live. For
 cell routes and every call in `single` mode it waits the full 45 s, a
 bound and not a check: in `single` mode a route cannot be observed
@@ -2229,8 +2233,8 @@ probe build per event, and step 22 waits through two skipped delete
 hooks, each three builds of at least one 60 s poll with 60 s and 120 s
 between them, so at least 6 minutes each.
 The step 2 fixture and the suspensions of steps 13 and 22 are writes
-the test makes without the hook, so after each the test waits 60 s for
-propagation (ADR-0003, spike S-2) before its next call. The rotation check after
+the test makes without the hook, so after each the test waits 90 s for
+propagation (§4.2) before its next call. The rotation check after
 the list is a separate run with its own time. The dedicated-domain
 checks (steps 3, 11 and 18) use a fixture `host#` entry and
 `cloudfront:TestFunction`, so they deploy no distribution tenant and no
@@ -2241,7 +2245,7 @@ TXT record's TTL, two daily sweeper runs started by hand, each
 followed by a wait for its page (at most 15 s for one entry), two stack
 updates of the main stack and a wait of up to 15 minutes for the
 sweeper to delete the certificate. Step 23 adds the stand-in's deploy
-and destroy (67 s and 33 s in S-5), two 60 s waits around the
+and destroy (67 s and 33 s in S-5), two 90 s waits around the
 suspended-tenant check, and a streamed call of a few seconds. The
 control plane the test deploys has its own deploy and
 destroy time, which the test reports with the rest.
@@ -2279,7 +2283,7 @@ destroy time, which the test reports with the rest.
    `host#dedicated-a.example.com` naming `a`, with the control plane's
    account as `ac`, a dedicated domain with no DNS, certificate or distribution
    tenant. It writes with the store's ETag, as every other writer does,
-   then waits 60 s, or polls `cloudfront:TestFunction` until
+   then waits 90 s, or polls `cloudfront:TestFunction` until
    `/config.json` for that host answers 200, before step 3.
 3. `/` serves the SPA with every §7.1 header, and so does every answer
    the router generates itself: the 302 of `/logout`, `/config.json`,
@@ -2336,12 +2340,12 @@ destroy time, which the test reports with the rest.
     hook role. An edge-account principal that is neither a pair role nor
     the operator role, with `execute-api:Invoke` in its identity policy,
     calls the registrar: 403 (the explicit `Deny`, §3.4).
-13. Suspend `b`: after 60 s, `b`'s token returns 503, `a` is still served.
+13. Suspend `b`: after 90 s, `b`'s token returns 503, `a` is still served.
     The edge account's tenant provisioning role then calls
     `DeleteTenantRoute` and `PutTenantRoute` for `b`: 403 for both, and
     `b`'s entry is unchanged. `UpdateDeployment` for `b` through the
     control plane runs `front-door-post`, which puts `b`'s route again;
-    the deployment reaches `ACTIVE`, and after 60 s `b`'s token still
+    the deployment reaches `ACTIVE`, and after 90 s `b`'s token still
     returns 503.
 14. Domain challenge (ADR-0018), in `test/integ.single.ts` only.
     `<dd>` is `TFD_DEDICATED_DOMAIN`, for example
@@ -2495,7 +2499,7 @@ destroy time, which the test reports with the rest.
     (control-plane R-34).
 22. A skipped delete hook, and a suspension across a re-created
     deployment. Create tenant `c` in cell A and suspend it;
-    after 60 s its token gets 503. The test points the front door hook
+    after 90 s its token gets 503. The test points the front door hook
     parameter's `registrarUrl` at a path the registrar does not serve,
     which API Gateway refuses with 403, and deletes `c`'s deployment:
     `front-door-pre` fails three times and is skipped, the control
@@ -2504,14 +2508,14 @@ destroy time, which the test reports with the rest.
     deployment again: its `createdAt` differs from the entry's `dt`, so
     `front-door-post` replaces the entry and keeps `suspended`, and
     `c`'s token still gets 503. The edge operator role resumes `c`
-    (`UpdateTenantRouteStatus`), and after 60 s `c`'s token is served by
+    (`UpdateTenantRouteStatus`), and after 90 s `c`'s token is served by
     cell A. The test suspends `c` again and, with the parameter intact,
     deletes `c`'s deployment (`front-door-pre` removes the entry, and
-    after 60 s `c`'s token gets 403) and creates it again: the new entry
+    after 90 s `c`'s token gets 403) and creates it again: the new entry
     is `active`, and `c`'s token is served by cell A (AR-31). The test
     breaks the parameter again and deletes `c`'s
     deployment, which skips the hook again; the edge operator role's
-    `DeleteTenantRoute` for `c` answers 200, and after 60 s `c`'s token
+    `DeleteTenantRoute` for `c` answers 200, and after 90 s `c`'s token
     gets 403. The test restores the parameter.
 23. `/agents/*` on the `tenant-only` distribution (ADR-0019), in
     `test/integ.single.ts` and, for the rewrite and the 404 cases,
@@ -2534,8 +2538,8 @@ destroy time, which the test reports with the rest.
     path lands (ADR-0024). With no token the agent route gets 401, with
     a token for an unregistered tenant 403, and with `Sec-Fetch-Site:
     same-site` 403. The edge operator role then suspends `a`, and after
-    60 s `a`'s token on the agent route gets 503 with
-    `Retry-After: 300`; it resumes `a` and waits 60 s before the
+    90 s `a`'s token on the agent route gets 503 with
+    `Retry-After: 300`; it resumes `a` and waits 90 s before the
     streamed call below. Then one streamed `POST
     https://<appDomain>/agents/support-bot/invocations` with `a`'s
     token goes through the real distribution to the stand-in, which
@@ -2563,7 +2567,7 @@ Rotation check, optional and run on its own against a `host` mode front
 door: run the three rotation updates of §4.1 and check that a `state`
 minted before the switch to the new `current` still verifies, and that
 it gets 400 once the old id is removed. It adds three stack updates, the
-60 s propagation wait and the 10-minute `state` lifetime, so at least
+90 s propagation wait and the 10-minute `state` lifetime, so at least
 11 minutes plus the updates.
 
 Not tested end to end, and covered by unit tests with a stubbed
