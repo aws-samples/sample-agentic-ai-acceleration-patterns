@@ -361,7 +361,10 @@ export class MainStack extends Stack {
     // On a stack delete the registrar goes first, so no dedicated
     // distribution tenant is created while the teardown runs; the teardown
     // then runs before the distribution's delete.
-    const teardown = new DedicatedDomainsTeardown(this, 'DedicatedDomainsTeardown', { distributionId: distribution.ref });
+    const teardown = new DedicatedDomainsTeardown(this, 'DedicatedDomainsTeardown', {
+      distributionId: distribution.ref,
+      pooledTenantId: pooled.attrId,
+    });
     // Dedicated distribution tenants sit in the connection group too, so it goes after the teardown.
     teardown.resource.node.addDependency(connectionGroup);
     (registrar.function.node.defaultChild as lambda.CfnFunction).node.addDependency(teardown.resource);
@@ -380,6 +383,7 @@ export class MainStack extends Stack {
       const sweeper = new Sweeper(this, 'Sweeper', {
         routeTableArn: routeTable.keyValueStoreArn,
         distributionId: distribution.ref,
+        pooledTenantId: pooled.attrId,
         alarmAction,
       });
       for (const schedule of sweeper.schedules) schedule.node.addDependency(guard.resource);

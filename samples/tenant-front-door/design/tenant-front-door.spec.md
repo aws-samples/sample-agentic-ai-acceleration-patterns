@@ -984,7 +984,10 @@ given below):
    and the call keeps its answer; the sweeper disables what is left
    enabled. The sweeper (§3.1), run
    every 15 minutes by EventBridge Scheduler, lists this distribution's
-   dedicated distribution tenants and the registrar's certificates.
+   dedicated distribution tenants and the registrar's certificates. It
+   skips the pooled distribution tenant by its id, which the stack
+   passes it as it does to the guard, before it reads it or its tags, so
+   no tag on the pooled distribution tenant makes it removable.
    A distribution tenant whose domain is no longer the `d` of the
    tenant it is tagged with is disabled if it is still enabled, deleted
    once it is disabled and deployed, and its certificate deleted after
@@ -1991,7 +1994,9 @@ All with a small static HTML or JSON body and `no-store`:
   behind names a registrar that step 6 removes, so the application's next
   create or update fails. In step 6 a custom resource on the
   distribution, run before the distribution's delete, disables and
-  deletes every dedicated distribution tenant on it, then deletes every
+  deletes every dedicated distribution tenant on it (it skips the pooled
+  distribution tenant by its id before any read, as the sweeper does, and
+  CloudFormation deletes that one), then deletes every
   certificate the registrar tagged with this distribution, one still
   pending validation included, which has no distribution tenant and
   would outlive the stack, polling until each disable has deployed (the

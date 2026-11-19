@@ -11,7 +11,8 @@
  *
  * 1. every dedicated distribution tenant on the distribution, tagged with
  *    it by the registrar: disabled when enabled, deleted once disabled and
- *    deployed;
+ *    deployed. The pooled distribution tenant is skipped by its id before
+ *    any read; CloudFormation deletes it;
  * 2. then every certificate the registrar tagged with the distribution,
  *    pending ones included.
  *
@@ -35,6 +36,8 @@ import { TAG_DISTRIBUTION_ID } from '../shared/contracts';
 /** The teardown's properties. */
 export interface TeardownProperties {
   readonly DistributionId: string;
+  /** The pooled distribution tenant, which the teardown never touches. */
+  readonly PooledTenantId: string;
 }
 
 /** The provider framework's event: the CloudFormation request without the response URL. */
@@ -71,6 +74,8 @@ export function physicalResourceId(distributionId: string): string {
 export async function onEvent(event: TeardownEvent): Promise<{ PhysicalResourceId: string }> {
   const distributionId = event.ResourceProperties.DistributionId;
   if (typeof distributionId !== 'string' || distributionId === '') throw new Error('DistributionId is required');
+  const pooledTenantId = event.ResourceProperties.PooledTenantId;
+  if (typeof pooledTenantId !== 'string' || pooledTenantId === '') throw new Error('PooledTenantId is required');
   return { PhysicalResourceId: event.RequestType === 'Delete' && event.PhysicalResourceId !== undefined ? event.PhysicalResourceId : physicalResourceId(distributionId) };
 }
 
@@ -87,9 +92,10 @@ export interface PassResult {
  * left; a resource changed by another writer, or a certificate CloudFront
  * has not released yet, is left for the next poll.
  */
-export async function teardownPass(distributionId: string, deps: Deps): Promise<PassResult> {
+export async function teardownPass(distributionId: string, pooledTenantId: string, deps: Deps): Promise<PassResult> {
   let tenants = 0;
   for (const summary of await listDistributionTenants(deps.cloudFront, distributionId)) {
+    if (summary.Id === pooledTenantId) continue;
     let got;
     let tags;
     try {
@@ -101,7 +107,6 @@ export async function teardownPass(distributionId: string, deps: Deps): Promise<
       throw error;
     }
     const dt = got.DistributionTenant;
-    // The pooled distribution tenant has no registrar tag; CloudFormation deletes it.
     if (!tags.some((t) => t.Key === TAG_DISTRIBUTION_ID && t.Value === distributionId)) continue;
     tenants++;
     try {
@@ -143,7 +148,7 @@ export async function teardownPass(distributionId: string, deps: Deps): Promise<
 
 export async function checkComplete(event: TeardownEvent, deps: Deps): Promise<{ IsComplete: boolean }> {
   if (event.RequestType !== 'Delete') return { IsComplete: true };
-  const left = await teardownPass(event.ResourceProperties.DistributionId, deps);
+  const left = await teardownPass(event.ResourceProperties.DistributionId, event.ResourceProperties.PooledTenantId, deps);
   log('teardown pass', { tenantsLeft: left.tenants, certificatesLeft: left.certificates });
   return { IsComplete: left.tenants === 0 && left.certificates === 0 };
 }

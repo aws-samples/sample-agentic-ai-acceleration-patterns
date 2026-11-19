@@ -20,10 +20,11 @@
  *   or by another tool. A removal cannot leave it, because `d` is read
  *   after `GetDistributionTenant` and every write carries that read's ETag.
  *
- * Before it touches a distribution tenant or a certificate it checks that
+ * It skips the pooled distribution tenant by its id before any read. Before
+ * it touches another distribution tenant or a certificate it checks that
  * the resource's tags name this distribution and a tenant, so it never
- * touches the pooled distribution tenant, another distribution's resources
- * or a certificate the registrar did not request. A resource whose tenant
+ * touches another distribution's resources or a certificate the registrar
+ * did not request. A resource whose tenant
  * entry cannot be read is kept. It finds what a crashed registrar call left
  * the same way. It never writes the route table.
  */
@@ -62,6 +63,8 @@ export interface RemovalDeps {
   readonly kvs: Pick<CloudFrontKeyValueStoreClient, 'send'>;
   readonly routeTableArn: string;
   readonly distributionId: string;
+  /** The pooled distribution tenant's id: skipped before any read, so no tag on it makes it removable. */
+  readonly pooledTenantId: string;
 }
 
 export interface RemovalResult {
@@ -176,6 +179,8 @@ export async function runRemoval(deps: RemovalDeps): Promise<RemovalResult> {
   }
 
   for (const summary of summaries) {
+    // The pooled distribution tenant is the stack's, whatever its tags say (threat model AR-33).
+    if (summary.Id === deps.pooledTenantId) continue;
     await attempt({ distributionTenantId: summary.Id ?? '' }, async () => {
       const got = await deps.cloudFront.send(new GetDistributionTenantCommand({ Identifier: summary.Id }));
       const dt = got.DistributionTenant;

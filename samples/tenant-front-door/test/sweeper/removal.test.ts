@@ -120,8 +120,11 @@ function deps(): RemovalDeps {
     kvs: new CloudFrontKeyValueStoreClient({ region: 'us-east-1' }),
     routeTableArn: ROUTE_TABLE_ARN,
     distributionId: DISTRIBUTION_ID,
+    pooledTenantId: POOLED,
   };
 }
+
+const POOLED = 'dt-pooled';
 
 const deletedCertificates = (): (string | undefined)[] => acm.commandCalls(DeleteCertificateCommand).map((c) => c.args[0].input.CertificateArn);
 
@@ -166,6 +169,16 @@ describe('two-phase removal (spec §3.4 step 5, ADR-0018, M-25)', () => {
     });
     expect(cloudFront.commandCalls(DeleteDistributionTenantCommand)).toHaveLength(0);
     expect(deletedCertificates()).toEqual([]);
+  });
+
+  it('skips the pooled distribution tenant before any read, even tagged with a tenant that has no d (threat model AR-33)', async () => {
+    distributionTenants([{ id: POOLED, domain: OLD_DOMAIN, enabled: true, status: 'Deployed', tenantTag: TENANT_A }]);
+    const result = await runRemoval(deps());
+    expect(result.disabled).toBe(0);
+    expect(cloudFront.commandCalls(GetDistributionTenantCommand)).toHaveLength(0);
+    expect(cloudFront.commandCalls(ListTagsForResourceCommand)).toHaveLength(0);
+    expect(cloudFront.commandCalls(UpdateDistributionTenantCommand)).toHaveLength(0);
+    expect(cloudFront.commandCalls(DeleteDistributionTenantCommand)).toHaveLength(0);
   });
 
   it('waits while a disable is still deploying', async () => {

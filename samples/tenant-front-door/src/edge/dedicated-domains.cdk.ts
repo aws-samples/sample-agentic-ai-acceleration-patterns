@@ -313,6 +313,8 @@ export function registrarDedicatedDomainsPolicy(scope: Construct, id: string, ro
 export interface SweeperProps {
   readonly routeTableArn: string;
   readonly distributionId: string;
+  /** The pooled distribution tenant, which the removal job skips. */
+  readonly pooledTenantId: string;
   /** The ALARM action of every alarm, when the deployer gives one (§3.6 `alarmTopicArn`). */
   readonly alarmAction?: cloudwatch.IAlarmAction;
 }
@@ -355,6 +357,7 @@ export class Sweeper extends Construct {
     const environment: Record<keyof typeof SWEEPER_ENV, string> = {
       routeTableArn: props.routeTableArn,
       distributionId: props.distributionId,
+      pooledTenantId: props.pooledTenantId,
       tableName: this.table.tableName,
     };
     this.function = nodeFunction(this, 'Function', {
@@ -603,6 +606,8 @@ export class DedicatedDomainsGuard extends Construct {
 
 export interface DedicatedDomainsTeardownProps {
   readonly distributionId: string;
+  /** The pooled distribution tenant, which the teardown skips; CloudFormation deletes it. */
+  readonly pooledTenantId: string;
 }
 
 export class DedicatedDomainsTeardown extends Construct {
@@ -652,7 +657,7 @@ export class DedicatedDomainsTeardown extends Construct {
     this.resource = new CustomResource(this, 'Resource', {
       serviceToken: provider.serviceToken,
       resourceType: 'Custom::TenantFrontDoorDedicatedDomainsTeardown',
-      properties: { DistributionId: props.distributionId },
+      properties: { DistributionId: props.distributionId, PooledTenantId: props.pooledTenantId },
     });
   }
 }

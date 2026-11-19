@@ -30,6 +30,7 @@ import {
 import { TAG_DISTRIBUTION_ID, TAG_TENANT_ID } from '../../src/shared/contracts';
 
 const DISTRIBUTION = 'E1EXAMPLE';
+const POOLED = 'dt_pooled';
 const CERT = (n: number) => `arn:aws:acm:us-east-1:111111111111:certificate/${n}`;
 
 const cloudFront = mockClient(CloudFrontClient);
@@ -37,7 +38,7 @@ const acm = mockClient(ACMClient);
 const deps: Deps = { cloudFront: new CloudFrontClient({ region: 'us-east-1' }), acm: new ACMClient({ region: 'us-east-1' }) };
 
 function event(requestType: TeardownEvent['RequestType'], physicalId?: string): TeardownEvent {
-  return { RequestType: requestType, PhysicalResourceId: physicalId, ResourceProperties: { DistributionId: DISTRIBUTION } };
+  return { RequestType: requestType, PhysicalResourceId: physicalId, ResourceProperties: { DistributionId: DISTRIBUTION, PooledTenantId: POOLED } };
 }
 
 const registrarTags = (tenant: string) => ({ Items: [{ Key: TAG_TENANT_ID, Value: tenant }, { Key: TAG_DISTRIBUTION_ID, Value: DISTRIBUTION }] });
@@ -85,7 +86,8 @@ describe('dedicated domains teardown (spec §6.2)', () => {
     expect(await onEvent(event('Create'))).toEqual({ PhysicalResourceId: physicalResourceId(DISTRIBUTION) });
     expect(await onEvent(event('Update', 'old'))).toEqual({ PhysicalResourceId: physicalResourceId(DISTRIBUTION) });
     expect(await onEvent(event('Delete', 'old'))).toEqual({ PhysicalResourceId: 'old' });
-    await expect(onEvent({ RequestType: 'Create', ResourceProperties: { DistributionId: '' } })).rejects.toThrow(/DistributionId/);
+    await expect(onEvent({ RequestType: 'Create', ResourceProperties: { DistributionId: '', PooledTenantId: POOLED } })).rejects.toThrow(/DistributionId/);
+    await expect(onEvent({ RequestType: 'Create', ResourceProperties: { DistributionId: DISTRIBUTION, PooledTenantId: '' } })).rejects.toThrow(/PooledTenantId/);
   });
 
   it.each(['Create', 'Update'] as const)('completes a %s at once, touching nothing', async (type) => {
@@ -128,9 +130,17 @@ describe('dedicated domains teardown (spec §6.2)', () => {
     expect(acm.commandCalls(DeleteCertificateCommand).map((c) => c.args[0].input.CertificateArn)).toEqual([CERT(1), CERT(2)]);
   });
 
-  it('leaves the pooled tenant and tenants of other distributions or without the registrar tag to CloudFormation', async () => {
+  it('skips the pooled distribution tenant by id before any read, even with the registrar\'s tags', async () => {
+    tenants([{ Id: POOLED, Enabled: true, Tags: registrarTags('a') }]);
+    expect(await checkComplete(event('Delete'), deps)).toEqual({ IsComplete: true });
+    expect(cloudFront.commandCalls(GetDistributionTenantCommand)).toHaveLength(0);
+    expect(cloudFront.commandCalls(ListTagsForResourceCommand)).toHaveLength(0);
+    expect(cloudFront.commandCalls(UpdateDistributionTenantCommand)).toHaveLength(0);
+  });
+
+  it('leaves tenants of other distributions or without the registrar tag to CloudFormation', async () => {
     tenants([
-      { Id: 'dt_pooled', Enabled: true },
+      { Id: 'dt_untagged', Enabled: true },
       { Id: 'dt_other', Enabled: true, DistributionId: 'E2OTHER', Tags: registrarTags('a') },
       { Id: 'dt_foreign', Enabled: true, Tags: { Items: [{ Key: TAG_DISTRIBUTION_ID, Value: 'E2OTHER' }] } },
     ]);
