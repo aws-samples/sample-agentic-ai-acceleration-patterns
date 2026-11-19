@@ -72,6 +72,12 @@ expect_denied "SetDefaultPolicyVersion on the execution policy" iam set-default-
 expect_denied "PutParameter over the identity pool id" ssm put-parameter --name /application-plane/shared/identity/userPoolId --type String --value q5 --overwrite
 expect_denied "PutParameter over the cell bootstrap version" ssm put-parameter --name /cdk-bootstrap/cell/version --type String --value 99 --overwrite
 expect_denied "UpdateAccount: point the API Gateway logs role at a /cell/ role" apigateway update-account --patch-operations "op=replace,path=/cloudwatchRoleArn,value=arn:${partition}:iam::${account}:role/cell/cell-spike-positive"
+slr_out="$(probe iam create-service-linked-role --aws-service-name ops.apigateway.amazonaws.com 2>&1)"
+if [[ $? -eq 0 ]] || grep -q 'has been taken' <<<"$slr_out"; then
+  echo "PASS  CreateServiceLinkedRole for API Gateway under role/aws-service-role/ (positive control): allowed"
+else
+  echo "FAIL  CreateServiceLinkedRole for API Gateway: $(head -c 200 <<<"$slr_out")"; fails=$((fails + 1))
+fi
 expect_allowed "UpdateRoleDescription on a /cell/ role (positive control)" iam update-role-description --role-name cell-spike-positive --description "changed by the q5 probe"
 expect_allowed "GetRole on the role pair (read stays open)" iam get-role --role-name cell-spike-role-pair-stand-in --query Role.Path --output text
 

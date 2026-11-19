@@ -269,7 +269,9 @@ The `control-plane` slice's `deploy` enforces it before the first cell
 build: it lists the account's CloudFormation stacks in every Region the run
 uses and refuses an account with any stack but the four kinds above
 (`CDKToolkit-cell` and the role pair by name, the account base by its
-tag, cells by their service role, the cell bootstrap's execution role), a
+tag together with no service role and a stack name on the list the
+account owner gives the check (W-11), cells by their service role, the
+cell bootstrap's execution role), a
 stack whose service role is set and is not the cell execution role, a
 `cdk-hnb659fds-*` role, a role pair on `/cell/` or under the cell
 boundary, or a `/cell/` role trusted from outside (above). The stack list

@@ -55,7 +55,7 @@ Run 2026-11-18, `eu-central-1`, two new, empty, non-production accounts
 | Cell bootstrap | 54 s; execution role bounded | 54 s; execution role bounded |
 | Probe stack (`cell-spike-probe` on `/cell/`, bounded) | 50 s | 49 s |
 | Deny probe: a bounded role on `/` | refused at `iam:CreateRole`, explicit deny in the boundary | the same |
-| `probes.sh` | 20 of 20 pass (2026-11-19) | 20 of 20 pass (2026-11-19) |
+| `probes.sh` | 21 of 21 pass (2026-11-19) | 21 of 21 pass (2026-11-19); the service-linked-role control created `AWSServiceRoleForAPIGateway` under `/aws-service-role/` |
 | runtime-isolation cell | `CREATE_COMPLETE` in 424 s; 27 of 27 roles on `/cell/` and bounded; destroyed in 528 s, nothing left | not deployed |
 
 `probes.sh`, as the bounded `/cell/` role whose own policy allows `iam:*`,
@@ -65,7 +65,8 @@ permissions boundary. The script stops before the first probe unless the
 caller is the probe role. The first run (2026-11-18) had 11 deny probes.
 The re-runs on 2026-11-19 added the SSM deny (CP-7), the API Gateway
 account deny (CP-8) and the service-linked-role path scope, and probe
-each with the policies as they are in this folder.
+each with the policies as they are in this folder: 18 deny probes and
+three positive controls.
 
 | Probe | Result |
 |---|---|
@@ -87,6 +88,7 @@ each with the policies as they are in this folder.
 | `ssm:PutParameter` over `/application-plane/shared/identity/userPoolId` | denied |
 | `ssm:PutParameter` over `/cdk-bootstrap/cell/version` | denied |
 | `apigateway:PATCH` `/account`, pointing the logs role at a `/cell/` role | denied |
+| `iam:CreateServiceLinkedRole` for `ops.apigateway.amazonaws.com` (positive control; the role already existing counts as allowed) | allowed |
 | `iam:UpdateRoleDescription` on another `/cell/` role (positive control) | allowed |
 | `iam:GetRole` on the role pair | allowed |
 
@@ -107,9 +109,10 @@ each with the policies as they are in this folder.
 
 ## Teardown
 
-The cell is destroyed. Each 2026-11-19 re-run updated the owner stacks in
-place (61 s, 62 s) and deployed the probe stack again (50 s); the probe
-stack is destroyed after the run (16 s). The cell deploy predates the
+The cell is destroyed. The last 2026-11-19 re-run updated the owner
+stacks in place (61 s, 62 s) and deployed the probe stack again (50 s).
+The probe stack is destroyed by hand after a run (16 s on the earlier
+re-run). The cell deploy predates the
 SSM and API Gateway account denies and the service-linked-role path
 scope; runtime-isolation with `publishParameters=false` only reads those
 parameters, does not change the API Gateway account, and creates its
@@ -126,5 +129,5 @@ headers: 0. IAM least privilege for this spike: 2 high, 2 medium, all in
 
 | Finding | Outcome |
 |---|---|
-| Service wildcards (`apigateway:*`, `dynamodb:*`, `kms:*`, `lambda:*`, `logs:*`, `ssm:*`, ...) on `*`, in both policies (high) | Accepted: the file records the policies the spike ran, so CP-1 to CP-7 stay reproducible. The standalone cell account scopes them: it holds nothing but cells, the bootstrap and the owner stacks, and the boundary's explicit denies keep cell roles off the owner's roles, policies, parameters and API Gateway account setting |
+| Service wildcards (`apigateway:*`, `dynamodb:*`, `kms:*`, `lambda:*`, `logs:*`, `ssm:*`, ...) on `*`, in both policies (high) | Accepted: the file records the policies the spike ran, so CP-1 to CP-8 stay reproducible. The standalone cell account scopes them: it holds nothing but cells, the bootstrap and the owner stacks, and the boundary's explicit denies keep cell roles off the owner's roles, policies, parameters and API Gateway account setting |
 | `iam:PassRole` on `role/cell/*` without `iam:PassedToService` (medium) | Accepted for the spike: every role on `/cell/` carries the boundary, so a role passed to any service holds at most the boundary's permissions. The cell policies in `stress/application/` (W-10) can add an `iam:PassedToService` list once the cell's services are fixed |
