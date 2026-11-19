@@ -24,10 +24,13 @@ export type ExchangeResult =
   /**
    * `unavailable`: network errors (API Gateway's own answers carry no CORS
    * header) or `server_error` after the retries; the caller keeps the
-   * refresh token and shows "try again later". `refused`: a 4xx, such as
-   * `invalid_target`.
+   * refresh token and shows "try again later". `tenant-refused`: a 400
+   * `invalid_target`, the user does not hold the tenant or it is not
+   * ACTIVE. `refused`: any other 4xx (such as `invalid_grant` for an
+   * expired refresh token) or an answer with no token. `aborted`: the
+   * caller's signal ended the call; nothing is retried.
    */
-  | { readonly ok: false; readonly reason: 'unavailable' | 'refused' };
+  | { readonly ok: false; readonly reason: 'unavailable' | 'tenant-refused' | 'refused' | 'aborted' };
 
 /**
  * The `scope` the exchange accepts: the resource-server scopes of
@@ -72,8 +75,13 @@ export async function narrowToken(
         const t = (await res.json().catch(() => undefined)) as Record<string, unknown> | undefined;
         return typeof t?.access_token === 'string' ? { ok: true, accessToken: t.access_token } : { ok: false, reason: 'refused' };
       }
-      if (res.status < 500) return { ok: false, reason: 'refused' };
-    } catch {
+      if (res.status < 500) {
+        const e = (await res.json().catch(() => undefined)) as Record<string, unknown> | undefined;
+        return { ok: false, reason: res.status === 400 && e?.error === 'invalid_target' ? 'tenant-refused' : 'refused' };
+      }
+    } catch (e) {
+      // By name, not `instanceof`: a `DOMException` need not come from this realm.
+      if ((e as { name?: unknown } | null)?.name === 'AbortError') return { ok: false, reason: 'aborted' };
       // A network error: API Gateway's own answers carry no CORS header (§7.2).
     }
     if (attempt >= EXCHANGE_RETRY_DELAYS_MS.length) return { ok: false, reason: 'unavailable' };
