@@ -32,12 +32,17 @@ Pros: nothing to change. Cons: the standalone case carries the producer.
 ## Decision
 
 Option 1. `UntrustedCodeSandboxes` (package root) holds the pattern and
-deploys `runCodeFunction`, which a vendor's own API invokes with IAM,
-passing a tenant id it verified; the function vends the tool tenant role
-itself. `RunCodeToolTarget` (`gateway` subpath) takes the core construct
+deploys `runCodeFunction` only with `standalone: true`, which a vendor's
+own API invokes with IAM, passing a tenant id it verified; the function
+vends the tool tenant role itself. A core with no entry fails synth. `RunCodeToolTarget` (`gateway` subpath) takes the core construct
 and an ingress, deploys a gateway function that wraps the same run logic
-in `toolHandler`, and gets its grants from `sandboxes.grantRunCode`.
-Invoke on `runCodeFunction` is granted only through `grantInvokeRunCode`.
+in `toolHandler`, and gets its subnets, security group, environment, timeout, trust,
+actions and log group from `sandboxes.bindRunCode`. It is the one
+construct that names the producer, an accepted exception to standard
+§1.1, which otherwise reserves that for demo apps and tests. Invoke on
+`runCodeFunction` is granted through `grantInvokeRunCode`, or by an
+identity policy on its published ARN; same-account identity policies
+that allow invoke on `*` also reach it (threat T-82).
 A lint rule and a unit test keep the producer import inside
 `src/gateway/`.
 
@@ -48,3 +53,15 @@ the gateway, and a `standalone` step through `runCodeFunction` with IAM.
 On the standalone path the vendor decides the tenant (threat T-61, T-82).
 The core function's budget may reach 120 s; the gateway entry refuses a
 budget above 90 s.
+
+Package shape, written in `.projenrc.ts` with `project.package.addField`
+because projen owns `package.json`: `devDependencies` holds
+`agentic-runtime-isolation` as `file:../agentic-runtime-isolation`;
+`peerDependencies` holds it as `*` with
+`peerDependenciesMeta.agentic-runtime-isolation.optional = true`;
+`exports` maps `.` to the core entry and `./gateway` to the gateway
+entry, with `typesVersions` for consumers on `node10` resolution. No
+sample consumes another through `file:` yet, and the producer has no
+`main` or `exports`, so the first build proves both imports from the
+integration app and from a stub consumer, and checks that the gateway
+entry resolves the consumer's copy of the producer.

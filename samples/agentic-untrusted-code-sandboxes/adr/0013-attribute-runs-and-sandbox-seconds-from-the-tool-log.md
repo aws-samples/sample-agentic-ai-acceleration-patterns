@@ -11,8 +11,9 @@
 
 R-7 and standard §4.4 ask that every run and its cost be attributable to a
 tenant. The sandbox itself is not a reliable witness: MicroVMs log nothing,
-and code can write into the runner's stream. The tool and the stopping
-functions know the verified tenant. Per-tenant CloudWatch metrics grow with
+and code can write into the runner's stream. The tool functions (the
+gateway function and, standalone, `runCodeFunction`) and the stopping
+functions know the tenant. Per-tenant CloudWatch metrics grow with
 the tenant count (agentic-runtime-isolation ADR-0021).
 
 ## Options considered

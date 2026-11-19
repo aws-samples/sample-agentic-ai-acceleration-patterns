@@ -17,8 +17,10 @@ per tenant, on any of three AWS boundaries:
 | `nitro` | a Nitro Sandbox task per tenant on Amazon ECS Managed Instances | AWS runs the instances; the vendor owns the capacity provider |
 | `agentcore` | a session per tenant on a second AgentCore Runtime (platform version V2) with a narrow role | AWS; no servers |
 
-The tool is the only component that chooses the tenant. It reads the tenant
-from the signed tenant context the tools gateway hands it, fetches the
+The tool is the only component that chooses the tenant. On the gateway
+entry it reads the tenant from the signed tenant context the tools gateway
+hands it; on the standalone entry the vendor's own API passes a tenant id
+it verified with its own identity provider (ADR-0017). The tool then fetches the
 input with the tenant's own credentials, starts or reuses that tenant's
 sandbox, passes in the code and the bytes, and returns the output. The
 sandbox sees one tenant's bytes, has no route to the internet, and holds no
@@ -44,8 +46,9 @@ script" case on all three backends and checks what each one refuses.
 ### Requirements
 
 - R-1: One tool, `run_code`, with one input and output shape for every backend.
-- R-2: The tenant comes only from the verified tenant context; the caller
-  never names it.
+- R-2: The tenant comes only from a verified identity: the signed tenant
+  context on the gateway entry, or the vendor's own verified token on the
+  standalone entry. The agent and the code never name it.
 - R-3: The input is fetched with credentials that reach only the caller's
   tenant prefix, before the sandbox is involved.
 - R-4: One sandbox per tenant per backend, reused across calls while it
@@ -115,8 +118,11 @@ has nothing to fetch with. This rules out mounting tenant buckets, passing
 presigned URLs, or giving the sandbox a role "just for logs" that could be
 widened later (ADR-0006).
 
-**P-2. The tenant is chosen once, by the tool, from the signed context.**
-No argument the caller passes selects a tenant, a prefix or a session. The
+**P-2. The tenant is chosen once, from a verified identity.** On the
+gateway entry the tool takes it from the signed context and refuses a
+`tenantId` argument; on the standalone entry the vendor's API, which
+holds invoke on `runCodeFunction`, passes the id it verified. No other
+argument selects a tenant, a prefix or a session. The
 `backend` argument picks which of the tenant's own sandboxes runs the code,
 never whose. The sandbox knows its tenant only as a label for logs.
 
@@ -165,8 +171,7 @@ claim in the README without a test row behind it is a defect.
 | Component | Service | Pattern | Holds |
 |---|---|---|---|
 | `run_code` tool | Lambda: the core `runCodeFunction`, and with the gateway entry also a `ToolTarget` of `agentic-runtime-isolation` | Signed tenant context, tool-side TVM | the tool role (§3.6) |
-| Gateway tool role (`RunCodeToolTarget` only) | invoked by the tools gateway role only; what `grantRunCode` gives: assume the tool tenant role with a `TenantId` tag, and the tool role's sandbox actions; `kms:GetPublicKey` on the context key | the same as the tool role |
-| `runCodeFunction` invokers | `lambda:InvokeFunction` on `runCodeFunction`, granted only through `sandboxes.grantInvokeRunCode(principal)`; the function has no resource policy, so no other principal may call it | anything else |
+| Standalone invokers | `lambda:InvokeFunction` on `runCodeFunction`, through `grantInvokeRunCode(principal)` in the app, or an identity policy on the published `runCodeFunctionArn` in another app | the gateway path |
 | Tool tenant role | IAM, vended with the `TenantId` session tag | ABAC on `TenantId` | `inputs/<t>/*` read, `outputs/<t>/*` write, registry rows `TENANT#<t>`, `nitro` `RunTask` and `StopTask` on tasks tagged `<t>` |
 | Input bucket | S3 | Tenant prefix | tenant files the code reads |
 | Sandbox registry | DynamoDB | Tenant-keyed registry, optimistic version, start lease | one row per tenant per backend |
@@ -194,7 +199,8 @@ claim in the README without a test row behind it is a defect.
 5. With its own role it starts and calls the tenant's MicroVM or AgentCore
    session.
 
-Nothing downstream of step 3 accepts a tenant id from the arguments.
+Nothing downstream of step 3 accepts a tenant id from the arguments; the
+gateway handler refuses a `tenantId` argument with `invalid_argument`.
 
 Standalone, with any identity provider (ADR-0017). The core construct,
 `UntrustedCodeSandboxes`, needs no ingress and imports nothing from
@@ -202,7 +208,10 @@ Standalone, with any identity provider (ADR-0017). The core construct,
 vendor's own API or tool invokes with IAM (`lambda:InvokeFunction`),
 passing `tenantId` with the §5.1 fields. The vendor takes that id only
 from a token they verified with their own identity provider; nothing
-else changes. `runCodeFunction` vends the tool tenant role itself, with
+else changes. The function has no resource policy, but inside the account
+any principal whose identity policy allows `lambda:InvokeFunction` on it
+(or on `*`) can call it and name any tenant, so the vendor keeps that
+action out of broad policies (threat T-82). `runCodeFunction` vends the tool tenant role itself, with
 one `sts:AssumeRole` and `sts:TagSession` carrying `TenantId`, so steps
 4 and 5 above are the same on both paths. Steps 1 to 3 are the gateway
 entry's (§3.3).
@@ -220,15 +229,30 @@ Two entry points (ADR-0017):
 `ingress` (`SharedIngress | SharedIngressRef`, required), `gateway`
 (default `default`), `toolName` (default `run-code`). It deploys one more
 Lambda whose handler wraps the same run logic in the producer's
-`toolHandler`, registers it as a Lambda `ToolTarget`, and calls
-`sandboxes.grantRunCode(fn)`, which lets that function assume the tool
-tenant role and start and call sandboxes as the core function can. Its
-read-only property is `toolTarget`.
+`toolHandler`, sets `tenantId` from the verified context, and refuses a
+`tenantId` argument; it registers the function as a Lambda `ToolTarget`
+(which grants `kms:GetPublicKey` on the context key) and calls
+`sandboxes.bindRunCode(fn)`. `bindRunCode` gives the function everything
+the core function has: the tool subnets and tool security group, the
+environment (table, bucket, image, connector, pinned task definition,
+runtime and tenant role ARNs, limits), the timeout from the budget, a
+place in the tool tenant role's trust policy, the tool role's sandbox
+actions, a log group the core owns (retention set, deleted on destroy)
+and inclusion in the §3.8 Contributor Insights rules. Its read-only
+property is `toolTarget`. It names the producer, which standard §1.1
+allows only in demo apps and tests; ADR-0017 records this adapter as the
+exception.
+
+`runCodeFunction` exists only with `standalone: true`. A core construct
+with neither `standalone` nor a `RunCodeToolTarget` bound fails synth,
+because it would have no way in. A gateway-only deployment therefore has
+no unsigned entry.
 
 `UntrustedCodeSandboxes` props:
 
 | Prop | Type | Default | Meaning |
 |---|---|---|---|
+| `standalone` | `boolean` | `false` | deploy `runCodeFunction` for the vendor's own API (ADR-0017) |
 | `backends` | `('microvm' \| 'nitro' \| 'agentcore')[]` | `['microvm']` | the boundaries to deploy; at least one |
 | `defaultBackend` | one of `backends` | first entry | used when the call names none |
 | `runTimeout` | `Duration` | 30 s | runner kill time; 1 s to 60 s |
@@ -263,7 +287,7 @@ below 1 min or at or above `sandboxMaxLife`, `dnsFirewall` together with
 a supplied `vpc`. `RunCodeToolTarget` fails at synth when the core's
 budget is above 90 s.
 
-Read-only properties: `runCodeFunction`, `registryTable`, `inputBucket`, `toolRole`,
+Read-only properties: `runCodeFunction` (undefined unless `standalone`), `registryTable`, `inputBucket`, `toolRole`,
 `toolTenantRole`, `offboardFunction`, `vpc`, and per backend the image ARN,
 cluster ARN or runtime ARN.
 
@@ -394,7 +418,7 @@ to its own stdout through the runner.
 
 | Role | May | May not |
 |---|---|---|
-| Tool role (function) | assume the tool tenant role with a `TenantId` tag; `lambda:RunMicrovm`, `GetMicrovm`, `TerminateMicrovm`, `CreateMicrovmAuthToken` on the sample's image (every MicroVM action authorizes against the image ARN; there is no MicroVM ARN), `lambda:PassNetworkConnector` on `HTTP_INGRESS` and the sample's connector only, so a start without the connector, which would get `INTERNET_EGRESS`, is refused; `bedrock-agentcore:InvokeAgentRuntime`, `StopRuntimeSession` on the sample's runtime; `ecs:DescribeTasks` on the cluster; `kms:GetPublicKey` on the context key | read the bucket or the registry directly; `ecs:RunTask` or `StopTask` |
+| Tool role (function) | assume the tool tenant role with a `TenantId` tag; `lambda:RunMicrovm`, `GetMicrovm`, `TerminateMicrovm`, `CreateMicrovmAuthToken` on the sample's image (every MicroVM action authorizes against the image ARN; there is no MicroVM ARN), `lambda:PassNetworkConnector` on `HTTP_INGRESS` and the sample's connector only, so a start without the connector, which would get `INTERNET_EGRESS`, is refused; `bedrock-agentcore:InvokeAgentRuntime`, `StopRuntimeSession` on the sample's runtime; `ecs:DescribeTasks` on the cluster. One such role for `runCodeFunction` and one for each bound gateway function (`bindRunCode`); the gateway function's role also gets `kms:GetPublicKey` on the context key from `ToolTarget` | read the bucket or the registry directly; `ecs:RunTask` or `StopTask` |
 | Tool tenant role | `s3:GetObject` on `inputs/${TenantId}/*`, `s3:PutObject` on `outputs/${TenantId}/*`, registry items with `dynamodb:LeadingKeys` = `TENANT#${TenantId}`, `ecs:RunTask` on the pinned task definition revision ARN only, with the request tag condition and `ecs:cluster` = the sample's cluster; `ecs:TagResource` on `task/<cluster>/*` with the request tag condition and `ecs:CreateAction` = `RunTask` (the action has no `ecs:cluster` key, and this stops the role retagging existing tasks); `ecs:StopTask` with the resource tag condition and `ecs:cluster`; `iam:PassRole` on the task execution role | anything without its own tag; any other task definition or cluster |
 | Task execution role | `ecr:GetAuthorizationToken` on `*` (the action takes no resource), `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, Logs write on the task log group | everything else; never reachable by code (S-5) |
 | AgentCore runtime role | `ecr:GetAuthorizationToken` on `*`, `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents`, `DescribeLogStreams` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` (the name is known at synth, and runtime names cannot contain `-`, so the prefix matches only this runtime; code can create extra groups under the prefix, which the cleanup resource removes); with `sessionFiles`, `s3:GetObject`, `s3:PutObject` on `sessions/${aws:AgentCoreRuntimeSourceSid}/*` and `s3:ListBucket` with an `s3:prefix` condition | everything else |
@@ -686,10 +710,13 @@ tool tenant role allows `RunTask` on that ARN only (§3.6).
 
 ### 5.1 Tool `run_code`
 
-Input, after the gateway strips the tenant context:
+Input. On the gateway entry: after the gateway strips the tenant context,
+with `tenantId` taken from the context (a `tenantId` argument is refused).
+On the standalone entry: the same fields plus `tenantId`.
 
 | Field | Type | Required | Rule |
 |---|---|---|---|
+| `tenantId` | string | standalone only | `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; the same rule applies to the context's tenant on the gateway entry, because the id becomes the session tag, the key prefix, the registry key and the session hash |
 | `code` | string | yes | ≤ 64 KiB, UTF-8 Python |
 | `input` | string | no | object name under the tenant's `inputs/` prefix; `[A-Za-z0-9._/-]{1,256}`, no `..`, no leading `/` |
 | `backend` | string | no | one of the enabled backends; default `defaultBackend` |
@@ -708,7 +735,7 @@ Errors (tool error `code`, no stack, no tenant data):
 
 | Code | Retry | When |
 |---|---|---|
-| `context_invalid` | no | the gateway context failed verification (from `toolHandler`) |
+| `context_invalid` | no | gateway entry: the context failed verification (from `toolHandler`) |
 | `invalid_argument` | no | a field breaks its rule |
 | `input_not_found` | no | no such object under the tenant's prefix |
 | `input_too_large` | no | the object exceeds `maxInputBytes` (`HeadObject` before any start) |
@@ -716,7 +743,7 @@ Errors (tool error `code`, no stack, no tenant data):
 | `sandbox_starting` | yes, after `retryAfterSeconds` | the tenant's sandbox is starting (§4.1) |
 | `sandbox_busy` | yes | the tenant's sandbox is running another job |
 | `sandbox_failed` | yes, after `retryAfterSeconds` | the sandbox ended before it served, or died mid-run (§4.1 failed starts) |
-| `tool_failed` | no | any other fault (from `toolHandler`) |
+| `tool_failed` | no | any other fault (from `toolHandler` on the gateway entry, from the core handler on the standalone entry) |
 
 A script that exits non-zero, times out or is killed is not a tool error: it
 returns a result with `exitCode`, `timedOut` and its output.
@@ -849,7 +876,7 @@ Publishes:
 
 | Parameter | Value |
 |---|---|
-| `/application-plane/shared/code-sandbox/sandboxes` | one JSON document: `version`, `toolTarget` (or `none`), `backends`, `defaultBackend`, `registryTableName`, `inputBucketName`, `offboardFunctionArn`, and per backend `imageArn`, `clusterArn` or `runtimeArn` |
+| `/application-plane/shared/code-sandbox/sandboxes` | one JSON document: `version`, `toolTarget` (from `RunCodeToolTarget`, or `none`), `runCodeFunctionArn` (with `standalone`, or `none`), `backends`, `defaultBackend`, `registryTableName`, `inputBucketName`, `offboardFunctionArn`, and per backend `imageArn`, `clusterArn` or `runtimeArn` |
 
 The demo stack writes the parameter from the construct's read-only
 properties; the construct writes no parameter (standard §4.5), and the
@@ -935,14 +962,16 @@ runs once through the producer's sample agent with its deterministic
 `tool <target>/<tool> {json}` probe, so the grant and the 120 s ingress
 path are exercised as a consumer would. It deploys one integration stack with two
 construct instances, each with its own VPC: `run-code` with all three
-backends, `sandboxIdle` = 2 min and `dnsFirewall` on, and
-`run-code-files` with `agentcore` only, `sessionFiles` on and
-`dnsFirewall` off. Both are destroyed at the end; the shared pool is never
+backends, `sandboxIdle` = 2 min, `dnsFirewall` on, `standalone` on, and a
+`RunCodeToolTarget` named `run-code`; and `run-code-files` with
+`agentcore` only, `sessionFiles` on, `dnsFirewall` off, and a
+`RunCodeToolTarget` named `run-code-files`. Every step runs through the
+gateway entry except `standalone`; `session-files` uses `run-code-files`. Both are destroyed at the end; the shared pool is never
 touched.
 
 | Step | Checks |
 |---|---|
-| seed | tenants `A` and `B`, each with `inputs/<t>/invoice.csv` (synthetic) and a `run_code` grant |
+| seed | tenants `A` and `B`, each with `inputs/<t>/invoice.csv` (synthetic) and grants for the `run-code` and `run-code-files` tools |
 | parse | A runs a script that parses its invoice; output matches; `sandbox` = `started` (or `sandbox_starting`, then retried) |
 | reuse | A writes `/work/marker`; A's next call reads it; `sandbox` = `reused` |
 | apart | B's call on the same backend cannot see A's marker; B's `sandbox` = `started` |
@@ -965,7 +994,7 @@ touched.
 | dns | `run-code` (firewall on): A's script looks up `example.com`, a unique `<token>.example.com`, a 40-character exfil label and a TXT name, then `logs.<region>.amazonaws.com`; the first four return NXDOMAIN and appear in the query log as `BLOCK`, the last resolves to an endpoint address. `run-code-files` (firewall off): `example.com` resolves to a public address. On `nitro` the `BLOCK` line's `srcaddr` is A's task address |
 | dns-platform | after the run, every `BLOCK` line in `run-code`'s query log is for a name some test script looked up, or `*.amazon.pool.ntp.org` (left blocked on purpose, §3.9); any other blocked name is a platform name missing from the allow list and fails the step |
 | telemetry | Logs Insights finds one tool line per call with the §3.8 fields and the right `tenantId` |
-| standalone | the driver invokes `run-code`'s `runCodeFunction` with IAM, as a vendor's own API would, with `tenantId` = `A`: A's script parses its invoice; with `input` = `../B/invoice.csv` the call is refused; a principal without `lambda:InvokeFunction` on the function is refused |
+| standalone | the driver invokes `run-code`'s `runCodeFunction` with IAM, as a vendor's own API would, with `tenantId` = `A`: A's script parses its invoice; `input` = `../B/invoice.csv`, `tenantId` = `A/x` and an empty `tenantId` each return `invalid_argument`; a role with no invoke grant is refused (shows IAM applies, not that only granted roles can reach it, T-82). Through the gateway, a `tenantId` argument returns `invalid_argument` |
 | forged | a direct Lambda invoke with a tampered tenant context returns `context_invalid` and starts nothing (test-only shortcut: only the gateway role may invoke the function in a real deployment) |
 | offboard | after `C`'s grant is removed, `offboardTenant` for `C` stops its sandboxes and deletes its rows; a second call returns the same result with nothing stopped |
 | teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left (the task and usage-log groups, `/aws/lambda-microvms/<imageName>`, the query-log group, and every `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` group), no DNS Firewall resource or construct-owned Logs resource policy of the sample, and the `DescribeResourcePolicies` statements that name the query-log group's ARN match their state before deploy (any difference is reported as the §3.9 known leftover), and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
