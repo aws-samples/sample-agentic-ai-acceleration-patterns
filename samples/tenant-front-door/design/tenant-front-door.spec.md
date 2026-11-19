@@ -240,7 +240,7 @@ resource removes them (§6.2).
 |---|---|---|---|---|
 | `/assets/*` | static | SPA bucket | one year, immutable, shared by all tenants | no |
 | `/`, other SPA routes | static, rewritten to `/index.html` | SPA bucket | `no-cache`, revalidated | no |
-| `/config.json` | generated at the edge | none | `no-store` | `host` mode only |
+| `/config.json` | generated at the edge | none | `no-store` | in `host` mode, and on a dedicated domain in `single` mode |
 | `/api/*` | dynamic | the tenant's cell API, in the cell's account | disabled | yes |
 | `/agents/*` | dynamic, streaming | the agent ingress | disabled | yes |
 | `/logout` | generated at the edge: 302 to the issuer's logout endpoint (§3.5) | none | `no-store` | no (`host` mode: a registered pooled host, §3.3 step 2) |
@@ -951,7 +951,10 @@ delete removes a `host#` key only when its `t` names the tenant, and
 finds the tenant's dedicated `host#<d>` key from the `d` of its
 `tenant#` entry. The edge operator role's deletes skip step 2: it may
 remove any tenant or cell route, to clear one that a skipped delete
-hook left behind (below). Status changes (`suspended`, `active`),
+hook left behind (below). `UpdateTenantRouteStatus` skips step 2 as
+well: it changes only `s` of an existing `tenant#` entry, so the
+operator can suspend a tenant while the control plane cannot be read
+(ADR-0025). Status changes (`suspended`, `active`),
 dedicated domains and `DeleteHostRoute`, which clears a `host#` key left
 behind (§5.1), are vendor operations: only the edge account's operator
 role may make them.
@@ -1948,7 +1951,8 @@ ingress behind `/agents/*` needs its URL form checked first.
   read it, so the application's shared stack in each cell account copies
   `distributionArn`, which `CellRouteAccess` needs, to
   `/application-plane/applications/<applicationId>/shared/front-door`
-  (control-plane §6.2). The `RouteHookAccess` stack writes
+  (control-plane §6.2), as a plain string, not JSON, so a cell stack
+  reads it as a CloudFormation SSM parameter (ADR-0026). The `RouteHookAccess` stack writes
   `/application-plane/applications/<applicationId>/shared/front-door-hook`
   in the control plane's account, with `registrarUrl`, for the route
   hook (§3.1). The names differ, so a control-plane account that also
@@ -2136,6 +2140,8 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0022](../adr/0022-pin-each-sweeper-page-to-the-listers-date-and-re-read-the-route-table.md) | Pin each sweeper page to the lister's date, which it must match to today and then uses for every read and write; count three misses only on a miss; re-read each passed tenant's entry with `GetKey`, 10 at a time, with no scan (page bound 842 s); grant `BatchWriteItem`; amends ADR-0020 | no date passed; a date the page trusts; a date the page must match to today; a `ListKeys` scan with a deadline; a `GetKey` per passed id |
 | [ADR-0023](../adr/0023-pin-imported-spa-chunks-with-an-import-map-integrity.md) | Pin each imported SPA chunk with an `integrity` entry in an import map, and the entry script with `integrity`; the import map's hash joins the entry's in the CSP; amends ADR-0008 | an import map with `integrity`; one bundle with no imports; one hash per chunk in the CSP |
 | [ADR-0024](../adr/0024-test-the-agent-route-against-a-stand-in-ingress.md) | Test the agent route against the stand-in ingress of spike S-5, not a composed `agentic-runtime-isolation` | compose `agentic-runtime-isolation` (deploy or reuse); a stand-in |
+| [ADR-0025](../adr/0025-change-a-route-status-without-reading-the-control-plane.md) | The edge operator's status change skips the control-plane read, so a suspension works while the control plane is down | read the placement first; skip the read |
+| [ADR-0026](../adr/0026-copy-the-distribution-arn-to-cell-accounts-as-a-plain-string.md) | Copy the distribution ARN to each cell account as a plain string, not JSON | a JSON document; a plain string |
 
 ## 9. Spikes
 

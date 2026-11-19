@@ -15,7 +15,7 @@
  * the application's shared stack writes in each cell account.
  */
 
-import { Fn, Token } from 'aws-cdk-lib';
+import { Token } from 'aws-cdk-lib';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
@@ -76,12 +76,8 @@ function resolveDistributionArn(scope: Construct, props: CellRouteAccessProps): 
   if (!Token.isUnresolved(props.applicationId) && !APPLICATION_ID.test(props.applicationId)) {
     throw new Error(`CellRouteAccess: applicationId must match ${APPLICATION_ID}, got ${JSON.stringify(props.applicationId)}`);
   }
-  // The parameter holds the CellCopyParameter JSON, {"distributionArn":"arn:..."}.
-  // CloudFormation cannot parse JSON, so take the fourth '"'-separated field.
-  // shortcut: relies on distributionArn being the document's first key; a
-  // differently shaped value yields a wrong SourceArn, which fails closed
-  // (the edge gets 403). Upgrade to a plain-string parameter or a lookup if
-  // the copy parameter's shape changes.
-  const document = ssm.StringParameter.valueForStringParameter(scope, paramCellCopy(props.applicationId));
-  return Fn.select(3, Fn.split('"', document));
+  // The parameter holds the distribution ARN as a plain string
+  // (CellCopyParameter, ADR-0026). A wrong value gives a SourceArn no
+  // distribution has, which fails closed: the edge gets 403.
+  return ssm.StringParameter.valueForStringParameter(scope, paramCellCopy(props.applicationId));
 }

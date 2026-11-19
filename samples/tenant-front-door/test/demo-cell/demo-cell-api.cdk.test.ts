@@ -106,15 +106,8 @@ describe('CellRouteAccess (spec §5.2, ADR-0011, spike S-3)', () => {
     expect(name).toBeDefined();
     expect(params[name!].Type).toBe('AWS::SSM::Parameter::Value<String>');
     const sourceArns = Object.values(permissions(template)).map((p) => p.Properties.SourceArn);
-    expect(sourceArns).toEqual([
-      { 'Fn::Select': [3, { 'Fn::Split': ['"', { Ref: name }] }] },
-      { 'Fn::Select': [3, { 'Fn::Split': ['"', { Ref: name }] }] },
-    ]);
-  });
-
-  test('the field it selects is distributionArn in the CellCopyParameter JSON', () => {
-    const value = JSON.stringify({ distributionArn: DISTRIBUTION_ARN });
-    expect(value.split('"')[3]).toBe(DISTRIBUTION_ARN);
+    // The value is the ARN as a plain string (ADR-0026), used as it is.
+    expect(sourceArns).toEqual([{ Ref: name }, { Ref: name }]);
   });
 
   test('refuses a literal that is not a distribution ARN, and a construct with neither source', () => {
