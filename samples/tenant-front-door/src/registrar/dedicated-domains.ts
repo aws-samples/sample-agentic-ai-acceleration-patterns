@@ -26,7 +26,7 @@ import {
 import { refuse } from './errors';
 import { logLine } from './log';
 import type { ReadKey, RouteStore } from './route-store';
-import { CHALLENGE_TTL_SECONDS, TAG_DISTRIBUTION_ID, TAG_TENANT_ID, TERMINAL_CERTIFICATE_STATUSES } from '../shared/contracts';
+import { CHALLENGE_TTL_SECONDS, TAG_COST_TENANT_ID, TAG_DISTRIBUTION_ID, TAG_TENANT_ID, TERMINAL_CERTIFICATE_STATUSES } from '../shared/contracts';
 import { type ChallengeOutcome, challengeRecordName, challengeRecordValue, checkChallenge, type DnsLookup } from '../shared/dns-challenge';
 import { decodeHostEntry, encodeEntry, hostEntry, hostKey, RouteTableError, type TenantEntry, tenantEntry, tenantKey } from '../shared/route-table';
 import type { DnsRecord, PutTenantRouteServerOutput } from '../smithy/source/typescript-ssdk-codegen/src';
@@ -166,6 +166,15 @@ function hostNames(value: string, tenantId: string): boolean {
 
 function cloudFrontTag(tags: CloudFrontTags | undefined, key: string): string | undefined {
   return tags?.Items?.find((t) => t.Key === key)?.Value;
+}
+
+/** The tags on a dedicated domain's certificate and distribution tenant (§3.4 step 5). */
+function registrarTags(tenantId: string, distributionId: string): { Key: string; Value: string }[] {
+  return [
+    { Key: TAG_TENANT_ID, Value: tenantId },
+    { Key: TAG_DISTRIBUTION_ID, Value: distributionId },
+    { Key: TAG_COST_TENANT_ID, Value: tenantId.toUpperCase() },
+  ];
 }
 
 function acmTag(tags: AcmTag[] | undefined, key: string): string | undefined {
@@ -422,7 +431,7 @@ export class AwsDedicatedDomains implements DedicatedDomains {
   }
 
   /**
-   * Requests the certificate with DNS validation and both tags. The
+   * Requests the certificate with DNS validation and the registrar's tags. The
    * idempotency token is derived from the distribution, the tenant, the
    * domain and the challenge token, so a repeat within ACM's hour gets the
    * same certificate.
@@ -435,10 +444,7 @@ export class AwsDedicatedDomains implements DedicatedDomains {
         DomainName: domain,
         ValidationMethod: 'DNS',
         IdempotencyToken: idempotency,
-        Tags: [
-          { Key: TAG_TENANT_ID, Value: tenantId },
-          { Key: TAG_DISTRIBUTION_ID, Value: distributionId },
-        ],
+        Tags: registrarTags(tenantId, distributionId),
       }));
       if (out.CertificateArn === undefined) throw refuse.internal('ACM returned no certificate ARN');
       return out.CertificateArn;
@@ -493,7 +499,7 @@ export class AwsDedicatedDomains implements DedicatedDomains {
   }
 
   /**
-   * Creates the distribution tenant with the certificate and both tags,
+   * Creates the distribution tenant with the certificate and the registrar's tags,
    * unless it exists. One that exists for this tenant but is disabled (the
    * domain was dropped and set again before the sweeper deleted it) or
    * holds another certificate is updated to serve with this one.
@@ -513,7 +519,7 @@ export class AwsDedicatedDomains implements DedicatedDomains {
         Name: distributionTenantName(distributionId, tenantId, domain),
         Domains: [{ Domain: domain }],
         Customizations: { Certificate: { Arn: certificateArn } },
-        Tags: { Items: [{ Key: TAG_TENANT_ID, Value: tenantId }, { Key: TAG_DISTRIBUTION_ID, Value: distributionId }] },
+        Tags: { Items: registrarTags(tenantId, distributionId) },
         Enabled: true,
       }));
     } catch (error) {

@@ -43,6 +43,7 @@ import {
   SWEEPER_REMOVE_INPUT,
   SWEEPER_TABLE,
   SweeperStarterProperties,
+  TAG_COST_TENANT_ID,
   TAG_DISTRIBUTION_ID,
   TAG_TENANT_ID,
 } from '../shared/contracts';
@@ -71,7 +72,8 @@ export const GUARD_TIMEOUT = Duration.minutes(2);
 /** How often the teardown's provider polls, and for how long (§6.2). */
 export const TEARDOWN_POLL = { queryInterval: Duration.seconds(30), totalTimeout: Duration.hours(1) } as const;
 
-const L1_REASON = 'Node.js 24, the runtime the demo cell API uses too, so the sample runs on one runtime; move both when Node.js 26 is GA.';
+const L1_REASON = 'Node.js 24, the runtime the demo cell API uses too, so the sample runs on one pinned runtime (AR-19, dependency '
+  + 'pinning); move both when Node.js 26 is GA.';
 const BASIC_REASON = 'Logs-only managed policy NodejsFunction attaches; a scoped copy changes no access (M-36).';
 
 /** The ARNs that cdk-nag reports as wildcards, built once per stack. */
@@ -88,12 +90,21 @@ function distributionTag(kind: 'RequestTag' | 'ResourceTag', distributionId: str
   return { StringEquals: { [`aws:${kind}/${TAG_DISTRIBUTION_ID}`]: distributionId } };
 }
 
-/** On create: the distribution tag holds this distribution, and only the registrar's two tags are set. */
+/** On create: the distribution tag holds this distribution, and only the registrar's three tags are set. */
 function registrarTagsOnCreate(distributionId: string, alsoEquals: Record<string, string> = {}): Record<string, Record<string, unknown>> {
   return {
     'StringEquals': { [`aws:RequestTag/${TAG_DISTRIBUTION_ID}`]: distributionId, ...alsoEquals },
-    'ForAllValues:StringEquals': { 'aws:TagKeys': [TAG_TENANT_ID, TAG_DISTRIBUTION_ID] },
+    'ForAllValues:StringEquals': { 'aws:TagKeys': [TAG_TENANT_ID, TAG_DISTRIBUTION_ID, TAG_COST_TENANT_ID] },
   };
+}
+
+/**
+ * The tag grants: as on create, and only on a resource that carries no
+ * distribution tag yet, so the registrar cannot put this distribution's tag
+ * on a resource that already has one (threat model AR-33).
+ */
+function registrarTagsOnUntagged(distributionId: string): Record<string, Record<string, unknown>> {
+  return { ...registrarTagsOnCreate(distributionId), Null: { [`aws:ResourceTag/${TAG_DISTRIBUTION_ID}`]: 'true' } };
 }
 
 const IN_CERTIFICATE_REGION = { StringEquals: { 'aws:RequestedRegion': CERTIFICATE_REGION } };
@@ -137,19 +148,19 @@ function acknowledgeDedicatedWildcards(scope: IConstruct, who: string): void {
     scope,
     'AwsSolutions-IAM5[Resource::*]',
     `${who}: cloudfront:ListDistributionTenants and acm:ListCertificates take no resource ARN; ListCertificates is held to us-east-1 `
-    + 'by aws:RequestedRegion, and the code keeps only this distribution\'s tenants and the certificates tagged with it (spec §3.4).',
+    + 'by aws:RequestedRegion, and the code keeps only this distribution\'s tenants and the certificates tagged with it (M-16, M-25, ADR-0018).',
   );
   acknowledge(
     scope,
     `AwsSolutions-IAM5[Resource::${nagFindingResource(scope, a.distributionTenants)}]`,
     `${who}: distribution tenant ids are made by CloudFront at create, outside the stack, so no ARN is known; the writes carry `
-    + `the aws:ResourceTag/${TAG_DISTRIBUTION_ID} condition and the code checks the tenant's distribution and tags first (spec §3.4).`,
+    + `the aws:ResourceTag/${TAG_DISTRIBUTION_ID} condition and the code checks the tenant's distribution and tags first (M-16, M-25, ADR-0018).`,
   );
   acknowledge(
     scope,
     `AwsSolutions-IAM5[Resource::${nagFindingResource(scope, a.certificates)}]`,
     `${who}: the registrar requests certificates outside the stack, so no ARN is known; tags are read on every certificate to find `
-    + `the registrar's, and the delete carries the aws:ResourceTag/${TAG_DISTRIBUTION_ID} condition (spec §3.4, §6.2).`,
+    + `the registrar's, and the delete carries the aws:ResourceTag/${TAG_DISTRIBUTION_ID} condition (M-16, M-25, ADR-0018).`,
   );
 }
 
@@ -234,7 +245,7 @@ export function registrarDedicatedDomainsPolicy(scope: Construct, id: string, ro
         sid: 'DistributionTenantTagOnCreate',
         actions: ['cloudfront:TagResource'],
         resources: [a.distributionTenants],
-        conditions: registrarTagsOnCreate(distributionId),
+        conditions: registrarTagsOnUntagged(distributionId),
       }),
       new iam.PolicyStatement({
         sid: 'DistributionTenantUpdate',
@@ -259,7 +270,7 @@ export function registrarDedicatedDomainsPolicy(scope: Construct, id: string, ro
         sid: 'CertificateTagOnRequest',
         actions: ['acm:AddTagsToCertificate'],
         resources: [a.certificates],
-        conditions: registrarTagsOnCreate(distributionId),
+        conditions: registrarTagsOnUntagged(distributionId),
       }),
       // Reads any certificate's tags: one tagged for another tenant or
       // distribution answers 409 (§3.4 step 4).
@@ -275,20 +286,21 @@ export function registrarDedicatedDomainsPolicy(scope: Construct, id: string, ro
     'AwsSolutions-IAM5[Resource::*]',
     'cloudfront:CreateDistributionTenant, acm:RequestCertificate and acm:ListCertificates take no resource ARN (Service Authorization '
     + `Reference). The creates carry aws:RequestTag/${TAG_DISTRIBUTION_ID} with this distribution and aws:TagKeys with the registrar's `
-    + 'two tags; the ACM calls are held to us-east-1 by aws:RequestedRegion (spec §3.4).',
+    + 'three tags; the ACM calls are held to us-east-1 by aws:RequestedRegion (M-16, ADR-0018).',
   );
   acknowledge(
     policy,
     `AwsSolutions-IAM5[Resource::${nagFindingResource(scope, a.distributionTenants)}]`,
     'Distribution tenant ids are made by CloudFront at create, outside the stack, so no ARN is known. Reads cover any tenant, because '
-    + 'a domain another tenant or distribution holds answers 409; tagging carries the aws:RequestTag and updates the aws:ResourceTag '
-    + `condition on ${TAG_DISTRIBUTION_ID} (spec §3.4 step 5).`,
+    + 'a domain another tenant or distribution holds answers 409; tagging carries the aws:RequestTag condition and applies only to a '
+    + `tenant without ${TAG_DISTRIBUTION_ID}, and updates carry the aws:ResourceTag condition on it (M-16, AR-33, ADR-0018).`,
   );
   acknowledge(
     policy,
     `AwsSolutions-IAM5[Resource::${nagFindingResource(scope, a.certificates)}]`,
     'The registrar requests certificates outside the stack, so no ARN is known. Tag reads cover any certificate, because one tagged for '
-    + `another tenant answers 409; tagging carries the aws:RequestTag condition on ${TAG_DISTRIBUTION_ID} (spec §3.4 step 4).`,
+    + `another tenant answers 409; tagging carries the aws:RequestTag condition on ${TAG_DISTRIBUTION_ID} and applies only to a `
+    + 'certificate without it (M-16, M-23, AR-33, ADR-0018).',
   );
   return policy;
 }
@@ -336,7 +348,7 @@ export class Sweeper extends Construct {
     acknowledge(
       this.queue,
       'AwsSolutions-SQS3',
-      'This queue is the sweeper\'s on-failure destination; its depth alarm tells the operator, who redrives it by hand (spec §3.4 step 5).',
+      'This queue is the sweeper\'s on-failure destination; its depth alarm tells the operator, who redrives it by hand (M-24, ADR-0022).',
     );
 
     const environment: Record<keyof typeof SWEEPER_ENV, string> = {
@@ -379,7 +391,7 @@ export class Sweeper extends Construct {
     // has no index, so no index ARN.
     this.function.addToRolePolicy(new iam.PolicyStatement({
       sid: 'Table',
-      actions: ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:BatchWriteItem'],
+      actions: ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:UpdateItem', 'dynamodb:BatchWriteItem'],
       resources: [this.table.tableArn],
     }));
     // The lister's fan-out, one asynchronous invocation per page. A policy
@@ -431,7 +443,7 @@ export class Sweeper extends Construct {
       schedulerRole,
       `AwsSolutions-IAM5[Resource::${nagFindingResource(this, `${this.function.functionArn}:*`)}]`,
       'EventBridge Scheduler\'s target role: aws-scheduler-targets grants lambda:InvokeFunction on the sweeper and its versions; '
-      + 'the schedules invoke the unqualified function only (spec §3.4 step 5).',
+      + 'the schedules invoke the unqualified function only (M-16, M-24, ADR-0020).',
     );
 
     this.alarms = this.createAlarms(props.alarmAction);
@@ -560,13 +572,13 @@ export class DedicatedDomainsGuard extends Construct {
       fn,
       'AwsSolutions-IAM5[Resource::*]',
       'Guard: cloudfront:ListDistributionTenants and acm:ListCertificates take no resource ARN; ListCertificates is held to us-east-1 '
-      + 'by aws:RequestedRegion; the guard only reads (spec §3.4).',
+      + 'by aws:RequestedRegion; the guard only reads (M-25, ADR-0018).',
     );
     acknowledge(
       fn,
       `AwsSolutions-IAM5[Resource::${nagFindingResource(this, a.certificates)}]`,
       'Guard: the registrar requests certificates outside the stack, so no ARN is known; the guard reads each one\'s tags to find the '
-      + 'registrar\'s and changes nothing (spec §3.4).',
+      + 'registrar\'s and changes nothing (M-25, ADR-0018).',
     );
 
     this.resource = new CustomResource(this, 'Resource', {
@@ -644,9 +656,9 @@ export class DedicatedDomainsTeardown extends Construct {
 
 /** The CDK provider framework's own functions, roles and waiter state machine. */
 function acknowledgeProviderFramework(provider: cr.Provider, handlers: readonly lambda.IFunction[]): void {
-  const reason = 'CDK\'s custom resource provider framework, which runs only at deploy and delete and calls the teardown\'s two functions (spec §6.2)';
+  const reason = 'CDK\'s custom resource provider framework, which runs only at deploy and delete and calls the teardown\'s two functions (M-25)';
   acknowledge(provider, BASIC_EXECUTION_ROLE_FINDING, `${reason}; logs-only managed policy (M-36).`);
-  acknowledge(provider, 'AwsSolutions-L1', `${reason}; CDK pins the framework's runtime.`);
+  acknowledge(provider, 'AwsSolutions-L1', `${reason}; CDK pins the framework's runtime (AR-19, dependency pinning).`);
   acknowledge(provider, 'AwsSolutions-SF2', `${reason}; the waiter only polls isComplete, and its executions are logged at ALL without data.`);
   acknowledge(
     provider.node.findChild('waiter-state-machine'),

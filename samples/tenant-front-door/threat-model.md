@@ -148,7 +148,7 @@ spec §11 question, and the build gate M-40 holds the dependent code).
 | T-22 | B4 | E | A suspension is bypassed or lifted: (a) the tenant re-writes its route through the registrar, (b) another global hook does, (c) the tenant serves from its own account, (d) a caller reaches the agent ingress directly, (e) a vendor role deletes the tenant's deployment and creates a new one: the delete removes the `tenant#` entry, so the new entry starts `active` (spec §4.2). A skipped delete hook leaves the entry, and its suspension carries to the new deployment | (a) and (b) Mitigated, conditional on ADR-0017 (T-33). (c) AR-4. (d) AR-3. (e) AR-31 | M-6, M-7, M-9 |
 | T-23 | B4 | E | A stolen or misused edge operator role sets origins, suspends and resumes tenants, sets domains and clears routes | Accepted (AR-20) | M-17, M-18, M-23 |
 | T-24 | B4 | T | Concurrent writers overwrite each other's entry: hook retries, an operator call, the `signin` custom resource | Mitigated | M-15 |
-| T-25 | B4 | E | Compromised code in a function of the stack. The registrar is the route table's one writer, so its compromise is control of routing. IAM cannot narrow some CloudFront actions to this distribution's tenants, so the code checks tags first | Accepted (AR-19) | M-16, M-36 |
+| T-25 | B4 | E | Compromised code in a function of the stack. The registrar is the route table's one writer, so its compromise is control of routing. IAM cannot narrow some CloudFront actions to this distribution's tenants, so the code checks tags first | Accepted (AR-19, AR-33) | M-16, M-36 |
 | T-26 | B4 | R | Nobody can say which actor changed a route: every global hook shares one role, and the operator role shows as a role name | Mitigated; residual AR-1 | M-18 |
 | T-27 | B5 | I | A stolen reader token, or the app client's secret in the edge account. It reads placement, tenant names and the source locations of applications and hooks | Accepted (AR-22) | M-14 |
 | T-28 | B5 | I | The control plane places a tenant in another customer's tenant-owned account (control-plane T27). The route follows the placement, so the tenant's traffic and tokens go there | Accepted (AR-5) | M-7 |
@@ -214,7 +214,7 @@ hardening checklist (standard §7).
 | M-13 | Hook failure semantics keep the table honest. A failing `POST` hook fails the create or update, so `ACTIVE` means routed. The delete hook runs `PRE`, before the delete script, so the route goes while the record still exists. A delete hook that fails three times is skipped and counted by the control plane. The hook waits 45 s for propagation after a write | Spec §3.4 (route hook step 4 and the paragraphs after it), §4.2; ADR-0017, ADR-0003; control-plane R-45, R-46. Planned check: steps 16, 21, 22 | T-10, T-31 |
 | M-14 | The registrar reads the control plane with a reader token only: its own app client, whose `role` is a namespaced entry of the control plane's `readerRoles`, the client id in `vendorIdp.clientIds`, and `requiredScope` set when the client can call another API. The secret lives in Secrets Manager in the edge account. The token is cached until it expires. A failed read refuses the write | Spec §3.6, §6.1, §3.4 step 2; ADR-0015; spike S-9; control-plane R-36, R-38. Deployer action: rotate the secret | T-27, T-31 |
 | M-15 | Store writes are optimistic. Every write uses the store's ETag (`IfMatch`); on a conflict the registrar re-reads the keys, repeats the checks of steps 3 and 4 and the size check, and retries. A write that rests on a DNS answer is retried only if the entry still holds the same `d` and `dk`. The `signin` custom resource does the same | Spec §3.4 step 5 (end), §3.5; ADR-0003 | T-24, T-43, T-64 |
-| M-16 | Roles are split and narrow. The registrar never deletes a distribution tenant or certificate, and holds no ACM or CloudFront domain action while `dedicatedDomains` is off. The sweeper cannot write routes: it holds read actions on the store, not `PutKey`. Only the sweeper role holds the sweeper table, and its ACM delete is conditioned on the registrar's tag, as are the registrar's ACM writes. Where IAM cannot narrow an action, the code checks the tenant's distribution and tags first (409) | Spec §3.4 (IAM paragraphs), §3.1; ADR-0018, ADR-0020, ADR-0022 | T-25, T-55 |
+| M-16 | Roles are split and narrow. The registrar never deletes a distribution tenant or certificate, and holds no ACM or CloudFront domain action while `dedicatedDomains` is off. The sweeper cannot write routes: it holds read actions on the store, not `PutKey`. Only the sweeper role holds the sweeper table, and its ACM delete is conditioned on the registrar's distribution tag. The registrar's creates carry that tag with this distribution's id and no tag keys but its own three; its tag grants (`cloudfront:TagResource`, `acm:AddTagsToCertificate`) apply only to a resource that has no distribution tag yet, so it cannot re-label another front door's resource (residual AR-33). Where IAM cannot narrow an action, the code checks the tenant's distribution and tags first (409) | Spec §3.4 (IAM paragraphs), §3.1; ADR-0018, ADR-0020, ADR-0022 | T-25, T-55 |
 | M-17 | The edge operator role is the vendor's own and the stack does not create it. It sits behind the vendor's sign-in and multi-factor rule, and no role a cell account, a tenant or the hook role can assume reaches it. The registrar's own checks apply to it too: form of the origin, the `GetCell` read, the domain rules and the challenge | Spec §3.4 (operator role paragraph), §3.6; ADR-0017. Deployer action: MFA, short sessions, review of who can assume it | T-21, T-23 |
 | M-18 | Audit: the registrar logs the caller role, key and outcome, never the body (step 6). The API access log names the calling account, the edge account or the control plane's, on the refused calls. CloudTrail records each operator call under the role's name. The hook role's calls say "some global hook" (AR-1) | Spec §3.4 step 6, §10 step 15; ADR-0017 | T-23, T-26 |
 | M-19 | The `state` is `base64url(payload).base64url(HMAC-SHA256)` with the `signin` key named by `kid`, an `exp` 10 minutes out, the tenant host `h` that minted it, and the SPA's nonce `n`. The sign-in host forwards only when the HMAC and `kid` verify, `h` is a pooled host, `host#<h>` exists and its tenant is `active`. The router mints a `state` only on a pooled host. An expired or nonce-less `state` gets 302 to `https://<h>/` with no code. Everything else is 400 | Spec §3.3 step 2, §3.5, §5.3; ADR-0016. Planned check: step 18 | T-34, T-35, T-39, T-37 |
@@ -296,7 +296,7 @@ writes and deletes to everyone else, and an administrator of the edge
 account can still change the policy (AR-6).
 
 **Principals that can read or write the sweeper table:** the sweeper role
-(`GetItem`, `Query`, `UpdateItem`, `DeleteItem`, `BatchWriteItem`), and the
+(`GetItem`, `Query`, `UpdateItem`, `BatchWriteItem`), and the
 integration test role (`GetItem`, `PutItem`). The registrar role has no access.
 The table holds no token and no key.
 
@@ -630,6 +630,25 @@ starting "Why" gives the reason; "Bounded by" says what limits it.
   `reportingEndpoint` is off by default. Deployer action: set
   `reportingEndpoint` only to an endpoint that may hold an authorization
   code and a `state`.
+
+- **AR-33: The registrar role can put this distribution's tag on an
+    untagged distribution tenant or certificate (T-25).** The tag grants
+    hold only on a resource without the `tenant-front-door:distribution`
+    tag, and only with this distribution's id, so no resource another front
+    door tagged can be re-labelled. A resource with no such tag can: the
+    pooled distribution tenant, and any certificate in the edge account's
+    `us-east-1` that nothing uses. Tagged with a tenant id that has no
+    current `d`, the sweeper then disables and deletes such a distribution
+    tenant and deletes such a certificate; the registrar's
+    `UpdateDistributionTenant` also covers it. The code never calls either
+    tag action on its own: CloudFront and ACM authorise the tags of a create
+    through them. *Why:* IAM cannot tell a create's tags from a later tag
+    call on a resource that has none. *Bounded by:* the actor (compromised
+    registrar code, AR-19); the sweeper never deletes a certificate that is
+    in use; CloudTrail names every `TagResource` and `AddTagsToCertificate`
+    call (M-18). Deployer action: keep the edge account's `us-east-1` free
+    of other certificates, and review the registrar role's tag calls in
+    CloudTrail.
 
 ## Open items
 
