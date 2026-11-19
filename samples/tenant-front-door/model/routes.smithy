@@ -125,9 +125,12 @@ structure DnsRecord {
 /// Puts the tenant's route. The global hook role calls it on deployment
 /// create and update; the display name, cell and account come from the
 /// control plane, and the entry records the deployment's `createdAt` as
-/// `dt`. A new entry starts `active`; a write to an existing entry keeps its
-/// status. A hook put whose `createdAt` differs from the stored `dt`
-/// replaces the entry as a new one (§3.4 step 5). Only the edge operator
+/// `dt`. An entry with no entry before it starts `active`; every other
+/// write keeps the stored status. A hook put whose `createdAt` differs
+/// from the stored `dt` replaces a leftover entry with a new one for the
+/// new deployment, which keeps the leftover's status (§3.4 step 5, §4.2).
+/// ACM's certificate quota answers 429 with `reason: certificate-quota`;
+/// the hook never sends `customDomain`, so it never gets it. Only the edge operator
 /// role may send `customDomain` (403 for the global hook role), and only
 /// while `dedicatedDomains` is on (400 otherwise). 200 with `dt` once
 /// routed; 202 while a dedicated domain is pending (`stage`, `record`,
@@ -174,6 +177,7 @@ operation PutTenantRoute {
     errors: [
         UnprocessableError
         InsufficientStorageError
+        CertificateQuotaError
     ]
 }
 
