@@ -101,7 +101,15 @@ describe('§3.4 step 1: only the global hook role and the edge operator role get
     expect(res.statusCode).toBe(200);
   });
 
-  test('step 6: the log line has the role, key and outcome, never the body', async () => {
+  test('the operator\'s PutCellRoute repairs a cell# value that does not decode', async () => {
+    const h = harness();
+    h.cp.cells.set(CELL, { status: 'ACTIVE' });
+    h.kvs.items.set(cellKey(c), 'not json');
+    expect((await h.handler(restEvent('PUT', `/cells/${CELL}`, 'operator', { apiDomain: API_DOMAIN }))).statusCode).toBe(200);
+    expect(h.kvs.get(cellKey(c))).toBe(golden(`cell#${c}`));
+  });
+
+  test('§3.4 step 6: the log line has the role, key and outcome, never the body', async () => {
     const h = harness();
     h.cp.cells.set(CELL, { status: 'CREATING' });
     await h.handler(restEvent('PUT', `/cells/${CELL}`, 'hook', { apiDomain: API_DOMAIN }));
@@ -584,6 +592,15 @@ describe('DeleteTenantRoute', () => {
     expect([...h.kvs.items.keys()].sort()).toEqual([hostKey(POOLED), hostKey('portal.example.com')].sort());
   });
 
+  test('§5.1: a damaged tenant# whose host# names it is left as it is when the host# goes', async () => {
+    const h = harness();
+    h.kvs.items.set(tenantKey(t), 'not json');
+    seedHost(h, 'portal.example.com');
+    expect((await h.handler(restEvent('DELETE', '/hosts/portal.example.com', 'operator'))).statusCode).toBe(200);
+    expect(h.kvs.items.has(hostKey('portal.example.com'))).toBe(false);
+    expect(h.kvs.get(tenantKey(t))).toBe('not json');
+  });
+
   test('§5.1: a damaged tenant# is still removed; a damaged host# is kept as naming no tenant', async () => {
     const h = harness(testConfig({ addressing: 'host' }));
     h.kvs.items.set(tenantKey(t), 'not json');
@@ -821,6 +838,9 @@ describe('§5.1 error bodies are {message, reason?}', () => {
     const res = await h.handler(restEvent('PUT', `/cells/${CELL}`, 'hook', { apiDomain: API_DOMAIN }));
     expect(res.statusCode).toBe(500);
     expect(json(res.body)).toEqual({ message: 'internal error' });
+    const line = logSpy.mock.calls.map((call) => String(call[0])).find((l) => l.includes('registrar call'))!;
+    expect(json(line)).toMatchObject({ level: 'ERROR', outcome: 500, error: 'RouteTableError' });
+    expect(line).not.toContain('not json');
   });
 
   test('REST keeps client header casing; mixed-case Content-Type is read', async () => {

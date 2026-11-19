@@ -39,6 +39,13 @@ describe('the Lambda entry', () => {
     log.mockRestore();
   });
 
+  test('SDK calls time out with an error, not a warning, and try twice', async () => {
+    const { SDK_CLIENT } = await import('../../src/registrar/registrar.function');
+    expect(SDK_CLIENT.maxAttempts).toBe(2);
+    const config = (SDK_CLIENT.requestHandler as unknown as { configProvider: Promise<Record<string, unknown>> }).configProvider;
+    await expect(config).resolves.toMatchObject({ connectionTimeout: 2_000, requestTimeout: 3_000, throwOnRequestTimeout: true });
+  });
+
   test('fails closed when the environment is incomplete', async () => {
     delete process.env[REGISTRAR_ENV.routeTableArn];
     const { handler } = await import('../../src/registrar/registrar.function');
