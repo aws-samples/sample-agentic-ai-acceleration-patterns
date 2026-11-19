@@ -152,6 +152,9 @@ export const ANSWER_MARGIN_MS = RESPONSE_TIMEOUT_MS + 1_000;
  * `run`, or FAILED with `Timeout` once `ms` pass: an answer that never goes
  * out leaves the stack waiting an hour. On the deadline it aborts the
  * signal it gave `run`, so the abandoned run stops before its next write.
+ * shortcut: a write already in flight when the deadline fires can still
+ * land; closing that needs a server-side token, not worth it for a deploy-time
+ * write the ETag already orders.
  */
 export async function answerWithin(
   run: (signal: AbortSignal) => Promise<CustomResourceOutcome>,
