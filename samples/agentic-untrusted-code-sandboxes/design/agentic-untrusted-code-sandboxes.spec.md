@@ -269,7 +269,7 @@ no unsigned entry.
 | `microvm.memoryMiB` | `number` | 1024 | MicroVM image `MinimumMemoryInMiB`; the guest gets about four times this (S-15: 1024 gives 3998 MiB and 2 vCPUs, 2048 gives 8016 MiB and 4) |
 | `nitro.cpu`, `nitro.memoryMiB` | `number` | 512, 1024 | task size |
 | `nitro.instanceTypes` | `string[]` | `['m7i.xlarge']` | capacity provider instance requirements, and the architecture of the `nitro` runner image. The default is the one type run end to end; `m7g.large` (Graviton, 2 vCPU) reports Nitro Enclaves support and is likely cheaper, but has not been run on ECS. Synth checks each type against a static table of types with Nitro Enclaves support (Intel types need 4 vCPU or more, so `m7i.large` is refused) |
-| `nitro.minInstances` | `number` | 0 | 0 keeps idle cost at zero; an idle instance scales in 120 s after its last task (`ScaleInAfter`), a new sandbox then takes about 30 s, and calls return `sandbox_starting` until it is ready. Warm starts of 11 to 18 s also often exceed `startWait`. Whether a value above 0 starts a replacement during the drain is checked in S-16 (§5.3) |
+| `nitro.minInstances` | `number` | 0 | 0 keeps idle cost at zero; an idle instance scales in 120 s after its last task (`ScaleInAfter`), a new sandbox then takes about 30 s, and calls return `sandbox_starting` until it is ready. Warm starts of 11 to 18 s also often exceed `startWait`. Whether a value above 0 starts a replacement during the drain is checked in S-16 (§5.3). Until then, a value above 0 may make the stack delete fail; set it to 0 and redeploy before a delete |
 | `agentcore.sessionFiles` | `boolean` | `false` | grant the runtime role `sessions/${aws:AgentCoreRuntimeSourceSid}/*` on the input bucket (ADR-0007) |
 
 Timing budget: the tool Lambda timeout is set to
@@ -523,7 +523,7 @@ to its own stdout through the runner.
 | Task execution role | `ecr:GetAuthorizationToken` on `*` (the action takes no resource), `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, Logs write on the task log group | everything else; never reachable by code (S-5) |
 | AgentCore runtime role | `ecr:GetAuthorizationToken` on `*`, `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents`, `DescribeLogStreams` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` (the name is known at synth, and runtime names cannot contain `-`, so the prefix matches only this runtime; code can create extra groups under the prefix, which the cleanup resource removes); with `sessionFiles`, `s3:GetObject`, `s3:PutObject` on `sessions/${aws:AgentCoreRuntimeSourceSid}/*` and `s3:ListBucket` with an `s3:prefix` condition | everything else |
 | Reaper role | read, update and delete every registry row; `ecs:ListTasks`, `DescribeTasks`, `StopTask` on the cluster; `lambda:ListMicrovms` on `*` (it takes no resource; the call filters by image), `GetMicrovm`, `TerminateMicrovm` on the image; `StopRuntimeSession` on the runtime | the input bucket |
-| Drain role | the reaper role, plus `ecs:ListContainerInstances` on the cluster, `ecs:DescribeContainerInstances` and `ecs:DeregisterContainerInstance` on `container-instance/<cluster>/*`, and `ec2:DescribeInstances` (which takes no resource) | the input bucket; the reaper role never holds the instance actions, because a forced deregister ends the instance and a live tenant's sandbox on it |
+| Drain role | the reaper role, plus `ecs:ListContainerInstances` and `ecs:DeregisterContainerInstance` on the cluster (their only resource type), `ecs:DescribeContainerInstances` on `container-instance/<cluster>/*`, and `ec2:DescribeInstances` (which takes no resource) | the input bucket; the reaper role never holds the instance actions, because a forced deregister ends the instance and a live tenant's sandbox on it |
 | MicroVM image build role | trust `lambda.amazonaws.com`; `s3:GetObject` on the runner code artifact; `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents` on `/aws/lambda-microvms/<imageName>` | everything else |
 | MicroVM connector operator role | trust `lambda.amazonaws.com`; `ec2:CreateNetworkInterface` on network interfaces, the sandbox subnets and the connector security group; `ec2:CreateTags` on network interfaces with `ec2:ManagedResourceOperator` = `network-connectors.lambda.amazonaws.com` | everything else |
 | Log cleanup role (the log cleanup resource and the task log drain) | `logs:DescribeLogGroups`; `logs:DeleteLogGroup` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*`, on `/aws/lambda-microvms/<imageName>` and on the task log group | every other log group; everything else |
@@ -888,8 +888,11 @@ every task is `STOPPED`, the drain reads the cluster's container
 instances and their EC2 instance ids, deregisters each with `force`,
 which on ECS Managed Instances terminates the instance (ECS developer
 guide, Managed Instances draining), and waits until `DescribeInstances`
-shows every one of those ids `terminated`. The 10-minute bound covers
-every wait. How long that takes, whether the capacity provider delete
+shows every one of those ids `terminated`. It repeats the read,
+deregister and wait until `ListContainerInstances` is empty, so a
+replacement started for `nitro.minInstances` is ended too. The 10-minute
+bound covers every wait. A construct test checks that the drain role
+may deregister on the cluster and the reaper role may not. How long that takes, whether the capacity provider delete
 then succeeds, and whether a minimum above 0 starts a replacement first
 are checked in S-16. A
 `StopTask` takes 45 to 78 s, so the runner
