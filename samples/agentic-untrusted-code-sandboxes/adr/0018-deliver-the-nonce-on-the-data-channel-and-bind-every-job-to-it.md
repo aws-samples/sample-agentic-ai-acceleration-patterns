@@ -40,14 +40,15 @@ Pros: nothing to change. Cons: both gaps stay open.
 ## Decision
 
 Option 1 (spec §3.4 Identity check, §3.5 nonce delivery). Every job
-carries `jobAuth` = `HMAC(nonce, runId ‖ SHA-256(code ‖ input))`, and the
-runner refuses a mismatch with `wrong_sandbox` before it touches `/work`.
+carries `jobAuth`, an HMAC under the nonce over the run id, the
+`tenantId` and a hash of the code and input, length-prefixed as spec §3.5
+defines, the same on every backend. The runner refuses a mismatch with
+`wrong_sandbox` before it touches `/work`.
 Start calls carry `nonceHash` = SHA-256(`"nonce" ‖ nonce`); the nonce
 travels on the data channel with every job and `/hello` and is adopted
-only if it matches the hash. On `agentcore` the job carries `tenantId`
-under `jobAuth`, and the runner adopts only when its session id is
-`rc-` + SHA-256(`tenantId`). The `jobAuth` encoding is length-prefixed
-(spec §3.5).
+only if it matches the hash. On `agentcore`, which has no hash, the
+runner adopts only when its session id is `rc-` + SHA-256 of the
+`tenantId` that `jobAuth` covers.
 `nitro` keeps its TLS `/hello` before the first job.
 
 ## Consequences
