@@ -58,6 +58,10 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     '@aws-sdk/client-sts@3.1154.0', // tenant-scoped role session (ADR-0026)
     'aws-jwt-verify@5.2.1', // tenant authoriser (ADR-0007)
     'ulid@3.0.2', // tenant id generation
+    // Synth only: Public Suffix List rules for the allowedOrigins check
+    // (ADR-0040). Imported by src/shared/allowed-origins.ts, which no
+    // function entry imports, so it never reaches a bundle.
+    'tldts@7.5.4',
     // Security linting - AwsSolutionsChecks aspect applied in src/main.ts
     'cdk-nag@3.0.2',
   ],

@@ -17,6 +17,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
+import { validateAllowedOrigins } from './shared/allowed-origins';
 import {
   ACCESS_TOKEN_MINUTES,
   ADMIN_PASSWORD_KEY_ALIAS,
@@ -65,6 +66,13 @@ export interface TenantIdentityStackProps extends StackProps {
    * (ADR-0033) and `PlatformInvokePolicy` (ADR-0030), and their parameters.
    */
   readonly publishSharedParameters?: boolean;
+  /**
+   * The browser origins whose pages may read the token exchange's answer
+   * (spec §5.4.1, ADR-0040): `https://<host>[:<port>]` or
+   * `https://*.<domain>`. Default none: no CORS header on any answer.
+   * Checked at synth; a refused entry fails synthesis, naming it.
+   */
+  readonly allowedOrigins?: readonly string[];
 }
 
 /** The one API stage. Also part of the execution log group's name. */
@@ -199,6 +207,9 @@ export class TenantIdentityStack extends Stack {
     super(scope, id, props);
 
     const { topology } = props;
+    // ADR-0040: fail synthesis on an entry §5.4.1 refuses, before anything is built.
+    const allowedOrigins = [...(props.allowedOrigins ?? [])];
+    validateAllowedOrigins(allowedOrigins);
     // The two halves a deployment may have (ADR-0027): a stack-created
     // shared pool, and pools created at run time, one per tenant. A single
     // topology has one of them; `tiered` has both, so every block below is
@@ -295,6 +306,8 @@ export class TenantIdentityStack extends Stack {
         [ENV.topology]: topology,
         [ENV.tableName]: table.tableName,
         [ENV.poolIndexName]: GSI_BY_USER_POOL_ID,
+        // ADR-0040: set only when there is a list (§5.4.1).
+        ...(allowedOrigins.length > 0 ? { [ENV.allowedOrigins]: allowedOrigins.join(',') } : {}),
       },
     });
     tokenFn.addToRolePolicy(
@@ -1222,6 +1235,10 @@ export class TenantIdentityStack extends Stack {
     new CfnOutput(this, 'Topology', { value: topology });
     new CfnOutput(this, 'RegistryTableName', { value: table.tableName });
     new CfnOutput(this, 'TenantUsagePlanId', { value: tenantUsagePlan.usagePlanId });
+    if (allowedOrigins.length > 0) {
+      // ADR-0040: the e2e suite runs the CORS checks only when this is its own list.
+      new CfnOutput(this, 'AllowedOrigins', { value: allowedOrigins.join(',') });
+    }
     if (sharedPool && userPool !== undefined && appClient !== undefined) {
       new CfnOutput(this, 'UserPoolId', { value: userPool.userPoolId });
       new CfnOutput(this, 'AppClientId', { value: appClient.userPoolClientId });

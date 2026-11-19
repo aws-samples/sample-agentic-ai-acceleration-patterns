@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-20
+- Amended by: [ADR-0040](0040-let-listed-browser-origins-read-the-exchange-answer.md)
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -38,3 +39,5 @@ Easier: one source of truth for every route. Harder: the form schema lives
 in documentation and in the parser's tests. Revisit if the Smithy TypeScript
 server SDK cannot serve a non-JSON blob payload. The fallback is Option 1,
 with the route documented in the model's service docs.
+
+**2026-11-19.** Amended by ADR-0040: the function's entry adds CORS headers outside the model, and drops `;charset=...` from a form `Content-Type` before dispatch. The model and the form payload are unchanged.

@@ -726,7 +726,7 @@ scheme, a path, query, fragment or trailing `/`, upper case, an IP literal,
 `null` alone, an empty entry); a pattern whose `<domain>` is a public suffix
 under the Public Suffix List rules, wildcard and exception rules applied and
 the private section included (`https://*.co.uk`,
-`https://*.cloudfront.net`, `https://*.amazonaws.com`, and
+`https://*.cloudfront.net`, `https://*.s3.amazonaws.com`, and
 `https://*.us-east-1.elb.amazonaws.com`, which only a wildcard rule
 catches); a repeated entry;
 more than 20 entries; more than 1,024 characters in total, so the list fits
@@ -769,7 +769,7 @@ event's `headers` map keeps only the last value, and `convertEvent` reads
   reads the JSON body and `Cache-Control`, which the browser exposes without
   `Access-Control-Expose-Headers`.
 
-Before dispatch the entry also drops any parameters from `Content-Type` on
+Before dispatch the entry also drops any parameters from a form `Content-Type` on
 the `HttpRequest` that `convertEvent` returns, header name matched
 case-insensitively (`application/x-www-form-urlencoded;charset=UTF-8`
 becomes `application/x-www-form-urlencoded`), because the generated

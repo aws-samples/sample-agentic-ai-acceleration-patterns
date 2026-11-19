@@ -24,6 +24,7 @@
 
 import { App } from 'aws-cdk-lib';
 import { TenantIdentityStack } from '../src/identity.cdk';
+import { E2E_ALLOWED_ORIGINS } from './e2e/cors-origins';
 import { DEPLOYMENTS } from '../src/shared/constants';
 
 const STACK_PREFIX = process.env.E2E_STACK_PREFIX || 'TenantIdentity';
@@ -44,6 +45,8 @@ for (const topology of DEPLOYMENTS) {
   new TenantIdentityStack(app, `${STACK_PREFIX}-${topology}`, {
     topology,
     publishSharedParameters: topology === PUBLISHER,
+    // Spec §10 step 7: the e2e suite runs the CORS checks against this exact list.
+    allowedOrigins: [...E2E_ALLOWED_ORIGINS],
   });
 }
 

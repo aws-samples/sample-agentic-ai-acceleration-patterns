@@ -1,6 +1,6 @@
 # ADR-0040: Let listed browser origins read the exchange answer
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Amends: ADR-0011
 - Deciders: Dave Roberts (SA)
@@ -78,8 +78,8 @@ today's behaviour: no CORS header on any answer.
 - Synthesis applies the Public Suffix List rules, wildcard and exception
   rules and the private section included, to refuse a pattern such as
   `https://*.cloudfront.net`. The rules come from `tldts`
-  (`allowPrivateDomains: true`), a dev dependency in `.projenrc.ts` that
-  never reaches a function. Its copy of the list is as current as the
+  (`allowPrivateDomains: true`), a dependency in `.projenrc.ts` imported
+  only by the synth-time check, so it never reaches a function bundle. Its copy of the list is as current as the
   dependency version.
 - The stack outputs `AllowedOrigins` (the entries joined with `,`) when the
   list is set. The integration stacks deploy with a fixed test list, and

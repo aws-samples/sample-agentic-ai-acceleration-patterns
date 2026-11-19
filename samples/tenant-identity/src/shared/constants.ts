@@ -292,6 +292,8 @@ export const ENV = {
   premiumUsagePlanName: 'PREMIUM_USAGE_PLAN_NAME',
   /** Tenant-user function, pool-per-tenant only: the role it assumes per tenant (ADR-0026). */
   tenantScopedRoleArn: 'TENANT_SCOPED_ROLE_ARN',
+  /** Token-exchange function: the browser origins that may read its answer, joined with `,` (ADR-0040). Unset when there is no list. */
+  allowedOrigins: 'ALLOWED_ORIGINS',
 } as const;
 
 /** The registry GSI that maps a pool to its tenant (spec §4.2). */

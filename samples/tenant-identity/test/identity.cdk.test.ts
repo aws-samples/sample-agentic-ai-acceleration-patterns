@@ -1786,3 +1786,51 @@ describe('TenantIdentityStack - tiered (ADR-0027)', () => {
     }
   });
 });
+
+// ADR-0040: the allowedOrigins prop reaches the exchange function and an output.
+describe('allowedOrigins (spec §5.4.1, ADR-0040)', () => {
+  function synthWith(allowedOrigins?: readonly string[]): Template {
+    const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+    const stack = new TenantIdentityStack(app, 'TenantIdentity-shared-pool-multi-tenant', {
+      topology: 'shared-pool-multi-tenant',
+      allowedOrigins,
+      env: { account: '123456789012', region: 'eu-central-1' },
+    });
+    return Template.fromStack(stack);
+  }
+  function envOf(template: Template, prefix: string): Record<string, unknown> {
+    const fns = template.findResources('AWS::Lambda::Function');
+    const match = Object.entries(fns).find(([id]) => id.startsWith(prefix) && !id.includes('ServiceRole'));
+    return (match![1] as any).Properties.Environment?.Variables ?? {};
+  }
+  const LIST = ['https://app.example.com', 'https://*.tenants.example.com'];
+
+  test('a list sets ALLOWED_ORIGINS on the exchange function only, and the AllowedOrigins output', () => {
+    const template = synthWith(LIST);
+    expect(envOf(template, 'TokenFunction').ALLOWED_ORIGINS).toBe(LIST.join(','));
+    for (const fn of ['PlatformFunction', 'TenantUsersFunction', 'AuthorizerFunction', 'TriggerFunction']) {
+      expect(envOf(template, fn).ALLOWED_ORIGINS).toBeUndefined();
+    }
+    expect(template.findOutputs('AllowedOrigins').AllowedOrigins.Value).toBe(LIST.join(','));
+  });
+
+  test.each([[undefined], [[]]])('%p sets neither the variable nor the output', (value) => {
+    const template = synthWith(value as readonly string[] | undefined);
+    expect(envOf(template, 'TokenFunction').ALLOWED_ORIGINS).toBeUndefined();
+    expect(Object.keys(template.findOutputs('AllowedOrigins'))).toHaveLength(0);
+  });
+
+  test('a refused entry fails synthesis, naming it', () => {
+    expect(() => synthWith(['https://*.cloudfront.net'])).toThrow("'https://*.cloudfront.net'");
+  });
+
+  test('no route gains an OPTIONS method (simple request, no preflight route)', () => {
+    const template = synthWith(LIST);
+    const methods = template.findResources('AWS::ApiGateway::Method');
+    for (const m of Object.values(methods)) {
+      expect((m as any).Properties.HttpMethod).not.toBe('OPTIONS');
+    }
+    const body = JSON.stringify(template.findResources('AWS::ApiGateway::RestApi'));
+    expect(body).not.toContain('"options"');
+  });
+});

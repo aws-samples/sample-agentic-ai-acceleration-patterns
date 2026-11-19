@@ -416,6 +416,20 @@ Region. The deployed stack publishes
 sample mounts into the `control-plane` sample's shared namespace. The last two
 are the control-plane mount's inputs (ADR-0030, ADR-0033, next section).
 
+A browser app on another origin that narrows a token with `POST /oauth2/token`
+needs its origins listed, so the browser lets the page read the answer
+(spec §5.4.1, ADR-0040):
+
+```bash
+npx cdk deploy --context topology=shared-pool-multi-tenant --context allowedOrigins=https://app.example.com,https://*.tenants.example.com
+```
+
+Each entry is an exact `https` origin or `https://*.<domain>`, which matches
+one host label under the domain. Synthesis refuses `http`, a pattern under a
+public suffix such as `*.cloudfront.net`, and anything else §5.4.1 refuses,
+naming the entry. With no list, the API sends no CORS header. Redeploy with
+`--context allowedOrigins=` to clear it.
+
 Teardown:
 
 ```bash

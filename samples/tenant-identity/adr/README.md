@@ -48,4 +48,4 @@ Template: [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md#2-d
 | [ADR-0037](0037-map-dependency-throttles-to-a-retryable-503.md) | Map dependency throttles to a retryable 503 | Accepted | 2026-11-10 |
 | [ADR-0038](0038-the-mount-follows-the-control-planes-deployment-model.md) | The mount follows the control plane's deployment model | Accepted | 2026-11-11 |
 | [ADR-0039](0039-keep-the-own-exchange-endpoint-over-cognito-token-exchange.md) | Keep the sample's exchange endpoint, because Cognito token exchange cannot pick a tenant | Accepted | 2026-11-17 |
-| [ADR-0040](0040-let-listed-browser-origins-read-the-exchange-answer.md) | Let listed browser origins read the exchange answer | Proposed | 2026-11-18 |
+| [ADR-0040](0040-let-listed-browser-origins-read-the-exchange-answer.md) | Let listed browser origins read the exchange answer | Accepted | 2026-11-18 |

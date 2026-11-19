@@ -207,6 +207,11 @@
       "type": "runtime"
     },
     {
+      "name": "tldts",
+      "version": "7.5.4",
+      "type": "runtime"
+    },
+    {
       "name": "tslib",
       "version": "2.8.1",
       "type": "runtime"

@@ -64,6 +64,8 @@ export interface StackOutputs {
   readonly premiumUsagePlanId?: string;
   /** pool-per-tenant and tiered: the role the tenant-user function assumes (ADR-0026). */
   readonly tenantScopedRoleArn?: string;
+  /** The stack's `allowedOrigins`, joined with `,` (ADR-0040); unset when it has no list. */
+  readonly allowedOrigins?: string;
 }
 
 const OUTPUT_KEYS = {
@@ -75,6 +77,7 @@ const OUTPUT_KEYS = {
   tenantUsagePlanId: 'TenantUsagePlanId',
   premiumUsagePlanId: 'PremiumUsagePlanId',
   tenantScopedRoleArn: 'TenantScopedRoleArn',
+  allowedOrigins: 'AllowedOrigins',
 } as const;
 
 /** `TenantIdentity` unless overridden (matches the `integ`/`e2e` task env). */
@@ -116,6 +119,7 @@ export async function discoverStack(deployment: Deployment): Promise<StackOutput
     tenantUsagePlanId: outputs.get(OUTPUT_KEYS.tenantUsagePlanId),
     premiumUsagePlanId: outputs.get(OUTPUT_KEYS.premiumUsagePlanId),
     tenantScopedRoleArn: outputs.get(OUTPUT_KEYS.tenantScopedRoleArn),
+    allowedOrigins: outputs.get(OUTPUT_KEYS.allowedOrigins),
   };
 }
 
@@ -128,6 +132,8 @@ export interface HttpResult<T = unknown> {
   readonly body: T;
   /** The parsed `error` code for RFC 6749 responses (§5.4), when present. */
   readonly oauthError?: string;
+  /** The answer's headers; set by ExchangeClient for the CORS checks (§5.4.1). */
+  readonly headers?: Headers;
 }
 
 function joinUrl(base: string, path: string): string {
@@ -254,6 +260,10 @@ export interface ExchangeParams {
   readonly audience?: string;
   readonly actorToken?: string;
   readonly actorTokenType?: string;
+  /** Sent as `Origin`, as a browser would (§5.4.1). Node's fetch sends none by default. */
+  readonly origin?: string;
+  /** Overrides `Content-Type`, e.g. with `;charset=UTF-8` as a browser sends it (§5.4.1). */
+  readonly contentType?: string;
 }
 
 export interface ExchangeSuccess {
@@ -296,15 +306,21 @@ export class ExchangeClient {
     if (params.actorTokenType !== undefined) {
       form.set('actor_token_type', params.actorTokenType);
     }
+    const headers: Record<string, string> = {
+      'content-type': params.contentType ?? 'application/x-www-form-urlencoded',
+    };
+    if (params.origin !== undefined) {
+      headers.origin = params.origin;
+    }
     const res = await fetch(joinUrl(this.apiUrl, 'oauth2/token'), {
       method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      headers,
       body: form.toString(),
     });
     const parsed = (await readJson(res)) as Record<string, unknown> | undefined;
     const oauthError =
       parsed !== undefined && typeof parsed.error === 'string' ? parsed.error : undefined;
-    return { status: res.status, body: parsed, oauthError };
+    return { status: res.status, body: parsed, oauthError, headers: res.headers };
   }
 }
 

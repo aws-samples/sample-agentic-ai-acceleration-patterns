@@ -489,6 +489,19 @@ client goes to Cognito as is, and a client of a pool the registry does not
 know fails the trigger's GSI lookup (M-5), so no token with a tenant claim is
 issued (ADR-0027).
 
+A browser page on another origin can post the exchange as a CORS simple
+request (ADR-0040). The function's entry wraps the generated handler: before
+dispatch it drops `;charset=...` from a form `Content-Type`, and after the
+handler has built the answer it adds `Vary: Origin` and, when the request's
+one `Origin` matches the stack's `allowedOrigins` (exact, or one label under
+a pattern's domain), `Access-Control-Allow-Origin` with that origin. Every
+answer the function makes carries them, errors included; an unmatched
+`Origin` still gets the exchange. The list is checked at synth
+(`src/shared/allowed-origins.ts`, Public Suffix List rules from `tldts`) and
+reaches the function as `ALLOWED_ORIGINS`; the matcher
+(`src/token-exchange/cors.ts`) imports nothing. There is no `OPTIONS` route,
+and API Gateway's own answers (429, 403, 502) carry no CORS header.
+
 ### 6.4 Tenant admin calls through the authoriser
 
 ```mermaid

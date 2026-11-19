@@ -4,6 +4,7 @@
 import { App, Validations } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { TenantIdentityStack } from './identity.cdk';
+import { readAllowedOrigins } from './shared/allowed-origins';
 import { parseDeployment } from './shared/constants';
 
 const app = new App();
@@ -31,9 +32,16 @@ const topology = parseDeployment(app.node.tryGetContext('topology'));
 // Anything but the string 'false' (or a cdk.json boolean false) publishes.
 const publishSharedParameters = String(app.node.tryGetContext('publishSharedParameters') ?? 'true') !== 'false';
 
+// Optional: `--context allowedOrigins=https://app.example.com,https://*.tenants.example.com`
+// lists the browser origins whose pages may read the token exchange's
+// answer (spec §5.4.1, ADR-0040). Missing or empty means no list, so
+// `--context allowedOrigins=` clears it on a redeploy.
+const allowedOrigins = readAllowedOrigins(app.node.tryGetContext('allowedOrigins'));
+
 new TenantIdentityStack(app, `TenantIdentity-${topology}`, {
   topology,
   publishSharedParameters,
+  allowedOrigins,
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
     region: process.env.CDK_DEFAULT_REGION,
