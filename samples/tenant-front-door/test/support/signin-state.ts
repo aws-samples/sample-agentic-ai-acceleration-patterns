@@ -35,19 +35,23 @@ export function verifyState(signin: SigninEntry, state: string, nowSeconds: numb
   const parts = state.split('.');
   if (parts.length !== 2) return { ok: false, why: 'shape' };
   const [encoded, mac] = parts;
-  let payload: SigninStatePayload;
+  let parsed: unknown;
   try {
-    payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as SigninStatePayload;
+    parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
   } catch {
     return { ok: false, why: 'shape' };
   }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return { ok: false, why: 'shape' };
+  const payload = parsed as SigninStatePayload;
   if (payload.v !== 1 || typeof payload.kid !== 'string' || typeof payload.h !== 'string' || typeof payload.exp !== 'number') {
     return { ok: false, why: 'shape' };
   }
   const key = signin.k[payload.kid];
   if (key === undefined) return { ok: false, why: 'kid' };
-  const expected = hmac(key, encoded);
-  const given = Buffer.from(mac, 'base64url');
+  // Compare the canonical base64url strings, not decoded bytes: a lenient
+  // decoder accepts several strings for one MAC, a string compare does not.
+  const expected = Buffer.from(b64url(hmac(key, encoded)), 'utf8');
+  const given = Buffer.from(mac, 'utf8');
   if (given.length !== expected.length || !timingSafeEqual(given, expected)) return { ok: false, why: 'hmac' };
   if (payload.exp <= nowSeconds) return { ok: false, why: 'expired' };
   return { ok: true, payload };

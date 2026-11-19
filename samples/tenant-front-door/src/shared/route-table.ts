@@ -110,7 +110,11 @@ export interface TenantEntry {
   readonly n: string;
   /** Dedicated domain, only when the edge operator role set one. */
   readonly d?: string;
-  /** Domain challenge token, 43 base64url characters, with `d` until the challenge passes. */
+  /**
+   * Domain challenge token, 43 base64url characters, with `d` for as long
+   * as `d` exists. `dk` without `dx` is a passed challenge, the marker the
+   * daily re-check selects on (§3.4 step 5).
+   */
   readonly dk?: string;
   /** Challenge expiry, Unix seconds, only while the challenge is open. */
   readonly dx?: number;
@@ -180,10 +184,16 @@ export function encodeEntry(entry: TenantEntry | HostEntry | CellEntry | AppEntr
 // Builders: every writer goes through one of these, so each value's fields
 // are in the §4.1 order and the bytes match the golden fixtures.
 
-/** Builds a `tenant#` value with its fields in the §4.1 order. `dk` and `dx` come only with `d`. */
+/**
+ * Builds a `tenant#` value with its fields in the §4.1 order. `d` and `dk`
+ * come together; `dx` only with both (an open challenge).
+ */
 export function tenantEntry(fields: Omit<TenantEntry, 'v'>): TenantEntry {
-  if (fields.d === undefined && (fields.dk !== undefined || fields.dx !== undefined)) {
-    throw new RouteTableError('dk and dx need d');
+  if ((fields.d === undefined) !== (fields.dk === undefined)) {
+    throw new RouteTableError('d and dk come together');
+  }
+  if (fields.dx !== undefined && fields.dk === undefined) {
+    throw new RouteTableError('dx needs d and dk');
   }
   const e: Record<string, unknown> = { v: 1, c: fields.c, ac: fields.ac, dt: fields.dt, s: fields.s, n: fields.n };
   if (fields.d !== undefined) e.d = fields.d;
