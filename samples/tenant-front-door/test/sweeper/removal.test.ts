@@ -90,7 +90,8 @@ function distributionTenants(list: FakeTenant[]): void {
       Status: t.status,
     };
     cloudFront.on(GetDistributionTenantCommand, { Identifier: t.id }).resolves({ DistributionTenant: dt, ETag: `etag-${t.id}` });
-    cloudFront.on(ListTagsForResourceCommand, { Resource: arn }).resolves({ Tags: { Items: t.untagged ? [] : tags(t.tenantTag, t.distributionTag) } });
+    const items = t.untagged ? [] : tags(t.tenantTag, t.distributionTag);
+    cloudFront.on(ListTagsForResourceCommand, { Resource: arn }).resolves({ Tags: { Items: items } });
   }
 }
 
@@ -106,7 +107,9 @@ function certificates(list: FakeCertificate[]): void {
   acm.on(ListCertificatesCommand).resolves({ CertificateSummaryList: list.map((c) => ({ CertificateArn: c.arn, DomainName: c.domain })) });
   for (const c of list) {
     acm.on(ListTagsForCertificateCommand, { CertificateArn: c.arn }).resolves({ Tags: c.tags });
-    acm.on(DescribeCertificateCommand, { CertificateArn: c.arn }).resolves({ Certificate: { CertificateArn: c.arn, InUseBy: c.inUseBy ?? [], Status: c.status } });
+    acm.on(DescribeCertificateCommand, { CertificateArn: c.arn }).resolves({
+      Certificate: { CertificateArn: c.arn, InUseBy: c.inUseBy ?? [], Status: c.status },
+    });
   }
 }
 
