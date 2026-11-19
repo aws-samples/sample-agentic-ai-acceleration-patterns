@@ -405,12 +405,11 @@ export class Sweeper extends Construct {
     acknowledgeDedicatedWildcards(this.function, 'Sweeper');
 
     // Both schedules send a delivery they could not make to the same queue,
-    // so its depth alarm covers them too. Spec §3.4 step 5 names no
-    // dead-letter queue for the schedules; this is the conservative choice.
+    // so its depth alarm covers them too (§3.4 step 5).
     const removeTarget = new schedulerTargets.LambdaInvoke(this.function, {
       input: scheduler.ScheduleTargetInput.fromText(SWEEPER_REMOVE_INPUT),
       // The next run 15 minutes later redoes the work, so an older
-      // delivery is dropped. Spec §3.4 step 5 sets no policy for it.
+      // delivery is dropped (§3.4 step 5).
       maxEventAge: REMOVE_RATE,
       retryAttempts: 2,
       deadLetterQueue: this.queue,
@@ -483,8 +482,7 @@ export class Sweeper extends Construct {
       dimensionsMap: { [METRIC_DIMENSION_DISTRIBUTION]: distributionId },
     });
     const alarms = [
-      // Spec §3.4 step 5 names the count, not the period: one hour, so a
-      // three-miss line alarms within the hour of the page that wrote it.
+      // One hour, so a three-miss line alarms within the hour of the page that wrote it (§3.4 step 5).
       new cloudwatch.Alarm(this, 'ThreeMissAlarm', {
         alarmDescription: 'A tenant\'s dedicated domain missed its _tfd-challenge record on three checks in a row: drop the domain or fix the record (spec §3.4 step 5, ADR-0018)',
         metric: metric(SWEEPER_METRICS.threeMiss, cloudwatch.Stats.SUM, Duration.hours(1)),
@@ -501,8 +499,7 @@ export class Sweeper extends Construct {
         evaluationPeriods: 1,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       }),
-      // Spec §3.4 step 5 names the queue's depth, not its period: five
-      // minutes, the queue metric's own period.
+      // Five minutes, the queue metric's own period (§3.4 step 5).
       new cloudwatch.Alarm(this, 'OnFailureDepthAlarm', {
         alarmDescription: 'A sweeper run failed after its retries and waits in the on-failure queue (spec §3.4 step 5)',
         metric: this.queue.metricApproximateNumberOfMessagesVisible({ statistic: cloudwatch.Stats.MAXIMUM, period: Duration.minutes(5) }),
