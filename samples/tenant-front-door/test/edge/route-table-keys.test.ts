@@ -162,6 +162,16 @@ describe('route table keys custom resource (spec §4.1, ADR-0016, M-20)', () => 
     expect(kvs.commandCalls(UpdateKeysCommand)).toHaveLength(1);
   });
 
+  it('does not write when the deadline fires between the reads and UpdateKeys', async () => {
+    const controller = new AbortController();
+    kvs.on(GetKeyCommand).callsFake(() => {
+      controller.abort();
+      throw new ResourceNotFoundException({ message: 'not found', $metadata: {} });
+    });
+    expect(await handleEvent(event({}), { ...deps, signal: controller.signal })).toMatchObject({ status: 'FAILED', reason: 'Timeout' });
+    expect(kvs.commandCalls(UpdateKeysCommand)).toHaveLength(0);
+  });
+
   it('nextSigninEntry keeps the order of SigninIds', () => {
     const e = nextSigninEntry(undefined, ['b2', 'a1'], 'a1', () => 'a2V5');
     expect(encodeEntry(e)).toBe('{"v":1,"cur":"a1","k":{"b2":"a2V5","a1":"a2V5"}}');
