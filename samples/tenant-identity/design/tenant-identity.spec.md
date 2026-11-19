@@ -733,8 +733,8 @@ catches); a pattern whose `<domain>` is or ends in `amazonaws.com` or
 when the domain is not a public suffix (S3 path-style URLs on
 `https://s3.amazonaws.com` and `https://s3.eu-central-1.amazonaws.com`),
 so a vendor's own AWS hostname goes in as an exact entry, unless it is an
-S3 path-style host (`s3` followed by `.` or `-` labels with no later `s3`
-label, under `amazonaws.com` or `amazonaws.com.cn`, such as
+S3 path-style host (`s3` followed by `.` or `-` labels with no later label
+that is `s3` or starts with `s3-`, under `amazonaws.com` or `amazonaws.com.cn`, such as
 `https://s3.amazonaws.com`), which serves every bucket's path-style pages
 from one origin; a repeated entry;
 more than 20 entries; more than 1,024 characters in total, so the list fits
