@@ -1389,9 +1389,14 @@ Rules:
   of one deployment (same `dt`) from a new deployment of the same tenant
   that meets an entry a skipped delete hook left (another `dt`, §3.4
   step 5). No tenant input reaches it. The router reads it only to put
-  it in `/config.json` as `rev` (§3.2). The registrar converts the
-  timestamp the control plane returns; the control plane's spec lists no
-  `createdAt` in its `GetDeployment` output and states no format (Q-7).
+  it in `/config.json` as `rev` (§3.2). `GetDeployment` returns
+  `createdAt` as an RFC 3339 `date-time` in UTC with millisecond
+  precision, which may omit a zero fraction (control-plane §4, §5.2). The
+  registrar parses it to Unix milliseconds before it stores or compares
+  it, so `...:01Z` and `...:01.000Z` are the same `dt`, and refuses a
+  value that does not parse as a control plane it cannot read (503,
+  the write refused, §5.1). It never
+  compares the strings.
 - `d` is the tenant's dedicated domain, present only when the edge
   operator role has set one. It is written on the operator's first
   call for the domain, before the certificate validates, so a delete
@@ -1579,8 +1584,8 @@ failed validation or timed out (a domain challenge never fails: it
 expires and is issued again); 507
 when a write would exceed the route table's 5 MB (ADR-0012) or ACM
 refuses a certificate request for its quota (§4.1); 503 when
-the control plane cannot be read (the write is refused, never made
-unchecked), or when the store's ETag still conflicts after five
+the control plane cannot be read or returns a `createdAt` that does not
+parse (the write is refused, never made unchecked), or when the store's ETag still conflicts after five
 attempts (§3.4 step 5).
 
 ### 5.2 Script and construct forms
@@ -1654,7 +1659,7 @@ All with a small static HTML or JSON body and `no-store`:
   `<appDomain>` (§3.5).
 - A control plane whose `GetCell` and `GetDeployment` return `accountId`,
   `applicationId` and `status`, whose `GetDeployment` also returns
-  `createdAt` (not in its contract yet, Q-7) and whose `GetTenant`
+  `createdAt` (control-plane §5.2) and whose `GetTenant`
   returns `name`, with a reader role enabled (control-plane R-36), and
   a vendor IdP app client whose client-credentials tokens carry that role
   and pass the control plane authorizer (spike S-9, ADR-0015). A Cognito
@@ -1868,7 +1873,7 @@ Limits of these promises:
 | Sample | How | Needed for |
 |---|---|---|
 | `control-plane` | its API (`GetCell`, `GetDeployment`, `GetTenant`) with the reader grant (R-36) and a client-credentials reader token (spike S-9 showed both are needed: a `role` trigger on the vendor IdP and the `vendorIdp.clientIds` input of R-38, ADR-0043), its global hooks (R-39 to R-46, control-plane ADR-0044): `PutHook`, the `<fleet>-global-hook` role and `globalHookManagedPolicyArns`, the hook environment and `SCRIPT_OUTPUTS`. A prerequisite: without hooks the front door registers no route, and ADR-0044 is on `main` but still Proposed (Q-5) | placement checks, route registration, the integration test |
-| `tenant-identity` `shared-pool` and `shared-pool-multi-tenant` | its published parameters; the second topology also mints the `tenants` token and serves the token exchange (§3.5), whose `allowedOrigins` input lists the app's origins (`tenant-identity` §5.4.1 and ADR-0040; the values are in §6.1). Step 5 of §10 uses a `tenants` token only to check the edge's 401 and calls no exchange. A prerequisite: without `allowedOrigins` the SPA cannot read the exchange's answer (T-50), and the input is in [PR #61](https://github.com/aws-samples/sample-agentic-ai-acceleration-patterns/pull/61), not yet on `main` | the demo issuer and the integration test |
+| `tenant-identity` `shared-pool` and `shared-pool-multi-tenant` | its published parameters; the second topology also mints the `tenants` token and serves the token exchange (§3.5), whose `allowedOrigins` input lists the app's origins (`tenant-identity` §5.4.1 and ADR-0040; the values are in §6.1). Step 5 of §10 uses a `tenants` token only to check the edge's 401 and calls no exchange. | the demo issuer and the integration test |
 | `agentic-runtime-isolation` | its `/application-plane/shared/agent-runtime/ingress` parameter: `baseUrl` gives the `agentIngress` origin's domain and origin path | `/agents/*`, optional |
 
 What the front door assumes of the agent ingress's paths (ADR-0019):
@@ -2538,4 +2543,3 @@ step 14 checks the metric count the re-check alarm watches.
 |---|---|---|
 | Q-4 | Should the integration test also compose `agentic-runtime-isolation` for `/agents/*`, or reuse a deployment only when one is found? Until then step 23 runs against a stand-in. | integration test |
 | Q-5 | Route registration depends on the control plane's global hooks (control-plane R-39 to R-46, ADR-0044), which are on `main` and Proposed. Does their final shape keep what ADR-0017 uses: `POST` hooks only after a successful script, `PRE` delete hooks with three attempts that cannot stop a delete, one `<fleet>-global-hook` role, `SCRIPT_OUTPUTS` and `globalHookManagedPolicyArns`? If not, ADR-0017 is revisited. ADR-0017 stays Proposed and ADR-0013 Accepted until ADR-0044 is accepted | build start |
-| Q-7 | The deployment record holds `createdAt`, but the control plane's `GetDeployment` output does not list it (control-plane §5.2) and its spec states no timestamp format. The registrar needs it as `dt` (§4.1) to tell a new deployment from a leftover entry. Does the control plane add `createdAt` to `GetDeployment`, with a stated format (ISO 8601 or epoch)? Raised as [issue #55](https://github.com/aws-samples/sample-agentic-ai-acceleration-patterns/issues/55) | build start |
