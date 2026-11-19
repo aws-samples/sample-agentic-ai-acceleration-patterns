@@ -635,13 +635,15 @@ starting "Why" gives the reason; "Bounded by" says what limits it.
     untagged distribution tenant or certificate (T-25).** The tag grants
     hold only on a resource without the `tenant-front-door:distribution`
     tag, and only with this distribution's id, so no resource another front
-    door tagged can be re-labelled. A resource with no such tag can: the
-    pooled distribution tenant, and any certificate in the edge account's
-    `us-east-1` that nothing uses. Tagged with a tenant id that has no
-    current `d`, the sweeper then disables and deletes such a distribution
-    tenant and deletes such a certificate; the registrar's
-    `UpdateDistributionTenant` also covers it. The code never calls either
-    tag action on its own: CloudFront and ACM authorise the tags of a create
+    door tagged can be re-labelled. A resource with no such tag can: any
+    certificate in the edge account's `us-east-1` that nothing uses.
+    Tagged with a tenant id that has no current `d`, the sweeper then
+    deletes such a certificate. The pooled distribution tenant is not in
+    this residual: the sweeper and the teardown skip it by its id before
+    any read, so a tag on it makes nothing remove it, and the registrar's
+    `UpdateDistributionTenant` on it adds nothing to the control of
+    routing that compromised registrar code already holds (AR-19). The
+    code never calls either tag action on its own: CloudFront and ACM authorise the tags of a create
     through them. *Why:* IAM cannot tell a create's tags from a later tag
     call on a resource that has none. *Bounded by:* the actor (compromised
     registrar code, AR-19); the sweeper never deletes a certificate that is

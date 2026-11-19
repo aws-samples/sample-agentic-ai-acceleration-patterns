@@ -87,7 +87,10 @@ describe('dedicatedDomains off (spec §3.6)', () => {
       PooledTenantId: { 'Fn::GetAtt': ['PooledTenant', 'Id'] },
       KeyValueStoreArn: { 'Fn::GetAtt': [expect.stringMatching(/^RouteTable/), 'Arn'] },
     });
-    expect(only(off.main, 'Custom::TenantFrontDoorDedicatedDomainsTeardown')).toMatchObject({ DistributionId: DISTRIBUTION });
+    expect(only(off.main, 'Custom::TenantFrontDoorDedicatedDomainsTeardown')).toMatchObject({
+      DistributionId: DISTRIBUTION,
+      PooledTenantId: { 'Fn::GetAtt': ['PooledTenant', 'Id'] },
+    });
     expect(actions(statements(off.main, 'DedicatedDomainsTeardownIsComplete'))).toContain('cloudfront:DeleteDistributionTenant');
   });
 });
@@ -139,6 +142,7 @@ describe('dedicatedDomains on: sweeper (spec §3.1, §3.4 step 5, ADR-0020, ADR-
     expect(fn.Environment.Variables).toEqual({
       [SWEEPER_ENV.routeTableArn]: { 'Fn::GetAtt': [expect.stringMatching(/^RouteTable/), 'Arn'] },
       [SWEEPER_ENV.distributionId]: DISTRIBUTION,
+      [SWEEPER_ENV.pooledTenantId]: { 'Fn::GetAtt': ['PooledTenant', 'Id'] },
       [SWEEPER_ENV.tableName]: { Ref: logicalId(on.main, 'AWS::DynamoDB::Table', 'SweeperTable') },
     });
     const logGroup = resources(on.main)[fn.LoggingConfig.LogGroup.Ref];

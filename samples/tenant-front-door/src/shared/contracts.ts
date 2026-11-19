@@ -317,6 +317,8 @@ export const SWEEPER_ENV = {
   routeTableArn: 'ROUTE_TABLE_ARN',
   /** The multi-tenant distribution whose dedicated distribution tenants the removal job deletes. */
   distributionId: 'DISTRIBUTION_ID',
+  /** The pooled distribution tenant's id, which the removal job skips before it reads any tag. */
+  pooledTenantId: 'POOLED_TENANT_ID',
   /** Name of the sweeper's own DynamoDB table (ADR-0020). */
   tableName: 'SWEEPER_TABLE_NAME',
 } as const;

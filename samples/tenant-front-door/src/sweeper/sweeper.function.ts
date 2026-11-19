@@ -89,6 +89,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): SweeperDeps {
       kvs,
       routeTableArn,
       distributionId,
+      pooledTenantId: requireEnv(env, SWEEPER_ENV.pooledTenantId),
     },
   };
 }
