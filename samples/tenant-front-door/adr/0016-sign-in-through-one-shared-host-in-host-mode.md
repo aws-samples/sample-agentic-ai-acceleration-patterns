@@ -164,6 +164,6 @@ controls a dedicated domain: the tenant shows control of the domain's
 DNS with a registrar-issued token before the domain is routed. The
 challenge confirms that the tenant controls the domain's DNS and can
 point it at a server of its own, so an authorization code sent there
-could leave the vendor's edge. A
-dedicated domain therefore stays out of the sign-in path, and one with
-its own callback URL stays out of scope.
+could leave the vendor's edge. A dedicated domain therefore stays out
+of the sign-in path, and one with its own callback URL stays out of
+scope.

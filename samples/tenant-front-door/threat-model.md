@@ -494,8 +494,8 @@ starting "Why" gives the reason; "Bounded by" says what limits it.
     store is full; ACM's 2,500-certificate default binds before that, and a
     domain dropped and set again uses the 5,000 requests in 365 days. A
     create then fails with 507, and past ACM's quota an operator's domain
-    call fails with 429 and `reason: certificate-quota`. *Why:* sharding by distribution is a plan,
-    not a build (ADR-0012). *Bounded by:* the 80 % alarm; only the edge
+    call fails with 429 and `reason: certificate-quota`. *Why:* sharding
+    by distribution is a plan, not a build (ADR-0012). *Bounded by:* the 80 % alarm; only the edge
     operator role sets a domain. Deployer action: raise the ACM quota first.
 - **AR-19: Compromised code in the registrar, sweeper, router or a custom
     resource (T-25).** The registrar's compromise is control of routing: it

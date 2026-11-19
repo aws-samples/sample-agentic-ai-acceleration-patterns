@@ -141,7 +141,7 @@ then route or unroute any tenant. The hook retries a 5xx, 429 or missing answer 
 build for about two minutes, and a throttled read of the front door hook
 parameter for about a minute, so another application's burst of creates
 does not fail this one's. It fails at once on 400, 403, 409 or 507,
-printing the registrar's message.
+printing the status and the response body.
 
 ## Consequences
 

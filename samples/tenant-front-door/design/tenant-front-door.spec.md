@@ -624,8 +624,9 @@ On every write:
       the domain before then. Once `host#<d>` exists, a repeat looks
       nothing up, changes nothing and answers 200.
    6. Certificate failed, or validation timed out (ACM stops waiting
-      after 72 hours): 422 whose `message` carries ACM's failure reason. The operator drops the
-      domain and sets it again, which also issues a new challenge.
+      after 72 hours): 422 whose `message` carries ACM's failure
+      reason. The operator drops the domain and sets it again, which
+      also issues a new challenge.
 
    The token binds the challenge to one tenant and one domain: it lives
    in that tenant's `tenant#` entry next to `d`, is compared only for
@@ -1105,10 +1106,10 @@ the control plane's hook environment (control-plane R-42):
    answer: retry inside the build, five attempts with jittered backoff over
    about two minutes, then fail (the hook never sends `customDomain`, so
    its 429 is always a throttle, never `certificate-quota`); the
-   control plane does not retry a
-   create or update hook, so a hook that wants retries makes them
-   itself (control-plane R-46). 400, 403, 409 or 507: fail at once,
-   printing the status and the registrar's message. The cause is in the
+   control plane does not retry a create or update hook, so a hook that
+   wants retries makes them itself (control-plane R-46). 400, 403, 409
+   or 507: fail at once, printing the status and the response body. The
+   cause is in the
    input or the route table (a cell script that wrote no valid API
    domain, a tenant route whose cell has no route, a record in the
    wrong status, a full store, a misconfigured role), and a retry would
