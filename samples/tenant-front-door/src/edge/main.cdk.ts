@@ -6,11 +6,16 @@
  * multi-tenant distribution and its pooled distribution tenant, the router
  * and its KeyValueStore, the response headers policy, the SPA bucket, the
  * registrar, the custom resource for the `app` and `signin` keys, the
- * route table alarm and the published parameter.
+ * route table alarm, the published parameter, and the dedicated-domain
+ * guard and teardown, which exist in both states of `dedicatedDomains`.
  *
- * `dedicatedDomains` is off in this build slice (S2): the registrar role
- * holds no CloudFront or ACM action, and the sweeper, its table, the guard
- * and the teardown resource arrive with S6.
+ * With `dedicatedDomains` on (§3.6) the registrar role also holds its
+ * CloudFront and ACM actions, and the stack holds the sweeper, its table,
+ * queue, schedules, log group and alarms, and the starter
+ * (`dedicated-domains.cdk.ts`). The deploy order the switch needs (§3.4):
+ * the teardown before the registrar function, so a stack delete removes the
+ * registrar before the teardown runs; the registrar function before the
+ * guard; the guard before both schedules; the sweeper before the starter.
  */
 
 import * as fs from 'node:fs';
@@ -32,6 +37,7 @@ import * as sns from 'aws-cdk-lib/aws-sns';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { buildContentSecurityPolicy, readCspHashes, REPORT_GROUP } from './csp';
+import { DedicatedDomainsGuard, DedicatedDomainsTeardown, registrarDedicatedDomainsPolicy, Sweeper } from './dedicated-domains.cdk';
 import { ResolvedInputs } from './inputs';
 import { acknowledge, BASIC_EXECUTION_ROLE_FINDING, nagFindingResource } from './nag';
 import { allowEmptyBody, patchIntegrations, readRegistrarOpenApi } from './openapi';
@@ -341,6 +347,32 @@ export class MainStack extends Stack {
     });
     this.registrarUrl = registrar.url;
 
+    // --- Dedicated domains (§3.4 step 5, §6.2, ADR-0018) ---------------------
+    // On a stack delete the registrar goes first, so no dedicated
+    // distribution tenant is created while the teardown runs; the teardown
+    // then runs before the distribution's delete.
+    const teardown = new DedicatedDomainsTeardown(this, 'DedicatedDomainsTeardown', { distributionId: distribution.ref });
+    (registrar.function.node.defaultChild as lambda.CfnFunction).node.addDependency(teardown.resource);
+    const guard = new DedicatedDomainsGuard(this, 'DedicatedDomainsGuard', {
+      dedicatedDomains: inputs.dedicatedDomains,
+      routeTableArn: routeTable.keyValueStoreArn,
+      distributionId: distribution.ref,
+      pooledTenantId: pooled.attrId,
+    });
+    guard.resource.node.addDependency(registrar.function);
+
+    const alarmAction = inputs.alarmTopicArn === undefined
+      ? undefined
+      : new cloudwatchActions.SnsAction(sns.Topic.fromTopicArn(this, 'AlarmTopic', inputs.alarmTopicArn));
+    if (inputs.dedicatedDomains) {
+      const sweeper = new Sweeper(this, 'Sweeper', {
+        routeTableArn: routeTable.keyValueStoreArn,
+        distributionId: distribution.ref,
+        alarmAction,
+      });
+      for (const schedule of sweeper.schedules) schedule.node.addDependency(guard.resource);
+    }
+
     // --- Route table alarm (§4.1, ADR-0012, M-43, M-48) ---------------------
     const alarm = new cloudwatch.Alarm(this, 'RouteTableBytesAlarm', {
       alarmDescription: 'The route table is at 80 % of the 5 MB KeyValueStore: plan a shard before creates fail with 507 (spec §4.1, ADR-0012)',
@@ -355,8 +387,8 @@ export class MainStack extends Stack {
       evaluationPeriods: 1,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    if (inputs.alarmTopicArn !== undefined) {
-      alarm.addAlarmAction(new cloudwatchActions.SnsAction(sns.Topic.fromTopicArn(this, 'AlarmTopic', inputs.alarmTopicArn)));
+    if (alarmAction !== undefined) {
+      alarm.addAlarmAction(alarmAction);
     }
 
     // --- Published parameter (§6.4) -----------------------------------------
@@ -532,6 +564,7 @@ interface RegistrarProps {
  */
 class Registrar extends Construct {
   public readonly url: string;
+  public readonly function: NodejsFunction;
 
   constructor(scope: Construct, id: string, props: RegistrarProps) {
     super(scope, id);
@@ -551,7 +584,7 @@ class Registrar extends Construct {
       vendorIdpSecretArn: inputs.controlPlane.vendorIdp.clientSecretArn,
       fleet: inputs.fleet,
       edgeOperatorRoleArn: inputs.edgeOperatorRoleArn,
-      dedicatedDomains: 'off',
+      dedicatedDomains: inputs.dedicatedDomains ? 'on' : 'off',
       distributionId: props.distributionId,
     };
     const environment = Object.fromEntries(
@@ -605,6 +638,17 @@ class Registrar extends Construct {
       actions: ['secretsmanager:GetSecretValue'],
       resources: [inputs.controlPlane.vendorIdp.clientSecretArn],
     }));
+    // The dedicated-domain actions, only while `dedicatedDomains` is on
+    // (§3.4). The function depends on them, so turning the switch on grants
+    // them before the function serves `customDomain`; turning it off
+    // removes them in the update's cleanup, after the guard.
+    if (inputs.dedicatedDomains) {
+      // On the function resource alone: its role is in its subtree, and the policy names the role.
+      (fn.node.defaultChild as lambda.CfnFunction).node.addDependency(
+        registrarDedicatedDomainsPolicy(this, 'DedicatedDomainsPolicy', fn.role!, props.distributionId),
+      );
+    }
+    this.function = fn;
     acknowledge(fn, BASIC_EXECUTION_ROLE_FINDING, 'Logs-only managed policy NodejsFunction attaches; a scoped copy changes no access (M-36).');
     acknowledge(fn, 'AwsSolutions-L1', 'Node.js 24, the runtime the demo cell API uses too, so the sample runs on one runtime; move both when Node.js 26 is GA.');
     acknowledge(

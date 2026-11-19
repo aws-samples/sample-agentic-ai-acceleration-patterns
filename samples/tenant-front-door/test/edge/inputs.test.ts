@@ -190,12 +190,10 @@ describe('deployment inputs (spec §3.6)', () => {
     expect(() => validateInputs({ ...base, alarmTopicArn })).toThrow(/alarmTopicArn/);
   });
 
-  it('refuses dedicatedDomains on: it arrives in build slice S6', () => {
-    expect(() => validateInputs({ ...base, dedicatedDomains: true })).toThrow(/arrive in build slice S6/);
-  });
-
-  it('accepts dedicatedDomains off, and only a boolean', () => {
-    expect(() => validateInputs({ ...base, dedicatedDomains: false })).not.toThrow();
+  it('accepts dedicatedDomains on and off, default off, and only a boolean (§3.6)', () => {
+    expect(validateInputs({ ...base, dedicatedDomains: true }).dedicatedDomains).toBe(true);
+    expect(validateInputs({ ...base, dedicatedDomains: false }).dedicatedDomains).toBe(false);
+    expect(validateInputs(base).dedicatedDomains).toBe(false);
     expect(() => validateInputs({ ...base, dedicatedDomains: 'on' as never })).toThrow(/dedicatedDomains must be true or false/);
   });
 
