@@ -135,7 +135,8 @@ readable by anyone with log-group access:
 ## Scope
 
 These conventions apply to every script in this directory (`demo.sh`,
-`integ.sh`, `integ-control-plane.sh`, `integ-lib.sh`, `control-plane/`) and
+`integ.sh`, `integ-control-plane.sh`, `integ-lib.sh`, `control-plane/`,
+`stress/`) and
 any script added later. They are the
 local-script counterpart of `docs/sample-standard.md` §4.4 (no secrets,
 tokens, or caller payloads in logs).

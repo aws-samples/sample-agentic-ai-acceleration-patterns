@@ -11,6 +11,11 @@
       "type": "build"
     },
     {
+      "name": "@aws-sdk/client-cloudwatch",
+      "version": "3.1154.0",
+      "type": "build"
+    },
+    {
       "name": "@aws-sdk/client-iam",
       "version": "3.1154.0",
       "type": "build"

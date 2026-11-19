@@ -658,6 +658,32 @@ minutes for well under 1 USD. A second test, `npx projen integ:control-plane`,
 proves the control-plane mount end to end. What each test stands up, its
 steps, knobs and shortcuts are in [integration-test.md](./integration-test.md).
 
+## Platform stress slice
+
+The sample is a slice of the repository's platform stress test
+([`docs/stress-test.spec.md`](../../docs/stress-test.spec.md),
+[`stress/`](../../stress/README.md)). The slice runs on a `shared-pool` stack
+of its own, `<STRESS_PREFIX>-identity`, so thousands of stress tenants never
+crowd the pool the integration tests share, and it never touches a
+`TenantIdentity-*` stack ([ADR-0040](./adr/0040-run-the-platform-stress-slice-on-its-own-shared-pool-stack.md)).
+
+```bash
+export AWS_REGION=eu-central-1 STRESS_PREFIX=stress-ti
+cd ../../stress
+./run.sh run --tier small --slices tenant-identity --remove-fixtures
+```
+
+The runner calls [`scripts/stress/slice.sh`](./scripts/stress/slice.sh) with
+the verbs `budget`, `deploy`, `seed`, `run <scenario>`, `collect` and
+`teardown`; `--remove-fixtures` also destroys the stack. Without it the stack
+stays for the next run. Scenarios: `PS-1` (onboarding at the tier's churn
+count), `token-rate` (issue, refresh and exchange at the tier's steady rate)
+and `create-tenant-burst` (`CreateTenant` beyond what Cognito's control plane
+takes). Each asserts that every token names the tenant it was issued for and
+that a token or path of tenant A is refused for tenant B. The driver is
+[`test/stress/`](./test/stress/); its manifest and logs stay outside the
+repository and hold no token or password.
+
 ## End-to-end demo
 
 [`scripts/demo.sh`](./scripts/demo.sh) walks the primary flow against one

@@ -1,0 +1,6 @@
+{
+  "name": "tenant-identity",
+  "needs": [],
+  "scenarios": ["PS-1", "token-rate", "create-tenant-burst"],
+  "quotas": ["lambda-concurrency", "cognito-groups", "cognito-user-authentication-rps"]
+}
