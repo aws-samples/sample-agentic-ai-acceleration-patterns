@@ -318,7 +318,8 @@ export class RegistrarService implements RegistrarServiceService<RegistrarContex
     if (ctx.role !== 'operator') throw refuse.forbidden('only the edge operator role changes a route status');
     const status = input.status as RouteStatus;
     // The status writes no placement value, so it is not checked against the
-    // control plane: a suspension still works while the control plane is down.
+    // control plane: a suspension still works while the control plane is down
+    // (§3.4, ADR-0025).
     await this.deps.store.update(async (read) => {
       const entry = await readTenant(read, tenantId);
       if (entry === undefined) throw refuse.conflict('the tenant has no route');

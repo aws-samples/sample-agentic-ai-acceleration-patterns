@@ -165,10 +165,13 @@ export interface EdgeParameter {
   readonly reservedLabels: readonly string[];
 }
 
-/** The value of `paramCellCopy`: what `CellRouteAccess` needs. */
-export interface CellCopyParameter {
-  readonly distributionArn: string;
-}
+/**
+ * The value of `paramCellCopy`: the edge distribution's ARN as a plain
+ * string, what `CellRouteAccess` needs. Plain, not JSON, so a cell stack
+ * reads it with a CloudFormation SSM parameter, which cannot parse JSON
+ * (ADR-0026).
+ */
+export type CellCopyParameter = string;
 
 /** The value of `paramHook`: what the route hook needs. */
 export interface HookParameter {
