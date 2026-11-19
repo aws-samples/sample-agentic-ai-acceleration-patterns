@@ -121,8 +121,12 @@ scenario do. Its choices:
   mounts the stress stack.
 - **Budget.** The slice declares `cognito-groups` (two per tenant at the
   pool's peak, including the control plane's tenants in `platform` mode),
-  `cognito-user-authentication-rps` (the steady rate, or the 8 a second
-  token-preparation pace if higher) and `lambda-concurrency` (twice the
+  `cognito-user-authentication-rps` (the highest of the steady rate, the 8 a
+  second token-preparation pace, and the onboardings in flight at once in
+  PS-1 or the burst times the users each one signs in, since those two do
+  not pace their token calls: 40 at `small`, measured peak 26; 160 at
+  `medium`, above the 120 default, so a `medium` run needs the account's
+  applied quota in `--limits`) and `lambda-concurrency` (twice the
   steady rate for the token or platform function plus the trigger, or the
   burst concurrency). Each record's quota peaks are measured the same way:
   `cognito-groups` counts the control plane's tenants in `platform` mode, and

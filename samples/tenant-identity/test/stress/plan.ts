@@ -182,7 +182,13 @@ export function drawsOf(plan: Plan): Draw[] {
     {
       account: 'platform',
       quota: 'cognito-user-authentication-rps',
-      amount: Math.max(tier.steadyRps, ISSUE_PACE_PER_SECOND),
+      // PS-1 and the burst do not pace their token calls: every onboarding
+      // in flight can issue one token per user within the same second.
+      amount: Math.max(
+        tier.steadyRps,
+        ISSUE_PACE_PER_SECOND,
+        Math.max(plan.onboardConcurrency, plan.burstConcurrency) * tier.usersPerActiveTenant,
+      ),
     },
     {
       account: 'platform',

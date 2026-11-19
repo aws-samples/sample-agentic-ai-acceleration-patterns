@@ -86,4 +86,11 @@ describe('budget', () => {
     const draws = drawsOf(planOf(parseTier(SMALL), 'slice'));
     expect(draws.find((d) => d.quota === 'cognito-groups')?.amount).toBe(80);
   });
+
+  test('the auth rate covers the unpaced onboardings of PS-1 and the burst', () => {
+    // small: 20 burst onboardings at once, two users each.
+    expect(drawsOf(planOf(parseTier(SMALL), 'slice')).find((d) => d.quota === 'cognito-user-authentication-rps')?.amount).toBe(40);
+    // large: the steady rate is higher than 100 onboardings of one user.
+    expect(drawsOf(planOf(parseTier(LARGE), 'slice')).find((d) => d.quota === 'cognito-user-authentication-rps')?.amount).toBe(500);
+  });
 });
