@@ -10,6 +10,9 @@
 
 import * as https from 'node:https';
 
+/** The response PUT's socket timeout. */
+export const RESPONSE_TIMEOUT_MS = 4_000;
+
 export interface CustomResourceEventBase {
   readonly ResponseURL: string;
   readonly StackId: string;
@@ -52,7 +55,7 @@ export function respond(
     );
     req.on('error', () => resolve());
     // A PUT that hangs would hold the function to its timeout.
-    req.setTimeout?.(10_000, () => req.destroy());
+    req.setTimeout?.(RESPONSE_TIMEOUT_MS, () => req.destroy());
     req.end(body);
   });
 }

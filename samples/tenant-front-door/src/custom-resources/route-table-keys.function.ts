@@ -31,7 +31,7 @@ import {
 // The KeyValueStore data plane signs with SigV4A; importing the pure-JS
 // signer registers it with the SDK's multi-Region signer.
 import '@aws-sdk/signature-v4a';
-import { CustomResourceEventBase, CustomResourceOutcome, respond } from './cfn-response';
+import { CustomResourceEventBase, CustomResourceOutcome, respond, RESPONSE_TIMEOUT_MS } from './cfn-response';
 import { decodeSigninEntry, encodeEntry, KEY_APP, KEY_SIGNIN, signinEntry, SigninEntry } from '../shared/route-table';
 
 export const PHYSICAL_RESOURCE_ID = 'route-table-keys';
@@ -60,6 +60,8 @@ export interface Deps {
   /** 32 random bytes per call. */
   readonly newKey: () => string;
   readonly sleep: (ms: number) => Promise<void>;
+  /** Aborted when the answer has gone out without this run: it then writes nothing more. */
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -85,9 +87,14 @@ export async function handleEvent(event: RouteTableKeysEvent, deps: Deps): Promi
     return { status: 'FAILED', physicalResourceId, reason: 'SigninCurrent must be one of SigninIds' };
   }
 
+  const timedOut: CustomResourceOutcome = { status: 'FAILED', physicalResourceId, reason: 'Timeout' };
+  const options = { abortSignal: deps.signal };
   for (let attempt = 1; ; attempt++) {
+    // A run the deadline gave up on must not write over the rollback
+    // CloudFormation sends next (M-15).
+    if (isAborted(deps)) return timedOut;
     try {
-      const { ETag } = await deps.client.send(new DescribeKeyValueStoreCommand({ KvsARN: p.KeyValueStoreArn }));
+      const { ETag } = await deps.client.send(new DescribeKeyValueStoreCommand({ KvsARN: p.KeyValueStoreArn }), options);
       const stored = await getSignin(deps, p.KeyValueStoreArn);
       const puts = [{ Key: KEY_APP, Value: p.App }];
       const deletes: { Key: string }[] = [];
@@ -97,12 +104,13 @@ export async function handleEvent(event: RouteTableKeysEvent, deps: Deps): Promi
       } else if (stored !== undefined) {
         deletes.push({ Key: KEY_SIGNIN });
       }
+      if (isAborted(deps)) return timedOut;
       await deps.client.send(new UpdateKeysCommand({
         KvsARN: p.KeyValueStoreArn,
         IfMatch: ETag,
         Puts: puts,
         Deletes: deletes.length > 0 ? deletes : undefined,
-      }));
+      }), options);
       return { status: 'SUCCESS', physicalResourceId };
     } catch (error) {
       if (error instanceof ConflictException && attempt < MAX_ATTEMPTS) {
@@ -119,7 +127,7 @@ export async function handleEvent(event: RouteTableKeysEvent, deps: Deps): Promi
 async function getSignin(deps: Deps, kvsArn: string): Promise<SigninEntry | undefined> {
   let value: string | undefined;
   try {
-    value = (await deps.client.send(new GetKeyCommand({ KvsARN: kvsArn, Key: KEY_SIGNIN }))).Value;
+    value = (await deps.client.send(new GetKeyCommand({ KvsARN: kvsArn, Key: KEY_SIGNIN }), { abortSignal: deps.signal })).Value;
   } catch (error) {
     if (error instanceof ResourceNotFoundException) return undefined;
     throw error;
@@ -137,27 +145,36 @@ function errorName(error: unknown): string {
   return error instanceof Error ? error.name : 'UnknownError';
 }
 
-/** Time the answer needs before the function's own timeout. */
-export const ANSWER_MARGIN_MS = 5_000;
+/** Time the answer needs before the function's own timeout: the response PUT's limit and a second more. */
+export const ANSWER_MARGIN_MS = RESPONSE_TIMEOUT_MS + 1_000;
 
 /**
- * `handleEvent`, or FAILED with `Timeout` once `ms` pass: an answer that
- * never goes out leaves the stack waiting an hour.
+ * `run`, or FAILED with `Timeout` once `ms` pass: an answer that never goes
+ * out leaves the stack waiting an hour. On the deadline it aborts the
+ * signal it gave `run`, so the abandoned run stops before its next write.
  */
-export async function answerWithin(work: Promise<CustomResourceOutcome>, ms: number, physicalResourceId: string): Promise<CustomResourceOutcome> {
+export async function answerWithin(
+  run: (signal: AbortSignal) => Promise<CustomResourceOutcome>,
+  ms: number,
+  physicalResourceId: string,
+): Promise<CustomResourceOutcome> {
+  const controller = new AbortController();
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<CustomResourceOutcome>((resolve) => {
-    timer = setTimeout(() => resolve({ status: 'FAILED', physicalResourceId, reason: 'Timeout' }), ms);
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve({ status: 'FAILED', physicalResourceId, reason: 'Timeout' });
+    }, ms);
   });
   try {
-    return await Promise.race([work, deadline]);
+    return await Promise.race([run(controller.signal), deadline]);
   } finally {
     clearTimeout(timer);
   }
 }
 
 const deps: Deps = {
-  // Each call gives up after 10 s, so the retries fit the function's timeout.
+  // Keeps one hung call from using up the deadline; answerWithin bounds the run.
   client: new CloudFrontKeyValueStoreClient({ requestHandler: { requestTimeout: 10_000 } }),
   newKey: () => randomBytes(32).toString('base64'),
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -167,9 +184,18 @@ export const handler = async (event: RouteTableKeysEvent, context: { getRemainin
   const physicalResourceId = event.PhysicalResourceId ?? PHYSICAL_RESOURCE_ID;
   let outcome: CustomResourceOutcome;
   try {
-    outcome = await answerWithin(handleEvent(event, deps), context.getRemainingTimeInMillis() - ANSWER_MARGIN_MS, physicalResourceId);
+    outcome = await answerWithin(
+      (signal) => handleEvent(event, { ...deps, signal }),
+      context.getRemainingTimeInMillis() - ANSWER_MARGIN_MS,
+      physicalResourceId,
+    );
   } catch (error) {
     outcome = { status: 'FAILED', physicalResourceId, reason: errorName(error) };
   }
   await respond(event, outcome);
 };
+
+/** Read through a call, so TypeScript does not narrow it between awaits. */
+function isAborted(d: Deps): boolean {
+  return d.signal?.aborted === true;
+}

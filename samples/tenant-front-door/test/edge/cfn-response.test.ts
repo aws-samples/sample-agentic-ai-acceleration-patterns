@@ -3,7 +3,7 @@
 
 import { EventEmitter } from 'node:events';
 import type * as https from 'node:https';
-import { respond } from '../../src/custom-resources/cfn-response';
+import { respond, RESPONSE_TIMEOUT_MS } from '../../src/custom-resources/cfn-response';
 
 const event = {
   ResponseURL: 'https://cloudformation-response.example.com/path?sig=abc',
@@ -46,6 +46,27 @@ describe('custom resource answer (M-20)', () => {
       RequestId: 'request',
       LogicalResourceId: 'RouteTableKeys',
     });
+  });
+
+  it('gives up on a PUT that hangs past its socket timeout, and still resolves', async () => {
+    let onTimeout: (() => void) | undefined;
+    let destroyed = false;
+    const request = (() => {
+      const req = Object.assign(new EventEmitter(), {
+        setTimeout: (ms: number, cb: () => void) => {
+          expect(ms).toBe(RESPONSE_TIMEOUT_MS);
+          onTimeout = cb;
+        },
+        destroy: () => {
+          destroyed = true;
+          req.emit('error', new Error('socket timeout'));
+        },
+        end: () => onTimeout?.(),
+      });
+      return req;
+    }) as unknown as typeof https.request;
+    await expect(respond(event, { status: 'SUCCESS', physicalResourceId: 'x' }, request)).resolves.toBeUndefined();
+    expect(destroyed).toBe(true);
   });
 
   it('never throws when the PUT fails: a thrown answer would stall the stack for an hour', async () => {

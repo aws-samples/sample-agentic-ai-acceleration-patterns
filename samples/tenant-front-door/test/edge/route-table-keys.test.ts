@@ -142,10 +142,24 @@ describe('route table keys custom resource (spec §4.1, ADR-0016, M-20)', () => 
   });
 
   it('answers FAILED with Timeout before the function times out when a call never settles', async () => {
-    const never = new Promise<never>(() => undefined);
+    let seen: AbortSignal | undefined;
+    const never = (signal: AbortSignal) => {
+      seen = signal;
+      return new Promise<never>(() => undefined);
+    };
     expect(await answerWithin(never, 10, 'route-table-keys')).toEqual({ status: 'FAILED', physicalResourceId: 'route-table-keys', reason: 'Timeout' });
-    const done = Promise.resolve({ status: 'SUCCESS' as const, physicalResourceId: 'route-table-keys' });
+    expect(seen?.aborted).toBe(true);
+    const done = async () => ({ status: 'SUCCESS' as const, physicalResourceId: 'route-table-keys' });
     expect(await answerWithin(done, 10_000, 'route-table-keys')).toEqual({ status: 'SUCCESS', physicalResourceId: 'route-table-keys' });
+  });
+
+  it('writes nothing more once the deadline has aborted it, so a rollback is not overwritten (M-15)', async () => {
+    storedSignin(undefined);
+    kvs.on(UpdateKeysCommand).rejects(new ConflictException({ message: 'etag', $metadata: {} }));
+    const controller = new AbortController();
+    const aborting: Deps = { ...deps, sleep: async () => controller.abort(), signal: controller.signal };
+    expect(await handleEvent(event({}), aborting)).toMatchObject({ status: 'FAILED', reason: 'Timeout' });
+    expect(kvs.commandCalls(UpdateKeysCommand)).toHaveLength(1);
   });
 
   it('nextSigninEntry keeps the order of SigninIds', () => {
