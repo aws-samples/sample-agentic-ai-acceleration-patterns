@@ -464,8 +464,8 @@ Every global hook on the control plane runs under the same
 proves that a vendor global hook is calling, not that the route hook is
 calling for the record it names. So the registrar still reads the
 control plane on every global hook write, takes the placement from
-it, and admits a global hook's write only while the record has an operation of the
-matching kind in flight (ADR-0015, ADR-0017). That binds a write to the
+it, and admits a global hook's write only while the record has an
+operation of the matching kind in flight (ADR-0015, ADR-0017). That binds a write to the
 record's status, not to the hook, its phase or its execution: the record
 carries no execution id to compare. Any global hook, in either phase,
 can therefore write while a create, update or delete of that record
@@ -488,8 +488,8 @@ also put a tenant's route during that deployment's create or update. In a tenant
 script, which the tenant controls, still chooses its own cell's origin
 within the pinned form.
 
-On every write, except the edge operator role's deletes and status
-changes (below):
+On every put (deletes and status changes run the subset of these steps
+given below):
 
 1. Take the caller's role from the signed request context: the global
    hook role or the edge operator role. Ignore any account or cell id in
@@ -959,10 +959,9 @@ conflict re-read but without the domain sub-steps, and step 6. It
 changes only `s` of an existing `tenant#` entry and copies every other
 field as stored, so the operator can suspend a tenant while the control
 plane cannot be read (ADR-0025). A tenant with no `tenant#` entry gets
-409. Status changes (`suspended`, `active`),
-dedicated domains and `DeleteHostRoute`, which clears a `host#` key left
-behind (§5.1), are vendor operations: only the edge account's operator
-role may make them.
+409. Status changes (`suspended`, `active`), dedicated domains and
+`DeleteHostRoute`, which clears a `host#` key left behind (§5.1), are
+vendor operations: only the edge account's operator role may make them.
 
 The edge operator role may also call `PutCellRoute`, with the same
 `GetCell` check and origin form, the record's account and `apiDomain`
