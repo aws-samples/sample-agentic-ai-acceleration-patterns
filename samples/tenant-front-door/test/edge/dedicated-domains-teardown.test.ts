@@ -15,6 +15,7 @@ import {
   type DistributionTenantSummary,
   GetDistributionTenantCommand,
   ListDistributionTenantsCommand,
+  ListTagsForResourceCommand,
   PreconditionFailed,
   UpdateDistributionTenantCommand,
 } from '@aws-sdk/client-cloudfront';
@@ -41,15 +42,22 @@ function event(requestType: TeardownEvent['RequestType'], physicalId?: string): 
 
 const registrarTags = (tenant: string) => ({ Items: [{ Key: TAG_TENANT_ID, Value: tenant }, { Key: TAG_DISTRIBUTION_ID, Value: DISTRIBUTION }] });
 
-/** Distribution tenants by id; GetDistributionTenant answers each with its ETag. */
+const tenantArn = (id: string) => `arn:aws:cloudfront::111111111111:distribution-tenant/${id}`;
+
+/**
+ * Distribution tenants by id. GetDistributionTenant answers each with its
+ * ETag and no tags, as CloudFront does; ListTagsForResource answers the tags.
+ */
 function tenants(list: (Partial<DistributionTenant> & { Id: string })[]): void {
   const summaries = list.map((t) => ({ Id: t.Id, DistributionId: DISTRIBUTION }) as DistributionTenantSummary);
   cloudFront.on(ListDistributionTenantsCommand).resolves({ DistributionTenantList: summaries });
   for (const t of list) {
+    const { Tags, ...rest } = t;
     cloudFront.on(GetDistributionTenantCommand, { Identifier: t.Id }).resolves({
-      DistributionTenant: { DistributionId: DISTRIBUTION, Domains: [{ Domain: `${t.Id}.example.org` }], ...t } as DistributionTenant,
+      DistributionTenant: { DistributionId: DISTRIBUTION, Arn: tenantArn(t.Id), Domains: [{ Domain: `${t.Id}.example.org` }], ...rest } as DistributionTenant,
       ETag: `etag-${t.Id}`,
     });
+    cloudFront.on(ListTagsForResourceCommand, { Resource: tenantArn(t.Id) }).resolves({ Tags: Tags ?? { Items: [] } });
   }
 }
 

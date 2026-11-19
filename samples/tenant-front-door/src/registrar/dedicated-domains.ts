@@ -19,6 +19,7 @@ import {
   type DistributionTenant,
   EntityNotFound,
   GetDistributionTenantByDomainCommand,
+  ListTagsForResourceCommand,
   type Tags as CloudFrontTags,
   UpdateDistributionTenantCommand,
 } from '@aws-sdk/client-cloudfront';
@@ -194,7 +195,7 @@ export class AwsDedicatedDomains implements DedicatedDomains {
   async releaseDomain(tenantId: string, domain: string): Promise<void> {
     const found = await this.distributionTenant(domain);
     if (found === undefined) return;
-    this.requireOwnDistributionTenant(found.tenant, tenantId);
+    await this.requireOwnDistributionTenant(found.tenant, tenantId);
     if (found.tenant.Enabled === false) return;
     await this.updateDistributionTenant(found.tenant, found.etag, { enabled: false });
   }
@@ -439,16 +440,19 @@ export class AwsDedicatedDomains implements DedicatedDomains {
     }
   }
 
-  /** A distribution tenant on another distribution, or not tagged with this tenant and distribution, is someone else's: 409. */
-  private requireOwnDistributionTenant(tenant: DistributionTenant, tenantId: string): void {
+  /**
+   * A distribution tenant on another distribution, or not tagged with this
+   * tenant and distribution, is someone else's: 409. `Get` and `List`
+   * responses carry no tags, so they are read with `ListTagsForResource`
+   * (design/spikes.md, Smoke run).
+   */
+  private async requireOwnDistributionTenant(tenant: DistributionTenant, tenantId: string): Promise<void> {
     const { distributionId } = this.options;
-    if (
-      tenant.DistributionId !== distributionId
-      || cloudFrontTag(tenant.Tags, TAG_TENANT_ID) !== tenantId
-      || cloudFrontTag(tenant.Tags, TAG_DISTRIBUTION_ID) !== distributionId
-    ) {
-      throw refuse.conflict('customDomain is served by a distribution tenant of another tenant');
-    }
+    const other = (): Error => refuse.conflict('customDomain is served by a distribution tenant of another tenant');
+    if (tenant.DistributionId !== distributionId) throw other();
+    if (tenant.Arn === undefined) throw refuse.internal('CloudFront returned a distribution tenant without an ARN');
+    const tags = (await this.options.cloudfront.send(new ListTagsForResourceCommand({ Resource: tenant.Arn }))).Tags;
+    if (cloudFrontTag(tags, TAG_TENANT_ID) !== tenantId || cloudFrontTag(tags, TAG_DISTRIBUTION_ID) !== distributionId) throw other();
   }
 
   /**
@@ -461,7 +465,7 @@ export class AwsDedicatedDomains implements DedicatedDomains {
     const { cloudfront, distributionId } = this.options;
     const found = await this.distributionTenant(domain);
     if (found !== undefined) {
-      this.requireOwnDistributionTenant(found.tenant, tenantId);
+      await this.requireOwnDistributionTenant(found.tenant, tenantId);
       if (found.tenant.Enabled !== false && found.tenant.Customizations?.Certificate?.Arn === certificateArn) return;
       await this.updateDistributionTenant(found.tenant, found.etag, { enabled: true, certificateArn });
       return;

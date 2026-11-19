@@ -2,12 +2,19 @@
 // SPDX-License-Identifier: MIT-0
 
 import { ACMClient, RequestCertificateCommand } from '@aws-sdk/client-acm';
-import { CloudFrontClient, CreateDistributionTenantCommand, UpdateDistributionTenantCommand } from '@aws-sdk/client-cloudfront';
+import {
+  CloudFrontClient,
+  CreateDistributionTenantCommand,
+  GetDistributionTenantByDomainCommand,
+  ListTagsForResourceCommand,
+  UpdateDistributionTenantCommand,
+} from '@aws-sdk/client-cloudfront';
 import {
   acmMock,
   certificateArn,
   cloudFrontMock,
   DISTRIBUTION_ID,
+  distributionTenantArn,
   dtTags,
   FakeAcm,
   FakeCloudFront,
@@ -428,6 +435,17 @@ describe('§3.4 step 5 sub-step 5: the certificate issued', () => {
     expect((await put(h)).statusCode).toBe(200);
     expect(cloudFrontMock.commandCalls(CreateDistributionTenantCommand)).toHaveLength(0);
     expect(cloudFrontMock.commandCalls(UpdateDistributionTenantCommand)).toHaveLength(0);
+  });
+
+  test('reads the found distribution tenant\'s tags with ListTagsForResource, because the lookup carries none', async () => {
+    const h = rig();
+    passed(h);
+    const arn = issuedCertificate(h);
+    h.cf.add(D, { Id: 'dt_1', DistributionId: DISTRIBUTION_ID, Tags: dtTags(t), Enabled: true, Customizations: { Certificate: { Arn: arn } } });
+    h.dns.script([[[record(TOKEN_1)]]]);
+    expect((await put(h)).statusCode).toBe(200);
+    expect(cloudFrontMock.commandCalls(GetDistributionTenantByDomainCommand)).toHaveLength(1);
+    expect(cloudFrontMock.commandCalls(ListTagsForResourceCommand).map((x) => x.args[0].input)).toEqual([{ Resource: distributionTenantArn('dt_1') }]);
   });
 
   test('this tenant\'s disabled distribution tenant for the domain is enabled again with the certificate', async () => {

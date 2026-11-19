@@ -294,5 +294,12 @@ last miss, which comes later. Spec §4.2 and §10 therefore wait
 90 s where every request has to see a change. A suspension gave five
 503 answers in a row 15 to 53 s after the call.
 
+**Tags.** On a distribution tenant that carried a tag,
+`GetDistributionTenantByDomain` and `GetDistributionTenant` both returned
+`Tags: null`, and `ListDistributionTenants` returned no tags either; only
+`cloudfront:ListTagsForResource` on the distribution tenant's ARN returned
+them. The registrar, the sweeper and the teardown therefore read a
+distribution tenant's tags with `ListTagsForResource` (spec §3.4 step 5).
+
 **Deploy.** Front door stacks 384 s (a fresh main stack after a failed
 first attempt; the edge stack had deployed), demo cell 66 s, support 59 s.

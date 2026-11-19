@@ -22,6 +22,7 @@ import {
   type DistributionTenant,
   EntityNotFound,
   GetDistributionTenantByDomainCommand,
+  ListTagsForResourceCommand,
   PreconditionFailed,
   UpdateDistributionTenantCommand,
 } from '@aws-sdk/client-cloudfront';
@@ -184,8 +185,22 @@ export class FakeCloudFront {
   versions = 0;
 
   add(domain: string, tenant: DistributionTenant): void {
-    this.tenants.set(domain, { tenant: { Domains: [{ Domain: domain, Status: 'active' }], ...tenant }, etag: `E${++this.versions}` });
+    const withArn: DistributionTenant = {
+      Domains: [{ Domain: domain, Status: 'active' }],
+      Arn: tenant.Id === undefined ? undefined : distributionTenantArn(tenant.Id),
+      ...tenant,
+    };
+    this.tenants.set(domain, { tenant: withArn, etag: `E${++this.versions}` });
   }
+}
+
+export function distributionTenantArn(id: string): string {
+  return `arn:aws:cloudfront::${EDGE_ACCOUNT}:distribution-tenant/${id}`;
+}
+
+/** What CloudFront returns from Get and Create: the tenant without its tags, which only ListTagsForResource returns. */
+function withoutTags(tenant: DistributionTenant): DistributionTenant {
+  return { ...tenant, Tags: undefined };
 }
 
 export const cloudFrontMock = mockClient(CloudFrontClient);
@@ -199,7 +214,12 @@ export function installCloudFront(cf: FakeCloudFront): void {
   cloudFrontMock.on(GetDistributionTenantByDomainCommand).callsFake((input: { Domain: string }) => {
     const found = cf.tenants.get(input.Domain);
     if (found === undefined) throw new EntityNotFound({ message: 'not found', $metadata: {} });
-    return { DistributionTenant: found.tenant, ETag: found.etag };
+    return { DistributionTenant: withoutTags(found.tenant), ETag: found.etag };
+  });
+  cloudFrontMock.on(ListTagsForResourceCommand).callsFake((input: { Resource: string }) => {
+    const found = [...cf.tenants.values()].find((x) => x.tenant.Arn === input.Resource);
+    if (found === undefined) throw new EntityNotFound({ message: 'not found', $metadata: {} });
+    return { Tags: found.tenant.Tags ?? { Items: [] } };
   });
   cloudFrontMock.on(CreateDistributionTenantCommand).callsFake((input: DistributionTenant & { Domains: { Domain: string }[] }) => {
     const domain = input.Domains[0].Domain;
@@ -207,6 +227,7 @@ export function installCloudFront(cf: FakeCloudFront): void {
     cf.creates++;
     const tenant: DistributionTenant = {
       Id: `dt_${cf.creates}`,
+      Arn: distributionTenantArn(`dt_${cf.creates}`),
       DistributionId: input.DistributionId,
       Name: input.Name,
       Domains: [{ Domain: domain, Status: 'inactive' }],
@@ -216,7 +237,7 @@ export function installCloudFront(cf: FakeCloudFront): void {
       Status: 'InProgress',
     };
     cf.tenants.set(domain, { tenant, etag: `E${++cf.versions}` });
-    return { DistributionTenant: tenant, ETag: `E${cf.versions}` };
+    return { DistributionTenant: withoutTags(tenant), ETag: `E${cf.versions}` };
   });
   cloudFrontMock.on(UpdateDistributionTenantCommand).callsFake((input: DistributionTenant & { IfMatch: string }) => {
     const entry = [...cf.tenants.values()].find((x) => x.tenant.Id === input.Id);
@@ -224,6 +245,6 @@ export function installCloudFront(cf: FakeCloudFront): void {
     if (entry.etag !== input.IfMatch) throw new PreconditionFailed({ message: 'etag', $metadata: {} });
     entry.tenant = { ...entry.tenant, Enabled: input.Enabled, Customizations: input.Customizations };
     entry.etag = `E${++cf.versions}`;
-    return { DistributionTenant: entry.tenant, ETag: entry.etag };
+    return { DistributionTenant: withoutTags(entry.tenant), ETag: entry.etag };
   });
 }

@@ -9,7 +9,13 @@
  */
 
 import { type ACMClient, KeyAlgorithm, ListCertificatesCommand, ListTagsForCertificateCommand } from '@aws-sdk/client-acm';
-import { type CloudFrontClient, type DistributionTenantSummary, ListDistributionTenantsCommand } from '@aws-sdk/client-cloudfront';
+import {
+  type CloudFrontClient,
+  type DistributionTenantSummary,
+  ListDistributionTenantsCommand,
+  ListTagsForResourceCommand,
+  type Tag as CloudFrontTag,
+} from '@aws-sdk/client-cloudfront';
 import { TAG_DISTRIBUTION_ID } from '../shared/contracts';
 
 /** The Region of every registrar certificate: CloudFront takes certificates from `us-east-1` only. */
@@ -39,6 +45,21 @@ export async function listDistributionTenants(
     marker = page.NextMarker;
   } while (marker !== undefined && marker !== '');
   return out;
+}
+
+/**
+ * A distribution tenant's tags. `GetDistributionTenant` and
+ * `ListDistributionTenants` return none, so they are read with
+ * `ListTagsForResource` on the distribution tenant's ARN (design/spikes.md,
+ * Smoke run).
+ */
+export async function distributionTenantTags(
+  cloudFront: Pick<CloudFrontClient, 'send'>,
+  arn: string | undefined,
+  options: ReadOptions = {},
+): Promise<CloudFrontTag[]> {
+  if (arn === undefined) throw new Error('CloudFront returned a distribution tenant without an ARN');
+  return (await cloudFront.send(new ListTagsForResourceCommand({ Resource: arn }), options)).Tags?.Items ?? [];
 }
 
 /**

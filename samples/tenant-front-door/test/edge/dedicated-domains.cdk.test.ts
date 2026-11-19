@@ -99,7 +99,7 @@ describe('dedicatedDomains on: registrar (spec §3.4)', () => {
   it('holds the CloudFront and ACM actions of a domain call in a policy of its own, writes conditioned on the registrar\'s tag', () => {
     const list = statements(on.main, 'RegistrarFunction');
     expect(bySid(list, 'DistributionTenantRead')).toEqual({
-      Action: ['cloudfront:GetDistributionTenant', 'cloudfront:GetDistributionTenantByDomain'],
+      Action: ['cloudfront:GetDistributionTenantByDomain', 'cloudfront:ListTagsForResource'],
       Resource: TENANT_ARNS,
     });
     expect(bySid(list, 'DistributionTenantCreate')).toEqual({ Action: 'cloudfront:CreateDistributionTenant', Resource: '*', Condition: TAGS_ON_CREATE });
@@ -176,7 +176,7 @@ describe('dedicatedDomains on: sweeper (spec §3.1, §3.4 step 5, ADR-0020, ADR-
       Resource: { 'Fn::GetAtt': [expect.stringMatching(/^RouteTable/), 'Arn'] },
     });
     expect(bySid(list, 'DistributionTenantList')).toEqual({ Action: 'cloudfront:ListDistributionTenants', Resource: '*' });
-    expect(bySid(list, 'DistributionTenantRead')).toEqual({ Action: 'cloudfront:GetDistributionTenant', Resource: TENANT_ARNS });
+    expect(bySid(list, 'DistributionTenantRead')).toEqual({ Action: ['cloudfront:GetDistributionTenant', 'cloudfront:ListTagsForResource'], Resource: TENANT_ARNS });
     expect(bySid(list, 'DistributionTenantRemove')).toEqual({
       Action: ['cloudfront:UpdateDistributionTenant', 'cloudfront:DeleteDistributionTenant'],
       Resource: TENANT_ARNS,
@@ -194,7 +194,8 @@ describe('dedicatedDomains on: sweeper (spec §3.1, §3.4 step 5, ADR-0020, ADR-
     expect(actions(list).sort()).toEqual([
       'acm:DeleteCertificate', 'acm:DescribeCertificate', 'acm:ListCertificates', 'acm:ListTagsForCertificate',
       'cloudfront-keyvaluestore:DescribeKeyValueStore', 'cloudfront-keyvaluestore:GetKey', 'cloudfront-keyvaluestore:ListKeys',
-      'cloudfront:DeleteDistributionTenant', 'cloudfront:GetDistributionTenant', 'cloudfront:ListDistributionTenants', 'cloudfront:UpdateDistributionTenant',
+      'cloudfront:DeleteDistributionTenant', 'cloudfront:GetDistributionTenant', 'cloudfront:ListDistributionTenants', 'cloudfront:ListTagsForResource',
+      'cloudfront:UpdateDistributionTenant',
       'dynamodb:BatchWriteItem', 'dynamodb:DeleteItem', 'dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:UpdateItem',
       'lambda:InvokeFunction', 'sqs:SendMessage',
     ]);
@@ -311,7 +312,8 @@ describe('dedicatedDomains on: teardown (spec §6.2)', () => {
     const list = statements(on.main, 'DedicatedDomainsTeardownIsComplete');
     expect(actions(list).sort()).toEqual([
       'acm:DeleteCertificate', 'acm:ListCertificates', 'acm:ListTagsForCertificate',
-      'cloudfront:DeleteDistributionTenant', 'cloudfront:GetDistributionTenant', 'cloudfront:ListDistributionTenants', 'cloudfront:UpdateDistributionTenant',
+      'cloudfront:DeleteDistributionTenant', 'cloudfront:GetDistributionTenant', 'cloudfront:ListDistributionTenants', 'cloudfront:ListTagsForResource',
+      'cloudfront:UpdateDistributionTenant',
     ]);
     expect(bySid(list, 'DistributionTenantRemove')).toMatchObject({ Condition: DISTRIBUTION_TAG });
     expect(bySid(list, 'CertificateDelete')).toMatchObject({ Condition: DISTRIBUTION_TAG });

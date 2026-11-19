@@ -38,6 +38,7 @@ import {
   type DistributionTenantSummary,
   GetDistributionTenantCommand,
   ListDistributionTenantsCommand,
+  ListTagsForResourceCommand,
   UpdateDistributionTenantCommand,
 } from '@aws-sdk/client-cloudfront';
 import {
@@ -155,7 +156,10 @@ export async function runRemoval(deps: RemovalDeps): Promise<RemovalResult> {
       const got = await deps.cloudFront.send(new GetDistributionTenantCommand({ Identifier: summary.Id }));
       const dt = got.DistributionTenant;
       if (dt === undefined || dt.DistributionId !== deps.distributionId) return;
-      const tenantId = taggedTenant(dt.Tags?.Items, deps.distributionId);
+      // Get and List return no tags; only ListTagsForResource does (design/spikes.md, Smoke run).
+      if (dt.Arn === undefined) throw new Error('CloudFront returned a distribution tenant without an ARN');
+      const dtTags = (await deps.cloudFront.send(new ListTagsForResourceCommand({ Resource: dt.Arn }))).Tags;
+      const tenantId = taggedTenant(dtTags?.Items, deps.distributionId);
       if (tenantId === undefined) return;
       const domains = (dt.Domains ?? []).map((d) => d.Domain?.toLowerCase()).filter((d): d is string => d !== undefined);
       if (!(await isOrphan(tenantId, domains))) return;
