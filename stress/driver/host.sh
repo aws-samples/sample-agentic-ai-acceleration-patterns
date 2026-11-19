@@ -47,7 +47,11 @@ cleanup() {
   local code=$?
   set +e
   if [[ -n "$COMMAND_ID" && "$DONE" == 0 ]]; then
-    aws ssm cancel-command --command-id "$COMMAND_ID" >/dev/null 2>&1 && echo "cancelled the command on the driver host" >&2
+    if aws ssm cancel-command --command-id "$COMMAND_ID" >/dev/null 2>&1; then
+      echo "cancelled the command on the driver host" >&2
+    else
+      echo "could not cancel command ${COMMAND_ID}; run: aws ssm cancel-command --command-id ${COMMAND_ID}" >&2
+    fi
   fi
   rm -f "${TMP}"/*
   rmdir "$TMP"
@@ -58,7 +62,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-REMOTE="$(printf 'set +e\n( %s ) >/tmp/host-%s.out 2>&1\necho "exit=$?" >>/tmp/host-%s.out\naws s3 cp /tmp/host-%s.out s3://%s/%s --quiet\nrm -f /tmp/host-%s.out\n' \
+REMOTE="$(printf 'set +e\n( %s\n) >/tmp/host-%s.out 2>&1\nrc=$?\nprintf "\\nexit=%%s\\n" "$rc" >>/tmp/host-%s.out\naws s3 cp /tmp/host-%s.out s3://%s/%s --quiet\nrm -f /tmp/host-%s.out\n' \
   "$1" "$STAMP" "$STAMP" "$STAMP" "$BUCKET" "$KEY" "$STAMP")"
 jq -n --arg c "$REMOTE" --arg t "$TIMEOUT" '{commands: [$c], executionTimeout: [$t]}' >"${TMP}/params.json"
 COMMAND_ID="$(aws ssm send-command --instance-ids "$INSTANCE" --document-name AWS-RunShellScript \

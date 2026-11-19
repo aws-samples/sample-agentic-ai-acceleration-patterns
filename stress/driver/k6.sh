@@ -25,6 +25,9 @@
 # scenario does not overwrite the first. The exit code is k6's. Nothing here prints a token, and
 # k6 must not be run with --http-debug.
 #
+# NAME=value arguments travel in the Run Command parameters, which SSM keeps in its command
+# history: pass no secret that way.
+#
 # The mirror travels inside the Run Command parameters (about 100 KB at most), compressed:
 # this is for the shared library and one sample's scenario folder, not for data.
 
@@ -79,15 +82,15 @@ fi
   for name in STRESS_RUN_ID STRESS_TIER_JSON STRESS_MODE STRESS_COMMIT STRESS_TIER; do
     [[ -z "${!name:-}" ]] || { echo "export ${name}=$(sq "${!name}")"; NAMES="${NAMES} ${name}"; }
   done
-  echo 'export SUMMARY_PATH=/opt/stress/out/summary.json'
   for kv in "$@"; do
     [[ "$kv" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || { echo "not NAME=value: ${kv%%=*}" >&2; exit 2; }
     echo "export ${kv%%=*}=$(sq "${kv#*=}")"
     NAMES="${NAMES} ${kv%%=*}"
   done
-  echo "export STRESS_RESULTS=/opt/stress/out/results"
+  echo "export STRESS_RESULTS=/opt/stress/out/results SUMMARY_PATH=/opt/stress/out/summary.json"
   echo "export AWS_REGION=$(sq "$AWS_REGION")"
-  echo 'eval "$(aws configure export-credentials --format env)"'
+  echo 'creds="$(aws configure export-credentials --format env)"'
+  echo 'eval "$creds"; unset creds'
   echo "cd $(sq "/opt/stress/repo/${SCRIPT_DIR}")"
   echo 'rc=0'
   # `k6 inspect` does not read the process environment, so it gets each variable as --env.
@@ -124,6 +127,8 @@ if sed -n '/^OUT_BASE64_BEGIN$/,/^OUT_BASE64_END$/{/^OUT_BASE64_/!p}' "${TMP}/ho
   cp "${TMP}/out/k6-stdout.txt" "${DEST}/${NAME}.k6-stdout.txt" || echo "could not keep k6's stdout" >&2
   if [[ -f "${TMP}/out/summary.json" ]]; then
     cp "${TMP}/out/summary.json" "${DEST}/${NAME}.summary.json" || echo "could not keep k6's summary" >&2
+  else
+    echo "k6 wrote no summary.json" >&2
   fi
 else
   echo "no output archive came back from the host" >&2
