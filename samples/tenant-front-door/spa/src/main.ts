@@ -10,6 +10,7 @@
 
 import { whoami } from './api';
 import { beginSignIn, completeSignIn, Env, loadConfig, Outcome, Session, settleTenant, signOut } from './flow';
+import { withSignal } from './http';
 import type { FetchLike } from './http';
 import { clearPending, parseCallback } from './signin';
 import type { TokenSet } from './token';
@@ -59,11 +60,14 @@ const MESSAGES = {
   config: 'The settings could not be loaded. Try again later.',
   failed: 'Sign-in did not complete. Sign in again.',
   unavailable: 'The sign-in service did not answer. Try again later.',
+  refused: 'That tenant is not available. Pick another.',
 } as const;
 
 /** The only place a token lives (ADR-0007). */
 let session: Session | undefined;
-let retry: (() => Promise<void>) | undefined;
+let retry: (() => void) | undefined;
+/** Aborted when the tenant's state is cleared, so its calls stop and their late answers are dropped (§7.2). */
+let scope = new AbortController();
 
 function status(text: string): void {
   ui.status.textContent = text;
@@ -71,10 +75,19 @@ function status(text: string): void {
 
 /** In `single` mode tenants share one origin, so switching or signing out clears the tenant's state (§7.2). */
 function clearTenantView(): void {
+  scope.abort();
+  scope = new AbortController();
   session = undefined;
   ui.actions.hidden = true;
   ui.whoamiOut.textContent = '';
   ui.agentOut.textContent = '';
+  setBusy(false);
+}
+
+/** Disables the picker and Retry while an exchange runs, so two clicks cannot race (the last answer would win). */
+function setBusy(busy: boolean): void {
+  ui.retry.disabled = busy;
+  for (const b of ui.picker.querySelectorAll('button')) b.disabled = busy;
 }
 
 function leave(): void {
@@ -82,17 +95,28 @@ function leave(): void {
   signOut(env);
 }
 
-function showPicker(subject: TokenSet, tenants: readonly string[], config: ConfigJson): void {
+/** Narrows to `tenantId` in the current scope; an answer that arrives after the scope ended is dropped. */
+function settle(subject: TokenSet, tenantId: string, config: ConfigJson): void {
+  const { signal } = scope;
+  setBusy(true);
+  void settleTenant({ ...env, fetch: withSignal(env.fetch, signal) }, config, subject, tenantId).then((o) => {
+    if (signal.aborted) return;
+    setBusy(false);
+    show(o, config);
+  });
+}
+
+function showPicker(subject: TokenSet, tenants: readonly string[], config: ConfigJson, refused = false): void {
   ui.picker.replaceChildren();
   for (const t of tenants) {
     const b = document.createElement('button');
     b.type = 'button';
     b.textContent = t;
-    b.addEventListener('click', () => void settleTenant(env, config, subject, t).then((o) => show(o, config)));
+    b.addEventListener('click', () => settle(subject, t, config));
     ui.picker.append(b);
   }
   ui.picker.hidden = false;
-  status('Pick a tenant.');
+  status(refused ? MESSAGES.refused : 'Pick a tenant.');
 }
 
 function show(outcome: Outcome, config: ConfigJson): void {
@@ -107,11 +131,11 @@ function show(outcome: Outcome, config: ConfigJson): void {
       status(`Signed in to tenant ${outcome.session.tenantId}.`);
       return;
     case 'pick-tenant':
-      showPicker(outcome.subject, outcome.tenants, config);
+      showPicker(outcome.subject, outcome.tenants, config, outcome.refused === true);
       return;
     case 'unavailable': {
       const { subject, tenantId } = outcome;
-      retry = async () => show(await settleTenant(env, config, subject, tenantId), config);
+      retry = () => settle(subject, tenantId, config);
       ui.retry.hidden = false;
       status(MESSAGES.unavailable);
       return;
@@ -141,7 +165,7 @@ async function start(): Promise<void> {
   const cfg = config;
 
   ui.signin.addEventListener('click', () => void beginSignIn(env, cfg).catch(() => status(MESSAGES.failed)));
-  ui.retry.addEventListener('click', () => void retry?.());
+  ui.retry.addEventListener('click', () => retry?.());
   ui.signout.addEventListener('click', leave);
   ui.switchTenant.addEventListener('click', () => {
     const s = session;
@@ -152,17 +176,19 @@ async function start(): Promise<void> {
   ui.whoami.addEventListener('click', () => {
     const s = session;
     if (s === undefined) return;
+    const { signal } = scope;
     ui.whoamiOut.textContent = '';
-    whoami(env.fetch, s.accessToken).then(
-      (body) => { ui.whoamiOut.textContent = JSON.stringify(body, null, 2); },
-      () => { ui.whoamiOut.textContent = 'The call failed.'; },
+    whoami(withSignal(env.fetch, signal), s.accessToken).then(
+      (body) => { if (!signal.aborted) ui.whoamiOut.textContent = JSON.stringify(body, null, 2); },
+      () => { if (!signal.aborted) ui.whoamiOut.textContent = 'The call failed.'; },
     );
   });
   ui.agentForm.addEventListener('submit', (ev) => {
     ev.preventDefault();
     const s = session;
     if (s === undefined) return;
-    void import('./agent-view').then((m) => m.runAgent(env.fetch, s.accessToken, ui.backend.value, ui.prompt.value, ui.agentOut));
+    const { signal } = scope;
+    void import('./agent-view').then((m) => m.runAgent(env.fetch, signal, s.accessToken, ui.backend.value, ui.prompt.value, ui.agentOut));
   });
 
   const cb = parseCallback(query);

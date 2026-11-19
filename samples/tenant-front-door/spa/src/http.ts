@@ -11,6 +11,8 @@ export interface RequestInitLike {
   readonly headers?: Record<string, string>;
   readonly body?: string | URLSearchParams;
   readonly credentials: 'omit' | 'same-origin';
+  /** Aborts the call when the session that made it ends (§7.2). */
+  readonly signal?: AbortSignal;
 }
 
 export interface ResponseLike {
@@ -21,6 +23,11 @@ export interface ResponseLike {
 }
 
 export type FetchLike = (url: string, init: RequestInitLike) => Promise<ResponseLike>;
+
+/** `fetchFn` with every call bound to `signal`, so ending a session aborts the calls it started (§7.2). */
+export function withSignal(fetchFn: FetchLike, signal: AbortSignal): FetchLike {
+  return (url, init) => fetchFn(url, { ...init, signal });
+}
 
 export interface KeyValueStorage {
   getItem(key: string): string | null;

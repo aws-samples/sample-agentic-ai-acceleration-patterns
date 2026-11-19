@@ -70,8 +70,11 @@ export interface Session {
 
 export type Outcome =
   | { readonly kind: 'signed-in'; readonly session: Session }
-  /** `single` mode on `appDomain` with a `tenants` token: the user picks. */
-  | { readonly kind: 'pick-tenant'; readonly subject: TokenSet; readonly tenants: readonly string[] }
+  /**
+   * `single` mode on `appDomain` with a `tenants` token: the user picks.
+   * `refused` is set when the exchange refused the last pick (`invalid_target`).
+   */
+  | { readonly kind: 'pick-tenant'; readonly subject: TokenSet; readonly tenants: readonly string[]; readonly refused?: true }
   /** The exchange did not answer; the refresh token is kept for a retry (§7.2). */
   | { readonly kind: 'unavailable'; readonly subject: TokenSet; readonly tenantId: string }
   /** A fixed message; nothing from the issuer is shown (§7.2). */
@@ -96,7 +99,9 @@ export async function completeSignIn(env: Env, config: ConfigJson, code: string,
 /**
  * Settles on one tenant: `expected` is the host's tenant, or in `single`
  * mode the one the user picked. A `tenants` token is narrowed to it first,
- * and the narrowed token must name it (§3.5).
+ * and the narrowed token must name it (§3.5). The exchange refusing a
+ * tenant the user picked (no `tenantId` in `/config.json`) returns to the
+ * picker; refusing the host's own tenant signs out (§3.5 step 4).
  */
 export async function settleTenant(env: Env, config: ConfigJson, subject: TokenSet, expected: string | undefined): Promise<Outcome> {
   const view = tenantView(decodeClaims(subject.accessToken));
@@ -108,7 +113,8 @@ export async function settleTenant(env: Env, config: ConfigJson, subject: TokenS
   if (expected === undefined) return { kind: 'pick-tenant', subject, tenants: view.tenants };
   if (!view.tenants.some((t) => sameTenant(t, expected)) || subject.refreshToken === undefined) return { kind: 'sign-out' };
   const r = await narrowToken(env, config, { refreshToken: subject.refreshToken, tenantId: expected });
-  if (!r.ok) return r.reason === 'unavailable' ? { kind: 'unavailable', subject, tenantId: expected } : { kind: 'sign-out' };
+  if (!r.ok && r.reason === 'unavailable') return { kind: 'unavailable', subject, tenantId: expected };
+  if (!r.ok) return config.tenantId === undefined ? { kind: 'pick-tenant', subject, tenants: view.tenants, refused: true } : { kind: 'sign-out' };
   if (!namesTenant(decodeClaims(r.accessToken), expected)) return { kind: 'sign-out' };
   return { kind: 'signed-in', session: { subject, accessToken: r.accessToken, tenantId: expected, tenants: view.tenants } };
 }

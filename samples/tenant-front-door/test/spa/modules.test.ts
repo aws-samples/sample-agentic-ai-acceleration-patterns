@@ -10,6 +10,7 @@ import { configCase, configCases, fakeFetch, json, jwt, memoryStorage, streamOf 
 import { apiRequest, contentSha256, whoami } from '../../spa/src/api';
 import { ConfigError, parseConfig, signInPlan } from '../../spa/src/config';
 import { base64UrlDecodeText, base64UrlEncode } from '../../spa/src/encoding';
+import { withSignal } from '../../spa/src/http';
 import { codeChallenge, makeVerifier } from '../../spa/src/pkce';
 import {
   authorizeUrl, makeNonce, parseCallback, parseSigninState, PENDING_KEY, savePending, signinStatePath, stateMatches, stateNonce, takePending,
@@ -183,6 +184,13 @@ describe('tokens (§3.5, ADR-0007)', () => {
     expect(namesTenant(decodeClaims(jwt({ tenant_id: 'OTHER' })), '01HZX8K9P0QRST7VWXYZ1A2B3C')).toBe(false);
     expect(namesTenant(decodeClaims(jwt({ tenant_id: 'A', tenants: ['A'] })), 'A')).toBe(false);
   });
+});
+
+test('withSignal binds every call to the signal and keeps the rest of the request (§7.2)', async () => {
+  const f = fakeFetch(() => json(200, {}));
+  const c = new AbortController();
+  await withSignal(f, c.signal)('/api/whoami', { method: 'GET', credentials: 'same-origin' });
+  expect(f.calls[0].init).toEqual({ method: 'GET', credentials: 'same-origin', signal: c.signal });
 });
 
 describe('cell API calls (§3.2, §7.2, ADR-0011)', () => {

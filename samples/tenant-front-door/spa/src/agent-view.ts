@@ -7,6 +7,7 @@
  * untrusted text: it reaches the DOM as text nodes only (§7.2).
  */
 
+import { withSignal } from './http';
 import type { FetchLike } from './http';
 import { AgentError, invokeAgent, StreamEvent } from './stream';
 
@@ -14,11 +15,22 @@ function show(out: HTMLElement, e: StreamEvent): void {
   out.append(e.event === 'message' ? e.data : `[${e.event}] ${e.data}`, '\n');
 }
 
-export async function runAgent(fetchFn: FetchLike, accessToken: string, backend: string, prompt: string, out: HTMLElement): Promise<void> {
+/** Streams one reply into `out`. Once `signal` aborts (the session ended, §7.2) the call stops and nothing more is written. */
+export async function runAgent(
+  fetchFn: FetchLike,
+  signal: AbortSignal,
+  accessToken: string,
+  backend: string,
+  prompt: string,
+  out: HTMLElement,
+): Promise<void> {
+  if (signal.aborted) return;
   out.textContent = '';
   try {
-    await invokeAgent(fetchFn, accessToken, backend, prompt, (e) => show(out, e));
+    await invokeAgent(withSignal(fetchFn, signal), accessToken, backend, prompt, (e) => {
+      if (!signal.aborted) show(out, e);
+    });
   } catch (e) {
-    out.append(e instanceof AgentError ? `The agent answered ${e.status}.` : 'The agent call failed.', '\n');
+    if (!signal.aborted) out.append(e instanceof AgentError ? `The agent answered ${e.status}.` : 'The agent call failed.', '\n');
   }
 }

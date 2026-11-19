@@ -9,7 +9,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vm from 'vm';
-import { buildSpa, CALLBACK_SCRIPT, checkImportMap, CSP_HASH_ALG, cspHashes, digest, SpaBuild, SRI_ALG, writeSpa } from '../../spa/build';
+import { buildSpa, CALLBACK_SCRIPT, checkImportMap, checkImports, CSP_HASH_ALG, cspHashes, digest, SpaBuild, SRI_ALG, writeSpa } from '../../spa/build';
 
 const SAMPLE = path.join(__dirname, '..', '..');
 let a: SpaBuild;
@@ -95,6 +95,16 @@ describe('SPA build output', () => {
     const out = fs.mkdtempSync(path.join(os.tmpdir(), 'tfd-spa-'));
     writeSpa(a, out);
     for (const [k, v] of a.files) expect(fs.readFileSync(path.join(out, k)).equals(v)).toBe(true);
+    fs.writeFileSync(path.join(out, 'assets', 'stale.js'), 'x');
+    writeSpa(a, out);
+    expect(fs.existsSync(path.join(out, 'assets', 'stale.js'))).toBe(false);
+  });
+
+  test('writeSpa refuses to clear a directory that holds no earlier build', () => {
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'tfd-spa-'));
+    fs.writeFileSync(path.join(out, 'keep.txt'), 'mine');
+    expect(() => writeSpa(a, out)).toThrow('not clearing it');
+    expect(fs.readFileSync(path.join(out, 'keep.txt'), 'utf8')).toBe('mine');
   });
 });
 
@@ -108,6 +118,28 @@ describe('build checks (§7.1, §10 step 10)', () => {
   test('a chunk whose bytes changed fails the build', () => {
     const chunks = new Map([['/assets/AAAA.js', Buffer.from('changed')]]);
     expect(() => checkImportMap({ integrity: { '/assets/AAAA.js': digest(SRI_ALG, Buffer.from('x')) } }, chunks)).toThrow('does not match');
+  });
+
+  describe('checkImports (ADR-0023)', () => {
+    const pinned = { '/assets/CHUNK.js': 'sha384-x' };
+    const out = (p: string, kind = 'import-statement', external?: boolean) => ({
+      'out/assets/ENTRY.js': { imports: [{ path: p, kind, external }] },
+      'out/assets/x.css': { imports: [{ path: 'out/assets/NOPE.js', kind: 'import-statement' }] },
+    });
+
+    test('passes a static or dynamic import of a pinned chunk, or of the entry', () => {
+      expect(() => checkImports(out('out/assets/CHUNK.js'), 'out', pinned, '/assets/ENTRY.js')).not.toThrow();
+      expect(() => checkImports(out('out/assets/CHUNK.js', 'dynamic-import'), 'out', pinned, '/assets/ENTRY.js')).not.toThrow();
+      expect(() => checkImports(out('out/assets/ENTRY.js'), 'out', pinned, '/assets/ENTRY.js')).not.toThrow();
+    });
+
+    test.each([
+      ['an unpinned chunk', out('out/assets/OTHER.js')],
+      ['an unpinned chunk with import()', out('out/assets/OTHER.js', 'dynamic-import')],
+      ['an external URL', out('https://cdn.example.com/x.js', 'import-statement', true)],
+    ])('fails on %s', (_n, outputs) => {
+      expect(() => checkImports(outputs, 'out', pinned, '/assets/ENTRY.js')).toThrow('does not pin');
+    });
   });
 
   test.each([

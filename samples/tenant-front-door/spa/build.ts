@@ -67,6 +67,34 @@ export function checkImportMap(importMap: { integrity: Record<string, string> },
   }
 }
 
+/** One output of esbuild's metafile, as far as the import check reads it. */
+export interface OutputImports {
+  readonly imports: readonly { readonly path: string; readonly kind: string; readonly external?: boolean }[];
+}
+
+/**
+ * Fails when an emitted script imports, statically or with `import()`, a URL
+ * the import map does not pin, or anything outside `/assets/` (§7.1
+ * Imported chunks, ADR-0023). `outputs` are keyed and point at each other
+ * as `<outPrefix>/assets/<name>.js`; `entry` is pinned by its own
+ * `integrity`, so importing it is allowed.
+ */
+export function checkImports(
+  outputs: Readonly<Record<string, OutputImports>>,
+  outPrefix: string,
+  integrity: Readonly<Record<string, string>>,
+  entry: string,
+): void {
+  for (const [from, out] of Object.entries(outputs)) {
+    if (!from.endsWith('.js')) continue;
+    for (const imp of out.imports) {
+      if (imp.kind !== 'import-statement' && imp.kind !== 'dynamic-import') continue;
+      const url = imp.external === true || !imp.path.startsWith(`${outPrefix}/`) ? imp.path : imp.path.slice(outPrefix.length);
+      if (url !== entry && integrity[url] === undefined) throw new Error(`spa build: ${from} imports ${imp.path}, which the import map does not pin`);
+    }
+  }
+}
+
 /**
  * The hash sources of every inline `<script>` in `html`, plus the
  * `integrity` of each external script, which CSP3 matches against
@@ -153,6 +181,7 @@ export async function buildSpa(): Promise<SpaBuild> {
     integrity: Object.fromEntries([...chunks].map(([url, bytes]) => [url, digest(SRI_ALG, bytes)])),
   };
   checkImportMap(importMap, chunks);
+  checkImports(result.metafile.outputs, 'out', importMap.integrity, `/${entry}`);
 
   const entryBytes = files.get(entry)!;
   const template = fs.readFileSync(path.join(SPA_DIR, 'index.html'), 'utf8');
@@ -168,8 +197,16 @@ export async function buildSpa(): Promise<SpaBuild> {
   return { files, csp };
 }
 
-/** Writes a build to `outDir`, replacing what was there. */
+/**
+ * Writes a build to `outDir`, replacing what was there. Refuses to clear a
+ * directory that holds anything but an earlier build (`index.html` and
+ * `csp.json`), so a mistyped path such as `.` deletes nothing.
+ */
 export function writeSpa(build: SpaBuild, outDir: string): void {
+  const existing = fs.existsSync(outDir) ? fs.readdirSync(outDir) : [];
+  if (existing.length > 0 && !(existing.includes('index.html') && existing.includes('csp.json'))) {
+    throw new Error(`spa build: ${outDir} is not empty and holds no earlier build; not clearing it`);
+  }
   fs.rmSync(outDir, { recursive: true, force: true });
   for (const [rel, bytes] of [...build.files].sort(([a], [b]) => (a < b ? -1 : 1))) {
     const p = path.join(outDir, rel);
@@ -182,7 +219,12 @@ if (require.main === module) {
   const outDir = path.resolve(process.argv[2] ?? DEFAULT_OUT_DIR);
   buildSpa().then(
     (b) => {
-      writeSpa(b, outDir);
+      try {
+        writeSpa(b, outDir);
+      } catch (e) {
+        console.error(e instanceof Error ? e.message : e);
+        process.exit(1);
+      }
       for (const [rel, bytes] of [...b.files].sort(([x], [y]) => (x < y ? -1 : 1))) console.log(`${String(bytes.length).padStart(8)}  ${rel}`);
       console.log(`spa build: ${outDir}`);
     },
