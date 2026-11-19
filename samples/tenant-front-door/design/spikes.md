@@ -283,9 +283,11 @@ client `x-tenant-route` ignored; registrar 403 unsigned and 503 for
 suspending and resuming a tenant with no control plane (ADR-0025), with the
 other tenant still served, and 409 for a tenant with no route.
 
-**Propagation.** A seeded route was first served 34 to 52 s after the write,
-and for up to about a minute after that some requests (3 of 60 in one run)
-still got the router's 403. After 60 s from the write, 200 of 200 were
-routed, as the 60 s wait of §10 assumes. A suspension reached the edge in 28
-to 64 s. Deploy: front door stacks 384 s (a fresh main stack after a failed
+**Propagation.** Over ten runs from one client, a seeded route was first
+served 34 to 61 s after the write, and some requests still got the
+router's 403 after that: 3 of 60 in one run, and in another 4 of 300
+GETs made 63 to 65 s after the write; 200 of 200 were routed after 3
+minutes. The 60 s wait of §10 is therefore short by a few seconds at the
+tail, and the smoke waits until 90 s after the write before it checks
+that every request is routed. A suspension reached the edge in 28 to 64 s. Deploy: front door stacks 384 s (a fresh main stack after a failed
 first attempt; the edge stack had deployed), demo cell 66 s, support 59 s.
