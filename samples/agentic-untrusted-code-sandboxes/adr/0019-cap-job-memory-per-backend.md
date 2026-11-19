@@ -1,0 +1,86 @@
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. -->
+<!-- SPDX-License-Identifier: MIT-0 -->
+# ADR-0019: Cap job memory per backend
+
+- Status: Proposed
+- Date: 2026-11-19
+- Amends: ADR-0010, ADR-0016, ADR-0018
+- Deciders: Dave Roberts (Partner Solutions Architect)
+
+## Context
+
+ADR-0010 capped a job's memory with a cgroup v2 group where the runner
+could create one, else a 200 ms watchdog, and relied on the runner's
+`oom_score_adj` of -1000 and the job's 1000 so a kernel kill took the job
+first. Spikes S-14 and S-15 (spec §7.3) measured each backend:
+
+- No backend grants `CAP_SYS_RESOURCE`, so no runner can set -1000. The
+  runner starts at 1000 on `microvm` and `agentcore` and at -998 on
+  `nitro`.
+- `microvm` has no cgroup mount and the runner cannot make one. Its guest
+  is about four times `MinimumMemoryInMiB`. `RLIMIT_AS`, set with
+  soft = hard before the drop to uid 1001, makes every allocation past
+  the cap fail inside the job in under 0.1 s, and code cannot raise it.
+  `RLIMIT_DATA` is bypassed by a shared `mmap`.
+- `nitro` has a read-only cgroup mount, but the platform already caps
+  the task group at the task size, and a kernel kill there took only
+  jobs.
+- `agentcore` lets the runner build a cgroup tree once it has moved
+  itself out of the root. Its default `memory.oom.group` of 1 makes any
+  out-of-memory kill end the whole session, runner included.
+
+S-14 also answered the ADR-0018 checks. With management events only,
+CloudTrail Event history holds no `RunMicrovm` and no
+`InvokeAgentRuntime` event, and `RunTask` events hide the override
+`environment`. The AgentCore container gets the session id header
+unchanged. No path was found between two sessions of one runtime. And
+the AgentCore ready time of about 550 s that ADR-0016 left open recurred
+without the DNS Firewall.
+
+## Options considered
+
+### Option 1: One mechanism per backend, chosen from what each allows
+Pros: every backend gets a cap that was measured to hold; no capability
+is added to any sandbox. Cons: three code paths in the runner, and on
+`microvm` a per-process cap of 256 MiB with at most N processes, which
+limits what a job can do.
+
+### Option 2: Add capabilities to get one cgroup design everywhere
+Pros: one code path. Cons: `nitro` would need `SYS_ADMIN` in the task
+definition, which widens the sandbox for a limit the platform already
+enforces; `microvm` offers no way to add a capability at all.
+
+### Option 3: Keep the watchdog as the only cap
+Pros: works on every backend. Cons: on `agentcore` a fill inside the
+200 ms gap ends the session; on `microvm` the kernel picks victims by
+size, so the runner is safe only while it stays small.
+
+## Decision
+
+Option 1 (spec §3.5 memory cap). Every backend sets `RLIMIT_AS` = A and
+`RLIMIT_NPROC` = N with soft = hard before the uid drop, sets the job's
+`oom_score_adj` to 1000, tries its own -1000 and ignores `EACCES`.
+`microvm`: A = 256 MiB and N = ⌊0.7 × `MemTotal` / A⌋, so the rlimits are
+the total cap. `nitro`: the platform's task limit plus the watchdog,
+with `oom_kill` in the runner's scope as the record of a kernel kill.
+`agentcore`: one cgroup per job with `memory.max` = `MemAvailable` less
+256 MiB and `memory.oom.group` = 1, after the runner has moved into
+`/runner`, enabled `+memory` and written 0 to the root's
+`memory.oom.group`.
+
+ADR-0018 stands as written: its design did not depend on what
+CloudTrail records. ADR-0016 keeps the firewall off by default for the
+allow-list upkeep alone, since the ready-time question is now answered.
+
+## Consequences
+
+A memory fill no longer depends on an `oom_score_adj` value on any
+backend. `microvm` jobs are limited to 256 MiB per process and about ten
+processes at the default size, which rules out runtimes that reserve
+large address space, such as Node (344 MiB to start); the sample runs
+Python only. A larger `microvm.memoryMiB` raises N, not A. The runner
+needs unit tests for all three setups. `memoryExceeded` is never set on
+`microvm`: the job sees the error itself. Open: memory that `RLIMIT_AS`
+does not count on `microvm` (tmpfs files, `memfd_create`), and CloudTrail
+with data events. Revisit if `microvm` gains a cgroup mount, or if a
+platform grants `CAP_SYS_RESOURCE`.

@@ -22,3 +22,4 @@
 | [0016](0016-offer-a-dns-firewall-as-an-option.md) | Offer a DNS Firewall as an option | Proposed | 2026-11-19 |
 | [0017](0017-split-the-core-from-the-gateway-entry.md) | Split the core from the gateway entry | Proposed | 2026-11-19 |
 | [0018](0018-deliver-the-nonce-on-the-data-channel-and-bind-every-job-to-it.md) | Deliver the nonce on the data channel and bind every job to it | Proposed | 2026-11-19 |
+| [0019](0019-cap-job-memory-per-backend.md) | Cap job memory per backend | Proposed | 2026-11-19 |
