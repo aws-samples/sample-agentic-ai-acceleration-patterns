@@ -18,7 +18,7 @@ describe('sweeper entry (spec §3.1)', () => {
   const deps = { recheck: {}, removal: {} } as unknown as SweeperDeps;
 
   it('runs the removal job on the 15-minute input and the lister on the daily input', async () => {
-    const remove = jest.spyOn(removal, 'runRemoval').mockResolvedValue({ disabled: 0, deletedTenants: 0, deletedCertificates: 0, failures: 0 });
+    const remove = jest.spyOn(removal, 'runRemoval').mockResolvedValue({ disabled: 0, deletedTenants: 0, deletedCertificates: 0, disabledRouted: 0, failures: 0 });
     const lister = jest.spyOn(recheck, 'runLister').mockResolvedValue({ runDay: TODAY, entries: 0, pages: 0, missingPages: 0, deletedItems: 0 });
     const handler = createHandler(deps);
     await handler(JSON.parse(SWEEPER_REMOVE_INPUT));
