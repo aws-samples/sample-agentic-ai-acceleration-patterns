@@ -981,8 +981,9 @@ given below):
    the domain's distribution tenant. That disable is best effort: the
    write has landed, so an error (a throttle, or a distribution tenant
    for the domain that is not this tenant's) is logged by its error name
-   and the call keeps its answer; the sweeper disables what is left
-   enabled. The sweeper (§3.1), run
+   and the call keeps its answer. The sweeper later disables one left
+   enabled that is this tenant's and this distribution's, and leaves any
+   other alone. The sweeper (§3.1), run
    every 15 minutes by EventBridge Scheduler, lists this distribution's
    dedicated distribution tenants and the registrar's certificates. It
    skips the pooled distribution tenant by its id, which the stack

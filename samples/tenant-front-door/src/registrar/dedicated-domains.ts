@@ -218,15 +218,14 @@ export class AwsDedicatedDomains implements DedicatedDomains {
 
   /**
    * Best effort: it runs after the route table write has landed, so a
-   * failure is logged by its error name and never changes the answer. The
-   * sweeper disables an enabled distribution tenant whose domain is no
-   * longer its tenant's `d` (§3.4 step 5).
+   * failure is logged by its error name and never changes the answer
+   * (§3.4 step 5).
    */
   async releaseDomain(tenantId: string, domain: string): Promise<void> {
     try {
       await this.disable(tenantId, domain);
     } catch (error) {
-      logLine('WARN', 'distribution tenant release failed; the sweeper disables it', {
+      logLine('WARN', 'distribution tenant release failed', {
         tenantId,
         domain,
         error: error instanceof Error ? error.name : 'UnknownError',
