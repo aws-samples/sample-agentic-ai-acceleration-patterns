@@ -53,6 +53,12 @@ Nothing is reused: every stack the run deploys, it destroys.
 
 ### Steps
 
+Every stack deploys with `allowedOrigins` set to the test list in
+[`test/e2e/cors-origins.ts`](./test/e2e/cors-origins.ts), and step 7 checks
+the CORS answers of the exchange from a listed, a pattern-matched, an
+unlisted, a two-label and a missing `Origin` (ADR-0040). Against a stack
+deployed with another list, or none, those checks are skipped with a log line.
+
 The four stack files run in parallel, one jest worker each. Against each
 topology stack the spec §10 scenario runs steps 1b–9 and 11, plus the R-6
 parameter check. It registers `sample/read` and `sample/write` in the stack's
@@ -76,7 +82,7 @@ steps.
 | 4 | token contract: tenant claim per topology, ID token has none |
 | 5 | claim integrity: the tenant claim cannot be chosen by the caller |
 | 6 | refresh re-runs the trigger (`shared-pool-multi-tenant`) |
-| 7 | narrowing: one tenant, subset scopes, refusals, direct bypass; B cannot narrow to write |
+| 7 | narrowing: one tenant, subset scopes, refusals, direct bypass; B cannot narrow to write; CORS answers for a listed, pattern, unlisted, two-label and missing `Origin` (ADR-0040) |
 | 8 | tenant admin: the narrowed admin token manages only tenant A; the admin's cut shows in u1's next token |
 | 8b | `UpdateTenant` widens B; `DeleteScope` drops a scope from every token |
 | 9 | offboard A: issuance stops, cached verification still works |
@@ -100,9 +106,9 @@ steps.
 One run with all four stacks took **about 10.5 minutes** (the last green run
 was 630 s, of which two 60 s waits per stack let a `DeleteScope` and a
 re-registration reach the catalogue cache) and cost well under 1 USD. Last
-green run: 2026-11-10, eu-central-1, all four stacks deployed as
-`TenantIdentityScopes-*` beside a standing deployment, 51/51 e2e assertions,
-11.5 minutes, no leftovers;
+green run: 2026-11-19, eu-central-1, all four stacks deployed as
+`TenantIdentityCors-*` beside a standing deployment, 51/51 e2e assertions
+with the step 7 CORS checks run in every stack, 10.5 minutes, no leftovers;
 coverage is in the [`architecture.md`](./architecture.md) status block.
 
 ### After an interruption

@@ -52,9 +52,11 @@ import {
   ExchangeClient,
   PlatformClient,
   region,
+  stackName,
   StackOutputs,
   TenantClient,
 } from './clients';
+import { E2E_ALLOWED_ORIGINS } from './cors-origins';
 import {
   apiKeyName,
   COGNITO_USER_ADMIN_SCOPE,
@@ -985,6 +987,51 @@ export function defineScenario(topology: Topology): void {
         resource: resourceA,
       });
       expect(wrongSubjectType.oauthError).toBe('invalid_request');
+
+      // CORS (§5.4.1, ADR-0040): only against a stack deployed with the
+      // integration list, so a hand-deployed fixture with another list (or
+      // none) does not fail for a reason unrelated to the code.
+      const e2eList = E2E_ALLOWED_ORIGINS.join(',');
+      if (stack.allowedOrigins !== e2eList) {
+        console.log(
+          `step 7 CORS checks skipped: ${stackName(topology)} has allowedOrigins '${stack.allowedOrigins ?? ''}', not '${e2eList}'`,
+        );
+      } else {
+        const u1Read = {
+          clientId: exchangeClientId('A'),
+          subjectToken: tokens.u1.refreshToken,
+          scope: SCOPE_API_READ,
+          resource: resourceA,
+        };
+        const browser = await exchange.exchange({
+          ...u1Read,
+          origin: 'https://app.example.com',
+          contentType: 'application/x-www-form-urlencoded;charset=UTF-8',
+        });
+        expectStatus(browser, 200, 'exchange u1 read@A from a listed origin');
+        expect(browser.headers?.get('access-control-allow-origin')).toBe('https://app.example.com');
+        expect(browser.headers?.get('vary')).toBe('Origin');
+
+        const tenantHost = 'https://acme.tenants.example.com';
+        const refusedFromTenantHost = await exchange.exchange({
+          clientId: exchangeClientId('B'),
+          subjectToken: tokens.u2.refreshToken,
+          scope: SCOPE_API_READ,
+          resource: tenantResource(tenantIds.A),
+          origin: tenantHost,
+        });
+        expect(refusedFromTenantHost.oauthError).toBe('invalid_target');
+        expect(refusedFromTenantHost.headers?.get('access-control-allow-origin')).toBe(tenantHost);
+        expect(refusedFromTenantHost.headers?.get('vary')).toBe('Origin');
+
+        for (const origin of ['https://evil.example.com', 'https://a.b.tenants.example.com', undefined]) {
+          const unlisted = await exchange.exchange({ ...u1Read, origin });
+          expectStatus(unlisted, 200, `exchange u1 read@A from origin ${origin ?? '(none)'}`);
+          expect(unlisted.headers?.get('access-control-allow-origin')).toBeNull();
+          expect(unlisted.headers?.get('vary')).toBe('Origin');
+        }
+        coverage.record('ExchangeToken');
+      }
 
       // Bypass the endpoint: call GetTokensFromRefreshToken directly with
       // u2's refresh token and the §8.2 keys naming A. Cognito fails the

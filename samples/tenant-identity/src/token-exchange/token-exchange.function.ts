@@ -15,6 +15,11 @@
  * (ADR-0027) the shared client is set but a premium tenant's own client must
  * pass too, so the deployment's `hasPerTenantPools` widens the check.
  *
+ * Around the dispatch the entry adds the browser rules of spec §5.4.1
+ * (ADR-0040): it drops `;charset=...` from a form `Content-Type`, and adds
+ * `Vary: Origin` and, for a listed `Origin`, `Access-Control-Allow-Origin`
+ * to whatever answer the service handler built.
+ *
  * The token SSDK was generated with `disableDefaultValidation`, so the
  * handler factory requires a `ValidationCustomizer`. The only modelled
  * constraint is that `form` is required, which the deserializer always
@@ -30,6 +35,7 @@ import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { convertEvent, convertVersion1Response } from '@smithy/server-apigateway';
 import type { ValidationContext, ValidationFailure } from '@smithy/server-common';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
+import { addHeaders, corsHeaders, normaliseContentType, parseAllowedOriginsEnv, requestOrigin } from './cors';
 import { OAUTH_ERROR_DESCRIPTIONS } from './form';
 import { TokenExchangeService } from './token-exchange';
 import { ENV, hasPerTenantPools, parseDeployment, requireEnv } from '../shared/constants';
@@ -81,7 +87,18 @@ const service = new TokenExchangeService<Record<string, unknown>>({
 
 const serviceHandler = getTokenServiceServiceHandler(service, validationCustomizer);
 
+// ADR-0040: the browser origins that may read the answer, checked at synth.
+// Empty means no CORS header on any answer.
+const allowedOrigins = parseAllowedOriginsEnv(process.env[ENV.allowedOrigins]);
+
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
-  const httpResponse = await serviceHandler.handle(convertEvent(event), {});
+  const request = convertEvent(event);
+  // §5.4.1: a browser's `;charset=UTF-8` would otherwise be a 415.
+  normaliseContentType(request);
+  const httpResponse = await serviceHandler.handle(request, {});
+  // Outside the model, so the 200, every OAuth error and every framework
+  // error carry the same headers. `Origin` comes from multiValueHeaders,
+  // which keeps a repeated header that `headers` would collapse.
+  addHeaders(httpResponse, corsHeaders(allowedOrigins, requestOrigin(event.multiValueHeaders)));
   return convertVersion1Response(httpResponse);
 }

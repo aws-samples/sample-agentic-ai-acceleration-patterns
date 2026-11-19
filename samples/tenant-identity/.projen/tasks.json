@@ -361,6 +361,7 @@
             "aws-jwt-verify",
             "cdk-nag",
             "constructs",
+            "tldts",
             "tslib",
             "ulid"
           ]
