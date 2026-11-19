@@ -768,19 +768,18 @@ outside them is a 400 until the value is corrected. A cell stamped before the ch
 its stamp, so the §8.1 bound for the application's source and paths
 holds for cells stamped afterwards.
 
-**R-29 (field ownership on applications):** `PutApplication` MUST write
-the definition fields except `hooks`, plus `placementStrategy`, and
-each of `hooks`, `parameters` and `cellParameters` **only when the
+**R-29 (field ownership on applications):** `PutApplication` MUST
+write the definition fields except `hooks`, plus `placementStrategy`,
+and each of `hooks`, `parameters` and `cellParameters` **only when the
 request sent it** (on an existing application an absent list is kept,
 `[]` clears it, §5.5), into the record on a create and into `pending`
 on a replace (R-48), plus `status`, `operationId` and `updatedAt`, and
 MUST NOT touch `cellCount`. The workflow's commit moves `pending` into
 those fields and touches nothing else (R-50). The two counter paths
-MUST NOT write the definition, `pending`, `status` or `operationId`.
-A definition replaced while a cell is being created does not change
-that cell: the cell was
-stamped inside the placement transaction, from the definition read before
-it (§7.1 step 0).
+MUST NOT write the definition, `pending`, `status` or `operationId`. A
+definition replaced while a cell is being created does not change that
+cell: the cell was stamped inside the placement transaction, from the
+definition read before it (§7.1 step 0).
 
 ### 4.2 Cell
 
@@ -1084,38 +1083,37 @@ service MUST resolve the hooks of each event the execution runs (§8.3,
 the cell, never the application record's current list (P-4); for an
 application event the application hooks of the definition being
 written, which on `PutApplication` are the request's `hooks` when it
-sent them and the stored list otherwise, and on `DeleteApplication` the
-stored list; for a tenant or account event no application hooks; and
-for every event the global hooks read in one strongly
-consistent query (`PK=HOOK`, `SK begins_with HOOK#`), each with the
-`revision` and `source` it had at that read. The query MUST run before
-the operation's first write: in §7.1 step 0 for `CreateDeployment`, and
+sent them and the stored list otherwise, and on `DeleteApplication`
+the stored list; for a tenant or account event no application hooks;
+and for every event the global hooks read in one strongly consistent
+query (`PK=HOOK`, `SK begins_with HOOK#`), each with the `revision`
+and `source` it had at that read. The query MUST run before the
+operation's first write: in §7.1 step 0 for `CreateDeployment`, and
 with the record read that precedes the transitional conditional write
 for `UpdateDeployment`, `DeleteDeployment`, `UpdateCell`, `DeleteCell`
-and the seven operations of §8.4 (for `PutAccount`, after its handshake
-probe, R-48). A failed query is then a 500 with nothing written, never
-a record left `CREATING`, `UPDATING` or `DELETING` with no execution.
-The application hooks need no read of their own: a stamp is immutable,
-so the cell the operation already read, or for a new cell the
-application record read in step 0, holds them; an application event
-takes them from the request or the record the operation already read.
-The workflow runs that snapshot and never re-reads a hook (R-20). A
-global hook put or deleted
-after the read does not change an execution already accepted; the next
-operation sees it. Both are tolerated races (§7.2). Every terminal write
-that leaves the record in place (§8.2, §8.4) MUST record on the cell,
-the deployment, the application, the tenant or the account the global
-hooks that ran for its event as
-`lastGlobalHooks`, each with the `sourceVersion` the hook names and
-the `resolvedSourceVersion` its build's final poll reported, so an
-operator can tell which commit of a gate or an audit hook an `ACTIVE`
-record passed, also when the hook names a branch. For a git source
-CodeBuild reports the full commit SHA, the branch's tip when the hook
-names a branch (H-2). For an S3 source it reports none, also when
-`sourceVersion` names an object version, so the entry holds the
+and the seven operations of §8.4 (for `PutAccount`, after its
+handshake probe, R-48). A failed query is then a 500 with nothing
+written, never a record left `CREATING`, `UPDATING` or `DELETING` with
+no execution. The application hooks need no read of their own: a stamp
+is immutable, so the cell the operation already read, or for a new
+cell the application record read in step 0, holds them; an application
+event takes them from the request or the record the operation already
+read. The workflow runs that snapshot and never re-reads a hook
+(R-20). A global hook put or deleted after the read does not change an
+execution already accepted; the next operation sees it. Both are
+tolerated races (§7.2). Every terminal write that leaves the record in
+place (§8.2, §8.4) MUST record on the cell, the deployment, the
+application, the tenant or the account the global hooks that ran for
+its event as `lastGlobalHooks`, each with the `sourceVersion` the hook
+names and the `resolvedSourceVersion` its build's final poll reported,
+so an operator can tell which commit of a gate or an audit hook an
+`ACTIVE` record passed, also when the hook names a branch. For a git
+source CodeBuild reports the full commit SHA, the branch's tip when
+the hook names a branch (H-2). For an S3 source it reports none, also
+when `sourceVersion` names an object version, so the entry holds the
 requested `sourceVersion` and no `resolvedSourceVersion`. A hook that
-a `PRE` failure kept from running is not listed.
-Application hooks need no such record: the cell's stamp names them.
+a `PRE` failure kept from running is not listed. Application hooks
+need no such record: the cell's stamp names them.
 
 ---
 
@@ -1352,14 +1350,13 @@ check: status `ACTIVE` or a `*_FAILED` status (or absent) AND
 `cellCount = 0` (application, account) or `deploymentCount = 0`
 (tenant); condition failure → 409. Placement claims only a live record
 (§7.1), so no cell or deployment can be counted against a record from
-the moment it is `DELETING`. The workflow runs the pre hooks, each with
-the three attempts and the skip of R-46; then deletes the record,
+the moment it is `DELETING`. The workflow runs the pre hooks, each
+with the three attempts and the skip of R-46; then deletes the record,
 conditional on `status = DELETING`, `operationId = :op` and the same
-count still 0; then
-runs the post hooks the same way (R-50). A delete whose condition fails
-while the record is still there ends `DELETE_FAILED`; a missing record
-proves that an earlier identical delete committed (P-11). No hook can
-stop a delete (P-9).
+count still 0; then runs the post hooks the same way (R-50). A delete
+whose condition fails while the record is still there ends
+`DELETE_FAILED`; a missing record proves that an earlier identical
+delete committed (P-11). No hook can stop a delete (P-9).
 
 Every failed status of these records has an operator action that leads
 out of it (P-9):
@@ -1946,8 +1943,8 @@ fewer variables, none of them `PARAM_`, and its longest value,
 `ACCOUNT_APPLICATION_IDS` at 3,299 bytes (100 ids of 32 characters and
 99 commas, §4.5), is under the single 4,096-byte value H-5 delivered.
 
-There is no `ADMIN_EMAIL`: onboarding input crosses the boundary once, to
-the create script (P-3). There is no `externalId` and no pair
+There is no `ADMIN_EMAIL`: onboarding input crosses the boundary once,
+to the create script (P-3). There is no `externalId` and no pair
 credential (R-41). On application, tenant and account events a hook
 also receives no parameter value or declaration, no source or script
 of the application, and for an account not even whether an
@@ -1956,13 +1953,13 @@ still tells a hook which accounts exist, who owns them and what they
 admit (T46). A hook MUST take the identity it acts on
 (`APPLICATION_ID`, `CELL_ID`, `TENANT_ID`, `CELL_ACCOUNT_ID`,
 `ACCOUNT_ID`) from these variables, never from `SCRIPT_OUTPUTS`. Hooks
-MUST be idempotent and safe to re-run, as scripts are (R-15): an update
-runs them again, a delete
-retry runs them again, and a failed create is cleaned up by a delete
-whose hooks run even when the create's hooks never did. `EXECUTION_ID`,
-with `EVENT`, `PHASE` and `HOOK_ID`, names one occurrence of a hook
-across its attempts, so a hook that must record each event once (an
-audit export, a meter) keys on it and treats a repeat as done.
+MUST be idempotent and safe to re-run, as scripts are (R-15): an
+update runs them again, a delete retry runs them again, and a failed
+create is cleaned up by a delete whose hooks run even when the
+create's hooks never did. `EXECUTION_ID`, with `EVENT`, `PHASE` and
+`HOOK_ID`, names one occurrence of a hook across its attempts, so a
+hook that must record each event once (an audit export, a meter) keys
+on it and treats a repeat as done.
 
 **R-43 (script outputs):** before each script the provisioning buildspec
 MUST create a fresh temporary directory outside the source tree and
@@ -2016,13 +2013,12 @@ build that did not export), longer than 4,096 characters, or not a
 compact JSON object of printable ASCII string values. With printable
 ASCII, 4,096 characters are 4,096 bytes, so the guard and the
 buildspec enforce one rule. The last test is a regular expression
-over that grammar, and the pattern
-MUST be linear: no quantifier may hold another unbounded quantifier
-(the key's bounded `{0,63}` inside the `*` loop is allowed), and every
-choice the pattern makes MUST be decided by the next two characters,
-the loop exit included, so a near miss is rejected in one pass over at
-most 4,096 characters. A pattern of that shape, with `K` standing for
-the key pattern above:
+over that grammar, and the pattern MUST be linear: no quantifier may
+hold another unbounded quantifier (the key's bounded `{0,63}` inside
+the `*` loop is allowed), and every choice the pattern makes MUST be
+decided by the next two characters, the loop exit included, so a near
+miss is rejected in one pass over at most 4,096 characters. A pattern
+of that shape, with `K` standing for the key pattern above:
 
 ```
 ^\{(?:"K":"(?:[ !#-\[\]-~]|\\["\\]|","K":")*")?\}$
@@ -2421,41 +2417,41 @@ metadata. The `parameters` map on a deployment or cell is owned by its
 create and update requests (R-33, R-34); workflow terminal writes MUST
 NOT touch it.
 
-**Payload budget:** each resolved parameter set holds at most 40 entries
-(20 stored, stale ones included, plus up to 20 defaults) of at most 1,088
-bytes (a 64-byte name and a 1,024-byte value), about 43 KiB raw. The
-execution input is JSON. With control characters refused (R-33), only
-`"` and `\` need escaping, so a value grows at most twofold: about 87 KiB
-per set. A new-cell create carries a cell set and a tenant set, about
-174 KiB. Hooks add at most 20 resolved definitions to that execution (five
-global and five application hooks for each of its two events). R-39
-admits no character JSON escapes in a hook field, so a definition is as
-large in the input as raw: under 1,600 bytes as compact JSON (id,
-source, script, timeout, revision), about 1.5 KiB, 31 KiB in all.
-One script's outputs (R-43) are in state while its post hooks run: at
-most 4,096 printable ASCII characters, of which only `"` and `\`
-escape, so at most 8,190 characters escaped in state (H-10), two under
-8 KiB, for a value the buildspec checked and for any
-value the workflow guard admits alike. The cell event's outputs leave
-state when its post hooks finish, before the deployment event starts,
-so a new-cell create never holds two. The global hook results kept for
-`lastGlobalHooks` (R-40) add at most ten entries of about 0.4 KiB,
-4 KiB; an application hook's result leaves state once the hook
-succeeded. That is about 217 KiB, which leaves about 39 KiB of the
-256 KiB Step Functions limit for the rest of the R-20 input. The
-application's source and the two script paths of a new-cell create
+**Payload budget:** each resolved parameter set holds at most 40
+entries (20 stored, stale ones included, plus up to 20 defaults) of at
+most 1,088 bytes (a 64-byte name and a 1,024-byte value), about 43 KiB
+raw. The execution input is JSON. With control characters refused
+(R-33), only `"` and `\` need escaping, so a value grows at most
+twofold: about 87 KiB per set. A new-cell create carries a cell set
+and a tenant set, about 174 KiB. Hooks add at most 20 resolved
+definitions to that execution (five global and five application hooks
+for each of its two events). R-39 admits no character JSON escapes in
+a hook field, so a definition is as large in the input as raw: under
+1,600 bytes as compact JSON (id, source, script, timeout, revision),
+about 1.5 KiB, 31 KiB in all. One script's outputs (R-43) are in state
+while its post hooks run: at most 4,096 printable ASCII characters, of
+which only `"` and `\` escape, so at most 8,190 characters escaped in
+state (H-10), two under 8 KiB, for a value the buildspec checked and
+for any value the workflow guard admits alike. The cell event's
+outputs leave state when its post hooks finish, before the deployment
+event starts, so a new-cell create never holds two. The global hook
+results kept for `lastGlobalHooks` (R-40) add at most ten entries of
+about 0.4 KiB, 4 KiB; an application hook's result leaves state once
+the hook succeeded. That is about 217 KiB, which leaves about 39 KiB
+of the 256 KiB Step Functions limit for the rest of the R-20 input.
+The application's source and the two script paths of a new-cell create
 take at most 4.3 KiB of it (2,048 + 256 + 2 × 1,024 bytes), because
-their charsets admit no character JSON escapes (§4.1). The ids, the two
-role ARNs, the external id of at most 1,224 bytes, the tenant name and
-the failure statuses need a few KiB more. That limit applies to every
-state's payload, not only the input, and a CodeBuild `Build` result
-echoes the build's environment variables, values included. So each
-build task's JSONata `Output` MUST keep only what later states read:
-the build ARN and status, plus the guarded outputs for a script build
-(R-43), and for a hook build's `startBuild` and each of its
-`batchGetBuilds` polls (the SDK integration, R-46) the build id,
-status, phase timing and `resolvedSourceVersion`, never the
-environment (R-40, R-46). A full
+their charsets admit no character JSON escapes (§4.1). The ids, the
+two role ARNs, the external id of at most 1,224 bytes, the tenant name
+and the failure statuses need a few KiB more. That limit applies to
+every state's payload, not only the input, and a CodeBuild `Build`
+result echoes the build's environment variables, values included. So
+each build task's JSONata `Output` MUST keep only what later states
+read: the build ARN and status, plus the raw outputs of at most 4,096
+characters for a script build's guard state (R-43), and for a hook
+build's `startBuild` and each of its `batchGetBuilds` polls (the SDK
+integration, R-46) the build id, status, phase timing and
+`resolvedSourceVersion`, never the environment (R-40, R-46). A full
 result kept in state would add a second copy of each parameter set and
 pass the limit. The limit also holds for a task's raw result before
 `Output` runs, so a poll MUST name one build id per call: one hook
@@ -2469,11 +2465,11 @@ first 256 characters of its `Cause`, a service message with no `Build`
 in it. The refusal `Catch` passes its input through and keeps the same
 bounded name and cause in the variable `LAST_REFUSAL` (R-46), outside
 the state payload: under 2 KiB however its characters encode, against
-the 256 KiB a variable may hold ([sfn-vars]). A payload over the
-limit fails the execution with `States.DataLimitExceeded`, which
-`States.ALL` does not catch, so no `*_FAILED` write would run.
-Keeping state small does not keep values out of the task history events
-(they record the raw service result); N-11 already accepts values in
+the 256 KiB a variable may hold ([sfn-vars]). A payload over the limit
+fails the execution with `States.DataLimitExceeded`, which
+`States.ALL` does not catch, so no `*_FAILED` write would run. Keeping
+state small does not keep values out of the task history events (they
+record the raw service result); N-11 already accepts values in
 execution history.
 
 A record event's execution (§8.4) is smaller than any cell or deployment
@@ -2568,16 +2564,15 @@ With hooks, the execution timeout is therefore 26 hours. A record
 event's delete runs the hook time of a cell delete without its
 60-minute script, so its history stays inside the counts below. The
 worst case needs every hook at the 30-minute cap and every attempt to
-run it out.
-Standard workflows are billed per state transition, not by duration,
-so the longer net costs nothing; it bounds how long a hung execution
-holds its record. The hook steps of the longest execution, a delete at
-the caps, write at the larger of the refusal loop's rate of about 15.7
-history events a minute and the 60-second poll's nine (R-46). With
-every hook refused for its whole budget that is about 22,600 events,
-and polling throughout about 13,000, both inside the 25,000-event
-quota of a Standard execution; the outputs guard adds six events per
-build (R-43). A 30-second poll would pass it.
+run it out. Standard workflows are billed per state transition, not by
+duration, so the longer net costs nothing; it bounds how long a hung
+execution holds its record. The hook steps of the longest execution, a
+delete at the caps, write at the larger of the refusal loop's rate of
+about 15.7 history events a minute and the 60-second poll's nine
+(R-46). With every hook refused for its whole budget that is about
+22,600 events, and polling throughout about 13,000, both inside the
+25,000-event quota of a Standard execution; the outputs guard adds six
+events per build (R-43). A 30-second poll would pass it.
 
 Refusals are capped at 5 minutes and the queued timeout is shortened
 by the minutes refused, so refusals and queue together never pass the
@@ -2703,10 +2698,9 @@ $hash($join([EXECUTION_ID, EVENT, PHASE, HOOK.scope, HOOK_ID,
 ```
 
 `HOOK.scope` is the scope of the hook in hand, `GLOBAL` or
-`APPLICATION`. A global hook and an
-application hook may share a `hookId`, and both can run in one list
-of one event; the scope keeps their tokens apart, since each starts
-in a different project.
+`APPLICATION`. A global hook and an application hook may share a
+`hookId`, and both can run in one list of one event; the scope keeps
+their tokens apart, since each starts in a different project.
 
 [sfn-vars]: https://docs.aws.amazon.com/step-functions/latest/dg/workflow-variables.html
 
@@ -3287,36 +3281,36 @@ check.
    neither set is refused on every operation. The listed machine
    client's access token, which has no `aud` (R-38), succeeds on
    `ListTenants` and `GetTenant` and is refused with 403 on
-   `CreateTenant`, nothing written; its token for
-   `control-plane/other` alone and the unlisted client's token are
-   refused with 403 on `ListTenants`.
+   `CreateTenant`, nothing written; its token for `control-plane/other`
+   alone and the unlisted client's token are refused with 403 on
+   `ListTenants`.
 2. **Applications:** `PutApplication` with a missing script path, a
    script path holding a control character or a source location with
    userinfo → 400; with an id outside the charset → 400;
    `PutApplication` X and Y → 202 with `status = CREATING`, and
-   `GetApplication` polls each to `ACTIVE`;
-   `ListApplications` shows both with `cellCount = 0`; `PutAccount` naming
-   an unregistered application in `applicationIds` → 404. X declares two
-   parameters, `ALLOWED_EMAIL_DOMAIN` (required) and `LOG_LEVEL` (default
-   `info`), and one cell parameter, `CELL_SIZE` (default `small`); a
+   `GetApplication` polls each to `ACTIVE`; `ListApplications` shows
+   both with `cellCount = 0`; `PutAccount` naming an unregistered
+   application in `applicationIds` → 404. X declares two parameters,
+   `ALLOWED_EMAIL_DOMAIN` (required) and `LOG_LEVEL` (default `info`),
+   and one cell parameter, `CELL_SIZE` (default `small`); a
    declaration named in lower case, a duplicate name, a required
-   parameter with a default, a cell parameter without a default, or one
-   name in both lists → 400.
+   parameter with a default, a cell parameter without a default, or
+   one name in both lists → 400.
 3. **Handshake:** `PutAccount` for an account with no role pair → 400;
-   `PutAccount` B as `TENANT` without `externalId` → 400; with the wrong
-   `externalId` → 400 naming the role; `PutAccount` A (`VENDOR`,
-   `maxCells = 2`, shared) and B (`TENANT`, `maxCells = 1`, `externalId`,
-   `applicationIds = [Y]`) → 202, each polled to `ACTIVE`; a
-   `PutAccount` with 101 `applicationIds` → 400; `ListAccounts` shows
-   0/2 and 0/1 with
-   `maxCells` and B's `applicationIds`; `GetAccount` B does not return the
-   `externalId` value.
+   `PutAccount` B as `TENANT` without `externalId` → 400; with the
+   wrong `externalId` → 400 naming the role; `PutAccount` A (`VENDOR`,
+   `maxCells = 2`, shared) and B (`TENANT`, `maxCells = 1`,
+   `externalId`, `applicationIds = [Y]`) → 202, each polled to
+   `ACTIVE`; a `PutAccount` with 101 `applicationIds` → 400;
+   `ListAccounts` shows 0/2 and 0/1 with `maxCells` and B's
+   `applicationIds`; `GetAccount` B does not return the `externalId`
+   value.
 4. **Tenants run no build:** `CreateTenant` T1, T2 and T3 → 202 with
-   `status = CREATING` and `deploymentCount = 0`; `GetTenant` polls each
-   to `ACTIVE`; no cell created, no build started; `ListTenants` shows
-   three; `UpdateTenant` T3 → 202, polled back to `ACTIVE` with the new
-   metadata; `DeleteTenant` T3 → 202 (empty), and `GetTenant` T3 polls
-   to 404; `CreateDeployment` for T3 → 404;
+   `status = CREATING` and `deploymentCount = 0`; `GetTenant` polls
+   each to `ACTIVE`; no cell created, no build started; `ListTenants`
+   shows three; `UpdateTenant` T3 → 202, polled back to `ACTIVE` with
+   the new metadata; `DeleteTenant` T3 → 202 (empty), and `GetTenant`
+   T3 polls to 404; `CreateDeployment` for T3 → 404;
    `CreateDeployment` for an unregistered application → 404.
 5. **Implicit creation in the home account:** `CreateDeployment` T1/X
    without `ALLOWED_EMAIL_DOMAIN`, or with an undeclared parameter → 400,
@@ -3415,64 +3409,65 @@ check.
     script recorded the stale `PARAM_ALLOWED_EMAIL_DOMAIN = example.com`
     (no longer declared, still passed), `PARAM_LOG_LEVEL = warn` (the
     default) and no `PARAM_TIER`.
-16. **Hooks:** `ListHooks` is empty. `PutHook` with an unknown event, a
-    phase outside `PRE|POST`, a timeout of 4 or 31, a script path with
-    a space, a source location with userinfo
+16. **Hooks:** `ListHooks` is empty. `PutHook` with an unknown event,
+    a phase outside `PRE|POST`, a timeout of 4 or 31, a script path
+    with a space, a source location with userinfo
     (`https://u:p@host/r.git`) or a source ref holding a control
     character → 400; a reader's `PutHook` → 403, nothing written.
     `PutHook` G (`POST`, the six cell and deployment events) → 200
-    with `revision = 1`;
-    re-sent unchanged → `revision = 2`; `GetHook` G returns the
-    definition with `revision = 2`. `PutAccount` A with `maxCells = 3`.
-    `PutApplication` Z (Y's source and scripts, `maxTenants = 2`, three
-    parameters: `HOOK_FAIL` with default `no`, and `API_FUNCTION_NAME`
-    and `WORKFLOW_ARN`, whose defaults the test sets from the stack
-    outputs `ApiFunctionName` and `StateMachineArn` before this put,
-    because R-42 hands a hook neither name) with two application
-    hooks: `a-pre` (`PRE`, `DEPLOYMENT_DELETE`), which fails when
-    `PARAM_HOOK_FAIL` is `yes`, and `b-post` (`POST`,
-    `DEPLOYMENT_CREATE`), which fails when it is `post`; a third hook
-    with a repeated id → 400. Every hook records, under its own scope's
-    test path in A, a sequence stamp, `EVENT`, `PHASE`, `HOOK_ID`,
-    `HOOK_SCOPE`, `EXECUTION_ID`, `ATTEMPT`, the ids, `OPERATOR_ID`,
-    its `PARAM_` variables, `SCRIPT_OUTPUTS` and its caller identity;
-    Z's scripts record a sequence stamp too, and its tenant create
-    script writes `{"endpoint": "<TENANT_ID>.example.com"}` to
-    `OUTPUTS_FILE`. `CreateDeployment` T1/Z creates cell 4 in A, and
-    the stamps show this order: cell create script, G (`CELL_CREATE`),
-    tenant create script, `b-post`, G (`DEPLOYMENT_CREATE`), so
-    application post hooks run before global ones. `b-post` saw
+    with `revision = 1`; re-sent unchanged → `revision = 2`; `GetHook`
+    G returns the definition with `revision = 2`. `PutAccount` A with
+    `maxCells = 3`. `PutApplication` Z (Y's source and scripts,
+    `maxTenants = 2`, three parameters: `HOOK_FAIL` with default `no`,
+    and `API_FUNCTION_NAME` and `WORKFLOW_ARN`, whose defaults the
+    test sets from the stack outputs `ApiFunctionName` and
+    `StateMachineArn` before this put, because R-42 hands a hook
+    neither name) with two application hooks: `a-pre` (`PRE`,
+    `DEPLOYMENT_DELETE`), which fails when `PARAM_HOOK_FAIL` is `yes`,
+    and `b-post` (`POST`, `DEPLOYMENT_CREATE`), which fails when it is
+    `post`; a third hook with a repeated id → 400. Every hook records,
+    under its own scope's test path in A, a sequence stamp, `EVENT`,
+    `PHASE`, `HOOK_ID`, `HOOK_SCOPE`, `EXECUTION_ID`, `ATTEMPT`, the
+    ids, `OPERATOR_ID`, its `PARAM_` variables, `SCRIPT_OUTPUTS` and
+    its caller identity; Z's scripts record a sequence stamp too, and
+    its tenant create script writes
+    `{"endpoint": "<TENANT_ID>.example.com"}` to `OUTPUTS_FILE`.
+    `CreateDeployment` T1/Z creates cell 4 in A, and the stamps show
+    this order: cell create script, G (`CELL_CREATE`), tenant create
+    script, `b-post`, G (`DEPLOYMENT_CREATE`), so application post
+    hooks run before global ones. `b-post` saw
     `EVENT = DEPLOYMENT_CREATE`, `PHASE = POST`,
     `HOOK_SCOPE = APPLICATION`, `APPLICATION_ID = Z`, cell 4,
     `TENANT_ID = T1`, `CELL_ACCOUNT_ID = A`, the operator's id,
     `ATTEMPT = 1`, `PARAM_HOOK_FAIL = no` and
     `SCRIPT_OUTPUTS = {"endpoint":"T1.example.com"}`, the compact
     re-serialisation of what the script wrote; G on `CELL_CREATE` saw
-    no `TENANT_ID` and
-    `SCRIPT_OUTPUTS = {}`. Each hook's caller identity is its own hook
-    role in A, never a provisioning role, and `b-post`'s attempt to
-    write under the global test path was refused. `b-post` also
-    called `states:StartExecution` on `PARAM_WORKFLOW_ARN` with input
-    `{}`, which its test policy allows, and recorded `AccessDenied`
-    beside its refused SSM write. Its test policy also allows it to
-    invoke the API function, and it invoked `PARAM_API_FUNCTION_NAME`
-    twice, unqualified and with `Qualifier=$LATEST`, each time with a
-    `GET /hooks` event whose `requestContext.authorizer` claims the
-    operator role, and recorded `AccessDenied` both times. The forged
-    event names a read route, so a deny that failed would show as a
-    recorded success and write no state. `GetCell` 4 shows the two stamped application hooks; `GetCell` 4 and `GetDeployment`
-    T1/Z report `lastGlobalHooks` naming G at revision 2 with the
-    commit its build ran. `UpdateDeployment` T1/Z returns to `ACTIVE`,
-    and G recorded `DEPLOYMENT_UPDATE` under an `EXECUTION_ID` other
-    than the create's. `PutHook` P (`PRE`, `DEPLOYMENT_CREATE`), which
-    always fails. `CreateDeployment` T2/Z with `HOOK_FAIL = yes` lands
-    in cell 4 and ends `CREATE_FAILED` with `statusReason` naming
+    no `TENANT_ID` and `SCRIPT_OUTPUTS = {}`. Each hook's caller
+    identity is its own hook role in A, never a provisioning role, and
+    `b-post`'s attempt to write under the global test path was
+    refused. `b-post` also called `states:StartExecution` on
+    `PARAM_WORKFLOW_ARN` with input `{}`, which its test policy
+    allows, and recorded `AccessDenied` beside its refused SSM write.
+    Its test policy also allows it to invoke the API function, and it
+    invoked `PARAM_API_FUNCTION_NAME` twice, unqualified and with
+    `Qualifier=$LATEST`, each time with a `GET /hooks` event whose
+    `requestContext.authorizer` claims the operator role, and recorded
+    `AccessDenied` both times. The forged event names a read route, so
+    a deny that failed would show as a recorded success and write no
+    state. `GetCell` 4 shows the two stamped application hooks;
+    `GetCell` 4 and `GetDeployment` T1/Z report `lastGlobalHooks`
+    naming G at revision 2 with the commit its build ran.
+    `UpdateDeployment` T1/Z returns to `ACTIVE`, and G recorded
+    `DEPLOYMENT_UPDATE` under an `EXECUTION_ID` other than the
+    create's. `PutHook` P (`PRE`, `DEPLOYMENT_CREATE`), which always
+    fails. `CreateDeployment` T2/Z with `HOOK_FAIL = yes` lands in
+    cell 4 and ends `CREATE_FAILED` with `statusReason` naming
     `GLOBAL/P`; T2/Z's tenant create script and `b-post` recorded
     nothing, and `/application-plane/tenants/T2/Z/*` does not exist.
     `DeleteHook` P → 200; `GetHook` P → 404. `DeleteDeployment` T2/Z:
-    `a-pre` fails three times, recording `ATTEMPT` 1, 2 and 3, the skip
-    is logged and counted, the tenant delete script runs, the record is
-    removed and cell 4 drops to one tenant; G recorded
+    `a-pre` fails three times, recording `ATTEMPT` 1, 2 and 3, the
+    skip is logged and counted, the tenant delete script runs, the
+    record is removed and cell 4 drops to one tenant; G recorded
     `DEPLOYMENT_DELETE` after the script. `CreateDeployment` T2/Z with
     `HOOK_FAIL = post` lands in cell 4 and ends `CREATE_FAILED` with
     `statusReason` naming `APPLICATION/b-post`; the tenant create
@@ -3512,124 +3507,121 @@ check.
     `SCRIPT_OUTPUTS = {}` and no `CELL_ID`; `GetCell` 4 still shows the
     two hooks it was stamped with (P-4). `DeleteHook` R → 200.
 18. **Teardown:** deleting all deployments frees their slots and every
-    tenant's `deploymentCount` returns to 0; deleting the now-empty cells
-    removes them **and releases the account and application slots**
-    (A → 0/3, B → 0/1, X, Y and Z → `cellCount = 0`); G recorded a
-    `CELL_DELETE` for every cell; `DeleteHook` G → 200; `DeleteTenant` T1
-    and T2 → 202; `DeleteAccount` A and B → 202. `PutAccount` B again
-    (`TENANT`, `maxCells = 1`, the `externalId`, `applicationIds = [Y]`)
-    → 202, polled to `ACTIVE`: N recorded `EVENT = ACCOUNT_CREATE`,
-    `PHASE = POST`, `ACCOUNT_ID = B`, `ACCOUNT_OWNER = TENANT`,
-    `ACCOUNT_APPLICATION_IDS` equal to Y's id, `SCRIPT_OUTPUTS = {}`, and
-    no variable holding the external id or naming a pair role.
-    `DeleteAccount` B → 202; `DeleteHook` N → 200. `DeleteApplication`
-    X, Y and Z → 202; `ListTenants`, `ListAccounts`, `ListApplications`
-    and `ListHooks` are empty; the parameter namespaces in **both**
-    accounts end empty. Cell 1's
+    tenant's `deploymentCount` returns to 0; deleting the now-empty
+    cells removes them **and releases the account and application
+    slots** (A → 0/3, B → 0/1, X, Y and Z → `cellCount = 0`); G
+    recorded a `CELL_DELETE` for every cell; `DeleteHook` G → 200;
+    `DeleteTenant` T1 and T2 → 202; `DeleteAccount` A and B → 202.
+    `PutAccount` B again (`TENANT`, `maxCells = 1`, the `externalId`,
+    `applicationIds = [Y]`) → 202, polled to `ACTIVE`: N recorded
+    `EVENT = ACCOUNT_CREATE`, `PHASE = POST`, `ACCOUNT_ID = B`,
+    `ACCOUNT_OWNER = TENANT`, `ACCOUNT_APPLICATION_IDS` equal to Y's
+    id, `SCRIPT_OUTPUTS = {}`, and no variable holding the external id
+    or naming a pair role. `DeleteAccount` B → 202; `DeleteHook` N →
+    200. `DeleteApplication` X, Y and Z → 202; `ListTenants`,
+    `ListAccounts`, `ListApplications` and `ListHooks` are empty; the
+    parameter namespaces in **both** accounts end empty. Cell 1's
     delete script recorded `PARAM_CELL_SIZE = medium`; T2/X's tenant
-    delete script recorded `PARAM_TIER = gold` and `PARAM_LOG_LEVEL =
-    warn` (a default) and no `PARAM_ALLOWED_EMAIL_DOMAIN`. Every
-    operation has run at least once.
+    delete script recorded `PARAM_TIER = gold` and
+    `PARAM_LOG_LEVEL = warn` (a default) and no
+    `PARAM_ALLOWED_EMAIL_DOMAIN`. Every operation has run at least
+    once.
 
 Plus unit-level assertions that no state-dependent write path is
-unconditional (P-5), that
-exactly two code paths mutate each of `tenantCount`, `deploymentCount` and
-the two `cellCount`s and `hookCount` (P-6), that `PutAccount`,
-`PutApplication`, `CreateTenant` and `UpdateTenant` never write a
-counter (R-24, R-29, §4.3), that neither hook role is trusted by the
-pair or granted its AssumeRole, that a global hook starts only in the
-global hook project and an application hook only in the other, that
-only the workflow role holds `codebuild:StartBuild` on the hook projects
-and it holds no `iam:PassRole` on either hook role, while the build and
-API roles hold neither, that only the API role holds
-`states:StartExecution` on the workflow and no build role and no hook
-role holds it, that one standalone `AWS::IAM::Policy`, on which no
-resource depends, carries the explicit deny of R-41 with every action
-and resource of its list (`iam:PassRole` on the six roles, the seven
-IAM role writes on the stack's ten roles, the six CodeBuild actions on
-the four projects, `states:StartExecution` and `UpdateStateMachine` on
-the workflow's state machine ARN and `states:RedriveExecution` on its
-execution ARN, `execution:<fleet>-workflow:*`, the six Lambda writes
-on the API and authorizer functions, the four Lambda invoke and
-permission actions (`InvokeFunction`, `InvokeAsync`, `AddPermission`,
-`RemovePermission`) on the API function, each Lambda entry on both the
-unqualified ARN and the qualified `:*` form, the four API
-Gateway writes on the REST API and its sub-resources, and the seven
-table writes), that its `Roles` name each of the six denied role
-resources of the template and no other role, so the workflow, API,
-authorizer and API Gateway CloudWatch roles carry none, that the four
-projects and the workflow have their fleet-derived physical names, that
-each build role and each hook role trusts CodeBuild only on the
-`aws:SourceArn` computed from its own project's name, that the
-hook buildspec assumes no role, passes
-no external id, interpolates no variable and runs `bash "$HOOK_SCRIPT"`
-(R-41), that the resolved hook lists follow R-40 and R-45 and are read
-before the operation's first write, that an invalid `OUTPUTS_FILE`, one
-with a value outside printable ASCII included, fails a create and is
-dropped on a delete, that the provisioning buildspec exports
-`SCRIPT_OUTPUTS` alone, as its compact re-serialisation of the parsed
-file, and `{}` when no file was written, and refuses a repeated key,
-that the
-script task's `Output` rejects an empty, over-long or malformed value
-on create and update and substitutes `{}` on delete, that the guard
-rejects a 4,096-character near miss (a valid object of `\"` escapes
-with its closing `}` missing) within 100 ms, and that an `Output`
-evaluation error on a delete still yields `{}` (R-43), that a hook
-attempt starts its build request-response with the run timeout, a
-queued timeout of 10 less the minutes refused, never below 5, 10 on
-the first try, and an idempotency token
-that is the SHA-256 `$hash` of the execution, event, phase, hook,
-attempt and try index joined by `|` and built from nothing else, the
-try index set to 1 by the state that enters the attempt and to the
-next index by the refusal `Choice` rule, the queued timeout and token
-assigned from it by the state that begins the try, and every field of
-the start's `Arguments` read only from variables and the start task's
-state input, both fixed for the try, every state on the way back to
-the start task, the entry and begin-try `Pass` states, the refusal
-`Catch`, the `Wait` and the `Choice`, passing its input through
-unchanged (the refusal `Catch` setting `Output` to
+unconditional (P-5), that exactly two code paths mutate each of
+`tenantCount`, `deploymentCount` and the two `cellCount`s and
+`hookCount` (P-6), that `PutAccount`, `PutApplication`, `CreateTenant`
+and `UpdateTenant` never write a counter (R-24, R-29, §4.3), that
+neither hook role is trusted by the pair or granted its AssumeRole,
+that a global hook starts only in the global hook project and an
+application hook only in the other, that only the workflow role holds
+`codebuild:StartBuild` on the hook projects and it holds no
+`iam:PassRole` on either hook role, while the build and API roles hold
+neither, that only the API role holds `states:StartExecution` on the
+workflow and no build role and no hook role holds it, that one
+standalone `AWS::IAM::Policy`, on which no resource depends, carries
+the explicit deny of R-41 with every action and resource of its list
+(`iam:PassRole` on the six roles, the seven IAM role writes on the
+stack's ten roles, the six CodeBuild actions on the four projects,
+`states:StartExecution` and `UpdateStateMachine` on the workflow's
+state machine ARN and `states:RedriveExecution` on its execution ARN,
+`execution:<fleet>-workflow:*`, the six Lambda writes on the API and
+authorizer functions, the four Lambda invoke and permission actions
+(`InvokeFunction`, `InvokeAsync`, `AddPermission`, `RemovePermission`)
+on the API function, each Lambda entry on both the unqualified ARN and
+the qualified `:*` form, the four API Gateway writes on the REST API
+and its sub-resources, and the seven table writes), that its `Roles`
+name each of the six denied role resources of the template and no
+other role, so the workflow, API, authorizer and API Gateway
+CloudWatch roles carry none, that the four projects and the workflow
+have their fleet-derived physical names, that each build role and each
+hook role trusts CodeBuild only on the `aws:SourceArn` computed from
+its own project's name, that the hook buildspec assumes no role,
+passes no external id, interpolates no variable and runs
+`bash "$HOOK_SCRIPT"` (R-41), that the resolved hook lists follow R-40
+and R-45 and are read before the operation's first write, that an
+invalid `OUTPUTS_FILE`, one with a value outside printable ASCII
+included, fails a create and is dropped on a delete, that the
+provisioning buildspec exports `SCRIPT_OUTPUTS` alone, as its compact
+re-serialisation of the parsed file, and `{}` when no file was
+written, and refuses a repeated key, that the guard state after the
+script task rejects an empty, over-long or malformed value on create
+and update and substitutes `{}` on delete, that the guard rejects a
+4,096-character near miss (a valid object of `\"` escapes with its
+closing `}` missing) within 100 ms, that a guard evaluation error on a
+delete still yields `{}`, and that the script task keeps only its
+build-failure Catch (R-43), that a hook attempt starts its build
+request-response with the run timeout, a queued timeout of 10 less the
+minutes refused, never below 5, 10 on the first try, and an
+idempotency token that is the SHA-256 `$hash` of the execution, event,
+phase, hook scope, hook, attempt and try index joined by `|` and built
+from nothing else, the try index set to 1 by the state that enters the
+attempt and to the next index by the refusal `Choice` rule, the queued
+timeout and token assigned from it by the state that begins the try,
+and every field of the start's `Arguments` read only from variables
+and the start task's state input, both fixed for the try, every state
+on the way back to the start task, the entry and begin-try `Pass`
+states, the refusal `Catch`, the `Wait` and the `Choice`, passing its
+input through unchanged (the refusal `Catch` setting `Output` to
 `{% $states.input %}` and assigning `LAST_REFUSAL`), while the start
 task's success `Output` and its ending `Catch`es add the fields §8.1
 requires, and no `$states.context` field that changes on a repeat
-read,
-polls that one id with the `aws-sdk:codebuild:batchGetBuilds`
-integration every 60 seconds, keeping only its id, status, phase timing
-and `resolvedSourceVersion`, taken from the final poll, and at its
-deadline calls `StopBuild` and polls the build to a final status, that
-a `StartBuild` refusal loops through a `Catch`, a 30-second `Wait` and
-a `Choice` that advances the try index, for at most 5 minutes, and a
-`StopBuild` refusal through the same `Catch` and `Wait` within the 2
-minutes of a stop, and the only task `Retry` is the transient
-repeat (`TimeoutSeconds` 15, `IntervalSeconds` 10, `BackoffRate` 1,
-`MaxAttempts` 3, no jitter), a "start outcome unknown" ending naming
-the last error and a start still refused when its window ends naming
-`LAST_REFUSAL`, and
-that
-a failing delete hook runs as a loop of three started builds, 60 and
-120 seconds apart, each started only after the last is final, a
-refusal-only attempt not counted and followed by the 60-second
-backoff, a "start outcome unknown" attempt counted and followed by a
-wait of q + T, every deadline cut at the hook's budget, and is then
-skipped (R-46), that
+read, polls that one id with the `aws-sdk:codebuild:batchGetBuilds`
+integration every 60 seconds, keeping only its id, status, phase
+timing and `resolvedSourceVersion`, taken from the final poll, and at
+its deadline calls `StopBuild` and polls the build to a final status,
+that a `StartBuild` refusal loops through a `Catch`, a 30-second
+`Wait` and a `Choice` that advances the try index, for at most 5
+minutes, and a `StopBuild` refusal through the same `Catch` and `Wait`
+within the 2 minutes of a stop, and the only task `Retry` is the
+transient repeat (`TimeoutSeconds` 15, `IntervalSeconds` 10,
+`BackoffRate` 1, `MaxAttempts` 3, no jitter), a "start outcome
+unknown" ending naming the last error and a start still refused when
+its window ends naming `LAST_REFUSAL`, and that a failing delete hook
+runs as a loop of three started builds, 60 and 120 seconds apart, each
+started only after the last is final, a refusal-only attempt not
+counted and followed by the 60-second backoff, a "start outcome
+unknown" attempt counted and followed by a wait of q + T, every
+deadline cut at the hook's budget, and is then skipped (R-46), that
 `PutApplication`, `UpdateTenant` and `PutAccount` stage a replace in
-`pending` together with the move to `UPDATING` in one conditional write
-and leave the live fields untouched, except that a `PutAccount` replace
-writes `externalId` into the record in that write and never into
-`pending` (R-48), that a `PutAccount` on an `UPDATING` account whose
-`maxCells` and `applicationIds` equal the change in flight writes only
-`externalId`, after the probe, conditioned on `owner`, `UPDATING` and
-the `operationId` it read, and starts no execution, while one whose
-values differ is a 409, and one whose write loses its condition to an
-event that ended reads the record once more and takes the replace
-path without a second probe (R-48), that the commit sets only the
-fields `pending` names and removes `pending`, that every placement
-transaction conditions the tenant, and on the new-cell path the account
-and the application, on a live status with an absent status read as
-`ACTIVE` (R-47, R-13), that `PutApplication` refuses an application
-hook on a `TENANT_*` or `ACCOUNT_*` event (R-39), that an application,
-tenant or account event's hook environment carries no `PARAM_`
-variable, no external id and no admin email (R-42), that each of the
-seven record operations starts one execution, named after the
+`pending` together with the move to `UPDATING` in one conditional
+write and leave the live fields untouched, except that a `PutAccount`
+replace writes `externalId` into the record in that write and never
+into `pending` (R-48), that a `PutAccount` on an `UPDATING` account
+whose `maxCells` and `applicationIds` equal the change in flight
+writes only `externalId`, after the probe, conditioned on `owner`,
+`UPDATING` and the `operationId` it read, and starts no execution,
+while one whose values differ is a 409, and one whose write loses its
+condition to an event that ended reads the record once more and takes
+the replace path without a second probe (R-48), that the commit sets
+only the fields `pending` names and removes `pending`, that every
+placement transaction conditions the tenant, and on the new-cell path
+the account and the application, on a live status with an absent
+status read as `ACTIVE` (R-47, R-13), that `PutApplication` refuses an
+application hook on a `TENANT_*` or `ACCOUNT_*` event (R-39), that an
+application, tenant or account event's hook environment carries no
+`PARAM_` variable, no external id and no admin email (R-42), that each
+of the seven record operations starts one execution, named after the
 `operationId` it stored, also when no hook matches, and compensates a
 failed start: a fresh insert whose start was refused by a delete
 conditioned on `CREATING`, its `operationId` and a count of 0, only
@@ -3641,30 +3633,28 @@ R-51), that a retried start answered `ExecutionAlreadyExists`, and a
 compensation whose condition fails on a record holding the same
 `operationId` as `ACTIVE`, the matching `*_FAILED` status or
 `UPDATING` without `pending`, or on a record a delete removed, answer
-202 with no further write (R-51), that
-the names of two operations accepted in the same millisecond differ
-(R-51), that the commit and every terminal
-write of a record event are conditioned on the execution's
-`operationId`, and an execution whose write fails on another
-`operationId` ends without a further write or hook, except that a
-delete whose failure write fails its condition still runs its `POST`
-hooks (R-50), that a commit naming a field outside the commit fields
-fails to `UPDATE_FAILED` without a retry (R-50), that each
-record delete moves the
-record to `DELETING` in one write conditioned on its status and its
-count of 0, and deletes it in one write conditioned on `DELETING` and
-the count still 0 (R-49), that a commit whose condition fails on a
-record still `UPDATING` without `pending` counts as committed and goes
-on to the post hooks (R-50), that a targeted `CreateDeployment` into an
-account that is not live answers `ConflictError`, never
-`InsufficientCapacityError` (§7.1), that
-untargeted placement into a fleet with a
-shared vendor account registered before a dedicated one creates the new
-cell in the dedicated account
+202 with no further write (R-51), that the names of two operations
+accepted in the same millisecond differ (R-51), that the commit and
+every terminal write of a record event are conditioned on the
+execution's `operationId`, and an execution whose write fails on
+another `operationId` ends without a further write or hook, except
+that a delete whose failure write fails its condition still runs its
+`POST` hooks (R-50), that a commit naming a field outside the commit
+fields fails to `UPDATE_FAILED` without a retry (R-50), that each
+record delete moves the record to `DELETING` in one write conditioned
+on its status and its count of 0, and deletes it in one write
+conditioned on `DELETING` and the count still 0 (R-49), that a commit
+whose condition fails on a record still `UPDATING` without `pending`
+counts as committed and goes on to the post hooks (R-50), that a
+targeted `CreateDeployment` into an account that is not live answers
+`ConflictError`, never `InsufficientCapacityError` (§7.1), that
+untargeted placement into a fleet with a shared vendor account
+registered before a dedicated one creates the new cell in the
+dedicated account
 ([ADR-035](../adr/0035-new-cells-go-to-dedicated-accounts-before-shared-ones.md)),
 and that with two shared accounts at 1/2 and 0/2 a `FILL` application
-creates its next cell in the first and a `ROUND_ROBIN` application in the
-second
+creates its next cell in the first and a `ROUND_ROBIN` application in
+the second
 ([ADR-036](../adr/0036-the-application-chooses-fill-or-round-robin-across-accounts.md)).
 
 Not tested by the steps above: a hook on an `APPLICATION_DELETE`,

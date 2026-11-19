@@ -1297,7 +1297,7 @@ compact re-serialisation (`jq -c .`) as `SCRIPT_OUTPUTS`, the build's only
 exported variable, `{}` when there is no file. CodeBuild returns every
 exported value as an empty string past a total between 8 and 16 KiB, so
 one small variable stays clear of it. That check runs in the container the
-script ran in, so the script task's JSONata `Output` checks the value
+script ran in, so a JSONata state after the script task checks the value
 again with a linear regular expression over the compact grammar, never
 `$parse`: an empty, over-long or malformed value ends a create or update
 `*_FAILED` with "script outputs rejected" and becomes `{}` on a delete. The

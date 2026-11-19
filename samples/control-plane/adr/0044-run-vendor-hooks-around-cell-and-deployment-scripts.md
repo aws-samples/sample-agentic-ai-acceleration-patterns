@@ -418,17 +418,16 @@ as a consumer of a global post hook.
   running after API Gateway stops waiting). Then, when
   `ListExecutions` with status `RUNNING` on the old workflow is empty,
   deploy the upgrade with that `allowedRoles` kept. (c) Redeploy with
-  `allowedRoles` restored; a
-  refusal cached during the drain can last one TTL after this.
-  Deploy (b) must not restore the roles: CloudFormation may update
-  the authorizer before the API function points at the new workflow,
-  and it deletes the old state machine only at cleanup, so an
-  operation accepted in between would start on the old workflow and be
-  stranded. The gate treats people and machine clients alike (R-38):
-  a machine client with an operator role gets 403 on every route until
-  (c), so automation that uses an operator role, status polling
-  included, must hold off or retry. The README lists this upgrade
-  step.
+  `allowedRoles` restored; a refusal cached during the drain can last
+  one TTL after this. Deploy (b) must not restore the roles:
+  CloudFormation may update the authorizer before the API function
+  points at the new workflow, and it deletes the old state machine
+  only at cleanup, so an operation accepted in between would start on
+  the old workflow and be stranded. The gate treats people and machine
+  clients alike (R-38): a machine client with an operator role gets
+  403 on every route until (c), so automation that uses an operator
+  role, status polling included, must hold off or retry. The README
+  lists this upgrade step.
 - `fleetName` narrows from `[a-z0-9-]{1,32}` to
   `[a-z0-9][a-z0-9-]{0,31}` (spec §3.3), because it now names
   CodeBuild projects, whose names start with a letter or digit. A
