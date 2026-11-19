@@ -4,14 +4,14 @@
 import { App, Validations } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
-import { SSM_AGENT_MESSAGE_ACTIONS, StressDriverStack, stressIdentityParameter } from '../driver/stress-driver.cdk';
+import { SSM_AGENT_MESSAGE_ACTIONS, StressDriverStack, UNIQUE_LAUNCH_TEMPLATE_FLAG, stressIdentityParameter } from '../driver/stress-driver.cdk';
 import { TIERS } from '../src/tiers';
 
 const MAX_RESOURCES = 450;
 const IDENTITY = stressIdentityParameter('StressTest');
 
 function stackOf(props: { instanceType: string; identityParameterName?: string; parameterPrefixes?: string[] }): StressDriverStack {
-  const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+  const app = new App({ context: { 'aws:cdk:bundling-stacks': [], [UNIQUE_LAUNCH_TEMPLATE_FLAG]: true } });
   Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true }));
   return new StressDriverStack(app, 'StressTest-driver', { identityParameterName: IDENTITY, ...props });
 }
@@ -54,6 +54,12 @@ describe('StressDriverStack at small (spec §3.1)', () => {
       { DeviceName: '/dev/xvda', Ebs: { VolumeSize: 30, VolumeType: 'gp3', Encrypted: true, DeleteOnTermination: true } },
     ]);
     template.hasResourceProperties('AWS::EC2::LaunchTemplate', { LaunchTemplateData: { MetadataOptions: { HttpTokens: 'required' } } });
+  });
+
+  it('names the launch template after the stack, so two drivers can share an account', () => {
+    const lt = Object.values(template.findResources('AWS::EC2::LaunchTemplate'))[0] as any;
+    expect(lt.Properties.LaunchTemplateName).not.toBe('HostLaunchTemplate');
+    expect(String(lt.Properties.LaunchTemplateName)).toContain('StressTest');
   });
 
   it('has one NAT gateway, the S3 gateway endpoint only, and a private results bucket', () => {

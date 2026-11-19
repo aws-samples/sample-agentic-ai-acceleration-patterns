@@ -20,6 +20,12 @@ import { acknowledgeGranularFinding, nagFindingResource } from './nag';
 /** Where the host installs the scripts and writes its output. */
 export const STRESS_HOME = '/opt/stress';
 
+/**
+ * The CDK feature flag that names the host's IMDSv2 launch template after its stack. The app
+ * must set it, or two driver stacks in one account clash on the name `HostLaunchTemplate`.
+ */
+export const UNIQUE_LAUNCH_TEMPLATE_FLAG = '@aws-cdk/aws-ec2:uniqueImdsv2TemplateName';
+
 /** A parameter name or path prefix the host may read: starts with `/`, then letters, digits and `_.-/`. */
 const PARAMETER_PATH = /^\/[A-Za-z0-9_.\-/]+$/;
 

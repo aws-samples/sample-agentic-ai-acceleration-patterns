@@ -15,7 +15,7 @@
 
 import { App, Validations } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
-import { StressDriverStack, stressIdentityParameter } from './stress-driver.cdk';
+import { StressDriverStack, UNIQUE_LAUNCH_TEMPLATE_FLAG, stressIdentityParameter } from './stress-driver.cdk';
 import { tierOf } from '../src/tiers';
 
 const PREFIX = /^[A-Za-z][A-Za-z0-9]{0,39}$/;
@@ -30,7 +30,10 @@ const parameterPrefixes = (process.env.STRESS_PARAMETER_PREFIXES ?? '')
   .map((p) => p.trim())
   .filter((p) => p.length > 0);
 
-const app = new App();
+// The stack has no cdk.json, so the feature flag that matters is set here: without it, every
+// driver stack's IMDSv2 launch template is named `HostLaunchTemplate`, and a second
+// `<prefix>-driver` in the account fails to create.
+const app = new App({ context: { [UNIQUE_LAUNCH_TEMPLATE_FLAG]: true } });
 Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true, writeSuppressionsToCloudFormation: true }));
 new StressDriverStack(app, `${prefix}-driver`, {
   instanceType: tier.driverInstanceType,
