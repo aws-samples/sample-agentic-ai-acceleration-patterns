@@ -175,6 +175,14 @@ describe('completeSignIn (§3.5 step 4)', () => {
     expect(env.navigated).toEqual([]);
   });
 
+  test('single, appDomain: an expired refresh token (invalid_grant) signs out instead of returning to the picker', async () => {
+    const f = issuer({ access_token: jwt({ tenants: [HOST_TENANT, OTHER] }), refresh_token: 'r' },
+      () => json(400, { error: 'invalid_grant' }));
+    const { env, outcome } = await signedInVia(single, f);
+    if (outcome.kind !== 'pick-tenant') throw new Error('unreachable');
+    await expect(settleTenant(env, single.body, outcome.subject, OTHER)).resolves.toEqual({ kind: 'sign-out' });
+  });
+
   test('host, pooled tenant host: the exchange refusing the host\'s own tenant signs out (§3.5 step 4)', async () => {
     const f = issuer({ access_token: jwt({ tenants: [HOST_TENANT] }), refresh_token: 'r' }, () => json(400, { error: 'invalid_target' }));
     expect((await signedInVia(pooled, f)).outcome).toEqual({ kind: 'sign-out' });
@@ -220,9 +228,22 @@ describe('token exchange (§7.2, tenant-identity §5.4.1)', () => {
     expect(env.slept).toEqual([1000, 3000]);
   });
 
-  test('does not retry a 4xx such as invalid_target', async () => {
-    const env = envFor(pooled.host, fakeFetch(() => json(400, { error: 'invalid_target' })));
-    await expect(narrowToken(env, cfg, args)).resolves.toEqual({ ok: false, reason: 'refused' });
+  test.each([
+    [400, 'invalid_target', 'tenant-refused'],
+    [400, 'invalid_grant', 'refused'],
+    [400, 'invalid_scope', 'refused'],
+    [403, 'invalid_target', 'refused'],
+  ])('does not retry a %s %s, and reports it as %s', async (status, error, reason) => {
+    const env = envFor(pooled.host, fakeFetch(() => json(status, { error })));
+    await expect(narrowToken(env, cfg, args)).resolves.toEqual({ ok: false, reason });
+    expect(env.slept).toEqual([]);
+  });
+
+  test('an aborted call is not retried (§7.2)', async () => {
+    const abort = new DOMException('The operation was aborted.', 'AbortError');
+    const env = envFor(pooled.host, fakeFetch(() => Promise.reject(abort)));
+    await expect(narrowToken(env, cfg, args)).resolves.toEqual({ ok: false, reason: 'aborted' });
+    expect((env.fetch as ReturnType<typeof fakeFetch>).calls).toHaveLength(1);
     expect(env.slept).toEqual([]);
   });
 

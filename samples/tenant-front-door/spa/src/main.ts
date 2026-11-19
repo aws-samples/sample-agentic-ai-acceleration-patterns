@@ -68,6 +68,8 @@ let session: Session | undefined;
 let retry: (() => void) | undefined;
 /** Aborted when the tenant's state is cleared, so its calls stop and their late answers are dropped (§7.2). */
 let scope = new AbortController();
+/** The agent run that is streaming; a new run or the end of the session aborts it. */
+let agentRun: AbortController | undefined;
 
 function status(text: string): void {
   ui.status.textContent = text;
@@ -77,6 +79,8 @@ function status(text: string): void {
 function clearTenantView(): void {
   scope.abort();
   scope = new AbortController();
+  agentRun?.abort();
+  agentRun = undefined;
   session = undefined;
   ui.actions.hidden = true;
   ui.whoamiOut.textContent = '';
@@ -187,8 +191,10 @@ async function start(): Promise<void> {
     ev.preventDefault();
     const s = session;
     if (s === undefined) return;
-    const { signal } = scope;
-    void import('./agent-view').then((m) => m.runAgent(env.fetch, signal, s.accessToken, ui.backend.value, ui.prompt.value, ui.agentOut));
+    agentRun?.abort();
+    const run = new AbortController();
+    agentRun = run;
+    void import('./agent-view').then((m) => m.runAgent(env.fetch, run.signal, s.accessToken, ui.backend.value, ui.prompt.value, ui.agentOut));
   });
 
   const cb = parseCallback(query);
