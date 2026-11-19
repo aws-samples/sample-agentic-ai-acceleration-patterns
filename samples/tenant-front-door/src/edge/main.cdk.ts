@@ -48,6 +48,7 @@ import {
   REGISTRAR_ENV,
   SIGNIN_HOST_LABEL,
   substituteRouterTokens,
+  TAG_DISTRIBUTION_ID,
 } from '../shared/contracts';
 import {
   appEntry,
@@ -327,6 +328,11 @@ export class MainStack extends Stack {
       connectionGroupId: connectionGroup.attrId,
       domains: [pooledDomain],
       enabled: true,
+      // The distribution tag at create: a front door's registrar may tag
+      // only a distribution tenant without one, and may update only one
+      // tagged with its own distribution, so no registrar of another front
+      // door can tag or disable this one (threat model AR-33, M-16).
+      tags: [{ key: TAG_DISTRIBUTION_ID, value: distribution.ref }],
     });
     this.pooledTenantId = pooled.attrId;
     this.routingEndpoint = connectionGroup.attrRoutingEndpoint;
