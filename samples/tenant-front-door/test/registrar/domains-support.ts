@@ -14,6 +14,7 @@ import {
   ListCertificatesCommand,
   ListTagsForCertificateCommand,
   RequestCertificateCommand,
+  ResourceNotFoundException,
 } from '@aws-sdk/client-acm';
 import {
   CloudFrontClient,
@@ -101,9 +102,20 @@ export class FakeAcm {
   /** Summaries per ListCertificates page. */
   pageSize = 1000;
   requests = 0;
+  /** Idempotency tokens of deleted certificates; ACM still answers them with the deleted ARN within its hour. */
+  readonly deletedTokens = new Map<string, string>();
+  /** Certificates still listed but deleted before the read: DescribeCertificate answers ResourceNotFoundException. */
+  readonly goneOnRead = new Set<string>();
 
   add(arn: string, certificate: FakeCertificate): void {
     this.certificates.set(arn, certificate);
+  }
+
+  /** Deletes a certificate as the sweeper does; its idempotency token keeps returning the ARN. */
+  delete(arn: string): void {
+    const token = this.certificates.get(arn)?.idempotencyToken;
+    if (token !== undefined) this.deletedTokens.set(token, arn);
+    this.certificates.delete(arn);
   }
 }
 
@@ -137,7 +149,8 @@ export function installAcm(acm: FakeAcm): void {
     Tags: acm.certificates.get(input.CertificateArn)?.tags ?? [],
   }));
   acmMock.on(DescribeCertificateCommand).callsFake((input: { CertificateArn: string }) => {
-    const c = acm.certificates.get(input.CertificateArn)!;
+    const c = acm.certificates.get(input.CertificateArn);
+    if (c === undefined || acm.goneOnRead.has(input.CertificateArn)) throw new ResourceNotFoundException({ message: 'not found', $metadata: {} });
     let record = c.record;
     if (acm.recordDelay > 0) {
       acm.recordDelay--;
@@ -159,6 +172,8 @@ export function installAcm(acm: FakeAcm): void {
     for (const [arn, c] of acm.certificates) {
       if (c.idempotencyToken !== undefined && c.idempotencyToken === input.IdempotencyToken) return { CertificateArn: arn };
     }
+    const deleted = input.IdempotencyToken === undefined ? undefined : acm.deletedTokens.get(input.IdempotencyToken);
+    if (deleted !== undefined) return { CertificateArn: deleted };
     acm.requests++;
     const arn = certificateArn(100 + acm.requests);
     acm.add(arn, {
