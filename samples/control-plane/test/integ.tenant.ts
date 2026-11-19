@@ -879,6 +879,7 @@ integ.assertions
 integ.assertions
   // outputPaths keeps only the four limits: four whole project descriptions
   // exceed the 4 KB custom resource response ("Response object is too long").
+  // A flattened response is checked path by path; `expect` sees no object.
   .awsApiCall('codebuild', 'batchGetProjects', {
     names: [
       stack.provisioning.cellProject.projectName,
@@ -887,9 +888,10 @@ integ.assertions
       stack.provisioning.appHookProject.projectName,
     ],
   }, [0, 1, 2, 3].map((i) => `projects.${i}.concurrentBuildLimit`))
-  .expect(ExpectedResult.objectLike(Object.fromEntries(
-    [0, 1, 2, 3].map((i) => [`projects.${i}.concurrentBuildLimit`, INTEG_CONCURRENT_BUILD_LIMIT]),
-  )));
+  .assertAtPath('projects.0.concurrentBuildLimit', ExpectedResult.exact(INTEG_CONCURRENT_BUILD_LIMIT))
+  .assertAtPath('projects.1.concurrentBuildLimit', ExpectedResult.exact(INTEG_CONCURRENT_BUILD_LIMIT))
+  .assertAtPath('projects.2.concurrentBuildLimit', ExpectedResult.exact(INTEG_CONCURRENT_BUILD_LIMIT))
+  .assertAtPath('projects.3.concurrentBuildLimit', ExpectedResult.exact(INTEG_CONCURRENT_BUILD_LIMIT));
 // ADR-0047: B's cell role carries the owner's policy; B's tenant role is
 // not asked, the unit tests pin that it gets none.
 integ.assertions
