@@ -6,8 +6,9 @@ import { refuse } from './errors';
 import { parseCreatedAt, toControlPlaneId } from '../shared/route-table';
 
 /**
- * The control-plane reads the registrar makes on every write (spec §3.4
- * step 2): `GetCell`, `GetDeployment` and `GetTenant`, with a
+ * The control-plane reads the registrar makes on every write that sets
+ * placement (spec §3.4 step 2; the edge operator role's deletes and status
+ * changes skip them, ADR-0025): `GetCell`, `GetDeployment` and `GetTenant`, with a
  * client-credentials reader token from the vendor IdP (ADR-0015, spike
  * S-9, control-plane R-36 and R-38). Any read that does not give a usable
  * answer throws a 503: the write is refused, never made unchecked.

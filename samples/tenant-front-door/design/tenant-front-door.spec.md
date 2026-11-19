@@ -148,7 +148,8 @@ has passed the registrar's domain challenge (ADR-0018).
    change is checked against the account recorded on the tenant route.
 6. **P-6: Placement has one source of truth.** The control plane owns where
    each cell and deployment lives. The registrar reads it back on every
-   write and keeps no placement data of its own.
+   write that sets a route's placement and keeps no placement data of
+   its own.
 7. **P-7: Stop bad traffic at the edge.** Requests with no tenant, unknown
    or suspended tenants and cross-site API calls are refused before any
    origin is reached, so they cost no origin capacity.
@@ -462,8 +463,8 @@ Every global hook on the control plane runs under the same
 `<fleet>-global-hook` role (control-plane R-41). Admission therefore
 proves that a vendor global hook is calling, not that the route hook is
 calling for the record it names. So the registrar still reads the
-control plane on every write, takes the placement from it, and admits a
-global hook's write only while the record has an operation of the
+control plane on every global hook write, takes the placement from
+it, and admits a global hook's write only while the record has an operation of the
 matching kind in flight (ADR-0015, ADR-0017). That binds a write to the
 record's status, not to the hook, its phase or its execution: the record
 carries no execution id to compare. Any global hook, in either phase,
@@ -487,7 +488,8 @@ also put a tenant's route during that deployment's create or update. In a tenant
 script, which the tenant controls, still chooses its own cell's origin
 within the pinned form.
 
-On every write:
+On every write, except the edge operator role's deletes and status
+changes (below):
 
 1. Take the caller's role from the signed request context: the global
    hook role or the edge operator role. Ignore any account or cell id in
@@ -952,9 +954,12 @@ finds the tenant's dedicated `host#<d>` key from the `d` of its
 `tenant#` entry. The edge operator role's deletes skip step 2: it may
 remove any tenant or cell route, to clear one that a skipped delete
 hook left behind (below). `UpdateTenantRouteStatus` skips step 2 as
-well: it changes only `s` of an existing `tenant#` entry, so the
-operator can suspend a tenant while the control plane cannot be read
-(ADR-0025). Status changes (`suspended`, `active`),
+well: it runs step 1, the write of step 5 with its ETag and its
+conflict re-read but without the domain sub-steps, and step 6. It
+changes only `s` of an existing `tenant#` entry and copies every other
+field as stored, so the operator can suspend a tenant while the control
+plane cannot be read (ADR-0025). A tenant with no `tenant#` entry gets
+409. Status changes (`suspended`, `active`),
 dedicated domains and `DeleteHostRoute`, which clears a `host#` key left
 behind (§5.1), are vendor operations: only the edge account's operator
 role may make them.
@@ -1951,8 +1956,9 @@ ingress behind `/agents/*` needs its URL form checked first.
   read it, so the application's shared stack in each cell account copies
   `distributionArn`, which `CellRouteAccess` needs, to
   `/application-plane/applications/<applicationId>/shared/front-door`
-  (control-plane §6.2), as a plain string, not JSON, so a cell stack
-  reads it as a CloudFormation SSM parameter (ADR-0026). The `RouteHookAccess` stack writes
+  (control-plane §6.2): the ARN alone as a plain string, which a cell
+  stack reads as a CloudFormation SSM parameter (ADR-0026). The
+  `RouteHookAccess` stack writes
   `/application-plane/applications/<applicationId>/shared/front-door-hook`
   in the control plane's account, with `registrarUrl`, for the route
   hook (§3.1). The names differ, so a control-plane account that also
@@ -2141,7 +2147,7 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0023](../adr/0023-pin-imported-spa-chunks-with-an-import-map-integrity.md) | Pin each imported SPA chunk with an `integrity` entry in an import map, and the entry script with `integrity`; the import map's hash joins the entry's in the CSP; amends ADR-0008 | an import map with `integrity`; one bundle with no imports; one hash per chunk in the CSP |
 | [ADR-0024](../adr/0024-test-the-agent-route-against-a-stand-in-ingress.md) | Test the agent route against the stand-in ingress of spike S-5, not a composed `agentic-runtime-isolation` | compose `agentic-runtime-isolation` (deploy or reuse); a stand-in |
 | [ADR-0025](../adr/0025-change-a-route-status-without-reading-the-control-plane.md) | The edge operator's status change skips the control-plane read, so a suspension works while the control plane is down | read the placement first; skip the read |
-| [ADR-0026](../adr/0026-copy-the-distribution-arn-to-cell-accounts-as-a-plain-string.md) | Copy the distribution ARN to each cell account as a plain string, not JSON | a JSON document; a plain string |
+| [ADR-0026](../adr/0026-copy-the-distribution-arn-to-cell-accounts-as-a-plain-string.md) | Copy the distribution ARN to each cell account as a plain string | a JSON document; a plain string |
 
 ## 9. Spikes
 

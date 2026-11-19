@@ -44,9 +44,10 @@ import type {
 /**
  * The route registrar (spec §3.4, §5.1): the only writer of the route
  * table. Admission (the resource policy, then `classifyCaller` in the
- * function) only gets a caller here; every write is checked against the
- * control plane, never against the request (ADR-0013, ADR-0015,
- * ADR-0017).
+ * function) only gets a caller here; every write that sets placement is
+ * checked against the control plane, never against the request
+ * (ADR-0013, ADR-0015, ADR-0017). The edge operator role's deletes and
+ * status changes set none and skip the read (ADR-0025).
  */
 
 /** Built by the function per request from the signed request context. */
