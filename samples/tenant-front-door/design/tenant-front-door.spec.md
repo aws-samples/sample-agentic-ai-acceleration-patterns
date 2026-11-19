@@ -677,13 +677,18 @@ given below):
       request counts once against ACM's yearly certificate requests
       (§4.1), so repeats over a persistent failure spend one request per
       hour in which they come; the operator fixes the cause the 422 names
-      before repeating. The sweeper deletes a registrar certificate in a
-      terminal status that nothing uses, whatever its tenant's `d`, in
-      its next run, so a repeat within the hour can get back the ARN of a
-      certificate the sweeper has deleted. The registrar reads a
-      certificate that no longer exists (`ResourceNotFoundException`) as
-      no certificate: it answers 202 `certificate` without `record`, and
-      a repeat after the hour requests a new one. Dropping the domain and
+      before repeating. The sweeper keeps a registrar certificate in a
+      terminal status until an hour after its `CreatedAt`, so the 422 and
+      its reason hold for the whole hour, and then deletes it if nothing
+      uses it, whatever its tenant's `d`, logging `certificate deleted`
+      with its status and ACM's `FailureReason` (an ACM enum value, never
+      tenant data). A timed-out certificate is past its hour, so the
+      sweeper's next run deletes it. A repeat within the hour can still
+      get back the ARN of a certificate deleted another way (by hand, or
+      by another tool). The registrar reads a certificate that no longer
+      exists (`ResourceNotFoundException`) as no certificate: it answers
+      202 `certificate` without `record`, and a repeat after the hour
+      requests a new one. Dropping the domain and
       setting it again issues a new challenge and so, once it passes, a
       request under a new token, at any time.
 
@@ -997,8 +1002,11 @@ given below):
    pending), and whose domain is no longer the `d` of the tenant it is
    tagged with, is deleted on its own. So is a registrar certificate in a
    terminal status (sub-step 3) that no distribution tenant uses, whatever
-   its tenant's `d`, because it can never serve and counts against ACM's
-   quota. The sweeper reads the tenant's `d` with `GetKey` again right
+   its tenant's `d`, once an hour has passed since its `CreatedAt`, because
+   it can never serve and counts against ACM's quota. Within that hour,
+   ACM's idempotency window, it is kept like a pending certificate, so a
+   repeat still gets its 422 (sub-step 6). Its `certificate deleted` log
+   carries its status and ACM's `FailureReason`. The sweeper reads the tenant's `d` with `GetKey` again right
    before each disable and each delete, with no cache for the run, so a
    domain the registrar set again meanwhile is left alone. A disabled
    distribution tenant whose domain is its tenant's `d` and whose
@@ -1730,8 +1738,10 @@ and writes no `host#` key. Otherwise it creates the dedicated
 distribution tenant and writes the domain's `host#` key, which routes
 requests and records its owner (`t`, `ac`), and answers 200. The tenant
 then points the domain with a CNAME at the main stack's
-`RoutingEndpoint` output (§6.4). A failed validation gets 422 on a
-repeat within ACM's one-hour idempotency window; a repeat after that
+`RoutingEndpoint` output (§6.4). A failed validation gets 422, with
+ACM's failure reason, on every repeat within ACM's one-hour idempotency
+window from the request: the sweeper keeps the failed certificate for that
+hour, then deletes it and logs the reason. A repeat after that
 hour, or over a timed-out validation, requests a new certificate under
 the same challenge and answers 202 `certificate`, and each such request
 counts once against ACM's yearly certificate requests (§3.4 step 5
@@ -1758,7 +1768,8 @@ tenant, one another tenant holds pending (a registrar certificate for
 it tagged with that tenant), one CloudFront already serves (`CNAMEAlreadyExists`), or a
 distribution tenant or certificate tagged for another tenant (the
 message names no tenant); 422 when the dedicated domain's certificate
-failed validation, on a repeat within ACM's hour of its request (a
+failed validation, on any repeat within ACM's hour of its request, for
+which the sweeper keeps the failed certificate (a
 domain challenge never fails: it expires and is issued again); 507
 when a write would exceed the route table's 5 MB (ADR-0012); 429 with
 `reason: certificate-quota` when ACM refuses a certificate request for

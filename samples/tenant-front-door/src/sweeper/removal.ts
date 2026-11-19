@@ -14,7 +14,8 @@
  * - deletes a registrar certificate that no distribution tenant uses and
  *   whose domain is no longer the `d` of the tenant it is tagged with (the
  *   domain was dropped or changed while the certificate was pending), or
- *   that is in a terminal status, whatever the tenant's `d`;
+ *   that is in a terminal status, whatever the tenant's `d`, once ACM's
+ *   one-hour idempotency window from its `CreatedAt` has passed;
  * - logs a disabled distribution tenant whose domain is still routed for
  *   its tenant: one disabled outside the registrar and this job, by hand
  *   or by another tool. A removal cannot leave it, because `d` is read
@@ -65,6 +66,8 @@ export interface RemovalDeps {
   readonly distributionId: string;
   /** The pooled distribution tenant's id: skipped before any read, so no tag on it makes it removable. */
   readonly pooledTenantId: string;
+  /** Milliseconds since the epoch. */
+  readonly now: () => number;
 }
 
 export interface RemovalResult {
@@ -75,6 +78,14 @@ export interface RemovalResult {
   readonly disabledRouted: number;
   readonly failures: number;
 }
+
+/**
+ * How long ACM keeps a request's idempotency token. Within it a repeat of
+ * the registrar's request gets the same certificate back, and the 422
+ * carrying its failure reason, so a terminal certificate is kept until
+ * this long after its `CreatedAt` (spec §3.4 step 5 sub-step 6).
+ */
+const ACM_IDEMPOTENCY_WINDOW_MS = 60 * 60 * 1000;
 
 /** A distribution tenant's status once its last change has reached every edge location. */
 const DEPLOYED = 'Deployed';
@@ -153,8 +164,11 @@ export async function runRemoval(deps: RemovalDeps): Promise<RemovalResult> {
 
   /**
    * Deletes a registrar certificate that nothing uses: one in a terminal
-   * status whatever its tenant's `d` (it can never serve), any other once
-   * a fresh read shows its domain is no longer the tenant's `d`.
+   * status whatever its tenant's `d` (it can never serve) once ACM's hour
+   * from its `CreatedAt` has passed, any other once a fresh read shows its
+   * domain is no longer the tenant's `d`. A terminal certificate within its
+   * hour is treated as a pending one, so a repeat of the request still gets
+   * it back and answers 422 with its reason.
    */
   const deleteCertificate = async (arn: string, tenantId: string, domains: readonly string[]): Promise<void> => {
     const domain = domains.join(',');
@@ -164,10 +178,19 @@ export async function runRemoval(deps: RemovalDeps): Promise<RemovalResult> {
       return;
     }
     const terminal = TERMINAL_CERTIFICATE_STATUSES.includes(certificate?.Status ?? '');
-    if (!terminal && !(await isOrphan(tenantId, domains))) return;
+    const createdAt = certificate?.CreatedAt?.getTime();
+    const pastHour = createdAt === undefined || createdAt + ACM_IDEMPOTENCY_WINDOW_MS <= deps.now();
+    if (!(terminal && pastHour) && !(await isOrphan(tenantId, domains))) return;
     await deps.acm.send(new DeleteCertificateCommand({ CertificateArn: arn }));
     counts.deletedCertificates++;
-    logLine('INFO', 'certificate deleted', { tenantId, domain, certificateArn: arn, status: terminal ? certificate?.Status : undefined });
+    // FailureReason is one of ACM's enum values; it names no tenant.
+    logLine('INFO', 'certificate deleted', {
+      tenantId,
+      domain,
+      certificateArn: arn,
+      status: terminal ? certificate?.Status : undefined,
+      failureReason: terminal ? certificate?.FailureReason : undefined,
+    });
   };
 
   // --- Distribution tenants -----------------------------------------------
