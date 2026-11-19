@@ -81,7 +81,7 @@ steps.
 | 3 | `CreateUser` u1/u2; topology-specific conflicts; R-12 isolation |
 | 4 | token contract: tenant claim per topology, ID token has none |
 | 5 | claim integrity: the tenant claim cannot be chosen by the caller |
-| 6a | `RefreshToken` on A's path naming u1 with u2's (tenant B's) refresh token: 404, no token (`pool-per-tenant`: 409, A's client refuses B's token); ADR-0013 amendment 2026-11-19 |
+| 6a | `RefreshToken` on A's path naming u1 with u2's (tenant B's) refresh token: 404, no token (`pool-per-tenant`: 409, A's client refuses B's token); with a1's refresh token (another user of A): 404, no token, in every topology (ADR-0041) |
 | 6 | refresh re-runs the trigger (`shared-pool-multi-tenant`) |
 | 7 | narrowing: one tenant, subset scopes, refusals, direct bypass; B cannot narrow to write; CORS answers for a listed, pattern, unlisted, two-label and missing `Origin` (ADR-0040) |
 | 8 | tenant admin: the narrowed admin token manages only tenant A; the admin's cut shows in u1's next token |

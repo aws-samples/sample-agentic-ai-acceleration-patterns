@@ -209,7 +209,7 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
     });
   });
 
-  describe('refreshToken binds the result to the path\'s user and tenant (ADR-0013 amendment)', () => {
+  describe('refreshToken binds the result to the path\'s user and tenant (ADR-0041)', () => {
     beforeEach(() =>
       cognito.on(AdminGetUserCommand).resolves({
         Username: 'u1',

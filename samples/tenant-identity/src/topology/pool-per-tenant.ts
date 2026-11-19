@@ -239,7 +239,7 @@ export class PoolPerTenantProvisioner implements Provisioner {
   /**
    * R-12: in pool-per-tenant, membership is existence in the tenant's pool.
    * Returns the user so `refreshToken` can bind its result to the user's `sub`
-   * through the same check (ADR-0013 amendment).
+   * through the same check (ADR-0041).
    */
   private async member(tenant: TenantRecord, username: string): ReturnType<typeof adminGetUser> {
     return adminGetUser(this.cognito, this.poolId(tenant), username);
@@ -304,7 +304,7 @@ export class PoolPerTenantProvisioner implements Provisioner {
 
   async refreshToken(tenant: TenantRecord, username: string, refreshToken: string): Promise<TokenSet> {
     // R-12 (existence in the tenant's pool), then bind the refreshed token to
-    // the path's user (ADR-0013 amendment): another user's refresh token from
+    // the path's user (ADR-0041): another user's refresh token from
     // the same pool would otherwise be served.
     const user = await this.member(tenant, username);
     const tokens = await adminRefresh(this.cognito, this.poolId(tenant), this.clientId(tenant), refreshToken);

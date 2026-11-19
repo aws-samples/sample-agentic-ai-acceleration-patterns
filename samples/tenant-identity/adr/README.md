@@ -49,3 +49,4 @@ Template: [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md#2-d
 | [ADR-0038](0038-the-mount-follows-the-control-planes-deployment-model.md) | The mount follows the control plane's deployment model | Accepted | 2026-11-11 |
 | [ADR-0039](0039-keep-the-own-exchange-endpoint-over-cognito-token-exchange.md) | Keep the sample's exchange endpoint, because Cognito token exchange cannot pick a tenant | Accepted | 2026-11-17 |
 | [ADR-0040](0040-let-listed-browser-origins-read-the-exchange-answer.md) | Let listed browser origins read the exchange answer | Accepted | 2026-11-18 |
+| [ADR-0041](0041-bind-refreshtoken-result-to-the-path-user-and-tenant.md) | Bind `RefreshToken`'s result to the path's user and tenant | Accepted | 2026-11-19 |

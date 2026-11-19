@@ -9,9 +9,58 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import { mockClient } from 'aws-sdk-client-mock';
 import 'aws-sdk-client-mock-jest';
-import { cognitoError } from './helpers';
+import { accessJwt, cognitoError } from './helpers';
 import { InvalidInputError, NotFoundError } from '../../src/shared/errors';
-import { adminPasswordSignIn, emailFilter, findUserByEmail } from '../../src/topology/cognito-users';
+import {
+  adminPasswordSignIn,
+  assertRefreshedFor,
+  emailFilter,
+  findUserByEmail,
+  type TenantClaim,
+} from '../../src/topology/cognito-users';
+
+describe('assertRefreshedFor (R-12 binding, ADR-0041)', () => {
+  const SUB = 'sub-u1';
+  const A = 'tenant-a';
+  const B = 'tenant-b';
+
+  const served: Array<[string, TenantClaim, Record<string, unknown>]> = [
+    ['tenant_id names the tenant', 'tenant_id', { sub: SUB, tenant_id: A }],
+    ['tenants contains the tenant', 'tenants', { sub: SUB, tenants: [B, A] }],
+  ];
+
+  it.each(served)('serves the token when %s', (_name, claim, claims) => {
+    expect(() => assertRefreshedFor({ accessToken: accessJwt(claims) }, SUB, A, claim)).not.toThrow();
+  });
+
+  const refused: Array<[string, TenantClaim, Record<string, unknown>, string | undefined]> = [
+    ['another user (tenant_id)', 'tenant_id', { sub: 'sub-u2', tenant_id: A }, SUB],
+    ['another user (tenants)', 'tenants', { sub: 'sub-u2', tenants: [A] }, SUB],
+    ['another tenant (tenant_id)', 'tenant_id', { sub: SUB, tenant_id: B }, SUB],
+    ['another tenant (tenants)', 'tenants', { sub: SUB, tenants: [B] }, SUB],
+    ['an ID token in the access slot (tenant_id)', 'tenant_id', { sub: SUB, tenant_id: A, token_use: 'id' }, SUB],
+    ['an ID token in the access slot (tenants)', 'tenants', { sub: SUB, tenants: [A], token_use: 'id' }, SUB],
+    ['no tenant_id claim', 'tenant_id', { sub: SUB }, SUB],
+    ['tenants mode with only tenant_id', 'tenants', { sub: SUB, tenant_id: A }, SUB],
+    ['tenants as a string, not an array', 'tenants', { sub: SUB, tenants: A }, SUB],
+    ['no sub in the token', 'tenant_id', { tenant_id: A }, SUB],
+    ['a user record with no sub (tenant_id)', 'tenant_id', { tenant_id: A }, undefined],
+    ['a user record with no sub (tenants)', 'tenants', { tenants: [A] }, undefined],
+    ['a user record with an empty sub', 'tenant_id', { sub: '', tenant_id: A }, ''],
+  ];
+
+  it.each(refused)('refuses %s with the non-member 404', (_name, claim, claims, expectedSub) => {
+    const call = () => assertRefreshedFor({ accessToken: accessJwt(claims) }, expectedSub, A, claim);
+    expect(call).toThrow(NotFoundError);
+    expect(call).toThrow('User not found in tenant');
+  });
+
+  it.each<TenantClaim>(['tenant_id', 'tenants'])('treats an unreadable token as a server fault (%s)', (claim) => {
+    const call = () => assertRefreshedFor({ accessToken: 'not-a-jwt' }, SUB, A, claim);
+    expect(call).toThrow('Refreshed access token is not readable');
+    expect(call).not.toThrow(NotFoundError);
+  });
+});
 
 describe('emailFilter (ListUsers attribute filter)', () => {
   it('quotes a plain address', () => {

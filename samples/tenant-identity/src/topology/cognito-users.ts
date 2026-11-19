@@ -322,7 +322,7 @@ export async function adminRefresh(
 export type TenantClaim = 'tenant_id' | 'tenants';
 
 /**
- * ADR-0013 amendment (2026-11-19): REFRESH_TOKEN_AUTH takes only the refresh
+ * ADR-0041: REFRESH_TOKEN_AUTH takes only the refresh
  * token, so Cognito serves whoever the token belongs to. The path's user was
  * checked (R-12); this binds the result to that user. The access token's
  * `sub` must equal the path user's `sub` (from AdminGetUser: immutable,

@@ -61,7 +61,7 @@ export function cognitoError(name: string, message = 'cognito'): Error {
 
 /**
  * A JWT shaped like a Cognito access token, unsigned: the refresh binding
- * (ADR-0013 amendment) reads the claims of a token Cognito returned in the
+ * (ADR-0041) reads the claims of a token Cognito returned in the
  * same call, so the tests only need its payload.
  */
 export function accessJwt(claims: Record<string, unknown>): string {

@@ -272,7 +272,7 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
 
   async refreshToken(tenant: TenantRecord, username: string, refreshToken: string): Promise<TokenSet> {
     // R-12, then bind the refreshed token to the path's user and tenant
-    // (ADR-0013 amendment). Group membership does not carry `sub`, so one
+    // (ADR-0041). Group membership does not carry `sub`, so one
     // AdminGetUser reads it.
     await this.assertMember(tenant, username);
     const user = await adminGetUser(this.cognito, this.userPoolId, username);

@@ -576,8 +576,7 @@ tenant claim names `{tenantId}` (1, 2: `tenant_id`; 3: `tenants` contains it).
 On a mismatch the call fails with the same `ResourceNotFoundError` (404) and
 fixed text as a non-member, and the tokens are discarded, never returned. The
 claims are read without a signature check because the token came back from
-Cognito in that same call, not from the caller (ADR-0013, amendment
-2026-11-19). In topology 1 a foreign tenant's refresh token is already
+Cognito in that same call, not from the caller (ADR-0041). In topology 1 a foreign tenant's refresh token is already
 refused by the tenant's own app client (409, as any refused refresh); the
 binding covers another user's refresh token from the same pool.
 
@@ -1096,14 +1095,17 @@ step 12.
    user created directly in pool B (bypassing the platform API) still
    receives `tenant_id = B`, because the claim comes from the pool, not the
    caller.
+   6a. **`RefreshToken` binding (R-12), all topologies, run before step 6.**
+   `RefreshToken` on A's path naming u1, with u2's (tenant B's) refresh
+   token → 404 with no token in the body (topology 1: A's app client
+   refuses the foreign pool's token first, 409, also with no token).
+   `RefreshToken` on A's path naming u1, with a1's refresh token (another
+   user of A) → 404 with no token in every topology (ADR-0041).
 6. **Refresh re-runs the trigger (3):** `DeleteMembership` u1 from B;
    `RefreshToken` with u1's refresh token → verify → `tenants = [A]`.
    `DeleteMembership` u1 from A → 409 (last tenant). `CreateMembership` u1 → B
    again, refresh → `tenants = [A, B]`, so u1 enters step 9 as a
-   multi-tenant user. **All topologies (R-12 binding):** `RefreshToken` on
-   A's path naming u1, with u2's (tenant B's) refresh token → 404 with no
-   token in the body (topology 1: Cognito refuses the foreign pool's token
-   first, 409, also with no token).
+   multi-tenant user.
 7. **Narrowing (P-10), all topologies.** Exchange u1's refresh token with
    `scope=sample/read`, plus `resource=A` (required in 3), and verify.
    The result has `tenant_id = A`, no `tenants` claim,

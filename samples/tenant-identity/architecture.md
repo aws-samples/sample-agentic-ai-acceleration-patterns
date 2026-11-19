@@ -20,7 +20,7 @@
 > mounting spec §10 steps 1–12 including 5b and 9b: 11/11 e2e assertions
 > passed in about 11 minutes, and teardown left no stack, parameter, pool,
 > REST API or log group. ADRs: see
-> [`adr/`](./adr/README.md) (ADR-0001..0040).
+> [`adr/`](./adr/README.md) (ADR-0001..0041).
 
 This document describes what the sample deploys and runs, not the plan. Where
 the code and the specification diverge, the code and its ADRs win; the

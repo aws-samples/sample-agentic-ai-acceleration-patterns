@@ -293,7 +293,7 @@ describe('SharedPoolMultiTenantProvisioner (spec §7.3)', () => {
     });
   });
 
-  describe('refreshToken binds the result to the path\'s user and tenant (ADR-0013 amendment)', () => {
+  describe('refreshToken binds the result to the path\'s user and tenant (ADR-0041)', () => {
     beforeEach(() => {
       userGroups(`t-${IDS.a}`, `t-${IDS.b}`);
       cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: 'sub', Value: 'sub-u1' }], UserStatus: 'CONFIRMED' });

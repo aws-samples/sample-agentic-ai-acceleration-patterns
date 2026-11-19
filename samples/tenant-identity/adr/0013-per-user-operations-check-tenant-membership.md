@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-21
+- Amended by: ADR-0041
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -49,38 +50,6 @@ like its other actions (N-3). The check and the action are two calls, so a
 concurrent membership change can race them; at vendor scale that is
 accepted.
 
-## Amendment 2026-11-19: bind RefreshToken's result to the path's user and tenant
-
-Found by the W-6 stress slice (PR #64). `RefreshToken` checked that the
-path's user is a member of the path's tenant, then ran `REFRESH_TOKEN_AUTH`
-with the body's refresh token. That token names no user, so tenant A's
-refresh token sent on tenant B's path with a real user name of B passed the
-check and returned A's own new tokens. In `pool-per-tenant` the tenant's app
-client already refuses another pool's token, but another user's refresh
-token from the same pool was served on any user's path. The decision above
-lists `RefreshToken` and says the operation stays inside the path's tenant;
-the membership check alone did not keep that promise.
-
-This amendment completes the decision for `RefreshToken`:
-
-- After the refresh, the provisioner compares the returned access token's
-  `sub` with the path user's `sub` and checks the token's tenant claim
-  (`tenant_id` in topologies 1 and 2, `tenants` contains the tenant in
-  topology 3). `sub` is used, not the `username` claim: it is immutable and
-  unique, and it does not depend on whether the path named the user by
-  username or by e-mail alias. It costs no extra call in topologies 1 and 2
-  (the R-12 `AdminGetUser` already returns it) and one `AdminGetUser` in
-  topology 3, whose R-12 check reads groups only.
-- The claims are read without a signature check. The token is not caller
-  input: it came back from Cognito in this call, over TLS, on the platform
-  function's own IAM-signed `AdminInitiateAuth`. Verifying it again would
-  add a JWKS fetch per pool and prove nothing that channel does not. A token
-  that cannot be decoded is a server fault (500), never served.
-- On a mismatch the call answers the same 404 `ResourceNotFoundError`, with
-  the same fixed text, as a non-member: nothing says the token was someone
-  else's. The new tokens are discarded, never returned. They are not
-  revoked: the caller already holds the refresh token they came from.
-
-Unit tests in `test/topology/*.test.ts` cover a foreign tenant's token, another
-user's token in the same tenant, and the user's own token in each topology;
-spec §10 step 6a runs the cross-tenant case end to end. The pre-token trigger still logs "issued" for a refreshed token the binding then discards; read that log line as "minted", not "served".
+Note 2026-11-19: ADR-0041 amends this record for `RefreshToken`. The
+membership check stays, and the refreshed token must also belong to the
+path's user and tenant.
