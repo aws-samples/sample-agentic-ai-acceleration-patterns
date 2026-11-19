@@ -227,7 +227,8 @@ is stopped when it exits.
 
 `stress/run.sh run --tier <tier> --slices <a,b,...> [--scenarios <x,y>] [--limits <file>]`:
 
-1. Reads every named `slice.json` and checks the needs are present.
+1. Reads every named `slice.json`, checks the needs are present, and
+   refuses a `--scenarios` entry that no named slice declares.
 2. Sums `budget` per account and refuses to start when a sum is over its
    quota or another run holds the lock for the prefix.
 3. Runs `deploy` and `seed` in dependency order, then the scenarios in the

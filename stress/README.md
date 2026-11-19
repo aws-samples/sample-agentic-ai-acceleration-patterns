@@ -51,13 +51,15 @@ run. The runner times `deploy` and `teardown` itself and writes one
 
 Scenarios run platform scenarios first (`PS-1`, `PS-2`, ... by number),
 then each slice's own scenarios in slice order. A scenario no slice
-declares is refused before the run starts, so the run id stays free. A run fails when a
-scenario's record is missing, does not parse, belongs to another run, or
-makes no isolation assertion, when a record names a slice or a scenario
-the run did not run, when a record is already there before its own `run`
-starts (the runner removes it), and when a record changed after its own
-`run` returned (another slice rewrote it). Only the slice's own `collect` may
-change its records after `run`, and only records nobody else changed.
+declares is refused before the run starts, so the run id stays free.
+
+A run fails when a scenario's record is missing, does not parse, belongs
+to another run, or makes no isolation assertion, when a record names a
+slice or a scenario the run did not run, when a record is already there
+before its own `run` starts (the runner removes it), and when a record
+changed after its own `run` returned (another slice rewrote it). Only the
+slice's own `collect` may change its records after `run`, and only
+records nobody else changed.
 
 Each verb runs in its own session and process group with no stdin, so
 `slice.sh` must not prompt (`cdk deploy --require-approval never`). Its
