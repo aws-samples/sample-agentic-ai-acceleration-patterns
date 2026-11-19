@@ -28,6 +28,7 @@ import {
   Pacer,
   probeForeignExchange,
   probeForeignRefresh,
+  probeForeignRefreshToken,
   probeTenantDoor,
   randomPassword,
   platformRefresh,
@@ -116,17 +117,22 @@ async function onboardAll(
   return out;
 }
 
-/** Each tenant's admin refresh token is refused through, and exchanged for, the next tenant's path. */
-async function probeNeighbours(env: ScenarioEnv, done: readonly Onboarded[], fallbackForeign: string | undefined): Promise<void> {
+/**
+ * Each tenant's admin refresh token against the next tenant: on its path with
+ * the caller's own name, on its path with the next tenant's admin name, and
+ * exchanged for its resource.
+ */
+async function probeNeighbours(env: ScenarioEnv, done: readonly Onboarded[], fallbackForeign: ManifestTenant | undefined): Promise<void> {
   const { ctx, rec } = env;
   await runPool(done, 10, async (o, i) => {
-    const foreign = done.length > 1 ? done[(i + 1) % done.length].tenant.tenantId : fallbackForeign;
+    const foreign = done.length > 1 ? done[(i + 1) % done.length].tenant : fallbackForeign;
     const token = o.tokens.get(o.tenant.admin.username);
     if (foreign === undefined || token === undefined) {
       return;
     }
-    await probeForeignRefresh(ctx, rec, o.tenant.tenantId, foreign, o.tenant.admin.username, token.refreshToken);
-    await probeForeignExchange(ctx, rec, o.tenant.tenantId, foreign, token.refreshToken);
+    await probeForeignRefresh(ctx, rec, o.tenant.tenantId, foreign.tenantId, o.tenant.admin.username, token.refreshToken);
+    await probeForeignRefreshToken(ctx, rec, o.tenant.tenantId, foreign.tenantId, foreign.admin.username, token.refreshToken);
+    await probeForeignExchange(ctx, rec, o.tenant.tenantId, foreign.tenantId, token.refreshToken);
   });
 }
 
@@ -151,7 +157,7 @@ async function batch(env: ScenarioEnv, kind: string, count: number, concurrency:
   if (done.length !== count) {
     rec.finding(`${kind}: ${count - done.length} of ${count} tenants did not finish onboarding`);
   }
-  await probeNeighbours(env, done, store.seeded[0]?.tenantId);
+  await probeNeighbours(env, done, store.seeded[0]);
   await removeAll(env, ids);
 }
 
@@ -195,7 +201,8 @@ const MAX_INFLIGHT = 200;
  * token-rate: the tier's steady rate for its scenario length, as an open-loop
  * mix over the active seeded tenants. Per five calls: two admin exchanges
  * (`/oauth2/token`), two platform refreshes, one probe in rotation (a foreign
- * exchange, a foreign refresh path, the tenant admin door). A 429 or 503 is a
+ * exchange, a foreign refresh path, a foreign user's path with the caller's
+ * refresh token, the tenant admin door). A 429 or 503 is a
  * result (the throttle it measures), not retried.
  */
 export async function tokenRate(env: ScenarioEnv): Promise<void> {
@@ -257,13 +264,17 @@ export async function tokenRate(env: ScenarioEnv): Promise<void> {
       }
       default: {
         if (adminTokens === undefined) return;
-        switch (Math.floor(i / 5) % 3) {
+        switch (Math.floor(i / 5) % 4) {
           case 0:
             cognito.hit();
             await probeForeignExchange(ctx, rec, t.tenantId, other.tenantId, adminTokens.refreshToken);
             return;
           case 1:
             await probeForeignRefresh(ctx, rec, t.tenantId, other.tenantId, memberName, (memberTokens ?? adminTokens).refreshToken);
+            return;
+          case 2:
+            cognito.hit();
+            await probeForeignRefreshToken(ctx, rec, t.tenantId, other.tenantId, other.admin.username, adminTokens.refreshToken);
             return;
           default: {
             let token = narrowed.get(t.tenantId);

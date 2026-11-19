@@ -303,6 +303,40 @@ export async function probeForeignRefresh(
   assertRefused(rec, tenantId, 'RefreshToken through another tenant', r);
 }
 
+/**
+ * Tenant A's refresh token on tenant B's path, with the name of a real user
+ * of B, so the membership check (ADR-0013) passes and the refresh token
+ * itself is what is tested. It must be refused, or any token it returns must
+ * name A, never B (P-1). `RefreshToken` does not tie the refresh token to the
+ * path's user, so a served answer carrying A's tenant is noted, not a
+ * mismatch (ADR-0041).
+ */
+export async function probeForeignRefreshToken(
+  ctx: Ctx,
+  rec: Recorder,
+  tenantId: string,
+  foreignTenantId: string,
+  foreignUsername: string,
+  refreshToken: string,
+): Promise<void> {
+  const what = 'RefreshToken of another tenant on its own path';
+  const r = await withRetry(() =>
+    timed(rec, 'probe-foreign-refresh-token', tenantId, () =>
+      ctx.platform.call<{ accessToken?: string }>('POST', `platform/tenants/${foreignTenantId}/users/${foreignUsername}/token/refresh`, { refreshToken })),
+  );
+  if (r.status >= 200 && r.status < 300) {
+    const token = r.body?.accessToken;
+    if (token === undefined) {
+      rec.finding(`${what} for tenant ${tenantId}: HTTP ${r.status} without a token`);
+      return;
+    }
+    await assertTokenTenant(ctx, rec, token, tenantId, `${what}: served`);
+    rec.note(`${what}: served, the answer named the caller's tenant`);
+    return;
+  }
+  assertRefused(rec, tenantId, what, r);
+}
+
 /** A tenant's refresh token exchanged for another tenant's resource. */
 export async function probeForeignExchange(
   ctx: Ctx,

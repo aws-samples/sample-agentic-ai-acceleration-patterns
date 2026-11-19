@@ -3,7 +3,7 @@
 
 /**
  * The platform stress test's own tenant-identity deployment (stress ADR-0002,
- * ADR-0040): one `shared-pool` stack named `${STRESS_PREFIX}-identity`, with
+ * ADR-0041): one `shared-pool` stack named `${STRESS_PREFIX}-identity`, with
  * its own user pool, registry and API, beside whatever else the account holds.
  *
  * It never publishes the fixed-name `/application-plane/shared/identity/*`

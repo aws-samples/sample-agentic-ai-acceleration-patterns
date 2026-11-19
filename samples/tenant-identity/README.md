@@ -680,7 +680,12 @@ stays for the next run. Scenarios: `PS-1` (onboarding at the tier's churn
 count), `token-rate` (issue, refresh and exchange at the tier's steady rate)
 and `create-tenant-burst` (`CreateTenant` beyond what Cognito's control plane
 takes). Each asserts that every token names the tenant it was issued for and
-that a token or path of tenant A is refused for tenant B. The driver is
+that a token or path of tenant A is refused for tenant B. One observed
+behaviour is recorded, not failed: tenant A's refresh token on tenant B's
+platform path, with the name of a real user of B, is served with A's own
+tokens, because `RefreshToken` checks that the path's user is a member but
+does not tie the refresh token to that user. The probe asserts the answer
+names A, never B ([ADR-0041](./adr/0041-run-the-platform-stress-slice-on-its-own-shared-pool-stack.md)). The driver is
 [`test/stress/`](./test/stress/); its manifest and logs stay outside the
 repository and hold no token or password.
 

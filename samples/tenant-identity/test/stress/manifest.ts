@@ -37,6 +37,12 @@ export interface Manifest {
    * create call so a killed run leaves a trail `teardown` can follow.
    */
   readonly transient: readonly string[];
+  /**
+   * The 5xx answers the last `seed` saw, per UTC minute, and its run id.
+   * `collect` takes them out of API Gateway's 5XX count for the same minutes,
+   * since no scenario record holds them.
+   */
+  readonly seed5xx?: { readonly runId: string; readonly perMinute: Readonly<Record<string, number>> };
 }
 
 export const FILE_NAME = 'tenant-identity.json';

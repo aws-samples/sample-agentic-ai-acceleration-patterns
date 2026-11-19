@@ -78,6 +78,8 @@ export class Recorder {
   private readonly quotaPeaks = new Map<string, number>();
   /** Problems that fail the scenario but have no field in the record. */
   readonly findings: string[] = [];
+  /** Behaviour worth reporting that fails nothing (printed by the driver, not in the record). */
+  readonly notes = new Map<string, number>();
 
   /**
    * One HTTP call. `status` 0 is a transport failure. A status of 400 or more
@@ -124,6 +126,10 @@ export class Recorder {
   /** A failure that is not an isolation assertion (an operation that never completed). */
   finding(message: string): void {
     this.findings.push(message);
+  }
+
+  note(what: string): void {
+    this.notes.set(what, (this.notes.get(what) ?? 0) + 1);
   }
 
   quotaPeak(quota: string, value: number): void {

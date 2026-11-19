@@ -36,6 +36,7 @@ import { createUser, createTenantWithAdmin, type Ctx, deleteTenant, Pacer, sleep
 import { drawsOf, parameterNameOf, parseMode, parseTier, planOf, SEED_PACE_PER_SECOND, stackNameOf } from './plan';
 import { Recorder } from './recorder';
 import { createTenantBurst, emailOf, ps1, type ScenarioEnv, type Store, tokenRate } from './scenarios';
+import { applyReconciled, collectFiveXx, latestOf, MinuteRecorder, type RecordDoc, reconcileSeeded, sweepIds, sweepTenants } from './steps';
 import { AccessTokenVerifier, ExchangeClient, PlatformClient, region, TenantClient } from '../e2e/clients';
 
 function need(name: string): string {
@@ -146,23 +147,25 @@ async function seed(prefix: string, stack: string): Promise<number> {
   const plan = planOf(parseTier(process.env.STRESS_TIER_JSON), parseMode(process.env.STRESS_MODE));
   const { ctx } = await connect(stack);
   const store = openStore(prefix, stack, plan.tier.name, need('STRESS_COMMIT'));
-  const rec = new Recorder();
+  const rec = new MinuteRecorder();
   const pacer = new Pacer(SEED_PACE_PER_SECOND);
   const tag = 'seed';
 
-  // Keep what a manifest lists and the pool still has; drop the rest.
-  const kept: ManifestTenant[] = [];
-  // A tier that shrank leaves the surplus in the manifest, for sweep to delete.
-  const surplus = store.seeded.slice(plan.seedTenants);
-  for (const t of store.seeded.slice(0, plan.seedTenants)) {
-    await pacer.wait();
-    const r = await withRetry(() => timed(rec, 'get-tenant', t.tenantId, () => ctx.platform.call<{ tenant: { status: string } }>('GET', `platform/tenants/${t.tenantId}`)));
-    if (r.status === 200 && r.body.tenant.status === 'ACTIVE') {
-      kept.push(t);
-    }
+  // Keep what the manifest lists and reads back ACTIVE. A 404 is gone and
+  // forgotten; anything else is still in the pool, so it moves to
+  // `transient` for teardown to delete. A tier that shrank leaves the
+  // surplus in `seeded`, for `sweep --seeded`.
+  const reconciled = await reconcileSeeded(
+    store.seeded,
+    plan.seedTenants,
+    (id) => withRetry(() => timed(rec, 'get-tenant', id, () => ctx.platform.call<{ tenant: { status: string } }>('GET', `platform/tenants/${id}`))),
+    () => pacer.wait(),
+  );
+  store.update((m) => ({ ...applyReconciled(m, reconciled), tier: plan.tier.name, commit: need('STRESS_COMMIT') }));
+  if (reconciled.stale.length > 0) {
+    process.stdout.write(`seed: ${reconciled.stale.length} manifest tenants not ACTIVE, queued for teardown\n`);
   }
-  store.update((m) => ({ ...m, tier: plan.tier.name, commit: need('STRESS_COMMIT'), seeded: [...kept, ...surplus] }));
-  const have = new Map(kept.map((t) => [t.name, t]));
+  const have = new Map(reconciled.kept.map((t) => [t.name, t]));
 
   for (let index = 0; index < plan.seedTenants; index += 1) {
     const name = seedName(index);
@@ -204,6 +207,7 @@ async function seed(prefix: string, stack: string): Promise<number> {
     const t = store.seeded.find((s) => s.name === name);
     return t !== undefined && (i >= plan.activeTenants || t.users.length === plan.extraUsers);
   });
+  store.update((m) => ({ ...m, seed5xx: { runId: need('STRESS_RUN_ID'), perMinute: rec.fiveXxPerMinute } }));
   const { requests } = rec.totals;
   process.stdout.write(`seed: ${wanted.filter((n) => store.seeded.some((s) => s.name === n)).length} of ${plan.seedTenants} tenants, ${requests} calls, ${rec.findings.length} findings\n`);
   for (const f of rec.findings.slice(0, 20)) {
@@ -242,20 +246,15 @@ async function run(prefix: string, stack: string, scenario: string): Promise<num
   for (const f of rec.findings.slice(0, 25)) {
     process.stdout.write(`  ${f}\n`);
   }
+  for (const [what, n] of rec.notes) {
+    process.stdout.write(`  observed: ${what} (${n})\n`);
+  }
   return rec.findings.length === 0 && t.assertions > 0 ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------------
 // collect
 // ---------------------------------------------------------------------------
-
-interface RecordFile {
-  window: { start: string; end: string };
-  requests: Record<string, number>;
-  refusals: { unattributed: number };
-}
-
-const MINUTE = 60_000;
 
 async function apiSum(cw: CloudWatchClient, apiName: string, metric: string, start: Date, end: Date): Promise<number> {
   const out = await cw.send(
@@ -274,51 +273,47 @@ async function apiSum(cw: CloudWatchClient, apiName: string, metric: string, sta
 
 /**
  * Late fields (spec §3.4): API Gateway's own count of 5XX over the run's
- * scenarios, minus the 5XX the driver saw, is a server error the driver cannot
- * attribute (P-7). Scenarios run back to back and CloudWatch's finest period
- * is a minute, so adjacent scenarios share a bucket: the count is over the
- * union of the windows, and what is left over goes on the latest record.
- * CloudWatch delivers metrics late (finding F-6), so the count of calls is
- * waited for first, for up to four minutes.
+ * scenarios, minus the 5XX the driver saw (scenarios and seed), is a server
+ * error the driver cannot attribute (P-7). Scenarios run back to back and
+ * CloudWatch's finest period is a minute, so adjacent scenarios share a
+ * bucket: the count is over the union of the windows, and what is left over
+ * goes on the latest record. CloudWatch delivers metrics late (finding F-6),
+ * so the count of calls is waited for first, for up to four minutes; if it
+ * never catches up the verb fails rather than pass a count it cannot trust.
+ * In `platform` mode the API is shared with the control plane, whose 5XX this
+ * count would also hold (ADR-0041, until W-5).
  */
-async function collect(stack: string): Promise<number> {
+async function collect(prefix: string, stack: string): Promise<number> {
   const dir = need('STRESS_RESULTS');
   const cw = new CloudWatchClient({ region: region() });
   const apiName = `${stack}-api`;
   const files = fs.readdirSync(dir).filter((f) => f.startsWith('tenant-identity.') && !f.endsWith('.lifecycle.json') && f.endsWith('.json'));
-  const docs = files.map((file) => ({ file, full: path.join(dir, file), doc: JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8')) as RecordFile }));
+  const docs = files.map((file) => ({ file, full: path.join(dir, file), doc: JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8')) as RecordDoc }));
   if (docs.length === 0) {
     process.stdout.write('collect: no record of this slice\n');
     return 0;
   }
-  const first = Math.min(...docs.map((d) => Date.parse(d.doc.window.start)));
-  const last = Math.max(...docs.map((d) => Date.parse(d.doc.window.end)));
-  const start = new Date(Math.floor(first / MINUTE) * MINUTE);
-  const end = new Date(Math.ceil(last / MINUTE) * MINUTE + MINUTE);
-  const sum = (pick: (k: string) => boolean): number =>
-    docs.reduce((a, d) => a + Object.entries(d.doc.requests).filter(([k]) => pick(k)).reduce((b, [, n]) => b + n, 0), 0);
-  // A transport failure (status 0) never reached the API.
-  const reached = sum((k) => !k.startsWith('0:'));
-  const seen5xx = sum((k) => /^5\d\d/.test(k));
-  const deadline = Date.now() + 4 * MINUTE;
-  let counted = await apiSum(cw, apiName, 'Count', start, end);
-  while (counted < 0.9 * reached && Date.now() < deadline) {
-    await sleep(20_000);
-    counted = await apiSum(cw, apiName, 'Count', start, end);
+  const manifest = readManifest(manifestPath(need('STRESS_HOME'), prefix));
+  const seedPerMinute = manifest?.seed5xx?.runId === need('STRESS_RUN_ID') ? manifest.seed5xx.perMinute : undefined;
+  const c = await collectFiveXx(docs.map((d) => d.doc), seedPerMinute, {
+    apiSum: (metric, start, end) => apiSum(cw, apiName, metric, start, end),
+    sleep,
+    now: Date.now,
+  });
+  process.stdout.write(
+    `collect: driver ${c.reached} calls, API Gateway counted ${Math.round(c.counted)}; 5XX scenarios ${c.seen5xx}, seed ${c.seed5xx}, API ${Math.round(c.api5xx)}\n`,
+  );
+  if (!c.caughtUp) {
+    process.stdout.write('  API Gateway metrics had not caught up after 4 minutes: late 5XX cannot be ruled out (P-7)\n');
+    return 1;
   }
-  const api5xx = await apiSum(cw, apiName, '5XXError', start, end);
-  const extra = Math.max(0, Math.round(api5xx - seen5xx));
-  process.stdout.write(`collect: driver ${reached} calls, API Gateway counted ${Math.round(counted)}; 5XX driver ${seen5xx}, API ${Math.round(api5xx)}\n`);
-  if (counted < 0.9 * reached) {
-    process.stdout.write('  warning: API Gateway metrics had not caught up after 4 minutes\n');
-  }
-  if (extra === 0) {
+  if (c.extra === 0) {
     return 0;
   }
-  const latest = docs.reduce((a, b) => (Date.parse(b.doc.window.end) >= Date.parse(a.doc.window.end) ? b : a));
-  latest.doc.refusals.unattributed += extra;
+  const latest = latestOf(docs);
+  latest.doc.refusals.unattributed += c.extra;
   fs.writeFileSync(latest.full, `${JSON.stringify(latest.doc, null, 2)}\n`);
-  process.stdout.write(`  ${extra} 5XX the driver did not see, recorded as unattributed refusals on ${latest.file}\n`);
+  process.stdout.write(`  ${c.extra} 5XX the driver did not see, recorded as unattributed refusals on ${latest.file}\n`);
   return 1;
 }
 
@@ -328,7 +323,7 @@ async function collect(stack: string): Promise<number> {
 
 async function sweep(prefix: string, stack: string, includeSeeded: boolean): Promise<number> {
   const store = openStore(prefix, stack, 'unknown', process.env.STRESS_COMMIT ?? '');
-  const ids = [...store.transient, ...(includeSeeded ? store.seeded.map((t) => t.tenantId) : [])];
+  const ids = sweepIds(store, includeSeeded);
   if (ids.length === 0) {
     process.stdout.write('sweep: no tenant to delete\n');
     return 0;
@@ -343,28 +338,14 @@ async function sweep(prefix: string, stack: string, includeSeeded: boolean): Pro
   const { ctx } = await connect(stack);
   const rec = new Recorder();
   const pacer = new Pacer(SEED_PACE_PER_SECOND);
-  let failed = 0;
-  for (const id of ids) {
-    await pacer.wait();
-    if (await deleteTenant(ctx, rec, id)) {
-      store.removeTransient([id]);
-      if (includeSeeded) {
-        store.update((m) => ({ ...m, seeded: m.seeded.filter((t) => t.tenantId !== id) }));
-      }
-    } else {
-      failed += 1;
-    }
-  }
-  // Prove it: every deleted tenant now reads 404.
-  let left = 0;
-  for (const id of ids.filter((i) => !store.transient.includes(i))) {
-    const r = await withRetry(() => timed(rec, 'get-tenant', id, () => ctx.platform.call('GET', `platform/tenants/${id}`)));
-    if (r.status !== 404) {
-      left += 1;
-    }
-  }
-  process.stdout.write(`sweep: ${ids.length - failed} of ${ids.length} tenants deleted, ${left} still readable\n`);
-  return failed === 0 && left === 0 ? 0 : 1;
+  const r = await sweepTenants(store, includeSeeded, {
+    beforeEach: () => pacer.wait(),
+    deleteOne: (id) => deleteTenant(ctx, rec, id),
+    // Prove it: every deleted tenant now reads 404.
+    readStatus: async (id) => (await withRetry(() => timed(rec, 'get-tenant', id, () => ctx.platform.call('GET', `platform/tenants/${id}`)))).status,
+  });
+  process.stdout.write(`sweep: ${r.ids.length - r.failed} of ${r.ids.length} tenants deleted, ${r.left} still readable\n`);
+  return r.failed === 0 && r.left === 0 ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +396,7 @@ async function main(argv: string[]): Promise<number> {
   switch (command) {
     case 'seed': return seed(prefix, stack);
     case 'run': return run(prefix, stack, arg ?? '');
-    case 'collect': return collect(stack);
+    case 'collect': return collect(prefix, stack);
     case 'sweep': return sweep(prefix, stack, arg === '--seeded');
     case 'publish': await publish(prefix, stack); return 0;
     case 'unpublish': await unpublish(prefix); return 0;

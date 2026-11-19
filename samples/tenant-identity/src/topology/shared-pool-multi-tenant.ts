@@ -374,7 +374,7 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
         // A deprovision that was throttled after it deleted this group leaves
         // the tenant DELETING; its retry finds no group, and no member listed
         // by it. Stop here instead of failing the retry for good (found by the
-        // platform stress test's create-tenant-burst, ADR-0040).
+        // platform stress test's create-tenant-burst, ADR-0041).
         if (isCognitoError(error, COGNITO.resourceNotFound)) {
           return names;
         }

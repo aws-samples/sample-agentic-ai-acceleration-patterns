@@ -162,12 +162,14 @@ case "$verb" in
         echo "teardown: destroying ${STACK}"
         cdk destroy "$STACK" --force || status=1
       fi
-      driver unpublish || status=1
-      rm -f "${RUN_HOME}/tenant-identity.json"
-
+      # The manifest and the parameter go only with the stack: after a failed
+      # destroy they are the trail a rerun follows and what consumers read.
       if stack_exists; then
-        echo "teardown: stack ${STACK} is still there" >&2
+        echo "teardown: stack ${STACK} is still there; manifest and parameter kept for a rerun" >&2
         status=1
+      else
+        driver unpublish || status=1
+        rm -f "${RUN_HOME}/tenant-identity.json"
       fi
       left="$(leftover_pool_ids ${pools[@]+"${pools[@]}"})"
       if [ -n "$left" ]; then

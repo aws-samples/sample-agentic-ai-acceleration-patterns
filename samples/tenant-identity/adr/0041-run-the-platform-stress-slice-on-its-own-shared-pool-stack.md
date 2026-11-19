@@ -63,7 +63,11 @@ scenario do. Its choices:
 - **Seed.** In `slice` mode it creates the tier's `tenantsSeeded` tenants
   (admin plus `usersPerActiveTenant - 1` users for the active ones) at four
   calls a second, under the 10 rps platform throttle (ADR-0037), and checks
-  the manifest's tenants first. In `platform` mode the control plane puts the
+  the manifest's tenants first: a tenant that reads back 200 `ACTIVE` is
+  reused, one that reads 404 is forgotten, and any other answer (a status in
+  transition, or no answer after the retries) moves it to `transient`, so
+  `teardown` deletes it instead of leaving it in a kept pool. In `platform`
+  mode the control plane puts the
   tier's tenants into the pool, so the slice seeds a probe set of 20 and stays
   under the 5,000-tenant cap at `large`.
 - **Scenarios.** `PS-1` onboards the tier's churn count at once (tenant,
@@ -78,16 +82,34 @@ scenario do. Its choices:
 - **Isolation assertions (P-1).** Every token is verified against the stress
   pool and must carry `tenant_id` of the tenant it was issued for and no
   groups or tenants claim. Probes must be refused: a refresh token of A on
-  B's platform path (ADR-0013), A's refresh token exchanged for B's resource,
-  and, through the tenant admin door, B's user read with A's narrowed token
-  and a list that names only A's users.
+  B's platform path with A's username (ADR-0013's membership check), A's
+  refresh token exchanged for B's resource, and, through the tenant admin
+  door, B's user read with A's narrowed token and a list that names only A's
+  users. One probe may be served: A's refresh token on B's path with the name
+  of a real user of B passes the membership check, and `RefreshToken` does
+  not tie the refresh token to the path's user. The assertion is that the
+  answer is refused or names A, never B.
+- **Observed finding (refresh path).** In the `small` run of 2026-11-19 that
+  probe was served every time, and every token it returned named A. B's data
+  is not reached, and the platform API is the vendor's own IAM-signed door,
+  so this is a path-tenant mismatch, not a cross-tenant leak. The driver
+  prints it as an `observed:` line. Binding the refresh token to the path's
+  user (compare the token's `sub` or `username` to the path) is a change to
+  `RefreshToken`, outside this ADR.
 - **Findings.** A bare 5xx other than 503, and an operation that never
   finishes, fail the scenario. A bare 5xx is also counted as unattributed in
   the record (stress spec P-7).
 - **Collect.** After a wait for CloudWatch to catch up (finding F-6, four
-  minutes at most), the count of API Gateway `5XXError` in each record's
-  window minus the 5xx the driver saw is added to the record's unattributed
-  refusals.
+  minutes at most), API Gateway's `5XXError` over the union of the records'
+  windows, in whole minutes, minus the 5xx the scenarios saw, minus the 5xx
+  `seed` saw in the same minutes (seed writes them per minute to the
+  manifest, with its run id), goes on the latest record as unattributed
+  refusals. If `Count` has not reached 90% of the driver's calls by the
+  deadline, `collect` exits 1 and the run fails: a late 5XX cannot be ruled
+  out (P-7). In `platform` mode the identity API is shared with the control
+  plane, so its 5XX land in the same count and would be charged to this
+  slice; that stays a known limitation until W-5 decides how the control
+  plane mounts the stress stack.
 - **Budget.** The slice declares `cognito-groups` (two per tenant at the
   pool's peak, including the control plane's tenants in `platform` mode),
   `cognito-user-authentication-rps` (the steady rate, or the 8 a second
@@ -100,7 +122,9 @@ scenario do. Its choices:
 ## Consequences
 Easier: the stress test seeds and destroys freely beside the integration
 tests; `teardown --fixtures` removes the stack, parameter, pool, REST API and
-log groups and fails when one is left. Harder: the stress stack has no
+log groups and fails when one is left. The manifest and the parameter go only
+once the stack is gone: after a failed destroy both stay, as the trail a
+rerun follows. Harder: the stress stack has no
 `PlatformInvokePolicy` and no admin-password key, so the control-plane
 mount's tenant script (which reads `/application-plane/shared/identity/*`)
 cannot use it as is. The control-plane slice (W-5) needs option 2, or a
