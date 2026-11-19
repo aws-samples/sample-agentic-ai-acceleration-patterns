@@ -160,10 +160,12 @@ fi
 # The k6 host first: it is the shared driver's own app, not part of this one.
 if [[ "$DRIVER" == true ]]; then
   echo "== destroy ${PREFIX}-driver (stress/driver/teardown.sh)"
-  start=$SECONDS
   STRESS_PREFIX="$PREFIX" STRESS_TIER="$SCALE" "${SAMPLE_DIR}/../../stress/driver/teardown.sh" >"${MAIN_TMP}/driver.log" 2>&1 \
     || { tail -30 "${MAIN_TMP}/driver.log" >&2; fail "destroy ${PREFIX}-driver"; }
-  secs=$((SECONDS - start))
+  # The driver script's own figure, as deploy.sh takes its deploy_seconds: this call's wall
+  # time would also count the npm ci the wrapper may run first.
+  secs="$(sed -n "s/^stack=${PREFIX}-driver destroy_seconds=\([0-9][0-9]*\)$/\1/p" "${MAIN_TMP}/driver.log" | tail -1)"
+  [[ -n "$secs" ]] || fail "stress/driver/teardown.sh printed no destroy_seconds line"
   echo "stack=${PREFIX}-driver destroy_seconds=${secs}"
   echo "$(date -u +%F) scale=${SCALE} stack=${PREFIX}-driver destroy_seconds=${secs}" >>"$TIMINGS"
 fi

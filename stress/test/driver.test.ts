@@ -40,7 +40,15 @@ describe('StressDriverStack at small (spec §3.1)', () => {
     const instance = Object.values(template.findResources('AWS::EC2::Instance'))[0] as any;
     expect(instance.Properties.KeyName).toBeUndefined();
     expect(instance.Properties.InstanceType).toBe(TIERS.small.driverInstanceType);
-    expect(instance.Properties.NetworkInterfaces?.[0]?.AssociatePublicIpAddress ?? false).toBe(false);
+    // No public IP: the one interface says so explicitly (not by omission), and the subnet it is
+    // placed in does not hand one out at launch either.
+    const nics = instance.Properties.NetworkInterfaces;
+    expect(nics).toHaveLength(1);
+    expect(nics[0].AssociatePublicIpAddress).toBe(false);
+    const subnetId = nics[0].SubnetId?.Ref;
+    expect(typeof subnetId).toBe('string');
+    expect(json.Resources[subnetId].Type).toBe('AWS::EC2::Subnet');
+    expect(json.Resources[subnetId].Properties.MapPublicIpOnLaunch).toBe(false);
     expect(instance.Properties.BlockDeviceMappings).toEqual([
       { DeviceName: '/dev/xvda', Ebs: { VolumeSize: 30, VolumeType: 'gp3', Encrypted: true, DeleteOnTermination: true } },
     ]);

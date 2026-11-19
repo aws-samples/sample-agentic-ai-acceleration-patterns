@@ -26,7 +26,7 @@ them, and fails the scenario without them. What a record holds from k6:
 |---|---|
 | `requests` | `status_<code>` counters (`countStatus`); `other` for a code the library does not list |
 | `latency.client`, `latency['client-ttfb']` | the `client_ms` and `ttfb_ms` trends (`timed`), p50, p95, p99 in seconds; the ingress, router and origin hops come from the slices' logs |
-| `isolation` | `isolation_assertions` and `isolation_mismatch` (`isolationCheck`, one assertion per checked request, P-1) |
+| `isolation` | `isolation_assertions` and `isolation_mismatch` (`isolationCheck`, one assertion per checked request, P-1). P-1 counts answered probes only: a 200 is one assertion, and a mismatch when the slice cannot parse its answer; a non-200 makes no assertion (it is counted under `requests` and `refusals`), so `assertions` can be lower than `requests` |
 | `refusals` | `unattributed` is the count of 4xx and 5xx the driver saw; `byTenantReason` is empty. The slice's `collect` attributes them from the hops' logs (it may join the `tenant_minute` lines the library prints) and moves attributed refusals across (P-7) |
 | `quotas` | empty; a slice's `collect` fills it from its own measurements |
 | `window` | the end of the test and its duration |
@@ -62,6 +62,12 @@ Tuning, all optional: `ISSUE_RPS` (8), `REFRESH_RPS` (17), `REFRESH_MARGIN_S` (9
 - Setup data is copied into every VU. When tokens x VUs would pass `MEMORY_BUDGET_MB`, setup
   returns entries without tokens and each VU issues its own during the warm-up.
 - Nothing logs a token, a password or a caller ARN. Never add `--http-debug`.
+- k6 signs with one copy of the driver host's instance role credentials, exported when the run
+  starts; it cannot refresh them. `stress/driver/k6.sh` reads their expiration on the host and
+  refuses to start k6 (exit 3) when they expire sooner than `K6_TIMEOUT` (default 3600 s, at
+  most 14400 s) plus 300 s. A run is therefore bounded by the copy's remaining lifetime: keep
+  `K6_TIMEOUT` to the longest scenario plus its setup, and rerun after a few minutes when the
+  check refuses (the host rotates the credentials well before they expire).
 - The library imports `jslib.k6.io` (SigV4 signing, the text summary) when k6 starts, so the
   driver host needs outbound HTTPS to it, which its security group allows.
 - Written for k6 v1.x and checked on v2.4 (ES modules, `k6/execution`). `stress/driver/k6.sh` runs a script on the

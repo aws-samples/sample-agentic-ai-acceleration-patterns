@@ -276,6 +276,8 @@ function promptOf(kind, entry, opts) {
 /**
  * One probe with its §6 assertions. KIND: report | read-own | read-other | tool | stream.
  * PHASE `warm` requests are asserted too but are not timed nor in the ledger.
+ * P-1 (`isolationCheck`) counts answered probes only: a 200 is one assertion, a mismatch when
+ * its report or tool payload does not parse; a non-200 makes no assertion (it is a refusal).
  */
 export function probe(entry, kind, opts = {}) {
   const phase = opts.phase || 'main';
@@ -304,6 +306,9 @@ export function probe(entry, kind, opts = {}) {
     return toolAssertions(entry, r);
   }
   if (report === null || typeof report !== 'object') {
+    // A 200 the ingress answered with no report proves nothing about isolation: P-1 counts it
+    // as a mismatch, so a malformed answer cannot pass as neither a mismatch nor a refusal.
+    isolationCheck(entry, kind, r.status, ['noReport'], r.requestId, r.correlationId);
     check(r, { 'report parsed': () => false });
     if (kind === 'read-own') {
       positiveControlOk.add(false);
@@ -367,9 +372,8 @@ function toolAssertions(entry, r) {
       bad.push('tool.callerArn');
     }
   }
-  if (payload) {
-    isolationCheck(entry, 'tool', r.status, bad, r.requestId, r.correlationId);
-  }
+  // An admitted tool call whose payload does not parse is a mismatch (`noPayload`), as above.
+  isolationCheck(entry, 'tool', r.status, bad, r.requestId, r.correlationId);
   check(r, { 'tool admitted': () => true, 'isolation holds': () => bad.length === 0 });
   return r;
 }

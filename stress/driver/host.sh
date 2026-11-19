@@ -17,7 +17,9 @@
 # A SIGINT or SIGTERM cancels the command on the host, so a k6 run does not keep loading its
 # target. The wait ends early, with the reason, when the command fails or times out, when the
 # host loses its SSM agent for three minutes (a k6 that ran the host out of memory, finding
-# F-14) and when the credentials expire.
+# F-14) and when the credentials expire. Reading the output retries an S3 error other than
+# NoSuchKey (a throttle, a network blip) for one minute before it gives up, so one transient
+# error does not cancel a long k6 run. The limits count wall time.
 
 set -euo pipefail
 
@@ -46,6 +48,7 @@ DONE=0
 cleanup() {
   local code=$?
   set +e
+  trap '' INT TERM
   if [[ -n "$COMMAND_ID" && "$DONE" == 0 ]]; then
     if aws ssm cancel-command --command-id "$COMMAND_ID" >/dev/null 2>&1; then
       echo "cancelled the command on the driver host" >&2
@@ -70,17 +73,23 @@ COMMAND_ID="$(aws ssm send-command --instance-ids "$INSTANCE" --document-name AW
 
 lost=0
 finished=0
-for _ in $(seq 1 $((TIMEOUT / 5 + 12))); do
+read_errors=0
+DEADLINE=$((SECONDS + TIMEOUT + 60))
+while (( SECONDS < DEADLINE )); do
   if aws s3api get-object --bucket "$BUCKET" --key "$KEY" "${TMP}/output.txt" >/dev/null 2>"${TMP}/get.err"; then
     DONE=1
     cat "${TMP}/output.txt"
     code="$(tail -n 1 "${TMP}/output.txt" | sed -n 's/^exit=\([0-9]*\)$/\1/p')"
     exit "${code:-1}"
   fi
-  # NoSuchKey is the expected answer until the host has written; anything else is a failure.
-  if ! grep -q -E 'NoSuchKey|Not Found' "${TMP}/get.err"; then
-    echo "reading the output failed: $(tail -n 1 "${TMP}/get.err")" >&2
-    exit 1
+  # NoSuchKey is the expected answer until the host has written. Anything else (throttling,
+  # a 5xx, a network error) is retried for 12 polls, one minute, before it counts as a failure.
+  if grep -q -E 'NoSuchKey|Not Found' "${TMP}/get.err"; then
+    read_errors=0
+  else
+    read_errors=$((read_errors + 1))
+    echo "reading the output failed (${read_errors} of 12): $(tail -n 1 "${TMP}/get.err")" >&2
+    (( read_errors < 12 )) || { echo "reading the output kept failing for one minute; giving up (command ${COMMAND_ID})" >&2; exit 1; }
   fi
   status="$(aws ssm list-command-invocations --command-id "$COMMAND_ID" --instance-id "$INSTANCE" \
     --query 'CommandInvocations[0].Status' --output text 2>/dev/null || echo Unknown)"
@@ -106,8 +115,8 @@ for _ in $(seq 1 $((TIMEOUT / 5 + 12))); do
   ping="$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=${INSTANCE}" \
     --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo Online)"
   if [[ "$ping" == ConnectionLost ]]; then
-    lost=$((lost + 1))
-    (( lost < 36 )) || { echo "the host lost its SSM agent for 3 minutes (out of memory?); reboot the instance (command ${COMMAND_ID})" >&2; exit 1; }
+    (( lost > 0 )) || lost=$SECONDS
+    (( SECONDS - lost < 180 )) || { echo "the host lost its SSM agent for 3 minutes (out of memory?); reboot the instance (command ${COMMAND_ID})" >&2; exit 1; }
   else
     lost=0
   fi

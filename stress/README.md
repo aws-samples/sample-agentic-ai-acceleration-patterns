@@ -138,6 +138,10 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   same prefix there. A run from another host, or with another prefix,
   against the same accounts is not detected. Run one stress test per set of
   accounts at a time.
+- One run per driver host. `stress/driver/k6.sh` clears `/opt/stress/repo`, `inputs` and `out`
+  on the host before it unpacks, and a sample's own S3 copy (`run.sh ... s3 sync --delete`)
+  rewrites `/opt/stress/`, so two runs against one `<prefix>-driver` overwrite each other's
+  files. Nothing on the host locks; give a concurrent run its own prefix and driver.
 - Budget limits are what `--limits` says; without it the runner checks
   against service defaults, not the accounts' applied quotas.
 - Scenarios run one after another. Spec §5.1 runs PS-5 (churn) and PS-7
