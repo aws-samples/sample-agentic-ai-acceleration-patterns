@@ -586,14 +586,14 @@ class Registrar extends Construct {
       },
     });
     // The route table's data plane (§3.4 step 5). No ListKeys: the
-    // registrar reads the keys it writes, never the whole store.
+    // registrar reads the keys it writes, never the whole store. Every
+    // write is one UpdateKeys under the store's ETag, so no PutKey or
+    // DeleteKey either.
     fn.addToRolePolicy(new iam.PolicyStatement({
       sid: 'RouteTable',
       actions: [
         'cloudfront-keyvaluestore:DescribeKeyValueStore',
         'cloudfront-keyvaluestore:GetKey',
-        'cloudfront-keyvaluestore:PutKey',
-        'cloudfront-keyvaluestore:DeleteKey',
         'cloudfront-keyvaluestore:UpdateKeys',
       ],
       resources: [props.routeTableArn],

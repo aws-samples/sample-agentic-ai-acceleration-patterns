@@ -449,12 +449,13 @@ describe('main stack: registrar (spec §3.4, §5.1, M-6)', () => {
       Action: [
         'cloudfront-keyvaluestore:DescribeKeyValueStore',
         'cloudfront-keyvaluestore:GetKey',
-        'cloudfront-keyvaluestore:PutKey',
-        'cloudfront-keyvaluestore:DeleteKey',
         'cloudfront-keyvaluestore:UpdateKeys',
       ],
       Resource: { 'Fn::GetAtt': [expect.stringMatching(/^RouteTable/), 'Arn'] },
     });
+    // The registrar writes only with UpdateKeys under the ETag (S3 route-store.ts).
+    expect(actions).not.toContain('cloudfront-keyvaluestore:PutKey');
+    expect(actions).not.toContain('cloudfront-keyvaluestore:DeleteKey');
     expect(statements.find((s) => s.Sid === 'VendorIdpClientSecret')).toMatchObject({
       Action: 'secretsmanager:GetSecretValue',
       Resource: BASE_PROPS.controlPlane.vendorIdp.clientSecretArn,
