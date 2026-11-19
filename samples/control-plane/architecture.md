@@ -1312,10 +1312,11 @@ seconds, keeping only the id, status, phase timing and the
 sends the hook's `timeoutMinutes` as the run timeout, a queued timeout of
 10 minutes less the minutes already refused (never below 5), and an
 idempotency token that is the SHA-256 of the execution, event, phase,
-hook, attempt and try index. A start refused at a concurrency cap
-(`CodeBuild.AccountLimitExceededException`) waits 30 seconds and tries
-again under a new token for up to 5 minutes; any other error except
-`CodeBuild.InvalidInputException` goes to a task `Retry` under the same token (`TimeoutSeconds` 15, three repeats 10
+hook scope, hook, attempt and try index. A start refused at a
+concurrency cap (`CodeBuild.AccountLimitExceededException`) waits 30
+seconds and tries again under a new token for up to 5 minutes; any
+other error except `CodeBuild.InvalidInputException` goes to a task
+`Retry` under the same token (`TimeoutSeconds` 15, three repeats 10
 seconds apart, no jitter), so a call that created a build returns it
 instead of leaving a second one; a try whose repeats all fail ends the
 attempt as "start outcome unknown". The attempt's deadline is the run
