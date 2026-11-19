@@ -130,6 +130,7 @@ describe('§3.4 step 5 sub-step 1: a new domain is written first, with a new cha
       dt: DT,
       stage: 'domain-challenge',
       record: { name: NAME, type: 'TXT', value: record(TOKEN_1) },
+      expiresAt: NOW_S + CHALLENGE_TTL_SECONDS,
     });
     expect(stored(h)).toEqual(expect.objectContaining({ c, ac: CELL_ACCOUNT, dt: DT, s: 'active', n: 'Acme Corp', d: D, dk: TOKEN_1, dx: NOW_S + CHALLENGE_TTL_SECONDS }));
     expect(h.dns.txtNames).toEqual([]);
@@ -224,7 +225,7 @@ describe('§3.4 step 5 sub-step 2: the open challenge', () => {
     const before = h.kvs.items.get(tenantKey(t));
     const res = await put(h);
     expect(res.statusCode).toBe(202);
-    expect(res.body).toEqual({ tenantId: TENANT, dt: DT, stage: 'domain-challenge', challenge, record: { name: NAME, type: 'TXT', value: record(TOKEN_1) } });
+    expect(res.body).toEqual({ tenantId: TENANT, dt: DT, stage: 'domain-challenge', challenge, record: { name: NAME, type: 'TXT', value: record(TOKEN_1) }, expiresAt: NOW_S + 3600 });
     expect(h.kvs.items.get(tenantKey(t))).toBe(before);
     expect(acmMock.commandCalls(RequestCertificateCommand)).toHaveLength(0);
   });
@@ -236,7 +237,7 @@ describe('§3.4 step 5 sub-step 2: the open challenge', () => {
     h.dns.script([[[record(expired)]]]);
     const res = await put(h);
     expect(res.statusCode).toBe(202);
-    expect(res.body).toEqual(expect.objectContaining({ stage: 'domain-challenge', record: { name: NAME, type: 'TXT', value: record(TOKEN_1) } }));
+    expect(res.body).toEqual(expect.objectContaining({ stage: 'domain-challenge', record: { name: NAME, type: 'TXT', value: record(TOKEN_1) }, expiresAt: NOW_S + CHALLENGE_TTL_SECONDS }));
     expect(res.body.challenge).toBeUndefined();
     expect(stored(h)).toEqual(expect.objectContaining({ d: D, dk: TOKEN_1, dx: NOW_S + CHALLENGE_TTL_SECONDS }));
     expect(h.dns.txtNames).toEqual([]);

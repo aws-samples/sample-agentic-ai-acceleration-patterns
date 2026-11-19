@@ -77,6 +77,10 @@ string ApiDomain
 @range(min: 0)
 long DeploymentRevision
 
+/// A point in time as Unix seconds.
+@range(min: 0)
+long UnixSeconds
+
 /// Error message. Never names another tenant, account or cell (§5.1).
 /// Every error body the registrar function writes is `{message, reason?}`;
 /// only `CertificateQuotaError` sets `reason`.

@@ -134,7 +134,7 @@ structure DnsRecord {
 /// role may send `customDomain` (403 for the global hook role), and only
 /// while `dedicatedDomains` is on (400 otherwise). 200 with `dt` once
 /// routed; 202 while a dedicated domain is pending (`stage`, `record`,
-/// `challenge`).
+/// `challenge`, `expiresAt`).
 @idempotent
 @http(method: "PUT", uri: "/tenants/{tenantId}", code: 200)
 operation PutTenantRoute {
@@ -167,11 +167,18 @@ operation PutTenantRoute {
 
         /// The record the tenant publishes next: the challenge TXT record
         /// (`_tfd-challenge.<d>` `tfd-verify=<token>`) or ACM's validation
-        /// record. Present with 202.
+        /// record. Present with 202, except with `certificate` while ACM
+        /// has not attached its validation record to a new certificate yet:
+        /// the operator repeats the call a few seconds later.
         record: DnsRecord
 
-        /// Present with 202 for `domain-challenge` and `challenge-recheck`.
+        /// Present with 202 for `domain-challenge` and `challenge-recheck`
+        /// after a lookup; absent when the challenge was just issued.
         challenge: ChallengeResult
+
+        /// When the challenge token expires, in Unix seconds (7 days after
+        /// it was issued). Present with 202 for `domain-challenge`.
+        expiresAt: UnixSeconds
     }
 
     errors: [

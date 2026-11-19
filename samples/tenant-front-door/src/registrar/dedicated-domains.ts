@@ -364,7 +364,9 @@ export class AwsDedicatedDomains implements DedicatedDomains {
     record: DnsRecord | undefined,
     challenge?: Exclude<ChallengeOutcome, 'pass'>,
   ): PutTenantRouteServerOutput {
-    return { statusCode: 202, tenantId: request.requestTenantId, dt: entry.dt, stage, record, challenge };
+    // The challenge's expiry goes with the challenge record only (§3.4 step 5 sub-step 1).
+    const expiresAt = stage === 'domain-challenge' ? entry.dx : undefined;
+    return { statusCode: 202, tenantId: request.requestTenantId, dt: entry.dt, stage, record, challenge, expiresAt };
   }
 
   private challengeRecord(domain: string, token: string): DnsRecord {
