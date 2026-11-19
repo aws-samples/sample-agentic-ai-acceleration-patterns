@@ -31,6 +31,14 @@ const PATTERN = new RegExp(`^https://\\*\\.(${NAME})$`);
 export const SHARED_HOSTING_DOMAINS: readonly string[] = ['amazonaws.com', 'amazonaws.com.cn'];
 
 /**
+ * S3 path-style endpoints (`s3.amazonaws.com`, `s3.eu-central-1.amazonaws.com`,
+ * `s3-eu-west-1.amazonaws.com`, `s3.dualstack.<region>.amazonaws.com`): one
+ * origin serves every bucket's path-style pages, so an exact entry for one
+ * of them trusts all of those pages (§5.4.1).
+ */
+const S3_PATH_STYLE_HOST = /^s3(?:[.-][a-z0-9-]+)*\.amazonaws\.com(?:\.cn)?$/;
+
+/**
  * Turns the context value or stack prop into a list. A missing value, an
  * empty string and `[]` all mean no list. A string is split on `,` with no
  * trimming, so `a, b` or `a,,b` fails the entry check below.
@@ -76,6 +84,9 @@ function checkEntry(entry: string): void {
   const exact = EXACT.exec(entry);
   if (exact !== null) {
     checkName(exact[1], refuse);
+    if (S3_PATH_STYLE_HOST.test(exact[1])) {
+      refuse(`'${exact[1]}' serves every bucket's S3 path-style pages from one origin`);
+    }
     const port = exact[2];
     if (port !== undefined) {
       const n = Number(port);

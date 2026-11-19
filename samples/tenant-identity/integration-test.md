@@ -82,7 +82,7 @@ steps.
 | 4 | token contract: tenant claim per topology, ID token has none |
 | 5 | claim integrity: the tenant claim cannot be chosen by the caller |
 | 6 | refresh re-runs the trigger (`shared-pool-multi-tenant`) |
-| 7 | narrowing: one tenant, subset scopes, refusals, direct bypass; B cannot narrow to write |
+| 7 | narrowing: one tenant, subset scopes, refusals, direct bypass; B cannot narrow to write; CORS answers for a listed, pattern, unlisted, two-label and missing `Origin` (ADR-0040) |
 | 8 | tenant admin: the narrowed admin token manages only tenant A; the admin's cut shows in u1's next token |
 | 8b | `UpdateTenant` widens B; `DeleteScope` drops a scope from every token |
 | 9 | offboard A: issuance stops, cached verification still works |

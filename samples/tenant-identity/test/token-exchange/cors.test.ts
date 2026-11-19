@@ -99,10 +99,22 @@ describe('parseAllowedOriginsEnv', () => {
 });
 
 describe('addHeaders', () => {
-  it('replaces a header of the same name in any case', () => {
-    const response = { headers: { 'vary': 'Accept', 'Cache-Control': 'no-store' } };
+  it('merges Origin into an existing Vary of any case', () => {
+    const response = { headers: { 'vary': 'Accept-Encoding', 'Cache-Control': 'no-store' } };
     addHeaders(response, { Vary: 'Origin' });
-    expect(response.headers).toEqual({ 'Cache-Control': 'no-store', 'Vary': 'Origin' });
+    expect(response.headers).toEqual({ 'Cache-Control': 'no-store', 'Vary': 'Accept-Encoding, Origin' });
+  });
+
+  it('does not repeat a Vary token already there', () => {
+    const response = { headers: { Vary: 'origin, Accept' } };
+    addHeaders(response, { Vary: 'Origin' });
+    expect(response.headers).toEqual({ Vary: 'origin, Accept' });
+  });
+
+  it('replaces any other header of the same name in any case', () => {
+    const response = { headers: { 'access-control-allow-origin': 'https://old.example.com' } };
+    addHeaders(response, { 'Access-Control-Allow-Origin': 'https://app.example.com' });
+    expect(response.headers).toEqual({ 'Access-Control-Allow-Origin': 'https://app.example.com' });
   });
 });
 

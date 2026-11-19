@@ -42,6 +42,8 @@ describe('validateAllowedOrigins', () => {
     'https://xn--bcher-kva.example.com',
     'https://*.tenants.example.com',
     'https://*.app.example.co.uk',
+    'https://my-bucket.s3.eu-central-1.amazonaws.com',
+    'https://abc123.execute-api.eu-central-1.amazonaws.com',
   ])('accepts %s', (entry) => {
     expect(() => validateAllowedOrigins([entry])).not.toThrow();
   });
@@ -84,6 +86,11 @@ describe('validateAllowedOrigins', () => {
     ['https://*.dualstack.eu-central-1.amazonaws.com', 'regional shared-hosting domain'],
     ['https://*.cn-north-1.amazonaws.com.cn', 'China shared-hosting domain'],
     ['https://a.0x10', 'hex IPv4 literal'],
+    ['https://s3.amazonaws.com', 'S3 path-style host'],
+    ['https://s3.eu-central-1.amazonaws.com', 'regional S3 path-style host'],
+    ['https://s3-eu-west-1.amazonaws.com', 'legacy regional S3 path-style host'],
+    ['https://s3.dualstack.eu-central-1.amazonaws.com', 'dual-stack S3 path-style host'],
+    ['https://s3.cn-north-1.amazonaws.com.cn', 'China S3 path-style host'],
   ])('refuses %s (%s), naming the entry', (entry) => {
     expect(() => validateAllowedOrigins([entry])).toThrow(`'${entry}'`);
   });

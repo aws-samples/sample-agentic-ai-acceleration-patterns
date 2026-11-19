@@ -76,16 +76,38 @@ export function corsHeaders(allowed: readonly string[], origin: string | undefin
   return headers;
 }
 
-/** Adds `extra` to the answer's headers, replacing any header of the same name in any case. */
+/**
+ * Adds `extra` to the answer's headers. `Vary` is merged: its tokens are
+ * added to an existing `Vary` of any case, keeping the ones already there.
+ * Any other header replaces one of the same name in any case.
+ */
 export function addHeaders(response: HasHeaders, extra: Record<string, string>): void {
   for (const [name, value] of Object.entries(extra)) {
+    const lower = name.toLowerCase();
+    const tokens: string[] = [];
     for (const key of Object.keys(response.headers)) {
-      if (key.toLowerCase() === name.toLowerCase()) {
+      if (key.toLowerCase() === lower) {
+        if (lower === 'vary') {
+          tokens.push(...splitTokens(response.headers[key]));
+        }
         delete response.headers[key];
       }
     }
-    response.headers[name] = value;
+    if (lower === 'vary') {
+      for (const token of splitTokens(value)) {
+        if (!tokens.some((t) => t.toLowerCase() === token.toLowerCase())) {
+          tokens.push(token);
+        }
+      }
+      response.headers[name] = tokens.join(', ');
+    } else {
+      response.headers[name] = value;
+    }
   }
+}
+
+function splitTokens(value: string): string[] {
+  return value.split(',').map((t) => t.trim()).filter((t) => t !== '');
 }
 
 /**

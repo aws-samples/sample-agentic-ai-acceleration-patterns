@@ -94,7 +94,6 @@ today's behaviour: no CORS header on any answer.
   exchange (tracing headers from browser instrumentation included), makes
   the browser preflight and needs an `OPTIONS` route that answers from the
   same list; that is the §11 seam.
-- When this record is accepted, ADR-0011 gains `Amended by: ADR-0040` and a
-  dated trailing note.
+- ADR-0011 carries `Amended by: ADR-0040` and a dated trailing note.
 - Revisit if API Gateway gains per-request matching of `Origin` against a
   list, which would cover the gateway's own answers too.

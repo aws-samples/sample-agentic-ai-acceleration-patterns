@@ -706,8 +706,8 @@ answer only if it names the page's origin.
 the answer. As a context value it is one string, entries separated by `,`
 with no whitespace; as a stack prop it is `allowedOrigins?: string[]`. A
 missing context value, an empty string and the prop `[]` all mean no list,
-so `--context allowedOrigins=` clears it on a redeploy. Each entry is one
-of:
+so every deploy must pass the value: a deploy without it clears the list.
+Each entry is one of:
 
 | Form | Matches | Example |
 |---|---|---|
@@ -732,7 +732,10 @@ catches); a pattern whose `<domain>` is or ends in `amazonaws.com` or
 `amazonaws.com.cn`, where other customers' pages sit one label down even
 when the domain is not a public suffix (S3 path-style URLs on
 `https://s3.amazonaws.com` and `https://s3.eu-central-1.amazonaws.com`); a
-vendor's own AWS hostname goes in as an exact entry; a repeated entry;
+vendor's own AWS hostname goes in as an exact entry; an exact entry for an
+S3 path-style host (`s3` followed by `.` or `-` labels under
+`amazonaws.com` or `amazonaws.com.cn`, such as `https://s3.amazonaws.com`),
+which serves every bucket's path-style pages from one origin; a repeated entry;
 more than 20 entries; more than 1,024 characters in total, so the list fits
 the function's environment beside its other variables.
 
