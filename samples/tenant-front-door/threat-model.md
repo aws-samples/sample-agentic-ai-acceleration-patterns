@@ -642,15 +642,20 @@ starting "Why" gives the reason; "Bounded by" says what limits it.
     this residual: the sweeper and the teardown skip it by its id before
     any read, so a tag on it makes nothing remove it, and the registrar's
     `UpdateDistributionTenant` on it adds nothing to the control of
-    routing that compromised registrar code already holds (AR-19). The
-    code never calls either tag action on its own: CloudFront and ACM authorise the tags of a create
-    through them. *Why:* IAM cannot tell a create's tags from a later tag
+    routing that compromised registrar code already holds (AR-19). Another
+    front door's pooled distribution tenant in the same account carries no
+    distribution tag either: the registrar role can tag it with this
+    distribution's id and then disable it with `UpdateDistributionTenant`,
+    which takes that front door's pooled hosts offline. The code never
+    calls either tag action on its own: CloudFront and ACM authorise the
+    tags of a create through them. *Why:* IAM cannot tell a create's tags from a later tag
     call on a resource that has none. *Bounded by:* the actor (compromised
     registrar code, AR-19); the sweeper never deletes a certificate that is
     in use; CloudTrail names every `TagResource` and `AddTagsToCertificate`
     call (M-18). Deployer action: keep the edge account's `us-east-1` free
-    of other certificates, and review the registrar role's tag calls in
-    CloudTrail.
+    of other certificates, run each front door that serves dedicated
+    domains in an edge account of its own, and review the registrar role's
+    tag calls in CloudTrail.
 
 ## Open items
 
