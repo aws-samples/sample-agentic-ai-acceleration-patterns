@@ -87,21 +87,6 @@ cleanup works after the control plane has removed the record.
 - Revisit when the control plane offers a route hook of its own, or a
   cell origin type needs more than a domain.
 
-Note 2026-11-17: ADR-0017 (Proposed) registers routes from a
-control-plane global hook instead, and will supersede this record once
-control-plane ADR-0044 is accepted; the control-plane hooks branch
-merges first. Until then this record stands, with one gap a design
-review found: a tenant-owned account's tenant provisioning role can
-delete its suspended tenant's route and put it again, which writes a new
-entry that starts `active` (ADR-0017, Context). The specification
-already describes the ADR-0017 design.
-
-Note 2026-11-18: the clause "the control-plane hooks branch merges
-first" in the note above stands for a dependency, which this note
-states instead: ADR-0017 stays Proposed until control-plane ADR-0044 is
-accepted, and this record stays Accepted until then.
-
-Note 2026-11-18: control-plane ADR-0044 is now on `main` and still
-Proposed. When ADR-0017 is accepted it supersedes this record; until
-then this record stays Accepted and the specification describes the
+Note 2026-11-18: ADR-0017 (Proposed) will supersede this record once
+control-plane ADR-0044 is accepted. The specification describes the
 ADR-0017 design.

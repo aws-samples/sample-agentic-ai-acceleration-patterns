@@ -127,8 +127,8 @@ rotation are in spec §3.3 step 2, §3.5 and §4.1.
   which `/config.json` names: the pooled host `<tenant>.<appDomain>` in
   `host` mode, where they stay for the session, and `<appDomain>` in
   `single` mode (spec §3.5). A dedicated domain with its own callback URL
-  (Option 1 for that one client) is out of scope until spec Q-3 is
-  answered.
+  (Option 1 for that one client) is out of scope: ADR-0018 keeps a
+  dedicated domain out of the sign-in path.
 - Harder: the pooled-host rule holds only while the registrar keeps
   `customDomain` outside `appDomain` and refuses a write over another
   tenant's `host#` entry. The `host#` value names its tenant (`t`),
@@ -159,8 +159,8 @@ rotation are in spec §3.3 step 2, §3.5 and §4.1.
   `state` on a `logout_uri` redirect, or a per-tenant issuer replaces the
   shared one.
 
-Amended 2026-11-18 by ADR-0018, which answers spec Q-3: a tenant proves
-control of a dedicated domain's DNS with a registrar-issued token before
+Amended 2026-11-18 by ADR-0018, which decides how a tenant proves it
+controls a dedicated domain: the tenant shows control of the domain's DNS with a registrar-issued token before
 the domain is routed. The challenge confirms that the tenant controls
 the domain's DNS and can point it at a server of its own, so an
 authorization code sent there could leave the vendor's edge. A

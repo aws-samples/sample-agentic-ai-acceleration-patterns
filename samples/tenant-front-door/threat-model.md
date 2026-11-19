@@ -142,10 +142,10 @@ spec §11 question, and the build gate M-40 holds the dependent code).
 | T-16 | B3 | E | A caller reaches other routes of the ingress through the edge (`/invocations`, `/<backend>/delegations`, `/.well-known/*`, `/entitlements/*`) with encodings, extra slashes, case or `..` | Mitigated. The real ingress behind the filter is tested only through a stand-in (Q-4) | M-34 |
 | T-17 | B4 | E | A tenant that owns an account calls the registrar with the provisioning roles it controls: write, delete or re-create any route, its own included (lift its suspension, point its route at another cell) | Mitigated, conditional on ADR-0017, which is Proposed (T-33, Open items) | M-6, M-7, M-9 |
 | T-18 | B4 | E | Another principal in the edge account, whose identity policy allows `execute-api:Invoke`, calls the registrar. A same-account call needs only one of the two policies (spike S-8) | Mitigated | M-6 |
-| T-19 | B4 | T, I, E | A principal in the edge account with KeyValueStore actions writes any route, or reads the `signin` key, with no registrar in the way. The store has no resource policy and its actions name the store, not a key | Accepted; the deployer's boundary (AR-6) | M-36 |
+| T-19 | B4 | T, I, E | A principal in the edge account with KeyValueStore actions writes any route, or reads the `signin` key, with no registrar in the way. The store has no resource policy and its actions name the store, not a key | Accepted; the deployer's boundary (AR-6), which holds only while the edge account is vendor-owned and hosts no tenant-owned cell (spec §6.1) | M-36 |
 | T-20 | B4 | E | Every global hook runs as one role, so admission proves only that some vendor global hook is calling. Another global hook can set a new cell's origin before `front-door-post` does, or put a tenant route during that tenant's create or update | Mitigated to a failed operation; residual AR-1 | M-7, M-8, M-9, M-10 |
 | T-21 | B4 | T | A cell's origin points at the wrong host: the cell script in a tenant-owned account chooses its own cell's origin, a hook sets it, or an operator backfill names a wrong host | Mitigated for a hook or an operator error. A cell script in a tenant-owned account still chooses its own cell's origin within the pinned form (AR-4) | M-8, M-17 |
-| T-22 | B4 | E | A suspension is bypassed or lifted: (a) the tenant re-writes its route through the registrar, (b) another global hook does, (c) the tenant serves from its own account, (d) a caller reaches the agent ingress directly, (e) a vendor role deletes and creates the tenant's deployment, and the new `tenant#` entry starts `active` (spec §4.2) | (a) and (b) Mitigated, conditional on ADR-0017 (T-33). (c) AR-4. (d) AR-3. (e) AR-31 | M-6, M-7, M-9 |
+| T-22 | B4 | E | A suspension is bypassed or lifted: (a) the tenant re-writes its route through the registrar, (b) another global hook does, (c) the tenant serves from its own account, (d) a caller reaches the agent ingress directly, (e) a vendor role deletes the tenant's deployment and creates a new one: the delete removes the `tenant#` entry, so the new entry starts `active` (spec §4.2). A skipped delete hook leaves the entry, and its suspension carries to the new deployment | (a) and (b) Mitigated, conditional on ADR-0017 (T-33). (c) AR-4. (d) AR-3. (e) AR-31 | M-6, M-7, M-9 |
 | T-23 | B4 | E | A stolen or misused edge operator role sets origins, suspends and resumes tenants, sets domains and clears routes | Accepted (AR-20) | M-17, M-18, M-23 |
 | T-24 | B4 | T | Concurrent writers overwrite each other's entry: hook retries, an operator call, the `signin` custom resource | Mitigated | M-15 |
 | T-25 | B4 | E | Compromised code in a function of the stack. The registrar is the route table's one writer, so its compromise is control of routing. IAM cannot narrow some CloudFront actions to this distribution's tenants, so the code checks tags first | Accepted (AR-19) | M-16, M-36 |
@@ -155,7 +155,7 @@ spec §11 question, and the build gate M-40 holds the dependent code).
 | T-29 | B5 | T | A cell script in a tenant-owned account writes outputs that steer the hook: a repeated key, a missing key, shell metacharacters, an oversized value | Mitigated | M-12, M-8 |
 | T-30 | B5 | I | The hook's credentials leak: build logs, the process list, other processes in the build container | Mitigated; residual AR-1 | M-12 |
 | T-31 | B5 | D, T | The control plane cannot be read, so registrar writes are refused and creates fail. A delete hook fails three times and is skipped, which leaves a route | Mitigated; residual AR-23 | M-13, M-14, M-9 |
-| T-32 | B5 | T | The registrar misreads the deployment's `createdAt`. The control plane may return one instant in two forms (with or without a zero fraction), so a string comparison would make a repeat look like a new deployment and reset `suspended` to `active`, or let a new deployment inherit a stale entry | Mitigated: the registrar parses `createdAt` to Unix milliseconds before it stores or compares `dt`, and refuses a value that does not parse (spec §4.1) | M-9 |
+| T-32 | B5 | T | The registrar misreads the deployment's `createdAt`. The control plane may return one instant in two forms (with or without a zero fraction), so a string comparison would make a repeat look like a new deployment and replace the entry, dropping its dedicated domain, or let a new deployment inherit a stale entry | Mitigated: the registrar parses `createdAt` to Unix milliseconds before it stores or compares `dt`, and refuses a value that does not parse (spec §4.1) | M-9 |
 | T-33 | B5 | E | The control plane's global hooks do not land, or change shape (Q-5). Cell accounts' provisioning roles are then admitted again, and the gap of ADR-0013 returns: a tenant-owned account can delete its suspended route and put it again, which starts `active`, and can rewrite its own route | Open (Q-5). This model is redone if ADR-0017 is revisited (Open items) | M-40 |
 | T-34 | B6 | S | A `state` is forged, or the `signin` key leaks, so the sign-in host forwards a code to a tenant host of the attacker's choosing | Mitigated | M-19, M-20 |
 | T-35 | B6 | S | A `state` is replayed, or a code is stolen from a URL and redeemed | Mitigated | M-19, M-32 |
@@ -180,12 +180,12 @@ spec §11 question, and the build gate M-40 holds the dependent code).
 | T-54 | B9 | R | An alarm fires and nobody answers: the deployer gave no topic, nobody subscribes to it, or the sample does not check the notification | Mitigated for the wiring (the construct names `alarmTopicArn` on every alarm); residual AR-25 | M-24, M-48 |
 | T-55 | B10 | T | Someone invokes the sweeper with a crafted input (a chosen day, another list of tenant ids), or edits the sweeper table to hold back an alarm | Mitigated | M-26, M-16 |
 | T-56 | B10 | D | Detection is down: a page fails, the resolver has an outage, the table is lost, or the schedule never ran | Mitigated; residual AR-14 | M-24, M-26 |
-| T-57 | B11 | E | The test role writes the route table (so it can replace the `signin` key or any route), reads the `signin` key, edits the sweeper table, and invokes the sweeper. It stays behind if a run stops early | Accepted (AR-24) | M-39 |
+| T-57 | B11 | E | The test role writes the route table (so it can replace the `signin` key or any route), reads the `signin` key, edits the sweeper table, and invokes the sweeper. The test also registers its edge account as tenant-owned to run a tenant-owned cell, so the account role pair there holds the edge-account rights that T-19 and T-62 describe. It stays behind if a run stops early | Accepted (AR-24) | M-39 |
 | T-58 | B12 | D | The route hook runs for every application on the control plane. A wrong `RouteHookAccess` policy (a parameter read that answers `AccessDenied`), or a teardown out of order, fails the creates and updates of every application and delays every delete by three attempts. A `ParameterNotFound` does not fail the hook: it is a silent skip by design for an application with no front door (T-63) | Mitigated; residual AR-21 | M-41 |
 | T-59 | B12 | T, E | The hook's source is poisoned, or its pin is moved: code runs in the control plane's account as the global hook role, for every front door on that control plane | Mitigated; residual AR-21 | M-41 |
 | T-60 | B12 | D | The route table or ACM runs out: 5 MB store, 2,500 certificates, 5,000 certificate requests in 365 days. A tenant create or a domain set then fails | Mitigated; residual AR-18 | M-43 |
 | T-61 | B13 | T, E | Someone who can write an object under `/assets/*` in the SPA bucket changes a chunk. `'strict-dynamic'` trusts everything the hashed entry imports, so the script runs in every tenant's origin at once, with the access token and the refresh token in reach (T-46 for every tenant). `style-src 'self'` trusts the bucket too: a changed stylesheet defaces, but `img-src` and `default-src` keep it from sending data to another origin. `worker-src 'none'`, so no worker script loads. Someone who rewrites `index.html` can copy its two hashed inline scripts (the callback script and the import map) and the entry tag with its `integrity` byte for byte, so the hashes still match, and add markup around them: a phishing surface inside every tenant's origin, bounded by `form-action` (`'self'` and the authorize origin). They can also put back the previous release's `index.html`, which still runs while its hashes stay in the policy, a downgrade by one release. Neither runs new script | Mitigated for new script: a browser that checks the import map refuses a chunk it does not pin, and no worker loads. The rest rests on M-44, the bucket's write controls: a browser that ignores import map `integrity`, a rewritten `index.html` (markup, downgrade), a changed stylesheet. Residual: the edge account's administrators (AR-6) | M-44, M-45 |
-| T-62 | B13 | T, E | A principal in the edge account updates the router's code (`cloudfront:UpdateFunction`, `PublishFunction`), the distribution (`UpdateDistribution`), a response headers policy (`UpdateResponseHeadersPolicy`) or the web ACL (`wafv2:UpdateWebACL`, `us-east-1`). Each removes checks for every tenant at once: the router's routing and refusals, the origin access control, the P-8 header baseline, the rate rules | Accepted; the edge account's administrators are the deployer (AR-6) | M-36 |
+| T-62 | B13 | T, E | A principal in the edge account updates the router's code (`cloudfront:UpdateFunction`, `PublishFunction`), the distribution (`UpdateDistribution`), a response headers policy (`UpdateResponseHeadersPolicy`) or the web ACL (`wafv2:UpdateWebACL`, `us-east-1`). Each removes checks for every tenant at once: the router's routing and refusals, the origin access control, the P-8 header baseline, the rate rules | Accepted; the edge account's administrators are the deployer (AR-6), and the edge account is vendor-owned and hosts no tenant-owned cell (spec §6.1) | M-36 |
 | T-63 | B12 | D, T | The front door hook parameter is missing: deleted out of band in the control plane's account, or lost with a `RouteHookAccess` stack delete. The route hook reads `ParameterNotFound` and exits 0, a silent skip. Creates reach `ACTIVE` with no route. On a delete the hook also exits 0, so no skip alarm fires and the `tenant#` entry stays `active`, pointing at its old cell. The kept parameter brings two failures of its own: after a stack delete or a rolled-back first create, the next deploy of `RouteHookAccess` fails because the parameter exists; after a changed `applicationId`, the old application's parameter stays, the registrar answers 403 to the hook for that application, and its creates and updates fail | Mitigated against the stack delete (`Retain`). A deliberate deletion in the control plane's account is accepted (AR-30) | M-46 |
 | T-64 | B4 | D | Every writer uses the store's one ETag. A burst of hook writes (a bulk onboarding), operator calls and `signin` updates conflict, re-read and retry. A write that loses five attempts answers 503, the hook retries, and after the hook's retries the create fails (`CREATE_FAILED`) | Mitigated to a bounded retry. Sustained writes above about one a second, or a burst above about 100 (estimated), are accepted (AR-29) | M-15, M-49 |
 
@@ -207,7 +207,7 @@ hardening checklist (standard §7).
 | M-6 | Registrar admission: a resource policy that admits two principals by `aws:PrincipalArn` (the global hook role and the edge operator role), and an explicit `Deny` with `ArnNotLike` for every other principal. No role of a cell account is admitted, the provisioning role pair included. Admission grants no route | Spec P-5, §3.4 (opening paragraphs); ADR-0017, ADR-0013 (the `Deny` only; its admission list is replaced by ADR-0017); spike S-8. Planned check: steps 11, 12 | T-17, T-18, T-22 |
 | M-7 | Placement has one source: the registrar reads the control plane on every write, takes the cell and account from the record and never from the body, and applies its own `applicationId`. It refuses with 403 a missing record or one of another application. A hook put needs the record in `CREATING` or `UPDATING`, a hook delete needs `DELETING` or missing. It never writes without the read (503) | Spec P-5, P-6, §3.4 steps 1 to 3; ADR-0014, ADR-0015, ADR-0017. Planned check: step 20 | T-17, T-20, T-22, T-28 |
 | M-8 | A cell's origin has one form and one writer. It must be `<32 [a-z0-9]>.lambda-url.<control plane Region>.on.aws`. The global hook role writes it once and gets 409 on a different value; only the edge operator role changes it. A tenant route needs a cell route that has the same account as the deployment. A cell stays out of `ACTIVE` until its own hook put succeeds, and placement uses only `ACTIVE` cells | Spec §3.4 steps 3 and 4, §5.1; ADR-0017; control-plane §7.1. Planned check: step 20 | T-12, T-20, T-21, T-29 |
-| M-9 | The registrar owns status and replacement. A new `tenant#` entry is `active`; any later write from either role keeps `s`; only `UpdateTenantRouteStatus`, which only the edge operator role may call, changes it. A hook delete is accepted only while the record is `DELETING` or gone. `dt` (the deployment's `createdAt`, parsed to Unix milliseconds; an unparseable value is refused with 503) tells a retry from a new deployment, which replaces a leftover entry as a new one | Spec P-5, §3.4 steps 3 and 5, §4.1, §4.2, §5.1; ADR-0017. Planned check: steps 13, 20, 22, and the §10 unit test of the `createdAt` parse with a stubbed `GetDeployment` | T-17, T-20, T-22, T-31, T-32 |
+| M-9 | The registrar owns status and replacement. A `tenant#` entry with no entry before it is `active`; any later write from either role keeps `s`, and so does the replacement of a leftover entry; only `UpdateTenantRouteStatus`, which only the edge operator role may call, changes it. A hook delete is accepted only while the record is `DELETING` or gone. `dt` (the deployment's `createdAt`, parsed to Unix milliseconds; an unparseable value is refused with 503) tells a retry from a new deployment, which replaces a leftover entry and keeps its `s` | Spec P-5, §3.4 steps 3 and 5, §4.1, §4.2, §5.1; ADR-0017. Planned check: steps 13, 20, 22, and the §10 unit test of the `createdAt` parse with a stubbed `GetDeployment` | T-17, T-20, T-22, T-31, T-32 |
 | M-10 | The display name `n` comes from the control plane's `GetTenant`, never from a hook. The registrar replaces control characters, `"` and `\`, and cuts it to 64 bytes, so no stored character needs escaping | Spec §3.4 step 2, §4.1; ADR-0017 | T-20 |
 | M-11 | Host and domain rules in every route write: only the edge operator role may send `customDomain`, and only while `dedicatedDomains` is on; one lower-case host of at most 64 characters, no wildcard; never `appDomain` or `*.<appDomain>`; reserved labels (`www`, `api`, `admin`, `auth`, `login`, `static`, `status`) refused; 409 on a host or a pending claim another tenant holds | Spec §3.4 steps 3 and 4, §4.1, §5.1; ADR-0013, ADR-0016, ADR-0018. Planned check: step 11 | T-39, T-40 |
 | M-12 | The route hook handles input as untrusted. Ids come from `CELL_ID` and `TENANT_ID`, never from `SCRIPT_OUTPUTS`. It finds a repeated key with a streaming parse, rejects a missing `frontDoorApiDomain`, checks the origin form before sending (the registrar checks it again), builds bodies with `jq --arg`, and never `eval`s. Credentials reach `curl --aws-sigv4` through a mode-600 `-K` file, not the command line, and are never printed | Spec §3.4 (route hook steps 1 to 3), §5.2; ADR-0017; control-plane R-43 | T-29, T-30 |
@@ -241,7 +241,7 @@ hardening checklist (standard §7).
 | M-40 | Build gates. The build does not start until Q-5 (hooks) is answered, as spec §11 says. ADR-0017 stays Proposed and ADR-0013 Accepted until control-plane ADR-0044 is accepted. If Q-5 forces ADR-0017 to be revisited, this model is redone (Open items) | Spec §11, §6.3; ADR-0013, ADR-0017 | T-33 |
 | M-41 | Hook setup is safe to leave running. The hook exits 0 for an application with no front door hook parameter and retries a throttled read for about a minute. `register-hooks.sh` pins the hook's source to a full commit SHA, and the hook-to-registrar API stays backward compatible across versions, because one pin serves every front door. Setup and teardown go in the order of spec §6.2, which the README repeats | Spec §3.4, §5.2, §6.2; ADR-0014, ADR-0017; control-plane M10 (the pin rule). Planned check: steps 19, 24 | T-58, T-59 |
 | M-42 | Sign-out hygiene. `/logout` mints a `state` with no nonce, so the code that follows sign-out is dropped at the sign-in host and goes nowhere. It sends `Clear-Site-Data: "storage", "cache"` and no `"cookies"` directive, which would clear every site the vendor runs under the domain. The query is not logged | Spec §3.5 step 5, §7.3; ADR-0016. Planned check: step 18 | T-38 |
-| M-43 | Capacity is bounded and visible. Display names are cut to 64 bytes. The registrar refuses a write past 5 MB with 507, and an alarm on its own `RouteTableBytes` metric, in the main stack's Region, fires at 80 %. The ceilings are 16,949 tenants in `single` mode and 8,583 in `host` mode, and 3,472 dedicated tenants in the headroom. ACM's quota (2,500 by default) binds first; a request past it answers 507. Only the edge operator role can set a domain | Spec §4.1, §5.1; ADR-0012, ADR-0018. Deployer action: raise the ACM quota before routing more than about 2,500 dedicated domains | T-60 |
+| M-43 | Capacity is bounded and visible. Display names are cut to 64 bytes. The registrar refuses a write past 5 MB with 507, and an alarm on its own `RouteTableBytes` metric, in the main stack's Region, fires at 80 %. The ceilings are 16,949 tenants in `single` mode and 8,583 in `host` mode, and 3,472 dedicated tenants in the headroom. ACM's quota (2,500 by default) binds first; a request past it answers 429 with `reason: certificate-quota`. Only the edge operator role can set a domain | Spec §4.1, §5.1; ADR-0012, ADR-0018. Deployer action: raise the ACM quota before routing more than about 2,500 dedicated domains | T-60 |
 | M-44 | The SPA bucket has one writer. Block Public Access is on, the bucket owner enforces ownership, versioning is on, and the bucket policy lets the distribution read (origin access control) and denies `s3:PutObject`, `DeleteObject` and `DeleteObjectVersion` to every principal except the stack's two deployment roles, the upload and the teardown emptying. A bad write is a new version that can be rolled back | Spec §3.1, §3.2, §7.1; ADR-0023. Planned check: the bucket policy template test, step 10 | T-61 |
 | M-45 | Imported chunks are pinned. The build writes an import map with an `integrity` (`sha384`) for every chunk the entry can import and puts `integrity` on the entry. The CSP, which the response headers policy carries and the bucket does not, holds the hashes of the entry and the import map. The build fails when a chunk has no entry. A browser that ignores import map `integrity` loads chunks unchecked, and M-44 is the control there | Spec §7.1, §7.2; ADR-0008, ADR-0023. Planned check: the SPA build test, step 10 | T-61 |
 | M-46 | The hook parameter outlives its stack. `RouteHookAccess` sets `DeletionPolicy` and `UpdateReplacePolicy` `Retain` on it, so deleting or replacing the stack leaves it, and the teardown deletes it as a step of its own. Only a deliberate deletion in the control plane's account removes it. Its name is fixed, so the operator deletes or imports it before deploying `RouteHookAccess` again after a stack delete or a rolled-back first create, and deletes the old application's parameter when `applicationId` changes | Spec §3.1, §3.4 (route hook step 1), §6.2; ADR-0017. Planned check: step 24 | T-63 |
@@ -390,7 +390,13 @@ starting "Why" gives the reason; "Bounded by" says what limits it.
   update actions to what the stack owns. *Bounded by:* the sample's roles
   (M-16, M-36, M-44) and the deployer's own account hygiene. The edge
   account's administrators are the deployer, and the sample does not
-  defend against them. Deployer action: keep the store actions,
+  defend against them. The bound holds only while the edge account is
+  the vendor's alone: the deployer never registers it with the control
+  plane as `owner: TENANT` and hosts no tenant-owned cell in it (spec
+  §6.1), because the role pair of a tenant-owned account is the tenant's
+  to assume, edit or run code under, and it deploys stacks, so the tenant
+  would become one of the principals above. Deployer action: keep the
+  edge account vendor-owned; keep the store actions,
   `cloudfront:UpdateFunction`, `PublishFunction`, `UpdateDistribution`,
   `UpdateResponseHeadersPolicy`, `wafv2:UpdateWebACL` and writes to the
   bucket policy off every other role; review the [lists
@@ -487,7 +493,8 @@ starting "Why" gives the reason; "Bounded by" says what limits it.
     `single` mode, 8,583 in `host` mode or about 3,472 dedicated tenants the
     store is full; ACM's 2,500-certificate default binds before that, and a
     domain dropped and set again uses the 5,000 requests in 365 days. A
-    create then fails with 507. *Why:* sharding by distribution is a plan,
+    create then fails with 507, or with 429 and `reason: certificate-quota`
+    past ACM's quota. *Why:* sharding by distribution is a plan,
     not a build (ADR-0012). *Bounded by:* the 80 % alarm; only the edge
     operator role sets a domain. Deployer action: raise the ACM quota first.
 - **AR-19: Compromised code in the registrar, sweeper, router or a custom
@@ -531,11 +538,19 @@ starting "Why" gives the reason; "Bounded by" says what limits it.
     a later deployment of the tenant replaces the entry (M-9).
 - **AR-24: Test-only shortcuts (T-57).** The test role can write the
     store, read the `signin` key, edit the sweeper table and start the
-    sweeper; the test creates its own operator role. *Why:* a page acts
-    only on the current UTC day, so the test seeds items to reach a third
-    missed day, and a fixture `host#` key stands in for a domain with no
-    DNS (spec §10). *Bounded by:* test account only; created for the run and
-    removed after; none of it is in the shipped constructs. If a run stops
+    sweeper; the test creates its own operator role; and the test
+    registers its edge account with the control plane as `owner: TENANT`,
+    so cell B is a tenant-owned cell, and deploys the account role pair
+    there. That pair is the tenant's in a real tenant-owned account, and
+    in the edge account it holds the rights of T-19 and T-62. *Why:* a
+    page acts only on the current UTC day, so the test seeds items to
+    reach a third missed day, a fixture `host#` key stands in for a domain
+    with no DNS (spec §10), and a tenant-owned cell needs a tenant-owned
+    account, which the edge account stands in for so the test needs no
+    third. *Bounded by:* test account only; created for the run and
+    removed after; none of it is in the shipped constructs. A deployment
+    must not copy the topology: the edge account is vendor-owned and
+    hosts no tenant-owned cell (spec §6.1, §10 step 1). If a run stops
     early, remove the roles and the fixture by hand: the leftover check of
     step 24 lists them.
 - **AR-25: With no alarm topic nobody is told, and the notifications are
@@ -588,15 +603,17 @@ starting "Why" gives the reason; "Bounded by" says what limits it.
   an entry with no deployment and on a deployment with no entry. *Owner:*
   the deployer of the control plane's account.
 - **AR-31: A vendor delete-and-create of a deployment resets its
-  suspension (T-22).** The new deployment's `tenant#` entry starts
-  `active`, because the suspension follows the deployment, not the tenant
-  (spec §4.2; §10 step 22 drives it). A control plane operator, or
-  automation that recreates deployments (a tenant move, a repair), lifts a
+  suspension (T-22).** The delete hook removes the deployment's
+  `tenant#` entry, so the new deployment's entry starts `active` (spec
+  §4.2; §10 step 22 drives it). A control plane operator, or automation
+  that recreates deployments (a tenant move, a repair), lifts a
   suspension the edge operator set, and nothing tells the edge operator.
-  *Why:* only a vendor role can do it, no tenant can, and a suspension
-  that survives a new deployment needs a key that does not depend on `dt`,
-  which the sample does not carry. *Bounded by:* the actors, and the edge
-  operator, who suspends the new deployment again. Deployer action: when a
+  Only this path resets the status. When the delete hook was skipped, the
+  entry is still there, and the registrar carries its `s` to the
+  replacement. *Why:* only a vendor role can do it, no tenant can, and
+  once the entry is deleted nothing remains to carry the suspension.
+  *Bounded by:* the actors, and the edge operator, who suspends the new
+  deployment again. Deployer action: when a
   suspended tenant's deployment is replaced, check the status of the new
   entry.
 - **AR-32: A violation before the first inline script can report the

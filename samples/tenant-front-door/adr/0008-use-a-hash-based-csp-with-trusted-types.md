@@ -85,7 +85,7 @@ part of this decision: without them Trusted Types would block the app.
 - Revisit when the sample adds server-side rendering or per-tenant SPA
   versions (spec §1.2), which would need nonces or one policy per version.
 
-Note 2026-11-18: ADR-0023 amends this record. `'strict-dynamic'` trusts
+Amended 2026-11-18 by ADR-0023: `'strict-dynamic'` trusts
 everything the hashed entry script imports, so the build also writes an
 import map with an `integrity` entry for every chunk, and the policy
 carries the import map's hash besides the entry's (spec §7.1). The

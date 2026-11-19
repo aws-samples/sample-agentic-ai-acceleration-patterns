@@ -4,7 +4,6 @@
 
 - Status: Accepted
 - Date: 2026-11-18
-- Amends: ADR-0018
 - Amended by: ADR-0022
 - Deciders: Dave Roberts (PSA)
 
@@ -13,17 +12,16 @@
 ADR-0018 has the sweeper re-check every passed domain challenge daily
 and alarm when one tenant and domain misses on three days in a row, or
 only errors on three. A streak needs a memory that lasts across days.
-ADR-0018 gave the sweeper none ("its log is the record"), so each page
-rebuilt the history from the sweeper's own log with a Logs Insights
-query: a run id, a run day, `run-start` and `page-end` lines, a
-10,000-row limit with a 19-run proof, a join in memory, a first-run rule
-read from log lines, a 60 s wait for the log to index, a starter that
-gives the no-lister alarm its first datapoint, and a run day that only
-the integration test supplies. The full design review found two defects
-in that: the run id is the invocation id, which Lambda keeps across
-asynchronous retries, so whether a retry is a new run is undefined; and
-the supplied day is a test seam in the shipped function. No record
-compared another way to keep the history.
+The sweeper's own log can hold it: each page rebuilds the history with a
+Logs Insights query, which needs a run id, a run day, `run-start` and
+`page-end` lines, a 10,000-row limit with a 19-run proof, a join in
+memory, a first-run rule read from log lines, a 60 s wait for the log to
+index, a starter that gives the no-lister alarm its first datapoint, and
+a run day that only the integration test supplies. That has two defects:
+the run id is the invocation id, which Lambda keeps across asynchronous
+retries, so whether a retry is a new run is undefined; and the supplied
+day is a test seam in the shipped function. A table keeps the history
+without either.
 
 Constraints: the state is small (at most 3,472 dedicated tenants,
 spec §4.1, ADR-0012). The route table is registrar-only (P-3). An
@@ -36,7 +34,7 @@ repository has point-in-time recovery.
 
 ## Options considered
 
-### Option 1: The log as the record (ADR-0018 as accepted)
+### Option 1: The log as the record
 
 Pros: no new resource and no data access beyond Logs; the log lines
 also serve as an audit trail. Cons: every page runs a Logs Insights
@@ -93,7 +91,7 @@ the table. The sweeper takes no day from its caller. Option 1 would
 keep the sweeper stateless at the price of the machinery above; Option 3
 breaks the one-writer rule for the route table. The starter, the
 on-failure queue, the no-lister alarm, the in-call lookups, the guard,
-the page size and the removal paths of ADR-0018 stay as decided.
+the page size and the removal paths are as ADR-0018 states them.
 
 ## Consequences
 
@@ -109,7 +107,7 @@ the page size and the removal paths of ADR-0018 stay as decided.
 - Easier: a page takes at most 500 ÷ 10 × (2 queries × 5.4 s + 2 DynamoDB
   calls × 2 s) = 740 s, plus 2 s to finish, 742 s, inside the 15-minute
   timeout. The sweeper's role holds `dynamodb:GetItem`, `Query`,
-  `UpdateItem` and `DeleteItem` on the table in place of the Logs
+  `UpdateItem` and `DeleteItem` on the table, and no Logs
   Insights actions.
 - Size and cost: at the ceiling of 3,472 dedicated tenants, 3,472 entry
   items of under 400 bytes (about 1.4 MB) and about 14 run items, which
@@ -139,7 +137,7 @@ the page size and the removal paths of ADR-0018 stay as decided.
   switch being turned off, or when a dropped and re-set domain must not
   keep its earlier streaks.
 
-Note 2026-11-18: ADR-0022 amends this record. The lister passes its
+Amended 2026-11-18 by ADR-0022: the lister passes its
 UTC date to each page, which must match today and is then today for
 every read and write; the three-miss count is emitted only on a miss;
 each page re-reads its passed tenants' entries with `GetKey`; and the

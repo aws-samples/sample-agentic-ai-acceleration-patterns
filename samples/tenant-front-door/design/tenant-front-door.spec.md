@@ -558,11 +558,14 @@ On every write:
    retries and every update stay idempotent. One whose `createdAt`
    differs has met an entry that an earlier deployment of the tenant
    left when its delete hook was skipped (below): the registrar
-   replaces it as a new entry, and removes the old entry's `host#` keys
-   and its domain as a delete would. A new `tenant#` entry gets
+   replaces it with a new entry for the new deployment, and removes the
+   old entry's `host#` keys and its domain as a delete would. The new
+   entry keeps the old entry's `s`, so a suspended leftover stays
+   suspended. A `tenant#` entry with no entry before it gets
    `s: active`. Any write to an existing entry keeps its `s`, whether
-   the global hook role or the edge operator role makes it: only
-   `UpdateTenantRouteStatus` changes it (§4.2).
+   the global hook role or the edge operator role makes it, and a
+   replacement does the same: only `UpdateTenantRouteStatus` changes it
+   (§4.2).
 
    A dedicated domain is kept in the `tenant#` entry as `d`, with its
    domain challenge as `dk` and `dx` (§4.1, ADR-0018). The operator's
@@ -602,8 +605,8 @@ On every write:
       `us-east-1`, which CloudFront requires, requested by the registrar across Regions with DNS validation and
       tagged with the tenant id and the distribution id. A request past
       ACM's certificate quota fails with `LimitExceededException`, and
-      the call answers 507 (§4.1). The registrar
-      finds it among its own certificates by domain name and tags, and
+      the call answers 429 with `reason: certificate-quota` (§5.1). The
+      registrar finds it among its own certificates by domain name and tags, and
       finds the distribution tenant with `GetDistributionTenantByDomain`.
    4. Certificate pending: answer 202 with `stage: "certificate"` and
       ACM's validation record. The operator repeats the call once the
@@ -1145,8 +1148,8 @@ cell, whose hosts check refuses the tenant once the delete script has
 removed its namespace, or at a cell route that is gone. A
 later `CreateDeployment` for the same tenant does not inherit it: the
 new deployment's `createdAt` differs from the entry's `dt`, so the
-hook's put replaces the entry, `s: active` and routed to the new cell
-(step 5).
+hook's put replaces the entry, routed to the new cell and with the
+status the leftover held (step 5).
 
 ### 3.5 Identity model
 
@@ -1331,7 +1334,7 @@ hook's put replaces the entry, `s: active` and routed to the new cell
 | `edgeOperatorRoleArn` | yes | | ARN of a role in the edge account that the registrar admits for the vendor-only calls: suspend and resume, `customDomain`, backfill, origin changes and clearing leftovers (§3.4). The deployer brings the role; the stack does not create it |
 | `issuer` | yes | | The SPA's client id and scopes, and the issuer's authorize, token and logout endpoints as `https` URLs, or a Cognito user-pool domain they are derived from (`/oauth2/authorize`, `/oauth2/token`, `/logout`). Optionally `exchangeEndpoint`, an `https` URL, for an issuer that serves the multi-tenant token exchange on a URL other than its token endpoint (§3.5); omit it when the issuer serves the exchange at its token endpoint or no user holds a `tenants` token. Validated at synth, with no network call (§7.1) |
 | `signinKeys` | no | `{ids: ["k1"], current: "k1"}` | `host` mode only: `{ids: string[], current: string}`, the `kid`s the `signin` key holds and the one that signs. Synth checks that `ids` holds one or two unique ids, each matching `[a-z0-9]{1,8}`, and that `current` is one of them (§4.1) |
-| `tenantClaim` | no | `tenant_id` | Claim the router and the origin read |
+| `tenantClaim` | no | `tenant_id` | Name of the claim that holds the tenant id. The router, the SPA and the origin read it (below) |
 | `spaSource` | no | the demo SPA | Path of the built SPA |
 | `agentIngress` | no | off | Agent ingress endpoint; omit to leave `/agents/*` off, and the router then answers 404 for every `/agents` path (§3.3 step 3) |
 | `dedicatedDomains` | no | off | Lets the edge operator role set a tenant's `customDomain` (§3.4 step 5, ADR-0018). Off: any `customDomain` gets 400, the registrar role holds no ACM or distribution-tenant action, and the sweeper, its role, its table, its schedules and the starter are not deployed. A stack update that turns it off fails while any `tenant#` entry holds a `d` or the sweeper has a distribution tenant or certificate left to delete; the operator drops every dedicated domain first (§3.4) |
@@ -1339,6 +1342,14 @@ hook's put replaces the entry, `s: active` and routed to the new cell
 | `ipRequestsPer5Min` | no | 500 | `host` mode only: the most requests one client IP may send to one tenant host's `/api/*` and `/agents/*` in 5 minutes before the edge answers 429, counted ahead of the per-host count (ADR-0021). One value for every tenant host; there is no per-tenant setting. A chosen value, not a measured one. Keep it below `tenantRequestsPer5Min`. A tenant whose users all reach the edge through one office NAT address shares one count: at 500 its whole user base gets about 1.7 requests per second before `tenantRequestsPer5Min` applies. Raising it raises it for every host |
 | `reportingEndpoint` | no | off | URL for CSP and other browser reports, on for the whole session in both modes. No report carries the callback's code, because the first inline script removes it from the URL before anything loads (§7.1 Reports) |
 | `alarmTopicArn` | no | none | ARN of an SNS topic in the main stack's account and Region. The construct adds it as the ALARM action of every alarm this specification defines: the three-miss, `unverifiable`, queue-depth, missing-pages and no-lister alarms of the sweeper (§3.4 step 5) and the 80 % route table alarm on the registrar's `RouteTableBytes` metric (§4.1). Every one of these alarms is in the main stack's Region, so one topic serves them all. The deployer owns the topic, its policy (it must allow CloudWatch to publish) and its subscribers. With no topic the alarms exist and notify no one |
+
+`tenant_id` in this specification means the claim that `tenantClaim`
+names, `tenant_id` by default. That covers the router's rules and its 401
+conditions (§3.3, §5.3), the host-mode comparison of the claim with the
+host's tenant, the SPA's check after the token exchange (§3.5), the cell
+API's route-hint check and the path of the cell's own tenant namespace
+(§3.5, §6.1), and the demo cell API that reads the claim.
+The published interface carries the name (§6.4).
 
 ## 4. Data model
 
@@ -1459,7 +1470,8 @@ Rules:
   the default quota allows at most about 2,500 dedicated domains,
   below the 3,472 the headroom holds. The deployer requests a higher ACM
   quota before routing more. A request past the quota fails with
-  `LimitExceededException` and the registrar answers 507. The yearly
+  `LimitExceededException` and the registrar answers 429 with
+  `reason: certificate-quota` (§5.1). The yearly
   count includes every request, so a domain dropped and set again
   repeatedly uses it up. CloudFront's limit of 1,000,000 distribution
   tenants for each account does not bind
@@ -1506,14 +1518,17 @@ A tenant cannot lift its own suspension at the edge. The registrar
 admits no role a cell account holds (§3.4), so a tenant-owned account
 can neither write nor delete its route. Only the route hook writes it,
 on an operation the vendor started. A hook's put to an existing entry
-keeps `suspended`, and a hook's delete is accepted only while the
+keeps `suspended`, and so does a put that replaces a leftover entry of
+an earlier deployment (a different `dt`, which a skipped delete hook
+leaves, §3.4 step 5). A hook's delete is accepted only while the
 control plane is deleting the deployment (§3.4). The route starts
-`active` again only when the vendor deletes the deployment and creates a
-new one, whose `dt` differs, also when the delete hook was skipped (§3.4
-step 5). The suspension follows the deployment, not the tenant. A vendor
-role that deletes a deployment and creates a new one, for a tenant move
-or a repair, therefore lifts a suspension the edge operator set, and
-nothing tells the edge operator, who suspends the new deployment again.
+`active` again only when no entry is left: the vendor deletes the
+deployment, its delete hook removes the entry, and the vendor creates a
+new deployment. The status belongs to the entry, and the delete removes
+the entry. A vendor role that deletes a deployment and creates a new one,
+for a tenant move or a repair, therefore lifts a suspension the edge
+operator set, and nothing tells the edge operator, who suspends the new
+deployment again.
 A suspension also does not reach a cell the tenant owns or the agent
 ingress (§6.2 limits).
 
@@ -1581,8 +1596,11 @@ distribution tenant or certificate tagged for another tenant (the
 message names no tenant); 422 when the dedicated domain's certificate
 failed validation or timed out (a domain challenge never fails: it
 expires and is issued again); 507
-when a write would exceed the route table's 5 MB (ADR-0012) or ACM
-refuses a certificate request for its quota (§4.1); 503 when
+when a write would exceed the route table's 5 MB (ADR-0012); 429 with
+`reason: certificate-quota` when ACM refuses a certificate request for
+its quota (§4.1), which lasts until the deployer raises the quota or
+certificates are deleted, so the operator does not repeat the call until
+then; 503 when
 the control plane cannot be read or returns a `createdAt` that does not
 parse (the write is refused, never made unchecked), or when the store's
 ETag still conflicts after five
@@ -1650,6 +1668,16 @@ All with a small static HTML or JSON body and `no-store`:
 ### 6.1 What the deployer supplies
 
 - A public hosted zone for `appDomain` in the edge account.
+- An edge account that is the vendor's alone. The deployer never
+  registers it with the control plane as `owner: TENANT`, and it hosts
+  no tenant-owned cell. A tenant-owned account gives its tenant a role
+  pair it controls (§3.4), and that role pair deploys stacks, so the
+  tenant would hold the edge-account rights the design keeps from
+  tenants: the store (and with it the `signin` key and every route), the
+  router, the distribution, the response headers policy, the web ACL and
+  the SPA bucket (§6.2 limits; the threat model's AR-6). The integration
+  test registers its edge account tenant-owned as a test-only shortcut
+  (§10 step 1); a deployment does not copy that topology.
 - An issuer that meets `ARCHITECTURE.md` §2.1 and accepts the app's
   callback and sign-out URLs: `https://<appDomain>/` as both in `single`
   mode. In `host` mode, `https://login.<appDomain>/callback` as the
@@ -1728,7 +1756,8 @@ All with a small static HTML or JSON body and `no-store`:
   the stack cannot (§3.5).
 - A cell API that verifies the token in `x-tenant-token`, refuses a
   `tenant_id` that differs from `x-tenant-route` (compared
-  case-insensitively), refuses tenants its cell does not host, and in
+  case-insensitively; `tenant_id` is the claim `tenantClaim` names,
+  §3.6), refuses tenants its cell does not host, and in
   `single` mode limits each verified tenant to `tenantRequestsPer5Min`
   (ADR-0009). The demo cell API is the reference.
 - CloudFront origin access control support on the cell origin (Lambda
@@ -1816,10 +1845,11 @@ Limits of these promises:
   path, not built here, sits at the issuer: it refuses to mint or
   exchange a token for a suspended tenant, so direct access ends
   within one token lifetime. The front door does not tell the issuer.
-- A vendor role that deletes a deployment and creates a new one resets
-  its suspension to `active` (§4.2), and nothing tells the edge
-  operator. The suspension follows the deployment, not the tenant. The
-  edge operator suspends the new deployment again.
+- A vendor role that deletes a deployment, whose delete hook removes
+  the entry, and creates a new one resets its suspension to `active`
+  (§4.2), and nothing tells the edge operator. The edge operator
+  suspends the new deployment again. When the delete hook was skipped,
+  the leftover entry carries its suspension to the new deployment.
 - A caller who holds a tenant id can sort it in `single` mode with a
   forged, unsigned token: 403 for an unregistered id, 503 for a
   suspended one, the cell's refusal for a live one (§3.3 steps 5 and
@@ -1832,7 +1862,9 @@ Limits of these promises:
   (`wafv2:UpdateWebACL`) removes the checks each one carries, for every
   tenant at once, and the stack cannot narrow those actions to what it
   owns. The edge account's administrators are the deployer, and
-  CloudTrail names each call.
+  CloudTrail names each call. That holds only while the edge account is
+  the vendor's alone (§6.1): a tenant-owned role pair in it would make a
+  tenant one of those principals.
 - The front door hook parameter is the switch for routing an
   application's tenants. Deleting it, which only an administrator of
   the control plane's account can do, makes the hook skip the
@@ -2089,6 +2121,7 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0020](../adr/0020-keep-the-re-check-state-in-a-sweeper-owned-dynamodb-table.md) | Keep the dedicated-domain re-check state in a sweeper-owned DynamoDB table: one item for each tenant and domain, one for each daily run | the log as the record (Logs Insights); a sweeper-owned DynamoDB table; fields in the route table |
 | [ADR-0021](../adr/0021-add-a-per-ip-rate-rule-ahead-of-the-per-host-rule.md) | In `host` mode, a rate rule aggregated on `Host` and client IP, `ipRequestsPer5Min` (500, chosen, not measured), ahead of the per-host rule; amends ADR-0009 | no per-IP rule; an IP-only rule; a `Host`-and-IP aggregate |
 | [ADR-0022](../adr/0022-pin-each-sweeper-page-to-the-listers-date-and-re-read-the-route-table.md) | Pin each sweeper page to the lister's date, which it must match to today and then uses for every read and write; count three misses only on a miss; re-read each passed tenant's entry with `GetKey`, 10 at a time, with no scan (page bound 842 s); grant `BatchWriteItem`; amends ADR-0020 | no date passed; a date the page trusts; a date the page must match to today; a `ListKeys` scan with a deadline; a `GetKey` per passed id |
+| [ADR-0023](../adr/0023-pin-imported-spa-chunks-with-an-import-map-integrity.md) | Pin each imported SPA chunk with an `integrity` entry in an import map, and the entry script with `integrity`; the import map's hash joins the entry's in the CSP; amends ADR-0008 | an import map with `integrity`; one bundle with no imports; one hash per chunk in the CSP |
 
 ## 9. Spikes
 
@@ -2115,7 +2148,8 @@ Runs in `eu-central-1`, with the edge stacks in `us-east-1` (ADR-0010),
 in two accounts. The control plane's account hosts the test's own
 control plane and cell A, and is registered vendor-owned, as the control
 plane registers its home account (control-plane §1.1). The edge account
-hosts the front door and cell B, and is registered tenant-owned: the test
+hosts the front door and cell B, and is registered tenant-owned, a
+test-only shortcut that spares a third account (step 1): the test
 deploys the control plane's standalone account role pair there with an
 `externalId`, because `PutAccount` refuses `owner: TENANT` without one
 and proves that the pair enforces it (control-plane §3.3, §6.4). The test
@@ -2181,8 +2215,11 @@ destroy time, which the test reports with the rest.
    the edge account with an `externalId` the test generates for the run.
    Register both accounts with `PutAccount`: the control plane's account
    as `owner: VENDOR`, and the edge account as `owner: TENANT` with that
-   `externalId`. Deploy the agent ingress stand-in (S-5's: a REST API
-   with a REQUEST authoriser and a streaming Lambda proxy that records
+   `externalId`. That registration lets the test run a tenant-owned cell
+   without a third account. It is a test-only shortcut that a deployment
+   must not copy: a real front door's edge account is vendor-owned and
+   hosts no tenant-owned cell (§6.1). Deploy the agent ingress stand-in
+   (S-5's: a REST API with a REQUEST authoriser and a streaming Lambda proxy that records
    the path and headers it receives), then the front door, with
    `dedicatedDomains` on (§3.6), `edgeOperatorRoleArn` set to the
    operator role the test created, `controlPlane` naming the control
@@ -2417,7 +2454,8 @@ destroy time, which the test reports with the rest.
     runs the same hook code; the test builds no failing cell for it,
     because cell parameters are empty at a cell's birth
     (control-plane R-34).
-22. A skipped delete hook. Create tenant `c` in cell A and suspend it;
+22. A skipped delete hook, and a suspension across a re-created
+    deployment. Create tenant `c` in cell A and suspend it;
     after 60 s its token gets 503. The test points the front door hook
     parameter's `registrarUrl` at a path the registrar does not serve,
     which API Gateway refuses with 403, and deletes `c`'s deployment:
@@ -2425,8 +2463,14 @@ destroy time, which the test reports with the rest.
     plane counts the skip, the deployment is deleted, and `c`'s entry
     stays `suspended`. The test restores the parameter and creates `c`'s
     deployment again: its `createdAt` differs from the entry's `dt`, so
-    `front-door-post` writes a new entry, and `c`'s token is served by
-    cell A. The test breaks the parameter again and deletes `c`'s
+    `front-door-post` replaces the entry and keeps `suspended`, and
+    `c`'s token still gets 503. The edge operator role resumes `c`
+    (`UpdateTenantRouteStatus`), and after 60 s `c`'s token is served by
+    cell A. The test suspends `c` again and, with the parameter intact,
+    deletes `c`'s deployment (`front-door-pre` removes the entry, and
+    after 60 s `c`'s token gets 403) and creates it again: the new entry
+    is `active`, and `c`'s token is served by cell A (AR-31). The test
+    breaks the parameter again and deletes `c`'s
     deployment, which skips the hook again; the edge operator role's
     `DeleteTenantRoute` for `c` answers 200, and after 60 s `c`'s token
     gets 403. The test restores the parameter.
@@ -2531,7 +2575,8 @@ of a route hint that differs from the verified claim (the demo cell API's
 unit tests; step 7 drives a forged signature only); the `single` mode
 origin rate limit (the demo cell API's unit test); the edge operator's
 `PutCellRoute` backfill and origin change, `DeleteHostRoute`, the 503 for
-a missing `cell#` and the 507 answers; a `host#` entry with no `tenant#`
+a missing `cell#`, the 507 answers and the 429 for a certificate
+quota; a `host#` entry with no `tenant#`
 entry (a router test on a stubbed store); the SPA's token exchange to
 `exchangeEndpoint`, CORS headers and the bounded retry included (a
 browser test against a stub endpoint; `tenant-identity`'s own §10 step 7

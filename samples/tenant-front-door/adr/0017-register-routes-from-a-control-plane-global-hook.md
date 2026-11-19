@@ -14,8 +14,8 @@ registrar from the cell's own account, signed with the account's
 provisioning role pair. The registrar checked the calling account
 against the control plane's placement. In a tenant-owned account the
 tenant controls that pair: it can assume the roles, edit them, or run
-its own code under them, whenever it likes. A design review found the
-consequence: the tenant's role calls `DeleteTenantRoute` for its
+its own code under them, whenever it likes. The tenant's role can
+therefore lift its own suspension: it calls `DeleteTenantRoute` for its
 suspended tenant, then `PutTenantRoute`. The deployment is still placed
 in that account, so the second call passes the placement check and
 writes a new `tenant#` entry, which starts `active`. The suspension is
@@ -148,9 +148,9 @@ printing the registrar's message.
 - A tenant cannot lift its own suspension: no role it holds reaches the
   registrar, a hook's put keeps the stored status, and a hook's delete
   is refused while the deployment is live. Only the vendor's
-  `DeleteDeployment` and a new `CreateDeployment` start a route
-  `active` again (spec §4.2, the suspension step of the integration
-  test).
+  `DeleteDeployment`, once its delete hook has removed the entry, and a
+  new `CreateDeployment` start a route `active` again (spec §4.2, the
+  suspension step of the integration test).
 - No global hook can remove a live tenant's route, or re-create one
   during its delete, through the shared role: the status check admits a
   hook's put only while the record is `CREATING` or `UPDATING` and its
@@ -195,7 +195,8 @@ printing the registrar's message.
   route is gone. A later
   `CreateDeployment` for the tenant does not inherit a leftover entry:
   its `createdAt` differs from the entry's `dt`, so the hook's put
-  replaces it and the route starts `active`.
+  replaces it, routed to the new cell, and keeps its `s`: a suspended
+  leftover stays suspended.
 - `dt` adds 19 bytes to every `tenant#` entry, so the ADR-0012 ceilings
   fall to 16,949 tenants in `single` mode and 8,583 in `host` mode.
 - A control-plane read outage now also fails hooks: creates and updates
@@ -211,6 +212,11 @@ printing the registrar's message.
   the hooks still registered and no `RouteHookAccess` policy left, the
   hook cannot read the front door hook parameters and fails every create
   and update on the control plane.
+- `RouteHookAccess` keeps the front door hook parameter when the stack is
+  deleted or its resource replaced (`Retain`), so a missing parameter,
+  which the hook skips silently, follows only from a deliberate deletion
+  in the control plane's account. The teardown has a step after
+  `RouteHookAccess` that deletes the parameter (spec §3.1, §6.2).
 - The hook-to-registrar API stays backward compatible across sample
   versions, or every front door on one control plane upgrades together,
   because one hook pin serves them all.
@@ -221,10 +227,12 @@ printing the registrar's message.
 - Spike S-8 still covers the admission: it proved a cross-account
   `aws:PrincipalArn` match on a role ARN and the need for the explicit
   `Deny`; only the admitted principal changes. The integration test
-  checks that the provisioning roles of both cell accounts get 403, the
-  tenant-owned edge account's from the explicit `Deny` and the control
-  plane account's from the resource policy (spec §10, the steps that
-  call the registrar from a provisioning role).
+  checks that the provisioning roles of both cell accounts get 403: the
+  edge account's, which the test registers as a tenant-owned account, from
+  the explicit `Deny`, and the control plane account's from the resource
+  policy (spec §10, the steps that call the registrar from a provisioning
+  role). Only the test registers the edge account as tenant-owned; a
+  deployment's edge account is vendor-owned (spec §6.1).
 - This record stays Proposed, and ADR-0013 Accepted, until
   control-plane ADR-0044 (on `main`, Proposed) is accepted. On
   acceptance this record supersedes ADR-0013.
@@ -232,9 +240,3 @@ printing the registrar's message.
   (spec Q-5), or when the control plane offers a role per global hook
   (its §11 seam), which would let the registrar admit the route hook
   alone and close the residual above.
-
-Note 2026-11-18: `RouteHookAccess` keeps the front door hook parameter when
-the stack is deleted or its resource replaced (`Retain`), so a missing
-parameter, which the hook skips silently, follows only from a deliberate
-deletion in the control plane's account. The teardown gains a step after
-`RouteHookAccess` that deletes the parameter (spec §3.1, §6.2).

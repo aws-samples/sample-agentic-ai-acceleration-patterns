@@ -89,7 +89,7 @@ domain an edit to shared configuration; Option 3 breaks P-8 and P-9.
 - Harder: only the vendor sets a dedicated domain. A tenant
   provisioning role that sends `customDomain` gets 403, so a tenant
   cannot claim a domain it does not own. The vendor sets it after it
-  has confirmed that the tenant controls the domain; Q-3 decides how.
+  has confirmed that the tenant controls the domain; ADR-0018 decides how.
   The validated certificate alone does not decide it: ACM reuses one
   validation record per domain name per account, so the record proves
   the domain's DNS, not the tenant. The registrar refuses a domain for
@@ -98,8 +98,8 @@ domain an edit to shared configuration; Option 3 breaks P-8 and P-9.
   CDK and CloudFormation version it pins.
 - Harder: the dedicated path adds certificate validation per tenant
   domain, an ACM DNS record the tenant publishes in its own DNS, so the
-  operator's `PutTenantRoute` answers 202 until it validates. Q-3
-  decides whether the path ships in this sample.
+  operator's `PutTenantRoute` answers 202 until it validates. The path
+  ships off unless `dedicatedDomains` is on (ADR-0018).
 - Follow-up: ADR-0003 and ADR-0004 assume this distribution type.
 - Spike S-1 (2026-11-16): a viewer-request function with an associated
   KeyValueStore ran and read the store on an apex and a wildcard pooled
@@ -118,7 +118,8 @@ hook role, under which the route hook runs, and the edge operator role.
 The global hook role that sends `customDomain` gets 403, so only the
 edge operator role sets a dedicated domain, as before.
 
-Amended 2026-11-18 by ADR-0018, which answers spec Q-3: the
+Amended 2026-11-18 by ADR-0018, which decides whether the path ships and
+how a tenant proves it controls a dedicated domain: the
 dedicated-domain path stays in this sample, off unless the deployer
 turns on `dedicatedDomains`. Before the registrar requests a
 certificate, the tenant publishes a TXT record,
@@ -127,5 +128,4 @@ registrar issued for that tenant and that domain and stored next to
 `d`. The operator's first call answers 202 with that record, and only a
 repeat that finds this tenant's token goes on to the certificate step
 above. A former holder's validation record therefore no longer routes
-a domain, and the consequences above that say "Q-3 decides" now point
-to ADR-0018.
+a domain.

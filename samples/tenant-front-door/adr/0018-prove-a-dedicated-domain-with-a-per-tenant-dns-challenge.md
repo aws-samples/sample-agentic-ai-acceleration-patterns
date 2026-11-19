@@ -5,7 +5,6 @@
 - Status: Accepted
 - Date: 2026-11-18
 - Amends: ADR-0002, ADR-0012, ADR-0016
-- Amended by: ADR-0020
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -15,7 +14,7 @@ front door's distribution (ADR-0002). Only the vendor's edge operator
 role sets a tenant's `customDomain` (spec §3.4 step 3), and the
 registrar then requests an ACM certificate in `us-east-1`, creates the
 distribution tenant once the certificate has validated, and writes the
-domain's `host#` key (spec §3.4 step 5). Spec Q-3 asked two things:
+domain's `host#` key (spec §3.4 step 5). Two questions follow:
 does this path belong in the sample, and how does the vendor confirm
 that the tenant controls the domain before it is routed?
 
@@ -35,10 +34,12 @@ another tenant's proof nor a stale one passes. It must work before the
 domain points at the front door, because CloudFront serves a domain only
 once its distribution tenant and certificate exist. The route table is a
 KeyValueStore with a 5 MB ceiling, of which 20 % is headroom for
-non-pooled data (ADR-0012), and the sweeper keeps no miss history of its
-own: its log is the record. Dedicated domains are an add-on: the pooled
-path must not need them, and a deployer who does not use them should not carry the
-CloudFront and ACM permissions they need (spec §3.4).
+non-pooled data (ADR-0012). The daily re-check needs a history that
+lasts across days, and the route table is registrar-only, so the sweeper
+keeps it in a table of its own (ADR-0020). Dedicated domains are an
+add-on: the pooled path must not need them, and a deployer who does not
+use them should not carry the CloudFront and ACM permissions they need
+(spec §3.4).
 
 ## Options considered
 
@@ -130,8 +131,9 @@ holds the domain, and the sweeper re-checks every passed challenge
 daily, routed or not, and raises an alarm when the record is missing
 on three UTC days in a row for one tenant and domain, and a second
 alarm when its lookup only errors on three days in a row; it never
-drops a domain itself. The registrar resolves the record once more
-before it writes the domain's `host#` key.
+drops a domain itself. The streaks live in a DynamoDB table the sweeper
+owns (ADR-0020). The registrar resolves the record once more before it
+writes the domain's `host#` key.
 
 ## Consequences
 
@@ -183,89 +185,65 @@ before it writes the domain's `host#` key.
 - Harder: a domain that changes owner stays routed to the old tenant
   until the operator drops it. The daily re-check covers every passed
   challenge, routed or not, because a pending certificate request rests
-  on the same proof; its alarm means the tenant does not show control
-  of a domain it claimed. Every sweeper log line has a `type`
-  (`run-start`, `entry` or `page-end` for the re-check's record). The
-  lister gives each run a run id and a UTC `runDay`, logs both on a
-  `run-start` line with the page count (zero included), and passes the
-  run id and a page number to every page of 500 entries. Only the
-  integration test supplies a `runDay`, never the Scheduler; the lister
-  accepts one only within the last 7 days and not after today, and logs
-  that it was supplied. Each page looks its records up 10 at a time,
-  each query with up to five lookups of one try abandoned after 1 s,
-  as the registrar makes them, querying CNAME only when the TXT answer is empty or
-  holds the token, and logs one `entry` line per entry with the run id,
-  the page, the tenant, the domain and numeric `pass`, `miss` and
-  `error` fields, one of them 1, never the token, then a `page-end`
-  line, unless the page's own query already showed one. At its start,
-  the page runs one Logs Insights query, `limit 10000` set, that
-  aggregates with `stats sum(pass), sum(miss), sum(error),
-  latest(runDay) by type, runId, page, tenant, domain`, so a retried
-  page or an extra run still gives one row for each run and entry, and
-  the `run-start` and `page-end` rows stay apart. The page joins entry
-  rows to their run's `run-start` row on the run id in memory and walks
-  each missed entry's earlier days, one run for each UTC day, the
-  newest. Within one run `sum(miss) > 0` makes a miss even when a pass
-  was also logged, because a miss only counts toward three; only a
-  logged `pass` on a later day breaks the streak. A run holds at most
-  500 entries in the page's range, plus any entries in that range whose
-  domains have since been dropped, and adds a row for each, its
-  `run-start` row and one `page-end` row; with none dropped that is 502
-  rows, so 19 runs in the 7 days fit the 10,000-row limit. A page whose
-  result reaches the limit fails, and the missing-pages alarm reports
-  it. A day with an error or with no line for the entry,
-  because its page failed, is unknown and is skipped. Two earlier missed
-  days before any pass make a three-miss line with the tenant and
-  domain, and one count, as an embedded metric format log line, to the
-  metric the alarm watches. Errors keep out of that count, so that an
-  outage cannot look like a lost proof, and have a walk of their own:
-  an entry whose lines are `error` on three days in a row, with no pass
-  or miss between, gets an `unverifiable` line and a count to a second
-  metric and alarm, so whoever controls a domain's DNS cannot hold it
-  out of detection by breaking only the challenge name. A page takes at
-  most 540 s of lookups plus a 60 s poll limit on its one query; a query
-  that fails, does not finish, or returns 10,000 rows fails the page
-  (the page calls `logs:StopQuery` on a query it gives up on), which
-  Lambda retries twice and then keeps in an on-failure queue. The daily
-  schedule's retry policy (2 retries, 1 hour maximum event age) and the
-  sweeper's asynchronous maximum event age (3 hours), with its
+  on the same proof; its alarm means the tenant does not show control of
+  a domain it claimed. The sweeper keeps the history in a DynamoDB table
+  it owns (ADR-0020): an entry item for each tenant and domain, with the
+  last UTC day checked, that day's outcome and the miss and error
+  streaks, and a run item for each UTC day, with the pages started and
+  the page numbers finished. A run is one UTC day. The lister passes its
+  date to each page of 500 entries, and a page whose own date differs
+  exits without writing, so a retry or a redriven page never files an
+  outcome under another day (ADR-0022). Each page re-reads its tenants'
+  entries with `GetKey`, 10 at a time, and resolves their records 10
+  queries at a time, each query with up to five lookups of one try
+  abandoned after 1 s, as the registrar makes them, querying CNAME only
+  when the TXT answer is empty or holds the token. It records one outcome
+  for each entry and day (pass, miss or error), never the token, with one
+  conditional write that makes a repeat change nothing and lets a miss
+  replace a pass. A pass resets both streaks, a miss adds to the miss
+  streak, and an error adds to the error streak and leaves the miss
+  streak as it was, so a resolver outage cannot look like a lost proof.
+  A streak counts checks, not calendar days, so a failed page delays an
+  alarm and never cancels one. A miss that leaves the miss streak at
+  three or more makes a three-miss line with the tenant and the domain
+  and one count, as an embedded metric format log line, to the metric
+  the alarm watches. An entry that errors three times in a row, with no
+  pass or miss between, gets an `unverifiable` line and a count to a
+  second metric and alarm, so whoever controls a domain's DNS cannot
+  hold it out of detection by breaking only the challenge name. A page
+  that fails, after Lambda's two retries, is kept in an on-failure queue.
+  The daily schedule's retry policy (2 retries, 1 hour maximum event age)
+  and the sweeper's asynchronous maximum event age (3 hours), with its
   15-minute function timeout, end every run by 09:30 UTC on the day it
-  starts. The next run's lister reads the
-  previous run's `run-start` page count and its `page-end` lines and
-  emits a missing-pages count. A previous day with no `run-start` line
-  counts as one only when the 7-day window holds an earlier Scheduler
-  `run-start` line (no supplied `runDay`, and a `runDay` before that
-  day); otherwise the lister emits 0, so the first run after the
-  sweeper is deployed does not alarm. Four alarms watch the re-check
-  besides the three-miss alarm: the queue's depth, the `unverifiable`
-  count, and two on the missing-pages count, which say that detection
-  was down and judge only finished runs. The missing-pages alarm fires
-  on a `Maximum` above zero, one one-day period, 1 of 1, missing data
-  not breaching. The no-lister alarm fires on a `SampleCount` below
-  one, two one-day periods, 2 of 2, missing data breaching, so it
-  alarms only after two days with no lister and stays OK before the
-  day's 02:00 UTC run. A custom resource, the starter, deployed with
-  the sweeper, starts one Scheduler-shaped lister run (no supplied
-  `runDay`) on its Create, when the stack is created with
-  `dedicatedDomains` on and on the off-to-on update; no entry holds a
-  `d` then, so it is a zero-page run that emits 0 and gives the
-  no-lister alarm a datapoint once that run emits, a few minutes after
-  deployment; until then the alarm can read ALARM. The starter does not
-  wait for it: if that run fails, the no-lister alarm reads ALARM
-  until the first daily run, which emits 0 under the first-run rule.
-  One query per
-  page in flight keeps a run inside the Logs Insights quota of 30
-  concurrent queries. The sweeper keeps
-  no store of its own: its log is the record. In S-10 a deleted record
-  whose TTL (86400) was above the resolver's 300 s cap was still served
-  661 s after its deletion (631 s after `INSYNC`), in one run, within
-  the daily re-check's one-day bound; values changed at TTL 60 and 300
-  cleared within their TTL, 31 s and 181 s after `INSYNC`. A run that starts while a removed record is
-  still served can pass, which delays the alarm by at most one day while
-  any such stale window is under a day. The sweeper does not drop the
-  domain: a DNS fault or a tenant's mistake would then take a routed
-  domain offline with no person deciding. The re-check does not follow
-  ACM renewals, which depend on ACM's own validation record.
+  starts. The next day's lister reads the previous run's item and emits a
+  missing-pages count. A previous day with no run item counts only when
+  an earlier run item exists, so the first run after the sweeper is
+  deployed does not alarm. Four alarms watch the re-check besides the
+  three-miss alarm: the queue's depth, the `unverifiable` count, and two
+  on the missing-pages count, which say that detection was down and judge
+  only finished runs. The missing-pages alarm fires on a `Maximum` above
+  zero, one one-day period, 1 of 1, missing data not breaching. The
+  no-lister alarm fires on a `SampleCount` below one, two one-day
+  periods, 2 of 2, missing data breaching, so it alarms only after two
+  days with no lister and stays OK before the day's 02:00 UTC run. A
+  custom resource, the starter, deployed with the sweeper, starts one run
+  with the Scheduler's input on its Create, when the stack is created
+  with `dedicatedDomains` on and on the off-to-on update. No entry holds
+  a `d` then, so it is a zero-page run that emits 0 and gives the
+  no-lister alarm a datapoint a few minutes after deployment; until then
+  the alarm can read ALARM. The starter does not wait for it: if that run
+  fails, the no-lister alarm reads ALARM until the first daily run, which
+  emits 0 under the first-run rule. In S-10 a deleted record whose TTL
+  (86400) was above the resolver's 300 s cap was still served 661 s after
+  its deletion (631 s after `INSYNC`), in one run, within the daily
+  re-check's one-day bound; values changed at TTL 60 and 300 cleared
+  within their TTL, 31 s and 181 s after `INSYNC`. A run that starts while
+  a removed record is still served can pass, which delays the alarm by at
+  most one day while any such stale window is under a day. The sweeper
+  does not drop the domain: a DNS fault or a tenant's mistake would then
+  take a routed domain offline with no person deciding. The re-check does
+  not follow ACM renewals, which depend on ACM's own validation record.
+  Spec §3.4 step 5 holds the full procedure.
 - Harder: a CNAME at `_tfd-challenge.<d>` is refused, so a tenant whose
   DNS provider publishes records through a CNAME must publish the TXT
   record itself.
@@ -275,7 +253,7 @@ before it writes the domain's `host#` key.
   schedules and the starter are not deployed. The sweeper runs as an execution role of
   its own, with the route table read (`DescribeKeyValueStore`,
   `ListKeys`), the distribution-tenant and certificate deletes and the
-  re-check's Logs, SQS and Lambda actions; the registrar's role keeps
+  re-check's DynamoDB, SQS and Lambda actions; the registrar's role keeps
   only what a domain call needs and deletes nothing. The teardown custom resource holds both
   roles' CloudFront and ACM actions in both cases, so a front door that once served a dedicated domain
   still tears down. A stack update that turns it off fails, on a custom
@@ -307,10 +285,10 @@ before it writes the domain's `host#` key.
   conflict, a daily-run page that fails, the on-failure queue, the
   missing-pages count, the missing-pages alarm and the no-lister alarm
   (the 0 of a first run and two days with no lister included), the
-  starter's deploy-time run, a supplied `runDay` outside its
-  range, the guard's 40 s wait, the `unverifiable` line and its alarm for an entry
-  that errors three days in a row, and a query that reaches its row
-  limit and fails the page (spec §10). The alarms' notifications are not
+  starter's deploy-time run, a page that starts on another day than its
+  lister's, a repeated page or lister changing nothing, the guard's 40 s
+  wait, and the `unverifiable` line and its alarm for an entry that
+  errors three days in a row (spec §10). The alarms' notifications are not
   checked; the integration test checks the metric the re-check alarm
   watches. The resolver's caching was measured once, in `eu-central-1`
   against one zone (S-10), and the integration test does not repeat it.
@@ -322,21 +300,3 @@ before it writes the domain's `host#` key.
   the tenant zone's negative-caching TTL, S-10), when CloudFront or ACM
   offer a per-tenant domain proof of their own, or when a vendor needs
   the multi-perspective check.
-
-Amended 2026-11-18 by ADR-0020: the daily re-check keeps its state in a
-DynamoDB table the sweeper owns, not in the sweeper's log. The Context
-line "the sweeper keeps no miss history of its own: its log is the
-record", the Consequences paragraph that describes the re-check through
-`run-start`, `entry` and `page-end` lines, a run id, a `runDay` that only
-the integration test supplies, a Logs Insights query with a 10,000-row
-limit and a first-run rule read from the log, and the Known limitations
-that name those pieces (the row limit, the supplied `runDay`, the
-`logs:StopQuery` call, the `run-start` line) no longer describe the
-design. The sweeper's role holds DynamoDB actions on that table in place
-of the Logs Insights actions. The challenge, the daily check, the
-three-miss and `unverifiable` rules, the on-failure queue, the
-missing-pages and no-lister alarms, the starter, the in-call lookups,
-the guard and the removal paths stand as decided. Treat the passages
-named above as superseded: spec §3.4 step 5 and ADR-0020 hold the
-current description of the re-check, and this record no longer repeats
-it.

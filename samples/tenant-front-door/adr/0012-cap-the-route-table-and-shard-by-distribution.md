@@ -83,6 +83,14 @@ need their own record.
 - A dedicated tenant's own domain adds one more `host#` entry and a `d`
   field on its `tenant#` entry, both counted against the 20 % headroom
   and covered by the 507.
+- ACM binds before the dedicated headroom does. Each dedicated domain
+  needs one certificate in the edge account's `us-east-1`, against ACM's
+  default quota of 2,500 certificates for each account and Region (and
+  5,000 requests in any 365 days), shared with that account's other
+  certificates. A request past the quota answers 429 with
+  `reason: certificate-quota`. The deployer raises the ACM quota before
+  routing more than about 2,500 dedicated domains; spec §4.1 gives the
+  sources.
 - The registrar returns a clear error when the store is full, and the
   README states the ceiling per mode.
 - One front door per application (ADR-0014) means the ceiling is per
@@ -112,11 +120,3 @@ dedicated tenant adds at most 288 bytes to the 20 % headroom (`d` 71,
 `dk` 51, its `host#<d>` entry 166), so the headroom holds
 floor(1,000,000 / 288) = 3,472 dedicated tenants, less what `app` and
 `signin` take. The pooled ceilings do not change.
-
-Note 2026-11-18 (full design review): the dedicated ceiling above is the
-store's. ACM binds first: each dedicated domain needs one certificate in
-the edge account's `us-east-1`, against ACM's default quota of 2,500
-certificates for each account and Region (and 5,000 requests in any 365
-days), shared with that account's other certificates. The deployer raises
-the ACM quota before routing more than about 2,500 dedicated domains;
-spec §4.1 gives the sources.

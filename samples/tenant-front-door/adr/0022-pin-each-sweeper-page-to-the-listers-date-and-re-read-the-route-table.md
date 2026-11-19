@@ -11,8 +11,7 @@
 
 ADR-0020 keeps the daily re-check state in a sweeper-owned DynamoDB
 table. A run is one UTC day, and "the sweeper takes no day from its
-caller": each page reads the clock. Two full design reviews found four
-gaps in that.
+caller": each page reads the clock. That leaves four gaps.
 
 - A page that the on-failure queue redrives on a later day, or a page
   of a run started by hand late in the day, reads a later date from

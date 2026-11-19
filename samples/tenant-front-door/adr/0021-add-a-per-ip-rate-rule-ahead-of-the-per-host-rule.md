@@ -17,7 +17,7 @@ every request in its scope-down, including the ones the router then
 refuses with 401 for having no token or 403 for a token of another
 tenant. An anonymous client that sends tokenless requests to
 `b.<appDomain>/api/*` therefore takes `b`'s count to its limit, and
-`b`'s own users get 429. The full design review found this gap.
+`b`'s own users get 429.
 
 `single` mode does not have it. It has no edge rate rule; the origin
 counts verified requests only, so a tokenless or forged request is
