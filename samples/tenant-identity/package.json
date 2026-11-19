@@ -30,6 +30,7 @@
   "devDependencies": {
     "@aws-crypto/sha256-js": "5.2.0",
     "@aws-sdk/client-cloudformation": "3.1154.0",
+    "@aws-sdk/client-cloudwatch": "3.1154.0",
     "@aws-sdk/client-iam": "3.1154.0",
     "@aws-sdk/client-ssm": "3.1154.0",
     "@aws-sdk/credential-providers": "3.1154.0",

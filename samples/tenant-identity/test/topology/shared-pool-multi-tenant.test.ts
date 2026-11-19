@@ -259,6 +259,14 @@ describe('SharedPoolMultiTenantProvisioner (spec §7.3)', () => {
       await expect(provisioner().deprovisionTenant(tenantA())).resolves.toBeUndefined();
     });
 
+    it('a retry after the tenant group is gone finishes (ADR-0042)', async () => {
+      cognito.on(ListUsersInGroupCommand).rejects(cognitoError('ResourceNotFoundException'));
+      cognito.on(DeleteGroupCommand).rejects(cognitoError('ResourceNotFoundException'));
+      await expect(provisioner().deprovisionTenant(tenantA())).resolves.toBeUndefined();
+      // Both groups are still asked for: a group that survived is not skipped.
+      expect(cognito.commandCalls(DeleteGroupCommand).map((c: AnyMock) => c.args[0].input.GroupName)).toEqual([`t-${IDS.a}`, `admin-${IDS.a}`]);
+    });
+
     it('paginates ListUsersInGroup', async () => {
       cognito
         .on(ListUsersInGroupCommand)

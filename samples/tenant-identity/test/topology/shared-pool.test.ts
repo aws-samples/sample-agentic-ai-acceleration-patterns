@@ -139,6 +139,15 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
       await expect(provisioner().deprovisionTenant(tenantA())).resolves.toBeUndefined();
     });
 
+    it('a retry after the tenant group is gone still scans by attribute and finishes (ADR-0042)', async () => {
+      cognito.on(ListUsersInGroupCommand).rejects(cognitoError('ResourceNotFoundException'));
+      cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'orphan', Attributes: [{ Name: TENANT_ATTR, Value: IDS.a }] }] });
+      cognito.on(AdminDeleteUserCommand).resolves({});
+      cognito.on(DeleteGroupCommand).rejects(cognitoError('ResourceNotFoundException'));
+      await expect(provisioner().deprovisionTenant(tenantA())).resolves.toBeUndefined();
+      expect(cognito.commandCalls(AdminDeleteUserCommand).map((c: AnyMock) => c.args[0].input.Username)).toEqual(['orphan']);
+    });
+
     it('paginates ListUsersInGroup and ListUsers', async () => {
       cognito
         .on(ListUsersInGroupCommand)
