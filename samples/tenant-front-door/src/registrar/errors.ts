@@ -3,11 +3,14 @@
 
 import {
   BadRequestError,
+  CertificateQuotaError,
   ConflictError,
   ForbiddenError,
   InsufficientStorageError,
   InternalServerError,
   ServiceUnavailableError,
+  TooManyRequestsReason,
+  UnprocessableError,
 } from '../smithy/source/typescript-ssdk-codegen/src';
 
 /**
@@ -19,6 +22,12 @@ export const refuse = {
   badRequest: (message: string) => new BadRequestError({ message }),
   forbidden: (message: string) => new ForbiddenError({ message }),
   conflict: (message: string) => new ConflictError({ message }),
+  unprocessable: (message: string) => new UnprocessableError({ message }),
+  /** ACM refused the certificate request for its quota: 429 with `reason: certificate-quota` (§4.1). */
+  certificateQuota: () => new CertificateQuotaError({
+    message: 'ACM refused the certificate request for its certificate quota',
+    reason: TooManyRequestsReason.CERTIFICATE_QUOTA,
+  }),
   unavailable: (message: string) => new ServiceUnavailableError({ message }),
   storage: () => new InsufficientStorageError({ message: 'the write would take the route table past its size limit' }),
   internal: (message: string) => new InternalServerError({ message }),
