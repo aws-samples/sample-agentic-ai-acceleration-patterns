@@ -117,6 +117,7 @@ export async function settleTenant(env: Env, config: ConfigJson, subject: TokenS
   const r = await narrowToken(env, config, { refreshToken: subject.refreshToken, tenantId: expected });
   if (!r.ok && r.reason === 'unavailable') return { kind: 'unavailable', subject, tenantId: expected };
   if (!r.ok && r.reason === 'tenant-refused' && config.tenantId === undefined) return { kind: 'pick-tenant', subject, tenants: view.tenants, refused: true };
+  // `aborted` lands here too: a caller that passes a signal drops every outcome once it aborts (main.ts `settle`).
   if (!r.ok) return { kind: 'sign-out' };
   if (!namesTenant(decodeClaims(r.accessToken), expected)) return { kind: 'sign-out' };
   return { kind: 'signed-in', session: { subject, accessToken: r.accessToken, tenantId: expected, tenants: view.tenants } };
