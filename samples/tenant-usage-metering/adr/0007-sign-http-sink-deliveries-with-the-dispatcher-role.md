@@ -46,6 +46,12 @@ verify SigV4. The host check is not an ownership check: what the
 dispatcher can invoke is bounded by the IAM grants on its role, so the
 deployer grants it only on the billing endpoints.
 
+Proof: the integration test (integration-test.md) against the demo
+receiver, an `AWS_IAM` function URL in a non-production test account. An
+unsigned call is refused by Lambda with 403 `AccessDenied`; signed
+deliveries, to an endpoint with a repeated query key, reach `SENT`; an
+`AWS_IAM` sink to a host outside the allowlist is a 400.
+
 ## Consequences
 - `auth` is set at `CreateSink` only; an `AWS_IAM` sink takes no
   `secretName`. A stored sink that fails the check (a direct table write)

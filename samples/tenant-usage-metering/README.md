@@ -224,6 +224,8 @@ Threats, mitigations and residuals: [`threat-model.md`](threat-model.md).
 - [ ] `RemovalPolicy.RETAIN` on the table and the buckets.
 - [ ] A distributed map in the recounter for hours larger than one task's
       memory (ADR-0003).
+- [ ] For `AWS_IAM` sinks, grant `roles.dispatcher` invoke only on the
+      named billing endpoints, never on `*` (threat model M-17, ADR-0007).
 
 ## Design trail
 
