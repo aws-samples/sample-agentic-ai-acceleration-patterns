@@ -190,12 +190,23 @@ describe('deployment inputs (spec §3.6)', () => {
     expect(() => validateInputs({ ...base, alarmTopicArn })).toThrow(/alarmTopicArn/);
   });
 
-  it.each([true, 'on', 'true'])('refuses dedicatedDomains %j: it arrives in build slice S6', (dedicatedDomains) => {
-    expect(() => validateInputs({ ...base, dedicatedDomains: dedicatedDomains as boolean })).toThrow(/arrive in build slice S6/);
+  it('refuses dedicatedDomains on: it arrives in build slice S6', () => {
+    expect(() => validateInputs({ ...base, dedicatedDomains: true })).toThrow(/arrive in build slice S6/);
   });
 
-  it('accepts dedicatedDomains off', () => {
+  it('accepts dedicatedDomains off, and only a boolean', () => {
     expect(() => validateInputs({ ...base, dedicatedDomains: false })).not.toThrow();
-    expect(() => validateInputs({ ...base, dedicatedDomains: 'yes' as never })).toThrow(/dedicatedDomains must be a boolean/);
+    expect(() => validateInputs({ ...base, dedicatedDomains: 'on' as never })).toThrow(/dedicatedDomains must be true or false/);
+  });
+
+  it.each([
+    'arn:aws:secretsmanager:us-east-1:111111111111:secret:registrar-client-AbCdEf',
+    'arn:aws:secretsmanager:eu-central-1:333333333333:secret:registrar-client-AbCdEf',
+  ])('refuses a vendor IdP secret %j outside the edge account and the control plane\'s Region (ADR-0015)', (clientSecretArn) => {
+    expect(() => validateInputs(withControlPlane({ vendorIdp: { ...base.controlPlane.vendorIdp, clientSecretArn } }))).toThrow(/clientSecretArn must name a secret/);
+  });
+
+  it('warns that tenantRequestsPer5Min is the cells\' to enforce in single mode (ADR-0009)', () => {
+    expect(validateInputs({ ...base, tenantRequestsPer5Min: 1000 }).warnings).toEqual([expect.stringMatching(/no edge rule in single mode/)]);
   });
 });

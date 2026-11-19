@@ -154,7 +154,7 @@ const APPLICATION_ID = /^[a-z0-9-]{1,32}$/;
 const FLEET = /^[a-z0-9-]{1,32}$/;
 const ZONE_ID = /^[A-Z0-9]{1,32}$/;
 const ROLE_ARN = new RegExp(`^arn:${PARTITION}:iam::(\\d{12}):role/[\\w+=,.@/-]{1,512}$`);
-const SECRET_ARN = new RegExp(`^arn:${PARTITION}:secretsmanager:[a-z0-9-]+:\\d{12}:secret:[\\w/+=.@-]+-[A-Za-z0-9]{6}$`);
+const SECRET_ARN = new RegExp(`^arn:${PARTITION}:secretsmanager:([a-z0-9-]+):(\\d{12}):secret:[\\w/+=.@-]+-[A-Za-z0-9]{6}$`);
 const TOPIC_ARN = new RegExp(`^arn:${PARTITION}:sns:([a-z0-9-]+):(\\d{12}):[\\w-]{1,256}$`);
 /** An OAuth client id with no character that needs JSON or header escaping. */
 const CLIENT_ID = /^[A-Za-z0-9._~+-]{1,128}$/;
@@ -167,11 +167,11 @@ const CLAIM = /^[A-Za-z_][A-Za-z0-9_:.-]{0,63}$/;
 export function validateInputs(inputs: TenantFrontDoorInputs): ResolvedInputs {
   const warnings: string[] = [];
 
-  if (inputs.dedicatedDomains === true || (inputs.dedicatedDomains as unknown) === 'on' || (inputs.dedicatedDomains as unknown) === 'true') {
-    throw new InputError('dedicatedDomains', 'is not available yet: dedicated domains arrive in build slice S6. Leave it off');
+  if (inputs.dedicatedDomains !== undefined && typeof inputs.dedicatedDomains !== 'boolean') {
+    throw new InputError('dedicatedDomains', 'must be true or false');
   }
-  if (inputs.dedicatedDomains !== undefined && ![false, 'off', 'false'].includes(inputs.dedicatedDomains as unknown as string)) {
-    throw new InputError('dedicatedDomains', 'must be a boolean');
+  if (inputs.dedicatedDomains) {
+    throw new InputError('dedicatedDomains', 'is not available yet: dedicated domains arrive in build slice S6. Leave it off');
   }
 
   const appDomain = hostname('appDomain', inputs.appDomain);
@@ -196,6 +196,12 @@ export function validateInputs(inputs: TenantFrontDoorInputs): ResolvedInputs {
   const [, partition, edgeAccount] = roleMatch;
 
   const controlPlane = validateControlPlane(inputs.controlPlane);
+  // The registrar reads it with its own identity policy, from the main
+  // stack's Region, so the secret sits beside it (ADR-0015).
+  const secret = SECRET_ARN.exec(controlPlane.vendorIdp.clientSecretArn)!;
+  if (secret[1] !== partition || secret[2] !== controlPlane.region || secret[3] !== edgeAccount) {
+    throw new InputError('controlPlane.vendorIdp.clientSecretArn', 'must name a secret in the edge account and the control plane\'s Region');
+  }
   const issuer = validateIssuer(inputs.issuer);
 
   let signinKeys: SigninKeysInput | undefined;
@@ -219,6 +225,12 @@ export function validateInputs(inputs: TenantFrontDoorInputs): ResolvedInputs {
   const agentIngress = inputs.agentIngress === undefined ? undefined : validateAgentIngress(inputs.agentIngress);
 
   const tenantRequestsPer5Min = rate('tenantRequestsPer5Min', inputs.tenantRequestsPer5Min ?? DEFAULT_TENANT_REQUESTS_PER_5_MIN);
+  if (addressing === 'single' && inputs.tenantRequestsPer5Min !== undefined) {
+    warnings.push(
+      `tenantRequestsPer5Min (${tenantRequestsPer5Min}) has no edge rule in single mode: each cell limits its verified tenants `
+      + 'to it (spec §6.1, ADR-0009); configure the cells with the same value',
+    );
+  }
   if (addressing === 'single' && inputs.ipRequestsPer5Min !== undefined) {
     throw new InputError('ipRequestsPer5Min', 'applies to host mode only; remove it in single mode');
   }
