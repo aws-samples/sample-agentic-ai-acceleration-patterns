@@ -164,6 +164,22 @@ describe('completeSignIn (§3.5 step 4)', () => {
     });
   });
 
+  test('single, appDomain: a pick the exchange refuses returns to the picker, with the refresh token kept', async () => {
+    const f = issuer({ access_token: jwt({ tenants: [HOST_TENANT, OTHER] }), refresh_token: 'r' },
+      () => json(400, { error: 'invalid_target' }));
+    const { env, outcome } = await signedInVia(single, f);
+    if (outcome.kind !== 'pick-tenant') throw new Error('unreachable');
+    await expect(settleTenant(env, single.body, outcome.subject, OTHER)).resolves.toEqual({
+      kind: 'pick-tenant', subject: outcome.subject, tenants: [HOST_TENANT, OTHER], refused: true,
+    });
+    expect(env.navigated).toEqual([]);
+  });
+
+  test('host, pooled tenant host: the exchange refusing the host\'s own tenant signs out (§3.5 step 4)', async () => {
+    const f = issuer({ access_token: jwt({ tenants: [HOST_TENANT] }), refresh_token: 'r' }, () => json(400, { error: 'invalid_target' }));
+    expect((await signedInVia(pooled, f)).outcome).toEqual({ kind: 'sign-out' });
+  });
+
   test('single, appDomain: a single-tenant token signs in to its own tenant', async () => {
     const { outcome } = await signedInVia(single, issuer({ access_token: jwt({ tenant_id: OTHER }) }));
     expect(outcome).toMatchObject({ kind: 'signed-in', session: { tenantId: OTHER } });
