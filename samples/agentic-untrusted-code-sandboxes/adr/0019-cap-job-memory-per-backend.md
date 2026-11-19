@@ -85,18 +85,19 @@ the ready time.
 
 ## Consequences
 
-A memory fill no longer depends on an `oom_score_adj` value on any
-backend. `microvm` jobs are limited to 256 MiB per process and about ten
+A memory fill no longer depends on an `oom_score_adj` value on
+`microvm` and `agentcore`; on `nitro` the watchdog covers the case where
+the platform's -998 changes. `microvm` jobs are limited to 256 MiB per process and about ten
 processes and threads at the default size, each thread taking about
 8 MiB of stack out of the 256 MiB, which rules out runtimes that reserve
 large address space, such as Node (344 MiB to start); the sample runs
 Python only. A larger `microvm.memoryMiB` raises N, not A. The runner
 needs unit tests for all three setups. `memoryExceeded` is never set on
-`microvm`: the job sees the error itself. Open until S-16: whether `/work` is tmpfs; an unmapped `memfd` or a
-tmpfs file filled during a job, including against the `nitro`
-watchdog; the `agentcore` setup under a global out-of-memory; and, for
-the drain, the time to `terminated`, whether the capacity provider
-delete then succeeds, and whether a `nitro.minInstances` above 0
-starts a replacement first. Also open: CloudTrail with
-data events. Revisit if `microvm` gains a cgroup mount, or if a
+`microvm`: the job sees the error itself. Open until S-16: whether
+`/work` is tmpfs; an unmapped `memfd` or a tmpfs file filled during a
+job, including against the `nitro` watchdog; the `agentcore` setup under
+a global out-of-memory; and, for the drain, the time to `terminated`,
+whether the capacity provider delete then succeeds, and whether a
+`nitro.minInstances` above 0 starts a replacement first. Also open:
+CloudTrail with data events. Revisit if `microvm` gains a cgroup mount, or if a
 platform grants `CAP_SYS_RESOURCE`.
