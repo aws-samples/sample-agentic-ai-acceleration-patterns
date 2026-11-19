@@ -207,14 +207,14 @@ describe('main stack: distribution (spec §3.1, §3.2, ADR-0002)', () => {
     expect(agents.OriginAccessControlId).toBeUndefined();
   });
 
-  it('serves appDomain (single) or *.appDomain (host) from one pooled distribution tenant on its own connection group, tagged with the distribution, with a CNAME (spike S-1, AR-33)', () => {
+  it('serves appDomain (single) or *.appDomain (host) from one pooled distribution tenant on its own connection group, tagged pooled/<distribution id> so no grant matches it, with a CNAME (spike S-1, M-16, AR-33)', () => {
     for (const [s, domain] of [[single, 'app.example.com'], [host, '*.app.example.com']] as const) {
       const tenant = only(s.main, 'AWS::CloudFront::DistributionTenant');
       expect(tenant.Domains).toEqual([domain]);
       expect(tenant.Customizations).toBeUndefined();
       expect(tenant.ConnectionGroupId).toEqual({ 'Fn::GetAtt': ['ConnectionGroup', 'Id'] });
       expect(tenant.DistributionId).toEqual({ Ref: Object.keys(s.main.findResources('AWS::CloudFront::Distribution'))[0] });
-      expect(tenant.Tags).toEqual([{ Key: TAG_DISTRIBUTION_ID, Value: tenant.DistributionId }]);
+      expect(tenant.Tags).toEqual([{ Key: TAG_DISTRIBUTION_ID, Value: { 'Fn::Join': ['', ['pooled/', tenant.DistributionId]] } }]);
       s.main.hasResourceProperties('AWS::Route53::RecordSet', {
         Name: `${domain}.`,
         Type: 'CNAME',

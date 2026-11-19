@@ -992,9 +992,11 @@ given below):
    every 15 minutes by EventBridge Scheduler, lists this distribution's
    dedicated distribution tenants and the registrar's certificates. It
    skips the pooled distribution tenant by its id, which the stack
-   passes it as it does to the guard, before it reads it or its tags, so
-   the distribution tag it carries from create (§3.4 IAM paragraphs)
-   does not make it removable.
+   passes it as it does to the guard, before it reads it or its tags.
+   That skip is a second guard: the pooled distribution tenant's
+   distribution tag is `pooled/<distribution id>`, which matches no
+   grant, so IAM refuses the sweeper's update and delete on it (§3.4
+   IAM paragraphs).
    A distribution tenant whose domain is no longer the `d` of the
    tenant it is tagged with is disabled if it is still enabled, deleted
    once it is disabled and deployed, and its certificate deleted after
@@ -1138,10 +1140,13 @@ three. The tag grants also require the resource to carry no
 front door tagged. `UpdateDistributionTenant` requires
 `aws:ResourceTag/tenant-front-door:distribution` to be this
 distribution's id. The main stack creates the pooled distribution tenant
-with `tenant-front-door:distribution` set to its distribution's id, so
-another front door's registrar in the same account can neither tag it
-nor disable it; tagging an untagged certificate remains possible
-(threat model AR-33). It uses them only on the edge
+with `tenant-front-door:distribution` set to `pooled/<distribution id>`.
+The key is present, so no front door's registrar in the account can tag
+it; the value is no distribution's id, so IAM refuses the
+`UpdateDistributionTenant` and `DeleteDistributionTenant` of every
+front door's registrar, sweeper and teardown on it. No code reads the
+value. Tagging an untagged certificate remains possible (threat model
+AR-33). It uses them only on the edge
 operator role's domain calls and on deletes and replacements of an
 entry that has a `d`, and never deletes a distribution tenant or a
 certificate. The sweeper runs as an execution role of its own. It
@@ -2011,7 +2016,9 @@ All with a small static HTML or JSON body and `no-store`:
   create or update fails. In step 6 a custom resource on the
   distribution, run before the distribution's delete, disables and
   deletes every dedicated distribution tenant on it (it skips the pooled
-  distribution tenant by its id before any read, as the sweeper does, and
+  distribution tenant by its id before any read, as the sweeper does, a
+  second guard after IAM, which refuses both roles' update and delete on
+  its `pooled/<distribution id>` tag (§3.4 IAM paragraphs), and
   CloudFormation deletes that one), then deletes every
   certificate the registrar tagged with this distribution, one still
   pending validation included, which has no distribution tenant and

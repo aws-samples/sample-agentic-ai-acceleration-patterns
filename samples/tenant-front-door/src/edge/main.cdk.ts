@@ -328,11 +328,14 @@ export class MainStack extends Stack {
       connectionGroupId: connectionGroup.attrId,
       domains: [pooledDomain],
       enabled: true,
-      // The distribution tag at create: a front door's registrar may tag
-      // only a distribution tenant without one, and may update only one
-      // tagged with its own distribution, so no registrar of another front
-      // door can tag or disable this one (threat model AR-33, M-16).
-      tags: [{ key: TAG_DISTRIBUTION_ID, value: distribution.ref }],
+      // The distribution tag at create, with a value no grant matches. A
+      // registrar may tag only a distribution tenant without the key, so no
+      // registrar of another front door can tag this one. The update and
+      // delete grants of the registrar, the sweeper and the teardown require
+      // the value to be a distribution's id, so IAM refuses all three on
+      // this one; their skip by id is a second guard. Nothing reads the
+      // value. CloudFront allows `/` in tag values (threat model M-16, AR-33).
+      tags: [{ key: TAG_DISTRIBUTION_ID, value: `pooled/${distribution.ref}` }],
     });
     this.pooledTenantId = pooled.attrId;
     this.routingEndpoint = connectionGroup.attrRoutingEndpoint;
