@@ -25,11 +25,13 @@ This sample has been verified as working via automated integration tests and end
 
 **Test harness:** `test/integ.tenant.ts` — documented in `integration-test.md`
 
-**Vendor hooks (ADR-044) and hooks on application, tenant and account
-events (ADR-045):** covered by the 2026-11-19 run above and by unit tests
+**Vendor hooks (ADR-044) and hooks on application, tenant and account events
+(ADR-045):** covered by the 2026-11-19 run above and by unit tests
 (`test/tenant/hook*.test.ts`, `test/tenant/tenant.hooks.test.ts`,
-`test/shared/hook-transactions.test.ts`, `test/tenant/record-event.types.test.ts`,
-`test/tenant/record-writes.test.ts`, `test/tenant/record-event-workflow.test.ts`,
+`test/shared/hook-transactions.test.ts`,
+`test/tenant/record-event.types.test.ts`,
+`test/tenant/record-writes.test.ts`,
+`test/tenant/record-event-workflow.test.ts`,
 `test/tenant/tenant.record-events.test.ts`). The runs before it predate
 hooks and called the seven record operations as synchronous.
 
@@ -739,24 +741,23 @@ Cross-entity guards:
 invalid application definition; a targeted `CreateDeployment` into an
 account that does not admit the application; a `PutAccount` whose handshake
 was refused; an invalid hook definition on `PutHook` or `PutApplication`),
-`UnauthorizedError` 401/403, `ResourceNotFoundError` 404
-(unknown tenant, deployment, cell, account, application or global hook — including an
+`UnauthorizedError` 401/403, `ResourceNotFoundError` 404 (unknown tenant,
+deployment, cell, account, application or global hook — including an
 unregistered `CreateDeployment.accountId` or `applicationId` and an
 unregistered id in `PutAccount.applicationIds`), `ConflictError` 409
-(in-flight mutations; a second deployment of one application for one
-tenant; occupied-tenant, occupied-cell, occupied-account and
-occupied-application deletes; `owner` change; cell-not-ACTIVE guards; a
-tenant, account or application that is not live at placement; a put or
-update on a record in flight or being deleted, or one accepted since the
-request read it — retry; a
-`CreateDeployment` that lost every bounded claim on candidate cells
-while no account had a free cell slot — retry, ADR-031; `clientToken` reuse
-with different parameters, ADR-017; a `PutHook` that raced a create or
-delete of the same hook — retry; a sixth global hook — delete one first),
-`InsufficientCapacityError` 409 (no
-eligible account has cell capacity; nothing was written; the remedy is an
-operator act — raise `maxCells`, register an account, or admit the
-application in one — ADR-026), `InternalServerError` 500.
+(in-flight mutations; a second deployment of one application for one tenant;
+occupied-tenant, occupied-cell, occupied-account and occupied-application
+deletes; `owner` change; cell-not-ACTIVE guards; a tenant, account or
+application that is not live at placement; a put or update on a record in
+flight or being deleted, or one accepted since the request read it — retry;
+a `CreateDeployment` that lost every bounded claim on candidate cells while
+no account had a free cell slot — retry, ADR-031; `clientToken` reuse with
+different parameters, ADR-017; a `PutHook` that raced a create or delete of
+the same hook — retry; a sixth global hook — delete one first),
+`InsufficientCapacityError` 409 (no eligible account has cell capacity;
+nothing was written; the remedy is an operator act — raise `maxCells`,
+register an account, or admit the application in one — ADR-026),
+`InternalServerError` 500.
 
 ## 6. Placement and Capacity (ADR-013)
 
@@ -1254,29 +1255,31 @@ hook roles (threat model T30). The four projects and the workflow
 role's `aws:SourceArn` condition and the deny name them by ARNs computed
 before they exist, with no CloudFormation cycle.
 
-**The deny.** One standalone `AWS::IAM::Policy`, `<fleet>-control-plane-deny`,
-created outside every role construct and attached through its `Roles` list
-to `<fleet>-cell-build`, `<fleet>-tenant-build`, `<fleet>-global-hook`,
-`<fleet>-app-hook` and the home account's `<fleet>-cell-provisioning` and
+**The deny.** One standalone `AWS::IAM::Policy`,
+`<fleet>-control-plane-deny`, created outside every role construct and
+attached through its `Roles` list to `<fleet>-cell-build`,
+`<fleet>-tenant-build`, `<fleet>-global-hook`, `<fleet>-app-hook` and the
+home account's `<fleet>-cell-provisioning` and
 `<fleet>-tenant-provisioning`, so nothing in the stack depends on it
 (`src/tenant/control-plane-deny.ts`). Its nine statements deny
 `iam:PassRole` on the build, workflow, API and hook roles; seven IAM role
 writes on all ten roles the stack creates; `StartBuild`, `StartBuildBatch`,
 `RetryBuild`, `UpdateProject`, `CreateWebhook` and `UpdateWebhook` on the
-four projects; `StartExecution` and `UpdateStateMachine` on the workflow
-and `RedriveExecution` on its executions; six code, configuration, version
-and alias writes on the API and authorizer functions; `InvokeFunction`,
+four projects; `StartExecution` and `UpdateStateMachine` on the workflow and
+`RedriveExecution` on its executions; six code, configuration, version and
+alias writes on the API and authorizer functions; `InvokeFunction`,
 `InvokeAsync`, `AddPermission` and `RemovePermission` on the API function,
 every Lambda entry on both the unqualified ARN and `:*`; `PUT`, `PATCH`,
 `POST` and `DELETE` on the REST API; and seven table writes. An explicit
-deny wins over any allow, so no attached policy (`tenantBuildManagedPolicyArns`
-and both hook inputs included) can grant those roles a denied action. The
-workflow and API roles carry none, because those actions are their own
-grants; the authorizer and API Gateway CloudWatch roles hold only logs.
-What the deny does not close (an attached `sts:AssumeRole` on another role
-in the account, CloudFormation writes through a privileged role, IAM role
-creation, admin writes on the vendor IdP, writes to a script or hook source) is the
-deployer's to withhold (threat model T41).
+deny wins over any allow, so no attached policy
+(`tenantBuildManagedPolicyArns` and both hook inputs included) can grant
+those roles a denied action. The workflow and API roles carry none, because
+those actions are their own grants; the authorizer and API Gateway
+CloudWatch roles hold only logs. What the deny does not close (an attached
+`sts:AssumeRole` on another role in the account, CloudFormation writes
+through a privileged role, IAM role creation, admin writes on the vendor
+IdP, writes to a script or hook source) is the deployer's to withhold
+(threat model T41).
 
 **Environment.** A hook build gets `EVENT`, `PHASE`, `HOOK_ID`,
 `HOOK_SCOPE`, `APPLICATION_ID`, `CELL_ID`, `CELL_ACCOUNT_ID`, `OPERATOR_ID`,
